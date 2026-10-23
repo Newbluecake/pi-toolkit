@@ -137,7 +137,7 @@ describe("persistSettingOverride under the lock", () => {
             [
               "--input-type=module",
               "-e",
-              `const h = await import(${JSON.stringify(helper)}); h.registerVault("v${i}", "/vaults/v${i}", "/links/v${i}", ${JSON.stringify(tmp)});`,
+              `const h = await import(${JSON.stringify(helper)}); h.registerVault("v${i}", { dir: "/vaults/v${i}", mnt: "/links/v${i}" }, { home: ${JSON.stringify(tmp)} });`,
             ],
             { env, stdio: ["ignore", "ignore", "pipe"] },
           );

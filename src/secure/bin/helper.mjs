@@ -436,10 +436,28 @@ export function assertWritableSettingsFile(file, uid = process.getuid()) {
   return st;
 }
 
-/** Re-read → merge → write, all inside the settings lock (see withSettingsLock). */
-export function registerVaultUnlocked(name, dir, mnt, home = homeDir(), { private: priv = false } = {}) {
-  const file = settingsFilePath(home);
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+/**
+ * V0 (convert-plan §1.4/§3.3): transaction marker on a vault entry — `"<op>:<txid>"`
+ * (`convert:<txid>` / `import:<txid>`). While present the vault is mid-transaction; V6 wires the
+ * unlock/run/export refusals, V0 only writes/clears it. Prefix keeps its own namespace.
+ */
+export const PENDING_RE = /^[a-z][a-z0-9]{0,15}:[!-~]{1,64}$/;
+/** Entry keys a convert/import transaction may touch through patchVaultEntry (V0 allowlist). */
+export const TXN_ENTRY_KEYS = ["origin", "backup", "pending", "relocate"];
+
+function assertVaultEntryShape(entry) {
+  if (!isPlainObject(entry)) throw new Error("登记条目须为对象 {dir, mnt, private?}");
+  for (const k of Object.keys(entry))
+    if (k !== "dir" && k !== "mnt" && k !== "private")
+      throw new Error(`登记条目不认识键 ${JSON.stringify(k)}（允许：dir/mnt/private）`);
+  for (const k of ["dir", "mnt"])
+    if (typeof entry[k] !== "string" || !path.isAbsolute(entry[k]) || entry[k].length > 4096 || entry[k].includes("\0"))
+      throw new Error(`登记条目 ${k} 须为绝对路径字符串（≤4096）：${JSON.stringify(entry[k])}`);
+  if (entry.private !== undefined && typeof entry.private !== "boolean") throw new Error("登记条目 private 须为布尔值");
+}
+
+/** Shared read side of every settings mutation: same refusals as registerVaultUnlocked. */
+function loadMutableSettings(file) {
   const st = assertWritableSettingsFile(file);
   const r = readJsonFile(file);
   if (r.kind === "error") throw new Error(`拒绝改写设置文件：${r.message}`);
@@ -447,60 +465,272 @@ export function registerVaultUnlocked(name, dir, mnt, home = homeDir(), { privat
   if (!isPlainObject(root)) throw new Error(`拒绝改写设置文件：${file} 顶层不是对象`);
   if (root.secure !== undefined && !isPlainObject(root.secure))
     throw new Error(`拒绝改写设置文件：${file} 的 secure 不是对象`);
-  const secure = { ...(root.secure ?? {}) };
+  return { st, root };
+}
+
+function mutableVaults(secure, file) {
   if (secure.vaults !== undefined && !isPlainObject(secure.vaults))
     throw new Error(`拒绝改写设置文件：${file} 的 secure.vaults 不是对象`);
-  // N2: `private: true` only when requested (absent key ⇔ ordinary vault, byte-identical entry).
-  secure.vaults = { ...(secure.vaults ?? {}), [name]: { dir, mnt, ...(priv ? { private: true } : {}) } };
+  return secure.vaults ?? {};
+}
+
+/** Re-read → merge → write, all inside the settings lock (see withSettingsLock).
+ *  V0 (convert-plan §8.1): `expectAbsent` turns the write into a CLAIM — an existing key (any
+ *  value, even a broken one) refuses so same-name init/import/convert races leave exactly one
+ *  winner; `pending` stamps the transaction marker onto the freshly claimed entry. */
+export function registerVaultUnlocked(
+  name,
+  dir,
+  mnt,
+  home = homeDir(),
+  { private: priv = false, expectAbsent = false, pending } = {},
+) {
+  if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
+    throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
+  if (pending !== undefined && (typeof pending !== "string" || !PENDING_RE.test(pending)))
+    throw new Error(`pending 须匹配 ${PENDING_RE}：${JSON.stringify(pending)}`);
+  const file = settingsFilePath(home);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const { st, root } = loadMutableSettings(file);
+  const secure = { ...(root.secure ?? {}) };
+  const vaults = mutableVaults(secure, file);
+  if (expectAbsent && Object.hasOwn(vaults, name))
+    throw new Error(`保险库名 ${name} 已在 ${file} 登记（expectAbsent 认领失败）；未改动任何内容`);
+  // N2: `private: true` only when requested (absent key ⇔ ordinary vault, byte-identical entry);
+  // V0: `pending` rides only on transactional claims.
+  secure.vaults = {
+    ...vaults,
+    [name]: { dir, mnt, ...(priv ? { private: true } : {}), ...(pending !== undefined ? { pending } : {}) },
+  };
   const next = { ...root, secure };
   writeFileAtomic(file, JSON.stringify(next, null, 2) + "\n", settingsWriteMode(st));
 }
 
-/**
- * Serialize settings read-modify-write across processes (security review #5): runs
- * `flock -w 10 <agentDir>/.pi-subagent.json.lock node helper.mjs __register …` synchronously.
- * The lock file is created 0600 with O_NOFOLLOW first (a symlinked lock path fails closed).
- * Protocol for other writers (P2 `persistSettingOverride`): take an exclusive flock(2) on the same
- * file for the whole re-read → merge → rename.
- */
-export function registerVault(name, dir, mnt, home = homeDir(), { private: priv = false } = {}) {
+/** Create/verify the settings lock file, then run `node helper.mjs <args…>` under
+ *  `flock -E 73 -w <lockWaitS>` synchronously. Typed errors per convert-plan §6: lock-busy ⇒ 73
+ *  (LOCK_BUSY), spawn failure ⇒ 69 (PREREQ), a non-regular/foreign lock file ⇒ 78 (CONFIG). */
+function spawnUnderSettingsLock(home, lockWaitS, args) {
   const lockFile = settingsLockPath(home);
   fs.mkdirSync(path.dirname(lockFile), { recursive: true, mode: 0o700 });
   const fd = fs.openSync(lockFile, fsc.O_RDONLY | fsc.O_CREAT | fsc.O_NOFOLLOW | fsc.O_NONBLOCK, 0o600);
   try {
     const st = fs.fstatSync(fd);
-    if (!st.isFile() || st.uid !== process.getuid()) throw new Error(`设置锁文件 ${lockFile} 不是本用户的普通文件`);
+    if (!st.isFile() || st.uid !== process.getuid())
+      throw new CliError(EXIT.CONFIG, `设置锁文件 ${lockFile} 不是本用户的普通文件`);
   } finally {
     fs.closeSync(fd);
   }
   const self = fileURLToPath(import.meta.url);
   const r = spawnSync(
     "flock",
-    [
-      "-E",
-      String(FLOCK_TIMEOUT_CODE),
-      "-w",
-      String(SETTINGS_LOCK_WAIT_S),
-      lockFile,
-      process.execPath,
-      self,
-      "__register",
-      name,
-      dir,
-      mnt,
-      ...(priv ? ["--private"] : []),
-    ],
+    ["-E", String(FLOCK_TIMEOUT_CODE), "-w", String(lockWaitS), lockFile, process.execPath, self, ...args],
     {
       encoding: "utf8",
-      timeout: (SETTINGS_LOCK_WAIT_S + 10) * 1000,
+      timeout: Math.ceil((lockWaitS + 10) * 1000),
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, HOME: home },
     },
   );
-  if (r.error) throw new Error(`无法执行 flock：${r.error.message}`);
-  if (r.status === FLOCK_TIMEOUT_CODE) throw new Error(`设置文件锁 ${lockFile} 等待超时（另一个进程正在改写设置）`);
-  if (r.status !== 0)
-    throw new Error((r.stderr || "").replace(/^pi-secure: /gm, "").trim() || `登记失败（exit ${r.status}）`);
+  if (r.error) throw new CliError(EXIT.PREREQ, `无法执行 flock：${r.error.message}`);
+  if (r.status === FLOCK_TIMEOUT_CODE)
+    throw new CliError(EXIT.LOCK_BUSY, `设置文件锁 ${lockFile} 等待超时（另一个进程正在改写设置）`);
+  return r;
+}
+
+const childErrText = (r, what) =>
+  (r.stderr || "").replace(/^pi-secure: /gm, "").trim() || `${what}失败（exit ${r.status}）`;
+
+/**
+ * V0 (convert-plan §8.1/§8.2): `registerVault(name, entry, {expectAbsent, pending})` — the unified
+ * name CLAIM used by init (N2 call site migrated 1:1, byte-identical entries), convert §1.4 step 2
+ * and import §3.3 step 1. `entry` = `{dir, mnt, private?}`. Throws CliError: 73 (settings lock
+ * busy), 69 (flock missing), 78 (expectAbsent lost the race / settings file refused / bad child).
+ * `pending` (validated by PENDING_RE) lands on the entry as the transaction marker.
+ */
+export function registerVault(
+  name,
+  entry,
+  { home = homeDir(), expectAbsent = false, pending, lockWaitS = SETTINGS_LOCK_WAIT_S } = {},
+) {
+  if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
+    throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
+  assertVaultEntryShape(entry);
+  if (pending !== undefined && (typeof pending !== "string" || !PENDING_RE.test(pending)))
+    throw new Error(`pending 须匹配 ${PENDING_RE}：${JSON.stringify(pending)}`);
+  const r = spawnUnderSettingsLock(home, lockWaitS, [
+    "__register",
+    name,
+    entry.dir,
+    entry.mnt,
+    ...(entry.private ? ["--private"] : []),
+    ...(expectAbsent ? ["--expect-absent"] : []),
+    ...(pending !== undefined ? ["--pending", pending] : []),
+  ]);
+  if (r.status !== 0) throw new CliError(EXIT.CONFIG, childErrText(r, "登记"));
+}
+
+// ─────────────────── transactional entry patch/remove (V0: 「仅本 txid」清除) ───────────────────
+
+function assertAbsPathValue(v, what) {
+  if (typeof v !== "string" || !path.isAbsolute(v) || v.length > 4096 || v.includes("\0"))
+    throw new Error(`${what} 须为绝对路径字符串（≤4096）：${JSON.stringify(v)}`);
+}
+
+/** convert-plan §3.4 relocate marker {from,to,txid,phase}; V0 only stores it, V5 owns the phases. */
+function assertRelocateShape(rel) {
+  if (!isPlainObject(rel)) throw new Error("relocate 须为对象 {from, to, txid, phase}");
+  for (const k of Object.keys(rel))
+    if (k !== "from" && k !== "to" && k !== "txid" && k !== "phase")
+      throw new Error(`relocate 不认识键 ${JSON.stringify(k)}`);
+  assertAbsPathValue(rel.from, "relocate.from");
+  assertAbsPathValue(rel.to, "relocate.to");
+  if (typeof rel.txid !== "string" || !/^[!-~]{1,64}$/.test(rel.txid))
+    throw new Error(`relocate.txid 须为 1–64 个可打印字符：${JSON.stringify(rel.txid)}`);
+  if (typeof rel.phase !== "string" || !/^[a-z0-9_-]{1,32}$/.test(rel.phase))
+    throw new Error(`relocate.phase 须为 1–32 个 [a-z0-9_-] 字符：${JSON.stringify(rel.phase)}`);
+}
+
+/** Guard = the txid proof a patch/remove must present. At least one condition; unconditional
+ *  mutation of a registration is not part of the V0 surface (convert-plan I-C8). */
+function assertTxnGuard(guard, { requirePending = false } = {}) {
+  if (!isPlainObject(guard)) throw new Error("guard 须为对象 {pending?, relocateTxid?}");
+  for (const k of Object.keys(guard))
+    if (k !== "pending" && k !== "relocateTxid") throw new Error(`guard 不认识键 ${JSON.stringify(k)}`);
+  if (guard.pending !== undefined && (typeof guard.pending !== "string" || !PENDING_RE.test(guard.pending)))
+    throw new Error(`guard.pending 须匹配 ${PENDING_RE}：${JSON.stringify(guard.pending)}`);
+  if (
+    guard.relocateTxid !== undefined &&
+    (typeof guard.relocateTxid !== "string" || !/^[!-~]{1,64}$/.test(guard.relocateTxid))
+  )
+    throw new Error("guard.relocateTxid 须为 1–64 个可打印字符");
+  if (requirePending && guard.pending === undefined)
+    throw new Error("该操作要求 guard.pending（只对登记时带本 txid pending 的条目生效，convert-plan I-C8）");
+  if (!requirePending && guard.pending === undefined && guard.relocateTxid === undefined)
+    throw new Error("guard 至少要有一个条件（pending 或 relocateTxid）——不提供无条件修改");
+}
+
+function assertTxnPatch(patch) {
+  if (!isPlainObject(patch)) throw new Error("patch 须为对象 {set?, remove?}");
+  for (const k of Object.keys(patch))
+    if (k !== "set" && k !== "remove") throw new Error(`patch 不认识键 ${JSON.stringify(k)}`);
+  const set = patch.set ?? {};
+  const remove = patch.remove ?? [];
+  if (patch.set !== undefined && !isPlainObject(patch.set)) throw new Error("patch.set 须为对象");
+  if (!Array.isArray(remove) || remove.some((k) => typeof k !== "string"))
+    throw new Error("patch.remove 须为字符串数组");
+  for (const k of [...Object.keys(set), ...remove]) {
+    if (!TXN_ENTRY_KEYS.includes(k))
+      throw new Error(`patch 键 ${JSON.stringify(k)} 不在允许清单 ${JSON.stringify(TXN_ENTRY_KEYS)} 内`);
+    if (Object.hasOwn(set, k) && remove.includes(k))
+      throw new Error(`patch 键 ${JSON.stringify(k)} 不能同时 set 与 remove`);
+  }
+  if (set.origin !== undefined) assertAbsPathValue(set.origin, "set.origin");
+  if (set.backup !== undefined) assertAbsPathValue(set.backup, "set.backup");
+  if (set.pending !== undefined && (typeof set.pending !== "string" || !PENDING_RE.test(set.pending)))
+    throw new Error(`set.pending 须匹配 ${PENDING_RE}`);
+  if (set.relocate !== undefined) assertRelocateShape(set.relocate);
+}
+
+/**
+ * The「仅本 txid」half of V0, run UNDER the settings lock by patchVaultEntry: re-read the entry,
+ * require EVERY given guard condition to match its CURRENT value, then apply `{set?, remove?}`
+ * atomically. → {kind:"ok", entry} | {kind:"missing"} | {kind:"mismatch", reason} (no write).
+ * This is convert §1.4 step 14 (clear pending + write origin/backup = the ONLY commit point) and
+ * import §3.3 step 7 / §3.4 step 5 (clear pending / relocate once the transaction owns it).
+ */
+export function patchVaultEntryUnlocked(name, guard, patch, home = homeDir()) {
+  if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
+    throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
+  assertTxnGuard(guard);
+  assertTxnPatch(patch);
+  const file = settingsFilePath(home);
+  if (!lstatOrNull(file)) return { kind: "missing" }; // nothing claimed — never create for a patch
+  const { st, root } = loadMutableSettings(file);
+  const secure = { ...(root.secure ?? {}) };
+  const vaults = mutableVaults(secure, file);
+  if (!Object.hasOwn(vaults, name)) return { kind: "missing" };
+  const cur = vaults[name];
+  if (!isPlainObject(cur)) return { kind: "mismatch", reason: `secure.vaults.${name} 不是对象` };
+  if (guard.pending !== undefined && cur.pending !== guard.pending)
+    return {
+      kind: "mismatch",
+      reason: `pending 现为 ${JSON.stringify(cur.pending)}，要求 ${JSON.stringify(guard.pending)}`,
+    };
+  if (guard.relocateTxid !== undefined && !(isPlainObject(cur.relocate) && cur.relocate.txid === guard.relocateTxid))
+    return {
+      kind: "mismatch",
+      reason: `relocate.txid 现为 ${
+        isPlainObject(cur.relocate) ? JSON.stringify(cur.relocate.txid) : "缺失"
+      }，要求 ${JSON.stringify(guard.relocateTxid)}`,
+    };
+  const next = { ...cur, ...(patch.set ?? {}) };
+  for (const k of patch.remove ?? []) delete next[k];
+  secure.vaults = { ...vaults, [name]: next };
+  writeFileAtomic(file, JSON.stringify({ ...root, secure }, null, 2) + "\n", settingsWriteMode(st));
+  return { kind: "ok", entry: next };
+}
+
+/** Rollback half (convert §1.6 R-A / import recovery): delete the WHOLE entry, but only when it
+ *  still carries OUR pending marker — a committed (pending cleared) or foreign entry is never
+ *  removed. → {kind:"ok"} | {kind:"missing"} | {kind:"mismatch", reason} (no write). */
+export function removeVaultEntryUnlocked(name, guard, home = homeDir()) {
+  if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
+    throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
+  assertTxnGuard(guard, { requirePending: true });
+  const file = settingsFilePath(home);
+  if (!lstatOrNull(file)) return { kind: "missing" };
+  const { st, root } = loadMutableSettings(file);
+  const secure = { ...(root.secure ?? {}) };
+  const vaults = mutableVaults(secure, file);
+  if (!Object.hasOwn(vaults, name)) return { kind: "missing" };
+  const cur = vaults[name];
+  if (!isPlainObject(cur))
+    return { kind: "mismatch", reason: `secure.vaults.${name} 不是对象（无法证明属于本事务，不删除）` };
+  if (cur.pending !== guard.pending)
+    return {
+      kind: "mismatch",
+      reason: `pending 现为 ${JSON.stringify(cur.pending)}，要求 ${JSON.stringify(guard.pending)}（已提交或他人持有——不删除）`,
+    };
+  const rest = { ...vaults };
+  delete rest[name];
+  secure.vaults = rest;
+  writeFileAtomic(file, JSON.stringify({ ...root, secure }, null, 2) + "\n", settingsWriteMode(st));
+  return { kind: "ok" };
+}
+
+/** Locked wrapper (settings flock child `__vault-patch`). Same result kinds; throws CliError
+ *  73/69/78 exactly like registerVault. `lockWaitS` is a test seam (default 10 s). */
+export function patchVaultEntry(name, guard, patch, { home = homeDir(), lockWaitS = SETTINGS_LOCK_WAIT_S } = {}) {
+  if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
+    throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
+  assertTxnGuard(guard);
+  assertTxnPatch(patch);
+  const r = spawnUnderSettingsLock(home, lockWaitS, [
+    "__vault-patch",
+    name,
+    JSON.stringify(guard),
+    JSON.stringify(patch),
+  ]);
+  if (r.status !== 0) throw new CliError(EXIT.CONFIG, childErrText(r, "修改登记"));
+  try {
+    return JSON.parse(r.stdout);
+  } catch {
+    throw new CliError(EXIT.FAIL, `__vault-patch 输出无法解析：${String(r.stdout).slice(0, 200)}`);
+  }
+}
+
+/** Locked wrapper (settings flock child `__vault-remove`). */
+export function removeVaultEntry(name, guard, { home = homeDir(), lockWaitS = SETTINGS_LOCK_WAIT_S } = {}) {
+  if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
+    throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
+  assertTxnGuard(guard, { requirePending: true });
+  const r = spawnUnderSettingsLock(home, lockWaitS, ["__vault-remove", name, JSON.stringify(guard)]);
+  if (r.status !== 0) throw new CliError(EXIT.CONFIG, childErrText(r, "删除登记"));
+  try {
+    return JSON.parse(r.stdout);
+  } catch {
+    throw new CliError(EXIT.FAIL, `__vault-remove 输出无法解析：${String(r.stdout).slice(0, 200)}`);
+  }
 }
 
 /**
@@ -1473,7 +1703,9 @@ export function preflight() {
 const err = (s) => process.stderr.write(`pi-secure: ${s}\n`);
 const out = (s) => process.stdout.write(`${s}\n`);
 
-class CliError extends Error {
+/** Typed CLI error — `.code` is the §6 exit code. V0 exports it so convert/import (V4/V5) and
+ *  tests can branch on it (lock-busy 73, config 78, busy 76, bad password 77, …). */
+export class CliError extends Error {
   constructor(code, message) {
     super(message);
     this.code = code;
@@ -1809,7 +2041,9 @@ async function doMount(v) {
   return "mounted-now";
 }
 
-function postMount(v, { fix = false, realMnt } = {}) {
+// Named runPostMount: the unlockVault OPTION `postMount` (boolean) shadows this helper's name
+// inside that function's scope — the golden caught `true(v, …)` TypeError when they shared it.
+function runPostMount(v, { fix = false, realMnt } = {}) {
   ensureVaultDirs(v, { realMnt });
   const r = syncProjectSettings(v, { fix });
   if (r.kind === "conflict") throw new CliError(EXIT.CONFIG, r.message);
@@ -1824,7 +2058,7 @@ function printWarnings() {
   for (const w of systemWarnings()) err(`警告：${w}`);
 }
 
-async function unlockVault(v, { fix = false } = {}) {
+export async function unlockVault(v, { fix = false, postMount = true } = {}) {
   requirePrereqs();
   // `how` stays undefined until doMount settles — a THROW from doMount may still have MOUNTED
   // (identity verification runs INSIDE the __mount child, after gocryptfs succeeded), so the
@@ -1836,7 +2070,10 @@ async function unlockVault(v, { fix = false } = {}) {
     if (st !== "mounted")
       throw new CliError(EXIT.FAIL, `挂载未生效（mountinfo：${st}），请 pi-secure status ${v.name}`);
     const { realMnt } = physicalPaths(v);
-    postMount(v, { fix, realMnt });
+    // V0 (convert-plan §1.4 step 2 / §3.4): `postMount:false` mounts RAW — no ensureVaultDirs, no
+    // sessionDir write. Transactional callers (convert's own mount, the init --fix-settings /
+    // import --verify-password relocation entry) own the post-mount steps themselves.
+    if (postMount) runPostMount(v, { fix, realMnt });
     return { how, realMnt };
   } catch (e) {
     if (how !== "already") await rollbackFreshMount(v, e); // a pre-existing mount is left as found
@@ -1988,8 +2225,9 @@ async function cmdInit(args) {
     throw new CliError(EXIT.USAGE, "init 会在终端打印 master key，stdout 必须是终端（不要重定向到文件/管道）");
   createLayout(v, { others: otherRegisteredVaults(v) });
   // Registered BEFORE gocryptfs -init so an interrupted init shows up in `status` as incomplete.
+  // (N2 call site migrated to the V0 entry-object signature; the written bytes are identical.)
   try {
-    registerVault(name, v.dir, v.mnt, home, priv ? { private: true } : {});
+    registerVault(name, { dir: v.dir, mnt: v.mnt, ...(priv ? { private: true } : {}) }, { home });
   } catch (e) {
     throw new CliError(EXIT.CONFIG, `${String(e && e.message)}\n  ${v.dir} 已建好但未登记。\n${initCleanupHint(v)}`);
   }
@@ -4939,6 +5177,23 @@ async function finalizeInNs(v, { realMnt, id, S, say, exitCode }) {
   }
 }
 
+/**
+ * V0 helper ports (convert-plan §8.1 V0) — the injectable surface V4 (convert.mjs) and V5
+ * (archive.mjs) receive: `unlockVault(v, {postMount:false})`, the claim/patch/remove settings
+ * trio, and the pre-existing `finalizeBounded` / `scanCwdOccupants` / `preflight`. Signatures are
+ * pinned by tests/secure/helper-v0-api.test.ts and documented in
+ * docs/dev/data-encryption/V0-report.md. Frozen object: pass it around, never mutate it.
+ */
+export const V0_PORTS = Object.freeze({
+  unlockVault,
+  registerVault,
+  patchVaultEntry,
+  removeVaultEntry,
+  finalizeBounded,
+  scanCwdOccupants,
+  preflight,
+});
+
 export async function main(argv) {
   const [cmd, ...args] = argv;
   try {
@@ -4970,16 +5225,45 @@ export async function main(argv) {
         return await cmdNsRoot();
       case "__mount-work":
         return await cmdMountWork();
-      case "__register":
-        // internal: executed by registerVault() UNDER the settings flock
+      case "__register": {
+        // internal: executed by registerVault() UNDER the settings flock (V0: + --expect-absent / --pending)
         try {
-          if (args.length > 4 || (args[3] !== undefined && args[3] !== "--private"))
+          const [name, dir, mnt, ...flags] = args;
+          if (name === undefined || dir === undefined || mnt === undefined || flags.length > 4)
             throw new Error("内部错误：__register 参数不合法");
-          registerVaultUnlocked(args[0], args[1], args[2], undefined, { private: args[3] === "--private" });
+          let priv = false;
+          let expectAbsent = false;
+          let pending;
+          for (let i = 0; i < flags.length; i++) {
+            const f = flags[i];
+            if (f === "--private" && !priv) priv = true;
+            else if (f === "--expect-absent" && !expectAbsent) expectAbsent = true;
+            else if (f === "--pending" && pending === undefined && flags[i + 1] !== undefined) pending = flags[++i];
+            else throw new Error(`内部错误：__register 参数不合法（${JSON.stringify(f)}）`);
+          }
+          registerVaultUnlocked(name, dir, mnt, undefined, { private: priv, expectAbsent, pending });
         } catch (e) {
           throw new CliError(EXIT.CONFIG, String(e && e.message));
         }
         return EXIT.OK;
+      }
+      case "__vault-patch":
+      case "__vault-remove": {
+        // internal: executed by patchVaultEntry()/removeVaultEntry() UNDER the settings flock;
+        // prints exactly one JSON result line on stdout (kind ok|missing|mismatch).
+        try {
+          if (args.length !== (cmd === "__vault-patch" ? 3 : 2)) throw new Error(`内部错误：${cmd} 参数个数不合法`);
+          const parsed = args.slice(1).map((a) => JSON.parse(a));
+          const result =
+            cmd === "__vault-patch"
+              ? patchVaultEntryUnlocked(args[0], parsed[0], parsed[1])
+              : removeVaultEntryUnlocked(args[0], parsed[0]);
+          out(JSON.stringify(result));
+        } catch (e) {
+          throw new CliError(EXIT.CONFIG, String(e && e.message));
+        }
+        return EXIT.OK;
+      }
       case undefined:
       case "help":
       case "-h":

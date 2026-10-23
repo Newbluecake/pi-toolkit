@@ -526,8 +526,8 @@ describe.skipIf(!HAVE_FLOCK)("vaultInstanceView — which entry-point view a vau
 
 describe.skipIf(!HAVE_FLOCK)("registerVault — `private: true` only when requested", () => {
   it("plain registration writes exactly {dir, mnt}; private adds private:true; __register validates", () => {
-    H.registerVault("beta", "/x/beta", "/y/beta", home);
-    H.registerVault("gamma", "/x/gamma", "/y/gamma", home, { private: true });
+    H.registerVault("beta", { dir: "/x/beta", mnt: "/y/beta" }, { home });
+    H.registerVault("gamma", { dir: "/x/gamma", mnt: "/y/gamma", private: true }, { home });
     const s = JSON.parse(readFileSync(settingsFile(), "utf8"));
     expect(s.secure.vaults.beta).toEqual({ dir: "/x/beta", mnt: "/y/beta" });
     expect(s.secure.vaults.gamma).toEqual({ dir: "/x/gamma", mnt: "/y/gamma", private: true });

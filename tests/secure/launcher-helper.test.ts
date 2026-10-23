@@ -903,7 +903,7 @@ describe("settings registration", () => {
     const f = join(home, ".pi", "agent", "pi-subagent.json");
     writeFileSync(f, JSON.stringify({ hud: { enabled: true }, secure: { enabled: true, vaults: { old: {} } } }));
     chmodSync(f, 0o640);
-    H.registerVault("acme", "/d/acme", "/l/acme", home);
+    H.registerVault("acme", { dir: "/d/acme", mnt: "/l/acme" }, { home });
     expect(JSON.parse(readFileSync(f, "utf8"))).toEqual({
       hud: { enabled: true },
       secure: { enabled: true, vaults: { old: {}, acme: { dir: "/d/acme", mnt: "/l/acme" } } },
@@ -918,7 +918,7 @@ describe("settings registration", () => {
     const home = tmp("ps-reg-");
     mkdirSync(join(home, ".pi", "agent"), { recursive: true });
     writeFileSync(join(home, ".pi", "agent", "pi-subagent.json"), "{bad");
-    expect(() => H.registerVault("acme", "/d", "/l", home)).toThrow(/拒绝改写/);
+    expect(() => H.registerVault("acme", { dir: "/d", mnt: "/l" }, { home })).toThrow(/拒绝改写/);
     expect(H.resolveVault("acme", { home }).kind).toBe("error");
   });
   it("resolveVault: bad name, unknown vault, invalid entry", () => {
@@ -1076,7 +1076,7 @@ describe("review #5/#6: settings file writes are locked, and never through a sym
     const worker = (prefix: string) =>
       new Promise<number | null>((resolve) => {
         const script = `const H = await import(${JSON.stringify(pathToFileURL(HELPER).href)});
-          for (let i = 0; i < 12; i++) H.registerVault("${prefix}" + i, "/d/${prefix}" + i, "/l/${prefix}" + i, ${JSON.stringify(home)});`;
+          for (let i = 0; i < 12; i++) H.registerVault("${prefix}" + i, { dir: "/d/${prefix}" + i, mnt: "/l/${prefix}" + i }, { home: ${JSON.stringify(home)} });`;
         const c = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: "ignore" });
         c.on("close", resolve);
       });
@@ -1108,7 +1108,7 @@ describe("review #5/#6: settings file writes are locked, and never through a sym
     writeFileSync(target, JSON.stringify({ a: 1 }));
     chmodSync(target, 0o600);
     symlinkSync(target, file);
-    expect(() => H.registerVault("acme", "/d", "/l", home)).toThrow(/符号链接/);
+    expect(() => H.registerVault("acme", { dir: "/d", mnt: "/l" }, { home })).toThrow(/符号链接/);
     expect(lstatSync(file).isSymbolicLink()).toBe(true);
     expect(readFileSync(target, "utf8")).toBe(JSON.stringify({ a: 1 }));
     expect(statSync(target).mode & 0o777).toBe(0o600);
@@ -1116,19 +1116,19 @@ describe("review #5/#6: settings file writes are locked, and never through a sym
   it("a directory / fifo in place of the settings file is refused", () => {
     const { home, file } = agentHome();
     mkdirSync(file);
-    expect(() => H.registerVault("acme", "/d", "/l", home)).toThrow(/不是普通文件/);
+    expect(() => H.registerVault("acme", { dir: "/d", mnt: "/l" }, { home })).toThrow(/不是普通文件/);
     const b = agentHome();
     expect(spawnSync("mkfifo", [b.file]).status).toBe(0);
-    expect(() => H.registerVault("acme", "/d", "/l", b.home)).toThrow(/不是普通文件/);
+    expect(() => H.registerVault("acme", { dir: "/d", mnt: "/l" }, { home: b.home })).toThrow(/不是普通文件/);
   });
   it("modes: new file 0600; existing 0666 loses group/other write (never 0777)", () => {
     const a = agentHome();
-    H.registerVault("acme", "/d", "/l", a.home);
+    H.registerVault("acme", { dir: "/d", mnt: "/l" }, { home: a.home });
     expect(statSync(a.file).mode & 0o777).toBe(0o600);
     const b = agentHome();
     writeFileSync(b.file, "{}");
     chmodSync(b.file, 0o666);
-    H.registerVault("acme", "/d", "/l", b.home);
+    H.registerVault("acme", { dir: "/d", mnt: "/l" }, { home: b.home });
     expect(statSync(b.file).mode & 0o777).toBe(0o644);
     expect(H.settingsWriteMode(undefined)).toBe(0o600);
     expect(H.settingsWriteMode({ mode: 0o120777 })).toBe(0o755 & 0o777); // a raw link mode is never passed in, but is clamped anyway
@@ -1136,7 +1136,7 @@ describe("review #5/#6: settings file writes are locked, and never through a sym
   it("a symlinked lock file fails closed", () => {
     const { home } = agentHome();
     symlinkSync("/tmp/whatever", join(home, ".pi", "agent", ".pi-subagent.json.lock"));
-    expect(() => H.registerVault("acme", "/d", "/l", home)).toThrow();
+    expect(() => H.registerVault("acme", { dir: "/d", mnt: "/l" }, { home })).toThrow();
     expect(existsSync(join(home, ".pi", "agent", "pi-subagent.json"))).toBe(false);
   });
 });
