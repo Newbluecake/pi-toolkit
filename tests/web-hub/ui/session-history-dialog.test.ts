@@ -889,3 +889,29 @@ describe("SessionHistoryDialog: request pacing + silent 429 retry", () => {
     expect(dlg.contains(q(".history-foot"))).toBe(true);
   });
 });
+
+describe("SessionHistoryDialog: topmost overlay decision (preview-windows §5.2, W3)", () => {
+  it("a MODELESS preview-window root mounted later does NOT block Escape — the dialog stays topmost", async () => {
+    const h = harness({ history: [{ ok: true, page: historyPage({ items: [] }) }] });
+    const w = mountDialog(h);
+    await flushPromises();
+    const overlay = document.createElement("div");
+    overlay.className = "preview-overlay is-windows is-modeless";
+    document.body.appendChild(overlay);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flushPromises();
+    expect(w.emitted("close")).toHaveLength(1);
+  });
+
+  it("a MODAL preview overlay mounted later still blocks Escape (legacy semantics preserved)", async () => {
+    const h = harness({ history: [{ ok: true, page: historyPage({ items: [] }) }] });
+    const w = mountDialog(h);
+    await flushPromises();
+    const overlay = document.createElement("div");
+    overlay.className = "preview-overlay";
+    document.body.appendChild(overlay);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flushPromises();
+    expect(w.emitted("close") ?? []).toHaveLength(0);
+  });
+});

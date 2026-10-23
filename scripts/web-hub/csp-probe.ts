@@ -10,6 +10,9 @@
  * violation listener actually catches violations at all (a probe that can't see the thing it's
  * supposed to detect would otherwise report a false "all clear").
  *
+ * `--suite mermaid` (`npm run probe:mermaid`): the web-hub-mermaid real-browser gate (plan §10.4), Chromium + Firefox;
+ * `--lan` additionally serves the probe build on 0.0.0.0 for the S0 real-device run.
+ *
  * Exit codes: 0 = pass; 1 = assertion failure (CSP violated, or something computed wrong); 2 =
  * Playwright/Chromium unavailable (offline cache miss and no network).
  */
@@ -20,11 +23,16 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { CSP } from "../../src/web-hub/hub/http.js";
 import { loadPlaywright, type PwPage } from "./lib/playwright.js";
+import { runMermaidSuite } from "./mermaid-probe-suite.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const VITE_CONFIG = resolve(REPO_ROOT, "src/web-hub/ui/vite.config.ts");
 const PROBE_OUT_DIR = resolve(REPO_ROOT, "node_modules/.cache/pwh-csp-probe");
 const PORT = 42111;
+const MERMAID_REPORT = resolve(REPO_ROOT, "node_modules/.cache/pwh-mermaid-probe-report.json");
+/** Paths the mermaid suite's pages request on purpose to prove they are NEVER fetched (plan §10.4 N group). */
+const SINK_PREFIX = "/probe-sink/";
+const sinkHits: string[] = [];
 const PROBE_CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -62,10 +70,15 @@ interface Failure {
   readonly detail: string;
 }
 
-async function startServer(): Promise<{ server: Server; port: number }> {
+async function startServer(host = "127.0.0.1"): Promise<{ server: Server; port: number }> {
   const server = createServer((req, res) => {
     res.setHeader("Content-Security-Policy", CSP);
     res.setHeader("X-Content-Type-Options", "nosniff");
+    if ((req.url ?? "").startsWith(SINK_PREFIX)) {
+      sinkHits.push((req.url ?? "").split("?")[0] ?? "");
+      res.writeHead(404).end();
+      return;
+    }
     void serveProbeFile(req.url ?? "/", res).then((served) => {
       if (!served && !res.headersSent) {
         res.writeHead(404).end();
@@ -74,7 +87,7 @@ async function startServer(): Promise<{ server: Server; port: number }> {
   });
   await new Promise<void>((resolveP, rejectP) => {
     server.once("error", rejectP);
-    server.listen(PORT, "127.0.0.1", () => resolveP());
+    server.listen(PORT, host, () => resolveP());
   });
   return { server, port: PORT };
 }
@@ -169,9 +182,66 @@ async function runNegative(page: PwPage, base: string, failures: Failure[]): Pro
   }
 }
 
+function argValue(name: string): string | undefined {
+  const i = process.argv.indexOf(name);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
+
+/** `--suite mermaid`: Chromium + Firefox × corpus groups R/N/C/F/M/L (plan §10.4). `--lan`: only SERVE the probe
+ * build on 0.0.0.0 (S0 real-device test) — no authentication, development only. */
+async function mainMermaid(): Promise<void> {
+  const lan = process.argv.includes("--lan");
+  if (lan) {
+    console.warn(
+      "⚠ --lan binds 0.0.0.0 and serves ONLY the probe build output, with NO authentication. Development use only.",
+    );
+    const { port } = await startServer("0.0.0.0");
+    console.log(`  open http://<this-machine-lan-ip>:${port}/mermaid.html — Ctrl-C to stop`);
+    await new Promise(() => undefined);
+    return;
+  }
+  console.log("→ loading local Playwright + Chromium + Firefox");
+  const pw = await loadPlaywright();
+  if (!pw.ok || pw.firefox === undefined) {
+    console.error(`✗ browser unavailable: ${pw.ok ? "no cached Firefox build" : pw.reason}`);
+    process.exit(2);
+  }
+  console.log(
+    `  playwright ${pw.version} (${pw.source}); chromium ${pw.executablePath}; firefox ${pw.firefox.executablePath}`,
+  );
+  const { server, port } = await startServer();
+  try {
+    const chromiumExe = pw.executablePath;
+    const firefox = pw.firefox;
+    const { failures } = await runMermaidSuite({
+      base: `http://127.0.0.1:${port}`,
+      outDir: PROBE_OUT_DIR,
+      sinkHits,
+      reportPath: MERMAID_REPORT,
+      launchers: [
+        { name: "chromium", launch: () => pw.chromium.launch({ headless: true, executablePath: chromiumExe }) },
+        {
+          name: "firefox",
+          launch: () => firefox.launcher.launch({ headless: true, executablePath: firefox.executablePath }),
+        },
+      ],
+    });
+    if (failures.length === 0) {
+      console.log(`✓ probe:mermaid — PASS (Chromium + Firefox). Report: ${MERMAID_REPORT}`);
+      process.exit(0);
+    }
+    console.error(`✗ probe:mermaid — ${failures.length} assertion(s) failed (report: ${MERMAID_REPORT}):`);
+    for (const f of failures.slice(0, 60)) console.error(`  - [${f.browser}] ${f.caseId}: ${f.assertion}: ${f.detail}`);
+    process.exit(1);
+  } finally {
+    server.close();
+  }
+}
+
 async function main(): Promise<void> {
   console.log("→ building csp-probe entries via vite.config.ts --mode csp-probe");
   await build({ configFile: VITE_CONFIG, mode: "csp-probe", logLevel: "warn" });
+  if (argValue("--suite") === "mermaid") return mainMermaid();
 
   console.log("→ loading local Playwright + Chromium");
   const pw = await loadPlaywright();

@@ -32,6 +32,7 @@ import type { HoldItem } from "./hold.js";
 import type { DispatchOutcome, HoldDriver } from "./hold-driver.js";
 import type { PromptGatePort, WebPromptRelease } from "./prompt-gate.js";
 import { parseMention, routeMention, type MentionRouteDeps } from "../../mention/mention.js";
+import { safeParseSessionMention } from "../../mention/session.js";
 import type { MentionResultData } from "../protocol/messages.js";
 import type {
   CmdArgs,
@@ -44,6 +45,7 @@ import type {
   CmdResultBody,
   CmdResultFrame,
 } from "../protocol/messages.js";
+import { isFeishuCmdOrigin } from "../protocol/messages.js";
 
 export interface Timer {
   cancel(): void;
@@ -264,6 +266,27 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         errResult("E_COMMAND_DENIED", false, "none", "LAN authentication administration is local-TUI-only"),
       );
     }
+    // fabric (2026-10-22 user ruling, superseding phase-2 §5.3/#9/XI13): web may now execute the
+    // membership/policy mutations through the POLICY-GATED command op (`webCommandPolicy.fabric`,
+    // default allow) — but prompt text still never executes them. This guard keeps the same
+    // defense-in-depth as the /webhub row above (a prompt must not reach the mutation even as
+    // free slash-shaped text, whatever a future pi does with `expandPromptTemplates` defaults),
+    // and is the LAST choke point Feishu frames can reach (hub F6 admission forwards Feishu only
+    // as prompt/dialog ops) — Feishu origins get the dedicated refusal text. `status`/`blocks`
+    // stay promptable (read-only).
+    if (/^\s*\/fabric\s+(?:(?:join|leave|receive|block|unblock|fence)(?:\s|$)|alias(?:\s|$))/.test(cmd.text)) {
+      return settleAndReply(
+        frame,
+        errResult(
+          "E_COMMAND_DENIED",
+          false,
+          "none",
+          isFeishuCmdOrigin(frame.origin)
+            ? "飞书入口不能修改跨会话加入状态，请在终端或 web 执行"
+            : "Send /fabric as a command (op:command) — webCommandPolicy.fabric applies",
+        ),
+      );
+    }
     if (deps.compactionState.manualCompacting) {
       return settleAndReply(frame, errResult("E_BUSY_COMPACTING", true, "none"));
     }
@@ -283,7 +306,13 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     }
     if (mentionDeps !== undefined) {
       const parsed = parseMention(cmd.text, mentionDeps.registry);
-      if (parsed !== undefined) {
+      // fabric reply-plan §9.3: the web input path's SYNC mention determination gains the
+      // @session branch. safeParseSessionMention is `undefined` unless the port is assembled ∧
+      // live-joined, so the three off states (xs off / not joined / left) keep this whole block
+      // byte-identical to the legacy prompt path for every @ shape, `@session:` included (§9.7).
+      const sessionParsed = parsed === undefined ? safeParseSessionMention(mentionDeps.sessions, cmd.text) : undefined;
+      if (parsed !== undefined || sessionParsed !== undefined) {
+        const label = parsed?.label ?? sessionParsed?.label ?? "";
         // Do not make the native prompt path async: only a confirmed mention starts the
         // promise, preserving existing synchronous send/observation behavior for all other text.
         void routeMention(cmd.text, mentionDeps)
@@ -291,8 +320,15 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
             if (!routed.handled) return;
             const mention: MentionResultData =
               routed.action === "error"
-                ? { action: "error", label: parsed.label, error: routed.error }
-                : { action: routed.action, label: parsed.label, runId: routed.runId };
+                ? { action: "error", label, error: routed.error }
+                : routed.action === "session"
+                  ? {
+                      action: "session",
+                      label,
+                      effect: routed.effect,
+                      ...(routed.requestId !== undefined ? { requestId: routed.requestId } : {}),
+                    }
+                  : { action: routed.action, label, runId: routed.runId };
             deps.ledger.updatePrompt(frame.id, { promptState: "observed", behavior: cmd.deliver }, deps.now());
             settleAndReply(frame, {
               ok: true,
@@ -301,7 +337,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
           })
           .catch((error: unknown) => {
             const message = error instanceof Error ? error.message : String(error);
-            mentionDeps?.reportError?.(`cannot route @${parsed.label}: ${message}`);
+            mentionDeps?.reportError?.(`cannot route @${label}: ${message}`);
             deps.ledger.updatePrompt(frame.id, { promptState: "observed", behavior: cmd.deliver }, deps.now());
             settleAndReply(frame, {
               ok: true,
@@ -309,7 +345,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
                 op: "prompt",
                 delivery: "observed",
                 behavior: cmd.deliver,
-                mention: { action: "error", label: parsed.label, error: message },
+                mention: { action: "error", label, error: message },
               },
             });
           });
@@ -490,6 +526,45 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         if (settled) return;
         settled = true;
         deps.ledger.updatePrompt(cmdId, { promptState: "consumed" }, deps.now());
+        // topic-switch calls `elsewhere()` only AFTER `ctx.newSession` resolved (wire.ts
+        // `onSwitchEntered`), i.e. the bound session is already the NEW one. The entry was created
+        // under the claim-time session and `frame()` projects only the current session's entries,
+        // so without re-homing it the `consumed` terminal state never reaches the browser and its
+        // optimistic row stays "sent · unconfirmed" forever. Same session (or an unreadable one
+        // that equals it) ⇒ nothing to move; an unreadable/empty current id ⇒ session-agnostic.
+        let current = "";
+        try {
+          current = deps.getSessionId();
+        } catch {
+          current = "";
+        }
+        if (current !== sessionId) deps.ledger.rebindSession(cmdId, current === "" ? undefined : current, deps.now());
+        deps.onChanged();
+      },
+      handedOff(kind) {
+        // todo #8: called from topic-switch's `persistPending` (session_shutdown before the user
+        // decided). The request now belongs to topic-switch's recovery, which re-delivers through
+        // the plain content path — never through this release — so without settling here the
+        // entry would stay `observed` and the browser row "sent · unconfirmed" until TTL.
+        if (settled) return;
+        settled = true;
+        const now = deps.now();
+        if (kind === "reload") {
+          // Same session comes back and recovery auto-redelivers the SAME text (extension-source
+          // `input`, then the user `message_start`). Re-arm the entry exactly like a dispatch so the
+          // NEXT module instance's observation chain attributes it (dispatched → observed →
+          // consumed ⇒ the row clears) — the owner is dropped because the pre-reload owner never
+          // matches a new instance's scoped lookup. No timer is armed: this instance is going away
+          // and its publish path must not write into the next instance's slots.
+          deps.ledger.updatePrompt(cmdId, { promptState: "dispatched", text }, now);
+          deps.ledger.clearOwner(cmdId, now);
+        } else {
+          // new/resume/fork/quit: recovery at most puts the text back into the terminal editor —
+          // exactly what `dropped` already tells the browser ("returned to the terminal editor or
+          // discarded"). Unbound from any session: the next session's ctl slot must still carry it.
+          deps.ledger.updatePrompt(cmdId, { promptState: "dropped", reason: "session" }, now);
+          deps.ledger.rebindSession(cmdId, undefined, now);
+        }
         deps.onChanged();
       },
     };
@@ -769,8 +844,28 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       );
       return;
     }
-    settleCommandResult(frame, result as CmdResultBody, quiet);
-    notifyCommandSuccess(frame, cmd, result as CmdResultBody, quiet);
+    // fix (2026-10-22): an extension command whose capture window was still open at bridge-return
+    // time answers `completion:"async"` and settles ONLY through the late channel (capture finish
+    // → sendLate → handleBridgeLate): reply now but keep the ledger entry `running`, so the
+    // ctl-slot republish does not terminate the browser's pendingCtl item before `cmd_late`
+    // arrives — the existing async path (cmd_late → lateQuery → queryOnly) needs the item alive
+    // to fetch the output. Every such command carries a bounded settle-anyway (the capture
+    // window's CAPTURE_MAX_MS expiry fires the same late channel), so the entry cannot hang.
+    // Builtins (`/compact`, `/model`) keep their legacy immediate settle — their cmd_late is an
+    // upgrade, not the primary settle, and ModelSwitcher's ctl-slot convergence relies on it.
+    const body = result as CmdResultBody;
+    const asyncExtension =
+      body.ok === true &&
+      body.data.op === "command" &&
+      body.data.kind === "extension" &&
+      body.data.completion === "async";
+    if (asyncExtension) {
+      replyOnly(frame, body);
+      notifyCommandSuccess(frame, cmd, body, quiet);
+      return;
+    }
+    settleCommandResult(frame, body, quiet);
+    notifyCommandSuccess(frame, cmd, body, quiet);
   }
 
   /** §2.4: settle (stripping `data.sessions` for the quiet `__list` read) + reply in full. */
@@ -923,6 +1018,11 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       for (const item of cleared) {
         if (item.cmdId === undefined) continue;
         deps.ledger.updatePrompt(item.cmdId, { promptState: "dropped", reason: "session" }, deps.now());
+        // todo #8 (residual #2): this runs at session_shutdown, so the publish below still goes
+        // out under the OLD session — but if the link is down right then, the stored slot is
+        // overwritten by the next session's projection (which filters by session id) before any
+        // reconnect replays it. Unbinding the terminal entry keeps it in every later projection.
+        deps.ledger.rebindSession(item.cmdId, undefined, deps.now());
         changed = true;
       }
       if (changed) deps.onChanged();

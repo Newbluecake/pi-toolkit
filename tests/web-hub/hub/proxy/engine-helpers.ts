@@ -1,6 +1,6 @@
 import { createClientAllowGuard } from "../../../../src/web-hub/hub/client-allow.js";
 import { request, type Server, type IncomingHttpHeaders } from "node:http";
-import { connect, createServer, type Socket } from "node:net";
+import { connect, type Socket } from "node:net";
 import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import type { AuthIdentity, ProxyService } from "../../../../src/web-hub/hub/por
 import type { ProxyOpenResult } from "../../../../src/web-hub/protocol/proxy.js";
 import { createProxyService, type ProxyServiceDeps } from "../../../../src/web-hub/hub/proxy/service.js";
 import { proxyUpstream } from "../../../fixtures/proxy-upstream.js";
+import { freePortRange } from "../../../helpers/free-port.js";
 
 export const identity = (n = 1, now = Date.now()): AuthIdentity => ({
   listener: "loopback",
@@ -29,17 +30,11 @@ export async function listen(server: Server, port: number, host: string) {
   await once(server, "listening");
 }
 export async function freeRange(exclude: readonly number[] = []): Promise<[number, number]> {
-  // An ephemeral base can sit immediately below an already-bound upstream. Exclude its
-  // whole candidate range (plus one guard port for tests that probe target port ±1).
+  // Exclude the whole candidate range (plus one guard port for tests that probe target port ±1).
   for (let attempt = 0; attempt < 64; attempt++) {
-    const probe = createServer();
-    probe.listen(0, "127.0.0.1");
-    probe.unref();
-    await once(probe, "listening");
-    const port = (probe.address() as { port: number }).port;
-    await new Promise<void>((resolve) => probe.close(() => resolve()));
-    if (port + 16 > 65535 || exclude.some((n) => n >= port - 1 && n <= port + 16)) continue;
-    return [port, port + 15];
+    const [base, last] = await freePortRange(16);
+    if (exclude.some((n) => n >= base - 1 && n <= last + 1)) continue;
+    return [base, last];
   }
   throw new Error("no disjoint test port range");
 }

@@ -40,3 +40,21 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # The web UI toolchain (mermaid declares engines.node >=22.12.0, vite/rollup follow) must keep building on the
+  # LOWEST supported Node. The runtime floor stays >=22 (pi installs with --omit=dev, so devDependencies never
+  # reach users). web-hub-mermaid plan §2.4 / §12.
+  web-min-node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build web UI on the minimum Node
+        run: npm run build:web && npm run check:web

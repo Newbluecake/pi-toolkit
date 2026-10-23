@@ -522,6 +522,146 @@ describe("wrapCommandApi captured path — the real ctx/ui table (§4.9 point 4/
   });
 });
 
+describe("capture engine — isActive/onFinish/dispose (async-late channel, fix 2026-10-22)", () => {
+  it("isActive tracks the claimed window: true while the handler is suspended, false once it settles", async () => {
+    const api = fakeApi();
+    const engine = createCommandCaptureEngine();
+    const pi = wrapCommandApi(api, () => engine);
+    let resolveHandler: (() => void) | undefined;
+    pi.registerCommand("mycmd", {
+      handler: () =>
+        new Promise<void>((resolve) => {
+          resolveHandler = resolve;
+        }),
+    } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const ctx = fakeCtx(
+      fakeUi({ notify: [], setWidget: [], setStatus: [], setEditorText: [], pasteToEditor: [], setTitle: [] }),
+    );
+    const inv = invocationOf();
+    engine.arm(inv);
+    const pending = dispatch(api, engine, inv, ctx);
+    expect(engine.isActive(inv.cmdId)).toBe(true);
+    resolveHandler?.();
+    await pending;
+    expect(engine.isActive(inv.cmdId)).toBe(false);
+    // The window itself is retained (outputFor still answers) — only "active" flips.
+    expect(engine.outputFor(inv.cmdId)).toEqual({ entries: [] });
+  });
+
+  it("onFinish fires exactly once with 'settled' on handler settle (never re-fires on a later timeout)", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = fakeApi();
+      const engine = createCommandCaptureEngine();
+      const pi = wrapCommandApi(api, () => engine);
+      let resolveHandler: (() => void) | undefined;
+      pi.registerCommand("mycmd", {
+        handler: () =>
+          new Promise<void>((resolve) => {
+            resolveHandler = resolve;
+          }),
+      } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+      const ctx = fakeCtx(
+        fakeUi({ notify: [], setWidget: [], setStatus: [], setEditorText: [], pasteToEditor: [], setTitle: [] }),
+      );
+      const inv = invocationOf();
+      engine.arm(inv);
+      const pending = dispatch(api, engine, inv, ctx);
+      const fires: string[] = [];
+      engine.onFinish(inv.cmdId, (reason) => fires.push(reason));
+      expect(fires).toEqual([]);
+      resolveHandler?.();
+      await pending;
+      expect(fires).toEqual(["settled"]);
+      vi.advanceTimersByTime(60_000); // the window timer eventually fires too — must NOT re-fire
+      expect(fires).toEqual(["settled"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an unfinished handler gets 'timeout' at the CAPTURE_MAX_MS window expiry (settle-anyway)", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = fakeApi();
+      const engine = createCommandCaptureEngine();
+      const pi = wrapCommandApi(api, () => engine);
+      pi.registerCommand("mycmd", {
+        handler: () => new Promise<void>(() => {}), // never settles
+      } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+      const ctx = fakeCtx(
+        fakeUi({ notify: [], setWidget: [], setStatus: [], setEditorText: [], pasteToEditor: [], setTitle: [] }),
+      );
+      const inv = invocationOf();
+      engine.arm(inv);
+      void dispatch(api, engine, inv, ctx);
+      const fires: string[] = [];
+      engine.onFinish(inv.cmdId, (reason) => fires.push(reason));
+      vi.advanceTimersByTime(30_000);
+      expect(fires).toEqual(["timeout"]);
+      // The window closed — later collection is dropped, exactly like the pre-existing cap.
+      expect(engine.isActive(inv.cmdId)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a listener that throws never breaks the engine (the window still closes, the map still drains)", async () => {
+    const api = fakeApi();
+    const engine = createCommandCaptureEngine();
+    const pi = wrapCommandApi(api, () => engine);
+    pi.registerCommand("mycmd", { handler: async () => {} } as unknown as Omit<
+      RegisteredCommand,
+      "name" | "sourceInfo"
+    >);
+    const ctx = fakeCtx(
+      fakeUi({ notify: [], setWidget: [], setStatus: [], setEditorText: [], pasteToEditor: [], setTitle: [] }),
+    );
+    const inv = invocationOf();
+    engine.arm(inv);
+    const pending = dispatch(api, engine, inv, ctx);
+    engine.onFinish(inv.cmdId, () => {
+      throw new Error("listener boom");
+    });
+    await expect(pending).resolves.toBeUndefined(); // finish() ran without propagating the throw
+    expect(engine.isActive(inv.cmdId)).toBe(false);
+  });
+
+  it("dispose() closes every window and fires pending listeners with 'timeout', keeping collected output readable", async () => {
+    const api = fakeApi();
+    const engine = createCommandCaptureEngine();
+    const pi = wrapCommandApi(api, () => engine);
+    let resolveHandler: (() => void) | undefined;
+    pi.registerCommand("mycmd", {
+      handler: (_args: string, ctx: ExtensionCommandContext) =>
+        new Promise<void>((resolve) => {
+          ctx.ui.notify("captured pre-dispose", "info");
+          resolveHandler = resolve;
+        }),
+    } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const ctx = fakeCtx(
+      fakeUi({ notify: [], setWidget: [], setStatus: [], setEditorText: [], pasteToEditor: [], setTitle: [] }),
+    );
+    const inv = invocationOf();
+    engine.arm(inv);
+    void dispatch(api, engine, inv, ctx);
+    let seen: { reason: string; output: unknown } | undefined;
+    engine.onFinish(inv.cmdId, (reason) => {
+      seen = { reason, output: engine.outputFor(inv.cmdId) };
+    });
+    engine.dispose();
+    expect(seen).toEqual({
+      reason: "timeout",
+      output: { entries: [{ kind: "notify", text: "captured pre-dispose", level: "info" }] },
+    });
+    expect(engine.isActive(inv.cmdId)).toBe(false);
+    // A very-late handler settle is a no-op for the listener (already fired) — and the drain
+    // above means no second firing, no leak.
+    resolveHandler?.();
+    await new Promise((r) => setTimeout(r, 0));
+  });
+});
+
 describe("truncation and window lifecycle (§4.9 point 7/8)", () => {
   it("a single entry over 8 KiB is clipped at a UTF-8-safe boundary with a trailing ellipsis", async () => {
     const api = fakeApi();

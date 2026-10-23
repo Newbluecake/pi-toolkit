@@ -1,0 +1,870 @@
+{
+  "version": 1,
+  "skeletonVersion": 1,
+  "cases": [
+    {
+      "input": "web",
+      "ok": true,
+      "alias": "web",
+      "note": "ascii"
+    },
+    {
+      "input": "Web",
+      "ok": true,
+      "alias": "web",
+      "note": "ascii upper"
+    },
+    {
+      "input": "WEB-1_x",
+      "ok": true,
+      "alias": "web-1_x",
+      "note": "mixed"
+    },
+    {
+      "input": "前端",
+      "ok": true,
+      "alias": "前端",
+      "note": "han"
+    },
+    {
+      "input": "小王",
+      "ok": true,
+      "alias": "小王"
+    },
+    {
+      "input": "@前端",
+      "ok": true,
+      "alias": "前端",
+      "note": "leading @ stripped"
+    },
+    {
+      "input": "ふろんと",
+      "ok": true,
+      "alias": "ふろんと",
+      "note": "hiragana"
+    },
+    {
+      "input": "フロント",
+      "ok": true,
+      "alias": "フロント",
+      "note": "katakana"
+    },
+    {
+      "input": "サーバー",
+      "ok": true,
+      "alias": "サーバー",
+      "note": "katakana ー inside"
+    },
+    {
+      "input": "프론트",
+      "ok": true,
+      "alias": "프론트",
+      "note": "hangul syllables"
+    },
+    {
+      "input": "前端2号",
+      "ok": true,
+      "alias": "前端2号"
+    },
+    {
+      "input": "\uff41\uff42\uff43",
+      "ok": true,
+      "alias": "abc",
+      "note": "fullwidth latin"
+    },
+    {
+      "input": "\uff37\uff25\uff22",
+      "ok": true,
+      "alias": "web",
+      "note": "fullwidth upper"
+    },
+    {
+      "input": "\uff57\uff45\uff42\uff11",
+      "ok": true,
+      "alias": "web1",
+      "note": "fullwidth digit"
+    },
+    {
+      "input": "\uff8c\uff9b\uff9d\uff84",
+      "ok": true,
+      "alias": "フロント",
+      "note": "halfwidth katakana folds"
+    },
+    {
+      "input": "\uff71",
+      "ok": true,
+      "alias": "ア",
+      "note": "halfwidth single"
+    },
+    {
+      "input": "\u212aey",
+      "ok": true,
+      "alias": "key",
+      "note": "KELVIN SIGN folds to k"
+    },
+    {
+      "input": "\ufb01le",
+      "ok": true,
+      "alias": "file",
+      "note": "ligature fi"
+    },
+    {
+      "input": "\u3007a",
+      "ok": true,
+      "alias": "\u3007a",
+      "note": "ideographic zero is Han Nl"
+    },
+    {
+      "input": "a\ud840\udc00",
+      "ok": true,
+      "alias": "a\ud840\udc00",
+      "note": "ext-B han"
+    },
+    {
+      "input": "\u3300",
+      "ok": true,
+      "alias": "アパート",
+      "note": "square katakana folds? (NFKC)"
+    },
+    {
+      "input": "\u2f00a",
+      "ok": true,
+      "alias": "一a",
+      "note": "kangxi radical folds to unified"
+    },
+    {
+      "input": "\uf900a",
+      "ok": true,
+      "alias": "豈a",
+      "note": "compat ideograph folds"
+    },
+    {
+      "input": "\u017fa",
+      "ok": true,
+      "alias": "sa",
+      "note": "\u017f folds to s"
+    },
+    {
+      "input": "",
+      "ok": false,
+      "reason": "invalid"
+    },
+    {
+      "input": "@",
+      "ok": false,
+      "reason": "invalid",
+      "note": "only @"
+    },
+    {
+      "input": "@@a",
+      "ok": false,
+      "reason": "invalid",
+      "note": "double @"
+    },
+    {
+      "input": "a b",
+      "ok": false,
+      "reason": "invalid",
+      "note": "space"
+    },
+    {
+      "input": "a\u3000b",
+      "ok": false,
+      "reason": "invalid",
+      "note": "ideographic space"
+    },
+    {
+      "input": "a.b",
+      "ok": false,
+      "reason": "invalid",
+      "note": "dot"
+    },
+    {
+      "input": "a/b",
+      "ok": false,
+      "reason": "invalid"
+    },
+    {
+      "input": "a#b",
+      "ok": false,
+      "reason": "invalid"
+    },
+    {
+      "input": "a:b",
+      "ok": false,
+      "reason": "invalid"
+    },
+    {
+      "input": "\ud83d\ude00a",
+      "ok": false,
+      "reason": "invalid",
+      "note": "emoji"
+    },
+    {
+      "input": "\u00e9",
+      "ok": false,
+      "reason": "invalid",
+      "note": "non-ASCII latin"
+    },
+    {
+      "input": "e\u0301a",
+      "ok": false,
+      "reason": "invalid",
+      "note": "NFKC composes to \u00e9, not whitelisted"
+    },
+    {
+      "input": "a\u200bb",
+      "ok": false,
+      "reason": "invalid",
+      "note": "ZWSP"
+    },
+    {
+      "input": "a\u200db",
+      "ok": false,
+      "reason": "invalid",
+      "note": "ZWJ"
+    },
+    {
+      "input": "a\u200cb",
+      "ok": false,
+      "reason": "invalid",
+      "note": "ZWNJ"
+    },
+    {
+      "input": "\u2060web",
+      "ok": false,
+      "reason": "invalid",
+      "note": "word joiner"
+    },
+    {
+      "input": "\ufeffweb",
+      "ok": false,
+      "reason": "invalid",
+      "note": "BOM"
+    },
+    {
+      "input": "web\u00ad",
+      "ok": false,
+      "reason": "invalid",
+      "note": "soft hyphen"
+    },
+    {
+      "input": "a\u0000b",
+      "ok": false,
+      "reason": "invalid",
+      "note": "NUL"
+    },
+    {
+      "input": "a\tb",
+      "ok": false,
+      "reason": "invalid",
+      "note": "tab"
+    },
+    {
+      "input": "a\nb",
+      "ok": false,
+      "reason": "invalid",
+      "note": "newline"
+    },
+    {
+      "input": "ab",
+      "ok": false,
+      "reason": "invalid",
+      "note": "DEL"
+    },
+    {
+      "input": "a\u0085b",
+      "ok": false,
+      "reason": "invalid",
+      "note": "C1"
+    },
+    {
+      "input": "a\u202eb",
+      "ok": false,
+      "reason": "invalid",
+      "note": "bidi RLO"
+    },
+    {
+      "input": "a\u2066b",
+      "ok": false,
+      "reason": "invalid",
+      "note": "bidi isolate"
+    },
+    {
+      "input": "a\u200eb",
+      "ok": false,
+      "reason": "invalid",
+      "note": "LRM"
+    },
+    {
+      "input": "a\ufe0fb",
+      "ok": false,
+      "reason": "invalid",
+      "note": "VS16"
+    },
+    {
+      "input": "前\ufe00端",
+      "ok": false,
+      "reason": "invalid",
+      "note": "VS1"
+    },
+    {
+      "input": "前\udb40\udd00端",
+      "ok": false,
+      "reason": "invalid",
+      "note": "VS17"
+    },
+    {
+      "input": "w\u0435b",
+      "ok": false,
+      "reason": "invalid",
+      "note": "cyrillic \u0435"
+    },
+    {
+      "input": "w\u0435b",
+      "ok": false,
+      "reason": "invalid",
+      "note": "cyrillic \u0435 (literal)"
+    },
+    {
+      "input": "\u0430bc",
+      "ok": false,
+      "reason": "invalid",
+      "note": "cyrillic \u0430"
+    },
+    {
+      "input": "\u03bfk",
+      "ok": false,
+      "reason": "invalid",
+      "note": "greek omicron"
+    },
+    {
+      "input": "\u0391bc",
+      "ok": false,
+      "reason": "invalid",
+      "note": "greek Alpha"
+    },
+    {
+      "input": "\u03c1a",
+      "ok": false,
+      "reason": "invalid",
+      "note": "greek rho"
+    },
+    {
+      "input": "a\u0300",
+      "ok": false,
+      "reason": "invalid",
+      "note": "combining grave"
+    },
+    {
+      "input": "a\u20ddb",
+      "ok": false,
+      "reason": "invalid",
+      "note": "enclosing mark"
+    },
+    {
+      "input": "か\u3099",
+      "ok": true,
+      "alias": "が",
+      "note": "dakuten composes under NFKC"
+    },
+    {
+      "input": "a\u3099",
+      "ok": false,
+      "reason": "invalid",
+      "note": "dakuten on latin stays a mark"
+    },
+    {
+      "input": "\u115f",
+      "ok": false,
+      "reason": "invalid",
+      "note": "jamo filler"
+    },
+    {
+      "input": "\u1160",
+      "ok": false,
+      "reason": "invalid"
+    },
+    {
+      "input": "\u3164",
+      "ok": false,
+      "reason": "invalid",
+      "note": "hangul filler"
+    },
+    {
+      "input": "\uffa0",
+      "ok": false,
+      "reason": "invalid",
+      "note": "halfwidth hangul filler"
+    },
+    {
+      "input": "\u115fweb",
+      "ok": false,
+      "reason": "invalid",
+      "note": "filler prefix"
+    },
+    {
+      "input": "web\u3164",
+      "ok": false,
+      "reason": "invalid",
+      "note": "filler suffix"
+    },
+    {
+      "input": "\u1160web\u1160",
+      "ok": false,
+      "reason": "invalid"
+    },
+    {
+      "input": "w\uffa0eb",
+      "ok": false,
+      "reason": "invalid"
+    },
+    {
+      "input": "\u1100",
+      "ok": false,
+      "reason": "invalid",
+      "note": "lone choseong"
+    },
+    {
+      "input": "\u1161a",
+      "ok": false,
+      "reason": "invalid",
+      "note": "lone jungseong"
+    },
+    {
+      "input": "\u3131a",
+      "ok": false,
+      "reason": "invalid",
+      "note": "compat jamo"
+    },
+    {
+      "input": "\ua960a",
+      "ok": false,
+      "reason": "invalid",
+      "note": "jamo ext-A"
+    },
+    {
+      "input": "\ud7b0a",
+      "ok": false,
+      "reason": "invalid",
+      "note": "jamo ext-B"
+    },
+    {
+      "input": "\uffa1a",
+      "ok": false,
+      "reason": "invalid",
+      "note": "halfwidth jamo"
+    },
+    {
+      "input": "123",
+      "ok": false,
+      "reason": "invalid",
+      "note": "pure digits"
+    },
+    {
+      "input": "0",
+      "ok": false,
+      "reason": "invalid"
+    },
+    {
+      "input": "_a",
+      "ok": false,
+      "reason": "invalid",
+      "note": "leading _"
+    },
+    {
+      "input": "-a",
+      "ok": false,
+      "reason": "invalid",
+      "note": "leading -"
+    },
+    {
+      "input": "ーa",
+      "ok": false,
+      "reason": "invalid",
+      "note": "leading ー"
+    },
+    {
+      "input": "___",
+      "ok": false,
+      "reason": "invalid",
+      "note": "no letter"
+    },
+    {
+      "input": "1-2",
+      "ok": false,
+      "reason": "invalid",
+      "note": "no letter"
+    },
+    {
+      "input": "deadbeef",
+      "ok": false,
+      "reason": "id_like",
+      "note": "8 hex"
+    },
+    {
+      "input": "DEADBEEF",
+      "ok": false,
+      "reason": "id_like",
+      "note": "8 hex upper"
+    },
+    {
+      "input": "12345678",
+      "ok": false,
+      "reason": "invalid",
+      "note": "8 digits: no letter, step 7 precedes id_like"
+    },
+    {
+      "input": "0123456789abcdef",
+      "ok": false,
+      "reason": "id_like"
+    },
+    {
+      "input": "019a1b2c-3d4e-7f50-8a9b-0c1d2e3f4a5b",
+      "ok": false,
+      "reason": "too_long",
+      "note": "uuid is too long"
+    },
+    {
+      "input": "q0123456789abcdef01",
+      "ok": false,
+      "reason": "too_long",
+      "note": "q + 18 hex = 19 clusters"
+    },
+    {
+      "input": "019a1b2c-3d4e-7",
+      "ok": false,
+      "reason": "id_like",
+      "note": "15 chars hex+dash"
+    },
+    {
+      "input": "0123-4567-89ab",
+      "ok": false,
+      "reason": "id_like",
+      "note": "hex + dashes"
+    },
+    {
+      "input": "abcdef12",
+      "ok": false,
+      "reason": "id_like"
+    },
+    {
+      "input": "deadbee",
+      "ok": true,
+      "alias": "deadbee",
+      "note": "7 hex chars is fine"
+    },
+    {
+      "input": "deadbeeg",
+      "ok": true,
+      "alias": "deadbeeg",
+      "note": "non-hex letter"
+    },
+    {
+      "input": "abc",
+      "ok": true,
+      "alias": "abc",
+      "note": "3 hex-ish letters"
+    },
+    {
+      "input": "所有人",
+      "ok": false,
+      "reason": "reserved"
+    },
+    {
+      "input": "全部",
+      "ok": false,
+      "reason": "reserved"
+    },
+    {
+      "input": "大家",
+      "ok": false,
+      "reason": "reserved"
+    },
+    {
+      "input": "自己",
+      "ok": false,
+      "reason": "reserved"
+    },
+    {
+      "input": "我",
+      "ok": false,
+      "reason": "reserved"
+    },
+    {
+      "input": "你",
+      "ok": false,
+      "reason": "reserved"
+    },
+    {
+      "input": "主会话",
+      "ok": false,
+      "reason": "reserved"
+    },
+    {
+      "input": "系统",
+      "ok": false,
+      "reason": "reserved"
+    },
+    {
+      "input": "Root",
+      "ok": false,
+      "reason": "reserved",
+      "note": "reserved after lowercase"
+    },
+    {
+      "input": "\uff33\uff39\uff33\uff34\uff25\uff2d",
+      "ok": false,
+      "reason": "reserved",
+      "note": "fullwidth reserved"
+    },
+    {
+      "input": "pi-foo",
+      "ok": false,
+      "reason": "reserved",
+      "note": "pi- prefix"
+    },
+    {
+      "input": "r_abc",
+      "ok": false,
+      "reason": "reserved",
+      "note": "r_ prefix"
+    },
+    {
+      "input": "wf_x",
+      "ok": false,
+      "reason": "reserved",
+      "note": "wf_ prefix"
+    },
+    {
+      "input": "PI-X",
+      "ok": false,
+      "reason": "reserved"
+    },
+    {
+      "input": "pifoo",
+      "ok": true,
+      "alias": "pifoo",
+      "note": "not a prefix"
+    },
+    {
+      "input": "r-abc",
+      "ok": true,
+      "alias": "r-abc"
+    },
+    {
+      "input": "wf-x",
+      "ok": true,
+      "alias": "wf-x"
+    },
+    {
+      "input": "rootx",
+      "ok": true,
+      "alias": "rootx"
+    },
+    {
+      "input": "系统2",
+      "ok": true,
+      "alias": "系统2",
+      "note": "reserved is exact"
+    },
+    {
+      "input": "gggggggggggggggg",
+      "ok": true,
+      "alias": "gggggggggggggggg",
+      "note": "16 ascii (g, not hex)"
+    },
+    {
+      "input": "ggggggggggggggggg",
+      "ok": false,
+      "reason": "too_long",
+      "note": "17 ascii"
+    },
+    {
+      "input": "前前前前前前前前前前前前前前前前",
+      "ok": true,
+      "alias": "前前前前前前前前前前前前前前前前",
+      "note": "16 han = 48 bytes"
+    },
+    {
+      "input": "前前前前前前前前前前前前前前前前前",
+      "ok": false,
+      "reason": "too_long",
+      "note": "17 han"
+    },
+    {
+      "input": "\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00",
+      "ok": true,
+      "alias": "\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00",
+      "note": "12 ext-B = 48 bytes"
+    },
+    {
+      "input": "\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00",
+      "ok": false,
+      "reason": "too_long",
+      "note": "13 ext-B = 52 bytes"
+    },
+    {
+      "input": "\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00",
+      "ok": false,
+      "reason": "too_long",
+      "note": "16 clusters but 64 bytes"
+    },
+    {
+      "input": "\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00前",
+      "ok": true,
+      "alias": "\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00前",
+      "note": "47 bytes"
+    },
+    {
+      "input": "\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00前a",
+      "ok": true,
+      "alias": "\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00前a",
+      "note": "48 bytes, 13 clusters"
+    },
+    {
+      "input": "\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00前前",
+      "ok": false,
+      "reason": "too_long",
+      "note": "50 bytes"
+    },
+    {
+      "input": "\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00\ud840\udc00前ab",
+      "ok": false,
+      "reason": "too_long",
+      "note": "49 bytes"
+    },
+    {
+      "input": "前前前前前前前前前前前前前前前a",
+      "ok": true,
+      "alias": "前前前前前前前前前前前前前前前a",
+      "note": "46 bytes 16 clusters"
+    },
+    {
+      "input": "前前前前前前前前前前前前前前前前a",
+      "ok": false,
+      "reason": "too_long",
+      "note": "17 clusters"
+    },
+    {
+      "input": "가가가가가가가가가가가가가가가가",
+      "ok": true,
+      "alias": "가가가가가가가가가가가가가가가가",
+      "note": "16 hangul = 48 bytes"
+    },
+    {
+      "input": "ああああああああああああああああ",
+      "ok": true,
+      "alias": "ああああああああああああああああ"
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ok": false,
+      "reason": "too_long",
+      "note": "very long"
+    },
+    {
+      "input": null,
+      "ok": false,
+      "reason": "invalid",
+      "note": "null"
+    },
+    {
+      "input": 42,
+      "ok": false,
+      "reason": "invalid",
+      "note": "number"
+    },
+    {
+      "ok": false,
+      "reason": "invalid"
+    },
+    {
+      "input": {},
+      "ok": false,
+      "reason": "invalid",
+      "note": "object"
+    }
+  ],
+  "skeletonEqual": [
+    ["o0", "00"],
+    ["0", "o"],
+    ["web1", "webl"],
+    ["web1", "webi"],
+    ["l1", "il"],
+    ["一", "-"],
+    ["a一b", "a-b"],
+    ["a一b", "a_b"],
+    ["\u3007", "o"],
+    ["\u3007a", "oa"],
+    ["口", "o"],
+    ["ロ", "o"],
+    ["口ロ\u3007", "ooo"],
+    ["a丨", "al"],
+    ["サーバー", "サ-バ-"],
+    ["a_b", "a-b"]
+  ],
+  "skeletonDistinct": [
+    ["カ", "力"],
+    ["エ", "工"],
+    ["ロ", "a"],
+    ["web", "wed"],
+    ["前端", "前瑞"],
+    ["a", "b"],
+    ["ー", "一x"],
+    ["ab", "ba"]
+  ],
+  "reservedPositive": [
+    "all",
+    "everyone",
+    "here",
+    "none",
+    "root",
+    "system",
+    "main",
+    "hub",
+    "session",
+    "xs",
+    "default",
+    "self",
+    "me",
+    "you",
+    "user",
+    "human",
+    "assistant",
+    "agent",
+    "bot",
+    "model",
+    "pi",
+    "subagent",
+    "workflow",
+    "channel",
+    "broadcast",
+    "reply",
+    "所有人",
+    "全部",
+    "大家",
+    "自己",
+    "我",
+    "你",
+    "主会话",
+    "系统",
+    "pi-",
+    "pi-x",
+    "r_",
+    "r_x",
+    "wf_",
+    "wf_abc"
+  ],
+  "reservedNegative": ["web", "前端", "pix", "rx", "wf", "agents", "users", "bots"],
+  "takeTokenValid": ["k0123456789abcdef", "kffffffffffffffff"],
+  "takeTokenInvalid": [
+    "",
+    "k0123456789abcde",
+    "k0123456789abcdef0",
+    "K0123456789abcdef",
+    "k0123456789abcdeg",
+    "0123456789abcdef",
+    "k0123456789abcdef\n"
+  ]
+}

@@ -4,7 +4,6 @@
  * Only the upstream is a fixture; no in-process startHub, service seams or fake auth.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomInt } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -16,6 +15,7 @@ import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
 import type { ProxyOpenResult } from "../../src/web-hub/protocol/proxy.js";
 import { PROXY_HUB_CAP, PROXY_LAN_HUB_CAP } from "../../src/web-hub/protocol/version.js";
 import { proxyUpstream } from "../fixtures/proxy-upstream.js";
+import { freePortRange } from "../helpers/free-port.js";
 import { waitUntil } from "../web-hub/agent/helpers.js";
 import { config, connectClient, hello } from "../web-hub/hub/helpers.js";
 import { login, postJson, rawRequest } from "../web-hub/http/helpers.js";
@@ -57,8 +57,9 @@ async function release(server: Server): Promise<void> {
 }
 
 /**
- * Reserve EVERY port, not just a free base + unchecked neighbours. Use a low, non-ephemeral
- * band so concurrent HTTP clients cannot steal a chosen port as their ephemeral source port.
+ * Reserve EVERY port, not just a free base + unchecked neighbours. Use the shared low,
+ * non-ephemeral allocator (tests/helpers/free-port.ts) so concurrent HTTP clients cannot
+ * steal a chosen port as their ephemeral source port.
  * Hold reservations through hub startup (port:0 cannot land inside the proxy range), and
  * release immediately before minting. EADDRINUSE retries only happen HERE, never around tests.
  */
@@ -67,8 +68,9 @@ async function reserveRange(avoid: readonly number[] = []): Promise<{
   release(): Promise<void>;
 }> {
   for (let attempt = 0; attempt < 64; attempt++) {
-    const lo = randomInt(16_000, 28_000);
-    const range: [number, number] = [lo, lo + 7];
+    // Candidates come from the shared per-worker allocator (below the ephemeral range, never
+    // handed to another helper caller in this process), then stay HELD until just before minting.
+    const range = await freePortRange(8);
     if (avoid.some((p) => p >= range[0] && p <= range[1])) continue;
     const held: Server[] = [];
     try {

@@ -210,6 +210,16 @@ describe("projectFleet / fleetFingerprint / readStatus", () => {
     expect("thinking" in long[0]!).toBe(false);
   });
 
+  it("projects diag.title as the optional display-title; absent/empty stays absent", () => {
+    const titled = snap({ diag: diag({ ...snap().diag, title: "explore the auth flow" }) });
+    expect(projectFleet([titled], 5_000)[0]!.title).toBe("explore the auth flow");
+    // no diag.title ⇒ the key itself is absent (byte-equal to the pre-feature shape)
+    expect("title" in projectFleet([snap()], 5_000)[0]!).toBe(false);
+    // an empty-string title never reaches the wire
+    const empty = snap({ diag: diag({ ...snap().diag, title: "" }) });
+    expect("title" in projectFleet([empty], 5_000)[0]!).toBe(false);
+  });
+
   it("projects diag.consultOf as the optional `consult:true` marker; absent stays absent", () => {
     const c = snap({ diag: diag({ ...snap().diag, consultOf: { askerRunId: "parent-1" } }) });
     expect(projectFleet([c], 5_000)[0]!.consult).toBe(true);

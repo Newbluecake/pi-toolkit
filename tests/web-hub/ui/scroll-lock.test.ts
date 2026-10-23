@@ -6,7 +6,8 @@ import PickerSheet from "../../../src/web-hub/ui/src/components/control/PickerSh
 import PreviewHost from "../../../src/web-hub/ui/src/components/preview/PreviewHost.vue";
 import { PREVIEW_CTX, type PreviewContext } from "../../../src/web-hub/ui/src/components/preview/previewContext.js";
 import { acquireBodyScrollLock, resetBodyScrollLock } from "../../../src/web-hub/ui/src/composables/useScrollLock.js";
-import type { PreviewHandle, PreviewView } from "../../../src/web-hub/ui/src/types.js";
+import type { PreviewView } from "../../../src/web-hub/ui/src/types.js";
+import { fakeWindowHandle, fakeWindowsFace } from "./helpers/preview-windows-fake.js";
 
 /**
  * `composables/useScrollLock.ts` (verify:model-switch-M3b 打回项): the body scroll lock must
@@ -41,34 +42,48 @@ function mountSheet(): ReturnType<typeof mount> {
   return wrapper;
 }
 
-function makePreviewCtx(initial: PreviewView): {
-  ctx: PreviewContext;
-  view: Ref<PreviewView>;
-} {
-  const view = ref(initial) as Ref<PreviewView>;
-  const handle: PreviewHandle = {
-    view,
-    scope: ref(null),
-    open: vi.fn(),
-    close: vi.fn(() => {
-      view.value = { phase: "closed" };
-    }),
-    retry: vi.fn(),
-    dispose: vi.fn(),
-  };
-  return { ctx: { handle, plaintext: false }, view };
+/**
+ * preview-windows W2: PreviewHost is now the WINDOWS shell — it locks body scroll only on the
+ * PHONE band (the ≥768px band is modeless, §5), so every stacking case here runs the phone
+ * band with a fake windows face (helpers/preview-windows-fake.ts) carrying one open window.
+ */
+function stubPhoneBand(): void {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
 }
 
-function mountPreview(view: PreviewView): { wrapper: ReturnType<typeof mount>; view: Ref<PreviewView> } {
-  const { ctx, view: v } = makePreviewCtx(view);
+type PreviewRig = {
+  wrapper: ReturnType<typeof mount>;
+  view: Ref<PreviewView>;
+  face: ReturnType<typeof fakeWindowsFace>;
+  close(): void;
+};
+
+function mountPreview(view: PreviewView): PreviewRig {
+  stubPhoneBand();
+  const win = fakeWindowHandle(1, view);
+  const face = fakeWindowsFace([win]);
   const host = document.createElement("div");
   document.body.appendChild(host);
   const wrapper = mount(PreviewHost, {
     attachTo: host,
-    global: { provide: { [PREVIEW_CTX as symbol]: ctx } },
+    global: { provide: { [PREVIEW_CTX as symbol]: { handle: face, plaintext: false } satisfies PreviewContext } },
   });
   mounted.push(wrapper);
-  return { wrapper, view: v };
+  return {
+    wrapper,
+    view: win.view as Ref<PreviewView>,
+    face,
+    /** the shell's normal close path: the window leaves the face (§4.4) */
+    close(): void {
+      win.view.value = { phase: "closed" };
+      face.closeWindow(1);
+    },
+  };
 }
 
 describe("useScrollLock — composable contract (verify:model-switch-M3b)", () => {
@@ -122,7 +137,7 @@ describe("useScrollLock — PickerSheet × PreviewHost stacking", () => {
 
     sheet.unmount(); // inner first
     expect(document.body.style.overflow).toBe("hidden");
-    preview.view.value = { phase: "closed" }; // PreviewHost's normal close path
+    preview.close(); // PreviewHost's normal close path (§4.4)
     await tick();
     expect(document.body.style.overflow).toBe("");
   });
@@ -133,7 +148,7 @@ describe("useScrollLock — PickerSheet × PreviewHost stacking", () => {
     await tick();
     const sheet = mountSheet();
     await tick();
-    preview.view.value = { phase: "closed" }; // preview closes while the sheet is still open
+    preview.close(); // preview closes while the sheet is still open
     await tick();
     expect(document.body.style.overflow).toBe("hidden");
     sheet.unmount();
@@ -145,7 +160,7 @@ describe("useScrollLock — PickerSheet × PreviewHost stacking", () => {
     const preview = mountPreview({ phase: "loading", path: "/p/a.ts" });
     await tick();
     expect(document.body.style.overflow).toBe("hidden");
-    preview.view.value = { phase: "closed" };
+    preview.close();
     await tick();
     expect(document.body.style.overflow).toBe("scroll");
     // closing twice (close path then unmount) stays clean

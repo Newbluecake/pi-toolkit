@@ -177,7 +177,15 @@ function startupReminderText(findings: readonly DoctorFinding[]): string {
   const bits: string[] = [];
   if (errors > 0) bits.push(`${errors} error finding${errors === 1 ? "" : "s"}`);
   if (d01) bits.push("no core.md");
-  return `/mem doctor: ${bits.join(", ")} — run /mem doctor for details.`;
+  // Only the D01 states /mem init can actually fix point at it (its fix text
+  // names /mem init); an archived core.md or a pin:true stand-in would make
+  // init refuse, so those keep the plain doctor pointer. Error findings
+  // always need the full doctor report.
+  const initFixable = findings.some((f) => f.id === "D01" && f.fix?.includes("/mem init") === true);
+  const detail = initFixable
+    ? "run /mem init to create one, or /mem doctor for details."
+    : "run /mem doctor for details.";
+  return `/mem doctor: ${bits.join(", ")} — ${detail}`;
 }
 
 export interface CreateStartupReminderDeps {

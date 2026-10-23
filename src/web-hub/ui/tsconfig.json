@@ -30,6 +30,7 @@
     "vite.config.ts",
     "aliases.ts",
     "build-info-plugin.ts",
+    "mermaid-provenance-plugin.ts",
     "motion-css.ts"
   ]
 }

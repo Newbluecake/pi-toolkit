@@ -50,6 +50,29 @@ async function advanceThroughRealIO(totalMs: number, stepMs = 25): Promise<void>
 }
 
 /**
+ * advanceThroughRealIO with an early exit once `cond()` holds, returning the fake-ms consumed.
+ * The "resolves after the deadline" scenarios below need the injected step to have been ENTERED
+ * before the start timeout fires: the startup steps preceding it (ensurePrivateDir,
+ * acquireSingleton's lock/bind/lstat, frontend construction, …) are real I/O whose event-loop
+ * latency is unbounded under full-suite load, and advancing the whole HUB_START_DEADLINE_MS
+ * unconditionally can fire the timeout BEFORE startHub ever reaches the injected step. The step
+ * then either never runs, or — for the listen scenario — registers its `abort` listener on an
+ * already-aborted signal, which never replays: `lateAbort` stays false, the delayed timer
+ * resolves instead of self-closing, and the post-deadline `waitFor(serverClosed)` times out
+ * (the exact CI flake: test failed at ~3.0s, i.e. one waitFor budget). `maxMs` must stay below
+ * HUB_START_DEADLINE_MS so the deadline can never fire while we are still waiting for entry.
+ */
+async function advanceUntil(cond: () => boolean, maxMs: number, stepMs = 25): Promise<number> {
+  for (let advanced = 0; advanced < maxMs; advanced += stepMs) {
+    const step = Math.min(stepMs, maxMs - advanced);
+    await vi.advanceTimersByTimeAsync(step);
+    for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve));
+    if (cond()) return advanced + step;
+  }
+  throw new Error("advanceUntil: injected step not reached within the fake-time budget");
+}
+
+/**
  * Retries `acquireSingleton` until it succeeds as owner. The abandoned/aborted attempt's own
  * cleanup (closeServer for the socket, then closeServer for the instance guard, sequentially in
  * its `finally` chain) can leave a short real-time gap where the socket file is already gone but
@@ -202,7 +225,9 @@ describe("startup cancellation chain: results that resolve *after* the deadline 
       })) as unknown as typeof import("node:fs/promises").lstat;
     const p = startHub(config({ home }), fakeFrontend(), { uid, fs: { lstat: delayedLstat } });
     const assertion = expect(p).rejects.toThrow(/start timeout/);
-    await advanceThroughRealIO(HUB_START_DEADLINE_MS);
+    // Reach the injected lstat BEFORE the deadline can fire (see advanceUntil's doc comment).
+    const consumed = await advanceUntil(() => called, HUB_START_DEADLINE_MS - 1_000);
+    await advanceThroughRealIO(HUB_START_DEADLINE_MS - consumed);
     await assertion; // startHub already settled — the injected lstat hasn't fired yet
     // let the injected delayed lstat's own timer (and its real lstat call) actually fire and settle
     await advanceThroughRealIO(26_000);
@@ -238,6 +263,7 @@ describe("startup cancellation chain: results that resolve *after* the deadline 
     vi.useFakeTimers(FAKE_TIMER_OPTS);
     const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
     let serverClosed = false;
+    let listenEntered = false;
     const fe = ((_deps: FrontendDeps): HttpFrontend => ({
       // Mirrors http.ts's own listen(opts) contract: resolution is deliberately delayed past the
       // deadline against the *already-bound* real server; a late abort self-closes it.
@@ -249,6 +275,10 @@ describe("startup cancellation chain: results that resolve *after* the deadline 
             lateAbort = true;
           };
           signal?.addEventListener("abort", onAbort, { once: true });
+          // Mark entry only AFTER the abort listener is registered: the gate below guarantees
+          // the deadline fires while this listen is genuinely in flight, so a late abort is
+          // always delivered through the listener (an already-aborted signal never replays).
+          listenEntered = true;
           setTimeout(() => {
             signal?.removeEventListener("abort", onAbort);
             if (lateAbort) {
@@ -272,7 +302,9 @@ describe("startup cancellation chain: results that resolve *after* the deadline 
 
     const p = startHub(config({ home }), fe, { uid });
     const assertion = expect(p).rejects.toThrow(/start timeout/);
-    await advanceThroughRealIO(HUB_START_DEADLINE_MS);
+    // Reach the injected listen BEFORE the deadline can fire (see advanceUntil's doc comment).
+    const consumed = await advanceUntil(() => listenEntered, HUB_START_DEADLINE_MS - 1_000);
+    await advanceThroughRealIO(HUB_START_DEADLINE_MS - consumed);
     await assertion;
     expect(serverClosed).toBe(false); // the delayed timer hasn't fired yet
     await advanceThroughRealIO(26_000); // let it fire and self-close
@@ -318,7 +350,9 @@ describe("startup cancellation chain: results that resolve *after* the deadline 
     const fe = fakeFrontend();
     const p = startHub(cfg, fe, { uid, lanAssembly: delayedAssembly });
     const assertion = expect(p).rejects.toThrow(/start timeout/);
-    await advanceThroughRealIO(HUB_START_DEADLINE_MS);
+    // Reach the injected build BEFORE the deadline can fire (see advanceUntil's doc comment).
+    const consumed = await advanceUntil(() => called, HUB_START_DEADLINE_MS - 1_000);
+    await advanceThroughRealIO(HUB_START_DEADLINE_MS - consumed);
     await assertion;
     expect(buildResolved).toBe(false);
     await advanceThroughRealIO(26_000); // let the delayed build() actually resolve

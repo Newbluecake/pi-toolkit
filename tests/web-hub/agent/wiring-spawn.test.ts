@@ -82,6 +82,7 @@ function baselineConfig(): Record<string, unknown> {
     buildId: "1.2.3@test",
     launcher: [process.execPath, "/nonexistent/pi"],
     preview: "on", // web-hub-preview PV1: default mode (U1)
+    cmdArgs: "all", // web-hub-slash-args §5 (P1): default commandComplete "all"
   };
 }
 

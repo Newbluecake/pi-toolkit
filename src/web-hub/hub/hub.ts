@@ -33,6 +33,7 @@ import {
 } from "../protocol/paths.js";
 import {
   PROTO,
+  CMD_ARGS_HUB_CAPS,
   P2_HUB_CAPS,
   UPLOAD_HUB_CAPS,
   DIALOG_BG_HUB_CAPS,
@@ -70,6 +71,7 @@ import { createAgentServer } from "./agent-server.js";
 import { createAgentRemoveService } from "./agent-remove.js";
 import { auditSpawn, auditUpload, createUploadHttpMetrics, uploadStatsFields } from "./audit.js";
 import { createCmdLimit } from "./cmd-limit.js";
+import { createCommandCompleteRoutes } from "./command-complete.js";
 import { createCommandRouter } from "./commands.js";
 import { createSupersede, SUPERSEDE_YIELD_MS, type SupersedeController } from "./supersede.js";
 import { createHistoryService } from "./history.js";
@@ -93,6 +95,7 @@ import { createSpawnPrefs } from "./spawn/prefs.js";
 import { createPreviewRoutes } from "./preview/routes.js";
 import { createAvatarRoutes } from "./avatar/routes.js";
 import { createAvatarStore } from "./avatar/store.js";
+import type { XsAliasHubStatus } from "../protocol/xs-alias.js";
 import { createPrivacyRoutes } from "./privacy/routes.js";
 import { createPrivacyStore, type PrivacyStore } from "./privacy/store.js";
 import { verifyPassword } from "./lan-auth.js";
@@ -152,6 +155,8 @@ import { createFeishuLinks } from "./feishu/link.js";
 import type { FsDeps } from "../protocol/paths.js";
 import { parseCmdline } from "../protocol/proc-identity.js";
 import { createRegistry } from "./registry.js";
+import { createXsAliasBinding, createXsRelay, hubXsAliasParamsOf, type XsAliasBinding } from "./xs/router.js";
+import { XS_ALIAS_HUB_CAP, XS_CHANNEL_HUB_CAP, XS_HUB_CAP, XS_REPLY_HUB_CAP } from "../protocol/xs.js";
 import { acquireSingleton, startFence } from "./singleton.js";
 import type { Auth } from "./auth.js";
 import type { AuthRevokeEvent } from "./auth-revoke.js";
@@ -414,7 +419,27 @@ export async function startHub(
     // web-hub-html-preview plan v2 §4: ONE value read by the cap declaration below AND the
     // `createPreviewRoutes({ html })` attachment further down, so they can never disagree.
     const htmlEnabled = config.preview !== undefined && previewProcFdAvailable();
+    // Alias-plan AL2 (§3.3/§3.6, key-absent convention): the binding table exists iff
+    // `config.crossSession.alias` exists (absent ⇒ no table, no file IO, no cap — byte-identical).
+    // It is LOADED here, before the cap array (`xs.alias.v1` iff the load came back `ready`, fixed for
+    // the run) and long before `createAgentServer` lets any xs request in. `degraded` never touches
+    // the file and only logs; recovery is a human fixing/moving the file + `/webhub restart`.
+    const xsAliasParams = hubXsAliasParamsOf(config.crossSession);
+    let xsAlias: XsAliasBinding | undefined;
+    let xsAliasDegraded: { reason: string; path: string } | undefined;
+    if (xsAliasParams !== undefined) {
+      const binding = createXsAliasBinding({ stateDir: paths.stateDir, params: xsAliasParams, log, now });
+      xsAlias = binding;
+      cleanup.push(async () => binding.store.close());
+      const loaded = await startupStep(binding.store.load());
+      if (loaded.state === "degraded") {
+        const path = binding.store.status().path;
+        log.warn("xs alias store degraded", { reason: loaded.reason, path });
+        xsAliasDegraded = { reason: String(loaded.reason), path };
+      }
+    }
     const extraHubCaps: readonly string[] = [
+      ...(config.cmdArgs === "all" || config.cmdArgs === "toolkit" ? CMD_ARGS_HUB_CAPS : []),
       // web-hub-version plan §3.7: unconditional (no settings gate, D3) — the service below is
       // always constructed, so the cap and the route can never disagree.
       VERSION_HUB_CAP,
@@ -482,6 +507,19 @@ export async function startHub(
       // Link-preview D1: additive, after the existing proxy caps on both surfaces.
       ...(config.proxy === undefined ? [] : [PROXY_FRAME_HUB_CAP]),
       ...(config.feishuBot === undefined ? [] : [FSB_HUB_CAP]),
+      // fabric phase-2 X1: `xs.v1` iff `config.crossSession` (tail-appended, same two-surface rule;
+      // absent ⇒ caps byte-identical). Reply cap shares the same gate plus reply !== false.
+      // Channel-plan §3.1 (CH1): `xs.channel.v1` iff `config.crossSession` — a hub protocol
+      // capability with NO hub-level off key (`crossSession.channels` only carries params).
+      ...(config.crossSession === undefined
+        ? []
+        : [
+            XS_HUB_CAP,
+            ...(config.crossSession.reply === false ? [] : [XS_REPLY_HUB_CAP]),
+            XS_CHANNEL_HUB_CAP,
+            // Alias-plan §3.6 (AL2): tail-appended, only for a table that loaded `ready`.
+            ...(xsAlias?.store.advertised === true ? [XS_ALIAS_HUB_CAP] : []),
+          ]),
     ];
 
     let supersede: SupersedeController | undefined = undefined;
@@ -769,6 +807,19 @@ export async function startHub(
       // replacement DB is created here.
       requestAdminShutdown("restart");
     }
+    // fabric phase-2 X1: the cross-session relay exists iff `config.crossSession` (key absence IS
+    // off — no router, no observer, no frame handling). Disposed on both teardown paths.
+    const xsRelay =
+      config.crossSession === undefined
+        ? undefined
+        : createXsRelay({
+            registry,
+            config: { home: config.home, crossSession: config.crossSession },
+            log,
+            now,
+            ...(xsAlias === undefined ? {} : { aliases: xsAlias }),
+          });
+    if (xsRelay !== undefined) cleanup.push(async () => xsRelay.dispose());
     agentServer = createAgentServer(owner.server, {
       registry,
       config,
@@ -777,6 +828,7 @@ export async function startHub(
       httpPort: () => httpPort,
       admin,
       extraHubCaps,
+      ...(xsRelay === undefined ? {} : { xs: xsRelay.router }),
       ...(config.feishuBot === undefined
         ? {}
         : {
@@ -1579,6 +1631,9 @@ export async function startHub(
       // stub. `registry` (constructed above) is the same instance the agent socket layer feeds.
       commands: commandRouter,
       cmdLimit,
+      ...(config.cmdArgs === "all" || config.cmdArgs === "toolkit"
+        ? { commandComplete: createCommandCompleteRoutes({ registry, log, now }) }
+        : {}),
       uploadMetrics,
       agentRemove: agentRemoveService,
       ...(avatarRoutes === undefined ? {} : { avatar: avatarRoutes }),
@@ -1917,6 +1972,8 @@ export async function startHub(
     };
     let lastProxyPortsStore = proxyStatusOf()?.portsStore;
     const initialProxy = proxyStatusOf();
+    const initialAlias: XsAliasHubStatus | undefined =
+      xsAliasDegraded === undefined ? undefined : { degraded: true, ...xsAliasDegraded };
     const identity = await startupStep(identityFields());
     // No await separates this gate from hub.json and the running log publication.
     if (closing !== undefined) return await closedResult();
@@ -1935,6 +1992,7 @@ export async function startHub(
       ...(initialSpawn === undefined ? {} : { spawn: initialSpawn }),
       ...(initialPrivacy === undefined ? {} : { privacy: initialPrivacy }),
       ...(initialProxy === undefined ? {} : { proxy: initialProxy }),
+      ...(initialAlias === undefined ? {} : { alias: initialAlias }),
       ui: initialUi,
     }); // ⑦
 
@@ -2133,6 +2191,7 @@ export async function startHub(
         // and held watches), then the reader (fails in-flight scans as `busy`).
         runTx.dispose();
         runFileReader.dispose();
+        xsRelay?.dispose();
         if (agentServer !== undefined) await bounded(agentServer.close());
         await bounded(rootScope.dispose());
         await bounded(owner.release());

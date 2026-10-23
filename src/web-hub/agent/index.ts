@@ -39,10 +39,12 @@ import {
   FORWARDED_EVENTS,
   RESUME_FEATURE_V1,
   type AgentKind,
+  type CommandsFrame,
   type LanInfoPayload,
   type LanReqFrame,
   type SessionInfo,
 } from "../protocol/messages.js";
+import type { CompleteReqFrame } from "../protocol/command-args.js";
 import { resolveHubPaths, type HubPaths } from "../protocol/paths.js";
 import { pidAlive } from "../protocol/pid.js";
 import {
@@ -58,6 +60,8 @@ import {
   HOLD_CAP,
   QUOTA_POOLS_HUB_CAP,
   TODO_ARCHIVE_HUB_CAP,
+  CMD_ARGS_AGENT_CAPS,
+  CMD_ARGS_HUB_CAP,
 } from "../protocol/version.js";
 import type { LanStatus } from "../protocol/lan.js";
 import {
@@ -68,13 +72,21 @@ import {
   type BindingPort,
   type HubConnection,
 } from "./connection.js";
+import { createXsAgentBridge, type XsAgentPort } from "./xs.js";
+import type { XsHubPort } from "../../fabric/xs/sender.js";
+import type { XsBlockResolve } from "../../commands/fabric-xs.js";
+import type { XsAliasBridgePort, XsAliasCachePort } from "../../fabric/xs/types-alias.js";
+import type { XsHubLimitsWire } from "../protocol/xs.js";
 import type { ConsultTranscriptDiagnostics } from "./consult-transcript.js";
 import { createRunTranscripts, type RunTxRunInfo, type RunTranscriptPort } from "./run-transcript.js";
 import { createEventTap } from "./event-tap.js";
 import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
 import { formatUiStatusLines } from "./ui-status.js";
 import { formatPrivacyStatusLines } from "./privacy-status.js";
+import { formatAliasStatusLines } from "./alias-status.js";
+import type { XsAliasHubStatus } from "../protocol/xs-alias.js";
 import { formatProxyStatusLines, type ProxyHubStatus } from "./proxy-status.js";
+import { cmdArgsStatusLevel, formatCmdArgsStatusLines } from "./cmd-args-status.js";
 import { packageUiDistDir } from "../protocol/paths.js";
 import type { UiStatus } from "../hub/ui-root.js";
 import type { PrivacyHubStatus } from "../protocol/privacy.js";
@@ -109,7 +121,14 @@ import { appendToolTimingEntries, registerToolTimingEntryRenderer } from "./tool
 import { createBuiltinBridge, type BuiltinBridgeDeps } from "./builtin-bridge.js";
 import { createExecGate, createResumeExec } from "./resume-exec.js";
 import { createResumeList, defaultResumeCore } from "./resume-list.js";
-import { classifyCommand, listSlashCommands } from "./slash.js";
+import { classifyCommand, listSlashCommands, stripCommandArgs, type CommandArgsHints } from "./slash.js";
+import {
+  createCommandComplete,
+  type ArgCompleter,
+  type AutocompleteProviderLike,
+  type CommandCompleteService,
+} from "./command-complete.js";
+import { resolveCommandUsage } from "./command-usage.js";
 import { modelsFingerprint, projectModels } from "./models.js";
 import { effectivePolicy, parameterizedBuiltinPolicy } from "./command-policy.js";
 import { createDialogBridge } from "./dialogs.js";
@@ -201,6 +220,18 @@ export interface WebHubSettings {
    *  cap, no `status.held` — byte-identical to the pre-feature agent (W1/W2). Non-live like the
    *  rest of webHub.* (captured at activate; change → /reload). */
   steerRecall?: boolean;
+  /** web-hub-slash-args plan §5 (P0 type-only addition, sysload-plan §10 precedent — the type
+   *  lives here because config/settings.ts's `parseWebHubSettings`/`DEFAULT_SETTINGS.webHub`,
+   *  both exclusively P0's, need somewhere to put the parsed value; P1 owns the wiring):
+   *  `/` command argument hint/completion availability. `"all"` (default, §11 D1 拍板) =
+   *  toolkit completions (S-own) + third-party commands via the TUI autocomplete provider
+   *  (S-tui, TUI main session only — RPC/print degrade to static hints); `"toolkit"` = S-own
+   *  only; `"off"` ⇒ no cap, no `args` field, no TUI wrapper registration, no hub route.
+   *  Non-live (change → /reload then /webhub restart). r1 #4 accepted residual, stated
+   *  honestly in the settings description: a third-party completer that hangs SYNCHRONOUSLY
+   *  stalls the whole session process — timeouts / in-flight caps cannot prevent it;
+   *  downgrade to "toolkit"/"off" if that happens. */
+  commandComplete?: "all" | "toolkit" | "off";
   /** 未设置或 `enabled:false` ⇒ `HubConfig.lan` 不被构造，`PI_WEBHUB_CONFIG` 与 P1 深相等（§11 LE 行）。 */
   lan?: WebHubLanSettings;
   /** web-hub-spawn §SP2: headless spawn 策略；未设置或 `enabled:false` ⇒ `HubConfig.spawn` 不被构造，
@@ -257,6 +288,12 @@ export interface WebHubDeps {
    * writes real toolkit command names into, handed straight through to `createCommandCapture` so
    * `owns()`/`settleArm()` answer from true registration state, not from `arm()` history. */
   ownedCommandNames?: Set<string>;
+  /** web-hub-slash-args plan §4.4 (P1): the same-by-reference `Map<string, ArgCompleter>`
+   *  `wrapCommandApi`'s registerCommand proxy fills with each toolkit command's RAW
+   *  `getArgumentCompletions` at real registration time (the `ownedCommandNames` pattern,
+   *  verbatim). Unset ⇒ the S-own completion source is empty (third-party S-tui still works
+   *  in `"all"` mode). */
+  argCompleters?: Map<string, ArgCompleter>;
   /** todo-web plan §3.3 (T3): live main-session todo state for the `StatusInfo.todo`
    *  projection. Unset (todo.enabled=false ⇒ `wireTodo` never ran) ⇒ the field is never
    *  set — the status frame stays byte-equal to the pre-feature shape. */
@@ -293,6 +330,12 @@ export interface WebHubDeps {
    *  assigns the ref. Unset (topic-switch off, or not wired yet) ⇒ `commands.ts` never calls
    *  `tryClaim` at all — byte-identical to the pre-feature native/hold dispatch path. */
   promptGate?: () => PromptGatePort | undefined;
+  /** fabric phase-2 X2 (§11.1): the cross-session agent port. UNSET (xs off — the only state
+   *  before XW threads it) ⇒ no `xs.v1` cap, no `xs_member` slot, no `HubConfig.crossSession`,
+   *  no `StatusInfo.xs`, no deliver/ack path: the agent stays byte-identical to the pre-xs
+   *  shape (pinned by `tests/integration/fabric-xs-off-golden.test.ts`). Presence IS `xsOn`
+   *  (XW computes XS0's switch at activate and only threads the port when it holds). */
+  xs?: XsAgentPort;
   hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -379,6 +422,35 @@ export interface WebHubControl {
    * `WebHubControl` doubles keep compiling; `/webhub status` prints nothing when absent. */
   proxy?: {
     statusLines(): string[];
+  };
+  /** alias-plan §3.3 (AL6): alias-store degraded line, off `hub.json.alias`. Optional like `proxy`. */
+  alias?: {
+    statusLines(): string[];
+  };
+  /** fabric phase-2 T1 §7.2 (`web_exec` fence input, X2): `resumeExec.switchInFlight() ∨
+   *  execGate.held()` — the read-only getter XW feeds the session-change fence. Optional so
+   *  pre-feature `WebHubControl` doubles keep compiling; absent ⇔ not switching. */
+  webExecBusy?(): boolean;
+  /** fabric phase-2 X2 (§11.1): the cross-session surface for XW — the member-slot republish
+   *  (join/leave/receive changes), X3's sender `XsHubPort`, X4's `/fabric block` resolve port
+   *  and the `/fabric status` hub-limits info port. Present iff `deps.xs` was threaded. */
+  xs?: {
+    publishMember(): void;
+    /** channel-plan §12 (IBP): the unread count changed ⇒ republish status (IBW calls this). */
+    notifyUnreadChanged(): void;
+    hubPort(): XsHubPort;
+    resolveBlock(query: string): Promise<XsBlockResolve>;
+    hubInfo(): Promise<XsHubLimitsWire | undefined>;
+    /** alias-plan §4/§7 (ALW): AL3's `op:"alias"` bridge and per-activate alias cache for `/fabric alias`. */
+    aliasBridge(): XsAliasBridgePort;
+    aliasCache(): XsAliasCachePort;
+  };
+  /** web-hub-slash-args plan §5 (P4): `/`-command argument-completion status line (agent-side
+   * mode + live hub cap). Optional for the same double-compatibility reason as `proxy`. */
+  cmdArgs?: {
+    statusLines(): string[];
+    /** `commands/webhub.ts`'s notify level for the first line (the module owns the rule). */
+    levelOf(line: string | undefined): "info" | "warning";
   };
 }
 
@@ -619,6 +691,48 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // §4.9 echo and the commands slot's `output` badge) — the return value used to build a second,
   // disconnected one (todo #32 C11 wiring).
   const commandCapture = createCommandCapture(deps.ownedCommandNames);
+  // web-hub-slash-args plan §4.3/§4.5 (P1): the /name␠ argument-completion engine + the S-tui
+  // provider slot. Mode "off" builds nothing (no service, no TUI wrapper, no cap) — byte-
+  // identical to the pre-feature agent. The TUI wrapper is registered once per activation,
+  // only in `mode === "tui"` sessions with setting "all"; the factory pi replays on every
+  // wrapper registration just overwrites the ref (idempotent) and returns `current`
+  // UNCHANGED (transparent — never alter the host's autocomplete behavior).
+  const cmdCompleteMode = settings.commandComplete ?? "all";
+  const cmdCompleteOn = cmdCompleteMode !== "off";
+  const EMPTY_COMPLETERS: ReadonlyMap<string, ArgCompleter> = new Map();
+  const tuiProviderRef: { current: AutocompleteProviderLike | undefined } = { current: undefined };
+  let tuiReady = false;
+  let tuiWrapperRegistered = false;
+  const commandComplete: CommandCompleteService | undefined = cmdCompleteOn
+    ? createCommandComplete({
+        commands: pi,
+        own: () => deps.argCompleters ?? EMPTY_COMPLETERS,
+        tui: () => tuiProviderRef.current,
+        ...(deps.settings.webCommandPolicy !== undefined ? { overrides: deps.settings.webCommandPolicy } : {}),
+        mode: cmdCompleteMode === "all" ? "all" : "toolkit",
+        now,
+      })
+    : undefined;
+  /** §4.5: passthrough factory — store `current`, announce readiness once, return it as-is. */
+  const tuiAutocompleteFactory = (current: AutocompleteProviderLike): AutocompleteProviderLike => {
+    tuiProviderRef.current = current;
+    if (!tuiReady) {
+      tuiReady = true;
+      publishCommands(); // §3.1: S-tui readiness re-advertises `complete` (frame content is
+      // caps-independent, r1 ① — this is a fresh republish, not a rebuild)
+    }
+    return current;
+  };
+  const registerTuiAutocomplete = (x: { mode: string; ui?: { addAutocompleteProvider?(f: unknown): void } }): void => {
+    if (!cmdCompleteOn || cmdCompleteMode !== "all" || tuiWrapperRegistered) return;
+    try {
+      if (x.mode !== "tui") return; // rpc/print stubs are no-ops — never register there
+      x.ui?.addAutocompleteProvider?.(tuiAutocompleteFactory);
+      tuiWrapperRegistered = true;
+    } catch {
+      /* a stale ctx must never take the session down */
+    }
+  };
   // Late-bound: the bridge is constructed before the command handler (which it needs for the
   // §4.6/D22 async-completion channel), so sendLate goes through this ref. Before the handler
   // exists (or after a settle raced ahead) the late frame is simply dropped — bounded, and the
@@ -757,7 +871,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       resumeFeatures,
     );
     lastLeaf = s.leafId;
-    c.setSlot("status", { t: "status", ...s });
+    // fabric phase-2 X2 (§4.4, P3): the display-only xs projection — absent while deps.xs is
+    // unset or there is no live stack, so the status frame stays byte-equal to the pre-feature
+    // shape (StatusInfoSchema is open: an old hub forwards the field verbatim, an old UI ignores it).
+    if (xsBridge !== undefined) {
+      const xsView = xsBridge.statusProjection();
+      if (xsView !== undefined) s.xs = xsView;
+      const inbox = xsBridge.inboxProjection();
+      if (inbox !== undefined) s.xsInbox = inbox;
+    }
+    c.setSlot("status", { t: "status", ...s }, xsBridge?.slotFlush);
   };
 
   const projectCurrentModels = (x: ExtensionContext) =>
@@ -993,18 +1116,39 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     : undefined;
 
   /** §3.2 commands slot: the web's slash palette (policy + §4.9 output badge), refreshed on
-   * (re)connect and `resources_discover` (extensions loaded mid-session change the list). */
+   * (re)connect, `resources_discover` (extensions loaded mid-session change the list), hello_ack
+   * (r1 #1 ③: fresh hub caps ⇒ republish) and S-tui readiness (§4.5). r1 #1 ①/②: the frame is
+   * ALWAYS built with `args` (never caps-dependent); the slot carries a flush transform that
+   * strips `args` per the CURRENT hub caps at every write, so an un-upgraded or downgraded hub
+   * still gets a decodable frame (its closed schema would drop the whole `commands` frame). */
   const publishCommands = (): void => {
     const c = conn;
     if (c === undefined) return;
-    c.setSlot("commands", {
-      t: "commands",
-      epoch: MODULE_INSTANCE,
-      items: listSlashCommands(pi, {
-        ...(deps.settings.webCommandPolicy !== undefined ? { overrides: deps.settings.webCommandPolicy } : {}),
-        output: (name) => (commandCapture.owns?.(name) === true ? "captured" : undefined),
-      }),
-    });
+    const argsHints: CommandArgsHints | undefined = cmdCompleteOn
+      ? {
+          usage: (name, kind, description) => resolveCommandUsage(name, kind, description),
+          // §3.1 + r1 #9: optimistic for ANY extension command in "all" mode (S-tui probe-only;
+          // empty results are normal, incl. RPC sessions where S-tui never arrives); "toolkit"
+          // mode stays literal — only commands with a captured S-own completer.
+          complete: (name, kind) =>
+            kind === "extension" && (cmdCompleteMode === "all" || (deps.argCompleters ?? EMPTY_COMPLETERS).has(name)),
+        }
+      : undefined;
+    c.setSlot(
+      "commands",
+      {
+        t: "commands",
+        epoch: MODULE_INSTANCE,
+        items: listSlashCommands(pi, {
+          ...(deps.settings.webCommandPolicy !== undefined ? { overrides: deps.settings.webCommandPolicy } : {}),
+          output: (name) => (commandCapture.owns?.(name) === true ? "captured" : undefined),
+          ...(argsHints !== undefined ? { args: argsHints } : {}),
+        }),
+      },
+      cmdCompleteOn
+        ? (frame, hubCaps) => (hubCaps.includes(CMD_ARGS_HUB_CAP) ? frame : stripCommandArgs(frame as CommandsFrame))
+        : undefined,
+    );
   };
   const remoteAskUserEnabled = (): boolean =>
     settings.control !== false && settings.remoteAskUser !== false && (deps.askUserEnabled?.() ?? true);
@@ -1029,7 +1173,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     hubCaps: () => conn?.caps ?? [],
   });
   attributePromptRef.current = dialogBridge.attributePrompt;
+  // fabric phase-2 X2: the xs bridge exists iff deps.xs was threaded (xsOn) — every surface it
+  // adds is conditional on it, so xs-off stays byte-identical. `conn` is late-bound through a
+  // getter (the closure variable swaps on every connectWith/handover).
+  const xsBridge =
+    deps.xs !== undefined
+      ? createXsAgentBridge({ port: deps.xs, conn: () => conn, publishStatus: () => publishStatus() })
+      : undefined;
   const binding: BindingPort = {
+    ...(xsBridge !== undefined ? { onXsDeliver: (frame) => xsBridge.onDeliver(frame) } : {}),
     onCmd: (frame) => {
       // dialog_answer/dialog_cancel are routed straight to the dialog bridge (C2's `dialogs.ts`) —
       // never through `commandHandler`, which would otherwise have to special-case them right back
@@ -1100,6 +1252,41 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     onRunWatch: (frame) => {
       if (attached) runTx.onWatch(frame.runId, frame.on);
     },
+    // web-hub-slash-args plan §4.3 (P1): completion requests arrive only over a live link
+    // from a cap-carrying hub. Answer asynchronously and always send exactly one reply —
+    // the service never throws/hangs; a wiring bug still degrades to a refusal reply so the
+    // hub's registry entry settles instead of waiting out its own deadline. Deliberately NOT
+    // gated on `attached`: completion is read-only and works through the detach grace window.
+    ...(commandComplete !== undefined
+      ? {
+          onCompleteReq: (frame: CompleteReqFrame): void => {
+            void commandComplete
+              .answer(frame)
+              .then((reply) => {
+                conn?.send(reply);
+              })
+              .catch(() => {
+                conn?.send({ t: "complete_reply", rid: frame.rid, ok: false, code: "E_BAD_REQUEST", retryable: false });
+              });
+          },
+        }
+      : {}),
+    // r1 评审 #1 ③ (P1): fresh hub caps (hello_ack) — republish the caps-sensitive commands
+    // slot for THIS hub (late caps, reconnects, downgrades). fabric phase-2 X2 rides the same
+    // hook to republish the xs_member slot from FRESH membership state — a membership change
+    // that landed while disconnected would otherwise have its STALE stored slot replayed by the
+    // hello_ack slot machinery (X1-report §6 note 6: only a NEW xs_member revives a member).
+    ...(cmdCompleteOn || xsBridge !== undefined
+      ? {
+          onHubCaps: () => {
+            if (cmdCompleteOn) publishCommands();
+            xsBridge?.publishMember();
+            // alias-plan §4/R2: every hello_ack (attach, reconnect, hub restart) reconciles the alias cache with
+            // the hub AFTER publishMember — a bounded read-only get, applied only if still the same link + session.
+            xsBridge?.onHubCapsAlias();
+          },
+        }
+      : {}),
     onStateChange: (v) => {
       runTx.onLink(v.state === "live"); // §3.3 #3: link-up retries gaps / pending ends
       if (attached) setStatusLine(statusLineText(v, readStatusTheme(ctx), { held: holdDriver?.heldCount() ?? 0 }));
@@ -1201,6 +1388,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // anything else); "off" is the key's ABSENCE, the same wire-level off pattern as spawn/lan.
     const preview = settings.preview ?? PREVIEW_DEFAULT_MODE;
     if (preview !== "off") config.preview = preview;
+    // web-hub-slash-args plan §5 (P1, P2 contract): `webHub.commandComplete` → `HubConfig.cmdArgs`
+    // ("off", control off, or webCommands off ⇒ key ABSENT, same wire-level off pattern as
+    // preview; the hub re-validates and owns the route/cap folding).
+    const cmdComplete = settings.commandComplete ?? "all";
+    if (settings.control !== false && settings.webCommands !== false && cmdComplete !== "off") {
+      config.cmdArgs = cmdComplete;
+    }
     // web-hub-avatar plan v2.1 §2.6: feature-off is key absence, and a read/write
     // avatar is disabled together with the web control plane.
     if (settings.avatar === true && settings.control !== false) config.avatar = true;
@@ -1215,6 +1409,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       const portRange = parseProxyPortRange(settings.proxy.portRange);
       if (portRange !== undefined) config.proxy = { portRange, maxProxies: settings.proxy.maxProxies };
     }
+    // fabric phase-2 X2 (§4.6 global row): the crossSession key — key-absence-is-off, exactly
+    // like every gated HubConfig feature; X1's `main.ts` re-validates and drops the whole key
+    // on a malformed value (⇒ hub xs off). Only written when the xs bridge exists (xsOn).
+    if (xsBridge !== undefined) config.crossSession = xsBridge.hubCrossSessionConfig();
     const bot = deps.feishuBot;
     if (settings.enabled && settings.control !== false && bot?.enabled === true) {
       config.feishuBot = {
@@ -1244,6 +1442,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const remoteAskUser = settings.remoteAskUser !== false && (deps.askUserEnabled?.() ?? true);
     if (remoteAskUser) caps.push("dialog.v1");
     if (settings.webCommands !== false) caps.push("command.v1");
+    // web-hub-slash-args plan §4.1 (P1): the completion cap rides the agent surface while the
+    // feature is on AND the web command plane itself is (the hub route requires cmd.v1 +
+    // command.v1 + cmd.args.v1 — advertising it under webCommands:false would be a lie).
+    if (settings.webCommands !== false && cmdCompleteOn) caps.push(...CMD_ARGS_AGENT_CAPS);
     // web-hub-upload plan §5.1: "on" (default) ⇒ both upload caps, "loopback" ⇒ upload.v1 only,
     // "off" ⇒ neither.
     const uploads = settings.uploads ?? "on";
@@ -1255,6 +1457,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // `recall` forwards (S4). Unreachable while control is false (early return above), which is
     // exactly holdWired's own truth table row.
     if (holdWired(settings)) caps.push(...HOLD_AGENT_CAPS);
+    // fabric phase-2 X2 (§8.6): the agent-side xs cap, tail-appended to mirror X1's hub-side
+    // `extraHubCaps` tail append. xsOn ⇒ control is on (the switch requires it), so the early
+    // `!control` return above has already passed when we get here.
+    if (xsBridge !== undefined) caps.push(...xsBridge.caps());
     return caps;
   };
 
@@ -1282,6 +1488,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     conn = c;
     connGen += 1;
     emitSession("attach");
+    // fabric phase-2 §8.1 (X2): the member slot lands right after the session slot — same
+    // ordering as the hello_ack SLOT_ORDER replay (session → xs), so the hub never sees a
+    // membership claim for a session id it has not been told about yet.
+    xsBridge?.publishMember();
+    // alias-plan §4 (ALW): stack attach (every session_start, incl. /new・/resume・/fork on a reused link) reconciles
+    // the alias cache AFTER the member slot — fire-and-forget, zero frames unless alias on ∧ the live hub has the cap
+    // (a not-yet-live link is covered by the hello_ack `onHubCaps` reconcile).
+    xsBridge?.onHubCapsAlias();
     // The dialogs slot exists (D14-gated, only actually sent once the hub advertises dialog.v1) so
     // C2 only replaces `dialogBridge.frame()`'s content, not this call.
     c.setSlot("dialogs", dialogBridge.frame());
@@ -1312,6 +1526,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const gen = generation;
     ctx = c;
     attached = true;
+    // web-hub-slash-args plan §4.5 (P1): register the passthrough autocomplete wrapper on the
+    // first TUI session of this activation (no-op in rpc/print and while the setting is off /
+    // "toolkit"). pi replays the factory whenever ANY extension adds a wrapper — the closure
+    // just keeps the newest `current`.
+    registerTuiAutocomplete(c);
     sessionReason = reasonOf(event);
     lastLeaf = undefined;
     lastFleetFp = undefined;
@@ -1357,6 +1576,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     attached = false;
     generation += 1;
     stopTick();
+    // web-hub-slash-args plan §4.5 (P1): drop the captured S-tui provider (the wrappers list
+    // itself is pi-owned; `tuiWrapperRegistered` stays — a same-activation /new re-runs
+    // session_start and pi keeps the wrapper registered, feeding us a fresh `current`).
+    // The completion service itself is ACTIVATION-scoped (read-only, no session state) and is
+    // deliberately NOT disposed here: in-flight answers settling inside the detach grace
+    // window give the hub its reply instead of a deadline.
+    tuiProviderRef.current = undefined;
+    tuiReady = false;
     wtSampler.stop(); // worktree-web plan §4.4: abort any in-flight scan, no leaked process/thread.
     bashSampler.stop(); // bash-jobs-panel plan §3.7: discard in-flight results by generation.
     // web-hub-steer-recall §4.7 step 7 (A6): BEFORE `commandHandler.onSessionBoundary()` — every
@@ -1364,6 +1591,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // returned; the NEXT activation's `onSessionStart`/`adopt` is the defensive backstop).
     holdDriver?.onSessionShutdown(reasonOf(event));
     commandHandler.onSessionBoundary();
+    // fix (2026-10-22): close every capture window and fire its pending finish listener
+    // ("timeout", settle-anyway) — an async web command still awaiting its handler Promise gets
+    // its late settle NOW (whatever output was collected) instead of dangling until the window's
+    // own CAPTURE_MAX_MS expiry fires inside a torn-down session.
+    safe(() => commandCapture.dispose(), undefined);
     // web-resume plan §2.5 (session boundary) + §2.4 (fence): revoke still-ARMED pick tickets
     // (our own switch is already past `armed`, so a reason:"resume" shutdown is a no-op for the
     // ticket) and abort in-flight list builds — a build finishing under the old epoch is
@@ -1491,6 +1723,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     ui?: UiStatus;
     privacy?: PrivacyHubStatus;
     proxy?: ProxyHubStatus;
+    alias?: XsAliasHubStatus;
   }
 
   const readHubJsonRecord = (): HubJsonSnapshot | undefined => {
@@ -1510,6 +1743,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (isStructurallyPrivacyStatus(parsed.privacy)) rec.privacy = parsed.privacy;
       // proxy (plan v2 §5 X1c): same structural-only treatment — malformed ⇒ absent.
       if (isStructurallyProxyStatus(parsed.proxy)) rec.proxy = parsed.proxy;
+      // alias (plan §3.3 AL6): structural-only — malformed ⇒ absent.
+      const al = parsed.alias as Record<string, unknown> | null | undefined;
+      if (
+        al !== null &&
+        typeof al === "object" &&
+        al.degraded === true &&
+        typeof al.reason === "string" &&
+        typeof al.path === "string"
+      )
+        rec.alias = { degraded: true, reason: al.reason, path: al.path };
       return rec;
     } catch {
       return undefined;
@@ -1594,6 +1837,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       allowlistActive: rec?.lan?.state === "on" && rec.lan.allowClients !== undefined,
     });
   };
+
+  const aliasStatusLines = (): string[] => formatAliasStatusLines(readHubJsonRecord()?.alias);
 
   const sendLanReq = async (op: "info" | "unlock"): Promise<LanAdminResult<LanInfoPayload | undefined>> => {
     const c = conn;
@@ -1787,6 +2032,36 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     },
     proxy: {
       statusLines: proxyStatusLines,
+    },
+    alias: {
+      statusLines: aliasStatusLines,
+    },
+    // fabric phase-2 T1 §7.2 (X2): the `web_exec` fence input — resume switch in flight ∨ the
+    // shared exec claim held (`/new` or a resume ticket). Read-only, never throws (both
+    // underlying getters are plain boolean reads).
+    webExecBusy: () => safe(() => resumeExec.switchInFlight() || execGate.held(), false),
+    ...(xsBridge !== undefined
+      ? {
+          xs: {
+            publishMember: () => xsBridge.publishMember(),
+            notifyUnreadChanged: () => xsBridge.notifyUnreadChanged(),
+            hubPort: () => xsBridge.hubPort(),
+            resolveBlock: (query: string) => xsBridge.resolveBlock(query),
+            hubInfo: () => xsBridge.hubInfo(),
+            aliasBridge: () => xsBridge.aliasBridge(),
+            aliasCache: () => xsBridge.aliasCache(),
+          },
+        }
+      : {}),
+    // web-hub-slash-args plan §5 (P4): the cmd-args status line reads the LIVE link's caps —
+    // "n/a" while disconnected, so the reader can tell "old hub" from "hub not running".
+    cmdArgs: {
+      statusLines: () =>
+        formatCmdArgsStatusLines({
+          mode: cmdCompleteMode,
+          hubCaps: conn !== undefined && conn.status().state === "live" ? conn.caps : undefined,
+        }),
+      levelOf: cmdArgsStatusLevel,
     },
   };
 }

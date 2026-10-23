@@ -388,6 +388,14 @@ export interface CodeBlockProps {
   readonly text: string;
 }
 
+/** web-hub-mermaid plan §6.2: `MermaidBlock.vue` (P2) — the settled-state diagram view over a
+ * ```mermaid fence. `lang` is the fence info string's first token (`isMermaidFence` gated in
+ * `MdBlock.vue`); `text` is the raw fence body. */
+export interface MermaidBlockProps {
+  readonly lang: string;
+  readonly text: string;
+}
+
 export interface MarkdownViewProps {
   readonly text: string;
 }

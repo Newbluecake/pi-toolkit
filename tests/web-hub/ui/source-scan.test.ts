@@ -67,13 +67,16 @@ const SOURCE_BANNED: Array<[string, RegExp]> = [
 ];
 
 /** Per-pattern file exemptions (each entry MUST carry its rationale here, not at the call
- *  site). preview-download (2026-10 user 拍板): PreviewHost's 「下载」 button hands a blob:
- *  objectURL to an `<a download>` anchor ONLY — the URL is navigated for SAVE, never loaded
- *  into the page as a resource, so the `img-src`/D1 rationale behind the ban does not apply
- *  (no CSP relaxation needed: nothing renders from it). Every other file stays banned. */
+ *  site). preview-download (2026-10 user 拍板): the「下载」 button hands a blob: objectURL to
+ *  an `<a download>` anchor ONLY — the URL is navigated for SAVE, never loaded into the page
+ *  as a resource, so the `img-src`/D1 rationale behind the ban does not apply (no CSP
+ *  relaxation needed: nothing renders from it). The chain lives in
+ *  `composables/usePreviewDownload.ts` since preview-windows W2 (moved verbatim out of
+ *  PreviewHost.vue, one instance per preview window) — the exception follows the CODE.
+ *  Every other file stays banned. */
 const SOURCE_BANNED_EXCEPT: Record<string, RegExp> = {
   "createObjectURL (banned — preview uses data: URLs; blob: would need CSP relaxed, D1/HP8)":
-    /components\/preview\/PreviewHost\.vue/,
+    /composables\/usePreviewDownload\.ts/,
 };
 
 /** localStorage is only legitimate for the theme preference, the token-mode transport, and a

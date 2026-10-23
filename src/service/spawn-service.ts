@@ -3,7 +3,7 @@ import { applyBudgetPolicy } from "../core/deadline.js";
 import { mergeBudget } from "../config/settings.js";
 import { newRunId, isRunId } from "../core/ids.js";
 import { isLiveSessionFile } from "../core/live-session-files.js";
-import { deriveUniqueLabel, firstNonEmptyLine, sanitizeLabelBase } from "../core/labels.js";
+import { deriveUniqueLabel, firstNonEmptyLine, sanitizeLabelBase, captureDisplayTitle } from "../core/labels.js";
 import { toErrorInfo } from "../core/errors.js";
 import type { WakeExclusion } from "../core/message.js";
 import { persistableWakeOrigin } from "../core/run-journal.js";
@@ -488,6 +488,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       ...initial.diag,
       ...(model ? { model } : {}),
       ...(req.label !== undefined ? { label: req.label } : {}),
+      ...(req.title !== undefined ? { title: req.title } : {}),
       agentType: displayAgentType(req.type),
       taskPrompt: req.prompt.slice(0, TASK_PROMPT_CAP),
       // consult A/B instrumentation plan (§5 P1b): mirror the two write-once
@@ -592,6 +593,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           // Preserve any dispatch/acceptance evidence if a runner throws after publishing snapshots.
           ...(deps.inbox && observedSnapshot ? records.get(runId)?.diag : {}),
           ...(req.label !== undefined ? { label: req.label } : {}),
+          ...(req.title !== undefined ? { title: req.title } : {}),
         },
         error: toErrorInfo(error),
       };
@@ -1067,6 +1069,10 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           ...(req.dispatchMeta === undefined && resumeDispatchMeta !== undefined
             ? { dispatchMeta: resumeDispatchMeta }
             : {}),
+          // R-inherit for the display-only title: a resume that re-states no
+          // description keeps showing the original one (same terminal-snapshot
+          // source rule as dispatchMeta).
+          ...(req.title === undefined && resume.title !== undefined ? { title: resume.title } : {}),
         };
         lockKeys = [targetId, resume.sessionFile];
       }
@@ -1117,7 +1123,23 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       const target = { runId, type: req.type, parent };
       labels.set(effective, target);
       deps.onLabel?.(effective, target, { resumed: labelAction === "repoint" });
-      resolvedReq = { ...resolvedReq, label: effective };
+      // Display-only title (the Agent tool's raw description, already captured
+      // by captureDisplayTitle): kept only when it differs from the effective
+      // label, so a label-shaped description adds no bytes to any diag/persist
+      // surface. The web fleet tree renders it as the row's main title with
+      // the label as secondary text.
+      // Re-normalized here (idempotent) so every spawn source — not just the Agent tool — is
+      // clamped to MAX_DISPLAY_TITLE_LENGTH before the value reaches any persisted diag.
+      const clampedTitle = resolvedReq.title === undefined ? undefined : captureDisplayTitle(resolvedReq.title);
+      const effectiveTitle = clampedTitle !== undefined && clampedTitle !== effective ? clampedTitle : undefined;
+      // Strip any raw title first: a title equal to the effective label (or a
+      // resume-inherited one now re-stated by the request) must not leak through.
+      const { title: _droppedTitle, ...reqWithoutTitle } = resolvedReq;
+      resolvedReq = {
+        ...reqWithoutTitle,
+        label: effective,
+        ...(effectiveTitle === undefined ? {} : { title: effectiveTitle }),
+      };
       // L1 (agent-tool pool-full plan §1/§2): reservation + queued-position
       // bookkeeping for every non-slotless request, computed BEFORE this run
       // is added to `slotfulLabel` (so `.size` below counts only runs AHEAD

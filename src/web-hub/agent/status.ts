@@ -240,6 +240,9 @@ export function projectFleet(
       }
     }
     if (r.label !== undefined) row.label = r.label;
+    // Display-only raw title: rides the same append-only slot style as `label`
+    // (empty values dropped field-only, never the row).
+    if (r.title !== undefined && r.title !== "" && r.title !== r.label) row.title = r.title;
     if (r.type !== undefined) row.type = r.type;
     if (r.model !== undefined) row.model = r.model;
     // M-B2 (thinking-level visibility): rides the same append-only slot style as

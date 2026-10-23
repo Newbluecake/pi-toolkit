@@ -117,9 +117,11 @@ export interface TitlePorts {
    */
   readAssistantExcerpt(): string | undefined;
   /**
-   * 会话级（全部 fileEntries）最近一条有效自有标题记录的名字 + 有效记录总数（legacy
+   * 会话级（全部 fileEntries）最近一条有效自有标题记录的名字 + 有效「非回收」记录总数（legacy
    * lifetime 口径，含首标那条） + 「刷新」记录的时间戳（升序，墙钟毫秒，不含最早那条
    * 首标记录；缺 `at` 的旧格式记录不计入该数组——window 口径下视为无历史）。
+   * `/title auto` 的回收记录（reclaim:true）只参与 latestName（恢复所有权），不进 count /
+   * refreshTimestamps——回收不消耗刷新额度（见 ./records.ts）。
    */
   titleRecords(): { latestName?: string | undefined; count: number; refreshTimestamps?: number[] | undefined };
   /** 写一条自有标题记录（pi 侧 appendEntry("subagent:title", {v:1,name,at})）。 */
@@ -288,9 +290,29 @@ export interface TitleTrigger<M> {
    * 门检时，忽略 refreshEveryInputs/refreshAfterMinutes/maxRefreshes（含窗口）阈值一次——
    * 仍然遵守硬安全线（所有权/已命名/在途互斥/模型可用）。一旦真正发起一次 generate()（无论
    * 成功失败、哪怕最终发现无模型），该次机会即消耗；若硬安全线直接拦住（未命名/在途/用户
-   * 所有），不消耗，留给下一次 agent_settled。
+   * 所有），不消耗，留给下一次 agent_settled。与 armRefreshBypass 共用同一标志位。
    */
   onSessionCompact(): void;
+  /**
+   * `/title auto` 回收所有权后武装的 one-shot 绕过：与 session_compact 完全同一机制
+   * （同一 pendingRefreshBypass 标志位、同一消耗规则），让回收后的下一个 agent_settled
+   * 无视输入/时长/额度阈值直接重新生成一次标题。
+   */
+  armRefreshBypass(): void;
+  /** 只读状态快照（`/title status` 渲染用）：在途互斥/计数器/绕过标志。 */
+  snapshot(): TitleTriggerSnapshot;
+}
+
+/** `TitleTrigger.snapshot()` 的只读视图。 */
+export interface TitleTriggerSnapshot {
+  /** 在途互斥：此刻是否有一次生成在途。 */
+  inFlight: boolean;
+  /** 自上次生成（或基线前移）以来的用户输入数。 */
+  inputsSinceGen: number;
+  /** 自上次生成（或基线前移）以来累计的运行时长（毫秒）。 */
+  busyMs: number;
+  /** one-shot 绕过是否已武装（session_compact 或 /title auto）。 */
+  pendingRefreshBypass: boolean;
 }
 
 interface GenerateContext<M> {
@@ -313,10 +335,10 @@ export function createTitleTrigger<M>(ports: TitlePorts, options: TitleTriggerOp
   let runStartedAt: number | undefined;
   let lastRunOk = true;
   let inFlight: AbortController | undefined;
-  // 压缩边界 one-shot 绕过（用户拍板）：session_compact 到来时置位；下一次 onAgentSettled
-  // 若真正发起 generate()（过了所有硬安全门检）就消耗；被硬安全门检拦住（未命名/在途/用户所有/
-  // aborted 运行）则不消耗，留待下一次。
-  let pendingCompactBypass = false;
+  // one-shot 绕过标志位（session_compact 拍板 + `/title auto` 回收共用）：置位后下一次
+  // onAgentSettled 若真正发起 generate()（过了所有硬安全门检）就消耗；被硬安全门检拦住
+  // （未命名/在途/用户所有/aborted 运行）则不消耗，留待下一次。
+  let pendingRefreshBypass = false;
 
   const resetBaseline = (): void => {
     inputsSinceGen = 0;
@@ -500,7 +522,7 @@ export function createTitleTrigger<M>(ports: TitlePorts, options: TitleTriggerOp
       }
       if (records.latestName === undefined || records.latestName !== currentName) return; // 用户所有，永久不刷新（硬安全，绕过标志不消耗）
 
-      const bypass = pendingCompactBypass;
+      const bypass = pendingRefreshBypass;
       if (!bypass) {
         const byCount = options.refreshEveryInputs > 0 && inputsSinceGen >= options.refreshEveryInputs;
         const byTime =
@@ -521,7 +543,7 @@ export function createTitleTrigger<M>(ports: TitlePorts, options: TitleTriggerOp
       }
       // bypass 在这里被消耗（无论成功失败/最终发现无模型，都算「那一次刷新」已尝试过）：
       // 已通过全部硬安全门检（在途/未命名/用户所有/aborted），接下来一定会发起 generate()。
-      pendingCompactBypass = false;
+      pendingRefreshBypass = false;
 
       const epochAtTrigger = epoch;
       const inputSeqAtTrigger = inputSeq;
@@ -574,7 +596,7 @@ export function createTitleTrigger<M>(ports: TitlePorts, options: TitleTriggerOp
       inputsSinceGen = 0;
       busyMs = 0;
       inFlight = undefined;
-      pendingCompactBypass = false; // 新会话/重载：旧会话的压缩拍板不跳转到新会话
+      pendingRefreshBypass = false; // 新会话/重载：旧会话的压缩/回收拍板不跳转到新会话
     },
 
     onSessionShutdown(): void {
@@ -591,7 +613,16 @@ export function createTitleTrigger<M>(ports: TitlePorts, options: TitleTriggerOp
     onSessionCompact(): void {
       // 纯置位，不校验任何其他不变量：下一次 onAgentSettled 统一决定是否能走到生成
       // （未命名/在途/用户所有/aborted 仍然拦住，标志保留到下一次机会）。
-      pendingCompactBypass = true;
+      pendingRefreshBypass = true;
+    },
+
+    armRefreshBypass(): void {
+      // 与 onSessionCompact 同一机制（/title auto 回收后让下一次 settled 必刷新一次）。
+      pendingRefreshBypass = true;
+    },
+
+    snapshot(): TitleTriggerSnapshot {
+      return { inFlight: inFlight !== undefined, inputsSinceGen, busyMs, pendingRefreshBypass };
     },
   };
 }

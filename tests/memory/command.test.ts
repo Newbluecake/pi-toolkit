@@ -183,7 +183,7 @@ describe("/mem getArgumentCompletions", () => {
     const fx = fixture();
     const cmd = createMemCommand({ paths: fx.paths });
     const items = cmd.getArgumentCompletions("")!;
-    expect(items.map((i) => i.value).sort()).toEqual(["doctor", "import", "list", "path", "restore", "tidy"]);
+    expect(items.map((i) => i.value).sort()).toEqual(["doctor", "import", "init", "list", "path", "restore", "tidy"]);
   });
 
   test("prefix filters subcommands", () => {

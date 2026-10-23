@@ -496,7 +496,9 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
           | undefined;
         // Anthropic's stock forceAdaptiveThinking path needs a non-empty reasoning option;
         // otherwise a reasoning model gets thinking:{type:'disabled'}, rejected by some relays.
-        // Managed effort takes precedence in pi and keeps its existing, independent construction.
+        // Managed-effort models need no such option: pi ≤1.2 builds the adaptive + output_config
+        // shape anyway, and pi ≥1.3's stock thinking-off build is thinking:{type:'disabled'} —
+        // both shapes pass the payload validator (measure-payload.ts managedThinkingDisabled).
         const forceAdaptive =
           api === "anthropic-messages" &&
           model.reasoning &&

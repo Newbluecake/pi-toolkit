@@ -11,8 +11,8 @@ import { currentOf, defaultOf, isKnownSettingKey, SETTING_SPECS } from "../../sr
 const defaults = DEFAULT_SETTINGS.fabric.wake;
 const wake = (block: unknown) => loadSettings({ fabric: { wake: block } }).fabric.wake;
 
-describe("fabric.wake settings (plan v3 §4.8)", () => {
-  it("pins the seven phase-1 leaves and their defaults (Q2: enabled by default, gated on fabric.enabled)", () => {
+describe("fabric.wake settings (plan v3 §4.8; rootRunMaxS added by phase2 §4.1)", () => {
+  it("pins the phase-1 leaves and their defaults (Q2: enabled by default, gated on fabric.enabled)", () => {
     expect(defaults).toEqual({
       enabled: true,
       maxLevel: 2,
@@ -21,8 +21,10 @@ describe("fabric.wake settings (plan v3 §4.8)", () => {
       resumesPerHour: 6,
       resumesPerTargetPerHour: 2,
       parkCapPerTarget: 8,
+      // phase2 §4.1: the cross-session Controller watchdog joins the wake block (default 900s)
+      rootRunMaxS: 900,
     });
-    // phase-2 leaves must NOT exist yet (rootRunMaxS, crossSession.*)
+    // `crossSession.*` is a FABRIC-level leaf (parsed by parseFabricCrossSessionSettings), never a wake one
     expect(Object.keys(defaults).sort()).toEqual(
       [
         "enabled",
@@ -32,6 +34,7 @@ describe("fabric.wake settings (plan v3 §4.8)", () => {
         "resumeBudgetS",
         "resumesPerHour",
         "resumesPerTargetPerHour",
+        "rootRunMaxS",
       ].sort(),
     );
     // fabric itself stays off by default ⇒ a default install has no wake behaviour at all
@@ -52,7 +55,7 @@ describe("fabric.wake settings (plan v3 §4.8)", () => {
     expect(nonObjectFabric.wake).not.toBe(DEFAULT_SETTINGS.fabric.wake);
   });
 
-  it("parses valid values and ignores unknown / phase-2 keys", () => {
+  it("parses valid values and ignores unknown keys (crossSession is a fabric-level leaf, not a wake one)", () => {
     expect(
       wake({
         enabled: false,
@@ -73,6 +76,7 @@ describe("fabric.wake settings (plan v3 §4.8)", () => {
       resumesPerHour: 10,
       resumesPerTargetPerHour: 1,
       parkCapPerTarget: 3,
+      rootRunMaxS: 60, // 5 clamps up to the 60s floor (phase2 §4.1)
     });
   });
 
@@ -87,6 +91,17 @@ describe("fabric.wake settings (plan v3 §4.8)", () => {
       parkCapPerTarget: 2.9,
     });
     expect(parsed).toEqual({ ...defaults, parkCapPerTarget: 2 });
+  });
+
+  it("rootRunMaxS: 0 disables the Controller, positive values clamp to 60..3600, invalid falls back (phase2 §4.1)", () => {
+    expect(wake({ rootRunMaxS: 0 }).rootRunMaxS).toBe(0);
+    expect(wake({ rootRunMaxS: 1 }).rootRunMaxS).toBe(60);
+    expect(wake({ rootRunMaxS: 59.9 }).rootRunMaxS).toBe(60);
+    expect(wake({ rootRunMaxS: 900 }).rootRunMaxS).toBe(900);
+    expect(wake({ rootRunMaxS: 99_999 }).rootRunMaxS).toBe(3600);
+    expect(wake({ rootRunMaxS: -5 }).rootRunMaxS).toBe(900);
+    expect(wake({ rootRunMaxS: "600" }).rootRunMaxS).toBe(900);
+    expect(wake({ rootRunMaxS: Number.NaN }).rootRunMaxS).toBe(900);
   });
 
   it("resumeBudgetS is clamped to 60..3600 at parse time (plan §3.7 step 4)", () => {

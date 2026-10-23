@@ -96,7 +96,7 @@ function projectProvider(v: ProviderVerdict, pools: boolean): QuotaProviderWire 
   const id = v.provider as QuotaProviderWire["id"]; // guarded by is{Legacy,Pools}WebQuotaProviderId
   const wire: QuotaProviderWire = {
     id,
-    level: v.level,
+    level: v.displayLevel ?? v.level, // 展示级别：不含 forecast-before-reset 抬升
     stale: v.stale,
     fetchedAt: v.fetchedAt,
     // pools !== true：month 窗口在封闭枚举之外 ⇒ 丢掉（防御；kimi/zai 适配器本就不产出 month）。
@@ -139,7 +139,7 @@ function isLegacyWireWindow(w: WindowVerdict): w is WindowVerdict & { scope: Quo
 }
 
 function projectWindow(w: WindowVerdict & { scope: QuotaWindowWire["scope"] }): QuotaWindowWire {
-  const wire: QuotaWindowWire = { scope: w.scope, usedPct: w.usedPct, level: w.level };
+  const wire: QuotaWindowWire = { scope: w.scope, usedPct: w.usedPct, level: w.displayLevel ?? w.level };
   if (w.resetAt !== undefined) wire.resetAt = w.resetAt;
   if (w.etaMs !== undefined) wire.etaMs = w.etaMs;
   return wire;

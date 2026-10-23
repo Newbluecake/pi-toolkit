@@ -1113,6 +1113,35 @@ describe("state.reduce — control plane (§7.3/§7.7)", () => {
     expect(A(s).pendingCtl).toEqual([]);
   });
 
+  it("topic-switch 'new session': an observed prompt row survives the session switch and clears only on the NEW session's ctl `consumed`", () => {
+    // Agent side (commands.ts `elsewhere()`) re-homes the ledger entry into the new session so its
+    // ctl slot carries `consumed`; before that fix the new session's slot never mentioned the
+    // cmdId and this row stayed "sent · unconfirmed" forever.
+    let s = base();
+    s = reduce(s, send("A", { id: "c1", kind: "prompt", state: "sending", at: 1 }));
+    s = reduce(
+      s,
+      result("A", "c1", { type: "result", outcome: { ok: true, data: { delivery: "observed", behavior: "idle" } } }),
+    );
+    s = reduce(s, {
+      event: "session",
+      data: { agentKey: "A", session: { ...card("A").session, sessionId: "s2", reason: "new" } },
+    });
+    s = reduce(s, { event: "ctl", data: { agentKey: "A", epoch: "e1", sessionId: "s2", items: [] } });
+    expect(A(s).pendingCtl).toHaveLength(1);
+    expect(A(s).pendingCtl[0]).toMatchObject({ id: "c1", state: "observed" });
+    s = reduce(s, {
+      event: "ctl",
+      data: {
+        agentKey: "A",
+        epoch: "e1",
+        sessionId: "s2",
+        items: [{ cmdId: "c1", op: "prompt", state: "consumed", at: 1, updatedAt: 5 }],
+      },
+    });
+    expect(A(s).pendingCtl).toEqual([]);
+  });
+
   it("commands frame: agent.commands slot (§4.6 completion/policies)", () => {
     let s = base();
     const items = [{ name: "compact", kind: "builtin", policy: "allow", policyBusy: "confirm" }];

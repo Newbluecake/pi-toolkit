@@ -17,14 +17,25 @@
 
   Click → inline edit: Enter (`@keydown.enter.prevent`) saves, Esc cancels, blur cancels (the
   Save/Cancel buttons use `@mousedown.prevent` so clicking them never loses input focus first
-  and triggers a blur-cancel race), trimmed + capped at `RENAME_MAX_CHARS` (120), empty or
-  unchanged ⇒ local cancel, no wire call at all (`@logic/control.js`'s `sanitizeRenameInput`).
+  and triggers a blur-cancel race), trimmed + capped at `RENAME_MAX_CHARS` (120), unchanged ⇒
+  local cancel, no wire call at all (`@logic/control.js`'s `renameAction`).
+
+  Clear-to-auto (title-auto plan, user ruling 2026-10-21): saving an EMPTY input while the
+  session currently has a name hands the title back to auto-generation — the same as the
+  `/title auto` command (a96c189a) — by sending `runCommand(agentKey, "title", "auto",
+  { confirm: true })`. The web policy for `title auto` is `confirm`
+  (`src/web-hub/agent/command-policy.ts`), but the user's explicit clear-and-save IS the
+  confirmation and the sidebar has no dock confirm bar, so the confirm the protocol already
+  supports rides the FIRST call (no second round-trip). The semantics are only offered when the
+  `titleAuto` prop is set (the agent's `commands` slot lists `title` — `AgentList.vue`'s
+  `renameInfoFor`); an old agent without /title keeps the legacy rule: empty ⇒ local cancel,
+  no wire call. Empty with no current name is always a local cancel.
 -->
 <script setup lang="ts">
 import { inject, nextTick, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
-import { sanitizeRenameInput, RENAME_MAX_CHARS } from "../../logic/control.js";
+import { renameAction, RENAME_MAX_CHARS } from "../../logic/control.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import "../../styles/agents.css";
 
@@ -33,6 +44,9 @@ const props = defineProps<{
   /** Current session name ("" when the session has none — never the localized placeholder
    *  text `AgentCardView.sessionLabel` falls back to). */
   readonly name: string;
+  /** title-auto plan: the agent advertises the `/title` command (its `commands` slot lists
+   *  `title`), so saving an EMPTY input sends `/title auto` instead of a local cancel. */
+  readonly titleAuto?: boolean;
 }>();
 const { t } = useI18n();
 const hub = inject(HUB_CTX, null);
@@ -61,8 +75,8 @@ function cancel(): void {
 
 async function save(): Promise<void> {
   if (sending.value) return;
-  const next = sanitizeRenameInput(draft.value, props.name);
-  if (next === null) {
+  const action = renameAction(draft.value, props.name, props.titleAuto === true);
+  if (action === null) {
     cancel();
     return;
   }
@@ -74,12 +88,19 @@ async function save(): Promise<void> {
   sending.value = true;
   errorText.value = null;
   try {
-    const outcome = await control.runCommand(props.agentKey, "name", next);
+    // title-auto: the explicit clear-and-save IS the confirmation — the protocol's existing
+    // `confirm` flag rides the first call, so the `confirm`-policy /title auto never bounces
+    // back E_CONFIRM_REQUIRED (the sidebar has no dock confirm bar to answer one).
+    const outcome =
+      action.kind === "auto"
+        ? await control.runCommand(props.agentKey, "title", "auto", { confirm: true })
+        : await control.runCommand(props.agentKey, "name", action.name);
     if (outcome.ok) {
       editing.value = false;
       draft.value = "";
     } else {
-      errorText.value = t("agents.renameFailed", { reason: outcome.message ?? outcome.error ?? "E_FAILED" });
+      const key = action.kind === "auto" ? "agents.titleAutoFailed" : "agents.renameFailed";
+      errorText.value = t(key, { reason: outcome.message ?? outcome.error ?? "E_FAILED" });
     }
   } catch {
     errorText.value = t("agents.renameFailed", { reason: "E_NETWORK" });
@@ -117,6 +138,7 @@ function onBlur(): void {
           autocomplete="off"
           spellcheck="false"
           :aria-label="t('agents.renameInputAria')"
+          :placeholder="titleAuto === true ? t('agents.renameAutoHint') : undefined"
           :disabled="sending"
           @keydown.enter.prevent="save"
           @keydown.esc.stop="cancel"

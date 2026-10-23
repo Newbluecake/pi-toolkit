@@ -347,6 +347,47 @@ describe("createCommandHandler — WebPromptRelease.elsewhere() (plan P4: freeze
     expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "consumed" });
   });
 
+  it("bug repro: elsewhere() after the session moved on ⇒ the NEW session's ctl slot projects `consumed` (no forever 'sent · unconfirmed' row)", () => {
+    // Real sequence (topic-switch "开新会话"): web prompt claimed under sess-1 (ledger observed/idle,
+    // HTTP reply observed ⇒ the browser row shows "sent · unconfirmed"), `/topic-switch __go`
+    // runs `ctx.newSession` — the bound session is now sess-2 — and only then wire.ts's
+    // `onSwitchEntered` calls `release.elsewhere()`. The ctl slot is published for the CURRENT
+    // session; the browser clears its row only on a ctl `consumed` for this cmdId.
+    const { gate, release } = fakeGate(true);
+    const h = makeHarness({ promptGate: () => gate });
+    h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
+    expect(h.deps.ledger.frame("sess-1", "ep", 1000).items).toContainEqual(
+      expect.objectContaining({ cmdId: "c1", state: "observed" }),
+    );
+    h.ctxState.sessionId = "sess-2"; // newSession resolved before onSwitchEntered
+    release.current!.elsewhere();
+    const ctl = h.deps.ledger.frame("sess-2", "ep", 1000);
+    expect(ctl.items).toContainEqual(expect.objectContaining({ cmdId: "c1", state: "consumed" }));
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "consumed", sessionId: "sess-2" });
+  });
+
+  it("elsewhere() while the current session id is unreadable ⇒ entry becomes session-agnostic (still projected)", () => {
+    const { gate, release } = fakeGate(true);
+    const h = makeHarness({ promptGate: () => gate });
+    h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
+    h.deps.getSessionId = () => {
+      throw new Error("stale ctx");
+    };
+    release.current!.elsewhere();
+    expect(h.deps.ledger.get("c1")?.sessionId).toBeUndefined();
+    expect(h.deps.ledger.frame("any-session", "ep", 1000).items).toContainEqual(
+      expect.objectContaining({ cmdId: "c1", state: "consumed" }),
+    );
+  });
+
+  it("elsewhere() within the claim-time session ⇒ session binding untouched", () => {
+    const { gate, release } = fakeGate(true);
+    const h = makeHarness({ promptGate: () => gate });
+    h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
+    release.current!.elsewhere();
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "consumed", sessionId: "sess-1" });
+  });
+
   it("current() first, then elsewhere() ⇒ elsewhere() is a no-op (dispatch already happened, stays dispatched)", () => {
     const { gate, release } = fakeGate(true);
     const h = makeHarness({ promptGate: () => gate });
@@ -355,6 +396,60 @@ describe("createCommandHandler — WebPromptRelease.elsewhere() (plan P4: freeze
     release.current!.elsewhere();
     expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "dispatched", text: "hi" });
     expect(h.sentUserMessages).toHaveLength(1);
+  });
+});
+
+describe("createCommandHandler — WebPromptRelease.handedOff() (todo #8: shutdown before the decision)", () => {
+  it("'session' ⇒ dropped{session}, unbound from any session (still projected by the next session), republished", () => {
+    const { gate, release } = fakeGate(true);
+    const h = makeHarness({ promptGate: () => gate });
+    h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
+    h.onChanged.mockClear();
+    release.current!.handedOff!("session");
+    const e = h.deps.ledger.get("c1");
+    expect(e).toMatchObject({ promptState: "dropped", reason: "session" });
+    expect(e?.sessionId).toBeUndefined();
+    expect(e?.text).toBeUndefined(); // terminal: a later same-text input can never re-attribute it
+    expect(h.deps.ledger.frame("sess-next", "ep", 1000).items).toContainEqual(
+      expect.objectContaining({ cmdId: "c1", state: "dropped", reason: "session" }),
+    );
+    expect(h.onChanged).toHaveBeenCalled();
+    expect(h.sentUserMessages).toHaveLength(0);
+  });
+
+  it("'reload' ⇒ re-armed as dispatched (text kept, owner dropped, session kept), no timer armed, nothing sent", () => {
+    const { gate, release } = fakeGate(true);
+    const h = makeHarness({ promptGate: () => gate });
+    h.deps.owner = "inst-old";
+    const handler = createCommandHandler(h.deps);
+    handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
+    expect(h.deps.ledger.get("c1")?.owner).toBe("inst-old");
+    const timersBefore = h.timers.pendingCount();
+    release.current!.handedOff!("reload");
+    const e = h.deps.ledger.get("c1");
+    expect(e).toMatchObject({ promptState: "dispatched", text: "hi", sessionId: "sess-1" });
+    expect(e?.owner).toBeUndefined();
+    expect(h.timers.pendingCount()).toBe(timersBefore);
+    expect(h.sentUserMessages).toHaveLength(0);
+  });
+
+  it("settles at most once across current()/elsewhere()/handedOff() in any order", () => {
+    const { gate, release } = fakeGate(true);
+    const h = makeHarness({ promptGate: () => gate });
+    h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
+    release.current!.handedOff!("session");
+    expect(release.current!.current()).toBe("refused");
+    release.current!.elsewhere();
+    release.current!.handedOff!("reload");
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "dropped", reason: "session" });
+    expect(h.sentUserMessages).toHaveLength(0);
+
+    const g2 = fakeGate(true);
+    const h2 = makeHarness({ promptGate: () => g2.gate });
+    h2.handler.handle(frame("c2", { op: "prompt", text: "yo", deliver: "steer" }));
+    expect(g2.release.current!.current()).toBe("dispatched");
+    g2.release.current!.handedOff!("session");
+    expect(h2.deps.ledger.get("c2")).toMatchObject({ promptState: "dispatched", text: "yo" });
   });
 });
 

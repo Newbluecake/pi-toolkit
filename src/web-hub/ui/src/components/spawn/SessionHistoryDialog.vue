@@ -51,6 +51,7 @@ import {
 import { HISTORY_Q_MAX_CHARS } from "@protocol/session-history.js";
 import type { HistoryQueryWire } from "@protocol/session-history.js";
 import type { SpawnHistoryOutcome } from "../../transport/types.js";
+import { MODAL_OVERLAY_ROOTS } from "@logic/overlayRoots.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import HistoryForkConfirm from "./HistoryForkConfirm.vue";
 import SpawnConfirm from "./SpawnConfirm.vue";
@@ -447,13 +448,13 @@ function onScrimKeydown(ev: KeyboardEvent): void {
   if (ev.key === "Tab") trapTab(ev);
 }
 
-const OVERLAY_ROOTS = ".spawn-scrim, .picker-scrim, .preview-overlay, .privacy-scrim";
-
+/** Topmost decision per logic/overlayRoots.ts (preview-windows §5.2): the shared selector
+ *  excludes the desktop modeless preview-window root — it never blocks Escape/Tab. */
 function ownsDocumentKeydown(ev: KeyboardEvent): boolean {
   const panel = panelEl.value;
   if (panel === null) return false;
   if (ev.target instanceof Node && panel.contains(ev.target)) return false;
-  const roots = Array.from(document.querySelectorAll(OVERLAY_ROOTS));
+  const roots = Array.from(document.querySelectorAll(MODAL_OVERLAY_ROOTS));
   for (const root of roots) {
     if (root !== scrimEl.value && ev.target instanceof Node && root.contains(ev.target)) return false;
   }

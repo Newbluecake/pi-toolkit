@@ -100,7 +100,19 @@ function rowOf(node: FleetTreeNode): FleetRowWire {
   return node.row as unknown as FleetRowWire;
 }
 function nameOf(row: FleetRowWire): string {
-  return clip(String(row.label ?? row.type ?? row.runId), 60);
+  // Main title: the raw display title (the Agent tool's un-sanitized description)
+  // when the agent carried one, else the sanitized label — same fallback chain as before.
+  return clip(String(row.title ?? row.label ?? row.type ?? row.runId), 60);
+}
+/** Secondary `@label` token shown next to the main title: only when a distinct raw
+ *  `title` took over the main slot, so the @mention handle stays discoverable.
+ *  Empty string = render nothing. The label (never the title) stays the handle
+ *  every mention/consult-prefix flow parses. */
+function subLabelOf(row: FleetRowWire): string {
+  const t = row.title;
+  const l = row.label;
+  if (typeof t !== "string" || t === "" || typeof l !== "string" || l === "") return "";
+  return `@${l}`;
 }
 function typeOf(row: FleetRowWire): string {
   return typeof row.type === "string" && row.type !== "" ? row.type : "";
@@ -215,6 +227,9 @@ function isOrphan(row: FleetRowWire): boolean {
               <b translate="no">{{ nameOf(rowOf(node)) }}</b>
             </button>
             <b v-else translate="no">{{ nameOf(rowOf(node)) }}</b>
+            <span v-if="subLabelOf(rowOf(node))" class="run-label" translate="no" :title="subLabelOf(rowOf(node))">{{
+              subLabelOf(rowOf(node))
+            }}</span>
             <span v-if="isOrphan(rowOf(node))" class="chip chip-orphan">{{ t("drawer.parentMissing") }}</span>
             <AppIcon name="chev-right" class="icon icon-sm chev" aria-hidden="true" />
           </span>
@@ -291,6 +306,9 @@ function isOrphan(row: FleetRowWire): boolean {
             <b translate="no">{{ nameOf(rowOf(node)) }}</b>
           </button>
           <b v-else translate="no">{{ nameOf(rowOf(node)) }}</b>
+          <span v-if="subLabelOf(rowOf(node))" class="run-label" translate="no" :title="subLabelOf(rowOf(node))">{{
+            subLabelOf(rowOf(node))
+          }}</span>
           <span v-if="isOrphan(rowOf(node))" class="chip chip-orphan">{{ t("drawer.parentMissing") }}</span>
         </span>
         <span class="run-activity"

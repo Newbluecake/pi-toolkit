@@ -23,6 +23,7 @@ import type { HubLog } from "./ports.js";
 import type { PROTO } from "../protocol/version.js";
 import type { UiStatus } from "./ui-root.js";
 import type { PrivacyHubStatus } from "../protocol/privacy.js";
+import type { XsAliasHubStatus } from "../protocol/xs-alias.js";
 
 export interface HubRecord {
   pid: number;
@@ -57,6 +58,9 @@ export interface HubRecord {
    * the hub's 5s tick through a full `write()` of the in-memory record. State only — no targets,
    * hosts or principals (hub.json is read by any same-uid process). */
   proxy?: { portsStore: "ok" | "broken" };
+  /** alias-plan §3.3 (AL6): present ONLY when the alias binding store loaded `degraded` (key absent
+   *  otherwise ⇒ hub.json byte-identical). Boot-time fact, rides the first write(). Same-uid readable. */
+  alias?: XsAliasHubStatus;
 }
 
 export interface HubJsonWriter {

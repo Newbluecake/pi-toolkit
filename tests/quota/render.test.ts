@@ -601,6 +601,18 @@ describe("HUD recovery countdown (resets …)", () => {
     );
   });
 
+  it("colors by displayLevel: forecast-raised level 2 stays plain text, level stays 2", () => {
+    const theme = { fg: (color: string, text: string) => `<${color}>${text}</>` };
+    const v = verdict({
+      level: 2,
+      displayLevel: 0,
+      windows: [w("5h", 30, 2, "forecast-before-reset", { displayLevel: 0 })],
+    });
+    expect(renderQuotaStatus([v], NOW, 600_000, theme)).toContain("<text>30%</>");
+    const raised = verdict({ level: 2, displayLevel: 2, windows: [w("5h", 30, 2, "pct")] });
+    expect(renderQuotaStatus([raised], NOW, 600_000, theme)).toContain("<warning>30%</>");
+  });
+
   it("coexists with the ·stale marker (stale stays at line end)", () => {
     const later = NOW + 12 * 60_000;
     const kimi = exhaustedKimi(later + TWO_D_11H, NOW); // fetchedAt=NOW ⇒ age 12m；倒计时按 later 现算

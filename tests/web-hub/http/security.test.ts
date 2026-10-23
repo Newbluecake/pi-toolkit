@@ -20,6 +20,7 @@ import { createLoginLimiter } from "../../../src/web-hub/hub/ratelimit.js";
 import { fakeKdf, fakeLanStore } from "../contract/fakes.js";
 import type { HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { fakeDeps, login, makeAgent, makeTmp, openSse, postJson, rawRequest, type FakeDeps } from "./helpers.js";
+import { freePort } from "../../helpers/free-port.js";
 
 let tmp: ReturnType<typeof makeTmp>;
 let deps: FakeDeps;
@@ -349,10 +350,7 @@ describe("LP1 hub frame-src (link-preview §2.4)", () => {
     "proxy=%s: loopback, LAN and transport-level 421 all get the same CSP, hub still cannot be framed",
     async (proxy) => {
       // Real frontend/listeners, fake store/KDF only: no sqlite child or password work needed.
-      const probe = createNetServer();
-      await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
-      const lanPort = (probe.address() as { port: number }).port;
-      await new Promise<void>((resolve) => probe.close(() => resolve()));
+      const lanPort = await freePort();
       const scope = createScope({ log: deps.log, now: deps.now });
       const limiter = createLoginLimiter({ now: deps.now });
       const config = {

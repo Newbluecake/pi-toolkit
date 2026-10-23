@@ -28,6 +28,8 @@ import { checkLanPortConflict, parseHubLanConfig } from "./lan-config.js";
 import { parseHubSpawnConfig } from "./spawn/config.js";
 import { normalizeHubLoadConfig } from "./load.js";
 import { normalizeHubProxyConfig } from "./proxy/config.js";
+import { normalizeHubCrossSessionConfig } from "./xs/limits.js";
+import { mergeHubXsAliasConfig } from "./xs/router.js";
 import { createHubLog } from "./log.js";
 import type { HubConfig } from "./ports.js";
 
@@ -118,6 +120,11 @@ async function main(): Promise<void> {
     }
   }
 
+  // Slash-args: unknown/off values omit the gate, never advertise an unusable cap.
+  if (config.cmdArgs !== undefined && config.cmdArgs !== "all" && config.cmdArgs !== "toolkit") {
+    const { cmdArgs: _drop, ...rest } = config;
+    config = rest;
+  }
   // web-hub-avatar plan v2.1 §2.6: feature-off is represented by an absent
   // key. Fail soft on hand-edited/old launcher config, preserving startup.
   if (config.avatar !== undefined && config.avatar !== true) {
@@ -183,6 +190,36 @@ async function main(): Promise<void> {
         /* ignored */
       }
     } else config = { ...config, feishuBot };
+  }
+  // fabric phase-2 §4.6 (X1): config.crossSession is one feature gate and frozen at start — a
+  // malformed value drops the WHOLE key (xs off: no relay, frame handling or cap); the hub keeps
+  // running. Key absence leaves everything byte-identical.
+  if (config.crossSession !== undefined) {
+    // Re-check reply too: absent defaults on; malformed values fail closed to reply:false.
+    // Channel-plan §3.1: a malformed `channels` sub-key is dropped alone (hub defaults 16/4 apply).
+    const crossSession = normalizeHubCrossSessionConfig(config.crossSession);
+    if (crossSession === undefined) {
+      const { crossSession: _drop, ...rest } = config;
+      config = rest;
+      try {
+        process.stderr.write("web-hub main: dropping malformed config.crossSession\n");
+      } catch {
+        /* ignored */
+      }
+    } else {
+      // Alias-plan AL2 (key-absent convention): the normalizer above drops unknown keys, so the
+      // nested `alias` sub-key is re-validated from the RAW value and merged back. Absent ⇒ alias off
+      // (byte-identical config); malformed ⇒ dropped alone + logged (alias off, xs unaffected).
+      const { merged, aliasDropped } = mergeHubXsAliasConfig(config.crossSession, crossSession);
+      if (aliasDropped) {
+        try {
+          process.stderr.write("web-hub main: dropping malformed config.crossSession.alias\n");
+        } catch {
+          /* ignored */
+        }
+      }
+      config = { ...config, crossSession: merged };
+    }
   }
   startDeps.childUmask = inheritedUmask;
 

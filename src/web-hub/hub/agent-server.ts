@@ -39,6 +39,8 @@ import {
   protoCompatible,
 } from "../protocol/version.js";
 import type { FsbReqFrame, FsbResFrame } from "../protocol/feishu.js";
+import { xsFrameBytesOk } from "../protocol/xs.js";
+import type { XsRouter } from "./xs/router.js";
 import type { AdminHandler } from "./admin.js";
 import type { HubConfig, HubLog } from "./ports.js";
 import type { AgentConn, Registry } from "./registry.js";
@@ -78,6 +80,11 @@ export function createAgentServer(
      * （§3.1 compat matrix 不变量，同 UPLOAD/DIALOG_BG 的追加模式）。可选：缺省时 caps 与
      * 追加前逐字节一致。 */
     extraHubCaps?: readonly string[];
+    /** fabric phase-2 X1 (§8.3): the cross-session relay router, present ONLY when
+     * `config.crossSession` exists. `xs_req` frames go here BEFORE the registry (never the bus,
+     * never this file's per-frame logging); absent ⇒ they fall through to the registry exactly
+     * as before (ignored). */
+    xs?: XsRouter;
   },
 ): AgentServer {
   const { registry, config, log, now } = deps;
@@ -201,7 +208,15 @@ export function createAgentServer(
         return;
       }
       const frame: AgentFrame | undefined = decodeAgentFrame(raw);
-      if (frame === undefined) return; // unknown / reserved / invalid: ignored
+      if (frame === undefined) {
+        // An oversize xs_req is refused by the decoder's 16 KiB xs cap (silent drop = a pointless
+        // client-deadline unknown): answer E_XS_TOO_LARGE. Every other undecodable frame stays
+        // ignored without any log (no body can reach hub.log).
+        if (deps.xs !== undefined && rawType(raw) === "xs_req" && !xsFrameBytesOk(raw)) {
+          deps.xs.rejectTooLarge(agentKey, raw, write);
+        }
+        return; // unknown / reserved / invalid: ignored
+      }
       if (frame.t === "hello") return;
       if (frame.t === "ping") {
         write({ t: "pong", ts: frame.ts });
@@ -226,6 +241,11 @@ export function createAgentServer(
             message: "飞书机器人未启用或尚不可用",
           });
         }
+        return;
+      }
+      // fabric phase-2 X1: xs requests never enter the registry/bus (the router replies itself).
+      if (frame.t === "xs_req" && deps.xs !== undefined) {
+        deps.xs.handle(agentKey, frame, write);
         return;
       }
       if (frame.t === "tfa_req") {
@@ -288,7 +308,8 @@ export function createAgentServer(
           log.warn("agent frame too large", { agentKey, bytes: err.bytes });
           destroy("frame too large");
         } else {
-          log.warn("agent sent bad json", { agentKey, sample: err.sample.slice(0, 80) });
+          // Hygiene (phase2 §8.5/XI6): any frame's text can be a message body — log the size only.
+          log.warn("agent sent bad json", { agentKey, bytes: err.sample.length });
         }
       },
     });

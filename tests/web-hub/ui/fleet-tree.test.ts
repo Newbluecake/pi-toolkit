@@ -110,6 +110,24 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
     expect(child1Details!.text()).toContain("grep call sites");
   });
 
+  it("renders the raw display title as the main name with the label as a small secondary token", () => {
+    const wrapper = mountTree([
+      row({ runId: "titled", label: "implement-/title-auto+status", title: "implement /title auto+status" }),
+      row({ runId: "plain", label: "plain-label" }),
+    ]);
+    const titled = wrapper.findAll(".run").find((r) => r.text().includes("implement /title auto+status"))!;
+    expect(titled).toBeTruthy();
+    expect(titled.get(".run-name b").text()).toBe("implement /title auto+status");
+    const sub = titled.get(".run-name .run-label");
+    expect(sub.text()).toBe("@implement-/title-auto+status");
+    expect(sub.attributes("translate")).toBe("no");
+    expect(sub.attributes("title")).toBe("@implement-/title-auto+status");
+    // rows without a title keep the label as the main name and render no secondary token
+    const plain = wrapper.findAll(".run").find((r) => r.text().includes("plain-label"))!;
+    expect(plain.get(".run-name b").text()).toBe("plain-label");
+    expect(plain.find(".run-name .run-label").exists()).toBe(false);
+  });
+
   it("folds subtrees at depth >= 3 by default and, past 5 finished siblings, all but 3 behind Show N Finished Runs", async () => {
     const rows: FleetRowWire[] = [row({ runId: "root", terminal: false })];
     for (let d = 1; d <= 4; d++) {

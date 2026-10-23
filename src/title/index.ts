@@ -1,14 +1,17 @@
 /**
  * 会话标题模型生成 v2——pi 侧装配（纯核心在 ./title.ts）。
  *
- * `wireTitle` 只做三件事（I7：src/index.ts 调这里，逻辑不进装配文件）：
+ * `wireTitle` 只做四件事（I7：src/index.ts 调这里，逻辑不进装配文件）：
  * 1. 子会话防御性排除（结构上 post-guard 已保证仅主会话可达，这里再查
  *    isChildSession——双保险，可测）；
- * 2. 注册 `before_agent_start` / `agent_end` / `agent_settled` / `session_start` /
- *    `session_shutdown` 五个 handler（事件分工：before_agent_start 计数 + 首标
- *    门检，agent_end 记录本轮是否正常收尾，agent_settled 累加运行时长 + 刷新
- *    门检，session_start/session_shutdown 维护 epoch/内存状态）；
- * 3. 把每次事件收到的 `ExtensionContext` 适配成核心需要的依赖：
+ * 2. enabled 时创建触发器并注册 `before_agent_start`（计数 + 首标门检）/
+ *    `agent_end`（记录本轮是否正常收尾）/ `agent_settled`（累加运行时长 + 刷新门检）/
+ *    `session_compact`（one-shot 绕过）/ `session_start` / `session_shutdown`
+ *    （epoch/内存状态）六个 handler；disabled（title.enabled=false）时完全不接事件
+ *    钩子（与改动前逐字节一致），只保留下面的 `/title` 命令；
+ * 3. 注册 `/title` 命令（无论 enabled——disabled 时 auto 如实拒绝、status 标注已禁用），
+ *    命令逻辑在 ./command.ts，记录读取口径与 ./records.ts 共用；
+ * 4. 把每次事件收到的 `ExtensionContext` 适配成核心需要的依赖：
  *    - `findModel`/`currentModel`/`complete`/`sessionKey`——这四个会在异步重试
  *      循环里被多次调用，**按次绑定**到本次 handler 收到的 ctx（`buildDeps(ctx)`
  *      就地构造一个闭包捕获该 ctx 的对象，随 `onBeforeAgentStart`/`onAgentSettled`
@@ -32,13 +35,20 @@ import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { readBeforeAgentStartTrigger } from "../adapters/pi-compat.js";
 import { createTitleTrigger, type TitleGenerationDeps, type TitlePorts, type TitleTrigger } from "./title.js";
+import { readTitleRecords, TITLE_RECORD_CUSTOM_TYPE } from "./records.js";
+import { createTitleCommand } from "./command.js";
 
-/** 自有标题记录的 customType（会话级 appendEntry，schema `{v:1,name,at}`）。 */
-export const TITLE_RECORD_CUSTOM_TYPE = "subagent:title";
+// 记录形状/读取口径在 ./records.ts（与 /title 命令共用）；re-export 保持既有 import 路径不破。
+export { TITLE_RECORD_CUSTOM_TYPE, readTitleRecords } from "./records.js";
 
 export interface WireTitleDeps {
   /** 子会话（print 模式）不触发标题生成——防御性双保险（post-guard 已排除）。 */
   isChildSession: boolean;
+  /**
+   * settings.title.enabled：false 时不创建触发器、不接任何事件钩子（与改动前
+   * 「完全不接线」逐字节一致），只注册 `/title` 命令（auto 如实拒绝、status 标注已禁用）。
+   */
+  enabled: boolean;
   /** settings.title.model 原始串：strict `provider/id`；空串/非法 = 跟随会话模型。 */
   model: string;
   /** settings.title.refreshEveryInputs：新增用户输入数达到此值即可刷新；0 = 关闭此条件。 */
@@ -119,50 +129,13 @@ function extractAssistantExcerpt(branch: readonly SessionEntry[]): string | unde
 }
 
 /**
- * 自有标题记录的落盘形状（r1 #14：`{v:1,name,at}`，name 非空字符串，at 数值）。`at` 标为可选
- * 是向前兼容：窗口刷新（title.refreshWindowMinutes）落地前写入的记录没有时间戳，仍要能正常
- * 加载为「存在但无时间戳」的历史——窗口口径下这类记录不计入统计（见 readTitleRecords）。
+ * 自有标题记录的落盘形状/校验/读取已移至 ./records.ts（`/title` 命令复用同一口径——
+ * 含 `reclaim` 回收记录：只恢复所有权、不占刷新额度）。
  */
-interface TitleRecordData {
-  v: 1;
-  name: string;
-  at?: number;
-}
-
-function isValidTitleRecordData(data: unknown): data is TitleRecordData {
-  if (!data || typeof data !== "object") return false;
-  const d = data as Record<string, unknown>;
-  if (d.v !== 1 || typeof d.name !== "string" || d.name.length === 0) return false;
-  return d.at === undefined || typeof d.at === "number";
-}
-
-/**
- * 会话级（全部 fileEntries）扫描自有标题记录：最近一条有效记录的名字 + 有效记录总数（legacy
- * lifetime 口径，含首标）+ 「刷新」记录的时间戳数组（升序，供 refreshWindowMinutes 的滚动窗口
- * 统计用）。第一条有效记录是首标，不计入 refreshTimestamps；没有 `at` 的旧格式记录同样不计入
- * （窗口口径下视为无历史——不是 bug，是 r1 拍板的安全退化：宁可多刷新，不乱猜旧记录的时间）。
- * 非法记录整体跳过。
- */
-function readTitleRecords(entries: readonly SessionEntry[]): {
-  latestName?: string | undefined;
-  count: number;
-  refreshTimestamps: number[];
-} {
-  let latestName: string | undefined;
-  let count = 0;
-  const refreshTimestamps: number[] = [];
-  for (const entry of entries) {
-    if (entry.type !== "custom" || entry.customType !== TITLE_RECORD_CUSTOM_TYPE) continue;
-    if (!isValidTitleRecordData(entry.data)) continue;
-    count++;
-    latestName = entry.data.name; // entries 是 chronological ascending，最后一次赋值即最新
-    if (count > 1 && typeof entry.data.at === "number") refreshTimestamps.push(entry.data.at);
-  }
-  return { latestName, count, refreshTimestamps };
-}
 
 export interface TitleWiring {
-  trigger: TitleTrigger<unknown>;
+  /** disabled 时 undefined（未创建触发器、未接事件钩子）。 */
+  trigger: TitleTrigger<unknown> | undefined;
 }
 
 export function wireTitle(pi: ExtensionAPI, deps: WireTitleDeps): TitleWiring | undefined {
@@ -224,54 +197,86 @@ export function wireTitle(pi: ExtensionAPI, deps: WireTitleDeps): TitleWiring | 
     };
   }
 
-  const trigger = createTitleTrigger<unknown>(ports, {
-    ...(modelRef ? { modelRef } : {}),
-    refreshEveryInputs: deps.refreshEveryInputs,
-    refreshAfterMinutes: deps.refreshAfterMinutes,
-    refreshWindowMinutes: deps.refreshWindowMinutes,
-    maxRefreshes: deps.maxRefreshes,
-  });
+  let trigger: TitleTrigger<unknown> | undefined;
+  if (deps.enabled) {
+    const t = createTitleTrigger<unknown>(ports, {
+      ...(modelRef ? { modelRef } : {}),
+      refreshEveryInputs: deps.refreshEveryInputs,
+      refreshAfterMinutes: deps.refreshAfterMinutes,
+      refreshWindowMinutes: deps.refreshWindowMinutes,
+      maxRefreshes: deps.maxRefreshes,
+    });
+    trigger = t;
 
-  pi.on("before_agent_start", (event, ctx) => {
-    // pi ≥1.2 also fires this for sendMessage(triggerTurn) wake runs (messageType "custom"). Those are
-    // not user input (docs/dev/title/plan.md:97): skip counting / first title / busy-time entirely —
-    // byte-for-byte the pi 1.0/1.1 behavior, where wake runs never reached this handler.
-    const start = readBeforeAgentStartTrigger(event);
-    if (start.kind !== "user") return;
-    // ctxRef 只给 readUserInputs 这三个同步端口用（本次调用里立即被消费）；
-    // completion 等异步依赖走下面就地构造的 buildDeps(ctx)。
-    ctxRef.current = ctx;
-    trigger.onBeforeAgentStart(start.prompt, buildDeps(ctx));
-  });
-  pi.on("agent_end", (event) => {
-    // 取 event.messages 中最后一条 assistant（不是数组最后一个元素——末尾可能是
-    // toolResult/custom 等非 assistant 条目）；找不到按未正常收尾处理（安全方向）。
-    let last: AssistantMessage | undefined;
-    for (let i = event.messages.length - 1; i >= 0; i--) {
-      const m = event.messages[i] as { role?: string } | undefined;
-      if (m && m.role === "assistant") {
-        last = m as AssistantMessage;
-        break;
+    pi.on("before_agent_start", (event, ctx) => {
+      // pi ≥1.2 also fires this for sendMessage(triggerTurn) wake runs (messageType "custom"). Those are
+      // not user input (docs/dev/title/plan.md:97): skip counting / first title / busy-time entirely —
+      // byte-for-byte the pi 1.0/1.1 behavior, where wake runs never reached this handler.
+      const start = readBeforeAgentStartTrigger(event);
+      if (start.kind !== "user") return;
+      // ctxRef 只给 readUserInputs 这三个同步端口用（本次调用里立即被消费）；
+      // completion 等异步依赖走下面就地构造的 buildDeps(ctx)。
+      ctxRef.current = ctx;
+      t.onBeforeAgentStart(start.prompt, buildDeps(ctx));
+    });
+    pi.on("agent_end", (event) => {
+      // 取 event.messages 中最后一条 assistant（不是数组最后一个元素——末尾可能是
+      // toolResult/custom 等非 assistant 条目）；找不到按未正常收尾处理（安全方向）。
+      let last: AssistantMessage | undefined;
+      for (let i = event.messages.length - 1; i >= 0; i--) {
+        const m = event.messages[i] as { role?: string } | undefined;
+        if (m && m.role === "assistant") {
+          last = m as AssistantMessage;
+          break;
+        }
       }
-    }
-    const ok = !!last && last.stopReason !== "aborted" && last.stopReason !== "error" && !last.errorMessage;
-    trigger.onAgentEnd(ok);
-  });
-  pi.on("agent_settled", (_event, ctx) => {
-    ctxRef.current = ctx;
-    trigger.onAgentSettled(buildDeps(ctx));
-  });
-  pi.on("session_compact", () => {
-    // 压缩边界 one-shot 绕过（用户拍板）：下一次 agent_settled 刷新门检时忽略阈值一次，
-    // 仍然遵守硬安全线（见 title.ts 的 onSessionCompact 注释）。
-    trigger.onSessionCompact();
-  });
-  pi.on("session_start", () => {
-    trigger.onSessionStart();
-  });
-  pi.on("session_shutdown", () => {
-    trigger.onSessionShutdown();
-  });
+      const ok = !!last && last.stopReason !== "aborted" && last.stopReason !== "error" && !last.errorMessage;
+      t.onAgentEnd(ok);
+    });
+    pi.on("agent_settled", (_event, ctx) => {
+      ctxRef.current = ctx;
+      t.onAgentSettled(buildDeps(ctx));
+    });
+    pi.on("session_compact", () => {
+      // 压缩边界 one-shot 绕过（用户拍板）：下一次 agent_settled 刷新门检时忽略阈值一次，
+      // 仍然遵守硬安全线（见 title.ts 的 onSessionCompact 注释）。
+      t.onSessionCompact();
+    });
+    pi.on("session_start", () => {
+      t.onSessionStart();
+    });
+    pi.on("session_shutdown", () => {
+      t.onSessionShutdown();
+    });
+  }
+
+  // `/title` 命令始终注册（即使 title.enabled=false——auto 如实拒绝、status 标注已禁用），
+  // 主会话限定由 post-guard + 上面的 isChildSession 早退保证。web-hub 侧：wrapCommandApi 的
+  // registerCommand 代理自动捕获 notify 输出回显浏览器；子命令级策略见
+  // src/web-hub/agent/command-policy.ts 的 title 行（status 只读 allow / auto confirm）。
+  pi.registerCommand(
+    "title",
+    createTitleCommand({
+      enabled: deps.enabled,
+      options: {
+        refreshEveryInputs: deps.refreshEveryInputs,
+        refreshAfterMinutes: deps.refreshAfterMinutes,
+        refreshWindowMinutes: deps.refreshWindowMinutes,
+        maxRefreshes: deps.maxRefreshes,
+      },
+      getSessionName: ports.getSessionName,
+      recordReclaimTitle: (name) => {
+        // 回收记录：shape 与正常自有记录一致 + reclaim:true（records.ts 读取口径：只恢复
+        // 所有权，不进 count/refreshTimestamps——不消耗刷新额度）。
+        pi.appendEntry(TITLE_RECORD_CUSTOM_TYPE, { v: 1, name, at: Date.now(), reclaim: true });
+      },
+      snapshot: () => trigger?.snapshot(),
+      armRefreshBypass: () => {
+        trigger?.armRefreshBypass();
+      },
+      now: () => Date.now(),
+    }),
+  );
 
   return { trigger };
 }

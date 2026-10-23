@@ -22,6 +22,7 @@ import { lstat as realLstat, open as realOpen, realpath as realRealpath, utimes 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { UI_MAX_FILES, UI_MAX_TOTAL_BYTES } from "../../../src/web-hub/protocol/ui-manifest.js";
 import {
   buildUiCandidates,
   createUiRootService,
@@ -427,7 +428,7 @@ describe("verifyUiRoot: manifest/content integrity", () => {
   it("rejects a manifest/parse-time budget overrun as its own 'too-large' reason (not the generic 'build-info')", async () => {
     const dir = rootDir();
     mkdirSync(dir, { recursive: true, mode: 0o755 });
-    const files = Array.from({ length: 65 }, (_, i) => ({
+    const files = Array.from({ length: UI_MAX_FILES + 1 }, (_, i) => ({
       path: `assets/f${i}-aaaaaaaa.js`,
       bytes: 1,
       sha256: "0".repeat(64),
@@ -442,6 +443,39 @@ describe("verifyUiRoot: manifest/content integrity", () => {
     });
     const outcome = await verifyUiRoot(dir, EXPECT);
     expect(outcome).toMatchObject({ ok: false, reason: "too-large" });
+  });
+
+  it("accepts exactly UI_MAX_FILES files (the upper boundary of the file-count cap)", async () => {
+    const dir = rootDir();
+    const files: FixtureFile[] = [
+      { path: "index.html", content: DEFAULT_INDEX },
+      ...Array.from({ length: UI_MAX_FILES - 1 }, (_, i) => ({ path: `assets/f${i}-aaaaaaaa.js`, content: "x" })),
+    ];
+    expect(files).toHaveLength(UI_MAX_FILES);
+    writeValidRoot(dir, { files });
+    const outcome = await verifyUiRoot(dir, EXPECT);
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("accepts a cumulative size of exactly UI_MAX_TOTAL_BYTES and rejects one byte more as 'too-large'", async () => {
+    const indexBytes = Buffer.byteLength(DEFAULT_INDEX);
+    const exact = "a".repeat(UI_MAX_TOTAL_BYTES - indexBytes);
+    const dirOk = rootDir();
+    writeValidRoot(dirOk, {
+      files: [
+        { path: "index.html", content: DEFAULT_INDEX },
+        { path: "assets/big-aaaaaaaa.js", content: exact },
+      ],
+    });
+    expect((await verifyUiRoot(dirOk, EXPECT)).ok).toBe(true);
+    const dirOver = rootDir();
+    writeValidRoot(dirOver, {
+      files: [
+        { path: "index.html", content: DEFAULT_INDEX },
+        { path: "assets/big-aaaaaaaa.js", content: `${exact}a` },
+      ],
+    });
+    expect(await verifyUiRoot(dirOver, EXPECT)).toMatchObject({ ok: false, reason: "too-large" });
   });
 
   it("rejects a candidate whose realpath escapes the root (injected realpath — defends a TOCTOU window even though symlinks are already blocked earlier)", async () => {

@@ -29,25 +29,19 @@ import { config } from "../hub/helpers.js";
 import { login, rawRequest, type RawResponse } from "./helpers.js";
 import { lanPostJson, seedLanUser } from "./lan-helpers.js";
 
+import { freePort, freePortRange } from "../../helpers/free-port.js";
+
+/** Thin re-export of tests/helpers/free-port.ts (kept for existing imports). */
 export async function freeTcpPort(): Promise<number> {
-  const srv = createNetServer();
-  srv.listen(0, "127.0.0.1");
-  await new Promise<void>((resolve, reject) => {
-    srv.once("listening", resolve);
-    srv.once("error", reject);
-  });
-  const port = (srv.address() as { port: number }).port;
-  await new Promise<void>((resolve) => srv.close(() => resolve()));
-  return port;
+  return await freePort();
 }
 
 /** A 16-port range that excludes every `avoid` port (+1 guard). */
 export async function freeProxyRange(avoid: readonly number[]): Promise<[number, number]> {
   for (let i = 0; i < 64; i++) {
-    const base = await freeTcpPort();
-    if (base + 16 > 65_535 || base < 1_100) continue;
-    if (avoid.some((p) => p >= base - 1 && p <= base + 16)) continue;
-    return [base, base + 15];
+    const [base, last] = await freePortRange(16);
+    if (avoid.some((p) => p >= base - 1 && p <= last + 1)) continue;
+    return [base, last];
   }
   throw new Error("no free proxy range");
 }

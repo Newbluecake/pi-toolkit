@@ -169,8 +169,13 @@ export function createNewSession<TTimer = ReturnType<typeof setTimeout>>(
       // session-history plan §4.7.1: session-class rejections carry their wire reason as
       // `code` (the dialog maps it to a `history.err*` line and refreshes the list).
       ...(kind === "session" && outcome.reason !== undefined ? { code: outcome.reason } : {}),
-      // created-dirs plan r2 §4: the LAN-only E_DIR cause rides only the dir bucket.
-      ...(kind === "dir" && outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+      // Keep launcher diagnostics through the failed flow, including gate 3's detail.
+      ...((kind === "launcher" || kind === "launcher-changed") && outcome.reason !== undefined
+        ? { reason: outcome.reason }
+        : {}),
+      ...((kind === "dir" || kind === "launcher" || kind === "launcher-changed") && outcome.detail !== undefined
+        ? { detail: outcome.detail }
+        : {}),
     };
   }
 

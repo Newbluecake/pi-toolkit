@@ -9,6 +9,7 @@
  */
 /** UploadStats is imported type-only: `uploads.ts` never imports this module (the store's audit
  * seam is the `deps.audit` callback), so there is no cycle. */
+import type { HubLog } from "./ports.js";
 import type { UploadStats } from "./uploads.js";
 import type { SpawnAuditRecord } from "./spawn/supervisor.js";
 import type { WtDiffFileKind, WtDiffStatus } from "../protocol/worktree-diff.js";
@@ -295,6 +296,8 @@ export const SPAWN_AUDIT_KEYS = [
   "restore",
   "restoreFailure",
   "attempt",
+  "reason",
+  "detail",
 ] as const;
 
 /** `log.info("spawn", { audit: "spawn", ...pick(record, SPAWN_AUDIT_KEYS) })` (arch §6.6). */
@@ -677,6 +680,9 @@ export const PRIVACY_AUDIT_KEYS = [
   "ok",
   "code",
   "ms",
+  // channel-plan §5.2 (CH1): tail-appended so pre-channel lines keep their key order.
+  "bcast",
+  "recipients",
 ] as const;
 
 /** `log.info("privacy", { audit: "privacy", ...pick(record, PRIVACY_AUDIT_KEYS) })`. */
@@ -756,4 +762,104 @@ export function auditLanSession(log: { info(msg: string, data?: object): void },
 export function auditLan2fa(log: { info(msg: string, data?: object): void }, record: Lan2faAuditRecord): void {
   if (record.phase === "admin") auditLanSecurity(log, "lan-2fa", record, ["op", "ok"]);
   else auditLanSecurity(log, "lan-2fa", record, LAN_2FA_AUDIT_KEYS);
+}
+
+/** Slash-args: text-free whitelist, deliberately excludes identity, prefix and item text. */
+export interface CommandCompleteAuditRecord {
+  listener: "loopback" | "lan";
+  name?: string;
+  plen?: number;
+  hits?: number;
+  ms?: number;
+  code?: string;
+  source?: "own" | "tui";
+}
+export function auditCommandComplete(log: HubLog, record: CommandCompleteAuditRecord): void {
+  const out: Record<string, unknown> = {};
+  for (const key of ["listener", "name", "plen", "hits", "ms", "code", "source"] as const) {
+    if (record[key] !== undefined) out[key] = record[key];
+  }
+  log.info("command-complete", out);
+}
+
+// ---------------------------------------------------------------------------
+// fabric phase-2 X1 (phase2-plan §8.5): the cross-session relay audit channel
+// ---------------------------------------------------------------------------
+
+/**
+ * One line per xs relay decision. Whitelist ONLY: the message body — and any hash of it — can
+ * never reach `hub.log` (XI6); the record carries lengths, codes and session-id PREFIXES (8
+ * chars). `reason`/`code` come partly from the receiving peer, so they are accepted only in
+ * strict token shape (a free-form string from a remote could smuggle text) and dropped otherwise.
+ */
+export interface XsAuditRecord {
+  /** Fixed association kind only — never the request id or message body. */
+  reply?: "expect" | "reply";
+  op: "list" | "resolve" | "send" | "info" | "broadcast" | "channels" | "alias";
+  /** Channel-plan §5.2 step 8: a per-recipient `op:"send"` line that belongs to a broadcast. */
+  bcast?: boolean;
+  /** Channel-plan §5.2 step 8: the broadcast line's recipient count N (never names or refs). */
+  recipients?: number;
+  xid?: string;
+  fromSession?: string;
+  toSession?: string;
+  textLen?: number;
+  wake?: boolean;
+  outcome?: "ok" | "applied" | "none" | "unknown" | "error";
+  reason?: string;
+  code?: string;
+  ms?: number;
+}
+
+export const XS_AUDIT_KEYS = [
+  "op",
+  "reply",
+  "xid",
+  "fromSession",
+  "toSession",
+  "textLen",
+  "wake",
+  "outcome",
+  "reason",
+  "code",
+  "ms",
+  // channel-plan §5.2 (CH1): tail-appended so pre-channel lines keep their key order.
+  "bcast",
+  "recipients",
+] as const;
+
+const XS_TOKEN_RE = /^[A-Za-z0-9_:.{}-]{1,64}$/;
+
+export function auditXs(log: { info(msg: string, data?: object): void }, record: XsAuditRecord): void {
+  const out: Record<string, unknown> = { audit: "xs" };
+  const raw = record as unknown as Record<string, unknown>;
+  for (const key of XS_AUDIT_KEYS) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (key === "reply") {
+      if (value === "expect" || value === "reply") out[key] = value;
+      continue;
+    }
+    if (key === "fromSession" || key === "toSession") {
+      if (typeof value === "string" && XS_TOKEN_RE.test(value)) out[key] = value.slice(0, 8);
+      continue;
+    }
+    if (key === "xid" || key === "reason" || key === "code") {
+      if (typeof value === "string" && XS_TOKEN_RE.test(value)) out[key] = value;
+      continue;
+    }
+    if (key === "textLen" || key === "ms" || key === "recipients") {
+      if (typeof value === "number" && Number.isFinite(value)) out[key] = Math.max(0, Math.trunc(value));
+      continue;
+    }
+    if (key === "wake" || key === "bcast") {
+      if (typeof value === "boolean") out[key] = value;
+      continue;
+    }
+    if (key === "op" || key === "outcome") {
+      if (typeof value === "string" && XS_TOKEN_RE.test(value)) out[key] = value;
+      continue;
+    }
+  }
+  log.info("xs", out);
 }

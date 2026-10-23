@@ -319,6 +319,102 @@ describe("execute — extension dispatch + capture.arm/settleArm (§4.9)", () =>
   });
 });
 
+describe("execute — extension async-late channel (fix 2026-10-22)", () => {
+  /** Engine-shaped fake: owns the name, empty sync output, but an OPEN window for the frame's
+   *  cmdId — plus the one-shot finish listener the bridge registers. */
+  function asyncCapture(output: CommandOutputWire) {
+    const listeners = new Map<string, (reason: "settled" | "timeout") => void>();
+    const port: CommandCapturePort & { fire(id: string, reason: "settled" | "timeout"): void } = {
+      arm() {},
+      take: () => undefined,
+      settleArm() {},
+      finish() {},
+      owns: () => true,
+      output: () => ({ entries: [] }),
+      isActive: (cmdId: string) => cmdId === "cmd-0000000000000001",
+      onFinish: (cmdId: string, listener) => {
+        listeners.set(cmdId, listener);
+      },
+      outputFor: () => output,
+      fire(id: string, reason) {
+        const listener = listeners.get(id);
+        if (listener !== undefined) listener(reason);
+      },
+    };
+    return port;
+  }
+
+  it("still-open window + sendLate wired ⇒ completion:async, and the finish listener sends the late result with outputFor's output", () => {
+    const { pi } = fakePi({ commands: [{ name: "fabric", source: "extension" }] });
+    const late: Array<{ id: string; body: unknown; reason?: "settled" | "timeout" }> = [];
+    const output: CommandOutputWire = { entries: [{ kind: "notify", text: "fabric status ok", level: "info" }] };
+    const capture = asyncCapture(output);
+    const bridge = createBuiltinBridge(
+      baseDeps({
+        pi,
+        capture: () => capture,
+        sendLate: (frame, result) => late.push({ id: frame.id, body: result }),
+      }),
+    );
+    const result = bridge.execute(frame("fabric", "status"));
+    expect(result).toEqual({
+      ok: true,
+      data: { op: "command", kind: "extension", completion: "async", captured: true },
+    });
+    expect(late).toEqual([]); // nothing late yet — the handler is still running
+    capture.fire("cmd-0000000000000001", "settled");
+    expect(late).toEqual([
+      {
+        id: "cmd-0000000000000001",
+        body: {
+          ok: true,
+          data: { op: "command", kind: "extension", completion: "sync", captured: true, output },
+        },
+      },
+    ]);
+  });
+
+  it("a timeout-reason finish (window expiry / boundary dispose) sends the same late upgrade", () => {
+    const { pi } = fakePi({ commands: [{ name: "fabric", source: "extension" }] });
+    const late: unknown[] = [];
+    const capture = asyncCapture({ entries: [] }); // nothing collected in time
+    const bridge = createBuiltinBridge(
+      baseDeps({ pi, capture: () => capture, sendLate: (_f, result) => late.push(result) }),
+    );
+    expect(bridge.execute(frame("fabric", "status"))).toMatchObject({ data: { completion: "async" } });
+    capture.fire("cmd-0000000000000001", "timeout");
+    expect(late).toEqual([
+      { ok: true, data: { op: "command", kind: "extension", completion: "sync", captured: true } },
+    ]);
+  });
+
+  it("no sendLate wired ⇒ stays completion:unknown even with an open window (legacy degrade)", () => {
+    const { pi } = fakePi({ commands: [{ name: "fabric", source: "extension" }] });
+    const capture = asyncCapture({ entries: [] });
+    const bridge = createBuiltinBridge(baseDeps({ pi, capture: () => capture }));
+    expect(bridge.execute(frame("fabric", "status"))).toEqual({
+      ok: true,
+      data: { op: "command", kind: "extension", completion: "unknown", captured: true },
+    });
+  });
+
+  it("window NOT active (settle-deferred handler — take() never matched) ⇒ stays completion:unknown", () => {
+    const { pi } = fakePi({ commands: [{ name: "fabric", source: "extension" }] });
+    const capture = asyncCapture({ entries: [] });
+    const bridge = createBuiltinBridge(
+      baseDeps({
+        pi,
+        capture: () => ({ ...capture, isActive: () => false }),
+        sendLate: (_f, r) => void r,
+      }),
+    );
+    expect(bridge.execute(frame("fabric", "status"))).toEqual({
+      ok: true,
+      data: { op: "command", kind: "extension", completion: "unknown", captured: true },
+    });
+  });
+});
+
 describe("execute — builtin dispatch (§4.6 builtin row)", () => {
   it("/session returns a synchronous text summary built from ctx", () => {
     const { ctx } = fakeCtx({
@@ -515,5 +611,51 @@ describe("execute — web-resume resume forms (§2.4/§2.5)", () => {
     expect(bridge.isQuiet(frame("resume", '__pick {"id":"x","gen":"0123456789abcdef"}'))).toBe(false);
     expect(bridge.isQuiet(frame("resume", ""))).toBe(false);
     expect(bridge.isQuiet(frame("new", ""))).toBe(false);
+  });
+});
+
+describe("execute — /fabric web surface (2026-10-22 ruling: policy-gated, not hard-denied)", () => {
+  it("fabric join is baseline allow and dispatches as an ordinary extension command", () => {
+    const { pi, sent } = fakePi({ commands: [{ name: "fabric", source: "extension" }] });
+    const bridge = createBuiltinBridge(baseDeps({ pi }));
+    expect(bridge.execute(frame("fabric", "join"))).toMatchObject({ ok: true });
+    expect(sent[0]).toEqual({ text: "/fabric join", options: { expandPromptTemplates: true, deliverAs: "followUp" } });
+  });
+
+  it("webCommandPolicy.fabric:'deny' refuses the mutation (override wins for the whole name)", () => {
+    const { pi, sent } = fakePi({ commands: [{ name: "fabric", source: "extension" }] });
+    const bridge = createBuiltinBridge(baseDeps({ pi, overrides: () => ({ fabric: "deny" }) }));
+    expect(bridge.execute(frame("fabric", "join"))).toMatchObject({
+      ok: false,
+      code: "E_COMMAND_DENIED",
+      effect: "none",
+    });
+    expect(sent).toEqual([]);
+  });
+
+  it("webCommandPolicy.fabric:'confirm' goes through the E_CONFIRM_REQUIRED → confirm:true round-trip", () => {
+    const { pi } = fakePi({ commands: [{ name: "fabric", source: "extension" }] });
+    const bridge = createBuiltinBridge(baseDeps({ pi, overrides: () => ({ fabric: "confirm" }) }));
+    const first = bridge.execute(frame("fabric", "leave"));
+    expect(first).toMatchObject({ ok: false, code: "E_CONFIRM_REQUIRED", effect: "none" });
+    expect((first as { message?: string }).message).toContain("/fabric leave");
+    expect(bridge.execute(frame("fabric", "leave", {}, true))).toMatchObject({ ok: true });
+  });
+
+  it("an unknown subcommand stays denied (typo surface)", () => {
+    const { pi } = fakePi({ commands: [{ name: "fabric", source: "extension" }] });
+    const bridge = createBuiltinBridge(baseDeps({ pi }));
+    expect(bridge.execute(frame("fabric", "joinx"))).toMatchObject({ ok: false, code: "E_COMMAND_DENIED" });
+  });
+
+  it("the web sees join's output: a captured fabric invocation settles completion:sync with output", () => {
+    const { pi } = fakePi({ commands: [{ name: "fabric", source: "extension" }] });
+    const output: CommandOutputWire = { entries: [{ kind: "notify", text: "已加入（epoch 1）。", level: "info" }] };
+    const capture = fakeCapture({ owns: () => true, output: () => output });
+    const bridge = createBuiltinBridge(baseDeps({ pi, capture: () => capture }));
+    expect(bridge.execute(frame("fabric", "join"))).toEqual({
+      ok: true,
+      data: { op: "command", kind: "extension", completion: "sync", captured: true, output },
+    });
   });
 });

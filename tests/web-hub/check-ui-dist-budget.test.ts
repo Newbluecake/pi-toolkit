@@ -10,15 +10,19 @@ describe("check:web JS budget classification", () => {
     ["theme-init.js", "document.documentElement.dataset.theme = 'dark';"],
   ]);
 
-  it("classifies entry, modulepreload, and classic theme scripts as first-screen", () => {
+  it("classifies entry, modulepreload, classic theme scripts and the entry's STATIC imports as first-screen", () => {
     const html = `
       <script src="/theme-init.js"></script>
       <script type="module" src="/assets/entry.js"></script>
       <link rel="modulepreload" href="/assets/preloaded.js">
     `;
     const result = classifyJsAssets(html, fixture);
-    expect(result.firstScreen).toEqual(new Set(["theme-init.js", "assets/entry.js", "assets/preloaded.js"]));
-    expect(result.lazy).toEqual(new Set(["assets/shared.js", "assets/lazy.js"]));
+    // web-hub-mermaid plan §7.3: static imports are followed even when modulepreload links exist (the old guard
+    // `modulePreloads.length === 0` let a statically imported chunk be miscounted as lazy).
+    expect(result.firstScreen).toEqual(
+      new Set(["theme-init.js", "assets/entry.js", "assets/preloaded.js", "assets/shared.js"]),
+    );
+    expect(result.lazy).toEqual(new Set(["assets/lazy.js"]));
   });
 
   it("follows static imports when the build has no modulepreload links", () => {

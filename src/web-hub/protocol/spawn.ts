@@ -706,7 +706,7 @@ export interface PiVersionRange {
   min: string;
   maxExclusive: string;
 }
-export const SUPPORTED_PI_RANGE: PiVersionRange = { min: "1.0.0", maxExclusive: "1.3.0" };
+export const SUPPORTED_PI_RANGE: PiVersionRange = { min: "1.0.0", maxExclusive: "1.4.0" };
 
 // ---------------------------------------------------------------------------
 // compile-time drift guards (schema static type ≡ frozen interface; no runtime effect)

@@ -291,6 +291,20 @@ describe("createCommandHandler — prompt (§4.2/§4.3/D4/D5/D13/D21)", () => {
     expect(h.sent).toHaveLength(1);
   });
 
+  it("onSessionBoundary: a queued web item ends dropped{session} AND unbound, so the next session's ctl slot still carries it (todo #8 residual #2)", () => {
+    const h = makeHarness();
+    h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
+    h.handler.onInputEvent({ text: "hi", source: "extension", streamingBehavior: "steer" });
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "queued" });
+    h.handler.onSessionBoundary(); // session_shutdown — the link may be down right now
+    h.ctxState.sessionId = "sess-2";
+    h.handler.onSessionBoundary(); // session_start of the replacement session: nothing left to clear
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "dropped", reason: "session" });
+    expect(h.deps.ledger.frame("sess-2", "ep", 1000).items).toContainEqual(
+      expect.objectContaining({ cmdId: "c1", state: "dropped", reason: "session" }),
+    );
+  });
+
   it("unobserved after 3s ⇒ ok{delivery:'unobserved'} (D5: never a hard failure)", () => {
     const h = makeHarness();
     h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
@@ -476,6 +490,57 @@ describe("createCommandHandler — command (delegates to BuiltinBridge, §4.6 ou
     h.handler.handle(frame("c1", { op: "command", name: "foo", args: "" }));
     expect(h.sent[0]).toMatchObject({ ok: false, code: "E_UNSUPPORTED" });
     expect(h.originEntry.notify).not.toHaveBeenCalled();
+  });
+
+  // fix (2026-10-22): the async-late channel — an extension command answering completion:async
+  // (capture window still open) replies WITHOUT settling the ledger, so the ctl-slot republish
+  // keeps the browser's pendingCtl item alive until handleBridgeLate upgrades it with the output.
+  it("completion:async extension command ⇒ reply-only (ledger stays running); handleBridgeLate settles it late with cmd_late", () => {
+    const h = makeHarness();
+    const f = frame("c1", { op: "command", name: "fabric", args: "status" });
+    (h.builtinBridge.execute as ReturnType<typeof vi.fn>).mockReturnValue({
+      ok: true,
+      data: { op: "command", kind: "extension", completion: "async", captured: true },
+    });
+    h.handler.handle(f);
+    // The HTTP reply went out unchanged …
+    expect(h.sent[0]).toMatchObject({
+      t: "cmd_result",
+      id: "c1",
+      ok: true,
+      data: { completion: "async", captured: true },
+    });
+    // … but the entry is still running (no ok-settle that would terminate the UI item early).
+    expect(h.deps.ledger.get("c1")).toMatchObject({ state: "running" });
+    expect(h.onChanged).not.toHaveBeenCalled();
+
+    const lateBody = {
+      ok: true,
+      data: {
+        op: "command",
+        kind: "extension",
+        completion: "sync",
+        captured: true,
+        output: { entries: [{ kind: "notify", text: "fabric status ok", level: "info" }] },
+      },
+    } as const;
+    h.handler.handleBridgeLate(f, lateBody);
+    expect(h.deps.ledger.get("c1")).toMatchObject({ state: "ok", late: true });
+    expect(h.deps.ledger.query("c1")?.result).toEqual(lateBody);
+    expect(h.sent[1]).toMatchObject({ t: "cmd_late", id: "c1", op: "command", ok: true });
+    expect(h.onChanged).toHaveBeenCalled();
+  });
+
+  it("completion:async BUILTIN commands keep the legacy immediate settle (their cmd_late is an upgrade, not the primary settle)", () => {
+    const h = makeHarness();
+    (h.builtinBridge.execute as ReturnType<typeof vi.fn>).mockReturnValue({
+      ok: true,
+      data: { op: "command", kind: "builtin", completion: "async" },
+    });
+    h.handler.handle(frame("c1", { op: "command", name: "compact", args: "" }));
+    expect(h.sent[0]).toMatchObject({ ok: true, data: { completion: "async" } });
+    expect(h.deps.ledger.get("c1")).toMatchObject({ state: "ok" }); // settled now, like before
+    expect(h.onChanged).toHaveBeenCalled();
   });
 });
 

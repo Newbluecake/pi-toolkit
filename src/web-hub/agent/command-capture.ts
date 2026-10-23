@@ -4,7 +4,13 @@ import type {
   ExtensionUIContext,
   RegisteredCommand,
 } from "@earendil-works/pi-coding-agent";
-import type { CmdOrigin, CommandOutputEntry, CommandOutputWire } from "../protocol/messages.js";
+import type { ArgCompleter } from "./command-complete.js";
+import {
+  isFeishuCmdOrigin,
+  type CmdOrigin,
+  type CommandOutputEntry,
+  type CommandOutputWire,
+} from "../protocol/messages.js";
 
 export interface CaptureInvocation {
   cmdId: string;
@@ -20,6 +26,18 @@ export interface CommandCapturePort {
   settleArm?(): void;
   finish?(cmdId: string): void;
   owns?(name: string): boolean;
+  /** Web-command async-late channel (fix 2026-10-22): true while `cmdId`'s capture window is
+   *  open — the invocation was claimed and its handler Promise has neither settled nor hit the
+   *  CAPTURE_MAX_MS window expiry. Optional: a port without it keeps the bridge's legacy
+   *  `completion:"unknown"` answer for a still-running handler (no async promise made). */
+  isActive?(cmdId: string): boolean;
+  /** One-shot listener for that window's finish — handler Promise settle (`"settled"`) or the
+   *  CAPTURE_MAX_MS window expiry (`"timeout"`, settle-anyway semantics). Fires at most once,
+   *  never rethrows into the engine. Optional: absent ⇒ the bridge never reports `async`. */
+  onFinish?(cmdId: string, listener: (reason: "settled" | "timeout") => void): void;
+  /** cmdId-scoped output read (the `output()` variant that keeps working after the window
+   *  closed / left the active stack — used by the async-late channel's finish listener). */
+  outputFor?(cmdId: string): CommandOutputWire | undefined;
   collect?(entry: {
     kind: "notify" | "widget" | "status" | "text" | "error" | "interactive";
     text: string;
@@ -54,8 +72,10 @@ const FALLBACK_TTL_MS = 5_000;
  * windows never grow unbounded; FIFO-evicted, oldest first. */
 const MAX_RETAINED_WINDOWS = 64;
 
-/** Strip ANSI CSI/OSC sequences, then any other C0 control byte except `\n`/`\t` (§4.9 point 8). */
-function sanitizeText(raw: string): string {
+/** Strip ANSI CSI/OSC sequences, then any other C0 control byte except `\n`/`\t` (§4.9 point 8).
+ * web-hub-slash-args plan §4.3 #6 (P1): also the shared sanitizer for completion items and
+ * usage lines — exported for `command-complete.ts`/`command-usage.ts`. */
+export function sanitizeText(raw: string): string {
   const noOsc = raw.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
   const noCsi = noOsc.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
   const noOtherEsc = noCsi.replace(/\x1b[@-Z\\-_]/g, "");
@@ -121,6 +141,12 @@ export interface CommandCaptureEngine extends CommandCapturePort {
   /** cmdId-scoped variants used internally by {@link wrapCommandApi}. */
   collectFor(cmdId: string, entry: CommandOutputEntry): void;
   outputFor(cmdId: string): CommandOutputWire | undefined;
+  isActive(cmdId: string): boolean;
+  onFinish(cmdId: string, listener: (reason: "settled" | "timeout") => void): void;
+  /** Close every window and fire every pending finish listener with `"timeout"` (settle-anyway)
+   *  — the session-boundary cleanup so a listener can never outlive the stack by more than the
+   *  CAPTURE_MAX_MS self-expiry it already has. At most once per listener by construction. */
+  dispose(): void;
 }
 
 /**
@@ -151,11 +177,29 @@ export function createCommandCaptureEngine(
   const windows = new Map<string, Window>();
   const retainedOrder: string[] = [];
   const activeStack: string[] = [];
+  /** cmdId -> the still-pending one-shot finish listener (async-late channel). Every entry is
+   *  guaranteed to fire: `finish()` on handler settle, the window's CAPTURE_MAX_MS timer on
+   *  expiry, or `dispose()` on a session boundary — whichever comes first, exactly once. */
+  const finishListeners = new Map<string, (reason: "settled" | "timeout") => void>();
+
+  function fireFinish(cmdId: string, reason: "settled" | "timeout"): void {
+    const listener = finishListeners.get(cmdId);
+    if (listener === undefined) return;
+    finishListeners.delete(cmdId);
+    try {
+      listener(reason);
+    } catch {
+      /* a broken listener must never break the capture engine */
+    }
+  }
 
   function openWindow(cmdId: string): void {
     const timer = setTimeout(() => {
       const win = windows.get(cmdId);
       if (win !== undefined) win.closed = true;
+      // Settle-anyway: the CAPTURE_MAX_MS expiry is also a finish — a registered async-late
+      // listener must not wait for a handler Promise that may never settle.
+      fireFinish(cmdId, "timeout");
     }, CAPTURE_MAX_MS);
     timer.unref?.();
     windows.set(cmdId, {
@@ -219,6 +263,7 @@ export function createCommandCaptureEngine(
     }
     const idx = activeStack.lastIndexOf(cmdId);
     if (idx !== -1) activeStack.splice(idx, 1);
+    fireFinish(cmdId, "settled");
   }
 
   function owns(name: string): boolean {
@@ -267,6 +312,15 @@ export function createCommandCaptureEngine(
     return out;
   }
 
+  function isActive(cmdId: string): boolean {
+    const win = windows.get(cmdId);
+    return win !== undefined && !win.closed;
+  }
+
+  function onFinish(cmdId: string, listener: (reason: "settled" | "timeout") => void): void {
+    finishListeners.set(cmdId, listener);
+  }
+
   return {
     arm,
     take,
@@ -276,6 +330,25 @@ export function createCommandCaptureEngine(
     registerOwned,
     collectFor,
     outputFor,
+    isActive,
+    onFinish,
+    dispose() {
+      // Close every window first (timers cleared, no further collection), then fire the
+      // listeners — they still read their (now-closed) window's collected output before the
+      // maps go away, so a boundary settle carries whatever was captured so far.
+      for (const win of windows.values()) {
+        win.closed = true;
+        if (win.timer !== undefined) clearTimeout(win.timer);
+      }
+      for (const cmdId of [...finishListeners.keys()]) fireFinish(cmdId, "timeout");
+      windows.clear();
+      retainedOrder.length = 0;
+      activeStack.length = 0;
+      finishListeners.clear();
+      for (const queued of queue) clearTimeout(queued.timer);
+      queue.length = 0;
+      syncSlot = undefined;
+    },
     collect(entry) {
       const cmdId = activeStack[activeStack.length - 1];
       if (cmdId === undefined) return;
@@ -291,8 +364,10 @@ export function createCommandCaptureEngine(
 /** Production factory (`src/web-hub/agent/index.ts`'s call site). `ownedNames` is the same
  * `Set<string>` object `wrapCommandApi` writes into at real `registerCommand` time — `src/index.ts`
  * creates it once and passes it to both sides (see the doc comment above
- * {@link createCommandCaptureEngine}). */
-export function createCommandCapture(ownedNames?: Set<string>): CommandCapturePort {
+ * {@link createCommandCaptureEngine}). Returns the full engine (the async-late channel needs
+ * `isActive`/`onFinish`/`outputFor`, the session-boundary cleanup needs `dispose`) — assignable
+ * wherever the narrower {@link CommandCapturePort} is expected. */
+export function createCommandCapture(ownedNames?: Set<string>): CommandCaptureEngine {
   return createCommandCaptureEngine(ownedNames !== undefined ? { ownedNames } : {});
 }
 
@@ -383,15 +458,23 @@ function createCapturedUi(ui: ExtensionUIContext, capture: InternalCapture, cmdI
 
 /** §4.9 point 4: `ctxProxy` — same delegate-everything-except-`ui` shape as `wrapCommandApi`'s own
  * outer proxy, plus a synthetic `webInvocation: true` (what `isWebInvocation` reads) so command
- * code (`canOpenSettingsEditor`, `/tasklist`, …) can special-case a web-claimed invocation. */
+ * code (`canOpenSettingsEditor`, `/tasklist`, …) can special-case a web-claimed invocation.
+ * 2026-10-22 fabric ruling: when the claimed invocation's origin is the hub-internal Feishu
+ * marker (`isFeishuCmdOrigin`), the proxy additionally carries a synthetic `feishuInvocation:
+ * true` (what `isFeishuInvocation` reads) so command code can keep refusing Feishu-sourced
+ * mutations while allowing web ones. The marker is derived ONLY from the trusted, hub-constructed
+ * origin — never from anything a browser controls. */
 function createCapturedCtx(
   ctx: ExtensionCommandContext,
   capture: InternalCapture,
   cmdId: string,
+  origin?: CmdOrigin,
 ): ExtensionCommandContext {
+  const feishu = origin !== undefined && isFeishuCmdOrigin(origin);
   return new Proxy(ctx, {
     get(target, property) {
       if (property === "webInvocation") return true;
+      if (property === "feishuInvocation" && feishu) return true;
       if (property === "ui")
         return createCapturedUi(Reflect.get(target, "ui", target) as ExtensionUIContext, capture, cmdId);
       const value = Reflect.get(target, property, target);
@@ -436,17 +519,19 @@ async function runCaptured(
  * degrades to a plain `Reflect.apply`/`Reflect.get` passthrough with `this`
  * bound to `target` \u2014 byte-identical behavior to the unwrapped `pi`.
  *
- * C12: when a capture *is* wired and `take(name, args)` actually claims this invocation (§4.9
- * point 3 — the web dispatcher armed it first), the real handler runs with a captured `ctx` (§4.9
- * point 4/5) instead of the original one, and `finish` is called once its Promise settles. Every
- * other case (`getCapture()` undefined, or `take()` returns undefined because this specific
- * invocation was never claimed — e.g. a human typing the same command on the terminal) is the
- * exact original passthrough, unchanged.
+ * web-hub-slash-args plan §4.4 (P1): the optional 4th parameter is the same
+ * by-reference `Map<string, ArgCompleter>` `src/index.ts` creates once per
+ * `activate()` and hands to the web-hub wiring (the `ownedNames` pattern,
+ * verbatim). The proxy records each command's RAW `getArgumentCompletions`
+ * function at real registration time — never a wrapped handler — so S-own
+ * completion calls the exact function pi itself would call. No such field ⇒ no
+ * entry; `ownedNames` behavior is untouched by this parameter.
  */
 export function wrapCommandApi<T extends ExtensionAPI>(
   pi: T,
   getCapture: () => CommandCapturePort | undefined,
   ownedNames?: Set<string>,
+  argCompleters?: Map<string, ArgCompleter>,
 ): T {
   return new Proxy(pi, {
     get(target, property) {
@@ -464,6 +549,11 @@ export function wrapCommandApi<T extends ExtensionAPI>(
         command: Omit<RegisteredCommand, "name" | "sourceInfo">,
       ): unknown {
         ownedNames?.add(name);
+        // §4.4: capture the RAW completer (typed loosely — pi's exact signature lives in
+        // command-complete.ts's ArgCompleter; the structural shapes agree).
+        if (typeof command.getArgumentCompletions === "function") {
+          argCompleters?.set(name, command.getArgumentCompletions as ArgCompleter);
+        }
         const handler = command.handler;
         if (typeof handler !== "function") return Reflect.apply(register, target, [name, command]);
         const wrapped = {
@@ -473,7 +563,7 @@ export function wrapCommandApi<T extends ExtensionAPI>(
             if (capture === undefined) return Reflect.apply(handler, this, [args, ctx]);
             const invocation = capture.take(name, args);
             if (invocation === undefined) return Reflect.apply(handler, this, [args, ctx]);
-            const ctxProxy = createCapturedCtx(ctx, capture, invocation.cmdId);
+            const ctxProxy = createCapturedCtx(ctx, capture, invocation.cmdId, invocation.origin);
             return runCaptured(handler, this, args, ctxProxy, capture, invocation.cmdId);
           },
         } as Omit<RegisteredCommand, "name" | "sourceInfo">;
@@ -485,4 +575,12 @@ export function wrapCommandApi<T extends ExtensionAPI>(
 
 export function isWebInvocation(ctx: ExtensionCommandContext): boolean {
   return Boolean((ctx as unknown as { webInvocation?: unknown }).webInvocation);
+}
+
+/** 2026-10-22 fabric ruling: true only for a web-claimed invocation whose capture origin was the
+ *  hub-internal Feishu marker (see `createCapturedCtx`). Today the Feishu admission layer never
+ *  forwards `command`-op frames at all, so this is unreachable defense-in-depth for `/fabric`'s
+ *  Feishu refusal — it exists so the refusal survives any future widening of that admission. */
+export function isFeishuInvocation(ctx: ExtensionCommandContext): boolean {
+  return Boolean((ctx as unknown as { feishuInvocation?: unknown }).feishuInvocation);
 }

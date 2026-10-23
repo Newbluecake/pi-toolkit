@@ -287,6 +287,7 @@ export async function startFresh(intent: FreshSpawnIntent, ctx: FreshSpawnContex
         ...(result.code === "E_LIMIT"
           ? { limit: result.limit ?? "global", active: result.active, max: result.max }
           : {}),
+        ...(result.code === "E_LAUNCHER" ? { reason: result.reason ?? "unavailable" } : {}),
         code: result.code,
       },
       auth.origin ?? origin,

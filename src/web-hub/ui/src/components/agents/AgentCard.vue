@@ -5,7 +5,18 @@
   back/forward, middle-click-open-in-new-tab and Tab-order all work for free (ui-design §6.2).
 -->
 <script setup lang="ts">
-import { computed, inject } from "vue";
+import {
+  aliasChipText,
+  xsAliasOf,
+  xsBadgeOf,
+  xsChannelChipOf,
+  xsUnreadLabel,
+  xsUnreadOf,
+  type XsReceive,
+} from "./agentCardModel.js";
+import type { IconName } from "../../icons/names.js";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { observeResize } from "../../composables/useSharedResize.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { formatPercent } from "../../format.js";
@@ -22,6 +33,18 @@ const { t } = i18n;
 // showing `waiting`). The frozen `AgentCardView` has no dialogs field, so the card looks its
 // own agent up in the App.vue-provided `HUB_CTX` state (no provider ⇒ no badge).
 const hub = inject(HUB_CTX, null);
+const XS_ICON: Record<XsReceive, IconName> = { wake: "radio", deliver: "inbox", replies: "swap", off: "ban" };
+const xsBadge = computed(() => xsBadgeOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]));
+const xsUnread = computed(() =>
+  xsUnreadOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]),
+);
+// channel-plan §7 (CHU): chip only for a channel set ≠ [default] and only with hub cap xs.channel.v1.
+const xsChannels = computed(() =>
+  xsChannelChipOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]),
+);
+// alias-plan r4 §7.2 (ALU): the `@alias` chip sits between the xs badge and the channel chip
+// (chip order kind → 状态类 → xs 徽标 → @别名 → #频道 → 未读角标); cap xs.alias.v1 only.
+const xsAlias = computed(() => xsAliasOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]));
 const needsAnswer = computed(() => {
   const dialogs = hub?.state.value.agents.get(props.card.key)?.dialogs;
   return Array.isArray(dialogs?.open) && dialogs.open.length > 0;
@@ -77,6 +100,38 @@ const dotClass = computed(() => {
   }
 });
 
+// Badge placement: the chips group stays after the path while path + chips fit on row 1;
+// otherwise it moves (Teleport — still ONE DOM node, one aria tree) to the session-name line.
+// Measurements are placement-independent (title's natural width, the chips' intrinsic width,
+// the 1fr column's width), so moving the group can never feed back into the decision.
+const mainEl = ref<HTMLElement | null>(null);
+const titleEl = ref<HTMLElement | null>(null);
+const chipsEl = ref<HTMLElement | null>(null);
+const belowEl = ref<HTMLElement | null>(null);
+const chipsBelow = ref(false);
+
+function measure(): void {
+  const main = mainEl.value;
+  const title = titleEl.value;
+  const chips = chipsEl.value;
+  if (!main || !title || !chips) return;
+  const gap = Number.parseFloat(getComputedStyle(main).columnGap) || 0;
+  chipsBelow.value = title.scrollWidth + gap + chips.offsetWidth > main.clientWidth;
+}
+
+const stops: Array<() => void> = [];
+onMounted(() => {
+  measure();
+  for (const el of [mainEl.value, chipsEl.value]) if (el) stops.push(observeResize(el, measure));
+});
+onBeforeUnmount(() => {
+  for (const stop of stops.splice(0)) stop();
+});
+watch(
+  () => props.card.shortCwd,
+  () => void nextTick(measure),
+);
+
 const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
 </script>
 
@@ -89,45 +144,93 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
   >
     <span class="agent-row1">
       <span class="dot" :class="dotClass"></span>
-      <span class="agent-title" translate="no">{{ card.shortCwd }}</span>
-      <span class="chip" translate="no">{{ kindLabel }}</span>
-      <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
-        {{ t("agents.stopped") }}
+      <span ref="mainEl" class="agent-main">
+        <span ref="titleEl" class="agent-title" translate="no" :title="card.cwdFull || card.shortCwd"
+          ><bdi>{{ card.shortCwd }}</bdi></span
+        >
+        <Teleport :to="belowEl ?? 'body'" :disabled="!chipsBelow || !belowEl">
+          <span ref="chipsEl" class="agent-chips">
+            <span class="chip" translate="no">{{ kindLabel }}</span>
+            <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
+              {{ t("agents.stopped") }}
+            </span>
+            <span v-if="managed" class="chip chip-web" translate="no" :title="t('spawn.badgeWebTitle')">
+              {{ t("spawn.badgeWeb") }}
+            </span>
+            <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">
+              {{ t("spawn.badgeRestoring") }}
+            </span>
+            <span v-else-if="restored" class="chip chip-restored" translate="no" :title="t('spawn.badgeRestoredTitle')">
+              {{ t("spawn.badgeRestored") }}
+            </span>
+            <span v-if="managed?.removing" class="chip chip-removing" translate="no">
+              {{ t("agents.removing") }}
+            </span>
+            <span
+              v-else-if="xsBadge"
+              class="chip chip-xs"
+              role="img"
+              :data-xs="xsBadge"
+              :title="t(`agents.xs.${xsBadge}`)"
+              :aria-label="t(`agents.xs.${xsBadge}`)"
+            >
+              <AppIcon :name="XS_ICON[xsBadge]" />
+            </span>
+            <span v-if="xsAlias" class="chip chip-xs-alias" translate="no" :title="`@${xsAlias}`">{{
+              aliasChipText(xsAlias)
+            }}</span>
+            <span
+              v-if="xsChannels"
+              class="chip chip-xs-channels"
+              translate="no"
+              :title="t('agents.xsChannels', { list: xsChannels.map((c) => '#' + c).join(' ') })"
+              >{{ xsChannels.map((c) => "#" + c).join(" ") }}</span
+            >
+            <span
+              v-if="xsUnread !== undefined"
+              class="chip chip-xs-unread"
+              role="img"
+              translate="no"
+              :title="t('agents.xsUnread', { n: xsUnread })"
+              :aria-label="t('agents.xsUnread', { n: xsUnread })"
+            >
+              <AppIcon name="inbox" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span>
+            </span>
+          </span>
+        </Teleport>
       </span>
-      <span v-if="managed" class="chip chip-web" translate="no" :title="t('spawn.badgeWebTitle')">
-        {{ t("spawn.badgeWeb") }}
-      </span>
-      <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">
-        {{ t("spawn.badgeRestoring") }}
-      </span>
-      <span v-else-if="restored" class="chip chip-restored" translate="no" :title="t('spawn.badgeRestoredTitle')">
-        {{ t("spawn.badgeRestored") }}
-      </span>
-      <span v-if="managed?.removing" class="chip chip-removing" translate="no">
-        {{ t("agents.removing") }}
-      </span>
-      <!-- web-hub-privacy P2: 锁定态常显 / 未锁定悬停显示 (privacy.css keys the reveal off
+      <span class="agent-end">
+        <!-- web-hub-privacy P2: 锁定态常显 / 未锁定悬停显示 (privacy.css keys the reveal off
            `data-marked`). The click never navigates the card's <a>. -->
-      <button
-        v-if="privacyAffordance"
-        type="button"
-        class="privacy-lock-btn"
-        :data-marked="privacyMarked ? 'true' : 'false'"
-        :aria-label="privacyMarked ? t('privacy.unmarkTitle') : t('privacy.markAria')"
-        :title="privacyMarked ? `${t('privacy.badgeMarked')} — ${t('privacy.unmarkTitle')}` : t('privacy.mark')"
-        @click.prevent.stop="onPrivacyClick"
-      >
-        <AppIcon :name="privacyMarked ? 'lock' : 'unlock'" class="icon-sm" />
-      </button>
-      <span class="agent-cost num" :title="card.costTitle">{{ card.costLabel }}</span>
+        <button
+          v-if="privacyAffordance"
+          type="button"
+          class="privacy-lock-btn"
+          :data-marked="privacyMarked ? 'true' : 'false'"
+          :aria-label="privacyMarked ? t('privacy.unmarkTitle') : t('privacy.markAria')"
+          :title="privacyMarked ? `${t('privacy.badgeMarked')} — ${t('privacy.unmarkTitle')}` : t('privacy.mark')"
+          @click.prevent.stop="onPrivacyClick"
+        >
+          <AppIcon :name="privacyMarked ? 'lock' : 'unlock'" class="icon-sm" />
+        </button>
+        <span class="agent-cost num" :title="card.costTitle">{{ card.costLabel }}</span>
+      </span>
     </span>
     <span v-if="privacyError" class="privacy-card-error" role="alert">
       {{ t(privacyError.key, { code: privacyError.code }) }}
     </span>
 
-    <span class="agent-session" :class="{ mono: card.sessionLabel === t('agents.noSessionName') }" translate="no">{{
-      card.sessionLabel
-    }}</span>
+    <span class="agent-line2" :data-below="chipsBelow ? 'true' : 'false'">
+      <span
+        class="agent-session"
+        :class="{ mono: card.sessionLabel === t('agents.noSessionName') }"
+        translate="no"
+        :title="card.sessionLabel"
+        >{{ card.sessionLabel }}</span
+      >
+      <!-- the chips group is teleported here (same single DOM node) when row 1 cannot hold it -->
+      <span ref="belowEl" class="agent-below"></span>
+    </span>
 
     <span
       v-if="

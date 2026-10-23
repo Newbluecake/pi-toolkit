@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { appendFileSync, existsSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
-import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,6 +14,7 @@ import { AVATAR_DELETE_PATH, AVATAR_PATH } from "../../src/web-hub/protocol/avat
 import { config as hubConfig, connectClient, hello, type TestClient } from "../web-hub/hub/helpers.js";
 import { login, openSse, type SseConn } from "../web-hub/http/helpers.js";
 import { lanPostJson } from "../web-hub/http/lan-helpers.js";
+import { freePort } from "../helpers/free-port.js";
 
 const PNG = readFileSync(new URL("../fixtures/web-hub-avatar/chrome-canvas.png", import.meta.url));
 const PNG_V = createHash("sha256").update(PNG).digest("hex");
@@ -45,18 +45,6 @@ async function until(check: () => boolean, label: string, timeoutMs = 5_000): Pr
     if (Date.now() >= deadline) throw new Error(`timeout: ${label}`);
     await delay(10);
   }
-}
-
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createNetServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = address !== null && typeof address === "object" ? address.port : 0;
-      server.close((err) => (err === undefined ? resolve(port) : reject(err)));
-    });
-  });
 }
 
 async function boot(opts: { home?: string; lan?: boolean } = {}): Promise<LiveHub> {

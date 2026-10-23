@@ -23,6 +23,7 @@ function makePi() {
     getSessionName: vi.fn(() => undefined as string | undefined),
     setSessionName: vi.fn(),
     appendEntry,
+    registerCommand: vi.fn(),
   };
   return { pi, handlers, appendEntry };
 }
@@ -80,6 +81,7 @@ function makeCtx(
 
 const DEPS = {
   isChildSession: false,
+  enabled: true,
   model: "zai-coding-cn/glm-5.3-flash",
   refreshEveryInputs: 4,
   refreshAfterMinutes: 15,
@@ -93,6 +95,19 @@ describe("wireTitle — registration", () => {
     const wiring = wireTitle(pi as never, { ...DEPS, isChildSession: true });
     expect(wiring).toBeUndefined();
     expect(pi.on).not.toHaveBeenCalled();
+    expect(pi.registerCommand).not.toHaveBeenCalled();
+  });
+
+  it("disabled (title.enabled=false): no event hooks, but the /title command is still registered", () => {
+    const { pi, handlers } = makePi();
+    const wiring = wireTitle(pi as never, { ...DEPS, enabled: false });
+    expect(wiring).toBeDefined();
+    expect(wiring!.trigger).toBeUndefined();
+    expect(handlers).toEqual([]);
+    expect(pi.registerCommand).toHaveBeenCalledWith(
+      "title",
+      expect.objectContaining({ handler: expect.any(Function) }),
+    );
   });
 
   it("wires before_agent_start + agent_end + agent_settled + session_compact + session_start + session_shutdown", () => {

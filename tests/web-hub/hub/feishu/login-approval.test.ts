@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLoginApprovalPort } from "../../../../src/web-hub/hub/feishu/security.js";
+import { loginApprovalCard } from "../../../../src/web-hub/hub/feishu/service.js";
 import { createFeishuState, type FeishuState } from "../../../../src/web-hub/hub/feishu/state.js";
 import { systemFeishuClock } from "../../../../src/web-hub/hub/feishu/http.js";
 import { createFakeClock, settle, type FakeClock } from "../../../fixtures/feishu/fake-http.js";
@@ -140,6 +141,30 @@ describe("Feishu login approval (§5.7)", () => {
     });
     await expect(noInstall.request(req(clock))).resolves.toBe("unavailable");
     expect(sendCard).not.toHaveBeenCalled();
+  });
+
+  it("renders deny and approve as visually distinct, side-by-side buttons (deny first)", () => {
+    const json = loginApprovalCard({ user: "alice", ip: "1.2.3.4", device: "Chrome" }, "pending", {
+      approve: "n-approve",
+      deny: "n-deny",
+    });
+    const card = JSON.parse(json) as { body: { elements: Array<Record<string, unknown>> } };
+    const row = card.body.elements.find((e) => e["tag"] === "column_set") as
+      | { columns: Array<{ elements: Array<{ type: string; text: { content: string }; behaviors: unknown }> }> }
+      | undefined;
+    expect(row).toBeDefined();
+    const buttons = row!.columns.map((c) => c.elements[0]!);
+    expect(buttons.map((b) => b.type)).toEqual(["danger_filled", "primary_filled"]);
+    expect(buttons[0]!.text.content).toContain("拒绝");
+    expect(buttons[1]!.text.content).toContain("批准");
+    expect(JSON.stringify(buttons[0]!.behaviors)).toContain("n-deny");
+    expect(JSON.stringify(buttons[1]!.behaviors)).toContain("n-approve");
+    // no bare top-level buttons left behind; settled cards carry no buttons at all
+    expect(card.body.elements.some((e) => e["tag"] === "button")).toBe(false);
+    const settled = JSON.parse(loginApprovalCard({ user: "a", ip: "i", device: "d" }, "approved")) as {
+      body: { elements: Array<Record<string, unknown>> };
+    };
+    expect(settled.body.elements.map((e) => e["tag"])).toEqual(["markdown"]);
   });
 
   it("issues both nonces and a successful decision consumes the sibling and notifies the core once", async () => {

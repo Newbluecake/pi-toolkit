@@ -41,7 +41,8 @@ import {
   type PlaintextStorageEvent,
   type PlaintextWarnWindow,
 } from "../../../src/web-hub/ui/src/composables/usePlaintextWarning.js";
-import type { PreviewHandle, PreviewView, Attachment } from "../../../src/web-hub/ui/src/types.js";
+import type { PreviewView, Attachment } from "../../../src/web-hub/ui/src/types.js";
+import { fakeWindowHandle, fakeWindowsFace } from "./helpers/preview-windows-fake.js";
 import { MESSAGES } from "../../../src/web-hub/ui/src/i18n/index.js";
 
 const mounted: Array<ReturnType<typeof mount>> = [];
@@ -106,23 +107,20 @@ function mountDiffDialog() {
   );
 }
 
+/** preview-windows W2: PreviewHost renders only the WINDOWS face — the plaintext warning now
+ *  lives per-window (PreviewWindow), driven through the fake face like every other suite. */
 function mountPreviewHost() {
   const host = document.createElement("div");
   document.body.appendChild(host);
-  const view = ref<PreviewView>({ phase: "closed" }) as Ref<PreviewView>;
-  const handle: PreviewHandle = {
-    view,
-    scope: ref(null),
-    open: vi.fn(),
-    close: vi.fn(() => {
-      view.value = { phase: "closed" };
+  const win = fakeWindowHandle(1, { phase: "closed" });
+  const face = fakeWindowsFace([win]);
+  const w = track(
+    mount(PreviewHost, {
+      attachTo: host,
+      global: { provide: { [PREVIEW_CTX as symbol]: { handle: face, plaintext: true } satisfies PreviewContext } },
     }),
-    retry: vi.fn(),
-    dispose: vi.fn(),
-  };
-  const ctx: PreviewContext = { handle, plaintext: true };
-  const w = track(mount(PreviewHost, { attachTo: host, global: { provide: { [PREVIEW_CTX as symbol]: ctx } } }));
-  return { w, view };
+  );
+  return { w, view: win.view as Ref<PreviewView> };
 }
 
 function fakeEnv(over: Partial<ControlEnv> = {}): ControlEnv {

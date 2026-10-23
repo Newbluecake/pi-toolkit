@@ -701,6 +701,10 @@ export function dedupeVerdicts(verdicts: readonly ProviderVerdict[]): readonly P
 }
 
 /** HUD 调色板（对齐 cache-ttl 的 TONE_COLOR 惯例：L0/L1 常态、L2 警告、L3 错误）。 */
+function displayLevelOf(v: ProviderVerdict): number {
+  return v.displayLevel ?? v.level;
+}
+
 function levelColor(level: number): string {
   return level >= 3 ? "error" : level === 2 ? "warning" : "text";
 }
@@ -711,7 +715,7 @@ function hudSegmentThemed(v: ProviderVerdict, now: Millis, theme: QuotaStatusThe
   const name = theme.fg("dim", shortName(v.provider));
   const value = v.windows.map((w) => `${pctOf(w.usedPct)}%${resetSuffix(w)}`).join("/");
   const countdown = recoveryCountdownText(v, now);
-  return `${name} ${theme.fg(levelColor(v.level), value)}${countdown === undefined ? "" : ` ${theme.fg("dim", `resets ${countdown}`)}`}`;
+  return `${name} ${theme.fg(levelColor(displayLevelOf(v)), value)}${countdown === undefined ? "" : ` ${theme.fg("dim", `resets ${countdown}`)}`}`;
 }
 
 /** droid 池段的单元格：month 窗口写成 `mo 5%`（D14），5h/week 维持 `12%`。 */
@@ -748,9 +752,9 @@ function droidSegment(
     }
     let out = theme.fg("dim", "droid");
     if (label !== undefined) out += ` ${theme.fg("dim", label)}`;
-    out += ` ${theme.fg(levelColor(v.level), cells)}`;
+    out += ` ${theme.fg(levelColor(displayLevelOf(v)), cells)}`;
     if (countdown !== undefined) out += ` ${theme.fg("dim", `resets ${countdown}`)}`;
-    if (extra !== "") out += theme.fg(levelColor(v.level), extra);
+    if (extra !== "") out += theme.fg(levelColor(displayLevelOf(v)), extra);
     return out;
   };
   // 合并形态：`droid <std cells> core <core cells>`（label 仅 core 带）；单池时只有一段。
@@ -767,11 +771,11 @@ function droidSegment(
       );
     }
     let out = theme.fg("dim", "droid");
-    out += ` ${theme.fg(levelColor(std.level), stdCells)}`;
+    out += ` ${theme.fg(levelColor(displayLevelOf(std)), stdCells)}`;
     if (stdCountdown !== undefined) out += ` ${theme.fg("dim", `resets ${stdCountdown}`)}`;
-    if (extra !== "") out += theme.fg(levelColor(std.level), extra);
+    if (extra !== "") out += theme.fg(levelColor(displayLevelOf(std)), extra);
     out += ` ${theme.fg("dim", "core")}`;
-    out += ` ${theme.fg(levelColor(core.level), coreCells)}`;
+    out += ` ${theme.fg(levelColor(displayLevelOf(core)), coreCells)}`;
     if (coreCountdown !== undefined) out += ` ${theme.fg("dim", `resets ${coreCountdown}`)}`;
     return out;
   }

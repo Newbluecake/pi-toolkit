@@ -51,6 +51,22 @@ const transcript = {
   "tool.viewRendered": "Rendered",
   "tool.viewSource": "Source",
   "tool.viewToggleLabel": "Markdown view mode",
+  // web-hub-mermaid plan §6.2 (P2): MermaidBlock chrome. Error-line texts are reason-mapped in
+  // the component (`parse`/`render`/`timeout`/`output-invalid` share `mermaidError` + the
+  // runtime's ≤160-char message; `unsupported` + a KaTeX-bearing message selects `mermaidMath`).
+  mermaidShowSource: "Source",
+  mermaidShowDiagram: "Diagram",
+  mermaidRendering: "Rendering…",
+  mermaidError: "Render failed: {message}",
+  mermaidTooLarge: "Diagram too large; showing source",
+  mermaidUnsupported: "Unsupported diagram content (type or config); showing source",
+  mermaidMath: "Diagram contains math (not supported); showing source",
+  mermaidLoadFailed: "Diagram engine unavailable; showing source",
+  mermaidBusy: "Render queue is full; showing source",
+  mermaidAlt: "Mermaid {type} diagram",
+  mermaidFitWidth: "Fit width",
+  mermaidActualSize: "Actual size",
+  mermaidCopySelectFailed: "Copy failed — select manually",
 } satisfies Record<string, string>;
 
 export default transcript;

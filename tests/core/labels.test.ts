@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  captureDisplayTitle,
   deriveUniqueLabel,
   firstNonEmptyLine,
+  MAX_DISPLAY_TITLE_LENGTH,
   MAX_LABEL_BASE_LENGTH,
   MAX_LABEL_ATTEMPTS,
   sanitizeLabelBase,
@@ -40,5 +42,31 @@ describe("labels", () => {
     expect(firstNonEmptyLine("\n\n  do this\nnext")).toBe("  do this");
     expect(firstNonEmptyLine("\u0000\u0001\nwork")).toBe("work");
     expect(firstNonEmptyLine("\n\t")).toBeUndefined();
+  });
+
+  it("captureDisplayTitle keeps inner whitespace and the first non-empty line verbatim", () => {
+    // The whole point of the field: whitespace is NOT dasherized, slashes/plus signs survive.
+    expect(captureDisplayTitle("implement /title auto+status")).toBe("implement /title auto+status");
+    // Outer whitespace trims; inner runs of spaces keep verbatim — but tabs
+    // count as control chars and are stripped (they render as nothing stable).
+    expect(captureDisplayTitle("  spaced   out  \t words ")).toBe("spaced   out   words");
+    expect(captureDisplayTitle("\n\nfirst line\nsecond line")).toBe("first line");
+    expect(captureDisplayTitle("中文 任务 标题")).toBe("中文 任务 标题");
+  });
+
+  it("captureDisplayTitle strips control chars and rejects empty input", () => {
+    expect(captureDisplayTitle("a\u0000\u001fb")).toBe("ab");
+    expect(captureDisplayTitle("\u0000\u0001\nreal title")).toBe("real title");
+    expect(captureDisplayTitle("")).toBeUndefined();
+    expect(captureDisplayTitle(" \n\t\r ")).toBeUndefined();
+    expect(captureDisplayTitle("\u0000\u001f")).toBeUndefined();
+  });
+
+  it("captureDisplayTitle caps by code point without splitting emoji", () => {
+    const value = "😀".repeat(MAX_DISPLAY_TITLE_LENGTH + 5);
+    const result = captureDisplayTitle(value);
+    expect(result).toBe("😀".repeat(MAX_DISPLAY_TITLE_LENGTH));
+    expect([...result!]).toHaveLength(MAX_DISPLAY_TITLE_LENGTH);
+    expect(MAX_DISPLAY_TITLE_LENGTH).toBe(120);
   });
 });

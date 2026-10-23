@@ -41,6 +41,21 @@ const agents = {
   renameSaveAria: "保存名称",
   renameCancelAria: "取消重命名",
   renameFailed: "重命名失败：{reason}",
+  // title-auto plan: 清空输入并保存 = 把标题交回自动生成（同 /title auto）
+  renameAutoHint: "留空 = 自动生成标题",
+  titleAutoFailed: "恢复自动标题失败：{reason}",
+  "xs.wake": "跨会话：已加入，其他会话的消息可唤醒本会话",
+  "xs.deliver": "跨会话：已加入，其他会话的消息只送达、不唤醒本会话",
+  "xs.replies": "跨会话：已加入，只接收本会话所发请求的回复，拒收其他消息",
+  xsUnread: "{n} 条跨会话来信未读（模型处理后自动清零）",
+  xsChannels: "频道：{list}",
+  channelFilterAria: "频道筛选",
+  channelAll: "全部",
+  channelsOpenTitle: "管理跨会话频道",
+  channelsOpenLabel: "频道",
+  // alias-plan r4 §7.2 (ALU)：详情头部 `@别名` 按钮的提示
+  xsAliasManage: "别名 @{alias}——管理频道与别名",
+  "xs.off": "跨会话：已加入，但当前拒收所有消息",
 } satisfies Messages<typeof en>;
 
 export default agents;

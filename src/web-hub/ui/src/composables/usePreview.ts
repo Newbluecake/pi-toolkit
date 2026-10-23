@@ -2,6 +2,28 @@
  * web-hub-preview plan v3 §3.2 (package PV4; dir-plan v3.1 §0.2 A3/§5 P3): the App-level
  * preview state machine, extended with in-dialog DIRECTORY navigation.
  *
+ * web-hub-preview-windows plan r2 §4.2 (W1): the machine is now split out as
+ * `createPreviewMachine(deps)` — a DOM-free, watcher-free state machine one per preview
+ * WINDOW — while `usePreview(opts)` stays as the single-window wrapper it always was (scope
+ * computed + shared probe + the scope watcher + the frozen-face bridge cast). The machine's
+ * observable single-window behavior is byte-identical to the pre-split composable (R10:
+ * `use-preview.test.ts`'s original cases run unchanged); the multi-window deltas are strictly
+ * additive and only activate through their deps:
+ *
+ * - `deps.onSessionChanged(scopeKey)` replaces the three hard-wired `close()` calls
+ *   (settleError's session-changed branch, the continuation stream's `d.close`, and — new,
+ *   §4.4/评审 #6 — the tree fetch's E_SESSION_CHANGED) so the WINDOW MANAGER can decide
+ *   (only a key matching the CURRENT scope closes everything; a late error from an old
+ *   scope/visit never does);
+ * - `navEpoch` (bumped by load/back/adopt) lets the manager detect "the origin window paged
+ *   away" for speculative fold-back (§3.3);
+ * - `deps.history` (the §4.5 global byte budget) turns pushed snapshots into evictable
+ *   ledger entries — `back()` over a demoted "stub" entry refetches instead of restoring;
+ * - `adopt(view)` splices another window's already-fetched dir listing into THIS window
+ *   (push current view, set view, no request — §3.3's fold-back target half);
+ * - `dispose()` cleans only its own state (no watcher ownership — the wrapper/manager owns
+ *   those) and latches `disposed` so late tree callbacks go silent.
+ *
  * `closed ⇄ loading → image | text | dir | unsupported | tooLarge | error`, with the three
  * interrupt rules from the plan all folding into one seq guard + one AbortController:
  *
@@ -10,7 +32,8 @@
  * - `close()` does the same and returns to `closed`;
  * - **作用域失效**: a watcher on `scopeKeyOf(scope)` (v3-2: `agentKey|sessionId|cwd` — a cwd
  *   change is treated exactly like a session switch) closes immediately, aborting the fetch
- *   and clearing the stack.
+ *   and clearing the stack (the wrapper/manager registers that watcher — the machine itself
+ *   owns none).
  *
  * `scope` itself is the §4.6 derivation (`previewScopeOf`): transport has `preview` ∧ hub caps
  * carry `preview.v1` (token) / `preview.lan.v1` (password — under the default mode "on" both
@@ -31,12 +54,14 @@
  *   phases with something to return to) onto a snapshot stack capped at
  *   `PREVIEW_NAV_STACK_MAX` (64, FIFO: the oldest entry falls out), then loads. Snapshots
  *   are restored verbatim by `back()` — no refetch, byte-stable, instantly;
- * - `back()` pops (a no-op at the bottom) and restores the snapshot view;
+ * - `back()` pops (a no-op at the bottom) and restores the snapshot view — unless the entry
+ *   was demoted to a stub by the history budget, in which case it RELOADS `{path, dir}`
+ *   (§4.5: the stub carries exactly the identity needed to refetch);
  * - `up()` navigates to `parentPreviewPath(current)` (a no-op at one-segment paths — `/` is
  *   not listable, A3's greyed-「上级」 semantics); it is only surfaced by the dir phase's UI;
- * - a click from inside the open dialog (PreviewHost's subtree `provide` override: `open` →
- *   `navigate`) drills down instead of restarting, so md path refs (B6) and dir rows share
- *   the same stack;
+ * - a click from inside the open dialog (the subtree `provide` override: `open` →
+ *   `navigate`/`openWindow`) drills down instead of restarting, so md path refs (B6) and dir
+ *   rows share the same stack;
  * - dir-ness of a requested path is resolved WITHOUT extra round trips: the probe pipeline
  *   already confirmed the click candidate, so `probe.kindOf(path) === "dir"` sets the
  *   `dir=1` opt-in directly. The no-probe fallback (a legacy transport without `probe`, or a
@@ -54,6 +79,7 @@ import {
   previewScopeOf,
   scopeKeyOf,
 } from "@logic/preview.js";
+import { estimateSnapshotBytes, type PreviewHistoryBudget } from "@logic/previewHistoryBudget.js";
 import { usePreviewProbe, type PreviewProbeHandle } from "./usePreviewProbe.js";
 import { createPreviewTree, type PreviewTreeStore } from "./usePreviewTree.js";
 import { classifyChunkOutcome, nextChunkAction } from "@logic/previewStream.js";
@@ -82,6 +108,12 @@ export interface UsePreviewOptions {
   /** `(pointer: coarse)` — touch devices preview against the 20MP budget (plan §0/P2-13). */
   readonly coarse: Readonly<Ref<boolean>>;
   readonly createFileReader?: () => FileReaderLike;
+  /** preview-windows §4.5: override the global history budget's maxBytes. Used ONLY by
+   * `usePreviewWindows` (the single-window wrapper ignores it); the default is
+   * `historyBudgetFor(coarse)` (96 MiB desktop / 32 MiB touch). Injectable so the node suite
+   * can drive eviction without allocating ~32 MiB of strings — same discipline as
+   * `createFileReader`. */
+  readonly historyBudgetBytes?: number;
 }
 
 /** A3: the in-dialog history stack cap — 返回 walks at most this many snapshots back. */
@@ -109,6 +141,15 @@ export type PreviewViewDir = PreviewView | PreviewDirPhase;
 export interface PreviewNavRef {
   readonly path: string;
   readonly dir?: true;
+}
+
+/**
+ * preview-windows §4.5: a history entry demoted by the global byte budget. `back()` over a
+ * stub REFETCHES `{path, dir}` instead of restoring a snapshot (the memory is gone; the
+ * identity is not). Only ever appears inside the machine's private stack.
+ */
+export interface PreviewNavStub {
+  readonly stub: { readonly path: string; readonly dir?: true };
 }
 
 /** dir-plan §5 P3: the handle `usePreview` actually builds. Structurally the frozen
@@ -156,6 +197,45 @@ export interface PreviewHandleDir {
 }
 
 /**
+ * preview-windows §4.2 (W1): the per-window machine handle — the P3 dir handle plus the two
+ * multi-window members. `navEpoch` bumps on every view-identity change (load/back/adopt);
+ * the window manager compares it against the epoch captured at speculative-open time (§3.3).
+ * `adopt` is §3.3's fold-back landing: push the current view, splice in the OTHER window's
+ * already-settled dir listing, zero requests.
+ */
+export type PreviewMachine = PreviewHandleDir & {
+  readonly navEpoch: Readonly<Ref<number>>;
+  adopt(v: PreviewDirPhase): void;
+};
+
+/** The global §4.5 budget plus this machine's window id (tokens are per-machine counters). */
+export interface PreviewHistoryPort {
+  readonly budget: PreviewHistoryBudget;
+  readonly winId: number;
+}
+
+/** The content phases A3/§4.5 can snapshot (the only views with something to return to). */
+export type PreviewNavSnapshotView = Extract<PreviewViewDir, { phase: "text" | "image" | "dir" }>;
+
+/** preview-windows §4.1/§4.2 (W1): everything one machine needs — the scope/transport/
+ * coarse-pointer trio, the SHARED probe handle (created once by the wrapper/manager, never
+ * per window), the optional FileReader factory, the optional history budget, and the
+ * session-change port (§4.4). */
+export interface PreviewMachineDeps {
+  readonly scope: Readonly<Ref<PreviewPathScope | null>>;
+  readonly preview: PreviewTransport | undefined;
+  readonly coarse: Readonly<Ref<boolean>>;
+  readonly probe?: PreviewProbeHandle;
+  readonly createFileReader?: () => FileReaderLike;
+  readonly history?: PreviewHistoryPort;
+  /**
+   * §4.4: a fetch answered E_SESSION_CHANGED under `scopeKey`. The single-window wrapper
+   * closes; the window manager closes everything iff the key matches the CURRENT scope.
+   */
+  readonly onSessionChanged: (scopeKey: string) => void;
+}
+
+/**
  * Recover the P3 navigation face from an injected `PreviewHandle` (duck-typed — a pre-P3
  * handle or a frozen component fake omits `navigate`/`back`/`up` and gets `null`: the host
  * then degrades to open-only navigation, per the frozen-types convention).
@@ -195,10 +275,12 @@ export function readPreviewDataUrl(blob: Blob, create: () => FileReaderLike = de
   return readDataUrl(create, blob);
 }
 
-export function usePreview(opts: UsePreviewOptions): PreviewHandle {
-  const view = ref<PreviewViewDir>({ phase: "closed" }) as Ref<PreviewViewDir>;
-
-  const scope = computed<PreviewPathScope | null>(() => {
+/**
+ * The §4.6 scope derivation as one shared computed — `usePreview` and `usePreviewWindows`
+ * (§4.1: "scope 全局一份") both build it through here so the two can never drift.
+ */
+export function previewScopeRef(opts: UsePreviewOptions): Readonly<Ref<PreviewPathScope | null>> {
+  return computed<PreviewPathScope | null>(() => {
     const st = opts.state.value;
     const hub = st.hub;
     const selected = st.selected;
@@ -213,16 +295,41 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
       session,
     });
   });
+}
+
+/**
+ * preview-windows §4.2 (W1): the per-window state machine. The closure body is the pre-split
+ * `usePreview` moved verbatim; the deltas are exactly the ones listed in the file header
+ * (onSessionChanged routing, tree session-change guard, navEpoch, history budget + stubs,
+ * adopt, watcher-free dispose). Caller owns disposal — call `dispose()` when the window goes.
+ */
+export function createPreviewMachine(deps: PreviewMachineDeps): PreviewMachine {
+  const view = ref<PreviewViewDir>({ phase: "closed" }) as Ref<PreviewViewDir>;
+  const scope = deps.scope;
 
   let seq = 0;
   let ctl: AbortController | null = null;
   let lastPath: string | null = null;
   let lastDir: true | undefined;
 
-  /** A3 history stack: snapshots of content views (text/image/dir) + the element to refocus
-   * on back() — null outside a DOM (node unit tests) or when the trigger is gone. */
-  const stack: Array<{ readonly view: PreviewViewDir; readonly focus: Element | null }> = [];
+  /** A3 history stack: snapshots of content views (text/image/dir — plus §4.5 stub entries)
+   * + the element to refocus on back() — null outside a DOM (node unit tests) or when the
+   * trigger is gone. `view` is MUTABLE so the budget's stub callback can demote in place. */
+  const stack: Array<{
+    view: PreviewViewDir | PreviewNavStub;
+    focus: Element | null;
+    token: number | null;
+  }> = [];
   const stackDepth = ref(0);
+  let tokenSeq = 0;
+
+  // preview-windows §3.3: the view-identity epoch — load/back/adopt bump it; the manager
+  // captures it when speculatively opening a window and folds back only if it still matches.
+  const navEpoch = ref(0);
+
+  // preview-windows §4.4/评审 #6: the tree's visit epoch — clearVisit() bumps it so a late
+  // tree E_SESSION_CHANGED from an already-abandoned visit can never reach onSessionChanged.
+  let visitEpoch = 0;
 
   // chunked-plan §4.2: the continuation stream's own cancellation domain (a SEPARATE
   // controller/seq from the main load, so a late continuation can never write into a view it
@@ -270,15 +377,31 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
   // aborted by tree.clear(). A dir:true fetch that comes back non-dir (the path raced into
   // a regular file server-side) maps to the same E_PREVIEW_UNSUPPORTED code the error phase
   // would have shown — never a wrong tree.
+  //
+  // preview-windows §4.4 (评审 #6): an E_SESSION_CHANGED expansion answer is routed through
+  // deps.onSessionChanged — but ONLY when the answer still belongs to THIS visit (visitEpoch
+  // unchanged), the machine is alive, and the CURRENT scope still is the scope the request
+  // left under. Every other late/stale answer keeps the legacy `{ok:false,error}` return
+  // (the tree row shows its own error state; nothing else moves).
   const tree = createPreviewTree(async (path, signal) => {
     const sc = scope.value;
-    const transport = opts.preview;
+    const transport = deps.preview;
     if (sc === null || transport === undefined) return { ok: false, error: "E_NO_SCOPE" };
+    const ve = visitEpoch;
     try {
       const out = await transport.fetch(
         { agentKey: sc.agentKey, sessionId: sc.sessionId, path, dir: true },
-        { signal, maxPixels: clientImageBudget({ coarse: opts.coarse.value }) },
+        { signal, maxPixels: clientImageBudget({ coarse: deps.coarse.value }) },
       );
+      if (
+        !out.ok &&
+        out.error === "E_SESSION_CHANGED" &&
+        !disposed &&
+        ve === visitEpoch &&
+        scopeKeyOf(scope.value) === scopeKeyOf(sc)
+      ) {
+        deps.onSessionChanged(scopeKeyOf(sc));
+      }
       if (!out.ok) return { ok: false, error: out.error };
       if (out.kind !== "dir") return { ok: false, error: "E_PREVIEW_UNSUPPORTED" };
       return { ok: true, listing: out.listing };
@@ -290,11 +413,14 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
   function clearStack(): void {
     stack.length = 0;
     stackDepth.value = 0;
+    if (deps.history !== undefined) deps.history.budget.dropWindow(deps.history.winId);
   }
 
   function clearVisit(): void {
     // visit-scoped state goes together: history stack AND the inline-expansion tree
-    // (弹窗关闭即弃; a fresh open is a fresh visit).
+    // (弹窗关闭即弃; a fresh open is a fresh visit). §4.4: the epoch bump also silences any
+    // in-flight tree fetch's session-change routing (see the tree fetch above).
+    visitEpoch++;
     clearStack();
     tree.clear();
   }
@@ -307,21 +433,12 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     if (view.value.phase !== "closed") view.value = { phase: "closed" };
   }
 
-  // 作用域失效 (§3.2): the scope KEY (agentKey|sessionId|cwd) changing — session switch,
-  // cwd drift (v3-2), agent deselected, caps lost on reconnect — closes instantly (and, per
-  // A3, drops the whole navigation history with it: another session's paths are not ours).
-  const stopWatch = watch(
-    () => scopeKeyOf(scope.value),
-    (next, prev) => {
-      if (next !== prev) close();
-    },
-  );
-
-  function settleError(outcome: Extract<PreviewDirOutcome, { ok: false }>, path: string): void {
+  function settleError(outcome: Extract<PreviewDirOutcome, { ok: false }>, path: string, sc: PreviewPathScope): void {
     const c = classifyPreviewError(outcome.status, outcome);
     if (c.kind === "session-changed") {
-      // §3.2: E_SESSION_CHANGED closes directly — the transcript itself is about to reload.
-      close();
+      // §3.2 / preview-windows §4.2: E_SESSION_CHANGED routes through the port — the wrapper
+      // closes, the manager closes everything iff the key still matches the current scope.
+      deps.onSessionChanged(scopeKeyOf(sc));
       return;
     }
     if (c.kind === "unsupported") {
@@ -353,17 +470,8 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     };
   }
 
-  // 2026-10-07 修订「先探测后标记」: the batch probe controller rides the SAME handle iff the
-  // transport implements `probe` — otherwise `handle.probe` stays absent and `PathText` keeps
-  // the legacy always-clickable rendering (component-level fakes never break). dir-plan P3
-  // additionally consults its `kindOf` for the `dir=1` opt-in (see `isDirHint`).
-  const probeHandle: PreviewProbeHandle | undefined =
-    opts.preview !== undefined && opts.preview.probe !== undefined
-      ? usePreviewProbe({ probe: opts.preview.probe, scope })
-      : undefined;
-
   function isDirHint(path: string): boolean {
-    return probeHandle?.kindOf !== undefined && probeHandle.kindOf(path) === "dir";
+    return deps.probe?.kindOf !== undefined && deps.probe.kindOf(path) === "dir";
   }
 
   /** §4.2 建流条件: scope carries `chunks`, the first chunk is truncated and echoed
@@ -376,7 +484,7 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
   ): PreviewTextStream | undefined {
     if (sc.chunks !== true || outcome.truncated !== true) return undefined;
     if (outcome.chunk === undefined || outcome.bytes === undefined) return undefined;
-    const cap = clientTextStreamCap({ coarse: opts.coarse.value });
+    const cap = clientTextStreamCap({ coarse: deps.coarse.value });
     const s = shallowReactive<PreviewTextStream>({
       ident: outcome.chunk.ident,
       total: outcome.size,
@@ -398,7 +506,7 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
   }
 
   function streamFetch(s: PreviewTextStream): void {
-    const transport = opts.preview;
+    const transport = deps.preview;
     const c = streamCtx;
     if (transport === undefined || c === null) return;
     s.state = "loading";
@@ -416,7 +524,7 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
           path: c.path,
           chunk: { offset: s.loaded, ident: s.ident },
         },
-        { signal: ac.signal, maxPixels: clientImageBudget({ coarse: opts.coarse.value }) },
+        { signal: ac.signal, maxPixels: clientImageBudget({ coarse: deps.coarse.value }) },
       )
       .catch((): PreviewDirOutcome => ({ ok: false, status: 0, error: "E_NETWORK" }) as PreviewDirOutcome)
       .then((out) => {
@@ -439,7 +547,10 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
           return;
         }
         if (d.close === true) {
-          close();
+          // §4.2 + preview-windows §4.2: the continuation saw E_SESSION_CHANGED — route
+          // through the port under the scope THIS stream was built for (not necessarily
+          // the current one; the manager compares).
+          deps.onSessionChanged(scopeKeyOf(c.sc));
           return;
         }
         if (d.append !== undefined) {
@@ -502,6 +613,50 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     delete s.retryAt;
   }
 
+  function captureFocus(): Element | null {
+    return typeof document === "undefined" ? null : document.activeElement;
+  }
+
+  function refocus(el: Element | null): void {
+    if (el === null || typeof document === "undefined" || !document.contains(el)) return;
+    (el as HTMLElement).focus();
+  }
+
+  /** preview-windows §4.5: the budget's demote callback — swap a live snapshot for a stub
+   * carrying exactly the identity `back()` needs to refetch. No-op for popped/shifted tokens. */
+  function stubEntry(token: number): void {
+    for (const e of stack) {
+      if (e.token !== token) continue;
+      const v = e.view;
+      if ("stub" in v) return; // already demoted
+      if (v.phase !== "text" && v.phase !== "image" && v.phase !== "dir") return; // never pushable
+      e.view = { stub: { path: v.path, ...(v.phase === "dir" ? { dir: true } : {}) } };
+      return;
+    }
+  }
+
+  /** A3 + §4.5: push one snapshot (FIFO cap 64, bytes registered with the global budget iff
+   * one is wired). Shared by navigate() and adopt(). Only CONTENT views are pushable. */
+  function pushSnapshot(cur: PreviewNavSnapshotView): void {
+    if (stack.length >= PREVIEW_NAV_STACK_MAX) {
+      const shifted = stack.shift()!;
+      if (shifted.token !== null && deps.history !== undefined) {
+        deps.history.budget.remove(deps.history.winId, shifted.token);
+      }
+    }
+    const token = deps.history !== undefined ? ++tokenSeq : null;
+    stack.push({ view: cur, focus: captureFocus(), token });
+    stackDepth.value = stack.length;
+    if (deps.history !== undefined && token !== null) {
+      deps.history.budget.add({
+        winId: deps.history.winId,
+        token,
+        bytes: estimateSnapshotBytes(cur),
+        stub: stubEntry,
+      });
+    }
+  }
+
   /**
    * The single settle path for EVERY fetch outcome — exhaustive over the P3 union
    * (`PreviewDirOutcome`: text / image / dir) plus the two interrupt classes (seq drop and
@@ -529,9 +684,9 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
         ctx.sc.dirs === true &&
         outcome.error === "E_PREVIEW_UNSUPPORTED" &&
         outcome.reason === "not-regular" &&
-        opts.preview !== undefined
+        deps.preview !== undefined
       ) {
-        void opts.preview
+        void deps.preview
           .fetch(
             { agentKey: ctx.sc.agentKey, sessionId: ctx.sc.sessionId, path, dir: true },
             { signal: ctx.ac.signal, maxPixels: ctx.maxPixels },
@@ -539,7 +694,7 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
           .then((second) => settleOutcome(second, path, ctx, true));
         return;
       }
-      settleError(outcome, path);
+      settleError(outcome, path, ctx.sc);
       return;
     }
     switch (outcome.kind) {
@@ -561,7 +716,7 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
         return;
       case "image": {
         const mime = outcome.mime;
-        void readDataUrl(opts.createFileReader ?? defaultFileReader, outcome.blob).then(
+        void readDataUrl(deps.createFileReader ?? defaultFileReader, outcome.blob).then(
           (dataUrl) => {
             if (ctx.mySeq !== seq) return;
             if (!dataUrl.startsWith(`data:${mime};base64,`)) {
@@ -590,16 +745,17 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
 
   function load(path: string, dir?: true): void {
     const sc = scope.value;
-    const transport = opts.preview;
+    const transport = deps.preview;
     if (sc === null || transport === undefined) return; // no scope ⇒ nothing is clickable
     abortInFlight();
+    navEpoch.value++; // §3.3: the view identity is about to change
     const mySeq = seq;
     const ac = new AbortController();
     ctl = ac;
     lastPath = path;
     lastDir = dir;
     view.value = { phase: "loading", path };
-    const maxPixels = clientImageBudget({ coarse: opts.coarse.value });
+    const maxPixels = clientImageBudget({ coarse: deps.coarse.value });
     const wantDir = dir === true || isDirHint(path);
     void transport
       .fetch(
@@ -621,23 +777,12 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     load(ref.path, ref.dir);
   }
 
-  function captureFocus(): Element | null {
-    return typeof document === "undefined" ? null : document.activeElement;
-  }
-
-  function refocus(el: Element | null): void {
-    if (el === null || typeof document === "undefined" || !document.contains(el)) return;
-    (el as HTMLElement).focus();
-  }
-
   function navigate(ref: PreviewNavRef): void {
-    if (scope.value === null || opts.preview === undefined) return; // no scope ⇒ nothing clickable
+    if (scope.value === null || deps.preview === undefined) return; // no scope ⇒ nothing is clickable
     const cur = view.value;
     if (cur.phase === "text" || cur.phase === "image" || cur.phase === "dir") {
       demoteStream(cur);
-      if (stack.length >= PREVIEW_NAV_STACK_MAX) stack.shift(); // FIFO: oldest falls out
-      stack.push({ view: cur, focus: captureFocus() });
-      stackDepth.value = stack.length;
+      pushSnapshot(cur); // A3 push (FIFO 64; §4.5 budget registration when wired)
     }
     // transient phases (loading/error/…) have nothing to return to — a navigate from there
     // (defensive: their bodies render no clickable refs) just loads.
@@ -647,9 +792,19 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
   function back(): void {
     if (stack.length === 0) return;
     abortInFlight();
+    navEpoch.value++; // §3.3: back changes the view identity too
     const entry = stack.pop()!;
+    if (entry.token !== null && deps.history !== undefined) {
+      deps.history.budget.remove(deps.history.winId, entry.token);
+    }
     stackDepth.value = stack.length;
     const v = entry.view;
+    if ("stub" in v) {
+      // §4.5: the snapshot was demoted — refetch by identity instead of restoring memory.
+      load(v.stub.path, v.stub.dir);
+      refocus(entry.focus);
+      return;
+    }
     view.value = v;
     if ("path" in v) {
       lastPath = v.path;
@@ -675,6 +830,25 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     navigate({ path: parent, dir: true });
   }
 
+  /**
+   * preview-windows §3.3 (W1): fold-back landing — splice ANOTHER window's already-settled
+   * dir listing into this one. Pushes the current content view exactly like navigate() would
+   * (so 返回 works), drops any in-flight fetch of THIS window (the adopted view must stick),
+   * and bumps navEpoch. Zero requests.
+   */
+  function adopt(v: PreviewDirPhase): void {
+    const cur = view.value;
+    if (cur.phase === "text" || cur.phase === "image" || cur.phase === "dir") {
+      demoteStream(cur);
+      pushSnapshot(cur);
+    }
+    abortInFlight();
+    navEpoch.value++;
+    view.value = v;
+    lastPath = v.path;
+    lastDir = true;
+  }
+
   function retry(): void {
     if (view.value.phase !== "error" || lastPath === null) return;
     load(lastPath, lastDir); // same path, same dir-ness — the history stack is untouched
@@ -684,20 +858,20 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
   function dispose(): void {
     if (disposed) return;
     disposed = true;
-    stopWatch();
+    // preview-windows §4.2: the machine owns NO watcher (the wrapper/manager registers the
+    // scope watcher) — disposal only cleans its own in-flight work and visit state.
     clearVisit();
     abortInFlight();
   }
-  onScopeDispose(dispose, true); // failSilently: safe to call outside a component/effect scope (unit tests)
 
-  const dirHandle: PreviewHandleDir = {
+  const machine: PreviewMachine = {
     view: view as Readonly<Ref<PreviewViewDir>>,
     scope,
     open,
     close,
     retry,
     dispose,
-    ...(probeHandle !== undefined ? { probe: probeHandle } : {}),
+    ...(deps.probe !== undefined ? { probe: deps.probe } : {}),
     navigate,
     back,
     up,
@@ -705,11 +879,63 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     reopen,
     stackDepth,
     tree,
+    navEpoch,
+    adopt,
+  };
+  return machine;
+}
+
+export function usePreview(opts: UsePreviewOptions): PreviewHandle {
+  // preview-windows §4.2: the single-window wrapper — the §4.6 scope, the shared probe and
+  // the scope watcher live HERE; the machine below gets them as deps. The wiring keeps the
+  // pre-split behavior byte-identical (R10): onSessionChanged closes, no history budget.
+  const scope = previewScopeRef(opts);
+
+  // 2026-10-07 修订「先探测后标记」: the batch probe controller rides the SAME handle iff the
+  // transport implements `probe` — otherwise `handle.probe` stays absent and `PathText` keeps
+  // the legacy always-clickable rendering (component-level fakes never break). dir-plan P3
+  // additionally consults its `kindOf` for the `dir=1` opt-in (the machine's `isDirHint`).
+  const probeHandle: PreviewProbeHandle | undefined =
+    opts.preview !== undefined && opts.preview.probe !== undefined
+      ? usePreviewProbe({ probe: opts.preview.probe, scope })
+      : undefined;
+
+  const m = createPreviewMachine({
+    scope,
+    preview: opts.preview,
+    coarse: opts.coarse,
+    ...(probeHandle !== undefined ? { probe: probeHandle } : {}),
+    ...(opts.createFileReader !== undefined ? { createFileReader: opts.createFileReader } : {}),
+    onSessionChanged: () => m.close(),
+  });
+
+  // 作用域失效 (§3.2): the scope KEY (agentKey|sessionId|cwd) changing — session switch,
+  // cwd drift (v3-2), agent deselected, caps lost on reconnect — closes instantly (and, per
+  // A3, drops the whole navigation history with it: another session's paths are not ours).
+  const stopWatch = watch(
+    () => scopeKeyOf(scope.value),
+    (next, prev) => {
+      if (next !== prev) m.close();
+    },
+  );
+
+  let disposed = false;
+  function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    stopWatch();
+    m.dispose();
+  }
+  onScopeDispose(dispose, true); // failSilently: safe to call outside a component/effect scope (unit tests)
+
+  const dirHandle: PreviewHandleDir & Pick<PreviewMachine, "navEpoch" | "adopt"> = {
+    ...m,
+    dispose,
   };
 
   // The frozen-face bridge: everything except `view` is structurally identical (and
   // `open`/`navigate`'s wider param stays contravariance-safe); `view` is narrowed by this
-  // one cast — sound because this closure is the ref's only writer and `PreviewHost` recovers
-  // the widened face via `asDirHandle` before reading a `dir` phase.
+  // one cast — sound because this closure is the only writer of the ref and `PreviewHost`
+  // recovers the widened face via `asDirHandle` before reading a `dir` phase.
   return dirHandle as unknown as PreviewHandle;
 }

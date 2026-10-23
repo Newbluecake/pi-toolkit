@@ -106,6 +106,13 @@ const control = {
   sendAsText: "Send as text",
   paletteAria: "Command completions",
   paletteHint: "Tab completes · ↑↓ select · Esc close",
+  // `/name␠` argument panel (web-hub-slash-args §6.5, P3); the confirm chip reuses
+  // policyConfirm — no new key for it.
+  argAria: "Command argument completions",
+  argUsage: "Usage",
+  argLoading: "Loading completions…",
+  argEmpty: "No completions available",
+  argHint: "Tab completes · ↑↓ select · Esc close",
   policyAllow: "allow",
   policyConfirm: "confirm",
   policyDeny: "deny",
@@ -158,7 +165,8 @@ const control = {
   mentionAria: "Mentions and files",
   mentionZone: "Sub-agents",
   fileZone: "Files",
-  mentionEmpty: "No matching sub-agent or file",
+  sessionZone: "Sessions",
+  mentionEmpty: "No matching sub-agent, session or file",
   mentionRunning: "running",
   mentionSettled: "settled · @ resumes",
   mentionUnavailable: "unavailable",

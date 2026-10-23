@@ -75,6 +75,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../compact-hint/threshold.js",
     "../core/deadline.js",
     "../extensions/worktree-link-paths.js",
+    // channel-plan CH0: pure channel-name rules (imports only the protocol xs schema module).
+    "../fabric/xs/channel.js",
     "../memory/tidy/batch-settings.js",
     "../sysload/types.js",
     "../topic-switch/settings.js",
@@ -86,6 +88,7 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "./time-units.js",
   ],
   "src/config/model-hint.ts": [],
+  "src/fabric/xs/channel.ts": ["../../web-hub/protocol/xs.js"],
   "src/sysload/io-ledger.ts": [],
   // P0's compatibility re-export keeps the shared file limits available to pi-free callers.
   "src/memory/tidy/batch-settings.ts": ["../contracts.js"],

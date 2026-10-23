@@ -508,6 +508,9 @@ describe("wireWebHub — runtx caps matrix (§8.4 #2: control × uploads × suba
     else if (runtx === "loopback") expected.push("runtx.v1");
     if (control) {
       expected.push("cmd.v1", "dialog.v1", "command.v1");
+      // web-hub-slash-args §4.1 (P1): cmd.args.v1 rides along while the feature is on (this
+      // matrix never sets webCommands/commandComplete ⇒ both default on).
+      expected.push("cmd.args.v1");
       if (uploads === "on") expected.push("upload.v1", "upload.lan.v1");
       else if (uploads === "loopback") expected.push("upload.v1");
       // web-hub-steer-recall §4.7 step 13: hold.v1 rides the agent surface whenever holdWired()

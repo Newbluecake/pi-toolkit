@@ -431,6 +431,15 @@ export interface SpawnRequest {
   type: AgentTypeName;
   prompt: string;
   label?: string;
+  /**
+   * Display-only title: the Agent tool's raw `description`, captured by
+   * `captureDisplayTitle` (first non-empty line, control chars stripped,
+   * whitespace preserved, ≤120 code points). Spawn admission keeps it only
+   * when it differs from the effective label (otherwise omitted, so a
+   * label-shaped description adds no bytes anywhere). Surfaced as the fleet
+   * row's main title in the web UI while `label` stays the @mention handle.
+   */
+  title?: string;
   cwd?: string;
   modelOverride?: { provider: string; id: string };
   /**
@@ -659,6 +668,8 @@ export interface ToolCallRecord {
 export interface RunDisplayMeta {
   model?: { provider: string; id: string };
   label?: string;
+  /** Display-only raw title (SpawnRequest.title), kept only when it differs from the label. */
+  title?: string;
   agentType?: string;
   /** Truncated dispatch prompt for agent-tree previews and /agent status. */
   taskPrompt?: string;
@@ -1297,6 +1308,10 @@ export interface RunDiagnostics {
   /** C2 M2: record-only comparison of a consult session against its expert snapshot. */
   consultIdentityPrediction?: ConsultIdentityPrediction;
   label?: string;
+  /** Display-only raw title (the Agent tool's un-sanitized description), kept only
+   *  when it differs from `label`; the web fleet tree renders it as the row's main
+   *  title with the label as secondary text. */
+  title?: string;
   agentType?: string;
   /** Truncated dispatch prompt for agent-tree pending-row previews and /agent status. */
   taskPrompt?: string;

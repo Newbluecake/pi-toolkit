@@ -192,8 +192,9 @@ function validateAnthropicPayload(p: Record<string, unknown>, expect: PayloadExp
   if (!isRecord(user) || user.role !== "user" || !onlyKeys(user, ["role", "content"])) return refuse("extra-input");
   const userTexts = textParts(user.content);
   if (!userTexts || userTexts.length !== 1 || userTexts[0] !== expect.expectedUser) return refuse("extra-input");
-  // One user message only, plus precisely the builder's empty trailing effort message.
-  if (expect.managedEffort) {
+  // One user message only. pi ≤1.2 managed-effort builds append the builder's empty trailing
+  // effort system message; pi ≥1.3 thinking-off builds have no effort markers at all.
+  if (expect.managedEffort && !managedThinkingDisabled(p)) {
     const effort = messages[1];
     if (
       messages.length !== 2 ||
@@ -233,7 +234,11 @@ function validateAnthropicPayload(p: Record<string, unknown>, expect: PayloadExp
 
 function validThinking(p: Record<string, unknown>, expect: PayloadExpectation): boolean {
   const thinking = p.thinking;
-  if (expect.managedEffort)
+  if (expect.managedEffort) {
+    // pi ≥1.3 stock build for a thinking-off request (anthropic-messages buildParams:
+    // effort markers cannot change while thinking is disabled, so the whole adaptive
+    // construction is replaced by thinking:{type:"disabled"}). Both shapes are stock.
+    if (managedThinkingDisabled(p)) return true;
     return (
       isRecord(thinking) &&
       thinking.type === "adaptive" &&
@@ -245,6 +250,7 @@ function validThinking(p: Record<string, unknown>, expect: PayloadExpectation): 
       validEffort(p.output_config) &&
       p.output_config.effort === "high"
     );
+  }
   if (expect.adaptiveEffort !== undefined)
     return (
       isRecord(thinking) &&
@@ -257,6 +263,20 @@ function validThinking(p: Record<string, unknown>, expect: PayloadExpectation): 
   return (
     !hasAny(p, ["output_config"]) &&
     (thinking === undefined || (isRecord(thinking) && thinking.type === "disabled" && onlyKeys(thinking, ["type"])))
+  );
+}
+/**
+ * The pi ≥1.3 stock managed-effort build for a thinking-off request: exactly
+ * `thinking:{type:"disabled"}` and NO `output_config` anywhere (anthropic-messages
+ * buildParams' `thinkingDisabled` branch takes precedence over the managed adaptive
+ * construction, and the trailing effort system message is omitted with it). A mixture
+ * (disabled thinking WITH effort markers) is not a stock shape and falls through to the
+ * adaptive checks, which reject it.
+ */
+function managedThinkingDisabled(p: Record<string, unknown>): boolean {
+  const thinking = p.thinking;
+  return (
+    isRecord(thinking) && thinking.type === "disabled" && onlyKeys(thinking, ["type"]) && !hasAny(p, ["output_config"])
   );
 }
 function validEffort(value: unknown): value is Record<string, unknown> {

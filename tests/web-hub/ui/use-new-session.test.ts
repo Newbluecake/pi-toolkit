@@ -332,6 +332,25 @@ describe("useNewSession (plan §3.2 — #15 hard gate)", () => {
     expect(h.flow()).toMatchObject({ phase: "awaiting", spawnId: "sp2" });
   });
 
+  it.each([
+    ["changed", undefined, "launcher-changed"],
+    ["launcher", "changed", "launcher-changed"],
+    ["launcher", "missing", "launcher"],
+  ] as const)("keeps launcher reason=%s detail=%s in the failed flow", async (reason, detail, kind) => {
+    const h = make();
+    h.setStartImpl(async () => ({
+      ok: false,
+      error: "E_LAUNCHER",
+      reason,
+      ...(detail === undefined ? {} : { detail }),
+      retryable: true,
+    }));
+    await h.ns.submit(input());
+    expect(h.flow()).toMatchObject({ phase: "failed", kind, reason, ...(detail === undefined ? {} : { detail }) });
+    expect(h.starts).toHaveLength(1);
+    if (detail === undefined) expect(h.flow()).not.toHaveProperty("detail");
+  });
+
   it("created-dirs r2 §4: the LAN-only E_DIR `detail` rides failed{kind:dir}; other kinds never carry it", async () => {
     const h = make();
     h.setStartImpl(async () => ({

@@ -38,6 +38,7 @@ describe("web-hub settings", () => {
       webCommands: true,
       webCommandPolicy: {},
       steerRecall: true,
+      commandComplete: "all",
       uploads: "on",
       preview: "on",
       avatar: true,
@@ -130,6 +131,7 @@ describe("web-hub settings", () => {
       webCommands: true,
       webCommandPolicy: {},
       steerRecall: true,
+      commandComplete: "all",
       uploads: "on",
       preview: "on",
       avatar: true,
@@ -148,6 +150,24 @@ describe("web-hub settings", () => {
     expect(parseWebHubSettings({}).privacy).toBe(true);
     expect(parseWebHubSettings({ privacy: false }).privacy).toBe(false);
     expect(parseWebHubSettings({ privacy: "off" }).privacy).toBe(true);
+  });
+
+  // web-hub-slash-args plan §5 (P0): webHub.commandComplete is tri-valued, default "all" (§11 D1 拍板).
+  it("webHub.commandComplete: default all; explicit values survive; garbage falls back", () => {
+    expect(defaults.commandComplete).toBe("all");
+    expect(parseWebHubSettings({}).commandComplete).toBe("all");
+    expect(parseWebHubSettings(undefined).commandComplete).toBe("all");
+    expect(parseWebHubSettings({ commandComplete: "all" }).commandComplete).toBe("all");
+    expect(parseWebHubSettings({ commandComplete: "toolkit" }).commandComplete).toBe("toolkit");
+    expect(parseWebHubSettings({ commandComplete: "off" }).commandComplete).toBe("off");
+    for (const bad of ["On", true, 1, null, [], { mode: "all" }, "loopback"]) {
+      expect(parseWebHubSettings({ commandComplete: bad }).commandComplete, String(bad)).toBe("all");
+    }
+    // exposed in the TUI settings editor, non-live like the rest of webHub.*
+    const spec = SETTING_SPECS["webHub.commandComplete"]!;
+    expect(spec.kind).toBe("enum");
+    expect(spec.live).toBeUndefined();
+    expect(isKnownSettingKey("webHub.commandComplete")).toBe(true);
   });
 
   it("is wired into loadSettings", () => {

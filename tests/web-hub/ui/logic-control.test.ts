@@ -879,6 +879,41 @@ describe("sanitizeRenameInput (web-hub-rename plan)", () => {
   });
 });
 
+import { renameAction } from "../../../src/web-hub/ui/src/logic/control.js";
+
+describe("renameAction (title-auto plan)", () => {
+  it("empty draft + a current name + /title advertised ⇒ the auto action", () => {
+    expect(renameAction("", "old name", true)).toEqual({ kind: "auto" });
+    expect(renameAction("   ", "old name", true)).toEqual({ kind: "auto" });
+  });
+
+  it("empty draft WITHOUT the /title command (old agent) ⇒ local cancel (legacy rule)", () => {
+    expect(renameAction("", "old name", false)).toBeNull();
+    expect(renameAction("   ", "old name", undefined)).toBeNull();
+  });
+
+  it("empty draft with NO current name ⇒ local cancel even with /title advertised", () => {
+    expect(renameAction("", "", true)).toBeNull();
+    expect(renameAction("   ", "", true)).toBeNull();
+  });
+
+  it("unchanged (after trim) ⇒ local cancel, regardless of the title capability", () => {
+    expect(renameAction("same name", "same name", true)).toBeNull();
+    expect(renameAction("  same name  ", "same name", false)).toBeNull();
+  });
+
+  it("a normal rename is unchanged: trimmed + capped rename action", () => {
+    expect(renameAction("  new name  ", "old name", true)).toEqual({ kind: "rename", name: "new name" });
+    const long = "x".repeat(RENAME_MAX_CHARS + 50);
+    expect(renameAction(long, "", false)).toEqual({ kind: "rename", name: "x".repeat(RENAME_MAX_CHARS) });
+  });
+
+  it("non-string draft (defensive): empty ⇒ cancel/auto only per the same rules", () => {
+    expect(renameAction(undefined, "old", true)).toEqual({ kind: "auto" });
+    expect(renameAction(42, "old", false)).toBeNull();
+  });
+});
+
 import { isWebSentMessage } from "../../../src/web-hub/ui/src/logic/control.js";
 
 describe("isWebSentMessage (§7.7 transcript web badge)", () => {

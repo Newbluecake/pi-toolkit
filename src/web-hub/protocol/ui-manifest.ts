@@ -36,11 +36,19 @@ export interface UiManifestFile {
   sha256: string;
 }
 
-/** Hard cap on manifest entries — a legitimate build never comes close; guards against a corrupted/oversized manifest. */
-export const UI_MAX_FILES = 64;
+/**
+ * Hard cap on manifest entries — guards against a corrupted/oversized manifest.
+ * 64 → 128 (web-hub-mermaid plan §7.4, 2026-10-21): the lazily loaded mermaid closure adds 61 `assets/mmd-*` files;
+ * the measured production build with mermaid wired in is ≈82 files (≈60 % headroom).
+ */
+export const UI_MAX_FILES = 128;
 
-/** Hard cap on the sum of `files[].bytes` — plan §2.1's "产物清单字节预算" (real builds are expected to land near 0.5 MiB). */
-export const UI_MAX_TOTAL_BYTES = 4 * 1024 * 1024;
+/**
+ * Hard cap on the sum of `files[].bytes` — plan §2.1's "产物清单字节预算".
+ * 4 → 12 MiB (web-hub-mermaid plan §7.4, 2026-10-21): the mermaid closure is ≈4.9 MB raw; the measured production
+ * build with mermaid wired in is ≈6.3 MB (≈1.9× headroom).
+ */
+export const UI_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
 
 const COMMIT_UNKNOWN = "unknown";
 const COMMIT_RE = /^[0-9a-f]{12}(-dirty)?$|^unknown$/;

@@ -40,7 +40,7 @@ import { memLog } from "../hub/helpers.js";
 import { testHubPaths } from "../helpers/paths.js";
 import { makeAgent } from "./helpers.js";
 import { lanPostJson, lanRequest, seedLanUser, type RawResponse } from "./lan-helpers.js";
-import { createServer as createNetServer } from "node:net";
+import { freePort } from "../../helpers/free-port.js";
 
 // ---------------------------------------------------------------------------
 // LAN harness (startLan + uploads/commands/registry injection)
@@ -83,18 +83,6 @@ function fakeRouter(reply: (frame: CmdFrame) => CmdResultFrame): FakeRouter {
 
 function okReply(frame: CmdFrame): CmdResultFrame {
   return { t: "cmd_result", rid: frame.rid, id: frame.id, ok: true, data: {} };
-}
-
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createNetServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
 }
 
 async function startLanUpload(opts: { router?: FakeRouter } = {}): Promise<LanUploadHarness> {

@@ -119,6 +119,22 @@ export function parameterizedBuiltinPolicy(
  */
 type SubPolicyFn = (tokens: readonly string[]) => PolicyDecision;
 
+/** `/fabric`'s known subcommand set (2026-10-22 ruling: all baseline-allow). Kept in sync with
+ * `src/commands/fabric-xs.ts`'s SUBS. */
+const FABRIC_KNOWN_SUBS: ReadonlySet<string> = new Set([
+  "replies",
+  "status",
+  "channels", // channel-plan §6.3 (CH3): read-only listing; baseline allow, subject to the `fabric` whole-name override
+  "blocks",
+  "join",
+  "leave",
+  "receive",
+  "block",
+  "unblock",
+  "fence",
+  "alias", // alias-plan §3.5/§7 (AL4): get/set/clear/take preview+exec; baseline allow, governed by `webCommandPolicy.fabric`
+]);
+
 const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
   // /agent [status|<runId>] · costs · fleet → read-only text. settings/budget with no further
   // args falls back to the text listing (allow, §4.9's C12 text-fallback row); with a
@@ -132,7 +148,7 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
     // Anything else is a bare runId/prefix (`/agent r_xxx`) — a read-only detail view.
     return { policy: "allow" };
   },
-  // /mem [list] · path · doctor → read-only. import/tidy/restore write files or (tidy/restore)
+  // /mem [list] · path · doctor → read-only. init/import/tidy/restore write files or (tidy/restore)
   // are multi-step interactive flows the web caller cannot drive (§4.9's downgrade-to-cancel row).
   mem(tokens) {
     const sub = tokens[0];
@@ -191,6 +207,13 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
   "pi-hud-refresh"() {
     return { policy: "allow" };
   },
+  // /title [status] → read-only report. `auto` appends a title-ownership record (session write)
+  // and arms a forced refresh → same confirm class as other session mutations (mirrors /name's
+  // allow-with-args on the builtin bridge, but this one goes through the extension table).
+  title(tokens) {
+    const sub = tokens[0];
+    return { policy: sub === undefined || sub === "status" ? "allow" : "confirm" };
+  },
   // /clear is session-nav's alias for /new (same confirm as the builtin row).
   clear() {
     return { policy: "confirm" };
@@ -206,6 +229,18 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
   webhub(tokens) {
     const sub = tokens[0] ?? "status";
     return { policy: sub === "status" ? "allow" : "deny" };
+  },
+  // fabric (2026-10-22 user ruling, superseding phase-2 §5.3/#9/XI13's deny-by-default): every
+  // KNOWN subcommand — including the membership/policy/blocklist/fence mutations — is baseline
+  // `allow`, and the web surface is governed by `webCommandPolicy.fabric` (default allow, settable
+  // to confirm/deny; the override wins outright in `resolveCommandPolicy`, for every subcommand at
+  // once). Unknown subcommands stay `deny` (they can only be typos — the real ones render usage
+  // text anyway). The Feishu source never reaches this table: hub F6 admission forwards only
+  // prompt/dialog ops for Feishu, and X4's handler additionally hard-refuses Feishu-marked
+  // invocations regardless of policy.
+  fabric(tokens) {
+    const sub = tokens[0] ?? "status";
+    return { policy: FABRIC_KNOWN_SUBS.has(sub) ? "allow" : "deny" };
   },
 };
 

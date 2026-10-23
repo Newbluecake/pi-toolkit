@@ -50,6 +50,8 @@ import type {
   LoadWire,
 } from "../protocol/messages.js";
 import type { FeishuBotHubConfig } from "../protocol/feishu.js";
+import type { HubCrossSessionConfig } from "./xs/limits.js";
+import type { CommandCompleteRoutes } from "./command-complete.js";
 import type { CmdLimit } from "./cmd-limit.js";
 import type { HubPaths } from "../protocol/paths.js";
 import type { AgentRemoveFrontendPort } from "./agent-remove.js";
@@ -446,6 +448,8 @@ export interface HubConfig {
   preview?: "on" | "loopback";
   /** web-hub-avatar plan v2.1 §2.6: presence of the literal key is the feature gate. */
   avatar?: true;
+  /** Slash-argument completion; absent = off (no cap or routes). */
+  cmdArgs?: "all" | "toolkit";
   /** web-hub-privacy plan v2.1 (P1, 「设置」节): presence of the literal key is the feature
    * gate (same wire-level pattern as `avatar`): `webHub.privacy` default true — `false` leaves
    * the key ABSENT, so an off hub mounts no routes, sends no `privacy` frame, declares no
@@ -468,6 +472,12 @@ export interface HubConfig {
   proxy?: HubProxyConfig;
   /** Feishu bot: absence is off; credentials never cross this config boundary. */
   feishuBot?: FeishuBotHubConfig;
+  /** fabric phase-2 §4.6 (X1): the cross-session relay's hub-global limits, present ONLY when
+   * `xsOn` on the launching pi (X2's `buildHubConfig` omits the key otherwise — key absence IS off:
+   * no relay, no frame handling, no `xs.v1` cap, byte-identical hub). Frozen at hub start;
+   * `hub/main.ts` re-validates via `normalizeHubCrossSessionConfig` and drops the whole key on a
+   * malformed value. */
+  crossSession?: HubCrossSessionConfig;
 }
 
 /**
@@ -761,6 +771,8 @@ export interface FrontendDeps {
    * security surface, same §4.7 listener matrix: LAN answers 404 unless `mode === "on"`),
    * so an assembly that injects neither gets the exact pre-feature behavior back. */
   fileSearch?: FileSearchRoutes;
+  /** Same ephemeral route instance on both listeners; absent keeps the original 404. */
+  commandComplete?: CommandCompleteRoutes;
   /** worktree-diff plan §1.6 (D3): the worktree-diff route frontend
    * (`hub/worktree-diff/routes.ts`'s `createWorktreeDiffRoutes`), constructed by hub.ts only
    * when `config.preview` exists AND `/proc/self/fd` is usable (D21). Optional so test doubles

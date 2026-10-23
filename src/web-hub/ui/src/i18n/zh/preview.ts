@@ -92,6 +92,19 @@ const preview = {
   dirTreeLimitEntries: "已达到树行数预算（{n} 行）——请先收起部分文件夹。",
   // 2026-10 交互调整：目录行单击内联展开，双击进入
   dirRowHint: "单击展开/折叠，双击进入",
+  // preview-windows（W2，plan r2 §9）：多窗口非模态预览的文案。窗口标题读屏前缀（sr-only，
+  // 与可见 basename 拼成 §5.3 的「文件预览：x」）、上限提示、
+  // 手机叠层徽标读屏文案、标题栏键盘提示、窗口菜单。
+  windowLabel: "文件预览：",
+  windowLimit: "已达 {n} 个窗口上限，已在当前窗口打开",
+  windowStackLabel: "第 {i} 个窗口，共 {n} 个",
+  windowMoveHint: "拖动标题栏移动；方向键移动，Shift+方向键调整大小；Ctrl+` 在对话与窗口间切换",
+  windowMenu: "窗口操作",
+  windowCloseAll: "全部关闭（{n}）",
+  windowResetGeom: "重置位置和大小",
+  // 2026-10-22 L1：桌面端最大化/恢复（标题栏按钮 + 双击标题栏 + 窗口菜单）
+  windowMaximize: "最大化窗口",
+  windowRestore: "恢复窗口大小",
   // preview-download（对话框头部的文件下载按钮 —— 仅文件，目录没有）
   download: "下载",
   downloadFailed: "下载失败 — 请重试。",
@@ -103,6 +116,9 @@ const preview = {
   htmlMaybeStale: "预览可能已过期 — 页面若加载失败，可刷新。",
   htmlExpired: "链接已过期，刷新以继续加载。",
   htmlReload: "重新加载",
+  // preview-windows plan §8.2 (W3): tab-local FIFO eviction notice for the HTML cap.
+  htmlMaybeEvicted:
+    "这个页面的访问凭据可能已被后来打开的 HTML 预览挤掉（同一登录最多保留 8 个）。页面里的链接或资源加载失败时，点「重新加载」。",
   htmlLoadingSlow: "仍在加载…",
   htmlNote: "页面脚本在沙箱中运行，可访问外网与本目录文件，无法访问 hub。",
   htmlMintFailed: "无法建立渲染预览（{code}）——已切换为源码显示。",

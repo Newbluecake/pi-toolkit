@@ -27,6 +27,37 @@ import {
 import type { LanStatus } from "./lan.js";
 // feishu-bot plan §9 (F0): `fsb_req`/`fsb_res` schemas + types live in protocol/feishu.ts; only folded in here.
 import { type FsbReqFrame, FsbReqSchema, type FsbResFrame, FsbResSchema } from "./feishu.js";
+import {
+  XS_AGENT_FRAME_SCHEMAS,
+  XS_HUB_FRAME_SCHEMAS,
+  XsStatusSchema,
+  type XsAckFrame,
+  type XsDeliverFrame,
+  type XsEffect,
+  type XsMemberFrame,
+  type XsReqFrame,
+  type XsResFrame,
+  type XsStatusWire,
+  xsFrameBytesOk,
+} from "./xs.js";
+export type { XsAckFrame, XsDeliverFrame, XsMemberFrame, XsReqFrame, XsResFrame, XsStatusWire } from "./xs.js";
+// web-hub-slash-args plan §4.1 (P0): argument-completion frames + the CommandInfo.args
+// sub-schema live in protocol/command-args.ts; only folded in here (run-transcript precedent).
+import {
+  type CommandInfoArgs,
+  CommandInfoArgsSchema,
+  type CompleteReplyFrame,
+  CompleteReplySchema,
+  type CompleteReqFrame,
+  CompleteReqSchema,
+} from "./command-args.js";
+export type {
+  CommandInfoArgs,
+  CmdArgsReplyCode,
+  CompleteItemWire,
+  CompleteReplyFrame,
+  CompleteReqFrame,
+} from "./command-args.js";
 import { type TfaReqFrame, TfaReqSchema, type TfaResFrame, TfaResSchema } from "./lan-2fa.js";
 export type { TfaReqFrame, TfaResFrame } from "./lan-2fa.js";
 
@@ -575,11 +606,25 @@ export interface StatusInfo {
    *  feature on this agent. Bounded ≤32 entries × ≤64 chars; a strictly optional field, so an
    *  old hub's open StatusInfoSchema forwards it verbatim and an old UI ignores it (F9). */
   features?: string[];
+  /** fabric phase-2 XS0 (§4.4, P3): display-only cross-session membership projection. Absent ⇔
+   *  xs off / not joined — byte-equal to the pre-feature shape. The hub's list/send authorization
+   *  NEVER reads this (#4): authoritative membership is the `xs_member` slot frame. */
+  xs?: XsStatusWire;
+  /** channel-plan §12.6 (IBP): unread cross-session inbox count of THIS session. Present only
+   *  while n>0 (1..9999, saturated); absent ⇒ byte-equal to the pre-feature shape. Open top-level
+   *  field like `todo`/`worktrees` — no cap, no PROTO bump; the UI gates on `xs.v1` ∧ presence. */
+  xsInbox?: { unread: number };
 }
 
 export interface FleetRowWire {
   runId: string;
   label?: string;
+  /** Display-only raw title (append-only optional field — no proto bump): the Agent
+   *  tool's un-sanitized `description` (whitespace preserved, ≤120 code points),
+   *  present only when it differs from `label`. The UI renders it as the row's main
+   *  title with the label as small secondary text; absent ⇔ title === label or an
+   *  old agent, and the UI falls back to the label. */
+  title?: string;
   type?: string;
   model?: string;
   /** M-B2 (thinking-level visibility): the run's effective thinking level
@@ -712,6 +757,18 @@ export interface CmdOrigin {
   user?: string;
   reqId: string;
 }
+
+/** 2026-10-22 fabric ruling: Feishu-source identification for command/prompt gating. The ONLY
+ *  constructor of Feishu-marked origins is the hub side's F6 admission
+ *  (`src/web-hub/hub/commands.ts` `createFeishuCommandOrigin`) — a synthetic, hub-internal
+ *  attribution value (`ip:"feishu"`, `user:"feishu:<openId>"`) that never comes from a socket:
+ *  web/LAN HTTP origins always carry the caller's real remote address as `ip`, so a browser
+ *  cannot forge the marker. The agent socket is trusted (only the hub connects to it), which
+ *  makes `origin.ip === "feishu"` a reliable agent-side Feishu predicate. Pure predicate — no
+ *  frozen protocol type changes. */
+export function isFeishuCmdOrigin(origin: CmdOrigin): boolean {
+  return origin.ip === "feishu";
+}
 export interface CmdExpect {
   sessionId?: string;
 }
@@ -800,9 +857,15 @@ export const STATUS_FEATURES_MAX_CHARS = 64;
  *  projection drops anything longer instead of failing the fleet frame. */
 export const FLEET_CACHE_MARK_MAX = 64;
 /** Result of agent-side @mention routing. This is additive to the prompt result so older
- * hubs/UIs continue to accept and ignore it. */
+ * hubs/UIs continue to accept and ignore it.
+ * Reply-plan §9.3 (RX0 freezes the wire; the M package wires it): the `"session"` variant is
+ * the independent @-session branch — a cross-session mention routed through the fabric sender
+ * (`effect` = the send's delivery effect; `requestId` present iff an `expectReply` was
+ * registered). It deliberately shares no field with the runId branch. */
 export type MentionResultData =
-  { action: "steer" | "resume"; label: string; runId: string } | { action: "error"; label: string; error: string };
+  | { action: "steer" | "resume"; label: string; runId: string }
+  | { action: "session"; label: string; effect: XsEffect; requestId?: string }
+  | { action: "error"; label: string; error: string };
 /** web-hub-steer-recall plan §2.3 S2 / §5.8: the typed result of a `recall` op. `text` is the
  *  FULL recalled message body (≤ RECALL_TEXT_MAX_BYTES, hub-validated) — the only channel that
  *  ever returns the untruncated text. `too_late` never distinguishes WHY (already handed to pi /
@@ -931,6 +994,11 @@ export interface CommandInfoWire {
   policy: "allow" | "confirm" | "deny";
   policyBusy?: "allow" | "confirm" | "deny";
   output?: "captured" | "terminal";
+  /** web-hub-slash-args plan §3.1: static argument usage hint + dynamic-completion
+   *  availability. Append-only; the agent emits it ONLY while the live link's hello_ack.caps
+   *  ∋ "cmd.args.v1" (an un-upgraded hub's closed CommandInfoSchema would silently drop the
+   *  whole commands frame otherwise, §7 matrix) — absent ⇒ pre-feature byte-identical wire. */
+  args?: CommandInfoArgs;
 }
 export interface CommandsFrame {
   t: "commands";
@@ -976,6 +1044,9 @@ export type AgentFrame =
   | DialogsFrame
   | CtlFrame
   | CommandsFrame
+  // web-hub-slash-args plan §4.1 (P0): dynamic argument-completion reply (cap-gated, no
+  // PROTO bump per r1 评审 #2 — same 只加帧不改 rule as fsb/tfa; nothing routes it until P1).
+  | CompleteReplyFrame
   // web-hub-fleet-drawer plan §3.1 (F0): run-transcript frames — schema bodies and the
   // authoritative interfaces live in protocol/run-transcript.ts; only folded in here.
   | RunTxReplyFrame
@@ -985,7 +1056,13 @@ export type AgentFrame =
   | LanReqFrame
   | HubCtlFrame
   | FsbReqFrame
-  | TfaReqFrame;
+  | TfaReqFrame
+  // fabric phase-2 XS0 (phase2-plan §8.1/§8.2): cross-session frames. Decoding is wired from
+  // day one (inert — nothing routes them until X1/X2); every xs_* frame additionally passes
+  // the stricter XS_MAX_FRAME_BYTES byte cap in decodeWith.
+  | XsMemberFrame
+  | XsReqFrame
+  | XsAckFrame;
 
 // ---- S1 LAN control-plane frames (§8.1; 同一个 unix socket，hello 之后才接受，不进 registry/bus/普通日志，不做额外鉴权——同 uid 完全可信) ----
 
@@ -1050,12 +1127,17 @@ export type HubFrame =
   | RunWatchFrame
   | CmdFrame
   | SupersededFrame
+  // web-hub-slash-args plan §4.1 (P0): dynamic argument-completion request (cap-gated, no
+  // PROTO bump per r1 评审 #2; nothing routes it until P2).
+  | CompleteReqFrame
   | { t: "ping"; ts: number }
   | { t: "pong"; ts: number }
   | LanResFrame
   | HubCtlAckFrame
   | FsbResFrame
-  | TfaResFrame;
+  | TfaResFrame
+  | XsResFrame
+  | XsDeliverFrame;
 
 export const TIMING = {
   connectMs: 1_000,
@@ -1493,6 +1575,9 @@ const StatusInfoSchema = Type.Object({
       maxItems: STATUS_FEATURES_MAX_ITEMS,
     }),
   ),
+  xs: Type.Optional(XsStatusSchema),
+  // channel-plan §12.6 (IBP): open top-level slot, only written while unread > 0.
+  xsInbox: Type.Optional(Type.Object({ unread: Type.Integer({ minimum: 1, maximum: 9999 }) })),
 });
 
 const FleetRowSchema = Type.Object({
@@ -2031,6 +2116,8 @@ const CommandInfoSchema = Type.Object(
     policy: Type.Union([Type.Literal("allow"), Type.Literal("confirm"), Type.Literal("deny")]),
     policyBusy: Type.Optional(Type.Union([Type.Literal("allow"), Type.Literal("confirm"), Type.Literal("deny")])),
     output: Type.Optional(Type.Union([Type.Literal("captured"), Type.Literal("terminal")])),
+    // web-hub-slash-args plan §3.1 (P0): append-only, cap-gated on the hub side ("cmd.args.v1").
+    args: Type.Optional(CommandInfoArgsSchema),
   },
   { additionalProperties: false },
 );
@@ -2120,11 +2207,14 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   dialogs: DialogsSchema,
   ctl: CtlSchema,
   commands: CommandsSchema,
+  // web-hub-slash-args plan §4.1 (P0): schema from protocol/command-args.ts
+  complete_reply: CompleteReplySchema,
   // fleet-drawer §3.1 (F0): schemas imported from protocol/run-transcript.ts
   run_tx_reply: RunTxReplySchema,
   run_ev: RunEvSchema,
   run_gap: RunGapSchema,
   run_end: RunEndSchema,
+  ...XS_AGENT_FRAME_SCHEMAS,
 };
 
 const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
@@ -2135,6 +2225,8 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   // fleet-drawer §3.1 (F0): schemas imported from protocol/run-transcript.ts
   run_tx_req: RunTxReqSchema,
   run_watch: RunWatchSchema,
+  // web-hub-slash-args plan §4.1 (P0): schema from protocol/command-args.ts
+  complete_req: CompleteReqSchema,
   cmd: CmdSchema,
   superseded: SupersededSchema,
   ping: PingSchema,
@@ -2143,6 +2235,7 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   hub_ctl_ack: HubCtlAckSchema,
   fsb_res: FsbResSchema,
   tfa_res: TfaResSchema,
+  ...XS_HUB_FRAME_SCHEMAS,
 };
 
 // ---------------------------------------------------------------------------
@@ -2164,6 +2257,9 @@ function decodeWith(schemas: Readonly<Record<string, TSchema>>, raw: unknown): o
   if (!withinFrameBudget(raw)) return undefined;
   const t = (raw as Record<string, unknown>)["t"];
   if (typeof t !== "string") return undefined;
+  // fabric phase-2 (protocol/xs.ts §8.2): xs_* frames carry a STRICTER 16 KiB byte cap than the
+  // global ndjson budget — an oversize xs frame is invalid exactly like an unknown one.
+  if (t.startsWith("xs_") && !xsFrameBytesOk(raw)) return undefined;
   const schema = schemas[t];
   if (schema === undefined) return undefined; // unknown t + RESERVED_FRAME_TYPES
   return Value.Check(schema, raw) ? (raw as object) : undefined;

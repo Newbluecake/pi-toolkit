@@ -341,10 +341,10 @@ export function runDoctor(snapshot: DoctorSnapshot, settings: DoctorSettings): D
           extra.length === 0 ? "; the block carries only the auto-generated index" : ""
         }).${extra.length > 0 ? ` ${extra.join(" ")}` : ""}`,
         fix: handIndex
-          ? `Move the always-on rules from ${handIndex.name} into core.md, or add \`pin: true\` to a suitable file — ${handIndex.name} itself will not be auto-injected.`
+          ? `${archivedCore ? "Move" : "Run /mem init, then move"} the always-on rules from ${handIndex.name} into core.md, or add \`pin: true\` to a suitable file — ${handIndex.name} itself will not be auto-injected.`
           : archivedCore
             ? "Set core.md back to status: active, or add `pin: true` to a suitable file's frontmatter."
-            : "Create core.md with the always-on rules, or add `pin: true` to a suitable file's frontmatter.",
+            : "Run /mem init to create core.md with the always-on rules, or add `pin: true` to a suitable file's frontmatter.",
       });
     }
   } else if (primary !== "core.md") {

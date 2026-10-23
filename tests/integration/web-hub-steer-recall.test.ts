@@ -20,6 +20,7 @@ import { AGENT_ID_KEY, resetGlobals, waitUntil } from "../web-hub/agent/helpers.
 import { config as hubConfig } from "../web-hub/hub/helpers.js";
 import { login, openSse, postJson, type SseConn } from "../web-hub/http/helpers.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
+import { freePort } from "../helpers/free-port.js";
 
 const HOST_KEY = Symbol.for("pi-subagent:host");
 const LEDGER_KEY = Symbol.for("pi-subagent:web-hub:cmd-ledger");
@@ -428,17 +429,6 @@ describe("web-hub steer-recall LAN (I6)", () => {
   it.skipIf(NO_NODE_SQLITE)(
     "a held row recalls over the LAN auth surface with the same typed result",
     async () => {
-      const { createServer: createNetServer } = await import("node:net");
-      const freePort = async (): Promise<number> =>
-        new Promise((resolve, reject) => {
-          const srv = createNetServer();
-          srv.once("error", reject);
-          srv.listen(0, "0.0.0.0", () => {
-            const addr = srv.address();
-            const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-            srv.close(() => resolve(port));
-          });
-        });
       const { lanPostJson } = await import("../web-hub/http/lan-helpers.js");
       const { connectClient, hello } = await import("../web-hub/hub/helpers.js");
       const home = sandboxHome();

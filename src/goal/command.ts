@@ -129,7 +129,7 @@ export function createGoalCommand(deps: GoalCommandDeps): Omit<RegisteredCommand
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const goal = deps.goal();
       if (!goal) {
-        notify(ctx, "pi-subagent：当前没有活动会话，goal 不可用。", "error");
+        notify(ctx, "当前没有活动会话，/goal 不可用。", "error");
         return;
       }
       if (!goal.settings.enabled) {

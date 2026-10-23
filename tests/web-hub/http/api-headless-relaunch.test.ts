@@ -101,6 +101,9 @@ describe("POST /api/headless/relaunch (spawn-relaunch)", () => {
     const r = await relaunchPost({ spawnId: SPAWN_ID });
     expect(r.status).toBe(503);
     expect(JSON.parse(r.body)).toMatchObject({ error: "E_LAUNCHER", reason: "launcher" });
+    expect(kit.log.lines.filter((l) => l.data?.phase === "reject").map((l) => l.data)).toEqual([
+      expect.objectContaining({ endpoint: "relaunch", spawnId: SPAWN_ID, code: "E_LAUNCHER", reason: "launcher" }),
+    ]);
   });
 
   it("idempotent re-entry: the record turned non-terminal (relaunch in flight) ⇒ 202 dup:true, no state change", async () => {

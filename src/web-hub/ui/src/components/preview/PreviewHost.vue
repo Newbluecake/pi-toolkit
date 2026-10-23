@@ -1,404 +1,251 @@
 <!--
-  Preview overlay host (web-hub-preview plan v3 §4.6, package PV5; dir-plan v3.1 §0.2 A3/§5
-  P3): Teleports to `<body>` and renders `usePreview`'s state machine (`PREVIEW_CTX` — provided
-  by PV6's App wiring; absent ⇒ nothing renders): loading / image / text / dir / unsupported /
-  tooLarge / error, with the header's basename + full path + close button and the §5.2
-  plaintext-transport standing warning (hidden by default via the `pwh_hide_plaintext_warn`
-  browser pref since 2026-10-20, like every plaintext warning).
+  PreviewHost.vue — web-hub-preview-windows plan r2 §9 (W2): the windows SHELL. Everything
+  per-dialog moved into `PreviewWindow.vue`; what remains here is exactly §7.2's sketch:
 
-  Interaction contract (§4.6):
-  - scrim click closes (`@click.self` — clicks INSIDE the panel never reach it);
-  - Esc closes with `preventDefault()` + `stopPropagation()` (a global Esc handler must not
-    also fire — e.g. a drawer closing underneath);
-  - focus ENTERS the panel on open, Tab/Shift+Tab CYCLE inside it, and focus RETURNS to the
-    previously focused element on close;
-  - body scroll is locked while open and ALWAYS restored (close path AND unmount path).
+  - the Teleport + root node `.preview-overlay.is-windows` (+ `.is-modeless` on the ≥768px
+    band — pointer-events:none, no scrim, no body-scroll lock; the phone band keeps the base
+    z60 fullscreen stack + scroll lock, §6);
+  - the keyed `v-for` over the manager's `windows` (CREATION order — never reordered; z-order
+    rides `--pw-z`, so a window's DOM node and any iframe inside it are never remounted, R1);
+  - geometry (`usePreviewWindowLayout`: cascade placement per new window, drag/resize
+    gestures, viewport re-clamp) and the desktop resize hot zones;
+  - focus (§5.4/§6.2): activation on pointerdown/focusin, per-window `lastFocus`, `pageFocus`
+    refreshed by ANY focusin landing outside the windows (r2 复审处置), `focusRequest`
+    landing after nextTick, focus return on close — and the phone-band trap confined to the
+    TOP window with `focusablesIn()` filtering `[inert]` subtrees (评审 #4);
+  - Esc (§5.5): closes exactly the window containing the event target (preventDefault +
+    stopPropagation, so DashboardView's window-level Esc never fires); the window menu stops
+    its own Esc first.
 
-  dir-plan §0.2 A3 (P3): when the injected handle carries the navigation face
-  (`asDirHandle` — `usePreview`'s P3 return), the header grows 返回 (pop the in-dialog history
-  stack; disabled at its bottom) and, in the dir phase, 上级 (`parentPreviewPath`; disabled at
-  one-segment paths — `/` is not listable). The whole host subtree gets `PREVIEW_CTX`
-  re-provided with `open` mapped to `navigate`, so path refs rendered INSIDE the open dialog
-  (B6: a rendered md's PathText segments) drill down — push + 返回-able — instead of
-  restarting the visit. A handle without the face (pre-P3 fakes) keeps open-only navigation:
-  no nav buttons, no dir branch, byte-identical to pre-P3 DOM.
+  `asWindowsHandle(ctx.handle) === null` ⇒ NOTHING renders (评审 #14: the legacy single-window
+  face is deleted; component fakes come from `tests/.../helpers/preview-windows-fake.ts`).
+
+  W3 wire-in (live, see the "W3 wire-in" section below): `usePreviewWindowCycle(...)` — the
+  Ctrl+` conversation⇄window ring (§5.6) — and `provide(PREVIEW_HTML_LEDGER, …)` — the §8.2
+  tab-local html-cap FIFO ledger every window's PreviewHtml shares.
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onUnmounted, provide, ref, watch } from "vue";
-import { childPreviewPath, clientImageBudget, isHtmlPath, parentPreviewPath } from "@logic/preview.js";
-import type { PreviewDirEntry } from "@protocol/preview.js";
-import { PREVIEW_DOWNLOAD_HUB_CAP } from "@protocol/version.js";
+import type { PreviewResizeDir } from "@logic/previewWindowGeom.js";
+import { asWindowsHandle } from "../../composables/usePreviewWindows.js";
+import { usePreviewWindowCycle } from "../../composables/usePreviewWindowCycle.js";
+import { usePreviewWindowLayout } from "../../composables/usePreviewWindowLayout.js";
+import { useMedia } from "../../composables/useMedia.js";
 import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
-import { useI18n } from "../../composables/useI18n.js";
 import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
-import { asDirHandle, type PreviewHandleDir, type PreviewViewDir } from "../../composables/usePreview.js";
-import AppIcon from "../../icons/AppIcon.vue";
-import type { PreviewView } from "../../types.js";
-import CopyButton from "../detail/CopyButton.vue";
-import { HUB_CTX } from "../control/controlContext.js";
-import PreviewDir from "./PreviewDir.vue";
-import PreviewImage from "./PreviewImage.vue";
-import PreviewText from "./PreviewText.vue";
 import { browserLocalStorage } from "../shell/themeStorage.js";
+import PreviewWindow from "./PreviewWindow.vue";
 import { PREVIEW_CTX } from "./previewContext.js";
+import { createPreviewHtmlLedger, PREVIEW_HTML_LEDGER } from "./previewHtmlLedger.js";
 
 const ctx = inject(PREVIEW_CTX, null);
-const hub = inject(HUB_CTX, null);
-const { t } = useI18n();
+
+/** §4.3 (frozen): only the windows face renders. A plain handle/fake ⇒ nothing at all. */
+const face = computed(() => (ctx === null ? null : asWindowsHandle(ctx.handle)));
+const windows = computed(() => face.value?.windows.value ?? []);
+const order = computed(() => face.value?.order.value ?? []);
+const activeId = computed(() => face.value?.activeId.value ?? null);
+const focusRequest = computed(() => face.value?.focusRequest.value ?? null);
+const hasWindows = computed(() => windows.value.length > 0);
 
 // `pwh_hide_plaintext_warn` (browser pref, hidden by default) gates the §5.2 standing warning.
 const warn = usePlaintextWarning({ storage: browserLocalStorage() });
 const showPlainWarning = computed(() => warn.warnVisible(ctx?.plaintext === true));
 
-/** A3/P3: the navigation face — `null` for a pre-P3 handle/fake (open-only degradation). */
-const nav = computed<PreviewHandleDir | null>(() => (ctx === null ? null : asDirHandle(ctx.handle)));
+/** §6: the ≥768px desktop band (modeless floating windows ⇄ phone fullscreen stack). */
+const media = useMedia(window, "(min-width: 768px)");
+const desktop = computed(() => media.matches.value);
 
-const view = computed<PreviewViewDir>(() =>
-  nav.value !== null ? nav.value.view.value : ((ctx?.handle.view.value ?? { phase: "closed" }) as PreviewView),
-);
-const isOpen = computed(() => view.value.phase !== "closed");
-const path = computed(() => ("path" in view.value ? view.value.path : ""));
-const basename = computed(() => {
-  const p = path.value;
-  const slash = p.lastIndexOf("/");
-  return slash >= 0 && slash < p.length - 1 ? p.slice(slash + 1) : p;
+/** Bottom edge of the top bar in viewport px — the clamp box starts here (ask-float's rule). */
+function topOffset(): number {
+  const el = document.querySelector("header.topbar");
+  if (el === null) return 0;
+  const r = el.getBoundingClientRect();
+  return Number.isFinite(r.bottom) ? Math.max(0, r.bottom) : 0;
+}
+
+const layout = usePreviewWindowLayout({
+  desktop,
+  doc: document,
+  win: window,
+  topOffset,
 });
-const isDirPhase = computed(() => view.value.phase === "dir");
-/** Once a directory listing has been shown in this open, the panel keeps its full height
- * (2026-10-08 field report: browsing from a long listing to a short one — or through the
- * loading phase in between — shrank the vertically-centered panel and made the header buttons
- * jump under the cursor). Reset whenever the dialog closes. */
-const holdTall = ref(false);
-watch(
-  () => view.value.phase,
-  (phase) => {
-    if (phase === "dir") holdTall.value = true;
-    else if (phase === "closed") holdTall.value = false;
-  },
-  { immediate: true },
-);
-const backDisabled = computed(() => nav.value === null || nav.value.stackDepth.value === 0);
-const upDisabled = computed(() => parentPreviewPath(path.value) === null);
 
-/** web-hub-html-preview plan v2 §5 (P2): an HTML entry in the text phase renders the tall
- *  (`clamp(320px,72vh,1400px)`) sandboxed iframe — hold the panel tall through the SAME dir-
- *  phase mechanism so toggling rendered⇄source (or a mint spinner) never moves the header
- *  buttons. Gated on the cap AND the transport method: an absent cap keeps a `.html` preview
- *  byte-identical to today (no class flip, same heights). Never resets by itself — like the
- *  dir rule, only `closed` does (a taller-then-shorter dialog is the accepted trade-off). */
-const htmlHoldTall = computed(() => {
-  const v = view.value;
-  return (
-    v.phase === "text" &&
-    isHtmlPath(path.value) &&
-    ctx?.handle.scope.value?.html === true &&
-    hub?.preview?.htmlCap !== undefined
-  );
-});
-watch(
-  htmlHoldTall,
-  (on) => {
-    if (on) holdTall.value = true;
-  },
-  { immediate: true },
-);
+/** §7.2: the eight resize hot zones (desktop only, `aria-hidden` — §5.5's keyboard
+ *  equivalents live on the title bar and in the window menu). */
+const RZ_DIRS: readonly PreviewResizeDir[] = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
 
-// §4.1/P3 (B6): the dialog's subtree re-provides PREVIEW_CTX with `open` mapped to
-// `navigate` — an in-dialog path ref click drills down (history push) instead of restarting
-// the visit. The injected `ctx` itself stays untouched for anything above this host; the
-// override only exists when the parent wiring provided a context at all.
-if (ctx !== null) {
-  const outer = ctx;
-  provide(PREVIEW_CTX, {
-    plaintext: outer.plaintext,
-    handle: {
-      ...outer.handle,
-      open(ref: { readonly path: string }) {
-        const d = nav.value;
-        if (d !== null) d.navigate(ref);
-        else outer.handle.open(ref);
-      },
-    },
+// --- focus bookkeeping (§5.4/§6.2) -----------------------------------------------------------
+
+const rootEl = ref<HTMLElement | null>(null);
+const sectionEls = new Map<number, HTMLElement>();
+const lastFocus = new Map<number, Element>();
+/** The window that currently holds (or last held) focus — drives the close-time return. */
+let focusedWin: number | null = null;
+/** The last element focused OUTSIDE the windows (r2 复审: ANY outside focusin refreshes it). */
+let pageFocus: HTMLElement | null = null;
+
+function setSectionRef(id: number, el: unknown): void {
+  if (el instanceof HTMLElement) sectionEls.set(id, el);
+  else sectionEls.delete(id);
+}
+
+function onWinFocusin(id: number, ev: FocusEvent): void {
+  face.value?.focusWindow(id); // §5.4 activation: only reorders, never moves focus
+  focusedWin = id;
+  if (ev.target instanceof Element) lastFocus.set(id, ev.target);
+}
+
+function onDocFocusin(ev: FocusEvent): void {
+  // r2 复审处置: ANY focusin landing outside the windows refreshes pageFocus — including
+  // while no overlay root exists yet (the pre-open moments are exactly the ones we must
+  // remember). An Element target inside the (existing) root is the only skip case.
+  const root = rootEl.value;
+  if (root !== null && ev.target instanceof Element && root.contains(ev.target)) return;
+  if (ev.target instanceof Element) {
+    focusedWin = null;
+    pageFocus = ev.target instanceof HTMLElement ? ev.target : null;
+  }
+}
+document.addEventListener("focusin", onDocFocusin, true);
+
+/** §5.4 落焦: the window's own last focus target if it survives, else its panel. */
+function landFocus(id: number | null): void {
+  if (id === null) return;
+  const sec = sectionEls.get(id);
+  if (sec === undefined) return;
+  const lf = lastFocus.get(id);
+  if (lf instanceof HTMLElement && sec.contains(lf) && document.contains(lf)) lf.focus();
+  else sec.querySelector<HTMLElement>(".preview-panel")?.focus();
+}
+
+// §5.4: the manager's DOM-side instruction — land AFTER the (possibly new) node exists.
+watch(focusRequest, (req) => {
+  if (req === null) return;
+  void nextTick().then(() => {
+    landFocus(req.id);
   });
-}
-
-function back(): void {
-  nav.value?.back();
-}
-
-function up(): void {
-  nav.value?.up();
-}
-
-/** A3 “点子项”: join the row's name onto the listed dir; the join's legality
- * (`childPreviewPath`) is re-checked here — a bad row never fires a request. A `dir` row
- * requests the listing directly (`dir:true`); a symlink row leaves the decision to the
- * admission chain (the 415 fallback upgrades it to a listing if it is a directory). */
-function onDirEntry(entry: PreviewDirEntry, parentPath?: string): void {
-  const d = nav.value;
-  if (d === null || view.value.phase !== "dir") return;
-  // A row from an inline-expanded subfolder carries its own parent dir; joining onto the
-  // top-level listing would drop the subfolder segment (2026-10-15 E_NOT_FOUND report).
-  const child = childPreviewPath(parentPath ?? view.value.path, entry.name);
-  if (child === null) return;
-  const ref: { readonly path: string; readonly dir?: true } =
-    entry.type === "dir" ? { path: child, dir: true } : { path: child };
-  d.navigate(ref);
-}
-
-/** Path bar (tilde-expansion addendum, part B): the user typed/pasted an absolute or `~/...`
- * path and pressed Enter/Go. No client-side admission re-check here — `navigate()` re-runs
- * the FULL hub admission chain for whatever string comes back; a directory opens as a
- * listing in the SAME dialog (history push, same as `onDirEntry`/a transcript ref click), a
- * file opens the file preview, and anything invalid/denied surfaces through the existing
- * error/unsupported view. No `dir` hint is forced: `usePreview`'s existing 415-`not-regular`
- * → retry-with-`dir:true` fallback (when the hub declares `preview.dir.v1`) upgrades an
- * unprobed directory path the same way an ordinary unprobed ref click already does. */
-function onPathBarGo(path: string): void {
-  nav.value?.navigate({ path });
-}
-
-/** The displayed body's UTF-8 length — only a fallback for a fake/legacy view without `bytes`. */
-function utf8Length(text: string): number {
-  return new TextEncoder().encode(text).length;
-}
-
-function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n < 0) return "";
-  if (n < 1024) return `${n} B`;
-  const units = ["KiB", "MiB", "GiB"] as const;
-  let v = n;
-  let u = -1;
-  do {
-    v /= 1024;
-    u++;
-  } while (v >= 1024 && u < units.length - 1);
-  return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[u]}`;
-}
-
-const unsupportedReason = computed(() => {
-  if (view.value.phase !== "unsupported") return "";
-  switch (view.value.reason) {
-    case "binary":
-      return t("preview.reasonBinary");
-    case "not-regular":
-      return t("preview.reasonNotRegular");
-    case "dims-unknown":
-      return t("preview.reasonDimsUnknown");
-    default:
-      return t("preview.reasonGeneric");
-  }
 });
 
-function close(): void {
-  ctx?.handle.close();
-}
-
-// --- 下载 (preview-download, 2026-10 user 拍板): 文件预览（text/image/markdown=text 相位）
-// 头部常驻「下载」按钮 — 目录列表（dir 相位）不显示。走同一个 `GET /api/preview` 端点重取
-// bytes（读语义不变，hub 侧零改动；预览传输层已带 X-PWH 头 + header 契约校验 + 尺寸上限中
-// 止），浏览器侧 Blob → objectURL → a[download] 保存 —— 不能 `<a href>` 直连，导航请求带不
-// 了自定义头。文件名 = 路径 basename，lossy（U+FFFD）降级为 "download"。 -----------------
-const dlBusy = ref(false);
-const dlFailed = ref(false);
-
-/** 复制 (2026-10-20 用户裁定): the copy button moved from PreviewText's toolbar into the
- *  header, sitting right before 下载 with the same ghost-icon weight. PreviewText stays the
- *  SOLE source of the value (ANSI-stripped shown source / consumed stream segments — the
- *  chunked preview.chunk.v1 semantics unchanged) and publishes it via `update:copyValue`;
- *  `null` (image/dir/error/loading phases, or a closed dialog) ⇒ no button. */
-const copyValue = ref<string | null>(null);
-function onCopyValue(v: string | null): void {
-  copyValue.value = v;
-}
-
-/** Only file phases (text/image — markdown IS the text phase) offer download; dir and every
- *  failure phase don't. The button also requires the preview transport (a component-level
- *  fake without HUB_CTX never renders a dead button). Reset the failure line on every
- *  phase/path change. */
-const downloadable = computed(
-  () => (view.value.phase === "image" || view.value.phase === "text") && hub?.preview !== undefined,
-);
-
-/** preview-download: the `preview.download.v1` cap gates the download surface for
- *  NON-previewable files (the unsupported phase's offer); previewable files keep the plain
- *  `fetch`-based button regardless (it predates the cap). The transport method itself is
- *  required too — a component-level fake without it never renders a dead button. */
-const downloadCap = computed(() => {
-  const h = hub?.state.value.hub;
-  const caps = h !== null && h !== undefined && typeof h === "object" ? (h as { caps?: unknown }).caps : undefined;
-  return Array.isArray(caps) && caps.includes(PREVIEW_DOWNLOAD_HUB_CAP) && hub?.preview?.download !== undefined;
-});
+// Geometry lifecycle (§7.4): cascade every NEW window off the previous ACTIVE one; drop the
+// rects of closed windows. flush:"pre" ⇒ the rect exists before the section renders.
 watch(
-  () => ("path" in view.value ? `${view.value.phase}:${view.value.path}` : view.value.phase),
-  () => {
-    dlFailed.value = false;
-    copyValue.value = null; // stale copy text from the previous view never survives a switch
+  windows,
+  (next, prev) => {
+    const prevIds = new Set(prev.map((w) => w.id));
+    const newIds = next.filter((w) => !prevIds.has(w.id)).map((w) => w.id);
+    if (newIds.length > 0) {
+      // the previous ACTIVE window (the order's tail before the new id landed) — lib ES2022
+      // has no findLast, hence the manual tail walk.
+      let anchor: number | null = null;
+      for (let i = order.value.length - 1; i >= 0; i--) {
+        const x = order.value[i]!;
+        if (!newIds.includes(x)) {
+          anchor = x;
+          break;
+        }
+      }
+      for (const id of newIds) layout.ensureRect(id, anchor);
+    }
+    const nextIds = new Set(next.map((w) => w.id));
+    for (const w of prev) if (!nextIds.has(w.id)) layout.dropRect(w.id);
   },
+  { flush: "pre" },
 );
 
-/** The fetch needs a live session pair (the endpoint's ③/⑤ gate) — re-derived from the
- *  selected agent EXACTLY like `usePreview`'s scope derivation (a scope change closes the
- *  dialog, so an open dialog's derivation is stable for the click's lifetime). */
-const downloadSession = computed(() => {
-  const st = hub?.state.value;
-  if (st === undefined || st === null) return null;
-  const selected = st.selected;
-  if (selected === null || selected === undefined) return null;
-  const agent = st.agents.get(selected);
-  const session =
-    agent?.session ?? (agent?.card !== undefined ? (agent.card as { session?: unknown }).session : undefined);
-  const sessionId =
-    session !== null && typeof session === "object" ? (session as { sessionId?: unknown }).sessionId : undefined;
-  if (typeof sessionId !== "string" || sessionId === "") return null;
-  return { agentKey: selected, sessionId };
-});
-
-/** basename of the download path; a lossy name (U+FFFD from a lossy decode) is never written
- *  to disk as-is — degrade to "download". */
-function downloadNameOf(p: string): string {
-  const slash = p.lastIndexOf("/");
-  const base = slash >= 0 && slash < p.length - 1 ? p.slice(slash + 1) : p;
-  return base === "" || base.includes("\uFFFD") ? "download" : base;
-}
-
-async function download(): Promise<void> {
-  const preview = hub?.preview;
-  const sess = downloadSession.value;
-  const v = view.value;
-  if (preview === undefined || sess === null || dlBusy.value) return;
-  if (v.phase !== "image" && v.phase !== "text") return;
-  const path = v.path;
-  dlBusy.value = true;
-  dlFailed.value = false;
-  try {
-    // chunked-plan D11: a text preview may be only a prefix of the file (256 KiB chunks) —
-    // when the hub declares `preview.download.v1` save the COMPLETE file via `download=1`.
-    const dl = hub?.preview?.download;
-    if (v.phase === "text" && downloadCap.value && dl !== undefined) {
-      const full = await dl(
-        { agentKey: sess.agentKey, sessionId: sess.sessionId, path },
-        { signal: new AbortController().signal },
-      );
-      if (!full.ok) {
-        dlFailed.value = true;
-        return;
-      }
-      saveBlob(full.blob, downloadNameOf(path));
+// Focus return (§5.4 关闭): the closed window had focus ⇒ land on the new active window;
+// the LAST window (or 全部关闭) ⇒ return to pageFocus if it still exists.
+watch(
+  windows,
+  (next, prev) => {
+    const removed = prev.filter((w) => !next.some((n) => n.id === w.id));
+    if (removed.length === 0) return;
+    if (next.length === 0) {
+      const target = pageFocus;
+      pageFocus = null;
+      if (target !== null && document.contains(target)) target.focus();
       return;
     }
-    const out = await preview.fetch(
-      { agentKey: sess.agentKey, sessionId: sess.sessionId, path },
-      { signal: new AbortController().signal, maxPixels: clientImageBudget() },
-    );
-    if (!out.ok || out.kind === "dir") {
-      dlFailed.value = true;
-      return;
+    if (focusedWin !== null && removed.some((w) => w.id === focusedWin)) {
+      landFocus(activeId.value);
     }
-    // Content-Type 用响应头原值: image 的 Blob 已带 sniffed mime；text 端点恒为 text/plain
-    const blob = out.kind === "image" ? out.blob : new Blob([out.text], { type: "text/plain;charset=utf-8" });
-    saveBlob(blob, downloadNameOf(path));
-  } catch {
-    dlFailed.value = true;
-  } finally {
-    dlBusy.value = false;
-  }
+  },
+  { flush: "post" },
+);
+
+// --- W3 wire-in (§8.2 + §5.6): the html-cap ledger + the conversation⇄window switcher -------------
+
+// §8.2: ONE tab-local ledger for EVERY window's PreviewHtml (the hub's per-principal 8-cap
+// FIFO simulation — drives the 「可能已被挤掉」 role=status notice and the standing 重新加载
+// as its deterministic recovery entry). PreviewHtml injects it optionally; a mount that never
+// receives it keeps byte-identical pre-W3 behavior.
+provide(PREVIEW_HTML_LEDGER, createPreviewHtmlLedger());
+
+// §5.6: Ctrl+` / Ctrl+Shift+` (拍板 3). The face object is stable for this host's lifetime —
+// `ctx.handle` is captured once at mount (App's single `usePreviewWindows` handle) — so the
+// composable is armed exactly once, guards included. `pageFocus` here is a plain variable
+// (NOT a ref), so the §5.4 page restore target crosses as a GETTER, read per landing.
+const cycleFace = face.value;
+if (cycleFace !== null) {
+  usePreviewWindowCycle({ face: cycleFace, pageFocus: () => pageFocus });
 }
 
-/** Blob → objectURL → `a[download]` (the ONLY sanctioned save chain: the endpoint requires
- *  `X-PWH: 1`, so a plain `<a href>` navigation can never authenticate). The objectURL is
- *  revoked a macrotask after the click handed it to the browser. */
-function saveBlob(blob: Blob, name: string): void {
-  const url = URL.createObjectURL(blob);
-  try {
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = name;
-    document.body.appendChild(a); // Firefox requires the anchor in the DOM
-    a.click();
-    a.remove();
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(url), 0);
-  }
-}
+// --- phone fullscreen stack (§6): scroll lock + top-window focus + the Tab trap --------------
 
-/** The unsupported phase's download offer (preview-download): re-fetch through the SAME
- *  endpoint with `download=1` — the hub then serves raw octet-stream bytes of ANY admitted
- *  regular file (no sniff/kind gate). Rendered only under `downloadCap`. */
-async function downloadUnsupported(): Promise<void> {
-  const dl = hub?.preview?.download;
-  const sess = downloadSession.value;
-  const v = view.value;
-  if (dl === undefined || sess === null || dlBusy.value) return;
-  if (v.phase !== "unsupported") return;
-  const path = v.path;
-  dlBusy.value = true;
-  dlFailed.value = false;
-  try {
-    const out = await dl(
-      { agentKey: sess.agentKey, sessionId: sess.sessionId, path },
-      { signal: new AbortController().signal },
-    );
-    if (!out.ok) {
-      dlFailed.value = true;
-      return;
-    }
-    saveBlob(out.blob, downloadNameOf(path));
-  } catch {
-    dlFailed.value = true;
-  } finally {
-    dlBusy.value = false;
-  }
-}
-
-// --- focus management + scroll lock (§4.6: 焦点进入、循环、归还；滚动锁一定会清理) ---
-const panelEl = ref<HTMLElement | null>(null);
-let returnFocus: Element | null = null;
-// Shared ref-counted lock (useScrollLock.ts — verify:model-switch-M3b): composes with
-// PickerSheet's lock when overlays stack; only the LAST release restores the overflow.
 let releaseScrollLock: (() => void) | null = null;
 
-function restoreScroll(): void {
-  releaseScrollLock?.(); // idempotent
-  releaseScrollLock = null;
-}
-
 watch(
-  isOpen,
-  async (open) => {
-    if (open) {
-      returnFocus = document.activeElement;
-      releaseScrollLock = acquireBodyScrollLock();
-      await nextTick();
-      panelEl.value?.focus();
-      return;
+  [hasWindows, desktop],
+  ([has, desk]) => {
+    const need = has && !desk;
+    if (need && releaseScrollLock === null) releaseScrollLock = acquireBodyScrollLock();
+    else if (!need && releaseScrollLock !== null) {
+      releaseScrollLock();
+      releaseScrollLock = null;
     }
-    restoreScroll();
-    const target = returnFocus;
-    returnFocus = null;
-    if (target instanceof HTMLElement && document.contains(target)) target.focus();
   },
-  { immediate: true }, // a host mounted with an already-open view locks/focuses too
+  { immediate: true },
 );
 
-onUnmounted(restoreScroll); // 滚动锁一定会清理 — even if the host unmounts mid-preview
+// §6.3 desktop→phone: if focus is not already inside the top window, land it there (the
+// gesture end + rect re-clamp halves live in the layout controller's own desktop watch).
+watch(desktop, (desk) => {
+  if (!desk && hasWindows.value) {
+    const top = activeId.value;
+    if (top !== null) {
+      const sec = sectionEls.get(top);
+      const active = document.activeElement;
+      if (sec === undefined || active === null || !sec.contains(active)) landFocus(top);
+    }
+  }
+});
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+/** §6.2 (评审 #4): the trap's universe is the TOP window only, with `[inert]`,
+ *  `[aria-hidden="true"]` and `[hidden]` subtrees explicitly filtered out (no layout reads —
+ *  holds in happy-dom too). */
+function focusablesIn(root: ParentNode): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+    (el) => el.closest("[inert],[aria-hidden='true'],[hidden]") === null,
+  );
+}
+
 function trapTab(ev: KeyboardEvent): void {
-  const panel = panelEl.value;
-  if (panel === null) return;
-  const items = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE));
-  const first = items[0];
-  const last = items[items.length - 1];
-  if (first === undefined || last === undefined) {
+  const top = activeId.value;
+  const sec = top === null ? undefined : sectionEls.get(top);
+  if (sec === undefined) return;
+  const items = focusablesIn(sec);
+  const active = document.activeElement;
+  if (items.length === 0) {
     ev.preventDefault();
     return;
   }
-  const active = document.activeElement;
-  const outside = active === null || !panel.contains(active);
-  if (ev.shiftKey && (outside || active === first)) {
+  const first = items[0]!;
+  const last = items[items.length - 1]!;
+  const outside = active === null || !sec.contains(active);
+  if (ev.shiftKey && (outside || active === first || active === sec.querySelector(".preview-panel"))) {
     ev.preventDefault();
     last.focus();
   } else if (!ev.shiftKey && (outside || active === last)) {
@@ -407,203 +254,104 @@ function trapTab(ev: KeyboardEvent): void {
   }
 }
 
-function onKeydown(ev: KeyboardEvent): void {
-  if (ev.key === "Escape") {
-    // §4.6: preventDefault + stopPropagation — the overlay owns Esc while open.
-    ev.preventDefault();
-    ev.stopPropagation();
-    close();
+/** §5.5 Esc: close exactly the window containing the event target — and ONLY then eat the
+ *  event (preventDefault + stopPropagation so DashboardView's Esc never also fires). Focus
+ *  on the page (outside every window) leaves the key to the page. */
+function onRootKeydown(ev: KeyboardEvent): void {
+  if (ev.key === "Tab" && !desktop.value) {
+    trapTab(ev);
     return;
   }
-  if (ev.key === "Tab") trapTab(ev);
+  if (ev.key !== "Escape" || ev.defaultPrevented || ev.isComposing) return;
+  const target = ev.target;
+  const sec = target instanceof Element ? target.closest(".preview-window") : null;
+  if (sec === null) return;
+  const idAttr = sec.getAttribute("data-pw-id");
+  if (idAttr === null) return;
+  const id = Number(idAttr);
+  if (!desktop.value && id !== activeId.value) return; // phone: only the TOP window closes
+  ev.preventDefault();
+  ev.stopPropagation();
+  face.value?.closeWindow(id);
 }
+
+// --- resize hot zones (§7.2) -------------------------------------------------------------------
+
+function onRzPointerdown(ev: PointerEvent, id: number, dir: PreviewResizeDir): void {
+  const el = ev.currentTarget;
+  if (el instanceof HTMLElement) layout.beginGesture(ev, id, dir, el);
+}
+
+function zOf(id: number): string {
+  return String(1 + Math.max(0, order.value.indexOf(id)));
+}
+
+/** Desktop geometry: CSS variables ONLY, through Vue's OBJECT `:style` binding (§7.1 CSP —
+ *  runtime CSSOM via style.setProperty, never a static style attribute). */
+function geomVars(id: number): Record<string, string> {
+  return { ...layout.varsOf(id), "--pw-z": zOf(id) };
+}
+
+onUnmounted(() => {
+  document.removeEventListener("focusin", onDocFocusin, true);
+  releaseScrollLock?.(); // 滚动锁一定会清理 — even mid-preview unmount
+  releaseScrollLock = null;
+  layout.dispose();
+});
 </script>
 
 <template>
   <Teleport to="body">
-    <div v-if="isOpen" class="preview-overlay" @click.self="close" @keydown="onKeydown">
-      <div
-        ref="panelEl"
-        class="preview-panel"
-        :class="{ 'is-hold-tall': holdTall }"
-        role="dialog"
-        aria-modal="true"
-        :aria-label="t('preview.dialogLabel')"
-        tabindex="-1"
+    <div
+      v-if="hasWindows"
+      ref="rootEl"
+      class="preview-overlay is-windows"
+      :class="{ 'is-modeless': desktop }"
+      @keydown="onRootKeydown"
+    >
+      <section
+        v-for="(w, i) in windows"
+        :key="w.id"
+        class="preview-window"
+        :class="{
+          'is-floating': desktop,
+          'is-active': w.id === activeId,
+          'is-maximized': desktop && layout.isMaximized(w.id),
+        }"
+        :data-pw-id="w.id"
+        :style="desktop ? geomVars(w.id) : { '--pw-z': zOf(w.id) }"
+        :inert="!desktop && w.id !== activeId"
+        :ref="(el) => setSectionRef(w.id, el)"
+        @pointerdown.capture="face?.focusWindow(w.id)"
+        @focusin="onWinFocusin(w.id, $event)"
       >
-        <header class="preview-header">
-          <!-- A3/P3: 返回 (history pop, disabled at the bottom) — present whenever the handle
-               carries the navigation face; 上级 joins only in the dir phase, disabled at
-               one-segment paths (`/` is not listable). Native buttons: keyboard-reachable,
-               part of the panel's Tab cycle. -->
-          <nav v-if="nav !== null" class="preview-nav" :aria-label="t('preview.dirNavLabel')">
-            <button
-              class="btn btn-ghost btn-icon preview-nav-btn"
-              type="button"
-              :disabled="backDisabled"
-              :aria-label="t('preview.dirBack')"
-              :title="t('preview.dirBack')"
-              @click="back"
-            >
-              <AppIcon name="chev-left" />
-            </button>
-            <button
-              v-if="isDirPhase"
-              class="btn btn-ghost btn-icon preview-nav-btn"
-              type="button"
-              :disabled="upDisabled"
-              :aria-label="t('preview.dirUp')"
-              :title="t('preview.dirUp')"
-              @click="up"
-            >
-              <AppIcon name="arrow-up" />
-            </button>
-          </nav>
-          <AppIcon :name="isDirPhase ? 'folder' : 'file'" class="icon-sm preview-header-icon" />
-          <span class="preview-title" translate="no">{{ basename }}</span>
-          <!-- `<bdi dir="ltr">` isolates the path from `.preview-path`'s `direction: rtl`
-               front-ellipsis trick: without it the Unicode bidi algorithm reorders the
-               absolute path's LEADING "/" to the visual end (user field report 2026-10-08:
-               the header showed "…Tf4uhhFX.png/"). The stored/requested path is unaffected. -->
-          <span class="preview-path" :title="path" translate="no"
-            ><bdi dir="ltr">{{ path }}</bdi></span
-          >
-          <!-- 复制 (2026-10-20): text phase only — the value arrives from PreviewText's
-               `update:copyValue` channel; sits immediately before 下载 (header order:
-               copy → download → close). Same ghost-icon weight + copied feedback via
-               CopyButton. -->
-          <CopyButton
-            v-if="view.phase === 'text' && copyValue !== null"
-            class="preview-copy"
-            :value="copyValue"
-            :label="t('common.copy')"
-            :title="t('common.copy')"
-          />
-          <!-- preview-download: files only (text/image); the dir phase never shows it. Native
-               button ⇒ keyboard-reachable inside the panel's Tab cycle; spinner while busy. -->
-          <button
-            v-if="downloadable"
-            class="btn btn-ghost btn-icon preview-download"
-            type="button"
-            :disabled="dlBusy"
-            :aria-label="t('preview.download')"
-            :title="t('preview.download')"
-            @click="download"
-          >
-            <AppIcon :name="dlBusy ? 'loader' : 'arrow-down'" :class="dlBusy ? 'spin' : undefined" />
-          </button>
-          <button
-            class="btn btn-ghost btn-icon preview-close"
-            type="button"
-            :aria-label="t('preview.close')"
-            @click="close"
-          >
-            <AppIcon name="x" />
-          </button>
-        </header>
-        <p v-if="dlFailed" class="preview-download-error" role="alert">
-          {{ t("preview.downloadFailed") }}
-        </p>
-        <p v-if="showPlainWarning" class="preview-plaintext" role="note">
-          <AppIcon name="unlock" class="icon-sm" />
-          <span>{{ t("preview.plaintextWarning") }}</span>
-        </p>
-        <div class="preview-body">
-          <div v-if="view.phase === 'loading'" class="preview-loading" role="status">
-            <AppIcon name="loader" class="preview-spinner" />
-            <span>{{ t("preview.loading") }}</span>
-          </div>
-          <PreviewImage
-            v-else-if="view.phase === 'image'"
-            :data-url="view.dataUrl"
-            :dims="view.dims"
-            :size-label="formatBytes(view.size)"
-            :alt="basename"
-          />
-          <!-- PM (dir-plan §4.1 B4): `:key` remounts PreviewText on every path change — the
-               rendered/source mode resets per freshly opened file; a same-path retry keeps it. -->
-          <PreviewText
-            v-else-if="view.phase === 'text'"
-            :key="view.path"
-            :text="view.text"
-            :truncated="view.truncated"
-            :loaded-label="formatBytes(view.bytes ?? utf8Length(view.text))"
-            :total-label="formatBytes(view.size)"
-            :stream="view.stream"
-            :filename="basename"
-            :path="path"
-            @load-more="nav?.loadMore?.()"
-            @reopen="nav?.reopen?.()"
-            @retry-stream="nav?.loadMore?.()"
-            @update:copy-value="onCopyValue"
-          />
-          <!-- A3/P3: the listing — rendered only with the navigation face (a frozen fake can
-               never produce a dir phase; the guard keeps the branch total anyway).
-               preview-tree: `nav.tree` carries the per-visit inline-expansion store. -->
-          <PreviewDir
-            v-else-if="view.phase === 'dir' && nav !== null"
-            :key="view.path"
-            :path="view.path"
-            :listing="view.listing"
-            :tree="nav.tree"
-            @navigate="onDirEntry"
-            @go="onPathBarGo"
-          />
-          <div v-else-if="view.phase === 'unsupported'" class="preview-note">
-            <AppIcon name="ban" class="preview-note-icon" />
-            <h3 class="preview-note-title">{{ t("preview.unsupportedTitle") }}</h3>
-            <p>
-              {{
-                downloadCap
-                  ? t("preview.unsupportedDownload")
-                  : t("preview.unsupportedBody", { reason: unsupportedReason })
-              }}
-            </p>
-            <p v-if="view.size !== undefined" class="preview-meta">
-              {{ t("preview.fileSize", { size: formatBytes(view.size) }) }}
-            </p>
-            <!-- preview-download: the unsupported phase offers a direct download when the hub
-                 declares `preview.download.v1` — the button re-fetches with `download=1`. -->
-            <button
-              v-if="downloadCap"
-              class="btn btn-primary preview-download-unsupported"
-              type="button"
-              :disabled="dlBusy"
-              @click="downloadUnsupported"
-            >
-              <AppIcon :name="dlBusy ? 'loader' : 'arrow-down'" class="icon-sm" :class="dlBusy ? 'spin' : undefined" />
-              <span>{{ t("preview.download") }}</span>
-            </button>
-          </div>
-          <div v-else-if="view.phase === 'tooLarge'" class="preview-note">
-            <AppIcon name="alert" class="preview-note-icon" />
-            <h3 class="preview-note-title">{{ t("preview.tooLargeTitle") }}</h3>
-            <p v-if="view.dims !== undefined" translate="no">
-              {{ t("preview.tooLargePixels", { w: view.dims.w, h: view.dims.h }) }}
-            </p>
-            <p v-else-if="view.size !== undefined && view.max !== undefined" translate="no">
-              {{ t("preview.tooLargeBytes", { size: formatBytes(view.size), max: formatBytes(view.max) }) }}
-            </p>
-            <p v-else>{{ t("preview.tooLargeGeneric") }}</p>
-            <p class="preview-copy-path">
-              <code class="md-code" translate="no">{{ path }}</code>
-              <CopyButton :value="path" :label="t('preview.copyPath')" />
-            </p>
-          </div>
-          <div v-else-if="view.phase === 'error'" class="preview-note">
-            <AppIcon name="alert" class="preview-note-icon" />
-            <h3 class="preview-note-title">{{ t("preview.errorTitle") }}</h3>
-            <p translate="no">{{ view.error }}</p>
-            <p v-if="view.retryAfterS !== undefined" class="preview-meta">
-              {{ t("preview.retryAfter", { n: view.retryAfterS }) }}
-            </p>
-            <button v-if="view.retryable" class="btn preview-retry" type="button" @click="ctx?.handle.retry()">
-              <AppIcon name="refresh" class="icon-sm" />
-              <span>{{ t("preview.retry") }}</span>
-            </button>
-          </div>
-        </div>
-      </div>
+        <PreviewWindow
+          :win="w"
+          :face="face!"
+          :desktop="desktop"
+          :is-top="w.id === activeId"
+          :index="i"
+          :count="windows.length"
+          :plaintext="ctx?.plaintext === true"
+          :show-plain-warning="showPlainWarning"
+          :layout="layout"
+          @close="face?.closeWindow($event)"
+          @close-all="face?.closeAll()"
+          @reset="layout.resetRect($event)"
+          @select="face?.focusWindow($event, { moveFocus: true })"
+        />
+        <!-- Maximized (2026-10-22 L1): the hot zones are dropped from the DOM entirely — no
+             dead hit areas; `beginGesture` refuses them belt-and-braces on top. -->
+        <template v-if="desktop && !layout.isMaximized(w.id)"
+          ><div
+            v-for="d in RZ_DIRS"
+            :key="d"
+            class="pw-rz"
+            :data-dir="d"
+            aria-hidden="true"
+            @pointerdown="onRzPointerdown($event, w.id, d)"
+        /></template>
+      </section>
     </div>
   </Teleport>
 </template>

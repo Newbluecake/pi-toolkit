@@ -959,6 +959,19 @@
   user-select: none;
 }
 
+/* --- `/name␠` argument palette (web-hub-slash-args §6.2, P3) — reuses the command-palette
+ * shape above; the only additions are the static header row and its single-line usage text
+ * (CSS ellipsis; the full text rides the `title` attribute, r1 #3). --- */
+
+.arg-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  user-select: none;
+}
+
 /* --- @mention completion (task #11) — mirrors the command palette's shape; it renders before
  * the composer row so it opens upward from the bottom-pinned composer --- */
 
@@ -1319,4 +1332,14 @@
   .composer-sub {
     gap: var(--sp-2);
   }
+}
+
+.mention-session-meta {
+  min-width: 0;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
 }

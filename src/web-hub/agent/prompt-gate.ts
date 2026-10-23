@@ -18,8 +18,19 @@
  *    `ctx.newSession` hop) — this session's ledger entry is frozen at `consumed` so its bubble in
  *    the browser stops looking "pending" forever.
  *
- * `current()`/`elsewhere()` settle at most once in total: whichever is called first wins, every
- * later call (either method, either order) is a no-op.
+ *  - `release.handedOff(kind)` (todo #8): the session ended (`session_shutdown`) BEFORE the user
+ *    decided, and topic-switch handed the request to its own crash/reload recovery (persisted
+ *    `pending` + in-process transfer) instead of settling it. The recovery re-delivers through the
+ *    content path, never through this release, so the ledger entry is moved to a state the NEXT
+ *    session/module instance can still finish: `"reload"` (the same session comes back and
+ *    recovery auto-redelivers) re-arms it as `dispatched` with its owner dropped, so the
+ *    re-delivered `input`/`message_start` pair is attributed to this cmdId as usual (⇒ `consumed`,
+ *    the browser row clears); `"session"` (new/resume/fork/quit — recovery puts the text back into
+ *    the terminal editor at most) ends it as `dropped{session}`, unbound from any session so the
+ *    next session's ctl slot still projects it.
+ *
+ * `current()`/`elsewhere()`/`handedOff()` settle at most once in total: whichever is called first
+ * wins, every later call (any method, any order) is a no-op.
  *
  * This port is purely a type contract (pi-free) — `src/index.ts` (frozen, owned by package P3b)
  * wires a late-bound getter (`promptGate: () => promptGateRef.current`) into `WebHubDeps`, and
@@ -35,6 +46,10 @@ export interface WebPromptRelease {
   /** The request was delivered elsewhere (a different session); freeze this session's ledger
    * entry so its bubble stops looking pending. No-op if this release already settled. */
   elsewhere(): void;
+  /** todo #8: the request was handed to topic-switch's shutdown recovery before any decision (see
+   * the file header). Optional so pre-#8 implementers (test doubles) still type-check; the real
+   * `commands.ts` release always implements it. No-op if this release already settled. */
+  handedOff?(kind: "reload" | "session"): void;
 }
 
 export interface PromptGatePort {

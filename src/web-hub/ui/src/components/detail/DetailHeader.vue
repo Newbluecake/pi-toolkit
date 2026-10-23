@@ -57,6 +57,7 @@ import TodoPanel from "./TodoPanel.vue";
 import WorktreePanel from "./WorktreePanel.vue";
 import GraphPanel from "./GraphPanel.vue";
 import { cacheKeepaliveOf } from "./cacheKeepaliveView.js";
+import { XS_CHANNEL_CAP, xsAliasOf, xsUnreadLabel, xsUnreadOf } from "../agents/agentCardModel.js";
 import { worktreesOf } from "./worktreesView.js";
 
 const props = defineProps<DetailHeaderProps>();
@@ -131,6 +132,8 @@ function onPrivacyClick(): void {
 // body `useNewSession` already put back into the draft surfaces as a one-time dismissible note.
 // ---------------------------------------------------------------------------
 const hub = inject(HUB_CTX, null);
+// channel-plan §12.6 (IBU): unread cross-session inbox badge; absent field / no xs.v1 ⇒ nothing.
+const xsUnread = computed(() => xsUnreadOf(props.agent, hub?.state.value.hub?.["caps"]));
 const managed = computed(() => managedFor(hub?.state.value.spawns ?? null, props.agent.key));
 // spawn-restore plan §9.1 (F20): the OLD agent of a restore in flight — `restoring` badge here,
 // the composer itself goes read-only through AgentDetail's readonlyReason.
@@ -249,6 +252,28 @@ const clearError = ref<string | null>(null);
 const resumeHost = inject(RESUME_DIALOG, null);
 const resumeUsable = computed(() => clearUsable.value && resumeAvailable(status.value));
 
+// ---------------------------------------------------------------------------
+// channel-plan §7 (CHU): 「频道」 button → lazy ChannelsDialog. Needs hub cap xs.channel.v1, the
+// session's `status.xs` slot (xs usable on that session) and the same control gate as 「清空」
+// (the dialog drives `/fabric join|leave` through the command channel).
+// ---------------------------------------------------------------------------
+const ChannelsDialog = defineAsyncComponent(() => import("./ChannelsDialog.vue"));
+const channelsOpen = ref(false);
+const channelsUsable = computed(() => {
+  const caps = hub?.state.value.hub?.["caps"];
+  if (!Array.isArray(caps) || !caps.includes(XS_CHANNEL_CAP)) return false;
+  const xs = (status.value as { xs?: unknown } | undefined)?.xs;
+  return clearUsable.value && typeof xs === "object" && xs !== null;
+});
+
+// alias-plan r4 §7.2 (ALU): the held alias renders as a small `@alias` right after the title;
+// clicking it opens the same (lazily loaded) 「频道与别名」 dialog. Drawn only when the hub
+// pushed `status.xs.alias` under the xs.alias.v1 cap — otherwise zero trace.
+const headerAlias = computed(() => xsAliasOf(props.agent, hub?.state.value.hub?.["caps"]));
+function onAliasOpen(): void {
+  if (channelsUsable.value) channelsOpen.value = true;
+}
+
 async function onClear(): Promise<void> {
   const view = controlView;
   const c = view?.control ?? null;
@@ -345,6 +370,22 @@ function onToggleHeadInfo(): void {
           <span class="detail-title-text">{{ title }}</span>
         </button>
       </h2>
+      <!-- alias-plan r4 §7.2 (ALU): `@alias` next to the title opens the channels & alias
+           dialog (a plain non-interactive chip when the dialog's control gate is not met). -->
+      <button
+        v-if="headerAlias !== undefined && channelsUsable"
+        class="chip detail-alias-btn"
+        type="button"
+        translate="no"
+        :title="t('agents.xsAliasManage', { alias: headerAlias })"
+        :aria-label="t('agents.xsAliasManage', { alias: headerAlias })"
+        @click="onAliasOpen"
+      >
+        @{{ headerAlias }}
+      </button>
+      <span v-else-if="headerAlias !== undefined" class="chip chip-xs-alias" translate="no" :title="`@${headerAlias}`"
+        >@{{ headerAlias }}</span
+      >
       <StatusPill :state="visual" :label="statusLabel" />
       <!-- Web /clear quick button (2026-10): new session in the same pi process via builtin
            /new with confirm baked in — no confirmation dialog anywhere in this flow. Rendered
@@ -364,6 +405,19 @@ function onToggleHeadInfo(): void {
       </button>
       <!-- web-resume §2.6 D7 (P3): 「恢复」 opens the resume picker — clear-button gating +
            resume.v1; never busy-gated (D4: busy ⇒ list browsable, rows not switchable). -->
+      <button
+        v-if="channelsUsable"
+        class="detail-channels-btn"
+        type="button"
+        :title="t('agents.channelsOpenTitle')"
+        :aria-label="t('agents.channelsOpenTitle')"
+        aria-haspopup="dialog"
+        @click="channelsOpen = true"
+      >
+        <AppIcon name="radio" class="icon" />
+        <span class="head-btn-label" aria-hidden="true">{{ t("agents.channelsOpenLabel") }}</span>
+      </button>
+      <ChannelsDialog v-if="channelsOpen" @close="channelsOpen = false" />
       <button
         v-if="resumeUsable"
         class="detail-resume-btn"
@@ -391,6 +445,15 @@ function onToggleHeadInfo(): void {
           privacyMarked ? t("privacy.lockLabel") : t("privacy.markLabel")
         }}</span>
       </button>
+      <span
+        v-if="xsUnread !== undefined"
+        class="chip chip-xs-unread"
+        role="img"
+        translate="no"
+        :title="t('agents.xsUnread', { n: xsUnread })"
+        :aria-label="t('agents.xsUnread', { n: xsUnread })"
+        ><AppIcon name="inbox" class="icon" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span></span
+      >
       <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">{{
         t("spawn.badgeRestoring")
       }}</span>

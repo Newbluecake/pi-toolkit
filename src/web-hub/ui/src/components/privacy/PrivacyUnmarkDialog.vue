@@ -23,6 +23,7 @@ import { nextTick, onMounted, onUnmounted, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
+import { MODAL_OVERLAY_ROOTS } from "@logic/overlayRoots.js";
 import type { LoginErrorView } from "../../types.js";
 
 const props = defineProps<{
@@ -78,17 +79,13 @@ onUnmounted(() => {
   if (target instanceof HTMLElement && document.contains(target)) target.focus();
 });
 
-/** Every Teleport'd overlay root this dialog can stack with (same constant DirPicker /
- *  SessionHistoryDialog / PreviewHost share — keep the list in lockstep). */
-const OVERLAY_ROOTS = ".spawn-scrim, .picker-scrim, .preview-overlay, .privacy-scrim";
-
-/** Escape/Tab belong to this dialog only while it is the TOPMOST open overlay (DirPicker's
- *  precedent): a keydown targeted inside a sibling overlay is that overlay's business. */
+/** Topmost decision per logic/overlayRoots.ts (preview-windows §5.2): the shared selector
+ *  excludes the desktop modeless preview-window root — it never blocks Escape/Tab. */
 function ownsDocumentKeydown(ev: KeyboardEvent): boolean {
   const panel = panelEl.value;
   if (panel === null) return false;
   if (ev.target instanceof Node && panel.contains(ev.target)) return false; // scrim path handles it
-  const roots = Array.from(document.querySelectorAll(OVERLAY_ROOTS));
+  const roots = Array.from(document.querySelectorAll(MODAL_OVERLAY_ROOTS));
   for (const root of roots) {
     if (root !== scrimEl.value && ev.target instanceof Node && root.contains(ev.target)) return false;
   }

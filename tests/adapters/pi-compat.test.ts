@@ -36,7 +36,7 @@ describe("pi-compat gate", () => {
     const result = assertCompatible(caps);
     expect(result.ok).toBe(true);
     expect(result).toHaveProperty("warning");
-    for (const v of ["1.3.0", "2.0.0"]) {
+    for (const v of ["1.4.0", "2.0.0"]) {
       const out = assertCompatible(
         detectPiCapabilities({ sendMessage() {}, appendEntry() {}, events: { on() {}, emit() {} } }, v),
       );
@@ -44,8 +44,8 @@ describe("pi-compat gate", () => {
     }
   });
 
-  it("does not warn inside the tested range (1.0.x, 1.1.x and 1.2.x)", () => {
-    for (const v of ["1.0.0", "1.0.2", "1.1.0", "1.1.5", "1.2.0", "1.2.7"]) {
+  it("does not warn inside the tested range (1.0.x, 1.1.x, 1.2.x and 1.3.x)", () => {
+    for (const v of ["1.0.0", "1.0.2", "1.1.0", "1.1.5", "1.2.0", "1.2.7", "1.3.0", "1.3.2"]) {
       const result = assertCompatible(
         detectPiCapabilities({ sendMessage() {}, appendEntry() {}, events: { on() {}, emit() {} } }, v),
       );

@@ -112,6 +112,18 @@ export interface CommandLedger {
     patch: Partial<Pick<LedgerEntry, "promptState" | "behavior" | "reason" | "text">>,
     now: number,
   ): void;
+  /** topic-switch web release, `elsewhere()` branch: the claimed prompt was carried into a NEW
+   * session (pi `/new` via `/topic-switch __go`), so the entry is re-homed to that session — the
+   * ctl slot (`frame()`, scoped to the CURRENT session) would otherwise never project its
+   * terminal state again and the browser's optimistic row would sit at "sent · unconfirmed"
+   * forever. `undefined` drops the binding (session-agnostic, same back-compat rule `frame()`
+   * already applies to entries that never carried a session id). Unknown id ⇒ no-op. */
+  rebindSession(id: string, sessionId: string | undefined, now: number): void;
+  /** todo #8 (topic-switch hand-off across `/reload`): forget the creating module instance so the
+   * NEXT instance's owner-scoped `findDispatchedByText` can attribute a re-delivery to this entry
+   * (an entry without `owner` matches every owner — the same rule pre-owner entries follow).
+   * Unknown id ⇒ no-op. */
+  clearOwner(id: string, now: number): void;
   /** v4.3 Y4/Y7.3 (verifier r_BHFA552J P2): scope is OPTIONAL and selects between two genuinely
    * different matching strategies, not just a stricter filter on the same one — passing `scope`
    * must be BYTE-IDENTICAL to the pre-steer-recall behavior for every caller that still omits it
@@ -278,6 +290,19 @@ export function createCommandLedger(): CommandLedger {
       if (patch.promptState !== undefined && !TEXT_RETAINING_STATES.has(patch.promptState)) {
         delete e.text; // v4.3 Y6.2: only dispatched/observed/unconfirmed still need it.
       }
+    },
+    rebindSession(id, sessionId, now) {
+      const e = bag.entries.get(id);
+      if (e === undefined) return;
+      if (sessionId === undefined) delete e.sessionId;
+      else e.sessionId = sessionId;
+      e.updatedAt = now;
+    },
+    clearOwner(id, now) {
+      const e = bag.entries.get(id);
+      if (e === undefined) return;
+      delete e.owner;
+      e.updatedAt = now;
     },
     findDispatchedByText(text, scope) {
       if (scope === undefined) {

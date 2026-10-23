@@ -44,7 +44,15 @@ export interface PwPage {
   waitForFunction(fn: string | ((...args: never[]) => unknown), opts?: { timeout?: number }): Promise<unknown>;
   click(selector: string): Promise<void>;
   close(): Promise<void>;
-  on(event: "console" | "pageerror", handler: (...args: unknown[]) => void): void;
+  on(event: "console" | "pageerror" | "request", handler: (...args: unknown[]) => void): void;
+  setContent(html: string, opts?: { waitUntil?: "load" | "domcontentloaded" | "networkidle" }): Promise<void>;
+  waitForTimeout(ms: number): Promise<void>;
+}
+
+/** Subset of Playwright's `Request` the mermaid probe reads. */
+export interface PwRequest {
+  url(): string;
+  resourceType(): string;
 }
 
 export interface PwContext {
@@ -62,6 +70,9 @@ export interface PwChromium {
   launch(opts?: Record<string, unknown>): Promise<PwBrowser>;
 }
 
+/** Same launcher shape for Firefox (the mermaid probe runs both engines). */
+export type PwFirefox = PwChromium;
+
 export type LoadPlaywrightResult =
   | {
       readonly ok: true;
@@ -69,6 +80,8 @@ export type LoadPlaywrightResult =
       readonly version: string;
       readonly executablePath: string;
       readonly source: "offline" | "online";
+      /** Present iff a matching cached Firefox build exists (the mermaid probe requires it). */
+      readonly firefox?: { readonly launcher: PwFirefox; readonly executablePath: string };
     }
   | { readonly ok: false; readonly reason: string };
 
@@ -78,6 +91,7 @@ interface ChildProbeResult {
   readonly entry?: string;
   readonly version?: string;
   readonly executablePath?: string;
+  readonly firefoxExecutablePath?: string;
 }
 
 /**
@@ -117,6 +131,7 @@ try {
     entry,
     version: pkg.version,
     executablePath,
+    firefoxExecutablePath: (() => { try { const f = pw.firefox.executablePath(); return fs.existsSync(f) ? f : undefined; } catch { return undefined; } })(),
   });
 } catch (err) {
   report({ ok: false, reason: "resolve-error: " + (err && err.message ? err.message : String(err)) });
@@ -163,7 +178,8 @@ export async function loadPlaywright(): Promise<LoadPlaywrightResult> {
   }
   const mod = (await import(pathToFileURL(result.entry).href)) as {
     chromium?: PwChromium;
-    default?: { chromium: PwChromium };
+    firefox?: PwFirefox;
+    default?: { chromium: PwChromium; firefox?: PwFirefox };
   };
   // Node's CJS/ESM interop (cjs-module-lexer) can't statically see playwright's dynamically
   // re-exported `module.exports` shape, so a dynamic `import()` of its CJS entry only reliably
@@ -176,5 +192,10 @@ export async function loadPlaywright(): Promise<LoadPlaywrightResult> {
       reason: `playwright module at ${result.entry} exposed neither a named nor a default "chromium" export`,
     };
   }
-  return { ok: true, chromium, version: result.version, executablePath: result.executablePath, source };
+  const firefoxLauncher = mod.firefox ?? mod.default?.firefox;
+  const base = { ok: true as const, chromium, version: result.version, executablePath: result.executablePath, source };
+  if (firefoxLauncher !== undefined && result.firefoxExecutablePath !== undefined) {
+    return { ...base, firefox: { launcher: firefoxLauncher, executablePath: result.firefoxExecutablePath } };
+  }
+  return base;
 }

@@ -42,6 +42,7 @@ import { fakeKdf, fakeLanStore, type FakeLanStore } from "../contract/fakes.js";
 import { config, connectClient, hello, type TestClient } from "../hub/helpers.js";
 import { login, postJson, rawRequest, type RawResponse } from "./helpers.js";
 import { seedLanUser } from "./lan-helpers.js";
+import { freePort } from "../../helpers/free-port.js";
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -276,16 +277,7 @@ const kits: Kit[] = [];
  * (kernel-assigned) would 421 every request — pick a free port up front, exactly like
  * `lan-helpers.ts`'s harness. */
 async function freeLanPort(): Promise<number> {
-  const { createServer } = await import("node:net");
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
+  return await freePort();
 }
 
 async function startKit(opts: { lan?: boolean; legacy?: Buffer; symlinkHome?: boolean } = {}): Promise<Kit> {

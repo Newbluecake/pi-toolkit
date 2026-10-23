@@ -213,6 +213,24 @@ details[open] > summary.run .chev {
   font-weight: var(--fw-semibold);
 }
 
+/* Display-only raw-title feature: when a row carries `title` (the Agent tool's
+ * un-sanitized description) it takes over the main-name slot and the sanitized
+ * @mention label drops to this small muted secondary token after it. Same
+ * shrink discipline as `.run-name b`/`.chip` (`flex: 0 1 auto` + `min-width: 0`
+ * + ellipsis), so it can never overflow into the model column; it shrinks
+ * before the chips do and hides entirely below ~479px. */
+.run-name .run-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+  color: var(--c-text-3);
+}
+
 /* chip(类型徽标/孤儿徽标)可收缩:窄容器里 name 列被压到比 chip 还窄时,`flex: none` 会让 chip
  * 溢出自己的格子、叠到右侧 `.run-model` 的模型名上(2026-10 手机现场重叠反馈的根因)。改为
  * `flex: 0 1 auto` + `min-width: 0` + ellipsis:空间不足时 chip 与 label 一起截断,任何宽度下
@@ -575,6 +593,10 @@ details[open] > summary.run .chev {
 
   .run-name .chip {
     max-width: 72px;
+  }
+
+  .run-name .run-label {
+    display: none;
   }
 
   .run-model {

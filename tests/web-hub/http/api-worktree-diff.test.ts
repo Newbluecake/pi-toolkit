@@ -31,6 +31,7 @@ import { testHubPaths } from "../helpers/paths.js";
 import { captureLog, makeAgent, makeTmp, rawRequest } from "./helpers.js";
 import { login } from "./helpers.js";
 import { lanPostJson, lanRequest, seedLanUser } from "./lan-helpers.js";
+import { freePort } from "../../helpers/free-port.js";
 import { config as hubConfig, connectClient, hello } from "../hub/helpers.js";
 import {
   AGENT,
@@ -281,17 +282,7 @@ async function lanKitBody(
   );
   const subs = new Set<(e: HubEvent) => void>();
   const lanStore = fakeLanStore();
-  const { createServer } = await import("node:net");
-  const freePort = await new Promise<number>((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
-  const cfg: HubLanConfig = { port: freePort, extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
+  const cfg: HubLanConfig = { port: await freePort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
   let lastStatus: LanStatus = { state: "starting" };
   const routes = createWorktreeDiffRoutes({
     mode: opts.mode ?? "on",

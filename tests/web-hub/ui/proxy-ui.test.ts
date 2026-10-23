@@ -443,6 +443,19 @@ describe("T-U4 ProxyDialog", () => {
     expect(w.emitted("close")).toBeTruthy();
     w.unmount();
   });
+
+  it("topmost decision (preview-windows §5.2 W3): a MODELESS preview-window root never blocks Escape", async () => {
+    const w = mountDialog(fakeProxy());
+    await flushPromises();
+    const overlay = document.createElement("div");
+    overlay.className = "preview-overlay is-windows is-modeless";
+    document.body.appendChild(overlay);
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flushPromises();
+    expect(w.emitted("close")).toHaveLength(1);
+    overlay.remove();
+    w.unmount();
+  });
 });
 
 // ---------------------------------------------------------------------------

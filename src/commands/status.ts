@@ -1,3 +1,4 @@
+import { formatTokens } from "../hud/format.js";
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { formatSize } from "@earendil-works/pi-coding-agent";
 import type { RunSnapshot, UsageDelta } from "../core/types.js";
@@ -28,6 +29,8 @@ import type { MentionAutocompleteEntry } from "../mention/autocomplete.js";
 import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor.js";
 import { countActiveRuns } from "../reload/defer.js";
 import { formatWakeStatusLine, type WakeStatusView } from "../fabric/wake.js";
+import type { StackXs } from "../stack.js";
+import { XS_DEFAULT_CHANNEL, XS_MAX_CHANNELS, displayChannel } from "../fabric/xs/channel.js";
 import type { DynamicStatusView } from "../compact-hint/dynamic/wire.js";
 import { effectiveThresholdPercentWithTokens, windowScaledForcePercent } from "../compact-hint/threshold.js";
 import { resolveEffectiveHint } from "../compact-hint/dynamic/threshold.js";
@@ -115,6 +118,8 @@ export interface StatusCommandDeps {
    * false ⇒ no line, so the output is byte-identical to the pre-wake build.
    */
   wake?: () => WakeStatusView | undefined;
+  /** Phase-2: read the current stack, never a cached status/member slot. Absent = byte-identical off. */
+  xs?: () => { stack: StackXs; capability: string; outCap: number } | undefined;
   /** Omitted when external agents are disabled; live unified prompt/admission availability. */
   external?: () => { readonly droidUnavailableReason: string | undefined } | undefined;
 }
@@ -338,7 +343,7 @@ function formatUsage(u: UsageDelta | undefined): string {
   // line — "all" ⇒ `cost:unpriced`, "partial" ⇒ `cost:$x.xxxx+unpriced`.
   const cost =
     u.unpriced === "all" ? "unpriced" : `$${u.costUsd.toFixed(4)}${u.unpriced === "partial" ? "+unpriced" : ""}`;
-  return ` usage=in:${u.input} out:${u.output} cache_r:${u.cacheRead} cache_w:${u.cacheWrite} cost:${cost}`;
+  return ` usage=in:${formatTokens(u.input)} out:${formatTokens(u.output)} cache_r:${formatTokens(u.cacheRead)} cache_w:${formatTokens(u.cacheWrite)} cost:${cost}`;
 }
 function sumUsage(items: readonly (UsageDelta | undefined)[]): UsageDelta | undefined {
   const present = items.filter((u): u is UsageDelta => u !== undefined);
@@ -492,7 +497,7 @@ export function renderCosts(query: QueryService): string {
   const unpricedCount = countedRuns.filter((s) => s.diag.usage?.unpriced !== undefined).length;
   if (total)
     lines.push(
-      `  Total: $${total.costUsd.toFixed(4)} · in:${total.input} out:${total.output} cache_r:${total.cacheRead}` +
+      `  Total: $${total.costUsd.toFixed(4)} · in:${formatTokens(total.input)} out:${formatTokens(total.output)} cache_r:${formatTokens(total.cacheRead)}` +
         (unpricedCount > 0 ? ` (+${unpricedCount} unpriced runs)` : ""),
     );
   const absorbedCount = runs.length - countedRuns.length;
@@ -642,6 +647,49 @@ export function renderStatus(deps: StatusCommandDeps, contextWindow?: number): s
   if (deps.childSwitch) lines.push(renderChildSwitchLine(deps.childSwitch()));
   const wake = deps.wake?.();
   if (wake !== undefined) lines.push(formatWakeStatusLine(wake));
+  const xs = deps.xs?.();
+  if (xs !== undefined) {
+    const { stack, capability, outCap } = xs;
+    const quota = stack.receiver.wakeQuota();
+    const fence = stack.fence.status();
+    const state = stack.controller?.state;
+    const pref =
+      stack.membership.receivePref !== stack.membership.receive ? ` (pref ${stack.membership.receivePref})` : "";
+    // The hub owns outbound quota; its info reply exposes limits, NOT usage. Never invent 0.
+    lines.push(
+      `xs ${stack.membership.joined ? "joined" : "left"} · recv ${stack.membership.receive}${pref} · cap ${capability}` +
+        ` · in ${quota.recvUsed}/${quota.recvCap}h · out n/a/${outCap}h · wakes ${quota.wakesUsed}/${quota.wakesCap}h` +
+        ` · fenced ${stack.receiver.countersSnapshot().fenced} · stuck ${fence.stuck.length}` +
+        ` · unbound ${state === "starting" || state === "deferred" ? 1 : 0}` +
+        ` · lateAbort ${stack.audit.wake_late_aborted ?? 0} · abortStuck ${stack.audit.abortStuck ?? 0}`,
+    );
+    // Channels + unread inbox (channel-plan §6.3/§12, CH6): a line ONLY when it carries news —
+    // default-only with no suspended names and no unread keeps the pre-channel output byte-identical.
+    const m = stack.membership;
+    if (typeof m.effective === "function" && typeof m.suspended === "function") {
+      const eff = m.effective();
+      const susp = m.suspended();
+      const unreadN = safeNumber(stack.unread);
+      const named = eff.some((c) => c !== XS_DEFAULT_CHANNEL);
+      if (named || susp.length > 0 || unreadN > 0) {
+        const fmt = (names: readonly string[]) => (names.length === 0 ? "-" : names.map(displayChannel).join(" "));
+        lines.push(
+          `xs channels ${fmt(eff)} (${eff.length}/${XS_MAX_CHANNELS})` +
+            (susp.length > 0 ? ` · suspended ${fmt(susp)}` : "") +
+            (unreadN > 0 ? ` · inbox ${unreadN > 99 ? "99+" : unreadN}` : ""),
+        );
+      }
+    }
+    // Reply association (reply-plan §8.3, RX6): absent entirely when reply is off ⇒ byte-identical.
+    const reply = stack.reply;
+    if (reply !== undefined) {
+      const s = reply.ledger.stats(reply.sessionId);
+      lines.push(
+        `xs replies p${s.pending}/${reply.maxPending} i${s.inbox} to${s.timedOut} late${s.late} rej${s.rejected}` +
+          ` owed${s.owed} drop${s.dropped} · ledger ${s.ledger.size}/${s.ledger.capacity}`,
+      );
+    }
+  }
   const load = deps.load?.();
   if (load !== undefined) lines.push(`Load: ${load.level}${load.gating ? " · gated" : " · open"}`);
   const external = deps.external?.();
@@ -798,4 +846,13 @@ export function renderDynamicThresholdSection(
     `  price r ${formatUsdPerM(view.priceReadPerM)} w ${formatUsdPerM(view.priceWritePerM)}~ · g ${formatTokensShort(view.g)}/turn (σ ${formatTokensShort(view.sigma)}) · S0 ${formatTokensShort(view.s0)}`,
     `  R $${view.rUsd.toFixed(2)} (uncalibrated prior) · dynamic ${view.mode} · telemetry ${view.telemetryCount} → ${view.telemetryPath ?? "—"}`,
   ];
+}
+
+function safeNumber(read: (() => number) | undefined): number {
+  try {
+    const n = read?.();
+    return typeof n === "number" && Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
 }

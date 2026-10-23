@@ -31,6 +31,7 @@ import {
 import { compareVersions, HOLD_CAP } from "../protocol/version.js";
 import type { AgentView, HubBus, HubEvent, HubLog, RegistryView } from "./ports.js";
 import { pidAlive as defaultPidAlive } from "./singleton.js";
+import type { XsRecordView, XsRegistryObserver } from "./xs/members.js";
 
 export interface Registry extends RegistryView {
   register(hello: Extract<AgentFrame, { t: "hello" }>, conn: AgentConn): { agentKey: string; reclaimed: boolean };
@@ -38,7 +39,12 @@ export interface Registry extends RegistryView {
   onClose(agentKey: string, hadBye: boolean): void;
   tick(now: number): void; // stale/reap + pid 存活探测
   readonly bus: HubBus;
-  request<R extends AgentFrame>(agentKey: string, frame: HubFrame & { rid: string }, deadlineMs: number): Promise<R>; // P2 cmd 复用
+  request<R extends AgentFrame>(
+    agentKey: string,
+    frame: HubFrame & { rid: string },
+    deadlineMs: number,
+    signal?: AbortSignal,
+  ): Promise<R>; // relative wait; optional caller cancellation
   /**
    * Addition to the plan signature: lets hub-internal producers (history's
    * `append` / compaction `gap`) publish on the same bus the frontend reads.
@@ -81,6 +87,13 @@ export interface Registry extends RegistryView {
    * a late/duplicate caller observes the same outcome every time.
    */
   remove(agentKey: string, opts: { allowConnected: boolean }): "removed" | "absent" | "online";
+  /** fabric phase-2 X1 (§8.1): install/clear the cross-session member observer. Only `hub.ts`
+   * calls this, and only when `HubConfig.crossSession` exists; with no observer every xs hook
+   * below is a no-op (the registry behaves exactly as before). */
+  setXsObserver(observer: XsRegistryObserver | undefined): void;
+  /** fabric phase-2 X1: read-only projection of one record for `hub/xs/members.ts`'s validity
+   * join — the frozen `AgentView`/`AgentCard` surface is not widened. No I/O. */
+  xsView(agentKey: string): XsRecordView | undefined;
 }
 
 export interface AgentConn {
@@ -132,6 +145,7 @@ interface Rec {
 }
 
 interface Pending {
+  requestType: HubFrame["t"];
   agentKey: string;
   resolve(frame: AgentFrame): void;
   reject(err: Error): void;
@@ -163,6 +177,16 @@ export function createRegistry(deps: {
    * `setLateResultHandler()` below (not a constructor dep) since the router is built *from* this
    * registry instance. */
   let lateResultHandler: ((agentKey: string, frame: CmdResultFrame | CmdLateFrame) => void) | undefined;
+  /** fabric phase-2 X1: cross-session member observer (absent unless `config.crossSession`). */
+  let xsObs: XsRegistryObserver | undefined;
+  const xsNotify = (fn: (o: XsRegistryObserver) => void): void => {
+    if (xsObs === undefined) return;
+    try {
+      fn(xsObs);
+    } catch (err) {
+      log.error("xs observer threw", { error: String(err) });
+    }
+  };
 
   const bus: HubBus = {
     subscribe(fn) {
@@ -244,6 +268,7 @@ export function createRegistry(deps: {
     const idKey = agentIdKey(r.agentId);
     if (byAgentId.get(idKey) === r.agentKey) byAgentId.delete(idKey);
     rejectPendingFor(r.agentKey, "E_AGENT_GONE");
+    xsNotify((o) => o.onInvalidate(r.agentKey, "down"));
     const conn = r.conn;
     r.conn = undefined;
     if (conn !== undefined) {
@@ -272,6 +297,27 @@ export function createRegistry(deps: {
 
     setLateResultHandler(handler) {
       lateResultHandler = handler;
+    },
+
+    setXsObserver(observer) {
+      xsObs = observer;
+    },
+
+    xsView(agentKey) {
+      const r = records.get(agentKey);
+      if (r === undefined) return undefined;
+      return {
+        phase: r.phase,
+        connected: r.conn !== undefined,
+        detached: r.detached,
+        sessionId: r.session?.sessionId,
+        sessionName: r.session?.name,
+        cwd: r.session?.cwd ?? r.cwd,
+        kind: r.kind,
+        caps: r.caps,
+        busy: r.status?.busy === true,
+        agentId: { pid: r.agentId.pid, nonce: r.agentId.nonce },
+      };
     },
 
     broadcast(frame) {
@@ -341,6 +387,7 @@ export function createRegistry(deps: {
       if (existing !== undefined) {
         const prevPhase = existing.phase;
         const oldConn = existing.conn;
+        xsNotify((o) => o.onInvalidate(existing.agentKey, "reclaimed"));
         if (oldConn !== undefined && oldConn !== conn) {
           rejectPendingFor(existing.agentKey, "E_AGENT_GONE");
           try {
@@ -431,6 +478,7 @@ export function createRegistry(deps: {
           const hadSession = r.session !== undefined;
           r.session = info;
           r.detached = false;
+          xsNotify((o) => o.onSession(agentKey, info.sessionId));
           publish({ type: "session", agentKey, session: info });
           // Session replaced / re-sent (reconnect, /new, /resume …): subscribers must re-snapshot.
           if (hadSession) publish({ type: "gap", agentKey, fromSeq: r.seq + 1 });
@@ -438,9 +486,11 @@ export function createRegistry(deps: {
         }
         case "session_detached":
           r.detached = true;
+          xsNotify((o) => o.onInvalidate(agentKey, "detached"));
           log.info("agent session detached", { agentKey, reason: frame.reason });
           return;
         case "ev": {
+          xsNotify((o) => o.onActivity(agentKey));
           r.seq = frame.seq;
           const e = frame.e;
           if (e.type === "ui_prompt_start") {
@@ -468,6 +518,7 @@ export function createRegistry(deps: {
         case "status": {
           const { t: _t, ...status } = frame;
           r.status = status;
+          xsNotify((o) => o.onActivity(agentKey));
           publish({ type: "status", agentKey, status });
           return;
         }
@@ -483,13 +534,19 @@ export function createRegistry(deps: {
         case "gap":
           publish({ type: "gap", agentKey, fromSeq: frame.fromSeq });
           return;
-        // fleet-drawer plan §5.3 (F3b): run-transcript agent→hub frames. `run_tx_reply` settles
-        // its pending `registry.request()` by rid (same dance as snapshot_reply above); the three
-        // stream frames are stateless here — republished on the bus for the run-transcript
-        // service's §3.3 state table (ports.ts: these HubEvents are never SSE-broadcast).
+        // Completion replies are ephemeral: rid + agent + request kind, never the bus/ledger.
+        case "complete_reply": {
+          const p = pending.get(frame.rid);
+          if (p === undefined || p.agentKey !== agentKey || p.requestType !== "complete_req") return;
+          pending.delete(frame.rid);
+          clearTimeout(p.timer);
+          p.resolve(frame);
+          return;
+        }
+        // fleet-drawer: reply settles its request; stream frames below republish on the bus.
         case "run_tx_reply": {
           const p = pending.get(frame.rid);
-          if (p === undefined || p.agentKey !== agentKey) return;
+          if (p === undefined || p.agentKey !== agentKey || p.requestType === "complete_req") return;
           pending.delete(frame.rid);
           clearTimeout(p.timer);
           p.resolve(frame);
@@ -524,7 +581,7 @@ export function createRegistry(deps: {
         case "snapshot_reply":
         case "branch_reply": {
           const p = pending.get(frame.rid);
-          if (p === undefined || p.agentKey !== agentKey) return;
+          if (p === undefined || p.agentKey !== agentKey || p.requestType === "complete_req") return;
           pending.delete(frame.rid);
           clearTimeout(p.timer);
           if (frame.t === "snapshot_reply") {
@@ -546,7 +603,7 @@ export function createRegistry(deps: {
         // only the handler (LRU/audit bookkeeping, keyed by `id` alone) observes it.
         case "cmd_result": {
           const p = pending.get(frame.rid);
-          if (p !== undefined && p.agentKey === agentKey) {
+          if (p !== undefined && p.agentKey === agentKey && p.requestType !== "complete_req") {
             pending.delete(frame.rid);
             clearTimeout(p.timer);
             p.resolve(frame);
@@ -590,6 +647,25 @@ export function createRegistry(deps: {
           publish({ type: "commands", agentKey, epoch: frame.epoch, items: frame.items });
           return;
         }
+        // fabric phase-2 X1 (§8.1/§8.2): the membership slot is forwarded to the xs table (all
+        // validity decisions live in hub/xs/members.ts); `xs_ack` settles the pending
+        // `xs_deliver` by rid exactly like snapshot_reply/cmd_result — and only for the very
+        // agent the deliver went to. No pending (hub already settled/timed out) ⇒ count only,
+        // never log or keep anything from the frame.
+        case "xs_member":
+          xsNotify((o) => o.onMember(agentKey, frame));
+          return;
+        case "xs_ack": {
+          const p = pending.get(frame.rid);
+          if (p !== undefined && p.agentKey === agentKey && p.requestType === "xs_deliver") {
+            pending.delete(frame.rid);
+            clearTimeout(p.timer);
+            p.resolve(frame);
+            return;
+          }
+          xsNotify((o) => o.onLateAck(agentKey));
+          return;
+        }
         default:
           return; // hello (dup) / ping / pong: liveness only
       }
@@ -600,6 +676,7 @@ export function createRegistry(deps: {
       if (r === undefined) return;
       r.conn = undefined;
       rejectPendingFor(agentKey, "E_AGENT_GONE");
+      xsNotify((o) => o.onInvalidate(agentKey, "closed"));
       const reason = r.byeReason;
       if (hadBye && reason !== undefined && reason !== "handover") {
         down(r, reason);
@@ -636,7 +713,12 @@ export function createRegistry(deps: {
       deps.onTick?.();
     },
 
-    request<R extends AgentFrame>(agentKey: string, frame: HubFrame & { rid: string }, deadlineMs: number) {
+    request<R extends AgentFrame>(
+      agentKey: string,
+      frame: HubFrame & { rid: string },
+      deadlineMs: number,
+      signal?: AbortSignal,
+    ) {
       return new Promise<R>((resolve, reject) => {
         const r = records.get(agentKey);
         const conn = r?.conn;
@@ -644,23 +726,49 @@ export function createRegistry(deps: {
           reject(new HubError("E_AGENT_GONE"));
           return;
         }
+        if (signal?.aborted) {
+          reject(new HubError("E_DEADLINE"));
+          return;
+        }
         // The registry owns rid allocation (monotonic string); the caller's rid is replaced.
         const rid = `r${++ridCounter}`;
         const timer = setTimeout(
           () => {
-            if (pending.delete(rid)) reject(new HubError("E_DEADLINE"));
+            if (pending.delete(rid)) fail(new HubError("E_DEADLINE"));
           },
           Math.max(0, deadlineMs),
         );
         timer.unref();
-        pending.set(rid, { agentKey, resolve: (f) => resolve(f as R), reject, timer });
+        const cleanup = (): void => {
+          signal?.removeEventListener("abort", onAbort);
+        };
+        const fail = (err: Error): void => {
+          cleanup();
+          reject(err);
+        };
+        const onAbort = (): void => {
+          if (!pending.delete(rid)) return;
+          clearTimeout(timer);
+          fail(new HubError("E_DEADLINE"));
+        };
+        pending.set(rid, {
+          requestType: frame.t,
+          agentKey,
+          resolve: (f) => {
+            cleanup();
+            resolve(f as R);
+          },
+          reject: fail,
+          timer,
+        });
+        signal?.addEventListener("abort", onAbort, { once: true });
         try {
           const out: HubFrame = Object.assign({}, frame, { rid });
           conn.send(out);
         } catch (err) {
           pending.delete(rid);
           clearTimeout(timer);
-          reject(new HubError("E_AGENT_GONE", String(err)));
+          fail(new HubError("E_AGENT_GONE", String(err)));
         }
       });
     },

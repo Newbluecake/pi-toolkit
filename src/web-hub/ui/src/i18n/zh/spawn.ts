@@ -86,6 +86,7 @@ const spawn = {
   errLimit: "进程数已达上限 — 请停止一个会话或等待其退出",
   errRate: "请求过于频繁 — 稍后重试",
   errLauncher: "hub 暂时无法启动 pi — 稍后重试",
+  errLauncherChanged: "pi 已升级或启动器已变更 — 请在终端运行 /webhub restart 后重试",
   errDeadline: "hub 未及时应答 — 请确认会话是否已上线",
   errNetwork: "网络错误 — 请重试",
   errSpawn: "会话启动失败",

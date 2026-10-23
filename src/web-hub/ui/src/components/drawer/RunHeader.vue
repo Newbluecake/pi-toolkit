@@ -41,7 +41,19 @@ const listed = computed(() => {
 const name = computed(() => {
   const r = row.value;
   if (r === undefined) return runId.value;
-  return clip(String(r.label ?? r.type ?? r.runId), 60);
+  // Same title-first chain as FleetTree's nameOf: the raw display title when the
+  // agent carried one, else the sanitized label.
+  return clip(String(r.title ?? r.label ?? r.type ?? r.runId), 60);
+});
+/** Secondary `@label` token next to the name — only when a distinct raw `title`
+ *  took over the main slot (mirrors FleetTree's subLabelOf). */
+const subLabel = computed(() => {
+  const r = row.value;
+  if (r === undefined) return "";
+  const t = r.title;
+  const l = r.label;
+  if (typeof t !== "string" || t === "" || typeof l !== "string" || l === "") return "";
+  return `@${l}`;
 });
 const typeChip = computed(() => {
   const ty = row.value?.type;
@@ -76,6 +88,7 @@ const spins = computed(() => fleetStateSpins(visualState.value));
     <span class="run-icon run-head-icon"><AppIcon :name="icon" :class="{ icon: true, spin: spins }" /></span>
     <span class="run-head-name">
       <b translate="no">{{ name }}</b>
+      <span v-if="subLabel" class="run-head-label" translate="no" :title="subLabel">{{ subLabel }}</span>
       <span v-if="typeChip" class="chip" translate="no">{{ typeChip }}</span>
       <span v-if="!listed" class="chip chip-notlisted">{{ t("drawer.notListed") }}</span>
     </span>

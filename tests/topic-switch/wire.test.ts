@@ -366,6 +366,76 @@ describe("wireTopicSwitch: webGate.tryClaim", () => {
     expect(currentCalls).toBe(1);
   });
 
+  for (const [reason, kind] of [
+    ["reload", "reload"],
+    ["new", "session"],
+    ["resume", "session"],
+    ["fork", "session"],
+    ["quit", "session"],
+  ] as const) {
+    it(`todo #8: session_shutdown(${reason}) while judging ⇒ persist-pending AND release.handedOff("${kind}") exactly once (never current/elsewhere)`, async () => {
+      const pi = new FakePi();
+      const clock = new FakeClock();
+      const ctx = makeCtx({
+        modelRegistry: { find: () => ({ provider: "anthropic", id: "claude" }), complete: () => new Promise(() => {}) },
+      });
+      pi.ctx = ctx;
+      const wiring = wireTopicSwitch(pi as never, makeDeps({}, clock));
+      const calls: string[] = [];
+      const release = {
+        current: () => {
+          calls.push("current");
+          return "dispatched" as const;
+        },
+        elsewhere: () => calls.push("elsewhere"),
+        handedOff: (k: "reload" | "session") => calls.push(`handedOff:${k}`),
+      };
+      expect(wiring.webGate.tryClaim({ cmdId: "c1", text: EXPENSIVE_TEXT }, ctx, release)).toBe(true);
+      await flush(); // judging, judge pending forever
+      pi.emit("session_shutdown", { type: "session_shutdown", reason }, ctx);
+      clock.advance(60_000);
+      await flush();
+      expect(calls).toEqual([`handedOff:${kind}`]);
+      const pending = pi.entries.filter(
+        (e) => e.customType === ENTRY_TYPE && (e.data as { kind?: string }).kind === "pending",
+      );
+      expect(pending).toHaveLength(1);
+    });
+  }
+
+  it("todo #8: a pre-#8 release without handedOff still persists cleanly (optional method)", async () => {
+    const pi = new FakePi();
+    const clock = new FakeClock();
+    const ctx = makeCtx({
+      modelRegistry: { find: () => ({ provider: "anthropic", id: "claude" }), complete: () => new Promise(() => {}) },
+    });
+    pi.ctx = ctx;
+    const wiring = wireTopicSwitch(pi as never, makeDeps({}, clock));
+    const release = { current: () => "dispatched" as const, elsewhere: () => {} };
+    expect(wiring.webGate.tryClaim({ cmdId: "c1", text: EXPENSIVE_TEXT }, ctx, release)).toBe(true);
+    await flush();
+    pi.emit("session_shutdown", { type: "session_shutdown", reason: "reload" }, ctx);
+    expect(
+      pi.entries.filter((e) => e.customType === ENTRY_TYPE && (e.data as { kind?: string }).kind === "pending"),
+    ).toHaveLength(1);
+  });
+
+  it("todo #8: an input-origin hold (no web release) is unaffected — persist-pending only", async () => {
+    const pi = new FakePi();
+    const clock = new FakeClock();
+    const ctx = makeCtx({
+      modelRegistry: { find: () => ({ provider: "anthropic", id: "claude" }), complete: () => new Promise(() => {}) },
+    });
+    pi.ctx = ctx;
+    wireTopicSwitch(pi as never, makeDeps({}, clock));
+    pi.emit("input", { type: "input", text: EXPENSIVE_TEXT, source: "interactive" }, ctx);
+    await flush();
+    pi.emit("session_shutdown", { type: "session_shutdown", reason: "new" }, ctx);
+    expect(
+      pi.entries.filter((e) => e.customType === ENTRY_TYPE && (e.data as { kind?: string }).kind === "pending"),
+    ).toHaveLength(1);
+  });
+
   it("a cheap web prompt is NOT claimed (gate fails, native path runs)", () => {
     const pi = new FakePi();
     const wiring = wireTopicSwitch(pi as never, makeDeps());
@@ -599,6 +669,48 @@ describe("wireTopicSwitch: /topic-switch __go PONR command paths", () => {
       (e) => e.customType === ENTRY_TYPE && (e.data as { kind?: string }).kind === "handoff",
     );
     expect(handoffs).toHaveLength(1);
+  });
+
+  it("web-claimed hold: release.elsewhere() fires exactly once, only AFTER newSession (incl. withSession) resolved — the bound session is already the new one", async () => {
+    // Pins the ordering the web-hub side relies on (commands.ts `elsewhere()` re-homes the ledger
+    // entry to the session bound AT CALL TIME, so the browser's queue row gets its terminal ctl
+    // `consumed`): elsewhere() must never run while the old session is still bound.
+    const pi = new FakePi();
+    const clock = new FakeClock();
+    const w = wireTopicSwitch(pi as never, makeDeps({}, clock));
+    const ctx = hoppingCtx();
+    pi.ctx = ctx;
+    let bound = "s1";
+    const elsewhereSeenSession: string[] = [];
+    let currentCalls = 0;
+    const release = {
+      current: () => {
+        currentCalls += 1;
+        return "dispatched" as const;
+      },
+      elsewhere: () => {
+        elsewhereSeenSession.push(bound);
+      },
+    };
+    expect(w.webGate.tryClaim({ cmdId: "c-web", text: EXPENSIVE_TEXT }, ctx, release)).toBe(true);
+    for (let i = 0; i < 8; i += 1) await flush();
+    const hop = pi.sent.find(
+      (x) => typeof x.content === "string" && (x.content as string).startsWith("/topic-switch __go "),
+    );
+    expect(hop).toBeDefined();
+    const nonce = (hop!.content as string).slice("/topic-switch __go ".length);
+    const commandCtx = {
+      ...ctx,
+      newSession: async (opts: { withSession?: (rctx: unknown) => Promise<void> }) => {
+        pi.emit("session_shutdown", { type: "session_shutdown", reason: "new" }, ctx);
+        bound = "new-session";
+        await opts.withSession?.({ sendUserMessage: async () => {}, ui: { notify: () => {} } });
+        return { cancelled: false };
+      },
+    };
+    await pi.commands.get("topic-switch")!.handler("__go " + nonce, commandCtx as never);
+    expect(elsewhereSeenSession).toEqual(["new-session"]);
+    expect(currentCalls).toBe(0);
   });
 
   it("{cancelled:true} before any withSession call rolls back to the current session (switch-cancelled)", async () => {
@@ -1217,5 +1329,45 @@ describe("wireTopicSwitch: judge model chain with runtime failover", () => {
     expect(notified).toHaveLength(1);
     expect(notified[0]).toContain("judge chain: x/one(configured) → x/two(configured) → anthropic/claude(session)");
     expect(notified[0]).toContain("judge: answered x/two · fails x/one×1");
+  });
+});
+
+describe("wireTopicSwitch: T1 read-only fenceActive() (phase2-plan §7.2)", () => {
+  it("false when idle; true while a hold is pending (judging AND releasing); false once resolved", async () => {
+    const pi = new FakePi();
+    const clock = new FakeClock();
+    const wiring = wireTopicSwitch(pi as never, makeDeps({}, clock));
+    expect(wiring.fenceActive()).toBe(false);
+    pi.emit("input", { type: "input", text: EXPENSIVE_TEXT, source: "interactive" }, makeCtx());
+    expect(wiring.fenceActive()).toBe(true); // judging phase — a hold is pending
+    await flush(); // no judge model ⇒ no-model verdict, hold moves to releasing
+    expect(wiring.fenceActive()).toBe(true); // still pending — the release queue is draining
+    clock.advance(2_000); // release-queue barrier
+    await flush();
+    expect(wiring.fenceActive()).toBe(false);
+    // read-only: repeated calls change nothing
+    expect(wiring.fenceActive()).toBe(false);
+    expect(wiring.fenceActive()).toBe(false);
+  });
+
+  it("true while a B1 mid-switch marker is live in the process-global transfer store", () => {
+    const pi = new FakePi();
+    const wiring = wireTopicSwitch(pi as never, makeDeps());
+    expect(wiring.fenceActive()).toBe(false); // also lazily creates the transfer store
+    const store = (globalThis as Record<symbol, unknown>)[TRANSFER_KEY] as {
+      inFlight: Set<string>;
+    };
+    store.inFlight.add("hold-1");
+    expect(wiring.fenceActive()).toBe(true);
+    store.inFlight.delete("hold-1");
+    expect(wiring.fenceActive()).toBe(false);
+  });
+
+  it("false after this activation's session_shutdown even if a hold reference lingers", () => {
+    const pi = new FakePi();
+    const wiring = wireTopicSwitch(pi as never, makeDeps());
+    pi.emit("input", { type: "input", text: EXPENSIVE_TEXT, source: "interactive" }, makeCtx());
+    pi.emit("session_shutdown", { type: "session_shutdown", reason: "new" }, makeCtx());
+    expect(wiring.fenceActive()).toBe(false);
   });
 });

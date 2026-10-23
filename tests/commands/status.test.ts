@@ -105,6 +105,20 @@ describe("X9 status usage rendering", () => {
     expect(text).toContain("usage=in:100 out:50 cache_r:10 cache_w:0 cost:$0.0123");
   });
 
+  it("abbreviates large token counts with k / M", () => {
+    const active = snapshot({
+      status: "running",
+      phase: "model_turn",
+      diag: {
+        ...snapshot().diag,
+        phase: "model_turn",
+        usage: { input: 44, output: 13094, cacheRead: 1806223, cacheWrite: 106253, costUsd: 1.1369 },
+      },
+    });
+    const text = renderStatus(deps([active]) as never);
+    expect(text).toContain("usage=in:44 out:13k cache_r:1.8M cache_w:106k cost:$1.1369");
+  });
+
   it("shows an aggregate usage line summed across all runs when at least one has usage", () => {
     const a = snapshot({
       runId: "a",

@@ -230,6 +230,19 @@ describe("newSessionActions (arch §8.3 NewSessionAction[])", () => {
 
 describe("classifySpawnError (§3.2 DirPicker taxonomy)", () => {
   it.each([
+    ["changed", undefined, "launcher-changed"],
+    ["launcher", "changed", "launcher-changed"],
+    ["launcher", "missing", "launcher"],
+    ["persist", undefined, "launcher"],
+    ["reaper", undefined, "launcher"],
+    ["cooldown", undefined, "launcher"],
+    ["breaker", undefined, "launcher"],
+    ["launcher", "future-detail", "launcher"],
+  ])("E_LAUNCHER reason=%s detail=%s ⇒ %s", (reason, detail, kind) => {
+    expect(classifySpawnError({ ok: false, error: "E_LAUNCHER", reason, detail })).toBe(kind);
+  });
+
+  it.each([
     ["E_CONFIRM_REQUIRED", "confirm"],
     ["E_DIR", "dir"],
     ["E_BAD_REQUEST", "dir"],

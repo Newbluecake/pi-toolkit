@@ -101,6 +101,7 @@ const spawn = {
   errLimit: "Process limit reached — stop a session or wait for one to exit",
   errRate: "Too many spawn requests — retry in a moment",
   errLauncher: "The hub cannot launch pi right now — try again later",
+  errLauncherChanged: "pi was upgraded or the launcher changed — run /webhub restart in the terminal, then try again",
   errDeadline: "The hub did not answer in time — check whether the session came up",
   errNetwork: "Network error — retry",
   errSpawn: "The session failed to start",

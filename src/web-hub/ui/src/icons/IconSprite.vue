@@ -156,6 +156,14 @@
     <symbol id="i-swap" viewBox="0 0 24 24">
       <path d="M5 8h13M15 4.5 18.5 8 15 11.5M19 16H6M9 12.5 5.5 16 9 19.5" />
     </symbol>
+    <!-- maximize/restore (2026-10-22, preview-windows L1 桌面最大化/恢复): outward /
+         inward corner brackets, same stroke family (lucide maximize-2 / minimize-2). -->
+    <symbol id="i-maximize" viewBox="0 0 24 24">
+      <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3" />
+    </symbol>
+    <symbol id="i-restore" viewBox="0 0 24 24">
+      <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3" />
+    </symbol>
     <symbol id="i-terminal" viewBox="0 0 24 24">
       <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
       <path d="M7 9.5l3 2.5-3 2.5M13 15h4" />

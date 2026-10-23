@@ -21,6 +21,10 @@ import { PV_SANDBOX } from "../../../src/web-hub/protocol/preview-html.js";
 import PreviewHtml from "../../../src/web-hub/ui/src/components/preview/PreviewHtml.vue";
 import PreviewText from "../../../src/web-hub/ui/src/components/preview/PreviewText.vue";
 import { PREVIEW_CTX } from "../../../src/web-hub/ui/src/components/preview/previewContext.js";
+import {
+  createPreviewHtmlLedger,
+  PREVIEW_HTML_LEDGER,
+} from "../../../src/web-hub/ui/src/components/preview/previewHtmlLedger.js";
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import type { HubHandle, PreviewHandle, PreviewPathScope, PreviewView } from "../../../src/web-hub/ui/src/types.js";
 import type { PreviewHtmlCapOutcome, PreviewTransport } from "../../../src/web-hub/ui/src/transport/types.js";
@@ -294,7 +298,9 @@ describe("PreviewText.vue — html render/source toggle (T-U2)", () => {
     const toggle = wrapper.get(".preview-toggle");
     expect(toggle.attributes("role")).toBe("group");
     expect(toggle.attributes("aria-label")).toBe("HTML view mode");
-    const btns = wrapper.findAll(".preview-toggle-btn");
+    // W3 (preview-windows §8.2): PreviewHtml's standing 「重新加载」 also carries
+    // `.preview-toggle-btn` — scope the toggle-pair assertions to the toggle GROUP.
+    const btns = wrapper.get(".preview-toggle").findAll(".preview-toggle-btn");
     expect(btns).toHaveLength(2);
     expect(btns[0]!.attributes("aria-pressed")).toBe("true");
     expect(btns[1]!.attributes("aria-pressed")).toBe("false");
@@ -362,6 +368,80 @@ describe("PreviewText.vue — html render/source toggle (T-U2)", () => {
     const wrapper = mountText({ text: "<p>hi</p>", path: "/srv/site/index.html" }, HTML_SCOPE, hub);
     await settle(6);
     expect(wrapper.get(".preview-html-note").text()).toContain("sandboxed");
+    wrapper.unmount();
+  });
+});
+
+describe("PreviewHtml.vue — eviction ledger + standing reload (preview-windows §8.2, W3)", () => {
+  /** Mint impl answering a FRESH url per call (each mint is a new capability/token). */
+  function uniqueUrlImpl(): { impl: HtmlCapImpl; urls: string[] } {
+    const urls: string[] = [];
+    let n = 0;
+    const impl: HtmlCapImpl = async () => {
+      n += 1;
+      const cap = `${String(n).padStart(3, "0")}${"a".repeat(40)}`;
+      const url = `/pv/${cap}/index.html`;
+      urls.push(url);
+      return { ...CAP_OK, url, openUrl: `/pvw/${cap}` };
+    };
+    return { impl, urls };
+  }
+
+  it("「重新加载」is STANDING in the toolbar (shown before any TTL hint, no ledger needed)", async () => {
+    const { wrapper } = mountHtml(async () => ({ ...CAP_OK }));
+    await settle();
+    const bar = wrapper.get(".preview-html-bar");
+    const reload = bar.get("button.preview-html-reload");
+    expect(reload.text()).toContain("Reload");
+    expect(bar.find('[role="status"]').exists()).toBe(false); // no idle hint yet either
+    wrapper.unmount();
+  });
+
+  it("with the ledger: 8 later mints evict this cap ⇒ role=status notice; reload clears it", async () => {
+    const ledger = createPreviewHtmlLedger();
+    const { impl, urls } = uniqueUrlImpl();
+    const { hub, calls } = makeHub(impl);
+    const wrapper = mount(PreviewHtml, {
+      props: { agentKey: "A", sessionId: "s1", path: "/srv/site/index.html" },
+      global: { provide: { [HUB_CTX as symbol]: hub, [PREVIEW_HTML_LEDGER as symbol]: ledger } },
+    });
+    await settle();
+    expect(ledger.liveCount()).toBe(1); // our own mint is recorded
+    expect(wrapper.find(".preview-html-note[role='status']").exists()).toBe(false);
+    // 8 later mints elsewhere in the same tab (other windows / reloads) displace ours.
+    for (let i = 0; i < 8; i++) ledger.minted(`other-${i}`);
+    await nextTick();
+    const notice = wrapper.get("p.preview-html-note[role='status']");
+    expect(notice.text()).toContain("8 per login");
+    // 「重新加载」 re-mints a FRESH token ⇒ not evicted ⇒ the notice clears.
+    await wrapper.get(".preview-html-bar button.preview-html-reload").trigger("click");
+    await settle();
+    expect(wrapper.find("p.preview-html-note[role='status']").exists()).toBe(false);
+    expect(calls.length).toBe(2);
+    expect(ledger.liveCount()).toBe(8); // the 8th slot was freed by evicting `other-0` for our fresh mint
+    wrapper.unmount();
+  });
+
+  it("unmount records unmounted() — the slot keeps occupying the tab-local FIFO", async () => {
+    const ledger = createPreviewHtmlLedger();
+    const { impl } = uniqueUrlImpl();
+    const { hub } = makeHub(impl);
+    const wrapper = mount(PreviewHtml, {
+      props: { agentKey: "A", sessionId: "s1", path: "/srv/site/index.html" },
+      global: { provide: { [HUB_CTX as symbol]: hub, [PREVIEW_HTML_LEDGER as symbol]: ledger } },
+    });
+    await settle();
+    expect(ledger.liveCount()).toBe(1);
+    wrapper.unmount();
+    expect(ledger.liveCount()).toBe(1); // unmounted ≠ freed — the hub does not know
+  });
+
+  it("NO injected ledger ⇒ byte-identical pre-W3 behavior: no notice, mints still fine", async () => {
+    const { wrapper } = mountHtml(async () => ({ ...CAP_OK }));
+    await settle();
+    // nothing here observes other tabs' mints — the notice is structurally impossible
+    expect(wrapper.find("p.preview-html-note[role='status']").exists()).toBe(false);
+    expect(wrapper.get(".preview-html-bar button.preview-html-reload").exists()).toBe(true);
     wrapper.unmount();
   });
 });

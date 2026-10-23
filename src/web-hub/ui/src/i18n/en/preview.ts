@@ -89,6 +89,20 @@ const preview = {
   dirTreeLimitEntries: "Tree row budget reached ({n}) — collapse some folders first.",
   // 2026-10 interaction: dir row single-click expands inline, double-click drills down
   dirRowHint: "click to expand/collapse, double-click or Ctrl+Enter to open",
+  // preview-windows (W2, plan r2 §9): the multi-window modeless preview copy — window
+  // title aria-label, the cap notice, the phone stack badge's screen-reader label, the
+  // title-bar keyboard hint and the window menu.
+  windowLabel: "File preview: ",
+  windowLimit: "Window limit ({n}) reached — opened in this window",
+  windowStackLabel: "Window {i} of {n}",
+  windowMoveHint:
+    "Drag the title bar to move; arrows move, Shift+arrows resize; Ctrl+` switches between chat and windows",
+  windowMenu: "Window actions",
+  windowCloseAll: "Close all ({n})",
+  windowResetGeom: "Reset position and size",
+  // 2026-10-22 L1: desktop maximize/restore (header button + dblclick + window menu)
+  windowMaximize: "Maximize window",
+  windowRestore: "Restore window size",
   // preview-download (file download button in the dialog header — files only, never dirs)
   download: "Download",
   downloadFailed: "Download failed — retry.",
@@ -100,6 +114,9 @@ const preview = {
   htmlMaybeStale: "The preview may have expired — refresh if the page fails to load.",
   htmlExpired: "The link has expired — reload to keep viewing.",
   htmlReload: "Reload",
+  // preview-windows plan §8.2 (W3): tab-local FIFO eviction notice for the HTML cap.
+  htmlMaybeEvicted:
+    'This page\'s access token may have been displaced by a newer HTML preview (8 per login). If links or resources fail to load, click "Reload".',
   htmlLoadingSlow: "Still loading…",
   htmlNote: "Page scripts run sandboxed: external network and files in this directory are reachable; the hub is not.",
   htmlMintFailed: "Rendered preview unavailable ({code}) — showing source instead.",

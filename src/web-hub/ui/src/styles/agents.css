@@ -266,16 +266,85 @@
   color: var(--c-text-3);
 }
 
+/* Three columns: [dot] [title + chips, wraps INSIDE its column] [lock + cost, fixed top-right].
+   The cost can therefore never drop onto its own line (2026-10-22 layout bug). */
 .agent-row1 {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: var(--sp-2);
   min-width: 0;
 }
 
+.agent-row1 > .dot {
+  margin-top: 0.45em; /* align with the first text line */
+}
+
+.agent-main {
+  display: flex;
+  align-items: center;
+  column-gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* The badge group never wraps or shrinks: AgentCard.vue moves it WHOLE onto the session-name
+ * line (Teleport) when path + badges do not fit on row 1, so it never owns a line by itself. */
+.agent-chips {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: var(--sp-2);
+}
+
+.agent-line2 {
+  display: flex;
+  flex-wrap: wrap; /* the badge group (one unit) drops to the next line instead of squeezing the name */
+  align-items: center;
+  column-gap: 6px;
+  padding-left: 16px; /* indent shared by the name and a wrapped badge line */
+  min-width: 0;
+}
+
+/* The session name wins: it keeps its full width and is ellipsized ONLY when it alone exceeds
+ * the line (max-width), never to make room for the badges. */
+.agent-line2 > .agent-session {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding-left: 0;
+}
+
+.agent-below {
+  display: contents;
+}
+
+/* Badges sit at the RIGHT edge of the name line (same edge as row 1's cost); when the name
+ * leaves no room they wrap, as one unit, onto a line of their own — still right-aligned. */
+.agent-line2 .agent-chips {
+  margin-left: auto;
+}
+
+/* Badges after the name (same line when they fit, else a line of their own): the rename pencil
+ * sits right after the name's last character, so a renamable card reserves its box here. */
+.agent-item.renamable .agent-line2[data-below="true"] > .agent-session {
+  margin-right: calc(var(--rename-hit) + 8px);
+}
+
+.agent-end {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: none;
+  white-space: nowrap;
+}
+
 .agent-title {
-  /* keep a few characters of the cwd visible next to the chips + cost (2026-10-10 overflow bug) */
-  min-width: min(6ch, 100%);
+  /* Full `~/…` path; when it alone exceeds the row, elide from the FRONT (keep the project name):
+     rtl on the box moves the ellipsis to the left, the inner <bdi> keeps `~` `/` in ltr order. */
+  min-width: 0;
+  max-width: 100%;
+  direction: rtl;
+  text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -283,7 +352,6 @@
 }
 
 .agent-cost {
-  margin-left: auto;
   flex: none;
   color: var(--c-text-2);
   font-size: var(--fs-xs);
@@ -538,6 +606,37 @@
   padding-right: calc(60px * var(--fs-scale, 1));
 }
 
+/* Delete button geometry (AgentList context): a 40×40 circle (44 coarse) absolutely placed
+ * `bottom: 8px; right: 8px` of the `<li>`, i.e. it reaches `--remove-reach` above the card's
+ * bottom edge — normally beside the model/context row (row 3) but ALSO into the lower part of
+ * the session-name line (measured: line spans 33→53px above the bottom, button 8→48px).
+ * Badges on that line are right-aligned to row 1's cost edge, so instead of making them yield
+ * horizontally, the line is lifted clear of the button's top edge (margin-bottom), and the
+ * 60px side reservation only stays where nothing can lift it: no row 3 (line is the last row),
+ * or badges still on row 1 (the name itself must not run under the button). */
+.agent-item.removable {
+  --remove-reach: 48px;
+}
+
+@media (pointer: coarse) {
+  .agent-item.removable {
+    --remove-reach: 52px;
+  }
+}
+
+.removable > .agent-card > .agent-line2[data-below="true"] {
+  padding-right: 0;
+}
+
+.removable > .agent-card > .agent-line2[data-below="true"]:not(:last-child) {
+  /* card padding+border 11px + meta row ≈19px·scale + grid gap 3px sit below this line; +2px slack */
+  margin-bottom: max(0px, calc(var(--remove-reach) + 2px - 14px - 19px * var(--fs-scale, 1)));
+}
+
+.removable > .agent-card > .agent-line2[data-below="true"]:last-child {
+  padding-right: calc(60px * var(--fs-scale, 1));
+}
+
 .remove-wrap {
   display: inline-grid;
   flex: none;
@@ -755,7 +854,7 @@
  * ellipsis). `.removable`'s 60px right reservation would otherwise push the anchor BOX (and
  * with it the pencil) 60px past the text end — drop it on THIS row only: the pencil's own
  * reservation replaces it, and the bottom-right buttons never reach the title line. */
-.agent-item.renamable > .agent-card > .agent-session {
+.agent-item.renamable > .agent-card .agent-session {
   justify-self: start;
   max-width: calc(100% - var(--rename-hit) - 8px);
   padding-right: 0;
@@ -764,7 +863,7 @@
 /* `.removable`: the delete button sits in the bottom-right corner and, being taller than the
  * meta row, reaches up to the title line — the title (hence the pencil right after it) stops
  * short of that column, so pencil and delete button never overlap. */
-.agent-item.renamable.removable > .agent-card > .agent-session {
+.agent-item.renamable.removable > .agent-card .agent-session {
   max-width: calc(100% - var(--rename-hit) - 8px - var(--remove-col));
 }
 
@@ -803,7 +902,7 @@
     anchor-scope: --rename-anchor;
   }
 
-  .agent-item.renamable > .agent-card > .agent-session {
+  .agent-item.renamable > .agent-card .agent-session {
     anchor-name: --rename-anchor;
   }
 
@@ -950,4 +1049,76 @@
     min-height: 44px;
     height: 44px;
   }
+}
+
+.chip-xs {
+  display: inline-flex;
+  align-items: center;
+  padding-inline: 4px;
+}
+
+.chip-xs .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.chip-xs-channels {
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-2);
+}
+
+.chip-xs-unread {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-inline: 5px;
+  color: var(--c-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.chip-xs-unread .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.chip-xs[data-xs="wake"] {
+  color: var(--c-primary);
+}
+
+.chip-xs[data-xs="replies"] {
+  color: var(--c-text-2);
+}
+
+.chip-xs[data-xs="off"] {
+  color: var(--c-text-3);
+  opacity: 0.6;
+}
+
+/* channel-plan §7 (CHU): sidebar channel filter chips + card chip pressed state */
+.channel-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 0 2px;
+}
+
+.channel-filter .chip {
+  cursor: pointer;
+  background: transparent;
+  font: inherit;
+  font-size: var(--fs-xs);
+}
+
+.channel-filter .chip[aria-pressed="true"] {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: #fff;
+}
+
+.channel-filter .chip:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 1px;
 }

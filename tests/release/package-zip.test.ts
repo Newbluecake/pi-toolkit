@@ -23,6 +23,10 @@ describe("release total archive", () => {
     ]) {
       expect(entries).toContain(`pi-toolkit/${path}`);
     }
+    // The EPL-2.0 elkjs entry (full licence text) must ship in the total archive's notices.
+    const notices = execFileSync("unzip", ["-p", zip, "pi-toolkit/THIRD_PARTY_NOTICES.md"], { encoding: "utf8" });
+    expect(notices).toContain("## elkjs@");
+    expect(notices).toContain("Eclipse Public License - v 2.0");
     expect(existsSync(join(out, `pi-toolkit-web-ui-${version}.zip`))).toBe(true);
     expect(existsSync(join(out, `pi-toolkit-${version}.zip.sha256`))).toBe(true);
     expect(existsSync(join(out, `pi-toolkit-web-ui-${version}.zip.sha256`))).toBe(true);

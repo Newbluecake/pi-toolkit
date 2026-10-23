@@ -157,7 +157,10 @@ describe("F8 in-process service composition", () => {
     await eventually(() => expect(r.fake.callsTo("PATCH", /messages/)).toHaveLength(2));
     const card = JSON.parse((r.fake.callsTo("PATCH", /messages/)[1]!.json as { content: string }).content);
     expect(card.body.elements).toEqual([
-      { tag: "markdown", content: expect.stringContaining("1. 今天运动情况？\n1. 已达标（1小时）\n2. 今天休息") },
+      {
+        tag: "markdown",
+        content: expect.stringContaining("**今天运动情况？**\n- **1** **已达标（1小时）**\n- **2** **今天休息**"),
+      },
     ]);
     expect(card.body.elements[0].content).toContain("文字回答");
     expect(card.body.elements[0].content).toContain("https://phone.example.com/#/agent/agent-1");

@@ -37,12 +37,15 @@
   `renameEnabled()` gate (hub `cmd.v1` AND agent card `control` AND agent live AND not mid-
   restore AND the agent's `commands` slot present) plus the current raw session name off the
   injected hub state (the frozen `AgentCardView.sessionLabel` is a localized placeholder-or-name
-  string, not usable as an edit prefill).
+  string, not usable as an edit prefill) plus the title-auto capability (title-auto plan: the
+  `commands` slot lists `title` ⇒ clearing the input and saving sends `/title auto`).
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { xsChannelsOf } from "./agentCardModel.js";
+import { channelDirectory } from "./channelModel.js";
 import { renameEnabled } from "../../logic/control.js";
 import {
   classifyRelaunchError,
@@ -72,10 +75,30 @@ const props = withDefaults(defineProps<AgentListProps>(), { collapsed: false });
 const emit = defineEmits<AgentListEmits>();
 const { t } = useI18n();
 
+// channel-plan §7 (CHU): sidebar channel filter — component memory only (never persisted). The chip
+// row appears only while a non-default channel exists on the hub (cap xs.channel.v1).
+const hub = inject(HUB_CTX, null);
+const channelPick = ref<string | null>(null);
+const channelRows = computed(() => {
+  const agents = hub?.state.value.agents;
+  if (!(agents instanceof Map)) return [];
+  const rows = channelDirectory(agents, hub?.state.value.hub?.["caps"]);
+  return rows.some((r) => r.name !== "default") ? rows : [];
+});
+// a picked channel that vanished from the hub falls back to 「全部」 (no stuck-empty list)
+watch(channelRows, (rows) => {
+  if (channelPick.value !== null && !rows.some((r) => r.name === channelPick.value)) channelPick.value = null;
+});
 const filtered = computed(() => {
   const needle = props.filter.trim().toLowerCase();
-  if (needle === "") return props.cards;
-  return props.cards.filter((c) => `${c.shortCwd} ${c.sessionLabel}`.toLowerCase().includes(needle));
+  let list = props.cards;
+  const pick = channelPick.value;
+  if (pick !== null && channelRows.value.length > 0) {
+    const caps = hub?.state.value.hub?.["caps"];
+    list = list.filter((c) => xsChannelsOf(hub?.state.value.agents.get(c.key), caps)?.includes(pick) === true);
+  }
+  if (needle === "") return list;
+  return list.filter((c) => `${c.shortCwd} ${c.sessionLabel}`.toLowerCase().includes(needle));
 });
 // 2026-10-13 restore order-stability (user report: restart+restore 卡片跳动): a card whose
 // managed session is mid-restore (an in-flight spawn record's `restore.prevAgentKey` names it)
@@ -106,7 +129,6 @@ function toggleCollapsed(): void {
 // new session (§header comment; web-hub-spawn SP12 — actions come from @logic/spawn.js, SP11)
 // ---------------------------------------------------------------------------
 
-const hub = inject(HUB_CTX, null);
 const env = inject(CONTROL_ENV, null);
 // First-`agents`-snapshot gate (deep-link refresh flicker fix): before the hub's first snapshot
 // lands, an empty card list is "still connecting", not 「暂无会话」. Missing hub/field defaults
@@ -318,7 +340,7 @@ const spawnRows = computed(() =>
 interface AgentRow {
   readonly card: AgentCardView;
   readonly target: ReturnType<typeof removalTargetForAgent>;
-  readonly rename: { readonly enabled: boolean; readonly name: string };
+  readonly rename: { readonly enabled: boolean; readonly name: string; readonly titleAuto: boolean };
   /** spawn-relaunch: the terminal managed record this offline card may re-fork
    *  (`relaunchableFor` — undefined ⇒ the row keeps the plain click=select behavior). */
   readonly relaunch: { readonly spawnId: string } | undefined;
@@ -328,7 +350,7 @@ interface AgentRow {
  *  `commandsEnabled` (duplicated, not imported — that file is outside this package's exclusive
  *  `components/agents/**` scope), evaluated against the raw `AgentState` this list already
  *  injects for `removalTargetForAgent`/`managedFor`. */
-function renameInfoFor(c: AgentCardView): { enabled: boolean; name: string } {
+function renameInfoFor(c: AgentCardView): { enabled: boolean; name: string; titleAuto: boolean } {
   const agent = hub?.state.value.agents.get(c.key) as
     | {
         down?: unknown;
@@ -346,8 +368,14 @@ function renameInfoFor(c: AgentCardView): { enabled: boolean; name: string } {
     restoring: restoringKeys(hub?.state.value.spawns ?? null).has(c.key),
     hasCommandsSlot: Array.isArray(agent?.commands),
   });
+  // title-auto plan: clear-to-auto semantics are only offered when the agent advertises the
+  // /title command (a96c189a) in its `commands` slot — an old agent keeps empty ⇒ local cancel.
+  const cmds = agent?.commands;
+  const titleAuto =
+    Array.isArray(cmds) &&
+    cmds.some((cmd) => cmd !== null && typeof cmd === "object" && (cmd as { name?: unknown }).name === "title");
   const rawName = agent?.session?.name;
-  return { enabled, name: typeof rawName === "string" ? rawName : "" };
+  return { enabled, titleAuto, name: typeof rawName === "string" ? rawName : "" };
 }
 
 function toRow(c: AgentCardView): AgentRow {
@@ -485,6 +513,27 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
           @input="onFilterInput"
         />
       </div>
+      <div
+        v-if="channelRows.length > 0"
+        class="channel-filter"
+        role="group"
+        :aria-label="t('agents.channelFilterAria')"
+      >
+        <button type="button" class="chip" :aria-pressed="channelPick === null" @click="channelPick = null">
+          {{ t("agents.channelAll") }}
+        </button>
+        <button
+          v-for="r in channelRows"
+          :key="r.name"
+          type="button"
+          class="chip"
+          translate="no"
+          :aria-pressed="channelPick === r.name"
+          @click="channelPick = channelPick === r.name ? null : r.name"
+        >
+          #{{ r.name }} <span class="num">{{ r.members }}</span>
+        </button>
+      </div>
       <p v-if="newSessionNote" class="new-session-note" :data-kind="newSessionNote.kind" role="status">
         {{ newSessionNote.text }}
       </p>
@@ -554,7 +603,12 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
         :class="{ removable: !!row.target, renamable: row.rename.enabled }"
       >
         <AgentCard :card="row.card" :selected="row.card.key === selectedKey" />
-        <RenameButton v-if="row.rename.enabled" :agent-key="row.card.key" :name="row.rename.name" />
+        <RenameButton
+          v-if="row.rename.enabled"
+          :agent-key="row.card.key"
+          :name="row.rename.name"
+          :title-auto="row.rename.titleAuto"
+        />
         <RemoveButton
           v-if="row.target"
           :target="row.target.kind === 'managed' ? { spawnId: row.target.spawnId } : { agentKey: row.card.key }"
@@ -591,7 +645,12 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
         <p v-if="relaunchErr !== null && relaunchErr.key === row.card.key" class="relaunch-note" role="alert">
           {{ relaunchErr.text }}
         </p>
-        <RenameButton v-if="row.rename.enabled" :agent-key="row.card.key" :name="row.rename.name" />
+        <RenameButton
+          v-if="row.rename.enabled"
+          :agent-key="row.card.key"
+          :name="row.rename.name"
+          :title-auto="row.rename.titleAuto"
+        />
         <RemoveButton
           v-if="row.target"
           :target="row.target.kind === 'managed' ? { spawnId: row.target.spawnId } : { agentKey: row.card.key }"

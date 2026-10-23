@@ -78,6 +78,15 @@ export interface TopicSwitchDeps {
 
 export interface TopicSwitchWiring {
   readonly webGate: PromptGatePort;
+  /**
+   * T1 read-only port (phase2-plan §7.2): true while a topic-switch hold is pending (any
+   * phase — judging/confirming/hopping/switching/releasing) or a B1 mid-switch marker is live
+   * in the process-global transfer store (the marker outlives this activation across `/reload`).
+   * The fabric session-change fence reads this at CHECK time (XW wires it as the `topic_switch`
+   * port); it MUST stay side-effect-free and never throw — the fence treats a thrown port as
+   * an ACTIVE window (fail closed).
+   */
+  readonly fenceActive: () => boolean;
 }
 
 const TRANSFER_KEY = Symbol.for("pi-subagent:topic-switch-transfer");
@@ -420,6 +429,18 @@ export function wireTopicSwitch(pi: ExtensionAPI, deps: TopicSwitchDeps): TopicS
     }
     const fromSessionId = safe(() => ctxRef.current?.sessionManager.getSessionId()) ?? "";
     setTransfer({ holdId: hold.id, payload: hold.payload, fromSessionId, reason, state: "pending", at });
+    // todo #8: a web-claimed hold is now owned by recovery, never by its WebPromptRelease (the
+    // recovery re-delivers through the content path) — settle the release as handed off so the
+    // browser's row reaches a terminal state instead of "sent · unconfirmed" until TTL. Only a
+    // `reload` comes back into the same session with an automatic re-delivery (planRecovery rule
+    // 1); every other reason at most refills the terminal editor.
+    if (hold.webRelease !== undefined) {
+      try {
+        hold.webRelease.handedOff?.(reason === "reload" ? "reload" : "session");
+      } catch {
+        /* best-effort: never let the web side break shutdown persistence */
+      }
+    }
   }
 
   function persistCooldown(hold: HoldRuntime): void {
@@ -981,5 +1002,12 @@ export function wireTopicSwitch(pi: ExtensionAPI, deps: TopicSwitchDeps): TopicS
     },
   };
 
-  return { webGate };
+  return {
+    webGate,
+    fenceActive: () =>
+      // Read-only (T1): pending hold in THIS live activation, or any B1 mid-switch marker in
+      // the process-global store — a marker left by a previous activation during a `/reload`
+      // still means a session switch may be resolving right now.
+      transferGlobal().inFlight.size > 0 || (live && currentHold !== undefined),
+  };
 }

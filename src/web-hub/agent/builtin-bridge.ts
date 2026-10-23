@@ -217,14 +217,30 @@ function dispatchExtension(deps: BuiltinBridgeDeps, frame: CmdFrame, cmd: CmdArg
   const owns = capture?.owns?.(cmd.name) === true;
   const output = owns ? (capture?.output?.() as CommandOutputWire | undefined) : undefined;
   const hasOutput = output !== undefined && output.entries.length > 0;
-  const data: CmdData = {
-    op: "command",
-    kind: "extension",
-    completion: hasOutput ? "sync" : "unknown",
-    captured: owns,
-  };
-  if (hasOutput) (data as { output?: CommandOutputWire }).output = output;
-  return okResult(data);
+  if (hasOutput) {
+    const data: CmdData = { op: "command", kind: "extension", completion: "sync", captured: owns };
+    (data as { output?: CommandOutputWire }).output = output;
+    return okResult(data);
+  }
+  // fix (2026-10-22): an owned invocation whose capture window is STILL OPEN — the handler was
+  // claimed but is `await`ing before its output (e.g. /fabric status awaits hubInfo() before
+  // its notify) — used to answer `completion:"unknown"` and then silently drop everything the
+  // window collected afterwards. Promise exactly what the engine can guarantee instead: the
+  // window's finish (handler Promise settle, or the CAPTURE_MAX_MS settle-anyway expiry) fires
+  // the one-shot listener registered here, upgrading the ledger through `sendLate`/
+  // `handleBridgeLate` (ledger `{late:true}` + `cmd_late`) with the FULL output so the web UI's
+  // existing async path (pendingCtl → cmd_late → queryOnly) renders it. Gated on `sendLate`
+  // being wired: without a late channel the honest answer stays `"unknown"` (legacy).
+  if (owns && deps.sendLate !== undefined && capture?.isActive?.(frame.id) === true) {
+    capture.onFinish?.(frame.id, () => {
+      const late = capture.outputFor?.(frame.id) as CommandOutputWire | undefined;
+      const data: CmdData = { op: "command", kind: "extension", completion: "sync", captured: true };
+      if (late !== undefined && late.entries.length > 0) (data as { output?: CommandOutputWire }).output = late;
+      deps.sendLate?.(frame, okResult(data));
+    });
+    return okResult({ op: "command", kind: "extension", completion: "async", captured: true });
+  }
+  return okResult({ op: "command", kind: "extension", completion: "unknown", captured: owns });
 }
 
 function randomNonce(): string {

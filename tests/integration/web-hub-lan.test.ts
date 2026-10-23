@@ -38,6 +38,7 @@ import { lanPostJson, lanRequest } from "../web-hub/http/lan-helpers.js";
 import { openSse, type SseConn } from "../web-hub/http/helpers.js";
 import { waitUntil } from "../web-hub/agent/helpers.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
+import { freePort } from "../helpers/free-port.js";
 
 /** Environmental gate only (plan §4.3's own convention) — never a stand-in for "LD hasn't merged". */
 const NO_NODE_SQLITE = !(await hasNodeSqlite());
@@ -56,18 +57,6 @@ function firstLanIPv4(): string | undefined {
     }
   }
   return undefined;
-}
-
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createNetServer();
-    srv.once("error", reject);
-    srv.listen(0, "0.0.0.0", () => {
-      const addr = srv.address();
-      const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
 }
 
 /** A minimal `node:http` reverse proxy (plan §11 LI row: "用本机 node:http 起一个最小代理"):

@@ -1,6 +1,5 @@
 import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 import { request as httpRequest, type IncomingMessage } from "node:http";
-import { createServer as createNetServer } from "node:net";
 import { readFileSync } from "node:fs";
 import { effectScope } from "vue";
 import { afterEach, describe, expect, it } from "vitest";
@@ -22,6 +21,7 @@ import {
 import { createTokenTransport, TOKEN_KEY } from "../../../src/web-hub/ui/src/transport/token.js";
 import type { PasswordTransportDeps } from "../../../src/web-hub/ui/src/transport/password.js";
 import type { TokenTransportDeps } from "../../../src/web-hub/ui/src/transport/token.js";
+import { freePort } from "../../helpers/free-port.js";
 
 /**
  * Real-HTTP `password-client.js`/`token-client.js` + `useHub` regression suite (vue-plan.md
@@ -246,18 +246,6 @@ function countingTimers() {
 const flush = async (rounds = 15): Promise<void> => {
   for (let i = 0; i < rounds; i++) await Promise.resolve();
 };
-
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createNetServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
-}
 
 async function waitUntil(pred: () => boolean, timeoutMs = 4_000, stepMs = 20): Promise<void> {
   const deadline = Date.now() + timeoutMs;

@@ -66,7 +66,7 @@ describe("buildHubConfig — webHub.proxy translation", () => {
       const config = await spawnedConfig({ ...SETTINGS, ...(proxy === undefined ? {} : { proxy }) });
       expect("proxy" in config).toBe(false);
       expect(Object.keys(config).sort()).toEqual(
-        ["buildId", "home", "idleExitMinutes", "launcher", "pluginVersion", "port", "preview", "v"].sort(),
+        ["buildId", "cmdArgs", "home", "idleExitMinutes", "launcher", "pluginVersion", "port", "preview", "v"].sort(),
       );
       resetGlobals();
     }

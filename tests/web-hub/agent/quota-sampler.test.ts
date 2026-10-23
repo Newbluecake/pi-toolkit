@@ -32,6 +32,23 @@ describe("projectQuota", () => {
     expect(projectQuota([], 1_000)).toBeUndefined();
   });
 
+  it("writes displayLevel (not the forecast-raised level) to provider and window wire", () => {
+    const v = verdict({
+      level: 2,
+      displayLevel: 0,
+      windows: [window({ usedPct: 30, level: 2, displayLevel: 0, reason: "forecast-before-reset" })],
+    });
+    const wire = projectQuota([v], 1_000)!;
+    expect(wire.providers[0]?.level).toBe(0);
+    expect(wire.providers[0]?.windows[0]?.level).toBe(0);
+  });
+
+  it("falls back to level when displayLevel is absent", () => {
+    const wire = projectQuota([verdict({ level: 2, windows: [window({ level: 2 })] })], 1_000)!;
+    expect(wire.providers[0]?.level).toBe(2);
+    expect(wire.providers[0]?.windows[0]?.level).toBe(2);
+  });
+
   it("projects provider + window fields; v=1 and at=now", () => {
     const v = verdict({
       provider: "kimi-coding",

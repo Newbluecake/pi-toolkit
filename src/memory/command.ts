@@ -29,12 +29,13 @@ import { discoverCCProjects, importAll, importProject, listMemory, type ImportRe
 import { formatSize } from "./render.js";
 import { handleMemDoctorCommand, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
 import { summaryLine } from "./doctor.js";
+import { handleMemInitCommand } from "./init-command.js";
 import { handleMemTidyCommand } from "./tidy/command.js";
 
 export type CommandHandler = (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 
 const DESCRIPTION =
-  "Project memory. /mem · /mem list · /mem import [--force] [slug|all] · /mem path · /mem doctor · /mem tidy [--batch] · /mem restore [--legacy]";
+  "Project memory. /mem · /mem list · /mem init · /mem import [--force] [slug|all] · /mem path · /mem doctor · /mem tidy [--batch] · /mem restore [--legacy]";
 
 function fmtImport(r: ImportResult): string {
   const s = r.skipped ? `, ${r.skipped} skipped (exists)` : "";
@@ -64,6 +65,7 @@ export interface CreateMemCommandDeps {
 
 const MEM_SUBCOMMANDS: ReadonlyArray<{ value: string; description: string }> = [
   { value: "list", description: "列出项目记忆文件（默认）" },
+  { value: "init", description: "初始化项目记忆（创建 core.md 骨架）" },
   { value: "path", description: "显示记忆目录路径" },
   { value: "import", description: "从 Claude Code 导入记忆 [--force] [slug|all]" },
   { value: "doctor", description: "记忆健康检查（D01-D14）" },
@@ -151,6 +153,22 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
       try {
         if (sub === "path") {
           if (ctx.hasUI) ctx.ui.notify(`memory dir: ${memoryDirFor(cwd, deps.paths)}`, "info");
+          return;
+        }
+        if (sub === "init") {
+          const initSettings = deps.settings;
+          await handleMemInitCommand(ctx, {
+            ...(deps.paths === undefined ? {} : { paths: deps.paths }),
+            isChildSession,
+            ...(initSettings === undefined ? {} : { settings: initSettings }),
+            ...(deps.onAfterWrite === undefined ? {} : { onAfterWrite: deps.onAfterWrite }),
+            ...(initSettings === undefined
+              ? {}
+              : {
+                  doctorSummary: (c: string) =>
+                    summaryLine(collectDoctorFindings(c, deps.paths, initSettings, deps.renderBlock, () => Date.now())),
+                }),
+          });
           return;
         }
         if (sub === "list") {

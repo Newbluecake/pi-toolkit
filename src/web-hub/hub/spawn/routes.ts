@@ -267,6 +267,8 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
   interface RejectFields {
     endpoint: "list" | "dirs" | "spawn" | "stop" | "prefs" | "history" | "mkdir" | "relaunch";
     code: string;
+    reason?: string;
+    detail?: string;
     reqId?: string;
     spawnId?: string;
     cwd?: string;
@@ -294,6 +296,8 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       ...(fields.active === undefined ? {} : { active: fields.active }),
       ...(fields.max === undefined ? {} : { max: fields.max }),
       code: fields.code,
+      ...(fields.reason === undefined ? {} : { reason: fields.reason }),
+      ...(fields.detail === undefined ? {} : { detail: fields.detail }),
     });
   }
 
@@ -336,13 +340,24 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     });
   }
 
-  function sendLauncher(io: SpawnRouteIo, res: ServerResponse, reason: string, retryAfterS?: number): void {
+  function sendLauncher(
+    io: SpawnRouteIo,
+    res: ServerResponse,
+    reason: string,
+    retryAfterS?: number,
+    detail?: string,
+  ): void {
     const headers: Record<string, string> = {};
     if (retryAfterS !== undefined) headers["Retry-After"] = String(Math.max(1, retryAfterS));
     io.sendJson(
       res,
       503,
-      { error: "E_LAUNCHER", reason, ...(retryAfterS === undefined ? {} : { retryAfterS }) },
+      {
+        error: "E_LAUNCHER",
+        reason,
+        ...(retryAfterS === undefined ? {} : { retryAfterS }),
+        ...(detail === undefined ? {} : { detail }),
+      },
       headers,
     );
   }
@@ -608,9 +623,13 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     const policy = supervisor.policy(probePrincipal, io.listener, io.scheme, io.viaTrustedProxy);
     if (!policy.allowed) {
       const reason = policy.reason ?? "launcher";
-      rejectAudit(io, auth, { endpoint: "spawn", code: reason === "platform" ? "E_SPAWN_DENIED" : "E_LAUNCHER" });
+      rejectAudit(io, auth, {
+        endpoint: "spawn",
+        code: reason === "platform" ? "E_SPAWN_DENIED" : "E_LAUNCHER",
+        ...(reason === "platform" ? {} : { reason, ...(policy.detail === undefined ? {} : { detail: policy.detail }) }),
+      });
       if (reason === "platform") sendSpawnDenied(io, res, "platform", policy.detail);
-      else sendLauncher(io, res, reason, policy.retryAfterS);
+      else sendLauncher(io, res, reason, policy.retryAfterS, policy.detail);
       return;
     }
 
@@ -1129,6 +1148,7 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
           ...(result.code === "E_LIMIT"
             ? { limit: result.limit ?? "global", active: result.active, max: result.max }
             : {}),
+          ...(result.code === "E_LAUNCHER" ? { reason: result.reason ?? "unavailable" } : {}),
           code: result.code,
         });
         sendStartResult(io, res, result);
@@ -1266,7 +1286,7 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     const from = prefs.get();
     const saved = prefs.set(to);
     if (!saved.ok) {
-      rejectAudit(io, stillAuthed, { endpoint: "prefs", code: "E_LAUNCHER" });
+      rejectAudit(io, stillAuthed, { endpoint: "prefs", code: "E_LAUNCHER", reason: "persist" });
       sendLauncher(io, res, "persist");
       return;
     }
@@ -1486,7 +1506,12 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     // principal may relaunch any managed session, same as stop — there is no owner check.
     const r: RelaunchResult = supervisor.relaunch(spawnId, reqDeadline);
     if (!r.ok) {
-      rejectAudit(io, auth, { endpoint: "relaunch", spawnId, code: r.code });
+      rejectAudit(io, auth, {
+        endpoint: "relaunch",
+        spawnId,
+        code: r.code,
+        ...(r.code === "E_LAUNCHER" ? { reason: r.reason } : {}),
+      });
       switch (r.code) {
         case "E_NOT_FOUND":
           io.sendError(res, 404, "E_NOT_FOUND");

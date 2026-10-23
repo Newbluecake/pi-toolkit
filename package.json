@@ -1,6 +1,6 @@
 {
   "name": "pi-toolkit",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Toolbox extension for pi — anti-hang subagents (Agent / get_subagent_result / steer_subagent), HUD footer, web_search failover, task tools, ask_user, bash auto-background, scheduler, message fabric, /goal loop",
   "license": "MIT",
   "repository": {
@@ -45,9 +45,9 @@
     "agent"
   ],
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=1.0.0 <1.3.0",
-    "@earendil-works/pi-coding-agent": ">=1.0.0 <1.3.0",
-    "@earendil-works/pi-tui": ">=1.0.0 <1.3.0",
+    "@earendil-works/pi-ai": ">=1.0.0 <1.4.0",
+    "@earendil-works/pi-coding-agent": ">=1.0.0 <1.4.0",
+    "@earendil-works/pi-tui": ">=1.0.0 <1.4.0",
     "@sinclair/typebox": "*"
   },
   "peerDependenciesMeta": {
@@ -62,9 +62,9 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^1.2.0",
-    "@earendil-works/pi-coding-agent": "^1.2.0",
-    "@earendil-works/pi-tui": "^1.2.0",
+    "@earendil-works/pi-ai": "^1.3.0",
+    "@earendil-works/pi-coding-agent": "^1.3.0",
+    "@earendil-works/pi-tui": "^1.3.0",
     "@sinclair/typebox": "^0.34.49",
     "@types/node": "^22.0.0",
     "@vitejs/plugin-vue": "~5.2.4",
@@ -72,6 +72,7 @@
     "axe-core": "^4.13.0",
     "fast-check": "^4.9.0",
     "happy-dom": "^20.0.0",
+    "mermaid": "12.2.0",
     "prettier": "^3.9.6",
     "prismjs": "^1.30.0",
     "tsx": "^4.23.13",
@@ -87,6 +88,7 @@
     "dev:web": "vite build --watch --config src/web-hub/ui/vite.config.ts",
     "check:web": "tsx scripts/web-hub/check-ui-dist.ts",
     "probe:csp": "tsx scripts/web-hub/csp-probe.ts",
+    "probe:mermaid": "tsx scripts/web-hub/csp-probe.ts --suite mermaid",
     "dev:hub": "tsx scripts/web-hub/dev-hub.ts",
     "visual:web": "tsx scripts/web-hub/visual.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.typecheck.json && vue-tsc --noEmit -p src/web-hub/ui/tsconfig.json",

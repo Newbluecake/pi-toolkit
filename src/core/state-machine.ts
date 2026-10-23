@@ -827,6 +827,7 @@ export function reduce(
         // M-A: display-only spawn metadata, set exactly once here.
         ...(input.meta?.model === undefined ? {} : { model: input.meta.model }),
         ...(input.meta?.label === undefined ? {} : { label: input.meta.label }),
+        ...(input.meta?.title === undefined ? {} : { title: input.meta.title }),
         ...(input.meta?.agentType === undefined ? {} : { agentType: input.meta.agentType }),
         ...(input.meta?.taskPrompt === undefined ? {} : { taskPrompt: input.meta.taskPrompt }),
         ...(input.meta?.worktree === undefined ? {} : { worktree: input.meta.worktree }),

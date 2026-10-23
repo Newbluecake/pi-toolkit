@@ -26,6 +26,7 @@ import { testHubPaths } from "../helpers/paths.js";
 import { captureLog, makeAgent, makeTmp, rawRequest } from "./helpers.js";
 import { login } from "./helpers.js";
 import { lanPostJson, lanRequest, seedLanUser } from "./lan-helpers.js";
+import { freePort } from "../../helpers/free-port.js";
 import { fakeKdf, fakeLanStore } from "../contract/fakes.js";
 import { createScope } from "../../../src/web-hub/hub/lifecycle.js";
 import { createHostsPort } from "../../../src/web-hub/hub/net-hosts.js";
@@ -241,17 +242,7 @@ async function lanKitBody(
   );
   const subs = new Set<(e: HubEvent) => void>();
   const lanStore = fakeLanStore();
-  const { createServer } = await import("node:net");
-  const freePort = await new Promise<number>((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
-  const cfg: HubLanConfig = { port: freePort, extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
+  const cfg: HubLanConfig = { port: await freePort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
   let lastStatus: LanStatus = { state: "starting" };
   const { fx, routes } = (() => {
     const w = wtgraphRoutes(opts.mode ?? "on");

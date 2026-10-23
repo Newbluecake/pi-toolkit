@@ -97,6 +97,13 @@ const control = {
   sendAsText: "作为文本发送",
   paletteAria: "命令补全",
   paletteHint: "Tab 补全 · ↑↓ 选择 · Esc 关闭",
+  // `/name␠` 参数面板（web-hub-slash-args §6.5，P3）；argHint 是散文提示（zh 用中文，符合
+  // 「紧凑标记仅英文 token」的分界），chip 复用 policyConfirm 不新增。
+  argAria: "命令参数补全",
+  argUsage: "用法",
+  argLoading: "查询补全中…",
+  argEmpty: "无可用补全",
+  argHint: "Tab 补全 · ↑↓ 选择 · Esc 关闭",
   policyAllow: "allow",
   policyConfirm: "confirm",
   policyDeny: "deny",
@@ -144,7 +151,8 @@ const control = {
   mentionAria: "提及与文件",
   mentionZone: "子 agent",
   fileZone: "文件",
-  mentionEmpty: "无匹配的子 agent 或文件",
+  sessionZone: "会话",
+  mentionEmpty: "无匹配的子 agent、会话或文件",
   mentionRunning: "running",
   mentionSettled: "settled · @ resumes",
   mentionUnavailable: "unavailable",

@@ -82,6 +82,25 @@ describe("ask_user floating window (2026-10-20 user ruling 「非模态浮窗」
     expect(rule(read("styles/preview.css"), ".preview-overlay")).toMatch(/z-index:\s*60\b/); // modal tier
   });
 
+  it("preview-windows W2 (plan r2 §5.1): the modeless windows root sits at tier 25 — above the dock (20), below drawers/popovers/ask-float/modals", () => {
+    const preview = read("styles/preview.css");
+    const modeless = rule(preview, ".preview-overlay.is-windows.is-modeless");
+    expect(modeless).not.toBe("");
+    expect(modeless).toMatch(/z-index:\s*25\b/); // the registered tier (§5.1 table)
+    expect(modeless).toMatch(/pointer-events:\s*none/); // the root never intercepts — windows only
+    // the tier ordering vs the canonical neighbours: drawers (30) and ask-float (45) stay above
+    expect(read("styles/drawer.css")).toMatch(/z-index:\s*30\b/);
+    expect(rule(read("styles/ask-float.css"), ".ask-float")).toMatch(/z-index:\s*45\b/);
+    // the base `.preview-overlay` stays the modal tier 60 (AttachmentImagePreview reuses it)
+    expect(rule(preview, ".preview-overlay")).toMatch(/z-index:\s*60\b/);
+    // windows restore their own pointer events; positioned by left/top vars only (R2: no transform)
+    expect(rule(preview, ".preview-overlay.is-windows.is-modeless .preview-window")).toMatch(/pointer-events:\s*auto/);
+    const floating = rule(preview, ".preview-window.is-floating");
+    expect(floating).toMatch(/left:\s*var\(--pw-x\)/);
+    expect(floating).toMatch(/top:\s*var\(--pw-y\)/);
+    expect(floating).not.toMatch(/transform/);
+  });
+
   it("band split: the phone sheet is in-flow anchored (absolute, tier 20) — never viewport-fixed", () => {
     // Verifier round 3: on <768px the sheet must sit ABOVE the composer (anchored to the
     // in-flow .ask-anchor so a growing dock pushes it up) and BELOW the fullscreen drawer

@@ -1,7 +1,6 @@
 import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 import { mkdirSync, readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
-import { createServer as createNetServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { AVATAR_DELETE_PATH, AVATAR_PATH } from "../../../src/web-hub/protocol/avatar.js";
 import { createAvatarRoutes } from "../../../src/web-hub/hub/avatar/routes.js";
@@ -15,20 +14,9 @@ import type { HubInfo, HubLanConfig, HttpFrontend, LanStatus } from "../../../sr
 import { fakeKdf, fakeLanStore } from "../contract/fakes.js";
 import { fakeDeps, login, makeTmp, openSse as openLoopbackSse } from "./helpers.js";
 import { lanPostJson, lanRequest, openSse, seedLanUser } from "./lan-helpers.js";
+import { freePort } from "../../helpers/free-port.js";
 
 const PNG = readFileSync(new URL("../../fixtures/web-hub-avatar/chrome-canvas.png", import.meta.url));
-
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createNetServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = address !== null && typeof address === "object" ? address.port : 0;
-      server.close(() => resolve(port));
-    });
-  });
-}
 
 function lanBinaryRequest(
   port: number,

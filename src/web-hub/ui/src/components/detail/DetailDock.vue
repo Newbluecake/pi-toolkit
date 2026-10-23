@@ -88,8 +88,11 @@ const mentionResult = ref<{ kind: "ok" | "error"; label: string; action?: "steer
 let mentionResultTimer: ReturnType<typeof setTimeout> | undefined;
 
 /** pendingCtl id of the in-flight async command we're tracking (found by kind+name after the
- * optimistic item lands in the reducer). */
-let trackingCmd: { id: string | null; name: string } | null = null;
+ * optimistic item lands in the reducer). `captured` is the runCommand response's own
+ * `data.captured` (known for every async/unknown completion) — the one-shot query fallback
+ * keeps it instead of degrading to `captured:false`, so a pi-toolkit command whose query failed
+ * renders its honest "nothing to show" card, never the third-party terminal-only note. */
+let trackingCmd: { id: string | null; name: string; captured?: boolean } | null = null;
 let waitPromptTimer: ReturnType<typeof setTimeout> | undefined;
 
 function agentKey(): string | null {
@@ -144,7 +147,10 @@ async function runCommand(name: string, args: string, confirm: boolean): Promise
     output?: CommandOutputWire;
   };
   if (data.completion === "async" || data.completion === "unknown") {
-    return; // stays "running" — the pendingCtl watcher + queryOnly finish it (cmd_late path)
+    // stays "running" — the pendingCtl watcher + queryOnly finish it (cmd_late path). Remember
+    // the response's own `captured` so a later query failure can't mislabel the card.
+    if (trackingCmd !== null) trackingCmd.captured = data.captured === true;
+    return;
   }
   trackingCmd = null;
   cmdResult.value = {
@@ -201,15 +207,40 @@ function watchCommandItem(): void {
       void c.query(key, id).then((outcome) => {
         if (!cmdResult.value || cmdResult.value.name !== tracking.name) return;
         if (outcome.ok) {
-          const data = (outcome.data ?? {}) as { captured?: boolean; output?: CommandOutputWire };
+          // A queryOnly answer wraps the real command result: `{op:"query", state, result: {ok,
+          // data: {…command data}}}` (commands.ts handleQueryOnly). Unwrap `result.data` — the
+          // old code read `captured`/`output` off the query WRAPPER, so both were undefined and
+          // every async command (incl. captured pi-toolkit ones) fell into the terminal-only
+          // note. A flat/legacy shape (no `result`) still reads the top level.
+          const data = (outcome.data ?? {}) as {
+            result?: { ok?: boolean; data?: { captured?: boolean; output?: CommandOutputWire } };
+            captured?: boolean;
+            output?: CommandOutputWire;
+          };
+          const inner =
+            data.result !== undefined &&
+            typeof data.result === "object" &&
+            data.result.ok === true &&
+            data.result.data !== undefined &&
+            typeof data.result.data === "object"
+              ? data.result.data
+              : data;
           cmdResult.value = {
             name: tracking.name,
             state: "done",
-            captured: data.captured === true,
-            output: data.output ?? null,
+            captured: inner.captured === true,
+            output: inner.output ?? null,
           };
         } else {
-          cmdResult.value = { name: tracking.name, state: "done", captured: false, output: null };
+          // Query failed (e.g. the ledger entry aged out) — keep the KNOWN captured value: a
+          // pi-toolkit command (captured:true) renders its content-less "done" card, never the
+          // third-party terminal-only note; a genuinely third-party command keeps it.
+          cmdResult.value = {
+            name: tracking.name,
+            state: "done",
+            captured: tracking.captured === true,
+            output: null,
+          };
         }
       });
     },

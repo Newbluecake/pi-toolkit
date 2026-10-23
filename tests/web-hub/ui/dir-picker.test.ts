@@ -208,6 +208,29 @@ describe("DirPicker.vue (SP12)", () => {
     expect(qa(".spawn-recent-btn")[0]!.classList.contains("is-current")).toBe(false);
   });
 
+  it.each([
+    ["changed", undefined, "/webhub restart"],
+    ["launcher", "changed", "/webhub restart"],
+    ["launcher", "missing", "try again later"],
+    ["persist", undefined, "try again later"],
+  ] as const)("launcher reason=%s detail=%s renders actionable copy", async (reason, detail, text) => {
+    const h = harness({
+      start: async () => ({
+        ok: false,
+        error: "E_LAUNCHER",
+        reason,
+        ...(detail === undefined ? {} : { detail }),
+        retryable: true,
+      }),
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-picker-actions .btn-primary"));
+    expect(q(".spawn-picker-error").textContent).toContain(text);
+    expect(q<HTMLInputElement>("#spawn-cwd").value).toBe("/home/u/proj");
+    expect(h.starts).toHaveLength(1);
+  });
+
   it("submits {cwd} through the orchestrator exactly once per click (no first-prompt field — removed per user 拍板)", async () => {
     let call = 0;
     const h = harness({
@@ -473,6 +496,19 @@ describe("DirPicker.vue — document-level keydown (a11y fix)", () => {
     await keydown(document.body, { key: "Escape" });
     expect(wrapper.emitted("close") ?? []).toHaveLength(0);
     overlay.remove();
+    await keydown(document.body, { key: "Escape" });
+    expect(wrapper.emitted("close")).toHaveLength(1);
+  });
+
+  it("a MODELESS preview-window root (preview-windows §5.2 W3) never blocks the picker, even mounted later", async () => {
+    const h = harness({ start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }) });
+    const wrapper = mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    // the desktop window stack's root — `:not(.is-modeless)` keeps it OUT of the topmost
+    // decision, so Escape still belongs to the topmost MODAL overlay: this picker.
+    const overlay = document.createElement("div");
+    overlay.className = "preview-overlay is-windows is-modeless";
+    document.body.appendChild(overlay);
     await keydown(document.body, { key: "Escape" });
     expect(wrapper.emitted("close")).toHaveLength(1);
   });

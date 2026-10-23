@@ -31,7 +31,6 @@ import type {
 import type {
   RemoveAgentOutcome,
   RemoveTarget,
-  SpawnDirRejectDetail,
   SpawnDirsOutcome,
   SpawnListOutcome,
   SpawnOutcome,
@@ -608,6 +607,7 @@ export type NewSessionFailKind =
   | "limit"
   | "rate"
   | "launcher"
+  | "launcher-changed"
   | "deadline"
   | "network"
   | "gone"
@@ -684,10 +684,9 @@ export type NewSessionFlow =
       readonly hint?: string;
       readonly code?: string;
       readonly retryAfterS?: number;
-      /** created-dirs plan r2 §4: the LAN-only `E_DIR` cause, present only for
-       * `kind === "dir"` on a hub that sends it — the DirPicker maps it to the
-       * cause-specific `spawn.errDir*` copy (absent ⇒ the generic `spawn.errDir`). */
-      readonly detail?: SpawnDirRejectDetail;
+      /** Launcher refusal codes and directory admission detail, when supplied by the hub. */
+      readonly reason?: string;
+      readonly detail?: string;
       readonly reqId?: string;
       readonly spawnId?: string;
       readonly agentKey?: string;
@@ -783,7 +782,10 @@ export type RunVisualState =
 export interface AgentCardView {
   readonly key: string;
   readonly kind: "tui" | "rpc";
+  /** `~`-abbreviated full cwd (absolute when the home dir is unknown). */
   readonly shortCwd: string;
+  /** Raw absolute cwd, for the hover title. */
+  readonly cwdFull?: string;
   /** Session name, else the first 8 chars of `sessionId`, else `"(no session name)"`. */
   readonly sessionLabel: string;
   /** Model id without the provider prefix; `""` when unknown. */

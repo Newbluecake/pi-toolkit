@@ -15,17 +15,43 @@
  * passes `check:web` is guaranteed servable, not just well-formed.
  */
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { readPackageVersion } from "../../src/web-hub/ui/build-info-plugin.js";
+import { elkBanner } from "../../src/web-hub/ui/mermaid-provenance-plugin.js";
 import { verifyUiRoot } from "../../src/web-hub/hub/ui-root.js";
 import { isAllowedUiPath, parseUiBuildInfo, type UiBuildInfo } from "../../src/web-hub/protocol/ui-manifest.js";
 import { PROTO } from "../../src/web-hub/protocol/version.js";
+import {
+  MERMAID_JS_BUDGET_GZIP_BYTES,
+  MERMAID_PATTERN_EXEMPTIONS,
+  MERMAID_URL_ALLOWLIST,
+  exclusiveSet,
+  exemptionsFor,
+  mermaidGzipBytes,
+  readPackageLicenseFiles,
+  uniquePackages,
+  verifyFirstScreenDisjoint,
+  verifyImplChunk,
+  verifyLicenses,
+  verifyNaming,
+  verifyNoKatex,
+  verifyProvenance,
+  type ThirdPartyOverrides,
+  type UiProvenance,
+  type VendoredBundled,
+} from "./lib/ui-provenance.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const DIST_DIR = resolve(REPO_ROOT, "dist/web-hub-ui");
+const PROVENANCE_FILE =
+  process.env["PWH_UI_PROVENANCE"] ?? resolve(REPO_ROOT, "node_modules/.cache/pwh-ui-provenance.json");
+const NOTICES_FILE = resolve(REPO_ROOT, "THIRD_PARTY_NOTICES.md");
+const OVERRIDES_FILE = resolve(REPO_ROOT, "scripts/web-hub/third-party-overrides.json");
+const VENDORED_FILE = resolve(REPO_ROOT, "src/web-hub/ui/vendored-bundled.json");
 const HASHED_ASSET_RE = /-[A-Za-z0-9_-]{8,}\.(js|css|svg)$/;
 const FORBIDDEN_JS_PATTERNS: Array<{ name: string; re: RegExp }> = [
   { name: "eval(", re: /\beval\s*\(/ },
@@ -171,22 +197,23 @@ export function classifyJsAssets(html: string, jsSources: ReadonlyMap<string, st
   }
   for (const path of [...entryModules, ...modulePreloads]) firstScreen.add(path);
 
-  if (modulePreloads.length === 0) {
-    const pending = [...entryModules];
-    const visited = new Set<string>();
-    while (pending.length > 0) {
-      const current = pending.pop()!;
-      if (visited.has(current)) continue;
-      visited.add(current);
-      const source = jsSources.get(current);
-      if (!source) continue;
-      const currentDir = current.includes("/") ? current.slice(0, current.lastIndexOf("/") + 1) : "";
-      for (const imported of staticImports(source)) {
-        if (!imported.startsWith(".")) continue;
-        const resolved = assetPath(join(currentDir, imported));
-        firstScreen.add(resolved);
-        pending.push(resolved);
-      }
+  // Always follow static imports from the entry modules AND the modulepreloads (a `<link modulepreload>`
+  // only hints at some of what a first-screen chunk statically imports; web-hub-mermaid plan §7.3 removed the
+  // old "only when there are no modulepreloads" guard, which let a statically-imported mermaid chunk hide).
+  const pending = [...entryModules, ...modulePreloads];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    const source = jsSources.get(current);
+    if (!source) continue;
+    const currentDir = current.includes("/") ? current.slice(0, current.lastIndexOf("/") + 1) : "";
+    for (const imported of staticImports(source)) {
+      if (!imported.startsWith(".")) continue;
+      const resolved = assetPath(join(currentDir, imported));
+      firstScreen.add(resolved);
+      pending.push(resolved);
     }
   }
 
@@ -205,7 +232,7 @@ export function budgetExceeded(actual: number, budget: number): boolean {
   return actual > budget;
 }
 
-class CheckError extends Error {}
+export class CheckError extends Error {}
 
 function fail(msg: string): never {
   throw new CheckError(msg);
@@ -239,14 +266,19 @@ async function checkIndexHtml(html: string): Promise<void> {
   if (/\sstyle\s*=/i.test(html)) fail("index.html contains a style= attribute");
 }
 
-function scanForbiddenPatterns(source: string, file: string): void {
+/** `mermaidExclusive` files (provenance-proven, never inferred from reachability) get the mermaid exemptions. */
+export function scanForbiddenPatterns(source: string, file: string, mermaidExclusive = false): void {
   for (const { name, re } of FORBIDDEN_JS_PATTERNS) {
+    if (mermaidExclusive && MERMAID_PATTERN_EXEMPTIONS.has(name)) continue;
     if (re.test(source)) fail(`${file}: forbidden pattern "${name}"`);
   }
   const urlRe = /https?:\/\/[^\s"'()<>`;]+/g;
   for (const m of source.matchAll(urlRe)) {
     const url = m[0];
-    if (!EXTERNAL_URL_ALLOWLIST.some((allow) => allow.test(url))) {
+    const allowed =
+      EXTERNAL_URL_ALLOWLIST.some((allow) => allow.test(url)) ||
+      (mermaidExclusive && MERMAID_URL_ALLOWLIST.some((allow) => allow.test(url)));
+    if (!allowed) {
       fail(`${file}: external resource reference not on the allowlist: ${url}`);
     }
   }
@@ -288,6 +320,50 @@ async function checkManifest(files: string[]): Promise<UiBuildInfo> {
   return parsed.info;
 }
 
+async function loadProvenance(): Promise<UiProvenance> {
+  const raw = await readFile(PROVENANCE_FILE, "utf8").catch(() =>
+    fail(`provenance sidecar missing (${PROVENANCE_FILE}) — run "npm run build:web" first`),
+  );
+  try {
+    return JSON.parse(raw) as UiProvenance;
+  } catch {
+    return fail("provenance sidecar is not valid JSON — re-run build:web");
+  }
+}
+
+async function runLicenseGate(prov: UiProvenance, jsSources: ReadonlyMap<string, string>): Promise<string[]> {
+  const readJson = async <T>(file: string): Promise<T> => JSON.parse(await readFile(file, "utf8")) as T;
+  const notices = await readFile(NOTICES_FILE, "utf8").catch(() => fail("THIRD_PARTY_NOTICES.md is missing"));
+  const overrides = await readJson<ThirdPartyOverrides>(OVERRIDES_FILE).catch(() =>
+    fail("third-party-overrides.json is unreadable"),
+  );
+  const vendored = await readJson<VendoredBundled>(VENDORED_FILE).catch(() =>
+    fail("vendored-bundled.json is unreadable"),
+  );
+  const elkPkg = uniquePackages(prov).find((p) => p.name === "elkjs");
+  const heads = new Map<string, string>();
+  for (const [path, c] of Object.entries(prov.chunks))
+    if (c.containsElk) heads.set(path, (jsSources.get(path) ?? "").slice(0, 2048));
+  return verifyLicenses({
+    prov,
+    notices,
+    overrides,
+    vendored,
+    packageFacts: ({ version, dir: rel }) => {
+      const dir = resolve(REPO_ROOT, rel);
+      try {
+        const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { version?: string };
+        if (pkg.version !== version) return null;
+      } catch {
+        return null;
+      }
+      return readPackageLicenseFiles(dir);
+    },
+    elkChunkHeads: heads,
+    expectedElkBanner: elkPkg ? elkBanner(elkPkg.version) : null,
+  });
+}
+
 async function main(): Promise<void> {
   await stat(DIST_DIR).catch(() => fail(`${DIST_DIR} does not exist — run "npm run build:web" first`));
 
@@ -309,14 +385,16 @@ async function main(): Promise<void> {
 
   let cssGzipTotal = 0;
   const jsSources = new Map<string, string>();
+  const jsBytes = new Map<string, Buffer>();
   const jsGzipBytes = new Map<string, number>();
   for (const abs of files) {
     const rel = relPosix(DIST_DIR, abs);
     if (rel === "build-info.json") continue;
     const ext = extname(rel);
     if (ext === ".js") {
-      const source = await readFile(abs, "utf8");
-      scanForbiddenPatterns(source, rel);
+      const bytes = await readFile(abs);
+      const source = bytes.toString("utf8");
+      jsBytes.set(rel, bytes);
       jsSources.set(rel, source);
       jsGzipBytes.set(rel, gzipBytes(source));
     } else if (ext === ".css") {
@@ -335,9 +413,30 @@ async function main(): Promise<void> {
       cssGzipTotal += gzipSync(await readFile(abs)).length;
     }
   }
+
+  // web-hub-mermaid: provenance (sidecar written by the build) → naming → impl → first-screen disjointness
+  // → scans with provenance-proven exemptions → budgets → katex → licences. Order per plan §7.3.
+  const prov = await loadProvenance();
+  const provErrors = [...verifyProvenance(prov, jsBytes), ...verifyNaming(prov), ...verifyImplChunk(prov)];
+  if (provErrors.length > 0) fail(`provenance: ${provErrors.join("; ")}`);
   const classification = classifyJsAssets(await readFile(indexAbs, "utf8"), jsSources);
+  const disjoint = verifyFirstScreenDisjoint(classification.firstScreen, prov);
+  if (disjoint.length > 0) fail(disjoint.join("; "));
+  for (const [rel, source] of jsSources) scanForbiddenPatterns(source, rel, exemptionsFor(rel, prov));
+  const exclusive = exclusiveSet(prov);
   const firstScreenJsGzip = [...classification.firstScreen].reduce((total, path) => total + jsGzipBytes.get(path)!, 0);
-  const lazyJsGzip = [...classification.lazy].reduce((total, path) => total + jsGzipBytes.get(path)!, 0);
+  // The mermaid closure is budgeted on its own (MERMAID_JS_BUDGET); it never counts as lazy app JS.
+  const lazyJsGzip = [...classification.lazy]
+    .filter((path) => !exclusive.has(path))
+    .reduce((total, path) => total + jsGzipBytes.get(path)!, 0);
+  const mermaidJsGzip = mermaidGzipBytes(prov, jsGzipBytes);
+  if (budgetExceeded(mermaidJsGzip, MERMAID_JS_BUDGET_GZIP_BYTES)) {
+    fail(`mermaid JS gzip budget exceeded: ${mermaidJsGzip} > ${MERMAID_JS_BUDGET_GZIP_BYTES} bytes`);
+  }
+  const katexErrors = verifyNoKatex(prov);
+  if (katexErrors.length > 0) fail(katexErrors.join("; "));
+  const licenseErrors = await runLicenseGate(prov, jsSources);
+  if (licenseErrors.length > 0) fail(`licence gate:\n  - ${licenseErrors.join("\n  - ")}`);
   if (budgetExceeded(firstScreenJsGzip, FIRST_SCREEN_JS_BUDGET_GZIP_BYTES)) {
     fail(`first-screen JS gzip budget exceeded: ${firstScreenJsGzip} > ${FIRST_SCREEN_JS_BUDGET_GZIP_BYTES} bytes`);
   }
@@ -359,7 +458,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `✓ check:web — dist/web-hub-ui/ OK (${files.length} files, first-screen JS ${firstScreenJsGzip}B gz/${FIRST_SCREEN_JS_BUDGET_GZIP_BYTES}B, lazy JS ${lazyJsGzip}B gz/${LAZY_JS_BUDGET_GZIP_BYTES}B, CSS ${cssGzipTotal}B gz/${CSS_BUDGET_GZIP_BYTES}B)`,
+    `✓ check:web — dist/web-hub-ui/ OK (${files.length} files, first-screen JS ${firstScreenJsGzip}B gz/${FIRST_SCREEN_JS_BUDGET_GZIP_BYTES}B, lazy JS ${lazyJsGzip}B gz/${LAZY_JS_BUDGET_GZIP_BYTES}B, mermaid JS ${mermaidJsGzip}B gz/${MERMAID_JS_BUDGET_GZIP_BYTES}B in ${exclusive.size} mmd files, CSS ${cssGzipTotal}B gz/${CSS_BUDGET_GZIP_BYTES}B, ${uniquePackages(prov).length} packages)`,
   );
 }
 

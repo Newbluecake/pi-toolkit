@@ -32,8 +32,9 @@ export interface TidyFileFlag {
    *  source, over a hard byte cap, or invalid frontmatter) — view/edit-only. */
   canApply: boolean;
   /** Short annotation for the per-file confirm title, e.g. "hand-written —
-   *  suggestion only", "3 lines unaccounted", "412B over the 1600B core cap",
-   *  "description truncated to 300B" (2026-10-16). */
+   *  suggestion only; Take over & apply to rewrite", "3 lines unaccounted",
+   *  "412B over the 1600B core cap", "description truncated to 300B"
+   *  (2026-10-16). */
   note?: string;
   /** 2026-10-16: proposed content whose ONLY frontmatter problem was an
    *  over-limit description/read_when, with those fields truncated at a
@@ -58,6 +59,12 @@ export interface TidyValidateContext {
   maxOutputBytes: number;
   /** Names currently present on disk; used to reject rename/create collisions. */
   existingNames?: ReadonlySet<string>;
+  /** 2026-10-21 user ruling: explicit per-file takeover grants. A
+   *  hand-written file named here is NOT forced to `canApply:false` — the
+   *  user picked "Take over & apply" in the confirm loop and the write
+   *  stamps `source: agent`. The hand-written guard itself stays in place
+   *  for every file NOT in this set; nothing else relaxes it. */
+  takeover?: ReadonlySet<string>;
 }
 
 export const SCHEMA_LIMITS = {
@@ -266,8 +273,14 @@ export function validateTidyProposal(proposal: TidyProposal, ctx: TidyValidateCo
     let unaccountedLines = 0;
 
     if (orig?.handWritten === true) {
-      canApply = false;
-      notes.push("hand-written — suggestion only");
+      if (ctx.takeover?.has(f.name) === true) {
+        // Explicit per-file takeover (see TidyValidateContext.takeover):
+        // Apply becomes reachable; the apply path stamps source: agent.
+        notes.push("hand-written — takeover granted (becomes source: agent)");
+      } else {
+        canApply = false;
+        notes.push("hand-written — suggestion only; Take over & apply to rewrite");
+      }
     }
 
     if (f.content !== undefined) {
@@ -294,7 +307,10 @@ export function validateTidyProposal(proposal: TidyProposal, ctx: TidyValidateCo
       const droppedTextForFile = proposal.dropped.filter((d) => d.from === f.name).map((d) => d.text);
       unaccountedLines = countUnaccountedLines(stripFrontmatter(orig.body), allOutputContent, droppedTextForFile);
       if (unaccountedLines > 0) {
-        notes.push(`\u26a0 ${String(unaccountedLines)} lines unaccounted`);
+        // 2026-10-21 ruling: this warning is the ONLY signal for the risk —
+        // the menu order is now fixed (Apply always first), so the note must
+        // say plainly what to do.
+        notes.push(`\u26a0 ${String(unaccountedLines)} lines unaccounted — check View diff before Apply`);
       }
     }
 

@@ -46,6 +46,8 @@ export type IconName =
   | "sparkle"
   | "sun"
   | "swap"
+  | "maximize"
+  | "restore"
   | "terminal"
   | "unlock"
   | "unplug"
@@ -94,6 +96,8 @@ export const ICON_NAMES: readonly IconName[] = [
   "sparkle",
   "sun",
   "swap",
+  "maximize",
+  "restore",
   "terminal",
   "unlock",
   "unplug",

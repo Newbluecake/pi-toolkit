@@ -97,6 +97,7 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("mem", "path", "extension").policy).toBe("allow");
     expect(resolve("mem", "doctor", "extension").policy).toBe("allow");
     expect(resolve("mem", "import", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "init", "extension").policy).toBe("confirm"); // one-shot write, like import
     expect(resolve("mem", "tidy", "extension").policy).toBe("confirm");
     expect(resolve("mem", "restore --trash", "extension").policy).toBe("confirm");
     expect(resolve("mem", "tidy --batch --dry-run", "extension").policy).toBe("allow");
@@ -133,6 +134,13 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("watch", "", "extension").policy).toBe("confirm");
     expect(resolve("feishu-test", "", "extension").policy).toBe("confirm");
     expect(resolve("pi-hud-refresh", "", "extension").policy).toBe("allow");
+  });
+
+  it("/title: no-args/status allow (read-only report), auto confirms (session write)", () => {
+    expect(resolve("title", "", "extension").policy).toBe("allow");
+    expect(resolve("title", "status", "extension").policy).toBe("allow");
+    expect(resolve("title", "auto", "extension").policy).toBe("confirm");
+    expect(resolve("title", "anything-else", "extension").policy).toBe("confirm");
   });
 
   it("/clear always confirms (session-nav alias for /new)", () => {

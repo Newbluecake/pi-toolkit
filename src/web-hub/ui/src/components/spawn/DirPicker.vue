@@ -52,6 +52,7 @@ import { isValidMkdirName } from "@protocol/spawn.js";
 import { PREVIEW_IMAGE_MAX_PIXELS, type PreviewDirListing } from "@protocol/preview.js";
 import { PREVIEW_DIR_HUB_CAP } from "@protocol/version.js";
 import { childPreviewPath, parentPreviewPath } from "../../logic/preview.js";
+import { MODAL_OVERLAY_ROOTS } from "../../logic/overlayRoots.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import type { NewSessionInput } from "../../types.js";
 import SpawnConfirm from "./SpawnConfirm.vue";
@@ -539,6 +540,7 @@ const ERR_KEYS: Record<string, string> = {
   limit: "spawn.errLimit",
   rate: "spawn.errRate",
   launcher: "spawn.errLauncher",
+  "launcher-changed": "spawn.errLauncherChanged",
   deadline: "spawn.errDeadline",
   network: "spawn.errNetwork",
   spawn: "spawn.errSpawn",
@@ -628,21 +630,16 @@ function onScrimKeydown(ev: KeyboardEvent): void {
 // inner `stopPropagation` semantics are unchanged.
 // ---------------------------------------------------------------------------
 
-/** Every Teleport'd overlay root this dialog can stack with (PickerSheet, preview, a second picker, the P2 privacy-unmark dialog). */
-const OVERLAY_ROOTS = ".spawn-scrim, .picker-scrim, .preview-overlay, .privacy-scrim";
-
-/**
- * Escape/Tab belong to this dialog only while it is the TOPMOST open overlay: teleported
- * overlays append to `<body>` in mount order, so the last one in document order is on top —
- * Escape must close exactly that one (and a keydown targeted inside a sibling overlay is
- * that overlay's business regardless of order).
- */
+/** Topmost decision per the shared logic/overlayRoots.ts selector (preview-windows §5.2):
+ *  Escape/Tab belong to this dialog only while it is the TOPMOST MODAL overlay — teleported
+ *  overlays append to `<body>` in mount order, so the last one in document order is on top.
+ *  The desktop modeless preview windows (`.is-modeless`) deliberately stay OUT of it. */
 function ownsDocumentKeydown(ev: KeyboardEvent): boolean {
   const panel = panelEl.value;
   if (panel === null) return false;
   // Focus inside our dialog ⇒ the keydown bubbles to the scrim's own handler (see above).
   if (ev.target instanceof Node && panel.contains(ev.target)) return false;
-  const roots = Array.from(document.querySelectorAll(OVERLAY_ROOTS));
+  const roots = Array.from(document.querySelectorAll(MODAL_OVERLAY_ROOTS));
   for (const root of roots) {
     if (root !== scrimEl.value && ev.target instanceof Node && root.contains(ev.target)) return false;
   }

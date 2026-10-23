@@ -1,0 +1,6 @@
+{
+  "khroma@2.1.0": {
+    "license": "MIT",
+    "evidence": "node_modules/khroma/package.json has no `license` field; node_modules/khroma/license is the full MIT text (\"Copyright (c) 2019-present Fabio Spampinato, Andrew Maney\"). Verified by hand 2026-10-21 (P1 web-hub-mermaid). Pinned to this exact version: a version bump invalidates the entry and must be re-verified."
+  }
+}

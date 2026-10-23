@@ -1,3 +1,4 @@
+import { formatTokens } from "../hud/format.js";
 import type {
   ContextUsageInfo,
   Millis,
@@ -47,6 +48,10 @@ export interface FleetRow {
   type: string | undefined;
   /** M-C: SpawnRequest.label (the Agent tool's `description`), from diag.label. */
   label: string | undefined;
+  /** Display-only raw title (diag.title): the un-sanitized description, present
+   *  only when it differs from the label. Web renderers use it as the row's main
+   *  title with the label as secondary text; the TUI widget keeps the label. */
+  title: string | undefined;
   /** M-C: model id from diag.model (display only; undefined = session default). */
   model: string | undefined;
   /** M-B2 (thinking-level visibility): the run's effective thinking level
@@ -261,7 +266,7 @@ export function formatContextUsage(u: ContextUsageInfo): string {
 
 /** X9 usage, 4-decimal cost (same convention as /agent status: subagent runs are sub-cent). */
 export function formatUsage(u: UsageDelta): string {
-  return `in:${u.input} out:${u.output} $${u.costUsd.toFixed(4)}`;
+  return `in:${formatTokens(u.input)} out:${formatTokens(u.output)} $${u.costUsd.toFixed(4)}`;
 }
 
 /** Max rendered branch-name length (the `pi-agent-<runId>` prefix alone is 9). */
@@ -406,6 +411,7 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     // older builds whose diag still carries the raw sentinel.
     type: displayAgentType(opts.typeOf?.(snapshot.runId) ?? snapshot.diag.agentType),
     label: snapshot.diag.label,
+    title: snapshot.diag.title,
     model: formatModelRef(snapshot.diag.model),
     thinking: snapshot.diag.thinkingLevel === "" ? undefined : snapshot.diag.thinkingLevel,
     // Terminal rows freeze the trail (no live duration): a run killed mid-tool

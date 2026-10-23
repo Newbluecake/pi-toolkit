@@ -9,9 +9,36 @@ export interface MentionAutocompleteEntry {
   readonly status: MentionAutocompleteStatus;
 }
 
+/** fabric reply-plan §9.5 (package M): one @session completion entry — a directory-cache row
+ *  projection (never paths or session files). */
+export interface MentionSessionAutocompleteEntry {
+  readonly ref: string;
+  readonly name?: string;
+  readonly cwdLabel: string;
+  readonly receive: string;
+  readonly busy: boolean;
+  /** Channel-plan §4.3: shared channels (canonical names, no `#`); absent/empty ⇒ default-only
+   *  (description byte-identical to the pre-channel format). */
+  readonly channels?: readonly string[];
+  /** Alias-plan §5.4/§6 (AL5b): the row's canonical alias; absent ⇒ pre-alias behavior/description. */
+  readonly alias?: string;
+}
+
 export interface MentionAutocompleteSource {
   /** Returns only labels which are valid root-child mention targets. */
   entries(): readonly MentionAutocompleteEntry[];
+  /** Reply-plan §9.5: session entries from the xs directory cache (the implementation triggers
+   *  `refresh("complete")` but NEVER awaits it). Absent ⇔ the xs surface is off — completion
+   *  output stays byte-identical (§9.7). A throwing implementation degrades to no entries. */
+  sessions?(): readonly MentionSessionAutocompleteEntry[];
+  /** Reply-plan §9.5 insert-value rule: true iff `name` satisfies §9.1's bare-form static
+   *  conditions (shape ①, not a subagent label ②, no same-name file ③, unique in the cache) so
+   *  the entry inserts `@<name>`; otherwise the entry inserts the explicit `@session:<ref>`.
+   *  Absent ⇒ never bare (fail-safe to the unambiguous explicit form). */
+  sessionBareName?(name: string): boolean;
+  /** Alias-plan §5.4: true iff the canonical `alias` may be inserted as `@<alias>` (label/file/unique
+   *  checks, cache-only). Absent ⇒ alias entries insert the explicit `@session:<ref>`. */
+  sessionBareAlias?(alias: string): boolean;
 }
 
 export interface AtToken {
@@ -81,8 +108,55 @@ export function createMentionAutocompleteProvider(
           return item;
         });
 
-      if (agentItems.length === 0) return base;
-      return { prefix: token.raw, items: [...agentItems, ...(base?.items ?? [])] };
+      // fabric reply-plan §9.5: session entries AFTER the agent group. The insert value is the
+      // bare `@<name>` only when the source's sessionBareName approves (§9.1 ①②③ + cache-unique);
+      // every conflicting entry inserts the explicit `@session:<ref>` — completion always yields
+      // a deterministic form. A throwing sessions()/sessionBareName() degrades to no entries /
+      // explicit refs, never to a broken completion pass.
+      let sessionEntries: readonly MentionSessionAutocompleteEntry[] = [];
+      try {
+        sessionEntries = source.sessions?.() ?? [];
+      } catch {
+        sessionEntries = [];
+      }
+      const sessionItems = sessionEntries.flatMap((entry) => {
+        let bare = false;
+        let aliasValue: string | undefined;
+        if (entry.alias !== undefined) {
+          try {
+            if (source.sessionBareAlias?.(entry.alias) === true) aliasValue = `@${entry.alias}`;
+          } catch {
+            aliasValue = undefined;
+          }
+        }
+        if (aliasValue === undefined && entry.name !== undefined) {
+          try {
+            bare = source.sessionBareName?.(entry.name) ?? false;
+          } catch {
+            bare = false;
+          }
+        }
+        const value = aliasValue ?? (bare && entry.name !== undefined ? `@${entry.name}` : `@session:${entry.ref}`);
+        // prefix match on the inserted value, or (alias entries) on the alias as typed (NFKC + ASCII lowercase)
+        const typed = token.prefix.normalize("NFKC").replace(/[A-Z]/g, (c) => c.toLowerCase());
+        const aliasHit = entry.alias !== undefined && typed.length > 0 && entry.alias.startsWith(typed);
+        if (!value.slice(1).startsWith(token.prefix) && !aliasHit) return [];
+        const al = entry.alias !== undefined ? `@${entry.alias} · ` : "";
+        const chs =
+          entry.channels !== undefined && entry.channels.length > 0
+            ? `${entry.channels.map((c) => `#${c}`).join(",")} · `
+            : "";
+        const item: AutocompleteItem = {
+          value,
+          label: value,
+          description: `session · ${al}${chs}${entry.cwdLabel} · ${entry.receive} · ${entry.busy ? "busy" : "idle"}`,
+        };
+        ownItems.add(item);
+        return [item];
+      });
+
+      if (agentItems.length === 0 && sessionItems.length === 0) return base;
+      return { prefix: token.raw, items: [...agentItems, ...sessionItems, ...(base?.items ?? [])] };
     },
     applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
       if (ownItems.has(item)) return replaceAtToken(lines, cursorLine, cursorCol, `${item.value} `);

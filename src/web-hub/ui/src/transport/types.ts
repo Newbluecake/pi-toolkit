@@ -244,11 +244,10 @@ export type SpawnOutcome =
       /** 409 `E_CONFIRM_REQUIRED` (arch §6.3): the admitted realpath to echo back as `expectCwd`. */
       readonly resolvedCwd?: string;
       readonly reason?: string;
-      /** created-dirs plan r2 §4 (additive, LAN listener only): the cause of a 400
-       * `E_DIR{reason:"not-allowed"}` — which admission wall stopped the spawn. Absent on
-       * loopback and on pre-feature hubs ⇒ the UI falls back to the generic `spawn.errDir`
-       * line; an unrecognized value does the same (forward-compatible). */
-      readonly detail?: SpawnDirRejectDetail;
+      /** Optional directory admission cause (LAN-only E_DIR) or launcher policy detail.
+       * Absent on pre-feature hubs; unknown values fall back to the generic error copy. */
+      readonly detail?:
+        SpawnDirRejectDetail | "changed" | "missing" | "not-file" | "unverifiable" | "incompatible" | "closed";
       /** session-history plan §3.6 (409 `E_CONFIRM_REQUIRED{reason:"session-open"}`): why the
        * hub insists on a fork + why it could not establish "no occupancy detected". Riding
        * the outcome (not just the flow) keeps `useNewSession`'s confirming phase lossless. */

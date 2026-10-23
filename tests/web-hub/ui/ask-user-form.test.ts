@@ -342,6 +342,42 @@ describe("AskUserForm.vue — compact window rulings (mock ~/pwh-preview/askcomp
       if (clientDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientDesc);
     }
   });
+  it("a hidden (inactive-tab) question re-measures when it becomes visible; Expand also un-clamps option descriptions", async () => {
+    // Inactive tabs are v-show'd (display:none): the onMounted measurement sees 0×0 there, so
+    // only the ResizeObserver firing on visibility can reveal the toggle.
+    const callbacks: Array<() => void> = [];
+    const RealRO = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    (globalThis as { ResizeObserver?: unknown }).ResizeObserver = class {
+      constructor(cb: () => void) {
+        callbacks.push(cb);
+      }
+      observe(): void {}
+      disconnect(): void {}
+    };
+    const scrollDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    const clientDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    let laidOut = false;
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => (laidOut ? 60 : 0) });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => (laidOut ? 24 : 0) });
+    try {
+      const w = mountForm(MULTI);
+      await nextTick();
+      await nextTick();
+      expect(w.findAll("[data-context-toggle]")).toHaveLength(0); // nothing measurable yet
+      laidOut = true; // the tab became visible → the observer fires
+      for (const cb of callbacks) cb();
+      await nextTick();
+      const toggles = w.findAll("[data-context-toggle]");
+      expect(toggles.length).toBeGreaterThan(0);
+      await toggles[toggles.length - 1]!.trigger("click");
+      const fieldsets = w.findAll("fieldset.ask-question");
+      expect(fieldsets[fieldsets.length - 1]!.classes()).toContain("ask-question--expanded");
+    } finally {
+      if (scrollDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollDesc);
+      if (clientDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientDesc);
+      (globalThis as { ResizeObserver?: unknown }).ResizeObserver = RealRO;
+    }
+  });
 });
 
 describe("AskUserForm.vue — drafts (§3.5) + suspended (v2.1)", () => {

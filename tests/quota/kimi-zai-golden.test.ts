@@ -65,7 +65,9 @@ describe("kimi/zai golden (byte-identical pre/post P7)", () => {
     expect(existsSync(FIXTURE), "golden fixture must exist (never regenerate it)").toBe(true);
     const fixture = withPaceAwareL1(loadFixture());
     expect(recording.meta.now).toBe(fixture.meta.now);
-    expect(JSON.parse(JSON.stringify(recording))).toEqual(JSON.parse(JSON.stringify(fixture)));
+    // displayLevel is a later additive verdict field (display-only); the frozen fixture predates it.
+    const stripDisplay = (k: string, val: unknown): unknown => (k === "displayLevel" ? undefined : val);
+    expect(JSON.parse(JSON.stringify(recording, stripDisplay))).toEqual(JSON.parse(JSON.stringify(fixture)));
   });
 
   it("fixture covers every required surface (verdicts / renders / gate / hook / sampler)", () => {

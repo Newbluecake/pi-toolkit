@@ -1155,7 +1155,7 @@ describe("supervisor launcher chain (arch §4.2/#12)", () => {
   it("init failure reasons surface in policy + start", async () => {
     for (const [fs, reason] of [
       [badPkgFs("0.99.0"), "incompatible"],
-      [badPkgFs("1.3.0"), "incompatible"],
+      [badPkgFs("1.4.0"), "incompatible"],
     ] as const) {
       const sup = await initWithFs(fs);
       expect(sup.policy("p", "loopback", "http", false)).toMatchObject({ allowed: false, reason: "launcher" });

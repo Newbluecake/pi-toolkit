@@ -28,6 +28,22 @@ describe("resolveSchemaPreset (consult A/B instrumentation plan §4/§5 P1a)", (
     expect(SCHEMA_PRESETS["verdict/v1"]).toBe(VERDICT_SCHEMA_V1);
   });
 
+  it("declares an explicit type on every schema node (Moonshot rejects typeless enum nodes)", () => {
+    const typeless: string[] = [];
+    const walk = (node: unknown, path: string): void => {
+      if (typeof node !== "object" || node === null) return;
+      const rec = node as Record<string, unknown>;
+      if (!("type" in rec)) typeless.push(path || "<root>");
+      const props = rec["properties"];
+      if (typeof props === "object" && props !== null) {
+        for (const [k, v] of Object.entries(props)) walk(v, `${path}.properties.${k}`);
+      }
+      if (rec["items"] !== undefined) walk(rec["items"], `${path}.items`);
+    };
+    walk(VERDICT_SCHEMA_V1, "");
+    expect(typeless).toEqual([]);
+  });
+
   it("returns undefined for an unknown string, a literal schema object, or a non-string", () => {
     expect(resolveSchemaPreset("verdict/v2")).toBeUndefined();
     expect(resolveSchemaPreset({ type: "object" })).toBeUndefined();

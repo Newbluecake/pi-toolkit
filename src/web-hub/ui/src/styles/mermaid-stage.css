@@ -1,0 +1,13 @@
+/* Off-screen layout stage for mermaid (web-hub-mermaid plan §6.1). The stage MUST live in the main
+ * document (getBBox needs real layout), so its font has to match what the final <img> will show:
+ * mermaid's own <style> is blocked by CSP style-src 'self', hence this site stylesheet. */
+.pwh-mmd-stage {
+  position: fixed;
+  left: -100000px;
+  top: 0;
+  width: 1200px;
+  visibility: hidden;
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: normal;
+}

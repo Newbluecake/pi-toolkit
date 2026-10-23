@@ -24,6 +24,7 @@ import { useI18n } from "../../composables/useI18n.js";
 import { useProxyOpen } from "../../composables/useProxyOpen.js";
 import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
 import { proxyErrorKey } from "@logic/proxy.js";
+import { MODAL_OVERLAY_ROOTS } from "@logic/overlayRoots.js";
 import type { ProxyListView } from "../../types.js";
 import "../../styles/proxy-dialog.css";
 
@@ -139,15 +140,15 @@ onUnmounted(() => {
   if (el instanceof HTMLElement && document.contains(el)) el.focus();
 });
 
-/** Every Teleport'd overlay root this dialog can stack with (keep in lockstep with
- *  PrivacyUnmarkDialog / DirPicker / PreviewHost). */
-const OVERLAY_ROOTS = ".spawn-scrim, .picker-scrim, .preview-overlay, .privacy-scrim, .proxy-scrim";
+/** Topmost decision per logic/overlayRoots.ts (preview-windows §5.2) + this dialog's own
+ *  `.proxy-scrim`; the desktop modeless preview-window root stays out of the decision. */
+const PROXY_OVERLAY_ROOTS = MODAL_OVERLAY_ROOTS + ", .proxy-scrim";
 
 function ownsDocumentKeydown(ev: KeyboardEvent): boolean {
   const panel = panelEl.value;
   if (panel === null) return false;
   if (ev.target instanceof Node && panel.contains(ev.target)) return false; // scrim path handles it
-  const roots = Array.from(document.querySelectorAll(OVERLAY_ROOTS));
+  const roots = Array.from(document.querySelectorAll(PROXY_OVERLAY_ROOTS));
   for (const root of roots) {
     if (root !== scrimEl.value && ev.target instanceof Node && root.contains(ev.target)) return false;
   }

@@ -42,6 +42,22 @@ const agents = {
   renameSaveAria: "Save name",
   renameCancelAria: "Cancel rename",
   renameFailed: "Rename failed: {reason}",
+  // --- title-auto plan: clearing the input and saving hands the title back to auto-generation
+  renameAutoHint: "Leave empty = auto-generate title",
+  titleAutoFailed: "Could not restore automatic title: {reason}",
+  "xs.wake": "Cross-session: joined — messages from other sessions can wake this session",
+  "xs.deliver": "Cross-session: joined — messages from other sessions are delivered but do not wake this session",
+  "xs.replies":
+    "Cross-session: joined — only replies to requests this session sent are accepted; other messages are rejected",
+  xsUnread: "{n} unread cross-session message(s) (cleared automatically once the model handles them)",
+  xsChannels: "Channels: {list}",
+  channelFilterAria: "Channel filter",
+  channelAll: "All",
+  channelsOpenTitle: "Manage cross-session channels",
+  channelsOpenLabel: "Channels",
+  // alias-plan r4 §7.2 (ALU): the detail header's `@alias` button tooltip
+  xsAliasManage: "Alias @{alias} — manage channels & alias",
+  "xs.off": "Cross-session: joined — currently rejecting all messages",
 } satisfies Record<string, string>;
 
 export default agents;
