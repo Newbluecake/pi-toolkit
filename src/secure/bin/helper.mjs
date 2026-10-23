@@ -437,7 +437,7 @@ export function assertWritableSettingsFile(file, uid = process.getuid()) {
 }
 
 /** Re-read → merge → write, all inside the settings lock (see withSettingsLock). */
-export function registerVaultUnlocked(name, dir, mnt, home = homeDir()) {
+export function registerVaultUnlocked(name, dir, mnt, home = homeDir(), { private: priv = false } = {}) {
   const file = settingsFilePath(home);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const st = assertWritableSettingsFile(file);
@@ -450,7 +450,8 @@ export function registerVaultUnlocked(name, dir, mnt, home = homeDir()) {
   const secure = { ...(root.secure ?? {}) };
   if (secure.vaults !== undefined && !isPlainObject(secure.vaults))
     throw new Error(`拒绝改写设置文件：${file} 的 secure.vaults 不是对象`);
-  secure.vaults = { ...(secure.vaults ?? {}), [name]: { dir, mnt } };
+  // N2: `private: true` only when requested (absent key ⇔ ordinary vault, byte-identical entry).
+  secure.vaults = { ...(secure.vaults ?? {}), [name]: { dir, mnt, ...(priv ? { private: true } : {}) } };
   const next = { ...root, secure };
   writeFileAtomic(file, JSON.stringify(next, null, 2) + "\n", settingsWriteMode(st));
 }
@@ -462,7 +463,7 @@ export function registerVaultUnlocked(name, dir, mnt, home = homeDir()) {
  * Protocol for other writers (P2 `persistSettingOverride`): take an exclusive flock(2) on the same
  * file for the whole re-read → merge → rename.
  */
-export function registerVault(name, dir, mnt, home = homeDir()) {
+export function registerVault(name, dir, mnt, home = homeDir(), { private: priv = false } = {}) {
   const lockFile = settingsLockPath(home);
   fs.mkdirSync(path.dirname(lockFile), { recursive: true, mode: 0o700 });
   const fd = fs.openSync(lockFile, fsc.O_RDONLY | fsc.O_CREAT | fsc.O_NOFOLLOW | fsc.O_NONBLOCK, 0o600);
@@ -487,6 +488,7 @@ export function registerVault(name, dir, mnt, home = homeDir()) {
       name,
       dir,
       mnt,
+      ...(priv ? ["--private"] : []),
     ],
     {
       encoding: "utf8",
@@ -606,6 +608,13 @@ export function positionProblems(v, others = [], home = homeDir()) {
  * exemption: $HOME itself (e.g. a group-writable shared home) and every ancestor up to / are
  * checked like any other level. A violation reports the level and the reason. Legacy vaults skip
  * this check. `deps.lstat` is a test seam (defaults to fs.lstatSync).
+ *
+ * N2 review #2: `deps.unmappedUid` (status inside a NON-initial user namespace only — see
+ * userNsUnmappedUid) is the overflow uid every unmapped host owner (root included) reads as there;
+ * a level owned by it cannot be judged from inside, so its owner/write rules are skipped and the
+ * level is reported through `deps.onIndeterminate(path)` instead of as a problem. Never used for
+ * mount ADMISSION: the full chain is enforced in the initial namespace (`__mount`, and the
+ * `__private-claim` before any private namespace exists).
  */
 export function mntAncestorProblems(v, uid = process.getuid(), deps = {}) {
   const lstat = deps.lstat ?? ((p) => fs.lstatSync(p));
@@ -623,21 +632,43 @@ export function mntAncestorProblems(v, uid = process.getuid(), deps = {}) {
       problems.push(`${cur} 须为真实目录（不得是符号链接/文件）`);
       break;
     }
-    if (st.uid !== uid && st.uid !== 0) {
+    if (deps.unmappedUid !== undefined && st.uid === deps.unmappedUid && st.uid !== uid) {
+      deps.onIndeterminate?.(cur); // owner unknowable from inside this user namespace
+    } else if (st.uid !== uid && st.uid !== 0) {
       problems.push(`${cur} 属于其他用户（uid ${st.uid}），不可作为挂载点祖先（须为本用户或 root）`);
       break;
-    }
-    const sticky = (st.mode & 0o1000) !== 0;
-    if ((st.mode & 0o022) !== 0 && !(st.uid === 0 && sticky)) {
-      problems.push(
-        `${cur} 对组/其他可写${sticky ? "但属主非 root" : "且无 sticky 位"}，其他用户可替换其下的路径，拒绝`,
-      );
-      break;
+    } else {
+      const sticky = (st.mode & 0o1000) !== 0;
+      if ((st.mode & 0o022) !== 0 && !(st.uid === 0 && sticky)) {
+        problems.push(
+          `${cur} 对组/其他可写${sticky ? "但属主非 root" : "且无 sticky 位"}，其他用户可替换其下的路径，拒绝`,
+        );
+        break;
+      }
     }
     if (cur === path.dirname(cur)) break; // reached "/"
     cur = path.dirname(cur);
   }
   return problems;
+}
+
+/**
+ * N2 review #2: inside a non-initial user namespace (uid_map is not the identity map) return the
+ * overflow uid unmapped owners show as; undefined in the initial namespace (host rules unchanged).
+ * Pure: facts = {uidMap, overflowUid}.
+ */
+export function userNsUnmappedUid({ uidMap, overflowUid } = {}) {
+  const norm = (uidMap ?? "").trim().split(/\s+/).join(" ");
+  if (norm === "" || norm === "0 0 4294967295") return undefined;
+  const n = Number.parseInt(String(overflowUid ?? "").trim(), 10);
+  return Number.isSafeInteger(n) && n >= 0 ? n : 65534;
+}
+
+function currentUnmappedUid() {
+  return userNsUnmappedUid({
+    uidMap: readTextOr("/proc/self/uid_map", ""),
+    overflowUid: readTextOr("/proc/sys/kernel/overflowuid", "65534"),
+  });
 }
 
 /**
@@ -648,7 +679,14 @@ export function mntAncestorProblems(v, uid = process.getuid(), deps = {}) {
  */
 export function checkLayout(
   v,
-  { mounted = false, uid = process.getuid(), others = [], home = homeDir(), ancestors = true } = {},
+  {
+    mounted = false,
+    uid = process.getuid(),
+    others = [],
+    home = homeDir(),
+    ancestors = true,
+    unmappedUid, // status only (N2 review #2): see mntAncestorProblems
+  } = {},
 ) {
   const problems = [];
   const d = lstatOrNull(v.dir);
@@ -690,8 +728,10 @@ export function checkLayout(
       }
     }
   }
-  if (v.layout !== "legacy" && ancestors) problems.push(...mntAncestorProblems(v, uid));
-  return { exists: true, problems };
+  const indeterminate = [];
+  if (v.layout !== "legacy" && ancestors)
+    problems.push(...mntAncestorProblems(v, uid, { unmappedUid, onIndeterminate: (p) => indeterminate.push(p) }));
+  return { exists: true, problems, ...(indeterminate.length ? { indeterminate } : {}) };
 }
 
 /**
@@ -1437,16 +1477,25 @@ function requireTty(what) {
   if (!tty.isatty(0)) throw new CliError(EXIT.USAGE, `${what}需要在终端里输入口令（stdin 不是 TTY）`);
 }
 
-const USAGE = `用法：
-  pi-secure init <name> [--path <挂载点>] [--fix-settings]
-  pi-secure unlock <name>
-  pi-secure lock <name> [--lazy]
+// USAGE text (Q9: new lines allowed). PRIVATE_BOUNDARY_LONG is declared further down (const, TDZ):
+// usageText() reads it lazily so the order of declarations stays free.
+function usageText() {
+  return `用法：
+  pi-secure init <name> [--path <挂载点>] [--private] [--fix-settings]
+  pi-secure unlock <name> [--global]
+  pi-secure lock <name> [--lazy|--kill]
   pi-secure status [<name>]
-  pi-secure run <name> [-C <子目录>] [pi 参数…]
+  pi-secure run <name> [--private|--no-private] [-C <子目录>] [pi 参数…]
 布局（private-plan §L.1）：元数据在 ~/.local/share/pi-toolkit-secure/<name>/（cipher、mount.lock、mount.lease），
 挂载点是 ~/secure/<name>/（0700 目录；未挂载时 work/state 是两个哨兵文件），项目根 ~/secure/<name>/work。
 --path 指定挂载点位置（绝对路径或 ~/ 开头）。
+--private/--no-private 只在紧跟 <name> 的位置识别（固定顺序：<name> [--private|--no-private] [-C <子目录>]，其余交给 pi）；
+  缺省取 secure.vaults.<name>.private。init --private 登记为私有库（首次挂载、建目录、写 sessionDir、卸载都在私有命名空间内完成）。
+私有库的 unlock 默认拒绝（全局挂载对所有同用户进程可见），--global 只解除这条默认、从不绕过互斥。
+lock --kill 结束 --private 会话并收尾；lock --lazy 摘除该命名空间里的挂载路径；既有 cwd、已打开的文件和运行中的作业可能继续访问；插件在下一次输入/工具调用时拒绝。
+${PRIVATE_BOUNDARY_LONG}
 说明见 docs/dev/data-encryption/plan.md §2.2（run 之后的参数原样交给 pi 解析；"--" 之后全部是消息）`;
+}
 
 /** Run gocryptfs with the TTY inherited; resolves to its exit code. */
 function runInherited(cmd, args, { timeoutMs } = {}) {
@@ -1616,11 +1665,13 @@ export function verifyMountPointIdentity(v, pin, deps = {}) {
 async function cmdInnerMount(name) {
   const { vault: v } = must(resolveVault(name));
   requireNewLayout(v); // §L.3: legacy vaults never mount again
+  await plainMountPrivateGate(v); // §1.2: private record conflicts, BEFORE any TTY/password
   let st = await probeMountState(v);
   if (st === "mounted") return INNER_ALREADY;
   if (st === "hung")
     throw new CliError(EXIT.FAIL, `${v.mnt} 的挂载探测超时（FUSE 卡住？），拒绝操作；必要时 fusermount3 -uz ${v.mnt}`);
   if (st === "foreign") throw new CliError(EXIT.FAIL, `${v.mnt} 上挂着别的文件系统（mountinfo 不符），拒绝挂载`);
+  await plainMountLeaseGate(v); // §1.2: lease busy without a record ⇒ 76 (also before the stale cleanup)
   if (st === "stale") {
     err(`${name}：发现失效挂载（守护进程已不在），先清理`);
     spawnSync("fusermount3", ["-u", v.mnt], { stdio: "ignore", timeout: 10_000 });
@@ -1679,6 +1730,44 @@ async function cmdInnerMount(name) {
   } finally {
     closeMountPointPin(pin);
   }
+}
+
+/**
+ * §1.2 for plain mount entries (`__mount`, under mount.lock): an existing private record blocks
+ * unless it is `stale`, which is released here (mount.lock held ⇒ the lease is only TRIED, §3.1).
+ */
+async function plainMountPrivateGate(v) {
+  const record = await readPrivateRecord(v, { deadline: Date.now() + PRIVATE_BUDGET.scanMs });
+  if (record.kind === "none") return;
+  const s = await privateInstanceState(v, { record });
+  if (callerInPrivateNs(s.record))
+    throw new CliError(
+      EXIT.BUSY,
+      `${v.name}：本进程就在该库的私有会话（命名空间）内部——拒绝再挂载；退出 pi 即自动收尾`,
+    );
+  if (s.state !== "stale") throw new CliError(EXIT.BUSY, `${describePrivateState(v.name, s, v)}——未挂载`);
+  const rel = releaseRecordHoldingMountLock(v, s.record.instanceId);
+  if (rel.kind !== "released" && rel.kind !== "none")
+    throw new CliError(EXIT.BUSY, `${describePrivateState(v.name, s, v)}，但无法清理（${rel.kind}）——未挂载`);
+  err(`${v.name}：清理了失效的 --private 记录`);
+}
+
+/** §1.2/F1c: lease probe (one /proc/locks read, ≤2 s). No lease file ⇒ checkLayout refuses later. */
+async function plainMountLeaseGate(v) {
+  const li = leaseIdentitySync(v);
+  if (li.problem) return;
+  const lease = await probeLease(li);
+  if (lease === "free") return;
+  if (lease === "unknown")
+    throw new CliError(EXIT.DEADLINE, `无法读取 /proc/locks 判断 ${v.name} 的挂载租约——拒绝挂载（fail closed）`);
+  const holders = await leaseHolders(li);
+  throw new CliError(
+    EXIT.BUSY,
+    [
+      `${describePrivateState(v.name, { state: "unrecorded" }, v)}——未挂载`,
+      ...holders.map((h) => `  持有者 pid ${h.pid} ${h.comm ?? "(已退出/不可读)"}（/proc/locks，只报告）`),
+    ].join("\n"),
+  );
 }
 
 /** Mount (if needed) under `flock -o -w 10 mount.lock`, then ensure dirs. Returns "mounted-now"|"already". */
@@ -1761,10 +1850,20 @@ async function rollbackFreshMount(v, cause) {
 }
 
 async function cmdUnlock(args) {
-  const [name, ...rest] = args;
-  if (!name || rest.length) throw new CliError(EXIT.USAGE, USAGE);
+  // `unlock <name> [--global]` (Q5). Without --global the argv rule is byte-identical to before.
+  const global = args.includes("--global");
+  const pos = args.filter((a) => a !== "--global");
+  const [name, ...rest] = pos;
+  if (!name || rest.length || args.filter((a) => a === "--global").length > 1)
+    throw new CliError(EXIT.USAGE, usageText());
   const { vault: v } = must(resolveVault(name));
   requireNewLayout(v); // §L.3
+  if (v.private === true && !global)
+    throw new CliError(
+      EXIT.REFUSED_ARGS,
+      `${name} 配置为 --private（secure.vaults.${name}.private=true）：默认不做全局解锁——全局挂载对所有同用户进程可见。` +
+        `用 pi-secure run ${name}（私有命名空间）；确需全局解锁：pi-secure unlock ${name} --global（不绕过与私有实例的互斥）`,
+    );
   const { how } = await unlockVault(v);
   printWarnings();
   out(
@@ -1777,13 +1876,23 @@ async function cmdUnlock(args) {
 
 async function cmdLock(args) {
   let lazy = false;
+  let kill = false;
   const pos = [];
   for (const a of args) {
     if (a === "--lazy") lazy = true;
+    else if (a === "--kill") kill = true;
     else pos.push(a);
   }
-  if (pos.length !== 1) throw new CliError(EXIT.USAGE, USAGE);
+  if (pos.length !== 1) throw new CliError(EXIT.USAGE, usageText());
+  if (lazy && kill) throw new CliError(EXIT.USAGE, "--lazy 与 --kill 不能同用");
   const { vault: v } = must(resolveVault(pos[0]));
+  // §3.7: private instances first; `none` ⇒ the original lock path below, output unchanged.
+  if (v.layout !== "legacy") {
+    const view = await freshView(v);
+    const d = lockPrivateDecision(v, view, { lazy, kill });
+    if (d.action !== "plain") return await lockPrivate(v, view, d, { lazy, kill });
+    if (d.note) err(d.note);
+  } else if (kill) err("--kill 只用于 --private 实例；按普通 lock 处理");
   const r = await finalizeBounded(v, { lazy });
   for (const l of r.lines) (r.code === 0 ? out : err)(l);
   return r.code;
@@ -1793,20 +1902,33 @@ async function cmdInit(args) {
   let name;
   let mntArg;
   let fix = false;
+  let priv = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--path") mntArg = args[++i];
     else if (a.startsWith("--path=")) mntArg = a.slice(7);
     else if (a === "--fix-settings") fix = true;
+    else if (a === "--private") priv = true;
     else if (!name && !a.startsWith("-")) name = a;
-    else throw new CliError(EXIT.USAGE, USAGE);
+    else throw new CliError(EXIT.USAGE, usageText());
   }
-  if (!name) throw new CliError(EXIT.USAGE, USAGE);
+  if (!name) throw new CliError(EXIT.USAGE, usageText());
   const home = homeDir();
   if (fix) {
     if (mntArg !== undefined) throw new CliError(EXIT.USAGE, "--fix-settings 不与 --path 同用");
+    if (priv)
+      throw new CliError(
+        EXIT.USAGE,
+        `--fix-settings 不与 --private 同用（已登记库是否私有由 secure.vaults.${name}.private 决定）`,
+      );
     const { vault: v } = must(resolveVault(name));
     requireNewLayout(v); // §L.3
+    if (v.private === true) {
+      // §1.1: a private vault is fixed INSIDE its private ns (P1 setup mode), then unmounted.
+      const code = await runPrivate(v, { mode: "setup", fix: true });
+      if (code === EXIT.OK) out(`${name}：sessionDir 已对齐（在私有命名空间内完成，已卸载）`);
+      return code;
+    }
     await unlockVault(v, { fix: true });
     out(`${name}：sessionDir 已对齐；保险库保持挂载（pi-secure lock ${name} 卸载）`);
     return EXIT.OK;
@@ -1835,13 +1957,22 @@ async function cmdInit(args) {
     v = deriveVault(name, v.dir, m);
   }
   requirePrereqs();
+  if (priv) {
+    // Before anything is created: a host without usable user namespaces gets nothing half-made.
+    const pf = await privatePreflight();
+    if (!pf.ok)
+      throw new CliError(
+        EXIT.PREREQ,
+        `--private 前置检查失败，未创建任何东西：\n  - ${pf.problems.join("\n  - ")}\n  去掉 --private 仍可创建普通保险库`,
+      );
+  }
   requireTty("init");
   if (!tty.isatty(1))
     throw new CliError(EXIT.USAGE, "init 会在终端打印 master key，stdout 必须是终端（不要重定向到文件/管道）");
   createLayout(v, { others: otherRegisteredVaults(v) });
   // Registered BEFORE gocryptfs -init so an interrupted init shows up in `status` as incomplete.
   try {
-    registerVault(name, v.dir, v.mnt, home);
+    registerVault(name, v.dir, v.mnt, home, priv ? { private: true } : {});
   } catch (e) {
     throw new CliError(EXIT.CONFIG, `${String(e && e.message)}\n  ${v.dir} 已建好但未登记。\n${initCleanupHint(v)}`);
   }
@@ -1852,6 +1983,26 @@ async function cmdInit(args) {
   const code = await runInherited("gocryptfs", ["-init", "--", v.cipher]);
   if (code !== 0) {
     throw new CliError(EXIT.FAIL, `gocryptfs -init 失败（exit ${code}）\n${initCleanupHint(v)}`);
+  }
+  if (priv) {
+    // §1.1: first mount + dirs + sessionDir + unmount all happen inside the private ns (setup).
+    out(`首次私有挂载以建立目录结构（再输入一次口令；在私有命名空间内完成，结束后自动卸载）：`);
+    const code = await runPrivate(v, { mode: "setup" });
+    if (code !== EXIT.OK) {
+      err(
+        `${name}：首次私有挂载未完成（exit ${code}）。保险库已创建并登记为 --private；可再执行 pi-secure init ${name} --fix-settings 补齐目录与 sessionDir`,
+      );
+      return code;
+    }
+    printWarnings();
+    out(
+      [
+        `完成：私有保险库 ${name}（secure.vaults.${name}.private=true），挂载点 ${v.mnt}，项目放在 ${v.work}，会话落在 ${v.sessionDir}。`,
+        `master key 仍留在终端回滚里：现在执行 clear；若在 tmux 中再执行 tmux clear-history（尽力清理，不等于安全擦除）。`,
+        `之后：pi-secure run ${name}（默认 --private：明文只在本次 pi 的私有命名空间里可见）`,
+      ].join("\n"),
+    );
+    return EXIT.OK;
   }
   out(`首次解锁以建立目录结构（再输入一次口令）：`);
   await unlockVault(v);
@@ -1868,17 +2019,41 @@ async function cmdInit(args) {
   return f.code === 0 ? EXIT.OK : f.code;
 }
 
-async function describeVault(v, { scan = true } = {}) {
+export async function describeVault(v, { scan = true, probe = probeMountState, unmappedUid } = {}) {
   const lines = [];
-  const st = await probeMountState(v);
+  const st = await probe(v);
+  // N2 review #1: status stays bounded. Only a PROVEN-absent mount lets checkLayout touch the
+  // mount point (lstat/readdir of the sentinels, synchronous); hung (the probe's readdir never
+  // finished), foreign and stale all skip every access under <mnt> — the <dir> metadata, position
+  // and ancestor checks (all outside the mount) still run.
+  // N2 review #2: inside a user namespace, unmapped ancestor owners are reported as n/a.
   const lay = checkLayout(v, {
-    mounted: st === "mounted" || st === "stale",
+    mounted: st !== "absent",
     others: otherRegisteredVaults(v),
+    unmappedUid: unmappedUid === undefined ? currentUnmappedUid() : unmappedUid === null ? undefined : unmappedUid,
   });
+  const notes = [];
+  if (st === "hung")
+    notes.push(`  ! 挂载探测超时（gocryptfs 无响应？）：未检查挂载点内容；必要时 fusermount3 -uz ${v.mnt}`);
+  if (lay.indeterminate?.length)
+    notes.push(
+      `  ancestors: n/a for ${lay.indeterminate.length} level(s) (unmapped owner inside a user namespace; enforced outside at mount/claim time)`,
+    );
   const layout = !lay.exists ? "missing" : lay.problems.length ? "incomplete" : v.layout === "legacy" ? "legacy" : "ok";
+  // §3.8: a private instance (or an unrecorded lease holder) renders its own block; `none` keeps
+  // the original output byte-for-byte (legacy vaults are never probed — they have no lease).
+  if (v.layout !== "legacy") {
+    const view = await vaultInstanceView(v, st);
+    if (view.state !== "none") {
+      const pl = renderPrivateStatus(v, { st, layout, problems: lay.problems, view });
+      pl.splice(2 + lay.problems.length, 0, ...notes); // right after the dir / problem lines
+      return { lines: pl, st, scan: false };
+    }
+  }
   lines.push(`${v.name}: ${st === "absent" ? "locked" : st}  layout ${layout}  mnt ${v.mnt}`);
   lines.push(`  dir ${v.dir}`);
   for (const p of lay.problems) lines.push(`  ! ${p}`);
+  lines.push(...notes); // empty unless hung / inside a user namespace (host output unchanged)
   if (v.layout === "legacy") {
     lines.push(`  ! 旧布局（挂载点 ${v.mnt}）：仅 status/lock 可用，unlock/run/init --fix-settings 已拒绝`);
     lines.push(`  ! ${legacyRefusal(v)}`);
@@ -1897,7 +2072,7 @@ function otherRegisteredVaults(v) {
 }
 
 async function cmdStatus(args) {
-  if (args.length > 1) throw new CliError(EXIT.USAGE, USAGE);
+  if (args.length > 1) throw new CliError(EXIT.USAGE, usageText());
   const home = homeDir();
   const { file, cfg, readError } = loadSecureConfig(home);
   const p = preflight();
@@ -1983,7 +2158,7 @@ export function resolveRunCwd(v, sub, { physical = false, realMnt } = {}) {
 
 async function cmdRun(args) {
   const [name, ...rest] = args;
-  if (!name || name.startsWith("-")) throw new CliError(EXIT.USAGE, USAGE);
+  if (!name || name.startsWith("-")) throw new CliError(EXIT.USAGE, usageText());
   // §1.1 fixed order: [--private|--no-private] right after the name, then the old `-C` rule.
   const flags = parseRunFlags(rest);
   const { sub, piArgs } = flags;
@@ -2803,7 +2978,7 @@ export async function privateInstanceState(v, { procRoot = "/proc", deadline, re
   return { ...verdict, record: rec, recordKind: record.kind, lease, scan, alive, classes };
 }
 
-export function describePrivateState(name, s) {
+export function describePrivateState(name, s, v) {
   const pi = s.record?.pi ? `pi pid ${s.record.pi.pid}` : undefined;
   switch (s.state) {
     case "starting":
@@ -2821,11 +2996,208 @@ export function describePrivateState(name, s) {
     case "unrecorded":
       return `保险库 ${name} 的挂载租约被一个未登记的进程持有（可能仍有 gocryptfs 在运行）——无法证明归属，不会自动终止；pi-secure status ${name} 查看`;
     case "corrupt":
-      return `保险库 ${name} 的 private.json 无法解析（${s.reason}）——拒绝操作（fail closed），请人工核对 ${privateRecordPath({ dir: "<dir>" })}`;
+      return `保险库 ${name} 的 private.json 无法解析（${s.reason}）——拒绝操作（fail closed），请人工核对 ${privateRecordPath(v ?? { dir: "<dir>" })}`;
     case "stale":
       return `保险库 ${name} 有一条失效的 --private 记录`;
     default:
       return `无法确认保险库 ${name} 的 --private 实例状态（${s.reason ?? s.state}）——拒绝操作`;
+  }
+}
+
+// ───────────────────────────── command surface (N2: §1.2, §3.7, §3.8) ─────────────────────────────
+
+/** The caller's own mount ns IS the record's private ns (§1.2: lock/unlock/run from inside refuse). */
+export function callerInPrivateNs(rec, selfMnt = readNsLinkSync("self", "mnt")) {
+  return Boolean(rec?.ns?.mnt && selfMnt && selfMnt === rec.ns.mnt);
+}
+
+/** FLOCK holders of the lease from /proc/locks — REPORT ONLY, never a termination right (§3.3). */
+export async function leaseHolders(lease, { procRoot = "/proc", deadline = Date.now() + PRIVATE_BUDGET.scanMs } = {}) {
+  if (!lease) return [];
+  const t = await deadlineRace(fsp.readFile(path.join(procRoot, "locks"), "utf8"), deadline).catch(() => TIMEOUT);
+  if (typeof t !== "string") return [];
+  const [maj, min] = String(lease.dev).split(":").map(Number);
+  const seen = new Set();
+  const holders = [];
+  for (const e of parseProcLocks(t)) {
+    if (e.blocked || e.type !== "FLOCK" || e.maj !== maj || e.min !== min || e.ino !== lease.ino) continue;
+    if (seen.has(e.pid) || holders.length >= 16) continue;
+    seen.add(e.pid);
+    const comm = readTextOr(path.join(procRoot, String(e.pid), "comm"), "").trim();
+    holders.push({ pid: e.pid, ...(comm ? { comm } : {}) });
+  }
+  return holders;
+}
+
+/**
+ * The view every plain entry point (lock / status / __mount) starts from. `state:"none"` ⇔ no
+ * record AND (no vault dir / no lease file — legacy or incomplete layouts never ran the lease
+ * chain —, lease free, or a GLOBAL mount is present: an ordinary gocryptfs holds the lease too,
+ * §3.1/§1.2 row 1). Otherwise privateInstanceState (+ `inNs`), or `unrecorded`/`unknown` with the
+ * /proc/locks holders. `globalSt` = this caller's probeMountState(v). Never throws.
+ */
+export async function vaultInstanceView(v, globalSt, { procRoot = "/proc", selfMnt } = {}) {
+  const none = (lease) => ({ state: "none", recordKind: "none", lease });
+  const dirSt = lstatOrNull(v.dir);
+  if (!dirSt || !dirSt.isDirectory() || !v.lease) return none("n/a");
+  const record = await readPrivateRecord(v, { deadline: Date.now() + PRIVATE_BUDGET.scanMs });
+  if (record.kind === "none") {
+    const li = leaseIdentitySync(v);
+    if (li.problem) return none("n/a");
+    const lease = await probeLease(li, { procRoot });
+    if (lease === "free" || globalSt !== "absent") return none(lease);
+    const holders = await leaseHolders(li, { procRoot });
+    return lease === "held"
+      ? { state: "unrecorded", recordKind: "none", lease, holders }
+      : { state: "unknown", reason: "lease-unknown", recordKind: "none", lease, holders };
+  }
+  const s = await privateInstanceState(v, { procRoot, record });
+  return { ...s, inNs: callerInPrivateNs(s.record, selfMnt ?? readNsLinkSync("self", "mnt")) };
+}
+
+const STATUS_TOKENS = Object.freeze({
+  session: "private",
+  starting: "private:starting",
+  mounting: "private:starting",
+  launching: "private:launching",
+  finalizing: "private:finalizing",
+  orphan: "private:orphan",
+  "orphan-ns": "private:orphan-ns",
+  stale: "private:stale-record",
+  "ns-in-use": "private:ns-in-use",
+  unrecorded: "lease:unrecorded",
+  corrupt: "private:corrupt-record",
+  unknown: "private:unknown",
+});
+const PHASE_TOKENS = Object.freeze({
+  starting: "private:starting",
+  mounting: "private:starting",
+  launching: "private:launching",
+  setup: "private:launching",
+  session: "private",
+  finalizing: "private:finalizing",
+});
+
+/** §3.8 vault-line token. Inside the ns the scan cannot complete — being there proves liveness. */
+export function privateStatusToken(view) {
+  if (view.inNs && view.record) return PHASE_TOKENS[view.record.phase] ?? "private";
+  return STATUS_TOKENS[view.state] ?? "private:unknown";
+}
+
+/** "2026-10-23 19:30" (local time); unparsable ⇒ the raw string. */
+export function shortTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * §3.8 status block for a vault whose view is NOT `none` (pure). `st` = the caller's global
+ * probeMountState, `layout`/`problems` as describeVault computed them.
+ */
+export function renderPrivateStatus(v, { st, layout, problems = [], view }) {
+  const L = [];
+  const name = v.name;
+  L.push(`${name}: ${privateStatusToken(view)}  layout ${layout}  mnt ${v.mnt}`);
+  L.push(`  dir ${v.dir}`);
+  for (const p of problems) L.push(`  ! ${p}`);
+  const rec = view.record;
+  if (rec) {
+    const parts = [rec.phase];
+    for (const k of ["pi", "supervisor", "gocryptfs"]) if (rec[k]) parts.push(`${k} ${rec[k].pid}`);
+    if (rec.ns) parts.push(`ns ${rec.ns.mnt}`);
+    parts.push(`since ${shortTime(rec.createdAt)}`);
+    parts.push(`id ${rec.instanceId.slice(0, 4)}…`);
+    if (rec.mode === "setup") parts.push("mode setup");
+    if (rec.lazyDetachedAt) parts.push(`lazy-detached ${shortTime(rec.lazyDetachedAt)}`);
+    L.push(`  private: ${parts.join(" · ")}`);
+  } else if (view.recordKind === "corrupt") L.push(`  private.json: corrupt (${view.reason})  ${privateRecordPath(v)}`);
+  else if (view.recordKind === "unknown") L.push(`  private.json: n/a (unreadable within deadline)`);
+  L.push(`  lease: ${view.state === "unrecorded" ? "held (unrecorded)" : view.lease}`);
+  for (const h of view.holders ?? []) L.push(`    holder pid ${h.pid} ${h.comm ?? "(exited/unreadable)"}`);
+  const outside = view.inNs
+    ? "n/a (seen from inside the private namespace)"
+    : st === "mounted"
+      ? "! global mount also present (conflict)"
+      : st === "absent"
+        ? `not mounted · ${layout === "ok" ? "sentinels ok" : "! layout/sentinel problems (see above)"}`
+        : `! global ${st}`;
+  L.push(`  outside view: ${outside}`);
+  if (rec?.ns) {
+    if (view.scan?.kind === "done") {
+      const unv = view.classes?.unverified ?? [];
+      L.push(
+        `  ns members: ${view.scan.members.length}${unv.length ? ` (unverified ${unv.length}: ${unv.map((m) => `pid ${m.pid} ${m.comm}`).join(", ")})` : ""}`,
+      );
+    } else L.push("  ns members: n/a (incomplete)");
+  }
+  if (view.inNs) L.push("  (this process is inside the private namespace)");
+  switch (view.inNs ? "in-ns" : view.state) {
+    case "orphan":
+    case "orphan-ns":
+      L.push(`  ! 监督进程已不在：pi-secure lock ${name} 终止有证明归属的进程并清理记录`);
+      break;
+    case "stale":
+      L.push(`  ! 失效记录：pi-secure lock ${name} 清理（下一次 run/unlock 也会自动清理）`);
+      break;
+    case "unrecorded":
+    case "ns-in-use":
+      L.push(`  ! 无法证明归属，不会自动终止；确认后可手工 kill，或重启。期间一切挂载入口拒绝`);
+      break;
+    case "corrupt":
+    case "unknown":
+      L.push(
+        `  ! 状态无法确认（${view.reason ?? view.state}）：一切挂载入口拒绝（fail closed）；人工核对 ${privateRecordPath(v)}`,
+      );
+      break;
+    default:
+      break;
+  }
+  if (rec) L.push(`  boundary: ${PRIVATE_BOUNDARY_SHORT}`);
+  return L;
+}
+
+export const LAZY_DETACHED_TEXT =
+  "已在私有命名空间内摘除挂载路径。既有 cwd、已打开的文件和运行中的作业可能继续访问明文；插件会在下一次输入/工具调用时拒绝（LOCKED）。要真正结束访问请用 --kill";
+
+/**
+ * §3.7 lock table (pure). → {action:"plain"|"refuse"|"kill"|"lazy"|"wait"|"outer"|"release",
+ * code?, text?, note?, degrade?}. `plain` = the original (pre-N2) lock path, byte-identical.
+ */
+export function lockPrivateDecision(v, view, { lazy = false, kill = false } = {}) {
+  const name = v.name;
+  if (view.state === "none")
+    return { action: "plain", ...(kill ? { note: "--kill 只用于 --private 实例；按普通 lock 处理" } : {}) };
+  if (view.inNs)
+    return { action: "refuse", code: EXIT.BUSY, text: `${name}：不能在私有会话内部收尾自己；退出 pi 即自动收尾` };
+  const pi = view.record?.pi ? `pi pid ${view.record.pi.pid}` : "启动中";
+  const running = `${name}：会话仍在运行（${pi}）：退出 pi 后自动收尾；--lazy 摘除该命名空间里的挂载路径；--kill 结束会话并收尾`;
+  switch (view.state) {
+    case "starting":
+    case "mounting":
+      return { action: "refuse", code: EXIT.LOCK_BUSY, text: `另一个 pi-secure 正在挂载 ${name}` };
+    case "launching":
+      if (kill) return { action: "kill" };
+      return lazy
+        ? { action: "refuse", code: EXIT.BUSY, text: `${name}：会话尚未启动完成，稍后再试` }
+        : { action: "refuse", code: EXIT.BUSY, text: running };
+    case "session":
+      if (kill) return { action: "kill" };
+      return lazy ? { action: "lazy" } : { action: "refuse", code: EXIT.BUSY, text: running };
+    case "finalizing":
+      return { action: "wait" };
+    case "orphan":
+    case "orphan-ns":
+      return { action: "outer", degrade: lazy };
+    case "stale":
+      return { action: "release" };
+    default:
+      return {
+        action: "refuse",
+        code: EXIT.BUSY,
+        text: `${describePrivateState(name, view, v)}。确认后可手工 kill，或重启`,
+      };
   }
 }
 
@@ -3263,15 +3635,15 @@ async function cmdPrivateClaim(name, instanceId, ownerPid, ownerStart, mode = "r
   const recNow = readPrivateRecordSync(v);
   if (recNow.kind !== "none") {
     const s = await privateInstanceState(v, { record: recNow });
-    if (s.state !== "stale") throw new CliError(EXIT.BUSY, describePrivateState(name, s));
+    if (s.state !== "stale") throw new CliError(EXIT.BUSY, describePrivateState(name, s, v));
     const rel = releaseRecordHoldingMountLock(v, recNow.record.instanceId);
     if (rel.kind !== "released")
-      throw new CliError(EXIT.BUSY, `${describePrivateState(name, s)}，但无法清理（${rel.kind}）——拒绝`);
+      throw new CliError(EXIT.BUSY, `${describePrivateState(name, s, v)}，但无法清理（${rel.kind}）——拒绝`);
     err(`${name}：清理了失效的 --private 记录`);
   }
   // 4. lease (read-only probe)
   const lease = await probeLease(li);
-  if (lease === "held") throw new CliError(EXIT.BUSY, describePrivateState(name, { state: "unrecorded" }));
+  if (lease === "held") throw new CliError(EXIT.BUSY, describePrivateState(name, { state: "unrecorded" }, v));
   if (lease !== "free") throw new CliError(EXIT.DEADLINE, `无法读取 /proc/locks 判断 ${name} 的挂载租约——拒绝`);
   // 5. stale global mount: lease is free ⇒ no gocryptfs holds it ⇒ safe to clean
   if (st === "stale") {
@@ -3464,6 +3836,179 @@ export async function outerPrivateCleanup(v, instanceId, { budgetMs = PRIVATE_BU
   return { code: EXIT.DEADLINE, lines };
 }
 
+// ───────────────────────────── external lock (§3.7) ─────────────────────────────
+
+const LOCK_WAIT_MS = 10_000;
+
+/** Re-read view (global probe + instance view). */
+async function freshView(v) {
+  return vaultInstanceView(v, await probeMountState(v));
+}
+
+/**
+ * Wait ≤ms for the instance `instanceId` to disappear (record gone / owned by a successor),
+ * re-judging liveness about once a second. → {kind:"gone"} | {kind:"stale"|"orphan"|"timeout", view}
+ */
+async function waitInstanceGone(v, instanceId, ms) {
+  const end = Date.now() + ms;
+  let nextJudge = Date.now() + 1_000;
+  for (;;) {
+    const r = await readPrivateRecord(v, { deadline: Date.now() + PRIVATE_BUDGET.scanMs });
+    if (r.kind === "none" || (r.kind === "ok" && r.record.instanceId !== instanceId)) return { kind: "gone" };
+    const last = Date.now() >= end;
+    if (last || Date.now() >= nextJudge) {
+      const view = await freshView(v);
+      if (view.state === "none" || (view.record && view.record.instanceId !== instanceId)) return { kind: "gone" };
+      if (view.state === "stale") return { kind: "stale", view };
+      if (view.state === "orphan" || view.state === "orphan-ns") return { kind: "orphan", view };
+      if (last) return { kind: "timeout", view };
+      nextJudge = Date.now() + 1_000;
+    }
+    await sleep(200);
+  }
+}
+
+/** §3.5 from `lock` (hard backstop outerCleanupMs + 0.5 s ⇒ 75). */
+async function lockOuter(v, instanceId) {
+  const hard = armHardExit(
+    PRIVATE_BUDGET.outerCleanupMs + PRIVATE_BUDGET.hardGraceMs,
+    `--private 外部收尾未完成（${v.name}），记录保留`,
+  );
+  try {
+    const c = await outerPrivateCleanup(v, instanceId);
+    for (const l of c.lines) (c.code === EXIT.OK ? out : err)(l);
+    if (c.code === EXIT.OK) out(`${v.name}：已终止并清理 --private 实例`);
+    return c.code;
+  } finally {
+    clearTimeout(hard);
+  }
+}
+
+/** Read /proc/<pid>/mountinfo of the supervisor (initial-ns caller; bounded). undefined = unreadable. */
+async function supervisorMountinfo(sup, procRoot = "/proc") {
+  const t = await deadlineRace(
+    fsp.readFile(path.join(procRoot, String(sup.pid), "mountinfo"), "utf8"),
+    Date.now() + PRIVATE_BUDGET.scanMs,
+  ).catch(() => TIMEOUT);
+  return typeof t === "string" && readProcStartSync(sup.pid, procRoot) === sup.start ? t : undefined;
+}
+
+/**
+ * Execute a lockPrivateDecision. `depth` bounds re-judging (a state that changes under us is
+ * re-dispatched at most once more).
+ */
+async function lockPrivate(v, view, d, opts, depth = 0) {
+  const name = v.name;
+  const rec = view.record;
+  const rejudge = async (why) => {
+    const nv = await freshView(v);
+    const nd = lockPrivateDecision(v, nv, opts);
+    if (nd.action === "plain") {
+      out(`${name}：--private 实例已不在${why ? `（${why}）` : ""}`);
+      return EXIT.OK;
+    }
+    if (depth >= 1) {
+      err(`${name}：--private 实例状态在操作期间变化（${nv.state}），未完成；pi-secure status ${name}`);
+      return nd.action === "refuse" ? nd.code : EXIT.DEADLINE;
+    }
+    return lockPrivate(v, nv, nd, opts, depth + 1);
+  };
+  switch (d.action) {
+    case "refuse": {
+      err(d.text);
+      for (const h of view.holders ?? [])
+        err(`  持有者 pid ${h.pid} ${h.comm ?? "(已退出/不可读)"}（/proc/locks，只报告）`);
+      for (const m of view.classes?.unverified ?? [])
+        err(`  命名空间成员 pid ${m.pid} ${m.comm}（无法证明属于该实例，只报告、不终止）`);
+      return d.code;
+    }
+    case "release": {
+      const rel = await releaseRecord(v, rec.instanceId, { waitMs: 1_000 });
+      if (rel.kind === "released" || rel.kind === "none") {
+        out(`${name}：清理了失效的 --private 记录`);
+        return EXIT.OK;
+      }
+      if (rel.kind === "mismatch") return rejudge("记录已换成另一个实例");
+      if (depth >= 1) {
+        err(`${name}：无法清理失效的 --private 记录（${rel.kind}）；pi-secure status ${name}`);
+        return rel.kind === "timeout" || rel.kind === "lease-busy" ? EXIT.DEADLINE : EXIT.BUSY;
+      }
+      return rejudge();
+    }
+    case "outer":
+      if (d.degrade)
+        err(
+          `${name}：监督进程已不在，无法在私有命名空间内摘除挂载路径（--lazy 退化）：改为终止有证明归属的进程（含 gocryptfs）并清理记录`,
+        );
+      return lockOuter(v, rec.instanceId);
+    case "kill": {
+      const sup = rec.supervisor;
+      if (!sup || !signalVerified(sup, "SIGTERM", { nsMnt: rec.ns?.mnt }))
+        return depth >= 1 ? EXIT.BUSY : rejudge("监督进程已变化");
+      out(`${name}：已通知监督进程（pid ${sup.pid}）结束会话并收尾（≤10 s）…`);
+      const hard = armHardExit(LOCK_WAIT_MS + PRIVATE_BUDGET.scanMs * 2 + 2_000, `等待 --private 收尾超时（${name}）`);
+      let w;
+      try {
+        w = await waitInstanceGone(v, rec.instanceId, LOCK_WAIT_MS);
+      } finally {
+        clearTimeout(hard);
+      }
+      if (w.kind === "gone") {
+        out(`${name}：--private 会话已结束并收尾`);
+        return EXIT.OK;
+      }
+      if (w.kind === "stale") return lockPrivate(v, w.view, { action: "release" }, opts, depth + 1);
+      err(`${name}：${w.kind === "orphan" ? "监督进程已退出但收尾未完成" : "10 s 内未完成收尾"}，执行外部收尾`);
+      return lockOuter(v, rec.instanceId);
+    }
+    case "wait": {
+      out(`${name}：--private 实例正在收尾，等待（≤10 s）…`);
+      const hard = armHardExit(LOCK_WAIT_MS + PRIVATE_BUDGET.scanMs * 2 + 2_000, `等待 --private 收尾超时（${name}）`);
+      let w;
+      try {
+        w = await waitInstanceGone(v, rec.instanceId, LOCK_WAIT_MS);
+      } finally {
+        clearTimeout(hard);
+      }
+      if (w.kind === "gone") {
+        out(`${name}：--private 实例已收尾`);
+        return EXIT.OK;
+      }
+      if (w.kind === "stale") return lockPrivate(v, w.view, { action: "release" }, opts, depth + 1);
+      if (w.kind === "orphan") return lockPrivate(v, w.view, { action: "outer", degrade: opts.lazy }, opts, depth + 1);
+      err(`${name}：--private 实例 10 s 内仍未收尾（${w.view.state}）；稍后 pi-secure status ${name}`);
+      return EXIT.DEADLINE;
+    }
+    case "lazy": {
+      const sup = rec.supervisor;
+      const gone = (mi) => mi !== undefined && vaultMountState(mi, rec.realMnt, rec.realCipher) === "absent";
+      if (!sup) return rejudge();
+      if (gone(await supervisorMountinfo(sup))) {
+        out(`${name}：${LAZY_DETACHED_TEXT}`);
+        return EXIT.OK;
+      }
+      if (!signalVerified(sup, "SIGUSR2", { nsMnt: rec.ns?.mnt }))
+        return depth >= 1 ? EXIT.BUSY : rejudge("监督进程已变化");
+      const end = Date.now() + 3_000;
+      while (Date.now() < end) {
+        await sleep(100);
+        const mi = await supervisorMountinfo(sup);
+        if (mi === undefined && readProcStartSync(sup.pid) !== sup.start) return rejudge("监督进程已退出");
+        if (gone(mi)) {
+          out(`${name}：${LAZY_DETACHED_TEXT}`);
+          return EXIT.OK;
+        }
+      }
+      err(
+        `${name}：未能确认私有命名空间内的挂载路径已摘除（监督进程 pid ${sup.pid} 的 mountinfo 仍有该条目）；pi-secure status ${name}；要结束访问请用 --kill`,
+      );
+      return EXIT.DEADLINE;
+    }
+    default:
+      throw new CliError(EXIT.FAIL, `内部错误：未知 lock 动作 ${d.action}`);
+  }
+}
+
 // ───────────────────────────── P0 outcome table (§3.6) ─────────────────────────────
 
 /**
@@ -3481,7 +4026,11 @@ export function decidePrivateOutcome(f) {
     if (f.p1Code === LEASE_BUSY_CODE && rec.phase === "starting") return { action: "abort-start", code: EXIT.BUSY };
     return { action: "release", code: f.p1Code === 0 ? EXIT.FAIL : (rec.failCode ?? EXIT.PREREQ) };
   }
-  const code = rec.piExit ? rec.piExit.code : (rec.failCode ?? (f.p1Code === 0 ? EXIT.FAIL : f.p1Code));
+  // setup mode never has a pi: a completed in-ns finalize without failCode IS success (N2).
+  const code = rec.piExit
+    ? rec.piExit.code
+    : (rec.failCode ??
+      (rec.mode === "setup" && rec.inNsDone === true ? EXIT.OK : f.p1Code === 0 ? EXIT.FAIL : f.p1Code));
   if (rec.inNsDone === true) return { action: "release", code };
   // P1 was killed alone: wait for the user to leave pi, then clean up outside (piExit missing ⇒ 1).
   if (f.piAlive) return { action: "wait-pi", code: rec.piExit ? rec.piExit.code : EXIT.FAIL };
@@ -3528,7 +4077,7 @@ export async function webHubHint(home = homeDir(), { timeoutMs = 300 } = {}) {
 // ───────────────────────────── P0: run --private (§2.2) ─────────────────────────────
 
 /** P0 orchestration. Called by cmdRun after the shared checks + lexical audit. */
-async function runPrivate(v, { sub, piArgs, piBin, pkg, mode = "run", fix = false }) {
+async function runPrivate(v, { sub, piArgs, piBin, pkg, mode = "run", fix = false } = {}) {
   requirePrereqs();
   const pf = await privatePreflight();
   if (!pf.ok)
@@ -3569,7 +4118,9 @@ async function runPrivate(v, { sub, piArgs, piBin, pkg, mode = "run", fix = fals
     throw new CliError(EXIT.LOCK_BUSY, "另一个 pi-secure 正在挂载或卸载（mount.lock 等待超时）");
   if (claim.code !== 0) throw new CliError(claim.code, ""); // the claim child already printed why
 
-  const hint = await webHubHint().catch(() => undefined);
+  // setup (init --private / --fix-settings) never starts pi ⇒ no web-hub hint; the boundary
+  // sentence is printed on every private start (§5.1), setup included.
+  const hint = mode === "run" ? await webHubHint().catch(() => undefined) : undefined;
   if (hint) err(hint);
   err(PRIVATE_BOUNDARY_LONG);
   const spec = {
@@ -3832,6 +4383,13 @@ async function cmdNsRoot() {
   };
   // Signals FIRST (gocryptfs' SIGUSR1 would otherwise kill us — default action terminates).
   process.on("SIGUSR1", () => S.readyResolve?.("usr1"));
+  // N2: SIGUSR2 (`lock --lazy`) is handled from the start too — `lock` may read phase:"session"
+  // the instant the record is written, before this process resumes; the default action would
+  // kill the supervisor. lazyDetach itself is a no-op outside the session stage.
+  process.on("SIGUSR2", () => {
+    if (S.onUsr2) S.onUsr2();
+    else if (S.stage === "launching") S.usr2Pending = true; // the race window right before "session"
+  });
   const interrupt = () => {
     if (S.stage === "mounting") {
       S.abort = true;
@@ -4128,7 +4686,11 @@ async function cmdNsRoot() {
         return await finalizeInNs(v, { realMnt, id, S, say, exitCode: fc });
       }
       S.stage = "session";
-      process.on("SIGUSR2", () => void lazyDetach(v, realMnt, id, S, say));
+      S.onUsr2 = () => void lazyDetach(v, realMnt, id, S, say);
+      if (S.usr2Pending) {
+        S.usr2Pending = false;
+        S.onUsr2();
+      }
       const code = await piExited;
       S.pi = undefined;
       S.stage = "finalizing";
@@ -4310,7 +4872,9 @@ export async function main(argv) {
       case "__register":
         // internal: executed by registerVault() UNDER the settings flock
         try {
-          registerVaultUnlocked(args[0], args[1], args[2]);
+          if (args.length > 4 || (args[3] !== undefined && args[3] !== "--private"))
+            throw new Error("内部错误：__register 参数不合法");
+          registerVaultUnlocked(args[0], args[1], args[2], undefined, { private: args[3] === "--private" });
         } catch (e) {
           throw new CliError(EXIT.CONFIG, String(e && e.message));
         }
@@ -4319,11 +4883,11 @@ export async function main(argv) {
       case "help":
       case "-h":
       case "--help":
-        out(USAGE);
+        out(usageText());
         return cmd === undefined ? EXIT.USAGE : EXIT.OK;
       default:
         err(`未知命令：${cmd}`);
-        err(USAGE);
+        err(usageText());
         return EXIT.USAGE;
     }
   } catch (e) {

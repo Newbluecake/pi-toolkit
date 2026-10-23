@@ -1154,7 +1154,9 @@ describe.skipIf(!HAVE_FLOCK || !which("script"))(
         c.on("close", (code) => res({ code, text }));
       });
       expect(r.code, r.text).toBe(76);
-      expect(r.text).toMatch(/挂载租约正被另一个挂载持有/);
+      // N2: refused by the pre-TTY lease gate (§1.2) — the lease chain's own BUSY is the backstop.
+      expect(r.text).toMatch(/挂载租约被一个未登记的进程持有/);
+      expect(r.text).toMatch(/持有者 pid \d+ flock/);
       expect(existsSync(log)).toBe(false);
     }, 30_000);
   },
