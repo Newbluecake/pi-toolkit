@@ -1,0 +1,111 @@
+/* ------------------------------------------------------------------ *
+ * preview-perf P2 (plan r3 §4.2–§4.5): the virtual-scroll source body.
+ * Imported by components/shared/VirtualCode.vue; CodeLines' own rules in
+ * preview.css apply unchanged to the shared line DOM (`.pv-line`,
+ * `.pv-line::before`, `--pvline-w`) — this sheet only adds the virtual
+ * scaffolding on top of them. No `<style>` blocks in SFCs (source-scan);
+ * no content-visibility, no rAF (§3.2/§6.3 discipline).
+ * ------------------------------------------------------------------ */
+
+/* The component wrapper takes over the flex slot `.preview-text-body` used to fill inside
+ * PreviewText's column, so the inner <pre> keeps its exact layout contract (flex:1 /
+ * min-height:0 / margin:0). It is also the probe's positioning context. */
+.pv-vwrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Line-height probe (§4.3): a SIBLING of the scroll container — never inside it, so it can
+ * neither join native selection/copy nor add to the scrollable content. Same font stack,
+ * size and line-height as .preview-text-body; visibility:hidden keeps it measurable. The
+ * ResizeObserver watches it, so font-scale changes / font loading re-measure row height. */
+.pv-vprobe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  pointer-events: none;
+  white-space: pre;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+/* The virtual body: the .preview-text-body contract, but NEVER wrapping (已拍板: 虚拟模式
+ * 不换行) — long lines extend the horizontal scroll (§4.4). overflow-anchor none: native
+ * scroll anchoring must not fight the virtual window (blocks unmount above/below the
+ * viewport; an anchor node vanishing mid-gesture would jitter scrollTop). */
+.preview-text-body.pv-virtual {
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-anchor: none;
+}
+
+/* Total-height + gutter-width carrier. `--pvline-w` (gutter) and `--pv-row-h` (locked row
+ * height) are set HERE, once for the whole file (§4.4: unified gutter — block roots never
+ * set their own), via CSSOM inline style from VirtualCode. min-width is a pure `ch`
+ * literal + the root --sp-3 token (§4.4): it never references descendant variables. */
+.pv-spacer {
+  display: block;
+  position: relative;
+}
+
+/* One 32-line block, absolutely positioned by inline `top` (blockIndex × 32 × rowH —
+ * rounding error stays inside a block, never accumulates, §4.3). Inline `top` overrides
+ * this base 0. */
+.pv-vblock {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+/* Fixed row height (§4.3): every line box is exactly the measured row height, so block
+ * tops stay arithmetic. Inherits --pv-row-h from the spacer. */
+.pv-virtual .pv-line {
+  height: var(--pv-row-h);
+}
+
+/* r3 (§R2 #1): the clip marker is an EMPTY inline span placed BEFORE the terminator text
+ * node, so the terminator stays block-final (swallowed — the line remains ONE line box)
+ * and the marker sits on the line's single visual row. Its glyphs exist only as generated
+ * content: not DOM text, not in Selection/copy. It contributes no extra line-box height
+ * (line-height:inherit, same font, baseline-aligned); the fixed row height then holds by
+ * construction. `data-clip-label` carries the alt text (read by engines that support the
+ * `content: … / alt` syntax); engines without it read the `…(+N)` fallback. */
+.pv-vblock .pv-vclip::before {
+  content: "…(+" attr(data-clip) ")";
+  content: "…(+" attr(data-clip) ")" / attr(data-clip-label);
+  user-select: none;
+  color: var(--c-text-3);
+  font: inherit;
+  line-height: inherit;
+  vertical-align: baseline;
+}
+
+/* Virtual-mode line numbers hide from the a11y tree via empty alt text (§4.2 如实登记:
+ * generated content DOES reach the accessibility tree in Chromium/Firefox, so the number
+ * would otherwise be read on every line). Engines without alt-text support keep reading
+ * the number — the non-virtual path (preview.css) is unchanged this package (K11). */
+.pv-vblock .pv-line::before {
+  content: counter(pvline) / "";
+}
+
+/* Logical select-all (§4.5): Ctrl+A sets a DOM-independent flag; the spacer class paints
+ * the selection with the system highlight colors while the native selection stays empty. */
+.pv-spacer.is-all-selected .pv-line {
+  background: Highlight;
+  color: HighlightText;
+}
+
+/* View-cap tail notice (§4.3): shown once, after the spacer, when lineCount exceeds
+ * maxLines = min(500k, floor(15e6 / rowH)). Copy and find still cover all loaded text. */
+.pv-cap-note {
+  display: block;
+  margin: 0;
+  padding: var(--sp-2) 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
