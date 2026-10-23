@@ -2,13 +2,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getSpawnCount } from "../../src/traffic/jq.js";
+
 import { ensureDb } from "../../src/traffic/db.js";
-import { patchFetch, setRewriteBlockedHandler, unpatchFetch } from "../../src/traffic/capture.js";
-import { matchAfter, makeProbe, pushPending, resetCorrelation } from "../../src/traffic/correlate.js";
-import { acquireSlot, currentSlot, resetGate, type GateSlot } from "../../src/traffic/serialize.js";
-import { resetState, state, type PendingRequest } from "../../src/traffic/state.js";
+
+import { makeProbe } from "../../src/traffic/correlate.js";
+import { type GateSlot } from "../../src/traffic/serialize.js";
+import { type PendingRequest } from "../../src/traffic/state.js";
 import type { EngineSettings, RewriteRule } from "../../src/traffic/rewrite.js";
+import type { TrafficEngine } from "../../src/traffic/engine.js";
+import { installTap, retireTap } from "../../src/traffic/tap.js";
+import { makeEngine, teardownEngine } from "./helpers/engine.js";
+
+let state: TrafficEngine;
+// T2a：patchFetch/unpatchFetch 由 tap.ts 的 trampoline 取代（每次安装新 wrapper，退役还原）。
+const patchFetch = (): void => {
+  installTap(state, state.capture.handleFetch);
+};
+const unpatchFetch = (): void => {
+  retireTap(state);
+};
 
 let dir: string;
 let originalFetch: typeof globalThis.fetch;
@@ -44,7 +56,7 @@ function rule(overrides: Partial<RewriteRule> = {}): RewriteRule {
 }
 
 function addRow(id = 1, payload = originalBody): void {
-  ensureDb()
+  ensureDb(state)
     .prepare(
       `INSERT INTO requests (id, session_id, turn, ts, provider, model, payload, request_headers)
 			 VALUES (?, 'session', 0, ?, 'provider', 'model', ?, NULL)`,
@@ -53,7 +65,7 @@ function addRow(id = 1, payload = originalBody): void {
 }
 
 function addEnabledRule(rewriteRule: RewriteRule = rule()): void {
-  ensureDb()
+  ensureDb(state)
     .prepare(
       `INSERT INTO rewrite_rules (id, name, enabled, priority, url_pattern, method, model, body_jq, headers_jq, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -74,7 +86,7 @@ function addEnabledRule(rewriteRule: RewriteRule = rule()): void {
 }
 
 function row(id = 1): Record<string, unknown> {
-  return ensureDb().prepare("SELECT * FROM requests WHERE id = ?").get(id) as Record<string, unknown>;
+  return ensureDb(state).prepare("SELECT * FROM requests WHERE id = ?").get(id) as Record<string, unknown>;
 }
 
 function entry(rowId: number | null, payload = originalBody, sessionId = "session"): PendingRequest {
@@ -93,7 +105,7 @@ function entry(rowId: number | null, payload = originalBody, sessionId = "sessio
 }
 
 async function hookSlot(pending: PendingRequest, rules: RewriteRule[]): Promise<GateSlot> {
-  const slot = await acquireSlot(
+  const slot = await state.gate.acquireSlot(
     {
       sessionId: pending.sessionId,
       baseUrl: pending.baseUrl,
@@ -106,7 +118,7 @@ async function hookSlot(pending: PendingRequest, rules: RewriteRule[]): Promise<
   );
   slot.pending = pending;
   pending.slot = slot;
-  pushPending(pending);
+  state.corr.pushPending(pending);
   return slot;
 }
 
@@ -117,9 +129,9 @@ function installOrigin(handler: typeof globalThis.fetch): void {
 }
 
 function applyAfter(status: number, headers: Record<string, string>): void {
-  const attempt = matchAfter(status, headers);
+  const attempt = state.corr.matchAfter(status, headers);
   if (!attempt || attempt.rowId === null) return;
-  ensureDb()
+  ensureDb(state)
     .prepare("UPDATE requests SET status = ?, response_headers = ? WHERE id = ?")
     .run(status, JSON.stringify(headers), attempt.rowId);
 }
@@ -127,7 +139,7 @@ function applyAfter(status: number, headers: Record<string, string>): void {
 async function waitForChunks(id: number, timeoutMs = 1000): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const rows = ensureDb()
+    const rows = ensureDb(state)
       .prepare("SELECT data FROM stream_chunks WHERE request_id = ? ORDER BY seq")
       .all(id) as Array<{ data: string }>;
     const text = rows.map((item) => item.data).join("");
@@ -140,12 +152,9 @@ async function waitForChunks(id: number, timeoutMs = 1000): Promise<string> {
 beforeEach(() => {
   originalFetch = globalThis.fetch;
   dir = mkdtempSync(join(tmpdir(), "pi-capture-rewrite-"));
-  resetState();
-  resetCorrelation();
-  resetGate();
-  state.dbPath = join(dir, "traffic.db");
+  state = makeEngine(dir);
   state.recording = true;
-  ensureDb();
+  ensureDb(state);
   sent = [];
   globalThis.fetch = async (input: unknown, init?: RequestInit) => {
     sent.push({ input, init });
@@ -157,17 +166,13 @@ beforeEach(() => {
   patchFetch();
 });
 
-afterEach(() => {
+afterEach(async () => {
   unpatchFetch();
-  setRewriteBlockedHandler(null);
+  state.capture.setRewriteBlockedHandler(null);
   globalThis.fetch = originalFetch;
-  resetGate();
-  try {
-    state.db?.close();
-  } catch {}
-  rmSync(dir, { recursive: true, force: true });
-  resetState();
   vi.useRealTimers();
+  await teardownEngine(state);
+  rmSync(dir, { recursive: true, force: true });
 });
 
 describe("capture rewrite interception T7", () => {
@@ -233,7 +238,7 @@ describe("capture rewrite interception T7", () => {
     await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
     vi.useFakeTimers();
     await vi.advanceTimersByTimeAsync(settings.retryGraceMs);
-    resetGate();
+    state.gate.resetGate();
     const second = entry(2, JSON.stringify({ messages: [{ role: "user", content: "second" }], temperature: 1 }));
     await hookSlot(second, [rule({ body_jq: ".temperature = 0" })]);
     await globalThis.fetch(url, { method: "POST", body: secondPayload(second) });
@@ -259,13 +264,13 @@ describe("capture rewrite interception T7", () => {
         return true;
       },
     } as never);
-    const before = getSpawnCount();
+    const before = state.jq.spawnCount();
     await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
-    const afterFirst = getSpawnCount();
+    const afterFirst = state.jq.spawnCount();
     await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
     await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
     expect(afterFirst).toBeGreaterThanOrEqual(before);
-    expect(getSpawnCount()).toBe(afterFirst);
+    expect(state.jq.spawnCount()).toBe(afterFirst);
     expect(events.filter((event) => event.includes('"type":"rewrite_error"'))).toHaveLength(1);
     expect(row().rewrite_status).toBe("blocked");
   });
@@ -276,7 +281,7 @@ describe("capture rewrite interception T7", () => {
     const pending = entry(1);
     await hookSlot(pending, [rule({ body_jq: 'error("boom-secret-stderr")' })]);
     const notices: string[] = [];
-    setRewriteBlockedHandler((message: string) => notices.push(message));
+    state.capture.setRewriteBlockedHandler((message: string) => notices.push(message));
 
     await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
     await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
@@ -332,7 +337,7 @@ describe("capture rewrite interception T7", () => {
   });
 
   it("g: does not rewrite while recording is off, even with an already-acquired slot", async () => {
-    const before = getSpawnCount();
+    const before = state.jq.spawnCount();
     state.recording = false;
     const pending = entry(null);
     // slot 在录制开启时取得（hookSlot 内部 acquire），随后录制被关闭：
@@ -341,19 +346,19 @@ describe("capture rewrite interception T7", () => {
     await globalThis.fetch(url, { method: "POST", body: originalBody });
     expect(sent[0]?.init?.body).toBe(originalBody);
     expect(sent[0]?.init?.body).not.toContain('"temperature":0');
-    expect(getSpawnCount()).toBe(before);
+    expect(state.jq.spawnCount()).toBe(before);
     expect(state.unlinkedRewrites).toBe(0);
   });
 
   it("h: passes non-provider fetches through without DB lookup, gate, or jq", async () => {
-    const before = getSpawnCount();
+    const before = state.jq.spawnCount();
     state.db?.close();
     state.db = null;
     state.dbPath = "/dev/null/traffic.db";
     await globalThis.fetch("https://unrelated.example.test/data", { method: "POST", body: originalBody });
     expect(sent[0]?.input).toBe("https://unrelated.example.test/data");
     expect(currentSlotId()).toBeNull();
-    expect(getSpawnCount()).toBe(before);
+    expect(state.jq.spawnCount()).toBe(before);
     expect(state.dbError).toBeNull();
   });
 
@@ -390,11 +395,11 @@ describe("capture rewrite interception T7", () => {
   });
 
   it("k: with no enabled rules, records the unchanged request without gate/timer/jq overhead", async () => {
-    const before = getSpawnCount();
+    const before = state.jq.spawnCount();
     addRow();
     const pending = entry(1);
-    pushPending(pending);
-    const db = ensureDb();
+    state.corr.pushPending(pending);
+    const db = ensureDb(state);
     const prepareSpy = vi.spyOn(db, "prepare");
     vi.useFakeTimers();
     const timerCount = vi.getTimerCount();
@@ -404,7 +409,7 @@ describe("capture rewrite interception T7", () => {
       headers: { "content-type": "application/json" },
     });
     expect(vi.getTimerCount()).toBe(timerCount);
-    expect(getSpawnCount()).toBe(before);
+    expect(state.jq.spawnCount()).toBe(before);
     expect(state.dbError).toBeNull();
     expect(currentSlotId()).toBeNull();
     expect(prepareSpy.mock.calls.filter(([sql]) => String(sql).includes("FROM rewrite_rules"))).toHaveLength(0);
@@ -458,12 +463,12 @@ describe("capture rewrite interception T7", () => {
   });
 
   it("n: recording off with enabled rules in the DB is a total bypass — no query, gate, timer, or jq", async () => {
-    const before = getSpawnCount();
+    const before = state.jq.spawnCount();
     addRow();
     addEnabledRule(rule({ body_jq: ".temperature = 0" }));
     state.recording = false;
-    pushPending(entry(1));
-    const db = ensureDb();
+    state.corr.pushPending(entry(1));
+    const db = ensureDb(state);
     const prepareSpy = vi.spyOn(db, "prepare");
     vi.useFakeTimers();
     const timerCount = vi.getTimerCount();
@@ -472,7 +477,7 @@ describe("capture rewrite interception T7", () => {
 
     expect(sent[0]?.init?.body).toBe(originalBody);
     expect(vi.getTimerCount()).toBe(timerCount);
-    expect(getSpawnCount()).toBe(before);
+    expect(state.jq.spawnCount()).toBe(before);
     expect(currentSlotId()).toBeNull();
     expect(state.dbError).toBeNull();
     // 录制关闭时连规则表都不查 —— 门槛前置于 loadEnabledRules。
@@ -483,7 +488,7 @@ describe("capture rewrite interception T7", () => {
     addRow();
     addEnabledRule(rule({ body_jq: ".temperature = 0" }));
     state.recording = false;
-    pushPending(entry(1));
+    state.corr.pushPending(entry(1));
     await globalThis.fetch(url, { method: "POST", body: originalBody });
     expect(sent[0]?.init?.body).toBe(originalBody);
 
@@ -499,5 +504,5 @@ function secondPayload(_pending: PendingRequest): string {
 }
 
 function currentSlotId(): number | null {
-  return currentSlot()?.id ?? null;
+  return state.gate.currentSlot()?.id ?? null;
 }

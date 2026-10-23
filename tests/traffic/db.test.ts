@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DbMigrationError, ensureColumn, ensureDb, openDb } from "../../src/traffic/db.js";
-import { resetState, state } from "../../src/traffic/state.js";
+import type { TrafficEngine } from "../../src/traffic/engine.js";
+import { makeEngine, teardownEngine } from "./helpers/engine.js";
+
+let state: TrafficEngine;
 
 const { DatabaseSync: DatabaseSyncImpl } = createRequire(import.meta.url)("node:sqlite") as {
   DatabaseSync: typeof DatabaseSync;
@@ -30,11 +33,11 @@ function expectMigrationError(fn: () => unknown, label: string): void {
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "pi-traffic-record-"));
-  resetState();
+  state = makeEngine(dir);
 });
 
-afterEach(() => {
-  resetState();
+afterEach(async () => {
+  await teardownEngine(state);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -209,26 +212,26 @@ describe("openDb", () => {
     const blocker = join(dir, "not-a-directory");
     writeFileSync(blocker, "block");
     state.dbPath = join(blocker, "traffic.db");
-    expect(() => ensureDb()).toThrow();
+    expect(() => ensureDb(state)).toThrow();
     const firstError = state.dbError;
     expect(firstError).toBeTruthy();
     expect(state.db).toBeNull();
     expect(state.dbErrorNotified).toBe(true);
-    expect(() => ensureDb()).toThrow();
+    expect(() => ensureDb(state)).toThrow();
     expect(state.dbError).toBe(firstError);
     expect(state.dbErrorNotified).toBe(true);
   });
 
-  it("legacy dumps/ 迁移只在默认路径生效，且不碰测试用的临时库", () => {
-    // migrateLegacyRecordDir 以 dbPath === DB_PATH 为唯一触发条件。
-    // 临时路径必须原样打开，否则每次跑测试都会去搬用户的真实数据目录。
+  it("legacy dumps/ 检测只在默认路径生效，且不碰测试用的临时库", () => {
+    // T2a：自动搬迁已取消（plan §3.3），改为默认路径下的只读检测；临时路径原样打开，
+    // 不触碰用户的真实数据目录（检测用例见 legacy-dir.test.ts）。
     const temp = join(dir, "nested", "traffic.db");
     const db = openDb(temp);
     expect(db.prepare("SELECT COUNT(*) c FROM requests").get()).toEqual({ c: 0 });
     db.close();
   });
 
-  it("legacy 迁移会把 -wal / -shm 一起搬走", () => {
+  it("人工迁移须连同 -wal / -shm 一起搬（拒绝文案中人工步骤的依据）", () => {
     // 只搬主库会丢掉未 checkpoint 的写。这里直接验证三件套的搬运约定。
     const legacyDir = mkdtempSync(join(tmpdir(), "pi-record-legacy-"));
     const legacy = join(legacyDir, "traffic.db");

@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../../src/traffic/db.js";
-import { getSpawnCount } from "../../src/traffic/jq.js";
+import { createJqRunner } from "../../src/traffic/jq.js";
+
 import {
   applyRequest,
   decodeBody,
@@ -26,6 +27,9 @@ import {
 
 let dir: string;
 let db: ReturnType<typeof openDb>;
+// T2a：jq 执行器由调用方注入（RewriteEnv）；本文件一个执行器，等价于源实现的模块单例。
+const jq = createJqRunner();
+const env = { jq };
 
 const defaultSettings: EngineSettings = {
   jqPath: "",
@@ -92,7 +96,7 @@ function applySnapshot(
   rules: RewriteRule[] = loadEnabledRules(db),
   settings: EngineSettings = getEngineSettings(db),
 ) {
-  return applyRequest(rules, settings, context, readBody, headers);
+  return applyRequest(rules, settings, context, readBody, headers, env);
 }
 
 describe("T5-a 规则加载与设置", () => {
@@ -342,7 +346,7 @@ describe("T5-g B5+V4 错误通道", () => {
 
 describe("T5-h 快照短路与兼容性", () => {
   it("空规则快照不读 body、不 spawn，1000 次低于 500ms", async () => {
-    const before = getSpawnCount();
+    const before = jq.spawnCount();
     let reads = 0;
     const reader = async () => {
       reads++;
@@ -350,10 +354,10 @@ describe("T5-h 快照短路与兼容性", () => {
     };
     const started = performance.now();
     for (let i = 0; i < 1000; i++) {
-      expect(await applyRequest([], defaultSettings, context, reader, { "X-Test": "1" })).toBeNull();
+      expect(await applyRequest([], defaultSettings, context, reader, { "X-Test": "1" }, env)).toBeNull();
     }
     const elapsed = performance.now() - started;
-    expect(getSpawnCount()).toBe(before);
+    expect(jq.spawnCount()).toBe(before);
     expect(reads).toBe(0);
     expect(elapsed).toBeLessThan(500);
   });
@@ -366,6 +370,7 @@ describe("T5-h 快照短路与兼容性", () => {
       context,
       async () => jsonBody('{"x":1}'),
       {},
+      env,
     );
     expect(result).toMatchObject({ ruleIds: [1], body: '{"x":2}', encoding: "identity", bodyBytes: 7 });
   });

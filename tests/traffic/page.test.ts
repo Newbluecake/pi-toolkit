@@ -11,9 +11,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PAGE, PAGE_GZIP } from "../../src/traffic/page.js";
-import { startServer } from "../../src/traffic/server.js";
-import { resetState, state } from "../../src/traffic/state.js";
+import { buildPage } from "../../src/traffic/page.js";
+import type { TrafficEngine } from "../../src/traffic/engine.js";
+import { createTrafficServer, type TrafficServer } from "../../src/traffic/server.js";
+import { makeEngine, teardownEngine } from "./helpers/engine.js";
+
+// T2a：页面在首次 buildPage() 时组装（模块顶层零 IO）。
+const { html: PAGE, gzip: PAGE_GZIP } = buildPage();
+let state: TrafficEngine;
 
 describe("PAGE 结构", () => {
   it("含 #app 挂载点与 Vue 特征串，无未替换 sentinel", () => {
@@ -336,13 +341,11 @@ describe("/ 路由 gzip 响应", () => {
   let port: number;
   beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "record-page-gzip-"));
-    resetState();
-    state.dbPath = join(tmp, "traffic.db");
-    port = await startServer();
+    state = makeEngine(tmp);
+    port = await createTrafficServer(state).startServer();
   });
   afterEach(async () => {
-    await new Promise((r) => state.server?.close(r));
-    resetState();
+    await teardownEngine(state);
     rmSync(tmp, { recursive: true, force: true });
   });
 

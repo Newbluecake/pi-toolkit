@@ -2,16 +2,26 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { patchFetch, unpatchFetch } from "../../src/traffic/capture.js";
-import { ensureDb } from "../../src/traffic/db.js";
-import { registerTrafficRecordHandlers } from "../../src/traffic/index.js";
+
+import { ensureDb, openDb } from "../../src/traffic/db.js";
+import { wireTraffic } from "../../src/traffic/index.js";
+import { acquireEngine, peekEngine, type TrafficEngine } from "../../src/traffic/engine.js";
+import { installTap, retireTap } from "../../src/traffic/tap.js";
+import { teardownEngine } from "./helpers/engine.js";
 import { isSecureSession } from "../../src/traffic/secure.js";
-import { resetState, state } from "../../src/traffic/state.js";
 
 let dir: string;
 let handlers: Map<string, (event: any, ctx: any) => any>;
 let command: (args: string, ctx: any) => Promise<void>;
 let notes: string[];
+let state: TrafficEngine;
+let owner: object;
+const patchFetch = (): void => {
+  installTap(state, state.capture.handleFetch);
+};
+const unpatchFetch = (): void => {
+  retireTap(state);
+};
 
 function ctx(): any {
   return {
@@ -23,29 +33,33 @@ function ctx(): any {
 }
 
 const prev = process.env.PI_SECURE_SESSION;
+const nativeFetch = globalThis.fetch;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "pi-traffic-secure-"));
-  resetState();
-  state.dbPath = join(dir, "traffic.db");
   notes = [];
   handlers = new Map();
-  registerTrafficRecordHandlers({
-    on: (e: string, h: any) => handlers.set(e, h),
-    registerCommand: (_n: string, o: any) => {
-      command = o.handler;
-    },
-  } as any);
+  owner = {};
+  const dbPath = join(dir, "traffic.db");
+  wireTraffic(
+    {
+      on: (e: string, h: any) => handlers.set(e, h),
+      registerCommand: (_n: string, o: any) => {
+        command = o.handler;
+      },
+    } as any,
+    { enabled: true, owner, dbPath, legacyDbPath: null },
+  );
+  state = acquireEngine(owner, { dbPath, legacyDbPath: null, role: "host", mode: "tui" });
 });
 
-afterEach(() => {
+afterEach(async () => {
   unpatchFetch();
-  try {
-    state.db?.close();
-  } catch {}
-  resetState();
+  globalThis.fetch = nativeFetch;
   if (prev === undefined) delete process.env.PI_SECURE_SESSION;
   else process.env.PI_SECURE_SESSION = prev;
+  await teardownEngine(peekEngine());
+  await teardownEngine(state);
   rmSync(dir, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
@@ -78,10 +92,10 @@ describe("PI_SECURE_SESSION 契约", () => {
 
   it("加密会话：ensureDb 拒绝打开，即使 state.db 已存在", () => {
     delete process.env.PI_SECURE_SESSION;
-    ensureDb();
+    ensureDb(state);
     expect(state.db).not.toBeNull();
     process.env.PI_SECURE_SESSION = "1";
-    expect(() => ensureDb()).toThrow(/PI_SECURE_SESSION/);
+    expect(() => ensureDb(state)).toThrow(/PI_SECURE_SESSION/);
   });
 
   it("加密会话：/record on 拒绝，不开启录制、不建库", async () => {
@@ -111,12 +125,141 @@ describe("PI_SECURE_SESSION 契约", () => {
     state.recording = true;
     await handlers.get("before_provider_request")!({ payload: { a: 1 } }, ctx());
     expect(existsSync(state.dbPath)).toBe(true);
-    const n = (ensureDb().prepare("SELECT COUNT(*) c FROM requests").get() as { c: number }).c;
+    const n = (ensureDb(state).prepare("SELECT COUNT(*) c FROM requests").get() as { c: number }).c;
     expect(n).toBe(1);
   });
 
   it("package.json 声明 piSecure.honors", () => {
     const pkg = JSON.parse(readFileSync(join(__dirname, "fixtures/source-package.json"), "utf8"));
     expect(pkg.piSecure).toEqual({ honors: "PI_SECURE_SESSION/1" });
+  });
+});
+
+describe("secure-domain 符号源 + 异步切点（plan §6）", () => {
+  const DOMAIN_KEY = Symbol.for("pi-subagent:secure-domain");
+  const g = globalThis as Record<symbol, unknown>;
+
+  afterEach(() => {
+    delete g[DOMAIN_KEY];
+  });
+
+  it("getSecureDomain().kind ∈ {secure, locked} ⇒ isSecure；plain / 未初始化 ⇒ 只看 env", () => {
+    delete process.env.PI_SECURE_SESSION;
+    expect(isSecureSession()).toBe(false);
+    g[DOMAIN_KEY] = { kind: "locked", reason: "x", vaults: [], config: {} };
+    expect(isSecureSession()).toBe(true);
+    g[DOMAIN_KEY] = { kind: "secure", vaults: [], config: {} };
+    expect(isSecureSession()).toBe(true);
+    g[DOMAIN_KEY] = { kind: "plain", vaults: [], config: {} };
+    expect(isSecureSession()).toBe(false);
+    process.env.PI_SECURE_SESSION = "1";
+    expect(isSecureSession()).toBe(true);
+  });
+
+  it("locked 域：wireTraffic 零注册", () => {
+    g[DOMAIN_KEY] = { kind: "locked", reason: "x", vaults: [], config: {} };
+    const on = vi.fn();
+    const registerCommand = vi.fn();
+    expect(wireTraffic({ on, registerCommand } as any, { enabled: true })).toBeUndefined();
+    expect(on).not.toHaveBeenCalled();
+    expect(registerCommand).not.toHaveBeenCalled();
+  });
+
+  it("慢流中途切到 locked ⇒ 之后零新增 chunk、读取被取消、engine 进入关闭", async () => {
+    ensureDb(state);
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        controller = c;
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const capture = state.capture.captureStream(1, "s", new Response(body), state.epoch);
+    const enc = new TextEncoder();
+    controller.enqueue(enc.encode("data: 1\n\n"));
+    await new Promise((r) => setTimeout(r, 20));
+    const rawCount = (): number => {
+      const db = openDb(state.dbPath, { legacyDbPath: null });
+      try {
+        return (db.prepare("SELECT COUNT(*) c FROM stream_chunks").get() as { c: number }).c;
+      } finally {
+        db.close();
+      }
+    };
+    expect(rawCount()).toBe(1);
+    g[DOMAIN_KEY] = { kind: "locked", reason: "x", vaults: [], config: {} };
+    controller.enqueue(enc.encode("data: 2\n\n"));
+    await capture;
+    expect(cancelled).toBe(true);
+    expect(state.state).not.toBe("open");
+    delete g[DOMAIN_KEY];
+    expect(rawCount()).toBe(1);
+  });
+
+  it("慢重放跨切换（上游回头前切到 secure）⇒ 切换后零写入，回 503", async () => {
+    const { createServer } = await import("node:http");
+    const { createTrafficServer } = await import("../../src/traffic/server.js");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const upstream = createServer((_req, res) => {
+      void gate.then(() => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end('{"ok":true}');
+      });
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+    const upPort = (upstream.address() as { port: number }).port;
+    try {
+      const web = createTrafficServer(state);
+      const port = await web.startServer();
+      const src = Number(
+        ensureDb(state)
+          .prepare(
+            "INSERT INTO requests (session_id, turn, ts, payload, request_headers, url, method) VALUES ('s', 0, 't', '{}', '{}', ?, 'POST')",
+          )
+          .run(`http://127.0.0.1:${upPort}/x`).lastInsertRowid,
+      );
+      const pending = fetch(`http://127.0.0.1:${port}/api/replay`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ request_id: src }),
+      });
+      // 等重放行已插入、上游请求已发出。
+      for (let i = 0; i < 100; i++) {
+        const n = (ensureDb(state).prepare("SELECT COUNT(*) c FROM requests").get() as { c: number }).c;
+        if (n === 2) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      const db = state.db!;
+      if (!db.prepare("SELECT id FROM requests WHERE origin = 'replay'").get()) {
+        const r = await pending;
+        throw new Error(`replay failed: ${r.status} ${await r.text()}`);
+      }
+      const replayRow = (db.prepare("SELECT id FROM requests WHERE origin = 'replay'").get() as { id: number }).id;
+      process.env.PI_SECURE_SESSION = "1";
+      release();
+      const res = await pending;
+      expect(res.status).toBe(503);
+      delete process.env.PI_SECURE_SESSION;
+      const raw = openDb(state.dbPath, { legacyDbPath: null });
+      try {
+        const row = raw.prepare("SELECT status, response_headers FROM requests WHERE id = ?").get(replayRow) as {
+          status: number | null;
+          response_headers: string | null;
+        };
+        expect(row).toEqual({ status: null, response_headers: null });
+        expect((raw.prepare("SELECT COUNT(*) c FROM stream_chunks").get() as { c: number }).c).toBe(0);
+      } finally {
+        raw.close();
+      }
+    } finally {
+      release();
+      await new Promise((r) => upstream.close(r));
+    }
   });
 });

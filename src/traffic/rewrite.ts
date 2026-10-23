@@ -1,8 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import * as zlib from "node:zlib";
-import { JqError, type JqErrorKind, runJq } from "./jq.js";
+import { JqError, type JqErrorKind, type JqRunner } from "./jq.js";
 import { collectSecrets, redactText } from "./redact.js";
-import { broadcast } from "./sse.js";
 
 export interface RewriteRule {
   id: number;
@@ -344,18 +343,28 @@ function safeJqError(err: JqError, phase: RewritePhase, rule: RewriteRule, secre
   return new RewriteError(err.kind, phase, rule.id, rule.name, err.rawStderr, err.exitCode, undefined, secrets);
 }
 
+/**
+ * 改写执行环境（T2a：jq 执行器与告警出口由调用方 engine 注入，本模块无状态）。
+ */
+export interface RewriteEnv {
+  jq: Pick<JqRunner, "run">;
+  /** 规则级告警（如 url_pattern 非法）；缺省丢弃。 */
+  warn?: (event: Record<string, unknown>) => void;
+}
+
 async function applyBodyChain(
   rules: RewriteRule[],
   body: Extract<BodyInput, { kind: "json" }>,
   settings: EngineSettings,
   secrets: string[],
+  env: RewriteEnv,
 ): Promise<{ text: string; changed: boolean }> {
   let text = body.text;
   const original = text;
   for (const rule of rules) {
     if (!rule.body_jq?.trim()) continue;
     try {
-      text = await runJq(rule.body_jq, text, settings);
+      text = await env.jq.run(rule.body_jq, text, settings);
     } catch (err) {
       if (err instanceof JqError) throw safeJqError(err, "body", rule, secrets);
       throw err;
@@ -364,13 +373,13 @@ async function applyBodyChain(
   return { text, changed: text !== original };
 }
 
-function validPattern(rule: RewriteRule): boolean {
+function validPattern(rule: RewriteRule, env: RewriteEnv): boolean {
   if (!rule.url_pattern) return true;
   try {
     new RegExp(rule.url_pattern);
     return true;
   } catch {
-    broadcast({
+    env.warn?.({
       type: "rewrite_warn",
       rule_id: rule.id,
       rule_name: rule.name,
@@ -386,11 +395,12 @@ async function applyRequestSnapshot(
   ctx: RewriteContext,
   readBody: BodyReader,
   headers: unknown,
+  env: RewriteEnv,
 ): Promise<ApplyResult | null> {
   if (rules.length === 0) return null;
   const matched: RewriteRule[] = [];
   for (const rule of rules) {
-    if (rule.enabled === 0 || !validPattern(rule)) continue;
+    if (rule.enabled === 0 || !validPattern(rule, env)) continue;
     if (matchRule(rule, ctx)) matched.push(rule);
   }
   if (matched.length === 0) return null;
@@ -403,7 +413,7 @@ async function applyRequestSnapshot(
     let headerJson: unknown = originalHeaders;
     for (const rule of headerRules) {
       try {
-        const output = await runJq(rule.headers_jq as string, JSON.stringify(headerJson), settings);
+        const output = await env.jq.run(rule.headers_jq as string, JSON.stringify(headerJson), settings);
         headerJson = JSON.parse(output);
         finalHeaders = jsonToHeaders(headerJson, rule);
       } catch (err) {
@@ -447,7 +457,7 @@ async function applyRequestSnapshot(
       origBodyText = input.text;
       encoding = input.encoding;
       const secrets = collectSecrets(sendHeaders, origBodyText);
-      const result = await applyBodyChain(bodyRules, input, settings, secrets);
+      const result = await applyBodyChain(bodyRules, input, settings, secrets, env);
       bodyChanged = result.changed;
       let encoded: string | Uint8Array;
       try {
@@ -491,6 +501,7 @@ export async function applyRequest(
   ctx: RewriteContext,
   readBody: BodyReader,
   headers: unknown,
+  env: RewriteEnv,
 ): Promise<ApplyResult | null> {
-  return applyRequestSnapshot(rules, settings, ctx, readBody, headers);
+  return applyRequestSnapshot(rules, settings, ctx, readBody, headers, env);
 }

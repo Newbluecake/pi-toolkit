@@ -6,8 +6,15 @@ import * as zlib from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import * as dbModule from "../../src/traffic/db.js";
 import { ensureDb } from "../../src/traffic/db.js";
-import { accessUrls, startServer } from "../../src/traffic/server.js";
-import { resetState, state } from "../../src/traffic/state.js";
+import type { TrafficEngine } from "../../src/traffic/engine.js";
+import { createTrafficServer, type TrafficServer } from "../../src/traffic/server.js";
+import { makeEngine, teardownEngine } from "./helpers/engine.js";
+import { installTap, retireTap } from "../../src/traffic/tap.js";
+
+let state: TrafficEngine;
+let web: TrafficServer;
+const realFetch = globalThis.fetch;
+const accessUrls = (p: number): string[] => web.accessUrls(p);
 
 let dir: string;
 let port: number;
@@ -38,7 +45,7 @@ async function sendJson(path: string, method: string, value: unknown): Promise<{
 }
 
 function addSource(sessionId = "source-session"): number {
-  const result = ensureDb()
+  const result = ensureDb(state)
     .prepare(
       `INSERT INTO requests (session_id, turn, ts, provider, model, payload, request_headers, url, method)
 			 VALUES (?, 0, ?, 'test', 'test-model', ?, ?, ?, 'POST')`,
@@ -76,11 +83,10 @@ async function countRules(name: string): Promise<number> {
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "pi-traffic-rewrite-api-"));
-  resetState();
-  state.dbPath = join(dir, "traffic.db");
+  state = makeEngine(dir);
   // 改写引擎（含重放）按录制开关门控，重放改写用例需显式开启录制。
   state.recording = true;
-  ensureDb();
+  ensureDb(state);
 
   upstream = createServer((_req: IncomingMessage, res: ServerResponse) => {
     upstreamCalls++;
@@ -88,19 +94,22 @@ beforeAll(async () => {
     res.end(JSON.stringify({ ok: true }));
   });
   await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
-  port = await startServer();
+  web = createTrafficServer(state);
+  port = await web.startServer();
   sourceId = addSource();
-  state.originalFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-    lastFetchInit = init;
-    return fetch(input, init);
-  };
+  // T2a：重放绕过 trampoline，用活动 wrapper 的固定下游——把探针装成该下游（源实现的 state.originalFetch）。
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (!String(input instanceof Request ? input.url : input).includes(`:${port}/`)) lastFetchInit = init;
+    return realFetch(input, init);
+  }) as typeof globalThis.fetch;
+  installTap(state, state.capture.handleFetch);
 });
 
 afterAll(async () => {
-  state.originalFetch = null;
+  retireTap(state);
+  globalThis.fetch = realFetch;
   await new Promise<void>((resolve) => upstream.close(() => resolve()));
-  await new Promise<void>((resolve) => state.server?.close(() => resolve()));
-  resetState();
+  await teardownEngine(state);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -281,7 +290,7 @@ describe("rewrite API", () => {
 
     state.db?.close();
     state.db = null;
-    ensureDb();
+    ensureDb(state);
     const reopened = await api("/api/rewrite/settings");
     expect(reopened.body).toMatchObject({
       jq_path: "/usr/bin/jq",
@@ -309,7 +318,7 @@ describe("rewrite API", () => {
     expect(replay.body.status).toBe(200);
     expect(lastFetchInit?.body).toBe('{"temperature":0}');
     const newId = replay.body.id as number;
-    const row = ensureDb().prepare("SELECT * FROM requests WHERE id = ?").get(newId) as Record<string, any>;
+    const row = ensureDb(state).prepare("SELECT * FROM requests WHERE id = ?").get(newId) as Record<string, any>;
     expect(JSON.parse(row.payload)).toEqual({ temperature: 0 });
     const sentHeaders = JSON.parse(row.request_headers);
     expect(sentHeaders).toMatchObject({ "x-rewritten": "yes", "content-type": "application/json" });
@@ -327,7 +336,7 @@ describe("rewrite API", () => {
     const zstdDecompress = (zlib as unknown as { zstdDecompressSync?: (value: Uint8Array) => Uint8Array })
       .zstdDecompressSync;
     if (!zstdCompress || !zstdDecompress) return;
-    const db = ensureDb();
+    const db = ensureDb(state);
     const source = db
       .prepare(
         `INSERT INTO requests (session_id, turn, ts, provider, model, payload, request_headers, payload_encoding, payload_bytes, url, method)
@@ -424,7 +433,10 @@ describe("rewrite API", () => {
     });
     expect(replay.response.status).toBe(400);
     expect(upstreamCalls).toBe(before);
-    const row = ensureDb().prepare("SELECT * FROM requests WHERE id = ?").get(replay.body.id) as Record<string, any>;
+    const row = ensureDb(state).prepare("SELECT * FROM requests WHERE id = ?").get(replay.body.id) as Record<
+      string,
+      any
+    >;
     expect(row.status).toBe(0);
     expect(row.rewrite_status).toBe("blocked");
     expect(JSON.parse(row.rewrite_error)).toMatchObject({
@@ -437,7 +449,7 @@ describe("rewrite API", () => {
   });
 
   it("excludes blocked rows from detail pairing and export, and returns rewrite fields", async () => {
-    const db = ensureDb();
+    const db = ensureDb(state);
     const session = "pairing-session";
     const insert = db.prepare(
       "INSERT INTO requests (session_id, turn, ts, provider, model, payload, origin, rewrite_status, rewrite_rule_ids) VALUES (?, 0, ?, 'p', 'm', '{}', NULL, ?, ?)",

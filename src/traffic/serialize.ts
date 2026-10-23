@@ -1,5 +1,6 @@
 import { broadcast } from "./sse.js";
-import { state, type PendingRequest } from "./state.js";
+import type { PendingRequest } from "./state.js";
+import type { TrafficEngine } from "./engine.js";
 import type { RewriteRule } from "./rewrite.js";
 
 export type ReleaseReason =
@@ -84,14 +85,6 @@ const DEFAULTS = {
   queueWaitMs: 60_000,
 } as const;
 
-let nextSlotId = 0;
-let holder: GateSlot | null = null;
-let waiters: Waiter[] = [];
-let warnedAt = -Infinity;
-let warningHandler: (event: Record<string, unknown>) => void = broadcast;
-const timers = new WeakMap<GateSlot, SlotTimers>();
-const kinds = new WeakMap<GateSlot, "hook" | "orphan">();
-
 function positive(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
 }
@@ -116,260 +109,299 @@ function clearTimer(timer: ReturnType<typeof setTimeout> | null): void {
   if (timer !== null) clearTimeout(timer);
 }
 
-let releaseHandler: ((slot: GateSlot, reason: ReleaseReason) => void) | null = null;
-
-export function setGateReleaseHandler(handler: ((slot: GateSlot, reason: ReleaseReason) => void) | null): void {
-  releaseHandler = handler;
+/** 闸门 API（T2b 退役：票据归属取代全局串行，见 plan §5.3；T2a 只把模块级状态收进 engine）。 */
+export interface Gate {
+  setGateReleaseHandler(handler: ((slot: GateSlot, reason: ReleaseReason) => void) | null): void;
+  setGateWarningHandler(handler: ((event: Record<string, unknown>) => void) | null): void;
+  acquireSlot(meta: SlotMeta, kind: "hook" | "orphan"): Promise<GateSlot>;
+  currentSlot(): GateSlot | null;
+  attachAttempt(slot: GateSlot): void;
+  armRetryGrace(slot: GateSlot): void;
+  armPoison(slot: GateSlot, error: Error): void;
+  releaseSlot(slot: GateSlot, reason: ReleaseReason): void;
+  drainGate(reason: ReleaseReason): void;
+  gateStats(): GateStats;
+  resetGate(): void;
 }
 
-function clearSlotTimers(slot: GateSlot): void {
-  const slotTimers = timers.get(slot);
-  if (!slotTimers) return;
-  clearTimer(slotTimers.handoff);
-  clearTimer(slotTimers.maxHold);
-  clearTimer(slotTimers.retryGrace);
-  slotTimers.handoff = null;
-  slotTimers.maxHold = null;
-  slotTimers.retryGrace = null;
-  slot.retryGraceArmed = false;
-}
+export function createGate(state: TrafficEngine): Gate {
+  let nextSlotId = 0;
+  let holder: GateSlot | null = null;
+  let waiters: Waiter[] = [];
+  let warnedAt = -Infinity;
+  const defaultWarn = (event: Record<string, unknown>): void => broadcast(state, event);
+  let warningHandler: (event: Record<string, unknown>) => void = defaultWarn;
+  const timers = new WeakMap<GateSlot, SlotTimers>();
+  const kinds = new WeakMap<GateSlot, "hook" | "orphan">();
+  let releaseHandler: ((slot: GateSlot, reason: ReleaseReason) => void) | null = null;
 
-function emitWarning(reason: string, slot: GateSlot, message: string): void {
-  const now = Date.now();
-  if (now - warnedAt < 10_000) return;
-  warnedAt = now;
-  try {
-    warningHandler({ type: "gate_warn", reason, slot_id: slot.id, message });
-  } catch {
-    // Warning delivery must never affect the provider request.
+  function setGateReleaseHandler(handler: ((slot: GateSlot, reason: ReleaseReason) => void) | null): void {
+    releaseHandler = handler;
   }
-}
 
-function removeWaiter(slot: GateSlot): Waiter | null {
-  const index = waiters.findIndex((waiter) => waiter.slot === slot);
-  if (index < 0) return null;
-  const [waiter] = waiters.splice(index, 1);
-  if (!waiter) return null;
-  clearTimer(waiter.timer);
-  waiter.timer = null;
-  return waiter;
-}
+  function clearSlotTimers(slot: GateSlot): void {
+    const slotTimers = timers.get(slot);
+    if (!slotTimers) return;
+    clearTimer(slotTimers.handoff);
+    clearTimer(slotTimers.maxHold);
+    clearTimer(slotTimers.retryGrace);
+    slotTimers.handoff = null;
+    slotTimers.maxHold = null;
+    slotTimers.retryGrace = null;
+    slot.retryGraceArmed = false;
+  }
 
-function startMaxHold(slot: GateSlot, maxHoldMs: number): void {
-  const slotTimers = timers.get(slot);
-  if (!slotTimers || slotTimers.maxHold !== null) return;
-  slotTimers.maxHold = setTimeout(() => {
+  function emitWarning(reason: string, slot: GateSlot, message: string): void {
+    const now = Date.now();
+    if (now - warnedAt < 10_000) return;
+    warnedAt = now;
+    try {
+      warningHandler({ type: "gate_warn", reason, slot_id: slot.id, message });
+    } catch {
+      // Warning delivery must never affect the provider request.
+    }
+  }
+
+  function removeWaiter(slot: GateSlot): Waiter | null {
+    const index = waiters.findIndex((waiter) => waiter.slot === slot);
+    if (index < 0) return null;
+    const [waiter] = waiters.splice(index, 1);
+    if (!waiter) return null;
+    clearTimer(waiter.timer);
+    waiter.timer = null;
+    return waiter;
+  }
+
+  function startMaxHold(slot: GateSlot, maxHoldMs: number): void {
+    const slotTimers = timers.get(slot);
+    if (!slotTimers || slotTimers.maxHold !== null) return;
+    slotTimers.maxHold = setTimeout(() => {
+      if (slot.state === "released") return;
+      state.gateTimeouts++;
+      emitWarning("max-hold", slot, `串行化闸门持有超过 ${maxHoldMs}ms，已释放`);
+      releaseSlot(slot, "max-hold");
+    }, maxHoldMs);
+    unref(slotTimers.maxHold);
+  }
+
+  function startHandoff(slot: GateSlot, handoffMs: number): void {
+    const slotTimers = timers.get(slot);
+    if (!slotTimers || slotTimers.handoff !== null) return;
+    slotTimers.handoff = setTimeout(() => {
+      if (slot.state === "released" || slot.state === "attached") return;
+      state.gateNoFetch++;
+      emitWarning("no-fetch", slot, `串行化闸门 ${handoffMs}ms 内未观察到 fetch，已释放`);
+      releaseSlot(slot, "no-fetch");
+    }, handoffMs);
+    unref(slotTimers.handoff);
+  }
+
+  function promoteNext(): void {
+    const next = waiters.shift();
+    if (!next) return;
+    clearTimer(next.timer);
+    next.timer = null;
+    holder = next.slot;
+    next.slot.state = "held";
+    const timing = slotTimings({ settings: next.slot.settings });
+    if (kinds.get(next.slot) === "hook") startHandoff(next.slot, timing.handoffMs);
+    next.resolve(next.slot);
+  }
+
+  function bypassWaiter(waiter: Waiter, countAsBypass: boolean): void {
+    clearTimer(waiter.timer);
+    waiter.timer = null;
+    if (waiter.slot.state === "released") return;
+    waiter.slot.degraded = true;
+    waiter.slot.state = "attached";
+    clearSlotTimers(waiter.slot);
+    if (countAsBypass) state.gateBypassed++;
+    waiter.resolve(waiter.slot);
+  }
+
+  function setGateWarningHandler(handler: ((event: Record<string, unknown>) => void) | null): void {
+    warningHandler = handler ?? defaultWarn;
+  }
+
+  function acquireSlot(meta: SlotMeta, kind: "hook" | "orphan"): Promise<GateSlot> {
+    const settings = { ...(meta.settings ?? {}) };
+    const timing = slotTimings({ ...meta, settings });
+    const slot: GateSlot = {
+      id: ++nextSlotId,
+      sessionId: meta.sessionId ?? "",
+      baseUrl: meta.baseUrl ?? null,
+      model: meta.model ?? null,
+      modelApi: meta.modelApi ?? null,
+      rules: meta.rules ?? [],
+      settings: { ...settings, ...timing },
+      pending: meta.pending ?? null,
+      attempts: 0,
+      blocked: null,
+      state: "queued",
+      acquiredAt: Date.now(),
+      degraded: false,
+      retryGraceArmed: false,
+      releaseReason: undefined,
+    };
+    timers.set(slot, { handoff: null, maxHold: null, retryGrace: null });
+    kinds.set(slot, kind);
+    state.gateAcquired++;
+    startMaxHold(slot, timing.maxHoldMs);
+
+    if (holder === null) {
+      holder = slot;
+      slot.state = "held";
+      if (kind === "hook") startHandoff(slot, timing.handoffMs);
+      return Promise.resolve(slot);
+    }
+
+    return new Promise<GateSlot>((resolve) => {
+      const waiter: Waiter = { slot, resolve, timer: null };
+      waiters.push(waiter);
+      state.gateMaxQueueDepth = Math.max(state.gateMaxQueueDepth, waiters.length);
+      waiter.timer = setTimeout(() => {
+        const index = waiters.indexOf(waiter);
+        if (index < 0 || slot.state === "released") return;
+        waiters.splice(index, 1);
+        emitWarning("queue-wait", slot, `串行化闸门等待超过 ${timing.queueWaitMs}ms，已旁路放行`);
+        bypassWaiter(waiter, true);
+      }, timing.queueWaitMs);
+      unref(waiter.timer);
+    });
+  }
+
+  function currentSlot(): GateSlot | null {
+    return holder;
+  }
+
+  function attachAttempt(slot: GateSlot): void {
+    if (slot.blocked !== null) throw slot.blocked.error;
     if (slot.state === "released") return;
-    state.gateTimeouts++;
-    emitWarning("max-hold", slot, `串行化闸门持有超过 ${maxHoldMs}ms，已释放`);
-    releaseSlot(slot, "max-hold");
-  }, maxHoldMs);
-  unref(slotTimers.maxHold);
-}
-
-function startHandoff(slot: GateSlot, handoffMs: number): void {
-  const slotTimers = timers.get(slot);
-  if (!slotTimers || slotTimers.handoff !== null) return;
-  slotTimers.handoff = setTimeout(() => {
-    if (slot.state === "released" || slot.state === "attached") return;
-    state.gateNoFetch++;
-    emitWarning("no-fetch", slot, `串行化闸门 ${handoffMs}ms 内未观察到 fetch，已释放`);
-    releaseSlot(slot, "no-fetch");
-  }, handoffMs);
-  unref(slotTimers.handoff);
-}
-
-function promoteNext(): void {
-  const next = waiters.shift();
-  if (!next) return;
-  clearTimer(next.timer);
-  next.timer = null;
-  holder = next.slot;
-  next.slot.state = "held";
-  const timing = slotTimings({ settings: next.slot.settings });
-  if (kinds.get(next.slot) === "hook") startHandoff(next.slot, timing.handoffMs);
-  next.resolve(next.slot);
-}
-
-function bypassWaiter(waiter: Waiter, countAsBypass: boolean): void {
-  clearTimer(waiter.timer);
-  waiter.timer = null;
-  if (waiter.slot.state === "released") return;
-  waiter.slot.degraded = true;
-  waiter.slot.state = "attached";
-  clearSlotTimers(waiter.slot);
-  if (countAsBypass) state.gateBypassed++;
-  waiter.resolve(waiter.slot);
-}
-
-export function setGateWarningHandler(handler: ((event: Record<string, unknown>) => void) | null): void {
-  warningHandler = handler ?? broadcast;
-}
-
-export function acquireSlot(meta: SlotMeta, kind: "hook" | "orphan"): Promise<GateSlot> {
-  const settings = { ...(meta.settings ?? {}) };
-  const timing = slotTimings({ ...meta, settings });
-  const slot: GateSlot = {
-    id: ++nextSlotId,
-    sessionId: meta.sessionId ?? "",
-    baseUrl: meta.baseUrl ?? null,
-    model: meta.model ?? null,
-    modelApi: meta.modelApi ?? null,
-    rules: meta.rules ?? [],
-    settings: { ...settings, ...timing },
-    pending: meta.pending ?? null,
-    attempts: 0,
-    blocked: null,
-    state: "queued",
-    acquiredAt: Date.now(),
-    degraded: false,
-    retryGraceArmed: false,
-    releaseReason: undefined,
-  };
-  timers.set(slot, { handoff: null, maxHold: null, retryGrace: null });
-  kinds.set(slot, kind);
-  state.gateAcquired++;
-  startMaxHold(slot, timing.maxHoldMs);
-
-  if (holder === null) {
-    holder = slot;
-    slot.state = "held";
-    if (kind === "hook") startHandoff(slot, timing.handoffMs);
-    return Promise.resolve(slot);
-  }
-
-  return new Promise<GateSlot>((resolve) => {
-    const waiter: Waiter = { slot, resolve, timer: null };
-    waiters.push(waiter);
-    state.gateMaxQueueDepth = Math.max(state.gateMaxQueueDepth, waiters.length);
-    waiter.timer = setTimeout(() => {
-      const index = waiters.indexOf(waiter);
-      if (index < 0 || slot.state === "released") return;
-      waiters.splice(index, 1);
-      emitWarning("queue-wait", slot, `串行化闸门等待超过 ${timing.queueWaitMs}ms，已旁路放行`);
-      bypassWaiter(waiter, true);
-    }, timing.queueWaitMs);
-    unref(waiter.timer);
-  });
-}
-
-export function currentSlot(): GateSlot | null {
-  return holder;
-}
-
-export function attachAttempt(slot: GateSlot): void {
-  if (slot.blocked !== null) throw slot.blocked.error;
-  if (slot.state === "released") return;
-  if (slot.degraded) {
+    if (slot.degraded) {
+      slot.state = "attached";
+      slot.attempts++;
+      return;
+    }
+    if (holder !== slot) return;
+    const slotTimers = timers.get(slot);
+    if (slotTimers) {
+      clearTimer(slotTimers.handoff);
+      slotTimers.handoff = null;
+    }
     slot.state = "attached";
     slot.attempts++;
-    return;
   }
-  if (holder !== slot) return;
-  const slotTimers = timers.get(slot);
-  if (slotTimers) {
+
+  function armRetryGrace(slot: GateSlot): void {
+    if (slot.state === "released") return;
+    const slotTimers = timers.get(slot);
+    if (!slotTimers) return;
     clearTimer(slotTimers.handoff);
     slotTimers.handoff = null;
+    clearTimer(slotTimers.retryGrace);
+    slot.retryGraceArmed = true;
+    const timing = slotTimings(slot.settings as SlotMeta);
+    slotTimers.retryGrace = setTimeout(() => {
+      slot.retryGraceArmed = false;
+      releaseSlot(slot, "retry-grace");
+    }, timing.retryGraceMs);
+    unref(slotTimers.retryGrace);
   }
-  slot.state = "attached";
-  slot.attempts++;
-}
 
-export function armRetryGrace(slot: GateSlot): void {
-  if (slot.state === "released") return;
-  const slotTimers = timers.get(slot);
-  if (!slotTimers) return;
-  clearTimer(slotTimers.handoff);
-  slotTimers.handoff = null;
-  clearTimer(slotTimers.retryGrace);
-  slot.retryGraceArmed = true;
-  const timing = slotTimings(slot.settings as SlotMeta);
-  slotTimers.retryGrace = setTimeout(() => {
-    slot.retryGraceArmed = false;
-    releaseSlot(slot, "retry-grace");
-  }, timing.retryGraceMs);
-  unref(slotTimers.retryGrace);
-}
+  function armPoison(slot: GateSlot, error: Error): void {
+    if (slot.state === "released") return;
+    slot.blocked = { error };
+    armRetryGrace(slot);
+  }
 
-export function armPoison(slot: GateSlot, error: Error): void {
-  if (slot.state === "released") return;
-  slot.blocked = { error };
-  armRetryGrace(slot);
-}
+  function releaseSlot(slot: GateSlot, _reason: ReleaseReason): void {
+    if (slot.state === "released") return;
 
-export function releaseSlot(slot: GateSlot, _reason: ReleaseReason): void {
-  if (slot.state === "released") return;
+    const queued = removeWaiter(slot);
+    if (queued && holder !== slot) {
+      slot.releaseReason = _reason;
+      slot.state = "released";
+      clearSlotTimers(slot);
+      queued.resolve(slot);
+      try {
+        releaseHandler?.(slot, _reason);
+      } catch {}
+      return;
+    }
 
-  const queued = removeWaiter(slot);
-  if (queued && holder !== slot) {
-    slot.releaseReason = _reason;
-    slot.state = "released";
     clearSlotTimers(slot);
-    queued.resolve(slot);
-    try {
-      releaseHandler?.(slot, _reason);
-    } catch {}
-    return;
-  }
-
-  clearSlotTimers(slot);
-  if (holder !== slot) {
+    if (holder !== slot) {
+      slot.releaseReason = _reason;
+      slot.state = "released";
+      try {
+        releaseHandler?.(slot, _reason);
+      } catch {}
+      return;
+    }
     slot.releaseReason = _reason;
     slot.state = "released";
+    holder = null;
     try {
       releaseHandler?.(slot, _reason);
     } catch {}
-    return;
+    promoteNext();
   }
-  slot.releaseReason = _reason;
-  slot.state = "released";
-  holder = null;
-  try {
-    releaseHandler?.(slot, _reason);
-  } catch {}
-  promoteNext();
-}
 
-export function drainGate(_reason: ReleaseReason): void {
-  if (holder !== null) {
-    const oldHolder = holder;
+  function drainGate(_reason: ReleaseReason): void {
+    if (holder !== null) {
+      const oldHolder = holder;
+      holder = null;
+      clearSlotTimers(oldHolder);
+      oldHolder.releaseReason = _reason;
+      oldHolder.state = "released";
+      try {
+        releaseHandler?.(oldHolder, _reason);
+      } catch {}
+    }
+    const pending = waiters;
+    waiters = [];
+    for (const waiter of pending) bypassWaiter(waiter, false);
+  }
+
+  function gateStats(): GateStats {
+    return {
+      active: holder !== null || waiters.length > 0,
+      queueDepth: waiters.length,
+      holderId: holder?.id ?? null,
+      holderAgeMs: holder === null ? null : Math.max(0, Date.now() - holder.acquiredAt),
+      gateAcquired: state.gateAcquired,
+      gateTimeouts: state.gateTimeouts,
+      gateNoFetch: state.gateNoFetch,
+      gateBypassed: state.gateBypassed,
+      gateMaxQueueDepth: state.gateMaxQueueDepth,
+    };
+  }
+
+  function resetGate(): void {
+    drainGate("drain");
+    waiters = [];
     holder = null;
-    clearSlotTimers(oldHolder);
-    oldHolder.releaseReason = _reason;
-    oldHolder.state = "released";
-    try {
-      releaseHandler?.(oldHolder, _reason);
-    } catch {}
+    nextSlotId = 0;
+    warnedAt = -Infinity;
+    state.gateAcquired = 0;
+    state.gateTimeouts = 0;
+    state.gateNoFetch = 0;
+    state.gateBypassed = 0;
+    state.gateMaxQueueDepth = 0;
+    setGateWarningHandler(null);
   }
-  const pending = waiters;
-  waiters = [];
-  for (const waiter of pending) bypassWaiter(waiter, false);
-}
 
-export function gateStats(): GateStats {
   return {
-    active: holder !== null || waiters.length > 0,
-    queueDepth: waiters.length,
-    holderId: holder?.id ?? null,
-    holderAgeMs: holder === null ? null : Math.max(0, Date.now() - holder.acquiredAt),
-    gateAcquired: state.gateAcquired,
-    gateTimeouts: state.gateTimeouts,
-    gateNoFetch: state.gateNoFetch,
-    gateBypassed: state.gateBypassed,
-    gateMaxQueueDepth: state.gateMaxQueueDepth,
+    setGateReleaseHandler,
+    setGateWarningHandler,
+    acquireSlot,
+    currentSlot,
+    attachAttempt,
+    armRetryGrace,
+    armPoison,
+    releaseSlot,
+    drainGate,
+    gateStats,
+    resetGate,
   };
-}
-
-export function resetGate(): void {
-  drainGate("drain");
-  waiters = [];
-  holder = null;
-  nextSlotId = 0;
-  warnedAt = -Infinity;
-  state.gateAcquired = 0;
-  state.gateTimeouts = 0;
-  state.gateNoFetch = 0;
-  state.gateBypassed = 0;
-  state.gateMaxQueueDepth = 0;
-  setGateWarningHandler(null);
 }

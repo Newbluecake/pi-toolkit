@@ -11,8 +11,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ensureDb } from "../../src/traffic/db.js";
-import { startServer } from "../../src/traffic/server.js";
-import { resetState, state } from "../../src/traffic/state.js";
+import type { TrafficEngine } from "../../src/traffic/engine.js";
+import { createTrafficServer } from "../../src/traffic/server.js";
+import { makeEngine, teardownEngine } from "./helpers/engine.js";
+
+let state: TrafficEngine;
 
 let tmp: string;
 let upstreamPort: number;
@@ -36,9 +39,8 @@ function writeSse(res: ServerResponse, chunks: string[], status = 200): void {
 
 beforeAll(async () => {
   tmp = mkdtempSync(join(tmpdir(), "record-replay4-"));
-  resetState();
-  state.dbPath = join(tmp, "traffic.db");
-  ensureDb();
+  state = makeEngine(tmp);
+  ensureDb(state);
 
   upstreamServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     switch (req.url) {
@@ -61,8 +63,8 @@ beforeAll(async () => {
   await new Promise<void>((r) => upstreamServer.listen(0, "127.0.0.1", r));
   upstreamPort = (upstreamServer.address() as { port: number }).port;
 
-  recordPort = await startServer();
-  const ins = ensureDb()
+  recordPort = await createTrafficServer(state).startServer();
+  const ins = ensureDb(state)
     .prepare(
       `INSERT INTO requests (session_id, turn, ts, provider, model, payload, request_headers, url, method)
 			 VALUES ('s1', 0, ?, 'p', 'm', '{}', '{"x-api-key":"k"}', 'http://127.0.0.1/', 'POST')`,
@@ -73,8 +75,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise((r) => upstreamServer.close(r));
-  state.server?.close();
-  resetState();
+  await teardownEngine(state);
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -94,7 +95,7 @@ async function replay(urlPath: string): Promise<{ status: number; json: any }> {
 }
 
 function dbChunks(requestId: number): string {
-  const rows = ensureDb()
+  const rows = ensureDb(state)
     .prepare("SELECT data FROM stream_chunks WHERE request_id = ? ORDER BY seq")
     .all(requestId) as Array<{ data: string }>;
   return rows.map((r) => r.data).join("");

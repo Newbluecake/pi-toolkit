@@ -1,21 +1,140 @@
 /**
  * SQLite 存储层（Node 22 内置 node:sqlite，零外部依赖）。
- * 多 pi 进程共享同一 DB：WAL 允许读写并发，busy_timeout 避免 SQLITE_BUSY 静默丢记录。
+ * 多 pi 进程共享同一 DB：WAL 允许读写并发。
+ *
+ * T2a（traffic-merge plan §3.1/§3.3）：
+ * - `node:sqlite` 惰性加载：模块顶层不 require，首次显式 DB 访问（`/record on` / `/record status`）
+ *   才经 `loadSqlite()` 加载（ExperimentalWarning 只在那一刻出现一次）；不可用时抛
+ *   `SqliteUnavailableError`，只让本命令失败。
+ * - 路径固定 `homedir()/.pi/agent/records/traffic.db`（调用时计算，不随 PI_CODING_AGENT_DIR）。
+ * - 旧 `dumps/` 目录不再自动搬迁：打开前检测，未迁移 / 半迁移状态拒绝打开并给人工步骤。
+ * - 无模块级可变状态：连接句柄归 engine（见 engine.ts 的 ensureDb）。
  */
-import { SecureSessionError, isSecureSession } from "./secure.js";
-import { existsSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { SecureSessionError, isSecure } from "./secure.js";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { broadcast } from "./sse.js";
-import { DB_PATH, LEGACY_DB_PATH, state } from "./state.js";
+import type { TrafficEngine } from "./engine.js";
 
-// node:sqlite 不在 Node 22 的 builtinModules 列表中，vite/vitest 不会自动 externalize；
-// 用 createRequire 动态加载，避免被打包器静态解析（运行时仍是原生 node:sqlite）。
-const { DatabaseSync: DatabaseSyncImpl } = createRequire(import.meta.url)("node:sqlite") as {
+export interface SqliteModule {
   DatabaseSync: typeof DatabaseSync;
-};
+}
+
+export type SqliteLoader = () => SqliteModule;
+
+export class SqliteUnavailableError extends Error {
+  readonly code = "E_SQLITE_UNAVAILABLE" as const;
+  constructor(cause: unknown) {
+    super(`traffic 录制需要 Node ≥22.13（当前 ${process.version}），node:sqlite 不可用`, { cause });
+    this.name = "SqliteUnavailableError";
+  }
+}
+
+/**
+ * 惰性加载 node:sqlite。node:sqlite 不在 Node 22 的 builtinModules 列表中，vite/vitest 不会自动
+ * externalize；用 createRequire 动态加载，避免被打包器静态解析（运行时仍是原生 node:sqlite）。
+ * 重复调用由 Node 自身的 require 缓存去重，本模块不持有状态。
+ */
+export function loadSqlite(): SqliteModule {
+  try {
+    const mod = createRequire(import.meta.url)("node:sqlite") as Partial<SqliteModule>;
+    if (typeof mod.DatabaseSync !== "function") throw new Error("DatabaseSync missing");
+    return mod as SqliteModule;
+  } catch (err) {
+    throw new SqliteUnavailableError(err);
+  }
+}
+
+/** 固定路径（§3.3）：与源实现同算法，调用时计算，不随 PI_CODING_AGENT_DIR。 */
+export function defaultRecordPaths(home: string = homedir()): {
+  recordDir: string;
+  dbPath: string;
+  legacyDir: string;
+  legacyDbPath: string;
+} {
+  const agent = join(home, ".pi", "agent");
+  return {
+    recordDir: join(agent, "records"),
+    dbPath: join(agent, "records", "traffic.db"),
+    legacyDir: join(agent, "dumps"),
+    legacyDbPath: join(agent, "dumps", "traffic.db"),
+  };
+}
+
+export type LegacyLayoutState = "unmigrated" | "half-migrated";
+
+export class LegacyLayoutError extends Error {
+  readonly code: "E_LEGACY_UNMIGRATED" | "E_LEGACY_HALF_MIGRATED";
+  constructor(
+    readonly layout: LegacyLayoutState,
+    message: string,
+  ) {
+    super(message);
+    this.name = "LegacyLayoutError";
+    this.code = layout === "unmigrated" ? "E_LEGACY_UNMIGRATED" : "E_LEGACY_HALF_MIGRATED";
+  }
+}
+
+function nonEmptyFile(path: string): boolean {
+  try {
+    return statSync(path).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 旧目录检测（§3.3，取代自动 rename）。只读 stat，不创建任何文件：
+ * - records 库不存在而 dumps 库（或非空 -wal）存在 ⇒ 未迁移：拒绝，给人工步骤，不建空库；
+ * - records 库存在且 dumps 下仍有 traffic.db 或非空 -wal ⇒ 半迁移：拒绝，提示人工合并；
+ * - 两者皆无 / 只有 records ⇒ 返回 null（正常打开或新建）。
+ */
+export function detectLegacyLayout(dbPath: string, legacyDbPath: string): LegacyLayoutError | null {
+  const current = existsSync(dbPath);
+  const legacyDb = existsSync(legacyDbPath);
+  const legacyWal = nonEmptyFile(`${legacyDbPath}-wal`);
+  if (!legacyDb && !legacyWal) return null;
+  if (!current) {
+    if (!legacyDb) {
+      return new LegacyLayoutError(
+        "half-migrated",
+        [
+          `检测到旧目录残留的非空 WAL（${legacyDbPath}-wal）而主库缺失：数据状态不完整，traffic 拒绝打开。`,
+          "请人工检查旧目录，确认无需保留后删除该 WAL，或从备份恢复主库后按迁移步骤处理。",
+        ].join("\n"),
+      );
+    }
+    return new LegacyLayoutError(
+      "unmigrated",
+      [
+        `检测到旧版数据目录 ${dirname(legacyDbPath)}（records/ 下尚无库），traffic 不再自动搬迁，已拒绝打开。`,
+        "人工迁移步骤：",
+        "  1. 关闭所有 pi 进程（含仍在运行旧版 pi-traffic-record 的进程）；",
+        `  2. sqlite3 "${legacyDbPath}" "PRAGMA wal_checkpoint(TRUNCATE)"；`,
+        `  3. 确认 "${legacyDbPath}-wal" 不存在或为空；`,
+        `  4. mkdir -p "${dirname(dbPath)}" && mv "${legacyDbPath}" "${dbPath}"（-shm 可删除）；`,
+        "  5. 重新执行 /record on。",
+      ].join("\n"),
+    );
+  }
+  return new LegacyLayoutError(
+    "half-migrated",
+    [
+      `检测到半迁移状态：${dbPath} 已存在，但旧目录 ${dirname(legacyDbPath)} 下仍有 ${legacyDb ? "traffic.db" : "非空 traffic.db-wal"}。`,
+      "traffic 拒绝打开（不会静默打开可能缺 WAL 的库）。请关闭所有 pi 后人工合并或删除其中一份，再执行 /record on。",
+    ].join("\n"),
+  );
+}
+
+export interface OpenDbOptions {
+  loadSqlite?: SqliteLoader;
+  /** 旧库路径（null = 不检测）。缺省：dbPath 等于默认路径时检测默认 dumps/，否则不检测。 */
+  legacyDbPath?: string | null;
+}
 
 export class DbMigrationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -67,27 +186,16 @@ export function verifySchema(d: DatabaseSync): void {
   }
 }
 
-/**
- * 一次性迁移：dumps/ → records/（命令由 /dump 改名为 /record 时的目录改名）。
- * 只对默认路径生效，测试的临时 dbPath 不受影响。同文件系统内 rename 是原子的；
- * 任何一步失败都静默跳过 —— 迁移不成功最多是重新开一个空库，绝不能阻断扩展启动。
- */
-export function migrateLegacyRecordDir(dbPath: string): void {
-  if (dbPath !== DB_PATH) return;
-  if (existsSync(dbPath) || !existsSync(LEGACY_DB_PATH)) return;
-  try {
-    mkdirSync(dirname(dbPath), { recursive: true });
-    // -wal / -shm 必须跟着主库一起搬，否则 SQLite 会把未 checkpoint 的写丢掉。
-    for (const suffix of ["", "-wal", "-shm"]) {
-      const from = `${LEGACY_DB_PATH}${suffix}`;
-      if (existsSync(from)) renameSync(from, `${dbPath}${suffix}`);
-    }
-  } catch {}
-}
-
 /** 打开（或新建）数据库并建表/补列；openDb 本身不触碰全局 state，便于测试 */
-export function openDb(dbPath: string): DatabaseSync {
-  migrateLegacyRecordDir(dbPath);
+export function openDb(dbPath: string, opts: OpenDbOptions = {}): DatabaseSync {
+  const defaults = defaultRecordPaths();
+  const legacy =
+    opts.legacyDbPath === undefined ? (dbPath === defaults.dbPath ? defaults.legacyDbPath : null) : opts.legacyDbPath;
+  if (legacy !== null) {
+    const refusal = detectLegacyLayout(dbPath, legacy);
+    if (refusal) throw refusal;
+  }
+  const { DatabaseSync: DatabaseSyncImpl } = (opts.loadSqlite ?? loadSqlite)();
   mkdirSync(dirname(dbPath), { recursive: true });
   const db: DatabaseSync = new DatabaseSyncImpl(dbPath);
   try {
@@ -196,27 +304,31 @@ export function openDb(dbPath: string): DatabaseSync {
   }
 }
 
-export function ensureDb(): DatabaseSync {
-  // 纵深防御：加密会话下任何调用方都不得打开/复用 traffic.db（每次现场判定）。
-  if (isSecureSession()) throw new SecureSessionError();
-  if (state.db) return state.db;
+/**
+ * 取 engine 的连接（必要时打开）。纵深防御：加密会话下任何调用方都不得打开/复用 traffic.db
+ * （每次现场判定）；非 open 的 engine 不再打开库（关闭后的陈旧续体不能重开旧库）。
+ */
+export function ensureDb(engine: TrafficEngine): DatabaseSync {
+  if (isSecure()) throw new SecureSessionError();
+  if (engine.state !== "open") throw new Error("traffic engine 已关闭");
+  if (engine.db) return engine.db;
   try {
-    state.db = openDb(state.dbPath);
-    state.dbError = null;
-    return state.db;
+    engine.db = openDb(engine.dbPath, { loadSqlite: engine.loadSqlite, legacyDbPath: engine.legacyDbPath });
+    engine.dbError = null;
+    return engine.db;
   } catch (err) {
-    state.dbError = String(err);
-    state.db = null;
-    if (!state.dbErrorNotified) {
-      state.dbErrorNotified = true;
-      broadcast({ type: "record_warn", message: `数据库错误，改写持久化已禁用: ${state.dbError}` });
+    engine.dbError = String(err);
+    engine.db = null;
+    if (!engine.dbErrorNotified) {
+      engine.dbErrorNotified = true;
+      broadcast(engine, { type: "record_warn", message: `数据库错误，改写持久化已禁用: ${engine.dbError}` });
     }
     throw err;
   }
 }
 
-export function upsertSession(ctx: ExtensionContext): string {
-  const d = ensureDb();
+/** 写 sessions 行；调用方须已经过 persist 闸口（见 persist.ts）。 */
+export function upsertSession(d: DatabaseSync, ctx: ExtensionContext): string {
   const sid = ctx.sessionManager.getSessionId();
   const now = new Date().toISOString();
   d.prepare(

@@ -2,17 +2,18 @@ import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  cleanupJqTempDir,
-  getActiveChildCount,
-  getSpawnCount,
-  probeJq,
-  resetJqEngine,
-  resetJqForTest,
-  runJq,
-  shutdownJq,
-  JqError,
-} from "../../src/traffic/jq.js";
+import { createJqRunner, JqError } from "../../src/traffic/jq.js";
+
+// T2a：jq 执行器归 engine（无模块级状态）；本文件共享一个执行器，等价于源实现的模块单例。
+const jq = createJqRunner();
+const runJq = jq.run;
+const probeJq = jq.probe;
+const shutdownJq = jq.shutdown;
+const resetJqEngine = jq.reset;
+const resetJqForTest = jq.resetForTest;
+const getSpawnCount = jq.spawnCount;
+const getActiveChildCount = jq.activeChildCount;
+const cleanupJqTempDir = jq.cleanupTempDir;
 
 const jqAvailable = existsSync("/usr/bin/jq");
 const jqDescribe = jqAvailable ? describe : describe.skip;
@@ -199,5 +200,24 @@ jqDescribe("runJq（子进程生命周期）", () => {
     expect(await runJq(slowFilter, "{}", { timeoutMs: 60_000 })).toBe("1");
     expect(getActiveChildCount()).toBe(0);
     resetJqForTest();
+  });
+});
+
+describe("T2a：exit 监听惰性登记（plan §3.1 / §7.1）", () => {
+  it("创建执行器不登记 exit 监听；首次 spawn 才登记一次；dispose 移除且之后拒绝执行", async () => {
+    const before = process.listenerCount("exit");
+    const runner = createJqRunner();
+    expect(runner.exitHookInstalled()).toBe(false);
+    expect(process.listenerCount("exit")).toBe(before);
+    await runner.probe("/nonexistent/jq-for-lazy-test");
+    await runner.probe("/nonexistent/jq-for-lazy-test-2");
+    expect(runner.exitHookInstalled()).toBe(true);
+    expect(process.listenerCount("exit")).toBe(before + 1);
+    runner.dispose();
+    expect(runner.exitHookInstalled()).toBe(false);
+    expect(process.listenerCount("exit")).toBe(before);
+    runner.reset();
+    await expect(runner.run(".", "{}")).rejects.toMatchObject({ kind: "spawn_error" });
+    expect(process.listenerCount("exit")).toBe(before);
   });
 });

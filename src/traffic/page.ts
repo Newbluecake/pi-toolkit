@@ -2,10 +2,10 @@
  * Web 查看页：Vue 3 内联应用（零构建步骤、零外部运行时依赖）。
  *
  * - 本文件只含 HTML 骨架（#app 挂载点 + 两个内联 script 占位）与全部 CSS
- * - Vue（src/vendor/vue.global.prod.js，带 compiler 的 global build）与应用（src/app.js）
- *   在模块加载时 readFileSync 读入并内联；两个文本 blob 分别 sanitize（</script → <\/script），
- *   不对最终 PAGE 全局替换（骨架自身需要合法的 </script>）
- * - PAGE_GZIP 为模块级 gzipSync 预压缩副本，常驻内存；server 按 accept-encoding 直接回发
+ * - Vue（vendor/vue.global.prod.js，带 compiler 的 global build）与应用（app.js）
+ *   在**首次调用 buildPage()** 时 readFileSync 读入并内联（T2a：模块顶层零 IO，§3.1）；两个文本 blob 分别
+ *   sanitize（</script → <\/script），不对最终页面全局替换（骨架自身需要合法的 </script>）
+ * - gzip 副本同在 buildPage() 内生成；缓存归调用方（engine.page，首个 GET / 时组装）
  * - Vue 升级步骤见 README「开发与本地安装」
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -35,15 +35,11 @@ function resolveSrcDir(): string {
   );
 }
 
-const SRC_DIR = resolveSrcDir();
-
 /** 内联 sanitize：仅对将要插入 <script> 的文本 blob 转义 </script，防止提前闭合外层 script 标签 */
 const inlineJs = (js: string): string => js.replace(/<\/script/gi, "<\\/script");
 
-const VUE_JS = inlineJs(readFileSync(join(SRC_DIR, "vendor", "vue.global.prod.js"), "utf8"));
-const APP_JS = inlineJs(readFileSync(join(SRC_DIR, "app.js"), "utf8"));
-
-const PAGE_HTML = `<!DOCTYPE html>
+function pageHtml(VUE_JS: string, APP_JS: string): string {
+  return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -241,9 +237,20 @@ button.btn:disabled { opacity: 0.5; cursor: default; }
 <script>${APP_JS}</script>
 </body>
 </html>`;
+}
 
-/** 页面原文（accept-encoding 不含 gzip 时的回退） */
-export const PAGE = PAGE_HTML;
+export interface BuiltPage {
+  /** 页面原文（accept-encoding 不含 gzip 时的回退）。 */
+  html: string;
+  /** gzip 预压缩副本，server 按 accept-encoding 直接回发。 */
+  gzip: Buffer;
+}
 
-/** gzip 预压缩副本：模块加载时生成一次，常驻内存，server 按 accept-encoding 直接回发 */
-export const PAGE_GZIP = gzipSync(PAGE_HTML);
+/** 组装页面（读资源 + 内联 + gzip）。纯函数：每次调用重新读取；缓存由调用方持有。 */
+export function buildPage(): BuiltPage {
+  const dir = resolveSrcDir();
+  const vue = inlineJs(readFileSync(join(dir, "vendor", "vue.global.prod.js"), "utf8"));
+  const app = inlineJs(readFileSync(join(dir, "app.js"), "utf8"));
+  const html = pageHtml(vue, app);
+  return { html, gzip: gzipSync(html) };
+}
