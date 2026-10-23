@@ -25,7 +25,11 @@
  * into the CURRENT viewport. `resetRect` cancels a maximize; `dropRect` forgets the state.
  *
  * CSP: rect values reach the DOM only as CSS variables through Vue `:style` OBJECT bindings
- * (`varsOf`) — no static style attributes, no rAF, no transform (R2).
+ * (`varsOf`) — no static style attributes, no rAF, no transform (R2). The five `--pw-*` vars
+ * are registered `@property inherits:false` in `styles/preview.css` (preview-perf P0,
+ * docs/dev/preview-perf/plan.md §3) so a geometry change restyles the window box only,
+ * never its content subtree; the writes stay `<length>`/`<integer>`-shaped (pinned by
+ * tests/web-hub/ui/preview-geom-vars.test.ts).
  */
 import { onScopeDispose, ref, watch, type Ref } from "vue";
 import {

@@ -1082,6 +1082,40 @@ button.preview-dir-row:focus-visible {
   pointer-events: auto;
 }
 
+/* preview-perf P0 (docs/dev/preview-perf/plan.md §3): the five geometry vars are registered
+ * NON-INHERITED — one change must restyle the window box only, never its (possibly
+ * 10k-node) content subtree. Unregistered custom properties inherit, so every drag /
+ * activate / resize used to restyle the whole text body (~30 ms on a 3.6k-line file,
+ * plan table A). `varsOf`/`zOf` only ever write `<length>`/`<integer>`-shaped values, so
+ * registration never invalidates them; engines without @property (Firefox <128, Safari
+ * <16.4) ignore this block and fall back to the old inherited behaviour — slower, never
+ * wrong. Positioning stays left/top (R2: no transform), preview-windows §7.1. */
+@property --pw-x {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --pw-y {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --pw-w {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --pw-h {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --pw-z {
+  syntax: "<integer>";
+  inherits: false;
+  initial-value: 0;
+}
+
 /* One window: positioned by left/top ONLY (never transform — a transform would mint a new
  * containing block for fixed descendants, R2) through CSS variables the host sets via
  * Vue's OBJECT :style binding (runtime CSSOM, CSP-safe; z-order rides --pw-z so activation
