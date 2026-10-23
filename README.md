@@ -84,6 +84,7 @@ pi install .
 | topic-switch              | 新请求与当前会话无关且缓存已冷时，建议开新会话。                                                                                                                                                                                                                                                 | [tools](docs/guide/tools.md#topic-switch)                        |
 | 自动标题 / 延迟 `/reload` | 小模型生成会话标题；有 subagent 在跑时延后 `/reload`。                                                                                                                                                                                                                                           | [tools](docs/guide/tools.md#自动标题)                            |
 | Web Hub（可选）           | 浏览器查看与控制会话：网页发消息、`ask_user` 竞速、托管会话与恢复、文件 / HTML 沙箱预览、本机端口代理、worktree diff / 图、版本面板、LAN 密码与安全（IP 白名单、二次验证、登录会话管理、飞书安全告警）、隐私锁；可安装为 PWA（[安装到手机 / 桌面](docs/guide/web-hub.md#安装到手机--桌面pwa)）。 | [web-hub](docs/guide/web-hub.md)                                 |
+| 加密会话（pi-secure）     | gocryptfs 保险库：项目与会话记录加密落盘，插件守护拦截跨域读写。未配置时零接线。                                                                                                                                                                                                                 | 本文 [加密会话](#加密会话pi-secure)                              |
 | 从独立插件迁移            | 旧插件的卸载与残留识别。                                                                                                                                                                                                                                                                         | [migration](docs/guide/migration.md)                             |
 
 ## 命令
@@ -102,6 +103,7 @@ pi install .
 | `/feishu-test`                                                            | 发送飞书测试卡片                                                                                                    |
 | `/pi-hud-refresh`                                                         | `git fetch` 并刷新 HUD                                                                                              |
 | `/resume-recent`                                                          | 恢复最近 48 小时的会话（`--all` 全量）                                                                              |
+| `/secure status`                                                          | 加密会话判定与挂载状态（配置过 `secure` 段才注册）                                                                  |
 | `/clear`                                                                  | 开新会话                                                                                                            |
 
 ## 配置
@@ -157,6 +159,86 @@ pi install .
 | `feishuBot.files.inbound`       | `true`    | 接收入站图片/文件附件。                                    |
 | `feishuBot.files.maxInboundMiB` | `30`      | 解析范围 1–100 MiB，实际仍受共享上传的 30 MiB 上限约束。   |
 | `feishuBot.securityAlerts`      | `true`    | LAN 安全告警：新 IP 登录、白名单拒绝、会话下线、2FA 变更。 |
+
+## 加密会话（pi-secure）
+
+把项目连同它的全部会话记录放进一个 gocryptfs 加密目录（保险库）：挂载后正常使用，卸载后磁盘上只剩密文。插件做轻量守护——加密会话写不到库外、普通会话读不到库内。**这是加固，不是「绝不写明文」的承诺**：web-hub / 飞书里的明文副本、swap、终端回滚等残留见[设计文档](docs/dev/data-encryption/plan.md) §5。
+
+### 前提与安装
+
+- Linux（依赖 FUSE）；
+- `gocryptfs` ≥ 1.8（Ubuntu 22.04 可直接 `sudo apt install gocryptfs`）、`fusermount3`、`flock`（util-linux 自带）；
+- 安装启动器（把仓库内的启动器链接到 `~/.local/bin`，确保该目录在 PATH 里）：
+
+  ```sh
+  ln -s <仓库路径>/src/secure/bin/pi-secure ~/.local/bin/pi-secure
+  # git 安装的仓库路径通常是 ~/.pi/agent/git/github.com/Newbluecake/pi-toolkit
+  ```
+
+  配置过保险库后，会话内 `/secure status` 也会打印这条安装命令（未配置时该命令不注册）。
+
+### 初始化
+
+```sh
+pi-secure init acme        # 需要真实终端；会提示输入两次新口令
+```
+
+- **master key 只在 init 时由 gocryptfs 在终端打印一次**（64 个十六进制字符），务必当场抄写并离线保存——口令丢失且没有 master key 时数据无法恢复。工具本身不读取、不保存口令与 master key。
+- 打印后建议执行 `clear` 和 `tmux clear-history`（尽力清理终端回滚，算不上安全擦除）。
+- init 会自动完成首次挂载、创建目录、登记保险库并写好项目 sessionDir，结束时自动卸载。
+
+### 迁移已有项目到 ~/secure/acme
+
+```sh
+pi-secure init acme                 # ① 若还没建
+pi-secure unlock acme               # ② 输入口令挂载
+rsync -a ~/ai/acme/ ~/secure/acme/  # ③ 整个仓库都要搬进去（含 .git）
+pi-secure run acme --version        # ④ 冒烟（不带 `--` 分隔；-- 之后的内容会被当成消息）
+cd ~/secure/acme                    # ⑤ 确认 git 仓库完整：
+git status
+git rev-parse --git-common-dir      #    输出应位于 ~/secure/acme 内；库外 common-dir 会被插件警告
+# ⑥ 旧会话按需导入（务必用绝对路径）：
+pi-secure run acme --fork /home/me/.pi/agent/sessions/旧会话.jsonl
+# ⑦ 项目 memory 按 cwd 存放，新路径是空 memory；需要时把
+#    ~/.pi/agent/memory/<旧slug>/ 复制到 ~/.local/share/pi-toolkit-secure/acme/mnt/state/memory/<新slug>/
+# ⑧ 确认无误后删除原目录和旧备份（SSD / CoW 上删除不等于擦除）
+# ⑨ 更新 IDE 工作区、脚本、cron、docker compose 等处的绝对路径
+```
+
+### 日常使用
+
+| 命令                           | 作用                                                                                               |
+| ------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `pi-secure run acme`           | 解锁（提示口令）→ 在项目根启动 pi → pi 退出后自动尽力卸载（10 秒有界收尾；卸不掉会告警并保留挂载） |
+| `pi-secure run acme -C sub`    | 从项目的子目录 `sub` 启动（任意目录都可调用，不必先 cd）                                           |
+| `pi-secure unlock acme`        | 挂载；已挂载则直接返回。之后在项目根直接 `pi` 也可以（sessionDir 已写进项目设置）                  |
+| `pi-secure lock acme [--lazy]` | 有界卸载；`--lazy` 延迟卸载（有占用者时仍可卸）                                                    |
+| `pi-secure status [acme]`      | 挂载状态、布局完整性、swap / core 警告、traffic-record 适配                                        |
+
+会话内用 `/secure status` 查看判定、锁定原因、各保险库挂载状态与 traffic-record 适配情况。
+
+### 注意事项
+
+- **`--fork` / `--session` / `@file` 一律用绝对路径**：相对路径按 pi 的 cwd（库内）解析。
+- **注册新保险库后需重启 pi 进程**：`pi-secure init` 写入的登记在 `/reload` 后不会重新判定。
+- 加密会话**不能写保险库外**（write/edit 被拦截，bash 尽力而为）；普通会话**不能读保险库**（read/write/edit/grep/find/ls 与 bash 命令文本被拦截）。
+- worktree 隔离在加密会话中被拒绝；飞书通知卡片、跨会话消息（xs）、droid、cron 新建在加密会话中关闭。
+- traffic-record 需 **v0.2.1+**（声明遵守 `PI_SECURE_SESSION=1`）：旧版本会把请求正文写进明文 traffic.db，`/secure status` 会警告。
+- 运行中保险库被外部卸载 ⇒ 会话转为 LOCKED（输入与工具全部拦截）；重新挂载后重开会话即可。
+- 未挂载时 `~/secure/acme` 指向一个普通文件，`cd` 会失败——这是设计使然（哨兵）。
+- pi 原生 `/debug` `/export <库外路径>` `/share` `/copy`、绕过 `pi-secure` 直接在子目录里跑 `pi`，这些路径插件拦不到；一律走 `pi-secure run`。完整残留清单见[设计文档](docs/dev/data-encryption/plan.md) §5。
+
+### 故障排除
+
+| 症状                                 | 处理                                                                                                                                       |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `lock` 报 busy / EBUSY，列出占用 pid | 有进程的 cwd 还在库内（IDE、shell 等）：退出后重试 `pi-secure lock <name>`；不急的话用 `--lazy` 延迟卸载                                   |
+| `status` 显示 stale（ENOTCONN）      | gocryptfs 守护进程异常退出：`pi-secure unlock <name>` 会先清理再重新挂载，或 `pi-secure lock <name>` 清理                                  |
+| 退出码 75「卸载未完成」              | 保险库可能仍挂载：稍后 `pi-secure status` 查看，再 `pi-secure lock <name>`；必要时手动 `fusermount3 -uz <dir>/mnt`                         |
+| 退出码 77                            | 口令连错 3 次（间隔 1s/2s/4s），重新执行命令                                                                                               |
+| 退出码 73                            | 另一个 pi-secure 正在挂载/卸载（mount.lock 被占），稍后重试                                                                                |
+| 状态栏 `secure:locked`、输入被拦     | 会话被 LOCKED：保险库未挂载、会话与所属库不一致或跨域打开。按提示重开（如 `pi-secure run acme -C sub`）；LOCKED 不会自动退出，`/quit` 可用 |
+| 状态栏 `secure:invalid`              | `pi-subagent.json` 的 `secure` 段无法解析：修复 JSON 后重启 pi                                                                             |
 
 ## 开发
 
