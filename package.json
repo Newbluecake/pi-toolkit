@@ -92,6 +92,7 @@
     "check:web": "tsx scripts/web-hub/check-ui-dist.ts",
     "probe:csp": "tsx scripts/web-hub/csp-probe.ts",
     "probe:mermaid": "tsx scripts/web-hub/csp-probe.ts --suite mermaid",
+    "probe:preview-perf": "tsx scripts/web-hub/preview-perf-probe.ts",
     "dev:hub": "tsx scripts/web-hub/dev-hub.ts",
     "visual:web": "tsx scripts/web-hub/visual.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.typecheck.json && vue-tsc --noEmit -p src/web-hub/ui/tsconfig.json",

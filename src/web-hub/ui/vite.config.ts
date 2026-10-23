@@ -8,10 +8,11 @@
  *    lazy chunks for dynamic `import()`s (2026-10 syntax-highlight: Prism + its language
  *    packs load only when a highlightable code view mounts) — `assets/<name>-<hash>.js`
  *    remains the naming contract `ui-manifest.ts`'s `isAllowedUiPath` enforces.
- *  - `--mode csp-probe` (`npm run probe:csp` / `npm run probe:mermaid`, §4.4.1): entries
- *    `csp-probe/{index,negative,mermaid}.html`, output `node_modules/.cache/pwh-csp-probe/`
- *    (already `.gitignore`d via `node_modules/`), no `build-info.json` (that plugin is
- *    skipped), no `public/` copy (the probe doesn't need `theme-init.js`/favicon).
+ *  - `--mode csp-probe` (`npm run probe:csp` / `npm run probe:mermaid` / `npm run
+ *    probe:preview-perf`, §4.4.1): entries `csp-probe/{index,negative,mermaid,preview-perf}.html`,
+ *    output `node_modules/.cache/pwh-csp-probe/` (already `.gitignore`d via `node_modules/`),
+ *    no `build-info.json` (that plugin is skipped), no `public/` copy (the probe doesn't
+ *    need `theme-init.js`/favicon).
  *
  * Both modes also run `mermaid-provenance-plugin.ts` (web-hub-mermaid plan §7): `assets/mmd-*` naming of the lazily
  * loaded mermaid closure, mixed-chunk build failure, the ELK EPL banner, and the sha256-bound sidecar `check:web`
@@ -102,6 +103,9 @@ export default defineConfig(async ({ command, mode }): Promise<UserConfig> => {
               index: resolve(here, "csp-probe/index.html"),
               negative: resolve(here, "csp-probe/negative.html"),
               mermaid: resolve(here, "csp-probe/mermaid.html"),
+              // preview-perf plan §6.1 (PB): real-component perf probe — never in the product
+              // bundle (this input list only exists under --mode csp-probe).
+              "preview-perf": resolve(here, "csp-probe/preview-perf.html"),
             },
             output: { chunkFileNames: provenance.chunkFileNames },
           }
