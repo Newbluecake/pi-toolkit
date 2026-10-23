@@ -112,6 +112,30 @@ describe("spawnHub", () => {
     expect(child.on).toHaveBeenCalledWith("error", expect.any(Function));
   });
 
+  it("data-encryption §2.7: the hub env is hubSafeEnv(process.env) — PI_SECURE_* gone, TMPDIR restored", () => {
+    const keys = ["TMPDIR", "ARMORY_MEMORY_ROOT", "PI_SECURE_VAULT", "PI_SECURE_SESSION", "PI_SECURE_ORIG_ENV"];
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    try {
+      process.env.TMPDIR = "/vault/mnt/state/tmp";
+      process.env.ARMORY_MEMORY_ROOT = "/vault/mnt/state/memory";
+      process.env.PI_SECURE_VAULT = "acme";
+      process.env.PI_SECURE_SESSION = "1";
+      process.env.PI_SECURE_ORIG_ENV = JSON.stringify({ TMPDIR: "/tmp/orig", ARMORY_MEMORY_ROOT: null });
+      const spawnImpl = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+      spawnHub(plan, "/m.ts", config, spawnImpl as never);
+      const env = (spawnImpl.mock.calls[0] as unknown as [string, string[], { env: Record<string, string> }])[2].env;
+      expect(env.TMPDIR).toBe("/tmp/orig");
+      expect("ARMORY_MEMORY_ROOT" in env).toBe(false);
+      expect(Object.keys(env).filter((k) => k.startsWith("PI_SECURE_"))).toEqual([]);
+      expect(JSON.parse(env.PI_WEBHUB_CONFIG!)).toEqual(config);
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+  });
+
   it("a throwing spawn never propagates", () => {
     const spawnImpl = vi.fn(() => {
       throw new Error("EAGAIN");

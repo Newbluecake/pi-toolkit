@@ -11,6 +11,7 @@
  * Nothing here blocks: `spawnHub` is fire-and-forget (detached, stdio ignored,
  * unref'd, async spawn errors swallowed).
  */
+import { hubSafeEnv } from "../../secure/env.js";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -104,7 +105,8 @@ export function spawnHub(
       stdio: "ignore",
       cwd: config.home,
       env: {
-        ...process.env,
+        // data-encryption §2.7: the hub only ever sees the pre-secure env (identity when no PI_SECURE_* key).
+        ...hubSafeEnv(process.env),
         PI_WEBHUB_CONFIG: JSON.stringify(config),
         PI_WEBHUB_LAUNCHER: JSON.stringify([plan.execPath, plan.argv1]),
       },

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { secureStatePaths } from "../secure/domain.js";
 import {
   closeSync,
   existsSync,
@@ -74,9 +75,14 @@ interface HeadScan {
   fileSize: number;
 }
 
-/** Consult fork copies live here: `~/.pi/agent/cache/consult-sessions` via pi's own accessor (review-1 #15 — never derived by walking up from a session dir). */
+/**
+ * Consult fork copies live here: `~/.pi/agent/cache/consult-sessions` via pi's own accessor (review-1 #15 — never
+ * derived by walking up from a session dir). data-encryption §2.5: a secure process uses the in-vault
+ * `<state>/cache/consult-sessions` instead — creation, main fork, `removeForkFile`'s default root, sweep and the
+ * expert index all read THIS function, so they stay on one root.
+ */
 export function consultSessionDir(): string {
-  return join(getAgentDir(), "cache", "consult-sessions");
+  return secureStatePaths()?.consult ?? join(getAgentDir(), "cache", "consult-sessions");
 }
 
 /** Single-line, 200-char-capped reason payload (§6 C-9). */

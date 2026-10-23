@@ -56,6 +56,7 @@
  *
  * Zero-`as` module (`hub/spawn/**` contract, `tests/web-hub/hub/spawn/source-scan.test.ts`).
  */
+import { hubSafeEnv, PI_SECURE_PREFIX } from "../../../secure/env.js";
 import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, constants, lstatSync, openSync, readdirSync, readFileSync, readSync, unlinkSync } from "node:fs";
 import { basename } from "node:path";
@@ -1871,8 +1872,10 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       if (deps.childUmask !== undefined) umaskFn(deps.childUmask);
       try {
         const childEnv: Record<string, string> = {};
-        for (const [k, v] of Object.entries(deps.env)) {
-          if (v === undefined || k.startsWith("PI_WEBHUB_")) continue;
+        // data-encryption §2.7: restore the pre-secure TMPDIR/ARMORY_MEMORY_ROOT and drop PI_SECURE_*
+        // (identity when the hub env carries no PI_SECURE_* key); the prefix skip is defence in depth.
+        for (const [k, v] of Object.entries(hubSafeEnv(deps.env))) {
+          if (v === undefined || k.startsWith("PI_WEBHUB_") || k.startsWith(PI_SECURE_PREFIX)) continue;
           childEnv[k] = v;
         }
         childEnv.PI_WEBHUB_HEADLESS = "1";

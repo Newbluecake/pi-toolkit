@@ -613,6 +613,31 @@
       "expect": {
         "A": "1"
       }
+    },
+    {
+      "name": "only PI_SECURE_ORIG_ENV (no other PI_SECURE_*): ORIG applied — null deletes, string restores",
+      "input": {
+        "PATH": "/usr/bin",
+        "TMPDIR": "/legit/tmp",
+        "ARMORY_MEMORY_ROOT": "/legit/mem",
+        "PI_SECURE_ORIG_ENV": "{\"TMPDIR\": null, \"ARMORY_MEMORY_ROOT\": \"/orig/mem\"}"
+      },
+      "expect": {
+        "PATH": "/usr/bin",
+        "ARMORY_MEMORY_ROOT": "/orig/mem"
+      }
+    },
+    {
+      "name": "only a malformed PI_SECURE_ORIG_ENV (not a secure session): stripped, TMPDIR/ARMORY kept",
+      "input": {
+        "TMPDIR": "/legit/tmp",
+        "ARMORY_MEMORY_ROOT": "/legit/mem",
+        "PI_SECURE_ORIG_ENV": "{bad"
+      },
+      "expect": {
+        "TMPDIR": "/legit/tmp",
+        "ARMORY_MEMORY_ROOT": "/legit/mem"
+      }
     }
   ]
 }

@@ -1,4 +1,5 @@
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { assertSessionFileInDomain, secureChildSessionDir } from "../secure/domain.js";
 import { DefaultResourceLoader, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -855,7 +856,19 @@ export class PiSessionDriver implements SessionDriver {
     const resolved = this.withResolvedModel(spec);
     const cwd = resolved.cwd ?? process.cwd();
     const persist = resolved.persist ?? this.rememberAgents;
-    const sessionManager = persist ? SessionManager.create(cwd) : SessionManager.inMemory(cwd);
+    // data-encryption §2.5: a secure process puts child sessions inside the vault; a locked one
+    // refuses to start any. Plain ⇒ undefined ⇒ the exact legacy `create(cwd)` call.
+    let secureDir: string | undefined;
+    try {
+      secureDir = secureChildSessionDir();
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    const sessionManager = persist
+      ? secureDir !== undefined
+        ? SessionManager.create(cwd, secureDir)
+        : SessionManager.create(cwd)
+      : SessionManager.inMemory(cwd);
     // H0 (session-history plan §4.3, PD2): mark every persisted child session as a child BEFORE
     // anything else can append — the marker is then the first entry (file line 2 once pi lazily
     // flushes). Driver-side on purpose: it fires even when the child extension never activated
@@ -883,6 +896,13 @@ export class PiSessionDriver implements SessionDriver {
       });
   }
   resume(sessionFile: string, spec: SessionSpec) {
+    // data-encryption §2.5: cross-domain resume (vault file from a plain process, or a file outside
+    // the vault from a secure one) is refused before pi opens — and possibly rewrites — the file.
+    try {
+      assertSessionFileInDomain(sessionFile);
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
     const resolved = this.withResolvedModel(spec);
     const sessionManager = SessionManager.open(sessionFile, undefined, resolved.cwd);
     // todo #27: a consult fork's read-only tool domain (CONSULT_READONLY_TOOLS) makes the

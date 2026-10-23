@@ -9,6 +9,8 @@ import type { WorktreeSettings } from "../extensions/worktree-settings.js";
 import { MAX_SAFE_KEEPALIVE_INTERVAL_MS } from "../cache-ttl/keepalive-state.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 import { parseStrictModelRef } from "./model-hint.js";
+import { getSecureDomain, statePathsOf } from "../secure/domain.js";
+import { withSettingsFileLock, writeSettingsFileAtomic } from "../secure/settings-lock.js";
 import {
   DEFAULT_FORCE_THRESHOLD_PERCENT,
   DEFAULT_HINT_THRESHOLD_PERCENT,
@@ -1657,6 +1659,34 @@ export function isTimeSettingKey(secondsKey: string): boolean {
  * silently here; `loadSettingsFromFile` is the one that WARNs and rewrites.
  */
 export function loadSettings(source: unknown): AgentSettings {
+  return applySecureDomainOverrides(parseSettingsSource(source));
+}
+
+/**
+ * data-encryption plan r4 §2.4 step 2: an encrypted (secure) process forces in-vault roots and turns
+ * off the toolkit's active pushes (D8), whatever the user file says; a locked process keeps D8 off
+ * too. Both settings entry points (`loadSettingsFromFile` / `readSettingsNoMigrate`) end here.
+ * Plain or no verdict (hub process, unit tests) ⇒ the SAME object back (byte-identical). Every
+ * nested object touched is cloned — `DEFAULT_SETTINGS` is never mutated.
+ */
+function applySecureDomainOverrides(settings: AgentSettings): AgentSettings {
+  const domain = getSecureDomain();
+  if (domain === undefined || domain.kind === "plain") return settings;
+  const out: AgentSettings = {
+    ...settings,
+    fabric: { ...settings.fabric, crossSession: { ...settings.fabric.crossSession, enabled: false } },
+    externalAgents: { ...settings.externalAgents, droid: { ...settings.externalAgents.droid, enabled: false } },
+    feishuNotify: { ...settings.feishuNotify, enabled: false },
+  };
+  if (domain.kind === "secure") {
+    const paths = statePathsOf(domain.vault);
+    out.bashJobs = { ...settings.bashJobs, dir: paths.bashJobs };
+    out.workflow = { ...settings.workflow, journalDir: paths.workflows };
+  }
+  return out;
+}
+
+function parseSettingsSource(source: unknown): AgentSettings {
   if (source === null || typeof source !== "object") return { ...DEFAULT_SETTINGS, budget: { ...DEFAULT_BUDGET } };
   const value = normalizeTimeUnits(source as Record<string, unknown>, TIME_SETTING_MS_PATHS);
   const budget =
@@ -3366,24 +3396,30 @@ export function defaultSettingsPath(): string {
  */
 export function loadSettingsFromFile(path: string = defaultSettingsPath()): AgentSettings {
   try {
-    const parsed: unknown = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+    const rawText = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+    const parsed: unknown = rawText !== undefined ? JSON.parse(rawText) : {};
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return loadSettings(parsed);
     const timed = migrateSettingsFileTimeUnits(parsed as Record<string, unknown>, path);
     const cache = migrateLegacyCacheTtlState(timed.value, path, join(dirname(path), "cache-ttl-state.json"));
     const changed = timed.changed || cache.changed;
     let writeSucceeded = true;
     if (changed) {
-      try {
-        // Atomic write (tmp + rename): this file is shared by every session in
-        // the process tree, so a torn write would read back as malformed JSON
-        // and silently reset all settings to defaults (review B1).
+      // Atomic write (tmp + rename): this file is shared by every session in
+      // the process tree, so a torn write would read back as malformed JSON
+      // and silently reset all settings to defaults (review B1). data-encryption
+      // P1 review #5: held under the cross-process settings lock, and skipped when
+      // another writer changed the file since we read it (retried next time).
+      const outcome = withSettingsFileLock(path, () => {
+        const now = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+        if (now !== rawText) throw new Error("the file changed while migrating");
         const tmpPath = `${path}.${process.pid}.tmp`;
         writeFileSync(tmpPath, JSON.stringify(cache.value, null, 2) + "\n", "utf8");
         renameSync(tmpPath, path);
-      } catch (error) {
+      });
+      if (!outcome.ok) {
         writeSucceeded = false;
         console.warn(
-          `[pi-subagent] failed to write the migrated ${path}: ${error instanceof Error ? error.message : String(error)}; the migration will be retried next time.`,
+          `[pi-subagent] failed to write the migrated ${path}: ${outcome.error}; the migration will be retried next time.`,
         );
       }
     }
@@ -3612,35 +3648,40 @@ export function persistSettingOverride(
   value: unknown,
   path: string = defaultSettingsPath(),
 ): string | undefined {
-  let raw: Record<string, unknown> = {};
-  try {
-    if (existsSync(path)) {
-      const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
-        return `${path}: top-level value is not an object; not modifying it`;
-      raw = parsed as Record<string, unknown>;
+  // data-encryption P1 review #5: the whole re-read → merge → write runs under the cross-process
+  // settings lock shared with the `pi-secure` launcher; a lock failure refuses the write.
+  const outcome = withSettingsFileLock(path, (): string | undefined => {
+    let raw: Record<string, unknown> = {};
+    try {
+      if (existsSync(path)) {
+        const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+          return `${path}: top-level value is not an object; not modifying it`;
+        raw = parsed as Record<string, unknown>;
+      }
+    } catch (error) {
+      return `${path}: ${error instanceof Error ? error.message : String(error)}`;
     }
-  } catch (error) {
-    return `${path}: ${error instanceof Error ? error.message : String(error)}`;
-  }
-  const segments = dottedKey.split(".");
-  let node: Record<string, unknown> = raw;
-  for (const segment of segments.slice(0, -1)) {
-    const child = node[segment];
-    const next =
-      child !== null && typeof child === "object" && !Array.isArray(child)
-        ? { ...(child as Record<string, unknown>) }
-        : {};
-    node[segment] = next;
-    node = next;
-  }
-  const leaf = segments[segments.length - 1]!;
-  if (value === undefined) delete node[leaf];
-  else node[leaf] = value;
-  try {
-    writeFileSync(path, JSON.stringify(raw, null, 2) + "\n", "utf8");
-    return undefined;
-  } catch (error) {
-    return `${path}: ${error instanceof Error ? error.message : String(error)}`;
-  }
+    const segments = dottedKey.split(".");
+    let node: Record<string, unknown> = raw;
+    for (const segment of segments.slice(0, -1)) {
+      const child = node[segment];
+      const next =
+        child !== null && typeof child === "object" && !Array.isArray(child)
+          ? { ...(child as Record<string, unknown>) }
+          : {};
+      node[segment] = next;
+      node = next;
+    }
+    const leaf = segments[segments.length - 1]!;
+    if (value === undefined) delete node[leaf];
+    else node[leaf] = value;
+    try {
+      writeSettingsFileAtomic(path, JSON.stringify(raw, null, 2) + "\n");
+      return undefined;
+    } catch (error) {
+      return `${path}: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
+  return outcome.ok ? outcome.value : `${path}: ${outcome.error}`;
 }

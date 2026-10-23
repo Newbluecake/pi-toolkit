@@ -1,4 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { initSecureDomain } from "./secure/domain.js";
+import { secureGuardsNeeded, wireSecureGuards } from "./secure/guards.js";
+import { registerSecureCommand, secureCommandWanted } from "./secure/command.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
@@ -154,6 +157,10 @@ function wireWorktree(pi: ExtensionAPI, settings: AgentSettings): SubagentExtens
  * through to the current session's stack. session_shutdown drains bounded.
  */
 export default function activate(rawPi: ExtensionAPI): void {
+  // data-encryption plan r4 §2.4 step 1: judge the encrypted-session domain FIRST — before any
+  // settings read (the settings override in loadSettings and the TMPDIR / ARMORY_MEMORY_ROOT
+  // redirection both depend on it). Frozen per process; child sessions and /reload reuse it.
+  const secureDomain = initSecureDomain();
   const commandCaptureRef: { current?: CommandCapturePort } = {};
   // P1 fix (#32 C12 review): the set `wrapCommandApi`'s `registerCommand` proxy writes real
   // toolkit command names into, at real registration time — long before `commandCaptureRef.current`
@@ -191,6 +198,12 @@ export default function activate(rawPi: ExtensionAPI): void {
   // gating and todo-nudge tracker gating, both with clear error copy.
   const isChildSession = Boolean(g[HOST_KEY]);
   const askUserRemoteRef: { current?: () => AskUserRemotePort | undefined } = {};
+  // data-encryption §2.4/§2.5: LOCKED gate + D3/D4 + cross-domain switch guards. Registered before
+  // every other handler (first `handled`/`block`/`cancel` wins inside one extension); pre-guard so
+  // child sessions get D3/D4 too. Plain without configured vaults ⇒ zero wiring (byte-identical).
+  const secureGuards = secureGuardsNeeded(secureDomain)
+    ? wireSecureGuards(pi, { domain: secureDomain, isChildSession })
+    : undefined;
 
   if (preGuardSettings.webSearch.enabled) registerWebSearchTool(pi);
   // date 模块：首轮 + 跨日以隐藏消息注入当前日期（主/子会话都注入；pre-guard）。
@@ -281,6 +294,11 @@ export default function activate(rawPi: ExtensionAPI): void {
   // releases its claim (otherwise a bad-compat activation would wedge every
   // later reload into the inert branch).
   const settings = loadSettingsFromFile();
+  // data-encryption §2.2: the one read-only plugin command — only when there is something to report
+  // (non-plain verdict, configured vaults, or an enabled-but-broken section). No `secure` section or
+  // `secure.enabled=false` ⇒ command list unchanged (secure-off golden).
+  if (secureCommandWanted(secureDomain))
+    registerSecureCommand(pi, { domain: secureDomain, runtimeLock: () => secureGuards?.lockedReason() });
   const holder: { current?: Stack } = {};
   const xsEnabled = xsOn({
     fabric: settings.fabric,
@@ -1433,7 +1451,8 @@ export default function activate(rawPi: ExtensionAPI): void {
     // Background workflows (plan §3.2): notices the previous stack persisted while shutting down.
     stack.workflow.redeliverPendingNotices();
     stack.fabric?.pump(); // RC5: synchronous, never blocks startup
-    await stack.scheduler.start(); // X5
+    // data-encryption D8: secure/locked processes never load or arm cron tasks.
+    if (secureDomain.kind === "plain") await stack.scheduler.start(); // X5
   });
 
   pi.on("session_shutdown", async (event, ctx) => {

@@ -1,4 +1,5 @@
 import type { Clock, TimerHandle } from "../core/clock.js";
+import { getSecureDomain } from "../secure/domain.js";
 import { systemClock } from "../core/clock.js";
 import type { SpawnService } from "../service/spawn-service.js";
 import { nextCronOccurrence, parseCron } from "./cron.js";
@@ -25,6 +26,12 @@ function validateDefinition(definition: ScheduleDefinition): void {
     if (!Number.isFinite(definition.intervalMs) || definition.intervalMs <= 0)
       throw new Error("intervalMs must be positive");
   } else if (Number.isNaN(Date.parse(definition.at))) throw new Error(`invalid one-shot date: ${definition.at}`);
+}
+
+/** data-encryption D8: cron is refused outside the plain domain (reason text), else undefined. */
+function cronRefusal(): string | undefined {
+  const kind = getSecureDomain()?.kind ?? "plain";
+  return kind === "plain" ? undefined : "加密会话禁用定时任务（cron，data-encryption D8）";
 }
 
 export function createScheduler(deps: SchedulerDeps): Scheduler {
@@ -90,6 +97,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
 
   return {
     async start() {
+      // data-encryption D8: an encrypted/locked process never loads or arms cron tasks.
+      if (cronRefusal() !== undefined) return;
       if (started) return;
       started = true;
       stopped = false;
@@ -114,6 +123,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       timers.clear();
     },
     async register(task) {
+      const refusal = cronRefusal();
+      if (refusal !== undefined) throw new Error(refusal);
       validateDefinition(task.schedule);
       prepare(task);
       tasks.set(task.id, task);

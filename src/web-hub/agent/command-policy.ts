@@ -180,6 +180,12 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
     if (sub === undefined || sub === "status") return { policy: "allow" };
     return { policy: "confirm" };
   },
+  // /secure [status] → read-only (data-encryption plan §2.2 「web 允许」); it has no other
+  // sub-command, so anything else can only be a typo and is denied.
+  secure(tokens) {
+    const sub = tokens[0];
+    return { policy: sub === undefined || sub === "status" ? "allow" : "deny" };
+  },
   // /tasklist [no args] → read-only listing (text fallback, §4.9). `clear` is destructive.
   tasklist(tokens) {
     return { policy: tokens[0] === undefined ? "allow" : "confirm" };

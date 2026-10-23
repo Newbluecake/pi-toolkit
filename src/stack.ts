@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getSecureDomain } from "./secure/domain.js";
 import {
   agentEnd as unreadAgentEnd,
   count as unreadCount,
@@ -3394,7 +3395,8 @@ export function buildSessionStack(
     // workflow-worktree plan D2: read fresh on every call (not snapshotted
     // at stack-build time) so a `/reload` that flips `worktree.enabled`
     // takes effect for the next agent({isolation}) call immediately.
-    worktreeAvailable: () => settings.worktree.enabled,
+    // data-encryption D2: workflow isolation is unavailable outside the plain domain.
+    worktreeAvailable: () => settings.worktree.enabled && (getSecureDomain()?.kind ?? "plain") === "plain",
     // replay-verify plan D9: same freshness convention — a `/reload` that
     // flips `workflow.isolationReplay` only takes effect for the NEXT run's
     // own `buildJournalConfig` (pinned once per run), not a run already live.

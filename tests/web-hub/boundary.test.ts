@@ -37,6 +37,8 @@ const SYSLOAD_FILE_ALLOWLIST = [
   "src/sysload/tracker.ts",
   "src/sysload/types.ts",
   "src/sysload/wire.ts",
+  // data-encryption P2 §2.7: the supervisor's managed-spawn env runs through the import-free hubSafeEnv.
+  "src/secure/env.ts",
 ].map((p) => resolve(ROOT, p));
 
 /**
@@ -85,8 +87,16 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../web-hub/protocol/client-allow.js",
     // external-agent plan §2.8: droid pricing refs validated with parseStrictModelRef (pure, zero imports).
     "./model-hint.js",
+    // data-encryption P2 §2.4 step 2: the secure-domain settings override (pi-free closure below).
+    "../secure/domain.js",
+    // data-encryption P1 review #5: cross-process settings-file lock (flock child, pi-free).
+    "../secure/settings-lock.js",
     "./time-units.js",
   ],
+  "src/secure/settings-lock.ts": ["node:child_process", "node:fs", "node:path"],
+  "src/secure/domain.ts": ["node:fs", "node:os", "node:path", "./config.js", "./env.js"],
+  "src/secure/config.ts": ["node:path"],
+  "src/secure/env.ts": [],
   "src/config/model-hint.ts": [],
   "src/fabric/xs/channel.ts": ["../../web-hub/protocol/xs.js"],
   "src/sysload/io-ledger.ts": [],

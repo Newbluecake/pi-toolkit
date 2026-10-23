@@ -115,6 +115,12 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("cache-ttl", "save", "extension").policy).toBe("confirm");
   });
 
+  it("/secure: no-args/status allow, anything else denies", () => {
+    expect(resolve("secure", "", "extension").policy).toBe("allow");
+    expect(resolve("secure", "status", "extension").policy).toBe("allow");
+    expect(resolve("secure", "unlock", "extension").policy).toBe("deny");
+  });
+
   it("/tasklist: no-args allow (text fallback), clear confirms", () => {
     expect(resolve("tasklist", "", "extension").policy).toBe("allow");
     expect(resolve("tasklist", "clear", "extension").policy).toBe("confirm");

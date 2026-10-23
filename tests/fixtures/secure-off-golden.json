@@ -1,0 +1,18 @@
+{
+  "note": "data-encryption P2 secure-off golden (plan r4 §6). Captured 2026-10-23: a real activate() traced through a recording ExtensionAPI produced the SAME 176-call sequence and an empty process.env delta on the pre-P2 HEAD and on P2, for every scenario below. Never regenerate to fix a diff — a diff here means a non-secure process changed.",
+  "scenarios": {
+    "none": null,
+    "disabled": { "secure": { "enabled": false, "vaults": { "acme": { "dir": "/nonexistent/v/acme" } } } },
+    "empty": { "secure": {} }
+  },
+  "expect": {
+    "domainKind": "plain",
+    "guardsNeeded": false,
+    "secureCommandRegistered": false,
+    "envDelta": {},
+    "tracesIdenticalAcrossScenarios": true,
+    "loadSettingsIdentity": true,
+    "defaultSettingsUnchanged": true,
+    "hubSafeEnvIdentity": true
+  }
+}
