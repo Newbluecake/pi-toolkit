@@ -77,6 +77,13 @@ export default defineConfig(async ({ command, mode }): Promise<UserConfig> => {
     // override the OS setting — see `./motion-css.ts`'s header for the full contract. Runs in
     // BOTH build modes (the csp-probe tests the same CSS pipeline the shipped bundle uses).
     css: { postcss: { plugins: [motionPrefCssPlugin()] } },
+    // preview-perf P5 (plan r3 §5.3): the highlight worker is an ES-module worker. Vite's
+    // default `worker.format: "iife"` cannot carry `highlight-worker.ts`'s DYNAMIC engine
+    // import (the prismjs `disableWorkerMessageHandler` pre-load flag must be seeded before
+    // any prism code evaluates, so the engine cannot be a static import — see that file's
+    // header). "es" emits the worker entry + its engine chunk as plain hashed assets, both
+    // served same-origin under the existing `script-src 'self'` CSP (no relaxation).
+    worker: { format: "es" },
     // syntax-highlight (2026-10): prismjs's MIT banner (`https://prismjs.com`, kept by
     // esbuild's default legal-comments handling) would trip check-ui-dist.ts's external-URL
     // allowlist — strip legal comments from the bundle instead of widening the allowlist.

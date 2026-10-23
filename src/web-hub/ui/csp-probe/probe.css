@@ -30,3 +30,10 @@
   width: 2px;
   height: 2px;
 }
+/* preview-perf P5 §5.3: the worker case's outcome box (visualization only — the assertion
+ * rides window.__PWH_WORKER_RESULT__, read by the runner). */
+.worker-box {
+  margin-top: 8px;
+  font: 12px/1.4 monospace;
+  color: #333;
+}

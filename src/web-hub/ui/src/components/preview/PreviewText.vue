@@ -55,7 +55,10 @@
   (§4.6 — P1's `createPreviewFinder` + the singleton Custom Highlight manager in
   `composables/useFindHighlights.ts`, `PreviewFind.vue` is the bar) and the
   `update:findable` / `update:virtualizable` channels PreviewWindow's Ctrl+F interception and
-  完整视图 button consume.
+  完整视图 button consume. The virtual-body highlight itself lives in highlight-core since P5
+  (plan §5.3): `createVirtualHighlighter` tokenizes in the shared module WORKER (widened gates
+  256 KiB / 80k tokens) and falls back to §5.1's original-gate idle main-thread path whenever
+  the worker is unavailable/timed out/errored — this component only supplies the deps above.
 -->
 <script lang="ts">
 import type { InjectionKey } from "vue";
@@ -118,8 +121,7 @@ import { chooseSourceRenderer, type SourceRendererChoice } from "@logic/previewV
 import { createVirtualSourceFactory } from "@logic/previewLineIndex.js";
 import { createPreviewFinder, type PreviewFinder } from "@logic/previewFind.js";
 import { PREVIEW_VIRTUAL_ENABLED, type MutableVirtualSource } from "@logic/previewVirtualTypes.js";
-import { encodeHighlightSpans, flattenTokens, shouldHighlight } from "@logic/highlight.js";
-import { loadPrism, type PrismLike } from "../shared/highlight-core.js";
+import { createVirtualHighlighter, isImmediateHighlightSize } from "../shared/highlight-core.js";
 import VirtualCode from "../shared/VirtualCode.vue";
 import PreviewFind from "./PreviewFind.vue";
 import { acquireFindHighlights, type FindHighlightHandle } from "../../composables/useFindHighlights.js";
@@ -193,6 +195,11 @@ const emit = defineEmits<{
 }>();
 const { t } = useI18n();
 const highlightLang = computed(() => resolveFileLang(props.filename ?? ""));
+/** P5 addendum (user ruling 2026-10-23, PB-report §7.3): §5.2's first-frame highlight is for
+ *  SMALL files only — ≤200 lines and ≤8 KiB. Larger in-gate files render plain first and swap
+ *  when the debounced tokenize lands (the pre-§5.2 behaviour); the virtual worker path is
+ *  unaffected (it always starts plain and never passes `immediate`). */
+const immediateHl = computed(() => isImmediateHighlightSize(shownSource.value));
 
 // --- line numbers (2026-10-23): the browser-local `pwh_linenumbers` pref, shared by every
 // open preview window (module-scope ref — a toggle anywhere re-renders all of them). -------
@@ -525,8 +532,7 @@ if (!isStream.value) {
     if (vSource === null) return;
     vSource = vFactory.fromText(t);
     vRev.value = vSource.revision;
-    hlEpoch += 1; // a pending idle highlight targets the OLD text — invalidate it
-    scheduleVirtualHighlight();
+    virtualHighlighter.schedule(); // bumps the epoch — a pending tokenize for the OLD text is dropped
     if (findOpen.value && finder.query !== "") {
       finder.search(finder.query, finder.caseSensitive, t);
       afterFindTextChange();
@@ -534,87 +540,48 @@ if (!isStream.value) {
   });
 }
 
-// --- preview-perf P3 §5.1: idle main-thread highlight for the VIRTUAL body (pre-Worker) -----
-// First frame renders PLAIN DisplayLines; tokenizing is scheduled for idle time and dodges
-// gestures (`body.pwh-pw-dragging`) and any scroll within the last 150 ms. The gates stay at
-// the ORIGINAL shouldHighlight defaults (100 KiB / 3000 lines / 20k tokens) until P5's worker
-// (已拍板 ①). Streams never highlight (§5.3 — the body keeps growing; same as r0).
-let hlEpoch = 0;
+// --- preview-perf P5 §5.3: the virtual-body highlighter (worker first, §5.1 fallback) -----
+// The whole orchestration now lives in highlight-core (`createVirtualHighlighter` — P5's
+// "虚拟入口"): the body tokenizes in the shared same-origin module WORKER under the widened
+// gates (256 KiB / lines uncapped / 80k tokens), and whenever the worker is out (sticky
+// unavailable / CSP-blocked / this request's 3 s deadline) it runs §5.1's path VERBATIM —
+// idle main-thread tokenization under the ORIGINAL gates (100 KiB / 3000 / 20k). This
+// component now only supplies text/lang/activity, the apply sink and the §5.1 dodge signal.
+// Streams never highlight (§5.3 — the body keeps growing; same as r0).
 let lastScrollAt = 0;
 function onDocScrollCapture(): void {
   lastScrollAt = Date.now();
 }
 
-/** `requestIdleCallback` with its §5.1 fallback (`setTimeout` 50 ms); returns a cancel fn. */
-function scheduleIdle(cb: () => void, opts?: { readonly timeout?: number }): () => void {
-  const ric = (globalThis as { requestIdleCallback?: (f: () => void, o?: { timeout: number }) => number })
-    .requestIdleCallback;
-  if (typeof ric === "function") {
-    const h = ric(cb, { timeout: opts?.timeout ?? 500 });
-    return () => {
-      const cic = (globalThis as { cancelIdleCallback?: (h: number) => void }).cancelIdleCallback;
-      if (typeof cic === "function") cic(h);
-    };
-  }
-  const h = setTimeout(cb, 50);
-  return () => clearTimeout(h);
-}
-
-function applyVirtualHighlight(engine: PrismLike, epoch: number): void {
-  if (epoch !== hlEpoch || vSource === null) return;
-  const text = shownSource.value;
-  const lang = highlightLang.value;
-  if (lang === null || !shouldHighlight(text)) return; // original gates stand (§5.1)
-  const grammar = engine.languages[lang];
-  if (grammar === undefined) return;
-  try {
-    const parts = flattenTokens(engine.tokenize(text, grammar));
-    if (parts === null) return;
-    const spans = encodeHighlightSpans(parts);
-    if (spans === null) return;
+const virtualHighlighter = createVirtualHighlighter({
+  text: () => shownSource.value,
+  lang: () => highlightLang.value,
+  active: () => virtualized.value && !isStream.value,
+  apply: (spans) => {
+    if (vSource === null) return;
     vSource.setHighlight(spans); // repaints the mounted blocks only (P2 contract)
     vRev.value = vSource.revision;
-  } catch {
-    /* a grammar must never break rendering — plain stands */
-  }
-}
-
-function scheduleVirtualHighlight(): void {
-  if (!virtualized.value || isStream.value) return;
-  const epoch = ++hlEpoch;
-  void loadPrism().then((engine) => {
-    if (epoch !== hlEpoch || engine === null) return; // failed load ⇒ plain forever (contract)
-    let cancel: (() => void) | null = null;
-    const run = (): void => {
-      if (epoch !== hlEpoch) return;
-      // §5.1: dodge gestures and recent scrolls — re-queue instead of tokenizing.
-      const dragging = typeof document !== "undefined" && document.body.classList.contains(PW_DRAGGING_CLASS);
-      if (dragging || Date.now() - lastScrollAt < 150) {
-        cancel?.();
-        cancel = scheduleIdle(run, { timeout: 500 });
-        return;
-      }
-      applyVirtualHighlight(engine, epoch);
-    };
-    cancel = scheduleIdle(run, { timeout: 500 });
-  });
-}
+  },
+  busy: () =>
+    (typeof document !== "undefined" && document.body.classList.contains(PW_DRAGGING_CLASS)) ||
+    Date.now() - lastScrollAt < 150,
+});
 
 onMounted(() => {
   if (typeof document !== "undefined") {
     document.addEventListener("scroll", onDocScrollCapture, { passive: true, capture: true });
   }
-  scheduleVirtualHighlight();
+  virtualHighlighter.schedule();
 });
 onBeforeUnmount(() => {
-  hlEpoch += 1;
+  virtualHighlighter.dispose(); // window closed — pending tasks are cancelled outright
   if (typeof document !== "undefined") {
     document.removeEventListener("scroll", onDocScrollCapture, true);
   }
 });
 watch(virtualized, (on) => {
-  if (on) scheduleVirtualHighlight();
-  else hlEpoch += 1; // left the virtual path — a pending tokenize is stale
+  if (on) virtualHighlighter.schedule();
+  else virtualHighlighter.invalidate(); // left the virtual path — a pending tokenize is stale
 });
 
 // --- preview-perf P3 §4.6: the in-window find ----------------------------------------------
@@ -1110,13 +1077,14 @@ watch(streamState, (st) => {
       />
       <!-- line numbers on (default) + under the line cap ⇒ NumberedCode (per-line split,
            textContent-identical); off / capped ⇒ the exact pre-feature HighlightedCode.
-           `immediate` (preview-perf §5.2): with the engine already resolved the FIRST render
-           is highlighted — no plain→highlight swap. -->
+           `immediate` (preview-perf §5.2 + P5 addendum): SMALL files only (≤200 lines / ≤8 KiB
+           — PB-report §7.3's regression) get the highlighted first render; larger in-gate
+           files render plain and swap when the debounced tokenize lands. -->
       <pre
         v-else
         class="preview-text-body"
         tabindex="0"
-      ><NumberedCode v-if="rendererChoice === 'numbered'" :text="shownSource" :lang="highlightLang" immediate /><HighlightedCode v-else :text="shownSource" :lang="highlightLang" immediate /></pre>
+      ><NumberedCode v-if="rendererChoice === 'numbered'" :text="shownSource" :lang="highlightLang" :immediate="immediateHl" /><HighlightedCode v-else :text="shownSource" :lang="highlightLang" :immediate="immediateHl" /></pre>
     </template>
     <div v-if="hasActions" class="preview-text-actions">
       <div

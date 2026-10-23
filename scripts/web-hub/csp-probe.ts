@@ -10,6 +10,12 @@
  * violation listener actually catches violations at all (a probe that can't see the thing it's
  * supposed to detect would otherwise report a false "all clear").
  *
+ * preview-perf P5 (plan r3 §5.3) adds the WORKER case to the positive page: the real
+ * `highlight-worker-client` + real module worker chunk must load, tokenize and transfer
+ * `HighlightSpans` back — and it must pass on Chromium AND Firefox (plan: 「Chromium 和
+ * Firefox 都要实测通过」; Firefox therefore became a hard requirement of the base probe,
+ * like the mermaid suite — missing cached Firefox is exit 2).
+ *
  * `--suite mermaid` (`npm run probe:mermaid`): the web-hub-mermaid real-browser gate (plan §10.4), Chromium + Firefox;
  * `--lan` additionally serves the probe build on 0.0.0.0 for the S0 real-device run.
  *
@@ -111,7 +117,27 @@ async function violations(page: PwPage): Promise<Array<{ violatedDirective: stri
 
 async function runPositive(page: PwPage, base: string, failures: Failure[]): Promise<void> {
   await page.goto(`${base}/index.html`, { waitUntil: "load" });
-  await page.waitForFunction("window.__PWH_PROBE_READY__ === true", { timeout: 5_000 });
+  await page.waitForFunction(
+    () => (window as unknown as { __PWH_PROBE_READY__?: boolean }).__PWH_PROBE_READY__ === true,
+    { timeout: 5_000 },
+  );
+
+  // preview-perf P5 §5.3 — the module-worker case FIRST, so a blocked worker script also
+  // shows up in the violations read at the end of this function. "spans-ok" is the only
+  // passing outcome: the worker loaded under the production CSP, tokenized the sample, and
+  // its transferred HighlightSpans decode back into tok-* parts (the page computes it). Any
+  // other outcome ("fallback" = worker unavailable/CSP-rejected, "plain", "spans-bad",
+  // still "pending" after 10 s) fails with the outcome string as the detail.
+  await page.waitForFunction(
+    () => (window as unknown as { __PWH_WORKER_RESULT__?: string }).__PWH_WORKER_RESULT__ !== undefined,
+    { timeout: 10_000 },
+  );
+  const workerResult = await page.evaluate<string>(
+    () => (window as unknown as { __PWH_WORKER_RESULT__?: string }).__PWH_WORKER_RESULT__ ?? "",
+  );
+  if (workerResult !== "spans-ok") {
+    failures.push({ assertion: "worker-highlight", detail: `worker outcome: ${workerResult}` });
+  }
 
   const pctWidth = parseFloat(await readComputed(page, '[data-probe="pct"]', "width"));
   if (!(Math.abs(pctWidth - 210) <= 1)) {
@@ -163,7 +189,10 @@ async function runPositive(page: PwPage, base: string, failures: Failure[]): Pro
 
 async function runNegative(page: PwPage, base: string, failures: Failure[]): Promise<void> {
   await page.goto(`${base}/negative.html`, { waitUntil: "load" });
-  await page.waitForFunction("window.__PWH_PROBE_READY__ === true", { timeout: 5_000 });
+  await page.waitForFunction(
+    () => (window as unknown as { __PWH_PROBE_READY__?: boolean }).__PWH_PROBE_READY__ === true,
+    { timeout: 5_000 },
+  );
   const color = await readComputed(page, "#target", "color");
   if (color === "rgb(1, 2, 3)") {
     failures.push({
@@ -252,7 +281,16 @@ async function main(): Promise<void> {
     );
     process.exit(2);
   }
+  if (pw.firefox === undefined) {
+    // preview-perf P5 §5.3: the worker case must pass on Firefox too — a missing cached
+    // Firefox build is "browser unavailable" (exit 2), same envelope as the mermaid suite.
+    console.error(
+      "✗ browser unavailable: no cached Firefox build for the P5 worker case (probe:csp requires Chromium + Firefox)",
+    );
+    process.exit(2);
+  }
   console.log(`  playwright ${pw.version} (${pw.source}), chromium at ${pw.executablePath}`);
+  console.log(`  firefox at ${pw.firefox.executablePath}`);
 
   const { server, port } = await startServer();
   const base = `http://127.0.0.1:${port}`;
@@ -270,6 +308,37 @@ async function main(): Promise<void> {
     } finally {
       await browser.close();
     }
+    // preview-perf P5 §5.3 — the worker case on FIREFOX as well (the positive suite's other
+    // assertions stay Chromium-only, exactly as before): load the page, wait for the worker
+    // outcome, assert spans-ok + zero violations recorded by the init script.
+    const firefox = await pw.firefox.launcher.launch({ headless: true, executablePath: pw.firefox.executablePath });
+    try {
+      const context = await firefox.newContext();
+      await context.addInitScript(INIT_SCRIPT);
+      const page = await context.newPage();
+      await page.goto(`${base}/index.html`, { waitUntil: "load" });
+      await page.waitForFunction(
+        () => (window as unknown as { __PWH_PROBE_READY__?: boolean }).__PWH_PROBE_READY__ === true,
+        { timeout: 5_000 },
+      );
+      await page.waitForFunction(
+        () => (window as unknown as { __PWH_WORKER_RESULT__?: string }).__PWH_WORKER_RESULT__ !== undefined,
+        { timeout: 10_000 },
+      );
+      const ffWorker = await page.evaluate<string>(
+        () => (window as unknown as { __PWH_WORKER_RESULT__?: string }).__PWH_WORKER_RESULT__ ?? "",
+      );
+      if (ffWorker !== "spans-ok") {
+        failures.push({ assertion: "worker-highlight-firefox", detail: `worker outcome: ${ffWorker}` });
+      }
+      const ffViolations = await violations(page);
+      if (ffViolations.length !== 0) {
+        failures.push({ assertion: "zero-csp-violations-firefox", detail: JSON.stringify(ffViolations) });
+      }
+      await context.close();
+    } finally {
+      await firefox.close();
+    }
   } finally {
     server.close();
   }
@@ -277,6 +346,9 @@ async function main(): Promise<void> {
   if (failures.length === 0) {
     console.log("✓ probe:csp — PASS. All :style / v-show / dynamic-class / static-hoisting constructs are CSP-clean.");
     console.log("  verdict: no source-scan tightening needed.");
+    console.log(
+      "  P5 worker: module worker + HighlightSpans transfer OK under the production CSP (Chromium + Firefox).",
+    );
     process.exit(0);
   }
 

@@ -10,11 +10,20 @@
     "static" — 30 connected pure-static sibling nodes (no bindings at all), to force Vue's
                static-hoisting/stringification path (`createStaticVNode`, which inserts via
                `innerHTML`) so the probe also exercises that code path, not just simple bindings.
+  preview-perf P5 (plan r3 §5.3) adds the WORKER case: the page drives the REAL
+  `highlight-worker-client` (lazily creating the REAL module worker — the exact production
+  path, the same worker chunk the product build emits) and publishes the outcome on
+  `window.__PWH_WORKER_RESULT__`: "spans-ok" only when the worker loaded under the production
+  CSP, tokenized, and its transferred `HighlightSpans` decode back into token parts. A CSP
+  rejection (missing `worker-src` falls back to `script-src 'self'`) surfaces as "fallback"
+  plus a recorded violation — the runner asserts both, on Chromium AND Firefox.
   No `<style>` block (SFC style blocks are banned repo-wide) — all CSS lives in `probe.css`,
   loaded externally by `main.ts`.
 -->
 <script setup lang="ts">
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
+import { getHighlightWorkerClient } from "../src/components/shared/highlight-worker-client.js";
+import { decodeHighlightSpans } from "@logic/highlight.js";
 
 const showToggle = ref(true);
 const level = ref(1);
@@ -22,6 +31,26 @@ const level = ref(1);
 function cycleLevel(): void {
   level.value = level.value >= 3 ? 1 : level.value + 1;
 }
+
+/** §5.3 sample: TypeScript that MUST yield a `tok-keyword` span through the worker. */
+const WORKER_SAMPLE = 'const answer = 42; // comment\nlet s = "str";\n';
+const workerResult = ref<string>("pending");
+
+onMounted(() => {
+  const g = window as unknown as { __PWH_WORKER_RESULT__?: string };
+  const handle = getHighlightWorkerClient().request(WORKER_SAMPLE, "typescript");
+  void handle.result.then((outcome) => {
+    if (outcome.status !== "spans") {
+      workerResult.value = outcome.status; // plain | fallback | cancelled — all fail the probe
+      g.__PWH_WORKER_RESULT__ = outcome.status;
+      return;
+    }
+    const parts = decodeHighlightSpans(outcome.spans, WORKER_SAMPLE, 0, WORKER_SAMPLE.length);
+    const ok = parts !== null && parts.some((p) => p.cls.includes("tok-keyword"));
+    workerResult.value = ok ? "spans-ok" : "spans-bad";
+    g.__PWH_WORKER_RESULT__ = workerResult.value;
+  });
+});
 </script>
 
 <template>
@@ -46,5 +75,9 @@ function cycleLevel(): void {
       ><span class="s" data-i="24"></span><span class="s" data-i="25"></span><span class="s" data-i="26"></span
       ><span class="s" data-i="27"></span><span class="s" data-i="28"></span><span class="s" data-i="29"></span>
     </div>
+
+    <!-- preview-perf P5 §5.3: the module-worker case. The assertion rides the window global
+         (the runner waitForFunction's it); this box only visualizes the outcome. -->
+    <div class="worker-box" data-probe="worker" :data-worker-result="workerResult">worker: {{ workerResult }}</div>
   </div>
 </template>
