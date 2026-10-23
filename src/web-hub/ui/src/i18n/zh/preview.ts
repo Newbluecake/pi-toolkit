@@ -54,6 +54,22 @@ const preview = {
   // `1#`）与超上限降级提示。
   lineNumbers: "行号",
   linesTooMany: "此文件超过 {n} 行——已不显示行号。",
+  // preview-perf P3（plan r3 §4.6/§4.7，2026-10-23）：窗口内查找栏与完整视图。散文文案；
+  // 计数标记（`10000+`、`1 / 7`）是紧凑标记，不进此表。
+  findLabel: "在文件内查找",
+  findPlaceholder: "查找内容…",
+  findCaseSensitive: "区分大小写",
+  findNext: "查找下一个",
+  findPrev: "查找上一个",
+  findClose: "关闭查找",
+  findNoHit: "无结果",
+  findScopeNote:
+    "范围：本文件已加载内容 · Enter / F3 下一个 · Shift+Enter / Shift+F3 上一个 · Esc 关闭。浏览器自带页面查找只能找到当前可见的行——要找全文请用本查找框，或开完整视图。",
+  findScopeNoteMac:
+    "范围：本文件已加载内容 · Enter / ⌘G 下一个 · ⇧⌘G 上一个 · Esc 关闭。浏览器自带页面查找只能找到当前可见的行——要找全文请用本查找框，或开完整视图。",
+  findBeyondDisplay: "命中在截断区内——开完整视图可查看全文。",
+  fullView: "完整视图",
+  fullViewHint: "渲染全部已加载内容，便于读屏连续阅读、浏览器原生查找与选择；大文件下拖动和缩放会变慢；只影响本窗口。",
   mdTooComplex: "此文件结构过于复杂，无法渲染——已改以源码显示。",
   // md-preview-html plan：行内图片占位原因（占位 chip：`🖼 <alt> · <原因>`）
   "mdImg.loading": "加载中…",

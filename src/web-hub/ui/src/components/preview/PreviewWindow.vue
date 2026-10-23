@@ -39,19 +39,26 @@ import PreviewText from "./PreviewText.vue";
 import PreviewWindowMenu from "./PreviewWindowMenu.vue";
 import { PREVIEW_CTX, type PreviewContext } from "./previewContext.js";
 
-const props = defineProps<{
-  readonly win: PreviewWindow;
-  readonly face: PreviewWindowsFace;
-  readonly desktop: boolean;
-  /** Phone band: this window is the top of the stack. */
-  readonly isTop: boolean;
-  /** 0-based creation index + total window count (the phone `2/3` badge). */
-  readonly index: number;
-  readonly count: number;
-  readonly plaintext: boolean;
-  readonly showPlainWarning: boolean;
-  readonly layout: PreviewWindowLayout;
-}>();
+const props = withDefaults(
+  defineProps<{
+    readonly win: PreviewWindow;
+    readonly face: PreviewWindowsFace;
+    readonly desktop: boolean;
+    /** Phone band: this window is the top of the stack. */
+    readonly isTop: boolean;
+    /** 0-based creation index + total window count (the phone `2/3` badge). */
+    readonly index: number;
+    readonly count: number;
+    readonly plaintext: boolean;
+    readonly showPlainWarning: boolean;
+    readonly layout: PreviewWindowLayout;
+    /** Test/probe seam (preview-perf §4.1): force PreviewText's r0 renderer set. Undefined
+     *  default on purpose — Vue's Boolean casting would otherwise turn an ABSENT optional
+     *  boolean into `false` and silently hand PreviewText a kill-switch OFF. */
+    readonly virtualEnabled?: boolean | undefined;
+  }>(),
+  { virtualEnabled: undefined },
+);
 
 const emit = defineEmits<{
   (e: "close", id: number): void;
@@ -159,6 +166,45 @@ const ln = useLineNumbersPref({ storage: browserLocalStorage() });
 const lnSourceActive = ref(false);
 function onSourceView(v: boolean): void {
   lnSourceActive.value = v;
+}
+
+// --- preview-perf P3 (plan r3 §4.6/§4.7): full view + in-window find -----------------------
+// `fullView` is THIS window's escape hatch (已拍板 ③): kept until the window closes, survives
+// file navigation; true renders exactly like line numbers off (legacy single-text DOM) so
+// screen readers, the browser's own find and native selection see the whole loaded body.
+// Other windows and the global line-numbers pref are untouched.
+const fullView = ref(false);
+/** PreviewText reports whether its CURRENT view is the virtual source view (§4.6's only
+ *  interception state) and whether a virtual source view is AVAILABLE (the button stays
+ *  visible while pressed, to un-press it). Both reset to false on view switches/unmount. */
+const findable = ref(false);
+const virtualizable = ref(false);
+const textRef = ref<InstanceType<typeof PreviewText> | null>(null);
+function onFindable(v: boolean): void {
+  findable.value = v;
+}
+function onVirtualizable(v: boolean): void {
+  virtualizable.value = v;
+}
+function toggleFullView(): void {
+  fullView.value = !fullView.value;
+}
+
+/** §4.6 interception, written exactly as the plan states: the PANEL-ROOT keydown handler
+ *  fires only for focus inside this window; Ctrl/⌘+F is prevented (and the bar opened with
+ *  its input selected) iff the current view is the virtual source view, focus is NOT in the
+ *  find input (there the browser's PAGE find takes over), no IME composition is active and
+ *  nothing prevented the event yet. Full view on / line numbers off ⇒ `findable` false ⇒
+ *  never intercepted. */
+function onPanelKeydown(ev: KeyboardEvent): void {
+  if (ev.defaultPrevented || ev.isComposing || ev.keyCode === 229) return;
+  if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
+  if (ev.key !== "f" && ev.key !== "F") return;
+  if (!findable.value) return;
+  const target = ev.target;
+  if (target instanceof Element && target.closest(".pv-find-input") !== null) return;
+  ev.preventDefault();
+  textRef.value?.openFind();
 }
 
 const dl = usePreviewDownload({ hub, view: () => view.value });
@@ -286,6 +332,7 @@ const ariaModal = computed(() => (props.desktop || !props.isTop ? "false" : "tru
     :aria-labelledby="titleId"
     :aria-describedby="hintId"
     tabindex="-1"
+    @keydown="onPanelKeydown"
   >
     <header
       class="preview-header"
@@ -362,6 +409,20 @@ const ariaModal = computed(() => (props.desktop || !props.isTop ? "false" : "tru
       >
         <span class="pw-ln-glyph" aria-hidden="true">1#</span>
       </button>
+      <!-- preview-perf P3 §4.7: the per-window 完整视图 escape (virtual source views only —
+           PreviewText's `update:virtualizable`; stays visible while pressed, to un-press). -->
+      <button
+        v-if="view.phase === 'text' && virtualizable"
+        class="btn btn-ghost btn-icon pw-fullview-btn"
+        type="button"
+        :aria-pressed="fullView ? 'true' : 'false'"
+        :aria-label="t('preview.fullView')"
+        :title="t('preview.fullViewHint')"
+        data-no-drag
+        @click="toggleFullView()"
+      >
+        <span class="pw-fullview-glyph" aria-hidden="true">FULL</span>
+      </button>
       <button
         v-if="downloadable"
         class="btn btn-ghost btn-icon preview-download"
@@ -431,9 +492,12 @@ const ariaModal = computed(() => (props.desktop || !props.isTop ? "false" : "tru
         :size-label="formatBytes(view.size)"
         :alt="basename"
       />
-      <!-- dir-plan §4.1 B4: `:key` remounts PreviewText on every path change. -->
+      <!-- dir-plan §4.1 B4: `:key` remounts PreviewText on every path change. `fullView` is
+           P3 §4.7 (kept per window, survives navigation); `findable`/`virtualizable` ride the
+           update channels back up (Ctrl+F gate + the 完整视图 button). -->
       <PreviewText
         v-else-if="view.phase === 'text'"
+        ref="textRef"
         :key="view.path"
         :text="view.text"
         :truncated="view.truncated"
@@ -442,11 +506,15 @@ const ariaModal = computed(() => (props.desktop || !props.isTop ? "false" : "tru
         :stream="view.stream"
         :filename="basename"
         :path="path"
+        :full-view="fullView"
+        :virtual-enabled="virtualEnabled"
         @load-more="handle.loadMore()"
         @reopen="handle.reopen()"
         @retry-stream="handle.loadMore()"
         @update:copy-value="onCopyValue"
         @update:source-view="onSourceView"
+        @update:findable="onFindable"
+        @update:virtualizable="onVirtualizable"
       />
       <PreviewDir
         v-else-if="view.phase === 'dir'"

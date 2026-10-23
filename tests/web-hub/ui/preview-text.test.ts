@@ -238,9 +238,20 @@ describe("PreviewText.vue — chunked stream mode", () => {
       ...over,
     });
   }
+  // preview-perf P3 (§6.3): this suite pins the r0 STREAM renderer (per-segment divs /
+  // CodeLines) — the production default is now the virtual body, so `virtualEnabled: false`
+  // keeps every pre-P3 assertion running against the preserved r0 branches.
   const mountStream = (stream: PreviewTextStream, extra: Record<string, unknown> = {}) =>
     mount(PreviewText, {
-      props: { text: stream.chunks[0]!, truncated: true, stream, filename: "x.log", path: "/p/x.log", ...extra },
+      props: {
+        text: stream.chunks[0]!,
+        truncated: true,
+        stream,
+        filename: "x.log",
+        path: "/p/x.log",
+        virtualEnabled: false,
+        ...extra,
+      },
       attachTo: document.body,
     });
 

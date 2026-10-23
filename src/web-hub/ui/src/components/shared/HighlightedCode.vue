@@ -29,9 +29,15 @@ export default defineComponent({
     text: { type: String, required: true },
     /** Prism grammar id (from `@logic/highlight.js`'s resolvers); null/absent ⇒ plain text. */
     lang: { type: String as PropType<string | null>, default: null },
+    /** preview-perf P3 §5.2: one-shot preview bodies pass `immediate` — with the engine
+     * already resolved the FIRST render is highlighted (no plain→highlight swap). The
+     * transcript's CodeBlock does not pass it (150 ms debounce unchanged). */
+    immediate: { type: Boolean, default: false },
   },
   setup(props) {
-    const parts = useHighlightParts(() => ({ text: props.text, lang: props.lang }));
+    const parts = useHighlightParts(() => ({ text: props.text, lang: props.lang }), {
+      immediate: props.immediate === true,
+    });
     return (): VNodeChild => {
       const f = parts.value;
       if (f === null) return props.text;

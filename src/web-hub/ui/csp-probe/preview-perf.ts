@@ -41,6 +41,7 @@ import { createApp, defineComponent, h, provide, ref, type InjectionKey, type Re
 import IconSprite from "../src/icons/IconSprite.vue";
 import PathText from "../src/components/preview/PathText.vue";
 import PreviewHost from "../src/components/preview/PreviewHost.vue";
+import { PREVIEW_VIRTUAL_KEY } from "../src/components/preview/PreviewText.vue";
 import { HUB_CTX } from "../src/components/control/controlContext.js";
 import { PREVIEW_CTX } from "../src/components/preview/previewContext.js";
 import { usePreviewWindows } from "../src/composables/usePreviewWindows.js";
@@ -382,6 +383,9 @@ const ProbeApp = defineComponent({
   name: "PreviewPerfProbe",
   setup() {
     provide(PREVIEW_CTX, { handle, plaintext: false });
+    // preview-perf P3: the probe's `virtual=1` switch drives the real renderer choice (virtual
+    // is the production default since P3; `virtual=0` measures the r0 DOM for the baseline).
+    provide(PREVIEW_VIRTUAL_KEY, virtualOn);
     // the hub face the preview tree reads (state + preview transport); cast — the real
     // ControlHub type drags in the whole control plane the probe never exercises.
     provide(HUB_CTX as InjectionKey<unknown>, { state, preview: appTransport, dispatch: () => {} });

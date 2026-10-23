@@ -22,9 +22,14 @@ const props = defineProps<{
   readonly text: string;
   /** Prism grammar id (`@logic/highlight.js`'s resolvers); null/absent ⇒ plain lines. */
   readonly lang?: string | null;
+  /** preview-perf P3 §5.2: one-shot preview bodies pass `immediate` — with the engine
+   * already resolved the FIRST render is highlighted (no plain→highlight swap). */
+  readonly immediate?: boolean;
 }>();
 
-const parts = useHighlightParts(() => ({ text: props.text, lang: props.lang ?? null }));
+const parts = useHighlightParts(() => ({ text: props.text, lang: props.lang ?? null }), {
+  immediate: props.immediate === true,
+});
 
 const lines = computed<readonly CodeLine[]>(() =>
   parts.value === null ? splitTextIntoCodeLines(props.text) : splitPartsIntoCodeLines(parts.value),
