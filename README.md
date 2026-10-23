@@ -220,6 +220,27 @@ pi-secure run acme --fork /home/me/.pi/agent/sessions/旧会话.jsonl
 
 会话内用 `/secure status` 查看判定、锁定原因、各保险库挂载状态与 traffic-record 适配情况。
 
+### 私有模式（--private）
+
+默认（普通模式）下，解锁后的保险库对**所有同用户进程**可见。`--private` 把明文挂载改进为：只存在于本次 pi 进程树的**私有挂载命名空间**里，其他程序按路径只能看到哨兵占位文件。
+
+```sh
+pi-secure init demo --private        # 登记为私有库（此后 run 缺省即私有）
+pi-secure run demo --private         # 单次私有运行；--no-private 强制普通模式
+pi-secure lock demo --lazy           # 摘除该命名空间里的挂载路径（既有访问可能继续）
+pi-secure lock demo --kill           # 结束 --private 会话并收尾
+pi-secure unlock demo --global       # 私有库默认拒绝全局解锁，--global 仅解除这条默认
+```
+
+- `--private`/`--no-private` 只在紧跟库名的位置识别；缺省取 `secure.vaults.<名字>.private`。
+- `run` 结束（或 `lock --kill`）后自动收尾：终止有证明归属的进程、卸载、释放记录与租约，退出码透传 pi。
+- web-hub 不会在私有会话内拉起（会被困在命名空间里）；需要网页时在普通终端的 pi 里执行 `/webhub start`。
+- 详细的进程链、互斥规则、实例状态与退出码见[设计文档](docs/dev/data-encryption/plan.md) §2.8 与 [private-plan](docs/dev/data-encryption/private-plan.md)；真机验收清单见 [acceptance](docs/dev/data-encryption/acceptance.md) J 节。
+
+安全边界（统一措辞，与 `pi-secure --help` 一致）：
+
+> --private：明文挂载只存在于本次 pi 进程树的私有挂载命名空间里。其他程序按路径访问保险库只会看到占位文件，find/grep/备份工具/其他 agent 的无意识访问都会被挡住。它不能防御同一用户下有意的恶意进程：这类进程可以经 /proc/<pid>/root、/proc/<pid>/cwd 读到明文，或用 setns 加入该命名空间。若需要硬边界，请用独立的系统用户运行 pi-secure。
+
 ### 注意事项
 
 - **`--fork` / `--session` / `@file` 一律用绝对路径**：相对路径按 pi 的 cwd（库内）解析。
