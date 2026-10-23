@@ -85,6 +85,7 @@ pi install .
 | 自动标题 / 延迟 `/reload` | 小模型生成会话标题；有 subagent 在跑时延后 `/reload`。                                                                                                                                                                                                                                           | [tools](docs/guide/tools.md#自动标题)                            |
 | Web Hub（可选）           | 浏览器查看与控制会话：网页发消息、`ask_user` 竞速、托管会话与恢复、文件 / HTML 沙箱预览、本机端口代理、worktree diff / 图、版本面板、LAN 密码与安全（IP 白名单、二次验证、登录会话管理、飞书安全告警）、隐私锁；可安装为 PWA（[安装到手机 / 桌面](docs/guide/web-hub.md#安装到手机--桌面pwa)）。 | [web-hub](docs/guide/web-hub.md)                                 |
 | 加密会话（pi-secure）     | gocryptfs 保险库：项目与会话记录加密落盘，插件守护拦截跨域读写。未配置时零接线。                                                                                                                                                                                                                 | 本文 [加密会话](#加密会话pi-secure)                              |
+| 流量录制（traffic）       | `/record` 把 provider 请求 / 响应 / 流式 chunk 录进本地 SQLite，票据归属 + jq 改写规则 + 加固的网页查看 / 重放。默认关闭。                                                                                                                                                                       | 本文 [流量录制](#流量录制traffic)                                |
 | 从独立插件迁移            | 旧插件的卸载与残留识别。                                                                                                                                                                                                                                                                         | [migration](docs/guide/migration.md)                             |
 
 ## 命令
@@ -104,6 +105,7 @@ pi install .
 | `/pi-hud-refresh`                                                         | `git fetch` 并刷新 HUD                                                                                              |
 | `/resume-recent`                                                          | 恢复最近 48 小时的会话（`--all` 全量）                                                                              |
 | `/secure status`                                                          | 加密会话判定与挂载状态（配置过 `secure` 段才注册）                                                                  |
+| `/record`                                                                 | 流量录制：`on` / `off` / `status`（需 `traffic.enabled`，Node ≥22.13；网页端 `on` 需确认）                          |
 | `/clear`                                                                  | 开新会话                                                                                                            |
 
 ## 配置
@@ -137,6 +139,7 @@ pi install .
   "externalAgents": { "droid": { "enabled": false } },
   "webHub": { "enabled": false },
   "feishuBot": { "enabled": false }, // 飞书机器人；依赖 Web Hub 控制面
+  "traffic": { "enabled": false }, // 流量录制（/record；需 Node ≥22.13）
 }
 ```
 
@@ -239,6 +242,46 @@ pi-secure run acme --fork /home/me/.pi/agent/sessions/旧会话.jsonl
 | 退出码 73                            | 另一个 pi-secure 正在挂载/卸载（mount.lock 被占），稍后重试                                                                                |
 | 状态栏 `secure:locked`、输入被拦     | 会话被 LOCKED：保险库未挂载、会话与所属库不一致或跨域打开。按提示重开（如 `pi-secure run acme -C sub`）；LOCKED 不会自动退出，`/quit` 可用 |
 | 状态栏 `secure:invalid`              | `pi-subagent.json` 的 `secure` 段无法解析：修复 JSON 后重启 pi                                                                             |
+
+## 流量录制（traffic）
+
+把发往 provider 的请求与响应（含流式 chunk）录进本地 SQLite：`~/.pi/agent/records/traffic.db`，与独立插件 pi-traffic-record 同库同表，历史、改写规则与计数自动沿用。配合 jq 改写规则和一个加固的网页查看 / 重放界面。默认关闭，开启需 Node ≥22.13（`node:sqlite`）；off 时零注册、零 IO。内部设计见 [traffic-merge 方案](docs/dev/traffic-merge/plan.md)，真机验收清单见 [acceptance](docs/dev/traffic-merge/acceptance.md)。
+
+- 命令：`/record on` / `off` / `status`，在主会话注册（包括 print / json 模式），子会话不注册；print / json 模式只录制、不启动网页服务、不能重放；网页端执行 `on` 需要确认。
+- 请求归属靠一次性票据头（铸造后在上游 fetch 层剥离，provider 看不到）；改写只作用于能证明归属的请求，无法证明的按原样发送并记 `unattributed`。改写白名单：anthropic-messages / openai-completions / openai-responses（Codex 的 WS 握手绕过 fetch，票据剥不掉，只能录不改写）。
+- 库内含 API key 明文（原设计），文件本身不加密——录制默认关，请自行控制本机访问。
+- 网页默认只绑 `127.0.0.1`（4177 起，被占用自增）；全部 `/api/*` 要 token（回环也不例外），响应带反嵌入 / no-store 头；会话结束（含 `/reload`）中止在途重放。
+
+### 配置
+
+| 键                      | 默认值      | 含义                                                                         |
+| ----------------------- | ----------- | ---------------------------------------------------------------------------- |
+| `traffic.enabled`       | `false`     | 总开关；off ⇒ 零注册、零 IO、不加载 `node:sqlite`。                          |
+| `traffic.childSessions` | `true`      | 子会话请求是否落库。`false` 只禁止落库，**不**禁止子会话请求被改写规则作用。 |
+| `traffic.web.host`      | `127.0.0.1` | 绑定地址；`"0.0.0.0"` 显式开启 LAN（见下方风险）。                           |
+| `traffic.web.port`      | `4177`      | 起始端口，被占用自增，最多 20 次。                                           |
+
+以上键均非 live：改完 settings 文件后 `/reload` 生效；库路径固定在 `~/.pi/agent/records/traffic.db`，不随 `PI_CODING_AGENT_DIR`，也无可配置项。
+
+### 数据范围（拍板①）
+
+开启后默认**也录子 agent 流量**：consult fork、`/goal` verifier、workflow 子 agent 的完整 prompt 与输出都会落库，数据量约随子 agent 用量线性增长。toolkit 自身的保活 ping、额度查询、会话标题、topic 判定请求结构上不经过录制钩子，不录也不改写（拍板⑥）。另有两点共存行为：改写规则启用期间，cache 保活 ping 被否决（HUD 显示 `ping off:traffic-rewrite`）、pi 原生 cache warming 被叫停；观测到 warming 决策后改写会暂停（fail closed，`/record status` 可见），`/record off → on` 恢复。
+
+### LAN 风险
+
+`traffic.web.host = "0.0.0.0"` 会把查看 / 重放页面开放给同网段，但走的是**明文 HTTP**：token、请求正文与 API key 都可被同网段嗅探。Host 白名单与 token 校验不替代传输加密；需要跨机访问时建议走 SSH 隧道并保持默认绑定。
+
+### 从独立 pi-traffic-record 迁移
+
+1. 所有运行中的 pi 执行 `/record off`。
+2. 升级 pi-toolkit。
+3. 从 `~/.pi/agent/settings.json` 的 `packages` 删掉 `"../../ai/pi-traffic-record"`（装过 `~/.pi/agent/extensions/traffic-dump.ts` 的一并删）。
+4. `~/.pi/agent/pi-subagent.json` 写 `"traffic": { "enabled": true }`（或用 `/agent settings`）；需要 LAN 再加 `"web": { "host": "0.0.0.0" }`。
+5. **重启 pi**（只 `/reload` 不够）。
+6. 验证：只有一个 `/record`；`/record status` 计数与迁移前一致（库、规则、引擎设置在 DB 中自动沿用）；网页历史可浏览。
+7. 回滚：`traffic.enabled=false` 并把 package 加回去（另一个进程仍在跑旧版时，两者可共享同一个库，schema 不变）。
+
+暂时保留外部包也可以：toolkit 只在「确有活动的外部录制器」时让位——旧版 v0.2.x 实际在跑 ⇒ toolkit 让位并在 session_start 提示从 settings 移除；外部墓碑版 v0.3.0 则反过来对 toolkit 让位。任何加载顺序下活动录制器都恰为 1，不会双写。
 
 ## 开发
 

@@ -392,3 +392,13 @@ P3 ─────────┘
 | 增  | **init 不得加 `-q`**（否则不打印 master key，违反 Q1）；unlock 可用 `-q`（口令提示仍在）。1.8 守护化为 `-fg -notifypid` 子进程，启动器不要依赖进程名匹配（可用 mountinfo 判活）                 | §2.2 init / unlock                                                                                 |
 | 增  | 卸载统一用 `fusermount3 -u`（`/usr/bin/fusermount` 是其符号链接）；陈旧挂载（ENOTCONN）可被它清理，与 §3 一致                                                                                   | §3                                                                                                 |
 | 增  | conformance 为「工具可用即跑」自门控（不再需要 `PI_TOOLKIT_GOCRYPTFS_CONFORMANCE=1`），gocryptfs/FUSE 缺失则 skip                                                                               | §6                                                                                                 |
+
+---
+
+## 修订记录：traffic 已并入 pi-toolkit（traffic-merge T7，2026-10-23）
+
+- pi-traffic-record 已作为 `src/traffic/` 并入 pi-toolkit（设置组 `traffic.*`，`traffic.enabled` 默认 false；设计与拍板见 `docs/dev/traffic-merge/plan.md` r3）。对加密会话是**双保险**：
+  - **设置层**：`applySecureDomainOverrides`（`src/config/settings.ts`，两个设置加载入口的共同出口）在 secure/locked 分支强制 `traffic: { …, enabled: false }`（T3 落地，两个入口各有一条测试）；toolkit 自身 `package.json` 也声明了与外部 v0.2.1 同形的 `"piSecure": { "honors": "PI_SECURE_SESSION/1" }`。
+  - **运行层**：traffic 的唯一落库闸口 `persist()` 在每次写库前复查 `PI_SECURE_SESSION` / `getSecureDomain()`（不保留跨 await 的连接引用），engine 生命周期的各判定点（命令入口、钩子入口、票据铸造、fetch wrapper、流捕获每批、重放切点）同样复查，命中即停录并关库。
+  - 因此 R10「traffic-record 未适配 ⇒ 明文落库」对**内置** traffic 不再成立。
+- **D5 / §2.6 的外部包适配说明保留**：settings packages 里仍装着外部 pi-traffic-record 时，launcher 与 `/secure status` 的 D5 检测照旧——未声明 `piSecure` 的旧版本（< v0.2.1）依旧被警告；声明了的 v0.2.1+ 遵守 `PI_SECURE_SESSION`。toolkit 的认领协议（`Symbol.for("pi-traffic-record:claim")` / `external-active` + session_start `getCommands()` 复核）保证任何加载顺序下活动录制器恰为 1：外部实际在跑 ⇒ toolkit 让位，不会双写。从外部包迁移到内置 traffic 的步骤见 README「流量录制 / 从独立 pi-traffic-record 迁移」。

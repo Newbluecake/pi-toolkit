@@ -408,9 +408,9 @@ pi 的 payload 事件不携带 headers，也没有共同请求 ID，因此「hea
 - **钉住 §5.3 退役规则的前提**（按白名单 API 逐条）：会话 runner 的 `before_provider_request` 只由 agent loop 与 cache warmer 触发、compaction/branch summary 只触发 headers；同一请求只有 400 strict-tools 回退会再次触发 `onPayload`；2xx 响应头之后不再有 `onPayload`。任一条在新 pi 版本不成立 ⇒ conformance 失败，阻止 peer 升级。
 - Codex（`openai-codex-responses`）是否入白名单由本组的 SSE/WS 两条用例决定（R-b）。AGENTS.md 的 peer 升级清单加入两文件。
 
-### 8.4 CI 时长
+### 8.4 CI 时长（T7 实测回填，2026-10-23）
 
-迁入 ~160 例（独立 1.4s）+ 新增约 120 例；持锁/真子进程用例各 ≤5s 且并入 fork 池。toolkit 全量约 210s，预计增量 <3%；T7 以实测回填，若 >5% 把 #8/#10 标记 `slow` 组仍在 CI 跑。conformance 不进 `npm test`。CI 另增 `web-min-node` 的 node-floor 冒烟一步（§3.1，<10s）。
+迁入 + 新增共 32 个测试文件 / 391 例（`tests/traffic/**` 31 个 + `tests/integration/traffic-lifecycle-process.test.ts`），独立运行 17.65s（本机 16 核，fork 池 8 worker；最长单文件 `db-contention` ≈17s，常规模式下计时断言关闭）。fork 池下对全量（~210s，见 vitest.config.ts 注释）的影响约 2%，未超 5%，#8/#10 不标 `slow` 组。conformance 修正：`vitest.config.ts` 的 include 未排除 `tests/conformance`，两文件实际**也随 `npm test` / CI Test 步骤运行**（单文件 ≈99s / ≈52s；`npm run test:conformance` 全组 27 文件实测 122s，增量被并行池摊平，长尾是 `traffic.test.ts`）——原「conformance 不进 `npm test`」以实现为准作废（末尾修订记录 #2）。CI 另增 `web-min-node` 的 node-floor 冒烟一步（§3.1，实测 <1s，纯 node 内建零依赖）。
 
 ---
 
@@ -547,3 +547,21 @@ pi 的 payload 事件不携带 headers，也没有共同请求 ID，因此「hea
 > 60s 时间窗，**迟到 warming payload 被错配到其他票据的录制行为已接受残留**（数据质量，不改写任何请求）。② 运行时 checkpoint
 > 只在现场 stat 的 `-wal` ≤2 MiB 时执行；engine 关闭时 `db.close()` 的隐式 checkpoint 为已接受残留（shutdown / reload，
 > 不在发送路径），`-wal` >64 MiB 时先 warn。详见 `T2b-report.md` §13。
+
+---
+
+## 修订记录（T7，2026-10-23：plan 与实现不一致处，一律以实现 / T 报告为准）
+
+| #   | plan 原文                                                                            | 实现行为（出处）                                                                                                                                                                                                                                                                                       |
+| --- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | §7.3「主会话 `cache-keepalive.ts` 的发送闸门、子会话 `child.ts` 的发送闸门各加一行」 | 否决只落在共享 `CacheKeepaliveServiceImpl.onTick` 的 ping 分支（一处覆盖主/子），`child.ts` 零改动；`dispatchPing` 的 guard 闭包另在鉴权后 / 重试退避时复查。「拦 capture」被作者裁定为有害（会持有更旧的 capture）。（T5 §2/§8）                                                                      |
+| 2   | §8.4「conformance 不进 `npm test`」                                                  | `vitest.config.ts` 的 include 未排除 `tests/conformance`，两 conformance 文件实际随 `npm test` 与 CI Test 步骤运行（无 skip 门）。（T6 §6）                                                                                                                                                            |
+| 3   | §3.1 node-floor 冒烟 = fake pi 激活主/子各一次 + off 无 SQLite / on 只报版本错误     | T7 按任务口径落地为 `node:sqlite` 真实 roundtrip（加载 → 建临时库 → 写读一条 → 删除；22.5–22.12 自动补 `--experimental-sqlite` 重跑一次；失败非 0）。off 零面的断言由 `tests/traffic/wiring.test.ts` 与 `tests/integration/traffic-lifecycle-process.test.ts`（真子进程）承担。（T7）                  |
+| 4   | §3.2「unref 的 setImmediate」                                                        | 实测 unref 的 Immediate 会被 poll 拖延（最长 ~2s），flush tick 用 ref 的 `setImmediate`（每次只占一轮事件循环，print 模式自然退出不受影响）；退避/封批/whenIdle 的定时器仍 unref。（T2b §8.7）                                                                                                         |
+| 5   | §3.2 硬门「CI 跑」                                                                   | 计时门槛只在 `PI_TRAFFIC_PERF_GATE=1`（`npm run test:traffic-gate`）独立运行时断言；常规套件 / CI 只做功能断言（数字照打）。硬门以独立运行 + 真机 V11（含 IO 负载）为准，V11 复现超限 ⇒ T2c。（T2b §6.1/§12.12）                                                                                       |
+| 6   | §3.2 checkpoint「按上次 checkpoint 结果估算积压」                                    | 复审裁定 B1：每次决定前现场 `stat` `-wal`，≤2 MiB 才 PASSIVE，否则跳过（`checkpointsDeferred`，本 engine 周期内不再做运行时 checkpoint）；关库前 `-wal` >64 MiB 先 warn 一行。WAL 积压后不再 checkpoint / 关库隐式 checkpoint 为已接受残留。（T2b §13.2/§13.3）                                        |
+| 7   | §5.2 转换表（close / tap lost 才退役 wrapper）                                       | 补充两条：`/record off` 不退役 wrapper（`recording=false` 纯透传，避免反复 on/off 套层）；同一会话的重复宿主副本由进程级会话槽（`Symbol.for("pi-subagent:traffic-session-slot")`）按 sessionManager 身份去重，首个拿到 engine 的激活独占。（T2a §5.4、T3 §10 #1）                                      |
+| 8   | §4.1「token：`x-record-token` 头或 `?token=`」                                       | 状态变更（非 GET/HEAD）只认头（CSRF 纵深，方案的严格子集）；GET/HEAD 两者皆可。（T4 §3.1）                                                                                                                                                                                                             |
+| 9   | §2.1 布局 `web/`（app.js + vendor 同迁）                                             | `app.js` 在 `src/traffic/web/app.js`；vendor 留在 `src/traffic/vendor/`（字节锁定链不动，后续迁移只需 page.ts 一个函数 + 校验脚本两行）。`serialize.ts` T1 原样迁入、T2b 删除。原仓库 docs（`page-vue` / `traffic-rewrite`）拷入 `docs/dev/traffic/` 尚未做（遗留，见 T7-report）。（T4 §3.4、T1/T2b） |
+| 10  | §8.3「Codex 是否入白名单由本组用例决定（R-b）」                                      | CT8/CT9 裁定：SSE transport 票据可达且可剥离，但默认 transport 的 WS 握手携带票据头且不经 `globalThis.fetch` ⇒ 维持白名单外（只录钩子级、不改写、`codex_ws_warning` 提示）。（T6 §3）                                                                                                                  |
+| 11  | §5.3 warming 前提「决策结果回写到 event」                                            | pi 1.3 不回写：观察器对**任何** `cache_warming_decision` 事件都按「可能放行」记账（60s 内规则 ② 不成立），且任何 decision 都触发**改写暂停**（fail closed，行 `rewrite_status='suspended'`），只有 `/record off→on`、规则清零后再启用、会话 shutdown / 新 engine 解除。（T2b §12.3/§13.1）             |

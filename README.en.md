@@ -84,6 +84,7 @@ Detailed guides live in [`docs/guide/`](docs/guide/) and are **written in Chines
 | topic-switch                      | Suggests a fresh session when a new request is unrelated and the cache is cold.                                                                                                                                                                                                                                 | [tools](docs/guide/tools.md#topic-switch)                        |
 | Auto title / deferred `/reload`   | A small model titles sessions; `/reload` waits while subagents are running.                                                                                                                                                                                                                                     | [tools](docs/guide/tools.md#自动标题)                            |
 | Web Hub (optional)                | Browser view and control: web prompts, `ask_user` race, managed sessions and restore, file / sandboxed HTML preview, local-port proxy, worktree diff / graph, version panel, LAN password and security (client IP allowlist, two-factor login, login session management, Feishu security alerts), privacy lock. | [web-hub](docs/guide/web-hub.md)                                 |
+| Traffic recording (traffic)       | `/record` logs provider requests / responses / stream chunks into local SQLite; ticket attribution, jq rewrite rules, hardened web viewer / replay. Off by default.                                                                                                                                             | this README [traffic](#traffic-recording-traffic)                |
 | Migrating from standalone plugins | Uninstalling the old plugins and spotting leftovers.                                                                                                                                                                                                                                                            | [migration](docs/guide/migration.md)                             |
 
 ## Commands
@@ -103,6 +104,7 @@ Detailed guides live in [`docs/guide/`](docs/guide/) and are **written in Chines
 | `/pi-hud-refresh`                                                        | `git fetch` and refresh the HUD                                                                                     |
 | `/resume-recent`                                                         | Resume sessions from the last 48 hours (`--all` for everything)                                                     |
 | `/clear`                                                                 | Start a new session                                                                                                 |
+| `/record`                                                                | Traffic recording: `on` / `off` / `status` (needs `traffic.enabled`, Node ≥22.13; web `on` asks for confirmation)   |
 
 ## Configuration
 
@@ -135,6 +137,7 @@ Top-level enable switches (defaults in the comments):
   "externalAgents": { "droid": { "enabled": false } },
   "webHub": { "enabled": false },
   "feishuBot": { "enabled": false }, // Feishu bot; requires Web Hub control
+  "traffic": { "enabled": false }, // traffic recording (/record; needs Node ≥22.13)
 }
 ```
 
@@ -157,6 +160,28 @@ These are **top-level** `feishuBot.*` keys in `pi-subagent.json`, not `webHub.fe
 | `feishuBot.files.inbound`       | `true`    | Accept inbound image/file attachments.                                                |
 | `feishuBot.files.maxInboundMiB` | `30`      | Parses 1–100 MiB; effective ceiling is 30 MiB with shared upload limits.              |
 | `feishuBot.securityAlerts`      | `true`    | LAN security alerts: new-IP logins, allowlist denials, revoked sessions, 2FA changes. |
+
+## Traffic recording (traffic)
+
+Records provider requests and responses (including stream chunks) into a local SQLite DB — `~/.pi/agent/records/traffic.db`, the same database the standalone pi-traffic-record plugin used, so history, rewrite rules and counters carry over automatically. jq rewrite rules plus a hardened web viewer / replayer. Off by default; recording needs Node ≥22.13 (`node:sqlite`); off means zero wiring, zero IO. Design doc (Chinese): [traffic-merge plan](docs/dev/traffic-merge/plan.md); real-machine checklist: [acceptance](docs/dev/traffic-merge/acceptance.md).
+
+- `/record on | off | status`, registered in interactive main sessions only. print / json modes record but never start the web service or replay; the web command path asks for confirmation on `on`.
+- Requests are attributed by a one-shot ticket header (minted in the headers hook, stripped at the fetch trampoline — providers never see it). Rewriting only touches provably-attributed requests; anything unprovable is sent verbatim and counted `unattributed`. Rewrite whitelist: anthropic-messages / openai-completions / openai-responses (codex WS handshakes bypass fetch, so codex sessions are recorded but never rewritten).
+- The DB stores API keys in clear text (unchanged from the original design) and the file itself is not encrypted — recording is off by default for a reason.
+- The web viewer binds `127.0.0.1` only by default (port 4177, auto-increments); every `/api/*` call needs a token (loopback included); responses carry anti-framing / no-store headers; session end (including `/reload`) aborts in-flight replays.
+
+Configuration (non-live — `/reload` after editing the settings file):
+
+| Key                     | Default       | Meaning                                                                                                                                                                                                             |
+| ----------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `traffic.enabled`       | `false`       | Master switch; off ⇒ zero wiring, zero IO, `node:sqlite` never loads.                                                                                                                                               |
+| `traffic.childSessions` | `true`        | Whether child-session requests are persisted. `false` stops DB rows, never stops rewriting of those requests.                                                                                                       |
+| `traffic.web.host`      | `"127.0.0.1"` | Bind address; `"0.0.0.0"` opts into LAN — plaintext HTTP: the token, request bodies and API keys are sniffable on the LAN segment. Host allowlist and token checks are no substitute for TLS; prefer an SSH tunnel. |
+| `traffic.web.port`      | `4177`        | First port, auto-increments for up to 20 tries.                                                                                                                                                                     |
+
+Data scope: enabled recording includes **child-agent traffic** by default — consult forks, `/goal` verifiers and workflow children land with their full prompts and outputs, growing linearly with child usage (`traffic.childSessions=false` stops the rows only). The toolkit's own keepalive / quota / title / topic-judge requests never pass the recording hooks and are never recorded or rewritten. While rewrite rules are armed, cache keepalive pings are vetoed (HUD `ping off:traffic-rewrite`) and pi-native cache warming is stopped; after any observed warming decision rewriting is suspended (fail closed, visible in `/record status`) until `/record off → on`.
+
+Migrating from the standalone pi-traffic-record plugin (step-by-step in Chinese: [README.md](README.md#从独立-pi-traffic-record-迁移)): `/record off` everywhere → upgrade pi-toolkit → remove the package from `~/.pi/agent/settings.json` → set `"traffic": { "enabled": true }` in `~/.pi/agent/pi-subagent.json` → **restart pi** (not just `/reload`). Keeping the external package installed is also safe: the toolkit yields to a proven-active external recorder (the v0.3.0 tombstone release yields back), so exactly one recorder is ever active.
 
 ## Development
 
