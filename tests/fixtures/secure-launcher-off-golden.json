@@ -1,0 +1,741 @@
+{
+  "$comment": "N0 launcher off golden (private-plan r3 §6.5/§7.2 F1). Generated once from the post-L0 launcher; NEVER regenerate. See tests/secure/launcher-off-golden.test.ts for the normalization rules.",
+  "fake": [
+    {
+      "name": "status-no-settings",
+      "argv": ["status"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json  (no secure section)\n(no vaults)\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-corrupt-settings",
+      "argv": ["status"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json  ! <ROOT>/home/.pi/agent/pi-subagent.json: invalid JSON (<v8 message>)\n(no vaults)\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-secure-not-object",
+      "argv": ["status"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json  ! secure: not an object\n(no vaults)\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-invalid-entries",
+      "argv": ["status"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\n  ! secure.vaults.Bad Name invalid (name)\n  ! secure.vaults.acme invalid (dir)\n  ! secure.vaults.beta invalid (mnt)\n  ! secure.vaults.gamma invalid (entry)\n(no vaults)\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-enabled-false",
+      "argv": ["status"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json  secure.enabled=false\n(no vaults)\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-locked-all",
+      "argv": ["status"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\nacme: locked  layout ok  mnt <ROOT>/home/secure/acme\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/acme\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-locked-name",
+      "argv": ["status", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\nacme: locked  layout ok  mnt <ROOT>/home/secure/acme\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/acme\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-unregistered-name",
+      "argv": ["status", "zed"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json  (no secure section)\n  zed：未在设置中登记\nzed: locked  layout missing  mnt <ROOT>/home/secure/zed\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/zed\n  ! <ROOT>/home/.local/share/pi-toolkit-secure/zed 不存在\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-missing",
+      "argv": ["status"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\nacme: locked  layout missing  mnt <ROOT>/home/secure/acme\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/acme\n  ! <ROOT>/home/.local/share/pi-toolkit-secure/acme 不存在\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-incomplete",
+      "argv": ["status"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\nacme: locked  layout incomplete  mnt <ROOT>/home/secure/acme\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/acme\n  ! <ROOT>/home/.local/share/pi-toolkit-secure/acme/mount.lease 缺失（mount.lease 由 init 创建）\n  ! <ROOT>/home/secure/acme 下有多余条目：stray（可能是锁定期间写进挂载点底层的明文，人工检查）\n  恢复：确认 <ROOT>/home/.local/share/pi-toolkit-secure/acme 与挂载点 <ROOT>/home/secure/acme（未挂载、只含 work/state 两个哨兵）里没有要保留的数据后一并删除，再 pi-secure init acme\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-legacy",
+      "argv": ["status"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\nacme: locked  layout legacy  mnt <ROOT>/home/.local/share/pi-toolkit-secure/acme/mnt\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/acme\n  ! 旧布局（挂载点 <ROOT>/home/.local/share/pi-toolkit-secure/acme/mnt）：仅 status/lock 可用，unlock/run/init --fix-settings 已拒绝\n  ! 保险库 acme 使用旧布局（挂载点 <ROOT>/home/.local/share/pi-toolkit-secure/acme/mnt）。没有真实数据：pi-secure 登记项与目录删除后重新 init；有真实数据：pi-secure export acme <文件> 后 pi-secure import <文件> <新名字>（新布局，会话与 sessionDir 自动迁址），确认无误再删除旧库。\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-bad-name",
+      "argv": ["status", "Bad"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json  (no secure section)\n",
+      "stderr": "pi-secure: 保险库名不合法：\"Bad\"（需匹配 /^[a-z0-9][a-z0-9_-]{0,31}$/）\n"
+    },
+    {
+      "name": "unlock-not-found",
+      "argv": ["unlock", "acme"],
+      "tty": false,
+      "exit": 66,
+      "stdout": "",
+      "stderr": "pi-secure: 未找到保险库 acme（<ROOT>/home/.pi/agent/pi-subagent.json 的 secure.vaults 中没有）。先执行：pi-secure init acme\n"
+    },
+    {
+      "name": "unlock-bad-name",
+      "argv": ["unlock", "Bad"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 保险库名不合法：\"Bad\"（需匹配 /^[a-z0-9][a-z0-9_-]{0,31}$/）\n"
+    },
+    {
+      "name": "unlock-legacy",
+      "argv": ["unlock", "acme"],
+      "tty": false,
+      "exit": 78,
+      "stdout": "",
+      "stderr": "pi-secure: 保险库 acme 使用旧布局（挂载点 <ROOT>/home/.local/share/pi-toolkit-secure/acme/mnt）。没有真实数据：pi-secure 登记项与目录删除后重新 init；有真实数据：pi-secure export acme <文件> 后 pi-secure import <文件> <新名字>（新布局，会话与 sessionDir 自动迁址），确认无误再删除旧库。\n"
+    },
+    {
+      "name": "unlock-non-tty",
+      "argv": ["unlock", "acme"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "unlock-tty-bad-password",
+      "argv": ["unlock", "acme"],
+      "tty": true,
+      "exit": 77,
+      "stdout": "pi-secure: 口令错误（1/3）\npi-secure: 口令错误（2/3）\npi-secure: 口令连续错误 3 次\n",
+      "stderr": "",
+      "calls": [
+        "gocryptfs -nonempty -- <ROOT>/home/.local/share/pi-toolkit-secure/acme/cipher <ROOT>/home/secure/acme",
+        "gocryptfs -nonempty -- <ROOT>/home/.local/share/pi-toolkit-secure/acme/cipher <ROOT>/home/secure/acme",
+        "gocryptfs -nonempty -- <ROOT>/home/.local/share/pi-toolkit-secure/acme/cipher <ROOT>/home/secure/acme"
+      ]
+    },
+    {
+      "name": "unlock-tty-no-mount",
+      "argv": ["unlock", "acme"],
+      "tty": true,
+      "exit": 1,
+      "stdout": "pi-secure: gocryptfs 返回成功，但 mountinfo 不符（absent），请 pi-secure status acme\n",
+      "stderr": "",
+      "calls": ["gocryptfs -nonempty -- <ROOT>/home/.local/share/pi-toolkit-secure/acme/cipher <ROOT>/home/secure/acme"]
+    },
+    {
+      "name": "unlock-tty-exit10",
+      "argv": ["unlock", "acme"],
+      "tty": true,
+      "exit": 1,
+      "stdout": "pi-secure: gocryptfs 挂载失败（挂载点非空）\n",
+      "stderr": "",
+      "calls": ["gocryptfs -nonempty -- <ROOT>/home/.local/share/pi-toolkit-secure/acme/cipher <ROOT>/home/secure/acme"]
+    },
+    {
+      "name": "unlock-tty-exit23",
+      "argv": ["unlock", "acme"],
+      "tty": true,
+      "exit": 1,
+      "stdout": "pi-secure: gocryptfs 挂载失败（gocryptfs.conf 无法读取）\n",
+      "stderr": "",
+      "calls": ["gocryptfs -nonempty -- <ROOT>/home/.local/share/pi-toolkit-secure/acme/cipher <ROOT>/home/secure/acme"]
+    },
+    {
+      "name": "unlock-tty-stray",
+      "argv": ["unlock", "acme"],
+      "tty": true,
+      "exit": 78,
+      "stdout": "pi-secure: 布局校验失败，拒绝挂载：\n  - <ROOT>/home/secure/acme 下有多余条目：stray（可能是锁定期间写进挂载点底层的明文，人工检查）\n",
+      "stderr": ""
+    },
+    {
+      "name": "unlock-tty-lock-busy",
+      "argv": ["unlock", "acme"],
+      "tty": true,
+      "exit": 73,
+      "stdout": "pi-secure: 另一个 pi-secure 正在挂载或卸载（mount.lock 等待超时）\n",
+      "stderr": ""
+    },
+    {
+      "name": "lock-unmounted",
+      "argv": ["lock", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "acme：未挂载\n",
+      "stderr": ""
+    },
+    {
+      "name": "lock-lazy-unmounted",
+      "argv": ["lock", "--lazy", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "acme：未挂载\n",
+      "stderr": ""
+    },
+    {
+      "name": "lock-not-found",
+      "argv": ["lock", "acme"],
+      "tty": false,
+      "exit": 66,
+      "stdout": "",
+      "stderr": "pi-secure: 未找到保险库 acme（<ROOT>/home/.pi/agent/pi-subagent.json 的 secure.vaults 中没有）。先执行：pi-secure init acme\n"
+    },
+    {
+      "name": "lock-legacy-unmounted",
+      "argv": ["lock", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "acme：未挂载\n",
+      "stderr": ""
+    },
+    {
+      "name": "init-non-tty",
+      "argv": ["init", "acme"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: init需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "init-exists",
+      "argv": ["init", "acme"],
+      "tty": false,
+      "exit": 1,
+      "stdout": "",
+      "stderr": "pi-secure: 保险库 acme 已存在（<ROOT>/home/.local/share/pi-toolkit-secure/acme）。修正项目 sessionDir 用：pi-secure init acme --fix-settings\n"
+    },
+    {
+      "name": "init-exists-incomplete",
+      "argv": ["init", "acme"],
+      "tty": false,
+      "exit": 1,
+      "stdout": "",
+      "stderr": "pi-secure: <ROOT>/home/.local/share/pi-toolkit-secure/acme 已存在但布局不完整（上次 init 未完成？）：\n  - <ROOT>/home/secure/acme 下有多余条目：stray（可能是锁定期间写进挂载点底层的明文，人工检查）\n  清理（自行确认后执行）：确认未挂载、<ROOT>/home/secure/acme 内只有 work/state 两个哨兵文件且无要保留的数据后，删除元数据目录 <ROOT>/home/.local/share/pi-toolkit-secure/acme 与挂载点目录 <ROOT>/home/secure/acme，再 pi-secure init acme\n"
+    },
+    {
+      "name": "init-legacy",
+      "argv": ["init", "acme"],
+      "tty": false,
+      "exit": 78,
+      "stdout": "",
+      "stderr": "pi-secure: 保险库 acme 使用旧布局（挂载点 <ROOT>/home/.local/share/pi-toolkit-secure/acme/mnt）。没有真实数据：pi-secure 登记项与目录删除后重新 init；有真实数据：pi-secure export acme <文件> 后 pi-secure import <文件> <新名字>（新布局，会话与 sessionDir 自动迁址），确认无误再删除旧库。\n"
+    },
+    {
+      "name": "init-fix-settings-legacy",
+      "argv": ["init", "acme", "--fix-settings"],
+      "tty": false,
+      "exit": 78,
+      "stdout": "",
+      "stderr": "pi-secure: 保险库 acme 使用旧布局（挂载点 <ROOT>/home/.local/share/pi-toolkit-secure/acme/mnt）。没有真实数据：pi-secure 登记项与目录删除后重新 init；有真实数据：pi-secure export acme <文件> 后 pi-secure import <文件> <新名字>（新布局，会话与 sessionDir 自动迁址），确认无误再删除旧库。\n"
+    },
+    {
+      "name": "init-bad-path",
+      "argv": ["init", "acme", "--path", "rel/x"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: --path 须为绝对路径或 ~/ 开头：rel/x\n"
+    },
+    {
+      "name": "init-fix-with-path",
+      "argv": ["init", "acme", "--fix-settings", "--path", "~/x"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: --fix-settings 不与 --path 同用\n"
+    },
+    {
+      "name": "init-fix-not-found",
+      "argv": ["init", "acme", "--fix-settings"],
+      "tty": false,
+      "exit": 66,
+      "stdout": "",
+      "stderr": "pi-secure: 未找到保险库 acme（<ROOT>/home/.pi/agent/pi-subagent.json 的 secure.vaults 中没有）。先执行：pi-secure init acme\n"
+    },
+    {
+      "name": "init-bad-name",
+      "argv": ["init", "Bad"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 保险库名不合法：\"Bad\"（需匹配 /^[a-z0-9][a-z0-9_-]{0,31}$/）\n"
+    },
+    {
+      "name": "init-fix-settings-non-tty",
+      "argv": ["init", "acme", "--fix-settings"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "init-tty-init-fails",
+      "argv": ["init", "acme"],
+      "tty": true,
+      "exit": 1,
+      "stdout": "即将创建保险库 acme：gocryptfs 会要求输入两次新口令，然后在终端打印 master key（只显示这一次，请抄下离线保存）。\npi-secure: gocryptfs -init 失败（exit 1）\n  清理（自行确认后执行）：确认未挂载、<ROOT>/home/secure/acme 内只有 work/state 两个哨兵文件且无要保留的数据后，删除元数据目录 <ROOT>/home/.local/share/pi-toolkit-secure/acme 与挂载点目录 <ROOT>/home/secure/acme，再 pi-secure init acme\n",
+      "stderr": "",
+      "calls": ["gocryptfs -init -- <ROOT>/home/.local/share/pi-toolkit-secure/acme/cipher"]
+    },
+    {
+      "name": "init-tty-mnt-exists",
+      "argv": ["init", "acme"],
+      "tty": true,
+      "exit": 78,
+      "stdout": "pi-secure: 挂载点 <ROOT>/home/secure/acme 已存在——init 不会接管已有目录；确认无用后删除，或用 --path 换一个位置\n",
+      "stderr": ""
+    },
+    {
+      "name": "init-tty-parent-missing",
+      "argv": ["init", "acme", "--path", "~/nowhere/acme"],
+      "tty": true,
+      "exit": 78,
+      "stdout": "pi-secure: 挂载点父目录 <ROOT>/home/nowhere 不存在（仅缺省 ~/secure 会自动创建，其他位置请先自建）\n",
+      "stderr": ""
+    },
+    {
+      "name": "run-not-found",
+      "argv": ["run", "acme"],
+      "tty": false,
+      "exit": 66,
+      "stdout": "",
+      "stderr": "pi-secure: 未找到保险库 acme（<ROOT>/home/.pi/agent/pi-subagent.json 的 secure.vaults 中没有）。先执行：pi-secure init acme\n"
+    },
+    {
+      "name": "run-legacy",
+      "argv": ["run", "acme"],
+      "tty": false,
+      "exit": 78,
+      "stdout": "",
+      "stderr": "pi-secure: 保险库 acme 使用旧布局（挂载点 <ROOT>/home/.local/share/pi-toolkit-secure/acme/mnt）。没有真实数据：pi-secure 登记项与目录删除后重新 init；有真实数据：pi-secure export acme <文件> 后 pi-secure import <文件> <新名字>（新布局，会话与 sessionDir 自动迁址），确认无误再删除旧库。\n"
+    },
+    {
+      "name": "run-enabled-false",
+      "argv": ["run", "acme"],
+      "tty": false,
+      "exit": 78,
+      "stdout": "",
+      "stderr": "pi-secure: secure.enabled=false：插件守护已关闭，拒绝 run（unlock/lock/status 仍可用）\n"
+    },
+    {
+      "name": "run-pi-missing",
+      "argv": ["run", "acme"],
+      "tty": false,
+      "exit": 69,
+      "stdout": "",
+      "stderr": "pi-secure: PATH 上找不到 pi\n"
+    },
+    {
+      "name": "run-pi-not-package",
+      "argv": ["run", "acme"],
+      "tty": false,
+      "exit": 69,
+      "stdout": "",
+      "stderr": "pi-secure: 无法从 <ROOT>/bin/pi 定位 pi 包（需要 @earendil-works/pi-coding-agent 的 dist/cli/args.js）——拒绝启动\n"
+    },
+    {
+      "name": "run-refuse-session-dir",
+      "argv": ["run", "acme", "--session-dir", "/tmp/x"],
+      "tty": false,
+      "exit": 64,
+      "stdout": "",
+      "stderr": "pi-secure: 参数被拒：不允许 --session-dir：加密会话的会话目录固定在保险库内\n"
+    },
+    {
+      "name": "run-refuse-session-dir-dangling",
+      "argv": ["run", "acme", "--session-dir"],
+      "tty": false,
+      "exit": 64,
+      "stdout": "",
+      "stderr": "pi-secure: 参数被拒：不允许 --session-dir（缺少取值或用了 --session-dir=… 形式）\n"
+    },
+    {
+      "name": "run-refuse-no-extensions",
+      "argv": ["run", "acme", "--no-extensions"],
+      "tty": false,
+      "exit": 64,
+      "stdout": "",
+      "stderr": "pi-secure: 参数被拒：不允许 --no-extensions：加密守护依赖 pi-toolkit 扩展\n"
+    },
+    {
+      "name": "run-refuse-export",
+      "argv": ["run", "acme", "--export", "out.html"],
+      "tty": false,
+      "exit": 64,
+      "stdout": "",
+      "stderr": "pi-secure: 参数被拒：不允许 --export：请在会话内用 /export（默认写到保险库内的 cwd）\n"
+    },
+    {
+      "name": "run-refuse-extension",
+      "argv": ["run", "acme", "-e", "/x.ts"],
+      "tty": false,
+      "exit": 64,
+      "stdout": "",
+      "stderr": "pi-secure: 参数被拒：不允许 -e/--extension：加密会话不追加扩展路径（务实版简化）\n"
+    },
+    {
+      "name": "run-refuse-session-outside",
+      "argv": ["run", "acme", "--session", "/tmp/s.jsonl"],
+      "tty": false,
+      "exit": 64,
+      "stdout": "",
+      "stderr": "pi-secure: 参数被拒：--session <TMP>/s.jsonl 不在保险库会话目录 <ROOT>/home/secure/acme/state/sessions/ 内；库外会话请用 --fork 复制进来\n"
+    },
+    {
+      "name": "run-refuse-session-dangling",
+      "argv": ["run", "acme", "--session"],
+      "tty": false,
+      "exit": 64,
+      "stdout": "",
+      "stderr": "pi-secure: 参数被拒：不允许 --session（缺少取值或用了 --session=… 形式）\n"
+    },
+    {
+      "name": "run-refuse-fork-dangling",
+      "argv": ["run", "acme", "--fork"],
+      "tty": false,
+      "exit": 64,
+      "stdout": "",
+      "stderr": "pi-secure: 参数被拒：不允许 --fork（缺少取值或用了 --fork=… 形式）\n"
+    },
+    {
+      "name": "run-C-missing-value",
+      "argv": ["run", "acme", "-C"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: -C 需要子目录\n"
+    },
+    {
+      "name": "run-C-escape",
+      "argv": ["run", "acme", "-C", "../../x"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: -C ../../x 跳出了保险库\n"
+    },
+    {
+      "name": "run-C-absolute-outside",
+      "argv": ["run", "acme", "-C", "/etc"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: -C /etc 不在保险库 <ROOT>/home/secure/acme/work 内\n"
+    },
+    {
+      "name": "run-C-then-refused",
+      "argv": ["run", "acme", "-C", "sub", "--session-dir", "/x"],
+      "tty": false,
+      "exit": 64,
+      "stdout": "",
+      "stderr": "pi-secure: 参数被拒：不允许 --session-dir：加密会话的会话目录固定在保险库内\n"
+    },
+    {
+      "name": "run-plain-non-tty",
+      "argv": ["run", "acme"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-message-non-tty",
+      "argv": ["run", "acme", "hello world"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-C-non-tty",
+      "argv": ["run", "acme", "-C", "sub"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-C-dup-non-tty",
+      "argv": ["run", "acme", "-C", "a", "-C", "b"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-dashdash-non-tty",
+      "argv": ["run", "acme", "--", "--session-dir", "x"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-dashdash-private-non-tty",
+      "argv": ["run", "acme", "--", "--private"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-C-private-non-tty",
+      "argv": ["run", "acme", "-C", "sub", "--private"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-C-no-private-non-tty",
+      "argv": ["run", "acme", "-C", "sub", "--no-private", "msg"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-message-private-non-tty",
+      "argv": ["run", "acme", "hello", "--private"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-message-with-private-text",
+      "argv": ["run", "acme", "please use --private mode"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-no-session-non-tty",
+      "argv": ["run", "acme", "--no-session", "-p", "hi"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-session-inside-non-tty",
+      "argv": ["run", "acme", "--session", "~/secure/acme/state/sessions/default/x.jsonl"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-fork-non-tty",
+      "argv": ["run", "acme", "--fork", "/tmp/s.jsonl"],
+      "tty": false,
+      "exit": 2,
+      "stdout": "",
+      "stderr": "pi-secure: 解锁需要在终端里输入口令（stdin 不是 TTY）\n"
+    },
+    {
+      "name": "run-tty-bad-password",
+      "argv": ["run", "acme", "-C", "sub", "--private", "msg"],
+      "tty": true,
+      "exit": 77,
+      "stdout": "pi-secure: 口令错误（1/3）\npi-secure: 口令错误（2/3）\npi-secure: 口令连续错误 3 次\n",
+      "stderr": "",
+      "calls": [
+        "gocryptfs -nonempty -- <ROOT>/home/.local/share/pi-toolkit-secure/acme/cipher <ROOT>/home/secure/acme",
+        "gocryptfs -nonempty -- <ROOT>/home/.local/share/pi-toolkit-secure/acme/cipher <ROOT>/home/secure/acme",
+        "gocryptfs -nonempty -- <ROOT>/home/.local/share/pi-toolkit-secure/acme/cipher <ROOT>/home/secure/acme"
+      ]
+    }
+  ],
+  "real": [
+    {
+      "name": "unlock-already-first",
+      "argv": ["unlock", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "acme：已挂载（挂载点 <ROOT>/home/secure/acme，项目根 <ROOT>/home/secure/acme/work）\n",
+      "stderr": "pi-secure: 已写入 <ROOT>/home/secure/acme/work/.pi/settings.json 的 sessionDir\n"
+    },
+    {
+      "name": "status-mounted",
+      "argv": ["status"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\nacme: mounted  layout ok  mnt <ROOT>/home/secure/acme\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/acme\n  cwd-in-vault: 0\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "unlock-already-again",
+      "argv": ["unlock", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "acme：已挂载（挂载点 <ROOT>/home/secure/acme，项目根 <ROOT>/home/secure/acme/work）\n",
+      "stderr": ""
+    },
+    {
+      "name": "run-already-exit3",
+      "argv": ["run", "acme", "--no-session", "-p", "hi"],
+      "tty": false,
+      "exit": 3,
+      "stdout": "acme：已卸载\n",
+      "stderr": "",
+      "pi": {
+        "argv": ["--session-dir", "<ROOT>/home/secure/acme/state/sessions/default", "--no-session", "-p", "hi"],
+        "cwd": "<ROOT>/home/secure/acme/work",
+        "env": {
+          "PI_SECURE_VAULT": "acme",
+          "PI_SECURE_SESSION": "1",
+          "PI_SECURE_ORIG_ENV": "{\"TMPDIR\":\"<TMP>\",\"ARMORY_MEMORY_ROOT\":null}",
+          "TMPDIR": "<ROOT>/home/secure/acme/state<TMP>",
+          "ARMORY_MEMORY_ROOT": "<ROOT>/home/secure/acme/state/memory",
+          "PWD": "<ROOT>/home/secure/acme/work"
+        }
+      }
+    },
+    {
+      "name": "status-after-run",
+      "argv": ["status", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\nacme: locked  layout ok  mnt <ROOT>/home/secure/acme\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/acme\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "run-already-C-sub",
+      "argv": ["run", "acme", "-C", "sub", "--private", "msg"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "acme：已卸载\n",
+      "stderr": "",
+      "pi": {
+        "argv": ["--session-dir", "<ROOT>/home/secure/acme/state/sessions/default", "--private", "msg"],
+        "cwd": "<ROOT>/home/secure/acme/work/sub",
+        "env": {
+          "PI_SECURE_VAULT": "acme",
+          "PI_SECURE_SESSION": "1",
+          "PI_SECURE_ORIG_ENV": "{\"TMPDIR\":\"<TMP>\",\"ARMORY_MEMORY_ROOT\":null}",
+          "TMPDIR": "<ROOT>/home/secure/acme/state<TMP>",
+          "ARMORY_MEMORY_ROOT": "<ROOT>/home/secure/acme/state/memory",
+          "PWD": "<ROOT>/home/secure/acme/work/sub"
+        }
+      }
+    },
+    {
+      "name": "run-settings-conflict",
+      "argv": ["run", "acme"],
+      "tty": false,
+      "exit": 78,
+      "stdout": "",
+      "stderr": "pi-secure: <ROOT>/home/secure/acme/work/.pi/settings.json 的 sessionDir=\"/elsewhere\"，与保险库要求的 <ROOT>/home/secure/acme/state/sessions/default 不一致——会话可能写到保险库外，拒绝启动。\n  修复：pi-secure init acme --fix-settings（先备份原文件再改写）\n"
+    },
+    {
+      "name": "init-fix-settings-mounted",
+      "argv": ["init", "acme", "--fix-settings"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "acme：sessionDir 已对齐；保险库保持挂载（pi-secure lock acme 卸载）\n",
+      "stderr": "pi-secure: 已改写 sessionDir（原文件备份为 <ROOT>/home/secure/acme/work/.pi/settings.json.bak-<TS>）\n"
+    },
+    {
+      "name": "status-mounted-after-fix",
+      "argv": ["status", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\nacme: mounted  layout ok  mnt <ROOT>/home/secure/acme\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/acme\n  cwd-in-vault: 0\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-occupied",
+      "argv": ["status", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\nacme: mounted  layout ok  mnt <ROOT>/home/secure/acme\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/acme\n  cwd-in-vault: 1\n    pid <PID> sleep  <ROOT>/home/secure/acme/work\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "lock-occupied",
+      "argv": ["lock", "acme"],
+      "tty": false,
+      "exit": 76,
+      "stdout": "",
+      "stderr": "pi-secure: acme：仍有进程在保险库内（cwd），未卸载：\npi-secure:   pid <PID> sleep  <ROOT>/home/secure/acme/work\npi-secure:   退出它们后执行：pi-secure lock acme\n"
+    },
+    {
+      "name": "lock-mounted",
+      "argv": ["lock", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "acme：已卸载\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-locked-after",
+      "argv": ["status", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\nacme: locked  layout ok  mnt <ROOT>/home/secure/acme\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/acme\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-stale",
+      "argv": ["status", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\nacme: stale  layout ok  mnt <ROOT>/home/secure/acme\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/acme\n  ! 失效挂载（守护进程已不在）：pi-secure unlock acme 会先清理再挂载\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "lock-stale",
+      "argv": ["lock", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "acme：已卸载\n",
+      "stderr": ""
+    },
+    {
+      "name": "status-after-stale-lock",
+      "argv": ["status", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "gocryptfs: 1.8.0\nsettings: <ROOT>/home/.pi/agent/pi-subagent.json\nacme: locked  layout ok  mnt <ROOT>/home/secure/acme\n  dir <ROOT>/home/.local/share/pi-toolkit-secure/acme\nwarn: <env>\n",
+      "stderr": ""
+    },
+    {
+      "name": "lock-lazy-occupied",
+      "argv": ["lock", "--lazy", "acme"],
+      "tty": false,
+      "exit": 0,
+      "stdout": "acme：已卸载\n",
+      "stderr": ""
+    }
+  ]
+}

@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { acquireGocryptfsTestLock } from "./gocryptfs-test-lock.js";
 
 const REPO = join(import.meta.dirname, "..", "..");
 const BIN = join(REPO, "src", "secure", "bin", "pi-secure");
@@ -47,6 +48,12 @@ function exe(path: string, body: string): void {
 }
 
 describe.skipIf(!HAVE_FUSE)("pi-secure against real gocryptfs", () => {
+  // N1 review #3: serialize every suite that creates REAL global gocryptfs mounts (see gocryptfs-test-lock.ts).
+  let releaseGocryptfsLock: (() => void) | undefined;
+  beforeAll(async () => {
+    releaseGocryptfsLock = await acquireGocryptfsTestLock();
+  }, 250_000);
+  afterAll(() => releaseGocryptfsLock?.());
   let root = "";
   let home = "";
   let record = "";

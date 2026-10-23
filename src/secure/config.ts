@@ -60,11 +60,13 @@ export interface SecureVault {
    * stay reachable through it.
    */
   readonly legacyLink?: string;
+  /** private-plan §1.1: `secure.vaults.<name>.private === true` (present ONLY when true; new layout only). */
+  readonly private?: true;
 }
 
 export interface SecureInvalidVault {
   readonly name: string;
-  readonly reason: "name" | "entry" | "dir" | "mnt";
+  readonly reason: "name" | "entry" | "dir" | "mnt" | "private";
 }
 
 /** Disk probe used ONLY to recognize legacy entries without an explicit `mnt` (§L.3). */
@@ -187,6 +189,11 @@ export function parseSecureConfig(settings: unknown, home: string, io?: SecureCo
       invalid.push({ name, reason: "dir" });
       continue;
     }
+    // private-plan §1.1: `private` must be a boolean when present; only `true` surfaces.
+    if (entry.private !== undefined && typeof entry.private !== "boolean") {
+      invalid.push({ name, reason: "private" });
+      continue;
+    }
     const oldDefaultLink = join(home, SECURE_DEFAULT_MNT_PARENT, name);
     // Legacy recognition (§L.3): a `link` key always means the pre-L0 layout; an entry without
     // `mnt` whose `<dir>/mnt` exists as a directory on disk does too (probed via `io`). The link
@@ -205,7 +212,9 @@ export function parseSecureConfig(settings: unknown, home: string, io?: SecureCo
       vaults.push(deriveLegacyVault(name, dir, oldDefaultLink));
       continue;
     }
-    vaults.push(deriveVault(name, dir, mnt));
+    vaults.push(
+      entry.private === true ? { ...deriveVault(name, dir, mnt), private: true } : deriveVault(name, dir, mnt),
+    );
   }
   return { present: true, enabled, valid: true, vaults, invalid };
 }
@@ -258,4 +267,181 @@ export function pathWithin(p: string, root: string): boolean {
   if (p === root) return true;
   const base = root.endsWith(sep) ? root : root + sep;
   return p.startsWith(base);
+}
+
+// ───────────────────────────── private instance record (private-plan r3 §3.2) ─────────────────────────────
+
+/** Phases of a `--private` instance record (§3.2). */
+export const PRIVATE_PHASES = ["starting", "mounting", "launching", "setup", "session", "finalizing"] as const;
+export type PrivatePhase = (typeof PRIVATE_PHASES)[number];
+/** `<dir>/private.json` is at most this many UTF-8 bytes (larger ⇒ corrupt, fail closed). */
+export const PRIVATE_RECORD_MAX_BYTES = 4096;
+
+/** A process identity (pid + /proc starttime in clock ticks) — no pid namespace, global pids. */
+export interface PrivateIdentity {
+  readonly pid: number;
+  readonly start: number;
+}
+
+/** The validated `<dir>/private.json` (v3). Unknown keys are dropped by the parser. */
+export interface PrivateRecord {
+  readonly v: 3;
+  readonly instanceId: string;
+  readonly name: string;
+  readonly phase: PrivatePhase;
+  readonly mode?: "run" | "setup";
+  readonly bootId: string;
+  readonly createdAt: string;
+  readonly realCipher: string;
+  readonly realMnt: string;
+  /** `mount.lease` identity: dev as decimal `maj:min`, inode number. */
+  readonly lease: { readonly dev: string; readonly ino: number };
+  readonly owner: PrivateIdentity;
+  readonly supervisor?: PrivateIdentity;
+  readonly gocryptfs?: PrivateIdentity;
+  readonly pi?: PrivateIdentity;
+  readonly piExit?: { readonly code: number };
+  /** Exit code recorded by the supervisor when the instance failed before pi ran (1/69/75/77/78). */
+  readonly failCode?: number;
+  readonly inNsDone?: boolean;
+  readonly inNsPending?: readonly string[];
+  readonly ns?: { readonly mnt: string; readonly user: string; readonly innerUser?: string };
+  readonly lazyDetachedAt?: string;
+}
+
+export type PrivateRecordParse =
+  { readonly kind: "ok"; readonly record: PrivateRecord } | { readonly kind: "corrupt"; readonly reason: string };
+
+function utf8Length(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return n;
+}
+
+const HEX32_RE = /^[0-9a-f]{32}$/;
+const MAJMIN_RE = /^\d{1,10}:\d{1,10}$/;
+const NS_MNT_RE = /^mnt:\[\d{1,20}\]$/;
+const NS_USER_RE = /^user:\[\d{1,20}\]$/;
+
+function isIdentity(v: unknown): v is PrivateIdentity {
+  return (
+    isPlainObject(v) &&
+    Number.isSafeInteger(v.pid) &&
+    (v.pid as number) >= 2 &&
+    Number.isSafeInteger(v.start) &&
+    (v.start as number) >= 0
+  );
+}
+const isExitCode = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= 255;
+const isShortString = (v: unknown, max = 256): v is string => typeof v === "string" && v !== "" && v.length <= max;
+const isAbsPath = (v: unknown): v is string => isShortString(v, 4096) && v.startsWith("/") && !v.includes("\0");
+
+/**
+ * Parse `<dir>/private.json` text (the caller has already lstat'ed it as an own regular file).
+ * Strict on every known key, drops unknown keys, never throws. Same rules as the launcher's
+ * `parsePrivateRecord` (helper.mjs) — pinned by the parity fixture's `privateRecord` cases.
+ */
+export function parsePrivateRecord(text: unknown): PrivateRecordParse {
+  if (typeof text !== "string") return { kind: "corrupt", reason: "type" };
+  if (utf8Length(text) > PRIVATE_RECORD_MAX_BYTES) return { kind: "corrupt", reason: "size" };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { kind: "corrupt", reason: "json" };
+  }
+  if (!isPlainObject(raw)) return { kind: "corrupt", reason: "shape" };
+  const bad = (field: string): PrivateRecordParse => ({ kind: "corrupt", reason: `field:${field}` });
+  if (raw.v !== 3) return bad("v");
+  if (typeof raw.instanceId !== "string" || !HEX32_RE.test(raw.instanceId)) return bad("instanceId");
+  if (typeof raw.name !== "string" || !SECURE_VAULT_NAME_RE.test(raw.name)) return bad("name");
+  if (typeof raw.phase !== "string" || !(PRIVATE_PHASES as readonly string[]).includes(raw.phase)) return bad("phase");
+  if (raw.mode !== undefined && raw.mode !== "run" && raw.mode !== "setup") return bad("mode");
+  if (!isShortString(raw.bootId, 64)) return bad("bootId");
+  if (!isShortString(raw.createdAt, 64)) return bad("createdAt");
+  if (!isAbsPath(raw.realCipher)) return bad("realCipher");
+  if (!isAbsPath(raw.realMnt)) return bad("realMnt");
+  const lease = raw.lease;
+  if (
+    !isPlainObject(lease) ||
+    typeof lease.dev !== "string" ||
+    !MAJMIN_RE.test(lease.dev) ||
+    !Number.isSafeInteger(lease.ino) ||
+    (lease.ino as number) < 1
+  )
+    return bad("lease");
+  if (!isIdentity(raw.owner)) return bad("owner");
+  for (const k of ["supervisor", "gocryptfs", "pi"] as const)
+    if (raw[k] !== undefined && !isIdentity(raw[k])) return bad(k);
+  if (raw.piExit !== undefined && !(isPlainObject(raw.piExit) && isExitCode(raw.piExit.code))) return bad("piExit");
+  if (raw.failCode !== undefined && !isExitCode(raw.failCode)) return bad("failCode");
+  if (raw.inNsDone !== undefined && typeof raw.inNsDone !== "boolean") return bad("inNsDone");
+  if (
+    raw.inNsPending !== undefined &&
+    !(
+      Array.isArray(raw.inNsPending) &&
+      raw.inNsPending.length <= 16 &&
+      raw.inNsPending.every((x) => isShortString(x, 200))
+    )
+  )
+    return bad("inNsPending");
+  const ns = raw.ns;
+  if (
+    ns !== undefined &&
+    !(
+      isPlainObject(ns) &&
+      typeof ns.mnt === "string" &&
+      NS_MNT_RE.test(ns.mnt) &&
+      typeof ns.user === "string" &&
+      NS_USER_RE.test(ns.user) &&
+      (ns.innerUser === undefined || (typeof ns.innerUser === "string" && NS_USER_RE.test(ns.innerUser)))
+    )
+  )
+    return bad("ns");
+  if (raw.lazyDetachedAt !== undefined && !isShortString(raw.lazyDetachedAt, 64)) return bad("lazyDetachedAt");
+  const id = (x: unknown): PrivateIdentity => {
+    const o = x as PrivateIdentity;
+    return { pid: o.pid, start: o.start };
+  };
+  const leaseOk = lease as { dev: string; ino: number };
+  const nsOk = ns as { mnt: string; user: string; innerUser?: string } | undefined;
+  const record: PrivateRecord = {
+    v: 3,
+    instanceId: raw.instanceId,
+    name: raw.name,
+    phase: raw.phase as PrivatePhase,
+    ...(raw.mode !== undefined ? { mode: raw.mode } : {}),
+    bootId: raw.bootId,
+    createdAt: raw.createdAt,
+    realCipher: raw.realCipher,
+    realMnt: raw.realMnt,
+    lease: { dev: leaseOk.dev, ino: leaseOk.ino },
+    owner: id(raw.owner),
+    ...(raw.supervisor !== undefined ? { supervisor: id(raw.supervisor) } : {}),
+    ...(raw.gocryptfs !== undefined ? { gocryptfs: id(raw.gocryptfs) } : {}),
+    ...(raw.pi !== undefined ? { pi: id(raw.pi) } : {}),
+    ...(raw.piExit !== undefined ? { piExit: { code: (raw.piExit as { code: number }).code } } : {}),
+    ...(raw.failCode !== undefined ? { failCode: raw.failCode } : {}),
+    ...(raw.inNsDone !== undefined ? { inNsDone: raw.inNsDone } : {}),
+    ...(raw.inNsPending !== undefined ? { inNsPending: [...(raw.inNsPending as string[])] } : {}),
+    ...(nsOk !== undefined
+      ? {
+          ns: {
+            mnt: nsOk.mnt,
+            user: nsOk.user,
+            ...(nsOk.innerUser !== undefined ? { innerUser: nsOk.innerUser } : {}),
+          },
+        }
+      : {}),
+    ...(raw.lazyDetachedAt !== undefined ? { lazyDetachedAt: raw.lazyDetachedAt } : {}),
+  };
+  return { kind: "ok", record };
 }

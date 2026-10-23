@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parseSecureConfig, vaultMountState } from "../../src/secure/config.js";
+import { parsePrivateRecord, parseSecureConfig, vaultMountState } from "../../src/secure/config.js";
 import { hubSafeEnv } from "../../src/secure/env.js";
 
 /**
@@ -18,6 +18,7 @@ interface Fixture {
     expect: Record<string, string>;
     identity?: boolean;
   }>;
+  privateRecord: Array<{ name: string; text: string; expect: unknown }>;
 }
 
 const fixture = JSON.parse(
@@ -56,6 +57,18 @@ describe("secure contract parity — hubSafeEnv", () => {
       else expect(out).not.toBe(input);
       expect(input).toEqual(c.input); // never mutates its argument
       expect(Object.keys(out).some((k) => k.startsWith("PI_SECURE_"))).toBe(false);
+    });
+  }
+});
+
+describe("secure contract parity — private.json record (private-plan r3 §3.2, N1)", () => {
+  it("fixture covers ok and corrupt records", () => {
+    expect(fixture.privateRecord.length).toBeGreaterThanOrEqual(15);
+    expect(fixture.privateRecord.some((c) => (c.expect as { kind: string }).kind === "ok")).toBe(true);
+  });
+  for (const c of fixture.privateRecord) {
+    it(c.name, () => {
+      expect(JSON.parse(JSON.stringify(parsePrivateRecord(c.text)))).toEqual(c.expect);
     });
   }
 });

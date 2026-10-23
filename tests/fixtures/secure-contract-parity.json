@@ -1,5 +1,5 @@
 {
-  "$comment": "P1↔P2 secure contract parity (data-encryption plan r4 + private-plan §L layout, revised once by L0 2026-10-24: vault objects carry mnt/lease instead of link; legacy entries (§L.3) parse with layout:\"legacy\" and the OLD derivations — the only sanctioned non-append fixture change; extend cases here only). Shared by tests/secure/config-parity.test.ts (src/secure/config.ts, env.ts) and the launcher tests (src/secure/bin/helper.mjs). Never import across; the two implementations stay separate. settings.expect is the full JSON of parseSecureConfig (present/enabled/valid/vaults/invalid[{name,reason}]/error?); vaults and invalid are sorted by name. settings.probe (optional) lists paths the injected legacy-layout disk probe reports as existing directories (the real default probe lstat's <dir>/mnt). mountinfo realMnt/realCipher are already realpath'd. hubSafeEnv.expect is the full output env; identity=true additionally requires the same object back.",
+  "$comment": "P1↔P2 secure contract parity (data-encryption plan r4 + private-plan §L layout, revised once by L0 2026-10-24: vault objects carry mnt/lease instead of link; legacy entries (§L.3) parse with layout:\"legacy\" and the OLD derivations — the only sanctioned non-append fixture change; extend cases here only). Shared by tests/secure/config-parity.test.ts (src/secure/config.ts, env.ts) and the launcher tests (src/secure/bin/helper.mjs). Never import across; the two implementations stay separate. settings.expect is the full JSON of parseSecureConfig (present/enabled/valid/vaults/invalid[{name,reason}]/error?); vaults and invalid are sorted by name. settings.probe (optional) lists paths the injected legacy-layout disk probe reports as existing directories (the real default probe lstat's <dir>/mnt). mountinfo realMnt/realCipher are already realpath'd. hubSafeEnv.expect is the full output env; identity=true additionally requires the same object back. N1 (private-plan r3) appended: settings cases for `private` (only true surfaces; non-boolean ⇒ reason private; legacy entries never carry it), a hubSafeEnv case for PI_SECURE_NS, and the new privateRecord section (text ⇒ parsePrivateRecord result, run against config.ts and helper.mjs).",
   "home": "/home/u",
   "settings": [
     {
@@ -654,6 +654,184 @@
         ],
         "invalid": []
       }
+    },
+    {
+      "name": "N1: private:true surfaces on the vault",
+      "input": {
+        "secure": {
+          "vaults": {
+            "acme": {
+              "private": true
+            }
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "acme",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/acme",
+            "mnt": "/home/u/secure/acme",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+            "work": "/home/u/secure/acme/work",
+            "state": "/home/u/secure/acme/state",
+            "sessionDir": "/home/u/secure/acme/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lease",
+            "private": true
+          }
+        ],
+        "invalid": []
+      }
+    },
+    {
+      "name": "N1: private:false ⇒ no private key (shape unchanged)",
+      "input": {
+        "secure": {
+          "vaults": {
+            "acme": {
+              "private": false
+            }
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "acme",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/acme",
+            "mnt": "/home/u/secure/acme",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+            "work": "/home/u/secure/acme/work",
+            "state": "/home/u/secure/acme/state",
+            "sessionDir": "/home/u/secure/acme/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lease"
+          }
+        ],
+        "invalid": []
+      }
+    },
+    {
+      "name": "N1: private non-boolean ⇒ invalid reason private",
+      "input": {
+        "secure": {
+          "vaults": {
+            "acme": {
+              "private": "yes"
+            },
+            "beta": {
+              "private": 1
+            },
+            "gamma": {
+              "private": null
+            }
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [],
+        "invalid": [
+          {
+            "name": "acme",
+            "reason": "private"
+          },
+          {
+            "name": "beta",
+            "reason": "private"
+          },
+          {
+            "name": "gamma",
+            "reason": "private"
+          }
+        ]
+      }
+    },
+    {
+      "name": "N1: private on a legacy entry is validated but never surfaces",
+      "input": {
+        "secure": {
+          "vaults": {
+            "acme": {
+              "link": "~/secure/acme",
+              "private": true
+            },
+            "beta": {
+              "link": "~/x",
+              "private": "no"
+            }
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "acme",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/acme",
+            "mnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+            "work": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/work",
+            "state": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state",
+            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lease",
+            "layout": "legacy",
+            "legacyLink": "/home/u/secure/acme"
+          }
+        ],
+        "invalid": [
+          {
+            "name": "beta",
+            "reason": "private"
+          }
+        ]
+      }
+    },
+    {
+      "name": "N1: private next to explicit dir/mnt",
+      "input": {
+        "secure": {
+          "vaults": {
+            "acme": {
+              "dir": "/srv/v/acme",
+              "mnt": "~/m/acme",
+              "private": true
+            }
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "acme",
+            "dir": "/srv/v/acme",
+            "mnt": "/home/u/m/acme",
+            "cipher": "/srv/v/acme/cipher",
+            "work": "/home/u/m/acme/work",
+            "state": "/home/u/m/acme/state",
+            "sessionDir": "/home/u/m/acme/state/sessions/default",
+            "lock": "/srv/v/acme/mount.lock",
+            "lease": "/srv/v/acme/mount.lease",
+            "private": true
+          }
+        ],
+        "invalid": []
+      }
     }
   ],
   "mountinfo": [
@@ -864,6 +1042,349 @@
       "expect": {
         "TMPDIR": "/legit/tmp",
         "ARMORY_MEMORY_ROOT": "/legit/mem"
+      }
+    },
+    {
+      "name": "N1: PI_SECURE_NS is stripped like every PI_SECURE_*",
+      "input": {
+        "PATH": "/usr/bin",
+        "PI_SECURE_NS": "1",
+        "PI_SECURE_VAULT": "acme",
+        "PI_SECURE_SESSION": "1"
+      },
+      "expect": {
+        "PATH": "/usr/bin"
+      }
+    }
+  ],
+  "privateRecord": [
+    {
+      "name": "full session record round-trips",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"}}",
+      "expect": {
+        "kind": "ok",
+        "record": {
+          "v": 3,
+          "instanceId": "9f3c0a1b2c3d4e5f60718293a4b5c6d7",
+          "name": "acme",
+          "phase": "session",
+          "mode": "run",
+          "bootId": "99b7fae3-1f0f-4b6c-a810-ede5695ec46a",
+          "createdAt": "2026-10-23T19:30:00.000Z",
+          "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+          "realMnt": "/home/u/secure/acme",
+          "lease": {
+            "dev": "8:1",
+            "ino": 145137
+          },
+          "owner": {
+            "pid": 1200,
+            "start": 9876543
+          },
+          "supervisor": {
+            "pid": 1201,
+            "start": 9876550
+          },
+          "gocryptfs": {
+            "pid": 1210,
+            "start": 9876601
+          },
+          "pi": {
+            "pid": 1220,
+            "start": 9876650
+          },
+          "ns": {
+            "mnt": "mnt:[4026532871]",
+            "user": "user:[4026532870]"
+          }
+        }
+      }
+    },
+    {
+      "name": "minimal starting record",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"starting\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543}}",
+      "expect": {
+        "kind": "ok",
+        "record": {
+          "v": 3,
+          "instanceId": "9f3c0a1b2c3d4e5f60718293a4b5c6d7",
+          "name": "acme",
+          "phase": "starting",
+          "bootId": "99b7fae3-1f0f-4b6c-a810-ede5695ec46a",
+          "createdAt": "2026-10-23T19:30:00.000Z",
+          "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+          "realMnt": "/home/u/secure/acme",
+          "lease": {
+            "dev": "8:1",
+            "ino": 145137
+          },
+          "owner": {
+            "pid": 1200,
+            "start": 9876543
+          }
+        }
+      }
+    },
+    {
+      "name": "finalizing with piExit/inNsDone/pending/innerUser/lazy",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"finalizing\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\",\"innerUser\":\"user:[4026532874]\"},\"piExit\":{\"code\":3},\"inNsDone\":false,\"inNsPending\":[\"umount\",\"gocryptfs\"],\"lazyDetachedAt\":\"2026-10-23T19:40:00.000Z\",\"failCode\":75}",
+      "expect": {
+        "kind": "ok",
+        "record": {
+          "v": 3,
+          "instanceId": "9f3c0a1b2c3d4e5f60718293a4b5c6d7",
+          "name": "acme",
+          "phase": "finalizing",
+          "mode": "run",
+          "bootId": "99b7fae3-1f0f-4b6c-a810-ede5695ec46a",
+          "createdAt": "2026-10-23T19:30:00.000Z",
+          "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+          "realMnt": "/home/u/secure/acme",
+          "lease": {
+            "dev": "8:1",
+            "ino": 145137
+          },
+          "owner": {
+            "pid": 1200,
+            "start": 9876543
+          },
+          "supervisor": {
+            "pid": 1201,
+            "start": 9876550
+          },
+          "gocryptfs": {
+            "pid": 1210,
+            "start": 9876601
+          },
+          "pi": {
+            "pid": 1220,
+            "start": 9876650
+          },
+          "piExit": {
+            "code": 3
+          },
+          "failCode": 75,
+          "inNsDone": false,
+          "inNsPending": ["umount", "gocryptfs"],
+          "ns": {
+            "mnt": "mnt:[4026532871]",
+            "user": "user:[4026532870]",
+            "innerUser": "user:[4026532874]"
+          },
+          "lazyDetachedAt": "2026-10-23T19:40:00.000Z"
+        }
+      }
+    },
+    {
+      "name": "setup mode",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"setup\",\"mode\":\"setup\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"}}",
+      "expect": {
+        "kind": "ok",
+        "record": {
+          "v": 3,
+          "instanceId": "9f3c0a1b2c3d4e5f60718293a4b5c6d7",
+          "name": "acme",
+          "phase": "setup",
+          "mode": "setup",
+          "bootId": "99b7fae3-1f0f-4b6c-a810-ede5695ec46a",
+          "createdAt": "2026-10-23T19:30:00.000Z",
+          "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+          "realMnt": "/home/u/secure/acme",
+          "lease": {
+            "dev": "8:1",
+            "ino": 145137
+          },
+          "owner": {
+            "pid": 1200,
+            "start": 9876543
+          },
+          "supervisor": {
+            "pid": 1201,
+            "start": 9876550
+          },
+          "gocryptfs": {
+            "pid": 1210,
+            "start": 9876601
+          },
+          "pi": {
+            "pid": 1220,
+            "start": 9876650
+          },
+          "ns": {
+            "mnt": "mnt:[4026532871]",
+            "user": "user:[4026532870]"
+          }
+        }
+      }
+    },
+    {
+      "name": "unknown keys are dropped",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543,\"comm\":\"node\"},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"},\"extra\":\"x\"}",
+      "expect": {
+        "kind": "ok",
+        "record": {
+          "v": 3,
+          "instanceId": "9f3c0a1b2c3d4e5f60718293a4b5c6d7",
+          "name": "acme",
+          "phase": "session",
+          "mode": "run",
+          "bootId": "99b7fae3-1f0f-4b6c-a810-ede5695ec46a",
+          "createdAt": "2026-10-23T19:30:00.000Z",
+          "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+          "realMnt": "/home/u/secure/acme",
+          "lease": {
+            "dev": "8:1",
+            "ino": 145137
+          },
+          "owner": {
+            "pid": 1200,
+            "start": 9876543
+          },
+          "supervisor": {
+            "pid": 1201,
+            "start": 9876550
+          },
+          "gocryptfs": {
+            "pid": 1210,
+            "start": 9876601
+          },
+          "pi": {
+            "pid": 1220,
+            "start": 9876650
+          },
+          "ns": {
+            "mnt": "mnt:[4026532871]",
+            "user": "user:[4026532870]"
+          }
+        }
+      }
+    },
+    {
+      "name": "v2 ⇒ corrupt",
+      "text": "{\"v\":2,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"}}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:v"
+      }
+    },
+    {
+      "name": "bad instanceId (uppercase) ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9F3C0A1B2C3D4E5F60718293A4B5C6D7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"}}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:instanceId"
+      }
+    },
+    {
+      "name": "bad phase ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"running\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"}}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:phase"
+      }
+    },
+    {
+      "name": "bad mode ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"shell\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"}}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:mode"
+      }
+    },
+    {
+      "name": "relative realMnt ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"}}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:realMnt"
+      }
+    },
+    {
+      "name": "lease dev not maj:min ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"0801\",\"ino\":1},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"}}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:lease"
+      }
+    },
+    {
+      "name": "lease ino 0 ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":0},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"}}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:lease"
+      }
+    },
+    {
+      "name": "owner pid 1 ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1,\"start\":5},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"}}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:owner"
+      }
+    },
+    {
+      "name": "supervisor start negative ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":9,\"start\":-1},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"}}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:supervisor"
+      }
+    },
+    {
+      "name": "piExit code 256 ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"},\"piExit\":{\"code\":256}}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:piExit"
+      }
+    },
+    {
+      "name": "inNsDone non-boolean ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"},\"inNsDone\":\"yes\"}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:inNsDone"
+      }
+    },
+    {
+      "name": "ns mnt malformed ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"net:[1]\",\"user\":\"user:[2]\"}}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:ns"
+      }
+    },
+    {
+      "name": "bad vault name ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"Acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"}}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "field:name"
+      }
+    },
+    {
+      "name": "not JSON ⇒ corrupt",
+      "text": "{v:3",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "json"
+      }
+    },
+    {
+      "name": "array ⇒ corrupt",
+      "text": "[]",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "shape"
+      }
+    },
+    {
+      "name": "over 4 KiB ⇒ corrupt",
+      "text": "{\"v\":3,\"instanceId\":\"9f3c0a1b2c3d4e5f60718293a4b5c6d7\",\"name\":\"acme\",\"phase\":\"session\",\"mode\":\"run\",\"bootId\":\"99b7fae3-1f0f-4b6c-a810-ede5695ec46a\",\"createdAt\":\"2026-10-23T19:30:00.000Z\",\"realCipher\":\"/home/u/.local/share/pi-toolkit-secure/acme/cipher\",\"realMnt\":\"/home/u/secure/acme\",\"lease\":{\"dev\":\"8:1\",\"ino\":145137},\"owner\":{\"pid\":1200,\"start\":9876543},\"supervisor\":{\"pid\":1201,\"start\":9876550},\"gocryptfs\":{\"pid\":1210,\"start\":9876601},\"pi\":{\"pid\":1220,\"start\":9876650},\"ns\":{\"mnt\":\"mnt:[4026532871]\",\"user\":\"user:[4026532870]\"},\"pad\":\"éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"}",
+      "expect": {
+        "kind": "corrupt",
+        "reason": "size"
       }
     }
   ]
