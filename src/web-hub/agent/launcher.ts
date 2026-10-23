@@ -12,6 +12,7 @@
  * unref'd, async spawn errors swallowed).
  */
 import { hubSafeEnv } from "../../secure/env.js";
+import { hubSpawnBlockedReason } from "../../secure/domain.js";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -89,16 +90,40 @@ function findPiPackageJson(start: string, exists: (p: string) => boolean): strin
   return undefined;
 }
 
+/** private-plan §4.1-5 / security review N3 #1: `spawnHub`'s refusal verdict — the ONE place a
+ *  hub spawn can be blocked because the caller's process lives in (or cannot be proven NOT to
+ *  live in) a private mount ns. `unknown` blocks exactly like `in-ns` (fail-safe). */
+export type SpawnHubResult = { blocked: false } | { blocked: true; reason: "private-ns" | "private-ns-unknown" };
+
+/**
+ * The default gate: a FRESH three-state judgment (`judgePrivateNsGate` — never the frozen
+ * domain verdict, so a miss cannot survive until process exit). Re-judged on every call; the
+ * cost is one fd-bound record read per registered vault (+2 /proc reads only when a record
+ * exists), and ZERO fs access for an unconfigured process.
+ */
+export function hubSpawnBlockedInPrivateNs(): "private-ns" | "private-ns-unknown" | undefined {
+  return hubSpawnBlockedReason();
+}
+
 /**
  * Fire-and-forget hub spawn: `execPath jiti-cli.mjs main.ts`, detached, stdio
  * ignored, config passed through env. Never throws, never awaits.
+ *
+ * private-plan §4.1-1: the ONE hard gate covering every caller (auto-start, respawn, restart,
+ * start) — inside a private mount ns (or when that cannot be ruled out) the spawn is refused
+ * outright (a hub trapped in the ns would hold the plaintext view). Callers may pass their own
+ * `privateNsBlocked` seam; the default re-judges fresh, so it can never disagree with the
+ * session's own judgment.
  */
 export function spawnHub(
   plan: LauncherPlan,
   mainTs: string,
   config: HubConfig,
   spawnImpl: typeof import("node:child_process").spawn = nodeSpawn,
-): void {
+  privateNsBlocked: () => "private-ns" | "private-ns-unknown" | undefined = hubSpawnBlockedInPrivateNs,
+): SpawnHubResult {
+  const reason = privateNsBlocked();
+  if (reason !== undefined) return { blocked: true, reason };
   try {
     const child = spawnImpl(plan.execPath, [plan.jitiCli, mainTs], {
       detached: true,
@@ -118,6 +143,7 @@ export function spawnHub(
   } catch {
     /* synchronous spawn failure: the reconnect loop just keeps backing off */
   }
+  return { blocked: false };
 }
 
 /**

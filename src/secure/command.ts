@@ -13,6 +13,10 @@ import { PI_SECURE_SESSION } from "./env.js";
 
 export const TRAFFIC_RECORD_HONORS = "PI_SECURE_SESSION/1";
 
+/** private-plan §5.1 短句（固定措辞，status 的 boundary 行与 /secure status 共用）。 */
+export const PRIVATE_NS_BOUNDARY_SHORT =
+  "防路径直读/扫描/备份/其他程序的无意识访问；不防同 uid 定向进程（/proc/<pid>/root、setns）";
+
 export interface TrafficRecordCheck {
   /** package spec as written in settings.json */
   spec: string;
@@ -69,6 +73,9 @@ export interface SecureStatusInput {
   packageRoot: string;
   env: Readonly<Record<string, string | undefined>>;
   readMountinfo?: () => string;
+  /** private-plan §2.9: does `<dir>/private.json` exist for this vault row (default existsSync)?
+   *  Pure existence — no parsing, no evidence judgment (that is the domain's job, frozen earlier). */
+  existsPrivateRecord?: (file: string) => boolean;
 }
 
 export function renderSecureStatus(input: SecureStatusInput): string {
@@ -77,6 +84,12 @@ export function renderSecureStatus(input: SecureStatusInput): string {
   const lockText = input.runtimeLock ?? (domain.kind === "locked" ? domain.reason : undefined);
   lines.push(`加密会话：${domain.kind}${lockText !== undefined ? "（已锁定）" : ""}`);
   if (lockText !== undefined) lines.push(`  锁定原因：${lockText}`);
+  // private-plan §2.9/§5.2: two fixed lines inside a private mount ns, on EVERY domain kind.
+  if (domain.ns !== undefined) {
+    const nsName = domain.ns.vault?.vault.name;
+    lines.push(`  私有命名空间：是${nsName !== undefined ? `（${nsName}）` : ""}`);
+    lines.push(`  边界：${PRIVATE_NS_BOUNDARY_SHORT}`);
+  }
   if (domain.kind === "secure") {
     const p = statePathsOf(domain.vault);
     lines.push(`  保险库：${domain.vault.vault.name}（经 ${domain.via === "env" ? "PI_SECURE_VAULT" : "cwd"} 判定）`);
@@ -87,11 +100,17 @@ export function renderSecureStatus(input: SecureStatusInput): string {
   }
   if (domain.config.present) {
     const cfg = domain.config;
+    const existsPrivate = input.existsPrivateRecord ?? existsSync;
     lines.push(`配置：secure.enabled=${cfg.enabled}${cfg.valid ? "" : `（非法：${cfg.error ?? "?"}）`}`);
     for (const v of domain.vaults) {
       const mount = judgeVaultMount(v, input.readMountinfo ?? readProcMountinfo);
+      // private-plan §2.9: a plain session lists a vault with a live --private record with a
+      // pointer hint; the row is byte-identical when no record exists (freeze F5).
+      const privateRec = existsPrivate(join(v.root, "private.json"))
+        ? "（存在 --private 实例记录，用 pi-secure status 查看）"
+        : "";
       lines.push(
-        `  - ${v.vault.name}：${mount.ok ? "mounted" : "not mounted"} · ${v.root} · 挂载点 ${v.vault.mnt}${v.vault.layout === "legacy" ? "（旧布局，只读兼容）" : ""}`,
+        `  - ${v.vault.name}：${mount.ok ? "mounted" : "not mounted"} · ${v.root} · 挂载点 ${v.vault.mnt}${v.vault.layout === "legacy" ? "（旧布局，只读兼容）" : ""}${privateRec}`,
       );
     }
     for (const bad of cfg.invalid) lines.push(`  - ${bad.name}：invalid (${bad.reason})`);

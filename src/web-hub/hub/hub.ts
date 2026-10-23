@@ -74,6 +74,7 @@ import { createCmdLimit } from "./cmd-limit.js";
 import { createCommandCompleteRoutes } from "./command-complete.js";
 import { createCommandRouter } from "./commands.js";
 import { createSupersede, SUPERSEDE_YIELD_MS, type SupersedeController } from "./supersede.js";
+import { AGENT_NOSPAWN_CAP } from "../protocol/nospawn.js";
 import { createHistoryService } from "./history.js";
 import { createHubJsonWriter, type HubJsonWriter, type HubRecord } from "./hub-json.js";
 import { createIdleMonitor } from "./idle.js";
@@ -609,6 +610,12 @@ export async function startHub(
           spawnSup.noteVersion(agentKey, pluginVersion);
           return;
         }
+        // private-plan §4.1-5 (Q2): an agent advertising agent.nospawn.v1 (a private-mount-ns
+        // session) never enters the version observer either — the replacement hub could only
+        // be spawned from inside the ns, which spawnHub refuses. Caps are registered before
+        // onVersion fires, so getCaps sees THIS hello's set (R25 covers a hub that predates
+        // the cap).
+        if (registry.getCaps(agentKey)?.includes(AGENT_NOSPAWN_CAP) === true) return;
         supersede?.observe(pluginVersion, agentKey);
       },
       onTick: () => supersede?.tick(),

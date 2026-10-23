@@ -13,18 +13,32 @@
  * for the settings override and the web-hub boundary closure pins that surface. The hub process
  * never calls `initSecureDomain`, so it always sees `undefined` (= plain, no override).
  */
-import { lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  readSync,
+  realpathSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import {
+  parsePrivateRecord,
   parseSecureConfig,
   pathWithin,
+  PRIVATE_RECORD_MAX_BYTES,
   vaultMountState,
+  type PrivateRecord,
   type SecureConfig,
   type SecureConfigIo,
   type SecureVault,
 } from "./config.js";
-import { PI_SECURE_ORIG_ENV, PI_SECURE_SESSION, PI_SECURE_VAULT, origEnvSnapshot } from "./env.js";
+import { PI_SECURE_NS, PI_SECURE_ORIG_ENV, PI_SECURE_SESSION, PI_SECURE_VAULT, origEnvSnapshot } from "./env.js";
 
 export const SECURE_DOMAIN_KEY = Symbol.for("pi-subagent:secure-domain");
 
@@ -41,8 +55,27 @@ export interface SecureVaultRoots {
   readonly mntReal: string;
 }
 
+/**
+ * "This process lives inside a private mount namespace" (private-plan §2.9). Evidence-based:
+ * `/proc/self/ns/mnt` equals a registered vault's `private.json` v3 record `ns.mnt` (same boot);
+ * `PI_SECURE_NS=1` is an additional hint that only ever makes the verdict MORE conservative.
+ * Judged with the domain verdict, independent of its kind — a plain-domain cwd inside the ns
+ * hits just the same. `vault` names the matched vault (hint-only verdicts name the env vault
+ * when it is registered, else carry none).
+ */
+export interface PrivateNsInfo {
+  readonly via: "record" | "hint";
+  readonly vault?: SecureVaultRoots;
+}
+
 export type SecureDomain =
-  | { readonly kind: "plain"; readonly vaults: readonly SecureVaultRoots[]; readonly config: SecureConfig }
+  | {
+      readonly kind: "plain";
+      readonly vaults: readonly SecureVaultRoots[];
+      readonly config: SecureConfig;
+      /** private-plan §2.9: present ONLY inside a private mount ns (never `undefined`-valued). */
+      readonly ns?: PrivateNsInfo;
+    }
   | {
       readonly kind: "secure";
       readonly vault: SecureVaultRoots;
@@ -50,6 +83,7 @@ export type SecureDomain =
       readonly config: SecureConfig;
       /** How the vault was selected. */
       readonly via: "env" | "cwd";
+      readonly ns?: PrivateNsInfo;
     }
   | {
       readonly kind: "locked";
@@ -57,6 +91,7 @@ export type SecureDomain =
       readonly vaultName?: string;
       readonly vaults: readonly SecureVaultRoots[];
       readonly config: SecureConfig;
+      readonly ns?: PrivateNsInfo;
     };
 
 export interface SecureDomainDeps {
@@ -67,6 +102,11 @@ export interface SecureDomainDeps {
   settingsPath?: string;
   home?: string;
   readMountinfo?: () => string;
+  /** private-plan §2.9 seams for the ns evidence judgment (defaults: real /proc reads). */
+  readSelfMntNs?: () => string | undefined;
+  readBootId?: () => string | undefined;
+  /** Read one vault's `<dir>/private.json` (default: the fd-bound `readPrivateRecordFd`). */
+  readPrivateRecord?: (file: string) => PrivateRecordRead;
   /** One-shot warning sink for a broken `secure` section (default console.warn). */
   warn?: (message: string) => void;
 }
@@ -200,6 +240,264 @@ export function readProcMountinfo(): string {
   }
 }
 
+// ── private-plan §2.9: ns evidence (defaults + the judgment itself) ─────────────────────────
+
+/** readlink("/proc/self/ns/mnt") — e.g. `mnt:[4026532871]`; undefined on any error. */
+export function readSelfMntNsDefault(): string | undefined {
+  try {
+    return readlinkSync("/proc/self/ns/mnt");
+  } catch {
+    return undefined;
+  }
+}
+
+/** `/proc/sys/kernel/random/boot_id`, trimmed; undefined on any error. */
+export function readBootIdDefault(): string | undefined {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The default `<dir>/private.json` reader — FD-BOUND (security review N3 #3): one
+ * `open(O_RDONLY|O_NOFOLLOW|O_NONBLOCK)` → `fstat` (own uid, REGULAR file, 0 < size ≤ 4 KiB) →
+ * at most 4097 bytes read THROUGH THAT FD → close. A path swap between open and read is
+ * impossible (the fd pins the inode); growth between fstat and read is caught by the byte cap.
+ * ENOENT ⇒ absent; anything else that exists (symlink ⇒ ELOOP, foreign uid, not a regular
+ * file, empty, over-limit, read error) ⇒ rejected — the JUDGMENT maps that to `unknown`, never
+ * to "no evidence". Synchronous by design (one small file at gate time); no timer deadline —
+ * a wedged fs stalls the gate the same way the activation-time settings read would.
+ */
+export type PrivateRecordRead =
+  | { readonly kind: "absent" }
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "rejected"; readonly reason: string };
+
+export function readPrivateRecordFd(file: string): PrivateRecordRead {
+  let fd: number;
+  try {
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { kind: "absent" };
+    return { kind: "rejected", reason: code ?? "open-error" };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { kind: "rejected", reason: "not-regular" };
+    if (st.uid !== (process.getuid?.() ?? -1)) return { kind: "rejected", reason: "foreign-uid" };
+    if (st.size <= 0) return { kind: "rejected", reason: "empty" };
+    if (st.size > PRIVATE_RECORD_MAX_BYTES) return { kind: "rejected", reason: "over-limit" };
+    const buf = Buffer.alloc(PRIVATE_RECORD_MAX_BYTES + 1);
+    let total = 0;
+    for (;;) {
+      let n: number;
+      try {
+        n = readSync(fd, buf, total, buf.length - total, total);
+      } catch (error) {
+        return { kind: "rejected", reason: (error as NodeJS.ErrnoException).code ?? "read-error" };
+      }
+      if (n <= 0) break;
+      total += n;
+      if (total > PRIVATE_RECORD_MAX_BYTES) return { kind: "rejected", reason: "over-limit" };
+    }
+    return { kind: "text", text: buf.subarray(0, total).toString("utf8") };
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
+export interface PrivateNsIo {
+  readonly readSelfMntNs: () => string | undefined;
+  readonly readBootId: () => string | undefined;
+  readonly readPrivateRecord: (file: string) => PrivateRecordRead;
+}
+
+/**
+ * The FROZEN-domain ns field (private-plan §2.9): EVIDENCE — our `/proc/self/ns/mnt` equals some
+ * registered vault's `private.json` v3 `ns.mnt` under the SAME boot id — ∨ HINT
+ * (`PI_SECURE_NS=1`). A record from another boot never matches (ns ids are recycled across
+ * reboots); the hint only ever makes the verdict more conservative; the vault it names is
+ * resolved for display when registered. Never reads the mount itself, never throws.
+ *
+ * This feeds `/secure status` and `isPrivateNsSession()` ONLY. The hub GATES do not use it —
+ * they run the fresh three-state `judgePrivateNsGate()` below (security review N3 #1).
+ */
+export function privateNsEvidence(
+  vaults: readonly SecureVaultRoots[],
+  env: Record<string, string | undefined>,
+  io: PrivateNsIo,
+): PrivateNsInfo | undefined {
+  // Review round 2 #2: /proc is read ONLY when there is at least one vault to compare against —
+  // a process with no registered vaults (and the hint path, which needs no comparison) performs
+  // ZERO extra filesystem access, byte-identical to the pre-private-plan activation.
+  if (vaults.length > 0) {
+    const selfNs = io.readSelfMntNs();
+    const bootId = io.readBootId();
+    if (selfNs !== undefined && bootId !== undefined) {
+      for (const v of vaults) {
+        const r = io.readPrivateRecord(join(v.root, "private.json"));
+        if (r.kind !== "text") continue;
+        const parsed = parsePrivateRecord(r.text);
+        if (parsed.kind !== "ok" || parsed.record.bootId !== bootId) continue;
+        if (parsed.record.ns?.mnt === selfNs) return { via: "record", vault: v };
+      }
+    }
+  }
+  if (env[PI_SECURE_NS] === "1") {
+    const named = env[PI_SECURE_VAULT];
+    const vault = named !== undefined && named !== "" ? vaults.find((v) => v.vault.name === named) : undefined;
+    return { via: "hint", ...(vault !== undefined ? { vault } : {}) };
+  }
+  return undefined;
+}
+
+// ── security review N3 #1 (ruling 2026-10-24): the fail-safe three-state GATE judgment ───────
+
+export type PrivateNsGate = "in-ns" | "not-ns" | "unknown";
+
+export interface PrivateNsGateVerdict {
+  readonly gate: PrivateNsGate;
+  /** in-ns: the matched vault's name; unknown: WHAT could not be established (refusal copy). */
+  readonly reason?: string;
+}
+
+export interface PrivateNsGateDeps {
+  env?: Record<string, string | undefined>;
+  /** Default: the FROZEN domain's vault list (settings changes need a pi restart anyway). */
+  vaults?: readonly SecureVaultRoots[];
+  readSelfMntNs?: () => string | undefined;
+  readBootId?: () => string | undefined;
+  readPrivateRecord?: (file: string) => PrivateRecordRead;
+}
+
+type ScannedRecord =
+  | { readonly kind: "absent" }
+  | { readonly kind: "record"; readonly record: PrivateRecord }
+  | { readonly kind: "unknown"; readonly reason: string };
+
+/**
+ * The settings-state factor shared by BOTH ns judgments (review round 2 #1): a PRESENT secure
+ * section that could not be read/parsed — file read failure, corrupt JSON, wrong section shape,
+ * or ANY invalid vault entry (the whole registry is then untrustworthy) — is `"unusable"` and
+ * the gate answers `unknown` (never `not-ns`: with vaults=[] from a broken config we cannot
+ * scan the records that would prove membership). Only a genuinely ABSENT section (or a valid,
+ * deliberately disabled one) may yield `not-ns`. `undefined` config = the domain verdict has
+ * not run (pre-activate / the hub process) — treated as absent; every production gate runs
+ * post-activate.
+ */
+export type SecureConfigNsFactor = "absent" | "ok" | "off" | "unusable";
+
+export function secureConfigNsFactor(config: SecureConfig | undefined): SecureConfigNsFactor {
+  if (config === undefined || !config.present) return "absent";
+  if (!config.valid || config.invalid.length > 0) return "unusable";
+  return config.enabled ? "ok" : "off";
+}
+
+/**
+ * The gate judgment every hub-spawn surface runs FRESH (never the frozen verdict — a miss must
+ * not survive until process exit; security review N3 #1 ruling):
+ *
+ *   in-ns    — positive evidence: a same-boot record whose `ns.mnt` equals ours.
+ *   unknown  — anything that could not be established: `PI_SECURE_NS=1` without matching
+ *              evidence; a PRESENT secure section that is unreadable / corrupt / wrongly shaped
+ *              / carries any invalid vault entry (review round 2 #1 — then vaults=[] means
+ *              "could not determine", never "none"); ANY registered vault's private.json
+ *              existing but unreadable / corrupt / not an own-uid regular file / over 4 KiB;
+ *              `/proc/self/ns/mnt` (or boot_id) unreadable while a record exists; a same-boot
+ *              claim record without `ns` yet; a different-boot record whose ns id string
+ *              collides with ours (id reuse).
+ *   not-ns   — ONLY when there is no hint AND the secure section is genuinely absent (or valid
+ *              and deliberately disabled) AND every registered vault's record is either absent
+ *              or legal with `ns.mnt` ≠ ours (different-boot records count when their ns id
+ *              string differs — ids may be reused across reboots, never within one).
+ *
+ * Cost (per gate call — spawn admission / command invocation, rare): one open+read per
+ * registered vault, plus `/proc/self/ns/mnt` + boot_id reads ONLY when at least one record
+ * exists. NO vaults and no hint ⇒ `not-ns` with ZERO filesystem access (freeze: a plain
+ * unconfigured process stays byte-identical). All IO is synchronous; there is no timer
+ * deadline (see `readPrivateRecordFd`).
+ */
+export function judgePrivateNsGate(deps: PrivateNsGateDeps = {}): PrivateNsGateVerdict {
+  const domain = getSecureDomain();
+  // Review round 2 #1: same classification the activation-time judgment folded into `vaults` —
+  // a present-but-unusable secure section means vaults=[] is "could not determine", not "none".
+  const factor = secureConfigNsFactor(domain?.config);
+  if (factor === "unusable")
+    return {
+      gate: "unknown",
+      reason: `secure 配置存在但不可用（${domain?.config?.error ?? "读取失败/损坏/含非法库条目"}），无法排除私有挂载命名空间`,
+    };
+  const vaults = deps.vaults ?? domain?.vaults ?? [];
+  const env = deps.env ?? process.env;
+  const read = deps.readPrivateRecord ?? readPrivateRecordFd;
+  const hint = env[PI_SECURE_NS] === "1";
+
+  const scanned: ScannedRecord[] = [];
+  let anyRecord = false;
+  for (const v of vaults) {
+    const r = read(join(v.root, "private.json"));
+    if (r.kind === "absent") {
+      scanned.push({ kind: "absent" });
+      continue;
+    }
+    if (r.kind === "rejected") {
+      return { gate: "unknown", reason: `保险库 ${v.vault.name} 的 private.json 存在但不可读（${r.reason}）` };
+    }
+    const parsed = parsePrivateRecord(r.text);
+    if (parsed.kind !== "ok") {
+      return { gate: "unknown", reason: `保险库 ${v.vault.name} 的 private.json 损坏（${parsed.reason}）` };
+    }
+    anyRecord = true;
+    scanned.push({ kind: "record", record: parsed.record });
+  }
+
+  // Matching needs our own ns id — read it (and boot_id) only when there is something to match.
+  let selfNs: string | undefined;
+  let bootId: string | undefined;
+  if (anyRecord) {
+    selfNs = (deps.readSelfMntNs ?? readSelfMntNsDefault)();
+    bootId = (deps.readBootId ?? readBootIdDefault)();
+    if (selfNs === undefined || bootId === undefined)
+      return { gate: "unknown", reason: "/proc/self/ns/mnt 或 boot_id 不可读，无法比对私有命名空间证据" };
+  }
+
+  for (const s of scanned) {
+    if (s.kind !== "record") continue;
+    const rec = s.record;
+    if (rec.bootId === bootId) {
+      if (rec.ns?.mnt === selfNs) return { gate: "in-ns", reason: rec.name };
+      if (rec.ns === undefined)
+        return { gate: "unknown", reason: `保险库 ${rec.name} 存在尚未登记 ns 的 --private 认领记录（${rec.phase}）` };
+    } else if (rec.ns?.mnt === selfNs) {
+      // different boot + colliding ns id string: kernel ids are reused across reboots — the
+      // string matches but the boot does not, so this is neither evidence nor "≠ us".
+      return {
+        gate: "unknown",
+        reason: `保险库 ${rec.name} 的记录来自上次启动且 ns id 与当前碰撞，需 pi-secure status 核对`,
+      };
+    }
+  }
+
+  if (hint)
+    return { gate: "unknown", reason: "PI_SECURE_NS=1 但未找到匹配的 private.json 证据（记录可能已被移动或损坏）" };
+  return { gate: "not-ns" };
+}
+
+/** The hub-gate helper: `unknown` BLOCKS exactly like `in-ns` (fail-safe). */
+export function hubSpawnBlockedReason(): "private-ns" | "private-ns-unknown" | undefined {
+  const v = judgePrivateNsGate();
+  if (v.gate === "in-ns") return "private-ns";
+  if (v.gate === "unknown") return "private-ns-unknown";
+  return undefined;
+}
+
 /** The real-fs legacy-layout probe (§L.3): true when `<dir>/mnt` is a directory on disk. */
 export function legacyMntDirProbe(mnt: string): boolean {
   try {
@@ -237,11 +535,19 @@ export function computeSecureDomain(deps: SecureDomainDeps = {}): SecureDomain {
   const config = secureConfigFromRead(readSecureSettingsRaw(settingsPath), home, { legacyMntDir: legacyMntDirProbe });
   const usable = config.enabled && config.valid;
   const vaults = usable ? config.vaults.map(vaultRoots) : [];
+  // private-plan §2.9: judged once with the domain verdict and frozen with it (the optional `ns`
+  // key exists ONLY inside a private mount ns — non-ns objects stay deep-equal to pre-N3).
+  const ns = privateNsEvidence(vaults, env, {
+    readSelfMntNs: deps.readSelfMntNs ?? readSelfMntNsDefault,
+    readBootId: deps.readBootId ?? readBootIdDefault,
+    readPrivateRecord: deps.readPrivateRecord ?? readPrivateRecordFd,
+  });
+  const nsKey = ns === undefined ? {} : { ns };
   const envVault = env[PI_SECURE_VAULT];
   const fromVault = (v: SecureVaultRoots, via: "env" | "cwd"): SecureDomain => {
     const mount = judgeVaultMount(v, readMountinfo);
-    if (!mount.ok) return { kind: "locked", reason: mount.reason, vaultName: v.vault.name, vaults, config };
-    return { kind: "secure", vault: v, vaults, config, via };
+    if (!mount.ok) return { kind: "locked", reason: mount.reason, vaultName: v.vault.name, vaults, config, ...nsKey };
+    return { kind: "secure", vault: v, vaults, config, via, ...nsKey };
   };
   if (envVault !== undefined && envVault !== "") {
     if (!usable)
@@ -251,6 +557,7 @@ export function computeSecureDomain(deps: SecureDomainDeps = {}): SecureDomain {
         vaultName: envVault,
         vaults,
         config,
+        ...nsKey,
       };
     const v = vaults.find((x) => x.vault.name === envVault);
     if (!v)
@@ -260,13 +567,14 @@ export function computeSecureDomain(deps: SecureDomainDeps = {}): SecureDomain {
         vaultName: envVault,
         vaults,
         config,
+        ...nsKey,
       };
     return fromVault(v, "env");
   }
-  if (vaults.length === 0) return { kind: "plain", vaults, config };
+  if (vaults.length === 0) return { kind: "plain", vaults, config, ...nsKey };
   const cwd = canonicalPath(deps.cwd ?? process.cwd());
   const hit = vaults.find((v) => inVaultDir(cwd, v));
-  return hit ? fromVault(hit, "cwd") : { kind: "plain", vaults, config };
+  return hit ? fromVault(hit, "cwd") : { kind: "plain", vaults, config, ...nsKey };
 }
 
 /** Apply the secure env redirection (plan §2.4 step 1). ORIG is written only when absent. */
@@ -309,6 +617,16 @@ export function initSecureDomain(deps: SecureDomainDeps = {}): SecureDomain {
 /** The frozen verdict, or undefined before `initSecureDomain` ran (e.g. the hub process, unit tests). */
 export function getSecureDomain(): SecureDomain | undefined {
   return (globalThis as Record<symbol, unknown>)[SECURE_DOMAIN_KEY] as SecureDomain | undefined;
+}
+
+/**
+ * Private-mount-ns info for THIS process (private-plan §2.9/§4.1), or undefined outside one.
+ * Truthy ⇒ every hub-spawn surface refuses (spawnHub gate, /webhub restart, agent.nospawn.v1).
+ * Undefined before `initSecureDomain` ran (the hub process itself, pre-activate imports) —
+ * every consumer lives in plugin wiring that runs after activate, so that is "not in an ns".
+ */
+export function isPrivateNsSession(): PrivateNsInfo | undefined {
+  return getSecureDomain()?.ns;
 }
 
 /** In-vault paths when the frozen domain is secure, else undefined. */

@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetSecureDomainForTests, type SecureDomain } from "../../src/secure/domain.js";
@@ -450,5 +450,41 @@ describe("wireSecureGuards (pi-facing assembly)", () => {
     await f.emit("session_start", {}, c.ctx);
     await new Promise((r) => setTimeout(r, 20));
     expect(c.notes).toEqual([]);
+  });
+});
+
+// ── private-plan §6.1 (N3): D4 pins for /proc/<pid>/root-style vault access ─────────────────
+//
+// A same-uid process can reach a private mount through `/proc/<pid>/root/<vault>/…` (KNOWN
+// residual R20 — the vault CONTENT stays readable that way). What D4 must still guarantee in a
+// PLAIN session: naming that spelling through a path tool or bash text is blocked. The mechanism
+// is realpath resolution (canonicalPath follows the symlink chain exactly like /proc/<pid>/root),
+// pinned here with a real directory symlink standing in for the proc root.
+
+describe("D4 vs /proc/<pid>/root spellings (private-plan §6.1)", () => {
+  it("read/grep through a /proc-root-style symlink into the vault is blocked (realpath resolution)", () => {
+    const { v, d } = plain();
+    // a directory symlink standing in for /proc/<pid>/root → resolves through to the vault
+    const fakeRoot = join(v.tmp, "fakeroot");
+    symlinkSync(v.home, fakeRoot);
+    const through = join(fakeRoot, "secure", "acme", "work", "secret.txt");
+    for (const tool of ["read", "grep", "ls", "find"]) {
+      const r = decideToolCall(d, undefined, tool, { path: through }, v.outside, v.home);
+      expect(r?.block, tool).toBe(true);
+      expect(r?.reason).toContain("acme");
+    }
+    // same spelling WITHOUT the indirection stays blocked too (absolute path form)
+    expect(decideToolCall(d, undefined, "read", { path: join(v.mnt, "work", "x") }, v.outside, v.home)?.block).toBe(
+      true,
+    );
+  });
+
+  it("bash text naming the /proc-root spelling is caught by the substring scan", () => {
+    const { v, d } = plain();
+    const home = v.home;
+    const cmd = `cat /proc/1234/root${join(home, "secure", "acme", "work", "secret.txt")} > /tmp/leak`;
+    const r = decideToolCall(d, undefined, "bash", { command: cmd }, v.outside, v.home);
+    expect(r?.block).toBe(true);
+    expect(bashTouchesVault(cmd, d.vaults, v.home)?.vault.name).toBe("acme");
   });
 });

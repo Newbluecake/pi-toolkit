@@ -66,6 +66,7 @@ import { currentConnection, newAdminRid } from "../web-hub/agent/connection.js";
 import { fetchTfaStatus, runTwofaCommand, type TwofaCommandDeps } from "../web-hub/agent/twofa-cmd.js";
 import { runUsersCommand, type LanUsersPort } from "../web-hub/agent/users-cmd.js";
 import { isWebInvocation } from "../web-hub/agent/command-capture.js";
+import { isPrivateNsSession, judgePrivateNsGate, type PrivateNsGateVerdict } from "../secure/domain.js";
 import { FEISHU_OPEN_ID_RE } from "../web-hub/protocol/feishu.js";
 import { loadFeishuBotWarnings, type FeishuBotWarning } from "../config/settings.js";
 import { renderQr } from "./qr-render.js";
@@ -112,6 +113,12 @@ export interface WebHubCommandDeps {
   feishuCoexistence?: () => FeishuNotifyCoexistence;
   /** F9: setup-poll sleep seam (default `unrefSleep`; tests inject an instant clock). */
   feishuSleep?: (ms: number) => Promise<void>;
+  /** private-plan §4.1-3 / security review N3 #1 (N3): the private-ns GATE verdict —
+   *  `"in-ns" | "not-ns" | "unknown"`, re-judged FRESH per command invocation (unset ⇒
+   *  `judgePrivateNsGate()`; `unknown` refuses exactly like `in-ns`, with its own copy).
+   *  Gates restart (refused before ANY hub interaction), open (URL only, no browser) and start
+   *  (an extra note line); `stop` is deliberately untouched. */
+  privateNs?: () => PrivateNsGateVerdict;
 }
 
 const USAGE =
@@ -318,7 +325,13 @@ async function runStatus(ctx: ExtensionCommandContext, control: WebHubControl, d
   notifyAll(ctx, cmdArgsLines, control.cmdArgs?.levelOf(cmdArgsLines[0]) ?? "info");
 }
 
+/** The command-layer gate verdict (fresh per invocation; `unknown` refuses like `in-ns`). */
+function privateNsGateOf(deps: WebHubCommandDeps): PrivateNsGateVerdict {
+  return deps.privateNs !== undefined ? deps.privateNs() : judgePrivateNsGate();
+}
+
 async function runOpen(ctx: ExtensionCommandContext, control: WebHubControl, deps: WebHubCommandDeps): Promise<void> {
+  const privateNs = privateNsGateOf(deps).gate !== "not-ns";
   // §6.7.2: an explicit open clears the machine-level stop marker first (best-effort — the open
   // itself proceeds either way, with a warning when the marker couldn't be removed).
   const clear = await control.admin.clearStopMarker();
@@ -331,11 +344,21 @@ async function runOpen(ctx: ExtensionCommandContext, control: WebHubControl, dep
     return;
   }
   notify(ctx, res.url, "info");
-  const open = deps.open ?? ((url: string) => defaultOpen(url, (m) => notify(ctx, m, "warning")));
-  try {
-    open(res.url);
-  } catch (err) {
-    notify(ctx, `打开浏览器失败：${err instanceof Error ? err.message : String(err)}`, "warning");
+  if (privateNs) {
+    // private-plan §4.1-3: inside a private mount ns (or when that cannot be ruled out, review
+    // N3 #1) `open` only PRINTS the URL — no browser, and the hub is never auto-started from here.
+    notify(
+      ctx,
+      "本会话在私有挂载命名空间内（或无法确认不在其中），不在此打开浏览器；若 hub 未运行，请在普通终端的 pi 里执行 /webhub start。",
+      "info",
+    );
+  } else {
+    const open = deps.open ?? ((url: string) => defaultOpen(url, (m) => notify(ctx, m, "warning")));
+    try {
+      open(res.url);
+    } catch (err) {
+      notify(ctx, `打开浏览器失败：${err instanceof Error ? err.message : String(err)}`, "warning");
+    }
   }
   // best-effort: LAN section degrades silently when the admin socket isn't live (plan §9.3 "open").
   const infoRes = await control.lan.info();
@@ -360,7 +383,26 @@ async function runUnlock(ctx: ExtensionCommandContext, control: WebHubControl): 
   notify(ctx, message, level);
 }
 
-async function runRestart(ctx: ExtensionCommandContext, control: WebHubControl): Promise<void> {
+async function runRestart(
+  ctx: ExtensionCommandContext,
+  control: WebHubControl,
+  deps: WebHubCommandDeps,
+): Promise<void> {
+  const verdict = privateNsGateOf(deps);
+  // private-plan §4.1-3 / review N3 #1: refuse BEFORE the stop fence is written / shutdown is
+  // sent — the replacement hub could only be spawned from inside the ns, which spawnHub
+  // refuses, so a restart from here would just leave the (working) hub down. `unknown` refuses
+  // identically (fail-safe) with its own diagnostic copy.
+  if (verdict.gate !== "not-ns") {
+    notify(
+      ctx,
+      verdict.gate === "unknown"
+        ? `无法确认本会话是否在私有挂载命名空间内（${verdict.reason ?? "证据不可用"}），已拒绝 /webhub restart。排查：pi-secure status；确认后请在普通终端的 pi 里执行 /webhub restart。`
+        : "本会话运行在私有挂载命名空间内，已拒绝 /webhub restart（新 hub 会被困在命名空间里并持有明文视图）。需要重启 hub 时，请在普通终端的 pi 里执行 /webhub restart。",
+      "warning",
+    );
+    return;
+  }
   // §6.7.2: same explicit-intent marker clear as `/webhub open`.
   const clear = await control.admin.clearStopMarker();
   if (clear.kind === "clear-failed") {
@@ -432,10 +474,14 @@ async function runStop(ctx: ExtensionCommandContext, control: WebHubControl): Pr
   notify(ctx, message, level);
 }
 
-async function runStart(ctx: ExtensionCommandContext, control: WebHubControl): Promise<void> {
+async function runStart(ctx: ExtensionCommandContext, control: WebHubControl, deps: WebHubCommandDeps): Promise<void> {
   const outcome = await control.admin.start();
   const { message, level } = formatStartOutcomeMessage(outcome);
   notify(ctx, message, level);
+  // private-plan §4.1-3: the marker is cleared as usual (other terminals may auto-spawn), but
+  // THIS session never pulls the hub up itself (`unknown` included — fail-safe, review N3 #1).
+  if (privateNsGateOf(deps).gate !== "not-ns")
+    notify(ctx, "本会话不会自行拉起 web-hub；需要网页时，在普通终端的 pi 里执行 /webhub start。", "info");
 }
 
 async function runTokenRotate(ctx: ExtensionCommandContext, control: WebHubControl): Promise<void> {
@@ -908,13 +954,13 @@ export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCom
           await runUnlock(ctx, control);
           return;
         case "restart":
-          await runRestart(ctx, control);
+          await runRestart(ctx, control, deps);
           return;
         case "stop":
           await runStop(ctx, control);
           return;
         case "start":
-          await runStart(ctx, control);
+          await runStart(ctx, control, deps);
           return;
         case "token":
           await runTokenRotate(ctx, control);

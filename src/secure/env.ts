@@ -7,6 +7,11 @@
  *   PI_SECURE_VAULT=<name>    launcher `run`: explicit domain (must be a registered, valid vault)
  *   PI_SECURE_SESSION=1       launcher `run`; the plugin also sets it in a secure domain
  *                             (traffic-record & co. skip persisting bodies — plan §2.6)
+ *   PI_SECURE_NS=1            launcher `run --private` ONLY (private-plan §2.4): "this pi tree
+ *                             lives in a private mount ns". An ADDITIONAL HINT for the plugin's
+ *                             evidence-based ns judgment (§2.9) — it is stripped from every
+ *                             child env like the rest of the prefix, so it can never leak into
+ *                             a hub / managed spawn (hubSafeEnv strips PI_SECURE_*)
  *   PI_SECURE_ORIG_ENV        JSON {"TMPDIR": orig|null, "ARMORY_MEMORY_ROOT": orig|null}; written by
  *                             whichever side first enters secure (launcher pre-writes it; the plugin
  *                             writes it only when absent) — never overwritten
@@ -18,6 +23,7 @@
 export const PI_SECURE_PREFIX = "PI_SECURE_";
 export const PI_SECURE_VAULT = "PI_SECURE_VAULT";
 export const PI_SECURE_SESSION = "PI_SECURE_SESSION";
+export const PI_SECURE_NS = "PI_SECURE_NS";
 export const PI_SECURE_ORIG_ENV = "PI_SECURE_ORIG_ENV";
 /** The env keys a secure domain overrides and `hubSafeEnv` restores. Order is the JSON key order. */
 export const PI_SECURE_RESTORED_KEYS = ["TMPDIR", "ARMORY_MEMORY_ROOT"] as const;

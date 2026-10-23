@@ -141,6 +141,41 @@ describe("spawnHub", () => {
       throw new Error("EAGAIN");
     });
     expect(() => spawnHub(plan, "/m.ts", config, spawnImpl as never)).not.toThrow();
+    expect(spawnHub(plan, "/m.ts", config, spawnImpl as never)).toEqual({ blocked: false });
+  });
+
+  // private-plan §4.1-1 (N3): the ONE hard gate — inside a private mount ns (or when that
+  // cannot be ruled out, review N3 #1) spawnHub refuses to spawn at all, covering every caller
+  // (auto-start, respawn, restart, start).
+  it("private-ns: the injected gate refuses before any spawn and reports blocked", () => {
+    const spawnImpl = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+    const res = spawnHub(plan, "/m.ts", config, spawnImpl as never, () => "private-ns");
+    expect(res).toEqual({ blocked: true, reason: "private-ns" });
+    const unk = spawnHub(plan, "/m.ts", config, spawnImpl as never, () => "private-ns-unknown");
+    expect(unk).toEqual({ blocked: true, reason: "private-ns-unknown" });
+    expect(spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it("private-ns: the DEFAULT gate re-judges FRESH (hint env + no evidence ⇒ unknown ⇒ blocked)", async () => {
+    const { resetSecureDomainForTests } = await import("../../../src/secure/domain.js");
+    const spawnImpl = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+    try {
+      resetSecureDomainForTests();
+      // outside an ns, no vaults ⇒ not-ns: spawns normally (and returns blocked:false)
+      expect(spawnHub(plan, "/m.ts", config, spawnImpl as never)).toEqual({ blocked: false });
+      expect(spawnImpl).toHaveBeenCalledTimes(1);
+      // the hint env (exactly what P1 exports into the pi process) with no matching record ⇒
+      // unknown (review N3 #1) — the fresh gate reads the LIVE process env, not a frozen verdict
+      process.env.PI_SECURE_NS = "1";
+      expect(spawnHub(plan, "/m.ts", config, spawnImpl as never)).toEqual({
+        blocked: true,
+        reason: "private-ns-unknown",
+      });
+      expect(spawnImpl).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.PI_SECURE_NS;
+      resetSecureDomainForTests();
+    }
   });
 });
 

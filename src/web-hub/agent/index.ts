@@ -91,6 +91,8 @@ import { packageUiDistDir } from "../protocol/paths.js";
 import type { UiStatus } from "../hub/ui-root.js";
 import type { PrivacyHubStatus } from "../protocol/privacy.js";
 import { resolveJitiCli, spawnHub, type LauncherPlan } from "./launcher.js";
+import { judgePrivateNsGate, type PrivateNsGateVerdict } from "../../secure/domain.js";
+import { AGENT_NOSPAWN_CAP } from "../protocol/nospawn.js";
 import { MaskedInputComponent, runPasswdPrompt, type PasswdOutcome } from "./passwd-prompt.js";
 import { verifyProcIdentity, readStartTicksNow } from "./proc-identity.js";
 import { ctlLivenessProbe, restartHub, type RestartOutcome } from "./restart.js";
@@ -321,6 +323,13 @@ export interface WebHubDeps {
    *  mode (`src/index.ts` threads it only when `cacheTtl.keepalive` is on). Unset ⇒ the
    *  `StatusInfo.cacheKeepalive` field is never set (byte-equal to the pre-feature shape). */
   cacheKeepalive?: () => CacheKeepaliveInput | undefined;
+  /** private-plan §4.1 / security review N3 #1 (N3): the private-ns GATE verdict for THIS
+   *  process — `"in-ns" | "not-ns" | "unknown"`. Unset ⇒ a FRESH `judgePrivateNsGate()` call
+   *  (re-judged per use — spawn admission, hello caps, notify — never the frozen domain verdict,
+   *  so a miss cannot survive until process exit; the cost is one fd-bound record read per
+   *  registered vault, zero fs access for an unconfigured process). `unknown` blocks exactly
+   *  like `in-ns` on every gate below. */
+  privateNs?: () => PrivateNsGateVerdict;
   /** sysload session gate projection and hub config source. */
   load?: { port: () => LoadPort | undefined; settings: LoadSettings };
   /** topic-switch plan P4 (D2, #5) / arch §15 r2 row 1: optional, late-bound web-prompt claim
@@ -484,6 +493,19 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const hubMainPath = deps.hubMainPath ?? fileURLToPath(new URL("../hub/main.ts", import.meta.url));
   const argv1 = deps.argv1 ?? process.argv[1];
 
+  // private-plan §4.1 / security review N3 #1: the gate verdict is re-judged FRESH on every use
+  // (spawn admission, hello caps, notify) — never the frozen domain verdict, so a miss cannot
+  // survive until process exit. `unknown` blocks exactly like `in-ns` on every surface below;
+  // a genuinely `not-ns` session keeps every one of them byte-identical (freeze F5/F6).
+  const privateNsVerdict = (): PrivateNsGateVerdict =>
+    deps.privateNs !== undefined ? deps.privateNs() : judgePrivateNsGate();
+  const privateNsBlocked = (): "private-ns" | "private-ns-unknown" | undefined => {
+    const gate = privateNsVerdict().gate;
+    if (gate === "in-ns") return "private-ns";
+    if (gate === "unknown") return "private-ns-unknown";
+    return undefined;
+  };
+
   let ctx: ExtensionContext | undefined;
   let conn: HubConnection | undefined;
   let attached = false;
@@ -507,6 +529,24 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   let modelsTick = 0;
   let tick: NodeJS.Timeout | undefined;
   let statusText: string | undefined;
+  let privateNsNotified = false;
+  /** private-plan §4.1-2: the ONE-shot notify — fired the first time a hub auto-spawn would
+   *  have run (connection.ts's spawnBlocked knob invokes this). The copy distinguishes a
+   *  PROVEN ns from an `unknown` verdict (which blocks identically, review N3 #1). */
+  const notifyPrivateNsOnce = (verdict: PrivateNsGateVerdict): void => {
+    if (privateNsNotified) return;
+    privateNsNotified = true;
+    const x = ctx;
+    const message =
+      verdict.gate === "unknown"
+        ? `无法确认本会话是否在私有挂载命名空间内（${verdict.reason ?? "证据不可用"}），已按在命名空间内处理：不会自动拉起 web-hub（它会被困在命名空间里并持有明文视图）。排查：pi-secure status；确认后可在普通终端的 pi 里执行 /webhub start。`
+        : "本会话运行在私有挂载命名空间内，不会自动拉起 web-hub（它会被困在命名空间里并持有明文视图）。需要网页时，在普通终端的 pi 里执行 /webhub start。";
+    try {
+      x?.ui.notify(message, "warning");
+    } catch {
+      /* stale ctx must never affect the connection path */
+    }
+  };
   let buildInfo: Promise<{ pluginVersion: string; buildId: string }> | undefined;
   let launcher: LauncherPlan | { error: string } | undefined;
   // §4.6 "/webhub __exec" + web-resume plan §2.5 step 3: the ONE per-process exec claim.
@@ -1437,6 +1477,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const runtx = settings.subagentTranscript ?? "all";
     if (runtx === "all") caps.push(...RUNTX_AGENT_CAPS);
     else if (runtx === "loopback") caps.push("runtx.v1");
+    // private-plan §4.1-5 (Q2): the ns fact cap sits BEFORE the `control === false` early return
+    // so EVERY configuration advertises it — an ns session (or one that cannot be proven
+    // otherwise, review N3 #1) must never take part in hub version replacement, whatever its
+    // control plane. Absent in every not-ns session (freeze F6); re-judged fresh per hello.
+    if (privateNsVerdict().gate !== "not-ns") caps.push(AGENT_NOSPAWN_CAP);
     const control = settings.control !== false;
     if (!control) return caps;
     caps.push("cmd.v1");
@@ -1482,8 +1527,22 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       ...(deps.netConnect !== undefined ? { netConnect: deps.netConnect } : {}),
       headless: env.PI_WEBHUB_HEADLESS === "1",
       spawn: () => {
-        if (!("error" in plan)) spawnHub(plan, hubMainPath, config, deps.spawnImpl);
+        if (!("error" in plan)) spawnHub(plan, hubMainPath, config, deps.spawnImpl, privateNsBlocked);
       },
+      // private-plan §4.1-2: conditionally spread — a not-ns session's opts stay deep-equal to
+      // the pre-N3 shape (freeze F5; evaluated per attach). The knob re-judges fresh on every
+      // spawn admission: a verdict that has since resolved to not-ns steps aside (spawnHub's
+      // own gate re-judges anyway), otherwise it blocks + fires the ONE notify (§4.1-2 wording).
+      ...(privateNsVerdict().gate !== "not-ns"
+        ? {
+            spawnBlocked: () => {
+              const v = privateNsVerdict();
+              if (v.gate === "not-ns") return false;
+              notifyPrivateNsOnce(v);
+              return true;
+            },
+          }
+        : {}),
       capsExtra,
     });
     conn = c;
@@ -1902,7 +1961,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const plan = resolveLauncher();
     if ("error" in plan) return;
     void getBuildInfo().then((info) => {
-      spawnHub(plan, hubMainPath, buildHubConfig(info), deps.spawnImpl);
+      spawnHub(plan, hubMainPath, buildHubConfig(info), deps.spawnImpl, privateNsBlocked);
     });
   };
 
@@ -1932,7 +1991,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         const config = buildHubConfig(info);
         // Keep other sessions fenced through async build-info resolution.
         removeFence();
-        spawnHub(plan, hubMainPath, config, deps.spawnImpl);
+        spawnHub(plan, hubMainPath, config, deps.spawnImpl, privateNsBlocked);
       });
     } finally {
       removeFence();
