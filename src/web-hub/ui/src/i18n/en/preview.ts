@@ -47,6 +47,10 @@ const preview = {
   viewRendered: "Rendered",
   viewSource: "Source",
   viewToggleLabel: "Markdown view mode",
+  // preview line numbers (2026-10-23): the header toggle (title/aria — the visible glyph is
+  // the language-neutral compact token `1#`) and the over-cap degradation note.
+  lineNumbers: "Line numbers",
+  linesTooMany: "Line numbers are off for this file — it has over {n} lines.",
   mdTooComplex: "This file is too complex to render — showing the source instead.",
   // md-preview-html plan: inline-image placeholder reasons (chip: `🖼 <alt> · <reason>`)
   "mdImg.loading": "loading…",

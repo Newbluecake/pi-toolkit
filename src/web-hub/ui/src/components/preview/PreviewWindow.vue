@@ -30,6 +30,8 @@ import type { PreviewNavRef } from "../../composables/usePreview.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import type { PreviewView } from "../../types.js";
 import CopyButton from "../detail/CopyButton.vue";
+import { useLineNumbersPref } from "../../composables/useLineNumbersPref.js";
+import { browserLocalStorage } from "../shell/themeStorage.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import PreviewDir from "./PreviewDir.vue";
 import PreviewImage from "./PreviewImage.vue";
@@ -150,6 +152,15 @@ function onCopyValue(v: string | null): void {
   copyValue.value = v;
 }
 
+// --- line-number toggle (2026-10-23): one header button per window, bound to the SHARED
+// `pwh_linenumbers` browser pref (a flip re-renders every open window). Offered only while
+// PreviewText reports a SOURCE view (rendered md/html have no gutter to toggle).
+const ln = useLineNumbersPref({ storage: browserLocalStorage() });
+const lnSourceActive = ref(false);
+function onSourceView(v: boolean): void {
+  lnSourceActive.value = v;
+}
+
 const dl = usePreviewDownload({ hub, view: () => view.value });
 // Destructured so the template reads plain refs (refs nested in a plain object are not
 // auto-unwrapped in templates).
@@ -159,6 +170,7 @@ watch(
   () => {
     dl.resetForView();
     copyValue.value = null; // stale copy text from the previous view never survives a switch
+    lnSourceActive.value = false; // re-reported by the new view's PreviewText on mount
   },
 );
 
@@ -336,6 +348,20 @@ const ariaModal = computed(() => (props.desktop || !props.isTop ? "false" : "tru
         :label="t('common.copy')"
         :title="t('common.copy')"
       />
+      <!-- line numbers (2026-10-23): compact `1#` glyph + localized title/aria, aria-pressed
+           on the shared pref; source views only (PreviewText's update:sourceView). -->
+      <button
+        v-if="view.phase === 'text' && lnSourceActive"
+        class="btn btn-ghost btn-icon pw-ln-btn"
+        type="button"
+        :aria-pressed="ln.on.value"
+        :aria-label="t('preview.lineNumbers')"
+        :title="t('preview.lineNumbers')"
+        data-no-drag
+        @click="ln.setOn(!ln.on.value)"
+      >
+        <span class="pw-ln-glyph" aria-hidden="true">1#</span>
+      </button>
       <button
         v-if="downloadable"
         class="btn btn-ghost btn-icon preview-download"
@@ -420,6 +446,7 @@ const ariaModal = computed(() => (props.desktop || !props.isTop ? "false" : "tru
         @reopen="handle.reopen()"
         @retry-stream="handle.loadMore()"
         @update:copy-value="onCopyValue"
+        @update:source-view="onSourceView"
       />
       <PreviewDir
         v-else-if="view.phase === 'dir'"

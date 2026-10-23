@@ -430,6 +430,59 @@ code.md-code.path-ref {
   justify-content: flex-end;
 }
 
+/* ---------------------------------------- numbered source lines (2026-10-23, line numbers) */
+/* One block per logical line; the number is a CSS counter rendered by the line's ::before —
+ * NEVER a DOM node, so selection/copy stay pure body text and the per-line DOM cost is one
+ * element (约束 ②, ahead of the planned virtual-scroll work). The ::before pins the number
+ * to the line's FIRST visual line; soft-wrapped continuation lines align with the text
+ * column via padding-left (gutter width `--pvline-w` + gap, set per block by CodeLines
+ * through a runtime-CSSOM style binding). `.pv-line-cont` is a stream force-cut's
+ * continuation head: no number, and it does not consume one. The root is a <span> (phrasing
+ * content — valid inside the <pre> body), block-ified here. */
+.pv-lines {
+  display: block;
+}
+
+.pv-line {
+  display: block;
+  position: relative;
+  counter-increment: pvline;
+  padding-left: calc(var(--pvline-w, 2ch) + 1.5ch);
+}
+
+.pv-line::before {
+  content: counter(pvline);
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--pvline-w, 2ch);
+  color: var(--c-text-3);
+  text-align: right;
+  user-select: none;
+}
+
+.pv-line-cont {
+  counter-increment: none;
+}
+
+.pv-line-cont::before {
+  content: none;
+}
+
+/* The header's 行号 toggle (PreviewWindow): compact `1#` glyph; pressed state mirrors the
+ * rendered/source segmented control's active button. */
+.pw-ln-btn[aria-pressed="true"] {
+  background: var(--c-primary-soft);
+  color: var(--c-primary);
+}
+
+.pw-ln-glyph {
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
 /* -------------------------------------------- chunked stream (chunked-plan §4.4–§4.6, P2b) */
 /* Segments are plain blocks that INHERIT `white-space`/font from the scroll container: no
  * margin/padding/white-space of their own (a block boundary stands in for exactly one "\n",

@@ -30,6 +30,18 @@
   lives in the actions row OUTSIDE the scroll area so nothing above the viewport ever changes
   height (no scroll jump). No syntax highlight in stream mode (it would swap DOM later).
   Never `content-visibility` (#11 Aw Snap) — source-scan pins it.
+
+  Line numbers (2026-10-23, L1): the SOURCE views (non-stream `<pre>` and the stream's
+  `.preview-seg` source segments) show a left gutter by default — one `.pv-line` block per
+  logical line, the number a CSS counter in `::before` (never a DOM node: selection and the
+  published copy value stay pure body text). The `pwh_linenumbers` browser pref (header
+  toggle in PreviewWindow, shared by all windows, default ON) switches back to the exact
+  pre-feature DOM. Each line carries its own "\n" terminator so the rendered `textContent`
+  stays byte-identical to the legacy body; stream numbering continues across segments
+  (precomputed at ingestion, append-only — a §4.3.4 force cut leaves an unnumbered
+  continuation head) and degrades to plain `.preview-seg` divs past
+  PREVIEW_NUMBERED_LINES_MAX lines (the non-stream view degrades to `<HighlightedCode>` +
+  a note). Rendered md/html views never show line numbers. See `@logic/previewLines.ts`.
 -->
 <script setup lang="ts">
 import {
@@ -60,6 +72,16 @@ import { createMarkdownSegmenter, createSourceSegmenter } from "@logic/previewSt
 import MdBlock from "../transcript/MdBlock.vue";
 import type { MdNode } from "../transcript/markdown-types.js";
 import HighlightedCode from "../shared/HighlightedCode.vue";
+import NumberedCode from "../shared/NumberedCode.vue";
+import CodeLines from "../shared/CodeLines.vue";
+import { useLineNumbersPref } from "../../composables/useLineNumbersPref.js";
+import { browserLocalStorage } from "../shell/themeStorage.js";
+import {
+  countCodeLines,
+  splitTextIntoCodeLines,
+  PREVIEW_NUMBERED_LINES_MAX,
+  type CodeLine,
+} from "@logic/previewLines.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import { MD_IMAGE_LOADER, PREVIEW_BASE_DIR, PREVIEW_CTX } from "./previewContext.js";
 import { createMdImageFetcher, createMdImageLoader } from "../../composables/useMdImageLoader.js";
@@ -94,9 +116,17 @@ const emit = defineEmits<{
   /** 2026-10-20: the copy button lives in PreviewHost's header now — this is the channel the
    *  header's CopyButton reads. Emitted on mount and on every change; `null` on unmount. */
   (e: "update:copyValue", value: string | null): void;
+  /** 2026-10-23 (line numbers): whether the current view is a SOURCE view (the header's
+   *  行号 toggle only makes sense there — rendered md/html hide it). Immediate, and `false`
+   *  on unmount. */
+  (e: "update:sourceView", value: boolean): void;
 }>();
 const { t } = useI18n();
 const highlightLang = computed(() => resolveFileLang(props.filename ?? ""));
+
+// --- line numbers (2026-10-23): the browser-local `pwh_linenumbers` pref, shared by every
+// open preview window (module-scope ref — a toggle anywhere re-renders all of them). -------
+const lnPref = useLineNumbersPref({ storage: browserLocalStorage() });
 
 // --- sandboxed HTML render (web-hub-html-preview plan v2 §5, package P2) ------------------
 // Lazy by design (§5 budget: the lazy JS budget is a 128 KiB gz TOTAL) — PreviewHtml and its
@@ -264,15 +294,77 @@ function syncMd(): void {
   if (add.length > 0) mdSegs.value = [...mdSegs.value, ...add.map((x) => markRaw(x))];
 }
 
+// Stream line numbers: per-segment line data, computed ONCE per segment at ingestion
+// (append-only, same discipline as `srcSegs` — old segments are never re-split/re-patched).
+// `start` is the first numbered line; `cont` marks a force-cut continuation head (§4.3.4);
+// `numbered` flips false for good once the cumulative line count passes
+// PREVIEW_NUMBERED_LINES_MAX (that and every later segment render as the legacy plain
+// `.preview-seg` div). State precedes `syncStream()` — the setup-time call reads it.
+interface SrcLineSeg {
+  readonly id: number;
+  readonly start: number;
+  readonly cont: boolean;
+  readonly numbered: boolean;
+  readonly text: string;
+  readonly lines: readonly CodeLine[];
+}
+const srcLineSegs = shallowRef<readonly SrcLineSeg[]>([]);
+let lnCursor = 0;
+let lnNextStart = 1;
+let lnCont = false;
+let lnNumbered = true;
+let lnTotal = 0;
+
+function syncLineSegs(): void {
+  if (!lnPref.on.value) return;
+  const segs = srcSegs.value;
+  if (lnCursor >= segs.length) return;
+  const add: SrcLineSeg[] = [];
+  while (lnCursor < segs.length) {
+    const seg = segs[lnCursor++]!;
+    const lines = splitTextIntoCodeLines(seg.text);
+    if (lnNumbered && lnTotal + lines.length > PREVIEW_NUMBERED_LINES_MAX) lnNumbered = false;
+    lnTotal += lines.length;
+    add.push(markRaw({ id: seg.id, start: lnNextStart, cont: lnCont, numbered: lnNumbered, text: seg.text, lines }));
+    // next segment's first numbered line: +lines, minus the unnumbered continuation head.
+    lnNextStart += lines.length - (lnCont && lines.length > 0 ? 1 : 0);
+    // a segment whose consumed text (text+sep) does not end with "\n" leaves its last line
+    // unfinished ⇒ the next segment's first line is a continuation. Non-final segments never
+    // end with "\n" (§4.3.4), so `sep === ""` is exactly that case.
+    lnCont = seg.sep === "";
+  }
+  srcLineSegs.value = [...srcLineSegs.value, ...add];
+}
+
 function syncStream(): void {
   syncSource();
   syncMd();
+  syncLineSegs();
 }
 syncStream();
 watch(() => [props.stream?.chunks.length ?? 0, props.stream?.state, effectiveMode.value] as const, syncStream);
+// Toggling the pref ON mid-stream catches the line view up from the already-consumed segs.
+watch(lnPref.on, (on) => {
+  if (on) syncLineSegs();
+});
+
+// --- line numbers: per-line views of the source body ----------------------------------------
+// Non-stream: `NumberedCode` (highlight → per-line split) replaces `HighlightedCode` inside
+// the SAME `<pre class="preview-text-body">` (DOM/text fidelity pinned by tests: every line
+// carries its own "\n", so textContent is byte-identical). Over PREVIEW_NUMBERED_LINES_MAX
+// lines the numbered view degrades to the legacy single block + a note (the toggle stays on).
+const shownLineCount = computed(() => countCodeLines(shownSource.value));
+const linesCapped = computed(() => lnPref.on.value && shownLineCount.value > PREVIEW_NUMBERED_LINES_MAX);
+const nonStreamNumbered = computed(() => lnPref.on.value && !linesCapped.value);
+
+/** The header's 行号 toggle is offered only while a SOURCE view is actually showing. */
+const sourceViewActive = computed(() => !htmlRendered.value && effectiveMode.value === "source");
+watch(sourceViewActive, (v) => emit("update:sourceView", v), { immediate: true });
+onBeforeUnmount(() => emit("update:sourceView", false));
 
 /** Copy = the ANSI-stripped consumed source (`text + sep` is strictly the stripped input,
- * §4.3.4 — the raw bytes stay downloadable through PreviewHost's own refetch). */
+ * §4.3.4 — the raw bytes stay downloadable through PreviewHost's own refetch). Line numbers
+ * never touch this (they are CSS counters, not DOM). */
 const copyValue = computed(() =>
   isStream.value ? srcSegs.value.map((x) => x.text + x.sep).join("") : shownSource.value,
 );
@@ -392,6 +484,11 @@ watch(streamState, (st) => {
       }}</span>
     </p>
     <p v-if="mdTooComplex" class="preview-md-note" role="note">{{ t("preview.mdTooComplex") }}</p>
+    <!-- line numbers: the toggle is on but the body is over PREVIEW_NUMBERED_LINES_MAX ⇒
+         the legacy single-block body renders instead, with this one-line reason. -->
+    <p v-if="!stream && sourceViewActive && linesCapped" class="preview-md-note" role="note">
+      {{ t("preview.linesTooMany", { n: String(PREVIEW_NUMBERED_LINES_MAX) }) }}
+    </p>
     <!-- web-hub-html-preview §5: a failed html mint keeps the source view usable and explains
          itself in one line (403 dir-too-broad/upload ⇒ the prose variant); retryable errors
          get a retry that flips back to rendered (remount ⇒ re-mint). -->
@@ -424,7 +521,25 @@ watch(streamState, (st) => {
         <div ref="sentinelEl" class="preview-stream-sentinel" aria-hidden="true"></div>
       </div>
       <div v-else ref="scrollEl" class="preview-text-body preview-stream" tabindex="0">
-        <div v-for="seg in srcSegs" :key="seg.id" class="preview-seg">{{ seg.text }}</div>
+        <!-- line numbers on (default): one CodeLines block per segment (its root carries
+             the legacy `preview-seg` class), keyed + precomputed so old segments are never
+             re-patched; over the line cap a segment falls back to the plain div. Off: the
+             exact pre-feature DOM. -->
+        <template v-if="lnPref.on.value">
+          <template v-for="seg in srcLineSegs" :key="seg.id"
+            ><CodeLines
+              v-if="seg.numbered"
+              class="preview-seg"
+              :lines="seg.lines"
+              :start-line="seg.start"
+              :continuation="seg.cont"
+            />
+            <div v-else class="preview-seg">{{ seg.text }}</div></template
+          >
+        </template>
+        <template v-else
+          ><div v-for="seg in srcSegs" :key="seg.id" class="preview-seg">{{ seg.text }}</div></template
+        >
         <div ref="sentinelEl" class="preview-stream-sentinel" aria-hidden="true"></div>
       </div>
     </template>
@@ -441,11 +556,13 @@ watch(streamState, (st) => {
       <div v-else-if="effectiveMode === 'rendered'" class="preview-md md" tabindex="0">
         <MdBlock :nodes="mdNodes!" />
       </div>
+      <!-- line numbers on (default) + under the line cap ⇒ NumberedCode (per-line split,
+           textContent-identical); off / capped ⇒ the exact pre-feature HighlightedCode. -->
       <pre
         v-else
         class="preview-text-body"
         tabindex="0"
-      ><HighlightedCode :text="shownSource" :lang="highlightLang" /></pre>
+      ><NumberedCode v-if="nonStreamNumbered" :text="shownSource" :lang="highlightLang" /><HighlightedCode v-else :text="shownSource" :lang="highlightLang" /></pre>
     </template>
     <div v-if="hasActions" class="preview-text-actions">
       <div

@@ -123,12 +123,17 @@ describe("CodeBlock.vue — highlight integration", () => {
 });
 
 describe("PreviewText.vue — filename-driven highlight", () => {
+  // 2026-10-23: line numbers are ON by default (per-line `.pv-line` spans); the two tests
+  // pinning the pre-highlight PLAIN-TEXT DOM run with the pref off so they keep asserting
+  // the highlight layer's degradation, not the gutter's structure.
   it("renders the plain pre DOM without a filename prop (back-compat)", async () => {
+    window.localStorage.setItem("pwh_linenumbers", "0");
     const wrapper = mount(PreviewText, { props: { text: "const x = 1;", truncated: false } });
     await new Promise((r) => setTimeout(r, 300));
     const pre = wrapper.get("pre.preview-text-body");
     expect(pre.attributes("tabindex")).toBe("0");
     expect(textNodeOnly(pre.element)).toBe(true);
+    window.localStorage.removeItem("pwh_linenumbers");
   });
 
   it("highlights by file extension (a.ts ⇒ typescript) once the lazy chunk lands", async () => {
@@ -140,11 +145,13 @@ describe("PreviewText.vue — filename-driven highlight", () => {
   });
 
   it("unknown extension (a.txt) stays plain; truncation badge is unaffected", async () => {
+    window.localStorage.setItem("pwh_linenumbers", "0");
     const wrapper = mount(PreviewText, {
       props: { text: JS_SNIPPET, truncated: true, loadedLabel: "256.0 KiB", totalLabel: "2.3 MiB", filename: "a.txt" },
     });
     await new Promise((r) => setTimeout(r, 300));
     expect(wrapper.findAll("pre span").length).toBe(0);
+    window.localStorage.removeItem("pwh_linenumbers");
     // en locale: "Showing the first {loaded} of {total} …" (chunked-plan §4.7 — never the total as shown)
     expect(wrapper.get(".preview-truncated").text()).toContain("first 256.0 KiB of 2.3 MiB");
     expect(wrapper.get("pre.preview-text-body").text()).toBe(JS_SNIPPET);

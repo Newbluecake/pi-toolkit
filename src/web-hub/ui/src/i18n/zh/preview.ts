@@ -50,6 +50,10 @@ const preview = {
   viewRendered: "渲染",
   viewSource: "源码",
   viewToggleLabel: "Markdown 显示方式",
+  // 预览行号（2026-10-23）：头部切换按钮的 title/aria（可见字形是语言中立的紧凑标记
+  // `1#`）与超上限降级提示。
+  lineNumbers: "行号",
+  linesTooMany: "此文件超过 {n} 行——已不显示行号。",
   mdTooComplex: "此文件结构过于复杂，无法渲染——已改以源码显示。",
   // md-preview-html plan：行内图片占位原因（占位 chip：`🖼 <alt> · <原因>`）
   "mdImg.loading": "加载中…",
