@@ -124,6 +124,7 @@ describe("PI_SECURE_SESSION 契约", () => {
     delete process.env.PI_SECURE_SESSION;
     state.recording = true;
     await handlers.get("before_provider_request")!({ payload: { a: 1 } }, ctx());
+    await state.dbPort.whenIdle(); // T2b：写后账本
     expect(existsSync(state.dbPath)).toBe(true);
     const n = (ensureDb(state).prepare("SELECT COUNT(*) c FROM requests").get() as { c: number }).c;
     expect(n).toBe(1);
@@ -165,6 +166,50 @@ describe("secure-domain 符号源 + 异步切点（plan §6）", () => {
     expect(registerCommand).not.toHaveBeenCalled();
   });
 
+  it.each(["env", "locked"])(
+    "安全评审 #2（E2）：plain 下排队后切 secure（%s），由 flush 的 drainAllowed 首次发现 ⇒ 无未捕获异常、零新增写、engine 有界关闭",
+    async (how) => {
+      const uncaught: unknown[] = [];
+      const onUncaught = (e: unknown): void => {
+        uncaught.push(e);
+      };
+      process.on("uncaughtException", onUncaught);
+      try {
+        delete process.env.PI_SECURE_SESSION;
+        ensureDb(state);
+        await state.dbPort.whenIdle();
+        state.recording = true;
+        // 两条 ready 条目：修复前内层 close 排空全部后，外层 shift() 得到 undefined 并读 .bytes。
+        handlers.get("message_end")!({ message: { role: "user", content: "a" } }, ctx());
+        handlers.get("message_end")!({ message: { role: "user", content: "b" } }, ctx());
+        handlers.get("before_provider_request")!({ payload: { p: 1 } }, ctx());
+        expect(state.dbPort.stats().queued).toBeGreaterThanOrEqual(3);
+        // 入队之后、flush 之前切域；之后不再调用任何 record*。
+        if (how === "env") process.env.PI_SECURE_SESSION = "1";
+        else g[DOMAIN_KEY] = { kind: "locked", reason: "x", vaults: [], config: {} };
+        const t0 = performance.now();
+        await new Promise((r) => setTimeout(r, 30));
+        expect(uncaught).toEqual([]);
+        expect(state.state).not.toBe("open");
+        await state.close("test");
+        expect(state.state).toBe("closed");
+        expect(performance.now() - t0).toBeLessThan(1500);
+        expect(state.dbPort.stats().queued).toBe(0);
+        delete process.env.PI_SECURE_SESSION;
+        delete g[DOMAIN_KEY];
+        const raw = openDb(state.dbPath, { legacyDbPath: null });
+        try {
+          expect((raw.prepare("SELECT COUNT(*) c FROM messages").get() as { c: number }).c).toBe(0);
+          expect((raw.prepare("SELECT COUNT(*) c FROM requests").get() as { c: number }).c).toBe(0);
+        } finally {
+          raw.close();
+        }
+      } finally {
+        process.off("uncaughtException", onUncaught);
+      }
+    },
+  );
+
   it("慢流中途切到 locked ⇒ 之后零新增 chunk、读取被取消、engine 进入关闭", async () => {
     ensureDb(state);
     let controller!: ReadableStreamDefaultController<Uint8Array>;
@@ -181,6 +226,7 @@ describe("secure-domain 符号源 + 异步切点（plan §6）", () => {
     const enc = new TextEncoder();
     controller.enqueue(enc.encode("data: 1\n\n"));
     await new Promise((r) => setTimeout(r, 20));
+    await state.dbPort.whenIdle(); // T2b：chunk 在账本内合并成批（whenIdle 封批并落库）
     const rawCount = (): number => {
       const db = openDb(state.dbPath, { legacyDbPath: null });
       try {
@@ -194,6 +240,8 @@ describe("secure-domain 符号源 + 异步切点（plan §6）", () => {
     controller.enqueue(enc.encode("data: 2\n\n"));
     await capture;
     expect(cancelled).toBe(true);
+    expect(state.recording).toBe(false); // 同步撤销接纳
+    await new Promise((r) => setImmediate(r)); // 关闭延迟到当前栈退出之后（安全评审 #2）
     expect(state.state).not.toBe("open");
     delete g[DOMAIN_KEY];
     expect(rawCount()).toBe(1);
@@ -226,7 +274,7 @@ describe("secure-domain 符号源 + 异步切点（plan §6）", () => {
       );
       const pending = fetch(`http://127.0.0.1:${port}/api/replay`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-record-token": state.accessToken ?? "" },
         body: JSON.stringify({ request_id: src }),
       });
       // 等重放行已插入、上游请求已发出。

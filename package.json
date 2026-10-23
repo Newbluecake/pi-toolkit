@@ -99,6 +99,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:conformance": "vitest run tests/conformance",
+    "test:traffic-gate": "PI_TRAFFIC_PERF_GATE=1 vitest run tests/traffic/db-contention.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepack": "npm run build && npm run build:web && npm run check:web"

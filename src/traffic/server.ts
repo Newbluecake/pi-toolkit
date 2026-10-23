@@ -1,6 +1,5 @@
 /**
  * 内嵌 HTTP server：Web 页面 + JSON API + SSE + 编辑重放。
- * 绑 0.0.0.0 但强制 token 鉴权（回环访问豁免）。（Host 白名单 / 安全头 / 全量 token 等加固归 T4。）
  *
  * T2a（traffic-merge plan §4.1 / §5.2）：
  * - 每个 engine 一个服务实例（`createTrafficServer(engine)`），无模块级状态；
@@ -11,14 +10,33 @@
  *   读流空闲 120s / 总长 30min）；读请求体后、jq 后、上游返回后、写行前各复查一次 engine/secure；
  * - 页面在首个 `GET /` 懒加载并缓存到 `engine.page`；
  * - 所有写（规则 CRUD、引擎设置、重放行）经 persist 闸口。
+ *
+ * T4（§4.1 第一期加固，全部响应生效）：
+ * - 默认绑 127.0.0.1（`opts.host = "0.0.0.0"` 才开 LAN；T3 接 `traffic.web.host`）；
+ * - Host 白名单（鉴权前）：`127.0.0.1`/`localhost`/`[::1]`（LAN 绑定时加本机各网卡 IPv4），带端口；
+ *   不在清单 ⇒ 421（防 DNS rebinding）；
+ * - 反嵌入：所有响应 `X-Frame-Options: DENY` + `CSP: frame-ancestors 'none'; base-uri 'none';
+ *   form-action 'self'`（不限制 script，保留运行时编译 Vue）+ `nosniff` + `Referrer-Policy: no-referrer`；
+ * - 缓存：页面 `/` 与全部 `/api/*` 一律 `Cache-Control: no-store`；
+ * - token：页面 `/` 回环免 token（HTML 注入 <meta name="record-token">，app.js 经 x-record-token 头携带）；
+ *   **全部 `/api/*` 要 token（回环亦然）**；GET/HEAD 接受 `x-record-token` 头或 `?token=`，
+ *   状态变更（非 GET/HEAD）只认 `x-record-token` 头（自定义头 ⇒ 跨站表单无法伪造）；
+ *   比较两侧 SHA-256 摘要后 timingSafeEqual（照 web-hub hub/auth.ts），空串恒拒；
+ * - 跨域：任何响应不发 `Access-Control-Allow-*`；`OPTIONS` 一律 405（预检永远不成功）；
+ *   非 GET/HEAD：`Origin` 存在且 ≠ 本服务 origin（含 `null`）⇒ 403；`Sec-Fetch-Site: cross-site` ⇒ 403；
+ *   缺元数据时仅凭 token；
+ * - T2b 对接：`engine.gate` 引用已删（闸门退役，serialize_* 键标注已停用）；外部持锁（busy_timeout=0）时
+ *   同步写返回 503「数据库忙」；`/api/requests` 热路径与 `/api/export` 走 `engine.dbPort.pages()`
+ *   分页读（db-port.ts 的 ReadQuery，keyset + 每 tick 预算让出）。
  */
 import type { DatabaseSync } from "node:sqlite";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { networkInterfaces } from "node:os";
 import { statSync } from "node:fs";
 import type { Socket } from "node:net";
 import { armTimer } from "./cancel.js";
+import type { ReadQuery, Rows } from "./db-port.js";
 import { ensureDb } from "./db.js";
 import type { TrafficEngine } from "./engine.js";
 import { TrafficModeError } from "./mode.js";
@@ -38,13 +56,126 @@ import {
   type BodyInput,
 } from "./rewrite.js";
 import { broadcast } from "./sse.js";
-import { BASE_PORT, BIND_HOST, MAX_PORT_TRIES } from "./state.js";
+import { BASE_PORT, MAX_PORT_TRIES } from "./state.js";
 import { JqError } from "./jq.js";
 
 function sendJson(res: ServerResponse, data: unknown, status = 200): void {
   const body = JSON.stringify(data);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(body);
+}
+
+/** T4 §4.1 反嵌入/元数据头：对每个响应（含 401/404/421/405）在路由前统一设置。 */
+function setSecurityHeaders(res: ServerResponse): void {
+  // 不限制 script-src：页面内联 Vue 带 compiler，需要运行时编译（§4.1 反嵌入行）。
+  res.setHeader("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+}
+
+function sha256(text: string): Buffer {
+  return createHash("sha256").update(text, "utf8").digest();
+}
+
+/** 与 web-hub hub/auth.ts 同款：两侧摘要后定长常量时间比较；空候选/超长候选恒拒。 */
+const MAX_TOKEN_CHARS = 1024;
+function tokenMatches(provided: string | null | undefined, expected: string | null): boolean {
+  if (!expected) return false; // fail closed：无 token 配置 ⇒ 全拒（startServer 恒铸造，正常不可达）
+  const text =
+    typeof provided === "string" && provided.length > 0 && provided.length <= MAX_TOKEN_CHARS ? provided : "";
+  if (!text) return false;
+  return timingSafeEqual(sha256(text), sha256(expected));
+}
+
+/** T2b：openDb busy_timeout=0 ⇒ 外部持锁时同步写立即 SQLITE_BUSY。API 层给 503 友好错误，不重试。 */
+function isBusyError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as Error & { code?: unknown }).code;
+  return code === "SQLITE_BUSY" || code === "SQLITE_BUSY_RECOVERY" || /database is locked/i.test(err.message);
+}
+
+const BUSY_MESSAGE = "数据库忙（正被其他进程持锁），稍后重试";
+
+/** 安全评审 #3：readBody 超限时抛出；调用方映射 413。 */
+export class BodyTooLargeError extends Error {
+  readonly code = "E_BODY_TOO_LARGE" as const;
+  constructor() {
+    super("request body too large");
+  }
+}
+
+/**
+ * 安全评审 #4（第二轮）：参数校验类错误——**唯一**允许把 message 作为公开文案出站的异常类型。
+ * 其余任意异常在路由层一律折叠为固定错误码 + 通用文案（细节经 sanitizeDetail 只进日志）。
+ */
+class PublicInputError extends Error {}
+
+/**
+ * 安全评审 #4：错误细节的唯一出站/日志清洗口。已知敏感值（accessToken / db 路径）与常见
+ * 绝对路径形态替换为占位符；长度截断。公开错误响应一律走固定文案（见 sendRouteError /
+ * E_INTERNAL），这里的产物只进日志与本地诊断字段（db_error）。
+ */
+function sanitizeDetail(err: unknown, state: TrafficEngine): string {
+  let text = err instanceof Error ? err.message : String(err);
+  for (const secret of [state.accessToken, state.dbPath, state.legacyDbPath]) {
+    if (typeof secret === "string" && secret.length > 0) {
+      text = text.split(secret).join(secret === state.accessToken ? "<token>" : "<path>");
+    }
+  }
+  text = text.replace(/\/(?:home|root|Users)\/[^\s"'，。)]*/g, "<path>");
+  // 常见凭证形态（sk-…、Bearer …）一律占位：日志/库内行同样不得留存密钥样文本
+  text = text.replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "<api-key>");
+  text = text.replace(/\bBearer\s+[A-Za-z0-9._-]{8,}/gi, "Bearer <token>");
+  return text.length > 300 ? `${text.slice(0, 300)}…` : text;
+}
+
+/** 安全评审 #4：不可预期异常的统一公开出口——固定文案 + 错误码，细节只进日志（经 sanitizeDetail）。 */
+function sendInternalError(res: ServerResponse, state: TrafficEngine, where: string, err: unknown): void {
+  try {
+    console.error(`[traffic] ${where}:`, sanitizeDetail(err, state));
+  } catch {}
+  try {
+    sendJson(res, { error: "internal error", code: "E_INTERNAL" }, 500);
+  } catch {}
+}
+
+/**
+ * 安全评审 #4：db_error 的公开出口。底层 SQL/IO 异常的原文（可能含路径、第三方细节）
+ * 不出站——busy 走白名单文案，其余一律固定「数据库不可用」；细节经 sanitizeDetail 只进日志。
+ */
+const PUBLIC_DB_ERROR = "数据库不可用（详情见进程日志）";
+function publicDbError(raw: string | null): string | null {
+  if (raw === null || raw === "") return null;
+  if (/SQLITE_BUSY|database is locked/i.test(raw)) return BUSY_MESSAGE;
+  return PUBLIC_DB_ERROR;
+}
+
+/**
+ * 路由级错误出口（安全评审 #4 第二轮）：
+ * - `PublicInputError` ⇒ 400 + 其 message（参数校验白名单）；
+ * - `BodyTooLargeError` ⇒ 413 + 固定文案 + connection: close；
+ * - BUSY ⇒ 503 固定文案；
+ * - **其余任意异常** ⇒ 500 E_INTERNAL 固定文案，细节（经 sanitizeDetail）只进日志。
+ */
+function sendRouteError(res: ServerResponse, state: TrafficEngine, err: unknown, where: string): void {
+  if (err instanceof PublicInputError) {
+    sendJson(res, { error: err.message }, 400);
+    return;
+  }
+  if (err instanceof BodyTooLargeError) {
+    // 剩余正文已转丢弃式消费；显式 connection: close 让 socket 在 413 冲刷后关闭。
+    try {
+      res.writeHead(413, { "content-type": "application/json; charset=utf-8", connection: "close" });
+      res.end(JSON.stringify({ error: "请求体超过 32 MiB 上限" }));
+    } catch {}
+    return;
+  }
+  if (isBusyError(err)) {
+    sendJson(res, { error: BUSY_MESSAGE }, 503);
+    return;
+  }
+  sendInternalError(res, state, where, err);
 }
 
 function parseBody(row: Record<string, unknown>, key: string): unknown {
@@ -74,27 +205,27 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function normalizeOptionalString(value: unknown, field: string): string | null {
   if (value === undefined || value === null || value === "") return null;
-  if (typeof value !== "string") throw new Error(`${field} 必须是字符串`);
+  if (typeof value !== "string") throw new PublicInputError(`${field} 必须是字符串`);
   const trimmed = value.trim();
   return trimmed || null;
 }
 
 function normalizeRulePayload(value: unknown): NormalizedRule {
-  if (!isObject(value)) throw new Error("请求体必须是 JSON 对象");
+  if (!isObject(value)) throw new PublicInputError("请求体必须是 JSON 对象");
   const name = typeof value.name === "string" ? value.name.trim() : "";
-  if (!name) throw new Error("name 不能为空");
-  if (name.length > 200) throw new Error("name 长度不能超过 200 个字符");
+  if (!name) throw new PublicInputError("name 不能为空");
+  if (name.length > 200) throw new PublicInputError("name 长度不能超过 200 个字符");
 
   const priority = value.priority === undefined ? 100 : value.priority;
   if (typeof priority !== "number" || !Number.isInteger(priority) || priority < -100000 || priority > 100000) {
-    throw new Error("priority 必须是 -100000 到 100000 之间的整数");
+    throw new PublicInputError("priority 必须是 -100000 到 100000 之间的整数");
   }
 
   let enabled = 0;
   if (value.enabled !== undefined) {
     if (value.enabled === true || value.enabled === 1) enabled = 1;
     else if (value.enabled === false || value.enabled === 0) enabled = 0;
-    else throw new Error("enabled 必须是布尔值或 0/1");
+    else throw new PublicInputError("enabled 必须是布尔值或 0/1");
   }
 
   const urlPattern = normalizeOptionalString(value.url_pattern, "url_pattern");
@@ -102,12 +233,13 @@ function normalizeRulePayload(value: unknown): NormalizedRule {
     try {
       new RegExp(urlPattern);
     } catch (err) {
-      throw new Error(`url_pattern 正则无法编译: ${String(err instanceof Error ? err.message : err)}`);
+      throw new PublicInputError(`url_pattern 正则无法编译: ${String(err instanceof Error ? err.message : err)}`);
     }
   }
   const methodValue = normalizeOptionalString(value.method, "method");
   const method = methodValue?.toUpperCase() ?? null;
-  if (method && !RULE_METHODS.has(method)) throw new Error("method 必须是 GET、POST、PUT、PATCH、DELETE 或空值");
+  if (method && !RULE_METHODS.has(method))
+    throw new PublicInputError("method 必须是 GET、POST、PUT、PATCH、DELETE 或空值");
 
   return {
     name,
@@ -130,17 +262,50 @@ const DEFAULT_ENGINE_SETTINGS = {
   queueWaitMs: 60_000,
 } as const;
 
-/** 读取请求体（重放接口用） */
+/** 读取请求体（重放 / 规则 / 设置接口用）。按**字节**计数；越限立即停读（安全评审 #3）。 */
+const MAX_BODY_BYTES = 32_000_000;
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (c) => {
-      data += c;
-      if (data.length > 32_000_000) reject(new Error("body too large"));
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let over = false;
+    req.on("data", (c: Buffer) => {
+      if (over) return;
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        // 立即停止累计与监听；丢弃式消费剩余正文（有界：内核接收窗），调用方回 413 + connection: close。
+        over = true;
+        req.removeAllListeners("data");
+        req.removeAllListeners("end");
+        req.resume();
+        reject(new BodyTooLargeError());
+      } else {
+        chunks.push(c);
+      }
     });
-    req.on("end", () => resolve(data));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
+}
+
+/**
+ * 读取并解析 JSON 请求体（安全评审 #4 第二轮的唯一入口）：
+ * 越限 ⇒ BodyTooLargeError（413）；解析失败 ⇒ PublicInputError（400 固定文案）；
+ * 流错误原样上抛（路由层折叠为 E_INTERNAL）。
+ */
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  let text: string;
+  try {
+    text = await readBody(req);
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) throw err;
+    throw err;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new PublicInputError("请求体不是合法 JSON");
+  }
 }
 
 /** 重放前过滤 header：长度/连接相关头交给 fetch 重算（payload 编辑后长度已变），其余（含鉴权头）透传 */
@@ -163,8 +328,72 @@ export interface TrafficServer {
   replay(body: Record<string, unknown>, res: ServerResponse): Promise<void>;
 }
 
-export function createTrafficServer(state: TrafficEngine): TrafficServer {
+export interface CreateServerOptions {
+  /**
+   * 绑定地址（T4 §4.1 拍板②）：默认 `127.0.0.1`；`"0.0.0.0"` = LAN 显式 opt-in
+   * （T3 由 `traffic.web.host` 传入）。其余值原样交给 listen（自担）。
+   */
+  host?: string;
+}
+
+export function createTrafficServer(state: TrafficEngine, opts: CreateServerOptions = {}): TrafficServer {
   const epoch = state.epoch;
+  // ---- T4：绑定与 Host 白名单（§4.1「绑定」「Host」行）----
+  const bindHost = opts.host ?? "127.0.0.1";
+  const lanBound = bindHost === "0.0.0.0";
+  /** Host 白名单按连接的真实本地端口计算；LAN 绑定时加本机各网卡 IPv4（含 docker/网桥——Host 校验不做展示过滤）。 */
+  let hostAllowCache: { port: number; hosts: Set<string> } | null = null;
+  function allowedHosts(port: number): Set<string> {
+    if (hostAllowCache?.port === port) return hostAllowCache.hosts;
+    const hosts = new Set<string>([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]);
+    if (lanBound) {
+      for (const addrs of Object.values(networkInterfaces())) {
+        for (const addr of addrs ?? []) {
+          if (addr.family === "IPv4" && !addr.internal) hosts.add(`${addr.address}:${port}`);
+        }
+      }
+    }
+    hostAllowCache = { port, hosts };
+    return hosts;
+  }
+  function hostAllowed(req: IncomingMessage): boolean {
+    const host = req.headers.host;
+    const port = req.socket.localPort;
+    if (typeof host !== "string" || host === "" || typeof port !== "number") return false;
+    return allowedHosts(port).has(host.toLowerCase());
+  }
+  /** 回环来源（页面 `/` 免 token 的判据是来源地址，不是绑定地址）。 */
+  function isLoopback(req: IncomingMessage): boolean {
+    const remote = req.socket.remoteAddress ?? "";
+    return remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
+  }
+  function headerToken(req: IncomingMessage): string | undefined {
+    const value = req.headers["x-record-token"];
+    return Array.isArray(value) ? value[0] : value;
+  }
+  /** 非 GET/HEAD 的跨站拒绝（§4.1「跨域」行）：Origin ≠ 本服务 origin（含 null）或 Sec-Fetch-Site: cross-site。 */
+  function crossOriginRejected(req: IncomingMessage): boolean {
+    const sfs = req.headers["sec-fetch-site"];
+    if (typeof sfs === "string" && sfs.toLowerCase() === "cross-site") return true;
+    const origin = req.headers.origin;
+    if (origin === undefined || typeof origin !== "string") return false;
+    const own = `http://${String(req.headers.host ?? "").toLowerCase()}`;
+    return origin.toLowerCase().replace(/\/+$/, "") !== own;
+  }
+  /**
+   * T2b 对接（db-port）：历史列表 / 导出经 `engine.dbPort.pages()` 分页读——keyset（≤200 行/页），
+   * 页内每行 2ms 预算、页间 setImmediate 让出，外部持锁时读语句 BUSY ⇒ 抛错走 503「数据库忙」。
+   * ReadQuery 的 keyset 假设整数自增 id（requests/messages 满足）；sessions 表是字符串主键 + 聚合子查询，
+   * 仍走有界同步读（LIMIT 500）。
+   */
+  const READ_DEADLINE_MS = 10_000;
+  async function readRowsPaged(q: ReadQuery): Promise<Rows> {
+    const rows: Rows = [];
+    for await (const page of state.dbPort.pages(q, { deadlineMs: READ_DEADLINE_MS })) {
+      for (const row of page) rows.push(row);
+    }
+    return rows;
+  }
   /** engine 仍可写（open ∧ 纪元一致 ∧ 非加密会话）。 */
   const live = (): boolean => state.state === "open" && !isSecure();
   /** await 之后重新经 persist 闸口取连接；拒绝时抛错（调用方按原逻辑回错误）。 */
@@ -199,7 +428,7 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
         const hint = shellWrapped
           ? `：该字段只要 jq 程序本身，不要包 shell 外壳。应填 ${program.replace(/^\s*jq\s+['"]/, "").replace(/['"]\s*$/, "")}`
           : "";
-        throw new Error(`${field} jq 语法错误${hint}`);
+        throw new PublicInputError(`${field} jq 语法错误${hint}`);
       }
     }
   }
@@ -208,7 +437,11 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
     try {
       return { d: ensureDb(state), error: null };
     } catch (err) {
-      return { d: null, error: String(err) };
+      // 安全评审 #4：公开面经 publicDbError 折叠为固定文案；细节（清洗后）只进日志。
+      try {
+        console.error("[traffic] db unavailable:", sanitizeDetail(err, state));
+      } catch {}
+      return { d: null, error: sanitizeDetail(err, state) };
     }
   }
 
@@ -229,8 +462,9 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
 
   async function rewriteSettingsResponse(
     d: DatabaseSync | null,
-    dbError: string | null = state.dbError,
+    rawDbError: string | null = state.dbError,
   ): Promise<Record<string, unknown>> {
+    const dbError = publicDbError(rawDbError);
     const engine = d ? getEngineSettings(d) : DEFAULT_ENGINE_SETTINGS;
     const enabledRules = d ? loadEnabledRules(d).length : null;
     const probe = await state.jq.probe(engine.jqPath || undefined);
@@ -248,7 +482,8 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
       enabled_rules: enabledRules,
       active: rewriteActive(enabledRules, dbError),
       correlation_mode: correlationMode(enabledRules),
-      gate: state.gate.gateStats(),
+      // T2b：串行化闸门退役（r2 票据归属）。四个 serialize_* 键停用（页面展示为已停用），PUT 仍接受旧值。
+      serialize_retired: true,
     };
   }
 
@@ -273,16 +508,18 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
             dbBytes = statSync(state.dbPath).size;
           } catch {}
         } catch (err) {
-          state.dbError = String(err instanceof Error ? err.message : err);
+          // 安全评审 #4：db_error 是公开响应字段——经清洗边界（不含 token/路径）。
+          state.dbError = sanitizeDetail(err, state);
         }
       }
       const jq = await state.jq.probe();
       const codexWsWarned = state.codexWsWarned;
-      const dbError = result.error ?? state.dbError;
+      // 安全评审 #4：db_error 公开面固定文案（state.dbError 可能由 db.ts 以原文写入）。
+      const dbError = publicDbError(result.error ?? state.dbError);
       sendJson(res, {
         recording: state.recording,
         port: state.serverPort,
-        host: BIND_HOST,
+        host: bindHost,
         sessionId: state.currentSessionId,
         sessions,
         requests,
@@ -294,7 +531,6 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
           enabled_rules: enabledRules,
           active: rewriteActive(enabledRules, dbError),
           correlation_mode: correlationMode(enabledRules),
-          gate: state.gate.gateStats(),
           jq_available: jq.ok,
           jq_version: jq.version,
           db_error: dbError,
@@ -312,7 +548,7 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
 
     const result = tryDb();
     if (!result.d) {
-      sendJson(res, { error: result.error ?? "数据库不可用" }, 503);
+      sendJson(res, { error: PUBLIC_DB_ERROR }, 503);
       return;
     }
     const d = result.d;
@@ -325,7 +561,7 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
     if (path === "/api/rewrite/rules" && req.method === "POST") {
       let input: unknown;
       try {
-        input = JSON.parse(await readBody(req));
+        input = await readJsonBody(req);
         const rule = normalizeRulePayload(input);
         await assertRuleJqCompiles(rule, d);
         const now = new Date().toISOString();
@@ -348,10 +584,12 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
             now,
           );
         const id = Number(result.lastInsertRowid);
+        // 发送路径只读 engine 的内存规则快照（T2b 安全评审 #4）：写成功后立即刷新，不等 1s 定时器。
+        state.refreshRules();
         broadcast(state, { type: "rewrite_rules" });
         sendJson(res, w.prepare("SELECT * FROM rewrite_rules WHERE id = ?").get(id), 201);
       } catch (err) {
-        sendJson(res, { error: String(err instanceof Error ? err.message : err) }, 400);
+        sendRouteError(res, state, err, "rules create");
       }
       return;
     }
@@ -364,7 +602,7 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
         return;
       }
       try {
-        const rule = normalizeRulePayload(JSON.parse(await readBody(req)));
+        const rule = normalizeRulePayload(await readJsonBody(req));
         await assertRuleJqCompiles(rule, d);
         const now = new Date().toISOString();
         const w = writable();
@@ -383,10 +621,11 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
           now,
           id,
         );
+        state.refreshRules();
         broadcast(state, { type: "rewrite_rules" });
         sendJson(res, w.prepare("SELECT * FROM rewrite_rules WHERE id = ?").get(id));
       } catch (err) {
-        sendJson(res, { error: String(err instanceof Error ? err.message : err) }, 400);
+        sendRouteError(res, state, err, "rules update");
       }
       return;
     }
@@ -397,13 +636,14 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
       try {
         result = writable().prepare("DELETE FROM rewrite_rules WHERE id = ?").run(id);
       } catch (err) {
-        sendJson(res, { error: String(err instanceof Error ? err.message : err) }, 503);
+        sendRouteError(res, state, err, "rules delete");
         return;
       }
       if (!result.changes) {
         sendJson(res, { error: "not found" }, 404);
         return;
       }
+      state.refreshRules();
       broadcast(state, { type: "rewrite_rules" });
       sendJson(res, { ok: true });
       return;
@@ -416,11 +656,11 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
 
     if (path === "/api/rewrite/settings" && req.method === "PUT") {
       try {
-        const input = JSON.parse(await readBody(req));
-        if (!isObject(input)) throw new Error("请求体必须是 JSON 对象");
+        const input = await readJsonBody(req);
+        if (!isObject(input)) throw new PublicInputError("请求体必须是 JSON 对象");
         const current = getEngineSettings(d);
         const jqPath = input.jq_path === undefined ? current.jqPath : input.jq_path;
-        if (typeof jqPath !== "string") throw new Error("jq_path 必须是字符串");
+        if (typeof jqPath !== "string") throw new PublicInputError("jq_path 必须是字符串");
         const ranges = [
           ["timeout_ms", current.timeoutMs, 100, 60000],
           ["serialize_handoff_ms", current.handoffMs, 1000, 60000],
@@ -432,7 +672,7 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
         for (const [key, fallback, min, max] of ranges) {
           const value = input[key] === undefined ? fallback : input[key];
           if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
-            throw new Error(`${key} 必须是 ${min} 到 ${max} 之间的整数`);
+            throw new PublicInputError(`${key} 必须是 ${min} 到 ${max} 之间的整数`);
           }
           values.set(key, value);
         }
@@ -441,20 +681,22 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
         );
         upsert.run("jq_path", jqPath.trim());
         for (const [key, value] of values) upsert.run(key, String(value));
+        state.refreshRules();
         sendJson(res, await rewriteSettingsResponse(ensureDb(state)));
       } catch (err) {
-        sendJson(res, { error: String(err instanceof Error ? err.message : err) }, 400);
+        sendRouteError(res, state, err, "settings update");
       }
       return;
     }
 
     if (path === "/api/sessions") {
+      // sessions.id 是字符串主键且含聚合子查询：dbPort 的 keyset 分页不适用，保持有界同步读（LIMIT 500）。
       const rows = d
         .prepare(
           `SELECT s.id, s.started_at, s.cwd, s.provider, s.model,
-  				   (SELECT COUNT(*) FROM requests r WHERE r.session_id = s.id) AS req_count,
-  				   (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count
-  				 FROM sessions s ORDER BY s.started_at DESC LIMIT 500`,
+				   (SELECT COUNT(*) FROM requests r WHERE r.session_id = s.id) AS req_count,
+				   (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count
+				 FROM sessions s ORDER BY s.started_at DESC LIMIT 500`,
         )
         .all();
       sendJson(res, rows);
@@ -463,21 +705,28 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
 
     if (path === "/api/requests") {
       const sid = url.searchParams.get("session_id");
-      const limit = Math.min(Number(url.searchParams.get("limit")) || 100, 1000);
-      const offset = Number(url.searchParams.get("offset")) || 0;
-      const rows = sid
-        ? d
-            .prepare(
-              `SELECT id, session_id, turn, ts, provider, model, status, origin, replay_of, rewrite_status, LENGTH(payload) AS size
-  						 FROM requests WHERE session_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`,
-            )
-            .all(sid, limit, offset)
-        : d
-            .prepare(
-              `SELECT id, session_id, turn, ts, provider, model, status, origin, replay_of, rewrite_status, LENGTH(payload) AS size
-  						 FROM requests ORDER BY id DESC LIMIT ? OFFSET ?`,
-            )
-            .all(limit, offset);
+      const limit = Math.max(0, Math.floor(Math.min(Number(url.searchParams.get("limit")) || 100, 1000)));
+      const offset = Math.max(0, Math.floor(Number(url.searchParams.get("offset")) || 0));
+      const columns =
+        "id, session_id, turn, ts, provider, model, status, origin, replay_of, rewrite_status, LENGTH(payload) AS size";
+      let rows: Record<string, unknown>[];
+      if (offset === 0) {
+        // 热路径（页面只翻最新）：keyset 分页读，ORDER BY id DESC 与旧查询一致。
+        rows = await readRowsPaged({
+          table: "requests",
+          columns,
+          ...(sid ? { where: "session_id = ?", params: [sid] } : {}),
+          order: "desc",
+          limit,
+        });
+      } else {
+        // keyset 无法表达 OFFSET：保留旧同步 OFFSET 路径（LIMIT 仍钳在 1000）。
+        rows = (
+          sid
+            ? d.prepare(`SELECT ${columns} FROM requests WHERE session_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`)
+            : d.prepare(`SELECT ${columns} FROM requests ORDER BY id DESC LIMIT ? OFFSET ?`)
+        ).all(...(sid ? [sid, limit, offset] : [limit, offset])) as Record<string, unknown>[];
+      }
       sendJson(res, rows);
       return;
     }
@@ -584,17 +833,93 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
         sendJson(res, { error: "missing session_id" }, 400);
         return;
       }
-      // 导出只含实际录制的请求，replay 行不进数据集（避免破坏配对与数据集纯度）
-      const reqs = d
-        .prepare(
-          "SELECT * FROM requests WHERE session_id = ? AND origin IS NULL AND (rewrite_status IS NULL OR rewrite_status <> 'blocked') ORDER BY id",
-        )
-        .all(sid) as Array<Record<string, unknown>>;
-      const assts = d
-        .prepare("SELECT message FROM messages WHERE session_id = ? AND role = 'assistant' ORDER BY id")
-        .all(sid) as Array<{ message: string }>;
-      const lines = reqs.map((r, i) =>
-        JSON.stringify({
+      // 导出只含实际录制的请求，replay 行不进数据集（避免破坏配对与数据集纯度）。
+      // 安全评审 #1/#2：流式导出——只选需要的列（不取 request_headers/orig_* 等凭证列），
+      // 逐行序列化写出，尊重 res.write 背压（drain），客户端断开即 abort 分页迭代；
+      // 内存占用 O(单页)（≤200 行/页），不随会话行数线性累积。
+      // 配对语义与旧实现一致：requests（过滤后）与 assistant 消息各按 id 升序，位置 zip。
+      await exportStream(res, sid);
+      return;
+    }
+
+    sendJson(res, { error: "not found" }, 404);
+  }
+
+  /**
+   * 流式 NDJSON 导出（安全评审 #2）。
+   *
+   * - 两段查询都走 `dbPort.pages()`（keyset ORDER BY id ASC；messages 必须选 `id` 列——
+   *   keyset 游标从 `row.id` 前进，缺 id ⇒ 游标 NaN、跨页丢行（安全评审 #1））。
+   * - assistant 行按需惰性拉取（每条请求配一行），两段各驻留至多一页。
+   * - `res.write` 返回 false ⇒ await drain；与「客户端断开」竞速，断开即停止拉页。
+   * - 响应头不再携带总行数（无法预知）；文件名中的 session 片段做头安全清洗。
+   * - engine 关闭（getDb 返回 null）或截止耗尽 ⇒ 迭代提前结束，流在已写内容处截断。
+   */
+  const EXPORT_DEADLINE_MS = 60_000;
+  async function exportStream(res: ServerResponse, sid: string): Promise<void> {
+    const abort = new AbortController();
+    let clientGone = false;
+    const onGone = (): void => {
+      clientGone = true;
+      abort.abort();
+    };
+    res.once("close", onGone);
+    res.once("error", onGone);
+    const reqQuery: ReadQuery = {
+      table: "requests",
+      columns: "id, session_id, turn, ts, provider, model, status, payload",
+      where: "session_id = ? AND origin IS NULL AND (rewrite_status IS NULL OR rewrite_status <> 'blocked')",
+      params: [sid],
+      order: "asc",
+    };
+    const asstQuery: ReadQuery = {
+      table: "messages",
+      columns: "id, message", // id 是 keyset 游标列，必须选
+      where: "session_id = ? AND role = 'assistant'",
+      params: [sid],
+      order: "asc",
+    };
+    const drainOrGone = (): Promise<"drain" | "gone"> =>
+      new Promise((resolve) => {
+        const onDrain = (): void => {
+          cleanup();
+          resolve("drain");
+        };
+        const onClose = (): void => {
+          cleanup();
+          resolve("gone");
+        };
+        const cleanup = (): void => {
+          res.off("drain", onDrain);
+          res.off("close", onClose);
+        };
+        res.once("drain", onDrain);
+        res.once("close", onClose);
+      });
+    const safeName = sid.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 24) || "session";
+    res.writeHead(200, {
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "content-disposition": `attachment; filename="record-${safeName}.jsonl"`,
+      connection: "close", // 流式 + 可中途截断：不复用连接
+    });
+    async function* rows(query: ReadQuery): AsyncGenerator<Record<string, unknown>> {
+      for await (const page of state.dbPort.pages(query, { deadlineMs: EXPORT_DEADLINE_MS, signal: abort.signal })) {
+        for (const row of page) yield row;
+      }
+    }
+    const assistants = rows(asstQuery);
+    let assistantNext = assistants.next();
+    const takeAssistant = async (): Promise<{ message: string } | null> => {
+      const step = await assistantNext;
+      if (step.done) return null;
+      assistantNext = assistants.next();
+      return step.value as { message: string };
+    };
+    try {
+      for await (const r of rows(reqQuery)) {
+        if (clientGone || abort.signal.aborted) break;
+        const paired = await takeAssistant();
+        const line = JSON.stringify({
           session_id: r.session_id,
           request_id: r.id,
           turn: r.turn,
@@ -603,18 +928,18 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
           model: r.model,
           status: r.status,
           request: parseBody(r, "payload"),
-          response: assts[i] ? parseBody(assts[i], "message") : null,
-        }),
-      );
-      res.writeHead(200, {
-        "content-type": "application/x-ndjson; charset=utf-8",
-        "content-disposition": `attachment; filename="record-${sid.slice(0, 8)}-${reqs.length}.jsonl"`,
-      });
-      res.end(lines.join("\n") + "\n");
-      return;
+          response: paired ? parseBody(paired, "message") : null,
+        });
+        if (clientGone || res.destroyed || res.writableEnded) break;
+        if (!res.write(`${line}\n`)) {
+          if ((await drainOrGone()) === "gone") break;
+        }
+      }
+    } finally {
+      // 生成器被 break/throw 提前退出 ⇒ 显式关闭，让 pages() 的迭代器 return() 释放语句。
+      await assistants.return(undefined).catch(() => undefined);
+      res.end();
     }
-
-    sendJson(res, { error: "not found" }, 404);
   }
 
   /**
@@ -626,11 +951,11 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
     if (!state.serviceAllowed) throw new TrafficModeError("重放");
     let body: Record<string, unknown>;
     try {
-      const parsed = JSON.parse(await readBody(req));
-      if (!isObject(parsed)) throw new Error("请求体必须是 JSON 对象");
+      const parsed = await readJsonBody(req);
+      if (!isObject(parsed)) throw new PublicInputError("请求体必须是 JSON 对象");
       body = parsed;
-    } catch {
-      sendJson(res, { error: "请求体不是合法 JSON" }, 400);
+    } catch (err) {
+      sendRouteError(res, state, err, "replay body");
       return;
     }
     await replay(body, res);
@@ -646,12 +971,23 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
     }
     const dbResult = tryDb();
     if (!dbResult.d) {
-      sendJson(res, { error: dbResult.error ?? "数据库不可用" }, 503);
+      // 安全评审 #4 第三轮：连接获取/打开失败同样只出固定公开文案（细节已由 tryDb 进日志）。
+      sendJson(res, { error: publicDbError(dbResult.error) ?? PUBLIC_DB_ERROR }, 503);
       return;
     }
     const d = dbResult.d;
-    const src = d.prepare("SELECT * FROM requests WHERE id = ?").get(Number(body.request_id)) as
-      Record<string, any> | undefined;
+    let src: Record<string, any> | undefined;
+    try {
+      src = d.prepare("SELECT * FROM requests WHERE id = ?").get(Number(body.request_id)) as
+        Record<string, any> | undefined;
+    } catch (err) {
+      // 重放 DB 失败 ⇒ publicDbError 语义（安全评审 #4 第二轮）：busy ⇒ BUSY 文案，其余固定 db 文案；细节只进日志。
+      try {
+        console.error("[traffic] replay source lookup:", sanitizeDetail(err, state));
+      } catch {}
+      sendJson(res, { error: publicDbError(String(err instanceof Error ? err.message : err)) ?? PUBLIC_DB_ERROR }, 503);
+      return;
+    }
     if (!src) {
       sendJson(res, { error: "源记录不存在" }, 404);
       return;
@@ -684,13 +1020,41 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
     const originalHeadersText = JSON.stringify(rawHeaders);
     const ts = new Date().toISOString();
 
-    const ins = writable()
-      .prepare(
-        `INSERT INTO requests (session_id, turn, ts, provider, model, payload, request_headers, url, method, origin, replay_of)
+    // T2b：外部持锁（busy_timeout=0）时同步 INSERT 立即 SQLITE_BUSY ⇒ 503 友好错误（重放未开始，无半行）。
+    let newId: number;
+    try {
+      const ins = writable()
+        .prepare(
+          `INSERT INTO requests (session_id, turn, ts, provider, model, payload, request_headers, url, method, origin, replay_of)
   			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'replay', ?)`,
-      )
-      .run(src.session_id, src.turn, ts, src.provider, src.model, payloadStr, originalHeadersText, url, method, src.id);
-    const newId = Number(ins.lastInsertRowid);
+        )
+        .run(
+          src.session_id,
+          src.turn,
+          ts,
+          src.provider,
+          src.model,
+          payloadStr,
+          originalHeadersText,
+          url,
+          method,
+          src.id,
+        );
+      newId = Number(ins.lastInsertRowid);
+    } catch (err) {
+      // DB 失败（含 BUSY）⇒ publicDbError 语义；其余（理论不可达）按内部错误折叠。
+      if (err instanceof Error && err.message === CLOSED_MESSAGE) {
+        sendJson(res, { error: CLOSED_MESSAGE }, 503);
+        return;
+      }
+      if (!isBusyError(err)) {
+        try {
+          console.error("[traffic] replay insert:", sanitizeDetail(err, state));
+        } catch {}
+      }
+      sendJson(res, { error: isBusyError(err) ? BUSY_MESSAGE : PUBLIC_DB_ERROR }, 503);
+      return;
+    }
     broadcast(state, {
       type: "request",
       id: newId,
@@ -816,15 +1180,20 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
       upstream = await doFetch(url, replayInit);
     } catch (err) {
       finish();
+      // 上游失败：公开面固定文案（安全评审 #4 第二轮）；细节经 sanitize 只进日志与库内行。
+      const detail = sanitizeDetail(err, state);
+      try {
+        console.error("[traffic] replay upstream:", detail);
+      } catch {}
       try {
         writable()
           .prepare("UPDATE requests SET status = ?, response_headers = ? WHERE id = ?")
-          .run(0, JSON.stringify({ error: String(err) }), newId);
+          .run(0, JSON.stringify({ error: detail }), newId);
         broadcast(state, { type: "response", id: newId, session_id: src.session_id, status: 0 });
       } catch {
         // engine 已关闭 / 加密会话：丢弃写。
       }
-      sendJson(res, { id: newId, error: String(err) }, live() ? 502 : 503);
+      sendJson(res, { id: newId, error: "上游请求失败（详情已记录）" }, live() ? 502 : 503);
       return;
     }
     clearHead();
@@ -888,18 +1257,144 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
     }
   }
 
-  /** 非回环请求必须携带正确 token；本机访问豁免 */
-  function isAuthorized(req: IncomingMessage, url: URL): boolean {
-    if (!state.accessToken) return true;
-    const remote = req.socket.remoteAddress ?? "";
-    if (remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1") return true;
-    const provided = url.searchParams.get("token") ?? (req.headers["x-record-token"] as string | undefined) ?? "";
-    return provided === state.accessToken;
+  /** T4 §4.1：鉴权与跨域门禁后的主请求管线（Host/OPTIONS/跨域/token 见 handleHttp 顶部）。 */
+  function handleHttp(req: IncomingMessage, res: ServerResponse): void {
+    // 反嵌入/元数据头：所有响应（页面、API、错误页、401/404/421/405）统一携带。
+    setSecurityHeaders(res);
+    try {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const method = (req.method ?? "GET").toUpperCase();
+
+      // 1) Host 白名单（鉴权前，防 DNS rebinding）：不在清单 ⇒ 421。
+      if (!hostAllowed(req)) {
+        res.writeHead(421, { "content-type": "text/plain; charset=utf-8", connection: "close" });
+        res.end("421 Misdirected Request: Host 不在允许清单（防 DNS rebinding）");
+        return;
+      }
+
+      // 2) OPTIONS 一律 405：预检永远不成功（本服务无任何跨域读能力，也从不发 Access-Control-Allow-*）。
+      if (method === "OPTIONS") {
+        res.writeHead(405, {
+          "content-type": "text/plain; charset=utf-8",
+          allow: "GET, HEAD, POST, PUT, PATCH, DELETE",
+        });
+        res.end("405 Method Not Allowed");
+        return;
+      }
+
+      const isApi = url.pathname === "/api" || url.pathname.startsWith("/api/");
+      const isPage = url.pathname === "/";
+      // 3) 缓存：含 token 的 HTML 与全部 /api/* 一律 no-store（SSE 亦不缓存）。
+      if (isApi || isPage) res.setHeader("Cache-Control", "no-store");
+
+      // 4) 跨站元数据门禁（状态变更请求；§4.1「跨域」行）：Origin ≠ 本服务（含 null）或
+      //    Sec-Fetch-Site: cross-site ⇒ 403；缺元数据时仅凭 token（下一道闸）。
+      if (method !== "GET" && method !== "HEAD" && crossOriginRejected(req)) {
+        res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+        res.end("403 Forbidden: 跨站请求被拒绝（Origin / Sec-Fetch-Site 校验失败）");
+        return;
+      }
+
+      // 5) token 门禁。页面 `/`：回环免 token（token 经 <meta> 注入 HTML）；非回环须带（导航只能 ?token= 或头）。
+      //    /api/*：一律要 token（回环亦然）；GET/HEAD 接受头或 ?token=，状态变更只认 x-record-token 头
+      //    （自定义头跨站表单无法伪造 —— CSRF 纵深）。
+      if (isPage) {
+        if (!isLoopback(req) && !tokenMatches(headerToken(req) ?? url.searchParams.get("token"), state.accessToken)) {
+          res.writeHead(401, { "content-type": "text/plain; charset=utf-8" });
+          res.end("401 unauthorized: 页面访问需要 token（用 /record status 输出的带 token URL 打开）");
+          return;
+        }
+        // 页面已模块级 gzipSync 预压缩：客户端支持 gzip 时直接回发压缩副本
+        const page = (state.page ??= buildPage(state.accessToken ?? undefined));
+        const accept = req.headers["accept-encoding"];
+        if (typeof accept === "string" && accept.includes("gzip")) {
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8", "content-encoding": "gzip" });
+          res.end(page.gzip);
+        } else {
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          res.end(page.html);
+        }
+        return;
+      }
+
+      if (isApi) {
+        const viaHeader = headerToken(req);
+        const viaQuery = url.searchParams.get("token");
+        const ok =
+          method === "GET" || method === "HEAD"
+            ? tokenMatches(viaHeader ?? viaQuery, state.accessToken)
+            : // 状态变更（POST/PUT/PATCH/DELETE）：只认自定义头形式——?token= 单独出现恒拒。
+              tokenMatches(viaHeader, state.accessToken);
+        if (!ok) {
+          res.writeHead(401, { "content-type": "text/plain; charset=utf-8" });
+          res.end(
+            method === "GET" || method === "HEAD"
+              ? "401 unauthorized: /api/* 需要 token（x-record-token 头或 ?token=；页面 token 见 /record status）"
+              : "401 unauthorized: 状态变更请求必须经 x-record-token 头携带 token（不接受 ?token=）",
+          );
+          return;
+        }
+        if (url.pathname === "/api/events") {
+          // no-store 已设置；SSE 语义只需 keep-alive。
+          res.writeHead(200, { "content-type": "text/event-stream", connection: "keep-alive" });
+          if (state.state !== "open") {
+            res.end();
+            return;
+          }
+          res.write("retry: 2000\n\n");
+          state.sseClients.add(res);
+          req.on("close", () => state.sseClients.delete(res));
+          return;
+        }
+
+        if (url.pathname === "/api/replay" && method === "POST") {
+          void handleReplay(req, res).catch((err: unknown) => {
+            if (err instanceof TrafficModeError) {
+              try {
+                sendJson(res, { error: err.message, code: err.code }, 403);
+              } catch {}
+              return;
+            }
+            if (isBusyError(err)) {
+              try {
+                sendJson(res, { error: BUSY_MESSAGE }, 503);
+              } catch {}
+              return;
+            }
+            // 安全评审 #4：不可预期异常 ⇒ 固定文案 + E_INTERNAL；细节只进日志（清洗后）。
+            sendInternalError(res, state, "api replay", err);
+          });
+          return;
+        }
+
+        void handleApi(req, res, url).catch((err: unknown) => {
+          if (isBusyError(err)) {
+            try {
+              sendJson(res, { error: BUSY_MESSAGE }, 503);
+            } catch {}
+            return;
+          }
+          sendInternalError(res, state, "api", err);
+        });
+        return;
+      }
+
+      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      res.end("not found");
+    } catch (err) {
+      sendInternalError(res, state, "http", err);
+    }
   }
 
-  /** 可访问 URL 列表：优先真实局域网 IPv4，过滤 docker/网桥/代理虚拟网卡；无局域网时才回退到 127.0.0.1 */
+  /**
+   * 可访问 URL 列表（T4 §4.1「绑定」「LAN 提示」行）：
+   * 默认只绑回环 ⇒ 只报 127.0.0.1；`0.0.0.0`（LAN opt-in）时优先真实局域网 IPv4（过滤
+   * docker/网桥/代理虚拟网卡；无局域网时回退 127.0.0.1），URL 带 ?token=（页面导航无法带自定义头），
+   * 并附明文 HTTP 风险提示（Host 白名单与 token 不替代传输加密）。
+   */
   function accessUrls(port: number): string[] {
     const q = state.accessToken ? `?token=${state.accessToken}` : "";
+    if (!lanBound) return [`http://127.0.0.1:${port}`];
     const skipIface = /^(docker|br-|veth|virbr|tun|tap|utun|meta|zt|tailscale)/i;
     const isPrivate = (ip: string) =>
       /^192\.168\./.test(ip) || /^10\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
@@ -913,82 +1408,11 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
         (isPrivate(addr.address) ? lan : other).push(line);
       }
     }
-    const urls = [...lan, ...other];
-    if (urls.length === 0) urls.push(`http://127.0.0.1:${port}`);
-    return urls;
-  }
-
-  function handleHttp(req: IncomingMessage, res: ServerResponse): void {
-    try {
-      const url = new URL(req.url ?? "/", "http://127.0.0.1");
-
-      if (!isAuthorized(req, url)) {
-        res.writeHead(401, { "content-type": "text/plain; charset=utf-8" });
-        res.end("401 unauthorized: 缺少或错误的 ?token=（局域网访问需带 token，见 /record status）");
-        return;
-      }
-
-      if (url.pathname === "/") {
-        // 页面已模块级 gzipSync 预压缩：客户端支持 gzip 时直接回发压缩副本
-        const page = (state.page ??= buildPage());
-        const accept = req.headers["accept-encoding"];
-        if (typeof accept === "string" && accept.includes("gzip")) {
-          res.writeHead(200, { "content-type": "text/html; charset=utf-8", "content-encoding": "gzip" });
-          res.end(page.gzip);
-        } else {
-          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-          res.end(page.html);
-        }
-        return;
-      }
-
-      if (url.pathname === "/api/events") {
-        res.writeHead(200, {
-          "content-type": "text/event-stream",
-          "cache-control": "no-cache",
-          connection: "keep-alive",
-        });
-        if (state.state !== "open") {
-          res.end();
-          return;
-        }
-        res.write("retry: 2000\n\n");
-        state.sseClients.add(res);
-        req.on("close", () => state.sseClients.delete(res));
-        return;
-      }
-
-      if (url.pathname === "/api/replay" && req.method === "POST") {
-        void handleReplay(req, res).catch((err) => {
-          if (err instanceof TrafficModeError) {
-            try {
-              sendJson(res, { error: err.message, code: err.code }, 403);
-            } catch {}
-            return;
-          }
-          try {
-            sendJson(res, { error: String(err) }, 500);
-          } catch {}
-        });
-        return;
-      }
-
-      if (url.pathname.startsWith("/api/")) {
-        void handleApi(req, res, url).catch((err) => {
-          try {
-            sendJson(res, { error: String(err) }, 500);
-          } catch {}
-        });
-        return;
-      }
-
-      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-      res.end("not found");
-    } catch (err) {
-      try {
-        sendJson(res, { error: String(err) }, 500);
-      } catch {}
+    const urls = [...lan, ...other, `http://127.0.0.1:${port}`];
+    if (lan.length + other.length > 0) {
+      urls.push("⚠ 明文 HTTP：token、请求正文与 API key 可被同网段嗅探（Host 白名单与 token 不替代传输加密）");
     }
+    return urls;
   }
 
   /**
@@ -1037,7 +1461,7 @@ export function createTrafficServer(state: TrafficEngine): TrafficServer {
           } catch {}
           resolve(null);
         });
-        s.listen(port, BIND_HOST, () => {
+        s.listen(port, bindHost, () => {
           s.unref();
           if (state.state !== "open") {
             // 监听期间 engine 已关闭：不得留下监听。

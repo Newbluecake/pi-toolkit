@@ -2,10 +2,12 @@
  * Web 查看页：Vue 3 内联应用（零构建步骤、零外部运行时依赖）。
  *
  * - 本文件只含 HTML 骨架（#app 挂载点 + 两个内联 script 占位）与全部 CSS
- * - Vue（vendor/vue.global.prod.js，带 compiler 的 global build）与应用（app.js）
+ * - Vue（web/vendor/vue.global.prod.js，带 compiler 的 global build）与应用（web/app.js）
  *   在**首次调用 buildPage()** 时 readFileSync 读入并内联（T2a：模块顶层零 IO，§3.1）；两个文本 blob 分别
  *   sanitize（</script → <\/script），不对最终页面全局替换（骨架自身需要合法的 </script>）
  * - gzip 副本同在 buildPage() 内生成；缓存归调用方（engine.page，首个 GET / 时组装）
+ * - T4（§4.1 token 行）：token 不再经 URL 透传——buildPage(token) 在 <head> 注入
+ *   <meta name="record-token">，app.js 读它并经 x-record-token 头携带；页面响应 no-store
  * - Vue 升级步骤见 README「开发与本地安装」
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -14,11 +16,11 @@ import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
 /**
- * 资源目录解析：依次尝试 import.meta.url 所在目录（标准 ESM / vitest）→
- * __filename 所在目录（jiti 加载 TS 时注入），取第一个存在 app.js 的目录。
+ * 资源目录解析（T4，§4.1「页面组装」行）：app.js 候选 = 模块同级 web/ → 包根 src/traffic/web/。
+ * vendor（vue.global.prod.js）仍在 src/traffic/vendor/（由 vendor-vue.mjs + VENDOR.json 锁定）。
  * 禁止 process.cwd() 兜底（扩展工作目录不可控）。
  */
-function resolveSrcDir(): string {
+function moduleDirs(): string[] {
   const candidates: string[] = [];
   try {
     candidates.push(dirname(fileURLToPath(import.meta.url)));
@@ -27,23 +29,60 @@ function resolveSrcDir(): string {
     // @types/node 声明了 __filename 全局；jiti 注入 CJS 风格 __filename，纯 ESM 下为 undefined
     if (typeof __filename === "string" && __filename) candidates.push(dirname(__filename));
   } catch {}
-  for (const dir of candidates) {
-    if (existsSync(join(dir, "app.js"))) return dir;
+  return candidates;
+}
+
+/** 在候选目录里找第一个存在的目标文件；找不到抛错（列出全部候选）。 */
+function firstExisting(dirs: string[], fileOf: (dir: string) => string, what: string): string {
+  for (const dir of dirs) {
+    const file = fileOf(dir);
+    if (existsSync(file)) return file;
   }
-  throw new Error(
-    `pi-traffic-record: 无法定位页面资源目录（需包含 app.js 与 vendor/vue.global.prod.js）。已尝试: ${candidates.join(", ") || "（无候选目录）"}`,
-  );
+  throw new Error(`pi-traffic-record: 无法定位${what}。已尝试目录: ${dirs.join(", ") || "（无候选目录）"}`);
+}
+
+function resolveAppJs(): string {
+  const mod = moduleDirs();
+  // 包根候选（模块目录向上两级 = 包根）：覆盖 dist/ 布局的 npm 入口消费者
+  const dirs = [...mod.map((d) => join(d, "web")), ...mod.map((d) => join(d, "..", "..", "src", "traffic", "web"))];
+  return firstExisting(dirs, (dir) => join(dir, "app.js"), "页面资源 web/app.js");
+}
+
+function resolveVueJs(): string {
+  const mod = moduleDirs();
+  const dirs = [...mod, ...mod.map((d) => join(d, "..", "..", "src", "traffic"))];
+  return firstExisting(dirs, (dir) => join(dir, "vendor", "vue.global.prod.js"), "vendor/vue.global.prod.js");
 }
 
 /** 内联 sanitize：仅对将要插入 <script> 的文本 blob 转义 </script，防止提前闭合外层 script 标签 */
 const inlineJs = (js: string): string => js.replace(/<\/script/gi, "<\\/script");
 
-function pageHtml(VUE_JS: string, APP_JS: string): string {
+/** HTML 属性值转义（token 注入 <meta content="..."> 用；token 本为 hex，但按不可信文本处理） */
+function escapeAttr(value: string): string {
+  return value.replace(/[&<>"']/g, (ch) => {
+    switch (ch) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      default:
+        return "&#39;";
+    }
+  });
+}
+
+function pageHtml(VUE_JS: string, APP_JS: string, token: string | undefined): string {
+  // token 经 <meta> 交给 app.js（T4：替换 URL 透传；含 token 的 HTML 由 server 加 no-store）
+  const tokenMeta = token ? `\n<meta name="record-token" content="${escapeAttr(token)}">` : "";
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1">${tokenMeta}
 <title>pi traffic record</title>
 <style>
 /* 主题变量：默认深色，[data-theme="light"] 覆盖为浅色 */
@@ -247,10 +286,9 @@ export interface BuiltPage {
 }
 
 /** 组装页面（读资源 + 内联 + gzip）。纯函数：每次调用重新读取；缓存由调用方持有。 */
-export function buildPage(): BuiltPage {
-  const dir = resolveSrcDir();
-  const vue = inlineJs(readFileSync(join(dir, "vendor", "vue.global.prod.js"), "utf8"));
-  const app = inlineJs(readFileSync(join(dir, "app.js"), "utf8"));
-  const html = pageHtml(vue, app);
+export function buildPage(token?: string): BuiltPage {
+  const vue = inlineJs(readFileSync(resolveVueJs(), "utf8"));
+  const app = inlineJs(readFileSync(resolveAppJs(), "utf8"));
+  const html = pageHtml(vue, app, token);
   return { html, gzip: gzipSync(html) };
 }

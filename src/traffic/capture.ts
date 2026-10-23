@@ -1,35 +1,42 @@
 /**
- * 线级抓取与请求改写拦截。
- * 改写发生在下游 fetch 之前；流式响应仍通过 clone 旁路保存。
+ * fetch 层：票据认领、按 (T, generation, 正文摘要) 改写与线级录制（traffic-merge plan §5.3 fetch 表）。
  *
- * T2a：不再自行 patch `globalThis.fetch`——由 tap.ts 的 trampoline 在活动 wrapper 内调用
- * `capture.handleFetch(next, …)`（`next` 为安装时捕获的固定下游）。全部状态归 engine，入口固定 engine
- * 与纪元，所有写经 persist 闸口；流捕获登记进 engine 取消域，每批复查闸口。
+ * 由 tap.ts 的活动 wrapper 调用 `capture.handleFetch(next, input, init, ticket)`：`next` 为 wrapper 安装时捕获的固定
+ * 下游，入参已剥离票据头，票据值单独传入。全部状态归 engine，入口固定 engine 与纪元；所有写进写后账本（persist.ts 的
+ * `record*`），provider 请求从不等待 DB。
+ *
+ * | 情形                                           | 行为                                                                     |
+ * | ---------------------------------------------- | ------------------------------------------------------------------------ |
+ * | 无票据头                                       | 纯透传，不认领、不改写、不录                                             |
+ * | 票据未知 / 已回收 / 属其他纪元                 | 透传，`staleTickets++`                                                   |
+ * | 票据从未绑定（compaction 只有 headers 等）     | 透传，不改写、不录线级字段（响应仍参与退役规则 ①）                       |
+ * | 已绑定，本 generation 尚无正文摘要             | 绑定摘要；按本 generation 规则快照改写，结果缓存；线级字段写本 generation 行 |
+ * | 已绑定，摘要等于本 generation 摘要             | 同 generation 的网络重试：复用缓存结果（正文字节一致），不重跑 jq          |
+ * | 已绑定，摘要不等                               | 未被证明的新正文：原样透传、不改写、`unattributedFetches++`，不写该票据行 |
+ * | 本 generation 已 blocked（同摘要）             | 再抛同一错误，不重跑 jq、不放出原请求；通知按 (会话, 规则集, 错误) 30s 去重 |
+ *
+ * 状态与响应头由 fetch 层直接从 `Response` 写入（精确）；2xx/3xx ⇒ 票据退役（规则 ①）。
  */
-import { ensureDb } from "./db.js";
+import { createHash } from "node:crypto";
 import { urlMatchesBase } from "./correlate.js";
-import type { GateSlot, ReleaseReason } from "./serialize.js";
 import { idleTimer } from "./cancel.js";
+import { newRowRef, type RowRef } from "./db-port.js";
 import type { TrafficEngine } from "./engine.js";
-import { persist, persistAllowed } from "./persist.js";
+import { recordChunk, recordPatch } from "./persist.js";
 import {
   applyRequest,
   decodeBody,
   encodingOf,
   extractBody,
-  getEngineSettings,
   headersToJson,
-  loadEnabledRules,
   sanitizeSendHeaders,
   type ApplyResult,
-  type BodyInput,
-  type EngineSettings,
   type RewriteEnv,
 } from "./rewrite.js";
 import { RewriteError } from "./rewrite.js";
 import { isSecure } from "./secure.js";
 import { broadcast } from "./sse.js";
-import type { Attempt } from "./state.js";
+import { rewriteSuspended, type RewriteOutcome, type Ticket, type TicketGeneration } from "./ticket.js";
 
 /** 把 fetch 的 headers 入参（Headers / 二元组数组 / 普通对象）归一化为普通对象 */
 export function normalizeHeaders(h: unknown): Record<string, string> {
@@ -55,7 +62,7 @@ export function normalizeHeaders(h: unknown): Record<string, string> {
   return out;
 }
 
-function noteDbErrorOn(state: TrafficEngine, err: unknown): void {
+export function noteDbErrorOn(state: TrafficEngine, err: unknown): void {
   const message = err instanceof Error ? err.message : String(err);
   if (!state.dbError) state.dbError = message;
   if (!state.dbErrorNotified) {
@@ -73,18 +80,16 @@ function isBinaryBody(value: unknown): value is ArrayBuffer | ArrayBufferView {
   return value instanceof ArrayBuffer || ArrayBuffer.isView(value);
 }
 
-function bodyByteLength(input: unknown, init: unknown): number | null {
+function bodyByteLength(init: unknown): number | null {
   const initBody = typeof init === "object" && init !== null ? (init as { body?: unknown }).body : undefined;
   if (typeof initBody === "string") return Buffer.byteLength(initBody, "utf8");
   if (isBinaryBody(initBody)) return initBody.byteLength;
-  if (
-    typeof initBody === "undefined" &&
-    typeof Request !== "undefined" &&
-    input instanceof Request &&
-    input.body === null
-  )
-    return null;
   return null;
+}
+
+function byteView(value: ArrayBuffer | ArrayBufferView): Uint8Array {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
 }
 
 async function bodyTextOf(result: ApplyResult): Promise<string | null> {
@@ -94,12 +99,34 @@ async function bodyTextOf(result: ApplyResult): Promise<string | null> {
   return decodeBody(bytes, result.encoding);
 }
 
-function isAbortError(err: unknown): boolean {
-  return typeof err === "object" && err !== null && "name" in err && (err as { name?: unknown }).name === "AbortError";
-}
-
-function isRetryableStatus(status: number): boolean {
-  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+/**
+ * 原始正文摘要（sha256；压缩正文按 content-encoding 解压后摘要）。不 JSON.parse（热路径只做一次哈希）。
+ * 不可摘要（流式 body 等）⇒ null：无法证明同一正文，fetch 层按未证明处理（透传不改写）。
+ */
+export async function bodyDigest(input: unknown, init: unknown): Promise<string | null> {
+  const initBody = typeof init === "object" && init !== null ? (init as { body?: unknown }).body : undefined;
+  const hash = (data: string | Uint8Array): string => createHash("sha256").update(data).digest("hex");
+  if (typeof initBody === "string") return hash(initBody);
+  if (isBinaryBody(initBody)) {
+    const bytes = byteView(initBody);
+    try {
+      const encoding = encodingOf(headersToJson(requestHeaders(input, init)));
+      if (encoding !== "identity") return hash(decodeBody(bytes, encoding));
+    } catch {
+      // 未知编码：按原始字节摘要。
+    }
+    return hash(bytes);
+  }
+  if (initBody !== undefined && initBody !== null) return null;
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    if (input.body === null) return "none";
+    try {
+      return hash(await input.clone().text());
+    } catch {
+      return null;
+    }
+  }
+  return "none";
 }
 
 /** 根据 applyRequest 的结果重建 fetch 入参，保留 Request 的原有请求属性。 */
@@ -143,18 +170,12 @@ type FetchLike = (input: any, init?: any) => Promise<Response>;
 export interface Capture {
   /** 活动 wrapper 调用：`original` 为 wrapper 安装时捕获的固定下游；入参已剥离票据头。 */
   handleFetch(original: FetchLike, input: any, init: any, ticket: string | null): Promise<Response>;
-  tryRewrite(attempt: Attempt, slot: GateSlot | null, input: unknown, init: unknown): Promise<ApplyResult | null>;
-  recordPreSend(
-    attempt: Attempt,
-    applied: ApplyResult | null,
-    input?: unknown,
-    init?: unknown,
-    epoch?: number,
-  ): Promise<void>;
-  onRewriteBlocked(attempt: Attempt, slot: GateSlot | null, err: unknown, epoch?: number): Error;
-  /** 后台消费响应体并逐批入库；登记进取消域，每批复查 persist 闸口。 */
+  /**
+   * 后台消费响应体并逐批进写后账本；登记进取消域，每批复查 persist 闸口。`requestId` 为已落库的行 id（重放）或
+   * 行引用（provider 请求，行可能尚在账本中）。
+   */
   captureStream(
-    requestId: number,
+    requestId: number | RowRef,
     sessionId: string,
     res: Response,
     epoch?: number,
@@ -175,150 +196,169 @@ export interface CaptureStreamOptions {
   onEnd?: (kind: "eof" | "aborted") => void;
 }
 
+/** 阻断通知去重窗口（同一 (会话, 规则集, 错误)）。 */
+export const BLOCKED_NOTIFY_DEDUP_MS = 30_000;
+
 export function createCapture(state: TrafficEngine): Capture {
-  const gate = state.gate;
-  const corr = state.corr;
   let blockedHandler: ((message: string) => void) | null = null;
   const rewriteEnv = (): RewriteEnv => ({ jq: state.jq, warn: (event) => broadcast(state, event) });
+  const blockedNotified = new Map<string, number>();
 
-  /**
-   * 在 fetch 侧接管一个已有的 hook slot；若当前 holder 属于别的请求，
-   * 则创建 orphan slot，保持改写路径仍然串行。
-   */
-  async function attachOrAcquire(attempt: Attempt): Promise<GateSlot | null> {
-    // 录制关闭 = 改写引擎停机。fetch 层现场复查（钩子放行后用户可能刚 /record off），
-    // drain 掉可能残留的持有者，避免 slot 空持有到 handoff 看门狗超时并污染 gateNoFetch。
-    if (!state.recording) {
-      gate.drainGate("drain");
-      return null;
-    }
-    const holder = gate.currentSlot();
-    if (holder === null && (attempt.slot === null || attempt.slot === undefined)) return null;
-    if (holder !== null && attempt.slot === holder && urlMatchesBase(attempt.url, holder.baseUrl)) {
-      gate.attachAttempt(holder);
-      return holder;
-    }
+  const counters = () => state.tickets.counters;
 
-    let db;
-    try {
-      db = ensureDb(state);
-      const rules = loadEnabledRules(db);
-      if (rules.length === 0) {
-        gate.drainGate("drain");
-        return null;
-      }
-      const settings = getEngineSettings(db);
-      const slot = await gate.acquireSlot(
-        {
-          sessionId: attempt.pending?.sessionId ?? state.currentSessionId ?? "",
-          baseUrl: attempt.url,
-          model: attempt.pending?.model ?? null,
-          modelApi: null,
-          rules,
-          settings,
-        },
-        "orphan",
-      );
-      slot.degraded = true;
-      attempt.degraded = true;
-      gate.attachAttempt(slot);
-      return slot;
-    } catch (err) {
-      // A storage failure must never turn the provider request into an extension error.
-      noteDbErrorOn(state, err);
-      return null;
-    }
+  function setRewriteBlockedHandler(handler: ((message: string) => void) | null): void {
+    blockedHandler = handler;
   }
 
-  /** DB 失败时整体放行：存储故障不能阻断 provider 请求。 */
-  async function tryRewrite(
-    attempt: Attempt,
-    slot: GateSlot | null,
+  function notifyBlocked(gen: TicketGeneration, safe: ReturnType<typeof blockedSafeEvent>, text: string): void {
+    const key = JSON.stringify([gen.sessionId, gen.rules.map((r) => r.id), safe.kind, safe.phase, safe.rule_id]);
+    const t = Date.now();
+    for (const [k, at] of blockedNotified) if (t - at >= BLOCKED_NOTIFY_DEDUP_MS) blockedNotified.delete(k);
+    if (blockedNotified.has(key)) return;
+    blockedNotified.set(key, t);
+    blockedHandler?.(text);
+  }
+
+  /** 改写阻断：写阻断行（进账本）、双 SSE、通知（去重），返回要抛给 SDK 的错误。 */
+  function onRewriteBlocked(
+    gen: TicketGeneration,
+    url: string,
+    method: string,
+    origHeaders: Record<string, string>,
+    origPayload: string | null,
+    err: unknown,
+    epoch: number,
+  ): Error {
+    const safe = blockedSafeEvent(err);
+    const ruleName = safe.rule_name ?? "未知规则";
+    const ruleId = safe.rule_id === null ? "?" : String(safe.rule_id);
+    const message = `traffic-record rewrite blocked: [规则 "${ruleName}" #${ruleId}] ${safe.phase} ${safe.kind}`;
+    const ruleIds = gen.rules.map((r) => r.id);
+    const finish = (rowId: number | null): void => {
+      broadcast(state, { type: "rewrite_error", id: rowId, session_id: gen.sessionId, ...safe, message });
+      broadcast(state, { type: "response", id: rowId, session_id: gen.sessionId, status: 0 });
+    };
+    if (gen.row) {
+      const ok = recordPatch(
+        state,
+        epoch,
+        gen.row,
+        "requests",
+        {
+          status: 0,
+          rewrite_status: "blocked",
+          rewrite_error: JSON.stringify(safe),
+          orig_payload: origPayload,
+          orig_request_headers: JSON.stringify(origHeaders),
+          rewrite_rule_ids: JSON.stringify(ruleIds.length > 0 ? ruleIds : safe.rule_id === null ? [] : [safe.rule_id]),
+          url,
+          method,
+        },
+        { onDone: finish },
+      );
+      if (!ok) finish(null);
+    } else {
+      finish(null);
+    }
+    const blockedError = err instanceof RewriteError ? err : new Error(message);
+    blockedError.message = message;
+    // 安全边界：只用 toSafeEvent 的结构化字段，绝不带 detail（含 jq stderr）。
+    notifyBlocked(
+      gen,
+      safe,
+      `改写阻断：规则「${ruleName}」#${ruleId} ${safe.phase} 阶段 ${safe.kind}\n请求已中断。详情见 Web 页「改写」子页。`,
+    );
+    return blockedError;
+  }
+
+  async function runRewrite(
+    gen: TicketGeneration,
+    url: string,
+    method: string,
     input: unknown,
     init: unknown,
-  ): Promise<ApplyResult | null> {
-    // B2-严格：drainGate 放行的 degraded slot 仍带着非空 rules 快照，
-    // 故此处必须复查 recording —— 这是「/record off 立刻停止在途改写」的唯一可靠拦截点。
-    if (!state.recording || slot === null || slot.rules.length === 0) return null;
+    epoch: number,
+  ): Promise<RewriteOutcome> {
+    // 录制关闭 = 改写引擎停机。
+    if (!state.recording || gen.rules.length === 0) return { kind: "ok", result: null };
     const headers = requestHeaders(input, init);
     const originalHeaders = headersToJson(headers);
-    attempt.origHeaders = originalHeaders;
-    const context = {
-      url: attempt.url,
-      method: attempt.method,
-      model: attempt.pending?.model ?? slot.model,
-    };
-    let claimTried = typeof init === "object" && init !== null && typeof (init as { body?: unknown }).body === "string";
-    const readBody = async (): Promise<BodyInput> => {
-      const body = await extractBody(input, init, originalHeaders);
-      if (body.kind === "json") {
-        attempt.origPayload = body.text;
-        if (!claimTried) {
-          claimTried = true;
-          corr.claimPending(attempt, body.text);
-        }
-      }
-      return body;
-    };
+    let origPayload: string | null =
+      typeof init === "object" && init !== null && typeof (init as { body?: unknown }).body === "string"
+        ? ((init as { body: string }).body as string)
+        : null;
     try {
       const result = await applyRequest(
-        slot.rules,
-        slot.settings as EngineSettings,
-        context,
-        readBody,
+        gen.rules,
+        gen.settings,
+        { url, method, model: gen.model },
+        async () => {
+          const body = await extractBody(input, init, originalHeaders);
+          if (body.kind === "json") origPayload = body.text;
+          return body;
+        },
         headers,
         rewriteEnv(),
       );
-      if (result) {
-        attempt.applied = result;
-        attempt.rewriteRuleIds = result.ruleIds.slice();
-        if (result.origBodyText !== null) attempt.origPayload = result.origBodyText;
-      }
-      return result;
+      return { kind: "ok", result };
     } catch (err) {
-      if (err instanceof RewriteError) throw err;
+      if (err instanceof RewriteError) {
+        return {
+          kind: "blocked",
+          error: onRewriteBlocked(gen, url, method, originalHeaders, origPayload, err, epoch),
+        };
+      }
+      // 存储 / 引擎故障绝不阻断 provider 请求。
       noteDbErrorOn(state, err);
-      return null;
+      return { kind: "ok", result: null };
     }
   }
 
-  function hookHeaders(attempt: Attempt): Record<string, string> {
-    const cached = attempt.pending?.hookHeaders ?? corr.takeHookHeaders();
-    if (!cached) return {};
+  /** 同 generation 复用缓存结果：正文字节一致；规则未改头时用本次请求自己的头（SDK 重试计数等）。 */
+  function reuseResult(gen: TicketGeneration, cached: ApplyResult, input: unknown, init: unknown): ApplyResult {
+    if (gen.rules.some((r) => Boolean(r.headers_jq?.trim()))) return cached;
     try {
-      return headersToJson(JSON.parse(cached));
+      return { ...cached, headers: sanitizeSendHeaders(headersToJson(requestHeaders(input, init))) };
     } catch {
-      return {};
+      return cached;
     }
   }
 
-  /** 发送前写入最终线级值；失败只告警，不影响真实发送。所有写经 persist 闸口（await 之后重新取连接）。 */
-  async function recordPreSend(
-    attempt: Attempt,
+  /** 首次 fetch：线级字段写本 generation 行（进账本）。 */
+  async function recordWire(
+    ticket: Ticket,
+    gen: TicketGeneration,
+    url: string,
+    method: string,
     applied: ApplyResult | null,
-    input?: unknown,
-    init?: unknown,
-    epoch: number = state.epoch,
+    effectiveInit: unknown,
+    effectiveInput: unknown,
+    epoch: number,
   ): Promise<void> {
-    if (attempt.rowId === null) {
-      if (applied && attempt.pending !== null) state.unlinkedRewrites++;
-      return;
-    }
-    const rowId = attempt.rowId;
+    if (!gen.row) return;
+    const row = gen.row;
     try {
       let sendHeaders: Record<string, string>;
       if (applied) {
         sendHeaders = applied.headers;
       } else {
-        const rawHeaders = headersToJson(requestHeaders(input, init));
-        if (Object.keys(rawHeaders).length > 0) {
+        const raw = headersToJson(requestHeaders(effectiveInput, effectiveInit));
+        if (Object.keys(raw).length > 0) {
           try {
-            sendHeaders = sanitizeSendHeaders(rawHeaders);
+            sendHeaders = sanitizeSendHeaders(raw);
           } catch {
-            sendHeaders = rawHeaders;
+            sendHeaders = raw;
           }
         } else {
-          sendHeaders = sanitizeSendHeaders(hookHeaders(attempt));
+          let snap: Record<string, string> = {};
+          try {
+            snap = headersToJson(ticket.headersSnapshot ? JSON.parse(ticket.headersSnapshot) : {});
+          } catch {}
+          try {
+            sendHeaders = sanitizeSendHeaders(snap);
+          } catch {
+            sendHeaders = snap;
+          }
         }
       }
       const headerText = Object.keys(sendHeaders).length > 0 ? JSON.stringify(sendHeaders) : null;
@@ -328,125 +368,197 @@ export function createCapture(state: TrafficEngine): Capture {
       } catch (err) {
         noteDbErrorOn(state, err);
       }
-      const payloadBytes = applied?.bodyBytes ?? bodyByteLength(input, init);
-      if (applied && attempt.degraded) state.unlinkedRewrites++;
+      const payloadBytes = applied?.bodyBytes ?? bodyByteLength(effectiveInit);
       if (!applied || applied.ruleIds.length === 0) {
-        persist(state, epoch, (d) =>
-          d
-            .prepare(
-              "UPDATE requests SET url = ?, method = ?, request_headers = COALESCE(?, request_headers), payload_encoding = ?, payload_bytes = ? WHERE id = ?",
-            )
-            .run(attempt.url, attempt.method, headerText, encoding, payloadBytes, rowId),
+        recordPatch(
+          state,
+          epoch,
+          row,
+          "requests",
+          { url, method, request_headers: headerText, payload_encoding: encoding, payload_bytes: payloadBytes },
+          { coalesce: ["request_headers"] },
         );
         return;
       }
       const finalPayload = await bodyTextOf(applied);
-      const originalPayload = applied.origBodyText ?? attempt.origPayload ?? null;
-      persist(state, epoch, (d) =>
-        d
-          .prepare(
-            `UPDATE requests SET url = ?, method = ?,
-			 payload = COALESCE(?, payload), request_headers = COALESCE(?, request_headers),
-			 payload_encoding = ?, payload_bytes = ?,
-			 orig_payload = ?, orig_request_headers = ?, rewrite_rule_ids = ?, rewrite_status = 'applied'
-			 WHERE id = ?`,
-          )
-          .run(
-            attempt.url,
-            attempt.method,
-            applied.bodyChanged ? finalPayload : null,
-            headerText,
-            encoding,
-            payloadBytes,
-            originalPayload,
-            JSON.stringify(applied.origHeaders),
-            JSON.stringify(applied.ruleIds),
-            rowId,
-          ),
+      recordPatch(
+        state,
+        epoch,
+        row,
+        "requests",
+        {
+          url,
+          method,
+          payload: applied.bodyChanged ? finalPayload : null,
+          request_headers: headerText,
+          payload_encoding: encoding,
+          payload_bytes: payloadBytes,
+          orig_payload: applied.origBodyText ?? null,
+          orig_request_headers: JSON.stringify(applied.origHeaders),
+          rewrite_rule_ids: JSON.stringify(applied.ruleIds),
+          rewrite_status: "applied",
+        },
+        { coalesce: ["payload", "request_headers"] },
       );
     } catch (err) {
       noteDbErrorOn(state, err);
     }
   }
 
-  /**
-   * 阻断通知回调（由 index.ts 注册，形状对齐 setGateReleaseHandler）。
-   * capture 层拿不到 ctx.ui.notify，只能回调出去。
-   */
-  function setRewriteBlockedHandler(handler: ((message: string) => void) | null): void {
-    blockedHandler = handler;
+  function endFetch(ticket: Ticket, ok: boolean): void {
+    ticket.inFlight = Math.max(0, ticket.inFlight - 1);
+    ticket.lastFetchOk = ok;
+    ticket.lastFetchEndAt = state.tickets.now();
+    if (ok) {
+      // 规则 ①：2xx/3xx 响应头 ⇒ 立即退役（已开始的流不会回退）；等 after_provider_response 消费。
+      ticket.awaitingHookSince = ticket.lastFetchEndAt;
+      state.tickets.retire(ticket, "success");
+    }
   }
 
-  /** 阻断请求的五步事务：写行、封存 attempt、移出 pool、双 SSE、poison。 */
-  function onRewriteBlocked(attempt: Attempt, slot: GateSlot | null, err: unknown, epoch: number = state.epoch): Error {
-    const safe = blockedSafeEvent(err);
-    const ruleName = safe.rule_name ?? "未知规则";
-    const ruleId = safe.rule_id === null ? "?" : String(safe.rule_id);
-    const message = `traffic-record rewrite blocked: [规则 "${ruleName}" #${ruleId}] ${safe.phase} ${safe.kind}`;
-    if (attempt.rowId !== null) {
-      const rowId = attempt.rowId;
-      try {
-        const origHeaders = attempt.origHeaders ?? {};
-        const ruleIds =
-          attempt.rewriteRuleIds.length > 0 ? attempt.rewriteRuleIds : safe.rule_id === null ? [] : [safe.rule_id];
-        persist(state, epoch, (d) =>
-          d
-            .prepare(
-              `UPDATE requests SET status = 0, rewrite_status = 'blocked', rewrite_error = ?,
-  				 orig_payload = ?, orig_request_headers = ?, rewrite_rule_ids = ?, url = ?, method = ?
-  				 WHERE id = ?`,
-            )
-            .run(
-              JSON.stringify(safe),
-              attempt.origPayload ?? null,
-              JSON.stringify(origHeaders),
-              JSON.stringify(ruleIds),
-              attempt.url,
-              attempt.method,
-              rowId,
-            ),
-        );
-      } catch (dbErr) {
-        noteDbErrorOn(state, dbErr);
-      }
+  async function sendObserved(
+    ticket: Ticket,
+    next: FetchLike,
+    input: any,
+    init: any,
+  ): Promise<{ res: Response } | { error: unknown }> {
+    try {
+      const res = init === undefined ? await next(input) : await next(input, init);
+      endFetch(ticket, res.status < 400);
+      return { res };
+    } catch (error) {
+      endFetch(ticket, false);
+      return { error };
     }
-    corr.blockAttempt(attempt);
-    const blockedError = err instanceof RewriteError ? err : new Error(message);
-    blockedError.message = message;
-    broadcast(state, {
-      type: "rewrite_error",
-      id: attempt.rowId,
-      session_id: attempt.pending?.sessionId ?? null,
-      ...safe,
-      message,
-    });
-    broadcast(state, {
-      type: "response",
-      id: attempt.rowId,
-      session_id: attempt.pending?.sessionId ?? null,
-      status: 0,
-    });
-    // 弹到 pi 界面，否则 SDK 只会显示笼统的 "Connection error."。
-    // 安全边界：只用 toSafeEvent 的结构化字段，绝不带 detail（含 jq stderr）。
-    // 去重靠 poison 窗口：重试在 patchFetch 的 slot.blocked 处提前抛出，不会重入本函数。
-    blockedHandler?.(
-      `改写阻断：规则「${ruleName}」#${ruleId} ${safe.phase} 阶段 ${safe.kind}\n请求已中断。详情见 Web 页「改写」子页。`,
-    );
-    if (slot !== null) gate.armPoison(slot, blockedError);
-    return blockedError;
+  }
+
+  async function passthrough(ticket: Ticket, next: FetchLike, input: any, init: any): Promise<Response> {
+    const out = await sendObserved(ticket, next, input, init);
+    if ("error" in out) throw out.error;
+    return out.res;
+  }
+
+  async function handleFetch(original: FetchLike, input: any, init: any, ticketId: string | null): Promise<Response> {
+    // 入口固定纪元（engine 引用本身即闭包固定）。
+    const epoch = state.epoch;
+    const call = (i: any, n: any): Promise<Response> => (n === undefined ? original(i) : original(i, n));
+    // 加密会话 / 无票据：纯透传，不认领、不改写、不录。
+    if (isSecure() || ticketId === null) return call(input, init);
+    const ticket = state.tickets.lookup(ticketId);
+    if (!ticket || ticket.epoch !== epoch) {
+      counters().staleTickets++;
+      return call(input, init);
+    }
+    ticket.fetches++;
+    ticket.inFlight++;
+    const gen = ticket.generation;
+    // 从未绑定（compaction 只有 headers / 绑定判据失败）：透传，不改写、不录线级字段。
+    if (!gen) return passthrough(ticket, original, input, init);
+
+    const url = typeof input === "string" ? input : String(input?.url ?? input);
+    const method = String(init?.method ?? input?.method ?? "GET").toUpperCase();
+    if (gen.baseUrl !== null && !urlMatchesBase(url, gen.baseUrl)) {
+      counters().unattributedFetches++;
+      return passthrough(ticket, original, input, init);
+    }
+    let digest: string | null;
+    try {
+      digest = await bodyDigest(input, init);
+    } catch {
+      digest = null;
+    }
+    // 摘要绑定 / 比对必须基于**当前** generation（await 期间可能升了 generation）。
+    if (ticket.generation !== gen || digest === null) {
+      counters().unattributedFetches++;
+      return passthrough(ticket, original, input, init);
+    }
+    let first = false;
+    if (gen.digest === null) {
+      gen.digest = digest;
+      first = true;
+    } else if (gen.digest !== digest) {
+      // 未被证明的新正文（例如因交错未能升 generation 的 strict 回退 payload）：原样透传、不改写、不写该票据行。
+      counters().unattributedFetches++;
+      return passthrough(ticket, original, input, init);
+    }
+    if (
+      gen.rewrite === null &&
+      gen.rules.length > 0 &&
+      rewriteSuspended(ticket.runner, state.rewriteMarks, state.rulesSnapshot.rules.length, counters())
+    ) {
+      // 改写暂停（第三轮裁定 A）：绑定之后才观测到 warming 的票据同样不改写（本 generation 固定为「无改写」）。
+      counters().rewriteSuspendedRequests++;
+      gen.rewrite = Promise.resolve({ kind: "ok", result: null });
+    }
+    gen.rewrite ??= runRewrite(gen, url, method, input, init, epoch);
+    const outcome = await gen.rewrite;
+    if (outcome.kind === "blocked") {
+      // 不放出原请求；同 generation / 同摘要的重试再抛同一错误（不重跑 jq、不重复通知）。
+      endFetch(ticket, false);
+      throw outcome.error;
+    }
+    const applied = outcome.result ? (first ? outcome.result : reuseResult(gen, outcome.result, input, init)) : null;
+    const effective = applied ? rebuildRequest(input, init, applied) : { input, init };
+    if (first && !gen.wireRecorded) {
+      gen.wireRecorded = true;
+      await recordWire(ticket, gen, url, method, applied, effective.init ?? init, effective.input, epoch);
+    }
+    // 安全评审 #8：「实际改写已发出」的标记放在出站边界，与是否录行（gen.row / childSessions）及落库成败解耦。
+    if (applied && applied.ruleIds.length > 0) state.lastRewrittenAt.set(gen.sessionId, Date.now());
+    const out = await sendObserved(ticket, original, effective.input, effective.init);
+    if ("error" in out) throw out.error;
+    const res = out.res;
+    if (gen.row) {
+      const row = gen.row;
+      const status = res.status;
+      const headersJson: Record<string, string> = {};
+      res.headers.forEach((v, k) => {
+        headersJson[k] = v;
+      });
+      recordPatch(
+        state,
+        epoch,
+        row,
+        "requests",
+        { status, response_headers: JSON.stringify(headersJson) },
+        {
+          onDone: (rowId) => broadcast(state, { type: "response", id: rowId, session_id: gen.sessionId, status }),
+        },
+      );
+      try {
+        const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
+        if (
+          res.body &&
+          !gen.streamCaptured &&
+          (contentType.includes("event-stream") ||
+            contentType.includes("x-ndjson") ||
+            contentType.includes("stream+json"))
+        ) {
+          gen.streamCaptured = true;
+          void captureStream(row, gen.sessionId, res.clone(), epoch);
+        }
+      } catch {}
+    }
+    return res;
   }
 
   async function captureStream(
-    requestId: number,
+    requestId: number | RowRef,
     sessionId: string,
     res: Response,
     epoch: number = state.epoch,
     opts: CaptureStreamOptions = {},
   ): Promise<string> {
+    const ref = typeof requestId === "number" ? newRowRef(requestId) : requestId;
     const end = (kind: "eof" | "aborted"): void => {
       try {
         opts.onEnd?.(kind);
       } catch {}
+    };
+    const markDone = (): void => {
+      state.dbPort.sealChunks(epoch, ref, (rowId) => {
+        if (rowId !== null) state.streamDone.add(rowId);
+      });
     };
     if (isSecure() || state.state !== "open") {
       // 不读、不落库：同样不能留下存活的上游。
@@ -455,13 +567,15 @@ export function createCapture(state: TrafficEngine): Capture {
       return "";
     }
     if (!res.body) {
-      state.streamDone.add(requestId);
+      markDone();
       end("eof");
       return "";
     }
     const reader = res.body.getReader();
-    // 取消只「触发」不等待：engine 关闭 / 重放中止 / 读流空闲超时 ⇒ reader.cancel()。
+    // 取消只「触发」不等待：engine 关闭 / 重放中止 / 读流空闲超时 / 落库失败 ⇒ reader.cancel()。
+    let cancelled = false;
     const cancelReader = (): void => {
+      cancelled = true;
       void reader.cancel().catch(() => {});
     };
     const unregister = state.cancel.register(cancelReader);
@@ -473,20 +587,24 @@ export function createCapture(state: TrafficEngine): Capture {
     const started = Date.now();
     const parts: string[] = [];
     let seq = 0;
-    // 只有真正读到 EOF 才算自然结束；其它一切退出（落库抛错 / 闸口拒绝 / 取消 / 读错）都必须先触发上游取消，
-    // 再注销清理入口——否则仍存活的上游会失去全部清理入口（安全评审 #3）。
+    // 只有真正读到 EOF（且未被取消）才算自然结束；其它一切退出都必须先触发上游取消，再注销清理入口（安全评审 #3）。
     let eof = false;
+    // chunk 批在 flush 时落库失败 ⇒ 取消读取（异步回调）。
+    const onChunkFail = (): void => cancelReader();
     const insert = (text: string): boolean => {
-      // 每批复查闸口（secure / engine 关闭 / 纪元）：失败 ⇒ 取消读取、停止旁路。
-      if (!persistAllowed(state, epoch)) {
+      // 每批复查闸口（secure / engine 关闭 / 纪元；recordChunk 内经 persistAllowed）：失败 ⇒ 取消读取、停止旁路。
+      const ok = recordChunk(
+        state,
+        epoch,
+        ref,
+        sessionId,
+        { seq, ts: new Date().toISOString(), elapsedMs: Date.now() - started, data: text },
+        onChunkFail,
+      );
+      if (!ok) {
         cancelReader();
         return false;
       }
-      ensureDb(state)
-        .prepare(
-          "INSERT INTO stream_chunks (request_id, session_id, seq, ts, elapsed_ms, data) VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .run(requestId, sessionId, seq, new Date().toISOString(), Date.now() - started, text);
       seq++;
       return true;
     };
@@ -494,9 +612,10 @@ export function createCapture(state: TrafficEngine): Capture {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) {
-          eof = true;
+          eof = !cancelled;
           break;
         }
+        if (cancelled) break;
         idle?.touch();
         const text = decoder.decode(value, { stream: true });
         if (!text) continue;
@@ -504,94 +623,32 @@ export function createCapture(state: TrafficEngine): Capture {
         if (!insert(text)) break;
       }
       const tail = decoder.decode();
-      if (tail && state.state === "open") {
+      if (eof && tail && state.state === "open") {
         parts.push(tail);
         insert(tail);
       }
-      if (seq > 0) broadcast(state, { type: "stream", request_id: requestId, session_id: sessionId, chunks: seq });
+      if (seq > 0) {
+        const chunks = seq;
+        state.dbPort.sealChunks(epoch, ref, (rowId) => {
+          if (rowId !== null) broadcast(state, { type: "stream", request_id: rowId, session_id: sessionId, chunks });
+        });
+      }
     } catch {
       // 旁路失败不得影响主链路（对 provider 的 clone 分支：只取消本分支，不影响消费方读取原流）。
     } finally {
       idle?.clear();
       // 非 EOF 退出：先触发取消（不等待），再注销取消域条目。
-      if (!eof) cancelReader();
+      if (!eof && !cancelled) cancelReader();
       unregister();
       opts.signal?.removeEventListener("abort", onAbort);
       try {
         reader.releaseLock();
       } catch {}
-      state.streamDone.add(requestId);
+      markDone();
       end(eof ? "eof" : "aborted");
     }
     return parts.join("");
   }
 
-  async function handleFetch(original: FetchLike, input: any, init: any, _ticket: string | null): Promise<Response> {
-    {
-      // 入口固定纪元（engine 引用本身即闭包固定）；之后所有写经 persist(state, epoch, …)。
-      const epoch = state.epoch;
-      const url = typeof input === "string" ? input : (input?.url ?? String(input));
-      const method = String(init?.method ?? input?.method ?? "GET").toUpperCase();
-      // 加密会话：完全透传，不建 attempt、不改写、不记录、不旁路读流。
-      if (isSecure()) return original(input, init);
-      const attempt = corr.beginAttempt(String(url), method);
-      if (!attempt) return original(input, init);
-      const cheapBody = typeof init?.body === "string" ? init.body : null;
-      attempt.origPayload = cheapBody;
-      const slot = await attachOrAcquire(attempt);
-      let released = false;
-      const release = (reason: ReleaseReason): void => {
-        if (slot && !released) {
-          released = true;
-          gate.releaseSlot(slot, reason);
-        }
-      };
-      try {
-        corr.claimPending(attempt, cheapBody);
-        if (slot?.blocked) throw slot.blocked.error;
-
-        let applied: ApplyResult | null = null;
-        try {
-          applied = await tryRewrite(attempt, slot, input, init);
-        } catch (err) {
-          throw onRewriteBlocked(attempt, slot, err, epoch);
-        }
-        const effective = applied ? rebuildRequest(input, init, applied) : { input, init };
-        await recordPreSend(attempt, applied, effective.input, effective.init ?? init, epoch);
-
-        let res: Response;
-        try {
-          res = await original(effective.input, effective.init);
-        } catch (err) {
-          corr.failAttempt(attempt, err);
-          if (isAbortError(err)) release("aborted");
-          else if (slot) gate.armRetryGrace(slot);
-          throw err;
-        }
-        corr.settleAttempt(attempt, res);
-        if (slot && isRetryableStatus(res.status)) gate.armRetryGrace(slot);
-        else release("settled");
-
-        try {
-          const pending = attempt.pending;
-          if (!pending || pending.rowId === null || !res.body || pending.streamCaptured) return res;
-          const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
-          if (
-            !contentType.includes("event-stream") &&
-            !contentType.includes("x-ndjson") &&
-            !contentType.includes("stream+json")
-          )
-            return res;
-          pending.streamCaptured = true;
-          void captureStream(pending.rowId, pending.sessionId, res.clone(), epoch);
-        } catch {}
-        return res;
-      } finally {
-        // poison / retry-grace 各自持有定时器；其它未覆盖异常由 finally 释放。
-        if (slot && !released && !slot.blocked && !slot.retryGraceArmed) release("failed");
-      }
-    }
-  }
-
-  return { handleFetch, tryRewrite, recordPreSend, onRewriteBlocked, captureStream, setRewriteBlockedHandler };
+  return { handleFetch, captureStream, setRewriteBlockedHandler };
 }

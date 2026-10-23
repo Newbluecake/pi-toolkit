@@ -534,3 +534,16 @@ pi 的 payload 事件不携带 headers，也没有共同请求 ID，因此「hea
 | R1-8 | 严重   | print/json 不启动服务、不允许重放；子会话只录不重放；其他模式会话结束走 dispose 中止在途重放                      | §4.1「模式」行与「重放」行（触发事件 = `session_shutdown` → `engine.close()`）、真子进程用例改为活动出站重放；§8.2 #10、新增 #13 `mode-gate`；§2.3；§11 V12/V13；§0 3         |
 | R1-9 | 严重   | 去掉 50ms busy wait，每 tick 预算 + 退避让出；T2b 硬验收门，不达标切 worker（接口与失败处置写明）                 | §3.2（`busy_timeout=0`、setImmediate flush、2ms/1 次 BUSY、读分页、硬门表、`DbPort` 与 worker 分支）；§10 T2b/T2c；§8.2 #8；§0 2、8；§13-6                                    |
 | 附   | —      | secure 现状过时：工作区已有 `src/secure/domain.ts` 与 `applySecureDomainOverrides`                                | §1 事实 9；§6（直接 import `getSecureDomain`，设置覆盖落在 `applySecureDomainOverrides`）；§10 T3 依赖「secure P2 已提交」；§0 4                                              |
+
+> **附注（T2b 安全评审 #7，主会话裁定为已接受残留，2026-10-23）**：票据 `x-pi-traffic-ticket` 是一次性随机 128-bit 关联 id
+> （`randomBytes(16)` 十六进制），不含会话、用户或凭证信息。它在 `before_provider_headers` 注入、在 fetch 层剥离，但 Anthropic
+> SDK 在 `ANTHROPIC_LOG=debug` 时会在调用 fetch **之前**打印请求头，其脱敏名单不含该头，因此票据值会出现在 SDK debug 日志中。
+> 票据只在本进程、本 engine 纪元内有意义，过期 / 回收后不再被识别，不构成凭证暴露；不改代码，由
+> `tests/traffic/ticket.test.ts`「票据值」锁定「只依赖随机、与会话无关」的前提。详见 `T2b-report.md` §12.7。
+>
+> **附注（T2b 复审 r2 第三轮裁定，2026-10-23）**：① warming 没有可验证的完成边界 ⇒ 改写路径 fail closed：会话一旦观测到
+> 任何 `cache_warming_decision` 即暂停改写（照常录制），只在 `/record off→on`、规则全部禁用后再启用、会话 shutdown / 新
+> engine 时解除，不按时间解除；规则启用时 warming 应由 T5 否决（`TrafficWiring.rewriteArmed()` 为消费点）。仅录制路径沿用
+> 60s 时间窗，**迟到 warming payload 被错配到其他票据的录制行为已接受残留**（数据质量，不改写任何请求）。② 运行时 checkpoint
+> 只在现场 stat 的 `-wal` ≤2 MiB 时执行；engine 关闭时 `db.close()` 的隐式 checkpoint 为已接受残留（shutdown / reload，
+> 不在发送路径），`-wal` >64 MiB 时先 warn。详见 `T2b-report.md` §13。

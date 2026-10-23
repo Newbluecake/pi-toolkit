@@ -14,7 +14,6 @@ import { installTap, retireTap } from "../../src/traffic/tap.js";
 let state: TrafficEngine;
 let web: TrafficServer;
 const realFetch = globalThis.fetch;
-const accessUrls = (p: number): string[] => web.accessUrls(p);
 
 let dir: string;
 let port: number;
@@ -28,7 +27,9 @@ function jsonHeaders(): Record<string, string> {
 }
 
 async function api(path: string, init?: RequestInit): Promise<{ response: Response; body: any }> {
-  const response = await fetch(`http://127.0.0.1:${port}${path}`, init);
+  // T4：全部 /api/* 要 token（回环亦然），一律走 x-record-token 头。
+  const headers = { "x-record-token": state.accessToken ?? "", ...(init?.headers ?? {}) };
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, { ...init, headers });
   let body: any = null;
   try {
     body = await response.json();
@@ -115,7 +116,9 @@ afterAll(async () => {
 
 describe("rewrite API", () => {
   it("supports CRUD and broadcasts every successful rule mutation", async () => {
-    const events = await fetch(`http://127.0.0.1:${port}/api/events`);
+    const events = await fetch(`http://127.0.0.1:${port}/api/events`, {
+      headers: { "x-record-token": state.accessToken ?? "" },
+    });
     const reader = events.body!.getReader();
     await reader.read();
 
@@ -399,18 +402,19 @@ describe("rewrite API", () => {
       expect(stateResponse.body.rewrite).toMatchObject({
         enabled_rules: null,
         correlation_mode: "unknown",
-        db_error: "Error: mock database failure",
+        db_error: "数据库不可用（详情见进程日志）", // 安全评审 #4：db_error 公开面固定文案
       });
       const settings = await api("/api/rewrite/settings");
       expect(settings.response.status).toBe(200);
       expect(settings.body).toMatchObject({
         timeout_ms: 2000,
         serialize_handoff_ms: 10000,
-        db_error: "Error: mock database failure",
+        db_error: "数据库不可用（详情见进程日志）",
       });
       const requests = await api("/api/requests");
       expect(requests.response.status).toBe(503);
-      expect(requests.body.error).toBe("Error: mock database failure");
+      // 安全评审 #4：公开错误固定文案；细节只进日志。
+      expect(requests.body.error).toBe("数据库不可用（详情见进程日志）");
     } finally {
       ensureDbSpy.mockRestore();
     }
@@ -472,18 +476,15 @@ describe("rewrite API", () => {
     const list = await api(`/api/requests?session_id=${session}`);
     expect(list.body.find((row: any) => row.id === blocked).rewrite_status).toBe("blocked");
 
-    const exported = await fetch(`http://127.0.0.1:${port}/api/export?session_id=${session}`);
+    const exported = await fetch(`http://127.0.0.1:${port}/api/export?session_id=${session}`, {
+      headers: { "x-record-token": state.accessToken ?? "" },
+    });
     const text = await exported.text();
     expect(text).toContain(`"request_id":${good1}`);
     expect(text).toContain(`"request_id":${good2}`);
     expect(text).not.toContain(`"request_id":${blocked}`);
   });
 
-  it("rejects requests without a token from a non-loopback address when available", async () => {
-    const lan = accessUrls(port).find((value) => !value.includes("127.0.0.1"));
-    if (!lan) return;
-    const host = lan.slice("http://".length).split(" ")[0];
-    const response = await fetch(`http://${host}/api/rewrite/rules`);
-    expect(response.status).toBe(401);
-  });
+  // T4 起默认只绑 127.0.0.1（LAN 需显式 opt-in）：非回环无 token ⇒ 401 的用例移入
+  // tests/traffic/server-hardening.test.ts（LAN 绑定场景，含 Host 白名单）。
 });

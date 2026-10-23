@@ -63,7 +63,7 @@ function replay(port: number, id: number): Promise<number> {
         path: "/api/replay",
         method: "POST",
         agent: false,
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-record-token": engine.accessToken ?? "" },
       },
       (res) => {
         res.resume();

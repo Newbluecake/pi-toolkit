@@ -2,7 +2,8 @@
  * 页面（Vue 内联应用）测试：
  * 1. PAGE 结构：含 #app 挂载点与 Vue 特征串，无未替换的 ${VUE_JS}/${APP_JS} sentinel
  * 2. happy-dom 挂载冒烟：执行内联脚本（Vue global build + app.js），断言挂载成功、
- *    header 与四个主 tab 渲染、token 透传到所有 fetch/EventSource
+ *    header 与四个主 tab 渲染；T4：token 经 <meta name="record-token"> 注入，fetch 走
+ *    x-record-token 头（EventSource/导出链接保留 ?token= 查询）
  * 3. 交互：主 tab 切换（v-show）、flow 行点击触发详情 fetch
  */
 import { Window } from "happy-dom";
@@ -18,6 +19,8 @@ import { makeEngine, teardownEngine } from "./helpers/engine.js";
 
 // T2a：页面在首次 buildPage() 时组装（模块顶层零 IO）。
 const { html: PAGE, gzip: PAGE_GZIP } = buildPage();
+// T4：带 token 的页面（服务端注入 <meta name="record-token">）——挂载冒烟用它。
+const PAGE_TOKENED = buildPage("test-token").html;
 let state: TrafficEngine;
 
 describe("PAGE 结构", () => {
@@ -37,6 +40,19 @@ describe("PAGE 结构", () => {
 
   it("PAGE_GZIP 是 PAGE 的 gzip 压缩副本", () => {
     expect(gunzipSync(PAGE_GZIP).toString("utf8")).toBe(PAGE);
+  });
+
+  it('T4 token meta：buildPage(token) 注入 <meta name="record-token">；无 token 不注入；属性值转义', () => {
+    // 无 token ⇒ 无 meta 标签（app.js 注释/选择器串不含 content= 形式）
+    expect(PAGE).not.toContain('<meta name="record-token" content=');
+    expect(PAGE_TOKENED).toContain('<meta name="record-token" content="test-token">');
+    // token 按不可信文本转义（token 本为 hex，此为纵深）
+    const hostile = buildPage('a"b<c>&');
+    expect(hostile.html).not.toContain('content="a"b');
+    expect(hostile.html).toContain(
+      "content=&quot;b&lt;c&gt;&amp;".replace("content=", 'content="a&quot;b&lt;c&gt;&amp;"').slice(0, 0) ||
+        'content="a&quot;b&lt;c&gt;&amp;"',
+    );
   });
 });
 
@@ -103,7 +119,7 @@ const REWRITE_SETTINGS = {
   jq_available: true,
   db_error: null,
 };
-/** v3（§3.9）：settings 追加 serialize_* / correlation_mode / gate；db_error 红条 */
+/** v3（§3.9）：settings 追加 serialize_* / correlation_mode；r2 起闸门退役（serialize_* 停用）；db_error 红条 */
 const REWRITE_SETTINGS_V3 = {
   jq_path: "",
   timeout_ms: 2000,
@@ -127,7 +143,7 @@ const REWRITE_SETTINGS_V3 = {
     gateMaxQueueDepth: 2,
   },
 };
-/** v3（§3.9）：/api/state 的 rewrite 块（codex_ws_warning 红条 + 顶栏「串行化中」数据源） */
+/** v3（§3.9）：/api/state 的 rewrite 块（codex_ws_warning 红条 + 顶栏「规则生效中」数据源） */
 const STATE_REWRITE = {
   enabled_rules: 1,
   correlation_mode: "exact",
@@ -184,8 +200,8 @@ interface MountResult {
   window: Window;
   document: Document;
   fetchCalls: string[];
-  /** 完整请求记录（含 method/body），fetchCalls 仅 url */
-  fetchLog: { url: string; init?: { method?: string; body?: string } }[];
+  /** 完整请求记录（含 method/body/headers），fetchCalls 仅 url */
+  fetchLog: { url: string; init?: { method?: string; body?: string; headers?: Record<string, string> } }[];
   esUrls: string[];
   /** 最后创建的 EventSource stub（页面只有一个 SSE 连接） */
   es: { onmessage: ((ev: { data: string }) => void) | null } | null;
@@ -193,28 +209,32 @@ interface MountResult {
 }
 
 async function mountPage(opts: MountOptions = {}): Promise<MountResult> {
-  const window = new Window({ url: "http://127.0.0.1:4177/?token=test-token" });
+  // T4：token 不再走 URL——注入 <meta name="record-token">（app.js 首选 meta，URL 仅兜底）
+  const window = new Window({ url: "http://127.0.0.1:4177/" });
   const document = window.document;
-  const bodyHtml = PAGE.match(/<body>([\s\S]*)<\/body>/)![1]!.replace(/<script>[\s\S]*?<\/script>/g, "");
+  document.head.innerHTML = '<meta name="record-token" content="test-token">';
+  const bodyHtml = PAGE_TOKENED.match(/<body>([\s\S]*)<\/body>/)![1]!.replace(/<script>[\s\S]*?<\/script>/g, "");
   document.body.innerHTML = bodyHtml;
 
   const fetchCalls: string[] = [];
   const fetchLog: MountResult["fetchLog"] = [];
   const esUrls: string[] = [];
   let lastEs: InstanceType<typeof EventSourceStub> | null = null;
-  const fetchStub = vi.fn((url: string, init?: { method?: string; body?: string }) => {
-    const u = String(url);
-    fetchCalls.push(u);
-    fetchLog.push({ url: u, init });
-    let data: unknown = {};
-    if (u.startsWith("/api/state")) data = opts.state ?? { recording: true, sessionId: "sess-1" };
-    else if (u.startsWith("/api/sessions")) data = [SESSION];
-    else if (u.startsWith("/api/rewrite/settings")) data = opts.settings ?? REWRITE_SETTINGS;
-    else if (u.startsWith("/api/rewrite/rules")) data = opts.rules ?? [REWRITE_RULE];
-    else if (u.startsWith("/api/requests/")) data = opts.detail ?? DETAIL;
-    else if (u.startsWith("/api/requests")) data = opts.rows ?? [FLOW_ROW];
-    return Promise.resolve({ json: () => Promise.resolve(data) });
-  });
+  const fetchStub = vi.fn(
+    (url: string, init?: { method?: string; body?: string; headers?: Record<string, string> }) => {
+      const u = String(url);
+      fetchCalls.push(u);
+      fetchLog.push({ url: u, init });
+      let data: unknown = {};
+      if (u.startsWith("/api/state")) data = opts.state ?? { recording: true, sessionId: "sess-1" };
+      else if (u.startsWith("/api/sessions")) data = [SESSION];
+      else if (u.startsWith("/api/rewrite/settings")) data = opts.settings ?? REWRITE_SETTINGS;
+      else if (u.startsWith("/api/rewrite/rules")) data = opts.rules ?? [REWRITE_RULE];
+      else if (u.startsWith("/api/requests/")) data = opts.detail ?? DETAIL;
+      else if (u.startsWith("/api/requests")) data = opts.rows ?? [FLOW_ROW];
+      return Promise.resolve({ json: () => Promise.resolve(data) });
+    },
+  );
   class EventSourceStub {
     url: string;
     onopen: (() => void) | null = null;
@@ -349,6 +369,9 @@ describe("/ 路由 gzip 响应", () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
+  // T4：服务端页面携带 engine token 的 <meta name="record-token">（回环 GET / 免 token）
+  const servedPage = (): string => buildPage(state.accessToken ?? undefined).html;
+
   it("accept-encoding 含 gzip 时回发压缩副本并带 content-encoding 头", async () => {
     // 注意：undici 会按 content-encoding 自动解压，res.text() 拿到的已是解压后文本；
     // 压缩副本本身的正确性由「PAGE_GZIP 是 PAGE 的 gzip 压缩副本」用例保证
@@ -357,7 +380,7 @@ describe("/ 路由 gzip 响应", () => {
       headers: { "accept-encoding": "gzip", connection: "close" },
     });
     expect(res.headers.get("content-encoding")).toBe("gzip");
-    expect(await res.text()).toBe(PAGE);
+    expect(await res.text()).toBe(servedPage());
   });
 
   it("客户端不支持 gzip 时回退原文", async () => {
@@ -365,7 +388,9 @@ describe("/ 路由 gzip 响应", () => {
       headers: { "accept-encoding": "identity", connection: "close" },
     });
     expect(res.headers.get("content-encoding")).toBeNull();
-    expect(await res.text()).toBe(PAGE);
+    const text = await res.text();
+    expect(text).toBe(servedPage());
+    expect(text).toContain(`<meta name="record-token" content="${state.accessToken}">`);
   });
 });
 
@@ -391,27 +416,32 @@ describe("happy-dom 挂载冒烟", () => {
     expect(app.querySelector("#pane-history")).toBeTruthy();
     expect(app.querySelector("#pane-export")).toBeTruthy();
     expect(app.querySelector("#pane-rules")).toBeTruthy();
-    // /api/state 默认无 rewrite 块：顶栏不显示「串行化中」
-    expect(app.querySelector("header")!.textContent).not.toContain("串行化中");
+    // /api/state 默认无 rewrite 块：顶栏不显示「规则生效中」
+    expect(app.querySelector("header")!.textContent).not.toContain("规则生效中");
   });
 
-  it("token 透传到所有 fetch 与 EventSource", async () => {
-    const { fetchCalls, esUrls } = mounted!;
+  it("token 经 x-record-token 头携带到所有 fetch；EventSource 保留 ?token= 查询", async () => {
+    const { fetchCalls, fetchLog, esUrls } = mounted!;
     await waitFor(() => fetchCalls.some((u) => u.startsWith("/api/requests")), "等待 /api/requests 请求");
     expect(fetchCalls.length).toBeGreaterThan(0);
-    for (const u of fetchCalls) expect(u).toContain("token=test-token");
+    for (const u of fetchCalls) expect(u).not.toContain("token="); // fetch 不再走 URL
+    for (const c of fetchLog) {
+      expect(c.init?.headers?.["x-record-token"]).toBe("test-token");
+    }
     expect(esUrls.length).toBe(1);
     expect(esUrls[0]).toBe("/api/events?token=test-token");
   });
 
-  it("实时列表渲染 flow 行，点击触发详情 fetch（token 透传）并渲染 meta", async () => {
-    const { document, fetchCalls } = mounted!;
+  it("实时列表渲染 flow 行，点击触发详情 fetch（token 头）并渲染 meta", async () => {
+    const { document, fetchLog } = mounted!;
     await waitFor(() => !!document.querySelector("#pane-live .flow"), "等待 flow 行渲染");
     const row = document.querySelector("#pane-live .flow") as HTMLElement;
     expect(row.textContent).toContain("#1");
     (row as unknown as { click(): void }).click();
-    await waitFor(() => fetchCalls.some((u) => u.startsWith("/api/requests/1")), "等待详情 fetch");
-    expect(fetchCalls.find((u) => u.startsWith("/api/requests/1"))).toContain("token=test-token");
+    await waitFor(() => fetchLog.some((c) => c.url.startsWith("/api/requests/1")), "等待详情 fetch");
+    expect(fetchLog.find((c) => c.url.startsWith("/api/requests/1"))!.init?.headers?.["x-record-token"]).toBe(
+      "test-token",
+    );
     await waitFor(() => !!document.querySelector("#pane-live .detail .meta"), "等待详情 meta 渲染");
     expect(document.querySelector("#pane-live .detail .meta")!.textContent).toContain("#1");
     // 详情子 tab 五个
@@ -443,7 +473,7 @@ describe("改写功能（T7）", () => {
     mounted = null;
   });
 
-  it("切到「改写」tab 触发 /api/rewrite/rules 与 settings（token 透传），表格与引擎卡片渲染，enabled 复选框点击即 PUT", async () => {
+  it("切到「改写」tab 触发 /api/rewrite/rules 与 settings（token 头），表格与引擎卡片渲染，enabled 复选框点击即 PUT", async () => {
     mounted = await mountPage();
     const { document, fetchCalls, fetchLog } = mounted;
     // 初始（实时 tab）不应拉取规则
@@ -451,9 +481,13 @@ describe("改写功能（T7）", () => {
     const tabs = document.querySelectorAll(".tab");
     (tabs[3] as unknown as { click(): void }).click(); // 改写
     await waitFor(() => fetchCalls.some((u) => u.startsWith("/api/rewrite/rules")), "等待 rules fetch");
-    expect(fetchCalls.find((u) => u.startsWith("/api/rewrite/rules"))).toContain("token=test-token");
+    expect(fetchLog.find((c) => c.url.startsWith("/api/rewrite/rules"))!.init?.headers?.["x-record-token"]).toBe(
+      "test-token",
+    );
     await waitFor(() => fetchCalls.some((u) => u.startsWith("/api/rewrite/settings")), "等待 settings fetch");
-    expect(fetchCalls.find((u) => u.startsWith("/api/rewrite/settings"))).toContain("token=test-token");
+    expect(fetchLog.find((c) => c.url.startsWith("/api/rewrite/settings"))!.init?.headers?.["x-record-token"]).toBe(
+      "test-token",
+    );
     // 引擎卡片（第一张卡片）
     await waitFor(() => !!document.querySelector("#pane-rules .rw-engine"), "等待引擎卡片渲染");
     const engine = document.querySelector("#pane-rules .rw-card")!;
@@ -465,7 +499,7 @@ describe("改写功能（T7）", () => {
     expect(table.textContent).toContain("降温");
     expect(table.textContent).toContain("/v1/messages$");
     expect(table.textContent).toContain("body: .temperature = 0");
-    // enabled 复选框：点击即全量 PUT（1 → 0），token 透传
+    // enabled 复选框：点击即全量 PUT（1 → 0），token 头
     const cb = document.querySelector("#pane-rules .rw-table input[type=checkbox]") as HTMLElement;
     cb.dispatchEvent(new (mounted.window.Event as unknown as typeof Event)("change"));
     await waitFor(
@@ -473,7 +507,7 @@ describe("改写功能（T7）", () => {
       "等待 enabled 切换 PUT",
     );
     const put = fetchLog.find((c) => c.init?.method === "PUT" && c.url.startsWith("/api/rewrite/rules/1"))!;
-    expect(put.url).toContain("token=test-token");
+    expect(put.init?.headers?.["x-record-token"]).toBe("test-token");
     expect(JSON.parse(put.init!.body!).enabled).toBe(0);
   });
 
@@ -585,45 +619,42 @@ describe("改写功能（T7）", () => {
   });
 
   it("app.js 不使用 v-html（用户数据走 {{ }} 默认转义），且不宣称「真实线级 header」（V7）", () => {
-    const appJs = readFileSync(new URL("../../src/traffic/app.js", import.meta.url), "utf8");
+    const appJs = readFileSync(new URL("../../src/traffic/web/app.js", import.meta.url), "utf8");
     expect(appJs).not.toMatch(/v-html\s*=/);
     expect(appJs).not.toMatch(/v-html[\s>]/);
     expect(appJs).not.toContain("真实线级");
     expect(appJs).toContain("发送请求头");
   });
 
-  it("v3 引擎卡片：高级区 serialize_* 参数可见并随保存提交；correlation_mode / gate 计数 / db_error / codex_ws_warning 红条渲染；顶栏「串行化中」", async () => {
+  it("v3 引擎卡片：高级区 serialize_* 已停用但仍展示旧值并随保存提交；correlation_mode / db_error / codex_ws_warning 红条渲染；顶栏「规则生效中」", async () => {
     mounted = await mountPage({
       settings: REWRITE_SETTINGS_V3,
       state: { recording: true, sessionId: "sess-1", rewrite: STATE_REWRITE },
     });
     const { document, fetchLog } = mounted;
-    // 顶栏标记：/api/state rewrite.correlation_mode === "exact"
+    // 顶栏标记：/api/state rewrite.correlation_mode === "exact"（r2 起为「规则生效中」）
     await waitFor(
-      () => (document.querySelector("header")!.textContent || "").includes("串行化中"),
-      "等待顶栏「串行化中」标记",
+      () => (document.querySelector("header")!.textContent || "").includes("规则生效中"),
+      "等待顶栏「规则生效中」标记",
     );
     const tabs = document.querySelectorAll(".tab");
     (tabs[3] as unknown as { click(): void }).click(); // 改写
     await waitFor(() => !!document.querySelector("#pane-rules .rw-engine"), "等待引擎卡片渲染");
     const card = document.querySelector("#pane-rules .rw-card")!;
     const text = card.textContent!;
-    // correlation_mode（精确（串行化生效））
-    expect(text).toContain("关联模式: 精确（串行化生效）");
-    // gate 计数（队列深度 / holder / 交接超时 / 旁路 / 上限）
-    expect(text).toContain("队列 2");
-    expect(text).toContain("持有 #7");
-    expect(text).toContain("交接超时 3");
-    expect(text).toContain("旁路 4");
-    expect(text).toContain("上限 1");
+    // correlation_mode（r2 起串行化闸门退役 ⇒ 精确（票据归属））
+    expect(text).toContain("关联模式: 精确（票据归属）");
+    // T2b：闸门退役——gate 计数行不再渲染
+    expect(text).not.toContain("串行化闸门:");
     // db_error 红条（V3）
     expect(text).toContain("数据库错误");
     expect(text).toContain("attempt to write a readonly database");
     // codex_ws_warning 红条（V12，来自 /api/state rewrite）
     expect(text).toContain("Codex WebSocket 传输绕过改写，请将 transport 设为 sse");
-    // 折叠「高级」区含四个 serialize_* 参数
+    // 折叠「高级」区含四个 serialize_* 参数（已停用标注 + 输入禁用，仅展示旧值）
     const adv = card.querySelector("details.rw-adv")!;
     expect(adv).toBeTruthy();
+    expect(adv.querySelector("summary")!.textContent).toContain("已停用");
     for (const k of [
       "serialize_handoff_ms",
       "serialize_retry_grace_ms",
@@ -631,8 +662,9 @@ describe("改写功能（T7）", () => {
       "serialize_queue_wait_ms",
     ]) {
       expect(adv.textContent).toContain(k);
+      expect(adv.textContent).toContain("已停用");
     }
-    // 保存引擎配置 → PUT 携带全部 serialize_* 键（token 透传）
+    // 保存引擎配置 → PUT 仍携带全部 serialize_* 键（停用键原样回写；token 头）
     const saveBtn = Array.from(card.querySelectorAll("button")).find((b) =>
       (b.textContent || "").includes("保存引擎配置"),
     )! as HTMLElement;
@@ -642,7 +674,7 @@ describe("改写功能（T7）", () => {
       "等待 settings PUT",
     );
     const put = fetchLog.find((c) => c.init?.method === "PUT" && c.url.startsWith("/api/rewrite/settings"))!;
-    expect(put.url).toContain("token=test-token");
+    expect(put.init?.headers?.["x-record-token"]).toBe("test-token");
     const body = JSON.parse(put.init!.body!);
     expect(body.serialize_handoff_ms).toBe(10000);
     expect(body.serialize_retry_grace_ms).toBe(30000);

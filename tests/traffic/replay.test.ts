@@ -82,7 +82,7 @@ afterAll(async () => {
 async function replay(urlPath: string): Promise<{ status: number; json: any }> {
   const res = await fetch(`http://127.0.0.1:${recordPort}/api/replay`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "x-record-token": state.accessToken ?? "" },
     body: JSON.stringify({
       request_id: srcId,
       url: `http://127.0.0.1:${upstreamPort}${urlPath}`,
@@ -113,7 +113,9 @@ async function waitChunks(requestId: number, until?: string, timeoutMs = 3000): 
 }
 
 async function detailReplayBody(requestId: number): Promise<unknown> {
-  const res = await fetch(`http://127.0.0.1:${recordPort}/api/requests/${requestId}`);
+  const res = await fetch(`http://127.0.0.1:${recordPort}/api/requests/${requestId}`, {
+    headers: { "x-record-token": state.accessToken ?? "" },
+  });
   const d = (await res.json()) as { replay_body?: unknown };
   return d.replay_body;
 }
@@ -129,7 +131,9 @@ describe("重放四象限", () => {
     // 捕获收尾后 done=true（轮询等待，finally 标记与最后一条 chunk 入库存在微小先后差）
     const deadline = Date.now() + 3000;
     for (;;) {
-      const r = await fetch(`http://127.0.0.1:${recordPort}/api/stream/${json.id}`);
+      const r = await fetch(`http://127.0.0.1:${recordPort}/api/stream/${json.id}`, {
+        headers: { "x-record-token": state.accessToken ?? "" },
+      });
       const sj = (await r.json()) as { rows: unknown[]; done: boolean };
       if (sj.done) {
         expect(sj.rows.length).toBeGreaterThan(0);

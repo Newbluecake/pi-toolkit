@@ -187,37 +187,49 @@ describe("close 语义", () => {
 });
 
 describe("陈旧续体（跨 reload）", () => {
-  it("before_provider_request 在 await 闸门期间 engine 被关闭：续体固定旧 engine，写入被丢弃、不重开旧库、不写新库", async () => {
-    const wire1 = fakePi();
-    const owner1 = {};
-    wireTraffic(wire1.pi, { enabled: true, owner: owner1, dbPath, legacyDbPath: null });
-    await wire1.command()("on", ctx());
-    const old = peekEngine()!;
-    // 启用规则使钩子在 acquireSlot 处 await（闸门被占用 ⇒ 排队）。
-    ensureDb(old)
-      .prepare(
-        "INSERT INTO rewrite_rules (name, enabled, priority, body_jq, created_at, updated_at) VALUES ('r', 1, 1, '.', 't', 't')",
-      )
-      .run();
-    const blocker = await old.gate.acquireSlot({ sessionId: "x", baseUrl: "https://api.example.test/v1" }, "orphan");
-    const pending = wire1.handlers.get("before_provider_request")!({ payload: { a: 1 } }, ctx());
-    await Promise.resolve();
+  it("fetch 续体跨 reload：旧 engine 关闭后上游才回头 ⇒ 续体的写被丢弃、不重开旧库、不写新纪元；关闭前已接纳的行有界排空", async () => {
+    const realFetch = globalThis.fetch;
+    let release!: (res: Response) => void;
+    globalThis.fetch = (() => new Promise<Response>((r) => (release = r))) as typeof fetch;
+    try {
+      const wire1 = fakePi();
+      const owner1 = {};
+      wireTraffic(wire1.pi, { enabled: true, owner: owner1, dbPath, legacyDbPath: null });
+      await wire1.command()("on", ctx());
+      const old = peekEngine()!;
+      const headers: Record<string, string | null> = {};
+      await wire1.handlers.get("before_provider_headers")!({ headers }, ctx());
+      await wire1.handlers.get("before_provider_request")!({ payload: { a: 1 } }, ctx());
+      const inflight = globalThis.fetch("https://api.example.test/v1/messages", {
+        method: "POST",
+        headers: headers as Record<string, string>,
+        body: '{"a":1}',
+      });
+      await new Promise((r) => setTimeout(r, 5));
 
-    // reload：旧激活 shutdown（关闭旧 engine），新激活 /record on。
-    await wire1.handlers.get("session_shutdown")!({ reason: "reload" }, ctx());
-    const wire2 = fakePi();
-    const owner2 = {};
-    wireTraffic(wire2.pi, { enabled: true, owner: owner2, dbPath, legacyDbPath: null });
-    await wire2.command()("on", ctx());
-    const fresh = peekEngine()!;
-    expect(fresh).not.toBe(old);
-    void blocker;
-    await pending; // drainGate 放行排队者，续体继续执行
-    expect(old.state).toBe("closed");
-    expect(old.db).toBeNull(); // 未重开旧库
-    expect(count(fresh, "requests")).toBe(0); // 未写新库
-    expect(fresh.recording).toBe(true); // 旧续体不能复活/干扰新 engine 的录制
-    expect(old.recording).toBe(false);
+      // reload：旧激活 shutdown（关闭旧 engine），新激活 /record on。
+      await wire1.handlers.get("session_shutdown")!({ reason: "reload" }, ctx());
+      const wire2 = fakePi();
+      const owner2 = {};
+      wireTraffic(wire2.pi, { enabled: true, owner: owner2, dbPath, legacyDbPath: null });
+      await wire2.command()("on", ctx());
+      const fresh = peekEngine()!;
+      expect(fresh).not.toBe(old);
+      release(new Response("{}", { status: 200 }));
+      await (await inflight).text(); // 续体继续执行（写 status）
+      await fresh.dbPort.whenIdle();
+      expect(old.state).toBe("closed");
+      expect(old.db).toBeNull(); // 未重开旧库
+      // 关闭前已接纳的 hook 行在关闭时有界排空；关闭之后的 status 写被丢弃。
+      const rows = ensureDb(fresh).prepare("SELECT status, url FROM requests").all() as Array<{ status: unknown }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.status).toBeNull();
+      expect(old.counters.droppedPersists).toBeGreaterThan(0);
+      expect(fresh.recording).toBe(true); // 旧续体不能复活/干扰新 engine 的录制
+      expect(old.recording).toBe(false);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 
   it("流捕获跨 close：之后零新增 chunk，读取被取消", async () => {
@@ -237,6 +249,7 @@ describe("陈旧续体（跨 reload）", () => {
     const capture = engine.capture.captureStream(7, "s", new Response(body), engine.epoch);
     controller.enqueue(new TextEncoder().encode("data: 1\n\n"));
     await new Promise((r) => setTimeout(r, 20));
+    await engine.dbPort.whenIdle(); // T2b：chunk 在账本内合并成批（whenIdle 封批并落库）
     const chunks = (): number => (engine.db!.prepare("SELECT COUNT(*) c FROM stream_chunks").get() as { c: number }).c;
     expect(chunks()).toBe(1);
     const closing = engine.close("reload");

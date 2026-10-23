@@ -171,7 +171,8 @@ async function scenarioLifecycle(): Promise<void> {
           "CREATE TRIGGER IF NOT EXISTS fail_chunks BEFORE INSERT ON stream_chunks BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
         );
     }
-    out({ event: "ready", tag, port: engine.serverPort, srcId, epoch: engine.epoch });
+    // T4：/api/* 一律要 token（回环亦然）——把 token 一并交给父进程。
+    out({ event: "ready", tag, port: engine.serverPort, srcId, epoch: engine.epoch, token: engine.accessToken });
     return { handlers: p.handlers };
   };
 

@@ -1,508 +1,357 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+/**
+ * fetch 层改写拦截（T7 用例迁到 T2b 票据归属）：规则只作用于可证明归属的请求（ticket 绑定的 generation），
+ * 线级字段 / 原始正文 / 改写元数据写到该 generation 的行；阻断按 (T, generation, 摘要) 吸收 SDK 重试。
+ */
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureDb } from "../../src/traffic/db.js";
+import { peekEngine, type TrafficEngine } from "../../src/traffic/engine.js";
+import { TICKET_HEADER } from "../../src/traffic/tap.js";
+import {
+  activate,
+  beginRequest,
+  createUpstream,
+  json,
+  sse,
+  URL_MESSAGES,
+  type Activation,
+  type Upstream,
+} from "./helpers/harness.js";
+import { teardownEngine } from "./helpers/engine.js";
 
-import { makeProbe } from "../../src/traffic/correlate.js";
-import { type GateSlot } from "../../src/traffic/serialize.js";
-import { type PendingRequest } from "../../src/traffic/state.js";
-import type { EngineSettings, RewriteRule } from "../../src/traffic/rewrite.js";
-import type { TrafficEngine } from "../../src/traffic/engine.js";
-import { installTap, retireTap } from "../../src/traffic/tap.js";
-import { makeEngine, teardownEngine } from "./helpers/engine.js";
-
-let state: TrafficEngine;
-// T2a：patchFetch/unpatchFetch 由 tap.ts 的 trampoline 取代（每次安装新 wrapper，退役还原）。
-const patchFetch = (): void => {
-  installTap(state, state.capture.handleFetch);
-};
-const unpatchFetch = (): void => {
-  retireTap(state);
-};
+const HAS_JQ = existsSync("/usr/bin/jq");
+const payload = { messages: [{ role: "user", content: "capture rewrite test payload" }], temperature: 1 };
+const originalBody = JSON.stringify(payload);
+const rewrittenBody = '{"messages":[{"role":"user","content":"capture rewrite test payload"}],"temperature":0}';
 
 let dir: string;
-let originalFetch: typeof globalThis.fetch;
-let sent: Array<{ input: unknown; init: RequestInit | undefined }>;
+let realFetch: typeof globalThis.fetch;
+let up: Upstream;
+let host: Activation;
+let engine: TrafficEngine;
+let events: string[];
 
-const url = "https://api.example.test/v1/messages";
-const baseUrl = "https://api.example.test/v1";
-const originalBody = JSON.stringify({
-  messages: [{ role: "user", content: "capture rewrite test payload" }],
-  temperature: 1,
-});
-const settings: EngineSettings = {
-  jqPath: "",
-  timeoutMs: 2000,
-  handoffMs: 1000,
-  retryGraceMs: 20,
-  maxHoldMs: 5000,
-  queueWaitMs: 1000,
-};
-
-function rule(overrides: Partial<RewriteRule> = {}): RewriteRule {
-  return {
-    id: overrides.id ?? 1,
-    name: overrides.name ?? "test rule",
-    enabled: overrides.enabled ?? 1,
-    priority: overrides.priority ?? 1,
-    url_pattern: overrides.url_pattern ?? null,
-    method: overrides.method ?? null,
-    model: overrides.model ?? null,
-    body_jq: overrides.body_jq ?? null,
-    headers_jq: overrides.headers_jq ?? null,
-  };
-}
-
-function addRow(id = 1, payload = originalBody): void {
-  ensureDb(state)
+function addRule(r: { body_jq?: string | null; headers_jq?: string | null; name?: string } = {}): void {
+  const now = new Date().toISOString();
+  ensureDb(engine)
     .prepare(
-      `INSERT INTO requests (id, session_id, turn, ts, provider, model, payload, request_headers)
-			 VALUES (?, 'session', 0, ?, 'provider', 'model', ?, NULL)`,
+      "INSERT INTO rewrite_rules (name, enabled, priority, body_jq, headers_jq, created_at, updated_at) VALUES (?, 1, 1, ?, ?, ?, ?)",
     )
-    .run(id, new Date().toISOString(), payload);
+    .run(r.name ?? "test rule", r.body_jq ?? null, r.headers_jq ?? null, now, now);
+  // 发送路径只读内存快照（安全评审 #4）：规则写库后刷新（运行时由后台定时器 / T4 CRUD 后调用）。
+  engine.refreshRules();
 }
 
-function addEnabledRule(rewriteRule: RewriteRule = rule()): void {
-  ensureDb(state)
-    .prepare(
-      `INSERT INTO rewrite_rules (id, name, enabled, priority, url_pattern, method, model, body_jq, headers_jq, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      rewriteRule.id,
-      rewriteRule.name,
-      rewriteRule.enabled,
-      rewriteRule.priority,
-      rewriteRule.url_pattern,
-      rewriteRule.method,
-      rewriteRule.model,
-      rewriteRule.body_jq,
-      rewriteRule.headers_jq,
-      new Date().toISOString(),
-      new Date().toISOString(),
-    );
+async function rowsAfterFlush(): Promise<Array<Record<string, any>>> {
+  await engine.dbPort.whenIdle();
+  return ensureDb(engine).prepare("SELECT * FROM requests ORDER BY id").all() as Array<Record<string, any>>;
 }
 
-function row(id = 1): Record<string, unknown> {
-  return ensureDb(state).prepare("SELECT * FROM requests WHERE id = ?").get(id) as Record<string, unknown>;
+/** 一个已配对的请求（headers + payload），返回带票据的 fetch 头。 */
+async function paired(p: unknown = payload) {
+  const req = await beginRequest(host);
+  await req.payload(p);
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(req.headers)) if (v !== null) headers[k] = v;
+  return { req, headers };
 }
 
-function entry(rowId: number | null, payload = originalBody, sessionId = "session"): PendingRequest {
-  return {
-    rowId,
-    sessionId,
-    baseUrl,
-    model: "model",
-    payloadLen: payload.length,
-    probe: makeProbe(payload),
-    createdAt: Date.now(),
-    status: "waiting",
-    claimedBy: [],
-    streamCaptured: false,
-  };
-}
-
-async function hookSlot(pending: PendingRequest, rules: RewriteRule[]): Promise<GateSlot> {
-  const slot = await state.gate.acquireSlot(
-    {
-      sessionId: pending.sessionId,
-      baseUrl: pending.baseUrl,
-      model: pending.model,
-      modelApi: "test",
-      rules,
-      settings,
-    },
-    "hook",
-  );
-  slot.pending = pending;
-  pending.slot = slot;
-  state.corr.pushPending(pending);
-  return slot;
-}
-
-function installOrigin(handler: typeof globalThis.fetch): void {
-  unpatchFetch();
-  globalThis.fetch = handler;
-  patchFetch();
-}
-
-function applyAfter(status: number, headers: Record<string, string>): void {
-  const attempt = state.corr.matchAfter(status, headers);
-  if (!attempt || attempt.rowId === null) return;
-  ensureDb(state)
-    .prepare("UPDATE requests SET status = ?, response_headers = ? WHERE id = ?")
-    .run(status, JSON.stringify(headers), attempt.rowId);
-}
-
-async function waitForChunks(id: number, timeoutMs = 1000): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const rows = ensureDb(state)
-      .prepare("SELECT data FROM stream_chunks WHERE request_id = ? ORDER BY seq")
-      .all(id) as Array<{ data: string }>;
-    const text = rows.map((item) => item.data).join("");
-    if (text) return text;
-    if (Date.now() >= deadline) throw new Error(`stream #${id} was not captured`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
-
-beforeEach(() => {
-  originalFetch = globalThis.fetch;
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "pi-capture-rewrite-"));
-  state = makeEngine(dir);
-  state.recording = true;
-  ensureDb(state);
-  sent = [];
-  globalThis.fetch = async (input: unknown, init?: RequestInit) => {
-    sent.push({ input, init });
-    return new Response(JSON.stringify({ ok: true }), {
-      status: 200,
-      headers: { "content-type": "application/json", "request-id": `r-${sent.length}` },
-    });
-  };
-  patchFetch();
+  realFetch = globalThis.fetch;
+  up = createUpstream(() => json(200, { ok: true }));
+  globalThis.fetch = up.fetch;
+  host = activate({ dbPath: join(dir, "traffic.db"), sessionId: "session" });
+  await host.commands.get("record")!("on", host.ctx());
+  engine = peekEngine()!;
+  events = [];
+  engine.sseClients.add({ write: (t: string) => (events.push(t), true) } as never);
 });
 
 afterEach(async () => {
-  unpatchFetch();
-  state.capture.setRewriteBlockedHandler(null);
-  globalThis.fetch = originalFetch;
+  engine.sseClients.clear();
+  await teardownEngine(engine);
+  globalThis.fetch = realFetch;
   vi.useRealTimers();
-  await teardownEngine(state);
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe("capture rewrite interception T7", () => {
+describe.skipIf(!HAS_JQ)("capture rewrite interception（票据归属）", () => {
   it("a: rewrites before orig and records final plus original payload/header metadata", async () => {
-    addRow();
-    const pending = entry(1);
-    await hookSlot(pending, [
-      rule({ headers_jq: '. + {"Content-Length":"1", "X-Changed":"yes"}', body_jq: ".temperature = 0" }),
-    ]);
-    await globalThis.fetch(url, {
-      method: "POST",
-      body: originalBody,
-      headers: { "content-type": "application/json" },
-    });
-
-    expect(sent).toHaveLength(1);
-    expect(sent[0]?.init?.body).toBe(
-      '{"messages":[{"role":"user","content":"capture rewrite test payload"}],"temperature":0}',
-    );
-    expect(sent[0]?.init?.headers).toMatchObject({ "x-changed": "yes" });
-    expect((sent[0]?.init?.headers as Record<string, string>)["content-length"]).toBeUndefined();
-    expect(row()).toMatchObject({
-      payload: '{"messages":[{"role":"user","content":"capture rewrite test payload"}],"temperature":0}',
+    addRule({ headers_jq: '. + {"Content-Length":"1", "X-Changed":"yes"}', body_jq: ".temperature = 0" });
+    const { req } = await paired();
+    const res = await req.fetch(originalBody);
+    await req.respond(res);
+    expect(up.calls).toHaveLength(1);
+    expect(up.calls[0]!.body).toBe(rewrittenBody);
+    expect(up.calls[0]!.headers["x-changed"]).toBe("yes");
+    expect(up.calls[0]!.headers["content-length"]).not.toBe("1");
+    expect(up.calls[0]!.headers[TICKET_HEADER]).toBeUndefined();
+    const [row] = await rowsAfterFlush();
+    expect(row).toMatchObject({
+      payload: rewrittenBody,
       orig_payload: originalBody,
       rewrite_status: "applied",
       payload_encoding: "identity",
       payload_bytes: 87,
+      status: 200,
+      url: URL_MESSAGES,
+      method: "POST",
     });
-    expect(JSON.parse(row().rewrite_rule_ids as string)).toEqual([1]);
+    expect(JSON.parse(row!.rewrite_rule_ids)).toEqual([1]);
+    expect(JSON.parse(row!.request_headers)[TICKET_HEADER]).toBeUndefined();
+    expect(engine.lastRewrittenAt.get("session")).toBeTypeOf("number");
   });
 
-  it("b: blocks before orig, broadcasts safe events, and releases after poison grace", async () => {
-    vi.useFakeTimers();
-    addRow();
-    const pending = entry(1);
-    const slot = await hookSlot(pending, [rule({ body_jq: 'error("boom")' })]);
-    const events: string[] = [];
-    state.sseClients.add({
-      write: (text: string) => {
-        events.push(text);
-        return true;
-      },
-    } as never);
-
-    await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow(
+  it("b: blocks before orig, broadcasts safe events; the row records blocked", async () => {
+    addRule({ body_jq: 'error("boom")' });
+    const { req } = await paired();
+    await expect(req.fetch(originalBody)).rejects.toThrow(
       'traffic-record rewrite blocked: [规则 "test rule" #1] body runtime_error',
     );
-    expect(sent).toHaveLength(0);
-    expect(row()).toMatchObject({ status: 0, rewrite_status: "blocked" });
+    expect(up.calls).toHaveLength(0);
+    const [row] = await rowsAfterFlush();
+    expect(row).toMatchObject({ status: 0, rewrite_status: "blocked" });
     expect(events.join("\n")).toContain('"type":"rewrite_error"');
     expect(events.join("\n")).toContain('"type":"response"');
-    expect(slot.blocked).not.toBeNull();
-    expect(currentSlotId()).toBe(slot.id);
-    await vi.advanceTimersByTimeAsync(settings.retryGraceMs);
-    expect(currentSlotId()).toBeNull();
   });
 
-  it("c: removes blocked row from correlation so the next request writes its own row", async () => {
-    addRow(1);
-    addRow(2, JSON.stringify({ messages: [{ role: "user", content: "second" }], temperature: 1 }));
-    const first = entry(1);
-    const firstSlot = await hookSlot(first, [rule({ body_jq: 'error("boom")' })]);
-    await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
-    vi.useFakeTimers();
-    await vi.advanceTimersByTimeAsync(settings.retryGraceMs);
-    state.gate.resetGate();
-    const second = entry(2, JSON.stringify({ messages: [{ role: "user", content: "second" }], temperature: 1 }));
-    await hookSlot(second, [rule({ body_jq: ".temperature = 0" })]);
-    await globalThis.fetch(url, { method: "POST", body: secondPayload(second) });
-    applyAfter(200, { "request-id": "r-1" });
-
-    expect(first.status).toBe("blocked");
-    expect(second.status).toBe("resolved");
-    expect(row(1).status).toBe(0);
-    expect(row(2).status).toBe(200);
-    expect(row(1).payload).toBe(originalBody);
-    expect(firstSlot.state).toBe("released");
+  it("c: a blocked request does not capture the next request: the next one writes its own row and is rewritten", async () => {
+    addRule({ body_jq: 'if .messages[0].content == "second" then .temperature = 0 else error("boom") end' });
+    const first = await paired();
+    await expect(first.req.fetch(originalBody)).rejects.toThrow();
+    await host.emit("message_end", { message: { role: "assistant", stopReason: "error" } });
+    const secondPayload = { messages: [{ role: "user", content: "second" }], temperature: 1 };
+    const second = await paired(secondPayload);
+    const res = await second.req.fetch(JSON.stringify(secondPayload));
+    await second.req.respond(res);
+    const rows = await rowsAfterFlush();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.status).toBe(0);
+    expect(rows[0]!.payload).toBe(originalBody);
+    expect(rows[1]!.status).toBe(200);
+    expect(JSON.parse(up.calls[0]!.body!).temperature).toBe(0);
   });
 
-  it("d: poison absorbs two SDK retries without another spawn, row write, or broadcast", async () => {
-    vi.useFakeTimers();
-    addRow();
-    const pending = entry(1);
-    await hookSlot(pending, [rule({ body_jq: 'error("boom")' })]);
-    const events: string[] = [];
-    state.sseClients.add({
-      write: (text: string) => {
-        events.push(text);
-        return true;
-      },
-    } as never);
-    const before = state.jq.spawnCount();
-    await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
-    const afterFirst = state.jq.spawnCount();
-    await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
-    await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
+  it("d: blocked generation absorbs SDK retries without another spawn, row write, or broadcast", async () => {
+    addRule({ body_jq: 'error("boom")' });
+    const { req } = await paired();
+    const before = engine.jq.spawnCount();
+    await expect(req.fetch(originalBody)).rejects.toThrow();
+    await engine.dbPort.whenIdle();
+    const afterFirst = engine.jq.spawnCount();
+    const writesAfterFirst = engine.dbPort.stats().ticks;
+    const e1 = await req.fetch(originalBody).catch((e: unknown) => e);
+    const e2 = await req.fetch(originalBody).catch((e: unknown) => e);
     expect(afterFirst).toBeGreaterThanOrEqual(before);
-    expect(state.jq.spawnCount()).toBe(afterFirst);
-    expect(events.filter((event) => event.includes('"type":"rewrite_error"'))).toHaveLength(1);
-    expect(row().rewrite_status).toBe("blocked");
+    expect(engine.jq.spawnCount()).toBe(afterFirst);
+    expect(e1).toBe(e2); // 同一错误对象
+    expect(events.filter((ev) => ev.includes('"type":"rewrite_error"'))).toHaveLength(1);
+    await engine.dbPort.whenIdle();
+    expect(engine.dbPort.stats().ticks).toBe(writesAfterFirst); // 重试零写入
+    expect(up.calls).toHaveLength(0); // 原请求从未放出
   });
 
-  it("d2: blocked notifies pi once across SDK retries, without leaking stderr", async () => {
-    vi.useFakeTimers();
-    addRow();
-    const pending = entry(1);
-    await hookSlot(pending, [rule({ body_jq: 'error("boom-secret-stderr")' })]);
+  it("d2: blocked notifies pi once across SDK retries and across a fresh ticket in 30s, without leaking stderr", async () => {
+    addRule({ body_jq: 'error("boom-secret-stderr")' });
     const notices: string[] = [];
-    state.capture.setRewriteBlockedHandler((message: string) => notices.push(message));
-
-    await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
-    await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
-    await expect(globalThis.fetch(url, { method: "POST", body: originalBody })).rejects.toThrow();
-
-    // poison 窗口吸收重试：三次调用只弹一次。
+    engine.capture.setRewriteBlockedHandler((m) => notices.push(m));
+    const { req } = await paired();
+    for (let i = 0; i < 3; i++) await expect(req.fetch(originalBody)).rejects.toThrow();
+    await host.emit("message_end", { message: { role: "assistant" } });
+    const again = await paired(); // agent 级重试：新票据，同 (会话, 规则集, 错误)
+    await expect(again.req.fetch(originalBody)).rejects.toThrow();
     expect(notices).toHaveLength(1);
     expect(notices[0]).toContain("改写阻断");
     expect(notices[0]).toContain("test rule");
-    // 安全边界：jq stderr 绝不能进入抛给 pi 的消息。
     expect(notices[0]).not.toContain("boom-secret-stderr");
   });
 
   it("e: records rewrite metadata even when the response has no body", async () => {
-    addRow();
-    const pending = entry(1);
-    await hookSlot(pending, [rule({ body_jq: ".temperature = 0" })]);
-    installOrigin(async (input, init) => {
-      sent.push({ input, init });
-      return new Response(null, { status: 204 });
-    });
-    await globalThis.fetch(url, { method: "POST", body: originalBody });
-    expect(sent).toHaveLength(1);
-    expect(row()).toMatchObject({
+    addRule({ body_jq: ".temperature = 0" });
+    up.queue.push(() => new Response(null, { status: 204 }));
+    const { req } = await paired();
+    await req.fetch(originalBody);
+    const [row] = await rowsAfterFlush();
+    expect(row).toMatchObject({
       rewrite_status: "applied",
       orig_payload: originalBody,
       payload_encoding: "identity",
+      status: 204,
     });
   });
 
-  it("f: after and stream capture continue after recording is turned off", async () => {
-    addRow();
-    const pending = entry(1);
-    await hookSlot(pending, [rule({ body_jq: ".temperature = 0" })]);
-    installOrigin(async (input, init) => {
-      sent.push({ input, init });
-      state.recording = false;
-      return new Response(
-        new ReadableStream({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode('data: {"ok":true}\\n\\n'));
-            controller.close();
-          },
+  it("f: stream capture continues after recording is turned off mid-stream", async () => {
+    addRule({ body_jq: ".temperature = 0" });
+    let ctl!: ReadableStreamDefaultController<Uint8Array>;
+    up.queue.push(
+      () =>
+        new Response(new ReadableStream<Uint8Array>({ start: (c) => void (ctl = c) }), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
         }),
-        { status: 200, headers: { "content-type": "text/event-stream", "request-id": "stream-1" } },
-      );
-    });
-    await globalThis.fetch(url, { method: "POST", body: originalBody });
-    applyAfter(200, { "request-id": "stream-1" });
-    const stream = await waitForChunks(1);
-    expect(stream).toContain('"ok":true');
-    expect(row(1).status).toBe(200);
+    );
+    const { req } = await paired();
+    const res = await req.fetch(originalBody);
+    await req.respond(res);
+    await host.commands.get("record")!("off", host.ctx());
+    const enc = new TextEncoder();
+    ctl.enqueue(enc.encode("data: a\n\n"));
+    ctl.close();
+    await res.text();
+    await new Promise((r) => setTimeout(r, 10));
+    const [row] = await rowsAfterFlush();
+    const chunks = ensureDb(engine)
+      .prepare("SELECT data FROM stream_chunks WHERE request_id = ?")
+      .all(row!.id) as Array<{
+      data: string;
+    }>;
+    expect(chunks.map((c) => c.data).join("")).toBe("data: a\n\n");
+    expect(row!.status).toBe(200);
   });
 
-  it("g: does not rewrite while recording is off, even with an already-acquired slot", async () => {
-    const before = state.jq.spawnCount();
-    state.recording = false;
-    const pending = entry(null);
-    // slot 在录制开启时取得（hookSlot 内部 acquire），随后录制被关闭：
-    // tryRewrite 的 recording 复查必须拦住它，否则 degraded slot 的规则快照会照旧生效。
-    await hookSlot(pending, [rule({ body_jq: ".temperature = 0" })]);
-    await globalThis.fetch(url, { method: "POST", body: originalBody });
-    expect(sent[0]?.init?.body).toBe(originalBody);
-    expect(sent[0]?.init?.body).not.toContain('"temperature":0');
-    expect(state.jq.spawnCount()).toBe(before);
-    expect(state.unlinkedRewrites).toBe(0);
+  it("g/n: recording off ⇒ no tickets minted, total bypass — no rule query, no jq, bytes unchanged", async () => {
+    addRule({ body_jq: ".temperature = 0" });
+    await host.commands.get("record")!("off", host.ctx());
+    const before = engine.jq.spawnCount();
+    const prepareSpy = vi.spyOn(ensureDb(engine), "prepare");
+    const req = await beginRequest(host);
+    expect(req.ticket()).toBeNull();
+    await req.payload(payload);
+    await req.fetch(originalBody);
+    expect(up.calls[0]!.body).toBe(originalBody);
+    expect(engine.jq.spawnCount()).toBe(before);
+    expect(prepareSpy.mock.calls.filter(([sql]) => String(sql).includes("FROM rewrite_rules"))).toHaveLength(0);
   });
 
-  it("h: passes non-provider fetches through without DB lookup, gate, or jq", async () => {
-    const before = state.jq.spawnCount();
-    state.db?.close();
-    state.db = null;
-    state.dbPath = "/dev/null/traffic.db";
+  it("g2: /record off between pairing and fetch ⇒ the paired fetch is not rewritten", async () => {
+    addRule({ body_jq: ".temperature = 0" });
+    const { req } = await paired();
+    await host.commands.get("record")!("off", host.ctx());
+    await req.fetch(originalBody);
+    expect(up.calls[0]!.body).toBe(originalBody);
+  });
+
+  it("h: non-ticket fetches pass through without DB lookup or jq", async () => {
+    const before = engine.jq.spawnCount();
+    const prepareSpy = vi.spyOn(ensureDb(engine), "prepare");
     await globalThis.fetch("https://unrelated.example.test/data", { method: "POST", body: originalBody });
-    expect(sent[0]?.input).toBe("https://unrelated.example.test/data");
-    expect(currentSlotId()).toBeNull();
-    expect(state.jq.spawnCount()).toBe(before);
-    expect(state.dbError).toBeNull();
+    expect(up.calls[0]!.url).toBe("https://unrelated.example.test/data");
+    expect(engine.jq.spawnCount()).toBe(before);
+    expect(prepareSpy).not.toHaveBeenCalled();
+    expect(engine.dbError).toBeNull();
   });
 
   it("i: decompresses and recompresses zstd while persisting plaintext and wire bytes", async () => {
     const zlib = (await import("node:zlib")) as typeof import("node:zlib") & {
       zstdCompressSync?: (input: Uint8Array) => Uint8Array;
+      zstdDecompressSync?: (input: Uint8Array) => Uint8Array;
     };
     if (!zlib.zstdCompressSync) return;
+    addRule({ body_jq: ".temperature = 0" });
     const source = zlib.zstdCompressSync(Buffer.from(originalBody));
-    addRow();
-    const pending = entry(1);
-    await hookSlot(pending, [rule({ body_jq: ".temperature = 0" })]);
-    await globalThis.fetch(url, { method: "POST", body: source, headers: { "content-encoding": "zstd" } });
-    const wire = sent[0]?.init?.body as Uint8Array;
-    expect(wire).toBeInstanceOf(Uint8Array);
-    const decoded = zlib.zstdDecompressSync?.(wire);
-    expect(new TextDecoder().decode(decoded)).toContain('"temperature":0');
-    expect(row()).toMatchObject({ payload_encoding: "zstd", payload_bytes: wire.byteLength });
-    expect(row().payload).toContain('"temperature":0');
+    const { headers } = await paired();
+    const res = await globalThis.fetch(URL_MESSAGES, {
+      method: "POST",
+      body: source,
+      headers: { ...headers, "content-encoding": "zstd" },
+    });
+    await res.text();
+    const wire = Buffer.from(up.calls[0]!.body!, "latin1");
+    expect(new TextDecoder().decode(zlib.zstdDecompressSync!(wire))).toContain('"temperature":0');
+    const [row] = await rowsAfterFlush();
+    expect(row).toMatchObject({ payload_encoding: "zstd", payload_bytes: wire.byteLength });
+    expect(row!.payload).toContain('"temperature":0');
   });
 
   it("j: rebuilds Request input while preserving method, signal, and rewritten body", async () => {
-    addRow();
-    const pending = entry(1);
-    await hookSlot(pending, [rule({ body_jq: ".temperature = 0" })]);
+    addRule({ body_jq: ".temperature = 0" });
+    const { headers } = await paired();
     const controller = new AbortController();
-    const request = new Request(url, { method: "PATCH", body: originalBody, signal: controller.signal });
-    await globalThis.fetch(request);
-    const sentRequest = sent[0]?.input as Request;
-    expect(sentRequest).toBeInstanceOf(Request);
-    expect(sentRequest.method).toBe("PATCH");
-    expect(sentRequest.signal.aborted).toBe(false);
-    expect(await sentRequest.text()).toContain('"temperature":0');
-  });
-
-  it("k: with no enabled rules, records the unchanged request without gate/timer/jq overhead", async () => {
-    const before = state.jq.spawnCount();
-    addRow();
-    const pending = entry(1);
-    state.corr.pushPending(pending);
-    const db = ensureDb(state);
-    const prepareSpy = vi.spyOn(db, "prepare");
-    vi.useFakeTimers();
-    const timerCount = vi.getTimerCount();
-    await globalThis.fetch(url, {
+    const request = new Request(URL_MESSAGES, {
       method: "PATCH",
       body: originalBody,
-      headers: { "content-type": "application/json" },
+      headers,
+      signal: controller.signal,
     });
-    expect(vi.getTimerCount()).toBe(timerCount);
-    expect(state.jq.spawnCount()).toBe(before);
-    expect(state.dbError).toBeNull();
-    expect(currentSlotId()).toBeNull();
-    expect(prepareSpy.mock.calls.filter(([sql]) => String(sql).includes("FROM rewrite_rules"))).toHaveLength(0);
-    expect(row()).toMatchObject({
-      url,
-      method: "PATCH",
-      payload_encoding: "identity",
-      payload_bytes: Buffer.byteLength(originalBody, "utf8"),
-    });
-    expect(row().url).not.toBeNull();
-    expect(row().method).not.toBeNull();
-    expect(JSON.parse(row().request_headers as string)).toEqual({ "content-type": "application/json" });
+    await globalThis.fetch(request);
+    expect(up.calls[0]!.method).toBe("PATCH");
+    expect(up.calls[0]!.signal?.aborted).toBe(false);
+    expect(up.calls[0]!.body).toContain('"temperature":0');
+    expect(up.calls[0]!.headers[TICKET_HEADER]).toBeUndefined();
   });
 
-  it("l: orphan retry after grace rewrites with a fresh rule snapshot and is degraded", async () => {
-    vi.useFakeTimers();
-    addRow();
-    addEnabledRule(rule({ body_jq: ".temperature = 0" }));
-    const pending = entry(1);
-    await hookSlot(pending, [rule({ body_jq: ".temperature = 0" })]);
-    let calls = 0;
-    installOrigin(async (input, init) => {
-      sent.push({ input, init });
-      calls++;
-      return new Response(null, { status: calls === 1 ? 429 : 200, headers: { "request-id": `retry-${calls}` } });
+  it("k: with no enabled rules, records the unchanged request without jq", async () => {
+    const before = engine.jq.spawnCount();
+    const { req } = await paired();
+    const res = await req.fetch(originalBody);
+    await req.respond(res);
+    expect(up.calls[0]!.body).toBe(originalBody);
+    expect(engine.jq.spawnCount()).toBe(before);
+    const [row] = await rowsAfterFlush();
+    expect(row).toMatchObject({ payload: originalBody, rewrite_status: null, status: 200, url: URL_MESSAGES });
+    expect(row!.orig_payload).toBeNull();
+  });
+
+  it("l: an unproven body on a bound ticket (digest mismatch) is passed through unchanged and never written to the ticket row", async () => {
+    addRule({ body_jq: ".temperature = 0" });
+    const { req } = await paired();
+    const res = await req.fetch(JSON.stringify({ ...payload, extra: 1 }));
+    await res.text();
+    // 首次 fetch 即绑定摘要（gen.digest 取首个 fetch 正文）——再来一个不同正文才是未证明
+    const res2 = await req.fetch(JSON.stringify({ ...payload, extra: 2 }));
+    await res2.text();
+    expect(JSON.parse(up.calls[1]!.body!).temperature).toBe(1);
+    expect(engine.tickets.counters.unattributedFetches).toBe(1);
+  });
+
+  it("m: falls back to the ticket's headers snapshot for an unchanged request and leaves its response available", async () => {
+    const req = await beginRequest(host);
+    await req.payload(payload);
+    // SDK 发 fetch 时只带票据（极端：其它头经 Request 默认值注入）
+    const res = await globalThis.fetch(URL_MESSAGES, {
+      method: "POST",
+      headers: { [TICKET_HEADER]: req.ticket()! },
+      body: originalBody,
     });
-
-    await globalThis.fetch(url, { method: "POST", body: originalBody });
-    applyAfter(429, { "request-id": "retry-1" });
-    await vi.advanceTimersByTimeAsync(settings.retryGraceMs);
-    expect(currentSlotId()).toBeNull();
-
-    await globalThis.fetch(url, { method: "POST", body: originalBody });
-    const lateAttempt = state.attempts[1];
-    expect(sent[1]?.init?.body).toContain('"temperature":0');
-    expect(lateAttempt?.degraded).toBe(true);
-    expect(state.unlinkedRewrites).toBe(1);
-    expect(row()).toMatchObject({ rewrite_status: "applied", payload: expect.stringContaining('"temperature":0') });
-  });
-
-  it("m: falls back to hook headers for an unchanged request and leaves its response available", async () => {
-    addRow();
-    const pending = entry(1);
-    pending.hookHeaders = JSON.stringify({ Authorization: "Bearer hook-token" });
-    await hookSlot(pending, []);
-    const response = await globalThis.fetch(url);
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ ok: true });
-    expect(JSON.parse(row().request_headers as string)).toEqual({ authorization: "Bearer hook-token" });
-    expect(state.streamDone.size).toBe(0);
-  });
-
-  it("n: recording off with enabled rules in the DB is a total bypass — no query, gate, timer, or jq", async () => {
-    const before = state.jq.spawnCount();
-    addRow();
-    addEnabledRule(rule({ body_jq: ".temperature = 0" }));
-    state.recording = false;
-    state.corr.pushPending(entry(1));
-    const db = ensureDb(state);
-    const prepareSpy = vi.spyOn(db, "prepare");
-    vi.useFakeTimers();
-    const timerCount = vi.getTimerCount();
-
-    await globalThis.fetch(url, { method: "POST", body: originalBody });
-
-    expect(sent[0]?.init?.body).toBe(originalBody);
-    expect(vi.getTimerCount()).toBe(timerCount);
-    expect(state.jq.spawnCount()).toBe(before);
-    expect(currentSlotId()).toBeNull();
-    expect(state.dbError).toBeNull();
-    // 录制关闭时连规则表都不查 —— 门槛前置于 loadEnabledRules。
-    expect(prepareSpy.mock.calls.filter(([sql]) => String(sql).includes("FROM rewrite_rules"))).toHaveLength(0);
+    expect(await res.json()).toEqual({ ok: true });
+    const [row] = await rowsAfterFlush();
+    expect(JSON.parse(row!.request_headers)).toMatchObject({
+      "x-api-key": "key-session",
+      "content-type": "application/json",
+    });
+    expect(engine.streamDone.size).toBe(0);
   });
 
   it("o: turning recording back on restores rewriting for subsequent requests", async () => {
-    addRow();
-    addEnabledRule(rule({ body_jq: ".temperature = 0" }));
-    state.recording = false;
-    state.corr.pushPending(entry(1));
-    await globalThis.fetch(url, { method: "POST", body: originalBody });
-    expect(sent[0]?.init?.body).toBe(originalBody);
+    addRule({ body_jq: ".temperature = 0" });
+    await host.commands.get("record")!("off", host.ctx());
+    const off = await beginRequest(host);
+    await off.payload(payload);
+    await off.fetch(originalBody);
+    expect(up.calls[0]!.body).toBe(originalBody);
+    await host.commands.get("record")!("on", host.ctx());
+    const { req } = await paired();
+    await req.fetch(originalBody);
+    expect(up.calls[1]!.body).toContain('"temperature":0');
+  });
 
-    state.recording = true;
-    await hookSlot(entry(1), [rule({ body_jq: ".temperature = 0" })]);
-    await globalThis.fetch(url, { method: "POST", body: originalBody });
-    expect(sent[1]?.init?.body).toContain('"temperature":0');
+  it("p: streamed response of a bound request is captured to its own row via the ledger", async () => {
+    up.queue.push(() => sse(["data: x\n\n", "data: y\n\n"]));
+    const { req } = await paired();
+    const res = await req.fetch(originalBody);
+    await req.respond(res);
+    await res.text();
+    await new Promise((r) => setTimeout(r, 5));
+    const [row] = await rowsAfterFlush();
+    const n = (
+      ensureDb(engine).prepare("SELECT COUNT(*) c FROM stream_chunks WHERE request_id = ?").get(row!.id) as {
+        c: number;
+      }
+    ).c;
+    expect(n).toBe(2);
+    expect(engine.streamDone.has(row!.id)).toBe(true);
   });
 });
-
-function secondPayload(_pending: PendingRequest): string {
-  return JSON.stringify({ messages: [{ role: "user", content: "second" }], temperature: 1 });
-}
-
-function currentSlotId(): number | null {
-  return state.gate.currentSlot()?.id ?? null;
-}

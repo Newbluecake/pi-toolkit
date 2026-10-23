@@ -136,8 +136,9 @@ async function startUpstream(kind: "never-headers" | "hang-stream"): Promise<Ups
 }
 
 /** 父进程挂一个 SSE 连接；返回「被服务端断开」的 promise（包一层对象，避免 async 返回值被展平）。 */
-async function holdSse(port: number): Promise<{ closed: Promise<void> }> {
-  const res = await fetch(`http://127.0.0.1:${port}/api/events`);
+async function holdSse(port: number, token?: string): Promise<{ closed: Promise<void> }> {
+  // T4：/api/* 要 token（回环亦然）；SSE 用 ?token= 查询（EventSource 无法带自定义头）。
+  const res = await fetch(`http://127.0.0.1:${port}/api/events${token ? `?token=${token}` : ""}`);
   expect(res.status).toBe(200);
   const reader = res.body!.getReader();
   await reader.read(); // retry: 2000
@@ -154,10 +155,11 @@ async function holdSse(port: number): Promise<{ closed: Promise<void> }> {
   return { closed };
 }
 
-function fireReplay(port: number, srcId: number): void {
+function fireReplay(port: number, srcId: number, token?: string): void {
+  // T4：状态变更请求必须经 x-record-token 头携带 token。
   void fetch(`http://127.0.0.1:${port}/api/replay`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...(token ? { "x-record-token": token } : {}) },
     body: JSON.stringify({ request_id: srcId }),
   })
     .then((r) => r.text())
@@ -212,8 +214,9 @@ describe.each(["never-headers", "hang-stream"] as const)("生命周期：上游 
     const child = startChild("lifecycle", { dbPath: join(home, "t.db"), upstreamUrl: upstream.url });
     const ready = await child.next((m) => m.event === "ready");
     const port = ready.port as number;
-    const sse = await holdSse(port);
-    fireReplay(port, ready.srcId as number);
+    const token = ready.token as string | undefined;
+    const sse = await holdSse(port, token);
+    fireReplay(port, ready.srcId as number, token);
     await upstream.hit;
     await new Promise((r) => setTimeout(r, 50));
 
@@ -234,8 +237,9 @@ describe.each(["never-headers", "hang-stream"] as const)("生命周期：上游 
     const child = startChild("lifecycle", { dbPath: join(home, "t.db"), upstreamUrl: upstream.url });
     const ready = await child.next((m) => m.event === "ready");
     const port = ready.port as number;
-    const sse = await holdSse(port);
-    fireReplay(port, ready.srcId as number);
+    const token = ready.token as string | undefined;
+    const sse = await holdSse(port, token);
+    fireReplay(port, ready.srcId as number, token);
     await upstream.hit;
     await new Promise((r) => setTimeout(r, 50));
 
@@ -270,7 +274,7 @@ describe("生命周期：流式落库抛错（安全评审 #3）", () => {
     });
     const ready = await child.next((m) => m.event === "ready");
     const t0 = Date.now();
-    fireReplay(ready.port as number, ready.srcId as number);
+    fireReplay(ready.port as number, ready.srcId as number, ready.token as string | undefined);
     await upstream.hit;
     const abortedAt = await Promise.race([
       upstream.aborted,

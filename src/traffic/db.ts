@@ -201,7 +201,8 @@ export function openDb(dbPath: string, opts: OpenDbOptions = {}): DatabaseSync {
   try {
     step("PRAGMA 初始化", () => {
       db.exec("PRAGMA journal_mode = WAL;");
-      db.exec("PRAGMA busy_timeout = 5000;");
+      // §3.2（r3 R1-9）：主线程绝不等锁——遇锁立即 SQLITE_BUSY，写后账本退避让出。
+      db.exec("PRAGMA busy_timeout = 0;");
       db.exec("PRAGMA synchronous = NORMAL;");
     });
     step("建表", () => {
@@ -328,16 +329,24 @@ export function ensureDb(engine: TrafficEngine): DatabaseSync {
 }
 
 /** 写 sessions 行；调用方须已经过 persist 闸口（见 persist.ts）。 */
-export function upsertSession(d: DatabaseSync, ctx: ExtensionContext): string {
-  const sid = ctx.sessionManager.getSessionId();
-  const now = new Date().toISOString();
-  d.prepare(
-    `INSERT INTO sessions (id, started_at, last_seen, cwd, provider, model)
+export const UPSERT_SESSION_SQL = `INSERT INTO sessions (id, started_at, last_seen, cwd, provider, model)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   last_seen = excluded.last_seen,
 		   provider = COALESCE(excluded.provider, sessions.provider),
-		   model = COALESCE(excluded.model, sessions.model)`,
-  ).run(sid, now, now, ctx.cwd, ctx.model?.provider ?? null, ctx.model?.id ?? null);
-  return sid;
+		   model = COALESCE(excluded.model, sessions.model)`;
+
+/** upsertSession 的参数（在钩子时刻取值，交给写后账本执行）。 */
+export function sessionUpsertParams(
+  ctx: ExtensionContext,
+): [string, string, string, string, string | null, string | null] {
+  const sid = ctx.sessionManager.getSessionId();
+  const now = new Date().toISOString();
+  return [sid, now, now, ctx.cwd, ctx.model?.provider ?? null, ctx.model?.id ?? null];
+}
+
+export function upsertSession(d: DatabaseSync, ctx: ExtensionContext): string {
+  const params = sessionUpsertParams(ctx);
+  d.prepare(UPSERT_SESSION_SQL).run(...params);
+  return params[0];
 }

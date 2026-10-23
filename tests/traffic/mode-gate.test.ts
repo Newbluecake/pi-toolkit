@@ -87,6 +87,7 @@ describe.each(["print", "json"])("%s 模式", (mode) => {
 
     await handlers.get("before_provider_request")!({ payload: { a: 1 } }, c);
     handlers.get("message_end")!({ message: { role: "assistant", content: "hi" } }, c);
+    await engine.dbPort.whenIdle(); // T2b：写后账本
     const db = ensureDb(engine);
     expect((db.prepare("SELECT COUNT(*) c FROM requests").get() as { c: number }).c).toBe(1);
     expect((db.prepare("SELECT COUNT(*) c FROM messages").get() as { c: number }).c).toBe(1);
@@ -112,7 +113,7 @@ describe("交互模式（tui / rpc）", () => {
     expect(engine.serviceAllowed).toBe(true);
     expect(engine.serverPort).not.toBeNull();
     const res = await fetch(`http://127.0.0.1:${engine.serverPort}/api/state`, {
-      headers: { connection: "keep-alive" },
+      headers: { connection: "keep-alive", "x-record-token": engine.accessToken ?? "" },
     });
     expect(res.status).toBe(200);
     await res.json();
@@ -136,8 +137,10 @@ describe("子会话", () => {
     expect([...child.handlers.keys()].sort()).toEqual(
       [
         "after_provider_response",
+        "agent_settled",
         "before_provider_headers",
         "before_provider_request",
+        "cache_warming_decision",
         "message_end",
         "turn_start",
       ].sort(),
@@ -160,6 +163,7 @@ describe("子会话", () => {
     wireTraffic(host.pi, { enabled: true, dbPath, legacyDbPath: null });
     await host.commands.get("record")!("on", ctx("print"));
     await child.handlers.get("before_provider_request")!({ payload: { a: 2 } }, ctx("print", "s-child"));
+    await peekEngine()!.dbPort.whenIdle();
     const rows = ensureDb(peekEngine()!).prepare("SELECT session_id FROM requests").all() as Array<{
       session_id: string;
     }>;
@@ -174,6 +178,7 @@ describe("子会话", () => {
     wireTraffic(child.pi, { enabled: true, role: "child", childPersist: false, dbPath, legacyDbPath: null });
     await child.handlers.get("before_provider_request")!({ payload: { a: 2 } }, ctx("print", "s-child"));
     child.handlers.get("message_end")!({ message: { role: "assistant" } }, ctx("print", "s-child"));
+    await peekEngine()!.dbPort.whenIdle();
     const db = ensureDb(peekEngine()!);
     expect((db.prepare("SELECT COUNT(*) c FROM requests").get() as { c: number }).c).toBe(0);
     expect((db.prepare("SELECT COUNT(*) c FROM messages").get() as { c: number }).c).toBe(0);

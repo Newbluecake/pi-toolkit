@@ -20,11 +20,28 @@
 
   // ---------- 通用工具 ----------
 
-  // token 从当前 URL 读取，透传到所有 API / SSE / 导出链接（局域网访问必须，本机可省）
-  var TOKEN = new URLSearchParams(window.location.search).get("token") || "";
+  // token（T4）：首选页面 <meta name="record-token">（服务端注入），URL ?token= 仅作兜底（LAN 直链）。
+  // 出站：fetch 一律走 x-record-token 头（自定义头 ⇒ 跨站表单/简单请求无法伪造）；
+  // EventSource 与导出链接无法带自定义头，保留 ?token= 查询参数。
+  var TOKEN = "";
+  try {
+    var metaEl = document.querySelector('meta[name="record-token"]');
+    if (metaEl && metaEl.getAttribute("content")) TOKEN = metaEl.getAttribute("content");
+  } catch (e) {}
+  if (!TOKEN) TOKEN = new URLSearchParams(window.location.search).get("token") || "";
   function api(p) {
     if (!TOKEN) return p;
     return p + (p.indexOf("?") >= 0 ? "&" : "?") + "token=" + encodeURIComponent(TOKEN);
+  }
+  /** 所有 API fetch 的唯一出口：注入 x-record-token 头（与已有 init.headers 合并，后者优先同名键以外的都不冲突） */
+  function apiFetch(p, init) {
+    var headers = { "x-record-token": TOKEN };
+    if (init && init.headers) {
+      for (var k in init.headers) headers[k] = init.headers[k];
+    }
+    var next = init ? Object.assign({}, init) : {};
+    next.headers = headers;
+    return fetch(p, next);
   }
   function fmtTime(iso) {
     try {
@@ -148,7 +165,7 @@
     if (s.state === "done") return Promise.resolve(s);
     s.state = "loading";
     s.error = "";
-    s.promise = fetch(api("/api/stream/" + id))
+    s.promise = apiFetch("/api/stream/" + id)
       .then(function (r) {
         return r.json();
       })
@@ -202,7 +219,7 @@
       // v3：闸门生效时显示。correlationMode 来自 /api/state（挂载时取一次），
       // 而 recording 由 SSE state 事件实时更新 —— 两者相与，/record off 后立刻熄灭，
       // 不依赖 rewrite 块的刷新。
-      '<span v-if="recording && correlationMode === \'exact\'" class="badge gate" title="改写规则已启用：provider 请求经串行化闸门按序发送">串行化中</span>' +
+      '<span v-if="recording && correlationMode === \'exact\'" class="badge gate" title="改写规则已启用：请求按票据精确归属改写">规则生效中</span>' +
       "<nav>" +
       '<button v-for="t in tabs" :key="t.key" class="tab" :class="{ active: activeTab === t.key }" @click="$emit(\'tab\', t.key)">{{ t.label }}</button>' +
       '<button id="themeBtn" :title="themeTitle" @click="$emit(\'theme\')">{{ themeIcon }}</button>' +
@@ -516,7 +533,7 @@
               "等待超时 · " + self.streamRows.length + " chunk（可稍后到 #" + id + " 的「流式」子页查看）";
             return;
           }
-          fetch(api("/api/stream/" + id))
+          apiFetch("/api/stream/" + id)
             .then(function (r) {
               return r.json();
             })
@@ -575,7 +592,7 @@
         if (this.headersError || this.payloadError) return;
         var self = this;
         this.sending = true;
-        fetch(api("/api/replay"), {
+        apiFetch("/api/replay", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -897,12 +914,12 @@
       },
     },
     computed: {
-      // v3：关联模式（§1.8）—— settings 为主，/api/state 的 rewrite 兜底
+      // v3：关联模式（§1.8）—— settings 为主，/api/state 的 rewrite 兜底（r2 起串行化闸门退役，改票据归属）
       correlationText: function () {
         var s = this.settings || {};
         var mode = s.correlation_mode || (this.stateRewrite && this.stateRewrite.correlation_mode);
         if (mode === "inactive") return "未生效（录制已关闭）";
-        return mode === "exact" ? "精确（串行化生效）" : "尽力而为";
+        return mode === "exact" ? "精确（票据归属）" : "尽力而为";
       },
       // 录制关闭导致引擎停机。recording 用 prop（SSE 实时），
       // 规则数用 settings/stateRewrite 快照；prop 缺省时按 true 处理，避免旧 payload 误报停用。
@@ -912,11 +929,6 @@
         var rules = s.enabled_rules;
         if (rules == null && this.stateRewrite) rules = this.stateRewrite.enabled_rules;
         return (rules || 0) > 0;
-      },
-      // gate 计数（队列深度 / holder / 交接超时 / 旁路 / 上限）
-      gate: function () {
-        var s = this.settings || {};
-        return s.gate || (this.stateRewrite && this.stateRewrite.gate) || null;
       },
       // V12：Codex WS 绕过检测（/api/state rewrite.codex_ws_warning，settings 兜底）
       codexWsWarning: function () {
@@ -995,7 +1007,7 @@
           }
         }
         var self = this;
-        fetch(api(f.id == null ? "/api/rewrite/rules" : "/api/rewrite/rules/" + f.id), {
+        apiFetch(f.id == null ? "/api/rewrite/rules" : "/api/rewrite/rules/" + f.id, {
           method: f.id == null ? "POST" : "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(this.rulePayload(f)),
@@ -1019,7 +1031,7 @@
       remove: function (r) {
         if (!window.confirm("删除规则「" + r.name + "」？")) return;
         var self = this;
-        fetch(api("/api/rewrite/rules/" + r.id), { method: "DELETE" })
+        apiFetch("/api/rewrite/rules/" + r.id, { method: "DELETE" })
           .then(function () {
             self.$emit("reload");
           })
@@ -1028,7 +1040,7 @@
       /** enabled 复选框：点击即全量 PUT（服务端契约 PUT 为全量更新） */
       toggle: function (r) {
         var self = this;
-        fetch(api("/api/rewrite/rules/" + r.id), {
+        apiFetch("/api/rewrite/rules/" + r.id, {
           method: "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -1050,7 +1062,7 @@
       saveSettings: function () {
         var self = this;
         this.settingsMsg = "";
-        fetch(api("/api/rewrite/settings"), {
+        apiFetch("/api/rewrite/settings", {
           method: "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -1087,15 +1099,14 @@
       '<template v-if="settings">' +
       '<div class="rw-row"><label>jq 路径（留空 = 从 PATH 查找）</label><input type="text" v-model="settingsForm.jq_path" placeholder="jq"></div>' +
       '<div class="rw-row"><label>超时（毫秒，100–60000）</label><input type="text" v-model="settingsForm.timeout_ms"></div>' +
-      // v3：串行化闸门参数收进折叠「高级」区（§3.9 范围由服务端校验，越界 400）
-      '<details class="rw-adv"><summary>高级（串行化闸门参数，毫秒）</summary>' +
-      '<div class="rw-row"><label>交接超时 serialize_handoff_ms（1000–60000）：hook 拿锁后无 fetch 的看门狗</label><input type="text" v-model="settingsForm.serialize_handoff_ms"></div>' +
-      '<div class="rw-row"><label>重试宽限 serialize_retry_grace_ms（1000–120000）：可重试状态后保留槽位等待 retry</label><input type="text" v-model="settingsForm.serialize_retry_grace_ms"></div>' +
-      '<div class="rw-row"><label>持有上限 serialize_max_hold_ms（5000–600000）：槽位绝对持有上限</label><input type="text" v-model="settingsForm.serialize_max_hold_ms"></div>' +
-      '<div class="rw-row"><label>等待上限 serialize_queue_wait_ms（1000–300000）：排队超时后旁路放行（归属降级）</label><input type="text" v-model="settingsForm.serialize_queue_wait_ms"></div>' +
+      // 串行化闸门已退役（traffic-merge r2：改写按票据归属）；四个 serialize_* 键停用，仅展示旧值
+      '<details class="rw-adv"><summary>高级（串行化参数，毫秒）— 已停用（r2 票据归属）</summary>' +
+      '<div class="rw-row"><label>交接超时 serialize_handoff_ms（已停用）</label><input type="text" v-model="settingsForm.serialize_handoff_ms" :disabled="true"></div>' +
+      '<div class="rw-row"><label>重试宽限 serialize_retry_grace_ms（已停用）</label><input type="text" v-model="settingsForm.serialize_retry_grace_ms" :disabled="true"></div>' +
+      '<div class="rw-row"><label>持有上限 serialize_max_hold_ms（已停用）</label><input type="text" v-model="settingsForm.serialize_max_hold_ms" :disabled="true"></div>' +
+      '<div class="rw-row"><label>等待上限 serialize_queue_wait_ms（已停用）</label><input type="text" v-model="settingsForm.serialize_queue_wait_ms" :disabled="true"></div>' +
       "</details>" +
       '<div class="rw-engine">版本: {{ settings.jq_version || "未知" }} · <span :class="settings.jq_available ? \'rw-ok\' : \'rw-bad\'">{{ settings.jq_available ? "可用" : "不可用" }}</span> · 关联模式: {{ correlationText }}</div>' +
-      '<div v-if="gate" class="rw-engine">串行化闸门: 队列 {{ gate.queueDepth != null ? gate.queueDepth : 0 }} · 持有 {{ gate.holderId != null ? "#" + gate.holderId : "无" }} · 交接超时 {{ gate.gateNoFetch != null ? gate.gateNoFetch : 0 }} · 旁路 {{ gate.gateBypassed != null ? gate.gateBypassed : 0 }} · 上限 {{ gate.gateTimeouts != null ? gate.gateTimeouts : 0 }}</div>' +
       '<div v-if="settings.db_error" class="rw-err">数据库错误（改写引擎已停用，请求放行）: {{ settings.db_error }}</div>' +
       // 录制关闭 = 改写引擎整体停机（含重放）。有启用规则却不生效时必须说明，否则用户会以为规则在工作。
       '<div v-if="inactiveByRecording" class="rw-err">录制已关闭：改写引擎不介入，provider 请求与重放均原样放行。在 pi 中执行 /record on 启用改写。</div>' +
@@ -1179,7 +1190,7 @@
       var rules = ref([]);
       var rulesLoading = ref(false);
       var rewriteSettings = ref(null);
-      // v3：/api/state 的 rewrite 块（correlation_mode / gate / codex_ws_warning 等），DB 故障时可能缺失
+      // v3：/api/state 的 rewrite 块（correlation_mode / codex_ws_warning 等），DB 故障时可能缺失
       var rewriteInfo = ref(null);
       var toasts = ref([]); // {id, kind:'error'|'warn', text}
       var toastSeq = 0;
@@ -1254,7 +1265,7 @@
 
       // ---- 数据加载 ----
       function loadState() {
-        return fetch(api("/api/state"))
+        return apiFetch("/api/state")
           .then(function (r) {
             return r.json();
           })
@@ -1266,7 +1277,7 @@
           .catch(function () {});
       }
       function loadSessions() {
-        return fetch(api("/api/sessions"))
+        return apiFetch("/api/sessions")
           .then(function (r) {
             return r.json();
           })
@@ -1278,10 +1289,10 @@
       function refreshLive(force) {
         var sid = liveSid.value || "";
         var url = sid
-          ? api("/api/requests?session_id=" + encodeURIComponent(sid) + "&limit=300")
-          : api("/api/requests?limit=300");
+          ? "/api/requests?session_id=" + encodeURIComponent(sid) + "&limit=300"
+          : "/api/requests?limit=300";
         var gen = ++liveGen;
-        fetch(url)
+        apiFetch(url)
           .then(function (r) {
             return r.json();
           })
@@ -1326,7 +1337,7 @@
           historyDetail.value = null;
         }
         historyRowsLoading.value = true;
-        fetch(api("/api/requests?session_id=" + encodeURIComponent(sid) + "&limit=500"))
+        apiFetch("/api/requests?session_id=" + encodeURIComponent(sid) + "&limit=500")
           .then(function (r) {
             return r.json();
           })
@@ -1357,7 +1368,7 @@
         detailRef.value = null;
         errorRef.value = "";
         loadingRef.value = true;
-        fetch(api("/api/requests/" + id))
+        apiFetch("/api/requests/" + id)
           .then(function (r) {
             return r.json();
           })
@@ -1395,7 +1406,7 @@
           exportInfo.value = null;
           return;
         }
-        fetch(api("/api/sessions"))
+        apiFetch("/api/sessions")
           .then(function (r) {
             return r.json();
           })
@@ -1411,7 +1422,7 @@
       // ---- 改写规则 / 引擎设置（tab 激活或 SSE rewrite_rules 时加载） ----
       function loadRules() {
         rulesLoading.value = true;
-        return fetch(api("/api/rewrite/rules"))
+        return apiFetch("/api/rewrite/rules")
           .then(function (r) {
             return r.json();
           })
@@ -1424,7 +1435,7 @@
           });
       }
       function loadSettings() {
-        return fetch(api("/api/rewrite/settings"))
+        return apiFetch("/api/rewrite/settings")
           .then(function (r) {
             return r.json();
           })
@@ -1442,6 +1453,7 @@
       });
 
       var exportHref = computed(function () {
+        // 导出是 <a> 导航（无法带自定义头）：保留 ?token= 查询参数（GET 接受）
         return exportSid.value ? api("/api/export?session_id=" + encodeURIComponent(exportSid.value)) : "#";
       });
 
