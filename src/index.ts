@@ -101,6 +101,7 @@ import { createStatusCommand } from "./commands/status.js";
 import { createWebHubCommand } from "./commands/webhub.js";
 import { wireWebHub, type WebHubControl } from "./web-hub/agent/index.js";
 import { renderXsMessage } from "./fabric/xs/render.js";
+import { renderToolkitMessage, TOOLKIT_LABELLED_CUSTOM_TYPES } from "./ui/toolkit-message-renderer.js";
 import { renderTaskStartedMessage, TASK_STARTED_CUSTOM_TYPE, createTaskCommand } from "./commands/task.js";
 import { createGoalCommand } from "./goal/command.js";
 import { createGoalLoopHook } from "./goal/hook.js";
@@ -1197,6 +1198,8 @@ export default function activate(rawPi: ExtensionAPI): void {
     pi.registerMessageRenderer(TASK_STARTED_CUSTOM_TYPE, renderTaskStartedMessage);
     // RX7 D-display: clean TUI form for received cross-session messages (wake/deliver/reply).
     pi.registerMessageRenderer("subagent:xs", renderXsMessage);
+    // Display-only label `[toolkit:x]` instead of `[subagent:x]` (customType names are persisted data).
+    for (const type of TOOLKIT_LABELLED_CUSTOM_TYPES) pi.registerMessageRenderer(type, renderToolkitMessage);
   }
 
   // X6: @handle mentions. Registered once; resolves through the current
