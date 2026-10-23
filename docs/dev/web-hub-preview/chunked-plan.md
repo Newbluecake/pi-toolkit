@@ -707,3 +707,10 @@ function takeSegments() {
 | r3  | Major（真浏览器实测） | **采纳**（2026-10-15，主会话授权）。`createSourceSegmenter` 的切点规则把 `\r\n` 当整体行终止符：段尾行去掉 `\r` 后必须非空，空 CRLF 行不得作为段尾；补 CRLF 固定用例 + 属性不变式 (e)；`seg-parity-snippet.js` 语料重新生成                                                                                                                                                                                        | §4.3.4、§6.2                                        |
 
 「用户拍板（2026-10-14）」一节（D1/D10/D11/D12）保持不变。
+
+## 修订记录 r4（2026-10-23，preview-perf P3/P5/P4 登记，只登记不改正文）
+
+- **流式源码视图改虚拟渲染**（preview-perf plan r3 §4.1/§4.8，commit 8ab06bb4）：行号开、`PREVIEW_VIRTUAL_ENABLED=true`（构建期默认）时，流式源码视图**一律**走 `VirtualCode`（32 行块虚拟化），不再逐段 `CodeLines`；渲染器由 `chooseSourceRenderer` 决定。
+- **D9 / P2b「旧段从不替换」在本路径上的字面约束被替换**：虚拟流式的新不变式（preview-perf plan §4.8）——只扫描新增内容；稳定的行不重算；append 只改动「最后一个未完成行所在的块」和新增的块，其余已挂载块的 props 引用不变；总高只在底部增长；选区活跃时最后一行的变化排队。`content-visibility` 禁令不变。
+- **不变的部分**：legacy 段路径（行号关 / 完整视图）与 Markdown 流式视图契约完全不变；8000 行累计降级只在 `virtualEnabled=false` 的 r0 分支可达；`seg-parity-snippet.js` 继续覆盖 legacy 段；分段协议（ident/offset/cap `preview.chunk.v1`）与 hub 侧零改动。
+- 高亮：流式仍不高亮；非流式虚拟体经 P5 Worker 放宽闸门（256 KiB / 80k token）分词，回落维持本线原有主线程闸门（见 preview-perf plan §5.3）。

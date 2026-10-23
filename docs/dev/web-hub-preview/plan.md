@@ -874,3 +874,21 @@ caps 对照：off 时与现状深相等；loopback 时多出 `preview.v1`；on �
 ### 测试锚点
 
 `tests/web-hub/hub/preview/probe.test.ts`（逐条 kind/准入同链/请求级拒绝/上限/dispose/审计）、`tests/web-hub/http/api-preview-probe.test.ts`（真实 frontend 派发 + 认证对齐 + 方法钉）、`tests/web-hub/ui/logic-preview-probe.test.ts`（store/LRU/切批/应答解析）、`tests/web-hub/ui/use-preview-probe.test.ts`（状态机/单请求合并/LRU 免重发/失败降级/scope 重探/dispose）、`tests/web-hub/ui/preview-probe-path-text.test.ts`（组件渲染升级、missing 保持纯文本、相对路径按绝对路径探测、无 probe 旧版行为、TxAssistant 单批合并、流式不探测）。
+
+## 追加修订（2026-10-23，preview-perf P4 登记：预览行号契约变化）
+
+> 行号功能本体（commit 72fa2abe，2026-10-23「show line numbers in source previews」）**没有独立方案文件**——
+> 该包未经 SDD 直改落地；本登记落在预览线母方案（本文）名下，出处为 `docs/dev/preview-perf/plan.md` r3 §7
+> 契约变化清单（P4 执行登记）。
+
+- **行号开的路径不再到达 8000 行降级**（`PREVIEW_NUMBERED_LINES_MAX` / `preview.linesTooMany`）：
+  `PREVIEW_VIRTUAL_ENABLED=true`（构建期默认）时，>600 行的非流式源文件与一切行号开流式源码视图走
+  `VirtualCode` 虚拟渲染（preview-perf plan §4.1 渲染器选择表）；降级路径只在 `virtualEnabled=false` 的
+  r0 分支可达（保留不清理）。
+- **虚拟模式下 `pre.textContent` 只包含已挂载块**（视口 ± overscan 的 32 行块），不再等于全文；
+  「已加载全文」只能经复制语义取得——头部「复制」按钮 / Ctrl/⌘+A 逻辑全选后的 Ctrl+C（copyValue）、
+  完整视图、下载。
+- **`CodeLines.vue` 零改动**：其 `continuation`（续行头）能力只在 `virtualEnabled=false` 的 r0 流式分支
+  中使用；虚拟模式由 `VirtualBlock.vue` 输出同一套 DOM 语法（preview-perf plan §4.2）。
+- 相关登记：流式源码视图的变化见 `chunked-plan.md` 修订记录 r4；窗口几何/虚拟/查找/完整视图见
+  `docs/dev/web-hub-preview-windows/plan.md` r2 修订记录追加行。

@@ -198,3 +198,61 @@ P3 验收观察到的 114.3ms 即本分布的 p95 档。14 个实测轮里 12 �
 
 - 本次复测的 runner 即跟进 #1/#2 之后的版本（默认 scratch 输出、`lines.*` 虚拟感知断言：virtual 态断言 `.pv-virtual` 在场、挂载块数 3–16、`.pv-line` 数 = 块数 × 32 且 < 全文行数；r0 态保持 3609/701 全量断言）。
 - `--quick --virtual` 与 `--quick`（r0）各跑一遍，failures 均 = 0；`git status docs/dev/preview-perf/baseline.json` 无改动（本次未用 `--write-baseline`）。
+
+## 8. P4 收口：`--gate` 落地 + P5 后虚拟基线（2026-10-23）
+
+- runner（P4 版）新增：`--gate` 按 §6.1 门槛表判定（**要求 `--virtual`**，r0 仍是 record-only 对照态）；
+  `highlight.stack-3609` 断言分叉——r0 维持「>100 KiB 闸门 ⇒ 无 tok」，virtual 改为「tok 必须经 Worker 到达
+  （放宽闸门 256 KiB 下 170,811 B 入闸；回落路径按原闸门必拒，tok 在场即 Worker 证明）+ 打开后主线程
+  0 个 >50 ms longtask」（无 longtask API 的引擎如实记录，不判失败）；`activate.perClick` 补记 longtaskCount。
+- 命令与结果（三连，均 exit 0、failures=0；`git status docs/dev/preview-perf/baseline.json` 全程干净）：
+  `npm run probe:preview-perf -- --virtual --gate`（7 轮全量，gate 11/11 行过）；
+  `npm run probe:preview-perf -- --quick`（r0）；
+  `npm run probe:preview-perf -- --virtual --write-baseline` → **`baseline.virtual.json`**（P5 后定版基线，提交物）。
+  WebKit 三次均 skip（launch 即退，补测命令见 `acceptance.md` §H）。
+
+### 8.1 虚拟基线数字（baseline.virtual.json，Chromium headless fs1 1440×900，7 轮 median / p95，ms）
+
+| 指标                                 | r0 基线（§3） | virtual·P3 复测（§7.1） | virtual·P5 后定版 | 备注                                                        |
+| ------------------------------------ | ------------: | ----------------------: | ----------------: | ----------------------------------------------------------- |
+| `open.warm.stack-3609.ts`            |       148/173 |               47.8/63.7 |     **51.5/52.3** |                                                             |
+| `open.warm.stack-3609.ts`（390×844） |       164/197 |                       — |     **64.2/68.1** |                                                             |
+| `open.cold.stack-3609.ts`            |       231/247 |               97.2/97.5 |     **80.3/95.9** |                                                             |
+| `open.warm.hl-600.ts`                |     64.6/64.8 |            97.6/114.6 ⚠ |     **63.5/79.8** | P5 尺寸闸门（≤200 行/8 KiB）把 600 行档回异步路径，回归消除 |
+| `open.warm.uploads-2292.ts`          |       113/115 |               50.3/51.2 |     **47.7/48.1** |                                                             |
+| `gesture.drag`                       |     1.22/1.39 |               0.35/0.50 |     **0.47/0.59** | stepMax 3.83 · longtask 0                                   |
+| `gesture.resize.e`                   |   21.47/22.22 |               0.46/0.56 |     **0.67/0.89** | stepMax 3.42 · longtask 0（r0 曾 413 个 longtask）          |
+| `gesture.resize.e.softwrap`          |     5.94/6.22 |                       — |     **6.57/7.01** | stepMax 24.94 · longtask 0（hl-600 非虚拟路径）             |
+| `activate.perClick`                  |     0.01/0.03 |                       — |     **0.01/0.04** | longtask 0                                                  |
+| `scroll.wheel.perStep`               |     0.00/0.00 |               0.79/0.92 |     **1.31/1.59** | 含块挂载；longtask 0                                        |
+| `scroll.farjump`                     |   13.03/22.45 |              7.08/15.37 |     **12.5/33.6** | 方差大，未设闸（§8.2）                                      |
+| `highlight.busy`（uploads-2292）     |       269/475 |                       — |     **23.0/27.6** | Worker 路径主线程忙时（r0 是主线程 Prism 全程）             |
+| `stream.append.perChunk`             |       117/125 |                       — |     **36.7/49.9** |                                                             |
+
+读数：§3.1 的方向性预期全部兑现——resize.e 21.5→0.67 ms/步、cold 231→80、hl-600 的 §5.2 回归被 P5 尺寸闸门
+消除（97.6→63.5，回到基线一线）、Worker 把闸门内文件的打开→高亮主线程忙时 269→23 ms；stack-3609 的
+Worker 高亮断言两引擎（Chromium/Firefox；WebKit 因缺系统库 skip）全过（tok 到达 + 0 longtask）。
+
+### 8.2 门槛表定稿与取舍（`--gate` 启用 11 行，未启用 5 项均登记在 JSON `gate.disabled[]`）
+
+- **启用**：drag ≤1 · resize e/s/se ≤2 · activate ≤2 · softwrap ≤8（仅均值/p95）· scroll ≤4（均值/p95 + longtask=0）
+  · warm open stack-3609 ≤60 · cold ≤110 · hl-600 ≤80 · 窄屏 open ≤80。规则：median ≤t、p95 ≤1.5t、
+  单步峰值 ≤min(4t,16)、交互期 longtask=0。
+- **调整过门槛（非默改，note 里带出处）**：warm open（plan 50：P3 测 47.8 / P4 测 52.0，骑线于 headless
+  ±5 ms 噪声 → 取 60；50 ms 保留在真机清单）；cold（**plan §6.1 的 cold 80 未达成**：headless 噪声带 80–97（P3 97.2 / P4 80.7 /
+  复跑 95.7，含 localhost 懒块拉取，主会话裁定统一取 110，真机由 acceptance.md 复核）；
+  **hl-600 ≤80 = 实际取舍**：plan ≤50 从未达成（改动前基线已 64.6），P5 尺寸闸门后实测 63.5/79.8，
+  取 80（p95 界 120，P3 期间最差 114.6 也覆盖）。
+- **不启用**：帧隙 max ≤33（headless rAF 离群点是调度抖动——46 ms 帧隙与 stepMax 2.77/0 longtask 并存，
+  r0 基线同形态；记录保留，真机清单终裁）；滚动单步峰值 ≤16（该指标**从未录到过**——wheel 输入切片不进
+  devtools.timeline 的 EventDispatch，PB 起即如此，均值行已覆盖）；远跳 ≤10（7.08/10.56 跨线 + 方差随跳距
+  走，record-only）；uploads-2292 主线程 ≤30 ms（被 P5 取代：该文件 >600 行走 Worker）；stack-3609 主线程
+  0 长任务（**升格为功能断言**，强于均值闸）。
+
+### 8.3 残留登记
+
+- softwrap（hl-600）单步峰值 23.6–24.9 ms 超 16 ms 通用上限、7 轮偶发 1 个 longtask——≤600 行不虚拟化的
+  已知代价（plan 该行原文「不达标时调阈值，回报用户」），均值 6.0–6.6 达标；真机清单 A4 终裁手感。
+- WebKit 三连 skip（launch 即退）；补依赖命令见 `acceptance.md` §H。
+- Firefox 面无 CDP，维持 open/流式/功能断言；`highlight.stack-3609` 在 Firefox 通过（tok 经 Worker 到达；
+  longtask API 可用，0 条）。

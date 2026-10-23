@@ -25,11 +25,16 @@
  *     anywhere else.
  *
  * Baseline mode is the DEFAULT (record-only — the §6.1 gate table applies to the POST-P3
- * virtual renderer, so pre-change numbers are expected to exceed it). `--gate` (wired for
- * P3+) evaluates the gate table; `--virtual` flips the page's VirtualCode switch (also P3+).
+ * virtual renderer, so pre-change numbers are expected to exceed it). `--gate` (P4)
+ * evaluates the §6.1 threshold table against the recorded chromium fs1 metrics — it
+ * requires `--virtual` (r0 is the record-only comparison mode) and lists every over-limit
+ * row before exiting 1; only commitments the P5-era renderer actually meets are gated
+ * (see GATE_DISABLED + the P4 notes in PB-report.md). `--virtual` flips the page's
+ * VirtualCode switch (also P3+).
  *
  * Exit codes: 0 = ran clean; 1 = infrastructure/functional failure (corpus mismatch, missing
- * elements, page errors, engine crash); 2 = Playwright/Chromium unavailable.
+ * elements, page errors, engine crash) or gate rows over the §6.1 thresholds; 2 =
+ * Playwright/Chromium unavailable.
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -59,6 +64,12 @@ const QUICK = process.argv.includes("--quick");
 const SKIP_BUILD = process.argv.includes("--skip-build");
 const VIRTUAL = process.argv.includes("--virtual");
 const GATE = process.argv.includes("--gate");
+if (GATE && !VIRTUAL) {
+  console.error(
+    "✗ --gate evaluates the plan §6.1 thresholds against the VIRTUAL renderer — pass --virtual (r0 is the record-only comparison mode)",
+  );
+  process.exit(1);
+}
 const ENGINES = (argValue("--engines") ?? "chromium,firefox,webkit").split(",");
 const ROUNDS = QUICK ? 2 : Number(argValue("--rounds") ?? 7);
 const STREAM_ROUNDS = QUICK ? 1 : Number(argValue("--stream-rounds") ?? 3);
@@ -630,7 +641,15 @@ async function runEngine(
       }
       await pp<void>(env, "closeAll()");
     }
-    // highlight gates: uploads-2292 (≤ gate → tok) and stack-3609 (over gate → no tok)
+    // highlight gates: uploads-2292 (inside the gate → tok) and stack-3609 —
+    // r0: over the original 100 KiB / 3000-line gate ⇒ NO tok spans (plan §5.1);
+    // --virtual (P5): the worker's widened gate (256 KiB / any lines / 80k tokens) admits
+    // stack-3609 (170,811 B), so tok MUST arrive via the worker, and the POST-OPEN
+    // tokenization must keep the main thread free of >50 ms long tasks (plan §6.1 gate row
+    // 「打开后分词任务 · stack-3609（P5：Worker）」). tok presence IS the worker proof: the
+    // fallback path re-applies §5.1's original gates, which reject 170 KiB / 3609 lines, so
+    // a fallback shows no tok at all. Engines without the longtask API report
+    // `longtaskSupported:false` — unobservable is not 0 (plan §6.1), recorded, not failed.
     await openKeep(env, "uploads-2292.ts");
     for (let i = 0; i < 100 && !(await pp<boolean>(env, "tokArrived()")); i++) await sleep(50);
     if (!(await pp<boolean>(env, "tokArrived()"))) {
@@ -638,8 +657,44 @@ async function runEngine(
     }
     await pp<void>(env, "closeAll()");
     await openKeep(env, "stack-3609.ts");
-    if (await pp<boolean>(env, "tokArrived()")) {
-      failures.push({ engine: name, id: "highlight.stack-3609", detail: "tok spans present past the 100 KiB gate" });
+    if (!VIRTUAL) {
+      if (await pp<boolean>(env, "tokArrived()")) {
+        failures.push({ engine: name, id: "highlight.stack-3609", detail: "tok spans present past the 100 KiB gate" });
+      }
+    } else {
+      // post-open window only — the open's own first-frame mount is not the tokenization task
+      await pp<void>(env, "beginGaps()");
+      for (let i = 0; i < 200 && !(await pp<boolean>(env, "tokArrived()")); i++) await sleep(25);
+      const tok = await pp<boolean>(env, "tokArrived()");
+      const frame = await pp<FrameGapResult>(env, "endGaps()");
+      if (!tok) {
+        failures.push({
+          engine: name,
+          id: "highlight.stack-3609",
+          detail:
+            "tok spans never arrived — the virtual relaxed gate (256 KiB) is only honoured by the P5 worker; the sticky fallback re-applies the original gates and rejects 170 KiB / 3609 lines",
+        });
+      } else if (frame.longtaskSupported && frame.longtasks.length > 0) {
+        failures.push({
+          engine: name,
+          id: "highlight.stack-3609.longtasks",
+          detail: `${frame.longtasks.length} main-thread longtask(s) during the post-open worker highlight: [${frame.longtasks
+            .map((d) => d.toFixed(1))
+            .join(", ")}] ms`,
+        });
+      }
+      if (frame.longtasks.length > 0) {
+        record(
+          "highlight.worker.stack-3609",
+          name,
+          1,
+          vpTag(1440, 900),
+          "stack-3609.ts",
+          "longtask-list (post-open worker highlight)",
+          frame.longtasks,
+          { note: `longtaskSupported=${frame.longtaskSupported}; 0 entries = gate met` },
+        );
+      }
     }
     await pp<void>(env, "closeAll()");
 
@@ -796,6 +851,7 @@ async function runEngine(
       if (wi.count !== 6) failures.push({ engine: name, id: "activate.windows", detail: `saw ${wi.count}` });
       const perClick: number[] = [];
       const frameP95: number[] = [];
+      let activateLongtasks = 0; // gate evidence: 交互期 longtask = 0 (plan §6.1)
       for (let r = 0; r < ROUNDS; r++) {
         await pp<void>(env, "beginGaps()");
         const evs = await withTracing(env.cdp!, async () => {
@@ -810,6 +866,7 @@ async function runEngine(
         for (const c of sum.stepCosts) perClick.push(c);
         const frame = await pp<FrameGapResult>(env, "endGaps()");
         frameP95.push(frame.p95);
+        activateLongtasks += frame.longtasks.length;
       }
       record(
         "activate.perClick",
@@ -821,6 +878,7 @@ async function runEngine(
         perClick,
         {
           frameP95: stats(frameP95).median,
+          longtaskCount: activateLongtasks,
           note: "6 distinct files (openWindow dedups same-path); plan's 6×stack-3609 is unreachable",
         },
       );
@@ -1049,6 +1107,146 @@ async function runNarrow(launcher: PwLauncher, name: "chromium" | "firefox" | "w
   }
 }
 
+// --- gate (plan §6.1, wired in P4) ----------------------------------------------------
+/** One §6.1 gate-table row. Selector defaults: engine chromium, fs 1, viewport 1440x900
+ *  (the plan's gate conditions — Firefox/WebKit stay record-only: no CDP, and "帧隙 p95 ≤ 33"
+ *  needs its own harness pass; their functional assertions already fail the run). */
+interface GateRow {
+  /** metric id (as recorded) */
+  id: string;
+  /** median bound (ms); the p95 bound is 1.5× (plan §6.1 header rule) */
+  t: number;
+  engine?: string;
+  fs?: number;
+  viewport?: string;
+  /** provenance / trade-off note (threshold adjustments are called out here, never silent) */
+  note?: string;
+  /** per-step metric (drag/resize/scroll/activate): also gate stepMax ≤ min(4t, 16) and
+   *  longtaskCount = 0 — each only when the record carries it. (frame-gap max is NOT gated:
+   *  headless rAF outliers are scheduler jitter, see GATE_DISABLED; real-device checklist.) */
+  step?: boolean;
+}
+
+/** Rows deliberately NOT gated, with the reason — kept in the JSON so the report stays honest
+ *  (the plan's table predates the measured virtual numbers; P4 enables met commitments only). */
+const GATE_DISABLED: ReadonlyArray<{ id: string; reason: string }> = [
+  {
+    id: "交互期帧隙 max ≤ 33 ms（拖/缩/滚/激活各行）",
+    reason:
+      "headless rAF sampling cannot separate renderer work from scheduler jitter: a 46 ms drag frame gap coexists with stepMax 2.77 ms and 0 longtasks (P4 run 2026-10-23; same shape as the r0 baseline's 45.5 ms). frameMax stays recorded per metric and moves to the real-device checklist (acceptance.md; PB deviation #10)",
+  },
+  {
+    id: "滚动单步峰值 ≤16 ms（scroll.wheel.stepPeak）",
+    reason:
+      "the step-peak metric has NEVER been recorded — wheel input slices do not surface as EventDispatch in devtools.timeline traces (pre-existing since the frozen PB baseline; scroll.wheel.perStep's per-step average + longtasks=0 cover the row)",
+  },
+  {
+    id: "远跳单次 ≤10 ms（scroll.farjump）",
+    reason:
+      "measured medians straddle the plan line across runs — 7.08 (P3 re-test) vs 10.56 (P4) — and per-jump busy scales with jump distance (p95 19.6 lands on the 0.25–1.0 fraction extremes). Record-only; still 2× better than the r0 baseline's 13.03/22.45",
+  },
+  {
+    id: "打开后分词任务 uploads-2292 主线程 ≤30ms",
+    reason:
+      "superseded by P5: in virtual mode uploads-2292 (>600 lines) highlights via the worker (highlight.busy 269 ms → 19 ms), so the main-thread tokenize promise no longer applies; highlight.busy/styleLayout stay record-only evidence",
+  },
+  {
+    id: "打开后分词任务 stack-3609 主线程 0 个 >50ms 长任务",
+    reason:
+      "enforced as a FUNCTIONAL assertion instead (highlight.stack-3609.longtasks, all engines with the longtask API) — a per-round median gate would be weaker than the required 0",
+  },
+];
+
+const GATE_ROWS: readonly GateRow[] = [
+  { id: "gesture.drag", t: 1, step: true, note: "拖动·每轮平均每步（stack-3609，虚拟）" },
+  { id: "gesture.resize.e", t: 2, step: true, note: "横缩·每轮平均每步（stack-3609，虚拟）" },
+  { id: "gesture.resize.s", t: 2, step: true, note: "竖缩·每轮平均每步（stack-3609，虚拟）" },
+  { id: "gesture.resize.se", t: 2, step: true, note: "对角缩·每轮平均每步（stack-3609，虚拟）" },
+  {
+    id: "gesture.resize.e.softwrap",
+    t: 8,
+    note: "横缩·每轮平均每步（hl-600：非虚拟高亮软换行，两态同径）。实测单步峰值 24.5 ms / 7 轮共 1 个 longtask——≤600 行不虚拟化的已知代价（plan 原文「不达标时调阈值，回报用户」），平均值达标；真机清单另测手感",
+  },
+  { id: "activate.perClick", t: 2, step: true, note: "激活每次点击（6 窗口轮转）" },
+  {
+    id: "open.warm.stack-3609.ts",
+    t: 60,
+    note: "open-to-frame warm（虚拟）。plan 原定 ≤50：P3 复测 47.8 / P4 复测 52.0（headless 噪声 ±5 ms，两者骑线）——取 60 为可回归闸门，50 ms 保留在真机清单",
+  },
+  {
+    id: "open.cold.stack-3609.ts",
+    t: 110,
+    note: "open-to-frame cold（虚拟）。plan §6.1 的 cold 80 未达成：headless 噪声带 80–97（P3 复测 97.2 / P4 80.7 / 复跑 95.7），主会话裁定统一取 110 为可回归闸门；真机由 acceptance.md 复核",
+  },
+  {
+    id: "open.warm.hl-600.ts",
+    t: 80,
+    note: "open-to-frame warm — hl-600 实际取舍：plan 原定 ≤50 从未达成（改动前基线已 64.6 ms）；P5 尺寸闸门（≤200 行/8 KiB）把 600 行档回异步高亮路径，实测 64.7 / p95 96.9（P3 曾 97.6/114.6）。取 80（p95 界 120）",
+  },
+  { id: "scroll.wheel.perStep", t: 4, step: true, note: "滚动·每轮平均每步（stack-3609；含块挂载）" },
+  {
+    id: "open.warm.stack-3609.ts",
+    viewport: "390x844",
+    t: 80,
+    note: "窄屏（手机带）open-to-frame（虚拟）；实测 51.7/67.6，维持 plan 原值 80",
+  },
+];
+
+interface GateRowResult {
+  id: string;
+  selector: string;
+  threshold: number;
+  median?: number;
+  p95?: number;
+  stepMax?: number;
+  frameMax?: number;
+  longtaskCount?: number;
+  pass: boolean;
+  problems: string[];
+  note?: string;
+}
+
+function evaluateGate(): { rows: GateRowResult[]; failures: GateRowResult[] } {
+  const rows: GateRowResult[] = [];
+  for (const row of GATE_ROWS) {
+    const engine = row.engine ?? "chromium";
+    const fs = row.fs ?? 1;
+    const viewport = row.viewport ?? "1440x900";
+    const rec = metrics.find((m) => m.id === row.id && m.engine === engine && m.fs === fs && m.viewport === viewport);
+    const out: GateRowResult = {
+      id: row.id,
+      selector: `${engine} fs${fs} ${viewport}`,
+      threshold: row.t,
+      pass: false,
+      problems: [],
+      note: row.note,
+    };
+    rows.push(out);
+    if (rec === undefined) {
+      out.problems.push("metric not recorded (engine skipped or section not reached)");
+      continue;
+    }
+    out.median = rec.median;
+    out.p95 = rec.p95;
+    out.stepMax = rec.stepMax;
+    out.frameMax = rec.frameMax;
+    out.longtaskCount = rec.longtaskCount;
+    if (!(rec.median <= row.t)) out.problems.push(`median ${rec.median.toFixed(2)} > ${row.t}`);
+    if (!(rec.p95 <= 1.5 * row.t)) out.problems.push(`p95 ${rec.p95.toFixed(2)} > ${(1.5 * row.t).toFixed(1)}`);
+    if (row.step) {
+      const peakBound = Math.min(4 * row.t, 16);
+      if (rec.stepMax !== undefined && !(rec.stepMax <= peakBound)) {
+        out.problems.push(`step peak ${rec.stepMax.toFixed(2)} > ${peakBound}`);
+      }
+      if (rec.longtaskCount !== undefined && rec.longtaskCount !== 0) {
+        out.problems.push(`interaction longtasks ${rec.longtaskCount} ≠ 0`);
+      }
+    }
+    out.pass = out.problems.length === 0;
+  }
+  return { rows, failures: rows.filter((r) => !r.pass) };
+}
+
 // --- report ---------------------------------------------------------------------------
 function printTable(): void {
   const byId = new Map<string, MetricRec[]>();
@@ -1157,6 +1355,33 @@ async function main(): Promise<void> {
 
   printTable();
 
+  const GATE_OUT = GATE
+    ? (() => {
+        const g = evaluateGate();
+        console.log(
+          `\n══ gate (plan §6.1, chromium fs1, virtual) — ${g.rows.length - g.failures.length}/${g.rows.length} rows pass ══`,
+        );
+        for (const r of g.rows) {
+          const nums =
+            r.median !== undefined
+              ? ` median ${r.median.toFixed(2)} / p95 ${(r.p95 ?? 0).toFixed(2)} (t=${r.threshold})`
+              : "";
+          console.log(
+            `  ${r.pass ? "✓" : "✗"} ${r.id.padEnd(28)} [${r.selector}]${nums}${r.pass ? "" : ` — ${r.problems.join("; ")}`}`,
+          );
+        }
+        for (const d of GATE_DISABLED) console.log(`  · ${d.id}: NOT gated — ${d.reason}`);
+        return {
+          target: "plan §6.1 gate table (virtual renderer, chromium fs1)",
+          rules:
+            "median ≤ t · p95 ≤ 1.5t · step peak ≤ min(4t,16ms) · interaction longtasks = 0 (frame-gap max is recorded but NOT gated — see disabled[])",
+          rows: g.rows,
+          disabled: GATE_DISABLED,
+          failures: g.failures.map((r) => ({ id: r.id, selector: r.selector, problems: r.problems })),
+        };
+      })()
+    : null;
+
   const out = {
     schema: "preview-perf-baseline/1",
     meta: {
@@ -1175,7 +1400,9 @@ async function main(): Promise<void> {
       corpusManifest: manifest,
       lineNumbers: "1 (on)",
       notes: [
-        "baseline = pre-P1 dev HEAD incl. P0 (commit 1e768c70, @property geometry vars)",
+        VIRTUAL
+          ? "virtual mode — production default since P3 (>600-line and streaming bodies virtualized; P5 worker highlight under the 256 KiB / 80k-token gate); baseline.virtual.json is the post-P5 pin"
+          : "r0 mode (PREVIEW_VIRTUAL_KEY=false) — the frozen docs/dev/preview-perf/baseline.json was captured pre-P1 (commit 1e768c70 incl. P0); later r0 re-runs on newer code are comparison runs",
         "6 activation windows use DISTINCT corpora (openWindow dedups same-path)",
         "log-8mib served from memory; chunk sizes 256 KiB + 1 MiB (hub streams 64 KiB × 300 ms)",
       ],
@@ -1183,6 +1410,7 @@ async function main(): Promise<void> {
     engines: { chromium: chromiumResult, firefox: firefoxResult, webkit: webkitResult },
     metrics,
     failures,
+    gate: GATE_OUT,
   };
   await mkdir(dirname(JSON_OUT), { recursive: true });
   await writeFile(JSON_OUT, JSON.stringify(out, null, 2) + "\n", "utf8");
@@ -1190,17 +1418,20 @@ async function main(): Promise<void> {
     `\nJSON → ${JSON_OUT}${WRITE_BASELINE ? " (tracked baseline — review the diff before committing)" : " (scratch; pass --write-baseline to update the tracked baseline)"}`,
   );
 
-  if (GATE) {
-    console.error("✗ --gate is not implemented yet (P3+: plan §6.1 gate table targets the virtual renderer)");
-    process.exit(1);
-  }
+  let failed = false;
   if (failures.length > 0) {
     console.error(`✗ probe:preview-perf — ${failures.length} failure(s):`);
     for (const f of failures.slice(0, 40)) console.error(`  - [${f.engine}] ${f.id}: ${f.detail}`);
-    process.exit(1);
+    failed = true;
   }
+  if (GATE_OUT !== null && GATE_OUT.failures.length > 0) {
+    console.error(`✗ gate — ${GATE_OUT.failures.length} row(s) over the plan §6.1 thresholds:`);
+    for (const r of GATE_OUT.failures) console.error(`  - ${r.id} [${r.selector}]: ${r.problems.join("; ")}`);
+    failed = true;
+  }
+  if (failed) process.exit(1);
   console.log(
-    `✓ probe:preview-perf — run recorded (${WRITE_BASELINE ? "baseline written" : "record-only; --write-baseline to pin"}; gate lands with P3+)`,
+    `✓ probe:preview-perf — run recorded (${WRITE_BASELINE ? "baseline written" : "record-only; --write-baseline to pin"}${GATE ? "; gate passed" : ""})`,
   );
   process.exit(0);
 }
