@@ -248,6 +248,16 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
     const sub = tokens[0] ?? "status";
     return { policy: FABRIC_KNOWN_SUBS.has(sub) ? "allow" : "deny" };
   },
+  // /record (traffic-merge §7.4, 拍板⑦): bare/status is a read-only report and `off` an idempotent
+  // stop ⇒ allow; `on` starts recording AND the web viewer (a standing behavior change plus a
+  // listening port) ⇒ confirm; anything else can only be a typo ⇒ deny. Sub-command matching
+  // lowercases like the command handler itself (`args.trim().toLowerCase()`), so "ON" is `on`.
+  record(tokens) {
+    const sub = tokens[0]?.toLowerCase();
+    if (sub === undefined || sub === "status" || sub === "off") return { policy: "allow" };
+    if (sub === "on") return { policy: "confirm" };
+    return { policy: "deny" };
+  },
 };
 
 function tokenize(args: string): string[] {

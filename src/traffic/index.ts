@@ -2,19 +2,40 @@
  * traffic 录制——面向 pi 的唯一装配（T2a：进程容器 / engine 生命周期 / trampoline / 模式门禁）。
  *
  * 入口 `wireTraffic(pi, opts)`：**opts 缺省 = 关** ⇒ 立即返回，零注册、零 IO、零全局符号、不加载 node:sqlite。
- * T3 负责从 settings 读 `traffic.*` 后调用（主会话在 activate 末尾、子会话在 guard 前），并接入认领协议
- * （`isActive` 端口 = claim.isLive）。本包不改任何现有模块。
+ * T3 的 `assembleTrafficHost` / `assembleTrafficChild` 从 settings 读 `traffic.*` 后调用（主会话在 activate
+ * 末尾、子会话在 guard 前），并接入认领协议（`isActive` 端口 = claim 存活）。
  *
  * - host（主会话）：注册 `/record on|off|status`、钩子与 `session_shutdown`。engine 只在 `/record on`
  *   时创建（`acquireEngine(owner)`）；`/record status` 无 engine 时开短连接读计数后即关（不建容器）。
  *   网页服务 / 重放只在 `ctx.mode ∈ {tui, rpc}` 时随 `/record on` 启动（§4.1），print/json 只录制并在回复注明。
  *   `session_shutdown`（任何 reason）⇒ 身份校验释放 + `engine.close()`（同步撤销接纳，有界关库）。
  * - child（子会话）：只注册录制钩子；每个钩子入口读一次全局 engine 并固定持有；engine 不存在 / 非 open /
- *   未录制 / `isActive()` 为假 ⇒ 立即 return（不 stringify、不做任何事）。子会话无命令、无服务、无重放。
+ *   未录制 / `isActive()` 为假 / **会话槽准入被拒**（安全评审 #1：同一 AgentSession 的重复 toolkit 副本）
+ *   ⇒ 立即 return（不 stringify、不做任何事）。子会话无命令、无服务、无重放。
  * - 所有钩子恒返回 `undefined`（不改 payload / headers）。
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { TrafficSettings, TrafficWebSettings } from "../config/settings.js";
 import { statSync } from "node:fs";
+import {
+  externalActiveInProcess,
+  publishToolkitClaim,
+  releaseToolkitClaim,
+  claimIsOurs,
+  toolkitClaimIsLive,
+  type ToolkitTrafficClaim,
+} from "./claim.js";
+import {
+  defaultAgentDir,
+  findExternalRecorderCommand,
+  formatDupWarning,
+  scanExternalTrafficReferences,
+  TOOLKIT_PACKAGE_ROOT,
+  type DupDetectFs,
+} from "./dup-detect.js";
+// T5（§7.3）：keepalive 否决端口 + pi 原生 warming 否决（两模块均零重依赖、零顶层副作用）。
+import { createTrafficKeepalivePort, registerTrafficKeepalivePort } from "./keepalive-port.js";
+import { registerWarmingVeto, type WarmingVetoHandle } from "./warming.js";
 import { lazyText, type RowRef } from "./db-port.js";
 import {
   defaultRecordPaths,
@@ -62,10 +83,12 @@ export interface WireTrafficOptions {
   dbPath?: string;
   legacyDbPath?: string | null;
   loadSqlite?: SqliteLoader;
-  /** 认领协议端口（T3：claim 属于 toolkit 且 isLive）。缺省恒 true。 */
+  /** 认领协议端口（T3：claim 属于 toolkit 且存活）。缺省恒 true。 */
   isActive?: () => boolean;
   /** 子会话请求是否落库（T3：`traffic.childSessions`，缺省 true）。 */
   childPersist?: boolean;
+  /** `traffic.web.*`（T3）：host 传入 server；`"0.0.0.0"` 时 on/status 附明文 HTTP 风险提示。 */
+  web?: TrafficWebSettings;
 }
 
 export interface TrafficWiring {
@@ -78,6 +101,114 @@ export interface TrafficWiring {
    * `cache_warming_decision` 返回 `{action:"stop"}`。traffic 拿不到最终裁定，故观测到 decision 一律暂停改写（fail closed）。
    */
   rewriteArmed(): boolean;
+}
+
+/** HUD/TUI 状态键（§7.5）：录制中 `rec`，有丢弃时 `rec·drop N`；停止/关闭清除。 */
+const TRAFFIC_STATUS_KEY = "pi-subagent:traffic";
+const STATUS_TICK_MS = 2_000;
+
+/** §2.2（拍板②）：`traffic.web.host="0.0.0.0"` 时 /record on 与 status 的额外风险提示。 */
+export const LAN_PLAINTEXT_WARNING =
+  "明文 HTTP：token、请求正文与 API key 可被同网段嗅探（web.host=0.0.0.0，建议保持 127.0.0.1）";
+
+interface StatusUi {
+  setStatus?: (key: string, text: string | undefined) => void;
+}
+
+// ── 安全评审 #1（Major）：每个 AgentSession 只允许一套 traffic 录制钩子 ──
+//
+// 同一 AgentSession 可能加载两份 toolkit 副本（settings 同时列 git 安装与本地路径）：第一份认领
+// HOST_KEY 装配 host，第二份仅凭 HOST_KEY 存在被误判为 child，在 guard 前注册第二套录制钩子——
+// HOST_KEY 只能区分「首个激活与否」，不能区分「重复宿主副本」与「真子会话」（真子会话是
+// PiSessionDriver.create 在同进程新建的另一个 AgentSession，有自己的 sessionManager）。故按
+// **实际会话身份**（ctx.sessionManager 对象）做进程级唯一接纳：首个拿到 engine 的激活认领会话槽，
+// 同会话的其它副本永久惰性（不铸票据不落库）；跨会话互不影响（WeakMap 键为各会话的
+// sessionManager 对象，子会话结束随 GC 回收）。host 在 session_shutdown 身份校验释放（/reload
+// 后新激活可重新认领）；激活顺序保证 host 先注册 ⇒ 先认领（激活序 = 注册序 = 派发序）。
+
+const SESSION_SLOT_KEY = Symbol.for("pi-subagent:traffic-session-slot");
+type SessionSlots = WeakMap<object, object>;
+
+function sessionSlots(): SessionSlots {
+  const g = globalThis as Record<symbol, unknown>;
+  const existing = g[SESSION_SLOT_KEY] as SessionSlots | undefined;
+  if (existing instanceof WeakMap) return existing;
+  const created: SessionSlots = new WeakMap();
+  g[SESSION_SLOT_KEY] = created;
+  return created;
+}
+
+/** 会话槽值 = 认领激活的 owner 对象（身份校验释放：仅本人可删）。 */
+function claimSessionSlot(sessionManager: object, token: object): boolean {
+  const slots = sessionSlots();
+  if (slots.has(sessionManager)) return false;
+  slots.set(sessionManager, token);
+  return true;
+}
+
+function releaseSessionSlot(sessionManager: object, token: object): void {
+  const slots = sessionSlots();
+  if (slots.get(sessionManager) === token) slots.delete(sessionManager);
+}
+
+/** 仅测试：清除会话槽表（不影响 engine/tap/claim）。 */
+export function resetTrafficSessionSlotsForTest(): void {
+  delete (globalThis as Record<symbol, unknown>)[SESSION_SLOT_KEY];
+}
+
+/**
+ * HUD 状态行控制器（§7.5）：状态全在闭包；`refresh()` 读当前 engine（发送者提供 getter）重画；
+ * 录制中后动 unref 的 2s tick（丢计数可见），停止/关闭即停。`setStatus` 缺席（print/rpc 无 TUI）⇒ 静默。
+ */
+function createTrafficStatus(engineOf: () => TrafficEngine | undefined): {
+  noteCtx: (ui: StatusUi | undefined) => void;
+  refresh: () => void;
+  clear: () => void;
+} {
+  let ui: StatusUi | undefined;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const render = (): string | undefined => {
+    const engine = engineOf();
+    if (!engine || engine.state !== "open" || !engine.recording) return undefined;
+    const dropped = engine.dbPort.stats().droppedRows;
+    return dropped > 0 ? `rec·drop ${dropped}` : "rec";
+  };
+  const push = (): void => {
+    try {
+      ui?.setStatus?.(TRAFFIC_STATUS_KEY, render());
+    } catch {
+      /* 展示-only */
+    }
+  };
+  const stopTick = (): void => {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
+  return {
+    noteCtx: (next) => {
+      if (next?.setStatus) ui = next;
+    },
+    refresh: () => {
+      const engine = engineOf();
+      const recording = engine !== undefined && engine.state === "open" && engine.recording;
+      if (!recording) stopTick();
+      else if (timer === null) {
+        timer = setInterval(push, STATUS_TICK_MS);
+        timer.unref?.();
+      }
+      push();
+    },
+    clear: () => {
+      stopTick();
+      try {
+        ui?.setStatus?.(TRAFFIC_STATUS_KEY, undefined);
+      } catch {
+        /* 展示-only */
+      }
+    },
+  };
 }
 
 function errorText(err: unknown): string {
@@ -143,6 +274,7 @@ function registerRecordCommand(
   pi: ExtensionAPI,
   opts: Required<Pick<WireTrafficOptions, "isActive">> & WireTrafficOptions,
   owner: object,
+  status: { noteCtx: (ui: StatusUi | undefined) => void; refresh: () => void },
 ): void {
   const ownEngine = (): TrafficEngine | undefined => {
     const engine = peekEngine();
@@ -165,7 +297,11 @@ function registerRecordCommand(
         return;
       }
       if (!opts.isActive()) {
-        ctx.ui.notify("traffic 录制当前由其它录制器承担（toolkit 已让位）", "warning");
+        // 让位（外部 pi-traffic-record 实际加载/活动）或本激活已随会话切换结束（claim 已释放，拍板⑤）。
+        ctx.ui.notify(
+          "traffic 录制未生效：已让位给外部 pi-traffic-record，或本激活已随会话切换/关闭结束（/reload 后重开）",
+          "warning",
+        );
         return;
       }
 
@@ -211,14 +347,20 @@ function registerRecordCommand(
       recordSql(engine, epoch, UPSERT_SESSION_SQL, sessionUpsertParams(ctx), 0);
       const lines = ["🔴 流量录制已开启", ""];
       if (engine.serviceAllowed) {
-        engine.web ??= createTrafficServer(engine);
+        engine.web ??= createTrafficServer(engine, {
+          host: opts.web?.host ?? "127.0.0.1",
+          ...(opts.web?.port !== undefined ? { port: opts.web.port } : {}),
+        });
         const port = await engine.web.startServer();
         lines.push("Web 查看页:", ...engine.web.accessUrls(port), "");
+        if (opts.web?.host === "0.0.0.0") lines.push(LAN_PLAINTEXT_WARNING, "");
       } else {
         lines.push(`（${PRINT_MODE_NOTE}）`, "");
       }
       lines.push(`数据库: ${engine.dbPath}`);
       broadcast(engine, { type: "state", recording: true, sessionId: engine.currentSessionId });
+      status.noteCtx(ctx.ui as StatusUi | undefined);
+      status.refresh();
       ctx.ui.notify(lines.join("\n"), "info");
     } catch (err) {
       // 失败不留下半开的 engine（不留监听、不留 wrapper、不持库）。
@@ -243,6 +385,8 @@ function registerRecordCommand(
         : "⏹ 录制已停止",
       "info",
     );
+    status.noteCtx(ctx.ui as StatusUi | undefined);
+    status.refresh();
   }
 
   async function recordStatus(ctx: ExtensionContext): Promise<void> {
@@ -325,10 +469,14 @@ function registerRecordCommand(
       ...(counts.failure !== null ? [`DB 不可用：${counts.failure}；改写已禁用，流量放行`] : []),
       `绑定: ${engine?.serverPort != null ? `${BIND_HOST}:${engine.serverPort} (token 鉴权已启用，本机豁免)` : "未启动"}`,
       ...(engine?.serverPort != null && engine.web
-        ? engine.web.accessUrls(engine.serverPort)
+        ? [
+            ...engine.web.accessUrls(engine.serverPort),
+            ...(opts.web?.host === "0.0.0.0" ? [LAN_PLAINTEXT_WARNING] : []),
+          ]
         : [
             engine && !engine.serviceAllowed ? `Web 页面: ${PRINT_MODE_NOTE}` : "Web 页面: 未启动（/record on 后可用）",
           ]),
+      ...(opts.web?.host === "0.0.0.0" && engine?.serverPort == null ? [LAN_PLAINTEXT_WARNING] : []),
     ];
     ctx.ui.notify(lines.join("\n"), counts.failure === null ? "info" : "error");
   }
@@ -362,13 +510,33 @@ function rulesSnapshot(engine: TrafficEngine): { rules: RewriteRule[]; settings:
  * 票据（§5.3）：headers 钩子铸造并注入 `x-pi-traffic-ticket`；payload 钩子只在本 runner 存活集合 L 恰为 {T}
  * 时绑定（或对失败过的 T 升 generation），否则写 hook 级行并记 unattributed；fetch 层凭票据认领（capture.ts）。
  */
-function registerRecordingHooks(pi: ExtensionAPI, hook: HookOptions): void {
+function registerRecordingHooks(pi: ExtensionAPI, hook: HookOptions): () => void {
   let currentTurn = 0;
   // runner 按 engine 绑定：/record on 新建的 engine 有新台账 ⇒ 新 runner（旧票据随旧台账作废）。
   let bound: { engine: TrafficEngine; runner: TicketRunner } | null = null;
   const runnerOf = (engine: TrafficEngine): TicketRunner => {
     if (bound?.engine !== engine) bound = { engine, runner: engine.tickets.newRunner(hook.role) };
     return bound.runner;
+  };
+
+  /**
+   * 安全评审 #1：按实际会话身份的唯一接纳。ctx 无 sessionManager（cache_warming_decision
+   * 观察器等无 ctx 路径）⇒ 不占槽也不拒绝（其操作只作用于本激活自己的 runner，无害重复）。
+   * 每次直接查/占 WeakMap（微秒级），不缓存结果——多会话/重生成都正确；本激活占过的槽记入
+   * claimedSlots 供 disposer 身份校验释放（一个激活实际只会服务一个会话，集合为防御性多记）。
+   */
+  const claimedSlots = new Set<object>();
+  const admit = (ctx: ExtensionContext | undefined): boolean => {
+    const sm = ctx?.sessionManager;
+    if (sm === undefined || sm === null) return true;
+    const slots = sessionSlots();
+    const holder = slots.get(sm);
+    if (holder === undefined) {
+      slots.set(sm, hook.owner);
+      claimedSlots.add(sm);
+      return true;
+    }
+    return holder === hook.owner;
   };
 
   /** 入口判定：返回固定的 engine 或 undefined（立即透传）。 */
@@ -378,6 +546,7 @@ function registerRecordingHooks(pi: ExtensionAPI, hook: HookOptions): void {
     if (!engine || engine.state !== "open") return undefined;
     if (needRecording && !engine.recording) return undefined;
     if (!hook.isActive()) return undefined;
+    if (!admit(ctx)) return undefined;
     if (hook.role === "host" && engine.owner === hook.owner && ctx)
       engine.notify = ctx.ui.notify.bind(ctx.ui) as NotifyFn;
     return engine;
@@ -666,6 +835,16 @@ function registerRecordingHooks(pi: ExtensionAPI, hook: HookOptions): void {
       broadcast(engine, { type: "message", id, session_id: sid, turn, ts, role, size: msgStr.length });
     });
   });
+
+  // 安全评审 #1：释放本激活认领的会话槽（仅槽值 === 本激活 owner 时删；身份校验，/reload 安全）。
+  // host 由 wireTraffic 的 session_shutdown 调用；child 无 shutdown，靠 sessionManager GC 回收。
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    for (const sm of claimedSlots) releaseSessionSlot(sm, hook.owner);
+    claimedSlots.clear();
+  };
 }
 
 /**
@@ -677,21 +856,30 @@ export function wireTraffic(pi: ExtensionAPI, opts: WireTrafficOptions = {}): Tr
   const role: TrafficRole = opts.role ?? "host";
   const owner = opts.owner ?? {};
   const isActive = opts.isActive ?? (() => true);
-  registerRecordingHooks(pi, {
+  const releaseRecordingSlots = registerRecordingHooks(pi, {
     role,
     owner,
     isActive,
     persistRows: role === "host" ? true : opts.childPersist !== false,
   });
   if (role === "host") {
-    registerRecordCommand(pi, { ...opts, isActive }, owner);
+    const status = createTrafficStatus(() => {
+      const engine = peekEngine();
+      return engine && engine.owner === owner ? engine : undefined;
+    });
+    registerRecordCommand(pi, { ...opts, isActive }, owner, status);
     pi.on("session_shutdown", async () => {
-      // 任何 reason（quit/reload/new/resume/fork）：身份校验释放 + 关闭（同步撤销接纳，有界关库）。
+      // 任何 reason（quit/reload/new/resume/fork）：身份校验释放 + 关闭（同步撤销接纳，有界关库）
+      // + 会话槽释放（评审 #1：/reload 后新激活可重新认领本会话）。
+      status.clear();
+      releaseRecordingSlots();
       const engine = peekEngine();
       if (!engine || engine.owner !== owner) return;
       releaseEngine(owner, engine);
       await engine.close("session_shutdown");
     });
+  } else {
+    // 子会话无 shutdown：disposer 不接线，会话槽随子会话 sessionManager GC 回收（WeakMap 键）。
   }
   return {
     role,
@@ -719,4 +907,142 @@ export function wireTrafficChild(
   opts: Omit<WireTrafficOptions, "role"> = {},
 ): TrafficWiring | undefined {
   return wireTraffic(pi, { ...opts, role: "child" });
+}
+
+// ── T3 装配（traffic-merge plan §2.3/§2.4/§6/§7）：settings → wire + 认领协议 + 复核 + 告警 ──
+
+export interface AssembleTrafficOptions {
+  /** settings.traffic 组。`enabled !== true` ⇒ 零注册零 IO（冻结面）。 */
+  settings: TrafficSettings;
+  /** dup-detect 的项目级扫描目录；缺省 process.cwd()。 */
+  cwd?: string;
+  /** getCommands 判定的 toolkit 包根；缺省未模块位置推导。 */
+  packageRoot?: string;
+  /** dup-detect 的 agentDir；缺省 `$PI_CODING_AGENT_DIR` else `~/.pi/agent`。 */
+  agentDir?: string;
+  /** 测试注入的只读 fs。 */
+  fs?: DupDetectFs;
+}
+
+const EXTERNAL_ACTIVE_MESSAGE =
+  "pi-traffic-record 已在运行，toolkit traffic 让位；请从 settings.json 移除该 package 后重启 pi";
+
+function notifyOnce(pi: ExtensionAPI, message: string, level: "info" | "warning"): void {
+  let done = false;
+  pi.on("session_start", (_event, ctx) => {
+    if (done) return;
+    done = true;
+    try {
+      ctx?.ui?.notify?.(message, level);
+    } catch {
+      /* 展示-only */
+    }
+  });
+}
+
+/**
+ * 主会话装配（activate 末尾、cache-ttl 之后调用；§2.3）。
+ *
+ * 1. `enabled !== true` 或加密域 ⇒ 零注册零全局符号（settings 层已强制，这里双保险）。
+ * 2. 外部墓碑版已在本进程活动（`external-active`）⇒ **不发布 claim、不注册任何命令/钩子**，
+ *    session_start notify 一次让位说明（§2.4 步骤 1）。
+ * 3. 否则发布 claim（token === wire 的 owner 同一对象）、注册 `/record` 与钩子；
+ *    settings 扫描（dup-detect）只产出告警文案（步骤 2，永不让位）。
+ * 4. session_start 复核（权威证据，步骤 3）：getCommands 里存在包根外的 `/record(:\d+)?` ⇒
+ *    身份校验释放 claim（钩子/命令立即失效）、notify 一次。
+ * 5. session_shutdown（任何 reason）：释放 claim（拍板⑤的认领面；engine 关闭在 wire 内部）。
+ */
+export function assembleTrafficHost(pi: ExtensionAPI, opts: AssembleTrafficOptions): TrafficWiring | undefined {
+  if (opts.settings.enabled !== true) return undefined;
+  if (isSecure()) return undefined;
+  if (externalActiveInProcess()) {
+    notifyOnce(pi, EXTERNAL_ACTIVE_MESSAGE, "warning");
+    return undefined;
+  }
+  const owner: object = {};
+  const claim: ToolkitTrafficClaim = publishToolkitClaim(owner);
+  const dupFindings = scanExternalTrafficReferences({
+    ...(opts.agentDir !== undefined ? { agentDir: opts.agentDir } : {}),
+    ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+    ...(opts.fs !== undefined ? { fs: opts.fs } : {}),
+  });
+  const wiring = wireTrafficHost(pi, {
+    enabled: true,
+    owner,
+    // 评审 #4：主会话 isActive 绑定自身 claim 对象身份（claimIsOurs），不只问进程内是否有 claim。
+    isActive: () => claimIsOurs(claim),
+    web: opts.settings.web,
+  });
+  if (!wiring) {
+    // 不可达防御（isSecure 已查，wireTraffic 自身也复查）：不留半装配的 claim。
+    releaseToolkitClaim(claim);
+    return undefined;
+  }
+  // T5（§7.3，主会话装配；子会话同进程共享，无需重复注册）：keepalive 否决端口（进程级符号，
+  // capture.ts 出站边界写入镜像标记，engine 关闭/重载后旧 capture 仍被否决）；身份校验注销。
+  const unregisterKeepalivePort = registerTrafficKeepalivePort(
+    createTrafficKeepalivePort(() => peekEngine(), { isSecure: () => isSecure() }),
+  );
+  // T5（裁定 A2）：规则启用时否决 pi 原生 cache warming（traffic 自己的观察器仍 fail-closed 暂停改写）。
+  const warmingVeto: WarmingVetoHandle = registerWarmingVeto(pi, {
+    rewriteArmed: () => wiring.rewriteArmed(),
+  });
+  let warnedDup = false;
+  let yielded = false;
+  pi.on("session_start", (_event, ctx) => {
+    if (yielded) return;
+    // 步骤 3：权威证据复核（所有扩展 activate 完成后才会 fire，两种加载顺序都覆盖）。
+    const external =
+      typeof pi.getCommands === "function"
+        ? findExternalRecorderCommand(pi.getCommands(), opts.packageRoot ?? TOOLKIT_PACKAGE_ROOT)
+        : undefined;
+    if (external) {
+      yielded = true;
+      releaseToolkitClaim(claim);
+      try {
+        ctx?.ui?.notify?.(
+          `检测到外部录制器已加载（${external.path ?? external.name}），toolkit traffic 已让位；` +
+            "请从 settings.json 移除后重启 pi",
+          "warning",
+        );
+      } catch {
+        /* 展示-only */
+      }
+      return;
+    }
+    if (!warnedDup && dupFindings.length > 0) {
+      warnedDup = true;
+      try {
+        ctx?.ui?.notify?.(formatDupWarning(dupFindings), "warning");
+      } catch {
+        /* 展示-only */
+      }
+    }
+  });
+  pi.on("session_shutdown", () => {
+    releaseToolkitClaim(claim);
+    unregisterKeepalivePort();
+    warmingVeto.dispose();
+  });
+  return wiring;
+}
+
+/**
+ * 子会话装配（guard 前调用；§2.3）：只注册录制钩子（含 `agent_settled`/`cache_warming_decision`），
+ * 无命令、无服务、无重放。`isActive` = 进程内 toolkit claim 存活（主会话发布；让位/关闭后立即惰性）。
+ * `childSessions=false` 只禁落库，不禁改写归属（拍板①）。
+ */
+export function assembleTrafficChild(pi: ExtensionAPI, opts: AssembleTrafficOptions): TrafficWiring | undefined {
+  if (opts.settings.enabled !== true) return undefined;
+  if (isSecure()) return undefined;
+  const wiring = wireTrafficChild(pi, {
+    enabled: true,
+    isActive: toolkitClaimIsLive,
+    childPersist: opts.settings.childSessions,
+  });
+  if (!wiring) return undefined;
+  // T5（裁定 A2）：每个 AgentSession 有自己的 cache warmer ⇒ 子会话装配也各注册一次；
+  // 子会话无 session_shutdown，不 dispose 也只留下一个恒返回 undefined 的惰性处理器（随子会话销毁）。
+  registerWarmingVeto(pi, { rewriteArmed: () => wiring.rewriteArmed() });
+  return wiring;
 }

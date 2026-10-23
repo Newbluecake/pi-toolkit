@@ -77,6 +77,7 @@ import {
   type LateUsageReason,
   type UsageSource,
 } from "../cache-ttl/late-usage.js";
+import { trafficVetoPing } from "../traffic/keepalive-port.js";
 import { probeKeepaliveTransport } from "../adapters/pi-compat.js";
 import type { ProviderEvidenceStore } from "../cache-ttl/provider-evidence.js";
 import type { ChildKeepaliveLedger, Lease } from "../cache-ttl/ping-ledger.js";
@@ -992,6 +993,20 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           if (!gate.terminal) this.arm();
           return;
         }
+        // traffic-merge §7.3 (T5)：traffic 改写上膛，或该 capture 之后会话已被实际改写 ⇒ 跳过本次 ping
+        // （capture 早于改写，重放旧前缀只产生费用）。非终态、不熔断、不动 capture：规则停用后下一次
+        // 未改写真实请求的新 capture（capturedAt > 最近改写时刻）自愈。端口未注册（traffic off）⇒ 恒
+        // false，行为与输出字节不变。
+        if (trafficVetoPing(capture!.sessionId, capture!.capturedAt)) {
+          // 否决 ⇒ 本次 ping 不发送：撤销本 tick 在预算闸里拿到的 ping-ledger 预留（0 = 不计费，
+          // `settle` 的「omitted ⇒ revoke entirely」语义，与 dispose 兜底同款）。否则 lease 既不挂
+          // `currentLease` 也无人 settle：150s 后被 `reclaimExpired` 回收并把 estimateUsd 记成幽灵
+          // 消费，且持续否决每 15s 漏占一个并发额度，挤占其它子会话（global-cap / usd-process）。
+          if (gate.lease) this.settleLeaseOnce(gate.lease, 0);
+          this.lastSkip = "traffic-rewrite";
+          this.arm();
+          return;
+        }
         const pingStartedAt = now;
         this.window = onPingStarted(this.window, pingStartedAt);
         this.pingAttempts += 1; // O3: "keepalive was active" for the dispose-time verdict.
@@ -1054,7 +1069,21 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         body,
         clock: this.clock,
         deadlineAt,
-        guard: () => !this.disposed && this.window.windowEpoch === pingEpoch,
+        // 安全评审 T5-#2：除 liveness（disposed / epoch）外，这里也是 traffic 否决的**物理发送前**复查
+        // 点——pipeline 传输在鉴权完成后、base fetch 之前调用 guard（且每次 retry 尝试各调一次）。onTick
+        // 检查之后的异步窗口（鉴权等待 / 重试退避）内规则上膛时，不发出旧 capture 的 ping：命中 ⇒ 走既有
+        // not-sent{guard} 路径中止本次尝试（首尝试与 retry 尝试均按**可恢复暂停**处理——runPing 的 not-sent
+        // 分支：非终态、不熔断、不清 capture、不进 onUnproven；lease 由 finally 按已修语义结算，可重试前提下
+        // charge 恒 0；已发出的请求不追溯——流读取中途命中 guard 与 disposed/epoch 同款处理，不追加计费/熔断）。
+        // 端口未注册 ⇒ trafficVetoPing 恒 false，guard 语义与输出字节不变。
+        guard: () => {
+          if (this.disposed || this.window.windowEpoch !== pingEpoch) return false;
+          if (trafficVetoPing(capture.sessionId, capture.capturedAt)) {
+            this.lastSkip = "traffic-rewrite";
+            return false;
+          }
+          return true;
+        },
         signal: controller.signal,
         ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
         ...(lateUsage ? { lateUsage: true } : {}),
@@ -1229,6 +1258,23 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         if (sent !== undefined && controller !== undefined) this.diagnoseTransport(sent, controller);
 
         if (sent === undefined || sent.kind === "not-sent") {
+          // 安全复审第 2 轮（T5-#2 部分闭合）：traffic 否决结束 retry 链 ≠ 普通 not-sent 终结。普通路径会以
+          // 「上一次未证明结果」进 onUnproven（清 capture、立 lastStopReason）；否决是**可恢复暂停**：保留
+          // capture 与原 aliveUntil、不熔断、不进未证明计数，只退预算解除 pingInFlight、记 lastSkip 后直接
+          // 返回。lease 由外层 finally 结算一次：可重试前提下前次尝试必为 never-processed（network / 可重试
+          // http）⇒ charge 恒 0（未发送部分撤销不计费；已发送的前次尝试按原规则即为 0）；规则停用后 15s
+          // tick 在窗口 TTL 内自动恢复发送，无需 noteRequest。重新评估一次 veto 以区分 guard 的另两个
+          // liveness 原因（disposed / epoch——后者已在上方 I-K8 返回）。
+          if (
+            sent?.kind === "not-sent" &&
+            sent.reason === "guard" &&
+            trafficVetoPing(capture.sessionId, capture.capturedAt)
+          ) {
+            this.lastSkip = "traffic-rewrite";
+            refundBudget();
+            this.publishVisibility();
+            return;
+          }
           // Zero network for THIS attempt. First attempt ⇒ refund the whole ping (the request never left);
           // a retry attempt ⇒ finalize with the previous attempt's (unproven) outcome.
           if (outcome === undefined) {

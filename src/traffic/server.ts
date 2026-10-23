@@ -334,6 +334,10 @@ export interface CreateServerOptions {
    * （T3 由 `traffic.web.host` 传入）。其余值原样交给 listen（自担）。
    */
   host?: string;
+  /**
+   * 起始端口（T3：`traffic.web.port`，默认 4177；占用自增，最多 MAX_PORT_TRIES 次）。
+   */
+  port?: number;
 }
 
 export function createTrafficServer(state: TrafficEngine, opts: CreateServerOptions = {}): TrafficServer {
@@ -1435,7 +1439,10 @@ export function createTrafficServer(state: TrafficEngine, opts: CreateServerOpti
   async function listenFirstFree(): Promise<number> {
     ensureDb(state);
     state.accessToken = state.accessToken ?? randomBytes(16).toString("hex");
-    for (let port = BASE_PORT; port < BASE_PORT + MAX_PORT_TRIES; port++) {
+    // 安全评审 #5：合法端口上界截断——绝不 listen(65536+) 抛参数异常，超出即按有界「端口占用」结束。
+    const startPort = opts.port ?? BASE_PORT;
+    const endPort = Math.min(startPort + MAX_PORT_TRIES - 1, 65535);
+    for (let port = startPort; port <= endPort; port++) {
       const started = await new Promise<Server | null>((resolve) => {
         const s = createServer(handleHttp);
         state.listeners.add(s);
@@ -1479,7 +1486,7 @@ export function createTrafficServer(state: TrafficEngine, opts: CreateServerOpti
         return port;
       }
     }
-    throw new Error(`端口 ${BASE_PORT}-${BASE_PORT + MAX_PORT_TRIES - 1} 均被占用`);
+    throw new Error(`端口 ${startPort}-${Math.max(startPort, endPort)} 均被占用`);
   }
 
   return { startServer, accessUrls, handleHttp, replay };

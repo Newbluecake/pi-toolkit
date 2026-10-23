@@ -118,6 +118,9 @@ import type { TidySpawnRequest } from "./memory/contracts.js";
 import { wireChildBashJobs } from "./bash/child.js";
 import { wireChildSession } from "./child/wire.js";
 import { markChildExtensionActivated } from "./child/activation-signal.js";
+// traffic-merge T3（§2.3）：主会话在 activate 末尾、子会话在 guard 前。模块顶层零副作用
+// （惰性 sqlite/page/jq，tests/integration/traffic-lifecycle-process.test.ts 钉住），import 安全。
+import { assembleTrafficChild, assembleTrafficHost } from "./traffic/index.js";
 import { getChildBashRegistry } from "./bash/child-registry.js";
 import { createPromptSectionHub } from "./sysprompt/hub.js";
 import { agentTypesSection, availableModelsSection } from "./sysprompt/core-sections.js";
@@ -270,6 +273,12 @@ export default function activate(rawPi: ExtensionAPI): void {
   if (isChildSession) {
     markChildExtensionActivated();
     wireChildSession(pi, preGuardSettings);
+    // traffic-merge T3（§2.3）：子会话只注册录制钩子（含 agent_settled / cache_warming_decision），
+    // 无命令/服务/重放；isActive = 进程内 toolkit claim 存活（主会话发布；secure 域 settings 已强制
+    // enabled=false，这里双保险在 assemble 内部复查）。childSessions=false 只禁落库不禁改写归属（拍板①）。
+    // 安全评审 #1：同一 AgentSession 重复加载的 toolkit 副本也会走到这里（HOST_KEY 只能判「非首个激活」），
+    // 由 src/traffic 的会话槽准入（按 ctx.sessionManager 身份）保证每会话仅一套录制钩子生效。
+    assembleTrafficChild(pi, { settings: preGuardSettings.traffic, cwd: process.cwd() });
   }
 
   // Child subagent sessions bind extensions too (pi's bindExtensions), which
@@ -1769,6 +1778,11 @@ export default function activate(rawPi: ExtensionAPI): void {
     xsFencePorts.topicSwitch = () => topicSwitch.fenceActive();
     promptGateRef.current = topicSwitch.webGate; // D2 flip point
   }
+
+  // traffic-merge T3（§2.3/§2.4）：**activate 末尾**注册（cache-ttl 之后 ⇒ 录到最终 payload；认领
+  // 协议同步执行：external-active ⇒ 整体让位零注册，否则发布 claim + session_start 权威复核）。
+  // enabled=false（默认）/ secure 域 ⇒ assembleTrafficHost 首行即返回，零注册零 IO 零全局符号。
+  assembleTrafficHost(pi, { settings: settings.traffic, cwd: process.cwd() });
 }
 
 /** §3.7 `shutdownPolicy: "kill"` — signal every live job, wait at most `graceMs`. */

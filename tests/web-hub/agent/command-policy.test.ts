@@ -8,8 +8,13 @@ import {
   resolveCommandPolicy,
 } from "../../../src/web-hub/agent/command-policy.js";
 
-function resolve(name: string, args: string, kind: "extension" | "template" | "skill" | "builtin") {
-  return resolveCommandPolicy({ name, args, kind });
+function resolve(
+  name: string,
+  args: string,
+  kind: "extension" | "template" | "skill" | "builtin",
+  overrides?: Record<string, "allow" | "confirm" | "deny">,
+) {
+  return resolveCommandPolicy({ name, args, kind, ...(overrides !== undefined ? { overrides } : {}) });
 }
 
 describe("parameterizedBuiltinPolicy", () => {
@@ -168,6 +173,22 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
 
   it("an unknown (third-party) extension command defaults to confirm", () => {
     expect(resolve("some-third-party-command", "whatever args", "extension").policy).toBe("confirm");
+  });
+
+  // traffic-merge plan §7.4（拍板⑦，T3）：/record 的 web 面。
+  it("/record: bare/status/off allow; on confirms (starts recording + a listener); typos deny", () => {
+    expect(resolve("record", "", "extension").policy).toBe("allow");
+    expect(resolve("record", "status", "extension").policy).toBe("allow");
+    expect(resolve("record", "off", "extension").policy).toBe("allow");
+    expect(resolve("record", "on", "extension").policy).toBe("confirm");
+    // the handler lowercases its sub-command — "ON" / "on now" act as `on` ⇒ confirm, not a typo
+    expect(resolve("record", "ON", "extension").policy).toBe("confirm");
+    expect(resolve("record", "on now", "extension").policy).toBe("confirm");
+    for (const sub of ["start", "export", "bogus"]) {
+      expect(resolve("record", sub, "extension").policy, sub).toBe("deny");
+    }
+    // an explicit webCommandPolicy override wins outright (same rule as every extension command)
+    expect(resolve("record", "on", "extension", { record: "allow" }).policy).toBe("allow");
   });
 });
 

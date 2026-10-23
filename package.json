@@ -37,6 +37,9 @@
       "./skills"
     ]
   },
+  "piSecure": {
+    "honors": "PI_SECURE_SESSION/1"
+  },
   "exports": {
     ".": "./dist/index.js"
   },

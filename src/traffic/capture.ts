@@ -22,6 +22,7 @@ import { urlMatchesBase } from "./correlate.js";
 import { idleTimer } from "./cancel.js";
 import { newRowRef, type RowRef } from "./db-port.js";
 import type { TrafficEngine } from "./engine.js";
+import { noteTrafficRewrite } from "./keepalive-port.js";
 import { recordChunk, recordPatch } from "./persist.js";
 import {
   applyRequest,
@@ -504,7 +505,18 @@ export function createCapture(state: TrafficEngine): Capture {
       await recordWire(ticket, gen, url, method, applied, effective.init ?? init, effective.input, epoch);
     }
     // 安全评审 #8：「实际改写已发出」的标记放在出站边界，与是否录行（gen.row / childSessions）及落库成败解耦。
-    if (applied && applied.ruleIds.length > 0) state.lastRewrittenAt.set(gen.sessionId, Date.now());
+    // T5：同步写进程级镜像（keepalive-port 的 vetoCapture 消费；engine 关闭/重载后旧 capture 仍被否决）。
+    // 安全评审 T5-#3：本调用位于实际发送（sendObserved）**之前**，双重先决 never-throw——noteTrafficRewrite
+    // 自身已全程兑底，这里再包一层：辅助记账的任何故障都绝不阻断 provider 请求。
+    if (applied && applied.ruleIds.length > 0) {
+      const rewrittenAt = Date.now();
+      state.lastRewrittenAt.set(gen.sessionId, rewrittenAt);
+      try {
+        noteTrafficRewrite(gen.sessionId, rewrittenAt);
+      } catch {
+        /* 辅助记账失败不影响发送 */
+      }
+    }
     const out = await sendObserved(ticket, original, effective.input, effective.init);
     if ("error" in out) throw out.error;
     const res = out.res;
