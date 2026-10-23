@@ -1,0 +1,9 @@
+{
+  "name": "vue",
+  "version": "3.5.42",
+  "file": "vue.global.prod.js",
+  "sha256": "aae6339a0e744cc3503f2a3ae63f5ee0d99ce39f45517e7a51fcb9ecc290ca2c",
+  "source": "https://unpkg.com/vue@3.5.42/dist/vue.global.prod.js",
+  "license": "MIT",
+  "note": "vendored byte-for-byte; pinned by sha256; refresh via scripts/traffic/vendor-vue.mjs"
+}
