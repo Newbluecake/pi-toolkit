@@ -120,10 +120,22 @@ function landFocus(id: number | null): void {
 }
 
 // §5.4: the manager's DOM-side instruction — land AFTER the (possibly new) node exists.
+// J1 #4 (jank-20kb LT-1): the land itself is deferred one PAST-RENDER macrotask past the
+// node's existence — `.preview-panel`'s focus() forces layout over the freshly mounted
+// (thousands-of-nodes) body, and inside the open flush that layout rides the open longtask
+// (measured 13 ms @1× / 33 ms @4× on a cold open). The contract is unchanged — focus lands
+// on the same target, one frame later; a newer request supersedes a pending timer; the
+// close-path landFocus below stays immediate (nothing big is mounting there).
+let landTimer: ReturnType<typeof setTimeout> | undefined;
 watch(focusRequest, (req) => {
   if (req === null) return;
+  if (landTimer !== undefined) clearTimeout(landTimer);
   void nextTick().then(() => {
-    landFocus(req.id);
+    if (landTimer !== undefined) clearTimeout(landTimer);
+    landTimer = setTimeout(() => {
+      landTimer = undefined;
+      landFocus(req.id);
+    }, 0);
   });
 });
 
@@ -293,6 +305,10 @@ function geomVars(id: number): Record<string, string> {
 }
 
 onUnmounted(() => {
+  if (landTimer !== undefined) {
+    clearTimeout(landTimer);
+    landTimer = undefined;
+  }
   document.removeEventListener("focusin", onDocFocusin, true);
   releaseScrollLock?.(); // 滚动锁一定会清理 — even mid-preview unmount
   releaseScrollLock = null;

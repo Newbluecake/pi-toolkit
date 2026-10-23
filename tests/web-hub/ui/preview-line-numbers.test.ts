@@ -321,6 +321,18 @@ describe("node budget — 3000-line TS file, numbers on vs off", () => {
     const text = Array.from({ length: 3000 }, (_, i) => (i % 2 === 0 ? `const v${i} = ${i};` : `y${i}=${i}`)).join(
       "\n",
     );
+    /** J1 #2: the highlight now applies in row blocks — wait until the DOM stops growing
+     *  (two consecutive identical element counts ≥25 ms apart) before counting nodes. */
+    const waitForSettled = async (root: Element): Promise<void> => {
+      let prev = -1;
+      for (let i = 0; i < 200; i++) {
+        const n = root.querySelectorAll("*").length;
+        if (n === prev && n > 0) return;
+        prev = n;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      throw new Error("highlight staging never settled");
+    };
     const countNodes = (root: Element): { elements: number; textNodes: number } => {
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       let textNodes = 0;
@@ -333,6 +345,7 @@ describe("node budget — 3000-line TS file, numbers on vs off", () => {
       attachTo: document.body,
     });
     await waitFor(() => on.element.querySelector("span.tok-keyword") !== null);
+    await waitForSettled(on.get("pre.preview-text-body").element); // J1 #2: batches land row-block-wise
     const onPre = on.get("pre.preview-text-body").element;
     const onCount = countNodes(onPre);
     expect(onPre.querySelectorAll(".pv-line")).toHaveLength(3000);
@@ -346,6 +359,7 @@ describe("node budget — 3000-line TS file, numbers on vs off", () => {
       attachTo: document.body,
     });
     await waitFor(() => off.element.querySelector("span.tok-keyword") !== null);
+    await waitForSettled(off.get("pre.preview-text-body").element); // J1 #2: part-batch staging
     const offCount = countNodes(off.get("pre.preview-text-body").element);
     off.unmount();
 

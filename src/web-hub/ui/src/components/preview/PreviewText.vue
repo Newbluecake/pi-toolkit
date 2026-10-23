@@ -100,6 +100,7 @@ import {
 } from "@logic/preview.js";
 import { createMarkdownSegmenter, createSourceSegmenter } from "@logic/previewStream.js";
 import MdBlock from "../transcript/MdBlock.vue";
+import MdPreviewBody from "./MdPreviewBody.vue";
 import type { MdNode } from "../transcript/markdown-types.js";
 import HighlightedCode from "../shared/HighlightedCode.vue";
 import NumberedCode from "../shared/NumberedCode.vue";
@@ -1063,9 +1064,11 @@ watch(streamState, (st) => {
         :path="path ?? filename ?? ''"
         @mint-error="onHtmlMintError"
       />
-      <!-- rendered: `preview-md md` — `md` pulls in transcript.css's shared markdown typography -->
+      <!-- rendered: `preview-md md` — `md` pulls in transcript.css's shared markdown typography.
+           J1 #5: the body mounts progressively (MdPreviewBody — leading blocks first, idle
+           batches after; final DOM identical). -->
       <div v-else-if="effectiveMode === 'rendered'" class="preview-md md" tabindex="0">
-        <MdBlock :nodes="mdNodes!" />
+        <MdPreviewBody :nodes="mdNodes!" />
       </div>
       <!-- preview-perf P3 §4.1: >600 lines (line numbers on) ⇒ VirtualCode. -->
       <VirtualCode

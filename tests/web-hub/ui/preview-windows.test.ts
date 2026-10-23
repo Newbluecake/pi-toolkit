@@ -25,6 +25,9 @@ import type {
 const tick = async (): Promise<void> => {
   await nextTick();
   await nextTick();
+  // J1 #4: PreviewHost's focusRequest landing is deferred one PAST-RENDER macrotask —
+  // flush it so the §5.4 focus assertions see the final state.
+  await new Promise((r) => setTimeout(r, 0));
 };
 
 /** The production rig: the REAL manager over a scripted transport (+ optional HUB fake). */

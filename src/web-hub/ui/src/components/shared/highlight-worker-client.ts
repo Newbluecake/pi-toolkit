@@ -49,7 +49,10 @@ export interface HighlightWorkerHandle {
 export interface HighlightWorkerClient {
   /** Sticky process-wide verdict (§5.3 回落). Read-only diagnostics; `request` already folds it in. */
   readonly unavailable: boolean;
-  request(text: string, lang: string): HighlightWorkerHandle;
+  /** J1: `opts.maxTokens` (optional) pins the worker's `flattenTokens` budget for THIS request —
+   *  the non-virtual bodies pass the ORIGINAL 20k so their degrade set stays byte-identical;
+   *  omitted keeps the worker's own widened 80k default (the virtual path, unchanged). */
+  request(text: string, lang: string, opts?: { readonly maxTokens?: number }): HighlightWorkerHandle;
 }
 
 /** Structural subset of `Worker` the client touches (tests implement this; prod casts). */
@@ -158,7 +161,7 @@ export function createHighlightWorkerClient(opts?: HighlightWorkerClientOptions)
     return w;
   }
 
-  function request(text: string, lang: string): HighlightWorkerHandle {
+  function request(text: string, lang: string, opts?: { readonly maxTokens?: number }): HighlightWorkerHandle {
     const w = ensureWorker();
     const settled = (o: HighlightWorkerOutcome): HighlightWorkerHandle => ({
       result: Promise.resolve(o),
@@ -185,7 +188,11 @@ export function createHighlightWorkerClient(opts?: HighlightWorkerClientOptions)
     // Fire-and-forget postMessage: the deadline owns failure — a throw here would mean the
     // worker object itself is unusable, which the error/timeout paths already cover.
     try {
-      w.postMessage({ kind: "tokenize", id, text, lang } satisfies HighlightWorkerRequest);
+      const message: HighlightWorkerRequest =
+        typeof opts?.maxTokens === "number" && Number.isFinite(opts.maxTokens) && opts.maxTokens > 0
+          ? { kind: "tokenize", id, text, lang, maxTokens: opts.maxTokens }
+          : { kind: "tokenize", id, text, lang };
+      w.postMessage(message);
     } catch {
       killWorker();
       settle(id, { status: "fallback" });

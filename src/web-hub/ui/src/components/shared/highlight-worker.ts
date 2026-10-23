@@ -46,12 +46,16 @@ import type { PrismLike } from "./highlight-core.js";
   g.Prism = { ...g.Prism, disableWorkerMessageHandler: true };
 }
 
-/** Wire request (client → worker). The `kind` discriminant future-proofs the channel. */
+/** Wire request (client → worker). The `kind` discriminant future-proofs the channel;
+ *  `maxTokens` (J1, optional) pins this request's `flattenTokens` budget — the non-virtual
+ *  bodies pass the ORIGINAL 20k so their degrade set matches the pre-worker main-thread
+ *  behaviour; absent keeps the worker's widened 80k default. */
 export interface HighlightWorkerRequest {
   readonly kind: "tokenize";
   readonly id: number;
   readonly text: string;
   readonly lang: string;
+  readonly maxTokens?: number;
 }
 
 /** Wire reply (worker → client). `spans`' buffer rides the transfer list (§5.3). */
@@ -76,15 +80,22 @@ export function computeWorkerReplyWith(
   msg: unknown,
 ): { reply: HighlightWorkerReply; transfer: readonly unknown[] } | null {
   if (msg === null || typeof msg !== "object") return null;
-  const m = msg as { kind?: unknown; id?: unknown; text?: unknown; lang?: unknown };
+  const m = msg as { kind?: unknown; id?: unknown; text?: unknown; lang?: unknown; maxTokens?: unknown };
   if (m.kind !== "tokenize" || typeof m.id !== "number" || typeof m.text !== "string" || typeof m.lang !== "string") {
     return null;
   }
   const plain: HighlightWorkerReply = { kind: "plain", id: m.id };
+  // J1: a well-formed per-request budget overrides the worker default; anything else (absent,
+  // NaN, non-positive) keeps the WIDENED 80k default — the virtual path never sends the field
+  // and must keep it (regression caught by probe:preview-perf highlight.stack-3609).
+  const limits =
+    typeof m.maxTokens === "number" && Number.isFinite(m.maxTokens) && m.maxTokens > 0
+      ? { maxTokens: m.maxTokens }
+      : { maxTokens: HIGHLIGHT_WORKER_MAX_TOKENS };
   try {
     const grammar = Prism.languages[m.lang];
     if (grammar === undefined) return { reply: plain, transfer: [] }; // unknown language ⇒ plain
-    const parts = flattenTokens(Prism.tokenize(m.text, grammar), { maxTokens: HIGHLIGHT_WORKER_MAX_TOKENS });
+    const parts = flattenTokens(Prism.tokenize(m.text, grammar), limits);
     if (parts === null) return { reply: plain, transfer: [] }; // token budget blew ⇒ plain
     const spans = encodeHighlightSpans(parts);
     if (spans === null) return { reply: plain, transfer: [] };

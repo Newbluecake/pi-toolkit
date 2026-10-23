@@ -137,6 +137,9 @@ async function settle(n = 8): Promise<void> {
     await Promise.resolve();
     await nextTick();
   }
+  // J1 #4: the real PreviewHost's focusRequest landing is deferred one PAST-RENDER
+  // macrotask — the ring tests read focusedWindow() right after settle(), so flush it.
+  await new Promise((r) => setTimeout(r, 0));
 }
 
 const mounted: Array<{ unmount: () => void }> = [];

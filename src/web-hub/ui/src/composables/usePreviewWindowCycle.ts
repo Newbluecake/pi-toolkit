@@ -86,10 +86,23 @@ export function usePreviewWindowCycle(opts: PreviewWindowCycleOptions): void {
     if (cur instanceof HTMLElement) cur.blur();
   }
 
-  /** After the host lands a `focusRequest`, remember the landed element (reuse condition). */
+  /** After the host lands a `focusRequest`, remember the landed element (reuse condition).
+   *  J1 #4 (jank-20kb): the host's landing is deferred one PAST-RENDER macrotask past its
+   *  nextTick (the panel focus() forces layout over a freshly mounted body — it must not
+   *  ride the open longtask). Microtask/arm ordering makes a single fixed wait fragile, so
+   * this waits for the landing OBSERVABLY (bounded macrotask polling — one or two rounds
+   * in practice): without it `lastFocused` never records, every press re-snapshots, and the
+   * activation reordering would flip the ring's direction. */
   async function landOnWindow(id: number): Promise<void> {
     await nextTick();
     await nextTick();
+    for (let i = 0; i < 20; i++) {
+      const el = document.activeElement;
+      if (el instanceof Element && previewCycleWindowIdOf(el) === id) break;
+      await new Promise<void>((res) => {
+        setTimeout(res, 0);
+      });
+    }
     const el = document.activeElement;
     if (el instanceof Element && previewCycleWindowIdOf(el) === id) lastFocused = el;
   }

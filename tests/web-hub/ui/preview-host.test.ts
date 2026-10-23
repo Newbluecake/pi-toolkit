@@ -58,6 +58,9 @@ const windowsEls = (): HTMLElement[] => [...document.querySelectorAll<HTMLElemen
 const tick = async (): Promise<void> => {
   await nextTick();
   await nextTick();
+  // J1 #4: PreviewHost's focusRequest landing is deferred one PAST-RENDER macrotask —
+  // flush it here so the §5.4 assertions (focus HAS landed) see the final state.
+  await new Promise((r) => setTimeout(r, 0));
 };
 
 afterEach(() => {
