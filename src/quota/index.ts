@@ -24,6 +24,7 @@ import { createDemotionStore, type DemotionRecord, type DemotionStore } from "./
 import { createFetchJson } from "./http.js";
 import {
   createQuotaHintHook,
+  QUOTA_AVAILABLE_ENTRY_TYPE,
   QUOTA_CUSTOM_TYPE,
   QUOTA_RECOVERY_INBOX_CAP,
   type QuotaAnnounceLatch,
@@ -214,6 +215,7 @@ export type {
 };
 export {
   ADAPTERS,
+  QUOTA_AVAILABLE_ENTRY_TYPE,
   QUOTA_CUSTOM_TYPE,
   createBaselineStore,
   createCredentialResolver,

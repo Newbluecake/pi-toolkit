@@ -7,6 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   QUOTA_CUSTOM_TYPE,
   createQuotaHintHook,
+  isForecastDrop,
+  quotaAvailableKey,
   shouldAnnounce,
   type QuotaAnnounceLatch,
   type QuotaHintState,
@@ -186,9 +188,9 @@ describe("createQuotaHintHook", () => {
     expect(h.sent[0]?.message.content).not.toContain("订阅优先");
   });
   it("L0: sends nothing, clears the provider latch, still lazy-refreshes", () => {
-    // 预填 availableAnnounced：本用例专测 L0 清閘锁，不涉可用播报（B 方案）。
+    // 预填 availableAnnounced（provider + resetAt 指纹键）：本用例专测 L0 清閘锁，不涉可用播报（B 方案）。
     const h = harness({
-      state: { availableAnnounced: new Set(["zai-coding-cn"]) },
+      state: { availableAnnounced: new Set([quotaAvailableKey("zai-coding-cn", [w("5h", 5, 0, "none")])]) },
       verdicts: [verdict({ level: 0, windows: [w("5h", 5, 0, "none")] })],
     });
     h.state.latches.set("zai-coding-cn", { level: 1, step: 60, at: 0, usedPct: 62 });
@@ -399,8 +401,12 @@ describe("reset-elapsed windows (no L3 injection, latch kept for the recovery ev
     });
 
   it("injects nothing for a window whose reset has elapsed (even past repeatMs) and keeps the latch", () => {
-    // 预填 availableAnnounced：本用例专测 reset-elapsed 与闩锁，不涉可用播报。
-    const h = harness({ state: { availableAnnounced: new Set(["kimi-coding"]) }, verdicts: [elapsedKimi()] });
+    // 预填 availableAnnounced（provider + resetAt 指纹键，覆盖 elapsed 与 fresh 两种窗口形态）：
+    // 本用例专测 reset-elapsed 与闩锁，不涉可用播报。
+    const h = harness({
+      state: { availableAnnounced: new Set([quotaAvailableKey("kimi-coding", elapsedKimi().windows)]) },
+      verdicts: [elapsedKimi()],
+    });
     h.state.latches.set("kimi-coding", { level: 3, step: 100, at: 0, usedPct: 100 }); // 曾真播报过 L3
     h.clock = 10_000_000; // 远超 repeatMs：旧实现会在这里复读 L3
     h.hook({}, ctx());
@@ -495,8 +501,11 @@ describe("createQuotaHintHook recovery announcements", () => {
   });
 
   it("a provider that never announced gets no recovery message; the event is consumed silently", () => {
-    // 预填 availableAnnounced：本用例专测「未曾播报 ⇒ 恢复事件静默丢弃」，不涉可用播报。
-    const h = harness({ state: { availableAnnounced: new Set(["zai-coding-cn"]) }, verdicts: [l0Reset()] });
+    // 预填 availableAnnounced（provider + resetAt 指纹键）：本用例专测「未曾播报 ⇒ 恢复事件静默丢弃」，不涉可用播报。
+    const h = harness({
+      state: { availableAnnounced: new Set([quotaAvailableKey("zai-coding-cn", l0Reset().windows)]) },
+      verdicts: [l0Reset()],
+    });
     h.state.recoveries.push(recoveryEvent());
     h.hook({}, ctx());
     expect(h.sent).toHaveLength(0);
@@ -596,7 +605,7 @@ describe("createQuotaHintHook availability announcements (plan B)", () => {
     expect(h.sent[0]?.message.content).toBe("[quota] zai-coding-cn 订阅可用，当前 5h 0% · 7d 2%，可正常派单。");
     expect(h.sent[0]?.message.customType).toBe(QUOTA_CUSTOM_TYPE);
     expect(h.sent[0]?.message.details).toMatchObject({ available: ["zai-coding-cn"] });
-    expect(h.state.availableAnnounced.has("zai-coding-cn")).toBe(true);
+    expect(h.state.availableAnnounced.has(quotaAvailableKey("zai-coding-cn", l0Fresh().windows))).toBe(true);
     h.hook({}, ctx()); // 下一轮同读数：零新增（每 provider 每栈至多一条）
     expect(h.sent).toHaveLength(1);
   });
@@ -888,8 +897,8 @@ describe("createQuotaHintHook — droid pools", () => {
       "[quota] Droid Standard 池 订阅可用，当前 5h 0%，可正常派单。",
       "[quota] Droid Core 池 订阅可用，当前 5h 0%，可正常派单。",
     ]);
-    expect(h.state.availableAnnounced.has("droid-standard")).toBe(true);
-    expect(h.state.availableAnnounced.has("droid-core")).toBe(true);
+    expect(h.state.availableAnnounced.has(quotaAvailableKey("droid-standard", [w("5h", 0, 0, "none")]))).toBe(true);
+    expect(h.state.availableAnnounced.has(quotaAvailableKey("droid-core", [w("5h", 0, 0, "none")]))).toBe(true);
   });
 });
 

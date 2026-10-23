@@ -24,6 +24,7 @@ import type { Millis } from "../core/types.js";
 import {
   DEFAULT_THRESHOLDS_BY_WINDOW,
   isDemotionFloorOnly,
+  isForecastSoftVerdict,
   triggerWindow,
   type ProviderVerdict,
   type QuotaRecoveryEvent,
@@ -419,6 +420,26 @@ export function buildQuotaWarnText(
   );
 }
 
+/**
+ * 3b 软化提示块（2026-10-23 拍板）：仅由规则 3b（forecast-before-reset）抬到 L2、
+ * 且所有窗口用量低于各自 L1 阈值、且 eta 未知或 > 12h 的 provider（见 ladder 的
+ * `isForecastSoftVerdict`），注入改用「[quota 提示]」前缀——不再叫「预警」，正文
+ * 明确「当前用量不高，订阅仍应优先使用；按当前速率可能在窗口重置前用完，留意
+ * 即可」。等级、闸门、HUD 均不变（只改文案与分类）；非软化条件（用量 ≥ L1 /
+ * eta ≤ 12h / 3a / 百分比阈值 / 降位）仍走 buildQuotaWarnText 的「预警」文案。
+ */
+export function buildQuotaSoftText(v: ProviderVerdict, now: Millis, label: string = v.provider): string {
+  const w = triggerWindow(v);
+  let head = `[quota 提示] ${label}`;
+  if (w !== undefined) {
+    head = `[quota 提示] ${label} ${formatScope(w.scope)} 已用 ${pctOf(w.usedPct)}%`;
+    const etaMs = liveEtaMs(w);
+    if (etaMs !== undefined) head += `，按当前速率${formatEta(etaMs)}后耗尽`;
+    if (w.resetAt !== undefined) head += `（窗口 ${formatResetAt(w.resetAt, now)} 重置）`;
+  }
+  return `${head}。\n当前用量不高，订阅仍应优先使用；按当前速率可能在窗口重置前用完，留意即可。`;
+}
+
 /** L3 强烈块（含本轮禁用 + 替代候选 + 按需取舍说明）。 */
 export function buildQuotaBlockText(
   v: ProviderVerdict,
@@ -618,7 +639,12 @@ export function buildQuotaMessage(sections: readonly QuotaSection[], now: Millis
     );
   const grouped = groupSamePool(sections);
   for (const { section: s, label } of grouped) {
-    if (s.verdict.level === 2) parts.push(buildQuotaWarnText(s.verdict, now, label, s.alternatives));
+    if (s.verdict.level === 2)
+      parts.push(
+        isForecastSoftVerdict(s.verdict)
+          ? buildQuotaSoftText(s.verdict, now, label)
+          : buildQuotaWarnText(s.verdict, now, label, s.alternatives),
+      );
   }
   const l3 = grouped.filter((g) => g.section.verdict.level === 3);
   const merged = l3.length > 1 ? buildMergedBlockText(l3, now) : undefined;

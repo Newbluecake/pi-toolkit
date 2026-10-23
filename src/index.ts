@@ -87,7 +87,7 @@ import { createExtendTimeoutTool } from "./tools/extend-timeout-tool.js";
 import { createCompactTool } from "./tools/compact-tool.js";
 import { createSwitchContextTool } from "./tools/switch-context-tool.js";
 import { PendingHandoffStore } from "./context-switch/store.js";
-import { createQuotaHintHook } from "./quota/index.js";
+import { createQuotaHintHook, QUOTA_AVAILABLE_ENTRY_TYPE } from "./quota/index.js";
 import { parseSubscriptionProviders, pickAlternatives } from "./quota/gate.js";
 import { createSwitchContextCompactHook } from "./context-switch/hook.js";
 import { getChildSwitchCapability } from "./context-switch/capability.js";
@@ -588,6 +588,9 @@ export default function activate(rawPi: ExtensionAPI): void {
       verdicts: () => holder.current?.quota?.verdicts() ?? [],
       refresh: () => holder.current?.quota?.refreshIfStale(),
       sendMessage: (message, options) => pi.sendMessage(message, options),
+      // 可用播报持久化（2026-10-23 拍板，跨 /reload 去重）：custom entry 不进 LLM
+      // 上下文；读回走 turn_end ctx 的 getBranch（hook 内部，每栈首轮一次）。
+      persistAvailable: (keys) => pi.appendEntry(QUOTA_AVAILABLE_ENTRY_TYPE, { v: 1, keys }),
       alternatives: (provider) =>
         pickAlternatives(provider, {
           verdictFor: (p) => holder.current?.quota?.verdictFor(p),
