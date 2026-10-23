@@ -26,6 +26,9 @@
   },
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "pi-secure": "src/secure/bin/pi-secure"
+  },
   "pi": {
     "extensions": [
       "./index.ts"

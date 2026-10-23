@@ -1,0 +1,618 @@
+{
+  "$comment": "P1↔P2 secure contract parity (data-encryption plan r4). Shared by tests/secure/config-parity.test.ts (src/secure/config.ts, env.ts) and the launcher tests (src/secure/bin/helper.mjs). Never import across; extend cases here only. settings.expect is the full JSON of parseSecureConfig (present/enabled/valid/vaults/invalid[{name,reason}]/error?); vaults and invalid are sorted by name. mountinfo realMnt/realCipher are already realpath'd. hubSafeEnv.expect is the full output env; identity=true additionally requires the same object back.",
+  "home": "/home/u",
+  "settings": [
+    {
+      "name": "no secure key",
+      "input": {
+        "concurrencyLimit": 3
+      },
+      "expect": {
+        "present": false,
+        "enabled": true,
+        "valid": true,
+        "vaults": [],
+        "invalid": []
+      }
+    },
+    {
+      "name": "settings not an object",
+      "input": null,
+      "expect": {
+        "present": false,
+        "enabled": true,
+        "valid": true,
+        "vaults": [],
+        "invalid": []
+      }
+    },
+    {
+      "name": "secure null treated as present-but-invalid",
+      "input": {
+        "secure": null
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": false,
+        "vaults": [],
+        "invalid": [],
+        "error": "secure: not an object"
+      }
+    },
+    {
+      "name": "empty secure section",
+      "input": {
+        "secure": {}
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [],
+        "invalid": []
+      }
+    },
+    {
+      "name": "secure not an object",
+      "input": {
+        "secure": "on"
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": false,
+        "vaults": [],
+        "invalid": [],
+        "error": "secure: not an object"
+      }
+    },
+    {
+      "name": "secure is an array",
+      "input": {
+        "secure": [1]
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": false,
+        "vaults": [],
+        "invalid": [],
+        "error": "secure: not an object"
+      }
+    },
+    {
+      "name": "vaults is an array",
+      "input": {
+        "secure": {
+          "vaults": []
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": false,
+        "vaults": [],
+        "invalid": [],
+        "error": "secure.vaults: not an object"
+      }
+    },
+    {
+      "name": "vaults null",
+      "input": {
+        "secure": {
+          "vaults": null
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": false,
+        "vaults": [],
+        "invalid": [],
+        "error": "secure.vaults: not an object"
+      }
+    },
+    {
+      "name": "enabled false keeps parsing vaults (consumers ignore them)",
+      "input": {
+        "secure": {
+          "enabled": false,
+          "vaults": {
+            "acme": {}
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": false,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "acme",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/acme",
+            "link": "/home/u/secure/acme",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+            "mnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+            "work": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/work",
+            "state": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state",
+            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock"
+          }
+        ],
+        "invalid": []
+      }
+    },
+    {
+      "name": "enabled non-boolean defaults to true",
+      "input": {
+        "secure": {
+          "enabled": "yes",
+          "vaults": {}
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [],
+        "invalid": []
+      }
+    },
+    {
+      "name": "defaults for dir and link",
+      "input": {
+        "secure": {
+          "vaults": {
+            "acme": {}
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "acme",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/acme",
+            "link": "/home/u/secure/acme",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+            "mnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+            "work": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/work",
+            "state": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state",
+            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock"
+          }
+        ],
+        "invalid": []
+      }
+    },
+    {
+      "name": "tilde and absolute paths normalized",
+      "input": {
+        "secure": {
+          "vaults": {
+            "c": {
+              "dir": "~/v/c",
+              "link": "/abs/c/"
+            },
+            "f": {
+              "dir": "/a/../b/f"
+            }
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "c",
+            "dir": "/home/u/v/c",
+            "link": "/abs/c",
+            "cipher": "/home/u/v/c/cipher",
+            "mnt": "/home/u/v/c/mnt",
+            "work": "/home/u/v/c/mnt/work",
+            "state": "/home/u/v/c/mnt/state",
+            "sessionDir": "/home/u/v/c/mnt/state/sessions/default",
+            "lock": "/home/u/v/c/mount.lock"
+          },
+          {
+            "name": "f",
+            "dir": "/b/f",
+            "link": "/home/u/secure/f",
+            "cipher": "/b/f/cipher",
+            "mnt": "/b/f/mnt",
+            "work": "/b/f/mnt/work",
+            "state": "/b/f/mnt/state",
+            "sessionDir": "/b/f/mnt/state/sessions/default",
+            "lock": "/b/f/mount.lock"
+          }
+        ],
+        "invalid": []
+      }
+    },
+    {
+      "name": "invalid entries are dropped individually, sorted by name",
+      "input": {
+        "secure": {
+          "vaults": {
+            "zz": {},
+            "Bad": {},
+            "x y": {},
+            "b": {
+              "dir": "rel/x"
+            },
+            "d": {
+              "link": "~"
+            },
+            "e": 3,
+            "g": {
+              "dir": "~user/x"
+            },
+            "h": {
+              "dir": ""
+            },
+            "i": {
+              "dir": null
+            },
+            "j": {
+              "link": ["/x"]
+            },
+            "k": []
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "zz",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/zz",
+            "link": "/home/u/secure/zz",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/zz/cipher",
+            "mnt": "/home/u/.local/share/pi-toolkit-secure/zz/mnt",
+            "work": "/home/u/.local/share/pi-toolkit-secure/zz/mnt/work",
+            "state": "/home/u/.local/share/pi-toolkit-secure/zz/mnt/state",
+            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/zz/mnt/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/zz/mount.lock"
+          }
+        ],
+        "invalid": [
+          {
+            "name": "Bad",
+            "reason": "name"
+          },
+          {
+            "name": "b",
+            "reason": "dir"
+          },
+          {
+            "name": "d",
+            "reason": "link"
+          },
+          {
+            "name": "e",
+            "reason": "entry"
+          },
+          {
+            "name": "g",
+            "reason": "dir"
+          },
+          {
+            "name": "h",
+            "reason": "dir"
+          },
+          {
+            "name": "i",
+            "reason": "dir"
+          },
+          {
+            "name": "j",
+            "reason": "link"
+          },
+          {
+            "name": "k",
+            "reason": "entry"
+          },
+          {
+            "name": "x y",
+            "reason": "name"
+          }
+        ]
+      }
+    },
+    {
+      "name": "name rules",
+      "input": {
+        "secure": {
+          "vaults": {
+            "9": {},
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {},
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {},
+            "-a": {},
+            "_a": {},
+            "0a_b-c": {}
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "0a_b-c",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/0a_b-c",
+            "link": "/home/u/secure/0a_b-c",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/cipher",
+            "mnt": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/mnt",
+            "work": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/mnt/work",
+            "state": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/mnt/state",
+            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/mnt/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/mount.lock"
+          },
+          {
+            "name": "9",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/9",
+            "link": "/home/u/secure/9",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/9/cipher",
+            "mnt": "/home/u/.local/share/pi-toolkit-secure/9/mnt",
+            "work": "/home/u/.local/share/pi-toolkit-secure/9/mnt/work",
+            "state": "/home/u/.local/share/pi-toolkit-secure/9/mnt/state",
+            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/9/mnt/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/9/mount.lock"
+          },
+          {
+            "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "link": "/home/u/secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cipher",
+            "mnt": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/mnt",
+            "work": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/mnt/work",
+            "state": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/mnt/state",
+            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/mnt/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/mount.lock"
+          }
+        ],
+        "invalid": [
+          {
+            "name": "-a",
+            "reason": "name"
+          },
+          {
+            "name": "_a",
+            "reason": "name"
+          },
+          {
+            "name": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "reason": "name"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown keys ignored",
+      "input": {
+        "secure": {
+          "gocryptfsPath": "x",
+          "vaults": {
+            "acme": {
+              "dir": "~/d",
+              "extra": 1
+            }
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "acme",
+            "dir": "/home/u/d",
+            "link": "/home/u/secure/acme",
+            "cipher": "/home/u/d/cipher",
+            "mnt": "/home/u/d/mnt",
+            "work": "/home/u/d/mnt/work",
+            "state": "/home/u/d/mnt/state",
+            "sessionDir": "/home/u/d/mnt/state/sessions/default",
+            "lock": "/home/u/d/mount.lock"
+          }
+        ],
+        "invalid": []
+      }
+    }
+  ],
+  "mountinfo": [
+    {
+      "name": "mounted",
+      "mountinfo": "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n40 25 0:40 / /home/u/.local/share/pi-toolkit-secure/acme/mnt rw,nosuid,nodev,relatime shared:40 - fuse.gocryptfs /home/u/.local/share/pi-toolkit-secure/acme/cipher rw,user_id=1000,group_id=1000\n",
+      "realMnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+      "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+      "expect": "mounted"
+    },
+    {
+      "name": "absent",
+      "mountinfo": "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n",
+      "realMnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+      "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+      "expect": "absent"
+    },
+    {
+      "name": "empty text",
+      "mountinfo": "",
+      "realMnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+      "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+      "expect": "absent"
+    },
+    {
+      "name": "foreign fstype",
+      "mountinfo": "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n40 25 0:40 / /home/u/.local/share/pi-toolkit-secure/acme/mnt rw,nosuid,nodev,relatime shared:40 - tmpfs tmpfs rw,user_id=1000,group_id=1000\n",
+      "realMnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+      "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+      "expect": "foreign"
+    },
+    {
+      "name": "gocryptfs with another source",
+      "mountinfo": "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n40 25 0:40 / /home/u/.local/share/pi-toolkit-secure/acme/mnt rw,nosuid,nodev,relatime shared:40 - fuse.gocryptfs /elsewhere/cipher rw,user_id=1000,group_id=1000\n",
+      "realMnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+      "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+      "expect": "foreign"
+    },
+    {
+      "name": "stacked: last line wins (tmpfs on top)",
+      "mountinfo": "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n40 25 0:40 / /home/u/.local/share/pi-toolkit-secure/acme/mnt rw,nosuid,nodev,relatime shared:40 - fuse.gocryptfs /home/u/.local/share/pi-toolkit-secure/acme/cipher rw,user_id=1000,group_id=1000\n41 25 0:41 / /home/u/.local/share/pi-toolkit-secure/acme/mnt rw,nosuid,nodev,relatime shared:41 - tmpfs tmpfs rw,user_id=1000,group_id=1000\n",
+      "realMnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+      "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+      "expect": "foreign"
+    },
+    {
+      "name": "stacked: last line wins (gocryptfs on top)",
+      "mountinfo": "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n40 25 0:40 / /home/u/.local/share/pi-toolkit-secure/acme/mnt rw,nosuid,nodev,relatime shared:40 - tmpfs tmpfs rw,user_id=1000,group_id=1000\n41 25 0:41 / /home/u/.local/share/pi-toolkit-secure/acme/mnt rw,nosuid,nodev,relatime shared:41 - fuse.gocryptfs /home/u/.local/share/pi-toolkit-secure/acme/cipher rw,user_id=1000,group_id=1000\n",
+      "realMnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+      "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+      "expect": "mounted"
+    },
+    {
+      "name": "octal escapes decoded",
+      "mountinfo": "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n40 25 0:40 / /home/u/my\\040vault/mnt rw,nosuid,nodev,relatime shared:40 - fuse.gocryptfs /home/u/my\\040vault/cipher rw,user_id=1000,group_id=1000\n",
+      "realMnt": "/home/u/my vault/mnt",
+      "realCipher": "/home/u/my vault/cipher",
+      "expect": "mounted"
+    },
+    {
+      "name": "prefix of mount point does not match",
+      "mountinfo": "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n40 25 0:40 / /home/u/.local/share/pi-toolkit-secure/acme/mnt2 rw,nosuid,nodev,relatime shared:40 - fuse.gocryptfs /home/u/.local/share/pi-toolkit-secure/acme/cipher rw,user_id=1000,group_id=1000\n",
+      "realMnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+      "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+      "expect": "absent"
+    },
+    {
+      "name": "malformed lines skipped",
+      "mountinfo": "garbage\n1 2 3\n40 25 0:40 / /home/u/.local/share/pi-toolkit-secure/acme/mnt rw,nosuid,nodev,relatime shared:40 - fuse.gocryptfs /home/u/.local/share/pi-toolkit-secure/acme/cipher rw,user_id=1000,group_id=1000\n",
+      "realMnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+      "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+      "expect": "mounted"
+    },
+    {
+      "name": "no trailing newline",
+      "mountinfo": "40 25 0:40 / /home/u/.local/share/pi-toolkit-secure/acme/mnt rw,nosuid,nodev,relatime shared:40 - fuse.gocryptfs /home/u/.local/share/pi-toolkit-secure/acme/cipher rw,user_id=1000,group_id=1000",
+      "realMnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+      "realCipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+      "expect": "mounted"
+    }
+  ],
+  "hubSafeEnv": [
+    {
+      "name": "plain env is returned as-is (identity)",
+      "input": {
+        "PATH": "/usr/bin",
+        "TMPDIR": "/tmp"
+      },
+      "expect": {
+        "PATH": "/usr/bin",
+        "TMPDIR": "/tmp"
+      },
+      "identity": true
+    },
+    {
+      "name": "secure: ORIG restores TMPDIR, deletes ARMORY_MEMORY_ROOT (null)",
+      "input": {
+        "PATH": "/usr/bin",
+        "TMPDIR": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/tmp",
+        "ARMORY_MEMORY_ROOT": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/memory",
+        "PI_SECURE_VAULT": "acme",
+        "PI_SECURE_SESSION": "1",
+        "PI_SECURE_ORIG_ENV": "{\"TMPDIR\": \"/tmp\", \"ARMORY_MEMORY_ROOT\": null}"
+      },
+      "expect": {
+        "PATH": "/usr/bin",
+        "TMPDIR": "/tmp"
+      }
+    },
+    {
+      "name": "secure: ORIG null for both deletes both",
+      "input": {
+        "TMPDIR": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/tmp",
+        "ARMORY_MEMORY_ROOT": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/memory",
+        "PI_SECURE_SESSION": "1",
+        "PI_SECURE_ORIG_ENV": "{\"TMPDIR\": null, \"ARMORY_MEMORY_ROOT\": null}"
+      },
+      "expect": {}
+    },
+    {
+      "name": "secure: ORIG restores both strings",
+      "input": {
+        "TMPDIR": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/tmp",
+        "ARMORY_MEMORY_ROOT": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/memory",
+        "PI_SECURE_SESSION": "1",
+        "PI_SECURE_ORIG_ENV": "{\"TMPDIR\": \"/var/t\", \"ARMORY_MEMORY_ROOT\": \"/m\"}"
+      },
+      "expect": {
+        "TMPDIR": "/var/t",
+        "ARMORY_MEMORY_ROOT": "/m"
+      }
+    },
+    {
+      "name": "secure session without ORIG deletes both",
+      "input": {
+        "HOME": "/home/u",
+        "TMPDIR": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/tmp",
+        "ARMORY_MEMORY_ROOT": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/memory",
+        "PI_SECURE_SESSION": "1",
+        "PI_SECURE_VAULT": "acme"
+      },
+      "expect": {
+        "HOME": "/home/u"
+      }
+    },
+    {
+      "name": "secure session with malformed ORIG deletes both",
+      "input": {
+        "TMPDIR": "/x",
+        "ARMORY_MEMORY_ROOT": "/y",
+        "PI_SECURE_SESSION": "1",
+        "PI_SECURE_ORIG_ENV": "{not json"
+      },
+      "expect": {}
+    },
+    {
+      "name": "ORIG missing one key: secure session deletes it",
+      "input": {
+        "TMPDIR": "/x",
+        "ARMORY_MEMORY_ROOT": "/y",
+        "PI_SECURE_SESSION": "1",
+        "PI_SECURE_ORIG_ENV": "{\"TMPDIR\": \"/t\"}"
+      },
+      "expect": {
+        "TMPDIR": "/t"
+      }
+    },
+    {
+      "name": "stray PI_SECURE_VAULT only: stripped, TMPDIR kept",
+      "input": {
+        "TMPDIR": "/tmp",
+        "PI_SECURE_VAULT": "acme"
+      },
+      "expect": {
+        "TMPDIR": "/tmp"
+      }
+    },
+    {
+      "name": "any PI_SECURE_* key is stripped",
+      "input": {
+        "A": "1",
+        "PI_SECURE_FUTURE": "z"
+      },
+      "expect": {
+        "A": "1"
+      }
+    }
+  ]
+}

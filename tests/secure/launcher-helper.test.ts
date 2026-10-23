@@ -1,0 +1,840 @@
+/**
+ * P1 launcher helper (`src/secure/bin/helper.mjs`) — pure-function unit tests
+ * (docs/dev/data-encryption/plan.md §2.1–§2.5, §6 "单测 helper.mjs").
+ *
+ * - parity: the shared fixture `tests/fixtures/secure-contract-parity.json` (also run by P2 against
+ *   src/secure/config.ts — the two sides never import each other)
+ * - argument audit with the REAL pi `parseArgs` (devDependency pi 1.3.x)
+ * - project sessionDir sync, layout/sentinel checks, /proc cwd scan, swap/core/traffic-record
+ *   detection, bounded `finalize` with injected stages, run env / -C resolution
+ *
+ * Nothing here mounts anything; FUSE-backed behaviour lives in launcher-fuse.test.ts.
+ */
+import { spawn, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { afterAll, describe, expect, it } from "vitest";
+
+const REPO = join(import.meta.dirname, "..", "..");
+const HELPER = join(REPO, "src", "secure", "bin", "helper.mjs");
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- plain-JS module, no typings by design
+const H: any = await import(pathToFileURL(HELPER).href);
+const PI_PKG = join(REPO, "node_modules", "@earendil-works", "pi-coding-agent");
+type ParseArgs = (a: string[]) => Record<string, unknown>;
+const parseArgs: ParseArgs = (await import(pathToFileURL(join(PI_PKG, "dist", "cli", "args.js")).href)).parseArgs;
+
+const scratch: string[] = [];
+function tmp(prefix: string): string {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  chmodSync(d, 0o700);
+  scratch.push(d);
+  return d;
+}
+afterAll(() => {
+  for (const d of scratch) {
+    try {
+      chmodSync(d, 0o700);
+    } catch {
+      /* ignore */
+    }
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+interface ParityFixture {
+  home: string;
+  settings: { name: string; input: unknown; expect: unknown }[];
+  mountinfo: { name: string; mountinfo: string; realMnt: string; realCipher: string; expect: string }[];
+}
+const PARITY: ParityFixture = JSON.parse(
+  readFileSync(join(REPO, "tests", "fixtures", "secure-contract-parity.json"), "utf8"),
+) as ParityFixture;
+
+describe("contract parity (shared fixture with src/secure/config.ts)", () => {
+  it("fixture is non-trivial", () => {
+    expect(PARITY.settings.length).toBeGreaterThanOrEqual(10);
+    expect(PARITY.mountinfo.length).toBeGreaterThanOrEqual(8);
+  });
+  for (const c of PARITY.settings) {
+    it(`settings: ${c.name}`, () => {
+      expect(JSON.parse(JSON.stringify(H.parseSecureConfig(c.input, PARITY.home)))).toEqual(c.expect);
+    });
+  }
+  for (const c of PARITY.mountinfo) {
+    it(`mountinfo: ${c.name}`, () => {
+      expect(H.vaultMountState(c.mountinfo, c.realMnt, c.realCipher)).toBe(c.expect);
+    });
+  }
+  it("derived paths follow the agreed layout", () => {
+    const r = H.parseSecureConfig({ secure: { vaults: { acme: {} } } }, "/home/u");
+    expect(r.vaults[0]).toEqual({
+      name: "acme",
+      dir: "/home/u/.local/share/pi-toolkit-secure/acme",
+      link: "/home/u/secure/acme",
+      cipher: "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+      mnt: "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+      work: "/home/u/.local/share/pi-toolkit-secure/acme/mnt/work",
+      state: "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state",
+      sessionDir: "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/sessions/default",
+      lock: "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock",
+    });
+  });
+});
+
+describe("argument audit with the real pi parseArgs (§2.2.1 + P0 C4)", () => {
+  const v = H.deriveVault("acme", "/vault/acme", "/home/u/secure/acme");
+  const sessionsRoot = join(v.state, "sessions");
+  const audit = (argv: string[], cwd = v.work) =>
+    H.auditParsedArgs(parseArgs(argv), { cwd, sessionsRoot, home: "/home/u" });
+
+  it("the real parseArgs passes the shape self-test", () => {
+    expect(H.parseArgsShapeOk(parseArgs)).toBe(true);
+  });
+  it("a drifted parseArgs fails the shape self-test (fail closed)", () => {
+    expect(H.parseArgsShapeOk(() => ({ messages: [], fileArgs: [] }))).toBe(false);
+    expect(
+      H.parseArgsShapeOk(() => {
+        throw new Error("x");
+      }),
+    ).toBe(false);
+    expect(H.auditParsedArgs({ messages: [] }, { cwd: v.work, sessionsRoot }).ok).toBe(false);
+  });
+
+  const allowed: [string, string[]][] = [
+    ["no args", []],
+    ["--version", ["--version"]],
+    ["-p message", ["-p", "hello"]],
+    ["--fork <outside path> (copies INTO the vault)", ["--fork", "/home/u/.pi/agent/sessions/x/old.jsonl"]],
+    ["--fork <id>", ["--fork", "0193abcd"]],
+    ["--session <id>", ["--session", "0193abcd"]],
+    ["--session <path inside sessions/>", ["--session", join(sessionsRoot, "default", "a.jsonl")]],
+    ["--session relative path resolving inside", ["--session", "../state/sessions/default/a.jsonl"]],
+    ["@file (read into the vault session)", ["@/etc/hostname", "summarize"]],
+    ["--no-session", ["--no-session", "-p", "hi"]],
+    ["--session-id", ["--session-id", "11111111-1111-4111-8111-111111111111"]],
+    ["-c / -r", ["-c"]],
+    ["model/thinking flags", ["--model", "a/b", "--thinking", "high"]],
+    ["`--` makes everything after a message", ["--", "--session-dir", "/tmp/x", "--export", "y", "--no-extensions"]],
+  ];
+  for (const [name, argv] of allowed) {
+    it(`allows ${name}`, () => {
+      expect(audit(argv)).toEqual({ ok: true });
+    });
+  }
+
+  const rejected: [string, string[], RegExp][] = [
+    ["--session-dir <x>", ["--session-dir", "/tmp/x"], /--session-dir/],
+    ['--session-dir "" (presence, not truthiness)', ["--session-dir", ""], /--session-dir/],
+    ["dangling --session-dir", ["-p", "hi", "--session-dir"], /--session-dir/],
+    ["--session-dir=x form", ["--session-dir=/tmp/x"], /--session-dir/],
+    ["dangling --fork", ["--fork"], /--fork/],
+    ["dangling --session", ["--session"], /--session/],
+    ["--session <path outside the vault>", ["--session", "/home/u/.pi/agent/sessions/x/a.jsonl"], /--session/],
+    ["--session a.jsonl (relative, resolves to cwd = work, not sessions/)", ["--session", "a.jsonl"], /--session/],
+    ["--session ../../escape", ["--session", "../state/sessions/../../../x.jsonl"], /--session/],
+    ["--session ~/x.jsonl", ["--session", "~/x.jsonl"], /--session/],
+    ["--session <sessions root itself>", ["--session", `${sessionsRoot}/`], /--session/],
+    ["--no-extensions", ["--no-extensions"], /--no-extensions/],
+    ["-ne", ["-ne"], /--no-extensions/],
+    ["-e <path>", ["-e", "/x/ext.ts"], /extension/],
+    ["--extension <path>", ["--extension", "/x/ext.ts"], /extension/],
+    ["--export <file>", ["--export", "/tmp/s.jsonl"], /--export/],
+  ];
+  for (const [name, argv, re] of rejected) {
+    it(`rejects ${name}`, () => {
+      const r = audit(argv);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(re);
+    });
+  }
+
+  it("physical pass: a symlink under sessions/ that points outside is rejected", () => {
+    const root = tmp("ps-audit-");
+    const sessions = join(root, "state", "sessions");
+    mkdirSync(join(sessions, "default"), { recursive: true });
+    mkdirSync(join(root, "outside"));
+    symlinkSync(join(root, "outside"), join(sessions, "evil"));
+    const p = parseArgs(["--session", join(sessions, "evil", "a.jsonl")]);
+    expect(H.auditParsedArgs(p, { cwd: root, sessionsRoot: sessions }).ok).toBe(true); // lexical: inside
+    const r = H.auditParsedArgs(p, { cwd: root, sessionsRoot: sessions, physical: true });
+    expect(r.ok).toBe(false);
+    const ok = parseArgs(["--session", join(sessions, "default", "new.jsonl")]);
+    expect(H.auditParsedArgs(ok, { cwd: root, sessionsRoot: sessions, physical: true }).ok).toBe(true);
+  });
+
+  it("sessionArgIsPath mirrors pi main.js", () => {
+    expect(H.sessionArgIsPath("abc")).toBe(false);
+    expect(H.sessionArgIsPath("a/b")).toBe(true);
+    expect(H.sessionArgIsPath("a\\b")).toBe(true);
+    expect(H.sessionArgIsPath("x.jsonl")).toBe(true);
+  });
+});
+
+describe("pi package discovery", () => {
+  it("findPiPackage walks up from the real pi entry to the package root", () => {
+    expect(H.findPiPackage(join(PI_PKG, "dist", "cli.js"))).toBe(
+      join(REPO, "node_modules", "@earendil-works", "pi-coding-agent"),
+    );
+  });
+  it("returns undefined for a foreign binary", () => {
+    expect(H.findPiPackage("/bin/sh")).toBeUndefined();
+  });
+});
+
+describe("project sessionDir sync (§2.3)", () => {
+  function vault() {
+    const root = tmp("ps-sync-");
+    const v = H.deriveVault("acme", join(root, "v"), join(root, "link"));
+    mkdirSync(v.work, { recursive: true });
+    mkdirSync(v.sessionDir, { recursive: true });
+    return v;
+  }
+  const file = (v: { work: string }) => join(v.work, ".pi", "settings.json");
+
+  it("writes a fresh file, then is idempotent", () => {
+    const v = vault();
+    expect(H.syncProjectSettings(v).kind).toBe("written");
+    expect(JSON.parse(readFileSync(file(v), "utf8"))).toEqual({ sessionDir: v.sessionDir });
+    expect(H.syncProjectSettings(v).kind).toBe("unchanged");
+  });
+  it("merges only sessionDir into an existing settings file", () => {
+    const v = vault();
+    mkdirSync(join(v.work, ".pi"));
+    writeFileSync(file(v), JSON.stringify({ theme: "dark", packages: ["x"] }));
+    expect(H.syncProjectSettings(v).kind).toBe("written");
+    expect(JSON.parse(readFileSync(file(v), "utf8"))).toEqual({
+      theme: "dark",
+      packages: ["x"],
+      sessionDir: v.sessionDir,
+    });
+  });
+  it("a different sessionDir is a conflict (nothing written) until --fix-settings, which backs up first", () => {
+    const v = vault();
+    mkdirSync(join(v.work, ".pi"));
+    const orig = JSON.stringify({ sessionDir: "/home/u/old-sessions", theme: "x" });
+    writeFileSync(file(v), orig);
+    const r = H.syncProjectSettings(v);
+    expect(r.kind).toBe("conflict");
+    expect(r.message).toContain("--fix-settings");
+    expect(readFileSync(file(v), "utf8")).toBe(orig);
+    const f = H.syncProjectSettings(v, { fix: true, now: new Date(2026, 9, 23, 13, 0, 0) });
+    expect(f.kind).toBe("fixed");
+    expect(f.backup).toBe(`${file(v)}.bak-20261023-130000`);
+    expect(readFileSync(f.backup, "utf8")).toBe(orig);
+    expect(JSON.parse(readFileSync(file(v), "utf8"))).toEqual({ sessionDir: v.sessionDir, theme: "x" });
+  });
+  it("equivalent spellings (trailing slash, symlinked path) count as the same value", () => {
+    const v = vault();
+    mkdirSync(join(v.work, ".pi"));
+    writeFileSync(file(v), JSON.stringify({ sessionDir: `${v.sessionDir}/` }));
+    expect(H.syncProjectSettings(v).kind).toBe("unchanged");
+    const alias = join(v.dir, "..", "alias");
+    symlinkSync(v.dir, alias);
+    writeFileSync(file(v), JSON.stringify({ sessionDir: join(alias, "mnt", "state", "sessions", "default") }));
+    expect(H.syncProjectSettings(v).kind).toBe("unchanged");
+  });
+  it("unparsable settings: conflict; --fix-settings backs up and writes a minimal object", () => {
+    const v = vault();
+    mkdirSync(join(v.work, ".pi"));
+    writeFileSync(file(v), "{ // jsonc\n}");
+    expect(H.syncProjectSettings(v).kind).toBe("conflict");
+    const f = H.syncProjectSettings(v, { fix: true });
+    expect(f.kind).toBe("fixed");
+    expect(f.droppedOtherKeys).toBe(true);
+    expect(JSON.parse(readFileSync(file(v), "utf8"))).toEqual({ sessionDir: v.sessionDir });
+  });
+  it("a symlinked .pi or settings.json is refused, never followed", () => {
+    const v = vault();
+    const elsewhere = join(v.dir, "..", "elsewhere");
+    mkdirSync(elsewhere);
+    symlinkSync(elsewhere, join(v.work, ".pi"));
+    expect(H.syncProjectSettings(v, { fix: true }).kind).toBe("conflict");
+    expect(readdirSync(elsewhere)).toEqual([]);
+  });
+});
+
+describe("layout / sentinels (§2.1)", () => {
+  function fresh() {
+    const root = tmp("ps-layout-");
+    const v = H.deriveVault("acme", join(root, "v"), join(root, "secure", "acme"));
+    H.createLayout(v);
+    writeFileSync(join(v.cipher, "gocryptfs.conf"), "{}");
+    return v;
+  }
+  it("createLayout builds private dirs + 0-byte 0400 sentinels + lock", () => {
+    const v = fresh();
+    expect(H.checkLayout(v)).toEqual({ exists: true, problems: [] });
+    expect(readdirSync(v.mnt).sort()).toEqual(["state", "work"]);
+    expect(existsSync(v.lock)).toBe(true);
+    expect(() => H.createLayout(v)).toThrow(/已存在/);
+  });
+  it("missing gocryptfs.conf ⇒ incomplete", () => {
+    const root = tmp("ps-layout-");
+    const v = H.deriveVault("acme", join(root, "v"), join(root, "l"));
+    H.createLayout(v);
+    expect(H.checkLayout(v).problems.join()).toMatch(/gocryptfs\.conf/);
+  });
+  it("an extra entry under mnt/ is refused", () => {
+    const v = fresh();
+    writeFileSync(join(v.mnt, "extra"), "");
+    expect(H.checkLayout(v).problems.join()).toMatch(/多余条目：extra/);
+  });
+  it("a sentinel with content / wrong mode / replaced by a dir is refused", () => {
+    const v = fresh();
+    chmodSync(join(v.mnt, "work"), 0o600);
+    writeFileSync(join(v.mnt, "work"), "x");
+    expect(H.checkLayout(v).problems.join()).toMatch(/哨兵 .*work/);
+    const v2 = fresh();
+    chmodSync(join(v2.mnt, "state"), 0o600);
+    rmSync(join(v2.mnt, "state"));
+    mkdirSync(join(v2.mnt, "state"));
+    expect(H.checkLayout(v2).problems.join()).toMatch(/哨兵 .*state/);
+  });
+  it("group/other-accessible dirs are refused", () => {
+    const v = fresh();
+    chmodSync(v.dir, 0o750);
+    expect(H.checkLayout(v).problems.join()).toMatch(/0700/);
+  });
+  it("mounted=true skips the sentinel checks", () => {
+    const v = fresh();
+    writeFileSync(join(v.mnt, "extra"), "");
+    expect(H.checkLayout(v, { mounted: true }).problems).toEqual([]);
+  });
+  it("createLink is idempotent and refuses a foreign entry", () => {
+    const v = fresh();
+    H.createLink(v);
+    H.createLink(v);
+    const v2 = H.deriveVault("b", v.dir, join(v.dir, "..", "occupied"));
+    writeFileSync(v2.link, "");
+    expect(() => H.createLink(v2)).toThrow(/占用/);
+  });
+});
+
+describe("/proc cwd occupancy scan (§2.5 step 2)", () => {
+  function fakeProc(entries: Record<string, string>) {
+    const root = tmp("ps-proc-");
+    for (const [pid, cwd] of Object.entries(entries)) {
+      mkdirSync(join(root, pid));
+      symlinkSync(cwd, join(root, pid, "cwd"));
+      writeFileSync(join(root, pid, "comm"), `proc${pid}\n`);
+    }
+    mkdirSync(join(root, "self"));
+    mkdirSync(join(root, "77")); // unreadable cwd (no link) ⇒ ignored
+    return root;
+  }
+  it("finds processes whose cwd is the mount or below; ignores prefixes, self and unreadable", async () => {
+    const proc = fakeProc({
+      "10": "/v/mnt/work/a",
+      "11": "/v/mntx",
+      "12": "/v/mnt",
+      "13": "/v/mnt/state (deleted)",
+      "99": "/v/mnt",
+    });
+    const r = await H.scanCwdOccupants("/v/mnt", { deadline: Date.now() + 2000, procRoot: proc, selfPid: 99 });
+    expect(r.kind).toBe("done");
+    expect(r.occupants.map((o: { pid: number }) => o.pid).sort()).toEqual([10, 12, 13]);
+    expect(r.occupants.find((o: { pid: number }) => o.pid === 10).comm).toBe("proc10");
+  });
+  it("too many entries ⇒ too-many (finalize then refuses to unmount)", async () => {
+    const proc = fakeProc({ "1": "/", "2": "/", "3": "/" });
+    expect(
+      (await H.scanCwdOccupants("/v/mnt", { deadline: Date.now() + 2000, procRoot: proc, maxEntries: 2 })).kind,
+    ).toBe("too-many");
+  });
+  it("respects the deadline", async () => {
+    const proc = fakeProc({ "1": "/" });
+    const t0 = Date.now();
+    const r = await H.scanCwdOccupants("/v/mnt", { deadline: Date.now() + 200, procRoot: proc, delayMs: 5000 });
+    expect(r.kind).toBe("timeout");
+    expect(Date.now() - t0).toBeLessThan(1500);
+  });
+  it("the real /proc is scannable and sees a child sitting in a temp dir", async () => {
+    const d = tmp("ps-occ-");
+    const child = spawn("sleep", ["5"], { cwd: d, stdio: "ignore" });
+    try {
+      await new Promise((r) => setTimeout(r, 100));
+      const r = await H.scanCwdOccupants(d, { deadline: Date.now() + 3000 });
+      expect(r.kind).toBe("done");
+      expect(r.occupants.map((o: { pid: number }) => o.pid)).toContain(child.pid);
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+});
+
+describe("bounded finalize (§2.5, injected stages)", () => {
+  const v = H.deriveVault("acme", "/nonexistent/acme", "/nonexistent/link");
+  const deps = (over: Record<string, unknown>) => ({
+    mountState: () => "mounted",
+    scan: async () => ({ kind: "done", occupants: [] }),
+    unmount: async () => ({ kind: "exit", code: 0, stderr: "" }),
+    ...over,
+  });
+  it("not mounted ⇒ ok, nothing spawned", async () => {
+    let called = false;
+    const r = await H.finalize(v, {
+      deps: deps({ mountState: () => "absent", unmount: async () => ((called = true), {}) }),
+    });
+    expect(r.code).toBe(0);
+    expect(called).toBe(false);
+  });
+  it("foreign mount ⇒ refuse", async () => {
+    const r = await H.finalize(v, { deps: deps({ mountState: () => "foreign" }) });
+    expect(r.code).toBe(H.EXIT.FAIL);
+  });
+  it("occupants ⇒ list ≤10 pids, do not unmount", async () => {
+    let called = false;
+    const occupants = Array.from({ length: 12 }, (_, i) => ({ pid: 100 + i, comm: "bash", cwd: "/x" }));
+    const r = await H.finalize(v, {
+      deps: deps({ scan: async () => ({ kind: "done", occupants }), unmount: async () => ((called = true), {}) }),
+    });
+    expect(r.code).toBe(H.EXIT.BUSY);
+    expect(called).toBe(false);
+    expect(r.lines.filter((l: string) => l.includes("pid ")).length).toBe(10);
+    expect(r.lines.join("\n")).toMatch(/共 12 个/);
+  });
+  it("--lazy unmounts even with occupants", async () => {
+    let lazySeen: unknown;
+    const r = await H.finalize(v, {
+      lazy: true,
+      deps: deps({
+        mountState: (() => {
+          let n = 0;
+          return () => (n++ === 0 ? "mounted" : "absent");
+        })(),
+        scan: async () => ({ kind: "done", occupants: [{ pid: 1, comm: "x", cwd: "/x" }] }),
+        unmount: async (o: { lazy: boolean }) => ((lazySeen = o.lazy), { kind: "exit", code: 0, stderr: "" }),
+      }),
+    });
+    expect(r.code).toBe(0);
+    expect(lazySeen).toBe(true);
+  });
+  it("scan timeout ⇒ skip unmount with a warning", async () => {
+    const r = await H.finalize(v, { deps: deps({ scan: async () => ({ kind: "timeout" }) }) });
+    expect(r.code).toBe(H.EXIT.DEADLINE);
+    expect(r.lines[0]).toMatch(/扫描超时/);
+  });
+  it("unmount timeout / lock timeout / EBUSY / other failure are reported distinctly", async () => {
+    const cases: [unknown, number, RegExp][] = [
+      [{ kind: "timeout" }, H.EXIT.DEADLINE, /预算内完成/],
+      [{ kind: "exit", code: 73, stderr: "" }, H.EXIT.LOCK_BUSY, /mount\.lock/],
+      [
+        { kind: "exit", code: 1, stderr: "fusermount3: failed to unmount /x: Device or resource busy\n" },
+        H.EXIT.BUSY,
+        /EBUSY/,
+      ],
+      [{ kind: "exit", code: 1, stderr: "fusermount3: entry for /x not found\n" }, H.EXIT.FAIL, /not found/],
+    ];
+    for (const [u, code, re] of cases) {
+      const r = await H.finalize(v, { deps: deps({ unmount: async () => u }) });
+      expect(r.code).toBe(code);
+      expect(r.lines.join("\n")).toMatch(re);
+    }
+  });
+  it("stale mount skips the scan and goes straight to unmount", async () => {
+    let scanned = false;
+    const states = ["stale", "absent"];
+    const r = await H.finalize(v, {
+      deps: deps({
+        mountState: () => states.shift(),
+        scan: async () => ((scanned = true), { kind: "done", occupants: [] }),
+      }),
+    });
+    expect(r.code).toBe(0);
+    expect(scanned).toBe(false);
+  });
+  it("success is verified against mountinfo", async () => {
+    const r = await H.finalize(v, { deps: deps({}) }); // mountState stays "mounted"
+    expect(r.code).toBe(H.EXIT.FAIL);
+    expect(r.lines[0]).toMatch(/挂载仍在/);
+  });
+  it("all stages share ONE budget: a scan eating the budget leaves no time to unmount", async () => {
+    let called = false;
+    const r = await H.finalize(v, {
+      budgetMs: 1500,
+      deps: deps({
+        scan: async () => (await new Promise((res) => setTimeout(res, 800)), { kind: "done", occupants: [] }),
+        unmount: async () => ((called = true), {}),
+      }),
+    });
+    expect(called).toBe(false);
+    expect(r.code).toBe(H.EXIT.DEADLINE);
+  });
+});
+
+describe("swap / core / traffic-record detection (warn only)", () => {
+  const header = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n";
+  it("no swap ⇒ no warning", () => {
+    expect(H.swapWarnings(header)).toEqual([]);
+  });
+  it("plain partition/file swap ⇒ warning", () => {
+    const w = H.swapWarnings(`${header}/swap.img  file  2097148  0  -2\n`, {
+      realpath: (p: string) => p,
+      sys: () => undefined,
+    });
+    expect(w).toHaveLength(1);
+    expect(w[0]).toMatch(/swap \/swap\.img/);
+  });
+  it("dm-crypt swap ⇒ quiet; zram without writeback ⇒ quiet; with writeback / unknown ⇒ warning", () => {
+    const sys = (p: string) =>
+      ({
+        "/sys/block/dm-1/dm/uuid": "CRYPT-PLAIN-swap\n",
+        "/sys/block/zram0/backing_dev": "none\n",
+        "/sys/block/zram1/backing_dev": "/dev/sdb2\n",
+      })[p];
+    const text = `${header}/dev/mapper/cryptswap partition 1 0 -2\n/dev/zram0 partition 1 0 100\n/dev/zram1 partition 1 0 100\n/dev/zram2 partition 1 0 100\n`;
+    const w = H.swapWarnings(text, { sys, realpath: (p: string) => (p === "/dev/mapper/cryptswap" ? "/dev/dm-1" : p) });
+    expect(w).toHaveLength(2);
+    expect(w[0]).toMatch(/zram1.*writeback/);
+    expect(w[1]).toMatch(/zram2/);
+  });
+  it("piped core_pattern warns (ulimit does not cover it); a plain one does not", () => {
+    expect(H.coreWarnings("|/usr/share/apport/apport -p%p\n")[0]).toMatch(/apport/);
+    expect(H.coreWarnings("core\n")).toEqual([]);
+  });
+  it("traffic-record: declared ⇒ quiet, undeclared ⇒ warn, unresolvable ⇒ warn, absent ⇒ quiet", () => {
+    const home = tmp("ps-tr-");
+    const agent = join(home, ".pi", "agent");
+    const pkgOk = join(home, "ok", "pi-traffic-record");
+    const pkgBad = join(home, "bad", "pi-traffic-record");
+    mkdirSync(pkgOk, { recursive: true });
+    mkdirSync(pkgBad, { recursive: true });
+    mkdirSync(agent, { recursive: true });
+    writeFileSync(
+      join(pkgOk, "package.json"),
+      JSON.stringify({ name: "x", piSecure: { honors: "PI_SECURE_SESSION/1" } }),
+    );
+    writeFileSync(join(pkgBad, "package.json"), JSON.stringify({ name: "x" }));
+    const set = (packages: unknown[]) => writeFileSync(join(agent, "settings.json"), JSON.stringify({ packages }));
+    set([pkgOk, "../../other"]);
+    expect(H.trafficRecordWarnings(home, agent)).toEqual([]);
+    set([{ source: pkgBad }]);
+    expect(H.trafficRecordWarnings(home, agent)[0]).toMatch(/未声明 piSecure/);
+    set(["npm:@x/pi-traffic-record"]);
+    expect(H.trafficRecordWarnings(home, agent)[0]).toMatch(/找不到/);
+    set([]);
+    expect(H.trafficRecordWarnings(home, agent)).toEqual([]);
+  });
+  it("this machine's real traffic-record checkout declares the contract (P3 landed)", () => {
+    const real = "/home/bluecake/ai/pi-traffic-record/package.json";
+    if (!existsSync(real)) return;
+    const home = tmp("ps-tr2-");
+    const agent = join(home, "agent");
+    mkdirSync(agent);
+    writeFileSync(join(agent, "settings.json"), JSON.stringify({ packages: ["/home/bluecake/ai/pi-traffic-record"] }));
+    expect(H.trafficRecordWarnings(home, agent)).toEqual([]);
+  });
+  it("gocryptfs version parsing / comparison", () => {
+    expect(H.parseGocryptfsVersion("gocryptfs 1.8.0; go-fuse 2.0.3; 2024-11-18 go1.18.1 linux/amd64")).toEqual([
+      1, 8, 0,
+    ]);
+    expect(H.parseGocryptfsVersion("gocryptfs v2.4.0 without_openssl; go-fuse v2.4.0")).toEqual([2, 4, 0]);
+    expect(H.parseGocryptfsVersion("nope")).toBeUndefined();
+    expect(H.versionAtLeast([1, 8, 0], [1, 8])).toBe(true);
+    expect(H.versionAtLeast([1, 7, 9], [1, 8])).toBe(false);
+    expect(H.versionAtLeast([2, 0, 0], [1, 8])).toBe(true);
+  });
+});
+
+describe("run env + -C resolution (§2.2 run, §2.4 env contract)", () => {
+  const v = H.deriveVault("acme", "/vault/acme", "/home/u/secure/acme");
+  it("sets the secure env, records originals, strips stale PI_SECURE_* and the env sessionDir", () => {
+    const env = H.piChildEnv(v, `${v.work}/sub`, {
+      PATH: "/bin",
+      TMPDIR: "/tmp/orig",
+      PI_SECURE_FOO: "stale",
+      PI_CODING_AGENT_SESSION_DIR: "/elsewhere",
+    });
+    expect(env).toEqual({
+      PATH: "/bin",
+      TMPDIR: `${v.state}/tmp`,
+      ARMORY_MEMORY_ROOT: `${v.state}/memory`,
+      PI_SECURE_VAULT: "acme",
+      PI_SECURE_SESSION: "1",
+      PI_SECURE_ORIG_ENV: JSON.stringify({ TMPDIR: "/tmp/orig", ARMORY_MEMORY_ROOT: null }),
+      PWD: `${v.work}/sub`,
+    });
+  });
+  it("keeps an existing PI_SECURE_ORIG_ENV (nested launch never records vault paths as originals)", () => {
+    const orig = JSON.stringify({ TMPDIR: null, ARMORY_MEMORY_ROOT: "/m" });
+    const env = H.piChildEnv(v, v.work, { PI_SECURE_ORIG_ENV: orig, TMPDIR: "/other/state/tmp" });
+    expect(env.PI_SECURE_ORIG_ENV).toBe(orig);
+  });
+  it("-C stays inside work", () => {
+    expect(H.resolveRunCwd(v, undefined)).toBe(v.work);
+    expect(H.resolveRunCwd(v, "pkg/a")).toBe(`${v.work}/pkg/a`);
+    expect(H.resolveRunCwd(v, `${v.link}/pkg`)).toBe(`${v.work}/pkg`);
+    expect(H.resolveRunCwd(v, `${v.work}/pkg`)).toBe(`${v.work}/pkg`);
+    expect(() => H.resolveRunCwd(v, "../state")).toThrow(/跳出/);
+    expect(() => H.resolveRunCwd(v, "/etc")).toThrow(/不在保险库/);
+  });
+  it("-C physical check rejects a symlink pointing out of work", () => {
+    const root = tmp("ps-cwd-");
+    const w = H.deriveVault("acme", join(root, "v"), join(root, "l"));
+    mkdirSync(join(w.work, "real"), { recursive: true });
+    symlinkSync("/etc", join(w.work, "out"));
+    expect(H.resolveRunCwd(w, "real", { physical: true })).toBe(join(w.work, "real"));
+    expect(() => H.resolveRunCwd(w, "out", { physical: true })).toThrow(/保险库外/);
+    expect(() => H.resolveRunCwd(w, "missing", { physical: true })).toThrow(/不存在/);
+  });
+});
+
+describe("settings registration", () => {
+  it("registerVault keeps unrelated keys and is atomic (0600 on create)", () => {
+    const home = tmp("ps-reg-");
+    mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+    const f = join(home, ".pi", "agent", "pi-subagent.json");
+    writeFileSync(f, JSON.stringify({ hud: { enabled: true }, secure: { enabled: true, vaults: { old: {} } } }));
+    chmodSync(f, 0o640);
+    H.registerVault("acme", "/d/acme", "/l/acme", home);
+    expect(JSON.parse(readFileSync(f, "utf8"))).toEqual({
+      hud: { enabled: true },
+      secure: { enabled: true, vaults: { old: {}, acme: { dir: "/d/acme", link: "/l/acme" } } },
+    });
+    expect(readdirSync(join(home, ".pi", "agent")).sort()).toEqual([".pi-subagent.json.lock", "pi-subagent.json"]);
+    expect(statSync(f).mode & 0o777).toBe(0o640 & ~0o022);
+    const r = H.resolveVault("acme", { home });
+    expect(r.kind).toBe("ok");
+    expect(r.vault.sessionDir).toBe("/d/acme/mnt/state/sessions/default");
+  });
+  it("refuses to rewrite an unparsable settings file", () => {
+    const home = tmp("ps-reg-");
+    mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+    writeFileSync(join(home, ".pi", "agent", "pi-subagent.json"), "{bad");
+    expect(() => H.registerVault("acme", "/d", "/l", home)).toThrow(/拒绝改写/);
+    expect(H.resolveVault("acme", { home }).kind).toBe("error");
+  });
+  it("resolveVault: bad name, unknown vault, invalid entry", () => {
+    const home = tmp("ps-reg-");
+    expect(H.resolveVault("Bad", { home }).code).toBe(H.EXIT.USAGE);
+    expect(H.resolveVault("acme", { home }).code).toBe(H.EXIT.NOT_FOUND);
+    expect(H.resolveVault("acme", { home, allowUnregistered: true }).registered).toBe(false);
+    mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+    writeFileSync(
+      join(home, ".pi", "agent", "pi-subagent.json"),
+      JSON.stringify({ secure: { vaults: { acme: { dir: "rel" } } } }),
+    );
+    expect(H.resolveVault("acme", { home }).code).toBe(H.EXIT.CONFIG);
+  });
+});
+
+// ───────────────────────────── security review fixes (P1 reject → r2) ─────────────────────────────
+
+describe("review #1: every private dir component is checked (no symlinked state/sessions)", () => {
+  function mountedLike() {
+    const root = tmp("ps-r1-");
+    const v = H.deriveVault("acme", join(root, "v"), join(root, "l"));
+    mkdirSync(v.mnt, { recursive: true });
+    const outside = join(root, "outside");
+    mkdirSync(outside);
+    return { root, v, outside };
+  }
+  it("a symlinked INTERMEDIATE component (state/sessions → outside) is refused and nothing is created outside", () => {
+    const { v, outside } = mountedLike();
+    mkdirSync(v.state);
+    symlinkSync(outside, join(v.state, "sessions"));
+    expect(() => H.ensureVaultDirs(v)).toThrow(/sessions 须为本用户的普通目录/);
+    expect(readdirSync(outside)).toEqual([]);
+  });
+  it("…also when the final dir already exists behind the link", () => {
+    const { v, outside } = mountedLike();
+    mkdirSync(v.state);
+    mkdirSync(join(outside, "default"));
+    symlinkSync(outside, join(v.state, "sessions"));
+    expect(() => H.ensureVaultDirs(v)).toThrow(/sessions 须为本用户的普通目录/);
+    expect(readdirSync(outside)).toEqual(["default"]);
+  });
+  it("a symlinked state itself, or a file where a dir belongs, is refused", () => {
+    const a = mountedLike();
+    symlinkSync(a.outside, a.v.state);
+    expect(() => H.ensureVaultDirs(a.v)).toThrow(/state 须为本用户的普通目录/);
+    expect(readdirSync(a.outside)).toEqual([]);
+    const b = mountedLike();
+    mkdirSync(b.v.state);
+    writeFileSync(join(b.v.state, "tmp"), "");
+    expect(() => H.ensureVaultDirs(b.v)).toThrow(/tmp 须为本用户的普通目录/);
+  });
+  it("creates the full private tree level by level when absent", () => {
+    const { v } = mountedLike();
+    H.ensureVaultDirs(v);
+    for (const d of ["sessions/default", "tmp", "bash-jobs", "workflows", "consult", "memory"])
+      expect(statSync(join(v.state, d)).isDirectory()).toBe(true);
+    expect(statSync(join(v.state, "sessions")).mode & 0o777).toBe(0o700);
+  });
+  it("realpath must equal the expected path under the CONFIRMED mount root", () => {
+    const { v, root } = mountedLike();
+    H.ensureVaultDirs(v);
+    expect(() => H.ensureVaultDirs(v, { realMnt: join(root, "some-other-mount") })).toThrow(/不在已确认的挂载/);
+  });
+  it("verifyRunPaths: sessionDir / tmp / memory / cwd must physically be inside the mount", () => {
+    const { v, outside } = mountedLike();
+    H.ensureVaultDirs(v);
+    const cwd = realpathSync(v.work);
+    expect(H.verifyRunPaths(v, cwd).sessionDir).toBe(join(realpathSync(v.mnt), "state", "sessions", "default"));
+    // pi would write --session-dir through a link planted AFTER ensureVaultDirs
+    rmSync(v.sessionDir, { recursive: true });
+    symlinkSync(outside, v.sessionDir);
+    expect(() => H.verifyRunPaths(v, cwd)).toThrow(/不在保险库挂载内/);
+    rmSync(v.sessionDir);
+    mkdirSync(v.sessionDir);
+    expect(() => H.verifyRunPaths(v, outside)).toThrow(/cwd/);
+    symlinkSync(".", join(v.work, "self"));
+    expect(() => H.verifyRunPaths(v, join(cwd, "self"))).toThrow(/cwd/); // non-canonical (symlinked) spelling
+  });
+});
+
+describe("review #2: physical -C returns the canonical cwd the audit and the child share", () => {
+  function tree() {
+    const root = tmp("ps-r2-");
+    const v = H.deriveVault("acme", join(root, "v"), join(root, "l"));
+    mkdirSync(join(v.work, "a", "b"), { recursive: true });
+    mkdirSync(join(v.state, "sessions", "default"), { recursive: true });
+    symlinkSync(join(v.work, "a", "b"), join(v.work, "deep")); // shallow name → deeper dir
+    return v;
+  }
+  it("default and -C both come back canonical (realpath)", () => {
+    const v = tree();
+    expect(H.resolveRunCwd(v, undefined, { physical: true })).toBe(realpathSync(v.work));
+    expect(H.resolveRunCwd(v, "deep", { physical: true })).toBe(realpathSync(join(v.work, "a", "b")));
+    expect(H.resolveRunCwd(v, "deep")).toBe(join(v.work, "deep")); // lexical pass keeps the lexical path
+  });
+  it("a relative --session that is inside lexically but outside physically is caught by the 2nd pass", () => {
+    const v = tree();
+    const p = parseArgs(["--session", "../../state/sessions/default/x.jsonl"]);
+    const sessionsRoot = join(v.state, "sessions");
+    const lex = H.resolveRunCwd(v, "deep");
+    expect(H.auditParsedArgs(p, { cwd: lex, sessionsRoot }).ok).toBe(true); // W/deep/../.. = mnt
+    const canon = H.resolveRunCwd(v, "deep", { physical: true });
+    const r = H.auditParsedArgs(p, { cwd: canon, sessionsRoot: realpathSync(sessionsRoot), physical: true });
+    expect(r.ok).toBe(false); // W/a/b/../.. = W → W/state/… is NOT the vault's sessions dir
+  });
+});
+
+describe("review #3: mount probing never blocks the main thread", () => {
+  const v = H.deriveVault("acme", "/nonexistent/acme", "/nonexistent/l");
+  it("a mount probe that never settles is cut off at its deadline ⇒ 'hung' + leftover-mount warning, inside the budget", async () => {
+    const t0 = Date.now();
+    const r = await H.finalize(v, { budgetMs: 3000, deps: { mountState: () => new Promise(() => {}) } });
+    expect(Date.now() - t0).toBeLessThan(3000);
+    expect(r.code).toBe(H.EXIT.DEADLINE);
+    expect(r.lines[0]).toMatch(/挂载探测超时.*可能仍挂载.*fusermount3 -uz/);
+  });
+  it("probeReaddirChild runs the readdir in a child: ok / error / timeout (child killed, not awaited)", async () => {
+    const d = tmp("ps-r3-");
+    expect(await H.probeReaddirChild(d, Date.now() + 5000)).toBe("ok");
+    expect(await H.probeReaddirChild(join(d, "missing"), Date.now() + 5000)).toBe("error");
+    const t0 = Date.now();
+    expect(await H.probeReaddirChild(d, Date.now() + 1)).toBe("timeout");
+    expect(Date.now() - t0).toBeLessThan(500);
+  });
+  it("probeMountState on a plain dir is 'absent' and never consults the readdir probe", async () => {
+    const d = tmp("ps-r3b-");
+    let called = false;
+    const w = H.deriveVault("x", d, join(d, "l"));
+    const st = await H.probeMountState(w, { readdirProbe: async () => ((called = true), "ok") });
+    expect(st).toBe("absent");
+    expect(called).toBe(false);
+  });
+  it("the helper source has no synchronous IO in the mount-probe / finalize path", () => {
+    const src = readFileSync(HELPER, "utf8");
+    const body = (name: string) => {
+      const i = src.indexOf(`export async function ${name}(`);
+      const j = src.indexOf("\n}\n", i);
+      return src.slice(i, j);
+    };
+    for (const fn of ["probeMountState", "finalize"]) expect(body(fn)).not.toMatch(/Sync\(/);
+    expect(src).not.toMatch(/liveMountState/);
+  });
+});
+
+describe("review #5/#6: settings file writes are locked, and never through a symlink", () => {
+  function agentHome() {
+    const home = tmp("ps-r5-");
+    mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+    return { home, file: join(home, ".pi", "agent", "pi-subagent.json") };
+  }
+  it("two processes registering different vaults concurrently lose nothing", async () => {
+    const { home, file } = agentHome();
+    writeFileSync(file, JSON.stringify({ keep: true }));
+    const worker = (prefix: string) =>
+      new Promise<number | null>((resolve) => {
+        const script = `const H = await import(${JSON.stringify(pathToFileURL(HELPER).href)});
+          for (let i = 0; i < 12; i++) H.registerVault("${prefix}" + i, "/d/${prefix}" + i, "/l/${prefix}" + i, ${JSON.stringify(home)});`;
+        const c = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: "ignore" });
+        c.on("close", resolve);
+      });
+    const codes = await Promise.all([worker("a"), worker("b")]);
+    expect(codes).toEqual([0, 0]);
+    const j = JSON.parse(readFileSync(file, "utf8"));
+    expect(j.keep).toBe(true);
+    expect(Object.keys(j.secure.vaults).sort()).toEqual(
+      [...Array.from({ length: 12 }, (_, i) => `a${i}`), ...Array.from({ length: 12 }, (_, i) => `b${i}`)].sort(),
+    );
+  }, 60_000);
+  it("without the lock the same race DOES lose registrations (the test can see the bug)", async () => {
+    const { home, file } = agentHome();
+    writeFileSync(file, "{}");
+    const worker = (prefix: string) =>
+      new Promise<void>((resolve) => {
+        const script = `const H = await import(${JSON.stringify(pathToFileURL(HELPER).href)});
+          for (let i = 0; i < 60; i++) H.registerVaultUnlocked("${prefix}" + i, "/d/x", "/l/x", ${JSON.stringify(home)});`;
+        spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: "ignore" }).on("close", () =>
+          resolve(),
+        );
+      });
+    await Promise.all([worker("a"), worker("b"), worker("c")]);
+    expect(Object.keys(JSON.parse(readFileSync(file, "utf8")).secure.vaults).length).toBeLessThan(180);
+  }, 60_000);
+  it("a symlinked settings file is refused; link and target stay untouched", () => {
+    const { home, file } = agentHome();
+    const target = join(home, "real-settings.json");
+    writeFileSync(target, JSON.stringify({ a: 1 }));
+    chmodSync(target, 0o600);
+    symlinkSync(target, file);
+    expect(() => H.registerVault("acme", "/d", "/l", home)).toThrow(/符号链接/);
+    expect(lstatSync(file).isSymbolicLink()).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe(JSON.stringify({ a: 1 }));
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+  });
+  it("a directory / fifo in place of the settings file is refused", () => {
+    const { home, file } = agentHome();
+    mkdirSync(file);
+    expect(() => H.registerVault("acme", "/d", "/l", home)).toThrow(/不是普通文件/);
+    const b = agentHome();
+    expect(spawnSync("mkfifo", [b.file]).status).toBe(0);
+    expect(() => H.registerVault("acme", "/d", "/l", b.home)).toThrow(/不是普通文件/);
+  });
+  it("modes: new file 0600; existing 0666 loses group/other write (never 0777)", () => {
+    const a = agentHome();
+    H.registerVault("acme", "/d", "/l", a.home);
+    expect(statSync(a.file).mode & 0o777).toBe(0o600);
+    const b = agentHome();
+    writeFileSync(b.file, "{}");
+    chmodSync(b.file, 0o666);
+    H.registerVault("acme", "/d", "/l", b.home);
+    expect(statSync(b.file).mode & 0o777).toBe(0o644);
+    expect(H.settingsWriteMode(undefined)).toBe(0o600);
+    expect(H.settingsWriteMode({ mode: 0o120777 })).toBe(0o755 & 0o777); // a raw link mode is never passed in, but is clamped anyway
+  });
+  it("a symlinked lock file fails closed", () => {
+    const { home } = agentHome();
+    symlinkSync("/tmp/whatever", join(home, ".pi", "agent", ".pi-subagent.json.lock"));
+    expect(() => H.registerVault("acme", "/d", "/l", home)).toThrow();
+    expect(existsSync(join(home, ".pi", "agent", "pi-subagent.json"))).toBe(false);
+  });
+});
