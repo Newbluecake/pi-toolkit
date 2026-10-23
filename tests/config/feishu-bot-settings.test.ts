@@ -20,6 +20,7 @@ describe("feishuBot settings: defaults", () => {
   it("pins the §9 defaults (off by default)", () => {
     expect(defaults).toEqual({
       securityAlerts: true,
+      xsMirror: true,
       enabled: false,
       allowGroups: true,
       groupRootTopics: false,
@@ -68,6 +69,7 @@ describe("feishuBot settings: parsing", () => {
     expect(parsed.warnings).toEqual([]);
     expect(parsed.feishuBot).toEqual({
       securityAlerts: true,
+      xsMirror: true,
       enabled: true,
       allowGroups: false,
       groupRootTopics: true,
@@ -230,6 +232,17 @@ describe("LAN security P0 securityAlerts", () => {
     expect(parseFeishuBotBlock({ securityAlerts: "false" })).toMatchObject({
       feishuBot: { securityAlerts: true },
       warnings: ["security-alerts-invalid"],
+    });
+  });
+});
+
+describe("feishu-xs-mirror xsMirror", () => {
+  it("defaults true, accepts only bool, warns on wrong type", () => {
+    expect(parseFeishuBotBlock({}).feishuBot.xsMirror).toBe(true);
+    expect(parseFeishuBotBlock({ xsMirror: false })).toMatchObject({ feishuBot: { xsMirror: false }, warnings: [] });
+    expect(parseFeishuBotBlock({ xsMirror: "no" })).toMatchObject({
+      feishuBot: { xsMirror: true },
+      warnings: ["xs-mirror-invalid"],
     });
   });
 });

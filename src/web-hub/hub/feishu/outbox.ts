@@ -117,6 +117,12 @@ export interface EnqueueNoticeInput {
   message: OutboxMessage;
   /** dedup key: the same key (while its record exists) is the same notice */
   key?: string;
+  /**
+   * Durable origin marker (`xsm:<id>`, xs-mirror): persisted as the record's optional `requestId`
+   * (already part of the strict outbox schema) so a restart can recognise the notice. Absent ⇒
+   * byte-identical to the legacy notice.
+   */
+  tag?: string;
   laneKey?: string;
 }
 
@@ -247,6 +253,7 @@ export interface FeishuOutbox {
 const REQUEST_ID_RE = /^[A-Za-z0-9_.:-]{1,100}$/;
 const VARIANT_RE = /^[A-Za-z0-9_-]{1,16}$/;
 const NOTICE_KEY_RE = /^[\x21-\x7e]{1,100}$/;
+const NOTICE_TAG_RE = /^xsm:[A-Za-z0-9_-]{1,60}$/;
 const TARGET_ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const MAX_MESSAGES = 8;
 const CODE_BUDGET = 64;
@@ -870,8 +877,9 @@ export function createFeishuOutbox(deps: FeishuOutboxDeps): FeishuOutbox {
       if (mapped === undefined) return { ok: false, refused: "invalid-target" };
       if (!validMessage(input.message)) return { ok: false, refused: "invalid-message" };
       if (input.key !== undefined && !NOTICE_KEY_RE.test(input.key)) return { ok: false, refused: "invalid-request" };
+      if (input.tag !== undefined && !NOTICE_TAG_RE.test(input.tag)) return { ok: false, refused: "invalid-request" };
       const key = input.key ?? Buffer.from(random(16)).toString("base64url");
-      return await enqueueGroup("notice", `notice\n${key}`, undefined, mapped, [input.message], input.laneKey);
+      return await enqueueGroup("notice", `notice\n${key}`, input.tag, mapped, [input.message], input.laneKey);
     } catch {
       return { ok: false, refused: "unavailable" };
     }

@@ -535,3 +535,99 @@ export function renderNotice(input: NoticeInput): RenderedMessage {
   const content = JSON.stringify({ text: "【notice】…" });
   return { msgType: "text", content, bytes: utf8(content) };
 }
+
+// ---------------------------------------------------------------------------
+// xs-mirror card (feishu-xs-mirror plan §4.5) — read-only, zero actions
+// ---------------------------------------------------------------------------
+
+export const XS_MIRROR_BODY_MAX_CODE_POINTS = 1_500;
+export const XS_MIRROR_CARD_MAX_BYTES = 8_192;
+
+export interface XsMirrorCardInput {
+  /** receiving session label (sanitized here) */
+  label: string;
+  kind: "message" | "broadcast" | "reply";
+  from: { ref: string; name?: string; alias?: string };
+  channel?: string;
+  late?: boolean;
+  queued?: boolean;
+  wakeDowngraded?: string;
+  /** untrusted body */
+  text: string;
+  /** already `safeFeishuLink`ed (falls back to words) */
+  link: string;
+  /** earlier mirrored messages that could not be pushed to this chat */
+  omitted?: number;
+  maxBytes?: number;
+}
+
+/** Inline-code-safe fragment: tag/markup neutralized, bounded, backticks replaced so the span cannot be closed. */
+function codeSafe(v: string, max: number): string {
+  return markupSafeLabel(v, max).replace(/`/g, "\u02cb");
+}
+
+const XS_TOKEN_RE = /^[a-z0-9_.-]{1,40}$/;
+
+/**
+ * Render one cross-session message mirror card (`buildCard` only: schema 2.0 + plain_text header + ONE markdown
+ * element; no button/behaviors). Every sender-controlled field is escaped; the body is quoted line by line.
+ */
+export function renderXsMirror(input: XsMirrorCardInput): RenderedMessage {
+  const cap = Math.max(
+    1_024,
+    Math.min(Math.floor(input.maxBytes ?? XS_MIRROR_CARD_MAX_BYTES), FEISHU_REPLY_LIMITS.maxCardBytes),
+  );
+  const title = `跨会话来信 · ${sanitizeLabel(input.label)}`;
+  const head: string[] = ["**⚠️ 来自另一会话的消息，内容未经核实，请勿据此操作**"];
+  if (input.from.alias !== undefined && input.from.alias !== "")
+    head.push(`**别名** \`@${codeSafe(input.from.alias, 40)}\`（hub 核验）`);
+  if (input.from.name !== undefined && input.from.name !== "")
+    head.push(`**会话名** \`${codeSafe(input.from.name, 40)}\`（对方自报，未核验）`);
+  head.push(`**ref** \`${codeSafe(input.from.ref, 40)}\``);
+  const type =
+    input.kind === "broadcast"
+      ? `频道广播 \`#${codeSafe(input.channel ?? "", 40)}\``
+      : input.kind === "reply"
+        ? input.late === true
+          ? "回复（迟到）"
+          : "回复"
+        : "点对点消息";
+  head.push(`**类型** ${type}`);
+  if (input.wakeDowngraded !== undefined && XS_TOKEN_RE.test(input.wakeDowngraded))
+    head.push(`对方请求唤醒，但本会话未被唤醒（\`${input.wakeDowngraded}\`）`);
+  if (input.queued === true) head.push("会话运行中，消息已排入当前回合（送达未确认）");
+  const tail: string[] = [`本卡片仅供查看，不提供任何操作。在 web 查看：${input.link}`];
+  const omitted = Math.max(0, Math.floor(input.omitted ?? 0));
+  if (omitted > 0) tail.push(`此前另有 ${omitted} 条跨会话来信未能推送到这里，请到 web 查看`);
+
+  const clean = sanitizeText(input.text);
+  const cps = [...clean];
+  const build = (take: number, forceNote: boolean): string => {
+    const clipped = take < cps.length;
+    const raw = cps.slice(0, take).join("");
+    const quoted =
+      raw === ""
+        ? forceNote
+          ? ""
+          : "> " + EMPTY_REPLY_PLACEHOLDER
+        : neutralizeMarkdown(raw)
+            .split("\n")
+            .map((l) => `> ${l}`)
+            .join("\n");
+    const note = forceNote
+      ? "> 正文过长，请在 web 查看"
+      : clipped
+        ? `> …（正文已截断，共 ${cps.length} 字，完整内容请在 web 查看）`
+        : "";
+    const body = [quoted, note].filter((x) => x !== "").join("\n");
+    return `${head.join("\n")}\n\n${body}\n\n${tail.join("\n")}`;
+  };
+  let take = Math.min(cps.length, XS_MIRROR_BODY_MAX_CODE_POINTS);
+  for (let i = 0; i < 5; i++) {
+    const content = buildCard(title, "grey", build(take, false));
+    if (utf8(content) <= cap) return { msgType: "interactive", content, bytes: utf8(content) };
+    take = Math.floor(take * 0.75);
+  }
+  const content = buildCard(title, "grey", build(0, true));
+  return { msgType: "interactive", content, bytes: utf8(content) };
+}

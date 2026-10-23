@@ -1172,6 +1172,10 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "feishuBot.securityAlerts",
     "Feishu bot: high-risk LAN security alerts (default on; change: /reload then /webhub restart)",
   ),
+  "feishuBot.xsMirror": bool(
+    "feishuBot.xsMirror",
+    "Feishu bot: mirror cross-session messages that did not wake the session to bound p2p chats (default on; change: /reload then /webhub restart)",
+  ),
   "feishuBot.enabled": bool(
     "feishuBot.enabled",
     "Feishu bot: enable the hub-side bot (change: /reload then /webhub restart)",

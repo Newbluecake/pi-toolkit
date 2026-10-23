@@ -47,6 +47,8 @@ import { createFeishuRuns, type FeishuRunEvent, type FeishuRunResult } from "./r
 import { createFeishuDialogs } from "./dialogs.js";
 import { createFeishuDiagnostics, feishuPatchMessage } from "./diagnostics.js";
 import { safeFeishuLink } from "./link.js";
+import { createFeishuXsMirror } from "./xs-mirror.js";
+import type { FeishuXsMirrorEvent } from "./xs-mirror.js";
 import { createFeishuSessionCard } from "./session-card.js";
 import { createFeishuFiles, feishuFileCandidates, type FeishuFilesDeps } from "./files.js";
 import { createFeishuNotify, type FeishuIdleEvidence } from "./notify.js";
@@ -223,6 +225,8 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     dropped: {} as Record<string, number>,
     lastCode: undefined as string | undefined,
   };
+  // xs-mirror counters (plan §4.3): service-lifetime, merged into `info().counters.dropped` only.
+  const mirrorDropped: Record<string, number> = {};
   const state = createFeishuState({
     dir,
     clock,
@@ -270,6 +274,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     const dropped: Record<string, number> = { ...retired.dropped };
     for (const [key, value] of Object.entries(runtime ? (view?.counters ?? {}) : {}))
       if (key !== "in" && key !== "duplicate") dropped[key] = (dropped[key] ?? 0) + value;
+    for (const [key, value] of Object.entries(mirrorDropped)) dropped[key] = (dropped[key] ?? 0) + value;
     return {
       status: !running
         ? credentials.status() === "absent" && !startedAt
@@ -477,6 +482,24 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       send: outbox.enqueueNotice,
       budget,
     });
+    // feishu-xs-mirror (plan §4.2/§4.3): own per-card budget, single serial worker; absent ⇒ inert.
+    const mirror =
+      deps.config.xsMirror === true
+        ? createFeishuXsMirror({
+            state,
+            now: clock.now,
+            label,
+            link,
+            target: bindingTarget,
+            enqueue: outbox.enqueueNotice,
+            run: (task) => work.run(task),
+            workSize: () => work.size,
+            log: (e) => log(e.event, e.reason, e.code),
+            count: (reason) => {
+              mirrorDropped[reason] = (mirrorDropped[reason] ?? 0) + 1;
+            },
+          })
+        : undefined;
     // LAN security r2 §4.3: high-risk alerts, one shared budget with notify. Subscribes the hub
     // security bus; absent bus or `securityAlerts:false` ⇒ inert (and `undefined`).
     const security =
@@ -967,6 +990,8 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     }
     async function settled(group: SettledGroup) {
       if (!active) throw new Error("stopped");
+      // xs-mirror notices carry `xsm:` as a durable origin marker; they need no request/dialog bookkeeping.
+      if (group.kind === "notice" && group.requestId?.startsWith("xsm:")) return;
       if (group.requestId) {
         const waiter = sendWaiters.get(group.requestId);
         if (!waiter && state.dialogCards.get(group.requestId))
@@ -1565,6 +1590,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       files.expirePins();
       work.run(() => dialogs.sweep());
       work.run(bindFresh);
+      mirror?.pump();
       maintenance = clock.setTimeout(maintain, 30_000);
     }
     return {
@@ -1581,6 +1607,10 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       security,
       approval,
       sessionCard,
+      xsMirror(e: FeishuXsMirrorEvent): void {
+        if (!active || !mirror) return;
+        mirror.deliver(e);
+      },
       get authFailed() {
         return authFailed;
       },
@@ -1600,6 +1630,16 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
           state.requests.transition(r.id, r.state === "received" ? "expired" : "uncertain", { code: "restart-new" });
         for (const r of state.requests.list({ states: ["received"] }).filter((r) => r.code === "new-first"))
           state.requests.transition(r.id, "expired", { code: "restart-first" });
+        // xs-mirror off: discard persisted-but-unsent mirror notices BEFORE outbox.start() can resend them (§4.6).
+        if (deps.config.xsMirror !== true) {
+          let purged = 0;
+          for (const p of state.outbox.list({ state: "queued" }))
+            if (p.kind === "notice" && p.requestId?.startsWith("xsm:") && state.outbox.remove(p.sendId)) purged++;
+          if (purged > 0) {
+            mirrorDropped["xs-mirror-purged"] = (mirrorDropped["xs-mirror-purged"] ?? 0) + purged;
+            log("xs-mirror", "purged");
+          }
+        }
         // bootFresh is captured before accepting any live work; its stored first prompts are never replayed.
         await state.commit();
         if (!active) return;
@@ -1652,6 +1692,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         security?.dispose();
         approval.dispose();
         notify.dispose();
+        mirror?.dispose();
         budget.dispose();
         for (const w of sendWaiters.values()) {
           clock.clearTimeout(w.timer);
@@ -1879,6 +1920,14 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     admin,
     approval,
     snapshot: info,
+    /** hub.ts (P3) late-binds the xs observer here; synchronous, never throws, drops when no runtime. */
+    xsMirror(e: FeishuXsMirrorEvent): void {
+      try {
+        if (!disposed) runtime?.xsMirror(e);
+      } catch {
+        /* observer must never affect xs routing */
+      }
+    },
     keepalive: () => credentials.status() === "loaded" || credentials.status() === "unsafe",
     dispose(): Promise<void> {
       if (disposing) return disposing;

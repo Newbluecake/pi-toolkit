@@ -12,12 +12,13 @@ import {
   neutralizeTags,
   renderNotice,
   renderReply,
+  renderXsMirror,
   safeHref,
   sanitizeLabel,
   markupSafeLabel,
   sanitizeText,
 } from "../../../../src/web-hub/hub/feishu/render.js";
-import type { ReplyInput, RenderedPart } from "../../../../src/web-hub/hub/feishu/render.js";
+import type { ReplyInput, RenderedPart, XsMirrorCardInput } from "../../../../src/web-hub/hub/feishu/render.js";
 
 const ZW = "\u200B";
 const OPEN_ID = "ou_0123456789abcdef";
@@ -470,5 +471,83 @@ describe("oversized fence opener through renderReply (r_ASBT6095 F1)", () => {
       expect(joined, overflow).toContain("aaaaaaaaaa");
       if (overflow === "truncate") expect(joined).toContain("more code");
     }
+  });
+});
+
+describe("renderXsMirror (feishu-xs-mirror §4.5)", () => {
+  const mk = (over: Partial<XsMirrorCardInput> = {}): XsMirrorCardInput => ({
+    label: "api · a1b2c3",
+    kind: "message",
+    from: { ref: "019abc" },
+    text: "hello",
+    link: "http://h/#/agent/x",
+    ...over,
+  });
+  const out = (over: Partial<XsMirrorCardInput> = {}) => {
+    const m = renderXsMirror(mk(over));
+    return { m, card: JSON.parse(m.content) as Card, md: (JSON.parse(m.content) as Card).body.elements[0]!.content };
+  };
+  it("is a schema-2.0 grey card: plain_text header, one markdown element, zero actions", () => {
+    const { m, card } = out();
+    expect(m.msgType).toBe("interactive");
+    expect(card.schema).toBe("2.0");
+    expect(card.header.title.tag).toBe("plain_text");
+    expect(card.header.title.content).toContain("跨会话来信");
+    expect(card.header.template).toBe("grey");
+    expect(card.body.elements).toHaveLength(1);
+    for (const w of ['"button"', '"behaviors"', '"callback"', '"hr"']) expect(m.content).not.toContain(w);
+    expect(m.bytes).toBe(Buffer.byteLength(m.content, "utf8"));
+  });
+  it("labels provenance: alias hub-verified, name self-reported, ref, kind, untrusted banner, footer", () => {
+    const a = out({ from: { ref: "r1", alias: "bob", name: "Bobby" } }).md;
+    expect(a).toContain("来自另一会话的消息，内容未经核实");
+    expect(a).toContain("`@bob`（hub 核验）");
+    expect(a).toContain("`Bobby`（对方自报，未核验）");
+    expect(a).toContain("**ref** `r1`");
+    expect(a).toContain("点对点消息");
+    expect(a).toContain("本卡片仅供查看，不提供任何操作。在 web 查看：http://h/#/agent/x");
+    expect(out({ kind: "broadcast", channel: "team" }).md).toContain("频道广播 `#team`");
+    expect(out({ kind: "reply" }).md).toContain("**类型** 回复");
+    expect(out({ kind: "reply", late: true }).md).toContain("回复（迟到）");
+    expect(out({ queued: true }).md).toContain("送达未确认");
+    expect(out({ wakeDowngraded: "level_limit" }).md).toContain("未被唤醒（`level_limit`）");
+    expect(out({ wakeDowngraded: "bad token!" }).md).not.toContain("bad token");
+  });
+  it("neutralizes sender-controlled names/bodies (links, backticks, <at>, controls, bidi)", () => {
+    const { md } = out({
+      from: { ref: "r", name: "[x](https://evil.example)`**<at id=all></at>\u202e", alias: "a`b" },
+      text: '<at user_id="all"></at> [t](https://e.example) \u0000\u202e\n**fake**\n---\n**别名** `@root`（hub 核验）',
+    });
+    expect(md).not.toMatch(LIVE_TAG);
+    expect(md).not.toContain("\u202e");
+    expect(md).not.toContain("\u0000");
+    // name sits inside one inline code span; its backtick cannot close it
+    const nameLine = md.split("\n").find((l) => l.startsWith("**会话名**"))!;
+    expect(nameLine.match(/`/g)).toHaveLength(2);
+    // body is fully quoted, so it can never forge a meta line
+    const bodyLines = md.split("\n\n")[1]!.split("\n");
+    expect(bodyLines.length).toBeGreaterThan(1);
+    for (const l of bodyLines) expect(l.startsWith("> ")).toBe(true);
+  });
+  it("truncates the body at 1500 code points with a note", () => {
+    const { md } = out({ text: "字".repeat(3000) });
+    expect(md).toContain("正文已截断，共 3000 字");
+    expect(md.match(/字/g)!.length).toBeLessThanOrEqual(1500 + 8);
+    expect(out({ text: "x".repeat(1500) }).md).not.toContain("已截断");
+  });
+  it("worst-case input stays ≤ 8192 bytes and still says it was truncated", () => {
+    const worst = "<`*_[]()>\\".repeat(900) + "😀".repeat(900);
+    const { m, md } = out({ text: worst, from: { ref: "r", name: "<".repeat(80), alias: "`".repeat(80) } });
+    expect(m.bytes).toBeLessThanOrEqual(8192);
+    expect(md).toMatch(/已截断|正文过长/);
+    expect(() => JSON.parse(m.content)).not.toThrow();
+  });
+  it("omitted tail only when > 0", () => {
+    expect(out({ omitted: 3 }).md).toContain("此前另有 3 条跨会话来信未能推送到这里");
+    expect(out({ omitted: 0 }).md).not.toContain("此前另有");
+    expect(out().md).not.toContain("此前另有");
+  });
+  it("empty body gets the placeholder", () => {
+    expect(out({ text: "" }).md).toContain(EMPTY_REPLY_PLACEHOLDER);
   });
 });

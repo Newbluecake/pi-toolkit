@@ -665,6 +665,7 @@ export const FEISHU_BOT_DEFAULTS = {
   allowGroups: true,
   groupRootTopics: false,
   securityAlerts: true,
+  xsMirror: true,
   notify: "bound",
   spawnScope: "known",
   debounceMs: 1_500,
@@ -687,6 +688,8 @@ export const FEISHU_BOT_RANGES = {
 export interface FeishuBotHubConfig {
   /** Absent is false; P0 does not forward the settings default into this wire yet. */
   securityAlerts?: boolean;
+  /** Absent is false (fail closed): mirror non-waking cross-session messages to bound p2p chats. */
+  xsMirror?: boolean;
   allowGroups: boolean;
   groupRootTopics: boolean;
   notify: FeishuNotifyMode;
@@ -723,6 +726,7 @@ export function normalizeFeishuBotHubConfig(input: unknown): FeishuBotHubConfig 
   const f = files as Record<string, unknown>;
   const rg = FEISHU_BOT_RANGES;
   if (r["securityAlerts"] !== undefined && typeof r["securityAlerts"] !== "boolean") return undefined;
+  if (r["xsMirror"] !== undefined && typeof r["xsMirror"] !== "boolean") return undefined;
   if (typeof r["allowGroups"] !== "boolean" || typeof r["groupRootTopics"] !== "boolean") return undefined;
   if (!oneOf(r["notify"], FEISHU_NOTIFY_MODES) || !oneOf(r["spawnScope"], FEISHU_SPAWN_SCOPES)) return undefined;
   if (!isInt(r["debounceMs"], rg.debounceMs.min, rg.debounceMs.max)) return undefined;
@@ -731,6 +735,7 @@ export function normalizeFeishuBotHubConfig(input: unknown): FeishuBotHubConfig 
   if (!isInt(f["maxInboundMiB"], rg.maxInboundMiB.min, rg.maxInboundMiB.max)) return undefined;
   return {
     ...(r["securityAlerts"] === undefined ? {} : { securityAlerts: r["securityAlerts"] as boolean }),
+    ...(r["xsMirror"] === undefined ? {} : { xsMirror: r["xsMirror"] as boolean }),
     allowGroups: r["allowGroups"],
     groupRootTopics: r["groupRootTopics"],
     notify: r["notify"],

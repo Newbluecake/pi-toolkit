@@ -1420,6 +1420,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         groupRootTopics: bot.groupRootTopics,
         notify: bot.notify,
         securityAlerts: bot.securityAlerts ?? true,
+        xsMirror: bot.xsMirror ?? true,
         spawnScope: bot.spawnScope,
         debounceMs: bot.debounceMs,
         staleMessageS: bot.staleMessageS,

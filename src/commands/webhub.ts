@@ -502,6 +502,7 @@ const FEISHU_WARNING_PHRASES: Record<FeishuBotWarning, string> = {
   "block-invalid": "feishuBot 块不是对象，已整体回退默认",
   "enabled-invalid": "enabled 类型应为布尔，已回退默认",
   "security-alerts-invalid": "securityAlerts 类型应为布尔，已回退默认",
+  "xs-mirror-invalid": "xsMirror 类型应为布尔，已回退默认",
   "allow-groups-invalid": "allowGroups 类型应为布尔，已回退默认",
   "group-root-topics-invalid": "groupRootTopics 类型应为布尔，已回退默认",
   "notify-invalid": "notify 取值应为 bound|off，已回退默认",

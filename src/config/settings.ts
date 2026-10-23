@@ -49,6 +49,8 @@ export interface WebHubProxySettings {
  */
 export interface FeishuBotSettings {
   securityAlerts?: boolean;
+  /** Mirror non-waking cross-session messages to bound p2p chats (default on; hub-start frozen). */
+  xsMirror?: boolean;
   enabled: boolean;
   allowGroups: boolean;
   /** V8-confirmed: a group @-bot outside a topic opens + binds a topic */
@@ -1197,6 +1199,7 @@ export const DEFAULT_FEISHU_BOT_SETTINGS: FeishuBotSettings = {
   allowGroups: true,
   groupRootTopics: false,
   securityAlerts: true,
+  xsMirror: true,
   notify: "bound",
   spawnScope: "known",
   debounceMs: 1_500,
@@ -2826,6 +2829,7 @@ export type FeishuBotWarning =
   | "block-invalid"
   | "enabled-invalid"
   | "security-alerts-invalid"
+  | "xs-mirror-invalid"
   | "allow-groups-invalid"
   | "group-root-topics-invalid"
   | "notify-invalid"
@@ -2910,6 +2914,7 @@ export function parseFeishuBotBlock(input: unknown): FeishuBotParseResult {
     feishuBot: {
       enabled: bool(r.enabled, d.enabled, "enabled-invalid"),
       securityAlerts: bool(r.securityAlerts, d.securityAlerts ?? true, "security-alerts-invalid"),
+      xsMirror: bool(r.xsMirror, d.xsMirror ?? true, "xs-mirror-invalid"),
       allowGroups: bool(r.allowGroups, d.allowGroups, "allow-groups-invalid"),
       groupRootTopics: bool(r.groupRootTopics, d.groupRootTopics, "group-root-topics-invalid"),
       notify: choice(r.notify, ["bound", "off"] as const, d.notify, "notify-invalid"),
