@@ -809,6 +809,10 @@ export async function startHub(
     }
     // fabric phase-2 X1: the cross-session relay exists iff `config.crossSession` (key absence IS
     // off — no router, no observer, no frame handling). Disposed on both teardown paths.
+    // feishu-xs-mirror (A′): the quiet-delivery observer exists iff `feishuBot.xsMirror === true` ∧
+    // `config.crossSession` — otherwise the key is not passed at all (hub byte-identical). `bot` is
+    // assigned later; the closure reads it lazily (undefined ⇒ dropped).
+    const xsMirrorOn = config.feishuBot?.xsMirror === true && config.crossSession !== undefined;
     const xsRelay =
       config.crossSession === undefined
         ? undefined
@@ -818,6 +822,7 @@ export async function startHub(
             log,
             now,
             ...(xsAlias === undefined ? {} : { aliases: xsAlias }),
+            ...(xsMirrorOn ? { onQuietDelivered: (e) => bot?.xsMirror(e) } : {}),
           });
     if (xsRelay !== undefined) cleanup.push(async () => xsRelay.dispose());
     agentServer = createAgentServer(owner.server, {
