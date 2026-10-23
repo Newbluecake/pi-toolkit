@@ -17,6 +17,8 @@ const agents = {
   noSessionName: "(no session name)",
   collapseSidebar: "Collapse sidebar",
   expandSidebar: "Expand sidebar",
+  densityCompact: "Compact list: directory, title and alias only (click for detailed)",
+  densityDetailed: "Detailed list: cost, model and context (click for compact)",
   openDrawer: "Show sessions list",
   newSession: "New session",
   newSessionAria: "Start a new session in the selected session's directory; pick a directory when none is selected",

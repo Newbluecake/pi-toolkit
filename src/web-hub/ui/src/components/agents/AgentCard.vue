@@ -19,6 +19,7 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } fr
 import { observeResize } from "../../composables/useSharedResize.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { useListDensityValue } from "../../composables/useListDensity.js";
 import { formatPercent } from "../../format.js";
 import { isFreshlyRestored, managedFor, restoringKeys } from "../../logic/spawn.js";
 import type { AgentCardProps } from "../../contracts.js";
@@ -27,6 +28,16 @@ import { PRIVACY_LOCK_CTX } from "../privacy/privacyContext.js";
 
 const props = defineProps<AgentCardProps>();
 const i18n = useI18n();
+const compactChips = computed(
+  () =>
+    xsAlias.value !== undefined ||
+    xsUnread.value !== undefined ||
+    needsAnswer.value ||
+    props.card.statusLabel !== null ||
+    props.card.runningSubCount > 0 ||
+    props.card.runningBashCount > 0,
+);
+const compact = computed(() => useListDensityValue().value === "compact");
 const { t } = i18n;
 
 // §7.4 (C5): an open ask_user dialog adds a "Needs answer" badge (the visual state pill keeps
@@ -141,51 +152,56 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
     :href="`#/agent/${encodeURIComponent(card.key)}`"
     :aria-current="selected ? 'page' : undefined"
     :data-st="card.visualState"
+    :data-density="compact ? 'compact' : 'detailed'"
   >
-    <span class="agent-row1">
-      <span class="dot" :class="dotClass"></span>
-      <span ref="mainEl" class="agent-main">
-        <span ref="titleEl" class="agent-title" translate="no" :title="card.cwdFull || card.shortCwd"
-          ><bdi>{{ card.shortCwd }}</bdi></span
-        >
-        <Teleport :to="belowEl ?? 'body'" :disabled="!chipsBelow || !belowEl">
-          <span ref="chipsEl" class="agent-chips">
-            <span class="chip" translate="no">{{ kindLabel }}</span>
-            <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
-              {{ t("agents.stopped") }}
-            </span>
-            <span v-if="managed" class="chip chip-web" translate="no" :title="t('spawn.badgeWebTitle')">
-              {{ t("spawn.badgeWeb") }}
-            </span>
-            <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">
-              {{ t("spawn.badgeRestoring") }}
-            </span>
-            <span v-else-if="restored" class="chip chip-restored" translate="no" :title="t('spawn.badgeRestoredTitle')">
-              {{ t("spawn.badgeRestored") }}
-            </span>
-            <span v-if="managed?.removing" class="chip chip-removing" translate="no">
-              {{ t("agents.removing") }}
+    <!-- Compact (default): directory + run state (state pill, running sub-agent / background
+         command counts, needs-answer) + @alias (+ unread badge) on row 1, title on row 2. Cost,
+         lock, kind chip, xs/channel chips, model and context meter are detailed-only.
+         2026-10-23 user ruling: compact must still show whether the session is running. -->
+    <template v-if="compact">
+      <span class="agent-row1">
+        <span class="dot" :class="dotClass"></span>
+        <span class="agent-main">
+          <span class="agent-title" translate="no" :title="card.cwdFull || card.shortCwd"
+            ><bdi>{{ card.shortCwd }}</bdi></span
+          >
+          <span v-if="compactChips" class="agent-chips">
+            <!-- same model + styles as the detailed meta row: state pill (running/waiting/
+                 offline/stale/outdated; idle has none — the hollow dot says it), running
+                 sub-agent / command counts, the needs-answer pill -->
+            <span v-if="needsAnswer" class="pill badge-answer" data-compact="answer">
+              <AppIcon name="message" class="icon-sm" />{{ t("common.needsAnswer") }}
             </span>
             <span
-              v-else-if="xsBadge"
-              class="chip chip-xs"
-              role="img"
-              :data-xs="xsBadge"
-              :title="t(`agents.xs.${xsBadge}`)"
-              :aria-label="t(`agents.xs.${xsBadge}`)"
+              v-if="card.statusLabel && !(needsAnswer && card.visualState === 'waiting')"
+              class="pill pill-inline"
+              data-compact="state"
+              :data-st="card.visualState"
             >
-              <AppIcon :name="XS_ICON[xsBadge]" />
+              <AppIcon v-if="card.visualState === 'waiting'" name="message" class="icon-sm" />
+              <AppIcon v-else-if="card.visualState === 'offline'" name="unplug" class="icon-sm" />
+              <AppIcon v-else-if="card.outdated" name="info" class="icon-sm" />
+              {{ card.statusLabel }}
             </span>
+            <span
+              v-if="card.runningSubCount > 0"
+              class="chip chip-run-count"
+              data-compact="sub"
+              :title="t('agents.runningCount', { n: card.runningSubCount })"
+              :aria-label="t('agents.runningCount', { n: card.runningSubCount })"
+              ><AppIcon name="branch" class="icon-sm" /><span class="num">{{ card.runningSubCount }}</span></span
+            >
+            <span
+              v-if="card.runningBashCount > 0"
+              class="chip chip-run-count"
+              data-compact="bash"
+              :title="t('agents.runningCount', { n: card.runningBashCount })"
+              :aria-label="t('agents.runningCount', { n: card.runningBashCount })"
+              ><AppIcon name="terminal" class="icon-sm" /><span class="num">{{ card.runningBashCount }}</span></span
+            >
             <span v-if="xsAlias" class="chip chip-xs-alias" translate="no" :title="`@${xsAlias}`">{{
               aliasChipText(xsAlias)
             }}</span>
-            <span
-              v-if="xsChannels"
-              class="chip chip-xs-channels"
-              translate="no"
-              :title="t('agents.xsChannels', { list: xsChannels.map((c) => '#' + c).join(' ') })"
-              >{{ xsChannels.map((c) => "#" + c).join(" ") }}</span
-            >
             <span
               v-if="xsUnread !== undefined"
               class="chip chip-xs-unread"
@@ -197,111 +213,185 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
               <AppIcon name="inbox" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span>
             </span>
           </span>
-        </Teleport>
-      </span>
-      <span class="agent-end">
-        <!-- web-hub-privacy P2: 锁定态常显 / 未锁定悬停显示 (privacy.css keys the reveal off
-           `data-marked`). The click never navigates the card's <a>. -->
-        <button
-          v-if="privacyAffordance"
-          type="button"
-          class="privacy-lock-btn"
-          :data-marked="privacyMarked ? 'true' : 'false'"
-          :aria-label="privacyMarked ? t('privacy.unmarkTitle') : t('privacy.markAria')"
-          :title="privacyMarked ? `${t('privacy.badgeMarked')} — ${t('privacy.unmarkTitle')}` : t('privacy.mark')"
-          @click.prevent.stop="onPrivacyClick"
-        >
-          <AppIcon :name="privacyMarked ? 'lock' : 'unlock'" class="icon-sm" />
-        </button>
-        <span class="agent-cost num" :title="card.costTitle">{{ card.costLabel }}</span>
-      </span>
-    </span>
-    <span v-if="privacyError" class="privacy-card-error" role="alert">
-      {{ t(privacyError.key, { code: privacyError.code }) }}
-    </span>
-
-    <span class="agent-line2" :data-below="chipsBelow ? 'true' : 'false'">
-      <span
-        class="agent-session"
-        :class="{ mono: card.sessionLabel === t('agents.noSessionName') }"
-        translate="no"
-        :title="card.sessionLabel"
-        >{{ card.sessionLabel }}</span
-      >
-      <!-- the chips group is teleported here (same single DOM node) when row 1 cannot hold it -->
-      <span ref="belowEl" class="agent-below"></span>
-    </span>
-
-    <span
-      v-if="
-        card.modelShort ||
-        card.contextPercent !== null ||
-        card.runningSubCount > 0 ||
-        card.runningBashCount > 0 ||
-        card.statusLabel
-      "
-      class="agent-meta"
-    >
-      <span v-if="card.modelShort" class="model" translate="no">{{ card.modelShort }}</span>
-      <span v-if="card.modelShort && card.contextPercent !== null" class="sep" aria-hidden="true">·</span>
-      <span v-if="card.contextPercent !== null">
-        <meter
-          class="meter"
-          min="0"
-          max="100"
-          low="70"
-          high="85"
-          optimum="0"
-          :value="card.contextPercent"
-          :aria-label="t('detail.contextAria')"
-        ></meter
-        ><span class="num">{{ formatPercent(card.contextPercent, i18n.lang === "zh" ? "zh-CN" : "en-US") }}</span>
-      </span>
-      <template v-if="card.runningSubCount > 0">
-        <span v-if="card.modelShort || card.contextPercent !== null" class="sep" aria-hidden="true">·</span>
-        <span
-          ><AppIcon name="branch" class="icon-sm" /><span class="num">{{
-            t("agents.runningCount", { n: card.runningSubCount })
-          }}</span></span
-        >
-      </template>
-      <!-- 2026-10-15 会话列表也展示运行中的命令:terminal 图标 + 同一段 agents.runningCount
-           文案(图标区分 agent/命令);仅统计 status.bashJobs 的非终态行(含 staged)。 -->
-      <template v-if="card.runningBashCount > 0">
-        <span
-          v-if="card.modelShort || card.contextPercent !== null || card.runningSubCount > 0"
-          class="sep"
-          aria-hidden="true"
-          >·</span
-        >
-        <span
-          ><AppIcon name="terminal" class="icon-sm" /><span class="num">{{
-            t("agents.runningCount", { n: card.runningBashCount })
-          }}</span></span
-        >
-      </template>
-      <template v-if="card.statusLabel">
-        <span
-          v-if="
-            card.modelShort || card.contextPercent !== null || card.runningSubCount > 0 || card.runningBashCount > 0
-          "
-          class="sep"
-          aria-hidden="true"
-          >·</span
-        >
-        <span class="pill pill-inline" :data-st="card.visualState">
-          <AppIcon v-if="card.visualState === 'waiting'" name="message" class="icon-sm" />
-          <AppIcon v-else-if="card.visualState === 'offline'" name="unplug" class="icon-sm" />
-          <AppIcon v-else-if="card.outdated" name="info" class="icon-sm" />
-          {{ card.statusLabel }}
         </span>
-      </template>
-    </span>
-
-    <span v-if="needsAnswer" class="agent-flags">
-      <span v-if="needsAnswer" class="pill badge-answer">
-        <AppIcon name="message" class="icon-sm" />{{ t("common.needsAnswer") }}
       </span>
-    </span>
+      <span class="agent-line2">
+        <span
+          class="agent-session"
+          :class="{ mono: card.sessionLabel === t('agents.noSessionName') }"
+          translate="no"
+          :title="card.sessionLabel"
+          >{{ card.sessionLabel }}</span
+        >
+      </span>
+    </template>
+    <template v-else>
+      <span class="agent-row1">
+        <span class="dot" :class="dotClass"></span>
+        <span ref="mainEl" class="agent-main">
+          <span ref="titleEl" class="agent-title" translate="no" :title="card.cwdFull || card.shortCwd"
+            ><bdi>{{ card.shortCwd }}</bdi></span
+          >
+          <Teleport :to="belowEl ?? 'body'" :disabled="!chipsBelow || !belowEl">
+            <span ref="chipsEl" class="agent-chips">
+              <span class="chip" translate="no">{{ kindLabel }}</span>
+              <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
+                {{ t("agents.stopped") }}
+              </span>
+              <span v-if="managed" class="chip chip-web" translate="no" :title="t('spawn.badgeWebTitle')">
+                {{ t("spawn.badgeWeb") }}
+              </span>
+              <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">
+                {{ t("spawn.badgeRestoring") }}
+              </span>
+              <span
+                v-else-if="restored"
+                class="chip chip-restored"
+                translate="no"
+                :title="t('spawn.badgeRestoredTitle')"
+              >
+                {{ t("spawn.badgeRestored") }}
+              </span>
+              <span v-if="managed?.removing" class="chip chip-removing" translate="no">
+                {{ t("agents.removing") }}
+              </span>
+              <span
+                v-else-if="xsBadge"
+                class="chip chip-xs"
+                role="img"
+                :data-xs="xsBadge"
+                :title="t(`agents.xs.${xsBadge}`)"
+                :aria-label="t(`agents.xs.${xsBadge}`)"
+              >
+                <AppIcon :name="XS_ICON[xsBadge]" />
+              </span>
+              <span v-if="xsAlias" class="chip chip-xs-alias" translate="no" :title="`@${xsAlias}`">{{
+                aliasChipText(xsAlias)
+              }}</span>
+              <span
+                v-if="xsChannels"
+                class="chip chip-xs-channels"
+                translate="no"
+                :title="t('agents.xsChannels', { list: xsChannels.map((c) => '#' + c).join(' ') })"
+                >{{ xsChannels.map((c) => "#" + c).join(" ") }}</span
+              >
+              <span
+                v-if="xsUnread !== undefined"
+                class="chip chip-xs-unread"
+                role="img"
+                translate="no"
+                :title="t('agents.xsUnread', { n: xsUnread })"
+                :aria-label="t('agents.xsUnread', { n: xsUnread })"
+              >
+                <AppIcon name="inbox" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span>
+              </span>
+            </span>
+          </Teleport>
+        </span>
+        <span class="agent-end">
+          <!-- web-hub-privacy P2: 锁定态常显 / 未锁定悬停显示 (privacy.css keys the reveal off
+           `data-marked`). The click never navigates the card's <a>. -->
+          <button
+            v-if="privacyAffordance"
+            type="button"
+            class="privacy-lock-btn"
+            :data-marked="privacyMarked ? 'true' : 'false'"
+            :aria-label="privacyMarked ? t('privacy.unmarkTitle') : t('privacy.markAria')"
+            :title="privacyMarked ? `${t('privacy.badgeMarked')} — ${t('privacy.unmarkTitle')}` : t('privacy.mark')"
+            @click.prevent.stop="onPrivacyClick"
+          >
+            <AppIcon :name="privacyMarked ? 'lock' : 'unlock'" class="icon-sm" />
+          </button>
+          <span class="agent-cost num" :title="card.costTitle">{{ card.costLabel }}</span>
+        </span>
+      </span>
+      <span v-if="privacyError" class="privacy-card-error" role="alert">
+        {{ t(privacyError.key, { code: privacyError.code }) }}
+      </span>
+
+      <span class="agent-line2" :data-below="chipsBelow ? 'true' : 'false'">
+        <span
+          class="agent-session"
+          :class="{ mono: card.sessionLabel === t('agents.noSessionName') }"
+          translate="no"
+          :title="card.sessionLabel"
+          >{{ card.sessionLabel }}</span
+        >
+        <!-- the chips group is teleported here (same single DOM node) when row 1 cannot hold it -->
+        <span ref="belowEl" class="agent-below"></span>
+      </span>
+
+      <span
+        v-if="
+          card.modelShort ||
+          card.contextPercent !== null ||
+          card.runningSubCount > 0 ||
+          card.runningBashCount > 0 ||
+          card.statusLabel
+        "
+        class="agent-meta"
+      >
+        <span v-if="card.modelShort" class="model" translate="no">{{ card.modelShort }}</span>
+        <span v-if="card.modelShort && card.contextPercent !== null" class="sep" aria-hidden="true">·</span>
+        <span v-if="card.contextPercent !== null">
+          <meter
+            class="meter"
+            min="0"
+            max="100"
+            low="70"
+            high="85"
+            optimum="0"
+            :value="card.contextPercent"
+            :aria-label="t('detail.contextAria')"
+          ></meter
+          ><span class="num">{{ formatPercent(card.contextPercent, i18n.lang === "zh" ? "zh-CN" : "en-US") }}</span>
+        </span>
+        <template v-if="card.runningSubCount > 0">
+          <span v-if="card.modelShort || card.contextPercent !== null" class="sep" aria-hidden="true">·</span>
+          <span
+            ><AppIcon name="branch" class="icon-sm" /><span class="num">{{
+              t("agents.runningCount", { n: card.runningSubCount })
+            }}</span></span
+          >
+        </template>
+        <!-- 2026-10-15 会话列表也展示运行中的命令:terminal 图标 + 同一段 agents.runningCount
+           文案(图标区分 agent/命令);仅统计 status.bashJobs 的非终态行(含 staged)。 -->
+        <template v-if="card.runningBashCount > 0">
+          <span
+            v-if="card.modelShort || card.contextPercent !== null || card.runningSubCount > 0"
+            class="sep"
+            aria-hidden="true"
+            >·</span
+          >
+          <span
+            ><AppIcon name="terminal" class="icon-sm" /><span class="num">{{
+              t("agents.runningCount", { n: card.runningBashCount })
+            }}</span></span
+          >
+        </template>
+        <template v-if="card.statusLabel">
+          <span
+            v-if="
+              card.modelShort || card.contextPercent !== null || card.runningSubCount > 0 || card.runningBashCount > 0
+            "
+            class="sep"
+            aria-hidden="true"
+            >·</span
+          >
+          <span class="pill pill-inline" :data-st="card.visualState">
+            <AppIcon v-if="card.visualState === 'waiting'" name="message" class="icon-sm" />
+            <AppIcon v-else-if="card.visualState === 'offline'" name="unplug" class="icon-sm" />
+            <AppIcon v-else-if="card.outdated" name="info" class="icon-sm" />
+            {{ card.statusLabel }}
+          </span>
+        </template>
+      </span>
+
+      <span v-if="needsAnswer" class="agent-flags">
+        <span v-if="needsAnswer" class="pill badge-answer">
+          <AppIcon name="message" class="icon-sm" />{{ t("common.needsAnswer") }}
+        </span>
+      </span>
+    </template>
   </a>
 </template>

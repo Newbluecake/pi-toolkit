@@ -19,6 +19,8 @@ const agents = {
   noSessionName: "（无会话名称）",
   collapseSidebar: "收起侧边栏",
   expandSidebar: "展开侧边栏",
+  densityCompact: "紧凑列表：仅显示目录、标题和别名（点击切换为详细）",
+  densityDetailed: "详细列表：含费用、模型和上下文（点击切换为紧凑）",
   openDrawer: "显示会话列表",
   newSession: "新建会话",
   newSessionAria: "在选中会话的目录新建独立会话；无选中时选择目录新建",

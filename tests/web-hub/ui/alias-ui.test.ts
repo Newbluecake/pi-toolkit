@@ -31,6 +31,8 @@ import { CONTROL_CTX } from "../../../src/web-hub/ui/src/composables/useControl.
 import { ALIAS_EXTRA } from "../../../src/web-hub/ui/src/i18n/alias-extra.js";
 import { parseXsMessage } from "../../../src/web-hub/ui/src/logic/xsMessage.js";
 import type { AgentState, CmdOutcome, ControlHandle, HubHandle, HubState } from "../../../src/web-hub/ui/src/types.js";
+import { setDetailedListForTests } from "./helpers/list-density.js";
+beforeEach(setDetailedListForTests);
 
 const CAPS = ["xs.v1", "xs.channel.v1", "xs.alias.v1"];
 const TOKEN = "k0123456789abcdef";

@@ -144,7 +144,13 @@ function costTitleOf(agent: AgentState, t: I18nHandle["t"]): { costTitle: string
 
 export function toAgentCardView(agent: AgentState, t: I18nHandle["t"], home?: string): AgentCardView {
   const card = record(agent.card);
-  const visual = agentVisualState(agent);
+  const runningSubCount = runningSubCountOf(agent);
+  const runningBashCount = runningBashCountOf(agent);
+  // 2026-10-23 user ruling: the LIST marks a session "running" whenever the main session is busy
+  // OR it still has background work (running sub-agents / background bash jobs) — an idle main
+  // turn with live background work is not "idle". offline/waiting/stale keep precedence.
+  const base = agentVisualState(agent);
+  const visual: RunVisualState = base === "idle" && (runningSubCount > 0 || runningBashCount > 0) ? "running" : base;
   return {
     key: agent.key,
     kind: card["kind"] === "rpc" ? "rpc" : "tui",
@@ -153,8 +159,8 @@ export function toAgentCardView(agent: AgentState, t: I18nHandle["t"], home?: st
     sessionLabel: sessionLabel(agent, t),
     modelShort: modelShortOf(agent),
     contextPercent: contextPercentOf(agent),
-    runningSubCount: runningSubCountOf(agent),
-    runningBashCount: runningBashCountOf(agent),
+    runningSubCount,
+    runningBashCount,
     costLabel: agentCostLabel(agent),
     ...(costTitleOf(agent, t) ?? {}),
     visualState: visual,

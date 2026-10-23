@@ -25,6 +25,8 @@ import { PREVIEW_CTX, type PreviewContext } from "../../../src/web-hub/ui/src/co
 import { fakeWindowHandle, fakeWindowsFace } from "./helpers/preview-windows-fake.js";
 import type { HubHandle, HubState, Route } from "../../../src/web-hub/ui/src/types.js";
 import type { PrivacyOutcome, PrivacyTransport } from "../../../src/web-hub/ui/src/transport/types.js";
+import { setDetailedListForTests } from "./helpers/list-density.js";
+beforeEach(setDetailedListForTests);
 
 type Msg = { event: string; data?: unknown; id?: number };
 type LogicState = ReturnType<typeof initialState>;

@@ -511,6 +511,7 @@
    * remount churn re-toggling) and nothing here needs to know about collapse at all. */
   .sidebar.is-collapsed .sidebar-title,
   .sidebar.is-collapsed .new-session-btn,
+  .sidebar.is-collapsed .list-density-toggle,
   .sidebar.is-collapsed .search,
   .sidebar.is-collapsed .new-session-note,
   .sidebar.is-collapsed .replace-confirm,
@@ -1121,4 +1122,80 @@
 .channel-filter .chip:focus-visible {
   outline: 2px solid var(--c-primary);
   outline-offset: 1px;
+}
+
+/* List density (pwh_list_density). Compact (default): row 1 = dot + directory + @alias (+ unread
+ * badge), row 2 = title. Reuses .agent-row1/.agent-session so the rename/remove geometry above
+ * keeps applying; only the vertical rhythm is tightened. */
+.list-density-toggle {
+  flex: none;
+}
+
+.agent-card[data-density="compact"] {
+  padding-top: 7px;
+  padding-bottom: 7px;
+  gap: 1px;
+}
+
+.agent-card[data-density="compact"] .agent-main {
+  justify-content: space-between;
+}
+
+.agent-card[data-density="compact"] .agent-main > .agent-title {
+  flex: 0 1 auto;
+}
+
+.agent-card[data-density="compact"] .agent-chips {
+  margin-left: auto;
+}
+
+.agent-card[data-density="compact"] .agent-line2 {
+  flex-wrap: nowrap;
+}
+
+.agent-card[data-density="compact"] .agent-line2 > .agent-session {
+  flex: 1 1 auto;
+}
+
+/* Compact state/count markers (same pill + dot semantics as the detailed meta row). */
+.agent-card[data-density="compact"] .agent-chips {
+  gap: var(--sp-1);
+}
+
+.agent-card[data-density="compact"] .agent-chips > .pill {
+  padding: 2px 6px;
+}
+
+.chip-run-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-inline: 5px;
+  color: var(--c-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-card[data-st="running"] .chip-run-count,
+.chip-run-count[data-compact="sub"] {
+  color: var(--st-running, var(--c-primary));
+}
+
+.agent-card[data-st="stale"] .agent-chips,
+.agent-card[data-st="offline"] .agent-chips {
+  opacity: 0.85;
+}
+
+/* Touch + compact: the always-visible pencil clutters row 2, so only the SELECTED card (or one
+ * mid-edit) keeps it; every other card gives the title the full width back. Fine pointers keep
+ * the hover-revealed pencil unchanged. */
+@media (pointer: coarse) {
+  .sidebar[data-density="compact"] .agent-item.renamable:not(:has(> .agent-card[aria-current="page"])) {
+    --rename-hit: 0px;
+  }
+
+  .sidebar[data-density="compact"]
+    .agent-item.renamable:not(:has(> .agent-card[aria-current="page"]))
+    .rename-wrap:not(.is-editing) {
+    display: none;
+  }
 }

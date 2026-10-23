@@ -44,6 +44,8 @@
 import { computed, inject, nextTick, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { useListDensity } from "../../composables/useListDensity.js";
+import { browserLocalStorage } from "../shell/themeStorage.js";
 import { xsChannelsOf } from "./agentCardModel.js";
 import { channelDirectory } from "./channelModel.js";
 import { renameEnabled } from "../../logic/control.js";
@@ -120,6 +122,8 @@ function onFilterInput(ev: Event): void {
 // (2026-10-13 bug: AgentList-owned 56px on `<html>` lost to a dragged inline width on
 // `.layout` ⇒ blank full-width panel with a lone chevron).
 // ---------------------------------------------------------------------------
+
+const listDensity = useListDensity({ storage: browserLocalStorage() });
 
 function toggleCollapsed(): void {
   emit("update:collapsed", !props.collapsed);
@@ -477,7 +481,13 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
 </script>
 
 <template>
-  <nav ref="sidebarEl" class="sidebar" :class="{ 'is-collapsed': collapsed }" aria-label="Agents">
+  <nav
+    ref="sidebarEl"
+    class="sidebar"
+    :class="{ 'is-collapsed': collapsed }"
+    :data-density="listDensity.density.value"
+    aria-label="Agents"
+  >
     <div class="sidebar-head">
       <div class="sidebar-headrow">
         <button
@@ -492,6 +502,18 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
         <h2 class="sidebar-title">
           {{ t("agents.title") }} <span class="count num">{{ cards.length }}</span>
         </h2>
+        <button
+          class="btn btn-ghost btn-icon list-density-toggle"
+          type="button"
+          :aria-pressed="listDensity.density.value === 'compact'"
+          :aria-label="
+            listDensity.density.value === 'compact' ? t('agents.densityCompact') : t('agents.densityDetailed')
+          "
+          :title="listDensity.density.value === 'compact' ? t('agents.densityCompact') : t('agents.densityDetailed')"
+          @click="listDensity.toggle()"
+        >
+          <AppIcon name="layers" class="icon-sm" />
+        </button>
         <NewSessionMenu
           :actions="sessionActions"
           :busy="newSessionBusy"
@@ -602,7 +624,7 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
         class="agent-item"
         :class="{ removable: !!row.target, renamable: row.rename.enabled }"
       >
-        <AgentCard :card="row.card" :selected="row.card.key === selectedKey" />
+        <AgentCard :key="listDensity.density.value" :card="row.card" :selected="row.card.key === selectedKey" />
         <RenameButton
           v-if="row.rename.enabled"
           :agent-key="row.card.key"
@@ -629,7 +651,7 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
         }"
         @click.capture="onStaleRowClick(row, $event)"
       >
-        <AgentCard :card="row.card" :selected="row.card.key === selectedKey" />
+        <AgentCard :key="listDensity.density.value" :card="row.card" :selected="row.card.key === selectedKey" />
         <!-- spawn-relaunch affordance: hover-revealed on hover-capable pointers, always visible
              on touch (same `.agent-item` convention as the delete button); the busy state swaps
              the label for a spinner line and stays visible until the call settles. -->
