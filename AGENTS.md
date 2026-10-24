@@ -969,6 +969,32 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   navigation (D2 拍板). `/webhub status` prints `cmd-args: <mode> · hub-cap on|off|n/a`
   (`agent/cmd-args-status.ts`). Conformance: `tests/conformance/slash-args.test.ts` (real pi
   rpc child + real InteractiveMode) before any pi peer bump.
+- **Command history** (`docs/dev/web-hub-cmd-history/plan.md` v2, packages P0/H1/A1/U1/I1):
+  command output becomes `subagent:cmd` custom entries (`protocol/cmd-record.ts`, freeze F1 —
+  via `pi.appendEntry` only, never a TUI renderer, never LLM context; Q1 原文落盘，Q5 `/webhub`
+  敏感子命令只记头部，editor 预填/input 值不落盘) written by the agent-side recorder
+  (`agent/command-record.ts`; `webHub.cmdHistory=false` ⇒ no recorder, no feature token,
+  byte-identical legacy) at the handler's REAL execution point — `wrapCommandApi`'s optional 5th
+  param feeds both the claimed (web) and observed (TUI, pure tee — terminal display never
+  changes) modes plus ctx leave interception (`commitBeforeLeave` before
+  newSession/fork/switchSession/reload, one corrective `end{failed}` if cancelled);
+  `builtin-bridge.ts` records builtins at their settlement points (intent ledger D7 recovers the
+  frame cmdId for agent_settled-deferred dispatches — G7) and stamps the open `history` field on
+  sync/late replies. The hub statically advertises `cmd.history.v1` and projects entries as
+  custom tombstones + open `cmd` field (`protocol/keys.ts`); `runTail`'s ENOENT-only
+  `branch_req` fallback serves records live before the first conversation flushes the file
+  (§4.10 — a GENERAL hub fix, deliberately outside the switch-off promise). UI: purple cards
+  (`TxCommand.vue`), gated `hubCap ∧ status.features`, placeholder state machine with 60 s
+  degrade; `historyMode` off ⇒ DOM byte-identical. `/webhub status` adds the `cmd-history:` line
+  (`agent/cmd-history-status.ts`). secure LOCKED sessions still execute commands but skip every
+  write (guards' read-only `recheckForWrite`, M1). Residual: plaintext command output (incl.
+  live credentials like `?token=` take tokens, §5.3) persists in session files by user ruling —
+  hub.log/agent logs must never carry output bodies (gated by tests). Integration:
+  `tests/integration/web-hub-cmd-history.test.ts` (real hub child × real stack); conformance
+  `tests/conformance/cmd-history.test.ts` (the six pi premises — custom-out-of-context,
+  no-renderer, streaming/settled-deferral timing, `expandPromptTemplates:false`,
+  no-file-before-first-message, newSession cancelled/stale-ctx) before any pi peer bump;
+  real-device checklist `docs/dev/web-hub-cmd-history/acceptance.md`.
 - `src/topic-switch/` — new-request relevance judge → suggest a clean new session
   (`docs/dev/topic-switch/{requirements,arch,plan}.md`). Post-guard, main-session only, settings-
   gated (`topicSwitch.enabled`, default on). The judge model chain is a configurable LIST
@@ -1182,7 +1208,14 @@ max(ceil(f·workflowTotalMs), workflowTotalMs + maxExtensions·extendStepMs)` wi
   why it stays off the rewrite whitelist) — plus the claim-protocol single-recorder matrix under
   the real resource loader (old v0.2.x external, tombstone v0.3.0, both load orders, filtered
   package entries, missing paths). Any premise breaking on a new pi/pi-ai must fail there before
-  the bump ships.
+  the bump ships. **Also run `tests/conformance/cmd-history.test.ts`** (web-hub-cmd-history I1):
+  it pins the six pi premises the command-history feature stands on — custom `appendEntry` entries
+  never reach `buildSessionContext`/the provider payload/the system prompt; a custom entry with
+  no renderer renders nothing in InteractiveMode; extension commands run immediately while
+  streaming and defer ONLY inside the `_isEmittingAgentSettled` window (deferred actions in
+  order); `sendUserMessage` never executes slash text (`expandPromptTemplates:false` default);
+  `appendEntry` before the first conversation does not create the session file; `ctx.newSession()`
+  returns `{cancelled}` and every read of a replaced ctx throws the stale error.
 
 ## pi-extension specifics (easy to get wrong)
 
