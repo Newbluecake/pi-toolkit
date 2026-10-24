@@ -168,6 +168,11 @@ const control = {
   modelSearch: "搜索模型",
   modelTabScoped: "scoped",
   modelTabAll: "all",
+  // 排序切换（2026-10）：标签散文可译；「provider」段在两种语言都保持英文 token（紧凑标记
+  // 仅英文的分界——它就是 wire 字段名）。
+  modelSort: "排序",
+  modelSortName: "名称",
+  modelSortProvider: "provider",
   modelCurrentBadge: "current",
   modelEmpty: "没有已配置凭据的模型",
   modelNoMatch: "没有匹配的模型",

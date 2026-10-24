@@ -184,6 +184,11 @@ const control = {
   modelSearch: "Search models",
   modelTabScoped: "scoped",
   modelTabAll: "all",
+  // Sort toggle (2026-10): label prose translates; the "provider" segment stays an English
+  // token in both languages (AGENTS.md UI-text split — it names the wire field).
+  modelSort: "Sort",
+  modelSortName: "Name",
+  modelSortProvider: "provider",
   modelCurrentBadge: "current",
   modelEmpty: "No models with credentials",
   modelNoMatch: "No matching model",
