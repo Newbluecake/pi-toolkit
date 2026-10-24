@@ -144,6 +144,11 @@ const control = {
   "cmdOutput.truncated": "输出过长——已丢弃 {entries} 条 / {kib} KiB，完整内容见终端。",
   "cmdOutput.clipped": "…",
 
+  // --- 命令历史的精简提示（cmd-history 方案 v2 §4.7；historyMode 下取代 CommandResult 卡片） ---
+  cmdHistoryExecuted: "已执行 /{name}",
+  cmdHistoryDeferred: "结果暂未记录（可能仍在排队或已中断）",
+  cmdHistoryDismiss: "关闭",
+
   dockReadonlyHub: "此 hub 为只读",
   dockReadonlyAgent: "此 pi 的 pi-toolkit 不支持网页控制——请更新并 /reload",
   dockReadonlyOffline: "Agent 离线",

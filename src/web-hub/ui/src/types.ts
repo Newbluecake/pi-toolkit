@@ -79,7 +79,7 @@ export interface LiveTool {
   readonly seenAt?: number;
 }
 
-export type ItemKind = "message" | "custom" | "compaction" | "branch_summary" | "model_change";
+export type ItemKind = "message" | "custom" | "compaction" | "branch_summary" | "model_change" | "cmd";
 
 export interface Item {
   readonly id: string;

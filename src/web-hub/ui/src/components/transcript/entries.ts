@@ -12,6 +12,7 @@
 import { itemRenderKey, messageText } from "@logic/transcript.js";
 import { safeJson, toolView } from "@logic/tools.js";
 import { resultText, messageKey } from "@logic/state.js";
+import { foldCmdRecords, resolveCmdState, type CmdCardView } from "../../logic/cmdRecord.js";
 import type { Item, ToolView } from "../../types.js";
 import type { TranscriptSource } from "../../contracts.js";
 import { DATE_CUSTOM_TYPE, parseDateMarker, type DateMarker } from "../../logic/dateMarker.js";
@@ -63,7 +64,8 @@ export type TxEntry =
       readonly role: string;
       readonly text: string;
       readonly truncated: boolean;
-    };
+    }
+  | { readonly type: "command"; readonly key: string; readonly view: CmdCardView };
 
 function isNonEmptyString(x: unknown): x is string {
   return typeof x === "string" && x !== "";
@@ -212,6 +214,18 @@ export interface TxBuild {
  * never keyed). Items with neither (live streamed messages without a final entry, orphan live
  * tools, custom live messages) return `[]` and can never serve as scroll anchors.
  */
+/** Live context for resolving start-only command cards (cmd-history plan §4.7): the latest
+ * `status.cmdRunning` set, this tab's seen-running lookup (grace vs. the append/status frame
+ * race), and the browser-clock now. Absent (drawer run sources) ⇒ start-only cards render
+ * `unrecorded`. */
+export interface CmdLiveContext {
+  readonly running: ReadonlySet<string>;
+  readonly seenRunningAt?: ((cmdId: string) => number | undefined) | undefined;
+  readonly now: number;
+}
+
+const EMPTY_RUNNING: ReadonlySet<string> = new Set<string>();
+
 export function anchorIdsOf(it: Item): string[] {
   const ids: string[] = [];
   if (typeof it.entryId === "string" && it.entryId !== "") ids.push(`e:${it.entryId}`);
@@ -223,12 +237,44 @@ export function anchorIdsOf(it: Item): string[] {
   return ids;
 }
 
-export function buildTxEntries(a: TranscriptSource): TxBuild {
+export function buildTxEntries(a: TranscriptSource, cmdLive?: CmdLiveContext): TxBuild {
   const idx = indexTools(a);
   const entries: TxEntry[] = [];
   const renderKeys: string[] = [];
   const anchors: (readonly string[])[] = [];
-  for (const it of a.items) {
+  // web-hub-cmd-history (plan §4.2/§4.7): fold same-cmdId start/end records into ONE card at
+  // the first occurrence (D1). A `cmdLive` context (main session only — the drawer's run
+  // source passes none) re-resolves start-only cards against `status.cmdRunning` + this tab's
+  // seen-running grace; without it they honestly render `unrecorded`.
+  const cmdFold = foldCmdRecords(a.items);
+  for (let i = 0; i < a.items.length; i++) {
+    const it = a.items[i];
+    if (it === undefined) continue;
+    if (it.kind === "cmd") {
+      if (cmdFold.hidden.has(i)) continue;
+      const folded = cmdFold.byIndex.get(i);
+      if (folded === undefined) continue; // entryItem already validated; defensive only
+      const view = folded.hasEnd
+        ? folded.view
+        : {
+            ...folded.view,
+            state: resolveCmdState(
+              { hasEnd: false, cmdId: folded.view.cmdId },
+              {
+                running: cmdLive?.running ?? EMPTY_RUNNING,
+                seenRunningAt: cmdLive?.seenRunningAt?.(folded.view.cmdId),
+                now: cmdLive?.now ?? 0,
+              },
+            ),
+          };
+      entries.push({ type: "command", key: it.id, view });
+      // foldSig (plan §4.7 v-memo rule): the card must re-render when its END lands or the
+      // resolved state flips, so the render key carries both — the host item id alone is
+      // stable across exactly those changes.
+      renderKeys.push(`${itemRenderKey(it, idx)}|cmd:${folded.lastEndEntryId}:${view.state}`);
+      anchors.push(anchorIdsOf(it));
+      continue;
+    }
     const entry = itemEntry(it, idx);
     if (!entry) continue;
     entries.push(entry);

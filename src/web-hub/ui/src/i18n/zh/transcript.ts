@@ -70,6 +70,21 @@ const transcript = {
   mermaidFitWidth: "适应宽度",
   mermaidActualSize: "原尺寸",
   mermaidCopySelectFailed: "复制失败，请手动选择",
+  // web-hub-cmd-history（方案 v2 §4.7）：紫色命令卡。done/failed/running 状态 chip 两个语言
+  // 都保留英文 token（用户认可的预览如此）；已截止/结果未记录与散文行走中文。
+  cmdWho: "命令",
+  cmdSourceFeishu: "飞书",
+  cmdNoContext: "不进上下文",
+  cmdStateTimeout: "已截止",
+  cmdStateUnrecorded: "结果未记录",
+  cmdRunningBody: "执行中…（完成后本条原地更新为输出）",
+  cmdUnrecordedBody: "结果未记录：会话中断或已切换",
+  cmdNoticeTerminalOnly: "已发送，输出仅在终端",
+  cmdNoticeSensitive: "敏感命令，输出未记录",
+  cmdNoticeNoOutput: "无输出",
+  cmdNeedsTerminal: "以下交互步骤需在终端完成：{steps}",
+  cmdInteractedTerminal: "已在终端交互：{steps}",
+  cmdCopy: "复制输出",
 } satisfies Messages<typeof en>;
 
 export default transcript;

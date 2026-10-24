@@ -156,6 +156,12 @@ const control = {
     "Output too long — {entries} entr(y/ies) / {kib} KiB dropped; see the terminal for the full output.",
   "cmdOutput.clipped": "…",
 
+  // --- command history slim dock notes (cmd-history plan v2 §4.7; historyMode replaces the
+  // CommandResult card with transcript records + these) ---
+  cmdHistoryExecuted: "Ran /{name}",
+  cmdHistoryDeferred: "Result not recorded yet (may still be queued or was interrupted)",
+  cmdHistoryDismiss: "Dismiss",
+
   // --- read-only dock reasons (§7.4 DetailDock) ---
   dockReadonlyHub: "This hub is read-only",
   dockReadonlyAgent: "This pi's pi-toolkit doesn't support web control — update and /reload",

@@ -70,7 +70,7 @@
  * @typedef {{ toolCallId: string, toolName: string, args: unknown, partial?: string,
  *   result?: unknown, isError?: boolean, done: boolean, truncated?: boolean,
  *   seenAt?: number }} LiveTool
- * @typedef {{ id: string, kind: "message" | "custom" | "compaction" | "branch_summary" | "model_change",
+ * @typedef {{ id: string, kind: "message" | "custom" | "compaction" | "branch_summary" | "model_change" | "cmd",
  *   entryId?: string | undefined, seq?: number | undefined, key?: string | undefined, message?: any, entry?: any,
  *   truncated?: boolean | undefined }} Item
  * @typedef {{ clientId: string, pending: boolean, failed?: boolean }} Sub
@@ -119,6 +119,7 @@
  * @typedef {{ event: string, data: any, id?: number, at?: number }} Msg
  */
 import { acceptHeld, HELD_TOMB_CTL_STATES, pendingTransition } from "./control.js";
+import { isCmdRecordWire } from "./cmdRecord.ts";
 import { isLoadGateWireLike, isLoadWireLike, parseLoadTopWire } from "./load.js";
 import { SSE_EVENTS } from "@protocol/http-contract.ts";
 
@@ -1202,6 +1203,12 @@ function entryItem(entry) {
       return { ...base, kind: "branch_summary", entry };
     case "model_change":
       return { ...base, kind: "model_change", entry };
+    case "custom":
+      // web-hub-cmd-history (plan §4.7): a projected `subagent:cmd` tombstone carrying a valid
+      // bounded `cmd` record becomes a command-history card; every other custom tombstone
+      // (incl. invalid/absent `cmd`) stays invisible exactly as before.
+      if (isCmdRecordWire(entry.cmd)) return { ...base, kind: "cmd", entry };
+      return undefined;
     default:
       return undefined; // custom(data), thinking_level_change: not rendered
   }
