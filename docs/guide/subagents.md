@@ -52,21 +52,9 @@ run 活跃期间，编辑器上方常驻实时 agent tree（`fleetWidget`，默�
 
 ## 定时任务
 
-session 启动时从 `~/.pi/agent/pi-subagent-schedules.json` 加载，到点自动发起 subagent run（走正常的槽位与看管）：
+定时任务已改为会话级功能：默认关闭，`schedule.enabled` 打开后用 `/schedule` 命令和 AI 的 `schedule` 工具管理，任务属于创建它的会话，AI 创建的任务须你批准。用法、批准规则与设置见 [README 的「定时任务」](../../README.md#定时任务schedule)。
 
-```json
-[
-  {
-    "id": "nightly-review",
-    "schedule": { "kind": "cron", "expression": "0 3 * * *" },
-    "request": { "type": "general", "prompt": "审查昨晚的提交并汇报风险", "label": "nightly-review" }
-  }
-]
-```
-
-- `schedule.kind`：`"cron"`（五段表达式）/ `"interval"`（`intervalMs`）/ `"once"`（`at` 为 ISO 时间，触发后自动移除）。
-- `request` 与 `Agent` 工具的 spawn 参数同构（`runId` 除外）。
-- 启动时已过期的任务不补跑；编辑文件后 `/reload` 生效。
+旧的全局引擎（`~/.pi/agent/pi-subagent-schedules.json`）已退役，不再读取也不再写入，原文件里的任务不会迁移。
 
 ## 防卡死架构
 
