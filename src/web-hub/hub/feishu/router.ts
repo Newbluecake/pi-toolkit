@@ -13,8 +13,14 @@ export type FeishuCommand =
   | { op: "help"; unknown?: string }
   | { op: "use"; selector: string }
   | { op: "new"; cwd: string; firstPrompt: string }
-  | { op: "file"; path: string };
-export function parseFeishuCommand(text: string): FeishuCommand {
+  | { op: "file"; path: string }
+  | { op: "schedule" }
+  | { op: "schedule-run"; n: number };
+/** `schedule` (F1, #32): recognise `/schedule` + `/schedule run <n>`; absent/false ⇒ unknown command, byte-identical. */
+export interface FeishuParseOptions {
+  schedule?: boolean;
+}
+export function parseFeishuCommand(text: string, opts: FeishuParseOptions = {}): FeishuCommand {
   if (text.startsWith("//")) return { op: "prompt", text: text.slice(1) };
   if (!text.startsWith("/")) return { op: "prompt", text };
   const newline = text.indexOf("\n");
@@ -25,6 +31,12 @@ export function parseFeishuCommand(text: string): FeishuCommand {
   if (token.indexOf("/", 1) >= 0) return { op: "prompt", text };
   if (["/list", "/cur", "/unbind", "/help"].includes(first) && !tail.trim())
     return { op: first.slice(1) as "list" | "cur" | "unbind" | "help" };
+  if (opts.schedule === true && token === "/schedule") {
+    if (tail.trim()) return { op: "help" };
+    if (first === "/schedule") return { op: "schedule" };
+    const m = /^\/schedule\s+run\s+(\d{1,4})$/.exec(first);
+    return m !== null && Number(m[1]) >= 1 ? { op: "schedule-run", n: Number(m[1]) } : { op: "help" };
+  }
   if (first.startsWith("/use ") && first.slice(5).trim() && !tail.trim())
     return { op: "use", selector: first.slice(5).trim() };
   if (first.startsWith("/file ") && first.slice(6).trim().startsWith("/") && !tail.trim())
@@ -69,13 +81,17 @@ export type FeishuRouterIntent =
       policy: { scope: "known" | "roots"; confirm: "unknown-dir" };
     }
   | { type: "file"; message: FeishuMessage; identity: FeishuIdentityContext; path: string; binding: FeishuBinding }
-  | { type: "open-topic"; message: FeishuMessage; identity: FeishuIdentityContext };
+  | { type: "open-topic"; message: FeishuMessage; identity: FeishuIdentityContext }
+  | { type: "schedule"; message: FeishuMessage; identity: FeishuIdentityContext }
+  | { type: "schedule-run"; message: FeishuMessage; identity: FeishuIdentityContext; n: number };
 export interface FeishuRouterDeps {
   state: FeishuState;
   sessions: FeishuSessions;
   requests: FeishuRequests;
   groupRootTopics: boolean;
   spawnScope: "known" | "roots";
+  /** F1: `/schedule` is recognised (HubConfig.schedule present). Absent ⇒ legacy behavior. */
+  schedule?: boolean;
   /** F8 must return committed+pinned upload ids, and stage >16KiB text as .txt. No silent truncation. */
   preparePayload?(message: FeishuMessage, text: string, identity: FeishuIdentityContext): Promise<RequestPayload>;
   emit(intent: FeishuRouterIntent): void;
@@ -93,7 +109,7 @@ export function createFeishuRouter(deps: FeishuRouterDeps) {
       const intents: FeishuRouterIntent[] = [];
       let readyId: string | undefined;
       const key = feishuBindingKey(message.chatType, message.chatId, message.threadId);
-      const command = parseFeishuCommand(message.text);
+      const command = parseFeishuCommand(message.text, deps.schedule === true ? { schedule: true } : {});
       const notice = (code: string, unknownCommand?: string) => {
         intents.push({ type: "notice", message, code, ...(unknownCommand ? { unknownCommand } : {}) });
       };
@@ -101,7 +117,12 @@ export function createFeishuRouter(deps: FeishuRouterDeps) {
         return { drop: true };
       if (command.op === "prompt" && message.messageType === "text" && !command.text.trim()) notice("usage");
       else if (command.op === "help") notice("help", command.unknown);
-      else if (key === undefined) {
+      else if (command.op === "schedule" || command.op === "schedule-run") {
+        // Private chat only (plan §7.4): a group/topic never lists or triggers schedules.
+        if (message.chatType !== "p2p") notice("schedule-p2p-only");
+        else if (command.op === "schedule") intents.push({ type: "schedule", message, identity });
+        else intents.push({ type: "schedule-run", message, identity, n: command.n });
+      } else if (key === undefined) {
         if (deps.groupRootTopics) intents.push({ type: "open-topic", message, identity });
         else notice("use-topic");
       } else if (command.op === "list") {
