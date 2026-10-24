@@ -17,6 +17,12 @@ function put(record: Record<string, string>, key: string, value: string): void {
 export function encodeAnswer(value: AnswerValue, opts: { key: string; multiSelect: boolean }): Record<string, string> {
   const result: Record<string, string> = {};
 
+  // 2026-10-24 复验 blocker backstop: single-select carries ONE answer. When both a pick and
+  // an Other text arrive (pre-fix web drafts, foreign clients), the pick wins and the
+  // `__other` key is dropped (TUI parity: component.ts clears freeTextValue on option
+  // confirm). The web UI and buildDialogAnswers already enforce this; this is the last gate.
+  const suppressOther = !opts.multiSelect && value.selected.length > 0;
+
   if (value.selected.length > 0) {
     const first = value.selected[0];
     if (first !== undefined) {
@@ -24,7 +30,7 @@ export function encodeAnswer(value: AnswerValue, opts: { key: string; multiSelec
     }
   }
 
-  if (value.other !== null && value.other !== "") {
+  if (!suppressOther && value.other !== null && value.other !== "") {
     put(result, `${opts.key}__other`, value.other);
   }
 

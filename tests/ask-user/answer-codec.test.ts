@@ -8,11 +8,17 @@ describe("answer codec", () => {
     expect(encodeAnswer({ selected: ["A"], other: null }, { key: "db", multiSelect: false })).toEqual({
       db: "A",
     });
+    // 2026-10-24 复验 blocker backstop: single-select with BOTH a pick and an Other drops the
+    // Other — the pick wins (TUI parity: confirming an option clears freeTextValue).
     expect(encodeAnswer({ selected: ["A"], other: "custom" }, { key: "db", multiSelect: false })).toEqual({
       db: "A",
-      db__other: "custom",
     });
     expect(encodeAnswer({ selected: [], other: "custom" }, { key: "db", multiSelect: false })).toEqual({
+      db__other: "custom",
+    });
+    // multi-select keeps the coexistence (pick + Other both encoded).
+    expect(encodeAnswer({ selected: ["A"], other: "custom" }, { key: "db", multiSelect: true })).toEqual({
+      db: '["A"]',
       db__other: "custom",
     });
   });
@@ -95,7 +101,9 @@ describe("answer codec property-based round trip", () => {
 
           const expectedAnswer = selected.length === 0 ? undefined : multiSelect ? selected : selected[0];
           expect(decoded).toEqual(expectedAnswer);
-          expect(decodedOther).toBe(generatedOther);
+          // 2026-10-24 backstop: single-select suppresses __other whenever a pick exists.
+          const expectedOther = !multiSelect && selected.length > 0 ? null : generatedOther;
+          expect(decodedOther).toBe(expectedOther);
         },
       ),
     );
