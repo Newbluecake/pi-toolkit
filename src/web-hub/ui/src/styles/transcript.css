@@ -273,6 +273,19 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   font-size: 0.9em;
 }
 
+/* The `.md code` inline-chip rule above also matches a fenced block's `<pre><code>` — and an
+ * inline element's left padding paints ONCE, at the start of its FIRST line box only, so the
+ * fence's first line sat 5px (≈1 char) to the right of every later line (2026-10-24 bug; the
+ * 0.9em also quietly shrank the whole block, and the chip background went unnoticed only
+ * because it equals the codeblock surface). Neutralize it inside code blocks: the `<pre>`
+ * owns padding, font size and background there. */
+.md .codeblock pre code {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  font-size: inherit;
+}
+
 .md a {
   overflow-wrap: anywhere;
 }
