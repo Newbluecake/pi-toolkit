@@ -323,6 +323,11 @@ async function runStatus(ctx: ExtensionCommandContext, control: WebHubControl, d
   // web-hub-slash-args plan §5 (P4): `/`-command argument-completion line (mode + live hub cap).
   const cmdArgsLines = control.cmdArgs?.statusLines() ?? [];
   notifyAll(ctx, cmdArgsLines, control.cmdArgs?.levelOf(cmdArgsLines[0]) ?? "info");
+  // web-hub-cmd-history plan §4.9 (A1, M1 verify fix): command-history line (agent-side switch
+  // + live hub cap + recorder write counters). The slot is ALWAYS present — `cmd-history: off`
+  // is itself the operator-visible confirmation, exactly like `cmd-args: off` above.
+  const cmdHistoryLines = control.cmdHistory?.statusLines() ?? [];
+  notifyAll(ctx, cmdHistoryLines, control.cmdHistory?.levelOf(cmdHistoryLines[0]) ?? "info");
 }
 
 /** The command-layer gate verdict (fresh per invocation; `unknown` refuses like `in-ns`). */

@@ -1508,6 +1508,11 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     // web-hub-slash-args plan §5 (§11 D1 拍板): / 命令参数提示与补全，默认 all（含第三方命令，
     // 经 TUI autocomplete provider）；non-live（/reload 后 /webhub restart）。
     commandComplete: "all",
+    // web-hub-cmd-history plan §4.9 (A1): command-output history cards persisted as
+    // `subagent:cmd` session entries. Default ON (Q1–Q5 rulings); `false` ⇒ no recorder, no
+    // feature token, nothing written (`/reload` to take effect). NOTE the accepted residual:
+    // command output is persisted VERBATIM (incl. e.g. `?token=` URLs — plan §5.3).
+    cmdHistory: true,
     uploads: "on",
     preview: "on",
     avatar: true,
@@ -2750,6 +2755,8 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     steerRecall: typeof record.steerRecall === "boolean" ? record.steerRecall : (defaults.steerRecall ?? true),
     // web-hub-slash-args plan §5 (P0): tri-valued, any other value falls back to "all" (§11 D1 拍板).
     commandComplete: parseCommandCompleteSetting(record.commandComplete, defaults.commandComplete),
+    // web-hub-cmd-history plan §4.9 (A1): boolean only, anything else falls back to the default true.
+    cmdHistory: typeof record.cmdHistory === "boolean" ? record.cmdHistory : (defaults.cmdHistory ?? true),
     uploads: parseUploadsSetting(record.uploads, defaults.uploads),
     preview: parsePreviewSetting(record.preview, defaults.preview),
     avatar: typeof record.avatar === "boolean" ? record.avatar : (defaults.avatar ?? true),

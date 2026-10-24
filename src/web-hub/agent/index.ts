@@ -36,6 +36,7 @@ import type { HubSpawnConfig } from "../protocol/spawn.js";
 import { PREVIEW_DEFAULT_MODE, type PreviewMode } from "../protocol/preview.js";
 import { PROXY_PORTS_FILE_NAME, PROXY_STATE_DIR_NAME, parseProxyPortRange } from "../protocol/proxy.js";
 import {
+  CMD_HISTORY_FEATURE_V1,
   FORWARDED_EVENTS,
   RESUME_FEATURE_V1,
   type AgentKind,
@@ -112,6 +113,8 @@ import { cacheKeepaliveFingerprint, projectCacheKeepalive, type CacheKeepaliveIn
 import type { ProviderVerdict } from "../../quota/ladder.js";
 import type { QuotaProblem } from "../../quota/types.js";
 import { createCommandCapture, type CommandCapturePort } from "./command-capture.js";
+import { createCommandRecorder, type CommandRecorder, type CommandRecorderDeps } from "./command-record.js";
+import { cmdHistoryStatusLevel, formatCmdHistoryStatusLines } from "./cmd-history-status.js";
 import { createCommandHandler, type InputEventLike, type MessageStartLike } from "./commands.js";
 import { createCommandLedger } from "./ledger.js";
 import { createQueueMirror } from "./queue-mirror.js";
@@ -228,6 +231,12 @@ export interface WebHubSettings {
    *  cap, no `status.held` — byte-identical to the pre-feature agent (W1/W2). Non-live like the
    *  rest of webHub.* (captured at activate; change → /reload). */
   steerRecall?: boolean;
+  /** web-hub-cmd-history plan §4.9 (A1): command-output history cards, persisted as
+   *  `subagent:cmd` session entries (plan §4.1). Default `true`; `false` ⇒ no recorder is
+   *  built, `wrapCommandApi` keeps today's pure passthrough branch, no feature token, no
+   *  cmdRunning slot — byte-identical to the pre-feature agent. Non-live (`/reload`);
+   *  agent-side only (the hub needs no restart for this flag). */
+  cmdHistory?: boolean;
   /** web-hub-slash-args plan §5 (P0 type-only addition, sysload-plan §10 precedent — the type
    *  lives here because config/settings.ts's `parseWebHubSettings`/`DEFAULT_SETTINGS.webHub`,
    *  both exclusively P0's, need somewhere to put the parsed value; P1 owns the wiring):
@@ -296,6 +305,10 @@ export interface WebHubDeps {
    * writes real toolkit command names into, handed straight through to `createCommandCapture` so
    * `owns()`/`settleArm()` answer from true registration state, not from `arm()` history. */
   ownedCommandNames?: Set<string>;
+  /** web-hub-cmd-history plan §4.3/§5.4 (A1, M1): the secure LOCKED pre-write query
+   * (`src/index.ts` threads `secureGuards?.recheckForWrite`; web-hub never imports src/secure).
+   * Unset (plain domain without guards, older wiring) ⇒ treated as writable. */
+  secureRecheckForWrite?: (ctx: ExtensionContext | undefined) => string | undefined;
   /** web-hub-slash-args plan §4.4 (P1): the same-by-reference `Map<string, ArgCompleter>`
    *  `wrapCommandApi`'s registerCommand proxy fills with each toolkit command's RAW
    *  `getArgumentCompletions` at real registration time (the `ownedCommandNames` pattern,
@@ -404,6 +417,10 @@ export type LanAdminResult<T> =
 
 export interface WebHubControl {
   readonly capture?: CommandCapturePort;
+  /** web-hub-cmd-history plan §4.3 (A1): the command recorder — present iff
+   *  `webHub.cmdHistory !== false` (the feature's agent-side switch). `src/index.ts` assigns it
+   *  into its own `commandRecorderRef` exactly like `capture`. */
+  readonly recorder?: CommandRecorder;
   internalExec(args: string, ctx: unknown): Promise<{ ok: true } | { ok: false; code: "E_UNSUPPORTED" }>;
   askUserRemote(): AskUserRemotePort | undefined;
   /**
@@ -470,6 +487,12 @@ export interface WebHubControl {
   cmdArgs?: {
     statusLines(): string[];
     /** `commands/webhub.ts`'s notify level for the first line (the module owns the rule). */
+    levelOf(line: string | undefined): "info" | "warning";
+  };
+  /** web-hub-cmd-history plan §4.9 (A1): the `cmd-history:` `/webhub status` line (agent-side
+   * switch + live hub cap + recorder counters). Optional like `cmdArgs`. */
+  cmdHistory?: {
+    statusLines(): string[];
     levelOf(line: string | undefined): "info" | "warning";
   };
 }
@@ -756,6 +779,33 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // §4.9 echo and the commands slot's `output` badge) — the return value used to build a second,
   // disconnected one (todo #32 C11 wiring).
   const commandCapture = createCommandCapture(deps.ownedCommandNames);
+  // web-hub-cmd-history plan §4.3/§4.9 (A1): the command recorder. Built iff cmdHistory !==
+  // false — independent of the hub connection (TUI invocations record into the session file
+  // even while the hub is down; onChange's publishStatus is a no-op without a live link).
+  // All timers unref'd (zero-hang); every append failure is swallowed and counted inside.
+  // `onChange` is read at call time, so the forward reference to publishStatus (declared below)
+  // is safe — the recorder only ever fires it long after this closure finished initializing.
+  const commandRecorder: CommandRecorder | undefined =
+    settings.cmdHistory !== false
+      ? createCommandRecorder({
+          appendEntry: (customType, data) => {
+            pi.appendEntry(customType, data);
+          },
+          sessionId: () => safe(() => ctx?.sessionManager.getSessionId(), undefined),
+          now,
+          setTimer: (ms, fn) => {
+            const t = setTimeout(fn, ms);
+            t.unref();
+            return { cancel: () => clearTimeout(t) };
+          },
+          ...(deps.secureRecheckForWrite !== undefined
+            ? { recheckForWrite: (c: ExtensionContext | undefined) => deps.secureRecheckForWrite?.(c ?? ctx) }
+            : {}),
+          onChange: () => {
+            safe(() => publishStatus(), undefined);
+          },
+        } satisfies CommandRecorderDeps)
+      : undefined;
   // web-hub-slash-args plan §4.3/§4.5 (P1): the /name␠ argument-completion engine + the S-tui
   // provider slot. Mode "off" builds nothing (no service, no TUI wrapper, no cap) — byte-
   // identical to the pre-feature agent. The TUI wrapper is registered once per activation,
@@ -815,6 +865,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     core: defaultResumeCore(),
   });
   const resumeExec = createResumeExec({
+    // web-hub-cmd-history plan §5.2 (A1): the /resume card's execution-point writer.
+    recorder: () => commandRecorder,
     sendUserMessage: (text, options) => {
       pi.sendUserMessage(text, options);
     },
@@ -837,9 +889,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
     now,
     capture: () => commandCapture,
+    recorder: () => commandRecorder,
     overrides: () => deps.settings.webCommandPolicy,
     sendLate: (frame, result) => bridgeLate.current?.(frame, result),
-    armExec: (op) => (op === "new" ? execGate.armNew() : undefined),
+    // B2 (verify 2026-10-24): the second parameter IS the web frame's cmdId — without it
+    // `consumeNew` hands internalExec `cmdId: undefined` and the /new card never lands.
+    armExec: (op, cmdId) => (op === "new" ? execGate.armNew(cmdId) : undefined),
     resume: (frame, cmd, bridgeCtx) => {
       const first = cmd.args.trim().split(/\s+/)[0];
       return first === "__list" ? resumeList.list(frame, cmd) : resumeExec.pick(frame, cmd, bridgeCtx);
@@ -898,13 +953,22 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
    * only surface a guaranteed failure). Old agents never emit `features`, so a new UI against an
    *  old agent degrades to no intercept / no button (§2.8 row 1). */
   const resumeFeatures = (): string[] | undefined => {
-    if (settings.control === false || settings.webCommands === false) return undefined;
-    const pol = deps.settings.webCommandPolicy?.resume;
-    if (pol !== undefined && pol !== "allow") return undefined;
+    // web-resume plan §2.7 (HEAD semantics, B1 restore): `resume.v1` requires control ∧
+    // webCommands ∧ policy ∧ ctx ∧ a PERSISTED session (`getSessionFile()` defined) — entirely
+    // independent of the command recorder. web-hub-cmd-history plan §4.6 (A1) adds
+    // `cmd.history.v1` with its OWN gate (recorder wired ∧ the same persisted check — no
+    // control-plane conjuncts, the recorder records TUI invocations too). One getSessionFile
+    // read serves both. Order is frozen: [resume.v1?, cmd.history.v1?].
+    const tokens: string[] = [];
     const x = ctx;
-    if (x === undefined) return undefined;
-    const file = safe(() => x.sessionManager.getSessionFile(), undefined);
-    return file === undefined ? undefined : [RESUME_FEATURE_V1];
+    const file = x === undefined ? undefined : safe(() => x.sessionManager.getSessionFile(), undefined);
+    if (settings.control !== false && settings.webCommands !== false) {
+      const pol = deps.settings.webCommandPolicy?.resume;
+      if ((pol === undefined || pol === "allow") && x !== undefined && file !== undefined)
+        tokens.push(RESUME_FEATURE_V1);
+    }
+    if (commandRecorder !== undefined && file !== undefined) tokens.push(CMD_HISTORY_FEATURE_V1);
+    return tokens.length > 0 ? tokens : undefined;
   };
 
   const publishStatus = (): void => {
@@ -945,6 +1009,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (xsView !== undefined) s.xs = xsView;
       const inbox = xsBridge.inboxProjection();
       if (inbox !== undefined) s.xsInbox = inbox;
+    }
+    // web-hub-cmd-history plan §4.6 (A1): open command records, ≤16 newest first — present only
+    // while non-empty (StatusInfoSchema is open; an old hub forwards, an old UI ignores).
+    if (commandRecorder !== undefined) {
+      const running = commandRecorder.running();
+      if (running.length > 0) s.cmdRunning = running;
     }
     c.setSlot("status", { t: "status", ...s }, xsBridge?.slotFlush);
   };
@@ -1691,6 +1761,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // returned; the NEXT activation's `onSessionStart`/`adopt` is the defensive backstop).
     holdDriver?.onSessionShutdown(reasonOf(event));
     commandHandler.onSessionBoundary();
+    // web-hub-cmd-history plan §4.3 (A1): close every open record (timers cancelled, nothing
+    // further written) at the same session boundary the capture engine closes its windows.
+    safe(() => commandRecorder?.dispose(), undefined);
     // fix (2026-10-22): close every capture window and fire its pending finish listener
     // ("timeout", settle-anyway) — an async web command still awaiting its handler Promise gets
     // its late settle NOW (whatever output was collected) instead of dangling until the window's
@@ -2077,6 +2150,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // what makes this a zero-visible-change addition: every existing command still runs
     // byte-identically once the ref is actually populated.
     capture: commandCapture,
+    ...(commandRecorder !== undefined ? { recorder: commandRecorder } : {}),
     internalExec: async (args, ctx) => {
       const parts = args
         .trim()
@@ -2085,12 +2159,55 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       const op = parts[0];
       const nonce = parts[1];
       if (op === "new") {
-        if (nonce === undefined || !execGate.consumeNew(nonce)) {
+        const consumed = nonce === undefined ? { ok: false as const } : execGate.consumeNew(nonce);
+        if (!consumed.ok) {
           return { ok: false, code: "E_UNSUPPORTED" };
         }
+        // web-hub-cmd-history plan §5.2 (A1): the /new card is written HERE — after the nonce
+        // consumed (the dispatch was real) and BEFORE ctx.newSession() flips the session (the
+        // leave-interception semantics, applied at the builtin's own execution point). A
+        // cancelled/failed switch gets a second end{failed} under the same cmdId (the session
+        // never left, so the recorder's session guard still passes).
+        const cmdId = consumed.cmdId;
+        if (commandRecorder !== undefined && cmdId !== undefined) {
+          commandRecorder.recordImmediate({
+            cmdId,
+            name: "new",
+            args: "",
+            source: "web",
+            startedAt: now(),
+            state: "done",
+            notice: "left-session",
+            output: {
+              entries: [{ kind: "notify", level: "info", text: "已新建会话并切换过去（之后的对话在新会话中）" }],
+            },
+          });
+        }
         try {
-          await (ctx as ExtensionCommandContext).newSession();
-        } catch {
+          const rc = (await (ctx as ExtensionCommandContext).newSession()) as { cancelled?: boolean } | undefined;
+          if (rc?.cancelled === true && commandRecorder !== undefined && cmdId !== undefined) {
+            commandRecorder.recordImmediate({
+              cmdId,
+              name: "new",
+              args: "",
+              source: "web",
+              startedAt: now(),
+              state: "failed",
+              error: "新建会话被取消",
+            });
+          }
+        } catch (error) {
+          if (commandRecorder !== undefined && cmdId !== undefined) {
+            commandRecorder.recordImmediate({
+              cmdId,
+              name: "new",
+              args: "",
+              source: "web",
+              startedAt: now(),
+              state: "failed",
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
           return { ok: false, code: "E_UNSUPPORTED" };
         }
         return { ok: true };
@@ -2162,6 +2279,19 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           hubCaps: conn !== undefined && conn.status().state === "live" ? conn.caps : undefined,
         }),
       levelOf: cmdArgsStatusLevel,
+    },
+    // web-hub-cmd-history plan §4.9 (A1): the cmd-history status line — ALWAYS present (the
+    // `cmd-args` posture: `cmd-history: off` is itself operator-visible confirmation), reading
+    // the LIVE link's caps ("n/a" while disconnected) and the recorder's write counters (all
+    // zero while off — no recorder was built).
+    cmdHistory: {
+      statusLines: () =>
+        formatCmdHistoryStatusLines({
+          enabled: settings.cmdHistory !== false,
+          hubCaps: conn !== undefined && conn.status().state === "live" ? conn.caps : undefined,
+          counters: commandRecorder?.counters() ?? { appended: 0, skipped: 0, failed: 0 },
+        }),
+      levelOf: cmdHistoryStatusLevel,
     },
   };
 }

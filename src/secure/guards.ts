@@ -235,6 +235,16 @@ export interface SecureGuardOptions {
 export interface SecureGuardWiring {
   /** Current runtime LOCKED reason (main session), or the frozen locked reason. */
   lockedReason(): string | undefined;
+  /**
+   * web-hub-cmd-history plan §4.3/§5.4 (M1, A1; freeze F6): READ-ONLY pre-write query for the
+   * command recorder — extension commands bypass the `input` event, so LOCKED does not stop
+   * them and the recorder must not append session entries onto a possibly-unmounted vault.
+   * Runs the SAME mount recheck a `tool_call`/`input` would (one bounded /proc read; a vanished
+   * mount enters LOCKED here exactly like those paths, notifying through the given ctx when
+   * available), then returns `lockedReason()`. Never blocks, never throws; `lockedReason()`
+   * itself is unchanged. No ctx ⇒ no recheck, just the current verdict.
+   */
+  recheckForWrite(ctx?: GuardCtx): string | undefined;
 }
 
 /** True when the guards have anything to do for this verdict (plain with no vaults ⇒ zero wiring). */
@@ -369,7 +379,17 @@ export function wireSecureGuards(pi: SecureGuardPi, opts: SecureGuardOptions): S
     });
   }
 
-  return { lockedReason };
+  return {
+    lockedReason,
+    recheckForWrite(ctx) {
+      try {
+        if (ctx !== undefined) recheckMount(ctx);
+      } catch {
+        /* a read-only query must never throw into the caller */
+      }
+      return lockedReason();
+    },
+  };
 }
 
 /** R9: a linked worktree / external `.git` writes objects outside the vault. One bounded git call. */

@@ -659,3 +659,409 @@ describe("execute — /fabric web surface (2026-10-22 ruling: policy-gated, not 
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// web-hub-cmd-history plan §5.2/§4.6 (A1) — bridge-side recording: the builtin card table,
+// noteIntent, the terminal-only placeholder, the `history` open field, and the M3 freeze
+// (bridge return values / sendLate sequence unchanged modulo the new `history` field).
+// ---------------------------------------------------------------------------
+
+/** Recording fake: captures every recorder call the bridge makes. */
+function recRecorder(policy = "record") {
+  const calls: {
+    intents: Array<Record<string, unknown>>;
+    externals: Array<Record<string, unknown>>;
+    immediates: Array<Record<string, unknown>>;
+  } = { intents: [], externals: [], immediates: [] };
+  const handles = new Map<string, { settle: (o: { error?: unknown; failed?: string }) => void }>();
+  const recorder = {
+    policyFor: () => policy,
+    noteIntent: (i: Record<string, unknown>) => calls.intents.push(i),
+    begin: () => undefined,
+    beginExternal: (i: Record<string, unknown> & { cmdId: string }) => {
+      calls.externals.push(i);
+      const h = {
+        cmdId: i.cmdId,
+        sink: () => undefined,
+        commitBeforeLeave: () => undefined,
+        afterLeaveCancelled: () => undefined,
+        settle: (o: { error?: unknown; failed?: string }) => {
+          calls.immediates.push({ kind: "settle", cmdId: i.cmdId, outcome: o });
+        },
+      };
+      handles.set(i.cmdId, h);
+      return h;
+    },
+    recordImmediate: (r: Record<string, unknown>) => calls.immediates.push({ kind: "immediate", ...r }),
+    running: () => [],
+    counters: () => ({ appended: 0, skipped: 0, failed: 0 }),
+    dispose: () => undefined,
+  };
+  return { recorder: recorder as never, calls };
+}
+
+describe("execute — cmd-history: builtin cards at the real settlement point (§5.2 F5)", () => {
+  it("/session: recordImmediate(done) carrying the same session text as the reply", () => {
+    const { ctx } = fakeCtx({ sessionId: "sess-9" });
+    const rec = recRecorder();
+    const bridge = createBuiltinBridge(baseDeps({ getCtx: () => ctx, recorder: () => rec.recorder }));
+    const result = bridge.execute(frame("session", "")) as { data: { output?: CommandOutputWire; history?: string } };
+    expect(result.data.history).toBe("recorded");
+    expect(rec.calls.immediates).toHaveLength(1);
+    const r = rec.calls.immediates[0]!;
+    expect(r.kind).toBe("immediate");
+    expect(r).toMatchObject({ cmdId: "cmd-0000000000000001", name: "session", source: "web", state: "done" });
+    const replyText = result.data.output?.entries[0]?.text;
+    expect((r as { output?: CommandOutputWire }).output?.entries[0]?.text).toBe(replyText);
+  });
+
+  it("/name: recorded only after setSessionName succeeds, body 会话名称：<x>", () => {
+    const { pi } = fakePi();
+    const rec = recRecorder();
+    const bridge = createBuiltinBridge(baseDeps({ pi, recorder: () => rec.recorder }));
+    bridge.execute(frame("name", "Renamed"));
+    expect(rec.calls.immediates).toHaveLength(1);
+    expect(rec.calls.immediates[0]).toMatchObject({ name: "name", state: "done" });
+    expect((rec.calls.immediates[0] as { output?: CommandOutputWire }).output?.entries[0]).toMatchObject({
+      kind: "notify",
+      text: "会话名称：Renamed",
+    });
+  });
+
+  it("/name with a throwing setSessionName ⇒ E_STALE_CTX and NO record (effect none)", () => {
+    const pi = {
+      getCommands: () => [],
+      setSessionName: () => {
+        throw new Error("stale");
+      },
+    };
+    const rec = recRecorder();
+    const bridge = createBuiltinBridge(baseDeps({ pi: pi as never, recorder: () => rec.recorder }));
+    expect(bridge.execute(frame("name", "x"))).toMatchObject({ ok: false, code: "E_STALE_CTX" });
+    expect(rec.calls.immediates).toHaveLength(0);
+  });
+
+  it("/thinking: recorded after success, body 思考等级：<lv>", () => {
+    const { pi } = fakePi();
+    const rec = recRecorder();
+    const bridge = createBuiltinBridge(baseDeps({ pi, recorder: () => rec.recorder }));
+    bridge.execute(frame("thinking", "high"));
+    expect((rec.calls.immediates[0] as { output?: CommandOutputWire }).output?.entries[0]).toMatchObject({
+      kind: "notify",
+      text: "思考等级：high",
+    });
+  });
+
+  it("/model: beginExternal(lazyStart:true) in the same sync block — before the Promise can settle; an effect-none sync throw leaves NO record", async () => {
+    const model = { provider: "anthropic", id: "claude" };
+    const { ctx } = fakeCtx({ findModel: () => model });
+    const rec = recRecorder();
+    let release: (v: boolean) => void = () => {};
+    const pi = {
+      getCommands: () => [],
+      setModel: () => new Promise<boolean>((res) => (release = res)),
+    };
+    const bridge = createBuiltinBridge(baseDeps({ pi: pi as never, getCtx: () => ctx, recorder: () => rec.recorder }));
+    const result = bridge.execute(frame("model", "anthropic/claude")) as { data: { history?: string } };
+    expect(result.data.history).toBe("recorded");
+    // the record opened in the SAME synchronous block (§5.2 "于 setModel 调用前" — the lazy
+    // timer starts before any settlement can run; the sync-throw gate keeps effect-none refusals
+    // record-free), and the observer settle rides the resolution below.
+    expect(rec.calls.externals[0]).toMatchObject({
+      cmdId: "cmd-0000000000000001",
+      name: "model",
+      args: "anthropic/claude",
+      source: "web",
+      lazyStart: true,
+    });
+    release(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    const settle = rec.calls.immediates.find((i) => i.kind === "settle");
+    expect(settle).toBeDefined();
+    expect(settle).toMatchObject({ cmdId: "cmd-0000000000000001", outcome: {} });
+    // effect-none: a synchronous setModel throw never opens a record
+    const rec2 = recRecorder();
+    const pi2 = {
+      getCommands: () => [],
+      setModel: () => {
+        throw new Error("stale");
+      },
+    };
+    const bridge2 = createBuiltinBridge(
+      baseDeps({ pi: pi2 as never, getCtx: () => ctx, recorder: () => rec2.recorder }),
+    );
+    expect(bridge2.execute(frame("model", "anthropic/claude"))).toMatchObject({ ok: false, code: "E_STALE_CTX" });
+    expect(rec2.calls.externals).toHaveLength(0);
+  });
+
+  it("/model auth rejection ⇒ settle failed with the fixed message (record, not the reply)", async () => {
+    const model = { provider: "anthropic", id: "claude" };
+    const { ctx } = fakeCtx({ findModel: () => model });
+    const rec = recRecorder();
+    const pi = { getCommands: () => [], setModel: () => Promise.resolve(false) };
+    const bridge = createBuiltinBridge(baseDeps({ pi: pi as never, getCtx: () => ctx, recorder: () => rec.recorder }));
+    bridge.execute(frame("model", "anthropic/claude"));
+    await Promise.resolve();
+    await Promise.resolve();
+    const settle = rec.calls.immediates.find((i) => i.kind === "settle");
+    expect(settle).toMatchObject({ outcome: { failed: "authentication not configured for that model" } });
+  });
+
+  it("/model promise rejection ⇒ settle failed with the rejection message", async () => {
+    const model = { provider: "anthropic", id: "claude" };
+    const { ctx } = fakeCtx({ findModel: () => model });
+    const rec = recRecorder();
+    const pi = { getCommands: () => [], setModel: () => Promise.reject(new Error("net down")) };
+    const bridge = createBuiltinBridge(baseDeps({ pi: pi as never, getCtx: () => ctx, recorder: () => rec.recorder }));
+    bridge.execute(frame("model", "anthropic/claude"));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const settle = rec.calls.immediates.find((i) => i.kind === "settle");
+    expect(settle).toMatchObject({ outcome: { failed: "net down" } });
+  });
+
+  it("/model: the sendLate .then chain is unchanged — async reply first, one late with the auth error", async () => {
+    const model = { provider: "anthropic", id: "claude" };
+    const { ctx } = fakeCtx({ findModel: () => model });
+    const rec = recRecorder();
+    const { pi } = fakePi({ setModelResult: false });
+    const sendLate = vi.fn();
+    const bridge = createBuiltinBridge(
+      baseDeps({ pi: pi as never, getCtx: () => ctx, sendLate, recorder: () => rec.recorder }),
+    );
+    const sync = bridge.execute(frame("model", "anthropic/claude")) as { data: Record<string, unknown> };
+    expect(sync.data).toEqual({ op: "command", kind: "builtin", completion: "async", history: "recorded" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sendLate).toHaveBeenCalledTimes(1);
+    // error bodies carry no CmdData (pre-feature shape, untouched); `history` rides ok lates only
+    expect(sendLate.mock.calls[0]![1]).toEqual({
+      ok: false,
+      code: "E_SUBAGENT_REJECTED",
+      retryable: false,
+      effect: "none",
+      message: "authentication not configured for that model",
+    });
+  });
+
+  it("/compact: beginExternal(lazyStart:false), NO start entry ever; onComplete ⇒ settle done; onError ⇒ failed with message", async () => {
+    const rec = recRecorder();
+    const { ctx } = fakeCtx({
+      compact: (o) => {
+        queueMicrotask(() => o.onError?.(new Error("compact blew up")));
+      },
+    });
+    const bridge = createBuiltinBridge(baseDeps({ getCtx: () => ctx, recorder: () => rec.recorder }));
+    bridge.execute(frame("compact", ""));
+    expect(rec.calls.externals[0]).toMatchObject({ name: "compact", lazyStart: false });
+    await new Promise((r) => setTimeout(r, 0));
+    const settle = rec.calls.immediates.find((i) => i.kind === "settle");
+    expect(settle).toMatchObject({ outcome: { failed: "compact blew up" } });
+  });
+
+  it("/compact with recorder but NO sendLate: recording-only callbacks are passed to ctx.compact", async () => {
+    const rec = recRecorder();
+    const { ctx } = fakeCtx({ compact: (o) => queueMicrotask(() => o.onComplete?.()) });
+    const bridge = createBuiltinBridge(baseDeps({ getCtx: () => ctx, recorder: () => rec.recorder }));
+    const result = bridge.execute(frame("compact", "instruction-x")) as { data: Record<string, unknown> };
+    expect(result.data).toEqual({ op: "command", kind: "builtin", completion: "unknown", history: "recorded" });
+    await new Promise((r) => setTimeout(r, 0));
+    const settle = rec.calls.immediates.find((i) => i.kind === "settle");
+    expect(settle).toMatchObject({ outcome: {} });
+  });
+
+  it("/new: armExec receives the frame id; ok reply carries history recorded", () => {
+    const { pi } = fakePi();
+    const rec = recRecorder();
+    const armExec = vi.fn((op: string) => `armed-${op}`);
+    const bridge = createBuiltinBridge(baseDeps({ pi, armExec, recorder: () => rec.recorder }));
+    const result = bridge.execute(frame("new", "", {}, true)) as { data: { history?: string } };
+    expect(result.data.history).toBe("recorded");
+    expect(armExec).toHaveBeenCalledWith("new", "cmd-0000000000000001");
+    // the /new CARD itself is written at the internalExec execution point (index.ts), not here
+    expect(rec.calls.immediates).toHaveLength(0);
+  });
+
+  it("/reload: noteIntent(match /agent reload, display reload) BEFORE dispatch; reply carries history", () => {
+    const { pi, sent } = fakePi({ commands: [{ name: "agent", source: "extension" }] });
+    const rec = recRecorder();
+    const bridge = createBuiltinBridge(baseDeps({ pi, recorder: () => rec.recorder }));
+    const result = bridge.execute(frame("reload", "", {}, true)) as { data: { history?: string } };
+    expect(result.data.history).toBe("recorded");
+    expect(rec.calls.intents).toEqual([
+      {
+        cmdId: "cmd-0000000000000001",
+        source: "web",
+        sessionId: "sess-1",
+        at: 1000,
+        match: { name: "agent", args: "reload" },
+        display: { name: "reload", args: "" },
+      },
+    ]);
+    expect(sent[0]?.text).toBe("/agent reload");
+  });
+
+  it("resume __list ⇒ history none; no recorder call", async () => {
+    const rec = recRecorder();
+    const resume = vi.fn(() => ({
+      ok: true,
+      data: { op: "command", kind: "builtin", completion: "sync", sessions: { total: 0, items: [] } },
+    }));
+    const bridge = createBuiltinBridge(baseDeps({ recorder: () => rec.recorder, resume: resume as never }));
+    const r = (await bridge.execute(frame("resume", '__list {"scope":"all"}'))) as { data: Record<string, unknown> };
+    expect(r.data.history).toBe("none");
+    expect(rec.calls.immediates).toHaveLength(0);
+  });
+});
+
+describe("execute — cmd-history: extension dispatch recording (G7 intents, Q4 placeholder)", () => {
+  it("owned extension ⇒ noteIntent(source web, cmdId = frame id) before sendUserMessage; history recorded", () => {
+    const { pi, sent } = fakePi({ commands: [{ name: "agent", source: "extension" }] });
+    const capture = fakeCapture({ owns: () => true, output: () => ({ entries: [] }) });
+    const rec = recRecorder();
+    const bridge = createBuiltinBridge(
+      baseDeps({ pi, capture: () => capture, recorder: () => rec.recorder, now: () => 4242 }),
+    );
+    const result = bridge.execute(frame("agent", "status")) as { data: { history?: string } };
+    expect(result.data.history).toBe("recorded");
+    expect(rec.calls.intents).toEqual([
+      {
+        cmdId: "cmd-0000000000000001",
+        source: "web",
+        sessionId: "sess-1",
+        at: 4242,
+        match: { name: "agent", args: "status" },
+      },
+    ]);
+    expect(sent[0]?.text).toBe("/agent status");
+  });
+
+  it("a feishu-origin frame notes the intent with source feishu", () => {
+    const { pi } = fakePi({ commands: [{ name: "agent", source: "extension" }] });
+    const capture = fakeCapture({ owns: () => true, output: () => ({ entries: [] }) });
+    const rec = recRecorder();
+    const bridge = createBuiltinBridge(baseDeps({ pi, capture: () => capture, recorder: () => rec.recorder }));
+    bridge.execute(
+      frame("agent", "status", { origin: { listener: "lan", ip: "feishu", user: "feishu:ou_1", reqId: "r2" } }),
+    );
+    expect(rec.calls.intents[0]).toMatchObject({ source: "feishu" });
+  });
+
+  it("skip-policy owned extension (agent reload fire) ⇒ history none, intent still noted", () => {
+    const { pi } = fakePi({ commands: [{ name: "agent", source: "extension" }] });
+    const capture = fakeCapture({ owns: () => true, output: () => ({ entries: [] }) });
+    const rec = recRecorder("skip");
+    const bridge = createBuiltinBridge(baseDeps({ pi, capture: () => capture, recorder: () => rec.recorder }));
+    const result = bridge.execute(frame("agent", "reload fire", {}, true)) as { data: { history?: string } };
+    expect(result.data.history).toBe("none");
+    expect(rec.calls.intents).toHaveLength(1);
+  });
+
+  it("third-party extension ⇒ terminal-only recordImmediate + history recorded (Q4)", () => {
+    const { pi } = fakePi({ commands: [{ name: "third-party", source: "extension" }] });
+    const rec = recRecorder();
+    const bridge = createBuiltinBridge(baseDeps({ pi, recorder: () => rec.recorder, now: () => 777 }));
+    const result = bridge.execute(frame("third-party", "go", {}, true)) as { data: { history?: string } };
+    expect(result.data.history).toBe("recorded");
+    expect(rec.calls.immediates).toEqual([
+      {
+        kind: "immediate",
+        cmdId: "cmd-0000000000000001",
+        name: "third-party",
+        args: "go",
+        source: "web",
+        startedAt: 777,
+        state: "done",
+        notice: "terminal-only",
+      },
+    ]);
+  });
+
+  it("third-party dispatch that throws sendUserMessage ⇒ no record (effect none)", () => {
+    const { pi } = fakePi({ commands: [{ name: "third-party", source: "extension" }], throwOnSend: true });
+    const rec = recRecorder();
+    const bridge = createBuiltinBridge(baseDeps({ pi, recorder: () => rec.recorder }));
+    expect(bridge.execute(frame("third-party", "go", {}, true))).toMatchObject({ ok: false, code: "E_STALE_CTX" });
+    expect(rec.calls.immediates).toHaveLength(0);
+  });
+
+  it("async-late (open window) reply carries history too (m2: late channels)", async () => {
+    const model = { provider: "anthropic", id: "claude" };
+    void model;
+    const { pi } = fakePi({ commands: [{ name: "agent", source: "extension" }] });
+    const late: CommandOutputWire = { entries: [{ kind: "notify", text: "late out", level: "info" }] };
+    const listeners = new Map<string, (r: "settled" | "timeout") => void>();
+    const capture: CommandCapturePort = {
+      arm() {},
+      take: () => undefined,
+      settleArm() {},
+      finish() {},
+      owns: () => true,
+      output: () => ({ entries: [] }),
+      isActive: (id) => id === "cmd-0000000000000001",
+      onFinish: (id, l) => listeners.set(id, l),
+      outputFor: () => late,
+    };
+    const rec = recRecorder();
+    const sendLate = vi.fn();
+    const bridge = createBuiltinBridge(
+      baseDeps({ pi, capture: () => capture, recorder: () => rec.recorder, sendLate }),
+    );
+    const result = bridge.execute(frame("agent", "status")) as { data: { history?: string } };
+    expect(result.data).toMatchObject({ completion: "async" });
+    expect(result.data.history).toBe("recorded");
+    listeners.get("cmd-0000000000000001")!("settled");
+    expect(sendLate).toHaveBeenCalledTimes(1);
+    const lateBody = sendLate.mock.calls[0]![1] as { data: { output?: CommandOutputWire; history?: string } };
+    expect(lateBody.data.output).toBe(late);
+    expect(lateBody.data.history).toBe("recorded");
+  });
+});
+
+describe("execute — cmd-history: M3 freeze (recorder unwired ⇒ byte-identical replies)", () => {
+  /** Strip the `history` field from a result for comparison against the pre-feature shape. */
+  const strip = (r: unknown): unknown => {
+    const body = r as { data?: Record<string, unknown> };
+    if (body?.data !== undefined && "history" in body.data) {
+      const { history, ...rest } = body.data;
+      void history;
+      return { ...body, data: rest };
+    }
+    return r;
+  };
+
+  it("every builtin/extension reply equals the pre-feature shape once `history` is stripped", () => {
+    const model = { provider: "anthropic", id: "claude" };
+    const { ctx } = fakeCtx({ findModel: () => model, sessionId: "sess-9", sessionName: "n" });
+    const { pi } = fakePi({ commands: [{ name: "agent", source: "extension" }] });
+    const capture = fakeCapture({ owns: () => true, output: () => ({ entries: [] }) });
+    const rec = recRecorder();
+    const sendLate = vi.fn();
+    const mk = (recorder?: () => unknown) =>
+      createBuiltinBridge(
+        baseDeps({
+          pi: pi as never,
+          getCtx: () => ctx,
+          capture: () => capture,
+          sendLate,
+          ...(recorder !== undefined ? { recorder: recorder as never } : {}),
+        }),
+      );
+    for (const [name, args, confirm] of [
+      ["session", "", undefined],
+      ["name", "N", undefined],
+      ["thinking", "high", undefined],
+      ["model", "anthropic/claude", undefined],
+      ["compact", "", undefined],
+      ["new", "", true],
+      ["reload", "", true],
+      ["agent", "status", undefined],
+    ] as const) {
+      const without = strip(mk().execute(frame(name, args, {}, confirm)));
+      const withRec = strip(mk(() => rec.recorder).execute(frame(name, args, {}, confirm)));
+      expect(withRec, name).toEqual(without);
+    }
+  });
+});

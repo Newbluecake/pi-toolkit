@@ -5,6 +5,7 @@ import type {
   RegisteredCommand,
 } from "@earendil-works/pi-coding-agent";
 import type { ArgCompleter } from "./command-complete.js";
+import type { CommandRecorder as CommandRecorderLike, RecordHandle } from "./command-record.js";
 import {
   isFeishuCmdOrigin,
   type CmdOrigin,
@@ -390,53 +391,78 @@ function collectEntry(capture: InternalCapture, cmdId: string, entry: CommandOut
  * `pasteToEditor` are dropped entirely (never forwarded, never overwrite a real terminal draft).
  * Everything else (`theme`, `setTitle`, `setWorkingMessage`, `setFooter`, …) delegates untouched.
  */
-function createCapturedUi(ui: ExtensionUIContext, capture: InternalCapture, cmdId: string): ExtensionUIContext {
+function createCapturedUi(
+  ui: ExtensionUIContext,
+  capture: InternalCapture,
+  cmdId: string,
+  sink?: (entry: CommandOutputEntry) => void,
+): ExtensionUIContext {
   const collect = (entry: CommandOutputEntry): void => collectEntry(capture, cmdId, entry);
   return new Proxy(ui, {
     get(target, property) {
       switch (property) {
         case "notify":
           return (message: string, type?: "info" | "warning" | "error") => {
-            collect({ kind: "notify", level: type ?? "info", text: message });
+            const entry: CommandOutputEntry = { kind: "notify", level: type ?? "info", text: message };
+            collect(entry);
+            sink?.(entry);
             return Reflect.apply(target.notify, target, [message, type]);
           };
         case "setWidget":
           return (key: string, content: unknown, options?: unknown) => {
             if (content !== undefined) {
-              if (Array.isArray(content)) collect({ kind: "widget", key, text: content.join("\n") });
-              else collect({ kind: "widget", key, text: "(rendered in terminal)" });
+              const text = Array.isArray(content) ? content.join("\n") : "(rendered in terminal)";
+              const entry: CommandOutputEntry = { kind: "widget", key, text };
+              collect(entry);
+              sink?.(entry);
             }
             return Reflect.apply(target.setWidget, target, [key, content, options]);
           };
         case "setStatus":
           return (key: string, text: string | undefined) => {
-            if (text !== undefined) collect({ kind: "status", key, text });
+            if (text !== undefined) {
+              const entry: CommandOutputEntry = { kind: "status", key, text };
+              collect(entry);
+              sink?.(entry);
+            }
             return Reflect.apply(target.setStatus, target, [key, text]);
           };
         case "editor":
           return async (title: string, prefill?: string) => {
             collect({ kind: "text", title, text: prefill ?? "" });
+            // web-hub-cmd-history §4.4: the PERSISTED record keeps the prefill out (a draft or a
+            // secret) — the live web window above still receives it exactly as today.
+            sink?.({ kind: "text", title, text: "(编辑器内容未记录)" });
             collect({ kind: "interactive", text: "editor" });
+            sink?.({ kind: "interactive", text: "editor" });
             return undefined;
           };
         case "select":
           return async (title: string) => {
-            collect({ kind: "interactive", title, text: "select" });
+            const entry: CommandOutputEntry = { kind: "interactive", title, text: "select" };
+            collect(entry);
+            sink?.(entry);
             return undefined;
           };
         case "input":
           return async (title: string) => {
-            collect({ kind: "interactive", title, text: "input" });
+            const entry: CommandOutputEntry = { kind: "interactive", title, text: "input" };
+            collect(entry);
+            sink?.(entry);
             return undefined;
           };
         case "confirm":
           return async (title: string) => {
-            collect({ kind: "interactive", title, text: "confirm" });
+            const entry: CommandOutputEntry = { kind: "interactive", title, text: "confirm" };
+            collect(entry);
+            sink?.(entry);
             return false;
           };
         case "custom":
           return async () => {
-            collect({ kind: "interactive", text: "custom" });
+            const entry: CommandOutputEntry = { kind: "interactive", text: "custom" };
+            collect(entry);
+            sink?.(entry);
             return undefined;
           };
         case "setEditorText":
@@ -469,6 +495,7 @@ function createCapturedCtx(
   capture: InternalCapture,
   cmdId: string,
   origin?: CmdOrigin,
+  handle?: RecordHandle,
 ): ExtensionCommandContext {
   const feishu = origin !== undefined && isFeishuCmdOrigin(origin);
   return new Proxy(ctx, {
@@ -476,9 +503,162 @@ function createCapturedCtx(
       if (property === "webInvocation") return true;
       if (property === "feishuInvocation" && feishu) return true;
       if (property === "ui")
-        return createCapturedUi(Reflect.get(target, "ui", target) as ExtensionUIContext, capture, cmdId);
+        return createCapturedUi(
+          Reflect.get(target, "ui", target) as ExtensionUIContext,
+          capture,
+          cmdId,
+          handle?.sink.bind(handle),
+        );
       const value = Reflect.get(target, property, target);
-      return typeof value === "function" ? value.bind(target) : value;
+      if (typeof value !== "function") return value;
+      const leave = leaveKindOf(property);
+      if (leave !== undefined && handle !== undefined) return leaveIntercepted(target, leave, value, handle);
+      return value.bind(target);
+    },
+  }) as ExtensionCommandContext;
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-cmd-history plan §4.4 (A1) — observe mode + session-leave interception
+// ---------------------------------------------------------------------------
+
+/** The four ctx methods whose call means "this command is leaving the current session". */
+function leaveKindOf(property: string | symbol): "new" | "fork" | "switch" | "reload" | undefined {
+  switch (property) {
+    case "newSession":
+      return "new";
+    case "fork":
+      return "fork";
+    case "switchSession":
+      return "switch";
+    case "reload":
+      return "reload";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * §4.4 leave interception (both capture modes): commit the record's end BEFORE the call (the
+ * session is about to be replaced — an appendEntry after the switch would land in the NEW
+ * session or hit a stale ctx), forward with the SAME arguments, return the ORIGINAL Promise
+ * object, and attach a separate error-swallowing `.then` observer: `{cancelled:true}` or a
+ * rejection means the leave did NOT happen, so a second end{failed} corrects the first (the
+ * UI folds on the last end). The observer never mutates the forwarded promise.
+ */
+function leaveIntercepted(
+  target: ExtensionCommandContext,
+  kind: "new" | "fork" | "switch" | "reload",
+  value: (this: ExtensionCommandContext, ...args: unknown[]) => unknown,
+  handle: RecordHandle,
+): (...args: unknown[]) => unknown {
+  return function leaveForward(this: unknown, ...args: unknown[]) {
+    handle.commitBeforeLeave(kind);
+    const result = Reflect.apply(value, target, args) as unknown;
+    if (result !== null && typeof result === "object" && typeof (result as { then?: unknown }).then === "function") {
+      (result as Promise<{ cancelled?: boolean }>).then(
+        (r) => {
+          try {
+            if ((r as { cancelled?: boolean } | undefined)?.cancelled === true) handle.afterLeaveCancelled();
+          } catch {
+            /* never rethrow into pi */
+          }
+        },
+        (error: unknown) => {
+          try {
+            handle.afterLeaveCancelled(error instanceof Error ? error.message : String(error));
+          } catch {
+            /* never rethrow into pi */
+          }
+        },
+      );
+    }
+    return result;
+  };
+}
+
+/**
+ * §4.4 observe mode — the TUI capture proxy. Hard contract (zero display difference):
+ * ① every `ctx.ui.*` call forwards to the real UI with the SAME arguments and returns the
+ * ORIGINAL value — interactive methods return the very Promise object the real UI returned
+ * (never an `async` wrapper, which would allocate a new promise); ② side-channel bookkeeping
+ * only: notify/setWidget(string[])/setStatus entries, `"(rendered in terminal)"` for component
+ * factories, one `interactive` entry (title + method name) for confirm/select/input/editor/
+ * custom — NEVER the user's answers, input values, or the editor prefill; setEditorText/
+ * pasteToEditor forward untouched and record nothing; ③ no `webInvocation`/`feishuInvocation`
+ * synthesis — everything else delegates like `createCapturedCtx`; ④ the rest of ctx (including
+ * the leave methods) goes through the same leave interception as the claimed mode.
+ */
+function createObservedUi(ui: ExtensionUIContext, handle: RecordHandle): ExtensionUIContext {
+  const record = (entry: CommandOutputEntry): void => handle.sink(entry);
+  return new Proxy(ui, {
+    get(target, property) {
+      switch (property) {
+        case "notify":
+          return (message: string, type?: "info" | "warning" | "error") => {
+            record({ kind: "notify", level: type ?? "info", text: message });
+            return Reflect.apply(target.notify, target, [message, type]);
+          };
+        case "setWidget":
+          return (key: string, content: unknown, options?: unknown) => {
+            if (content !== undefined) {
+              record({
+                kind: "widget",
+                key,
+                text: Array.isArray(content) ? content.join("\n") : "(rendered in terminal)",
+              });
+            }
+            return Reflect.apply(target.setWidget, target, [key, content, options]);
+          };
+        case "setStatus":
+          return (key: string, text: string | undefined) => {
+            if (text !== undefined) record({ kind: "status", key, text });
+            return Reflect.apply(target.setStatus, target, [key, text]);
+          };
+        case "editor":
+          return (title: string, prefill?: string) => {
+            record({ kind: "interactive", title, text: "editor" });
+            return Reflect.apply(target.editor, target, [title, prefill]);
+          };
+        case "select":
+          return (title: string) => {
+            record({ kind: "interactive", title, text: "select" });
+            return Reflect.apply(target.select, target, [title]);
+          };
+        case "input":
+          return (title: string) => {
+            record({ kind: "interactive", title, text: "input" });
+            return Reflect.apply(target.input, target, [title]);
+          };
+        case "confirm":
+          return (title: string) => {
+            record({ kind: "interactive", title, text: "confirm" });
+            return Reflect.apply(target.confirm, target, [title]);
+          };
+        case "custom":
+          return (...args: unknown[]) => {
+            record({ kind: "interactive", text: "custom" });
+            return Reflect.apply(target.custom, target, args);
+          };
+        default: {
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      }
+    },
+  }) as ExtensionUIContext;
+}
+
+/** §4.4 observe-mode ctx: `ui` re-derived per access, leave methods intercepted, no markers. */
+function createObservedCtx(ctx: ExtensionCommandContext, handle: RecordHandle): ExtensionCommandContext {
+  return new Proxy(ctx, {
+    get(target, property) {
+      if (property === "ui") return createObservedUi(Reflect.get(target, "ui", target) as ExtensionUIContext, handle);
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== "function") return value;
+      const leave = leaveKindOf(property);
+      if (leave !== undefined) return leaveIntercepted(target, leave, value, handle);
+      return value.bind(target);
     },
   }) as ExtensionCommandContext;
 }
@@ -487,23 +667,33 @@ function createCapturedCtx(
  * Promise actually settles (resolved or rejected) — not merely once it has been obtained — so the
  * collection window stays open for the handler's whole lifetime, matching "认领 → handler Promise
  * settle". Catches and records a thrown/rejected error as an `error` entry, then rethrows
- * unchanged (pi's own `emitError` path is untouched). */
-async function runCaptured(
+ * unchanged (pi's own `emitError` path is untouched).
+ *
+ * web-hub-cmd-history §4.4 (A1): the optional recorder handle observes the same lifecycle —
+ * the thrown error is sunk (a bypass `error` entry for the record) and `settle` runs in the
+ * same finally, once, AFTER the capture window closed. Neither touches the return value. */
+async function runRecorded(
   handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>,
   thisArg: unknown,
   args: string,
   ctxProxy: ExtensionCommandContext,
-  capture: InternalCapture,
-  cmdId: string,
+  capture: InternalCapture | undefined,
+  cmdId: string | undefined,
+  handle: RecordHandle | undefined,
 ): Promise<void> {
+  let thrown: { error: unknown } | undefined;
   try {
     return await Reflect.apply(handler, thisArg, [args, ctxProxy]);
   } catch (error) {
+    thrown = { error };
     const text = error instanceof Error ? error.message : String(error);
-    collectEntry(capture, cmdId, { kind: "error", text });
+    if (capture !== undefined && cmdId !== undefined) collectEntry(capture, cmdId, { kind: "error", text });
+    handle?.sink({ kind: "error", text });
     throw error;
   } finally {
-    capture.finish?.(cmdId);
+    if (capture !== undefined && cmdId !== undefined) capture.finish?.(cmdId);
+    if (handle !== undefined && thrown === undefined) handle.settle({});
+    else if (handle !== undefined) handle.settle({ error: thrown!.error });
   }
 }
 
@@ -532,6 +722,7 @@ export function wrapCommandApi<T extends ExtensionAPI>(
   getCapture: () => CommandCapturePort | undefined,
   ownedNames?: Set<string>,
   argCompleters?: Map<string, ArgCompleter>,
+  getRecorder?: () => CommandRecorderLike | undefined,
 ): T {
   return new Proxy(pi, {
     get(target, property) {
@@ -560,11 +751,34 @@ export function wrapCommandApi<T extends ExtensionAPI>(
           ...command,
           handler: function (this: unknown, args: string, ctx: ExtensionCommandContext) {
             const capture = getCapture() as InternalCapture | undefined;
-            if (capture === undefined) return Reflect.apply(handler, this, [args, ctx]);
-            const invocation = capture.take(name, args);
-            if (invocation === undefined) return Reflect.apply(handler, this, [args, ctx]);
-            const ctxProxy = createCapturedCtx(ctx, capture, invocation.cmdId, invocation.origin);
-            return runCaptured(handler, this, args, ctxProxy, capture, invocation.cmdId);
+            // web-hub-cmd-history §4.4 (A1): the recorder is looked up fresh per invocation
+            // (same discipline as getCapture — never a wrap-time snapshot). With NEITHER a
+            // capture NOR a recorder the handler runs byte-identically to the unwrapped pi.
+            const recorder = getRecorder?.();
+            if (capture === undefined && recorder === undefined) return Reflect.apply(handler, this, [args, ctx]);
+            const invocation = capture?.take(name, args);
+            const handle =
+              recorder === undefined
+                ? undefined
+                : recorder.begin({
+                    name,
+                    args,
+                    ctx,
+                    ...(invocation !== undefined
+                      ? {
+                          claimed: {
+                            cmdId: invocation.cmdId,
+                            source: isFeishuCmdOrigin(invocation.origin) ? ("feishu" as const) : ("web" as const),
+                          },
+                        }
+                      : {}),
+                  });
+            if (invocation === undefined && handle === undefined) return Reflect.apply(handler, this, [args, ctx]);
+            const ctxProxy =
+              invocation !== undefined && capture !== undefined
+                ? createCapturedCtx(ctx, capture, invocation.cmdId, invocation.origin, handle)
+                : createObservedCtx(ctx, handle!);
+            return runRecorded(handler, this, args, ctxProxy, capture, invocation?.cmdId, handle);
           },
         } as Omit<RegisteredCommand, "name" | "sourceInfo">;
         return Reflect.apply(register, target, [name, wrapped]);

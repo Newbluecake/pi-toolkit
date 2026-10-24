@@ -320,6 +320,13 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   // quota-web plan §2/D8: StatusInfo.quota availability — non-live like the rest of webHub.*
   // (change → /reload).
   "webHub.quota": bool("webHub.quota", "web-hub: subscription-quota pill/card in the top bar (default on)"),
+  // web-hub-cmd-history plan §4.9 (A1): command-output history cards in the session transcript.
+  // Non-live; change requires /reload. The description states the Q1 verbatim-persistence
+  // residual honestly (credentials printed by a command DO land in the session file, §5.3).
+  "webHub.cmdHistory": bool(
+    "webHub.cmdHistory",
+    "web-hub: persist command output as session history cards (default on; output is stored VERBATIM in the session file incl. any tokens it printed — /webhub sensitive subcommands record headers only; change: /reload)",
+  ),
   // web-hub archive plan (docs/dev/web-hub/archive-report.md): agent-side auto-archive knob —
   // non-live but does NOT need a hub restart (never read by buildHubConfig; /reload suffices).
   "webHub.archiveAfterMin": {

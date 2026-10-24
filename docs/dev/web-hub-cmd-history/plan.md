@@ -264,7 +264,9 @@ export interface CommandRecorder {
     source: "web";
     lazyStart: boolean;
   }): RecordHandle | undefined;
-  /** bridge 的同步记录（单条 end）：第三方 terminal-only、session/name/thinking、new、resume。 */
+  /** bridge 的同步记录（单条 end）：第三方 terminal-only、session/name/thinking、new、resume。
+   * 返回 boolean（A1 验收 m1 同步）：该 end 是否真的落盘 —— resume-exec 用它驱动 `ticket.recorded`
+   * （late `history` 字段：写成功 ⇒ "recorded"，检查失败/守卫跳过 ⇒ "none"）。 */
   recordImmediate(r: {
     cmdId: string;
     name: string;
@@ -275,7 +277,7 @@ export interface CommandRecorder {
     output?: CommandOutputWire;
     notice?: CmdRecordNotice;
     error?: string;
-  }): void;
+  }): boolean;
   running(): string[];
   counters(): { appended: number; skipped: number; failed: number };
   dispose(): void;

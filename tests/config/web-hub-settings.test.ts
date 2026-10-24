@@ -39,6 +39,7 @@ describe("web-hub settings", () => {
       webCommandPolicy: {},
       steerRecall: true,
       commandComplete: "all",
+      cmdHistory: true,
       uploads: "on",
       preview: "on",
       avatar: true,
@@ -133,6 +134,7 @@ describe("web-hub settings", () => {
       webCommandPolicy: {},
       steerRecall: true,
       commandComplete: "all",
+      cmdHistory: true,
       uploads: "on",
       preview: "on",
       avatar: true,
@@ -953,5 +955,15 @@ describe("webHub.archiveAfterMin (web-hub archive plan)", () => {
     expect(parseWebHubSettings({ archiveAfterMin: -5 }).archiveAfterMin).toBe(30);
     expect(parseWebHubSettings({ archiveAfterMin: "30" }).archiveAfterMin).toBe(30);
     expect(parseWebHubSettings({ archiveAfterMin: Number.NaN }).archiveAfterMin).toBe(30);
+  });
+});
+
+describe("webHub.cmdHistory (web-hub-cmd-history plan §4.9, A1)", () => {
+  it("defaults to true; parses false; any other value falls back to true (never throws)", () => {
+    expect(parseWebHubSettings(undefined).cmdHistory).toBe(true);
+    expect(parseWebHubSettings({ cmdHistory: false }).cmdHistory).toBe(false);
+    expect(parseWebHubSettings({ cmdHistory: true }).cmdHistory).toBe(true);
+    expect(parseWebHubSettings({ cmdHistory: "no" }).cmdHistory).toBe(true);
+    expect(parseWebHubSettings({ cmdHistory: 0 }).cmdHistory).toBe(true);
   });
 });

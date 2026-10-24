@@ -213,7 +213,12 @@ async function capture(config: Config): Promise<Capture> {
   writeFileSync(nodeLoader, "");
   pin.current = (deps) => ({
     ...deps,
-    settings: { ...SETTINGS, autoStart: true, nodeLoader },
+    // web-hub-cmd-history A1 (main-session ruling 2026-10-24, same disposition as the two
+    // golden-generating tests): this capture anchors on the FROZEN reply-off golden, and
+    // cmd-history is orthogonal to the channel surface — switched off so the fixture stays
+    // byte-stable (default-on behavior is pinned in fabric-xs-off-golden.test.ts and
+    // tests/web-hub/agent/wiring-resume.test.ts).
+    settings: { ...SETTINGS, autoStart: true, nodeLoader, cmdHistory: false },
     env: { HOME: home.home },
     paths: { ...pathsIn(home.home), stoppedFile: join(home.home, "stopped") },
     buildInfo: async () => ({ pluginVersion: "0.0.0-golden", buildId: "golden-build" }),

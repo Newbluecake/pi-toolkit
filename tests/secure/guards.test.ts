@@ -488,3 +488,57 @@ describe("D4 vs /proc/<pid>/root spellings (private-plan §6.1)", () => {
     expect(bashTouchesVault(cmd, d.vaults, v.home)?.vault.name).toBe("acme");
   });
 });
+
+/* ---------------------------------------------------------------------------------------- */
+
+describe("recheckForWrite (web-hub-cmd-history plan §4.3/§5.4 M1, A1 — read-only pre-write query)", () => {
+  it("secure + mounted ⇒ undefined (writable); a vanished mount enters LOCKED and returns the reason", async () => {
+    const { v, d } = secure();
+    let mountinfo = v.mounted;
+    const f = fakePi();
+    const w = wireSecureGuards(f.pi as never, {
+      domain: d,
+      isChildSession: false,
+      git: noGit,
+      readMountinfo: () => mountinfo,
+    });
+    const c = fakeCtx(v.work, join(v.sessions, "s.jsonl"), v.sessions);
+    await f.emit("session_start", {}, c.ctx);
+    expect(w.recheckForWrite(c.ctx)).toBeUndefined();
+    // `pi-secure lock` from another terminal — the recorder's write would land on a plaintext dir
+    mountinfo = v.unmounted;
+    const reason = w.recheckForWrite(c.ctx);
+    expect(reason).toContain("未挂载");
+    expect(w.lockedReason()).toBe(reason); // LOCKED actually flipped — same as tool_call/input
+    expect(c.status.at(-1)).toEqual([SECURE_STATUS_KEY, "secure:locked"]);
+  });
+
+  it("plain-with-vaults domain ⇒ no mount recheck at all, stays writable", () => {
+    const { d } = plain();
+    const f = fakePi();
+    const w = wireSecureGuards(f.pi as never, { domain: d, isChildSession: true, git: noGit });
+    expect(w.recheckForWrite(undefined)).toBeUndefined();
+  });
+
+  it("no ctx ⇒ NO recheck, just the current verdict (never throws, never fabricates)", async () => {
+    const { v, d } = secure();
+    let mountinfo = v.mounted;
+    const f = fakePi();
+    const w = wireSecureGuards(f.pi as never, {
+      domain: d,
+      isChildSession: false,
+      git: noGit,
+      readMountinfo: () => mountinfo,
+    });
+    const c = fakeCtx(v.work, undefined, "");
+    await f.emit("session_start", {}, c.ctx);
+    mountinfo = v.unmounted;
+    // without a ctx there is nothing to notify — the query only reports the CURRENT verdict
+    expect(w.recheckForWrite(undefined)).toBeUndefined();
+    // a real tool_call (which does carry a ctx) flips LOCKED; from then on even a ctx-less
+    // query sees it
+    await f.emit("tool_call", { toolName: "read", input: { path: "x" } }, c.ctx);
+    expect(w.recheckForWrite(undefined)).toContain("未挂载");
+    void v;
+  });
+});

@@ -127,6 +127,7 @@ import { agentTypesSection, availableModelsSection } from "./sysprompt/core-sect
 import { wireHud } from "./hud/index.js";
 import wireAskUser from "./ask-user/index.js";
 import { wrapCommandApi, type CommandCapturePort } from "./web-hub/agent/command-capture.js";
+import type { CommandRecorder } from "./web-hub/agent/command-record.js";
 import type { ArgCompleter } from "./web-hub/agent/command-complete.js";
 import wireFeishuNotify from "./feishu-notify/index.js";
 import { wireSessionNav } from "./session-nav/index.js";
@@ -165,6 +166,10 @@ export default function activate(rawPi: ExtensionAPI): void {
   // redirection both depend on it). Frozen per process; child sessions and /reload reuse it.
   const secureDomain = initSecureDomain();
   const commandCaptureRef: { current?: CommandCapturePort } = {};
+  // web-hub-cmd-history plan §4.3/§8.1 (A1): same late-bound-ref pattern as commandCaptureRef —
+  // wrapCommandApi runs at activate()'s very first line, the recorder is only built inside
+  // wireWebHub (post-guard, webHub.enabled ∧ cmdHistory), assigned right after it returns.
+  const commandRecorderRef: { current?: CommandRecorder } = {};
   // P1 fix (#32 C12 review): the set `wrapCommandApi`'s `registerCommand` proxy writes real
   // toolkit command names into, at real registration time — long before `commandCaptureRef.current`
   // is ever assigned (web-hub wiring runs last in this function). Handed to `createCommandCapture`
@@ -177,7 +182,13 @@ export default function activate(rawPi: ExtensionAPI): void {
   // read by the S-own completion source (`agent/command-complete.ts`) through the wireWebHub
   // deps. Created once per activate; NEVER module-scope (the /reload invariant).
   const argCompleters = new Map<string, ArgCompleter>();
-  const pi = wrapCommandApi(rawPi, () => commandCaptureRef.current, ownedCommandNames, argCompleters);
+  const pi = wrapCommandApi(
+    rawPi,
+    () => commandCaptureRef.current,
+    ownedCommandNames,
+    argCompleters,
+    () => commandRecorderRef.current,
+  );
   // Merged plugins (plugin-merge) that must stay available in EVERY session,
   // child subagent sessions included — they register BEFORE the HOST_KEY
   // guard below. Settings here come from the read-only loader: the full
@@ -1705,6 +1716,9 @@ export default function activate(rawPi: ExtensionAPI): void {
         }),
       askUserEnabled: () => settings.askUser.enabled,
       ownedCommandNames,
+      // web-hub-cmd-history plan §4.3/§5.4 (A1, M1): the recorder's pre-write LOCKED query.
+      // Unassigned (plain domain without guards) ⇒ the deps stay unset ⇒ treated as writable.
+      secureRecheckForWrite: (c) => secureGuards?.recheckForWrite(c),
       // web-hub-slash-args plan §4.4 (P1): S-own completion source (see the creation site
       // near `ownedCommandNames` above).
       argCompleters,
@@ -1767,6 +1781,10 @@ export default function activate(rawPi: ExtensionAPI): void {
     });
     askUserRemoteRef.current = () => webHubRef.current?.askUserRemote();
     if (webHubRef.current.capture !== undefined) commandCaptureRef.current = webHubRef.current.capture;
+    // web-hub-cmd-history plan §8.1 (A1): the recorder rides the same ref the capture does —
+    // undefined while cmdHistory is off (getRecorder then always answers undefined ⇒
+    // wrapCommandApi keeps its byte-identical passthrough branch).
+    if (webHubRef.current.recorder !== undefined) commandRecorderRef.current = webHubRef.current.recorder;
     // §9.1/§2.4 diagnostic snapshot (invalid `extraHosts` tokens / `trustProxyFrom`↔`externalOrigins`
     // mismatch) — same non-live, activate-time capture as `settings` itself; without this the
     // production `/webhub status` never surfaced these settings-level warnings even though
