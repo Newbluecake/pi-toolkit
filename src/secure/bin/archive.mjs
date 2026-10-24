@@ -1707,7 +1707,7 @@ async function admitOwnMount(name, home, ports) {
   if (v.private === true)
     throw fail(
       AX.CONFIG,
-      `保险库 ${name} 是私有库：迁址/口令验证必须在私有挂载命名空间（setup 模式）内进行，当前版本拒绝——请等待 pi-secure init ${name} --fix-settings 的私有库路径`,
+      `保险库 ${name} 是私有库：迁址/口令验证必须在私有挂载命名空间（setup 模式）内进行——迁址请用 pi-secure init ${name} --fix-settings`,
     );
   const st = await ports.probeMountState(v);
   if (st !== "absent")
@@ -1726,6 +1726,59 @@ async function ownRawMount(v, ports) {
       foreignMount: true,
     });
   return m;
+}
+
+/**
+ * The relocation steps on a mount the CALLER established and owns exclusively (V6: shared by
+ * `relocateVault` below and the private setup-mode path in helper.mjs, which runs this inside the
+ * private mount namespace). `onPhase(p)` runs BEFORE each step ("sessions" / "memory" / "settings")
+ * and after the sync ("synced"); it may throw to stop. Every step is re-entrant, fd-anchored and runs
+ * in a worker (§10 B1); `signal` aborts the current worker. Does NOT mount, unmount or clear the
+ * marker. Warnings are pushed into `warnings` AS THEY ARISE (a later failure keeps the earlier ones).
+ * → {sessions, memory, settings, warnings}; throws a CliError-shaped failure.
+ */
+export async function runRelocateSteps(
+  { v, rel, realMnt, home = homeDir(), onPhase = () => {}, signal, warnings = [] },
+  portsIn,
+) {
+  const ports = withPorts(portsIn);
+  const name = v.name;
+  const base = { realMnt, mountCheck: true };
+  const opts = signal ? { signal } : {};
+  await onPhase("sessions");
+  const sr = await runOp(
+    ports,
+    "relocate-sessions",
+    {
+      ...base,
+      rules: {
+        from: rel.from,
+        to: rel.to,
+        fromSessionsDir: stateSessionsDirFor(rel.from),
+        toSessionsDir: stateSessionsDirFor(rel.to),
+      },
+    },
+    "会话迁址",
+    name,
+    opts,
+  );
+  await onPhase("memory");
+  const mr = await runOp(ports, "relocate-memory", { ...base, from: rel.from, to: rel.to }, "memory 迁址", name, opts);
+  if (mr.reason === "target-exists")
+    warnings.push(`memory 目标目录 state/memory/${mr.toSlug} 已存在，未合并（state/memory/${mr.fromSlug} 保留）`);
+  await onPhase("settings");
+  const pr = await runOp(
+    ports,
+    "relocate-settings",
+    { ...base, want: v.sessionDir, home, now: ports.now().getTime() },
+    "项目 sessionDir 改写",
+    name,
+    opts,
+  );
+  if (pr.kind === "fixed") warnings.push(`已备份原项目设置到 ${pr.backup}`);
+  await runOp(ports, "sync", { path: physicalPaths(v).realCipher }, "落盘", name, opts);
+  await onPhase("synced");
+  return { sessions: sr, memory: mr, settings: pr, warnings };
 }
 
 /**
@@ -1767,38 +1820,9 @@ export async function relocateVault({ name, home = homeDir() }, portsIn) {
     const m = await ownRawMount(v, ports);
     mounted = true;
     const realMnt = m?.realMnt ?? physicalPaths(v).realMnt;
-    const base = { realMnt, mountCheck: true };
-    phase("sessions");
-    const sr = await runOp(
-      ports,
-      "relocate-sessions",
-      {
-        ...base,
-        rules: {
-          from: rel.from,
-          to: rel.to,
-          fromSessionsDir: stateSessionsDirFor(rel.from),
-          toSessionsDir: stateSessionsDirFor(rel.to),
-        },
-      },
-      "会话迁址",
-      name,
-    );
-    phase("memory");
-    const mr = await runOp(ports, "relocate-memory", { ...base, from: rel.from, to: rel.to }, "memory 迁址", name);
-    if (mr.reason === "target-exists")
-      warnings.push(`memory 目标目录 state/memory/${mr.toSlug} 已存在，未合并（state/memory/${mr.fromSlug} 保留）`);
-    phase("settings");
-    const pr = await runOp(
-      ports,
-      "relocate-settings",
-      { ...base, want: v.sessionDir, home, now: ports.now().getTime() },
-      "项目 sessionDir 改写",
-      name,
-    );
-    if (pr.kind === "fixed") warnings.push(`已备份原项目设置到 ${pr.backup}`);
-    await runOp(ports, "sync", { path: physicalPaths(v).realCipher }, "落盘", name);
-    phase("synced");
+    const steps = await runRelocateSteps({ v, rel, realMnt, home, onPhase: phase, warnings }, ports);
+    const sr = steps.sessions;
+    const mr = steps.memory;
     const c = ports.patchVaultEntry(name, { relocateTxid: rel.txid }, { remove: ["relocate"] }, { home });
     if (c.kind !== "ok") throw fail(AX.IO, `清除迁址标记失败（${c.kind}${c.reason ? `：${c.reason}` : ""}）`);
     result = { code: AX.OK, warnings, sessions: sr, memory: mr };

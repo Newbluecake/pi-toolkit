@@ -71,6 +71,10 @@ export function vaultSpellings(v: SecureVaultRoots, home: string = homedir()): s
   const out = new Set<string>();
   const paths = [v.root, v.vault.dir, v.vault.mnt, v.mntReal];
   if (v.vault.legacyLink !== undefined) paths.push(v.vault.legacyLink); // review L0 #3
+  // convert-plan §4 (V6): the converted project's ORIGINAL path (now a symlink into the vault) —
+  // its literal / `~` / physical spellings. No origin ⇒ the list is unchanged (G4).
+  if (v.vault.origin !== undefined) paths.push(v.vault.origin);
+  if (v.originReal !== undefined) paths.push(v.originReal);
   for (const p of paths) {
     out.add(p);
     const rel = relative(home, p);

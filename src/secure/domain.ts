@@ -53,6 +53,12 @@ export interface SecureVaultRoots {
    * mount). Legacy vaults keep the old derivation: `join(root, "mnt")` (§L.3).
    */
   readonly mntReal: string;
+  /**
+   * convert-plan §4 (V6): present ONLY when the entry carries `origin` — the origin's PHYSICAL
+   * spelling `join(realpath(dirname(origin)), basename(origin))` (the origin itself is a symlink
+   * into the vault: never followed here). Feeds D4's bash spellings; frozen with the verdict.
+   */
+  readonly originReal?: string;
 }
 
 /**
@@ -153,7 +159,8 @@ export function vaultRoots(vault: SecureVault): SecureVaultRoots {
   const root = realpathOr(vault.dir);
   const mntReal =
     vault.layout === "legacy" ? join(root, "mnt") : join(realpathOr(dirname(vault.mnt)), basename(vault.mnt));
-  return { vault, root, mntReal };
+  if (vault.origin === undefined) return { vault, root, mntReal };
+  return { vault, root, mntReal, originReal: join(canonicalPath(dirname(vault.origin)), basename(vault.origin)) };
 }
 
 export function statePathsOf(v: SecureVaultRoots): SecureStatePaths {
@@ -526,6 +533,17 @@ export function judgeVaultMount(
   return { ok: true };
 }
 
+/** convert-plan §4 (V6): why a vault with transaction keys must not host a session (undefined ⇒ fine). */
+export function vaultUnfinishedReason(v: SecureVault): string | undefined {
+  // review V6 #1: malformed transaction keys ⇒ LOCKED (as if not unlocked), a human must fix them
+  if (v.txnInvalid !== undefined)
+    return `保险库 ${v.name} 的事务键损坏（${v.txnInvalid.join(", ")}），按锁定处理：请人工核对设置文件 secure.vaults.${v.name} 中的这些键（pi-secure status ${v.name}）`;
+  if (v.pending !== undefined)
+    return `保险库 ${v.name} 有未完成的转换/导入（${v.pending}）：先用 pi-secure convert|import --resume|--abort ${v.name} 处理`;
+  if (v.relocate !== undefined) return `保险库 ${v.name} 迁址未完成：先执行 pi-secure init ${v.name} --fix-settings`;
+  return undefined;
+}
+
 /** Side-effect-free judgment (reads settings, realpath, mountinfo). */
 export function computeSecureDomain(deps: SecureDomainDeps = {}): SecureDomain {
   const env = deps.env ?? process.env;
@@ -545,6 +563,12 @@ export function computeSecureDomain(deps: SecureDomainDeps = {}): SecureDomain {
   const nsKey = ns === undefined ? {} : { ns };
   const envVault = env[PI_SECURE_VAULT];
   const fromVault = (v: SecureVaultRoots, via: "env" | "cwd"): SecureDomain => {
+    // convert-plan §4 (V6): an unfinished convert/import (`pending`) or relocation ⇒ locked, even
+    // when something mounted it — the launcher refuses to open such a vault, so a session inside
+    // one is never a legitimate secure session.
+    const unfinished = vaultUnfinishedReason(v.vault);
+    if (unfinished !== undefined)
+      return { kind: "locked", reason: unfinished, vaultName: v.vault.name, vaults, config, ...nsKey };
     const mount = judgeVaultMount(v, readMountinfo);
     if (!mount.ok) return { kind: "locked", reason: mount.reason, vaultName: v.vault.name, vaults, config, ...nsKey };
     return { kind: "secure", vault: v, vaults, config, via, ...nsKey };

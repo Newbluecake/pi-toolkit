@@ -550,7 +550,10 @@ describe.skipIf(!HAVE_FUSE)("V0 unlockVault({postMount:false}) against real gocr
   afterAll(() => releaseGocryptfsLock?.());
 
   /** Build a registered, initialized, UNMOUNTED vault test-side (fake passfile only). */
-  function buildVault(name: string): { root: string; home: string; dir: string; mnt: string; env: NodeJS.ProcessEnv } {
+  function buildVault(
+    name: string,
+    { pending = true }: { pending?: boolean } = {},
+  ): { root: string; home: string; dir: string; mnt: string; env: NodeJS.ProcessEnv } {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "ps-v0f-")));
     chmodSync(root, 0o700);
     const home = join(root, "home");
@@ -566,7 +569,11 @@ describe.skipIf(!HAVE_FUSE)("V0 unlockVault({postMount:false}) against real gocr
       timeout: 20_000,
     });
     expect(r.status, r.stderr).toBe(0);
-    H.registerVault(name, { dir, mnt }, { home, expectAbsent: true, pending: "convert:v0test" });
+    H.registerVault(
+      name,
+      { dir, mnt },
+      { home, expectAbsent: true, ...(pending ? { pending: "convert:v0test" } : {}) },
+    );
     scratch.push(root);
     return { root, home, dir, mnt, env: { ...process.env, HOME: home } };
   }
@@ -634,7 +641,10 @@ console.log("FINALIZE " + f.code);
   });
 
   it("default (postMount:true) still builds work/state + sessionDir — regression for the option shadowing the function", async () => {
-    const { root, home, mnt, env } = buildVault("withpost");
+    // V6 security review #3: the inner __mount entry now refuses a pending vault unless the mount is
+    // the raw transactional one (postMount:false, token = the current marker) — so the postMount:true
+    // regression runs on a vault WITHOUT a pending claim (what this case pins is unchanged).
+    const { root, home, mnt, env } = buildVault("withpost", { pending: false });
     const driver = join(root, "driver2.mjs");
     writeFileSync(
       driver,

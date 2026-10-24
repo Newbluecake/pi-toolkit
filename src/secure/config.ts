@@ -18,6 +18,10 @@
  * - `secure` not an object, or `vaults` present but not an object ⇒ whole section invalid
  *   (no vaults). `vaults` absent ⇒ valid, no vaults.
  * - `enabled` non-boolean ⇒ default (true).
+ * - transaction keys (convert-plan §4, V6): `pending` ("<op>:<txid>"), `origin` / `backup` (abs|~/),
+ *   `relocate` ({from, to, txid, phase}) surface on the vault ONLY when present and valid; malformed
+ *   ones are listed in `txnInvalid` (the vault is KEPT and judged locked — fail closed), each key
+ *   validated independently.
  * - derived (new layout): mnt=<mnt>, work=<mnt>/work, state=<mnt>/state,
  *   sessionDir=<state>/sessions/default, cipher=<dir>/cipher, lock=<dir>/mount.lock,
  *   lease=<dir>/mount.lease
@@ -62,6 +66,35 @@ export interface SecureVault {
   readonly legacyLink?: string;
   /** private-plan §1.1: `secure.vaults.<name>.private === true` (present ONLY when true; new layout only). */
   readonly private?: true;
+  /**
+   * convert-plan §4 (V6) transaction keys — each present ONLY when the entry carries it.
+   * `pending`: a convert/import is in progress or interrupted (`<op>:<txid>`) ⇒ the domain judges
+   * the vault locked. `origin`: the plain path a convert turned into a symlink to `<mnt>/work`
+   * (feeds D4's bash spellings). `backup`: the read-only backup a convert left behind.
+   * `relocate`: an import's unfinished path relocation (⇒ locked as well).
+   */
+  readonly pending?: string;
+  readonly origin?: string;
+  readonly backup?: string;
+  readonly relocate?: SecureRelocate;
+  /**
+   * Security review V6 #1 (fail closed): present ONLY when one or more transaction keys are
+   * malformed — their names, in the fixed order pending/origin/backup/relocate. The vault is kept
+   * (path guards and write redirection still cover it) and judged LOCKED; a human must fix the
+   * entry. The VALID keys are still carried individually.
+   */
+  readonly txnInvalid?: readonly SecureTxnKey[];
+}
+
+/** The four convert/import transaction keys of a vault entry (convert-plan §4). */
+export type SecureTxnKey = "pending" | "origin" | "backup" | "relocate";
+
+/** convert-plan §3.4 relocation marker (`secure.vaults.<name>.relocate`). */
+export interface SecureRelocate {
+  readonly from: string;
+  readonly to: string;
+  readonly txid: string;
+  readonly phase: string;
 }
 
 export interface SecureInvalidVault {
@@ -145,6 +178,53 @@ export function isLegacyVault(v: SecureVault): boolean {
 
 const EMPTY: readonly never[] = Object.freeze([]);
 
+/** V0 writer contract for `pending` (helper.mjs PENDING_RE): `<op>:<txid>`. */
+export const SECURE_PENDING_RE = /^[a-z][a-z0-9]{0,15}:[!-~]{1,64}$/;
+
+type TxnKeys = Pick<SecureVault, "pending" | "origin" | "backup" | "relocate" | "txnInvalid">;
+
+const isAbsLiteral = (x: unknown): x is string =>
+  typeof x === "string" && x.length <= 4096 && x.startsWith("/") && !x.includes("\0");
+
+/**
+ * convert-plan §4 / §8.2 (V6): the transaction keys of one entry, each validated INDEPENDENTLY
+ * (security review V6 #1: one malformed key never drops the others). → the VALID present keys
+ * (normalized) plus `txnInvalid` (malformed key names, fixed order) when any is malformed. The entry
+ * is never dropped for these keys — it stays a vault and `txnInvalid` makes the domain LOCKED.
+ * Accepts at least everything helper.mjs's V0 writers store. Parity twin of helper.mjs `parseTxnKeys`.
+ */
+function parseTxnKeys(entry: Record<string, unknown>, home: string): TxnKeys {
+  const keys: { -readonly [K in keyof TxnKeys]: TxnKeys[K] } = {};
+  const bad: SecureTxnKey[] = [];
+  if (entry.pending !== undefined) {
+    if (typeof entry.pending === "string" && SECURE_PENDING_RE.test(entry.pending)) keys.pending = entry.pending;
+    else bad.push("pending");
+  }
+  for (const k of ["origin", "backup"] as const) {
+    if (entry[k] === undefined) continue;
+    const p = expandSecurePath(entry[k], home);
+    if (p !== undefined && !p.includes("\0") && p.length <= 4096) keys[k] = p;
+    else bad.push(k);
+  }
+  if (entry.relocate !== undefined) {
+    const r = entry.relocate;
+    if (
+      isPlainObject(r) &&
+      Object.keys(r).every((k) => k === "from" || k === "to" || k === "txid" || k === "phase") &&
+      isAbsLiteral(r.from) &&
+      isAbsLiteral(r.to) &&
+      typeof r.txid === "string" &&
+      /^[!-~]{1,64}$/.test(r.txid) &&
+      typeof r.phase === "string" &&
+      /^[a-z0-9_-]{1,32}$/.test(r.phase)
+    )
+      keys.relocate = { from: resolve(r.from), to: resolve(r.to), txid: r.txid, phase: r.phase };
+    else bad.push("relocate");
+  }
+  if (bad.length) keys.txnInvalid = bad;
+  return keys;
+}
+
 /** Parse the WHOLE settings-file object (not just the `secure` value). Never throws. */
 export function parseSecureConfig(settings: unknown, home: string, io?: SecureConfigIo): SecureConfig {
   if (!isPlainObject(settings) || !("secure" in settings) || settings.secure === undefined)
@@ -194,12 +274,18 @@ export function parseSecureConfig(settings: unknown, home: string, io?: SecureCo
       invalid.push({ name, reason: "private" });
       continue;
     }
+    // convert-plan §4 (V6): transaction keys (absent ⇒ no key on the vault object; malformed ⇒
+    // the vault stays and carries `txnInvalid` ⇒ locked — never dropped, review V6 #1).
+    const txn = { keys: parseTxnKeys(entry, home) };
     const oldDefaultLink = join(home, SECURE_DEFAULT_MNT_PARENT, name);
     // Legacy recognition (§L.3): a `link` key always means the pre-L0 layout; an entry without
     // `mnt` whose `<dir>/mnt` exists as a directory on disk does too (probed via `io`). The link
     // VALUE is not validated as a vault — it only feeds D4's known-address set (review L0 #3).
     if (entry.link !== undefined) {
-      vaults.push(deriveLegacyVault(name, dir, expandSecurePath(entry.link, home) ?? oldDefaultLink));
+      vaults.push({
+        ...deriveLegacyVault(name, dir, expandSecurePath(entry.link, home) ?? oldDefaultLink),
+        ...txn.keys,
+      });
       continue;
     }
     const mntExplicit = entry.mnt !== undefined;
@@ -209,12 +295,14 @@ export function parseSecureConfig(settings: unknown, home: string, io?: SecureCo
       continue;
     }
     if (!mntExplicit && io?.legacyMntDir?.(join(dir, "mnt")) === true) {
-      vaults.push(deriveLegacyVault(name, dir, oldDefaultLink));
+      vaults.push({ ...deriveLegacyVault(name, dir, oldDefaultLink), ...txn.keys });
       continue;
     }
-    vaults.push(
-      entry.private === true ? { ...deriveVault(name, dir, mnt), private: true } : deriveVault(name, dir, mnt),
-    );
+    vaults.push({
+      ...deriveVault(name, dir, mnt),
+      ...(entry.private === true ? { private: true as const } : {}),
+      ...txn.keys,
+    });
   }
   return { present: true, enabled, valid: true, vaults, invalid };
 }

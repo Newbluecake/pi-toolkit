@@ -4,10 +4,11 @@
  * section / verdict worth reporting, so a plain process without vaults keeps its command list
  * byte-identical.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { SecureVault } from "./config.js";
 import { judgeVaultMount, readProcMountinfo, statePathsOf, type SecureDomain } from "./domain.js";
 import { PI_SECURE_SESSION } from "./env.js";
 
@@ -76,6 +77,39 @@ export interface SecureStatusInput {
   /** private-plan §2.9: does `<dir>/private.json` exist for this vault row (default existsSync)?
    *  Pure existence — no parsing, no evidence judgment (that is the domain's job, frozen earlier). */
   existsPrivateRecord?: (file: string) => boolean;
+  /** convert-plan §1.7 (V6): does the vault's `backup` path still exist (default lstat, never follows)? */
+  existsBackup?: (path: string) => boolean;
+}
+
+function lstatExists(p: string): boolean {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * convert-plan §1.7 / §3.4 / §3.5 (V6): extra lines under a vault row, each ONLY when its key is on
+ * the entry (`backup` only while the path still exists) — a row without them is byte-identical.
+ */
+export function vaultTxnLines(v: SecureVault, existsBackup: (path: string) => boolean = lstatExists): string[] {
+  const lines: string[] = [];
+  if (v.txnInvalid !== undefined)
+    lines.push(
+      `    ! 事务键损坏：${v.txnInvalid.join(", ")}（保险库按锁定处理；请人工核对 secure.vaults.${v.name} 中的这些键）`,
+    );
+  if (v.pending !== undefined)
+    lines.push(
+      `    pending: ${v.pending}（未完成的转换/导入，保险库不可用：pi-secure convert|import --resume|--abort ${v.name}）`,
+    );
+  if (v.relocate !== undefined)
+    lines.push(`    relocate: pending (${v.relocate.phase})（迁址未完成：pi-secure init ${v.name} --fix-settings）`);
+  if (v.origin !== undefined) lines.push(`    origin: ${v.origin}`);
+  if (v.backup !== undefined && existsBackup(v.backup))
+    lines.push(`    backup: ${v.backup} (still present)（确认保险库内容无误后请自行删除这份明文备份）`);
+  return lines;
 }
 
 export function renderSecureStatus(input: SecureStatusInput): string {
@@ -112,6 +146,7 @@ export function renderSecureStatus(input: SecureStatusInput): string {
       lines.push(
         `  - ${v.vault.name}：${mount.ok ? "mounted" : "not mounted"} · ${v.root} · 挂载点 ${v.vault.mnt}${v.vault.layout === "legacy" ? "（旧布局，只读兼容）" : ""}${privateRec}`,
       );
+      lines.push(...vaultTxnLines(v.vault, input.existsBackup));
     }
     for (const bad of cfg.invalid) lines.push(`  - ${bad.name}：invalid (${bad.reason})`);
   }

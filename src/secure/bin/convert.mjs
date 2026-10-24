@@ -3017,9 +3017,14 @@ async function finishCommitted({ ports, ctx, state, v, sessionsReport, out, err 
   return CONVERT_EXIT.OK;
 }
 
+/** POSIX sh single-argument quoting for the printed manual-cleanup commands (V6 status reuses it). */
+export function shellQuote(p) {
+  return `'${p.replace(/'/g, `'\\''`)}'`;
+}
+
 /** §1.7 completion output. */
 export function completionLines(ctx, state, v, sessionsReport) {
-  const q = (p) => `'${p.replace(/'/g, `'\\''`)}'`;
+  const q = shellQuote;
   const lines = [
     `完成：${state.origin} 已转换为保险库 ${state.name}；原路径现在是指向 ${v.work} 的符号链接（锁定时不可进入）。`,
     `原目录已改名为只读备份：${state.backup}。请在确认保险库内容无误后自行删除：chmod -R u+w -- ${q(state.backup)} && rm -rf -- ${q(state.backup)}`,

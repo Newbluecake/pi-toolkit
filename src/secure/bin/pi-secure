@@ -27,5 +27,8 @@ node_bin="$(command -v node)" || {
 
 ulimit -c 0 2>/dev/null || echo "pi-secure: 警告：无法设置 ulimit -c 0" >&2
 umask 077
+# The user's (physical) cwd, for relative convert/export/import paths; helper.mjs takes it and
+# removes the variable before anything else runs. Empty when the cwd is gone (helper ignores it).
+orig_cwd="$(pwd -P 2>/dev/null)" || orig_cwd=""
 cd / || exit 1
-exec "$node_bin" "$helper" "$@"
+PI_SECURE_ORIG_CWD="$orig_cwd" exec "$node_bin" "$helper" "$@"

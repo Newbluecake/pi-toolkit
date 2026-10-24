@@ -50,11 +50,25 @@ export const EXIT = Object.freeze({
   BAD_PASSWORD: 77,
   CONFIG: 78,
 });
+/** convert-plan §6: 74 = IO / persistence failure (kept out of EXIT so its frozen shape is unchanged). */
+const EXIT_IO = 74;
 /** Internal codes between the outer launcher and the `__mount` child that runs under flock. */
 const INNER_ALREADY = 20;
 const FLOCK_TIMEOUT_CODE = 73;
 
 // ───────────────────────────── settings contract (parity with src/secure/config.ts) ─────────────────────────────
+
+/** Key-sorted JSON (CAS comparison of settings entries); undefined ⇒ "undefined". */
+function canonicalJson(x) {
+  if (x === undefined) return "undefined";
+  if (Array.isArray(x)) return `[${x.map(canonicalJson).join(",")}]`;
+  if (x !== null && typeof x === "object")
+    return `{${Object.keys(x)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(x[k])}`)
+      .join(",")}}`;
+  return JSON.stringify(x);
+}
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -120,6 +134,50 @@ export function legacyMntDirProbe(mnt) {
   }
 }
 
+const isAbsLiteral = (x) => typeof x === "string" && x.length <= 4096 && path.isAbsolute(x) && !x.includes("\0");
+
+/**
+ * convert-plan §4 / §8.2 (V6): `pending` / `origin` / `backup` / `relocate` of one entry, each key
+ * validated INDEPENDENTLY (security review V6 #1: one malformed key never drops the others — a
+ * valid `pending` survives a malformed `backup`). → {keys, txnInvalid?}: `keys` = the VALID present
+ * keys (normalized); `txnInvalid` = the malformed key names in fixed order, present only when
+ * non-empty. The ENTRY is never dropped for these keys: it stays a vault (path guards / write
+ * redirection keep covering it) and `txnInvalid` makes it LOCKED everywhere (fail closed).
+ * Accepts at least everything the V0 writers (`registerVault` / `patchVaultEntry`) can store:
+ * pending ⇔ PENDING_RE; origin/backup absolute (or `~/`, expanded like dir/mnt); relocate exactly
+ * {from, to (absolute), txid (1–64 printable), phase ([a-z0-9_-]{1,32})}. Parity twin of config.ts.
+ */
+export function parseTxnKeys(entry, home) {
+  const keys = {};
+  const bad = [];
+  if (entry.pending !== undefined) {
+    if (typeof entry.pending === "string" && PENDING_RE.test(entry.pending)) keys.pending = entry.pending;
+    else bad.push("pending");
+  }
+  for (const k of ["origin", "backup"]) {
+    if (entry[k] === undefined) continue;
+    const p = expandSecurePath(entry[k], home);
+    if (p !== undefined && !p.includes("\0") && p.length <= 4096) keys[k] = p;
+    else bad.push(k);
+  }
+  if (entry.relocate !== undefined) {
+    const r = entry.relocate;
+    if (
+      isPlainObject(r) &&
+      Object.keys(r).every((k) => k === "from" || k === "to" || k === "txid" || k === "phase") &&
+      isAbsLiteral(r.from) &&
+      isAbsLiteral(r.to) &&
+      typeof r.txid === "string" &&
+      /^[!-~]{1,64}$/.test(r.txid) &&
+      typeof r.phase === "string" &&
+      /^[a-z0-9_-]{1,32}$/.test(r.phase)
+    )
+      keys.relocate = { from: path.resolve(r.from), to: path.resolve(r.to), txid: r.txid, phase: r.phase };
+    else bad.push("relocate");
+  }
+  return bad.length ? { keys, txnInvalid: bad } : { keys };
+}
+
 /** Parse the WHOLE settings-file object (not just `secure`). Never throws. Same shape as config.ts. */
 export function parseSecureConfig(settings, home, io) {
   if (!isPlainObject(settings) || !("secure" in settings) || settings.secure === undefined)
@@ -162,12 +220,18 @@ export function parseSecureConfig(settings, home, io) {
       invalid.push({ name, reason: "private" });
       continue;
     }
+    // convert-plan §4 / V6: the transaction keys (absent ⇒ no key on the vault object).
+    const t = parseTxnKeys(entry, home);
+    const txn = { keys: t.txnInvalid ? { ...t.keys, txnInvalid: t.txnInvalid } : t.keys };
     const oldDefaultLink = defaultVaultMnt(name, home);
     // Legacy recognition (§L.3): a `link` key always means the pre-L0 layout; an entry without
     // `mnt` whose `<dir>/mnt` exists as a directory on disk does too. The link VALUE only feeds
     // D4's known-address set (review L0 #3), never validated as a vault.
     if (entry.link !== undefined) {
-      vaults.push(deriveLegacyVault(name, dir, expandSecurePath(entry.link, home) ?? oldDefaultLink));
+      vaults.push({
+        ...deriveLegacyVault(name, dir, expandSecurePath(entry.link, home) ?? oldDefaultLink),
+        ...txn.keys,
+      });
       continue;
     }
     const mntExplicit = entry.mnt !== undefined;
@@ -177,12 +241,10 @@ export function parseSecureConfig(settings, home, io) {
       continue;
     }
     if (!mntExplicit && (io?.legacyMntDir ?? legacyMntDirProbe)(path.join(dir, "mnt")) === true) {
-      vaults.push(deriveLegacyVault(name, dir, oldDefaultLink));
+      vaults.push({ ...deriveLegacyVault(name, dir, oldDefaultLink), ...txn.keys });
       continue;
     }
-    vaults.push(
-      entry.private === true ? { ...deriveVault(name, dir, mnt), private: true } : deriveVault(name, dir, mnt),
-    );
+    vaults.push({ ...deriveVault(name, dir, mnt), ...(entry.private === true ? { private: true } : {}), ...txn.keys });
   }
   return { present: true, enabled, valid: true, vaults, invalid };
 }
@@ -483,7 +545,7 @@ export function registerVaultUnlocked(
   dir,
   mnt,
   home = homeDir(),
-  { private: priv = false, expectAbsent = false, pending } = {},
+  { private: priv = false, expectAbsent = false, expectEntry, pending } = {},
 ) {
   if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
     throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
@@ -496,6 +558,9 @@ export function registerVaultUnlocked(
   const vaults = mutableVaults(secure, file);
   if (expectAbsent && Object.hasOwn(vaults, name))
     throw new Error(`保险库名 ${name} 已在 ${file} 登记（expectAbsent 认领失败）；未改动任何内容`);
+  // Security review V6 #2: compare-and-swap against the entry the caller read earlier.
+  if (expectEntry !== undefined && canonicalJson(vaults[name]) !== canonicalJson(expectEntry))
+    throw new Error(`保险库 ${name} 的登记项已被其他操作改动（CAS 失败）；未改动任何内容`);
   // N2: `private: true` only when requested (absent key ⇔ ordinary vault, byte-identical entry);
   // V0: `pending` rides only on transactional claims.
   secure.vaults = {
@@ -550,7 +615,7 @@ const childErrText = (r, what) =>
 export function registerVault(
   name,
   entry,
-  { home = homeDir(), expectAbsent = false, pending, lockWaitS = SETTINGS_LOCK_WAIT_S } = {},
+  { home = homeDir(), expectAbsent = false, expectEntry, pending, lockWaitS = SETTINGS_LOCK_WAIT_S } = {},
 ) {
   if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
     throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
@@ -564,6 +629,7 @@ export function registerVault(
     entry.mnt,
     ...(entry.private ? ["--private"] : []),
     ...(expectAbsent ? ["--expect-absent"] : []),
+    ...(expectEntry !== undefined ? ["--expect-entry", JSON.stringify(expectEntry)] : []),
     ...(pending !== undefined ? ["--pending", pending] : []),
   ]);
   if (r.status !== 0) throw new CliError(EXIT.CONFIG, childErrText(r, "登记"));
@@ -990,7 +1056,137 @@ function requireNewLayout(v) {
   if (v.layout === "legacy") throw new CliError(EXIT.CONFIG, legacyRefusal(v));
 }
 
+/** Text of the §3.5 pending refusal (76): which command finishes / undoes the transaction. */
+export function pendingRefusal(v) {
+  const p = v.pending ?? "";
+  const at = p.indexOf(":");
+  const op = at > 0 ? p.slice(0, at) : "convert";
+  const txid = at > 0 ? p.slice(at + 1) : p;
+  const kind = op === "import" ? "import" : "convert";
+  return `保险库 ${v.name} 有未完成的${kind === "import" ? "导入" : "转换"}（${txid}）：pi-secure ${kind} --resume|--abort ${v.name}`;
+}
+
+/** §3.4 relocation refusal (78). */
+export function relocateRefusal(v) {
+  return `保险库 ${v.name} 迁址未完成：pi-secure init ${v.name} --fix-settings 继续`;
+}
+
+/** Review V6 #1: refusal text for a vault whose transaction keys are malformed (78). */
+export function txnInvalidRefusal(v) {
+  return `保险库 ${v.name} 的事务键损坏（${v.txnInvalid.join(", ")}），按锁定处理：请人工核对 ${settingsFilePath()} 中 secure.vaults.${v.name} 的这些键`;
+}
+
+/** `.txn/convert-<name>.json` / `.txn/import-<name>.json` that exist (any type; lstat only). */
+export function txnStateFilesFor(name, home = homeDir()) {
+  const txn = path.join(home, ".local", "share", "pi-toolkit-secure", ".txn");
+  return [`convert-${name}.json`, `import-${name}.json`].map((f) => path.join(txn, f)).filter((f) => lstatOrNull(f));
+}
+
+/** Text of the refusal for a name that still has convert/import state files (76). */
+export function txnStateRefusal(name, files) {
+  const kind = files.some((f) => path.basename(f).startsWith("import-")) ? "import" : "convert";
+  return `保险库 ${name} 有未完成的${kind === "import" ? "导入" : "转换"}状态文件（${files.join(", ")}）：pi-secure ${kind} --resume|--abort ${name}`;
+}
+
+/**
+ * convert-plan §3.5 / §3.4 (V6 + security review): `unlock` / `run` (incl. --private) /
+ * `init --fix-settings` / plain `init` never open or re-create a vault whose entry carries malformed
+ * transaction keys (78), `pending` (76), or whose name still has convert/import state files (76) —
+ * and only `--fix-settings` (the relocation entry, `{ allowRelocate: true }`) passes one carrying
+ * `relocate` (78 otherwise). `lock` and `status` never call this. The inner `__mount` entry runs the
+ * same checks itself (`innerMountTxnGate`), exempting only the in-process raw mount whose token
+ * matches the CURRENT marker.
+ */
+export function refuseUnfinished(v, { allowRelocate = false, home = homeDir() } = {}) {
+  if (v.txnInvalid !== undefined) throw new CliError(EXIT.CONFIG, txnInvalidRefusal(v));
+  if (v.pending !== undefined) throw new CliError(EXIT.BUSY, pendingRefusal(v));
+  const files = txnStateFilesFor(v.name, home);
+  if (files.length) throw new CliError(EXIT.BUSY, txnStateRefusal(v.name, files));
+  if (v.relocate !== undefined && !allowRelocate) throw new CliError(EXIT.CONFIG, relocateRefusal(v));
+}
+
+/**
+ * Security review V6 #3 — the transaction gate of the inner `__mount <name> [--txn <token>]` entry
+ * (defence in depth: it does not rely on the caller). No marker (no pending / relocate / state
+ * file) and no token ⇒ allowed. Any marker ⇒ allowed ONLY with a token equal to the CURRENT
+ * `pending` or `relocate.txid` — the token is what `unlockVault(v, {postMount:false})` (the V0
+ * raw transactional mount used by convert / relocation) passes; the public `unlock` / `run` never
+ * pass one. A token with nothing to match ⇒ refused. Malformed transaction keys ⇒ always refused.
+ */
+export function innerMountTxnGate(v, token, { home = homeDir() } = {}) {
+  if (v.txnInvalid !== undefined) throw new CliError(EXIT.CONFIG, txnInvalidRefusal(v));
+  const matches = token !== undefined && (token === v.pending || token === v.relocate?.txid);
+  if (token !== undefined && !matches)
+    throw new CliError(EXIT.BUSY, `保险库 ${v.name}：事务凭证与当前登记不符（登记项已变化？），拒绝挂载`);
+  if (matches) return;
+  if (v.pending !== undefined) throw new CliError(EXIT.BUSY, pendingRefusal(v));
+  const files = txnStateFilesFor(v.name, home);
+  if (files.length) throw new CliError(EXIT.BUSY, txnStateRefusal(v.name, files));
+  if (v.relocate !== undefined) throw new CliError(EXIT.CONFIG, relocateRefusal(v));
+}
+
 /** Create the §L.1 layout for a fresh vault (dir and mnt must not exist). Throws on any problem. */
+/** Identity {dev, ino} (bigint-exact, as strings) of `p` without following it; undefined when absent. */
+function idOfPath(p) {
+  try {
+    const st = fs.lstatSync(p, { bigint: true });
+    return { dev: String(st.dev), ino: String(st.ino) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Identities of what init's createLayout just made: `<dir>`, `<mnt>` and both parents. */
+export function initSkeletonIds(v) {
+  return {
+    dir: idOfPath(v.dir),
+    dirParent: idOfPath(path.dirname(v.dir)),
+    mnt: idOfPath(v.mnt),
+    mntParent: idOfPath(path.dirname(v.mnt)),
+  };
+}
+
+/** Sibling name for a set-aside init skeleton: `<base>.init-failed-<YYYYMMDD-HHMMSS>-<rand4>`. */
+export function initFailedName(base, now = new Date(), rand = () => Math.floor(Math.random() * 0x10000)) {
+  const p = (n) => String(n).padStart(2, "0");
+  const ts = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
+  return `${base}.init-failed-${ts}-${(rand() & 0xffff).toString(16).padStart(4, "0")}`;
+}
+
+/**
+ * Security review V6 round 2 (ruling: init NEVER deletes): after a lost registration claim the
+ * skeleton this run created is SET ASIDE, not removed — `<dir>` and `<mnt>` are each renamed as a
+ * whole, with RENAME_NOREPLACE, to a sibling `<base>.init-failed-<ts>-<rand>` through tree.mjs's
+ * reviewed `renameNoReplace` (parent pinned by fd + its recorded identity, source must still be the
+ * recorded (dev, ino), verdict by post-move identity). Identity changed, parent swapped, target name
+ * taken or any doubt ⇒ that path is left exactly as it is and only reported. No unlink / rmdir at all.
+ * → {moved: [{from, to}], kept: [{path, reason}]}
+ */
+export async function setAsideInitSkeleton(v, ids, { renameImpl, now = new Date(), rand } = {}) {
+  const rename = renameImpl ?? (await import("./tree.mjs")).renameNoReplace;
+  const moved = [];
+  const kept = [];
+  for (const [p, expect, expectParent] of [
+    [v.dir, ids.dir, ids.dirParent],
+    [v.mnt, ids.mnt, ids.mntParent],
+  ]) {
+    if (!expect || !expectParent) {
+      if (lstatOrNull(p)) kept.push({ path: p, reason: "创建时的身份未记录" });
+      continue;
+    }
+    const to = initFailedName(path.basename(p), now, rand);
+    let r;
+    try {
+      r = await rename({ parent: path.dirname(p), from: path.basename(p), to, expect, expectParent });
+    } catch (e) {
+      r = { ok: false, state: "unknown", reason: String((e && e.message) || e) };
+    }
+    if (r.ok) moved.push({ from: p, to: path.join(path.dirname(p), to) });
+    else if (lstatOrNull(p) || r.state !== "unchanged") kept.push({ path: p, reason: r.reason });
+  }
+  return { moved, kept };
+}
+
 export function createLayout(v, { others = [], home = homeDir() } = {}) {
   if (lstatOrNull(v.dir))
     throw new CliError(EXIT.FAIL, `${v.dir} 已存在——保险库已初始化，或上次 init 未完成（确认无用后删除该目录再 init）`);
@@ -1726,6 +1922,14 @@ function requireTty(what) {
   if (!tty.isatty(0)) throw new CliError(EXIT.USAGE, `${what}需要在终端里输入口令（stdin 不是 TTY）`);
 }
 
+/** convert.mjs CONVERT_USAGE, indented (kept verbatim in sync — pinned by a test; helper does not
+ *  load convert.mjs just to print its usage). */
+export const CONVERT_USAGE_LINES = [
+  "  pi-secure convert <明文目录> [<名字>] [--path <挂载点>] [--no-sessions] [--sessions-from <目录>]… [--private] [--assume-unreadable-idle]",
+  "  pi-secure convert --resume <名字> [--assume-unreadable-idle]",
+  "  pi-secure convert --abort  <名字> [--assume-unreadable-idle]",
+].join("\n");
+
 // USAGE text (Q9: new lines allowed). PRIVATE_BOUNDARY_LONG is declared further down (const, TDZ):
 // usageText() reads it lazily so the order of declarations stays free.
 function usageText() {
@@ -1735,12 +1939,19 @@ function usageText() {
   pi-secure lock <name> [--lazy|--kill]
   pi-secure status [<name>]
   pi-secure run <name> [--private|--no-private] [-C <子目录>] [pi 参数…]
+${CONVERT_USAGE_LINES}
+  pi-secure export <名字> <文件.tar>
+  pi-secure import <文件.tar> <名字> [--path <挂载点>] [--verify-password]
+  pi-secure import --resume <名字>
+  pi-secure import --abort  <名字>
 布局（private-plan §L.1）：元数据在 ~/.local/share/pi-toolkit-secure/<name>/（cipher、mount.lock、mount.lease），
 挂载点是 ~/secure/<name>/（0700 目录；未挂载时 work/state 是两个哨兵文件），项目根 ~/secure/<name>/work。
 --path 指定挂载点位置（绝对路径或 ~/ 开头）。
 --private/--no-private 只在紧跟 <name> 的位置识别（固定顺序：<name> [--private|--no-private] [-C <子目录>]，其余交给 pi）；
   缺省取 secure.vaults.<name>.private。init --private 登记为私有库（首次挂载、建目录、写 sessionDir、卸载都在私有命名空间内完成）。
 私有库的 unlock 默认拒绝（全局挂载对所有同用户进程可见），--global 只解除这条默认、从不绕过互斥。
+convert 把明文目录转成保险库：原目录改名为只读备份（从不删除），原路径改为指向 ~/secure/<名字>/work 的符号链接；中断后用 --resume（只完成链接）或 --abort（备份改回原名）。
+export 只导出密文包（库须未挂载）；import 导入为新库，挂载点位置变化时登记迁址，完成前 run/unlock/export 被拒，用 init <名字> --fix-settings 继续（私有库在私有命名空间内完成）。
 lock --kill 结束 --private 会话并收尾；lock --lazy 摘除该命名空间里的挂载路径；既有 cwd、已打开的文件和运行中的作业可能继续访问；插件在下一次输入/工具调用时拒绝。
 ${PRIVATE_BOUNDARY_LONG}
 说明见 docs/dev/data-encryption/plan.md §2.2（run 之后的参数原样交给 pi 解析；"--" 之后全部是消息）`;
@@ -1911,9 +2122,14 @@ export function verifyMountPointIdentity(v, pin, deps = {}) {
 }
 
 /** Inner half of a mount, executed by the outer launcher UNDER `flock -o mount.lock`. */
-async function cmdInnerMount(name) {
+async function cmdInnerMount(args) {
+  const [name, ...flags] = args;
+  let token;
+  if (flags.length === 2 && flags[0] === "--txn" && /^[!-~]{1,80}$/.test(flags[1] ?? "")) token = flags[1];
+  else if (flags.length) throw new CliError(EXIT.USAGE, "内部错误：__mount 参数不合法");
   const { vault: v } = must(resolveVault(name));
   requireNewLayout(v); // §L.3: legacy vaults never mount again
+  innerMountTxnGate(v, token); // security review V6 #3: same txn refusals as unlock, at the entry itself
   await plainMountPrivateGate(v); // §1.2: private record conflicts, BEFORE any TTY/password
   let st = await probeMountState(v);
   if (st === "mounted") return INNER_ALREADY;
@@ -2020,7 +2236,7 @@ async function plainMountLeaseGate(v) {
 }
 
 /** Mount (if needed) under `flock -o -w 10 mount.lock`, then ensure dirs. Returns "mounted-now"|"already". */
-async function doMount(v) {
+async function doMount(v, { txn } = {}) {
   const self = fileURLToPath(import.meta.url);
   const code = await runInherited("flock", [
     "-o",
@@ -2033,6 +2249,7 @@ async function doMount(v) {
     self,
     "__mount",
     v.name,
+    ...(txn !== undefined ? ["--txn", txn] : []),
   ]);
   if (code === FLOCK_TIMEOUT_CODE)
     throw new CliError(EXIT.LOCK_BUSY, "另一个 pi-secure 正在挂载或卸载（mount.lock 等待超时）");
@@ -2060,12 +2277,16 @@ function printWarnings() {
 
 export async function unlockVault(v, { fix = false, postMount = true } = {}) {
   requirePrereqs();
+  // Security review V6 #3: only the V0 raw transactional mount (`postMount:false` — convert's own
+  // mount, relocateVault / verifyVaultPassword) carries the CURRENT marker as its token, so the inner
+  // entry exempts exactly the transaction owning that marker; `unlock` / `run` never pass one.
+  const txn = postMount ? undefined : currentTxnToken(v.name);
   // `how` stays undefined until doMount settles — a THROW from doMount may still have MOUNTED
   // (identity verification runs INSIDE the __mount child, after gocryptfs succeeded), so the
   // catch treats how === undefined exactly like "mounted-now": probe & roll back (r2 ruling A3).
   let how;
   try {
-    how = await doMount(v);
+    how = await doMount(v, { txn });
     const st = await probeMountState(v);
     if (st !== "mounted")
       throw new CliError(EXIT.FAIL, `挂载未生效（mountinfo：${st}），请 pi-secure status ${v.name}`);
@@ -2079,6 +2300,20 @@ export async function unlockVault(v, { fix = false, postMount = true } = {}) {
     if (how !== "already") await rollbackFreshMount(v, e); // a pre-existing mount is left as found
     throw e;
   }
+}
+
+/** The entry's current transaction marker (pending, else relocate.txid) — undefined when none / unreadable. */
+function currentTxnToken(name) {
+  let e;
+  try {
+    e = getVaultEntryRaw(name);
+  } catch {
+    return undefined; // the inner entry re-reads settings and refuses on its own
+  }
+  if (!isPlainObject(e)) return undefined;
+  if (typeof e.pending === "string") return e.pending;
+  if (isPlainObject(e.relocate) && typeof e.relocate.txid === "string") return e.relocate.txid;
+  return undefined;
 }
 
 /** Unmount a mount we made ourselves after a failure; always tells the user the outcome.
@@ -2112,6 +2347,7 @@ async function cmdUnlock(args) {
     throw new CliError(EXIT.USAGE, usageText());
   const { vault: v } = must(resolveVault(name));
   requireNewLayout(v); // §L.3
+  refuseUnfinished(v); // convert-plan §3.5 / §3.4 (V6)
   if (v.private === true && !global)
     throw new CliError(
       EXIT.REFUSED_ARGS,
@@ -2177,6 +2413,10 @@ async function cmdInit(args) {
       );
     const { vault: v } = must(resolveVault(name));
     requireNewLayout(v); // §L.3
+    refuseUnfinished(v, { allowRelocate: true }); // §3.5: pending ⇒ 76
+    // convert-plan §3.4 (V6): a pending relocation turns --fix-settings into the controlled
+    // relocation entry. Without the marker the original paths below run unchanged.
+    if (v.relocate !== undefined) return await fixSettingsRelocate(v, home);
     if (v.private === true) {
       // §1.1: a private vault is fixed INSIDE its private ns (P1 setup mode), then unmounted.
       const code = await runPrivate(v, { mode: "setup", fix: true });
@@ -2191,6 +2431,11 @@ async function cmdInit(args) {
   if (r.registered && r.vault.layout === "legacy") {
     throw new CliError(EXIT.CONFIG, legacyRefusal(r.vault)); // §L.3: re-init over a legacy vault
   }
+  // Security review V6 #2: never re-create over an unfinished convert/import (pending, malformed
+  // keys, relocate, or state files for this name) — and the registration below is a settings-lock
+  // CAS against exactly what was read here (absent ⇒ expectAbsent; present ⇒ the same raw entry).
+  refuseUnfinished(r.vault, { home });
+  const entryBefore = r.registered ? getVaultEntryRaw(name, home) : undefined;
   if (lstatOrNull(r.vault.dir)) {
     const lay = checkLayout(r.vault, {
       mounted: (await probeMountState(r.vault)) !== "absent",
@@ -2224,12 +2469,26 @@ async function cmdInit(args) {
   if (!tty.isatty(1))
     throw new CliError(EXIT.USAGE, "init 会在终端打印 master key，stdout 必须是终端（不要重定向到文件/管道）");
   createLayout(v, { others: otherRegisteredVaults(v) });
+  const made = initSkeletonIds(v); // identities of what THIS run created (review V6 round 2)
   // Registered BEFORE gocryptfs -init so an interrupted init shows up in `status` as incomplete.
   // (N2 call site migrated to the V0 entry-object signature; the written bytes are identical.)
   try {
-    registerVault(name, { dir: v.dir, mnt: v.mnt, ...(priv ? { private: true } : {}) }, { home });
+    registerVault(
+      name,
+      { dir: v.dir, mnt: v.mnt, ...(priv ? { private: true } : {}) },
+      entryBefore === undefined ? { home, expectAbsent: true } : { home, expectEntry: entryBefore },
+    );
   } catch (e) {
-    throw new CliError(EXIT.CONFIG, `${String(e && e.message)}\n  ${v.dir} 已建好但未登记。\n${initCleanupHint(v)}`);
+    // Lost the claim to a concurrent convert/import (or the entry changed since it was read):
+    // NOTHING is deleted (review V6 round 2) — the skeleton this run created is renamed aside
+    // (identity-checked, no-replace) so the winner's publish is not blocked; anything else stays.
+    const r2 = await setAsideInitSkeleton(v, made);
+    const lines = [String(e && e.message), "  本次 init 未完成，未登记。"];
+    for (const m of r2.moved) lines.push(`  ${m.from} → ${m.to}`);
+    if (r2.moved.length) lines.push("  以上目录为本次创建的空骨架，核对后可自行删除。");
+    for (const k of r2.kept) lines.push(`  保留未动：${k.path}（${k.reason}）`);
+    if (r2.kept.length) lines.push(initCleanupHint(v));
+    throw new CliError(EXIT.CONFIG, lines.join("\n"));
   }
   out(
     `即将创建保险库 ${name}：gocryptfs 会要求输入两次新口令，然后在终端打印 master key（只显示这一次，请抄下离线保存）。`,
@@ -2302,6 +2561,7 @@ export async function describeVault(v, { scan = true, probe = probeMountState, u
     if (view.state !== "none") {
       const pl = renderPrivateStatus(v, { st, layout, problems: lay.problems, view });
       pl.splice(2 + lay.problems.length, 0, ...notes); // right after the dir / problem lines
+      pl.push(...txnVaultLines(v, { quote: await backupQuoter(v) })); // V6: empty unless the entry carries the keys
       return { lines: pl, st, scan: false };
     }
   }
@@ -2317,7 +2577,112 @@ export async function describeVault(v, { scan = true, probe = probeMountState, u
       `  恢复：确认 ${v.dir} 与挂载点 ${v.mnt}（未挂载、只含 work/state 两个哨兵）里没有要保留的数据后一并删除，再 pi-secure init ${v.name}`,
     );
   if (st === "stale") lines.push(`  ! 失效挂载（守护进程已不在）：pi-secure unlock ${v.name} 会先清理再挂载`);
+  lines.push(...txnVaultLines(v, { quote: await backupQuoter(v) })); // V6: empty unless the entry carries the keys
   return { lines, st, scan: scan && st === "mounted" };
+}
+
+/**
+ * convert-plan §1.7 / §3.4 / §3.5 (V6): per-vault lines for the transaction keys — each line
+ * appears ONLY when its key is on the entry (backup: only while that path still exists), so a
+ * vault without them prints byte-identical output (G1). lstat only (never follows, never reads).
+ */
+export function txnVaultLines(v, { exists = (p) => lstatOrNull(p) !== null, quote } = {}) {
+  const lines = [];
+  if (v.txnInvalid !== undefined) lines.push(`  ! ${txnInvalidRefusal(v)}`);
+  if (v.pending !== undefined) lines.push(`  pending: ${v.pending} · ${pendingRefusal(v)}`);
+  if (v.relocate !== undefined)
+    lines.push(
+      `  relocate: pending (${v.relocate.phase}) · ${v.relocate.from} → ${v.relocate.to} · pi-secure init ${v.name} --fix-settings`,
+    );
+  if (v.origin !== undefined) lines.push(`  origin: ${v.origin}`);
+  // security review V6 #4: the copy-paste command quotes the path with V4's shellQuote (convert.mjs);
+  // without a quoter only the path is shown — never an unquoted command.
+  if (v.backup !== undefined && exists(v.backup))
+    lines.push(
+      quote
+        ? `  backup: ${v.backup} (still present) · 确认保险库内容无误后自行删除：chmod -R u+w -- ${quote(v.backup)} && rm -rf -- ${quote(v.backup)}`
+        : `  backup: ${v.backup} (still present) · 确认保险库内容无误后自行删除`,
+    );
+  return lines;
+}
+
+/** V4's shellQuote, loaded only when a backup line can appear (convert.mjs is not loaded otherwise). */
+async function backupQuoter(v) {
+  if (v.backup === undefined) return undefined;
+  try {
+    return (await import("./convert.mjs")).shellQuote;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `<name>.aborted-<txid>` leftovers of a rolled-back convert (convert-plan r3.1) next to a vault dir/mnt. */
+const ABORTED_RE = /^([a-z0-9][a-z0-9_-]{0,31})\.aborted-([0-9a-f]{8,64})$/;
+
+/**
+ * Directories to look for `.aborted-<txid>` leftovers in: the default parents of `<dir>` and
+ * `<mnt>` plus the parents of every registered vault's dir/mnt. Listing a parent never enters a
+ * mount (readdir of the parent only); entries are lstat'ed, never followed.
+ */
+export function listAbortedLeftovers(home, vaults = [], { only } = {}) {
+  const parents = new Set([path.dirname(defaultVaultDir("x", home)), path.dirname(defaultVaultMnt("x", home))]);
+  for (const v of vaults) {
+    parents.add(path.dirname(v.dir));
+    parents.add(path.dirname(v.mnt));
+  }
+  const found = [];
+  for (const dir of [...parents].sort()) {
+    let names;
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const n of names.sort()) {
+      const m = ABORTED_RE.exec(n);
+      if (!m || (only !== undefined && m[1] !== only)) continue;
+      const p = path.join(dir, n);
+      const st = lstatOrNull(p);
+      if (st && st.isDirectory() && !st.isSymbolicLink()) found.push(p);
+    }
+  }
+  return found;
+}
+
+/**
+ * V6 status block: interrupted convert / import state files (V4 `listInterruptedConverts`,
+ * V5 `listImportStates`) and `.aborted-<txid>` leftovers. Nothing at all is printed (and neither
+ * engine module is loaded) when `.txn/` has no entry and no leftover exists — G1.
+ */
+export async function txnStatusLines(home, vaults, { only } = {}) {
+  const lines = [];
+  const txn = path.join(home, ".local", "share", "pi-toolkit-secure", ".txn");
+  let names = [];
+  try {
+    names = fs.readdirSync(txn);
+  } catch {
+    /* no .txn ⇒ nothing interrupted */
+  }
+  const want = (n) => only === undefined || n === only;
+  if (names.some((n) => /^convert-.*\.json$/.test(n))) {
+    try {
+      const C = await import("./convert.mjs");
+      for (const e of C.listInterruptedConverts(txn)) if (want(e.name)) lines.push(C.formatInterruptedLine(e));
+    } catch (e) {
+      lines.push(`convert: ! 无法读取中断的转换（${(e && e.message) || e}）`);
+    }
+  }
+  if (names.some((n) => /^import-.*\.json$/.test(n))) {
+    try {
+      const A = await import("./archive.mjs");
+      for (const l of A.listImportStates(home)) if (want(/^import (\S+):/.exec(l)?.[1])) lines.push(l);
+    } catch (e) {
+      lines.push(`import: ! 无法读取中断的导入（${(e && e.message) || e}）`);
+    }
+  }
+  for (const p of listAbortedLeftovers(home, vaults, { only }))
+    lines.push(`aborted: ${p} · 回滚留下的副本（内含本次拷贝的密文或数据），核对后可自行删除`);
+  return lines;
 }
 
 /** Other vaults from the settings file (for §L.1 position rules); empty on any read problem. */
@@ -2355,6 +2720,8 @@ async function cmdStatus(args) {
       } else out(`  cwd-in-vault: n/a (${s.kind})`);
     }
   }
+  // V6: interrupted transactions + rollback leftovers (only when present ⇒ G1 byte-identical)
+  for (const l of await txnStatusLines(home, cfg.valid ? cfg.vaults : [], { only: args[0] })) out(l);
   const w = systemWarnings(home);
   for (const x of w) out(`warn: ${x}`);
   if (!w.length) out("warn: none");
@@ -2420,6 +2787,7 @@ async function cmdRun(args) {
   const r = must(resolveVault(name));
   const v = r.vault;
   requireNewLayout(v); // §L.3: legacy vaults never run
+  refuseUnfinished(v); // convert-plan §3.5 / §3.4 (V6): pending ⇒ 76, relocate ⇒ 78 (both run modes)
   if (!r.enabled)
     throw new CliError(EXIT.CONFIG, "secure.enabled=false：插件守护已关闭，拒绝 run（unlock/lock/status 仍可用）");
   const piBin = findOnPath("pi");
@@ -4412,7 +4780,7 @@ export async function webHubHint(home = homeDir(), { timeoutMs = 300 } = {}) {
 // ───────────────────────────── P0: run --private (§2.2) ─────────────────────────────
 
 /** P0 orchestration. Called by cmdRun after the shared checks + lexical audit. */
-async function runPrivate(v, { sub, piArgs, piBin, pkg, mode = "run", fix = false } = {}) {
+async function runPrivate(v, { sub, piArgs, piBin, pkg, mode = "run", fix = false, relocateTxid } = {}) {
   requirePrereqs();
   const pf = await privatePreflight();
   if (!pf.ok)
@@ -4468,6 +4836,7 @@ async function runPrivate(v, { sub, piArgs, piBin, pkg, mode = "run", fix = fals
     piBin,
     piPkg: pkg,
     fix,
+    ...(mode === "setup" && relocateTxid !== undefined ? { relocateTxid } : {}),
     uid: process.getuid(),
     gid: process.getgid(),
   };
@@ -4558,6 +4927,95 @@ async function privateOutcome(v, instanceId, p1Code) {
     }
   }
   return d.code;
+}
+
+// ───────────────────────────── relocation entry (convert-plan §3.4, V6) ─────────────────────────────
+
+/**
+ * `init <名字> --fix-settings` on an entry carrying `relocate` (convert-plan §3.4). Normal vault ⇒
+ * V5 `relocateVault` (its own admission: unmounted, no instance, lease free, `to` = current work;
+ * raw mount, fd-anchored workers, phase per step, clears the marker, always unmounts). Private vault
+ * ⇒ the private setup mode: the same steps run INSIDE the private mount namespace (`relocateInNs`),
+ * the vault must be unmounted and without a live instance; the marker is advanced/cleared OUTSIDE
+ * the namespace under the settings lock with the relocateTxid guard.
+ */
+export async function fixSettingsRelocate(v, home, deps = {}) {
+  const d = {
+    relocateVault: async (o) => (await import("./archive.mjs")).relocateVault(o),
+    probeMountState,
+    vaultInstanceView,
+    patchVaultEntry,
+    runPrivate,
+    requireTty,
+    out,
+    err,
+    ...deps,
+  };
+  if (v.private !== true) return (await d.relocateVault({ name: v.name, home })).code;
+  const name = v.name;
+  const rel = v.relocate;
+  const realWork = path.join(physicalPaths(v).realMnt, "work");
+  if (realWork !== rel.to)
+    throw new CliError(EXIT.CONFIG, `迁址目标 ${rel.to} 与保险库当前工作目录 ${realWork} 不一致——请人工检查登记项`);
+  const st = await d.probeMountState(v);
+  if (st !== "absent")
+    throw new CliError(
+      EXIT.BUSY,
+      `保险库 ${name} 当前已挂载（${st}）——私有库迁址要求未挂载：先 pi-secure lock ${name}，再执行 pi-secure init ${name} --fix-settings`,
+    );
+  const view = await d.vaultInstanceView(v, st);
+  if (view.state !== "none" && view.state !== "stale")
+    throw new CliError(
+      EXIT.BUSY,
+      `保险库 ${name} 有正在运行或无法判定的私有实例 / 租约被占用（${view.state}）——拒绝迁址`,
+    );
+  d.requireTty("迁址"); // before the marker moves: a non-TTY call changes nothing
+  const mark = (patch) => {
+    const r = d.patchVaultEntry(name, { relocateTxid: rel.txid }, patch, { home });
+    if (r.kind !== "ok") throw new CliError(EXIT_IO, `更新迁址标记失败（${r.kind}${r.reason ? `：${r.reason}` : ""}）`);
+  };
+  mark({ set: { relocate: { ...rel, phase: "sessions" } } });
+  d.out(`${name}：在私有命名空间内迁址（${rel.from} → ${rel.to}；再输入一次口令，结束后自动卸载）：`);
+  const code = await d.runPrivate(v, { mode: "setup", relocateTxid: rel.txid });
+  if (code !== EXIT.OK) {
+    d.err(`${name}：迁址未完成（exit ${code}）；迁址标记保留，修复原因后重试 pi-secure init ${name} --fix-settings`);
+    return code;
+  }
+  mark({ set: { relocate: { ...rel, phase: "synced" } } });
+  mark({ remove: ["relocate"] });
+  d.out(`保险库 ${name} 迁址完成（${rel.from} → ${rel.to}；在私有命名空间内完成，已卸载）。`);
+  return EXIT.OK;
+}
+
+/**
+ * P1 side of the private relocation (setup stage, inside the ns, on the raw mount this supervisor
+ * just made): re-checks that the entry still carries THIS txid and no pending, that `to` is the
+ * in-ns physical work, then runs archive.mjs `runRelocateSteps` (fd-anchored workers, re-entrant,
+ * `sync -f`). No settings writes here. → the post-mount worker's result shape {ok, code?, message?, notes}.
+ */
+export async function relocateInNs(v, txid, realMnt, S, { runSteps } = {}) {
+  const rel = v.relocate;
+  if (!rel || rel.txid !== txid || v.pending !== undefined)
+    return { ok: false, code: EXIT.CONFIG, message: "迁址标记已变化（txid 不符或出现未完成的转换/导入），中止" };
+  if (path.join(realMnt, "work") !== rel.to)
+    return { ok: false, code: EXIT.CONFIG, message: `迁址目标 ${rel.to} 与挂载后的工作目录不一致，中止` };
+  const ac = new AbortController();
+  S.onRelocAbort = () => ac.abort();
+  const warnings = [];
+  try {
+    const A = await import("./archive.mjs");
+    try {
+      await (runSteps ?? A.runRelocateSteps)({ v, rel, realMnt, home: homeDir(), signal: ac.signal, warnings });
+      return { ok: true, notes: warnings };
+    } catch (e) {
+      const f = A.toFailure(e);
+      return { ok: false, code: f.code, message: f.message, notes: warnings };
+    }
+  } catch (e) {
+    return { ok: false, code: EXIT.FAIL, message: `无法加载迁址模块：${(e && e.message) || e}`, notes: warnings };
+  } finally {
+    S.onRelocAbort = undefined;
+  }
 }
 
 // ───────────────────────────── worker (§2.6) ─────────────────────────────
@@ -4728,6 +5186,7 @@ async function cmdNsRoot() {
     else if (S.stage === "launching") S.usr2Pending = true; // the race window right before "session"
   });
   const interrupt = () => {
+    S.onRelocAbort?.(); // V6: a running relocation worker is aborted (setup stage only)
     if (S.stage === "mounting") {
       S.abort = true;
       signalVerified(S.gocryId ?? { pid: -1, start: -1 }, "SIGTERM"); // identity-checked (review N1 #4)
@@ -4744,6 +5203,7 @@ async function cmdNsRoot() {
   });
   process.on("SIGTERM", () => {
     S.abort = true;
+    S.onRelocAbort?.();
     if (S.stage === "mounting") interrupt();
     if (S.pi) {
       try {
@@ -4947,18 +5407,23 @@ async function cmdNsRoot() {
     closeMountPointPin(pin);
     if (!vf.ok) throw new CliError(vf.code ?? EXIT.FAIL, vf.message);
     if (S.abort) throw new CliError(EXIT.FAIL, "已中止");
-    const pm = await runWorker(
-      {
-        op: "post-mount",
-        name: v.name,
-        mode: spec.mode,
-        fix: spec.fix === true,
-        sub: spec.sub ?? null,
-        piArgs: spec.piArgs ?? [],
-        piPkg: spec.piPkg,
-      },
-      PRIVATE_BUDGET.postMountMs,
-    );
+    // convert-plan §3.4 (V6): setup mode carrying a relocation runs the fd-anchored relocation steps
+    // (archive.mjs, workers) on this RAW private mount instead of the path-based post-mount writes.
+    const pm =
+      spec.mode === "setup" && typeof spec.relocateTxid === "string"
+        ? await relocateInNs(v, spec.relocateTxid, realMnt, S)
+        : await runWorker(
+            {
+              op: "post-mount",
+              name: v.name,
+              mode: spec.mode,
+              fix: spec.fix === true,
+              sub: spec.sub ?? null,
+              piArgs: spec.piArgs ?? [],
+              piPkg: spec.piPkg,
+            },
+            PRIVATE_BUDGET.postMountMs,
+          );
     for (const n of pm.notes ?? []) say(n);
     if (!pm.ok) throw new CliError(pm.code ?? EXIT.FAIL, pm.message);
     if (S.abort) throw new CliError(EXIT.FAIL, "已中止");
@@ -5177,6 +5642,144 @@ async function finalizeInNs(v, { realMnt, id, S, say, exitCode }) {
   }
 }
 
+// ───────────────────────────── V6: convert / export / import wiring ─────────────────────────────
+
+/**
+ * Raw settings entry `secure.vaults.<name>` (V4 port `getVaultEntry`): a deep copy incl. keys the
+ * vault object does not carry, or undefined when the file / section / entry is absent. An
+ * unreadable or malformed file THROWS (never "absent" — a claim decision must not rest on it).
+ */
+export function getVaultEntryRaw(name, home = homeDir()) {
+  const file = settingsFilePath(home);
+  const r = readJsonFile(file);
+  if (r.kind === "missing") return undefined;
+  if (r.kind === "error") throw new CliError(EXIT.CONFIG, `设置文件无法读取：${r.message}`);
+  if (!isPlainObject(r.value)) throw new CliError(EXIT.CONFIG, `${file}：不是 JSON 对象`);
+  const sec = r.value.secure;
+  if (sec === undefined) return undefined;
+  if (!isPlainObject(sec)) throw new CliError(EXIT.CONFIG, `${file}：secure: not an object`);
+  if (sec.vaults === undefined) return undefined;
+  if (!isPlainObject(sec.vaults)) throw new CliError(EXIT.CONFIG, `${file}：secure.vaults: not an object`);
+  return Object.hasOwn(sec.vaults, name) ? structuredClone(sec.vaults[name]) : undefined;
+}
+
+/** V4 port `leaseState`: "free" | "held" | "unknown" (a missing / malformed lease file ⇒ unknown). */
+export async function leaseStateOf(v) {
+  const li = leaseIdentitySync(v);
+  if (li.problem) return "unknown";
+  return await probeLease(li);
+}
+
+/** V4 port `initCipher`: `gocryptfs -init -- <cipher>` with the TTY inherited, NOT -q (master key). */
+export async function initCipherOf(v) {
+  if (!tty.isatty(1)) {
+    err("gocryptfs -init 会在终端打印 master key，stdout 必须是终端（不要重定向到文件/管道）");
+    return EXIT.USAGE;
+  }
+  return await runInherited("gocryptfs", ["-init", "--", v.cipher]);
+}
+
+/** V4 port `prompt`: one line from the terminal (interactive time is outside the bounded promise). */
+export async function promptLine(question) {
+  const readline = await import("node:readline");
+  return await new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    let done = false;
+    rl.on("close", () => {
+      if (!done) resolve("");
+      done = true;
+    });
+    rl.question(question, (a) => {
+      done = true;
+      rl.close();
+      resolve(a);
+    });
+  });
+}
+
+/** The full port object convert.mjs expects (V4-report §1), assembled from this module. */
+export function launcherPorts(home = homeDir()) {
+  return {
+    ...V0_PORTS,
+    getVaultEntry: (name) => getVaultEntryRaw(name, home),
+    listVaults: () => {
+      const { cfg } = loadSecureConfig(home);
+      return cfg.valid ? cfg.vaults : [];
+    },
+    deriveVault,
+    defaultVaultDir,
+    defaultVaultMnt,
+    physicalPaths,
+    createLayout,
+    ensureVaultDirs,
+    syncProjectSettings,
+    initCipher: initCipherOf,
+    probeMountState,
+    leaseState: leaseStateOf,
+    isTty: () => tty.isatty(0) && tty.isatty(1),
+    prompt: promptLine,
+    out,
+    err,
+  };
+}
+
+/** The user's cwd (the launcher `cd /`s first and hands it over in PI_SECURE_ORIG_CWD). */
+export function origCwdFrom(env, fallback) {
+  const v = env.PI_SECURE_ORIG_CWD;
+  if (typeof v === "string" && v.startsWith("/") && !v.includes("\0")) return path.resolve(v);
+  return fallback;
+}
+
+/** `~/x` ⇒ $HOME/x; anything else unchanged (relative paths are resolved by the engines against cwd). */
+function expandTilde(p, home) {
+  return typeof p === "string" && p.startsWith("~/") ? path.join(home, p.slice(2)) : p;
+}
+
+async function cmdConvertEntry(args, cwd) {
+  const C = await import("./convert.mjs");
+  const home = homeDir();
+  const ctx = C.defaultConvertContext(process.env, { home, cwd });
+  return await C.cmdConvert(args, { ports: launcherPorts(home), ctx });
+}
+
+async function cmdExportEntry(args, cwd) {
+  if (args.length !== 2 || args.some((a) => a.startsWith("-"))) throw new CliError(EXIT.USAGE, usageText());
+  const home = homeDir();
+  const A = await import("./archive.mjs");
+  return await A.cmdExport({ name: args[0], file: expandTilde(args[1], home), home, cwd });
+}
+
+async function cmdImportEntry(args, cwd) {
+  const home = homeDir();
+  const A = await import("./archive.mjs");
+  if (args[0] === "--resume" || args[0] === "--abort") {
+    if (args.length !== 2 || args[1].startsWith("-")) throw new CliError(EXIT.USAGE, usageText());
+    return args[0] === "--resume"
+      ? await A.cmdImportResume({ name: args[1], home })
+      : await A.cmdImportAbort({ name: args[1], home });
+  }
+  const pos = [];
+  let mnt;
+  let verify = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--path" && mnt === undefined && args[i + 1] !== undefined) mnt = args[++i];
+    else if (a.startsWith("--path=") && mnt === undefined && a.length > 7) mnt = a.slice(7);
+    else if (a === "--verify-password" && !verify) verify = true;
+    else if (!a.startsWith("-")) pos.push(a);
+    else throw new CliError(EXIT.USAGE, usageText());
+  }
+  if (pos.length !== 2) throw new CliError(EXIT.USAGE, usageText());
+  return await A.cmdImport({
+    file: expandTilde(pos[0], home),
+    name: pos[1],
+    ...(mnt !== undefined ? { path: expandTilde(mnt, home) } : {}),
+    ...(verify ? { verifyPassword: true } : {}),
+    home,
+    cwd,
+  });
+}
+
 /**
  * V0 helper ports (convert-plan §8.1 V0) — the injectable surface V4 (convert.mjs) and V5
  * (archive.mjs) receive: `unlockVault(v, {postMount:false})`, the claim/patch/remove settings
@@ -5197,6 +5800,15 @@ export const V0_PORTS = Object.freeze({
 export async function main(argv) {
   const [cmd, ...args] = argv;
   try {
+    // V6: the user's cwd for relative convert/export/import paths — taken BEFORE the chdir and the
+    // hand-over variable is removed so it never reaches gocryptfs, workers or pi.
+    let origCwd;
+    try {
+      origCwd = origCwdFrom(process.env, process.cwd());
+    } catch {
+      origCwd = origCwdFrom(process.env, undefined);
+    }
+    delete process.env.PI_SECURE_ORIG_CWD;
     process.chdir("/"); // never pin the vault ourselves; every user path is resolved explicitly
     switch (cmd) {
       case "init":
@@ -5209,8 +5821,17 @@ export async function main(argv) {
         return await cmdStatus(args);
       case "run":
         return await cmdRun(args);
+      // V6 (convert-plan §8.1): the engines run their workers through their OWN module entries
+      // (`node convert.mjs __convert-work`, `node tree.mjs`, `node archive.mjs __archive-work`) —
+      // helper needs no internal dispatch for them.
+      case "convert":
+        return await cmdConvertEntry(args, origCwd);
+      case "export":
+        return await cmdExportEntry(args, origCwd);
+      case "import":
+        return await cmdImportEntry(args, origCwd);
       case "__mount":
-        return await cmdInnerMount(args[0]);
+        return await cmdInnerMount(args);
       case "__private-claim":
         return await cmdPrivateClaim(args[0], args[1], args[2], args[3], args[4]);
       case "__private-update":
@@ -5229,19 +5850,24 @@ export async function main(argv) {
         // internal: executed by registerVault() UNDER the settings flock (V0: + --expect-absent / --pending)
         try {
           const [name, dir, mnt, ...flags] = args;
-          if (name === undefined || dir === undefined || mnt === undefined || flags.length > 4)
+          if (name === undefined || dir === undefined || mnt === undefined || flags.length > 6)
             throw new Error("内部错误：__register 参数不合法");
           let priv = false;
           let expectAbsent = false;
+          let expectEntry;
           let pending;
           for (let i = 0; i < flags.length; i++) {
             const f = flags[i];
             if (f === "--private" && !priv) priv = true;
             else if (f === "--expect-absent" && !expectAbsent) expectAbsent = true;
+            else if (f === "--expect-entry" && expectEntry === undefined && flags[i + 1] !== undefined)
+              expectEntry = JSON.parse(flags[++i]);
             else if (f === "--pending" && pending === undefined && flags[i + 1] !== undefined) pending = flags[++i];
             else throw new Error(`内部错误：__register 参数不合法（${JSON.stringify(f)}）`);
           }
-          registerVaultUnlocked(name, dir, mnt, undefined, { private: priv, expectAbsent, pending });
+          if (expectAbsent && expectEntry !== undefined)
+            throw new Error("内部错误：expectAbsent 与 expectEntry 不能同用");
+          registerVaultUnlocked(name, dir, mnt, undefined, { private: priv, expectAbsent, expectEntry, pending });
         } catch (e) {
           throw new CliError(EXIT.CONFIG, String(e && e.message));
         }
