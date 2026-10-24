@@ -3,6 +3,7 @@
 > 状态：r3（2026-10-23）。r1 评审（`/tmp/secure-convert-review-r1.json`）处置见「§R1 评审处置」；r2 复审（`/tmp/secure-convert-review-r2.json`：6 Blocker / 1 Major / 1 Minor）按 dev-flow 第三轮由主会话裁定、用户拍板，处置见文末「§R2 评审处置」。
 > **r3 的核心变化（用户拍板 2026-10-23）**：convert **不自动删除任何东西**。原目录先在同级原子改名为只读备份 `<原名>.pi-secure-backup-<时间戳>`，从备份拷入保险库并校验，成功后原路径换成指向 `~/secure/<名字>/work` 的符号链接；备份由用户确认后自己删除。旧会话与旧 memory 也只复制不删。r2 的整个删除事务（WAL、delete-intent、删除恢复、退出码 79）随之移除。
 > 用户已拍板的其他三项不变：A 原路径换成符号链接；B 迁移该项目的 pi 旧会话；C 密文包导出/导入（不做明文导出，不提供导入外部 gocryptfs 目录的接口）。布局按 [`private-plan.md`](./private-plan.md) §L（L0）：挂载点 `~/secure/<名字>/`，项目根 `~/secure/<名字>/work`。
+> **r3.1 修订注（2026-10-24，V4 安全评审 B3 裁定）**：回滚与 `--abort` **不再删除新库**。凡本文写「删新库」「删除 `<dir>` 与 `<mnt>`」「随后被回滚删除」之处（§0、§1.4 第 2/3 步回滚列、§1.4 中断文案、§1.6 R-A、§5 worker 模型与 I-C8、§7.2-4、W1）一律改读为：确认卸载、租约空闲、身份一致、无占用后，把 `<dir>` 与 `<mnt>` 用 `RENAME_NOREPLACE` 改名为同级 `<名字>.aborted-<txid>`（不覆盖），输出路径并提示「内含本次拷贝的密文，核对后可自行删除」；只有本 txid 创建且仍为空的挂载点目录可在身份核对后 `rmdir`（与 V2 探针同口径的残留）。登记项照旧只撤销 `pending === "convert:<txid>"` 的本事务条目。其余 r3.1 修订（恢复授权绑定、`.modes` 严格校验、worker owner-death、`--resume` 复核、git 加固、占用不可读即拒绝、权限恢复不完整即报告不完整、memory 冲突/不完整即失败）见 [`V4-report.md`](./V4-report.md)「§安全评审与验收处置」。
 > 并列文档：`private-plan.md` r3（两份共用 §6 退出码表与 §8 包顺序）、[`plan.md`](./plan.md) r4。本文只写方案，不改代码。
 
 ---
