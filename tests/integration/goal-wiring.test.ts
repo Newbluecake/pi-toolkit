@@ -129,7 +129,7 @@ describe("goal wiring (fake pi + ctx end-to-end)", () => {
     expect(host.userMessages[0]!.text).toContain("/goal 达成");
     expect(host.userMessages[0]!.options).toEqual({ deliverAs: "followUp" });
     expect(env.statuses.at(-1)).toEqual(["goal", undefined]);
-    stack.scheduler.stop();
+    stack.schedule?.dispose();
     stack.rpc.close();
   });
 
@@ -154,21 +154,21 @@ describe("goal wiring (fake pi + ctx end-to-end)", () => {
     expect(stackResume.goal.record).toMatchObject({ state: "paused", objective: "遗留目标", epoch: 2 });
     expect(resumed.notifications.some((n) => n.message.includes("/goal resume"))).toBe(true);
     expect(resumed.statuses.at(-1)?.[0]).toBe("goal");
-    stackResume.scheduler.stop();
+    stackResume.schedule?.dispose();
     stackResume.rpc.close();
 
     const reloaded = makeCtx("/tmp/goal-wiring-3", [goalEntry]);
     const stackReload = buildSessionStack(host.pi, reloaded.ctx, testSettings(), emptyTypes, [], "reload");
     expect(stackReload.goal.record?.state).toBe("paused");
     expect(reloaded.notifications).toHaveLength(0);
-    stackReload.scheduler.stop();
+    stackReload.schedule?.dispose();
     stackReload.rpc.close();
 
     const fresh = makeCtx("/tmp/goal-wiring-4", [goalEntry]);
     const stackNew = buildSessionStack(host.pi, fresh.ctx, testSettings(), emptyTypes, [], "new");
     expect(stackNew.goal.record).toBeUndefined();
     expect(fresh.notifications).toHaveLength(0);
-    stackNew.scheduler.stop();
+    stackNew.schedule?.dispose();
     stackNew.rpc.close();
   });
 
@@ -197,7 +197,7 @@ describe("goal wiring (fake pi + ctx end-to-end)", () => {
     await runGoalCommand(command, "clear", env.ctx);
     expect(holder.current.goal.record?.state).toBe("none");
     expect(env.statuses.at(-1)).toEqual(["goal", undefined]);
-    holder.current.scheduler.stop();
+    holder.current.schedule?.dispose();
     holder.current.rpc.close();
   });
 
@@ -223,7 +223,7 @@ describe("goal wiring (fake pi + ctx end-to-end)", () => {
     expect(record.state).toBe("active");
     expect(record.tokensUsed).toBe(0);
     expect(record.evalCount).toBe(0);
-    holder.current.scheduler.stop();
+    holder.current.schedule?.dispose();
     holder.current.rpc.close();
   });
 });

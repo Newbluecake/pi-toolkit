@@ -250,7 +250,7 @@ describe("compact hint turn_end wiring", () => {
     });
     await tool.execute("1", { percent: 60 }, undefined, undefined, ctx(80));
     expect(first.compactHint.thresholdPercent).toBe(60);
-    first.scheduler.stop();
+    first.schedule?.dispose();
     first.rpc.close();
     settings.compact = {
       enabled: true,
@@ -266,7 +266,7 @@ describe("compact hint turn_end wiring", () => {
     await tool.execute("2", { percent: 50 }, undefined, undefined, ctx(80));
     expect(second.compactHint.thresholdPercent).toBe(50);
     expect(first.compactHint.thresholdPercent).toBe(60);
-    second.scheduler.stop();
+    second.schedule?.dispose();
     second.rpc.close();
   });
   it("disabled compact settings start with a closed threshold", () => {
@@ -291,7 +291,7 @@ describe("compact hint turn_end wiring", () => {
     );
     expect(stack.compactHint.thresholdPercent).toBe(0);
     expect(stack.compactHint.thresholdTokens).toBe(0);
-    stack.scheduler.stop();
+    stack.schedule?.dispose();
     stack.rpc.close();
   });
   it("keeps the L1 latch independent from L2 force and rearms after fallback", () => {
@@ -551,7 +551,7 @@ describe("compact hint turn_end wiring", () => {
     expect(stack.compactHint.thresholdTokens).toBe(500);
     expect(stack.compactHint.forceAtTokens).toBe(0);
     expect(stack.compactHint.forceScaling).toBe(true); // default on
-    stack.scheduler.stop();
+    stack.schedule?.dispose();
     stack.rpc.close();
     const literal = buildSessionStack(
       fakePi().pi,
@@ -561,7 +561,7 @@ describe("compact hint turn_end wiring", () => {
       [],
     );
     expect(literal.compactHint.forceScaling).toBe(false);
-    literal.scheduler.stop();
+    literal.schedule?.dispose();
     literal.rpc.close();
   });
 
@@ -677,7 +677,7 @@ describe("compact hint turn_end wiring", () => {
       expect(stack.compactHint.switchTool).toBe(true);
       expect(stack.compactHint.forceDemandTurns).toBe(2);
       expect(stack.compactHint.demandCount).toBe(0);
-      stack.scheduler.stop();
+      stack.schedule?.dispose();
       stack.rpc.close();
       const off = buildSessionStack(
         fakePi().pi,
@@ -687,7 +687,7 @@ describe("compact hint turn_end wiring", () => {
         [],
       );
       expect(off.compactHint.switchTool).toBe(false);
-      off.scheduler.stop();
+      off.schedule?.dispose();
       off.rpc.close();
     });
   });

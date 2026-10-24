@@ -174,7 +174,7 @@ import { PiSessionDriver } from "./runtime/session-driver.js";
 import { SingleSlotPool } from "./runtime/slot-pool.js";
 import { EventWatchdog } from "./runtime/watchdog.js";
 import { createRPCServer, type RPCServer } from "./rpc/server.js";
-import { createScheduler, type Scheduler } from "./schedule/scheduler.js";
+import type { ScheduleAgent, ScheduleWiring } from "./schedule/agent/wire.js";
 import { createQueryService, type QueryService } from "./service/query-service.js";
 import { createLiveRunRegistry } from "./service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
@@ -1077,7 +1077,10 @@ export interface Stack {
   mention: MentionRegistry;
   /** X6b: latest raw user @ message per run, shown in the fleet widget under the run. */
   mentionNotes: MentionNotes;
-  scheduler: Scheduler;
+  /** scheduled-reports A0: the per-session schedule agent (absent ⇔ schedule.enabled off — the
+   *  default; the retired global cron engine is gone). Started by src/index.ts after the build,
+   *  shut down FIRST in session_shutdown (closeEpoch). */
+  schedule?: ScheduleAgent;
   rpc: RPCServer;
   workflow: WorkflowSupport;
   /** X7b fleet widget; absent when settings.fleetWidget is off. Exposed so session_shutdown
@@ -2111,6 +2114,8 @@ export function buildSessionStack(
   loadHintState?: LoadHintState,
   externalInput?: StackExternalInput,
   xsInput: StackXsInput = {},
+  /** scheduled-reports A0: activate-level wiring (present ⇔ schedule.enabled). */
+  scheduleWiring?: ScheduleWiring,
 ): Stack {
   // ask-user-async plan §3.3 (P2): FIRST disposal of the rebuild — the old
   // hub must stop broadcasting before the old coalescer/bash manager below
@@ -3363,7 +3368,7 @@ export function buildSessionStack(
       }
     }
   }
-  const scheduler = createScheduler({ spawn });
+  const schedule = scheduleWiring?.createAgent({ ctx });
   const rpc = createRPCServer({ events: pi.events, spawn, query });
   // §3.6: prepare the session directory before recover so migrated/orphaned
   // records enter the normal adjudication and notification path.
@@ -3620,7 +3625,7 @@ export function buildSessionStack(
     notifier,
     mention,
     mentionNotes,
-    scheduler,
+    ...(schedule !== undefined ? { schedule } : {}),
     rpc,
     workflow,
     goal,

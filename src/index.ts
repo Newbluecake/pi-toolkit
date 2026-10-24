@@ -3,7 +3,7 @@ import { initSecureDomain } from "./secure/domain.js";
 import { secureGuardsNeeded, wireSecureGuards } from "./secure/guards.js";
 import { registerSecureCommand, secureCommandWanted } from "./secure/command.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
 import { wireCacheTtl } from "./cache-ttl/cache-ttl.js";
 import { getProviderEvidenceStore } from "./cache-ttl/provider-evidence.js";
@@ -103,6 +103,7 @@ import { isTerminalJobStatus, type JobRecord } from "./bash/types.js";
 import { createStatusCommand } from "./commands/status.js";
 import { createWebHubCommand } from "./commands/webhub.js";
 import { wireWebHub, type WebHubControl } from "./web-hub/agent/index.js";
+import { wireSchedule } from "./schedule/agent/wire.js";
 import { renderXsMessage } from "./fabric/xs/render.js";
 import { renderToolkitMessage, TOOLKIT_LABELLED_CUSTOM_TYPES } from "./ui/toolkit-message-renderer.js";
 import { renderTaskStartedMessage, TASK_STARTED_CUSTOM_TYPE, createTaskCommand } from "./commands/task.js";
@@ -680,6 +681,20 @@ export default function activate(rawPi: ExtensionAPI): void {
     });
     return;
   }
+
+  // scheduled-reports A0 (plan r3 §3/§12): post-guard, after the compat gate; default off ⇒ never
+  // wired (no hook, no disk, no cap, no HubConfig key). Per-session agents are built by
+  // buildSessionStack; the old global cron engine is retired.
+  const scheduleWiring = settings.schedule.enabled
+    ? wireSchedule(pi, {
+        settings: settings.schedule,
+        agentDir: getAgentDir(),
+        secure: secureDomain,
+        lockedReason: () => secureGuards?.lockedReason(),
+        webHub: settings.webHub.enabled && settings.webHub.control !== false,
+        current: () => holder.current?.schedule,
+      })
+    : undefined;
 
   // Reply-plan §9 (MW): the @session port reuses the SAME sender instance as the tools.
   let xsSender: XsSender | undefined;
@@ -1388,7 +1403,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       holder.current.external?.dispose(); // external-agent plan §5.5（P5）：停目录探测（与 /reload 重建双保险）
       holder.current.dynamic?.dispose(ctx); // P1-4：防御性清理（与 shutdown 双保险，幂等）
       holder.current.load?.dispose();
-      holder.current.scheduler.stop();
+      holder.current.schedule?.dispose(); // defensive: the next stack recovers this epoch's runs (unknown(reload))
       holder.current.rpc.close();
       holder.current.fabric?.dispose();
       holder.current.workflow.runs.abandon(); // stop orphaned background workflows; their notices are dropped
@@ -1424,6 +1439,7 @@ export default function activate(rawPi: ExtensionAPI): void {
             },
           }
         : undefined,
+      scheduleWiring,
     );
     holder.current = stack;
     xsSessionId = nextXsSessionId;
@@ -1491,8 +1507,10 @@ export default function activate(rawPi: ExtensionAPI): void {
     // Background workflows (plan §3.2): notices the previous stack persisted while shutting down.
     stack.workflow.redeliverPendingNotices();
     stack.fabric?.pump(); // RC5: synchronous, never blocks startup
-    // data-encryption D8: secure/locked processes never load or arm cron tasks.
-    if (secureDomain.kind === "plain") await stack.scheduler.start(); // X5
+    // scheduled-reports A0: interactive plain sessions only (the agent's mode matrix decides; secure /
+    // locked / print / child / --no-session never arm). Never awaited: sweep/recovery take the ledger
+    // lock (bounded) and must not delay session start.
+    void stack.schedule?.start();
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
@@ -1503,6 +1521,10 @@ export default function activate(rawPi: ExtensionAPI): void {
     // must not interrupt whatever session comes next. Idempotent (the next
     // buildSessionStack's top-of-build dispose is the same call).
     stack.backgroundCompletions.dispose();
+    // scheduled-reports A0 (§4.6): the schedule executor goes FIRST — dispose, then this epoch's
+    // non-terminal runs become unknown(owner-closed) (lock wait ≤ 500 ms) BEFORE the run drain
+    // below can land a shutdown `aborted` (first terminal write wins).
+    await stack.schedule?.shutdown();
     // X7b: kill the fleet widget FIRST and unconditionally. pi's /reload
     // re-imports this extension as a fresh module (jiti moduleCache:false), so
     // the module-level previousFleetWidget handoff in buildSessionStack never
@@ -1521,7 +1543,6 @@ export default function activate(rawPi: ExtensionAPI): void {
     stack.quota?.dispose();
     stack.dynamic?.dispose(ctx); // P1-4：flush 遥测观察窗 + 估计量落盘（T-D3-DISPOSE）
     stack.load?.dispose();
-    stack.scheduler.stop(); // X5
     stack.rpc.close(); // X8
     // bash-timeout-grace plan §2.5 step 4/6 (P5): abort whichever recovery/
     // cleanup phase this stack still has outstanding — covers the fresh-
@@ -1699,6 +1720,8 @@ export default function activate(rawPi: ExtensionAPI): void {
           }
         : {}),
       feishuBot: settings.feishuBot,
+      // scheduled-reports A0: present ⇔ schedule.enabled ∧ plain domain (router exists).
+      ...(scheduleWiring?.webHubPort !== undefined ? { schedule: scheduleWiring.webHubPort } : {}),
       proxyWarnings: () => proxyWarnings,
       fleet: () => holder.current?.query.list() ?? [],
       query: () => holder.current?.query,

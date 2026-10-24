@@ -1,5 +1,5 @@
 // data-encryption P2: the remaining guard points — child-session placement and cross-domain resume
-// (session-driver), the consult fork root (fork-store), D2 worktree refusal (H2), D8 cron refusal.
+// (session-driver), the consult fork root (fork-store), D2 worktree refusal (H2), D8 schedule refusal.
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,7 +13,7 @@ import { createAgentSession, getAgentDir } from "@earendil-works/pi-coding-agent
 import { PiSessionDriver } from "../../src/runtime/session-driver.js";
 import { consultSessionDir, removeForkFile } from "../../src/consult/fork-store.js";
 import { createWorktreeExtension } from "../../src/extensions/worktree.js";
-import { createScheduler } from "../../src/schedule/scheduler.js";
+import { wireSchedule } from "../../src/schedule/agent/wire.js";
 import { resetSecureDomainForTests } from "../../src/secure/domain.js";
 import { freezeDomain, makeFakeVault, type FakeVault } from "./helpers.js";
 
@@ -145,29 +145,54 @@ describe("D2: worktree isolation refused outside the plain domain (H2)", () => {
   });
 });
 
-describe("D8: cron refused outside the plain domain", () => {
-  const task = () => ({
-    id: "t",
-    schedule: { kind: "interval" as const, intervalMs: 60_000 },
-    request: { prompt: "x" },
-  });
-  it("secure ⇒ register throws, start never loads the store", async () => {
+describe("D8: scheduled tasks refused outside the plain domain (A0 retired the old cron engine)", () => {
+  const ctxOf = (file: string | undefined) =>
+    ({
+      mode: "tui",
+      sessionManager: { getSessionId: () => "sess-1", getSessionFile: () => file, getEntries: () => [] },
+    }) as never;
+  it("secure ⇒ mode secure: no store, no clock, every execution gate E_SECURE, nothing created", async () => {
     v = makeFakeVault();
-    freezeDomain(v);
-    const store = { load: vi.fn(async () => [task()]), save: vi.fn(async () => undefined) };
-    const s = createScheduler({ spawn: { spawn: vi.fn() } as never, store });
-    await s.start();
-    expect(store.load).not.toHaveBeenCalled();
-    await expect(s.register(task() as never)).rejects.toThrow(/cron/);
-    expect(s.list()).toEqual([]);
-    s.stop();
+    const { domain } = freezeDomain(v);
+    const dir = join(v.home, "sched-store");
+    const pi = { on: vi.fn() };
+    const wiring = wireSchedule(pi as never, {
+      settings: { enabled: true, dir, defaultTimeoutMs: 1_800_000, maxTimeoutMs: 14_400_000 },
+      agentDir: v.home,
+      secure: domain,
+      webHub: true,
+      current: () => undefined,
+      flockProbe: () => true,
+    });
+    expect(wiring.webHubPort).toBeUndefined(); // no sched.v1 cap / HubConfig.schedule from a secure process
+    const agent = wiring.createAgent({ ctx: ctxOf(join(v.work, "s.jsonl")) });
+    expect(agent.mode.kind).toBe("secure");
+    expect(agent.clock).toBeUndefined();
+    expect(agent.store()).toBeUndefined();
+    expect(agent.self).toBeUndefined(); // no identity is even read in a secure process
+    expect(agent.gate()?.code).toBe("E_SECURE");
+    expect(await agent.runNow({ taskId: "s_abcdefgh", reqId: "req-0123456789abcdef" })).toMatchObject({
+      kind: "refused",
+      code: "E_SECURE",
+    });
+    await agent.start();
+    await agent.shutdown();
+    expect(existsSync(dir)).toBe(false);
   });
-  it("no verdict ⇒ legacy scheduler (loads the store)", async () => {
-    const store = { load: vi.fn(async () => []), save: vi.fn(async () => undefined) };
-    const s = createScheduler({ spawn: { spawn: vi.fn() } as never, store });
-    await s.start();
-    expect(store.load).toHaveBeenCalledTimes(1);
-    s.stop();
+  it("no verdict (plain) ⇒ interactive TUI session arms", () => {
+    const pi = { on: vi.fn() };
+    const wiring = wireSchedule(pi as never, {
+      settings: { enabled: true, dir: "/nonexistent/sched", defaultTimeoutMs: 1_800_000, maxTimeoutMs: 14_400_000 },
+      agentDir: "/nonexistent",
+      secure: { kind: "plain", vaults: [], config: {} } as never,
+      webHub: false,
+      current: () => undefined,
+      flockProbe: () => true,
+    });
+    const agent = wiring.createAgent({ ctx: ctxOf("/tmp/x.jsonl") });
+    expect(agent.mode.kind).toBe("interactive");
+    expect(agent.clock).toBeDefined();
+    agent.dispose();
   });
 });
 

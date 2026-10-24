@@ -32,6 +32,8 @@ import type { ObserveRunResult, RunObserverListener, RunSnapshot, RunStatus } fr
 import { isTerminalStatus } from "../../core/status.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
 import type { HubConfig, HubLanConfig } from "../hub/ports.js";
+import type { ScheduleWebHubPort } from "../../schedule/agent/coordinator.js";
+import { SCHED_AGENT_CAPS, SCHED_HUB_CAP, type SchedReceiptsFrame, type SchedRunFrame } from "../protocol/schedule.js";
 import type { HubSpawnConfig } from "../protocol/spawn.js";
 import { PREVIEW_DEFAULT_MODE, type PreviewMode } from "../protocol/preview.js";
 import { PROXY_PORTS_FILE_NAME, PROXY_STATE_DIR_NAME, parseProxyPortRange } from "../protocol/proxy.js";
@@ -369,6 +371,10 @@ export interface WebHubDeps {
    *  projection and the `archive` cmd op. Unset ⇒ the wire field never appears and the op settles
    *  `E_UNSUPPORTED` (byte-equal to the pre-feature shape). */
   archive?: () => ArchiveControl | undefined;
+  /** scheduled-reports A0 (§10.1/§10.3): the activate-level schedule hub router. UNSET (schedule
+   *  off — the default — or a non-plain domain) ⇒ no `sched.v1` cap, no `HubConfig.schedule`, no
+   *  sched frame hooks: byte-identical to the pre-feature shape. */
+  schedule?: ScheduleWebHubPort;
   hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -1328,8 +1334,20 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     deps.xs !== undefined
       ? createXsAgentBridge({ port: deps.xs, conn: () => conn, publishStatus: () => publishStatus() })
       : undefined;
+  // scheduled-reports A0: the router sends only while the live link's hello_ack carries sched.v1.
+  const schedulePort = deps.schedule;
+  schedulePort?.bindLink({
+    ready: () => conn?.status().state === "live" && (conn?.caps.includes(SCHED_HUB_CAP) ?? false),
+    send: (frame) => conn?.send(frame),
+  });
   const binding: BindingPort = {
     ...(xsBridge !== undefined ? { onXsDeliver: (frame) => xsBridge.onDeliver(frame) } : {}),
+    ...(schedulePort !== undefined
+      ? {
+          onSchedRun: (frame: SchedRunFrame) => schedulePort.onSchedRun(frame),
+          onSchedReceipts: (frame: SchedReceiptsFrame) => schedulePort.onSchedReceipts(frame),
+        }
+      : {}),
     onCmd: (frame) => {
       // dialog_answer/dialog_cancel are routed straight to the dialog bridge (C2's `dialogs.ts`) —
       // never through `commandHandler`, which would otherwise have to special-case them right back
@@ -1425,7 +1443,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // hook to republish the xs_member slot from FRESH membership state — a membership change
     // that landed while disconnected would otherwise have its STALE stored slot replayed by the
     // hello_ack slot machinery (X1-report §6 note 6: only a NEW xs_member revives a member).
-    ...(cmdCompleteOn || xsBridge !== undefined
+    ...(cmdCompleteOn || xsBridge !== undefined || schedulePort !== undefined
       ? {
           onHubCaps: () => {
             if (cmdCompleteOn) publishCommands();
@@ -1433,6 +1451,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             // alias-plan §4/R2: every hello_ack (attach, reconnect, hub restart) reconciles the alias cache with
             // the hub AFTER publishMember — a bounded read-only get, applied only if still the same link + session.
             xsBridge?.onHubCapsAlias();
+            schedulePort?.onHubCaps(); // scheduled-reports A0: announce the session once per hello_ack
           },
         }
       : {}),
@@ -1562,6 +1581,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // like every gated HubConfig feature; X1's `main.ts` re-validates and drops the whole key
     // on a malformed value (⇒ hub xs off). Only written when the xs bridge exists (xsOn).
     if (xsBridge !== undefined) config.crossSession = xsBridge.hubCrossSessionConfig();
+    // scheduled-reports A0 (§10.3): key-absence-is-off; only with the router (schedule.enabled ∧
+    // plain domain) AND the control plane; an unusable store dir also omits the key.
+    if (schedulePort !== undefined && settings.control !== false) {
+      const sched = schedulePort.hubConfig();
+      if (sched !== undefined) config.schedule = sched;
+    }
     const bot = deps.feishuBot;
     if (settings.enabled && settings.control !== false && bot?.enabled === true) {
       config.feishuBot = {
@@ -1616,6 +1641,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // `extraHubCaps` tail append. xsOn ⇒ control is on (the switch requires it), so the early
     // `!control` return above has already passed when we get here.
     if (xsBridge !== undefined) caps.push(...xsBridge.caps());
+    // scheduled-reports A0 (§10.1): tail-appended, only while the schedule router exists.
+    if (schedulePort !== undefined) caps.push(...SCHED_AGENT_CAPS);
     return caps;
   };
 

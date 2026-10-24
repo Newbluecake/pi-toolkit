@@ -78,7 +78,7 @@ describe("secure stack roots (real buildSessionStack)", () => {
       expect(readFileSync(marker, "utf8")).toBe("sess-secure-1\n");
       expect(existsSync(join(homeSandbox!.home, ".pi", "agent", "bash-jobs"))).toBe(false);
     } finally {
-      stack.scheduler.stop();
+      stack.schedule?.dispose();
       stack.rpc.close();
       stack.bashJobRecovery?.dispose();
       stack.backgroundCompletions.dispose();

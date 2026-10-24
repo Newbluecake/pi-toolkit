@@ -91,7 +91,7 @@ function build(over: { externalEnabled?: boolean; quotaProviders?: string } = {}
     dispose() {
       stack.external?.dispose();
       stack.quota?.dispose();
-      stack.scheduler.stop();
+      stack.schedule?.dispose();
       stack.rpc.close();
       if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = prev;

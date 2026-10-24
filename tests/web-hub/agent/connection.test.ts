@@ -1049,3 +1049,53 @@ describe("complete_req routing + commands-slot flush (web-hub-slash-args §4.1/�
     expect(written.at(-1)!.items.every((i) => i.args === undefined)).toBe(true);
   });
 });
+
+describe("scheduled-reports A0: sched_run / sched_receipts dispatch", () => {
+  const SCHED_RUN = {
+    t: "sched_run",
+    reqId: "fsAbCdEfGhIjKlMnOpQrStUvWxYz0123",
+    sessionId: "019a0000-aaaa-7bbb-8ccc-dddddddddddd",
+    taskId: "s_abcdefgh",
+    defHash: "a".repeat(64),
+    expiresAt: 1_761_350_430_000,
+  } as const;
+  const SCHED_RECEIPTS = {
+    t: "sched_receipts",
+    sessionId: "019a0000-aaaa-7bbb-8ccc-dddddddddddd",
+    reportIds: ["b".repeat(64)],
+  } as const;
+  const base = { onSnapshotReq: () => undefined, onBranchReq: () => undefined, onStateChange: () => undefined };
+
+  it("live link: both frames reach their binding hooks", () => {
+    const { conn, sock } = liveFake();
+    const runs: unknown[] = [];
+    const receipts: unknown[] = [];
+    conn.attach({ ...base, onSchedRun: (f) => runs.push(f), onSchedReceipts: (f) => receipts.push(f) }, SESSION);
+    sock().hub(SCHED_RUN);
+    sock().hub(SCHED_RECEIPTS);
+    expect(runs).toEqual([SCHED_RUN]);
+    expect(receipts).toEqual([SCHED_RECEIPTS]);
+  });
+
+  it("a binding without the hooks (schedule off) ignores them silently — no throw, no reply", () => {
+    const { conn, sock } = liveFake();
+    conn.attach(base, SESSION);
+    const before = sock().frames().length;
+    expect(() => {
+      sock().hub(SCHED_RUN);
+      sock().hub(SCHED_RECEIPTS);
+    }).not.toThrow();
+    expect(sock().frames().length).toBe(before);
+  });
+
+  it("non-live link: frames never reach the hooks", () => {
+    const n = fakeNet();
+    const conn = acquireConnection(opts({ netConnect: n.netConnect }));
+    const runs: unknown[] = [];
+    conn.attach({ ...base, onSchedRun: (f) => runs.push(f) }, SESSION);
+    const s = n.sockets[0]!;
+    s.emit("connect"); // handshaking, no hello_ack yet
+    s.hub(SCHED_RUN);
+    expect(runs).toEqual([]);
+  });
+});
