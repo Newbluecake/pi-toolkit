@@ -197,8 +197,8 @@ export class RealHarness {
     }
   }
 
-  tmp(prefix: string): string {
-    const d = mkdtempSync(join(tmpdir(), prefix));
+  tmp(prefix: string, root: string = tmpdir()): string {
+    const d = mkdtempSync(join(root, prefix));
     chmodSync(d, 0o700);
     this.scratch.push(d);
     return d;
@@ -244,8 +244,11 @@ export class RealHarness {
   }
 
   /** A fresh new-layout vault `acme` (plus optional extra registered vault names) under a temp HOME. */
-  setup(extraVaults: string[] = []): Env {
-    const r = this.tmp("ps-n4-");
+  setup(
+    extraVaults: string[] = [],
+    { acme = true, root, prefix = "ps-n4-" }: { acme?: boolean; root?: string; prefix?: string } = {},
+  ): Env {
+    const r = this.tmp(prefix, root);
     const h = join(r, "home");
     mkdirSync(h, { mode: 0o700 });
     const pkg = join(r, "fakepi");
@@ -268,7 +271,7 @@ export class RealHarness {
       mkdirSync(p, { mode: 0o700 });
     mkdirSync(join(h, "secure"), { mode: 0o700 });
     const vaults: Record<string, object> = {};
-    for (const name of ["acme", ...extraVaults]) {
+    for (const name of [...(acme ? ["acme"] : []), ...extraVaults]) {
       this.makeVault(r, h, name);
       vaults[name] = {};
     }
@@ -325,13 +328,28 @@ export class RealHarness {
     e: Env,
     args: string,
     extra: Record<string, string> = {},
-    { killAfterMs = 90_000, onText }: { killAfterMs?: number; onText?: (t: string) => void } = {},
+    {
+      killAfterMs = 90_000,
+      onText,
+      answers = [],
+      cwd,
+      password = PW,
+    }: {
+      killAfterMs?: number;
+      onText?: (t: string) => void;
+      /** [prompt pattern, reply]: the reply is typed once per occurrence of the pattern. */
+      answers?: Array<[RegExp, string]>;
+      cwd?: string;
+      /** typed at every "Password:"/"Repeat:" prompt (default: the harness's test password) */
+      password?: string;
+    } = {},
   ): Promise<{ code: number | null; text: string; ms: number; pid: number }> & { child: ChildProcess } {
     const t0 = Date.now();
     const c = spawn("script", ["-qefc", `${BIN} ${args}`, "/dev/null"], {
       env: { ...e.env, ...extra },
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
+      ...(cwd !== undefined ? { cwd } : {}),
     });
     const g = c.pid !== undefined ? { pid: c.pid, start: procStart(c.pid) ?? -1 } : undefined;
     if (g) this.groups.push(g);
@@ -342,17 +360,29 @@ export class RealHarness {
     const p = new Promise<{ code: number | null; text: string; ms: number; pid: number }>((res) => {
       let text = "";
       let typed = 0;
+      const answered = answers.map(() => 0);
       const on = (b: Buffer) => {
         text += b.toString();
         const prompts = text.split(/Password:|Repeat:/).length - 1;
         while (typed < prompts) {
           typed++;
           try {
-            c.stdin.write(`${PW}\r`);
+            c.stdin.write(`${password}\r`);
           } catch {
             /* closed */
           }
         }
+        answers.forEach(([re, reply], i) => {
+          const n = text.match(new RegExp(re.source, "g"))?.length ?? 0;
+          while (answered[i]! < n) {
+            answered[i]!++;
+            try {
+              c.stdin.write(`${reply}\r`);
+            } catch {
+              /* closed */
+            }
+          }
+        });
         onText?.(text);
       };
       c.stdout.on("data", on);

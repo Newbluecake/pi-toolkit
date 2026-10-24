@@ -8,7 +8,8 @@
  * Self-gating (skipped without gocryptfs / fusermount3 / flock / usable /dev/fuse). Everything happens in
  * a private mktemp dir with a TEST-ONLY fake password via -passfile; every mount is unmounted and the
  * scratch dir removed in afterAll. Holds the cross-suite gocryptfs test lock (global mounts would make
- * `run --private` suites flaky). V7 folds this into tests/conformance/secure-convert.test.ts.
+ * `run --private` suites flaky). V7 decision: kept as its own file (the V1 freeze-gate evidence);
+ * the XC index lives in tests/conformance/secure-convert.test.ts.
  */
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";

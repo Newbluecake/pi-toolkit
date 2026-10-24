@@ -1331,6 +1331,96 @@ describe("round 2 M4: --resume needs the evidence of steps 8, 9, 10 AND 11", () 
   });
 });
 
+// ───────────────────────────── V7 review M2: stale evidence before the irreversible points ─────────────────────────────
+
+describe("V7 review M2: a pause after the final backup re-verification voids its evidence", () => {
+  /** A clock that advances 6 s per reading (every check sees the evidence as stale). */
+  const jumpingClock = () => {
+    let t = 0;
+    return () => ({ mono: BigInt(++t) * 6_000_000_000n, wall: 1_800_000_000_000 + t * 6_000 });
+  };
+  const countCompare = (E: E_) => {
+    const n = { compare: 0 };
+    E.world.treeArgvOverride = (op: string) => {
+      if (op === "compare-baseline") n.compare++;
+      return undefined;
+    };
+    return n;
+  };
+  const touchBackup = (E: E_) => {
+    const f = join(E.home, backups(E)[0]!, "a.txt");
+    chmodSync(f, 0o644);
+    writeFileSync(f, "changed during the pause");
+  };
+
+  it("pure helper: >5 s on EITHER clock, or a backwards wall jump, is stale; missing evidence is stale", () => {
+    const s0 = { mono: 10_000_000_000n, wall: 1_000_000 };
+    expect(C.STALE_EVIDENCE_MS).toBe(5_000);
+    expect(C.evidenceStale(s0, { mono: s0.mono + 4_000_000_000n, wall: s0.wall + 4_000 })).toBe(false);
+    expect(C.evidenceStale(s0, { mono: s0.mono + 5_001_000_000n, wall: s0.wall + 10 })).toBe(true); // Ctrl+Z / SIGSTOP
+    expect(C.evidenceStale(s0, { mono: s0.mono + 10_000_000n, wall: s0.wall + 3_600_000 })).toBe(true); // suspend
+    expect(C.evidenceStale(s0, { mono: s0.mono + 10_000_000n, wall: s0.wall - 2_000 })).toBe(true);
+    expect(C.evidenceStale(undefined)).toBe(true);
+  });
+
+  it("forward flow, no pause: exactly ONE baseline comparison, no re-check notice", async () => {
+    const E = makeEnv("m2-fresh");
+    const n = countCompare(E);
+    expect(await E.run([E.src])).toBe(0);
+    expect(n.compare).toBe(1);
+    expect(E.out.join("\n")).not.toContain("重新复核备份");
+  });
+
+  it("forward flow, stale but unchanged: re-verified before step 13 AND step 14, then success", async () => {
+    const E = makeEnv("m2-stale-ok");
+    const n = countCompare(E);
+    expect(await E.run([E.src], { evidenceNow: jumpingClock() })).toBe(0);
+    expect(n.compare).toBe(3);
+    expect(E.out.filter((l) => l.includes("重新复核备份")).length).toBe(2);
+    expect(lstatSync(E.src).isSymbolicLink()).toBe(true);
+  });
+
+  it.each([13, 14])(
+    "forward flow, backup changed during a pause before step %i ⇒ rolled back (74), never success, the write survives",
+    async (step) => {
+      const E = makeEnv(`m2-chg-${step}`);
+      let notices = 0;
+      const say = (l: string) => {
+        E.out.push(l);
+        if (l.includes("重新复核备份") && ++notices === (step === 13 ? 1 : 2)) touchBackup(E);
+      };
+      expect(await E.run([E.src], { evidenceNow: jumpingClock(), say })).toBe(74);
+      expect(E.err.join("\n")).toContain("备份在转换期间被改动");
+      expect(E.out.join("\n")).toContain("已回滚");
+      expect(E.out.join("\n")).not.toContain("完成：");
+      expect(lstatSync(E.src).isDirectory()).toBe(true); // our link (step 14 case) was removed first
+      expect(readFileSync(join(E.src, "a.txt"), "utf8")).toBe("changed during the pause");
+      expect(E.reg.get("proj")).toBeUndefined();
+    },
+  );
+
+  it.each([13, 14])(
+    "--resume, backup changed during a pause before step %i ⇒ refused (76), no commit, --abort restores",
+    async (step) => {
+      const E = makeEnv(`m2-res-${step}`);
+      await build(E, "synced", { renamed: true, frozen: true, base: true, mounted: true });
+      let notices = 0;
+      const say = (l: string) => {
+        E.out.push(l);
+        if (l.includes("重新复核备份") && ++notices === (step === 13 ? 1 : 2)) touchBackup(E);
+      };
+      expect(await E.run(["--resume", "proj"], { evidenceNow: jumpingClock(), say })).toBe(76);
+      expect(E.err.join("\n")).toContain("备份在转换期间被改动");
+      expect(E.reg.get("proj").pending).toBe(`convert:${TXID}`); // not committed
+      expect(existsSync(E.src)).toBe(step === 14); // step 14: our link exists, state stays "linked"
+      expect(C.readState(E.txnDir, "proj").phase).toBe(step === 14 ? "linked" : "synced");
+      expect(await E.run(["--abort", "proj"])).toBe(1);
+      expect(lstatSync(E.src).isDirectory()).toBe(true);
+      expect(readFileSync(join(E.src, "a.txt"), "utf8")).toBe("changed during the pause");
+    },
+  );
+});
+
 // ───────────────────────────── real gocryptfs (fake password file, mktemp only) ─────────────────────────────
 
 const which = (b: string) => spawnSync("sh", ["-c", `command -v ${b}`]).status === 0;

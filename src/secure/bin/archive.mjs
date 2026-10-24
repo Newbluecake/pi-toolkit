@@ -987,6 +987,13 @@ const WORKER_OPS = {
   },
 };
 
+/** Test seam gate (mirror of helper.mjs testSeam, no import): value iff PI_SECURE_TEST_SEAMS=1. */
+export function testSeam(name, env = process.env) {
+  const v = env[name];
+  if (v === undefined || v === "") return undefined;
+  return env.PI_SECURE_TEST_SEAMS === "1" ? v : undefined;
+}
+
 async function workerMain(argv) {
   const emit = (obj) => fs.writeSync(1, `${JSON.stringify(obj)}\n`);
   const [sub, op, json] = argv;
@@ -997,13 +1004,14 @@ async function workerMain(argv) {
   // test seam (same precedent as helper's PI_SECURE_TEST_WORKER_DELAY): silent delay before the op,
   // so the stall watchdog can be exercised against a real worker process
   // second seam: a same-group descendant that IGNORES SIGTERM and holds none of our pipes (I5 test)
-  const orphanPidFile = process.env.PI_SECURE_TEST_ARCHIVE_ORPHAN_PIDFILE;
+  // V7 review M1: both seams are honoured only with PI_SECURE_TEST_SEAMS=1 (helper's testSeam rule)
+  const orphanPidFile = testSeam("PI_SECURE_TEST_ARCHIVE_ORPHAN_PIDFILE");
   if (orphanPidFile) {
     const o = spawn("sh", ["-c", "trap '' TERM; sleep 60"], { stdio: "ignore" });
     fs.writeFileSync(orphanPidFile, String(o.pid));
     o.unref();
   }
-  const delay = Number(process.env.PI_SECURE_TEST_ARCHIVE_STALL_MS ?? 0);
+  const delay = Number(testSeam("PI_SECURE_TEST_ARCHIVE_STALL_MS") ?? 0);
   if (Number.isFinite(delay) && delay > 0) await new Promise((r) => setTimeout(r, Math.min(delay, 600_000)));
   try {
     const result = await WORKER_OPS[op](JSON.parse(json ?? "null"), emit);

@@ -178,7 +178,7 @@ describe("spawnWorker (§5 worker model)", () => {
     const r = await A.spawnWorker(
       "sync",
       { path: env.home },
-      { stallMs: 300, env: { ...process.env, PI_SECURE_TEST_ARCHIVE_STALL_MS: "20000" } },
+      { stallMs: 300, env: { ...process.env, PI_SECURE_TEST_SEAMS: "1", PI_SECURE_TEST_ARCHIVE_STALL_MS: "20000" } },
     );
     expect(r.kind).toBe("stalled");
     expect(Date.now() - t0).toBeLessThan(10_000);
@@ -189,7 +189,10 @@ describe("spawnWorker (§5 worker model)", () => {
     const p = A.spawnWorker(
       "sync",
       { path: "/" },
-      { signal: ac.signal, env: { ...process.env, PI_SECURE_TEST_ARCHIVE_STALL_MS: "20000" } },
+      {
+        signal: ac.signal,
+        env: { ...process.env, PI_SECURE_TEST_SEAMS: "1", PI_SECURE_TEST_ARCHIVE_STALL_MS: "20000" },
+      },
     );
     setTimeout(() => ac.abort(), 200);
     expect((await p).kind).toBe("aborted");
@@ -1261,6 +1264,7 @@ describe("security review V5", () => {
         stallMs: 300,
         env: {
           ...process.env,
+          PI_SECURE_TEST_SEAMS: "1",
           PI_SECURE_TEST_ARCHIVE_STALL_MS: "20000",
           PI_SECURE_TEST_ARCHIVE_ORPHAN_PIDFILE: pidFile,
         },

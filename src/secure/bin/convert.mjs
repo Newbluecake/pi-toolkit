@@ -1556,12 +1556,47 @@ export function convertWorkerArgv(op, nodeBin = process.execPath) {
 
 // ───────────────────────────── context ─────────────────────────────
 
-/** Test seam (§7.2-3): `PI_SECURE_TEST_CONVERT_FAIL_AT=<step>:<before|after>` — can only make the flow FAIL. */
+/** Test seam gate (mirror of helper.mjs testSeam, no import): value iff PI_SECURE_TEST_SEAMS=1 (V7 review M1). */
+export function testSeam(name, env = process.env) {
+  const v = env[name];
+  if (v === undefined || v === "") return undefined;
+  return env.PI_SECURE_TEST_SEAMS === "1" ? v : undefined;
+}
+
+/** Test seam (§7.2-3): `PI_SECURE_TEST_CONVERT_FAIL_AT=<step>:<before|after>` — can only make the flow FAIL. Gated. */
 export function parseFailAt(env = process.env) {
-  const m = /^(\d{1,2}):(before|after)$/.exec(env.PI_SECURE_TEST_CONVERT_FAIL_AT ?? "");
+  const m = /^(\d{1,2}):(before|after)$/.exec(testSeam("PI_SECURE_TEST_CONVERT_FAIL_AT", env) ?? "");
   if (!m) return undefined;
   const step = Number(m[1]);
   return step >= 0 && step <= 15 ? { step, when: m[2] } : undefined;
+}
+
+/**
+ * Test seam (V7, §7.2-4/5/7): `PI_SECURE_TEST_CONVERT_STOP_AT=<step>:<before|mid|after>` — the
+ * orchestrator SIGSTOPs ITSELF at that point (`mid` exists only for step 3: phase "renaming" is
+ * persisted, the rename has not run). It can only DELAY the flow: the test then either SIGKILLs the
+ * stopped process (an interruption at an exact phase) or changes the world and SIGCONTs it (a race
+ * at an exact point). Unset/malformed ⇒ no effect. V7 review M1: honoured ONLY together with
+ * PI_SECURE_TEST_SEAMS=1; when armed, cmdConvert announces it on stderr at start and stopPoint prints
+ * step/when/pid right before stopping. A pause after the final backup re-verification is covered by
+ * the stale-evidence re-check before step 13 (V7 review M2, STALE_EVIDENCE_MS).
+ */
+export function parseStopAt(env = process.env) {
+  const m = /^(\d{1,2}):(before|mid|after)$/.exec(testSeam("PI_SECURE_TEST_CONVERT_STOP_AT", env) ?? "");
+  if (!m) return undefined;
+  const step = Number(m[1]);
+  return step >= 0 && step <= 15 ? { step, when: m[2] } : undefined;
+}
+
+function stopPoint(ctx, step, when) {
+  if (ctx.stopAt && ctx.stopAt.step === step && ctx.stopAt.when === when) {
+    try {
+      process.stderr.write(`pi-secure: 测试缝：convert 在第 ${step} 步（${when}）暂停（pid ${process.pid}）\n`);
+    } catch {
+      /* stderr gone */
+    }
+    process.kill(process.pid, "SIGSTOP");
+  }
 }
 
 /**
@@ -1594,6 +1629,7 @@ export function defaultConvertContext(env = process.env, over = {}) {
     convertArgv: (op) => convertWorkerArgv(op),
     workerEnv: env,
     failAt: parseFailAt(env),
+    stopAt: parseStopAt(env),
     signals: process,
     ...over,
   };
@@ -2339,6 +2375,7 @@ function fsckTimeoutMs(bytes) {
 }
 
 function failPoint(ctx, step, when) {
+  stopPoint(ctx, step, when);
   if (ctx.failAt && ctx.failAt.step === step && ctx.failAt.when === when)
     throw CE(CONVERT_EXIT.IO, `测试缝：第 ${step} 步（${when}）注入失败`, { code: "test-fail" });
 }
@@ -2361,6 +2398,7 @@ export async function cmdConvert(args, { ports, ctx: ctxIn } = {}) {
   const ctx = ctxIn ?? defaultConvertContext();
   const out = ports.out;
   const err = ports.err;
+  ctx.say ??= out; // M2 re-verification notices
   let opts;
   try {
     opts = parseConvertArgs(args);
@@ -2369,6 +2407,11 @@ export async function cmdConvert(args, { ports, ctx: ctxIn } = {}) {
     err(ce.message);
     return ce.exit;
   }
+  // V7 review M1: an armed STOP seam is announced before anything (lock, prompts, state) happens
+  if (ctx.stopAt)
+    err(
+      `!!! 测试缝已启用：convert 将在第 ${ctx.stopAt.step} 步（${ctx.stopAt.when}）暂停（PI_SECURE_TEST_CONVERT_STOP_AT，仅供测试）`,
+    );
   const intr = createInterrupts(ctx.signals, () => ({ txid: ctx.txid, uid: ctx.uid, procRoot: ctx.procRoot }));
   const baseSpawn = ctx.spawnImpl ?? spawn;
   ctx.spawnImpl = intr.track(baseSpawn);
@@ -2586,6 +2629,7 @@ async function convertFlow(opts, { ports, ctx, intr }) {
     // ── step 14: the only commit point (not interruptible) ──
     intr.check();
     failPoint(ctx, 14, "before");
+    await refreshIfStale(ctx, state, 14); // V7 review M2 (a mismatch ⇒ rollback, link removed by R-B 1)
     intr.deferred = true;
     let r;
     try {
@@ -2738,6 +2782,7 @@ async function forwardSteps({
   failPoint(ctx, 3, "before");
   state.phase = "renaming";
   persist();
+  stopPoint(ctx, 3, "mid"); // test seam only: phase "renaming" persisted, rename not yet done
   const rn = await T.renameNoReplace({
     parent: parentReal,
     from: base,
@@ -2956,8 +3001,40 @@ async function forwardSteps({
   // ── step 13: the link ──
   intr.check();
   failPoint(ctx, 13, "before");
+  await refreshIfStale(ctx, state, 13); // V7 review M2: a pause since step 12 voids its evidence
   await linkOrigin(ctx, state, v, persist);
   failPoint(ctx, 13, "after");
+}
+
+/**
+ * V7 review M2 — stale-evidence bound. Step 12's occupancy scan + baseline comparison are the last
+ * proof that the backup (= what the vault holds) is unchanged. Between that proof and the
+ * irreversible points (step 13 link, step 14 commit; the same pair in --resume) the flow does no
+ * user interaction and no data-proportional work: milliseconds. A pause there — Ctrl+Z/SIGSTOP,
+ * laptop suspend, scheduler stall, a debugger — lets the world change while the evidence looks
+ * fresh. So right before each irreversible point: if more than STALE_EVIDENCE_MS passed since the
+ * last successful re-verification, run it again in full (occupancy + compare-baseline, step-12
+ * semantics; a mismatch takes the existing failure path — rollback in the forward flow, refusal in
+ * --resume — never success). 5 s: three orders of magnitude above the normal gap, so it never fires
+ * in a healthy run, yet any human-scale pause is caught; a spurious re-check only costs time.
+ * Both clocks are consulted: the monotonic one stops during system suspend (CLOCK_MONOTONIC), the
+ * wall clock does not; any backwards wall jump counts as stale as well.
+ */
+export const STALE_EVIDENCE_MS = 5_000;
+export function evidenceStamp() {
+  return { mono: process.hrtime.bigint(), wall: Date.now() };
+}
+export function evidenceStale(stamp, now = evidenceStamp(), limitMs = STALE_EVIDENCE_MS) {
+  if (!stamp) return true;
+  const mono = Number((now.mono - stamp.mono) / 1_000_000n);
+  const wall = now.wall - stamp.wall;
+  return mono > limitMs || wall > limitMs || wall < -1_000;
+}
+async function refreshIfStale(ctx, state, step) {
+  if (!evidenceStale(ctx.backupVerifiedAt, (ctx.evidenceNow ?? evidenceStamp)())) return false;
+  ctx.say?.(`距上次备份复核已超过 ${STALE_EVIDENCE_MS / 1000} 秒（暂停/休眠？），第 ${step} 步之前重新复核备份 …`);
+  await reverifyBackup(ctx, state);
+  return true;
 }
 
 async function reverifyBackup(ctx, state) {
@@ -2971,6 +3048,7 @@ async function reverifyBackup(ctx, state) {
         .map((d) => `  ${d.rel ?? ""}：${d.kind}${d.fields ? `（${d.fields.join(",")}）` : ""}`),
       code: "backup-changed",
     });
+  ctx.backupVerifiedAt = (ctx.evidenceNow ?? evidenceStamp)(); // M2: evidence timestamp (end of the proof)
 }
 
 /** Step 13 (also --resume). EEXIST / foreign object ⇒ 76 keepState. */
@@ -3081,15 +3159,18 @@ async function resumeFlow(name, { ports, ctx, intr }) {
     const b = lstatBigOrNull(s.backup);
     if (!b || !sameId(b, s.ids.origin))
       throw CE(CONVERT_EXIT.BUSY, `备份 ${s.backup} 不在或身份不符，不能完成；请核对后 --abort`);
-    await reverifyBackup(ctx, s).catch((e) => {
+    const refuse = (e) => {
       // an uncertain occupancy check (75) stays 75: it is not a state conflict
       if (e && e.exit === CONVERT_EXIT.DEADLINE) throw e;
       throw CE(CONVERT_EXIT.BUSY, `${e.message}；请执行 pi-secure convert --abort ${name}`, { lines: e.lines });
-    });
+    };
+    await reverifyBackup(ctx, s).catch(refuse);
     intr.check();
+    await refreshIfStale(ctx, s, 13).catch(refuse); // V7 review M2
     await linkOrigin(ctx, s, v, persist);
     out(`已建立链接 ${s.originReal} → ${v.work}`);
     intr.check();
+    await refreshIfStale(ctx, s, 14).catch(refuse); // V7 review M2: refused ⇒ state stays linked, --abort
     intr.deferred = true;
     let r;
     try {

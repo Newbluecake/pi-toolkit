@@ -177,7 +177,11 @@ export function makeEnv(tag: string, opts: { failAt?: string; project?: boolean 
   delete env.ARMORY_MEMORY_ROOT;
   delete env.PI_SECURE_TEST_CONVERT_FAIL_AT;
   env.HOME = home;
-  if (opts.failAt) env.PI_SECURE_TEST_CONVERT_FAIL_AT = opts.failAt;
+  delete env.PI_SECURE_TEST_SEAMS;
+  if (opts.failAt) {
+    env.PI_SECURE_TEST_SEAMS = "1"; // V7 review M1: seams need the gate
+    env.PI_SECURE_TEST_CONVERT_FAIL_AT = opts.failAt;
+  }
   world.env = env;
   const ports = {
     registerVault: (name: string, entry: any, o: any) => {

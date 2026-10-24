@@ -167,6 +167,7 @@ describe.skipIf(SKIP !== "")(
     it("§6.2-4 lock inside the launching window (post-mount checks held 4 s): plain/--lazy 76, session unaffected", async (ctx) => {
       const e = await fresh(ctx);
       const run = T.tty(e, "run acme --private -- hi", {
+        PI_SECURE_TEST_SEAMS: "1",
         PI_SECURE_TEST_WORKER_DELAY: "post-mount:4000",
         FAKE_PI_SLEEP: "500",
         FAKE_PI_EXIT: "9",
@@ -186,7 +187,10 @@ describe.skipIf(SKIP !== "")(
 
     it("§6.2-4 lock --kill inside the launching window: P1 aborts before pi, finalizes, P0 releases ⇒ lock 0", async (ctx) => {
       const e = await fresh(ctx);
-      const run = T.tty(e, "run acme --private -- hi", { PI_SECURE_TEST_WORKER_DELAY: "post-mount:4000" });
+      const run = T.tty(e, "run acme --private -- hi", {
+        PI_SECURE_TEST_SEAMS: "1",
+        PI_SECURE_TEST_WORKER_DELAY: "post-mount:4000",
+      });
       await untilPhase(e, "launching");
       const t0 = Date.now();
       const k = plain(e, "lock acme --kill");
@@ -271,6 +275,7 @@ describe.skipIf(SKIP !== "")(
       const e = await fresh(ctx);
       const run = T.tty(e, "run acme --private -- hi", {
         FAKE_PI_SLEEP: "60000",
+        PI_SECURE_TEST_SEAMS: "1",
         PI_SECURE_TEST_FINALIZE_STALL_MS: "3000",
       });
       await untilPhase(e, "session");
@@ -384,7 +389,10 @@ describe.skipIf(SKIP !== "")(
     it("§6.2-8 worker timeout (review N4 #4): the readdir probe worker exceeds its 3 s budget ⇒ detected, 75, pi never starts, bounded, released", async (ctx) => {
       const e = await fresh(ctx);
       const t0 = Date.now();
-      const r = await T.tty(e, "run acme --private -- hi", { PI_SECURE_TEST_WORKER_DELAY: "readdir:15000" });
+      const r = await T.tty(e, "run acme --private -- hi", {
+        PI_SECURE_TEST_SEAMS: "1",
+        PI_SECURE_TEST_WORKER_DELAY: "readdir:15000",
+      });
       const ms = Date.now() - t0;
       expect(r.code, r.text).toBe(75);
       expect(r.text).toMatch(/挂载内操作 readdir 超时/);
@@ -584,6 +592,7 @@ describe.skipIf(SKIP !== "")(
       const e = await fresh(ctx);
       const run = T.tty(e, "run acme --private -- hi", {
         FAKE_PI_SLEEP: "60000",
+        PI_SECURE_TEST_SEAMS: "1",
         PI_SECURE_TEST_FINALIZE_STALL_MS: "30000",
       });
       await untilPhase(e, "session");

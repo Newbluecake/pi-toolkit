@@ -1,6 +1,7 @@
 /**
  * convert-plan.md §7.3 XC8 / XC9 — the pre-gate of package V2 (`src/secure/bin/tree.mjs`), run
- * BEFORE V2 starts (V7 later folds these into `tests/conformance/secure-convert.test.ts`).
+ * BEFORE V2 starts. V7 decision: kept as its own file (the V2 pre-gate evidence); the XC index
+ * lives in `tests/conformance/secure-convert.test.ts`.
  *
  *  XC8  coreutils `mv -n -T` uses `renameat2(…, RENAME_NOREPLACE)` on a whitelisted filesystem
  *       (asserted with strace when available, otherwise by behaviour: an existing EMPTY target

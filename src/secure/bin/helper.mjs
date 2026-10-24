@@ -1682,10 +1682,42 @@ export async function finalize(v, { lazy = false, budgetMs = FINALIZE_BUDGET_MS,
   return { code: EXIT.FAIL, lines: [`${v.name}：fusermount3 返回成功但挂载仍在（${after}）`] };
 }
 
+/**
+ * V7 security review M1 — test-seam gate. Every `PI_SECURE_TEST_*` seam is honoured ONLY when the
+ * gate `PI_SECURE_TEST_SEAMS=1` is set as well (only the test suites set both, in the env of the
+ * child they spawn). One variable alone ⇒ the seam is ignored and every user-facing launcher command
+ * prints a warning (main → testSeamWarnings); `status` adds a `warn:` line whenever any is present.
+ * Not a security boundary against the same uid — it only stops a stray/inherited variable from
+ * changing a real run. Mirrored (same rule, no import) in convert.mjs and archive.mjs.
+ */
+export const TEST_SEAMS_GATE = "PI_SECURE_TEST_SEAMS";
+export function testSeam(name, env = process.env) {
+  const v = env[name];
+  if (v === undefined || v === "") return undefined;
+  return env[TEST_SEAMS_GATE] === "1" ? v : undefined;
+}
+/** Names of the set (non-empty) seam variables, gate excluded, sorted. */
+export function testSeamNames(env = process.env) {
+  return Object.keys(env)
+    .filter((k) => k.startsWith("PI_SECURE_TEST_") && k !== TEST_SEAMS_GATE && env[k] !== undefined && env[k] !== "")
+    .sort();
+}
+/** Warning lines for a user-facing command (empty ⇔ no test variable at all). */
+export function testSeamWarnings(env = process.env) {
+  const names = testSeamNames(env);
+  const gate = env[TEST_SEAMS_GATE];
+  const gateSet = gate !== undefined && gate !== "";
+  if (names.length && gate !== "1")
+    return [`检测到测试用环境变量 ${names.join("、")}，已忽略（测试缝只在 ${TEST_SEAMS_GATE}=1 时生效）`];
+  if (gateSet && !names.length) return [`检测到测试用环境变量 ${TEST_SEAMS_GATE}，已忽略（没有设置任何测试缝）`];
+  if (names.length) return [`测试缝已启用（仅供测试，切勿用于真实数据）：${names.join("、")}`];
+  return [];
+}
+
 function testScanDelay() {
   // TEST-ONLY seam (tests/secure/launcher-fuse.test.ts): delay the occupancy scan to prove the scan
-  // budget. Can only make the launcher refuse to unmount — never weaker.
-  const n = Number(process.env.PI_SECURE_TEST_SCAN_DELAY_MS ?? 0);
+  // budget. Can only make the launcher refuse to unmount — never weaker. Gated (testSeam).
+  const n = Number(testSeam("PI_SECURE_TEST_SCAN_DELAY_MS") ?? 0);
   return Number.isFinite(n) && n > 0 ? Math.min(n, 60_000) : 0;
 }
 
@@ -1698,11 +1730,11 @@ function testScanDelay() {
  *     backstop still fires ⇒ exit 75 ⇒ P0's outer cleanup: the §3.4+§3.5 worst path).
  */
 export function testWorkerDelayMs(op, env = process.env) {
-  const m = /^([a-z-]{1,32}):(\d{1,6})$/.exec(env.PI_SECURE_TEST_WORKER_DELAY ?? "");
+  const m = /^([a-z-]{1,32}):(\d{1,6})$/.exec(testSeam("PI_SECURE_TEST_WORKER_DELAY", env) ?? "");
   return m && m[1] === op ? Math.min(Number(m[2]), 60_000) : 0;
 }
 export function testFinalizeStallMs(env = process.env) {
-  const n = Number(env.PI_SECURE_TEST_FINALIZE_STALL_MS ?? 0);
+  const n = Number(testSeam("PI_SECURE_TEST_FINALIZE_STALL_MS", env) ?? 0);
   return Number.isFinite(n) && n > 0 ? Math.min(n, 60_000) : 0;
 }
 
@@ -2067,7 +2099,7 @@ export function mountinfoDevAt(mountinfo, realMnt) {
 }
 
 export function verifyMountPointIdentity(v, pin, deps = {}) {
-  if (process.env.PI_SECURE_TEST_MOUNT_VERIFY_FAIL === "1")
+  if (testSeam("PI_SECURE_TEST_MOUNT_VERIFY_FAIL") === "1")
     throw new CliError(EXIT.FAIL, `TEST 注入：挂载点身份核验失败（${v.mnt}）`);
   try {
     const { realCipher } = physicalPaths(v);
@@ -2723,6 +2755,12 @@ async function cmdStatus(args) {
   // V6: interrupted transactions + rollback leftovers (only when present ⇒ G1 byte-identical)
   for (const l of await txnStatusLines(home, cfg.valid ? cfg.vaults : [], { only: args[0] })) out(l);
   const w = systemWarnings(home);
+  // V7 review M1: any test variable present (gated or not) is called out (absent ⇒ byte-identical)
+  const seamVars = [...testSeamNames(), ...(process.env[TEST_SEAMS_GATE] ? [TEST_SEAMS_GATE] : [])];
+  if (seamVars.length)
+    w.push(
+      `测试用环境变量已设置：${seamVars.join("、")}${testSeamWarnings().some((l) => l.startsWith("测试缝已启用")) ? "（测试缝已启用）" : "（已忽略）"}——真实使用时请 unset`,
+    );
   for (const x of w) out(`warn: ${x}`);
   if (!w.length) out("warn: none");
   return EXIT.OK;
@@ -5810,6 +5848,9 @@ export async function main(argv) {
     }
     delete process.env.PI_SECURE_ORIG_CWD;
     process.chdir("/"); // never pin the vault ourselves; every user path is resolved explicitly
+    // V7 review M1: stray / inherited test variables are reported on every user-facing command
+    // (internal `__*` entries stay silent: their stderr belongs to the supervising launcher)
+    if (typeof cmd === "string" && !cmd.startsWith("__")) for (const l of testSeamWarnings()) err(l);
     switch (cmd) {
       case "init":
         return await cmdInit(args);

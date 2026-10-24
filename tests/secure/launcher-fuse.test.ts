@@ -339,7 +339,7 @@ process.exit(Number(e.FAKE_PI_EXIT ?? 0));
 
   it("bounded finalize ① scan over budget ⇒ warns and skips the unmount, well within 11s", () => {
     mountDirect();
-    const r = run(["lock", "acme"], { PI_SECURE_TEST_SCAN_DELAY_MS: "20000" });
+    const r = run(["lock", "acme"], { PI_SECURE_TEST_SEAMS: "1", PI_SECURE_TEST_SCAN_DELAY_MS: "20000" });
     expect(r.code).toBe(75);
     expect(r.err).toContain("占用扫描超时，未卸载");
     expect(r.ms).toBeLessThan(11_000);
@@ -521,7 +521,10 @@ process.exit(Number(e.FAKE_PI_EXIT ?? 0));
     expect(mounted()).toBe(false);
     // gocryptfs really mounts; the post-mount identity check is forced to fail inside __mount;
     // doMount then throws and unlockVault MUST probe + unmount what this call created.
-    const r = await runTty(`${BIN} unlock acme`, [FAKE_PW], 60_000, { PI_SECURE_TEST_MOUNT_VERIFY_FAIL: "1" });
+    const r = await runTty(`${BIN} unlock acme`, [FAKE_PW], 60_000, {
+      PI_SECURE_TEST_SEAMS: "1",
+      PI_SECURE_TEST_MOUNT_VERIFY_FAIL: "1",
+    });
     expect(r.code, r.text).toBe(1);
     expect(r.text).toContain("TEST 注入");
     expect(r.text).toContain("本次挂载已撤销");
