@@ -103,7 +103,11 @@ import { isTerminalJobStatus, type JobRecord } from "./bash/types.js";
 import { createStatusCommand } from "./commands/status.js";
 import { createWebHubCommand } from "./commands/webhub.js";
 import { wireWebHub, type WebHubControl } from "./web-hub/agent/index.js";
-import { wireSchedule } from "./schedule/agent/wire.js";
+import { vaultPredicateOf, wireSchedule } from "./schedule/agent/wire.js";
+import { wireScheduleSurface } from "./schedule/agent/surface.js";
+import { createScheduleCommand } from "./commands/schedule.js";
+import { createScheduleTool } from "./tools/schedule-tool.js";
+import { scheduleSection } from "./sysprompt/schedule-section.js";
 import { renderXsMessage } from "./fabric/xs/render.js";
 import { renderToolkitMessage, TOOLKIT_LABELLED_CUSTOM_TYPES } from "./ui/toolkit-message-renderer.js";
 import { renderTaskStartedMessage, TASK_STARTED_CUSTOM_TYPE, createTaskCommand } from "./commands/task.js";
@@ -695,6 +699,29 @@ export default function activate(rawPi: ExtensionAPI): void {
         current: () => holder.current?.schedule,
       })
     : undefined;
+  // scheduled-reports A3 (plan r3 §5): the session-visible surface. Tool / section / status bar / digest
+  // exist ONLY when schedule.enabled (default off ⇒ tool table, command table, system prompt and status bar
+  // byte-identical); `/schedule` is registered only then too (plan §1).
+  const scheduleSurface = scheduleWiring
+    ? wireScheduleSurface(pi, { settings: settings.schedule, types, current: () => holder.current?.schedule })
+    : undefined;
+  if (scheduleSurface !== undefined) {
+    pi.registerTool(
+      createScheduleTool({
+        agent: () => holder.current?.schedule,
+        ports: (agent, ctx) => scheduleSurface.opsPorts(agent, ctx),
+      }),
+    );
+    pi.registerCommand(
+      "schedule",
+      createScheduleCommand({
+        enabled: () => settings.schedule.enabled,
+        agent: () => holder.current?.schedule,
+        ports: (agent, ctx) => scheduleSurface.opsPorts(agent, ctx),
+        inVault: vaultPredicateOf(secureDomain),
+      }),
+    );
+  }
 
   // Reply-plan §9 (MW): the @session port reuses the SAME sender instance as the tools.
   let xsSender: XsSender | undefined;
@@ -1119,6 +1146,10 @@ export default function activate(rawPi: ExtensionAPI): void {
       },
     }),
   );
+  // scheduled-reports A3: last section in the fold order (memory → types → models → schedules); session-scoped,
+  // so a fork never inherits the parent's tasks. Absent when schedule is off ⇒ the prompt hub is untouched.
+  if (scheduleWiring !== undefined)
+    promptHub.register("pi_schedules", scheduleSection({ agent: () => holder.current?.schedule }));
   // CC3/M3.6: the workflow engine stays entirely inert (stub tool, clear
   // error message) unless settings.workflow.enabled — decided once here
   // rather than per-session, since `settings` itself is loaded once.
@@ -1510,7 +1541,8 @@ export default function activate(rawPi: ExtensionAPI): void {
     // scheduled-reports A0: interactive plain sessions only (the agent's mode matrix decides; secure /
     // locked / print / child / --no-session never arm). Never awaited: sweep/recovery take the ledger
     // lock (bounded) and must not delay session start.
-    void stack.schedule?.start();
+    // A3: the surface starts the agent, then the status bar and the opening digest (needs the swept ledger).
+    void scheduleSurface?.start(ctx, stack.schedule);
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
@@ -1524,6 +1556,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     // scheduled-reports A0 (§4.6): the schedule executor goes FIRST — dispose, then this epoch's
     // non-terminal runs become unknown(owner-closed) (lock wait ≤ 500 ms) BEFORE the run drain
     // below can land a shutdown `aborted` (first terminal write wins).
+    scheduleSurface?.shutdown(); // status bar cleared + digest disposed BEFORE the executor closes its runs
     await stack.schedule?.shutdown();
     // X7b: kill the fleet widget FIRST and unconditionally. pi's /reload
     // re-imports this extension as a fresh module (jiti moduleCache:false), so

@@ -23,6 +23,7 @@ import {
   readBackSectionStates,
   serializeSectionStates,
   type ReadBackReason,
+  type SectionScope,
 } from "../prompt-sections/store.js";
 import { renderSectionUpdateMessage } from "../prompt-sections/update-message.js";
 import { createWakeReplay, type MessageLike } from "./wake-replay.js";
@@ -57,6 +58,13 @@ export interface SectionRegistration {
    */
   pointerHint?: string | ((input: SectionProviderInput) => string);
   skipIf?: (input: SectionProviderInput) => boolean;
+  /**
+   * scheduled-reports A3 (plan r3 §5.3): the section's content belongs to ONE session. Its persisted
+   * snapshot records the owning session id and read-back into any other session (fork / copy of the
+   * branch) starts from the initial state instead of inheriting it. Absent ⇒ every byte of the
+   * section's persistence is as before.
+   */
+  sessionScoped?: true;
 }
 
 export interface PromptSectionHubOpts {
@@ -94,6 +102,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
   let firstRequestPending = true;
   let lastPersisted: string | undefined;
   let warnedPersist = false;
+  let currentSid: string | undefined;
   const warnedPointerHint = new Set<SectionName>();
 
   const names = (): SectionName[] => [...registrations.keys()];
@@ -148,8 +157,26 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
     return value;
   }
 
+  const scopedNames = (): ReadonlySet<SectionName> =>
+    new Set([...registrations].filter(([, r]) => r.sessionScoped === true).map(([name]) => name));
+  function scope(): SectionScope | undefined {
+    const names = scopedNames();
+    return names.size === 0 ? undefined : { names, sessionId: currentSid };
+  }
+  function noteSession(ctx: ExtensionContext | undefined): void {
+    // Only session-scoped sections need the sid: without one registered the ctx is never touched here
+    // (a minimal host without a session manager must keep working byte-for-byte as before).
+    if (![...registrations.values()].some((r) => r.sessionScoped === true)) return;
+    try {
+      const id = ctx?.sessionManager?.getSessionId?.();
+      currentSid = typeof id === "string" && id !== "" ? id : undefined;
+    } catch {
+      currentSid = undefined; // stale ctx ⇒ unknown ⇒ scoped sections are not trusted
+    }
+  }
+
   function persist(): void {
-    const data = serializeSectionStates(states);
+    const data = serializeSectionStates(states, scope());
     const serialized = JSON.stringify(data);
     if (serialized === lastPersisted) return;
     try {
@@ -170,7 +197,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
   ): { states: Map<SectionName, SectionState>; exact: boolean; serialized: string } | undefined {
     try {
       const branch = ctx.sessionManager?.getBranch?.() ?? [];
-      return readBackSectionStates(branch, reason, names());
+      return readBackSectionStates(branch, reason, names(), scope());
     } catch {
       return undefined;
     }
@@ -182,6 +209,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
   }
 
   function onSessionStart(ctx: ExtensionContext, reason: ReadBackReason): void {
+    noteSession(ctx);
     const restored = readBranch(ctx, reason);
     if (!restored) {
       // §4.8: entry not found / invalid / reason "new" -> fresh snapshot (one refresh ahead).
@@ -200,6 +228,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
   }
 
   function onSessionTree(ctx: ExtensionContext): void {
+    noteSession(ctx);
     const restored = readBranch(ctx, "tree");
     if (restored) {
       states.clear();
@@ -285,6 +314,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
     ctx: ExtensionContext,
   ): BeforeAgentStartEventResult | undefined {
     userTurnSeen = true;
+    noteSession(ctx);
     const mode = opts.mode();
     if (prefixFresh) {
       prefixFresh = false;
