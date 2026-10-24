@@ -32,7 +32,7 @@ import AppIcon from "../../icons/AppIcon.vue";
 import { FLEET_STATE_ICON, fleetStateSpins } from "./state-icon.js";
 import { typeBadge, shortModelLabel } from "@logic/fleetRow.js";
 import { formatTimeRange, type TimeRangeLabel } from "@logic/timeRange.js";
-import { fleetActivity, isTerminalRow, FLEET_SELECT } from "./summary.js";
+import { fleetActivity, isTerminalRow, FLEET_ARCHIVE, FLEET_SELECT } from "./summary.js";
 
 const props = withDefaults(defineProps<FleetTreeProps>(), { depth: 0 });
 const { t } = useI18n();
@@ -95,6 +95,16 @@ function displayElapsedMs(row: FleetRowWire): number {
 // row 渲染辅助(原 FleetNode 的 computed,按行调用)
 // ---------------------------------------------------------------------------
 const sel = inject(FLEET_SELECT, null);
+// web-hub archive plan: the per-row「归档」button seam (terminal rows only — a running row
+// never archives; the agent re-checks terminality anyway).
+const arch = inject(FLEET_ARCHIVE, null);
+function canArchiveRow(row: FleetRowWire): boolean {
+  return arch !== null && arch.canArchive.value && isTerminalRow(row as unknown as Record<string, unknown>);
+}
+function onArchiveRow(row: FleetRowWire): void {
+  const label = String(row.title ?? row.label ?? row.type ?? row.runId);
+  arch?.archive("run", String(row.runId), label);
+}
 
 function rowOf(node: FleetTreeNode): FleetRowWire {
   return node.row as unknown as FleetRowWire;
@@ -271,6 +281,14 @@ function isOrphan(row: FleetRowWire): boolean {
             :title="timeRangeOf(rowOf(node))!.title"
             >{{ timeRangeOf(rowOf(node))!.text }}</span
           >
+          <button
+            v-if="canArchiveRow(rowOf(node))"
+            class="btn btn-ghost arch-act"
+            type="button"
+            @click.stop.prevent="onArchiveRow(rowOf(node))"
+          >
+            {{ t("fleet.archive") }}
+          </button>
         </summary>
         <FleetTree :nodes="node.children" :depth="depth + 1" :now="now" />
       </details>
@@ -349,6 +367,14 @@ function isOrphan(row: FleetRowWire): boolean {
           :title="timeRangeOf(rowOf(node))!.title"
           >{{ timeRangeOf(rowOf(node))!.text }}</span
         >
+        <button
+          v-if="canArchiveRow(rowOf(node))"
+          class="btn btn-ghost arch-act"
+          type="button"
+          @click.stop.prevent="onArchiveRow(rowOf(node))"
+        >
+          {{ t("fleet.archive") }}
+        </button>
       </div>
     </li>
   </ul>

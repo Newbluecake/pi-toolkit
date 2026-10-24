@@ -386,6 +386,10 @@ export interface ControlHandle {
   abort(agentKey: string): Promise<CmdOutcome>;
   steerSub(agentKey: string, runId: string, text: string): Promise<CmdOutcome>;
   stopSub(agentKey: string, runId: string): Promise<CmdOutcome>;
+  /** web-hub archive plan (docs/dev/web-hub/archive-report.md): archive/unarchive a terminal run
+   *  row / bash row. No optimistic ctl item (the `queryCommand` precedent — the state change
+   *  arrives via the next `status.archived` frame); the drawer owns its own undo toast. */
+  setArchived(agentKey: string, kind: "run" | "bash", id: string, set: "archive" | "unarchive"): Promise<CmdOutcome>;
   // `id` is optional (defaults to a freshly generated one inside `createControl`) — the caller
   // may instead generate it itself and pass it through, so it can be tracked synchronously
   // BEFORE the wire round-trip settles (acc32-B3 fix, see AgentDetail.vue's `onDialogAnswer`).

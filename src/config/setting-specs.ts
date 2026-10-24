@@ -320,6 +320,14 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   // quota-web plan §2/D8: StatusInfo.quota availability — non-live like the rest of webHub.*
   // (change → /reload).
   "webHub.quota": bool("webHub.quota", "web-hub: subscription-quota pill/card in the top bar (default on)"),
+  // web-hub archive plan (docs/dev/web-hub/archive-report.md): agent-side auto-archive knob —
+  // non-live but does NOT need a hub restart (never read by buildHubConfig; /reload suffices).
+  "webHub.archiveAfterMin": {
+    kind: "number",
+    path: "webHub.archiveAfterMin",
+    min: 0,
+    description: "web-hub: auto-archive finished agent cards / bash rows in the fleet drawer after N minutes (0 = off)",
+  },
   // web-hub LAN (lan-plan.md §9.1, S1-W3 LI): five more keys under webHub.lan.*, all non-live like
   // the rest of webHub.* (captured at activate; change → /reload). extraHosts/trustProxyFrom/
   // externalOrigins are comma-separated on disk and in the editor (`csvString`'s `csv: true`

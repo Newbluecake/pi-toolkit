@@ -1519,6 +1519,11 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     // on/off for its OWN load sampler (`buildHubConfig` writes `config.load` only when BOTH
     // this and `load.enabled` are true, §7.2). Default true.
     load: true,
+    // web-hub archive plan (docs/dev/web-hub/archive-report.md): auto-archive TERMINAL fleet
+    // rows / bash rows after N minutes (default 30). 0 disables the sweep; manual archive from
+    // the web drawer always works. AGENT-side only (never read by buildHubConfig) — a change
+    // needs `/reload` (picked up at the next stack build), NOT `/webhub restart`.
+    archiveAfterMin: 30,
     lan: DEFAULT_WEBHUB_LAN_SETTINGS,
     spawn: DEFAULT_WEBHUB_SPAWN_SETTINGS,
     // web-hub-proxy plan v2 §5 (X0): off by default, non-live.
@@ -2754,6 +2759,14 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     quota: typeof record.quota === "boolean" ? record.quota : (defaults.quota ?? true),
     // sysload plan §6.1: boolean only, anything else falls back to the default `true`.
     load: typeof record.load === "boolean" ? record.load : (defaults.load ?? true),
+    // web-hub archive plan: finite number ≥ 0 (minutes); anything else falls back to the
+    // default 30. 0 = sweep off.
+    archiveAfterMin:
+      typeof record.archiveAfterMin === "number" &&
+      Number.isFinite(record.archiveAfterMin) &&
+      record.archiveAfterMin >= 0
+        ? record.archiveAfterMin
+        : (defaults.archiveAfterMin ?? 30),
     lan: lanParsed.lan,
     spawn: parseWebHubSpawnBlock(record.spawn),
     proxy: parseWebHubProxyBlock(record.proxy, resolvedPort, lanParsed.lan.port).proxy,

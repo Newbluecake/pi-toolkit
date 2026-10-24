@@ -400,6 +400,25 @@ export default function activate(rawPi: ExtensionAPI): void {
     pi.on("turn_end", () => holder.current?.xs?.unreadTurnEnd());
     pi.on("agent_end", () => holder.current?.xs?.unreadAgentEnd()); // fallback when turn_end never fired
   }
+  // web-hub archive plan (docs/dev/web-hub/archive-report.md): re-seed the per-session archive
+  // control off the CURRENT branch (session_tree / session_compact — the stack itself seeds at
+  // build time). Never throws; a missing sessionManager degrades to "keep current state".
+  const restoreArchive = (ctx: { sessionManager?: unknown } | undefined): void => {
+    const archive = holder.current?.archive;
+    if (archive === undefined) return;
+    const sm = ctx?.sessionManager as { getBranch?: () => readonly unknown[] } | undefined;
+    if (typeof sm?.getBranch !== "function") return;
+    try {
+      archive.restore(sm.getBranch() ?? []);
+    } catch {
+      /* keep current state */
+    }
+  };
+  // web-hub archive plan: the archive control re-seeds on session_tree (the stack is NOT rebuilt
+  // there) and session_compact — same restore points as todo's wiring, registered OUTSIDE the
+  // xsEnabled blocks above so they run regardless of fabric.
+  pi.on("session_tree", (_event, ctx) => restoreArchive(ctx));
+  pi.on("session_compact", (_event, ctx) => restoreArchive(ctx));
   if (xsEnabled) {
     // Registered ahead of other async mutation hooks: the window closes BEFORE their awaits.
     pi.on("session_before_compact", () => {
@@ -1352,6 +1371,7 @@ export default function activate(rawPi: ExtensionAPI): void {
         xsLedger.teardown(xsSessionId);
       holder.current.backgroundCompletions.dispose();
       holder.current.fleetWidget?.dispose();
+      holder.current.archive?.dispose(); // web-hub archive plan: stop the stale auto-sweep (dual-path with buildSessionStack)
       holder.current.keepalive?.dispose();
       holder.current.quota?.dispose();
       holder.current.external?.dispose(); // external-agent plan §5.5（P5）：停目录探测（与 /reload 重建双保险）
@@ -1481,6 +1501,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     // setWidget(undefined) over the new session's frames: the agent tree
     // blinks off/on at the combined tick rate, worse with every reload.
     stack.fleetWidget?.dispose();
+    stack.archive?.dispose(); // web-hub archive plan: same fresh-module /reload rationale as the widget above
     stack.keepalive?.dispose();
     // consult cache-thread plan §7 (①): FIRST path — delete every retained thread head and clear the ledger
     // before the drain below; any consult still settling arrives at a closed registry and can only delete.
@@ -1713,6 +1734,10 @@ export default function activate(rawPi: ExtensionAPI): void {
             },
           }
         : {}),
+      // web-hub archive plan: late-bound archive control (undefined while no live stack /
+      // web-hub off — the `archived` status slot then stays absent and the op settles
+      // E_UNSUPPORTED). Built per session by buildSessionStack, same lifecycle as bashJobs.
+      archive: () => holder.current?.archive,
       // quota-web plan §2 (D3/D8): same late-bound-getter precedent as `todo` above. `holder.current`
       // is re-read on every call (session_start/⁄reload rebuilds the stack); `settings.webHub.quota`
       // defaults true, `false` ⇒ the getter is never threaded through at all (wireWebHub treats an

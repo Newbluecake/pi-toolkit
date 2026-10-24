@@ -12,6 +12,7 @@ import type { RunSnapshot } from "../../core/types.js";
 import { buildFleetViewModel, phaseLabel } from "../../ui/fleet-panel.js";
 import type {
   FleetRowConsultCacheWire,
+  ArchiveWire,
   BashJobsWire,
   FleetOmitted,
   FleetRowWire,
@@ -96,6 +97,7 @@ export function readStatus(
   load?: () => LoadPort | undefined,
   cacheKeepalive?: () => CacheKeepaliveWire | undefined,
   features?: () => string[] | undefined,
+  archived?: () => ArchiveWire | undefined,
 ): StatusInfo {
   const status: StatusInfo = {
     leafId: safe(() => ctx.sessionManager.getLeafId(), null),
@@ -200,6 +202,14 @@ export function readStatus(
         .slice(0, STATUS_FEATURES_MAX_ITEMS)
         .map((t) => t.slice(0, STATUS_FEATURES_MAX_CHARS));
     }
+  }
+  // web-hub archive plan: same overwrite-only-slot rationale as the siblings above — no getter
+  // (web-hub off / no live stack) or an empty archive set ⇒ the field stays absent, byte-equal
+  // to the pre-feature status shape. The slot is display-only hiding; /agent status,
+  // get_subagent_result, notifications and the runs themselves never read it.
+  if (archived !== undefined) {
+    const wire = archived();
+    if (wire !== undefined && wire.entries.length > 0) status.archived = wire;
   }
   return status;
 }

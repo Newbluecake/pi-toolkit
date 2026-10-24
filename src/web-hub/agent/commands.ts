@@ -31,6 +31,7 @@ import type { QueryControlPort, StopResult } from "./index.js";
 import type { HoldItem } from "./hold.js";
 import type { DispatchOutcome, HoldDriver } from "./hold-driver.js";
 import type { PromptGatePort, WebPromptRelease } from "./prompt-gate.js";
+import type { ArchiveControl } from "../../archive/control.js";
 import { parseMention, routeMention, type MentionRouteDeps } from "../../mention/mention.js";
 import { safeParseSessionMention } from "../../mention/session.js";
 import type { MentionResultData } from "../protocol/messages.js";
@@ -83,6 +84,10 @@ export interface CommandHandlerDeps {
    * it out from under us (e.g. a settings change). `undefined` ⇒ `tryClaim` is never called —
    * byte-identical to the pre-feature native/hold dispatch path. */
   promptGate?: () => PromptGatePort | undefined;
+  /** web-hub archive plan: the session's archive control, late-bound (undefined ⇔ web-hub
+   *  off / no live stack — the op then settles `E_UNSUPPORTED`). Manual archive/unarchive
+   *  only; the auto sweep lives inside the control itself. */
+  archive?: () => ArchiveControl | undefined;
   /** Late-bound shared TUI/web mention router. Absent preserves legacy prompt handling. */
   mention?: () => MentionRouteDeps | undefined;
   /** web-resume plan §2.5 step c: true while a resume switch sits between its execution-point
@@ -649,6 +654,30 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     return settleAndReply(frame, errResult("E_NOT_FOUND", false, "none"));
   }
 
+  /** web-hub archive plan (docs/dev/web-hub/archive-report.md): manual archive/unarchive of a
+   *  terminal run row / bash row. `not_terminal` is refused (running rows are not archivable);
+   *  the change (if any) persists into the session and the next status frame carries the new
+   *  `archived` slot — `deps.onChanged()` after the mutation makes that publish immediate
+   *  instead of waiting for the 1Hz tick. */
+  function handleArchive(frame: CmdFrame): void {
+    if (frame.cmd.op !== "archive") return;
+    const cmd = frame.cmd;
+    if (!beginOrReply(frame)) return;
+    const control = deps.archive?.();
+    if (control === undefined) return settleAndReply(frame, errResult("E_UNSUPPORTED", false, "none"));
+    const result = control.setArchived(cmd.kind, cmd.id, cmd.set);
+    if (!result.ok) {
+      const code = result.reason === "not_terminal" ? "E_BAD_REQUEST" : "E_NOT_FOUND";
+      return settleAndReply(
+        frame,
+        errResult(code, false, "none", result.reason === "not_terminal" ? "not terminal" : undefined),
+      );
+    }
+    // A real mutation's republish rides settleAndReply's own onChanged() (below) — one call,
+    // same as every other settling op.
+    settleAndReply(frame, okResult({ op: "archive", set: cmd.set, ...(result.changed ? { changed: true } : {}) }));
+  }
+
   function mapSteerError(r: { ok: false; reason: string; detail?: string }): LedgerResult {
     if (r.reason === "not_running") return errResult("E_NOT_RUNNING", false, "none");
     if (r.reason === "steer_rejected") return errResult("E_SUBAGENT_REJECTED", false, "none", r.detail);
@@ -912,6 +941,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       if (op === "abort_subagent") return handleStop(frame);
       if (op === "command") return handleCommand(frame);
       if (op === "recall") return handleRecall(frame);
+      if (op === "archive") return handleArchive(frame);
       // dialog_answer / dialog_cancel: routed straight to the dialog bridge by the caller.
     },
     onInputEvent(ev) {

@@ -551,6 +551,23 @@ export interface CacheKeepaliveWire {
   lines: CacheKeepaliveLineWire[];
   omitted?: number;
 }
+/** web-hub archive plan (docs/dev/web-hub/archive-report.md): one archived fleet/bash row
+ *  as persisted in the session (`subagent:archive`). `auto` ⇔ sweep-archived after
+ *  `webHub.archiveAfterMin`; absent ⇔ user-archived. */
+export interface ArchiveEntryWire {
+  kind: "run" | "bash";
+  id: string;
+  at: number;
+  auto?: true;
+}
+/** `StatusInfo.archived`: the session's current archive set (both kinds in one list; the UI
+ *  partitions by kind). Present ONLY while at least one entry exists — no archives ⇒ the field
+ *  is absent and the status frame is byte-equal to the pre-feature shape. `rev` is monotone
+ *  per session (bumps on every mutation) so the 1Hz fingerprint gate can cheaply detect change. */
+export interface ArchiveWire {
+  rev: number;
+  entries: ArchiveEntryWire[];
+}
 export interface StatusInfo {
   leafId: string | null; // spike K7④：leaf 变化是 idle custom_message 的唯一信号（不经扩展事件）
   busy: boolean;
@@ -614,6 +631,11 @@ export interface StatusInfo {
    *  while n>0 (1..9999, saturated); absent ⇒ byte-equal to the pre-feature shape. Open top-level
    *  field like `todo`/`worktrees` — no cap, no PROTO bump; the UI gates on `xs.v1` ∧ presence. */
   xsInbox?: { unread: number };
+  /** web-hub archive plan: this session's archived run/bash ids (display-only hiding for the
+   *  fleet drawer + TUI widget). Absent ⇔ nothing archived / archive not wired (web-hub off) —
+   *  byte-equal to the pre-feature shape; the open StatusInfoSchema forwards it through old hubs
+   *  untouched and old UIs ignore it. */
+  archived?: ArchiveWire;
 }
 
 export interface FleetRowWire {
@@ -749,7 +771,15 @@ export interface SnapshotReplyBody {
 // P2 control-plane frames (§3.2). These are additive to the P1 wire surface.
 // ---------------------------------------------------------------------------
 export type CmdOp =
-  "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "dialog_answer" | "dialog_cancel" | "command" | "recall";
+  | "prompt"
+  | "abort"
+  | "steer_subagent"
+  | "abort_subagent"
+  | "dialog_answer"
+  | "dialog_cancel"
+  | "command"
+  | "recall"
+  | "archive";
 
 export interface CmdOrigin {
   listener: "loopback" | "lan";
@@ -799,7 +829,8 @@ export type CmdArgs =
   | { op: "dialog_answer"; dialogId: string; epoch: string; answers: DialogAnswerWire[] }
   | { op: "dialog_cancel"; dialogId: string; epoch: string }
   | { op: "command"; name: string; args: string; confirm?: true; deliver?: "steer" | "followUp"; expect?: CmdExpect }
-  | { op: "recall"; target: string };
+  | { op: "recall"; target: string }
+  | { op: "archive"; kind: "run" | "bash"; id: string; set: "archive" | "unarchive" };
 export interface CommandOutputEntry {
   kind: "notify" | "widget" | "status" | "text" | "error" | "interactive";
   level?: "info" | "warning" | "error";
@@ -892,7 +923,8 @@ export type CmdData =
       sessions?: ResumeSessionsWire;
     }
   | { op: "query"; state: "running" | "ok" | "failed"; late?: true; result?: CmdResultBody }
-  | RecallResultData;
+  | RecallResultData
+  | { op: "archive"; set: "archive" | "unarchive"; changed?: boolean };
 export type CmdErrorCode =
   | "E_UNSUPPORTED"
   | "E_STALE_CTX"
@@ -1562,6 +1594,26 @@ const StatusInfoSchema = Type.Object({
   worktrees: Type.Optional(WorktreesWireSchema),
   bashJobs: Type.Optional(BashJobsWireSchema),
   quota: Type.Optional(QuotaWireSchema),
+  archived: Type.Optional(
+    Type.Object(
+      {
+        rev: Type.Number(),
+        entries: Type.Array(
+          Type.Object(
+            {
+              kind: Type.Union([Type.Literal("run"), Type.Literal("bash")]),
+              id: Type.String(),
+              at: Type.Number(),
+              auto: Type.Optional(Type.Literal(true)),
+            },
+            { additionalProperties: false },
+          ),
+          { maxItems: 256 },
+        ),
+      },
+      { additionalProperties: false },
+    ),
+  ),
   loadGate: Type.Optional(LoadGateWireSchema),
   cacheKeepalive: Type.Optional(CacheKeepaliveWireSchema),
   // web-hub-steer-recall plan §2.3 S2'
@@ -1903,6 +1955,19 @@ const RecallArgsSchema = Type.Object(
   { op: Type.Literal("recall"), target: Type.String({ pattern: "^[A-Za-z0-9_-]{16,64}$" }) },
   { additionalProperties: false },
 );
+// web-hub archive plan (docs/dev/web-hub/archive-report.md): the manual archive/unarchive op
+// for the fleet drawer's Agents/Bash lists. Closed schema (recall precedent): exactly
+// {kind, id, set} — nothing else rides the op. ids are runIds / bash jobIds (free-form but
+// bounded agent-side); `set` is the direction.
+export const ArchiveArgsSchema = Type.Object(
+  {
+    op: Type.Literal("archive"),
+    kind: Type.Union([Type.Literal("run"), Type.Literal("bash")]),
+    id: Type.String({ minLength: 1, maxLength: 128 }),
+    set: Type.Union([Type.Literal("archive"), Type.Literal("unarchive")]),
+  },
+  { additionalProperties: false },
+);
 const CmdSchema = Type.Object(
   {
     t: Type.Literal("cmd"),
@@ -1921,6 +1986,7 @@ const CmdSchema = Type.Object(
       DialogCancelArgsSchema,
       CommandArgsSchema,
       RecallArgsSchema,
+      ArchiveArgsSchema,
     ]),
   },
   { additionalProperties: false },
@@ -2062,6 +2128,7 @@ const CtlItemSchema = Type.Object(
       Type.Literal("dialog_cancel"),
       Type.Literal("command"),
       Type.Literal("recall"),
+      Type.Literal("archive"),
     ]),
     state: Type.Union([
       Type.Literal("dispatched"),

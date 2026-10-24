@@ -97,6 +97,9 @@ const detail = {
   clearLabel: "Clear",
   clearTitle: "New session (/clear)",
   clearFailed: "Couldn't start a new session ({code})",
+  // web-hub archive plan: the `· N archived` summary segment — compact English token in BOTH
+  // locales (AGENTS.md UI-text rule, same as bashJobsRunning/Done/Failed).
+  bashJobsArchived: "{n} archived",
 } satisfies Record<string, string>;
 
 export default detail;

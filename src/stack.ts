@@ -193,6 +193,7 @@ import {
   type WorktreeOrphanScanResult,
 } from "./extensions/worktree-orphans.js";
 import { FleetWidgetController } from "./ui/fleet-widget.js";
+import { ArchiveControl } from "./archive/control.js";
 import { TODO_WIDGET_MOUNTED_EVENT } from "./ui/widget-mount-events.js";
 import type { GoalSession, GoalSessionStartReason } from "./goal/state.js";
 import { readBackGoalRecord } from "./goal/store.js";
@@ -247,6 +248,12 @@ let previousBackgroundCompletions: BackgroundCompletionHub | undefined;
  * adopt the still-running jobs and own the single notification channel.
  */
 let previousBashJobs: BashJobManager | undefined;
+// web-hub archive plan (docs/dev/web-hub/archive-report.md): the previous session's archive
+// control — disposed at the top of the next build (same dual-path discipline as
+// previousBashJobs: index.ts's session_shutdown is the other path). Disposing is REQUIRED, not
+// cosmetic: a stale control's auto-sweep would appendEntry the OLD session's archive state into
+// the NEW session's file.
+let previousArchive: ArchiveControl | undefined;
 /**
  * bash-timeout-grace plan §2.5 step 4/6 (P5): the previous stack's bash-job
  * recovery/cleanup dual-timer handle (see `scheduleBashJobRecovery` below),
@@ -1084,6 +1091,9 @@ export interface Stack {
   fleetWidget?: FleetWidgetController;
   /** bash auto-background job manager; absent when the feature is off (§2.6/R6). */
   bashJobs?: BashJobManager;
+  /** web-hub archive plan: the session's archive control (runs/bash display-hiding + the
+   *  `subagent:archive` session entry). Absent when `webHub.enabled` is false. */
+  archive?: ArchiveControl;
   /**
    * 2026-10-17 shell-resolution revision: pi's own `shellPath` /
    * `shellCommandPrefix` for this stack (read once per build, non-live).
@@ -2126,6 +2136,10 @@ export function buildSessionStack(
   const prevBashJobs = previousBashJobs;
   prevBashJobs?.dispose();
   previousBashJobs = undefined;
+  // web-hub archive plan: stop the previous session's auto-sweep before anything else —
+  // see previousArchive's declaration comment for why this is not optional.
+  previousArchive?.dispose();
+  previousArchive = undefined;
   // bash-timeout-grace plan §2.5 step 4/6 (P5): abort whichever of the
   // previous stack's recovery/cleanup phases is still outstanding.
   previousBashJobRecovery?.dispose();
@@ -3124,6 +3138,26 @@ export function buildSessionStack(
     : undefined;
   previousBashJobs = bashJobs;
 
+  // web-hub archive plan (docs/dev/web-hub/archive-report.md): per-session archive control —
+  // seeded from the branch's last `subagent:archive` entry (the G5a read-back discipline),
+  // swept every 60s while `webHub.archiveAfterMin` > 0. Gated on webHub.enabled (the whole
+  // feature is web-originated; with web-hub off nothing is ever archived and the TUI widget's
+  // filter getter stays absent — byte-identical rendering).
+  const archive = settings.webHub.enabled
+    ? new ArchiveControl(
+        { runs: () => query.list(), bashJobs: () => bashJobs?.list() ?? [] },
+        { appendEntry: (type, data) => pi.appendEntry(type, data), now: () => systemClock.now() },
+      )
+    : undefined;
+  if (archive !== undefined) {
+    const archiveBranch = readBack
+      ? ((ctx.sessionManager as unknown as { getBranch?: () => readonly unknown[] }).getBranch?.() ?? [])
+      : [];
+    archive.restore(archiveBranch);
+    archive.start(Math.max(0, settings.webHub.archiveAfterMin ?? 30) * 60_000);
+  }
+  previousArchive = archive;
+
   const keepalive = settings.cacheTtl.keepalive
     ? createCacheKeepaliveService({
         clock: systemClock,
@@ -3248,6 +3282,9 @@ export function buildSessionStack(
       ui: ctx.ui,
       query,
       clock: systemClock,
+      // web-hub archive plan: display-only hiding of archived runs/bash rows in the TUI
+      // widget (same 1Hz tick re-reads the view — no extra refresh wiring needed).
+      ...(archive ? { archived: () => archive.view() } : {}),
       idleBudgetMs: settings.budget.idleMs,
       maxRows: settings.fleetWidgetMaxRows,
       receiptOf: (runId) => contextReceipt.receiptOf(runId),
@@ -3595,6 +3632,7 @@ export function buildSessionStack(
     backgroundCompletions,
     ...(widgetRef.current ? { fleetWidget: widgetRef.current } : {}),
     ...(bashJobs ? { bashJobs, bashShell: piShell } : {}),
+    ...(archive ? { archive } : {}),
     ...(bashJobRecovery ? { bashJobRecovery } : {}),
     ...(keepalive ? { keepalive } : {}),
     ...(quota ? { quota: quota.service, quotaHint: quota.hintState } : {}),

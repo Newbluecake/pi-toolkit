@@ -207,6 +207,11 @@ export function createControl(
         { agentKey, id, op: "abort_subagent", runId },
       );
     },
+    // web-hub archive plan: direct transport call, NO optimistic ctl item (queryCommand
+    // precedent — a settle-in-milliseconds archive flash in the queue would be pure noise; the
+    // drawer's own 4s undo toast is the feedback). Agent-side terminality is re-checked anyway.
+    setArchived: (agentKey, kind, target, set) =>
+      transport.command({ agentKey, id: newCmdId(), op: "archive", target, kind, set }),
     answerDialog: (agentKey, dialogId, epoch, answers, id = newCmdId()) => {
       return sendDialog(
         agentKey,

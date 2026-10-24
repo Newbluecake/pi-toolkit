@@ -652,3 +652,62 @@ describe("FleetBashJobs start/end time token (2026-10-18 user pick C)", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// web-hub archive plan (docs/dev/web-hub/archive-report.md): the bash group's archived fold,
+// summary segment and per-row archive button. The `archived` prop is the id→entry map the
+// FleetDrawer narrows from `status.archived` (kind "bash").
+// ---------------------------------------------------------------------------
+describe("FleetBashJobs.vue — archive (web-hub archive plan)", () => {
+  const done = (id: string): BashJobRowWire =>
+    row({ id, status: "completed", exitCode: 0, endedAt: SAMPLED_AT - 1_000 });
+
+  const mountArch = async (
+    rows: BashJobRowWire[],
+    archived: Map<string, { kind: "run" | "bash"; id: string; at: number; auto?: true }>,
+  ) => {
+    const w = await mountGroupOpen(wire(rows));
+    return mount(FleetBashJobs, {
+      props: { jobs: wire(rows), now: SAMPLED_AT, archived },
+      global: { stubs: { teleport: true } },
+    });
+  };
+
+  it("summary gains `· N archived`; archived rows leave the live list into the fold", async () => {
+    const w = await mountArch(
+      [row(), done("job-done0001")],
+      new Map([["job-done0001", { kind: "bash", id: "job-done0001", at: 1 }]]),
+    );
+    const sum = w.find(".bj-sum-text").text();
+    expect(sum).toContain("Bash");
+    expect(sum).toContain("archived");
+    // The live list excludes the archived row's id; the fold is collapsed by default.
+    const liveIds = w.findAll(".bj-list .bj-item:not(.is-archived)").map((n) => n.text());
+    expect(liveIds.join("\n")).not.toContain("job-done0001");
+    expect(w.find(".bj-archived-fold").text()).toContain("1");
+  });
+
+  it("the fold expands to dimmed rows with the auto badge and 取消归档 button", async () => {
+    const w = await mountArch(
+      [done("job-done0001"), done("job-auto0002")],
+      new Map([
+        ["job-done0001", { kind: "bash", id: "job-done0001", at: 1 }],
+        ["job-auto0002", { kind: "bash", id: "job-auto0002", at: 2, auto: true }],
+      ]),
+    );
+    await w.find(".bj-archived-fold").trigger("click");
+    const archivedItems = w.findAll(".bj-item.is-archived");
+    expect(archivedItems).toHaveLength(2);
+    expect(archivedItems[1]!.find(".arch-auto").text()).toBe("auto");
+    expect(archivedItems[0]!.find(".arch-auto").exists()).toBe(false);
+    expect(archivedItems[0]!.find(".arch-act").text()).toBe("Unarchive");
+  });
+
+  it("no archived prop ⇒ no fold, no archive buttons, summary unchanged (pre-feature bytes)", async () => {
+    const w = await mountGroupOpen(wire([row(), done("job-done0001")]));
+    expect(w.find(".bj-archived").exists()).toBe(false);
+    // The per-row archive button requires the FLEET_ARCHIVE provider — absent here.
+    expect(w.findAll(".arch-act")).toHaveLength(0);
+    expect(w.find(".bj-sum-text").text()).not.toContain("archived");
+  });
+});

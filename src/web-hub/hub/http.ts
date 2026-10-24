@@ -2374,6 +2374,25 @@ function parseCmdBody(body: unknown): ParseOutcome {
         },
       };
     }
+    case "archive": {
+      // web-hub archive plan (docs/dev/web-hub/archive-report.md): the fleet drawer's manual
+      // archive/unarchive. The TARGET id rides `target` (the body's `id` is the cmdId, the
+      // recall precedent); identify-only — exactly {kind, target, set}. LAN rides the SAME
+      // /api/cmd authorization as every other op.
+      const kind = field(body, "kind");
+      const target = field(body, "target");
+      const set = field(body, "set");
+      if (kind !== "run" && kind !== "bash") return { error: "E_BAD_REQUEST", message: "bad kind" };
+      if (typeof target !== "string" || target.length === 0 || target.length > 128)
+        return { error: "E_BAD_REQUEST", message: "bad target" };
+      if (set !== "archive" && set !== "unarchive") return { error: "E_BAD_REQUEST", message: "bad set" };
+      return {
+        agentKey,
+        id,
+        ...(queryOnlyFlag ? { queryOnly: true as const } : {}),
+        cmd: { op: "archive", kind, id: target, set },
+      };
+    }
     case "recall": {
       // steer-recall plan §2.3 S4: recall identifies by cmdId only — `target` must pass CMD_ID_RE
       // (400 "target required" otherwise) and the forwarded frame carries EXACTLY

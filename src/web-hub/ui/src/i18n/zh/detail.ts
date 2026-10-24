@@ -94,6 +94,7 @@ const detail = {
   clearLabel: "清空",
   clearTitle: "新会话（/clear）",
   clearFailed: "新会话启动失败（{code}）",
+  bashJobsArchived: "{n} archived",
 } satisfies Messages<typeof en>;
 
 export default detail;

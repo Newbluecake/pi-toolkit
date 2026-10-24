@@ -24,7 +24,7 @@
   overscroll-guard.test.ts 按类名钉),分组包装与状态底色也在该文件。
 -->
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, inject, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { formatDuration } from "../../format.js";
@@ -33,10 +33,12 @@ import type { FleetBashJobsProps } from "../../contracts.js";
 import { formatBytes, statusToken, summaryCounts, tailFreshness, type TailFreshness } from "../detail/bashJobsView.js";
 import { deshellCmd, type DeshelledCmd } from "../../logic/bashCmd.js";
 import { formatTimeRange, type TimeRangeLabel } from "../../logic/timeRange.js";
+import { FLEET_ARCHIVE } from "./summary.js";
 import "../../styles/bash-jobs.css";
 
 const props = defineProps<FleetBashJobsProps>();
 const { t } = useI18n();
+const arch = inject(FLEET_ARCHIVE, null);
 
 /** 有运行中的任务、或任务总数 ≤ BASH_OPEN_FEW 时默认展开(2026-10-16 用户:「很少就默认展开，不然
  *  显得空空的」);更多且全终态时默认收起。一次性的初始值,不随 wire 后续变化强制开合。 */
@@ -49,7 +51,29 @@ const open = ref(
 const expandedId = ref<string | null>(null);
 
 // ---------------------------------------------------------------------------
-// 组标题(D4 计数语法):`Bash · 2 running · 8 done`,零计数段省略
+// web-hub archive plan: partition live/archived rows. The wire carries ALL rows (the agent
+// never filters — display-only hiding), so the archived fold keeps its full row data. The
+// summary counts `N running · N done · N archived` count over the whole wire: running rows can
+// never be archived (agent-side terminality check), so running is the same either way.
+// ---------------------------------------------------------------------------
+const archivedRows = computed(() => props.jobs.rows.filter((row) => props.archived?.has(String(row.id)) === true));
+const liveRows = computed(() => props.jobs.rows.filter((row) => props.archived?.has(String(row.id)) !== true));
+function isAuto(row: BashJobRowWire): boolean {
+  return props.archived?.get(String(row.id))?.auto === true;
+}
+function canArchiveRow(row: BashJobRowWire): boolean {
+  return arch !== null && arch.canArchive.value && !statusToken(row).live;
+}
+function onArchiveRow(row: BashJobRowWire): void {
+  arch?.archive("bash", String(row.id), shell(row).cmd);
+}
+function onUnarchiveRow(row: BashJobRowWire): void {
+  arch?.unarchive("bash", String(row.id));
+}
+const archivedOpen = ref(false);
+
+// ---------------------------------------------------------------------------
+// 组标题(D4 计数语法):`Bash · 2 running · 8 done · N archived`,零计数段省略
 // ---------------------------------------------------------------------------
 const counts = computed(() => summaryCounts(props.jobs));
 const summary = computed(() => {
@@ -58,6 +82,7 @@ const summary = computed(() => {
   if (c.running > 0) segments.push(t("detail.bashJobsRunning", { n: c.running }));
   if (c.done > 0) segments.push(t("detail.bashJobsDone", { n: c.done }));
   if (c.failed > 0) segments.push(t("detail.bashJobsFailed", { n: c.failed }));
+  if (archivedRows.value.length > 0) segments.push(t("detail.bashJobsArchived", { n: archivedRows.value.length }));
   // `Bash · 2 running · 8 done` — every segment (incl. the title) joins with ` · `.
   return segments.length > 0 ? `${t("detail.bashJobsTitle")} · ${segments.join(" · ")}` : t("detail.bashJobsTitle");
 });
@@ -159,7 +184,7 @@ function toggleRow(row: BashJobRowWire): void {
       <AppIcon name="chev-right" class="icon-sm chev" />
     </button>
     <ul v-if="open" class="bj-list">
-      <li v-for="row in jobs.rows" :key="row.id" class="bj-item" :data-status="statusToken(row).text">
+      <li v-for="row in liveRows" :key="row.id" class="bj-item" :data-status="statusToken(row).text">
         <button
           class="bj-row"
           type="button"
@@ -197,6 +222,16 @@ function toggleRow(row: BashJobRowWire): void {
             timeRangeOf(row)!.text
           }}</span>
         </button>
+        <!-- web-hub archive plan: archive button — SIBLING of the .bj-row button (nested buttons
+             are invalid HTML), absolutely positioned top-right on hover. -->
+        <button
+          v-if="canArchiveRow(row)"
+          class="btn btn-ghost arch-act"
+          type="button"
+          @click.stop.prevent="onArchiveRow(row)"
+        >
+          {{ t("fleet.archive") }}
+        </button>
         <!-- full redacted command (plain text) — the row itself ellipsizes it -->
         <div v-if="expandedId === row.id && row.tail !== undefined" class="bj-cmd-full" translate="no">
           {{ row.cmd }}
@@ -206,6 +241,43 @@ function toggleRow(row: BashJobRowWire): void {
       </li>
       <li v-if="jobs.omitted !== undefined && jobs.omitted > 0" class="bj-more">
         {{ t("detail.bashJobsMore", { n: jobs.omitted }) }}
+      </li>
+      <!-- web-hub archive plan: the archived fold — dimmed rows, `auto` badge for sweep-archived
+           ones,「取消归档」on hover. -->
+      <li v-if="archivedRows.length > 0" class="bj-archived">
+        <button
+          class="bj-archived-fold"
+          type="button"
+          :aria-expanded="archivedOpen"
+          @click="archivedOpen = !archivedOpen"
+        >
+          <AppIcon name="chev-right" class="icon-sm chev" />
+          <span>{{ t("fleet.archivedFold", { n: archivedRows.length }) }}</span>
+        </button>
+        <ul v-if="archivedOpen" class="bj-list">
+          <li
+            v-for="row in archivedRows"
+            :key="row.id"
+            class="bj-item is-archived"
+            :data-status="statusToken(row).text"
+          >
+            <div class="bj-row" :data-archived="true">
+              <AppIcon :name="statusToken(row).icon" class="icon-sm bj-ico" :data-kind="statusToken(row).kind" />
+              <span class="bj-cmd" translate="no" :title="row.cmd">{{ shell(row).cmd }}</span>
+              <span class="bj-elapsed num">{{ displayElapsed(row) }}</span>
+              <span class="bj-l2">
+                <span class="bj-id" translate="no">{{ shortId(row) }}</span>
+                <span v-if="isAuto(row)" class="arch-auto" translate="no">auto</span>
+              </span>
+              <span v-if="timeRangeOf(row)" class="bj-meta" translate="no" :title="timeRangeOf(row)!.title">{{
+                timeRangeOf(row)!.text
+              }}</span>
+            </div>
+            <button class="btn btn-ghost arch-act" type="button" @click.stop.prevent="onUnarchiveRow(row)">
+              {{ t("fleet.unarchive") }}
+            </button>
+          </li>
+        </ul>
       </li>
     </ul>
   </section>

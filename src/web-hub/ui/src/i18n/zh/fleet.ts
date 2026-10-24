@@ -16,6 +16,11 @@ const fleet = {
   consultDone: "咨询已回答",
   consultIncomplete: "咨询未完成",
   consultRunning: "咨询中",
+  archive: "归档",
+  unarchive: "取消归档",
+  archivedFold: "已归档 {n}",
+  archivedToast: "已归档 {name}",
+  undo: "撤销",
 } satisfies Messages<typeof en>;
 
 export default fleet;

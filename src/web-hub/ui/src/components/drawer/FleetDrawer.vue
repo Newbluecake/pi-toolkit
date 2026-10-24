@@ -124,9 +124,11 @@ import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import FleetTree from "../fleet/FleetTree.vue";
 import FleetBashJobs from "../fleet/FleetBashJobs.vue";
+import FleetArchived from "../fleet/FleetArchived.vue";
 import { bashJobsOf } from "../detail/bashJobsView.js";
+import { archivedOf, archiveSetOf, partitionArchived } from "../fleet/archiveView.js";
 import { bannerView } from "@logic/load.js";
-import { buildFleetTree, orphanRunIds, runTranscriptAvailable, FLEET_SELECT } from "../fleet/summary.js";
+import { buildFleetTree, orphanRunIds, runTranscriptAvailable, FLEET_ARCHIVE, FLEET_SELECT } from "../fleet/summary.js";
 import RunHeader from "./RunHeader.vue";
 import RunTranscript from "./RunTranscript.vue";
 
@@ -137,11 +139,54 @@ const { t } = useI18n();
 const rootEl = ref<HTMLElement | null>(null);
 
 // ---------------------------------------------------------------------------
+// web-hub archive plan (docs/dev/web-hub/archive-report.md): archived runs leave the tree
+// (they land in the bottom「已归档 N」fold), bash rows partition inside FleetBashJobs. The undo
+// toast lives HERE (both halves share it): ~4s window,「撤销」sends the reverse op.
+// ---------------------------------------------------------------------------
+const archiveWire = computed(() => archivedOf(props.agent));
+const runArchive = computed(() => archiveSetOf(archiveWire.value, "run"));
+const bashArchive = computed(() => archiveSetOf(archiveWire.value, "bash"));
+const liveRows = computed(() => partitionArchived(rows.value, runArchive.value).live);
+const archivedRows = computed(() => partitionArchived(rows.value, runArchive.value).archivedRows);
+
+const hub = inject(HUB_CTX, null);
+const archToast = ref<{ kind: "run" | "bash"; id: string; label: string } | null>(null);
+let archToastTimer: ReturnType<typeof setTimeout> | undefined;
+function showArchToast(kind: "run" | "bash", id: string, label: string): void {
+  archToast.value = { kind, id, label };
+  if (archToastTimer !== undefined) clearTimeout(archToastTimer);
+  archToastTimer = setTimeout(() => {
+    archToast.value = null;
+  }, 4000);
+}
+function sendArchive(kind: "run" | "bash", id: string, set: "archive" | "unarchive"): void {
+  const control = hub?.control;
+  if (control === undefined) return;
+  void control.setArchived(props.agent.key, kind, id, set);
+}
+function undoArchive(): void {
+  const t = archToast.value;
+  if (t !== null) sendArchive(t.kind, t.id, "unarchive");
+  archToast.value = null;
+}
+onBeforeUnmount(() => {
+  if (archToastTimer !== undefined) clearTimeout(archToastTimer);
+});
+provide(FLEET_ARCHIVE, {
+  canArchive: computed(() => hub?.control !== undefined),
+  archive: (kind, id, label) => {
+    sendArchive(kind, id, "archive");
+    showArchToast(kind, id, label);
+  },
+  unarchive: (kind, id) => sendArchive(kind, id, "unarchive"),
+});
+
+// ---------------------------------------------------------------------------
 // 树视图数据 + run 选择接缝(FLEET_SELECT,§6.3)
 // ---------------------------------------------------------------------------
 const rows = computed(() => props.agent.fleet as unknown as readonly FleetRowWire[]);
-const treeNodes = computed(() => buildFleetTree(rows.value));
-const orphans = computed(() => orphanRunIds(rows.value));
+const treeNodes = computed(() => buildFleetTree(liveRows.value));
+const orphans = computed(() => orphanRunIds(liveRows.value));
 /* 2026-10-16 user ("红框部分感觉有点丑"): with no sub-agent rows (and no omitted counts) the
  * tree renders nothing, so the bash group's own top divider would sit right under the
  * header's bottom border — a double line around an empty gap. Solo ⇒ no divider. */
@@ -176,7 +221,6 @@ onBeforeUnmount(() => {
 });
 const banner = computed(() => bannerView(props.agent.loadGate, props.agent.loadGateReceivedAt, bannerNow.value));
 
-const hub = inject(HUB_CTX, null);
 const env = inject(CONTROL_ENV, null);
 const canOpen = computed(() => runTranscriptAvailable(props.agent.card, env?.authMode) && hub?.selectRun !== undefined);
 provide(FLEET_SELECT, {
@@ -298,9 +342,23 @@ watch(
       </div>
       <div class="tree-scroll">
         <FleetTree :nodes="treeNodes" :now="now" :orphans="orphans" :omitted="agent.fleetOmitted" />
+        <!-- web-hub archive plan: the archived-runs fold (hidden when nothing archived). -->
+        <FleetArchived v-if="archivedRows.length > 0" :rows="archivedRows" :set="runArchive" />
         <!-- 2026-10-15:子 agent 树之后的独立 bash 分组(无任务/无字段 ⇒ 不渲染)。 -->
-        <FleetBashJobs v-if="bashJobs" :class="{ 'fleet-bash-solo': treeEmpty }" :jobs="bashJobs" :now="now" />
+        <FleetBashJobs
+          v-if="bashJobs"
+          :class="{ 'fleet-bash-solo': treeEmpty }"
+          :jobs="bashJobs"
+          :now="now"
+          :archived="bashArchive"
+        />
       </div>
     </template>
   </aside>
+  <!-- web-hub archive plan: the shared undo toast (viewport-fixed; both the tree's and the bash
+       group's archive actions land here). -->
+  <div v-if="archToast !== null" class="arch-toast" role="status">
+    <span class="arch-toast-text">{{ t("fleet.archivedToast", { name: archToast.label }) }}</span>
+    <button class="btn btn-ghost arch-toast-undo" type="button" @click="undoArchive">{{ t("fleet.undo") }}</button>
+  </div>
 </template>

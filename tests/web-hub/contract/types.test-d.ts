@@ -221,6 +221,7 @@ describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
       | "dialog_cancel"
       | "command"
       | "recall" // steer-recall plan §2.3 S2 (hold.v1)
+      | "archive" // web-hub archive plan (docs/dev/web-hub/archive-report.md)
     >();
   });
 

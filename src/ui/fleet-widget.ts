@@ -17,6 +17,7 @@ import {
   type FleetViewModel,
 } from "./fleet-panel.js";
 import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
+import type { FleetArchiveView } from "../archive/control.js";
 
 /**
  * X7b fleet widget: the always-on compact counterpart to the `/agent fleet`
@@ -1059,6 +1060,11 @@ export interface FleetWidgetDeps {
   workflows?: () => readonly WorkflowActivitySnapshot[];
   /** D1: live in-memory bash job records; fs access remains in the stack adapter. */
   bashJobs?: () => readonly JobRecord[];
+  /** web-hub archive plan: late-bound archive view — archived terminal runs / bash rows are
+   *  HIDDEN from the widget (display only; /agent status, notifications and the runs themselves
+   *  never read this). Absent (web-hub off / child session) ⇒ no filtering, pre-feature bytes.
+   *  Re-read every tick, so a web-originated archive lands on the next 1Hz refresh. */
+  archived?: () => FleetArchiveView | undefined;
   /** D2: stack-bound two-pass tail reader, including the observed file size. */
   readBashTail?: (
     record: JobRecord,
@@ -1194,27 +1200,35 @@ export class FleetWidgetController {
   /** Unguarded refresh core — never call directly, always go through refresh(). */
   private renderFrame(): void {
     const now = this.clock.now();
-    const bashRecords = this.deps.bashJobs?.() ?? [];
+    const archiveView = this.deps.archived?.();
+    const bashRecords = (this.deps.bashJobs?.() ?? []).filter(
+      (record) => archiveView === undefined || !archiveView.bash.has(record.jobId),
+    );
     const bashViews = this.bashJobViews(bashRecords, now);
     this.prefetchBashTails(bashRecords);
-    const model = buildFleetViewModel(this.deps.query.list(), {
-      now,
-      recentTerminal: 3, // M6: feed just-finished runs so the builder can linger them briefly
-      maxActiveRows: Math.min(WIDGET_MAX_ROWS, Math.max(1, this.deps.maxRows ?? WIDGET_DEFAULT_ROWS)),
-      ...(this.deps.idleBudgetMs !== undefined ? { idleBudgetMs: this.deps.idleBudgetMs } : {}),
-      ...(this.deps.deadlineWarnMs !== undefined ? { deadlineWarnMs: this.deps.deadlineWarnMs } : {}),
-      ...(this.deps.typeOf ? { typeOf: this.deps.typeOf } : {}),
-      ...(this.deps.receiptOf
-        ? {
-            retainTerminal: (snapshot: import("../core/types.js").RunSnapshot) => {
-              const receipt = this.deps.receiptOf!(snapshot.runId);
-              return (
-                receipt.kind === "pending" && now - snapshot.updatedAt <= (this.deps.awaitNotificationMs ?? 600_000)
-              );
-            },
-          }
-        : {}),
-    });
+    const model = buildFleetViewModel(
+      archiveView === undefined
+        ? this.deps.query.list()
+        : this.deps.query.list().filter((run) => !archiveView.runs.has(run.runId)),
+      {
+        now,
+        recentTerminal: 3, // M6: feed just-finished runs so the builder can linger them briefly
+        maxActiveRows: Math.min(WIDGET_MAX_ROWS, Math.max(1, this.deps.maxRows ?? WIDGET_DEFAULT_ROWS)),
+        ...(this.deps.idleBudgetMs !== undefined ? { idleBudgetMs: this.deps.idleBudgetMs } : {}),
+        ...(this.deps.deadlineWarnMs !== undefined ? { deadlineWarnMs: this.deps.deadlineWarnMs } : {}),
+        ...(this.deps.typeOf ? { typeOf: this.deps.typeOf } : {}),
+        ...(this.deps.receiptOf
+          ? {
+              retainTerminal: (snapshot: import("../core/types.js").RunSnapshot) => {
+                const receipt = this.deps.receiptOf!(snapshot.runId);
+                return (
+                  receipt.kind === "pending" && now - snapshot.updatedAt <= (this.deps.awaitNotificationMs ?? 600_000)
+                );
+              },
+            }
+          : {}),
+      },
+    );
     this.deps.pruneReceipts?.(new Set(this.deps.query.list().map((run) => run.runId)), now);
     const lines = buildFleetWidgetLines(model, {
       width: this.widgetWidth(),

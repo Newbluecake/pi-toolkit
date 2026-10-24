@@ -62,7 +62,7 @@ export interface TransportHooks {
 export interface CmdRequest {
   agentKey: string;
   id: string;
-  op: "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "command" | "recall";
+  op: "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "command" | "recall" | "archive";
   text?: string;
   deliver?: "steer" | "followUp";
   runId?: string;
@@ -72,6 +72,10 @@ export interface CmdRequest {
   /** steer-recall plan §2.3 S2 (P-ui): the held/returned row's cmdId to recall — identify-only,
    * never carries `expect` (S5). */
   target?: string;
+  /** web-hub archive plan (docs/dev/web-hub/archive-report.md): the archive op's target item
+   * (runId / bash jobId, rides `target` like recall) + the kind and direction. */
+  kind?: "run" | "bash";
+  set?: "archive" | "unarchive";
   expect?: { sessionId?: string };
   queryOnly?: true;
 }

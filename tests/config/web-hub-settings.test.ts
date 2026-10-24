@@ -46,6 +46,7 @@ describe("web-hub settings", () => {
       subagentTranscript: "all",
       quota: true,
       load: true,
+      archiveAfterMin: 30,
       lan: {
         enabled: false,
         port: 7879,
@@ -139,6 +140,7 @@ describe("web-hub settings", () => {
       subagentTranscript: "all",
       quota: true,
       load: true,
+      archiveAfterMin: 30,
       lan: lanDefaults,
       spawn: spawnDefaults,
       proxy: proxyDefaults,
@@ -934,5 +936,22 @@ describe("LAN security P0 settings", () => {
     expect(parseSettingValue(SETTING_SPECS["webHub.lan.allowClients"]!, "192.168.1.2, ::1")).toMatchObject({
       ok: true,
     });
+  });
+});
+
+// web-hub archive plan (docs/dev/web-hub/archive-report.md): webHub.archiveAfterMin — default
+// 30, 0 disables the auto sweep, garbage falls back; AGENT-side only (never in buildHubConfig).
+describe("webHub.archiveAfterMin (web-hub archive plan)", () => {
+  it("defaults to 30 and survives explicit values including 0", () => {
+    expect(defaults.archiveAfterMin).toBe(30);
+    expect(parseWebHubSettings({}).archiveAfterMin).toBe(30);
+    expect(parseWebHubSettings({ archiveAfterMin: 0 }).archiveAfterMin).toBe(0);
+    expect(parseWebHubSettings({ archiveAfterMin: 120 }).archiveAfterMin).toBe(120);
+  });
+
+  it("falls back to the default on non-finite/negative values", () => {
+    expect(parseWebHubSettings({ archiveAfterMin: -5 }).archiveAfterMin).toBe(30);
+    expect(parseWebHubSettings({ archiveAfterMin: "30" }).archiveAfterMin).toBe(30);
+    expect(parseWebHubSettings({ archiveAfterMin: Number.NaN }).archiveAfterMin).toBe(30);
   });
 });

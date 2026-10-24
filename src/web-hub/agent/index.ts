@@ -102,7 +102,8 @@ import { createGitRunner, type GitRunner } from "../../git/run.js";
 import { createWorktreeSampler } from "./worktree-sampler.js";
 import { bashJobsLightFingerprint, bashJobsRowSignature, projectBashJobs, selectJobs } from "./bash-jobs.js";
 import { createBashJobsSampler, type BashJobsSource } from "./bash-jobs-sampler.js";
-import type { BashJobsWire, TodoWire, WireEvent } from "../protocol/messages.js";
+import type { ArchiveWire, BashJobsWire, TodoWire, WireEvent } from "../protocol/messages.js";
+import type { ArchiveControl } from "../../archive/control.js";
 import { projectTodo, todoLightFingerprint } from "./todo.js";
 import type { TodoState } from "../../todo/state.js";
 import { projectQuota, quotaFingerprint } from "./quota-sampler.js";
@@ -216,6 +217,11 @@ export interface WebHubSettings {
    * load sampler: `buildHubConfig` (P2a, this file) writes `config.load` only when this AND
    * `settings.load.enabled` are both true (§7.2's "任一为 false ⇒整键省略"). Default `true`. */
   load?: boolean;
+  /** web-hub archive plan (docs/dev/web-hub/archive-report.md): auto-archive terminal fleet
+   *  rows / bash rows after N minutes (default 30). `0` disables the sweep (manual archive
+   *  from the drawer still works). AGENT-side only — never read by buildHubConfig, so a change
+   *  needs just `/reload` (picked up at the next stack build), NOT a hub restart. */
+  archiveAfterMin?: number;
   /** web-hub-steer-recall plan §2/§4.7 (A6) / arch §11 Q1: hold busy web steer/followUp in the
    *  agent-side buffer until pi's next queue drain so the browser can recall/re-edit them.
    *  Default `true`; `false` (or `control:false`) ⇒ no driver, no hold handlers, no `hold.v1`
@@ -345,6 +351,11 @@ export interface WebHubDeps {
    *  shape (pinned by `tests/integration/fabric-xs-off-golden.test.ts`). Presence IS `xsOn`
    *  (XW computes XS0's switch at activate and only threads the port when it holds). */
   xs?: XsAgentPort;
+  /** web-hub archive plan: the session's archive control (late-bound like `query` — `undefined`
+   *  ⇔ web-hub off / no live stack, e.g. the detach grace window). Feeds the `StatusInfo.archived`
+   *  projection and the `archive` cmd op. Unset ⇒ the wire field never appears and the op settles
+   *  `E_UNSUPPORTED` (byte-equal to the pre-feature shape). */
+  archive?: () => ArchiveControl | undefined;
   hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -524,6 +535,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   let lastQuotaFp: string | undefined;
   // cache-keepalive-web plan §3.3: same lifecycle — reset on session_start.
   let lastKaFp: string | undefined;
+  // web-hub archive plan: the archive slot's 1Hz fingerprint — the control's monotone rev.
+  // The cmd op's `onChanged` already republishes immediately; this gate catches the AUTO sweep
+  // (which never goes through commands.ts) within one tick.
+  let lastArchiveRev = -1;
   let connGen = 0;
   let lastModelsKey: string | undefined;
   let modelsTick = 0;
@@ -631,6 +646,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     conn?.status().state === "live" && (conn?.caps.includes(TODO_ARCHIVE_HUB_CAP) ?? false);
   const todoProjection = (): TodoWire | undefined =>
     deps.todo !== undefined ? projectTodo(deps.todo(), { archiveFields: todoArchiveCap() }) : undefined;
+  // web-hub archive plan: projection closure (same optional-source pattern as todo/bashJobs).
+  // `wire()` is a synchronous in-memory read; undefined while the control is detached (no live
+  // stack) or nothing is archived — the status frame stays byte-equal in both cases.
+  const archiveProjection = (): ArchiveWire | undefined => {
+    try {
+      return deps.archive?.()?.wire();
+    } catch {
+      return undefined;
+    }
+  };
   const cacheKeepaliveProjection = (): CacheKeepaliveWire | undefined => {
     const d = deps.cacheKeepalive;
     if (d === undefined) return undefined;
@@ -909,6 +934,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       deps.load?.port,
       deps.cacheKeepalive !== undefined ? cacheKeepaliveProjection : undefined,
       resumeFeatures,
+      deps.archive !== undefined ? archiveProjection : undefined,
     );
     lastLeaf = s.leafId;
     // fabric phase-2 X2 (§4.4, P3): the display-only xs projection — absent while deps.xs is
@@ -1011,6 +1037,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         publishStatus();
       }
     }
+    // web-hub archive plan: no events either (the auto sweep lives inside the control) — rev
+    // fingerprint gate, ≤1s after a sweep commits.
+    if (deps.archive !== undefined) {
+      const rev = archiveProjection()?.rev ?? -1;
+      if (rev !== lastArchiveRev) {
+        lastArchiveRev = rev;
+        publishStatus();
+      }
+    }
     // bash-jobs-panel plan §3.7 (包 A, D3-1): the manager has no events, so the same 1Hz tick
     // carries a light-fingerprint gate over the selectJobs result (running logBytes and
     // second-level elapsed stay OUT; terminal logBytes — the footer patch — is IN, R3-2). A
@@ -1084,6 +1119,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     compactionState,
     originEntry,
     builtinBridge,
+    // web-hub archive plan: manual archive/unarchive from the drawer (auto sweep lives in the
+    // control itself, wired from the stack).
+    archive: () => deps.archive?.(),
     controlEnabled: () => settings.control !== false,
     now,
     send: (frame) => conn?.send(frame),
@@ -1275,6 +1313,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             deps.load?.port,
             deps.cacheKeepalive !== undefined ? cacheKeepaliveProjection : undefined,
             resumeFeatures,
+            deps.archive !== undefined ? archiveProjection : undefined,
           ),
           fleet: projectFleet(snaps, now(), deps.fleetTypeOf),
         }),
@@ -1599,6 +1638,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     lastBashSigs = undefined;
     lastQuotaFp = undefined;
     lastKaFp = undefined;
+    lastArchiveRev = -1;
     lastModelsKey = undefined;
     modelsTick = 0;
     tap.resetForSession(Number.NaN);
