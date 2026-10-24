@@ -152,12 +152,15 @@ import type {
   LanFrontendDeps,
   ProxyService,
   HubEvent,
+  FrontendDeps,
 } from "./ports.js";
 import { createFeishuLinks } from "./feishu/link.js";
 import type { FsDeps } from "../protocol/paths.js";
 import { parseCmdline } from "../protocol/proc-identity.js";
 import { createRegistry } from "./registry.js";
 import { createXsAliasBinding, createXsRelay, hubXsAliasParamsOf, type XsAliasBinding } from "./xs/router.js";
+import { SCHED_HUB_CAP } from "../protocol/schedule.js";
+import { createScheduleService } from "./schedule/service.js";
 import { XS_ALIAS_HUB_CAP, XS_CHANNEL_HUB_CAP, XS_HUB_CAP, XS_REPLY_HUB_CAP } from "../protocol/xs.js";
 import { acquireSingleton, startFence } from "./singleton.js";
 import type { Auth } from "./auth.js";
@@ -529,6 +532,10 @@ export async function startHub(
             // Alias-plan §3.6 (AL2): tail-appended, only for a table that loaded `ready`.
             ...(xsAlias?.store.advertised === true ? [XS_ALIAS_HUB_CAP] : []),
           ]),
+      // scheduled-reports plan r3 §10.1 (H1): `sched.v1` iff `config.schedule` exists (same
+      // two-surface tail-append rule; absent ⇒ caps byte-identical). Declared even when the
+      // store root failed to resolve (spawn.v1 precedent: the UI needs the cap to explain).
+      ...(config.schedule === undefined ? [] : [SCHED_HUB_CAP]),
     ];
 
     let supersede: SupersedeController | undefined = undefined;
@@ -600,6 +607,9 @@ export async function startHub(
       },
     };
     let botOnHello: ((key: string) => void) | undefined;
+    /** scheduled-reports H1: the bot's event listener, captured so sched_bound frames (which
+     *  never reach the registry) can be forwarded as FeishuServiceEvents (§7.5). */
+    let botSchedEventListener: ((event: never) => void) | undefined;
     const botDialogSlots =
       config.feishuBot === undefined ? undefined : new Map<string, Extract<HubEvent, { type: "dialogs" }>>();
     const registry = createRegistry({
@@ -840,6 +850,16 @@ export async function startHub(
             ...(xsMirrorOn ? { onQuietDelivered: (e) => bot?.xsMirror(e) } : {}),
           });
     if (xsRelay !== undefined) cleanup.push(async () => xsRelay.dispose());
+    // scheduled-reports plan r3 §7 (H1): the read-only schedule coordinator — constructed ONLY
+    // when `config.schedule` exists (key absence IS off: no reader, no `sched.v1`, no frames, no
+    // disk). A store root that fails to resolve degrades INSIDE the coordinator (empty
+    // projection + WARN, hub keeps running); dispose drains its hub-state flush. The 60s scan
+    // loop, observation clock and every timer it owns are unref'd.
+    const scheduleHub =
+      config.schedule === undefined
+        ? undefined
+        : createScheduleService({ config: config.schedule, stateDir: paths.stateDir, registry, log, now });
+    if (scheduleHub !== undefined) cleanup.push(() => scheduleHub.dispose());
     agentServer = createAgentServer(owner.server, {
       registry,
       config,
@@ -848,6 +868,8 @@ export async function startHub(
       httpPort: () => httpPort,
       admin,
       extraHubCaps,
+      // scheduled-reports H1: `sched_*` frame routing (never the registry).
+      ...(scheduleHub === undefined ? {} : { schedule: scheduleHub }),
       ...(xsRelay === undefined ? {} : { xs: xsRelay.router }),
       ...(config.feishuBot === undefined
         ? {}
@@ -1494,8 +1516,14 @@ export async function startHub(
               r.sessionId === undefined ? [] : [{ sessionId: r.sessionId, cwd: r.cwd }],
             ),
         },
+        // scheduled-reports H1 → F1 (verify r1 major): the port rides FeishuBotServiceDeps at
+        // CONSTRUCTION time (F1 builds its whole schedule surface iff it is present; the
+        // coordinator implements list/run/receiptsChanged). Key absence (schedule off / no
+        // coordinator) keeps the bot byte-identical.
+        ...(scheduleHub === undefined ? {} : { schedule: scheduleHub.port() }),
         events: {
           subscribe: (listener) => {
+            botSchedEventListener = listener;
             botOnHello = (key) => {
               evidence.delete(key);
               listener({ type: "agent_up", agentKey: key });
@@ -1569,6 +1597,21 @@ export async function startHub(
       if (lanDeps !== undefined) lanDeps.approval = bot.approval;
       await startupStep(bot.start());
       startup.signal.throwIfAborted();
+      // scheduled-reports H1 → F1 (§7.1–§7.5): hand over F1's own delivery half
+      // (`service.schedule`: pushReport/pushNotice/receiptsFor/hasReceipt) — discovery, notices
+      // and the receipt view flow through it from now on — and tap `sched_bound` into the bot's
+      // event stream (those frames are routed to the coordinator BEFORE the registry, so the
+      // bot's registry-bus subscription can never see them by itself).
+      if (scheduleHub !== undefined) {
+        scheduleHub.setBoundTap((agentKey, runKey) => {
+          try {
+            botSchedEventListener?.({ type: "sched_bound", agentKey, runKey } as never);
+          } catch {
+            /* the bot's listener must never break the coordinator */
+          }
+        });
+        if (bot.schedule !== undefined) scheduleHub.bindDelivery(bot.schedule);
+      }
     }
     // web-hub-delete-session plan v2 §2.9: the removal route frontend is wired UNCONDITIONALLY
     // (unlike spawn/preview/upload) — deleting an offline/stale TUI card never depended on
@@ -1627,7 +1670,7 @@ export async function startHub(
     cleanup.push(async () => versionSvc.dispose());
     const sameUi = (a: HubUiBuildWire | undefined, b: HubUiBuildWire | undefined): boolean =>
       a === b || (a !== undefined && b !== undefined && JSON.stringify(a) === JSON.stringify(b));
-    fe = frontend({
+    const frontendDeps: FrontendDeps = {
       config,
       paths,
       registry,
@@ -1668,7 +1711,14 @@ export async function startHub(
       // fleet-drawer plan §5.3 (F3b): the run-transcript service — F4's `createRunRoutes`
       // reads it through this dep (absent ⇒ no `/api/run/*` wiring, byte-identical today).
       runTx,
-    });
+    };
+    // scheduled-reports H1: the coordinator rides FrontendDeps as a duck-typed extra (ports.ts
+    // frozen for this package — http.ts reads it through the same widening; the GET route + SSE
+    // sinks only exist when `config.schedule` does, so an off hub stays byte-identical).
+    if (scheduleHub !== undefined) {
+      (frontendDeps as FrontendDeps & { schedules?: typeof scheduleHub }).schedules = scheduleHub;
+    }
+    fe = frontend(frontendDeps);
     cleanup.push(() => fe.close());
     // web-hub-preview plan v3 §4.5.1 (PV3): pushed right after the frontend's own entry so the
     // startup-failure reverse-order unwind runs preview dispose BEFORE `fe.close()` — the same
