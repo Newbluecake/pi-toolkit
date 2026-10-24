@@ -53,6 +53,13 @@
  * dropped wholesale via `@logic/load.js`'s `isLoadWireLike`/`isLoadGateWireLike`, same discipline
  * `todoFromStatus` already applies to `status.todo`.
  *
+ * Scheduled-reports W1 (docs/dev/scheduled-reports/plan.md r3 §5.6): the hub-global `schedules`
+ * SSE frame (cap `sched.v1`, append-only `SchedulesPayloadWire`) lands on top-level
+ * `HubState.schedules` + `schedulesReceivedAt` (browser-clock receive anchor, same discipline
+ * as `load` above), cleared on a fresh `hello` and whenever a `hub` frame's caps drop
+ * `sched.v1`; malformed frames drop wholesale via `@logic/schedule.js`'s
+ * `isSchedulesPayloadLike`.
+ *
  * Steer recall (web-hub-steer-recall plan §7, P-ui): the agent-side hold snapshot rides the
  * open `status` slot. `acceptHeld` (./control.js) is the single merge point — its output lands
  * on `held`/`heldRev`/`heldEpoch` (Y2 scope = the card's CURRENT epoch; a mismatched snapshot
@@ -121,6 +128,7 @@
 import { acceptHeld, HELD_TOMB_CTL_STATES, pendingTransition } from "./control.js";
 import { isCmdRecordWire } from "./cmdRecord.ts";
 import { isLoadGateWireLike, isLoadWireLike, parseLoadTopWire } from "./load.js";
+import { SCHED_CAP, SCHED_EVENT, isSchedulesPayloadLike } from "./schedule.js";
 import { SSE_EVENTS } from "@protocol/http-contract.ts";
 
 /**
@@ -542,6 +550,10 @@ function reduceInner(s, event, d, at) {
         load: undefined,
         loadReceivedAt: undefined,
         loadTop: undefined,
+        // scheduled-reports W1 (§5.6): same posture as `load` — stale until the hub's
+        // post-`agents` resend / the first live `schedules` frame on the new connection.
+        schedules: undefined,
+        schedulesReceivedAt: undefined,
       };
     }
     case "hub": {
@@ -571,6 +583,11 @@ function reduceInner(s, event, d, at) {
         load: loadCap ? s.load : undefined,
         loadReceivedAt: loadCap ? s.loadReceivedAt : undefined,
         loadTop: loadCap ? s.loadTop : undefined,
+        // scheduled-reports W1 (§5.6): a `hub` frame whose caps dropped `sched.v1` clears the
+        // slot (older hub / schedule off) — never a frozen snapshot of a feature the hub no
+        // longer serves (same rule as `load` above).
+        schedules: caps.includes(SCHED_CAP) ? s.schedules : undefined,
+        schedulesReceivedAt: caps.includes(SCHED_CAP) ? s.schedulesReceivedAt : undefined,
       };
     }
     // web-hub-privacy plan v2.1 (P1): the locked-set full-snapshot/broadcast frame. Overwrite
@@ -611,6 +628,15 @@ function reduceInner(s, event, d, at) {
     // (§10 包注 P0·M9: never trust the hub's own `load.at`).
     case "load":
       return isLoadWireLike(d) ? { ...s, load: d, loadReceivedAt: at } : s;
+    // scheduled-reports W1 (plan r3 §5.6): the hub-global `schedules` snapshot (per-session
+    // projections — H1 produces, W1 consumes; append-only). Overwrite semantics with
+    // receive-time anchoring (`schedulesReceivedAt`, the same discipline as `load`); malformed
+    // frames are dropped wholesale via `@logic/schedule.js`'s `isSchedulesPayloadLike`. NOTE:
+    // the case key is the UI-side mirror (`@logic/schedule.js`'s SCHED_EVENT) — the
+    // `pinnedEvent` drift pin can only land once H1 appends "schedules" to the contract's
+    // SSE_EVENTS (S0 deliberately left the array untouched).
+    case SCHED_EVENT:
+      return isSchedulesPayloadLike(d) ? { ...s, schedules: d, schedulesReceivedAt: at } : s;
     // sysload plan §7.1/§10: `useHub.fetchLoadTop()`'s single-flight GET /api/load/top drive.
     // `loading` starts/stays true on `load_top_start`; a successful/failed settle independently
     // updates `data`/`error` while clearing `loading` — `data` is KEPT across a failed refetch

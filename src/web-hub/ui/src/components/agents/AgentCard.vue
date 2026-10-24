@@ -23,6 +23,7 @@ import { useListDensityValue } from "../../composables/useListDensity.js";
 import { formatPercent } from "../../format.js";
 import { isFreshlyRestored, managedFor, restoringKeys } from "../../logic/spawn.js";
 import type { AgentCardProps } from "../../contracts.js";
+import { scheduleBadgeOf, scheduleBadgeText } from "../../logic/schedule.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import { PRIVACY_LOCK_CTX } from "../privacy/privacyContext.js";
 
@@ -32,6 +33,7 @@ const compactChips = computed(
   () =>
     xsAlias.value !== undefined ||
     xsUnread.value !== undefined ||
+    schedBadge.value !== undefined ||
     needsAnswer.value ||
     props.card.statusLabel !== null ||
     props.card.runningSubCount > 0 ||
@@ -59,6 +61,18 @@ const xsAlias = computed(() => xsAliasOf(hub?.state.value.agents.get(props.card.
 const needsAnswer = computed(() => {
   const dialogs = hub?.state.value.agents.get(props.card.key)?.dialogs;
   return Array.isArray(dialogs?.open) && dialogs.open.length > 0;
+});
+
+// scheduled-reports W1 (plan r3 §5.6): the ⏰ badge — hub cap sched.v1 ∧ the hub-global
+// `schedules` slot carries this sessionId's projection with ≥1 task (or a degraded store).
+// `⏰<n>` normally; `⏰!` while any task is pendingApproval. Count-only — like the needsAnswer
+// badge it is NOT gated on the privacy lock (plan: 卡片保留 needsAnswer 徽标,内容解锁后才可见 —
+// the count is metadata, the task content stays behind the lock/panel).
+const schedBadge = computed(() => {
+  const agent = hub?.state.value.agents.get(props.card.key);
+  const session = agent?.session as { sessionId?: unknown } | undefined;
+  const sid = typeof session?.sessionId === "string" ? session.sessionId : undefined;
+  return scheduleBadgeOf(hub?.state.value.hub?.["caps"], hub?.state.value.schedules, sid);
 });
 
 // ---------------------------------------------------------------------------
@@ -212,6 +226,23 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             >
               <AppIcon name="inbox" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span>
             </span>
+            <!-- scheduled-reports W1 (§5.6): ⏰ badge (count-only; `!` = 待确认). -->
+            <span
+              v-if="schedBadge !== undefined"
+              class="chip chip-sched"
+              data-compact="sched"
+              :data-pending="schedBadge.pending ? 'true' : undefined"
+              role="img"
+              translate="no"
+              :title="t(schedBadge.pending ? 'agents.schedBadgePending' : 'agents.schedBadge', { n: schedBadge.count })"
+              :aria-label="
+                t(schedBadge.pending ? 'agents.schedBadgePending' : 'agents.schedBadge', { n: schedBadge.count })
+              "
+            >
+              <AppIcon name="clock" class="icon-sm" /><span class="num">{{
+                schedBadge.pending ? "!" : scheduleBadgeText(schedBadge.count)
+              }}</span>
+            </span>
           </span>
         </span>
       </span>
@@ -284,6 +315,24 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
                 :aria-label="t('agents.xsUnread', { n: xsUnread })"
               >
                 <AppIcon name="inbox" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span>
+              </span>
+              <!-- scheduled-reports W1 (§5.6): ⏰ badge (count-only; `!` = 待确认). -->
+              <span
+                v-if="schedBadge !== undefined"
+                class="chip chip-sched"
+                :data-pending="schedBadge.pending ? 'true' : undefined"
+                role="img"
+                translate="no"
+                :title="
+                  t(schedBadge.pending ? 'agents.schedBadgePending' : 'agents.schedBadge', { n: schedBadge.count })
+                "
+                :aria-label="
+                  t(schedBadge.pending ? 'agents.schedBadgePending' : 'agents.schedBadge', { n: schedBadge.count })
+                "
+              >
+                <AppIcon name="clock" /><span class="num">{{
+                  schedBadge.pending ? "!" : scheduleBadgeText(schedBadge.count)
+                }}</span>
               </span>
             </span>
           </Teleport>

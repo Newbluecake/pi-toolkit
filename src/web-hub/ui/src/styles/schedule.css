@@ -1,0 +1,316 @@
+/*
+ * Scheduled-reports W1 (plan r3 §5.6): `SchedulePanel.vue` / `ScheduleReview.vue` + the
+ * detail-header 「定时」 button and the AgentCard ⏰ badge. Own file (never detail.css /
+ * agents.css) for the same file-domain disjointness todo.css documents; source-scan bans
+ * scoped <style> blocks outright. Reuses the PickerSheet chrome + the channels-sheet cap
+ * grammar (styles/resume.css `.picker-scrim.channels-scrim` precedent).
+ */
+
+.picker-scrim.sched-scrim {
+  align-items: center;
+  justify-content: center;
+}
+
+@media (min-width: 641px) {
+  .picker-scrim.sched-scrim .picker-sheet {
+    width: min(520px, calc(100vw - 32px));
+    max-height: min(70vh, 560px);
+    border: 1px solid var(--c-border);
+    border-radius: var(--r-lg);
+    box-shadow: 0 12px 36px rgb(19 32 38 / 0.22);
+  }
+}
+
+.sched-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+  max-height: 100%;
+  padding-bottom: var(--sp-3);
+  overflow-y: auto;
+}
+
+.sched-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 10px 12px 0;
+}
+
+.sched-title {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  overflow-wrap: anywhere;
+}
+
+.sched-head .sched-close {
+  flex: none;
+}
+
+/* --- notices (stale / offline / degraded / droppedReports) --- */
+
+.sched-note {
+  margin: 0 12px;
+  padding: 6px 10px;
+  border-radius: var(--r-md);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.sched-note[data-kind="warn"] {
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+  border: 1px solid var(--c-warning-border);
+}
+
+.sched-note[data-kind="info"] {
+  background: var(--c-info-soft);
+  color: var(--c-info);
+}
+
+/* --- task list --- */
+
+.sched-sec {
+  padding: 0 12px;
+}
+
+.sched-sec-title {
+  margin: 0 0 2px;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--c-text-3);
+}
+
+.sched-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sched-task {
+  padding: var(--sp-2) 0;
+  border-top: 1px solid var(--c-border);
+}
+
+.sched-task:first-child {
+  border-top: 0;
+}
+
+.sched-task-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.sched-task-name {
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+  overflow-wrap: anywhere;
+}
+
+.sched-task[data-enabled="false"] .sched-task-name {
+  color: var(--c-text-3);
+}
+
+.sched-task-head .sched-task-act {
+  flex: none;
+  margin-inline-start: auto;
+}
+
+.sched-task-meta,
+.sched-task-stats {
+  margin: 2px 0 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.sched-task-stats {
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-regular);
+}
+
+.sched-chip-missed {
+  color: var(--c-warning-text);
+}
+
+/* --- run list --- */
+
+.sched-run {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--sp-2);
+  padding: 5px 0;
+  border-top: 1px solid var(--c-border);
+  font-size: var(--fs-xs);
+}
+
+.sched-run:first-child {
+  border-top: 0;
+}
+
+.sched-run-state {
+  flex: none;
+  font-weight: var(--fw-semibold);
+}
+
+.sched-run[data-state="completed"] .sched-run-state,
+.sched-run[data-state="settled"] .sched-run-state,
+.sched-run[data-state="continued"] .sched-run-state {
+  color: var(--st-done);
+}
+
+.sched-run[data-state="failed"] .sched-run-state,
+.sched-run[data-state="unknown"] .sched-run-state,
+.sched-run[data-state="dropped"] .sched-run-state,
+.sched-run[data-state="refused"] .sched-run-state {
+  color: var(--st-failed);
+}
+
+.sched-run[data-state="timed_out"] .sched-run-state,
+.sched-run[data-state="aborted"] .sched-run-state {
+  color: var(--c-warning-text);
+}
+
+.sched-run[data-live="true"] .sched-run-state {
+  color: var(--st-running);
+}
+
+.sched-run-task {
+  min-width: 0;
+  color: var(--c-text-2);
+  overflow-wrap: anywhere;
+}
+
+.sched-run-time {
+  margin-inline-start: auto;
+  flex: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.sched-run-sub {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  overflow-wrap: anywhere;
+}
+
+.sched-empty {
+  margin: 0;
+  padding: var(--sp-2) 12px;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+/* --- ScheduleReview --- */
+
+.review-kv {
+  margin: 0 12px;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-xs);
+}
+
+.review-kv > li {
+  display: flex;
+  gap: var(--sp-2);
+  padding: 3px 0;
+  border-top: 1px solid var(--c-border);
+}
+
+.review-kv > li:first-child {
+  border-top: 0;
+}
+
+.review-kv .k {
+  flex: none;
+  width: 96px;
+  color: var(--c-text-3);
+}
+
+.review-kv .v {
+  min-width: 0;
+  color: var(--c-text);
+  overflow-wrap: anywhere;
+}
+
+.review-prompt {
+  margin: 0 12px;
+  padding: var(--sp-2) 10px;
+  background: var(--c-sunken);
+  border-radius: var(--r-md);
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 32vh;
+  overflow-y: auto;
+}
+
+.review-hash {
+  margin: 0 12px;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  overflow-wrap: anywhere;
+}
+
+.review-status {
+  margin: 0 12px;
+  font-size: var(--fs-xs);
+}
+
+.review-status[data-kind="err"] {
+  color: var(--c-danger);
+}
+
+.review-status[data-kind="ok"] {
+  color: var(--c-success);
+}
+
+.review-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 12px 0;
+}
+
+/* --- entry points (header button + card badge) --- */
+
+/* The 「定时」 header button mirrors .detail-clear-btn / .detail-channels-btn (detail.css):
+   its class is defined next to them so the family stays in one place — see detail.css. */
+
+.chip-sched {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.chip-sched .num {
+  font-variant-numeric: tabular-nums;
+}
+
+.chip-sched[data-pending="true"] {
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+  border-color: var(--c-warning-border);
+}
+
+/* coarse pointers: the review/approve buttons keep a ≥36px hit box (channels.css grammar) */
+@media (pointer: coarse) {
+  .sched-task-act .btn,
+  .review-actions .btn {
+    min-height: 36px;
+  }
+}

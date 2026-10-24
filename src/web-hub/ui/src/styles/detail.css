@@ -121,7 +121,8 @@
  * button never does); the coarse-pointer ≥44px house rule mirrors stop button A's block. */
 .detail-clear-btn,
 .detail-channels-btn,
-.detail-resume-btn {
+.detail-resume-btn,
+.detail-sched-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -144,14 +145,17 @@
 .detail-channels-btn:hover:not(:disabled),
 .detail-resume-btn:hover:not(:disabled),
 .detail-channels-btn:focus-visible,
-.detail-resume-btn:focus-visible {
+.detail-resume-btn:focus-visible,
+.detail-sched-btn:hover:not(:disabled),
+.detail-sched-btn:focus-visible {
   background: var(--c-surface-2);
   color: var(--c-text-2);
 }
 
 .detail-clear-btn:disabled,
 .detail-channels-btn:disabled,
-.detail-resume-btn:disabled {
+.detail-resume-btn:disabled,
+.detail-sched-btn:disabled {
   cursor: default;
   opacity: 0.6;
 }
@@ -160,7 +164,8 @@
   /* house rule: every new interactive target ≥44px on coarse pointers (2026-10 stop button A) */
   .detail-clear-btn,
   .detail-channels-btn,
-  .detail-resume-btn {
+  .detail-resume-btn,
+  .detail-sched-btn {
     min-width: 44px;
     min-height: 44px;
   }
@@ -172,7 +177,15 @@
  * the accessible name. Below 600px of titlebar width (title keeps ≳200px beside pill +
  * 4 labeled buttons incl. stop) the labels drop and the 32px icon-only buttons return.
  * Selector is `.detail-titlebar`-prefixed so it also beats `.btn`/`.btn-ghost` (privacy). */
-.detail-titlebar :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn, .spawn-stop-btn) {
+.detail-titlebar
+  :is(
+    .detail-clear-btn,
+    .detail-resume-btn,
+    .detail-channels-btn,
+    .privacy-head-btn,
+    .spawn-stop-btn,
+    .detail-sched-btn
+  ) {
   width: auto;
   min-height: calc(24px * var(--fs-scale, 1));
   padding: 1px 4px;
@@ -191,21 +204,45 @@
  * (bar gap) + 8 (padding) = 24px; 4px padding and a −4px margin between adjacent labeled
  * buttons bring it to 12px. The icon-only tier below resets the margin. */
 .detail-titlebar
-  :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn, .spawn-stop-btn)
-  + :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn, .spawn-stop-btn) {
+  :is(
+    .detail-clear-btn,
+    .detail-resume-btn,
+    .detail-channels-btn,
+    .privacy-head-btn,
+    .spawn-stop-btn,
+    .detail-sched-btn
+  )
+  + :is(
+    .detail-clear-btn,
+    .detail-resume-btn,
+    .detail-channels-btn,
+    .privacy-head-btn,
+    .spawn-stop-btn,
+    .detail-sched-btn
+  ) {
   margin-left: -4px;
 }
 
 .detail-titlebar
-  :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn, .spawn-stop-btn)
+  :is(
+    .detail-clear-btn,
+    .detail-resume-btn,
+    .detail-channels-btn,
+    .privacy-head-btn,
+    .spawn-stop-btn,
+    .detail-sched-btn
+  )
   .icon {
   width: calc(14px * var(--fs-scale, 1));
   height: calc(14px * var(--fs-scale, 1));
 }
 
 .detail-titlebar
-  :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn):hover:not(:disabled),
-.detail-titlebar :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn):focus-visible {
+  :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn, .detail-sched-btn):hover:not(
+    :disabled
+  ),
+.detail-titlebar
+  :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn, .detail-sched-btn):focus-visible {
   background: var(--c-surface-2);
   color: var(--c-text-2);
 }
@@ -243,7 +280,14 @@
   }
 
   .detail-titlebar
-    :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn, .spawn-stop-btn) {
+    :is(
+      .detail-clear-btn,
+      .detail-resume-btn,
+      .detail-channels-btn,
+      .privacy-head-btn,
+      .spawn-stop-btn,
+      .detail-sched-btn
+    ) {
     width: 32px;
     min-height: 32px;
     padding: 0;
@@ -252,13 +296,34 @@
   }
 
   .detail-titlebar
-    :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn, .spawn-stop-btn)
-    + :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn, .spawn-stop-btn) {
+    :is(
+      .detail-clear-btn,
+      .detail-resume-btn,
+      .detail-channels-btn,
+      .privacy-head-btn,
+      .spawn-stop-btn,
+      .detail-sched-btn
+    )
+    + :is(
+      .detail-clear-btn,
+      .detail-resume-btn,
+      .detail-channels-btn,
+      .privacy-head-btn,
+      .spawn-stop-btn,
+      .detail-sched-btn
+    ) {
     margin-left: 0;
   }
 
   .detail-titlebar
-    :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn, .spawn-stop-btn)
+    :is(
+      .detail-clear-btn,
+      .detail-resume-btn,
+      .detail-channels-btn,
+      .privacy-head-btn,
+      .spawn-stop-btn,
+      .detail-sched-btn
+    )
     .icon {
     width: calc(16px * var(--fs-scale, 1));
     height: calc(16px * var(--fs-scale, 1));
@@ -267,13 +332,27 @@
 
 @media (pointer: coarse) {
   .detail-titlebar
-    :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn, .spawn-stop-btn) {
+    :is(
+      .detail-clear-btn,
+      .detail-resume-btn,
+      .detail-channels-btn,
+      .privacy-head-btn,
+      .spawn-stop-btn,
+      .detail-sched-btn
+    ) {
     min-height: 44px;
   }
 
   @container detail-titlebar (max-width: 599px) {
     .detail-titlebar
-      :is(.detail-clear-btn, .detail-resume-btn, .detail-channels-btn, .privacy-head-btn, .spawn-stop-btn) {
+      :is(
+        .detail-clear-btn,
+        .detail-resume-btn,
+        .detail-channels-btn,
+        .privacy-head-btn,
+        .spawn-stop-btn,
+        .detail-sched-btn
+      ) {
       min-width: 44px;
     }
   }

@@ -100,6 +100,10 @@ const detail = {
   // web-hub archive plan: the `· N archived` summary segment — compact English token in BOTH
   // locales (AGENTS.md UI-text rule, same as bashJobsRunning/Done/Failed).
   bashJobsArchived: "{n} archived",
+  // scheduled-reports W1 (plan r3 §5.6): the detail header's 「定时」 button opening the lazy
+  // SchedulePanel (hub cap sched.v1 + a sessionId on the card; absent ⇒ zero trace).
+  scheduleOpenTitle: "Scheduled tasks",
+  scheduleOpenLabel: "Schedules",
 } satisfies Record<string, string>;
 
 export default detail;

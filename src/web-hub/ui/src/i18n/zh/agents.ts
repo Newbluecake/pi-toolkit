@@ -58,6 +58,11 @@ const agents = {
   // alias-plan r4 §7.2 (ALU)：详情头部 `@别名` 按钮的提示
   xsAliasManage: "别名 @{alias}——管理频道与别名",
   "xs.off": "跨会话：已加入，但当前拒收所有消息",
+  // scheduled-reports W1（方案 r3 §5.6）：会话卡 ⏰ 徽标的悬浮提示（cap sched.v1 + hub 全局
+  // schedules 槽位；缺失 ⇒ 徽标整体不出现）。仅数量，不含任务内容，隐私锁定的卡片照常显示
+  // （与 needsAnswer 徽标同一先例）。
+  schedBadge: "{n} 个定时任务",
+  schedBadgePending: "{n} 个定时任务——有待确认",
 } satisfies Messages<typeof en>;
 
 export default agents;

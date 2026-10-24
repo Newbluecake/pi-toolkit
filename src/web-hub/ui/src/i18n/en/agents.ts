@@ -60,6 +60,11 @@ const agents = {
   // alias-plan r4 §7.2 (ALU): the detail header's `@alias` button tooltip
   xsAliasManage: "Alias @{alias} — manage channels & alias",
   "xs.off": "Cross-session: joined — currently rejecting all messages",
+  // scheduled-reports W1 (plan r3 §5.6): the AgentCard ⏰ badge title (cap sched.v1 + the
+  // hub-global `schedules` slot; absent ⇒ no badge at all). Count-only chip, visible on
+  // privacy-marked cards like the needsAnswer badge (content stays behind the lock).
+  schedBadge: "{n} scheduled task(s)",
+  schedBadgePending: "{n} scheduled task(s) — review pending",
 } satisfies Record<string, string>;
 
 export default agents;

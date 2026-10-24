@@ -95,6 +95,10 @@ const detail = {
   clearTitle: "新会话（/clear）",
   clearFailed: "新会话启动失败（{code}）",
   bashJobsArchived: "{n} archived",
+  // scheduled-reports W1（方案 r3 §5.6）：详情头部「定时」按钮，打开懒加载的 SchedulePanel
+  //（hub cap sched.v1 + 卡片有 sessionId 才出现；否则零痕迹）。
+  scheduleOpenTitle: "定时任务",
+  scheduleOpenLabel: "定时",
 } satisfies Messages<typeof en>;
 
 export default detail;

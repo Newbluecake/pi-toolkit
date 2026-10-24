@@ -58,6 +58,7 @@ import WorktreePanel from "./WorktreePanel.vue";
 import GraphPanel from "./GraphPanel.vue";
 import { cacheKeepaliveOf } from "./cacheKeepaliveView.js";
 import { XS_CHANNEL_CAP, xsAliasOf, xsUnreadLabel, xsUnreadOf } from "../agents/agentCardModel.js";
+import { schedCapOn } from "../../logic/schedule.js";
 import { worktreesOf } from "./worktreesView.js";
 
 const props = defineProps<DetailHeaderProps>();
@@ -266,6 +267,21 @@ const channelsUsable = computed(() => {
   return clearUsable.value && typeof xs === "object" && xs !== null;
 });
 
+// ---------------------------------------------------------------------------
+// scheduled-reports W1 (plan r3 §5.6): the 「定时」 button → lazy SchedulePanel. Gated ONLY on
+// the hub's sched.v1 cap + this card having a sessionId — deliberately NOT on the control
+// gate: the panel is read-only by default, and offline sessions stay readable (E3; write
+// buttons hide inside the panel/review). Mounted inside AgentDetail's tree, so a privacy
+// relock unmounts it with everything else (ResumeDialog precedent).
+// ---------------------------------------------------------------------------
+const SchedulePanel = defineAsyncComponent(() => import("../schedule/SchedulePanel.vue"));
+const schedOpen = ref(false);
+const schedSessionId = computed(() => {
+  const sid = session.value?.["sessionId"];
+  return typeof sid === "string" && sid !== "" ? sid : undefined;
+});
+const schedUsable = computed(() => schedCapOn(hub?.state.value.hub?.["caps"]) && schedSessionId.value !== undefined);
+
 // alias-plan r4 §7.2 (ALU): the held alias renders as a small `@alias` right after the title;
 // clicking it opens the same (lazily loaded) 「频道与别名」 dialog. Drawn only when the hub
 // pushed `status.xs.alias` under the xs.alias.v1 cap — otherwise zero trace.
@@ -418,6 +434,25 @@ function onToggleHeadInfo(): void {
         <span class="head-btn-label" aria-hidden="true">{{ t("agents.channelsOpenLabel") }}</span>
       </button>
       <ChannelsDialog v-if="channelsOpen" @close="channelsOpen = false" />
+      <!-- scheduled-reports W1 (§5.6): 「定时」 → lazy SchedulePanel (sched.v1 + sessionId;
+           read-only-safe offline, so NOT gated on the control surface). -->
+      <button
+        v-if="schedUsable"
+        class="detail-sched-btn"
+        type="button"
+        :title="t('detail.scheduleOpenTitle')"
+        :aria-label="t('detail.scheduleOpenTitle')"
+        aria-haspopup="dialog"
+        @click="schedOpen = true"
+      >
+        <AppIcon name="clock" class="icon" />
+        <span class="head-btn-label" aria-hidden="true">{{ t("detail.scheduleOpenLabel") }}</span>
+      </button>
+      <SchedulePanel
+        v-if="schedOpen && schedSessionId !== undefined"
+        :session-id="schedSessionId"
+        @close="schedOpen = false"
+      />
       <button
         v-if="resumeUsable"
         class="detail-resume-btn"
