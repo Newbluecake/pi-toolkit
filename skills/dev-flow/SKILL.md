@@ -79,24 +79,23 @@ metadata:
 ## 阶段→模型
 
 精确 ID、回退链、fable 闸门、订阅优先与失败处置见 [references/models.md](./references/models.md)。
-「订阅余量」指 [quota] 行未触 L3（≥90%）；GLM 订阅有余量时在候选阶段升为首选，droid 订阅线次之。
+「订阅余量」指 [quota] 行未触 L3（≥90%）；GLM 订阅有余量时在候选阶段升为首选（前端开发除外：kimi-k3 首选）。droid 线已于 2026-10-24 移出路由（用户令）。
 「kimi-k3（订阅）」在可用时优先派 **kimi-coding/k3-256k**（同订阅，价格约为 k3 的一半）；仅当任务需要超过 256k 上下文（大文件通读、大包验收、长会话 resume）才用 kimi-coding/k3。
 
-| 阶段                        | 首选                                                 | 回退                                   | 说明                                                                                                             |
-| --------------------------- | ---------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| **核心调度**（主会话）      | opus-5.5                                             | kimi-k3（订阅）                        | 拆解、派单、汇总、裁定                                                                                           |
-| **代码探索**                | glm-5.3（订阅）→ droid 订阅线 → sonnet               | kimi-k3（订阅）                        | `Explore`，只读                                                                                                  |
-| **架构设计**                | opus-5.5                                             | gpt-6.1-sol                            | `architect`，仅 L3 / 新模块从零搭建                                                                              |
-| **方案制定**                | opus-5.5                                             | sonnet（简单方案）                     | `Plan`                                                                                                           |
-| **复杂任务方案 / 疑难攻坚** | opus-5.5                                             | gpt-6.1-sol                            | 仅 L3 / 连续 2 轮无进展；Blocker 或仍卡死 → `ask_user` 批准后升 fable                                            |
-| **前端开发**                | glm-5.3（订阅）→ droid 订阅线 → sonnet               | opus-5.5（视觉/疑难）→ kimi-k3（订阅） | `frontend-dev`（内置 deveye 浏览器调试，页面 bug 派单给可访问 URL/端口）                                         |
-| **方案评审**                | gpt-6.1-sol（`copilot-response/` → `cr-response/`）  | glm-5.3（订阅）→ kimi-k3               | `reviewer`；必须与方案模型异源                                                                                   |
-| **开发实施**                | glm-5.3（订阅）→ droid 订阅线 → sonnet ⇄ gpt-6.1-sol | kimi-k3（订阅）→ opus-5.5              | `general`（`general-purpose` 仅杂项多步）；sonnet 与 gpt-6.1-sol 并列，多包按包分摊                              |
-| **任务验收**                | glm-5.3（订阅；开发用了 GLM 的包禁派）→ kimi-k3      | deepseek-flash → sonnet                | `verifier`；异源；**禁任何 GPT 系**；kimi 订阅将尽（≥80%）优先 deepseek-flash；打回后复验优先 resume 原 verifier |
+| 阶段                        | 首选                                                | 回退                           | 说明                                                                                                             |
+| --------------------------- | --------------------------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| **核心调度**（主会话）      | opus-5.5                                            | kimi-k3（订阅）                | 拆解、派单、汇总、裁定                                                                                           |
+| **代码探索**                | glm-5.3（订阅）→ sonnet                             | kimi-k3（订阅）                | `Explore`，只读                                                                                                  |
+| **架构设计**                | opus-5.5                                            | gpt-6.1-sol                    | `architect`，仅 L3 / 新模块从零搭建                                                                              |
+| **方案制定**                | opus-5.5                                            | sonnet（简单方案）             | `Plan`                                                                                                           |
+| **复杂任务方案 / 疑难攻坚** | opus-5.5                                            | gpt-6.1-sol                    | 仅 L3 / 连续 2 轮无进展；Blocker 或仍卡死 → `ask_user` 批准后升 fable                                            |
+| **前端开发**                | kimi-k3（订阅）→ glm-5.3（订阅）                    | sonnet → opus-5.5（视觉/疑难） | `frontend-dev`（内置 deveye 浏览器调试，页面 bug 派单给可访问 URL/端口）；2026-10-24 用户令：kimi-k3 首选        |
+| **方案评审**                | gpt-6.1-sol（`copilot-response/` → `cr-response/`） | glm-5.3（订阅）→ kimi-k3       | `reviewer`；必须与方案模型异源                                                                                   |
+| **开发实施**                | glm-5.3（订阅）→ sonnet ⇄ gpt-6.1-sol               | kimi-k3（订阅）→ opus-5.5      | `general`（`general-purpose` 仅杂项多步）；sonnet 与 gpt-6.1-sol 并列，多包按包分摊                              |
+| **任务验收**                | glm-5.3（订阅；开发用了 GLM 的包禁派）→ kimi-k3     | deepseek-flash → sonnet        | `verifier`；异源；**禁任何 GPT 系**；kimi 订阅将尽（≥80%）优先 deepseek-flash；打回后复验优先 resume 原 verifier |
 
-- droid 线（`droid/<model>`）只用于探索/前端/开发；评审、验收、方案、consult 专家一律不用 droid。
-- **droid 线可用性**：只有系统提示的 Available models 里出现「External agent models (droid)」一节时才派 droid；该节缺失（未启用 / 未登录 / 凭据失效 / 二进制缺失）就跳过 droid 线直接走下一级。派 droid 秒挂（如 `No access token`）同理：本轮不再派 droid，回退下一级，并提醒用户登录 droid。
-- gpt-6.1-sol 开发的包，验收改派 Claude 系（sonnet）。开发用了 GLM（含 droid 底层 GLM）的包，验收不派 GLM。
+- droid 线（`droid/<model>`）2026-10-24 起不进路由表（用户令），任何阶段都不派。
+- gpt-6.1-sol 开发的包，验收改派 Claude 系（sonnet）。开发用了 GLM 的包，验收不派 GLM。
 - 专属 agent 定义在 `~/.pi/agent/agents/`（architect / frontend-dev / reviewer / verifier / general / Explore），调用时传 `subagent_type` 并按本表传 `model`。
 
 ## 各车道流程
