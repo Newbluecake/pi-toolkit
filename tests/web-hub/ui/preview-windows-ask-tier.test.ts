@@ -53,7 +53,22 @@ function rig() {
   const transport: PreviewTransport = {
     fetch: () => new Promise<PreviewDirOutcome>((resolve) => waits.push({ resolve })),
   };
-  const hubFake = { state, preview: { fetch: transport.fetch }, dispatch: () => {} };
+  const hubFake = {
+    state,
+    preview: {
+      fetch: transport.fetch,
+      // static cap answer (the preview-windows.test.ts rig pattern) so .html windows can mint
+      htmlCap: () =>
+        Promise.resolve({
+          ok: true,
+          url: "/pv/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.html",
+          openUrl: "/pvw/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          idleMs: 900_000,
+          hardRemainingMs: 3_600_000,
+        }),
+    },
+    dispatch: () => {},
+  };
   const previewHandle = usePreviewWindows({ preview: transport, mode: "token", state, coarse: ref(false) });
   const host = document.createElement("div");
   document.body.appendChild(host);
@@ -160,31 +175,45 @@ describe("ask-tier preview windows (fix #1)", () => {
   });
 
   it("placement avoids the ask float's on-screen rectangle when a side fits", async () => {
-    // float at the bottom edge: the "above" candidate fits (left/right can't hold a
-    // ~960-wide default window at happy-dom's 1024px viewport).
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    fakeAskFloat({ left: vw - 420, top: vh - 60, width: 400, height: 50 });
-    const { handle, text } = rig();
-    handle.open({ path: "/p/from-ask.txt", origin: "ask" });
-    text("ask");
-    await tick();
-    const ask = roots().find((r) => r.classList.contains("is-ask-tier"))!;
-    const sec = ask.querySelector<HTMLElement>(".preview-window")!;
-    const rect = {
-      x: cssVar(sec, "--pw-x"),
-      y: cssVar(sec, "--pw-y"),
-      w: cssVar(sec, "--pw-w"),
-      h: cssVar(sec, "--pw-h"),
-    };
-    expect([rect.x, rect.y, rect.w, rect.h].every(Number.isFinite)).toBe(true);
-    const obstacle = { x: vw - 420, y: vh - 60, w: 400, h: 50 };
-    const intersects =
-      rect.x < obstacle.x + obstacle.w &&
-      obstacle.x < rect.x + rect.w &&
-      rect.y < obstacle.y + obstacle.h &&
-      obstacle.y < rect.y + rect.h;
-    expect(intersects).toBe(false);
+    // 复验 B1: the default-band viewport (1024×768) makes the cascaded window so large that
+    // a bottom-right float never intersects it — the old assertion was vacuous. Pin a
+    // 1920×1080 viewport instead: the cascaded rect is then (512,126,960,900) and a
+    // bottom-right float genuinely overlaps its right edge. Deleting the `askFloatRect()`
+    // argument in PreviewHost turns this test RED (the window stays at x=512, intersecting).
+    const descW = Object.getOwnPropertyDescriptor(window, "innerWidth");
+    const descH = Object.getOwnPropertyDescriptor(window, "innerHeight");
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1920 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 1080 });
+    try {
+      fakeAskFloat({ left: 1200, top: 700, width: 400, height: 300 });
+      const { handle, text } = rig();
+      handle.open({ path: "/p/from-ask.txt", origin: "ask" });
+      text("ask");
+      await tick();
+      const ask = roots().find((r) => r.classList.contains("is-ask-tier"))!;
+      const sec = ask.querySelector<HTMLElement>(".preview-window")!;
+      const rect = {
+        x: cssVar(sec, "--pw-x"),
+        y: cssVar(sec, "--pw-y"),
+        w: cssVar(sec, "--pw-w"),
+        h: cssVar(sec, "--pw-h"),
+      };
+      expect([rect.x, rect.y, rect.w, rect.h].every(Number.isFinite)).toBe(true);
+      // displaced into the LEFT gap: x = 1200 − w − EDGE(8); the cascaded x would be 512
+      expect(rect.w).toBe(960);
+      expect(rect.x).toBe(1200 - 960 - 8);
+      expect(rect.x).not.toBe(512);
+      const obstacle = { x: 1200, y: 700, w: 400, h: 300 };
+      const intersects =
+        rect.x < obstacle.x + obstacle.w &&
+        obstacle.x < rect.x + rect.w &&
+        rect.y < obstacle.y + obstacle.h &&
+        obstacle.y < rect.y + rect.h;
+      expect(intersects).toBe(false);
+    } finally {
+      if (descW !== undefined) Object.defineProperty(window, "innerWidth", descW);
+      if (descH !== undefined) Object.defineProperty(window, "innerHeight", descH);
+    }
   });
 
   it("non-ask windows do NOT avoid the float rect (legacy placement)", async () => {
@@ -205,6 +234,68 @@ describe("ask-tier preview windows (fix #1)", () => {
     expect(cssVar(sec, "--pw-y")).toBe(d.y);
     expect(cssVar(sec, "--pw-w")).toBe(d.w);
     expect(cssVar(sec, "--pw-h")).toBe(d.h);
+  });
+});
+
+describe("ask-tier promotion (复验 B2)", () => {
+  it("dedup focus: an ask-tagged ref for an already-open path promotes that window to the ask tier", async () => {
+    const { handle, text } = rig();
+    handle.open({ path: "/p/shared.txt" }); // conversation origin ⇒ legacy tier-25 window
+    text("body");
+    await tick();
+    expect(handle.windows.value[0]!.askTier).toBeUndefined();
+    expect(roots().some((r) => r.classList.contains("is-ask-tier"))).toBe(false);
+
+    const result = handle.open({ path: "/p/shared.txt", origin: "ask" }); // same path from the ask float
+    expect(result).toBe("focused"); // dedup hits the existing window…
+    await tick();
+    expect(handle.windows.value).toHaveLength(1); // deduped, no second window
+    expect(handle.windows.value[0]!.askTier).toBe(true); // …but promoted
+    const ask = roots().find((r) => r.classList.contains("is-ask-tier"))!;
+    expect(ask.querySelectorAll(".preview-window")).toHaveLength(1);
+  });
+
+  it("cap navigation: an ask-tagged ref over the 6-window cap promotes the navigation target", async () => {
+    const { handle, text } = rig();
+    for (let i = 0; i < 6; i++) {
+      handle.open({ path: `/p/w${i}.txt` });
+      text(`body ${i}`);
+    }
+    await tick();
+    expect(handle.windows.value).toHaveLength(6);
+    expect(handle.windows.value.every((w) => w.askTier === undefined)).toBe(true);
+
+    handle.open({ path: "/p/overflow.txt", origin: "ask" }); // 7th: navigates in the ACTIVE window
+    text("overflow");
+    await tick();
+    expect(handle.windows.value).toHaveLength(6); // still capped
+    const active = handle.activeId.value!;
+    const target = handle.windows.value.find((w) => w.id === active)!;
+    expect(target.askTier).toBe(true); // promoted so the float can't cover the navigation result
+    const ask = roots().find((r) => r.classList.contains("is-ask-tier"))!;
+    expect(ask.querySelectorAll(".preview-window")).toHaveLength(1);
+    expect(ask.querySelector(".preview-window")!.getAttribute("data-pw-id")).toBe(String(active));
+  });
+
+  it("复验 #3: promotion SKIPS an html window — same element instance, iframe intact, stays tier 25", async () => {
+    const { handle, text } = rig();
+    handle.open({ path: "/p/a.html" }); // conversation origin ⇒ legacy tier-25 window
+    await tick();
+    text("<p>x</p>");
+    // the html entry renders the sandboxed iframe (lazy chunk) — the migration hazard
+    await vi.waitFor(() => expect(document.querySelector("iframe.preview-html-frame")).not.toBeNull(), {
+      timeout: 4000,
+    });
+    const sec = document.querySelector(".preview-window")!;
+    const frame = document.querySelector("iframe.preview-html-frame")!;
+
+    const result = handle.open({ path: "/p/a.html", origin: "ask" }); // same path from the ask float
+    expect(result).toBe("focused"); // dedup hit…
+    await tick();
+    expect(handle.windows.value[0]!.askTier).toBeUndefined(); // …but NOT promoted (iframe reload guard)
+    expect(roots().some((r) => r.classList.contains("is-ask-tier"))).toBe(false);
+    expect(document.querySelector(".preview-window")).toBe(sec); // same element instance, no migration
+    expect(document.querySelector("iframe.preview-html-frame")).toBe(frame); // iframe NOT remounted
   });
 });
 

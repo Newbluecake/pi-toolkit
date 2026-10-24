@@ -109,8 +109,10 @@ const windowGroups = computed(() => {
   ] as const;
 });
 
-/** The ask float's on-screen rectangle (null when absent/hidden — a minimized float is
- *  `display:none`, its rect 0×0). Read fresh per placement; never cached across frames. */
+/** The ask float's on-screen rectangle. A MINIMIZED float still shows its bar (only the
+ *  body is v-show-hidden), so the bar's rect is a real obstacle and is returned as-is;
+ *  `null` only when no dialog is open at all (or a zero-size measurement). Read fresh per
+ *  placement; never cached across frames. */
 function askFloatRect(): PreviewRect | null {
   const el = document.querySelector(".ask-float");
   if (el === null) return null;

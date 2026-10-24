@@ -32,7 +32,7 @@
  * `asDirHandle(root) === null` and the host MUST go through `asWindowsHandle`.
  */
 import { computed, onScopeDispose, ref, shallowRef, watch, type Ref, type ShallowRef } from "vue";
-import { scopeKeyOf } from "@logic/preview.js";
+import { isHtmlPath, scopeKeyOf } from "@logic/preview.js";
 import { PreviewHistoryBudget, historyBudgetFor } from "@logic/previewHistoryBudget.js";
 import { routeOf, type PreviewRoute } from "@logic/previewWindowRoute.js";
 import {
@@ -97,8 +97,9 @@ interface WindowMeta {
   readonly originEpoch: number;
   /** The navEpoch this window's current limitNotice was armed at (§3.4 clear rule ①). */
   noticeEpoch: number | null;
-  /** ask-paths fix #1: opened from the ask dialog (or from an ask-tier window). */
-  readonly askTier: boolean;
+  /** ask-paths fix #1: opened from the ask dialog (or from an ask-tier window). Mutable: B2's
+   *  dedup/cap branches promote an existing window when an ask-tagged ref lands on it. */
+  askTier: boolean;
   readonly stopWatchers: Array<() => void>;
 }
 
@@ -219,6 +220,27 @@ export function usePreviewWindows(opts: UsePreviewOptions): PreviewHandle {
     },
   );
 
+  /** ask-paths fix (2026-10-24 复验遗留 B2): a ref tagged origin:"ask" that lands on an
+   * EXISTING window (dedup focus / cap navigation) must pull that window up to the ask tier
+   * too — otherwise the focused/navigated window stays at z25 and the ask float can still
+   * cover it. No-op for windows already on the tier.
+   *
+   * 复验 #3 (plan §3 「z 只改变量、不重排 DOM」): promotion MIGRATES the window's section
+   * between the two tier roots' v-fors — a remount. Text/dir/image windows re-render from
+   * machine state (scroll position is the only casualty, accepted); but a `.html` window's
+   * SANDBOXED IFRAME would reload with a fresh cap mint and lose its page state, so those
+   * keep their z25 home — documented exception: an already-open HTML window re-focused by
+   * an ask-tagged ref may stay partly under the ask float (drag it aside, or close and
+   * reopen it from the dialog). */
+  function promoteToAskTier(id: number): void {
+    const meta = metas.get(id);
+    if (meta === undefined || meta.askTier) return;
+    const v = meta.handle.view.value;
+    if (v.phase === "text" && isHtmlPath(v.path)) return; // iframe-bearing: never migrate
+    meta.askTier = true;
+    windows.value = windows.value.map((w) => (w.id === id ? { ...w, askTier: true as const } : w));
+  }
+
   function openWindow(
     ref: PreviewNavRef,
     fromId: number | null,
@@ -247,6 +269,7 @@ export function usePreviewWindows(opts: UsePreviewOptions): PreviewHandle {
       if (hit === undefined) continue;
       const v = hit.handle.view.value;
       if ("path" in v && v.path === ref.path) {
+        if (ref.origin === "ask") promoteToAskTier(order.value[i]!); // B2
         focusWindow(order.value[i]!, { moveFocus: true });
         return "focused";
       }
@@ -257,6 +280,7 @@ export function usePreviewWindows(opts: UsePreviewOptions): PreviewHandle {
     if (windows.value.length >= PREVIEW_WINDOW_MAX) {
       const target = from ?? windowOf(activeId.value);
       if (target === null) return "ignored";
+      if (ref.origin === "ask") promoteToAskTier(target.id); // B2
       target.handle.navigate(ref);
       armLimitNotice(from !== null ? from.id : activeId.value!);
       return "navigated";

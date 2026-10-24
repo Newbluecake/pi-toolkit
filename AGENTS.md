@@ -799,7 +799,9 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   identical to `off` on LAN) while loopback keeps previewing. Design + real-device acceptance:
   `docs/dev/web-hub-preview/{plan,dir-plan,acceptance}.md`.
   **Preview multi-windows** (preview-windows plan r2, W1–W4 merged): on ≥768px that dialog becomes MODELESS floating
-  preview windows (z-layer 25 — over chat/composer, under drawers/popups/ask-float): conversation clicks APPEND
+  preview windows (z-layer 25 — over chat/composer, under drawers/popups/ask-float; EXCEPTION 2026-10-24:
+  windows opened FROM the ask_user float ride a dedicated z-46 root above ask-float, placement avoiding the
+  float's rect, and an ask-tagged ref landing on an existing window promotes it to that tier): conversation clicks APPEND
   windows (cap 6, staggered cascade), known dirs navigate in place, unknown types speculatively open + fold back,
   drag/8-way resize with keyboard equivalents on the title bar, 「⋯」 window menu (close-all/reset/list),
   `Ctrl+`` / `Ctrl+Shift+`` conversation⇄window MRU ring, same-path dedup focuses + moves focus, cap-limit

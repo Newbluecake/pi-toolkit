@@ -114,8 +114,12 @@ function revealOther(): void {
 function setSelected(next: string[]): void {
   const i = index.value;
   if (!form || i < 0 || form.suspended.value) return;
+  // 2026-10-24 复验 blocker (双向互斥): single-select — picking an option CLEARS a typed
+  // Other (TUI parity: component.ts's confirm sets freeTextValue=null). The DESELECT path
+  // (next empty) deliberately keeps Other — cancelling a mis-click must not eat typed text.
+  const other = !multi.value && next.length > 0 ? null : selection.value.other;
   // Picking an option retracts a skip (the fresh slot object simply drops `skipped`).
-  form.selections[i] = { selected: next, other: selection.value.other };
+  form.selections[i] = { selected: next, other };
   form.saveDraft();
 }
 
@@ -123,7 +127,15 @@ function setOther(text: string): void {
   const i = index.value;
   if (!form || i < 0 || form.suspended.value) return;
   // Typing an Other answer retracts a skip too.
-  form.selections[i] = { selected: selection.value.selected, other: text };
+  // 2026-10-24 bug fix (单选误点无法撤销): single-select — a NON-EMPTY Other clears the picked
+  // option (option ⟂ Other are mutually exclusive; the wire would otherwise send BOTH —
+  // encodeAnswer emits `key` = selected[0] plus `key__other`). 复验 #2: the emptiness check
+  // trims (TUI parity: component.ts confirms `draftText.trim()`), so whitespace-only text
+  // does NOT clear the option. Clearing the Other text does NOT resurrect the old option.
+  // multiSelect keeps the legacy coexistence.
+  const selected =
+    !multi.value && text.trim() !== "" && selection.value.selected.length > 0 ? [] : selection.value.selected;
+  form.selections[i] = { selected, other: text };
   form.saveDraft();
 }
 
@@ -169,6 +181,42 @@ function onToggle(label: string, ev: Event): void {
   const checked = (ev.target as HTMLInputElement).checked;
   const cur = selection.value.selected;
   setSelected(multi.value ? (checked ? [...cur, label] : cur.filter((l) => l !== label)) : checked ? [label] : []);
+}
+
+/**
+ * 2026-10-24 bug fix (单选误点无法撤销): clicking the ALREADY-SELECTED radio deselects it,
+ * returning the question to unanswered. Native radios never fire `change` on a re-click, so
+ * the toggle rides `click` directly; Space on the checked radio (natively a no-op there)
+ * deselects too — keyboard parity. Deselecting NEVER calls form.onAnswered: the auto-advance
+ * is a first-answer convenience, a deselect is the opposite of an answer (and re-picking
+ * later keeps the existing first-answer/revision semantics untouched).
+ *
+ * 复验 #5 (Space 取消的稳定性): the Space path relies on keydown `preventDefault` to suppress
+ * the activation's SYNTHETIC click. If a browser dispatches that click anyway, it would find
+ * the option already unchecked and RE-SELECT it (undoing the deselect) — the `spaceDeselect`
+ * marker makes exactly that one trailing click a no-op (matched by label, armed for 500 ms).
+ * The marker is belt-and-braces; preventDefault is the primary mechanism. NOTE: keyboard
+ * activation timing is browser-specific — worth a real-device manual check (Chrome/Firefox/
+ * Safari Space on a checked radio).
+ */
+let spaceDeselect: { label: string; at: number } | null = null;
+
+function onRadioToggle(label: string, ev: MouseEvent): void {
+  if (spaceDeselect !== null && spaceDeselect.label === label && Date.now() - spaceDeselect.at < 500) {
+    spaceDeselect = null; // one-shot: swallow exactly the Space-synthesized trailing click
+    ev.preventDefault();
+    return;
+  }
+  if (multi.value || !isChecked(label)) return; // unchecked: native click ⇒ change ⇒ onRadio
+  ev.preventDefault(); // the checked flag is state-driven (`:checked`); undo the native re-assert
+  setSelected([]);
+}
+
+function onRadioKeydown(label: string, ev: KeyboardEvent): void {
+  if (ev.key !== " " || multi.value || !isChecked(label)) return;
+  ev.preventDefault(); // native Space on a CHECKED radio is a no-op; make it deselect
+  spaceDeselect = { label, at: Date.now() };
+  setSelected([]);
 }
 
 function onRadio(label: string): void {
@@ -229,6 +277,8 @@ function onOtherInput(ev: Event): void {
           :value="view.opt.label"
           :checked="isChecked(view.opt.label)"
           @change="onRadio(view.opt.label)"
+          @click="onRadioToggle(view.opt.label, $event)"
+          @keydown="onRadioKeydown(view.opt.label, $event)"
         />
         <span class="ask-option-text">
           <span class="ask-option-label">
