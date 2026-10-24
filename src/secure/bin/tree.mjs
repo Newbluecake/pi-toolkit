@@ -2664,3 +2664,6 @@ if (isEntry) {
     },
   );
 }
+
+// V5 (archive.mjs) reuses the reviewed group-reaping logic verbatim (export only, bodies unchanged).
+export { pgidStillOurs, reapGroup };
