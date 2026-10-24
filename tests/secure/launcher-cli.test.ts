@@ -375,19 +375,25 @@ describe.skipIf(!HAVE_SCRIPT)("unlock: password retries (D9) with a fake gocrypt
   }, 30_000);
 });
 
-describe("review #4: an interrupted init names BOTH cleanup locations", () => {
-  it.skipIf(!HAVE_SCRIPT)("gocryptfs -init failure: the hint lists the metadata dir and the mount point", async () => {
-    const c = ctx({ gocryptfsExit: 12 });
-    const r = await runTty(c, `${BIN} init acme`, []);
-    expect(r.code, r.text).toBe(1);
-    expect(r.text).toContain("gocryptfs -init 失败");
-    expect(r.text).toContain(join(c.home, ".local", "share", "pi-toolkit-secure", "acme"));
-    expect(r.text).toContain(join(c.home, "secure", "acme"));
-    expect(r.text).toMatch(/删除元数据目录.*挂载点目录/);
-    // the layout WAS created (both locations exist on disk), matching the hint's premise
-    expect(existsSync(join(c.home, ".local", "share", "pi-toolkit-secure", "acme"))).toBe(true);
-    expect(existsSync(join(c.home, "secure", "acme", "work"))).toBe(true);
-  });
+describe("review #4 + init-cleanup ruling: a failed gocryptfs -init removes BOTH locations it created", () => {
+  it.skipIf(!HAVE_SCRIPT)(
+    "gocryptfs -init failure: metadata dir, mount point and registration are all gone",
+    async () => {
+      const c = ctx({ gocryptfsExit: 12 });
+      const r = await runTty(c, `${BIN} init acme`, []);
+      expect(r.code, r.text).toBe(1);
+      expect(r.text).toContain("gocryptfs -init 失败");
+      expect(r.text).toContain("清理本次创建的内容：");
+      expect(r.text).toContain("已撤销登记 secure.vaults.acme");
+      expect(r.text).toContain(join(c.home, ".local", "share", "pi-toolkit-secure", "acme"));
+      expect(r.text).toContain(join(c.home, "secure", "acme"));
+      expect(r.text).not.toContain("保留未动");
+      // user ruling 2026-10-24: what THIS run created is removed (previously: a manual hint)
+      expect(existsSync(join(c.home, ".local", "share", "pi-toolkit-secure", "acme"))).toBe(false);
+      expect(existsSync(join(c.home, "secure", "acme"))).toBe(false);
+      expect(readFileSync(join(c.home, ".pi", "agent", "pi-subagent.json"), "utf8")).not.toContain('"acme"');
+    },
+  );
 });
 
 describe("legacy-layout vaults: read-only compat (§L.3)", () => {

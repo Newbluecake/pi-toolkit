@@ -334,6 +334,7 @@ export class RealHarness {
       answers = [],
       cwd,
       password = PW,
+      passwords,
     }: {
       killAfterMs?: number;
       onText?: (t: string) => void;
@@ -342,6 +343,8 @@ export class RealHarness {
       cwd?: string;
       /** typed at every "Password:"/"Repeat:" prompt (default: the harness's test password) */
       password?: string;
+      /** per-prompt passwords in order (prompt n gets passwords[n], falling back to `password`) */
+      passwords?: string[];
     } = {},
   ): Promise<{ code: number | null; text: string; ms: number; pid: number }> & { child: ChildProcess } {
     const t0 = Date.now();
@@ -367,7 +370,7 @@ export class RealHarness {
         while (typed < prompts) {
           typed++;
           try {
-            c.stdin.write(`${password}\r`);
+            c.stdin.write(`${passwords?.[typed - 1] ?? password}\r`);
           } catch {
             /* closed */
           }

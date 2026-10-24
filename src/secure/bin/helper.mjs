@@ -1061,9 +1061,11 @@ export function checkLayout(
 
 /**
  * Security review L0 #4: recovery hint for an interrupted init — the new layout leaves BOTH the
- * metadata dir and the mount point behind. Commands only; nothing is auto-deleted, and the mount
- * point must be confirmed unmounted and sentinel-only before removal (extra entries are listed for
- * MANUAL inspection — they may be plaintext written under the mount point while locked).
+ * metadata dir and the mount point behind. Commands only: the mount point must be confirmed
+ * unmounted and sentinel-only before removal (extra entries are listed for MANUAL inspection —
+ * they may be plaintext written under the mount point while locked). Since the init-cleanup ruling
+ * (2026-10-24) init removes its OWN identity-recorded objects itself (removeInitVault); this hint
+ * is printed for whatever that cleanup could not prove and therefore kept.
  */
 export function initCleanupHint(v) {
   return (
@@ -1216,7 +1218,582 @@ export async function setAsideInitSkeleton(v, ids, { renameImpl, now = new Date(
   return { moved, kept };
 }
 
-export function createLayout(v, { others = [], home = homeDir() } = {}) {
+// ───────────────────── init cleanup (user ruling 2026-10-24; supersedes V6 r2 「init 不删」 for
+// THIS run's own objects only — see docs/dev/data-encryption/init-cleanup-report.md). Security
+// review r1 fixes: identity evidence is HELD (fds kept open from creation to cleanup, so an inode
+// can never be reused under us), cipher files need provenance, the cleanup runs under the vault's
+// mount.lease + mount.lock, sentinels must still look like sentinels, and every primitive failure
+// is caught and reported.
+
+/** The only names `gocryptfs -init` (1.8) writes into an empty cipher dir. */
+export const INIT_CIPHER_NAMES = Object.freeze(["gocryptfs.conf", "gocryptfs.diriv"]);
+/** Upper bound for an -init product (a real gocryptfs.conf is < 1 KiB, gocryptfs.diriv 16 B). */
+export const INIT_CIPHER_MAX_BYTES = 64 * 1024;
+/** Slack for the coarse kernel clock that stamps ctime/mtime (≈ one jiffy, generously rounded). */
+const INIT_CLOCK_SLACK_NS = 100_000_000n;
+const O_PATH_FLAG = 0o10000000; // Linux O_PATH (Node does not export it)
+const INIT_DIR_READ = fsc.O_RDONLY | fsc.O_DIRECTORY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK;
+const fdp = (fd, name) => `/proc/self/fd/${fd}/${name}`;
+const nowNs = () => BigInt(Date.now()) * 1_000_000n;
+const idEq = (a, b) => !!a && !!b && a.dev === b.dev && a.ino === b.ino;
+const stId = (st) => ({ dev: String(st.dev), ino: String(st.ino) });
+
+/** fstat of a held fd → {dev, ino, st} | undefined (closed / invalid). */
+function heldStat(fd) {
+  if (typeof fd !== "number") return undefined;
+  try {
+    const st = fs.fstatSync(fd, { bigint: true });
+    return { ...stId(st), st };
+  } catch {
+    return undefined;
+  }
+}
+/** `<held dir fd>/<name>` without following a symlink → {dev, ino, st} | undefined (absent). */
+function entryAt(pfd, name) {
+  let fd;
+  try {
+    fd = fs.openSync(fdp(pfd, name), O_PATH_FLAG | fsc.O_NOFOLLOW);
+  } catch (e) {
+    if (e && (e.code === "ENOENT" || e.code === "ENOTDIR")) return undefined;
+    throw e;
+  }
+  try {
+    const st = fs.fstatSync(fd, { bigint: true });
+    return { ...stId(st), st };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Close every fd init holds for its cleanup evidence (idempotent). */
+export function closeInitHolds(made) {
+  const fds = made?.fds;
+  if (!fds) return;
+  const all = [fds.dirParent, fds.dir, fds.cipher, fds.mntParent, fds.mnt];
+  for (const g of [fds.dirFiles, fds.mntFiles, fds.cipherFiles]) all.push(...Object.values(g ?? {}));
+  for (const fd of all) {
+    try {
+      if (typeof fd === "number") fs.closeSync(fd);
+    } catch {
+      /* already closed */
+    }
+  }
+  delete made.fds;
+}
+
+/**
+ * Just before `gocryptfs -init`: the HELD cipher dir must still be empty and still be what the
+ * path `v.cipher` names; the start time bounds the provenance check of recordInitCipher.
+ */
+export function prepareInitCipher(v, made) {
+  made.cipherT0 = String(nowNs() - INIT_CLOCK_SLACK_NS);
+  delete made.cipherProblem;
+  const h = heldStat(made.fds?.cipher);
+  if (!h) return void (made.cipherProblem = "cipher 目录的身份证据（持有的 fd）不在");
+  try {
+    const p = fs.lstatSync(v.cipher, { bigint: true });
+    if (!idEq(stId(p), h)) return void (made.cipherProblem = "cipher 路径已不指向本次创建的目录");
+    const n = fs.readdirSync(`/proc/self/fd/${made.fds.cipher}`);
+    if (n.length) made.cipherProblem = `gocryptfs -init 之前 cipher 已非空：${n.slice(0, 8).join(", ")}`;
+  } catch (e) {
+    made.cipherProblem = `无法检查 cipher（${e.code ?? e.message}）`;
+  }
+}
+
+/**
+ * Right after `gocryptfs -init` (success OR failure): through the HELD cipher dir fd, accept only
+ * provable -init products — names in INIT_CIPHER_NAMES, regular file, owned by us, nlink 1, size ≤
+ * INIT_CIPHER_MAX_BYTES, ctime AND mtime not earlier than prepareInitCipher's start — and hold an
+ * O_PATH fd on each. Anything else ⇒ `cipherProblem` (the whole `<dir>` is then kept, only reported).
+ */
+export function recordInitCipher(v, made, { uid = process.getuid() } = {}) {
+  made.cipherFiles = {};
+  made.fds.cipherFiles = {};
+  if (made.cipherProblem !== undefined) return made;
+  const cfd = made.fds?.cipher;
+  const t0 = BigInt(made.cipherT0 ?? "0");
+  try {
+    const odd = [];
+    for (const n of fs.readdirSync(`/proc/self/fd/${cfd}`).sort()) {
+      const e = INIT_CIPHER_NAMES.includes(n) ? entryAt(cfd, n) : undefined;
+      const st = e?.st;
+      if (
+        !st ||
+        !st.isFile() ||
+        Number(st.uid) !== uid ||
+        st.nlink !== 1n ||
+        st.size > BigInt(INIT_CIPHER_MAX_BYTES) ||
+        st.ctimeNs < t0 ||
+        st.mtimeNs < t0
+      ) {
+        odd.push(n);
+        continue;
+      }
+      const fd = fs.openSync(fdp(cfd, n), O_PATH_FLAG | fsc.O_NOFOLLOW);
+      if (!idEq(heldStat(fd), e)) {
+        fs.closeSync(fd);
+        odd.push(n);
+        continue;
+      }
+      made.fds.cipherFiles[n] = fd;
+      made.cipherFiles[n] = stId(st);
+    }
+    if (odd.length) made.cipherProblem = `出现无法证明是本次 gocryptfs -init 产物的条目：${odd.slice(0, 8).join(", ")}`;
+  } catch (e) {
+    made.cipherProblem = `无法列出 cipher（${e.code ?? e.message}）`;
+  }
+  return made;
+}
+
+/** The registration init wrote (exact bytes of the CAS guard for the unclaim). */
+export function initWrittenEntry(v, priv) {
+  return { dir: v.dir, mnt: v.mnt, ...(priv ? { private: true } : {}) };
+}
+
+/**
+ * Run UNDER the settings lock (`__vault-unclaim`): undo init's registration only while the entry
+ * still canonically equals what THIS run wrote — then delete it (no earlier entry) or restore the
+ * entry read before the claim. → {kind:"ok", action:"deleted"|"restored"} | {kind:"missing"} |
+ * {kind:"mismatch", reason} (no write).
+ */
+export function unclaimInitEntryUnlocked(name, written, before, home = homeDir()) {
+  if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
+    throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
+  assertVaultEntryShape(written);
+  if (before !== undefined && !isPlainObject(before)) throw new Error("before 须为对象");
+  const file = settingsFilePath(home);
+  if (!lstatOrNull(file)) return { kind: "missing" };
+  const { st, root } = loadMutableSettings(file);
+  const secure = { ...(root.secure ?? {}) };
+  const vaults = mutableVaults(secure, file);
+  if (!Object.hasOwn(vaults, name)) return { kind: "missing" };
+  if (canonicalJson(vaults[name]) !== canonicalJson(written))
+    return { kind: "mismatch", reason: `secure.vaults.${name} 已不是本次 init 写入的内容（被其他操作改动）` };
+  const rest = { ...vaults };
+  if (before === undefined) delete rest[name];
+  else rest[name] = before;
+  secure.vaults = rest;
+  writeFileAtomic(file, JSON.stringify({ ...root, secure }, null, 2) + "\n", settingsWriteMode(st));
+  return { kind: "ok", action: before === undefined ? "deleted" : "restored" };
+}
+
+/** Locked wrapper (settings flock child `__vault-unclaim`). Throws CliError 73/69/78 like registerVault. */
+export function unclaimInitEntry(name, written, before, { home = homeDir(), lockWaitS = SETTINGS_LOCK_WAIT_S } = {}) {
+  const r = spawnUnderSettingsLock(home, lockWaitS, [
+    "__vault-unclaim",
+    name,
+    JSON.stringify(written),
+    JSON.stringify(before ?? null),
+  ]);
+  if (r.status !== 0) throw new CliError(EXIT.CONFIG, childErrText(r, "撤销登记"));
+  try {
+    return JSON.parse(r.stdout);
+  } catch {
+    throw new CliError(EXIT.FAIL, `__vault-unclaim 输出无法解析：${String(r.stdout).slice(0, 200)}`);
+  }
+}
+
+/**
+ * Hold the vault's mount.lease (outer, like releaseRecord) and mount.lock (inner) for the whole
+ * cleanup: `flock -w … lease flock -w … lock sh -c 'echo locked $$; exec cat'`. The innermost process
+ * inherits both lock fds (no -o) and lives until we close its stdin (or we die). The lock is only
+ * accepted after proving, through that process's /proc fds, that the inodes it locked ARE the
+ * lease/lock files this run created. → {release()} ; throws Error(reason) when not obtainable.
+ */
+export async function holdInitVaultLocks(v, made, { leaseWaitS = 5, lockWaitS = LOCK_WAIT_S } = {}) {
+  const c = spawn(
+    "flock",
+    [
+      "-E",
+      String(FLOCK_TIMEOUT_CODE),
+      "-w",
+      String(leaseWaitS),
+      v.lease,
+      "flock",
+      "-E",
+      String(FLOCK_TIMEOUT_CODE),
+      "-w",
+      String(lockWaitS),
+      v.lock,
+      "sh",
+      "-c",
+      'echo "locked $$"; exec cat >/dev/null',
+    ],
+    { stdio: ["pipe", "pipe", "ignore"], cwd: "/" },
+  );
+  const release = async () => {
+    try {
+      c.stdin.end();
+    } catch {
+      /* gone */
+    }
+    if (c.exitCode !== null || c.signalCode !== null) return;
+    await new Promise((res) => {
+      const t = setTimeout(() => {
+        try {
+          c.kill("SIGKILL");
+        } catch {
+          /* gone */
+        }
+        res();
+      }, 3_000);
+      t.unref();
+      c.once("exit", () => {
+        clearTimeout(t);
+        res();
+      });
+    });
+  };
+  const pid = await new Promise((resolve) => {
+    let buf = "";
+    const t = setTimeout(() => resolve(undefined), (leaseWaitS + lockWaitS + 5) * 1000);
+    t.unref();
+    c.stdout.on("data", (b) => {
+      buf += b.toString("utf8");
+      const m = /locked (\d+)\n/.exec(buf);
+      if (m) {
+        clearTimeout(t);
+        resolve(Number(m[1]));
+      }
+    });
+    c.once("exit", (code) => {
+      clearTimeout(t);
+      resolve(code === FLOCK_TIMEOUT_CODE ? "busy" : undefined);
+    });
+    c.once("error", () => {
+      clearTimeout(t);
+      resolve(undefined);
+    });
+  });
+  if (typeof pid !== "number") {
+    await release();
+    throw new Error(
+      pid === "busy"
+        ? "mount.lease/mount.lock 被占用（另一个 pi-secure 正在使用该库）"
+        : "无法取得 mount.lease/mount.lock",
+    );
+  }
+  const want = [made.dirFiles?.["mount.lease"], made.dirFiles?.["mount.lock"]];
+  const seen = [];
+  try {
+    for (const n of fs.readdirSync(`/proc/${pid}/fd`)) {
+      try {
+        seen.push(stId(fs.statSync(`/proc/${pid}/fd/${n}`, { bigint: true })));
+      } catch {
+        /* closed meanwhile */
+      }
+    }
+  } catch {
+    /* unreadable ⇒ not proven */
+  }
+  if (!want.every((w) => w && seen.some((s) => idEq(s, w)))) {
+    await release();
+    throw new Error("加锁的文件不是本次创建的 mount.lease/mount.lock");
+  }
+  return { release };
+}
+
+/** A unique single-component tombstone name in the same directory. */
+function tombstoneName(rand) {
+  return `.pi-secure-rm-${rand().toString(16).padStart(8, "0").slice(-8)}`;
+}
+
+/**
+ * Remove ONE object of ours: `<parent>/<name>`, where `pfd` is the HELD parent fd and `expect` the
+ * identity of the HELD object fd (an inode that is held open cannot be reused, so the comparison
+ * can never confuse a re-created object with ours).
+ *  1. tree.mjs `renameNoReplace` moves it to a fresh tombstone name in the same directory (parent
+ *     identity pinned, source must be `expect`, never replaces, verdict by identity). A non-ok
+ *     verdict (including "unknown") is resolved by probing BOTH names through the held parent fd.
+ *  2. the tombstone is opened O_PATH|O_NOFOLLOW through `/proc/self/fd/<pfd>/` — only `expect` passes;
+ *  3. files: unlink, directories: rmdir (fails when not empty — never recursive), both through the
+ *     held parent fd path. Anything unproven ⇒ renamed back (identity-checked) or left where it is,
+ *     and reported with its actual location. Never throws.
+ * → {ok:true} | {ok:false, reason}
+ */
+async function removeOwnObject({ parent, pfd, name, expect, expectParent, dir, shape, T, rand }) {
+  const tomb = tombstoneName(rand);
+  // review r2 #5: report coordinates from the HELD parent fd's current path (the parent may have been
+  // renamed meanwhile); when that path no longer resolves to the held directory, say so.
+  const where = (n) => {
+    try {
+      const cur = fs.readlinkSync(`/proc/self/fd/${pfd}`);
+      const st = fs.lstatSync(cur, { bigint: true });
+      if (path.isAbsolute(cur) && idEq(stId(st), heldStat(pfd))) return path.join(cur, n);
+    } catch {
+      /* fall through */
+    }
+    return `（父目录已移动，原位置未知）/${n}`;
+  };
+  try {
+    let r;
+    try {
+      r = await T.renameNoReplace({ parent, from: name, to: tomb, expect, expectParent });
+    } catch (e) {
+      r = { ok: false, state: "unknown", reason: String((e && e.message) || e) };
+    }
+    if (!r.ok) {
+      const atTomb = entryAt(pfd, tomb);
+      const atName = entryAt(pfd, name);
+      if (!idEq(atTomb, expect)) {
+        if (idEq(atName, expect)) return { ok: false, reason: `无法移到墓碑名（${r.reason ?? r.state}），原样保留` };
+        return {
+          ok: false,
+          reason: `移动结局不明（${r.reason ?? r.state}）；原名与墓碑名 ${where(tomb)} 都不是本次对象，未删除任何东西`,
+        };
+      }
+      // "unknown" but it did move: carry on with the tombstone (identity proven just above)
+    }
+    const putBack = async (why) => {
+      let moved;
+      try {
+        const now = entryAt(pfd, tomb);
+        if (now && !entryAt(pfd, name)) {
+          moved = stId(now.st);
+          await T.renameNoReplace({ parent, from: tomb, to: name, expect: moved, expectParent });
+        }
+      } catch {
+        /* the verdict below re-probes both names either way */
+      }
+      // review r2 #5: whatever the rename back reported (ok / unchanged / unknown / threw), the
+      // ACTUAL location is decided by probing both names through the held parent fd
+      try {
+        const atName = entryAt(pfd, name);
+        const atTomb = entryAt(pfd, tomb);
+        if (moved && idEq(atName, moved)) return { ok: false, reason: `${why}，已改回原名 ${where(name)}` };
+        if (atTomb) return { ok: false, reason: `${why}，留在 ${where(tomb)}` };
+        if (atName) return { ok: false, reason: `${why}，${where(name)} 上现有一个对象（未删除）` };
+        return { ok: false, reason: `${why}，原名与墓碑名 ${where(tomb)} 上都已不见，位置不明（未删除任何东西）` };
+      } catch (e) {
+        return {
+          ok: false,
+          reason: `${why}，无法确认位置（${e.code ?? e.message}）；可能在 ${where(name)} 或 ${where(tomb)}`,
+        };
+      }
+    };
+    const id = entryAt(pfd, tomb);
+    if (!idEq(id, expect) || (dir ? !id.st.isDirectory() : !id.st.isFile()))
+      return await putBack("墓碑身份与本次对象不符");
+    // review r2 #4: re-check the sentinel shape on the tombstone itself, right before the unlink
+    // (data written through an already-open fd after the preflight must not be deleted)
+    const bad = dir || !shape ? undefined : fileShapeProblem(id.st, shape);
+    if (bad) return await putBack(`墓碑上的文件已不是创建时的形状（${bad}）`);
+    try {
+      if (dir) fs.rmdirSync(fdp(pfd, tomb));
+      else fs.unlinkSync(fdp(pfd, tomb));
+    } catch (e) {
+      return await putBack(e && e.code === "ENOTEMPTY" ? "目录非空" : `删除失败（${e.code ?? e.message}）`);
+    }
+    try {
+      fs.fsyncSync(pfd);
+    } catch {
+      /* best effort */
+    }
+    return { ok: true };
+  } catch (e) {
+    return {
+      ok: false,
+      reason: `检查失败（${(e && (e.code ?? e.message)) || e}），未删除；可能留在 ${where(name)} 或 ${where(tomb)}`,
+    };
+  }
+}
+
+/** Sentinel-like files must still look exactly as created: empty, same mode, single link. */
+function fileShapeProblem(st, { mode, cipher }) {
+  if (!st.isFile()) return "不是普通文件";
+  if (st.nlink !== 1n) return `链接数为 ${st.nlink}（应为 1）`;
+  if (Number(st.uid) !== process.getuid()) return "属主不是本用户";
+  if (cipher) return st.size > BigInt(INIT_CIPHER_MAX_BYTES) ? "大小超出 -init 产物上限" : undefined;
+  if (st.size !== 0n) return `大小为 ${st.size} 字节（创建时为空——可能是误写入的数据）`;
+  if (mode !== undefined && (Number(st.mode) & 0o7777) !== mode)
+    return `权限为 ${(Number(st.mode) & 0o7777).toString(8)}（创建时为 ${mode.toString(8)}）`;
+  return undefined;
+}
+
+/**
+ * Remove the vault THIS init run created (user ruling 2026-10-24). `made` = createLayout(…, {hold})
+ * + prepareInitCipher/recordInitCipher; its fds are the identity evidence and stay open until here.
+ * Everything below runs while holding the vault's mount.lease + mount.lock (holdInitVaultLocks):
+ *  A. preflight (no side effects): mount state absent, cipher provenance clean, and for every object
+ *     — held fd present, same identity at `<held parent>/<name>`, shape (empty/mode/nlink for the
+ *     files we created), directories holding nothing but planned children. ANY failure ⇒ nothing is
+ *     unregistered or deleted; every problem is reported.
+ *  B. settings-lock CAS unclaim (`written` must still be the entry; `before` restored if there was
+ *     one) — mismatch ⇒ nothing deleted. Then bottom-up removal through `removeOwnObject`.
+ * Never throws; the holds are closed at the end.
+ * → {unclaimed: "deleted"|"restored"|"missing"|"skipped"|"mismatch", removed: string[], kept: [{path, reason}]}
+ */
+export async function removeInitVault(
+  v,
+  made,
+  {
+    written,
+    before,
+    home = homeDir(),
+    probe = probeMountState,
+    unclaim = unclaimInitEntry,
+    treeImpl,
+    rand,
+    leaseWaitS,
+    lockWaitS,
+  } = {},
+) {
+  const kept = [];
+  const removed = [];
+  let unclaimed = "skipped";
+  const fds = made?.fds ?? {};
+  const plan = [
+    ...Object.keys(made.cipherFiles ?? {}).map((n) => ({
+      pfdKey: "cipher",
+      parent: v.cipher,
+      name: n,
+      fd: fds.cipherFiles?.[n],
+      cipher: true,
+    })),
+    { pfdKey: "dir", parent: v.dir, name: "cipher", fd: fds.cipher, dir: true },
+    ...Object.keys(made.dirFiles ?? {}).map((n) => ({
+      pfdKey: "dir",
+      parent: v.dir,
+      name: n,
+      fd: fds.dirFiles?.[n],
+      mode: 0o600,
+    })),
+    { pfdKey: "dirParent", parent: path.dirname(v.dir), name: path.basename(v.dir), fd: fds.dir, dir: true },
+    ...Object.keys(made.mntFiles ?? {}).map((n) => ({
+      pfdKey: "mnt",
+      parent: v.mnt,
+      name: n,
+      fd: fds.mntFiles?.[n],
+      mode: 0o400,
+    })),
+    { pfdKey: "mntParent", parent: path.dirname(v.mnt), name: path.basename(v.mnt), fd: fds.mnt, dir: true },
+  ];
+  let lock;
+  try {
+    try {
+      lock = await holdInitVaultLocks(v, made, {
+        ...(leaseWaitS !== undefined ? { leaseWaitS } : {}),
+        ...(lockWaitS !== undefined ? { lockWaitS } : {}),
+      });
+    } catch (e) {
+      kept.push({ path: v.dir, reason: `${(e && e.message) || e}，不删除` });
+      return { unclaimed, removed, kept };
+    }
+    // ── A. preflight, inside the locks ──
+    let st;
+    try {
+      st = await probe(v);
+    } catch (e) {
+      st = `unknown (${(e && e.message) || e})`;
+    }
+    if (st !== "absent") kept.push({ path: v.mnt, reason: `挂载状态不是 absent（${st}），不删除` });
+    if (made.cipherProblem !== undefined) kept.push({ path: v.cipher, reason: made.cipherProblem });
+    for (const o of plan) {
+      const p = path.join(o.parent, o.name);
+      try {
+        const h = heldStat(o.fd);
+        const ph = heldStat(fds[o.pfdKey]);
+        if (!h || !ph) {
+          kept.push({ path: p, reason: "创建时的身份证据（持有的 fd）不在" });
+          continue;
+        }
+        let pathSt;
+        try {
+          pathSt = fs.lstatSync(o.parent, { bigint: true });
+        } catch {
+          pathSt = undefined;
+        }
+        const at = entryAt(fds[o.pfdKey], o.name);
+        if (!pathSt || !pathSt.isDirectory() || !idEq(stId(pathSt), ph))
+          kept.push({ path: p, reason: `父目录路径 ${o.parent} 已不指向本次持有的目录（被改名或替换）` });
+        else if (!at) kept.push({ path: p, reason: "已不在原位置" });
+        else if (!idEq(at, h)) kept.push({ path: p, reason: "原位置上已不是本次创建的对象（被替换或重建）" });
+        else if (o.dir) {
+          if (!h.st.isDirectory()) kept.push({ path: p, reason: "不是目录" });
+          else {
+            const want = new Set(plan.filter((c) => c.parent === p).map((c) => c.name));
+            const extra = fs.readdirSync(`/proc/self/fd/${o.fd}`).filter((n) => !want.has(n));
+            if (extra.length) kept.push({ path: p, reason: `含有非本次创建的条目：${extra.slice(0, 8).join(", ")}` });
+          }
+        } else {
+          const bad = fileShapeProblem(h.st, o);
+          if (bad) kept.push({ path: p, reason: bad });
+        }
+      } catch (e) {
+        kept.push({ path: p, reason: `无法检查（${e.code ?? e.message}）` });
+      }
+    }
+    if (kept.length) return { unclaimed, removed, kept };
+    // ── B. unclaim (CAS), then remove bottom-up ──
+    let u;
+    try {
+      u = unclaim(v.name, written, before, { home });
+    } catch (e) {
+      u = { kind: "mismatch", reason: String((e && e.message) || e) };
+    }
+    if (u.kind === "mismatch") {
+      kept.push({ path: settingsFilePath(home), reason: u.reason });
+      return { unclaimed: "mismatch", removed, kept };
+    }
+    unclaimed = u.kind === "ok" ? (u.action ?? "deleted") : "missing";
+    const T = treeImpl ?? (await import("./tree.mjs"));
+    const rnd = rand ?? (() => Math.floor(Math.random() * 0x100000000));
+    for (const o of plan) {
+      const p = path.join(o.parent, o.name);
+      const h = heldStat(o.fd);
+      const ph = heldStat(fds[o.pfdKey]);
+      const r =
+        h && ph
+          ? await removeOwnObject({
+              parent: o.parent,
+              pfd: fds[o.pfdKey],
+              name: o.name,
+              expect: stId(h.st),
+              expectParent: stId(ph.st),
+              dir: !!o.dir,
+              shape: o.dir ? undefined : { mode: o.mode, cipher: !!o.cipher },
+              T,
+              rand: rnd,
+            })
+          : { ok: false, reason: "创建时的身份证据（持有的 fd）不在" };
+      if (r.ok) removed.push(p);
+      else kept.push({ path: p, reason: r.reason });
+    }
+    return { unclaimed, removed, kept };
+  } catch (e) {
+    kept.push({ path: v.dir, reason: `清理中断（${(e && e.message) || e}）` });
+    return { unclaimed, removed, kept };
+  } finally {
+    if (lock) await lock.release();
+    closeInitHolds(made);
+  }
+}
+
+/** Human report lines for removeInitVault, generated from the ACTUAL result (review r1 minor). */
+export function formatInitCleanup(v, r) {
+  const reg = `secure.vaults.${v.name}`;
+  const lines = [
+    {
+      deleted: `  已撤销登记 ${reg}`,
+      restored: `  已把 ${reg} 恢复为本次 init 之前的登记`,
+      missing: `  登记项 ${reg} 已不存在（未改动）`,
+      mismatch: `  登记未动：${reg}（已被其他操作改动）`,
+      skipped: `  登记未动：${reg}`,
+    }[r.unclaimed] ?? `  登记状态：${r.unclaimed}`,
+  ];
+  for (const p of r.removed) lines.push(`  已删除：${p}`);
+  for (const k of r.kept) lines.push(`  保留未动：${k.path}（${k.reason}）`);
+  if (r.kept.length) {
+    if (r.unclaimed === "deleted" || r.unclaimed === "restored" || r.unclaimed === "missing")
+      lines.push(
+        `  登记已处理，但以上对象仍在：确认未挂载、其中没有要保留的数据后手工删除上列路径（${v.dir}、${v.mnt}），再 pi-secure init ${v.name}`,
+      );
+    else lines.push(initCleanupHint(v));
+  }
+  return lines;
+}
+
+export function createLayout(v, { others = [], home = homeDir(), hold = false } = {}) {
   if (lstatOrNull(v.dir))
     throw new CliError(EXIT.FAIL, `${v.dir} 已存在——保险库已初始化，或上次 init 未完成（确认无用后删除该目录再 init）`);
   if (lstatOrNull(v.mnt))
@@ -1237,16 +1814,68 @@ export function createLayout(v, { others = [], home = homeDir() } = {}) {
   const pp = mntAncestorProblems(v, process.getuid());
   if (pp.length) throw new CliError(EXIT.CONFIG, `挂载点祖先目录检查失败：\n  - ${pp.join("\n  - ")}`);
   fs.mkdirSync(path.dirname(v.dir), { recursive: true, mode: 0o700 });
-  fs.mkdirSync(v.dir, { mode: 0o700 });
-  fs.mkdirSync(v.cipher, { mode: 0o700 });
-  fs.mkdirSync(v.mnt, { mode: 0o700 });
-  for (const n of ["work", "state"]) {
-    const f = path.join(v.mnt, n);
-    fs.closeSync(fs.openSync(f, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o400));
-    fs.chmodSync(f, 0o400);
+  // init cleanup (ruling 2026-10-24 + security review r1): every object is created INSIDE an
+  // already-held parent dir fd (mkdir/open through /proc/self/fd/<pfd>/<name>, mkdirat-equivalent),
+  // then opened and fstat'ed right away; directories must be fresh (owned by us, nlink 2, empty,
+  // ctime ≥ start). With `hold` (init only) those fds stay open until removeInitVault — an inode
+  // that is held open cannot be reused, so later identity checks can never confuse a re-created
+  // object with ours. Without `hold` (convert's port) only the identities are returned and every
+  // fd is closed here (convert's occupancy checks must not see this process inside the vault).
+  const t0 = nowNs() - INIT_CLOCK_SLACK_NS;
+  const uid = process.getuid();
+  const fds = { dirFiles: {}, mntFiles: {}, cipherFiles: {} };
+  const made = { t0: String(t0), dirFiles: {}, mntFiles: {}, fds };
+  const opened = [];
+  const keep = (fd) => (opened.push(fd), fd);
+  const freshDir = (fd, p) => {
+    const st = fs.fstatSync(fd, { bigint: true });
+    if (
+      !st.isDirectory() ||
+      Number(st.uid) !== uid ||
+      (st.nlink !== 2n && st.nlink !== 1n) || // btrfs reports 1 for directories
+      st.ctimeNs < t0 ||
+      fs.readdirSync(`/proc/self/fd/${fd}`).length !== 0
+    )
+      throw new CliError(EXIT.FAIL, `刚创建的目录 ${p} 不是预期的空目录（并发改动？），停止 init`);
+    return stId(st);
+  };
+  const mkdirIn = (pfd, name, p) => {
+    fs.mkdirSync(fdp(pfd, name), { mode: 0o700 });
+    const fd = keep(fs.openSync(fdp(pfd, name), INIT_DIR_READ));
+    return { fd, id: freshDir(fd, p) };
+  };
+  const createIn = (pfd, name, mode) => {
+    // review r2 #3: the O_EXCL fd IS the evidence — it is held as-is (never closed and re-opened
+    // by name), so nothing can be swapped in between creating the file and taking its identity.
+    const fd = keep(fs.openSync(fdp(pfd, name), fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, mode));
+    fs.fchmodSync(fd, mode);
+    return { fd, id: stId(fs.fstatSync(fd, { bigint: true })) };
+  };
+  try {
+    fds.dirParent = keep(fs.openSync(path.dirname(v.dir), INIT_DIR_READ));
+    made.dirParent = stId(heldStat(fds.dirParent).st);
+    const d = mkdirIn(fds.dirParent, path.basename(v.dir), v.dir);
+    [fds.dir, made.dir] = [d.fd, d.id];
+    const c = mkdirIn(fds.dir, "cipher", v.cipher);
+    [fds.cipher, made.cipher] = [c.fd, c.id];
+    fds.mntParent = keep(fs.openSync(path.dirname(v.mnt), INIT_DIR_READ));
+    made.mntParent = stId(heldStat(fds.mntParent).st);
+    const m = mkdirIn(fds.mntParent, path.basename(v.mnt), v.mnt);
+    [fds.mnt, made.mnt] = [m.fd, m.id];
+    for (const n of ["work", "state"]) {
+      const f = createIn(fds.mnt, n, 0o400);
+      [fds.mntFiles[n], made.mntFiles[n]] = [f.fd, f.id];
+    }
+    for (const n of ["mount.lock", "mount.lease"]) {
+      const f = createIn(fds.dir, n, 0o600);
+      [fds.dirFiles[n], made.dirFiles[n]] = [f.fd, f.id];
+    }
+  } catch (e) {
+    for (const fd of opened) fs.closeSync(fd);
+    throw e;
   }
-  fs.closeSync(fs.openSync(v.lock, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600));
-  fs.closeSync(fs.openSync(v.lease, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600));
+  if (!hold) closeInitHolds(made);
+  return made;
 }
 
 /**
@@ -2529,20 +3158,22 @@ async function cmdInit(args) {
   requireTty("init");
   if (!tty.isatty(1))
     throw new CliError(EXIT.USAGE, "init 会在终端打印 master key，stdout 必须是终端（不要重定向到文件/管道）");
-  createLayout(v, { others: otherRegisteredVaults(v) });
-  const made = initSkeletonIds(v); // identities of what THIS run created (review V6 round 2)
+  // identities of what THIS run created, recorded at creation (review V6 round 2 + init cleanup)
+  const made = createLayout(v, { others: otherRegisteredVaults(v), hold: true });
+  const written = initWrittenEntry(v, priv);
   // Registered BEFORE gocryptfs -init so an interrupted init shows up in `status` as incomplete.
   // (N2 call site migrated to the V0 entry-object signature; the written bytes are identical.)
   try {
     registerVault(
       name,
-      { dir: v.dir, mnt: v.mnt, ...(priv ? { private: true } : {}) },
+      written,
       entryBefore === undefined ? { home, expectAbsent: true } : { home, expectEntry: entryBefore },
     );
   } catch (e) {
     // Lost the claim to a concurrent convert/import (or the entry changed since it was read):
     // NOTHING is deleted (review V6 round 2) — the skeleton this run created is renamed aside
     // (identity-checked, no-replace) so the winner's publish is not blocked; anything else stays.
+    closeInitHolds(made); // the set-aside path is rename-only and needs no held evidence
     const r2 = await setAsideInitSkeleton(v, made);
     const lines = [String(e && e.message), "  本次 init 未完成，未登记。"];
     for (const m of r2.moved) lines.push(`  ${m.from} → ${m.to}`);
@@ -2555,14 +3186,49 @@ async function cmdInit(args) {
     `即将创建保险库 ${name}：gocryptfs 会要求输入两次新口令，然后在终端打印 master key（只显示这一次，请抄下离线保存）。`,
   );
   // NOT -q: with -q gocryptfs 1.8 does not print the master key (P0 C1).
+  prepareInitCipher(v, made); // held cipher dir still empty + start time for the provenance check
   const code = await runInherited("gocryptfs", ["-init", "--", v.cipher]);
+  recordInitCipher(v, made); // provable -init products only (success or failure)
+  const cleanup = () => removeInitVault(v, made, { written, before: entryBefore, home });
   if (code !== 0) {
-    throw new CliError(EXIT.FAIL, `gocryptfs -init 失败（exit ${code}）\n${initCleanupHint(v)}`);
+    // init cleanup ① (user ruling 2026-10-24): nothing usable was created — remove it automatically
+    const r = await cleanup();
+    throw new CliError(
+      EXIT.FAIL,
+      [`gocryptfs -init 失败（exit ${code}）；清理本次创建的内容：`, ...formatInitCleanup(v, r)].join("\n"),
+    );
   }
+  /** init cleanup ② (ruling): the first mount failed with 3 wrong passwords — ask (TTY only). */
+  const offerRemoval = async (what) => {
+    err(`${name}：${what}`);
+    const ok = tty.isatty(0)
+      ? /^(y|yes)$/i.test(
+          String(
+            await promptLine(
+              `是否删除刚创建的空保险库 ${name}？删除后刚才打印的 master key 作废，需要重新 pi-secure init ${name}。[y/N] `,
+            ),
+          ).trim(),
+        )
+      : false;
+    if (!ok) {
+      closeInitHolds(made);
+      err(
+        `已保留保险库 ${name}（已创建并登记${priv ? "为 --private" : ""}）：用正确的口令执行 pi-secure init ${name} --fix-settings 补齐目录与 sessionDir`,
+      );
+      return;
+    }
+    const r = await cleanup();
+    for (const l of [`${name}：按要求清理本次创建的内容：`, ...formatInitCleanup(v, r)]) err(l);
+  };
   if (priv) {
     // §1.1: first mount + dirs + sessionDir + unmount all happen inside the private ns (setup).
     out(`首次私有挂载以建立目录结构（再输入一次口令；在私有命名空间内完成，结束后自动卸载）：`);
     const code = await runPrivate(v, { mode: "setup" });
+    if (code === EXIT.BAD_PASSWORD) {
+      await offerRemoval(`首次私有挂载失败：口令连续错误 ${PASSWORD_TRIES} 次`);
+      return code;
+    }
+    closeInitHolds(made);
     if (code !== EXIT.OK) {
       err(
         `${name}：首次私有挂载未完成（exit ${code}）。保险库已创建并登记为 --private；可再执行 pi-secure init ${name} --fix-settings 补齐目录与 sessionDir`,
@@ -2580,7 +3246,15 @@ async function cmdInit(args) {
     return EXIT.OK;
   }
   out(`首次解锁以建立目录结构（再输入一次口令）：`);
-  await unlockVault(v);
+  try {
+    await unlockVault(v);
+  } catch (e) {
+    if (!(e instanceof CliError) || e.code !== EXIT.BAD_PASSWORD) throw e;
+    await offerRemoval(`首次挂载失败：${e.message}`);
+    return EXIT.BAD_PASSWORD;
+  } finally {
+    closeInitHolds(made); // idempotent; nothing below needs the evidence (and finalize scans fds)
+  }
   const f = await finalizeBounded(v);
   for (const l of f.lines) (f.code === 0 ? out : err)(l);
   printWarnings();
@@ -5939,6 +6613,17 @@ export async function main(argv) {
           if (expectAbsent && expectEntry !== undefined)
             throw new Error("内部错误：expectAbsent 与 expectEntry 不能同用");
           registerVaultUnlocked(name, dir, mnt, undefined, { private: priv, expectAbsent, expectEntry, pending });
+        } catch (e) {
+          throw new CliError(EXIT.CONFIG, String(e && e.message));
+        }
+        return EXIT.OK;
+      }
+      case "__vault-unclaim": {
+        // internal: executed by unclaimInitEntry() UNDER the settings flock (init cleanup)
+        try {
+          if (args.length !== 3) throw new Error("内部错误：__vault-unclaim 参数个数不合法");
+          const before = JSON.parse(args[2]);
+          out(JSON.stringify(unclaimInitEntryUnlocked(args[0], JSON.parse(args[1]), before ?? undefined)));
         } catch (e) {
           throw new CliError(EXIT.CONFIG, String(e && e.message));
         }

@@ -283,13 +283,45 @@ function runTty(e: Env, argv: string[], timeoutMs = 60_000): Promise<{ code: num
   });
 }
 
+/**
+ * Decided output changes (the fixture itself is NEVER regenerated). Each entry pins the OLD golden
+ * bytes it replaces (so the fixture provably stays frozen) and the exact new bytes.
+ *  - init cleanup ① (user ruling 2026-10-24, docs/dev/data-encryption/init-cleanup-report.md): a
+ *    failed `gocryptfs -init` now removes what this run created instead of printing a manual hint.
+ */
+const RULING_OVERRIDES: Record<string, { was: Partial<GoldenCase>; now: Partial<GoldenCase> }> = {
+  "fake/init-tty-init-fails": {
+    was: {
+      stdout:
+        "即将创建保险库 acme：gocryptfs 会要求输入两次新口令，然后在终端打印 master key（只显示这一次，请抄下离线保存）。\n" +
+        "pi-secure: gocryptfs -init 失败（exit 1）\n" +
+        "  清理（自行确认后执行）：确认未挂载、<ROOT>/home/secure/acme 内只有 work/state 两个哨兵文件且无要保留的数据后，删除元数据目录 <ROOT>/home/.local/share/pi-toolkit-secure/acme 与挂载点目录 <ROOT>/home/secure/acme，再 pi-secure init acme\n",
+    },
+    now: {
+      stdout:
+        "即将创建保险库 acme：gocryptfs 会要求输入两次新口令，然后在终端打印 master key（只显示这一次，请抄下离线保存）。\n" +
+        "pi-secure: gocryptfs -init 失败（exit 1）；清理本次创建的内容：\n" +
+        "  已撤销登记 secure.vaults.acme\n" +
+        "  已删除：<ROOT>/home/.local/share/pi-toolkit-secure/acme/cipher\n" +
+        "  已删除：<ROOT>/home/.local/share/pi-toolkit-secure/acme/mount.lock\n" +
+        "  已删除：<ROOT>/home/.local/share/pi-toolkit-secure/acme/mount.lease\n" +
+        "  已删除：<ROOT>/home/.local/share/pi-toolkit-secure/acme\n" +
+        "  已删除：<ROOT>/home/secure/acme/work\n" +
+        "  已删除：<ROOT>/home/secure/acme/state\n" +
+        "  已删除：<ROOT>/home/secure/acme\n",
+    },
+  },
+};
+
 function check(block: "fake" | "real", c: GoldenCase): void {
   produced[block].push(c);
   if (WRITE) return;
   expect(golden, `${FIXTURE} missing — N0 golden must exist`).toBeDefined();
-  const want = golden![block].find((x) => x.name === c.name);
-  expect(want, `golden case missing: ${block}/${c.name}`).toBeDefined();
-  expect(c).toEqual(want);
+  const frozen = golden![block].find((x) => x.name === c.name);
+  expect(frozen, `golden case missing: ${block}/${c.name}`).toBeDefined();
+  const ov = RULING_OVERRIDES[`${block}/${c.name}`];
+  if (ov) expect(frozen).toMatchObject(ov.was); // the fixture bytes are still the original ones
+  expect(c).toEqual(ov ? { ...frozen, ...ov.now } : frozen);
 }
 
 async function record(
@@ -481,10 +513,13 @@ describe.skipIf(!HAVE_FAKE)("N0 golden — fake gocryptfs (no FUSE mount)", () =
     layout(e4);
     await record("fake", "init-fix-settings-non-tty", e4, ["init", "acme", "--fix-settings"]);
   });
-  F("init (pty): gocryptfs -init fails ⇒ cleanup hint naming both locations", async () => {
-    const e = makeEnv({ fakeGocryptfs: true, initExit: 1 });
-    await record("fake", "init-tty-init-fails", e, ["init", "acme"], { tty: true });
-  });
+  F(
+    "init (pty): gocryptfs -init fails ⇒ this run's vault is removed (ruling override, see RULING_OVERRIDES)",
+    async () => {
+      const e = makeEnv({ fakeGocryptfs: true, initExit: 1 });
+      await record("fake", "init-tty-init-fails", e, ["init", "acme"], { tty: true });
+    },
+  );
   F("init (pty): existing mount point ⇒ 78; non-default missing parent ⇒ 78", async () => {
     const e = makeEnv({ fakeGocryptfs: true });
     mkdirSync(join(e.home, "secure", "acme"), { recursive: true, mode: 0o700 });

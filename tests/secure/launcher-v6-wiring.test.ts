@@ -902,7 +902,11 @@ describe("V6 review #2 — plain init never overwrites an unfinished transaction
     expect(readFileSync(join(`${v.mnt}.init-failed-20261024-130509-cafe`, "late-file"), "utf8")).toBe("racer data");
   });
 
-  it("init itself never deletes: the claim-loss path in cmdInit only renames (source pin)", () => {
+  it("init deletes only through removeInitVault's tombstone primitive; the claim-loss path still only renames (source pin)", () => {
+    // V6 round 2 ruling 「init 不删任何东西」, narrowed by the init-cleanup ruling (2026-10-24):
+    // cmdInit itself never unlinks/rmdirs; the lost-claim path renames aside; the ONLY deletes of
+    // init's objects are removeOwnObject's unlink/rmdir of an identity-checked tombstone through a
+    // pinned parent fd — never rmSync, never a recursive delete, never an absolute path.
     const src = readFileSync(HELPER, "utf8");
     expect(src).not.toMatch(/removeInitSkeleton/);
     const body = src.slice(
@@ -913,6 +917,18 @@ describe("V6 review #2 — plain init never overwrites an unfinished transaction
     expect(body).not.toMatch(/unlinkSync|rmSync|rmdirSync/);
     const fn = src.slice(src.indexOf("export async function setAsideInitSkeleton("));
     expect(fn.slice(0, fn.indexOf("\n}\n"))).not.toMatch(/unlinkSync|rmSync|rmdirSync/);
+    const block = src.slice(
+      src.indexOf("// ───────────────────── init cleanup"),
+      src.indexOf("export function createLayout("),
+    );
+    expect(block).not.toMatch(/rmSync|recursive: *true/);
+    const deletes = block.match(/\b(unlinkSync|rmdirSync)\([^;]*;/g) ?? [];
+    expect(deletes).toEqual(["rmdirSync(fdp(pfd, tomb));", "unlinkSync(fdp(pfd, tomb));"]);
+    expect(block).toContain("const fdp = (fd, name) => `/proc/self/fd/${fd}/${name}`;");
+    const roo = block.slice(block.indexOf("async function removeOwnObject("));
+    expect(roo.slice(0, roo.indexOf("\n}\n"))).toContain(
+      "T.renameNoReplace({ parent, from: name, to: tomb, expect, expectParent })",
+    );
   });
 });
 
