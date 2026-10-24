@@ -15,6 +15,10 @@
  *       notes, spawn dir list, mid-band scrim)
  *  40   drawers (fleet fullscreen, mid-band agents drawer) + nsmenu dropdown
  *  45   THIS WINDOW (`.ask-float`) — above the agents tree/fleet drawer, below every modal
+ *  46   ask-origin preview windows (`.preview-overlay.is-windows.is-modeless.is-ask-tier` —
+ *       2026-10-24 验收裁定: ONLY windows opened from this float; above THIS WINDOW so the
+ *       float can't cover what it opened, below every modal. All other preview windows stay
+ *       at tier 25 — the one documented exception to the preview-windows z25 rule)
  *  50   modal-ish sheets/panels: picker scrim, spawn scrim, settings panel, ctx-ring panels,
  *       back-to-top button
  *  55   `.model-panel--fixed` (must top the settings panel it opens from)

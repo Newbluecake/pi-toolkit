@@ -33,6 +33,7 @@
  */
 import { onScopeDispose, ref, watch, type Ref } from "vue";
 import {
+  avoidObstacle,
   clampRect,
   defaultRect,
   maximizedRect,
@@ -134,13 +135,16 @@ export function usePreviewWindowLayout(opts: UsePreviewWindowLayoutOptions) {
 
   /** A window appearing: the FIRST window takes `defaultRect`; every later one cascades off
    *  the given anchor's rect (the previous active window, W1's "从活动窗口错开摆放"),
-   *  avoiding every occupied top-left corner (§7.3 cascadeRect). */
-  function ensureRect(id: number, anchorId: number | null): void {
+   *  avoiding every occupied top-left corner (§7.3 cascadeRect). `avoid` (2026-10-24 验收裁定,
+   *  ask-tier windows only) is the ask float's on-screen rectangle: the cascaded rect is
+   *  nudged clear of it via `avoidObstacle` (overlap allowed when nothing fits). */
+  function ensureRect(id: number, anchorId: number | null, avoid?: PreviewRect | null): void {
     if (rects.has(id)) return;
     const base = anchorId !== null ? (rects.get(anchorId)?.value ?? defaultRect(vp())) : defaultRect(vp());
     // occupied = EFFECTIVE rects (a maximized window occupies its maximized box, §7.3 slots)
     const occupied = [...rects.keys()].map((wid) => effectiveRectOf(wid));
-    rects.set(id, ref(cascadeRect(base, vp(), occupied)));
+    const placed = cascadeRect(base, vp(), occupied);
+    rects.set(id, ref(avoid !== undefined && avoid !== null ? avoidObstacle(placed, avoid, vp()) : placed));
     maxStates.set(id, { flag: ref(false), restore: null });
     hookResize();
   }

@@ -55,6 +55,10 @@ const LIMIT_NOTICE_TTL_MS = 8000;
 export interface PreviewWindow {
   readonly id: number;
   readonly handle: PreviewMachine;
+  /** 2026-10-24 验收裁定 (ask-paths fix #1): this window (or its opener's lineage) came from
+   * the ask_user dialog/float ⇒ PreviewHost renders it in the ask-tier root (z above the
+   * ask-float) on the desktop band. Optional so every pre-existing fake stays valid. */
+  readonly askTier?: true;
 }
 
 export type OpenWindowResult = "opened" | "focused" | "navigated" | "in-place" | "ignored";
@@ -93,6 +97,8 @@ interface WindowMeta {
   readonly originEpoch: number;
   /** The navEpoch this window's current limitNotice was armed at (§3.4 clear rule ①). */
   noticeEpoch: number | null;
+  /** ask-paths fix #1: opened from the ask dialog (or from an ask-tier window). */
+  readonly askTier: boolean;
   readonly stopWatchers: Array<() => void>;
 }
 
@@ -276,10 +282,14 @@ export function usePreviewWindows(opts: UsePreviewOptions): PreviewHandle {
       pendingFold: route === "unknown" && from !== null,
       originEpoch: from !== null ? from.handle.navEpoch.value : 0,
       noticeEpoch: null,
+      // ask-paths fix #1: the ask lineage — a ref tagged origin:"ask", or any window opened
+      // from inside an ask-tier window (a child of an ask window must not slide back under
+      // the float it sits above).
+      askTier: ref.origin === "ask" || from?.askTier === true,
       stopWatchers: [],
     };
     metas.set(id, meta);
-    windows.value = [...windows.value, { id, handle: machine }];
+    windows.value = [...windows.value, { id, handle: machine, ...(meta.askTier ? { askTier: true as const } : {}) }];
     order.value = [...order.value, id];
 
     // §3.4 rule ①: this window's own navigate/back (navEpoch bump) clears its notice —

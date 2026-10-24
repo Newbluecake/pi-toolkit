@@ -174,6 +174,35 @@ function fullyInBox(r: PreviewRect, vp: PreviewViewportBox): boolean {
   return r.x >= EDGE && r.y >= vp.top + EDGE && r.x + r.w <= vp.vw - EDGE && r.y + r.h <= vp.vh - EDGE;
 }
 
+function intersects(a: PreviewRect, b: PreviewRect): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+/**
+ * Ask-origin preview windows (2026-10-24 验收裁定, ask-paths fix #1): a window opened FROM
+ * the ask_user float rides a dedicated z tier ABOVE the float, so placement additionally
+ * tries to clear the float's on-screen rectangle. Candidates, in order: LEFT of the
+ * obstacle (the float defaults to the bottom-right, so its left side is the widest gap),
+ * ABOVE, RIGHT, BELOW — each accepted only when fully inside the usable box AND not
+ * intersecting the obstacle. When nothing fits the cascaded rect is kept unchanged:
+ * overlap is allowed (the ask tier is z-above the float anyway). `r` is expected to be
+ * already clamped (ensureRect's cascade output); the result is always inside P1–P4.
+ */
+export function avoidObstacle(r: PreviewRect, obstacle: PreviewRect, vp: PreviewViewportBox): PreviewRect {
+  const b = clampRect(r, vp);
+  if (!finiteRect(obstacle) || obstacle.w <= 0 || obstacle.h <= 0 || !intersects(b, obstacle)) return b;
+  const candidates: readonly PreviewRect[] = [
+    { x: obstacle.x - b.w - EDGE, y: b.y, w: b.w, h: b.h }, // left of the panel
+    { x: b.x, y: obstacle.y - b.h - EDGE, w: b.w, h: b.h }, // above it
+    { x: obstacle.x + obstacle.w + EDGE, y: b.y, w: b.w, h: b.h }, // right of it
+    { x: b.x, y: obstacle.y + obstacle.h + EDGE, w: b.w, h: b.h }, // below it
+  ];
+  for (const c of candidates) {
+    if (fullyInBox(c, vp) && !intersects(c, obstacle)) return c;
+  }
+  return b; // 放不下 ⇒ 允许重叠（层级已在 ask-float 之上）
+}
+
 /**
  * The MAXIMIZE target rect (2026-10-22 L1 桌面最大化/恢复): the whole usable box — `EDGE`
  * inset from the left/right/bottom and from the topbar's bottom edge (`top`), i.e. the

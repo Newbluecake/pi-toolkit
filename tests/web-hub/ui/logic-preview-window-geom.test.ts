@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import {
+  avoidObstacle,
   CASCADE,
   clampRect,
   defaultRect,
@@ -299,5 +300,48 @@ describe("previewWindowGeom — maximizedRect (2026-10-22 L1 桌面最大化/恢
     const clamped = clampRect(r, vp);
     expect(clamped.w).toBeGreaterThanOrEqual(Math.min(MIN_W, 300 - 2 * EDGE));
     expect(clamped.h).toBeGreaterThanOrEqual(Math.min(MIN_H, 200 - 190 - 2 * EDGE));
+  });
+});
+
+describe("previewWindowGeom — avoidObstacle (2026-10-24 ask-paths fix #1)", () => {
+  const r: PreviewRect = { x: 100, y: 100, w: 400, h: 300 };
+
+  it("no intersection ⇒ the cascaded rect is returned unchanged", () => {
+    const obstacle: PreviewRect = { x: 900, y: 600, w: 200, h: 100 };
+    expect(avoidObstacle(r, obstacle, VP)).toEqual(r);
+  });
+
+  it("degenerate / non-finite obstacles are ignored", () => {
+    expect(avoidObstacle(r, { x: 100, y: 100, w: 0, h: 0 }, VP)).toEqual(r);
+    expect(avoidObstacle(r, { x: Number.NaN, y: 0, w: 100, h: 100 }, VP)).toEqual(r);
+  });
+
+  it("prefers the LEFT gap when it fits", () => {
+    const obstacle: PreviewRect = { x: 450, y: 100, w: 300, h: 300 }; // overlaps r (100..500 × 100..400)
+    const out = avoidObstacle(r, obstacle, VP);
+    expect(out).toEqual({ x: 450 - 400 - EDGE, y: 100, w: 400, h: 300 });
+    expect(out.x + out.w).toBeLessThanOrEqual(obstacle.x);
+  });
+
+  it("falls through to ABOVE when the left gap cannot hold the window", () => {
+    // obstacle too close to the left edge for a 400-wide window to sit left of it
+    const obstacle: PreviewRect = { x: 300, y: 350, w: 400, h: 150 }; // overlaps r's bottom (y 350 < 400)
+    const out = avoidObstacle(r, obstacle, VP);
+    expect(out.y + out.h).toBeLessThanOrEqual(obstacle.y);
+    expect(out).toEqual({ x: 100, y: 350 - 300 - EDGE, w: 400, h: 300 });
+  });
+
+  it("keeps the cascaded rect (overlap allowed) when no side fits", () => {
+    // a huge window around a centered obstacle: no side can hold it
+    const big: PreviewRect = { x: 50, y: 50, w: 1100, h: 650 };
+    const obstacle: PreviewRect = { x: 500, y: 300, w: 200, h: 100 };
+    expect(avoidObstacle(big, obstacle, VP)).toEqual(big);
+  });
+
+  it("the result always satisfies P1–P4 in the current viewport", () => {
+    const vp = vpOf(900, 700, 40);
+    const obstacle: PreviewRect = { x: 400, y: 300, w: 200, h: 200 };
+    const out = avoidObstacle(r, obstacle, vp);
+    assertP1toP4(out, vp);
   });
 });

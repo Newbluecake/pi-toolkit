@@ -26,7 +26,7 @@
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onUnmounted, provide, ref, watch } from "vue";
-import type { PreviewResizeDir } from "@logic/previewWindowGeom.js";
+import type { PreviewRect, PreviewResizeDir } from "@logic/previewWindowGeom.js";
 import { asWindowsHandle } from "../../composables/usePreviewWindows.js";
 import { usePreviewWindowCycle } from "../../composables/usePreviewWindowCycle.js";
 import { usePreviewWindowLayout } from "../../composables/usePreviewWindowLayout.js";
@@ -77,13 +77,47 @@ const RZ_DIRS: readonly PreviewResizeDir[] = ["n", "s", "e", "w", "ne", "nw", "s
 
 // --- focus bookkeeping (§5.4/§6.2) -----------------------------------------------------------
 
-const rootEl = ref<HTMLElement | null>(null);
 const sectionEls = new Map<number, HTMLElement>();
 const lastFocus = new Map<number, Element>();
 /** The window that currently holds (or last held) focus — drives the close-time return. */
 let focusedWin: number | null = null;
 /** The last element focused OUTSIDE the windows (r2 复审: ANY outside focusin refreshes it). */
 let pageFocus: HTMLElement | null = null;
+
+// --- ask tier (2026-10-24 验收裁定, ask-paths fix #1) ------------------------------------------
+// Windows opened FROM the ask_user float (`origin:"ask"`, or from inside an ask-tier window)
+// render in a SECOND overlay root above the ask-float's z45 — the float can no longer cover
+// them. Desktop band only: the phone fullscreen stack is byte-identical (ask windows stay in
+// the single root there). With no ask-tier window the extra root never renders and the DOM is
+// byte-identical to pre-change.
+interface WindowEntry {
+  readonly w: (typeof windows.value)[number];
+  /** Index in the creation-order `windows` list — PreviewWindow's `index` prop (the phone
+   *  `i/n` badge) must count ALL windows, not just this root's. */
+  readonly gi: number;
+}
+const windowGroups = computed(() => {
+  const base: WindowEntry[] = [];
+  const ask: WindowEntry[] = [];
+  windows.value.forEach((w, gi) => {
+    if (desktop.value && w.askTier === true) ask.push({ w, gi });
+    else base.push({ w, gi });
+  });
+  return [
+    { key: "base", ask: false, list: base },
+    { key: "ask", ask: true, list: ask },
+  ] as const;
+});
+
+/** The ask float's on-screen rectangle (null when absent/hidden — a minimized float is
+ *  `display:none`, its rect 0×0). Read fresh per placement; never cached across frames. */
+function askFloatRect(): PreviewRect | null {
+  const el = document.querySelector(".ask-float");
+  if (el === null) return null;
+  const r = el.getBoundingClientRect();
+  if (r.width <= 0 || r.height <= 0) return null;
+  return { x: r.left, y: r.top, w: r.width, h: r.height };
+}
 
 function setSectionRef(id: number, el: unknown): void {
   if (el instanceof HTMLElement) sectionEls.set(id, el);
@@ -99,9 +133,9 @@ function onWinFocusin(id: number, ev: FocusEvent): void {
 function onDocFocusin(ev: FocusEvent): void {
   // r2 复审处置: ANY focusin landing outside the windows refreshes pageFocus — including
   // while no overlay root exists yet (the pre-open moments are exactly the ones we must
-  // remember). An Element target inside the (existing) root is the only skip case.
-  const root = rootEl.value;
-  if (root !== null && ev.target instanceof Element && root.contains(ev.target)) return;
+  // remember). An Element target inside ANY overlay root (ask-paths fix #1: there can be
+  // two — the base root and the ask-tier root) is the only skip case.
+  if (ev.target instanceof Element && ev.target.closest(".preview-overlay.is-windows") !== null) return;
   if (ev.target instanceof Element) {
     focusedWin = null;
     pageFocus = ev.target instanceof HTMLElement ? ev.target : null;
@@ -157,7 +191,10 @@ watch(
           break;
         }
       }
-      for (const id of newIds) layout.ensureRect(id, anchor);
+      for (const id of newIds) {
+        const win = next.find((w) => w.id === id);
+        layout.ensureRect(id, anchor, desktop.value && win?.askTier === true ? askFloatRect() : null);
+      }
     }
     const nextIds = new Set(next.map((w) => w.id));
     for (const w of prev) if (!nextIds.has(w.id)) layout.dropRect(w.id);
@@ -318,56 +355,61 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body">
-    <div
-      v-if="hasWindows"
-      ref="rootEl"
-      class="preview-overlay is-windows"
-      :class="{ 'is-modeless': desktop }"
-      @keydown="onRootKeydown"
-    >
-      <section
-        v-for="(w, i) in windows"
-        :key="w.id"
-        class="preview-window"
-        :class="{
-          'is-floating': desktop,
-          'is-active': w.id === activeId,
-          'is-maximized': desktop && layout.isMaximized(w.id),
-        }"
-        :data-pw-id="w.id"
-        :style="desktop ? geomVars(w.id) : { '--pw-z': zOf(w.id) }"
-        :inert="!desktop && w.id !== activeId"
-        :ref="(el) => setSectionRef(w.id, el)"
-        @pointerdown.capture="face?.focusWindow(w.id)"
-        @focusin="onWinFocusin(w.id, $event)"
+    <!-- ask-paths fix #1 (2026-10-24 验收裁定): ONE root per tier. The base tier's markup is
+         byte-identical to the pre-change single root; the ask tier (`.is-ask-tier`, z 46 —
+         above the ask-float's 45) exists only while a DESKTOP ask-origin window is open.
+         The phone band keeps everything in the base root (fullscreen stack unchanged). -->
+    <template v-for="group in windowGroups" :key="group.key">
+      <div
+        v-if="group.list.length > 0"
+        class="preview-overlay is-windows"
+        :class="{ 'is-modeless': desktop, 'is-ask-tier': group.ask }"
+        @keydown="onRootKeydown"
       >
-        <PreviewWindow
-          :win="w"
-          :face="face!"
-          :desktop="desktop"
-          :is-top="w.id === activeId"
-          :index="i"
-          :count="windows.length"
-          :plaintext="ctx?.plaintext === true"
-          :show-plain-warning="showPlainWarning"
-          :layout="layout"
-          @close="face?.closeWindow($event)"
-          @close-all="face?.closeAll()"
-          @reset="layout.resetRect($event)"
-          @select="face?.focusWindow($event, { moveFocus: true })"
-        />
-        <!-- Maximized (2026-10-22 L1): the hot zones are dropped from the DOM entirely — no
-             dead hit areas; `beginGesture` refuses them belt-and-braces on top. -->
-        <template v-if="desktop && !layout.isMaximized(w.id)"
-          ><div
-            v-for="d in RZ_DIRS"
-            :key="d"
-            class="pw-rz"
-            :data-dir="d"
-            aria-hidden="true"
-            @pointerdown="onRzPointerdown($event, w.id, d)"
-        /></template>
-      </section>
-    </div>
+        <section
+          v-for="entry in group.list"
+          :key="entry.w.id"
+          class="preview-window"
+          :class="{
+            'is-floating': desktop,
+            'is-active': entry.w.id === activeId,
+            'is-maximized': desktop && layout.isMaximized(entry.w.id),
+          }"
+          :data-pw-id="entry.w.id"
+          :style="desktop ? geomVars(entry.w.id) : { '--pw-z': zOf(entry.w.id) }"
+          :inert="!desktop && entry.w.id !== activeId"
+          :ref="(el) => setSectionRef(entry.w.id, el)"
+          @pointerdown.capture="face?.focusWindow(entry.w.id)"
+          @focusin="onWinFocusin(entry.w.id, $event)"
+        >
+          <PreviewWindow
+            :win="entry.w"
+            :face="face!"
+            :desktop="desktop"
+            :is-top="entry.w.id === activeId"
+            :index="entry.gi"
+            :count="windows.length"
+            :plaintext="ctx?.plaintext === true"
+            :show-plain-warning="showPlainWarning"
+            :layout="layout"
+            @close="face?.closeWindow($event)"
+            @close-all="face?.closeAll()"
+            @reset="layout.resetRect($event)"
+            @select="face?.focusWindow($event, { moveFocus: true })"
+          />
+          <!-- Maximized (2026-10-22 L1): the hot zones are dropped from the DOM entirely — no
+               dead hit areas; `beginGesture` refuses them belt-and-braces on top. -->
+          <template v-if="desktop && !layout.isMaximized(entry.w.id)"
+            ><div
+              v-for="d in RZ_DIRS"
+              :key="d"
+              class="pw-rz"
+              :data-dir="d"
+              aria-hidden="true"
+              @pointerdown="onRzPointerdown($event, entry.w.id, d)"
+          /></template>
+        </section>
+      </div>
+    </template>
   </Teleport>
 </template>

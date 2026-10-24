@@ -13,6 +13,7 @@ import type { AskUserQuestionWire } from "@protocol/messages.js";
 import { useI18n } from "../../composables/useI18n.js";
 import type { AskUserQuestionProps } from "../../contracts.js";
 import { ASK_FORM, type AskSelection } from "./askFormContext.js";
+import PathText from "../preview/PathText.vue";
 
 const props = defineProps<AskUserQuestionProps>();
 const { t } = useI18n();
@@ -144,6 +145,22 @@ function onSkipToggle(): void {
   form.onAnswered?.(i, wasAnswered);
 }
 
+/**
+ * Clicking a path/proxy ref INSIDE an option row must never toggle the option (user ruling
+ * 2026-10-24 — ask 对话框路径可预览). The ref span (`span.path-ref`/`span.proxy-ref`, an ARIA
+ * button, not HTML interactive content) would otherwise let the <label>'s default activation
+ * forward the click to the radio/checkbox. The PathText handler runs first at the span (opens
+ * the preview synchronously), then the click bubbles to the label where preventDefault cancels
+ * the label's default forwarding — no wrapper element needed, so the no-PREVIEW_CTX DOM stays
+ * byte-identical.
+ * 2026-10-24 验收裁定 (fix #2): the selector ALSO covers `.proxy-ref-note` — with `no-note`
+ * set on these PathText instances the note never renders here, this is belt-and-braces. */
+function onOptionClick(ev: MouseEvent): void {
+  const target = ev.target;
+  if (target instanceof Element && target.closest(".path-ref, .proxy-ref, .proxy-ref-note") !== null)
+    ev.preventDefault();
+}
+
 function isChecked(label: string): boolean {
   return selection.value.selected.includes(label);
 }
@@ -181,9 +198,9 @@ function onOtherInput(ev: Event): void {
     :class="{ 'ask-skipped': selection.skipped === true, 'ask-question--expanded': contextOpen }"
     :disabled="form?.suspended.value === true"
   >
-    <legend class="ask-question-text">{{ question.question }}</legend>
+    <legend class="ask-question-text"><PathText :text="question.question" /></legend>
     <p v-if="question.context" ref="contextEl" class="ask-context" :class="{ 'ask-context--clamped': !contextOpen }">
-      {{ question.context }}
+      <PathText :text="question.context" />
     </p>
     <button
       v-if="contextLong"
@@ -196,7 +213,7 @@ function onOtherInput(ev: Event): void {
       {{ contextOpen ? t("dialog.contextCollapse") : t("dialog.contextExpand") }}
     </button>
     <div class="ask-options">
-      <label v-for="view in optionViews" :key="view.opt.label" class="ask-option">
+      <label v-for="view in optionViews" :key="view.opt.label" class="ask-option" @click="onOptionClick">
         <input
           v-if="multi"
           type="checkbox"
@@ -215,10 +232,12 @@ function onOtherInput(ev: Event): void {
         />
         <span class="ask-option-text">
           <span class="ask-option-label">
-            {{ view.text }}<span v-if="view.recommended" class="ask-reco-tag">{{ t("dialog.recommendedTag") }}</span>
+            <PathText :text="view.text" no-note /><span v-if="view.recommended" class="ask-reco-tag">{{
+              t("dialog.recommendedTag")
+            }}</span>
           </span>
           <span v-if="view.opt.description" class="ask-option-desc" :title="view.opt.description">
-            {{ view.opt.description }}
+            <PathText :text="view.opt.description" no-note />
           </span>
         </span>
       </label>

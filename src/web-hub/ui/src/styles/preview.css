@@ -1078,6 +1078,15 @@ button.preview-dir-row:focus-visible {
   pointer-events: none;
 }
 
+/* 2026-10-24 验收裁定 (ask-paths fix #1): windows opened FROM the ask_user dialog/float
+ * (`origin:"ask"`) render in this SECOND modeless root — tier 46, ABOVE the ask-float (45)
+ * that would otherwise cover them, still below every modal (50+). Every other window keeps
+ * tier 25 (below the float) unchanged; desktop band only (the phone stack never gets this
+ * class). Registered in ask-float.css's canonical tier table. */
+.preview-overlay.is-windows.is-modeless.is-ask-tier {
+  z-index: 46;
+}
+
 .preview-overlay.is-windows.is-modeless .preview-window {
   pointer-events: auto;
 }

@@ -28,6 +28,8 @@ import type { AskUserFormEmits, AskUserFormProps } from "../../contracts.js";
 import { CONTROL_ENV, CONTROL_VIEW, dialogDraftKey } from "../control/controlContext.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import AskUserQuestion from "./AskUserQuestion.vue";
+import PathText from "../preview/PathText.vue";
+import { PREVIEW_CTX } from "../preview/previewContext.js";
 import { ASK_FORM, type AskSelection } from "./askFormContext.js";
 
 const props = defineProps<AskUserFormProps>();
@@ -36,6 +38,23 @@ const { t } = useI18n();
 
 const view = inject(CONTROL_VIEW, null);
 const env = inject(CONTROL_ENV, null);
+
+/**
+ * 2026-10-24 验收裁定 (ask-paths fix #1): previews opened FROM an ask dialog ride the
+ * dedicated ask tier (z 46, above the ask-float; placement avoids the float's rect). The
+ * tag travels as `origin:"ask"` on the preview open ref — this re-provides PREVIEW_CTX to
+ * every PathText inside the form (tabs here, questions in AskUserQuestion) with an `open`
+ * that stamps the tag; PathText itself stays untouched. No ambient ctx ⇒ nothing is
+ * re-provided and PathText keeps its byte-identical plain-text rendering.
+ */
+const previewCtx = inject(PREVIEW_CTX, null);
+if (previewCtx !== null) {
+  const base = previewCtx.handle;
+  provide(PREVIEW_CTX, {
+    plaintext: previewCtx.plaintext,
+    handle: { ...base, open: (ref) => base.open({ ...ref, origin: "ask" }) },
+  });
+}
 
 const dialog = computed(() => props.dialog as DialogWire);
 const questions = computed<readonly AskUserQuestionWire[]>(() =>
@@ -144,6 +163,19 @@ const multi = computed(() => questions.value.length > 1);
 function tabLabel(q: AskUserQuestionWire, i: number): string {
   return typeof q.header === "string" && q.header !== "" ? q.header : t("dialog.questionTab", { n: i + 1 });
 }
+
+/**
+ * A header can carry a path/link (2026-10-24 ruling: ask 对话框路径可预览 — rendered through
+ * PathText). Clicking such a ref inside the tab button bubbles up as a button click; recognize
+ * it and DON'T switch the tab (the preview already opened at the span). No wrapper element, so
+ * the no-PREVIEW_CTX DOM stays byte-identical. Fix #2: `.proxy-ref-note` is ignored too
+ * (belt-and-braces — these PathText instances set `no-note`, so the note never renders here).
+ */
+function onTabClick(i: number, ev: MouseEvent): void {
+  const target = ev.target;
+  if (target instanceof Element && target.closest(".path-ref, .proxy-ref, .proxy-ref-note") !== null) return;
+  activeTab.value = i;
+}
 // Screen readers get the answered state too — the ✓ icon is decorative (aria-hidden) only.
 function tabAriaLabel(q: AskUserQuestionWire, i: number): string {
   const base = tabLabel(q, i);
@@ -211,10 +243,10 @@ watch(draftKey, () => {
         :aria-selected="activeTab === i"
         :aria-label="tabAriaLabel(q, i)"
         :class="{ active: activeTab === i, answered: isAnswered(selections[i]) }"
-        @click="activeTab = i"
+        @click="onTabClick(i, $event)"
       >
         <AppIcon v-if="isAnswered(selections[i])" name="check" class="icon-sm ask-tab-check" />
-        {{ tabLabel(q, i) }}
+        <PathText :text="tabLabel(q, i)" no-note />
       </button>
     </div>
 
