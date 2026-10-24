@@ -41,6 +41,24 @@ import {
   xsFrameBytesOk,
 } from "./xs.js";
 export type { XsAckFrame, XsDeliverFrame, XsMemberFrame, XsReqFrame, XsResFrame, XsStatusWire } from "./xs.js";
+// scheduled-reports plan r3 §10.1 (S0): `sched_*` frame schemas + types live in protocol/schedule.ts;
+// only folded in here (cap-gated on `sched.v1`, no PROTO bump — 只加帧不改).
+import {
+  SCHED_AGENT_FRAME_SCHEMAS,
+  SCHED_HUB_FRAME_SCHEMAS,
+  type SchedBoundFrame,
+  type SchedChangedFrame,
+  type SchedReceiptsFrame,
+  type SchedRunAckFrame,
+  type SchedRunFrame,
+} from "./schedule.js";
+export type {
+  SchedBoundFrame,
+  SchedChangedFrame,
+  SchedReceiptsFrame,
+  SchedRunAckFrame,
+  SchedRunFrame,
+} from "./schedule.js";
 // web-hub-slash-args plan §4.1 (P0): argument-completion frames + the CommandInfo.args
 // sub-schema live in protocol/command-args.ts; only folded in here (run-transcript precedent).
 import {
@@ -1122,7 +1140,11 @@ export type AgentFrame =
   // the stricter XS_MAX_FRAME_BYTES byte cap in decodeWith.
   | XsMemberFrame
   | XsReqFrame
-  | XsAckFrame;
+  | XsAckFrame
+  // scheduled-reports S0 (§10.1): inert until A0/H1 route them; sent only under `sched.v1`.
+  | SchedChangedFrame
+  | SchedBoundFrame
+  | SchedRunAckFrame;
 
 // ---- S1 LAN control-plane frames (§8.1; 同一个 unix socket，hello 之后才接受，不进 registry/bus/普通日志，不做额外鉴权——同 uid 完全可信) ----
 
@@ -1197,7 +1219,10 @@ export type HubFrame =
   | FsbResFrame
   | TfaResFrame
   | XsResFrame
-  | XsDeliverFrame;
+  | XsDeliverFrame
+  // scheduled-reports S0 (§10.1): inert until A0/H1 route them; sent only under `sched.v1`.
+  | SchedRunFrame
+  | SchedReceiptsFrame;
 
 export const TIMING = {
   connectMs: 1_000,
@@ -2310,6 +2335,8 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   run_gap: RunGapSchema,
   run_end: RunEndSchema,
   ...XS_AGENT_FRAME_SCHEMAS,
+  // scheduled-reports S0 (§10.1): schemas from protocol/schedule.ts
+  ...SCHED_AGENT_FRAME_SCHEMAS,
 };
 
 const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
@@ -2331,6 +2358,8 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   fsb_res: FsbResSchema,
   tfa_res: TfaResSchema,
   ...XS_HUB_FRAME_SCHEMAS,
+  // scheduled-reports S0 (§10.1): schemas from protocol/schedule.ts
+  ...SCHED_HUB_FRAME_SCHEMAS,
 };
 
 // ---------------------------------------------------------------------------
