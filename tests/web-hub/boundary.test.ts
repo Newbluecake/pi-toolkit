@@ -40,6 +40,27 @@ const SYSLOAD_FILE_ALLOWLIST = [
   // data-encryption P2 §2.7: the supervisor's managed-spawn env runs through the import-free hubSafeEnv.
   "src/secure/env.ts",
 ].map((p) => resolve(ROOT, p));
+/** scheduled-reports plan r3 §7.6/§12 S1: the hub coordinator reads schedule state through the pure,
+ * read-only half of src/schedule/core (reader + path primitives + cron + occurrence + liveness
+ * judgment + the frozen spec). The writer / lock / claim / session-proof half is agent-only and
+ * deliberately NOT allowlisted. */
+const SCHEDULE_CORE_FILE_ALLOWLIST = ["spec", "cron", "occurrence", "paths", "reader", "recovery"].map((n) =>
+  resolve(ROOT, `src/schedule/core/${n}.ts`),
+);
+/** Exact VALUE-import closure of the allowlisted schedule core files (type-only lines omitted). */
+const SCHEDULE_CORE_FILE_CLOSURE: Record<string, string[]> = {
+  // spec.ts value-imports AND value-re-exports the protocol vocabulary (two scanner hits).
+  "src/schedule/core/spec.ts": [
+    "node:crypto",
+    "../../web-hub/protocol/schedule.js",
+    "../../web-hub/protocol/schedule.js",
+  ],
+  "src/schedule/core/cron.ts": ["./spec.js"],
+  "src/schedule/core/occurrence.ts": ["./cron.js", "./spec.js"],
+  "src/schedule/core/paths.ts": ["node:crypto", "node:fs", "node:path"],
+  "src/schedule/core/reader.ts": ["node:fs", "./paths.js", "./spec.js"],
+  "src/schedule/core/recovery.ts": ["node:fs", "node:os", "./spec.js"],
+};
 
 /**
  * Closure constant table (worktree-diff plan §5 D1 #12): the exact import surface of the
@@ -179,7 +200,8 @@ function hubImportAllowed(file: string, spec: string): boolean {
         // hub files escaping {protocol,hub} must land on an exact, reviewed allowlist
         (inHub &&
           (GIT_FILE_ALLOWLIST.includes(resolveImport(file, spec)) ||
-            SYSLOAD_FILE_ALLOWLIST.includes(resolveImport(file, spec))))))
+            SYSLOAD_FILE_ALLOWLIST.includes(resolveImport(file, spec)) ||
+            SCHEDULE_CORE_FILE_ALLOWLIST.includes(resolveImport(file, spec))))))
   );
 }
 
@@ -263,6 +285,38 @@ describe("web-hub boundary", () => {
         .sort((a, b) => a.localeCompare(b));
       const wanted = [...expected].sort((a, b) => a.localeCompare(b));
       expect(actual, `${relPath} must import exactly ${JSON.stringify(wanted)} (value imports only)`).toEqual(wanted);
+    }
+  });
+
+  it("the schedule core allowlist files import EXACTLY the pinned value-import closure (scheduled-reports S1)", () => {
+    for (const [relPath, expected] of Object.entries(SCHEDULE_CORE_FILE_CLOSURE)) {
+      const actual = scanImports(resolve(ROOT, relPath))
+        .filter((ref) => !ref.typeOnly)
+        .map((ref) => ref.spec)
+        .sort((a, b) => a.localeCompare(b));
+      const wanted = [...expected].sort((a, b) => a.localeCompare(b));
+      expect(actual, `${relPath} must import exactly ${JSON.stringify(wanted)} (value imports only)`).toEqual(wanted);
+    }
+    // the type-only imports of the closure stay inside the same reviewed set (no pi type leaks)
+    for (const relPath of Object.keys(SCHEDULE_CORE_FILE_CLOSURE)) {
+      const file = resolve(ROOT, relPath);
+      for (const ref of scanImports(file).filter((r) => r.typeOnly)) {
+        const target = resolveImport(file, ref.spec);
+        expect(
+          SCHEDULE_CORE_FILE_ALLOWLIST.includes(target) || insideProtocolHub(target),
+          `${relPath} type-imports ${ref.spec}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("hub may import the read-only schedule core but never its writer half", () => {
+    const hubFile = resolve(ROOT, "src/web-hub/hub/schedule/scan.fixture.ts");
+    for (const n of ["reader", "cron", "occurrence", "paths", "recovery", "spec"]) {
+      expect(hubImportAllowed(hubFile, `../../../schedule/core/${n}.js`), n).toBe(true);
+    }
+    for (const n of ["writer", "lock", "claim", "session-proof"]) {
+      expect(hubImportAllowed(hubFile, `../../../schedule/core/${n}.js`), n).toBe(false);
     }
   });
 
