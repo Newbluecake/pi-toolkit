@@ -196,15 +196,22 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
       // 终态 delivered 且带正文的记录投影为可渲染 custom_message（header 与 TUI 一致）；
       // outbox 每迁移一次状态就追加一条，非 delivered 状态维持墓碑投影，避免重复显示。
       if (r.customType === "subagent:fabric") {
-        const d = r.data as { state?: unknown; kind?: unknown; from?: unknown; payload?: unknown } | null | undefined;
+        const d = r.data as
+          | { state?: unknown; kind?: unknown; from?: unknown; fromLabel?: unknown; payload?: unknown }
+          | null
+          | undefined;
         const payload = d !== null && typeof d === "object" ? d.payload : undefined;
         const text =
           payload !== null && typeof payload === "object" && !Array.isArray(payload)
             ? (payload as Record<string, unknown>).text
             : undefined;
         if (d?.state === "delivered" && typeof text === "string" && text.trim() !== "") {
-          const kind = typeof d.kind === "string" ? d.kind : "message";
-          const from = typeof d.from === "string" && d.from !== "" && d.from !== "root" ? ` ${d.from}` : "";
+          // 2026-10-24 user report: 「fabric finding」 said nothing about WHO sent the message. The header now
+          // shows only the sender — `@<label>` (record.fromLabel, stamped at admit() time), falling back to
+          // `@<runId>` for unlabeled/old records and `@root`/`@system` for host senders. No 「fabric」/kind wording.
+          const from = typeof d.from === "string" ? d.from : "";
+          const fromLabel = typeof d.fromLabel === "string" && d.fromLabel !== "" ? d.fromLabel : undefined;
+          const sender = from === "root" ? "root" : from === "" ? "unknown" : (fromLabel ?? from);
           return finish(
             {
               id: r.id,
@@ -212,7 +219,7 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
               type: "custom_message",
               timestamp: r.timestamp,
               customType: r.customType,
-              content: truncateDeep(`[fabric ${kind}${from}]\n${text}`, flag),
+              content: truncateDeep(`[@${sender}]\n${text}`, flag),
             },
             flag,
           );

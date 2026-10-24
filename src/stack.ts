@@ -71,6 +71,7 @@ import { createFabricMailbox, type FabricPorts } from "./fabric/mailbox.js";
 import { createCausalLevel, readRootLevel, WAKE_LEVEL_CUSTOM_TYPE, type CausalLevel } from "./fabric/wake-level.js";
 import { createWakeService, inboxDurability, type WakeStatusView } from "./fabric/wake.js";
 import { isLiveSessionFile } from "./core/live-session-files.js";
+import { isRunId } from "./core/ids.js";
 import { RESUME_TEXT } from "./tools/compact-tool.js";
 import { createFabricRouter } from "./fabric/router.js";
 import { createFabricThrottle } from "./fabric/throttle.js";
@@ -636,6 +637,15 @@ function buildFabric(
       ...settings.fabric,
       reconcileTtlMs: settings.reconcileTtlMs,
       canRenderEntries: capabilities.canRenderEntries,
+      // 2026-10-24 user report: entry headers must say WHO sent the message (`@label`), not `[fabric <kind>
+      // <runId>]`. Stamp the sender's label into the record at admit() time — the run registry's diag.label
+      // is authoritative (survives /reload via seeded snapshots); the live query is late-bound because the
+      // fabric router is built before the QueryService exists. Display-only; never gates admission.
+      senderLabel: (from) => {
+        if (from === "root" || from === "system" || !isRunId(from)) return undefined;
+        const label = query()?.get(from)?.diag.label;
+        return typeof label === "string" && label !== "" ? label : undefined;
+      },
       ...(level
         ? {
             wakePolicy: {

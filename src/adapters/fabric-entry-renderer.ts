@@ -36,11 +36,20 @@ function bodyIndent(options: unknown): number {
 /** Resolve a sender runId to its mention label, if one is registered. */
 export type FabricSenderResolver = (runId: string) => string | undefined;
 
-function formatSender(from: string | undefined, resolveSender?: FabricSenderResolver): string {
-  if (!from) return "";
-  if (from === "root") return " root";
-  const label = resolveSender?.(from);
-  return label !== undefined ? ` @${label}` : ` ${from}`;
+/**
+ * 2026-10-24 user report: 「fabric finding」 said nothing about WHO sent the message. The header now shows only
+ * the sender — `@<fromLabel>` (persisted at admit() time, survives reloads), then the resolver's mention label,
+ * then the bare runId; host senders render as `@root` / `@system`.
+ */
+function formatSender(
+  from: string | undefined,
+  fromLabel: string | undefined,
+  resolveSender?: FabricSenderResolver,
+): string {
+  if (from === "root") return "@root";
+  if (from === undefined || from === "") return "@unknown";
+  const label = fromLabel !== undefined && fromLabel !== "" ? fromLabel : resolveSender?.(from);
+  return label !== undefined ? `@${label}` : `@${from}`;
 }
 
 /**
@@ -77,9 +86,9 @@ export function createFabricEntryRenderer(resolveSender?: FabricSenderResolver):
     const data = entry.data as Partial<FabricRecord> | undefined;
     if (data?.state !== "delivered") return undefined;
     const text = data.payload?.text ?? "";
-    const sender = formatSender(data.from, resolveSender);
+    const sender = formatSender(data.from, data.fromLabel, resolveSender);
     const indent = bodyIndent(options);
-    const header = new Text(theme.fg("muted", `[fabric ${data.kind ?? "message"}${sender}]`), indent, 0);
+    const header = new Text(theme.fg("muted", `[${sender}]`), indent, 0);
     if (text.trim() === "") return header;
     // Header on its own line + the payload as a markdown block, both at the
     // same indent: fabric payloads are model-written prose (progress

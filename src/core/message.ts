@@ -69,6 +69,13 @@ export type FabricDeliveryState = "pending" | "claimed" | "delivered" | "consume
 export interface FabricRecord extends MessageEnvelope {
   state: FabricDeliveryState;
   attempts: number;
+  /**
+   * Display-only sender label (2026-10-24 user report: the `[fabric <kind> <runId>]` header said nothing about
+   * WHO sent the message). Stamped by the router at admit() time from the run registry; the TUI/web entry headers
+   * render `@fromLabel`, falling back to `@<runId>` / `@root` when absent (all pre-existing records). Never
+   * participates in routing, dedup, quotas or the model-facing context format.
+   */
+  fromLabel?: string;
   claimToken?: string;
   updatedAt: Millis;
   deliveredAt?: Millis;

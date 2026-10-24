@@ -833,8 +833,8 @@ export default function activate(rawPi: ExtensionAPI): void {
     // delivered records: the fabric outbox store appends one entry per state
     // transition, and rendering each one duplicated every fabric message in
     // the chat (pending/claimed appends + delivered append).
-    // Show the sender alongside kind: prefer the mention label (@name),
-    // falling back to the raw runId when no label is registered.
+    // The header shows only the sender (@name): the record's persisted
+    // fromLabel first, then the mention label, then the raw runId.
     pi.registerEntryRenderer(
       FABRIC_ENTRY_CUSTOM_TYPE,
       createFabricEntryRenderer((runId) => {

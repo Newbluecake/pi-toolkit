@@ -97,8 +97,62 @@ describe("customKey", () => {
     expect(delivered).toBeDefined();
     expect(delivered!.type).toBe("custom_message");
     expect(delivered!.customType).toBe("subagent:fabric");
-    expect(delivered!.content).toBe("[fabric progress r_ABC12345]\n@你的回复正文");
+    expect(delivered!.content).toBe("[@r_ABC12345]\n@你的回复正文");
     expect(delivered!.display).toBeUndefined(); // unset ≠ false ⇒ rendered
+
+    // 2026-10-24 header rework: `[@<fromLabel>]` wins when the record carries the admit()-time label;
+    // `@root` for a root sender (old records without fromLabel fall back to the runId above).
+    const labeled = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data: {
+        key: "k9",
+        from: "r_ABC12345",
+        fromLabel: "secreview:-secure-V6-wiring",
+        to: "root",
+        kind: "finding",
+        state: "delivered",
+        payload: { text: "body" },
+      },
+      id: "f9",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:05.000Z",
+    });
+    expect(labeled!.content).toBe("[@secreview:-secure-V6-wiring]\nbody");
+    const fromRoot = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data: {
+        key: "k10",
+        from: "root",
+        to: "r_ABC12345",
+        kind: "directive",
+        state: "delivered",
+        payload: { text: "hi" },
+      },
+      id: "f10",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:06.000Z",
+    });
+    expect(fromRoot!.content).toBe("[@root]\nhi");
+    const fromSystem = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data: { key: "k11", from: "system", to: "root", kind: "result", state: "delivered", payload: { text: "sys" } },
+      id: "f11",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:07.000Z",
+    });
+    expect(fromSystem!.content).toBe("[@system]\nsys");
+    const noSender = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data: { key: "k12", to: "root", kind: "finding", state: "delivered", payload: { text: "anon" } },
+      id: "f12",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:08.000Z",
+    });
+    expect(noSender!.content).toBe("[@unknown]\nanon");
 
     // Non-delivered outbox transitions stay tombstones (no duplicate display).
     const pending = projectSessionEntry({

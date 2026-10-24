@@ -35,6 +35,12 @@ export interface FabricRouterConfig {
   wakePolicy?: WakePolicy;
   /** W3: absent with wake off. stack-memory cannot promise a parked inbox. */
   inbox?: { durability: InboxDurability; parkCapPerTarget: number };
+  /**
+   * Display-only: resolve a sender run's label so persisted records carry `fromLabel` for the TUI/web entry
+   * headers (`@label` instead of a bare runId). Never gates admission, routing, dedup or quotas; absent or
+   * returning undefined ⇒ the field is simply omitted and every consumer falls back to `@<runId>`.
+   */
+  senderLabel?: (from: NodeRef) => string | undefined;
 }
 /** Host-owned causal-level reader + the expensive-class budget for `wake:true` (plan §3.1 "separate quota class"). */
 export interface WakePolicy {
@@ -140,6 +146,12 @@ export class FabricRouter {
     }
   }
 
+  /** Display-only sender label lookup (config.senderLabel); sanitized to a non-empty string or undefined. */
+  private labelOf(from: NodeRef): string | undefined {
+    const label = this.config.senderLabel?.(from);
+    return typeof label === "string" && label.trim() !== "" ? label : undefined;
+  }
+
   admit(from: NodeRef, input: AdmissionInput): AdmissionResult {
     if (this.frozen) throw new Error("shutting down");
     if (this.tree.targetState(from, this.now()) !== "running") throw new Error("sender is not running");
@@ -233,6 +245,7 @@ export class FabricRouter {
       ).length >= this.config.inbox!.parkCapPerTarget
     )
       rejection = { ok: false, status: "target_backpressure", key, seq, retryAfterMs: 0 };
+    const fromLabel = this.labelOf(from);
     const record: FabricRecord = {
       key,
       from,
@@ -246,6 +259,7 @@ export class FabricRouter {
       updatedAt: this.now(),
       state: rejection ? "dropped" : "pending",
       attempts: 0,
+      ...(fromLabel !== undefined ? { fromLabel } : {}),
       ...(rejection
         ? { rejected: { reason: rejection.status === "quota_exhausted" ? "quota_exhausted" : "target_backpressure" } }
         : {}),
