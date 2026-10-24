@@ -125,6 +125,53 @@ describe("cmd_result / cmd_late (agent\u2192hub)", () => {
     const raw = { t: "cmd_result", rid: "r1", id: "x", ok: false, code: "E_DEADLINE", retryable: true, effect: "?" };
     expect(decodeAgentFrame(raw)).toBeUndefined();
   });
+  // web-hub-cmd-history plan §4.6 (P0, freeze F4): the command variant of CmdData carries the
+  // optional `history` hint — written on the sync reply AND both late channels alike (m2); the
+  // hub-side CmdDataSchema stays Type.Unknown() so an old hub forwards it verbatim, no PROTO bump.
+  it("data.history rides the command variant on cmd_result and cmd_late (late channel, m2)", () => {
+    const sync = {
+      t: "cmd_result",
+      rid: "r1",
+      id: "x",
+      ok: true,
+      data: {
+        op: "command",
+        kind: "extension",
+        completion: "sync",
+        captured: true,
+        output: { entries: [] },
+        history: "recorded",
+      },
+    };
+    expect(decodeAgentFrame(sync)).toEqual(sync);
+    const late = {
+      t: "cmd_late",
+      id: "x",
+      op: "command",
+      at: 123,
+      ok: true,
+      data: { op: "command", kind: "builtin", completion: "async", history: "recorded" },
+    };
+    expect(decodeAgentFrame(late)).toEqual(late);
+    const none = {
+      t: "cmd_result",
+      rid: "r2",
+      id: "y",
+      ok: true,
+      data: { op: "command", kind: "extension", completion: "unknown", history: "none" },
+    };
+    expect(decodeAgentFrame(none)).toEqual(none);
+  });
+  it("a command result without history still decodes (old-agent shape, UI treats missing as none)", () => {
+    const raw = {
+      t: "cmd_result",
+      rid: "r1",
+      id: "x",
+      ok: true,
+      data: { op: "command", kind: "extension", completion: "sync" },
+    };
+    expect(decodeAgentFrame(raw)).toEqual(raw);
+  });
 });
 
 describe("dialogs / ctl / commands slots (agent\u2192hub)", () => {

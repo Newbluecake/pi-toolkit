@@ -9,6 +9,7 @@
  * `diffAppended` 的多重集对账使用 —— 持久化严格按事件顺序，尾部计数对账正确。
  */
 import { Buffer } from "node:buffer";
+import { CMD_RECORD_ENTRY_TYPE, sanitizeCmdRecord } from "./cmd-record.js";
 import { LIMITS, type WireEntry, type WireMessage } from "./messages.js";
 
 /** user/assistant/system: `role:timestamp`；toolResult 追加 `:toolCallId`；custom → customKey。 */
@@ -188,6 +189,24 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
           dataKey: customKey(r.customType, r.data),
           display: false,
           ...(timing !== undefined ? { timing } : {}),
+        };
+      }
+      // web-hub-cmd-history plan §4.5: `subagent:cmd` keeps the tombstone shape (display:false,
+      // dataKey over the FULL raw data — dedupe/reconciliation semantics unchanged) but
+      // additionally carries the sanitized `cmd` record so the browser folds history cards;
+      // an unsanitizable record (tampered/hostile) degrades to the bare tombstone. Old UIs
+      // render neither (no renderer for the tombstone), old hubs forward the frame verbatim.
+      if (r.customType === CMD_RECORD_ENTRY_TYPE) {
+        const cmd = sanitizeCmdRecord(r.data);
+        return {
+          id: r.id,
+          parentId,
+          type: "custom",
+          timestamp: r.timestamp,
+          customType: r.customType,
+          dataKey: customKey(r.customType, r.data),
+          display: false,
+          ...(cmd !== undefined ? { cmd } : {}),
         };
       }
       // message_agent → root 的 display 面（progress/finding 等，progressChannel:"display"）：

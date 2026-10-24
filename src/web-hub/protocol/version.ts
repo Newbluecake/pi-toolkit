@@ -337,6 +337,21 @@ export const CMD_ARGS_HUB_CAP = "cmd.args.v1";
 export const CMD_ARGS_HUB_CAPS = [CMD_ARGS_HUB_CAP] as const;
 export const CMD_ARGS_AGENT_CAPS = [CMD_ARGS_HUB_CAP] as const;
 
+/**
+ * web-hub-cmd-history plan §4.6/§8.2-F4 (P0 协议冻结包): the cap advertising the command-history
+ * channel — `subagent:cmd` entries projected as custom tombstones + the bounded `cmd` field
+ * (protocol/cmd-record.ts, freeze F1/F3), `StatusInfo.cmdRunning` and `CmdData.history`
+ * (open fields, F4). A new hub declares it STATICALLY on BOTH cap surfaces (HubInfo.caps /
+ * hello_ack.caps — unlike cmd.args.v1 there is no config gate; H1 folds it into extraHubCaps),
+ * the agent's signal is the `cmd.history.v1` token inside `StatusInfo.features`
+ * (messages.ts's CMD_HISTORY_FEATURE_V1 — deliberately the same string), and the UI only enters
+ * historyMode when BOTH surfaces carry it. Purely additive open fields — no new frames, no
+ * SSE event types, no PROTO bump (只加不改, same rule as every cap above). In P0 the constant
+ * alone is INERT — nothing folds it into any caps array yet.
+ */
+export const CMD_HISTORY_HUB_CAP = "cmd.history.v1";
+export const CMD_HISTORY_HUB_CAPS = [CMD_HISTORY_HUB_CAP] as const;
+
 /** LAN security P0: declared ONLY. I advertises these on both cap surfaces after wiring.
  * Optional new frames are cap-gated, so PROTO stays unchanged (same as fsb_req/res). */
 export const LAN_2FA_HUB_CAP = "lan.2fa.v1";

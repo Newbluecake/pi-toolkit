@@ -60,6 +60,10 @@ export type {
 } from "./command-args.js";
 import { type TfaReqFrame, TfaReqSchema, type TfaResFrame, TfaResSchema } from "./lan-2fa.js";
 export type { TfaReqFrame, TfaResFrame } from "./lan-2fa.js";
+// web-hub-cmd-history plan §4.5 (P0): the `subagent:cmd` record type lives in
+// protocol/cmd-record.ts (its own frozen module); only the type is folded in here —
+// TYPE-only in both directions, so no runtime import cycle with keys.ts's projection.
+import type { CmdRecordWire } from "./cmd-record.js";
 
 // ---------------------------------------------------------------------------
 // data types
@@ -98,6 +102,12 @@ export interface WireEntry {
    *  `{[toolCallId]: durationMs}` map here (the entry otherwise stays a display:false tombstone —
    *  never a transcript row). Absent on every other entry shape; ≤ TOOL_TIMING_WIRE_PAIRS pairs. */
   timing?: Record<string, number>;
+  /** web-hub-cmd-history plan §4.5 (P0): `subagent:cmd` custom(data) entries carry their
+   *  sanitized record here (the entry otherwise stays a display:false tombstone — the new UI
+   *  folds cards by cmdId, old UIs render nothing). Absent on every other entry shape and on
+   *  records that fail re-validation (pure tombstone). WireEntrySchema stays open — timing
+   *  precedent — so an old hub forwards the field verbatim. */
+  cmd?: CmdRecordWire;
   /** `subagent:date` custom_message only: the bounded `{date, kind, at}` subset of `details`
    *  (kind ∈ first|cross-day|idle) so the web divider can label the injection. Absent on every
    *  other entry shape; old entries without details degrade to a content-only parse. */
@@ -623,6 +633,12 @@ export interface StatusInfo {
    *  feature on this agent. Bounded ≤32 entries × ≤64 chars; a strictly optional field, so an
    *  old hub's open StatusInfoSchema forwards it verbatim and an old UI ignores it (F9). */
   features?: string[];
+  /** web-hub-cmd-history plan §4.6 (P0): cmdIds of this session's still-open command records
+   *  (≤ CMD_HISTORY_RUNNING_MAX, newest first). Present ONLY while non-empty — absent ⇔
+   *  cmd-history off / no running record (byte-equal to the pre-feature shape). The open
+   *  StatusInfoSchema forwards it through old hubs untouched (features/timing precedent);
+   *  old UIs ignore it. */
+  cmdRunning?: string[];
   /** fabric phase-2 XS0 (§4.4, P3): display-only cross-session membership projection. Absent ⇔
    *  xs off / not joined — byte-equal to the pre-feature shape. The hub's list/send authorization
    *  NEVER reads this (#4): authoritative membership is the `xs_member` slot frame. */
@@ -879,6 +895,12 @@ export interface ResumeSessionsWire {
 /** web-resume plan §2.7: the one `StatusInfo.features` token this version emits. Old agents
  *  never send `features` at all, so its presence is a positive capability signal. */
 export const RESUME_FEATURE_V1 = "resume.v1";
+/** web-hub-cmd-history plan §4.6: the `StatusInfo.features` token this version emits once the
+ *  recorder is wired (`webHub.enabled ∧ cmdHistory !== false`) AND the session is persisted
+ *  (same gate as `resume.v1`; emitted after it — features order `[resume.v1?, cmd.history.v1?]`).
+ *  Deliberately the SAME string as `CMD_HISTORY_HUB_CAP` (protocol/version.ts): the UI's
+ *  historyMode gate requires the token on BOTH surfaces (pinned equal by tests). */
+export const CMD_HISTORY_FEATURE_V1 = "cmd.history.v1";
 /** §2.7 bounds: `features` is bounded ≤32 entries × ≤64 chars (schema-enforced, and clipped
  *  again agent-side before it is ever set). */
 export const STATUS_FEATURES_MAX_ITEMS = 32;
@@ -921,6 +943,12 @@ export type CmdData =
        *  the page of the session list (never paths/cwd/message text). Not retained in the
        *  agent's command ledger (stripped at settle) nor in any origin notify. */
       sessions?: ResumeSessionsWire;
+      /** web-hub-cmd-history plan §4.6 (P0): whether a history card will appear for this call
+       *  ("recorded") or not ("none"). Written on the sync reply AND both late channels alike
+       *  (the extension `sendLate` payload and the builtin late payload — one CmdData shape
+       *  covers cmd_result/cmd_late); ledger semantics unchanged. Absent ⇔ old agent — the
+       *  UI treats a missing value as "none" (plan n1: the single inference rule). */
+      history?: "recorded" | "none";
     }
   | { op: "query"; state: "running" | "ok" | "failed"; late?: true; result?: CmdResultBody }
   | RecallResultData

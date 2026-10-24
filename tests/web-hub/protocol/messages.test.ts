@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
+  CMD_HISTORY_FEATURE_V1,
   FORWARDED_EVENTS,
   LIMITS,
   TIMING,
@@ -12,7 +13,11 @@ import {
 } from "../../../src/web-hub/protocol/messages.js";
 import { MAX_FRAME_BYTES } from "../../../src/web-hub/protocol/ndjson.js";
 import { RUN_TX_REASONS } from "../../../src/web-hub/protocol/run-transcript.js";
-import { RESERVED_FRAME_TYPES } from "../../../src/web-hub/protocol/version.js";
+import {
+  CMD_HISTORY_HUB_CAP,
+  CMD_HISTORY_HUB_CAPS,
+  RESERVED_FRAME_TYPES,
+} from "../../../src/web-hub/protocol/version.js";
 
 const nonce16 = "abcdefghijklmnop";
 const nonce64 = "a".repeat(64);
@@ -560,6 +565,74 @@ describe("constants", () => {
       toolUpdateMs: 250,
       fleetMs: 1_000,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// web-hub-cmd-history plan §4.6 (P0): open fields ride the UNCHANGED (old) schemas — no schema
+// edit, no PROTO bump (timing/features precedent). These tests pin that frames carrying the
+// new fields decode verbatim through the current (pre-change-shape) schemas, and that old
+// frames without them are unaffected.
+// ---------------------------------------------------------------------------
+
+describe("cmd-history P0 open fields on unchanged schemas (§4.6)", () => {
+  const ts = "2026-10-24T08:00:00.000Z";
+  const cmdRecord = {
+    v: 1,
+    cmdId: "cAbCdEfGhIjKlMnOpQrS",
+    phase: "end",
+    name: "record",
+    args: "status",
+    source: "web",
+    startedAt: 1_792_000_000_000,
+    endedAt: 1_792_000_004_000,
+    state: "done",
+    output: { entries: [{ kind: "notify", level: "info", text: "viewer: /record?token=abc" }] },
+  };
+
+  it("status frame with features + cmdRunning decodes verbatim (open StatusInfoSchema)", () => {
+    const raw = {
+      t: "status",
+      leafId: "abc123",
+      busy: true,
+      pending: false,
+      features: ["resume.v1", CMD_HISTORY_FEATURE_V1], // §4.6 ordering: [resume.v1?, cmd.history.v1?]
+      cmdRunning: ["cmd_0123456789abcdef", "cAbCdEfGhIjKlMnOpQrS"],
+    };
+    expect(decodeAgentFrame(raw)).toEqual(raw);
+  });
+
+  it("status frame without the new fields still decodes (byte-equal pre-feature shape)", () => {
+    const raw = { t: "status", leafId: null, busy: false, pending: false };
+    expect(decodeAgentFrame(raw)).toEqual(raw);
+    expect("cmdRunning" in (decodeAgentFrame(raw) as Record<string, unknown>)).toBe(false);
+  });
+
+  it("branch_reply entries may carry WireEntry.cmd (tombstone + cmd, open WireEntrySchema)", () => {
+    const raw = {
+      t: "branch_reply",
+      rid: "r1",
+      truncated: false,
+      entries: [
+        {
+          id: "e1",
+          parentId: null,
+          type: "custom",
+          timestamp: ts,
+          customType: "subagent:cmd",
+          dataKey: "custom:subagent:cmd:0123abcd",
+          display: false,
+          cmd: cmdRecord,
+        },
+      ],
+    };
+    expect(decodeAgentFrame(raw)).toEqual(raw);
+  });
+
+  it("CMD_HISTORY_FEATURE_V1 is the same string as the hub cap (UI gates historyMode on BOTH)", () => {
+    expect(CMD_HISTORY_FEATURE_V1).toBe("cmd.history.v1");
+    expect(CMD_HISTORY_FEATURE_V1).toBe(CMD_HISTORY_HUB_CAP);
+    expect([...CMD_HISTORY_HUB_CAPS]).toEqual(["cmd.history.v1"]);
   });
 });
 
