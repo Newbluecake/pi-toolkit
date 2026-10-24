@@ -496,6 +496,50 @@ describe("import (§3.3)", () => {
     expect(await A.cmdImport({ file: pkg, name: "half", home: env.home }, p)).toBe(76);
   });
 
+  it("V8: mount-point ancestor rules are judged BEFORE the claim and before any password prompt (78, nothing changes)", async () => {
+    const env = mkEnv();
+    const pkg = writePkg(env);
+    const seen: string[] = [];
+    const spy = env.ports({
+      isTTY: () => true,
+      registerVault: () => {
+        seen.push("claim");
+        throw new Error("must not claim");
+      },
+      unlockVault: async () => {
+        seen.push("password");
+        throw new Error("must not ask for a password");
+      },
+    });
+    const untouched = () => {
+      expect(seen).toEqual([]);
+      expect(existsSync(join(env.home, ".local"))).toBe(false); // no <dir>, no staging, no .txn
+      expect(existsSync(join(env.home, "secure"))).toBe(false);
+      expect(readSettings(env.home)?.secure).toBeUndefined();
+    };
+    // (a) default mount point, ~/secure not created yet, group-writable $HOME: before V8 this was only
+    //     noticed at publish time — after the claim and the whole staged read
+    chmodSync(env.home, 0o775);
+    try {
+      expect(await A.cmdImport({ file: pkg, name: "gw", verifyPassword: true, home: env.home }, spy)).toBe(78);
+      expect(env.lines.err.join("\n")).toContain("挂载点祖先目录检查失败：");
+      expect(env.lines.err.join("\n")).toContain(`${env.home} 对组/其他可写且无 sticky 位`);
+      untouched();
+    } finally {
+      chmodSync(env.home, 0o700);
+    }
+    // (b) --path below a group-writable directory
+    const gw = join(env.home, "gwdir");
+    mkdirSync(gw, { mode: 0o700 });
+    chmodSync(gw, 0o775);
+    expect(
+      await A.cmdImport({ file: pkg, name: "gw2", path: join(gw, "m"), verifyPassword: true, home: env.home }, spy),
+    ).toBe(78);
+    expect(env.lines.err.join("\n")).toContain(`${gw} 对组/其他可写且无 sticky 位`);
+    untouched();
+    expect(existsSync(join(gw, "m"))).toBe(false);
+  });
+
   describe("malicious packages ⇒ 65, zero residue, registration removed, decoys untouched", () => {
     // cases with a custom `budget` only fail under that reduced budget — import uses the default one
     const bad = (

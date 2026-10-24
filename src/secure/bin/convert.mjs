@@ -2390,7 +2390,7 @@ function printLines(fn, lines) {
  * `pi-secure convert …` entry (V6 dispatches here). → exit code. Never throws for expected failures.
  *   ports: launcher facilities (see V4-report §2): registerVault, patchVaultEntry, removeVaultEntry,
  *          getVaultEntry, listVaults, deriveVault, defaultVaultDir, defaultVaultMnt, physicalPaths,
- *          createLayout, initCipher, unlockVault, ensureVaultDirs, syncProjectSettings,
+ *          createLayout, layoutPreflight (V8), initCipher, unlockVault, ensureVaultDirs, syncProjectSettings,
  *          probeMountState, finalizeBounded, leaseState, preflight, isTty, prompt, out, err
  *   ctx  : defaultConvertContext(...) (paths, binaries, workers, seams)
  */
@@ -2520,6 +2520,11 @@ async function convertFlow(opts, { ports, ctx, intr }) {
       CONVERT_EXIT.CONFIG,
       `保险库名 ${name} 已登记（secure.vaults.${name}）；换一个名字：pi-secure convert ${src} <名字>`,
     );
+  // V8: createLayout's position + mount-point ancestor rules, judged NOW (same functions, via the
+  // port) so a non-compliant location is refused before any prompt, claim, password or write
+  // (.txn included); step 2 re-checks them as defense in depth.
+  const lp = ports.layoutPreflight(v, { others: vaults, home });
+  if (lp) throw CE(CONVERT_EXIT.CONFIG, lp.title, { lines: lp.lines.map((l) => `  - ${l}`) });
   ensureTxnDir(ctx.txnDir, uid);
   if (readState(ctx.txnDir, name))
     throw CE(CONVERT_EXIT.BUSY, `保险库 ${name} 有未完成的转换：pi-secure convert --resume|--abort ${name}`);

@@ -29,6 +29,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   C,
+  H,
   T,
   cleanupTmps,
   fixtureScanOccupants,
@@ -51,7 +52,8 @@ afterAll(() => {
 /** No registry call, no vault dir, no state file, source byte-for-byte unchanged. */
 function expectNoSideEffects(E: ReturnType<typeof makeEnv>, before: Record<string, unknown>) {
   expect(E.reg.size).toBe(0);
-  expect(E.calls.filter((c) => !c.startsWith("finalize"))).toEqual([]);
+  // layoutPreflight (V8) is a read-only judgement, not a side effect
+  expect(E.calls.filter((c) => !c.startsWith("finalize") && c !== "layoutPreflight")).toEqual([]);
   const v = E.vault();
   expect(existsSync(v.dir)).toBe(false);
   expect(existsSync(v.mnt)).toBe(false);
@@ -657,7 +659,7 @@ describe("early refusals have zero side effects", () => {
     mkdirSync(E.txnDir, { recursive: true, mode: 0o700 });
     writeFileSync(join(E.txnDir, "convert-proj.json"), "{}");
     expect(await E.run([E.src])).toBe(78); // malformed state is never guessed
-    expect(E.calls).toEqual([]);
+    expect(E.calls).toEqual(["layoutPreflight"]); // V8: the read-only location judgement runs first
     expect(snapshot(E.src)).toEqual(before);
   });
 
@@ -738,6 +740,104 @@ describe("early refusals have zero side effects", () => {
     }
     const again = await C.acquireConvertLock(lockPath);
     await again.release();
+  });
+});
+
+describe("V8: mount-point position / ancestor rules are judged at step 0", () => {
+  const promptSpy = (E: ReturnType<typeof makeEnv>) => {
+    const asked: string[] = [];
+    E.ports.prompt = async (q: string) => {
+      asked.push(q);
+      return "proj";
+    };
+    return asked;
+  };
+
+  it("a group-writable ancestor of --path ⇒ 78 before any prompt, claim or layout; nothing changes", async () => {
+    const E = makeEnv("v8-gw");
+    const gw = join(E.base, "gw");
+    mkdirSync(gw, { mode: 0o700 });
+    chmodSync(gw, 0o775);
+    const asked = promptSpy(E);
+    const before = snapshot(E.src);
+    expect(await E.run([E.src, "proj", "--path", join(gw, "proj")])).toBe(78);
+    const err = E.err.join("\n");
+    expect(err).toContain("挂载点祖先目录检查失败：");
+    expect(err).toContain(`${gw} 对组/其他可写且无 sticky 位`);
+    expect(asked).toEqual([]);
+    expect(E.calls).toEqual(["layoutPreflight"]); // never register / createLayout / initCipher / unlock
+    expect(existsSync(join(gw, "proj"))).toBe(false);
+    expectNoSideEffects(E, before);
+  });
+
+  it("the check runs on the real helper functions: a compliant --path passes it and reaches the prompt", async () => {
+    const E = makeEnv("v8-ok");
+    const ok = join(E.base, "ok");
+    mkdirSync(ok, { mode: 0o700 });
+    E.ports.prompt = async (q: string) => (q.includes("继续") ? "yes" : "no"); // cancel at the name confirmation
+    expect(await E.run([E.src, "proj", "--path", join(ok, "proj")])).toBe(1);
+    expect(E.out.join("\n")).toContain("已取消，未做任何修改");
+    expect(E.calls).toEqual(["layoutPreflight"]);
+  });
+
+  it("missing non-default parent and overlapping vault position ⇒ 78 at step 0 (same texts as createLayout)", async () => {
+    const E = makeEnv("v8-pos");
+    const asked = promptSpy(E);
+    const before = snapshot(E.src);
+    expect(await E.run([E.src, "proj", "--path", join(E.base, "nope", "proj")])).toBe(78);
+    expect(E.err.join("\n")).toContain(`挂载点父目录 ${join(E.base, "nope")} 不存在`);
+    mkdirSync(join(E.base, "other"), { mode: 0o700 });
+    E.reg.set("other", { dir: join(E.base, "other", "d"), mnt: join(E.base, "other", "m") });
+    expect(await E.run([E.src, "proj", "--path", join(E.base, "other", "m", "x")])).toBe(78);
+    expect(E.err.join("\n")).toContain("位置检查失败：");
+    expect(E.err.join("\n")).toContain("与保险库 other");
+    E.reg.delete("other");
+    expect(asked).toEqual([]);
+    expectNoSideEffects(E, before);
+  });
+
+  it("whatever the port reports is fatal (78) and printed line by line", async () => {
+    const E = makeEnv("v8-port");
+    E.world.layoutProblem = {
+      title: "挂载点祖先目录检查失败：",
+      lines: ["/x 对组/其他可写且无 sticky 位，其他用户可替换其下的路径，拒绝"],
+    };
+    const asked = promptSpy(E);
+    const before = snapshot(E.src);
+    expect(await E.run([E.src])).toBe(78);
+    expect(E.err).toContain("  - /x 对组/其他可写且无 sticky 位，其他用户可替换其下的路径，拒绝");
+    expect(asked).toEqual([]);
+    expectNoSideEffects(E, before);
+  });
+});
+
+describe("V8: layoutPreflightProblems (pure mirror of createLayout's rules)", () => {
+  it("missing default ~/secure ⇒ the chain ABOVE it is judged; group-writable $HOME ⇒ refused", () => {
+    const E = makeEnv("v8-pure");
+    const v = E.vault("proj");
+    expect(existsSync(join(E.home, "secure"))).toBe(false);
+    expect(H.layoutPreflightProblems(v, { home: E.home })).toBeNull();
+    chmodSync(E.home, 0o775);
+    try {
+      const r = H.layoutPreflightProblems(v, { home: E.home });
+      expect(r?.title).toBe("挂载点祖先目录检查失败：");
+      expect(r?.lines[0]).toContain(`${E.home} 对组/其他可写且无 sticky 位`);
+    } finally {
+      chmodSync(E.home, 0o700);
+    }
+    expect(existsSync(join(E.home, "secure"))).toBe(false); // side-effect free
+  });
+
+  it("agrees with mntAncestorProblems on an existing parent (same function, injected lstat)", () => {
+    const E = makeEnv("v8-pure2");
+    const v = H.deriveVault("p", join(E.base, "d"), join(E.base, "m"));
+    const fake = (p: string) => {
+      const st = lstatSync(p);
+      return p === E.base ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { mode: st.mode | 0o002 }) : st;
+    };
+    const r = H.layoutPreflightProblems(v, { home: E.home, lstat: fake });
+    expect(r?.lines).toEqual(H.mntAncestorProblems(v, process.getuid(), { lstat: fake }));
+    expect(r?.lines[0]).toContain("对组/其他可写");
   });
 });
 

@@ -32,10 +32,10 @@ import {
   defaultVaultMnt,
   deriveVault,
   homeDir,
+  layoutPreflightProblems,
   loadSecureConfig,
   mntAncestorProblems,
   physicalPaths,
-  positionProblems,
   probeMountState,
   readJsonFile,
   resolveVault,
@@ -1419,6 +1419,21 @@ export async function cmdImport(opts, portsIn) {
     if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
       throw fail(AX.USAGE, `保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
     if (opts.verifyPassword && !ports.isTTY()) throw fail(AX.USAGE, "--verify-password 需要在终端（TTY）中运行");
+    {
+      // V8: createLayout's position + mount-point ancestor rules, judged before ANYTHING is written
+      // (txn lock file, claim, staging) or any password is asked — including a missing default
+      // ~/secure (the chain above it is judged). Read-only, so no lock is needed for an early
+      // refusal; an unreadable/invalid config is reported by the checks below. Publish re-checks.
+      const { cfg: cfg0, readError: re0 } = loadSecureConfig(home);
+      if (!re0 && cfg0.valid) {
+        const mnt0 = opts.path !== undefined ? path.resolve(cwd, opts.path) : defaultVaultMnt(name, home);
+        const lp0 = layoutPreflightProblems(deriveVault(name, defaultVaultDir(name, home), mnt0), {
+          others: cfg0.vaults,
+          home,
+        });
+        if (lp0) throw fail(AX.CONFIG, lp0.lines.length ? `${lp0.title}\n  - ${lp0.lines.join("\n  - ")}` : lp0.title);
+      }
+    }
     lock = await ports.txnLock(name, home, opts.lockWaitS !== undefined ? { waitS: opts.lockWaitS } : undefined);
     // entry first: a same-name racer registers BEFORE writing its state file, so the loser sees 78
     // (§3.5); a state file without an entry is a crashed rollback ⇒ 76 (--abort finishes it)
@@ -1437,15 +1452,8 @@ export async function cmdImport(opts, portsIn) {
     if (lstatOrNull(dir)) throw fail(AX.CONFIG, `${dir} 已存在——不接管已有目录`);
     if (lstatOrNull(mnt))
       throw fail(AX.CONFIG, `挂载点 ${mnt} 已存在——不接管已有目录；确认无用后删除，或用 --path 换位置`);
-    const pos = positionProblems(v, cfg.vaults, home);
-    if (pos.length) throw fail(AX.CONFIG, `位置检查失败：\n  - ${pos.join("\n  - ")}`);
-    const mntParent = lstatOrNull(path.dirname(mnt));
-    if (!mntParent && mnt !== defaultVaultMnt(name, home))
-      throw fail(AX.CONFIG, `挂载点父目录 ${path.dirname(mnt)} 不存在（仅缺省 ~/secure 会自动创建）`);
-    if (mntParent) {
-      const pp = mntAncestorProblems(v, process.getuid());
-      if (pp.length) throw fail(AX.CONFIG, `挂载点祖先目录检查失败：\n  - ${pp.join("\n  - ")}`);
-    }
+    const lp = layoutPreflightProblems(v, { others: cfg.vaults, home }); // V8 (re-judged under the lock)
+    if (lp) throw fail(AX.CONFIG, lp.lines.length ? `${lp.title}\n  - ${lp.lines.join("\n  - ")}` : lp.title);
     const pkg = path.resolve(cwd, opts.file);
     const pst = lstatOrNull(pkg);
     if (!pst) throw fail(AX.NOT_FOUND, `文件 ${pkg} 不存在`);

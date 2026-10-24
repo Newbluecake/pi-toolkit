@@ -63,10 +63,9 @@ toolkit 提供一键**创建、解锁、卸载** gocryptfs 加密目录的命令
    - 大量小文件（如 `node_modules`）读写会明显变慢。
    - 硬链接只能在保险库内部建；指向保险库外的符号链接，其目标仍是明文。
    - 磁盘上的文件名和内容都加密，但文件个数、大小和目录层级可见。
-7. **迁移已有项目**：
-   - ① `pi-secure init acme`。
-   - ② `pi-secure unlock acme`。
-   - ③ `rsync -a ~/ai/acme/ ~/secure/acme/work/`（含 `.git`；挂载后 work 是项目根）。
+7. **迁移已有项目**：推荐用 `pi-secure convert ~/ai/acme acme`（§2.9.1）。它一次完成建库、拷入（含 `.git`）、逐文件读回校验、会话与 memory 复制、项目 sessionDir，并把原路径换成指向 `~/secure/acme/work` 的符号链接，所以 IDE 和脚本里的旧绝对路径在解锁期间照样能用。原目录**不删除**：它被改名为同级的只读备份 `<原名>.pi-secure-backup-<时间>-<4位>`，`pi-secure status` 会持续列出，确认保险库内容无误后由你自己删除（输出里给出 `chmod -R u+w … && rm -rf …` 命令；SSD/CoW 上删除不等于擦除，R17/R26）。旧会话与旧 memory 同样保留，由你自行删除。跨机器或跨布局（旧布局 demo 库）的迁移用 `export` + `import`（§2.9.2–§2.9.4）。
+   convert 拒绝的情形（ACL/xattr、setgid 目录、他组文件、linked worktree、树内挂载等，§2.9.1）可以退回手工方式：
+   - ① `pi-secure init acme`；② `pi-secure unlock acme`；③ `rsync -a ~/ai/acme/ ~/secure/acme/work/`（含 `.git`；挂载后 work 是项目根）。
    - ④ `pi-secure run acme --version`（不带 `--` 分隔；`--` 之后的内容按 pi parseArgs 会被当成消息）：每次 `unlock`/`run` 都会幂等补写 `.pi/settings.json` 的 `sessionDir`；项目自带的 `.pi/settings.json` 只合并这一个键，键值不同时会提示。
    - ⑤ 在保险库内执行 `git status` 和 `git rev-parse --git-common-dir`，确认位于 `~/secure/acme/work` 内。
    - ⑥ 旧会话（`~/.pi/agent/sessions/--home-…-ai-acme--/`）按需用 `pi-secure run acme --fork <旧会话文件>` 导入，然后删掉旧目录。
@@ -136,6 +135,8 @@ toolkit 提供一键**创建、解锁、卸载** gocryptfs 加密目录的命令
 | `pi-secure lock <name> [--lazy]`                | 执行 §2.5 的「有界收尾」（统一 10 秒预算）：`cd /` → 占用扫描 → 加锁卸载（`--lazy` 时加 `-z`）。若 EBUSY、超时或预算耗尽，打印占用者和建议后返回，不会卡住                                                                                                                                                                                                                                                                                                   |
 | `pi-secure status [<name>]`                     | 挂载状态、布局完整性、gocryptfs 版本、cwd 在挂载内的进程、swap/core 警告、traffic-record 适配情况（D5）                                                                                                                                                                                                                                                                                                                                                      |
 | `pi-secure run <name> [-C <子目录>] [pi 参数…]` | `unlock` → `cd <work>/<子目录>` → 参数审查（§2.2.1）→ `ulimit -c 0; umask 077` → 设置环境变量 `PI_SECURE_VAULT=<name>`、`PI_SECURE_SESSION=1` → **以子进程方式**运行 `pi --session-dir <state>/sessions/default "$@"` → pi 退出后执行 §2.5 的有界收尾 → 以 pi 的退出码退出                                                                                                                                                                                   |
+
+转换与迁移命令 `convert` / `export` / `import`（含 `--resume` / `--abort`）与 `init --fix-settings` 迁址见 §2.9。
 
 插件内只有一个只读命令 `/secure status`（web 允许）。另有状态栏标记 `secure` / `secure:locked`（英文 token，遵守 UI 约定）。
 
@@ -328,7 +329,7 @@ shell ─ pi-secure(bash)
 
 #### 2.8.7 退出码
 
-私有模式下的退出码（统一表，与 [convert-plan](./convert-plan.md) §6 相同；65/74 为 convert 方案预留，export/import 未实现）：
+私有模式下的退出码（统一表，与 [convert-plan](./convert-plan.md) §6 相同；65/74 只由转换与迁移命令产生，见 §2.9.8）：
 
 | 码      | 私有模式下的含义                                                                                                                                                                                                                                                   |
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -348,6 +349,151 @@ shell ─ pi-secure(bash)
 
 崩溃自愈（要点；全表见 private-plan §3.9）：P0 被杀 ⇒ P1 照常收尾，记录留待清理（stale）；P1 被杀 ⇒ gocryptfs 与 pi 继续持租约，P0 等 pi 退出后外部收尾；P0+P1 被杀且 pi 不怕 SIGHUP ⇒ `orphan-ns`，`lock --kill` 收尾；前台进程组被 SIGKILL ⇒ gocryptfs 已 setsid 存活 ⇒ `orphan`，`lock` 清理；全部被杀 ⇒ ns 销毁、租约释放、记录 stale；机器重启 ⇒ bootId 不符 ⇒ stale。正常退出路径不经过任何 75 分支（P0 的释放耗时 <1 s）。
 
+### 2.9 转换与迁移（convert / export / import；V0–V8 已落地 2026-10-24）
+
+设计、评审处置与测试矩阵见 [convert-plan](./convert-plan.md)（r3/r3.1）；各包实现记录见 `V0`–`V8-report.md`。本节是用户口径的摘要。
+
+共同原则：
+
+- **不删除任何源数据**。convert 把原目录改名为**只读备份**，回滚时只把备份改回原名、恢复权限，并把本次新建的库搁置为 `.aborted-<txid>`，从不删除新库。备份、旧会话、旧 memory 都由用户核对后自行删除（R26）。import 的数据源是包文件，从不修改。
+- **只读预检先行**。凡能提前判断的拒绝，都在确认提示、名字认领、口令输入之前报错，零改动。这些拒绝包括：路径与内容规则、git、占用、空间，以及挂载点位置与祖先链（V8 起由第 0 步执行，与 init 用同一套 `positionProblems` / `mntAncestorProblems`，规则不放宽，第 2 步与 import 发布时的检查保留作纵深防御）。被拒时最多留下空的锁文件（`.convert.lock`、`.txn/import-<名字>.lock`）。
+- **事务标记**。登记项带 `pending:"convert:<txid>"` / `"import:<txid>"`（转换或导入进行中、中断）或 `relocate`（迁址待完成）时，`run` / `unlock` / `export` 一律被拒（pending ⇒ 76，relocate ⇒ 78），插件按 locked 判定。`lock` 例外：确有挂载时允许卸载。
+- **只创建新布局**。旧布局库（§2.1 legacy）只能 `export`，再 `import` 成新布局；`run` / `unlock` / `init --fix-settings` 对旧布局一律拒绝（78）。
+
+#### 2.9.1 `convert`：把明文目录转成保险库
+
+```
+pi-secure convert <明文目录> [<名字>] [--path <挂载点>] [--no-sessions] [--sessions-from <目录>]… [--private] [--assume-unreadable-idle]
+pi-secure convert --resume <名字> [--assume-unreadable-idle]
+pi-secure convert --abort  <名字> [--assume-unreadable-idle]
+```
+
+- 必须有 TTY：要键入保险库名确认，要输三次口令（`init` 两次 + 挂载一次），master key 由 gocryptfs 打印一次。确认与口令都在原目录改名之前完成，之后没有交互；不提供跳过确认的参数。
+- `<名字>` 缺省取目录名（小写化，非法字符换 `-`，截到 32 位）。`--path` 指定挂载点，缺省 `~/secure/<名字>`。`--private` 完成后登记为私有库（转换过程本身走普通挂载）。`--no-sessions` 跳过会话复制，`--sessions-from` 追加会话来源。
+- **前置工具**：gocryptfs、fusermount3、flock、`getfattr`（attr 包）、支持 `-n -T` 的 coreutils `mv`、`sync -f`；树内有 `.git` 时还需要 git。缺任何一项 ⇒ 69。
+- **收窄规则（全部拒绝，65）**：
+  - 路径：源是符号链接；源不在 `$HOME` 之下，或落在 `$HOME/.*`、系统目录、某个保险库内，或包含 pi agent 目录。
+  - 挂载点：树根或树内有挂载点。
+  - 父目录：组/其他可写，或所在文件系统类型不在 ext4/xfs/btrfs/f2fs/tmpfs 之列。
+  - 属主与特殊位：他人 uid 或非主组 gid、FIFO/socket/设备、setuid/setgid/sticky。
+  - xattr、ACL、capability：发现任何一项即拒绝。
+  - 链接：树外硬链接、逃出根的相对符号链接（指向树外的绝对链接只警告）。
+  - git：linked worktree、树外的 gitdir/alternates/commondir/`core.worktree`。
+
+  早检在原目录上做，**权威检查在冻结后的备份上做**。
+
+- **占用**：同 uid 进程的 cwd、exe、fd 或映射落在树内 ⇒ 76。同 uid 但 `/proc` 读不到的进程（如 `sd-pam`、本用户的 `sshd`）会被列出：交互时必须答精确的 `y` / `yes` 才继续；非交互时必须显式带 `--assume-unreadable-idle`（只确认本次运行第一组）。否则 75。确认按 pid+starttime 绑定；之后每次再扫出现新进程都要重新确认。
+- **流程**（convert-plan §1.4）：0. 早检，打印计划，键入名字确认；
+  1. 写状态文件；
+  2. 认领名字（`pending`）→ 建布局 → `gocryptfs -init` → 挂载；
+  3. 原目录以 `mv -n -T`（`RENAME_NOREPLACE`）改名为 `<父目录>/<原名>.pi-secure-backup-<YYYYmmdd-HHMMSS>-<4位>`；
+  4. 备份整树 `chmod a-w`；
+  5. 冻结后再扫占用；
+  6. 在备份上做权威检查，取基线；
+  7. 从备份拷入 `<work>`；
+  8. 经挂载读回逐项比对，`git fsck`；
+  9. 写项目 sessionDir；
+  10. 复制会话与 memory（源只读）；
+  11. 持久化屏障（对密文文件系统做 `sync -f`）；
+  12. 复核备份基线；
+  13. 原路径建符号链接 → `~/secure/<名字>/work`；
+  14. 清除 `pending`，写入 `origin` / `backup`（**唯一提交点**）；
+  15. 收尾卸载，打印备份删除命令与残留提示。
+
+  第 12 步之后如果暂停超过 5 秒（Ctrl+Z、休眠、调试器），第 13、14 步之前都会完整重新复核备份；不一致 ⇒ 回滚 74（`--resume` 中 ⇒ 76）。
+
+- **完成之后**：原路径是符号链接。锁定时 `cd` 报 ENOTDIR；解锁后 `cd <原路径> && pi` 即是加密会话。已在运行的 pi 进程要重启才认得新的 `origin`。备份删除命令是 `chmod -R u+w -- '<备份>' && rm -rf -- '<备份>'`，SSD/CoW 上删除不等于擦除。
+
+#### 2.9.2 `export`：导出密文包
+
+`pi-secure export <名字> <文件.tar>`：
+
+- 新、旧布局都可以导出。库必须未挂载、租约空闲、没有运行中的私有实例（否则 76）。登记带 `pending` ⇒ 76，带 `relocate` ⇒ 78。
+- 全程持有 `mount.lock`：导出期间 `unlock` / `run` / `lock` 等 10 s 后得到 73。
+- 包格式 `pi-secure-vault/2`：最小 ustar + pax（只承载 path/size/mtime）+ `MANIFEST.json`，链接只记在 MANIFEST 里。包只含密文与 `gocryptfs.conf`，不含哨兵、锁、租约。
+- 先写 `<文件>.partial-<txid>`（0600），用 `link()` 发布：目标已存在 ⇒ 78，从不覆盖。
+- 拿到包的人可以离线暴力破解口令（W8）；MANIFEST 带 `origRealWork`（R27）。
+
+#### 2.9.3 `import`：导入为新库
+
+`pi-secure import <文件.tar> <名字> [--path <挂载点>] [--verify-password]`，另有 `--resume <名字>` / `--abort <名字>`：
+
+- 只针对新名字。挂载点位置与祖先链在认领之前检查（V8：包括缺省 `~/secure` 尚不存在的情况，此时检查它将挂在其下的那条祖先链）。
+- **校验型读取**进暂存目录 `.<名字>.import-<txid>`。路径白名单、预算、头校验、MANIFEST 冲突表、`gocryptfs.conf` 严格模式都在这一步；链接只在暂存根内重建。任何异常 ⇒ 65，零残留，撤销登记。
+- **发布**：把暂存内容移入自建的 `<dir>`，独占创建 `<mnt>` 并写哨兵，做布局校验与 `sync -f`；随后清除 `pending`，这是导入的提交点。
+- 挂载点地址与包里的 `origRealWork` 不同 ⇒ 登记 `relocate`，迁址待完成（§2.9.4）。
+- `--verify-password`（需要 TTY）：提交后立即走受控迁址并验证口令。连错 3 次 ⇒ 77，导入结果保留，提示 `init <名字> --fix-settings`。迁址的其他失败 ⇒ exit 1（导入已提交）。
+- 提交前失败 ⇒ 只撤销本 txid 的暂存、目录与登记，74（内容不合格 ⇒ 65）。
+
+#### 2.9.4 迁址：`init <名字> --fix-settings`
+
+- 登记带 `relocate:{from, to, txid, phase}` 时，`init <名字> --fix-settings` 和 `import --verify-password` 是仅有的两个入口。步骤：
+  1. 裸挂载（不做 postMount）；
+  2. 改写 `state/sessions/default/*.jsonl` 的会话头 cwd、`parentSession` 与 `subagent:run` 的 `diag.sessionFile`；
+  3. memory 目录从 `toSlug(from)` 改名为 `toSlug(to)`，目标已存在则不合并、只报告；
+  4. 改写 `work/.pi/settings.json` 的 sessionDir；
+  5. `sync -f` 后在 settings 锁内清除 `relocate`，然后卸载。
+
+  每步更新 `phase`，崩溃后再次执行即从实际状态继续。
+
+- 私有库在 setup 模式（私有命名空间）内完成，要求库未挂载、没有运行中的实例（否则 76）。
+- 没有 `relocate` 时，`--fix-settings` 照旧只幂等补写项目 sessionDir。
+
+#### 2.9.5 `status` 显示项（`pi-secure status [<名字>]`；有对应键或文件时才出现，否则输出与原来逐字节相同）
+
+| 行                                                                                                      | 含义与处置                                                                                             |
+| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `  pending: convert:<txid> · …` / `  pending: import:<txid> · …`                                        | 转换或导入未完成：`pi-secure convert\|import --resume\|--abort <名字>`；期间 run/unlock/export 被拒    |
+| `  relocate: pending (<phase>) · <from> → <to> · pi-secure init <名字> --fix-settings`                  | 迁址待完成（§2.9.4）                                                                                   |
+| `  origin: <原路径>`                                                                                    | convert 完成后原路径符号链接的位置（插件 D4 拼写表据此加入原路径写法）                                 |
+| `  backup: <备份> (still present) · 确认保险库内容无误后自行删除：chmod -R u+w -- '…' && rm -rf -- '…'` | convert 留下的只读备份**仍存在**；删除后这一行消失                                                     |
+| `  ! 保险库 <名字> 的事务键损坏（…），按锁定处理…`                                                      | 登记项里 `pending`/`relocate`/`origin`/`backup` 形状非法：保险库保留但按 locked 处理，人工核对设置文件 |
+| `convert <名字>: interrupted (<phase>) · --resume\|--abort`                                             | `.txn/convert-<名字>.json` 存在（§2.9.6）                                                              |
+| `import <名字>: interrupted (<phase>) · --resume\|--abort`（或只 `· --abort`）                          | `.txn/import-<名字>.json` 存在；`state file unreadable (…)` ⇒ 人工检查该文件                           |
+| `aborted: <路径> · 回滚留下的副本（…），核对后可自行删除`                                               | convert 回滚搁置的新库（§2.9.7）                                                                       |
+| `  ! 保险库 <名字> 使用旧布局…`                                                                         | 旧布局只能 status/lock/export；迁移：`export` 后 `import` 为新名字                                     |
+| `warn: 测试用环境变量已设置：…`                                                                         | 环境里有 `PI_SECURE_TEST_*`（含门控本身）：真实使用前 unset（§5 转换相关说明 3）                       |
+
+会话内的 `/secure status` 对 pending / relocate / origin / backup 显示同样的库行。
+
+#### 2.9.6 中断恢复：`--resume` / `--abort`
+
+恢复判定只看**实际状态**：逐项 lstat 原路径、备份、库目录、挂载点，比对 dev+ino。阶段名只决定允许哪种动作。
+
+| 命令                      | 允许条件                                                                                | 动作                                                                                                                                                                                                                 | 结果                                                                               |
+| ------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `convert --resume <名字>` | `phase ∈ {synced, linked}`，且 `pending` 属于本 txid（或 linked 且已提交）              | 复核备份基线（含 >5 s 暂停后重验）→ 原路径建链接（被占用 ⇒ 76，不覆盖）→ 提交 → 清理状态文件                                                                                                                         | 0；`claimed`/`renaming`/`backed-up` 或基线不符 ⇒ 76，提示 `--abort`                |
+| `convert --abort <名字>`  | 登记仍带本 txid 的 `pending`（提交后一律拒绝 ⇒ 76「转换已完成，不能撤销；备份仍在 …」） | 删除我们建的链接 → 按 `.modes` 恢复备份权限 → `mv -n -T` 改回原名（原路径被占用 ⇒ 备份原样保留并报告）→ 新库在确认卸载、身份一致、无占用时改名为 `.aborted-<txid>`（本次建的空挂载点可直接 rmdir）→ 撤销本 txid 登记 | 全部完成 ⇒ 「已回滚」exit 1；任何一步未完成 ⇒ 74，保留状态并列出剩余项，可重复执行 |
+| `import --resume <名字>`  | 已发布、登记仍带本 txid 的 `pending`                                                    | 重新执行登记（含 relocate），完成提交                                                                                                                                                                                | 0；其他阶段 ⇒ 1，提示 `--abort`                                                    |
+| `import --abort <名字>`   | 未提交                                                                                  | 按身份删除本 txid 的暂存目录、`<dir>`（须未挂载）、`<mnt>`（只含两个哨兵），然后撤销登记                                                                                                                             | 0；已提交 ⇒ 1（「导入结果保留，未删除任何东西」）；有剩余 ⇒ 74                     |
+
+convert 第 14 步之前的 SIGINT/SIGTERM/SIGHUP ⇒ 执行对应回滚，退出 130/143，文案说明实际结果；回滚未完成时提示 `--abort`。监督者被 `kill -9` 时状态文件保留，`status` 显示中断，用 `--abort` 收尾（`synced` 之后也可以用 `--resume`）。
+
+#### 2.9.7 留下的目录：`.aborted-<txid>` 与 `.init-failed-*`
+
+| 名字                                                                       | 来源                                                                                                                                                                  | 内容                                                                            | 清理                                                                                                                                                                                                       |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<dir>.aborted-<txid>`、`<mnt>.aborted-<txid>`（与原位置同级）             | convert 回滚 / `--abort` 从不删除新库，以 `RENAME_NOREPLACE` 搁置                                                                                                     | 本次拷入的密文（明文内容与备份相同）与元数据；挂载点副本通常已被 rmdir          | `status` 的 `aborted:` 行会列出（查找范围：缺省父目录与已登记库的父目录；自定义 `--path` 且登记已撤销时只在 `--abort` 输出中出现）。确认源目录已复原后 `rm -rf -- '<路径>'`（遇只读目录先 `chmod -R u+w`） |
+| `<dir>.init-failed-<YYYYMMDD-HHMMSS>-<4位十六进制>`、`<mnt>.init-failed-…` | `init`（以及同名并发的 init / convert / import）在建骨架后**输掉了名字认领**：本次建的骨架整体改名搁置，不做任何 unlink/rmdir；身份变化或目标名被占用时原样保留并报告 | 只有本次新建的骨架（空 cipher 或刚 `-init` 的配置、哨兵、锁文件），没有用户数据 | init 的输出会打印路径；`status` 不列出。确认不是自己要的库后 `rm -rf -- '<路径>'`                                                                                                                          |
+
+备份（`<原名>.pi-secure-backup-<ts>-<4位>`）不在此列：它是用户原数据的只读副本，工具从不修改、从不删除，只在 `status` 里持续提醒。
+
+#### 2.9.8 退出码（转换与迁移命令）
+
+统一表见 [convert-plan](./convert-plan.md) §6；下表只列这三个命令及迁址实际会用到的含义。0 = 成功（含 `import --abort` 完成）；1 = 取消 / `convert --abort` 已回滚 / import 已提交但迁址未完成 / `import --resume` 拒绝 / 对已提交的导入 `--abort`；2 = 用法错误或需要 TTY；65 = 源目录或包内容不合格。
+
+| 码  | 含义                                                                                                                                                                                                                                      |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 64  | 不由这三个命令产生（`run` 的 pi 参数被拒、私有库不带 `--global` 的 `unlock`）                                                                                                                                                             |
+| 66  | 源目录 / 包文件 / 保险库不存在；`--resume` / `--abort` 找不到状态文件                                                                                                                                                                     |
+| 69  | 前置缺失：gocryptfs、fusermount3、flock；convert 另需 `getfattr`（attr 包）、git（树内有 `.git` 时）、`mv -n -T`、`sync -f`                                                                                                               |
+| 73  | 锁忙：转换锁 `.convert.lock`、settings 锁、import 事务锁、`mount.lock`。导出全程持有 `mount.lock`，此时 `unlock` / `run` / `lock` 等 10 s 后得到 73，文案仍是「另一个 pi-secure 正在挂载或卸载」（§5 转换相关说明 1）                     |
+| 74  | 拷贝、校验、IO、持久化屏障失败或空间不足，已回滚；第 13/14 步前的复核发现备份被改（>5 s 暂停后），已回滚；回滚**未完成**（附剩余项，状态保留）；convert 提交失败（保留状态，`--resume` 完成）；改名结局未知                               |
+| 75  | 有界性：占用扫描超时、过多或失败；无法检查的同 uid 进程未获确认；worker 60 s 无进展；遗留 worker 进程组无法证明已结束                                                                                                                     |
+| 76  | 占用或状态冲突：源或备份被占用；原路径在窗口内被重新占用；`convert --resume` 的阶段、基线、身份不符；对已提交的转换 `--abort`；export 时库已挂载、租约忙或私有实例运行中；登记带 `pending` 时的 run/unlock/export；已有未完成的转换或导入 |
+| 77  | 口令连错 3 次：convert 挂载新库时（回滚）；`import --verify-password`（导入保留，迁址待完成）；`init --fix-settings`                                                                                                                      |
+| 78  | 配置错误：名字已登记；目录或挂载点已存在；**挂载点位置或祖先链不合规**（V8 起在第 0 步）；状态文件不合法或与登记不符；`relocate` 未完成时的 run/unlock/export；旧布局；导出目标文件已存在；设置文件损坏                                   |
+
 ---
 
 ## 3. 失败模式
@@ -357,7 +503,7 @@ shell ─ pi-secure(bash)
 | gocryptfs 未安装、版本低于 1.8、非 Linux、缺少 fusermount3 或 flock | `pi-secure` 报错，给出安装提示；插件把配置中的 vault 一律当作未挂载（cwd 命中即 LOCKED） |
 | 哨兵校验失败、mountinfo 不符、布局不完整                            | 拒绝挂载，列出问题                                                                       |
 | 口令连错 3 次                                                       | 退出码 77                                                                                |
-| `mount.lock` 等待超时（10s 或 5s）                                  | 报「另一个 pi-secure 正在挂载或卸载」，退出                                              |
+| `mount.lock` 等待超时（10s 或 5s）                                  | 报「另一个 pi-secure 正在挂载或卸载」，退出（导出期间同样如此，§5 转换相关说明 1）       |
 | 守护进程崩溃（ENOTCONN）                                            | `status` 报 `stale`；`unlock` 时先 `fusermount3 -u` 再重新挂载                           |
 | `run` 被 SIGKILL                                                    | 不卸载，挂载会残留，`status` 能看到                                                      |
 | 设置中 `secure` 段非法                                              | 该 vault 判为 `invalid`；cwd 命中时 LOCKED                                               |
@@ -408,12 +554,24 @@ shell ─ pi-secure(bash)
 | R23 | 私有实例孤儿窗口 / ns id 复用 / 额外 ns 引用                         | 监督者全部丢失时明文持续存在于 ns 直到 `lock`；有进程持有该 ns 的 fd 或 nsfs bind mount 时 ns 不随成员退出销毁（挂载不拆）；ns id 被内核复用给无关 ns 时判定偏向「仍有成员」——fail-closed 的误报（`status` 显示 ns-in-use/unverified 与 pid）                                                                                                                                                                                                                           | `pi-secure status` / `lock <name>`；额外引用用 `/sys/fs/fuse/connections` 排查；ns id 复用由 bootId+starttime+双 ns id 规避                                                                      |
 | R24 | 被困守护（ns 内首次启动的常驻进程）                                  | ns 内启动的 tmux server、gpg-agent、ssh ControlMaster、语言服务器、dev server 等在收尾时被终止（从外部 attach 到 ns 内 tmux 的会话也随之结束；外部启动的 tmux server 不受影响，收尾文案区分）；stderr 列出被终止的进程                                                                                                                                                                                                                                                  | 不在私有会话里启动常驻服务                                                                                                                                                                       |
 | R25 | 旧 hub 的版本替换循环                                                | 旧 hub 不认 `agent.nospawn.v1` 时仍可能反复替换 ns 内 agent 的版本观察（新 agent / 新 hub 都已处理；仅「新 agent + 旧 hub」组合存在）                                                                                                                                                                                                                                                                                                                                   | 在普通会话里 `/webhub restart` 升级 hub（hub 侧改动需重启 hub 进程）                                                                                                                             |
+| R26 | 转换后的旧明文：备份、旧会话、旧 memory（细化 R17）                  | convert 从不删除源数据：原目录作为只读备份留在同级，旧会话与旧 memory 原样保留并在输出里逐条列出；删除由用户执行，SSD/CoW 上删除不等于擦除                                                                                                                                                                                                                                                                                                                              | 解锁核对保险库内容后删除备份（`status` 的 `backup:` 行给出命令）与列出的旧会话、旧 memory；高敏感数据应从一开始就放进 vault                                                                      |
+| R27 | 导出包的元数据                                                       | 包里除密文外还有 MANIFEST 的 `origRealWork`（导出端的绝对路径）以及密文结构（文件个数、大小、层级、mtime）；拿到包的人可以离线暴力破解口令（W8）                                                                                                                                                                                                                                                                                                                        | 包按密文目录同等敏感对待（0600、妥善保管、用完删除）；使用强口令                                                                                                                                 |
+| R28 | 会话复制的边界                                                       | 会话正文里出现的旧路径不改写；未发现的历史会话目录、其他项目里 `parentSession` 指向本项目的会话（反向链接）不处理；consult fork 缓存、web-hub `spawn/fork-src` 快照只列出、不复制                                                                                                                                                                                                                                                                                       | 用 `--sessions-from <目录>` 补充会话来源；按完成输出的清单手工清理旧位置                                                                                                                         |
 | R29 | `--lazy` 后的既有访问                                                | 已打开的 fd、cwd 在挂载内的进程、运行中的作业可继续访问明文直到会话结束；插件在下一次输入/工具调用时拒绝（LOCKED）；FUSE 中断后页缓存仍可被已打开文件读到                                                                                                                                                                                                                                                                                                               | `--kill` 真正结束访问                                                                                                                                                                            |
+| R30 | 转换期间 `.txn` 里的明文元数据                                       | `.txn/convert-<名字>.modes`（相对路径与原 mode），以及 `.base` / `.hashes`（相对路径、大小、mtime、内容 sha256）在库外以明文保存，完成或回滚后删除；暴露面不超出同目录下的明文备份                                                                                                                                                                                                                                                                                      | 知悉即可；中断的转换尽快 `--resume` 或 `--abort` 收尾                                                                                                                                            |
+| R32 | 跨机器导入后的绝对路径                                               | 迁址只改写会话头、子会话引用、memory slug 与项目 sessionDir；项目内写死的绝对路径、指向旧位置的符号链接、IDE 与脚本配置都不修正                                                                                                                                                                                                                                                                                                                                         | 导入后手工更新                                                                                                                                                                                   |
+| R33 | 读回校验不证明介质完好                                               | convert 的逐文件读回校验经过页缓存，证明的是加密/解密路径与内容一致，不证明数据已正确落在介质上                                                                                                                                                                                                                                                                                                                                                                         | 这正是备份不自动删除的原因：在解锁核对、必要时重新挂载（或重启）再核对之后，再删除备份                                                                                                           |
 | R34 | 私有模式 gocryptfs 消息进 syslog                                     | gocryptfs 以 `-fg -notifypid=<P1>` 运行时把输出转给 syslog（伴随一个 `logger` 子进程，随 gocryptfs 退出；收尾把它算作 gocryptfs 的一部分、不先杀）——挂载后 gocryptfs 的消息不上终端、进 syslog，与守护模式一致（N1 实测）                                                                                                                                                                                                                                               | 知悉；排查挂载问题看 `journalctl`（gocryptfs 相关日志）                                                                                                                                          |
 | R35 | fail-closed 的误报（跨 mount ns 占用扫描 / 同 uid 非 dumpable 进程） | 普通 `lock` 的 cwd 占用扫描按路径字符串比对：私有 ns 里 cwd 路径相同的进程会被误判为全局挂载的占用者（76，N4 §4-3）；会话期间新启动的同 uid 非 dumpable 进程（新登录的 ssh 会话、setuid 辅助程序）会让释放时的 ns 扫描判「不完整」⇒ 记录保留、退出 75——两者都只损失可用性，方向安全                                                                                                                                                                                     | 占用误报改用 `lock --lazy`；扫描不完整等无关进程退出后 `pi-secure lock` 清理；均不危及数据                                                                                                       |
 | R36 | 外部收尾的归属证明限制（nohup 类 pi / 被收养的后台作业）             | supervisor 死后：nohup/tmux 类不怕 SIGHUP 的 pi 存活 ⇒ `orphan-ns`，`lock --kill` 可终止有记录/ns 证明的成员并收尾（N4 e2e 钉住）；但 ppid 链已断（被 init 收养）的后台作业无法证明归属 ⇒ 只报告 `ns-in-use`/未证明 pid，`lock` 76，需人工 kill 后再 `lock`（「不可证明 ⇒ 只报告不杀」的保守取舍）                                                                                                                                                                      | nohup 类 pi：`pi-secure lock <name> --kill`；被收养作业：按 `status` 列出的 pid 人工核对后 kill，再 `lock`                                                                                       |
 
-私有模式不改变 D1/R12（Q8 拍板）——§5 其余条目对私有会话同样成立；R26–R28/R30/R32/R33 由 convert 方案预留（export/import，未实现）。
+私有模式不改变 D1/R12（Q8 拍板）——§5 其余条目对私有会话同样成立。R26–R28/R30/R32/R33 来自 convert 方案（convert-plan §9；R31 已因 `RENAME_NOREPLACE` 消除）。
+
+**转换相关说明**（不是明文残留，但影响使用与验收）：
+
+1. **73 的文案**：等待 `mount.lock` 超时（10 s）的提示仍然是「另一个 pi-secure 正在挂载或卸载（mount.lock 等待超时）」，但导出（`export`）全程同样持有 `mount.lock`，所以在导出期间 `unlock` / `run` / `lock` 得到的也是这句话。原因是启动器的 N0 off golden（`tests/fixtures/secure-launcher-off-golden.json`）冻结了这条文案；export 自己等锁时用的是「正在挂载、卸载或导出」。看到 73 时，请同时考虑是否有导出在进行（`ps` 中的 `pi-secure export` / `__archive-work`）。
+2. **超过 5 秒的暂停会触发重验**：convert 在第 12 步完成最终的备份复核后，如果到第 13 步（建链接）或第 14 步（提交）之前已过去超过 5 秒（单调时钟或墙钟任一超过，或墙钟回拨；常见于 Ctrl+Z、系统休眠、调试器、调度停顿），会先打印「距上次备份复核已超过 5 秒…重新复核备份」，再完整重跑一次占用扫描与基线比较。不一致 ⇒ 回滚 74（`--resume` 中 ⇒ 76，之后 `--abort`）。正常运行这两步之间只需毫秒，不会触发。检查与紧随其后的动作之间仍有毫秒级窗口无法消除；链接与提交本身另有 EEXIST 与比较后写入的守卫。
+3. **测试缝需要 `PI_SECURE_TEST_SEAMS=1`**：启动器内有 8 个仅供测试的环境变量 `PI_SECURE_TEST_*`（`SCAN_DELAY_MS`、`WORKER_DELAY`、`FINALIZE_STALL_MS`、`MOUNT_VERIFY_FAIL`、`ARCHIVE_ORPHAN_PIDFILE`、`ARCHIVE_STALL_MS`、`CONVERT_FAIL_AT`、`CONVERT_STOP_AT`）。它们**只在同时设置 `PI_SECURE_TEST_SEAMS=1` 时生效**；单独设置任意一个都会被忽略，每条命令在 stderr 打一行警告。两者都设时，`convert` 在取锁和提示之前先打印「!!! 测试缝已启用…」。只要环境里有任一测试变量（含门控本身），`status` 就会多一行 `warn: 测试用环境变量已设置：…`。这个门控防的是误设或继承来的变量，不是针对同 uid 进程的安全凭证（同 uid 对抗不在承诺内，R16）。真实使用前请 unset。
 
 ---
 

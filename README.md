@@ -190,33 +190,41 @@ pi-secure init acme        # 需要真实终端；会提示输入两次新口令
 - 打印后建议执行 `clear` 和 `tmux clear-history`（尽力清理终端回滚，算不上安全擦除）。
 - init 会自动完成首次挂载、创建目录、登记保险库并写好项目 sessionDir，结束时自动卸载。
 
-### 迁移已有项目到 ~/secure/acme
+### 迁移已有项目：`convert`（推荐）
 
 ```sh
-pi-secure init acme                 # ① 若还没建
-pi-secure unlock acme               # ② 输入口令挂载
-rsync -a ~/ai/acme/ ~/secure/acme/  # ③ 整个仓库都要搬进去（含 .git）
-pi-secure run acme --version        # ④ 冒烟（不带 `--` 分隔；-- 之后的内容会被当成消息）
-cd ~/secure/acme                    # ⑤ 确认 git 仓库完整：
-git status
-git rev-parse --git-common-dir      #    输出应位于 ~/secure/acme 内；库外 common-dir 会被插件警告
-# ⑥ 旧会话按需导入（务必用绝对路径）：
-pi-secure run acme --fork /home/me/.pi/agent/sessions/旧会话.jsonl
-# ⑦ 项目 memory 按 cwd 存放，新路径是空 memory；需要时把
-#    ~/.pi/agent/memory/<旧slug>/ 复制到 ~/.local/share/pi-toolkit-secure/acme/mnt/state/memory/<新slug>/
-# ⑧ 确认无误后删除原目录和旧备份（SSD / CoW 上删除不等于擦除）
-# ⑨ 更新 IDE 工作区、脚本、cron、docker compose 等处的绝对路径
+pi-secure convert ~/ai/acme acme   # 需要真实终端：键入库名确认 + 三次口令（init 两次、挂载一次）
+pi-secure status acme              # origin: ~/ai/acme · backup: ~/ai/acme.pi-secure-backup-… (still present)
 ```
+
+- 一条命令完成：建库 → 拷入（含 `.git`）→ 经挂载逐文件读回校验、`git fsck` → 复制会话与 memory（源文件不动）→ 写项目 sessionDir → 原路径换成指向 `~/secure/acme/work` 的符号链接。解锁期间旧绝对路径照样能用。
+- **原目录不删除**：它被改名为同级的只读备份 `acme.pi-secure-backup-<时间>-<4位>`。`status` 会一直提醒它存在，并给出删除命令。确认保险库内容无误后**由你自己删除**；旧会话和旧 memory 也一样（SSD / CoW 上删除不等于擦除）。
+- 前置：`getfattr`（`sudo apt install attr`）、git。家目录和挂载点的各级祖先目录不得对组或其他用户可写，否则在任何确认和口令之前就报 78。
+- 带 ACL/xattr、setgid、他组文件、linked worktree、树内挂载的目录会被拒绝（65），并逐条列出原因。中断后 `pi-secure convert --resume acme`（只完成链接）或 `--abort acme`（备份改回原名）。
+- 被拒的项目可以退回手工迁移：`pi-secure init acme` → `pi-secure unlock acme` → `rsync -a ~/ai/acme/ ~/secure/acme/work/` → `pi-secure run acme --version`（冒烟，不带 `--` 分隔）；旧会话用 `pi-secure run acme --fork <旧会话的绝对路径>` 导入；最后自行删除原目录并更新各处绝对路径。
+
+### 导出与导入（换机器 / 旧布局库迁移）
+
+```sh
+pi-secure export acme ~/acme.tar                    # 库须未挂载；包只含密文，与密文目录同样敏感
+pi-secure import ~/acme.tar acme --verify-password  # 校验后发布为新库，验证口令并完成迁址
+pi-secure init acme --fix-settings                  # 导入时没带 --verify-password：用它完成迁址
+pi-secure import --resume acme                      # 导入中断后继续；--abort 撤销
+```
+
+- 包的读取会校验路径白名单、大小预算、头校验与 MANIFEST；不合格 ⇒ 65，零残留。挂载点位置变了时，迁址（改写会话头、memory 目录、sessionDir）完成前 `run` / `unlock` / `export` 会被拒绝。
+- 旧布局库（`status` 提示 `layout legacy`）只能 `export`，再 `import` 成新名字的新布局库；确认无误后再删旧库。
+- 完整说明（流程、`status` 各显示项、退出码、中断恢复、`.aborted-<txid>` / `.init-failed-*` 的清理）见[设计文档](docs/dev/data-encryption/plan.md) §2.9「转换与迁移」；真机验收清单见 [acceptance](docs/dev/data-encryption/acceptance.md) K–M 节。
 
 ### 日常使用
 
-| 命令                           | 作用                                                                                               |
-| ------------------------------ | -------------------------------------------------------------------------------------------------- |
-| `pi-secure run acme`           | 解锁（提示口令）→ 在项目根启动 pi → pi 退出后自动尽力卸载（10 秒有界收尾；卸不掉会告警并保留挂载） |
-| `pi-secure run acme -C sub`    | 从项目的子目录 `sub` 启动（任意目录都可调用，不必先 cd）                                           |
-| `pi-secure unlock acme`        | 挂载；已挂载则直接返回。之后在项目根直接 `pi` 也可以（sessionDir 已写进项目设置）                  |
-| `pi-secure lock acme [--lazy]` | 有界卸载；`--lazy` 延迟卸载（有占用者时仍可卸）                                                    |
-| `pi-secure status [acme]`      | 挂载状态、布局完整性、swap / core 警告、traffic-record 适配                                        |
+| 命令                           | 作用                                                                                                           |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `pi-secure run acme`           | 解锁（提示口令）→ 在项目根启动 pi → pi 退出后自动尽力卸载（10 秒有界收尾；卸不掉会告警并保留挂载）             |
+| `pi-secure run acme -C sub`    | 从项目的子目录 `sub` 启动（任意目录都可调用，不必先 cd）                                                       |
+| `pi-secure unlock acme`        | 挂载；已挂载则直接返回。之后在项目根直接 `pi` 也可以（sessionDir 已写进项目设置）                              |
+| `pi-secure lock acme [--lazy]` | 有界卸载；`--lazy` 延迟卸载（有占用者时仍可卸）                                                                |
+| `pi-secure status [acme]`      | 挂载状态、布局完整性、swap / core 警告、traffic-record 适配；转换/导入未完成、迁址待完成、备份仍在时另有提示行 |
 
 会话内用 `/secure status` 查看判定、锁定原因、各保险库挂载状态与 traffic-record 适配情况。
 

@@ -778,6 +778,7 @@ const ports = {
     for (const n of ["work", "state"]) fs.writeFileSync(path.join(v.mnt, n), "", { mode: 0o400 });
     fs.writeFileSync(v.lock, "", { mode: 0o600 }); fs.writeFileSync(v.lease, "", { mode: 0o600 });
   },
+  layoutPreflight: (v, o) => H.layoutPreflightProblems(v, o),
   initCipher: async (v) => { fs.writeFileSync(path.join(v.cipher, "gocryptfs.conf"), "{}\\n", { mode: 0o400 }); return 0; },
   unlockVault: async (v) => { for (const n of ["work", "state"]) fs.rmSync(path.join(v.mnt, n), { force: true }); return { how: "mounted-now", realMnt: H.physicalPaths(v).realMnt }; },
   ensureVaultDirs: H.ensureVaultDirs, syncProjectSettings: H.syncProjectSettings,

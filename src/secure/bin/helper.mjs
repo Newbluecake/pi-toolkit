@@ -949,6 +949,35 @@ export function mntAncestorProblems(v, uid = process.getuid(), deps = {}) {
 }
 
 /**
+ * V8 (convert-plan §8; main-session ruling): the SIDE-EFFECT-FREE preflight of createLayout's
+ * position and mount-point ancestor rules, so convert/import refuse at step 0 — before any
+ * confirmation prompt, name claim or password — instead of after the claim. It calls the SAME
+ * functions (positionProblems, mntAncestorProblems) and relaxes nothing; the step-2 / publish
+ * checks stay as defense in depth. The one thing createLayout may still create is the DEFAULT
+ * parent `~/secure` (mkdir 0700 by this uid ⇒ a compliant level by construction): when it is
+ * missing, the chain it will hang under (its own ancestors) is checked instead. A missing
+ * non-default parent is refused exactly like createLayout does. Returns null (all clear) or
+ * `{title, lines}` (exit 78). `deps.lstat` is the mntAncestorProblems test seam.
+ */
+export function layoutPreflightProblems(v, { others = [], home = homeDir(), uid = process.getuid(), lstat } = {}) {
+  const pos = positionProblems(v, others, home);
+  if (pos.length) return { title: "位置检查失败：", lines: pos };
+  const parent = path.dirname(path.resolve(v.mnt));
+  let probe = v;
+  if (!lstatOrNull(parent)) {
+    if (path.resolve(v.mnt) !== path.resolve(defaultVaultMnt(v.name, home)))
+      return {
+        title: `挂载点父目录 ${parent} 不存在（仅缺省 ~/secure 会自动创建，其他位置请先自建）`,
+        lines: [],
+      };
+    probe = { ...v, mnt: parent }; // ~/secure will be created 0700 by us: judge the chain above it
+  }
+  const pp = mntAncestorProblems(probe, uid, lstat ? { lstat } : {});
+  if (pp.length) return { title: "挂载点祖先目录检查失败：", lines: pp };
+  return null;
+}
+
+/**
  * N2 review #2: inside a non-initial user namespace (uid_map is not the identity map) return the
  * overflow uid unmapped owners show as; undefined in the initial namespace (host rules unchanged).
  * Pure: facts = {uidMap, overflowUid}.
@@ -5749,6 +5778,7 @@ export function launcherPorts(home = homeDir()) {
     defaultVaultMnt,
     physicalPaths,
     createLayout,
+    layoutPreflight: (v, o) => layoutPreflightProblems(v, o),
     ensureVaultDirs,
     syncProjectSettings,
     initCipher: initCipherOf,

@@ -162,6 +162,8 @@ export function makeEnv(tag: string, opts: { failAt?: string; project?: boolean 
     mounted: false,
     busy: false,
     promptAnswer: undefined as string | undefined,
+    /** V8: forced result of the layoutPreflight port (undefined ⇒ the real helper function). */
+    layoutProblem: undefined as undefined | null | { title: string; lines: string[] },
     out: [] as string[],
     err: [] as string[],
     signals: new EventEmitter(),
@@ -224,6 +226,10 @@ export function makeEnv(tag: string, opts: { failAt?: string; project?: boolean 
       for (const n of ["work", "state"]) writeFileSync(join(v.mnt, n), "", { mode: 0o400 });
       writeFileSync(v.lock, "", { mode: 0o600 });
       writeFileSync(v.lease, "", { mode: 0o600 });
+    },
+    layoutPreflight: (v: any, o: any) => {
+      world.calls.push("layoutPreflight");
+      return world.layoutProblem !== undefined ? world.layoutProblem : H.layoutPreflightProblems(v, o);
     },
     initCipher: async (v: any) => {
       world.calls.push("initCipher");

@@ -183,6 +183,24 @@ Data scope: enabled recording includes **child-agent traffic** by default — co
 
 Migrating from the standalone pi-traffic-record plugin (step-by-step in Chinese: [README.md](README.md#从独立-pi-traffic-record-迁移)): `/record off` everywhere → upgrade pi-toolkit → remove the package from `~/.pi/agent/settings.json` → set `"traffic": { "enabled": true }` in `~/.pi/agent/pi-subagent.json` → **restart pi** (not just `/reload`). Keeping the external package installed is also safe: the toolkit yields to a proven-active external recorder (the v0.3.0 tombstone release yields back), so exactly one recorder is ever active.
 
+## Encrypted sessions (pi-secure)
+
+`pi-secure` keeps a project and all of its session records inside a gocryptfs vault (Linux, gocryptfs ≥ 1.8): plaintext while mounted, ciphertext only once unmounted, with the plugin blocking cross-domain reads/writes. It is hardening, not a no-plaintext guarantee — see the residual list in the [design doc](docs/dev/data-encryption/plan.md) §5 (Chinese). Install the launcher with `ln -s <repo>/src/secure/bin/pi-secure ~/.local/bin/pi-secure`; day-to-day commands are `init` / `unlock` / `lock` / `status` / `run`.
+
+Moving existing data in and out:
+
+```sh
+pi-secure convert ~/ai/acme acme                    # real TTY: type the vault name + three passwords
+pi-secure export acme ~/acme.tar                    # vault must be unmounted; ciphertext-only package
+pi-secure import ~/acme.tar acme --verify-password  # validated import as a NEW vault + path relocation
+pi-secure init acme --fix-settings                  # finish a relocation (import without --verify-password)
+```
+
+- `convert` copies the directory into the vault, verifies every file read back through the mount, copies sessions and memory (sources untouched) and replaces the original path with a symlink to `~/secure/<name>/work`. The original directory is **never deleted**: it becomes a read-only sibling backup `<name>.pi-secure-backup-<time>-<rand>` that `pi-secure status` keeps listing — you delete it yourself once the vault checks out. Interrupted runs: `pi-secure convert --resume|--abort <name>`.
+- Needs `getfattr` (`attr` package) and git; the home directory and every ancestor of the mount point must not be group/other-writable (refused with exit 78 before any prompt or password).
+- `import` validates the package (path allow-list, budgets, header checksums, MANIFEST) and refuses anything malformed with zero residue; legacy-layout vaults can only be `export`ed and re-`import`ed under a new name.
+- Full details — flow, `status` lines, exit codes, `--resume` / `--abort`, cleaning up `.aborted-<txid>` / `.init-failed-*` — are in [plan.md §2.9 「转换与迁移」](docs/dev/data-encryption/plan.md) (Chinese); the real-machine checklist is [acceptance.md](docs/dev/data-encryption/acceptance.md) sections K–M.
+
 ## Development
 
 ```sh

@@ -734,6 +734,93 @@ describe.skipIf(SKIP !== "")("V7 launcher e2e — convert / export / import (rea
     return r;
   }
 
+  /** A group-writable (0775) directory owned by us, under a token-marked /tmp scratch dir. */
+  function groupWritableDir(): string {
+    const gw = join(T.tmp("ps-v8gw-"), "gw");
+    mkdirSync(gw, { mode: 0o700 });
+    chmodSync(gw, 0o775);
+    return gw;
+  }
+
+  it("V8: convert with a group-writable mount-point ancestor ⇒ 78 before the name confirmation and any password; nothing changes", async () => {
+    const f = makeFixture(T, { sessions: false });
+    const gw = groupWritableDir();
+    const before = snapshot(f.proj);
+    const r = await T.tty(
+      f.e,
+      `convert proj --path ${join(gw, "proj")}`,
+      {},
+      {
+        cwd: f.h,
+        answers: confirmAnswers("proj"),
+        killAfterMs: 60_000,
+      },
+    );
+    expect(r.code, r.text).toBe(78);
+    expect(r.text).toContain("挂载点祖先目录检查失败：");
+    expect(r.text).toContain(`${gw} 对组/其他可写且无 sticky 位`);
+    expect(r.text).not.toContain("确认请输入保险库名");
+    expect(r.text).not.toContain("继续？"); // not even the uninspectable-process confirmation
+    expect(r.text).not.toMatch(/Password:/);
+    expect(snapshot(f.proj)).toEqual(before);
+    expect(backupsOf(f.h)).toEqual([]);
+    expect(vaultsOf(f.h).proj).toBeUndefined();
+    expect(existsSync(paths(f.h).dir("proj"))).toBe(false);
+    expect(existsSync(join(gw, "proj"))).toBe(false);
+    expect(existsSync(join(paths(f.h).txn, "convert-proj.json"))).toBe(false);
+    // the same location made compliant ⇒ the very same command gets past step 0 (to the confirmation)
+    chmodSync(gw, 0o755);
+    const ok = await T.tty(
+      f.e,
+      `convert proj --path ${join(gw, "proj")}`,
+      {},
+      {
+        cwd: f.h,
+        answers: [
+          [/确认请输入保险库名 proj：/, "no"],
+          [/继续？\[y\/N\]/, "y"],
+        ],
+        killAfterMs: 60_000,
+      },
+    );
+    expect(ok.code, ok.text).toBe(1);
+    expect(ok.text).toContain("已取消，未做任何修改");
+    expect(snapshot(f.proj)).toEqual(before);
+  }, 240_000);
+
+  it("V8: import with a group-writable mount-point ancestor ⇒ 78 before the claim and before any password (plain and --verify-password)", async () => {
+    const a = filledAcme();
+    const P = paths(a.h);
+    const pkg = join(a.e.r, "acme.tar");
+    expect(plain(a.e, `export acme ${pkg}`, 120_000).code).toBe(0);
+    const gw = groupWritableDir();
+    const untouched = (name: string) => {
+      expect(vaultsOf(a.h)[name]).toBeUndefined();
+      expect(existsSync(P.dir(name))).toBe(false);
+      expect(readdirSync(P.share).filter((n) => n.includes(`.${name}.import-`))).toEqual([]);
+      expect(existsSync(join(P.txn, `import-${name}.json`))).toBe(false);
+      expect(existsSync(join(gw, name))).toBe(false);
+    };
+    const im = plain(a.e, `import ${pkg} theta --path ${join(gw, "theta")}`, 60_000);
+    expect(im.code, im.text).toBe(78);
+    expect(im.text).toContain("挂载点祖先目录检查失败：");
+    expect(im.text).toContain(`${gw} 对组/其他可写且无 sticky 位`);
+    untouched("theta");
+    const vp = await T.tty(
+      a.e,
+      `import ${pkg} iota --path ${join(gw, "iota")} --verify-password`,
+      {},
+      {
+        killAfterMs: 60_000,
+      },
+    );
+    expect(vp.code, vp.text).toBe(78);
+    expect(vp.text).toContain("挂载点祖先目录检查失败：");
+    expect(vp.text).not.toMatch(/Password:/);
+    untouched("iota");
+    expect(vaultsOf(a.h).acme).toEqual({}); // the source vault is untouched
+  }, 300_000);
+
   it("§7.2-6 refusals before any change: occupied 76, $HOME/.config 65, xattr 65, setgid 65, escaping link 65, alternates 65; no TTY 2", async () => {
     const f = makeFixture(T, { sessions: false });
     // no TTY ⇒ 2, nothing touched
@@ -891,7 +978,11 @@ describe.skipIf(SKIP !== "")("V7 launcher e2e — convert / export / import (rea
     );
     const pid = await waitStopped(T);
     expect(live).toContain(`!!! 测试缝已启用：convert 将在第 ${at.split(":")[0]} 步（${at.split(":")[1]}）暂停`);
-    expect(live).toContain(`测试缝：convert 在第 ${at.split(":")[0]} 步（${at.split(":")[1]}）暂停（pid ${pid}）`);
+    // the notice is written right before the self-SIGSTOP; the pty may deliver it a moment after the
+    // stop is observable — give the reader a bounded grace instead of racing it
+    const notice = `测试缝：convert 在第 ${at.split(":")[0]} 步（${at.split(":")[1]}）暂停（pid ${pid}）`;
+    for (let t0 = Date.now(); !live.includes(notice) && Date.now() - t0 < 3_000;) await sleep(50);
+    expect(live).toContain(notice);
     if (change) {
       const victim = join(f.h, backupsOf(f.h)[0]!, "README.md");
       chmodSync(victim, 0o644);

@@ -254,6 +254,7 @@ describe("V6 unit — USAGE, refusals, ports", () => {
       "defaultVaultMnt",
       "physicalPaths",
       "createLayout",
+      "layoutPreflight",
       "initCipher",
       "unlockVault",
       "ensureVaultDirs",
@@ -871,7 +872,9 @@ describe("V6 review #2 — plain init never overwrites an unfinished transaction
     const outside = join(dirname(h), "outside");
     mkdirSync(join(outside, "acme"), { recursive: true });
     writeFileSync(join(outside, "acme", "precious"), "keep");
-    rmSync(v.dir, { recursive: true });
+    // keep the recorded <dir> inode alive (renamed, not removed): a freed inode number can be handed
+    // straight to the "foreign" directory below, which would then match the recorded identity
+    renameSync(v.dir, `${v.dir}.recorded`);
     mkdirSync(join(v.dir, "cipher"), { recursive: true });
     writeFileSync(join(v.dir, "cipher", "gocryptfs.conf"), "{}");
     writeFileSync(join(v.dir, "mount.lock"), "other");
