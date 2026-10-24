@@ -12,6 +12,9 @@ import {
   readScheduleTrigger,
   SCHED_MSG_ABORT_GRACE_MS,
   SCHED_MSG_POLL_MS,
+  SCHED_SELF_COMPACTION_ATTRIB_MS,
+  SCHED_START_COMPACTION_MAX_MS,
+  UI_END_SETTLE_MS,
   type HandoffOutcome,
   type MessageScheduler,
   type MessageSchedulerDeps,
@@ -1241,13 +1244,18 @@ describe("review r1 — uncertain 意图写入 (#7)", () => {
 });
 
 describe("review r1 — ui_prompt 对账与 fence 人工恢复 (#8 #9)", () => {
-  it("an end that overtakes its start is reconciled by the sum, not clamped (no permanent block)", async () => {
+  it("I1 review r1 #4: an end that overtakes its start is IGNORED (no credit); the late start then over-blocks until the local reset", async () => {
     const s = build();
     const task = await mkTask();
     const run = await mkRun(task);
-    s.onUiPrompt(false); // end first (async observer ordering)
-    s.onUiPrompt(true);
+    s.onUiPrompt(false); // end first (async observer ordering): nothing is open ⇒ ignored, never a credit
+    expect(s.diagnostics().uiPrompts).toBe(0);
+    s.onUiPrompt(true); // its start arrives late: counted open (the deliberate over-block direction)
     s.enqueue(run, task);
+    await drive(s, 3_000);
+    expect(host.sent).toHaveLength(0);
+    expect(s.diagnostics().uiPrompts).toBe(1);
+    s.resetBlockers(); // the exit: /schedule repair · /fabric fence reset
     await drive(s, 3_000);
     expect(host.sent).toHaveLength(1);
   });
@@ -1509,6 +1517,521 @@ describe("review r2 — once 的豁免只在任务自 claim 起未被改动时�
   });
 });
 
+describe("I1 — own pre-start compaction (C-S5): exempt from verifyDispatch, budget paused, hard-capped", () => {
+  const compactInSend = (s: MessageScheduler) => () => s.onFenceEvent({ type: "session_before_compact" });
+
+  it("a compaction that began INSIDE our own send does not void the dispatch; the run stays dispatched and is authorized after the compaction", async () => {
+    const s = build();
+    const task = await mkTask();
+    host.onSend = compactInSend(s);
+    const { run, token } = await sendOne(s, task);
+    expect(runOf(run.runKey).state).toBe("dispatched"); // NOT unknown(owner-closed)
+    expect(s.status().inflight).toBe("dispatched");
+    expect(s.diagnostics().fence.open).toEqual(["compaction"]); // the window itself stays open for every OTHER dispatch
+    s.onFenceEvent({ type: "session_compact" });
+    host.idle = false;
+    expect(s.onBeforeAgentStart(wakeEvent(token))).toBe("authorized");
+    s.onAgentStart();
+    s.onMessageStart(customStart(token));
+    s.onContext();
+    s.onMessageEnd(assistant("done"));
+    host.idle = true;
+    s.onAgentSettled({ aborted: false });
+    await s.idle();
+    expect(settledCalls).toEqual([{ runKey: run.runKey, text: "done", reason: undefined }]);
+    expect(host.sent).toHaveLength(1); // one send, never a resend
+  });
+
+  it("the 60 s start budget is paused while it compacts (65 s ⇒ still dispatched), resumes 60 s after the compaction ended", async () => {
+    const s = build();
+    const task = await mkTask();
+    host.onSend = compactInSend(s);
+    const { run, token } = await sendOne(s, task);
+    await drive(s, 65_000);
+    expect(runOf(run.runKey).state).toBe("dispatched");
+    expect(host.aborts).toBe(0);
+    s.onFenceEvent({ type: "session_compact" }); // compaction ended
+    await drive(s, SCHED_START_TIMEOUT_MS - 1_000);
+    expect(runOf(run.runKey).state).toBe("dispatched"); // 59 s after the end: still inside the resumed budget
+    await drive(s, 2_000);
+    expect(runOf(run.runKey)).toMatchObject({ state: "unknown", reason: "start-timeout" });
+    expect(host.aborts).toBe(1);
+    expect(s.onBeforeAgentStart(wakeEvent(token))).toBe("aborted"); // the late trigger is an orphan now
+  });
+
+  it("a compaction that never ends is cut at the hard cap (sentAt + SCHED_START_COMPACTION_MAX_MS), not before", async () => {
+    const s = build();
+    const task = await mkTask();
+    host.onSend = compactInSend(s);
+    const { run } = await sendOne(s, task);
+    await drive(s, SCHED_START_COMPACTION_MAX_MS - 5_000);
+    expect(runOf(run.runKey).state).toBe("dispatched");
+    expect(host.aborts).toBe(0);
+    await drive(s, 6_000);
+    expect(runOf(run.runKey)).toMatchObject({ state: "unknown", reason: "start-timeout" });
+    expect(host.aborts).toBe(1);
+  });
+
+  it("a FAILED / cancelled compaction ends the pause the same way (no resend, ordinary rules)", async () => {
+    const s = build();
+    const task = await mkTask();
+    host.onSend = compactInSend(s);
+    const { run, token } = await sendOne(s, task);
+    await drive(s, 100_000);
+    s.onFenceEvent({ type: "session_compact_failed" });
+    host.idle = false;
+    expect(s.onBeforeAgentStart(wakeEvent(token))).toBe("authorized"); // pi proceeds after a cancelled pre-start compaction
+    expect(runOf(run.runKey).state).toBe("dispatched");
+    expect(host.sent).toHaveLength(1);
+  });
+
+  it("ONLY compaction is exempt: a tree / switch window opened on the same send still closes the flight (unknown owner-closed)", async () => {
+    for (const other of ["session_before_tree", "session_before_switch"] as const) {
+      const s = build();
+      const task = await mkTask({ name: other });
+      host.onSend = () => {
+        s.onFenceEvent({ type: "session_before_compact" });
+        s.onFenceEvent({ type: other });
+      };
+      const { run } = await sendOne(s, task);
+      expect(runOf(run.runKey)).toMatchObject({ state: "unknown", reason: "owner-closed" });
+      s.shutdown();
+      host.onSend = undefined;
+    }
+  });
+
+  it("a session identity change on the send (session_start / shutdown) is never exempt", async () => {
+    const s = build();
+    const task = await mkTask();
+    host.onSend = () => {
+      s.onFenceEvent({ type: "session_before_compact" });
+      s.onFenceEvent({ type: "session_start" });
+    };
+    const { run } = await sendOne(s, task);
+    expect(runOf(run.runKey)).toMatchObject({ state: "unknown", reason: "owner-closed" });
+  });
+
+  it("a compaction that starts AFTER the send returned is foreign: no pause (the 60 s budget applies), and a window open BEFORE the send blocks the send", async () => {
+    const s = build();
+    const task = await mkTask();
+    const { run } = await sendOne(s, task); // no compaction in the send
+    await drive(s, SCHED_SELF_COMPACTION_ATTRIB_MS + 1); // the attribution window of this send is over
+    s.onFenceEvent({ type: "session_before_compact" }); // foreign, later
+    await drive(s, SCHED_START_TIMEOUT_MS);
+    expect(runOf(run.runKey)).toMatchObject({ state: "unknown", reason: "start-timeout" });
+    s.onFenceEvent({ type: "session_compact" });
+    // a window open before the dispatch point rejects it (fenced) — nothing is sent
+    const s2 = build();
+    const task2 = await mkTask({ name: "later" });
+    s2.onFenceEvent({ type: "session_before_compact" });
+    host.sent = [];
+    const run2 = await mkRun(task2);
+    s2.enqueue(run2, task2);
+    await drive(s2, 5_000);
+    expect(host.sent).toHaveLength(0);
+    expect(runOf(run2.runKey).state).toBe("queued");
+  });
+
+  it("authorization is unchanged: a forged token during our own compaction is still an orphan abort", async () => {
+    const s = build();
+    const task = await mkTask();
+    host.onSend = compactInSend(s);
+    const { run } = await sendOne(s, task);
+    expect(s.onBeforeAgentStart(wakeEvent("forged"))).toBe("aborted");
+    expect(host.aborts).toBe(1);
+    expect(runOf(run.runKey).state).toBe("dispatched");
+  });
+});
+
+describe("I1 review r1 #1 — attribution survives handlers ahead of ours (async arrival)", () => {
+  it("a session_before_compact that arrives a few microtasks AFTER sendMessage returned (a handler ahead of ours awaited) is still this send's: budget paused, run proceeds", async () => {
+    const s = build();
+    const task = await mkTask();
+    const { run, token } = await sendOne(s, task); // send returned, nothing observed yet
+    await Promise.resolve();
+    s.onFenceEvent({ type: "session_before_compact" }); // delivered late, inside the window
+    expect(s.status().inflight).toBe("dispatched");
+    await drive(s, 65_000);
+    expect(runOf(run.runKey).state).toBe("dispatched"); // paused (would be start-timeout at 60 s otherwise)
+    expect(host.aborts).toBe(0);
+    s.onFenceEvent({ type: "session_compact" });
+    host.idle = false;
+    expect(s.onBeforeAgentStart(wakeEvent(token))).toBe("authorized");
+  });
+
+  it("outside the window it is foreign (no pause); a human's run starting closes the window; only the FIRST compaction is attributed", async () => {
+    // (a) too late
+    {
+      const s = build();
+      const task = await mkTask({ name: "late" });
+      const { run } = await sendOne(s, task);
+      await drive(s, SCHED_SELF_COMPACTION_ATTRIB_MS + 1);
+      s.onFenceEvent({ type: "session_before_compact" });
+      await drive(s, SCHED_START_TIMEOUT_MS);
+      expect(runOf(run.runKey)).toMatchObject({ state: "unknown", reason: "start-timeout" });
+      s.shutdown();
+    }
+    // (b) a human's run started first
+    {
+      const s = build();
+      const task = await mkTask({ name: "human" });
+      const { run } = await sendOne(s, task);
+      s.onBeforeAgentStart(userEvent); // foreignStart
+      s.onFenceEvent({ type: "session_before_compact" });
+      await drive(s, SCHED_START_TIMEOUT_MS + 1);
+      expect(runOf(run.runKey).state).toBe("unknown");
+      s.shutdown();
+    }
+    // (c) the second compaction does not extend anything
+    {
+      const s = build();
+      const task = await mkTask({ name: "second" });
+      host.onSend = () => s.onFenceEvent({ type: "session_before_compact" });
+      const { run } = await sendOne(s, task);
+      s.onFenceEvent({ type: "session_compact" });
+      host.onSend = undefined;
+      s.onFenceEvent({ type: "session_before_compact" }); // a second one, inside the 5 s window — not attributed
+      s.onFenceEvent({ type: "session_compact" });
+      await drive(s, SCHED_START_TIMEOUT_MS + 1_000);
+      expect(runOf(run.runKey)).toMatchObject({ state: "unknown", reason: "start-timeout" });
+    }
+  });
+});
+
+describe("I1 review r1 #2 — a fence window opened during the pre-start wait stops the pending trigger", () => {
+  const selfCompact = (s: MessageScheduler) => () => s.onFenceEvent({ type: "session_before_compact" });
+
+  it.each(["session_before_switch", "session_before_fork", "session_before_tree"] as const)(
+    "%s opened while our compaction runs: after the compaction ends, before_agent_start is REFUSED (unknown owner-closed, no resend, trigger aborted)",
+    async (windowEvent) => {
+      const s = build();
+      const task = await mkTask();
+      host.onSend = selfCompact(s);
+      const { run, token } = await sendOne(s, task);
+      s.onFenceEvent({ type: windowEvent }); // user starts a switch/fork/tree during the compaction
+      s.onFenceEvent({ type: "session_compact" });
+      const aborts = host.aborts;
+      expect(s.onBeforeAgentStart(wakeEvent(token))).toBe("aborted");
+      expect(host.aborts).toBe(aborts + 1);
+      await s.idle();
+      expect(runOf(run.runKey)).toMatchObject({ state: "unknown", reason: "owner-closed" });
+      expect(host.sent).toHaveLength(1);
+      // the registry refuses any model call this orphan still makes
+      expect(s.onContext()).toBeUndefined();
+      await s.idle();
+    },
+  );
+
+  it("a FOREIGN compaction still open at before_agent_start (ours already ended) refuses too; our own running compaction alone does not", async () => {
+    const s = build();
+    const task = await mkTask();
+    host.onSend = selfCompact(s);
+    const { run, token } = await sendOne(s, task);
+    // our own compaction is still the only open window ⇒ tolerated
+    host.idle = false;
+    expect(s.onBeforeAgentStart(wakeEvent(token))).toBe("authorized");
+    s.onAgentStart();
+    expect(runOf(run.runKey).state).toBe("dispatched");
+    // (second scenario on a fresh scheduler)
+    s.shutdown();
+    host.idle = true;
+    const s2 = build();
+    host.onSend = undefined;
+    host.sent = [];
+    const task2 = await mkTask({ name: "foreign" });
+    const sent = await sendOne(s2, task2);
+    await drive(s2, SCHED_SELF_COMPACTION_ATTRIB_MS + 1);
+    s2.onFenceEvent({ type: "session_before_compact" }); // foreign (outside the window)
+    expect(s2.onBeforeAgentStart(wakeEvent(sent.token))).toBe("aborted");
+    await s2.idle();
+    expect(runOf(sent.run.runKey)).toMatchObject({ state: "unknown", reason: "owner-closed" });
+  });
+
+  it("a session identity change (session_start) during the wait refuses at before_agent_start", async () => {
+    const s = build();
+    const task = await mkTask();
+    const { run, token } = await sendOne(s, task);
+    s.onFenceEvent({ type: "session_start" });
+    expect(s.onBeforeAgentStart(wakeEvent(token))).toBe("aborted");
+    await s.idle();
+    expect(runOf(run.runKey)).toMatchObject({ state: "unknown", reason: "owner-closed" });
+  });
+
+  it("a window opened between before_agent_start and the first model call is caught by the context re-check: no model call, unknown owner-closed", async () => {
+    const s = build();
+    const task = await mkTask();
+    const { run, token } = await sendOne(s, task);
+    host.idle = false;
+    expect(s.onBeforeAgentStart(wakeEvent(token))).toBe("authorized");
+    s.onAgentStart();
+    s.onFenceEvent({ type: "session_before_switch" });
+    const aborts = host.aborts;
+    s.onContext();
+    expect(host.aborts).toBeGreaterThan(aborts); // the request is blocked at the context hook
+    await s.idle();
+    expect(runOf(run.runKey)).toMatchObject({ state: "unknown", reason: "owner-closed" });
+    // a later context of the same (now void) run is refused again
+    const again = host.aborts;
+    s.onContext();
+    expect(host.aborts).toBeGreaterThan(again);
+  });
+
+  it("a human's / merged run is never aborted by this re-check; `goal` alone never refuses", async () => {
+    const s = build();
+    const task = await mkTask();
+    const { run, token } = await sendOne(s, task);
+    host.idle = false;
+    expect(s.onBeforeAgentStart(wakeEvent(token))).toBe("authorized");
+    s.onAgentStart();
+    s.onContext(); // first model call made ⇒ modelCalled
+    s.onFenceEvent({ type: "session_before_switch" });
+    const aborts = host.aborts;
+    s.onContext(); // a later model call of the run is not this gate's business
+    expect(host.aborts).toBe(aborts);
+    expect(runOf(run.runKey).state).not.toBe("unknown");
+  });
+});
+
+describe("I1 review r1 #3 — revocation generation (a post-pause handoff / message never wakes)", () => {
+  const onceWhen = { kind: "once", at: "2026-01-01T00:00", tz: "UTC" } as const;
+  const bgTask = (over: Partial<ScheduleTask> = {}) =>
+    mkTask({
+      form: "background",
+      when: onceWhen,
+      bg: { type: "general-purpose", timeoutS: 60, consultMain: false, handoff: true },
+      ...over,
+    });
+  async function patch(id: string, fn: (t: ScheduleTask) => void): Promise<void> {
+    const store = e.store(SID, { now: () => fake.now() });
+    await store.transact((d: ScheduleStateFile) => {
+      fn(d.tasks.find((x) => x.id === id)!);
+      return { value: undefined, write: true };
+    });
+  }
+  const handoffOf = (task: ScheduleTask, out: HandoffOutcome[], startedAt?: number) => ({
+    runKey: `${task.id}@${T0}`,
+    taskId: task.id,
+    task,
+    defHash: task.approval!.hash,
+    noteId: "n",
+    content: "c",
+    ...(startedAt !== undefined ? { startedAt } : {}),
+    onEnd: (o: HandoffOutcome) => out.push(o),
+  });
+
+  it("auto once background runs → user pauses (queue empty at that moment) → background completes → its handoff is REFUSED although the claim-disabled snapshot would be forgiven", async () => {
+    const s = build();
+    const task = await bgTask();
+    await patch(task.id, (t) => (t.enabled = false)); // the claim's own write
+    const claimedAt = fake.now();
+    fake.advance(5_000); // the background run is working …
+    expect(s.revokeTask(task.id)).toBe(0); // … the user pauses: nothing is queued yet
+    fake.advance(5_000);
+    const out: HandoffOutcome[] = [];
+    host.idle = false; // the pump cannot get anywhere: whatever happens below happens at enqueue time
+    expect(s.enqueueHandoff(handoffOf(task, out, claimedAt))).toBe(true); // accepted, but terminated immediately
+    expect(out).toEqual([{ kind: "dropped", reason: "task-changed" }]); // synchronously, before any pump / CAS
+    expect(s.status().queued).toBe(0);
+    host.idle = true;
+    await drive(s, 5_000);
+    expect(out).toEqual([{ kind: "dropped", reason: "task-changed" }]);
+    expect(host.sent).toHaveLength(0);
+    s.shutdown();
+  });
+
+  it("a message run claimed BEFORE the pause but enqueued after it is dropped(task-changed) in the ledger and never sent", async () => {
+    const s = build();
+    const task = await mkTask({ when: onceWhen });
+    await patch(task.id, (t) => (t.enabled = false));
+    const run = await mkRun(task);
+    fake.advance(2_000);
+    s.revokeTask(task.id);
+    fake.advance(1_000);
+    host.idle = false;
+    s.enqueue(run, task);
+    expect(s.status().queued).toBe(0); // refused at enqueue, never queued
+    await s.idle();
+    expect(runOf(run.runKey)).toMatchObject({ state: "dropped", reason: "task-changed" });
+    host.idle = true;
+    await drive(s, 5_000);
+    expect(host.sent).toHaveLength(0);
+  });
+
+  it("the same refusal holds when the revocation lands while the entry's CAS is in flight (handoff without startedAt)", async () => {
+    const s = build();
+    const task = await bgTask();
+    await patch(task.id, (t) => (t.enabled = false));
+    const out: HandoffOutcome[] = [];
+    s.enqueueHandoff(handoffOf(task, out));
+    fake.advance(1_100);
+    await Promise.resolve();
+    s.revokeTask(task.id);
+    await drive(s, 5_000);
+    expect(out).toEqual([{ kind: "dropped", reason: "task-changed" }]);
+    expect(host.sent).toHaveLength(0);
+    s.shutdown();
+  });
+
+  it("a run claimed AFTER the pause (task resumed, new occurrence) is not affected by the old revocation", async () => {
+    const s = build();
+    const task = await mkTask();
+    s.revokeTask(task.id); // pause at T
+    fake.advance(10_000);
+    const run = await mkRun(task); // claimed later
+    s.enqueue(run, task);
+    await drive(s, 5_000);
+    expect(host.sent).toHaveLength(1);
+    s.shutdown();
+  });
+});
+
+describe("I1 review r1 #5 — a handoff ends exactly once", () => {
+  it("deferred CAS → revokeTask → D13 replacement → CAS settles: the OLD handoff hears ONE outcome (coalesced), never also task-changed", async () => {
+    const s = build();
+    const task = await mkTask({
+      form: "background",
+      when: { kind: "once", at: "2026-01-01T00:00", tz: "UTC" },
+      bg: { type: "general-purpose", timeoutS: 60, consultMain: false, handoff: true },
+    });
+    const store = e.store(SID, { now: () => fake.now() });
+    await store.transact((d: ScheduleStateFile) => {
+      d.tasks.find((x) => x.id === task.id)!.enabled = false;
+      return { value: undefined, write: true };
+    });
+    const a: HandoffOutcome[] = [];
+    const b: HandoffOutcome[] = [];
+    const mk = (out: HandoffOutcome[], n: string) => ({
+      runKey: `${task.id}@${T0}-${n}`,
+      taskId: task.id,
+      task,
+      defHash: task.approval!.hash,
+      noteId: n,
+      content: n,
+      onEnd: (o: HandoffOutcome) => out.push(o),
+    });
+    s.enqueueHandoff(mk(a, "a"));
+    fake.advance(1_100);
+    await Promise.resolve(); // A's CAS is in flight
+    s.revokeTask(task.id); // A: revoked + dead, still queued
+    s.enqueueHandoff(mk(b, "b")); // D13 replaces A
+    await drive(s, 5_000);
+    expect(a).toHaveLength(1);
+    expect(b.length).toBeLessThanOrEqual(1);
+    expect(host.sent).toHaveLength(0);
+    s.shutdown();
+    expect(a).toHaveLength(1); // shutdown does not re-end it either
+  });
+
+  it("every terminal path is one-shot: revoke twice / shutdown after revoke", async () => {
+    const s = build();
+    const task = await mkTask({ bg: { type: "general-purpose", timeoutS: 60, consultMain: false, handoff: true } });
+    const out: HandoffOutcome[] = [];
+    host.idle = false;
+    s.enqueueHandoff({
+      runKey: `${task.id}@${T0}`,
+      taskId: task.id,
+      task,
+      defHash: task.approval!.hash,
+      noteId: "n",
+      content: "c",
+      onEnd: (o) => out.push(o),
+    });
+    s.revokeTask(task.id);
+    s.shutdown();
+    expect(out).toEqual([{ kind: "dropped", reason: "task-changed" }]);
+  });
+});
+
+describe("I1 — revokeTask (A2 residual 3: a pause/delete of a claim-disabled once task)", () => {
+  const onceWhen = { kind: "once", at: "2026-01-01T00:00", tz: "UTC" } as const;
+  async function patch(id: string, fn: (t: ScheduleTask) => void): Promise<void> {
+    const store = e.store(SID, { now: () => fake.now() });
+    await store.transact((d: ScheduleStateFile) => {
+      fn(d.tasks.find((x) => x.id === id)!);
+      return { value: undefined, write: true };
+    });
+  }
+
+  it("the NO-OP pause is the hole: without revoke a claim-disabled once task is still sent; revokeTask drops the queued message run (ledger: dropped(task-changed))", async () => {
+    const s = build();
+    const task = await mkTask({ when: onceWhen });
+    await patch(task.id, (t) => (t.enabled = false)); // the claim's own write — a later pause changes nothing
+    const run = await mkRun(task);
+    host.idle = false;
+    s.enqueue(run, task);
+    expect(s.revokeTask(task.id)).toBe(1);
+    host.idle = true;
+    await drive(s, 5_000);
+    expect(host.sent).toHaveLength(0);
+    expect(stateOf().runs.find((r) => r.runKey === run.runKey)).toMatchObject({
+      state: "dropped",
+      reason: "task-changed",
+    });
+    expect(s.status().queued).toBe(0);
+    s.shutdown();
+  });
+
+  it("a queued handoff is revoked: its owner hears dropped(task-changed) exactly once and nothing is sent; other tasks' entries stay", async () => {
+    const s = build();
+    const task = await mkTask({
+      form: "background",
+      when: onceWhen,
+      bg: { type: "general-purpose", timeoutS: 60, consultMain: false, handoff: true },
+    });
+    const other = await mkTask({ name: "other" });
+    await patch(task.id, (t) => (t.enabled = false));
+    const out: HandoffOutcome[] = [];
+    host.idle = false;
+    s.enqueueHandoff({
+      runKey: `${task.id}@${T0}`,
+      taskId: task.id,
+      task,
+      defHash: task.approval!.hash,
+      noteId: "n",
+      content: "c",
+      onEnd: (o) => out.push(o),
+    });
+    const otherRun = await mkRun(other);
+    s.enqueue(otherRun, other);
+    expect(s.revokeTask(task.id)).toBe(1);
+    expect(s.revokeTask(task.id)).toBe(0); // idempotent
+    host.idle = true;
+    await drive(s, 5_000);
+    expect(out).toEqual([{ kind: "dropped", reason: "task-changed" }]);
+    expect(host.sent).toHaveLength(1); // only the other task's message
+    expect((host.sent[0]!.message.details as { runKey: string }).runKey).toBe(otherRun.runKey);
+    s.shutdown();
+  });
+
+  it("an entry revoked while its ledger CAS is in flight is never sent and ends dropped (the pump settles it)", async () => {
+    const s = build();
+    const task = await mkTask({ when: onceWhen });
+    await patch(task.id, (t) => (t.enabled = false));
+    const run = await mkRun(task);
+    s.enqueue(run, task);
+    // let the pump reach its CAS (await boundary), then revoke synchronously inside that window
+    fake.advance(1_100);
+    await Promise.resolve();
+    s.revokeTask(task.id);
+    await drive(s, 5_000);
+    expect(host.sent).toHaveLength(0);
+    expect(stateOf().runs.find((r) => r.runKey === run.runKey)?.state).toBe("dropped");
+    s.shutdown();
+  });
+
+  it("dispatched / in-flight runs are not touched by revokeTask", async () => {
+    const s = build();
+    const task = await mkTask({});
+    const run = await mkRun(task);
+    s.enqueue(run, task);
+    await drive(s, 5_000);
+    expect(host.sent).toHaveLength(1);
+    expect(s.revokeTask(task.id)).toBe(0);
+    expect(s.status().inflight).toBeDefined();
+    s.shutdown();
+  });
+});
+
 describe("review r2 — ui_prompt 代次 / 对话身份 (#4)", () => {
   const A = { kind: "confirm", title: "A" };
   const B = { kind: "select", title: "B" };
@@ -1531,13 +2054,75 @@ describe("review r2 — ui_prompt 代次 / 对话身份 (#4)", () => {
     expect(await blocked(s)).toBe(true);
   });
 
-  it("different dialogs never cancel each other (end of A before its start must not hide B)", async () => {
+  it("I1 review r1 #4: end(A) → start(B) → start(A) (same key, interleaved) stays BLOCKED throughout — B's start never consumes A's end", async () => {
+    const s = build();
+    const same = { kind: "custom" }; // pi's ui.custom events carry no title: every dialog shares the key
+    s.onUiPrompt(false, same); // end(A) overtakes start(A)
+    s.onUiPrompt(true, same); // start(B)
+    expect(s.diagnostics().uiPrompts).toBe(1);
+    expect(await blocked(s)).toBe(true); // B is open: zero sends while it is
+    s.onUiPrompt(true, same); // late start(A)
+    expect(s.diagnostics().uiPrompts).toBe(2);
+    expect(await blocked(s)).toBe(true);
+    s.onUiPrompt(false, same); // end(B)
+    expect(s.diagnostics().uiPrompts).toBe(1); // still blocked: over-blocking is the only error direction
+    expect(await blocked(s)).toBe(true);
+    s.resetBlockers();
+    expect(s.diagnostics().uiPrompts).toBe(0);
+  });
+
+  it("review r2 #4: start(B) → end(A) → LATE start(A) inside UI_END_SETTLE_MS: the count touches zero but nothing is dispatched; the late start re-blocks; all closed + a full buffer ⇒ exactly one dispatch", async () => {
+    const s = build();
+    const same = { kind: "custom" }; // no title: every dialog shares the key
+    const task = await mkTask({ name: "settle" });
+    const run = await mkRun(task);
+    s.onUiPrompt(true, same); // start(B)
+    s.enqueue(run, task);
+    s.onUiPrompt(false, same); // end(A) consumes B's open: the count is 0 while B is still on screen
+    expect(s.diagnostics().uiPrompts).toBe(0);
+    await drive(s, UI_END_SETTLE_MS - 500); // inside the settle buffer: not due
+    expect(host.sent).toHaveLength(0);
+    s.onUiPrompt(true, same); // start(A) arrives late — inside the buffer
+    expect(s.diagnostics().uiPrompts).toBe(1);
+    await drive(s, 10_000);
+    expect(host.sent).toHaveLength(0); // blocked again, however long we wait
+    s.onUiPrompt(false, same); // end(B) …
+    expect(s.diagnostics().uiPrompts).toBe(0);
+    await drive(s, UI_END_SETTLE_MS - 500); // … the buffer restarts from THIS end
+    expect(host.sent).toHaveLength(0);
+    await drive(s, 1_000);
+    expect(host.sent).toHaveLength(1); // full buffer after the last end ⇒ dispatched exactly once
+    s.shutdown();
+  });
+
+  it("review r2 #4: a plain dialog (start → end) delays dispatch by UI_END_SETTLE_MS after its end, not longer; the local reset skips the buffer", async () => {
+    const s = build();
+    const t1 = await mkTask({ name: "p1" });
+    s.onUiPrompt(true, A);
+    s.onUiPrompt(false, A);
+    s.enqueue(await mkRun(t1), t1);
+    await drive(s, UI_END_SETTLE_MS - 500);
+    expect(host.sent).toHaveLength(0);
+    await drive(s, 600);
+    expect(host.sent).toHaveLength(1);
+    s.shutdown();
+    host.sent = [];
+    host.idle = true;
+    const s2 = build();
+    const t2 = await mkTask({ name: "p2" });
+    s2.onUiPrompt(true, A);
+    s2.onUiPrompt(false, A);
+    s2.enqueue(await mkRun(t2), t2);
+    s2.resetBlockers(); // /schedule repair · /fabric fence reset
+    await drive(s2, 100);
+    expect(host.sent).toHaveLength(1);
+    s2.shutdown();
+  });
+
+  it("an unmatched end of one key never hides a dialog of another key", () => {
     const s = build();
     s.onUiPrompt(true, B);
-    s.onUiPrompt(false, A); // A's end overtook A's start
-    expect(s.diagnostics().uiPrompts).toBe(1);
-    expect(await blocked(s)).toBe(true);
-    s.onUiPrompt(true, A); // A's late start cancels A's credit only
+    s.onUiPrompt(false, A);
     expect(s.diagnostics().uiPrompts).toBe(1);
     s.onUiPrompt(false, B);
     expect(s.diagnostics().uiPrompts).toBe(0);

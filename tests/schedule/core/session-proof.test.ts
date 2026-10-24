@@ -33,7 +33,11 @@ import {
 } from "../../../src/schedule/core/session-proof.js";
 
 /** Freshly written test files are "unsettled" by design; the settle check has its own test. */
-const find = (q: ProofQuery) => findSessionEntry({ settleMs: 0, ...q });
+// `wallNow` is pushed past any file ctime: with settleMs 0 the proof's `unsettled` check compares
+// `floor(Date.now() ms)·1e6` with the file's sub-millisecond ctime, so a file written inside the SAME
+// millisecond looked "unsettled" ⇒ inconclusive instead of absent (the flaky :148). The production
+// default settle window (2 s) is untouched; this only makes the fixture's clock unambiguous.
+const find = (q: ProofQuery) => findSessionEntry({ settleMs: 0, wallNow: () => Date.now() + 60_000, ...q });
 
 let dir: string;
 let file: string;

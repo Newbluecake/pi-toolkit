@@ -175,6 +175,8 @@ import { SingleSlotPool } from "./runtime/slot-pool.js";
 import { EventWatchdog } from "./runtime/watchdog.js";
 import { createRPCServer, type RPCServer } from "./rpc/server.js";
 import type { ScheduleAgent, ScheduleWiring } from "./schedule/agent/wire.js";
+import type { BackgroundExecutor } from "./schedule/agent/bg.js";
+import { installScheduleExecutors } from "./schedule/agent/executors.js";
 import { createQueryService, type QueryService } from "./service/query-service.js";
 import { createLiveRunRegistry } from "./service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
@@ -1081,6 +1083,8 @@ export interface Stack {
    *  default; the retired global cron engine is gone). Started by src/index.ts after the build,
    *  shut down FIRST in session_shutdown (closeEpoch). */
   schedule?: ScheduleAgent;
+  /** scheduled-reports I1: the background executor + result notes (absent when the agent cannot execute). */
+  scheduleBackground?: BackgroundExecutor;
   rpc: RPCServer;
   workflow: WorkflowSupport;
   /** X7b fleet widget; absent when settings.fleetWidget is off. Exposed so session_shutdown
@@ -3369,6 +3373,15 @@ export function buildSessionStack(
     }
   }
   const schedule = scheduleWiring?.createAgent({ ctx });
+  // scheduled-reports I1: the `message` (A2) and `background` (A1) executors, BEFORE `schedule.start()` (index.ts).
+  const scheduleBackground =
+    schedule !== undefined
+      ? installScheduleExecutors(pi, ctx, schedule, {
+          message: scheduleWiring?.message,
+          spawn,
+          consult,
+        })
+      : undefined;
   const rpc = createRPCServer({ events: pi.events, spawn, query });
   // §3.6: prepare the session directory before recover so migrated/orphaned
   // records enter the normal adjudication and notification path.
@@ -3626,6 +3639,7 @@ export function buildSessionStack(
     mention,
     mentionNotes,
     ...(schedule !== undefined ? { schedule } : {}),
+    ...(scheduleBackground !== undefined ? { scheduleBackground } : {}),
     rpc,
     workflow,
     goal,

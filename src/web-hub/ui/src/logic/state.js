@@ -152,6 +152,9 @@ function pinnedEvent(name) {
 const AGENT_REMOVED_EVENT = pinnedEvent("agent_removed");
 /** web-hub-privacy plan v2.1 (P1): same module-load-time drift pin as `agent_removed` above. */
 const PRIVACY_EVENT = pinnedEvent("privacy");
+/** scheduled-reports I1: H1 appended "schedules" to SSE_EVENTS — same module-load-time drift pin as above
+ *  (the case key stays `@logic/schedule.js`'s SCHED_EVENT mirror; this throws if the contract ever diverges). */
+const SCHEDULES_EVENT = pinnedEvent(SCHED_EVENT);
 
 /** Local (non-SSE) events understood by `reduce`. */
 export const LOCAL_EVENTS = Object.freeze([
@@ -632,10 +635,9 @@ function reduceInner(s, event, d, at) {
     // projections — H1 produces, W1 consumes; append-only). Overwrite semantics with
     // receive-time anchoring (`schedulesReceivedAt`, the same discipline as `load`); malformed
     // frames are dropped wholesale via `@logic/schedule.js`'s `isSchedulesPayloadLike`. NOTE:
-    // the case key is the UI-side mirror (`@logic/schedule.js`'s SCHED_EVENT) — the
-    // `pinnedEvent` drift pin can only land once H1 appends "schedules" to the contract's
-    // SSE_EVENTS (S0 deliberately left the array untouched).
-    case SCHED_EVENT:
+    // the case key is the UI-side mirror (`@logic/schedule.js`'s SCHED_EVENT), drift-pinned
+    // against the contract's SSE_EVENTS at module load (SCHEDULES_EVENT above).
+    case SCHEDULES_EVENT:
       return isSchedulesPayloadLike(d) ? { ...s, schedules: d, schedulesReceivedAt: at } : s;
     // sysload plan §7.1/§10: `useHub.fetchLoadTop()`'s single-flight GET /api/load/top drive.
     // `loading` starts/stays true on `load_top_start`; a successful/failed settle independently

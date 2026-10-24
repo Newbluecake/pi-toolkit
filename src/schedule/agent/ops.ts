@@ -34,7 +34,7 @@ import {
   type ScheduleWhen,
   SCHEDULE_THINKING_LEVELS,
 } from "../core/spec.js";
-import { removeTask, type SessionStore } from "../core/writer.js";
+import { finishRun, removeTask, type SessionStore } from "../core/writer.js";
 import { parseStrictModelRef } from "../../config/model-hint.js";
 import type { XsHostCapabilityState } from "../../fabric/xs/host-cap.js";
 import type { ScheduleRefusal } from "./mode.js";
@@ -64,6 +64,8 @@ export interface OpsPorts {
   /** Canonical cwd stamped on a new task (§11). */
   ownerCwd(): string;
   defaultTz(): string;
+  /** I1: revoke this session's in-memory queued message/handoff entries of a paused/deleted task. */
+  revokeQueued?(taskId: string): void;
 }
 
 /** The execution definition + name — what a create/edit fully specifies. */
@@ -448,26 +450,63 @@ export async function updateTask(
 
 // ----------------------------------------------------------------- pause / resume / delete (store-level, reused by --all)
 
+/**
+ * I1 (A2 residual 3): a pause / delete must also revoke the task's already-QUEUED message runs. A once task
+ * that a claim already disabled makes `pause` a no-op for the definition, so nothing else would stop a queued
+ * (or handoff) run from being sent after the user said stop. Ledger half (works for any session's store, so
+ * `--all` is covered): queued message runs → `dropped(task-changed)`; the owner process's in-memory queue
+ * (incl. handoffs, which have no ledger run) is revoked through `opts.revoke` — own session only.
+ */
+export interface RevokeOpts {
+  /** Own-session in-memory revocation (`MessageSchedulerInstall.revokeTask`); omitted for foreign stores. */
+  revoke?: (taskId: string) => void;
+}
+
+async function dropQueuedRuns(store: SessionStore, taskId: string): Promise<void> {
+  // Best effort: a failed write leaves the runs to the dispatcher's own CAS (task-changed / E_REV paths).
+  await store.transact<number>((draft, ctx) => {
+    let n = 0;
+    for (const run of draft.runs) {
+      if (run.taskId !== taskId || run.form !== "message" || run.state !== "queued") continue;
+      if (finishRun(draft, run.runKey, { state: "dropped", reason: "task-changed" }, ctx.now) === "ok") n += 1;
+    }
+    return { value: n, write: n > 0 };
+  });
+}
+
 export async function setTaskEnabled(
   store: SessionStore,
   id: string,
   enabled: boolean,
+  opts: RevokeOpts = {},
 ): Promise<OpResult<ScheduleTask>> {
   if (!SCHED_TASK_ID_RE.test(id)) return fail("E_INVALID", `no such task ${id}`);
-  return fromChange(
+  const out = fromChange(
     await changeTask(store, id, (task) => {
       task.enabled = enabled; // resume NEVER approves (§4.3)
       return undefined;
     }),
   );
+  if (out.ok && !enabled) {
+    opts.revoke?.(id);
+    await dropQueuedRuns(store, id);
+  }
+  return out;
 }
 
-export async function deleteTask(store: SessionStore, id: string): Promise<OpResult<{ id: string }>> {
+export async function deleteTask(
+  store: SessionStore,
+  id: string,
+  opts: RevokeOpts = {},
+): Promise<OpResult<{ id: string }>> {
   if (!SCHED_TASK_ID_RE.test(id)) return fail("E_INVALID", `no such task ${id}`);
   const r = await store.transact<boolean>((draft) => {
     const removed = removeTask(draft, id);
     return { value: removed, write: removed };
   });
   if (!r.ok) return fail(r.code, r.detail);
-  return r.value ? { ok: true, value: { id } } : fail("E_INVALID", `no such task ${id}`);
+  if (!r.value) return fail("E_INVALID", `no such task ${id}`);
+  opts.revoke?.(id);
+  await dropQueuedRuns(store, id);
+  return { ok: true, value: { id } };
 }

@@ -145,3 +145,56 @@ teardown 不 abort preparing（3 红）· preparing 忽略 `foreignStart`（1）
 | `npx vitest run tests/schedule --maxWorkers=3`                                              | 23 个文件 / 394 passed、1 failed：唯一失败是 S1 `fault-injection`「8 processes race」（已知负载抖动，单跑 5/5 通过，与 A2 无关） |
 | `npx tsc --noEmit -p tsconfig.json 2>&1 \| grep "schedule/agent/\(dispatch\|message\)"`     | 无输出                                                                                                                           |
 | `npx prettier --check`（源 / 测试 / 本报告）                                                | 通过                                                                                                                             |
+
+## 9. I1 修复：自引 pre-start compaction（C-S5 发现）
+
+> 来源：I1 的真实 pi 一致性测试 C-S5。root 裁定在 I1 包内修复并评审；本节是该修复的授权时序说明，供复核。代码：`src/schedule/agent/dispatch.ts`（`sending` / `selfCompaction` / `startDeadlineOf` / `SCHED_START_COMPACTION_MAX_MS`）。
+
+### 现象
+
+真实 pi 的 pre-start compaction 在 **`sendCustomMessage` 的同步栈内**触发（栈：`sendCustomMessage → _startRun → _prepareRun → _checkCompaction → session_before_compact`），早于该触发自己的 `before_agent_start`。A2 原实现里 `sendNow` 在 `host.sendMessage` 返回后立刻 `fence.verifyDispatch(gen)`，把这个刚打开的 compaction 窗口当成「会话身份在发送期间移动」⇒ 记 `unknown(owner-closed)`、flight 关闭，随后到达的触发成了孤儿被 abort。结果：上下文接近阈值时，定时消息**永不执行**（A2 单元测试里的 host 从不触发 compaction，所以没暴露；A2 的 §8 #1 只考虑了「flight 仍 dispatched 时 reload」）。
+
+### 修复（授权不变量不变）
+
+1. **归因只信同步栈**：`sendNow` 在 `host.sendMessage` 前设 `sending = f`、返回/抛出后清除。`onFenceEvent` 收到 `session_before_compact` 且 `sending === flight` ⇒ 标 `f.selfCompaction / compacting / compactStartedAt`。栈外（send 返回之后）到达的 compaction 一律视为外来，不标、不豁免、不暂停。
+2. **豁免面最小**：`verifyDispatch` 失败原因恰为 `fenced:compaction`，且 `f.selfCompaction`，且 `fence.status().open` 的每一项都是 `compaction`，才视为通过。tree / switch / fork / `session_start|shutdown`（gen 变化）/ 任何其它窗口同开 ⇒ 仍是 `unknown(owner-closed)`。send 之前就已有窗口开着 ⇒ `beginDispatch` 本就拒发（不变）。fence 窗口本身不关闭——别的派发在该 compaction 期间照常被拦。
+3. **启动预算暂停 + 硬上限**：`startDeadlineOf(f, now)` = `sentAt+60s`；有自引 compaction 时 = `min(sentAt+SCHED_START_COMPACTION_MAX_MS(600 s), max(base, (compacting ? now : compactEndedAt) + 60 s))`——compaction 运行中预算滚动前移，结束后从结束时刻再给 60 s，任何情况下不超过发送后 600 s。`enforceDeadlines` 的两处启动判定与 `armStart`（到点未到期则自重 arm）都用它。`session_compact` / `session_compact_failed`（含被取消）只结束暂停，**不重发**，flight 按常规规则收敛。
+4. **不变**：授权点仍是 `before_agent_start` 的 token 校验（compaction 期间伪造 token 仍是孤儿 abort，有测试）；`context` 复核、3600 s 运行上限、`handed`/`merged`、reload teardown-abort、孤儿 abort 均未改。
+
+### 测试
+
+- 单元（`tests/schedule/agent/dispatch.test.ts`，+8，共 95）：自引 compaction 不关 flight 且结束后正常授权/settle、只发一次；65 s 仍 dispatched，结束后 59 s 仍活、61 s `start-timeout`；永不结束 ⇒ 599 s 活 / 600 s 切断；failed/cancelled 同样结束暂停；tree/switch 与 compaction 同窗 ⇒ owner-closed；`session_start` ⇒ owner-closed；send 返回后才开始的 compaction ⇒ 外来、60 s 超时，send 前已开的窗口 ⇒ 不发；compaction 期间伪造 token ⇒ abort。
+- 真实 pi（`tests/conformance/schedule.test.ts`）：C-S5（栈内触发、早于 BAS、消息恰执行一次零重复）、C-S5b（65 s 不 abort，结束后执行；永不结束 ⇒ 600 s 切断且零主请求）、C-S5c（外来 compaction 期间仍 fenced，结束后才派发）。
+- 变异验证（改生产代码→红→还原）：去豁免 RED（单元 + C-S5）· 豁免任意窗口 RED · 去暂停 RED · 去硬上限 RED · 外来误标 self RED。「compaction 结束时重 arm」去掉仍 GREEN——等价变异：计时器到点会自重 arm，结束事件的重 arm 只是少一次空转。
+
+### 残差
+
+- 若 A2 的 `session_before_compact` handler 排在另一个**异步** handler 之后，事件在 send 栈返回之后才到 ⇒ 不被识别为自引，退化为旧行为（60 s 预算、不暂停），fail closed（不会误授权，只可能超时）。生产里本包 handler 注册早于大部分扩展；C-S5 钉住真实 pi 的同步栈事实，pi peer 升级前必须跑。
+- compaction 期间 `fence` 窗口保持开启 ⇒ 排队中的其它定时消息等 compaction 结束（期望行为）。
+
+### §8 #3 移交的落地（`revokeTask`）
+
+root 裁定的「A3 侧 pause/disable 撤销排队资格」在 I1 落地：pause（enabled=false）与 delete 后调 in-memory `MessageScheduler.revokeTask(taskId)`（A2 增量，root 同意）——队列里该 task 的 message/handoff 条目被摘除（handoff ⇒ `onEnd({dropped,"task-changed"})`，message ⇒ ledger `dropped(task-changed)`）；正处于发送前 CAS 的条目标 `revoked`，pump 在 CAS 后丢弃且绝不发送。ledger 半边（S1 `finishRun`）对 `--all` 也生效；**in-memory 半边只能到本进程**——`--all` 跨进程到不了他进程的内存队列，那里的 handoff 仍靠 A2 的发送 CAS（任务快照逐字段比对）兜底，这是 I1 记录的残差。
+
+### 评审第 1 轮处置（I1 评审，gpt：4 major + 1 minor；主会话裁定全部必修）
+
+> 基线 `/tmp/i1-review-r1.json`。**本节取代上文 §9「修复」第 1 条与「残差」第一条的措辞**：自引归因不再只信同步栈，且新增授权点 fence 复核、撤销代次、终结幂等、UI 保守配对。
+
+| #   | 严重度 | 做法与论证                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | 回归测试                                                                                                                                                                                                                           |
+| --- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | major  | 评审说得对：真实 runner 对每个 handler 都 `await`，xs 的 `session_before_compact` handler 排在 A2 前面时，A2 的观察落在 send 返回之后，`sending` 已清空。**不再依赖同步栈**：`Flight.attribUntil = sentAt + SCHED_SELF_COMPACTION_ATTRIB_MS(5 s)`；`session_before_compact` 满足「flight 仍 `dispatched` ∧ 非 `foreignStart` ∧ 尚未归因过 ∧（`sending===f` ∨ 在窗口内）」即为自引（只归因第一次；人的 run 先开始则关闭窗口）。`verifyDispatch` 豁免只对同步到达的事件有意义（verify 在 send 返回后同步执行），晚到事件不需要豁免——它们靠窗口归因获得**暂停预算**。代价：窗口内由别人触发的 compaction 会被误归因（只影响预算暂停，上限 600 s，授权由 #2 的复核兜住）；窗口之外一律外来 | 单测：晚到事件仍暂停（65 s 仍 dispatched、结束后授权）；窗口外/人的 run 先开始/第二次 compaction 都不暂停；真实 pi C-S5d：A2 之前注册同步 + 异步 `session_before_compact` handler（生产顺序），暂停仍成立                          |
+| 2   | major  | `sessionMovedUnder(f)`：`fence.generation() !== f.gen` ∨ 打开的窗口（排除 `goal`，它只降级唤醒）不全是「我们自己仍在运行的 compaction」。`before_agent_start` 授权前（flight 仍 `dispatched`）与 `context` 首次模型调用前（`authorized/bound` 且未 `modelCalled`、非 merged/handed）各复核一次，命中 ⇒ `unknown(owner-closed)`（与发送后 verify 失败同一收敛）、中止触发、孤儿登记使其模型调用继续被拒，**不重发**。已人工接手/合并的运行、已发过首个请求的运行不受影响                                                                                                                                                                                                                | 单测：自引压缩中再开 switch/fork/tree ⇒ BAS 被拒；外来 compaction 仍开 ⇒ 被拒；`session_start` ⇒ 被拒；BAS 后 context 前开窗 ⇒ context 拦截；已调用过模型/goal 不受影响；真实 pi C-S5e：压缩中挂起的 `newSession()` ⇒ 主请求不发出 |
+| 3   | major  | 调度器内进程内**撤销代次** `revokedAt[taskId]`（`revokeTask` 无论队列是否为空都记录，FIFO 64 条，随 dispose 清）。`enqueue` / `enqueueHandoff` 与发送 CAS 都检查「来源 run 的 `startedAt` ≤ 撤销时刻」⇒ 丢弃（message ⇒ ledger `dropped(task-changed)`；handoff ⇒ 同步 `onEnd(dropped,task-changed)` 并返回 true，避免适配器再回落一次）。来源 claim 时间：message 取 `run.startedAt`；handoff 由适配器传 `startedAt: run.startedAt`（新增可选字段；缺省按入队时刻，保守）。暂停之后才 claim 的 run 不受影响。跨进程仍是 §8 #3 的残差                                                                                                                                                  | 单测：auto once 运行中暂停→后完成→handoff 被拒；message 先 claim 后 pause 再入队被拒；CAS 在途撤销被拒；暂停后新 claim 不受影响；wiring：control（不暂停时唤醒）+ 暂停后只有一条 recap 且无唤醒                                    |
+| 4   | major  | pi 的 ui 事件只有 `kind`/`title`（`ui.custom` 全无 title），没有唯一 id。改为**只会多阻塞**：`end` 找不到已开对话时**直接忽略**（删除 credit 机制）；start 总是计入 open；ghost（reset 时已开）逻辑保留。代价：end 先于 start 的乱序会留下一个只能由 `/schedule repair`、`/fabric fence reset` 清掉的阻塞——方向保守，已在 AGENTS.md 说明                                                                                                                                                                                                                                                                                                                                               | 单测：end(A)→start(B)→start(A)（同 key）全程阻塞、end(B) 后仍阻塞、reset 清除；不同 key 的未配对 end 不影响他人；旧「end 先到」用例改为断言新语义                                                                                  |
+| 5   | minor  | QEntry 增 `ended`，`endHandoff()` 一次性：coalesce / revoke / CAS-changed / drop / shutdown 全走它；适配器再加 `recapped` 守卫，每个 handoff 至多写一条 recap                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | 单测：deferred CAS→revoke→D13 替换→CAS 结算，旧 handoff 只听到一次；revoke 后 shutdown 不再回调；`tests/schedule/agent/executors.test.ts`：多次终结回调只发一条 recap（同 noteId）                                                 |
+
+撤销验证（改生产代码→红→还原）：归因退回仅同步栈 RED（单测 + C-S5d）· BAS 复核去掉 RED（单测）· context 复核去掉 RED · 复核容忍任意窗口 RED · 去掉 generation 比较 RED · 不记录撤销代次 RED（单测 + wiring）· handoff/message 入队检查去掉各 RED（需要「停在入队时刻」的断言才能区分，已补）· `endHandoff` 去幂等 RED · 适配器去 `recapped` RED · UI 重新引入 credit RED。**等价变异（披露）**：发送 CAS 里的 `revokedSince` 检查去掉 GREEN——入队检查与 `revoked` 标记已覆盖全部可达路径，CAS 处保留为纵深防御；BAS 复核与 context 复核各自单独去掉时真实 pi 的 C-S5e 仍绿（两层互为冗余），**两层同时去掉 C-S5e RED**，单测对每一层分别钉住。
+
+### 评审第 2 轮处置（主会话裁定，不再开评审）
+
+> 第 2 轮复审：4 条 closed，**#4（UI 配对）not-closed**——同 key 下 start(B) → end(A) → 迟到的 start(A)：end(A) 消耗了 B 的 open，B 仍在屏幕上而计数归零，派发放行。没有唯一对话 id，计数方案**原理上**区分不了该交错，所以不追求原理闭合，改**有界缓冲**。
+
+- 做法：新增命名导出常量 `UI_END_SETTLE_MS = 2_000`；记录最后一次 ui end 的时刻 `uiLastEndAt`（任何 end，含被忽略的未配对 end）；`readiness()` 在 `uiOpenCount() > 0` 之后要求 `now − uiLastEndAt ≥ UI_END_SETTLE_MS`，否则 wait；`onUiPrompt` 的 end 分支把 `schedulePump(0)` 改为 `schedulePump(UI_END_SETTLE_MS)`；`resetBlockers()`（`/schedule repair`、`/fabric fence reset`）清掉 `uiLastEndAt`，人的显式出口不再等缓冲。迟到的 start 在窗口内到达 ⇒ open 重新 > 0 ⇒ 重新阻塞；之后最后一次 end 重新起算窗口。
+- **残差（接受）**：迟到超过 `UI_END_SETTLE_MS` 的交错仍会在窗口期内放行一次派发（此时 B 仍开着）。该残差的出口仍是 `/schedule repair`、`/fabric fence reset`；pi 对同一对话的 start/end 按 microtask 保序，乱序只在前置 handler 耗时不均时出现，2 s 缓冲覆盖这种抖动的常规量级。
+- 测试（`tests/schedule/agent/dispatch.test.ts`）：start(B)、end(A)、窗口内迟到 start(A) ⇒ 不派发，迟到 start 后无论等多久都不派发；end(B) 后窗口从该 end 重新起算，满窗口后派发恰一次；普通对话（start→end）只延后 `UI_END_SETTLE_MS`；reset 跳过缓冲。
+- 撤销验证：去掉 readiness 的 settle 检查 ⇒ 2 条 RED。**等价变异（披露）**：只把 end 分支的 `schedulePump(UI_END_SETTLE_MS)` 改回 `schedulePump(0)` 仍绿——readiness 返回 wait 时本就以 ≤2 s 的轮询重排，延后调度只是少一次空转。

@@ -49,6 +49,7 @@ import {
   type ScheduleWebHubPort,
   type SchedRunVerdict,
 } from "./coordinator.js";
+import type { MessageSchedulerInstall } from "./message.js";
 import { assertExecutable, resolveScheduleMode, type ScheduleModeVerdict, type ScheduleRefusal } from "./mode.js";
 
 // ----------------------------------------------------------------- disposed epochs (process-wide)
@@ -218,6 +219,8 @@ export interface ScheduleWiring {
   /** `WebHubDeps.schedule` — present ⇔ webHub ∧ plain domain. */
   readonly webHubPort: ScheduleWebHubPort | undefined;
   readonly router: ScheduleHubRouter | undefined;
+  /** I1: the activate-level A2 installer (`src/index.ts` sets it; `buildSessionStack` attaches each agent to it). */
+  readonly message?: MessageSchedulerInstall;
   createAgent(input: CreateAgentInput): ScheduleAgent;
 }
 

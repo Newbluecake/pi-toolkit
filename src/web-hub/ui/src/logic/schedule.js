@@ -137,6 +137,21 @@ export function isRunLive(state) {
   return NON_TERMINAL.has(state);
 }
 
+/** `dropped` reasons that have prose (schedule.runReason.*); anything else renders as the raw reason. */
+const DROPPED_REASONS = new Set([
+  "coalesced",
+  "owner-closed",
+  "capability",
+  "capability-unknown",
+  "start-timeout",
+  "task-changed", // I1 / A2: queued run revoked by a pause, edit or delete
+]);
+
+/** i18n leaf (schedule.runReason.*) for a dropped run's reason, or undefined ⇒ show the raw reason. */
+export function runReasonKey(state, reason) {
+  return state === "dropped" && typeof reason === "string" && DROPPED_REASONS.has(reason) ? reason : undefined;
+}
+
 /** i18n leaf for a run state (schedule.runState.*). Unknown ⇒ "unknown". */
 export function runStateKey(state) {
   return RUN_STATES.has(state) ? state : "unknown";

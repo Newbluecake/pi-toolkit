@@ -212,6 +212,8 @@ export interface MessageSchedulerInstall {
   attach(agent: ScheduleAgent, ctx: ExtensionContext): MessageScheduler | undefined;
   scheduler(agent?: ScheduleAgent): MessageScheduler | undefined;
   enqueueHandoff(input: HandoffInput): boolean;
+  /** Revoke the queued message/handoff entries of a paused / deleted task (see `MessageScheduler.revokeTask`). */
+  revokeTask(taskId: string): number;
   statusSuffix(): string;
   /** Why dispatch is idle right now (fence windows, ui prompts, stuck run); undefined without a scheduler. */
   diagnostics(): SchedDiagnostics | undefined;
@@ -406,6 +408,7 @@ export function installMessageScheduler(
     attach,
     scheduler: (agent) => (agent !== undefined ? attached.get(agent) : live(undefined))?.sched,
     enqueueHandoff: (input) => live(undefined)?.sched.enqueueHandoff(input) ?? false,
+    revokeTask: (taskId) => live(undefined)?.sched.revokeTask(taskId) ?? 0,
     statusSuffix: () => live(undefined)?.sched.statusSuffix() ?? "",
     diagnostics: () => live(undefined)?.sched.diagnostics(),
     resetBlockers: () => live(undefined)?.sched.resetBlockers(),

@@ -104,6 +104,7 @@ import { createStatusCommand } from "./commands/status.js";
 import { createWebHubCommand } from "./commands/webhub.js";
 import { wireWebHub, type WebHubControl } from "./web-hub/agent/index.js";
 import { vaultPredicateOf, wireSchedule } from "./schedule/agent/wire.js";
+import { installMessageScheduler, installScheduleOrphanGuard } from "./schedule/agent/message.js";
 import { wireScheduleSurface } from "./schedule/agent/surface.js";
 import { createScheduleCommand } from "./commands/schedule.js";
 import { createScheduleTool } from "./tools/schedule-tool.js";
@@ -689,22 +690,49 @@ export default function activate(rawPi: ExtensionAPI): void {
   // scheduled-reports A0 (plan r3 §3/§12): post-guard, after the compat gate; default off ⇒ never
   // wired (no hook, no disk, no cap, no HubConfig key). Per-session agents are built by
   // buildSessionStack; the old global cron engine is retired.
-  const scheduleWiring = settings.schedule.enabled
-    ? wireSchedule(pi, {
-        settings: settings.schedule,
-        agentDir: getAgentDir(),
-        secure: secureDomain,
-        lockedReason: () => secureGuards?.lockedReason(),
-        webHub: settings.webHub.enabled && settings.webHub.control !== false,
-        current: () => holder.current?.schedule,
+  const scheduleMessage = settings.schedule.enabled
+    ? installMessageScheduler(pi, holder, {
+        // Same wiring as the xs controller (fence windows / web resume exec / topic-switch / goal / root wake).
+        fencePorts: {
+          webExec: () => webHubRef.current?.webExecBusy?.() === true,
+          topicSwitch: () => xsFencePorts.topicSwitch?.(),
+          goal: () => xsFencePorts.goal?.(),
+        },
+        rootWakeBusy: () => holder.current?.xs?.controller?.busy === true,
+        attributeInput: () => wakeAttributeRef.current,
+        // sched_bound (§7.5): the hub's key for THIS session; undefined (no hub) ⇒ no frame.
+        agentKey: () => currentConnection()?.status().agentKey,
       })
+    : undefined;
+  // Feature off: only the orphan guard (hooks, zero IO, no tool/command/prompt/HubConfig change) — a trigger
+  // that was already pending across a /reload that switched the feature off is still aborted on sight.
+  if (!settings.schedule.enabled) installScheduleOrphanGuard(pi);
+  const scheduleWiring = settings.schedule.enabled
+    ? {
+        ...wireSchedule(pi, {
+          settings: settings.schedule,
+          agentDir: getAgentDir(),
+          secure: secureDomain,
+          lockedReason: () => secureGuards?.lockedReason(),
+          webHub: settings.webHub.enabled && settings.webHub.control !== false,
+          current: () => holder.current?.schedule,
+        }),
+        ...(scheduleMessage !== undefined ? { message: scheduleMessage } : {}),
+      }
     : undefined;
   // scheduled-reports A3 (plan r3 §5): the session-visible surface. Tool / section / status bar / digest
   // exist ONLY when schedule.enabled (default off ⇒ tool table, command table, system prompt and status bar
   // byte-identical); `/schedule` is registered only then too (plan §1).
   const scheduleSurface = scheduleWiring
-    ? wireScheduleSurface(pi, { settings: settings.schedule, types, current: () => holder.current?.schedule })
+    ? wireScheduleSurface(pi, {
+        settings: settings.schedule,
+        types,
+        current: () => holder.current?.schedule,
+        revokeQueued: (taskId) => void scheduleMessage?.revokeTask(taskId),
+      })
     : undefined;
+  // Result notes (A1): the quiet-period proof runs on every settle (late-bound — the stack owns the executor).
+  if (scheduleWiring !== undefined) pi.on("agent_settled", () => holder.current?.scheduleBackground?.notes.settled());
   if (scheduleSurface !== undefined) {
     pi.registerTool(
       createScheduleTool({
@@ -719,6 +747,9 @@ export default function activate(rawPi: ExtensionAPI): void {
         agent: () => holder.current?.schedule,
         ports: (agent, ctx) => scheduleSurface.opsPorts(agent, ctx),
         inVault: vaultPredicateOf(secureDomain),
+        // `/schedule repair` is the local-only escape for a stuck dispatcher when fabric/xs (and its
+        // `/fabric fence reset`) is not enabled; web policy keeps `repair` denied (frozen S0 table).
+        resetBlockers: () => scheduleMessage?.resetBlockers(),
       }),
     );
   }
@@ -812,6 +843,7 @@ export default function activate(rawPi: ExtensionAPI): void {
         return reply ? { ledger: reply.ledger, maxPending: reply.maxPending } : undefined;
       },
       onPolicyChange: () => holder.current?.xs?.reply?.flush(),
+      afterFenceReset: () => scheduleMessage?.resetBlockers(),
       // Alias-plan §7 (ALW, AL4 port): always wired while xs is on — `localEnabled:false` still renders the
       // `alias n/a (alias.enabled=false)` status line; bridge/cache are AL3's (absent web-hub wiring ⇒ local refusal).
       alias: () => {
@@ -1435,6 +1467,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       holder.current.dynamic?.dispose(ctx); // P1-4：防御性清理（与 shutdown 双保险，幂等）
       holder.current.load?.dispose();
       holder.current.schedule?.dispose(); // defensive: the next stack recovers this epoch's runs (unknown(reload))
+      holder.current.scheduleBackground?.dispose();
       holder.current.rpc.close();
       holder.current.fabric?.dispose();
       holder.current.workflow.runs.abandon(); // stop orphaned background workflows; their notices are dropped
@@ -1543,6 +1576,8 @@ export default function activate(rawPi: ExtensionAPI): void {
     // lock (bounded) and must not delay session start.
     // A3: the surface starts the agent, then the status bar and the opening digest (needs the swept ledger).
     void scheduleSurface?.start(ctx, stack.schedule);
+    // A1: cross-process note proof / re-delivery for results a previous process left pending (idle only).
+    void stack.scheduleBackground?.notes.flush();
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
@@ -1558,6 +1593,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     // below can land a shutdown `aborted` (first terminal write wins).
     scheduleSurface?.shutdown(); // status bar cleared + digest disposed BEFORE the executor closes its runs
     await stack.schedule?.shutdown();
+    stack.scheduleBackground?.dispose(); // AFTER closeEpoch wrote unknown(owner-closed): late outcomes only append lateOutcome
     // X7b: kill the fleet widget FIRST and unconditionally. pi's /reload
     // re-imports this extension as a fresh module (jiti moduleCache:false), so
     // the module-level previousFleetWidget handoff in buildSessionStack never

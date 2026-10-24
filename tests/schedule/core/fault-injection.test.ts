@@ -94,20 +94,29 @@ describe("fault injection (real SIGKILL)", () => {
     const { store, t, T, dir } = await prepare();
     // Stale holder content from a long-dead process: with the kernel lock it is plain bytes.
     writeFileSync(join(dir, ".lock"), JSON.stringify({ pid: 999_999, start: 1, host: "x", epoch: "dead", at: 0 }));
-    const children = Array.from(
-      { length: 8 },
-      (_, i) =>
-        new Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string }>((resolve) => {
-          const c = spawn(
-            process.execPath,
-            ["--import", "tsx", CHILD, E.storeDir, SID, t.id, String(T), i === 0 ? "lock-held" : "none"],
-            { cwd: ROOT, stdio: ["ignore", "pipe", "inherit"] },
-          );
-          let out = "";
-          c.stdout.on("data", (b: Buffer) => (out += b.toString("utf8")));
-          c.once("exit", (code, signal) => resolve({ code, signal, out }));
-        }),
-    );
+    const spawnChild = (mode: string) =>
+      new Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string }>((resolve) => {
+        const c = spawn(process.execPath, ["--import", "tsx", CHILD, E.storeDir, SID, t.id, String(T), mode], {
+          cwd: ROOT,
+          stdio: ["ignore", "pipe", "inherit"],
+        });
+        let out = "";
+        c.stdout.on("data", (b: Buffer) => (out += b.toString("utf8")));
+        c.once("exit", (code, signal) => resolve({ code, signal, out }));
+        victims.set(c, () => out);
+      });
+    const victims = new Map<ReturnType<typeof spawn>, () => string>();
+    // The victim takes the kernel lock FIRST and blocks there (deterministic: it cannot exit before the kill);
+    // the 7 racers start while it holds the lock, then it is SIGKILLed with the lock still held.
+    const victimDone = spawnChild("lock-hold-wait");
+    const victim = [...victims.keys()][0]!;
+    for (let i = 0; i < 600 && !victims.get(victim)!().includes("HELD"); i++)
+      await new Promise((r) => setTimeout(r, 50));
+    expect(victims.get(victim)!()).toContain("HELD");
+    const racers = Array.from({ length: 7 }, () => spawnChild("none"));
+    await new Promise((r) => setTimeout(r, 300)); // the racers are now queued behind the dead-to-be holder
+    victim.kill("SIGKILL");
+    const children = [victimDone, ...racers];
     const results = await Promise.all(children);
     const outcomes = results.filter((r) => r.code === 0).map((r) => JSON.parse(r.out) as { kind: string });
     expect(results[0]!.signal).toBe("SIGKILL");

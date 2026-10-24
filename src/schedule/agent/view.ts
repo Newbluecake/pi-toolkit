@@ -80,6 +80,16 @@ export function taskDetail(task: ScheduleTask, occ?: OccState, manual?: number):
   return lines;
 }
 
+/** One-line meaning of a dropped run's reason (English tokens — shared by the tool and the command). */
+const DROPPED_NOTE: Readonly<Record<string, string>> = {
+  coalesced: "replaced by a newer run of the same task while queued",
+  "owner-closed": "the owner session closed before it was sent",
+  capability: "this pi cannot be triggered by scheduled messages",
+  "capability-unknown": "queued over 30 min, pi trigger capability unconfirmed",
+  "start-timeout": "the trigger never started within 60 s",
+  "task-changed": "the task was paused, changed or deleted while queued; not sent",
+};
+
 export function runLine(run: RunRecord, when?: ScheduleWhen): string {
   const at = when === undefined ? new Date(run.scheduledAt).toISOString() : localTime(when, run.scheduledAt);
   const end = run.endedAt !== undefined && isTerminalRunState(run.state) ? "" : " (in progress)";
@@ -87,6 +97,9 @@ export function runLine(run: RunRecord, when?: ScheduleWhen): string {
     `${at}`,
     run.kind,
     `${run.state}${run.reason ? `(${run.reason})` : ""}${end}`,
+    ...(run.state === "dropped" && run.reason !== undefined && DROPPED_NOTE[run.reason] !== undefined
+      ? [DROPPED_NOTE[run.reason]!]
+      : []),
     ...(run.runId ? [`run ${run.runId}`] : []),
     ...(run.reportFile ? [`report ${run.reportFile}`] : []),
     ...(run.note === "unverified" ? ["note unverified"] : []),

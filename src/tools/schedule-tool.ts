@@ -205,6 +205,10 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
           );
       }
       const ports = (): OpsPorts => deps.ports(agent, ctx);
+      const revokeOf = (): { revoke?: (taskId: string) => void } => {
+        const revoke = ports().revokeQueued;
+        return revoke === undefined ? {} : { revoke };
+      };
       const taskId = params.id;
       const needId = (): ReturnType<typeof failure> | undefined =>
         taskId === undefined || !SCHED_TASK_ID_RE.test(taskId)
@@ -277,7 +281,7 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
           if (g !== undefined) return failure(g.code, g.detail);
           const store = agent.store();
           if (store === undefined) return failure("E_INVALID", `no such task ${taskId}`);
-          const res = await setTaskEnabled(store, taskId!, action === "resume");
+          const res = await setTaskEnabled(store, taskId!, action === "resume", revokeOf());
           if (!res.ok) return failOp(res);
           agent.changed();
           return out(`${action === "resume" ? "Resumed" : "Paused"} task ${res.value.id}. ${statusNote(res.value)}`, {
@@ -291,7 +295,7 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
           if (g !== undefined) return failure(g.code, g.detail);
           const store = agent.store();
           if (store === undefined) return failure("E_INVALID", `no such task ${taskId}`);
-          const res = await deleteTask(store, taskId!);
+          const res = await deleteTask(store, taskId!, revokeOf());
           if (!res.ok) return failOp(res);
           agent.changed();
           return out(`Deleted task ${taskId}. Runs already recorded stay in history.`, { id: taskId });

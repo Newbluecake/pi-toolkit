@@ -149,7 +149,7 @@ describe("schedule surface — OFF (default)", () => {
     await emit(on, "session_shutdown", { type: "session_shutdown" }, ctx2);
   });
 
-  it("the handler footprint of enabling the feature is exactly +2 turn_start, +1 agent_settled", () => {
+  it("the handler footprint of ENABLING the feature over the OFF baseline (which already carries the orphan guard) is pinned", () => {
     writeSettings({ ...baseline });
     const off = fakePi();
     activate(off.pi);
@@ -163,7 +163,28 @@ describe("schedule surface — OFF (default)", () => {
       const d = fns.length - (off.handlers.get(event)?.length ?? 0);
       if (d !== 0) diff[event] = d;
     }
-    expect(diff).toEqual({ turn_start: 2, agent_settled: 1 });
+    // A3: +2 turn_start (A0 clock poke, status bar), +1 agent_settled (status/digest). I1: the A2 message scheduler's
+    // fence/ui-prompt/input/run-lifecycle hooks and the A1 notes `agent_settled` hook (before_agent_start/context
+    // are present OFF already — the guard — so they do not diff).
+    expect(diff).toEqual({
+      agent_settled: 2,
+      agent_start: 1,
+      input: 1,
+      message_end: 1,
+      message_start: 1,
+      session_before_compact: 1,
+      session_before_fork: 1,
+      session_before_switch: 1,
+      session_before_tree: 1,
+      session_compact: 1,
+      session_compact_failed: 1,
+      session_shutdown: 1,
+      session_start: 1,
+      session_tree: 1,
+      turn_start: 2,
+      ui_prompt_end: 1,
+      ui_prompt_start: 1,
+    });
     expect([...on.tools.keys()].filter((k) => !off.tools.has(k))).toEqual(["schedule"]);
   });
 });

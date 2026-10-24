@@ -67,6 +67,13 @@ const en = {
   "runState.continued": "continued",
   "runState.unknown": "unknown",
   "runState.dropped": "dropped",
+  /** runReason.* — prose for the dropped reasons (the leaf is `runReasonKey(state, reason)`; unknown ⇒ raw text). */
+  "runReason.coalesced": "replaced by a newer run of the same task while queued",
+  "runReason.owner-closed": "the owner session closed before it was sent",
+  "runReason.capability": "this pi cannot be triggered by scheduled messages",
+  "runReason.capability-unknown": "queued over 30 min with the pi trigger capability still unconfirmed",
+  "runReason.start-timeout": "the trigger never started within 60 s",
+  "runReason.task-changed": "the task was paused, changed or deleted while queued — not sent",
   /** feishu.* — receipt display (§7.1); "q" is the frontend-derived "?" (hub unreachable). */
   "feishu.accepted": "accepted",
   "feishu.sent": "sent",
@@ -159,6 +166,13 @@ const zh: Record<keyof typeof en, string> = {
   "runState.continued": "continued",
   "runState.unknown": "unknown",
   "runState.dropped": "dropped",
+  /** runReason.* — dropped 原因的说明文案（叶子由 `runReasonKey(state, reason)` 给出；未知原因显示原文）。 */
+  "runReason.coalesced": "排队期间被同一任务的新一次运行取代",
+  "runReason.owner-closed": "发送前归属会话已关闭",
+  "runReason.capability": "当前 pi 不支持定时消息触发",
+  "runReason.capability-unknown": "排队超过 30 分钟仍未确认 pi 的触发能力",
+  "runReason.start-timeout": "触发后 60 秒内没有启动",
+  "runReason.task-changed": "排队期间任务被暂停、修改或删除，未发送",
   "feishu.accepted": "accepted",
   "feishu.sent": "sent",
   "feishu.failed": "failed",

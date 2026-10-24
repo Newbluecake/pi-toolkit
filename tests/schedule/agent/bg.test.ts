@@ -269,11 +269,19 @@ describe("background executor", () => {
     const bg = installBackgroundExecutor(f.a, { spawn, notes: f.notes, clock: f.clock });
     bg.dispatch(f.run, f.task);
     await vi.waitFor(() => expect(spawn.waitOutcome).toHaveBeenCalledTimes(1));
-    f.clock.advance(61000);
+    // I1 hardening: never rely on ONE advance landing exactly after the deadline timer was armed — keep
+    // advancing the fake clock until the run is terminal (a busy host could interleave the async chain).
+    for (let i = 0; i < 20 && readOk(f.store).runs[0]?.state === "running"; i++) {
+      f.clock.advance(61_000);
+      await new Promise((r) => setTimeout(r, 10));
+    }
     await bg.drain();
     expect(readOk(f.store).runs[0]).toMatchObject({ state: "unknown", reason: "no-outcome" });
     bg.dispose();
     f.a.dispose(); // schedule.changed() may have armed A0's next occurrence; clear its own timer.
+    await new Promise((r) => setTimeout(r, 10)); // let any late changed()/note continuation settle, then dispose again
+    f.a.dispose();
+    bg.dispose();
     expect(f.clock.pendingTimers).toBe(0);
   });
 

@@ -1,0 +1,83 @@
+{
+  "note": "schedule-off golden captured at scheduled-reports I1. Never regenerate to fix a diff.",
+  "surface": {
+    "tools": [
+      "Agent",
+      "get_subagent_result",
+      "list_subagents",
+      "steer_subagent",
+      "set_model",
+      "abort_subagent",
+      "extend_subagent_timeout",
+      "switch_context",
+      "set_compact_threshold",
+      "bash",
+      "bash_job",
+      "SubagentWorkflow"
+    ],
+    "commands": ["cache-ttl", "goal", "agent", "task", "title", "topic-switch"],
+    "handlerCounts": {
+      "agent_end": 4,
+      "agent_settled": 7,
+      "agent_start": 1,
+      "before_agent_start": 5,
+      "before_provider_request": 1,
+      "context": 1,
+      "context_with_system": 1,
+      "input": 4,
+      "message_end": 1,
+      "message_start": 2,
+      "model_select": 3,
+      "resources_discover": 1,
+      "session_before_compact": 2,
+      "session_compact": 6,
+      "session_compact_failed": 3,
+      "session_info_changed": 1,
+      "session_shutdown": 8,
+      "session_start": 8,
+      "session_tree": 3,
+      "thinking_level_select": 1,
+      "tool_call": 1,
+      "tool_execution_end": 1,
+      "tool_execution_start": 1,
+      "turn_end": 6,
+      "turn_start": 1,
+      "ui_prompt_end": 1,
+      "ui_prompt_start": 1
+    },
+    "systemPrompt": "BASE\n\n## Available subagent types (pi-subagent)\nWhen calling the Agent tool, pass one of these exact names as `subagent_type`:\n- general-purpose: Autonomous general-purpose agent for multi-step coding and research tasks.\n- Plan: Read-only planning agent: explores the codebase and produces an implementation plan.\nTool protocol: the Agent tool always runs in the background — every call returns immediately with a run_id, and a completion notification is pushed to you when the run reaches a terminal state; after that notification arrives, collect the result with get_subagent_result(run_id). While it runs you can steer it with steer_subagent or stop it with abort_subagent. Do not poll or block waiting for it — continue other work or end your turn. Independent tasks can be dispatched in parallel with several Agent calls in the same message.\nsteer_subagent works only on a run that is still running; abort_subagent stops a running run; the Agent tool's resume parameter works only on a terminal run with an existing persisted session (terminal includes completed, failed, timed_out and aborted).\nAnywhere a run_id is accepted (get_subagent_result, steer_subagent, abort_subagent, resume), the Agent call's label (its description) works too.\nSubagentWorkflow (when enabled) also always runs in the background: it returns a workflow id (wf_…) immediately and pushes a completion notification when the workflow reaches a terminal state; get_subagent_result and abort_subagent accept that workflow id in place of a run_id.",
+    "statuses": [],
+    "legacyFileExists": false,
+    "schedulesDirExists": false
+  },
+  "wiring": {
+    "helloCaps": [
+      "ev.v1",
+      "fleet.v1",
+      "snapshot.v1",
+      "branch.v1",
+      "runtx.v1",
+      "runtx.lan.v1",
+      "cmd.v1",
+      "dialog.v1",
+      "command.v1",
+      "cmd.args.v1",
+      "upload.v1",
+      "upload.lan.v1",
+      "hold.v1"
+    ],
+    "slotSequence": ["session", "status", "fleet", "dialogs", "ctl", "commands", "status", "ctl", "commands"],
+    "statusKeys": ["busy", "contextUsage", "costUsd", "features", "leafId", "pending", "t"],
+    "hubConfig": {
+      "v": 1,
+      "home": "<tmp>",
+      "port": 0,
+      "idleExitMinutes": 10,
+      "pluginVersion": "0.0.0-golden",
+      "buildId": "golden-build",
+      "launcher": ["<node>", "/nonexistent/pi"],
+      "preview": "on",
+      "cmdArgs": "all"
+    }
+  }
+}

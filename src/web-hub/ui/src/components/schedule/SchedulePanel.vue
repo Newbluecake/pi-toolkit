@@ -24,7 +24,7 @@ import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useTicker } from "../../composables/useTicker.js";
 import { registerScheduleExtra } from "../../i18n/schedule-extra.js";
-import { fmtTs, panelView, relIn, runStateKey } from "../../logic/schedule.js";
+import { fmtTs, panelView, relIn, runReasonKey, runStateKey } from "../../logic/schedule.js";
 import { CONTROL_VIEW, HUB_CTX } from "../control/controlContext.js";
 import PickerSheet from "../control/PickerSheet.vue";
 import ScheduleReview from "./ScheduleReview.vue";
@@ -259,7 +259,9 @@ function closeReview(): void {
               <span v-if="run.kind === 'manual'" class="chip">{{ t("schedule.runManual") }}</span>
               <span class="sched-run-time">{{ fmtTs(run.startedAt) }}</span>
               <span class="sched-run-sub">
-                <template v-if="run.reason">{{ run.reason }} · </template>
+                <template v-if="run.reason"
+                  >{{ runReasonKey(run.state, run.reason) ? t(`schedule.runReason.${run.reason}`) : run.reason }} ·
+                </template>
                 {{ t("schedule.runFeishu", { state: t(`schedule.feishu.${run.feishu}`) })
                 }}<template v-if="run.reportFile"> · {{ t("schedule.runReport", { file: run.reportFile }) }}</template>
               </span>

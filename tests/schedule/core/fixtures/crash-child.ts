@@ -12,7 +12,7 @@ const [storeDir, sessionId, taskId, tText, point] = process.argv.slice(2) as [
   string,
   string,
   string,
-  WriterFaultPoint,
+  WriterFaultPoint | "lock-hold-wait",
 ];
 const self = readSelfIdentity()!;
 const store = openSessionStore({
@@ -20,7 +20,13 @@ const store = openSessionStore({
   sessionId,
   self,
   epoch: "child",
-  faults: (p) => {
+  faults: (p: WriterFaultPoint) => {
+    // `lock-hold-wait` (race test): hold the kernel lock and BLOCK until the test SIGKILLs us, so the victim
+    // can never exit by itself before the kill (the old self-kill raced the other children's win).
+    if (p === "lock-held" && (point as string) === "lock-hold-wait") {
+      process.stdout.write("HELD\n");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+    }
     if (p === point) process.kill(process.pid, "SIGKILL");
   },
 });

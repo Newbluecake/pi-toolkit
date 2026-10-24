@@ -28,6 +28,8 @@ export interface ScheduleSurfaceDeps {
   types: Pick<AgentTypeRegistry, "get" | "list">;
   /** The CURRENT stack's schedule agent (late-bound through the holder). */
   current(): ScheduleAgent | undefined;
+  /** I1: the message scheduler's `revokeTask` (late-bound; absent ⇒ ledger-only revocation). */
+  revokeQueued?(taskId: string): void;
 }
 
 export interface ScheduleSurface {
@@ -93,6 +95,7 @@ export function wireScheduleSurface(pi: ExtensionAPI, deps: ScheduleSurfaceDeps)
         capability: () => getXsHostCapability().state,
         ownerCwd: () => canonicalCwd(ctx.cwd),
         defaultTz: systemTimeZone,
+        ...(deps.revokeQueued !== undefined ? { revokeQueued: deps.revokeQueued } : {}),
       };
     },
     async start(ctx, agent) {

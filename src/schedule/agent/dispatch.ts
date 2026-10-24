@@ -72,6 +72,12 @@ import type { ScheduleRefusal } from "./mode.js";
 
 /** Idle re-evaluation cadence while something is queued (unref'd; nothing is armed when the queue is empty). */
 export const SCHED_MSG_POLL_MS = 2_000;
+/**
+ * I1 (C-S5): hard cap, measured from the send, on how far OUR OWN pre-start compaction may push the 60 s start budget
+ * (`SCHED_START_TIMEOUT_MS`). While the compaction this very send triggered is running the budget is paused (it rolls
+ * forward); it resumes `SCHED_START_TIMEOUT_MS` after the compaction ends — never beyond `sentAt + this`.
+ */
+export const SCHED_START_COMPACTION_MAX_MS = 600_000;
 /** After `ctx.abort()` the run gets this long to settle before it is force-finished (no wedged slot). */
 export const SCHED_MSG_ABORT_GRACE_MS = 15_000;
 /** Ledger write retries (terminal writes must land: a live holder's run is never recovered). */
@@ -79,7 +85,20 @@ export const SCHED_MSG_COMMIT_RETRIES = 5;
 /** Idle observations (poll cadence) that release a stuck aborted run's capacity. */
 export const SCHED_MSG_STUCK_IDLE_OBS = 2;
 /** Bound on unmatched-end credits (an end that overtook its start). */
-const UI_CREDIT_MAX = 8;
+/**
+ * I1 review r1 #1: how long after the send an observed `session_before_compact` is still attributed to it. Real pi awaits
+ * EVERY handler of an event in turn, so with any handler ahead of ours (xs's, in production) our handler runs a few
+ * microtasks after `sendCustomMessage` returned — the synchronous-stack attribution alone is not reliable. The
+ * attribution is bound to the pending flight (`dispatched`, no run of a human's started, first compaction only).
+ */
+export const SCHED_SELF_COMPACTION_ATTRIB_MS = 5_000;
+/**
+ * I1 review r2 #4: after the LAST ui dialog end, dispatch waits this long before it may go. Dialog identity is only
+ * (kind,title), so start(B) → end(A) → late start(A) cannot be told apart by counting: end(A) consumes B's open and the
+ * count touches zero while B is still on screen. A late start that lands inside this bounded buffer re-blocks; one that
+ * is later than the buffer is the documented residual (exits: `/schedule repair`, `/fabric fence reset`).
+ */
+export const UI_END_SETTLE_MS = 2_000;
 /** sendMessage throwing this often in a row drops the run (pi cannot deliver). */
 export const SCHED_MSG_SEND_FAILURES_MAX = 5;
 
@@ -118,6 +137,8 @@ export interface HandoffInput {
   /** Same noteId as the result note it replaces (§6.3). */
   noteId: string;
   content: string;
+  /** Claim time (`startedAt`) of the source background run: a pause/delete AFTER it revokes the handoff. */
+  startedAt?: number;
   onEnd(outcome: HandoffOutcome): void;
 }
 
@@ -177,6 +198,13 @@ export interface MessageScheduler {
   enqueue(run: RunRecord, task: ScheduleTask): void;
   /** The handoff entry for A1's note path. `false` ⇒ not accepted (stopped) — fall back to a quiet note. */
   enqueueHandoff(input: HandoffInput): boolean;
+  /**
+   * I1 (A2 residual 3): a pause / delete of `taskId` revokes its QUEUED message and handoff entries
+   * (never an already dispatched / in-flight run). Message entries end as `dropped(task-changed)`, handoff
+   * entries call `onEnd({dropped,"task-changed"})` (their owner falls back to a quiet recap). Returns the
+   * number of entries revoked. In-memory only: another process's queue is out of reach (disclosed residual).
+   */
+  revokeTask(taskId: string): number;
   onBeforeAgentStart(event: unknown): "other" | "authorized" | "aborted";
   onContext(): void;
   onMessageStart(message: unknown): void;
@@ -356,7 +384,7 @@ export function createProcessOccupancy(
 // ----------------------------------------------------------------- internals
 
 type Phase = "dispatched" | "authorized" | "bound" | "aborting";
-type AbortCause = "start-timeout" | "run-max";
+type AbortCause = "start-timeout" | "run-max" | "fenced";
 
 interface QEntry {
   kind: "message" | "handoff";
@@ -370,6 +398,14 @@ interface QEntry {
   claimed?: ScheduleTask;
   queuedAt: number;
   dead: boolean;
+  /** `revokeTask` hit this entry while its ledger CAS was in flight: the pump settles it afterwards. */
+  revoked?: boolean;
+  /** The ledger CAS for this entry is awaiting (the entry must stay in the queue until it settles). */
+  casing?: boolean;
+  /** The handoff's terminal callback has fired (exactly once, whichever path got there first). */
+  ended?: boolean;
+  /** Claim time of the source run (revocation generation check). */
+  sourceAt: number;
   failures: number;
 }
 
@@ -398,6 +434,20 @@ interface Flight {
   handed: boolean;
   voided: boolean;
   abortCause?: AbortCause;
+  /**
+   * I1 (C-S5): pi's pre-start compaction fires SYNCHRONOUSLY inside `sendCustomMessage`. A `session_before_compact`
+   * that arrives while THIS send is on the stack was caused by this send (`selfCompaction`): its compaction window is
+   * exempt from `verifyDispatch`'s "session moved" verdict (compaction ONLY) and pauses the start budget
+   * (`compacting` ⇒ rolling deadline, `compactEndedAt` ⇒ resumes). A compaction that starts later is foreign: no exemption.
+   */
+  selfCompaction?: boolean;
+  /** Generation of the fence at the dispatch point (a later change ⇒ the session identity moved). */
+  gen: number;
+  /** End of the window in which a `session_before_compact` is still attributed to this send. */
+  attribUntil: number;
+  compacting?: boolean;
+  compactStartedAt?: number;
+  compactEndedAt?: number;
   sawAssistant: boolean;
   lastText?: string;
   startTimer?: TimerHandle | undefined;
@@ -443,7 +493,21 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
   });
 
   const queue: QEntry[] = [];
+  /**
+   * I1 review r1 #3: in-process revocation generation — taskId → time of the last pause/delete. Anything whose source run
+   * was claimed at or before it (a handoff that reaches the queue AFTER the pause, a CAS in flight) is refused; the
+   * enabled=false once-claim exemption can therefore never launder a post-pause wake. Process-local by design
+   * (cross-process stays the CAS's task-snapshot residual); FIFO-capped, dies with the scheduler.
+   */
+  const revokedAt = new Map<string, number>();
+  const REVOKED_MAX = 64;
+  const revokedSince = (taskId: string, sourceAt: number): boolean => {
+    const at = revokedAt.get(taskId);
+    return at !== undefined && sourceAt <= at;
+  };
   let flight: Flight | undefined;
+  /** The flight whose `host.sendMessage` call is on the stack right now (synchronous attribution of reentrant events). */
+  let sending: Flight | undefined;
   let shut = false;
   let running = false;
   let startSeq = 0;
@@ -456,9 +520,10 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
    * (consumed FIRST, so an old dialog's late end can never close a newer one). Blocked ⇔ any `open` > 0.
    */
   const uiOpen = new Map<string, number>();
-  const uiCredit = new Map<string, number>();
   const uiGhost = new Map<string, number>();
   let uiBlockedSince: number | undefined;
+  /** Time of the last ui dialog end (settle buffer, see `UI_END_SETTLE_MS`). */
+  let uiLastEndAt: number | undefined;
   let notified = false;
   let pumping = false;
   let pumpAgain = false;
@@ -647,13 +712,21 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
     if (!hostIdle() || hostPending()) return "wait";
     if (deps.rootWakeBusy?.() === true || deps.xsWakeOwned?.() === true) return "wait";
     if (uiOpenCount() > 0) return "wait";
+    if (uiLastEndAt !== undefined && clock.now() - uiLastEndAt < UI_END_SETTLE_MS) return "wait";
     if (!fence.check().ok) return "wait"; // goal downgrades to wait too — never a rejection
     return "ok";
   }
 
+  /** A handoff entry's terminal callback fires at most once (coalesce / revoke / CAS / shutdown may all race to it). */
+  const endHandoff = (e: QEntry, outcome: HandoffOutcome): void => {
+    if (e.ended === true) return;
+    e.ended = true;
+    e.handoff!.onEnd(outcome);
+  };
+
   const dropEntry = async (e: QEntry, reason: string): Promise<void> => {
     if (e.kind === "handoff") {
-      e.handoff!.onEnd({ kind: "dropped", reason });
+      endHandoff(e, { kind: "dropped", reason });
       return;
     }
     const run = e.run!;
@@ -737,7 +810,7 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
         if (cur === undefined || cur.state !== "queued" || !sameHolder(cur.holder, deps.holder))
           return { value: { kind: "gone" }, write: false };
         const t = draft.tasks.find((x) => x.id === cur.taskId);
-        if (!stillAuthorized(t, cur.defHash, cur.kind, false, e.claimed)) {
+        if (revokedSince(cur.taskId, e.sourceAt) || !stillAuthorized(t, cur.defHash, cur.kind, false, e.claimed)) {
           finishRun(draft, cur.runKey, { state: "dropped", reason: "task-changed" }, ctx.now);
           return { value: { kind: "changed" }, write: true };
         }
@@ -747,7 +820,8 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
       const h = e.handoff!;
       const t = draft.tasks.find((x) => x.id === h.taskId);
       const kind = parseRunKey(h.runKey)?.kind ?? "manual";
-      if (!stillAuthorized(t, h.defHash, kind, true, e.claimed)) return { value: { kind: "changed" }, write: false };
+      if (revokedSince(h.taskId, e.sourceAt) || !stillAuthorized(t, h.defHash, kind, true, e.claimed))
+        return { value: { kind: "changed" }, write: false };
       return { value: { kind: "ok", task: structuredClone(t) }, write: false };
     });
     if (!r.ok) return r.uncertain === true ? { kind: "uncertain" } : { kind: "busy" };
@@ -771,6 +845,8 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
       ...(e.run !== undefined ? { run: e.run } : {}),
       ...(e.handoff !== undefined ? { handoff: e.handoff } : {}),
       sentAt: clock.now(),
+      gen: begin.gen,
+      attribUntil: clock.now() + SCHED_SELF_COMPACTION_ATTRIB_MS,
       phase: "dispatched",
       foreignStart: false,
       recorded: false,
@@ -784,6 +860,7 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
     };
     // Occupy before the host call: even a synchronous reentrant hook sees the flight.
     flight = f;
+    sending = f; // I1: events delivered on THIS synchronous stack were caused by this send
     const content = e.kind === "handoff" ? e.handoff!.content : deps.contentFor(e.run!, e.task);
     try {
       host.sendMessage(
@@ -796,12 +873,24 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
         { triggerTurn: true },
       );
     } catch (err) {
+      sending = undefined;
       if (flight === f) flight = undefined;
       warn(`sendMessage failed: ${err instanceof Error ? err.message : String(err)}`);
       return "failed";
     }
+    sending = undefined;
     if (flight !== f) return "sent"; // finished reentrantly (shutdown / terminal inside the send)
-    const verify = fence.verifyDispatch(begin.gen);
+    let verify = fence.verifyDispatch(begin.gen);
+    if (
+      !verify.ok &&
+      verify.reason === "fenced:compaction" &&
+      f.selfCompaction === true &&
+      fence.status().open.every((n) => n === "compaction")
+    ) {
+      // The compaction window is the pre-start compaction THIS send triggered (it began on this synchronous stack and
+      // no other window / session identity change is involved): the dispatch is still provably ours and live.
+      verify = { ok: true, gen: begin.gen };
+    }
     if (!verify.ok) {
       // The session identity moved under the send: the write is not provably live. The trigger may
       // still start later — it is an orphan (no flight) and gets aborted on sight.
@@ -857,16 +946,25 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
         schedulePump(SCHED_MSG_POLL_MS);
         return;
       }
-      const cas = await serial(() => casDispatched(e));
+      e.casing = true;
+      const cas = await serial(() => casDispatched(e)).finally(() => {
+        e.casing = false;
+      });
       const remove = (): void => {
         const i = queue.indexOf(e);
         if (i >= 0) queue.splice(i, 1);
       };
+      if (e.revoked === true) {
+        // revokeTask() ran while the CAS was in flight (A2 residual 3): whatever the CAS did, nothing is sent.
+        occupancy.release(epoch, e.runKey);
+        remove();
+        revokeEntry(e);
+        continue;
+      }
       if (cas.kind === "gone" || cas.kind === "changed") {
         occupancy.release(epoch, e.runKey);
         remove();
-        if (cas.kind === "changed" && e.kind === "handoff")
-          e.handoff!.onEnd({ kind: "dropped", reason: "task-changed" });
+        if (cas.kind === "changed" && e.kind === "handoff") endHandoff(e, { kind: "dropped", reason: "task-changed" });
         continue;
       }
       if (cas.kind === "uncertain") {
@@ -960,24 +1058,54 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
     else abortRun(f, "start-timeout"); // our trigger is stuck in prepare / pre-start compaction
   }
 
+  /**
+   * I1 review r1 #2: has the session moved (or is a mutation window open) under a flight that has not made its first
+   * model call? Our OWN compaction while it is still running is the only tolerated open window; `goal` only downgrades
+   * waking and never counts. A compaction we did not trigger (or one that ended while another window opened) blocks.
+   */
+  function sessionMovedUnder(f: Flight): boolean {
+    if (fence.generation() !== f.gen) return true;
+    const open = fence.status().open.filter((n) => n !== "goal");
+    if (open.length === 0) return false;
+    return !(f.compacting === true && open.every((n) => n === "compaction"));
+  }
+
+  /**
+   * The start budget's end: `sentAt + 60 s`, pushed out by the pre-start compaction THIS send triggered (rolling while it
+   * runs, `+60 s` after it ended), never beyond `sentAt + SCHED_START_COMPACTION_MAX_MS`.
+   */
+  function startDeadlineOf(f: Flight, now: number): number {
+    const base = f.sentAt + SCHED_START_TIMEOUT_MS;
+    if (f.compactStartedAt === undefined) return base;
+    const candidate = f.compacting === true ? now : (f.compactEndedAt ?? now);
+    return Math.min(f.sentAt + SCHED_START_COMPACTION_MAX_MS, Math.max(base, candidate + SCHED_START_TIMEOUT_MS));
+  }
+
   /** Absolute deadlines, checked synchronously before any timer callback gets a chance (r1 #6). */
   function enforceDeadlines(f: Flight): void {
     if (flight !== f || (f.recorded && f.phase !== "aborting")) return;
     const now = clock.now();
     if (f.phase === "dispatched") {
-      if (now >= f.sentAt + SCHED_START_TIMEOUT_MS) startTimeout(f);
+      if (now >= startDeadlineOf(f, now)) startTimeout(f);
       return;
     }
     if ((f.phase !== "authorized" && f.phase !== "bound") || f.merged || f.handed) return;
-    if (!f.modelCalled && now >= f.sentAt + SCHED_START_TIMEOUT_MS) abortRun(f, "start-timeout");
+    if (!f.modelCalled && now >= startDeadlineOf(f, now)) abortRun(f, "start-timeout");
     else if (f.authorizedAt !== undefined && now >= f.authorizedAt + SCHED_RUN_MAX_MS) abortRun(f, "run-max");
   }
 
   function armStart(f: Flight): void {
-    const left = Math.max(0, f.sentAt + SCHED_START_TIMEOUT_MS - clock.now());
+    const left = Math.max(0, startDeadlineOf(f, clock.now()) - clock.now());
     f.startTimer = clock.setTimer(left, () => {
       f.startTimer = undefined;
-      if (flight === f && !stopped()) enforceDeadlines(f);
+      if (flight !== f || stopped()) return;
+      enforceDeadlines(f);
+      // Our own pre-start compaction moved the deadline: not due yet ⇒ look again at the new one (bounded by the hard cap).
+      const waiting =
+        !f.recorded &&
+        (f.phase === "dispatched" ||
+          ((f.phase === "authorized" || f.phase === "bound") && !f.modelCalled && !f.merged && !f.handed));
+      if (flight === f && f.startTimer === undefined && waiting) armStart(f);
     });
   }
 
@@ -1062,10 +1190,16 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
     if (old >= 0) {
       const [gone] = queue.splice(old, 1);
       gone!.dead = true;
-      if (gone!.kind === "handoff") gone!.handoff!.onEnd({ kind: "dropped", reason: "coalesced" });
+      if (gone!.kind === "handoff") endHandoff(gone!, { kind: "dropped", reason: "coalesced" });
     }
     queue.push(e);
     schedulePump(0);
+  };
+
+  /** The terminal consequence of a revoked entry: handoff ⇒ owner falls back to a quiet recap; message ⇒ dropped. */
+  const revokeEntry = (e: QEntry): void => {
+    if (e.kind === "handoff") endHandoff(e, { kind: "dropped", reason: "task-changed" });
+    else finishLedger(e.runKey, "dropped", "task-changed");
   };
 
   const claimedOf = (taskId: string): { claimed?: ScheduleTask } => {
@@ -1079,6 +1213,10 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
     fence,
     enqueue(run, task) {
       if (stopped()) return;
+      if (revokedSince(run.taskId, run.startedAt)) {
+        finishLedger(run.runKey, "dropped", "task-changed"); // claimed before a pause/delete that already happened
+        return;
+      }
       enqueueEntry({
         kind: "message",
         key: `message:${run.taskId}`,
@@ -1089,11 +1227,22 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
         ...claimedOf(run.taskId),
         queuedAt: clock.now(),
         dead: false,
+        sourceAt: run.startedAt,
         failures: 0,
       });
     },
     enqueueHandoff(input) {
       if (stopped()) return false;
+      const sourceAt = input.startedAt ?? clock.now();
+      if (input.startedAt !== undefined && revokedSince(input.taskId, sourceAt)) {
+        // The source run was claimed before a pause/delete that already happened: no wake. Exactly one outcome.
+        try {
+          input.onEnd({ kind: "dropped", reason: "task-changed" });
+        } catch (err) {
+          warn(`handoff onEnd failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return true;
+      }
       enqueueEntry({
         kind: "handoff",
         key: `handoff:${input.taskId}`,
@@ -1104,9 +1253,29 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
         ...claimedOf(input.taskId),
         queuedAt: clock.now(),
         dead: false,
+        sourceAt,
         failures: 0,
       });
       return true;
+    },
+    revokeTask(taskId) {
+      revokedAt.set(taskId, clock.now());
+      while (revokedAt.size > REVOKED_MAX) revokedAt.delete(revokedAt.keys().next().value as string);
+      let n = 0;
+      for (const e of [...queue]) {
+        if (e.taskId !== taskId || e.dead) continue;
+        e.dead = true;
+        n += 1;
+        if (e.casing === true) {
+          e.revoked = true; // the pump finishes it after the in-flight CAS (never sends)
+          continue;
+        }
+        const i = queue.indexOf(e);
+        if (i >= 0) queue.splice(i, 1);
+        revokeEntry(e);
+      }
+      if (n > 0) schedulePump(0);
+      return n;
     },
     onBeforeAgentStart(event) {
       const before = capability.state;
@@ -1129,6 +1298,16 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
         trigger.token === f.token &&
         f.phase !== "aborting"
       ) {
+        if (f.phase === "dispatched" && sessionMovedUnder(f)) {
+          // The pre-start wait ended with a mutation window open (switch / fork / tree / web_exec / topic_switch, a
+          // foreign compaction) or a new session identity: the dispatch is no longer provably live. Converge like the
+          // post-send check does — unknown(owner-closed), never a resend — and stop this trigger before any model call.
+          closeFlight(f);
+          recordUnknown(f, "owner-closed");
+          markOrphanRun(registry, trigger.token);
+          safeAbort("fenced");
+          return "aborted";
+        }
         if (f.phase === "dispatched") {
           const now = clock.now();
           f.phase = "authorized";
@@ -1148,6 +1327,22 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
     onContext() {
       const f = flight;
       if (f !== undefined) enforceDeadlines(f);
+      if (
+        f !== undefined &&
+        flight === f &&
+        !f.recorded &&
+        !f.modelCalled &&
+        !f.merged &&
+        !f.handed &&
+        !f.voided &&
+        (f.phase === "authorized" || f.phase === "bound") &&
+        sessionMovedUnder(f)
+      ) {
+        // Last gate before the first model request (window opened between before_agent_start and here).
+        recordUnknown(f, "owner-closed");
+        abortRun(f, "fenced");
+        return;
+      }
       const verdict = judgeScheduledContext(registry, clock.now(), epochDisposed);
       if (verdict === "abort") {
         // The authorization behind this run is gone (start timeout, run limit, teardown, reload): block the call.
@@ -1228,18 +1423,51 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
       else finishLedger(f.runKey, "continued");
     },
     onUiPrompt(open, info) {
+      // Pairing is by (kind,title) because pi's ui events carry no unique dialog id (every `ui.custom` has no title). The
+      // rule is deliberately one-directional: it can only OVER-block. An `end` that finds no open dialog is ignored — it
+      // never becomes a credit that a later, different dialog of the same key could consume (I1 review r1 #4); a start
+      // whose end was lost keeps blocking until `/schedule repair` or `/fabric fence reset`.
       const key = `${info?.kind ?? ""}\u0000${info?.title ?? ""}`;
-      if (open) {
-        if ((uiCredit.get(key) ?? 0) > 0) bump(uiCredit, key, -1);
-        else bump(uiOpen, key, 1);
-      } else if ((uiGhost.get(key) ?? 0) > 0) bump(uiGhost, key, -1);
+      if (open) bump(uiOpen, key, 1);
+      else if ((uiGhost.get(key) ?? 0) > 0) bump(uiGhost, key, -1);
       else if ((uiOpen.get(key) ?? 0) > 0) bump(uiOpen, key, -1);
-      else if ([...uiCredit.values()].reduce((a, b) => a + b, 0) < UI_CREDIT_MAX) bump(uiCredit, key, 1);
       uiBlockedSince = uiOpenCount() > 0 ? (uiBlockedSince ?? clock.now()) : undefined;
-      if (!open) schedulePump(0);
+      if (!open) {
+        uiLastEndAt = clock.now();
+        schedulePump(UI_END_SETTLE_MS); // dispatch is not due before the settle buffer is over
+      }
     },
     onFenceEvent(event) {
       fence.onEvent(event);
+      const f = flight;
+      if (
+        event.type === "session_before_compact" &&
+        f !== undefined &&
+        f.phase === "dispatched" &&
+        !f.foreignStart &&
+        f.compactStartedAt === undefined &&
+        (sending === f || clock.now() <= f.attribUntil)
+      ) {
+        // pi's pre-start compaction for THIS send: observed on the send's own synchronous stack, or — because real pi
+        // awaits every handler in turn, so any handler ahead of ours delays this one by microtasks — within a short window
+        // bound to this still-`dispatched` flight (first compaction only; a human's run starting closes it).
+        f.selfCompaction = true;
+        f.compacting = true;
+        f.compactStartedAt = clock.now();
+      } else if (
+        (event.type === "session_compact" || event.type === "session_compact_failed") &&
+        f !== undefined &&
+        f.compacting === true
+      ) {
+        // Finished / failed / cancelled: no resend, the flight converges by the ordinary rules (authorization at its
+        // own before_agent_start, or the start budget which now resumes from here).
+        f.compacting = false;
+        f.compactEndedAt = clock.now();
+        if (f.startTimer !== undefined) {
+          f.startTimer = clearTimer(f.startTimer);
+          armStart(f);
+        }
+      }
       schedulePump(0);
     },
     resetBlockers() {
@@ -1247,8 +1475,8 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
       // credits are dropped. A dialog that is really still open will be counted again by its own events.
       for (const [k, v] of uiOpen) bump(uiGhost, k, v);
       uiOpen.clear();
-      uiCredit.clear();
       uiBlockedSince = undefined;
+      uiLastEndAt = undefined; // the human's explicit exit: no buffer to wait out
       fence.reset();
       schedulePump(0);
     },
@@ -1280,7 +1508,7 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
       }
       for (const e of queue.splice(0)) {
         e.dead = true;
-        if (e.kind === "handoff") e.handoff!.onEnd({ kind: "dropped", reason: "owner-closed" });
+        if (e.kind === "handoff") endHandoff(e, { kind: "dropped", reason: "owner-closed" });
       }
       for (const [h, resolve] of [...sleepers]) {
         clock.clearTimer(h);

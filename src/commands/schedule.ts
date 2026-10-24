@@ -14,6 +14,7 @@ import {
   type OpOrigin,
   type OpsPorts,
   type RawFields,
+  type RevokeOpts,
 } from "../schedule/agent/ops.js";
 import { runLine, taskDetail, taskLine } from "../schedule/agent/view.js";
 import type { ScheduleAgent } from "../schedule/agent/wire.js";
@@ -36,7 +37,7 @@ import { SCHED_HASH_RE, SCHED_TASK_ID_RE } from "../web-hub/protocol/schedule.js
  *   /schedule approve <id> [<hash>] [--all]   review (full definition + hash) → confirm → CAS on that hash
  *   /schedule pause|resume|rm <id> [--all]    (resume never approves)
  *   /schedule run <id>                         immediate run (this session only)
- *   /schedule repair                           quarantine a corrupt ledger
+ *   /schedule repair                           quarantine a corrupt ledger; local-only: also resets the dispatcher blockers
  *   /schedule __put <json> <hash>              web review form (frozen contract below)
  *
  * Flags: --name --cron --at --tz --form background|message --feishu/--no-feishu --type --model
@@ -78,7 +79,7 @@ const USAGE = [
   "/schedule show <id> · log [<id>] — 完整定义与 hash · 运行历史（可加 --all）",
   "/schedule approve <id> [<hash>] — 审阅完整定义后批准（绑定 hash）",
   "/schedule pause|resume|rm <id> — 暂停 / 恢复（恢复不等于批准）/ 删除",
-  "/schedule run <id> — 立即运行（仅本会话）；/schedule repair — 修复损坏的账本",
+  "/schedule run <id> — 立即运行（仅本会话）；/schedule repair — 修复损坏的账本，并重置调度器栅栏阻塞（仅本地）",
   "--all：管理其他会话的任务（list/show/log/pause/resume/rm/approve；edit、run 不可用）",
 ].join("\n");
 
@@ -89,6 +90,8 @@ export interface ScheduleCommandDeps {
   ports(agent: ScheduleAgent, ctx: ExtensionCommandContext): OpsPorts;
   /** Vault predicate (literal + canonical) for opening other sessions' ledgers. */
   inVault: InVaultPredicate;
+  /** I1: local human reset of the message dispatcher's fence windows / ui-prompt balance (`/schedule repair`). */
+  resetBlockers?(): void;
   now?: () => number;
 }
 
@@ -609,10 +612,12 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
     if (given !== undefined && !SCHED_HASH_RE.test(given))
       return void notify(ctx, "E_INVALID: hash 应为 64 位十六进制（来自审阅界面）", "warning");
     let store: SessionStore;
+    let own = true;
     if (all) {
       const l = locateAll(agent, deps, id);
       if (!l.ok) return void notify(ctx, l.text, "error");
       store = l.store;
+      own = l.sessionId === agent.sessionId; // a foreign process's in-memory queue is out of reach (ledger half only)
     } else {
       const g = agent.gate();
       if (g !== undefined) return void notify(ctx, `${g.code}: ${g.detail}`, "error");
@@ -625,6 +630,12 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
     notify(ctx, r.text, r.level);
   }
 
+  function revokeOpts(agent: ScheduleAgent, ctx: ExtensionCommandContext, own: boolean): RevokeOpts {
+    if (!own) return {};
+    const revoke = deps.ports(agent, ctx).revokeQueued;
+    return revoke === undefined ? {} : { revoke };
+  }
+
   async function simple(
     ctx: ExtensionCommandContext,
     agent: ScheduleAgent,
@@ -634,10 +645,12 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
   ): Promise<void> {
     if (id === undefined) return void notify(ctx, `用法：/schedule ${sub} <id> [--all]`, "warning");
     let store: SessionStore;
+    let own = true;
     if (all) {
       const l = locateAll(agent, deps, id);
       if (!l.ok) return void notify(ctx, l.text, "error");
       store = l.store;
+      own = l.sessionId === agent.sessionId; // a foreign process's in-memory queue is out of reach (ledger half only)
     } else {
       const g = agent.gate();
       if (g !== undefined) return void notify(ctx, `${g.code}: ${g.detail}`, "error");
@@ -646,12 +659,12 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
       store = s;
     }
     if (sub === "rm") {
-      const r = await deleteTask(store, id);
+      const r = await deleteTask(store, id, revokeOpts(agent, ctx, own));
       if (!r.ok) return void notify(ctx, failText(r), "error");
       agent.changed();
       return void notify(ctx, `已删除 ${id}（已有运行记录保留在历史里）。`);
     }
-    const r = await setTaskEnabled(store, id, sub === "resume");
+    const r = await setTaskEnabled(store, id, sub === "resume", revokeOpts(agent, ctx, own));
     if (!r.ok) return void notify(ctx, failText(r), "error");
     agent.changed();
     notify(
@@ -681,8 +694,17 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
   }
 
   async function repair(ctx: ExtensionCommandContext, agent: ScheduleAgent): Promise<void> {
+    // The dispatcher's own blockers (a lost ui `end`, a stuck fence window) never lift on their own (M1):
+    // this local-only subcommand is the escape that works even when fabric/xs (/fabric fence reset) is off.
+    // Local TUI/RPC only: a web invocation (even under a permissive `webCommandPolicy.schedule`) never resets it.
+    const reset = deps.resetBlockers !== undefined && !isWebInvocation(ctx);
+    if (reset) deps.resetBlockers!();
     const r = ownState(agent);
-    if (r.error === undefined) return void notify(ctx, "本会话的账本正常，无需修复。");
+    if (r.error === undefined)
+      return void notify(
+        ctx,
+        `本会话的账本正常，无需修复。${reset ? "调度器的栅栏窗口与对话计数已重置（仅本地）。" : ""}`,
+      );
     let store: SessionStore;
     try {
       store = agent.store() ?? agent.ensureStore();

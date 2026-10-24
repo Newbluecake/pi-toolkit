@@ -16,6 +16,7 @@ import {
   isSchedulesPayloadLike,
   panelView,
   relIn,
+  runReasonKey,
   runStateKey,
   scheduleBadgeOf,
   scheduleBadgeText,
@@ -111,6 +112,22 @@ describe("display helpers", () => {
     });
     expect(whenParts(undefined).kind).toBe("invalid");
   });
+  it("runReasonKey: only dropped runs with a known reason map to an i18n leaf (I1)", () => {
+    for (const r of [
+      "coalesced",
+      "owner-closed",
+      "capability",
+      "capability-unknown",
+      "start-timeout",
+      "task-changed",
+    ]) {
+      expect(runReasonKey("dropped", r)).toBe(r);
+      expect(runReasonKey("unknown", r)).toBeUndefined();
+    }
+    expect(runReasonKey("dropped", "something-else")).toBeUndefined();
+    expect(runReasonKey("dropped", undefined)).toBeUndefined();
+  });
+
   it("runStateKey / isRunLive / feishuKey (stale ⇒ q; n/a ⇒ na)", () => {
     expect(runStateKey("completed")).toBe("completed");
     expect(runStateKey("bogus" as never)).toBe("unknown");

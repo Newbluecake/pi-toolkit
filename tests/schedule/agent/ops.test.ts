@@ -10,6 +10,8 @@ import {
 } from "../../../src/schedule/agent/ops.js";
 import { defHash, isApproved, isExecutable } from "../../../src/schedule/core/spec.js";
 import { a3Env, basicRaw, CRON, type A3Env } from "./a3-helpers.js";
+import { holder } from "../core/fixtures.js";
+import type { RunRecord } from "../../../src/schedule/core/spec.js";
 
 let env: A3Env;
 afterEach(() => env?.cleanup());
@@ -266,5 +268,83 @@ describe("approveReviewed (__put)", () => {
     if (!r2.ok) throw new Error(r2.detail);
     expect(isApproved(r2.value)).toBe(true);
     expect(r2.value.approval?.hash).toBe(h2);
+  });
+});
+
+describe("pause / delete revoke queued message runs (I1, A2 residual 3)", () => {
+  async function approvedTask(name = "t") {
+    const r = await createTask(env.ports, basicRaw({ name }), USER);
+    if (!r.ok) throw new Error(r.detail);
+    return r.value;
+  }
+  async function queuedRun(taskId: string, over: Partial<RunRecord> = {}): Promise<RunRecord> {
+    const run: RunRecord = {
+      runKey: over.runKey ?? `${taskId}@${env.fake.now()}`,
+      taskId,
+      kind: "auto",
+      form: "message",
+      scheduledAt: env.fake.now(),
+      defHash: "0".repeat(64),
+      state: "queued",
+      holder: holder(),
+      startedAt: env.fake.now(),
+      note: "none",
+      ...over,
+    };
+    await env.agent.ensureStore().transact((d) => {
+      d.runs.push(run);
+      return { value: undefined, write: true };
+    });
+    return run;
+  }
+
+  it("pause: queued message runs of THAT task become dropped(task-changed) in the ledger; other tasks, other forms and non-queued runs are untouched; resume revokes nothing", async () => {
+    env = a3Env();
+    const t = await approvedTask();
+    const other = await approvedTask("other");
+    const q = await queuedRun(t.id);
+    const qOther = await queuedRun(other.id);
+    const dispatched = await queuedRun(t.id, { runKey: `${t.id}@m-aaaaaaa1`, kind: "manual", state: "dispatched" });
+    const bg = await queuedRun(t.id, {
+      runKey: `${t.id}@m-aaaaaaa2`,
+      kind: "manual",
+      form: "background",
+      state: "running",
+    });
+    const revoked: string[] = [];
+    const rr = await setTaskEnabled(env.agent.ensureStore(), t.id, true, { revoke: (id) => revoked.push(id) });
+    expect(rr, JSON.stringify(rr)).toMatchObject({ ok: true });
+    expect(revoked).toEqual([]);
+    expect(state().runs.find((r) => r.runKey === q.runKey)?.state).toBe("queued");
+    expect((await setTaskEnabled(env.agent.ensureStore(), t.id, false, { revoke: (id) => revoked.push(id) })).ok).toBe(
+      true,
+    );
+    expect(revoked).toEqual([t.id]);
+    const by = (k: string) => state().runs.find((r) => r.runKey === k)!;
+    expect(by(q.runKey)).toMatchObject({ state: "dropped", reason: "task-changed" });
+    expect(by(qOther.runKey).state).toBe("queued");
+    expect(by(dispatched.runKey).state).toBe("dispatched");
+    expect(by(bg.runKey).state).toBe("running");
+  });
+
+  it("delete: the task's queued message run is dropped (or swept) too, and the in-memory revoke is called", async () => {
+    env = a3Env();
+    const t = await approvedTask();
+    const q = await queuedRun(t.id);
+    const revoked: string[] = [];
+    expect((await deleteTask(env.agent.ensureStore(), t.id, { revoke: (id) => revoked.push(id) })).ok).toBe(true);
+    expect(revoked).toEqual([t.id]);
+    // (the next write's housekeeping may already have swept an orphaned run — either way it is not queued any more)
+    const rec = state().runs.find((r) => r.runKey === q.runKey);
+    expect(rec === undefined || (rec.state === "dropped" && rec.reason === "task-changed")).toBe(true);
+  });
+
+  it("a failed pause (unknown task) revokes nothing", async () => {
+    env = a3Env();
+    const revoked: string[] = [];
+    expect(
+      await setTaskEnabled(env.agent.ensureStore(), "s_aaaaaaaa", false, { revoke: (id) => revoked.push(id) }),
+    ).toMatchObject({ ok: false });
+    expect(revoked).toEqual([]);
   });
 });
