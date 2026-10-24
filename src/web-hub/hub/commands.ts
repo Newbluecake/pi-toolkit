@@ -379,7 +379,26 @@ export function createCommandRouter(deps: { registry: Registry; log: HubLog; now
       throw err;
     }
     decInflight();
-    if (body.ok || !body.retryable) {
+    // Async EXTENSION commands (agent-side async-late channel, agent fix 2026-10-22 /
+    // 0a129f2a — commands.ts's `replyOnly` branch; THIS hub-side classification is the
+    // 2026-10-24 fix): the ok reply is PROVISIONAL — the agent's ledger entry stays
+    // `running` and the authoritative result (with the captured output) arrives via `cmd_late`.
+    // Caching it as "done" here would poison every later queryOnly with the output-less reply
+    // (the late-result handler only upgrades "unknown" entries) — the 2026-10-24 /record-on
+    // field bug. Cache it as "unknown" instead: an interim queryOnly is then forwarded to the
+    // agent (which answers its live ledger state), the cmd_late handler upgrades the entry to
+    // the full result, and the agent guarantees the late frame always comes (CAPTURE_MAX_MS
+    // settle-anyway). BUILTIN async (/compact, /model) is deliberately untouched — their ledger
+    // settle already happened (their cmd_late is an upgrade, and ModelSwitcher's ctl-slot
+    // convergence relies on the immediate settle).
+    const provisionalAsyncExtension =
+      body.ok === true &&
+      body.data.op === "command" &&
+      body.data.kind === "extension" &&
+      body.data.completion === "async";
+    if (provisionalAsyncExtension) {
+      entry.state = "unknown";
+    } else if (body.ok || !body.retryable) {
       entry.state = "done";
       entry.result = body;
     } else if (body.effect === "unknown") {

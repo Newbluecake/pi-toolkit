@@ -224,6 +224,149 @@ describe("commands router: queryOnly (\u00a73.4)", () => {
   });
 });
 
+describe("commands router: async extension command (agent async-late channel, fix 2026-10-22)", () => {
+  const asyncReply = {
+    ok: true,
+    data: { op: "command", kind: "extension", completion: "async", captured: true },
+  };
+  const lateOutput = {
+    op: "command",
+    kind: "extension",
+    completion: "sync",
+    captured: true,
+    output: { entries: [{ kind: "notify", level: "info", text: "recording on" }] },
+  };
+  const cmdFrame = (over: Partial<CmdFrame> = {}): CmdFrame => ({
+    ...promptFrame(),
+    cmd: { op: "command", name: "record", args: "on" },
+    ...over,
+  });
+
+  it("the provisional completion:'async' reply is NOT the final cache entry: an early queryOnly is forwarded to the agent, and cmd_late upgrades the entry so a later queryOnly carries the captured output", async () => {
+    const h = harness();
+    const frame = cmdFrame();
+    const p = h.router.request(frame, h.agentKey);
+    replyLatest(h, asyncReply);
+    await expect(p).resolves.toMatchObject({ ok: true, data: { completion: "async" } });
+
+    // queryOnly BEFORE cmd_late: the cached provisional reply must not answer "ok" — the agent's
+    // ledger is still running, so the query is forwarded and the agent says so.
+    const q1 = h.router.request({ ...frame, queryOnly: true }, h.agentKey);
+    const sentQ = h.conn.sent.at(-1) as { t: string; rid: string; queryOnly?: true };
+    expect(sentQ.t).toBe("cmd");
+    expect(sentQ.queryOnly).toBe(true);
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_result",
+      rid: sentQ.rid,
+      id: frame.id,
+      ok: true,
+      data: { op: "query", state: "running" },
+    } as never);
+    await expect(q1).resolves.toMatchObject({ ok: true, data: { op: "query", state: "running" } });
+
+    // The capture window finishes: cmd_late carries the FULL result (output included).
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_late",
+      id: frame.id,
+      op: "command",
+      at: h.clock.t,
+      ok: true,
+      data: lateOutput,
+    } as never);
+
+    // A later queryOnly is served from the upgraded entry — WITH the output, no new frame.
+    const before = h.conn.sent.length;
+    const q2 = await h.router.request({ ...frame, queryOnly: true }, h.agentKey);
+    expect(q2).toMatchObject({
+      ok: true,
+      data: { op: "query", state: "ok", result: { ok: true, data: { output: lateOutput.output } } },
+    });
+    expect(h.conn.sent.length).toBe(before);
+  });
+
+  it("queryOnly AFTER cmd_late without an intervening query also carries the output (the incident's exact order)", async () => {
+    const h = harness();
+    const frame = cmdFrame();
+    const p = h.router.request(frame, h.agentKey);
+    replyLatest(h, asyncReply);
+    await p;
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_late",
+      id: frame.id,
+      op: "command",
+      at: h.clock.t,
+      ok: true,
+      data: lateOutput,
+    } as never);
+    const q = await h.router.request({ ...frame, queryOnly: true }, h.agentKey);
+    expect(q).toMatchObject({
+      ok: true,
+      data: { op: "query", state: "ok", result: { ok: true, data: { output: lateOutput.output } } },
+    });
+  });
+
+  it("a same-id NON-queryOnly resend inside the async window re-forwards once with retry:true (the agent ledger short-circuits, no re-execution), and cmd_late still upgrades the entry to the full result", async () => {
+    const h = harness();
+    const frame = cmdFrame();
+    const p = h.router.request(frame, h.agentKey);
+    replyLatest(h, asyncReply);
+    await p;
+
+    // Same id + same payload, NOT queryOnly, before cmd_late: the entry is \"unknown\", so the hub
+    // re-forwards exactly once, marked retry — the no-double-EXECUTION guarantee is the agent
+    // ledger's (`beginOrReply` \"running\" outcome, agent commands.ts), which answers the running
+    // short-circuit instead of re-dispatching. Simulate that exact reply.
+    const resent = h.router.request(frame, h.agentKey);
+    const sentRetry = h.conn.sent.at(-1) as { t: string; rid: string; retry?: true; queryOnly?: true };
+    expect(sentRetry.t).toBe("cmd");
+    expect(sentRetry.retry).toBe(true);
+    expect(sentRetry.queryOnly).toBeUndefined();
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_result",
+      rid: sentRetry.rid,
+      id: frame.id,
+      ok: false,
+      code: "E_DEADLINE",
+      retryable: true,
+      effect: "unknown",
+    } as never);
+    await expect(resent).resolves.toMatchObject({ ok: false, code: "E_DEADLINE", effect: "unknown" });
+
+    // Exactly two cmd frames total (original + the retry-marked one) — a third would mean the hub
+    // executed something on its own.
+    expect(h.conn.sent.filter((f) => (f as { t: string }).t === "cmd")).toHaveLength(2);
+
+    // cmd_late still upgrades the SAME entry to the authoritative result, output included.
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_late",
+      id: frame.id,
+      op: "command",
+      at: h.clock.t,
+      ok: true,
+      data: lateOutput,
+    } as never);
+    const before = h.conn.sent.length;
+    const q = await h.router.request({ ...frame, queryOnly: true }, h.agentKey);
+    expect(q).toMatchObject({
+      ok: true,
+      data: { op: "query", state: "ok", result: { ok: true, data: { output: lateOutput.output } } },
+    });
+    expect(h.conn.sent.length).toBe(before);
+  });
+
+  it("a BUILTIN async reply (/compact, /model) keeps the legacy final caching — their cmd_late is an upgrade, not the primary settle", async () => {
+    const h = harness();
+    const frame = cmdFrame({ cmd: { op: "command", name: "compact", args: "" } });
+    const p = h.router.request(frame, h.agentKey);
+    replyLatest(h, { ok: true, data: { op: "command", kind: "builtin", completion: "async" } });
+    await expect(p).resolves.toMatchObject({ ok: true });
+    const before = h.conn.sent.length;
+    const q = await h.router.request({ ...frame, queryOnly: true }, h.agentKey);
+    expect(q).toMatchObject({ ok: true, data: { op: "query", state: "ok" } });
+    expect(h.conn.sent.length).toBe(before); // answered from cache, not forwarded
+  });
+});
+
 describe("commands router: drain (v2.1 \u00a76.7.3)", () => {
   it("after drain() is called, a fresh request is rejected E_HUB_RESTARTING before any frame is sent and no LRU entry is built", async () => {
     const h = harness();
