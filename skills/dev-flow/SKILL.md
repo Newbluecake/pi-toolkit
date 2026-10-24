@@ -87,7 +87,7 @@ metadata:
 | **核心调度**（主会话）      | opus-5.5                                            | kimi-k3（订阅）                | 拆解、派单、汇总、裁定                                                                                           |
 | **代码探索**                | glm-5.3（订阅）→ sonnet                             | kimi-k3（订阅）                | `Explore`，只读                                                                                                  |
 | **架构设计**                | opus-5.5                                            | gpt-6.1-sol                    | `architect`，仅 L3 / 新模块从零搭建                                                                              |
-| **方案制定**                | opus-5.5                                            | sonnet（简单方案）             | `Plan`                                                                                                           |
+| **方案制定**                | opus-5.5                                            | sonnet（简单方案）→ kimi-k3    | `Plan`                                                                                                           |
 | **复杂任务方案 / 疑难攻坚** | opus-5.5                                            | gpt-6.1-sol                    | 仅 L3 / 连续 2 轮无进展；Blocker 或仍卡死 → `ask_user` 批准后升 fable                                            |
 | **前端开发**                | kimi-k3（订阅）→ glm-5.3（订阅）                    | sonnet → opus-5.5（视觉/疑难） | `frontend-dev`（内置 deveye 浏览器调试，页面 bug 派单给可访问 URL/端口）；2026-10-24 用户令：kimi-k3 首选        |
 | **方案评审**                | gpt-6.1-sol（`copilot-response/` → `cr-response/`） | glm-5.3（订阅）→ kimi-k3       | `reviewer`；必须与方案模型异源                                                                                   |

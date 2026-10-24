@@ -96,3 +96,4 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
 | 2026-10-19 | cr-response 恢复：gpt-6.1-sol 备线 `cr-response/gpt-6.1-sol`             |
 | 2026-10-18 | 第 0 步改为主会话 ask_user 轻量澄清；dev-clarify 降为可选（用户要求）    |
 | 2026-10-24 | 前端开发 kimi-k3 首选、GLM 次之；droid 移出路由表（用户令）              |
+| 2026-10-24 | 方案制定回退链加 kimi-k3（sonnet 之后；用户令）                          |
