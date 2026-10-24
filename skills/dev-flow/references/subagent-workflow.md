@@ -49,7 +49,7 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
   `fullResult: true` 时返回对象只在这次调用真的隔离过才会多出 `worktree` 键（`{state, branch?, path?}`），outcome
   文本另有独立的 `worktrees:` 分栏列出每个调用的分支/kept 路径/pending 状态，不会被正文的头尾截断吞掉。
   ⇒ 评审/验收独立性直接在 verify 一级用 `model:` 指定与 dev 不同的模型（见下方模板），或继续写进类型 frontmatter。
-- **`agent(prompt, { experts })` 现在可以挂专家**，但规则比顶层 `Agent` 更严：`experts` 只接受**已 completed**
+- **（已停用，2026-10-25 起不再挂专家，consult 将随源码治理移除；以下仅作历史说明）`agent(prompt, { experts })` 可以挂专家**，但规则比顶层 `Agent` 更严：`experts` 只接受**已 completed**
   且有持久化 session 的调用（failed/timed_out/aborted/仍在运行/回放命中的调用都会被拒），可以是 `label`/`run_id`，
   也可以是保留字 `"main"`（指宿主主会话）。解析顺序：`"main"` 优先 → **本 workflow 内自己提交过的同名调用**
   （按声明或去重后的实际 label 匹配；本地有候选就绝不会解析到外面同名的旧 run）→ 交给主会话侧的 consult 解析器
