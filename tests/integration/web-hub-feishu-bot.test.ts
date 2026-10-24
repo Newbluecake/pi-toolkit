@@ -1201,6 +1201,7 @@ describe("F10 Feishu bot — real hub child assembly", () => {
         "runtx.v1",
         "quota.pools.v1",
         "todo.archive.v1",
+        "cmd.history.v1", // web-hub cmd-history H1 (b6cff217): unconditional hub cap, unrelated to the bot
         "version.v1",
       ]),
     );

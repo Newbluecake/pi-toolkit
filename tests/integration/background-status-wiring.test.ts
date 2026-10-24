@@ -15,6 +15,13 @@ function fakePi() {
     registerEntryRenderer: () => undefined,
     on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      // Real pi's `on()` returns an unsubscribe function (traffic's warming port calls it on dispose).
+      return () => {
+        handlers.set(
+          event,
+          (handlers.get(event) ?? []).filter((h) => h !== handler),
+        );
+      };
     },
     sendMessage: () => undefined,
     appendEntry: () => undefined,
