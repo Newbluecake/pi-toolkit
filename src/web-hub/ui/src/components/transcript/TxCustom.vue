@@ -39,8 +39,10 @@ const SUBAGENT_KINDS = new Set([
   "task-started",
   "child",
 ]);
-/** Short display aliases for namespaced kinds whose raw name is an implementation detail. */
-const KIND_ALIASES: Readonly<Record<string, string>> = { "usage-tick": "usage" };
+/** Short display aliases for namespaced kinds whose raw name is an implementation detail
+ *  (2026-10-24 user ruling: `fabric` — the internal name of the inter-agent channel — reads as
+ *  `message`; the raw customType stays in the chip's title). */
+const KIND_ALIASES: Readonly<Record<string, string>> = { "usage-tick": "usage", fabric: "message" };
 const namespaced = computed(() => props.customType.startsWith(NAMESPACE));
 const kind = computed(() => (namespaced.value ? props.customType.slice(NAMESPACE.length) : props.customType));
 const isSubagentNotice = computed(() => namespaced.value && SUBAGENT_KINDS.has(kind.value));
