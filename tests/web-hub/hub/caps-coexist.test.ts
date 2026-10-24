@@ -4,6 +4,7 @@ import type { FrontendDeps, FrontendFactory, HttpFrontend } from "../../../src/w
 import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
 import type { HubEvent } from "../../../src/web-hub/hub/ports.js";
 import {
+  CMD_HISTORY_HUB_CAPS,
   DIALOG_BG_HUB_CAPS,
   HOLD_HUB_CAPS,
   P2_HUB_CAPS,
@@ -132,6 +133,10 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
       ...TODO_ARCHIVE_HUB_CAPS, // todo-archive v2.1 §2 (D5): unconditional, both surfaces
       ...DIALOG_BG_HUB_CAPS,
       ...HOLD_HUB_CAPS,
+      // cmd-history H1 (plan §4.6/F4): unconditional, both surfaces — the P0 projection and the
+      // §4.10 runTail ENOENT fallback ship with every hub build, so the cap has no settings
+      // gate (old hubs never declare it ⇒ the UI stays in legacy mode).
+      ...CMD_HISTORY_HUB_CAPS,
     ]) {
       expect(browserCaps).toContain(cap);
     }

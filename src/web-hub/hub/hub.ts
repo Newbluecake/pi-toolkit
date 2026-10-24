@@ -34,6 +34,7 @@ import {
 import {
   PROTO,
   CMD_ARGS_HUB_CAPS,
+  CMD_HISTORY_HUB_CAPS,
   P2_HUB_CAPS,
   UPLOAD_HUB_CAPS,
   DIALOG_BG_HUB_CAPS,
@@ -441,6 +442,13 @@ export async function startHub(
     }
     const extraHubCaps: readonly string[] = [
       ...(config.cmdArgs === "all" || config.cmdArgs === "toolkit" ? CMD_ARGS_HUB_CAPS : []),
+      // cmd-history plan §4.6 (F4, H1): `cmd.history.v1` is UNCONDITIONAL on the hub — the P0
+      // projection and the §4.10 runTail ENOENT fallback ship with every hub build (the
+      // fallback deliberately ignores the agent's cmdHistory setting, M4/R9), so the cap has
+      // no settings gate; it only tells new agents/UIs this hub understands them (the agent's
+      // matching `StatusInfo.features` token gates the feature itself). Old hubs never
+      // declare it ⇒ the UI stays in legacy mode. Both cap surfaces share this one array.
+      ...CMD_HISTORY_HUB_CAPS,
       // web-hub-version plan §3.7: unconditional (no settings gate, D3) — the service below is
       // always constructed, so the cap and the route can never disagree.
       VERSION_HUB_CAP,

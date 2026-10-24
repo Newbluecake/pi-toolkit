@@ -33,6 +33,9 @@ import {
   RUNTX_HUB_CAPS,
   QUOTA_POOLS_HUB_CAPS,
   TODO_ARCHIVE_HUB_CAPS,
+  // cmd-history H1 (§4.6): unconditional on both cap surfaces (mechanical baseline update —
+  // sits right before VERSION_HUB_CAP, matching extraHubCaps order in hub.ts).
+  CMD_HISTORY_HUB_CAP,
   VERSION_HUB_CAP,
   UPLOAD_HUB_CAPS,
   WTDIFF_HUB_CAP,
@@ -62,6 +65,8 @@ function baselineCaps(): string[] {
     ...RUNTX_HUB_CAPS,
     ...QUOTA_POOLS_HUB_CAPS,
     ...TODO_ARCHIVE_HUB_CAPS,
+    // cmd-history H1 (§4.6): unconditional, right before VERSION_HUB_CAP (extraHubCaps order).
+    CMD_HISTORY_HUB_CAP,
     VERSION_HUB_CAP,
   ];
 }
