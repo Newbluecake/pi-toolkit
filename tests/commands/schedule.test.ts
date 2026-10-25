@@ -147,6 +147,19 @@ describe("add / edit / list / show / log", () => {
     expect(env.agent.readState().kind).toBe("absent");
   });
 
+  it("#40: --consult is rejected (nothing created); --no-consult is silently accepted and not persisted", async () => {
+    env = a3Env();
+    const h = harness(env);
+    expect(parseFlags(["--consult"]).error).toMatch(/--consult 已移除/);
+    expect(await h.run(`add x --cron "0 8 * * *" --consult -- p`)).toMatch(/--consult 已移除/);
+    expect(env.agent.readState().kind).toBe("absent");
+    expect(parseFlags(["--no-consult"]).error).toBeUndefined();
+    expect(await h.run(`add x --cron "0 8 * * *" --no-consult -- p`)).toMatch(/已创建并批准/);
+    expect(await h.run(`add y --cron "0 8 * * *" -- p`)).toMatch(/已创建并批准/);
+    const [withFlag, without] = readOk(env.agent.store()!).tasks;
+    expect(withFlag!.bg?.consultMain).toBe(without!.bg?.consultMain); // the flag changed nothing
+  });
+
   it("edit of an approved task keeps it approved; edit of a pending (AI) task keeps it pending and says so", async () => {
     env = a3Env();
     const h = harness(env);

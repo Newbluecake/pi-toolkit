@@ -229,6 +229,16 @@ describe("approval derivation (§4.3, S2)", () => {
     expect(isPendingApproval({ ...t, prompt: "changed" })).toBe(true);
     expect(isExecutable({ ...t, name: "renamed" })).toBe(true);
   });
+
+  it("#40: a legacy task with bg.consultMain:true keeps its pre-removal defHash and stays approved/executable", () => {
+    // 903e09… is the frozen hash of FULL_BG_TASK (consultMain:true) from before consult was removed.
+    const legacyHash = "903e09819b62a8a998043f26eb9ddc52b736e783a207b767c6a1da07c9051c32";
+    expect(defHash(FULL_BG_TASK)).toBe(legacyHash);
+    const stored: ScheduleTask = { ...FULL_BG_TASK, approval: { hash: legacyHash, by: "user", via: "web", at: 1 } };
+    expect(isApproved(stored)).toBe(true);
+    expect(isPendingApproval(stored)).toBe(false);
+    expect(isExecutable(stored)).toBe(true);
+  });
 });
 
 describe("keys (§4.2/§4.5b/§7.1)", () => {

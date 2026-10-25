@@ -41,7 +41,8 @@ import { SCHED_HASH_RE, SCHED_TASK_ID_RE } from "../web-hub/protocol/schedule.js
  *   /schedule __put <json> <hash>              web review form (frozen contract below)
  *
  * Flags: --name --cron --at --tz --form background|message --feishu/--no-feishu --type --model
- * --thinking --timeout <s> --consult/--no-consult --handoff/--no-handoff --worktree/--no-worktree.
+ * --thinking --timeout <s> --handoff/--no-handoff --worktree/--no-worktree.
+ * (`--consult` was removed with the consult feature: it errors; `--no-consult` is accepted and ignored.)
  *
  * `--all` (any local TUI session manages other sessions' tasks under their ledger lock): list/show/log/
  * pause/resume/rm/approve allowed; edit and run are refused (changes belong in the owning session,
@@ -74,7 +75,7 @@ const ONCE_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 
 const USAGE = [
   "/schedule [list] [--all] — 列出任务",
-  '/schedule add <名称> --cron "0 8 * * *" | --at 2026-12-01T09:00 [--tz Asia/Shanghai] [--form background|message] [--feishu|--no-feishu] [--type T] [--model p/id] [--thinking low] [--timeout 1800] [--consult] [--handoff] [--worktree] -- <prompt>',
+  '/schedule add <名称> --cron "0 8 * * *" | --at 2026-12-01T09:00 [--tz Asia/Shanghai] [--form background|message] [--feishu|--no-feishu] [--type T] [--model p/id] [--thinking low] [--timeout 1800] [--handoff] [--worktree] -- <prompt>',
   "/schedule edit <id> [同上参数] [-- <prompt>] — 修改（待确认的任务不会因编辑而被批准）",
   "/schedule show <id> · log [<id>] — 完整定义与 hash · 运行历史（可加 --all）",
   "/schedule approve <id> [<hash>] — 审阅完整定义后批准（绑定 hash）",
@@ -142,8 +143,7 @@ const BOOL_FLAGS = new Set([
   "all",
   "feishu",
   "no-feishu",
-  "consult",
-  "no-consult",
+  "no-consult", // legacy: accepted and ignored (#40)
   "handoff",
   "no-handoff",
   "worktree",
@@ -165,6 +165,7 @@ export function parseFlags(tokens: readonly string[]): Parsed {
       continue;
     }
     const name = t.slice(2);
+    if (name === "consult") return { ...out, error: "--consult 已移除（consult 功能已删除）；本任务无需此参数" };
     if (BOOL_FLAGS.has(name)) out.flags.set(name, true);
     else if (VALUE_FLAGS.has(name)) {
       const v = tokens[i + 1];
@@ -200,10 +201,7 @@ function flagsToRaw(p: Parsed, prompt: string | undefined, nameFromPositional?: 
     if (!Number.isFinite(n)) return { error: "--timeout 需要整数秒" };
     bg.timeoutS = n;
   }
-  for (const [flag, key] of [
-    ["consult", "consultMain"],
-    ["handoff", "handoff"],
-  ] as const) {
+  for (const [flag, key] of [["handoff", "handoff"]] as const) {
     if (f.has(flag) && f.has(`no-${flag}`)) return { error: `--${flag} 与 --no-${flag} 互斥` };
     if (f.has(flag)) bg[key] = true;
     if (f.has(`no-${flag}`)) bg[key] = false;

@@ -14,6 +14,7 @@ import { backgroundHeader, commitBackgroundReport, truncateUtf8, type Background
 
 export interface BackgroundExecutorDeps {
   spawn: Pick<SpawnService, "spawn" | "waitOutcome">;
+  /** @deprecated #40 — consult removed; never read. Removed in PS1b. */
   consult?: Pick<ConsultWiring, "resolveExperts">;
   notes: ScheduleNoteDeps;
   clock?: Clock;
@@ -146,17 +147,8 @@ export function installBackgroundExecutor(schedule: ScheduleAgent, deps: Backgro
       await finish({ state: "refused", reason: "admission:config", text: "缺少 background 配置。" });
       return;
     }
-    let consultExperts: SpawnRequest["consultExperts"];
-    if (bg.consultMain) {
-      try {
-        if (deps.consult === undefined) throw new Error("consult disabled");
-        consultExperts = deps.consult.resolveExperts(["main"]).refs;
-        if (consultExperts.length === 0) throw new Error("main expert unavailable");
-      } catch (err) {
-        consultExperts = undefined;
-        consultWarning = `⚠ 未能启用 consult-main：${truncateUtf8(err instanceof Error ? err.message : String(err), 1024)}。本次继续独立执行。`;
-      }
-    }
+    // #40: `bg.consultMain` stays a persisted field (defHash), but consult is gone — a legacy `true` is ignored.
+    if (bg.consultMain) consultWarning = "⚠ consult-main 已移除，本次独立执行（该选项被忽略）。";
     if (!live()) {
       await finish({ state: "unknown", reason: "owner-closed", text: "归属会话已关闭，结果未知。" });
       return;
@@ -178,7 +170,6 @@ export function installBackgroundExecutor(schedule: ScheduleAgent, deps: Backgro
       suppressDelivery: true,
       callerOwned: true,
       ...(bg.isolation === undefined ? {} : { isolation: bg.isolation }),
-      ...(consultExperts === undefined ? {} : { consultExperts }),
     };
     const began = monotonic();
     const hardMs = bg.timeoutS * 1000 + grace;

@@ -6,7 +6,7 @@
 
   What it must guarantee (复审 Major 5):
   - shows the FULL definition verbatim — the complete prompt (plain text nodes only, never
-    v-html), schedule expr + tz, form, model/thinking/timeout/consult/handoff/isolation,
+    v-html), schedule expr + tz, form, model/thinking/timeout/handoff/isolation,
     feishu flag, and the defHash (first 8 in the note, full hash on the wire);
   - 「批准」 sends `/schedule approve <id> <fullHash>` through `useTrackedCommand` (own cmdId,
     async settle via pendingCtl + one queryOnly, E_CONFIRM_REQUIRED re-issued behind the
@@ -135,9 +135,9 @@ async function onApprove(): Promise<void> {
           <span class="k">{{ t("schedule.kvTimeout") }}</span>
           <span class="v">{{ bg.timeoutS }}s</span>
         </li>
-        <li>
+        <li v-if="bg.consultMain">
           <span class="k">{{ t("schedule.kvConsult") }}</span>
-          <span class="v">{{ bg.consultMain ? t("schedule.kvOn") : t("schedule.kvOff") }}</span>
+          <span class="v">{{ t("schedule.kvOn") }}</span>
         </li>
         <li>
           <span class="k">{{ t("schedule.kvHandoff") }}</span>

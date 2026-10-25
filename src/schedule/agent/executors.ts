@@ -24,6 +24,7 @@ export interface ScheduleExecutorsDeps {
   /** Activate-level A2 installer (`ScheduleWiring.message`); absent ⇒ every handoff degrades to a quiet recap. */
   message: MessageSchedulerInstall | undefined;
   spawn: Pick<SpawnService, "spawn" | "waitOutcome">;
+  /** @deprecated #40 — consult removed; never read. Removed in PS1b. */
   consult?: Pick<ConsultWiring, "resolveExperts">;
 }
 
@@ -59,7 +60,6 @@ export function installScheduleExecutors(
 
   return installBackgroundExecutor(schedule, {
     spawn: deps.spawn,
-    ...(deps.consult !== undefined ? { consult: deps.consult } : {}),
     notes: {
       currentSessionId: () => ctx.sessionManager.getSessionId(),
       sessionFile: () => ctx.sessionManager.getSessionFile(),

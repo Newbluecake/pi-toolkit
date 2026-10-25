@@ -97,9 +97,6 @@ export const ScheduleToolParams = Type.Object(
     timeoutS: Type.Optional(
       Type.Integer({ description: "Background only: run budget in seconds (60..14400, default 1800)." }),
     ),
-    consultMain: Type.Optional(
-      Type.Boolean({ description: "Background only: let the subagent consult this session. Default false." }),
-    ),
     handoff: Type.Optional(
       Type.Boolean({
         description: "Background only: after the run, hand the result back to this session to act on. Default false.",
@@ -168,7 +165,6 @@ function flatToRaw(p: ScheduleToolParams): RawFields | OpFail {
   if (p.model !== undefined) bg.model = p.model;
   if (p.thinking !== undefined) bg.thinking = p.thinking;
   if (p.timeoutS !== undefined) bg.timeoutS = p.timeoutS;
-  if (p.consultMain !== undefined) bg.consultMain = p.consultMain;
   if (p.handoff !== undefined) bg.handoff = p.handoff;
   if (p.isolation !== undefined) bg.isolation = p.isolation;
   if (Object.keys(bg).length > 0) raw.bg = bg;

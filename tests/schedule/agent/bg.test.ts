@@ -117,26 +117,22 @@ describe("background executor", () => {
     },
   );
 
-  it("maps the real SpawnRequest and resolves main consult once without pool/load rejection policies", async () => {
+  it("maps the real SpawnRequest without pool/load rejection policies and without any consult experts", async () => {
     const f = await setup();
     f.task.bg = {
       ...f.task.bg!,
-      consultMain: true,
       model: { provider: "p", id: "m" },
       thinking: "high",
       isolation: "worktree",
       timeoutS: 60,
     };
-    const refs = [{ runId: "main", sessionFile: f.file, agentType: "main", kind: "main" as const }];
-    const consult = { resolveExperts: vi.fn(() => ({ refs, lines: [], warnings: [] })) };
     const spawn = {
       spawn: vi.fn(async (_req: SpawnRequest) => ({ runId: "r_background", slots: { limit: 1, inUse: 1, free: 0 } })),
       waitOutcome: vi.fn(async () => ({ kind: "settled" as const, outcome: outcome("completed") })),
     };
-    const bg = installBackgroundExecutor(f.a, { spawn, consult, notes: f.notes, clock: f.clock });
+    const bg = installBackgroundExecutor(f.a, { spawn, notes: f.notes, clock: f.clock });
     bg.dispatch(f.run, f.task);
     await bg.drain();
-    expect(consult.resolveExperts).toHaveBeenCalledWith(["main"]);
     const req = spawn.spawn.mock.calls[0]![0];
     expect(req).toMatchObject({
       type: f.task.bg.type,
@@ -149,8 +145,8 @@ describe("background executor", () => {
       modelOverride: f.task.bg.model,
       thinkingOverride: "high",
       isolation: "worktree",
-      consultExperts: refs,
     });
+    expect(req).not.toHaveProperty("consultExperts");
     expect(req).not.toHaveProperty("poolFullPolicy");
     expect(req).not.toHaveProperty("loadPolicy");
     expect(req.prompt).toContain("立即运行");
@@ -158,29 +154,43 @@ describe("background executor", () => {
     bg.dispose();
   });
 
-  it("consult failure degrades visibly; admission refusal has a report and result", async () => {
+  it("legacy bg.consultMain:true is ignored with a visible note; the deprecated consult dep is never read", async () => {
     const f = await setup();
     f.task.bg!.consultMain = true;
+    const spawn = {
+      spawn: vi.fn(async (_req: SpawnRequest) => ({ runId: "r_background", slots: { limit: 1, inUse: 1, free: 0 } })),
+      waitOutcome: vi.fn(async () => ({ kind: "settled" as const, outcome: outcome("completed") })),
+    };
+    const resolveExperts = vi.fn(() => ({ refs: [], lines: [], warnings: [] }));
+    const bg = installBackgroundExecutor(f.a, {
+      spawn,
+      consult: { resolveExperts },
+      notes: f.notes,
+      clock: f.clock,
+    });
+    bg.dispatch(f.run, f.task);
+    await bg.drain();
+    expect(resolveExperts).not.toHaveBeenCalled();
+    expect(spawn.spawn.mock.calls[0]![0]).not.toHaveProperty("consultExperts");
+    expect(f.sendMessage.mock.calls[0]![0].content).toContain("consult-main 已移除");
+    bg.dispose();
+  });
+
+  it("admission refusal has a report and result", async () => {
+    const f = await setup();
     const spawn = {
       spawn: vi.fn(async (_req: SpawnRequest) => ({
         error: { kind: "config" as const, reason: "quota" as const, message: "quota denied", retryable: false },
       })),
       waitOutcome: vi.fn(),
     };
-    const consult = {
-      resolveExperts: () => {
-        throw new Error("consult disabled");
-      },
-    };
-    const bg = installBackgroundExecutor(f.a, { spawn, consult, notes: f.notes, clock: f.clock });
+    const bg = installBackgroundExecutor(f.a, { spawn, notes: f.notes, clock: f.clock });
     bg.dispatch(f.run, f.task);
     await bg.drain();
     const run = readOk(f.store).runs[0]!;
     expect(run.state).toBe("refused");
     expect(run.reason).toBe("admission:quota");
-    expect(f.sendMessage.mock.calls[0]![0].content).toContain("consult disabled");
-    const req = spawn.spawn.mock.calls[0]![0] as SpawnRequest;
-    expect(req).not.toHaveProperty("consultExperts");
+    expect(f.sendMessage.mock.calls[0]![0].content).toContain("quota denied");
     expect(spawn.waitOutcome).not.toHaveBeenCalled();
     bg.dispose();
   });

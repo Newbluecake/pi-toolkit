@@ -59,7 +59,7 @@ export function taskDetail(task: ScheduleTask, occ?: OccState, manual?: number):
     lines.push(
       `type: ${b.type} · model: ${b.model === undefined ? "(default)" : `${b.model.provider}/${b.model.id}`}` +
         ` · thinking: ${b.thinking ?? "(default)"} · timeout: ${b.timeoutS}s`,
-      `consultMain: ${b.consultMain ? "yes" : "no"} · handoff: ${b.handoff ? "yes" : "no"}` +
+      `${b.consultMain ? "consultMain: yes (legacy, ignored) · " : ""}handoff: ${b.handoff ? "yes" : "no"}` +
         ` · isolation: ${b.isolation ?? "none"}`,
     );
   }
