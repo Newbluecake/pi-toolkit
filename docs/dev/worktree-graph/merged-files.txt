@@ -51,3 +51,10 @@ src/web-hub/ui/src/i18n/en/graph.ts
 src/web-hub/ui/src/i18n/zh/graph.ts
 tests/web-hub/ui/graph-panel.test.ts
 tests/web-hub/ui/graph-tokens-contrast.test.ts
+docs/dev/worktree-graph/merged-P0-report.md
+docs/dev/worktree-graph/merged-P1-report.md
+docs/dev/worktree-graph/merged-P2-report.md
+docs/dev/worktree-graph/merged-P3-report.md
+docs/dev/worktree-graph/merged-P4-report.md
+docs/dev/worktree-graph/merged-P5-report.md
+docs/dev/worktree-graph/merged-P6-report.md

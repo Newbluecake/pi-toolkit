@@ -203,6 +203,8 @@ export interface WtGraphPayload {
   degrade: WtGraphDegrade;
   /** `true` iff `degrade` carries nothing but `more` (parser-enforced both directions). */
   complete: boolean;
+  /** Only returned for `merged=1` (merged-plan §6); absent preserves the legacy payload. */
+  merged?: WtGraphMerged;
 }
 
 /** §2.2/§3 error `reason` values riding the REUSED error codes (`E_DEADLINE{reason:
@@ -233,6 +235,7 @@ const TOP_KEYS = [
   "wtHeads",
   "degrade",
   "complete",
+  "merged",
 ] as const;
 const HEAD_KEYS = ["h", "b"] as const;
 const COMMIT_KEYS = ["h", "p", "pT", "a", "t", "s"] as const;
@@ -503,5 +506,177 @@ function parseWtGraphPayloadUnsafe(raw: unknown): WtGraphPayload | null {
   if (shallow === true) payload.shallow = true;
   if (empty) payload.empty = true;
   if (head !== undefined) payload.head = head;
+  const rawMerged = getOwn(o, "merged");
+  if (rawMerged !== undefined) {
+    const merged = parseWtGraphMerged(rawMerged, payload, seenCommits);
+    if (merged === null) return null;
+    payload.merged = merged;
+  }
   return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Optional merged extension (merged-plan r3 §3.4 / §6). Legacy budgets above stay frozen.
+// ---------------------------------------------------------------------------
+
+/** Sent only under `wtgraph.merged.v1`; the only supported query value is "1". */
+export const WTGRAPH_MERGED_QUERY = "merged";
+/** At most 24 selected branch entries and at most 24 distinct Gm executions. */
+export const WTGRAPH_MERGED_MAX = 24;
+/** Global e-element budget, not a per-branch allowance. */
+export const WTGRAPH_MERGED_E_MAX = 200;
+export const WTGRAPH_CHERRY_MS = 2_000;
+export const WTGRAPH_CHERRY_MAX_BYTES = 64 * 1024;
+/** Independent M phase after G; NOT added to legacy requests. */
+export const WTGRAPH_MERGED_PHASE_MS = 14_000;
+/** Reserved for final info/attributes read + shallow stat (2 s each). */
+export const WTGRAPH_MERGED_TAIL_MS = 4_000;
+/** Reserved from the existing 512 KiB complete-response cap, not added to it. */
+export const WTGRAPH_MERGED_MAX_BYTES = 32 * 1024;
+/** A + G + M + close = 37 s; + transfer = 47 s ≤ 48 s (only merged=1). */
+export const WTGRAPH_MERGED_CLIENT_TIMEOUT_MS = 48_000;
+
+export type WtGraphMergedKind = "eq" | "part" | "none" | "anc" | "unk";
+export type WtGraphMergedUnknown = "budget" | "timeout" | "too-many" | "missing-object" | "git-failed" | "attr-changed";
+export type WtGraphMergedSkip =
+  "no-head" | "shallow" | "filter-config" | "git-too-old" | "attr-changed" | "unconfirmed" | "bytes";
+
+export interface WtGraphMergedEntry {
+  /** Short local branch name, matching a branch ref with the same h. */
+  n: string;
+  h: string;
+  v: WtGraphMergedKind;
+  /** eq/part/none only: patch-equivalent count and total branch-side commits. */
+  k?: number;
+  t?: number;
+  /** part only: unique window commit oids, on the first entry for this tip only. */
+  e?: string[];
+  /** part only: e is a subset (possibly absent after byte trimming). */
+  eP?: true;
+  /** Checked out by any worktree, including attached worktrees. */
+  co?: true;
+  /** Required on unk, forbidden on all other kinds. */
+  why?: WtGraphMergedUnknown;
+}
+
+export interface WtGraphMerged {
+  v: 1;
+  /** Present iff payload.head exists, and exactly equal to head.h. */
+  base?: string;
+  /** Whole-stage failure: no branch entries or omitted count. */
+  skipped?: WtGraphMergedSkip;
+  branches: WtGraphMergedEntry[];
+  /** Omitted selected-candidate overflow (strictly positive, omitted when zero). */
+  omitted?: number;
+}
+
+const MERGED_KEYS = ["v", "base", "skipped", "branches", "omitted"] as const;
+const MERGED_ENTRY_KEYS = ["n", "h", "v", "k", "t", "e", "eP", "co", "why"] as const;
+const MERGED_KINDS: readonly WtGraphMergedKind[] = ["eq", "part", "none", "anc", "unk"];
+const MERGED_UNKNOWNS: readonly WtGraphMergedUnknown[] = [
+  "budget",
+  "timeout",
+  "too-many",
+  "missing-object",
+  "git-failed",
+  "attr-changed",
+];
+const MERGED_SKIPS: readonly WtGraphMergedSkip[] = [
+  "no-head",
+  "shallow",
+  "filter-config",
+  "git-too-old",
+  "attr-changed",
+  "unconfirmed",
+  "bytes",
+];
+
+/** Called inside parseWtGraphPayload's existing defensive try/catch. Only the optional
+ * extension is inspected; the legacy projection and its property insertion order never change. */
+function parseWtGraphMerged(raw: unknown, payload: WtGraphPayload, commits: ReadonlySet<string>): WtGraphMerged | null {
+  if (!isPlainObject(raw) || !hasOnlyKeys(raw, MERGED_KEYS)) return null;
+  if (getOwn(raw, "v") !== 1) return null;
+  const base = getOwn(raw, "base");
+  if (payload.head === undefined) {
+    if (base !== undefined) return null;
+  } else if (base !== payload.head.h) {
+    return null;
+  }
+  const skipped = getOwn(raw, "skipped");
+  if (skipped !== undefined && !MERGED_SKIPS.includes(skipped as WtGraphMergedSkip)) return null;
+  const omitted = getOwn(raw, "omitted");
+  if (omitted !== undefined && !isPosSafeInt(omitted)) return null;
+  const rawBranches = getOwn(raw, "branches");
+  if (!Array.isArray(rawBranches) || rawBranches.length > WTGRAPH_MERGED_MAX) return null;
+  if (skipped !== undefined && (rawBranches.length !== 0 || omitted !== undefined)) return null;
+
+  const branches: WtGraphMergedEntry[] = [];
+  const names = new Set<string>();
+  const tips = new Map<string, WtGraphMergedEntry>();
+  let totalE = 0;
+  for (const rawEntry of rawBranches) {
+    if (!isPlainObject(rawEntry) || !hasOnlyKeys(rawEntry, MERGED_ENTRY_KEYS)) return null;
+    const n = getOwn(rawEntry, "n");
+    const h = getOwn(rawEntry, "h");
+    if (!isRefName(n) || !isOid(h, payload.format)) return null;
+    if (names.has(n) || !payload.refs.some((r) => r.k === "branch" && r.n === n && r.h === h)) return null;
+    names.add(n);
+    const v = getOwn(rawEntry, "v");
+    if (!MERGED_KINDS.includes(v as WtGraphMergedKind)) return null;
+    const k = getOwn(rawEntry, "k");
+    const t = getOwn(rawEntry, "t");
+    const e = getOwn(rawEntry, "e");
+    const eP = getOwn(rawEntry, "eP");
+    const co = getOwn(rawEntry, "co");
+    const why = getOwn(rawEntry, "why");
+    if (co !== undefined && co !== true) return null;
+    if (eP !== undefined && eP !== true) return null;
+    if (v !== "part" && (e !== undefined || eP !== undefined)) return null;
+    if (v === "unk") {
+      if (!MERGED_UNKNOWNS.includes(why as WtGraphMergedUnknown)) return null;
+    } else if (why !== undefined) {
+      return null;
+    }
+
+    const entry: WtGraphMergedEntry = { n, h, v: v as WtGraphMergedKind };
+    if (v === "eq" || v === "part" || v === "none") {
+      // A sha1 cherry-mark line consumes at least 41 bytes (the protocol's conservative
+      // common bound); sha256 shares the same wire bound, not a different schema.
+      if (!isNonNegSafeInt(k) || !isPosSafeInt(t) || t > WTGRAPH_CHERRY_MAX_BYTES / 41) return null;
+      if (v === "eq" && k !== t) return null;
+      if (v === "part" && !(k > 0 && k < t)) return null;
+      if (v === "none" && k !== 0) return null;
+      entry.k = k;
+      entry.t = t;
+      if (e !== undefined) {
+        if (!Array.isArray(e) || e.length > k || totalE + e.length > WTGRAPH_MERGED_E_MAX) return null;
+        const seen = new Set<string>();
+        const oids: string[] = [];
+        for (const oid of e) {
+          if (!isOid(oid, payload.format) || !commits.has(oid) || seen.has(oid)) return null;
+          seen.add(oid);
+          oids.push(oid);
+        }
+        totalE += oids.length;
+        entry.e = oids;
+      }
+    } else if (k !== undefined || t !== undefined) {
+      return null;
+    }
+    const first = tips.get(h);
+    if (first !== undefined) {
+      if (e !== undefined || v !== first.v || k !== first.k || t !== first.t) return null;
+    } else {
+      tips.set(h, entry);
+    }
+    if (eP === true) entry.eP = true;
+    if (co === true) entry.co = true;
+    if (v === "unk") entry.why = why as WtGraphMergedUnknown;
+    branches.push(entry);
+  }
+  const merged: WtGraphMerged = { v: 1, branches };
+  if (base !== undefined) merged.base = base as string;
+  if (skipped !== undefined) merged.skipped = skipped as WtGraphMergedSkip;
+  if (omitted !== undefined) merged.omitted = omitted as number;
+  return merged;
 }

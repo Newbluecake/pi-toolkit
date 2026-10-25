@@ -356,3 +356,9 @@ export const CMD_HISTORY_HUB_CAPS = [CMD_HISTORY_HUB_CAP] as const;
  * Optional new frames are cap-gated, so PROTO stays unchanged (same as fsb_req/res). */
 export const LAN_2FA_HUB_CAP = "lan.2fa.v1";
 export const LAN_SESSIONS_HUB_CAP = "lan.sessions.v1";
+
+/** worktree-graph merged-plan r3 §6 (P0): optional `merged=1` patch-equivalence metadata.
+ * Declared under the same preview + /proc gate as WTGRAPH_HUB_CAP (P2 wires both cap
+ * surfaces). Without it clients keep the legacy query and 35 s deadline. No frames or
+ * SSE events are added, so PROTO and all pre-existing cap arrays stay unchanged. */
+export const WTGRAPH_MERGED_HUB_CAP = "wtgraph.merged.v1";
