@@ -176,3 +176,125 @@ describe("hub: a forked session does not inherit the parent's scoped section", (
     expect(r.message).toBeDefined();
   });
 });
+
+describe("hub: a fork whose history carries the parent's scoped update retracts it (D2)", () => {
+  /** Parent A: frozen head without tasks, then a task appears ⇒ an announced `update` + persisted entry. */
+  function parentWithAnnouncedUpdate(): { branch: unknown[]; updateText: string } {
+    const host = fakePi();
+    const hub = mkHub(host);
+    let live = "";
+    hub.register(
+      "pi_schedules",
+      section(() => live, true),
+    );
+    const ctxA = ctxOf("sess-A");
+    host.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctxA);
+    expect(bas(host, ctxA)).toBeUndefined(); // frozen head: no section, nothing to announce
+    live = "TASKS-A";
+    const r = bas(host, ctxA);
+    expect(r.systemPrompt).toBeUndefined(); // stable: the system prompt does not move
+    expect(r.message.content).toContain("TASKS-A");
+    const entry = host.appended.at(-1)!;
+    expect(entry.data.sections.pi_schedules).toMatchObject({ sid: "sess-A", announced: "TASKS-A" });
+    return {
+      branch: [
+        { type: "custom_message", customType: r.message.customType, content: r.message.content },
+        { type: "custom", customType: PROMPT_SECTIONS_ENTRY_TYPE, data: entry.data },
+      ],
+      updateText: r.message.content,
+    };
+  }
+
+  test("fork with no tasks of its own: exactly one `removed` update, system prompt bytes unchanged, then silence", () => {
+    const { branch } = parentWithAnnouncedUpdate();
+    const host = fakePi();
+    const hub = mkHub(host);
+    hub.register(
+      "pi_subagent_types",
+      section(() => "TYPES", false),
+    );
+    hub.register(
+      "pi_schedules",
+      section(() => "", true),
+    );
+    const ctxB = ctxOf("sess-B", branch);
+    host.handlers.get("session_start")!({ type: "session_start", reason: "fork" }, ctxB);
+    const first = bas(host, ctxB);
+    expect(first.systemPrompt).toBe("BASE\n\nTYPES"); // same bytes as a fork without the fix
+    expect(first.message.content).toContain("no longer applies; ignore that update");
+    expect(first.message.content).toContain('"## S"');
+    expect(first.message.details.updates).toEqual([{ section: "pi_schedules", kind: "removed" }]);
+    expect(first.message.content).not.toContain("TASKS-A");
+    // later turns: the retraction is not repeated and the prompt is stable
+    expect(bas(host, ctxB)).toEqual({ systemPrompt: "BASE\n\nTYPES" });
+    expect(host.appended.at(-1)!.data.sections.pi_schedules?.sid).toBe("sess-B");
+  });
+
+  test("fork with its OWN tasks: the first turn replaces the parent's block with the fork's block", () => {
+    const { branch } = parentWithAnnouncedUpdate();
+    const host = fakePi();
+    const hub = mkHub(host);
+    hub.register(
+      "pi_schedules",
+      section(() => "TASKS-B", true),
+    );
+    const ctxB = ctxOf("sess-B", branch);
+    host.handlers.get("session_start")!({ type: "session_start", reason: "fork" }, ctxB);
+    const first = bas(host, ctxB);
+    expect(first.systemPrompt).toBe("BASE\n\nTASKS-B");
+    expect(first.message.content).toContain("<pi_section_update");
+    expect(first.message.content).toContain("TASKS-B");
+    expect(first.message.content).not.toContain("TASKS-A");
+    expect(bas(host, ctxB)).toEqual({ systemPrompt: "BASE\n\nTASKS-B" });
+  });
+
+  test("a parent whose last announcement was a removal, or whose head was never updated, needs no retraction", () => {
+    const host = fakePi();
+    const hub = mkHub(host);
+    hub.register(
+      "pi_schedules",
+      section(() => "TASKS-A", true),
+    );
+    const ctxA = ctxOf("sess-A");
+    host.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctxA);
+    bas(host, ctxA); // head only, announced === snapshot
+    const entry = host.appended.at(-1)!;
+    const host2 = fakePi();
+    const hub2 = mkHub(host2);
+    hub2.register(
+      "pi_schedules",
+      section(() => "", true),
+    );
+    const ctxB = ctxOf("sess-B", [{ type: "custom", customType: PROMPT_SECTIONS_ENTRY_TYPE, data: entry.data }]);
+    host2.handlers.get("session_start")!({ type: "session_start", reason: "fork" }, ctxB);
+    expect(bas(host2, ctxB)).toBeUndefined();
+  });
+
+  test("the SAME session resumed is not a fork: no retraction", () => {
+    const { branch } = parentWithAnnouncedUpdate();
+    const host = fakePi();
+    const hub = mkHub(host);
+    hub.register(
+      "pi_schedules",
+      section(() => "TASKS-A", true),
+    );
+    const ctxA = ctxOf("sess-A", branch);
+    host.handlers.get("session_start")!({ type: "session_start", reason: "resume" }, ctxA);
+    const r = bas(host, ctxA);
+    expect(JSON.stringify(r ?? {})).not.toContain("no longer applies");
+  });
+
+  test("readBackSectionStates reports foreignAnnounced only for scoped sections from another sid", () => {
+    const scope = (sid: string) => ({ names: new Set(["pi_schedules" as const]), sessionId: sid });
+    const data = serializeSectionStates(
+      new Map<(typeof NAMES)[number], SectionState>([
+        ["pi_subagent_types", { ...snap("T"), announced: "T2" }],
+        ["pi_schedules", { ...snap("S"), announced: "S2" }],
+      ]),
+      scope("sess-A"),
+    );
+    const branch = [{ type: "custom", customType: PROMPT_SECTIONS_ENTRY_TYPE, data }];
+    expect(readBackSectionStates(branch, "fork", NAMES, scope("sess-B"))?.foreignAnnounced).toEqual(["pi_schedules"]);
+    expect(readBackSectionStates(branch, "resume", NAMES, scope("sess-A"))?.foreignAnnounced).toEqual([]);
+  });
+});

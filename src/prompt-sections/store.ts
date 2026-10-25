@@ -109,12 +109,24 @@ function toState(section: PersistedSectionV1): SectionState {
   };
 }
 
+export interface ReadBack {
+  states: Map<SectionName, SectionState>;
+  exact: boolean;
+  serialized: string;
+  /**
+   * Session-scoped sections whose persisted entry belongs to ANOTHER session (fork / copy) AND whose
+   * `prompt-section-update` messages (an announced update or a pointer) are therefore still in this
+   * branch's history. The hub retracts them with one tail update on the next turn (D2).
+   */
+  foreignAnnounced: SectionName[];
+}
+
 export function readBackSectionStates(
   branch: readonly unknown[],
   reason: ReadBackReason,
   registered: readonly SectionName[],
   scope?: SectionScope,
-): { states: Map<SectionName, SectionState>; exact: boolean; serialized: string } | undefined {
+): ReadBack | undefined {
   if (reason === "new") return undefined;
   for (let index = branch.length - 1; index >= 0; index--) {
     const entry = branch[index] as { type?: unknown; customType?: unknown; data?: unknown } | undefined;
@@ -122,16 +134,23 @@ export function readBackSectionStates(
     const clean = sanitizePromptSectionsEntry(entry.data);
     if (!clean) continue;
     const states = new Map<SectionName, SectionState>();
+    const foreignAnnounced: SectionName[] = [];
     for (const name of registered) {
       const persisted = clean.sections[name];
       const foreign =
         scope?.names.has(name) === true && (scope.sessionId === undefined || persisted?.sid !== scope.sessionId);
       states.set(name, persisted && !foreign ? toState(persisted) : initialSectionState());
+      if (
+        foreign &&
+        persisted !== undefined &&
+        (persisted.pointer === true || (persisted.announced !== undefined && persisted.announced !== ""))
+      )
+        foreignAnnounced.push(name);
     }
     const exact =
       reason === "reload" &&
       !branch.slice(index + 1).some((item) => (item as { type?: unknown })?.type === "compaction");
-    return { states, exact, serialized: JSON.stringify(clean) };
+    return { states, exact, serialized: JSON.stringify(clean), foreignAnnounced };
   }
   return undefined;
 }

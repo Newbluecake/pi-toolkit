@@ -22,6 +22,7 @@ import {
   PROMPT_SECTIONS_ENTRY_TYPE,
   readBackSectionStates,
   serializeSectionStates,
+  type ReadBack,
   type ReadBackReason,
   type SectionScope,
 } from "../prompt-sections/store.js";
@@ -104,6 +105,11 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
   let warnedPersist = false;
   let currentSid: string | undefined;
   const warnedPointerHint = new Set<SectionName>();
+  /**
+   * D2: scoped sections whose parent-session update messages ride in this (forked/copied) branch's
+   * history. Once the section has a snapshot of its own, one tail update retracts/replaces them.
+   */
+  const retractForeign = new Set<SectionName>();
 
   const names = (): SectionName[] => [...registrations.keys()];
   const freshStates = (): Map<SectionName, SectionState> =>
@@ -191,10 +197,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
   }
 
   /** Both session_start and session_tree read the branch this way (never throws); each hook applies its own not-found policy below (§4.9). */
-  function readBranch(
-    ctx: ExtensionContext,
-    reason: ReadBackReason,
-  ): { states: Map<SectionName, SectionState>; exact: boolean; serialized: string } | undefined {
+  function readBranch(ctx: ExtensionContext, reason: ReadBackReason): ReadBack | undefined {
     try {
       const branch = ctx.sessionManager?.getBranch?.() ?? [];
       return readBackSectionStates(branch, reason, names(), scope());
@@ -211,6 +214,8 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
   function onSessionStart(ctx: ExtensionContext, reason: ReadBackReason): void {
     noteSession(ctx);
     const restored = readBranch(ctx, reason);
+    retractForeign.clear();
+    for (const name of restored?.foreignAnnounced ?? []) retractForeign.add(name);
     if (!restored) {
       // §4.8: entry not found / invalid / reason "new" -> fresh snapshot (one refresh ahead).
       resetToFresh();
@@ -231,6 +236,8 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
     noteSession(ctx);
     const restored = readBranch(ctx, "tree");
     if (restored) {
+      retractForeign.clear();
+      for (const name of restored.foreignAnnounced) retractForeign.add(name);
       states.clear();
       for (const [name, state] of restored.states) states.set(name, forgetAnnounced(state));
       lastPersisted = restored.serialized;
@@ -263,11 +270,24 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
         const resolved = resolveAtTurn(state, live);
         states.set(name, resolved.state);
         texts.push(resolved.text);
-        if (collectUpdates && resolved.update) {
+        let update = resolved.update;
+        if (
+          collectUpdates &&
+          retractForeign.has(name) &&
+          resolved.state.snapshot !== undefined &&
+          !resolved.state.stale
+        ) {
+          // D2: the branch history still carries ANOTHER session's update of this scoped section.
+          // Say what is true for THIS session: nothing (removed) or its own current block.
+          retractForeign.delete(name);
+          update ??=
+            resolved.state.snapshot === "" ? { kind: "removed" } : { kind: "update", content: resolved.state.snapshot };
+        }
+        if (collectUpdates && update) {
           const pointerHint =
             typeof registration.pointerHint === "string"
               ? registration.pointerHint
-              : registration.pointerHint !== undefined && resolved.update.kind === "pointer"
+              : registration.pointerHint !== undefined && update.kind === "pointer"
                 ? resolveFunctionPointerHint(name, registration.pointerHint, input)
                 : undefined;
           updates.push({
@@ -276,7 +296,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
             ...(pointerHint === undefined ? {} : { pointerHint }),
             // The frozen head never carried this section (empty snapshot) ⇒ the update adds it.
             ...(resolved.state.snapshot === "" ? { absentFromHead: true } : {}),
-            ...resolved.update,
+            ...update,
           });
         }
       } catch {
