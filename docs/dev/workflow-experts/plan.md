@@ -1,5 +1,7 @@
 # workflow-experts：agent() opts 严格校验 + agent({ experts })（v2）
 
+> 历史档案：专家咨询功能已随 #40 移除；本文保留设计过程，不作为当前使用指南。
+
 > 状态：方案 v2（未施工）。v1 被评审（gpt-sol）打回，本版逐条处置，见文末「§评审修订记录」。
 > 范围：① `agent(prompt, opts)` 严格校验；② workflow 子 run 可 consult 专家。
 > `opts.model` / `opts.thinking` 已由 `c454a2a` / `8a69c1f` 落地，**不重做**。

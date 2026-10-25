@@ -179,7 +179,7 @@ metadata:
 
 ## 子 agent 提问（问父 agent）
 
-2026-10-25 用户裁定：**不再挂 consult 专家**（A/B：挂专家组一次通过 52.5% vs 对照 66%、成本中位 $7.56 vs $5.28、77% 挂了专家的包从未调用；consult 子系统将在源码治理中移除）。下游缺的知识按以下顺序获得：
+下游缺的知识按以下顺序获得：
 
 1. **先推**：能写进 prompt / 落盘的先写——拍板过的决策、否决过的方案及理由、用户偏好、上一轮失败原因与已排除假设；评审意见、打回报告一律原文或路径推送。
 2. **再问父 agent**：每个写包 prompt 写一句「遇到读代码读不到的决策/冻结面/越界/范围取舍，用 `message_agent` 发给 root 说明问题与你的默认做法，然后先推进其余部分；不回复则按默认做法并在报告中列为遗留」。
@@ -236,15 +236,13 @@ metadata:
 - 机械改动/只读小查询开 `high` thinking；让 verifier 重跑全量测试。
 - 无文件交集上 `isolation:"worktree"`；≤3 个子任务写 `SubagentWorkflow` 脚本（4–6 个按是否需要 worktree 选）；同轮 >6 个仍用同消息 `Agent` 硬派。
 - 打回重派不推打回报告原文、也不 resume 上一轮 run；问作者「对不对」；复验凭记忆；子 agent 发来提问后主会话不 steer 应答。
-- 把整份 AI 长方案甩给用户；被打回 ≥3 轮仍逐条照改不裁定；再挂 `experts` / consult（已停用，待移除）或拿提问替代交接包。
+- 把整份 AI 长方案甩给用户；被打回 ≥3 轮仍逐条照改不裁定；拿提问替代交接包。
 
 ## 参考
 
 | 文档                                                                 | 内容                                                     |
 | -------------------------------------------------------------------- | -------------------------------------------------------- |
 | [references/models.md](./references/models.md)                       | 模型 ID/回退链、fable 闸门、订阅优先、失败处置、日期裁定 |
-| [references/consult.md](./references/consult.md)                     | （历史）consult 生产实测，已停用、随代码移除             |
-| [references/consult-ab.md](./references/consult-ab.md)               | （历史）consult A/B 实验协议，实验已于 2026-10-25 停止   |
 | [references/parallel-safety.md](./references/parallel-safety.md)     | 冲突预检四步、冻结面纪律、共享工作树禁令、合并纪律       |
 | [references/subagent-workflow.md](./references/subagent-workflow.md) | `SubagentWorkflow` 适用场景、限制、模型映射、最小模板    |
 | `scripts/conflict-check.mjs`                                         | 文件域 glob 交集预检脚本                                 |

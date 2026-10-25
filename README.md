@@ -7,7 +7,7 @@
 <p align="center">
   <img src="docs/images/hero-web-desktop.png" alt="Web UI：会话列表、对话与代理树" width="100%">
   <br>
-  <sub>Web UI：会话列表、对话、代理树（阶段 / 成本 / consult 缓存命中）与订阅额度一屏可见</sub>
+  <sub>Web UI：会话列表、对话、代理树（阶段 / 成本）与订阅额度一屏可见</sub>
 </p>
 
 <p align="center">
@@ -65,7 +65,6 @@ pi install .
 | 定时任务（`schedule`）    | 归属会话的 cron / 一次性任务：后台 subagent 出报告或定时消息；AI 建的任务须你批准；报告可推飞书。默认关闭。                                                                                                                                                                                                                                                                                                | 本文 [定时任务](#定时任务schedule)                               |
 | 防卡死架构                | 分相 deadline、升级阶梯、orphan 登记、持久化通知投递。                                                                                                                                                                                                                                                                                                                                                     | [subagents](docs/guide/subagents.md#防卡死架构)                  |
 | Message fabric            | subagent 间沿 agent tree 的 fire-and-forget 消息（`message_agent`）。默认关闭。                                                                                                                                                                                                                                                                                                                            | [subagents](docs/guide/subagents.md#message-fabric)              |
-| consult 专家咨询          | 子 agent 在一轮内同步咨询已结束的专家 run 或主会话（`consult`）。                                                                                                                                                                                                                                                                                                                                          | [subagents](docs/guide/subagents.md#consult-专家咨询)            |
 | 外部 droid agent          | 把 Factory droid 当作 `droid/<model>` 虚拟 provider 派发，带模型白名单与额度闸门。默认关闭。                                                                                                                                                                                                                                                                                                               | [subagents](docs/guide/subagents.md#外部-droid-agent)            |
 | 项目记忆                  | cwd 为键的被动记忆，分层注入 + `memory` 工具 + `/mem doctor` / `tidy`。                                                                                                                                                                                                                                                                                                                                    | [memory](docs/guide/memory.md)                                   |
 | bash 自动转后台           | 覆盖内置 `bash`：长命令转后台不杀，`bash_job` 管理，宽限与续期。                                                                                                                                                                                                                                                                                                                                           | [bash](docs/guide/bash.md)                                       |
@@ -132,7 +131,6 @@ pi install .
   "feishuNotify": { "enabled": true },
   "sessionNav": { "enabled": true },
   "goal": { "enabled": true },
-  "consult": { "enabled": true },
   "quota": { "enabled": true },
   "load": { "enabled": true },
   "topicSwitch": { "enabled": true },
@@ -173,7 +171,7 @@ pi install .
 
 **形式**
 
-- `background`：后台 subagent 执行，结果以一条消息写回归属会话（AI 之后可引用）。默认不叫醒主会话，任务可设「完成后让主会话接手」（`--handoff`）；可选 `--consult` 让它咨询归属会话。默认推飞书。
+- `background`：后台 subagent 执行，结果以一条消息写回归属会话（AI 之后可引用）。默认不叫醒主会话，任务可设「完成后让主会话接手」（`--handoff`）。默认推飞书。
 - `message`：到点给归属会话发一条消息；会话忙时排队，同一任务只留最新一条。默认不推飞书。
 - `message` 形式和 `--handoff` 依赖宿主 pi 提供的触发能力：能力缺失时，把任务新建或改成这两种形式会被拒（`E_UNSUPPORTED`）；已有这类任务时状态栏显示 `msg off`。由定时消息或接手触发的主会话运行最长 3600 秒，到时自动中止（期间有人工插话则解除上限），不可配置。
 - 每个会话最多 8 个任务。
@@ -194,16 +192,16 @@ pi install .
 
 **命令**
 
-| 子命令                                                                     | 作用                                                                                                                                                             |
-| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/schedule [list] [--all]`                                                 | 列出本会话（`--all`：所有会话）的任务                                                                                                                            |
-| `/schedule add <名称> --cron "<表达式>" \| --at <时间> [选项] -- <prompt>` | 创建；选项：`--tz` `--form background\|message` `--feishu` / `--no-feishu` `--type` `--model` `--thinking` `--timeout <秒>` `--consult` `--handoff` `--worktree` |
-| `/schedule edit <id> [选项] [-- <prompt>]`                                 | 修改（仅本会话）                                                                                                                                                 |
-| `/schedule show <id>` / `log [<id>]`                                       | 完整定义与哈希 / 运行历史                                                                                                                                        |
-| `/schedule approve <id> [<hash>]`                                          | 审阅并批准                                                                                                                                                       |
-| `/schedule pause\|resume\|rm <id>`                                         | 暂停 / 恢复 / 删除；暂停和删除会一并撤销该任务已排队、尚未发出的定时消息                                                                                         |
-| `/schedule run <id>`                                                       | 立即运行一次（仅本会话、仅已批准任务）                                                                                                                           |
-| `/schedule repair`                                                         | 隔离损坏的账本；账本正常时重置卡住的定时消息调度（对话框计数、会话栅栏）。仅本地终端可用，网页调用一律拒绝；启用跨会话时 `/fabric fence reset` 也会做同样的重置  |
+| 子命令                                                                     | 作用                                                                                                                                                            |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/schedule [list] [--all]`                                                 | 列出本会话（`--all`：所有会话）的任务                                                                                                                           |
+| `/schedule add <名称> --cron "<表达式>" \| --at <时间> [选项] -- <prompt>` | 创建；选项：`--tz` `--form background\|message` `--feishu` / `--no-feishu` `--type` `--model` `--thinking` `--timeout <秒>` `--handoff` `--worktree`            |
+| `/schedule edit <id> [选项] [-- <prompt>]`                                 | 修改（仅本会话）                                                                                                                                                |
+| `/schedule show <id>` / `log [<id>]`                                       | 完整定义与哈希 / 运行历史                                                                                                                                       |
+| `/schedule approve <id> [<hash>]`                                          | 审阅并批准                                                                                                                                                      |
+| `/schedule pause\|resume\|rm <id>`                                         | 暂停 / 恢复 / 删除；暂停和删除会一并撤销该任务已排队、尚未发出的定时消息                                                                                        |
+| `/schedule run <id>`                                                       | 立即运行一次（仅本会话、仅已批准任务）                                                                                                                          |
+| `/schedule repair`                                                         | 隔离损坏的账本；账本正常时重置卡住的定时消息调度（对话框计数、会话栅栏）。仅本地终端可用，网页调用一律拒绝；启用跨会话时 `/fabric fence reset` 也会做同样的重置 |
 
 `--all` 可对其他会话的任务做 list / show / log / pause / resume / rm / approve；`edit` 和 `run` 只能在归属会话里做。
 
@@ -362,7 +360,7 @@ pi-secure unlock demo --global       # 私有库默认拒绝全局解锁，--glo
 
 ### 数据范围（拍板①）
 
-开启后默认**也录子 agent 流量**：consult fork、`/goal` verifier、workflow 子 agent 的完整 prompt 与输出都会落库，数据量约随子 agent 用量线性增长。toolkit 自身的保活 ping、额度查询、会话标题、topic 判定请求结构上不经过录制钩子，不录也不改写（拍板⑥）。另有两点共存行为：改写规则启用期间，cache 保活 ping 被否决（HUD 显示 `ping off:traffic-rewrite`）、pi 原生 cache warming 被叫停；观测到 warming 决策后改写会暂停（fail closed，`/record status` 可见），`/record off → on` 恢复。
+开启后默认**也录子 agent 流量**：`/goal` verifier、workflow 子 agent 的完整 prompt 与输出都会落库，数据量约随子 agent 用量线性增长。toolkit 自身的保活 ping、额度查询、会话标题、topic 判定请求结构上不经过录制钩子，不录也不改写（拍板⑥）。另有两点共存行为：改写规则启用期间，cache 保活 ping 被否决（HUD 显示 `ping off:traffic-rewrite`）、pi 原生 cache warming 被叫停；观测到 warming 决策后改写会暂停（fail closed，`/record status` 可见），`/record off → on` 恢复。
 
 ### LAN 风险
 

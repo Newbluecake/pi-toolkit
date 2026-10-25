@@ -64,8 +64,7 @@ npx tsx scripts/exp/topic-judge-eval/run.mjs <labelled.jsonl> \
 ## 为什么用 `npx tsx` 而不是 `node --experimental-strip-types`
 
 两个脚本要 import `src/**/*.ts`，而 src 内部相对导入全部带 `.js` 后缀（ESMLoader
-约定），plain node 的 strip-types 不做 `.js → .ts` 路径重写，解析会失败；tsx 能。与
-`scripts/exp/exp6-judge.ts`、`consult-fork-probe.ts` 的既有先例一致。
+约定），plain node 的 strip-types 不做 `.js → .ts` 路径重写，解析会失败；tsx 能。
 
 ## 冒烟结果（2026-10-16，3 个人工打标 case，真实模型调用）
 

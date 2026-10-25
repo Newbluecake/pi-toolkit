@@ -42,7 +42,7 @@ Web hub 的额度胶囊、池明细见 [Web Hub](web-hub.md)。
 
 - 采样 `load.sampleIntervalS`=5；一个指标需持续 `sustainS`=60 才升级、持续 `recoverS`=30 才恢复，带迟滞。总体级别取各指标最高级，全部未知则为 unknown。
 - 默认阈值（`warn` / `crit`）：CPU 忙碌 85% / 95%，PSI 40% / 70%；内存可用 15% / 8%；磁盘空闲 10% / 5%（或绝对值 < 5 GiB）。均可通过 `load.cpu.*` / `load.mem.*` / `load.disk.*` 调整。
-- **闸门**（`load.gate` 默认 `true`，`load.gateLevel` 默认 `"crit"`）：顶层与嵌套 `Agent`（含 resume）在闸门期间被拒绝，且拒绝发生在创建任何 run / label / worktree 之前；workflow 的 `agent()` 按 FIFO 等待；consult、`/goal` 验证、tidy、`/task`、@mention、RPC、cron 不受限。
+- **闸门**（`load.gate` 默认 `true`，`load.gateLevel` 默认 `"crit"`）：顶层与嵌套 `Agent`（含 resume）在闸门期间被拒绝，且拒绝发生在创建任何 run / label / worktree 之前；workflow 的 `agent()` 按 FIFO 等待；`/goal` 验证、tidy、`/task`、@mention、RPC、cron 不受限。
 - **提示**（`load.hint.*`，默认开）：turn_end 追加负载提示，`load.hint.repeatS`=600、`minIntervalS`=120。HUD 也带一格（`load.hud`）。
 - 看谁在占资源：Web hub 的负载胶囊可打开进程聚合视图（`GET /api/load/top`，`webHub.load` 默认 `true`）。
 - 非 print/json 模式、数据未知或陈旧时一律放行。`load.*` 与 `webHub.load` 非 live，需 `/reload`（hub 侧再 `/webhub restart`）。
