@@ -7,7 +7,6 @@ import { RUN_TX } from "../../../src/web-hub/protocol/run-transcript.js";
 import { projectSessionEntry } from "../../../src/web-hub/protocol/keys.js";
 import type { HubEvent, RunSink, RunTranscriptService } from "../../../src/web-hub/hub/ports.js";
 import { HubError, createRegistry, type Registry } from "../../../src/web-hub/hub/registry.js";
-import { consultTranscript } from "../../../src/web-hub/agent/consult-transcript.js";
 import { createRunTranscriptService } from "../../../src/web-hub/hub/run-transcript.js";
 import { createRunFileReader } from "../../../src/web-hub/hub/run-file-reader.js";
 import { formatSseFrame } from "../../../src/web-hub/hub/sse.js";
@@ -402,13 +401,50 @@ describe("snapshot / page payloads (§5.2 reply branches)", () => {
     expect(json).not.toContain("finalLeafId");
   });
 
+  // #40: the agent side no longer produces consultFallback, but the hub must keep
+  // serving old agents that still send it (§3.8). These are hardcoded legacy wire
+  // entries in the exact shape the removed consultTranscript() produced.
+  const LEGACY_CONSULT_FALLBACK: WireEntry[] = [
+    {
+      id: "consult-question",
+      parentId: null,
+      type: "message",
+      timestamp: "1970-01-01T00:00:00.000Z",
+      message: {
+        role: "user",
+        content: "Question",
+        consultSummary: true,
+        consultPrompt: "READ-ONLY CONSULT MODE\n\nQuestion:\nQuestion",
+      },
+    },
+    {
+      id: "consult-answer",
+      parentId: "consult-question",
+      type: "message",
+      timestamp: "1970-01-01T00:00:00.000Z",
+      message: { role: "assistant", content: "Answer", consultSummary: true },
+    },
+  ];
+  const LEGACY_CONSULT_FALLBACK_SHORT: WireEntry[] = [
+    {
+      id: "consult-question",
+      parentId: null,
+      type: "message",
+      timestamp: "1970-01-01T00:00:00.000Z",
+      message: { role: "user", content: "q", consultSummary: true, consultPrompt: "q" },
+    },
+    {
+      id: "consult-answer",
+      parentId: "consult-question",
+      type: "message",
+      timestamp: "1970-01-01T00:00:00.000Z",
+      message: { role: "assistant", content: "a", consultSummary: true },
+    },
+  ];
+
   it("missing consult file uses Q&A, including terminal semantics, pagination and path hygiene", async () => {
     const c = ctx();
-    const fallback = consultTranscript({
-      consultOf: {},
-      taskPrompt: "READ-ONLY CONSULT MODE\n\nQuestion:\nQuestion",
-      text: "Answer",
-    })!;
+    const fallback = LEGACY_CONSULT_FALLBACK;
     const reply: ReplyBuilder = (req) =>
       ({ ...fileReply("/nonexistent/consult.jsonl", "leaf")(req), consultFallback: fallback }) as AgentFrame;
     c.replies.push(reply);
@@ -439,7 +475,7 @@ describe("snapshot / page payloads (§5.2 reply branches)", () => {
     const c = ctx();
     const raws = chainRaw("consult", 2);
     const file = writeJsonl("consult-present.jsonl", raws.map(line).join(""));
-    const fallback = consultTranscript({ consultOf: {}, taskPrompt: "q", text: "a" })!;
+    const fallback = LEGACY_CONSULT_FALLBACK_SHORT;
     const reply =
       (leaf: string): ReplyBuilder =>
       (req) =>

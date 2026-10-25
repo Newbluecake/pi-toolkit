@@ -234,16 +234,12 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
     expect(plain.get(".run-model .model").text()).toBe("glm-5.3");
   });
 
-  it("line-2 slot is always rendered: consult rows get a consult note, others the phase only", () => {
+  it("line-2 slot is always rendered: live activity, else the phase only", () => {
     const wrapper = mountTree([
       // wire status is the core RunStatus (`completed`, never the visual `done`)
-      row({ runId: "c-done", status: "completed", phaseLabel: "已结束", terminal: true, consult: true }),
-      row({ runId: "c-fail", status: "failed", phaseLabel: "已结束", terminal: true, consult: true }),
-      row({ runId: "c-run", status: "running", phaseLabel: "运行中", consult: true }),
+      row({ runId: "done", status: "completed", phaseLabel: "已结束", terminal: true }),
       row({ runId: "plain", status: "completed", phaseLabel: "已结束", terminal: true }),
-      // label looks like a consult but the wire marker is absent ⇒ generic fallback
-      row({ runId: "consult-fake", status: "completed", phaseLabel: "已结束", terminal: true }),
-      row({ runId: "c-live", consult: true, streamLine: "thinking hard" }),
+      row({ runId: "live", streamLine: "thinking hard" }),
     ]);
     const act = (id: string): string =>
       wrapper
@@ -251,13 +247,27 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
         .find((r) => r.text().includes(id))!
         .get(".run-activity")
         .text();
-    expect(act("c-done")).toMatch(/已结束 (咨询已回答|Consult answered)/);
-    expect(act("c-fail")).toMatch(/(咨询未完成|Consult incomplete)/);
-    expect(act("c-run")).toMatch(/(咨询中|Consulting)/);
-    expect(act("c-live")).toContain("thinking hard");
-    expect(act("c-live")).not.toMatch(/咨询|Consult/);
+    expect(act("done")).toBe("已结束");
+    expect(act("live")).toContain("thinking hard");
     expect(act("plain")).toBe("已结束");
-    expect(act("consult-fake")).toBe("已结束");
+  });
+
+  it("rows carrying legacy consult:true/cacheMark wire fields render normally (#40 compat)", () => {
+    const wrapper = mountTree([
+      row({ runId: "legacy-consult", status: "completed", phaseLabel: "已结束", terminal: true, consult: true }),
+      row({
+        runId: "legacy-mark",
+        status: "completed",
+        phaseLabel: "已结束",
+        terminal: true,
+        cacheMark: "t#2 warm·hit 96%",
+      }),
+    ]);
+    const legacy = wrapper.findAll(".run").find((r) => r.text().includes("legacy-consult"))!;
+    expect(legacy.get(".run-activity").text()).toBe("已结束");
+    const marked = wrapper.findAll(".run").find((r) => r.text().includes("legacy-mark"))!;
+    expect(marked.find(".run-cachemark").exists()).toBe(false);
+    expect(marked.text()).not.toContain("warm·hit");
   });
 
   it("2026-10-16: the provider renders before the model (`zai/` + `glm-5.3`); a bare id renders no provider", () => {

@@ -220,14 +220,6 @@ describe("projectFleet / fleetFingerprint / readStatus", () => {
     expect("title" in projectFleet([empty], 5_000)[0]!).toBe(false);
   });
 
-  it("projects diag.consultOf as the optional `consult:true` marker; absent stays absent", () => {
-    const c = snap({ diag: diag({ ...snap().diag, consultOf: { askerRunId: "parent-1" } }) });
-    expect(projectFleet([c], 5_000)[0]!.consult).toBe(true);
-    const empty = snap({ diag: diag({ ...snap().diag, consultOf: {} }) });
-    expect(projectFleet([empty], 5_000)[0]!.consult).toBe(true);
-    expect("consult" in projectFleet([snap()], 5_000)[0]!).toBe(false);
-  });
-
   it("projects startedAt (diag.createdAt) on every row and endedAt only on terminal rows; absent stays absent", () => {
     const running = snap({ diag: diag({ ...snap().diag, createdAt: 1_000 }) });
     const r = projectFleet([running], 5_000)[0]!;

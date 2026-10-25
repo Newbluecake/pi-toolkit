@@ -2,7 +2,6 @@
 import { mount } from "@vue/test-utils";
 import { nextTick, ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { consultTranscript } from "../../../src/web-hub/agent/consult-transcript.js";
 import { resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import AgentDetail from "../../../src/web-hub/ui/src/components/detail/AgentDetail.vue";
 import RunTranscript from "../../../src/web-hub/ui/src/components/drawer/RunTranscript.vue";
@@ -357,25 +356,40 @@ describe("RunTranscript 页脚其余状态(§6.5/§6.6)", () => {
   });
 });
 
-describe("reclaimed consult Q&A", () => {
-  it.each([
-    ["en", "The consult session file was reclaimed; only the question and answer are shown.", "Full consult prompt"],
-    ["zh", "咨询会话文件已回收，仅显示问题与回答。", "完整咨询提示词"],
-  ] as const)("renders the question, answer and collapsed original prompt in %s", async (lang, note, summary) => {
-    setLangOverride(lang, null);
-    const prompt = "READ-ONLY CONSULT MODE\nAllowed tools: read\n\nQuestion:\nWhere? <script>alert(1)</script>";
-    const agent = agentState({
-      terminal: true,
-      live: false,
-      runEntries: consultTranscript({ consultOf: {}, taskPrompt: prompt, text: "Here is the answer." }),
-    });
+describe("reclaimed consult Q&A (legacy wire entries)", () => {
+  // #40: the UI no longer renders consult chrome, but old agents may still send
+  // fallback entries carrying the consultSummary/consultPrompt custom fields —
+  // they must render as ordinary transcript messages. Hardcoded in the exact
+  // shape the removed consultTranscript() produced.
+  const LEGACY_CONSULT_ENTRIES = [
+    {
+      id: "consult-question",
+      parentId: null,
+      type: "message",
+      timestamp: "1970-01-01T00:00:00.000Z",
+      message: {
+        role: "user",
+        content: "Where? <script>alert(1)</script>",
+        consultSummary: true,
+        consultPrompt: "READ-ONLY CONSULT MODE\nAllowed tools: read\n\nQuestion:\nWhere? <script>alert(1)</script>",
+      },
+    },
+    {
+      id: "consult-answer",
+      parentId: "consult-question",
+      type: "message",
+      timestamp: "1970-01-01T00:00:00.000Z",
+      message: { role: "assistant", content: "Here is the answer.", consultSummary: true },
+    },
+  ];
+
+  it("renders the question and answer as ordinary messages, without any consult note or full-prompt control", async () => {
+    const agent = agentState({ terminal: true, live: false, runEntries: LEGACY_CONSULT_ENTRIES });
     const w = mount(RunTranscript, { props: { agent, now: 5000 } });
     mounted.push(w);
     await nextTick();
-    expect(w.find('[role="note"]').text()).toContain(note);
-    expect(w.find("summary").text()).toBe(summary);
-    expect(w.find("details").attributes("open")).toBeUndefined();
-    expect(w.find("pre").text()).toBe(prompt);
+    expect(w.find('[role="note"]').exists()).toBe(false);
+    expect(w.find("details").exists()).toBe(false);
     expect(w.find(".msg-user .bubble").text()).toBe("Where? <script>alert(1)</script>");
     expect(w.text()).toContain("Here is the answer.");
     expect(w.find("script").exists()).toBe(false);

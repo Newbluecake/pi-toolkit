@@ -13,7 +13,6 @@ import type {
 import { displayAgentType } from "../core/types.js";
 import { formatDuration } from "../core/format.js";
 import { isTerminalStatus } from "../core/status.js";
-import { consultCacheMarkerOfDiag } from "../core/consult-cache-marker.js";
 
 // Re-exported for the ~10 existing consumers (tools/, commands/, ui/, stack,
 // tests); the implementation moved to core/format.ts so non-UI layers (bash
@@ -101,11 +100,6 @@ export interface FleetRow {
   extensions: number;
   /** X1: worktree isolation display state (agent-tree `⎇` marker); undefined = not isolated. */
   worktree: WorktreeDisposition | undefined;
-  /** cache-thread plan §5.3 (U): consult-run warm/cold compact marker
-   *  (`t#2 warm·hit 96%`) from diag.consultCache/consultThread; undefined =
-   *  render nothing (non-consult runs, runs without the fields — the row
-   *  stays byte-identical to the pre-feature shape). */
-  consultCacheMark: string | undefined;
   highlight: FleetHighlight;
 }
 
@@ -401,9 +395,9 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
   return {
     runId: snapshot.runId,
     shortRunId: snapshot.runId.slice(0, 8),
-    // consult §16.5 (acceptance follow-up): fold the main-session sentinel back
-    // to "main" at the render boundary — also covers snapshots persisted by
-    // older builds whose diag still carries the raw sentinel.
+    // #40 legacy read: fold the removed consult subsystem's main-session
+    // sentinel back to "main" at the render boundary — covers snapshots
+    // persisted by older builds whose diag still carries the raw sentinel.
     type: displayAgentType(opts.typeOf?.(snapshot.runId) ?? snapshot.diag.agentType),
     label: snapshot.diag.label,
     title: snapshot.diag.title,
@@ -451,7 +445,6 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     inGrace: !terminal && snapshot.deadlines.graceUntil !== undefined,
     extensions: snapshot.diag.overtime?.extensions ?? 0,
     worktree: snapshot.diag.worktree,
-    consultCacheMark: consultCacheMarkerOfDiag(snapshot.diag),
     highlight: highlightOf(snapshot, opts),
   };
 }

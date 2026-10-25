@@ -80,7 +80,6 @@ import type { XsHubPort } from "../../fabric/xs/sender.js";
 import type { XsBlockResolve } from "../../commands/fabric-xs.js";
 import type { XsAliasBridgePort, XsAliasCachePort } from "../../fabric/xs/types-alias.js";
 import type { XsHubLimitsWire } from "../protocol/xs.js";
-import type { ConsultTranscriptDiagnostics } from "./consult-transcript.js";
 import { createRunTranscripts, type RunTxRunInfo, type RunTranscriptPort } from "./run-transcript.js";
 import { createEventTap } from "./event-tap.js";
 import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
@@ -269,11 +268,10 @@ export type StopResult =
   | { ok: false; reason: "already_terminal"; status: string }
   | { ok: false; reason: "stop_failed"; escalatedTo: "L2" | "L3" | "L4" };
 export interface QueryControlPort {
-  get(
-    runId: string,
-  ):
-    | { status: string; diag?: ConsultTranscriptDiagnostics & { sessionFile?: string; finalLeafId?: string } }
-    | undefined;
+  get(runId: string):
+    // #40: the transcript read path needs only the terminal file pointers; the
+    // removed consult subsystem's diag fields are no longer projected here.
+    { status: string; diag?: { sessionFile?: string; finalLeafId?: string } } | undefined;
   steer(
     runId: string,
     text: string,
@@ -761,7 +759,6 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           status: s.status,
           terminal: isTerminalStatus(s.status as RunStatus),
         };
-        if (s.diag !== undefined) info.diag = s.diag;
         if (s.diag?.sessionFile !== undefined) info.sessionFile = s.diag.sessionFile;
         if (s.diag?.finalLeafId !== undefined) info.finalLeafId = s.diag.finalLeafId;
         return info;

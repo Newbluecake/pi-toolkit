@@ -30,7 +30,6 @@
  * deactivate hook, and `/reload` tears the whole module instance down (the shutdown
  * handler still runs first, so observers never leak into the rebuilt stack).
  */
-import { consultTranscript, type ConsultTranscriptDiagnostics } from "./consult-transcript.js";
 import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import { projectSessionEntry } from "../protocol/keys.js";
@@ -45,7 +44,6 @@ export interface RunTxRunInfo {
   terminal: boolean;
   sessionFile?: string;
   finalLeafId?: string;
-  diag?: ConsultTranscriptDiagnostics;
 }
 
 /**
@@ -219,7 +217,6 @@ export function createRunTranscripts(deps: {
       replyErr(f, "leaf_unknown");
       return;
     }
-    const fallback = consultTranscript(info.diag);
     reply({
       t: "run_tx_reply",
       rid: f.rid,
@@ -229,7 +226,6 @@ export function createRunTranscripts(deps: {
       status: info.status,
       sessionFile: info.sessionFile,
       finalLeafId: info.finalLeafId,
-      ...(fallback === undefined ? {} : { consultFallback: fallback }),
     });
   };
 

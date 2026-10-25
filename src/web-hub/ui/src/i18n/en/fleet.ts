@@ -9,9 +9,6 @@ const fleet = {
   totalCost: "{n} total · {cost}",
   showFinished: "Show {n} Finished Runs",
   treeLabel: "Agents",
-  consultDone: "Consult answered",
-  consultIncomplete: "Consult incomplete",
-  consultRunning: "Consulting",
   // web-hub archive plan (docs/dev/web-hub/archive-report.md). `archivedFold`/`archivedToast`
   // carry a {n}/{name} placeholder; the `auto` badge itself is a compact English token
   // (rendered directly in the components, not through i18n).

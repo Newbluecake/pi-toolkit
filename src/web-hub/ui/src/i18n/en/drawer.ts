@@ -15,8 +15,6 @@ const drawer = {
   close: "Close Agents drawer",
   backToTree: "Agents",
   runTranscriptAria: "Subagent transcript",
-  consultSummary: "The consult session file was reclaimed; only the question and answer are shown.",
-  consultFullPrompt: "Full consult prompt",
   parentMissing: "parent run not listed",
   omittedActive: "{n} more running not listed",
   omittedTerminal: "{n} more finished not listed",
