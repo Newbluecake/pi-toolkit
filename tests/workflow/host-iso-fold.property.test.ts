@@ -401,15 +401,13 @@ describe("I4: removed experts on an isolated call never folds", () => {
     const h = harness();
     await h.boot();
     const c = controllableWorktreeSpawner();
-    const resolveExperts = vi.fn(() => ({ error: { message: "expert not found" } }));
     const appendSpy = vi.fn();
     const index = buildReplayIndex([], 0, "chain");
-    h.attach({ ...c.spawner, resolveExperts }, okGate, {
+    h.attach(c.spawner, okGate, {
       journal: { ...verifyJournalConfig(index, new Set()), store: { append: appendSpy } },
     });
     h.postHostCall("1", "agent", { prompt: "isolated", opts: { isolation: "worktree", experts: ["dev"] } });
     await flush();
-    expect(resolveExperts).not.toHaveBeenCalled();
     expect(ackFor(h.sent, "1")?.ok).toBe(false);
     expect(ackFor(h.sent, "1")?.error?.message).toContain("opts.experts is no longer supported");
     expect(c.spawns).toHaveLength(0); // rejected before ever reaching spawn/F2

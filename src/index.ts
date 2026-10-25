@@ -970,14 +970,9 @@ export default function activate(rawPi: ExtensionAPI): void {
       // only spawn() is reached; the outcome arrives through the notification outbox.
       spawn: forwardSpawn(holder),
       markdownTheme: resolveMarkdownTheme,
-      // consult (plan §6 D-16): dispatch-time `experts` resolution for the
-      // top-level Agent tool — the main session itself never gets the
-      // consult tool (§4.2/§5.2), but it CAN authorize a whitelist for a
-      // dispatched child (agent-tool.ts throws on failure to resolve).
-      resolveExperts: (refs) => requireStack(holder).consult.resolveExperts(refs),
       // L1 (agent-tool pool-full plan §2): read fresh on every call so a
       // live `/agent settings` edit (or /reload) takes effect immediately,
-      // same convention as worktreeAvailable/resolveExperts above.
+      // same convention as worktreeAvailable above.
       queueWhenFull: () => settings.agent.queueWhenFull,
       loadGate: () => holder.current?.load?.port().verdict().gating === true,
     }),
@@ -1471,7 +1466,6 @@ export default function activate(rawPi: ExtensionAPI): void {
       holder.current.rpc.close();
       holder.current.fabric?.dispose();
       holder.current.workflow.runs.abandon(); // stop orphaned background workflows; their notices are dropped
-      holder.current.consult.close(); // consult cache-thread plan §7 (②): retained thread heads + ledger (idempotent)
     }
     await types.reload();
     const stack = buildSessionStack(
@@ -1605,10 +1599,6 @@ export default function activate(rawPi: ExtensionAPI): void {
     stack.fleetWidget?.dispose();
     stack.archive?.dispose(); // web-hub archive plan: same fresh-module /reload rationale as the widget above
     stack.keepalive?.dispose();
-    // consult cache-thread plan §7 (①): FIRST path — delete every retained thread head and clear the ledger
-    // before the drain below; any consult still settling arrives at a closed registry and can only delete.
-    // pi's /reload sends reason "reload" through here before re-importing the extension.
-    stack.consult.close();
     stack.quota?.dispose();
     stack.dynamic?.dispose(ctx); // P1-4：flush 遥测观察窗 + 估计量落盘（T-D3-DISPOSE）
     stack.load?.dispose();

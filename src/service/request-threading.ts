@@ -30,7 +30,6 @@ const THREADED = [
   "resumeFrom",
   "parentRunId",
   "deadlineAt",
-  "forkSessionFrom", // @deprecated #40 legacy consult field: no producer, no consumer; entry stays while the SpawnRequest field exists (PS1b removes both)
   "inputBudget",
   // Timeout-policy (agent-explicit-timeout-extend plan §2.2/C10): must reach the
   // runner so the `enqueued` dispatch can mirror it into diag.timeoutPolicy.
@@ -63,11 +62,6 @@ const NOT_THREADED = [
   "suppressDelivery", // consumed by the runtime adapter / spawn failure fallback; caller owns completion reporting
   "isolation", // consumed by the X1 worktree extension via H2, not threaded
   "schema", // consumed by the adapter to inject the StructuredOutput tool
-  // @deprecated #40 legacy consult fields: no producer and no consumer any more; the entries stay only while the
-  // SpawnRequest fields exist (PS1b removes both).
-  "consultExperts",
-  "consultSnapshot",
-  "consultAnchor",
   "poolFullPolicy", // consumed entirely by spawn() admission (L1) — decided and resolved before start()/RunnerSpec ever exist
   // sysload plan §6.2: consumed entirely by spawn() admission (same point/reason as
   // poolFullPolicy above) — the load gate either rejects admission outright or lets the

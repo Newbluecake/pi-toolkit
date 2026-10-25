@@ -1,6 +1,7 @@
 // data-encryption P2: the remaining guard points — child-session placement and cross-domain resume
-// (session-driver), the consult fork root (fork-store), D2 worktree refusal (H2), D8 schedule refusal.
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+// (session-driver), the legacy consult fork root (legacy-consult-forks), D2 worktree refusal (H2), D8 schedule refusal.
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -11,7 +12,11 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
 
 import { createAgentSession, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { PiSessionDriver } from "../../src/runtime/session-driver.js";
-import { consultSessionDir, removeForkFile } from "../../src/consult/fork-store.js";
+import {
+  LEGACY_FORK_TTL_MS,
+  legacyConsultForkDir,
+  sweepLegacyConsultForks,
+} from "../../src/runtime/legacy-consult-forks.js";
 import { createWorktreeExtension } from "../../src/extensions/worktree.js";
 import { wireSchedule } from "../../src/schedule/agent/wire.js";
 import { resetSecureDomainForTests } from "../../src/secure/domain.js";
@@ -19,12 +24,24 @@ import { freezeDomain, makeFakeVault, type FakeVault } from "./helpers.js";
 
 const createMock = vi.mocked(createAgentSession);
 let v: FakeVault | undefined;
+let tempAgentDir: string | undefined;
 afterEach(() => {
+  vi.unstubAllEnvs();
+  if (tempAgentDir !== undefined) rmSync(tempAgentDir, { recursive: true, force: true });
+  tempAgentDir = undefined;
   resetSecureDomainForTests();
   createMock.mockReset();
   v?.cleanup();
   v = undefined;
 });
+
+/** Point pi's agent dir at a throwaway dir for this test (restored by afterEach) — never touch the real ~/.pi/agent. */
+function useTempAgentDir(): string {
+  tempAgentDir = mkdtempSync(join(tmpdir(), "guard-points-agent-"));
+  vi.stubEnv("PI_CODING_AGENT_DIR", tempAgentDir);
+  expect(getAgentDir()).toBe(tempAgentDir);
+  return tempAgentDir;
+}
 
 function fakeSession() {
   return {
@@ -60,6 +77,7 @@ describe("session-driver child placement (plan §2.5 「子会话落盘」)", ()
 
   it("no verdict ⇒ pi's default session dir (legacy create(cwd))", async () => {
     v = makeFakeVault();
+    useTempAgentDir(); // SessionManager.create() mkdirs the session dir under the agent dir
     createMock.mockResolvedValue({ session: fakeSession() } as never);
     const handle = await new PiSessionDriver().create({ runId: "r2", cwd: v.outside, persist: true } as never);
     expect(sessionManagerOf().getSessionDir().startsWith(getAgentDir())).toBe(true);
@@ -96,22 +114,55 @@ describe("session-driver child placement (plan §2.5 「子会话落盘」)", ()
   });
 });
 
-describe("consult fork root (fork-store.ts:78/808, stack.ts consult wiring)", () => {
-  it("secure ⇒ consultSessionDir and removeForkFile's default root are the in-vault dir", () => {
+describe("legacy consult fork root (runtime/legacy-consult-forks.ts, stack.ts sweep)", () => {
+  it("plain ⇒ <agentDir>/cache/consult-sessions; secure ⇒ the in-vault <state>/cache/consult-sessions", () => {
     v = makeFakeVault();
-    const legacy = consultSessionDir();
-    expect(legacy).toBe(join(getAgentDir(), "cache", "consult-sessions"));
+    expect(legacyConsultForkDir()).toBe(join(getAgentDir(), "cache", "consult-sessions"));
     freezeDomain(v);
-    const root = consultSessionDir();
-    expect(root).toBe(join(v.state, "cache", "consult-sessions"));
+    expect(legacyConsultForkDir()).toBe(join(v.state, "cache", "consult-sessions"));
+  });
+
+  it("secure ⇒ the default sweep cleans only the vault root: files outside it and in the plain agentDir dir are untouched", () => {
+    v = makeFakeVault();
+    const header = (id: string, cwd: string) =>
+      `${JSON.stringify({ type: "session", version: 3, id, timestamp: "t", cwd })}\n`;
+    const now = Date.now();
+    const old = new Date(now - LEGACY_FORK_TTL_MS - 60_000);
+    // the plain-domain dir lives under a throwaway agent dir (never the developer's real ~/.pi/agent);
+    // same-named files there must survive a secure sweep.
+    useTempAgentDir();
+    const plainDir = join(getAgentDir(), "cache", "consult-sessions");
+    mkdirSync(plainDir, { recursive: true });
+    const plainExpired = join(plainDir, "expired.jsonl");
+    const plainFragment = join(plainDir, "fragment.jsonl");
+    writeFileSync(plainExpired, header("p", plainDir));
+    utimesSync(plainExpired, old, old);
+    writeFileSync(plainFragment, "not a session\n");
+    const outsideExpired = join(v.outside, "expired.jsonl");
+    writeFileSync(outsideExpired, header("o", v.outside));
+    utimesSync(outsideExpired, old, old);
+    freezeDomain(v);
+    const root = legacyConsultForkDir();
     mkdirSync(root, { recursive: true });
-    const inside = join(root, "f.jsonl");
-    writeFileSync(inside, "x\n");
-    expect(removeForkFile(inside)).toBe(true);
-    expect(existsSync(inside)).toBe(false);
-    const legacyFile = join(v.outside, "g.jsonl");
-    writeFileSync(legacyFile, "x\n");
-    expect(removeForkFile(legacyFile)).toBe(false); // outside the (secure) root ⇒ refused
+    const vaultExpired = join(root, "expired.jsonl");
+    const vaultFragment = join(root, "fragment.jsonl");
+    const vaultFresh = join(root, "fresh.jsonl");
+    writeFileSync(vaultExpired, header("e", root));
+    utimesSync(vaultExpired, old, old);
+    writeFileSync(vaultFragment, "not a session\n");
+    writeFileSync(vaultFresh, header("f", root));
+    expect(sweepLegacyConsultForks(undefined, undefined, now)).toEqual({
+      removedExpired: 1,
+      removedFragments: 1,
+      kept: 1,
+      errors: 0,
+    });
+    expect(existsSync(vaultExpired)).toBe(false);
+    expect(existsSync(vaultFragment)).toBe(false);
+    expect(existsSync(vaultFresh)).toBe(true);
+    expect(existsSync(plainExpired)).toBe(true);
+    expect(existsSync(plainFragment)).toBe(true);
+    expect(existsSync(outsideExpired)).toBe(true);
   });
 });
 

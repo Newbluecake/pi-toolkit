@@ -287,11 +287,6 @@ interface AgentToolCommonDeps {
    */
   markdownTheme?: () => MarkdownTheme | undefined;
   /**
-   * @deprecated #40 — consult removed; never read (an `experts` argument is
-   * ignored with a one-line notice). Kept only until PS1b drops the wiring.
-   */
-  resolveExperts?: (refs: readonly string[]) => unknown;
-  /**
    * L1 (agent-tool pool-full plan §2): pool-full dispatch policy —
    * `settings.agent.queueWhenFull`, read fresh on every call (a `/reload` or
    * live `/agent settings` edit takes effect immediately, same convention as

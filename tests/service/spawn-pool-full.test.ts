@@ -153,7 +153,7 @@ describe("SpawnService pool-full admission (L1)", () => {
     expect(rejected.error.message).toContain("slots: 2/2 in use, 0 free");
   });
 
-  it("queue-policy (workflow/consult/resume/undefined) requests are never rejected when full, and report queued position/limit", async () => {
+  it("queue-policy (workflow/resume/undefined) requests are never rejected when full, and report queued position/limit", async () => {
     const d = deps(1);
     const service = createSpawnService(d);
     await spawnOk(service, { type: "worker", prompt: "a", label: "task-a" });

@@ -13,7 +13,6 @@
  * finds it and nothing is lost. No logic beyond glue lives here; pi-free apart from the `ctx`/`pi` ports.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ConsultWiring } from "../../consult/index.js";
 import type { SpawnService } from "../../service/spawn-service.js";
 import { installBackgroundExecutor, type BackgroundExecutor } from "./bg.js";
 import type { MessageSchedulerInstall } from "./message.js";
@@ -24,8 +23,6 @@ export interface ScheduleExecutorsDeps {
   /** Activate-level A2 installer (`ScheduleWiring.message`); absent ⇒ every handoff degrades to a quiet recap. */
   message: MessageSchedulerInstall | undefined;
   spawn: Pick<SpawnService, "spawn" | "waitOutcome">;
-  /** @deprecated #40 — consult removed; never read. Removed in PS1b. */
-  consult?: Pick<ConsultWiring, "resolveExperts">;
 }
 
 /** Remove the "please take over" tail: a recap informs, it must not invite a turn. */

@@ -220,7 +220,7 @@ function buildRealStack(cwd: string, deferOnReapedFor?: Set<string>) {
       getChildBashRegistry().attachHost(sessionId, hostViewFor(runId));
     },
     sealSession: (runId, sessionId) => getChildBashRegistry().sealAndKill(sessionId, GRACE_MS, runId)?.facts,
-    onReaped: (runId, _forkSessionFrom, sessionId) => {
+    onReaped: (runId, sessionId) => {
       if (sessionId === undefined) return;
       const fire = () => {
         getChildBashRegistry().sealAndKill(sessionId, GRACE_MS, runId);

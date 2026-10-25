@@ -10,9 +10,11 @@ export type MessageKey = string & { readonly __messageKey: unique symbol };
 /**
  * fabric-cross-session plan v3 §4.1: why a finished run can not be woken. The admission-time subset
  * (`consult_fork` … `external_agent`) is written to `diag.wakeExclusion`; the rest is evaluated at revive time.
+ * `consult_fork` is legacy-read-only (#40): nothing produces it any more, but run entries written before the
+ * consult removal can still carry it, and `fabric/wake.ts` keeps treating any non-`"none"` value as an exclusion.
  */
 export type WakeExclusion =
-  | "consult_fork"
+  | "consult_fork" // legacy-read-only: kept for pre-removal run entries, never produced
   | "readonly_domain"
   | "caller_owned"
   | "external_agent"

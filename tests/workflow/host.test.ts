@@ -1652,13 +1652,12 @@ describe("host.ts: removed experts admission", () => {
     const h = harness();
     await h.boot();
     const c = controllableSpawner();
-    const resolver = vi.fn(() => ({ refs: [] }));
     const append = vi.fn();
     const index = buildReplayIndex([], 0, "chain");
     const handler = attachHostCallHandler({
       clock: h.clock,
       workerHost: h.workerHost,
-      spawner: { ...c.spawner, resolveExperts: resolver },
+      spawner: c.spawner,
       gateRunner: okGate,
       budget: BASE_BUDGET,
       workflowDeadlineAt: 1000000,
@@ -1676,7 +1675,6 @@ describe("host.ts: removed experts admission", () => {
     const ack = sentFor(h.sent, "1").acks[0] as { ok: boolean; error?: { message: string } };
     expect(ack.ok).toBe(false);
     expect(ack.error?.message).toContain("opts.experts is no longer supported");
-    expect(resolver).not.toHaveBeenCalled();
     expect(c.spawns).toHaveLength(0);
     expect(handler.children).toEqual([]);
     expect(append).not.toHaveBeenCalled();

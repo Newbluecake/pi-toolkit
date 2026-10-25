@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
-import { consultSessionDir, FORK_TTL_MS, sweepForkDir } from "../../src/consult/fork-store.js";
 import {
   LEGACY_FORK_TTL_MS,
   legacyConsultForkDir,
@@ -13,9 +12,8 @@ import { resetSecureDomainForTests } from "../../src/secure/domain.js";
 import { freezeDomain, makeFakeVault, type FakeVault } from "../secure/helpers.js";
 
 /**
- * #40 P0: the legacy consult fork dir + sweep, migrated verbatim from
- * fork-store. Cases ported from tests/consult/fork-store.test.ts (T-6) plus the
- * plain/secure root and the fork-store delegation (signatures unchanged).
+ * #40: the legacy consult fork dir + sweep (migrated verbatim from the removed consult fork-store):
+ * plain/secure root, TTL and headerless-fragment rules.
  */
 
 const dirs: string[] = [];
@@ -38,19 +36,16 @@ const header = (id: string, dir: string): string =>
 describe("legacyConsultForkDir", () => {
   it("plain domain ⇒ <agentDir>/cache/consult-sessions", () => {
     expect(legacyConsultForkDir()).toBe(join(getAgentDir(), "cache", "consult-sessions"));
-    expect(consultSessionDir()).toBe(legacyConsultForkDir());
   });
 
   it("secure domain ⇒ the in-vault <state>/cache/consult-sessions", () => {
     v = makeFakeVault();
     freezeDomain(v);
     expect(legacyConsultForkDir()).toBe(join(v.state, "cache", "consult-sessions"));
-    expect(consultSessionDir()).toBe(legacyConsultForkDir());
   });
 
-  it("TTL is 24h and fork-store re-exports the same value", () => {
+  it("TTL is 24h", () => {
     expect(LEGACY_FORK_TTL_MS).toBe(24 * 60 * 60 * 1000);
-    expect(FORK_TTL_MS).toBe(LEGACY_FORK_TTL_MS);
   });
 });
 
@@ -127,14 +122,5 @@ describe("sweepLegacyConsultForks", () => {
     expect(existsSync(blankFirst)).toBe(true);
     expect(existsSync(big)).toBe(false);
     expect(existsSync(empty)).toBe(false);
-  });
-
-  it("fork-store's sweepForkDir delegates with identical results", () => {
-    const a = tempDir();
-    const b = tempDir();
-    const now = Date.now();
-    populate(a, now);
-    populate(b, now);
-    expect(sweepForkDir(a, FORK_TTL_MS, now)).toEqual(sweepLegacyConsultForks(b, LEGACY_FORK_TTL_MS, now));
   });
 });

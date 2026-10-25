@@ -215,7 +215,6 @@ interface Captured {
     timeoutPolicy?: string;
     parentRunId?: string;
     deadlineAt?: number;
-    forkSessionFrom?: string;
     // label/budgetOverride/toolDomain are consumed before the runner (NOT_THREADED);
     // the runner sees label via displayMeta and the readonly domain via toolScope.policy.
     displayMeta?: { label?: string };

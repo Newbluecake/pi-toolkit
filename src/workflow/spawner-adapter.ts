@@ -45,11 +45,6 @@ function toCoreStopCause(cause?: string): StopCause | undefined {
 export interface WorkflowChildSpawnerOptions {
   /** Optional sysload workflow FIFO gate; late-bound and absent by default. */
   loadAdmission?: LoadAdmission;
-  /** @deprecated #40 — removed in PS1b; retained for stack wiring, never read. */
-  resolveExperts?: (
-    refs: readonly string[],
-    opts: { completedOnly: true },
-  ) => { refs: readonly import("../core/types.js").ConsultExpertRef[] } | { error: { message: string } };
   /**
    * workflow-worktree plan D2: the live availability gate for
    * `isolation:"worktree"` — `stack.ts` wires this to `() =>
@@ -78,10 +73,6 @@ export function createWorkflowChildSpawner(
         type: req.type,
         prompt: req.prompt,
         ...(req.label !== undefined ? { label: req.label } : {}),
-        // Legacy request passthrough; workflow host no longer produces this field.
-        ...(req.consultExperts !== undefined && req.consultExperts.length > 0
-          ? { consultExperts: [...req.consultExperts] }
-          : {}),
         // workflow-worktree plan D1: forwarded verbatim to `SpawnRequest.
         // isolation` — the real worktree-isolation machinery lives entirely
         // in H2 (src/extensions/worktree.ts) and the service layer; this

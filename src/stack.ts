@@ -139,20 +139,7 @@ import {
   workflowDeliveryOptionsFor,
 } from "./delivery/deadline-notice.js";
 import { parseDeliveryKey } from "./core/delivery-key.js";
-import {
-  consultSessionDir,
-  forkExpertSession,
-  forkMainSessionSnapshot,
-  FORK_TTL_MS,
-  removeForkFile,
-  resolveForkCwd,
-  scanExpertSnapshot,
-  sweepForkDir,
-} from "./consult/fork-store.js";
-import { wireConsult, type ConsultWiring } from "./consult/index.js";
 import { sweepLegacyConsultForks } from "./runtime/legacy-consult-forks.js";
-import type { ConsultForkStore } from "./consult/tool.js";
-import type { MainSessionFacts } from "./consult/main-facts.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { createCacheKeepaliveService, type CacheKeepaliveService } from "./cache-ttl/keepalive-service.js";
 import { getProviderEvidenceStore } from "./cache-ttl/provider-evidence.js";
@@ -313,14 +300,6 @@ let previousHostBashViewCapabilityRelease: (() => void) | undefined;
  * session_shutdown，覆盖 /reload 重建新模块的情形）。
  */
 let previousExternal: { dispose(): void } | undefined;
-/**
- * consult cache-thread plan §7 (③): the previous stack's consult wiring — its follow-up thread heads
- * (retained fork files), prediction ledger and pending display metadata are closed at the top of the
- * next same-module build. The OTHER paths are index.ts's `session_shutdown` and the `session_start`
- * defensive cleanup (they cover the fresh-module `/reload`, which resets this variable). `close()` is
- * idempotent, so the three paths can never double-delete.
- */
-let previousConsult: { close(): void } | undefined;
 
 /** customType of the bash job completion notice (§5) — distinct from `subagent:notification`. */
 export const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
@@ -756,32 +735,6 @@ export function currentSessionId(ctx: ExtensionContext): string {
 }
 
 /**
- * consult (plan §16 "consult the main session"): live snapshot of the host
- * session's own persisted-session path / current model / current context
- * usage, read fresh on every call. Safe to call at any point in the
- * session's lifetime from the `ctx` captured once at `session_start` — the
- * same accessors `src/hud/footer.ts`'s `installFooter` already reads on
- * every later render from that very reference is the existing proof in this
- * codebase that this `ctx` stays live for the whole session rather than
- * freezing at capture time. Never throws (every failure degrades to `{}`,
- * mirroring every other `MainSessionFacts` producer).
- */
-function mainSessionFactsFrom(ctx: ExtensionContext): MainSessionFacts {
-  try {
-    const sessionFile = ctx.sessionManager?.getSessionFile?.();
-    const model = ctx.model;
-    const usage = ctx.getContextUsage?.();
-    return {
-      ...(sessionFile !== undefined ? { sessionFile } : {}),
-      ...(model !== undefined ? { model: { provider: model.provider, id: model.id } } : {}),
-      ...(usage !== undefined ? { contextTokens: usage.tokens, contextPercent: usage.percent } : {}),
-    };
-  } catch {
-    return {};
-  }
-}
-
-/**
  * bash auto-background §3/§5 assembly: store + process port + manager, with
  * the completion notice bound to `pi.sendMessage` (the manager itself has no
  * pi imports). A rejecting `notify` means "retry on the next poll", so
@@ -1155,10 +1108,6 @@ export interface Stack {
   loadHintState?: LoadHintState;
   /** /goal 目标驱动持续运行的 session 级运行态（goal-plan v4）。无持久 timer，纯数据。 */
   goal: GoalSession;
-  /** consult (plan §6 D-14/D-16): always constructed (even with consult.enabled=false — the
-   *  wiring itself degrades to no-op resolveExperts/depsFactory, matching the existing
-   *  unconditional sweep). index.ts's top-level Agent tool forwards `resolveExperts` off this. */
-  consult: ConsultWiring;
   /**
    * workflow-worktree plan D13 (v2.1 condition 2, frozen interface §4): tears down THIS
    * stack's spawn-service worktree waiters/timers and the runtime-adapter's live write-back
@@ -2170,9 +2119,6 @@ export function buildSessionStack(
   previousHostBashViewCapabilityRelease = undefined;
   previousExternal?.dispose();
   previousExternal = undefined;
-  // consult cache-thread plan §7 (③): close the old closure's threads BEFORE this build's fork-dir sweep.
-  previousConsult?.close();
-  previousConsult = undefined;
 
   if (loadHintState !== undefined) {
     loadHintState.latches.clear();
@@ -2255,16 +2201,10 @@ export function buildSessionStack(
   previousBackgroundCompletions = backgroundCompletions;
   const sendCompletion = backgroundCompletions.createSender((message, options) => pi.sendMessage(message, options));
 
-  // consult (plan §5.1/§6 C-9): fork-copy GC — once per session build, no
-  // timer. Unconditional (runs even with consult.enabled=false so leftovers
-  // from before a disable still age out). Multi-process safety argument and
-  // the two load-bearing premises live with sweepForkDir: ① any live consult
-  // run dies within its 150s totalMs hard cap, so an in-use fork file is
-  // ~576× younger than the 24h TTL; ② the "no valid header ⇒ delete
-  // regardless of mtime" fragment rule cannot hit a file mid-creation because
-  // the fork's very first write is a complete header line (header-first
-  // write order). Never throws; missing dir is a no-op.
-  sweepLegacyConsultForks(); // #40: same dir + TTL as before, now owned by runtime/legacy-consult-forks.ts
+  // Legacy consult fork-copy GC (#40): the consult tool is gone, but older versions left fork copies under
+  // `consult-sessions`. Once per session build, no timer; drains them via the 24h TTL + headerless-fragment
+  // rule (runtime/legacy-consult-forks.ts). Never throws; a missing dir is a no-op.
+  sweepLegacyConsultForks();
 
   // The widget controller is created after QueryService exists (below), but
   // its H1 onLifecycle must be part of the merged extension points *before*
@@ -2671,17 +2611,12 @@ export function buildSessionStack(
   // exists afterwards; filled in right after createSpawnService, same
   // ref-holder pattern as spawnRef/nestedSpawn.
   const worktreeDiag: { current?: (runId: RunId, disposition: WorktreeDisposal) => void } = {};
-  // consult (plan §6 D-14): same lazy-ref pattern as worktreeDiag/nestedSpawn —
-  // wireConsult itself needs the live SpawnService + QueryService, both of
-  // which are only constructed after this runner, so the adapter deps below
-  // are indirections through this ref, filled in once wireConsult runs.
-  const consultRef: { current?: ConsultWiring } = {};
   // bash-timeout-grace plan §3.1-3.3 (P5): the process-global registry the
   // child (subagent) session's own bash job manager registers into
   // (src/bash/child.ts). `query` is referenced by closures below that only
   // ever run later (async, once a real run exists) — by then it holds the
   // value assigned further down in this same function (same forward-
-  // reference pattern as spawnRef/consultRef above).
+  // reference pattern as spawnRef above).
   const childBashRegistry = getChildBashRegistry();
   // L1 todo #20: this stack really does run the `attachHost` wiring below
   // (`onSessionSeen`) — declare it once, released at the top of the NEXT
@@ -2765,19 +2700,8 @@ export function buildSessionStack(
     resolveModelHint: models.resolveHint,
     availableModels: models.available,
     onDeadlineNotice: sendDeadlineNotice,
-    // consult (plan §6 C-12/D-14): per-run tool factory + nested-Agent-tool
-    // whitelist resolver + physical-reap cleanup callback, all forwarded
-    // through consultRef so the adapter compiles before wireConsult exists.
-    consult: (selfRunId, selfCwd, whitelist) => consultRef.current?.depsFactory(selfRunId, selfCwd, whitelist),
-    consultResolveExperts: (refs) => {
-      if (!consultRef.current) throw new Error("consult is not wired yet");
-      return consultRef.current.resolveExperts(refs);
-    },
-    // consult cache-thread plan (Q1 ruling (d)): take-once enqueue metadata (prediction + thread position).
-    consultDisplayMeta: (forkSessionFrom) => consultRef.current?.takeDisplayMeta(forkSessionFrom),
-    onReaped: (runId, forkSessionFrom, sessionId, info) => {
+    onReaped: (runId, sessionId) => {
       fabric?.wake?.onReaped(runId);
-      consultRef.current?.onReaped(runId, forkSessionFrom, info);
       // bash-timeout-grace plan §3.2 (P5): defensive fan-out — `sealAndKill`
       // is idempotent, so this is a no-op for the (normal) case where
       // `sealBeforeTerminal` already sealed the session; it only matters for
@@ -2958,10 +2882,6 @@ export function buildSessionStack(
         if (["completed", "failed", "timed_out", "aborted"].includes(snapshot.status))
           fabric.mailbox.onRunSettled(snapshot.runId);
       }
-      // consult (plan §6 D-14): cap-watcher fan-out tap — no timer, purely
-      // snapshot-driven; consultRef is unset for the brief window before
-      // wireConsult runs below, during which no consult run can exist yet.
-      consultRef.current?.dispatchSnapshot(snapshot);
     },
   });
   spawnRef.current = spawn;
@@ -3067,65 +2987,6 @@ export function buildSessionStack(
   });
   // W3: hydrate/reconcile before any mailbox pump; query is now a live registry, not a raw journal.
   fabric?.wake?.reconcile();
-  // consult (plan §6 D-14/D-16): wired now that both `spawn` and `query`
-  // exist — consultRef.current is filled synchronously before this
-  // buildSessionStack call returns, so every dispatch/consult path above
-  // (adapter deps, onSnapshot tap) sees a live wiring by the time any run
-  // can actually reach them. Unconditional (mirrors the sweepForkDir call
-  // above): the wiring itself degrades to a no-op resolveExperts/depsFactory
-  // when settings.consult.enabled is false (src/consult/index.ts).
-  const priceOf = (
-    m: { provider: string; id: string },
-    contextTokens: number,
-  ): { input: number; cacheWrite: number } | undefined => {
-    const cost = ctx.modelRegistry.find(m.provider, m.id)?.cost;
-    if (!cost) return undefined;
-    // review-3 #7①: request-wide tiered pricing — the highest tier whose
-    // `inputTokensAbove` the estimate exceeds applies to the full request.
-    const tier =
-      [...(cost.tiers ?? [])]
-        .filter((t) => contextTokens > t.inputTokensAbove)
-        .sort((a, b) => b.inputTokensAbove - a.inputTokensAbove)[0] ?? cost;
-    return { input: tier.input, cacheWrite: tier.cacheWrite };
-  };
-  const consultForkStore: ConsultForkStore = {
-    // D10 (workflow-worktree plan §2): wrapped, not passed directly — the
-    // raw functions' 3rd positional parameter is `dir` (defaulted to
-    // `consultSessionDir()`), not `opts`, so the interface's `opts` must be
-    // forwarded as the 4th argument with `dir` left at its default.
-    forkExpertSession: (sourceFile, fallbackCwd, opts) =>
-      forkExpertSession(sourceFile, fallbackCwd, undefined, opts?.forceCwd ? { forceCwd: true } : {}),
-    forkMainSession: (sourceFile, fallbackCwd, opts) =>
-      forkMainSessionSnapshot(sourceFile, fallbackCwd, undefined, opts?.forceCwd ? { forceCwd: true } : {}),
-    removeForkFile,
-    resolveForkCwd,
-    scanExpertSnapshot,
-    sweepForkDir: () => sweepForkDir(consultSessionDir(), FORK_TTL_MS),
-  };
-  const consult = wireConsult({
-    settings: () => settings.consult,
-    query,
-    spawnService: spawn,
-    priceOf,
-    forkStore: consultForkStore,
-    consultDir: consultSessionDir(),
-    prefetchedEntries,
-    mainSessionFacts: () => mainSessionFactsFrom(ctx),
-    // cache-thread plan §5.1: the warm/cold prediction needs the route's pi-ai api.
-    routeApi: (m) => {
-      try {
-        const api = ctx.modelRegistry.find(m.provider, m.id)?.api;
-        return typeof api === "string" ? api : undefined;
-      } catch {
-        return undefined;
-      }
-    },
-    // external-agent plan §5.4/§5.5（P5）：仅在端口存在时注入 provider-claim 谓词
-    //（评审 #7：关闭态下第三项判定缺席 ⇒ 字节一致）。
-    ...(externalPort !== undefined ? { isExternalProvider: (p: string) => externalPort.port.owns(p) } : {}),
-  });
-  consultRef.current = consult;
-  previousConsult = consult;
   // M9: created early — the fleet widget below lists in-flight workflows.
   const workflowActivity = createWorkflowActivityRegistry();
   // M-E: live usage broadcaster (channel "subagent:usage", 1Hz while active).
@@ -3380,7 +3241,6 @@ export function buildSessionStack(
       ? installScheduleExecutors(pi, ctx, schedule, {
           message: scheduleWiring?.message,
           spawn,
-          consult,
         })
       : undefined;
   const rpc = createRPCServer({ events: pi.events, spawn, query });
@@ -3447,17 +3307,8 @@ export function buildSessionStack(
   // actually call `createOrchestrator()` (settings.workflow.enabled default
   // `false` — the engine stays entirely inert until then).
   // (M9: created above the fleet widget, which lists in-flight workflows.)
-  // workflow-experts (docs/dev/workflow-experts/plan.md §4.8): the workflow
-  // engine's own dispatch-time expert resolver — always `completedOnly:
-  // true` (D8), late-bound through `consultRef` exactly like
-  // `consultResolveExperts` above (package C, `src/consult/index.ts`, already
-  // exposes `resolveExperts(refs, opts?: { completedOnly?: boolean })`).
   const workflowChildSpawner = createWorkflowChildSpawner(spawn, types, {
     ...(loadAdmission ? { loadAdmission } : {}),
-    resolveExperts: (refs, o) => {
-      if (!consultRef.current) throw new Error("consult is not wired yet");
-      return consultRef.current.resolveExperts(refs, o);
-    },
     // workflow-worktree plan D2: read fresh on every call (not snapshotted
     // at stack-build time) so a `/reload` that flips `worktree.enabled`
     // takes effect for the next agent({isolation}) call immediately.
@@ -3644,7 +3495,6 @@ export function buildSessionStack(
     rpc,
     workflow,
     goal,
-    consult,
     worktreeLate,
     worktreeOrphans,
     worktreeOrphansStartup,

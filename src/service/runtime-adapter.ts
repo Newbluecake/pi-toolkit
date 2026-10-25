@@ -4,9 +4,6 @@ import { applyStructuredOutputPolicy, validateAgainstSchema } from "../core/json
 import { validateVerdictV1Semantics } from "../core/verdict-schema.js";
 import type { SnapshotStore } from "../core/store.js";
 import type {
-  ConsultCacheDiagnostics,
-  ConsultExpertRef,
-  ConsultThreadRef,
   DeadlineNotice,
   ErrorInfo,
   LifecycleEvent,
@@ -52,7 +49,6 @@ import {
 import type { Watchdog } from "../runtime/watchdog.js";
 import { threadThroughRequestFields } from "./request-threading.js";
 import { createAgentTool, type NestedSpawnPort } from "../tools/agent-tool.js";
-import type { ResolveExpertsResult } from "../consult/index.js";
 import { createStructuredOutputTool } from "../tools/structured-output-tool.js";
 import { createMessageAgentTool } from "../tools/message-agent-tool.js";
 import { createSetModelTool } from "../tools/set-model-tool.js";
@@ -136,24 +132,11 @@ export interface RuntimeAdapterDeps {
       spawn: () => SpawnService | undefined;
     };
   };
-  /** @deprecated #40 — consult tool factory, no longer read (the tool is never injected); stack still passes it. Removed in PS1b. */
-  consult?: (
-    selfRunId: RunId,
-    selfCwd: () => { cwd: string; isolated: boolean },
-    whitelist: readonly ConsultExpertRef[],
-  ) => ToolDefinition | undefined;
-  /** @deprecated #40 — no longer read (the nested Agent tool ignores `experts`); stack still passes it. Removed in PS1b. */
-  consultResolveExperts?: (refs: readonly string[]) => ResolveExpertsResult;
   /**
    * Forwarded to RunnerDeps.onReaped (runner calls it after physical reap / late disposal).
-   * Must be idempotent. `forkSessionFrom` is always `undefined` now (legacy consult argument, PS1b removes it).
+   * Must be idempotent.
    */
-  onReaped?: (runId: RunId, forkSessionFrom?: string, sessionId?: string, info?: { disposed: boolean }) => void;
-  /** @deprecated #40 — no longer read; stack still passes it. Removed in PS1b. */
-  consultDisplayMeta?: (
-    forkSessionFrom: string,
-  ) =>
-    { consultCache?: Pick<ConsultCacheDiagnostics, "v" | "predicted">; consultThread?: ConsultThreadRef } | undefined;
+  onReaped?: (runId: RunId, sessionId?: string, info?: { disposed: boolean }) => void;
   /**
    * bash-timeout-grace plan §3.2 (P5 wiring of the P0b-frozen `RunnerDeps`
    * field): forwarded verbatim to `RunnerDeps.sealSession` — `sealBeforeTerminal`

@@ -81,11 +81,11 @@ describe("W5 spawn admission: wakeExclusion (plan §4.5) — written once, only 
     await h.service.spawn({ type: "worker", prompt: "x", ...extra });
     expect(h.specs[0]!.request.wakeExclusion).toBe(expected);
   });
-  it("a legacy forkSessionFrom request is no longer consult_fork: it is classified from its other causes (#40)", async () => {
+  it("never produces the legacy consult_fork value (#40): an ack-owning request is caller_owned, a plain one none", async () => {
     const h = rig({ inbox });
-    await h.service.spawn({ type: "worker", prompt: "ask", forkSessionFrom: "/legacy/fork.jsonl", expectAck: true });
-    expect(h.specs[0]!.request.wakeExclusion).toBe("caller_owned"); // expectAck, nothing consult-specific
-    await h.service.spawn({ type: "worker", prompt: "ask2", forkSessionFrom: "/legacy/fork.jsonl" });
+    await h.service.spawn({ type: "worker", prompt: "ask", expectAck: true });
+    expect(h.specs[0]!.request.wakeExclusion).toBe("caller_owned");
+    await h.service.spawn({ type: "worker", prompt: "ask2" });
     expect(h.specs[1]!.request.wakeExclusion).toBe("none");
   });
   it("an external (droid) model is external_agent", async () => {

@@ -88,20 +88,6 @@ describe("Agent tool: legacy `experts` argument (#40)", () => {
     expect(text).toContain("message_agent");
   });
 
-  it("never calls a wired (deprecated) resolveExperts", async () => {
-    const calls: SpawnRequest[] = [];
-    let resolved = 0;
-    await createAgentTool({
-      spawn: port(calls),
-      resolveExperts: () => {
-        resolved++;
-        throw new Error("must not be read");
-      },
-    }).execute("c", params(["explorer"]), undefined, undefined, undefined as never);
-    expect(resolved).toBe(0);
-    expect(calls).toHaveLength(1);
-  });
-
   it("nested blocking path: ignores experts and appends the notice to the result", async () => {
     const calls: SpawnRequest[] = [];
     const nested = await createAgentTool({

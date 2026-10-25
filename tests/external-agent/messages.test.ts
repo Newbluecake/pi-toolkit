@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  MSG_EXPERTS_UNSUPPORTED,
   MSG_PERMISSION_REPLY_FAILED,
   MSG_READONLY_DOMAIN,
   MSG_RESUME_ISOLATION,
@@ -12,7 +11,6 @@ import {
   msgAuthFailure,
   msgBinaryNotFound,
   msgDroidModelNotAllowed,
-  msgExpertIsExternal,
   msgPermissionUnacknowledged,
   msgProviderNameCollision,
   msgProtocolDrift,
@@ -28,9 +26,6 @@ describe("external-agent messages (plan §2.11)", () => {
     expect(MSG_READONLY_DOMAIN).toBe(
       'toolDomain:"readonly" runs cannot use droid/* models: external agents run with full permissions in this ' +
         "version, so pi-toolkit cannot guarantee read-only execution. Use a pi model for this run.",
-    );
-    expect(MSG_EXPERTS_UNSUPPORTED).toBe(
-      "experts/consult is not supported for droid/* runs (external agents cannot load the consult tool)",
     );
     expect(MSG_RESUME_ISOLATION).toBe(
       "isolation cannot be combined with resuming a droid run: droid sessions are pinned to their original working directory",
@@ -49,7 +44,6 @@ describe("external-agent messages (plan §2.11)", () => {
   });
 
   it("parameterized texts interpolate and stay ASCII-safe", () => {
-    expect(msgExpertIsExternal("r_1")).toBe("expert r_1 is a droid external-agent run; consult requires a pi session");
     expect(msgResumeCrossRuntime("r_1", "pi")).toContain("r_1");
     expect(msgResumeCrossRuntime("r_1", "pi")).toContain("pi");
     expect(msgResumeCrossRuntime("r_1", "pi")).toContain("droid");

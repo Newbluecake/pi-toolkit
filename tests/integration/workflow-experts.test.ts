@@ -6,15 +6,12 @@ import { attachHostCallHandler } from "../../src/workflow/host.js";
 import { createWorkflowChildSpawner } from "../../src/workflow/spawner-adapter.js";
 import { createWorkerHost } from "../../src/workflow/lifecycle.js";
 
-// Real worker -> host validator -> production adapter, including deprecated stack wiring.
+// Real worker -> host validator -> production adapter, .
 describe("workflow experts removal compatibility", () => {
   it.each(['["main"]', "[]", "undefined", "[function () {}]"])(
     "rejects experts=%s and .catch() recovers to a normal dispatch",
     async (experts) => {
       const spawn = vi.fn(async (_req: Parameters<SpawnService["spawn"]>[0]) => ({ runId: "plain-run" }));
-      const resolveExperts = vi.fn(() => {
-        throw new Error("deprecated resolver must not run");
-      });
       const service = {
         spawn,
         waitAll: async () => ({
@@ -23,11 +20,9 @@ describe("workflow experts removal compatibility", () => {
         }),
         abort: async () => true,
       } as unknown as SpawnService;
-      const adapter = createWorkflowChildSpawner(
-        service,
-        { configHashOf: () => "hash" } as unknown as AgentTypeRegistry,
-        { resolveExperts },
-      );
+      const adapter = createWorkflowChildSpawner(service, {
+        configHashOf: () => "hash",
+      } as unknown as AgentTypeRegistry);
       const host = createWorkerHost({ clock: systemClock });
       const handler = attachHostCallHandler({
         clock: systemClock,
@@ -67,10 +62,8 @@ describe("workflow experts removal compatibility", () => {
           error: expect.stringContaining("opts.experts is no longer supported"),
           value: "plain-result",
         });
-        expect(resolveExperts).not.toHaveBeenCalled();
         expect(spawn).toHaveBeenCalledTimes(1);
         expect(spawn.mock.calls[0]![0]).toMatchObject({ prompt: "plain", label: "plain" });
-        expect(spawn.mock.calls[0]![0]).not.toHaveProperty("consultExperts");
         expect(handler.children).toHaveLength(1);
         expect(handler.children[0]).not.toHaveProperty("experts");
       } finally {

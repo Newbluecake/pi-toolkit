@@ -112,42 +112,6 @@ describe("createWorkflowChildSpawner: model/thinking override forwarding", () =>
   });
 });
 
-describe("createWorkflowChildSpawner: workflow-experts (§4.8)", () => {
-  it("forwards consultExperts verbatim to SpawnService.spawn when present, and omits the key entirely when absent", async () => {
-    const { service, requests } = fakeSpawnService();
-    const adapter = createWorkflowChildSpawner(service, fakeTypes());
-    const refs = [{ runId: "r1", sessionFile: "/tmp/r1.jsonl", agentType: "gp" }];
-    await adapter.spawn({ type: "general", prompt: "p", consultExperts: refs });
-    await adapter.spawn({ type: "general", prompt: "p2" });
-    expect(requests[0]).toMatchObject({ consultExperts: refs });
-    expect(requests[1]).not.toHaveProperty("consultExperts");
-  });
-
-  it("omits consultExperts when the array is empty (never sends an empty whitelist)", async () => {
-    const { service, requests } = fakeSpawnService();
-    const adapter = createWorkflowChildSpawner(service, fakeTypes());
-    await adapter.spawn({ type: "general", prompt: "p", consultExperts: [] });
-    expect(requests[0]).not.toHaveProperty("consultExperts");
-  });
-
-  it("resolveExperts is absent from the ChildSpawner when no option was supplied", () => {
-    const { service } = fakeSpawnService();
-    const adapter = createWorkflowChildSpawner(service, fakeTypes());
-    expect(adapter.resolveExperts).toBeUndefined();
-  });
-
-  it("accepts the deprecated resolver option without reading or exposing it", () => {
-    const { service } = fakeSpawnService();
-    const injected = vi.fn(() => {
-      throw new Error("must not run");
-    });
-    const options = Object.defineProperty({}, "resolveExperts", { get: injected });
-    const adapter = createWorkflowChildSpawner(service, fakeTypes(), options);
-    expect(adapter.resolveExperts).toBeUndefined();
-    expect(injected).not.toHaveBeenCalled();
-  });
-});
-
 describe("createWorkflowChildSpawner: workflow-worktree (D1/D2/D5)", () => {
   it('forwards isolation:"worktree" verbatim to SpawnService.spawn, and omits the key entirely when absent', async () => {
     const { service, requests } = fakeSpawnService();

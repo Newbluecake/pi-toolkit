@@ -146,7 +146,6 @@ describe("background executor", () => {
       thinkingOverride: "high",
       isolation: "worktree",
     });
-    expect(req).not.toHaveProperty("consultExperts");
     expect(req).not.toHaveProperty("poolFullPolicy");
     expect(req).not.toHaveProperty("loadPolicy");
     expect(req.prompt).toContain("立即运行");
@@ -154,24 +153,21 @@ describe("background executor", () => {
     bg.dispose();
   });
 
-  it("legacy bg.consultMain:true is ignored with a visible note; the deprecated consult dep is never read", async () => {
+  it("legacy bg.consultMain:true is ignored with a visible note and the run is dispatched as an ordinary background run", async () => {
     const f = await setup();
     f.task.bg!.consultMain = true;
     const spawn = {
       spawn: vi.fn(async (_req: SpawnRequest) => ({ runId: "r_background", slots: { limit: 1, inUse: 1, free: 0 } })),
       waitOutcome: vi.fn(async () => ({ kind: "settled" as const, outcome: outcome("completed") })),
     };
-    const resolveExperts = vi.fn(() => ({ refs: [], lines: [], warnings: [] }));
     const bg = installBackgroundExecutor(f.a, {
       spawn,
-      consult: { resolveExperts },
       notes: f.notes,
       clock: f.clock,
     });
     bg.dispatch(f.run, f.task);
     await bg.drain();
-    expect(resolveExperts).not.toHaveBeenCalled();
-    expect(spawn.spawn.mock.calls[0]![0]).not.toHaveProperty("consultExperts");
+    expect(spawn.spawn).toHaveBeenCalledTimes(1);
     expect(f.sendMessage.mock.calls[0]![0].content).toContain("consult-main 已移除");
     bg.dispose();
   });

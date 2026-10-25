@@ -35,11 +35,9 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
   // sessions), so deny-by-default strips MCP/late-registered same-name
   // tools from every run.
   "extend_subagent_timeout",
-  // consult (consult plan §6 A-4b): injected into a subagent run only when its
-  // dispatcher attached a resolved expert whitelist (`Agent({experts})`), and
-  // never into a consult run itself. Deny-by-default means an MCP or
-  // late-registered same-name tool cannot hand any other run the ability to
-  // fork+resume somebody else's session.
+  // consult: LEGACY reserved name (#40). The consult tool no longer exists; the entry stays because the
+  // reserved-name list is frozen in the fabric-xs-off golden, and it is harmless — it only strips a
+  // same-named MCP/late-registered tool from every run (deny-by-default).
   "consult",
   // bash_job (bash-timeout-grace plan §3.10): registered per-session only when
   // bashJobs.childSessions is on AND the child session already carries a real
@@ -66,16 +64,13 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
  * `/mem tidy` proposal runs and other `toolDomain: "readonly"` runs). Single source for BOTH pi's one-shot `tools` allowlist on the
  * forked session (set after H2 so no extension can widen it) and this
  * module's per-turn enforcer policy — the two must never drift, which is why
- * this constant lives here rather than in src/consult/.
+ * this constant lives here, next to the enforcer.
  *
  * `grep`/`find`/`ls` are NOT active by default in pi (an unset `tools` means
- * read/bash/edit/write), so they only exist for a consult run because they
+ * read/bash/edit/write), so they only exist for a readonly-domain run because they
  * are named here.
  */
 export const READONLY_DOMAIN_TOOLS: readonly string[] = ["read", "grep", "find", "ls"];
-
-/** @deprecated #40 — renamed {@link READONLY_DOMAIN_TOOLS}; removed in PS1b once `src/consult/**` is gone. */
-export const CONSULT_READONLY_TOOLS: readonly string[] = READONLY_DOMAIN_TOOLS;
 
 export interface ToolScopePolicy {
   /** Allow-list (agent type `tools` field, plus any explicitly granted reserved names). `undefined` = no allow-list restriction (only `deny` applies). */

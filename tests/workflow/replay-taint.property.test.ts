@@ -31,9 +31,6 @@ async function runPlan(
     configHashOf: () => "hash",
     worktreeAvailable: () => true,
     awaitWorktree: async () => ({ state: "clean" }),
-    resolveExperts: () => {
-      throw new Error("removed resolver must not run");
-    },
   };
   const handler = attachHostCallHandler({
     clock: new FakeClock(),

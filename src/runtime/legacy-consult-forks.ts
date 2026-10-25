@@ -6,7 +6,7 @@ import type { Millis } from "../core/types.js";
 
 /**
  * Legacy consult fork directory: location + sweep, migrated verbatim from
- * `src/consult/fork-store.ts` (#40, docs/dev/consult-removal/plan.md §2).
+ * the removed consult fork-store (#40, docs/dev/consult-removal/plan.md §2).
  * The consult tool is gone, but older versions left `consult-sessions` fork
  * copies on disk; the per-session-start sweep drains them within 24 h, and
  * the schedule wiring still treats files under this dir as child sessions.

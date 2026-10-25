@@ -725,9 +725,6 @@ describe("real-worker agent() opts snapshot (workflow-experts §4.5, N1)", () =>
         settled: runIds.map((runId) => ({ runId, status: "completed" as const, text: "ok" })),
         pending: [],
       }),
-      resolveExperts: () => {
-        throw new Error("must not run");
-      },
     };
     const { host, outcome } = await bootReal(
       scriptWith(`
@@ -746,7 +743,6 @@ describe("real-worker agent() opts snapshot (workflow-experts §4.5, N1)", () =>
       });
       expect(spawns).toHaveLength(1);
       expect(spawns[0]!.prompt).toBe("plain");
-      expect(spawns[0]).not.toHaveProperty("consultExperts");
     } finally {
       await host.terminate("test-done");
     }

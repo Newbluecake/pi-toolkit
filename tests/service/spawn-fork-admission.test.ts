@@ -5,8 +5,7 @@ import type { Runner, SlotPool } from "../../src/service/ports.js";
 
 /**
  * Nested-spawn admission through the REAL createSpawnService (kept from the consult fork-admission suite, #40 PS1a).
- * The consult fork bypass is gone: the canSpawn gate applies to every nested request — a legacy
- * `forkSessionFrom` on a request no longer skips it, is no longer validated, and no longer changes the nesting entry.
+ * The consult fork bypass is gone: the canSpawn gate applies to every nested request.
  */
 
 const pool: SlotPool = { acquire: (runId) => Promise.resolve({ ok: true, ticket: { runId, release() {} } }) };
@@ -99,29 +98,6 @@ describe("SpawnService: nested admission (canSpawn gate, #40 — no fork bypass)
     });
   });
 
-  it("a legacy forkSessionFrom no longer bypasses the canSpawn gate, and its (missing) file is never checked", async () => {
-    const { runner } = controllableRunner();
-    const svc = createSpawnService({ types: typesRegistry([expertType, askerType]), pool, runner, now: () => 0 });
-
-    const asker = await svc.spawn({ type: "asker", prompt: "a" });
-    if ("error" in asker) throw new Error(asker.error.message);
-
-    const rejected = await svc.spawn({
-      type: "expert",
-      prompt: "question",
-      parentRunId: asker.runId,
-      forkSessionFrom: "/definitely/not/there.jsonl",
-    });
-    expect(rejected).toEqual({
-      error: {
-        kind: "config",
-        message: 'nested delegation is not permitted: parent\'s agent type may only spawn [], not "expert"',
-        retryable: false,
-        reason: "config",
-      },
-    });
-  });
-
   it("a nested run inherits canSpawn normally (control group)", async () => {
     const { runner } = controllableRunner();
     const svc = createSpawnService({ types: typesRegistry([expertType, workerType]), pool, runner, now: () => 0 });
@@ -129,18 +105,6 @@ describe("SpawnService: nested admission (canSpawn gate, #40 — no fork bypass)
     if ("error" in top) throw new Error(top.error.message);
     const child = await svc.spawn({ type: "worker", prompt: "b", parentRunId: top.runId });
     expect("error" in child).toBe(false);
-  });
-
-  it("a legacy forkSessionFrom request under a parent that may spawn its type admits as an ordinary nested run (canSpawn kept)", async () => {
-    const { runner } = controllableRunner();
-    const svc = createSpawnService({ types: typesRegistry([expertType, workerType]), pool, runner, now: () => 0 });
-    const top = await svc.spawn({ type: "expert", prompt: "a" });
-    if ("error" in top) throw new Error(top.error.message);
-    const child = await svc.spawn({ type: "expert", prompt: "b", parentRunId: top.runId, forkSessionFrom: "/x.jsonl" });
-    if ("error" in child) throw new Error(child.error.message);
-    // nesting entry carries canSpawn like any other run: the grandchild of a worker type is admitted.
-    const grand = await svc.spawn({ type: "worker", prompt: "c", parentRunId: child.runId });
-    expect("error" in grand).toBe(false);
   });
 });
 

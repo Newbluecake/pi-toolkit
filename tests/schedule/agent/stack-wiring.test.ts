@@ -60,7 +60,6 @@ function cleanup(stack: Stack): void {
   stack.keepalive?.dispose();
   stack.quota?.dispose();
   stack.load?.dispose();
-  stack.consult.close();
 }
 
 describe("buildSessionStack × schedule", () => {

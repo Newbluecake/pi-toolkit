@@ -2,8 +2,8 @@ import type { RunSnapshot } from "../core/types.js";
 
 /**
  * Why a capped run (e.g. a `/mem tidy` proposal run) was cut short. Migrated
- * from `src/consult/watcher.ts` (#40, docs/dev/consult-removal/plan.md §2);
- * the implementation is verbatim. Originally (docs/dev/consult/plan.md §4.1,
+ * from the removed consult watcher (#40, docs/dev/consult-removal/plan.md §2);
+ * the implementation is verbatim. Originally (consult plan §4.1,
  * review-2 #4): Deliberately NOT part of `StopCause` (§15 #1): widening that
  * union would ripple through `src/core/state-machine.ts`'s stop_requested
  * branch, every `diag.stopCause` consumer and the transition-matrix/property

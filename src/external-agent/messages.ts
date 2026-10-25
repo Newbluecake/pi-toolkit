@@ -7,13 +7,6 @@ export const MSG_READONLY_DOMAIN: string =
   'toolDomain:"readonly" runs cannot use droid/* models: external agents run with full permissions in this ' +
   "version, so pi-toolkit cannot guarantee read-only execution. Use a pi model for this run.";
 
-export const MSG_EXPERTS_UNSUPPORTED: string =
-  "experts/consult is not supported for droid/* runs (external agents cannot load the consult tool)";
-
-export function msgExpertIsExternal(runId: string): string {
-  return `expert ${runId} is a droid external-agent run; consult requires a pi session`;
-}
-
 export function msgResumeCrossRuntime(runId: string, from: "droid" | "pi"): string {
   const other = from === "droid" ? "pi" : "droid";
   const origin = from === "droid" ? "a droid external-agent" : "a pi";

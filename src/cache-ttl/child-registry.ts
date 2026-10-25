@@ -4,7 +4,7 @@
  * A process-wide, `Symbol.for`-backed singleton (same pattern as
  * `src/bash/child-registry.ts` / `src/cache-ttl/ping-ledger.ts` / `src/core/worktree-origin.ts`)
  * that lets a child session's `CacheKeepaliveService` register its own `dispose()` under its
- * session id, and lets the MAIN session's `onReaped(runId, forkSessionFrom, sessionId)` callback
+ * session id, and lets the MAIN session's `onReaped(runId, sessionId)` callback
  * (wired in `src/stack.ts`, forwarded by the runner after every run — see
  * `RunnerDeps.onReaped`) reach across the process to actually stop it, even when the child's own
  * `agent_settled` path was somehow never taken (defensive fan-out, same rationale as

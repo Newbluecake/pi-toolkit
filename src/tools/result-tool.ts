@@ -29,7 +29,6 @@ import {
 } from "./result-text.js";
 import type { ExternalRunMeta, RunExitFacts } from "../core/types.js";
 import type { ContextSwitchDiag, CompactionFailureRecord } from "../core/types.js";
-import type { ConsultCacheDiagnostics, ConsultThreadRef } from "../core/types.js";
 import { resolveToolTarget, type WorkflowQueryPort } from "./workflow-target.js";
 import { labelOfRun, labelOfSnapshot, runRefText, titleForHandle } from "./run-ref.js";
 import {
@@ -556,8 +555,6 @@ function formatOutcome(
       childExtensionMissing?: true;
       schemaPreset?: SchemaPresetId;
       external?: ExternalRunMeta;
-      consultCache?: ConsultCacheDiagnostics;
-      consultThread?: ConsultThreadRef;
     };
   },
   maxChars = 0,

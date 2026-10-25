@@ -1,6 +1,6 @@
 import type { Clock, TimerHandle } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
-import type { ConsultExpertRef, Millis, RunId, ThinkingLevel, UsageDelta } from "../core/types.js";
+import type { Millis, RunId, ThinkingLevel, UsageDelta } from "../core/types.js";
 import type { LoadAdmission } from "../sysload/types.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { deriveChildBudget } from "./budget.js";
@@ -89,8 +89,6 @@ export interface ChildSpawner {
     modelHintOverride?: string;
     /** Per-call thinking-level override (agent()'s `opts.thinking`), same values as the Agent tool's `thinking` param. */
     thinkingOverride?: ThinkingLevel;
-    /** @deprecated #40 — removed in PS1b; legacy adapter request only. */
-    consultExperts?: readonly ConsultExpertRef[];
     /**
      * workflow-worktree plan D1: opt-in per-call worktree isolation
      * (`agent(prompt, { isolation: "worktree" })`) — forwarded verbatim to
@@ -131,10 +129,6 @@ export interface ChildSpawner {
    * changed agent-type definition.
    */
   configHashOf?(type: string): string | undefined;
-  /** @deprecated #40 — removed in PS1b; retained for stack wiring, never read. */
-  resolveExperts?: (
-    handles: readonly string[],
-  ) => { refs: readonly ConsultExpertRef[] } | { error: { message: string } };
   /**
    * workflow-worktree plan D2: the live availability gate for
    * `isolation:"worktree"` (decision 1 — no fallback to the shared

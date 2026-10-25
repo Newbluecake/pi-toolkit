@@ -3,7 +3,6 @@ import type { Clock } from "../../core/clock.js";
 import { systemClock } from "../../core/clock.js";
 import { DEFAULT_BUDGET, withDeadline } from "../../core/deadline.js";
 import type { RunOutcome, SpawnRequest } from "../../core/types.js";
-import type { ConsultWiring } from "../../consult/index.js";
 import type { SpawnService } from "../../service/spawn-service.js";
 import { sameHolder } from "../core/recovery.js";
 import { isTerminalRunState, type RunRecord, type ScheduleTask } from "../core/spec.js";
@@ -14,8 +13,6 @@ import { backgroundHeader, commitBackgroundReport, truncateUtf8, type Background
 
 export interface BackgroundExecutorDeps {
   spawn: Pick<SpawnService, "spawn" | "waitOutcome">;
-  /** @deprecated #40 — consult removed; never read. Removed in PS1b. */
-  consult?: Pick<ConsultWiring, "resolveExperts">;
   notes: ScheduleNoteDeps;
   clock?: Clock;
   monotonic?: () => number;

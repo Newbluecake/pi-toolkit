@@ -9,11 +9,9 @@ import {
   hardDeadlineAtFor,
 } from "./deadline.js";
 import { deliveryKey } from "./delivery-key.js";
-import { foldConsultCall } from "./consult-summary.js";
 import { mergeExternalMeta, mergeUnpriced } from "./external-meta.js";
 import { journalSnapshotFromState } from "./run-journal.js";
 import { isTerminalStatus } from "./status.js";
-import { capExpertRefs } from "./types.js";
 import type {
   CompactionFailureRecord,
   ContextSwitchDiag,
@@ -88,7 +86,7 @@ export const TASK_PROMPT_CAP = 4096;
 
 /**
  * X12: bounded cap for RunDiagnostics.absorbedRunIds. A run that delegates a
- * lot (consult experts, nested Agents, repeated get_subagent_result fetches)
+ * lot (nested Agents, repeated get_subagent_result fetches)
  * absorbs one id per usage-bearing toolResult; the cap keeps persist_snapshot
  * bounded. FIFO: the OLDEST id drops first — the residual risk is that a run
  * absorbing more than this many children loses the earliest absorption
@@ -180,33 +178,16 @@ export function toolTrailPatch(
     return { toolHistory: history, toolCounts: counts };
   }
   if (e.t === "tool_end") {
-    // consult A/B instrumentation plan (§2/§5 P1a, review §8 #2): the consult
-    // fold must run BEFORE both of toolHistory's own early returns below (no
-    // toolHistory at all, or the matching record already evicted by
-    // TOOL_HISTORY_CAP) and merge into every return path — a consult call is
-    // counted even when its toolHistory trace is gone. Latency resolution
-    // order per §5: the in-flight toolHistory record's startedAt, else
-    // diag.currentTool's startedAt (same toolCallId), else undefined (counted
-    // in ConsultSummary.latencyUnknown instead).
-    let consultPatch: Partial<RunDiagnostics> = {};
-    if (e.consult !== undefined) {
-      const inHistory = (diag.toolHistory ?? []).find((r) => r.toolCallId === e.toolCallId && r.endedAt === undefined);
-      const startedAt =
-        inHistory?.startedAt ??
-        (diag.currentTool?.toolCallId === e.toolCallId ? diag.currentTool.startedAt : undefined);
-      const latencyMs = startedAt === undefined ? undefined : at - startedAt;
-      consultPatch = { consults: foldConsultCall(diag.consults, e.consult, latencyMs) };
-    }
     const history = diag.toolHistory;
-    if (!history) return consultPatch;
+    if (!history) return {};
     for (let i = history.length - 1; i >= 0; i--) {
       if (history[i]!.toolCallId === e.toolCallId && history[i]!.endedAt === undefined) {
         const next = [...history];
         next[i] = { ...next[i]!, endedAt: at, isError: e.isError };
-        return { toolHistory: next, ...consultPatch };
+        return { toolHistory: next };
       }
     }
-    return consultPatch; // record evicted by the ring cap — counts still hold the truth
+    return {}; // record evicted by the ring cap — counts still hold the truth
   }
   return {};
 }
@@ -726,22 +707,6 @@ export function reduce(
     return terminal(state.status)
       ? { state, effects: [] }
       : { state: { ...state, diag: { ...state.diag, finalLeafId: input.event.leafId } }, effects: [] };
-  // consult cache/thread plan §5.3: the dispatch-time prediction must already
-  // exist. Do not manufacture consult diagnostics for ordinary/old runs. Like
-  // final_leaf this is generation-checked and ignored after terminal; unlike
-  // final_leaf the first metric is write-once. No liveness, phase, deadline,
-  // usage or effect changes (the accompanying message_end owns those).
-  if (input.kind === "session_event" && input.event.t === "consult_cache_first") {
-    const cache = state.diag.consultCache;
-    if (terminal(state.status) || cache === undefined || cache.first !== undefined) return { state, effects: [] };
-    return {
-      state: {
-        ...state,
-        diag: { ...state.diag, consultCache: { ...cache, first: { ...input.event.result, at: input.at } } },
-      },
-      effects: [],
-    };
-  }
   // effect_failed is a recovery protocol, including after settlement. It must
   // run before the terminal read-only update so terminal effects can recover.
   if (input.kind === "effect_failed") return handleEffectFailed(state, input);
@@ -831,24 +796,13 @@ export function reduce(
         ...(input.meta?.agentType === undefined ? {} : { agentType: input.meta.agentType }),
         ...(input.meta?.taskPrompt === undefined ? {} : { taskPrompt: input.meta.taskPrompt }),
         ...(input.meta?.worktree === undefined ? {} : { worktree: input.meta.worktree }),
-        // consult A/B instrumentation plan (§2/§3/§4, P1a): same write-once
-        // display metadata pattern as the M-A fields above.
-        ...(input.meta?.experts === undefined
-          ? {}
-          : { experts: { ...input.meta.experts, refs: capExpertRefs(input.meta.experts.refs) } }),
+        // consult A/B instrumentation plan (§3/§4): same write-once display metadata pattern as the M-A fields above.
         ...(input.meta?.dispatchMeta === undefined ? {} : { dispatchMeta: input.meta.dispatchMeta }),
         ...(input.meta?.schemaPreset === undefined ? {} : { schemaPreset: input.meta.schemaPreset }),
         // fabric-cross-session plan §4.1/§4.5 (W5): write-once wake provenance / wake-ability verdict. Absent unless the
         // wake inbox is wired, so a wake-off run's diag is byte-identical.
         ...(input.meta?.wakeOrigin === undefined ? {} : { wakeOrigin: input.meta.wakeOrigin }),
         ...(input.meta?.wakeExclusion === undefined ? {} : { wakeExclusion: input.meta.wakeExclusion }),
-        ...(input.meta?.consultOf === undefined ? {} : { consultOf: input.meta.consultOf }),
-        // §5.3 / R2-4: consult run's own write-once facts; ordinary runs stay byte-identical.
-        // Project prediction explicitly: even an untyped producer cannot seed the driver-owned first slot.
-        ...(input.meta?.consultCache === undefined
-          ? {}
-          : { consultCache: { v: input.meta.consultCache.v, predicted: input.meta.consultCache.predicted } }),
-        ...(input.meta?.consultThread === undefined ? {} : { consultThread: input.meta.consultThread }),
         // §2.7：策略是 run 的持久事实，enqueued 写一次，此后永不改写；缺席
         // （旧入口/直接构造的 RunInput）不写字段，读侧走中性文案。
         ...(input.timeoutPolicy === undefined ? {} : { timeoutPolicy: input.timeoutPolicy }),
@@ -922,9 +876,6 @@ export function reduce(
         // M-B2 (thinking-level visibility): same ground-truth treatment for the
         // effective thinking level — only ever set when the handle reported one.
         ...(input.thinking === undefined ? {} : { thinkingLevel: input.thinking }),
-        ...(input.consultIdentityPrediction === undefined
-          ? {}
-          : { consultIdentityPrediction: input.consultIdentityPrediction }),
       },
     };
     // run-persistence plan D1/D2: the first time a sessionFile becomes known,
@@ -1049,21 +1000,7 @@ export function reduce(
         state.diag.currentTool?.toolCallId === e.toolCallId ||
         (state.diag.toolHistory ?? []).some((r) => r.toolCallId === e.toolCallId && r.endedAt === undefined);
       if (!knownInFlight) {
-        // consult A/B instrumentation plan (§2/§5 P1a, main-session ruling M1):
-        // the illegal-event judgement and every state transition stay exactly
-        // as before (lastWarn set, phase/status/pendingTools untouched) — but
-        // this is precisely the "toolHistory record missing/evicted" case
-        // §5 wants counted, so `base.consults` (already computed above by
-        // toolTrailPatch, independently of knownInFlight) must still reach
-        // diag. Diag-only merge on top of whatever `illegal()` returned
-        // (including its same-warning dedup short-circuit, which reuses the
-        // original state/diag object) — no other field is touched.
-        const result = illegal(state, input);
-        if (base.consults === undefined) return result;
-        return {
-          state: { ...result.state, diag: { ...result.state.diag, consults: base.consults } },
-          effects: result.effects,
-        };
+        return illegal(state, input);
       }
       const remaining = Math.max(0, state.diag.pendingTools - 1);
       const nextDiag = { ...state.diag, ...base, pendingTools: remaining };

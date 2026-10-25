@@ -55,7 +55,7 @@ const drain = async (ticks = 80): Promise<void> => {
 
 function setup(driver: SessionDriver, opts: { reapRejects?: boolean; voidDisposeLate?: boolean } = {}) {
   const clock = new FakeClock();
-  const calls: Array<{ runId: string; fork?: string; info?: { disposed: boolean } }> = [];
+  const calls: Array<{ runId: string; info?: { disposed: boolean } }> = [];
   const real = new EscalatingReaper(clock);
   const reaper: Reaper = {
     registry: real.registry,
@@ -77,8 +77,8 @@ function setup(driver: SessionDriver, opts: { reapRejects?: boolean; voidDispose
     effects: new BasicEffectInterpreter(),
     emit() {},
     deliver() {},
-    onReaped: (runId, fork, _sessionId, info) => {
-      calls.push({ runId, ...(fork === undefined ? {} : { fork }), ...(info === undefined ? {} : { info }) });
+    onReaped: (runId, _sessionId, info) => {
+      calls.push({ runId, ...(info === undefined ? {} : { info }) });
     },
   };
   return { clock, runner: new RuntimeRunner(d), calls };
@@ -223,7 +223,7 @@ describe("RunnerDeps.onReaped { disposed } (R2-1)", () => {
     expect(t.calls.map((c) => c.info?.disposed)).toEqual([false, false]);
   });
 
-  it("runs call onReaped with forkSessionFrom undefined (legacy 2nd arg) (4th arg is simply extra)", async () => {
+  it("runs call onReaped(runId, sessionId, info) with the disposed proof", async () => {
     const t = setup(base({ create: async () => handle() }));
     await t.runner.run({ runId: "r7", prompt: "q" }, budget);
     await drain();

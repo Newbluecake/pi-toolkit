@@ -1,5 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { describe, expect, it } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { MemoryRunStore } from "../../src/core/store.js";
@@ -90,13 +89,6 @@ function spec(overrides: Partial<RunnerSpec["request"]> = {}, runId = "r1"): Run
   return { runId, type: workerType, request: { type: "worker", prompt: "do it", ...overrides }, budget: fastBudget() };
 }
 
-const consultFactory = vi.fn(() => ({ name: "consult" }) as unknown as ToolDefinition);
-
-const EXPERTS = [
-  { runId: "r_E1", sessionFile: "/s/e1.jsonl", agentType: "explorer", label: "explorer" },
-  { runId: "r_E2", sessionFile: "/s/e2.jsonl", agentType: "reviewer", kind: "main" as const, pending: true },
-];
-
 const META = { lane: "L2" as const, packageId: "pkg-2026-10-08-a" };
 
 describe("runtime-adapter: diag instrumentation (dispatchMeta / schemaPreset) and retired consult inputs (#40)", () => {
@@ -115,7 +107,6 @@ describe("runtime-adapter: diag instrumentation (dispatchMeta / schemaPreset) an
       onLateArrival: () => undefined,
     };
   }
-  const toolNames = (s?: SessionSpec) => ((s?.customTools ?? []) as Array<{ name: string }>).map((t) => t.name);
 
   it("folds dispatchMeta and schemaPreset into diag", async () => {
     const clock = new FakeClock();
@@ -127,55 +118,21 @@ describe("runtime-adapter: diag instrumentation (dispatchMeta / schemaPreset) an
     expect(diag?.schemaPreset).toBe("verdict/v1");
   });
 
-  it("a request still carrying consultExperts injects no consult tool and writes no diag.experts, even with a consult dep wired", async () => {
+  it("a readonly-domain run still folds dispatchMeta into diag", async () => {
     const clock = new FakeClock();
     const store = new MemoryRunStore();
-    const captured: { spec?: SessionSpec } = {};
-    consultFactory.mockClear();
-    const runner = buildAdapter(clock, { driver: plainDriver(captured), store, consult: consultFactory });
-    await runner.run(spec({ consultExperts: EXPERTS }));
-    expect(consultFactory).not.toHaveBeenCalled();
-    expect(toolNames(captured.spec)).not.toContain("consult");
-    expect(store.get("r1")?.diag).not.toHaveProperty("experts");
-  });
-
-  it("writes no experts key for a readonly-domain run, and dispatchMeta still flows", async () => {
-    const clock = new FakeClock();
-    const store = new MemoryRunStore();
-    const runner = buildAdapter(clock, { driver: plainDriver(), store, consult: consultFactory });
-    await runner.run(spec({ toolDomain: "readonly", consultExperts: EXPERTS, dispatchMeta: META }));
-    const diag = store.get("r1")?.diag;
-    expect(diag).not.toHaveProperty("experts");
-    expect(diag?.dispatchMeta).toEqual(META);
-  });
-
-  it("a legacy forkSessionFrom request is an ordinary run: opened through create() (not resume), no diag.consultOf, no experts", async () => {
-    const clock = new FakeClock();
-    const store = new MemoryRunStore();
-    const captured: { spec?: SessionSpec; resumed?: boolean } = {};
-    const runner = buildAdapter(clock, { driver: plainDriver(captured), store, consult: consultFactory });
-    await runner.run(
-      spec({
-        forkSessionFrom: "/cache/consult-sessions/fork-1.jsonl",
-        parentRunId: "r_ASKER",
-        consultExperts: EXPERTS,
-      }),
-    );
-    expect(captured.resumed).toBeUndefined();
-    const diag = store.get("r1")?.diag;
-    expect(diag).not.toHaveProperty("experts");
-    expect(diag).not.toHaveProperty("consultOf");
-    expect((captured.spec as { displayMeta?: object } | undefined)?.displayMeta).not.toHaveProperty("consultOf");
+    const runner = buildAdapter(clock, { driver: plainDriver(), store });
+    await runner.run(spec({ toolDomain: "readonly", dispatchMeta: META }));
+    expect(store.get("r1")?.diag.dispatchMeta).toEqual(META);
   });
 
   it("runs without any new request fields produce a diag with none of the new keys (zero-change when absent)", async () => {
     const clock = new FakeClock();
     const store = new MemoryRunStore();
-    const runner = buildAdapter(clock, { driver: plainDriver(), store, consult: consultFactory });
+    const runner = buildAdapter(clock, { driver: plainDriver(), store });
     await runner.run(spec());
     const diag = store.get("r1")?.diag;
-    for (const key of ["experts", "dispatchMeta", "schemaPreset", "consults", "consultOf"])
-      expect(diag).not.toHaveProperty(key);
+    for (const key of ["dispatchMeta", "schemaPreset"]) expect(diag).not.toHaveProperty(key);
   });
 });
 

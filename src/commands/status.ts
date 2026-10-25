@@ -385,7 +385,7 @@ export function renderRunDetail(
   const elapsed = (d.settledAt ?? Date.now()) - d.createdAt;
   const head = [
     `Run ${s.runId.slice(0, 8)}${d.label ? ` (${d.label})` : ""}`,
-    // consult §16.5 (acceptance follow-up): reserved id "main", never the sentinel.
+    // legacy consult sentinel agent type folds to "main" (older run entries only).
     displayAgentType(d.agentType) ?? undefined,
     formatModelRef(d.model),
     `${s.status}/${s.phase}`,
@@ -452,8 +452,8 @@ export function renderRunDetail(
  * digging through notifications.
  *
  * X12: a run's `diag.usage` already includes the lifetime spend of any
- * nested run absorbed on one of its usage-bearing toolResults (consult /
- * nested Agent / get_subagent_result — see src/core/state-machine.ts
+ * nested run absorbed on one of its usage-bearing toolResults (nested Agent /
+ * get_subagent_result — see src/core/state-machine.ts
  * absorbRunIds). Listing every run's cost AND summing all of them would
  * double-count the absorbed child on top of the parent that already carries
  * its spend, so the grand total skips any run whose id shows up in another

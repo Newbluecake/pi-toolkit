@@ -273,8 +273,6 @@ describe("runtime-adapter: readonly tool domain — N4 injection/authorization u
           throw new Error("x");
         },
       }),
-      consult: vi.fn(() => ({ name: "consult" }) as never),
-      consultResolveExperts: vi.fn(),
     };
   }
 
@@ -299,7 +297,6 @@ describe("runtime-adapter: readonly tool domain — N4 injection/authorization u
       runner,
       spec(tidyType(["read", "bash", "edit", "write", "memory"]), {
         schema: { type: "object" },
-        consultExperts: [{ runId: "r_E", sessionFile: "/s/e.jsonl", agentType: "Plan" }],
       }),
       clock,
     );
