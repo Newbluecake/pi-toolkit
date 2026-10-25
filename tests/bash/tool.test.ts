@@ -29,7 +29,7 @@ import {
   createBashTool,
   formatDescriptionSuffix,
   type BashBackgroundDetails,
-} from "../../src/tools/bash-tool.js";
+} from "../../src/bash/tool.js";
 
 /**
  * §10 T1-T9 for the bash override tool.

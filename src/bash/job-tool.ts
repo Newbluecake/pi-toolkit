@@ -1,23 +1,23 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { formatSize, truncateTail, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { HostRunView } from "../bash/child-registry.js";
+import type { HostRunView } from "./child-registry.js";
 import type { Millis } from "../core/types.js";
 import {
   EXTEND_PERSIST_TIMEOUT_MS,
   type BashJobManager,
   type ExtendJobOutcome,
   type JobOutputRead,
-} from "../bash/manager.js";
-import { describeJobStatus, isTerminalJobStatus, previewCommand, type JobId, type JobRecord } from "../bash/types.js";
+} from "./manager.js";
+import { describeJobStatus, isTerminalJobStatus, previewCommand, type JobId, type JobRecord } from "./types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
-import { MARGIN_RETURN_MS, type BashDeadlineSurface } from "./bash-tool.js";
+import { MARGIN_RETURN_MS, type BashDeadlineSurface } from "./tool.js";
 import {
   createPollGuard,
   createTimeoutStreak,
   type PollGuardOptions,
   type TimeoutStreakOptions,
-} from "./poll-guard.js";
+} from "../tools/poll-guard.js";
 
 /**
  * "bash_job" — the management surface for bash commands that were moved to

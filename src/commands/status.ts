@@ -24,7 +24,7 @@ import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
 import type { WorktreeOrphanScanResult } from "../extensions/worktree-orphans.js";
 import { formatDuration, formatModelRef } from "../ui/fleet-panel.js";
 import { isTerminalJobStatus, previewCommand, type JobRecord } from "../bash/types.js";
-import { describeJobStatus } from "../tools/bash-job-tool.js";
+import { describeJobStatus } from "../bash/job-tool.js";
 import type { MentionAutocompleteEntry } from "../mention/autocomplete.js";
 import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor.js";
 import { countActiveRuns } from "../reload/defer.js";

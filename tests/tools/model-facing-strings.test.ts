@@ -12,8 +12,8 @@ import {
   formatAutoBackgroundTextStarting,
   formatDeadlineSuffix,
   formatExplicitBackgroundTextStarting,
-} from "../../src/tools/bash-tool.js";
-import { createBashJobTool, formatGraceLine } from "../../src/tools/bash-job-tool.js";
+} from "../../src/bash/tool.js";
+import { createBashJobTool, formatGraceLine } from "../../src/bash/job-tool.js";
 import { createSetModelTool } from "../../src/tools/set-model-tool.js";
 import { createExtendTimeoutTool } from "../../src/tools/extend-timeout-tool.js";
 
@@ -143,7 +143,7 @@ describe("model-facing tool strings", () => {
   /**
    * The bash pair is generated from pi's own bash definition plus our own
    * wording; these guards cover what the T1 drift test in
-   * `tests/tools/bash-tool.test.ts` does not: that the *model-visible*
+   * `tests/bash/tool.test.ts` does not: that the *model-visible*
    * vocabulary stays free of plugin-internal terms (job status enum values,
    * settings paths, file-layout details) and that the shared job/threshold
    * contract is actually stated where the model can read it.

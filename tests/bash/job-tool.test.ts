@@ -9,7 +9,7 @@ import {
   STATUS_TAIL_LINES,
   BashJobToolParams,
   type BashJobToolParams as BashJobToolParamsType,
-} from "../../src/tools/bash-job-tool.js";
+} from "../../src/bash/job-tool.js";
 import type { BashJobManager, JobOutputRead, KillJobResult, ReadOutputOptions } from "../../src/bash/manager.js";
 import { isTerminalJobStatus, type JobId, type JobRecord, type JobStatus } from "../../src/bash/types.js";
 
@@ -756,7 +756,7 @@ describe("bash_job — wait timeout streak (repeated timing-out waits escalate g
 import type { ExtendJobOutcome } from "../../src/bash/manager.js";
 import type { JobDeadline, JobDeadlinePolicy } from "../../src/bash/types.js";
 import type { HostRunView } from "../../src/bash/child-registry.js";
-import { BashJobToolExtendParams } from "../../src/tools/bash-job-tool.js";
+import { BashJobToolExtendParams } from "../../src/bash/job-tool.js";
 
 const POLICY: JobDeadlinePolicy = { graceMs: 60_000, maxExtensions: 3, maxTimeoutFactor: 3 };
 

@@ -45,7 +45,7 @@ import {
 import { createProcessPort } from "./bash/process.js";
 import { readPiShellSettings, type PiShellSettings } from "./bash/pi-shell.js";
 import { isTerminalJobStatus, previewCommand, type JobRecord } from "./bash/types.js";
-import { describeJobStatus } from "./tools/bash-job-tool.js";
+import { describeJobStatus } from "./bash/job-tool.js";
 import { getChildBashRegistry, declareHostBashViewCapability, type HostRunView } from "./bash/child-registry.js";
 import { resolveChildSwitchContextGrant } from "./context-switch/capability.js";
 import { getChildKeepaliveDisposeRegistry } from "./cache-ttl/child-registry.js";

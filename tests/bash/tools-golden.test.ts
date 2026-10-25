@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
-import { BashToolParams, createBashTool } from "../../src/tools/bash-tool.js";
-import { BashJobToolParams, createBashJobTool } from "../../src/tools/bash-job-tool.js";
+import { BashToolParams, createBashTool } from "../../src/bash/tool.js";
+import { BashJobToolParams, createBashJobTool } from "../../src/bash/job-tool.js";
 
 /**
  * P0a / T0 (docs/dev/bash-timeout-grace/plan.md §5.3, §6.2, §7): a golden
@@ -34,7 +34,7 @@ import { BashJobToolParams, createBashJobTool } from "../../src/tools/bash-job-t
  * Generation command (plan §5.3, **only** on unmodified master, **only**
  * once, for P0a):
  *
- *   UPDATE_BASH_GOLDEN=1 npx vitest run tests/tools/bash-tools-golden.test.ts
+ *   UPDATE_BASH_GOLDEN=1 npx vitest run tests/bash/tools-golden.test.ts
  *
  * After that the fixture is frozen (same discipline as
  * `tests/fixtures/compact-hint-golden.json` — never regenerate it). The guard
@@ -47,7 +47,7 @@ const FIXTURE_PATH = resolve(process.cwd(), "tests/fixtures/bash-tools-golden.js
 
 /**
  * The `bash` override's description embeds the auto-background threshold via
- * `formatDescriptionSuffix` (`src/tools/bash-tool.ts`), so the fixture needs a
+ * `formatDescriptionSuffix` (`src/bash/tool.ts`), so the fixture needs a
  * fixed value. We pin it to the real shipped default
  * (`DEFAULT_SETTINGS.bashJobs.autoBackgroundMs`, currently 290_000ms) rather
  * than an arbitrary constant: the fixture then proves the surface a real
@@ -140,7 +140,7 @@ describe("bash tool surfaces — golden fixture (T0)", () => {
     if (!existsSync(FIXTURE_PATH)) {
       throw new Error(
         "tests/fixtures/bash-tools-golden.json is missing. Generate it once, on unmodified master, with " +
-          "`UPDATE_BASH_GOLDEN=1 npx vitest run tests/tools/bash-tools-golden.test.ts` (docs/dev/bash-timeout-grace/plan.md §5.3).",
+          "`UPDATE_BASH_GOLDEN=1 npx vitest run tests/bash/tools-golden.test.ts` (docs/dev/bash-timeout-grace/plan.md §5.3).",
       );
     }
     const expected = readFileSync(FIXTURE_PATH, "utf8");

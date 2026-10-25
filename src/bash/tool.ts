@@ -7,9 +7,9 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { Millis } from "../core/types.js";
-import type { HostRunView } from "../bash/child-registry.js";
-import type { BashJobManager, CreatedJob, ReservedJob } from "../bash/manager.js";
-import type { JobDeadlinePolicy, JobId } from "../bash/types.js";
+import type { HostRunView } from "./child-registry.js";
+import type { BashJobManager, CreatedJob, ReservedJob } from "./manager.js";
+import type { JobDeadlinePolicy, JobId } from "./types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 
 /**
@@ -62,7 +62,7 @@ import { formatDuration } from "../ui/fleet-panel.js";
  * from `inner.parameters` would cross two different typebox instances
  * (`@sinclair/typebox` here, pi's bundled `typebox` there). The `command` /
  * `timeout` descriptions are therefore duplicated verbatim and pinned against
- * the real thing by a drift test (`tests/tools/bash-tool.test.ts` T1).
+ * the real thing by a drift test (`tests/bash/tool.test.ts` T1).
  */
 export const BashToolParams = Type.Object({
   command: Type.String({ description: "Shell command to execute" }),
