@@ -95,6 +95,7 @@ const detail = {
   // Appended at the file's end — another package inserts before `todoCompletedHidden`, never here.
   clearAria: "Clear",
   clearLabel: "Clear",
+  clearBusyLabel: "Clearing…",
   clearTitle: "New session (/clear)",
   clearFailed: "Couldn't start a new session ({code})",
   // web-hub archive plan: the `· N archived` summary segment — compact English token in BOTH
@@ -104,6 +105,9 @@ const detail = {
   // SchedulePanel (hub cap sched.v1 + a sessionId on the card; absent ⇒ zero trace).
   scheduleOpenTitle: "Scheduled tasks",
   scheduleOpenLabel: "Schedules",
+  // issue #41 (titlebar overflow): the 「⋯」 menu trigger + menu aria-label receiving the
+  // folded low-frequency titlebar buttons on narrow bars.
+  moreActions: "More actions",
 } satisfies Record<string, string>;
 
 export default detail;

@@ -37,13 +37,31 @@
   `.detail-head-info` in detail.css.
 -->
 <script setup lang="ts">
-import { computed, defineAsyncComponent, inject, nextTick, onUnmounted, ref } from "vue";
+import {
+  computed,
+  defineAsyncComponent,
+  inject,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  onUnmounted,
+  ref,
+  watch,
+} from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { agentVisualState } from "../../composables/visual-state.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { useDetailHeadCollapse } from "../../composables/useDetailHeadCollapse.js";
+import { useMedia } from "../../composables/useMedia.js";
 import { browserLocalStorage } from "../shell/themeStorage.js";
 import { managedFor, restoringKeys } from "../../logic/spawn.js";
+import {
+  foldTitlebar,
+  TITLEBAR_FOLD_ORDER,
+  TITLEBAR_ICON_TIER_MAX_PX,
+  type TitlebarFoldId,
+  type TitlebarFoldState,
+} from "../../logic/headerFold.js";
 import type { DetailHeaderEmits, DetailHeaderProps } from "../../contracts.js";
 import { CONTROL_VIEW, HUB_CTX } from "../control/controlContext.js";
 import { PRIVACY_LOCK_CTX } from "../privacy/privacyContext.js";
@@ -53,6 +71,7 @@ import { cardOf, sessionOf, statusOf } from "./agentViews.js";
 import { resumeAvailable, RESUME_DIALOG } from "@logic/resume.js";
 import SessionInfo from "./SessionInfo.vue";
 import StatusPill from "./StatusPill.vue";
+import HeaderOverflowMenu, { type HeaderOverflowItem } from "./HeaderOverflowMenu.vue";
 import TodoPanel from "./TodoPanel.vue";
 import WorktreePanel from "./WorktreePanel.vue";
 import GraphPanel from "./GraphPanel.vue";
@@ -346,11 +365,208 @@ function onToggleHeadInfo(): void {
   if (sel !== null && sel.toString() !== "") return;
   headCollapse.toggle();
 }
+
+// ---------------------------------------------------------------------------
+// issue #41 (titlebar narrow-screen overflow): measure the bar (ONE ResizeObserver on
+// `.detail-titlebar`, fired per frame at most — RO callbacks are already frame-aligned, no
+// extra rAF) and let logic/headerFold.ts's pure `foldTitlebar` decide which right-side
+// buttons fold into the 「⋯」 menu, so the title never drops below its 96px clickable floor.
+// Fold priority: privacy → schedule → resume → channels → stop → clear. No measurement (SSR
+// first paint / RO unavailable / zero-layout) ⇒ empty fold state ⇒ the pre-feature DOM.
+// ---------------------------------------------------------------------------
+const titlebarEl = ref<HTMLElement | null>(null);
+const foldState = ref<TitlebarFoldState>({ folded: [], aliasGlyph: false, pillDot: false });
+const coarsePointer = useMedia(window, "(pointer: coarse)").matches;
+/** Last measured full-form widths — folded / degraded elements can't be re-measured. */
+const foldWidthCache = new Map<TitlebarFoldId, number>();
+let aliasFullCache = 0;
+let pillFullCache = 0;
+
+function isFolded(id: TitlebarFoldId): boolean {
+  return foldState.value.folded.includes(id);
+}
+
+/** Present foldable buttons in FOLD-PRIORITY order (the armed/busy stop pill is a transient
+ * in-bar state and never folds — only the IDLE stop button does). */
+function presentFoldIds(): TitlebarFoldId[] {
+  const present = new Set<TitlebarFoldId>();
+  if (privacyButton.value) present.add("privacy");
+  if (schedUsable.value) present.add("schedule");
+  if (resumeUsable.value) present.add("resume");
+  if (channelsUsable.value) present.add("channels");
+  if (managed.value !== undefined && !stopArmed.value && !stopStopping.value) present.add("stop");
+  if (clearUsable.value) present.add("clear");
+  return TITLEBAR_FOLD_ORDER.filter((id) => present.has(id));
+}
+
+function measureTitlebar(): void {
+  const el = titlebarEl.value;
+  if (el === null) return;
+  const barWidth = el.clientWidth;
+  if (!(barWidth > 0)) return; // hidden / zero-layout (happy-dom): keep the state as-was
+  // Mirror the CSS tiers: at/below TITLEBAR_ICON_TIER_MAX_PX the row's effective spacing
+  // compacts 8 → 4 (fine pointers: -4px sibling margins; coarse: viewport-media gap — a
+  // container query can't restyle its own container); icon-only buttons are 32px square
+  // (44px on coarse pointers, never overlapped there).
+  const gap = barWidth <= TITLEBAR_ICON_TIER_MAX_PX ? 4 : 8;
+  const btnFallback = coarsePointer.value ? 44 : 32;
+  const items = presentFoldIds().map((id) => {
+    const btn = el.querySelector(`[data-fold="${id}"]`);
+    let width = btn instanceof HTMLElement ? btn.offsetWidth : 0;
+    if (width > 0) foldWidthCache.set(id, width);
+    else width = foldWidthCache.get(id) ?? btnFallback;
+    return { id, width };
+  });
+  // Σ(width+gap) of the non-foldable, non-title, non-alias, non-pill children (back/drawer
+  // buttons, unread/restoring chips, the transient stop-armed/busy pill).
+  let fixedSlots = 0;
+  for (const child of Array.from(el.children)) {
+    const c = child as HTMLElement;
+    if (
+      c.classList.contains("detail-title") ||
+      c.classList.contains("detail-more-wrap") ||
+      c.hasAttribute("data-fold") ||
+      c.hasAttribute("data-alias") ||
+      c.hasAttribute("data-pill")
+    ) {
+      continue;
+    }
+    fixedSlots += c.offsetWidth + gap;
+  }
+  let aliasFull = 0;
+  const aliasEl = el.querySelector("[data-alias]");
+  if (aliasEl !== null && headerAlias.value !== undefined) {
+    const w = (aliasEl as HTMLElement).offsetWidth;
+    if (!foldState.value.aliasGlyph && w > 0) aliasFullCache = w; // only trust full-form widths
+    aliasFull = (foldState.value.aliasGlyph ? aliasFullCache : w) || aliasFullCache;
+    if (aliasFull === 0) aliasFull = 26 + headerAlias.value.length * 9; // never measured: estimate
+    aliasFull += gap;
+  }
+  const pillEl = el.querySelector("[data-pill]");
+  let pillFull = 0;
+  if (pillEl !== null) {
+    const w = (pillEl as HTMLElement).offsetWidth;
+    if (!foldState.value.pillDot && w > 0) pillFullCache = w;
+    pillFull = (foldState.value.pillDot ? pillFullCache : w) || pillFullCache || 78;
+    pillFull += gap;
+  }
+  const next = foldTitlebar({
+    barWidth,
+    gap,
+    moreSlot: btnFallback + gap,
+    fixedSlots,
+    aliasFull,
+    pillFull,
+    items,
+    hysteresis: 24,
+    prev: foldState.value,
+  });
+  const cur = foldState.value;
+  if (
+    next.aliasGlyph !== cur.aliasGlyph ||
+    next.pillDot !== cur.pillDot ||
+    next.folded.length !== cur.folded.length ||
+    next.folded.some((id, i) => id !== cur.folded[i])
+  ) {
+    foldState.value = next;
+  }
+}
+
+let titlebarRO: ResizeObserver | null = null;
+onMounted(() => {
+  measureTitlebar();
+  if (typeof ResizeObserver !== "undefined") {
+    titlebarRO = new ResizeObserver(() => measureTitlebar());
+    if (titlebarEl.value !== null) titlebarRO.observe(titlebarEl.value);
+  }
+});
+onBeforeUnmount(() => {
+  titlebarRO?.disconnect();
+  titlebarRO = null;
+});
+// A cap gate flipping adds/removes a button without necessarily resizing the bar — re-measure.
+watch(
+  () => presentFoldIds().join(","),
+  () => void nextTick(measureTitlebar),
+);
+
+/** Menu entries in the BAR's left-to-right order (not fold order) — a stable, predictable list. */
+const overflowItems = computed<HeaderOverflowItem[]>(() => {
+  const out: HeaderOverflowItem[] = [];
+  // Glyph-degraded alias chip shows a bare 「@」 — keep the full alias readable as the menu's
+  // first (read-only) entry.
+  if (foldState.value.aliasGlyph && headerAlias.value !== undefined)
+    out.push({ id: "alias-note", note: true, label: `@${headerAlias.value}` });
+  if (clearUsable.value && isFolded("clear")) {
+    const busy = clearing.value;
+    out.push({
+      id: "clear",
+      icon: busy ? "loader" : "sparkle",
+      label: busy ? t("detail.clearBusyLabel") : t("detail.clearLabel"),
+      busy,
+      separatorBefore: out.length > 0,
+    });
+  }
+  if (channelsUsable.value && isFolded("channels")) {
+    const alias = headerAlias.value;
+    out.push({
+      id: "channels",
+      icon: "radio",
+      label: alias === undefined ? t("agents.channelsOpenLabel") : `${t("agents.channelsOpenLabel")} @${alias}`,
+      haspopupDialog: true,
+    });
+  }
+  if (schedUsable.value && isFolded("schedule"))
+    out.push({ id: "schedule", icon: "clock", label: t("detail.scheduleOpenLabel"), haspopupDialog: true });
+  if (resumeUsable.value && isFolded("resume"))
+    out.push({ id: "resume", icon: "clock", label: t("resume.openLabel"), haspopupDialog: true });
+  if (privacyButton.value && isFolded("privacy"))
+    out.push({
+      id: "privacy",
+      icon: "lock",
+      label: privacyMarked.value ? t("privacy.lockLabel") : t("privacy.markLabel"),
+      checked: privacyMarked.value,
+    });
+  if (managed.value !== undefined && !stopArmed.value && !stopStopping.value && isFolded("stop"))
+    out.push({
+      id: "stop",
+      icon: "stop",
+      label: t("spawn.stopSessionLabel"),
+      danger: true,
+      separatorBefore: out.length > 0,
+    });
+  return out;
+});
+
+function onOverflowRun(id: string): void {
+  switch (id) {
+    case "clear":
+      void onClear();
+      break;
+    case "channels":
+      channelsOpen.value = true;
+      break;
+    case "schedule":
+      schedOpen.value = true;
+      break;
+    case "resume":
+      resumeHost?.open({ scope: "recent" });
+      break;
+    case "privacy":
+      onPrivacyClick();
+      break;
+    case "stop":
+      // Menu already closed; arm the two-step confirm — the ✓/✕ pill surfaces IN THE BAR
+      // (the armed/busy pills never fold) exactly as if the idle button had been clicked.
+      armStop();
+      break;
+  }
+}
 </script>
 
 <template>
   <header class="detail-head">
-    <div class="detail-titlebar">
+    <div class="detail-titlebar" ref="titlebarEl">
       <button
         v-if="drawer && drawer.active.value"
         class="btn btn-ghost detail-drawer-toggle"
@@ -391,26 +607,36 @@ function onToggleHeadInfo(): void {
       <button
         v-if="headerAlias !== undefined && channelsUsable"
         class="chip detail-alias-btn"
+        :class="{ 'is-glyph': foldState.aliasGlyph }"
         type="button"
         translate="no"
+        data-alias
         :title="t('agents.xsAliasManage', { alias: headerAlias })"
         :aria-label="t('agents.xsAliasManage', { alias: headerAlias })"
         @click="onAliasOpen"
       >
-        @{{ headerAlias }}
+        @{{ foldState.aliasGlyph ? "" : headerAlias }}
       </button>
-      <span v-else-if="headerAlias !== undefined" class="chip chip-xs-alias" translate="no" :title="`@${headerAlias}`"
-        >@{{ headerAlias }}</span
+      <span
+        v-else-if="headerAlias !== undefined"
+        class="chip chip-xs-alias"
+        :class="{ 'is-glyph': foldState.aliasGlyph }"
+        translate="no"
+        data-alias
+        :title="`@${headerAlias}`"
+        :aria-label="`@${headerAlias}`"
+        >@{{ foldState.aliasGlyph ? "" : headerAlias }}</span
       >
-      <StatusPill :state="visual" :label="statusLabel" />
+      <StatusPill :state="visual" :label="statusLabel" :dot-only="foldState.pillDot" data-pill />
       <!-- Web /clear quick button (2026-10): new session in the same pi process via builtin
            /new with confirm baked in — no confirmation dialog anywhere in this flow. Rendered
            only on the composer's slash-command surface (control ∧ live ∧ command.v1 slot);
            never busy-gated (see the script block above). -->
       <button
-        v-if="clearUsable"
+        v-if="clearUsable && !isFolded('clear')"
         class="detail-clear-btn"
         type="button"
+        data-fold="clear"
         :disabled="clearing"
         :title="t('detail.clearTitle')"
         :aria-label="t('detail.clearAria')"
@@ -422,9 +648,10 @@ function onToggleHeadInfo(): void {
       <!-- web-resume §2.6 D7 (P3): 「恢复」 opens the resume picker — clear-button gating +
            resume.v1; never busy-gated (D4: busy ⇒ list browsable, rows not switchable). -->
       <button
-        v-if="channelsUsable"
+        v-if="channelsUsable && !isFolded('channels')"
         class="detail-channels-btn"
         type="button"
+        data-fold="channels"
         :title="t('agents.channelsOpenTitle')"
         :aria-label="t('agents.channelsOpenTitle')"
         aria-haspopup="dialog"
@@ -437,9 +664,10 @@ function onToggleHeadInfo(): void {
       <!-- scheduled-reports W1 (§5.6): 「定时」 → lazy SchedulePanel (sched.v1 + sessionId;
            read-only-safe offline, so NOT gated on the control surface). -->
       <button
-        v-if="schedUsable"
+        v-if="schedUsable && !isFolded('schedule')"
         class="detail-sched-btn"
         type="button"
+        data-fold="schedule"
         :title="t('detail.scheduleOpenTitle')"
         :aria-label="t('detail.scheduleOpenTitle')"
         aria-haspopup="dialog"
@@ -454,9 +682,10 @@ function onToggleHeadInfo(): void {
         @close="schedOpen = false"
       />
       <button
-        v-if="resumeUsable"
+        v-if="resumeUsable && !isFolded('resume')"
         class="detail-resume-btn"
         type="button"
+        data-fold="resume"
         :title="t('resume.openTitle')"
         :aria-label="t('resume.openTitle')"
         @click="resumeHost?.open({ scope: 'recent' })"
@@ -467,8 +696,9 @@ function onToggleHeadInfo(): void {
       <!-- web-hub-privacy P2: 隐私标记 (unmarked → persistent mark) vs 立即锁定 (marked +
            viewing → view relock) — the two names never mix (plan v2.1 N1 命名分离). -->
       <button
-        v-if="privacyButton"
+        v-if="privacyButton && !isFolded('privacy')"
         class="btn btn-ghost privacy-head-btn"
+        data-fold="privacy"
         :class="{ 'is-marked': privacyMarked }"
         type="button"
         :title="privacyMarked ? t('privacy.lockNow') : t('privacy.mark')"
@@ -480,18 +710,6 @@ function onToggleHeadInfo(): void {
           privacyMarked ? t("privacy.lockLabel") : t("privacy.markLabel")
         }}</span>
       </button>
-      <span
-        v-if="xsUnread !== undefined"
-        class="chip chip-xs-unread"
-        role="img"
-        translate="no"
-        :title="t('agents.xsUnread', { n: xsUnread })"
-        :aria-label="t('agents.xsUnread', { n: xsUnread })"
-        ><AppIcon name="inbox" class="icon" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span></span
-      >
-      <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">{{
-        t("spawn.badgeRestoring")
-      }}</span>
       <!-- web-hub-spawn SP12 (arch §9.1) — 2026-10 variant-A redesign (user-picked mockup
            pwh-stopbtn/v-a): idle = 32px icon-only ghost button (title + aria-label, danger tint
            on hover/focus-visible); first click expands IN PLACE into the red confirm pill
@@ -499,10 +717,11 @@ function onToggleHeadInfo(): void {
            focus moves to ✓ on arm); stopping = spinner + label, no interactive control. -->
       <template v-if="managed">
         <button
-          v-if="!stopArmed && !stopStopping"
+          v-if="!stopArmed && !stopStopping && !isFolded('stop')"
           ref="stopIdleBtn"
           class="spawn-stop-btn"
           type="button"
+          data-fold="stop"
           :title="t('spawn.stopSession')"
           :aria-label="t('spawn.stopSessionAria')"
           @click="onStopSession"
@@ -551,6 +770,23 @@ function onToggleHeadInfo(): void {
           </button>
         </span>
       </template>
+      <!-- issue #41: the 「⋯」 overflow menu receives the measured-out low-frequency buttons
+           (logic/headerFold.ts); mounted only while ≥1 action is folded, so a wide bar's DOM
+           stays byte-identical to the pre-feature markup. Sits BEFORE the trailing state chips
+           (review pass: the unread chip stays the bar's LAST element). -->
+      <HeaderOverflowMenu v-if="overflowItems.length > 0" :items="overflowItems" @run="onOverflowRun" />
+      <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">{{
+        t("spawn.badgeRestoring")
+      }}</span>
+      <span
+        v-if="xsUnread !== undefined"
+        class="chip chip-xs-unread"
+        role="img"
+        translate="no"
+        :title="t('agents.xsUnread', { n: xsUnread })"
+        :aria-label="t('agents.xsUnread', { n: xsUnread })"
+        ><AppIcon name="inbox" class="icon" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span></span
+      >
     </div>
 
     <p v-if="privacyError" class="privacy-head-error" role="alert">

@@ -160,6 +160,9 @@ export interface ContextMeterProps {
 export interface StatusPillProps {
   readonly state: RunVisualState;
   readonly label: string;
+  /** issue #41 (titlebar overflow): extreme-narrow degradation — render the dot only, with
+   * the label carried by role=img + aria-label/title. Omitted/false ⇒ byte-identical. */
+  readonly dotOnly?: boolean;
 }
 
 export interface ComposerProps {

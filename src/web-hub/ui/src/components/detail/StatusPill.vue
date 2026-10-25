@@ -3,7 +3,8 @@
   `components/detail/**`). One shared rendering for every `RunVisualState` — used by
   `DetailHeader.vue`; `AgentCard.vue` (agents/) renders its own inline variant since it needs
   slightly different icon overrides (waiting/offline dialog icons) not modeled by this
-  component's plain `label` prop.
+  component's plain `label` prop. issue #41 adds the optional `dotOnly` degradation (dot only,
+  label on role=img + aria-label/title) for the detail titlebar's extreme-narrow tier.
 -->
 <script setup lang="ts">
 import { computed } from "vue";
@@ -29,5 +30,13 @@ const dotClass = computed(() => {
 </script>
 
 <template>
-  <span class="pill" :data-st="state"><span class="dot" :class="dotClass"></span>{{ label }}</span>
+  <span
+    class="pill"
+    :class="{ 'is-dot-only': props.dotOnly === true }"
+    :data-st="state"
+    :role="props.dotOnly === true ? 'img' : undefined"
+    :aria-label="props.dotOnly === true ? props.label : undefined"
+    :title="props.dotOnly === true ? props.label : undefined"
+    ><span class="dot" :class="dotClass"></span>{{ props.dotOnly === true ? "" : label }}</span
+  >
 </template>

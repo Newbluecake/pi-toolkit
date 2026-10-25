@@ -110,8 +110,14 @@
   margin-left: -6px;
 }
 
-.detail-title-toggle:hover {
-  background: var(--c-surface-2);
+/* 2026-10-25 (user request 「标题静态无底色」): on touch devices a tap leaves :hover stuck, so
+ * an unqualified hover tint reads as a PERMANENT lighter block behind the title. The tint is a
+ * hover affordance only — it now exists solely where a real hover exists; keyboard focus keeps
+ * base.css's global :focus-visible outline (no background), static stays flat against the bar. */
+@media (hover: hover) and (pointer: fine) {
+  .detail-title-toggle:hover {
+    background: var(--c-surface-2);
+  }
 }
 
 /* Web /clear and 「恢复」 (web-resume D7) quick buttons (2026-10 user request): 32px icon-only ghost in the titlebar,
@@ -304,29 +310,48 @@
       .spawn-stop-btn,
       .detail-sched-btn
     )
-    + :is(
-      .detail-clear-btn,
-      .detail-resume-btn,
-      .detail-channels-btn,
-      .privacy-head-btn,
-      .spawn-stop-btn,
-      .detail-sched-btn
-    ) {
-    margin-left: 0;
-  }
-
-  .detail-titlebar
-    :is(
-      .detail-clear-btn,
-      .detail-resume-btn,
-      .detail-channels-btn,
-      .privacy-head-btn,
-      .spawn-stop-btn,
-      .detail-sched-btn
-    )
     .icon {
     width: calc(16px * var(--fs-scale, 1));
     height: calc(16px * var(--fs-scale, 1));
+  }
+}
+
+/* issue #41 第一级压缩：图标档把整行有效间距 8px → 4px。负边距压缩只限 FINE 指针 ——
+ * coarse 指针下 44px 命中盒绝不相叠（验收意见：-4px 重叠把实际可点宽度压到 40px）。
+ * 全覆盖的 -4px 兄弟 margin 低优先级，`.detail-back + .detail-title` 等特指规则不受影响。 */
+@media (pointer: fine) {
+  @container detail-titlebar (max-width: 599px) {
+    .detail-titlebar > * + * {
+      margin-left: -4px;
+    }
+
+    .detail-titlebar
+      :is(
+        .detail-clear-btn,
+        .detail-resume-btn,
+        .detail-channels-btn,
+        .privacy-head-btn,
+        .spawn-stop-btn,
+        .detail-sched-btn
+      )
+      + :is(
+        .detail-clear-btn,
+        .detail-resume-btn,
+        .detail-channels-btn,
+        .privacy-head-btn,
+        .spawn-stop-btn,
+        .detail-sched-btn
+      ) {
+      margin-left: -4px; /* keep the labeled tier's compression in the icon tier */
+    }
+  }
+}
+
+/* coarse 指针的间距压缩走轨道 gap（容器查询不能 restyle 容器自身，故用视口媒体查询 ——
+ * 手机上 titlebar ≈ 全宽）。命中盒保持 ≥44px 且互不相叠。 */
+@media (pointer: coarse) and (max-width: 599px) {
+  .detail-titlebar {
+    gap: 4px;
   }
 }
 
@@ -356,6 +381,147 @@
       min-width: 44px;
     }
   }
+}
+
+/* issue #41 (titlebar narrow-screen overflow): the 「⋯」 overflow trigger + menu receiving the
+ * measured-out low-frequency buttons (logic/headerFold.ts decides; DetailHeader measures).
+ * The trigger mirrors the icon-only tier's 32px ghost button (44px hit box on coarse
+ * pointers); the menu grammar mirrors preview.css's `.pw-menu`. */
+.detail-more-wrap {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.detail-more-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-3);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.detail-more-btn:hover,
+.detail-more-btn:focus-visible,
+.detail-more-btn[aria-expanded="true"] {
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+}
+
+@media (pointer: coarse) {
+  .detail-more-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+.detail-head-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40; /* above the transcript below the header */
+  min-width: 180px;
+  max-width: min(280px, 90vw);
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-1);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-3);
+}
+
+.detail-head-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.detail-head-menu-item .icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--c-text-3);
+}
+
+/* a held alias can ride the channels item's label (issue #41) — never let it blow the menu out */
+.detail-head-menu-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* issue #41 review pass: divider before the danger row(s) + the read-only alias note shown
+ * while the alias chip is degraded to a bare 「@」 glyph (same padding grammar, no hover). */
+.detail-head-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--c-border);
+}
+
+.detail-head-menu-note {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 6px 10px;
+  color: var(--c-text-3);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
+.detail-head-menu-item:hover:not(:disabled),
+.detail-head-menu-item:focus-visible {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+.detail-head-menu-item:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.detail-head-menu-item.is-danger,
+.detail-head-menu-item.is-danger .icon {
+  color: var(--c-danger);
+}
+
+/* issue #41 extreme-narrow degradations (measured, never breakpoint-based): the alias chip
+ * collapses to the bare 「@」 glyph (full alias on title/aria-label + the channels menu item),
+ * the status pill to the bare dot (state text on role=img + aria-label). */
+.detail-alias-btn.is-glyph,
+.chip-xs-alias.is-glyph {
+  min-width: calc(22px * var(--fs-scale, 1));
+  padding: 1px 5px;
+  justify-content: center;
+}
+
+.detail-titlebar .pill.is-dot-only {
+  padding: 1px 7px;
 }
 
 .detail-title-text {

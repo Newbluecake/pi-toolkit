@@ -92,6 +92,7 @@ const detail = {
   // `todoCompletedHidden` 之前，永不动这里。
   clearAria: "清空",
   clearLabel: "清空",
+  clearBusyLabel: "清空中…",
   clearTitle: "新会话（/clear）",
   clearFailed: "新会话启动失败（{code}）",
   bashJobsArchived: "{n} archived",
@@ -99,6 +100,8 @@ const detail = {
   //（hub cap sched.v1 + 卡片有 sessionId 才出现；否则零痕迹）。
   scheduleOpenTitle: "定时任务",
   scheduleOpenLabel: "定时",
+  // issue #41（顶栏窄屏溢出）：接收折入按钮的「⋯」菜单——触发器与菜单的 aria-label。
+  moreActions: "更多操作",
 } satisfies Messages<typeof en>;
 
 export default detail;
