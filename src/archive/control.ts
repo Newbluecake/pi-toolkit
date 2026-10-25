@@ -28,7 +28,7 @@ import {
   type ArchiveKind,
   type ArchiveState,
 } from "./state.js";
-import { isTerminalStatus } from "../ui/fleet-panel.js";
+import { isTerminalStatus } from "../core/status.js";
 import { isTerminalJobStatus, type JobRecord } from "../bash/types.js";
 import type { RunSnapshot } from "../core/types.js";
 

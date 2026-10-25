@@ -12,6 +12,7 @@ import type {
 } from "../core/types.js";
 import { displayAgentType } from "../core/types.js";
 import { formatDuration } from "../core/format.js";
+import { isTerminalStatus } from "../core/status.js";
 import { consultCacheMarkerOfDiag } from "../core/consult-cache-marker.js";
 
 // Re-exported for the ~10 existing consumers (tools/, commands/, ui/, stack,
@@ -35,12 +36,6 @@ export type FleetHighlight = "none" | "warn" | "crit";
 export type FleetTone = FleetHighlight | "header" | "muted" | "success";
 export type FleetColorize = (tone: FleetTone, text: string) => string;
 type EscalationLevel = RunDiagnostics["escalation"][number]["level"];
-
-const TERMINAL: readonly RunStatus[] = ["completed", "failed", "timed_out", "aborted"];
-
-export function isTerminalStatus(status: RunStatus): boolean {
-  return TERMINAL.includes(status);
-}
 
 export interface FleetRow {
   runId: RunId;
