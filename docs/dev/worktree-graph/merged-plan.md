@@ -483,3 +483,10 @@ git diff --quiet origin/dev -- tests/fixtures/
 - F1：不加「已合入（有改动）」弱提示，只按补丁等价（patch-id）判定。
 - F2：merge / fast-forward 合入的分支不加标签。
 - F3：「显示已合入」开关不记忆，刷新后恢复折叠。
+
+## 开工记录（2026-10-25）
+
+- `B40` = `adebe2d6`（#40 PS2 合入、I4 全绿：vitest 28757 过、conformance 32 文件、fixtures 零 diff）。
+- §8.2 放行条件：① `B40` 在 dev 祖先链上；② I4 已绿；③ 工作区干净；④ §1 坐标复核——`302223c5..B40` 在 §1 涉及的 git/protocol/hub worktree-graph/worktree-diff/hub.ts/audit.ts/UI graph/scope/transport 文件上零改动，坐标沿用。
+- 文件域白名单：`docs/dev/worktree-graph/merged-files.txt`（§8.3；之后只由主会话修改）。
+- 并行方式：各包在主仓库工作区开发（文件域互不相交），主会话按精确路径提交；不开 worktree。
