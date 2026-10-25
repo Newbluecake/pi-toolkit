@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { createSecurityEventBus } from "../../../src/web-hub/hub/security-events.js";
 import { auditClientDeny, auditLanSession, auditLan2fa } from "../../../src/web-hub/hub/audit.js";
 import { repairLan2fa } from "../../../src/web-hub/hub/lan-store.js";
-import { unimplementedLanSecurityStore } from "../../../src/web-hub/hub/lan-security-stubs.js";
 describe("P0 security event and audit surfaces", () => {
   it("is instance-local, no-op without subscribers, sync ordered, isolated and idempotently unsubscribed", () => {
     const log = { error: vi.fn() },
@@ -87,10 +86,7 @@ describe("P0 security event and audit surfaces", () => {
     auditLan2fa(log, { phase: "admin", op: "repair", ok: true, ip: "must-not-log", ...secrets });
     expect(log.info).toHaveBeenLastCalledWith("lan-2fa", { audit: "lan-2fa", op: "repair", ok: true });
   });
-  it("unused compatibility stubs still refuse; B repair is async and honours cancellation", async () => {
-    const stubs = unimplementedLanSecurityStore();
-    expect(Object.keys(stubs)).toHaveLength(15);
-    for (const fn of Object.values(stubs)) expect(() => fn()).toThrow("not implemented");
+  it("B repair is async and honours cancellation", async () => {
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     await expect(repairLan2fa({ dbFile: "/not-opened", log, signal: AbortSignal.abort() })).resolves.toEqual({
       ok: false,

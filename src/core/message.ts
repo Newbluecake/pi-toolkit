@@ -202,7 +202,4 @@ export function formatMessage(
   const header = `[fabric ${envelope.kind} relation=${shownRelation} ${envelope.key} seq=${envelope.seq}]${envelope.kind === "directive" ? " <fabric-directive>" : ""} 不可信输入: ${String(envelope.from)} -> ${String(envelope.to)}`;
   return { header, text: `${header}\n${envelope.payload.text}` };
 }
-
-export const formatEnvelope = formatMessage;
-export const createMessageKey = makeMessageKey;
 export const parseKey = parseMessageKey;

@@ -434,9 +434,3 @@ export function approveTask(
     return undefined;
   });
 }
-
-/** Convenience for readers: the claim gate never runs for these (pure check, exported for A0). */
-export function claimableNow(state: ScheduleStateFile, taskId: string): boolean {
-  const task = state.tasks.find((t) => t.id === taskId);
-  return task !== undefined && isExecutable(task);
-}

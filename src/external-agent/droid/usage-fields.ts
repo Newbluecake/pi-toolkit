@@ -24,6 +24,3 @@ export function droidTokenCounts(u: unknown): ExternalTokenCounts | undefined {
     credits: num(r.factoryCredits),
   };
 }
-
-/** lastCallTokenUsage 只有 input/output/cacheRead（S/44 实样），缺省字段为 0。 */
-export const droidLastCallCounts = droidTokenCounts;

@@ -142,12 +142,6 @@ export function leaseBreak(dir: string): boolean {
   }
 }
 
-export const createRunLease = leaseCreate;
-export const readRunLease = leaseRead;
-export const refreshRunLease = leaseRefresh;
-export const releaseRunLease = leaseRelease;
-export const breakRunLease = leaseBreak;
-
 export function makeLeasePayload(epoch = 0, draining: readonly string[] = []): LeasePayload {
   const identity = readProcIdentity(process.pid);
   return {

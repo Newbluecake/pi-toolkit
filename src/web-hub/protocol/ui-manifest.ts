@@ -150,6 +150,3 @@ export function parseUiBuildInfo(json: unknown): { ok: true; info: UiBuildInfo }
     },
   };
 }
-
-/** `commit` value used when `git` is unavailable, the tree isn't a git checkout, or resolution timed out. */
-export const UNKNOWN_COMMIT = COMMIT_UNKNOWN;

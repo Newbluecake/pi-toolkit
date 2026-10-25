@@ -66,8 +66,6 @@ export function archiveSignals(file: TidySnapshotFile, options: ArchiveSignalOpt
   return { signals, suggested, eligible, reason };
 }
 
-export const computeArchiveSignals = archiveSignals;
-
 export function selectArchiveCandidates(
   files: readonly TidySnapshotFile[],
   options: ArchiveSignalOptions & { conflicts?: ReadonlySet<string> } = {},

@@ -77,17 +77,6 @@ export function copyLiveFileToBackup(dir: string, id: string, name: string): voi
   const tmp = writeTempRegular(backupDir, name, Buffer.from(text, "utf8"), 0o600);
   createExclusive(backupDir, tmp, name);
 }
-export function readBackupFile(dir: string, id: string, name: string): string {
-  return readRegular(join(dir, relBackupDir(id)), name).text;
-}
-
-/** The v1 writer is retained for callers outside the batch executor. */
-export function writeManifest(dir: string, manifest: TidyManifest): void {
-  const backupDir = join(dir, relBackupDir(manifest.id));
-  ensurePrivateDir(backupDir);
-  const tmp = writeTempRegular(backupDir, MANIFEST_NAME, Buffer.from(JSON.stringify(manifest, null, 2), "utf8"), 0o600);
-  replaceAtomic(backupDir, tmp, MANIFEST_NAME);
-}
 export function readManifest(dir: string, id: string): TidyManifest | undefined {
   try {
     const value: unknown = JSON.parse(readRegular(join(dir, relBackupDir(id)), MANIFEST_NAME).text);
@@ -599,7 +588,6 @@ export function createManifestV2(
   fsyncDirBestEffort(dirs.backup.path, undefined, dirs.fsyncWarnings);
   return manifest;
 }
-export const parseManifestV2 = parseManifestStrict;
 export function readManifestV2(dirs: RunDirs, id: string): TidyManifestV2 | undefined {
   try {
     const value: unknown = JSON.parse(readRegular(dirs.backup.path, MANIFEST_NAME).text);

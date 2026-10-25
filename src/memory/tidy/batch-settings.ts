@@ -63,8 +63,5 @@ export function resolveTidyBatchSettings(
   };
 }
 
-/** Compatibility spelling for settings adapters that use `parse*`. */
-export const parseTidyBatchSettings = resolveTidyBatchSettings;
-
 /** Compile-time batch cap required by M-T7/G-maxfiles. */
 export { BATCH_MAX_FILES, TIDY_MAX_FILES } from "../contracts.js";

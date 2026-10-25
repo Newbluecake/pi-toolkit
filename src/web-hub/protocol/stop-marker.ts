@@ -88,17 +88,11 @@ export function readStopMarkerSync(file: string): StopMarkerRead {
     return code === "ENOENT" ? { state: "absent" } : { state: "unknown", code: code ?? "EIO" };
   }
 }
-export async function readStopMarker(file: string): Promise<StopMarkerRead> {
-  return readStopMarkerSync(file);
-}
 export function writeStopMarkerSync(
   file: string,
   marker: StopMarker = { v: 1, at: Date.now(), pid: process.pid, by: "agent" },
 ): void {
   atomic(file, marker);
-}
-export async function writeStopMarker(file: string, marker?: StopMarker): Promise<void> {
-  writeStopMarkerSync(file, marker);
 }
 export function removeStopMarkerSync(file: string): void {
   try {
@@ -106,9 +100,6 @@ export function removeStopMarkerSync(file: string): void {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
-}
-export async function removeStopMarker(file: string): Promise<void> {
-  removeStopMarkerSync(file);
 }
 
 /** Best-effort cleanup; a later stop or another issuer's fence takes precedence. */

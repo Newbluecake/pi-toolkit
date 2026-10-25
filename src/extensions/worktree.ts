@@ -500,8 +500,6 @@ function requestRunId(request: SpawnRequest): string {
   return request.runId ?? request.label ?? `${request.type}-run`;
 }
 
-export const createWorktreeExtensionPoints = createWorktreeExtension;
-
 /** Pi host adapter: builds the extension from pi's exec (index.ts stays wiring-only, D7). */
 export function createPiWorktreeExtension(
   pi: {

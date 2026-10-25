@@ -218,18 +218,6 @@ export interface VerifySnapshotDeps {
   fs: HistoryFs;
 }
 
-/** SYNC per the frozen port, but this module only has an async `HistoryFs` — service.ts wires
- * the sync `HistorySyncFs` for this specific check instead (see `service.ts`). Exported here as
- * the async reference implementation used by snapshot's own tests. */
-export async function verifySnapshotAsync(s: ForkSnapshot, deps: VerifySnapshotDeps): Promise<boolean> {
-  try {
-    const st = await deps.fs.lstat(s.path);
-    return !st.isSymbolicLink() && st.isFile() && st.dev === s.dev && st.ino === s.ino && (st.mode & 0o777) === 0o600;
-  } catch {
-    return false;
-  }
-}
-
 /** Startup sweep (§4.5.7): delete only regular files, never follow a symlink, bounded count.
  * Finding 5 fix: each lstat/unlink is now individually bounded (`FORK_SRC_SWEEP_STEP_MS`, its
  * OWN deadline, never the request's — there is no request here, this runs at startup) so one

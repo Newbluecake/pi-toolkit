@@ -264,12 +264,6 @@ export function ensureStoreRoot(storeDir: string, opts: { inVault?: InVaultPredi
   return resolveStoreRoot(storeDir, opts);
 }
 
-// ----------------------------------------------------------------- ledger ops (pure, on a draft)
-
-export function runsOfTask(state: ScheduleStateFile, taskId: string): RunRecord[] {
-  return state.runs.filter((r) => r.taskId === taskId);
-}
-
 export function nonTerminalRuns(state: ScheduleStateFile, taskId: string): RunRecord[] {
   return state.runs.filter((r) => r.taskId === taskId && !isTerminalRunState(r.state));
 }

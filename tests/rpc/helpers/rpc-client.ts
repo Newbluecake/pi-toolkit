@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { ErrorInfo, StopCause } from "../core/types.js";
-import type { StopResult } from "../service/query-service.js";
+import type { ErrorInfo, StopCause } from "../../../src/core/types.js";
+import type { StopResult } from "../../../src/service/query-service.js";
 import {
   DEFAULT_RPC_TIMEOUT_MS,
   RPC_REQUEST_CHANNEL,
@@ -10,7 +10,7 @@ import {
   replyChannel,
   type RPCEventBus,
   type RPCReply,
-} from "./protocol.js";
+} from "../../../src/rpc/protocol.js";
 
 export class RPCError extends Error {
   readonly info: ErrorInfo;

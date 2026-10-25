@@ -136,7 +136,3 @@ export function editIndex(text: string, archivedNames: ReadonlySet<string> | rea
     references: parsed.links,
   };
 }
-
-export const planIndexEdit = editIndex;
-export const applyIndexEdit = editIndex;
-export const applyIndexEdits = editIndex;

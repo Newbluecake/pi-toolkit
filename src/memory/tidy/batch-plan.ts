@@ -184,5 +184,3 @@ export function planBatches<T extends BatchCandidate>(
   }
   return { batches, reported, capBytes, maxFiles };
 }
-
-export const packBatches = planBatches;

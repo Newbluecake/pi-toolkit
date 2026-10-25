@@ -117,7 +117,3 @@ export function loadFingerprint(wire: LoadWire): string {
   const { at: _at, sinceAgoMs: _since, ...stable } = wire;
   return JSON.stringify(stable);
 }
-
-export const toLoadWire = projectLoadWire;
-export const toLoadGateWire = projectLoadGate;
-export const fingerprintLoad = loadFingerprint;

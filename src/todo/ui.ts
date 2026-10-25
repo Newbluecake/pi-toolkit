@@ -218,7 +218,3 @@ function selectWidgetTasks(tasks: readonly Task[], limit: number): readonly Task
   const start = Math.max(0, Math.min(activeIndex - 2, tasks.length - limit));
   return tasks.slice(start, start + limit);
 }
-
-export function renderTaskPreview(task: Task, theme: Theme, tasks: readonly Task[] = [task]): Component {
-  return new Text(renderTaskLines(task, tasks, theme, 80).join("\n"), 0, 0);
-}

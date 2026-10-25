@@ -219,9 +219,6 @@ export async function ensureAvatarDir(fs: AvatarFs, deadlineAt: number): Promise
   return fs.ensureDir(deadlineAt);
 }
 
-/** Naming alias used by assembly code that prefers the preview fs convention. */
-export const defaultAvatarFs = createAvatarFs;
-
 function isCode(err: unknown, code: string): boolean {
   return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
 }

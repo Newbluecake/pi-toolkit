@@ -721,11 +721,3 @@ export interface MeasureSendRequest {
   signal: AbortSignal;
 }
 export type MeasureSendFn = (request: MeasureSendRequest) => Promise<PipelinePingResult>;
-
-// =====================================================================================================================
-// Tiny type guards
-// =====================================================================================================================
-
-export function isMeasureApi(api: unknown): api is MeasureApi {
-  return typeof api === "string" && (MEASURE_APIS as readonly string[]).includes(api);
-}

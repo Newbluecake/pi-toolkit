@@ -245,11 +245,6 @@ export function applySweep(draft: ScheduleStateFile, plan: SweepPlan, at: number
   return out;
 }
 
-/** Undecided-count helper for display/tests: occurrences in (decidedThrough, until]. */
-export function undecidedCount(c: CompiledWhen, occ: OccState, until: number): number {
-  return countOccurrences(c, occ.decidedThrough, until).count;
-}
-
 /** once verdict derived from the ledger (spec has no task `reason` field — S1 deviation). */
 export function onceVerdict(task: ScheduleTask, occ: OccState | undefined): "once-done" | "once-past" | undefined {
   if (task.when.kind !== "once" || task.enabled || occ === undefined) return undefined;

@@ -294,14 +294,6 @@ export function transitionRunState(
   return { ok: false, state: from, reason: `invalid transition ${from} -> ${to}` };
 }
 
-export function canTransitionRunState(
-  from: TidyRunState | undefined,
-  to: TidyRunState,
-  context?: Parameters<typeof transitionRunState>[2],
-): boolean {
-  return transitionRunState(from, to, context).ok;
-}
-
 export function validateRunEvents(events: readonly JournalEvent[]): { ok: boolean; reason?: string } {
   let state: TidyRunState | undefined;
   let epoch = 0;
@@ -327,7 +319,3 @@ export function validateRunEvents(events: readonly JournalEvent[]): { ok: boolea
   }
   return { ok: true };
 }
-
-export const foldJournal = foldEvents;
-export const nextRunState = transitionRunState;
-export const decideOp = decide;
