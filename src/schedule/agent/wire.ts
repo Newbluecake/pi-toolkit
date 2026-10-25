@@ -23,7 +23,7 @@ import { join, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { systemClock, type Clock } from "../../core/clock.js";
 import type { ScheduleSettings } from "../../config/settings.js";
-import { consultSessionDir } from "../../consult/fork-store.js";
+import { legacyConsultForkDir } from "../../runtime/legacy-consult-forks.js";
 import { canonicalPath, inVaultDir, type SecureDomain } from "../../secure/domain.js";
 import { SCHED_TOLERANCE_S, type HubScheduleConfig } from "../../web-hub/protocol/schedule.js";
 import { closeEpoch, manualClaim, type ClaimGate } from "../core/claim.js";
@@ -275,7 +275,7 @@ export function wireSchedule(pi: Pick<ExtensionAPI, "on">, opts: ScheduleWireOpt
       let childFile = hasChildMarker(ctx);
       if (!childFile && sessionFile !== undefined) {
         try {
-          childFile = isUnder(sessionFile, consultSessionDir());
+          childFile = isUnder(sessionFile, legacyConsultForkDir());
         } catch {
           /* no agent dir ⇒ not a consult fork */
         }

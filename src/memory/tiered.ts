@@ -14,7 +14,7 @@
 
 import { createHash } from "node:crypto";
 import type { MemoryToolSurface } from "../config/settings.js";
-import { CONSULT_READONLY_TOOLS } from "../runtime/tool-scope.js";
+import { READONLY_DOMAIN_TOOLS } from "../runtime/tool-scope.js";
 import {
   TIERED_TEMPLATES,
   type MemoryAccess,
@@ -128,7 +128,7 @@ function setEquals(a: ReadonlySet<string>, b: readonly string[]): boolean {
 export function accessFromTools(tools: readonly string[] | undefined, toolSurface: MemoryToolSurface): MemoryAccess {
   if (tools === undefined) return "none";
   const set = new Set(tools);
-  if (setEquals(set, CONSULT_READONLY_TOOLS)) return "read";
+  if (setEquals(set, READONLY_DOMAIN_TOOLS)) return "read";
   const hasRead = set.has("read");
   const hasMemory = toolSurface === "v2" && set.has("memory");
   if (hasMemory && hasRead) return "memory+read";

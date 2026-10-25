@@ -150,6 +150,7 @@ import {
   sweepForkDir,
 } from "./consult/fork-store.js";
 import { wireConsult, type ConsultWiring } from "./consult/index.js";
+import { sweepLegacyConsultForks } from "./runtime/legacy-consult-forks.js";
 import type { ConsultForkStore } from "./consult/tool.js";
 import type { MainSessionFacts } from "./consult/main-facts.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
@@ -2263,7 +2264,7 @@ export function buildSessionStack(
   // regardless of mtime" fragment rule cannot hit a file mid-creation because
   // the fork's very first write is a complete header line (header-first
   // write order). Never throws; missing dir is a no-op.
-  sweepForkDir(consultSessionDir(), FORK_TTL_MS);
+  sweepLegacyConsultForks(); // #40: same dir + TTL as before, now owned by runtime/legacy-consult-forks.ts
 
   // The widget controller is created after QueryService exists (below), but
   // its H1 onLifecycle must be part of the merged extension points *before*

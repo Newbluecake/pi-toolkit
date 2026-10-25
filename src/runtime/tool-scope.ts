@@ -62,8 +62,8 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
 ];
 
 /**
- * consult (plan §4.6/§5.4, frozen surface): the tool domain a consulted expert
- * runs with. Single source for BOTH pi's one-shot `tools` allowlist on the
+ * The read-only tool domain (formerly consult's frozen surface; now used by
+ * `/mem tidy` proposal runs and other `toolDomain: "readonly"` runs). Single source for BOTH pi's one-shot `tools` allowlist on the
  * forked session (set after H2 so no extension can widen it) and this
  * module's per-turn enforcer policy — the two must never drift, which is why
  * this constant lives here rather than in src/consult/.
@@ -72,7 +72,10 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
  * read/bash/edit/write), so they only exist for a consult run because they
  * are named here.
  */
-export const CONSULT_READONLY_TOOLS: readonly string[] = ["read", "grep", "find", "ls"];
+export const READONLY_DOMAIN_TOOLS: readonly string[] = ["read", "grep", "find", "ls"];
+
+/** @deprecated #40 — renamed {@link READONLY_DOMAIN_TOOLS}; removed in PS1b once `src/consult/**` is gone. */
+export const CONSULT_READONLY_TOOLS: readonly string[] = READONLY_DOMAIN_TOOLS;
 
 export interface ToolScopePolicy {
   /** Allow-list (agent type `tools` field, plus any explicitly granted reserved names). `undefined` = no allow-list restriction (only `deny` applies). */
@@ -191,7 +194,7 @@ export function buildToolScopePolicy(opts: {
  * nothing for `bash_job` to manage). `childBashJobs` is the session-level
  * `bashJobs.childSessions` setting gate (false ⇒ the whole feature is off for
  * this session, never granted, never registered). `consult` is true for a
- * consult run (forkSessionFrom-based, CONSULT_READONLY_TOOLS domain) — never
+ * consult run (forkSessionFrom-based, READONLY_DOMAIN_TOOLS domain) — never
  * granted regardless of type/tools, matching the plan's "两层都不含" rule (the
  * read-only domain's `tools` list also never contains "bash"/"bash_job", so
  * this check is defense-in-depth, not the only gate). Wiring the actual

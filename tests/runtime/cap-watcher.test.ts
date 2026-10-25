@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { RunDiagnostics, RunSnapshot } from "../../src/core/types.js";
-import { createCapWatcher } from "../../src/consult/watcher.js";
+import { createCapWatcher } from "../../src/runtime/cap-watcher.js";
 
 /**
  * T-11 (consult plan §9): the cap watcher judges ONLY at turn boundaries —
@@ -44,7 +44,7 @@ function snap(opts: {
   };
 }
 
-describe("consult/watcher: turn cap at turn boundaries only (T-11)", () => {
+describe("runtime/cap-watcher: turn cap at turn boundaries only (T-11)", () => {
   it("fires turn_cap exactly once, on the maxTurns+1-th turn_start snapshot", () => {
     const onCap = vi.fn();
     const w = createCapWatcher({ maxTurns: 3, maxCostUsd: 4, onCap });
@@ -84,7 +84,7 @@ describe("consult/watcher: turn cap at turn boundaries only (T-11)", () => {
   });
 });
 
-describe("consult/watcher: cost cap only at the NEXT turn boundary (T-11)", () => {
+describe("runtime/cap-watcher: cost cap only at the NEXT turn boundary (T-11)", () => {
   it("cost crossing during a turn (message_end) does not fire; the next turn_start does", () => {
     const onCap = vi.fn();
     const w = createCapWatcher({ maxTurns: 3, maxCostUsd: 2, onCap });

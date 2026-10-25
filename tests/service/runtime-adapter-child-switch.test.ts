@@ -168,7 +168,7 @@ describe("runtime-adapter childSwitchContextGrant (T-S9)", () => {
     const p = runner.run(spec(readonlyType, { forkSessionFrom: "/tmp/some-session.jsonl" }));
     await drain(clock, 10);
     await p;
-    // Consult forces the read-only tool domain unconditionally (CONSULT_READONLY_TOOLS) — whether
+    // Consult forces the read-only tool domain unconditionally (READONLY_DOMAIN_TOOLS) — whether
     // or not `driver.create` was ever reached with a captured spec, switch_context must not
     // appear in it (this mirrors the existing `!isConsultRun` guard every other grant uses).
     expect(captured?.tools ?? []).not.toContain("switch_context");

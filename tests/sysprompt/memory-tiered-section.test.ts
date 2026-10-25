@@ -511,7 +511,7 @@ describe("H6 — consult (main-session snapshot + core-profile/read-access child
     const mainPersisted = mainHost.appended.filter((e) => e.type === PROMPT_SECTIONS_ENTRY_TYPE).at(-1)!;
 
     // The consult fork: child session, core profile, read-only access
-    // (CONSULT_READONLY_TOOLS), restored from the main session's snapshot.
+    // (READONLY_DOMAIN_TOOLS), restored from the main session's snapshot.
     const childHost = fakePi();
     const childHub = makeHub(childHost);
     const childDeps: MemorySectionDeps = {
@@ -520,7 +520,7 @@ describe("H6 — consult (main-session snapshot + core-profile/read-access child
       settings: { ...fx.memDeps.settings, childProfile: "core" },
       cache: new RenderCache(),
       frozenBlocks: new Map(),
-      getActiveTools: () => ["read", "grep", "find", "ls"], // CONSULT_READONLY_TOOLS ⇒ access "read"
+      getActiveTools: () => ["read", "grep", "find", "ls"], // READONLY_DOMAIN_TOOLS ⇒ access "read"
     };
     registerMemory(childHub, childDeps);
     sessionStart(childHost, "resume", {

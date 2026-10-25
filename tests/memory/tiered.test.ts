@@ -22,7 +22,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CONSULT_READONLY_TOOLS } from "../../src/runtime/tool-scope.js";
+import { READONLY_DOMAIN_TOOLS } from "../../src/runtime/tool-scope.js";
 import {
   accessFromTools,
   joinNamesTruncated,
@@ -703,12 +703,12 @@ describe("G8 — accessFromTools", () => {
   it("undefined tools \u21d2 none (covers missing/throwing/non-array at the caller)", () => {
     expect(accessFromTools(undefined, "v2")).toBe("none");
   });
-  it("exact CONSULT_READONLY_TOOLS set \u21d2 read", () => {
-    expect(accessFromTools([...CONSULT_READONLY_TOOLS], "v2")).toBe("read");
-    expect(accessFromTools([...CONSULT_READONLY_TOOLS].reverse(), "v2")).toBe("read");
+  it("exact READONLY_DOMAIN_TOOLS set \u21d2 read", () => {
+    expect(accessFromTools([...READONLY_DOMAIN_TOOLS], "v2")).toBe("read");
+    expect(accessFromTools([...READONLY_DOMAIN_TOOLS].reverse(), "v2")).toBe("read");
   });
-  it("CONSULT_READONLY_TOOLS + StructuredOutput \u21d2 read (rule 3, not the exact-set exception)", () => {
-    expect(accessFromTools([...CONSULT_READONLY_TOOLS, "StructuredOutput"], "v2")).toBe("read");
+  it("READONLY_DOMAIN_TOOLS + StructuredOutput \u21d2 read (rule 3, not the exact-set exception)", () => {
+    expect(accessFromTools([...READONLY_DOMAIN_TOOLS, "StructuredOutput"], "v2")).toBe("read");
   });
   it("read+memory (v2) \u21d2 memory+read; read+memory (legacy toolSurface) \u21d2 read (memory invisible)", () => {
     expect(accessFromTools(["read", "memory"], "v2")).toBe("memory+read");

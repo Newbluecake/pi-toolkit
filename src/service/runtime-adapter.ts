@@ -47,7 +47,7 @@ import type { SlotPool } from "../runtime/slot-pool.js";
 import {
   buildToolScopePolicy,
   bashJobGrant,
-  CONSULT_READONLY_TOOLS,
+  READONLY_DOMAIN_TOOLS,
   RESERVED_TOOL_NAMES,
   createToolScopeEnforcer,
 } from "../runtime/tool-scope.js";
@@ -1044,7 +1044,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // consult §5.4 B-2 / P0-r §7.0 points 2/6a: FORCE the read-only tool
         // domain AFTER H2 (widened from isConsultRun to readonlyDomain), so no
         // extension (worktree or future) can ever widen it. Same constant as
-        // the enforcer policy below — single source (CONSULT_READONLY_TOOLS),
+        // the enforcer policy below — single source (READONLY_DOMAIN_TOOLS),
         // never a second list. This also activates grep/find/ls, which pi only
         // activates when named in `tools` (an unset `tools` means
         // read/bash/edit/write — the two fixture shapes `tools: undefined` and
@@ -1053,7 +1053,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // it always sets `schema`) additionally allows "StructuredOutput" by
         // name so pi's own registry filter (M1 below) doesn't drop it; a
         // consult run never sets schema, so this collapses to exactly
-        // CONSULT_READONLY_TOOLS for it — byte-identical to before. Read off
+        // READONLY_DOMAIN_TOOLS for it — byte-identical to before. Read off
         // `grantedReserved` (not `spec.request.schema` directly) so this
         // exactly tracks whether the StructuredOutput injection branch above
         // actually fired — that branch stays gated on `!isConsultRun`, so a
@@ -1067,7 +1067,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
               ? consultSnapshot.tools
                   .map((tool) => tool.name)
                   .filter((name): name is string => typeof name === "string")
-              : [...CONSULT_READONLY_TOOLS, ...(readonlyHasSchema ? ["StructuredOutput"] : [])],
+              : [...READONLY_DOMAIN_TOOLS, ...(readonlyHasSchema ? ["StructuredOutput"] : [])],
             ...(consultC2 ? { consultGuard: createConsultGuard(consultSnapshot) } : {}),
           };
           // §7.0 point 6a: narrow customTools down to ONLY the tool instance(s)
@@ -1133,7 +1133,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                       ? consultSnapshot.tools
                           .map((tool) => tool.name)
                           .filter((name): name is string => typeof name === "string")
-                      : CONSULT_READONLY_TOOLS,
+                      : READONLY_DOMAIN_TOOLS,
                     granted: consultC2 ? consultGranted : readonlyHasSchema ? ["StructuredOutput"] : [],
                     ...(readonlyProvenance ? { provenance: readonlyProvenance } : {}),
                     ...(consultC2 ? { reportBlockedOnBind: true } : {}),

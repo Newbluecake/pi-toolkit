@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { secureStatePaths } from "../secure/domain.js";
+import {
+  LEGACY_FORK_TTL_MS,
+  legacyConsultForkDir,
+  sweepLegacyConsultForks,
+  type LegacyForkSweepResult,
+} from "../runtime/legacy-consult-forks.js";
 import {
   closeSync,
   existsSync,
@@ -14,7 +19,7 @@ import {
   writeSync,
 } from "node:fs";
 import { join, resolve as resolvePath, sep } from "node:path";
-import { CURRENT_SESSION_VERSION, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
 import { getCurrentSystemMessage, getCurrentTools } from "@earendil-works/pi-ai";
 import type { ExpertRequestSnapshot, ForkExpertSessionResult, Millis, ToolDeclaration } from "../core/types.js";
 
@@ -44,7 +49,7 @@ import type { ExpertRequestSnapshot, ForkExpertSessionResult, Millis, ToolDeclar
  * bounded by its 150 s totalMs hard cap (no grace, no extension), so a fork
  * file still in use is at least ~576× younger than this TTL.
  */
-export const FORK_TTL_MS: Millis = 24 * 60 * 60 * 1000;
+export const FORK_TTL_MS: Millis = LEGACY_FORK_TTL_MS; // #40: owned by runtime/legacy-consult-forks.ts
 
 /**
  * Header parsing is capped at the first 8 KB of the file (plan §5.1, §6 C-9):
@@ -82,7 +87,7 @@ interface HeadScan {
  * expert index all read THIS function, so they stay on one root.
  */
 export function consultSessionDir(): string {
-  return secureStatePaths()?.consult ?? join(getAgentDir(), "cache", "consult-sessions");
+  return legacyConsultForkDir(); // #40: implementation moved to runtime/legacy-consult-forks.ts (verbatim)
 }
 
 /** Single-line, 200-char-capped reason payload (§6 C-9). */
@@ -742,64 +747,11 @@ function copyTail(sourcePath: string, contentStart: number, fileSize: number, ta
   }
 }
 
-export interface ForkSweepResult {
-  /** Valid-header files removed because their mtime exceeded the TTL. */
-  removedExpired: number;
-  /** Files removed because their head has no valid session header, regardless of mtime (deletion-aftermath fragments). */
-  removedFragments: number;
-  /** Valid-header files inside the TTL window. */
-  kept: number;
-  /** Entries we could not stat/unlink (raced away, permissions); never thrown. */
-  errors: number;
-}
+export type ForkSweepResult = LegacyForkSweepResult;
 
-/**
- * Fork-directory GC. Runs once per `buildSessionStack` (session start /
- * reload) — no timer (R-12).
- *
- * Multi-process safety (§5.1, review-3 #9 — both premises are load-bearing,
- * do not break them):
- * ① TTL: consultDir is shared across pi processes, but any live consult run
- *    dies within its 150 s totalMs hard cap, so a fork file still in use is
- *    orders of magnitude younger than the 24 h TTL;
- * ② fragment rule ("no valid header ⇒ delete regardless of mtime"): a fork
- *    file being created always starts life with a complete header line,
- *    because the very first write is the header (header-first write order —
- *    `writeFileSync(target, header, {flag:"wx"})`), so a headerless file can
- *    only be deletion aftermath (a `_persist` appendFileSync landing after an
- *    unlink), never a fork in progress.
- * Shortening the TTL to minutes, or judging fragments by tail completeness,
- * breaks one of these premises.
- */
+/** Fork-directory GC. #40: implementation (and the two load-bearing multi-process premises) live in `sweepLegacyConsultForks`. */
 export function sweepForkDir(dir: string, ttlMs: number, now: number = Date.now()): ForkSweepResult {
-  const result: ForkSweepResult = { removedExpired: 0, removedFragments: 0, kept: 0, errors: 0 };
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return result; // missing/unreadable dir — nothing to sweep, not an error
-  }
-  for (const name of names) {
-    const file = join(dir, name);
-    try {
-      const st = statSync(file);
-      if (!st.isFile()) continue; // never touch subdirectories
-      if (now - st.mtimeMs > ttlMs) {
-        unlinkSync(file);
-        result.removedExpired++;
-        continue;
-      }
-      if (!scanSessionHead(file).ok) {
-        unlinkSync(file);
-        result.removedFragments++;
-        continue;
-      }
-      result.kept++;
-    } catch {
-      result.errors++;
-    }
-  }
-  return result;
+  return sweepLegacyConsultForks(dir, ttlMs, now);
 }
 
 /**

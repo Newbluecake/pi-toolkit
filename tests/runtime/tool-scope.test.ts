@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  CONSULT_READONLY_TOOLS,
+  READONLY_DOMAIN_TOOLS,
   RESERVED_TOOL_NAMES,
   bashJobGrant,
   buildToolScopePolicy,
@@ -49,8 +49,8 @@ describe("runtime/tool-scope: buildToolScopePolicy", () => {
     expect(granted.deny.has("consult")).toBe(false);
     expect(granted.allow?.has("consult")).toBe(true);
   });
-  it("consult read-only domain: CONSULT_READONLY_TOOLS as an allow-list keeps exactly those four", () => {
-    const policy = buildToolScopePolicy({ tools: CONSULT_READONLY_TOOLS });
+  it("consult read-only domain: READONLY_DOMAIN_TOOLS as an allow-list keeps exactly those four", () => {
+    const policy = buildToolScopePolicy({ tools: READONLY_DOMAIN_TOOLS });
     expect([...(policy.allow ?? [])].sort()).toEqual(["find", "grep", "ls", "read"]);
     const handle = fakeHandle(["read", "grep", "find", "ls", "bash", "write", "Agent", "consult"]);
     const decision = createToolScopeEnforcer().onBind(handle, policy);

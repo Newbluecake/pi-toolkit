@@ -16,7 +16,7 @@ import {
   type ScheduleExecutor,
 } from "../../../src/schedule/agent/wire.js";
 import type { SchedHubLink } from "../../../src/schedule/agent/coordinator.js";
-import { consultSessionDir } from "../../../src/consult/fork-store.js";
+import { legacyConsultForkDir } from "../../../src/runtime/legacy-consult-forks.js";
 import type { SchedAgentFrame } from "../../../src/web-hub/protocol/schedule.js";
 import type { RunRecord, ScheduleTask } from "../../../src/schedule/core/spec.js";
 import { addTask, approve, makeTask, MIN, self, SID, utc } from "../core/fixtures.js";
@@ -165,7 +165,7 @@ describe("wireSchedule (activate level)", () => {
     expect(mode({ mode: "print" })).toBe("print");
     expect(mode({ file: undefined })).toBe("ephemeral");
     expect(mode({ entries: [{ type: "session" }, { type: "custom", customType: "subagent:child" }] })).toBe("child");
-    expect(mode({ file: join(consultSessionDir(), "fork.jsonl") })).toBe("child");
+    expect(mode({ file: join(legacyConsultForkDir(), "fork.jsonl") })).toBe("child");
   });
 
   it("hasChildMarker only looks at the head entries and never throws on a stale ctx", () => {

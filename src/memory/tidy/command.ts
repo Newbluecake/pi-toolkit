@@ -10,7 +10,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { resolveWorktreeOrigin } from "../../core/worktree-origin.js";
 import { DEFAULT_SETTINGS, type MemorySettings } from "../../config/settings.js";
-import { createCapWatcher, type ConsultCapReason } from "../../consult/watcher.js";
+import { createCapWatcher, type RunCapReason } from "../../runtime/cap-watcher.js";
 import type { RunOutcome } from "../../core/types.js";
 import type { TidyPort, TidyProposal, TidyProposalFile } from "../contracts.js";
 import { TIDY_SCHEMA } from "../contracts.js";
@@ -373,7 +373,7 @@ async function handleTidyCommand(args: string, ctx: ExtensionCommandContext, tct
   }
   const { runId } = spawnRes;
 
-  let capReason: ConsultCapReason | undefined;
+  let capReason: RunCapReason | undefined;
   const watcher = createCapWatcher({
     maxTurns: settings.tidy.maxTurns,
     maxCostUsd: priced ? settings.tidy.maxCostUsd : 0,

@@ -1,6 +1,6 @@
 // §7.1 tidy cost estimation (dispatch-time upper bound + cap-watcher wiring)
 // — todo #22 P4. Pure functions only; the actual cap watcher during a run
-// reuses `../../consult/watcher.js`'s `createCapWatcher` (§7.1: "复用
+// reuses `../../runtime/cap-watcher.js`'s `createCapWatcher` (§7.1: "复用
 // createCapWatcher"), wired from `command.ts`.
 
 export interface TidyCostRates {
