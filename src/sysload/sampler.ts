@@ -138,7 +138,7 @@ async function statMount(
   if (resolved.mount === undefined || resolved.skipped !== undefined)
     return { label, reading: resolved.skipped ? { kind: "skipped", reason: "remote" } : { kind: "unresolved" } };
   if (left() <= 0) return { label, reading: { kind: "invalid" } };
-  const statfs = io.statfs ?? ((p: string) => fsPromises.statfs(p, { bigint: true }));
+  const statfs: NonNullable<SamplerIo["statfs"]> = io.statfs ?? ((p: string) => fsPromises.statfs(p, { bigint: true }));
   const op = withIoLease(ledger, `statfs:${resolved.mount.mountId}:${resolved.mount.majorMinor}`, () =>
     statfs(path, { bigint: true }),
   );

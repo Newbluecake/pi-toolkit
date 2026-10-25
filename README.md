@@ -382,7 +382,7 @@ pi-secure unlock demo --global       # 私有库默认拒绝全局解锁，--glo
 
 ```sh
 npm install
-npm run build        # tsc → dist/
+npm run build        # tsc (TypeScript 7 native) → dist/
 npm test             # vitest：17,000+ 测试（状态机迁移矩阵、属性不变量、组件渲染……）
 npm run typecheck
 npm run format
