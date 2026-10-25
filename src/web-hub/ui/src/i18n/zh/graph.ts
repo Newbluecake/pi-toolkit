@@ -53,6 +53,20 @@ const graph = {
   selectedHash: "已选中——请按复制键。",
   // ---- 表格标题（§4.3）----
   caption: "当前 worktree 的提交图，最新在前",
+  // ---- 已合入分支（merged-plan r3 §7.3；徽章跟随界面语言是用户拍板②的显式豁免）----
+  mergedShow: "显示已合入的 {n} 个分支",
+  mergedHide: "隐藏已合入的 {n} 个分支",
+  mergedBadge: "已合入",
+  mergedBadgePart: "部分已合入 {k}/{t}",
+  mergedTitle: "按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 {t} 个提交在 {head} 中都有补丁等价的提交",
+  mergedTitlePart:
+    "按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 {t} 个提交中有 {k} 个在 {head} 中有补丁等价的提交；解冲突或修改后的 cherry-pick 可能计为未合入",
+  mergedTitlePartial: "（窗内逐提交标记不完整）",
+  srLanded: "已合入 HEAD（补丁等价）",
+  // 脚注等紧凑标记不豁免，两个语言都保持英文 token
+  footMergedHidden: "{n} merged hidden",
+  footMergedUnknown: "merged ? {m}",
+  footFoldOff: "fold off",
 } satisfies Messages<typeof en>;
 
 export default graph;

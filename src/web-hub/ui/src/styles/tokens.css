@@ -166,6 +166,10 @@
   --gg-chip-bg-remote: #eef3f3;
   --gg-chip-fg-tag: #6b3fa0;
   --gg-chip-bg-tag: #f0ebfd;
+  /* merged-plan r3 §7.4: landed（已合入）lane/dot — one SOLID slate per theme (no opacity
+   * on .is-landed rules); ≥3:1 against --c-surface both opaque (dots) and composited at the
+   * route's stroke-opacity .85 (graph-tokens-contrast.test.ts pins both). */
+  --gg-lane-landed: #566772;
 }
 
 /* dark: system preference (unless the user pinned light) … */
@@ -248,6 +252,8 @@
     --gg-chip-bg-remote: #1b2428;
     --gg-chip-fg-tag: #cabaf9;
     --gg-chip-bg-tag: #231c3a;
+    /* merged-plan r3 §7.4: landed lane/dot (see the light block's note). */
+    --gg-lane-landed: #93a3aa;
   }
 }
 
@@ -329,6 +335,8 @@
   --gg-chip-bg-remote: #1b2428;
   --gg-chip-fg-tag: #cabaf9;
   --gg-chip-bg-tag: #231c3a;
+  /* merged-plan r3 §7.4: landed lane/dot — identical to the system-dark block. */
+  --gg-lane-landed: #93a3aa;
 }
 
 @media (prefers-reduced-motion: reduce) {

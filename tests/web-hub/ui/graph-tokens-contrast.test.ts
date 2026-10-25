@@ -132,6 +132,25 @@ describe("graph tokens contrast (worktree-graph plan v2 §4.3/§7 P5)", () => {
     expect(failures.join("; ")).toBe("");
   });
 
+  it("merged-plan §7.4: --gg-lane-landed present in all three themes; opaque dot ≥3:1 AND route (stroke-opacity .85 composited onto --c-surface) ≥3:1", () => {
+    const failures: string[] = [];
+    for (const { name, decls } of themes) {
+      if (!decls.has("--gg-lane-landed")) {
+        failures.push(`${name}: --gg-lane-landed missing`);
+        continue;
+      }
+      const landed = resolveColor(decls, "--gg-lane-landed");
+      const surface = resolveColor(decls, "--c-surface");
+      const direct = contrast(landed, surface); // the dot is opaque
+      if (direct < 3) failures.push(`${name} dot: ${fmt(direct)}:1`);
+      // the route paints at stroke-opacity .85 (graph.css `.gg-route path`) over the surface
+      const composited = landed.map((c, i) => Math.round(0.85 * c + 0.15 * surface[i]!)) as [number, number, number];
+      const route = contrast(composited, surface);
+      if (route < 3) failures.push(`${name} route@.85: ${fmt(route)}:1`);
+    }
+    expect(failures.join("; ")).toBe("");
+  });
+
   it("the graph css + lazy component exist and reference the tokens (wiring canary)", () => {
     const graphCss = readFileSync(
       resolve(fileURLToPath(new URL("../../../src/web-hub/ui/src/styles", import.meta.url)), "graph.css"),

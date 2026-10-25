@@ -53,5 +53,30 @@ const graph = {
   selectedHash: "Selected — press Copy.",
   // ---- table caption (§4.3) ----
   caption: "Commit graph of the current worktree, newest first",
+  // ---- merged branches (merged-plan r3 §7.3) ----
+  /** The fold toggle, `show=false` ⇒ show. `{n}` = wouldHide (actual hidden branch count). */
+  mergedShow: "Show {n} merged branches",
+  /** The fold toggle, `show=true` ⇒ hide again. */
+  mergedHide: "Hide {n} merged branches",
+  /** eq badge (user ruling ②: badges follow the UI language — the compact-marker exemption). */
+  mergedBadge: "merged",
+  /** part badge: `{k}` patch-equivalent of `{t}` branch-only commits. */
+  mergedBadgePart: "merged {k}/{t}",
+  /** eq tooltip: the patch-id verdict (whitespace ignored is patch-id's pinned semantics). */
+  mergedTitle:
+    "Judged by patch equivalence (git patch-id, whitespace ignored): all {t} commits unique to this branch have patch-equivalent commits in {head}",
+  /** part tooltip: plus the conflict-resolved/amended cherry-pick caveat (R1). */
+  mergedTitlePart:
+    "Judged by patch equivalence (git patch-id, whitespace ignored): {k} of {t} commits unique to this branch have patch-equivalent commits in {head}; conflict-resolved or amended cherry-picks may count as unmerged",
+  /** Appended to the tooltip when `eP` marks the per-commit list as a truncated subset. */
+  mergedTitlePartial: " (per-commit marks in the window are incomplete)",
+  /** sr-only row note for a landed (patch-equivalent) commit. */
+  srLanded: "merged into HEAD (patch-equivalent)",
+  /** Footnote tokens — compact markers, English-only in BOTH locales (no exemption). */
+  footMergedHidden: "{n} merged hidden",
+  /** `{m}` = unk entry count, or the literal `skipped` when the whole phase was skipped. */
+  footMergedUnknown: "merged ? {m}",
+  /** Only when eq targets exist but the fold is blocked by incomplete information (§7.2). */
+  footFoldOff: "fold off",
 };
 export default graph;

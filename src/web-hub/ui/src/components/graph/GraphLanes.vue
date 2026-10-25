@@ -38,14 +38,23 @@ const props = defineProps<{
   readonly width: number;
   /** SVG height (px) — the parent's `lastCenter + halfPitch + pad`. */
   readonly height: number;
+  /** merged-plan r3 §7.3: row-indexed landed flags (patch-equivalent commits). Recolors the
+   *  row's dot and every route/stub DEPARTING that row to `--gg-lane-landed` — geometry
+   *  (cx/cy/r, path `d`) is provably unchanged (the §7.4 geometry test pins it). */
+  readonly landed?: readonly boolean[];
 }>();
+
+/** §7.4: the landed recolor rides ONE solid token — no opacity on any `.is-landed` path. */
+const LANDED_COLOR = "var(--gg-lane-landed)";
+const laneColor = (color: number): string => `var(--gg-lane-${color % 8})`;
+const rowLanded = (row: number): boolean => props.landed?.[row] === true;
 
 /** Visible (non-fold) routes — P3 already filtered them to all-visible endpoints. */
 const routePaths = computed(() =>
   props.fold.routes
     .map((r) => ({
       key: `r${r.from}-${r.to}-${r.lane}`,
-      color: r.color,
+      color: rowLanded(r.from) ? LANDED_COLOR : laneColor(r.color),
       d: pathD(r, props.fold.nodes, props.centers, props.laneX, props.pitch),
     }))
     .filter((p) => p.d !== ""),
@@ -54,30 +63,40 @@ const routePaths = computed(() =>
 /** Visible fade stubs (out-of-set parents in visible lanes). */
 const stubPaths = computed(() =>
   props.fold.stubs
-    .map((s) => ({ key: `s${s.from}-${s.lane}`, color: s.color, d: stubPathD(s, props.centers, props.laneX) }))
+    .map((s) => ({
+      key: `s${s.from}-${s.lane}`,
+      color: rowLanded(s.from) ? LANDED_COLOR : laneColor(s.color),
+      d: stubPathD(s, props.centers, props.laneX),
+    }))
     .filter((p) => p.d !== ""),
 );
 
 /** Fold-boundary arrow stubs (#6): short lines at the VISIBLE endpoint of a hidden run. */
 const foldStubPaths = computed(() => {
-  const out: { key: string; d: string; color: number; at: string }[] = [];
+  const out: { key: string; d: string; color: string; at: string }[] = [];
   for (const f of props.fold.foldStubs) {
     const y = props.centers[f.from];
     if (y === undefined) continue;
     const x = props.laneX(f.lane);
     // a short 8px line: departing downward from the dot, arriving upward into it
     const d = f.at === "depart" ? `M ${x} ${y} L ${x} ${y + 8}` : `M ${x} ${y} L ${x} ${y - 8}`;
-    out.push({ key: `f${f.from}-${f.lane}-${f.at}`, d, color: f.color, at: f.at });
+    out.push({
+      key: `f${f.from}-${f.lane}-${f.at}`,
+      d,
+      color: rowLanded(f.from) ? LANDED_COLOR : laneColor(f.color),
+      at: f.at,
+    });
   }
   return out;
 });
 
 /** Commit dots: filled circles on visible lanes; hollow diamonds in the fold column. */
 const dots = computed(() => {
-  const out: { i: number; y: number; lane: number; color: number; folded: boolean }[] = [];
+  const out: { i: number; y: number; lane: number; color: string; folded: boolean }[] = [];
   props.fold.nodes.forEach((n, i) => {
     const y = props.centers[i];
-    if (y !== undefined) out.push({ i, y, lane: n.lane, color: n.color, folded: n.folded });
+    if (y !== undefined)
+      out.push({ i, y, lane: n.lane, color: rowLanded(i) ? LANDED_COLOR : laneColor(n.color), folded: n.folded });
   });
   return out;
 });
@@ -97,23 +116,17 @@ const foldMarks = computed(() =>
     aria-hidden="true"
     focusable="false"
   >
-    <g v-for="p in routePaths" :key="p.key" class="gg-route" :style="{ color: `var(--gg-lane-${p.color % 8})` }">
+    <g v-for="p in routePaths" :key="p.key" class="gg-route" :style="{ color: p.color }">
       <path :d="p.d" />
     </g>
-    <path
-      v-for="p in stubPaths"
-      :key="p.key"
-      class="gg-stub"
-      :d="p.d"
-      :style="{ color: `var(--gg-lane-${p.color % 8})` }"
-    />
+    <path v-for="p in stubPaths" :key="p.key" class="gg-stub" :d="p.d" :style="{ color: p.color }" />
     <path
       v-for="p in foldStubPaths"
       :key="p.key"
       class="gg-foldstub"
       :class="p.at === 'arrive' ? 'is-arrive' : 'is-depart'"
       :d="p.d"
-      :style="{ color: `var(--gg-lane-${p.color % 8})` }"
+      :style="{ color: p.color }"
     />
     <template v-for="d in dots" :key="`n${d.i}`">
       <circle
@@ -123,18 +136,10 @@ const foldMarks = computed(() =>
         :cx="laneX(d.lane)"
         :cy="d.y"
         :r="dotRadius"
-        :style="{ color: `var(--gg-lane-${d.color % 8})` }"
+        :style="{ color: d.color }"
       />
       <!-- folded node (#6): hollow diamond in the fold column, never in its hidden lane -->
-      <rect
-        v-else
-        class="gg-fold-node"
-        :x="foldX - 4"
-        :y="d.y - 4"
-        width="8"
-        height="8"
-        :style="{ stroke: `var(--gg-lane-${d.color % 8})` }"
-      />
+      <rect v-else class="gg-fold-node" :x="foldX - 4" :y="d.y - 4" width="8" height="8" :style="{ stroke: d.color }" />
     </template>
     <text v-for="(y, i) in foldMarks" :key="`fm${i}`" class="gg-fold-mark" :x="foldX" :y="y + 3.5">⋮</text>
   </svg>

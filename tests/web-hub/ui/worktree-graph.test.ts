@@ -27,7 +27,7 @@ import { readFileSync } from "node:fs";
 import GraphLanes from "../../../src/web-hub/ui/src/components/graph/GraphLanes.vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WorktreeGraph from "../../../src/web-hub/ui/src/components/graph/WorktreeGraph.vue";
-import { useI18n, resetLangForTests } from "../../../src/web-hub/ui/src/composables/useI18n.js";
+import { useI18n, resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import type { WorktreeGraphTransport, WtDiffOutcome } from "../../../src/web-hub/ui/src/transport/types.js";
 import { parseWtGraphPayload, type WtGraphPayload } from "../../../src/web-hub/protocol/worktree-graph.js";
 import type { WorktreeRowWire } from "../../../src/web-hub/protocol/messages.js";
@@ -45,6 +45,16 @@ describe("graph layout regressions", () => {
     expect(rule(".gg-col-lanes")).toContain("width: 0");
     expect(css).toContain('tr[data-current="true"] > .gg-cell');
   });
+  it("merged-plan §7.4 source-scan: no opacity on .is-landed rules; the landed rule precedes the merge-dim rule", () => {
+    const landedBodies = [...css.matchAll(/[^{}]*\.is-landed[^{}]*\{([^}]*)\}/g)].map((m) => m[1]!);
+    expect(landedBodies.length).toBeGreaterThan(0);
+    for (const body of landedBodies) expect(body).not.toMatch(/opacity/);
+    expect(css).toContain("tr.is-landed .gg-sub {");
+    // same specificity ⇒ source order is the backstop (merge ∩ landed = ∅ by construction);
+    // match the rule definitions (with `{`) so comment mentions don't count
+    expect(css.indexOf("tr.is-landed .gg-sub {")).toBeLessThan(css.indexOf("tr.is-merge .gg-sub {"));
+  });
+
   it("repeated measure cycles converge without changing centers or SVG height", async () => {
     let callback: (() => void) | undefined;
     const ro = globalThis.ResizeObserver;
@@ -717,6 +727,246 @@ describe("useWorktreeGraph — §4.3 state machine", () => {
 // the i18n surface the component reads (en/zh parity pinned by i18n-parity.test.ts)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// merged-plan r3 §7.3–§7.5 (P5): badges, tooltips, the default fold + toggle, footnote
+// tokens, landed coloring, fold off, and the §7.5 byte-identical DOM invariance.
+// ---------------------------------------------------------------------------
+
+describe("WorktreeGraph.vue — merged branches (merged-plan r3 §7.3–§7.5)", () => {
+  afterEach(() => resetLangForTests());
+
+  /** Hex-safe ids only (`oid` pads with zeros). e0→e1→e2 is the HEAD chain; f1→f2→e2 and
+   *  f3→e2 are two fully-merged agent branches; f4→f5→e2 is the part-merged one (e=[f5]). */
+  const H = {
+    e0: oid("e0"),
+    e1: oid("e1"),
+    e2: oid("e2"),
+    f1: oid("f1"),
+    f2: oid("f2"),
+    f3: oid("f3"),
+    f4: oid("f4"),
+    f5: oid("f5"),
+  };
+  const MERGED_COMMITS = [
+    commit("e0", ["e1"], { s: "head tip" }),
+    commit("f1", ["f2"], { s: "agent-a tip" }),
+    commit("f4", ["f5"], { s: "agent-c tip" }),
+    commit("f3", ["e2"], { s: "agent-b tip" }),
+    commit("e1", ["e2"], { s: "mid" }),
+    commit("f2", ["e2"], { s: "agent-a base" }),
+    commit("f5", ["e2"], { s: "agent-c landed" }),
+    commit("e2", [], { s: "root" }),
+  ];
+  const MERGED_REFS = [
+    { k: "branch", n: "master", h: H.e0 },
+    { k: "branch", n: "agent-a", h: H.f1 },
+    { k: "branch", n: "agent-b", h: H.f3 },
+    { k: "branch", n: "agent-c", h: H.f4 },
+  ];
+  const HEAD_REF = { head: { h: H.e0, b: "master" }, refs: MERGED_REFS };
+  const FULL_BRANCHES = () => [
+    { n: "agent-a", h: H.f1, v: "eq", k: 2, t: 2 },
+    { n: "agent-c", h: H.f4, v: "part", k: 1, t: 2, e: [H.f5] },
+    { n: "agent-b", h: H.f3, v: "eq", k: 1, t: 1 },
+  ];
+  const mergedPayloadOf = (branches: Record<string, unknown>[], over: Record<string, unknown> = {}): WtGraphPayload =>
+    payloadOf(MERGED_COMMITS, { ...HEAD_REF, merged: { v: 1, base: H.e0, branches }, ...over });
+  const baselinePayloadOf = (over: Record<string, unknown> = {}): WtGraphPayload =>
+    payloadOf(MERGED_COMMITS, { ...HEAD_REF, ...over });
+
+  const EIGHT_CENTERS = [11, 33, 55, 77, 99, 121, 143, 165];
+  const FIVE_CENTERS = [11, 33, 55, 77, 99];
+
+  const mountMerged = async (
+    payload: WtGraphPayload,
+    props: Record<string, unknown> = {},
+  ): Promise<ReturnType<typeof mount>> => {
+    const { transport } = transportOf([{ ok: true, value: payload }]);
+    return mountExpanded(transport, { injectedCenters: EIGHT_CENTERS, ...props });
+  };
+  /** Expand the merged fold through the component's own toggle button. */
+  const showMergedBranches = async (w: ReturnType<typeof mount>): Promise<void> => {
+    await w.find(".gg-merged-toggle").trigger("click");
+    await nextTick();
+  };
+
+  it("§7.5 DOM invariance: all-none and all-anc payloads render byte-identical to the no-merged baseline", async () => {
+    const baseline = await mountMerged(baselinePayloadOf());
+    const html = baseline.find(".gg").html();
+    for (const branches of [
+      [
+        { n: "agent-a", h: H.f1, v: "none", k: 0, t: 2 },
+        { n: "agent-b", h: H.f3, v: "none", k: 0, t: 1 },
+      ],
+      [
+        { n: "agent-a", h: H.f1, v: "anc" },
+        { n: "agent-b", h: H.f3, v: "anc" },
+      ],
+    ]) {
+      const w = await mountMerged(mergedPayloadOf(branches));
+      expect(w.find(".gg").html()).toBe(html);
+      w.unmount();
+    }
+  });
+
+  it("§7.5: all none + degraded (refsOmitted) stays byte-identical — no `fold off` without targets", async () => {
+    const over = { degrade: { refsOmitted: 3 }, complete: false };
+    const base = await mountMerged(baselinePayloadOf(over));
+    const w = await mountMerged(
+      mergedPayloadOf(
+        [
+          { n: "agent-a", h: H.f1, v: "none", k: 0, t: 2 },
+          { n: "agent-b", h: H.f3, v: "none", k: 0, t: 1 },
+        ],
+        over,
+      ),
+    );
+    expect(w.find(".gg").html()).toBe(base.find(".gg").html());
+    expect(w.find(".gg-foot").text()).not.toContain("fold off");
+  });
+
+  it("default fold (zh): eq branches hidden, toggle「显示已合入的 2 个分支」, footnote `· 2 merged hidden`, part badge visible", async () => {
+    setLangOverride("zh");
+    const w = await mountMerged(mergedPayloadOf(FULL_BRANCHES()), { injectedCenters: FIVE_CENTERS });
+    expect(w.findAll("tr[data-row]")).toHaveLength(5); // f1/f2/f3 folded away
+    expect(w.text()).not.toContain("agent-a");
+    expect(w.text()).not.toContain("agent-b");
+    const toggle = w.find(".gg-merged-toggle");
+    expect(toggle.text()).toBe("显示已合入的 2 个分支");
+    expect(toggle.attributes("aria-pressed")).toBe("false");
+    expect(w.find(".gg-foot").text()).toContain("· 2 merged hidden");
+    // the part-merged branch is never folded; its badge is visible even in the folded view
+    const badge = w.find(".gg-mbadge");
+    expect(badge.text()).toBe("部分已合入 1/2");
+    expect(badge.attributes("title")).toContain("按补丁等价判定（git patch-id，忽略空白差异）");
+    expect(badge.attributes("title")).toContain("可能计为未合入");
+  });
+
+  it("toggle round-trip (zh): exact copy both ways, badges + landed coloring appear, footnote token drops", async () => {
+    setLangOverride("zh");
+    const w = await mountMerged(mergedPayloadOf(FULL_BRANCHES()), { injectedCenters: EIGHT_CENTERS });
+    await showMergedBranches(w);
+    expect(w.findAll("tr[data-row]")).toHaveLength(8);
+    const toggle = w.find(".gg-merged-toggle");
+    expect(toggle.text()).toBe("隐藏已合入的 2 个分支");
+    expect(toggle.attributes("aria-pressed")).toBe("true");
+    expect(w.find(".gg-foot").text()).not.toContain("merged hidden");
+    const badges = w.findAll(".gg-mbadge");
+    expect(badges.map((b) => b.text())).toEqual(["已合入", "部分已合入 1/2", "已合入"]);
+    const eqBadge = badges[0]!;
+    expect(eqBadge.attributes("title")).toBe(
+      "按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 2 个提交在 master 中都有补丁等价的提交",
+    );
+    // landed coloring: f1, f2, f3 (eq window-only) + f5 (part's e) — 4 landed dots
+    const landedDots = w.findAll(".gg-dot").filter((d) => (d.attributes("style") ?? "").includes("--gg-lane-landed"));
+    expect(landedDots).toHaveLength(4);
+    expect(w.findAll("tr.is-landed")).toHaveLength(4);
+    const landedRoutes = w
+      .findAll(".gg-route")
+      .filter((r) => (r.attributes("style") ?? "").includes("--gg-lane-landed"));
+    expect(landedRoutes.length).toBeGreaterThan(0);
+    // sr-only: a landed row announces it
+    const sr = w.findAll("tr[data-row] td.gg-subject .sr-only");
+    expect(sr.some((s) => s.text().includes("已合入 HEAD（补丁等价）"))).toBe(true);
+    // toggle back ⇒ the exact original state
+    await showMergedBranches(w);
+    expect(w.findAll("tr[data-row]")).toHaveLength(5);
+    expect(w.find(".gg-merged-toggle").text()).toBe("显示已合入的 2 个分支");
+    expect(w.find(".gg-foot").text()).toContain("· 2 merged hidden");
+  });
+
+  it("badge + tooltip copy follows the UI language (en): merged / merged 1/2", async () => {
+    setLangOverride("en");
+    const w = await mountMerged(mergedPayloadOf(FULL_BRANCHES()));
+    await showMergedBranches(w);
+    expect(w.find(".gg-merged-toggle").text()).toBe("Hide 2 merged branches");
+    const badges = w.findAll(".gg-mbadge");
+    expect(badges.map((b) => b.text())).toEqual(["merged", "merged 1/2", "merged"]);
+    expect(badges[0]!.attributes("title")).toContain("patch equivalence (git patch-id, whitespace ignored)");
+    expect(badges[1]!.attributes("title")).toContain("may count as unmerged");
+  });
+
+  it("eP appends the incomplete-window-marks note to the part tooltip", async () => {
+    setLangOverride("zh");
+    const w = await mountMerged(
+      mergedPayloadOf([{ n: "agent-c", h: H.f4, v: "part", k: 1, t: 2, e: [H.f5], eP: true }]),
+    );
+    const badge = w.find(".gg-mbadge");
+    expect(badge.attributes("title")).toContain("（窗内逐提交标记不完整）");
+  });
+
+  it("≤480px (mobile): no badges at all, even expanded (Q3)", async () => {
+    const w = await mountMerged(mergedPayloadOf(FULL_BRANCHES()), { mobile: true });
+    expect(w.find(".gg-mbadge").exists()).toBe(false);
+    await showMergedBranches(w);
+    expect(w.findAll("tr[data-row]")).toHaveLength(8);
+    expect(w.find(".gg-mbadge").exists()).toBe(false);
+    const chips = w.findAll(".gg-ref");
+    expect(chips).toHaveLength(1); // HEAD chip only
+  });
+
+  it("fold off: targets exist but refsOmitted blocks the fold — every row stays, footnote says `fold off`, no toggle (P3 reports wouldHide:[])", async () => {
+    const w = await mountMerged(mergedPayloadOf(FULL_BRANCHES(), { degrade: { refsOmitted: 2 }, complete: false }));
+    expect(w.findAll("tr[data-row]")).toHaveLength(8); // nothing folded
+    expect(w.find(".gg-foot").text()).toContain("· fold off");
+    expect(w.find(".gg-foot").text()).not.toContain("merged hidden");
+    expect(w.find(".gg-merged-toggle").exists()).toBe(false); // §7.3: bar needs wouldHide > 0
+    expect(w.findAll(".gg-mbadge").length).toBe(3); // annotation is NOT blocked
+  });
+
+  it("footnote `merged ?`: unk entry count; `skipped` renders the literal", async () => {
+    const w = await mountMerged(
+      mergedPayloadOf([
+        { n: "agent-a", h: H.f1, v: "eq", k: 2, t: 2 },
+        { n: "agent-b", h: H.f3, v: "unk", why: "timeout" },
+      ]),
+      { injectedCenters: [11, 33, 55, 77, 99, 121] },
+    );
+    expect(w.find(".gg-foot").text()).toContain("· 1 merged hidden");
+    expect(w.find(".gg-foot").text()).toContain("· merged ? 1");
+
+    const skippedPayload = payloadOf(MERGED_COMMITS, {
+      ...HEAD_REF,
+      merged: { v: 1, base: H.e0, skipped: "shallow", branches: [] },
+    });
+    const w2 = await mountMerged(skippedPayload);
+    expect(w2.find(".gg-foot").text()).toContain("· merged ? skipped");
+    expect(w2.find(".gg-merged-toggle").exists()).toBe(false);
+    expect(w2.findAll("tr[data-row]")).toHaveLength(8);
+  });
+
+  it("§7.4 geometry: landed recoloring and badges change no geometry (dots cx/cy/r, route d, per-row padding)", async () => {
+    const merged = await mountMerged(mergedPayloadOf(FULL_BRANCHES()));
+    await showMergedBranches(merged);
+    const baseline = await mountMerged(baselinePayloadOf());
+    const dotGeo = (w: ReturnType<typeof mount>) =>
+      w.findAll(".gg-dot").map((d) => [d.attributes("cx"), d.attributes("cy"), d.attributes("r")]);
+    expect(dotGeo(merged)).toEqual(dotGeo(baseline));
+    const routes = (w: ReturnType<typeof mount>) => w.findAll(".gg-route path").map((p) => p.attributes("d"));
+    expect(routes(merged)).toEqual(routes(baseline));
+    expect(routes(merged).length).toBeGreaterThan(0);
+    const pads = (w: ReturnType<typeof mount>) => w.findAll("td.gg-subject").map((c) => c.attributes("style"));
+    expect(pads(merged)).toEqual(pads(baseline)); // the badge never shifts the subject indent
+    // and the landed coloring really is only a color difference
+    expect(merged.findAll(".gg-dot").some((d) => (d.attributes("style") ?? "").includes("--gg-lane-landed"))).toBe(
+      true,
+    );
+    expect(baseline.findAll(".gg-dot").some((d) => (d.attributes("style") ?? "").includes("--gg-lane-landed"))).toBe(
+      false,
+    );
+  });
+
+  it("§7.4 geometry: in the folded view every dot's cy equals its filtered row's injected center", async () => {
+    const w = await mountMerged(mergedPayloadOf(FULL_BRANCHES()), { injectedCenters: FIVE_CENTERS });
+    expect(w.findAll("tr[data-row]")).toHaveLength(5);
+    const dots = w.findAll(".gg-dot");
+    expect(dots).toHaveLength(5);
+    dots.forEach((d, i) => expect(Number(d.attributes("cy"))).toBe(FIVE_CENTERS[i]));
+    // the part branch's landed commit f5 (row 3 in the filtered list) keeps its landed dot
+    expect(dots[3]!.attributes("style")).toContain("--gg-lane-landed");
+  });
+});
+
 describe("graph i18n namespace", () => {
   it("resolves every key the component uses (en)", () => {
     resetLangForTests();
@@ -757,6 +1007,17 @@ describe("graph i18n namespace", () => {
       "graph.copiedHash",
       "graph.selectedHash",
       "graph.caption",
+      "graph.mergedShow",
+      "graph.mergedHide",
+      "graph.mergedBadge",
+      "graph.mergedBadgePart",
+      "graph.mergedTitle",
+      "graph.mergedTitlePart",
+      "graph.mergedTitlePartial",
+      "graph.srLanded",
+      "graph.footMergedHidden",
+      "graph.footMergedUnknown",
+      "graph.footFoldOff",
     ]) {
       expect(t(key), key).not.toBe(key); // a resolved key never echoes itself
     }

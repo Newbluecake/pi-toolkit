@@ -1,0 +1,2313 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>worktree graph · 已合入分支标注与默认折叠 — 静态预览</title>
+    <style>
+      :root {
+        --font-sans:
+          system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+          "Noto Sans CJK SC", "Source Han Han SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+        --font-mono:
+          ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas,
+          "Liberation Mono", "Noto Sans Mono CJK SC", monospace;
+        --fs-scale: 1;
+        --fs-2xs: calc(11px * var(--fs-scale, 1));
+        --fs-xs: calc(12px * var(--fs-scale, 1));
+        --fw-semibold: 600;
+        --sp-1: 4px;
+        --sp-2: 8px;
+        --r-xs: 4px;
+        --r-sm: 6px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #eef1f2;
+        font-family: var(--font-sans);
+        color: #132026;
+      }
+      header,
+      .case {
+        max-width: 980px;
+        margin: 0 auto 28px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 6px;
+      }
+      h2 {
+        font-size: 15px;
+        margin: 0 0 6px;
+      }
+      header p,
+      .desc {
+        font-size: 13px;
+        line-height: 1.7;
+        color: #3b4a52;
+        margin: 0 0 10px;
+      }
+      code {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        background: #e4e9ea;
+        border-radius: 4px;
+        padding: 0 4px;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+      }
+      .side {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      /* theme tokens — values copied from src/web-hub/ui/src/styles/tokens.css (light + dark blocks) */
+      .pv {
+        --c-surface: #ffffff;
+        --c-surface-2: #f8fafa;
+        --c-sunken: #eef3f3;
+        --c-border: #e1e8e9;
+        --c-border-strong: #c9d4d6;
+        --c-text: #132026;
+        --c-text-2: #3b4a52;
+        --c-text-3: #5a6a72;
+        --c-primary-soft: #e3f4f1;
+        --c-on-primary-soft: #0a5f58;
+        --c-warning: #9a5a06;
+        --c-warning-text: #7a4604;
+        --gg-lane-0: #075e56;
+        --gg-lane-1: #174bad;
+        --gg-lane-2: #5b34b5;
+        --gg-lane-3: #8a3908;
+        --gg-lane-4: #0f6a34;
+        --gg-lane-5: #7c1a20;
+        --gg-lane-6: #5f4711;
+        --gg-lane-7: #4a5a62;
+        --gg-chip-fg-head: var(--c-on-primary-soft);
+        --gg-chip-bg-head: var(--c-primary-soft);
+        --gg-chip-fg-branch: #0a5f58;
+        --gg-chip-bg-branch: #e3f4f1;
+        --gg-chip-fg-remote: #43535c;
+        --gg-chip-bg-remote: #eef3f3;
+        --gg-chip-fg-tag: #6b3fa0;
+        --gg-chip-bg-tag: #f0ebfd;
+        /* NEW in this feature: landed lane color (solid, ≥3:1 vs surface at route opacity .85) + badge */
+        --gg-lane-landed: #566772;
+        --gg-mbadge-fg: #43535c;
+        --gg-mbadge-bg: #e8edf0;
+        background: var(--c-surface);
+        color: var(--c-text);
+        border: 1px solid #d5ddde;
+        border-radius: 8px;
+        padding: 12px 16px;
+      }
+      .pv-dark {
+        --c-surface: #141c20;
+        --c-surface-2: #192328;
+        --c-sunken: #10171a;
+        --c-border: #243037;
+        --c-border-strong: #33424a;
+        --c-text: #e4ecee;
+        --c-text-2: #b6c3c8;
+        --c-text-3: #8d9da4;
+        --c-primary-soft: #12302d;
+        --c-on-primary-soft: #8ae6d9;
+        --c-warning: #e5a93d;
+        --c-warning-text: #f0c77a;
+        --gg-lane-0: #3ccbb9;
+        --gg-lane-1: #72a7f5;
+        --gg-lane-2: #a98bf5;
+        --gg-lane-3: #f2914a;
+        --gg-lane-4: #4cc77e;
+        --gg-lane-5: #f2767a;
+        --gg-lane-6: #d6a84e;
+        --gg-lane-7: #9db0b8;
+        --gg-chip-fg-branch: #8ae6d9;
+        --gg-chip-bg-branch: #12302d;
+        --gg-chip-fg-remote: #c2ced4;
+        --gg-chip-bg-remote: #1b2428;
+        --gg-chip-fg-tag: #cabaf9;
+        --gg-chip-bg-tag: #231c3a;
+        --gg-lane-landed: #93a3aa;
+        --gg-mbadge-fg: #b6c3c8;
+        --gg-mbadge-bg: #232e34;
+      }
+      .pv-narrow {
+        width: 400px;
+      }
+
+      /* graph.css subset (values unchanged) */
+      .gg {
+        margin-top: var(--sp-1);
+        padding-top: var(--sp-1);
+        border-top: 1px dashed var(--c-border);
+      }
+      .gg-viewport {
+        --gg-row: 22px;
+        overflow-x: hidden;
+      }
+      .gg-table {
+        table-layout: fixed;
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .gg-table tr {
+        height: var(--gg-row, 22px);
+      }
+      .gg-cell {
+        padding: 0 4px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: var(--fs-xs);
+        color: var(--c-text-2);
+        vertical-align: middle;
+      }
+      .gg-lanes {
+        width: 0;
+        min-width: 0;
+        padding: 0;
+        position: relative;
+        overflow: visible;
+        background: transparent;
+      }
+      .gg-col-lanes {
+        width: 0;
+        min-width: 0;
+      }
+      .gg-col-date {
+        width: calc(17ch + 8px);
+      }
+      .gg-col-author {
+        width: 12ch;
+      }
+      .gg-col-hash {
+        width: 7ch;
+      }
+      .gg-svg {
+        display: block;
+        position: absolute;
+        top: 0;
+        left: 0;
+      }
+      .gg-route path {
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-opacity: 0.85;
+      }
+      .gg-dot {
+        fill: currentColor;
+        stroke: none;
+      }
+      .gg-table tr[data-current="true"] > .gg-cell {
+        background: var(--c-sunken);
+      }
+      .gg-subject {
+        min-width: 0;
+      }
+      .gg-refs {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        margin-right: 4px;
+        vertical-align: middle;
+      }
+      .gg-ref {
+        display: inline-flex;
+        align-items: center;
+        min-height: calc(17px * var(--fs-scale, 1));
+        padding: 0 6px;
+        border-radius: var(--r-sm);
+        font-family: var(--font-mono);
+        font-size: var(--fs-2xs);
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 48ch;
+        flex: none;
+      }
+      .gg-ref.k-head {
+        background: var(--gg-chip-bg-head);
+        color: var(--gg-chip-fg-head);
+      }
+      .gg-ref.k-branch {
+        background: var(--gg-chip-bg-branch);
+        color: var(--gg-chip-fg-branch);
+      }
+      .gg-wtbadge {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        min-height: 17px;
+        padding: 0 6px;
+        border: 1px dashed var(--c-border-strong);
+        border-radius: var(--r-sm);
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--c-text-3);
+      }
+      .gg-sub {
+        font-size: var(--fs-xs);
+        color: var(--c-text-2);
+      }
+      .gg-date,
+      .gg-author {
+        color: var(--c-text-3);
+        font-variant-numeric: tabular-nums;
+        font-size: var(--fs-2xs);
+      }
+      .gg-hashcell {
+        width: 7ch;
+        text-align: right;
+      }
+      .gg-hash {
+        display: inline-block;
+        width: 100%;
+        min-height: var(--gg-row, 22px);
+        margin: 0;
+        padding: 0 2px;
+        border: 0;
+        border-radius: var(--r-xs);
+        background: none;
+        font-family: var(--font-mono);
+        font-size: var(--fs-xs);
+        color: var(--c-text-3);
+        cursor: pointer;
+      }
+      .gg-hash:hover {
+        background: var(--c-surface-2);
+        color: var(--c-text);
+      }
+      .gg-foot {
+        margin-top: 2px;
+        color: var(--c-text-3);
+        font-size: var(--fs-2xs);
+        font-variant-numeric: tabular-nums;
+      }
+      .gg-degrade {
+        margin: 0 0 var(--sp-1);
+        padding: 2px 6px;
+        border-left: 2px solid var(--c-warning);
+      }
+      .gg-degrade-title {
+        margin: 0;
+        color: var(--c-warning-text);
+        font-size: var(--fs-2xs);
+        font-weight: var(--fw-semibold);
+      }
+      .gg-degrade-note {
+        margin: 0;
+        color: var(--c-text-3);
+        font-size: var(--fs-2xs);
+      }
+      /* landed rows (NEW): subject to text-2; dots/routes ride --gg-lane-landed (inline color), geometry unchanged.
+   NOTE: no opacity/stroke-opacity/fill-opacity allowed on .is-landed rules (source-scan). */
+      tr.is-landed .gg-sub {
+        color: var(--c-text-2);
+      }
+      /* merged bar + badge (NEW, this feature) */
+      .gg-merged-bar {
+        display: flex;
+        margin: 0 0 var(--sp-1);
+      }
+      .gg-merged-toggle {
+        min-height: 24px;
+        padding: 0 var(--sp-2);
+        border: 1px solid var(--c-border-strong);
+        border-radius: var(--r-sm);
+        background: var(--c-surface);
+        color: var(--c-text-2);
+        font-size: var(--fs-xs);
+        font-family: var(--font-sans);
+        cursor: pointer;
+      }
+      .gg-merged-toggle:hover {
+        background: var(--c-surface-2);
+      }
+      .gg-merged-toggle[aria-pressed="true"] {
+        background: var(--c-sunken);
+      }
+      .gg-mbadge {
+        display: inline-flex;
+        align-items: center;
+        min-height: calc(17px * var(--fs-scale, 1));
+        padding: 0 6px;
+        border-radius: var(--r-sm);
+        font-family: var(--font-sans);
+        font-size: var(--fs-2xs);
+        font-weight: 600;
+        white-space: nowrap;
+        background: var(--gg-mbadge-bg);
+        color: var(--gg-mbadge-fg);
+      }
+      /* tooltip demo (preview only — real UI uses the native title attribute) */
+      .tip-demo {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 8px;
+      }
+      .tip-label {
+        font-size: var(--fs-2xs);
+        color: var(--c-text-3);
+        padding-top: 3px;
+      }
+      .gg-tip {
+        max-width: 42ch;
+        white-space: normal;
+        line-height: 1.6;
+        background: var(--c-text);
+        color: var(--c-surface);
+        border-radius: var(--r-sm);
+        padding: 6px 8px;
+        font-size: var(--fs-2xs);
+        box-shadow: 0 2px 8px rgb(0 0 0 / 0.18);
+      }
+      @media (max-width: 480px) {
+        .gg-ref {
+          max-width: 24ch;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>worktree graph ·「已合入分支」标注与默认折叠 — 界面预览</h1>
+      <p>
+        依据 <code>docs/dev/worktree-graph/merged-plan.md</code> r3 §7 渲染的静态预览（虚构仓库：13 个提交、4
+        条分支：<code>dev</code> + <code>pi-agent-X7K2M9Q1</code>（已合入 2/2）+ <code>pi-agent-R4T8Y2U6</code>（已合入
+        1/1）+ <code>pi-agent-PWJGMSN3</code>（部分已合入 1/3））。颜色 / 间距 / 字号令牌复制自
+        <code>styles/tokens.css</code> 与 <code>styles/graph.css</code>；泳道几何与现行组件一致（行距 22px、泳道间距
+        14px、圆点 r=3.5）。本文件自包含、无外部依赖，仅场景 1 有一行原生 JS 用于开关切换演示。
+      </p>
+    </header>
+    <section class="case">
+      <h2>场景 1｜中文 · 浅色 · 默认状态（已合入分支已折叠）</h2>
+      <p class="desc">
+        默认折叠：<code>pi-agent-X7K2M9Q1</code>（已合入 2/2）与 <code>pi-agent-R4T8Y2U6</code>（已合入
+        1/1）两条已合入分支不渲染，面板顶部出现「显示已合入的 2 个分支」开关，脚注追加英文 token
+        <code>· 2 merged hidden</code>；「部分已合入」分支不折叠，其徽章默认已可见。点开关可直接切到场景 2 的展开状态。
+      </p>
+      <div class="pv">
+        <div id="s1-views">
+          <div>
+            <section class="gg" data-phase="ready">
+              <div class="gg-merged-bar">
+                <button class="gg-merged-toggle js-s1" type="button" aria-pressed="false">显示已合入的 2 个分支</button>
+              </div>
+              <div class="gg-viewport">
+                <table class="gg-table">
+                  <caption class="sr-only">
+                    当前 worktree 的提交图，最新在前
+                  </caption>
+                  <colgroup>
+                    <col class="gg-col-lanes" />
+                    <col />
+                    <col class="gg-col-date" />
+                    <col class="gg-col-author" />
+                    <col class="gg-col-hash" />
+                  </colgroup>
+                  <tbody>
+                    <tr data-row data-current="true">
+                      <td class="gg-lanes" rowspan="10" aria-hidden="true">
+                        <svg
+                          class="gg-svg"
+                          width="44"
+                          height="224"
+                          viewBox="0 0 44 224"
+                          aria-hidden="true"
+                          focusable="false"
+                        >
+                          <g class="gg-route" style="color: var(--gg-lane-0)"><path d="M 8 11 L 8 209" /></g>
+                          <g class="gg-route" style="color: var(--gg-lane-1)"><path d="M 22 55 L 22 99" /></g>
+                          <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 22 99 L 22 143" /></g>
+                          <g class="gg-route" style="color: var(--gg-lane-1)">
+                            <path d="M 22 143 C 22 176, 8 176, 8 209" />
+                          </g>
+                          <circle class="gg-dot" cx="8" cy="11" r="3.5" style="color: var(--gg-lane-0)" />
+                          <circle class="gg-dot" cx="8" cy="33" r="3.5" style="color: var(--gg-lane-0)" />
+                          <circle class="gg-dot" cx="22" cy="55" r="3.5" style="color: var(--gg-lane-1)" />
+                          <circle class="gg-dot" cx="8" cy="77" r="3.5" style="color: var(--gg-lane-0)" />
+                          <circle class="gg-dot" cx="22" cy="99" r="3.5" style="color: var(--gg-lane-landed)" />
+                          <circle class="gg-dot" cx="8" cy="121" r="3.5" style="color: var(--gg-lane-0)" />
+                          <circle class="gg-dot" cx="22" cy="143" r="3.5" style="color: var(--gg-lane-1)" />
+                          <circle class="gg-dot" cx="8" cy="165" r="3.5" style="color: var(--gg-lane-0)" />
+                          <circle class="gg-dot" cx="8" cy="187" r="3.5" style="color: var(--gg-lane-0)" />
+                          <circle class="gg-dot" cx="8" cy="209" r="3.5" style="color: var(--gg-lane-0)" />
+                        </svg>
+                      </td>
+                      <td
+                        class="gg-cell gg-subject"
+                        title="feat(graph): 已合入分支标注与折叠"
+                        style="padding-left: 22px"
+                      >
+                        <span class="gg-refs"
+                          ><span class="gg-ref k-head" title="HEAD → dev" translate="no">HEAD → dev</span></span
+                        ><span class="gg-sub" translate="no">feat(graph): 已合入分支标注与折叠</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-25 21:12</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 9f3e21a" translate="no">
+                          9f3e21a
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="fix(hub): 合并判定缓存复核" style="padding-left: 22px">
+                        <span class="gg-sub" translate="no">fix(hub): 合并判定缓存复核</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-25 18:40</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 7a1c4d8" translate="no">
+                          7a1c4d8
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="feat: 批量设置入口" style="padding-left: 36px">
+                        <span class="gg-refs"
+                          ><span class="gg-ref k-branch" title="pi-agent-PWJGMSN3" translate="no"
+                            >pi-agent-PWJGMSN3</span
+                          ><span
+                            class="gg-mbadge"
+                            title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 3 个提交中有 1 个在 dev 中有补丁等价的提交；解冲突或修改后的 cherry-pick 可能计为未合入"
+                            >部分已合入 1/3</span
+                          ></span
+                        ><span class="gg-sub" translate="no">feat: 批量设置入口</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-25 16:44</td>
+                      <td class="gg-cell gg-author" translate="no">agent</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 d9a15e7" translate="no">
+                          d9a15e7
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="docs: 更新 worktree-graph 方案" style="padding-left: 36px">
+                        <span class="gg-sub" translate="no">docs: 更新 worktree-graph 方案</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-25 15:03</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 4b9f0e2" translate="no">
+                          4b9f0e2
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row class="is-landed">
+                      <td class="gg-cell gg-subject" title="fix: 设置页滚动" style="padding-left: 36px">
+                        <span class="gg-sub" translate="no">fix: 设置页滚动</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-25 14:30</td>
+                      <td class="gg-cell gg-author" translate="no">agent</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 2f6c8b9" translate="no">
+                          2f6c8b9
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="refactor(ui): 拆分 GraphLanes" style="padding-left: 36px">
+                        <span class="gg-sub" translate="no">refactor(ui): 拆分 GraphLanes</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-24 22:31</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 e2d8a61" translate="no">
+                          e2d8a61
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="feat: 设置页骨架" style="padding-left: 36px">
+                        <span class="gg-sub" translate="no">feat: 设置页骨架</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-24 21:05</td>
+                      <td class="gg-cell gg-author" translate="no">agent</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 98e02d4" translate="no">
+                          98e02d4
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="test: 提交图几何用例" style="padding-left: 22px">
+                        <span class="gg-sub" translate="no">test: 提交图几何用例</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-24 17:45</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 60c3b9f" translate="no">
+                          60c3b9f
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="chore: 升级依赖" style="padding-left: 22px">
+                        <span class="gg-sub" translate="no">chore: 升级依赖</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-23 11:20</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 85f1d2c" translate="no">
+                          85f1d2c
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="feat(graph): 提交图首版" style="padding-left: 22px">
+                        <span class="gg-sub" translate="no">feat(graph): 提交图首版</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-22 09:58</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 3d7aa04" translate="no">
+                          3d7aa04
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="gg-foot">200 commits · date-order · local refs, no fetch · 2 merged hidden</p>
+            </section>
+          </div>
+          <div hidden>
+            <section class="gg" data-phase="ready">
+              <div class="gg-merged-bar">
+                <button class="gg-merged-toggle js-s1" type="button" aria-pressed="true">隐藏已合入的 2 个分支</button>
+              </div>
+              <div class="gg-viewport">
+                <table class="gg-table">
+                  <caption class="sr-only">
+                    当前 worktree 的提交图，最新在前
+                  </caption>
+                  <colgroup>
+                    <col class="gg-col-lanes" />
+                    <col />
+                    <col class="gg-col-date" />
+                    <col class="gg-col-author" />
+                    <col class="gg-col-hash" />
+                  </colgroup>
+                  <tbody>
+                    <tr data-row data-current="true">
+                      <td class="gg-lanes" rowspan="13" aria-hidden="true">
+                        <svg
+                          class="gg-svg"
+                          width="72"
+                          height="290"
+                          viewBox="0 0 72 290"
+                          aria-hidden="true"
+                          focusable="false"
+                        >
+                          <g class="gg-route" style="color: var(--gg-lane-0)"><path d="M 8 11 L 8 275" /></g>
+                          <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 22 33 L 22 99" /></g>
+                          <g class="gg-route" style="color: var(--gg-lane-2)"><path d="M 36 77 L 36 143" /></g>
+                          <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 36 143 L 36 209" /></g>
+                          <g class="gg-route" style="color: var(--gg-lane-landed)">
+                            <path d="M 22 99 C 22 143, 8 143, 8 187" />
+                          </g>
+                          <g class="gg-route" style="color: var(--gg-lane-landed)">
+                            <path d="M 50 165 C 50 198, 8 198, 8 231" />
+                          </g>
+                          <g class="gg-route" style="color: var(--gg-lane-2)">
+                            <path d="M 36 209 C 36 242, 8 242, 8 275" />
+                          </g>
+                          <circle class="gg-dot" cx="8" cy="11" r="3.5" style="color: var(--gg-lane-0)" />
+                          <circle class="gg-dot" cx="22" cy="33" r="3.5" style="color: var(--gg-lane-landed)" />
+                          <circle class="gg-dot" cx="8" cy="55" r="3.5" style="color: var(--gg-lane-0)" />
+                          <circle class="gg-dot" cx="36" cy="77" r="3.5" style="color: var(--gg-lane-2)" />
+                          <circle class="gg-dot" cx="22" cy="99" r="3.5" style="color: var(--gg-lane-landed)" />
+                          <circle class="gg-dot" cx="8" cy="121" r="3.5" style="color: var(--gg-lane-0)" />
+                          <circle class="gg-dot" cx="36" cy="143" r="3.5" style="color: var(--gg-lane-landed)" />
+                          <circle class="gg-dot" cx="50" cy="165" r="3.5" style="color: var(--gg-lane-landed)" />
+                          <circle class="gg-dot" cx="8" cy="187" r="3.5" style="color: var(--gg-lane-0)" />
+                          <circle class="gg-dot" cx="36" cy="209" r="3.5" style="color: var(--gg-lane-2)" />
+                          <circle class="gg-dot" cx="8" cy="231" r="3.5" style="color: var(--gg-lane-0)" />
+                          <circle class="gg-dot" cx="8" cy="253" r="3.5" style="color: var(--gg-lane-0)" />
+                          <circle class="gg-dot" cx="8" cy="275" r="3.5" style="color: var(--gg-lane-0)" />
+                        </svg>
+                      </td>
+                      <td
+                        class="gg-cell gg-subject"
+                        title="feat(graph): 已合入分支标注与折叠"
+                        style="padding-left: 22px"
+                      >
+                        <span class="gg-refs"
+                          ><span class="gg-ref k-head" title="HEAD → dev" translate="no">HEAD → dev</span></span
+                        ><span class="gg-sub" translate="no">feat(graph): 已合入分支标注与折叠</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-25 21:12</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 9f3e21a" translate="no">
+                          9f3e21a
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row class="is-landed">
+                      <td class="gg-cell gg-subject" title="fix: 超时宽限处理" style="padding-left: 36px">
+                        <span class="gg-refs"
+                          ><span class="gg-ref k-branch" title="pi-agent-X7K2M9Q1" translate="no"
+                            >pi-agent-X7K2M9Q1</span
+                          ><span
+                            class="gg-mbadge"
+                            title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 2 个提交在 dev 中都有补丁等价的提交"
+                            >已合入</span
+                          ></span
+                        ><span class="gg-sub" translate="no">fix: 超时宽限处理</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-25 19:20</td>
+                      <td class="gg-cell gg-author" translate="no">agent</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 51be9c3" translate="no">
+                          51be9c3
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="fix(hub): 合并判定缓存复核" style="padding-left: 36px">
+                        <span class="gg-sub" translate="no">fix(hub): 合并判定缓存复核</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-25 18:40</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 7a1c4d8" translate="no">
+                          7a1c4d8
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="feat: 批量设置入口" style="padding-left: 50px">
+                        <span class="gg-refs"
+                          ><span class="gg-ref k-branch" title="pi-agent-PWJGMSN3" translate="no"
+                            >pi-agent-PWJGMSN3</span
+                          ><span
+                            class="gg-mbadge"
+                            title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 3 个提交中有 1 个在 dev 中有补丁等价的提交；解冲突或修改后的 cherry-pick 可能计为未合入"
+                            >部分已合入 1/3</span
+                          ></span
+                        ><span class="gg-sub" translate="no">feat: 批量设置入口</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-25 16:44</td>
+                      <td class="gg-cell gg-author" translate="no">agent</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 d9a15e7" translate="no">
+                          d9a15e7
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row class="is-landed">
+                      <td class="gg-cell gg-subject" title="fix: 超时字段透传" style="padding-left: 50px">
+                        <span class="gg-sub" translate="no">fix: 超时字段透传</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-25 19:02</td>
+                      <td class="gg-cell gg-author" translate="no">agent</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 c0482f1" translate="no">
+                          c0482f1
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="docs: 更新 worktree-graph 方案" style="padding-left: 50px">
+                        <span class="gg-sub" translate="no">docs: 更新 worktree-graph 方案</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-25 15:03</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 4b9f0e2" translate="no">
+                          4b9f0e2
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row class="is-landed">
+                      <td class="gg-cell gg-subject" title="fix: 设置页滚动" style="padding-left: 50px">
+                        <span class="gg-sub" translate="no">fix: 设置页滚动</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-25 14:30</td>
+                      <td class="gg-cell gg-author" translate="no">agent</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 2f6c8b9" translate="no">
+                          2f6c8b9
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row class="is-landed">
+                      <td class="gg-cell gg-subject" title="fix: 空态文案" style="padding-left: 64px">
+                        <span class="gg-refs"
+                          ><span class="gg-ref k-branch" title="pi-agent-R4T8Y2U6" translate="no"
+                            >pi-agent-R4T8Y2U6</span
+                          ><span
+                            class="gg-mbadge"
+                            title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 2 个提交在 dev 中都有补丁等价的提交"
+                            >已合入</span
+                          ></span
+                        ><span class="gg-sub" translate="no">fix: 空态文案</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-24 20:11</td>
+                      <td class="gg-cell gg-author" translate="no">agent</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 b7743e0" translate="no">
+                          b7743e0
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="refactor(ui): 拆分 GraphLanes" style="padding-left: 64px">
+                        <span class="gg-sub" translate="no">refactor(ui): 拆分 GraphLanes</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-24 22:31</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 e2d8a61" translate="no">
+                          e2d8a61
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="feat: 设置页骨架" style="padding-left: 64px">
+                        <span class="gg-sub" translate="no">feat: 设置页骨架</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-24 21:05</td>
+                      <td class="gg-cell gg-author" translate="no">agent</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 98e02d4" translate="no">
+                          98e02d4
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="test: 提交图几何用例" style="padding-left: 50px">
+                        <span class="gg-sub" translate="no">test: 提交图几何用例</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-24 17:45</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 60c3b9f" translate="no">
+                          60c3b9f
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="chore: 升级依赖" style="padding-left: 50px">
+                        <span class="gg-sub" translate="no">chore: 升级依赖</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-23 11:20</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 85f1d2c" translate="no">
+                          85f1d2c
+                        </button>
+                      </td>
+                    </tr>
+                    <tr data-row>
+                      <td class="gg-cell gg-subject" title="feat(graph): 提交图首版" style="padding-left: 22px">
+                        <span class="gg-sub" translate="no">feat(graph): 提交图首版</span>
+                      </td>
+                      <td class="gg-cell gg-date" translate="no">2026-10-22 09:58</td>
+                      <td class="gg-cell gg-author" translate="no">bluecake</td>
+                      <td class="gg-cell gg-hashcell">
+                        <button class="gg-hash" type="button" title="复制提交哈希 3d7aa04" translate="no">
+                          3d7aa04
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="gg-foot">200 commits · date-order · local refs, no fetch</p>
+            </section>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="case">
+      <h2>场景 2｜中文 · 浅色 · 点开「显示已合入」之后</h2>
+      <p class="desc">
+        已合入分支回到图上：车道与圆点变为 landed
+        色（<code>--gg-lane-landed</code>，实色、不叠透明度），分支芯片后出现「已合入」与「部分已合入 1/3」徽章（<code
+          >pi-agent-PWJGMSN3</code
+        >
+        独有的 3 个提交中仅 1 个补丁等价，等价的那一个提交按 landed 着色，其余正常）。开关文案变为「隐藏已合入的 2
+        个分支」，脚注不再出现 hidden。下方为悬停徽章时 tooltip 的常显示意。
+      </p>
+      <div class="pv">
+        <section class="gg" data-phase="ready">
+          <div class="gg-merged-bar">
+            <button class="gg-merged-toggle" type="button" aria-pressed="true">隐藏已合入的 2 个分支</button>
+          </div>
+          <div class="gg-viewport">
+            <table class="gg-table">
+              <caption class="sr-only">
+                当前 worktree 的提交图，最新在前
+              </caption>
+              <colgroup>
+                <col class="gg-col-lanes" />
+                <col />
+                <col class="gg-col-date" />
+                <col class="gg-col-author" />
+                <col class="gg-col-hash" />
+              </colgroup>
+              <tbody>
+                <tr data-row data-current="true">
+                  <td class="gg-lanes" rowspan="13" aria-hidden="true">
+                    <svg
+                      class="gg-svg"
+                      width="72"
+                      height="290"
+                      viewBox="0 0 72 290"
+                      aria-hidden="true"
+                      focusable="false"
+                    >
+                      <g class="gg-route" style="color: var(--gg-lane-0)"><path d="M 8 11 L 8 275" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 22 33 L 22 99" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-2)"><path d="M 36 77 L 36 143" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 36 143 L 36 209" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)">
+                        <path d="M 22 99 C 22 143, 8 143, 8 187" />
+                      </g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)">
+                        <path d="M 50 165 C 50 198, 8 198, 8 231" />
+                      </g>
+                      <g class="gg-route" style="color: var(--gg-lane-2)">
+                        <path d="M 36 209 C 36 242, 8 242, 8 275" />
+                      </g>
+                      <circle class="gg-dot" cx="8" cy="11" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="22" cy="33" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="8" cy="55" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="77" r="3.5" style="color: var(--gg-lane-2)" />
+                      <circle class="gg-dot" cx="22" cy="99" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="8" cy="121" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="143" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="50" cy="165" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="8" cy="187" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="209" r="3.5" style="color: var(--gg-lane-2)" />
+                      <circle class="gg-dot" cx="8" cy="231" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="8" cy="253" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="8" cy="275" r="3.5" style="color: var(--gg-lane-0)" />
+                    </svg>
+                  </td>
+                  <td class="gg-cell gg-subject" title="feat(graph): 已合入分支标注与折叠" style="padding-left: 22px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-head" title="HEAD → dev" translate="no">HEAD → dev</span></span
+                    ><span class="gg-sub" translate="no">feat(graph): 已合入分支标注与折叠</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 21:12</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 9f3e21a" translate="no">9f3e21a</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 超时宽限处理" style="padding-left: 36px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-branch" title="pi-agent-X7K2M9Q1" translate="no">pi-agent-X7K2M9Q1</span
+                      ><span
+                        class="gg-mbadge"
+                        title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 2 个提交在 dev 中都有补丁等价的提交"
+                        >已合入</span
+                      ></span
+                    ><span class="gg-sub" translate="no">fix: 超时宽限处理</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 19:20</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 51be9c3" translate="no">51be9c3</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="fix(hub): 合并判定缓存复核" style="padding-left: 36px">
+                    <span class="gg-sub" translate="no">fix(hub): 合并判定缓存复核</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 18:40</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 7a1c4d8" translate="no">7a1c4d8</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat: 批量设置入口" style="padding-left: 50px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-branch" title="pi-agent-PWJGMSN3" translate="no">pi-agent-PWJGMSN3</span
+                      ><span
+                        class="gg-mbadge"
+                        title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 3 个提交中有 1 个在 dev 中有补丁等价的提交；解冲突或修改后的 cherry-pick 可能计为未合入"
+                        >部分已合入 1/3</span
+                      ></span
+                    ><span class="gg-sub" translate="no">feat: 批量设置入口</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 16:44</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 d9a15e7" translate="no">d9a15e7</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 超时字段透传" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">fix: 超时字段透传</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 19:02</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 c0482f1" translate="no">c0482f1</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="docs: 更新 worktree-graph 方案" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">docs: 更新 worktree-graph 方案</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 15:03</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 4b9f0e2" translate="no">4b9f0e2</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 设置页滚动" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">fix: 设置页滚动</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 14:30</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 2f6c8b9" translate="no">2f6c8b9</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 空态文案" style="padding-left: 64px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-branch" title="pi-agent-R4T8Y2U6" translate="no">pi-agent-R4T8Y2U6</span
+                      ><span
+                        class="gg-mbadge"
+                        title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 2 个提交在 dev 中都有补丁等价的提交"
+                        >已合入</span
+                      ></span
+                    ><span class="gg-sub" translate="no">fix: 空态文案</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 20:11</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 b7743e0" translate="no">b7743e0</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="refactor(ui): 拆分 GraphLanes" style="padding-left: 64px">
+                    <span class="gg-sub" translate="no">refactor(ui): 拆分 GraphLanes</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 22:31</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 e2d8a61" translate="no">e2d8a61</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat: 设置页骨架" style="padding-left: 64px">
+                    <span class="gg-sub" translate="no">feat: 设置页骨架</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 21:05</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 98e02d4" translate="no">98e02d4</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="test: 提交图几何用例" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">test: 提交图几何用例</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 17:45</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 60c3b9f" translate="no">60c3b9f</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="chore: 升级依赖" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">chore: 升级依赖</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-23 11:20</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 85f1d2c" translate="no">85f1d2c</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat(graph): 提交图首版" style="padding-left: 22px">
+                    <span class="gg-sub" translate="no">feat(graph): 提交图首版</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-22 09:58</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 3d7aa04" translate="no">3d7aa04</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="gg-foot">200 commits · date-order · local refs, no fetch</p>
+        </section>
+        <div class="tip-demo">
+          <span class="tip-label">悬停「已合入」徽章时（title）：</span><span class="gg-mbadge">已合入</span
+          ><span class="gg-tip"
+            >按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 2 个提交在 dev 中都有补丁等价的提交</span
+          >
+        </div>
+        <div class="tip-demo">
+          <span class="tip-label">悬停「部分已合入 1/3」徽章时（title）：</span
+          ><span class="gg-mbadge">部分已合入 1/3</span
+          ><span class="gg-tip"
+            >按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 3 个提交中有 1 个在 dev
+            中有补丁等价的提交；解冲突或修改后的 cherry-pick 可能计为未合入</span
+          >
+        </div>
+      </div>
+    </section>
+    <section class="case">
+      <h2>场景 3｜中文 · 深色 · 展开状态</h2>
+      <p class="desc">
+        同场景 2，深色主题：验证 landed 车道 / 徽章 / 空心 merge 点在深色下的对比度（landed 令牌按 route 0.85
+        不透明度合成后 ≥3:1 选取）。
+      </p>
+      <div class="pv pv-dark">
+        <section class="gg" data-phase="ready">
+          <div class="gg-merged-bar">
+            <button class="gg-merged-toggle" type="button" aria-pressed="true">隐藏已合入的 2 个分支</button>
+          </div>
+          <div class="gg-viewport">
+            <table class="gg-table">
+              <caption class="sr-only">
+                当前 worktree 的提交图，最新在前
+              </caption>
+              <colgroup>
+                <col class="gg-col-lanes" />
+                <col />
+                <col class="gg-col-date" />
+                <col class="gg-col-author" />
+                <col class="gg-col-hash" />
+              </colgroup>
+              <tbody>
+                <tr data-row data-current="true">
+                  <td class="gg-lanes" rowspan="13" aria-hidden="true">
+                    <svg
+                      class="gg-svg"
+                      width="72"
+                      height="290"
+                      viewBox="0 0 72 290"
+                      aria-hidden="true"
+                      focusable="false"
+                    >
+                      <g class="gg-route" style="color: var(--gg-lane-0)"><path d="M 8 11 L 8 275" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 22 33 L 22 99" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-2)"><path d="M 36 77 L 36 143" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 36 143 L 36 209" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)">
+                        <path d="M 22 99 C 22 143, 8 143, 8 187" />
+                      </g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)">
+                        <path d="M 50 165 C 50 198, 8 198, 8 231" />
+                      </g>
+                      <g class="gg-route" style="color: var(--gg-lane-2)">
+                        <path d="M 36 209 C 36 242, 8 242, 8 275" />
+                      </g>
+                      <circle class="gg-dot" cx="8" cy="11" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="22" cy="33" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="8" cy="55" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="77" r="3.5" style="color: var(--gg-lane-2)" />
+                      <circle class="gg-dot" cx="22" cy="99" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="8" cy="121" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="143" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="50" cy="165" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="8" cy="187" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="209" r="3.5" style="color: var(--gg-lane-2)" />
+                      <circle class="gg-dot" cx="8" cy="231" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="8" cy="253" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="8" cy="275" r="3.5" style="color: var(--gg-lane-0)" />
+                    </svg>
+                  </td>
+                  <td class="gg-cell gg-subject" title="feat(graph): 已合入分支标注与折叠" style="padding-left: 22px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-head" title="HEAD → dev" translate="no">HEAD → dev</span></span
+                    ><span class="gg-sub" translate="no">feat(graph): 已合入分支标注与折叠</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 21:12</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 9f3e21a" translate="no">9f3e21a</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 超时宽限处理" style="padding-left: 36px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-branch" title="pi-agent-X7K2M9Q1" translate="no">pi-agent-X7K2M9Q1</span
+                      ><span
+                        class="gg-mbadge"
+                        title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 2 个提交在 dev 中都有补丁等价的提交"
+                        >已合入</span
+                      ></span
+                    ><span class="gg-sub" translate="no">fix: 超时宽限处理</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 19:20</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 51be9c3" translate="no">51be9c3</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="fix(hub): 合并判定缓存复核" style="padding-left: 36px">
+                    <span class="gg-sub" translate="no">fix(hub): 合并判定缓存复核</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 18:40</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 7a1c4d8" translate="no">7a1c4d8</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat: 批量设置入口" style="padding-left: 50px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-branch" title="pi-agent-PWJGMSN3" translate="no">pi-agent-PWJGMSN3</span
+                      ><span
+                        class="gg-mbadge"
+                        title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 3 个提交中有 1 个在 dev 中有补丁等价的提交；解冲突或修改后的 cherry-pick 可能计为未合入"
+                        >部分已合入 1/3</span
+                      ></span
+                    ><span class="gg-sub" translate="no">feat: 批量设置入口</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 16:44</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 d9a15e7" translate="no">d9a15e7</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 超时字段透传" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">fix: 超时字段透传</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 19:02</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 c0482f1" translate="no">c0482f1</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="docs: 更新 worktree-graph 方案" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">docs: 更新 worktree-graph 方案</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 15:03</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 4b9f0e2" translate="no">4b9f0e2</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 设置页滚动" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">fix: 设置页滚动</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 14:30</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 2f6c8b9" translate="no">2f6c8b9</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 空态文案" style="padding-left: 64px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-branch" title="pi-agent-R4T8Y2U6" translate="no">pi-agent-R4T8Y2U6</span
+                      ><span
+                        class="gg-mbadge"
+                        title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 2 个提交在 dev 中都有补丁等价的提交"
+                        >已合入</span
+                      ></span
+                    ><span class="gg-sub" translate="no">fix: 空态文案</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 20:11</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 b7743e0" translate="no">b7743e0</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="refactor(ui): 拆分 GraphLanes" style="padding-left: 64px">
+                    <span class="gg-sub" translate="no">refactor(ui): 拆分 GraphLanes</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 22:31</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 e2d8a61" translate="no">e2d8a61</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat: 设置页骨架" style="padding-left: 64px">
+                    <span class="gg-sub" translate="no">feat: 设置页骨架</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 21:05</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 98e02d4" translate="no">98e02d4</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="test: 提交图几何用例" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">test: 提交图几何用例</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 17:45</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 60c3b9f" translate="no">60c3b9f</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="chore: 升级依赖" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">chore: 升级依赖</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-23 11:20</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 85f1d2c" translate="no">85f1d2c</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat(graph): 提交图首版" style="padding-left: 22px">
+                    <span class="gg-sub" translate="no">feat(graph): 提交图首版</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-22 09:58</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 3d7aa04" translate="no">3d7aa04</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="gg-foot">200 commits · date-order · local refs, no fetch</p>
+        </section>
+        <div class="tip-demo">
+          <span class="tip-label">悬停「已合入」徽章时（title）：</span><span class="gg-mbadge">已合入</span
+          ><span class="gg-tip"
+            >按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 2 个提交在 dev 中都有补丁等价的提交</span
+          >
+        </div>
+        <div class="tip-demo">
+          <span class="tip-label">悬停「部分已合入 1/3」徽章时（title）：</span
+          ><span class="gg-mbadge">部分已合入 1/3</span
+          ><span class="gg-tip"
+            >按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 3 个提交中有 1 个在 dev
+            中有补丁等价的提交；解冲突或修改后的 cherry-pick 可能计为未合入</span
+          >
+        </div>
+      </div>
+    </section>
+    <section class="case">
+      <h2>场景 4｜英文 · 浅色</h2>
+      <p class="desc">
+        上：默认折叠，脚注 <code>· 2 merged hidden</code>；下：展开后徽章为 <code>merged</code> /
+        <code>merged 1/3</code>（徽章与开关文案跟随界面语言；脚注等紧凑标记仍只用英文 token）。
+      </p>
+      <div class="side">
+        <div class="pv">
+          <section class="gg" data-phase="ready">
+            <div class="gg-merged-bar">
+              <button class="gg-merged-toggle" type="button" aria-pressed="false">Show 2 merged branches</button>
+            </div>
+            <div class="gg-viewport">
+              <table class="gg-table">
+                <caption class="sr-only">
+                  当前 worktree 的提交图，最新在前
+                </caption>
+                <colgroup>
+                  <col class="gg-col-lanes" />
+                  <col />
+                  <col class="gg-col-date" />
+                  <col class="gg-col-author" />
+                  <col class="gg-col-hash" />
+                </colgroup>
+                <tbody>
+                  <tr data-row data-current="true">
+                    <td class="gg-lanes" rowspan="10" aria-hidden="true">
+                      <svg
+                        class="gg-svg"
+                        width="44"
+                        height="224"
+                        viewBox="0 0 44 224"
+                        aria-hidden="true"
+                        focusable="false"
+                      >
+                        <g class="gg-route" style="color: var(--gg-lane-0)"><path d="M 8 11 L 8 209" /></g>
+                        <g class="gg-route" style="color: var(--gg-lane-1)"><path d="M 22 55 L 22 99" /></g>
+                        <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 22 99 L 22 143" /></g>
+                        <g class="gg-route" style="color: var(--gg-lane-1)">
+                          <path d="M 22 143 C 22 176, 8 176, 8 209" />
+                        </g>
+                        <circle class="gg-dot" cx="8" cy="11" r="3.5" style="color: var(--gg-lane-0)" />
+                        <circle class="gg-dot" cx="8" cy="33" r="3.5" style="color: var(--gg-lane-0)" />
+                        <circle class="gg-dot" cx="22" cy="55" r="3.5" style="color: var(--gg-lane-1)" />
+                        <circle class="gg-dot" cx="8" cy="77" r="3.5" style="color: var(--gg-lane-0)" />
+                        <circle class="gg-dot" cx="22" cy="99" r="3.5" style="color: var(--gg-lane-landed)" />
+                        <circle class="gg-dot" cx="8" cy="121" r="3.5" style="color: var(--gg-lane-0)" />
+                        <circle class="gg-dot" cx="22" cy="143" r="3.5" style="color: var(--gg-lane-1)" />
+                        <circle class="gg-dot" cx="8" cy="165" r="3.5" style="color: var(--gg-lane-0)" />
+                        <circle class="gg-dot" cx="8" cy="187" r="3.5" style="color: var(--gg-lane-0)" />
+                        <circle class="gg-dot" cx="8" cy="209" r="3.5" style="color: var(--gg-lane-0)" />
+                      </svg>
+                    </td>
+                    <td class="gg-cell gg-subject" title="feat(graph): 已合入分支标注与折叠" style="padding-left: 22px">
+                      <span class="gg-refs"
+                        ><span class="gg-ref k-head" title="HEAD → dev" translate="no">HEAD → dev</span></span
+                      ><span class="gg-sub" translate="no">feat(graph): 已合入分支标注与折叠</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">25 Oct 2026 21:12</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 9f3e21a" translate="no">9f3e21a</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="fix(hub): 合并判定缓存复核" style="padding-left: 22px">
+                      <span class="gg-sub" translate="no">fix(hub): 合并判定缓存复核</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">25 Oct 2026 18:40</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 7a1c4d8" translate="no">7a1c4d8</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="feat: 批量设置入口" style="padding-left: 36px">
+                      <span class="gg-refs"
+                        ><span class="gg-ref k-branch" title="pi-agent-PWJGMSN3" translate="no">pi-agent-PWJGMSN3</span
+                        ><span
+                          class="gg-mbadge"
+                          title="Judged by patch equivalence (git patch-id, whitespace ignored): 1 of 3 commits unique to this branch has a patch-equivalent commit in dev; conflict-resolved or amended cherry-picks may count as unmerged"
+                          >merged 1/3</span
+                        ></span
+                      ><span class="gg-sub" translate="no">feat: 批量设置入口</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">25 Oct 2026 16:44</td>
+                    <td class="gg-cell gg-author" translate="no">agent</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 d9a15e7" translate="no">d9a15e7</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="docs: 更新 worktree-graph 方案" style="padding-left: 36px">
+                      <span class="gg-sub" translate="no">docs: 更新 worktree-graph 方案</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">25 Oct 2026 15:03</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 4b9f0e2" translate="no">4b9f0e2</button>
+                    </td>
+                  </tr>
+                  <tr data-row class="is-landed">
+                    <td class="gg-cell gg-subject" title="fix: 设置页滚动" style="padding-left: 36px">
+                      <span class="gg-sub" translate="no">fix: 设置页滚动</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">25 Oct 2026 14:30</td>
+                    <td class="gg-cell gg-author" translate="no">agent</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 2f6c8b9" translate="no">2f6c8b9</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="refactor(ui): 拆分 GraphLanes" style="padding-left: 36px">
+                      <span class="gg-sub" translate="no">refactor(ui): 拆分 GraphLanes</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">24 Oct 2026 22:31</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 e2d8a61" translate="no">e2d8a61</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="feat: 设置页骨架" style="padding-left: 36px">
+                      <span class="gg-sub" translate="no">feat: 设置页骨架</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">24 Oct 2026 21:05</td>
+                    <td class="gg-cell gg-author" translate="no">agent</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 98e02d4" translate="no">98e02d4</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="test: 提交图几何用例" style="padding-left: 22px">
+                      <span class="gg-sub" translate="no">test: 提交图几何用例</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">24 Oct 2026 17:45</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 60c3b9f" translate="no">60c3b9f</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="chore: 升级依赖" style="padding-left: 22px">
+                      <span class="gg-sub" translate="no">chore: 升级依赖</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">23 Oct 2026 11:20</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 85f1d2c" translate="no">85f1d2c</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="feat(graph): 提交图首版" style="padding-left: 22px">
+                      <span class="gg-sub" translate="no">feat(graph): 提交图首版</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">22 Oct 2026 09:58</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 3d7aa04" translate="no">3d7aa04</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="gg-foot">200 commits · date-order · local refs, no fetch · 2 merged hidden</p>
+          </section>
+        </div>
+        <div class="pv">
+          <section class="gg" data-phase="ready">
+            <div class="gg-merged-bar">
+              <button class="gg-merged-toggle" type="button" aria-pressed="true">Hide 2 merged branches</button>
+            </div>
+            <div class="gg-viewport">
+              <table class="gg-table">
+                <caption class="sr-only">
+                  当前 worktree 的提交图，最新在前
+                </caption>
+                <colgroup>
+                  <col class="gg-col-lanes" />
+                  <col />
+                  <col class="gg-col-date" />
+                  <col class="gg-col-author" />
+                  <col class="gg-col-hash" />
+                </colgroup>
+                <tbody>
+                  <tr data-row data-current="true">
+                    <td class="gg-lanes" rowspan="13" aria-hidden="true">
+                      <svg
+                        class="gg-svg"
+                        width="72"
+                        height="290"
+                        viewBox="0 0 72 290"
+                        aria-hidden="true"
+                        focusable="false"
+                      >
+                        <g class="gg-route" style="color: var(--gg-lane-0)"><path d="M 8 11 L 8 275" /></g>
+                        <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 22 33 L 22 99" /></g>
+                        <g class="gg-route" style="color: var(--gg-lane-2)"><path d="M 36 77 L 36 143" /></g>
+                        <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 36 143 L 36 209" /></g>
+                        <g class="gg-route" style="color: var(--gg-lane-landed)">
+                          <path d="M 22 99 C 22 143, 8 143, 8 187" />
+                        </g>
+                        <g class="gg-route" style="color: var(--gg-lane-landed)">
+                          <path d="M 50 165 C 50 198, 8 198, 8 231" />
+                        </g>
+                        <g class="gg-route" style="color: var(--gg-lane-2)">
+                          <path d="M 36 209 C 36 242, 8 242, 8 275" />
+                        </g>
+                        <circle class="gg-dot" cx="8" cy="11" r="3.5" style="color: var(--gg-lane-0)" />
+                        <circle class="gg-dot" cx="22" cy="33" r="3.5" style="color: var(--gg-lane-landed)" />
+                        <circle class="gg-dot" cx="8" cy="55" r="3.5" style="color: var(--gg-lane-0)" />
+                        <circle class="gg-dot" cx="36" cy="77" r="3.5" style="color: var(--gg-lane-2)" />
+                        <circle class="gg-dot" cx="22" cy="99" r="3.5" style="color: var(--gg-lane-landed)" />
+                        <circle class="gg-dot" cx="8" cy="121" r="3.5" style="color: var(--gg-lane-0)" />
+                        <circle class="gg-dot" cx="36" cy="143" r="3.5" style="color: var(--gg-lane-landed)" />
+                        <circle class="gg-dot" cx="50" cy="165" r="3.5" style="color: var(--gg-lane-landed)" />
+                        <circle class="gg-dot" cx="8" cy="187" r="3.5" style="color: var(--gg-lane-0)" />
+                        <circle class="gg-dot" cx="36" cy="209" r="3.5" style="color: var(--gg-lane-2)" />
+                        <circle class="gg-dot" cx="8" cy="231" r="3.5" style="color: var(--gg-lane-0)" />
+                        <circle class="gg-dot" cx="8" cy="253" r="3.5" style="color: var(--gg-lane-0)" />
+                        <circle class="gg-dot" cx="8" cy="275" r="3.5" style="color: var(--gg-lane-0)" />
+                      </svg>
+                    </td>
+                    <td class="gg-cell gg-subject" title="feat(graph): 已合入分支标注与折叠" style="padding-left: 22px">
+                      <span class="gg-refs"
+                        ><span class="gg-ref k-head" title="HEAD → dev" translate="no">HEAD → dev</span></span
+                      ><span class="gg-sub" translate="no">feat(graph): 已合入分支标注与折叠</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">25 Oct 2026 21:12</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 9f3e21a" translate="no">9f3e21a</button>
+                    </td>
+                  </tr>
+                  <tr data-row class="is-landed">
+                    <td class="gg-cell gg-subject" title="fix: 超时宽限处理" style="padding-left: 36px">
+                      <span class="gg-refs"
+                        ><span class="gg-ref k-branch" title="pi-agent-X7K2M9Q1" translate="no">pi-agent-X7K2M9Q1</span
+                        ><span
+                          class="gg-mbadge"
+                          title="Judged by patch equivalence (git patch-id, whitespace ignored): all 2 commits unique to this branch have patch-equivalent commits in dev"
+                          >merged</span
+                        ></span
+                      ><span class="gg-sub" translate="no">fix: 超时宽限处理</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">25 Oct 2026 19:20</td>
+                    <td class="gg-cell gg-author" translate="no">agent</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 51be9c3" translate="no">51be9c3</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="fix(hub): 合并判定缓存复核" style="padding-left: 36px">
+                      <span class="gg-sub" translate="no">fix(hub): 合并判定缓存复核</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">25 Oct 2026 18:40</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 7a1c4d8" translate="no">7a1c4d8</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="feat: 批量设置入口" style="padding-left: 50px">
+                      <span class="gg-refs"
+                        ><span class="gg-ref k-branch" title="pi-agent-PWJGMSN3" translate="no">pi-agent-PWJGMSN3</span
+                        ><span
+                          class="gg-mbadge"
+                          title="Judged by patch equivalence (git patch-id, whitespace ignored): 1 of 3 commits unique to this branch has a patch-equivalent commit in dev; conflict-resolved or amended cherry-picks may count as unmerged"
+                          >merged 1/3</span
+                        ></span
+                      ><span class="gg-sub" translate="no">feat: 批量设置入口</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">25 Oct 2026 16:44</td>
+                    <td class="gg-cell gg-author" translate="no">agent</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 d9a15e7" translate="no">d9a15e7</button>
+                    </td>
+                  </tr>
+                  <tr data-row class="is-landed">
+                    <td class="gg-cell gg-subject" title="fix: 超时字段透传" style="padding-left: 50px">
+                      <span class="gg-sub" translate="no">fix: 超时字段透传</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">25 Oct 2026 19:02</td>
+                    <td class="gg-cell gg-author" translate="no">agent</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 c0482f1" translate="no">c0482f1</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="docs: 更新 worktree-graph 方案" style="padding-left: 50px">
+                      <span class="gg-sub" translate="no">docs: 更新 worktree-graph 方案</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">25 Oct 2026 15:03</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 4b9f0e2" translate="no">4b9f0e2</button>
+                    </td>
+                  </tr>
+                  <tr data-row class="is-landed">
+                    <td class="gg-cell gg-subject" title="fix: 设置页滚动" style="padding-left: 50px">
+                      <span class="gg-sub" translate="no">fix: 设置页滚动</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">25 Oct 2026 14:30</td>
+                    <td class="gg-cell gg-author" translate="no">agent</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 2f6c8b9" translate="no">2f6c8b9</button>
+                    </td>
+                  </tr>
+                  <tr data-row class="is-landed">
+                    <td class="gg-cell gg-subject" title="fix: 空态文案" style="padding-left: 64px">
+                      <span class="gg-refs"
+                        ><span class="gg-ref k-branch" title="pi-agent-R4T8Y2U6" translate="no">pi-agent-R4T8Y2U6</span
+                        ><span
+                          class="gg-mbadge"
+                          title="Judged by patch equivalence (git patch-id, whitespace ignored): all 2 commits unique to this branch have patch-equivalent commits in dev"
+                          >merged</span
+                        ></span
+                      ><span class="gg-sub" translate="no">fix: 空态文案</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">24 Oct 2026 20:11</td>
+                    <td class="gg-cell gg-author" translate="no">agent</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 b7743e0" translate="no">b7743e0</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="refactor(ui): 拆分 GraphLanes" style="padding-left: 64px">
+                      <span class="gg-sub" translate="no">refactor(ui): 拆分 GraphLanes</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">24 Oct 2026 22:31</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 e2d8a61" translate="no">e2d8a61</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="feat: 设置页骨架" style="padding-left: 64px">
+                      <span class="gg-sub" translate="no">feat: 设置页骨架</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">24 Oct 2026 21:05</td>
+                    <td class="gg-cell gg-author" translate="no">agent</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 98e02d4" translate="no">98e02d4</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="test: 提交图几何用例" style="padding-left: 50px">
+                      <span class="gg-sub" translate="no">test: 提交图几何用例</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">24 Oct 2026 17:45</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 60c3b9f" translate="no">60c3b9f</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="chore: 升级依赖" style="padding-left: 50px">
+                      <span class="gg-sub" translate="no">chore: 升级依赖</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">23 Oct 2026 11:20</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 85f1d2c" translate="no">85f1d2c</button>
+                    </td>
+                  </tr>
+                  <tr data-row>
+                    <td class="gg-cell gg-subject" title="feat(graph): 提交图首版" style="padding-left: 22px">
+                      <span class="gg-sub" translate="no">feat(graph): 提交图首版</span>
+                    </td>
+                    <td class="gg-cell gg-date" translate="no">22 Oct 2026 09:58</td>
+                    <td class="gg-cell gg-author" translate="no">bluecake</td>
+                    <td class="gg-cell gg-hashcell">
+                      <button class="gg-hash" type="button" title="复制提交哈希 3d7aa04" translate="no">3d7aa04</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="gg-foot">200 commits · date-order · local refs, no fetch</p>
+          </section>
+        </div>
+      </div>
+    </section>
+    <section class="case">
+      <h2>场景 5｜窄屏 ≤480px（400px 容器模拟）</h2>
+      <p class="desc">
+        移动态只保留泳道（≤4）+ 标题（仅 HEAD 芯片）+ 哈希列：不渲染任何徽章（分支芯片本身也不显示），landed
+        车道着色保留，无横向溢出。图示为展开后的状态。
+      </p>
+      <div class="pv pv-narrow">
+        <section class="gg" data-phase="ready">
+          <div class="gg-merged-bar">
+            <button class="gg-merged-toggle" type="button" aria-pressed="true">隐藏已合入的 2 个分支</button>
+          </div>
+          <div class="gg-viewport">
+            <table class="gg-table is-mobile">
+              <caption class="sr-only">
+                当前 worktree 的提交图，最新在前
+              </caption>
+              <colgroup>
+                <col class="gg-col-lanes" />
+                <col />
+                <col class="gg-col-hash" />
+              </colgroup>
+              <tbody>
+                <tr data-row data-current="true">
+                  <td class="gg-lanes" rowspan="13" aria-hidden="true">
+                    <svg
+                      class="gg-svg"
+                      width="72"
+                      height="290"
+                      viewBox="0 0 72 290"
+                      aria-hidden="true"
+                      focusable="false"
+                    >
+                      <g class="gg-route" style="color: var(--gg-lane-0)"><path d="M 8 11 L 8 275" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 22 33 L 22 99" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-2)"><path d="M 36 77 L 36 143" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 36 143 L 36 209" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)">
+                        <path d="M 22 99 C 22 143, 8 143, 8 187" />
+                      </g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)">
+                        <path d="M 50 165 C 50 198, 8 198, 8 231" />
+                      </g>
+                      <g class="gg-route" style="color: var(--gg-lane-2)">
+                        <path d="M 36 209 C 36 242, 8 242, 8 275" />
+                      </g>
+                      <circle class="gg-dot" cx="8" cy="11" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="22" cy="33" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="8" cy="55" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="77" r="3.5" style="color: var(--gg-lane-2)" />
+                      <circle class="gg-dot" cx="22" cy="99" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="8" cy="121" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="143" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="50" cy="165" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="8" cy="187" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="209" r="3.5" style="color: var(--gg-lane-2)" />
+                      <circle class="gg-dot" cx="8" cy="231" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="8" cy="253" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="8" cy="275" r="3.5" style="color: var(--gg-lane-0)" />
+                    </svg>
+                  </td>
+                  <td class="gg-cell gg-subject" title="feat(graph): 已合入分支标注与折叠" style="padding-left: 22px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-head" title="HEAD → dev" translate="no">HEAD → dev</span></span
+                    ><span class="gg-sub" translate="no">feat(graph): 已合入分支标注与折叠</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 9f3e21a" translate="no">9f3e21a</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 超时宽限处理" style="padding-left: 36px">
+                    <span class="gg-sub" translate="no">fix: 超时宽限处理</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 51be9c3" translate="no">51be9c3</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="fix(hub): 合并判定缓存复核" style="padding-left: 36px">
+                    <span class="gg-sub" translate="no">fix(hub): 合并判定缓存复核</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 7a1c4d8" translate="no">7a1c4d8</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat: 批量设置入口" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">feat: 批量设置入口</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 d9a15e7" translate="no">d9a15e7</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 超时字段透传" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">fix: 超时字段透传</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 c0482f1" translate="no">c0482f1</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="docs: 更新 worktree-graph 方案" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">docs: 更新 worktree-graph 方案</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 4b9f0e2" translate="no">4b9f0e2</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 设置页滚动" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">fix: 设置页滚动</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 2f6c8b9" translate="no">2f6c8b9</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 空态文案" style="padding-left: 64px">
+                    <span class="gg-sub" translate="no">fix: 空态文案</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 b7743e0" translate="no">b7743e0</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="refactor(ui): 拆分 GraphLanes" style="padding-left: 64px">
+                    <span class="gg-sub" translate="no">refactor(ui): 拆分 GraphLanes</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 e2d8a61" translate="no">e2d8a61</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat: 设置页骨架" style="padding-left: 64px">
+                    <span class="gg-sub" translate="no">feat: 设置页骨架</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 98e02d4" translate="no">98e02d4</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="test: 提交图几何用例" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">test: 提交图几何用例</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 60c3b9f" translate="no">60c3b9f</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="chore: 升级依赖" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">chore: 升级依赖</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 85f1d2c" translate="no">85f1d2c</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat(graph): 提交图首版" style="padding-left: 22px">
+                    <span class="gg-sub" translate="no">feat(graph): 提交图首版</span>
+                  </td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 3d7aa04" translate="no">3d7aa04</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="gg-foot">200 commits · date-order · local refs, no fetch</p>
+        </section>
+      </div>
+    </section>
+    <section class="case">
+      <h2>场景 6｜对照：无 cap 的旧 hub / 判定全部 none</h2>
+      <p class="desc">
+        DOM 不变条件生效时（无 <code>wtgraph.merged.v1</code> cap、payload 无 <code>merged</code>、或全部条目为 none/anc
+        且无 skipped/unk）：与现有界面逐字节一致——无开关、无徽章、无 landed 着色、脚注无变化。
+      </p>
+      <div class="pv">
+        <section class="gg" data-phase="ready">
+          <div class="gg-viewport">
+            <table class="gg-table">
+              <caption class="sr-only">
+                当前 worktree 的提交图，最新在前
+              </caption>
+              <colgroup>
+                <col class="gg-col-lanes" />
+                <col />
+                <col class="gg-col-date" />
+                <col class="gg-col-author" />
+                <col class="gg-col-hash" />
+              </colgroup>
+              <tbody>
+                <tr data-row data-current="true">
+                  <td class="gg-lanes" rowspan="13" aria-hidden="true">
+                    <svg
+                      class="gg-svg"
+                      width="72"
+                      height="290"
+                      viewBox="0 0 72 290"
+                      aria-hidden="true"
+                      focusable="false"
+                    >
+                      <g class="gg-route" style="color: var(--gg-lane-0)"><path d="M 8 11 L 8 275" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-1)"><path d="M 22 33 L 22 99" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-2)"><path d="M 36 77 L 36 143" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-2)"><path d="M 36 143 L 36 209" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-1)">
+                        <path d="M 22 99 C 22 143, 8 143, 8 187" />
+                      </g>
+                      <g class="gg-route" style="color: var(--gg-lane-3)">
+                        <path d="M 50 165 C 50 198, 8 198, 8 231" />
+                      </g>
+                      <g class="gg-route" style="color: var(--gg-lane-2)">
+                        <path d="M 36 209 C 36 242, 8 242, 8 275" />
+                      </g>
+                      <circle class="gg-dot" cx="8" cy="11" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="22" cy="33" r="3.5" style="color: var(--gg-lane-1)" />
+                      <circle class="gg-dot" cx="8" cy="55" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="77" r="3.5" style="color: var(--gg-lane-2)" />
+                      <circle class="gg-dot" cx="22" cy="99" r="3.5" style="color: var(--gg-lane-1)" />
+                      <circle class="gg-dot" cx="8" cy="121" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="143" r="3.5" style="color: var(--gg-lane-2)" />
+                      <circle class="gg-dot" cx="50" cy="165" r="3.5" style="color: var(--gg-lane-3)" />
+                      <circle class="gg-dot" cx="8" cy="187" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="209" r="3.5" style="color: var(--gg-lane-2)" />
+                      <circle class="gg-dot" cx="8" cy="231" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="8" cy="253" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="8" cy="275" r="3.5" style="color: var(--gg-lane-0)" />
+                    </svg>
+                  </td>
+                  <td class="gg-cell gg-subject" title="feat(graph): 已合入分支标注与折叠" style="padding-left: 22px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-head" title="HEAD → dev" translate="no">HEAD → dev</span></span
+                    ><span class="gg-sub" translate="no">feat(graph): 已合入分支标注与折叠</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 21:12</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 9f3e21a" translate="no">9f3e21a</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="fix: 超时宽限处理" style="padding-left: 36px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-branch" title="pi-agent-X7K2M9Q1" translate="no"
+                        >pi-agent-X7K2M9Q1</span
+                      ></span
+                    ><span class="gg-sub" translate="no">fix: 超时宽限处理</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 19:20</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 51be9c3" translate="no">51be9c3</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="fix(hub): 合并判定缓存复核" style="padding-left: 36px">
+                    <span class="gg-sub" translate="no">fix(hub): 合并判定缓存复核</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 18:40</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 7a1c4d8" translate="no">7a1c4d8</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat: 批量设置入口" style="padding-left: 50px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-branch" title="pi-agent-PWJGMSN3" translate="no"
+                        >pi-agent-PWJGMSN3</span
+                      ></span
+                    ><span class="gg-sub" translate="no">feat: 批量设置入口</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 16:44</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 d9a15e7" translate="no">d9a15e7</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="fix: 超时字段透传" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">fix: 超时字段透传</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 19:02</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 c0482f1" translate="no">c0482f1</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="docs: 更新 worktree-graph 方案" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">docs: 更新 worktree-graph 方案</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 15:03</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 4b9f0e2" translate="no">4b9f0e2</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="fix: 设置页滚动" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">fix: 设置页滚动</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 14:30</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 2f6c8b9" translate="no">2f6c8b9</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="fix: 空态文案" style="padding-left: 64px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-branch" title="pi-agent-R4T8Y2U6" translate="no"
+                        >pi-agent-R4T8Y2U6</span
+                      ></span
+                    ><span class="gg-sub" translate="no">fix: 空态文案</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 20:11</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 b7743e0" translate="no">b7743e0</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="refactor(ui): 拆分 GraphLanes" style="padding-left: 64px">
+                    <span class="gg-sub" translate="no">refactor(ui): 拆分 GraphLanes</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 22:31</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 e2d8a61" translate="no">e2d8a61</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat: 设置页骨架" style="padding-left: 64px">
+                    <span class="gg-sub" translate="no">feat: 设置页骨架</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 21:05</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 98e02d4" translate="no">98e02d4</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="test: 提交图几何用例" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">test: 提交图几何用例</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 17:45</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 60c3b9f" translate="no">60c3b9f</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="chore: 升级依赖" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">chore: 升级依赖</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-23 11:20</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 85f1d2c" translate="no">85f1d2c</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat(graph): 提交图首版" style="padding-left: 22px">
+                    <span class="gg-sub" translate="no">feat(graph): 提交图首版</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-22 09:58</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 3d7aa04" translate="no">3d7aa04</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="gg-foot">200 commits · date-order · local refs, no fetch</p>
+        </section>
+      </div>
+    </section>
+    <section class="case">
+      <h2>场景 7｜fold off（折叠被阻止）</h2>
+      <p class="desc">
+        确有已合入分支、但引用快照不完整（<code>refsOmitted</code> 降级）⇒
+        不删任何提交：开关仍在但点击不产生折叠，徽章照常显示，脚注出现 <code>· fold off</code>。<code>fold off</code>
+        仅在 targets 非空且信息不完整时出现。
+      </p>
+      <div class="pv">
+        <section class="gg" data-phase="ready">
+          <div class="gg-degrade" role="status">
+            <p class="gg-degrade-title">提交图已按降级数据加载</p>
+            <p class="gg-degrade-note">为满足响应字节预算，丢弃了 3 个引用。</p>
+          </div>
+          <div class="gg-merged-bar">
+            <button class="gg-merged-toggle" type="button" aria-pressed="false">显示已合入的 2 个分支</button>
+          </div>
+          <div class="gg-viewport">
+            <table class="gg-table">
+              <caption class="sr-only">
+                当前 worktree 的提交图，最新在前
+              </caption>
+              <colgroup>
+                <col class="gg-col-lanes" />
+                <col />
+                <col class="gg-col-date" />
+                <col class="gg-col-author" />
+                <col class="gg-col-hash" />
+              </colgroup>
+              <tbody>
+                <tr data-row data-current="true">
+                  <td class="gg-lanes" rowspan="13" aria-hidden="true">
+                    <svg
+                      class="gg-svg"
+                      width="72"
+                      height="290"
+                      viewBox="0 0 72 290"
+                      aria-hidden="true"
+                      focusable="false"
+                    >
+                      <g class="gg-route" style="color: var(--gg-lane-0)"><path d="M 8 11 L 8 275" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 22 33 L 22 99" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-2)"><path d="M 36 77 L 36 143" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)"><path d="M 36 143 L 36 209" /></g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)">
+                        <path d="M 22 99 C 22 143, 8 143, 8 187" />
+                      </g>
+                      <g class="gg-route" style="color: var(--gg-lane-landed)">
+                        <path d="M 50 165 C 50 198, 8 198, 8 231" />
+                      </g>
+                      <g class="gg-route" style="color: var(--gg-lane-2)">
+                        <path d="M 36 209 C 36 242, 8 242, 8 275" />
+                      </g>
+                      <circle class="gg-dot" cx="8" cy="11" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="22" cy="33" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="8" cy="55" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="77" r="3.5" style="color: var(--gg-lane-2)" />
+                      <circle class="gg-dot" cx="22" cy="99" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="8" cy="121" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="143" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="50" cy="165" r="3.5" style="color: var(--gg-lane-landed)" />
+                      <circle class="gg-dot" cx="8" cy="187" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="36" cy="209" r="3.5" style="color: var(--gg-lane-2)" />
+                      <circle class="gg-dot" cx="8" cy="231" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="8" cy="253" r="3.5" style="color: var(--gg-lane-0)" />
+                      <circle class="gg-dot" cx="8" cy="275" r="3.5" style="color: var(--gg-lane-0)" />
+                    </svg>
+                  </td>
+                  <td class="gg-cell gg-subject" title="feat(graph): 已合入分支标注与折叠" style="padding-left: 22px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-head" title="HEAD → dev" translate="no">HEAD → dev</span></span
+                    ><span class="gg-sub" translate="no">feat(graph): 已合入分支标注与折叠</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 21:12</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 9f3e21a" translate="no">9f3e21a</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 超时宽限处理" style="padding-left: 36px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-branch" title="pi-agent-X7K2M9Q1" translate="no">pi-agent-X7K2M9Q1</span
+                      ><span
+                        class="gg-mbadge"
+                        title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 2 个提交在 dev 中都有补丁等价的提交"
+                        >已合入</span
+                      ></span
+                    ><span class="gg-sub" translate="no">fix: 超时宽限处理</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 19:20</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 51be9c3" translate="no">51be9c3</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="fix(hub): 合并判定缓存复核" style="padding-left: 36px">
+                    <span class="gg-sub" translate="no">fix(hub): 合并判定缓存复核</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 18:40</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 7a1c4d8" translate="no">7a1c4d8</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat: 批量设置入口" style="padding-left: 50px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-branch" title="pi-agent-PWJGMSN3" translate="no">pi-agent-PWJGMSN3</span
+                      ><span
+                        class="gg-mbadge"
+                        title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 3 个提交中有 1 个在 dev 中有补丁等价的提交；解冲突或修改后的 cherry-pick 可能计为未合入"
+                        >部分已合入 1/3</span
+                      ></span
+                    ><span class="gg-sub" translate="no">feat: 批量设置入口</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 16:44</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 d9a15e7" translate="no">d9a15e7</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 超时字段透传" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">fix: 超时字段透传</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 19:02</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 c0482f1" translate="no">c0482f1</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="docs: 更新 worktree-graph 方案" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">docs: 更新 worktree-graph 方案</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 15:03</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 4b9f0e2" translate="no">4b9f0e2</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 设置页滚动" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">fix: 设置页滚动</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-25 14:30</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 2f6c8b9" translate="no">2f6c8b9</button>
+                  </td>
+                </tr>
+                <tr data-row class="is-landed">
+                  <td class="gg-cell gg-subject" title="fix: 空态文案" style="padding-left: 64px">
+                    <span class="gg-refs"
+                      ><span class="gg-ref k-branch" title="pi-agent-R4T8Y2U6" translate="no">pi-agent-R4T8Y2U6</span
+                      ><span
+                        class="gg-mbadge"
+                        title="按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 2 个提交在 dev 中都有补丁等价的提交"
+                        >已合入</span
+                      ></span
+                    ><span class="gg-sub" translate="no">fix: 空态文案</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 20:11</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 b7743e0" translate="no">b7743e0</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="refactor(ui): 拆分 GraphLanes" style="padding-left: 64px">
+                    <span class="gg-sub" translate="no">refactor(ui): 拆分 GraphLanes</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 22:31</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 e2d8a61" translate="no">e2d8a61</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat: 设置页骨架" style="padding-left: 64px">
+                    <span class="gg-sub" translate="no">feat: 设置页骨架</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 21:05</td>
+                  <td class="gg-cell gg-author" translate="no">agent</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 98e02d4" translate="no">98e02d4</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="test: 提交图几何用例" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">test: 提交图几何用例</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-24 17:45</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 60c3b9f" translate="no">60c3b9f</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="chore: 升级依赖" style="padding-left: 50px">
+                    <span class="gg-sub" translate="no">chore: 升级依赖</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-23 11:20</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 85f1d2c" translate="no">85f1d2c</button>
+                  </td>
+                </tr>
+                <tr data-row>
+                  <td class="gg-cell gg-subject" title="feat(graph): 提交图首版" style="padding-left: 22px">
+                    <span class="gg-sub" translate="no">feat(graph): 提交图首版</span>
+                  </td>
+                  <td class="gg-cell gg-date" translate="no">2026-10-22 09:58</td>
+                  <td class="gg-cell gg-author" translate="no">bluecake</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button class="gg-hash" type="button" title="复制提交哈希 3d7aa04" translate="no">3d7aa04</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="gg-foot">200 commits · date-order · local refs, no fetch · fold off</p>
+        </section>
+      </div>
+    </section>
+    <script>
+      for (const b of document.querySelectorAll(".js-s1"))
+        b.addEventListener("click", () => {
+          for (const v of document.getElementById("s1-views").children) v.hidden = !v.hidden;
+        });
+    </script>
+  </body>
+</html>
