@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { wireCacheTtl, type CacheTtlWiring } from "../../src/cache-ttl/cache-ttl.js";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
-import type { CacheKeepaliveService } from "../../src/service/cache-keepalive.js";
+import type { CacheKeepaliveService } from "../../src/cache-ttl/keepalive-service.js";
 import { MAX_TTL_MS } from "../../src/cache-ttl/warmth.js";
 
 afterEach(() => {

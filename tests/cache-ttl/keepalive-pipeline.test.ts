@@ -16,7 +16,7 @@ import {
 } from "../../src/cache-ttl/keepalive-state.js";
 import type { PipelineDiag, PipelineOutcome } from "../../src/cache-ttl/pipeline-ping-types.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";
-import type { CacheKeepaliveDeps, CacheKeepaliveService } from "../../src/service/cache-keepalive.js";
+import type { CacheKeepaliveDeps, CacheKeepaliveService } from "../../src/cache-ttl/keepalive-service.js";
 import { createCacheKeepaliveService, diagOf, fakeSender, type FakeSender } from "./fake-pipeline.js";
 
 const SETTINGS: CacheTtlSettings = {

@@ -11,7 +11,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
-import { type CacheKeepaliveDeps, type CacheKeepaliveService } from "../../src/service/cache-keepalive.js";
+import { type CacheKeepaliveDeps, type CacheKeepaliveService } from "../../src/cache-ttl/keepalive-service.js";
 import { createCacheKeepaliveService } from "./fake-pipeline.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";
 import { renderKeepaliveReportLines } from "../../src/cache-ttl/keepalive-state.js";

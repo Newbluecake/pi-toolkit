@@ -153,7 +153,7 @@ import { wireConsult, type ConsultWiring } from "./consult/index.js";
 import type { ConsultForkStore } from "./consult/tool.js";
 import type { MainSessionFacts } from "./consult/main-facts.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
-import { createCacheKeepaliveService, type CacheKeepaliveService } from "./service/cache-keepalive.js";
+import { createCacheKeepaliveService, type CacheKeepaliveService } from "./cache-ttl/keepalive-service.js";
 import { getProviderEvidenceStore } from "./cache-ttl/provider-evidence.js";
 import { readBackKeepaliveSessionState } from "./cache-ttl/keepalive-state.js";
 import {

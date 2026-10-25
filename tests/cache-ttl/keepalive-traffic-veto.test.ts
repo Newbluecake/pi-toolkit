@@ -9,7 +9,7 @@
  */
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
-import type { CacheKeepaliveDeps, CacheKeepaliveService } from "../../src/service/cache-keepalive.js";
+import type { CacheKeepaliveDeps, CacheKeepaliveService } from "../../src/cache-ttl/keepalive-service.js";
 import { createCacheKeepaliveService, diagOf, fakeSender } from "./fake-pipeline.js";
 import type { PipelinePingInput, SendPipelinePing } from "../../src/cache-ttl/pipeline-ping-types.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";

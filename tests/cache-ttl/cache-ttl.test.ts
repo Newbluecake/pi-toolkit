@@ -7,7 +7,7 @@ import {
 } from "../../src/cache-ttl/keepalive-state.js";
 import { wireCacheTtl, legacyCapNote } from "../../src/cache-ttl/cache-ttl.js";
 import { DEFAULT_SETTINGS, loadSettings, parseCacheTtlSettings } from "../../src/config/settings.js";
-import type { KeepalivePort } from "../../src/service/cache-keepalive.js";
+import type { KeepalivePort } from "../../src/cache-ttl/keepalive-service.js";
 
 function setup(mode: "auto" | "on" | "off" = "auto", persist = vi.fn()) {
   const hooks = new Map<string, (event: any, ctx: any) => unknown>();

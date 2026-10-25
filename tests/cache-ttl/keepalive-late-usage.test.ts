@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { renderKeepaliveReportLines, type CapturedRequest } from "../../src/cache-ttl/keepalive-state.js";
 import { createProviderEvidenceStore, type ProviderEvidenceStore } from "../../src/cache-ttl/provider-evidence.js";
-import { createCacheKeepaliveService, type CacheKeepaliveDeps } from "../../src/service/cache-keepalive.js";
+import { createCacheKeepaliveService, type CacheKeepaliveDeps } from "../../src/cache-ttl/keepalive-service.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";
 import { fakePiStreamSimple } from "./fake-pipeline.js";
 

@@ -7,7 +7,7 @@ import { wireCacheTtl } from "../../src/cache-ttl/cache-ttl.js";
 import { readBackKeepaliveSessionState } from "../../src/cache-ttl/keepalive-state.js";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import { FakeClock } from "../../src/core/clock.js";
-import { type CacheKeepaliveService } from "../../src/service/cache-keepalive.js";
+import { type CacheKeepaliveService } from "../../src/cache-ttl/keepalive-service.js";
 import { createCacheKeepaliveService } from "../cache-ttl/fake-pipeline.js";
 
 const dirs: string[] = [];
