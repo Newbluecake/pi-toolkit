@@ -90,16 +90,16 @@ describe("external-agent messages (plan §2.11)", () => {
 
   it("capabilitiesText lists exactly the unavailable capabilities (§4.8)", () => {
     const both = capabilitiesText({ canSpawn: false, canMessage: false });
-    expect(both).toContain("Unavailable here: consulting experts, messaging other agents, spawning pi sub-agents.");
+    expect(both).toContain("Unavailable here: messaging other agents, spawning pi sub-agents.");
     expect(both).toContain("with full permissions in your working directory");
     expect(both).toContain("Write every finding into your final answer.");
     expect(capabilitiesText({ canSpawn: true, canMessage: false })).toContain(
-      "Unavailable here: consulting experts, messaging other agents.",
+      "Unavailable here: messaging other agents.",
     );
     expect(capabilitiesText({ canSpawn: false, canMessage: true })).toContain(
-      "Unavailable here: consulting experts, spawning pi sub-agents.",
+      "Unavailable here: spawning pi sub-agents.",
     );
-    expect(capabilitiesText({ canSpawn: true, canMessage: true })).toContain("Unavailable here: consulting experts.");
+    expect(capabilitiesText({ canSpawn: true, canMessage: true })).not.toContain("Unavailable here");
   });
 
   it("externalModelsPromptHeader mentions every limitation from §5.3", () => {

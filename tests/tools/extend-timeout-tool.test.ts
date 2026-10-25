@@ -257,7 +257,7 @@ describe("tools/extend-timeout-tool: rejection matrix (arch §4.4 — every refu
     );
     const message = await executeError(tool, { run_id: RUN_ID, extend_s: 60 });
     expect(message).toContain("has a fixed deadline (the system started it with a non-extendable time cap");
-    expect(message).toContain("consult, /goal verifier or RPC run, or a resume of one");
+    expect(message).toContain("/goal verifier or RPC run, or a resume of one");
     expect(message).toContain("it stops at its deadline (in 42s) and cannot be extended");
     expect(message).toContain("get_subagent_result"); // next step ①
     expect(message).toContain("abort_subagent and respawn with a larger timeout_s"); // next step ②

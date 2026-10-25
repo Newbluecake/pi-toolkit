@@ -198,7 +198,7 @@ function normalizeAlternatives(input: AlternativeInput): AlternativeSelection {
 /**
  * pi provider 被拦/告急时追加的外部 droid 池候选行（2026-10-15 用户拍板）：在 pi
  * 候选之后列有余量的 droid 池模型（core 池在前，每池分组标注），并注明执行语义——
- * 外部 droid、以完整权限运行、不是 pi 子 agent、不能当 consult/验收。
+ * 外部 droid、以完整权限运行、不是 pi 子 agent、不能当验收。
  * undefined / 空列表 / 全空池 ⇒ undefined（调用方输出与旧版字节一致）。
  */
 function droidPoolAdviceLine(pools: readonly DroidPoolAlternative[] | undefined): string | undefined {
@@ -209,7 +209,7 @@ function droidPoolAdviceLine(pools: readonly DroidPoolAlternative[] | undefined)
       (p) => `${p.models.join("、")}（${poolLabel(p.pool)} 池${p.fallback === true ? "，回落 Standard 计费" : ""}）`,
     );
   if (parts.length === 0) return undefined;
-  return `有余量的外部 Droid 池也可用：${parts.join("；")}。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。`;
+  return `有余量的外部 Droid 池也可用：${parts.join("；")}。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当验收。`;
 }
 
 /** 逐池清单状态文案（中文散文，面向模型的说明块；紧凑读数仍是英文 token）。

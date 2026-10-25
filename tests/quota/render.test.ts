@@ -1209,7 +1209,7 @@ describe("alternativesAdvice — external × 逐池清单 + 对称推荐（2026-
 
 describe("alternativesAdvice — droid pool supplement for blocked pi providers (2026-10-15 拍板)", () => {
   const DROID_LINE =
-    "有余量的外部 Droid 池也可用：droid/glm-5.3、droid/kimi-k3（Core 池）；droid/claude-opus-5-5（Standard 池）。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。";
+    "有余量的外部 Droid 池也可用：droid/glm-5.3、droid/kimi-k3（Core 池）；droid/claude-opus-5-5（Standard 池）。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当验收。";
   const POOLS = [
     { pool: "core" as const, models: ["droid/glm-5.3", "droid/kimi-k3"] },
     { pool: "standard" as const, models: ["droid/claude-opus-5-5"] },
@@ -1234,7 +1234,7 @@ describe("alternativesAdvice — droid pool supplement for blocked pi providers 
     expect(text).toBe(
       [
         "暂无 pi provider 替代候选（可检查 pi /model）。",
-        "有余量的外部 Droid 池也可用：droid/glm-5.3（Core 池）。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。",
+        "有余量的外部 Droid 池也可用：droid/glm-5.3（Core 池）。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当验收。",
         "按任务需求选；不胜任就按路由表另选合适模型，不必硬凑。",
       ].join("\n"),
     );

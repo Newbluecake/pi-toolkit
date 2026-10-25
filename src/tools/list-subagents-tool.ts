@@ -319,7 +319,7 @@ export function createListSubagentsTool(deps: {
       "parent/child nesting (nested Agent-tool children indented under their parent; workflow children listed " +
       "under their workflow) — plus the current concurrency pool occupancy (`slots: N/limit in use, K free`, " +
       "same accounting as the Agent tool's own trailer: a workflow itself never occupies a slot, its children " +
-      "do, consult forks never do). Call this BEFORE dispatching with the Agent tool to check for a free slot, " +
+      "do). Call this BEFORE dispatching with the Agent tool to check for a free slot, " +
       "and whenever you need a run_id or workflow id (wf_…) for get_subagent_result / steer_subagent / " +
       "abort_subagent / message_agent / extend_subagent_timeout without guessing a label. Set `recent` " +
       "(0-20, default 0) to also list the most recently finished runs, newest first — handy right after a " +

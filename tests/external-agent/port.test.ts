@@ -217,7 +217,7 @@ describe("createExternalAgentsPort", () => {
       });
       expect(spec.contextBlocks).toEqual([
         { kind: "memory", text: "MEMO" },
-        { kind: "capabilities", text: expect.stringContaining("consulting experts") },
+        { kind: "capabilities", text: expect.not.stringContaining("consulting experts") },
       ]);
       expect(spec.degraded).toEqual(["schema_text", "message_agent", "nested_agent", "type_tools_ignored"]);
       expect(spec.persistTranscript).toBe(false);

@@ -920,7 +920,7 @@ describe("evaluateQuotaGate / pickAlternatives — pi blocked × droid pool supp
     expect(msg).toContain(
       "有余量的外部 Droid 池也可用：droid/glm-5.3、droid/kimi-k3（Core 池）；droid/claude-opus-5-5（Standard 池）。",
     );
-    expect(msg).toContain("不能当 consult/验收");
+    expect(msg).toContain("不能当验收");
     const piIdx = msg.indexOf("替代候选（订阅优先）：kimi-coding。");
     expect(piIdx).toBeGreaterThan(-1);
     expect(piIdx).toBeLessThan(msg.indexOf("有余量的外部 Droid 池也可用"));

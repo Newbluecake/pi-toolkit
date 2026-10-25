@@ -924,7 +924,7 @@ describe("createQuotaHintHook — droid pool supplement for blocked pi providers
     );
     expect(piIdx).toBeGreaterThan(-1);
     expect(droidIdx).toBeGreaterThan(piIdx);
-    expect(content).toContain("不能当 consult/验收");
+    expect(content).toContain("不能当验收");
   });
 
   it("droid supplement absent/empty ⇒ the injected block is byte-identical to the legacy one", () => {
