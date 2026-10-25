@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-25
+
+### Added
+
+- **schedule**: wire scheduled tasks end to end (`e618b862`)
+- **web-hub**: hub-side coordinator for scheduled tasks (`69170deb`)
+- **schedule**: scheduler for timed messages (`d7124d4e`)
+- **schedule**: schedule tool, /schedule command, prompt section and status bar (`0658b8ac`)
+- **schedule**: background executor for scheduled tasks (`74c53459`)
+- **web-hub**: preview paths shown in ask_user dialogs (`b3e27566`)
+- **schedule**: wire scheduled tasks into the pi session (off by default) (`85961b04`)
+- **feishu**: deliver scheduled task reports and missed-run notices (`7766997b`)
+- **schedule**: core scheduling, state ledger and recovery for scheduled tasks (`47d07e95`)
+- **web-hub**: add the scheduled tasks panel (`b272dfb9`)
+- **schedule**: define the contracts for hub-hosted scheduled tasks (`ec4297b0`)
+- **web-hub**: record command output in the session history (`1e5633fe`)
+- **web-hub**: show command records as cards in the transcript (`a48559ea`)
+- **web-hub**: let the hub announce command history and serve brand-new sessions (`b6cff217`)
+- **secure**: check the mount location before convert or import asks anything (`17d031ca`)
+- **web-hub**: define the command history record and its projection (`e33b984f`)
+- **secure**: wire convert, export and import into pi-secure (`3f3bc1a5`)
+- **web-hub**: archive finished agents and bash jobs (`998dce27`)
+- **fabric**: show the sending agent's name on subagent messages (`390a349b`)
+- **web-hub**: show providers and add sorting in the model picker (`93cc06cb`)
+- **secure**: add the convert flow that turns a project into a vault (`ad6c8b6a`)
+- **secure**: add vault export, import and relocation (`473b8a8f`)
+- **secure**: add the directory engine for converting a project into a vault (`c35b5052`)
+- **secure**: add the encrypted vault archive format (`31257b92`)
+- **secure**: add session and memory copying for vault conversion (`2b97f87d`)
+- **secure**: let lock clean up private sessions whose supervisor died (`e7345193`)
+- **secure**: wire private instances into pi-secure commands (`ed33894e`)
+- **secure**: keep the web hub out of private namespace sessions (`0f2a386a`)
+- **secure**: add the private mount namespace launcher core (`3c53c3fd`)
+- **secure**: mount vaults at ~/secure/<name> so pi shows a short path (`ea38a8b1`)
+- **traffic**: wire the traffic recorder into the toolkit (`e53deb12`)
+- **traffic**: attribute requests by ticket and harden the recorder page (`6e75de9c`)
+- **web-hub**: highlight large virtual previews in a worker (`93291695`)
+- **web-hub**: virtualize large source previews with in-window find (`8ab06bb4`)
+- **web-hub**: add line index, window and find logic for virtual previews (`a229c3d4`)
+- **traffic**: give the recorder a per-process lifecycle (still unwired) (`23b9f579`)
+- **web-hub**: add virtual code renderer for large previews (unwired) (`ed0bb8fa`)
+- **web-hub**: freeze virtual preview source and find interfaces (`3c0deb88`)
+- **secure**: guard pi-secure vault sessions inside the plugin (`799f9ee4`)
+- **traffic**: import pi-traffic-record sources as src/traffic (unwired) (`7d2a9ce4`)
+- **secure**: add pi-secure launcher for gocryptfs session vaults (`6c24e813`)
+- **web-hub**: mirror quiet cross-session messages to bound Feishu chats (`933b1f46`)
+- **web-hub**: Feishu cards for quiet cross-session messages (`22a2a0aa`)
+- **web-hub**: compact session list showing directory, title, alias and run state (`e905c935`)
+- **web-hub**: observe quiet cross-session deliveries in the hub router (`86964010`)
+- **web-hub**: show line numbers in source previews (`72fa2abe`)
+
+### Fixed
+
+- **ask-user**: send only one answer for a single-choice question (`e4d3e192`)
+- **secure**: clean up after a failed pi-secure init (`e2e66bb2`)
+- **web-hub**: allow deselecting a single-choice ask_user answer (`4afe376c`)
+- **web-hub**: stop indenting the first line of code blocks (`b807d698`)
+- **secure**: re-verify the backup when convert pauses before committing (`a490bcc9`)
+- **web-hub**: show the output of commands that finish asynchronously (`56c71cae`)
+- **web-hub**: label subagent messages as message instead of fabric (`8910d145`)
+- **web-hub**: align the archived folds in the Agents and Bash lists (`dbfbd958`)
+- **quota**: stop forecast-only notices from reading as low-quota warnings (`37fb7615`)
+- **web-hub**: align the parked-question notice with the composer column (`679c9818`)
+
+### Changed
+
+- **secure**: expose launcher building blocks for vault conversion (`e249fc6d`)
+- **web-hub**: stop the freeze when opening 20-30 KB code previews (`1dcca7d4`)
+- **web-hub**: stop window drags from restyling whole preview contents (`1e768c70`)
+
+### Documentation
+
+- document scheduled tasks and recent features in the READMEs (`86111c4c`)
+- **skills**: stop mounting consult experts; subagents ask the parent instead (`bbb88ba1`)
+- **dev-flow**: add kimi-k3 as a planning fallback (`e54c14ad`)
+- **dev-flow**: prefer kimi-k3 for frontend work and drop the droid line (`e73dfa59`)
+- **schedule**: plan session-aware scheduled tasks with Feishu reports (`4608928b`)
+- **secure**: document private mode and its acceptance steps (`13115159`)
+- **secure**: plan private mode, vault conversion and export/import (`446857a1`)
+- **traffic**: document the merged traffic recorder (`7b93c9b6`)
+- **secure**: record the private mount namespace feasibility probe (`979faab9`)
+- **secure**: document pi-secure vault sessions and their acceptance (`8609f7fd`)
+- **web-hub**: plan large-file preview performance work (`841d07c1`)
+- **traffic**: plan merging pi-traffic-record into the toolkit (`a339f820`)
+- **secure**: plan a pragmatic gocryptfs vault for encrypted sessions (`8918c184`)
+- **web-hub**: plan Feishu mirroring of quiet cross-session messages (`dba5dc7e`)
+
+### Tests
+
+- **web-hub**: integration and conformance coverage for command history (`8a23b236`)
+- fix two integration tests broken by recent features (`3acdd1d9`)
+- **traffic**: pin the pi behavior the recorder relies on (`88871ab1`)
+- **web-hub**: gate the preview perf probe and add the acceptance checklist (`2c721f1d`)
+- **web-hub**: keep the preview probe from overwriting its baseline (`ca876a11`)
+- **web-hub**: add a real-build preview performance probe and baseline (`edb8639a`)
+- **secure**: probe gocryptfs behaviour the vault launcher relies on (`8383a481`)
+
+Stats: 46 feat, 10 fix, 3 refactor/perf, 14 docs, 7 test
+
 ## [0.8.0] - 2026-10-23
 
 ### Added
@@ -1037,7 +1136,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.3...v0.7.0
