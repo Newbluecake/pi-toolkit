@@ -12,6 +12,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -203,7 +204,17 @@ describe("traffic off：零注册、零 IO、不加载 node:sqlite", () => {
     const report = await child.next((m) => m.scenario === "on-print");
     const exit = await child.exited;
     expect(exit.code).toBe(0);
-    expect(report).toMatchObject({ sqliteBefore: false, sqliteAfter: true, dbExists: true, rows: 3, server: false });
+    // 子进程内的 `rows` 只是「write-behind 队列刚被读到时」的瞬时值（ledger 由 setImmediate tick 落库，
+    // 与读取谁先谁后取决于调度，高并发下会读到 0）——不在子进程里断言；确定性证据是：进程自然退出之后
+    // 磁盘上确有 3 行（即 print 模式无 shutdown 也不丢记录）。
+    expect(report).toMatchObject({ sqliteBefore: false, sqliteAfter: true, dbExists: true, server: false });
+    const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect((db.prepare("SELECT COUNT(*) c FROM requests").get() as { c: number }).c).toBe(3);
+    } finally {
+      db.close();
+    }
     expect(child.stderr().match(/ExperimentalWarning/g)?.length).toBe(1);
   }, 30_000);
 });
