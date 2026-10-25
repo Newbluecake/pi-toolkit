@@ -42,6 +42,7 @@ import {
   type RunTxReason,
 } from "../protocol/run-transcript.js";
 import type { HubLog, ListenerKind, RegistryView, RunSink, RunTranscriptService } from "./ports.js";
+import { deadlineRace } from "./req-deadline.js";
 import { sendJsonNegotiated } from "./gzip.js";
 import { HubError } from "./registry.js";
 import type { SseClient, SseEventName, SseHub } from "./sse.js";
@@ -104,20 +105,7 @@ function isRunId(v: string): boolean {
 const runKeyOf = (agentKey: string, runId: string): string => `${agentKey}|${runId}`;
 
 function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new HubError("E_DEADLINE")), ms);
-    timer.unref?.();
-    p.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      (e: unknown) => {
-        clearTimeout(timer);
-        reject(e);
-      },
-    );
-  });
+  return deadlineRace(p, ms, () => new HubError("E_DEADLINE"));
 }
 
 function field(body: unknown, name: string): string | undefined {

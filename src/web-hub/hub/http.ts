@@ -180,6 +180,7 @@ import {
   BODY_RESERVE_MS,
   computeAgentBudgets,
   createReqDeadline,
+  deadlineRace,
   deriveBudget,
   FORWARD_MIN_REMAINING_MS,
   LAN_AUTH_CAP_MS,
@@ -356,20 +357,7 @@ function statusFor(code: string): number {
 }
 
 function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(Object.assign(new Error("E_DEADLINE"), { code: "E_DEADLINE" })), ms);
-    timer.unref?.();
-    p.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      (e: unknown) => {
-        clearTimeout(timer);
-        reject(e);
-      },
-    );
-  });
+  return deadlineRace(p, ms, () => Object.assign(new Error("E_DEADLINE"), { code: "E_DEADLINE" }));
 }
 
 /**

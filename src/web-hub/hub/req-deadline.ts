@@ -53,6 +53,34 @@ export async function raceDeadline<T>(promise: Promise<T>, ms: number): Promise<
   ]);
 }
 
+/**
+ * Promise-vs-timer race shared by the hub's private `withDeadline` wrappers. Structure is the
+ * hand-written form (timer first, then `p.then(resolve+clear, reject+clear)`) — deliberately NOT
+ * `Promise.race`, so each wrapper keeps its exact settle timing. `onTimeout` builds the rejection
+ * reason; `mapReject` (optional) maps a rejection of `p`, synchronously, with no extra microtask hop.
+ */
+export function deadlineRace<T>(
+  p: Promise<T>,
+  ms: number,
+  onTimeout: () => unknown,
+  mapReject?: (e: unknown) => unknown,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(onTimeout()), ms);
+    timer.unref?.();
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(timer);
+        reject(mapReject ? mapReject(e) : e);
+      },
+    );
+  });
+}
+
 /** `max(0, min(cap, remaining - reserve))` — the one formula every §3.3 step budget is built from. */
 export function deriveBudget(remaining: number, cap: number, reserve: number): number {
   return Math.max(0, Math.min(cap, remaining - reserve));
