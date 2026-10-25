@@ -141,3 +141,25 @@ describe("detail namespace — todo-archive fold tail keys (todo-archive v2.1 §
     expect(zh["todoArchived"]).toBe("已归档 {n} 项");
   });
 });
+
+// 2026-10-25 用户要求「对齐语言」：抽屉 Bash 分组标题的计数段在 zh 下改为中文（标签在前，与「已归档 {n}」
+// 折叠行一致）；en 保持紧凑英文 token。
+describe("detail namespace — Bash group count segments follow the locale", () => {
+  const en = MESSAGES.en["detail"] as Record<string, string>;
+  const zh = MESSAGES.zh["detail"] as Record<string, string>;
+
+  it("zh reads 运行中 / 已完成 / 失败 / 已归档, en keeps the compact tokens", () => {
+    expect([zh["bashJobsRunning"], zh["bashJobsDone"], zh["bashJobsFailed"], zh["bashJobsArchived"]]).toEqual([
+      "运行中 {n}",
+      "已完成 {n}",
+      "失败 {n}",
+      "已归档 {n}",
+    ]);
+    expect([en["bashJobsRunning"], en["bashJobsDone"], en["bashJobsFailed"], en["bashJobsArchived"]]).toEqual([
+      "{n} running",
+      "{n} done",
+      "{n} failed",
+      "{n} archived",
+    ]);
+  });
+});

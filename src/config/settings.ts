@@ -9,6 +9,8 @@ import type { WorktreeSettings } from "../extensions/worktree-settings.js";
 import { MAX_SAFE_KEEPALIVE_INTERVAL_MS } from "../cache-ttl/keepalive-state.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 import { parseStrictModelRef } from "./model-hint.js";
+import { getSecureDomain, statePathsOf } from "../secure/domain.js";
+import { withSettingsFileLock, writeSettingsFileAtomic } from "../secure/settings-lock.js";
 import {
   DEFAULT_FORCE_THRESHOLD_PERCENT,
   DEFAULT_HINT_THRESHOLD_PERCENT,
@@ -49,6 +51,8 @@ export interface WebHubProxySettings {
  */
 export interface FeishuBotSettings {
   securityAlerts?: boolean;
+  /** Mirror non-waking cross-session messages to bound p2p chats (default on; hub-start frozen). */
+  xsMirror?: boolean;
   enabled: boolean;
   allowGroups: boolean;
   /** V8-confirmed: a group @-bot outside a topic opens + binds a topic */
@@ -277,7 +281,7 @@ export interface BashJobsSettings {
   shutdownPolicy: "keep" | "kill";
   /** Job state/log root; each session uses a sanitized child directory. */
   dir?: string;
-  /** Shell used to run job commands. 2026-10-17 revision: when unset, the resolution mirrors pi's built-in bash tool — pi's own `shellPath` setting (`~`-expanded, project over global) → pi's default chain (/bin/bash → bash on PATH → sh); `$SHELL` is never consulted. Allow-listed basenames (bash/zsh/sh) apply to both explicit paths. */
+  /** Shell used to run job commands. 2026-10-17 revision: when unset, the resolution mirrors pi's built-in bash tool — pi's own `shellPath` setting (`~`-expanded, project over global) → pi's default chain (/bin/bash → bash on PATH → sh); `$SHELL` is never read. Allow-listed basenames (bash/zsh/sh) apply to both explicit paths. */
   shellPath?: string;
   /** bash-timeout-grace §5.1 (U1): subagent/child sessions get the bash override + `bash_job` tool registered. Default true; `false` = child sessions stay on today's behavior (no auto-background, no bash_job, no settle hold). */
   childSessions: boolean;
@@ -386,32 +390,6 @@ export interface CacheTtlSettings {
   childKeepaliveRunBudgetUsd: number;
   /** 全进程滚动 24h 保活美元预算；`0` = 子会话不 ping。Default 10，钳位 [0, 10000]。 */
   childKeepaliveProcessBudgetUsd: number;
-}
-
-/**
- * consult（docs/dev/consult/plan.md §4.6，冻结面）：轮内同步请教。七个字段，
- * 逐字段容错解析见 parseConsultSettings（never throws）。预检与累计帽是
- * **两个**值（方案 §15 #4）：共用一个值时 est 可以合法逼近 cap（如 $1.9 / cap $2），
- * 第一个 turn 结束即越帽 ⇒ maxTurns 退化为 1；$2/$4 保证 est 打满预检线时仍余
- * ≥ 1 个同量级 turn 的预算（P0-α③ 实测：150k 上下文专家首请求 $1.23）。
- * 内部常量（故意不进 settings，防旋钮 creep）：FORK_TTL_MS = 24h、
- * CONSULT_MAX_CONTEXT_PERCENT = 75、CONSULT_MAX_GLOBAL_INFLIGHT = 8。
- */
-export interface ConsultSettings {
-  /** 总开关。false = 不注入 consult 工具；派发后被关则工具返回 unavailable nack。Default true。 */
-  enabled: boolean;
-  /** 请教 run 的固定截止（budgetOverride.totalMs 且无 timeoutPolicy ⇒ 解析为 fixed，maxTotalFactor=1，无宽限无延长）。Default 150s。 */
-  timeoutMs: number;
-  /** 回答截断上限（同时写进问题 prompt 的指令）。Default 6000。 */
-  maxAnswerChars: number;
-  /** 轮次上限：第 maxTurns+1 个 turn 开始时 abort（turn 边界判定）。Default 3。 */
-  maxTurns: number;
-  /** fork 前的首请求成本预检阈值（USD）；0 = 关闭预检。Default 2。 */
-  maxFirstRequestUsd: number;
-  /** 累计成本帽（USD，turn 边界判定）；0 = 关闭成本帽。Default 4。 */
-  maxCostUsd: number;
-  /** 每提问方 in-flight consult 上限。Default 2。 */
-  maxConcurrent: number;
 }
 
 /**
@@ -548,7 +526,7 @@ export interface ReloadSettings {
  * policy when the concurrency pool is already full. Default is `false`
  * (reject immediately, no queueing); `true` restores the pre-L1 queue-wait
  * behavior (subject to `budget.queueWaitS`'s own timeout). Workflow children
- * (src/workflow/) and every other spawn path (consult, /task, resume) never
+ * (src/workflow/) and every other spawn path (/task, resume) never
  * read this setting — they always queue, unaffected by this toggle.
  */
 export interface AgentDispatchSettings {
@@ -705,8 +683,6 @@ export interface AgentSettings {
   load: LoadSettings;
   /** /goal 目标驱动持续运行（goal-plan v4）。 */
   goal: GoalSettings;
-  /** consult：轮内同步请教（consult plan §4.6）。 */
-  consult: ConsultSettings;
   /** Merged plugins (plugin-merge): HUD footer takeover. Default on; `enabled:false` leaves pi's built-in footer untouched. */
   hud: HudSettings;
   /** web-hub browser UI (plan 包 I). Default OFF: when disabled there is zero wiring, zero network, zero disk. */
@@ -739,11 +715,112 @@ export interface AgentSettings {
   externalAgents: ExternalAgentsSettings;
   /** 飞书机器人（feishu-bot plan v2 §9）：hub 侧长连接 bot。默认关闭 ⇒ 零接线、零行为变化。 */
   feishuBot: FeishuBotSettings;
+  /** 流量录制（traffic-merge plan §2.2）：默认 enabled=false ⇒ 零注册、零 IO、零全局符号。全部非 live（/reload 生效）。 */
+  traffic: TrafficSettings;
+  /** 定时任务（scheduled-reports plan r3 §10.3）：默认 enabled=false ⇒ 零面。全部非 live（/reload；涉及 hub 的还需 /webhub restart）。 */
+  schedule: ScheduleSettings;
 }
 
 /** Simple on/off settings group shared by the merged plugins (webSearch / todo). */
 export interface EnabledGroup {
   enabled: boolean;
+}
+
+// ── 流量录制（traffic-merge plan §2.2）：设置形状 / 默认值 / 解析。全部非 live。 ──
+
+export interface TrafficWebSettings {
+  /** 绑定地址（拍板②）：默认仅回环；`"0.0.0.0"` = LAN 显式 opt-in。 */
+  host: "127.0.0.1" | "0.0.0.0";
+  /** 起始端口（占用自增，最多 20 次）。 */
+  port: number;
+}
+export interface TrafficSettings {
+  /** 总开关，默认 false。off ⇒ 不调用任何 wire 函数；secure/locked 域强制 false（§6）。 */
+  enabled: boolean;
+  /** 子会话请求是否落库（拍板①，默认 true）：为 false 时子会话钩子仍注册（票据仍用于改写归属），只是不写行。 */
+  childSessions: boolean;
+  web: TrafficWebSettings;
+}
+export const DEFAULT_TRAFFIC_SETTINGS: TrafficSettings = {
+  enabled: false,
+  childSessions: true,
+  web: { host: "127.0.0.1", port: 4177 },
+};
+/** 解析 `traffic` 组：逐字段回落默认，永不抛错（web.host 只接受两个枚举值，端口整数 1024..65535）。 */
+export function parseTrafficSettings(input: unknown): TrafficSettings {
+  const d = DEFAULT_TRAFFIC_SETTINGS;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...d, web: { ...d.web } };
+  const value = input as Record<string, unknown>;
+  const webInput = value.web;
+  const web =
+    webInput && typeof webInput === "object" && !Array.isArray(webInput) ? (webInput as Record<string, unknown>) : {};
+  const host = web.host;
+  const port = web.port;
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : d.enabled,
+    childSessions: typeof value.childSessions === "boolean" ? value.childSessions : d.childSessions,
+    web: {
+      host: host === "0.0.0.0" ? "0.0.0.0" : d.web.host,
+      port: typeof port === "number" && Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : d.web.port,
+    },
+  };
+}
+
+// ── 定时任务（scheduled-reports plan r3 §10.3，S0 冻结面）：设置形状 / 默认值 / 解析。全部非 live。 ──
+//
+// `src/config/settings.ts` may NOT value-import the schedule modules (tests/web-hub/boundary.test.ts
+// freezes this file's import closure); the ranges below are literal mirrors of
+// `src/schedule/core/spec.ts`'s SCHED_BG_TIMEOUT_* constants — parity pinned by
+// tests/config/schedule-settings.test.ts.
+
+/** Hard floor / ceiling (ms) for both timeout knobs; the stored file keys are integer seconds (`*S`). */
+export const SCHEDULE_TIMEOUT_MIN_MS = 60_000;
+export const SCHEDULE_TIMEOUT_MAX_MS = 14_400_000;
+
+export interface ScheduleSettings {
+  /** 总开关，默认 false ⇒ 零面（工具/命令/段/HubConfig/旧文件写入全部不变）。 */
+  enabled: boolean;
+  /** storeDir 覆盖（绝对路径，JSON-only，不进 SETTING_SPECS——bashJobs.dir 同款）；缺省 = `<agentDir>/schedules`（A0 解析并做 vault 双检）。 */
+  dir?: string;
+  /** background 任务未指定 `timeoutS` 时的默认值（文件键 `schedule.defaultTimeoutS`，秒）。默认 1800s；总是 ≤ maxTimeoutMs。 */
+  defaultTimeoutMs: number;
+  /** 任务 `timeoutS` 上限（文件键 `schedule.maxTimeoutS`，秒）。默认且硬上限 14400s。 */
+  maxTimeoutMs: number;
+}
+export const DEFAULT_SCHEDULE_SETTINGS: ScheduleSettings = {
+  enabled: false,
+  defaultTimeoutMs: 1_800_000,
+  maxTimeoutMs: SCHEDULE_TIMEOUT_MAX_MS,
+};
+/**
+ * 解析 `schedule` 组（已过 normalizeTimeUnits：`*S` 文件键此时是 `*Ms` 毫秒）：逐字段回落默认，永不抛错。
+ * 时长须为整秒（ms % 1000 === 0）且落在 [60s, 14400s]；`dir` 只接受无 NUL 的绝对路径。
+ * 最后把 defaultTimeoutMs 收敛到 ≤ maxTimeoutMs。
+ */
+export function parseScheduleSettings(input: unknown): ScheduleSettings {
+  const d = DEFAULT_SCHEDULE_SETTINGS;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...d };
+  const value = input as Record<string, unknown>;
+  const timeout = (raw: unknown, fallback: number): number =>
+    typeof raw === "number" &&
+    Number.isInteger(raw) &&
+    raw % 1000 === 0 &&
+    raw >= SCHEDULE_TIMEOUT_MIN_MS &&
+    raw <= SCHEDULE_TIMEOUT_MAX_MS
+      ? raw
+      : fallback;
+  const maxTimeoutMs = timeout(value.maxTimeoutMs, d.maxTimeoutMs);
+  const defaultTimeoutMs = Math.min(timeout(value.defaultTimeoutMs, d.defaultTimeoutMs), maxTimeoutMs);
+  const dir =
+    typeof value.dir === "string" && value.dir.startsWith("/") && !value.dir.includes("\0") && value.dir.length <= 4096
+      ? value.dir
+      : undefined;
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : d.enabled,
+    ...(dir === undefined ? {} : { dir }),
+    defaultTimeoutMs,
+    maxTimeoutMs,
+  };
 }
 
 // ── 外部 agent（external-agent plan §2.8，冻结面）：设置形状 / 默认值 / 解析 ──
@@ -1197,6 +1274,7 @@ export const DEFAULT_FEISHU_BOT_SETTINGS: FeishuBotSettings = {
   allowGroups: true,
   groupRootTopics: false,
   securityAlerts: true,
+  xsMirror: true,
   notify: "bound",
   spawnScope: "known",
   debounceMs: 1_500,
@@ -1432,17 +1510,6 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     untilCmdTimeoutMs: 300_000,
     deliveryWatchdogMs: 30_000,
   },
-  consult: {
-    enabled: true,
-    // 默认 10min（2026-10-04 用户调整，原 150s 对真实专家咨询偏紧）。
-    timeoutMs: 600_000,
-    // 2026-10-18 用户裁定：2000 截断过紧（真实回答被截半），放宽到 6000。
-    maxAnswerChars: 6_000,
-    maxTurns: 3,
-    maxFirstRequestUsd: 2,
-    maxCostUsd: 4,
-    maxConcurrent: 2,
-  },
   hud: { enabled: true, autoFetchMinutes: 5 },
   webHub: {
     enabled: false,
@@ -1461,6 +1528,11 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     // web-hub-slash-args plan §5 (§11 D1 拍板): / 命令参数提示与补全，默认 all（含第三方命令，
     // 经 TUI autocomplete provider）；non-live（/reload 后 /webhub restart）。
     commandComplete: "all",
+    // web-hub-cmd-history plan §4.9 (A1): command-output history cards persisted as
+    // `subagent:cmd` session entries. Default ON (Q1–Q5 rulings); `false` ⇒ no recorder, no
+    // feature token, nothing written (`/reload` to take effect). NOTE the accepted residual:
+    // command output is persisted VERBATIM (incl. e.g. `?token=` URLs — plan §5.3).
+    cmdHistory: true,
     uploads: "on",
     preview: "on",
     avatar: true,
@@ -1472,6 +1544,11 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     // on/off for its OWN load sampler (`buildHubConfig` writes `config.load` only when BOTH
     // this and `load.enabled` are true, §7.2). Default true.
     load: true,
+    // web-hub archive plan (docs/dev/web-hub/archive-report.md): auto-archive TERMINAL fleet
+    // rows / bash rows after N minutes (default 30). 0 disables the sweep; manual archive from
+    // the web drawer always works. AGENT-side only (never read by buildHubConfig) — a change
+    // needs `/reload` (picked up at the next stack build), NOT `/webhub restart`.
+    archiveAfterMin: 30,
     lan: DEFAULT_WEBHUB_LAN_SETTINGS,
     spawn: DEFAULT_WEBHUB_SPAWN_SETTINGS,
     // web-hub-proxy plan v2 §5 (X0): off by default, non-live.
@@ -1540,6 +1617,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   topicSwitch: { ...DEFAULT_TOPIC_SWITCH_SETTINGS },
   externalAgents: { droid: { ...DEFAULT_EXTERNAL_AGENTS_SETTINGS.droid } },
   feishuBot: { ...DEFAULT_FEISHU_BOT_SETTINGS, files: { ...DEFAULT_FEISHU_BOT_SETTINGS.files } },
+  traffic: { ...DEFAULT_TRAFFIC_SETTINGS, web: { ...DEFAULT_TRAFFIC_SETTINGS.web } },
+  schedule: { ...DEFAULT_SCHEDULE_SETTINGS },
 };
 /** Parse the optional `agent` settings block (L1). Field-by-field fallback to defaults, never throws. */
 export function parseAgentDispatchSettings(input: unknown): AgentDispatchSettings {
@@ -1604,7 +1683,6 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "goal.evalTimeoutMs",
   "goal.untilCmdTimeoutMs",
   "goal.deliveryWatchdogMs",
-  "consult.timeoutMs",
   "memory.tidy.timeoutMs",
   "memory.tidy.batch.totalTimeoutMs",
   "cacheTtl.keepaliveIntervalMs",
@@ -1636,6 +1714,9 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "externalAgents.droid.requestTimeoutMs",
   "externalAgents.droid.initTimeoutMs",
   "externalAgents.droid.killGraceMs",
+  // 定时任务（scheduled-reports plan r3 §10.3）：文件键 `schedule.defaultTimeoutS` / `schedule.maxTimeoutS`（秒）。
+  "schedule.defaultTimeoutMs",
+  "schedule.maxTimeoutMs",
 ];
 
 const TIME_SETTING_SECONDS_PATHS: ReadonlySet<string> = new Set(TIME_SETTING_MS_PATHS.map(secondsKeyOf));
@@ -1654,6 +1735,36 @@ export function isTimeSettingKey(secondsKey: string): boolean {
  * silently here; `loadSettingsFromFile` is the one that WARNs and rewrites.
  */
 export function loadSettings(source: unknown): AgentSettings {
+  return applySecureDomainOverrides(parseSettingsSource(source));
+}
+
+/**
+ * data-encryption plan r4 §2.4 step 2: an encrypted (secure) process forces in-vault roots and turns
+ * off the toolkit's active pushes (D8), whatever the user file says; a locked process keeps D8 off
+ * too. Both settings entry points (`loadSettingsFromFile` / `readSettingsNoMigrate`) end here.
+ * Plain or no verdict (hub process, unit tests) ⇒ the SAME object back (byte-identical). Every
+ * nested object touched is cloned — `DEFAULT_SETTINGS` is never mutated.
+ */
+function applySecureDomainOverrides(settings: AgentSettings): AgentSettings {
+  const domain = getSecureDomain();
+  if (domain === undefined || domain.kind === "plain") return settings;
+  const out: AgentSettings = {
+    ...settings,
+    fabric: { ...settings.fabric, crossSession: { ...settings.fabric.crossSession, enabled: false } },
+    externalAgents: { ...settings.externalAgents, droid: { ...settings.externalAgents.droid, enabled: false } },
+    feishuNotify: { ...settings.feishuNotify, enabled: false },
+    // traffic-merge plan §6：加密/锁定域禁止流量落库（唯一落库闸口 persist 另有每次复查）。
+    traffic: { ...settings.traffic, enabled: false },
+  };
+  if (domain.kind === "secure") {
+    const paths = statePathsOf(domain.vault);
+    out.bashJobs = { ...settings.bashJobs, dir: paths.bashJobs };
+    out.workflow = { ...settings.workflow, journalDir: paths.workflows };
+  }
+  return out;
+}
+
+function parseSettingsSource(source: unknown): AgentSettings {
   if (source === null || typeof source !== "object") return { ...DEFAULT_SETTINGS, budget: { ...DEFAULT_BUDGET } };
   const value = normalizeTimeUnits(source as Record<string, unknown>, TIME_SETTING_MS_PATHS);
   const budget =
@@ -1754,7 +1865,6 @@ export function loadSettings(source: unknown): AgentSettings {
     load: parseLoadSettings(value.load),
     extend: parseExtendSettings(value.extend),
     goal: parseGoalSettings(value.goal),
-    consult: parseConsultSettings(value.consult),
     hud: parseHudSettings(value.hud),
     webHub: parseWebHubSettings(value.webHub),
     webSearch: parseEnabledGroup(value.webSearch, DEFAULT_SETTINGS.webSearch),
@@ -1770,45 +1880,9 @@ export function loadSettings(source: unknown): AgentSettings {
     topicSwitch: parseTopicSwitchSettings(value.topicSwitch),
     externalAgents: parseExternalAgentsSettings(value.externalAgents),
     feishuBot: parseFeishuBotBlock(value.feishuBot).feishuBot,
+    traffic: parseTrafficSettings(value.traffic),
+    schedule: parseScheduleSettings(value.schedule),
   });
-}
-
-/**
- * consult settings 块解析（plan §4.6）：逐字段容错、never throws（parseGoalSettings
- * 同款风格）。数字须 finite 且 ≥ 0；计数/时长字段要求整数；美元阈值允许小数
- * （exactOptionalPropertyTypes：七个字段总是存在，不设可选键）。
- */
-export function parseConsultSettings(input: unknown): ConsultSettings {
-  const defaults = DEFAULT_SETTINGS.consult;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
-  const value = input as Record<string, unknown>;
-  const num = (raw: unknown, fallback: number): number =>
-    typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : fallback;
-  const int = (raw: unknown, fallback: number): number =>
-    typeof raw === "number" && Number.isFinite(raw) && Number.isInteger(raw) && raw >= 0 ? raw : fallback;
-  return {
-    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
-    // totalMs 固定预算：0 会退回默认预算（可宽限/延长），所以下界是 1ms 而不是 0。
-    timeoutMs: (() => {
-      const parsed = int(value.timeoutMs, defaults.timeoutMs);
-      return parsed > 0 ? parsed : defaults.timeoutMs;
-    })(),
-    maxAnswerChars: (() => {
-      const parsed = int(value.maxAnswerChars, defaults.maxAnswerChars);
-      return parsed > 0 ? parsed : defaults.maxAnswerChars;
-    })(),
-    maxTurns: (() => {
-      const parsed = int(value.maxTurns, defaults.maxTurns);
-      return parsed > 0 ? parsed : defaults.maxTurns;
-    })(),
-    // 两个美元阈值允许 0（= 关闭对应闸门），故走 num 而不是「> 0 才收」。
-    maxFirstRequestUsd: num(value.maxFirstRequestUsd, defaults.maxFirstRequestUsd),
-    maxCostUsd: num(value.maxCostUsd, defaults.maxCostUsd),
-    maxConcurrent: (() => {
-      const parsed = int(value.maxConcurrent, defaults.maxConcurrent);
-      return parsed > 0 ? parsed : defaults.maxConcurrent;
-    })(),
-  };
 }
 
 /**
@@ -2666,6 +2740,8 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     steerRecall: typeof record.steerRecall === "boolean" ? record.steerRecall : (defaults.steerRecall ?? true),
     // web-hub-slash-args plan §5 (P0): tri-valued, any other value falls back to "all" (§11 D1 拍板).
     commandComplete: parseCommandCompleteSetting(record.commandComplete, defaults.commandComplete),
+    // web-hub-cmd-history plan §4.9 (A1): boolean only, anything else falls back to the default true.
+    cmdHistory: typeof record.cmdHistory === "boolean" ? record.cmdHistory : (defaults.cmdHistory ?? true),
     uploads: parseUploadsSetting(record.uploads, defaults.uploads),
     preview: parsePreviewSetting(record.preview, defaults.preview),
     avatar: typeof record.avatar === "boolean" ? record.avatar : (defaults.avatar ?? true),
@@ -2675,6 +2751,14 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     quota: typeof record.quota === "boolean" ? record.quota : (defaults.quota ?? true),
     // sysload plan §6.1: boolean only, anything else falls back to the default `true`.
     load: typeof record.load === "boolean" ? record.load : (defaults.load ?? true),
+    // web-hub archive plan: finite number ≥ 0 (minutes); anything else falls back to the
+    // default 30. 0 = sweep off.
+    archiveAfterMin:
+      typeof record.archiveAfterMin === "number" &&
+      Number.isFinite(record.archiveAfterMin) &&
+      record.archiveAfterMin >= 0
+        ? record.archiveAfterMin
+        : (defaults.archiveAfterMin ?? 30),
     lan: lanParsed.lan,
     spawn: parseWebHubSpawnBlock(record.spawn),
     proxy: parseWebHubProxyBlock(record.proxy, resolvedPort, lanParsed.lan.port).proxy,
@@ -2826,6 +2910,7 @@ export type FeishuBotWarning =
   | "block-invalid"
   | "enabled-invalid"
   | "security-alerts-invalid"
+  | "xs-mirror-invalid"
   | "allow-groups-invalid"
   | "group-root-topics-invalid"
   | "notify-invalid"
@@ -2910,6 +2995,7 @@ export function parseFeishuBotBlock(input: unknown): FeishuBotParseResult {
     feishuBot: {
       enabled: bool(r.enabled, d.enabled, "enabled-invalid"),
       securityAlerts: bool(r.securityAlerts, d.securityAlerts ?? true, "security-alerts-invalid"),
+      xsMirror: bool(r.xsMirror, d.xsMirror ?? true, "xs-mirror-invalid"),
       allowGroups: bool(r.allowGroups, d.allowGroups, "allow-groups-invalid"),
       groupRootTopics: bool(r.groupRootTopics, d.groupRootTopics, "group-root-topics-invalid"),
       notify: choice(r.notify, ["bound", "off"] as const, d.notify, "notify-invalid"),
@@ -3361,24 +3447,30 @@ export function defaultSettingsPath(): string {
  */
 export function loadSettingsFromFile(path: string = defaultSettingsPath()): AgentSettings {
   try {
-    const parsed: unknown = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+    const rawText = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+    const parsed: unknown = rawText !== undefined ? JSON.parse(rawText) : {};
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return loadSettings(parsed);
     const timed = migrateSettingsFileTimeUnits(parsed as Record<string, unknown>, path);
     const cache = migrateLegacyCacheTtlState(timed.value, path, join(dirname(path), "cache-ttl-state.json"));
     const changed = timed.changed || cache.changed;
     let writeSucceeded = true;
     if (changed) {
-      try {
-        // Atomic write (tmp + rename): this file is shared by every session in
-        // the process tree, so a torn write would read back as malformed JSON
-        // and silently reset all settings to defaults (review B1).
+      // Atomic write (tmp + rename): this file is shared by every session in
+      // the process tree, so a torn write would read back as malformed JSON
+      // and silently reset all settings to defaults (review B1). data-encryption
+      // P1 review #5: held under the cross-process settings lock, and skipped when
+      // another writer changed the file since we read it (retried next time).
+      const outcome = withSettingsFileLock(path, () => {
+        const now = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+        if (now !== rawText) throw new Error("the file changed while migrating");
         const tmpPath = `${path}.${process.pid}.tmp`;
         writeFileSync(tmpPath, JSON.stringify(cache.value, null, 2) + "\n", "utf8");
         renameSync(tmpPath, path);
-      } catch (error) {
+      });
+      if (!outcome.ok) {
         writeSucceeded = false;
         console.warn(
-          `[pi-subagent] failed to write the migrated ${path}: ${error instanceof Error ? error.message : String(error)}; the migration will be retried next time.`,
+          `[pi-subagent] failed to write the migrated ${path}: ${outcome.error}; the migration will be retried next time.`,
         );
       }
     }
@@ -3607,35 +3699,40 @@ export function persistSettingOverride(
   value: unknown,
   path: string = defaultSettingsPath(),
 ): string | undefined {
-  let raw: Record<string, unknown> = {};
-  try {
-    if (existsSync(path)) {
-      const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
-        return `${path}: top-level value is not an object; not modifying it`;
-      raw = parsed as Record<string, unknown>;
+  // data-encryption P1 review #5: the whole re-read → merge → write runs under the cross-process
+  // settings lock shared with the `pi-secure` launcher; a lock failure refuses the write.
+  const outcome = withSettingsFileLock(path, (): string | undefined => {
+    let raw: Record<string, unknown> = {};
+    try {
+      if (existsSync(path)) {
+        const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+          return `${path}: top-level value is not an object; not modifying it`;
+        raw = parsed as Record<string, unknown>;
+      }
+    } catch (error) {
+      return `${path}: ${error instanceof Error ? error.message : String(error)}`;
     }
-  } catch (error) {
-    return `${path}: ${error instanceof Error ? error.message : String(error)}`;
-  }
-  const segments = dottedKey.split(".");
-  let node: Record<string, unknown> = raw;
-  for (const segment of segments.slice(0, -1)) {
-    const child = node[segment];
-    const next =
-      child !== null && typeof child === "object" && !Array.isArray(child)
-        ? { ...(child as Record<string, unknown>) }
-        : {};
-    node[segment] = next;
-    node = next;
-  }
-  const leaf = segments[segments.length - 1]!;
-  if (value === undefined) delete node[leaf];
-  else node[leaf] = value;
-  try {
-    writeFileSync(path, JSON.stringify(raw, null, 2) + "\n", "utf8");
-    return undefined;
-  } catch (error) {
-    return `${path}: ${error instanceof Error ? error.message : String(error)}`;
-  }
+    const segments = dottedKey.split(".");
+    let node: Record<string, unknown> = raw;
+    for (const segment of segments.slice(0, -1)) {
+      const child = node[segment];
+      const next =
+        child !== null && typeof child === "object" && !Array.isArray(child)
+          ? { ...(child as Record<string, unknown>) }
+          : {};
+      node[segment] = next;
+      node = next;
+    }
+    const leaf = segments[segments.length - 1]!;
+    if (value === undefined) delete node[leaf];
+    else node[leaf] = value;
+    try {
+      writeSettingsFileAtomic(path, JSON.stringify(raw, null, 2) + "\n");
+      return undefined;
+    } catch (error) {
+      return `${path}: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
+  return outcome.ok ? outcome.value : `${path}: ${outcome.error}`;
 }

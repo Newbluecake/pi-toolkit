@@ -26,8 +26,19 @@ import { LAN_2FA_LIMITS } from "../../protocol/lan-2fa.js";
 // shared notice budget (#14)
 // ---------------------------------------------------------------------------
 
+/**
+ * F1 (§7.3): admission lanes over the ONE shared per-minute cap G (`FEISHU_NOTIFY_LIMITS.globalPerMin`).
+ * `critical` (security alerts, 2FA / approvals) and `normal` (done / failed / owner notices — the default)
+ * may each use all of G; `schedule` must leave {@link CRITICAL_RESERVE_PER_MIN} spare and may take at most
+ * `max(1, G − reserve − 2)` per minute, so a scheduled-task flood can never starve the other lanes.
+ */
+export type NoticeLane = "critical" | "normal" | "schedule";
+export const CRITICAL_RESERVE_PER_MIN = 5;
 export interface NoticeBudget {
-  reserve(key: string, gapMs: number): boolean;
+  /** `opts` absent ⇒ lane "normal": byte-identical to the legacy two-argument interface. */
+  reserve(key: string, gapMs: number, opts?: { lane?: NoticeLane }): boolean;
+  /** Spare global quota left in the current minute window (read-only; visibility and tests). */
+  remaining(): number;
   dispose(): void;
 }
 
@@ -36,16 +47,33 @@ export function createNoticeBudget(clock: Pick<FeishuClock, "now">): NoticeBudge
   const last = new Map<string, number>();
   let windowAt = clock.now();
   let count = 0;
+  let scheduleCount = 0;
   let disposed = false;
+  const G = FEISHU_NOTIFY_LIMITS.globalPerMin;
+  const roll = (): void => {
+    const now = clock.now();
+    if (now - windowAt >= 60_000) {
+      windowAt = now;
+      count = 0;
+      scheduleCount = 0;
+    }
+  };
   return {
-    reserve(key, gapMs) {
+    remaining() {
+      if (disposed) return 0;
+      roll();
+      return Math.max(0, G - count);
+    },
+    reserve(key, gapMs, opts) {
       if (disposed) return false;
       const now = clock.now();
-      if (now - windowAt >= 60_000) {
-        windowAt = now;
-        count = 0;
+      roll();
+      if (count >= G) return false;
+      const lane = opts?.lane;
+      if (lane === "schedule") {
+        if (G - (count + 1) < CRITICAL_RESERVE_PER_MIN) return false;
+        if (scheduleCount >= Math.max(1, G - CRITICAL_RESERVE_PER_MIN - 2)) return false;
       }
-      if (count >= FEISHU_NOTIFY_LIMITS.globalPerMin) return false;
       // Only gap-gated keys occupy the 1024-slot dedup map; a burst of unique gap-0 keys must
       // never starve a gap-gated key out of a slot. Every admitted reserve still counts toward
       // the global per-minute limit below.
@@ -55,6 +83,7 @@ export function createNoticeBudget(clock: Pick<FeishuClock, "now">): NoticeBudge
         last.set(key, now);
       }
       count++;
+      if (lane === "schedule") scheduleCount++;
       return true;
     },
     dispose() {
@@ -235,7 +264,7 @@ export function createFeishuSecurity(deps: FeishuSecurityDeps): FeishuSecurity &
   function sendNow(entry: PendingEntry, text: string, key: string): boolean {
     const owner = deps.owner();
     if (owner === undefined) return false;
-    if (!budget.reserve(key, 0)) {
+    if (!budget.reserve(key, 0, { lane: "critical" })) {
       dropped++;
       return false;
     }

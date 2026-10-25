@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "generator": "tests/fixtures/preview-perf/gen-corpus.mjs",
+  "files": {
+    "stack-3609.ts": {
+      "sha256": "29fd3897b1a74dbf5fb30ea83dce7f2bd76f4cf22342150d8ce7e45ecc2f1bbe",
+      "bytes": 170811,
+      "lines": 3609
+    },
+    "uploads-2292.ts": {
+      "sha256": "16da661adb6c1f3e76cd56037bd05b4f26e963c2e9cbd0fed66a14bbfe868de4",
+      "bytes": 90526,
+      "lines": 2292
+    },
+    "hl-600.ts": {
+      "sha256": "4bfa269135ccb4e03362779b2e9e928ce470e1e5a9445e7ddb9f09c1c3f83f03",
+      "bytes": 22585,
+      "lines": 600
+    },
+    "hl-601.ts": {
+      "sha256": "ac88c0d232ee4b775a7d88e4b0c5c468720d836cfb287e20f7af0d1e89707b27",
+      "bytes": 22593,
+      "lines": 601
+    },
+    "longline.js": {
+      "sha256": "132e4a167ca651a9ff0c70dbb15be206f2459ef8b550b1d39873375f9f7d182b",
+      "bytes": 304812,
+      "lines": 701
+    },
+    "wide-1200.md": {
+      "sha256": "d145b78eb406d8d0eb2e378bc507a702204720ca7ee1e0ac8d819f8ba12f0488",
+      "bytes": 75981,
+      "lines": 1201
+    }
+  },
+  "log8mib": {
+    "seed": 726785,
+    "totalBytes": 8388608,
+    "firstChunkBytes": 262144,
+    "nextChunkBytes": 1048576,
+    "emojiLineEvery": 1024,
+    "surrogateSplitBoundary": 5
+  }
+}

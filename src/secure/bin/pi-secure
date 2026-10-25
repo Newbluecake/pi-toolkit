@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# pi-secure — launcher for gocryptfs-encrypted pi sessions (docs/dev/data-encryption/plan.md §2.2).
+#
+# Thin entry: locate helper.mjs next to the REAL script (works from a git install, an npm bin link
+# and a ~/.local/bin symlink alike), harden the process (no core dumps, private umask — inherited by
+# pi and everything it starts), then hand over to Node. The vault password is typed by the user
+# straight into gocryptfs on the TTY; this script never reads, stores or passes it.
+set -u
+
+self="$(readlink -f -- "${BASH_SOURCE[0]}")" || {
+  echo "pi-secure: 无法解析脚本路径" >&2
+  exit 69
+}
+helper="$(dirname -- "$self")/helper.mjs"
+if [ ! -f "$helper" ]; then
+  echo "pi-secure: 找不到 $helper" >&2
+  exit 69
+fi
+if [ "$(uname -s)" != "Linux" ]; then
+  echo "pi-secure: 仅支持 Linux" >&2
+  exit 69
+fi
+node_bin="$(command -v node)" || {
+  echo "pi-secure: PATH 上找不到 node（需要 Node ≥ 22）" >&2
+  exit 69
+}
+
+ulimit -c 0 2>/dev/null || echo "pi-secure: 警告：无法设置 ulimit -c 0" >&2
+umask 077
+# The user's (physical) cwd, for relative convert/export/import paths; helper.mjs takes it and
+# removes the variable before anything else runs. Empty when the cwd is gone (helper ignores it).
+orig_cwd="$(pwd -P 2>/dev/null)" || orig_cwd=""
+cd / || exit 1
+PI_SECURE_ORIG_CWD="$orig_cwd" exec "$node_bin" "$helper" "$@"

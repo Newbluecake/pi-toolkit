@@ -16,7 +16,7 @@ import {
   wrapCommandApi,
   type CaptureInvocation,
   type CommandCaptureEngine,
-} from "../../../src/web-hub/agent/command-capture.js";
+} from "../../../src/commands/capture.js";
 import { createStatusCommand, type StatusCommandDeps } from "../../../src/commands/status.js";
 import { wireTodo } from "../../../src/todo/index.js";
 import { createMemCommand } from "../../../src/memory/command.js";

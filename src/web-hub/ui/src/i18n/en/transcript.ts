@@ -67,6 +67,22 @@ const transcript = {
   mermaidFitWidth: "Fit width",
   mermaidActualSize: "Actual size",
   mermaidCopySelectFailed: "Copy failed — select manually",
+  // web-hub-cmd-history (plan v2 §4.7): the purple command card. State chips done/failed/
+  // running stay English tokens in both locales (approved preview); timeout/unrecorded and
+  // the prose lines are localized.
+  cmdWho: "command",
+  cmdSourceFeishu: "feishu",
+  cmdNoContext: "not in context",
+  cmdStateTimeout: "timeout",
+  cmdStateUnrecorded: "unrecorded",
+  cmdRunningBody: "Running… (this card updates in place when it finishes)",
+  cmdUnrecordedBody: "Result not recorded: the session was interrupted or switched",
+  cmdNoticeTerminalOnly: "Sent — output is only visible in the terminal",
+  cmdNoticeSensitive: "Sensitive command — output not recorded",
+  cmdNoticeNoOutput: "No output",
+  cmdNeedsTerminal: "These interactive steps need the terminal: {steps}",
+  cmdInteractedTerminal: "Interacted in the terminal: {steps}",
+  cmdCopy: "Copy output",
 } satisfies Record<string, string>;
 
 export default transcript;

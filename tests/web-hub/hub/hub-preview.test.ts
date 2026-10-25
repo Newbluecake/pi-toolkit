@@ -33,10 +33,14 @@ import {
   RUNTX_HUB_CAPS,
   QUOTA_POOLS_HUB_CAPS,
   TODO_ARCHIVE_HUB_CAPS,
+  // cmd-history H1 (§4.6): unconditional on both cap surfaces (mechanical baseline update —
+  // sits right before VERSION_HUB_CAP, matching extraHubCaps order in hub.ts).
+  CMD_HISTORY_HUB_CAP,
   VERSION_HUB_CAP,
   UPLOAD_HUB_CAPS,
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
+  WTGRAPH_MERGED_HUB_CAP,
   PREVIEW_HTML_HUB_CAP,
 } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, tmpDirs } from "./helpers.js";
@@ -62,6 +66,8 @@ function baselineCaps(): string[] {
     ...RUNTX_HUB_CAPS,
     ...QUOTA_POOLS_HUB_CAPS,
     ...TODO_ARCHIVE_HUB_CAPS,
+    // cmd-history H1 (§4.6): unconditional, right before VERSION_HUB_CAP (extraHubCaps order).
+    CMD_HISTORY_HUB_CAP,
     VERSION_HUB_CAP,
   ];
 }
@@ -197,7 +203,7 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
       PREVIEW_CHUNK_HUB_CAP,
       ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
       ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
-      ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP] : []),
+      ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP] : []),
       // web-hub-html-preview plan v2 §4: preview.html.v1 rides the same gate + /proc probe tail.
       ...(previewProcFdAvailable() ? [PREVIEW_HTML_HUB_CAP] : []),
     ]);
@@ -226,7 +232,7 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
       PREVIEW_CHUNK_HUB_CAP,
       ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
       ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
-      ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP] : []),
+      ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP] : []),
       // web-hub-html-preview plan v2 §4: preview.html.v1 rides the same gate + /proc probe tail.
       ...(previewProcFdAvailable() ? [PREVIEW_HTML_HUB_CAP] : []),
       PREVIEW_LAN_HUB_CAP,

@@ -37,11 +37,3 @@ export function buildLoadEscalationText(verdict: LoadVerdict, context: LoadMessa
 export function buildLoadRecoveryText(verdict: LoadVerdict, gateEnabled = true): string {
   return `[load] ${levelLabel(verdict.level)} · 负载已回落${gateEnabled ? "，可以继续派发" : "（仅提示，闸门已关闭，派发不受限）"}`;
 }
-
-export function buildLoadNotice(verdict: LoadVerdict, context: LoadMessageContext = {}): string {
-  return buildLoadEscalationText(verdict, context);
-}
-
-export const buildLoadHintText = buildLoadEscalationText;
-export const buildLoadRejectText = buildLoadEscalationText;
-export const buildLoadRecoveryNotice = buildLoadRecoveryText;

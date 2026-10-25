@@ -1,0 +1,9 @@
+{
+  "repo": "/home/bluecake/ai/pi-traffic-record",
+  "commit": "b17d1f825c4a9b028b82a38ca8f236e41f4106af",
+  "version": "0.2.1",
+  "subject": "chore(release): bump version to v0.2.1 (includes PI_SECURE_SESSION secure adaptation)",
+  "vendoredAt": "2026-10-23",
+  "plan": "docs/dev/traffic-merge/plan.md",
+  "note": "T1 verbatim import; scripts and docs NOT migrated (T7); serialize.ts kept for T1 test parity, removed in T2a"
+}

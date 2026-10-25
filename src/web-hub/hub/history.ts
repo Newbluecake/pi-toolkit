@@ -37,6 +37,13 @@ export const DEFAULT_TAIL_ENTRIES = 400;
 export const DEFAULT_MAX_FILE_BYTES = 256 << 20;
 export const LEAF_DEBOUNCE_MS = 500;
 export const APPEND_TAIL_ENTRIES = 64;
+/**
+ * cmd-history §4.10 (M4): the `branch_req` budget for `runTail`'s ENOENT-only fallback —
+ * deliberately tighter than `loadBranch`'s `LIMITS.branchReplyBytes` (2 MiB): only the last
+ * `APPEND_TAIL_ENTRIES` entries are diffed, and the fallback fires in the window before the
+ * session file's first user/assistant message, when the in-memory branch is small.
+ */
+export const RUNTAIL_BRANCH_FALLBACK_BYTES = 256 << 10;
 export const DELIVERED_CAP = 512;
 // Same budget as the agent-side branch_reply fallback (agent/snapshot.ts's `buildBranchReply`):
 // `DEFAULT_TAIL_ENTRIES`/`PAGE_MAX` only cap entry COUNT — `projectSessionEntry` only bounds a
@@ -341,6 +348,45 @@ export function createHistoryService(deps: {
   const readBranch = (file: string, leafId: string): Promise<ReadResult> =>
     readBranchCached(file, leafId, DEFAULT_MAX_FILE_BYTES, cache);
 
+  /**
+   * cmd-history §4.10 (M4): the runTail ENOENT-only branch fallback.
+   *
+   * pi does not create the session file until the first user/assistant message lands
+   * (`session-manager.js`'s "no file before the first conversation" behavior — the premise
+   * conformance #5 pins), so a persisted-session report (a path exists, the file does not yet)
+   * used to drop the real-time `append` for every idle custom entry written in that window —
+   * exactly where a fresh session's first `subagent:cmd` records land. Ask the agent's
+   * in-memory branch instead: the SAME `branch_req` frame `loadBranch` already uses, with a
+   * tighter 256 KiB budget, cut at the pending leaf (identical to `loadBranch`). A reply that
+   * does not contain the leaf is treated as a read failure (return `undefined`, wait for the
+   * next leaf change) so `diffAppended` never runs against an unaligned branch.
+   *
+   * Errors — agent offline (`E_AGENT_GONE`), the `TIMING.snapshotMs` deadline (its timer is
+   * unref'd inside `registry.request`), anything else — are logged (metadata only, never entry
+   * content) and swallowed: this must never throw into `runTail`.
+   *
+   * Boundary (M4/R9, deliberate): this is a GENERAL hub fix — the hub cannot know the agent's
+   * `cmdHistory` setting, so it also fires for old agents / cmdHistory:false sessions (their
+   * pre-first-message idle custom entries start appearing live too; plan §1.3/§9-R9 discloses
+   * this as outside the "switch off ⇒ unchanged" promise). `--no-session` sessions
+   * (`file === undefined`) are NOT in scope and keep today's early return (M4).
+   */
+  const readTailFromAgent = async (agentKey: string, leafId: string): Promise<WireEntry[] | undefined> => {
+    try {
+      const br = await registry.request<BranchReply>(
+        agentKey,
+        { t: "branch_req", rid: "", maxBytes: RUNTAIL_BRANCH_FALLBACK_BYTES },
+        TIMING.snapshotMs,
+      );
+      const cut = br.entries.findIndex((e) => e.id === leafId);
+      if (cut === -1) return undefined;
+      return br.entries.slice(0, cut + 1);
+    } catch (err) {
+      log.info("runTail ENOENT branch fallback failed", { agentKey, error: String(err) });
+      return undefined;
+    }
+  };
+
   const unsubscribe = registry.bus.subscribe((ev) => {
     switch (ev.type) {
       case "ev": {
@@ -398,9 +444,18 @@ export function createHistoryService(deps: {
     st.reading = true;
     try {
       const res = await readBranch(file, leaf);
-      if (!res.ok) return; // leaf not flushed yet / unreadable: retry on the next leaf change
+      let entries: readonly WireEntry[] | undefined;
+      if (res.ok) {
+        entries = res.entries;
+      } else if (res.reason === "ENOENT") {
+        // cmd-history §4.10: the file is not there YET (pre-first-message) — ask the agent's
+        // in-memory branch. Other failures (TOO_LARGE/PARSE/LEAF_NOT_FOUND) keep the plain
+        // retry-on-next-leaf-change behavior below.
+        entries = await readTailFromAgent(agentKey, leaf);
+      }
+      if (entries === undefined) return; // leaf not flushed yet / unreadable: retry on the next leaf change
       if (st.delivered === undefined || states.get(agentKey) !== st) return; // session changed meanwhile
-      const tail = res.entries.slice(-APPEND_TAIL_ENTRIES);
+      const tail = entries.slice(-APPEND_TAIL_ENTRIES);
       const fresh = diffAppended(st.delivered, tail);
       if (fresh.length === 0) return;
       pushDelivered(

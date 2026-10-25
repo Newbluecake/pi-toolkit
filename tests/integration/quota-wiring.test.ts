@@ -89,7 +89,7 @@ function wireQuotaHook(pi: ExtensionAPI, holder: { current?: Stack }) {
 
 function teardown(stack: Stack): void {
   stack.quota?.dispose();
-  stack.scheduler.stop();
+  stack.schedule?.dispose();
   stack.rpc.close();
 }
 
@@ -461,7 +461,7 @@ describe("quota wiring — droid pools (P7, real-stack e2e since P5)", () => {
       expect(stack.quota?.poolAlternatives("droid-standard")).toEqual([]);
     } finally {
       stack.quota?.dispose();
-      stack.scheduler.stop();
+      stack.schedule?.dispose();
       stack.rpc.close();
       if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = prev;

@@ -70,6 +70,14 @@ export interface ProviderVerdict {
  */
 export const QUOTA_HYSTERESIS_PCT = 15;
 
+/**
+ * 3b（forecast-before-reset）软化线（2026-10-23 拍板）：仅由规则 3b 抬到 L2、且
+ * 所有窗口用量都低于各自 L1 阈值、且触发窗口的预测耗尽时间未知或晚于 12 小时的
+ * provider，注入文案降级为「[quota 提示]」——不再叫「预警」，正文明确订阅仍应
+ * 优先使用。等级 / 闸门 / HUD displayLevel 均不变（只改文案与分类）。
+ */
+export const QUOTA_FORECAST_SOFT_ETA_MS: Millis = 12 * 3_600_000;
+
 export const DEFAULT_THRESHOLDS: LadderThresholds = { l1: 50, l2: 75, l3: 90, l3EtaMs: 1_800_000 };
 
 /**
@@ -278,6 +286,31 @@ export interface QuotaRecoveryEvent {
  */
 export function isDemotionFloorOnly(v: ProviderVerdict): boolean {
   return v.demoted && v.level >= 2 && v.windows.every((w) => w.level < 2);
+}
+
+/**
+ * 3b 软化判定（2026-10-23 拍板，纯函数）：provider 的 L2 **仅**由规则 3b
+ * （forecast-before-reset）造成，且所有窗口用量 < 该窗口 L1 阈值（取仓库默认
+ * 阈值，与 render.thresholdText 同先例——ProviderVerdict 不携带运行时阈值），
+ * 且触发窗口 etaMs 未知或 > QUOTA_FORECAST_SOFT_ETA_MS（12h）⇒ true：注入文案
+ * 用「[quota 提示]」。规则 3a（ETA<30min ⇒ L3）、百分比阈值触发的 L2/L3、
+ * 降位地板、任一窗口用量 ≥ L1、eta ≤ 12h 都判 false（仍走「预警/严重」文案）。
+ * 等级、闸门（gate 只看 level，3b 最高 L2 本就不触发 gate）、HUD/web displayLevel
+ * 均不受此函数影响。
+ */
+export function isForecastSoftVerdict(v: ProviderVerdict): boolean {
+  if (v.level !== 2) return false; // 3b 最高抬到 L2；L1/L3 不适用
+  if (v.demoted) return false; // 降位地板造成的等级不是 3b
+  let sawForecast = false;
+  for (const w of v.windows) {
+    if (w.level >= 2 && w.reason !== "forecast-before-reset") return false; // 其它规则到 L2/L3
+    if (w.usedPct >= DEFAULT_THRESHOLDS_BY_WINDOW[w.scope].l1) return false; // 任一窗口用量 ≥ L1 阈值
+    if (w.reason === "forecast-before-reset") {
+      sawForecast = true;
+      if (w.etaMs !== undefined && Number.isFinite(w.etaMs) && w.etaMs <= QUOTA_FORECAST_SOFT_ETA_MS) return false; // eta ≤ 12h 仍算预警
+    }
+  }
+  return sawForecast;
 }
 
 /** usedPct 的线性网格步（step<=0 ⇒ 恒 0，即关闭网格闸）。 */

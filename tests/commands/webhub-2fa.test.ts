@@ -10,7 +10,7 @@
  * flows, codes-printed-once, and the old-hub cap gate.
  */
 import { describe, expect, it, vi } from "vitest";
-import { createCommandCaptureEngine, wrapCommandApi } from "../../src/web-hub/agent/command-capture.js";
+import { createCommandCaptureEngine, wrapCommandApi } from "../../src/commands/capture.js";
 import { resolveCommandPolicy } from "../../src/web-hub/agent/command-policy.js";
 import { createWebHubCommand } from "../../src/commands/webhub.js";
 import type {

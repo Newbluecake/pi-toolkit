@@ -108,7 +108,7 @@ describe("sysload stack wiring", () => {
     expect(stack.loadAdmission?.blocked()).toBe(false);
     stack.load?.dispose();
     expect(fake.activation.dispose).toHaveBeenCalled();
-    stack.scheduler.stop();
+    stack.schedule?.dispose();
     stack.rpc.close();
     home.restore();
   });

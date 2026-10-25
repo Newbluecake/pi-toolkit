@@ -913,6 +913,8 @@ describe("AgentCard.vue — managed `web` badge (SP12, arch §9.1)", () => {
  * fields rich enough for the target function).
  */
 import type { RemoveAgentOutcome, RemoveTarget } from "../../../src/web-hub/ui/src/types.js";
+import { setDetailedListForTests } from "./helpers/list-density.js";
+beforeEach(setDetailedListForTests);
 
 function fullAgentState(key: string, over: Record<string, unknown> = {}): Record<string, unknown> {
   return { key, down: false, card: { state: "live" }, ...over };

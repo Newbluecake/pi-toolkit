@@ -58,6 +58,9 @@ const windowsEls = (): HTMLElement[] => [...document.querySelectorAll<HTMLElemen
 const tick = async (): Promise<void> => {
   await nextTick();
   await nextTick();
+  // J1 #4: PreviewHost's focusRequest landing is deferred one PAST-RENDER macrotask —
+  // flush it here so the §5.4 assertions (focus HAS landed) see the final state.
+  await new Promise((r) => setTimeout(r, 0));
 };
 
 afterEach(() => {
@@ -248,7 +251,12 @@ describe("PreviewWindow.vue — phases (fake face)", () => {
     };
     win.view.value = { phase: "text", path: "/p/x.log", size: 900_000, truncated: true, text: "a\nb\n", stream };
     await tick();
-    expect(document.querySelector(".preview-stream")).not.toBeNull();
+    // preview-perf P3: a line-numbered stream is ALWAYS virtual — the body is the virtual
+    // `<pre>` (the legacy `.preview-stream` container survives under `virtualEnabled: false`,
+    // pinned in preview-text/preview-line-numbers). The sentinel + action buttons are
+    // renderer-independent.
+    expect(document.querySelector("pre.pv-virtual")).not.toBeNull();
+    expect(document.querySelector(".preview-stream-sentinel")).not.toBeNull();
     document.querySelector<HTMLButtonElement>(".preview-stream-btn")!.click(); // 重新打开
     expect(win.handle.reopen).toHaveBeenCalledTimes(1);
   });

@@ -1310,7 +1310,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
   /**
    * Deliberately independent of `reserve()`/`runReserveFlow` (not a thin
    * wrapper) — today's `bash-tool.ts` (P4, not yet migrated) calls `create()`
-   * directly and its existing golden/timing tests (`tests/tools/bash-tool.
+   * directly and its existing golden/timing tests (`tests/bash/tool.
    * test.ts`) assert on the exact number of microtask ticks between spawn
    * and an early abort. `reserve()`'s save-race (R12) inherently adds a tick
    * versus a bare `await store.save(...)`; keeping `create()`'s body

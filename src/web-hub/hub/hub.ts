@@ -34,6 +34,7 @@ import {
 import {
   PROTO,
   CMD_ARGS_HUB_CAPS,
+  CMD_HISTORY_HUB_CAPS,
   P2_HUB_CAPS,
   UPLOAD_HUB_CAPS,
   DIALOG_BG_HUB_CAPS,
@@ -54,6 +55,7 @@ import {
   PREVIEW_HTML_HUB_CAP,
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
+  WTGRAPH_MERGED_HUB_CAP,
   SPAWN_HISTORY_HUB_CAP,
   AVATAR_HUB_CAP,
   PRIVACY_HUB_CAP,
@@ -74,6 +76,7 @@ import { createCmdLimit } from "./cmd-limit.js";
 import { createCommandCompleteRoutes } from "./command-complete.js";
 import { createCommandRouter } from "./commands.js";
 import { createSupersede, SUPERSEDE_YIELD_MS, type SupersedeController } from "./supersede.js";
+import { AGENT_NOSPAWN_CAP } from "../protocol/nospawn.js";
 import { createHistoryService } from "./history.js";
 import { createHubJsonWriter, type HubJsonWriter, type HubRecord } from "./hub-json.js";
 import { createIdleMonitor } from "./idle.js";
@@ -150,12 +153,15 @@ import type {
   LanFrontendDeps,
   ProxyService,
   HubEvent,
+  FrontendDeps,
 } from "./ports.js";
 import { createFeishuLinks } from "./feishu/link.js";
 import type { FsDeps } from "../protocol/paths.js";
 import { parseCmdline } from "../protocol/proc-identity.js";
 import { createRegistry } from "./registry.js";
 import { createXsAliasBinding, createXsRelay, hubXsAliasParamsOf, type XsAliasBinding } from "./xs/router.js";
+import { SCHED_HUB_CAP } from "../protocol/schedule.js";
+import { createScheduleService } from "./schedule/service.js";
 import { XS_ALIAS_HUB_CAP, XS_CHANNEL_HUB_CAP, XS_HUB_CAP, XS_REPLY_HUB_CAP } from "../protocol/xs.js";
 import { acquireSingleton, startFence } from "./singleton.js";
 import type { Auth } from "./auth.js";
@@ -440,6 +446,13 @@ export async function startHub(
     }
     const extraHubCaps: readonly string[] = [
       ...(config.cmdArgs === "all" || config.cmdArgs === "toolkit" ? CMD_ARGS_HUB_CAPS : []),
+      // cmd-history plan §4.6 (F4, H1): `cmd.history.v1` is UNCONDITIONAL on the hub — the P0
+      // projection and the §4.10 runTail ENOENT fallback ship with every hub build (the
+      // fallback deliberately ignores the agent's cmdHistory setting, M4/R9), so the cap has
+      // no settings gate; it only tells new agents/UIs this hub understands them (the agent's
+      // matching `StatusInfo.features` token gates the feature itself). Old hubs never
+      // declare it ⇒ the UI stays in legacy mode. Both cap surfaces share this one array.
+      ...CMD_HISTORY_HUB_CAPS,
       // web-hub-version plan §3.7: unconditional (no settings gate, D3) — the service below is
       // always constructed, so the cap and the route can never disagree.
       VERSION_HUB_CAP,
@@ -477,7 +490,9 @@ export async function startHub(
             // worktree-graph plan v2 §3/§2.6: `wtgraph.v1` rides the SAME gate as `wtdiff.v1`
             // (「与 wtdiff 同门」— same `config.preview` existence AND /proc probe); LAN availability
             // rides `PREVIEW_LAN_HUB_CAP` below, same width as preview/wtdiff (§0.2 Q1).
-            ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP] : []),
+            // merged-plan §6: `wtgraph.merged.v1` — the SAME condition as `wtgraph.v1` (preview + /proc);
+            // LAN width rides `PREVIEW_LAN_HUB_CAP` below (mode `loopback` ⇒ LAN 404, no new setting).
+            ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP] : []),
             // web-hub-html-preview plan v2 §4 (P1b): `preview.html.v1` rides the SAME
             // `config.preview` gate AND the /proc probe (`htmlEnabled` — dir-fd anchoring is
             // /proc-bound, fail-closed); both cap surfaces share this one array. LAN width rides
@@ -520,6 +535,10 @@ export async function startHub(
             // Alias-plan §3.6 (AL2): tail-appended, only for a table that loaded `ready`.
             ...(xsAlias?.store.advertised === true ? [XS_ALIAS_HUB_CAP] : []),
           ]),
+      // scheduled-reports plan r3 §10.1 (H1): `sched.v1` iff `config.schedule` exists (same
+      // two-surface tail-append rule; absent ⇒ caps byte-identical). Declared even when the
+      // store root failed to resolve (spawn.v1 precedent: the UI needs the cap to explain).
+      ...(config.schedule === undefined ? [] : [SCHED_HUB_CAP]),
     ];
 
     let supersede: SupersedeController | undefined = undefined;
@@ -591,6 +610,9 @@ export async function startHub(
       },
     };
     let botOnHello: ((key: string) => void) | undefined;
+    /** scheduled-reports H1: the bot's event listener, captured so sched_bound frames (which
+     *  never reach the registry) can be forwarded as FeishuServiceEvents (§7.5). */
+    let botSchedEventListener: ((event: never) => void) | undefined;
     const botDialogSlots =
       config.feishuBot === undefined ? undefined : new Map<string, Extract<HubEvent, { type: "dialogs" }>>();
     const registry = createRegistry({
@@ -609,6 +631,12 @@ export async function startHub(
           spawnSup.noteVersion(agentKey, pluginVersion);
           return;
         }
+        // private-plan §4.1-5 (Q2): an agent advertising agent.nospawn.v1 (a private-mount-ns
+        // session) never enters the version observer either — the replacement hub could only
+        // be spawned from inside the ns, which spawnHub refuses. Caps are registered before
+        // onVersion fires, so getCaps sees THIS hello's set (R25 covers a hub that predates
+        // the cap).
+        if (registry.getCaps(agentKey)?.includes(AGENT_NOSPAWN_CAP) === true) return;
         supersede?.observe(pluginVersion, agentKey);
       },
       onTick: () => supersede?.tick(),
@@ -809,6 +837,10 @@ export async function startHub(
     }
     // fabric phase-2 X1: the cross-session relay exists iff `config.crossSession` (key absence IS
     // off — no router, no observer, no frame handling). Disposed on both teardown paths.
+    // feishu-xs-mirror (A′): the quiet-delivery observer exists iff `feishuBot.xsMirror === true` ∧
+    // `config.crossSession` — otherwise the key is not passed at all (hub byte-identical). `bot` is
+    // assigned later; the closure reads it lazily (undefined ⇒ dropped).
+    const xsMirrorOn = config.feishuBot?.xsMirror === true && config.crossSession !== undefined;
     const xsRelay =
       config.crossSession === undefined
         ? undefined
@@ -818,8 +850,19 @@ export async function startHub(
             log,
             now,
             ...(xsAlias === undefined ? {} : { aliases: xsAlias }),
+            ...(xsMirrorOn ? { onQuietDelivered: (e) => bot?.xsMirror(e) } : {}),
           });
     if (xsRelay !== undefined) cleanup.push(async () => xsRelay.dispose());
+    // scheduled-reports plan r3 §7 (H1): the read-only schedule coordinator — constructed ONLY
+    // when `config.schedule` exists (key absence IS off: no reader, no `sched.v1`, no frames, no
+    // disk). A store root that fails to resolve degrades INSIDE the coordinator (empty
+    // projection + WARN, hub keeps running); dispose drains its hub-state flush. The 60s scan
+    // loop, observation clock and every timer it owns are unref'd.
+    const scheduleHub =
+      config.schedule === undefined
+        ? undefined
+        : createScheduleService({ config: config.schedule, stateDir: paths.stateDir, registry, log, now });
+    if (scheduleHub !== undefined) cleanup.push(() => scheduleHub.dispose());
     agentServer = createAgentServer(owner.server, {
       registry,
       config,
@@ -828,6 +871,8 @@ export async function startHub(
       httpPort: () => httpPort,
       admin,
       extraHubCaps,
+      // scheduled-reports H1: `sched_*` frame routing (never the registry).
+      ...(scheduleHub === undefined ? {} : { schedule: scheduleHub }),
       ...(xsRelay === undefined ? {} : { xs: xsRelay.router }),
       ...(config.feishuBot === undefined
         ? {}
@@ -1424,6 +1469,8 @@ export async function startHub(
           run: graphGitRunner,
           log,
           now,
+          // routes are only built when the /proc probe passed ⇒ exactly when the cap is declared
+          mergedEnabled: true,
         });
       }
     }
@@ -1474,8 +1521,14 @@ export async function startHub(
               r.sessionId === undefined ? [] : [{ sessionId: r.sessionId, cwd: r.cwd }],
             ),
         },
+        // scheduled-reports H1 → F1 (verify r1 major): the port rides FeishuBotServiceDeps at
+        // CONSTRUCTION time (F1 builds its whole schedule surface iff it is present; the
+        // coordinator implements list/run/receiptsChanged). Key absence (schedule off / no
+        // coordinator) keeps the bot byte-identical.
+        ...(scheduleHub === undefined ? {} : { schedule: scheduleHub.port() }),
         events: {
           subscribe: (listener) => {
+            botSchedEventListener = listener;
             botOnHello = (key) => {
               evidence.delete(key);
               listener({ type: "agent_up", agentKey: key });
@@ -1549,6 +1602,21 @@ export async function startHub(
       if (lanDeps !== undefined) lanDeps.approval = bot.approval;
       await startupStep(bot.start());
       startup.signal.throwIfAborted();
+      // scheduled-reports H1 → F1 (§7.1–§7.5): hand over F1's own delivery half
+      // (`service.schedule`: pushReport/pushNotice/receiptsFor/hasReceipt) — discovery, notices
+      // and the receipt view flow through it from now on — and tap `sched_bound` into the bot's
+      // event stream (those frames are routed to the coordinator BEFORE the registry, so the
+      // bot's registry-bus subscription can never see them by itself).
+      if (scheduleHub !== undefined) {
+        scheduleHub.setBoundTap((agentKey, runKey) => {
+          try {
+            botSchedEventListener?.({ type: "sched_bound", agentKey, runKey } as never);
+          } catch {
+            /* the bot's listener must never break the coordinator */
+          }
+        });
+        if (bot.schedule !== undefined) scheduleHub.bindDelivery(bot.schedule);
+      }
     }
     // web-hub-delete-session plan v2 §2.9: the removal route frontend is wired UNCONDITIONALLY
     // (unlike spawn/preview/upload) — deleting an offline/stale TUI card never depended on
@@ -1607,7 +1675,7 @@ export async function startHub(
     cleanup.push(async () => versionSvc.dispose());
     const sameUi = (a: HubUiBuildWire | undefined, b: HubUiBuildWire | undefined): boolean =>
       a === b || (a !== undefined && b !== undefined && JSON.stringify(a) === JSON.stringify(b));
-    fe = frontend({
+    const frontendDeps: FrontendDeps = {
       config,
       paths,
       registry,
@@ -1648,7 +1716,14 @@ export async function startHub(
       // fleet-drawer plan §5.3 (F3b): the run-transcript service — F4's `createRunRoutes`
       // reads it through this dep (absent ⇒ no `/api/run/*` wiring, byte-identical today).
       runTx,
-    });
+    };
+    // scheduled-reports H1: the coordinator rides FrontendDeps as a duck-typed extra (ports.ts
+    // frozen for this package — http.ts reads it through the same widening; the GET route + SSE
+    // sinks only exist when `config.schedule` does, so an off hub stays byte-identical).
+    if (scheduleHub !== undefined) {
+      (frontendDeps as FrontendDeps & { schedules?: typeof scheduleHub }).schedules = scheduleHub;
+    }
+    fe = frontend(frontendDeps);
     cleanup.push(() => fe.close());
     // web-hub-preview plan v3 §4.5.1 (PV3): pushed right after the frontend's own entry so the
     // startup-failure reverse-order unwind runs preview dispose BEFORE `fe.close()` — the same

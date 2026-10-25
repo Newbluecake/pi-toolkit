@@ -7,7 +7,7 @@ import { EscalatingReaper } from "../../src/runtime/reaper.js";
 import type { SessionDriver, SessionHandle, SessionSpec } from "../../src/runtime/session-driver.js";
 import { SingleSlotPool } from "../../src/runtime/slot-pool.js";
 import {
-  CONSULT_READONLY_TOOLS,
+  READONLY_DOMAIN_TOOLS,
   buildToolScopePolicy,
   createToolScopeEnforcer,
   type ScopeSessionHandle,
@@ -197,7 +197,7 @@ describe("N9② onBind: a shadowed builtin is stripped and reported, the other t
       ["find", "builtin"],
       ["ls", "builtin"],
     ]);
-    const policy = buildToolScopePolicy({ tools: CONSULT_READONLY_TOOLS, provenance });
+    const policy = buildToolScopePolicy({ tools: READONLY_DOMAIN_TOOLS, provenance });
     let active = ["read", "grep", "find", "ls"];
     const fake: ScopeSessionHandle = {
       getActiveTools: () => active,

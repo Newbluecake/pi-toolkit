@@ -79,11 +79,3 @@ export function loadBlocked(port: LoadPort | undefined): boolean {
     return false;
   }
 }
-
-export function loadLevelAtLeast(level: LoadLevel, threshold: "warn" | "crit"): boolean {
-  return level !== "unknown" && levelRank(level) >= levelRank(threshold);
-}
-
-export function summarizeLoad(verdict: LoadVerdict): string {
-  return `load ${verdict.level}${verdict.gating ? " · gated" : ""}`;
-}

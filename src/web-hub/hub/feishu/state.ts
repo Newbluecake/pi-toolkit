@@ -74,6 +74,20 @@ export const FEISHU_STATE_ENVELOPE_BYTES = 4096;
 export const FEISHU_OUTBOX_FINAL_RESERVE = 64;
 /** sent/failed outbox bookkeeping lives this long (queued parts never expire here) */
 export const FEISHU_OUTBOX_SETTLED_TTL_MS = 3_600_000;
+
+/** F1 (scheduled reports §7.1): receipt table cap / retention (7 d > the 24 h delivery window + margin). */
+export const FEISHU_SCHEDULE_RECEIPT_CAP = 4_096;
+export const FEISHU_SCHEDULE_RECEIPT_TTL_MS = 7 * 24 * 3_600_000;
+export const SCHEDULE_RECEIPT_STATES = ["accepted", "sent", "failed", "uncertain", "refused"] as const;
+export type ScheduleReceiptState = (typeof SCHEDULE_RECEIPT_STATES)[number];
+/** One delivery receipt, keyed by `reportId` (64 hex). `code` is a static reason (≤64 chars), never message text. */
+export interface FeishuScheduleReceipt {
+  sid: string;
+  state: ScheduleReceiptState;
+  code?: string;
+  /** last transition (ms) — also the retention anchor */
+  at: number;
+}
 export const FEISHU_UNDECODABLE_RING = 16;
 export const FEISHU_UNDECODABLE_NOTICE_GAP_MS = 3_600_000;
 export const FEISHU_STATE_RETRY_MS = 1_000;
@@ -688,6 +702,21 @@ function parseOutbox(key: string, raw: unknown): FeishuOutboxPart | undefined {
   return out;
 }
 
+const RECEIPT_ID_RE = /^[0-9a-f]{64}$/;
+const RECEIPT_SID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+function parseScheduleReceipt(key: string, raw: unknown): FeishuScheduleReceipt | undefined {
+  if (!RECEIPT_ID_RE.test(key) || !isRec(raw) || !onlyKeys(raw, ["sid", "state", "code", "at"])) return undefined;
+  const sid = raw["sid"],
+    st = raw["state"];
+  if (typeof sid !== "string" || !RECEIPT_SID_RE.test(sid)) return undefined;
+  if (typeof st !== "string" || !(SCHEDULE_RECEIPT_STATES as readonly string[]).includes(st)) return undefined;
+  if (!isNat(raw["at"])) return undefined;
+  if (raw["code"] !== undefined && !isText(raw["code"], CODE_MAX)) return undefined;
+  const out: FeishuScheduleReceipt = { sid, state: st as ScheduleReceiptState, at: raw["at"] };
+  if (raw["code"] !== undefined) out.code = raw["code"] as string;
+  return out;
+}
+
 function parseUndecodable(raw: unknown): UndecodableSnapshot | undefined {
   if (!isRec(raw) || !onlyKeys(raw, ["count", "lastAt", "noticeAt", "ring"])) return undefined;
   if (!isNat(raw["count"])) return undefined;
@@ -787,6 +816,8 @@ export interface StateUsage {
     nonces: number;
     approvals: number;
     outbox: number;
+    /** present only while the schedule feature holds receipts (feature-off output is unchanged) */
+    scheduleReceipts?: number;
   };
   appliedSeq: number;
   durableSeq: number;
@@ -958,6 +989,17 @@ export interface FeishuState {
     remove(sendId: string): boolean;
     readonly size: number;
   };
+  /** F1: schedule delivery receipts (key absent from the file while empty). */
+  readonly scheduleReceipts: {
+    get(reportId: string): FeishuScheduleReceipt | undefined;
+    /** Insert or transition (stamps `at = now`); updating an existing key is never refused by the cap. */
+    set(
+      reportId: string,
+      input: { sid: string; state: ScheduleReceiptState; code?: string },
+    ): Admit<FeishuScheduleReceipt>;
+    list(filter?: { sid?: string }): Array<FeishuScheduleReceipt & { reportId: string }>;
+    readonly size: number;
+  };
   readonly undecodable: {
     /** Always accepted (bounded ring); the caller commits before the ACK. */
     record(entry: { reason: string; sha8?: string }): void;
@@ -981,6 +1023,7 @@ const TOP_KEYS = [
   "nonces",
   "approvals",
   "outbox",
+  "scheduleReceipts",
   "undecodable",
 ] as const;
 
@@ -1003,7 +1046,8 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
   const nonces = new Table<FeishuNonce>("nonces", FEISHU_CAPS.nonces);
   const approvals = new Table<FeishuApproval>("approvals", FEISHU_CAPS.approvals);
   const outbox = new Table<FeishuOutboxPart>("outbox", FEISHU_CAPS.outboxParts);
-  const tables = [allow, dedup, requests, bindings, dialogs, nonces, approvals, outbox];
+  const receipts = new Table<FeishuScheduleReceipt>("scheduleReceipts", FEISHU_SCHEDULE_RECEIPT_CAP);
+  const tables = [allow, dedup, requests, bindings, dialogs, nonces, approvals, outbox, receipts];
 
   let appId: string | undefined;
   let tenantKey: string | undefined;
@@ -1112,6 +1156,8 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
     doc["nonces"] = dump(nonces);
     doc["approvals"] = dump(approvals);
     doc["outbox"] = dump(outbox);
+    // Absent while empty ⇒ a feature-off state file is byte-identical to the pre-schedule format.
+    if (receipts.size > 0) doc["scheduleReceipts"] = dump(receipts);
     doc["undecodable"] = undec;
     const bytes = new TextEncoder().encode(`${JSON.stringify(doc)}\n`);
     if (bytes.length > budget) throw new Error("state-too-large");
@@ -1235,6 +1281,8 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
     for (const [k, d] of [...dialogs.entries()]) if (d.expiresAt <= now && dialogs.delete(k)) removed++;
     for (const [k, n] of [...nonces.entries()]) if (n.expiresAt <= now && nonces.delete(k)) removed++;
     for (const [k, a] of [...approvals.entries()]) if (a.expiresAt <= now && approvals.delete(k)) removed++;
+    for (const [k, r] of [...receipts.entries()])
+      if (now - r.at > FEISHU_SCHEDULE_RECEIPT_TTL_MS && receipts.delete(k)) removed++;
     for (const [k, o] of [...outbox.entries()]) {
       if (o.state !== "queued" && now - o.updatedAt > FEISHU_OUTBOX_SETTLED_TTL_MS && outbox.delete(k)) removed++;
     }
@@ -1285,6 +1333,11 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
     if (!parseTable(nonces, doc["nonces"], parseNonce, FEISHU_CAPS.nonces)) return "nonces";
     if (!parseTable(approvals, doc["approvals"], parseApproval, FEISHU_CAPS.approvals)) return "approvals";
     if (!parseTable(outbox, doc["outbox"], parseOutbox, FEISHU_CAPS.outboxParts)) return "outbox";
+    if (
+      doc["scheduleReceipts"] !== undefined &&
+      !parseTable(receipts, doc["scheduleReceipts"], parseScheduleReceipt, FEISHU_SCHEDULE_RECEIPT_CAP)
+    )
+      return "schedule-receipts";
     const u = parseUndecodable(doc["undecodable"]);
     if (u === undefined) return "undecodable";
     nonTerminal = 0;
@@ -1436,6 +1489,7 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
           nonces: nonces.size,
           approvals: approvals.size,
           outbox: outbox.size,
+          ...(receipts.size > 0 ? { scheduleReceipts: receipts.size } : {}),
         },
         appliedSeq,
         durableSeq,
@@ -1989,6 +2043,35 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
       },
     },
 
+    scheduleReceipts: {
+      get: (reportId) => {
+        const r = receipts.get(reportId);
+        return r === undefined ? undefined : clone(r);
+      },
+      set(reportId, input) {
+        if (!live()) return { ok: false, refused: "unavailable" };
+        const rec = parseScheduleReceipt(reportId, { ...input, at: clock.now() });
+        if (rec === undefined) return { ok: false, refused: "invalid" };
+        const existing = receipts.map.has(reportId);
+        if (!existing && receipts.size >= receipts.cap) {
+          if (sweepExpired() > 0) touch();
+          if (receipts.size >= receipts.cap) return { ok: false, refused: "cap" };
+        }
+        if (overBudget(receipts.delta(reportId, rec))) return { ok: false, refused: "budget" };
+        receipts.set(reportId, rec);
+        touch();
+        return { ok: true, value: clone(rec) };
+      },
+      list(filter) {
+        const out: Array<FeishuScheduleReceipt & { reportId: string }> = [];
+        for (const [k, v] of receipts.entries())
+          if (filter?.sid === undefined || v.sid === filter.sid) out.push({ reportId: k, ...clone(v) });
+        return out;
+      },
+      get size() {
+        return receipts.size;
+      },
+    },
     undecodable: {
       record(entry) {
         if (!live()) return;

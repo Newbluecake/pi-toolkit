@@ -2,7 +2,7 @@
 export const SKIP: unique symbol = Symbol.for("pi-subagent:prompt-section-skip") as never;
 export const POINTED: unique symbol = Symbol.for("pi-subagent:prompt-section-pointed") as never;
 
-export type SectionName = "pi_project_memory" | "pi_subagent_types" | "pi_subagent_models";
+export type SectionName = "pi_project_memory" | "pi_subagent_types" | "pi_subagent_models" | "pi_schedules";
 export type Live = string | typeof SKIP;
 export const UPDATE_LIMITS = { maxCount: 3, maxBytes: 32 * 1024 } as const;
 

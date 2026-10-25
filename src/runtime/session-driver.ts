@@ -1,25 +1,18 @@
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { assertSessionFileInDomain, secureChildSessionDir } from "../secure/domain.js";
 import { DefaultResourceLoader, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { getSystemMessageText } from "@earendil-works/pi-ai";
 import type {
-  ConsultCacheResult,
-  ConsultIdentityPrediction,
   ContextUsageInfo,
   DriverEvent,
   ErrorInfo,
-  ExpertRequestSnapshot,
   KillableHandle,
   RunOutcome,
   SessionSpec,
   UsageDelta,
 } from "../core/types.js";
 import { childActivationAdvanced, childActivationSnapshot } from "../child/activation-signal.js";
-import { classifyConsultCacheResult, classifyConsultToolEnd } from "../core/consult-summary.js";
-import { readHeaderCwd } from "../consult/fork-store.js";
-import { installConsultAnchor } from "../consult/anchor.js";
-import { installPrefixProbe, type PrefixProbeCleanup } from "../consult/prefix-probe.js";
 
 export type { KillableHandle, SessionSpec } from "../core/types.js";
 
@@ -35,17 +28,6 @@ export type { KillableHandle, SessionSpec } from "../core/types.js";
  */
 export const CHILD_SWITCH_CONTEXT_SOURCE = "pi-toolkit:switch_context";
 /**
- * todo #27 (child-extension-missing diagnostic): whether `spec` is a consult fork
- * (`SpawnRequest.forkSessionFrom` threaded through untyped/structurally into the
- * `SessionSpec` the driver sees — see `SessionSpec.forkSessionFrom`'s own doc comment in
- * core/types.ts). Factored out as its own pure function so it (and
- * `computeChildExtensionMissing` below) can be unit-tested directly without mocking pi's
- * `createAgentSession`.
- */
-export function isConsultForkSpec(spec: SessionSpec): boolean {
-  return typeof (spec as { forkSessionFrom?: unknown }).forkSessionFrom === "string";
-}
-/**
  * web-hub session-history plan §4.3 (H0, PD2): customType of the marker entry written into every
  * persisted child (subagent) session so the history list can recognize a session as a child even
  * when this package's child-session extension never activated for it (todo #27's `-e` parent —
@@ -56,15 +38,14 @@ export const SUBAGENT_CHILD_CUSTOM_TYPE = "subagent:child";
 /**
  * H0 (PD2): append the `subagent:child` marker to a freshly created child session, as the very
  * FIRST entry after the header (pi persists lazily — the file appears only once a user/assistant
- * message exists, and the marker then sits fixed on line 2). No-op unless `persist &&
- * !isConsultForkSpec(spec)` and `sm.appendCustomEntry` is a function; any throw is swallowed —
+ * message exists, and the marker then sits fixed on line 2). No-op unless `persist` and
+ * `sm.appendCustomEntry` is a function; any throw is swallowed —
  * the marker is best-effort bookkeeping and must never fail or delay a run. `resume()` never
- * calls this (a resumed session's provenance is already on disk; a consult fork stays unmarked —
- * its read-only run is not a dispatchable child session).
+ * calls this (a resumed session's provenance is already on disk).
  */
-export function markChildSession(sm: unknown, spec: SessionSpec, persist: boolean): void {
+export function markChildSession(sm: unknown, persist: boolean): void {
   try {
-    if (!persist || isConsultForkSpec(spec)) return;
+    if (!persist) return;
     const appendCustomEntry = (sm as { appendCustomEntry?: unknown } | null | undefined)?.appendCustomEntry;
     if (typeof appendCustomEntry !== "function") return;
     appendCustomEntry.call(sm, SUBAGENT_CHILD_CUSTOM_TYPE, { v: 1 });
@@ -73,70 +54,12 @@ export function markChildSession(sm: unknown, spec: SessionSpec, persist: boolea
   }
 }
 /**
- * todo #27: the actual create()/resume() decision — `true` (missing) iff this is NOT a
- * consult fork AND the process-wide activation counter (src/child/activation-signal.ts)
- * never advanced during the `[activationBefore, now]` window.
+ * todo #27: the actual create()/resume() decision — `true` (missing) iff the process-wide
+ * activation counter (src/child/activation-signal.ts) never advanced during the
+ * `[activationBefore, now]` window.
  */
-export function computeChildExtensionMissing(activationBefore: number, isConsultFork: boolean): boolean {
-  return !isConsultFork && !childActivationAdvanced(activationBefore);
-}
-
-/**
- * C2 M2: compare the newly opened consult session with the expert snapshot for
- * diagnostics only. Missing facts omit only their affected key; a malformed
- * host object or an unexpected getter never changes consult admission.
- */
-export function compareConsultIdentity(
-  sessionValue: unknown,
-  snapshot: ExpertRequestSnapshot,
-  sessionFile?: string,
-): ConsultIdentityPrediction | undefined {
-  try {
-    if (sessionValue === null || typeof sessionValue !== "object") return undefined;
-    const session = sessionValue as {
-      systemPrompt?: unknown;
-      model?: { provider?: unknown; id?: unknown };
-      thinkingLevel?: unknown;
-      sessionManager?: { getCwd?: () => unknown };
-      _runSystemPromptOptions?: { forceSystemPrompt?: unknown };
-    };
-    const prediction: ConsultIdentityPrediction = {};
-    const sections = snapshot.systemSections;
-    const hasSystemText =
-      sections !== null &&
-      typeof sections === "object" &&
-      Object.values(sections).some((value) => typeof value === "string" && value.length > 0);
-    if (hasSystemText && typeof session.systemPrompt === "string") {
-      const recorded = getSystemMessageText({ role: "system", content: "", sections, timestamp: 0 } as never);
-      prediction.system = session.systemPrompt === recorded;
-    }
-
-    if (snapshot.model !== undefined) {
-      const model = session.model;
-      if (typeof model?.provider === "string" && typeof model.id === "string")
-        prediction.model = model.provider === snapshot.model.provider && model.id === snapshot.model.id;
-    }
-    if (snapshot.thinkingLevel !== undefined && typeof session.thinkingLevel === "string")
-      prediction.thinking = session.thinkingLevel === snapshot.thinkingLevel;
-
-    const sessionCwd = session.sessionManager?.getCwd?.();
-    const snapshotCwd = sessionFile === undefined ? undefined : readHeaderCwd(sessionFile);
-    if (typeof sessionCwd === "string" && typeof snapshotCwd === "string") prediction.cwd = sessionCwd === snapshotCwd;
-
-    const forced = session._runSystemPromptOptions;
-    const consultForced =
-      forced !== undefined && Object.prototype.hasOwnProperty.call(forced, "forceSystemPrompt")
-        ? forced.forceSystemPrompt !== undefined
-        : false;
-    const snapshotForced = (snapshot as ExpertRequestSnapshot & { forcedPrompt?: unknown }).forcedPrompt;
-    // Snapshots do not record a forced prompt today; without that side, omit the key (same
-    // "missing data ⇒ omit" rule as the other fields) instead of guessing "expert had none".
-    if (typeof snapshotForced === "boolean") prediction.forcedPrompt = consultForced === snapshotForced;
-
-    return Object.keys(prediction).length === 0 ? undefined : prediction;
-  } catch {
-    return undefined;
-  }
+export function computeChildExtensionMissing(activationBefore: number): boolean {
+  return !childActivationAdvanced(activationBefore);
 }
 /** child-context-switch plan P0 (§2.3.1 point 1): customType of the entry the child-session extension appends at `agent_end` when a committed switch was never followed by a subsequent model request. */
 export const CHILD_SWITCH_SELFCHECK_CUSTOM_TYPE = "subagent:switch-selfcheck";
@@ -158,8 +81,6 @@ export interface SessionHandle {
   prompt(text: string): Promise<void>;
   /** Stage-1 input-budget preflight using pi's current effective prompt/tool definitions. */
   measureInputBudget?(prompt: string): { preBytes: number; preTokens: number };
-  /** C2 M2: record-only identity comparison computed before the first prompt. */
-  readonly consultIdentityPrediction?: ConsultIdentityPrediction;
   steer(text: string): Promise<void>;
   requestAbort(): Promise<void>;
   dispose(): DisposeReport;
@@ -234,8 +155,7 @@ export interface SessionHandle {
    * todo #27 (child-extension-missing diagnostic): true iff this child
    * session's own `activate()` was never observed running (see
    * `src/child/activation-signal.ts`'s process-wide counter). Set once at
-   * construction by `PiSessionDriver.create()`/`resume()`, never for a
-   * consult fork. `bind()` reads it once to emit the companion
+   * construction by `PiSessionDriver.create()`/`resume()`. `bind()` reads it once to emit the companion
    * `child_extension_missing` DriverEvent. Absent/false on every other
    * `SessionHandle` implementation (fakes in tests) — no event fires there.
    */
@@ -305,7 +225,7 @@ export { previewToolArgs };
 /**
  * X12: collect the tracked-run ids a toolResult message's `details` carries:
  * `runId` (nested Agent blocking result / get_subagent_result), `runIds`
- * (SubagentWorkflow batch results) and `consultRunId` (consult tool result).
+ * (SubagentWorkflow batch results).
  * Purely structural — no pi types, defensive against host shapes. Returns
  * undefined when nothing recognizable is present (the common case: assistant
  * message_ends and usage-less toolResults).
@@ -313,11 +233,10 @@ export { previewToolArgs };
 export function toolResultRunIds(message: unknown): readonly string[] | undefined {
   const m = message as { role?: unknown; details?: unknown } | undefined;
   if (!m || m.role !== "toolResult") return undefined;
-  const det = m.details as { runId?: unknown; runIds?: unknown; consultRunId?: unknown } | undefined;
+  const det = m.details as { runId?: unknown; runIds?: unknown } | undefined;
   if (!det || typeof det !== "object") return undefined;
   const ids: string[] = [];
   if (typeof det.runId === "string" && det.runId !== "") ids.push(det.runId);
-  if (typeof det.consultRunId === "string" && det.consultRunId !== "") ids.push(det.consultRunId);
   if (Array.isArray(det.runIds)) for (const r of det.runIds) if (typeof r === "string" && r !== "") ids.push(r);
   return ids.length > 0 ? ids : undefined;
 }
@@ -394,8 +313,8 @@ function mapEvent(e: any): DriverEvent | undefined {
     // X12: pi emits message_end for toolResult messages too (agent-core
     // tool-placement.js); a *usage-bearing* one carries some nested run's
     // spend INTO this run's X9 accumulator, and its `details` name the run(s)
-    // (nested Agent / get_subagent_result: runId; workflow batch: runIds;
-    // consult: consultRunId). Extract those ids so cost consumers can skip
+    // (nested Agent / get_subagent_result: runId; workflow batch: runIds).
+    // Extract those ids so cost consumers can skip
     // the nested runs instead of double-counting them. Gated on usage: a
     // background-spawn ack (or a "still running" poll) references a run whose
     // spend is NOT yet inside the parent — absorbing it would under-count.
@@ -416,18 +335,11 @@ function mapEvent(e: any): DriverEvent | undefined {
     };
   }
   if (t === "tool_execution_end") {
-    const toolName = String(e.toolName);
     return {
       t: "tool_end",
       toolCallId: String(e.toolCallId),
-      toolName,
+      toolName: String(e.toolName),
       isError: Boolean(e.isError),
-      // consult A/B instrumentation plan (§5 P1b): only a consult tool_end
-      // carries a classification fact (of pi's raw `result`, including the
-      // throw shape `isError` + `content[0].text=message` + `details:{}` the
-      // reducer folds into diag.consults); every other tool's tool_end keeps
-      // its exact pre-P1b shape.
-      ...(toolName === "consult" ? { consult: classifyConsultToolEnd(Boolean(e.isError), e.result) } : {}),
     };
   }
   if (t === "tool_execution_update") return { t: "tool_update", toolCallId: String(e.toolCallId) };
@@ -494,59 +406,16 @@ export function toolSourcesOf(session: AgentSession): ReadonlyMap<string, string
   }
 }
 
-/** Anchor is installed inside the probe, and only on resumed consult forks. */
-function installConsultProbes(session: AgentSession, spec: SessionSpec): PrefixProbeCleanup {
-  const anchor =
-    isConsultForkSpec(spec) && spec.consultAnchor !== undefined
-      ? installConsultAnchor(session, spec.consultAnchor)
-      : undefined;
-  const disposeProbe = installPrefixProbe(session, spec, anchor?.current);
-  return Object.assign(
-    () => {
-      disposeProbe();
-      anchor?.close();
-    },
-    disposeProbe.record ? { record: disposeProbe.record } : {},
-  );
-}
-function firstConsultCache(
-  spec: SessionSpec,
-  probe: PrefixProbeCleanup,
-): (() => ConsultCacheResult | undefined) | undefined {
-  if (!isConsultForkSpec(spec)) return undefined;
-  return () => {
-    const request = probe.record?.firstSuccessful;
-    if (!request || request.endedAt === undefined) return undefined;
-    return classifyConsultCacheResult(
-      request.usage,
-      request.anchor?.state ?? "n/a",
-      request.anchorIdentityValid === false ? true : request.anchor?.degraded,
-    );
-  };
-}
-
 class PiSessionHandle implements SessionHandle {
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
   readonly killableHandles = new Set<KillableHandle>();
-  readonly consultIdentityPrediction?: ConsultIdentityPrediction;
-  private consultCacheEmitted = false;
   constructor(
     public readonly session: AgentSession,
     readonly childExtensionMissing: boolean = false,
-    private readonly disposePrefixProbe: () => void = () => undefined,
-    consultIdentityPrediction?: ConsultIdentityPrediction,
-    private readonly consultCacheFirst?: () => ConsultCacheResult | undefined,
   ) {
     this.sessionId = session.sessionId;
     this.sessionFile = session.sessionFile;
-    if (consultIdentityPrediction !== undefined) this.consultIdentityPrediction = consultIdentityPrediction;
-  }
-  takeConsultCacheFirst(): ConsultCacheResult | undefined {
-    if (this.consultCacheEmitted) return undefined;
-    const result = this.consultCacheFirst?.();
-    if (result) this.consultCacheEmitted = true;
-    return result;
   }
   measureInputBudget(prompt: string): { preBytes: number; preTokens: number } {
     const byteLength = (value: string) => Buffer.byteLength(value, "utf8");
@@ -589,11 +458,6 @@ class PiSessionHandle implements SessionHandle {
     return Promise.resolve();
   }
   dispose(): DisposeReport {
-    try {
-      this.disposePrefixProbe();
-    } catch {
-      // Probe cleanup is diagnostic-only and must never change disposal semantics.
-    }
     try {
       this.session.dispose();
       return { returned: true, killed: 0, unkillable: [] };
@@ -807,7 +671,7 @@ export type ModelResolver = (provider: string, id: string) => unknown | undefine
  * the child session changes (extensions, skills, AGENTS.md, APPEND_SYSTEM).
  */
 export async function toCreateOptions(spec: SessionSpec, cwd: string): Promise<Record<string, unknown>> {
-  const { systemPrompt, consultAnchor: _consultAnchor, ...rest } = spec;
+  const { systemPrompt, ...rest } = spec;
   if (!systemPrompt) return rest;
   const agentDir = rest.agentDir ?? getAgentDir();
   const settingsManager = SettingsManager.create(cwd, agentDir);
@@ -855,12 +719,24 @@ export class PiSessionDriver implements SessionDriver {
     const resolved = this.withResolvedModel(spec);
     const cwd = resolved.cwd ?? process.cwd();
     const persist = resolved.persist ?? this.rememberAgents;
-    const sessionManager = persist ? SessionManager.create(cwd) : SessionManager.inMemory(cwd);
+    // data-encryption §2.5: a secure process puts child sessions inside the vault; a locked one
+    // refuses to start any. Plain ⇒ undefined ⇒ the exact legacy `create(cwd)` call.
+    let secureDir: string | undefined;
+    try {
+      secureDir = secureChildSessionDir();
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    const sessionManager = persist
+      ? secureDir !== undefined
+        ? SessionManager.create(cwd, secureDir)
+        : SessionManager.create(cwd)
+      : SessionManager.inMemory(cwd);
     // H0 (session-history plan §4.3, PD2): mark every persisted child session as a child BEFORE
     // anything else can append — the marker is then the first entry (file line 2 once pi lazily
     // flushes). Driver-side on purpose: it fires even when the child extension never activated
     // (todo #27). `resume()` above never marks.
-    markChildSession(sessionManager, resolved, persist);
+    markChildSession(sessionManager, persist);
     // todo #27: snapshot BEFORE the awaited resourceLoader.reload()/activate() window — see
     // src/child/activation-signal.ts for why "did the counter advance at all" (not "by exactly
     // one") is the correct check here.
@@ -873,106 +749,22 @@ export class PiSessionDriver implements SessionDriver {
           ...(persist ? {} : { persist: false }),
         } as Parameters<typeof createAgentSession>[0]),
       )
-      .then(({ session }) => {
-        const disposePrefixProbe = installPrefixProbe(session, resolved);
-        return new PiSessionHandle(
-          session,
-          computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec)),
-          disposePrefixProbe,
-        );
-      });
+      .then(({ session }) => new PiSessionHandle(session, computeChildExtensionMissing(activationBefore)));
   }
   resume(sessionFile: string, spec: SessionSpec) {
+    // data-encryption §2.5: cross-domain resume (vault file from a plain process, or a file outside
+    // the vault from a secure one) is refused before pi opens — and possibly rewrites — the file.
+    try {
+      assertSessionFileInDomain(sessionFile);
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
     const resolved = this.withResolvedModel(spec);
     const sessionManager = SessionManager.open(sessionFile, undefined, resolved.cwd);
-    // todo #27: a consult fork's read-only tool domain (CONSULT_READONLY_TOOLS) makes the
-    // features this diagnostic protects (bash-job settle-hold, switch_context, memory,
-    // cache-ttl keepalive) irrelevant — skip the check so a consult call never false-positives
-    // (isConsultForkSpec/computeChildExtensionMissing below).
     const activationBefore = childActivationSnapshot();
-    const guard = resolved.consultGuard;
-    if (!guard) {
-      return toCreateOptions(resolved, resolved.cwd ?? sessionManager.getCwd())
-        .then((options) =>
-          createAgentSession({ ...options, sessionManager } as Parameters<typeof createAgentSession>[0]),
-        )
-        .then(({ session }) => {
-          const disposePrefixProbe = installConsultProbes(session, resolved);
-          return new PiSessionHandle(
-            session,
-            computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec)),
-            disposePrefixProbe,
-            undefined,
-            firstConsultCache(resolved, disposePrefixProbe),
-          );
-        });
-    }
-
-    // Consult C2 must fail closed after createAgentSession has allocated an AgentSession,
-    // but before bind() or the first prompt. The driver owns this cleanup window because the
-    // runner's late-arrival hook only sees successfully resolved handles.
-    const { consultGuard: _consultGuard, consultSnapshot, consultAnchor: _consultAnchor, ...piSpec } = resolved;
-    let created: AgentSession | undefined;
-    let disposePrefixProbe: PrefixProbeCleanup | undefined;
-    let disposed = false;
-    const disposeOnce = () => {
-      if (disposed || !created) return;
-      disposed = true;
-      try {
-        disposePrefixProbe?.();
-      } catch {
-        // Probe cleanup is diagnostic-only and must not replace the guard error.
-      }
-      try {
-        created.dispose();
-      } catch {
-        // Cleanup must not replace the preflight/install failure.
-      }
-    };
-    return toCreateOptions(piSpec, piSpec.cwd ?? sessionManager.getCwd())
+    return toCreateOptions(resolved, resolved.cwd ?? sessionManager.getCwd())
       .then((options) => createAgentSession({ ...options, sessionManager } as Parameters<typeof createAgentSession>[0]))
-      .then(({ session }) => {
-        created = session;
-        disposePrefixProbe = installConsultProbes(session, resolved);
-        let verdict: ReturnType<typeof guard.preflight> | undefined;
-        try {
-          verdict = guard.preflight(session);
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          throw new Error(`[consult-preserve:guard_unavailable:agent-hooks] ${detail}`);
-        }
-        if (!verdict || typeof verdict !== "object") {
-          throw new Error("[consult-preserve:guard_unavailable:agent-hooks] invalid preflight result");
-        }
-        if (verdict.ok === false) {
-          if (typeof verdict.code !== "string")
-            throw new Error("[consult-preserve:guard_unavailable:agent-hooks] invalid preflight result");
-          throw new Error(`[consult-preserve:${verdict.code}] ${verdict.detail ?? verdict.code}`);
-        }
-        if (verdict.ok !== true) {
-          throw new Error("[consult-preserve:guard_unavailable:agent-hooks] invalid preflight result");
-        }
-        const consultIdentityPrediction =
-          consultSnapshot === undefined ? undefined : compareConsultIdentity(session, consultSnapshot, sessionFile);
-        try {
-          guard.install(session);
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          if (detail.startsWith("[consult-preserve:")) throw error;
-          throw new Error(`[consult-preserve:guard_unavailable:install-failed] ${detail}`);
-        }
-        return new PiSessionHandle(
-          session,
-          computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec)),
-          disposePrefixProbe,
-          consultIdentityPrediction,
-          firstConsultCache(resolved, disposePrefixProbe),
-        );
-      })
-      .catch((error: unknown) => {
-        disposeOnce();
-        throw error;
-      });
+      .then(({ session }) => new PiSessionHandle(session, computeChildExtensionMissing(activationBefore)));
   }
   bind(h: SessionHandle, onEvent: (e: DriverEvent) => void) {
     const session = (h as PiSessionHandle)["session"];
@@ -991,16 +783,6 @@ export class PiSessionDriver implements SessionDriver {
       if (mapped.t === "message_end" && (event as { message?: { role?: unknown } }).message?.role === "user")
         onEvent({ t: "input_accepted" });
       onEvent(mapped);
-      // The probe subscribed before bind, so it has already paired the first
-      // provider request with this assistant's usage. No cumulative/ping usage.
-      if (
-        mapped.t === "message_end" &&
-        (event as { message?: { role?: unknown } }).message?.role === "assistant" &&
-        h instanceof PiSessionHandle
-      ) {
-        const first = h.takeConsultCacheFirst();
-        if (first) onEvent({ t: "consult_cache_first", result: first });
-      }
       // child-context-switch plan P0 (§2.3.1): pi's own compaction failing is
       // ALSO surfaced as a dedicated best-effort diagnostic event (in addition
       // to the `compaction_end{failed:true}` flag above), carrying the raw

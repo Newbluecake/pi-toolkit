@@ -196,23 +196,4 @@ describe("runtime-adapter: promptNotes -> prompt (workflow-worktree plan D9, v2.
     await p;
     expect((createArgs as { prompt?: string }).prompt).toBe("hi");
   });
-
-  it("a consult run's prompt is the raw question, never gets a note appended even if H2 sets one", async () => {
-    const clock = new FakeClock();
-    let createArgs: unknown;
-    const driver: SessionDriver = {
-      create: async (s) => ((createArgs = s), handle()),
-      resume: async (_sessionFile, s) => ((createArgs = s), handle()),
-      bind: async () => undefined,
-      onLateArrival: () => undefined,
-    };
-    const ext: SubagentExtensionPoints = { resolveSessionSpec: (s) => ({ ...s, promptNotes: ["note"] }) };
-    const { runner } = buildAdapter(clock, driver, [ext]);
-    const p = runner.run(
-      spec({ request: { type: "worker", prompt: "consult question", forkSessionFrom: "/tmp/f.jsonl" } }),
-    );
-    await drain(clock, 30);
-    await p;
-    expect((createArgs as { prompt?: string }).prompt).toBe("consult question");
-  });
 });

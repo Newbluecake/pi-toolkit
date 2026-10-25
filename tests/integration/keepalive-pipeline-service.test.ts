@@ -21,7 +21,7 @@ import { wireCacheTtl } from "../../src/cache-ttl/cache-ttl.js";
 import { sendPipelinePing } from "../../src/cache-ttl/pipeline-ping.js";
 import { readBackKeepaliveSessionState } from "../../src/cache-ttl/keepalive-state.js";
 import type { PipelinePingInput, PipelinePingResult } from "../../src/cache-ttl/pipeline-ping-types.js";
-import { createCacheKeepaliveService, type CacheKeepaliveService } from "../../src/service/cache-keepalive.js";
+import { createCacheKeepaliveService, type CacheKeepaliveService } from "../../src/cache-ttl/keepalive-service.js";
 import { AnthropicStub, type AnthropicStubOptions } from "../conformance/fixtures/anthropic-stub.js";
 
 const ROOT = join(import.meta.dirname, "../..");
@@ -488,7 +488,7 @@ for (const mode of ["main", "child"] as const)
     const source = `
     import { ModelRuntime, SessionManager, SettingsManager, DefaultResourceLoader, createAgentSession, initTheme } from '@earendil-works/pi-coding-agent';
     import { DEFAULT_SETTINGS } from './src/config/settings.ts';
-    import { createCacheKeepaliveService } from './src/service/cache-keepalive.ts';
+    import { createCacheKeepaliveService } from './src/cache-ttl/keepalive-service.ts';
     import { wireCacheTtl } from './src/cache-ttl/cache-ttl.ts';
     import { wireChildKeepalive } from './src/cache-ttl/child.ts';
     import { getChildKeepaliveDisposeRegistry } from './src/cache-ttl/child-registry.ts';

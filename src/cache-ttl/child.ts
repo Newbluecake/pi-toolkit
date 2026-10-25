@@ -18,7 +18,7 @@ import { getProviderEvidenceStore, observeUsageIntoEvidence } from "./provider-e
 import { getChildKeepaliveLedger } from "./ping-ledger.js";
 import { getChildKeepaliveDisposeRegistry } from "./child-registry.js";
 import { getChildBashRegistry } from "../bash/child-registry.js";
-import { createCacheKeepaliveService, type CacheKeepaliveService } from "../service/cache-keepalive.js";
+import { createCacheKeepaliveService, type CacheKeepaliveService } from "./keepalive-service.js";
 import {
   isSuccessfulRealRequest,
   realRequestInputTokens,

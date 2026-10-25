@@ -8,6 +8,7 @@ import {
   WTGRAPH_TIPS_MAX,
   WTGRAPH_WT_HEADS_MAX,
   classifyGraphExit,
+  parseCherryMark,
   parseForEachRefZ,
   parseGraphLogZ,
   tipsFromRefs,
@@ -15,7 +16,7 @@ import {
   wtGraphArgs,
   type ForEachRefRow,
 } from "../../src/git/graph.js";
-import { WT_PINNED_PREFIX } from "../../src/git/diff.js";
+import { WTDIFF_EMPTY_TREE, WT_PINNED_PREFIX, wtDiffArgs } from "../../src/git/diff.js";
 
 const SHA1_A = "a".repeat(40);
 const SHA1_B = "b".repeat(40);
@@ -587,6 +588,207 @@ describe("argv execution whitelist (§2.3: no pathspec/content/diff-producing op
     for (const forbidden of FORBIDDEN) {
       expect(refsArgv).not.toContain(forbidden);
       expect(logArgv).not.toContain(forbidden);
+    }
+  });
+});
+
+describe("wtGraphArgs.cherry byte-exact snapshots (merged-plan §3.3 Gm)", () => {
+  const P = [...WT_PINNED_PREFIX];
+  const GB = [...P, "--no-lazy-fetch", "--no-replace-objects", "--no-pager", "-c", "core.hooksPath=/dev/null"];
+  const TAIL = ["-c", "diff.external=", "-c", "core.bigFileThreshold=512m"];
+  const REV = ["rev-list", "--cherry-mark", "--right-only"];
+  const driver = (n: string): string[] => [
+    "-c",
+    `filter.${n}.clean=`,
+    "-c",
+    `filter.${n}.smudge=`,
+    "-c",
+    `filter.${n}.process=`,
+    "-c",
+    `filter.${n}.required=false`,
+    "-c",
+    `diff.${n}.textconv=`,
+    "-c",
+    `diff.${n}.command=`,
+  ];
+
+  it("sha1, zero drivers: GB + L1(empty sha1 tree) + diff.external= + threshold + rev-list … <H>...<B> --", () => {
+    expect(WTDIFF_EMPTY_TREE.sha1).toBe("4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+    expect(wtGraphArgs.cherry(SHA1_A, SHA1_B, "sha1", [])).toEqual([
+      ...GB,
+      "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      "-c",
+      "core.attributesFile=/dev/null",
+      ...TAIL,
+      ...REV,
+      `${SHA1_A}...${SHA1_B}`,
+      "--",
+    ]);
+  });
+
+  it("sha256 uses the sha256 empty tree and 64-hex oids", () => {
+    expect(WTDIFF_EMPTY_TREE.sha256).toBe("6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321");
+    expect(wtGraphArgs.cherry(SHA256_A, SHA256_B, "sha256", [])).toEqual([
+      ...GB,
+      "--attr-source=6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
+      "-c",
+      "core.attributesFile=/dev/null",
+      ...TAIL,
+      ...REV,
+      `${SHA256_A}...${SHA256_B}`,
+      "--",
+    ]);
+  });
+
+  it("one driver: six blanked slots (clean/smudge/process/required=false/textconv/command) in order", () => {
+    const argv = wtGraphArgs.cherry(SHA1_A, SHA1_B, "sha1", ["lfs"]);
+    expect(argv).toEqual([
+      ...GB,
+      "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      "-c",
+      "core.attributesFile=/dev/null",
+      ...driver("lfs"),
+      ...TAIL,
+      ...REV,
+      `${SHA1_A}...${SHA1_B}`,
+      "--",
+    ]);
+  });
+
+  it("sixteen drivers: every name neutralized, in caller order, L2 strictly between L1 and diff.external", () => {
+    const names = Array.from({ length: 16 }, (_, i) => `d${i}`);
+    const argv = wtGraphArgs.cherry(SHA1_A, SHA1_B, "sha1", names);
+    expect(argv).toEqual([
+      ...GB,
+      "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      "-c",
+      "core.attributesFile=/dev/null",
+      ...names.flatMap(driver),
+      ...TAIL,
+      ...REV,
+      `${SHA1_A}...${SHA1_B}`,
+      "--",
+    ]);
+    expect(argv.filter((a) => a.startsWith("filter.") && a.endsWith(".clean="))).toHaveLength(16);
+  });
+
+  it("carries every hardening item, ends with `<H>...<B> --`, and has no tips-style / content-producing options", () => {
+    const argv = wtGraphArgs.cherry(SHA1_A, SHA1_B, "sha1", ["x"]);
+    for (const needed of [
+      "--no-lazy-fetch",
+      "--no-replace-objects",
+      "--no-pager",
+      "core.hooksPath=/dev/null",
+      "core.attributesFile=/dev/null",
+      "diff.external=",
+      "core.bigFileThreshold=512m",
+      "--cherry-mark",
+      "--right-only",
+    ]) {
+      expect(argv).toContain(needed);
+    }
+    expect(argv.slice(-2)).toEqual([`${SHA1_A}...${SHA1_B}`, "--"]);
+    for (const forbidden of ["--all", "--branches", "HEAD", "--no-merges", "-p", "--patch", "--stat", "--follow"]) {
+      expect(argv).not.toContain(forbidden);
+    }
+    expect(argv).not.toContain("--left-right");
+  });
+
+  it("is fail-closed on bad input: non-hex / wrong-length / flag-shaped oids and unsafe driver names THROW", () => {
+    expect(() => wtGraphArgs.cherry("--upload-pack=evil", SHA1_B, "sha1", [])).toThrow();
+    expect(() => wtGraphArgs.cherry(SHA1_A, "--output=/tmp/x", "sha1", [])).toThrow();
+    expect(() => wtGraphArgs.cherry(SHA1_A, SHA256_B, "sha1", [])).toThrow(); // length ≠ format
+    expect(() => wtGraphArgs.cherry(SHA256_A, SHA256_B, "sha1", [])).toThrow();
+    expect(() => wtGraphArgs.cherry(SHA1_A, SHA1_B, "sha256", [])).toThrow();
+    expect(() => wtGraphArgs.cherry("A".repeat(40), SHA1_B, "sha1", [])).toThrow(); // uppercase
+    expect(() => wtGraphArgs.cherry(SHA1_A, `${SHA1_B}\n`, "sha1", [])).toThrow();
+    expect(() => wtGraphArgs.cherry(SHA1_A, SHA1_B, "sha1", ["bad name"])).toThrow();
+    expect(() => wtGraphArgs.cherry(SHA1_A, SHA1_B, "sha1", ["-x"])).toThrow();
+    expect(() => wtGraphArgs.cherry(SHA1_A, SHA1_B, "sha1", ["a=b"])).toThrow();
+    expect(() => wtGraphArgs.cherry(SHA1_A, SHA1_B, "sha1", ["x".repeat(65)])).toThrow();
+  });
+
+  it("does not mutate its drivers input and is deterministic", () => {
+    const names = ["b", "a"];
+    const first = wtGraphArgs.cherry(SHA1_A, SHA1_B, "sha1", names);
+    expect(names).toEqual(["b", "a"]);
+    expect(wtGraphArgs.cherry(SHA1_A, SHA1_B, "sha1", names)).toEqual(first);
+  });
+});
+
+describe("wtGraphArgs.driverScan (Cc) is wtDiffArgs.driverScan() byte-for-byte", () => {
+  it("equals the wtdiff argv element by element", () => {
+    const a = wtGraphArgs.driverScan();
+    const b = wtDiffArgs.driverScan();
+    expect(a).toEqual(b);
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+    expect(a.slice(0, WT_PINNED_PREFIX.length)).toEqual([...WT_PINNED_PREFIX]);
+    expect(a).toContain("--get-regexp");
+  });
+
+  it("returns a fresh array each call (callers cannot corrupt a shared frozen argv)", () => {
+    const a = wtGraphArgs.driverScan();
+    a.push("tamper");
+    expect(wtGraphArgs.driverScan()).toEqual(wtDiffArgs.driverScan());
+  });
+});
+
+describe("parseCherryMark", () => {
+  it("splits =/+ lines into eq / plus preserving order", () => {
+    const out = `=${SHA1_A}\n+${SHA1_B}\n+${SHA1_C}\n=${"d".repeat(40)}\n`;
+    expect(parseCherryMark(out, false, "sha1")).toEqual({ eq: [SHA1_A, "d".repeat(40)], plus: [SHA1_B, SHA1_C] });
+  });
+
+  it("empty stdout is a valid empty result (HEAD advanced past the tip ⇒ t = 0)", () => {
+    expect(parseCherryMark("", false, "sha1")).toEqual({ eq: [], plus: [] });
+    expect(parseCherryMark("", false, "sha256")).toEqual({ eq: [], plus: [] });
+  });
+
+  it("tolerates the absence of the trailing newline", () => {
+    expect(parseCherryMark(`+${SHA1_A}`, false, "sha1")).toEqual({ eq: [], plus: [SHA1_A] });
+  });
+
+  it("sha256 oids parse under sha256 and are rejected under sha1 (and vice versa)", () => {
+    expect(parseCherryMark(`=${SHA256_A}\n+${SHA256_B}\n`, false, "sha256")).toEqual({
+      eq: [SHA256_A],
+      plus: [SHA256_B],
+    });
+    expect(parseCherryMark(`=${SHA256_A}\n`, false, "sha1")).toEqual({ bad: true });
+    expect(parseCherryMark(`=${SHA1_A}\n`, false, "sha256")).toEqual({ bad: true });
+  });
+
+  it.each([
+    ["unknown prefix", `-${SHA1_A}\n`],
+    ["no prefix (plain rev-list line)", `${SHA1_A}\n`],
+    ["boundary prefix", `-${SHA1_A}\n+${SHA1_B}\n`],
+    ["left-right prefix", `<${SHA1_A}\n`],
+    ["short oid", `=${"a".repeat(39)}\n`],
+    ["long oid", `=${"a".repeat(41)}\n`],
+    ["uppercase oid", `=${"A".repeat(40)}\n`],
+    ["non-hex oid", `=${"g".repeat(40)}\n`],
+    ["trailing space", `=${SHA1_A} \n`],
+    ["CRLF", `=${SHA1_A}\r\n`],
+    ["blank line in the middle", `=${SHA1_A}\n\n+${SHA1_B}\n`],
+    ["two trailing newlines", `=${SHA1_A}\n\n`],
+    ["two oids on one line", `=${SHA1_A}+${SHA1_B}\n`],
+    ["prefix only", "=\n"],
+    ["one bad line among good ones", `=${SHA1_A}\nxyz\n+${SHA1_B}\n`],
+    ["NUL byte", `=${SHA1_A}\0\n`],
+  ])("a bad stream is all-or-nothing: %s ⇒ { bad: true }", (_name, out) => {
+    expect(parseCherryMark(out, false, "sha1")).toEqual({ bad: true });
+  });
+
+  it("capped ⇒ { bad: true } even when every complete line is well-formed (count unknowable; caller reports too-many)", () => {
+    expect(parseCherryMark(`=${SHA1_A}\n+${SHA1_B}\n`, true, "sha1")).toEqual({ bad: true });
+    expect(parseCherryMark("", true, "sha1")).toEqual({ bad: true });
+  });
+});
+
+describe("Gm argv execution whitelist", () => {
+  it("wtGraphArgs.cherry() has none of the content/diff-producing options of the Gr/Gl whitelist", () => {
+    const argv = wtGraphArgs.cherry(SHA1_A, SHA1_B, "sha1", []);
+    for (const forbidden of ["-p", "--patch", "--stat", "--name-only", "--name-status", "-S", "-G", "--follow"]) {
+      expect(argv).not.toContain(forbidden);
     }
   });
 });

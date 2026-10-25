@@ -109,7 +109,12 @@ async function captureWiring(): Promise<WiringCapture> {
       return { on: () => undefined, unref: () => undefined } as never;
     }) as never;
     wireWebHub(pi, {
-      settings: { ...SETTINGS, autoStart: true, nodeLoader },
+      // web-hub-cmd-history A1 (main-session ruling 2026-10-24): the xs off golden pins ONLY
+      // the xs surface; cmd-history is an orthogonal feature, so it is switched OFF here to
+      // keep the frozen fixture byte-stable. Its real default-on behavior (the
+      // `cmd.history.v1` feature token on a persisted session) is pinned by the dedicated
+      // assertion below — NOT by this golden.
+      settings: { ...SETTINGS, autoStart: true, nodeLoader, cmdHistory: false },
       fleet: () => [],
       env: { HOME: tmp.dir },
       paths: { ...pathsIn(tmp.dir), stoppedFile: join(tmp.dir, "stopped") },
@@ -193,6 +198,50 @@ describe("fabric xs-off golden (phase2-plan §2.8 H3 / §10.1 XI1)", () => {
     }
     const golden = JSON.parse(readFileSync(FIXTURE, "utf8")) as Record<string, unknown>;
     expect(actual).toEqual(golden);
+  });
+
+  it("cmd-history default-on adds exactly the cmd.history.v1 feature token (A1 pin, orthogonal to the frozen golden)", async () => {
+    // Same capture harness, default settings (cmdHistory on): the persisted fake session meets
+    // plan §4.6's gate, so statusFrame.features is [resume.v1, cmd.history.v1] and nothing else
+    // changes — this is the assertion the frozen golden deliberately does NOT carry.
+    vi.useFakeTimers();
+    vi.setSystemTime(FIXED_NOW);
+    const tmp = tmpDir("wh-xs-cmdhistory-");
+    resetGlobals();
+    try {
+      const nodeLoader = join(tmp.dir, "jiti.mjs");
+      writeFileSync(nodeLoader, "");
+      const net = fakeNet();
+      const { pi, fire } = fakePi();
+      wireWebHub(pi, {
+        settings: { ...SETTINGS, autoStart: true, nodeLoader },
+        fleet: () => [],
+        env: { HOME: tmp.dir },
+        paths: { ...pathsIn(tmp.dir), stoppedFile: join(tmp.dir, "stopped") },
+        buildInfo: async () => ({ pluginVersion: "0.0.0-golden", buildId: "golden-build" }),
+        argv1: "/nonexistent/pi",
+        netConnect: net.netConnect,
+        spawnImpl: ((_e: string, _a: string[], _o: { env: NodeJS.ProcessEnv }) => ({
+          on: () => undefined,
+          unref: () => undefined,
+        })) as never,
+        now: () => FIXED_NOW,
+      });
+      fire("session_start", { reason: "startup" }, fakeCtx({ mode: "tui" }).ctx);
+      await vi.advanceTimersByTimeAsync(50);
+      net.sockets[0]!.emit("error", Object.assign(new Error("connect ENOENT"), { code: "ENOENT" }));
+      for (let i = 0; i < 40 && net.sockets.length < 2; i++) await vi.advanceTimersByTimeAsync(100);
+      const socket = net.sockets[1]!;
+      socket.emit("connect");
+      socket.hub(ackFrame("a1-key", 4242, [...P2_HUB_CAPS, VERSION_HUB_CAP]));
+      vi.advanceTimersByTime(50);
+      const status = socket.frames().find((f) => f.t === "status") as { features?: string[] };
+      expect(status.features).toEqual(["resume.v1", "cmd.history.v1"]);
+    } finally {
+      resetGlobals();
+      vi.useRealTimers();
+      tmp.cleanup();
+    }
   });
 
   it("is deterministic and contains no xs surface while off", async () => {

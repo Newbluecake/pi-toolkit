@@ -24,6 +24,11 @@
  * `store:false` — join-only, never cached, I6) keyed on `pin ids \0 sha256(sorted tips) \0
  * shallow`. The shared execution runs under `PinSet.withLoan` so it may outlive the leader
  * request's own ⑬ (`worktree-diff/git.ts`'s `PinSet.withLoan` precedent).
+ *
+ * merged-plan r3 §3 (P2): with `mergedEnabled` AND a `merged=1` query the request additionally
+ * runs the independent M phase (`./merged.ts`) after `projectGraph` and attaches the optional
+ * `merged` payload field. Any other request takes EXACTLY the baseline path above (same git call
+ * sequence, same `projectGraph` arguments, same response bytes).
  */
 
 import { createHash, createHmac, randomBytes } from "node:crypto";
@@ -34,11 +39,15 @@ import type { GitRunner } from "../../../git/run.js";
 import { canonicalOrigin, parseOrigin } from "../../protocol/lan.js";
 import { normalizePreviewPath, validatePreviewPath } from "../../protocol/preview.js";
 import {
+  WTGRAPH_BODY_MAX_BYTES,
   WTGRAPH_GIT_PHASE_MS,
   WTGRAPH_LOG_MAX_BYTES,
   WTGRAPH_LOG_MS,
+  WTGRAPH_MERGED_MAX_BYTES,
+  WTGRAPH_MERGED_QUERY,
   WTGRAPH_REFS_MAX_BYTES,
   WTGRAPH_REFS_SCAN_MAX,
+  type WtGraphMerged,
   type WtGraphPayload,
 } from "../../protocol/worktree-graph.js";
 import { WTDIFF_ADMIT_MS, WTDIFF_STEP_MS, type WtDiffDenyReason } from "../../protocol/worktree-diff.js";
@@ -58,6 +67,17 @@ import { SingleFlightCache } from "../worktree-diff/changeset.js";
 import { createMembership } from "../worktree-diff/membership.js";
 import { wtCsrfOk } from "../worktree-diff/routes.js";
 import { createPinnedGit, type PinnedGitOutcome, type PinSet } from "../worktree-diff/git.js";
+import {
+  MergedAbortError,
+  WTGRAPH_MERGED_CACHE_BYTES,
+  WTGRAPH_MERGED_CACHE_ITEM_BYTES,
+  WTGRAPH_MERGED_CACHE_LRU,
+  WTGRAPH_MERGED_CACHE_TTL_MS,
+  finalizeMergedPayload,
+  runMergedPhase,
+  type MergedStats,
+  type MergedValue,
+} from "./merged.js";
 import { isValidHead, projectGraph, type WtHeadCandidate } from "./project.js";
 
 // ---------------------------------------------------------------------------
@@ -198,6 +218,9 @@ export interface WorktreeGraphRoutesDeps {
   now(): number;
   limit?: CmdLimit | undefined;
   fs?: Partial<PreviewFs> | undefined;
+  /** merged-plan §3.1: honour `merged=1`. hub.ts passes `true` under exactly the condition that
+   * declares `wtgraph.merged.v1`; absent/false ⇒ the query key is ignored (baseline path). */
+  mergedEnabled?: boolean | undefined;
 }
 
 interface ActiveRequest {
@@ -217,6 +240,17 @@ export function createWorktreeGraphRoutes(deps: WorktreeGraphRoutesDeps): Worktr
     lruMax: 0,
     totalBytes: 0,
     store: false,
+    now,
+  });
+
+  /** merged-plan §3.6: Gm results are a pure function of (HEAD, tip, attribute signature) — cached
+   * with TTL/LRU/total-bytes/per-item bounds; one instance per `createWorktreeGraphRoutes` (I4). */
+  const mergedCache = new SingleFlightCache<MergedValue>({
+    ttlMs: WTGRAPH_MERGED_CACHE_TTL_MS,
+    lruMax: WTGRAPH_MERGED_CACHE_LRU,
+    totalBytes: WTGRAPH_MERGED_CACHE_BYTES,
+    itemMaxBytes: WTGRAPH_MERGED_CACHE_ITEM_BYTES,
+    store: true,
     now,
   });
 
@@ -246,6 +280,14 @@ export function createWorktreeGraphRoutes(deps: WorktreeGraphRoutesDeps): Worktr
     ms?: number | undefined;
     joined?: boolean | undefined;
     wtTag?: string | undefined;
+    mergedReq?: number | undefined;
+    mergedCand?: number | undefined;
+    mergedOmitted?: number | undefined;
+    mergedRun?: number | undefined;
+    mergedHit?: number | undefined;
+    mergedUnk?: number | undefined;
+    mergedSkip?: number | undefined;
+    mergedMs?: number | undefined;
   }
 
   async function serve(
@@ -488,7 +530,8 @@ export function createWorktreeGraphRoutes(deps: WorktreeGraphRoutesDeps): Worktr
         if (glOutcome !== undefined) {
           glParsed = parseGraphLogZ(glOutcome.stdout, glOutcome.capped, tips.format ?? "sha1");
         }
-        const payload: WtGraphPayload = projectGraph({
+        const wantMerged = deps.mergedEnabled === true && query.get(WTGRAPH_MERGED_QUERY) === "1";
+        let payload: WtGraphPayload = projectGraph({
           refRows,
           refsTruncated,
           tips,
@@ -503,7 +546,46 @@ export function createWorktreeGraphRoutes(deps: WorktreeGraphRoutesDeps): Worktr
                 },
           shallow,
           wtHeadCandidates,
+          // merged=1 only: reserve the merged block's share of the unchanged 512 KiB total
+          ...(wantMerged ? { maxBodyBytes: WTGRAPH_BODY_MAX_BYTES - WTGRAPH_MERGED_MAX_BYTES } : {}),
         });
+
+        if (wantMerged) {
+          acc.mergedReq = 1;
+          let merged: WtGraphMerged;
+          let stats: MergedStats | undefined;
+          try {
+            const r = await runMergedPhase(
+              { pinned, ps, fs, tracker, now, signal, cache: mergedCache, log },
+              { payload, rows: m.rows, shallow },
+            );
+            merged = r.merged;
+            stats = r.stats;
+          } catch (err) {
+            if (signal.aborted || err instanceof MergedAbortError) {
+              if (abortAnswer()) return;
+              throw new WtgInternalError();
+            }
+            // a defect inside the M phase must never take the graph itself down
+            log.error("wtgraph merged phase failed", { error: String(err) });
+            merged = {
+              v: 1,
+              ...(payload.head === undefined ? {} : { base: payload.head.h }),
+              skipped: payload.head === undefined ? "no-head" : "unconfirmed",
+              branches: [],
+            };
+          }
+          payload = finalizeMergedPayload(payload, merged);
+          if (stats !== undefined) {
+            acc.mergedCand = stats.cand;
+            acc.mergedOmitted = stats.omitted;
+            acc.mergedRun = stats.run;
+            acc.mergedHit = stats.hit;
+            acc.mergedUnk = stats.unk;
+            acc.mergedSkip = payload.merged?.skipped === undefined ? 0 : 1;
+            acc.mergedMs = stats.ms;
+          }
+        }
 
         acc.ok = true;
         acc.commits = payload.commits.length;
@@ -591,10 +673,12 @@ export function createWorktreeGraphRoutes(deps: WorktreeGraphRoutesDeps): Worktr
       const waitMs = Math.max(0, Math.min(WTGRAPH_DISPOSE_WAIT_MS, deadline.remaining()));
       disposePromise = (async (): Promise<void> => {
         glInflight.abortAll("hub-close");
+        mergedCache.abortAll("hub-close");
         for (const e of [...active]) e.ctl.abort("hub-close");
         if (active.size > 0) {
           await Promise.race([Promise.allSettled([...active].map((e) => e.done)), unrefDelay(waitMs)]);
         }
+        mergedCache.clear();
       })();
       disposePromise.catch(() => undefined);
       return disposePromise;

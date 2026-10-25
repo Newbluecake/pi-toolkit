@@ -607,3 +607,110 @@ details[open] > summary.run .chev {
     max-width: 6ch;
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * web-hub archive plan (docs/dev/web-hub/archive-report.md): per-row「归档」button + the
+ * bottom「已归档 N」fold. The button is hidden until the row is hovered (and only rendered on
+ * terminal rows — FleetTree's canArchiveRow); position:absolute inside the row keeps it out of
+ * the grid flow so nothing shifts when it appears.
+ * ------------------------------------------------------------------------- */
+.run {
+  position: relative;
+}
+
+.arch-act {
+  display: none;
+  position: absolute;
+  right: var(--sp-2);
+  top: 4px;
+  z-index: 1;
+  padding: 1px 8px;
+  font-size: var(--fs-xs, 12px);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-2, var(--c-text));
+}
+
+.run:hover .arch-act,
+.arch-act:focus-visible,
+.bj-item:hover .arch-act {
+  display: inline-flex;
+}
+
+/* The archived fold (FleetArchived.vue) — root-level section under the tree. Left inset matches the
+ * bash group's archived fold (`.bj-list` padding 6px) so the two folds line up (2026-10-24 user report). */
+.fleet-archived {
+  margin: var(--sp-2) 0 0 6px;
+  border-top: 1px dashed var(--c-border);
+  padding-top: 4px;
+}
+
+.fleet-archived-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  font-size: var(--fs-sm);
+  color: var(--c-text-2, var(--c-text));
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.fleet-archived-fold .chev {
+  transition: transform 0.12s ease;
+}
+
+.fleet-archived[data-open="true"] .fleet-archived-fold .chev,
+.bj-archived-fold[aria-expanded="true"] .chev {
+  transform: rotate(90deg);
+}
+
+.fleet-archived-list {
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.arch-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 32px;
+  padding: 3px var(--sp-2) 3px var(--tree-pad, 3px);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+  opacity: 0.72;
+}
+
+.arch-row:hover {
+  background: var(--c-surface-2);
+  opacity: 1;
+}
+
+.arch-name {
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.arch-name b {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.arch-auto {
+  flex: none;
+  font-size: var(--fs-xs, 12px);
+  color: var(--c-text-3, var(--c-text-2, var(--c-text)));
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  padding: 0 4px;
+}

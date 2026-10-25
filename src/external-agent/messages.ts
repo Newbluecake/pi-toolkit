@@ -7,13 +7,6 @@ export const MSG_READONLY_DOMAIN: string =
   'toolDomain:"readonly" runs cannot use droid/* models: external agents run with full permissions in this ' +
   "version, so pi-toolkit cannot guarantee read-only execution. Use a pi model for this run.";
 
-export const MSG_EXPERTS_UNSUPPORTED: string =
-  "experts/consult is not supported for droid/* runs (external agents cannot load the consult tool)";
-
-export function msgExpertIsExternal(runId: string): string {
-  return `expert ${runId} is a droid external-agent run; consult requires a pi session`;
-}
-
 export function msgResumeCrossRuntime(runId: string, from: "droid" | "pi"): string {
   const other = from === "droid" ? "pi" : "droid";
   const origin = from === "droid" ? "a droid external-agent" : "a pi";
@@ -113,14 +106,15 @@ export function msgProviderNameCollision(provider: string): string {
   );
 }
 
-/** §4.8 capabilities 文案：按可缺能力拼「Unavailable here」列表（consult 恒不可用）。 */
+/** §4.8 capabilities 文案：按可缺能力拼「Unavailable here」列表（两项都可用时不输出该句）。 */
 export function capabilitiesText(o: { canSpawn: boolean; canMessage: boolean }): string {
-  const missing: string[] = ["consulting experts"];
+  const missing: string[] = [];
   if (!o.canMessage) missing.push("messaging other agents");
   if (!o.canSpawn) missing.push("spawning pi sub-agents");
+  const unavailable = missing.length > 0 ? ` Unavailable here: ${missing.join(", ")}.` : "";
   return (
     "You are running as an external agent (Factory droid) on behalf of pi-toolkit, with full permissions in " +
-    `your working directory. Unavailable here: ${missing.join(", ")}. Write every finding into your final answer.`
+    `your working directory.${unavailable} Write every finding into your final answer.`
   );
 }
 
@@ -135,7 +129,7 @@ export function externalModelsPromptHeader(provider: string, allowed?: readonly 
         `(${allowed.join(", ")}); other ids are rejected at spawn admission.`;
   return (
     `\`${provider}/<id>\` runs the subagent as a Factory ${provider} CLI process with full permissions, not a pi ` +
-    'session: no consult/experts, message_agent, nested Agent, set_model or toolDomain:"readonly"; resuming is ' +
+    'session: no message_agent, nested Agent, set_model or toolDomain:"readonly"; resuming is ' +
     "pinned to the original working directory; schema answers are parsed from a final ```json block; cost is " +
     "computed from the underlying model's pi price (shown as unpriced when unknown). " +
     accept

@@ -69,23 +69,7 @@ const snaps: any[] = [
     currentTool: { name: "grep", toolCallId: "tg", startedAt: NOW - 3000 },
     toolHistory: tools(["grep", "read", "read"]),
   }),
-  snap("r_2ConSuLt", "completed", "settled", "r_8Kd2QnVx", {
-    createdAt: NOW - 70000,
-    settledAt: NOW - 2500,
-    label: "ask-arch",
-    agentType: "consult",
-    model: { provider: "cr-anthropic", id: "claude-opus-5" },
-    usage: { input: 30000, output: 800, cacheRead: 29000, cacheWrite: 0, costUsd: 0.09 },
-    consultOf: { askerRunId: "r_8Kd2QnVx" },
-    consultCache: {
-      v: 1,
-      predicted: { state: "warm" },
-      first: { v: 1, readShare: 0.962, label: "hit", anchor: "added", at: NOW - 60000 },
-    },
-    consultThread: { threadId: "c7k9q2mx", seq: 2 },
-  }),
 ];
-snaps[3].updatedAt = NOW - 2500;
 
 export default function (pi: any) {
   pi.on("session_start", (_e: any, ctx: any) => {

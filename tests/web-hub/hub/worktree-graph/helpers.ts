@@ -33,7 +33,7 @@ export {
   type ScriptedRunner,
 } from "../worktree-diff/helpers.js";
 
-import { okRun, type RepoFixture } from "../worktree-diff/helpers.js";
+import { HEAD_SHA1, okRun, type FakeFs, type RepoFixture } from "../worktree-diff/helpers.js";
 
 /** Push exactly C1a + C1 (the two membership commands `createMembership` runs) — no C0. Mirrors
  * `RepoFixture.scriptAdmission` without its trailing C0 push, since worktree-graph routes never
@@ -103,4 +103,107 @@ export function commitChain(n: number, startAt = 2_000_000): GlRecordInput[] {
     out.push({ h: hashOf(i), p: parents, an: `author${i}`, at: startAt - i, s: `commit ${i}` });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// merged-plan P2: the `merged=1` scenario harness (argv-shape routed runner handler)
+// ---------------------------------------------------------------------------
+
+import type { GitRunOptions, GitRunResult } from "../../../../src/git/run.js";
+import type { ScriptedRunner } from "../worktree-diff/helpers.js";
+
+/** Deterministic 40-hex oid from a small integer (never all-zero; ≥ 1). */
+export function oidOf(i: number): string {
+  return (0x1000 + i).toString(16).padStart(40, "a");
+}
+
+/** Gm stdout: `=<oid>` per patch-equivalent commit, `+<oid>` per other. */
+export function cherryOut(eq: readonly string[], plus: readonly string[]): string {
+  return [...eq.map((o) => `=${o}`), ...plus.map((o) => `+${o}`)].map((l) => `${l}\n`).join("");
+}
+
+export interface MergedScenario {
+  /** Gr stdout */
+  gr: string;
+  /** Gl stdout */
+  gl: string;
+  /** Cc stdout / exit (default: no driver config, exit 1 = "no match") */
+  cc?: { stdout?: string; code?: number } | undefined;
+  /** runs when Cc executes (e.g. to advance a fake clock) */
+  onCc?: (() => void) | undefined;
+  /** Gm response per tip oid (receives the full call so a test can mutate fs/clock mid-run) */
+  gm(tip: string, call: { argv: readonly string[]; opts: GitRunOptions }): GitRunResult | Promise<GitRunResult>;
+}
+
+export const isGmArgv = (argv: readonly string[]): boolean =>
+  argv.includes("rev-list") && argv.includes("--cherry-mark");
+export const isCcArgv = (argv: readonly string[]): boolean => argv.includes("config") && argv.includes("--get-regexp");
+
+/** Route every runner call by argv shape (call ORDER stays observable via `runner.calls`). */
+export function installMergedHandler(fx: { runner: ScriptedRunner; porcelain: string }, sc: MergedScenario): void {
+  fx.runner.setHandler((call) => {
+    const j = call.argv.join(" ");
+    if (j.includes("--git-common-dir")) return okRun("/w/repo/.git\n");
+    if (j.includes("worktree list --porcelain")) return okRun(fx.porcelain);
+    if (call.argv.includes("for-each-ref")) return okRun(sc.gr);
+    if (call.argv.includes("log") && call.argv.includes("--date-order")) return okRun(sc.gl);
+    if (isCcArgv(call.argv)) {
+      sc.onCc?.();
+      return {
+        code: sc.cc?.code ?? 1,
+        stdout: sc.cc?.stdout ?? "",
+        stdoutCapped: false,
+        stderr: "",
+      };
+    }
+    if (isGmArgv(call.argv)) {
+      const range = call.argv[call.argv.indexOf("--right-only") + 1] ?? "";
+      return sc.gm(range.split("...")[1] ?? "", call);
+    }
+    return { code: 128, stdout: "", stdoutCapped: false, stderr: `unexpected git call: ${j}` };
+  });
+}
+
+/**
+ * The standard merged window: HEAD (= HEAD_SHA1, parent P1) → P1 → P2; plus `sides` side commits
+ * S_i (parent P2) each carrying a local branch `side-<i>`; `refs/heads/feat` (the self row's own
+ * branch) sits on HEAD. Returns the Gr/Gl stdouts and the side tips.
+ */
+export function mergedWindow(sides: number): { gr: string; gl: string; tips: string[]; p1: string; p2: string } {
+  const p1 = oidOf(9001);
+  const p2 = oidOf(9002);
+  const tips = Array.from({ length: sides }, (_, i) => oidOf(i + 1));
+  const gl = glStdout([
+    { h: HEAD_SHA1, p: [p1], at: 5_000 },
+    ...tips.map((h, i) => ({ h, p: [p2], at: 4_000 - i })),
+    { h: p1, p: [p2], at: 3_000 },
+    { h: p2, p: [], at: 2_000 },
+  ]);
+  const gr = grStdout([
+    { type: "commit", oid: HEAD_SHA1, refname: "refs/heads/feat" },
+    ...tips.map((h, i) => ({ type: "commit" as const, oid: h, refname: `refs/heads/side-${i}` })),
+  ]);
+  return { gr, gl, tips, p1, p2 };
+}
+
+/** Count (and hook) the info/attributes opens and `shallow` stats the M phase performs. */
+export function hookFs(
+  fs: FakeFs,
+  hooks: {
+    onInfoOpen?: (n: number) => void | Promise<void>;
+    onShallowStat?: (n: number) => void | Promise<void>;
+  },
+): FakeFs {
+  let infoOpens = 0;
+  let shallowStats = 0;
+  const wrapped: FakeFs = { ...fs };
+  wrapped.open = async (path, flags) => {
+    if (path.endsWith("/info/attributes")) await hooks.onInfoOpen?.(++infoOpens);
+    return fs.open(path, flags);
+  };
+  wrapped.stat = async (path) => {
+    if (path.endsWith("/shallow")) await hooks.onShallowStat?.(++shallowStats);
+    return fs.stat(path);
+  };
+  return wrapped;
 }

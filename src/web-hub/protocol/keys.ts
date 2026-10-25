@@ -9,6 +9,7 @@
  * `diffAppended` 的多重集对账使用 —— 持久化严格按事件顺序，尾部计数对账正确。
  */
 import { Buffer } from "node:buffer";
+import { CMD_RECORD_ENTRY_TYPE, sanitizeCmdRecord } from "./cmd-record.js";
 import { LIMITS, type WireEntry, type WireMessage } from "./messages.js";
 
 /** user/assistant/system: `role:timestamp`；toolResult 追加 `:toolCallId`；custom → customKey。 */
@@ -190,21 +191,46 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
           ...(timing !== undefined ? { timing } : {}),
         };
       }
+      // web-hub-cmd-history plan §4.5: `subagent:cmd` keeps the tombstone shape (display:false,
+      // dataKey over the FULL raw data — dedupe/reconciliation semantics unchanged) but
+      // additionally carries the sanitized `cmd` record so the browser folds history cards;
+      // an unsanitizable record (tampered/hostile) degrades to the bare tombstone. Old UIs
+      // render neither (no renderer for the tombstone), old hubs forward the frame verbatim.
+      if (r.customType === CMD_RECORD_ENTRY_TYPE) {
+        const cmd = sanitizeCmdRecord(r.data);
+        return {
+          id: r.id,
+          parentId,
+          type: "custom",
+          timestamp: r.timestamp,
+          customType: r.customType,
+          dataKey: customKey(r.customType, r.data),
+          display: false,
+          ...(cmd !== undefined ? { cmd } : {}),
+        };
+      }
       // message_agent → root 的 display 面（progress/finding 等，progressChannel:"display"）：
       // TUI 靠 fabric-entry-renderer 渲染 record，web 端若走默认墓碑投影则正文永不可见
       // （2026-10-07 用户报告：@mention 后收不到 subagent 的 message_agent 回复）。
       // 终态 delivered 且带正文的记录投影为可渲染 custom_message（header 与 TUI 一致）；
       // outbox 每迁移一次状态就追加一条，非 delivered 状态维持墓碑投影，避免重复显示。
       if (r.customType === "subagent:fabric") {
-        const d = r.data as { state?: unknown; kind?: unknown; from?: unknown; payload?: unknown } | null | undefined;
+        const d = r.data as
+          | { state?: unknown; kind?: unknown; from?: unknown; fromLabel?: unknown; payload?: unknown }
+          | null
+          | undefined;
         const payload = d !== null && typeof d === "object" ? d.payload : undefined;
         const text =
           payload !== null && typeof payload === "object" && !Array.isArray(payload)
             ? (payload as Record<string, unknown>).text
             : undefined;
         if (d?.state === "delivered" && typeof text === "string" && text.trim() !== "") {
-          const kind = typeof d.kind === "string" ? d.kind : "message";
-          const from = typeof d.from === "string" && d.from !== "" && d.from !== "root" ? ` ${d.from}` : "";
+          // 2026-10-24 user report: 「fabric finding」 said nothing about WHO sent the message. The header now
+          // shows only the sender — `@<label>` (record.fromLabel, stamped at admit() time), falling back to
+          // `@<runId>` for unlabeled/old records and `@root`/`@system` for host senders. No 「fabric」/kind wording.
+          const from = typeof d.from === "string" ? d.from : "";
+          const fromLabel = typeof d.fromLabel === "string" && d.fromLabel !== "" ? d.fromLabel : undefined;
+          const sender = from === "root" ? "root" : from === "" ? "unknown" : (fromLabel ?? from);
           return finish(
             {
               id: r.id,
@@ -212,7 +238,7 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
               type: "custom_message",
               timestamp: r.timestamp,
               customType: r.customType,
-              content: truncateDeep(`[fabric ${kind}${from}]\n${text}`, flag),
+              content: truncateDeep(`[@${sender}]\n${text}`, flag),
             },
             flag,
           );

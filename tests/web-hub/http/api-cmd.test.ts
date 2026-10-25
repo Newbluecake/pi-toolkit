@@ -337,6 +337,38 @@ describe("POST /api/cmd — recall op (web-hub-steer-recall §2.3 S4)", () => {
   });
 });
 
+describe("POST /api/cmd — archive op (web-hub archive plan, docs/dev/web-hub/archive-report.md)", () => {
+  it("bad kind/target/set ⇒ 400 E_BAD_REQUEST, router never called", async () => {
+    const router = fakeRouter(okReply);
+    deps.commands = router;
+    for (const body of [
+      { agentKey: "a1", id: "a".repeat(16), op: "archive", kind: "workflow", target: "r1", set: "archive" },
+      { agentKey: "a1", id: "a".repeat(16), op: "archive", kind: "run", target: "", set: "archive" },
+      { agentKey: "a1", id: "a".repeat(16), op: "archive", kind: "run", target: "r1", set: "delete" },
+      { agentKey: "a1", id: "a".repeat(16), op: "archive", kind: "run", set: "archive" },
+    ]) {
+      const res = await postJson(port, "/api/cmd", body, cmdHeaders());
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect(JSON.parse(res.body)).toMatchObject({ error: "E_BAD_REQUEST" });
+    }
+    expect(router.calls).toHaveLength(0);
+  });
+
+  it("forwards EXACTLY {op, kind, id, set} — junk/expect never ride the frame", async () => {
+    const router = fakeRouter(okReply);
+    deps.commands = router;
+    const res = await postJson(
+      port,
+      "/api/cmd",
+      { agentKey: "a1", id: "b".repeat(16), op: "archive", kind: "bash", target: "b_JOB1", set: "unarchive", junk: 1 },
+      cmdHeaders(),
+    );
+    expect(res.status).toBe(200);
+    expect(router.calls).toHaveLength(1);
+    expect(router.calls[0]!.cmd).toEqual({ op: "archive", kind: "bash", id: "b_JOB1", set: "unarchive" });
+  });
+});
+
 describe("POST /api/cmd — rate limiting (plan §6.5)", () => {
   it("exhausting the per-category bucket returns 429 with Retry-After, and does not reach the router", async () => {
     const router = fakeRouter(okReply);

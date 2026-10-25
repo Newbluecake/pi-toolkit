@@ -50,6 +50,7 @@ import { useI18n } from "../../composables/useI18n.js";
 import { useWorktreeGraph } from "../../composables/useWorktreeGraph.js";
 import type { WorktreeGraphTransport } from "../../transport/types.js";
 import GraphLanes from "./GraphLanes.vue";
+import { foldMerged, mergedBadgeOf, mergedViewOf, type MergedBadge } from "@logic/gitGraphMerged.js";
 import "../../styles/graph.css";
 
 const { t, lang } = useI18n();
@@ -101,12 +102,71 @@ const payload = computed(() => (state.state.value.phase === "ok" ? state.state.v
 
 const laneLimit = computed(() => (props.mobile ? GRAPH_LANE_LIMIT_MOBILE : GRAPH_LANE_LIMIT_DESKTOP));
 
-const layout = computed(() => (payload.value === undefined ? null : layoutGraph(payload.value.commits)));
+// ---------------------------------------------------------------------------
+// merged branches (merged-plan r3 §7.2/§7.3): patch-equivalence annotation + the default
+// fold of「已合入」branches. The logic lives in `@logic/gitGraphMerged.js` (P3, same lazy
+// chunk); every merged DOM addition is gated so the §7.5 invariance conditions render
+// byte-identical to the baseline. `showMerged` is NEVER persisted (F3) — a refresh or a
+// remount returns to the default fold; the component stays mounted while collapsed, so a
+// same-page collapse/re-expand keeps the choice.
+// ---------------------------------------------------------------------------
+
+const showMerged = ref(false);
+const mview = computed(() => (payload.value === undefined ? null : mergedViewOf(payload.value, props.rows)));
+const mergedFold = computed(() =>
+  payload.value === undefined || mview.value === null ? null : foldMerged(payload.value, mview.value, showMerged.value),
+);
+/** The fold-filtered commit list (identical to `payload.commits` whenever nothing folds). */
+const graphCommits = computed(() => mergedFold.value?.commits ?? payload.value?.commits ?? []);
+
+const layout = computed(() => (payload.value === undefined ? null : layoutGraph(graphCommits.value)));
 
 const fold = computed(() => (layout.value === null ? null : foldLayout(layout.value, laneLimit.value)));
 
 /** The payload's own `n` caps the rendered rows (the parser pins it to WTGRAPH_N). */
-const commits = computed(() => (payload.value === undefined ? [] : payload.value.commits.slice(0, payload.value.n)));
+const commits = computed(() => (payload.value === undefined ? [] : graphCommits.value.slice(0, payload.value.n)));
+
+/** §7.3 badges: one per visible eq/part tip (never on ≤480px, where only the HEAD chip
+ *  survives — Q3). Computed once per payload, not per row render. */
+const badgeMap = computed(() => {
+  const map = new Map<string, MergedBadge>();
+  const p = payload.value;
+  const v = mview.value;
+  if (p === undefined || v === null || props.mobile) return map;
+  for (const c of commits.value) {
+    const b = mergedBadgeOf(p, v, c.h);
+    if (b !== null) map.set(c.h, b);
+  }
+  return map;
+});
+const badgeText = (b: MergedBadge): string =>
+  b.kind === "eq" ? t("graph.mergedBadge") : t("graph.mergedBadgePart", { k: b.k, t: b.t });
+/** §7.3 tooltip: the patch-id verdict + the cherry-pick caveat; `eP` appends the
+ *  incomplete-window-marks note. */
+const badgeTitle = (b: MergedBadge): string => {
+  const head = payload.value?.head?.b ?? "HEAD";
+  const base =
+    b.kind === "eq" ? t("graph.mergedTitle", { t: b.t, head }) : t("graph.mergedTitlePart", { k: b.k, t: b.t, head });
+  const partial = payload.value?.merged?.branches.some((e) => e.eP === true && b.branches.includes(e.n)) === true;
+  return partial ? base + t("graph.mergedTitlePartial") : base;
+};
+
+/** §7.3 landed rows: eq targets' window-only commits ∪ part's explicit `e` — color only. */
+const isLanded = (h: string): boolean => mview.value?.landed.has(h) === true;
+const landedRows = computed(() => commits.value.map((c) => isLanded(c.h)));
+
+/** §7.3 footnote tokens (compact markers, English-only in both locales). */
+const mergedHiddenNow = computed(() => mergedFold.value?.hiddenNow.length ?? 0);
+const mergedWouldHide = computed(() => mergedFold.value?.wouldHide.length ?? 0);
+const mergedFootUnknown = computed(() => {
+  const m = payload.value?.merged;
+  if (m === undefined) return "";
+  if (m.skipped !== undefined) return t("graph.footMergedUnknown", { m: "skipped" });
+  const unk = m.branches.filter((b) => b.v === "unk").length;
+  return unk > 0 ? t("graph.footMergedUnknown", { m: unk }) : "";
+});
+/** §7.2: set only when eq targets exist AND the fold is blocked by incomplete information. */
+const foldBlocked = computed(() => mview.value?.foldBlocked !== undefined);
 
 const isMerge = (i: number): boolean => (commits.value[i]?.p.length ?? 0) > 1;
 const isCurrent = (h: string): boolean => payload.value?.head?.h === h;
@@ -337,6 +397,22 @@ onBeforeUnmount(() => {
           <p v-for="(note, i) in degradeNotes" :key="i" class="gg-degrade-note">{{ note }}</p>
         </div>
 
+        <!-- §7.3 merged bar: only when branches would actually hide (foldBlocked ⇒ P3's
+             foldMerged reports wouldHide:[] and the bar stays out — the `fold off`
+             footnote carries the state instead) -->
+        <div v-if="mergedWouldHide > 0" class="gg-merged-bar">
+          <button
+            class="gg-merged-toggle"
+            type="button"
+            :aria-pressed="showMerged === true ? 'true' : 'false'"
+            @click="showMerged = !showMerged"
+          >
+            {{
+              showMerged ? t("graph.mergedHide", { n: mergedWouldHide }) : t("graph.mergedShow", { n: mergedWouldHide })
+            }}
+          </button>
+        </div>
+
         <div v-if="commits.length > 0" class="gg-viewport" :style="laneStyle">
           <table class="gg-table" :class="{ 'is-mobile': mobile }">
             <caption class="sr-only">
@@ -356,7 +432,7 @@ onBeforeUnmount(() => {
                 v-for="(c, i) in commits"
                 :key="c.h"
                 data-row
-                :class="{ 'is-merge': isMerge(i) }"
+                :class="{ 'is-merge': isMerge(i), 'is-landed': isLanded(c.h) }"
                 :data-current="isCurrent(c.h) === true ? 'true' : undefined"
               >
                 <td v-if="i === 0 && fold !== null" class="gg-lanes" :rowspan="commits.length" aria-hidden="true">
@@ -370,6 +446,7 @@ onBeforeUnmount(() => {
                     :dot-radius="dotRadius"
                     :width="svgW"
                     :height="svgH"
+                    :landed="landedRows"
                   />
                 </td>
                 <td class="gg-cell gg-subject" :title="c.s" :style="subjectStyle(i)">
@@ -383,6 +460,11 @@ onBeforeUnmount(() => {
                       translate="no"
                       >{{ chip.text }}</span
                     >
+                    <!-- §7.3 merged badge: after the branch chips, before `+n`, outside the
+                         ≤3-chip quota; suppressed entirely on ≤480px (badgeMap is empty) -->
+                    <span v-if="badgeMap.has(c.h)" class="gg-mbadge" :title="badgeTitle(badgeMap.get(c.h)!)">{{
+                      badgeText(badgeMap.get(c.h)!)
+                    }}</span>
                     <span v-if="chipOverflow(c.h) > 0" class="gg-ref gg-ref-overflow" :title="chipTitle(c.h)"
                       >+{{ chipOverflow(c.h) }}</span
                     >
@@ -409,6 +491,7 @@ onBeforeUnmount(() => {
                     <template v-if="fold !== null && (fold.nodes[i]?.folded ?? false)"
                       >{{ t("graph.srFold") }}
                     </template>
+                    <template v-if="isLanded(c.h)">{{ t("graph.srLanded") }} </template>
                     <template v-if="stubRows.has(i)">{{ t("graph.srOutOfSet") }}</template>
                   </span>
                 </td>
@@ -444,7 +527,9 @@ onBeforeUnmount(() => {
         {{ t("graph.footNote", { n: state.state.value.data?.n ?? 200 })
         }}<template v-if="state.state.value.data?.degrade.more === true">
           · {{ t("graph.footMore", { n: state.state.value.data.n }) }}</template
-        >
+        ><template v-if="mergedHiddenNow > 0"> · {{ t("graph.footMergedHidden", { n: mergedHiddenNow }) }}</template
+        ><template v-if="mergedFootUnknown !== ''"> · {{ mergedFootUnknown }}</template
+        ><template v-if="foldBlocked"> · {{ t("graph.footFoldOff") }}</template>
       </p>
     </template>
   </section>

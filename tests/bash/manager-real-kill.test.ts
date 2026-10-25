@@ -9,7 +9,7 @@ import { systemClock } from "../../src/core/clock.js";
 
 /**
  * bash-timeout-grace P3+P4 verifier round 5 (suggestion): T4b
- * (tests/tools/bash-tool.test.ts) proves the *shape* of "abort after output,
+ * (tests/bash/tool.test.ts) proves the *shape* of "abort after output,
  * before drain" against a fake process whose stream ending is entirely under
  * the test's own control — stronger than what a real SIGTERM actually
  * guarantees (nothing lets a test manufacture output landing in a real
@@ -81,7 +81,7 @@ describe.skipIf(!posix)("bash job manager: cancelReserve against a real process 
     // — the property under test is "output already delivered when the
     // signal is sent survives it", not "output racing the signal happens
     // to survive it" (that race is covered, deterministically, by the fake
-    // in tests/tools/bash-tool.test.ts's T4b).
+    // in tests/bash/tool.test.ts's T4b).
     expect(await until(() => (manager?.get(jobId)?.logBytes ?? 0) > 0)).toBe(true);
 
     // §3.6: the abort/cancel path sends the signal synchronously — no

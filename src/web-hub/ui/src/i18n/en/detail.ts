@@ -95,8 +95,20 @@ const detail = {
   // Appended at the file's end — another package inserts before `todoCompletedHidden`, never here.
   clearAria: "Clear",
   clearLabel: "Clear",
+  clearBusyLabel: "Clearing…",
   clearTitle: "New session (/clear)",
   clearFailed: "Couldn't start a new session ({code})",
+  // web-hub archive plan: the `· N archived` summary segment. 2026-10-25 (user request): the zh
+  // locale now translates the drawer's Bash count segments (running/done/failed/archived) to match
+  // the neighbouring 「已归档 {n}」 fold; status tokens (exit/grace) stay English in both.
+  bashJobsArchived: "{n} archived",
+  // scheduled-reports W1 (plan r3 §5.6): the detail header's 「定时」 button opening the lazy
+  // SchedulePanel (hub cap sched.v1 + a sessionId on the card; absent ⇒ zero trace).
+  scheduleOpenTitle: "Scheduled tasks",
+  scheduleOpenLabel: "Schedules",
+  // issue #41 (titlebar overflow): the 「⋯」 menu trigger + menu aria-label receiving the
+  // folded low-frequency titlebar buttons on narrow bars.
+  moreActions: "More actions",
 } satisfies Record<string, string>;
 
 export default detail;

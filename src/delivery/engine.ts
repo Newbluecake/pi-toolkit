@@ -313,5 +313,3 @@ export function createDeliveryEngine<
 
   return engine;
 }
-
-export const createEngine = createDeliveryEngine;

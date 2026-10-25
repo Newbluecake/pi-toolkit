@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  CONSULT_READONLY_TOOLS,
+  READONLY_DOMAIN_TOOLS,
   RESERVED_TOOL_NAMES,
   bashJobGrant,
   buildToolScopePolicy,
@@ -49,8 +49,8 @@ describe("runtime/tool-scope: buildToolScopePolicy", () => {
     expect(granted.deny.has("consult")).toBe(false);
     expect(granted.allow?.has("consult")).toBe(true);
   });
-  it("consult read-only domain: CONSULT_READONLY_TOOLS as an allow-list keeps exactly those four", () => {
-    const policy = buildToolScopePolicy({ tools: CONSULT_READONLY_TOOLS });
+  it("consult read-only domain: READONLY_DOMAIN_TOOLS as an allow-list keeps exactly those four", () => {
+    const policy = buildToolScopePolicy({ tools: READONLY_DOMAIN_TOOLS });
     expect([...(policy.allow ?? [])].sort()).toEqual(["find", "grep", "ls", "read"]);
     const handle = fakeHandle(["read", "grep", "find", "ls", "bash", "write", "Agent", "consult"]);
     const decision = createToolScopeEnforcer().onBind(handle, policy);
@@ -199,32 +199,34 @@ describe("runtime/tool-scope: bashJobGrant (bash-timeout-grace plan §3.10)", ()
     expect(buildToolScopePolicy({ granted: ["bash_job"] }).deny.has("bash_job")).toBe(false);
   });
   it("tools undeclared (no allow-list restriction) => granted", () => {
-    expect(bashJobGrant({ childBashJobs: true, consult: false })).toBe(true);
+    expect(bashJobGrant({ childBashJobs: true, readonlyDomain: false })).toBe(true);
   });
   it("tools includes bash (Plan/Explore/reviewer/verifier/architect-style types) => granted", () => {
-    expect(bashJobGrant({ typeTools: ["read", "bash", "edit"], childBashJobs: true, consult: false })).toBe(true);
+    expect(bashJobGrant({ typeTools: ["read", "bash", "edit"], childBashJobs: true, readonlyDomain: false })).toBe(
+      true,
+    );
   });
   it("tools declared without bash (a bash_job-only type) => not granted", () => {
-    expect(bashJobGrant({ typeTools: ["bash_job"], childBashJobs: true, consult: false })).toBe(false);
-    expect(bashJobGrant({ typeTools: ["read", "edit"], childBashJobs: true, consult: false })).toBe(false);
+    expect(bashJobGrant({ typeTools: ["bash_job"], childBashJobs: true, readonlyDomain: false })).toBe(false);
+    expect(bashJobGrant({ typeTools: ["read", "edit"], childBashJobs: true, readonlyDomain: false })).toBe(false);
   });
-  it("a consult (read-only) run is never granted, even with bash in tools", () => {
-    expect(bashJobGrant({ typeTools: ["bash"], childBashJobs: true, consult: true })).toBe(false);
-    expect(bashJobGrant({ childBashJobs: true, consult: true })).toBe(false);
+  it("a readonly-domain run is never granted, even with bash in tools", () => {
+    expect(bashJobGrant({ typeTools: ["bash"], childBashJobs: true, readonlyDomain: true })).toBe(false);
+    expect(bashJobGrant({ childBashJobs: true, readonlyDomain: true })).toBe(false);
   });
-  it("bashJobs.childSessions=false disables the grant regardless of tools/consult", () => {
-    expect(bashJobGrant({ childBashJobs: false, consult: false })).toBe(false);
-    expect(bashJobGrant({ typeTools: ["bash"], childBashJobs: false, consult: false })).toBe(false);
+  it("bashJobs.childSessions=false disables the grant regardless of tools/readonlyDomain", () => {
+    expect(bashJobGrant({ childBashJobs: false, readonlyDomain: false })).toBe(false);
+    expect(bashJobGrant({ typeTools: ["bash"], childBashJobs: false, readonlyDomain: false })).toBe(false);
   });
   it("an MCP tool of the same name is stripped by the reserved-name deny unless explicitly granted", () => {
     // bashJobGrant only decides whether to ADD "bash_job" to grantedReserved;
     // the actual stripping is buildToolScopePolicy's existing deny-by-default
     // (already covered above) — this closes the loop end to end.
-    const granted = bashJobGrant({ childBashJobs: true, consult: false });
+    const granted = bashJobGrant({ childBashJobs: true, readonlyDomain: false });
     expect(granted).toBe(true);
     const policy = buildToolScopePolicy({ granted: granted ? ["bash_job"] : [] });
     expect(policy.deny.has("bash_job")).toBe(false);
-    const notGranted = bashJobGrant({ childBashJobs: false, consult: false });
+    const notGranted = bashJobGrant({ childBashJobs: false, readonlyDomain: false });
     const policyOff = buildToolScopePolicy({ granted: notGranted ? ["bash_job"] : [] });
     expect(policyOff.deny.has("bash_job")).toBe(true);
   });

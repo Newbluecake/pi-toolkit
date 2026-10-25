@@ -61,7 +61,7 @@ function build(modelRegistry: unknown): Stack {
   const stack = buildSessionStack(fakePi(), ctxWith(modelRegistry), settings(), types, []);
   cleanup.push(() => {
     stack.quota?.dispose();
-    stack.scheduler.stop();
+    stack.schedule?.dispose();
     stack.rpc.close();
     home.restore();
   });

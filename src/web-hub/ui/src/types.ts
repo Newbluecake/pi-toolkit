@@ -18,6 +18,7 @@
 import type { Ref } from "vue";
 import type { PreviewDims } from "@protocol/preview.js";
 import type { FleetRowWire, LoadGateWire, LoadTopWire, LoadWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
+import type { SchedulesPayloadWire } from "@protocol/schedule.js";
 import type { ForkReason, HistoryLiveWire, ProofGap } from "@protocol/session-history.js";
 import type { ProxyListItem, ProxyPolicyWire } from "@protocol/proxy.js";
 import type { PreviewProbeHandle } from "./composables/usePreviewProbe.js";
@@ -79,7 +80,7 @@ export interface LiveTool {
   readonly seenAt?: number;
 }
 
-export type ItemKind = "message" | "custom" | "compaction" | "branch_summary" | "model_change";
+export type ItemKind = "message" | "custom" | "compaction" | "branch_summary" | "model_change" | "cmd";
 
 export interface Item {
   readonly id: string;
@@ -294,6 +295,14 @@ export interface HubState {
     readonly ready: boolean;
     readonly locked: ReadonlySet<string>;
   };
+  /** scheduled-reports W1 (plan r3 §5.6): the latest `schedules` SSE snapshot — a hub-global
+   * slot (per-session projections), NOT per-agent. `undefined` until the first valid frame
+   * arrives, and cleared on `hello` / a `hub` frame whose caps dropped `sched.v1` (same rule
+   * as `load` above). H1 may only APPEND optional fields; readers must ignore unknown keys. */
+  readonly schedules?: SchedulesPayloadWire;
+  /** Browser-clock instant the current `schedules` frame was received (the `at` reducer
+   * parameter — the hub's own clock is never trusted). Cleared together with `schedules`. */
+  readonly schedulesReceivedAt?: number;
 }
 
 /**
@@ -386,6 +395,10 @@ export interface ControlHandle {
   abort(agentKey: string): Promise<CmdOutcome>;
   steerSub(agentKey: string, runId: string, text: string): Promise<CmdOutcome>;
   stopSub(agentKey: string, runId: string): Promise<CmdOutcome>;
+  /** web-hub archive plan (docs/dev/web-hub/archive-report.md): archive/unarchive a terminal run
+   *  row / bash row. No optimistic ctl item (the `queryCommand` precedent — the state change
+   *  arrives via the next `status.archived` frame); the drawer owns its own undo toast. */
+  setArchived(agentKey: string, kind: "run" | "bash", id: string, set: "archive" | "unarchive"): Promise<CmdOutcome>;
   // `id` is optional (defaults to a freshly generated one inside `createControl`) — the caller
   // may instead generate it itself and pass it through, so it can be tracked synchronously
   // BEFORE the wire round-trip settles (acc32-B3 fix, see AgentDetail.vue's `onDialogAnswer`).
@@ -569,8 +582,10 @@ export interface PreviewHandle {
   readonly view: Readonly<Ref<PreviewView>>;
   /** The §4.6 scope derivation (`null` ⇒ no path is clickable). */
   readonly scope: Readonly<Ref<PreviewPathScope | null>>;
-  /** closed/any ⇒ loading (a no-op without a scope); aborts whatever was in flight. */
-  open(ref: { readonly path: string; readonly dir?: true }): void;
+  /** closed/any ⇒ loading (a no-op without a scope); aborts whatever was in flight. The
+   * optional `origin:"ask"` (2026-10-24 验收裁定) tags ask-dialog-opened previews for the
+   * ask z-tier; legacy callers pass `{path}` only and keep the legacy tier. */
+  open(ref: { readonly path: string; readonly dir?: true; readonly origin?: "ask" }): void;
   /** Any ⇒ closed; aborts the in-flight fetch (§3.2 作用域失效 uses the same path). */
   close(): void;
   /** error(retryable) ⇒ re-open the same path; a no-op in every other phase. */

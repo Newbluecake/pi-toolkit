@@ -122,7 +122,7 @@ async function realSession(baseUrl: string, tools: string[] = ["read"], withExte
     session,
     loader,
     modelRuntime,
-    childExtensionMissing: computeChildExtensionMissing(activationBefore, false),
+    childExtensionMissing: computeChildExtensionMissing(activationBefore),
   };
 }
 

@@ -226,7 +226,7 @@ describe("SubagentWorkflow tool: background-only", () => {
     expect(tool.promptSnippet).toMatch(/background/);
   });
 
-  it("documents agent()'s per-call model/thinking opts (Agent-tool model semantics) and the strict opts / experts contract", () => {
+  it("documents agent()'s per-call model/thinking opts (Agent-tool model semantics) and the seven-key strict opts contract", () => {
     const tool = toolWith(realRuns(makeSpawner().spawner));
     expect(tool.description).toContain("model");
     expect(tool.description).toContain("thinking");
@@ -240,9 +240,9 @@ describe("SubagentWorkflow tool: background-only", () => {
     expect(desc).toContain("thinking");
     expect(desc).toContain("'off' | 'low' | 'medium' | 'high'");
     expect(desc).toContain("isolation");
-    expect(desc).toContain("experts");
-    expect(desc).toContain("completed");
-    expect(desc).toContain("noReplay");
+    expect(desc).not.toContain("experts");
+    expect(desc).not.toContain("consult");
+    expect(desc).toContain("only label, agentType, phase, fullResult, model, thinking, isolation are");
   });
 });
 

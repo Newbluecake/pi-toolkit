@@ -111,7 +111,7 @@ const BUDGET_DESCRIPTIONS: Record<keyof DeadlineBudget, string> = {
   totalGraceMs: "Grace after the total budget before force-kill (default-budget runs only); 0 = off",
   maxExtensions: "Max deadline extensions per run; 0 = no extension and no grace",
   maxTotalFactor:
-    "Hard ceiling as a multiple of the run's total budget, explicit timeout_s included (fixed-deadline system runs — workflow children, consult, /goal verifier, RPC — are always 1)",
+    "Hard ceiling as a multiple of the run's total budget, explicit timeout_s included (fixed-deadline system runs — workflow children, /goal verifier, RPC — are always 1)",
   extendStepMs:
     "Max seconds granted by a single extend_subagent_timeout call (default 3600); also widens the hard ceiling for extendable runs to total + maxExtensions × step; 0 = legacy (no per-grant cap, factor-only ceiling)",
 };
@@ -320,6 +320,21 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   // quota-web plan §2/D8: StatusInfo.quota availability — non-live like the rest of webHub.*
   // (change → /reload).
   "webHub.quota": bool("webHub.quota", "web-hub: subscription-quota pill/card in the top bar (default on)"),
+  // web-hub-cmd-history plan §4.9 (A1): command-output history cards in the session transcript.
+  // Non-live; change requires /reload. The description states the Q1 verbatim-persistence
+  // residual honestly (credentials printed by a command DO land in the session file, §5.3).
+  "webHub.cmdHistory": bool(
+    "webHub.cmdHistory",
+    "web-hub: persist command output as session history cards (default on; output is stored VERBATIM in the session file incl. any tokens it printed — /webhub sensitive subcommands record headers only; change: /reload)",
+  ),
+  // web-hub archive plan (docs/dev/web-hub/archive-report.md): agent-side auto-archive knob —
+  // non-live but does NOT need a hub restart (never read by buildHubConfig; /reload suffices).
+  "webHub.archiveAfterMin": {
+    kind: "number",
+    path: "webHub.archiveAfterMin",
+    min: 0,
+    description: "web-hub: auto-archive finished agent cards / bash rows in the fleet drawer after N minutes (0 = off)",
+  },
   // web-hub LAN (lan-plan.md §9.1, S1-W3 LI): five more keys under webHub.lan.*, all non-live like
   // the rest of webHub.* (captured at activate; change → /reload). extraHosts/trustProxyFrom/
   // externalOrigins are comma-separated on disk and in the editor (`csvString`'s `csv: true`
@@ -890,31 +905,6 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     hint: "no new run observed within this window => retry once, then stop the goal",
     description: "Continuation delivery watchdog",
   }),
-  // consult（consult plan §4.6）：轮内同步请教的七个旋钮，全部非 live（在
-  // 派发/请教时从当次栈的 settings 读取 ⇒ 改动需 /reload）。内部常量
-  // （FORK_TTL_MS / CONSULT_MAX_CONTEXT_PERCENT / CONSULT_MAX_GLOBAL_INFLIGHT）
-  // 刻意不在这里，防旋钮蔓延（评审-1 #20）。
-  "consult.enabled": bool("consult.enabled", "Enable in-turn consult of finished expert subagent runs"),
-  "consult.timeoutS": seconds("consult.timeoutMs", {
-    min: 1,
-    hint: "hard total budget of a consult run (no grace, no extension)",
-    description: "Consult run timeout",
-  }),
-  "consult.maxAnswerChars": count("consult.maxAnswerChars", 1, "Max chars of an expert answer before truncation"),
-  "consult.maxTurns": count("consult.maxTurns", 1, "Max turns a consulted expert may take before being cut off"),
-  "consult.maxFirstRequestUsd": {
-    kind: "number",
-    path: "consult.maxFirstRequestUsd",
-    min: 0,
-    description: "Pre-fork first-request cost cap in USD; 0 = no pre-check",
-  },
-  "consult.maxCostUsd": {
-    kind: "number",
-    path: "consult.maxCostUsd",
-    min: 0,
-    description: "Cumulative cost cap per consult in USD (turn boundary); 0 = unlimited",
-  },
-  "consult.maxConcurrent": count("consult.maxConcurrent", 1, "Max in-flight consults per asking run"),
   // Quota-aware dispatch (quota-plan §8.5): all non-live — captured at
   // activate, change ⇒ /reload. baseUrl / userAgent stay JSON-file-only
   // (same treatment as bashJobs.dir / bashJobs.shellPath): they are escape
@@ -1172,6 +1162,10 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "feishuBot.securityAlerts",
     "Feishu bot: high-risk LAN security alerts (default on; change: /reload then /webhub restart)",
   ),
+  "feishuBot.xsMirror": bool(
+    "feishuBot.xsMirror",
+    "Feishu bot: mirror cross-session messages that did not wake the session to bound p2p chats (default on; change: /reload then /webhub restart)",
+  ),
   "feishuBot.enabled": bool(
     "feishuBot.enabled",
     "Feishu bot: enable the hub-side bot (change: /reload then /webhub restart)",
@@ -1219,6 +1213,46 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     ),
     max: 100,
   } as SettingSpec,
+  // traffic-merge plan §2.2：默认全关 ⇒ 零注册零 IO；全部非 live（/reload 生效）。
+  "traffic.enabled": bool(
+    "traffic.enabled",
+    "Traffic recording (/record on|off|status) of model inputs/outputs to SQLite + web viewer (change: /reload)",
+  ),
+  "traffic.childSessions": bool(
+    "traffic.childSessions",
+    "Record subagent (child session) traffic to the database too; false keeps rewrite attribution but skips rows (change: /reload)",
+  ),
+  "traffic.web.host": choice(
+    "traffic.web.host",
+    ["127.0.0.1", "0.0.0.0"],
+    "Record web viewer bind address; 0.0.0.0 exposes plaintext HTTP to the LAN (change: /reload)",
+  ),
+  "traffic.web.port": {
+    kind: "number",
+    path: "traffic.web.port",
+    integer: true,
+    min: 1024,
+    max: 65535,
+    description: "Record web viewer first port (auto-increments when busy, up to 20 tries) (change: /reload)",
+  },
+  // scheduled-reports plan r3 §10.3 (S0): default off ⇒ zero surface; all non-live. `schedule.dir`
+  // is JSON-only (bashJobs.dir precedent). Fixed values (tolerance 60s, message/handoff run max
+  // 3600s, 8 tasks, 64 pending reports, 14d retention, 24h report window, E1 missed policy, Feishu
+  // budgets) are deliberately NOT settings (§10.3).
+  "schedule.enabled": bool(
+    "schedule.enabled",
+    "Scheduled tasks: schedule tool, /schedule, session-scoped timers (change: /reload; hub side also /webhub restart)",
+  ),
+  "schedule.defaultTimeoutS": seconds("schedule.defaultTimeoutMs", {
+    min: 60,
+    max: 14_400,
+    description: "Scheduled tasks: default background run timeout in seconds, 60-14400 (change: /reload)",
+  }),
+  "schedule.maxTimeoutS": seconds("schedule.maxTimeoutMs", {
+    min: 60,
+    max: 14_400,
+    description: "Scheduled tasks: max background run timeout a task may request, 60-14400 (change: /reload)",
+  }),
 };
 
 /** Live settings object + persistence port, shared by the command and the editor. */

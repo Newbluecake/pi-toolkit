@@ -1,0 +1,42 @@
+{
+	"name": "@bluecake/pi-traffic-record",
+	"version": "0.2.1",
+	"description": "Pi traffic record extension - record full provider request/response traffic to SQLite, browse live in an embedded web page, edit & replay requests, export paired JSONL datasets.",
+	"type": "module",
+	"license": "MIT",
+	"main": "index.ts",
+	"piSecure": {
+		"honors": "PI_SECURE_SESSION/1"
+	},
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"files": [
+		"index.ts",
+		"src/",
+		"README.md",
+		"LICENSE"
+	],
+	"engines": {
+		"node": ">=22"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": ">=0.84.0 <0.86.0"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.84.4",
+		"@types/node": "^22.0.0",
+		"happy-dom": "^20.12.0",
+		"typescript": "^5.6.0",
+		"vitest": "^2.1.0",
+		"vue": "3.5.42"
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"vendor:check": "node scripts/vendor-check.mjs"
+	}
+}

@@ -1,0 +1,348 @@
+/**
+ * `wrapCommandApi` transparency tests (plan §4.9/§12.1 C0, `command-capture.ts`).
+ *
+ * C0's hard constraint: with no capture wired (the whole of C0 — `getCapture()`
+ * always returns `undefined`), every ExtensionAPI method other than
+ * `registerCommand` must forward byte-identically (same args, same `this`,
+ * same return value), and `registerCommand` itself must produce a handler
+ * that behaves exactly like the original one — this is what lets every
+ * existing command test in the repo pass unmodified once `wrapCommandApi` is
+ * spliced into `activate()`'s very first line (K25① primary path).
+ */
+import { describe, expect, it, vi } from "vitest";
+import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
+import {
+  isFeishuInvocation,
+  isWebInvocation,
+  wrapCommandApi,
+  type CommandCapturePort,
+} from "../../src/commands/capture.js";
+import { wireWebHub } from "../../src/web-hub/agent/index.js";
+import { SETTINGS } from "../web-hub/agent/helpers.js";
+
+/** A minimal fake ExtensionAPI that records every call and its `this` receiver. */
+function fakeApi(): ExtensionAPI & { calls: Array<{ prop: string; args: unknown[]; self: unknown }> } {
+  const calls: Array<{ prop: string; args: unknown[]; self: unknown }> = [];
+  const api = {
+    calls,
+    registerTool(this: unknown, ...args: unknown[]) {
+      calls.push({ prop: "registerTool", args, self: this });
+      return "registerTool-result";
+    },
+    on(this: unknown, ...args: unknown[]) {
+      calls.push({ prop: "on", args, self: this });
+      return () => undefined;
+    },
+    appendEntry(this: unknown, ...args: unknown[]) {
+      calls.push({ prop: "appendEntry", args, self: this });
+      return "appendEntry-result";
+    },
+    registerCommand(this: unknown, name: string, command: Omit<RegisteredCommand, "name" | "sourceInfo">) {
+      calls.push({ prop: "registerCommand", args: [name, command], self: this });
+      return `registered:${name}`;
+    },
+    events: { on: () => () => undefined, emit: () => undefined },
+  };
+  return api as unknown as ExtensionAPI & typeof api;
+}
+
+const ctx = { webInvocation: undefined } as unknown as ExtensionCommandContext;
+
+describe("wrapCommandApi — no capture (C0 fast path)", () => {
+  it("registerTool forwards args and `this` unchanged and returns the original value", () => {
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => undefined);
+    const result = (pi.registerTool as (...a: unknown[]) => unknown)("a", "b");
+    expect(result).toBe("registerTool-result");
+    expect(raw.calls).toEqual([{ prop: "registerTool", args: ["a", "b"], self: raw }]);
+  });
+
+  it("pi.on forwards args and `this` unchanged", () => {
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => undefined);
+    (pi.on as (...a: unknown[]) => unknown)("turn_end", "handler-ref");
+    expect(raw.calls).toEqual([{ prop: "on", args: ["turn_end", "handler-ref"], self: raw }]);
+  });
+
+  it("appendEntry forwards args and `this` unchanged", () => {
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => undefined);
+    (pi.appendEntry as (...a: unknown[]) => unknown)({ type: "x" });
+    expect(raw.calls).toEqual([{ prop: "appendEntry", args: [{ type: "x" }], self: raw }]);
+  });
+
+  it("non-function properties (events) pass through unwrapped", () => {
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => undefined);
+    expect(pi.events).toBe(raw.events);
+  });
+
+  it("registerCommand still registers the command (return value forwarded)", () => {
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => undefined);
+    const handler = vi.fn(() => "handler-result");
+    const result = pi.registerCommand("mycmd", { handler } as unknown as Omit<
+      RegisteredCommand,
+      "name" | "sourceInfo"
+    >);
+    expect(result).toBe("registered:mycmd");
+    expect(raw.calls).toHaveLength(1);
+    expect(raw.calls[0]!.prop).toBe("registerCommand");
+  });
+
+  it("a registered command's handler still runs and returns the original value with no capture", async () => {
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => undefined);
+    const handler = vi.fn(async (args: string, c: ExtensionCommandContext) => `ran:${args}:${c === ctx}`);
+    pi.registerCommand("mycmd", { handler } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const registeredCommand = raw.calls[0]!.args[1] as { handler: (a: string, c: ExtensionCommandContext) => unknown };
+    const out = await registeredCommand.handler("hello", ctx);
+    expect(out).toBe("ran:hello:true");
+    expect(handler).toHaveBeenCalledWith("hello", ctx);
+  });
+
+  it("a non-function `handler` (or missing) command is passed through unwrapped", () => {
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => undefined);
+    const command = {} as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">;
+    pi.registerCommand("nohandler", command);
+    expect(raw.calls[0]!.args[1]).toBe(command); // identical object, not re-wrapped
+  });
+
+  it("nested/dynamic registerCommand calls (called from inside another callback) still forward `this`", () => {
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => undefined);
+    function registerLater(this: unknown): unknown {
+      return pi.registerCommand("late", { handler: () => "late-result" } as unknown as Omit<
+        RegisteredCommand,
+        "name" | "sourceInfo"
+      >);
+    }
+    const result = registerLater.call({ some: "receiver" });
+    expect(result).toBe("registered:late");
+    expect(raw.calls[0]!.self).toBe(raw); // registerCommand itself is always called bound to `target`
+  });
+});
+
+describe("wrapCommandApi — capture wired later (dynamic lookup, not frozen at wrap time)", () => {
+  it("getCapture() is re-evaluated on every command invocation, not cached when wrapCommandApi was called", async () => {
+    let capture: CommandCapturePort | undefined;
+    const raw = fakeApi();
+    // Constructed while capture is still undefined (mirrors src/index.ts calling wrapCommandApi
+    // at the very top of activate(), before webHubRef.current.capture is ever assigned).
+    const pi = wrapCommandApi(raw, () => capture);
+    const handler = vi.fn(async () => "normal-result");
+    pi.registerCommand("mycmd", { handler } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const registeredCommand = raw.calls[0]!.args[1] as { handler: (a: string, c: ExtensionCommandContext) => unknown };
+
+    // Still no capture: plain passthrough.
+    await registeredCommand.handler("a1", ctx);
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    // Capture becomes available later (as it would once C12 wires the real port in) — the SAME
+    // already-registered handler must now consult it, proving the lookup isn't frozen.
+    const finish = vi.fn();
+    capture = {
+      arm: () => undefined,
+      take: (name) =>
+        name === "mycmd"
+          ? { cmdId: "c1", reqId: "r1", origin: {} as never, name, args: "a2", deadlineAt: 0 }
+          : undefined,
+      finish,
+    };
+    await registeredCommand.handler("a2", ctx);
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(finish).toHaveBeenCalledWith("c1");
+  });
+
+  it("capture.take() returning undefined (this invocation was not web-claimed) still runs the handler plainly", async () => {
+    const capture: CommandCapturePort = { arm: () => undefined, take: () => undefined, finish: vi.fn() };
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => capture);
+    const handler = vi.fn(async () => "plain");
+    pi.registerCommand("mycmd", { handler } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const registeredCommand = raw.calls[0]!.args[1] as { handler: (a: string, c: ExtensionCommandContext) => unknown };
+    const out = await registeredCommand.handler("x", ctx);
+    expect(out).toBe("plain");
+    expect(capture.finish).not.toHaveBeenCalled();
+  });
+});
+
+describe("wireWebHub ⇒ activate() assembly wiring (todo #32 P0 fix #2)", () => {
+  // Mirrors src/index.ts's real wiring order exactly: `wrapCommandApi(rawPi, () =>
+  // commandCaptureRef.current)` runs at activate()'s very first line, `wireWebHub(pi, ...)` runs
+  // later (inside the `settings.webHub.enabled` gate), and only THEN does
+  // `if (webHubRef.current.capture !== undefined) commandCaptureRef.current = webHubRef.current.capture;`
+  // populate the ref. Before this fix `wireWebHub()`'s returned object never had a `capture` key
+  // at runtime (only in the `WebHubControl` type declaration) so that `if` was always false and
+  // the ref stayed permanently unset — every web-originated command invocation's `getCapture()`
+  // call kept returning `undefined` forever, identical to the "web-hub disabled" case.
+  it("wireWebHub()'s return value actually carries a capture port (not just declared in the type)", async () => {
+    const control = wireWebHub(fakeApi(), { settings: SETTINGS, fleet: () => [] });
+    expect(control.capture).toBeDefined();
+    expect(typeof control.capture!.arm).toBe("function");
+    expect(typeof control.capture!.take).toBe("function");
+    // C0 fast-path stub semantics (§12.1 C0): no capture is ever claimed — pure passthrough.
+    expect(control.capture!.take("whatever", "args")).toBeUndefined();
+  });
+
+  it("end-to-end: commandCaptureRef gets populated and a web-registered command's handler reaches it (previously unreachable)", async () => {
+    const raw = fakeApi();
+    const commandCaptureRef: { current?: CommandCapturePort } = {}; // mirrors src/index.ts's own ref
+    const pi = wrapCommandApi(raw, () => commandCaptureRef.current); // activate()'s first line
+
+    // A command registered BEFORE the ref is populated (e.g. another extension's own
+    // activate()) must still consult the capture dynamically on every invocation, not a frozen
+    // snapshot — same invariant as the "capture wired later" describe block above.
+    const handler = vi.fn(async () => "ok");
+    pi.registerCommand("mycmd", { handler } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const registeredCommand = raw.calls[0]!.args[1] as {
+      handler: (a: string, c: ExtensionCommandContext) => unknown;
+    };
+
+    // wireWebHub() runs later, inside the `settings.webHub.enabled` gate.
+    const control = wireWebHub(pi, { settings: SETTINGS, fleet: () => [] });
+    expect(control.capture).toBeDefined();
+
+    // Exactly src/index.ts's own line: `if (webHubRef.current.capture !== undefined)
+    // commandCaptureRef.current = webHubRef.current.capture;`
+    if (control.capture !== undefined) commandCaptureRef.current = control.capture;
+    expect(commandCaptureRef.current).toBe(control.capture);
+
+    const takeSpy = vi.spyOn(commandCaptureRef.current!, "take");
+    await registeredCommand.handler("hello", ctx);
+    // The whole point of the fix: the web call path can now actually reach `capture.take(...)`.
+    expect(takeSpy).toHaveBeenCalledWith("mycmd", "hello");
+    expect(handler).toHaveBeenCalledWith("hello", ctx); // and (still, C0 fast path) runs plainly
+  });
+});
+
+describe("wrapCommandApi — argCompleters capture (web-hub-slash-args §4.4, P1)", () => {
+  it("records the RAW getArgumentCompletions at registerCommand time, by name", () => {
+    const api = fakeApi();
+    const completer = (prefix: string) => [{ value: prefix, label: prefix }];
+    const owned = new Set<string>();
+    const completers = new Map<string, unknown>();
+    const wrapped = wrapCommandApi(api, () => undefined, owned, completers as Map<string, never>);
+    wrapped.registerCommand("mem", {
+      description: "d",
+      getArgumentCompletions: completer,
+      handler: async () => undefined,
+    });
+    expect(completers.get("mem")).toBe(completer); // the exact function object, never a wrapper
+    expect(owned.has("mem")).toBe(true); // ownedNames behavior unchanged (§4.4)
+  });
+
+  it("commands without getArgumentCompletions are not recorded (no placeholder entries)", () => {
+    const api = fakeApi();
+    const completers = new Map<string, unknown>();
+    const wrapped = wrapCommandApi(api, () => undefined, undefined, completers as Map<string, never>);
+    wrapped.registerCommand("plain", { description: "d", handler: async () => undefined });
+    expect(completers.size).toBe(0);
+  });
+
+  it("no argCompleters handed in ⇒ registration is still byte-identical (optional param)", () => {
+    const api = fakeApi();
+    const wrapped = wrapCommandApi(api, () => undefined);
+    const r = wrapped.registerCommand("plain", {
+      description: "d",
+      getArgumentCompletions: () => null,
+      handler: async () => undefined,
+    });
+    expect(r).toBe("registered:plain");
+  });
+
+  it("a later same-name registration overwrites the earlier completer (last registration wins)", () => {
+    const api = fakeApi();
+    const first = () => null;
+    const second = () => [{ value: "x", label: "x" }];
+    const completers = new Map<string, unknown>();
+    const wrapped = wrapCommandApi(api, () => undefined, undefined, completers as Map<string, never>);
+    wrapped.registerCommand("cmd", { handler: async () => undefined, getArgumentCompletions: first });
+    wrapped.registerCommand("cmd", { handler: async () => undefined, getArgumentCompletions: second });
+    expect(completers.get("cmd")).toBe(second);
+  });
+});
+
+describe("wrapCommandApi — captured ctx source markers (2026-10-22 fabric ruling)", () => {
+  it("a web-origin armed invocation yields webInvocation:true and NO feishuInvocation", async () => {
+    const seen: unknown[] = [];
+    const capture: CommandCapturePort = {
+      arm: () => undefined,
+      take: (name) =>
+        name === "mycmd"
+          ? {
+              cmdId: "c1",
+              reqId: "r1",
+              origin: { listener: "lan", ip: "192.168.1.23", user: "alice", reqId: "r1" },
+              name,
+              args: "a1",
+              deadlineAt: 0,
+            }
+          : undefined,
+      finish: vi.fn(),
+    };
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => capture);
+    const handler = vi.fn(async (...a: unknown[]) => {
+      seen.push(a[1]);
+      return "ok";
+    });
+    pi.registerCommand("mycmd", { handler } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const registeredCommand = raw.calls[0]!.args[1] as { handler: (a: string, c: ExtensionCommandContext) => unknown };
+    await registeredCommand.handler("a1", ctx);
+    const capturedCtx = seen[0] as { webInvocation?: unknown; feishuInvocation?: unknown };
+    expect(isWebInvocation(capturedCtx as ExtensionCommandContext)).toBe(true);
+    expect(isFeishuInvocation(capturedCtx as ExtensionCommandContext)).toBe(false);
+    expect("feishuInvocation" in capturedCtx).toBe(false);
+  });
+
+  it('a feishu-origin armed invocation (hub F6 marker ip:"feishu") additionally yields feishuInvocation:true', async () => {
+    const seen: unknown[] = [];
+    const capture: CommandCapturePort = {
+      arm: () => undefined,
+      take: (name) =>
+        name === "mycmd"
+          ? {
+              cmdId: "c2",
+              reqId: "r2",
+              origin: { listener: "lan", ip: "feishu", user: "feishu:ou_1", reqId: "r2" },
+              name,
+              args: "a1",
+              deadlineAt: 0,
+            }
+          : undefined,
+      finish: vi.fn(),
+    };
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => capture);
+    const handler = vi.fn(async (...a: unknown[]) => {
+      seen.push(a[1]);
+      return "ok";
+    });
+    pi.registerCommand("mycmd", { handler } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const registeredCommand = raw.calls[0]!.args[1] as { handler: (a: string, c: ExtensionCommandContext) => unknown };
+    await registeredCommand.handler("a1", ctx);
+    const capturedCtx = seen[0] as { webInvocation?: unknown; feishuInvocation?: unknown };
+    expect(isWebInvocation(capturedCtx as ExtensionCommandContext)).toBe(true);
+    expect(isFeishuInvocation(capturedCtx as ExtensionCommandContext)).toBe(true);
+  });
+
+  it("a non-captured invocation keeps the handler's own ctx untouched (no markers synthesized)", async () => {
+    const seen: unknown[] = [];
+    const capture: CommandCapturePort = { arm: () => undefined, take: () => undefined, finish: vi.fn() };
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => capture);
+    const handler = vi.fn(async (...a: unknown[]) => {
+      seen.push(a[1]);
+      return "plain";
+    });
+    pi.registerCommand("mycmd", { handler } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const registeredCommand = raw.calls[0]!.args[1] as { handler: (a: string, c: ExtensionCommandContext) => unknown };
+    const localCtx = { mode: "tui" } as unknown as ExtensionCommandContext;
+    await registeredCommand.handler("a1", localCtx);
+    expect(seen[0]).toBe(localCtx);
+    expect(isWebInvocation(seen[0] as ExtensionCommandContext)).toBe(false);
+    expect(isFeishuInvocation(seen[0] as ExtensionCommandContext)).toBe(false);
+  });
+});

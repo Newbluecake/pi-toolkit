@@ -11,7 +11,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RunSnapshot } from "../../core/types.js";
 import { buildFleetViewModel, phaseLabel } from "../../ui/fleet-panel.js";
 import type {
-  FleetRowConsultCacheWire,
+  ArchiveWire,
   BashJobsWire,
   FleetOmitted,
   FleetRowWire,
@@ -21,7 +21,7 @@ import type {
   StatusInfo,
   WorktreesWire,
 } from "../protocol/messages.js";
-import { STATUS_FEATURES_MAX_CHARS, STATUS_FEATURES_MAX_ITEMS, FLEET_CACHE_MARK_MAX } from "../protocol/messages.js";
+import { STATUS_FEATURES_MAX_CHARS, STATUS_FEATURES_MAX_ITEMS } from "../protocol/messages.js";
 import type { EventTap } from "./event-tap.js";
 import type { QueueMirror } from "./queue-mirror.js";
 import type { TodoWire } from "../protocol/messages.js";
@@ -30,54 +30,6 @@ import type { LoadPort } from "../../sysload/types.js";
 
 /** Max length of a fleet row's thinking-level token (pi levels are short enum words). */
 export const FLEET_THINKING_MAX = 32;
-
-/** cache-thread plan §5.3 (U): project a run's own consult cache diag into the
- *  row's wire fields (`cacheMark` + `consultCache`). Returns the fields to
- *  spread, or an empty object when there is nothing displayable — the row
- *  then stays byte-identical to the pre-feature shape (old agents' rows never
- *  carried the diag fields either). `state`/`first` are validated, not
- *  trusted: a malformed persisted value degrades to `unknown`/omit. */
-function consultCacheWire(
-  mark: string | undefined,
-  diag: { consultCache?: unknown },
-): {
-  cacheMark?: string;
-  consultCache?: FleetRowConsultCacheWire;
-} {
-  if (mark === undefined) return {};
-  if (mark.length > FLEET_CACHE_MARK_MAX) return {};
-  const cache = diag.consultCache as
-    | {
-        predicted?: { state?: unknown };
-        first?: { label?: unknown; readShare?: unknown; anchor?: unknown; degraded?: unknown };
-      }
-    | undefined;
-  const state =
-    cache?.predicted?.state === "warm" || cache?.predicted?.state === "cold" ? cache.predicted.state : "unknown";
-  const first = cache?.first;
-  const label =
-    first?.label === "hit" || first?.label === "partial" || first?.label === "miss" || first?.label === "n/a"
-      ? first.label
-      : undefined;
-  const readShare = typeof first?.readShare === "number" && Number.isFinite(first.readShare) ? first.readShare : null;
-  const anchor = typeof first?.anchor === "string" && first.anchor !== "" ? first.anchor.slice(0, 64) : undefined;
-  return {
-    cacheMark: mark,
-    consultCache: {
-      state,
-      ...(label === undefined
-        ? {}
-        : {
-            first: {
-              label,
-              readShare,
-              ...(anchor === undefined ? {} : { anchor }),
-              ...(first?.degraded === true ? { degraded: true as const } : {}),
-            },
-          }),
-    },
-  };
-}
 
 /** Web rows: more than the TUI widget, still bounded. */
 const WEB_MAX_ACTIVE_ROWS = 64;
@@ -96,6 +48,7 @@ export function readStatus(
   load?: () => LoadPort | undefined,
   cacheKeepalive?: () => CacheKeepaliveWire | undefined,
   features?: () => string[] | undefined,
+  archived?: () => ArchiveWire | undefined,
 ): StatusInfo {
   const status: StatusInfo = {
     leafId: safe(() => ctx.sessionManager.getLeafId(), null),
@@ -201,6 +154,14 @@ export function readStatus(
         .map((t) => t.slice(0, STATUS_FEATURES_MAX_CHARS));
     }
   }
+  // web-hub archive plan: same overwrite-only-slot rationale as the siblings above — no getter
+  // (web-hub off / no live stack) or an empty archive set ⇒ the field stays absent, byte-equal
+  // to the pre-feature status shape. The slot is display-only hiding; /agent status,
+  // get_subagent_result, notifications and the runs themselves never read it.
+  if (archived !== undefined) {
+    const wire = archived();
+    if (wire !== undefined && wire.entries.length > 0) status.archived = wire;
+  }
   return status;
 }
 
@@ -255,7 +216,6 @@ export function projectFleet(
     if (r.usage !== undefined) row.costUsd = r.usage.costUsd;
     if (r.toolTrail !== undefined) row.toolTrail = r.toolTrail;
     if (r.streamLine !== undefined) row.streamLine = r.streamLine;
-    if (byId.get(r.runId)?.diag.consultOf !== undefined) row.consult = true;
     // Per-run context usage: rides the same open slot style as `thinking`/`cacheMark`.
     // The view-model row already carries diag.contextUsage (fleet-panel `toRow`); null
     // tokens/percent (pi reported no usage yet) drop the field, never the row. The value
@@ -265,10 +225,6 @@ export function projectFleet(
     if (ctxUsage !== undefined && ctxUsage.tokens !== null && ctxUsage.percent !== null) {
       row.ctx = { tokens: ctxUsage.tokens, contextWindow: ctxUsage.contextWindow, percent: ctxUsage.percent };
     }
-    // cache-thread plan §5.3 (U): consult cache mark rides the same open slot
-    // style as `thinking` — absent ⇔ no facts; the fingerprint (which keeps
-    // these fields) flips only on real changes.
-    Object.assign(row, consultCacheWire(r.consultCacheMark, byId.get(r.runId)?.diag ?? {}));
     return row;
   }) as FleetProjection;
   // fleet-drawer §4.4/#12: rows the 64-active/8-terminal caps dropped, so the browser can

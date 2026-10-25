@@ -30,7 +30,10 @@ import type {
 } from "../protocol/messages.js";
 import { buildSlashText, classifyCommand, type CommandsPort } from "./slash.js";
 import { effectivePolicy, resolveCommandPolicy, type CommandPolicy } from "./command-policy.js";
-import type { CommandCapturePort } from "./command-capture.js";
+import type { CommandCapturePort } from "../../commands/capture.js";
+import type { CommandRecorder } from "./command-record.js";
+import type { CmdRecordNotice, CmdRecordState } from "../protocol/cmd-record.js";
+import { isFeishuCmdOrigin, type CmdOrigin } from "../protocol/messages.js";
 
 export interface BuiltinBridge {
   /** web-resume plan §2.4: may return a Promise ONLY for the `resume __list` read path — every
@@ -61,6 +64,13 @@ export interface BuiltinBridgeDeps {
    */
   sendLate?(frame: CmdFrame, result: CmdResultBody): void;
   /**
+   * web-hub-cmd-history plan §5.2 (A1): the command recorder. UNWIRED (webHub.cmdHistory=false
+   * or older wiring) ⇒ the bridge's returns stay byte-identical to the pre-feature shape — no
+   * `history` field, no intent, no builtin cards (M3 freeze: recording is a bypass observer and
+   * never touches the return values or the ledger settlement paths).
+   */
+  recorder?(): CommandRecorder | undefined;
+  /**
    * §4.6 `/webhub __exec`: arms the one-shot nonce that `/new`'s re-entry into the extension-
    * command surface must present back (`index.ts`'s closure-scoped, 5s-TTL slot, consumed by
    * `WebHubControl.internalExec`). Without it, `randomNonce()` below is generated but never
@@ -72,7 +82,9 @@ export interface BuiltinBridgeDeps {
    * resume pick is in flight, or a live `/new` nonce is still armed) and the dispatch must
    * refuse with `E_COMMAND_DENIED exec:in-flight` instead of silently overwriting it.
    */
-  armExec?(op: string): string | undefined;
+  /** web-hub-cmd-history §5.2: `/new` threads the frame's cmdId so internalExec can write the
+   *  card at the real execution point (`consumeNew` hands it back). */
+  armExec?(op: string, cmdId?: string): string | undefined;
   /** web-resume plan §2.4/§2.5: the `resume` builtin's two web subcommand forms. Called only
    *  after policy already allowed `__list`/`__pick` (everything else about `resume` is deny,
    * §2.7). `__list` may settle as a Promise (bounded read); `__pick` is fully synchronous. */
@@ -124,6 +136,31 @@ function okResult(data: CmdData): CmdResultBody {
 
 function commandArgs(frame: CmdFrame): (CmdArgs & { op: "command" }) | undefined {
   return frame.cmd.op === "command" ? frame.cmd : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-cmd-history plan §4.6/§5.2 (A1): the `history` open field + bridge-side recording.
+// Every helper is a no-op without `deps.recorder` (M3: byte-identical returns when unwired).
+// ---------------------------------------------------------------------------
+
+function sourceOfFrame(origin: CmdOrigin): "web" | "feishu" {
+  return isFeishuCmdOrigin(origin) ? "feishu" : "web";
+}
+
+/** Attach `history` to an OK result's data (mutating the fresh data object this module built). */
+function withHistory(data: CmdData, history: "recorded" | "none"): CmdData {
+  (data as { history?: "recorded" | "none" }).history = history;
+  return data;
+}
+
+/** The policy-derived `history` value for an extension-kind dispatch. */
+function extensionHistory(
+  recorder: CommandRecorder | undefined,
+  name: string,
+  args: string,
+): "recorded" | "none" | undefined {
+  if (recorder === undefined) return undefined;
+  return recorder.policyFor(name, args, "extension", true) === "skip" ? "none" : "recorded";
 }
 
 /** web-resume plan §2.4: the read-only quiet marker — `resume __list` produces no terminal
@@ -181,13 +218,20 @@ function dispatchTemplate(deps: BuiltinBridgeDeps, cmd: CmdArgs & { op: "command
   } catch {
     return errResult("E_STALE_CTX", true, "none");
   }
-  return okResult({ op: "command", kind: "template", completion: "unknown" });
+  // §4.6 table: template/skill expansions become ordinary user messages — no card ("none").
+  const recorder = deps.recorder?.();
+  return okResult(
+    recorder !== undefined
+      ? withHistory({ op: "command", kind: "template", completion: "unknown" }, "none")
+      : { op: "command", kind: "template", completion: "unknown" },
+  );
 }
 
 /** §4.6 extension row + §4.9's `capture.arm`/`settleArm` call site. */
 function dispatchExtension(deps: BuiltinBridgeDeps, frame: CmdFrame, cmd: CmdArgs & { op: "command" }): CmdResultBody {
   if (deps.pi === undefined) return errResult("E_UNSUPPORTED", false, "none");
   const capture = deps.capture?.();
+  const recorder = deps.recorder?.();
   if (capture !== undefined) {
     capture.arm({
       cmdId: frame.id,
@@ -196,6 +240,20 @@ function dispatchExtension(deps: BuiltinBridgeDeps, frame: CmdFrame, cmd: CmdArg
       name: cmd.name,
       args: cmd.args,
       deadlineAt: (deps.now?.() ?? Date.now()) + Math.max(0, frame.deadlineMs),
+    });
+  }
+  // web-hub-cmd-history §3.2/§4.3 (A1, D7): register the dispatch intent BEFORE sendUserMessage
+  // so a handler the agent_settled window defers (beyond the capture fallback TTL — G7) can
+  // still recover the frame's cmdId at execution time. Owned commands only: a third-party
+  // handler never reaches the recorder's begin(), so an intent for it could never match.
+  const owned = capture?.owns?.(cmd.name) === true;
+  if (recorder !== undefined && owned) {
+    recorder.noteIntent({
+      cmdId: frame.id,
+      source: sourceOfFrame(frame.origin),
+      sessionId: safe(() => deps.getSessionId?.() ?? "", "") || "",
+      at: deps.now?.() ?? Date.now(),
+      match: { name: cmd.name, args: cmd.args },
     });
   }
   try {
@@ -207,6 +265,20 @@ function dispatchExtension(deps: BuiltinBridgeDeps, frame: CmdFrame, cmd: CmdArg
     capture?.settleArm?.();
     return errResult("E_STALE_CTX", true, "none");
   }
+  // §5.1/§5.2 (Q4): a dispatched THIRD-party command is observable only as "sent" — the output
+  // goes to the terminal alone. Written after a successful dispatch (an effect-none throw above
+  // records nothing).
+  if (recorder !== undefined && !owned) {
+    recorder.recordImmediate({
+      cmdId: frame.id,
+      name: cmd.name,
+      args: cmd.args,
+      source: sourceOfFrame(frame.origin),
+      startedAt: deps.now?.() ?? Date.now(),
+      state: "done",
+      notice: "terminal-only",
+    });
+  }
   // §2.1 K20: the handler's synchronous prefix runs inside this very call stack on the idle /
   // streaming paths, so a simple pi-toolkit handler (no `await` before its last `ctx.ui.*` call)
   // has already been captured by the time `sendUserMessage` returns; a settle-deferred handler
@@ -214,12 +286,14 @@ function dispatchExtension(deps: BuiltinBridgeDeps, frame: CmdFrame, cmd: CmdArg
   // pi-toolkit command either way), but `output()` will be empty until the deferred handler runs
   // — hence `completion` stays `"unknown"` rather than a fabricated `"sync"`.
   capture?.settleArm?.();
-  const owns = capture?.owns?.(cmd.name) === true;
+  const owns = owned;
+  const history = extensionHistory(recorder, cmd.name, cmd.args);
   const output = owns ? (capture?.output?.() as CommandOutputWire | undefined) : undefined;
   const hasOutput = output !== undefined && output.entries.length > 0;
   if (hasOutput) {
     const data: CmdData = { op: "command", kind: "extension", completion: "sync", captured: owns };
     (data as { output?: CommandOutputWire }).output = output;
+    if (history !== undefined) withHistory(data, history);
     return okResult(data);
   }
   // fix (2026-10-22): an owned invocation whose capture window is STILL OPEN — the handler was
@@ -236,11 +310,16 @@ function dispatchExtension(deps: BuiltinBridgeDeps, frame: CmdFrame, cmd: CmdArg
       const late = capture.outputFor?.(frame.id) as CommandOutputWire | undefined;
       const data: CmdData = { op: "command", kind: "extension", completion: "sync", captured: true };
       if (late !== undefined && late.entries.length > 0) (data as { output?: CommandOutputWire }).output = late;
+      if (history !== undefined) withHistory(data, history);
       deps.sendLate?.(frame, okResult(data));
     });
-    return okResult({ op: "command", kind: "extension", completion: "async", captured: true });
+    const asyncData: CmdData = { op: "command", kind: "extension", completion: "async", captured: true };
+    if (history !== undefined) withHistory(asyncData, history);
+    return okResult(asyncData);
   }
-  return okResult({ op: "command", kind: "extension", completion: "unknown", captured: owns });
+  const unknownData: CmdData = { op: "command", kind: "extension", completion: "unknown", captured: owns };
+  if (history !== undefined) withHistory(unknownData, history);
+  return okResult(unknownData);
 }
 
 function randomNonce(): string {
@@ -258,14 +337,49 @@ function dispatchBuiltin(
   frame: CmdFrame,
   cmd: CmdArgs & { op: "command" },
 ): CmdResultBody | Promise<CmdResultBody> {
+  // web-hub-cmd-history §5.2 (A1): every card below is written at the command's REAL settlement
+  // point (M3/D11) — after the effect landed (or on the very Promise that carries it) — and is a
+  // pure bypass: the reply bodies/late frames keep their exact pre-feature shape except the
+  // sanctioned `history` open field. Effect-none refusals never record.
+  const recorder = deps.recorder?.();
+  const source = sourceOfFrame(frame.origin);
+  const at = (): number => deps.now?.() ?? Date.now();
+  const immediate = (r: {
+    state: CmdRecordState;
+    output?: CommandOutputWire;
+    notice?: CmdRecordNotice;
+    error?: string;
+  }): void => {
+    recorder?.recordImmediate({
+      cmdId: frame.id,
+      name: cmd.name,
+      args: cmd.args,
+      source,
+      startedAt: at(),
+      ...r,
+    });
+  };
+  const syncData = (): CmdData => {
+    const data: CmdData = { op: "command", kind: "builtin", completion: "sync" };
+    if (recorder !== undefined) withHistory(data, "recorded");
+    return data;
+  };
   switch (cmd.name) {
-    case "session":
-      return okResult({
+    case "session": {
+      // §5.2: the card body is the same session text the reply carries.
+      const text = buildSessionText(ctx);
+      const data: CmdData = {
         op: "command",
         kind: "builtin",
         completion: "sync",
-        output: textOutput(buildSessionText(ctx)),
-      });
+        output: textOutput(text),
+      };
+      if (recorder !== undefined) {
+        withHistory(data, "recorded");
+        immediate({ state: "done", output: textOutput(text) });
+      }
+      return okResult(data);
+    }
     case "name": {
       const value = cmd.args.trim();
       if (value === "") return errResult("E_BAD_REQUEST", true, "none", "missing name");
@@ -275,7 +389,12 @@ function dispatchBuiltin(
       } catch {
         return errResult("E_STALE_CTX", true, "none");
       }
-      return okResult({ op: "command", kind: "builtin", completion: "sync" });
+      if (recorder !== undefined)
+        immediate({
+          state: "done",
+          output: { entries: [{ kind: "notify", level: "info", text: `会话名称：${value}` }] },
+        });
+      return okResult(syncData());
     }
     case "thinking": {
       const value = cmd.args.trim().toLowerCase();
@@ -286,7 +405,12 @@ function dispatchBuiltin(
       } catch {
         return errResult("E_STALE_CTX", true, "none");
       }
-      return okResult({ op: "command", kind: "builtin", completion: "sync" });
+      if (recorder !== undefined)
+        immediate({
+          state: "done",
+          output: { entries: [{ kind: "notify", level: "info", text: `思考等级：${value}` }] },
+        });
+      return okResult(syncData());
     }
     case "model": {
       const value = cmd.args.trim();
@@ -304,50 +428,145 @@ function dispatchBuiltin(
       } catch {
         return errResult("E_STALE_CTX", true, "none");
       }
+      // §5.2 (M3): the record opens BEFORE setModel is called (lazy start — no entry until 400 ms
+      // pass), and settles in a SEPARATE observer callback attached to the same pending Promise —
+      // the original .then chain and every return value below are untouched.
+      const handle = recorder?.beginExternal({
+        cmdId: frame.id,
+        name: "model",
+        args: cmd.args,
+        source: "web",
+        lazyStart: true,
+      });
+      const observe = (accepted: boolean): void => {
+        try {
+          if (accepted) {
+            handle?.sink({ kind: "notify", level: "info", text: `模型：${value}` });
+            handle?.settle({});
+          } else {
+            handle?.settle({ failed: "authentication not configured for that model" });
+          }
+        } catch {
+          /* bypass only */
+        }
+      };
+      const observeErr = (error: unknown): void => {
+        try {
+          handle?.settle({ failed: error instanceof Error ? error.message : String(error) });
+        } catch {
+          /* bypass only */
+        }
+      };
+      pending.then(observe, observeErr);
       if (deps.sendLate !== undefined) {
         pending.then(
           (accepted) =>
             deps.sendLate?.(
               frame,
               accepted
-                ? okResult({ op: "command", kind: "builtin", completion: "sync" })
+                ? okResult(
+                    recorder !== undefined
+                      ? withHistory({ op: "command", kind: "builtin", completion: "sync" }, "recorded")
+                      : { op: "command", kind: "builtin", completion: "sync" },
+                  )
                 : errResult("E_SUBAGENT_REJECTED", false, "none", "authentication not configured for that model"),
             ),
           () => deps.sendLate?.(frame, errResult("E_SUBAGENT_REJECTED", false, "none")),
         );
-        return okResult({ op: "command", kind: "builtin", completion: "async" });
+        return okResult(
+          recorder !== undefined
+            ? withHistory({ op: "command", kind: "builtin", completion: "async" }, "recorded")
+            : { op: "command", kind: "builtin", completion: "async" },
+        );
       }
       pending.catch(() => undefined);
-      return okResult({ op: "command", kind: "builtin", completion: "unknown" });
+      return okResult(
+        recorder !== undefined
+          ? withHistory({ op: "command", kind: "builtin", completion: "unknown" }, "recorded")
+          : { op: "command", kind: "builtin", completion: "unknown" },
+      );
     }
     case "compact": {
       const instructions = cmd.args.trim();
+      const recorderOn = recorder !== undefined;
+      // §5.2: lazyStart:false — /compact NEVER writes a start entry (appending entries mid-
+      // compaction is exactly what the plan avoids). The callbacks wrap the ORIGINAL sendLate
+      // calls (called first) and settle afterwards; with no sendLate but a recorder, recording-
+      // only callbacks are passed (plan-sanctioned); with neither, today's no-callback shape.
+      const lateCallbacks =
+        deps.sendLate !== undefined
+          ? {
+              onComplete: () =>
+                deps.sendLate?.(
+                  frame,
+                  okResult(
+                    recorderOn
+                      ? withHistory({ op: "command", kind: "builtin", completion: "sync" }, "recorded")
+                      : { op: "command", kind: "builtin", completion: "sync" },
+                  ),
+                ),
+              onError: (e: Error) => deps.sendLate?.(frame, errResult("E_SUBAGENT_REJECTED", false, "none", e.message)),
+            }
+          : undefined;
+      const callbacks =
+        recorder === undefined
+          ? lateCallbacks
+          : {
+              ...(lateCallbacks ?? {}),
+              onComplete: () => {
+                try {
+                  lateCallbacks?.onComplete();
+                } finally {
+                  const lines: Array<{ kind: "notify"; level: "info"; text: string }> = [
+                    { kind: "notify", level: "info", text: "上下文已压缩" },
+                  ];
+                  if (instructions !== "") lines.push({ kind: "notify", level: "info", text: `指令：${instructions}` });
+                  for (const l of lines) handle?.sink(l);
+                  handle?.settle({});
+                }
+              },
+              onError: (e: Error) => {
+                try {
+                  lateCallbacks?.onError(e);
+                } finally {
+                  handle?.settle({ failed: e.message });
+                }
+              },
+            };
+      // created AFTER ctx.compact accepts (an effect-none throw records nothing); onComplete
+      // can only fire asynchronously, so the same-tick assignment is race-free.
+      let handle: ReturnType<CommandRecorder["beginExternal"]> | undefined;
       try {
         ctx.compact({
           ...(instructions !== "" ? { customInstructions: instructions } : {}),
-          ...(deps.sendLate !== undefined
-            ? {
-                onComplete: () =>
-                  deps.sendLate?.(frame, okResult({ op: "command", kind: "builtin", completion: "sync" })),
-                onError: (e: Error) =>
-                  deps.sendLate?.(frame, errResult("E_SUBAGENT_REJECTED", false, "none", e.message)),
-              }
-            : {}),
+          ...(callbacks !== undefined ? callbacks : {}),
         });
       } catch {
         return errResult("E_STALE_CTX", true, "none");
       }
-      return okResult({
-        op: "command",
-        kind: "builtin",
-        completion: deps.sendLate !== undefined ? "async" : "unknown",
+      handle = recorder?.beginExternal({
+        cmdId: frame.id,
+        name: "compact",
+        args: cmd.args,
+        source: "web",
+        lazyStart: false,
       });
+      return okResult(
+        recorderOn
+          ? withHistory(
+              { op: "command", kind: "builtin", completion: deps.sendLate !== undefined ? "async" : "unknown" },
+              "recorded",
+            )
+          : { op: "command", kind: "builtin", completion: deps.sendLate !== undefined ? "async" : "unknown" },
+      );
     }
     case "new": {
       if (deps.pi === undefined) return errResult("E_UNSUPPORTED", false, "none");
       // web-resume plan §2.5 step 3: `undefined` ⇔ the shared exec claim is held (a resume
       // ticket in flight, or a not-yet-consumed `/new` nonce) — refuse instead of overwriting.
-      const armed = deps.armExec !== undefined ? deps.armExec("new") : randomNonce();
+      // web-hub-cmd-history §5.2: the frame's cmdId rides the nonce so internalExec writes the
+      // card at the real execution point (consumeNew hands it back).
+      const armed = deps.armExec !== undefined ? deps.armExec("new", frame.id) : randomNonce();
       if (armed === undefined) return errResult("E_COMMAND_DENIED", false, "none", "exec:in-flight");
       try {
         deps.pi.sendUserMessage(`/webhub __exec new ${armed}`, {
@@ -357,23 +576,43 @@ function dispatchBuiltin(
       } catch {
         return errResult("E_STALE_CTX", true, "none");
       }
-      return okResult({ op: "command", kind: "builtin", completion: "unknown" });
+      return okResult(
+        recorder !== undefined
+          ? withHistory({ op: "command", kind: "builtin", completion: "unknown" }, "recorded")
+          : { op: "command", kind: "builtin", completion: "unknown" },
+      );
     }
     case "resume": {
       // web-resume plan §2.4/§2.5 — policy has already allowed only the `__list`/`__pick`
       // forms; without the resume port wired (older wiring, or tests) the deny is the honest
       // answer (the feature signal `resume.v1` is off in exactly the same conditions).
       if (deps.resume === undefined) return errResult("E_COMMAND_DENIED", false, "none");
-      return deps.resume(frame, cmd, ctx);
+      // web-hub-cmd-history §4.6 table: `__list` is a read-only poll ("none"); `__pick`'s card
+      // is written at the execution point inside resume-exec ("recorded"). Errors carry no
+      // history at all (effect none).
+      const result = deps.resume(frame, cmd, ctx);
+      if (!isResumeListArgs(cmd)) return result;
+      const attach = (r: CmdResultBody): CmdResultBody => {
+        if (recorder !== undefined && r.ok === true && (r as { data?: { op?: string } }).data?.op === "command") {
+          withHistory((r as { data: CmdData }).data, "none");
+        }
+        return r;
+      };
+      return result instanceof Promise ? result.then(attach) : attach(result);
     }
     case "reload": {
       if (deps.pi === undefined) return errResult("E_UNSUPPORTED", false, "none");
+      // #42: /reload is never recorded (policyFor skips the whole reload family) — no intent.
       try {
         deps.pi.sendUserMessage("/agent reload", { expandPromptTemplates: true, deliverAs: "followUp" });
       } catch {
         return errResult("E_STALE_CTX", true, "none");
       }
-      return okResult({ op: "command", kind: "builtin", completion: "unknown" });
+      return okResult(
+        recorder !== undefined
+          ? withHistory({ op: "command", kind: "builtin", completion: "unknown" }, "none")
+          : { op: "command", kind: "builtin", completion: "unknown" },
+      );
     }
     default:
       return errResult("E_COMMAND_DENIED", false, "none");

@@ -14,6 +14,7 @@
  * logged.
  */
 import type { HubLog } from "./ports.js";
+import { deadlineRace } from "./req-deadline.js";
 
 export interface Scope {
   readonly signal: AbortSignal;
@@ -86,20 +87,12 @@ export function createScope(deps: { log: HubLog; now: () => number }): Scope {
 }
 
 export function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`E_DEADLINE: exceeded ${ms}ms`)), ms);
-    t.unref?.();
-    p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      (err: unknown) => {
-        clearTimeout(t);
-        reject(err instanceof Error ? err : new Error(String(err)));
-      },
-    );
-  });
+  return deadlineRace(
+    p,
+    ms,
+    () => new Error(`E_DEADLINE: exceeded ${ms}ms`),
+    (err) => (err instanceof Error ? err : new Error(String(err))),
+  );
 }
 
 /**

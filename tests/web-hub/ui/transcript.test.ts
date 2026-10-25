@@ -598,6 +598,9 @@ describe("TxCustom.vue — markdown rendering", () => {
     const tick = mount(TxCustom, { props: { customType: "subagent:usage-tick", text: "ctx 40%", truncated: false } });
     expect(tick.get(".kind-chip").text()).toBe("usage");
     expect(tick.get(".kind-chip").attributes("title")).toBe("subagent:usage-tick");
+    const fabric = mount(TxCustom, { props: { customType: "subagent:fabric", text: "[@x]\nhi", truncated: false } });
+    expect(fabric.get(".kind-chip").text()).toBe("message");
+    expect(fabric.get(".kind-chip").attributes("title")).toBe("subagent:fabric");
     expect(tick.get(".msg-head .who").text()).toBe("notice");
     expect(tick.find('.avatar-notice use[href="#i-info"]').exists()).toBe(true);
     const hint = mount(TxCustom, { props: { customType: "subagent:compact-hint", text: "x", truncated: false } });
@@ -606,7 +609,7 @@ describe("TxCustom.vue — markdown rendering", () => {
     for (const k of ["workflow-notice", "timeout", "fabric"]) {
       const w = mount(TxCustom, { props: { customType: `subagent:${k}`, text: "x", truncated: false } });
       expect(w.get(".msg-head .who").text()).toBe("subagent");
-      expect(w.get(".kind-chip").text()).toBe(k);
+      expect(w.get(".kind-chip").text()).toBe(k === "fabric" ? "message" : k);
     }
     const foreign = mount(TxCustom, { props: { customType: "other-ext:thing", text: "x", truncated: false } });
     expect(foreign.get(".kind-chip").text()).toBe("other-ext:thing");

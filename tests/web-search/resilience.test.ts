@@ -4,10 +4,10 @@ import {
   REQUEST_TIMEOUT_MS,
   backoffDelay,
   isRetryableError,
-  redactSecrets,
   sleep,
   withRequestTimeout,
 } from "../../src/web-search/resilience.js";
+import { redactSecrets } from "../../src/core/redact.js";
 
 describe("isRetryableError", () => {
   it("never retries 401/403 auth failures", () => {

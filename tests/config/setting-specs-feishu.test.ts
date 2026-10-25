@@ -19,6 +19,7 @@ import {
 const EXPOSED = [
   "feishuBot.enabled",
   "feishuBot.securityAlerts",
+  "feishuBot.xsMirror",
   "feishuBot.allowGroups",
   "feishuBot.groupRootTopics",
   "feishuBot.notify",

@@ -32,7 +32,7 @@ import AppIcon from "../../icons/AppIcon.vue";
 import { FLEET_STATE_ICON, fleetStateSpins } from "./state-icon.js";
 import { typeBadge, shortModelLabel } from "@logic/fleetRow.js";
 import { formatTimeRange, type TimeRangeLabel } from "@logic/timeRange.js";
-import { fleetActivity, isTerminalRow, FLEET_SELECT } from "./summary.js";
+import { fleetActivity, isTerminalRow, FLEET_ARCHIVE, FLEET_SELECT } from "./summary.js";
 
 const props = withDefaults(defineProps<FleetTreeProps>(), { depth: 0 });
 const { t } = useI18n();
@@ -95,6 +95,16 @@ function displayElapsedMs(row: FleetRowWire): number {
 // row 渲染辅助(原 FleetNode 的 computed,按行调用)
 // ---------------------------------------------------------------------------
 const sel = inject(FLEET_SELECT, null);
+// web-hub archive plan: the per-row「归档」button seam (terminal rows only — a running row
+// never archives; the agent re-checks terminality anyway).
+const arch = inject(FLEET_ARCHIVE, null);
+function canArchiveRow(row: FleetRowWire): boolean {
+  return arch !== null && arch.canArchive.value && isTerminalRow(row as unknown as Record<string, unknown>);
+}
+function onArchiveRow(row: FleetRowWire): void {
+  const label = String(row.title ?? row.label ?? row.type ?? row.runId);
+  arch?.archive("run", String(row.runId), label);
+}
 
 function rowOf(node: FleetTreeNode): FleetRowWire {
   return node.row as unknown as FleetRowWire;
@@ -107,7 +117,7 @@ function nameOf(row: FleetRowWire): string {
 /** Secondary `@label` token shown next to the main title: only when a distinct raw
  *  `title` took over the main slot, so the @mention handle stays discoverable.
  *  Empty string = render nothing. The label (never the title) stays the handle
- *  every mention/consult-prefix flow parses. */
+ *  every mention flow parses. */
 function subLabelOf(row: FleetRowWire): string {
   const t = row.title;
   const l = row.label;
@@ -124,15 +134,9 @@ function badgeOf(row: FleetRowWire): { letter: string; tone: number } | null {
 function phaseOf(row: FleetRowWire): string {
   return String(row.phaseLabel ?? row.status ?? "");
 }
-/** Line-2 slot is always rendered: live activity, else (consult runs only — `row.consult`, never the
- *  `consult-` label prefix) a short consult note; any other row without activity shows the phase only. */
+/** Line-2 slot is always rendered: live activity, else the phase only. */
 function activityOf(row: FleetRowWire): string {
-  const act = fleetActivity(row);
-  if (act !== "" || row.consult !== true) return act;
-  if (row.status === "completed") return t("fleet.consultDone");
-  if (row.status === "failed" || row.status === "timed_out" || row.status === "aborted")
-    return t("fleet.consultIncomplete");
-  return t("fleet.consultRunning");
+  return fleetActivity(row);
 }
 function modelShortOf(row: FleetRowWire): string {
   const m = row.model;
@@ -156,14 +160,6 @@ function modelProviderOf(row: FleetRowWire): string {
 function thinkingTokenOf(row: FleetRowWire): string {
   const t = row.thinking;
   return typeof t === "string" && t !== "" ? `·${t}` : "";
-}
-/** cache-thread plan §5.3 (U): the consult run's warm/cold compact marker
- *  (`t#2 warm·hit 96%`), precomputed agent-side (fleet row `cacheMark`).
- *  Empty string = no facts → renders nothing. English compact tokens only
- *  (UI text split); `translate="no"` keeps browser auto-translate off it. */
-function cacheMarkOf(row: FleetRowWire): string {
-  const m = row.cacheMark;
-  return typeof m === "string" && m !== "" ? m : "";
 }
 function modelBlockOf(row: FleetRowWire): boolean {
   // ctx is rendered inside the model block, so a model-less run with a context sample
@@ -234,10 +230,7 @@ function isOrphan(row: FleetRowWire): boolean {
             <AppIcon name="chev-right" class="icon icon-sm chev" aria-hidden="true" />
           </span>
           <span class="run-activity"
-            ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ activityOf(rowOf(node))
-            }}<span v-if="cacheMarkOf(rowOf(node))" class="run-cachemark" translate="no">
-              · {{ cacheMarkOf(rowOf(node)) }}</span
-            ></span
+            ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ activityOf(rowOf(node)) }}</span
           >
           <span v-if="modelBlockOf(rowOf(node))" class="run-model">
             <span
@@ -271,6 +264,14 @@ function isOrphan(row: FleetRowWire): boolean {
             :title="timeRangeOf(rowOf(node))!.title"
             >{{ timeRangeOf(rowOf(node))!.text }}</span
           >
+          <button
+            v-if="canArchiveRow(rowOf(node))"
+            class="btn btn-ghost arch-act"
+            type="button"
+            @click.stop.prevent="onArchiveRow(rowOf(node))"
+          >
+            {{ t("fleet.archive") }}
+          </button>
         </summary>
         <FleetTree :nodes="node.children" :depth="depth + 1" :now="now" />
       </details>
@@ -312,10 +313,7 @@ function isOrphan(row: FleetRowWire): boolean {
           <span v-if="isOrphan(rowOf(node))" class="chip chip-orphan">{{ t("drawer.parentMissing") }}</span>
         </span>
         <span class="run-activity"
-          ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ activityOf(rowOf(node))
-          }}<span v-if="cacheMarkOf(rowOf(node))" class="run-cachemark" translate="no">
-            · {{ cacheMarkOf(rowOf(node)) }}</span
-          ></span
+          ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ activityOf(rowOf(node)) }}</span
         >
         <span v-if="modelBlockOf(rowOf(node))" class="run-model">
           <span
@@ -349,6 +347,14 @@ function isOrphan(row: FleetRowWire): boolean {
           :title="timeRangeOf(rowOf(node))!.title"
           >{{ timeRangeOf(rowOf(node))!.text }}</span
         >
+        <button
+          v-if="canArchiveRow(rowOf(node))"
+          class="btn btn-ghost arch-act"
+          type="button"
+          @click.stop.prevent="onArchiveRow(rowOf(node))"
+        >
+          {{ t("fleet.archive") }}
+        </button>
       </div>
     </li>
   </ul>

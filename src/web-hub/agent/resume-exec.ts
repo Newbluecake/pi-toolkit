@@ -29,6 +29,7 @@ import { resolve } from "node:path";
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { CmdArgs, CmdErrorCode, CmdFrame, CmdResultBody } from "../protocol/messages.js";
 import type { LedgerResult } from "./ledger.js";
+import type { CommandRecorder } from "./command-record.js";
 import type { FileFact, ProvenanceIndex, ResumeCorePort, ResumeListHandle } from "./resume-list.js";
 
 // ---------------------------------------------------------------------------
@@ -36,10 +37,13 @@ import type { FileFact, ProvenanceIndex, ResumeCorePort, ResumeListHandle } from
 // ---------------------------------------------------------------------------
 
 export interface ExecGate {
-  /** `/new`'s arm: replaces an expired `/new` claim; `undefined` ⇔ the claim is held. */
-  armNew(): string | undefined;
-  /** `/new`'s take: consumes the armed nonce (releasing the claim); expired/unknown ⇒ false. */
-  consumeNew(nonce: string): boolean;
+  /** `/new`'s arm: replaces an expired `/new` claim; `undefined` ⇔ the claim is held.
+   *  web-hub-cmd-history §5.2 (A1): carries the web frame's cmdId so the execution point
+   *  (`internalExec("new")` in agent/index.ts) can write the command card. */
+  armNew(cmdId?: string): string | undefined;
+  /** `/new`'s take: consumes the armed nonce (releasing the claim); unknown/expired ⇒
+   *  `{ok:false}`; success ⇒ `{ok:true, cmdId}` (the threaded cmdId, possibly undefined). */
+  consumeNew(nonce: string): { ok: true; cmdId: string | undefined } | { ok: false };
   /** resume pick: acquire for a ticket; `false` ⇔ held by `/new` or another ticket. */
   tryAcquireResume(): boolean;
   /** resume settle/revocation: release the claim iff still held by resume. */
@@ -52,26 +56,32 @@ export function createExecGate(opts: { now(): number }): ExecGate {
   const TTL_MS = 5_000;
   type Holder = { kind: "new"; nonce: string; expiresAt: number } | { kind: "resume" };
   let holder: Holder | undefined;
+  /** web-hub-cmd-history A1: the cmdId riding the current /new nonce. */
+  let newCmdId: string | undefined;
   const expireStaleNew = (): void => {
     if (holder !== undefined && holder.kind === "new" && opts.now() > holder.expiresAt) {
       holder = undefined; // lazy TTL expiry — a forgotten /new nonce never wedges the claim
     }
   };
   return {
-    armNew() {
+    armNew(cmdId) {
       if (holder !== undefined) {
         expireStaleNew();
         if (holder !== undefined) return undefined;
       }
       const nonce = randomBytes(16).toString("hex");
+      newCmdId = cmdId;
       holder = { kind: "new", nonce, expiresAt: opts.now() + TTL_MS };
       return nonce;
     },
     consumeNew(nonce) {
       const h = holder;
-      if (h === undefined || h.kind !== "new" || h.nonce !== nonce) return false;
+      if (h === undefined || h.kind !== "new" || h.nonce !== nonce) return { ok: false as const };
       holder = undefined;
-      return opts.now() <= h.expiresAt;
+      if (opts.now() > h.expiresAt) return { ok: false as const };
+      const cmdId = newCmdId;
+      newCmdId = undefined;
+      return { ok: true as const, cmdId };
     },
     tryAcquireResume() {
       if (holder !== undefined) {
@@ -113,9 +123,19 @@ interface ResumeTicket {
   rejected?: Rejection;
   /** §2.5 step 7: set once the bridge replied `completion:"async"` — later settlements go late. */
   replied: boolean;
+  /** web-hub-cmd-history §5.2: when pick() ran — the card's startedAt. */
+  armedAt: number;
+  /** web-hub-cmd-history §5.2: at least one record entry landed for this ticket (drives the
+   *  late `history` field — a check-failure ticket produced no card, so "none"). */
+  recorded: boolean;
 }
 
 export interface ResumeExecDeps {
+  /** web-hub-cmd-history plan §5.2 (A1): optional recorder port — the `/resume __pick` card is
+   *  written at the execution point (after EVERY authoritative check, BEFORE switchSession —
+   *  R12: writing earlier would change the very session the "source unchanged" check reads).
+   *  Unset ⇒ zero recording, byte-identical behavior. */
+  recorder?(): CommandRecorder | undefined;
   sendUserMessage(text: string, options: { deliverAs: "followUp"; expandPromptTemplates: boolean }): void;
   getSessionId(): string;
   getSessionFile(): string | undefined;
@@ -206,10 +226,10 @@ export function createResumeExec(deps: ResumeExecDeps): ResumeExecHandle {
   let switching = false;
 
   const sendLateFor = (t: ResumeTicket, r: Rejection | { ok: true }): void => {
-    deps.sendLate(
-      t.frame,
-      "ok" in r ? { ok: true, data: { op: "command", kind: "builtin", completion: "sync" } } : { ok: false, ...r },
-    );
+    const recorderOn = deps.recorder?.() !== undefined;
+    const okData = { op: "command" as const, kind: "builtin" as const, completion: "sync" as const };
+    if (recorderOn) (okData as { history?: "recorded" | "none" }).history = t.recorded ? "recorded" : "none";
+    deps.sendLate(t.frame, "ok" in r ? { ok: true, data: okData } : { ok: false, ...r });
   };
 
   /** §2.5 b failure: record + release the claim; late ONLY when the bridge already replied —
@@ -256,6 +276,8 @@ export function createResumeExec(deps: ResumeExecDeps): ResumeExecHandle {
       deadlineAt: now() + Math.min(opTotal(frame), PICK_DEADLINE_CAP_MS),
       state: "armed",
       replied: false,
+      armedAt: now(),
+      recorded: false,
     };
     cur = ticket;
     // step 6 — re-entry into the extension-command surface.
@@ -357,6 +379,27 @@ export function createResumeExec(deps: ResumeExecDeps): ResumeExecHandle {
     } catch {
       return true; // unreachable (the inner catch covers every path); keeps the promise un-rejecting
     }
+    // web-hub-cmd-history §5.2 — THE execution point: every authoritative check has passed and
+    // the session is still the one we armed against, so the card lands HERE (writing earlier
+    // would have changed the file identity the checks above read — R12). `left-session` because
+    // everything after this line happens in/for the OTHER session.
+    try {
+      ticket.recorded =
+        deps.recorder?.()?.recordImmediate({
+          cmdId: ticket.frame.id,
+          name: "resume",
+          args: "",
+          source: "web",
+          startedAt: ticket.armedAt,
+          state: "done",
+          notice: "left-session",
+          output: {
+            entries: [{ kind: "notify", level: "info", text: `已切换到会话 ${ticket.target.id.slice(0, 8)}` }],
+          },
+        }) ?? false;
+    } catch {
+      ticket.recorded = false; // bypass only — the switch must proceed regardless
+    }
     // step c — switch. `switchInFlight` refuses web prompt ops for the whole window.
     ticket.state = "switching";
     switching = true;
@@ -389,6 +432,22 @@ export function createResumeExec(deps: ResumeExecDeps): ResumeExecHandle {
       // step d — exactly one late result (the finally below is the single send point).
       if ((rc as { cancelled?: boolean } | undefined)?.cancelled === true) {
         ticket.rejected = { code: "E_COMMAND_DENIED", retryable: false, effect: "none", message: "resume:cancelled" };
+        // web-hub-cmd-history §5.2: the switch did NOT happen — correct the left-session end
+        // with a second end{failed} under the same cmdId (session still ours, so the write
+        // passes the recorder's session guard; a skipped write is silently accepted).
+        try {
+          deps.recorder?.()?.recordImmediate({
+            cmdId: ticket.frame.id,
+            name: "resume",
+            args: "",
+            source: "web",
+            startedAt: ticket.armedAt,
+            state: "failed",
+            error: "resume:cancelled",
+          });
+        } catch {
+          /* bypass only */
+        }
       } else if (!verified) {
         ticket.rejected = {
           code: "E_STALE_CTX",
@@ -399,6 +458,21 @@ export function createResumeExec(deps: ResumeExecDeps): ResumeExecHandle {
       }
     } catch {
       ticket.rejected = { code: "E_STALE_CTX", retryable: false, effect: "unknown", message: "resume:switch-failed" };
+      // web-hub-cmd-history §5.2: the switch THREW — the session is (very likely) still ours,
+      // so correct the left-session end exactly like the cancelled case.
+      try {
+        deps.recorder?.()?.recordImmediate({
+          cmdId: ticket.frame.id,
+          name: "resume",
+          args: "",
+          source: "web",
+          startedAt: ticket.armedAt,
+          state: "failed",
+          error: "resume:switch-failed",
+        });
+      } catch {
+        /* bypass only */
+      }
     } finally {
       ticket.state = "done";
       if (cur === ticket) cur = undefined;

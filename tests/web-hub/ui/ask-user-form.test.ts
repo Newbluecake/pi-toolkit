@@ -188,6 +188,130 @@ describe("AskUserForm.vue — submit gating + payload (§7.4)", () => {
     expect(w.emitted("answer")).toEqual([[[{ selected: [], other: "  plan C, actually " }]]]);
   });
 
+  it("re-clicking the selected radio deselects it (2026-10-24 bug fix: 误点可撤销)", async () => {
+    const w = mountForm(SINGLE);
+    const radios = w.find(".ask-question").findAll("input[type='radio']");
+    await radios[0]!.setValue(true);
+    expect((radios[0]!.element as HTMLInputElement).checked).toBe(true);
+    expect(w.find("[data-submit]").attributes("disabled")).toBeUndefined();
+    // a native radio never fires `change` on a re-click — the deselect rides `click`
+    await radios[0]!.trigger("click");
+    expect((radios[0]!.element as HTMLInputElement).checked).toBe(false);
+    expect(w.find("[data-submit]").attributes("disabled")).toBeDefined(); // unanswered again
+    // …and a fresh pick afterwards selects normally (change fires from the unchecked state)
+    await radios[1]!.setValue(true);
+    expect(w.find("[data-submit]").attributes("disabled")).toBeUndefined();
+  });
+
+  it("Space on the selected radio deselects too (keyboard parity)", async () => {
+    const w = mountForm(SINGLE);
+    const radio = w.find(".ask-question").findAll("input[type='radio']")[0]!;
+    await radio.setValue(true);
+    expect((radio.element as HTMLInputElement).checked).toBe(true);
+    await radio.trigger("keydown", { key: " " });
+    expect((radio.element as HTMLInputElement).checked).toBe(false);
+    expect(w.find("[data-submit]").attributes("disabled")).toBeDefined();
+  });
+
+  it("single-select: typing a non-empty Other clears the picked option; clearing Other does not restore it", async () => {
+    const w = mountForm(SINGLE);
+    const radios = w.find(".ask-question").findAll("input[type='radio']");
+    await radios[0]!.setValue(true);
+    await w.find("[data-other-link]").trigger("click");
+    await w.find(".ask-other-input").setValue("plan C, actually");
+    // option ⟂ Other are mutually exclusive under single-select — the wire would otherwise
+    // send BOTH (encodeAnswer: key = selected[0] plus key__other)
+    expect((radios[0]!.element as HTMLInputElement).checked).toBe(false);
+    await w.find("[data-submit]").trigger("click");
+    expect(w.emitted("answer")).toEqual([[[{ selected: [], other: "plan C, actually" }]]]);
+
+    const w2 = mountForm(SINGLE);
+    const radios2 = w2.find(".ask-question").findAll("input[type='radio']");
+    await radios2[0]!.setValue(true);
+    await w2.find("[data-other-link]").trigger("click");
+    await w2.find(".ask-other-input").setValue("plan C");
+    await w2.find(".ask-other-input").setValue(""); // clearing Other does NOT resurrect the option
+    expect((radios2[0]!.element as HTMLInputElement).checked).toBe(false);
+    expect(w2.find("[data-submit]").attributes("disabled")).toBeDefined(); // fully unanswered
+  });
+
+  it("multiSelect keeps option + Other coexisting (unchanged legacy semantics)", async () => {
+    const w = mountForm(MULTI);
+    const tabs = w.findAll("[data-question-tab]");
+    await tabs[1]!.trigger("click");
+    const boxes = w.findAll(".ask-question")[1]!.findAll("input[type='checkbox']");
+    await boxes[0]!.setValue(true);
+    await w.findAll(".ask-question")[1]!.find("[data-other-link]").trigger("click");
+    await w.findAll(".ask-question")[1]!.find(".ask-other-input").setValue("plus a note");
+    expect((boxes[0]!.element as HTMLInputElement).checked).toBe(true); // not cleared
+    // answer the remaining two questions so the payload is observable
+    await tabs[0]!.trigger("click");
+    await w.findAll(".ask-question")[0]!.find("input[type='radio']").setValue(true);
+    await tabs[2]!.trigger("click");
+    await w.findAll(".ask-question")[2]!.find("input[type='radio']").setValue(true);
+    await w.find("[data-submit]").trigger("click");
+    const payload = w.emitted("answer")![0]![0] as Array<{ selected: string[]; other: string | null }>;
+    expect(payload[1]).toEqual({ selected: ["unit + integration green"], other: "plus a note" });
+  });
+
+  it("re-picking the SAME option after a deselect selects it again (复验 #4)", async () => {
+    const w = mountForm(SINGLE);
+    const radios = w.find(".ask-question").findAll("input[type='radio']");
+    await radios[0]!.setValue(true);
+    await radios[0]!.trigger("click"); // deselect
+    expect((radios[0]!.element as HTMLInputElement).checked).toBe(false);
+    await radios[0]!.setValue(true); // pick it again — a fresh change from the unchecked state
+    expect((radios[0]!.element as HTMLInputElement).checked).toBe(true);
+    await w.find("[data-submit]").trigger("click");
+    expect(w.emitted("answer")).toEqual([[[{ selected: ["Plan A — rewrite"], other: null }]]]);
+  });
+
+  it("single-select, reverse direction: typing Other FIRST then picking an option clears the Other (复验 blocker)", async () => {
+    const w = mountForm(SINGLE);
+    await w.find("[data-other-link]").trigger("click");
+    await w.find(".ask-other-input").setValue("plan C, actually");
+    const radios = w.find(".ask-question").findAll("input[type='radio']");
+    await radios[0]!.setValue(true); // pick after typing — the pick wins, Other is cleared
+    expect((w.find(".ask-other-input").element as HTMLInputElement).value).toBe("");
+    await w.find("[data-submit]").trigger("click");
+    expect(w.emitted("answer")).toEqual([[[{ selected: ["Plan A — rewrite"], other: null }]]]);
+  });
+
+  it("whitespace-only Other text does NOT clear the picked option (复验 #2, TUI trim parity)", async () => {
+    const w = mountForm(SINGLE);
+    const radios = w.find(".ask-question").findAll("input[type='radio']");
+    await radios[0]!.setValue(true);
+    await w.find("[data-other-link]").trigger("click");
+    await w.find(".ask-other-input").setValue("   ");
+    expect((radios[0]!.element as HTMLInputElement).checked).toBe(true); // kept
+    expect(w.find("[data-submit]").attributes("disabled")).toBeUndefined(); // the pick still answers
+  });
+
+  it("a Space-synthesized trailing click after a keyboard deselect is swallowed (复验 #5)", async () => {
+    const w = mountForm(SINGLE);
+    const radio = w.find(".ask-question").findAll("input[type='radio']")[0]!;
+    await radio.setValue(true);
+    await radio.trigger("keydown", { key: " " }); // deselects + arms the one-shot marker
+    expect((radio.element as HTMLInputElement).checked).toBe(false);
+    // a browser that dispatches the synthetic click despite preventDefault: swallowed, stays deselected
+    await radio.trigger("click");
+    expect((radio.element as HTMLInputElement).checked).toBe(false);
+    expect(w.find("[data-submit]").attributes("disabled")).toBeDefined();
+  });
+
+  it("deselecting the answer does NOT trigger the multi-question auto-advance", async () => {
+    const w = mountForm(MULTI);
+    const tabs = w.findAll("[data-question-tab]");
+    await w.findAll(".ask-question")[0]!.find("input[type='radio']").setValue(true); // first answer ⇒ advance
+    expect(tabs[1]!.attributes("aria-selected")).toBe("true");
+    await tabs[0]!.trigger("click"); // navigate back to revise
+    const radio = w.findAll(".ask-question")[0]!.findAll("input[type='radio']")[0]!;
+    await radio.trigger("click"); // deselect
+    expect((radio.element as HTMLInputElement).checked).toBe(false);
+    expect(tabs[0]!.attributes("aria-selected")).toBe("true"); // stayed put — no jump
+    expect(w.findAll(".ask-question")[1]!.attributes("style") ?? "").toContain("display: none");
+  });
+
   it("actions DOM order is Cancel → Submit (Tab order matches the visual left → right)", () => {
     const w = mountForm(SINGLE);
     const btns = w.findAll(".ask-actions button");

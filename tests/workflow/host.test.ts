@@ -1647,312 +1647,45 @@ describe("host.ts: strict agent() opts validation (workflow-experts §4.1/§4.4)
   });
 });
 
-describe("host.ts: agent({ experts }) admission (workflow-experts §4.4, D9/D11)", () => {
-  function expertsHarness(budgetOverrides: Partial<WorkflowRunBudget> = {}) {
-    const h = harness({ maxParallel: 4, ...budgetOverrides });
+describe("host.ts: removed experts admission", () => {
+  it.each([[], ["main"], undefined])("rejects experts (%s) before spawn, journaling or taint", async (experts) => {
+    const h = harness();
+    await h.boot();
     const c = controllableSpawner();
-    const events: WorkflowChildEvent[] = [];
-    return {
-      ...h,
-      c,
-      events,
-      attach(extra: Partial<Parameters<typeof attachHostCallHandler>[0]> = {}) {
-        return attachHostCallHandler({
-          clock: h.clock,
-          workerHost: h.workerHost,
-          spawner: c.spawner,
-          gateRunner: okGate,
-          budget: { ...BASE_BUDGET, maxParallel: 4, ...budgetOverrides },
-          workflowDeadlineAt: 1_000_000,
-          onChildEvent: (e) => events.push(e),
-          ...extra,
-        });
-      },
-      kindsOf(callId: string): string[] {
-        return events.filter((e) => e.callId === callId).map((e) => e.kind);
-      },
-    };
-  }
-
-  it("rejects with 'not supported in this context' when no resolveExperts is wired at all (D17)", async () => {
-    const h = expertsHarness();
-    await h.boot();
-    h.attach();
-    h.postHostCall("1", "agent", { prompt: "p", opts: { experts: ["dev"] } });
-    await flush();
-    expect(h.c.spawns).toHaveLength(0);
-    const ack = sentFor(h.sent, "1").acks[0] as { ok: boolean; error?: { message: string } };
-    expect(ack.ok).toBe(false);
-    expect(ack.error?.message).toContain("not supported in this context");
-    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "1")).toMatchObject({
-      stage: "admission",
-      reason: "experts_unresolved",
-    });
-  });
-
-  it("a successful resolution forwards consultExperts on the spawn request and records experts on the settled summary", async () => {
-    const h = expertsHarness();
-    await h.boot();
-    const refs = [{ runId: "r-expert", sessionFile: "/tmp/r-expert.jsonl", agentType: "gp" }];
-    const resolveExperts = vi.fn(() => ({ refs }));
-    const handler = h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
-    h.postHostCall("1", "agent", { prompt: "p", opts: { experts: ["outside"] } });
-    await flush();
-    expect(resolveExperts).toHaveBeenCalledWith(["outside"]);
-    expect(h.c.spawns[0]!.req).toMatchObject({ consultExperts: refs });
-    h.c.spawns[0]!.resolve({ runId: "r1" });
-    await flush();
-    h.c.finishChild("r1");
-    await flush();
-    expect(handler.children[0]).toMatchObject({ experts: ["r-expert"] });
-  });
-
-  it("a resolver failure rejects the call with experts_unresolved, never calls spawn, and records no children[] entry", async () => {
-    const h = expertsHarness();
-    await h.boot();
-    const resolveExperts = vi.fn(() => ({ error: { message: "expert not found" } }));
-    const handler = h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
-    h.postHostCall("1", "agent", { prompt: "p", opts: { experts: ["ghost"] } });
-    await flush();
-    expect(h.c.spawns).toHaveLength(0);
-    expect(handler.children).toEqual([]);
-    const ack = sentFor(h.sent, "1").acks[0] as { ok: boolean; error?: { message: string } };
-    expect(ack.ok).toBe(false);
-    expect(ack.error?.message).toBe("expert not found");
-    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "1")).toMatchObject({
-      stage: "admission",
-      reason: "experts_unresolved",
-    });
-  });
-
-  it("a call with experts:[] (validated to undefined) never touches resolveExperts at all", async () => {
-    const h = expertsHarness();
-    await h.boot();
-    const resolveExperts = vi.fn(() => ({ refs: [] }));
-    h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
-    h.postHostCall("1", "agent", { prompt: "p", opts: { experts: [] } });
-    await flush();
-    expect(resolveExperts).not.toHaveBeenCalled();
-    expect(h.c.spawns[0]!.req).not.toHaveProperty("consultExperts");
-  });
-
-  /**
-   * P1 (verification finding, docs/dev/workflow-experts/plan.md §5/D10):
-   * host.ts used to call `expertScope.noteSubmitted()` unconditionally, at
-   * the very top of `handleAgent`, BEFORE the journal/maxChildren/BW2/
-   * experts admission gates below it could reject the call — an
-   * admission-rejected labeled call was left registered as a permanently
-   * unsettled local candidate, so any LATER call in the same workflow run
-   * that referenced its label as an expert incorrectly got "is still
-   * running" forever, regardless of the real (settled, or never-submitted)
-   * state. The fix moves `noteSubmitted` to the three REAL `registry.submit`
-   * call sites (replay hit / FIFO queue / immediate dispatch) so a call
-   * rejected before any of them leaves no trace at all.
-   */
-  it("P1 regression: budget_exhausted (BW2, the outer host-call gate) never registers a phantom local candidate — once the deadline is extended, a later reference to its label falls through to the resolver instead of 'still running'", async () => {
-    const h = expertsHarness();
-    await h.boot();
-    // Already expired: the OUTER host-call gate (host.ts's `onHostCall`,
-    // ahead of `handleAgent`) rejects every envelope as budget_exhausted
-    // before `handleAgent` — and therefore `noteSubmitted` — ever runs.
-    let killAtValue = 0;
-    const resolveExperts = vi.fn(() => ({ error: { message: "no external match" } }));
-    const handler = h.attach({ killAt: () => killAtValue, spawner: { ...h.c.spawner, resolveExperts } });
-
-    h.postHostCall("1", "agent", { prompt: "p1", opts: { label: "dev" } });
-    await flush();
-    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "1")).toMatchObject({
-      stage: "admission",
-      reason: "budget_exhausted",
-      label: "dev",
-    });
-    expect(handler.children).toEqual([]);
-
-    // A grace/extension raising `killAt()` (workflow-agent-queue's
-    // `extend_subagent_timeout` does exactly this in production) — BW2 no
-    // longer trips for later calls.
-    killAtValue = h.clock.now() + 60_000;
-
-    h.postHostCall("2", "agent", { prompt: "p2", opts: { experts: ["dev"] } });
-    await flush();
-    // Before the fix: "dev" (call "1") was phantom-registered and
-    // permanently unsettled -> reject 'is still running'. After the fix:
-    // "1" left no trace -> mapLocal passes "dev" straight through to the
-    // (mocked) resolver.
-    expect(resolveExperts).toHaveBeenCalledWith(["dev"]);
-    const ack2 = sentFor(h.sent, "2").acks[0] as { ok: boolean; error?: { message: string } };
-    expect(ack2.ok).toBe(false);
-    expect(ack2.error?.message).toBe("no external match"); // NOT "... is still running ..."
-  });
-
-  it("P1 regression: experts_unresolved on a labeled call never registers a phantom local candidate — a later reference to its label falls through to the resolver instead of 'still running' (test #23 semantics: caught, then continue)", async () => {
-    const h = expertsHarness();
-    await h.boot();
-    const ref = { runId: "r-ext", sessionFile: "/tmp/r-ext.jsonl", agentType: "gp" };
-    const resolveExperts = vi.fn((handles: readonly string[]) =>
-      handles.includes("ghost") ? { error: { message: "expert not found" } } : { refs: [ref] },
-    );
-    const handler = h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
-
-    // Call "1" (label "dev") itself asks for a bogus external expert and
-    // gets rejected — before the P1 fix this still registered "dev" as an
-    // unsettled local candidate.
-    h.postHostCall("1", "agent", { prompt: "p1", opts: { label: "dev", experts: ["ghost"] } });
-    await flush();
-    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "1")).toMatchObject({
-      stage: "admission",
-      reason: "experts_unresolved",
-    });
-    expect(handler.children).toEqual([]);
-
-    // Call "2" references "dev" as an expert (the script caught "1"'s
-    // rejection and moved on — test #23's semantics). Before the fix: reject
-    // 'is still running'. After the fix: falls through to the resolver.
-    h.postHostCall("2", "agent", { prompt: "p2", opts: { experts: ["dev"] } });
-    await flush();
-    expect(resolveExperts).toHaveBeenLastCalledWith(["dev"]);
-    expect(h.c.spawns[0]!.req).toMatchObject({ consultExperts: [ref] });
-  });
-
-  it("P1 regression: max_children never registers a phantom local candidate either — a literal 'later call resolves dev correctly' round trip is unreachable for THIS gate specifically (see comment); the direct, reachable contract test lives in expert-scope.test.ts", async () => {
-    const h = expertsHarness({ maxChildren: 1 });
-    await h.boot();
-    const handler = h.attach();
-
-    // Call "1" uses the workflow's only maxChildren=1 slot; settle it so
-    // `handler.children` has a real baseline to compare against below.
-    h.postHostCall("1", "agent", { prompt: "p1", opts: null });
-    await flush();
-    h.c.spawns[0]!.resolve({ runId: "r1" });
-    await flush();
-    h.c.finishChild("r1");
-    await flush();
-
-    // Call "2" (label "dev") is rejected outright by max_children — before
-    // the P1 fix this still registered "dev" as an unsettled local
-    // candidate in expertScope, forever.
-    h.postHostCall("2", "agent", { prompt: "p2", opts: { label: "dev" } });
-    await flush();
-    expect(h.events.find((e) => e.kind === "rejected" && e.callId === "2")).toMatchObject({
-      reason: "max_children",
-      label: "dev",
-    });
-    expect(handler.children).toHaveLength(1); // only call "1" ever settles/records
-
-    // NOTE: unlike budget_exhausted (the outer gate's `killAt` is dynamic —
-    // a grace/extension can raise it) and experts_unresolved (doesn't touch
-    // any cap at all), maxChildren's own counter (`totalSubmitted()`, D1)
-    // only ever grows and has no reset/extend mechanism within a single
-    // workflow run: once it trips for call "2", EVERY subsequent call
-    // (including one that references "dev" as an expert) is ALSO rejected
-    // by max_children before ever reaching expert resolution — so it can
-    // never observe "still running" either. This asserts exactly that: the
-    // rejection reason stays "max_children", the resolver is never reached.
-    h.postHostCall("3", "agent", { prompt: "p3", opts: { experts: ["dev"] } });
-    await flush();
-    const ack3 = sentFor(h.sent, "3").acks[0] as { ok: boolean; error?: { message: string } };
-    expect(ack3.ok).toBe(false);
-    expect(ack3.error?.message).toContain("maxChildren");
-  });
-});
-
-describe("host.ts: chain-taint replay safety (workflow-experts D12-D15, §5)", () => {
-  function taintHarness(budgetOverrides: Partial<WorkflowRunBudget> = {}) {
-    const h = harness({ maxParallel: 4, ...budgetOverrides });
-    const c = controllableSpawner();
-    const appendSpy = vi.fn();
+    const append = vi.fn();
     const index = buildReplayIndex([], 0, "chain");
-    return {
-      ...h,
-      c,
-      appendSpy,
-      attach(extra: Partial<Parameters<typeof attachHostCallHandler>[0]> = {}) {
-        return attachHostCallHandler({
-          clock: h.clock,
-          workerHost: h.workerHost,
-          spawner: { ...c.spawner, configHashOf: () => "hash" },
-          gateRunner: okGate,
-          budget: { ...BASE_BUDGET, maxParallel: 4, ...budgetOverrides },
-          workflowDeadlineAt: 1_000_000,
-          journal: {
-            store: { append: appendSpy } as never,
-            dir: ".",
-            index,
-            scope: "chain",
-            noReplay: false,
-            deterministic: { current: true },
-          },
-          ...extra,
-        });
+    const handler = attachHostCallHandler({
+      clock: h.clock,
+      workerHost: h.workerHost,
+      spawner: c.spawner,
+      gateRunner: okGate,
+      budget: BASE_BUDGET,
+      workflowDeadlineAt: 1000000,
+      journal: {
+        store: { append },
+        dir: ".",
+        index,
+        scope: "chain",
+        noReplay: false,
+        deterministic: { current: true },
       },
-    };
-  }
-
-  it("an experts call itself is never journaled, even though it completes successfully", async () => {
-    const h = taintHarness();
-    await h.boot();
-    const refs = [{ runId: "r-expert", sessionFile: "/tmp/r-expert.jsonl", agentType: "gp" }];
-    const resolveExperts = vi.fn(() => ({ refs }));
-    const handler = h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
-    h.postHostCall("1", "agent", { prompt: "p", opts: { experts: ["outside"] } });
+    });
+    h.postHostCall("1", "agent", { prompt: "rejected", opts: { experts } });
     await flush();
-    h.c.spawns[0]!.resolve({ runId: "r1" });
-    await flush();
-    h.c.finishChild("r1");
-    await flush();
-    expect(h.appendSpy).not.toHaveBeenCalled();
-    expect(handler.replayStats).toMatchObject({ tainted: true });
-  });
-
-  it("a call submitted after a successful experts resolution is chain_tainted and never journaled, even though it declares no experts of its own", async () => {
-    const h = taintHarness();
-    await h.boot();
-    const refs = [{ runId: "r-expert", sessionFile: "/tmp/r-expert.jsonl", agentType: "gp" }];
-    const resolveExperts = vi.fn(() => ({ refs }));
-    h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
-    h.postHostCall("1", "agent", { prompt: "expert-call", opts: { experts: ["outside"] } });
-    await flush();
-    h.c.spawns[0]!.resolve({ runId: "r1" });
-    await flush();
-    h.c.finishChild("r1");
-    await flush();
-    h.postHostCall("2", "agent", { prompt: "plain-call", opts: null });
-    await flush();
-    h.c.spawns[1]!.resolve({ runId: "r2" });
-    await flush();
-    h.c.finishChild("r2");
-    await flush();
-    expect(h.appendSpy).not.toHaveBeenCalled();
-  });
-
-  it("a call BEFORE any taint is journaled normally (baseline, taint is not global-by-default)", async () => {
-    const h = taintHarness();
-    await h.boot();
-    const handler = h.attach();
-    h.postHostCall("1", "agent", { prompt: "plain-call", opts: null });
-    await flush();
-    h.c.spawns[0]!.resolve({ runId: "r1" });
-    await flush();
-    h.c.finishChild("r1");
-    await flush();
-    expect(h.appendSpy).toHaveBeenCalledTimes(1);
+    const ack = sentFor(h.sent, "1").acks[0] as { ok: boolean; error?: { message: string } };
+    expect(ack.ok).toBe(false);
+    expect(ack.error?.message).toContain("opts.experts is no longer supported");
+    expect(c.spawns).toHaveLength(0);
+    expect(handler.children).toEqual([]);
+    expect(append).not.toHaveBeenCalled();
     expect(handler.replayStats).not.toHaveProperty("tainted");
-  });
-
-  it("a REJECTED experts call (resolver failure) never taints the chain — the next plain call still journals", async () => {
-    const h = taintHarness();
-    await h.boot();
-    const resolveExperts = vi.fn(() => ({ error: { message: "nope" } }));
-    const handler = h.attach({ spawner: { ...h.c.spawner, resolveExperts } });
-    h.postHostCall("1", "agent", { prompt: "expert-call", opts: { experts: ["ghost"] } });
+    h.postHostCall("2", "agent", { prompt: "plain", opts: null });
     await flush();
-    h.postHostCall("2", "agent", { prompt: "plain-call", opts: null });
+    c.spawns[0]!.resolve({ runId: "r2" });
     await flush();
-    h.c.spawns[0]!.resolve({ runId: "r2" });
+    c.finishChild("r2");
     await flush();
-    h.c.finishChild("r2");
-    await flush();
-    expect(h.appendSpy).toHaveBeenCalledTimes(1);
-    expect(handler.replayStats).not.toHaveProperty("tainted");
+    expect(handler.children).toHaveLength(1);
+    expect(append).toHaveBeenCalledTimes(1);
   });
 });

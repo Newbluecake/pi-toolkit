@@ -14,6 +14,7 @@ import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
 import type { RegistryView } from "../../src/web-hub/hub/ports.js";
 import {
   WTGRAPH_PATH,
+  WTGRAPH_MERGED_MAX,
   WTGRAPH_N,
   WTGRAPH_PARENTS_MAX,
   parseWtGraphPayload,
@@ -202,12 +203,12 @@ async function boot(root: string): Promise<Live> {
   }
 }
 
-function request(live: Live, wt: string): Promise<RawResponse> {
-  const query = new URLSearchParams({ agentKey: AGENT_KEY, sessionId: SESSION, wt });
+function request(live: Live, wt: string, extra: Record<string, string> = {}): Promise<RawResponse> {
+  const query = new URLSearchParams({ agentKey: AGENT_KEY, sessionId: SESSION, wt, ...extra });
   return rawRequest(live.hub.httpPort, {
     path: `${WTGRAPH_PATH}?${query}`,
     headers: { "X-PWH": "1", Cookie: live.cookie },
-    timeoutMs: 35_000,
+    timeoutMs: extra["merged"] === "1" ? 48_000 : 35_000,
   });
 }
 
@@ -470,4 +471,213 @@ describe.skipIf(!hasGit || !hasProcFd)("worktree-graph P6: real hub + temp repos
     expect(live.spy.commands.some((a) => a.includes("log"))).toBe(false);
     await until(() => repoFds(root).length === 0, "failure pins closed");
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// merged-plan r3 §9 (P2): `merged=1` end to end — real hub, real HTTP, real git
+// ---------------------------------------------------------------------------
+
+type MergedWire = WtGraphPayload & {
+  merged: {
+    v: 1;
+    base?: string;
+    skipped?: string;
+    omitted?: number;
+    branches: Array<{ n: string; h: string; v: string; k?: number; t?: number; e?: string[]; why?: string; co?: true }>;
+  };
+};
+
+function mergedPayload(response: RawResponse): MergedWire {
+  expect(response.status, response.body).toBe(200);
+  const raw = JSON.parse(response.body) as MergedWire;
+  expect(parseWtGraphPayload(raw)).not.toBeNull(); // the real strict parser accepts the real wire
+  expect(Object.keys(raw)).toContain("merged");
+  return raw;
+}
+
+/** Independent oracle: the plain (un-hardened) cherry-mark on the same symmetric difference. */
+function cherryOracle(root: string, head: string, tip: string): { eq: string[]; plus: string[] } {
+  const lines = git(root, ["rev-list", "--cherry-mark", "--right-only", `${head}...${tip}`, "--"])
+    .split("\n")
+    .filter(Boolean);
+  return {
+    eq: lines.filter((l) => l.startsWith("=")).map((l) => l.slice(1)),
+    plus: lines.filter((l) => l.startsWith("+")).map((l) => l.slice(1)),
+  };
+}
+
+const gmCommands = (live: Live): string[][] => live.spy.commands.filter((a) => a.includes("--cherry-mark"));
+
+describe.skipIf(!hasGit || !hasProcFd)("worktree-graph merged=1: real hub + temp repos (merged-plan P2)", () => {
+  it("eq / part / none verdicts equal git's own cherry-mark; plain requests are unchanged; the second request spawns no Gm", async () => {
+    const root = await repo();
+    await commit(root, "base");
+    // eq: one commit, later cherry-picked into main
+    git(root, ["checkout", "-qb", "pi-agent-eq"]);
+    const eq1 = await commit(root, "eq1");
+    // part: two commits, only the first cherry-picked
+    git(root, ["checkout", "-q", "main"]);
+    git(root, ["checkout", "-qb", "pi-agent-part"]);
+    const part1 = await commit(root, "part1");
+    const part2 = await commit(root, "part2");
+    // none: one commit never merged
+    git(root, ["checkout", "-q", "main"]);
+    git(root, ["checkout", "-qb", "pi-agent-none"]);
+    await commit(root, "none1");
+    git(root, ["checkout", "-q", "main"]);
+    await commit(root, "main-diverge"); // HEAD must diverge BEFORE the picks (else the oids would coincide)
+    git(root, ["cherry-pick", eq1]);
+    git(root, ["cherry-pick", part1]);
+    git(root, ["branch", "pi-agent-anc", "main~3"]); // an ancestor of HEAD: never a candidate
+    const head = git(root, ["rev-parse", "HEAD"]).trim();
+    const live = await boot(root);
+
+    const plain = await request(live, root);
+    const plainGraph = payload(plain);
+    const response = await request(live, root, { merged: "1" });
+    const graph = mergedPayload(response);
+    expect(Object.keys(graph).sort()).toEqual(
+      [...TOP_KEYS.filter((k) => Object.hasOwn(plainGraph, k)), "merged"].sort(),
+    );
+    // the graph itself is byte-for-byte the plain one — `merged` is purely additive
+    const { merged, ...rest } = graph;
+    expect(rest).toEqual(plainGraph);
+    expect(merged.base).toBe(head);
+    expect(merged.skipped).toBeUndefined();
+
+    const byName = new Map(merged.branches.map((b) => [b.n, b]));
+    expect([...byName.keys()].sort()).toEqual(["pi-agent-eq", "pi-agent-none", "pi-agent-part"]);
+    for (const [name, entry] of byName) {
+      const o = cherryOracle(root, head, entry.h);
+      const t = o.eq.length + o.plus.length;
+      expect(entry.t, name).toBe(t);
+      expect(entry.k, name).toBe(o.eq.length);
+    }
+    expect(byName.get("pi-agent-eq")).toMatchObject({ v: "eq", k: 1, t: 1 });
+    expect(byName.get("pi-agent-none")).toMatchObject({ v: "none", k: 0, t: 1 });
+    expect(byName.get("pi-agent-part")).toMatchObject({ v: "part", k: 1, t: 2, e: [part1] });
+    expect(part2).not.toBe(part1);
+    // order = window row order (newest first), the same order the commits array has
+    const rowOf = new Map(graph.commits.map((c, i) => [c.h, i]));
+    const rows = merged.branches.map((b) => rowOf.get(b.h)!);
+    expect([...rows].sort((a, b) => a - b)).toEqual(rows);
+
+    // hardening reached the real command line
+    expect(gmCommands(live)).toHaveLength(3);
+    for (const argv of gmCommands(live)) {
+      for (const must of ["--no-lazy-fetch", "--no-replace-objects", "--right-only", "core.bigFileThreshold=512m"])
+        expect(argv.join(" ")).toContain(must);
+      expect(argv.some((a) => a.startsWith("--attr-source="))).toBe(true);
+      expect(argv.join(" ")).toContain("core.hooksPath=/dev/null");
+    }
+
+    // second merged request: identical block, ZERO new Gm spawns (verdicts come from the cache)
+    const again = mergedPayload(await request(live, root, { merged: "1" }));
+    expect(again.merged).toEqual(merged);
+    expect(gmCommands(live)).toHaveLength(3);
+
+    await until(() => auditRecords(live).length === 3, "three graph audits flushed");
+    const records = auditRecords(live);
+    expect(records[0]!["mergedReq"]).toBeUndefined();
+    expect(records[1]).toMatchObject({
+      ok: true,
+      mergedReq: 1,
+      mergedCand: 3,
+      mergedRun: 3,
+      mergedHit: 0,
+      mergedUnk: 0,
+      mergedSkip: 0,
+    });
+    expect(records[2]).toMatchObject({ ok: true, mergedReq: 1, mergedCand: 3, mergedRun: 0, mergedHit: 3 });
+    for (const r of records) {
+      expect(Object.keys(r).every((k) => (WTGRAPH_AUDIT_KEYS as readonly string[]).includes(k))).toBe(true);
+      const text = JSON.stringify(r);
+      for (const secret of ["pi-agent-eq", "pi-agent-part", head, eq1, part1]) expect(text).not.toContain(secret);
+    }
+    await until(() => repoFds(root).length === 0, "all pins closed after merged requests");
+  }, 90_000);
+
+  it("30 candidate branches ⇒ 24 entries + omitted 6 over the real wire; Gm runs only for the 24 selected", async () => {
+    const root = await repo();
+    await commit(root, "base");
+    for (let i = 0; i < 30; i++) {
+      git(root, ["checkout", "-qb", `b${String(i).padStart(2, "0")}`, "main"]);
+      await commit(root, `branch-${i}`);
+    }
+    git(root, ["checkout", "-q", "main"]);
+    await commit(root, "main-tip");
+    const live = await boot(root);
+    const graph = mergedPayload(await request(live, root, { merged: "1" }));
+    expect(graph.merged.branches).toHaveLength(WTGRAPH_MERGED_MAX);
+    expect(graph.merged.omitted).toBe(6);
+    expect(graph.merged.branches.every((b) => b.v === "none")).toBe(true);
+    expect(gmCommands(live)).toHaveLength(WTGRAPH_MERGED_MAX);
+    await until(() => auditRecords(live).length === 1, "audit flushed");
+    expect(auditRecords(live)[0]).toMatchObject({ mergedCand: 24, mergedOmitted: 6, mergedRun: 24 });
+    await until(() => repoFds(root).length === 0, "pins closed");
+  }, 90_000);
+
+  it("shallow clone ⇒ merged.skipped:'shallow' with base, and no Cc/Gm at all", async () => {
+    const root = await repo();
+    await commit(root, "base");
+    git(root, ["checkout", "-qb", "side"]);
+    await commit(root, "side1");
+    git(root, ["checkout", "-q", "main"]);
+    await commit(root, "main2");
+    const shallow = join(await tempDir(), "shallow");
+    git(root, ["clone", "-q", "--no-local", "--depth=1", "--no-single-branch", root, shallow]);
+    const live = await boot(shallow);
+    const graph = mergedPayload(await request(live, shallow, { merged: "1" }));
+    expect(graph.shallow).toBe(true);
+    expect(graph.merged).toEqual({ v: 1, base: graph.head!.h, skipped: "shallow", branches: [] });
+    expect(gmCommands(live)).toHaveLength(0);
+    expect(live.spy.commands.some((a) => a.includes("--get-regexp"))).toBe(false);
+  }, 60_000);
+
+  it("a missing blob in a partial clone ⇒ that branch is unk:missing-object, ssh marker=0, repository untouched", async () => {
+    const root = await repo();
+    await writeFile(join(root, "a.txt"), "base\n");
+    git(root, ["add", "a.txt"]);
+    git(root, ["commit", "-qm", "base"]);
+    git(root, ["checkout", "-qb", "pi-agent-m"]);
+    await writeFile(join(root, "a.txt"), "branch change\n");
+    git(root, ["commit", "-qam", "branch edit"]);
+    const blob = git(root, ["rev-parse", "pi-agent-m:a.txt"]).trim();
+    git(root, ["checkout", "-q", "main"]);
+    await writeFile(join(root, "a.txt"), "main change\n"); // same file on both sides ⇒ the full-blob path reads the branch blob
+    git(root, ["commit", "-qam", "main edit"]);
+    const scratch = await tempDir();
+    const marker = join(scratch, "ssh-marker");
+    const script = join(scratch, "ssh.sh");
+    await writeFile(script, `#!/bin/sh\nprintf 'x\\n' >> ${JSON.stringify(marker)}\nexit 1\n`, { mode: 0o755 });
+    for (const [key, value] of [
+      ["core.repositoryformatversion", "1"],
+      ["extensions.partialClone", "origin"],
+      ["remote.origin.promisor", "true"],
+      ["remote.origin.url", "ssh://example.invalid/x"],
+      ["remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+      ["core.sshCommand", script],
+    ])
+      git(root, ["config", key!, value!]);
+    // objects are still loose (no gc ran): physically delete the branch's blob
+    await rm(join(root, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
+    // CONTROL: the same symmetric difference WITHOUT --no-lazy-fetch really tries the transport,
+    // so marker=0 below is evidence of the hardening and not of a vacuous fixture
+    try {
+      git(root, ["rev-list", "--cherry-mark", "--right-only", "main...pi-agent-m", "--"]);
+    } catch {
+      /* the fetch fails by design */
+    }
+    expect(existsSync(marker)).toBe(true);
+    await rm(marker);
+    const before = readdirSync(join(root, ".git", "objects"), { recursive: true }).sort();
+    const live = await boot(root);
+    const graph = mergedPayload(await request(live, root, { merged: "1" }));
+    expect(graph.merged.branches).toEqual([
+      expect.objectContaining({ n: "pi-agent-m", v: "unk", why: "missing-object" }),
+    ]);
+    expect(existsSync(marker)).toBe(false);
+    expect(readdirSync(join(root, ".git", "objects"), { recursive: true }).sort()).toEqual(before); // nothing fetched/written
+    await until(() => repoFds(root).length === 0, "pins closed");
+  }, 90_000);
 });

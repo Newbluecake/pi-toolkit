@@ -23,7 +23,7 @@ import {
   createCacheKeepaliveService as createRealService,
   type CacheKeepaliveDeps,
   type CacheKeepaliveService,
-} from "../../src/service/cache-keepalive.js";
+} from "../../src/cache-ttl/keepalive-service.js";
 
 export function diagOf(overrides: Partial<PipelineDiag> = {}): PipelineDiag {
   return {

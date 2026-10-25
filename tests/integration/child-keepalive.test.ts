@@ -303,7 +303,7 @@ describe("child keepalive wiring (T-K6/T-K7): real ping, cost folded into the ch
       await emit("tool_execution_start", {}, ctx);
 
       // NOW simulate pi invalidating the extension ctx mid-flight (any property read throws
-      // from here on) — same shape `src/service/cache-keepalive.ts`'s `safeModel()` defends
+      // from here on) — same shape `src/cache-ttl/keepalive-service.ts`'s `safeModel()` defends
       // against (plan §2.4: "每个 tick 先读 ctx.mode，抛错 ⇒ dispose() 并 return，早于其它任何闸门").
       // Set AFTER the initial capture (not before) — a genuinely stale ctx only manifests once
       // the NEXT tick reads it, not retroactively on requests already captured.

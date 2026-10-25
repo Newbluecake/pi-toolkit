@@ -31,6 +31,10 @@ defineProps<{
   selected: boolean;
   active?: boolean;
   disabled?: boolean;
+  /** 2026-10 方案 A: render the provider as a small outlined mono chip in the badges area
+   *  (BEFORE ctx/R) — set only on FLAT lists; provider-grouped views already carry the name
+   *  in their sticky `.model-group` header and never duplicate it per row. */
+  providerBadge?: boolean;
 }>();
 const emit = defineEmits<{ pick: [] }>();
 </script>
@@ -49,6 +53,7 @@ const emit = defineEmits<{ pick: [] }>();
     <span class="row-id" translate="no">{{ item.id }}</span>
     <span v-if="item.name" class="row-name">{{ item.name }}</span>
     <span class="row-badges">
+      <span v-if="providerBadge === true" class="model-prov" translate="no">{{ item.provider }}</span>
       <span v-if="ctxBadge(item.ctx)" class="model-badge">{{ ctxBadge(item.ctx) }}</span>
       <span v-if="item.reasoning === true" class="model-badge model-badge-reasoning">R</span>
     </span>

@@ -16,7 +16,8 @@
  * 唯一偏差（行为等价、更可测，偏差记录见实施报告）。
  */
 
-import { backoffDelay, isRetryableError, redactSecrets, sleep } from "../web-search/resilience.js";
+import { redactSecrets } from "../core/redact.js";
+import { backoffDelay, isRetryableError, sleep } from "../web-search/resilience.js";
 import type { FetchJson } from "./types.js";
 
 /**

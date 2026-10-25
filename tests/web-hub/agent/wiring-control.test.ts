@@ -587,7 +587,7 @@ describe("wireWebHub — runtx wire plumbing (F2)", () => {
     await waitUntil(() => control.status().state === "live", 3_000, "live");
   }
 
-  it("terminal consult diagnostics reach the optional file-missing fallback over the real wire", async () => {
+  it("terminal diag carrying legacy consult fields no longer produces a consultFallback", async () => {
     const query = fakeQuery({
       get: () => ({
         status: "completed",
@@ -604,14 +604,9 @@ describe("wireWebHub — runtx wire plumbing (F2)", () => {
     await connectRuntx(query);
     hub!.send(hub!.conns[0]!, { t: "run_tx_req", rid: "consult-q", runId: RUN, limit: 50, maxBytes: 1 << 20 });
     await waitUntil(() => hub!.all().some((f) => f.t === "run_tx_reply"));
-    expect(hub!.all().find((f) => f.t === "run_tx_reply")).toMatchObject({
-      ok: true,
-      source: "file",
-      consultFallback: [
-        { message: { role: "user", content: "Why?", consultSummary: true } },
-        { message: { role: "assistant", content: "Because.", consultSummary: true } },
-      ],
-    });
+    const reply = hub!.all().find((f) => f.t === "run_tx_reply")!;
+    expect(reply).toMatchObject({ ok: true, source: "file" });
+    expect("consultFallback" in reply).toBe(false);
   });
 
   it("terminal run ⇒ deterministic source:file reply (sessionFile + finalLeafId)", async () => {

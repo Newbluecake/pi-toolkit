@@ -745,6 +745,14 @@ export type TickSkipReason =
    * an observed `cacheRead > 0` (`ProviderEvidenceStore.noteCacheRead`).
    */
   | "no-cache-value"
+  /**
+   * traffic-merge plan §7.3 (T5): traffic 录制的改写规则上膛（rewriteArmed），或该 capture 之后本会话已被
+   * traffic 实际改写（lastRewrittenAt ≥ capturedAt）——重放旧前缀只会产生无意义费用。Decided in the
+   * service layer (`cache-keepalive.ts`'s `onTick`, via the late-bound `src/traffic/keepalive-port.ts` port —
+   * absent port ⇒ never produced, byte-identical). Non-terminal, no breaker, no counter movement: re-arms at the
+   * normal tick; heals once rules are off AND a newer, un-rewritten real request produces a fresh capture.
+   */
+  | "traffic-rewrite"
   | "not-due";
 
 export type InvalidateReason =
@@ -2063,6 +2071,9 @@ export function pingSegmentParts(report: KeepaliveReport | undefined): PingSegme
       return { text: "ping off:no-usage", state: "line-off" };
     }
   }
+  // traffic-merge §7.3 (T5): a live traffic-rewrite veto (window kept, ping skipped each tick). Window-level
+  // stop, never a session breaker — `"paused"` like every other "this window isn't pinging right now" state.
+  if (report.lastSkip === "traffic-rewrite") return { text: "ping off:traffic-rewrite", state: "paused" };
   if (window.capture !== undefined && window.pings > 0 && window.pings >= config.maxPings)
     return { text: `ping ${window.pings}/${config.maxPings} capped`, state: "capped" };
   // "miss", not "paused" (2026-10-16 rename): a window-level stop is NOT a session pause —

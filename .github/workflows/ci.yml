@@ -58,3 +58,9 @@ jobs:
 
       - name: Build web UI on the minimum Node
         run: npm run build:web && npm run check:web
+
+      # traffic recording needs node:sqlite — unflagged only from 22.13 on. Prove the floor still
+      # loads it (the script self-re-execs with --experimental-sqlite on 22.5-22.12).
+      # traffic-merge plan r3 §3.1/§8.4. No npm deps needed (pure node builtins), <1s.
+      - name: Traffic node:sqlite smoke on the minimum Node
+        run: node scripts/traffic/node-floor-smoke.mjs

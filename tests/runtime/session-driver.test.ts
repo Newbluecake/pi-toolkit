@@ -6,7 +6,6 @@ import {
   CHILD_SWITCH_REJECTED_CUSTOM_TYPE,
   CHILD_SWITCH_SELFCHECK_CUSTOM_TYPE,
   computeChildExtensionMissing,
-  isConsultForkSpec,
   mapContextUsage,
   mapEvent,
   PiSessionDriver,
@@ -142,8 +141,8 @@ describe("session-driver context usage mapping", () => {
   });
 });
 
-describe("session-driver mapEvent: consult tool_end classification (consult A/B plan §5 P1b)", () => {
-  it("attaches a consult fact only when toolName is consult; other tools keep the plain tool_end shape", () => {
+describe("session-driver mapEvent: tool_end shape", () => {
+  it("tool_end carries only id/name/isError", () => {
     const other = mapEvent({
       type: "tool_execution_end",
       toolCallId: "tc1",
@@ -154,66 +153,15 @@ describe("session-driver mapEvent: consult tool_end classification (consult A/B 
     expect(other).toEqual({ t: "tool_end", toolCallId: "tc1", toolName: "read", isError: false });
   });
 
-  it("classifies a successful consult tool_end from details.outcome", () => {
+  it("a tool named consult is no longer classified: plain tool_end shape (#40)", () => {
     const ev = mapEvent({
       type: "tool_execution_end",
       toolCallId: "tc2",
       toolName: "consult",
       isError: false,
-      result: {
-        content: [{ type: "text", text: "answer" }],
-        details: { outcome: "completed", expertRunId: "r_EXPERT1", costUsd: 0.02, truncated: true },
-      },
+      result: { content: [{ type: "text", text: "x" }], details: { outcome: "completed" } },
     });
-    expect(ev).toMatchObject({
-      t: "tool_end",
-      toolName: "consult",
-      isError: false,
-      consult: { result: "completed", expertRunId: "r_EXPERT1", costUsd: 0.02, truncated: true },
-    });
-  });
-
-  it("classifies pi's throw shape (isError + content[0].text=message + details:{}) — whitelist mark ⇒ bad_ref, other throws ⇒ invalid", () => {
-    const badRef = mapEvent({
-      type: "tool_execution_end",
-      toolCallId: "tc3",
-      toolName: "consult",
-      isError: true,
-      // pi-agent-core agent-loop.js:634: a thrown tool error arrives as
-      // isError + content[0].text = message + details:{}.
-      result: {
-        content: [
-          {
-            type: "text",
-            text:
-              'consult: expert "stranger" is not in this run\'s expert whitelist (allowed: explorer (r_EXPERT1)). ' +
-              "Ask your dispatcher to add it, or answer from your own context.",
-          },
-        ],
-        details: {},
-      },
-    });
-    expect(badRef).toMatchObject({ isError: true, consult: { result: "bad_ref" } });
-
-    const invalid = mapEvent({
-      type: "tool_execution_end",
-      toolCallId: "tc4",
-      toolName: "consult",
-      isError: true,
-      result: { content: [{ type: "text", text: "consult: question must not be empty." }], details: {} },
-    });
-    expect(invalid).toMatchObject({ isError: true, consult: { result: "invalid" } });
-  });
-
-  it("maps a non-error consult tool_end without a known details.outcome to unknown (defensive)", () => {
-    const ev = mapEvent({
-      type: "tool_execution_end",
-      toolCallId: "tc5",
-      toolName: "consult",
-      isError: false,
-      result: { content: [{ type: "text", text: "…" }], details: { outcome: "brand_new_outcome_v2" } },
-    });
-    expect(ev).toMatchObject({ consult: { result: "unknown" } });
+    expect(ev).toEqual({ t: "tool_end", toolCallId: "tc2", toolName: "consult", isError: false });
   });
 });
 
@@ -551,35 +499,19 @@ describe("PiSessionHandle.getSwitchTail (§2.3.1 v3.1 runner settlement fallback
  * todo #27 (child-extension-missing diagnostic): pure decision-logic coverage for
  * create()/resume()'s detection, isolated from createAgentSession/pi's real SDK (which needs
  * model/auth resolution real tests here don't want to depend on) — see session-driver.ts's
- * own doc comments on `isConsultForkSpec`/`computeChildExtensionMissing` for why they are
- * factored out as standalone pure functions.
+ * own doc comment on `computeChildExtensionMissing` for why it is
+ * factored out as a standalone pure function.
  */
-describe("todo #27: isConsultForkSpec", () => {
-  it("true when spec.forkSessionFrom is a non-empty string", () => {
-    expect(isConsultForkSpec({ forkSessionFrom: "/tmp/fork.jsonl" } as never)).toBe(true);
-  });
-  it("false when forkSessionFrom is absent, or present but not a string", () => {
-    expect(isConsultForkSpec({})).toBe(false);
-    expect(isConsultForkSpec({ resumeFrom: "/tmp/x.jsonl" })).toBe(false);
-    expect(isConsultForkSpec({ forkSessionFrom: 123 } as never)).toBe(false);
-  });
-});
-
 describe("todo #27: computeChildExtensionMissing", () => {
-  it("true when the activation counter never advanced since the snapshot and this is not a consult fork", () => {
+  it("true when the activation counter never advanced since the snapshot", () => {
     const before = childActivationSnapshot();
-    expect(computeChildExtensionMissing(before, false)).toBe(true);
+    expect(computeChildExtensionMissing(before)).toBe(true);
   });
 
   it("false once the activation counter has advanced since the snapshot", () => {
     const before = childActivationSnapshot();
     markChildExtensionActivated();
-    expect(computeChildExtensionMissing(before, false)).toBe(false);
-  });
-
-  it("false for a consult fork even when the counter never advanced (consult exemption)", () => {
-    const before = childActivationSnapshot();
-    expect(computeChildExtensionMissing(before, true)).toBe(false);
+    expect(computeChildExtensionMissing(before)).toBe(false);
   });
 });
 

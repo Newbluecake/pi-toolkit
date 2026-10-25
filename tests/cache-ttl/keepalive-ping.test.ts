@@ -3,10 +3,10 @@ import {
   buildPingRequest,
   networkErrorDescriptor,
   preparePingPayload,
-  redactSecrets,
   sendKeepalivePing,
   type PingRequest,
 } from "../../src/cache-ttl/ping-client.js";
+import { redactSecrets } from "../../src/core/redact.js";
 
 const encoder = new TextEncoder();
 

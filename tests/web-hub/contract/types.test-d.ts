@@ -221,6 +221,7 @@ describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
       | "dialog_cancel"
       | "command"
       | "recall" // steer-recall plan §2.3 S2 (hold.v1)
+      | "archive" // web-hub archive plan (docs/dev/web-hub/archive-report.md)
     >();
   });
 
@@ -755,9 +756,9 @@ describe("types.test-d.ts (worktree-graph plan v2 §4.4 P4 transport surface)", 
     expectTypeOf<GraphValue>().toEqualTypeOf<WtGraphPayload>();
   });
 
-  it("request shape: the shared WtDiffScope plus wt; opts optional and carries only signal", () => {
+  it("request shape: the shared WtDiffScope plus wt (+ merged-plan r3 §7.1's opt-in merged flag); opts optional and carries only signal", () => {
     expectTypeOf<Parameters<WorktreeGraphTransport["graph"]>[0]>().toEqualTypeOf<
-      WtDiffScope & { readonly wt: string }
+      WtDiffScope & { readonly wt: string; readonly merged?: true }
     >();
     expectTypeOf<Parameters<WorktreeGraphTransport["graph"]>[1]>().toEqualTypeOf<
       { readonly signal?: AbortSignal } | undefined

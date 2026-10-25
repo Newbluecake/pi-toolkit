@@ -4,7 +4,7 @@ import {
   type CacheKeepaliveDeps,
   type CacheKeepaliveService,
   UI_PROMPT_KEEPALIVE_MAX_MS,
-} from "../../src/service/cache-keepalive.js";
+} from "../../src/cache-ttl/keepalive-service.js";
 import { createCacheKeepaliveService, diagOf, fakeSender } from "./fake-pipeline.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";
 import {

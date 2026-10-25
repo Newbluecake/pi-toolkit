@@ -413,6 +413,3 @@ export function createLoadTracker(
 export function levelRank(level: LoadLevel): number {
   return rank(level);
 }
-
-/** Short alias used by pi-free callers and tests. */
-export const createTracker = createLoadTracker;

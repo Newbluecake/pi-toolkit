@@ -26,13 +26,18 @@
  *   re-pull. Opaque — only equality of two signatures across samples ever matters.
  */
 
-import { PREVIEW_LAN_HUB_CAP, WTGRAPH_HUB_CAP } from "@protocol/version.js";
+import { PREVIEW_LAN_HUB_CAP, WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP } from "@protocol/version.js";
 import type { WorktreeRowWire } from "@protocol/messages.js";
 
 /** The §4.6-shaped request scope (same shape as wtdiff's; `wt` joins at request time). */
 export interface GraphScope {
   agentKey: string;
   sessionId: string;
+  /** merged-plan §6/§7.1 (P4): the hub declared `wtgraph.merged.v1` (under the SAME conditions
+   *  as `wtgraph.v1`, §5.1 — loopback-mode hubs and LAN-without-preview.lan.v1 never carry it,
+   *  so this file needs no extra gate). `true` ⇒ the graph request rides `&merged=1` with the
+   *  48 s deadline; `false` ⇒ the baseline request, byte-identical to before. */
+  merged: boolean;
 }
 
 /** Defensive input of `wtgraphScopeOf` — every field arrives from untrusted UI state. */
@@ -60,7 +65,7 @@ export function wtgraphScopeOf(p?: GraphScopeInput | null): GraphScope | null {
   if (session === null || typeof session !== "object") return null;
   const s = session as { sessionId?: unknown };
   if (typeof s.sessionId !== "string" || s.sessionId === "") return null;
-  return { agentKey, sessionId: s.sessionId };
+  return { agentKey, sessionId: s.sessionId, merged: caps.includes(WTGRAPH_MERGED_HUB_CAP) };
 }
 
 /**

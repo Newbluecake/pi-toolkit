@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { cacheDiagnostics, cacheProbe, consultMeta } from "./consult-cache-fixtures.js";
 import {
   interruptedFromJournal,
   JOURNAL_TASK_PROMPT_CAP,
@@ -7,8 +6,20 @@ import {
   restartInterruptedMessage,
 } from "../../src/core/run-journal.js";
 import { createInitialState } from "../../src/core/state-machine.js";
-import { EXPERTS_REFS_CAP } from "../../src/core/types.js";
 import type { RunDiagnostics, RunSnapshot, RunState } from "../../src/core/types.js";
+
+/**
+ * Retired consult diag fields (#40): no longer typed or whitelisted, but run entries written before the removal can
+ * still carry them. richState() injects them so the journal projection is proven to drop them.
+ */
+const LEGACY_CONSULT_DIAG = {
+  experts: { refs: [{ runId: "r_e1", label: "plan", agentType: "architect" }], granted: true },
+  consultOf: { askerRunId: "r_asker" },
+  consultCache: { v: 1, predicted: { state: "warm" } },
+  consultThread: { threadId: "c7k9q2mx", seq: 2 },
+  consultIdentityPrediction: { system: true },
+  consults: { calls: 2, byResult: { completed: 1, bad_ref: 1 }, costUsd: 0.05 },
+} as const;
 
 /** A live (non-terminal) state whose diag carries EVERY field — retained and dropped alike. */
 function richState(over: Partial<RunDiagnostics> = {}): RunState {
@@ -67,27 +78,11 @@ function richState(over: Partial<RunDiagnostics> = {}): RunState {
     compactionFailures: [],
     lastCompactionOkAt: 1_039,
     childExtensionMissing: true,
-    experts: { refs: [{ runId: "r_e1", label: "plan", agentType: "architect" }], granted: true },
-    dispatchMeta: { lane: "L2", packageId: "pkg-1", feature: "auth", abArm: "experts" },
+    dispatchMeta: { lane: "L2", packageId: "pkg-1", feature: "auth" },
     schemaPreset: "verdict/v1",
-    consultOf: { askerRunId: "r_asker" as NonNullable<NonNullable<RunDiagnostics["consultOf"]>["askerRunId"]> },
-    consultCache: cacheDiagnostics(),
-    consultThread: consultMeta().consultThread!,
-    consults: {
-      calls: 2,
-      byResult: { completed: 1, bad_ref: 1 },
-      truncated: 1,
-      partial: 0,
-      costUsd: 0.05,
-      unpricedCalls: 0,
-      latencyMs: 500,
-      maxLatencyMs: 300,
-      latencyUnknown: 1,
-      byExpert: { r_e1: 2 },
-      cacheProbes: [cacheProbe()],
-    },
+    ...LEGACY_CONSULT_DIAG,
     ...over,
-  };
+  } as RunDiagnostics;
   return { ...base, status: "running", phase: "model_turn", diag };
 }
 
@@ -124,13 +119,8 @@ const RETAINED = [
   "staleInputs",
   "sessionFile",
   "childExtensionMissing",
-  "experts",
   "dispatchMeta",
   "schemaPreset",
-  "consultOf",
-  "consultCache",
-  "consultThread",
-  "consults",
   "escalation",
   "degraded",
   "unkillable",
@@ -204,19 +194,10 @@ describe("journalSnapshotFromState (run-persistence plan D3)", () => {
     expect(short.diag.taskPrompt).toBe("do it");
   });
 
-  it("stays under the 10 KiB size budget with every retained field (incl. experts/dispatchMeta/schemaPreset/consults) at its upper bound", () => {
+  it("stays under the 10 KiB size budget with every retained field (incl. dispatchMeta/schemaPreset) at its upper bound", () => {
     // 1024 CJK chars (3 UTF-8 bytes each) is the worst-case prompt; the other
     // variable-length retained fields get generous upper-bound values.
     const tools = Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`tool_name_number_${i}`, 99_999]));
-    const experts = {
-      refs: Array.from({ length: 16 }, (_, i) => ({
-        runId: `r_${"e".repeat(40)}${i}`,
-        label: "l".repeat(32),
-        agentType: "a".repeat(32),
-      })),
-      granted: true,
-    };
-    const byExpert = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`r_${"e".repeat(40)}${i}`, 999]));
     const state = richState({
       taskPrompt: "测".repeat(4096),
       label: "l".repeat(64),
@@ -242,21 +223,8 @@ describe("journalSnapshotFromState (run-persistence plan D3)", () => {
       },
       worktree: { state: "kept", branch: `pi-agent-${"b".repeat(40)}`, path: `/tmp/${"w".repeat(120)}` },
       error: undefined,
-      experts,
-      dispatchMeta: { lane: "L3", packageId: "p".repeat(64), feature: "f".repeat(64), abArm: "control" },
+      dispatchMeta: { lane: "L3", packageId: "p".repeat(64), feature: "f".repeat(64) },
       schemaPreset: "verdict/v1",
-      consults: {
-        calls: 999,
-        byResult: { completed: 500, bad_ref: 100, invalid: 50, unknown: 50, failed: 100, timeout: 99, aborted: 100 },
-        truncated: 99,
-        partial: 99,
-        costUsd: 999.123456,
-        unpricedCalls: 99,
-        latencyMs: 999_999,
-        maxLatencyMs: 99_999,
-        latencyUnknown: 99,
-        byExpert,
-      },
     } as Partial<RunDiagnostics>);
     const snap = journalSnapshotFromState(state, 1_759_000_000_000, {
       kind: "shutdown_flush",
@@ -264,27 +232,29 @@ describe("journalSnapshotFromState (run-persistence plan D3)", () => {
     });
     const bytes = Buffer.byteLength(JSON.stringify(snap), "utf8");
     expect(bytes).toBeGreaterThan(3 * 1024); // the CJK prompt alone is 3 KiB — the fixture really is large
-    // consult A/B instrumentation plan (§2): adding experts (cap 16 refs) /
-    // dispatchMeta / schemaPreset / consults (cap 16 byExpert keys) pushed the
-    // realistic worst case past the pre-existing 6 KiB line; 10 KiB keeps the
-    // same "persist_snapshot stays cheap" intent with headroom for the new caps.
+    // dispatchMeta / schemaPreset keep the realistic worst case inside the 10 KiB "persist_snapshot stays cheap" budget.
     expect(bytes).toBeLessThan(10 * 1024);
   });
 });
 
-describe("journalSnapshotFromState: consult A/B instrumentation fields (plan §5 P1a, review §8 #1)", () => {
-  it("projects experts/dispatchMeta/schemaPreset/consults verbatim when present", () => {
+describe("journalSnapshotFromState: dispatchMeta / schemaPreset / legacy consult fields (#40)", () => {
+  it("projects dispatchMeta/schemaPreset verbatim when present", () => {
     const state = richState();
     const snap = journalSnapshotFromState(state, 2_000, { kind: "session_created" });
-    expect(snap.diag.experts).toEqual(state.diag.experts);
     expect(snap.diag.dispatchMeta).toEqual(state.diag.dispatchMeta);
     expect(snap.diag.schemaPreset).toBe("verdict/v1");
-    expect(snap.diag.consults).toEqual(state.diag.consults);
-    expect(snap.diag.consultCache).toEqual(state.diag.consultCache);
-    expect(snap.diag.consultThread).toEqual(state.diag.consultThread);
     // M-B2 (thinking-level visibility): same verbatim passthrough as `model` —
     // the level survives the journal so a restart/reload keeps rendering it.
     expect(snap.diag.thinkingLevel).toBe("high");
+  });
+
+  it("drops every retired consult diag field a pre-removal entry can still carry", () => {
+    const state = richState();
+    for (const key of Object.keys(LEGACY_CONSULT_DIAG)) expect(state.diag).toHaveProperty(key); // the fixture really carries them
+    const snap = journalSnapshotFromState(state, 2_000, { kind: "session_created" });
+    for (const key of Object.keys(LEGACY_CONSULT_DIAG)) expect(snap.diag).not.toHaveProperty(key);
+    expect(JSON.stringify(snap)).not.toContain("consult");
+    expect(JSON.stringify(interruptedFromJournal(snap))).not.toContain("consult");
   });
 
   it("M-B2: drops thinkingLevel when the live diag never set it (old-run shape, no backfill)", () => {
@@ -295,46 +265,19 @@ describe("journalSnapshotFromState: consult A/B instrumentation fields (plan §5
   });
 
   it("drops each field (no key at all) when the live diag never set it", () => {
-    const bare = richState({
-      experts: undefined,
-      dispatchMeta: undefined,
-      schemaPreset: undefined,
-      consults: undefined,
-      consultCache: undefined,
-      consultThread: undefined,
-    });
+    const bare = richState({ dispatchMeta: undefined, schemaPreset: undefined });
     const snap = journalSnapshotFromState(bare, 2_000, { kind: "session_created" });
-    expect(snap.diag).not.toHaveProperty("experts");
     expect(snap.diag).not.toHaveProperty("dispatchMeta");
     expect(snap.diag).not.toHaveProperty("schemaPreset");
-    expect(snap.diag).not.toHaveProperty("consults");
-    expect(snap.diag).not.toHaveProperty("consultCache");
-    expect(snap.diag).not.toHaveProperty("consultThread");
   });
 
-  it("interruptedFromJournal carries dispatchMeta (and the other three) through to the seeded terminal snapshot — a resume from it can inherit dispatchMeta", () => {
+  it("interruptedFromJournal carries dispatchMeta/schemaPreset through to the seeded terminal snapshot — a resume from it can inherit dispatchMeta", () => {
     const snap = journalSnapshotFromState(richState(), 2_000, { kind: "session_created" });
     const out = interruptedFromJournal(snap);
-    expect(out.diag.dispatchMeta).toEqual({ lane: "L2", packageId: "pkg-1", feature: "auth", abArm: "experts" });
-    expect(out.diag.experts).toEqual(snap.diag.experts);
+    expect(out.diag.dispatchMeta).toEqual({ lane: "L2", packageId: "pkg-1", feature: "auth" });
     expect(out.diag.schemaPreset).toBe("verdict/v1");
-    expect(out.diag.consults).toEqual(snap.diag.consults);
-    expect(out.diag.consultCache).toEqual(snap.diag.consultCache);
-    expect(out.diag.consultThread).toEqual(snap.diag.consultThread);
     // Also reachable through outcome.diag — the surface a resume's D3 inheritance reads.
     expect(out.outcome!.diag.dispatchMeta).toEqual(out.diag.dispatchMeta);
-  });
-
-  it("caps experts.refs at EXPERTS_REFS_CAP defensively, independent of whatever the live diag already carried (review §8 ⚠️ item)", () => {
-    const refs = Array.from({ length: EXPERTS_REFS_CAP + 1 }, (_, i) => ({ runId: `r_e${i}`, agentType: "architect" }));
-    const state = richState({ experts: { refs, granted: true } });
-    const snap = journalSnapshotFromState(state, 2_000, { kind: "session_created" });
-    expect(snap.diag.experts?.refs).toHaveLength(EXPERTS_REFS_CAP);
-    expect(snap.diag.experts?.refs[0]!.runId).toBe("r_e0");
-    expect(snap.diag.experts?.granted).toBe(true);
-    // Carried through interruptedFromJournal too — still capped, never re-expanded.
-    const out = interruptedFromJournal(snap);
-    expect(out.diag.experts?.refs).toHaveLength(EXPERTS_REFS_CAP);
   });
 });
 

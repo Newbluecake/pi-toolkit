@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as cacheTtl from "../../src/cache-ttl/cache-ttl.js";
 import { compareFingerprint } from "../../src/cache-ttl/keepalive-state.js";
-import type { KeepalivePort } from "../../src/service/cache-keepalive.js";
+import type { KeepalivePort } from "../../src/cache-ttl/keepalive-service.js";
 
 function fakePort(instanceId = "inst-1"): KeepalivePort {
   return {

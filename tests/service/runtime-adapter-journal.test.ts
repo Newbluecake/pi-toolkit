@@ -159,18 +159,15 @@ describe("runtime adapter journal wiring (run-persistence plan D2/D5/D10)", () =
     await p;
   });
 
-  it("consult forks and toolDomain:'readonly' runs never journal, not even on flush (D10)", async () => {
+  it("toolDomain:'readonly' runs never journal, not even on flush (D10)", async () => {
     const h = harness();
-    const fork = h.runner.run(spec("r_fork", { forkSessionFrom: "/tmp/fork-copy.jsonl" }));
-    await settle(h.clock);
     const tidy = h.runner.run(spec("r_tidy", { toolDomain: "readonly" }));
     await settle(h.clock);
     expect(h.journal).toEqual([]);
-    expect(h.runner.flushJournal!(["r_fork", "r_tidy"], { kind: "shutdown_flush", shutdownReason: "reload" })).toBe(0);
+    expect(h.runner.flushJournal!(["r_tidy"], { kind: "shutdown_flush", shutdownReason: "reload" })).toBe(0);
     expect(h.journal).toEqual([]);
-    h.finish("r_fork");
     h.finish("r_tidy");
-    await Promise.all([fork, tidy]);
+    await tidy;
   });
 
   it("flushJournal writes one shutdown_flush entry per live run, at most once, with live usage", async () => {

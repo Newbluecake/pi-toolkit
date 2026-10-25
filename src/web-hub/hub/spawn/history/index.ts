@@ -530,9 +530,4 @@ export async function pageHistory(
   }
 }
 
-export function parseCursor(raw: string | undefined): { genId: string; pos: number } | undefined | null {
-  if (raw === undefined) return undefined;
-  return decodeHistoryCursor(raw);
-}
-
 export type { HistoryKind };

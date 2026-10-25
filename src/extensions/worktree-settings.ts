@@ -19,16 +19,3 @@ export const DEFAULT_WORKTREE_SETTINGS: WorktreeSettings = {
   gitTimeoutMs: 30_000,
   linkPaths: [],
 };
-
-export function mergeWorktreeSettings(value: unknown): WorktreeSettings {
-  if (value === null || typeof value !== "object") return { ...DEFAULT_WORKTREE_SETTINGS };
-  const input = value as Record<string, unknown>;
-  return {
-    enabled: input.enabled === true,
-    gitTimeoutMs:
-      typeof input.gitTimeoutMs === "number" && Number.isFinite(input.gitTimeoutMs)
-        ? Math.max(1, input.gitTimeoutMs)
-        : DEFAULT_WORKTREE_SETTINGS.gitTimeoutMs,
-    linkPaths: dedupeLinkPaths(input.linkPaths),
-  };
-}

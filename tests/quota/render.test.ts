@@ -263,7 +263,11 @@ describe("buildQuotaMessage", () => {
   });
 
   it("merges same-pool providers (zai-coding-cn / zai) into one L2/L3 block", () => {
-    const pool = [w("5h", 20, 0, "none"), w("week", 28, 2, "forecast-before-reset", { resetAt: RESET })];
+    // eta 6h（≤ 12h）⇒ 非 3b 软化（仍「预警」）；软化合并见下方专项断言。
+    const pool = [
+      w("5h", 20, 0, "none"),
+      w("week", 28, 2, "forecast-before-reset", { resetAt: RESET, etaMs: 6 * 3_600_000 }),
+    ];
     const cn = verdict({ provider: "zai-coding-cn", level: 2, windows: pool });
     const intl = verdict({ provider: "zai", level: 2, windows: pool });
     const warn = buildQuotaMessage(
@@ -275,6 +279,18 @@ describe("buildQuotaMessage", () => {
     );
     expect(blocks(warn)).toHaveLength(1);
     expect(warn).toContain("[quota 预警] zai-coding-cn / zai 7d 已用 28%");
+
+    // 3b 软化（2026-10-23）：同池合并不变，只是前缀/正文换成「提示」。
+    const softPool = [w("5h", 20, 0, "none"), w("week", 28, 2, "forecast-before-reset", { resetAt: RESET })];
+    const soft = buildQuotaMessage(
+      [
+        { verdict: verdict({ provider: "zai-coding-cn", level: 2, windows: softPool }), alternatives: [] },
+        { verdict: verdict({ provider: "zai", level: 2, windows: softPool }), alternatives: [] },
+      ],
+      NOW,
+    );
+    expect(blocks(soft)).toHaveLength(1);
+    expect(soft).toContain("[quota 提示] zai-coding-cn / zai 7d 已用 28%");
 
     // L3：合并后替代链剔除同池成员（同池的另一个名字不是替代）。
     const hot = [w("5h", 93, 3, "pct", { resetAt: RESET })];
@@ -1193,7 +1209,7 @@ describe("alternativesAdvice — external × 逐池清单 + 对称推荐（2026-
 
 describe("alternativesAdvice — droid pool supplement for blocked pi providers (2026-10-15 拍板)", () => {
   const DROID_LINE =
-    "有余量的外部 Droid 池也可用：droid/glm-5.3、droid/kimi-k3（Core 池）；droid/claude-opus-5-5（Standard 池）。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。";
+    "有余量的外部 Droid 池也可用：droid/glm-5.3、droid/kimi-k3（Core 池）；droid/claude-opus-5-5（Standard 池）。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当验收。";
   const POOLS = [
     { pool: "core" as const, models: ["droid/glm-5.3", "droid/kimi-k3"] },
     { pool: "standard" as const, models: ["droid/claude-opus-5-5"] },
@@ -1218,7 +1234,7 @@ describe("alternativesAdvice — droid pool supplement for blocked pi providers 
     expect(text).toBe(
       [
         "暂无 pi provider 替代候选（可检查 pi /model）。",
-        "有余量的外部 Droid 池也可用：droid/glm-5.3（Core 池）。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。",
+        "有余量的外部 Droid 池也可用：droid/glm-5.3（Core 池）。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当验收。",
         "按任务需求选；不胜任就按路由表另选合适模型，不必硬凑。",
       ].join("\n"),
     );

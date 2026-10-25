@@ -1,6 +1,6 @@
 /**
  * child-ka-core (docs/dev/child-context-switch/plan.md §2.4/§7 P1) — service-level
- * (`src/service/cache-keepalive.ts`) tests for the parts that need a real ledger,
+ * (`src/cache-ttl/keepalive-service.ts`) tests for the parts that need a real ledger,
  * real retry/backoff timing, or real cost accounting: T-K3b (lease/retry/timeout
  * interleaving across two service instances sharing one ledger), T-K4 (audit cost
  * fields, gated by `reportCost`), T-K9 (worst-case budget behavior).
@@ -16,7 +16,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
-import { type CacheKeepaliveDeps } from "../../src/service/cache-keepalive.js";
+import { type CacheKeepaliveDeps } from "../../src/cache-ttl/keepalive-service.js";
 import { createCacheKeepaliveService, diagOf } from "./fake-pipeline.js";
 import type { SendPipelinePing } from "../../src/cache-ttl/pipeline-ping-types.js";
 import { createChildKeepaliveLedger, type ChildKeepaliveLedger } from "../../src/cache-ttl/ping-ledger.js";

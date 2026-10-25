@@ -613,7 +613,7 @@ describe("settings ⇄ protocol parity (settings.ts cannot import protocol/feish
 });
 
 describe("LAN security P0 Feishu wire compatibility", () => {
-  const { enabled: _enabled, securityAlerts: _securityAlerts, ...legacy } = FEISHU_BOT_DEFAULTS;
+  const { enabled: _enabled, securityAlerts: _securityAlerts, xsMirror: _xsMirror, ...legacy } = FEISHU_BOT_DEFAULTS;
   it("omits absent securityAlerts (means false), validates explicit booleans", () => {
     expect(normalizeFeishuBotHubConfig(legacy)).toEqual(legacy);
     expect(normalizeFeishuBotHubConfig({ ...legacy, securityAlerts: false })).toEqual({
@@ -625,5 +625,18 @@ describe("LAN security P0 Feishu wire compatibility", () => {
       securityAlerts: true,
     });
     expect(normalizeFeishuBotHubConfig({ ...legacy, securityAlerts: "true" })).toBeUndefined();
+  });
+});
+
+describe("feishu-xs-mirror wire leaf", () => {
+  const { enabled: _enabled, securityAlerts: _sa, xsMirror: _xm, ...legacy } = FEISHU_BOT_DEFAULTS;
+  it("defaults mirror the settings default; absent stays absent (fail closed); validates booleans; ignores unknown keys", () => {
+    expect(FEISHU_BOT_DEFAULTS.xsMirror).toBe(true);
+    expect(DEFAULT_FEISHU_BOT_SETTINGS.xsMirror).toBe(FEISHU_BOT_DEFAULTS.xsMirror);
+    expect(normalizeFeishuBotHubConfig(legacy)).not.toHaveProperty("xsMirror");
+    expect(normalizeFeishuBotHubConfig({ ...legacy, xsMirror: false })).toEqual({ ...legacy, xsMirror: false });
+    expect(normalizeFeishuBotHubConfig({ ...legacy, xsMirror: true })).toEqual({ ...legacy, xsMirror: true });
+    expect(normalizeFeishuBotHubConfig({ ...legacy, xsMirror: 1 })).toBeUndefined();
+    expect(normalizeFeishuBotHubConfig({ ...legacy, futureKey: 1 })).toEqual(legacy);
   });
 });

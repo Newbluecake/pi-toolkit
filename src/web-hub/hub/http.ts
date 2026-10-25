@@ -127,6 +127,8 @@ import { errCode, isPvLogUrl, redactLogUrl } from "./preview/pv-path.js";
 import { PREVIEW_AUTH_RESERVE_MS } from "./preview/routes.js";
 import { WTDIFF_AUTH_RESERVE_MS } from "./worktree-diff/routes.js";
 import { WTDIFF_FILES_PATH, WTDIFF_FILE_PATH } from "../protocol/worktree-diff.js";
+import { SCHED_API_PATH, SCHED_SESSION_ID_RE, type SchedulesPayloadWire } from "../protocol/schedule.js";
+import type { ScheduleCoordinator } from "./schedule/service.js";
 import { WTGRAPH_PATH } from "../protocol/worktree-graph.js";
 import {
   createHubLoad,
@@ -178,6 +180,7 @@ import {
   BODY_RESERVE_MS,
   computeAgentBudgets,
   createReqDeadline,
+  deadlineRace,
   deriveBudget,
   FORWARD_MIN_REMAINING_MS,
   LAN_AUTH_CAP_MS,
@@ -354,20 +357,7 @@ function statusFor(code: string): number {
 }
 
 function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(Object.assign(new Error("E_DEADLINE"), { code: "E_DEADLINE" })), ms);
-    timer.unref?.();
-    p.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      (e: unknown) => {
-        clearTimeout(timer);
-        reject(e);
-      },
-    );
-  });
+  return deadlineRace(p, ms, () => Object.assign(new Error("E_DEADLINE"), { code: "E_DEADLINE" }));
 }
 
 /**
@@ -759,6 +749,9 @@ interface RouteSet {
   pending: Map<string, Map<string, PendingSub>>;
   fleetCache: Map<string, FleetRowWire[]>;
   onHubEvent(e: HubEvent): void;
+  /** scheduled-reports H1 (§5.6): direct-send the schedule projection to every client of THIS
+   *  listener (no `id:`, never the replay ring — the connect burst carries the snapshot). */
+  onSchedules(payload: SchedulesPayloadWire): void;
   subscribe(body: unknown, res: ServerResponse): void;
   unsubscribe(body: unknown, res: ServerResponse): void;
   openEvents(req: IncomingMessage, res: ServerResponse, auth?: SseClient["auth"]): SseClient;
@@ -803,6 +796,11 @@ function createRouteSet(
      * direct-sends every change (never the replay ring, never an `id:`). Absent ⇒ no `privacy`
      * frame is ever sent, byte-identical to not-enabled. */
     privacy?: () => readonly string[];
+    /** scheduled-reports H1 (§5.6): this listener's schedule-projection snapshot — sent in the
+     * connect burst right AFTER `load`, and live-pushed via `RouteSet.onSchedules` (fingerprint
+     * gated by the coordinator itself). Absent (config.schedule off ⇒ no coordinator) ⇒ no
+     * `schedules` frame is ever sent, byte-identical to not-enabled. */
+    schedules?: () => SchedulesPayloadWire | undefined;
   },
 ): RouteSet {
   const pending = new Map<string, Map<string, PendingSub>>();
@@ -854,6 +852,11 @@ function createRouteSet(
   function scoped(event: SseEventName, data: unknown, agentKey: string, seq?: number): void {
     sse.publish(event, data, agentKey);
     bufferScoped(agentKey, seq === undefined ? { event, data } : { event, data, seq });
+  }
+
+  function onSchedules(payload: SchedulesPayloadWire): void {
+    // Direct-send, same posture as `load`/`privacy`: no id, no replay ring.
+    for (const client of sse.list()) client.send("schedules", payload);
   }
 
   function onHubEvent(e: HubEvent): void {
@@ -1008,6 +1011,11 @@ function createRouteSet(
     // deliberately bypasses the replay ring and carries no SSE id.
     const load = routeDeps.load?.();
     if (load !== undefined) client.send("load", load);
+    // scheduled-reports H1 (§5.6): the projection snapshot rides right after `load` (W1's
+    // 「随 agents 重发快照」— reconnecting browsers get the full picture in one connect burst).
+    // Same direct-send posture; absent coordinator ⇒ never sent.
+    const schedulesWire = routeDeps.schedules?.();
+    if (schedulesWire !== undefined) client.send("schedules", schedulesWire);
     for (const [agentKey, runs] of fleetCache) client.send("fleet", { agentKey, runs });
     res.once("close", () => {
       pending.delete(client.id);
@@ -1064,6 +1072,7 @@ function createRouteSet(
     pending,
     fleetCache,
     onHubEvent,
+    onSchedules,
     subscribe,
     unsubscribe,
     openEvents,
@@ -1103,6 +1112,10 @@ export interface LanRuntime {
   /** web-hub-proxy plan §4.3/§3.8 (X1c): the proxy route frontend + the `/api` cross-site gate
    * (P4). Both absent ⇒ the LAN `/api` matrix is byte-identical to a hub without the feature. */
   proxy?: ProxyRoutes;
+  /** scheduled-reports H1 (§5.6): the coordinator serving `GET /api/schedules` on the LAN
+   *  listener (same width as loopback — the panel is read-only by design). Absent ⇒ the LAN
+   *  branch keeps its original reply matrix, byte-identical. */
+  schedules?: ScheduleCoordinator;
   crossSiteGate?: boolean;
   routes: RouteSet;
   lanSse: SseHub;
@@ -1175,6 +1188,34 @@ export interface LanRuntime {
   load?: HubLoadService;
   /** web-hub-version plan §3.9: same service as the loopback listener's; absent ⇒ route not mounted. */
   versionInfo?: VersionInfoPort | undefined;
+}
+
+/**
+ * scheduled-reports H1: `FrontendDeps` carries the schedule coordinator as a duck-typed extra —
+ * ports.ts is frozen for this package (same widening pattern as hub.ts's `HttpFrontendExt`).
+ * Present ONLY when `config.schedule` exists (hub.ts attaches it); absent ⇒ the whole feature
+ * stays byte-identical (no route, no SSE frame, no cap).
+ */
+type FrontendDepsSchedulesExt = FrontendDeps & { schedules?: ScheduleCoordinator };
+
+/** `GET /api/schedules?sessionId=` — memory-only snapshot (the coordinator's scan loop owns all
+ *  IO); same width on both listeners. `Cache-Control: no-store`, X-PWH-gated, auth-gated. */
+function serveSchedules(
+  coordinator: ScheduleCoordinator,
+  res: ServerResponse,
+  query: URLSearchParams,
+  sendJsonFn: typeof sendJson,
+): void {
+  const raw = query.get("sessionId");
+  let sessionId: string | undefined;
+  if (raw !== null) {
+    if (!SCHED_SESSION_ID_RE.test(raw)) {
+      sendJsonFn(res, 400, { error: "E_BAD_REQUEST" }, { "Cache-Control": "no-store" });
+      return;
+    }
+    sessionId = raw;
+  }
+  sendJsonFn(res, 200, coordinator.snapshot(sessionId), { "Cache-Control": "no-store" });
 }
 
 async function serveLoadTop(
@@ -1828,6 +1869,17 @@ async function handleLanRequestInner(
     );
   }
 
+  // scheduled-reports H1 (§5.6): `GET /api/schedules` — LAN, same width as loopback (the panel
+  // is read-only by design; E3's write restrictions live in the command layer, not here).
+  // Snapshot-only (no scan at request time) ⇒ no rate limiter beyond the shared admission.
+  if (rt.schedules !== undefined && method === "GET" && path === SCHED_API_PATH) {
+    if (req.headers["x-pwh"] !== "1") throw new HttpError(403, "E_CSRF");
+    const authDeadlineMs = deriveBudget(8_000, LAN_AUTH_CAP_MS, 1_000);
+    const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs);
+    if (session === undefined) return;
+    return serveSchedules(rt.schedules, res, query, sendJson);
+  }
+
   // web-hub-version plan §3.9: `GET /api/version` — LAN, same width as loopback (D3). Absent
   // `versionInfo` ⇒ falls through to the original 404/401 matrix.
   if (rt.versionInfo !== undefined && method === "GET" && path === VERSION_INFO_PATH) {
@@ -2372,6 +2424,25 @@ function parseCmdBody(body: unknown): ParseOutcome {
           ...(deliver === undefined ? {} : { deliver }),
           ...(expect === undefined ? {} : { expect }),
         },
+      };
+    }
+    case "archive": {
+      // web-hub archive plan (docs/dev/web-hub/archive-report.md): the fleet drawer's manual
+      // archive/unarchive. The TARGET id rides `target` (the body's `id` is the cmdId, the
+      // recall precedent); identify-only — exactly {kind, target, set}. LAN rides the SAME
+      // /api/cmd authorization as every other op.
+      const kind = field(body, "kind");
+      const target = field(body, "target");
+      const set = field(body, "set");
+      if (kind !== "run" && kind !== "bash") return { error: "E_BAD_REQUEST", message: "bad kind" };
+      if (typeof target !== "string" || target.length === 0 || target.length > 128)
+        return { error: "E_BAD_REQUEST", message: "bad target" };
+      if (set !== "archive" && set !== "unarchive") return { error: "E_BAD_REQUEST", message: "bad set" };
+      return {
+        agentKey,
+        id,
+        ...(queryOnlyFlag ? { queryOnly: true as const } : {}),
+        cmd: { op: "archive", kind, id: target, set },
       };
     }
     case "recall": {
@@ -3030,6 +3101,20 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // callback is bound to both route sets below; no sampler is constructed when
   // config.load is absent or the bounded Linux probe fails.
   let loadRouteSets: RouteSet[] = [];
+  // scheduled-reports H1 (§5.6): the coordinator arrives as a duck-typed FrontendDeps extra
+  // (ports.ts stays frozen for this package — same widening pattern as `HttpFrontendExt`).
+  // Constructed by hub.ts (it needs the registry + agent-server wiring), attached here ONLY
+  // when `config.schedule` exists; absent ⇒ no routes, no SSE frame, byte-identical.
+  const schedulesCoordinator: ScheduleCoordinator | undefined =
+    config.schedule === undefined ? undefined : ((deps as FrontendDepsSchedulesExt).schedules ?? undefined);
+  let schedRouteSets: RouteSet[] = [];
+  if (schedulesCoordinator !== undefined) {
+    schedulesCoordinator.setSseSink({
+      publish: (payload) => {
+        for (const route of schedRouteSets) route.onSchedules(payload);
+      },
+    });
+  }
   const load: HubLoadService | undefined =
     config.load === undefined
       ? undefined
@@ -3070,8 +3155,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     ...(deps.runTx === undefined ? {} : { runTx: deps.runTx }),
     ...(load === undefined ? {} : { load: () => load.latest() }),
     ...(privacyRoutes === undefined ? {} : { privacy: () => privacyRoutes.locked() }),
+    ...(schedulesCoordinator === undefined ? {} : { schedules: () => schedulesCoordinator.snapshot() }),
   });
   loadRouteSets.push(routes);
+  schedRouteSets.push(routes);
 
   // ---- LAN facade (§2.5/§6/§7) ------------------------------------------
 
@@ -3106,8 +3193,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       ...(deps.runTx === undefined ? {} : { runTx: deps.runTx }),
       ...(load === undefined ? {} : { load: () => load.latest() }),
       ...(privacyRoutes === undefined ? {} : { privacy: () => privacyRoutes.locked() }),
+      ...(schedulesCoordinator === undefined ? {} : { schedules: () => schedulesCoordinator.snapshot() }),
     });
     loadRouteSets.push(lanRoutes);
+    schedRouteSets.push(lanRoutes);
     lanRunSink = lanRoutes.runSink;
     let lanClosed = false;
     const unsubscribeLanBus = bus.subscribe(lanRoutes.onHubEvent);
@@ -3157,6 +3246,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       /** web-hub-delete-session plan v2 §2.9: same instance as the loopback listener's. */
       agentRemove: deps.agentRemove,
       ...(load === undefined ? {} : { load }),
+      ...(schedulesCoordinator === undefined ? {} : { schedules: schedulesCoordinator }),
       markKdfInvalid: () => {
         if (kdfInvalidWarning) return;
         kdfInvalidWarning = true;
@@ -3528,6 +3618,14 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       const identity = authorizeLoopback(req, res);
       if (identity === undefined) return;
       return serveVersionInfo(deps.version, ui, req, res, `loopback:${identity.principal}:version`, cmdLimit);
+    }
+    // scheduled-reports H1 (§5.6): `GET /api/schedules` — loopback (absent coordinator ⇒ the
+    // original matrix: unauth 401, authed 404 — pinned by schedule-http.test.ts).
+    if (schedulesCoordinator !== undefined && method === "GET" && path === SCHED_API_PATH) {
+      if (req.headers["x-pwh"] !== "1") throw new HttpError(403, "E_CSRF");
+      const identity = authorizeLoopback(req, res);
+      if (identity === undefined) return;
+      return serveSchedules(schedulesCoordinator, res, query, sendJson);
     }
     // web-hub-preview plan v3 §4.5/§4.7 (PV3): `GET /api/preview` — same insertion point as the
     // spawn branch above (after headless, before the method branches). Absent ⇒ falls through

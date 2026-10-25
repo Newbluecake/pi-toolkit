@@ -4,6 +4,7 @@ import type { FrontendDeps, FrontendFactory, HttpFrontend } from "../../../src/w
 import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
 import type { HubEvent } from "../../../src/web-hub/hub/ports.js";
 import {
+  CMD_HISTORY_HUB_CAPS,
   DIALOG_BG_HUB_CAPS,
   HOLD_HUB_CAPS,
   P2_HUB_CAPS,
@@ -15,6 +16,8 @@ import {
   SPAWN_MODEL_HUB_CAP,
   UPLOAD_HUB_CAPS,
   WTDIFF_HUB_CAP,
+  WTGRAPH_HUB_CAP,
+  WTGRAPH_MERGED_HUB_CAP,
   AVATAR_HUB_CAP,
   PRIVACY_HUB_CAP,
   PREVIEW_HUB_CAP,
@@ -132,6 +135,10 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
       ...TODO_ARCHIVE_HUB_CAPS, // todo-archive v2.1 §2 (D5): unconditional, both surfaces
       ...DIALOG_BG_HUB_CAPS,
       ...HOLD_HUB_CAPS,
+      // cmd-history H1 (plan §4.6/F4): unconditional, both surfaces — the P0 projection and the
+      // §4.10 runTail ENOENT fallback ship with every hub build, so the cap has no settings
+      // gate (old hubs never declare it ⇒ the UI stays in legacy mode).
+      ...CMD_HISTORY_HUB_CAPS,
     ]) {
       expect(browserCaps).toContain(cap);
     }
@@ -391,6 +398,9 @@ describe("wtdiff.v1 cap coexistence (worktree-diff D3, §1.6)", () => {
 
     expect(browserCaps.sort()).toEqual(agentCaps.sort());
     expect(browserCaps).toContain(WTDIFF_HUB_CAP);
+    // merged-plan §6: wtgraph.merged.v1 coexists with wtgraph.v1, on both surfaces (sets were equal above)
+    expect(browserCaps).toContain(WTGRAPH_HUB_CAP);
+    expect(browserCaps).toContain(WTGRAPH_MERGED_HUB_CAP);
     for (const cap of [...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...RUNTX_HUB_CAPS, PREVIEW_HUB_CAP, PREVIEW_LAN_HUB_CAP]) {
       expect(browserCaps).toContain(cap);
     }
@@ -404,6 +414,7 @@ describe("wtdiff.v1 cap coexistence (worktree-diff D3, §1.6)", () => {
     });
     if ("exists" in hub) throw new Error("unexpected exists");
     expect(hub.info.caps).toContain(WTDIFF_HUB_CAP);
+    expect(hub.info.caps).toContain(WTGRAPH_MERGED_HUB_CAP);
     expect(hub.info.caps).not.toContain(PREVIEW_LAN_HUB_CAP);
   });
 
@@ -413,10 +424,12 @@ describe("wtdiff.v1 cap coexistence (worktree-diff D3, §1.6)", () => {
     const hub = await start(fe.factory, home);
     if ("exists" in hub) throw new Error("unexpected exists");
     expect(hub.info.caps).not.toContain(WTDIFF_HUB_CAP);
+    expect(hub.info.caps).not.toContain(WTGRAPH_MERGED_HUB_CAP);
     const c = await connectClient(hub.paths.socketPath);
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
     expect(ack["caps"]).not.toContain(WTDIFF_HUB_CAP);
+    expect(ack["caps"]).not.toContain(WTGRAPH_MERGED_HUB_CAP);
     c.sock.destroy();
   });
 });

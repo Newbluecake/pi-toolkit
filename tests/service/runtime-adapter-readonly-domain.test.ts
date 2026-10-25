@@ -10,7 +10,7 @@ import type { AgentTypeConfig } from "../../src/core/types.js";
 import { EscalatingReaper } from "../../src/runtime/reaper.js";
 import type { SessionDriver, SessionHandle, SessionSpec } from "../../src/runtime/session-driver.js";
 import { SingleSlotPool } from "../../src/runtime/slot-pool.js";
-import { CONSULT_READONLY_TOOLS, type ScopeSessionHandle } from "../../src/runtime/tool-scope.js";
+import { READONLY_DOMAIN_TOOLS, type ScopeSessionHandle } from "../../src/runtime/tool-scope.js";
 import { EventWatchdog } from "../../src/runtime/watchdog.js";
 import { createRuntimeRunnerAdapter, type RuntimeAdapterDeps } from "../../src/service/runtime-adapter.js";
 import type { RunnerSpec } from "../../src/service/ports.js";
@@ -138,7 +138,7 @@ describe("runtime-adapter: readonly tool domain — N1 forced tools", () => {
     const driver = captureDriver(captured);
     const runner = buildAdapter(clock, { driver });
     await runnerRun(runner, spec(tidyType(tools)), clock);
-    expect(captured.spec!.tools).toEqual([...CONSULT_READONLY_TOOLS]);
+    expect(captured.spec!.tools).toEqual([...READONLY_DOMAIN_TOOLS]);
   });
 
   it("with a schema (tidy's real shape), sessionSpec.tools also allows StructuredOutput by name", async () => {
@@ -151,7 +151,7 @@ describe("runtime-adapter: readonly tool domain — N1 forced tools", () => {
       spec(tidyType(["read", "bash", "edit", "write", "memory"]), { schema: { type: "object" } }),
       clock,
     );
-    expect(captured.spec!.tools).toEqual([...CONSULT_READONLY_TOOLS, "StructuredOutput"]);
+    expect(captured.spec!.tools).toEqual([...READONLY_DOMAIN_TOOLS, "StructuredOutput"]);
     expect(toolNames(captured.spec!)).toEqual(["StructuredOutput"]);
   });
 });
@@ -166,7 +166,7 @@ describe("runtime-adapter: readonly tool domain — N2 H2 cannot widen it", () =
       extensions: [{ resolveSessionSpec: async (s) => ({ ...s, tools: ["bash", "edit", "write"] }) }],
     });
     await runnerRun(runner, spec(tidyType(["read", "bash", "edit", "write", "memory"])), clock);
-    expect(captured.spec!.tools).toEqual([...CONSULT_READONLY_TOOLS]);
+    expect(captured.spec!.tools).toEqual([...READONLY_DOMAIN_TOOLS]);
   });
 
   it("an H2 extension injecting a foreign customTools entry is dropped (§7.0 point 6a) and WARNed", async () => {
@@ -239,7 +239,7 @@ describe("runtime-adapter: readonly tool domain — N3 policy shape", () => {
     const runner = buildAdapter(clock, { driver });
     await runnerRun(runner, spec(tidyType()), clock);
     const { policy, enforcer } = captured.spec!.toolScope!;
-    let active = [...CONSULT_READONLY_TOOLS, "bash"];
+    let active = [...READONLY_DOMAIN_TOOLS, "bash"];
     const fake: ScopeSessionHandle = {
       getActiveTools: () => active,
       setActiveTools: (names) => {
@@ -273,8 +273,6 @@ describe("runtime-adapter: readonly tool domain — N4 injection/authorization u
           throw new Error("x");
         },
       }),
-      consult: vi.fn(() => ({ name: "consult" }) as never),
-      consultResolveExperts: vi.fn(),
     };
   }
 
@@ -299,7 +297,6 @@ describe("runtime-adapter: readonly tool domain — N4 injection/authorization u
       runner,
       spec(tidyType(["read", "bash", "edit", "write", "memory"]), {
         schema: { type: "object" },
-        consultExperts: [{ runId: "r_E", sessionFile: "/s/e.jsonl", agentType: "Plan" }],
       }),
       clock,
     );

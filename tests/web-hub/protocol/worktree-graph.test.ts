@@ -1112,3 +1112,566 @@ describe("parseWtGraphPayload — each real degrade marker independently gates c
     expect(parseWtGraphPayload(p)).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// merged-plan r3 P0 (append-only extension; the legacy tests above are unchanged).
+// ---------------------------------------------------------------------------
+
+import { PROTO, WTGRAPH_MERGED_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
+import {
+  WTGRAPH_CHERRY_MAX_BYTES,
+  WTGRAPH_CHERRY_MS,
+  WTGRAPH_MERGED_CLIENT_TIMEOUT_MS,
+  WTGRAPH_MERGED_E_MAX,
+  WTGRAPH_MERGED_MAX,
+  WTGRAPH_MERGED_MAX_BYTES,
+  WTGRAPH_MERGED_PHASE_MS,
+  WTGRAPH_MERGED_QUERY,
+  WTGRAPH_MERGED_TAIL_MS,
+  type WtGraphMergedEntry,
+  type WtGraphMergedSkip,
+  type WtGraphMergedUnknown,
+} from "../../../src/web-hub/protocol/worktree-graph.js";
+
+const MERGED_SKIP_CASES: WtGraphMergedSkip[] = [
+  "no-head",
+  "shallow",
+  "filter-config",
+  "git-too-old",
+  "attr-changed",
+  "unconfirmed",
+  "bytes",
+];
+const MERGED_UNKNOWN_CASES: WtGraphMergedUnknown[] = [
+  "budget",
+  "timeout",
+  "too-many",
+  "missing-object",
+  "git-failed",
+  "attr-changed",
+];
+
+function mergedPayload(
+  entries: WtGraphMergedEntry[] = [{ n: "topic", h: H2, v: "part", k: 1, t: 2, e: [H2] }],
+): WtGraphPayload {
+  return {
+    ...basePayload(),
+    head: { h: H1, b: "main" },
+    commits: genCommits(3),
+    refs: [{ k: "branch", n: "main", h: H1 }, ...entries.map(({ n, h }) => ({ k: "branch" as const, n, h }))],
+    merged: { v: 1, base: H1, branches: entries },
+  };
+}
+
+function badMerged(patch: Record<string, unknown>): unknown {
+  const p = mergedPayload();
+  return { ...p, merged: { ...p.merged, ...patch } };
+}
+
+function badMergedEntry(patch: Record<string, unknown>): unknown {
+  const p = mergedPayload();
+  return { ...p, merged: { ...p.merged, branches: [{ ...p.merged!.branches[0], ...patch }] } };
+}
+
+function multiTipMerged(): WtGraphPayload {
+  return mergedPayload([
+    { n: "topic", h: H2, v: "part", k: 2, t: 3, e: [H2] },
+    { n: "alias", h: H2, v: "part", k: 2, t: 3 },
+  ]);
+}
+
+/** Uses the pre-extension parser's exact output property order, not the input's order. */
+function legacyParsedBytes(p: WtGraphPayload): string {
+  return JSON.stringify({
+    v: 1,
+    n: p.n,
+    format: p.format,
+    commits: p.commits,
+    refs: p.refs,
+    wtHeads: p.wtHeads,
+    degrade: p.degrade,
+    complete: p.complete,
+    ...(p.shallow === true ? { shallow: true } : {}),
+    ...(p.empty === true ? { empty: true } : {}),
+    ...(p.head === undefined ? {} : { head: p.head }),
+  });
+}
+
+describe("merged protocol — constants and independent budget ledger", () => {
+  it("pins the optional query, cap, limits and unchanged PROTO", () => {
+    expect(WTGRAPH_MERGED_QUERY).toBe("merged");
+    expect(WTGRAPH_MERGED_HUB_CAP).toBe("wtgraph.merged.v1");
+    expect(PROTO).toEqual({ major: 1, minor: 2 });
+    expect(WTGRAPH_MERGED_MAX).toBe(24);
+    expect(WTGRAPH_MERGED_E_MAX).toBe(200);
+    expect(WTGRAPH_CHERRY_MS).toBe(2_000);
+    expect(WTGRAPH_CHERRY_MAX_BYTES).toBe(64 * 1024);
+    expect(WTGRAPH_MERGED_PHASE_MS).toBe(14_000);
+    expect(WTGRAPH_MERGED_TAIL_MS).toBe(4_000);
+    expect(WTGRAPH_MERGED_MAX_BYTES).toBe(32 * 1024);
+    expect(WTGRAPH_MERGED_CLIENT_TIMEOUT_MS).toBe(48_000);
+  });
+
+  it("keeps old 23 / 33 ≤ 35 and adds 37 / 47 ≤ 48 using the actual shared constants", () => {
+    const legacyServer = WTDIFF_ADMIT_MS + WTGRAPH_GIT_PHASE_MS + WTDIFF_CLOSE_MS;
+    const mergedServer = legacyServer + WTGRAPH_MERGED_PHASE_MS;
+    expect(legacyServer).toBe(23_000);
+    expect(legacyServer + WTDIFF_TRANSFER_RESERVE_MS).toBe(33_000);
+    expect(legacyServer + WTDIFF_TRANSFER_RESERVE_MS).toBeLessThanOrEqual(WTGRAPH_CLIENT_TIMEOUT_MS);
+    expect(WTGRAPH_CLIENT_TIMEOUT_MS).toBe(35_000);
+    expect(mergedServer).toBe(37_000);
+    expect(mergedServer + WTDIFF_TRANSFER_RESERVE_MS).toBe(47_000);
+    expect(mergedServer + WTDIFF_TRANSFER_RESERVE_MS).toBeLessThanOrEqual(WTGRAPH_MERGED_CLIENT_TIMEOUT_MS);
+  });
+
+  it("accounts for 6s head + 4s tail: the 4s loop does not promise even one 8s worst-case candidate", () => {
+    const head = 3 * WTDIFF_STEP_MS;
+    const tail = 2 * WTDIFF_STEP_MS;
+    const perCandidate = WTDIFF_STEP_MS + WTGRAPH_CHERRY_MS + 2 * WTDIFF_STEP_MS;
+    expect(head).toBe(6_000);
+    expect(tail).toBe(WTGRAPH_MERGED_TAIL_MS);
+    const loop = WTGRAPH_MERGED_PHASE_MS - head - tail;
+    expect(loop).toBe(4_000);
+    expect(perCandidate).toBe(8_000);
+    expect(Math.floor(loop / perCandidate)).toBe(0);
+  });
+});
+
+describe("merged protocol — legacy bytes stay identical", () => {
+  it.each(["minimal", "head+shallow", "empty", "degraded", "sha256"])("%s without merged", (shape) => {
+    const p = basePayload();
+    if (shape === "head+shallow") {
+      p.head = { h: H1, b: "main" };
+      p.shallow = true;
+    }
+    if (shape === "empty") {
+      p.commits = [];
+      p.empty = true;
+    }
+    if (shape === "degraded") {
+      p.degrade = { more: true, refsOmitted: 2 };
+      p.complete = false;
+    }
+    if (shape === "sha256") {
+      p.format = "sha256";
+      p.commits[0].h = "a".repeat(64);
+      p.refs[0].h = "a".repeat(64);
+      p.wtHeads[0].h = "a".repeat(64);
+    }
+    const before = JSON.stringify(p);
+    const parsed = parseWtGraphPayload(p);
+    expect(parsed).toEqual(p);
+    expect(JSON.stringify(parsed)).toBe(legacyParsedBytes(p));
+    expect(Object.hasOwn(parsed!, "merged")).toBe(false);
+    expect(JSON.stringify(p)).toBe(before);
+  });
+
+  it("does not add a merged:undefined own slot or adopt an inherited merged field", () => {
+    const p = { ...basePayload(), merged: undefined };
+    expect(JSON.stringify(parseWtGraphPayload(p))).toBe(legacyParsedBytes(p));
+    Object.defineProperty(Object.prototype, "merged", { value: { invalid: true }, configurable: true });
+    try {
+      const parsed = parseWtGraphPayload(basePayload());
+      expect(parsed).not.toBeNull();
+      expect(Object.hasOwn(parsed!, "merged")).toBe(false);
+      expect(JSON.stringify(parsed)).toBe(legacyParsedBytes(basePayload()));
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).merged;
+    }
+  });
+});
+
+describe("merged protocol — accepted shapes", () => {
+  it.each([
+    { n: "topic", h: H2, v: "eq", k: 3, t: 3, co: true },
+    { n: "topic", h: H2, v: "part", k: 1, t: 2, e: [H2], eP: true },
+    { n: "topic", h: H2, v: "part", k: 1, t: 2, eP: true },
+    { n: "topic", h: H2, v: "part", k: 1, t: 2, e: [] },
+    { n: "topic", h: H2, v: "part", k: 1, t: 2 },
+    { n: "topic", h: H2, v: "none", k: 0, t: 2 },
+    { n: "topic", h: H2, v: "anc" },
+  ] satisfies WtGraphMergedEntry[])("accepts $v (e=$e, eP=$eP)", (entry) => {
+    const p = mergedPayload([entry]);
+    expect(parseWtGraphPayload(p)).toEqual(p);
+  });
+
+  it.each(MERGED_UNKNOWN_CASES)("accepts unk:%s", (why) => {
+    const p = mergedPayload([{ n: "topic", h: H2, v: "unk", why }]);
+    expect(parseWtGraphPayload(p)).toEqual(p);
+  });
+
+  it.each([0, 1, 376])("accepts 24 entries and omitted overflow %i (24 / 25 / 400 candidates)", (omitted) => {
+    const entries: WtGraphMergedEntry[] = Array.from({ length: 24 }, (_, i) => ({
+      n: `topic-${i}`,
+      h: H2,
+      v: "eq",
+      k: 1,
+      t: 1,
+    }));
+    const p = mergedPayload(entries);
+    if (omitted > 0) p.merged!.omitted = omitted;
+    expect(parseWtGraphPayload(p)).toEqual(p);
+  });
+
+  for (const withHead of [false, true]) {
+    it.each(MERGED_SKIP_CASES)(`accepts skipped:%s, head/base ${withHead ? "present" : "absent"}`, (skipped) => {
+      const p = mergedPayload([]);
+      if (withHead) {
+        p.merged!.skipped = skipped;
+      } else {
+        delete p.head;
+        p.merged = { v: 1, skipped, branches: [] };
+      }
+      expect(parseWtGraphPayload(p)).toEqual(p);
+    });
+  }
+
+  it("accepts no-head empty graph with the exact skipped wire shape", () => {
+    const p: WtGraphPayload = {
+      ...basePayload(),
+      commits: [],
+      refs: [],
+      wtHeads: [],
+      empty: true,
+      merged: { v: 1, skipped: "no-head", branches: [] },
+    };
+    expect(parseWtGraphPayload(p)).toEqual(p);
+    expect(Object.keys(parseWtGraphPayload(p)!.merged!)).toEqual(["v", "branches", "skipped"]);
+  });
+
+  it("accepts same-tip e only on its first entry, including partial e on both entries", () => {
+    const p = multiTipMerged();
+    p.merged!.branches[0].eP = true;
+    p.merged!.branches[1].eP = true;
+    expect(parseWtGraphPayload(p)).toEqual(p);
+    const before = JSON.stringify(p);
+    const parsed = parseWtGraphPayload(p)!;
+    expect(parsed.merged).not.toBe(p.merged);
+    expect(parsed.merged!.branches[0].e).not.toBe(p.merged!.branches[0].e);
+    expect(JSON.stringify(p)).toBe(before);
+  });
+
+  it("accepts format-matching sha256 metadata", () => {
+    const h = "a".repeat(64);
+    const p = mergedPayload([{ n: "topic", h, v: "part", k: 1, t: 2, e: [h] }]);
+    p.format = "sha256";
+    p.head = { h };
+    p.commits = [{ h, p: [], a: "A", t: 1, s: "s" }];
+    p.refs = [{ k: "branch", n: "topic", h }];
+    p.wtHeads = [];
+    p.merged!.base = h;
+    expect(parseWtGraphPayload(p)).toEqual(p);
+  });
+
+  it("accepts the maximum cherry-output-derived t and rejects its next integer", () => {
+    const max = Math.floor(WTGRAPH_CHERRY_MAX_BYTES / 41);
+    const p = mergedPayload([{ n: "topic", h: H2, v: "eq", k: max, t: max }]);
+    expect(parseWtGraphPayload(p)).toEqual(p);
+    p.merged!.branches[0].k = max + 1;
+    p.merged!.branches[0].t = max + 1;
+    expect(parseWtGraphPayload(p)).toBeNull();
+  });
+
+  it("accepts 200 e oids globally; rejects 201 even when each entry is individually under its k", () => {
+    const p = mergedPayload([
+      { n: "one", h: H2, v: "part", k: 150, t: 151, e: genCommits(150).map((c) => c.h) },
+      { n: "two", h: H3, v: "part", k: 51, t: 52, e: genCommits(50).map((c) => c.h) },
+    ]);
+    p.commits = genCommits(200);
+    expect(parseWtGraphPayload(p)).toEqual(p);
+    p.merged!.branches[1].e!.push(hex(50));
+    expect(parseWtGraphPayload(p)).toBeNull();
+  });
+
+  it("24 sha256 part refs with 200 total e oids fit the reserved 32KiB, and the existing 512KiB cap is not raised", () => {
+    const oid = (i: number): string => hex(i).padStart(64, "0");
+    const entries: WtGraphMergedEntry[] = Array.from({ length: 24 }, (_, i) => ({
+      n: `${i}`.padEnd(200, "x"),
+      h: oid(i),
+      v: "part",
+      k: 200,
+      t: 201,
+      ...(i === 0 ? { e: Array.from({ length: 200 }, (_, j) => oid(j)) } : { eP: true as const }),
+    }));
+    const p = mergedPayload(entries);
+    p.format = "sha256";
+    p.head = { h: oid(199) };
+    p.merged!.base = p.head.h;
+    p.wtHeads = [];
+    p.commits = genCommits(200).map((c, i) => ({ ...c, h: oid(i) }));
+    p.refs = entries.map(({ n, h }) => ({ k: "branch", n, h }));
+    expect(parseWtGraphPayload(p)).toEqual(p);
+    const extensionBytes = byteLen(JSON.stringify(p.merged));
+    expect(extensionBytes).toBeLessThan(WTGRAPH_MERGED_MAX_BYTES);
+    const reservedBase = WTGRAPH_BODY_MAX_BYTES - WTGRAPH_MERGED_MAX_BYTES;
+    expect(reservedBase).toBe(491_520);
+    expect(reservedBase + extensionBytes + byteLen(',"merged":')).toBeLessThanOrEqual(WTGRAPH_BODY_MAX_BYTES);
+  });
+});
+
+describe("merged protocol — rejects malformed envelopes and cross-fields", () => {
+  it.each([null, [], "x", 1, true, new Date()])("rejects merged=%p", (bad) => {
+    expect(parseWtGraphPayload({ ...basePayload(), merged: bad })).toBeNull();
+  });
+
+  it.each([undefined, 0, 2, "1", null])("rejects merged.v=%p", (v) => {
+    expect(parseWtGraphPayload(badMerged({ v }))).toBeNull();
+  });
+
+  it("rejects unknown keys in merged and entry, including non-enumerable keys", () => {
+    expect(parseWtGraphPayload(badMerged({ extra: 1 }))).toBeNull();
+    expect(parseWtGraphPayload(badMergedEntry({ extra: 1 }))).toBeNull();
+    const p = mergedPayload();
+    Object.defineProperty(p.merged!, "extra", { value: 1, enumerable: false });
+    expect(parseWtGraphPayload(p)).toBeNull();
+    const q = mergedPayload();
+    Object.defineProperty(q.merged!.branches[0], "extra", { value: 1, enumerable: false });
+    expect(parseWtGraphPayload(q)).toBeNull();
+  });
+
+  it.each([undefined, H2, "a".repeat(64), H1.toUpperCase().replace(/1$/, "A"), null])(
+    "rejects base=%p when head exists",
+    (base) => {
+      expect(parseWtGraphPayload(badMerged({ base }))).toBeNull();
+    },
+  );
+
+  it("rejects base without head", () => {
+    const p = mergedPayload([]);
+    delete p.head;
+    expect(parseWtGraphPayload(p)).toBeNull();
+  });
+
+  it.each([null, undefined, {}, true, "x"])("rejects branches=%p", (branches) => {
+    expect(parseWtGraphPayload(badMerged({ branches }))).toBeNull();
+  });
+
+  it("rejects 25 entries even when all refs exist and all names are unique", () => {
+    const p = mergedPayload(Array.from({ length: 25 }, (_, i) => ({ n: `b${i}`, h: H2, v: "eq", k: 1, t: 1 })));
+    expect(parseWtGraphPayload(p)).toBeNull();
+  });
+
+  it.each([0, -1, 0.5, "1", null, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53])("rejects omitted=%p", (omitted) => {
+    expect(parseWtGraphPayload(badMerged({ omitted }))).toBeNull();
+  });
+
+  it.each(["unknown", "", null, true, 1])("rejects skipped=%p", (skipped) => {
+    expect(parseWtGraphPayload(badMerged({ skipped, branches: [] }))).toBeNull();
+  });
+
+  it.each(MERGED_SKIP_CASES)("rejects skipped:%s with entries", (skipped) => {
+    expect(parseWtGraphPayload(badMerged({ skipped }))).toBeNull();
+  });
+
+  it("rejects an omitted count on the fixed skipped wire shape", () => {
+    expect(parseWtGraphPayload(badMerged({ skipped: "bytes", branches: [], omitted: 1 }))).toBeNull();
+  });
+});
+
+describe("merged protocol — rejects malformed entries and all §6 consistency violations", () => {
+  it.each([null, [], "x", 1, true])("rejects branch entry=%p", (entry) => {
+    expect(parseWtGraphPayload(badMerged({ branches: [entry] }))).toBeNull();
+  });
+
+  it.each([undefined, "", null, 1, "x".repeat(201), "α".repeat(101)])("rejects entry.n=%p", (n) => {
+    expect(parseWtGraphPayload(badMergedEntry({ n }))).toBeNull();
+  });
+
+  it.each([undefined, null, "a".repeat(64), "A".repeat(40), "g".repeat(40)])("rejects entry.h=%p", (h) => {
+    expect(parseWtGraphPayload(badMergedEntry({ h }))).toBeNull();
+  });
+
+  it("rejects nonexistent branch, wrong tip and a remote/tag in place of the matching branch", () => {
+    expect(parseWtGraphPayload(badMergedEntry({ n: "absent" }))).toBeNull();
+    expect(parseWtGraphPayload(badMergedEntry({ h: H3 }))).toBeNull();
+    for (const k of ["remote", "tag"] as const) {
+      const p = mergedPayload();
+      p.refs[1].k = k;
+      expect(parseWtGraphPayload(p)).toBeNull();
+    }
+  });
+
+  it("rejects duplicate branch names even when their refs have different tips", () => {
+    const p = mergedPayload([
+      { n: "topic", h: H2, v: "anc" },
+      { n: "topic", h: H3, v: "anc" },
+    ]);
+    expect(parseWtGraphPayload(p)).toBeNull();
+  });
+
+  it.each([undefined, "merged", "", 1, null])("rejects entry.v=%p", (v) => {
+    expect(parseWtGraphPayload(badMergedEntry({ v }))).toBeNull();
+  });
+
+  for (const field of ["co", "eP"] as const) {
+    it.each([false, 1, "true", null])(`rejects ${field}=%p (true-only)`, (value) => {
+      expect(parseWtGraphPayload(badMergedEntry({ [field]: value }))).toBeNull();
+    });
+  }
+
+  for (const v of ["eq", "part", "none"] as const) {
+    for (const field of ["k", "t"] as const) {
+      it.each([undefined, -1, 0.5, "1", null, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53])(
+        `rejects ${v}.${field}=%p`,
+        (value) => {
+          const valid = v === "eq" ? { k: 1, t: 1 } : v === "none" ? { k: 0, t: 1 } : { k: 1, t: 2 };
+          expect(parseWtGraphPayload(badMergedEntry({ v, ...valid, e: undefined, [field]: value }))).toBeNull();
+        },
+      );
+    }
+    it(`rejects ${v} with t above the cherry byte-derived maximum`, () => {
+      const t = Math.floor(WTGRAPH_CHERRY_MAX_BYTES / 41) + 1;
+      expect(
+        parseWtGraphPayload(badMergedEntry({ v, k: v === "eq" ? t : v === "part" ? 1 : 0, t, e: undefined })),
+      ).toBeNull();
+    });
+  }
+
+  it.each([
+    { v: "eq", k: 0, t: 0 },
+    { v: "eq", k: 0, t: 1 },
+    { v: "eq", k: 1, t: 2 },
+    { v: "eq", k: 2, t: 1 },
+    { v: "part", k: 0, t: 2 },
+    { v: "part", k: 2, t: 2 },
+    { v: "part", k: 3, t: 2 },
+    { v: "part", k: 1, t: 0 },
+    { v: "none", k: 1, t: 2 },
+    { v: "none", k: 0, t: 0 },
+  ])("rejects inconsistent $v k=$k t=$t", (fields) => {
+    expect(parseWtGraphPayload(badMergedEntry({ ...fields, e: undefined }))).toBeNull();
+  });
+
+  for (const v of ["anc", "unk"] as const) {
+    for (const [field, value] of [
+      ["k", 0],
+      ["t", 1],
+      ["e", []],
+      ["eP", true],
+    ] as const) {
+      it(`rejects ${field} on ${v}`, () => {
+        expect(
+          parseWtGraphPayload(
+            badMergedEntry({
+              v,
+              k: undefined,
+              t: undefined,
+              e: undefined,
+              ...(v === "unk" ? { why: "timeout" } : {}),
+              [field]: value,
+            }),
+          ),
+        ).toBeNull();
+      });
+    }
+  }
+
+  for (const v of ["eq", "none"] as const) {
+    for (const [field, value] of [
+      ["e", []],
+      ["eP", true],
+    ] as const) {
+      it(`rejects ${field} on ${v}`, () => {
+        expect(
+          parseWtGraphPayload(badMergedEntry({ v, k: v === "eq" ? 2 : 0, e: undefined, [field]: value })),
+        ).toBeNull();
+      });
+    }
+  }
+
+  it.each([undefined, "unknown", "", null, 1, true])("rejects unk.why=%p", (why) => {
+    expect(parseWtGraphPayload(badMergedEntry({ v: "unk", k: undefined, t: undefined, e: undefined, why }))).toBeNull();
+  });
+
+  it.each(["eq", "part", "none", "anc"])("rejects why on %s", (v) => {
+    expect(
+      parseWtGraphPayload(
+        badMergedEntry({
+          v,
+          k: v === "anc" ? undefined : v === "none" ? 0 : 1,
+          t: v === "anc" ? undefined : v === "eq" ? 1 : 2,
+          e: undefined,
+          why: "timeout",
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it.each([null, {}, "x", 1, [H2, H3], [hex(999)], ["a".repeat(64)], ["A".repeat(40)]])(
+    "rejects malformed / out-of-window / over-k e=%p",
+    (e) => {
+      expect(parseWtGraphPayload(badMergedEntry({ e }))).toBeNull();
+    },
+  );
+
+  it("rejects duplicate e oids even when |e| ≤ k", () => {
+    expect(parseWtGraphPayload(badMergedEntry({ k: 2, t: 3, e: [H2, H2] }))).toBeNull();
+  });
+
+  it("rejects e on a later same-tip entry even if the first entry has no e", () => {
+    for (const firstHasE of [false, true]) {
+      const p = multiTipMerged();
+      if (!firstHasE) delete p.merged!.branches[0].e;
+      p.merged!.branches[1].e = [];
+      expect(parseWtGraphPayload(p)).toBeNull();
+    }
+  });
+
+  it.each([{ v: "none", k: 0, t: 3 }, { k: 1 }, { t: 4 }])("rejects inconsistent same-tip v/k/t %p", (patch) => {
+    const p = multiTipMerged();
+    Object.assign(p.merged!.branches[1], patch);
+    expect(parseWtGraphPayload(p)).toBeNull();
+  });
+});
+
+describe("merged protocol — preserves defensive own-field/plain-object semantics", () => {
+  for (const level of ["merged", "entry"] as const) {
+    it.each(["__proto__", "constructor"] as const)(`rejects genuine own %s on ${level}`, (key) => {
+      const p = mergedPayload();
+      if (level === "merged") p.merged = withDangerousOwnKey(p.merged!, key, {});
+      else p.merged!.branches[0] = withDangerousOwnKey(p.merged!.branches[0], key, {});
+      expect(parseWtGraphPayload(p)).toBeNull();
+    });
+
+    it(`rejects exotic prototype on ${level}`, () => {
+      const p = mergedPayload();
+      Object.setPrototypeOf(level === "merged" ? p.merged : p.merged!.branches[0], { v: 1 });
+      expect(parseWtGraphPayload(p)).toBeNull();
+    });
+
+    it(`rejects throwing getters on ${level} through the existing catch`, () => {
+      const p = mergedPayload();
+      Object.defineProperty(level === "merged" ? p.merged : p.merged!.branches[0], "v", {
+        get() {
+          throw new Error("getter");
+        },
+      });
+      expect(parseWtGraphPayload(p)).toBeNull();
+    });
+  }
+
+  it("ignores inherited optional flags and rejects inherited required fields", () => {
+    Object.defineProperties(Object.prototype, {
+      co: { value: true, configurable: true },
+      why: { value: "timeout", configurable: true },
+    });
+    try {
+      const p = mergedPayload();
+      const parsed = parseWtGraphPayload(p);
+      expect(parsed).toEqual(p);
+      expect(Object.hasOwn(parsed!.merged!.branches[0], "co")).toBe(false);
+      const unk = mergedPayload([{ n: "topic", h: H2, v: "unk" }]);
+      expect(parseWtGraphPayload(unk)).toBeNull();
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).co;
+      delete (Object.prototype as Record<string, unknown>).why;
+    }
+  });
+
+  it("accepts null-prototype merged data objects", () => {
+    const p = mergedPayload();
+    Object.setPrototypeOf(p.merged!, null);
+    Object.setPrototypeOf(p.merged!.branches[0], null);
+    expect(parseWtGraphPayload(p)).toEqual(p);
+  });
+});

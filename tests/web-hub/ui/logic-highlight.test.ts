@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  decodeHighlightSpans,
+  encodeHighlightSpans,
   flattenTokens,
   HIGHLIGHT_MAX_BYTES,
   HIGHLIGHT_MAX_LINES,
@@ -222,5 +224,124 @@ describe("flattenTokens (Prism token tree → flat parts)", () => {
     expect(flattenTokens(null)).toBeNull();
     expect(flattenTokens("nope")).toBeNull();
     expect(flattenTokens({})).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * preview-perf P1 additions (plan r3 §5.3): optional gate `limits` on
+ * `shouldHighlight` / `flattenTokens` (defaults byte-identical) and the
+ * `HighlightSpans` codec (`encodeHighlightSpans` / `decodeHighlightSpans`).
+ * ------------------------------------------------------------------------- */
+
+describe("shouldHighlight / flattenTokens optional limits (§5.3)", () => {
+  it("an omitted / empty limits object keeps the constants exactly (byte-identical)", () => {
+    const aroundBytes = ["a".repeat(HIGHLIGHT_MAX_BYTES), "a".repeat(HIGHLIGHT_MAX_BYTES + 1)];
+    for (const t of aroundBytes) {
+      expect(shouldHighlight(t)).toBe(shouldHighlight(t, undefined));
+      expect(shouldHighlight(t)).toBe(shouldHighlight(t, {}));
+    }
+    const manyLines = `${"x\n".repeat(HIGHLIGHT_MAX_LINES - 1)}x\nx`; // exactly MAX+1 lines
+    expect(shouldHighlight(manyLines)).toBe(false);
+    expect(shouldHighlight(manyLines, {})).toBe(false);
+    const tree = ["a", { type: "Str", content: "b" }];
+    expect(flattenTokens(tree)).toEqual(flattenTokens(tree, undefined));
+    expect(flattenTokens(tree)).toEqual(flattenTokens(tree, {}));
+    expect(flattenTokens(tree)).toEqual(flattenTokens(tree, { maxTokens: HIGHLIGHT_MAX_TOKENS }));
+  });
+
+  it("the worker gate shape { maxBytes: 256 KiB, maxLines: Infinity } widens exactly that far", () => {
+    const text = "a".repeat(256 * 1024 - 1); // 256 KiB − 1 of ASCII, one line
+    expect(shouldHighlight(text, { maxBytes: 256 * 1024, maxLines: Infinity })).toBe(true);
+    // the byte cap is inclusive at exactly the limit (same as the default gate), +1 past fails
+    expect(shouldHighlight(`${text}a`, { maxBytes: 256 * 1024, maxLines: Infinity })).toBe(true);
+    expect(shouldHighlight(`${text}aa`, { maxBytes: 256 * 1024, maxLines: Infinity })).toBe(false);
+    expect(shouldHighlight(text)).toBe(false); // default gate still refuses 256 KiB
+    const many = "x\n".repeat(3100);
+    expect(shouldHighlight(many)).toBe(false);
+    expect(shouldHighlight(many, { maxLines: Infinity })).toBe(true); // Infinity disables the cap
+    expect(shouldHighlight(many, { maxBytes: 256 * 1024 })).toBe(false); // bytes alone don't lift lines
+  });
+
+  it("flattenTokens accepts a smaller token budget", () => {
+    const tree = Array.from({ length: 6 }, (_, i) => ({ type: i % 2 ? "odd" : "even", content: "x" }));
+    expect(flattenTokens(tree, { maxTokens: 3 })).toBeNull();
+    expect(flattenTokens(tree, { maxTokens: 6 })).not.toBeNull();
+    expect(flattenTokens(tree, { maxTokens: Infinity })).not.toBeNull();
+  });
+});
+
+describe("HighlightSpans codec (§5.3)", () => {
+  const parts = [
+    { cls: "", text: "ab" },
+    { cls: "tok-str", text: "cdef" },
+    { cls: "", text: "g" },
+    { cls: "tok-com", text: "hi" },
+    { cls: "tok-str", text: "j" },
+  ];
+  const text = parts.map((p) => p.text).join("");
+
+  it("encodes gaps as gaps, dedupes the class table in first-appearance order", () => {
+    const spans = encodeHighlightSpans(parts);
+    expect(spans).not.toBeNull();
+    expect(spans!.classes).toEqual(["tok-str", "tok-com"]);
+    expect(Array.from(spans!.spans)).toEqual([2, 6, 0, 7, 9, 1, 9, 10, 0]);
+  });
+
+  it("decodes the full range back to the original parts (round-trip)", () => {
+    expect(decodeHighlightSpans(encodeHighlightSpans(parts)!, text, 0, text.length)).toEqual(parts);
+  });
+
+  it("decodes arbitrary sub-windows: gaps become plain parts, fragments clip to the window", () => {
+    const spans = encodeHighlightSpans(parts)!;
+    expect(decodeHighlightSpans(spans, text, 3, 10)).toEqual([
+      { cls: "tok-str", text: "def" }, // clipped head
+      { cls: "", text: "g" },
+      { cls: "tok-com", text: "hi" },
+      { cls: "tok-str", text: "j" },
+    ]);
+    expect(decodeHighlightSpans(spans, text, 0, 2)).toEqual([{ cls: "", text: "ab" }]);
+    expect(decodeHighlightSpans(spans, text, 5, 5)).toEqual([]);
+    expect(decodeHighlightSpans(spans, text, -3, 99)).toEqual(decodeHighlightSpans(spans, text, 0, text.length));
+  });
+
+  it("binary-searches: short windows of long span lists stay correct", () => {
+    const many: Array<{ cls: string; text: string }> = [];
+    for (let i = 0; i < 500; i++) many.push({ cls: "", text: `p${i}:` }, { cls: "tok-x", text: `s${i};` });
+    const whole = many.map((p) => p.text).join("");
+    const spans = encodeHighlightSpans(many)!;
+    expect(spans.spans.length).toBe(500 * 3);
+    const last = decodeHighlightSpans(spans, whole, whole.length - 5, whole.length);
+    expect(last).toEqual([{ cls: "tok-x", text: "s499;" }]);
+  });
+
+  it("a classIdx without a table entry degrades that fragment to plain text", () => {
+    const spans = encodeHighlightSpans(parts)!;
+    const broken = { classes: spans.classes.slice(0, 1), spans: spans.spans };
+    expect(decodeHighlightSpans(broken, text, 7, 11)).toEqual([
+      { cls: "", text: "hi" }, // tok-com's idx is gone ⇒ plain
+      { cls: "tok-str", text: "j" },
+    ]);
+  });
+
+  it("rejects malformed inputs with null (never throws)", () => {
+    expect(encodeHighlightSpans(null)).toBeNull();
+    expect(encodeHighlightSpans("nope")).toBeNull();
+    expect(encodeHighlightSpans([null])).toBeNull();
+    expect(decodeHighlightSpans(null, "ab", 0, 2)).toBeNull();
+    expect(decodeHighlightSpans({}, "ab", 0, 2)).toBeNull();
+    expect(decodeHighlightSpans({ classes: ["a"], spans: [0, 1] }, "ab", 0, 2)).toBeNull(); // % 3 !== 0
+    expect(decodeHighlightSpans({ classes: "x", spans: new Uint32Array(3) }, "ab", 0, 2)).toBeNull();
+    expect(encodeHighlightSpans([{ cls: "tok", text: "" }])).toEqual({
+      classes: [],
+      spans: new Uint32Array(0),
+    }); // empty texts vanish
+  });
+
+  it("encode ∘ flattenTokens round-trips a real token tree", () => {
+    const tree = ["const ", { type: "keyword", content: "x" }, " = ", { type: "number", content: "1" }, ";"];
+    const flat = flattenTokens(tree)!;
+    const spans = encodeHighlightSpans(flat)!;
+    const source = flat.map((p) => p.text).join("");
+    expect(decodeHighlightSpans(spans, source, 0, source.length)).toEqual(flat);
   });
 });

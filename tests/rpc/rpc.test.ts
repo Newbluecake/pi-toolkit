@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createRPCClient } from "../../src/rpc/client.js";
+import { createRPCClient } from "./helpers/rpc-client.js";
 import { RPC_REQUEST_CHANNEL, RPC_VERSION, replyChannel } from "../../src/rpc/protocol.js";
 import { createRPCServer } from "../../src/rpc/server.js";
 

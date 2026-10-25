@@ -8,10 +8,11 @@
  *    lazy chunks for dynamic `import()`s (2026-10 syntax-highlight: Prism + its language
  *    packs load only when a highlightable code view mounts) — `assets/<name>-<hash>.js`
  *    remains the naming contract `ui-manifest.ts`'s `isAllowedUiPath` enforces.
- *  - `--mode csp-probe` (`npm run probe:csp` / `npm run probe:mermaid`, §4.4.1): entries
- *    `csp-probe/{index,negative,mermaid}.html`, output `node_modules/.cache/pwh-csp-probe/`
- *    (already `.gitignore`d via `node_modules/`), no `build-info.json` (that plugin is
- *    skipped), no `public/` copy (the probe doesn't need `theme-init.js`/favicon).
+ *  - `--mode csp-probe` (`npm run probe:csp` / `npm run probe:mermaid` / `npm run
+ *    probe:preview-perf`, §4.4.1): entries `csp-probe/{index,negative,mermaid,preview-perf}.html`,
+ *    output `node_modules/.cache/pwh-csp-probe/` (already `.gitignore`d via `node_modules/`),
+ *    no `build-info.json` (that plugin is skipped), no `public/` copy (the probe doesn't
+ *    need `theme-init.js`/favicon).
  *
  * Both modes also run `mermaid-provenance-plugin.ts` (web-hub-mermaid plan §7): `assets/mmd-*` naming of the lazily
  * loaded mermaid closure, mixed-chunk build failure, the ELK EPL banner, and the sha256-bound sidecar `check:web`
@@ -76,6 +77,13 @@ export default defineConfig(async ({ command, mode }): Promise<UserConfig> => {
     // override the OS setting — see `./motion-css.ts`'s header for the full contract. Runs in
     // BOTH build modes (the csp-probe tests the same CSS pipeline the shipped bundle uses).
     css: { postcss: { plugins: [motionPrefCssPlugin()] } },
+    // preview-perf P5 (plan r3 §5.3): the highlight worker is an ES-module worker. Vite's
+    // default `worker.format: "iife"` cannot carry `highlight-worker.ts`'s DYNAMIC engine
+    // import (the prismjs `disableWorkerMessageHandler` pre-load flag must be seeded before
+    // any prism code evaluates, so the engine cannot be a static import — see that file's
+    // header). "es" emits the worker entry + its engine chunk as plain hashed assets, both
+    // served same-origin under the existing `script-src 'self'` CSP (no relaxation).
+    worker: { format: "es" },
     // syntax-highlight (2026-10): prismjs's MIT banner (`https://prismjs.com`, kept by
     // esbuild's default legal-comments handling) would trip check-ui-dist.ts's external-URL
     // allowlist — strip legal comments from the bundle instead of widening the allowlist.
@@ -102,6 +110,9 @@ export default defineConfig(async ({ command, mode }): Promise<UserConfig> => {
               index: resolve(here, "csp-probe/index.html"),
               negative: resolve(here, "csp-probe/negative.html"),
               mermaid: resolve(here, "csp-probe/mermaid.html"),
+              // preview-perf plan §6.1 (PB): real-component perf probe — never in the product
+              // bundle (this input list only exists under --mode csp-probe).
+              "preview-perf": resolve(here, "csp-probe/preview-perf.html"),
             },
             output: { chunkFileNames: provenance.chunkFileNames },
           }

@@ -177,14 +177,13 @@ function workflowFn() {
 // equivalent (parity is pinned by tests/workflow/agent-opts.test.ts's shared
 // case table run against both). This runs in the *trusted scaffold* realm
 // (outside vm) against the *sandbox script's* raw opts object, so Object
-// .prototype/Array.prototype identity checks must accept both this
+// .prototype identity checks must accept both this
 // realm's own prototypes and the sandbox context's (captured once, right
-// after vm.createContext — see sandboxObjectProto/sandboxArrayProto
+// after vm.createContext — see sandboxObjectProto
 // below). Never invokes a getter (Reflect.getOwnPropertyDescriptor only) and
 // never touches a Proxy's traps (util.types.isProxy first, unconditionally).
 const AGENT_OPTS_KEYS = __AGENT_OPTS_KEYS_JSON__;
 let sandboxObjectProto = null;
-let sandboxArrayProto = null;
 
 function isProxyValue(v) {
   return typeof v === "object" && v !== null && utilTypes.isProxy(v);
@@ -202,52 +201,6 @@ function describeOptsKind(raw) {
   if (Array.isArray(raw)) return "array";
   if (typeof raw === "function") return "function";
   return typeof raw;
-}
-
-function snapshotExpertsValue(value) {
-  if (unsafeValueKind(value) !== undefined) return { defect: { code: "bad_array", key: "experts" } };
-  if (!Array.isArray(value)) return { value: value };
-  var proto;
-  try {
-    proto = Object.getPrototypeOf(value);
-  } catch (e) {
-    return { defect: { code: "bad_array", key: "experts" } };
-  }
-  if (proto === null || (proto !== Array.prototype && proto !== sandboxArrayProto)) {
-    return { defect: { code: "bad_array", key: "experts" } };
-  }
-  var keys;
-  try {
-    keys = Reflect.ownKeys(value);
-  } catch (e) {
-    return { defect: { code: "bad_array", key: "experts" } };
-  }
-  var len = value.length;
-  if (typeof len !== "number" || len < 0 || Math.floor(len) !== len) {
-    return { defect: { code: "bad_array", key: "experts" } };
-  }
-  var expected = { length: true };
-  for (var i = 0; i < len; i++) expected[String(i)] = true;
-  if (keys.length !== len + 1) return { defect: { code: "bad_array", key: "experts" } }; // hole or extra prop
-  for (var j = 0; j < keys.length; j++) {
-    var k = keys[j];
-    if (typeof k !== "string" || !Object.prototype.hasOwnProperty.call(expected, k)) {
-      return { defect: { code: "bad_array", key: "experts" } };
-    }
-  }
-  var items = [];
-  for (var m = 0; m < len; m++) {
-    var d;
-    try {
-      d = Reflect.getOwnPropertyDescriptor(value, String(m));
-    } catch (e) {
-      return { defect: { code: "bad_array", key: "experts" } };
-    }
-    if (!d || d.get || d.set) return { defect: { code: "bad_array", key: "experts" } };
-    if (unsafeValueKind(d.value) !== undefined) return { defect: { code: "bad_array", key: "experts" } };
-    items.push(d.value);
-  }
-  return { value: items };
 }
 
 function snapshotOpts(raw) {
@@ -295,12 +248,6 @@ function snapshotOpts(raw) {
     }
     var value = desc.value;
     if (value === undefined) continue;
-    if (key === "experts") {
-      var arr = snapshotExpertsValue(value);
-      if (arr.defect) return { values: {}, unknownKeys: [], defect: arr.defect };
-      values.experts = arr.value;
-      continue;
-    }
     var unsafe = unsafeValueKind(value);
     if (unsafe) {
       return {
@@ -320,8 +267,7 @@ function agent(prompt, opts) {
   // snapshotOpts only reads it through Reflect.ownKeys /
   // Reflect.getOwnPropertyDescriptor (no getter ever runs) and, on success,
   // yields values containing only already-safe primitives/strings/arrays
-  // of such — a function/symbol/Proxy anywhere reachable (including inside
-  // experts) instead produces a defect and values stays {}. Only
+  // of such — an unsafe known value instead produces a defect and values stays {}. Only
   // values (plus the computed phase) is ever handed to callHost, so a
   // postMessage DataCloneError from an unclonable opts value is now
   // structurally impossible — the defect is reported instead, immediately,
@@ -696,13 +642,12 @@ function run() {
     return;
   }
   // workflow-experts §4.5 (D2): the sandbox realm has its own Object
-  // .prototype/Array.prototype, distinct from the scaffold's — captured
-  // once here so snapshotOpts/snapshotExpertsValue (which run in the
+  // .prototype, distinct from the scaffold's — captured
+  // once here so snapshotOpts (which runs in the
   // *scaffold* realm against the *script's* opts object) can recognize a
-  // plain object/array literal the script wrote as such.
+  // plain object literal the script wrote as such.
   try {
     sandboxObjectProto = vm.runInContext("Object.prototype", ctx);
-    sandboxArrayProto = vm.runInContext("Array.prototype", ctx);
   } catch (err) {
     send({ kind: "script_threw", message: serializeError(err).message, stack: serializeError(err).stack });
     return;

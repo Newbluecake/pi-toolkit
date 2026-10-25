@@ -75,6 +75,11 @@ describe("FA buildHubConfig top-level feishuBot gate", () => {
     expect(cfg.feishuBot).toEqual(expected);
     expect(cfg.feishuBot).not.toHaveProperty("enabled");
     expect(cfg.feishuBot).toHaveProperty("securityAlerts", true);
+    expect(cfg.feishuBot).toHaveProperty("xsMirror", true);
+  });
+  it("xsMirror:false is forwarded as false", async () => {
+    const cfg = await spawnedConfig(SETTINGS, { ...DEFAULT_FEISHU_BOT_SETTINGS, enabled: true, xsMirror: false });
+    expect(cfg.feishuBot).toHaveProperty("xsMirror", false);
   });
   it("control:false omits the entire key even if bot enabled", async () => {
     const cfg = await spawnedConfig({ ...SETTINGS, control: false }, { ...DEFAULT_FEISHU_BOT_SETTINGS, enabled: true });

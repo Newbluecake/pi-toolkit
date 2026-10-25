@@ -86,7 +86,6 @@ interface StateLogEntry {
 }
 interface ReapedEntry {
   runId: string;
-  forkSessionFrom?: string;
   sessionId?: string;
 }
 
@@ -112,8 +111,8 @@ function harness(
       stateLog.push({ status: state.status, exitFacts: state.diag.exitFacts });
     },
     ...(opts.seal ? { sealSession: opts.seal } : {}),
-    onReaped: (runId, forkSessionFrom, sessionId) => {
-      reaped.push({ runId, forkSessionFrom, sessionId });
+    onReaped: (runId, sessionId) => {
+      reaped.push({ runId, sessionId });
     },
   };
   return { clock, runner: new RuntimeRunner(d), stateLog, reaped };
@@ -436,7 +435,7 @@ describe("onReaped carries the observed sessionId at all three call sites (bash-
     const outcome = await h.runner.run({ ...request, runId: "r-reap-normal" }, budget);
     expect(outcome.status).toBe("completed");
     await pump();
-    expect(h.reaped).toEqual([{ runId: "r-reap-normal", forkSessionFrom: undefined, sessionId: "s-reap-normal" }]);
+    expect(h.reaped).toEqual([{ runId: "r-reap-normal", sessionId: "s-reap-normal" }]);
   });
 
   it("no handle at all (session_create rejects before any handle exists): sessionId is undefined", async () => {
@@ -448,7 +447,7 @@ describe("onReaped carries the observed sessionId at all three call sites (bash-
     const outcome = await h.runner.run({ ...request, runId: "r-reap-nohandle" }, budget);
     expect(outcome.status).toBe("failed");
     await pump();
-    expect(h.reaped).toEqual([{ runId: "r-reap-nohandle", forkSessionFrom: undefined, sessionId: undefined }]);
+    expect(h.reaped).toEqual([{ runId: "r-reap-nohandle", sessionId: undefined }]);
   });
 
   it("late-arrival after a create timeout (site: the create-guard-failure branch's own onLateArrival): sessionId is the late handle's sessionId", async () => {
@@ -469,11 +468,11 @@ describe("onReaped carries the observed sessionId at all three call sites (bash-
     const outcome = await p;
     await pump();
     expect(outcome.status).toBe("timed_out");
-    expect(h.reaped).toEqual([{ runId: "r-reap-late1", forkSessionFrom: undefined, sessionId: undefined }]);
+    expect(h.reaped).toEqual([{ runId: "r-reap-late1", sessionId: undefined }]);
     lateResolve(handle({ sessionId: "s-reap-late1" }));
     await pump();
     expect(h.reaped).toHaveLength(2);
-    expect(h.reaped[1]).toEqual({ runId: "r-reap-late1", forkSessionFrom: undefined, sessionId: "s-reap-late1" });
+    expect(h.reaped[1]).toEqual({ runId: "r-reap-late1", sessionId: "s-reap-late1" });
   });
 
   it("an aborted run past a successful create still reports the bound handle's sessionId through the normal reap path", async () => {
@@ -488,7 +487,7 @@ describe("onReaped carries the observed sessionId at all three call sites (bash-
     const outcome = await p;
     await pump();
     expect(outcome.status).toBe("aborted");
-    expect(h.reaped).toEqual([{ runId: "r-reap-abort", forkSessionFrom: undefined, sessionId: "s-reap-abort" }]);
+    expect(h.reaped).toEqual([{ runId: "r-reap-abort", sessionId: "s-reap-abort" }]);
   });
 });
 
@@ -539,9 +538,9 @@ describe("run() finally late-arrival fallback (the `if (createP)` branch; bash-t
         sealCalls.push(`${runId}:${sessionId}`);
         return makeFacts("late");
       },
-      onReaped: (runId, forkSessionFrom, sessionId) => {
+      onReaped: (runId, sessionId) => {
         order.push(`onReaped(${sessionId ?? "undefined"})`);
-        reaped.push({ runId, forkSessionFrom, sessionId });
+        reaped.push({ runId, sessionId });
       },
     };
     return { clock, runner: new RuntimeRunner(d), reaper, sealCalls, reaped };
@@ -590,14 +589,14 @@ describe("run() finally late-arrival fallback (the `if (createP)` branch; bash-t
       expect(order.indexOf("terminal-dispatch")).toBeLessThan(order.indexOf("late-register"));
       expect(h.sealCalls).toEqual([]);
       // Normal reap happened despite the throw (sessionId undefined — no handle).
-      expect(h.reaped).toEqual([{ runId: "r-finally-late", forkSessionFrom: undefined, sessionId: undefined }]);
+      expect(h.reaped).toEqual([{ runId: "r-finally-late", sessionId: undefined }]);
       // The late session still gets its defensive seal path: disposeLate +
       // onReaped with the late handle's sessionId.
       lateResolve(handle({ sessionId: "s-finally-late" }));
       await pump(5);
       expect(h.reaper.lateDisposals).toEqual(["r-finally-late:1:s-finally-late"]);
       expect(h.reaped).toHaveLength(2);
-      expect(h.reaped[1]).toEqual({ runId: "r-finally-late", forkSessionFrom: undefined, sessionId: "s-finally-late" });
+      expect(h.reaped[1]).toEqual({ runId: "r-finally-late", sessionId: "s-finally-late" });
       expect(unhandled).toEqual([]);
     } finally {
       process.off("unhandledRejection", onUnhandled);
@@ -625,7 +624,7 @@ describe("run() finally late-arrival fallback (the `if (createP)` branch; bash-t
       expect(outcome.status).toBe("failed");
       expect(outcome.error?.message).toBe("onLateArrival always explodes");
       await pump();
-      expect(h.reaped).toEqual([{ runId: "r-finally-throw", forkSessionFrom: undefined, sessionId: undefined }]);
+      expect(h.reaped).toEqual([{ runId: "r-finally-throw", sessionId: undefined }]);
       // Map cleanup still ran ⇒ the terminal snapshot stays readable (the
       // generation/cancel/handle entries were deleted, not leaked forever).
       expect(h.runner.getRunState("r-finally-throw")?.outcome).toBe(outcome);

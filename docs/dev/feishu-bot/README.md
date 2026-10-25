@@ -1,5 +1,7 @@
 # 飞书机器人：从聊天控制本机 pi 会话
 
+> 开发者要点（hub 实现不变式、残留风险、门禁）见文末「开发者要点」两节（自 AGENTS.md 下沉，原文搬运）。
+
 飞书机器人把私聊或群话题接到 **本机 Web Hub 已连接的 pi 会话**：选择会话、发请求、收到带会话标签的最终回复、回答 `ask_user`，以及收发附件。它不是另一个模型服务，也不需要公网 webhook 或额外 SDK 依赖；hub 使用 Node 22 原生 WebSocket 维持长连接。
 
 默认关闭。它与 [`feishuNotify`](../../../src/feishu-notify/) 的被动通知插件是两个功能：后者只发通知卡片，不接收指令；同时开启可能收到重复提醒。机器人只在主会话的 hub 中运行，子 agent 不另建连接。
@@ -146,3 +148,50 @@
 - [真租户验收清单](acceptance.md)（二维码、真实客户端卡片/表单、V12、网络重连等尚须用户执行）。
 - [设计与最终裁定](plan.md)、[V1–V12 探针事实](probe-results.md)、[F10 覆盖与自验报告](F10-report.md)。设计中旧 FB7 “proof-backed snapshot backfill” 已被 §R2-b 禁止，以后者与实现为准。
 - 离线集成：`timeout 180 npx vitest run tests/integration/web-hub-feishu-bot.test.ts`。使用真 hub 子进程/组装、真实本地 socket/WS/HTTP/上传与 fake-pi 子进程，不访问飞书或模型服务；不是租户验收通过的证据。
+
+## 开发者要点：Feishu bot
+
+**Feishu bot (feishu-bot plan v2 + §R2/rulings, F0–F10)**: `hub/feishu/*` under
+`src/web-hub/` owns the zero-dependency native-fetch/WebSocket pbbp2 long connection, durable
+receive-before-ACK, requests/bindings/dialogs/files/outbox and owner-only-by-default admission.
+Ask-user cards settled elsewhere are recalled once (durable attempt claim; failure ⇒ neutral Chinese
+PATCH); an answer from that Feishu card keeps 「已通过飞书作答」 (`by:"web"` + matching `cmdId`).
+Top-level `feishuBot.enabled` requires `webHub.enabled` + control; non-live (`/reload` then
+`/webhub restart`). `HubConfig.feishuBot` key absent ⇒ byte-identical legacy hub: no bot
+service/network/disk/idle count or `fsb.v1` (shared cap fold on both surfaces). One app ↔ one
+hub/active connection — V7 proved two connections SPLIT events. `bot.stop()` is FIRST in every
+cleanup path, with bounded stop/dispose before registry/uploads/spawn/HTTP teardown. Local-TUI-only
+`/webhub feishu setup|status|cancel|allow|deny|repair|reset` uses `fsb_req`/`fsb_res` on the trusted
+agent socket (no web/LAN admin); the hub ledger's private branded `fsb:<gen>:<openId>` namespace
+cannot be selected by ordinary origin fields. Reply proof requires token anchor → settle on one
+uninterrupted stream; restart/reconnect/gap ⇒ unattributed, never snapshot backfill or automatic
+redispatch. Gates: `tests/web-hub/{hub/feishu,hub/hub-feishu.test.ts}` + caps/idle/cleanup tests,
+`tests/integration/web-hub-feishu-bot.test.ts` (real child hub + fake Feishu/fake-pi), typecheck/build.
+Design/user/tenant gates: `docs/dev/feishu-bot/{plan,README,acceptance,probe-results,F10-report}.md`;
+V12 non-creator visibility and real client card/form behavior still need tenant acceptance.
+
+## 开发者要点：Cross-session mirror
+
+**Cross-session mirror (feishu-xs-mirror plan r3 + §R1–R3, `docs/dev/feishu-xs-mirror/`; packages P1/P2/P3, reports `P*-report.md`)**:
+`feishuBot.xsMirror` (default **true**, non-live: `/reload` then `/webhub restart`) pushes a read-only Feishu card to every
+bound **p2p** chat (never group/topic bindings, never offline ones) when a cross-session message lands in the bound session
+WITHOUT waking it — point-to-point, `message_channel` broadcast, reply (late ones marked), and `unknown{queued}` (marked
+「送达未确认」); `woke:true`, `none`, `accept_unverified`, deadline/late/duplicate acks never mirror. **A′ = no wire change**: no
+new frame, cap, PROTO bump or agent code — the hub observes its own xs relay (`hub/xs/mirror.ts`, `XsRouterDeps.onQuietDelivered`,
+fired on a microtask AFTER the sender's `xs_res`/audit/limits settled; observer errors are swallowed) and `hub.ts` passes the
+observer only when `feishuBot.xsMirror === true ∧ config.crossSession` (key absent otherwise ⇒ hub byte-identical; the three off
+goldens and `xs-router-v071-diff` stay frozen). Delivery is a bounded FIFO(16) with ONE worker (`hub/feishu/xs-mirror.ts`):
+per-card budgets (6/min·60/h per binding, 30 cards/min global, least-recently-served first), mirror outbox slots ≤16 queued /
+total <320, ≥256 KiB state headroom, work-lane headroom ⇒ security alerts/owner notices are never starved; overflow becomes a
+per-binding 「此前另有 N 条」 tail note (monotone `dropped` + `reported` watermark) and `xs-mirror-<reason>` counters in
+`info().counters.dropped`. Cards are schema-2.0, zero buttons/behaviors/nonces, untrusted-input banner, sender-claimed names
+marked 「对方自报，未核验」 (only hub-stamped alias is 「hub 核验」), body quoted + markdown-neutralized, 1500 code points,
+≤8 KiB. Mirror notices carry `requestId:"xsm:<hash>"`; **turning the switch off + `/webhub restart` purges stranded queued
+`xsm:` notices at `start()` (counted `xs-mirror-purged`)**. Residuals R1–R9 (plan §6): old-agent-spawned hub ⇒ off; whitelisted
+links stay clickable; deny'd users' bindings still receive (as done-notices do); queued messages may never reach context and
+queued replies can't be marked late; best-effort (lost/late ack ⇒ permanent miss, no resend of the xs message); budget/outbox
+expiry drops with a tail note; no post-settle dedupe; alias only when receiver `aliasUsable`; `/reload` alone doesn't clear
+stranded notices. Gates: `tests/web-hub/hub/feishu/{xs-mirror,xs-mirror-isolation}.test.ts`, `tests/web-hub/hub/xs-mirror-tap.test.ts`,
+`tests/integration/web-hub-feishu-bot.test.ts` (「feishu-xs-mirror」 block, I1–I16, real hub child × fake Feishu × fake xs
+agents; every no-card case is compared with the same input under `xsMirror:false`). Real-device checklist:
+`docs/dev/feishu-xs-mirror/acceptance.md`.

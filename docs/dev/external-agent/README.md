@@ -1,5 +1,7 @@
 # droid 外部 agent provider 使用说明
 
+> 开发者要点（进程模型、权限、计费、可用性门禁）见文末「开发者要点（自 AGENTS.md 下沉）」一节。
+
 pi-toolkit 可以把 [Factory droid](https://factory.ai) 当作虚拟 provider `droid/<model>`，像普通模型一样通过 `Agent({ model: "droid/<id>" })` 派发子 agent。
 默认关闭；关闭时 pi-toolkit 的行为与提示词字节不变。设计见 `plan.md` / `arch.md`，额度见 `quota-plan.md`。
 
@@ -70,7 +72,7 @@ Factory 额度是 standard / core 两个池，窗口为 month（HUD 紧凑标记
 - ~~resume 后模型不记得前情~~ **已修复（#31）**：根因是 `droid.initialize_session(sessionId)` 只续会话文件、不恢复 LLM 历史；resume 现改走 `droid.load_session`，真正恢复上下文。副作用（fail closed）：droid 原生会话文件（`~/.factory/sessions/…`）被清理/换机器时 resume 直接报 `config`（`Session not found -32004`），不再静默失忆续跑。详见 `resume-memory.md`。
 - resume 钉 transcript 头行记录的原 cwd；该目录（如已清理的 worktree）不存在则报 `config` 错误，不回落；外部 resume 不能与 isolation 同用。
 - **R10 残余风险**：droid 以完整权限（autonomy high，权限请求自动批准）运行，并读取用户全局 skills / AGENTS.md / MCP 配置，子 agent 可调用你配置的 MCP 工具。建议在 droid 侧为 exec 场景收紧 MCP；破坏性任务用 worktree 隔离。
-- 只读工具域（consult 专家、tidy）拒绝走 droid。
+- 只读工具域（tidy）拒绝走 droid。
 - D10 实测 turn 进行中关闭 stdin 不会让 droid 退出——已由 `sh` owner-watchdog 哨兵兜底，pi 被强杀后孤儿会被清理。
 - 并发受 `concurrencyLimit` 与 sysload 闸门约束（droid 二进制约 290MB/进程）。
 
@@ -93,3 +95,29 @@ PI_TOOLKIT_DROID_CONFORMANCE=1 npx vitest run tests/conformance/droid-protocol.t
 | 协议漂移（strict 拒绝） | 多为 droid 升级所致；跑 conformance 确认；临时可设 `protocolCheck: "warn"`；并按上文禁用自更新 |
 | 额度被拒                | `/agent` 看池与 `mo`；必要时 `quota.droidAllowExtraUsage`                                      |
 | 未知模型                | 看返回的候选；目录可能过期，等待重探或缩短 `catalogTtlS`                                       |
+
+## 开发者要点（自 AGENTS.md 下沉）
+
+`src/external-agent/` — external agent provider framework, currently one adapter: the virtual provider `droid/<model>`
+(Factory's `droid` CLI; design `docs/dev/external-agent/{plan,arch}.md`, user guide `docs/dev/external-agent/README.md`).
+Settings-gated: `externalAgents.droid.enabled` defaults false ⇒ no port/router/probe/disk write and a byte-identical
+stack/prompt (the always-on checks use only structural evidence: `diag.external`, the `<agentDir>/external-agent/` path).
+Ports are assembled in `src/stack.ts`; `RoutingSessionDriver` sends `droid/*` models to the droid adapter and everything
+else to the pi driver. Process model: `droid exec --input-format stream-jsonrpc` child (`process.ts`/`jsonrpc.ts`),
+wrapped by an `sh` owner-watchdog because D10 measured that closing stdin mid-turn does NOT make droid exit (idle EOF
+does); `DROID_EXITS_ON_STDIN_EOF=false`, auto-update disabled via child env (strong guarantee is the user's
+`~/.factory/update-policy.json`). Permissions: `autonomyLevel:"high"` with `autoRejectPermissionRequests:false` and a
+synchronous `proceed_once` auto-approve (R10: droid also reads the user's global skills/AGENTS.md/MCP). `toolDomain:"readonly"`
+is refused for droid (tidy can never use it — droid cannot be sandboxed read-only). Resume pins the
+transcript's header-line cwd (missing ⇒ `config` error, never a fallback; external resume + isolation rejected).
+Billing: droid usage × the underlying model's pi price (`pricing.ts`; family/consensus matches are `approx`; no match ⇒
+`unpriced` "all"/"partial", never inferred from costUsd≈0). The model catalog is probed lazily (an empty session is
+written under `~/.factory/sessions/<probe-cwd slug>/`). Quota: droid's two Factory pools gate spawn (see `src/quota/`).
+Provider availability (2026-10-20): port-local auth evidence from runs/probes or quota HTTP 401/402/403 hides droid
+from the available-models section (stable hub tail update) and fast-rejects new/nested/workflow spawns AND resumes;
+`/agent status` exposes the most recent active reason. Failures are source-scoped (run/catalog/quota), each with
+a 30min read-time TTL: quota success clears quota only; catalog success clears catalog only (metadata init can
+succeed without usable login/model access); a successful droid turn clears all three. Any active failure blocks.
+`/reload` re-evaluates, no persistence/timers. Missing binary/collision/strict drift remain blocked.
+Protocol drift is guarded by a strict/warn check plus `tests/conformance/droid-protocol.test.ts` (real droid, opt-in
+`PI_TOOLKIT_DROID_CONFORMANCE=1`; run it manually before any pi/droid upgrade).

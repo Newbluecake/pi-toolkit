@@ -45,11 +45,13 @@ fake.on("POST", "/callback/ws/endpoint", () => ({json: {code: 0, data: {
   }
 }}}));
 const ws = await createFakeWsServer();
+let netFail = false;
+fake.on("POST", "/open-apis/im/v1/messages", () => (netFail ? {networkError: true} : undefined));
 if (cfg.feishuBot) {
   cfg.feishuBot = normalizeFeishuBotHubConfig(cfg.feishuBot);
   const store = createCredentialStore({dir: paths.stateDir + "/feishu-bot"});
   await store.load();
-  if (!store.current()) {
+  if (!store.current() && !process.env.F10_NO_CREDS) {
     const saved = await store.commit({brand: "feishu", appId: fake.appId,
       appSecret: fake.appSecret, ownerOpenId: "ou_owner", botOpenId: "ou_bot"});
     if (!saved.ok) throw new Error("fixture credentials: " + saved.reason);
@@ -84,6 +86,8 @@ process.on("message", async (m) => {
     } else if (m.op === "resource") {
       fake.resources.set(m.key, {bytes: Buffer.from(m.bytes), contentType: m.contentType});
       reply(m.id, true);
+    } else if (m.op === "netFail") {
+      netFail = m.on === true; reply(m.id, true);
     } else if (m.op === "drop") {
       ws.peers.at(-1)?.drop(); reply(m.id, true);
     } else if (m.op === "stop") {
@@ -157,7 +161,18 @@ function newHome() {
   homes.add(home);
   return home;
 }
-async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean; lanSecurity?: boolean } = {}) {
+async function boot(
+  options: {
+    home?: string;
+    enabled?: boolean;
+    spawn?: boolean;
+    lanSecurity?: boolean;
+    /** feishu-xs-mirror P3: hub-level `crossSession` on (+ `feishuBot.xsMirror` when given). */
+    xs?: boolean;
+    xsMirror?: boolean;
+    noCreds?: boolean;
+  } = {},
+) {
   const home = options.home ?? newHome();
   const cwd = join(home, "project");
   mkdirSync(cwd, { recursive: true });
@@ -176,6 +191,7 @@ async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean
   const cfg = config({
     home,
     ...(launcher ? { launcher } : {}),
+    ...(options.xs ? { crossSession: { limits: { hubSendsPerMin: 600 } } } : {}),
     ...(options.lanSecurity
       ? { lan: { port: await freeTcpPort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] } }
       : {}),
@@ -187,6 +203,7 @@ async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean
             groupRootTopics: true,
             notify: "bound",
             ...(options.lanSecurity ? { securityAlerts: true } : {}),
+            ...(options.xsMirror === undefined ? {} : { xsMirror: options.xsMirror }),
             spawnScope: "known",
             debounceMs: 0,
             staleMessageS: 300,
@@ -218,6 +235,7 @@ async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean
       XDG_RUNTIME_DIR: "",
       PI_CODING_AGENT_DIR: join(home, ".pi/agent"),
       F10_CONFIG: JSON.stringify(cfg),
+      ...(options.noCreds ? { F10_NO_CREDS: "1" } : {}),
     },
   });
   children.add(child);
@@ -301,11 +319,20 @@ async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean
   const inspect = () => rpc<Inspection>("inspect");
   const sent = (needle: string) =>
     until(inspect, (s) => s.sent.some((m) => String(m.body.content).includes(needle)), `sent ${needle}`);
-  if (options.enabled !== false) await until(inspect, (s) => s.livePeers === 1, "native Feishu websocket open");
+  if (options.enabled !== false && !options.noCreds)
+    await until(inspect, (s) => s.livePeers === 1, "native Feishu websocket open");
   const disk = () => JSON.parse(readFileSync(join(paths.stateDir, "feishu-bot/state.json"), "utf8"));
   let id = 0;
-  const send = (text: string, over: Parameters<typeof messageEnvelope>[2] = {}, messageId = `m-${++id}`) =>
-    rpc("send", { raw: messageEnvelope(messageId, text, { ...over, createdAt: String(Date.now()) }) });
+  const send = (
+    text: string,
+    over: Parameters<typeof messageEnvelope>[2] = {},
+    messageId = `m-${++id}`,
+    chatId?: string,
+  ) => {
+    const raw = messageEnvelope(messageId, text, { ...over, createdAt: String(Date.now()) });
+    if (chatId !== undefined) raw.event.message.chat_id = chatId;
+    return rpc("send", { raw });
+  };
   async function agent(sessionId = "session-one", name = "One") {
     const c = await connectClient(paths.socketPath);
     agents.add(c);
@@ -355,7 +382,114 @@ async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean
     await send(`/use ${sessionId}`, over);
     await until(inspect, (s) => s.sent.slice(before).some((m) => String(m.body.content).includes("已绑定")), "binding");
   }
-  return { home, cwd, paths, ready, rpc, inspect, sent, disk, send, agent, bind, stop, crash };
+  /** Bind a distinct p2p chat (`chatId`) to `sessionId` (one binding per chat). */
+  async function bindChat(chatId: string, sessionId: string) {
+    const before = (await inspect()).sent.length;
+    await send(`/use ${sessionId}`, {}, `bind-${chatId}-${++id}`, chatId);
+    await until(inspect, (s) => s.sent.slice(before).some((m) => String(m.body.content).includes("已绑定")), "binding");
+  }
+  const XS_CAPS = ["ev.v1", "cmd.v1", "dialog.v1", "upload.v1", "xs.v1", "xs.reply.v1", "xs.channel.v1"];
+  const XS_LIMITS = {
+    sendsOutPerMin: 60,
+    sendsOutPerHour: 600,
+    wakesOutPerHour: 6,
+    pairMinIntervalMs: 5_000,
+    pairWakesPerHour: 2,
+    inFlightPerSession: 16,
+    listPerMin: 60,
+    broadcastsOutPerHour: 6,
+    broadcastMinIntervalMs: 10_000,
+    broadcastWakesOutPerHour: 2,
+  };
+  /** A fake xs-capable agent: joined member, scripted sender (`req`) and receiver (`nextDeliver`/`ack`). */
+  async function xsAgent(sessionId: string, name: string, o: { channels?: string[]; receive?: string } = {}) {
+    const c = await connectClient(paths.socketPath);
+    agents.add(c);
+    c.send(
+      hello({
+        agentId: { pid: process.pid, nonce: `f10-xs-${++rid}-AAAAAAAAAA` },
+        cwd,
+        caps: XS_CAPS,
+      }),
+    );
+    await c.waitFrame((f) => f.t === "hello_ack");
+    c.send({ t: "session", sessionId, cwd, name, reason: "startup", leafId: null, mode: "tui" });
+    c.send({
+      t: "xs_member",
+      sessionId,
+      epoch: 1,
+      joined: true,
+      receive: o.receive ?? "deliver",
+      limits: XS_LIMITS,
+      ...(o.channels === undefined ? {} : { channels: o.channels }),
+    });
+    c.send({ t: "fsb_req", rid: `xs-barrier-${rid}`, op: "info" });
+    await c.waitFrame((f) => f.t === "fsb_res" && f.rid === `xs-barrier-${rid}`);
+    let seenDeliver = 0;
+    const delivers = () => (c.frames as any[]).filter((f) => f.t === "xs_deliver");
+    return {
+      c,
+      sessionId,
+      req(over: Record<string, unknown>, ms = 15_000): Promise<Record<string, any>> {
+        const reqId = `xr-${++rid}`;
+        c.send({ t: "xs_req", rid: reqId, op: "send", origin: { sessionId, epoch: 1 }, ...over });
+        return c.waitFrame((f) => f.t === "xs_res" && f.rid === reqId, ms) as Promise<Record<string, any>>;
+      },
+      async nextDeliver(): Promise<any> {
+        await until(
+          async () => delivers().length,
+          (n) => n > seenDeliver,
+          `xs_deliver for ${sessionId}`,
+        );
+        return delivers()[seenDeliver++];
+      },
+      ack(d: any, over: Record<string, unknown> = {}) {
+        c.send({ t: "xs_ack", rid: d.rid, xid: d.xid, effect: "applied", woke: false, ...over });
+      },
+    };
+  }
+  type XsA = Awaited<ReturnType<typeof xsAgent>>;
+  /** Mirror cards (not binding/notice chatter) the fake Feishu considers delivered, with their chat. */
+  const cards = async (marker?: string) => {
+    const s = await inspect();
+    return s.sent
+      .map((m) => ({ m, content: String(m.body.content) }))
+      .filter((x) => x.content.includes("跨会话来信") && (marker === undefined || x.content.includes(marker)))
+      .map((x) => ({
+        ...x,
+        chat: String(s.calls.find((c) => c.json?.uuid === (x.m as { uuid?: string }).uuid)?.json?.receive_id ?? ""),
+      }));
+  };
+  const mirrorDropped = async (a: XsA): Promise<Record<string, number>> => {
+    a.c.send({ t: "fsb_req", rid: `info-${++rid}`, op: "info" });
+    const r = (await a.c.waitFrame((f) => f.t === "fsb_res" && f.rid === `info-${rid}`)) as any;
+    return r.data.counters.dropped;
+  };
+  const quiet = (ms = 700) =>
+    new Promise<void>((r) => {
+      const t = setTimeout(r, ms);
+      t.unref();
+    });
+  return {
+    home,
+    cwd,
+    paths,
+    ready,
+    rpc,
+    inspect,
+    sent,
+    disk,
+    send,
+    agent,
+    bind,
+    bindChat,
+    xsAgent,
+    cards,
+    mirrorDropped,
+    quiet,
+    stop,
+    crash,
+  };
 }
 
 // describe-level timeout includes child startup/shutdown and slow CI scheduling; every inner wait
@@ -1067,6 +1201,7 @@ describe("F10 Feishu bot — real hub child assembly", () => {
         "runtx.v1",
         "quota.pools.v1",
         "todo.archive.v1",
+        "cmd.history.v1", // web-hub cmd-history H1 (b6cff217): unconditional hub cap, unrelated to the bot
         "version.v1",
       ]),
     );
@@ -1092,4 +1227,324 @@ describe("F10 Feishu bot — real hub child assembly", () => {
       sse.close();
     }
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// feishu-xs-mirror P3 (plan §7.2 I1–I16): real hub child (`crossSession` on) + fake Feishu + fake xs
+// agents (raw sockets speaking xs_member / xs_req / xs_deliver / xs_ack). The assertion surface is the
+// fake Feishu's delivered messages and `fsb_req info` counters; every "no card" case is compared with the
+// SAME input run under `xsMirror:false` (sender-visible `xs_res` must be identical, never just "0 cards").
+const normRes = (r: Record<string, any>) => ({
+  ok: r.ok,
+  ...(r.code === undefined ? {} : { code: r.code }),
+  ...(r.effect === undefined ? {} : { effect: r.effect }),
+  ...(r.reason === undefined ? {} : { reason: r.reason }),
+  ...(r.wakeDowngraded === undefined ? {} : { wakeDowngraded: r.wakeDowngraded }),
+  ...(r.fanout === undefined ? {} : { fanout: r.fanout }),
+  ...(r.results === undefined
+    ? {}
+    : {
+        results: (r.results as any[])
+          .map((x) => ({ effect: x.effect, reason: x.reason, woke: x.woke }))
+          .sort((p, q) => JSON.stringify(p).localeCompare(JSON.stringify(q))),
+      }),
+});
+const sortedJson = (x: unknown) => JSON.stringify(x, (_k, v) => (Array.isArray(v) ? v : v));
+
+describe("feishu-xs-mirror (A′) — real hub × fake Feishu × fake xs agents", () => {
+  /** I1–I5, I7, I10: one boot, many receivers (each bound to its own p2p chat); returns what the sender and Feishu saw. */
+  async function pointToPoint(xsMirror: boolean) {
+    const h = await boot({ xs: true, xsMirror });
+    const S = await h.xsAgent("xs-sender", "Sender");
+    const mk = async (n: number, receive = "deliver") => {
+      const r = await h.xsAgent(`xs-recv-${n}`, `Recv${n}`, { receive });
+      return r;
+    };
+    const R = [] as XsAgent[];
+    for (let n = 1; n <= 8; n++) R.push(await mk(n, n === 2 ? "wake" : "deliver"));
+    for (let n = 1; n <= 6; n++) await h.bindChat(`chat${n}`, `xs-recv-${n}`);
+    await h.bind("xs-recv-7", { chatType: "group", threadId: "t7", mentions: true }); // group topic only
+    await h.bindChat("chat8", "xs-recv-8"); // p2p …
+    await h.bind("xs-recv-8", { chatType: "group", threadId: "t8", mentions: true }); // … + group topic
+    const run = async (r: XsAgent, over: Record<string, unknown>, ackOver: Record<string, unknown>) => {
+      const p = S.req({ to: r.sessionId, ...over });
+      r.ack(await r.nextDeliver(), ackOver);
+      return normRes(await p);
+    };
+    const long = "L".repeat(3000);
+    const res = [
+      await run(R[0]!, { text: "I1-BODY" }, {}),
+      await run(R[1]!, { text: "I2-BODY", wake: true, level: 0 }, { woke: true }),
+      await run(R[2]!, { text: "I3A-BODY" }, { effect: "none", reason: "rejected" }),
+      await run(R[3]!, { text: "I3B-BODY" }, { effect: "unknown", reason: "accept_unverified" }),
+      await run(R[4]!, { text: "I4-BODY" }, { effect: "unknown", reason: "queued" }),
+      await run(R[5]!, { text: long }, {}),
+      await run(R[6]!, { text: "I5A-BODY" }, {}),
+      await run(R[7]!, { text: "I5B-BODY" }, {}),
+    ];
+    if (xsMirror) await until(h.cards, (c) => c.length >= 4, "mirror cards");
+    await h.quiet(900);
+    const all = await h.cards();
+    const caps = h.ready.caps;
+    await h.stop();
+    return { res, all, caps };
+  }
+  type XsAgent = Awaited<ReturnType<Awaited<ReturnType<typeof boot>>["xsAgent"]>>;
+
+  it("I1–I5/I7/I10: quiet messages mirror to bound p2p chats only; wake/none/unknown/group never; on/off sender-identical", async () => {
+    const on = await pointToPoint(true);
+    const off = await pointToPoint(false);
+    // I7: no cap change; sender-visible results identical with the mirror off.
+    expect(sortedJson(on.caps)).toBe(sortedJson(off.caps));
+    expect(sortedJson(on.res)).toBe(sortedJson(off.res));
+    expect(off.all).toEqual([]);
+    // Expected effects of the inputs (guards the parity above against both sides being wrong).
+    expect(on.res.map((r) => r.effect)).toEqual([
+      "applied",
+      "applied",
+      "none",
+      "unknown",
+      "unknown",
+      "applied",
+      "applied",
+      "applied",
+    ]);
+    const byBody = (b: string) => on.all.filter((c) => c.content.includes(b));
+    // I1
+    const i1 = byBody("I1-BODY");
+    expect(i1).toHaveLength(1);
+    expect(i1[0]!.chat).toBe("chat1");
+    for (const needle of [
+      "⚠️ 来自另一会话的消息",
+      "对方自报，未核验",
+      "Sender",
+      "xs-sender",
+      "点对点消息",
+      "在 web 查看",
+    ])
+      expect(i1[0]!.content).toContain(needle);
+    expect(i1[0]!.content).not.toMatch(/"tag":"button"|"behaviors"|callback/);
+    // I2/I3: woke:true, none{rejected}, unknown{accept_unverified} ⇒ nothing
+    for (const b of ["I2-BODY", "I3A-BODY", "I3B-BODY"]) expect(byBody(b)).toEqual([]);
+    // I4
+    const i4 = byBody("I4-BODY");
+    expect(i4).toHaveLength(1);
+    expect(i4[0]!.content).toContain("送达未确认");
+    // I5: group-only ⇒ none; p2p + group ⇒ the p2p chat only
+    expect(byBody("I5A-BODY")).toEqual([]);
+    const i5b = byBody("I5B-BODY");
+    expect(i5b).toHaveLength(1);
+    expect(i5b[0]!.chat).toBe("chat8");
+    // I10: 3000-char body ⇒ truncated, ≤ 8192 bytes
+    const big = on.all.filter((c) => c.content.includes("LLLLLLLL"));
+    expect(big).toHaveLength(1);
+    expect(big[0]!.content).toContain("正文已截断");
+    expect(Buffer.byteLength(big[0]!.content, "utf8")).toBeLessThanOrEqual(8192);
+    expect(on.all).toHaveLength(4); // I1, I4, I5B, I10 — nothing else
+  }, 90_000);
+
+  it("I11/I12: on-time reply → 「回复」, late reply → 「回复（迟到）」, queued reply → 「回复」+ 送达未确认 (never late)", async () => {
+    const h = await boot({ xs: true, xsMirror: true });
+    const P = await h.xsAgent("xs-asker", "Asker");
+    await h.bindChat("chatP", "xs-asker");
+    const reply = async (n: number, rid: string, text: string, ackOver: Record<string, unknown>) => {
+      const q = await h.xsAgent(`xs-replier-${n}`, `Replier${n}`);
+      const p = q.req({ to: "xs-asker", replyTo: rid, text });
+      P.ack(await P.nextDeliver(), ackOver);
+      return normRes(await p);
+    };
+    expect(await reply(1, "q0123456789abcdef01", "I11-REPLY", {})).toMatchObject({ ok: true, effect: "applied" });
+    await reply(2, "q0123456789abcdef02", "I12-LATE", { reason: "reply_late" });
+    await reply(3, "q0123456789abcdef03", "I12-QUEUED", { effect: "unknown", reason: "queued" });
+    await until(h.cards, (c) => c.length >= 3, "three reply cards");
+    await h.quiet(500);
+    const all = await h.cards();
+    expect(all).toHaveLength(3);
+    const get = (b: string) => all.find((c) => c.content.includes(b))!;
+    expect(get("I11-REPLY").content).toContain("**类型** 回复");
+    expect(get("I11-REPLY").content).not.toContain("迟到");
+    expect(get("I12-LATE").content).toContain("回复（迟到）");
+    expect(get("I12-QUEUED").content).toContain("**类型** 回复");
+    expect(get("I12-QUEUED").content).not.toContain("迟到");
+    expect(get("I12-QUEUED").content).toContain("送达未确认");
+    for (const c of all) expect(c.chat).toBe("chatP");
+  }, 60_000);
+
+  it("I13: an ack after the 5 s hub deadline never mirrors (sender saw deliver_deadline); a duplicate ack mirrors once", async () => {
+    const h = await boot({ xs: true, xsMirror: true });
+    const R = await h.xsAgent("xs-recv-late", "RecvLate");
+    await h.bindChat("chatL", "xs-recv-late");
+    const S1 = await h.xsAgent("xs-s1", "S1");
+    const S2 = await h.xsAgent("xs-s2", "S2");
+    const p = S1.req({ to: "xs-recv-late", text: "I13-LATE-ACK" });
+    const d = await R.nextDeliver(); // never acked within the deadline
+    const res = await p; // hub answers after XS_HUB_DELIVER_MS
+    expect(JSON.stringify(res)).toContain("deliver_deadline");
+    R.ack(d); // late applied ack
+    const p2 = S2.req({ to: "xs-recv-late", text: "I13-DUP-ACK" });
+    const d2 = await R.nextDeliver();
+    R.ack(d2);
+    R.ack(d2);
+    expect(await p2).toMatchObject({ ok: true, effect: "applied" });
+    await until(
+      () => h.cards("I13-DUP-ACK"),
+      (c) => c.length >= 1,
+      "dup-ack card",
+    );
+    await h.quiet(900);
+    expect(await h.cards("I13-DUP-ACK")).toHaveLength(1);
+    expect(await h.cards("I13-LATE-ACK")).toEqual([]);
+  }, 60_000);
+
+  /** I6/I14: broadcasts. Recipients per channel get their own p2p chat; `acks[i]` scripts recipient i. */
+  async function broadcasts(xsMirror: boolean) {
+    const h = await boot({ xs: true, xsMirror });
+    const mk = (id: string, ch: string) => h.xsAgent(id, id, { channels: ["default", ch] });
+    const B1 = await mk("xs-b1", "team");
+    const T = [await mk("xs-t1", "team"), await mk("xs-t2", "team")];
+    const B2 = await mk("xs-b2", "ops");
+    const O = [await mk("xs-o1", "ops"), await mk("xs-o2", "ops"), await mk("xs-o3", "ops"), await mk("xs-o4", "ops")];
+    for (const [i, r] of [...T, ...O].entries()) await h.bindChat(`bc${i}`, r.sessionId);
+    const cast = async (
+      s: XsAgent,
+      channel: string,
+      text: string,
+      rcpts: XsAgent[],
+      acks: Array<Record<string, unknown>>,
+    ) => {
+      const p = s.req({ op: "broadcast", channel, text });
+      for (const [i, r] of rcpts.entries()) r.ack(await r.nextDeliver(), acks[i]);
+      return normRes(await p);
+    };
+    const i6 = await cast(B1, "team", "I6-BCAST", T, [{}, {}]);
+    const i14 = await cast(B2, "ops", "I14-MIXED", O, [
+      {},
+      { effect: "none", reason: "rejected" },
+      { effect: "unknown", reason: "accept_unverified" },
+      { woke: true },
+    ]);
+    if (xsMirror) await until(h.cards, (c) => c.length >= 3, "broadcast cards");
+    await h.quiet(900);
+    const all = await h.cards();
+    await h.stop();
+    return { i6, i14, all };
+  }
+  it("I6/I14: broadcast mirrors one card per quiet recipient (bound chat each); mixed results mirror only the applied one; on/off identical for the sender", async () => {
+    const on = await broadcasts(true);
+    const off = await broadcasts(false);
+    expect(sortedJson([on.i6, on.i14])).toBe(sortedJson([off.i6, off.i14]));
+    expect(off.all).toEqual([]);
+    expect(on.i14).toMatchObject({ effect: "unknown", reason: "partial" });
+    const six = on.all.filter((c) => c.content.includes("I6-BCAST"));
+    expect(six.map((c) => c.chat).sort()).toEqual(["bc0", "bc1"]);
+    for (const c of six) expect(c.content).toContain("频道广播 `#team`");
+    const mixed = on.all.filter((c) => c.content.includes("I14-MIXED"));
+    expect(mixed.map((c) => c.chat)).toEqual(["bc2"]); // only the first ops recipient applied/quiet
+    expect(mixed[0]!.content).toContain("频道广播 `#ops`");
+    expect(on.all).toHaveLength(3);
+  }, 90_000);
+
+  it("I8: 7 messages into one binding within a minute ⇒ 6 cards and exactly one xs-mirror-rate drop", async () => {
+    const h = await boot({ xs: true, xsMirror: true });
+    const R = await h.xsAgent("xs-rate-recv", "RateRecv");
+    await h.bindChat("chatR", "xs-rate-recv");
+    for (let i = 1; i <= 7; i++) {
+      const s = await h.xsAgent(`xs-rate-s${i}`, `S${i}`);
+      const p = s.req({ to: "xs-rate-recv", text: `I8-${i}` });
+      R.ack(await R.nextDeliver());
+      expect(await p).toMatchObject({ ok: true, effect: "applied" });
+    }
+    await until(h.cards, (c) => c.length >= 6, "six cards");
+    const dropped = await until(
+      () => h.mirrorDropped(R),
+      (d) => d["xs-mirror-rate"] === 1,
+      "rate drop counted",
+    );
+    await h.quiet(700);
+    expect(await h.cards()).toHaveLength(6);
+    expect(dropped["xs-mirror-rate"]).toBe(1);
+  }, 60_000);
+
+  it("I9: Feishu without credentials / feishuBot off — xs round trips are unchanged and nothing is sent", async () => {
+    for (const opts of [
+      { xs: true, xsMirror: true, noCreds: true },
+      { xs: true, enabled: false },
+    ]) {
+      const h = await boot(opts);
+      const S = await h.xsAgent("xs-nc-s", "S");
+      const R = await h.xsAgent("xs-nc-r", "R");
+      const p = S.req({ to: "xs-nc-r", text: "I9-BODY" });
+      R.ack(await R.nextDeliver());
+      expect(await p).toMatchObject({ ok: true, effect: "applied" });
+      await h.quiet(500);
+      expect((await h.inspect()).sent).toEqual([]);
+      await h.stop();
+    }
+  }, 60_000);
+
+  /** I15: two queued mirror notices persisted while Feishu is unreachable, then a restart. */
+  async function stranded(restartMirror: boolean) {
+    const home = newHome();
+    const h1 = await boot({ home, xs: true, xsMirror: true });
+    const R = await h1.xsAgent("xs-str-recv", "StrRecv");
+    await h1.bindChat("chatS", "xs-str-recv");
+    await h1.rpc("netFail", { on: true });
+    for (let i = 1; i <= 2; i++) {
+      const s = await h1.xsAgent(`xs-str-s${i}`, `S${i}`);
+      const p = s.req({ to: "xs-str-recv", text: `I15-${i}` });
+      R.ack(await R.nextDeliver());
+      expect(await p).toMatchObject({ ok: true, effect: "applied" });
+    }
+    const queued = () =>
+      Object.values((h1.disk().outbox ?? {}) as Record<string, any>).filter(
+        (p) => p.state === "queued" && String(p.requestId ?? "").startsWith("xsm:"),
+      ).length;
+    await until(
+      async () => queued(),
+      (n) => n === 2,
+      "two persisted mirror notices",
+    );
+    expect(await h1.cards()).toEqual([]);
+    await h1.crash();
+    const h2 = await boot({ home, xs: true, xsMirror: restartMirror });
+    const probe = await h2.agent("probe-session", "Probe");
+    return { h2, probe };
+  }
+  it("I15: restart with xsMirror:false purges stranded mirror notices (counted, never sent); xsMirror:true still sends them", async () => {
+    const off = await stranded(false);
+    await until(
+      () => off.h2.mirrorDropped(off.probe as any),
+      (d) => d["xs-mirror-purged"] === 2,
+      "purged==2",
+    );
+    await off.h2.quiet(1500);
+    expect(await off.h2.cards()).toEqual([]);
+    await off.h2.stop();
+
+    const on = await stranded(true);
+    await until(on.h2.cards, (c) => c.length === 2, "stranded notices sent on restart (control)");
+    expect((await on.h2.mirrorDropped(on.probe as any))["xs-mirror-purged"]).toBeUndefined();
+  }, 120_000);
+
+  it("I16: one session bound to 10 p2p chats, 4 messages ⇒ ≤30 cards/min globally, every binding served, drops accounted", async () => {
+    const h = await boot({ xs: true, xsMirror: true });
+    const R = await h.xsAgent("xs-fan", "Fan");
+    for (let i = 0; i < 10; i++) await h.bindChat(`fan${i}`, "xs-fan");
+    let want = 0;
+    for (let m = 1; m <= 4; m++) {
+      const s = await h.xsAgent(`xs-fan-s${m}`, `S${m}`);
+      const p = s.req({ to: "xs-fan", text: `I16-${m}` });
+      R.ack(await R.nextDeliver());
+      expect(await p).toMatchObject({ ok: true, effect: "applied" });
+      want = Math.min(want + 10, 30);
+      await until(h.cards, (c) => c.length >= want, `cards after message ${m}`, 20_000);
+    }
+    await h.quiet(1500);
+    const all = await h.cards();
+    expect(all.length).toBeLessThanOrEqual(30);
+    expect(all).toHaveLength(30);
+    expect(new Set(all.map((c) => c.chat)).size).toBe(10); // every binding got ≥1
+    const d = await h.mirrorDropped(R);
+    expect((d["xs-mirror-rate"] ?? 0) + (d["xs-mirror-cap"] ?? 0)).toBe(40 - all.length);
+  }, 120_000);
 });

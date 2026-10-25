@@ -1,15 +1,15 @@
 /**
- * consult A/B instrumentation plan (docs/dev/consult/ab-instrumentation-plan.md
- * §4/§5 P1a): the `"verdict/v1"` structured-output schema preset for
- * verifier/reviewer acceptance conclusions, plus host-side rendering of a
- * captured structured result. Defined exactly once here. Pi-free.
+ * The `"verdict/v1"` structured-output schema preset for verifier/reviewer
+ * acceptance conclusions, plus host-side rendering of a captured structured
+ * result. Defined exactly once here. Pi-free. Introduced by the (now removed,
+ * #40) consult A/B instrumentation; it outlives that subsystem as the shared
+ * verifier/reviewer verdict preset.
  *
  * All strings inside the schema (enum values, `description`) are English
  * only: the schema is injected into the subagent's StructuredOutput tool
  * parameters (model-visible) and is scanned by
- * `tests/tools/model-facing-strings.test.ts`'s `collectDescriptions`. The
- * Chinese cross-reference (pass=通过、conditional_pass=有条件通过、reject=打回)
- * lives in `skills/dev-flow/references/consult-ab.md` (P4), never here.
+ * `tests/tools/model-facing-strings.test.ts`'s `collectDescriptions`. Any
+ * localized rendering of the verdict values belongs to the caller, never here.
  */
 import { validateAgainstSchema } from "./json-schema.js";
 import type { JsonSchema } from "./types.js";

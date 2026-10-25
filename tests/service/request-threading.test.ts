@@ -50,63 +50,6 @@ describe("threadThroughRequestFields", () => {
     expect(threadThroughRequestFields({ type: "worker", prompt: "hi" })).toEqual({});
   });
 
-  it("consult (plan §4.3): forkSessionFrom is threaded, consultExperts is not", () => {
-    const req: SpawnRequest = {
-      type: "explorer",
-      prompt: "question",
-      parentRunId: "r_ASKER01",
-      forkSessionFrom: "/tmp/consult/fork-1.jsonl",
-      consultExperts: [{ runId: "r_EXPERT01", sessionFile: "/tmp/expert.jsonl", agentType: "explorer" }],
-      consultSnapshot: {
-        tools: [],
-        systemSections: {},
-        sourceSessionId: "s-expert",
-      },
-    };
-    const out = threadThroughRequestFields(req);
-    expect(out).toEqual({ parentRunId: "r_ASKER01", forkSessionFrom: "/tmp/consult/fork-1.jsonl" });
-    // consultExperts is adapter-only (injection decision); it must never reach
-    // the execution layer verbatim.
-    expect(Object.prototype.hasOwnProperty.call(out, "consultExperts")).toBe(false);
-    // The C2 snapshot is adapter-only too; it must never cross the runner hop.
-    expect(Object.prototype.hasOwnProperty.call(out, "consultSnapshot")).toBe(false);
-    // Gate C is what makes the threaded field actually land on the runner's
-    // request type — assert the round-trip target accepts it (T-10).
-    const resolved: Pick<ResolvedSpawnRequest, "forkSessionFrom"> = { forkSessionFrom: out.forkSessionFrom };
-    expect(resolved.forkSessionFrom).toBe("/tmp/consult/fork-1.jsonl");
-  });
-
-  it.each(["fork", "resume"] as const)("consultAnchor is NOT_THREADED for %s and never changes the prompt", (mode) => {
-    const req: SpawnRequest = {
-      type: "explorer",
-      prompt: "host-generated consult question",
-      consultAnchor: {
-        prompt: "anchor-only-secret-sentinel",
-        base: {
-          k: 4,
-          block: 1,
-          blockType: "text",
-          blockHash: "block-hash",
-          prefixHash: "prefix-hash",
-          systemHash: "system-hash",
-          toolsHash: "tools-hash",
-          route: { provider: "cr-anthropic", model: "claude-sonnet-5", api: "anthropic-messages" },
-          ttl: "1h",
-        },
-      },
-      ...(mode === "fork" ? { forkSessionFrom: "/tmp/fork.jsonl" } : { resumeFrom: "r_old" }),
-    };
-    const before = JSON.stringify(req);
-    const out = threadThroughRequestFields(req);
-    expect(out).toEqual(mode === "fork" ? { forkSessionFrom: "/tmp/fork.jsonl" } : { resumeFrom: "r_old" });
-    expect(out).not.toHaveProperty("consultAnchor");
-    expect(out).not.toHaveProperty("prompt");
-    expect(JSON.stringify(out)).not.toContain("anchor-only-secret-sentinel");
-    expect(JSON.stringify(out)).not.toContain("prefix-hash");
-    expect(JSON.stringify(req)).toBe(before);
-    expect(req.prompt).toBe("host-generated consult question");
-  });
-
   it("fabric-cross-session §4.1 (S0): wakeOrigin is NOT_THREADED (a child never sees the claimToken); trackInput is THREADED to the runner", () => {
     const req: SpawnRequest = {
       type: "worker",

@@ -44,7 +44,7 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
   gpt-6.1-sol 开发的包（开发双首选，2026-09：与 sonnet 并列，多包并行时按包分摊——更便宜、上下文 1.05M），
   验收改派 Claude 系（sonnet）。
 - **异源**：评审模型 ≠ 方案模型；验收模型 ≠ 开发模型，走回退链时跳过与被评对象同系的模型。开发用了 GLM 的包，
-  验收不得再派 GLM（改 kimi-k3 / deepseek-flash / Claude 系）；droid 底层是 GLM 的开发包同理。
+  验收不得再派 GLM（改 kimi-k3 / deepseek-flash / Claude 系）。
 - **别因「列表里没有」静默换模型**：系统提示的可用模型列表优先取会话的 scoped models（pi settings 的
   `enabledModels`），没列进去的模型照样已注册、照样能派。按本表精确 ID 直接派，派发被拒才按回退链降级并明说原因
   （2026-10-10 教训：看列表没有就换模型顶替，单日传输失败 4 次）。
@@ -54,29 +54,19 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
 派单前参考系统注入的 [quota] 行：订阅额度窗口内不用就作废，**优先用完订阅**。L1/L2（预警）只是提示，
 派单照常；只有 L3（≥90% 或即将耗尽）才跳过该 provider。
 
-- **GLM 订阅优先（2026-10-07 用户拍板）**：zai 订阅有余量时，凡 GLM 在候选内的阶段（代码探索、前端开发、
+- **GLM 订阅优先（2026-10-07 用户拍板）**：zai 订阅有余量时，凡 GLM 在候选内的阶段（代码探索、
   开发实施、任务验收的回退链），GLM 升为该阶段**首选**，排在 sonnet / gpt 系等按量线之前；例外是异源约束（见上）。
+  **前端开发不适用**（2026-10-24 用户令）：前端首选 kimi-k3（订阅），GLM 排第二。
 - 其余 [quota] 给出的替代只是**候选**（按订阅优先排序）：额度层不知道任务需求，先判断候选是否胜任本阶段，
   胜任就优先用订阅，不胜任就按阶段表另选，不为用额度而硬凑。额度行不存在时按表中默认顺序。
 - **kimi**：kimi-coding / zai 订阅常耗尽；额度耗尽或 L3 预警时回退按量线（cr-anthropic 等）默认顺序。
   **验证模型订阅将尽**（如 kimi 7d ≥80%）时，验收优先 deepseek-flash。
 - GLM 仍在候选内的阶段可改派 `cr-glm/glm-5.3`（同模型、API 按量计费，按表中常规位次用，不升首选）。
 
-### droid 订阅线（`droid/<model>`，须 `externalAgents.droid.enabled`；2026-10-15 用户拍板进路由表）
+### droid 订阅线（已移除）
 
-Factory 订阅额度不用也作废。[quota] 行显示 droid 池有余量（未触 L3）时，**代码探索 / 前端开发 / 开发实施**
-排在 zai GLM 订阅之后、按量线之前。
-
-- 池内顺序：core 池（Factory 托管开源模型，`droid/glm-5.3` → `droid/kimi-k3`）先于 standard 池
-  （`droid/claude-sonnet-5-5`，疑难再 `droid/claude-opus-5-5`）。
-- **core→standard 回落**：core 池耗尽后 core 模型仍可跑、按 standard 额度计费；standard 池被拦时按 [quota] 建议改 core 池。
-- **评审 / 验收 / 方案 / consult 专家一律不用 droid**（只读无法保证、不能挂专家、不能跑 tidy）；验收仍用 pi 模型（异源，禁 GPT 系照旧）。
-- 经 `Agent({model:"droid/<id>"})` 派发；它以完整权限运行（读用户全局 skills/MCP），破坏性任务建议 worktree 隔离；
-  resume 钉原目录（worktree 被清后不可 resume）；额度受 Factory standard/core 两池闸门约束（触线会被拒绝派发）。
-- **可用性（2026-10-20）**：droid 不可用（未启用、未登录/凭据失效 `No access token`、Factory 401/402/403、二进制缺失）时，
-  pi-toolkit 不会在 Available models 里列出 droid 模型，派发也会被立即拒绝——**列表里没有 droid 一节就整条跳过 droid 线**，
-  直接走下一级（sonnet / gpt-6.1-sol / kimi）。派发后秒挂同理：本会话不再重试 droid，提醒用户 `droid` 登录后 `/reload`。
-- 详见 `docs/dev/external-agent/README.md`。
+2026-10-24 用户令：droid（`droid/<model>`）移出路由表，任何阶段都不派；`externalAgents.droid.enabled` 保持 false。
+历史设计见 `docs/dev/external-agent/README.md`。
 
 ## 失败处置：传输故障 vs 安全策略拒绝
 
@@ -105,3 +95,5 @@ Factory 订阅额度不用也作废。[quota] 行显示 droid 池有余量（未
 | 2026-10-18 | 验收次选 deepseek-v4-pro → deepseek-flash（用户要求）                    |
 | 2026-10-19 | cr-response 恢复：gpt-6.1-sol 备线 `cr-response/gpt-6.1-sol`             |
 | 2026-10-18 | 第 0 步改为主会话 ask_user 轻量澄清；dev-clarify 降为可选（用户要求）    |
+| 2026-10-24 | 前端开发 kimi-k3 首选、GLM 次之；droid 移出路由表（用户令）              |
+| 2026-10-24 | 方案制定回退链加 kimi-k3（sonnet 之后；用户令）                          |

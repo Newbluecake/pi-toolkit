@@ -47,6 +47,27 @@ const preview = {
   viewRendered: "Rendered",
   viewSource: "Source",
   viewToggleLabel: "Markdown view mode",
+  // preview line numbers (2026-10-23): the header toggle (title/aria — the visible glyph is
+  // the language-neutral compact token `1#`) and the over-cap degradation note.
+  lineNumbers: "Line numbers",
+  linesTooMany: "Line numbers are off for this file — it has over {n} lines.",
+  // preview-perf P3 (plan r3 §4.6/§4.7, 2026-10-23): the in-window find bar + the per-window
+  // full view. Prose copy; compact markers (`10000+`, `1 / 7`) never enter this table.
+  findLabel: "Find in this file",
+  findPlaceholder: "Find…",
+  findCaseSensitive: "Match case",
+  findNext: "Find next",
+  findPrev: "Find previous",
+  findClose: "Close find bar",
+  findNoHit: "No matches",
+  findScopeNote:
+    "Scope: this file's loaded content · Enter / F3 next · Shift+Enter / Shift+F3 previous · Esc closes. The browser's own page find only sees the currently visible lines — use this bar, or the full view, to search everything.",
+  findScopeNoteMac:
+    "Scope: this file's loaded content · Enter / ⌘G next · ⇧⌘G previous · Esc closes. The browser's own page find only sees the currently visible lines — use this bar, or the full view, to search everything.",
+  findBeyondDisplay: "This match lies in a line's hidden (clipped) part — open the full view to see it in context.",
+  fullView: "Full view",
+  fullViewHint:
+    "Render all loaded content — continuous screen-reader reading, native browser find and selection. Dragging and resizing get slow on large files. Affects this window only.",
   mdTooComplex: "This file is too complex to render — showing the source instead.",
   // md-preview-html plan: inline-image placeholder reasons (chip: `🖼 <alt> · <reason>`)
   "mdImg.loading": "loading…",

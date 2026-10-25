@@ -200,6 +200,7 @@ describe("preview windows — phone band (<768px, real manager)", () => {
     const pageBtn = document.createElement("button");
     document.body.appendChild(pageBtn);
     await openTwo(r);
+    await new Promise((r2) => setTimeout(r2, 0)); // J1 #4: the open-time focusRequest lands one PAST-RENDER macrotask later
     expect(document.body.style.overflow).toBe("hidden");
     // Esc from the LOWER window is ignored by the shell (phone: top-only close, §6.1)
     sections()[0]!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));

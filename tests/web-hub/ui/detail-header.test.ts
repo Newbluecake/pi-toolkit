@@ -740,3 +740,31 @@ describe("DetailHeader.vue — cache-keepalive panel mount (cache-keepalive-web 
     expect(malformed.find(".ck-panel").exists()).toBe(false);
   });
 });
+
+// 2026-10-25 (user request 「标题静态无底色」): the title toggle must blend into the topbar
+// when idle — on touch devices a tap leaves :hover stuck, so an unqualified hover tint read as
+// a permanent lighter block behind the title (phone screenshot evidence). Asserted straight off
+// the real stylesheet (component mounts can't see CSS), same pattern as the suites above.
+describe("title toggle chrome — flat against the topbar unless truly hovered (2026-10-25 「标题静态无底色」)", () => {
+  const css = readFileSync(
+    resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/detail.css"),
+    "utf8",
+  );
+
+  it("the static rule carries background:none (no independent title background)", () => {
+    const m = /\.detail-title-toggle\s*\{[^}]*\}/.exec(css);
+    expect(m?.[0] ?? "").toMatch(/background:\s*none/);
+  });
+
+  it("the hover tint exists ONLY under (hover: hover) and (pointer: fine) — touch can never stick it", () => {
+    expect(css).toMatch(
+      /@media \(hover: hover\) and \(pointer: fine\)\s*\{\s*\.detail-title-toggle:hover\s*\{\s*background:\s*var\(--c-surface-2\)/,
+    );
+    // and no OTHER (unqualified / differently-qualified) .detail-title-toggle:hover rule survives
+    const stripped = css.replace(
+      /@media \(hover: hover\) and \(pointer: fine\)\s*\{\s*\.detail-title-toggle:hover\s*\{[^}]*\}\s*\}/,
+      "",
+    );
+    expect(stripped).not.toMatch(/\.detail-title-toggle:hover/);
+  });
+});

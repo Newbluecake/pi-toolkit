@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { getSecureDomain } from "../secure/domain.js";
 import { existsSync, lstatSync, realpathSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
@@ -261,6 +262,10 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
       ctx?: { signal: AbortSignal },
     ): Promise<SessionSpec> {
       if (request.isolation !== "worktree") return spec;
+      // data-encryption D2: encrypted (or locked) sessions never get a worktree — git's common dir
+      // may live outside the vault (plan R9). Throwing here maps to failed(config), never a fallback.
+      if ((getSecureDomain()?.kind ?? "plain") !== "plain")
+        throw new Error("加密会话不支持 worktree 隔离（data-encryption D2）");
       if (!settings.enabled) throw new Error("worktree isolation is requested but disabled");
       const cwd = resolve(spec.cwd ?? request.cwd ?? process.cwd());
       const repoResult = await git(["rev-parse", "--show-toplevel"], cwd, settings.gitTimeoutMs);
@@ -494,8 +499,6 @@ export function createWorktreeExtension(options: WorktreeExtensionOptions): Suba
 function requestRunId(request: SpawnRequest): string {
   return request.runId ?? request.label ?? `${request.type}-run`;
 }
-
-export const createWorktreeExtensionPoints = createWorktreeExtension;
 
 /** Pi host adapter: builds the extension from pi's exec (index.ts stays wiring-only, D7). */
 export function createPiWorktreeExtension(

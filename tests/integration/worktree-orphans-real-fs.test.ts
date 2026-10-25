@@ -166,7 +166,7 @@ describe("workflow-worktree plan §3 (P4 fix): real-fs startup scan wiring", () 
       expect(fsHarness.writeCalls).toBe(0);
       expect(fsHarness.unlinkCalls).toBe(0);
     } finally {
-      stack.scheduler.stop();
+      stack.schedule?.dispose();
       stack.rpc.close();
     }
   });
@@ -212,7 +212,7 @@ describe("workflow-worktree plan §3 (P4 fix): real-fs startup scan wiring", () 
       expect(env.notifications).toHaveLength(0);
       expect((globalThis as Record<symbol, unknown>)[WORKTREE_ORPHANS_NOTIFIED_KEY]).toBeUndefined();
     } finally {
-      stack.scheduler.stop();
+      stack.schedule?.dispose();
       stack.rpc.close();
     }
   }, 10_000);

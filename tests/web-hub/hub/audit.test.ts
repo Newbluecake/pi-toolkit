@@ -6,6 +6,8 @@ import {
   auditControl,
   auditPreview,
   auditWorktreeDiff,
+  auditWorktreeGraph,
+  WTGRAPH_AUDIT_KEYS,
   auditRemove,
   auditSpawn,
   auditUpload,
@@ -619,5 +621,76 @@ describe("auditWorktreeDiff (worktree-diff plan §2.9, D3)", () => {
     });
     const data = log.lines[0]!.data as Record<string, unknown>;
     expect(Object.keys(data).sort()).toEqual(["audit", "code", "ip", "listener", "ok", "phase", "reason"].sort());
+  });
+});
+
+describe("auditWorktreeGraph (merged-plan §3.7: append-only count keys)", () => {
+  it("the merged keys are appended at the TAIL of the whitelist (the legacy prefix is byte-identical)", () => {
+    expect([...WTGRAPH_AUDIT_KEYS]).toEqual([
+      "phase",
+      "listener",
+      "ip",
+      "user",
+      "agentKey",
+      "ok",
+      "code",
+      "reason",
+      "commits",
+      "refs",
+      "tips",
+      "complete",
+      "bytes",
+      "ms",
+      "joined",
+      "wtTag",
+      "mergedReq",
+      "mergedCand",
+      "mergedOmitted",
+      "mergedRun",
+      "mergedHit",
+      "mergedUnk",
+      "mergedSkip",
+      "mergedMs",
+    ]);
+  });
+
+  it('writes the merged counts under audit:"wtgraph" and drops smuggled names / oids / driver names', () => {
+    const log = memLog();
+    auditWorktreeGraph(log, {
+      phase: "graph",
+      ok: true,
+      mergedReq: 1,
+      mergedCand: 24,
+      mergedOmitted: 3,
+      mergedRun: 2,
+      mergedHit: 22,
+      mergedUnk: 1,
+      mergedSkip: 0,
+      mergedMs: 17,
+      // smuggled — must be dropped by the whitelist
+      branch: "pi-agent-secret",
+      oid: "a".repeat(40),
+      driver: "lfs",
+    } as unknown as Parameters<typeof auditWorktreeGraph>[1]);
+    const data = log.lines[0]!.data as Record<string, unknown>;
+    expect(data).toEqual({
+      audit: "wtgraph",
+      phase: "graph",
+      ok: true,
+      mergedReq: 1,
+      mergedCand: 24,
+      mergedOmitted: 3,
+      mergedRun: 2,
+      mergedHit: 22,
+      mergedUnk: 1,
+      mergedSkip: 0,
+      mergedMs: 17,
+    });
+  });
+
+  it("a record without merged fields yields exactly the legacy line (no merged keys, no undefined)", () => {
+    const log = memLog();
+    auditWorktreeGraph(log, { phase: "graph", ok: true, commits: 3 });
+    expect(log.lines[0]!.data).toEqual({ audit: "wtgraph", phase: "graph", ok: true, commits: 3 });
   });
 });

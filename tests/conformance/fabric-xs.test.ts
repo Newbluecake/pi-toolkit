@@ -764,7 +764,7 @@ describe("fabric phase-2 real pi contracts", () => {
     expect(h2.errors).toEqual([]);
   }, 30_000);
 
-  it("C-X6: phase-1 C-P1–C-P5 and consult-preserve C1–C7 remain green", async () => {
+  it("C-X6: phase-1 C-P1–C-P5 remain green", async () => {
     const result = await promisify(execFile)(
       process.execPath,
       [
@@ -775,13 +775,21 @@ describe("fabric phase-2 real pi contracts", () => {
         "--maxWorkers",
         "2",
         "tests/conformance/fabric-wake.test.ts",
-        "tests/conformance/consult-preserve.test.ts",
       ],
-      { timeout: 180_000, maxBuffer: 4 * 1024 * 1024 },
+      {
+        timeout: 180_000,
+        maxBuffer: 4 * 1024 * 1024,
+        // CI exports FORCE_COLOR/CI; the child vitest then paints its summary with ANSI escapes
+        // ("Test Files \x1b[1m\x1b[32m1 passed…"), which breaks the regexes below. Ask for plain output…
+        env: { ...process.env, FORCE_COLOR: "0" },
+      },
     );
-    console.info("C-X6 delegated real-pi gates:\n" + result.stdout);
-    expect(result.stdout).toMatch(/2 passed/);
-    expect(result.stdout).not.toMatch(/Test Files\s+\d+ failed/);
+    // …and strip any residual SGR sequences anyway (a runner that forces colour regardless).
+    // eslint-disable-next-line no-control-regex
+    const out = result.stdout.replace(/\u001b\[[0-9;]*m/g, "");
+    console.info("C-X6 delegated real-pi gates:\n" + out);
+    expect(out).toMatch(/Test Files\s+1 passed \(1\)/);
+    expect(out).not.toMatch(/Test Files\s+\d+ failed/);
   }, 190_000);
 
   it("C-X7: record pi's duplicate-tool arbitration without depending on the winner", async () => {

@@ -30,7 +30,6 @@ const THREADED = [
   "resumeFrom",
   "parentRunId",
   "deadlineAt",
-  "forkSessionFrom",
   "inputBudget",
   // Timeout-policy (agent-explicit-timeout-extend plan §2.2/C10): must reach the
   // runner so the `enqueued` dispatch can mirror it into diag.timeoutPolicy.
@@ -63,9 +62,6 @@ const NOT_THREADED = [
   "suppressDelivery", // consumed by the runtime adapter / spawn failure fallback; caller owns completion reporting
   "isolation", // consumed by the X1 worktree extension via H2, not threaded
   "schema", // consumed by the adapter to inject the StructuredOutput tool
-  "consultExperts", // consumed by the adapter to decide whether to inject the consult tool (already-resolved refs)
-  "consultSnapshot", // consumed by the adapter to construct a C2 consult session; never threaded or serialized
-  "consultAnchor", // adapter -> SessionSpec only; never in child prompts, runner requests, or resume inheritance
   "poolFullPolicy", // consumed entirely by spawn() admission (L1) — decided and resolved before start()/RunnerSpec ever exist
   // sysload plan §6.2: consumed entirely by spawn() admission (same point/reason as
   // poolFullPolicy above) — the load gate either rejects admission outright or lets the

@@ -160,6 +160,9 @@ export interface ContextMeterProps {
 export interface StatusPillProps {
   readonly state: RunVisualState;
   readonly label: string;
+  /** issue #41 (titlebar overflow): extreme-narrow degradation — render the dot only, with
+   * the label carried by role=img + aria-label/title. Omitted/false ⇒ byte-identical. */
+  readonly dotOnly?: boolean;
 }
 
 export interface ComposerProps {
@@ -308,6 +311,9 @@ export interface FleetBashJobsProps {
   readonly jobs: BashJobsWire;
   /** 共享走时源(FleetDrawer ← AgentDetail),与 FleetTreeProps.now 同一语法。 */
   readonly now: number;
+  /** web-hub archive plan: archived bash-job id→entry map (`status.archived` kind "bash"; empty
+   *  map ⇔ nothing archived ⇒ the group renders exactly as before). */
+  readonly archived?: ReadonlyMap<string, { kind: "run" | "bash"; id: string; at: number; auto?: true }>;
 }
 
 export interface FleetTreeProps {

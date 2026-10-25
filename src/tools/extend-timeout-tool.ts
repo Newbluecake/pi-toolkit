@@ -19,7 +19,7 @@ import { labelOfRun, labelOfSnapshot, runRefDetails, titleForHandle } from "./ru
  * so the model may get less than it asked for — the result text
  * always says exactly how much was granted. Default-budget runs AND runs
  * dispatched with an explicit Agent timeout_s are both extendable (same
- * rules); only fixed-deadline runs — consult, /goal verifier, RPC, and
+ * rules); only fixed-deadline runs — /goal verifier, RPC, and
  * resumes that inherited a fixed policy — cannot be extended. The verdict
  * is read from the persisted `diag.timeoutPolicy` field, never inferred
  * from the `hardDeadlineAt === deadlineAt` shape (an extendable run can
@@ -123,7 +123,7 @@ function rejectionMessage(
       const policy = snapshot?.diag.timeoutPolicy;
       if (policy === "fixed") {
         return (
-          `${name} has a fixed deadline (the system started it with a non-extendable time cap — e.g. a consult, ` +
+          `${name} has a fixed deadline (the system started it with a non-extendable time cap — e.g. a ` +
           `/goal verifier or RPC run, or a resume of one); it stops at its deadline ` +
           `(in ${formatDuration(remainingMs(snapshot, now))}) and cannot be extended. Read what it has so far with ` +
           `${runId ? readResultHint(runId) : "get_subagent_result"}, ${respawnHint}.`
@@ -236,7 +236,7 @@ export function createExtendTimeoutTool(deps: {
     name: "extend_subagent_timeout",
     label: "Extend Subagent Timeout",
     description:
-      "Give a running subagent more wall-clock time by pushing its deadline forward (extend_s seconds, added on top of the current deadline). Works for default-budget runs and runs dispatched with an explicit timeout_s alike; runs the system started with a fixed deadline (consult, /goal verifier, RPC) cannot be extended. Each run allows a limited number of extensions and an absolute ceiling, so a request may be clamped or refused; the result says exactly what was granted and how much headroom is left. Extending a run that is inside its timeout grace window rescues it back to normal execution. Also works on a background SubagentWorkflow (run_id: its wf_… id) with the same rules; the children of a workflow cannot be extended one by one — extend their workflow instead.",
+      "Give a running subagent more wall-clock time by pushing its deadline forward (extend_s seconds, added on top of the current deadline). Works for default-budget runs and runs dispatched with an explicit timeout_s alike; runs the system started with a fixed deadline (/goal verifier, RPC) cannot be extended. Each run allows a limited number of extensions and an absolute ceiling, so a request may be clamped or refused; the result says exactly what was granted and how much headroom is left. Extending a run that is inside its timeout grace window rescues it back to normal execution. Also works on a background SubagentWorkflow (run_id: its wf_… id) with the same rules; the children of a workflow cannot be extended one by one — extend their workflow instead.",
     promptSnippet: "extend_subagent_timeout(run_id, extend_s, reason?) - give a running subagent more time",
     parameters: ExtendTimeoutParams,
     renderCall(args, theme, context) {

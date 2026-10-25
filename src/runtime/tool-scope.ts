@@ -35,11 +35,9 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
   // sessions), so deny-by-default strips MCP/late-registered same-name
   // tools from every run.
   "extend_subagent_timeout",
-  // consult (consult plan §6 A-4b): injected into a subagent run only when its
-  // dispatcher attached a resolved expert whitelist (`Agent({experts})`), and
-  // never into a consult run itself. Deny-by-default means an MCP or
-  // late-registered same-name tool cannot hand any other run the ability to
-  // fork+resume somebody else's session.
+  // consult: LEGACY reserved name (#40). The consult tool no longer exists; the entry stays because the
+  // reserved-name list is frozen in the fabric-xs-off golden, and it is harmless — it only strips a
+  // same-named MCP/late-registered tool from every run (deny-by-default).
   "consult",
   // bash_job (bash-timeout-grace plan §3.10): registered per-session only when
   // bashJobs.childSessions is on AND the child session already carries a real
@@ -62,17 +60,17 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
 ];
 
 /**
- * consult (plan §4.6/§5.4, frozen surface): the tool domain a consulted expert
- * runs with. Single source for BOTH pi's one-shot `tools` allowlist on the
+ * The read-only tool domain (formerly consult's frozen surface; now used by
+ * `/mem tidy` proposal runs and other `toolDomain: "readonly"` runs). Single source for BOTH pi's one-shot `tools` allowlist on the
  * forked session (set after H2 so no extension can widen it) and this
  * module's per-turn enforcer policy — the two must never drift, which is why
- * this constant lives here rather than in src/consult/.
+ * this constant lives here, next to the enforcer.
  *
  * `grep`/`find`/`ls` are NOT active by default in pi (an unset `tools` means
- * read/bash/edit/write), so they only exist for a consult run because they
+ * read/bash/edit/write), so they only exist for a readonly-domain run because they
  * are named here.
  */
-export const CONSULT_READONLY_TOOLS: readonly string[] = ["read", "grep", "find", "ls"];
+export const READONLY_DOMAIN_TOOLS: readonly string[] = ["read", "grep", "find", "ls"];
 
 export interface ToolScopePolicy {
   /** Allow-list (agent type `tools` field, plus any explicitly granted reserved names). `undefined` = no allow-list restriction (only `deny` applies). */
@@ -90,8 +88,6 @@ export interface ToolScopePolicy {
    * no-op (byte-identical to pre-P0-r behavior, \u00a77.0.0 defense-in-depth only).
    */
   readonly provenance?: ReadonlyMap<string, string>;
-  /** C2: report allow/deny strips at bind as well as later boundaries. */
-  readonly reportBlockedOnBind?: boolean;
 }
 export interface ScopeDecision {
   /** The tool names actually left active after this recompute, sorted. */
@@ -162,8 +158,6 @@ export function buildToolScopePolicy(opts: {
   granted?: readonly string[];
   /** P0-r (\u00a77.0 point 6b): attached to the returned policy verbatim (see ToolScopePolicy.provenance). */
   provenance?: ReadonlyMap<string, string>;
-  /** C2: report allow/deny strips at bind as well as later boundaries. */
-  reportBlockedOnBind?: boolean;
 }): ToolScopePolicy {
   const grantedSet = new Set(opts.granted ?? []);
   const deny = new Set(RESERVED_TOOL_NAMES.filter((n) => !grantedSet.has(n)));
@@ -171,7 +165,6 @@ export function buildToolScopePolicy(opts: {
     ...(opts.tools ? { allow: new Set([...opts.tools, ...grantedSet]) } : {}),
     deny,
     ...(opts.provenance ? { provenance: opts.provenance } : {}),
-    ...(opts.reportBlockedOnBind === true ? { reportBlockedOnBind: true } : {}),
   };
 }
 
@@ -181,8 +174,8 @@ export function buildToolScopePolicy(opts: {
  * same E24 pattern set_model/Agent/StructuredOutput/consult already use,
  * merged by the caller into `sessionSpec.tools` and this policy's `allow`)?
  *
- *   bashJobGrant({ typeTools, childBashJobs, consult })
- *     = childBashJobs && !consult && (typeTools === undefined || typeTools.includes("bash"))
+ *   bashJobGrant({ typeTools, childBashJobs, readonlyDomain })
+ *     = childBashJobs && !readonlyDomain && (typeTools === undefined || typeTools.includes("bash"))
  *
  * `typeTools` mirrors `buildToolScopePolicy`'s own `opts.tools` semantics:
  * `undefined` = the agent type declares no allow-list restriction (every
@@ -190,8 +183,8 @@ export function buildToolScopePolicy(opts: {
  * gates on it actually containing `bash` (a type that never has `bash` has
  * nothing for `bash_job` to manage). `childBashJobs` is the session-level
  * `bashJobs.childSessions` setting gate (false ⇒ the whole feature is off for
- * this session, never granted, never registered). `consult` is true for a
- * consult run (forkSessionFrom-based, CONSULT_READONLY_TOOLS domain) — never
+ * this session, never granted, never registered). `readonlyDomain` is true for a
+ * run in the readonly tool domain (READONLY_DOMAIN_TOOLS, e.g. `/mem tidy`) — never
  * granted regardless of type/tools, matching the plan's "两层都不含" rule (the
  * read-only domain's `tools` list also never contains "bash"/"bash_job", so
  * this check is defense-in-depth, not the only gate). Wiring the actual
@@ -204,16 +197,16 @@ export interface BashJobGrantInput {
   /** `bashJobs.childSessions` setting gate — false disables the feature outright for this session. */
   childBashJobs: boolean;
   /**
-   * True for the readonly tool domain (a consult run, or a plain run with
+   * True for the readonly tool domain (a run with
    * `SpawnRequest.toolDomain:"readonly"` such as `/mem tidy` — P0-r §7.0
-   * point 1) — never granted regardless of type/tools. Field name kept as
-   * `consult` for callers already passing `isConsultRun`; the caller now
-   * passes `readonlyDomain` instead (runtime-adapter.ts).
+   * point 1) — never granted regardless of type/tools.
    */
-  consult: boolean;
+  readonlyDomain: boolean;
 }
 export function bashJobGrant(input: BashJobGrantInput): boolean {
-  return input.childBashJobs && !input.consult && (input.typeTools === undefined || input.typeTools.includes("bash"));
+  return (
+    input.childBashJobs && !input.readonlyDomain && (input.typeTools === undefined || input.typeTools.includes("bash"))
+  );
 }
 
 export function createToolScopeEnforcer(
@@ -278,10 +271,9 @@ export function createToolScopeEnforcer(
     // first bind, or because nothing new registered since the previous turn
     // — never gets a redundant setActiveTools call.
     const changed = applied.length !== currentSorted.length || applied.some((n, i) => n !== currentSorted[i]);
-    if (report || (policy.reportBlockedOnBind === true && baseline === undefined)) {
+    if (report) {
       // Fail-safe: if onBind never ran (no baseline), every blocked name is
-      // treated as a newcomer rather than going unreported. C2 also opts into
-      // this path at bind because a stripped snapshot name is an identity loss.
+      // treated as a newcomer rather than going unreported.
       const trulyNew = blockedNewcomers.filter((n) => (baseline === undefined || !baseline.has(n)) && !warned.has(n));
       if (trulyNew.length) {
         trulyNew.forEach((n) => warned.add(n));

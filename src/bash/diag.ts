@@ -1,7 +1,7 @@
 /**
  * Child-session bash no-host-view diagnostics (L1 todo #20).
  *
- * `src/tools/bash-tool.ts` and `src/bash/child.ts` used to report this via
+ * `src/bash/tool.ts` and `src/bash/child.ts` used to report this via
  * `console.warn` — fine for the MAIN session (its own process's stdout), but
  * a subagent session runs in the SAME process (no subprocess boundary,
  * AGENTS.md) and a raw `console.warn` from it lands directly in the host's

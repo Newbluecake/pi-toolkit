@@ -144,6 +144,11 @@ const control = {
   "cmdOutput.truncated": "输出过长——已丢弃 {entries} 条 / {kib} KiB，完整内容见终端。",
   "cmdOutput.clipped": "…",
 
+  // --- 命令历史的精简提示（cmd-history 方案 v2 §4.7；historyMode 下取代 CommandResult 卡片） ---
+  cmdHistoryExecuted: "已执行 /{name}",
+  cmdHistoryDeferred: "结果暂未记录（可能仍在排队或已中断）",
+  cmdHistoryDismiss: "关闭",
+
   dockReadonlyHub: "此 hub 为只读",
   dockReadonlyAgent: "此 pi 的 pi-toolkit 不支持网页控制——请更新并 /reload",
   dockReadonlyOffline: "Agent 离线",
@@ -168,6 +173,11 @@ const control = {
   modelSearch: "搜索模型",
   modelTabScoped: "scoped",
   modelTabAll: "all",
+  // 排序切换（2026-10）：标签散文可译；「provider」段在两种语言都保持英文 token（紧凑标记
+  // 仅英文的分界——它就是 wire 字段名）。
+  modelSort: "排序",
+  modelSortName: "名称",
+  modelSortProvider: "provider",
   modelCurrentBadge: "current",
   modelEmpty: "没有已配置凭据的模型",
   modelNoMatch: "没有匹配的模型",

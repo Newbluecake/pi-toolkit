@@ -27,7 +27,7 @@ import { anyLongWriteSince, prefixFromLedger, readLatestAssistantUsage } from ".
 import { observeUsageIntoEvidence, type ProviderEvidenceStore } from "./provider-evidence.js";
 import { PROBE_TOTAL_TIMEOUT_MS, runCacheProbe, type ProbeResult } from "./probe.js";
 import { assessWarmth, MAX_TTL_MS, type CacheWarmth, type WarmthEvidence } from "./warmth.js";
-import type { CacheKeepaliveService, KeepalivePort } from "../service/cache-keepalive.js";
+import type { CacheKeepaliveService, KeepalivePort } from "./keepalive-service.js";
 import { wireMeasureCommand, type MeasureCommandDeps } from "./measure-command.js";
 
 // Moved to ./usage-ledger.js — re-exported so

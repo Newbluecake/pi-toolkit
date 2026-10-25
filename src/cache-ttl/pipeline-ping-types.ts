@@ -2,7 +2,7 @@
  * FROZEN interface between keepalive packages A1 and A2 (capture-pairing-plan.md r7 §6).
  *
  * Owned by the main session. A1 implements `src/cache-ttl/pipeline-ping.ts` against these types; A2
- * (`src/service/cache-keepalive.ts`, `src/cache-ttl/keepalive-state.ts`, …) imports ONLY these types — never the A1
+ * (`src/cache-ttl/keepalive-service.ts`, `src/cache-ttl/keepalive-state.ts`, …) imports ONLY these types — never the A1
  * implementation module's internals. Neither package edits this file; a change here is a plan revision.
  *
  * Types only: this module has no runtime code.

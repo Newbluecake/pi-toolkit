@@ -22,7 +22,7 @@ import {
   wrapCommandApi,
   type CaptureInvocation,
   type CommandCaptureEngine,
-} from "../../../src/web-hub/agent/command-capture.js";
+} from "../../../src/commands/capture.js";
 import type { CmdOrigin } from "../../../src/web-hub/protocol/messages.js";
 
 const ORIGIN: CmdOrigin = { listener: "loopback", ip: "127.0.0.1", reqId: "req-1" };

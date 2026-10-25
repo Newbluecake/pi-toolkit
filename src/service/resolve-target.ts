@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import type { DispatchMeta } from "../core/dispatch-meta.js";
+import { pickInheritableDispatchMeta, type DispatchMeta } from "../core/dispatch-meta.js";
 import type { RunId, RunSnapshot, RunStatus, TimeoutPolicy } from "../core/types.js";
 import type { Tombstone, TombstoneStore } from "./tombstone.js";
 
@@ -156,15 +156,8 @@ function formatCandidates(candidates: readonly ResumeCandidate[]): string {
 function resumeError(handle: string, candidates: readonly ResumeCandidate[]): string {
   return `resume target not found: ${oneLine(handle)}. Resumable targets: [${formatCandidates(candidates)}]`;
 }
-/**
- * Two-level id match: exact run id, then unique prefix. Exported for the
- * consult ExpertIndex (plan §4.5 / §6 C-8b, frozen surface) so the index
- * resolves ids with *this* implementation instead of a look-alike that can
- * drift; it feeds a minimal `ResolveTargetDeps` whose `records` are its own
- * projected snapshots (only `knownIds()` is reached from here — no label /
- * candidate logic).
- */
-export function matchRunId(handle: string, deps: ResolveTargetDeps): { runId?: RunId; ambiguous: boolean } {
+/** Two-level id match: exact run id, then unique prefix. */
+function matchRunId(handle: string, deps: ResolveTargetDeps): { runId?: RunId; ambiguous: boolean } {
   const ids = knownIds(deps);
   if (ids.has(handle)) return { runId: handle, ambiguous: false };
   const prefixes = [...ids].filter((runId) => runId.startsWith(handle));
@@ -218,9 +211,9 @@ export function resolveResumeTarget(handle: string, deps: ResolveTargetDeps): Re
   // 被逐出后靠 tombstone；旧条目缺字段 ⇒ undefined，解析式落第 ③ 项（按请求形状）。
   const timeoutPolicy =
     snapshotWithSessionFile(deps, runId)?.diag.timeoutPolicy ?? deps.tombstones.get(runId)?.timeoutPolicy;
-  // consult A/B 计划（§5 P1b，D3 推荐）：dispatchMeta 的继承源只取终态快照的
-  // diag（tombstone 不扩展 —— 它是 TTL 兜底视图，不带分析字段）。
-  const dispatchMeta = snapshotWithSessionFile(deps, runId)?.diag.dispatchMeta;
+  // dispatchMeta 的继承源只取终态快照的 diag（tombstone 不扩展 —— 它是 TTL
+  // 兜底视图，不带分析字段）；旧条目里已移除的 A/B 臂字段由 pickInheritableDispatchMeta 丢弃。
+  const dispatchMeta = pickInheritableDispatchMeta(snapshotWithSessionFile(deps, runId)?.diag.dispatchMeta);
   const title = snapshotWithSessionFile(deps, runId)?.diag.title;
   const wakeLevel = snapshotWithSessionFile(deps, runId)?.diag.wakeLevel ?? deps.tombstones.get(runId)?.wakeLevel;
   return {

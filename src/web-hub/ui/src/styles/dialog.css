@@ -270,6 +270,21 @@
   font-size: var(--fs-xs);
 }
 
+/* 2026-10-23 「这个提示的宽度应该也和输入框还有发送按钮一样宽」: the folded-ask notice sits
+ * right above the control dock, so it rides the SAME column as the composer row (input left
+ * edge → send button right edge): transcript cap minus the dock gutters, centred, as a
+ * bordered strip like `.dock.dock-ctl > .command-result`. */
+.ask-folded {
+  box-sizing: border-box;
+  width: calc(
+    100% - max(var(--col-gutter), env(safe-area-inset-left)) - max(var(--col-gutter), env(safe-area-inset-right))
+  );
+  max-width: calc(var(--transcript-max) - 2 * var(--col-gutter));
+  margin-inline: auto;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+}
+
 /* --- coarse pointers: 44px hit areas (§7.5) — the bare radio/checkbox inputs are measured
  * individually by the visual harness, so they grow to a 44px transparent box with the visible
  * control drawn by ::before (same trick as dock.css's `.switch input`). --- */

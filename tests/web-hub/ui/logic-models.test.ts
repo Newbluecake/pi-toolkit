@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  compareModelsById,
   currentModelOf,
   ctxBadge,
   filterModels,
@@ -9,13 +10,20 @@ import {
   isSpawnModelRef,
   knownModelRefs,
   modelsOf,
+  parseModelSort,
   readModelCache,
+  readModelSort,
   shortModelLabel,
   snapshotAge,
+  sortGroupedModels,
+  sortModelsById,
+  sortModelsByProvider,
   switchErrorKey,
   trackSwitch,
   writeModelCache,
+  writeModelSort,
   KNOWN_MODEL_REFS_CAP,
+  MODEL_SORT_STORAGE_KEY,
   SPAWN_MODELS_CACHE_KEY,
   SWITCH_TIMEOUT_MS,
 } from "../../../src/web-hub/ui/src/logic/models.js";
@@ -153,6 +161,118 @@ describe("filterModels / groupByProvider", () => {
       { provider: "a", items: [all[1]] },
     ]);
     expect(groupByProvider([])).toEqual([]);
+  });
+});
+
+describe("model sort preference + ordering (2026-10 provider 标签 + 排序)", () => {
+  /** Minimal injected storage (the module never touches the DOM — same shape as the component's
+   *  `browserLocalStorage()` face: getItem + setItem). */
+  function fakeStorage(init: Record<string, string> = {}): {
+    store: Map<string, string>;
+    getItem(key: string): string | null;
+    setItem(key: string, value: string): void;
+  } {
+    const store = new Map(Object.entries(init));
+    return {
+      store,
+      getItem: (k: string) => (store.has(k) ? (store.get(k) as string) : null),
+      setItem: (k: string, v: string) => void store.set(k, v),
+    };
+  }
+
+  it("parseModelSort: only the exact 'provider' token selects provider; everything else ⇒ name", () => {
+    expect(parseModelSort("provider")).toBe("provider");
+    for (const junk of ["name", "Provider", "providers", "", null, undefined, 0, {}, "sort=name"]) {
+      expect(parseModelSort(junk)).toBe("name");
+    }
+  });
+
+  it("readModelSort: junk/corrupt/absent values and a throwing/unavailable storage all fall back to name", () => {
+    expect(readModelSort(fakeStorage({ [MODEL_SORT_STORAGE_KEY]: "provider" }))).toBe("provider");
+    expect(readModelSort(fakeStorage())).toBe("name"); // key absent
+    expect(readModelSort(fakeStorage({ [MODEL_SORT_STORAGE_KEY]: "{broken" }))).toBe("name");
+    expect(readModelSort(fakeStorage({ [MODEL_SORT_STORAGE_KEY]: "3" }))).toBe("name");
+    expect(readModelSort(null)).toBe("name"); // storage unavailable (SSR-ish)
+    expect(
+      readModelSort({
+        getItem: () => {
+          throw new Error("denied");
+        },
+        setItem: () => {},
+      }),
+    ).toBe("name");
+  });
+
+  it("writeModelSort: persists the normalized token; junk modes normalize to name; failures swallowed", () => {
+    const ok = fakeStorage();
+    writeModelSort(ok, "provider");
+    expect(ok.store.get(MODEL_SORT_STORAGE_KEY)).toBe("provider");
+    writeModelSort(ok, "nonsense" as unknown as "name");
+    expect(ok.store.get(MODEL_SORT_STORAGE_KEY)).toBe("name");
+    expect(
+      writeModelSort(
+        {
+          getItem: () => null,
+          setItem: () => {
+            throw new Error("quota");
+          },
+        },
+        "provider",
+      ),
+    ).toBeUndefined(); // swallowed, never throws
+    writeModelSort(null, "provider"); // no-op, never throws
+  });
+
+  it("sortModelsById: natural (numeric-aware) id order A→Z, provider tie-break, input untouched", () => {
+    const input = [
+      { provider: "zai", id: "glm-5.10" },
+      { provider: "zai", id: "glm-5.5" },
+      { provider: "deepseek", id: "ds-2" },
+      { provider: "deepseek", id: "DS-1" },
+      { provider: "aaa", id: "glm-5.5" }, // same id as zai's ⇒ provider breaks the tie
+    ];
+    const sorted = sortModelsById(input);
+    expect(sorted.map((m) => `${m.provider}/${m.id}`)).toEqual([
+      "deepseek/DS-1", // case-insensitive
+      "deepseek/ds-2", // numeric: ds-2 < ds-10-style ordering (ds-2 before ds-10 elsewhere)
+      "aaa/glm-5.5", // id tie ⇒ provider A→Z
+      "zai/glm-5.5",
+      "zai/glm-5.10", // numeric: 5.5 < 5.10
+    ]);
+    expect(input[0]).toEqual({ provider: "zai", id: "glm-5.10" }); // input array NOT mutated
+    expect(input.map((m) => m.id)).toEqual(["glm-5.10", "glm-5.5", "ds-2", "DS-1", "glm-5.5"]);
+    expect(compareModelsById(input[4], input[1])).toBeLessThan(0); // exposed comparator: id tie ⇒ provider
+    expect(compareModelsById(input[1], input[4])).toBeGreaterThan(0);
+  });
+
+  it("sortModelsByProvider: provider A→Z first (case-insensitive), id natural within a provider", () => {
+    const input = [
+      { provider: "zai", id: "glm-5.10" },
+      { provider: "deepseek", id: "ds-10" },
+      { provider: "ZAI", id: "glm-2" }, // distinct bucket, same collation key as "zai"
+      { provider: "deepseek", id: "ds-2" },
+    ];
+    expect(sortModelsByProvider(input).map((m) => `${m.provider}/${m.id}`)).toEqual([
+      "deepseek/ds-2",
+      "deepseek/ds-10",
+      "ZAI/glm-2", // provider collation ties (zai vs ZAI) ⇒ id breaks it
+      "zai/glm-5.10",
+    ]);
+  });
+
+  it("sortGroupedModels: keeps group order, id-sorts within each group, builds fresh arrays", () => {
+    const groups = groupByProvider([
+      { provider: "zai", id: "glm-5.10" },
+      { provider: "openai", id: "gpt-2" },
+      { provider: "zai", id: "glm-2" },
+      { provider: "openai", id: "gpt-10" },
+    ]);
+    const sorted = sortGroupedModels(groups);
+    expect(sorted.map((g) => g.provider)).toEqual(["zai", "openai"]); // first-seen group order KEPT
+    expect(sorted[0]!.items.map((m) => m.id)).toEqual(["glm-2", "glm-5.10"]);
+    expect(sorted[1]!.items.map((m) => m.id)).toEqual(["gpt-2", "gpt-10"]);
+    expect(groups[0]!.items.map((m) => m.id)).toEqual(["glm-5.10", "glm-2"]); // input NOT mutated
+    expect(sorted[0]).not.toBe(groups[0]); // fresh group objects
   });
 });
 

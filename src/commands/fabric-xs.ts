@@ -1,5 +1,5 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
-import { isFeishuInvocation, isWebInvocation } from "../web-hub/agent/command-capture.js";
+import { isFeishuInvocation, isWebInvocation } from "./capture.js";
 import { isValidXsSessionId } from "../config/settings.js";
 import type { XsReplyLedger } from "../fabric/xs/reply-ledger.js";
 import type { SessionFence } from "../fabric/xs/fence.js";
@@ -121,6 +121,8 @@ export interface FabricXsCommandDeps {
   replies?(): { ledger: XsReplyLedger; maxPending: number } | undefined;
   /** RXW connects to NoticeGate.flush after a human opens an admission gate. */
   onPolicyChange?(): void;
+  /** I1: a local `/fabric fence reset` also clears the scheduled-message dispatcher's own fence/ui-prompt blockers. */
+  afterFenceReset?(): void;
   /** Channel-plan §6.3 (CHW wires the sender's `channels()`): one hub `op:"channels"` round trip. */
   channels?(): Promise<FabricXsChannelsListing>;
   /** Channel-plan §2.3: does the current hub link advertise `xs.channel.v1`? `undefined` ⇒ unknown/offline (`n/a`). */
@@ -478,6 +480,7 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
             return;
           }
           fence.reset();
+          deps.afterFenceReset?.();
           deps.onPolicyChange?.();
           notify(ctx, "栅栏窗口已清除（仅本地；stuck 计时重置）。");
           return;

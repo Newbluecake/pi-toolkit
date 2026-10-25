@@ -21,7 +21,7 @@ import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import { wireCacheTtl } from "../../src/cache-ttl/cache-ttl.js";
 import { sendPipelinePing } from "../../src/cache-ttl/pipeline-ping.js";
 import { preparePingPayload } from "../../src/cache-ttl/ping-client.js";
-import { createCacheKeepaliveService, type CacheKeepaliveService } from "../../src/service/cache-keepalive.js";
+import { createCacheKeepaliveService, type CacheKeepaliveService } from "../../src/cache-ttl/keepalive-service.js";
 import { PiSessionDriver } from "../../src/runtime/session-driver.js";
 import { childActivationAdvanced, childActivationSnapshot } from "../../src/child/activation-signal.js";
 import { getChildKeepaliveDisposeRegistry } from "../../src/cache-ttl/child-registry.js";

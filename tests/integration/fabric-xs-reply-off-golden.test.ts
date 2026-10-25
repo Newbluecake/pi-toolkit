@@ -122,7 +122,11 @@ async function captureWiring(): Promise<WiringCapture> {
       return { on: () => undefined, unref: () => undefined } as never;
     }) as never;
     wireWebHub(pi, {
-      settings: { ...SETTINGS, autoStart: true, nodeLoader },
+      // web-hub-cmd-history A1 (main-session ruling 2026-10-24): the reply-off golden pins ONLY
+      // the reply surface; cmd-history is orthogonal and switched OFF here so the frozen
+      // fixture stays byte-stable (default-on behavior is pinned in fabric-xs-off-golden.test.ts
+      // and tests/web-hub/agent/wiring-resume.test.ts).
+      settings: { ...SETTINGS, autoStart: true, nodeLoader, cmdHistory: false },
       fleet: () => [],
       env: { HOME: tmp.dir },
       paths: { ...pathsIn(tmp.dir), stoppedFile: join(tmp.dir, "stopped") },

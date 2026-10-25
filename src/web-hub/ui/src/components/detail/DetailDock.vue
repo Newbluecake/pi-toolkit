@@ -28,7 +28,8 @@
 -->
 <script setup lang="ts">
 import { computed, inject, onUnmounted, ref, watch } from "vue";
-import { commandPolicyFor, parseSlash, validRecallText } from "@logic/control.js";
+import { commandPolicyFor, newCmdId, parseSlash, validRecallText } from "@logic/control.js";
+import { cmdHistoryModeOn } from "@logic/cmdRecord.js";
 import { parseResumeIntent, resumeAvailable, RESUME_DIALOG } from "@logic/resume.js";
 import { clientImageBudget, previewScopeOf } from "@logic/preview.js";
 import {
@@ -48,6 +49,7 @@ import QueueList from "../control/QueueList.vue";
 import { CONTROL_ENV, CONTROL_VIEW } from "../control/controlContext.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import { useClipboard, type ClipboardWindow } from "../../composables/useClipboard.js";
+import { useCmdHistory } from "../../composables/useCmdHistory.js";
 
 const props = defineProps<DetailDockProps>();
 const emit = defineEmits<DetailDockEmits>();
@@ -82,6 +84,64 @@ interface CmdResultState {
 const pendingConfirm = ref<{ name: string; args: string; message?: string } | null>(null);
 const cmdResult = ref<CmdResultState | null>(null);
 const cmdWaitingTerminal = ref(false);
+
+// web-hub-cmd-history (plan v2 §4.6/§4.7, D4): historyMode = hub caps ∧ agent status.features
+// both carry `cmd.history.v1`. While ON, `cmdResult` stays null FOREVER (no CommandResult —
+// command output lives in the transcript as `subagent:cmd` cards) and the dock only shows the
+// slim notes below; while OFF every code path below is byte-identical to the pre-feature dock.
+const historyMode = computed(() => {
+  const caps = hub !== null ? (hub.state.value.hub as { caps?: unknown } | null | undefined)?.caps : undefined;
+  return cmdHistoryModeOn(caps, view?.agent.value.status);
+});
+/** Slim notes (「已执行 /x」 4 s auto / 「结果暂未记录」 manual / dispatch error manual) for the
+ *  current agent — the shared per-agentKey store so a real card landing in the transcript can
+ *  retract its deferred note from here (§4.7). */
+const cmdNotes = computed(() => {
+  const key = agentKey();
+  return key === null ? [] : useCmdHistory(key).notes;
+});
+
+/** historyMode dispatch (§4.7 占位状态机): mint the cmdId ourselves (it IS the wire frame id
+ *  the agent records under), placeholder at the transcript tail immediately; the reply's
+ *  `history` field decides the placeholder's fate — recorded ⇒ wait for the card (60 s store
+ *  degrade), none/missing ⇒ swap for the 4 s 「已执行」 note; effect-none errors ⇒ error note.
+ *  E_CONFIRM_REQUIRED drops the placeholder and keeps today's CommandConfirm flow. */
+async function runCommandHistory(
+  c: import("../../types.js").ControlHandle,
+  key: string,
+  name: string,
+  args: string,
+  confirm: boolean,
+): Promise<void> {
+  const store = useCmdHistory(key);
+  const id = newCmdId();
+  store.begin({ cmdId: id, name, args, startedAt: Date.now() });
+  cmdWaitingTerminal.value = false;
+  // §7.7's terminal-interaction banner survives historyMode (第三方命令占位卡) — same 2 s probe.
+  const promptsBefore = promptCount();
+  if (waitPromptTimer !== undefined) clearTimeout(waitPromptTimer);
+  waitPromptTimer = setTimeout(() => {
+    cmdWaitingTerminal.value = promptCount() > promptsBefore;
+  }, 2000);
+
+  const outcome = await c.runCommand(key, name, args, { id, ...(confirm ? { confirm: true as const } : {}) });
+  if (!outcome.ok) {
+    if (outcome.error === "E_CONFIRM_REQUIRED") {
+      store.drop(id);
+      pendingConfirm.value = {
+        name,
+        args,
+        ...(outcome.message !== undefined ? { message: outcome.message } : {}),
+      };
+    } else {
+      store.fail(id, name, outcome.error ?? "E_FAILED", outcome.message);
+    }
+    return;
+  }
+  const data = (outcome.data ?? {}) as { history?: unknown };
+  if (data.history === "recorded") return; // the record card arrives via the transcript
+  store.finishWithoutCard(id, name); // n1: `none` OR a missing field ⇒ no card will come
+}
 const mentionResult = ref<{ kind: "ok" | "error"; label: string; action?: "steer" | "resume"; error?: string } | null>(
   null,
 );
@@ -108,6 +168,7 @@ async function runCommand(name: string, args: string, confirm: boolean): Promise
   const key = agentKey();
   if (!c || key === null) return;
   pendingConfirm.value = null;
+  if (historyMode.value) return runCommandHistory(c, key, name, args, confirm); // §4.7 — no CommandResult
   cmdResult.value = { name, state: "running" };
   cmdWaitingTerminal.value = false;
   trackingCmd = { id: null, name };
@@ -397,6 +458,13 @@ function onQueueDiscard(id: string): void {
   c.discard(key, id);
 }
 
+/** cmd-history slim notes: manual dismiss (auto-dismiss lives in the store). */
+function dismissCmdNote(id: number): void {
+  const key = agentKey();
+  if (key === null) return;
+  useCmdHistory(key).dismissNote(id);
+}
+
 // --- steer recall (web-hub-steer-recall plan §7, P-ui) --------------------------------------
 
 /** The dock's own recall guard inputs — AgentDetail computes them once (hold.v1 on agent card
@@ -544,6 +612,36 @@ onUnmounted(() => {
       :waiting-terminal="cmdWaitingTerminal"
       @dismiss="cmdResult = null"
     />
+    <!-- cmd-history §4.7 (D4): in historyMode the transcript cards replace CommandResult; the
+         dock keeps ONLY the slim notes + the terminal-interaction banner. `historyMode` false
+         ⇒ this whole block renders nothing and the legacy surface above is untouched. -->
+    <template v-if="historyMode">
+      <p
+        v-for="note in cmdNotes"
+        :key="note.id"
+        class="fleet-actions-note cmd-note"
+        :data-kind="note.kind === 'error' ? 'err' : undefined"
+        role="status"
+      >
+        <template v-if="note.kind === 'executed'">{{ t("control.cmdHistoryExecuted", { name: note.name }) }}</template>
+        <template v-else-if="note.kind === 'deferred'">{{ t("control.cmdHistoryDeferred") }}</template>
+        <template v-else>{{
+          note.message ?? t("control.cmdFailed", { name: note.name, error: note.error ?? "E_FAILED" })
+        }}</template>
+        <button
+          v-if="note.kind !== 'executed'"
+          class="btn btn-ghost btn-xs cmd-note-dismiss"
+          type="button"
+          :aria-label="t('control.cmdHistoryDismiss')"
+          @click="dismissCmdNote(note.id)"
+        >
+          <AppIcon name="x" class="icon-sm" />
+        </button>
+      </p>
+      <p v-if="cmdWaitingTerminal" class="command-waiting-terminal" role="status">
+        <AppIcon name="monitor" class="icon-sm" />{{ t("control.cmdWaitingTerminal") }}
+      </p>
+    </template>
     <CommandConfirm
       v-if="pendingConfirm"
       :name="pendingConfirm.name"

@@ -67,5 +67,3 @@ export async function showBoundedViewer(
     return component;
   });
 }
-
-export const boundedViewer = showBoundedViewer;

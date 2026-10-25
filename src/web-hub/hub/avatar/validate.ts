@@ -34,10 +34,6 @@ export function validateAvatar(bytes: Uint8Array): AvatarValidation {
     return { ok: false, reason: "idat" };
   }
 }
-
-/** Alias named after the plan's §3.2 prose, useful to callers and tests. */
-export const validateAvatarPngHub = validateAvatar;
-export const validateAvatarPngNode = validateAvatar;
 export const validateAvatarPng = validateAvatar;
 
 function colorChannels(bytes: Uint8Array): 3 | 4 | undefined {
@@ -76,20 +72,4 @@ function readU32(bytes: Uint8Array, offset: number): number {
       (bytes[offset + 3] ?? 0)) >>>
     0
   );
-}
-
-export function isAvatarRejectReason(value: string): value is AvatarRejectReason {
-  return [
-    "signature",
-    "ihdr",
-    "dims",
-    "color",
-    "chunk",
-    "crc",
-    "animated",
-    "order",
-    "trailing",
-    "idat",
-    "size",
-  ].includes(value as AvatarRejectReason);
 }

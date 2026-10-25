@@ -119,3 +119,17 @@ export interface FleetSelect {
   readonly canOpen: ComputedRef<boolean>;
 }
 export const FLEET_SELECT: InjectionKey<FleetSelect> = Symbol("web-hub-fleet-select");
+
+/** web-hub archive plan (docs/dev/web-hub/archive-report.md): the archive/unarchive seam.
+ * FleetDrawer provides, FleetTree's per-row「归档」button / FleetArchived's and FleetBashJobs's
+ * 「取消归档」buttons consume; no provider (isolated tests / control off) ⇒ the buttons stay
+ * hidden, rows render exactly as before. */
+export interface FleetArchive {
+  /** May archive at all (a live control-plane handle exists). */
+  readonly canArchive: ComputedRef<boolean>;
+  /** Archive `id` (kind run|bash); `label` feeds the drawer's undo toast. */
+  archive(kind: "run" | "bash", id: string, label: string): void;
+  /** Unarchive (never needs the toast — the row just reappears). */
+  unarchive(kind: "run" | "bash", id: string): void;
+}
+export const FLEET_ARCHIVE: InjectionKey<FleetArchive> = Symbol("web-hub-fleet-archive");

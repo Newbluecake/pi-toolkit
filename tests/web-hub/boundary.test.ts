@@ -16,7 +16,7 @@ import { describe, expect, it } from "vitest";
  *   `fs`. The guarantee is the precise per-file allowlist above plus the closure table
  *   below (GIT_FILE_CLOSURE) pinning the transitive import surface of those three files;
  *   adding any import to them must go through a conscious update of that constant table.
- * - `src/web-hub/agent/**` must not import `../hub/**` — except type-only imports
+ * - Agent-side files (`src/web-hub/agent/**` plus command capture) must not import hub — except type-only imports
  *   of `ports.js` / `ui-root.js`.
  */
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -28,7 +28,6 @@ const GIT_FILE_ALLOWLIST = ["run", "worktrees", "diff", "graph"].map((n) => reso
  * allowing arbitrary imports outside the hub/protocol boundary. */
 const SYSLOAD_FILE_ALLOWLIST = [
   "src/core/clock.ts",
-  "src/config/settings.ts",
   "src/sysload/io-ledger.ts",
   "src/sysload/mounts.ts",
   "src/sysload/procfs.ts",
@@ -37,7 +36,34 @@ const SYSLOAD_FILE_ALLOWLIST = [
   "src/sysload/tracker.ts",
   "src/sysload/types.ts",
   "src/sysload/wire.ts",
+  // data-encryption P2 §2.7: the supervisor's managed-spawn env runs through the import-free hubSafeEnv.
+  "src/secure/env.ts",
 ].map((p) => resolve(ROOT, p));
+/** Settings are shared with hub only as erased types; their value closure stays pinned below. */
+const HUB_TYPE_ONLY_ALLOWLIST = ["src/config/settings.ts"].map((p) => resolve(ROOT, p));
+const AGENT_SIDE_EXTRA_CANDIDATES = ["src/web-hub/agent/command-capture.ts", "src/commands/capture.ts"];
+
+/** scheduled-reports plan r3 §7.6/§12 S1: the hub coordinator reads schedule state through the pure,
+ * read-only half of src/schedule/core (reader + path primitives + cron + occurrence + liveness
+ * judgment + the frozen spec). The writer / lock / claim / session-proof half is agent-only and
+ * deliberately NOT allowlisted. */
+const SCHEDULE_CORE_FILE_ALLOWLIST = ["spec", "cron", "occurrence", "paths", "reader", "recovery"].map((n) =>
+  resolve(ROOT, `src/schedule/core/${n}.ts`),
+);
+/** Exact VALUE-import closure of the allowlisted schedule core files (type-only lines omitted). */
+const SCHEDULE_CORE_FILE_CLOSURE: Record<string, string[]> = {
+  // spec.ts value-imports AND value-re-exports the protocol vocabulary (two scanner hits).
+  "src/schedule/core/spec.ts": [
+    "node:crypto",
+    "../../web-hub/protocol/schedule.js",
+    "../../web-hub/protocol/schedule.js",
+  ],
+  "src/schedule/core/cron.ts": ["./spec.js"],
+  "src/schedule/core/occurrence.ts": ["./cron.js", "./spec.js"],
+  "src/schedule/core/paths.ts": ["node:crypto", "node:fs", "node:path"],
+  "src/schedule/core/reader.ts": ["node:fs", "./paths.js", "./spec.js"],
+  "src/schedule/core/recovery.ts": ["node:fs", "node:os", "./spec.js"],
+};
 
 /**
  * Closure constant table (worktree-diff plan §5 D1 #12): the exact import surface of the
@@ -85,8 +111,16 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../web-hub/protocol/client-allow.js",
     // external-agent plan §2.8: droid pricing refs validated with parseStrictModelRef (pure, zero imports).
     "./model-hint.js",
+    // data-encryption P2 §2.4 step 2: the secure-domain settings override (pi-free closure below).
+    "../secure/domain.js",
+    // data-encryption P1 review #5: cross-process settings-file lock (flock child, pi-free).
+    "../secure/settings-lock.js",
     "./time-units.js",
   ],
+  "src/secure/settings-lock.ts": ["node:child_process", "node:fs", "node:path"],
+  "src/secure/domain.ts": ["node:fs", "node:os", "node:path", "./config.js", "./env.js"],
+  "src/secure/config.ts": ["node:path"],
+  "src/secure/env.ts": [],
   "src/config/model-hint.ts": [],
   "src/fabric/xs/channel.ts": ["../../web-hub/protocol/xs.js"],
   "src/sysload/io-ledger.ts": [],
@@ -158,7 +192,7 @@ function insideProtocolHub(absPath: string): boolean {
 }
 
 /** The single admission predicate for protocol/hub import specs. */
-function hubImportAllowed(file: string, spec: string): boolean {
+function hubImportAllowed(file: string, spec: string, typeOnly: boolean): boolean {
   const inHub = file.startsWith(`${resolve(ROOT, "src/web-hub/hub")}/`);
   return (
     spec.startsWith("node:") ||
@@ -168,9 +202,19 @@ function hubImportAllowed(file: string, spec: string): boolean {
       (insideProtocolHub(resolveImport(file, spec)) ||
         // hub files escaping {protocol,hub} must land on an exact, reviewed allowlist
         (inHub &&
-          (GIT_FILE_ALLOWLIST.includes(resolveImport(file, spec)) ||
-            SYSLOAD_FILE_ALLOWLIST.includes(resolveImport(file, spec))))))
+          ((typeOnly && HUB_TYPE_ONLY_ALLOWLIST.includes(resolveImport(file, spec))) ||
+            GIT_FILE_ALLOWLIST.includes(resolveImport(file, spec)) ||
+            SYSLOAD_FILE_ALLOWLIST.includes(resolveImport(file, spec)) ||
+            SCHEDULE_CORE_FILE_ALLOWLIST.includes(resolveImport(file, spec))))))
   );
+}
+
+/** Agent-side runtime imports may never reach hub logic, wherever capture lives. */
+function agentImportAllowed(file: string, spec: string, typeOnly: boolean): boolean {
+  const target = resolveImport(file, spec);
+  const hub = resolve(ROOT, "src/web-hub/hub");
+  if (target !== hub && !target.startsWith(`${hub}/`)) return true;
+  return typeOnly && ["ports", "ui-root"].some((name) => target === resolve(hub, `${name}.ts`));
 }
 
 describe("web-hub boundary", () => {
@@ -196,8 +240,8 @@ describe("web-hub boundary", () => {
   it("protocol/hub imports stay within node:*, @sinclair/typebox, intra-{protocol,hub} relative paths, and (hub only) the exact src/git three-file allowlist", () => {
     const offenders: string[] = [];
     for (const file of files) {
-      for (const { spec } of scanImports(file)) {
-        if (!hubImportAllowed(file, spec)) offenders.push(`${relative(ROOT, file)} → "${spec}"`);
+      for (const { spec, typeOnly } of scanImports(file)) {
+        if (!hubImportAllowed(file, spec, typeOnly)) offenders.push(`${relative(ROOT, file)} → "${spec}"`);
       }
     }
     expect(offenders, offenders.join("; ")).toEqual([]);
@@ -215,22 +259,37 @@ describe("web-hub boundary", () => {
     expect(offenders, offenders.join("; ")).toEqual([]);
   });
 
-  it("agent/** does not import ../hub/** (ports.js / ui-root.js type-only imports excepted)", () => {
+  it("agent-side files (agent/** + command capture) never import hub/** (ports/ui-root type-only excepted)", () => {
     const agentFiles = globSync("src/web-hub/agent/**/*.ts", { cwd: ROOT }).map((f) => resolve(ROOT, f));
+    const captureFiles = AGENT_SIDE_EXTRA_CANDIDATES.map((f) => resolve(ROOT, f)).filter(existsSync);
+    expect(captureFiles, "exactly one command capture layout must exist").toHaveLength(1);
+    const constrained = new Set([...agentFiles, ...captureFiles]);
+    expect([...constrained]).toEqual(expect.arrayContaining(agentFiles));
+    expect([...constrained]).toEqual(expect.arrayContaining(captureFiles));
     const offenders: string[] = [];
-    // vue-plan.md v2.1 §2.3 (P5b): `hub.json`'s `ui` field is a `UiStatus` (`hub/ui-root.js`) —
-    // the agent side (`/webhub status`) reads it back and needs the same type. `ports.js` stays
-    // the only allowed *value* boundary (agent never imports hub logic); this only widens the
-    // type-only exception the same way `ports.js` already had one.
-    const TYPE_ONLY_ALLOWED = new Set(["../hub/ports.js", "../hub/ui-root.js"]);
-    for (const file of agentFiles) {
+    for (const file of constrained) {
       for (const { spec, typeOnly } of scanImports(file)) {
-        const isHubImport = spec.startsWith("../hub/");
-        const allowed = isHubImport && TYPE_ONLY_ALLOWED.has(spec) && typeOnly;
-        if (isHubImport && !allowed) offenders.push(`${relative(ROOT, file)} → "${spec}" (typeOnly=${typeOnly})`);
+        if (!agentImportAllowed(file, spec, typeOnly)) {
+          offenders.push(`${relative(ROOT, file)} → "${spec}" (typeOnly=${typeOnly})`);
+        }
       }
     }
     expect(offenders, offenders.join("; ")).toEqual([]);
+  });
+
+  it.each([
+    ["src/commands/capture.ts", "../web-hub/hub/registry.js", false, false],
+    ["src/commands/capture.ts", "../web-hub/hub/ports.js", true, true],
+    ["src/commands/capture.ts", "../web-hub/hub/ports.js", false, false],
+    ["src/web-hub/agent/x.ts", "../hub/registry.js", false, false],
+    ["src/web-hub/agent/x.ts", "../hub/ui-root.js", true, true],
+  ])("agent admission: %s → %s (typeOnly=%s)", (file, spec, typeOnly, allowed) => {
+    expect(agentImportAllowed(resolve(ROOT, file), spec, typeOnly)).toBe(allowed);
+  });
+
+  it.each([false, true])("hub settings import is type-only (typeOnly=%s)", (typeOnly) => {
+    const file = resolve(ROOT, "src/web-hub/hub/load.ts");
+    expect(hubImportAllowed(file, "../../config/settings.js", typeOnly)).toBe(typeOnly);
   });
 
   it("the three allowlisted src/git files import EXACTLY the pinned closure table (worktree-diff §5 D1 #12)", () => {
@@ -253,6 +312,38 @@ describe("web-hub boundary", () => {
         .sort((a, b) => a.localeCompare(b));
       const wanted = [...expected].sort((a, b) => a.localeCompare(b));
       expect(actual, `${relPath} must import exactly ${JSON.stringify(wanted)} (value imports only)`).toEqual(wanted);
+    }
+  });
+
+  it("the schedule core allowlist files import EXACTLY the pinned value-import closure (scheduled-reports S1)", () => {
+    for (const [relPath, expected] of Object.entries(SCHEDULE_CORE_FILE_CLOSURE)) {
+      const actual = scanImports(resolve(ROOT, relPath))
+        .filter((ref) => !ref.typeOnly)
+        .map((ref) => ref.spec)
+        .sort((a, b) => a.localeCompare(b));
+      const wanted = [...expected].sort((a, b) => a.localeCompare(b));
+      expect(actual, `${relPath} must import exactly ${JSON.stringify(wanted)} (value imports only)`).toEqual(wanted);
+    }
+    // the type-only imports of the closure stay inside the same reviewed set (no pi type leaks)
+    for (const relPath of Object.keys(SCHEDULE_CORE_FILE_CLOSURE)) {
+      const file = resolve(ROOT, relPath);
+      for (const ref of scanImports(file).filter((r) => r.typeOnly)) {
+        const target = resolveImport(file, ref.spec);
+        expect(
+          SCHEDULE_CORE_FILE_ALLOWLIST.includes(target) || insideProtocolHub(target),
+          `${relPath} type-imports ${ref.spec}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("hub may import the read-only schedule core but never its writer half", () => {
+    const hubFile = resolve(ROOT, "src/web-hub/hub/schedule/scan.fixture.ts");
+    for (const n of ["reader", "cron", "occurrence", "paths", "recovery", "spec"]) {
+      expect(hubImportAllowed(hubFile, `../../../schedule/core/${n}.js`, false), n).toBe(true);
+    }
+    for (const n of ["writer", "lock", "claim", "session-proof"]) {
+      expect(hubImportAllowed(hubFile, `../../../schedule/core/${n}.js`, false), n).toBe(false);
     }
   });
 
@@ -319,14 +410,14 @@ describe("web-hub boundary import scanner (worktree-diff §5 D1 #12 fix 1a/1b/1c
     const hubFile = resolve(ROOT, "src/web-hub/hub/routes.fixture.ts");
     const protocolFile = resolve(ROOT, "src/web-hub/protocol/version.ts");
     for (const spec of ["../../git/run.js", "../../git/worktrees.js", "../../git/diff.js"]) {
-      expect(hubImportAllowed(hubFile, spec), `${spec} from hub`).toBe(true);
+      expect(hubImportAllowed(hubFile, spec, false), `${spec} from hub`).toBe(true);
     }
     // a real src/git file OUTSIDE the allowlist — even with a .ts sibling to normalize
     expect(existsSync(resolve(ROOT, "src/git/path-label.ts"))).toBe(true);
-    expect(hubImportAllowed(hubFile, "../../git/path-label.js")).toBe(false);
+    expect(hubImportAllowed(hubFile, "../../git/path-label.js", false)).toBe(false);
     // escaping outside src entirely
-    expect(hubImportAllowed(hubFile, "../../index.js")).toBe(false);
+    expect(hubImportAllowed(hubFile, "../../index.js", false)).toBe(false);
     // the git allowlist is hub-only: protocol files may not reach src/git at all
-    expect(hubImportAllowed(protocolFile, "../git/diff.js")).toBe(false);
+    expect(hubImportAllowed(protocolFile, "../git/diff.js", false)).toBe(false);
   });
 });

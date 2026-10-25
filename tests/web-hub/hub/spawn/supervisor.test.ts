@@ -1223,6 +1223,34 @@ describe("supervisor fork env, argv and umask (arch §4.2)", () => {
     expect(h.closeFds).toEqual([7]);
   });
 
+  it("data-encryption §2.7: PI_SECURE_* dropped, TMPDIR/ARMORY_MEMORY_ROOT restored from PI_SECURE_ORIG_ENV", async () => {
+    const h = makeHarness({
+      env: {
+        KEEP: "yes",
+        TMPDIR: "/vault/mnt/state/tmp",
+        ARMORY_MEMORY_ROOT: "/vault/mnt/state/memory",
+        PI_SECURE_VAULT: "acme",
+        PI_SECURE_SESSION: "1",
+        PI_SECURE_ORIG_ENV: JSON.stringify({ TMPDIR: "/tmp", ARMORY_MEMORY_ROOT: null }),
+      },
+    });
+    await h.sup.init(deadline());
+    h.sup.start(req(), deadline());
+    const env = h.spawnCalls[0]?.opts.env as Record<string, string | undefined>;
+    expect(env.KEEP).toBe("yes");
+    expect(env.TMPDIR).toBe("/tmp");
+    expect("ARMORY_MEMORY_ROOT" in env).toBe(false);
+    expect(Object.keys(env).filter((k) => k.startsWith("PI_SECURE_"))).toEqual([]);
+  });
+
+  it("data-encryption §2.7: a hub env without PI_SECURE_* keeps TMPDIR/ARMORY_MEMORY_ROOT untouched", async () => {
+    const h = makeHarness({ env: { KEEP: "yes", TMPDIR: "/t", ARMORY_MEMORY_ROOT: "/m" } });
+    await h.sup.init(deadline());
+    h.sup.start(req(), deadline());
+    const env = h.spawnCalls[0]?.opts.env as Record<string, string | undefined>;
+    expect([env.KEEP, env.TMPDIR, env.ARMORY_MEMORY_ROOT]).toEqual(["yes", "/t", "/m"]);
+  });
+
   it("childUmask undefined ⇒ no umask dance at all", async () => {
     const h = makeHarness({ childUmask: undefined });
     await h.sup.init(deadline());

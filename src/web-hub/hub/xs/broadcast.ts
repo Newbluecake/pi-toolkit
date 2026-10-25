@@ -41,6 +41,7 @@ import {
   type XsWakeDowngraded,
 } from "../../protocol/xs.js";
 import { auditXs } from "../audit.js";
+import { emitQuiet, quietVerdict, type XsQuietDelivered, type XsQuietObserver } from "./mirror.js";
 import type { HubLog } from "../ports.js";
 import type { Registry } from "../registry.js";
 import type { HubXsChannelsConfig, XsBroadcastWakeDowngrade, XsLimits } from "./limits.js";
@@ -72,6 +73,9 @@ export interface XsBroadcastDeps {
    *  recipient — `undefined` unless that recipient is `aliasUsable` and the sender holds an alias.
    *  Absent ⇒ never stamped (byte-identical pre-alias frames). */
   fromAliasFor?: (recipient: XsEffectiveMember) => string | undefined;
+  /** feishu-xs-mirror P2: advisory observer of quiet rows; invoked on a microtask after the
+   *  aggregate `releaseSlot → req.res → audit` (or the `.catch` equivalent). Absent ⇒ unchanged. */
+  onQuietDelivered?: XsQuietObserver;
 }
 
 export interface XsBroadcastRequest {
@@ -239,6 +243,7 @@ export function runXsBroadcast(deps: XsBroadcastDeps, req: XsBroadcastRequest): 
       ms: now() - started,
     });
 
+  const quiet: XsQuietDelivered[] = [];
   const pending: Array<Promise<RowResult>> = rows.map((r, i) => {
     const slot = admit.rows[i];
     if (r.ambiguous) {
@@ -253,13 +258,14 @@ export function runXsBroadcast(deps: XsBroadcastDeps, req: XsBroadcastRequest): 
       auditRow(r, xid, rowWake, out);
       return out;
     };
+    const built = build(r.member, xid, rowWake, "pending");
     const withDg = (out: RowResult, dg: string | undefined): RowResult =>
       dg === undefined ? out : { ...out, wakeDowngraded: dg };
     let p: Promise<XsAckFrame & AgentFrame>;
     try {
       p = registry.request<XsAckFrame & AgentFrame>(
         r.member.agentKey,
-        build(r.member, xid, rowWake, "pending") as HubFrame & { rid: string },
+        built as HubFrame & { rid: string },
         XS_HUB_DELIVER_MS,
         deps.signal,
       );
@@ -272,12 +278,34 @@ export function runXsBroadcast(deps: XsBroadcastDeps, req: XsBroadcastRequest): 
           return finish(withDg({ effect: "unknown", reason: "ack_mismatch", woke: false }, rowDowngrade));
         }
         const reason = xsToken(ack.reason) ?? (ack.reason === undefined ? undefined : "unverified");
-        return finish(
-          withDg(
-            { effect: ack.effect, ...(reason === undefined ? {} : { reason }), woke: ack.woke === true },
-            xsToken(ack.wakeDowngraded) ?? rowDowngrade,
-          ),
+        const dg = xsToken(ack.wakeDowngraded) ?? rowDowngrade;
+        const done = finish(
+          withDg({ effect: ack.effect, ...(reason === undefined ? {} : { reason }), woke: ack.woke === true }, dg),
         );
+        // feishu-xs-mirror P2: O(1) candidate collection only; delivery happens after the aggregate reply.
+        if (deps.onQuietDelivered !== undefined) {
+          const v = quietVerdict(ack);
+          if (v !== undefined) {
+            quiet.push({
+              sessionId: r.sessionId,
+              agentKey: r.member.agentKey,
+              xid,
+              kind: "broadcast",
+              from: {
+                ref: built.from.ref,
+                ...(built.from.name !== undefined ? { name: built.from.name } : {}),
+                ...(built.from.alias !== undefined ? { alias: built.from.alias } : {}),
+              },
+              channel,
+              ...(v.queued ? { queued: true as const } : {}),
+              ...((xsToken(ack.wakeDowngraded) ?? rowDowngrade ?? wholeDowngrade) !== undefined
+                ? { wakeDowngraded: (xsToken(ack.wakeDowngraded) ?? rowDowngrade ?? wholeDowngrade)! }
+                : {}),
+              text: frame.text!,
+            });
+          }
+        }
+        return done;
       },
       (err: unknown) => {
         const code = (err as { code?: unknown } | null)?.code;
@@ -320,11 +348,13 @@ export function runXsBroadcast(deps: XsBroadcastDeps, req: XsBroadcastRequest): 
         results,
       });
       auditLine(effect, { ...(reason === undefined ? {} : { reason }), recipients: n, wake: admit.wake });
+      emitQuiet(deps.onQuietDelivered, quiet, log);
     })
     .catch(() => {
       // aggregation/auditing itself failed: still release and answer with the only honest verdict.
       releaseSlot();
       req.res({ ok: false, code: "E_XS_INTERNAL", effect: "unknown" });
       log.warn("xs handler failed", { code: "E_XS_INTERNAL", op: "broadcast", textLen });
+      emitQuiet(deps.onQuietDelivered, quiet, log);
     });
 }

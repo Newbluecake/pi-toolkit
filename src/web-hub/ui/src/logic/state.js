@@ -53,6 +53,13 @@
  * dropped wholesale via `@logic/load.js`'s `isLoadWireLike`/`isLoadGateWireLike`, same discipline
  * `todoFromStatus` already applies to `status.todo`.
  *
+ * Scheduled-reports W1 (docs/dev/scheduled-reports/plan.md r3 §5.6): the hub-global `schedules`
+ * SSE frame (cap `sched.v1`, append-only `SchedulesPayloadWire`) lands on top-level
+ * `HubState.schedules` + `schedulesReceivedAt` (browser-clock receive anchor, same discipline
+ * as `load` above), cleared on a fresh `hello` and whenever a `hub` frame's caps drop
+ * `sched.v1`; malformed frames drop wholesale via `@logic/schedule.js`'s
+ * `isSchedulesPayloadLike`.
+ *
  * Steer recall (web-hub-steer-recall plan §7, P-ui): the agent-side hold snapshot rides the
  * open `status` slot. `acceptHeld` (./control.js) is the single merge point — its output lands
  * on `held`/`heldRev`/`heldEpoch` (Y2 scope = the card's CURRENT epoch; a mismatched snapshot
@@ -70,7 +77,7 @@
  * @typedef {{ toolCallId: string, toolName: string, args: unknown, partial?: string,
  *   result?: unknown, isError?: boolean, done: boolean, truncated?: boolean,
  *   seenAt?: number }} LiveTool
- * @typedef {{ id: string, kind: "message" | "custom" | "compaction" | "branch_summary" | "model_change",
+ * @typedef {{ id: string, kind: "message" | "custom" | "compaction" | "branch_summary" | "model_change" | "cmd",
  *   entryId?: string | undefined, seq?: number | undefined, key?: string | undefined, message?: any, entry?: any,
  *   truncated?: boolean | undefined }} Item
  * @typedef {{ clientId: string, pending: boolean, failed?: boolean }} Sub
@@ -119,7 +126,9 @@
  * @typedef {{ event: string, data: any, id?: number, at?: number }} Msg
  */
 import { acceptHeld, HELD_TOMB_CTL_STATES, pendingTransition } from "./control.js";
+import { isCmdRecordWire } from "./cmdRecord.ts";
 import { isLoadGateWireLike, isLoadWireLike, parseLoadTopWire } from "./load.js";
+import { SCHED_CAP, SCHED_EVENT, isSchedulesPayloadLike } from "./schedule.js";
 import { SSE_EVENTS } from "@protocol/http-contract.ts";
 
 /**
@@ -143,6 +152,9 @@ function pinnedEvent(name) {
 const AGENT_REMOVED_EVENT = pinnedEvent("agent_removed");
 /** web-hub-privacy plan v2.1 (P1): same module-load-time drift pin as `agent_removed` above. */
 const PRIVACY_EVENT = pinnedEvent("privacy");
+/** scheduled-reports I1: H1 appended "schedules" to SSE_EVENTS — same module-load-time drift pin as above
+ *  (the case key stays `@logic/schedule.js`'s SCHED_EVENT mirror; this throws if the contract ever diverges). */
+const SCHEDULES_EVENT = pinnedEvent(SCHED_EVENT);
 
 /** Local (non-SSE) events understood by `reduce`. */
 export const LOCAL_EVENTS = Object.freeze([
@@ -541,6 +553,10 @@ function reduceInner(s, event, d, at) {
         load: undefined,
         loadReceivedAt: undefined,
         loadTop: undefined,
+        // scheduled-reports W1 (§5.6): same posture as `load` — stale until the hub's
+        // post-`agents` resend / the first live `schedules` frame on the new connection.
+        schedules: undefined,
+        schedulesReceivedAt: undefined,
       };
     }
     case "hub": {
@@ -570,6 +586,11 @@ function reduceInner(s, event, d, at) {
         load: loadCap ? s.load : undefined,
         loadReceivedAt: loadCap ? s.loadReceivedAt : undefined,
         loadTop: loadCap ? s.loadTop : undefined,
+        // scheduled-reports W1 (§5.6): a `hub` frame whose caps dropped `sched.v1` clears the
+        // slot (older hub / schedule off) — never a frozen snapshot of a feature the hub no
+        // longer serves (same rule as `load` above).
+        schedules: caps.includes(SCHED_CAP) ? s.schedules : undefined,
+        schedulesReceivedAt: caps.includes(SCHED_CAP) ? s.schedulesReceivedAt : undefined,
       };
     }
     // web-hub-privacy plan v2.1 (P1): the locked-set full-snapshot/broadcast frame. Overwrite
@@ -610,6 +631,14 @@ function reduceInner(s, event, d, at) {
     // (§10 包注 P0·M9: never trust the hub's own `load.at`).
     case "load":
       return isLoadWireLike(d) ? { ...s, load: d, loadReceivedAt: at } : s;
+    // scheduled-reports W1 (plan r3 §5.6): the hub-global `schedules` snapshot (per-session
+    // projections — H1 produces, W1 consumes; append-only). Overwrite semantics with
+    // receive-time anchoring (`schedulesReceivedAt`, the same discipline as `load`); malformed
+    // frames are dropped wholesale via `@logic/schedule.js`'s `isSchedulesPayloadLike`. NOTE:
+    // the case key is the UI-side mirror (`@logic/schedule.js`'s SCHED_EVENT), drift-pinned
+    // against the contract's SSE_EVENTS at module load (SCHEDULES_EVENT above).
+    case SCHEDULES_EVENT:
+      return isSchedulesPayloadLike(d) ? { ...s, schedules: d, schedulesReceivedAt: at } : s;
     // sysload plan §7.1/§10: `useHub.fetchLoadTop()`'s single-flight GET /api/load/top drive.
     // `loading` starts/stays true on `load_top_start`; a successful/failed settle independently
     // updates `data`/`error` while clearing `loading` — `data` is KEPT across a failed refetch
@@ -1202,6 +1231,12 @@ function entryItem(entry) {
       return { ...base, kind: "branch_summary", entry };
     case "model_change":
       return { ...base, kind: "model_change", entry };
+    case "custom":
+      // web-hub-cmd-history (plan §4.7): a projected `subagent:cmd` tombstone carrying a valid
+      // bounded `cmd` record becomes a command-history card; every other custom tombstone
+      // (incl. invalid/absent `cmd`) stays invisible exactly as before.
+      if (isCmdRecordWire(entry.cmd)) return { ...base, kind: "cmd", entry };
+      return undefined;
     default:
       return undefined; // custom(data), thinking_level_change: not rendered
   }

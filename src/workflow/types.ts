@@ -178,15 +178,7 @@ export interface WorkflowReplayStats {
   /** An entry existed at the (key, occurrence) but an RP precondition (RP1/RP6/RP7/RP9/scope mismatch) vetoed using it — distinct from a plain miss (no entry at all). */
   readonly skipped: number;
   readonly corruptLines: number;
-  /**
-   * workflow-experts (D13/D22): `true` once this run has submitted at least
-   * one `agent({ experts })` call whose experts resolved successfully (was
-   * accepted — queued or dispatched, not necessarily settled yet). Every
-   * call submitted afterwards is `skip:"chain_tainted"` (never a hit, never
-   * journaled), in both `chain` and `content` scope. Absent (not `false`)
-   * when no call ever tainted the chain — matches every other optional
-   * `WorkflowReplayStats`-adjacent "undefined means no" convention.
-   */
+  /** Set when accepted isolation taints replay (off mode or content scope). */
   readonly tainted?: true;
   /**
    * replay-verify plan D4/D9: present only when `workflow.isolationReplay`
@@ -239,13 +231,6 @@ export interface WorkflowChildSummary {
    * measured from enqueue and equals this value.
    */
   readonly queueWaitMs?: Millis;
-  /**
-   * workflow-experts (docs/dev/workflow-experts/plan.md D22): the resolved
-   * expert handles this call was authorized to consult — the runId(s) (or
-   * the literal `"main"`) `resolveWorkflowExperts` settled on, in submission
-   * order. Absent for a call that never passed `opts.experts`.
-   */
-  readonly experts?: readonly string[];
   /**
    * workflow-worktree plan D5: the worktree disposition the *worker*
    * actually observed at its own settle time (frozen — recorded once,

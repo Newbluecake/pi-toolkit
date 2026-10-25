@@ -112,11 +112,70 @@ describe("spawnHub", () => {
     expect(child.on).toHaveBeenCalledWith("error", expect.any(Function));
   });
 
+  it("data-encryption §2.7: the hub env is hubSafeEnv(process.env) — PI_SECURE_* gone, TMPDIR restored", () => {
+    const keys = ["TMPDIR", "ARMORY_MEMORY_ROOT", "PI_SECURE_VAULT", "PI_SECURE_SESSION", "PI_SECURE_ORIG_ENV"];
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    try {
+      process.env.TMPDIR = "/vault/mnt/state/tmp";
+      process.env.ARMORY_MEMORY_ROOT = "/vault/mnt/state/memory";
+      process.env.PI_SECURE_VAULT = "acme";
+      process.env.PI_SECURE_SESSION = "1";
+      process.env.PI_SECURE_ORIG_ENV = JSON.stringify({ TMPDIR: "/tmp/orig", ARMORY_MEMORY_ROOT: null });
+      const spawnImpl = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+      spawnHub(plan, "/m.ts", config, spawnImpl as never);
+      const env = (spawnImpl.mock.calls[0] as unknown as [string, string[], { env: Record<string, string> }])[2].env;
+      expect(env.TMPDIR).toBe("/tmp/orig");
+      expect("ARMORY_MEMORY_ROOT" in env).toBe(false);
+      expect(Object.keys(env).filter((k) => k.startsWith("PI_SECURE_"))).toEqual([]);
+      expect(JSON.parse(env.PI_WEBHUB_CONFIG!)).toEqual(config);
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+  });
+
   it("a throwing spawn never propagates", () => {
     const spawnImpl = vi.fn(() => {
       throw new Error("EAGAIN");
     });
     expect(() => spawnHub(plan, "/m.ts", config, spawnImpl as never)).not.toThrow();
+    expect(spawnHub(plan, "/m.ts", config, spawnImpl as never)).toEqual({ blocked: false });
+  });
+
+  // private-plan §4.1-1 (N3): the ONE hard gate — inside a private mount ns (or when that
+  // cannot be ruled out, review N3 #1) spawnHub refuses to spawn at all, covering every caller
+  // (auto-start, respawn, restart, start).
+  it("private-ns: the injected gate refuses before any spawn and reports blocked", () => {
+    const spawnImpl = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+    const res = spawnHub(plan, "/m.ts", config, spawnImpl as never, () => "private-ns");
+    expect(res).toEqual({ blocked: true, reason: "private-ns" });
+    const unk = spawnHub(plan, "/m.ts", config, spawnImpl as never, () => "private-ns-unknown");
+    expect(unk).toEqual({ blocked: true, reason: "private-ns-unknown" });
+    expect(spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it("private-ns: the DEFAULT gate re-judges FRESH (hint env + no evidence ⇒ unknown ⇒ blocked)", async () => {
+    const { resetSecureDomainForTests } = await import("../../../src/secure/domain.js");
+    const spawnImpl = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+    try {
+      resetSecureDomainForTests();
+      // outside an ns, no vaults ⇒ not-ns: spawns normally (and returns blocked:false)
+      expect(spawnHub(plan, "/m.ts", config, spawnImpl as never)).toEqual({ blocked: false });
+      expect(spawnImpl).toHaveBeenCalledTimes(1);
+      // the hint env (exactly what P1 exports into the pi process) with no matching record ⇒
+      // unknown (review N3 #1) — the fresh gate reads the LIVE process env, not a frozen verdict
+      process.env.PI_SECURE_NS = "1";
+      expect(spawnHub(plan, "/m.ts", config, spawnImpl as never)).toEqual({
+        blocked: true,
+        reason: "private-ns-unknown",
+      });
+      expect(spawnImpl).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.PI_SECURE_NS;
+      resetSecureDomainForTests();
+    }
   });
 });
 

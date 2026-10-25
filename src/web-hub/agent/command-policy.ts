@@ -135,6 +135,50 @@ const FABRIC_KNOWN_SUBS: ReadonlySet<string> = new Set([
   "alias", // alias-plan §3.5/§7 (AL4): get/set/clear/take preview+exec; baseline allow, governed by `webCommandPolicy.fabric`
 ]);
 
+/** scheduled-reports plan r3 §5.2: sha256 full-hex shape of a defHash (mirror of protocol/schedule.ts's
+ * SCHED_HASH_RE — parity pinned by tests/web-hub/protocol/schedule-policy.test.ts). */
+const SCHEDULE_HASH_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * `/schedule` web sub-command table (scheduled-reports plan r3 §5.2 「web」 column). Exported for
+ * tests only — callers go through `resolveCommandPolicy`. The whole-name override
+ * `webHub.webCommandPolicy.schedule` still wins outright (resolveCommandPolicy).
+ *   - list / show / log (bare = list; `--all` read forms too) → allow
+ *   - pause / resume / rm / run → confirm (generic confirm = anti-misclick only); any `--all` → deny
+ *   - approve <id> <64-hex hash> → allow (the hash only comes from the review dialog); bare
+ *     approve, wrong arity, non-hash or `--all` → deny
+ *   - __put <json…> <64-hex hash> → allow (the panel review form; the JSON may contain spaces, so
+ *     only the LAST token is checked as the hash); without a trailing hash → deny
+ *   - add / edit / repair / anything else → deny
+ */
+export function schedulePolicy(tokens: readonly string[]): PolicyDecision {
+  const sub = tokens[0] ?? "list";
+  if (sub === "__put") {
+    const hash = tokens.length >= 3 ? tokens[tokens.length - 1] : undefined;
+    return { policy: hash !== undefined && SCHEDULE_HASH_RE.test(hash) ? "allow" : "deny" };
+  }
+  const all = tokens.includes("--all");
+  switch (sub) {
+    case "list":
+    case "show":
+    case "log":
+      return { policy: "allow" };
+    case "pause":
+    case "resume":
+    case "rm":
+    case "run":
+      return { policy: all ? "deny" : "confirm" };
+    case "approve": {
+      const hash = tokens[2];
+      return {
+        policy: !all && tokens.length === 3 && hash !== undefined && SCHEDULE_HASH_RE.test(hash) ? "allow" : "deny",
+      };
+    }
+    default:
+      return { policy: "deny" };
+  }
+}
+
 const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
   // /agent [status|<runId>] · costs · fleet → read-only text. settings/budget with no further
   // args falls back to the text listing (allow, §4.9's C12 text-fallback row); with a
@@ -179,6 +223,12 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
     }
     if (sub === undefined || sub === "status") return { policy: "allow" };
     return { policy: "confirm" };
+  },
+  // /secure [status] → read-only (data-encryption plan §2.2 「web 允许」); it has no other
+  // sub-command, so anything else can only be a typo and is denied.
+  secure(tokens) {
+    const sub = tokens[0];
+    return { policy: sub === undefined || sub === "status" ? "allow" : "deny" };
   },
   // /tasklist [no args] → read-only listing (text fallback, §4.9). `clear` is destructive.
   tasklist(tokens) {
@@ -242,6 +292,18 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
     const sub = tokens[0] ?? "status";
     return { policy: FABRIC_KNOWN_SUBS.has(sub) ? "allow" : "deny" };
   },
+  // /record (traffic-merge §7.4, 拍板⑦): bare/status is a read-only report and `off` an idempotent
+  // stop ⇒ allow; `on` starts recording AND the web viewer (a standing behavior change plus a
+  // listening port) ⇒ confirm; anything else can only be a typo ⇒ deny. Sub-command matching
+  // lowercases like the command handler itself (`args.trim().toLowerCase()`), so "ON" is `on`.
+  record(tokens) {
+    const sub = tokens[0]?.toLowerCase();
+    if (sub === undefined || sub === "status" || sub === "off") return { policy: "allow" };
+    if (sub === "on") return { policy: "confirm" };
+    return { policy: "deny" };
+  },
+  // /schedule (scheduled-reports plan r3 §5.2): see schedulePolicy above.
+  schedule: schedulePolicy,
 };
 
 function tokenize(args: string): string[] {

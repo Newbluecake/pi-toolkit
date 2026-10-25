@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { LIMITS, type WireEntry, type WireMessage } from "../../../src/web-hub/protocol/messages.js";
+import { CMD_RECORD_ENTRY_TYPE, CMD_RECORD_OUTPUT_MAX_ENTRIES } from "../../../src/web-hub/protocol/cmd-record.js";
 import {
   customKey,
   diffAppended,
@@ -97,8 +98,62 @@ describe("customKey", () => {
     expect(delivered).toBeDefined();
     expect(delivered!.type).toBe("custom_message");
     expect(delivered!.customType).toBe("subagent:fabric");
-    expect(delivered!.content).toBe("[fabric progress r_ABC12345]\n@你的回复正文");
+    expect(delivered!.content).toBe("[@r_ABC12345]\n@你的回复正文");
     expect(delivered!.display).toBeUndefined(); // unset ≠ false ⇒ rendered
+
+    // 2026-10-24 header rework: `[@<fromLabel>]` wins when the record carries the admit()-time label;
+    // `@root` for a root sender (old records without fromLabel fall back to the runId above).
+    const labeled = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data: {
+        key: "k9",
+        from: "r_ABC12345",
+        fromLabel: "secreview:-secure-V6-wiring",
+        to: "root",
+        kind: "finding",
+        state: "delivered",
+        payload: { text: "body" },
+      },
+      id: "f9",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:05.000Z",
+    });
+    expect(labeled!.content).toBe("[@secreview:-secure-V6-wiring]\nbody");
+    const fromRoot = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data: {
+        key: "k10",
+        from: "root",
+        to: "r_ABC12345",
+        kind: "directive",
+        state: "delivered",
+        payload: { text: "hi" },
+      },
+      id: "f10",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:06.000Z",
+    });
+    expect(fromRoot!.content).toBe("[@root]\nhi");
+    const fromSystem = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data: { key: "k11", from: "system", to: "root", kind: "result", state: "delivered", payload: { text: "sys" } },
+      id: "f11",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:07.000Z",
+    });
+    expect(fromSystem!.content).toBe("[@system]\nsys");
+    const noSender = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data: { key: "k12", to: "root", kind: "finding", state: "delivered", payload: { text: "anon" } },
+      id: "f12",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:08.000Z",
+    });
+    expect(noSender!.content).toBe("[@unknown]\nanon");
 
     // Non-delivered outbox transitions stay tombstones (no duplicate display).
     const pending = projectSessionEntry({
@@ -144,6 +199,141 @@ describe("customKey", () => {
     });
     expect(other!.type).toBe("custom");
     expect(other!.content).toBeUndefined();
+  });
+});
+
+describe("projectSessionEntry — subagent:cmd (cmd-history §4.5)", () => {
+  const ts = "2026-10-24T08:00:00.000Z";
+  const startData = {
+    v: 1,
+    cmdId: "cAbCdEfGhIjKlMnOpQrS",
+    phase: "start",
+    name: "record",
+    args: "status",
+    source: "tui",
+    startedAt: 1_792_000_000_000,
+  };
+  function cmdEntry(data: unknown, over: Record<string, unknown> = {}): Record<string, unknown> {
+    return { type: "custom", customType: "subagent:cmd", data, id: "c1", parentId: null, timestamp: ts, ...over };
+  }
+
+  it("valid record projects as tombstone + sanitized cmd, dataKey over the full data", () => {
+    const e = projectSessionEntry(cmdEntry(startData))!;
+    expect(e).toEqual({
+      id: "c1",
+      parentId: null,
+      type: "custom",
+      timestamp: ts,
+      customType: CMD_RECORD_ENTRY_TYPE,
+      dataKey: customKey("subagent:cmd", startData),
+      display: false,
+      cmd: startData,
+    });
+    expect(e.timing).toBeUndefined(); // never rides another feature's slot
+  });
+
+  it("valid end record carries the budgeted output through the projection", () => {
+    const endData = {
+      ...startData,
+      phase: "end" as const,
+      source: "web" as const,
+      endedAt: 1_792_000_004_000,
+      state: "done" as const,
+      output: { entries: [{ kind: "notify", level: "info", text: "viewer: /record?token=abc" }] },
+    };
+    const e = projectSessionEntry(cmdEntry(endData, { id: "c2" }))!;
+    expect(e.cmd).toEqual(endData); // content untouched (Q1)
+    expect(e.dataKey).toBe(customKey("subagent:cmd", endData));
+  });
+
+  it("invalid data (v:2 / bad cmdId) ⇒ pure tombstone; dataKey still over the FULL raw data", () => {
+    const badV = { ...startData, v: 2, secret: "x" };
+    const e1 = projectSessionEntry(cmdEntry(badV))!;
+    expect(e1).toEqual({
+      id: "c1",
+      parentId: null,
+      type: "custom",
+      timestamp: ts,
+      customType: CMD_RECORD_ENTRY_TYPE,
+      dataKey: customKey("subagent:cmd", badV), // full raw data, not the sanitized form
+      display: false,
+    });
+    expect("cmd" in e1).toBe(false);
+
+    const badId = { ...startData, cmdId: "c123" };
+    const e2 = projectSessionEntry(cmdEntry(badId))!;
+    expect("cmd" in e2).toBe(false);
+    expect(e2.type).toBe("custom");
+    expect(e2.display).toBe(false);
+  });
+
+  it("dataKey covers the FULL data: an unknown extra field changes dataKey but not cmd", () => {
+    const withExtra = { ...startData, injected: "dropped-by-sanitize" };
+    const e = projectSessionEntry(cmdEntry(withExtra, { id: "c3" }))!;
+    expect(e.cmd).toEqual(startData); // sanitized form drops the unknown field
+    expect(e.dataKey).not.toBe(customKey("subagent:cmd", startData)); // key still sees it
+  });
+
+  it("same record with reordered JSON keys ⇒ same dataKey (canonical json, hub/agent 同输出)", () => {
+    const a = {
+      v: 1,
+      cmdId: "cAbCdEfGhIjKlMnOpQrS",
+      phase: "end" as const,
+      name: "mem",
+      args: "",
+      source: "rpc" as const,
+      startedAt: 5,
+      state: "failed" as const,
+    };
+    const b = {
+      state: "failed",
+      startedAt: 5,
+      source: "rpc",
+      args: "",
+      name: "mem",
+      phase: "end",
+      cmdId: "cAbCdEfGhIjKlMnOpQrS",
+      v: 1,
+    };
+    const ea = projectSessionEntry(cmdEntry(a, { id: "ka" }))!;
+    const eb = projectSessionEntry(cmdEntry(b, { id: "kb" }))!;
+    expect(ea.dataKey).toBe(eb.dataKey);
+    expect(ea.cmd).toEqual(eb.cmd);
+  });
+
+  it("oversized output is re-budgeted inside the projection (65 ⇒ 64 + truncated)", () => {
+    const endData = {
+      ...startData,
+      phase: "end" as const,
+      endedAt: 1_792_000_004_000,
+      state: "timeout" as const,
+      output: { entries: Array.from({ length: 65 }, (_, i) => ({ kind: "text", text: `line ${i}` })) },
+    };
+    const e = projectSessionEntry(cmdEntry(endData, { id: "c4" }))!;
+    expect(e.cmd!.output!.entries).toHaveLength(CMD_RECORD_OUTPUT_MAX_ENTRIES);
+    expect(e.cmd!.output!.truncated!.droppedEntries).toBe(1);
+  });
+
+  it("cmd entries join the reconciliation multiset like any custom tombstone (entryKey = dataKey)", () => {
+    const ea = projectSessionEntry(cmdEntry(startData, { id: "m1" }))!;
+    const eb = projectSessionEntry(cmdEntry(startData, { id: "m2" }))!; // identical data ⇒ same key
+    expect(entryKey(ea)).toBe(ea.dataKey);
+    expect(entryKey(eb)).toBe(ea.dataKey);
+    expect(diffAppended([], [ea, eb])).toEqual([ea, eb]); // multiset: both append
+    expect(diffAppended([ea.dataKey!], [ea, eb])).toEqual([eb]); // one already delivered
+  });
+
+  it("no other entry shape ever carries cmd", () => {
+    const shapes = [
+      { type: "custom", customType: "subagent:run", data: { state: "done" }, id: "x1", parentId: null, timestamp: ts },
+      { type: "custom_message", customType: "subagent:date", content: "hi", id: "x2", parentId: null, timestamp: ts },
+      { type: "message", message: { role: "user", text: "hi" }, id: "x3", parentId: null, timestamp: ts },
+      { type: "compaction", summary: "s", id: "x4", parentId: null, timestamp: ts },
+    ];
+    for (const raw of shapes) {
+      const e = projectSessionEntry(raw)!;
+      expect("cmd" in e).toBe(false);
+    }
   });
 });
 

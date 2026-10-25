@@ -125,8 +125,9 @@ export class PinSet {
 /** The command id every `log.warn("wtdiff git failed")` line carries (§2.9 — never a path).
  * worktree-graph plan v2 §2.6 (P2 append): `"Gr" | "Gl"` are the two graph commands — they
  * never reach `warnGitFailed`/`auditWorktreeDiff` (graph has its own audit channel), but they
- * share the pinned executor and its closed command-id union. */
-export type WtGitCmd = "C1a" | "C1" | "C0" | "Cc" | "C2" | "Ca" | "C3" | "C4" | "Gr" | "Gl";
+ * share the pinned executor and its closed command-id union. merged-plan §3.7 appends `"Gm"`
+ * (the cherry-mark run; Cc is graph's driver scan too). */
+export type WtGitCmd = "C1a" | "C1" | "C0" | "Cc" | "C2" | "Ca" | "C3" | "C4" | "Gr" | "Gl" | "Gm";
 
 export type PinnedGitOutcome =
   | { ok: true; code: number; stdout: string; capped: boolean; stderrBytes: number; stderr?: string }

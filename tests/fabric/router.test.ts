@@ -131,6 +131,41 @@ describe("fabric router", () => {
     expect(engine.select((record) => record.state === "pending")).toHaveLength(2);
   });
 
+  it("stamps the display-only fromLabel from config.senderLabel at admit() time (2026-10-24 header rework)", () => {
+    const store = new MemoryOutboxStore<FabricRecord>();
+    const engine = createDeliveryEngine<FabricRecord, FabricRecord["state"]>({
+      store,
+      allowed: {
+        pending: ["claimed", "consumed", "dropped", "abandoned"],
+        claimed: ["pending", "delivered", "consumed", "dropped"],
+        delivered: [],
+        consumed: [],
+        dropped: [],
+        abandoned: [],
+      },
+      memoryOnly: new Set(["claimed"]),
+      memoryOnlyFields: ["claimToken"],
+      now: () => 1,
+    });
+    const tree = new FabricTree();
+    tree.append("root", "r_ABCDEFGH");
+    tree.markRunning("r_ABCDEFGH");
+    const router = new FabricRouter(
+      engine,
+      tree,
+      new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
+      { ...config, senderLabel: (from) => (from === "r_ABCDEFGH" ? "secreview:-secure-V6-wiring" : undefined) },
+      () => 1,
+    );
+    const admitted = router.admit("r_ABCDEFGH", { to: "root", kind: "finding", text: "x", generation: 1 });
+    expect(admitted.ok).toBe(true);
+    const [record] = engine.select(() => true);
+    expect(record!.fromLabel).toBe("secreview:-secure-V6-wiring");
+    // The label rides along on every persisted append (store update merges the engine cache).
+    engine.transition(record!.key, "pending", "dropped", {});
+    expect(store.list()[0]!.fromLabel).toBe("secreview:-secure-V6-wiring");
+  });
+
   it("consumes seq for root backpressure and does not consume quota", () => {
     const { router, engine } = setup();
     const first = router.admit("r_ABCDEFGH", {

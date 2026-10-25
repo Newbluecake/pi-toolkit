@@ -103,14 +103,8 @@ export function readRotateIntentSync(file: string): IntentRead {
     return code === "ENOENT" ? { state: "absent" } : { state: "unreadable", code: code ?? "EIO" };
   }
 }
-export async function readRotateIntent(file: string): Promise<IntentRead> {
-  return readRotateIntentSync(file);
-}
 export function writeRotateIntentSync(file: string, intent: RotateIntent): void {
   atomicJson(file, intent);
-}
-export async function writeRotateIntent(file: string, intent: RotateIntent): Promise<void> {
-  writeRotateIntentSync(file, intent);
 }
 export function removeRotateIntentSync(file: string): void {
   try {
@@ -119,9 +113,6 @@ export function removeRotateIntentSync(file: string): void {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
-}
-export async function removeRotateIntent(file: string): Promise<void> {
-  removeRotateIntentSync(file);
 }
 
 export function advanceRotateIntentSync(

@@ -31,7 +31,14 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Millis } from "../core/types.js";
-import { gridStep, QUOTA_HYSTERESIS_PCT, type ProviderVerdict, type QuotaRecoveryEvent } from "./ladder.js";
+import {
+  gridStep,
+  isForecastSoftVerdict,
+  QUOTA_HYSTERESIS_PCT,
+  type ProviderVerdict,
+  type QuotaRecoveryEvent,
+  type WindowVerdict,
+} from "./ladder.js";
 import {
   buildQuotaAvailableTexts,
   buildQuotaMessage,
@@ -41,6 +48,59 @@ import {
 import type { LadderLevel } from "./types.js";
 
 export const QUOTA_CUSTOM_TYPE = "subagent:quota";
+
+/**
+ * 可用播报持久化条目（2026-10-23 拍板，跨 /reload 去重）：custom entry type（不进
+ * LLM 上下文）。每次成功播报「订阅可用」后写入全量键集；栈重建（/reload / resume）
+ * 后从 getBranch 读回最后一条，同一窗口周期内不重发。读不到/损坏 ⇒ 回落现行为
+ * （可重报），不抛错。
+ */
+export const QUOTA_AVAILABLE_ENTRY_TYPE = "subagent:quota-avail";
+
+/** 持久化键容量上限（防积压保险：正常节奏下每 provider 每窗口周期一个键）。 */
+export const QUOTA_AVAILABLE_KEY_CAP = 64;
+
+/**
+ * 可用播报去重键（provider + 当前各窗口 resetAt 指纹）：窗口重置 ⇒ resetAt 变化
+ * ⇒ 键变 ⇒ 允许再报一次；同一周期内（含 /reload 重建栈）键不变 ⇒ 不重发。
+ */
+export function quotaAvailableKey(provider: string, windows: readonly WindowVerdict[]): string {
+  const fp = windows
+    .map((w) => `${w.scope}:${w.resetAt === undefined || !Number.isFinite(w.resetAt) ? "?" : w.resetAt}`)
+    .sort()
+    .join("|");
+  return `${provider}@${fp}`;
+}
+
+/** 读回持久化条目：非数组 / 非字符串成员 ⇒ undefined（调用方回落现行为，可重报）。 */
+export function parseAvailableKeys(data: unknown): readonly string[] | undefined {
+  const keys = (data as { keys?: unknown } | undefined)?.keys;
+  if (!Array.isArray(keys)) return undefined;
+  const out: string[] = [];
+  for (const k of keys) {
+    if (typeof k === "string" && k.length > 0 && k.length <= 256) out.push(k);
+    if (out.length >= QUOTA_AVAILABLE_KEY_CAP) break;
+  }
+  return out;
+}
+
+/** 从会话分支读回可用播报键（仅取最后一条条目，每个 state 实例一次）；静默失败。 */
+function restoreAvailableKeys(state: QuotaHintState, ctx: ExtensionContext): void {
+  try {
+    const branch =
+      typeof ctx.sessionManager?.getBranch === "function" ? (ctx.sessionManager.getBranch() as unknown[]) : undefined;
+    if (!Array.isArray(branch)) return;
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const entry = branch[i] as { type?: string; customType?: string; data?: unknown } | undefined;
+      if (entry?.type !== "custom" || entry.customType !== QUOTA_AVAILABLE_ENTRY_TYPE) continue;
+      const keys = parseAvailableKeys(entry.data);
+      if (keys !== undefined) for (const k of keys) state.availableAnnounced.add(k);
+      return;
+    }
+  } catch {
+    /* 读不到 / 损坏 ⇒ 回落现行为（可重报），不拖垮 turn_end */
+  }
+}
 
 /** 恢复收件箱容量上限（createQuotaStack 推入时截断丢最旧）——只是防积压保险：
  * 正常节奏下每窗口每 provider 数小时至多一条；钩子关闭/ print 模式下无人排空也不膨胀。 */
@@ -84,6 +144,11 @@ export interface QuotaHintDeps {
   ) => void;
   readonly now?: (() => Millis) | undefined;
   /**
+   * 可用播报持久化（跨 /reload 去重）：发送成功且本轮含可用播报时以全量键集回调；
+   * 缺席（测试/旧接线）⇒ 仅栈内去重（现行为）。
+   */
+  readonly persistAvailable?: ((keys: readonly string[]) => void) | undefined;
+  /**
    * 注入：provider → 替代 provider 列表与 tier 信息（Pack A 接线時用 gate.ts 的 `pickAlternatives` 供给）。
    * 缺省 `{ providers: [], subscription: true }`，render 层回落到「无替代候选」句式。
    */
@@ -122,8 +187,27 @@ export function shouldAnnounce(
   return { announce: false, next: latch };
 }
 
+/**
+ * 滞回判定（2026-10-23 拍板，纯函数）：provider 等级回到 0 是否**仅**因预测消失——
+ * windows 的 reason 不再是 forecast-*（预测还在就不会是 L0），且 pct 相对闩锁的
+ * 回落 < QUOTA_HYSTERESIS_PCT（真实回落 ≥ 滞回阈值视同窗口重置，由调用方清闩锁）。
+ * true ⇒ 调用方保留闩锁（不重报、不触发「订阅可用」）。reset-elapsed 由调用方在
+ * 更早处 continue（读数不真，与滞回正交）。
+ */
+export function isForecastDrop(verdict: ProviderVerdict, latch: QuotaAnnounceLatch): boolean {
+  if (verdict.windows.some((w) => w.reason === "forecast-before-reset" || w.reason === "forecast-eta")) return false;
+  let pct = 0;
+  for (const w of verdict.windows) if (w.usedPct > pct) pct = w.usedPct;
+  return pct > latch.usedPct - QUOTA_HYSTERESIS_PCT;
+}
+
 export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: ExtensionContext) => void {
   const now = deps.now ?? (() => Date.now());
+  // 可用播报持久化（跨 /reload 去重）：每个 state 实例（每次 session_start 重建）
+  // 首次使用时从会话分支读回；仅在本轮真正播报过可用后才写（条目携带全量键集，
+  // 读回取最后一条，天然最后一次写入胜出）。
+  let restoredFor: QuotaHintState | undefined;
+  let lastPersistedKeys: string | undefined;
   return (_event: unknown, ctx: ExtensionContext): void => {
     // ① 模式门：子会话是 print 模式，派单信息对它毫无意义（与 compact-hint 逐字同款）。
     if (ctx.mode === "print" || ctx.mode === "json") return;
@@ -131,6 +215,12 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
     if (state === undefined || !state.enabled) return;
 
     const t = now();
+
+    // ②.5 可用播报读回（跨 /reload 去重）：栈重建后的首轮从会话分支取回已播键。
+    if (restoredFor !== state) {
+      restoredFor = state;
+      restoreAvailableKeys(state, ctx);
+    }
 
     // ② 同步读缓存判定（永不 await、永不发请求）。
     let verdicts: readonly ProviderVerdict[] = [];
@@ -171,17 +261,26 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
         // （「本会话曾真播报过」）抹掉，恢复播报被静默吞掉（漏报）；真实读数落地后
         // 由恢复路径或下一轮的 L0 分支正常清闸。
         if (v.windows.some((w) => w.reason === "reset-elapsed")) continue;
+        const latch = state.latches.get(v.provider);
+        // 滞回（2026-10-23 拍板）：等级回到 0 若只是预测消失（windows 无 forecast-*
+        // reason、且 pct 相对闩锁回落 < QUOTA_HYSTERESIS_PCT），不清闩锁、也不触发
+        // 「订阅可用」——38%→39%(L0)→40%(L2) 不重报；本栈已报过预警/提示的 provider
+        // 在真实重置（reset-elapsed 已在上面 continue / pct 回落 ≥ 滞回阈值 / 恢复
+        // 事件）前不再报「可用」。恢复事件是 service 认定的观测重置，优先于滞回。
+        if (latch !== undefined && !recoveredProviders.has(v.provider) && isForecastDrop(v, latch)) continue;
         // 可用播报（B 方案）：本栈首次观测到窗口型 provider 真实读数低于 L1 ⇒
         // 一次性注入「订阅可用」。stale（M1：读数不真不进注入流）与 demoted
-        // （刻意停放中，播「可用」会诱导派单打脸）都不播。
-        if (v.windows.length > 0 && !v.stale && !v.demoted && !state.availableAnnounced.has(v.provider)) {
-          state.availableAnnounced.add(v.provider);
+        // （刻意停放中，播「可用」会诱导派单打脸）都不播。去重键 = provider + 各窗口
+        // resetAt 指纹（跨 /reload 持久化；窗口重置后允许再报一次）。
+        const key = quotaAvailableKey(v.provider, v.windows);
+        if (v.windows.length > 0 && !v.stale && !v.demoted && !state.availableAnnounced.has(key)) {
+          state.availableAnnounced.add(key);
           available.push(v);
         }
         // 恢复 provider 的 L0 删闩锁要登记回滚：send 失败时恢复事件会回队重试，
         // 而重试的门槛（「曾播报」）就是这个闩锁——它不能随一次失败的发送消失。
         if (recoveredProviders.has(v.provider)) {
-          latchesBefore.set(v.provider, state.latches.get(v.provider));
+          latchesBefore.set(v.provider, latch);
         }
         state.latches.delete(v.provider);
         continue;
@@ -206,6 +305,10 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
         continue;
       }
       if (!decision.announce) continue;
+      // 3b 软化滞回（2026-10-23 拍板）：仍处 3b-only L2（软化「提示」级）且闩锁已
+      // 在 ≥2 级时不重报——预测抖动（38%→39%(L0 保留闩锁)→40%）里跨网格步的前进
+      // 也不再说话；只有真正升级（百分比阈值 L2 / 3a / L3）才会再注入。
+      if (isForecastSoftVerdict(v) && latch !== undefined && latch.level >= 2) continue;
       latchesBefore.set(v.provider, latch);
       state.latches.set(v.provider, decision.next);
       let alternatives: AlternativeSelection = { providers: [], subscription: true };
@@ -226,8 +329,8 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
           state.latches.delete(provider); // Minor 2：首次进入者用 delete
         else state.latches.set(provider, before);
       }
-      // 可用播报回滚：本轮新播报的 provider 从已播集合移除（下一轮重试）。
-      for (const v of available) state.availableAnnounced.delete(v.provider);
+      // 可用播报回滚：本轮新播报的 provider 从已播集合移除（下一轮重试）。键与正路径同源（provider + resetAt 指纹）。
+      for (const v of available) state.availableAnnounced.delete(quotaAvailableKey(v.provider, v.windows));
     };
 
     let maxLevel: LadderLevel = 0;
@@ -287,6 +390,20 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
         { triggerTurn: false },
       );
       state.lastSentAt = t;
+      // 可用播报持久化（跨 /reload 去重）：本轮真播报过「订阅可用」才写全量键集；
+      // 键集未变不重复写（条目越少，读回超headroom 越小）。
+      if (available.length > 0 && deps.persistAvailable !== undefined) {
+        const keys = [...state.availableAnnounced].sort();
+        const serialized = keys.join("\n");
+        if (serialized !== lastPersistedKeys) {
+          lastPersistedKeys = serialized;
+          try {
+            deps.persistAvailable(keys);
+          } catch {
+            /* 持久化失败不致命：本栈内仍去重，下一轮重报时再试 */
+          }
+        }
+      }
     } catch (error) {
       // Minor 1（评审）同哲学：send 失败 ⇒ 闩锁回滚 + 恢复事件回队（下一轮重试；
       // 「至多一条」仍成立——它尚未真正送达）。

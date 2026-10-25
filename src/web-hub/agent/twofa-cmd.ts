@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { TfaReqFrame, TfaResData, TfaResFrame } from "../protocol/lan-2fa.js";
 import { LAN_2FA_HUB_CAP } from "../protocol/version.js";
-import { isWebInvocation } from "./command-capture.js";
+import { isWebInvocation } from "../../commands/capture.js";
 import { runTwofaEnrollPrompt, type TwofaPromptDeps } from "./twofa-prompt.js";
 
 export interface TwofaCommandDeps extends TwofaPromptDeps {

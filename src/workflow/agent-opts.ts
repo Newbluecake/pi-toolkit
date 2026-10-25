@@ -19,11 +19,10 @@ import { THINKING_LEVELS, type ThinkingLevel } from "../core/types.js";
  * host-generated error message (D1: "报错文案只在 host 生成一份").
  *
  * N1 (review, must hold): a `defect` on any known key's value (function,
- * symbol, Proxy, or an `experts` element failing the same test) means that
- * value is NEVER placed into `values` — the whole snapshot short-circuits
+ * symbol, or Proxy) means that value is NEVER placed into `values` — the whole snapshot short-circuits
  * with just the defect, exactly what stops the worker from ever attempting
  * to `postMessage` something `structuredClone` cannot carry. Wrong-*type*-
- * but-still-clonable values (`agentType: 123`, `label: {}`, `experts: [1]`)
+ * but-still-clonable values (`agentType: 123`, `label: {}`)
  * are NOT defects: they are captured verbatim in `values` (loosely typed —
  * `validateAgentOpts` does the real per-field `typeof` check, mirroring how
  * host.ts already re-checked `opts.model`/`opts.thinking` itself before
@@ -31,20 +30,12 @@ import { THINKING_LEVELS, type ThinkingLevel } from "../core/types.js";
  * once `validateAgentOpts` runs.
  */
 
-export const AGENT_OPTS_KEYS = [
-  "label",
-  "agentType",
-  "phase",
-  "fullResult",
-  "model",
-  "thinking",
-  "isolation",
-  "experts",
-] as const;
+export const AGENT_OPTS_KEYS = ["label", "agentType", "phase", "fullResult", "model", "thinking", "isolation"] as const;
 export type AgentOptsKey = (typeof AGENT_OPTS_KEYS)[number];
 
 const AGENT_OPTS_KEY_SET: ReadonlySet<string> = new Set<string>(AGENT_OPTS_KEYS);
 
+/** `bad_array` remains readable for legacy worker reports; no current snapshot produces it. */
 export type OptsDefectCode = "not_plain_object" | "proxy" | "accessor" | "threw" | "bad_array";
 
 export interface OptsDefect {
@@ -75,7 +66,6 @@ export interface ValidatedAgentOpts {
   readonly model?: string;
   readonly thinking?: ThinkingLevel;
   readonly isolation?: "worktree";
-  readonly experts?: readonly string[];
 }
 
 function isProxyValue(v: unknown): boolean {
@@ -105,71 +95,15 @@ function describeKind(raw: unknown): string {
 }
 
 /**
- * D2/D6 "experts": the array itself and every element must be safe to
- * embed. Structural badness (wrong prototype, holes, extra own keys,
- * unreadable/accessor elements, an unsafe element) is reported as
- * `bad_array` — a single code, no further detail needed (fail-closed,
- * matches "Proxy 在读任何东西之前就被判出"). Wrong-typed-but-safe elements
- * (`[1]`, `[""]`, `["a"," a"]`) pass through into `value` unchanged;
- * `validateAgentOpts` does the semantic (string/non-empty/dedup) check.
- */
-function snapshotExpertsValue(
-  value: unknown,
-  arrayProtos: readonly object[],
-): { value?: unknown; defect?: OptsDefect } {
-  if (unsafeValueKind(value) !== undefined) return { defect: { code: "bad_array", key: "experts" } };
-  if (!Array.isArray(value)) return { value }; // wrong type (not an array) — checked downstream, not structurally bad.
-  let proto: object | null;
-  try {
-    proto = Reflect.getPrototypeOf(value);
-  } catch {
-    return { defect: { code: "bad_array", key: "experts" } };
-  }
-  if (proto === null || !arrayProtos.includes(proto)) return { defect: { code: "bad_array", key: "experts" } };
-  let keys: (string | symbol)[];
-  try {
-    keys = Reflect.ownKeys(value);
-  } catch {
-    return { defect: { code: "bad_array", key: "experts" } };
-  }
-  const len = value.length;
-  if (typeof len !== "number" || !Number.isInteger(len) || len < 0) {
-    return { defect: { code: "bad_array", key: "experts" } };
-  }
-  const expected = new Set<string>(["length"]);
-  for (let i = 0; i < len; i += 1) expected.add(String(i));
-  if (keys.length !== expected.size) return { defect: { code: "bad_array", key: "experts" } }; // hole or extra prop
-  for (const k of keys) {
-    if (typeof k !== "string" || !expected.has(k)) return { defect: { code: "bad_array", key: "experts" } };
-  }
-  const items: unknown[] = [];
-  for (let i = 0; i < len; i += 1) {
-    let d: PropertyDescriptor | undefined;
-    try {
-      d = Reflect.getOwnPropertyDescriptor(value, String(i));
-    } catch {
-      return { defect: { code: "bad_array", key: "experts" } };
-    }
-    if (!d || d.get || d.set) return { defect: { code: "bad_array", key: "experts" } };
-    if (unsafeValueKind(d.value) !== undefined) return { defect: { code: "bad_array", key: "experts" } };
-    items.push(d.value);
-  }
-  return { value: items };
-}
-
-/**
  * D1-D6/D2 realm handling: `realmProtos` is every acceptable prototype for
  * the opts object itself (host default: `[Object.prototype, null]`; the
  * worker-side JS mirror passes both the scaffold's and the sandbox
  * (`vm.createContext`) realm's `Object.prototype`, plus `null` for
- * `Object.create(null)`). `realmArrayProtos` is the analogous whitelist for
- * the `experts` array's own prototype (host default: `[Array.prototype]`;
- * the worker mirror adds the sandbox realm's `Array.prototype`).
+ * `Object.create(null)`).
  */
 export function snapshotAgentOpts(
   raw: unknown,
   realmProtos: readonly (object | null)[] = [Object.prototype, null],
-  realmArrayProtos: readonly object[] = [Array.prototype],
 ): OptsSnapshot {
   if (raw === undefined || raw === null) return { values: {}, unknownKeys: [] };
   if (isProxyValue(raw)) return { values: {}, unknownKeys: [], defect: { code: "proxy" } };
@@ -215,12 +149,6 @@ export function snapshotAgentOpts(
     const value = desc.value;
     if (value === undefined) continue; // D4/D5: an allowed key explicitly set to undefined counts as not passed.
     const keyName = key as AgentOptsKey;
-    if (keyName === "experts") {
-      const arr = snapshotExpertsValue(value, realmArrayProtos);
-      if (arr.defect) return { values: {}, unknownKeys: [], defect: arr.defect };
-      values.experts = arr.value;
-      continue;
-    }
     const unsafe = unsafeValueKind(value);
     if (unsafe) {
       return {
@@ -257,7 +185,7 @@ export const AGENT_OPTS_HINTS: Readonly<Record<string, string>> = {
   resume: "resume is not supported here — use the Agent tool's resume instead",
   run_in_background: "agent() is already async — use parallel() for concurrency",
   background: "agent() is already async — use parallel() for concurrency",
-  expert: "use experts (a string array)",
+  expert: "expert consultation has been removed; use message_agent to ask the parent agent",
   full_result: "use fullResult",
 };
 
@@ -279,7 +207,10 @@ function unknownKeysMessage(keys: readonly string[]): string {
     })
     .filter((s): s is string => s !== undefined);
   const hintTail = hints.length > 0 ? ` ${hints.join("; ")}.` : "";
-  return `agent(prompt, opts?): unknown option(s) ${quoted} — allowed: ${allowed}.${hintTail}`;
+  const removed = keys.includes("experts")
+    ? "opts.experts is no longer supported; expert consultation has been removed. Use message_agent to ask the parent agent. "
+    : "";
+  return `${removed}agent(prompt, opts?): unknown option(s) ${quoted} — allowed: ${allowed}.${hintTail}`;
 }
 
 function defectMessage(defect: OptsDefect): string {
@@ -297,38 +228,12 @@ function defectMessage(defect: OptsDefect): string {
         ? `agent(prompt, opts?): could not read opts.${defect.key} (reading it threw)`
         : "agent(prompt, opts?): opts could not be inspected (reading it threw)";
     case "bad_array":
-      return "agent(prompt, opts?): opts.experts must be a plain array of non-empty strings (no holes, no extra properties, no accessors)";
+      return "agent(prompt, opts?): opts.experts is no longer supported; expert consultation has been removed. Use message_agent to ask the parent agent.";
     default: {
       const _exhaustive: never = defect.code;
       return _exhaustive;
     }
   }
-}
-
-function validateExperts(
-  raw: string | boolean | readonly string[] | undefined,
-): { ok: true; value: readonly string[] | undefined } | { ok: false; message: string } {
-  if (raw === undefined) return { ok: true, value: undefined };
-  if (!Array.isArray(raw)) {
-    return { ok: false, message: "agent(prompt, opts?): opts.experts must be an array of non-empty strings" };
-  }
-  const trimmed: string[] = [];
-  const seen = new Set<string>();
-  for (const item of raw as readonly unknown[]) {
-    if (typeof item !== "string" || item.trim().length === 0) {
-      return { ok: false, message: "agent(prompt, opts?): opts.experts must be an array of non-empty strings" };
-    }
-    const t = item.trim();
-    if (seen.has(t)) {
-      return {
-        ok: false,
-        message: `agent(prompt, opts?): opts.experts must not contain duplicate handles (after trimming) — "${t}"`,
-      };
-    }
-    seen.add(t);
-    trimmed.push(t);
-  }
-  return { ok: true, value: trimmed.length > 0 ? trimmed : undefined };
 }
 
 /**
@@ -382,8 +287,6 @@ export function validateAgentOpts(
     }
     isolation = "worktree";
   }
-  const expertsResult = validateExperts(v.experts);
-  if (!expertsResult.ok) return expertsResult;
 
   return {
     ok: true,
@@ -395,7 +298,6 @@ export function validateAgentOpts(
       ...(typeof v.model === "string" ? { model: v.model } : {}),
       ...(thinking !== undefined ? { thinking } : {}),
       ...(isolation !== undefined ? { isolation } : {}),
-      ...(expertsResult.value !== undefined ? { experts: expertsResult.value } : {}),
     },
   };
 }

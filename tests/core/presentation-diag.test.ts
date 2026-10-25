@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { createInitialState, reduce, TOOL_HISTORY_CAP, toolTrailPatch } from "../../src/core/state-machine.js";
-import { EXPERTS_REFS_CAP } from "../../src/core/types.js";
 import type { DriverEvent, RunInput, RunState } from "../../src/core/types.js";
 import { previewToolArgs } from "../../src/runtime/session-driver.js";
 
@@ -48,21 +47,17 @@ describe("M-A: display meta at enqueue", () => {
     expect("title" in s.diag).toBe(false);
   });
 
-  it("caps meta.experts.refs at EXPERTS_REFS_CAP when the dispatcher handed in more (review §8 ⚠️ item)", () => {
-    const refs = Array.from({ length: EXPERTS_REFS_CAP + 1 }, (_, i) => ({
-      runId: `r_e${i}`,
-      agentType: "architect",
-    }));
-    const s = runningState({ experts: { refs, granted: true } });
-    expect(s.diag.experts?.refs).toHaveLength(EXPERTS_REFS_CAP);
-    expect(s.diag.experts?.refs[0]!.runId).toBe("r_e0");
-    expect(s.diag.experts?.granted).toBe(true);
-  });
-
-  it("passes meta.experts.refs through unchanged when already within the cap", () => {
-    const refs = [{ runId: "r_e0", agentType: "architect" }];
-    const s = runningState({ experts: { refs, granted: false } });
-    expect(s.diag.experts).toEqual({ refs, granted: false });
+  it("retired consult meta (#40) on an enqueued input is ignored: no experts/consultOf/consultCache/consultThread reach diag", () => {
+    const legacy = {
+      label: "legacy",
+      experts: { refs: [{ runId: "r_e0", agentType: "architect" }], granted: true },
+      consultOf: { askerRunId: "r_asker" },
+      consultCache: { v: 1, predicted: { state: "warm" } },
+      consultThread: { threadId: "c7k9q2mx", seq: 1 },
+    } as never;
+    const s = runningState(legacy);
+    expect(s.diag.label).toBe("legacy");
+    for (const key of ["experts", "consultOf", "consultCache", "consultThread"]) expect(s.diag).not.toHaveProperty(key);
   });
 
   it("session_created carries the actual session model — fills the default case and overrides spawn-time meta", () => {
@@ -202,8 +197,8 @@ describe("M-A: tool trail (toolHistory / toolCounts)", () => {
   });
 });
 
-describe("M-A: tool trail — consult fold (consult A/B instrumentation plan §2/§5 P1a, review §8 #2)", () => {
-  it("end-to-end via reduce(): a completed consult call folds into diag.consults with real latency", () => {
+describe("M-A: tool trail — retired consult fact (#40)", () => {
+  it("a tool_end still carrying the old `consult` fact settles the call normally and never writes diag.consults", () => {
     let s = runningState();
     s = sessionEvent(s, { t: "tool_start", toolCallId: "c1", toolName: "consult" }, 10);
     s = sessionEvent(
@@ -214,200 +209,36 @@ describe("M-A: tool trail — consult fold (consult A/B instrumentation plan §2
         toolName: "consult",
         isError: false,
         consult: { result: "completed", costUsd: 0.1 },
-      },
-      25,
-    );
-    expect(s.diag.consults).toEqual({
-      calls: 1,
-      byResult: { completed: 1 },
-      truncated: 0,
-      partial: 0,
-      costUsd: 0.1,
-      unpricedCalls: 0,
-      latencyMs: 15,
-      maxLatencyMs: 15,
-      latencyUnknown: 0,
-    });
-    expect(s.diag.toolCounts).toEqual({ consult: 1 });
-  });
-
-  it(
-    "reduce() M1 regression — hand-built state, no diag.toolHistory at all: the consult patch still lands, diag-only (illegal judgement/phase/pendingTools unchanged). " +
-      "Unreachable via a naturally-sequenced run (state-machine.ts's tool_end branch requires phase==='tool_exec', which only tool_start sets, and tool_start's own toolTrailPatch branch, state-machine.ts ~line 163, unconditionally pushes into toolHistory) — driven here on a hand-built state, same shape the verifier's own repro used.",
-    () => {
-      const built = runningState();
-      const state: RunState = {
-        ...built,
-        phase: "tool_exec",
-        diag: { ...built.diag, pendingTools: 1, toolHistory: undefined, currentTool: undefined },
-      };
-      const out = reduce(
-        state,
-        {
-          generation: state.generation,
-          input: {
-            kind: "session_event",
-            at: 50,
-            event: {
-              t: "tool_end",
-              toolCallId: "ghost",
-              toolName: "consult",
-              isError: false,
-              consult: { result: "completed" },
-            },
-          },
-        },
-        budget,
-      );
-      // Illegal judgement and state transition are exactly as before M1.
-      expect(out.state.phase).toBe("tool_exec");
-      expect(out.state.diag.pendingTools).toBe(1);
-      expect(out.state.diag.lastWarn).toBe("illegal:session_event");
-      // Diag-only consult fold still lands.
-      expect(out.state.diag.consults).toEqual({
-        calls: 1,
-        byResult: { completed: 1 },
-        truncated: 0,
-        partial: 0,
-        costUsd: 0,
-        unpricedCalls: 1,
-        latencyMs: 0,
-        maxLatencyMs: 0,
-        latencyUnknown: 1,
-      });
-    },
-  );
-
-  it("reduce() M1 regression — naturally-sequenced run whose toolHistory record was evicted past TOOL_HISTORY_CAP: the consult patch still lands, diag-only", () => {
-    let s = runningState();
-    s = sessionEvent(s, { t: "tool_start", toolCallId: "consult1", toolName: "consult" }, 10);
-    // Flood with TOOL_HISTORY_CAP more PARALLEL tool_starts (all stay open), so
-    // consult1's record — the oldest — is evicted from the ring; currentTool
-    // tracks the newest start each time, so it stops pointing at consult1 too.
-    for (let i = 0; i < TOOL_HISTORY_CAP; i++) {
-      s = sessionEvent(s, { t: "tool_start", toolCallId: `x${i}`, toolName: "bash" }, 20 + i);
-    }
-    expect(s.diag.toolHistory!.some((r) => r.toolCallId === "consult1")).toBe(false);
-    expect(s.diag.currentTool?.toolCallId).not.toBe("consult1");
-    const beforePhase = s.phase;
-    const beforePending = s.diag.pendingTools;
-    s = sessionEvent(
-      s,
-      {
-        t: "tool_end",
-        toolCallId: "consult1",
-        toolName: "consult",
-        isError: false,
-        consult: { result: "completed", costUsd: 0.2 },
-      },
-      999,
-    );
-    // Illegal judgement and state transition unchanged (same pendingTools —
-    // consult1 is never resolved, matching the verifier's own repro).
-    expect(s.phase).toBe(beforePhase);
-    expect(s.diag.pendingTools).toBe(beforePending);
-    expect(s.diag.lastWarn).toBe("illegal:session_event");
-    // Diag-only consult fold still lands, counted even though the ring evicted it.
-    expect(s.diag.consults).toEqual({
-      calls: 1,
-      byResult: { completed: 1 },
-      truncated: 0,
-      partial: 0,
-      costUsd: 0.2,
-      unpricedCalls: 0,
-      latencyMs: 0,
-      maxLatencyMs: 0,
-      latencyUnknown: 1,
-    });
-    expect(s.diag.toolCounts!.consult).toBe(1);
-  });
-
-  it("toolTrailPatch: no toolHistory at all ⇒ the consult call is still counted, with latencyUnknown=1", () => {
-    const diag = { ...runningState().diag, toolHistory: undefined, currentTool: undefined };
-    const patch = toolTrailPatch(
-      diag,
-      { t: "tool_end", toolCallId: "c1", toolName: "consult", isError: false, consult: { result: "completed" } },
-      100,
-    );
-    expect(patch).not.toHaveProperty("toolHistory");
-    expect(patch.consults).toEqual({
-      calls: 1,
-      byResult: { completed: 1 },
-      truncated: 0,
-      partial: 0,
-      costUsd: 0,
-      unpricedCalls: 1,
-      latencyMs: 0,
-      maxLatencyMs: 0,
-      latencyUnknown: 1,
-    });
-  });
-
-  it("toolTrailPatch: the matching toolHistory record was already evicted by the ring cap ⇒ still counted", () => {
-    const diag = {
-      ...runningState().diag,
-      toolHistory: [{ name: "bash", toolCallId: "other", startedAt: 5 }],
-      currentTool: { name: "bash", toolCallId: "other", startedAt: 5 },
-    };
-    const patch = toolTrailPatch(
-      diag,
-      { t: "tool_end", toolCallId: "gone", toolName: "consult", isError: true, consult: { result: "bad_ref" } },
-      200,
-    );
-    expect(patch).not.toHaveProperty("toolHistory"); // the eviction no-op path — toolHistory itself is not rewritten
-    expect(patch.consults).toEqual({
-      calls: 1,
-      byResult: { bad_ref: 1 },
-      truncated: 0,
-      partial: 0,
-      costUsd: 0,
-      unpricedCalls: 0,
-      latencyMs: 0,
-      maxLatencyMs: 0,
-      latencyUnknown: 1,
-    });
-  });
-
-  it("toolTrailPatch: latency falls back to diag.currentTool's startedAt when the toolHistory record is gone but currentTool still matches", () => {
-    const diag = {
-      ...runningState().diag,
-      toolHistory: undefined,
-      currentTool: { name: "consult", toolCallId: "c9", startedAt: 50 },
-    };
-    const patch = toolTrailPatch(
-      diag,
-      { t: "tool_end", toolCallId: "c9", toolName: "consult", isError: false, consult: { result: "completed" } },
-      90,
-    );
-    expect(patch.consults?.latencyMs).toBe(40);
-    expect(patch.consults?.maxLatencyMs).toBe(40);
-    expect(patch.consults?.latencyUnknown).toBe(0);
-  });
-
-  it("a non-consult tool_end never sets diag.consults — the key is absent for runs with no consult event", () => {
-    let s = runningState();
-    s = sessionEvent(s, { t: "tool_start", toolCallId: "c1", toolName: "bash" }, 10);
-    s = sessionEvent(s, { t: "tool_end", toolCallId: "c1", toolName: "bash", isError: false }, 15);
-    expect(s.diag).not.toHaveProperty("consults");
-  });
-
-  it("invariant: consults.calls never exceeds toolCounts.consult", () => {
-    let s = runningState();
-    s = sessionEvent(s, { t: "tool_start", toolCallId: "c1", toolName: "consult" }, 10);
-    s = sessionEvent(
-      s,
-      { t: "tool_end", toolCallId: "c1", toolName: "consult", isError: false, consult: { result: "completed" } },
+      } as never,
       15,
     );
-    s = sessionEvent(s, { t: "tool_start", toolCallId: "c2", toolName: "consult" }, 20);
-    s = sessionEvent(
+    expect(s.diag).not.toHaveProperty("consults");
+    expect(s.diag.toolCounts).toEqual({ consult: 1 });
+    expect(s.diag.toolHistory!.find((r) => r.toolCallId === "c1")).toMatchObject({ endedAt: 15, isError: false });
+  });
+
+  it("an unknown tool_end with the old fact stays an illegal-event warning and still writes no diag.consults", () => {
+    const s = runningState();
+    const out = reduce(
       s,
-      { t: "tool_end", toolCallId: "c2", toolName: "consult", isError: true, consult: { result: "bad_ref" } },
-      25,
+      {
+        generation: s.generation,
+        input: {
+          kind: "session_event",
+          at: 20,
+          event: {
+            t: "tool_end",
+            toolCallId: "gone",
+            toolName: "consult",
+            isError: true,
+            consult: { result: "bad_ref" },
+          },
+        } as never,
+      },
+      budget,
     );
-    expect(s.diag.consults!.calls).toBeLessThanOrEqual(s.diag.toolCounts!.consult!);
-    expect(s.diag.consults!.calls).toBe(2);
-    expect(s.diag.toolCounts!.consult).toBe(2);
+    expect(out.state.diag.lastWarn).toBe("illegal:session_event");
+    expect(out.state.diag).not.toHaveProperty("consults");
   });
 });
 

@@ -175,27 +175,6 @@
   min-height: 0;
 }
 
-.run-tx-consult {
-  flex: none;
-  max-height: 30%;
-  overflow: auto;
-  padding: var(--sp-2) var(--sp-3);
-  color: var(--c-text-3);
-  font-size: var(--fs-xs);
-}
-
-/* consult cache marker (cache-thread plan §5.3): its own line under the fallback note. */
-.run-tx-cachemark {
-  display: block;
-  margin-top: var(--sp-1);
-  font-family: var(--font-mono);
-}
-
-.run-tx-consult pre {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
 /* 迷你「↓ 最新」按钮(主区的在 DetailDock 里,抽屉自己带一个) */
 .run-tx-latest {
   position: absolute;
@@ -243,4 +222,35 @@
 
 .run-tx-retry {
   flex: none;
+}
+
+/* web-hub archive plan: the archive undo toast (viewport-fixed, ~4s window, shared by the tree
+ * rows and the bash group). */
+.arch-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 14px;
+  border-radius: var(--r-md, var(--r-sm));
+  background: var(--c-text, #1d2321);
+  color: var(--c-surface, #fff);
+  font-size: var(--fs-sm);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+}
+
+.arch-toast-text {
+  max-width: 40vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.arch-toast-undo {
+  color: var(--c-accent, #8fd3c4);
+  font-weight: 600;
 }

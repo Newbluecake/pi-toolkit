@@ -48,12 +48,15 @@ import {
 import AppIcon from "../../icons/AppIcon.vue";
 import ToolCard from "./ToolCard.vue";
 import TxAssistant from "./TxAssistant.vue";
+import TxCommand from "./TxCommand.vue";
 import TxCustom from "./TxCustom.vue";
 import TxDate from "./TxDate.vue";
 import TxDivider from "./TxDivider.vue";
 import TxHiddenGap from "./TxHiddenGap.vue";
 import TxUser from "./TxUser.vue";
 import { buildTxEntries } from "./entries.js";
+import { CMD_SEEN_GRACE_MS, cmdRunningOf, type CmdCardView } from "../../logic/cmdRecord.js";
+import { useCmdHistory } from "../../composables/useCmdHistory.js";
 
 /** Distance (px) from the top under which an auto `load-older` fires — mirrors the legacy
  * scroll-triggered pagination threshold (plan §3.6); not a frozen/shared constant elsewhere. */
@@ -80,14 +83,103 @@ const props = withDefaults(defineProps<TranscriptProps>(), { anchorId: "transcri
 const emit = defineEmits<TranscriptEmits>();
 const { t } = useI18n();
 
+// ---------------------------------------------------------------------------
+// command history (web-hub-cmd-history plan §4.7): the per-agentKey shared store feeds
+// (a) `status.cmdRunning` into `resolveCmdState`'s live context (start-only cards stay
+// `running` while listed / within this tab's 5 s seen grace, else `unrecorded`), and
+// (b) the LOCAL placeholder cards DetailDock creates on dispatch — rendered at the tail and
+// dropped the moment the real record folds into the stream (or after the store's 60 s
+// degrade). The drawer's RunTranscript passes a runId-keyed source with no `status`, so both
+// sides degrade inert there (no records, empty live set).
+// ---------------------------------------------------------------------------
+const cmdHistory = useCmdHistory(props.agent.key);
+
+watch(
+  () => cmdRunningOf(props.agent),
+  (ids) => cmdHistory.noteRunning(ids),
+  { immediate: true },
+);
+
+/** Bumped by the grace-flip timer below so `cmdLive.now` re-resolves once the 5 s seen grace
+ *  expires without an end record (running ⇒ unrecorded) — no interval ticker needed. */
+const cmdGraceBump = ref(0);
+const cmdLive = computed(() => {
+  void cmdGraceBump.value; // reactive dependency: re-resolve when a grace flip fires
+  return {
+    running: new Set(cmdRunningOf(props.agent)),
+    seenRunningAt: (cmdId: string) => cmdHistory.seenRunning.get(cmdId),
+    now: Date.now(),
+  };
+});
+
 const mobile = useMedia(window, "(max-width: 480px)");
 // E1-2 single coordinate system: EVERY length/index below counts entries
 // (`build.entries`), not items+streaming+tools — streaming and an orphan live tool each occupy
 // exactly one trailing entry, a paired toolResult occupies none, and an attached live tool
 // occupies none, so the window, domSignal, N-new baseline, paging shift and anchors all share
 // one index space (fixes the pre-E1 two-space drift the v1 review's Blocker-4 flagged).
-const build = computed(() => buildTxEntries(props.agent));
+const build = computed(() => buildTxEntries(props.agent, cmdLive.value));
 const entriesLen = computed(() => build.value.entries.length);
+
+/** cmdIds whose records are visible in the stream — dropping matching placeholders/notes. */
+const recordCmdIds = computed(() => {
+  const ids = new Set<string>();
+  for (const e of build.value.entries) if (e.type === "command") ids.add(e.view.cmdId);
+  return ids;
+});
+watch(
+  recordCmdIds,
+  (ids) => {
+    if (ids.size > 0) cmdHistory.resolveRecords(ids);
+  },
+  { immediate: true },
+);
+
+/** Local placeholder views (DetailDock-dispatched commands whose record hasn't landed yet) —
+ *  tail-rendered after the windowed entries; filtered against arrived records so placeholder
+ *  and real card never coexist (§4.7). */
+const visiblePlaceholders = computed<CmdCardView[]>(() =>
+  cmdHistory.placeholders
+    .filter((p) => !recordCmdIds.value.has(p.cmdId))
+    .map((p) => ({
+      cmdId: p.cmdId,
+      name: p.name,
+      args: p.args,
+      source: "web" as const,
+      startedAt: p.startedAt,
+      state: "running" as const,
+      local: true as const,
+    })),
+);
+
+// Grace flip: a start-only card kept `running` ONLY by the seen grace must flip to
+// `unrecorded` the moment the grace expires — arm ONE one-shot timer for the earliest expiry
+// (recomputed whenever the build changes; cleared on unmount).
+let cmdGraceTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleCmdGraceFlip(): void {
+  if (cmdGraceTimer !== undefined) {
+    clearTimeout(cmdGraceTimer);
+    cmdGraceTimer = undefined;
+  }
+  let earliest: number | undefined;
+  for (const e of build.value.entries) {
+    if (e.type !== "command" || e.view.state !== "running") continue;
+    if (cmdLive.value.running.has(e.view.cmdId)) continue; // really running — no flip pending
+    const seen = cmdHistory.seenRunning.get(e.view.cmdId);
+    if (seen === undefined) continue;
+    const at = seen + CMD_SEEN_GRACE_MS;
+    if (earliest === undefined || at < earliest) earliest = at;
+  }
+  if (earliest === undefined) return;
+  cmdGraceTimer = setTimeout(
+    () => {
+      cmdGraceTimer = undefined;
+      cmdGraceBump.value += 1;
+    },
+    Math.max(0, earliest - Date.now()) + 20,
+  );
+}
+watch(build, scheduleCmdGraceFlip, { flush: "post" });
 
 // ---------------------------------------------------------------------------
 // scroll memory (session-switch plan §1.4 E1-6): read at setup (initial window + restore plan),
@@ -359,6 +451,10 @@ onBeforeUnmount(() => {
   contentResizeObserver?.disconnect();
   contentResizeObserver = undefined;
   clearTouchSettleTimer();
+  if (cmdGraceTimer !== undefined) {
+    clearTimeout(cmdGraceTimer);
+    cmdGraceTimer = undefined;
+  }
 });
 
 // A server page landing while the client window was already sitting at `start === 0` (the only
@@ -570,6 +666,11 @@ function saveScrollMemory(): void {
           :marker="entry.marker"
           :data-anchor-ids="anchorAttr(view.start + i)"
         />
+        <TxCommand
+          v-else-if="entry.type === 'command'"
+          :view="entry.view"
+          :data-anchor-ids="anchorAttr(view.start + i)"
+        />
         <TxCustom
           v-else-if="entry.type === 'custom'"
           :custom-type="entry.customType"
@@ -608,6 +709,10 @@ function saveScrollMemory(): void {
       </template>
 
       <TxHiddenGap v-if="view.hiddenAfter > 0" direction="after" :count="view.hiddenAfter" @action="jumpToLatest" />
+
+      <!-- cmd-history §4.7: local placeholders for commands dispatched from THIS tab whose
+           `subagent:cmd` record hasn't landed yet — tail-rendered, in-place updating. -->
+      <TxCommand v-for="ph in visiblePlaceholders" :key="`cmd-local:${ph.cmdId}`" :view="ph" />
 
       <div v-if="agent.history === 'waiting'" class="tx-status" aria-busy="true">
         {{ t("transcript.loadingHistory") }}

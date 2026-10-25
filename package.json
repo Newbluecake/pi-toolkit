@@ -1,6 +1,6 @@
 {
   "name": "pi-toolkit",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Toolbox extension for pi — anti-hang subagents (Agent / get_subagent_result / steer_subagent), HUD footer, web_search failover, task tools, ask_user, bash auto-background, scheduler, message fabric, /goal loop",
   "license": "MIT",
   "repository": {
@@ -26,6 +26,9 @@
   },
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "pi-secure": "src/secure/bin/pi-secure"
+  },
   "pi": {
     "extensions": [
       "./index.ts"
@@ -33,6 +36,9 @@
     "skills": [
       "./skills"
     ]
+  },
+  "piSecure": {
+    "honors": "PI_SECURE_SESSION/1"
   },
   "exports": {
     ".": "./dist/index.js"
@@ -76,25 +82,28 @@
     "prettier": "^3.9.6",
     "prismjs": "^1.30.0",
     "tsx": "^4.23.13",
-    "typescript": "^5.6.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-7": "npm:typescript@^7.0.2",
     "vite": "~5.4.21",
     "vitest": "^2.1.0",
     "vue": "^3.5.43",
     "vue-tsc": "^3.3.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node node_modules/typescript-7/bin/tsc -p tsconfig.build.json",
     "build:web": "vite build --config src/web-hub/ui/vite.config.ts",
     "dev:web": "vite build --watch --config src/web-hub/ui/vite.config.ts",
     "check:web": "tsx scripts/web-hub/check-ui-dist.ts",
     "probe:csp": "tsx scripts/web-hub/csp-probe.ts",
     "probe:mermaid": "tsx scripts/web-hub/csp-probe.ts --suite mermaid",
+    "probe:preview-perf": "tsx scripts/web-hub/preview-perf-probe.ts",
     "dev:hub": "tsx scripts/web-hub/dev-hub.ts",
     "visual:web": "tsx scripts/web-hub/visual.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.typecheck.json && vue-tsc --noEmit -p src/web-hub/ui/tsconfig.json",
+    "typecheck": "node node_modules/typescript-7/bin/tsc --noEmit -p tsconfig.json && node node_modules/typescript-7/bin/tsc --noEmit -p tsconfig.typecheck.json && vue-tsc --noEmit -p src/web-hub/ui/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:conformance": "vitest run tests/conformance",
+    "test:traffic-gate": "PI_TRAFFIC_PERF_GATE=1 vitest run tests/traffic/db-contention.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepack": "npm run build && npm run build:web && npm run check:web"

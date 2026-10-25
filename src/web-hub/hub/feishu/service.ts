@@ -47,9 +47,23 @@ import { createFeishuRuns, type FeishuRunEvent, type FeishuRunResult } from "./r
 import { createFeishuDialogs } from "./dialogs.js";
 import { createFeishuDiagnostics, feishuPatchMessage } from "./diagnostics.js";
 import { safeFeishuLink } from "./link.js";
+import { createFeishuXsMirror } from "./xs-mirror.js";
+import type { FeishuXsMirrorEvent } from "./xs-mirror.js";
 import { createFeishuSessionCard } from "./session-card.js";
 import { createFeishuFiles, feishuFileCandidates, type FeishuFilesDeps } from "./files.js";
 import { createFeishuNotify, type FeishuIdleEvidence } from "./notify.js";
+import {
+  createFeishuSchedule,
+  createScheduleLists,
+  scheduleListText,
+  scheduleRunReply,
+  type FeishuSchedulePort,
+  type NoticeResult,
+  type ReportOfferResult,
+  type ScheduleNoticeInput,
+  type ScheduleReceiptView,
+  type ScheduleReportOffer,
+} from "./schedule.js";
 import {
   createFeishuSecurity,
   createLoginApprovalPort,
@@ -67,7 +81,9 @@ export type FeishuServiceEvent =
   | { type: "dialogs"; agentKey: string; epoch: string; open: DialogWire[]; closed: DialogClosedWire[] }
   | { type: "spawns" }
   | { type: "status"; agentKey: string }
-  | { type: "fleet"; agentKey: string };
+  | { type: "fleet"; agentKey: string }
+  /** F1 (#32 §7.5): the agent's schedule dispatcher bound this run to a scheduled message (`sched_bound` frame). */
+  | { type: "sched_bound"; agentKey: string; runKey: string };
 export interface FeishuSpawnPort extends Pick<
   FreshSpawnContext,
   "dirs" | "supervisor" | "firstPrompt" | "prefs" | "registerTimeoutS"
@@ -92,6 +108,11 @@ export interface FeishuBotServiceDeps {
   preview?: FeishuFilesDeps["preview"];
   spawn?: FeishuSpawnPort;
   idleEvidence?(agentKey: string): FeishuIdleEvidence | undefined;
+  /**
+   * F1 (#32): schedule integration port (H1 supplies it iff `HubConfig.schedule` exists). Absent ⇒ no `/schedule`
+   * command, no report/notice push, no new state writes — the Feishu surface is byte-identical.
+   */
+  schedule?: FeishuSchedulePort;
   /** Authenticated web session link (no token/query credentials). */
   link?(agentKey: string): string;
   /** LAN security r2 §4.3: the hub security bus. Absent ⇒ no security alerts. */
@@ -117,7 +138,8 @@ export interface FeishuBotServiceDeps {
   cardAdoptionBudgetMs?: number;
 }
 const NEW_SESSION = "feishu:new";
-const HELP_TEXT = [
+const SCHEDULE_HELP_LINE = "/schedule [run <序号>] — 查看定时任务 / 立即运行（仅私聊）";
+const HELP_BASE = [
   "/list — 列出可用会话（卡片可直接点击切换）",
   "/use <n|sid-prefix|name> — 绑定/切换会话",
   "/cur — 查看当前绑定会话",
@@ -126,7 +148,9 @@ const HELP_TEXT = [
   "/file <abs path> — 发送指定文件",
   "/help — 显示命令帮助",
   "群聊中请先 @ 机器人，再输入命令。",
-].join("\n");
+];
+const helpText = (schedule: boolean): string =>
+  (schedule ? [...HELP_BASE.slice(0, -1), SCHEDULE_HELP_LINE, ...HELP_BASE.slice(-1)] : HELP_BASE).join("\n");
 const mask = (id: string) => (id.length > 10 ? `${id.slice(0, 5)}…${id.slice(-4)}` : "ou_…");
 /** Owner pages for real decode failures: at most one per decode code per 10 min (user ruling 2026-10-19). */
 const UNDECODABLE_OWNER_NOTICE_GAP_MS = 600_000;
@@ -223,6 +247,8 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     dropped: {} as Record<string, number>,
     lastCode: undefined as string | undefined,
   };
+  // xs-mirror counters (plan §4.3): service-lifetime, merged into `info().counters.dropped` only.
+  const mirrorDropped: Record<string, number> = {};
   const state = createFeishuState({
     dir,
     clock,
@@ -270,6 +296,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     const dropped: Record<string, number> = { ...retired.dropped };
     for (const [key, value] of Object.entries(runtime ? (view?.counters ?? {}) : {}))
       if (key !== "in" && key !== "duplicate") dropped[key] = (dropped[key] ?? 0) + value;
+    for (const [key, value] of Object.entries(mirrorDropped)) dropped[key] = (dropped[key] ?? 0) + value;
     return {
       status: !running
         ? credentials.status() === "absent" && !startedAt
@@ -477,6 +504,24 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       send: outbox.enqueueNotice,
       budget,
     });
+    // feishu-xs-mirror (plan §4.2/§4.3): own per-card budget, single serial worker; absent ⇒ inert.
+    const mirror =
+      deps.config.xsMirror === true
+        ? createFeishuXsMirror({
+            state,
+            now: clock.now,
+            label,
+            link,
+            target: bindingTarget,
+            enqueue: outbox.enqueueNotice,
+            run: (task) => work.run(task),
+            workSize: () => work.size,
+            log: (e) => log(e.event, e.reason, e.code),
+            count: (reason) => {
+              mirrorDropped[reason] = (mirrorDropped[reason] ?? 0) + 1;
+            },
+          })
+        : undefined;
     // LAN security r2 §4.3: high-risk alerts, one shared budget with notify. Subscribes the hub
     // security bus; absent bus or `securityAlerts:false` ⇒ inert (and `undefined`).
     const security =
@@ -489,6 +534,34 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
             send: outbox.enqueueNotice,
           })
         : undefined;
+    // F1 (#32): schedule report delivery + notices + `/schedule`. Absent port ⇒ undefined ⇒ nothing below runs.
+    const schedulePort = deps.schedule;
+    const schedule =
+      schedulePort !== undefined
+        ? createFeishuSchedule({
+            state,
+            now: clock.now,
+            owner: () => credentials.current()?.ownerOpenId,
+            installedAt: () => {
+              const at = Date.parse(credentials.current()?.createdAt ?? "");
+              return Number.isFinite(at) ? at : undefined;
+            },
+            ready: () => active && !state.persistFailed() && connector.snapshot().status === "open",
+            budget,
+            outbox,
+            upload: async (input) => {
+              const result = await bounded(api.uploadFile(input), 30_000, clock);
+              return result.ok ? { ok: true as const, fileKey: result.data.fileKey } : { ok: false as const };
+            },
+            workSize: () => work.size,
+            count: (reason) => {
+              mirrorDropped[reason] = (mirrorDropped[reason] ?? 0) + 1;
+            },
+            onReceipts: (sid, rows) => schedulePort.receiptsChanged(sid, rows),
+            log: (e) => log(e.event, e.reason),
+          })
+        : undefined;
+    const scheduleLists = schedule !== undefined ? createScheduleLists(clock.now) : undefined;
     // LAN security r2 §5.7: the Feishu login-approval port (per runtime — it needs the live work slot
     // and the outbox). `patchCard` re-renders the full card from the original info we keep keyed by
     // messageId, so the approve/deny patch still shows user/IP/device.
@@ -750,6 +823,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       requests,
       groupRootTopics: deps.config.groupRootTopics,
       spawnScope: deps.config.spawnScope,
+      ...(deps.schedule !== undefined ? { schedule: true } : {}),
       preparePayload: files.prepare,
       emit: (intent) => {
         work.run(() => routerIntent(intent));
@@ -967,6 +1041,10 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     }
     async function settled(group: SettledGroup) {
       if (!active) throw new Error("stopped");
+      // xs-mirror notices carry `xsm:` as a durable origin marker; they need no request/dialog bookkeeping.
+      if (group.kind === "notice" && group.requestId?.startsWith("xsm:")) return;
+      // F1: `sch:` report finals only move their delivery receipt (no request/dialog bookkeeping).
+      if (schedule !== undefined && (await schedule.settled(group))) return;
       if (group.requestId) {
         const waiter = sendWaiters.get(group.requestId);
         if (!waiter && state.dialogCards.get(group.requestId))
@@ -1127,6 +1205,63 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         ...(message.createdAt !== undefined ? { sourceCreatedAt: message.createdAt } : {}),
       };
     }
+    async function scheduleIntent(
+      intent: Extract<FeishuRouterIntent, { type: "schedule" | "schedule-run" }>,
+      target: OutboxTarget,
+    ) {
+      const port = deps.schedule,
+        lists = scheduleLists;
+      if (port === undefined || lists === undefined || !active) return;
+      const m = intent.message;
+      // Re-authorize at execution time: the allow-list / tenant may have changed since the ACK.
+      if (!admission.authorize(intent.identity).ok) return;
+      const reply = (text: string, kind: string) =>
+        outbox.enqueueNotice({
+          target,
+          message: renderNotice({ label: "定时任务", text }),
+          key: `sch-${kind}-${m.eventId}`.slice(0, 100),
+          laneKey: m.chatId,
+        });
+      if (intent.type === "schedule") {
+        let rows: ReturnType<FeishuSchedulePort["list"]>;
+        try {
+          rows = port.list();
+        } catch {
+          await reply("定时任务暂不可用，请稍后再试", "list");
+          return;
+        }
+        const { text, frozen } = scheduleListText(rows);
+        lists.freeze(m.chatId, m.senderOpenId, frozen);
+        await reply(text, "list");
+        return;
+      }
+      const picked = lists.pick(m.chatId, m.senderOpenId, intent.n);
+      if (picked === "expired") {
+        await reply("列表已过期，请先发送 /schedule 重新查看", "run");
+        return;
+      }
+      if (picked === "range") {
+        await reply("序号无效，请对照 /schedule 的列表", "run");
+        return;
+      }
+      let result: Awaited<ReturnType<FeishuSchedulePort["run"]>>;
+      try {
+        result = await bounded(
+          port.run({
+            reqId: feishuBatchIdentity([m.messageId]).id,
+            sessionId: picked.sessionId,
+            taskId: picked.taskId,
+            defHash: picked.defHash,
+          }),
+          12_000,
+          clock,
+        );
+      } catch {
+        result = { kind: "timeout" };
+      }
+      if (!active) return;
+      await reply(scheduleRunReply(picked, result), "run");
+    }
     async function routerIntent(intent: FeishuRouterIntent) {
       if (!active) return;
       const m = intent.message,
@@ -1136,7 +1271,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
           target,
           (
             {
-              help: `${intent.unknownCommand ? `未知命令 ${intent.unknownCommand}\n\n` : ""}${HELP_TEXT}`,
+              help: `${intent.unknownCommand ? `未知命令 ${intent.unknownCommand}\n\n` : ""}${helpText(deps.schedule !== undefined)}`,
               "use-topic": "请在话题内 @ 机器人",
               "no-session-bound": "尚未绑定会话 — /list 后 /use",
               "queue-full": "队列已满，请稍后重发",
@@ -1180,6 +1315,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       } else if (intent.type === "bound") await notice(target, `已绑定：${label(intent.binding.sessionId!)}`, m.chatId);
       else if (intent.type === "file") await explicitFile(context(m, intent.identity), intent.path, intent.identity);
       else if (intent.type === "new") await fresh(intent);
+      else if (intent.type === "schedule" || intent.type === "schedule-run") await scheduleIntent(intent, target);
       else if (intent.type === "open-topic") {
         const result = await sendCard(
           `ft${feishuKey(m.messageId)}`,
@@ -1501,7 +1637,20 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         }
       }
     }
-    const proactive = new Map<string, { text: string; failed: boolean; owned: boolean }>();
+    const proactive = new Map<
+      string,
+      {
+        text: string;
+        failed: boolean;
+        owned: boolean;
+        /** F1 §7.5: runKey of the scheduled message this run was bound to (cleared on a human user message) */
+        sched?: string;
+        /** user `message_start`s seen BEFORE the bind (the bound message's own ev may precede `sched_bound`) */
+        users: number;
+        /** the bound message's own `message_start` ev has been accounted for */
+        schedSeen?: boolean;
+      }
+    >();
     function event(event: FeishuServiceEvent) {
       if (!active) return;
       if (event.type === "dialogs") {
@@ -1513,16 +1662,33 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         return;
       }
       if (event.type === "status" || event.type === "fleet") return;
+      if (event.type === "sched_bound") {
+        // Exact, per-run suppression of the done notice. No marker without a run ⇒ conservatively notify.
+        const p = deps.schedule !== undefined ? proactive.get(event.agentKey) : undefined;
+        if (p !== undefined && p.users <= 1 && /^s_[a-z2-7]{8}@/.test(event.runKey)) {
+          p.sched = event.runKey;
+          p.schedSeen = p.users === 1;
+        }
+        return;
+      }
       if (event.type === "agent_down" || event.type === "agent_up" || event.type === "agent_stale")
         dialogs.disconnected(event.agentKey);
       if (event.type === "ev") {
         let p = proactive.get(event.agentKey);
         if (event.e.type === "agent_start") {
           if (proactive.size < 512)
-            proactive.set(event.agentKey, (p = { text: "", failed: false, owned: runs.owns(event.agentKey) }));
+            proactive.set(
+              event.agentKey,
+              (p = { text: "", failed: false, owned: runs.owns(event.agentKey), users: 0 }),
+            );
         }
         if (p) {
           p.owned ||= runs.owns(event.agentKey);
+          if (event.e.type === "message_start" && object(event.e["message"])?.["role"] === "user") {
+            if (p.sched === undefined) p.users++;
+            else if (p.schedSeen !== true) p.schedSeen = true;
+            else delete p.sched; // a human message joined the scheduled run ⇒ normal done notice again
+          }
           if (event.e.type === "message_end" && object(event.e["message"])?.["role"] === "assistant") {
             p.text = messageText(event.e["message"]).slice(0, 1_500);
             p.failed ||= object(event.e["message"])?.["stopReason"] === "error";
@@ -1530,7 +1696,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
           if (event.e.type === "agent_settled") {
             proactive.delete(event.agentKey);
             const sid = deps.sessions.views().find((v) => v.agentKey === event.agentKey && v.live)?.sessionId;
-            if (sid)
+            if (sid && !(p.sched !== undefined && !p.failed))
               work.run(() =>
                 notify.session({
                   sessionId: sid,
@@ -1565,6 +1731,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       files.expirePins();
       work.run(() => dialogs.sweep());
       work.run(bindFresh);
+      mirror?.pump();
       maintenance = clock.setTimeout(maintain, 30_000);
     }
     return {
@@ -1581,6 +1748,11 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       security,
       approval,
       sessionCard,
+      schedule,
+      xsMirror(e: FeishuXsMirrorEvent): void {
+        if (!active || !mirror) return;
+        mirror.deliver(e);
+      },
       get authFailed() {
         return authFailed;
       },
@@ -1600,7 +1772,19 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
           state.requests.transition(r.id, r.state === "received" ? "expired" : "uncertain", { code: "restart-new" });
         for (const r of state.requests.list({ states: ["received"] }).filter((r) => r.code === "new-first"))
           state.requests.transition(r.id, "expired", { code: "restart-first" });
+        // xs-mirror off: discard persisted-but-unsent mirror notices BEFORE outbox.start() can resend them (§4.6).
+        if (deps.config.xsMirror !== true) {
+          let purged = 0;
+          for (const p of state.outbox.list({ state: "queued" }))
+            if (p.kind === "notice" && p.requestId?.startsWith("xsm:") && state.outbox.remove(p.sendId)) purged++;
+          if (purged > 0) {
+            mirrorDropped["xs-mirror-purged"] = (mirrorDropped["xs-mirror-purged"] ?? 0) + purged;
+            log("xs-mirror", "purged");
+          }
+        }
         // bootFresh is captured before accepting any live work; its stored first prompts are never replayed.
+        // F1: accepted schedule receipts with no outbox group left become `uncertain` BEFORE the outbox can re-emit.
+        await schedule?.reconcile();
         await state.commit();
         if (!active) return;
         outbox.start();
@@ -1652,6 +1836,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         security?.dispose();
         approval.dispose();
         notify.dispose();
+        mirror?.dispose();
         budget.dispose();
         for (const w of sendWaiters.values()) {
           clock.clearTimeout(w.timer);
@@ -1879,6 +2064,59 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     admin,
     approval,
     snapshot: info,
+    /** hub.ts (P3) late-binds the xs observer here; synchronous, never throws, drops when no runtime. */
+    xsMirror(e: FeishuXsMirrorEvent): void {
+      try {
+        if (!disposed) runtime?.xsMirror(e);
+      } catch {
+        /* observer must never affect xs routing */
+      }
+    },
+    /**
+     * F1 (#32): H1 → F1 entry points. Every method is safe to call in any lifecycle phase and never throws;
+     * without `deps.schedule` they are inert (`n/a` / refused) and write nothing.
+     */
+    schedule: {
+      enabled: deps.schedule !== undefined,
+      async pushReport(offer: ScheduleReportOffer): Promise<ReportOfferResult> {
+        const none = (outcome: ReportOfferResult["outcome"]): ReportOfferResult => ({
+          reportId: offer.reportId,
+          outcome,
+        });
+        if (deps.schedule === undefined || disposed) return none("n/a");
+        const kit = runtime?.schedule;
+        if (kit === undefined) return none(credentials.current() === undefined ? "n/a" : "waiting");
+        try {
+          return await kit.pushReport(offer);
+        } catch {
+          return none("waiting");
+        }
+      },
+      async pushNotice(input: ScheduleNoticeInput): Promise<NoticeResult> {
+        const kit = deps.schedule !== undefined && !disposed ? runtime?.schedule : undefined;
+        if (kit === undefined) return { outcome: "refused", reason: "inactive" };
+        try {
+          return await kit.pushNotice(input);
+        } catch {
+          return { outcome: "refused", reason: "error" };
+        }
+      },
+      receiptsFor(sessionId: string): ScheduleReceiptView[] {
+        if (deps.schedule === undefined) return [];
+        try {
+          return state.scheduleReceipts.list({ sid: sessionId }).map((r) => ({
+            reportId: r.reportId,
+            state: r.state,
+            ...(r.code !== undefined ? { code: r.code } : {}),
+          }));
+        } catch {
+          return [];
+        }
+      },
+      hasReceipt(reportId: string): boolean {
+        return deps.schedule !== undefined && state.scheduleReceipts.get(reportId) !== undefined;
+      },
+    },
     keepalive: () => credentials.status() === "loaded" || credentials.status() === "unsafe",
     dispose(): Promise<void> {
       if (disposing) return disposing;

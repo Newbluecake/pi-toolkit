@@ -51,6 +51,7 @@ import type {
 } from "../protocol/messages.js";
 import type { FeishuBotHubConfig } from "../protocol/feishu.js";
 import type { HubCrossSessionConfig } from "./xs/limits.js";
+import type { HubScheduleConfig } from "../protocol/schedule.js";
 import type { CommandCompleteRoutes } from "./command-complete.js";
 import type { CmdLimit } from "./cmd-limit.js";
 import type { HubPaths } from "../protocol/paths.js";
@@ -478,6 +479,14 @@ export interface HubConfig {
    * `hub/main.ts` re-validates via `normalizeHubCrossSessionConfig` and drops the whole key on a
    * malformed value. */
   crossSession?: HubCrossSessionConfig;
+  /** scheduled-reports plan r3 §10.3 (S0 frozen face): the hub's read-only schedule coordinator
+   * policy, present ONLY when `schedule.enabled ∧ webHub.enabled ∧ control !== false` on the
+   * launching pi (A0's `buildHubConfig` omits the key otherwise — key absence IS off: no reader,
+   * no `sched.v1` cap, no `/api/schedules`, no `schedules` SSE, no `sched_*` frame handling,
+   * byte-identical hub). Frozen at hub start; `hub/main.ts` re-validates via
+   * `normalizeHubScheduleConfig` (protocol/schedule.ts) and drops the whole key when malformed.
+   * Residual: the pi that launched the hub decides (alias R11 class). */
+  schedule?: HubScheduleConfig;
 }
 
 /**

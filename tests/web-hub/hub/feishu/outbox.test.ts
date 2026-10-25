@@ -1031,3 +1031,41 @@ describe("hygiene", () => {
     expect(r.fake.sent).toHaveLength(1);
   });
 });
+
+describe("notice tag (feishu-xs-mirror §4.2/§4.6)", () => {
+  const T = { scope: "p2p", via: "send", receiveIdType: "chat_id", receiveId: "oc_p2p1" } as const;
+  const msg = { msgType: "text", content: '{"text":"x"}' } as const;
+  it("a valid tag is persisted as requestId; seed/sendId equal the untagged notice", async () => {
+    const r = await mkRig({ start: false });
+    const tagged = await r.outbox.enqueueNotice({ target: T, message: msg, key: "kk", tag: "xsm:abc_-9" });
+    expect(tagged).toMatchObject({ ok: true, duplicate: false });
+    const rec = r.state.outbox.list({ state: "queued" })[0]!;
+    expect(rec.requestId).toBe("xsm:abc_-9");
+    if (!tagged.ok) throw new Error();
+    expect(tagged.sendIds).toEqual([deriveSendId("notice\nkk", 1)]); // seed unchanged by the tag
+  });
+  it("an invalid tag is refused invalid-request; no tag leaves the record byte-identical (no requestId)", async () => {
+    const r = await mkRig({ start: false });
+    for (const tag of ["", "xsm:", "xsm:a b", "other:abc", `xsm:${"a".repeat(61)}`])
+      expect(await r.outbox.enqueueNotice({ target: T, message: msg, tag })).toEqual({
+        ok: false,
+        refused: "invalid-request",
+      });
+    expect(r.state.outbox.size).toBe(0);
+  });
+  it("the same tag while its record exists is a duplicate (nothing added)", async () => {
+    const r = await mkRig({ start: false });
+    await r.outbox.enqueueNotice({ target: T, message: msg, key: "xsm:dup", tag: "xsm:dup" });
+    const again = await r.outbox.enqueueNotice({ target: T, message: msg, key: "xsm:dup", tag: "xsm:dup" });
+    expect(again).toMatchObject({ ok: true, duplicate: true });
+    expect(r.state.outbox.size).toBe(1);
+  });
+  it("a tagged notice settles with kind notice + the tag as requestId, then its record is deleted (R7 pinned)", async () => {
+    const r = await mkRig();
+    await r.outbox.enqueueNotice({ target: T, message: msg, key: "xsm:s1", tag: "xsm:s1" });
+    await waitSettled(r, 1);
+    expect(r.settled[0]).toMatchObject({ kind: "notice", requestId: "xsm:s1", outcome: "delivered" });
+    await settle(30);
+    expect(r.state.outbox.list()).toHaveLength(0);
+  });
+});

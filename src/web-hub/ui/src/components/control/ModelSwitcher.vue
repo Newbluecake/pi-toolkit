@@ -24,14 +24,20 @@ import {
   filterModels,
   groupByProvider,
   modelsOf,
+  readModelSort,
   shortModelLabel,
   snapshotAge,
+  sortGroupedModels,
+  sortModelsById,
+  sortModelsByProvider,
   switchErrorKey,
   trackSwitch,
+  writeModelSort,
   SWITCH_TIMEOUT_MS,
 } from "@logic/models.js";
 import { modelCommandArg } from "@protocol/models.js";
 import AppIcon from "../../icons/AppIcon.vue";
+import { browserLocalStorage } from "../shell/themeStorage.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { usePopoverClamp } from "../../composables/usePopoverClamp.js";
 import ModelOptionRow from "./ModelOptionRow.vue";
@@ -103,6 +109,24 @@ const open = ref(false);
 const tab = ref<"scoped" | "all">("scoped");
 const query = ref("");
 const activeIdx = ref(-1);
+
+// --- sort mode (2026-10 request: 排序切换「名称 | provider」, persisted per browser) -----------
+
+/** `"name"` (flat, natural id A→Z) | `"provider"` (provider groups A→Z, id within). The
+ *  choice is a pure browser preference (`pwh_model_sort`) — one hub serves many pi's and
+ *  many browsers; storage comes INJECTED via themeStorage so this file never spells the
+ *  storage identifier (source-scan's localStorage rule). Junk/absent/corrupt ⇒ `"name"`. */
+function sortStorage(): Storage | null {
+  return typeof window === "undefined" ? null : browserLocalStorage();
+}
+const sortMode = ref<"name" | "provider">(readModelSort(sortStorage()));
+function setSort(next: "name" | "provider"): void {
+  if (sortMode.value === next) return;
+  sortMode.value = next;
+  activeIdx.value = -1; // display order changed — drop the highlight, never re-point it
+  writeModelSort(sortStorage(), next);
+}
+
 const root = ref<HTMLElement | null>(null);
 const trigger = ref<HTMLButtonElement | null>(null);
 const searchEl = ref<HTMLInputElement | null>(null);
@@ -198,14 +222,25 @@ watch(open, (v) => {
 const searched = computed<ModelItem[]>(() => filterModels(models.value?.items ?? [], query.value) as ModelItem[]);
 const useTabs = computed(() => models.value?.scoped === true);
 const scopedItems = computed<ModelItem[]>(() => searched.value.filter((m) => m.scoped === true));
-const groups = computed(() => groupByProvider(searched.value) as { provider: string; items: ModelItem[] }[]);
-/** Selectable rows in DISPLAY order (drives ↑↓/Enter). */
+/** Rows the open view draws from: scoped tab ⇒ scoped items; all tab / no-tabs ⇒ everything. */
+const isAllTab = computed(() => useTabs.value && tab.value === "all");
+const sourceItems = computed<ModelItem[]>(() =>
+  useTabs.value && !isAllTab.value ? scopedItems.value : searched.value,
+);
+/** Sticky `.model-group` headers render on the all tab (first-seen provider order — the
+ *  registry's own order) and whenever sortMode is "provider" (providers A→Z). Every other
+ *  view is a flat id-sorted list that therefore carries the per-row provider chip (方案 A). */
+const groupedView = computed(() => isAllTab.value || sortMode.value === "provider");
+const groups = computed(() => {
+  // provider sort: pre-sorting by provider+id makes groupByProvider's first-seen order
+  // alphabetical; all tab: keep the registry's first-seen provider order. Both id-sort within.
+  const src =
+    sortMode.value === "provider" && !isAllTab.value ? sortModelsByProvider(sourceItems.value) : sourceItems.value;
+  return sortGroupedModels(groupByProvider(src)) as { provider: string; items: ModelItem[] }[];
+});
+/** Selectable rows in DISPLAY order (drives ↑↓/Enter and aria-activedescendant). */
 const selectable = computed<ModelItem[]>(() =>
-  useTabs.value && tab.value === "scoped"
-    ? scopedItems.value
-    : useTabs.value
-      ? groups.value.flatMap((g) => g.items)
-      : searched.value,
+  groupedView.value ? groups.value.flatMap((g) => g.items) : sortModelsById(sourceItems.value),
 );
 
 function isCurrent(m: ModelItem): boolean {
@@ -508,6 +543,29 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
+        <!-- Sort toggle (2026-10): only where it has effect — the all tab is ALWAYS grouped by
+             provider (first-seen), so the toggle is hidden there instead of lying inert. -->
+        <div v-if="!isAllTab" class="model-sort-row">
+          <span class="model-sort-label">{{ t("control.modelSort") }}</span>
+          <div class="model-sort-seg" role="group" :aria-label="t('control.modelSort')">
+            <button
+              type="button"
+              :aria-pressed="sortMode === 'name'"
+              :class="{ active: sortMode === 'name' }"
+              @click="setSort('name')"
+            >
+              {{ t("control.modelSortName") }}
+            </button>
+            <button
+              type="button"
+              :aria-pressed="sortMode === 'provider'"
+              :class="{ active: sortMode === 'provider' }"
+              @click="setSort('provider')"
+            >
+              {{ t("control.modelSortProvider") }}
+            </button>
+          </div>
+        </div>
         <div v-if="confirmItem" class="model-confirm">
           <span>{{ t("control.modelConfirm", { id: confirmItem.item.id }) }}</span>
           <p v-if="confirmItem.message" class="model-confirm-msg">{{ confirmItem.message }}</p>
@@ -526,7 +584,7 @@ onBeforeUnmount(() => {
               <span class="model-badge model-badge-current">{{ t("control.modelCurrentBadge") }}</span>
             </span>
           </li>
-          <template v-if="useTabs && tab === 'all'">
+          <template v-if="groupedView">
             <template v-for="g in groups" :key="g.provider">
               <li class="model-group" role="presentation">{{ g.provider }}</li>
               <ModelOptionRow
@@ -550,6 +608,7 @@ onBeforeUnmount(() => {
               :selected="isCurrent(m)"
               :active="selectable[activeIdx] === m"
               :disabled="switching"
+              :provider-badge="true"
               @pick="pick(m)"
             />
           </template>

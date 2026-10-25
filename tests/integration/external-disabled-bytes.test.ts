@@ -91,7 +91,7 @@ function build(over: { externalEnabled?: boolean; quotaProviders?: string } = {}
     dispose() {
       stack.external?.dispose();
       stack.quota?.dispose();
-      stack.scheduler.stop();
+      stack.schedule?.dispose();
       stack.rpc.close();
       if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = prev;
@@ -134,7 +134,7 @@ describe("external-disabled bytes (P5 验收①)", () => {
     expect(formatAvailableModelsForPrompt(models, undefined)).toBe(golden);
   });
 
-  it("enabled=false ⇒ consult/set_model 谓词缺席：droid/x 严格解析不落外部、错误逐字节原样", () => {
+  it("enabled=false ⇒ set_model 谓词缺席：droid/x 严格解析不落外部、错误逐字节原样", () => {
     const b = build({ externalEnabled: false });
     teardowns.push(b.dispose);
     // resolveHint 不包装：严格 droid/x 不被外部认领 ⇒ 原函数（注册表无 droid ⇒ undefined）。

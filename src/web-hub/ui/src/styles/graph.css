@@ -16,8 +16,12 @@
  *   never overflows horizontally (Q3's three columns only).
  * - merge rows DIMMED (§0.2 user ruling — the OPPOSITE of the mockup's bold): `.is-merge`
  *   subject color `--c-text-3` + a hollow dot (the SVG dot is stroked, not filled).
- * - the current row (`data-current`) gets a background tint + the SVG outer ring; other
- *   worktree HEADs get a dashed ring + badge (all in the SVG geometry, colors here).
+ * - the current row (`data-current`) gets a cell background tint; other worktree HEADs get
+ *   the in-text `.gg-wtbadge` badge. The SVG draws NO rings (the comment claiming an outer
+ *   ring / dashed ring was outdated — corrected in merged-plan r3 P5).
+ * - merged-plan r3 §7.3/§7.4: `.is-landed` rows (patch-equivalent commits) recolor to the
+ *   solid `--gg-lane-landed` token — geometry unchanged, and NO opacity/stroke-opacity/
+ *   fill-opacity may appear on any `.is-landed` rule (the source-scan test pins this).
  */
 
 .gg {
@@ -151,6 +155,14 @@
   font-size: 10px;
   text-anchor: middle;
   opacity: 0.7;
+}
+
+/* ---- landed rows (merged-plan r3 §7.3): dimmed subject; dots/routes ride the solid
+ * --gg-lane-landed token (inline color in GraphLanes), geometry identical. This rule must
+ * stay BEFORE tr.is-merge .gg-sub (same specificity; merge ∩ landed = ∅ by construction —
+ * a merge is always `+` — the order is only a backstop). NO opacity here (source-scan). */
+tr.is-landed .gg-sub {
+  color: var(--c-text-2);
 }
 
 /* ---- merge rows DIMMED (§0.2 ruling — opposite of the mockup's bold) ---- */
@@ -350,6 +362,50 @@ tr.is-merge .gg-sub {
   color: var(--c-text-3);
   font-size: var(--fs-2xs);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---- merged branches (merged-plan r3 §7.3): the show/hide toggle + the badge ---- */
+.gg-merged-bar {
+  display: flex;
+  margin: 0 0 var(--sp-1);
+}
+
+.gg-merged-toggle {
+  min-height: 24px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+
+.gg-merged-toggle:hover {
+  background: var(--c-surface-2);
+}
+
+.gg-merged-toggle[aria-pressed="true"] {
+  background: var(--c-sunken);
+}
+
+/* the「已合入」/ merged badge: chip-shaped like .gg-ref but on the neutral sunken surface —
+ * sits after the branch chips, before `+n`, outside the ≤3-chip quota; never on ≤480px
+ * (the component simply doesn't render it there — Q3 keeps only the HEAD chip). */
+.gg-mbadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: calc(17px * var(--fs-scale, 1));
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  font-family: var(--font-sans);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+  background: var(--c-sunken);
+  color: var(--c-text-2);
+  flex: none;
 }
 
 /* ---- ≤480px (§0.2 Q3): lanes(≤4) + subject (HEAD chip only) + hash ---- */

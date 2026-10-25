@@ -159,6 +159,18 @@ describe("buildDialogAnswers / dialogComplete (§7.2/§7.4)", () => {
     expect(buildDialogAnswers(questions, "nope")).toBeUndefined();
   });
 
+  it("2026-10-24 backstop: single-select with BOTH a pick and an Other keeps only the pick", () => {
+    // A pre-fix draft can still carry both; the pick wins (TUI parity), multiSelect untouched.
+    const answers = buildDialogAnswers(questions, [
+      { selected: ["A"], other: "leftover" },
+      { selected: ["X"], other: "kept" },
+    ]);
+    expect(answers).toEqual([
+      { selected: ["A"], other: null },
+      { selected: ["X"], other: "kept" },
+    ]);
+  });
+
   it("dialogComplete: every question needs a selection or a non-empty Other", () => {
     expect(dialogComplete(questions, buildDialogAnswers(questions, [{ selected: ["A"] }, { other: "x" }]))).toBe(true);
     expect(dialogComplete(questions, buildDialogAnswers(questions, [{ selected: ["A"] }, { selected: [] }]))).toBe(

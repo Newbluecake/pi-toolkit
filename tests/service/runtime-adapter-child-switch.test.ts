@@ -153,7 +153,7 @@ describe("runtime-adapter childSwitchContextGrant (T-S9)", () => {
     expect(captured?.tools).toBeUndefined(); // unrestricted type: no allowlist to merge into either way
   });
 
-  it("a consult run (forkSessionFrom set) never gets switch_context, even when granted returns true", async () => {
+  it("a readonly-domain run never gets switch_context, even when granted returns true", async () => {
     const clock = new FakeClock();
     let captured: SessionSpec | undefined;
     const driver: SessionDriver = {
@@ -165,12 +165,12 @@ describe("runtime-adapter childSwitchContextGrant (T-S9)", () => {
       onLateArrival: () => undefined,
     };
     const runner = buildAdapter(clock, { driver, childSwitchContextGrant: () => true });
-    const p = runner.run(spec(readonlyType, { forkSessionFrom: "/tmp/some-session.jsonl" }));
+    const p = runner.run(spec(readonlyType, { toolDomain: "readonly" }));
     await drain(clock, 10);
     await p;
-    // Consult forces the read-only tool domain unconditionally (CONSULT_READONLY_TOOLS) — whether
-    // or not `driver.create` was ever reached with a captured spec, switch_context must not
-    // appear in it (this mirrors the existing `!isConsultRun` guard every other grant uses).
+    // The readonly domain forces READONLY_DOMAIN_TOOLS unconditionally — whether or not
+    // `driver.create` was ever reached with a captured spec, switch_context must not
+    // appear in it (this mirrors the `!readonlyDomain` guard every other grant uses).
     expect(captured?.tools ?? []).not.toContain("switch_context");
   });
 });

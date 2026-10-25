@@ -276,7 +276,7 @@ describe("exit facts value chain (T25-T27)", () => {
 
   it("onReaped forwards sessionId as a defensive fan-out point (E18 late-arrival call sites)", async () => {
     const clock = new FakeClock();
-    const seen: Array<{ runId: string; forkSessionFrom?: string; sessionId?: string }> = [];
+    const seen: Array<{ runId: string; sessionId?: string }> = [];
     const driver: SessionDriver = {
       create: async () => handle(),
       bind: async () => undefined,
@@ -284,8 +284,8 @@ describe("exit facts value chain (T25-T27)", () => {
     };
     const runner = buildAdapter(clock, {
       driver,
-      onReaped: (runId, forkSessionFrom, sessionId) => {
-        seen.push({ runId, ...(forkSessionFrom !== undefined ? { forkSessionFrom } : {}), sessionId });
+      onReaped: (runId, sessionId) => {
+        seen.push({ runId, sessionId });
       },
     });
     await runner.run(spec(plainType()));

@@ -273,6 +273,19 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   font-size: 0.9em;
 }
 
+/* The `.md code` inline-chip rule above also matches a fenced block's `<pre><code>` — and an
+ * inline element's left padding paints ONCE, at the start of its FIRST line box only, so the
+ * fence's first line sat 5px (≈1 char) to the right of every later line (2026-10-24 bug; the
+ * 0.9em also quietly shrank the whole block, and the chip background went unnoticed only
+ * because it equals the codeblock surface). Neutralize it inside code blocks: the `<pre>`
+ * owns padding, font size and background there. */
+.md .codeblock pre code {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  font-size: inherit;
+}
+
 .md a {
   overflow-wrap: anywhere;
 }
@@ -1052,4 +1065,206 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   .tool-head {
     min-height: 38px;
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * Command-history card (web-hub-cmd-history plan v2 §4.7; style baseline
+ * /tmp/cmd-history-preview.html, user-approved 2026-10-24). Purple-left-border card on the
+ * shared `.msg-assistant` grid: avatar column ≥481px only (same media query as
+ * `.msg-assistant`/`.msg-custom` below). Chips: source (mono token) + 「不进上下文」; state
+ * chip carries data-state; the body collapses to ~6 lines via `.is-clamped`.
+ * ------------------------------------------------------------------------- */
+.msg-cmd {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  column-gap: var(--sp-3);
+}
+
+.msg-cmd .avatar-cmd {
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+}
+
+.msg-cmd .cmd-chip {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  padding: 0 var(--sp-2);
+  border-radius: 999px;
+  background: var(--c-sunken);
+  color: var(--c-text-3);
+}
+
+.msg-cmd .cmd-chip-src {
+  background: var(--c-info-soft);
+  color: var(--c-info);
+}
+
+.msg-cmd .chip-noctx {
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+}
+
+.cmd-card {
+  border: 1px solid var(--c-border);
+  border-left: 3px solid var(--c-accent);
+  border-radius: var(--r-sm);
+  background: var(--c-accent-soft);
+  min-width: 0;
+}
+
+.cmd-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border-bottom: 1px dashed var(--c-border);
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+
+.cmd-card-head .cmd-invocation {
+  font-family: var(--font-mono);
+  font-weight: var(--fw-semibold);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmd-card-head .cmd-sp {
+  flex: 1;
+}
+
+.cmd-state[data-state="done"] {
+  background: var(--c-sunken);
+  color: var(--c-text-3);
+}
+
+.cmd-state[data-state="running"] {
+  background: var(--c-info-soft);
+  color: var(--c-info);
+}
+
+.cmd-state[data-state="failed"],
+.cmd-state[data-state="timeout"] {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+}
+
+.cmd-state[data-state="unrecorded"] {
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+}
+
+.cmd-card-body {
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+
+/* ≈6 body lines (fs-sm × ~1.6 line-height + padding) —「展开全部」lifts it. */
+.cmd-card-body.is-clamped {
+  max-height: calc(6 * 1.6 * var(--fs-sm) + 2 * var(--sp-2));
+  overflow: hidden;
+}
+
+.cmd-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-start;
+  margin: 2px 0;
+}
+
+.cmd-row-group {
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.cmd-lv {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.8;
+  padding: 0 5px;
+  border-radius: var(--r-sm);
+  flex: none;
+}
+
+.cmd-lv[data-level="info"] {
+  background: var(--c-info-soft);
+  color: var(--c-info);
+}
+
+.cmd-lv[data-level="warning"] {
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+}
+
+.cmd-lv[data-level="error"] {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+}
+
+.cmd-key {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.cmd-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  min-width: 0;
+  flex: 1;
+}
+
+.cmd-pre-err {
+  color: var(--c-danger);
+}
+
+.cmd-note-line {
+  margin: var(--sp-1) 0 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.cmd-muted {
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-sm);
+}
+
+.cmd-fold {
+  border: none;
+  background: none;
+  color: var(--c-info);
+  cursor: pointer;
+  font-size: var(--fs-xs);
+  padding: 0 var(--sp-3) var(--sp-2);
+}
+
+.cmd-fold:hover {
+  text-decoration: underline;
+}
+
+@media (min-width: 481px) {
+  .msg-cmd {
+    grid-template-columns: 28px minmax(0, 1fr);
+  }
+}
+
+/* cmd-history slim dock notes (DetailDock historyMode; classes hook tests, visuals reuse
+ * `.fleet-actions-note`) — the manual-dismiss button sits at the note's right edge. */
+.cmd-note {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.cmd-note .cmd-note-dismiss {
+  margin-left: auto;
 }

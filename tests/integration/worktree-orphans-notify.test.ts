@@ -110,7 +110,7 @@ function makeCtx(cwd: string, hasUI: boolean) {
 function buildAndStop(cwd: string, hasUI: boolean) {
   const env = makeCtx(cwd, hasUI);
   const stack = buildSessionStack(fakePi(), env.ctx, testSettings(), emptyTypes, []);
-  stack.scheduler.stop();
+  stack.schedule?.dispose();
   stack.rpc.close();
   return { stack, notifications: env.notifications };
 }
@@ -206,7 +206,7 @@ describe("workflow-worktree plan §3 (P4): startup orphan notify wiring", () => 
       ],
     };
     expect(stack.worktreeOrphans().count).toBe(2);
-    stack.scheduler.stop();
+    stack.schedule?.dispose();
     stack.rpc.close();
   });
 
@@ -222,7 +222,7 @@ describe("workflow-worktree plan §3 (P4): startup orphan notify wiring", () => 
     const stack = buildSessionStack(fakePi(), env.ctx, settings, emptyTypes, []);
     await vi.waitFor(() => expect(env.notifications).toHaveLength(1), { timeout: 2000, interval: 10 });
     expect(stack.worktreeOrphans().count).toBe(1);
-    stack.scheduler.stop();
+    stack.schedule?.dispose();
     stack.rpc.close();
   });
 });

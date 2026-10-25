@@ -1,4 +1,3 @@
-import { capExpertRefs } from "./types.js";
 import type {
   ErrorInfo,
   Millis,
@@ -22,13 +21,11 @@ import type {
  *   TERMINAL `aborted` snapshot (J1: the in-memory store only ever holds
  *   terminal snapshots).
  *
- * consult A/B instrumentation plan (§5 P1a, review §8 #1): `experts`,
- * `dispatchMeta`, `schemaPreset` and `consults` are whitelisted below so a
- * crash-interrupted run's journal entry — and the terminal `aborted`
- * snapshot `interruptedFromJournal` seeds from it — both keep them. Leaving
- * `dispatchMeta` out would otherwise silently drop D3's resume-inherited
- * lane/packageId/abArm the moment a run restarts mid-flight, making the
- * analysis script misclassify real rework as `unenrolled`.
+ * `dispatchMeta` and `schemaPreset` are whitelisted below so a crash-interrupted run's journal entry — and the
+ * terminal `aborted` snapshot `interruptedFromJournal` seeds from it — both keep them (resume-inherited lane/packageId).
+ * The retired consult diag fields (`experts`/`consultOf`/`consultCache`/`consultThread`/`consults`/
+ * `consultIdentityPrediction`) are no longer whitelisted: journal projection drops them, old entries that still
+ * carry them are read back as ignored extra properties (#40).
  */
 
 /** D3: journal entries cap the dispatch prompt harder than terminal entries (TASK_PROMPT_CAP = 4096). */
@@ -57,7 +54,6 @@ const JOURNAL_DIAG_FIELDS = [
   "contextUsage",
   "model",
   "thinkingLevel",
-  "consultIdentityPrediction",
   "label",
   "title",
   "agentType",
@@ -77,15 +73,8 @@ const JOURNAL_DIAG_FIELDS = [
   "staleInputs",
   "sessionFile",
   "childExtensionMissing",
-  "experts",
   "dispatchMeta",
   "schemaPreset",
-  "consultOf",
-  // Cache/thread plan §5.3 / R2-4: same persistence surfaces as other consult
-  // diag. Tombstones intentionally omit these display-only facts (user ruling 2026-10-18).
-  "consultCache",
-  "consultThread",
-  "consults",
   "external",
   // fabric-cross-session plan v3 §4.1 (S0): wake facts are run facts and ride every persistence surface; absent ⇒ not
   // copied (so a wake-off run's journal bytes never change). `wakeOrigin` is re-stripped of its claimToken in projectDiag.
@@ -132,13 +121,6 @@ function projectDiag(diag: RunDiagnostics): RunDiagnostics {
   }
   if (typeof diag.taskPrompt === "string" && diag.taskPrompt.length > JOURNAL_TASK_PROMPT_CAP)
     out["taskPrompt"] = diag.taskPrompt.slice(0, JOURNAL_TASK_PROMPT_CAP);
-  // consult A/B instrumentation plan (review §8 ⚠️ item): re-apply the
-  // `experts.refs` cap defensively here too — the real producer
-  // (P1b's runtime adapter) lives outside core, so this is the journal's own
-  // last-line guarantee that a persisted entry never carries more than
-  // `EXPERTS_REFS_CAP` refs, independent of whatever `state-machine.ts`'s
-  // `enqueued` branch already enforced on the live diag.
-  if (diag.experts !== undefined) out["experts"] = { ...diag.experts, refs: capExpertRefs(diag.experts.refs) };
   if (diag.wakeOrigin !== undefined) out["wakeOrigin"] = persistableWakeOrigin(diag.wakeOrigin);
   out["escalation"] = [];
   out["degraded"] = [];

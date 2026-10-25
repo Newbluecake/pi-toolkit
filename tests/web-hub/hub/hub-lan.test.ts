@@ -39,6 +39,9 @@ import {
   RUNTX_HUB_CAPS,
   QUOTA_POOLS_HUB_CAPS,
   TODO_ARCHIVE_HUB_CAPS,
+  // cmd-history H1 (§4.6): unconditional on both cap surfaces (mechanical baseline update —
+  // sits right before VERSION_HUB_CAP, matching extraHubCaps order in hub.ts).
+  CMD_HISTORY_HUB_CAP,
   VERSION_HUB_CAP,
   UPLOAD_HUB_CAPS,
 } from "../../../src/web-hub/protocol/version.js";
@@ -169,6 +172,7 @@ describe("startHub + defaultLanAssembly (plan \u00a71.4, \u00a78) \u2014 config.
       ...RUNTX_HUB_CAPS,
       ...QUOTA_POOLS_HUB_CAPS,
       ...TODO_ARCHIVE_HUB_CAPS,
+      CMD_HISTORY_HUB_CAP,
       VERSION_HUB_CAP,
     ]);
 
@@ -352,6 +356,7 @@ skipIfNoSqlite(
         ...RUNTX_HUB_CAPS,
         ...QUOTA_POOLS_HUB_CAPS,
         ...TODO_ARCHIVE_HUB_CAPS,
+        CMD_HISTORY_HUB_CAP,
         VERSION_HUB_CAP,
         "lan.sessions.v1",
       ]);

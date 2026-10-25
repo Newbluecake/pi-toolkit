@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
 import { nextTick, ref } from "vue";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import AgentCard from "../../../src/web-hub/ui/src/components/agents/AgentCard.vue";
 import {
   homeFromAgent,
@@ -12,6 +12,8 @@ import {
 } from "../../../src/web-hub/ui/src/components/agents/agentCardModel.js";
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import type { AgentState, HubHandle, HubState } from "../../../src/web-hub/ui/src/types.js";
+import { setDetailedListForTests } from "./helpers/list-density.js";
+beforeEach(setDetailedListForTests);
 const agent = (xs?: unknown): AgentState =>
   ({
     key: "a",

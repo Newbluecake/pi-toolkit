@@ -494,6 +494,3 @@ export function recoverRun(dirs: RunDirs, id: string, options: Omit<TxnRunOption
   const pending = (plannedFromRun(manifest) ?? []).filter((item) => !final.results.has(item.opId));
   return { manifest, results: [...final.results.values()], state: final.run?.state ?? "recovered", pending };
 }
-
-export const executeStep = runStep;
-export const executeTransaction = runTransaction;

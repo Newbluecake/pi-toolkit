@@ -20,7 +20,7 @@ import { RPC_REQUEST_CHANNEL, RPC_VERSION, replyChannel } from "../../src/rpc/pr
  *
  *  X1 workflow child run  — real SubagentWorkflow(timeout_s) → child pinned
  *     to W.hardAt (fixed, factor 1) while the workflow itself stays 2×.
- *  X2 consult fork        — the injected consult tool ("main" expert).
+ *  X2 (retired)           — was the consult fork; consult was removed (#40).
  *  X3 /goal verifier      — the /goal command + loop hook.
  *  X4 memory tidy         — the /mem tidy command (readonly tool domain).
  *  X5 RPC spawn           — the stack's RPC server on the events bus; a
@@ -215,7 +215,6 @@ interface Captured {
     timeoutPolicy?: string;
     parentRunId?: string;
     deadlineAt?: number;
-    forkSessionFrom?: string;
     // label/budgetOverride/toolDomain are consumed before the runner (NOT_THREADED);
     // the runner sees label via displayMeta and the readonly domain via toolScope.policy.
     displayMeta?: { label?: string };
@@ -291,61 +290,6 @@ describe("program-derived producers stay fixed (X1-X6, real entries)", () => {
       const read = await host.call("get_subagent_result", { run_id: child.req.runId });
       return ["aborted", "timed_out", "failed"].includes(String(read.details?.status));
     });
-    await host.emit("session_shutdown", { reason: "quit" });
-  }, 30_000);
-
-  it('X2: a consult run (injected consult tool, "main" expert) is fixed at settings.consult.timeoutMs', async () => {
-    writeAgentFiles(home);
-    writeSettings(home, { consult: { enabled: true, timeoutS: 20 } });
-    // A valid "main session" file the consult fork machinery can read.
-    const mainSessionFile = join(scratch, "main-session.jsonl");
-    writeFileSync(
-      mainSessionFile,
-      `${JSON.stringify({ type: "session", version: 3, id: "host", timestamp: "t", cwd: scratch })}\n`,
-    );
-    const branch: unknown[] = [];
-    const host = fakePi(branch);
-    const driver = stubDriver({ create: () => true, resume: () => false }); // parent hangs, fork resolves
-    const captured = spyRunnerRun();
-    activate(host.pi);
-    const ctx = host.ctx({
-      sessionManager: {
-        getEntries: () => branch,
-        getBranch: () => branch,
-        getSessionId: () => "producers-consult",
-        getSessionFile: () => mainSessionFile,
-      },
-      model: { provider: "acme", id: "host-model" },
-      getContextUsage: () => ({ tokens: 1_000, contextWindow: 200_000, percent: 1 }),
-    });
-    await host.emit("session_start", { reason: "startup" }, ctx);
-
-    // Real entry: the top-level Agent tool's `experts` param resolves through
-    // the stack's consult wiring, and the child session really gets the tool.
-    const started = await host.call(
-      "Agent",
-      { description: "asker", prompt: "ask the host", subagent_type: "worker", experts: ["main"] },
-      ctx,
-    );
-    const askerRunId = started.details.runId as string;
-    await until(() => driver.calls.some((c) => toolOf(c.spec, "consult") !== undefined));
-    const consultTool = toolOf(driver.calls.find((c) => toolOf(c.spec, "consult") !== undefined)!.spec, "consult")!;
-
-    const answer = await consultTool.execute(
-      "consult-1",
-      { expert: "main", question: "what did we decide?" },
-      undefined,
-      undefined,
-      undefined,
-    );
-    expect(answer.details).toMatchObject({ expertRunId: "main" });
-
-    await until(() => captured.some((c) => c.req.forkSessionFrom !== undefined));
-    const consultRun = captured.find((c) => c.req.forkSessionFrom !== undefined)!;
-    expect(consultRun.req.parentRunId).toBe(askerRunId);
-    expect(consultRun.req.timeoutPolicy).toBe("fixed");
-    expect(consultRun.budget.maxTotalFactor).toBe(1);
-    expect(consultRun.budget.totalMs).toBe(20_000); // settings.consult.timeoutS (merged into the budget)
     await host.emit("session_shutdown", { reason: "quit" });
   }, 30_000);
 

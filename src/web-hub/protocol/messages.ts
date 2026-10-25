@@ -41,6 +41,24 @@ import {
   xsFrameBytesOk,
 } from "./xs.js";
 export type { XsAckFrame, XsDeliverFrame, XsMemberFrame, XsReqFrame, XsResFrame, XsStatusWire } from "./xs.js";
+// scheduled-reports plan r3 §10.1 (S0): `sched_*` frame schemas + types live in protocol/schedule.ts;
+// only folded in here (cap-gated on `sched.v1`, no PROTO bump — 只加帧不改).
+import {
+  SCHED_AGENT_FRAME_SCHEMAS,
+  SCHED_HUB_FRAME_SCHEMAS,
+  type SchedBoundFrame,
+  type SchedChangedFrame,
+  type SchedReceiptsFrame,
+  type SchedRunAckFrame,
+  type SchedRunFrame,
+} from "./schedule.js";
+export type {
+  SchedBoundFrame,
+  SchedChangedFrame,
+  SchedReceiptsFrame,
+  SchedRunAckFrame,
+  SchedRunFrame,
+} from "./schedule.js";
 // web-hub-slash-args plan §4.1 (P0): argument-completion frames + the CommandInfo.args
 // sub-schema live in protocol/command-args.ts; only folded in here (run-transcript precedent).
 import {
@@ -60,6 +78,10 @@ export type {
 } from "./command-args.js";
 import { type TfaReqFrame, TfaReqSchema, type TfaResFrame, TfaResSchema } from "./lan-2fa.js";
 export type { TfaReqFrame, TfaResFrame } from "./lan-2fa.js";
+// web-hub-cmd-history plan §4.5 (P0): the `subagent:cmd` record type lives in
+// protocol/cmd-record.ts (its own frozen module); only the type is folded in here —
+// TYPE-only in both directions, so no runtime import cycle with keys.ts's projection.
+import type { CmdRecordWire } from "./cmd-record.js";
 
 // ---------------------------------------------------------------------------
 // data types
@@ -98,6 +120,12 @@ export interface WireEntry {
    *  `{[toolCallId]: durationMs}` map here (the entry otherwise stays a display:false tombstone —
    *  never a transcript row). Absent on every other entry shape; ≤ TOOL_TIMING_WIRE_PAIRS pairs. */
   timing?: Record<string, number>;
+  /** web-hub-cmd-history plan §4.5 (P0): `subagent:cmd` custom(data) entries carry their
+   *  sanitized record here (the entry otherwise stays a display:false tombstone — the new UI
+   *  folds cards by cmdId, old UIs render nothing). Absent on every other entry shape and on
+   *  records that fail re-validation (pure tombstone). WireEntrySchema stays open — timing
+   *  precedent — so an old hub forwards the field verbatim. */
+  cmd?: CmdRecordWire;
   /** `subagent:date` custom_message only: the bounded `{date, kind, at}` subset of `details`
    *  (kind ∈ first|cross-day|idle) so the web divider can label the injection. Absent on every
    *  other entry shape; old entries without details degrade to a content-only parse. */
@@ -551,6 +579,23 @@ export interface CacheKeepaliveWire {
   lines: CacheKeepaliveLineWire[];
   omitted?: number;
 }
+/** web-hub archive plan (docs/dev/web-hub/archive-report.md): one archived fleet/bash row
+ *  as persisted in the session (`subagent:archive`). `auto` ⇔ sweep-archived after
+ *  `webHub.archiveAfterMin`; absent ⇔ user-archived. */
+export interface ArchiveEntryWire {
+  kind: "run" | "bash";
+  id: string;
+  at: number;
+  auto?: true;
+}
+/** `StatusInfo.archived`: the session's current archive set (both kinds in one list; the UI
+ *  partitions by kind). Present ONLY while at least one entry exists — no archives ⇒ the field
+ *  is absent and the status frame is byte-equal to the pre-feature shape. `rev` is monotone
+ *  per session (bumps on every mutation) so the 1Hz fingerprint gate can cheaply detect change. */
+export interface ArchiveWire {
+  rev: number;
+  entries: ArchiveEntryWire[];
+}
 export interface StatusInfo {
   leafId: string | null; // spike K7④：leaf 变化是 idle custom_message 的唯一信号（不经扩展事件）
   busy: boolean;
@@ -606,6 +651,12 @@ export interface StatusInfo {
    *  feature on this agent. Bounded ≤32 entries × ≤64 chars; a strictly optional field, so an
    *  old hub's open StatusInfoSchema forwards it verbatim and an old UI ignores it (F9). */
   features?: string[];
+  /** web-hub-cmd-history plan §4.6 (P0): cmdIds of this session's still-open command records
+   *  (≤ CMD_HISTORY_RUNNING_MAX, newest first). Present ONLY while non-empty — absent ⇔
+   *  cmd-history off / no running record (byte-equal to the pre-feature shape). The open
+   *  StatusInfoSchema forwards it through old hubs untouched (features/timing precedent);
+   *  old UIs ignore it. */
+  cmdRunning?: string[];
   /** fabric phase-2 XS0 (§4.4, P3): display-only cross-session membership projection. Absent ⇔
    *  xs off / not joined — byte-equal to the pre-feature shape. The hub's list/send authorization
    *  NEVER reads this (#4): authoritative membership is the `xs_member` slot frame. */
@@ -614,6 +665,11 @@ export interface StatusInfo {
    *  while n>0 (1..9999, saturated); absent ⇒ byte-equal to the pre-feature shape. Open top-level
    *  field like `todo`/`worktrees` — no cap, no PROTO bump; the UI gates on `xs.v1` ∧ presence. */
   xsInbox?: { unread: number };
+  /** web-hub archive plan: this session's archived run/bash ids (display-only hiding for the
+   *  fleet drawer + TUI widget). Absent ⇔ nothing archived / archive not wired (web-hub off) —
+   *  byte-equal to the pre-feature shape; the open StatusInfoSchema forwards it through old hubs
+   *  untouched and old UIs ignore it. */
+  archived?: ArchiveWire;
 }
 
 export interface FleetRowWire {
@@ -749,7 +805,15 @@ export interface SnapshotReplyBody {
 // P2 control-plane frames (§3.2). These are additive to the P1 wire surface.
 // ---------------------------------------------------------------------------
 export type CmdOp =
-  "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "dialog_answer" | "dialog_cancel" | "command" | "recall";
+  | "prompt"
+  | "abort"
+  | "steer_subagent"
+  | "abort_subagent"
+  | "dialog_answer"
+  | "dialog_cancel"
+  | "command"
+  | "recall"
+  | "archive";
 
 export interface CmdOrigin {
   listener: "loopback" | "lan";
@@ -799,7 +863,8 @@ export type CmdArgs =
   | { op: "dialog_answer"; dialogId: string; epoch: string; answers: DialogAnswerWire[] }
   | { op: "dialog_cancel"; dialogId: string; epoch: string }
   | { op: "command"; name: string; args: string; confirm?: true; deliver?: "steer" | "followUp"; expect?: CmdExpect }
-  | { op: "recall"; target: string };
+  | { op: "recall"; target: string }
+  | { op: "archive"; kind: "run" | "bash"; id: string; set: "archive" | "unarchive" };
 export interface CommandOutputEntry {
   kind: "notify" | "widget" | "status" | "text" | "error" | "interactive";
   level?: "info" | "warning" | "error";
@@ -848,6 +913,12 @@ export interface ResumeSessionsWire {
 /** web-resume plan §2.7: the one `StatusInfo.features` token this version emits. Old agents
  *  never send `features` at all, so its presence is a positive capability signal. */
 export const RESUME_FEATURE_V1 = "resume.v1";
+/** web-hub-cmd-history plan §4.6: the `StatusInfo.features` token this version emits once the
+ *  recorder is wired (`webHub.enabled ∧ cmdHistory !== false`) AND the session is persisted
+ *  (same gate as `resume.v1`; emitted after it — features order `[resume.v1?, cmd.history.v1?]`).
+ *  Deliberately the SAME string as `CMD_HISTORY_HUB_CAP` (protocol/version.ts): the UI's
+ *  historyMode gate requires the token on BOTH surfaces (pinned equal by tests). */
+export const CMD_HISTORY_FEATURE_V1 = "cmd.history.v1";
 /** §2.7 bounds: `features` is bounded ≤32 entries × ≤64 chars (schema-enforced, and clipped
  *  again agent-side before it is ever set). */
 export const STATUS_FEATURES_MAX_ITEMS = 32;
@@ -890,9 +961,16 @@ export type CmdData =
        *  the page of the session list (never paths/cwd/message text). Not retained in the
        *  agent's command ledger (stripped at settle) nor in any origin notify. */
       sessions?: ResumeSessionsWire;
+      /** web-hub-cmd-history plan §4.6 (P0): whether a history card will appear for this call
+       *  ("recorded") or not ("none"). Written on the sync reply AND both late channels alike
+       *  (the extension `sendLate` payload and the builtin late payload — one CmdData shape
+       *  covers cmd_result/cmd_late); ledger semantics unchanged. Absent ⇔ old agent — the
+       *  UI treats a missing value as "none" (plan n1: the single inference rule). */
+      history?: "recorded" | "none";
     }
   | { op: "query"; state: "running" | "ok" | "failed"; late?: true; result?: CmdResultBody }
-  | RecallResultData;
+  | RecallResultData
+  | { op: "archive"; set: "archive" | "unarchive"; changed?: boolean };
 export type CmdErrorCode =
   | "E_UNSUPPORTED"
   | "E_STALE_CTX"
@@ -1062,7 +1140,11 @@ export type AgentFrame =
   // the stricter XS_MAX_FRAME_BYTES byte cap in decodeWith.
   | XsMemberFrame
   | XsReqFrame
-  | XsAckFrame;
+  | XsAckFrame
+  // scheduled-reports S0 (§10.1): inert until A0/H1 route them; sent only under `sched.v1`.
+  | SchedChangedFrame
+  | SchedBoundFrame
+  | SchedRunAckFrame;
 
 // ---- S1 LAN control-plane frames (§8.1; 同一个 unix socket，hello 之后才接受，不进 registry/bus/普通日志，不做额外鉴权——同 uid 完全可信) ----
 
@@ -1137,7 +1219,10 @@ export type HubFrame =
   | FsbResFrame
   | TfaResFrame
   | XsResFrame
-  | XsDeliverFrame;
+  | XsDeliverFrame
+  // scheduled-reports S0 (§10.1): inert until A0/H1 route them; sent only under `sched.v1`.
+  | SchedRunFrame
+  | SchedReceiptsFrame;
 
 export const TIMING = {
   connectMs: 1_000,
@@ -1562,6 +1647,26 @@ const StatusInfoSchema = Type.Object({
   worktrees: Type.Optional(WorktreesWireSchema),
   bashJobs: Type.Optional(BashJobsWireSchema),
   quota: Type.Optional(QuotaWireSchema),
+  archived: Type.Optional(
+    Type.Object(
+      {
+        rev: Type.Number(),
+        entries: Type.Array(
+          Type.Object(
+            {
+              kind: Type.Union([Type.Literal("run"), Type.Literal("bash")]),
+              id: Type.String(),
+              at: Type.Number(),
+              auto: Type.Optional(Type.Literal(true)),
+            },
+            { additionalProperties: false },
+          ),
+          { maxItems: 256 },
+        ),
+      },
+      { additionalProperties: false },
+    ),
+  ),
   loadGate: Type.Optional(LoadGateWireSchema),
   cacheKeepalive: Type.Optional(CacheKeepaliveWireSchema),
   // web-hub-steer-recall plan §2.3 S2'
@@ -1903,6 +2008,19 @@ const RecallArgsSchema = Type.Object(
   { op: Type.Literal("recall"), target: Type.String({ pattern: "^[A-Za-z0-9_-]{16,64}$" }) },
   { additionalProperties: false },
 );
+// web-hub archive plan (docs/dev/web-hub/archive-report.md): the manual archive/unarchive op
+// for the fleet drawer's Agents/Bash lists. Closed schema (recall precedent): exactly
+// {kind, id, set} — nothing else rides the op. ids are runIds / bash jobIds (free-form but
+// bounded agent-side); `set` is the direction.
+export const ArchiveArgsSchema = Type.Object(
+  {
+    op: Type.Literal("archive"),
+    kind: Type.Union([Type.Literal("run"), Type.Literal("bash")]),
+    id: Type.String({ minLength: 1, maxLength: 128 }),
+    set: Type.Union([Type.Literal("archive"), Type.Literal("unarchive")]),
+  },
+  { additionalProperties: false },
+);
 const CmdSchema = Type.Object(
   {
     t: Type.Literal("cmd"),
@@ -1921,6 +2039,7 @@ const CmdSchema = Type.Object(
       DialogCancelArgsSchema,
       CommandArgsSchema,
       RecallArgsSchema,
+      ArchiveArgsSchema,
     ]),
   },
   { additionalProperties: false },
@@ -2062,6 +2181,7 @@ const CtlItemSchema = Type.Object(
       Type.Literal("dialog_cancel"),
       Type.Literal("command"),
       Type.Literal("recall"),
+      Type.Literal("archive"),
     ]),
     state: Type.Union([
       Type.Literal("dispatched"),
@@ -2215,6 +2335,8 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   run_gap: RunGapSchema,
   run_end: RunEndSchema,
   ...XS_AGENT_FRAME_SCHEMAS,
+  // scheduled-reports S0 (§10.1): schemas from protocol/schedule.ts
+  ...SCHED_AGENT_FRAME_SCHEMAS,
 };
 
 const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
@@ -2236,6 +2358,8 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   fsb_res: FsbResSchema,
   tfa_res: TfaResSchema,
   ...XS_HUB_FRAME_SCHEMAS,
+  // scheduled-reports S0 (§10.1): schemas from protocol/schedule.ts
+  ...SCHED_HUB_FRAME_SCHEMAS,
 };
 
 // ---------------------------------------------------------------------------

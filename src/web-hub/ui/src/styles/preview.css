@@ -430,6 +430,59 @@ code.md-code.path-ref {
   justify-content: flex-end;
 }
 
+/* ---------------------------------------- numbered source lines (2026-10-23, line numbers) */
+/* One block per logical line; the number is a CSS counter rendered by the line's ::before —
+ * NEVER a DOM node, so selection/copy stay pure body text and the per-line DOM cost is one
+ * element (约束 ②, ahead of the planned virtual-scroll work). The ::before pins the number
+ * to the line's FIRST visual line; soft-wrapped continuation lines align with the text
+ * column via padding-left (gutter width `--pvline-w` + gap, set per block by CodeLines
+ * through a runtime-CSSOM style binding). `.pv-line-cont` is a stream force-cut's
+ * continuation head: no number, and it does not consume one. The root is a <span> (phrasing
+ * content — valid inside the <pre> body), block-ified here. */
+.pv-lines {
+  display: block;
+}
+
+.pv-line {
+  display: block;
+  position: relative;
+  counter-increment: pvline;
+  padding-left: calc(var(--pvline-w, 2ch) + 1.5ch);
+}
+
+.pv-line::before {
+  content: counter(pvline);
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--pvline-w, 2ch);
+  color: var(--c-text-3);
+  text-align: right;
+  user-select: none;
+}
+
+.pv-line-cont {
+  counter-increment: none;
+}
+
+.pv-line-cont::before {
+  content: none;
+}
+
+/* The header's 行号 toggle (PreviewWindow): compact `1#` glyph; pressed state mirrors the
+ * rendered/source segmented control's active button. */
+.pw-ln-btn[aria-pressed="true"] {
+  background: var(--c-primary-soft);
+  color: var(--c-primary);
+}
+
+.pw-ln-glyph {
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
 /* -------------------------------------------- chunked stream (chunked-plan §4.4–§4.6, P2b) */
 /* Segments are plain blocks that INHERIT `white-space`/font from the scroll container: no
  * margin/padding/white-space of their own (a block boundary stands in for exactly one "\n",
@@ -1025,8 +1078,51 @@ button.preview-dir-row:focus-visible {
   pointer-events: none;
 }
 
+/* 2026-10-24 验收裁定 (ask-paths fix #1): windows opened FROM the ask_user dialog/float
+ * (`origin:"ask"`) render in this SECOND modeless root — tier 46, ABOVE the ask-float (45)
+ * that would otherwise cover them, still below every modal (50+). Every other window keeps
+ * tier 25 (below the float) unchanged; desktop band only (the phone stack never gets this
+ * class). Registered in ask-float.css's canonical tier table. */
+.preview-overlay.is-windows.is-modeless.is-ask-tier {
+  z-index: 46;
+}
+
 .preview-overlay.is-windows.is-modeless .preview-window {
   pointer-events: auto;
+}
+
+/* preview-perf P0 (docs/dev/preview-perf/plan.md §3): the five geometry vars are registered
+ * NON-INHERITED — one change must restyle the window box only, never its (possibly
+ * 10k-node) content subtree. Unregistered custom properties inherit, so every drag /
+ * activate / resize used to restyle the whole text body (~30 ms on a 3.6k-line file,
+ * plan table A). `varsOf`/`zOf` only ever write `<length>`/`<integer>`-shaped values, so
+ * registration never invalidates them; engines without @property (Firefox <128, Safari
+ * <16.4) ignore this block and fall back to the old inherited behaviour — slower, never
+ * wrong. Positioning stays left/top (R2: no transform), preview-windows §7.1. */
+@property --pw-x {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --pw-y {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --pw-w {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --pw-h {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --pw-z {
+  syntax: "<integer>";
+  inherits: false;
+  initial-value: 0;
 }
 
 /* One window: positioned by left/top ONLY (never transform — a transform would mint a new

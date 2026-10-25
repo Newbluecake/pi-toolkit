@@ -414,3 +414,40 @@
     min-height: 44px;
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * web-hub archive plan (docs/dev/web-hub/archive-report.md): the bash group's archived fold +
+ * per-row archive button (sibling of .bj-row — nested buttons are invalid HTML; absolute top
+ * right on hover).
+ * ------------------------------------------------------------------------- */
+.bj-item {
+  position: relative;
+}
+
+.bj-item.is-archived .bj-row,
+.bj-item.is-archived {
+  opacity: 0.72;
+}
+
+.bj-item.is-archived:hover {
+  opacity: 1;
+}
+
+.bj-archived {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--c-border);
+  list-style: none;
+}
+
+.bj-archived-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  font-size: var(--fs-sm);
+  color: var(--c-text-2, var(--c-text));
+  background: none;
+  border: none;
+  cursor: pointer;
+}

@@ -19,6 +19,8 @@ const agents = {
   noSessionName: "（无会话名称）",
   collapseSidebar: "收起侧边栏",
   expandSidebar: "展开侧边栏",
+  densityCompact: "紧凑列表：仅显示目录、标题和别名（点击切换为详细）",
+  densityDetailed: "详细列表：含费用、模型和上下文（点击切换为紧凑）",
   openDrawer: "显示会话列表",
   newSession: "新建会话",
   newSessionAria: "在选中会话的目录新建独立会话；无选中时选择目录新建",
@@ -56,6 +58,11 @@ const agents = {
   // alias-plan r4 §7.2 (ALU)：详情头部 `@别名` 按钮的提示
   xsAliasManage: "别名 @{alias}——管理频道与别名",
   "xs.off": "跨会话：已加入，但当前拒收所有消息",
+  // scheduled-reports W1（方案 r3 §5.6）：会话卡 ⏰ 徽标的悬浮提示（cap sched.v1 + hub 全局
+  // schedules 槽位；缺失 ⇒ 徽标整体不出现）。仅数量，不含任务内容，隐私锁定的卡片照常显示
+  // （与 needsAnswer 徽标同一先例）。
+  schedBadge: "{n} 个定时任务",
+  schedBadgePending: "{n} 个定时任务——有待确认",
 } satisfies Messages<typeof en>;
 
 export default agents;

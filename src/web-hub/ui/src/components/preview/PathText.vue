@@ -36,6 +36,15 @@ const props = defineProps<{
   readonly code?: boolean | undefined;
   /** Force plain rendering (equivalent to having no scope). */
   readonly noRefs?: boolean | undefined;
+  /**
+   * 2026-10-24 验收裁定 (ask-paths fix #2): suppress the `.proxy-ref-note` failure hint
+   * entirely. The note contains an `<a>` — interactive content — so inside a `<label>` /
+   * `<button role=tab>` (the ask_user option rows and header tabs) it is ILLEGAL nested
+   * interactive markup, and clicking its link would bubble into option selection / tab
+   * switching. Those call sites pass `noNote`; the proxy open itself (blank-tab flow) is
+   * untouched, the failure just stays silent there. Absent/false ⇒ byte-identical legacy.
+   */
+  readonly noNote?: boolean | undefined;
 }>();
 
 const ctx = inject(PREVIEW_CTX, null);
@@ -53,7 +62,7 @@ const proxyPreview = inject(PROXY_PREVIEW_CTX, null);
 const proxyActive = computed(() => proxy.scope.value !== null && props.noRefs !== true && suspended?.value !== true);
 const NOTE_MS = 8000;
 const note = ref<{ href: string; key: string | null; url: string | null } | null>(null);
-const noteList = computed(() => (note.value === null ? [] : [note.value]));
+const noteList = computed(() => (note.value === null || props.noNote === true ? [] : [note.value]));
 let noteTimer: ReturnType<typeof setTimeout> | undefined;
 
 function clearNote(): void {

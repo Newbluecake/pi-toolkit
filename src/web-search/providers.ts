@@ -7,7 +7,8 @@
 import { request as httpsRequest } from "node:https";
 import { formatSize } from "@earendil-works/pi-coding-agent";
 import type { SearchProvider, SearchResponse, WebSearchConfig } from "./config.js";
-import { HttpError, errorMessage, redactSecrets, withRequestTimeout } from "./resilience.js";
+import { redactSecrets } from "../core/redact.js";
+import { HttpError, errorMessage, withRequestTimeout } from "./resilience.js";
 import { truncateField } from "./format.js";
 
 const MAX_CODEX_RESPONSE_BYTES = 8 * 1024 * 1024;

@@ -18,8 +18,8 @@ import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { startHub } from "../../../src/web-hub/hub/hub.js";
 import { createWorktreeGraphRoutes } from "../../../src/web-hub/hub/worktree-graph/routes.js";
 import { denyCtxOf } from "../../../src/web-hub/hub/preview/admit.js";
-import { WTGRAPH_PATH } from "../../../src/web-hub/protocol/worktree-graph.js";
-import { PROTO, WTGRAPH_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
+import { WTGRAPH_PATH, parseWtGraphPayload } from "../../../src/web-hub/protocol/worktree-graph.js";
+import { PROTO, WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import type { AgentView, HubEvent, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import type { FrontendDeps, FrontendFactory } from "../../../src/web-hub/hub/ports.js";
 import { testHubPaths } from "../helpers/paths.js";
@@ -40,8 +40,11 @@ import {
   LINKED,
   REPO,
   SESSION,
+  cherryOut,
   glStdout,
   grStdout,
+  installMergedHandler,
+  mergedWindow,
   okRun,
   scriptGraphAdmission,
 } from "../hub/worktree-graph/helpers.js";
@@ -56,7 +59,7 @@ vi.mock("../../../src/web-hub/hub/preview/fs.js", async (importOriginal) => {
 const DENY = denyCtxOf("/home/tester", "/home/tester/.pi/agent");
 const MAIN_REF = { type: "commit" as const, oid: HEAD_SHA1, refname: "refs/heads/main" };
 
-function wtgraphRoutes(mode: "on" | "loopback" = "on") {
+function wtgraphRoutes(mode: "on" | "loopback" = "on", mergedEnabled = false) {
   const fx = repoFixture();
   const routes = createWorktreeGraphRoutes({
     mode,
@@ -69,6 +72,7 @@ function wtgraphRoutes(mode: "on" | "loopback" = "on") {
     log: captureLog(),
     now: Date.now,
     fs: fx.fs,
+    mergedEnabled,
   });
   return { routes, fx };
 }
@@ -209,8 +213,54 @@ describe("loopback /api/worktree-graph — the §2.6/§3 matrix", () => {
   });
 });
 
+describe("loopback /api/worktree-graph?merged=1 — the M phase over real HTTP", () => {
+  async function mergedHttp(mergedEnabled: boolean) {
+    const w = wtgraphRoutes("on", mergedEnabled);
+    const win = mergedWindow(2);
+    installMergedHandler(w.fx, { gr: win.gr, gl: win.gl, gm: () => okRun(cherryOut([win.p1], [])) });
+    const tmp = makeTmp("pwh-api-wtg-m-");
+    const deps = createBaseDeps(tmp.dir);
+    deps.worktreeGraph = w.routes;
+    const fe = createHttpFrontend(deps);
+    const port = (await fe.listen()).port;
+    const cookie = await login(port, deps.paths.tokenFile);
+    cleanups.push(async () => {
+      await fe.close();
+      tmp.cleanup();
+    });
+    const get = (extra: string) =>
+      rawRequest(port, { method: "GET", path: gq() + extra, headers: { Cookie: cookie, "X-PWH": "1" } });
+    return { get, win, fx: w.fx };
+  }
+
+  it("enabled route + merged=1 ⇒ the payload carries a parser-valid merged block; without the query it does not", async () => {
+    const k = await mergedHttp(true);
+    const plain = await k.get("");
+    expect(plain.status).toBe(200);
+    expect(Object.keys(JSON.parse(plain.body) as object)).not.toContain("merged");
+    const withMerged = await k.get("&merged=1");
+    expect(withMerged.status).toBe(200);
+    const body = JSON.parse(withMerged.body) as { merged: { base: string; branches: Array<{ n: string; v: string }> } };
+    expect(parseWtGraphPayload(body)).not.toBeNull();
+    expect(body.merged.base).toBe(HEAD_SHA1);
+    expect(body.merged.branches.map((b) => [b.n, b.v])).toEqual([
+      ["side-0", "eq"],
+      ["side-1", "eq"],
+    ]);
+  });
+
+  it("a route built without mergedEnabled ignores merged=1 byte-for-byte", async () => {
+    const k = await mergedHttp(false);
+    const a = await k.get("");
+    const b = await k.get("&merged=1");
+    expect(b.status).toBe(200);
+    expect(b.body).toBe(a.body);
+    expect(k.fx.runner.calls.some((c) => c.argv.includes("--cherry-mark"))).toBe(false);
+  });
+});
+
 async function lanKit(
-  opts: { mode?: "on" | "loopback" } = {},
+  opts: { mode?: "on" | "loopback"; mergedEnabled?: boolean } = {},
 ): Promise<{ port: number; cookie: Promise<string>; cleanup: Promise<void> }> {
   const dir = mkdtempSync(join(tmpdir(), "pwh-lan-wtg-"));
   let fe: HttpFrontend | undefined;
@@ -230,7 +280,7 @@ async function lanKit(
 
 async function lanKitBody(
   dir: string,
-  opts: { mode?: "on" | "loopback" },
+  opts: { mode?: "on" | "loopback"; mergedEnabled?: boolean },
   onFrontend: (fe: HttpFrontend) => void,
 ): Promise<{ port: number; cookie: Promise<string>; cleanup: Promise<void> }> {
   const log = captureLog();
@@ -245,7 +295,7 @@ async function lanKitBody(
   const cfg: HubLanConfig = { port: await freePort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
   let lastStatus: LanStatus = { state: "starting" };
   const { fx, routes } = (() => {
-    const w = wtgraphRoutes(opts.mode ?? "on");
+    const w = wtgraphRoutes(opts.mode ?? "on", opts.mergedEnabled ?? false);
     return { fx: w.fx, routes: w.routes };
   })();
   void fx;
@@ -319,6 +369,21 @@ describe("LAN /api/worktree-graph — the mode gate", () => {
     expect(r.body).toBe('{"error":"E_NOT_FOUND"}');
   });
 
+  it('mode "loopback": LAN answers 404 for merged=1 too, byte-identical to the plain 404 and to not-enabled', async () => {
+    const k = await lanKit({ mode: "loopback", mergedEnabled: true });
+    cleanups.push(() => k.cleanup());
+    const cookie = await k.cookie;
+    const plain = await lanRequest(k.port, { method: "GET", path: gq(), headers: { Cookie: cookie, "X-PWH": "1" } });
+    const merged = await lanRequest(k.port, {
+      method: "GET",
+      path: `${gq()}&merged=1`,
+      headers: { Cookie: cookie, "X-PWH": "1" },
+    });
+    expect(merged.status).toBe(404);
+    expect(merged.body).toBe('{"error":"E_NOT_FOUND"}');
+    expect(merged.body).toBe(plain.body);
+  });
+
   it('mode "on": LAN dispatches (CSRF before auth; a scripted admission failure maps through the pipeline)', async () => {
     const k = await lanKit({ mode: "on" });
     cleanups.push(() => k.cleanup());
@@ -365,6 +430,40 @@ describe("hub assembly × /proc gate", () => {
     const agentCaps = ack["caps"] as string[];
     expect(hub.info.caps).not.toContain(WTGRAPH_HUB_CAP);
     expect(agentCaps).not.toContain(WTGRAPH_HUB_CAP);
+    // merged-plan §6: the merged cap rides the very same gate
+    expect(hub.info.caps).not.toContain(WTGRAPH_MERGED_HUB_CAP);
+    expect(agentCaps).not.toContain(WTGRAPH_MERGED_HUB_CAP);
+    expect(captured[0]!.worktreeGraph).toBeUndefined();
+    c.sock.destroy();
+    await hub.close("test");
+    rmSync(dirs, { recursive: true, force: true });
+  });
+
+  it("preview not configured ⇒ neither wtgraph cap on either surface, and no worktreeGraph deps", async () => {
+    const dirs = mkdtempSync(join(tmpdir(), "pwh-wtg-nopreview-"));
+    const captured: FrontendDeps[] = [];
+    const factory: FrontendFactory = (deps): HttpFrontend => {
+      captured.push(deps);
+      return {
+        listen: async () => ({ port: 43210 }),
+        close: async () => {},
+        clientCount: () => 0,
+        ui: {
+          serve: async () => false,
+          refresh: async () => ({ state: "unbuilt", candidates: [] }),
+          status: () => ({ state: "unbuilt", candidates: [] }),
+        },
+      };
+    };
+    const hub = await startHub(hubConfig({ home: dirs, port: 0 }), factory, { uid: process.getuid?.() ?? 0 });
+    if ("exists" in hub) throw new Error("unexpected exists");
+    const c = await connectClient(hub.paths.socketPath);
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
+    for (const caps of [hub.info.caps, ack["caps"] as string[]]) {
+      expect(caps).not.toContain(WTGRAPH_HUB_CAP);
+      expect(caps).not.toContain(WTGRAPH_MERGED_HUB_CAP);
+    }
     expect(captured[0]!.worktreeGraph).toBeUndefined();
     c.sock.destroy();
     await hub.close("test");
@@ -392,6 +491,9 @@ describe("hub assembly × /proc gate", () => {
     });
     if ("exists" in hub) throw new Error("unexpected exists");
     expect(hub.info.caps).toContain(WTGRAPH_HUB_CAP);
+    expect(hub.info.caps).toContain(WTGRAPH_MERGED_HUB_CAP);
+    // declared right behind wtgraph.v1, and on both cap surfaces
+    expect(hub.info.caps.indexOf(WTGRAPH_MERGED_HUB_CAP)).toBe(hub.info.caps.indexOf(WTGRAPH_HUB_CAP) + 1);
     expect(captured[0]!.worktreeGraph?.mode).toBe("loopback");
     await hub.close("test");
     rmSync(dirs, { recursive: true, force: true });

@@ -211,6 +211,48 @@
   color: var(--c-on-primary-soft);
 }
 
+/* Sort toggle row (2026-10 排序切换): sits directly under the search head, only on views
+ * where sorting applies (the all tab hides it — always grouped by provider). The segmented
+ * control deliberately does NOT reuse the `.model-tabs` class: `role="group"` +
+ * `aria-pressed` is the right semantics for a two-way toggle (tests pin `.model-tabs button`
+ * to exactly the two tabs), so it carries its own (visually identical) pill rules. */
+.model-sort-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 3px 10px 4px;
+  border-bottom: 1px solid var(--c-border);
+}
+
+.model-sort-label {
+  flex: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+}
+
+.model-sort-seg {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+}
+
+.model-sort-seg button {
+  border: none;
+  background: var(--c-surface);
+  color: var(--c-text-3);
+  padding: 3px 10px;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+}
+
+.model-sort-seg button.active {
+  background: var(--c-primary-soft);
+  color: var(--c-on-primary-soft);
+}
+
 .model-confirm {
   display: flex;
   flex-wrap: wrap;
@@ -318,6 +360,25 @@
 .model-badge-reasoning {
   background: var(--c-accent-soft);
   color: var(--c-accent);
+}
+
+/* Provider chip (2026-10 方案 A 拍板): flat (non-grouped) rows carry the provider as a small
+ * outlined mono capsule in the badges area, BEFORE ctx/R — provider-grouped views never
+ * duplicate the name (the sticky `.model-group` header already carries it). max-width +
+ * ellipsis keep a long provider from crowding the ctx/R badges out; the ≤640px tier tightens
+ * the cap further (mobile width, same truncation). */
+.model-prov {
+  max-width: 16ch;
+  padding: 0 6px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-pill);
+  color: var(--c-text-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  line-height: var(--lh-tight);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .model-badge-current {
@@ -431,6 +492,10 @@
   .picker-sheet .model-search {
     min-height: 27px;
   }
+
+  .model-prov {
+    max-width: 9ch; /* long providers ellipsize instead of crowding out ctx/R */
+  }
 }
 
 /* --- coarse pointers: ≥44px rows (form factor stays viewport-driven, #16) ---
@@ -442,6 +507,11 @@
   }
 
   .model-tabs button {
+    min-height: 27px;
+    padding: 4px 12px;
+  }
+
+  .model-sort-seg button {
     min-height: 27px;
     padding: 4px 12px;
   }

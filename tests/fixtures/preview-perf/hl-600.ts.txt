@@ -1,0 +1,600 @@
+/**
+ * web-hub upload storage — the `UploadStore` state machine (plan `docs/dev/web-hub-upload/plan.md`
+ * §2.2/§2.4/§2.6, package U2).
+ *
+ * This module owns upload *policy*: request-idempotency, the begin/chunk/commit/abort lifecycle,
+ * the three-level + principal-level quotas, content dedup (principal-scoped, §2.5), reference
+ * pinning (v3 #8's synchronous in-memory protection + bounded persistence), TTL/quota eviction,
+ * startup crash recovery (§2.2.4's state table) and close semantics (§2.6 #13). It NEVER imports
+ * `node:fs` (enforced by `tests/web-hub/hub/upload-fs-guard.test.ts`) — every disk access goes
+ * through `hub/upload-fs.ts`, wrapped in `trackedDeps()` so the poison machinery can observe when
+ * the last in-flight raw fs promise for an upload has settled (§2.2.5). The same wrapper layer
+ * carries the §2.6 #13 close gate: once `close()` has completed, a mutation initiated through —
+ * or settling into — the wrapper becomes an observable no-op (counted in `stats().counters.lateOps`
+ * and logged), surfaced to its caller as a deadline error so a late write can never produce a
+ * success reply or a state change after close returned.
+ *
+ * Deadline discipline (§2.2.5): every public method takes an absolute `deadline`; every fs step
+ * is bounded by `min(FS_STEP_CAP_MS, remaining)` inside `upload-fs.fsStep`. A step timeout moves
+ * the upload to `poisoned` — it immediately stops accepting requests (404), its state is never
+ * updated again, no success reply is ever produced, and its directory is deleted only after the
+ * in-flight fs promises settle (bounded 30s). Late fs results therefore only ever land inside a
+ * directory that is about to disappear.
+ *
+ * The audit seam is `deps.audit` (U3's `hub/audit.ts` implements the whitelist); this module
+ * just calls it at the plan's §5.4 write points. All timers created anywhere in this module or
+ * `upload-fs.ts` are unref'd (`hasRef() === false`).
+ */
+
+import { createHash, type Hash } from "node:crypto";
+import { basename, dirname, resolve as resolvePath, sep } from "node:path";
+import { PrivateDirError } from "../protocol/paths.js";
+import {
+  bucketFor,
+  normalizeMime,
+  parseAttachmentBlock,
+  parseUploadMeta,
+  sanitizeUploadName,
+  uploadDiskExt,
+  UPLOAD_BUCKET_MAX_BYTES,
+  UPLOAD_FILE_MAX_BYTES,
+  UPLOAD_INFLIGHT_HUB,
+  UPLOAD_INFLIGHT_PER_PRINCIPAL,
+  UPLOAD_TOTAL_MAX_BYTES,
+  type UploadMetaV1,
+} from "../protocol/upload.js";
+import {
+  createUploadDir,
+  defaultUploadFsDeps,
+  ensureUploadDir,
+  fsStep,
+  isUploadFsDeadline,
+  openFileNoFollow,
+  probeHardlink,
+  raceDeadlineUnref,
+  syncDir,
+  unrefDelay,
+  UploadDirCreateError,
+  UploadFsError,
+  verifyDirChain,
+  writeAllAt,
+  FS_STEP_CAP_MS,
+  META_TMP_FLAGS,
+  PART_CREATE_FLAGS,
+  PART_WRITE_FLAGS,
+  PROBE_CAP_MS,
+  TRUSTED_READ_FLAGS,
+  type Deadline,
+  type DirChain,
+  type DirChainEntry,
+  type FileStat,
+  type ReadableUploadFileHandle,
+  type UploadFileHandle,
+  type UploadFsDeps,
+} from "./upload-fs.js";
+
+// ---------------------------------------------------------------------------
+// §2.4 limits + §2.6 lifecycle constants
+// ---------------------------------------------------------------------------
+
+export interface UploadLimits {
+  readonly fileMaxBytes: number;
+  readonly bucketMaxBytes: number;
+  readonly totalMaxBytes: number;
+  readonly inflightPerPrincipal: number;
+  readonly inflightHub: number;
+  readonly idleTtlMs: number;
+  readonly unreferencedTtlMs: number;
+  readonly referencedTtlMs: number;
+  readonly unreferencedEvictableAfterMs: number;
+}
+
+export const DEFAULT_UPLOAD_LIMITS: UploadLimits = {
+  fileMaxBytes: UPLOAD_FILE_MAX_BYTES,
+  bucketMaxBytes: UPLOAD_BUCKET_MAX_BYTES,
+  totalMaxBytes: UPLOAD_TOTAL_MAX_BYTES,
+  inflightPerPrincipal: UPLOAD_INFLIGHT_PER_PRINCIPAL,
+  inflightHub: UPLOAD_INFLIGHT_HUB,
+  idleTtlMs: 10 * 60_000,
+  unreferencedTtlMs: 24 * 3_600_000,
+  referencedTtlMs: 7 * 24 * 3_600_000,
+  unreferencedEvictableAfterMs: 3_600_000,
+};
+
+/** §2.2.4: total advisory budget of the startup scan (it keeps going past this in the background). */
+export const UPLOAD_SCAN_TOTAL_MS = 10_000;
+/** §2.2.5: how long a poisoned upload waits for in-flight fs promises before deleting anyway. */
+export const UPLOAD_POISON_SETTLE_CAP_MS = 30_000;
+/** §2.6 #13: close() waits at most this long for in-flight fs promises. */
+export const UPLOAD_CLOSE_SETTLE_MS = 2_000;
+/** §2.6 #13: close()'s total budget for removing un-committed directories. */
+export const UPLOAD_CLOSE_RM_MS = 1_000;
+/** Total budget of a single sweep() run. */
+export const UPLOAD_SWEEP_BUDGET_MS = 10_000;
+/** begin's E_BUSY hint (§2.2.4: `Retry-After: 2`). */
+export const UPLOAD_BUSY_RETRY_AFTER_S = 2;
+/** Bounded retention of dedup'd terminal commit results (idempotent commit retries). */
+const FINISHED_MAX = 256;
+/** §5.4 stats row: op-latency reservoir size (ring) backing `stats().p50Ms/p95Ms`. */
+const LATENCY_RESERVOIR_MAX = 2_048;
+
+// ---------------------------------------------------------------------------
+// errors
+// ---------------------------------------------------------------------------
+
+export type UploadErrorCode =
+  | "E_BAD_REQUEST"
+  | "E_NOT_FOUND"
+  | "E_UPLOAD_OFFSET"
+  | "E_UPLOAD_DISABLED"
+  | "E_UPLOAD_CONFLICT"
+  | "E_UPLOAD_TOO_LARGE"
+  | "E_RATE"
+  | "E_DEADLINE"
+  | "E_BUSY"
+  | "E_HUB_RESTARTING"
+  | "E_UPLOAD_QUOTA"
+  | "E_INTERNAL";
+
+export const UPLOAD_ERROR_STATUS: Record<UploadErrorCode, number> = {
+  E_BAD_REQUEST: 400,
+  E_NOT_FOUND: 404,
+  E_UPLOAD_OFFSET: 409,
+  E_UPLOAD_DISABLED: 409,
+  E_UPLOAD_CONFLICT: 409,
+  E_UPLOAD_TOO_LARGE: 413,
+  E_RATE: 429,
+  E_DEADLINE: 504,
+  E_BUSY: 503,
+  E_HUB_RESTARTING: 503,
+  E_UPLOAD_QUOTA: 507,
+  E_INTERNAL: 500,
+};
+
+export interface UploadErrorExtra {
+  readonly received?: number | undefined;
+  readonly retryAfterS?: number | undefined;
+  readonly reason?: string | undefined;
+  readonly earliestExpiryAt?: number | undefined;
+}
+
+/** Store-level failure carrying the HTTP-mappable code (U3 maps `status` + `extra` 1:1). */
+export class UploadStoreError extends Error {
+  readonly code: UploadErrorCode;
+  readonly status: number;
+  readonly extra: UploadErrorExtra;
+
+  constructor(code: UploadErrorCode, message: string, extra: UploadErrorExtra = {}) {
+    super(`web-hub upload: ${code}: ${message}`);
+    this.code = code;
+    this.status = UPLOAD_ERROR_STATUS[code];
+    this.extra = extra;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// §5.4 audit seam (canonical whitelist lives in U3's hub/audit.ts)
+// ---------------------------------------------------------------------------
+
+export type UploadAuditReason =
+  | "ttl"
+  | "quota"
+  | "idle"
+  | "deadline"
+  | "close"
+  | "orphan-part"
+  | "anomaly"
+  | "conflict"
+  | "short-write"
+  | "no-hardlink"
+  | null;
+
+export type UploadAuditOp = "begin" | "chunk" | "commit" | "abort" | "reference" | "sweep";
+
+export interface UploadAuditEvent {
+  phase: "request" | "reject" | "evict" | "recover";
+  op: UploadAuditOp;
+  ok: boolean;
+  code?: string | undefined;
+  uploadId?: string | undefined;
+  bucket?: string | undefined;
+  agentKey?: string | undefined;
+  principal?: string | undefined;
+  bytes?: number | undefined;
+  received?: number | undefined;
+  chunks?: number | undefined;
+  dupChunks?: number | undefined;
+  dedup?: boolean | undefined;
+  ext?: string | null | undefined;
+  mimeClass?: string | null | undefined;
+  mimeDropped?: boolean | undefined;
+  referenced?: boolean | undefined;
+  ageS?: number | undefined;
+  reason?: UploadAuditReason;
+  ms?: number | undefined;
+  retryAfterS?: number | undefined;
+}
+
+export type UploadAuditFn = (event: UploadAuditEvent) => void;
+
+export interface UploadLog {
+  info(msg: string, data?: object): void;
+  warn(msg: string, data?: object): void;
+  error(msg: string, data?: object): void;
+}
+
+// ---------------------------------------------------------------------------
+// §6 U2 public shapes
+// ---------------------------------------------------------------------------
+
+export interface BeginParams {
+  readonly principal: string;
+  readonly agentKey: string;
+  readonly sessionId?: string | undefined;
+  readonly id: string;
+  readonly name: unknown;
+  readonly size: number;
+  readonly mime?: string | undefined;
+}
+
+export interface BeginResult {
+  readonly id: string;
+  readonly received: number;
+  readonly maxBytes: number;
+}
+
+export interface ChunkParams {
+  readonly principal: string;
+  readonly id: string;
+  readonly offset: number;
+  readonly bytes: Buffer;
+}
+
+export interface ChunkResult {
+  readonly received: number;
+  readonly dup?: true;
+}
+
+export interface CommitParams {
+  readonly principal: string;
+  readonly id: string;
+}
+
+export interface CommitResult {
+  readonly id: string;
+  readonly path: string;
+  readonly size: number;
+  readonly mime: string | null;
+  readonly dedup?: true;
+}
+
+// -- web-hub-preview §4.2 (PV2b): read-only preview open ---------------------------------
+
+export interface OpenForPreviewParams {
+  readonly principal: string;
+  readonly listener: "loopback" | "lan";
+  readonly path: string;
+  readonly agentKey: string;
+  readonly sessionId: string;
+}
+
+/** §4.2's result-object contract — `openForPreview` never throws; the route layer maps `code`
+ *  onto web-hub-preview §4.3's response matrix. */
+export type OpenForPreviewResult =
+  | {
+      readonly ok: true;
+      readonly fh: ReadableUploadFileHandle;
+      readonly size: number;
+      readonly uploadId: string;
+      readonly sha256: string;
+      readonly layout: "generated" | "legacy";
+      /** Audit hint (§4.5): true iff the reader is not the uploader (U3 session-visible sharing). */
+      readonly shared: boolean;
+    }
+  | { readonly ok: false; readonly code: "E_BUSY" | "E_NOT_FOUND" | "E_PREVIEW_CHANGED" | "E_DEADLINE" };
+
+export interface PinToken {
+  readonly ids: readonly string[];
+}
+
+export type PinResult =
+  { readonly ok: true; readonly token: PinToken } | { readonly ok: false; readonly gone: readonly string[] };
+
+export interface RecoverReport {
+  completed: boolean;
+  buckets: number;
+  ids: number;
+  committed: number;
+  removed: number;
+  anomalies: number;
+  overran: boolean;
+}
+
+export interface SweepEviction {
+  readonly id: string;
+  readonly reason: "ttl" | "quota" | "idle";
+  readonly bytes: number;
+}
+
+export interface SweepReport {
+  readonly reason: "tick" | "quota";
+  readonly evicted: readonly SweepEviction[];
+  readonly errors: number;
+}
+
+export interface UploadStats {
+  readonly ready: boolean;
+  readonly disabled: boolean;
+  readonly disabledReason: string | null;
+  readonly scanning: boolean;
+  readonly closing: boolean;
+  readonly inflight: number;
+  readonly inflightBytes: number;
+  readonly committedFiles: number;
+  readonly committedBytes: number;
+  readonly referencedFiles: number;
+  readonly buckets: number;
+  /** §5.4 stats row: reject counts keyed by error code (store-side rejects only — the HTTP
+   * layer's pre-store rejects are merged in by `uploadStatsFields`). */
+  readonly rejectsByCode: Record<string, number>;
+  /** §5.4 stats row: op-latency percentiles (all begin/chunk/commit/abort completions, success
+   * and failure), from a bounded reservoir; `null` before the first op. */
+  readonly p50Ms: number | null;
+  readonly p95Ms: number | null;
+  readonly counters: {
+    readonly requests: number;
+    readonly rejects: number;
+    readonly poisoned: number;
+    readonly evicted: number;
+    readonly dedupHits: number;
+    readonly timeouts: number;
+    /** §5.4 stats row: store-side E_RATE reject count (in-flight admission caps). */
+    readonly rateLimited: number;
+    /** §5.4 stats row: largest Retry-After the store ever handed out (seconds). */
+    readonly maxRetryAfterS: number;
+    /** §2.6 #13: mutations dropped by the close gate (observable no-ops after `close()`). */
+    readonly lateOps: number;
+  };
+}
+
+export interface UploadStore {
+  /** §2.2.4 startup scan — full, rebuilds every index; `begin` returns `E_BUSY` until done. */
+  recover(): Promise<RecoverReport>;
+  begin(p: BeginParams, deadline: Deadline): Promise<BeginResult>;
+  chunk(p: ChunkParams, deadline: Deadline): Promise<ChunkResult>;
+  commit(p: CommitParams, deadline: Deadline): Promise<CommitResult>;
+  abort(p: CommitParams, deadline: Deadline): Promise<void>;
+  /** v3 #8: synchronous in-memory pin — must run in a no-await region before forwarding a prompt. */
+  pinForPrompt(p: { principal: string; text: string }): PinResult;
+  /** v3 #8: synchronous settle — `referenced` sets `referencedAt` and marks meta dirty. */
+  settlePins(token: PinToken, outcome: "referenced" | "released"): void;
+  /** Bounded best-effort persistence of `referencedAt` (never blocks a success reply). */
+  flushReferences(ids: readonly string[], deadline: Deadline): Promise<"ok" | "timeout" | "error">;
+  sweep(reason: "tick" | "quota"): Promise<SweepReport>;
+  stats(): UploadStats;
+  inflight(): number;
+  /** U3 (plan §5.1.2): the authoritative begin-time principal→agentKey binding for the commit
+   * agent-recheck. Only an OPEN in-flight upload owned by `principal` returns its agentKey —
+   * poisoned/committed/finished/unknown ids return `undefined` (their commit path needs no
+   * recheck: 404 or an idempotent replay of an already-committed upload). Synchronous: safe to
+   * call inside no-await regions. */
+  agentKeyOf(principal: string, id: string): string | undefined;
+  /** web-hub-preview §4.2 (PV2b): read-only preview open of a committed upload — exact byPath
+   *  index hit + generated/legacy structural re-check + U3 session-visibility + `O_NOFOLLOW`
+   *  open with dirChain/size re-verification. Never throws; never mutates indexes, counters,
+   *  `referencedAt` or TTL (reading is not referencing). */
+  openForPreview(
+    p: OpenForPreviewParams,
+    ctx: { deadline: Deadline; signal: AbortSignal },
+  ): Promise<OpenForPreviewResult>;
+  /** §2.6 #13: poison everything un-committed, remove their dirs, retain committed files. */
+  close(): Promise<void>;
+}
+
+export interface UploadStoreDeps {
+  /** Absolute uploads root (`~/.pi/agent/web-hub/uploads`). */
+  readonly root: string;
+  readonly now?: (() => number) | undefined;
+  readonly log: UploadLog;
+  readonly audit?: UploadAuditFn | undefined;
+  readonly limits?: Partial<UploadLimits> | undefined;
+  readonly fs?: Partial<UploadFsDeps> | undefined;
+  /** Test-only seam (U3 race-case acceptance): invoked — and awaited — after a sweep has
+   * selected a committed eviction candidate but BEFORE the per-id lock is taken, i.e. exactly the
+   * window in which `pinForPrompt` and the lock-side recheck race (plan §2.6 v3 #8 case (c)).
+   * Production wiring never passes it; when absent the call site is skipped entirely (zero
+   * production overhead). */
+  readonly onEvictCandidate?: ((id: string, reason: "ttl" | "quota") => void | Promise<void>) | undefined;
+}
+
+// ---------------------------------------------------------------------------
+// implementation
+// ---------------------------------------------------------------------------
+
+/** Same shape as `hub/http.ts`'s `CMD_ID_RE` — the HTTP layer validates first; this re-checks. */
+const UPLOAD_ID_RE = /^[A-Za-z0-9_-]{8,64}$/; // min 8 since 2026-10-05 (UI emits 8-char ids; 22-char legacy ids stay valid)
+const BUCKET_NAME_RE = /^[sa]-[A-Za-z0-9_-]{1,80}$/;
+const META_TMP_RE = /^\.meta\.[0-9a-f]+\.tmp$/;
+const ROOT_UNSAFE_RE = /[\x00-\x1F\x7F]/;
+
+interface BaseRec {
+  readonly id: string;
+  readonly principal: string;
+  readonly agentKey: string;
+  readonly bucket: string;
+  /** Canonical client-declared display name (`sanitizeUploadName`) — begin-idempotency
+   *  comparison, dedup key, and the `meta.json` record. Never an fs path component. */
+  readonly safeName: string;
+  /** Generated on-disk file name (`<id>.<ext>` / bare `<id>`) — every fs path in this module
+   *  (`.part`, final, scan) is built from this, never from the client's name. */
+  readonly diskName: string;
+  readonly size: number;
+  readonly mime: string | null;
+  readonly dirChain: DirChain;
+  /** Raw fs promises currently outstanding for this upload (poison/close settle tracking). */
+  readonly pending: Set<Promise<unknown>>;
+}
+
+interface InflightRec extends BaseRec {
+  received: number;
+  readonly hash: Hash;
+  lastActivityAt: number;
+  state: "open" | "poisoned";
+  /** Set once a `.part` has been successfully created — a retried first chunk (after a
+   *  truncate-back) must re-open WITHOUT `O_CREAT|O_EXCL` or it would EEXIST its own part. */
+  partCreated: boolean;
+  chunkCount: number;
+  dupChunks: number;
+}
+
+interface CommittedRec extends BaseRec {
+  readonly sha256: string;
+  readonly path: string;
+  readonly committedAt: number;
+  referencedAt: number | null;
+  metaDirty: boolean;
+  pins: number;
+  state: "committed" | "evicting";
+  readonly result: CommitResult;
+}
+
+interface FinishedRec {
+  readonly principal: string;
+  readonly result: CommitResult;
+  readonly at: number;
+}
+
+function errCodeOf(err: unknown): string | undefined {
+  return typeof err === "object" && err !== null && "code" in err ? String((err as { code: unknown }).code) : undefined;
+}
+
+function mimeClassOf(mime: string | null): string | null {
+  return mime === null ? null : (mime.split("/")[0] ?? null);
+}
+
+/**
+ * Generated on-disk file name: `<uploadId>[.<ext>]` with `ext` from `uploadDiskExt(rawName)`.
+ * The id is unique per upload and its exclusive `<id>/` directory already rules out collisions,
+ * so the attacker-controlled original name never reaches the filesystem (2026-10 rework; the id
+ * is `[A-Za-z0-9_-]{8,64}` — no dots, so the generated name can never collide with `meta.json`
+ * or a `.meta.*.tmp` either). `part` is RESERVED for the in-flight `<diskName>.part` suffix: a
+ * final named `<id>.part` would match the startup scan's orphan filter and be swept, so such
+ * uploads (and every name without a legal ext) land extension-less as the bare id.
+ */
+function diskNameFor(id: string, rawName: unknown): string {
+  const ext = uploadDiskExt(rawName);
+  return ext === undefined || ext === "part" ? id : `${id}.${ext}`;
+}
+
+/**
+ * web-hub-preview §4.2 step 3's generated-name predicate (`^<id>(\.[A-Za-z0-9]{1,16})?$`),
+ * done structurally: scanned `<id>` dir names come straight from `readdir` (attacker-shaped
+ * strings), so the id is never interpolated into a RegExp.
+ */
+function isGeneratedDiskName(id: string, name: string): boolean {
+  if (name === id) return true;
+  if (!name.startsWith(`${id}.`)) return false;
+  const ext = name.slice(id.length + 1);
+  return /^[A-Za-z0-9]{1,16}$/.test(ext);
+}
+
+const pbKey = (principal: string, bucket: string): string => `${principal}|${bucket}`;
+const dedupKey = (principal: string, bucket: string, sha256: string, safeName: string): string =>
+  `${principal}|${bucket}|${sha256}|${safeName}`;
+
+export function createUploadStore(deps: UploadStoreDeps): UploadStore {
+  const fs: UploadFsDeps = { ...defaultUploadFsDeps(), ...(deps.fs ?? {}) };
+  const now: () => number = deps.now !== undefined ? deps.now : fs.now;
+  fs.now = now;
+  const log = deps.log;
+  const audit: UploadAuditFn = deps.audit ?? (() => undefined);
+  const limits: UploadLimits = { ...DEFAULT_UPLOAD_LIMITS, ...(deps.limits ?? {}) };
+  const root = deps.root;
+
+  // -- lifecycle state ------------------------------------------------------
+  type StoreState = "init" | "ready" | "disabled";
+  let storeState: StoreState = "init";
+  let disabledReason: string | null = null;
+  let rootEntry: DirChainEntry | null = null;
+  let rootResolved = "";
+  let closing = false;
+  let closed = false;
+  let closePromise: Promise<void> | null = null;
+  type ScanState = "idle" | "running" | "done";
+  let scanState: ScanState = "idle";
+  let scanPromise: Promise<RecoverReport> | null = null;
+
+  // -- indexes --------------------------------------------------------------
+  const inflight = new Map<string, InflightRec>();
+  const committed = new Map<string, CommittedRec>();
+  const finished = new Map<string, FinishedRec>();
+  const byPath = new Map<string, string>();
+  const dedup = new Map<string, string>();
+  /** Per-id mutex tail — survives the inflight→committed transition of the same id. */
+  const idLocks = new Map<string, Promise<unknown>>();
+  const bucketBytes = new Map<string, number>();
+  const bucketInflightBytes = new Map<string, number>();
+  const pbBytes = new Map<string, number>();
+  const pbInflightBytes = new Map<string, number>();
+  let totalCommittedBytes = 0;
+  let totalInflightBytes = 0;
+  const counters = {
+    requests: 0,
+    rejects: 0,
+    poisoned: 0,
+    evicted: 0,
+    dedupHits: 0,
+    timeouts: 0,
+    lateOps: 0,
+    rateLimited: 0,
+    maxRetryAfterS: 0,
+  };
+  /** §5.4 stats row: per-code reject counts + a bounded ring of op latencies (ms) for p50/p95. */
+  const rejectsByCode = new Map<string, number>();
+  const latencyMs: number[] = [];
+  let latencyCursor = 0;
+
+  function recordLatency(ms: number): void {
+    if (latencyMs.length < LATENCY_RESERVOIR_MAX) {
+      latencyMs.push(ms);
+      return;
+    }
+    latencyMs[latencyCursor] = ms;
+    latencyCursor = (latencyCursor + 1) % LATENCY_RESERVOIR_MAX;
+  }
+
+  function latencyPercentile(p: 50 | 95): number | null {
+    if (latencyMs.length === 0) return null;
+    const sorted = [...latencyMs].sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor(((sorted.length - 1) * p) / 100))]!;
+  }
+
+  // -- §2.2.3 v3 #4 constructor-time probe ----------------------------------
+  const initPromise: Promise<void> = (async () => {
+    if (!root.startsWith("/") || ROOT_UNSAFE_RE.test(root)) {
+      storeState = "disabled";
+      disabledReason = "root-invalid";
+      log.error("web-hub uploads disabled: root path invalid", { root });
+      return;
+    }
+    try {
+      const id = await ensureUploadDir(root, { create: true }, fs, { at: now() + FS_STEP_CAP_MS });
+      rootEntry = { path: root, id };
+      rootResolved = resolvePath(root);
+    } catch (err) {
+      storeState = "disabled";
+      disabledReason = "root-invalid";
+      log.error("web-hub uploads disabled: root unusable", { root, error: String(err) });
+      return;
+    }
+    try {
+      await probeHardlink(root, fs, { at: now() + PROBE_CAP_MS });
+      storeState = "ready";
+    } catch (err) {
+      storeState = "disabled";
+      disabledReason = "no-hardlink";
+      log.error("web-hub uploads disabled: hardlink probe failed (no fallback — v3 #4)", {
+        root,
+        error: String(err),
+      });
+    }

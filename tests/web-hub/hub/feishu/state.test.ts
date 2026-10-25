@@ -748,6 +748,16 @@ describe("requests (§5.4 + §R2-c)", () => {
   });
 });
 
+describe("notice requestId (feishu-xs-mirror downgrade compat)", () => {
+  it("a queued notice carrying requestId persists and reloads", async () => {
+    const r = await mk();
+    expect(r.s.outbox.add(partInput("m1", { kind: "notice", requestId: "xsm:abc123" })).ok).toBe(true);
+    expect(await durable(r)).toBe(true);
+    const again = await mk({ clock: r.clock });
+    expect(again.s.outbox.get("send_m1")).toMatchObject({ kind: "notice", state: "queued", requestId: "xsm:abc123" });
+  });
+});
+
 describe("byte budget (§R2-c / §R2-f)", () => {
   it("admission refuses `budget` BEFORE persisting; the file never exceeds 4 MiB even with max growth afterwards", async () => {
     const r = await mk();

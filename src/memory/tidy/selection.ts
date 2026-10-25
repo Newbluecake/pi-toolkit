@@ -86,5 +86,3 @@ export function reduceSelection(state: SelectionState, action: SelectionAction):
   }
   return { ...state, selected };
 }
-
-export const buildSelectionItems = selectionItems;

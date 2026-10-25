@@ -738,11 +738,11 @@ describe("tools/agent-tool: renderResult (markdown body)", () => {
 });
 
 /**
- * consult A/B instrumentation plan P2: the top-level Agent tool's `meta`
- * parameter (strict, analytics-only, never in the child prompt) and the
- * "verdict/v1" schema preset (request tagging + host-side rendering).
+ * The top-level Agent tool's `meta` parameter (strict, analytics-only, never
+ * in the child prompt) and the "verdict/v1" schema preset (request tagging +
+ * host-side rendering).
  */
-describe("tools/agent-tool: consult A/B instrumentation (meta + verdict/v1 preset)", () => {
+describe("tools/agent-tool: dispatch meta + verdict/v1 preset", () => {
   it("threads valid meta onto the spawn request as dispatchMeta; absent or {} leaves no field", async () => {
     const port = fakePort();
     const tool = createAgentTool({ spawn: port });
@@ -752,7 +752,7 @@ describe("tools/agent-tool: consult A/B instrumentation (meta + verdict/v1 prese
         description: "d",
         prompt: "do the work",
         subagent_type: "worker",
-        meta: { lane: "L2", packageId: "ab-pkg-42", feature: "consult-ab", abArm: "control" },
+        meta: { lane: "L2", packageId: "ab-pkg-42", feature: "dev-flow" },
       },
       undefined,
       undefined,
@@ -761,8 +761,7 @@ describe("tools/agent-tool: consult A/B instrumentation (meta + verdict/v1 prese
     expect(port.seen?.dispatchMeta).toEqual({
       lane: "L2",
       packageId: "ab-pkg-42",
-      feature: "consult-ab",
-      abArm: "control",
+      feature: "dev-flow",
     });
     // Analytics only — never shown to the subagent: the child prompt is the
     // caller's prompt verbatim (buildPrompt never reads dispatchMeta).
@@ -780,11 +779,15 @@ describe("tools/agent-tool: consult A/B instrumentation (meta + verdict/v1 prese
   });
 
   it.each([
-    ["unknown key", { lane: "L1", oops: 1 }, /unknown key\(s\): oops.*Allowed keys: lane, packageId, feature, abArm/],
+    ["unknown key", { lane: "L1", oops: 1 }, /unknown key\(s\): oops.*Allowed keys: lane, packageId, feature$/],
     ["non-plain object", "L2", /meta must be a plain object with keys/],
     ["invalid lane", { lane: "L9" }, /meta\.lane must be one of: L0, L1, L2, L3/],
     ["invalid packageId", { packageId: "-nope" }, /meta\.packageId must be a non-empty id matching/],
-    ["abArm without packageId", { abArm: "control" }, /meta\.abArm requires meta\.packageId/],
+    [
+      "the removed abArm key",
+      { packageId: "p", abArm: "control" },
+      /unknown key\(s\): abArm\. Allowed keys: lane, packageId, feature$/,
+    ],
   ])("rejects meta with %s, listing what is allowed, and never spawns", async (_label, meta, message) => {
     const port = fakePort();
     await expect(
@@ -797,85 +800,6 @@ describe("tools/agent-tool: consult A/B instrumentation (meta + verdict/v1 prese
       ),
     ).rejects.toThrow(message);
     expect(port.seen).toBeUndefined();
-  });
-
-  it("arm/experts consistency: control + non-empty experts throws; dev/work experts arm requires experts", async () => {
-    const port = fakePort();
-    const tool = createAgentTool({ spawn: port });
-    await expect(
-      tool.execute(
-        "tc",
-        {
-          description: "d",
-          prompt: "p",
-          subagent_type: "worker",
-          meta: { packageId: "pkg", abArm: "control" },
-          experts: ["main"],
-        },
-        undefined,
-        undefined,
-        {} as never,
-      ),
-    ).rejects.toThrow(/abArm "control" is inconsistent with a non-empty experts list/);
-    await expect(
-      tool.execute(
-        "tc",
-        { description: "d", prompt: "p", subagent_type: "worker", meta: { packageId: "pkg", abArm: "experts" } },
-        undefined,
-        undefined,
-        {} as never,
-      ),
-    ).rejects.toThrow(/abArm "experts" requires a non-empty experts list/);
-    await expect(
-      tool.execute(
-        "tc",
-        {
-          description: "d",
-          prompt: "p",
-          subagent_type: "worker",
-          meta: { packageId: "pkg", abArm: "experts" },
-          experts: [],
-        },
-        undefined,
-        undefined,
-        {} as never,
-      ),
-    ).rejects.toThrow(/requires a non-empty experts list/);
-    expect(port.seen).toBeUndefined();
-    // control + an EMPTY experts list is consistent (no experts attached).
-    await tool.execute(
-      "tc",
-      {
-        description: "d",
-        prompt: "p",
-        subagent_type: "worker",
-        meta: { packageId: "pkg", abArm: "control" },
-        experts: [],
-      },
-      undefined,
-      undefined,
-      {} as never,
-    );
-    expect(port.seen?.consultExperts).toBeUndefined();
-    expect(port.seen?.dispatchMeta?.abArm).toBe("control");
-
-    for (const subagent_type of ["verifier", "reviewer"]) {
-      const rolePort = fakePort();
-      await createAgentTool({ spawn: rolePort }).execute(
-        "tc",
-        {
-          description: "d",
-          prompt: "p",
-          subagent_type,
-          meta: { packageId: "pkg", abArm: "experts" },
-        } as AgentToolParams,
-        undefined,
-        undefined,
-        {} as never,
-      );
-      expect(rolePort.seen?.dispatchMeta?.abArm).toBe("experts");
-      expect(rolePort.seen?.consultExperts).toBeUndefined();
-    }
   });
 
   it('resolves the "verdict/v1" preset to the frozen schema and tags schemaPreset; other schemas stay untagged', async () => {

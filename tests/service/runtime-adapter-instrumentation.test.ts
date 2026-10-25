@@ -1,5 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { describe, expect, it } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { MemoryRunStore } from "../../src/core/store.js";
@@ -13,10 +12,9 @@ import { createRuntimeRunnerAdapter, type RuntimeAdapterDeps } from "../../src/s
 import type { RunnerSpec } from "../../src/service/ports.js";
 
 /**
- * consult A/B instrumentation plan (§5 P1b, tests): the runtime adapter's
- * share — diag experts/dispatchMeta/schemaPreset via displayMeta, the
- * readonly-domain/consult-fork exclusions, and the notification textPreview
- * switch to renderStructuredForHost.
+ * Runtime adapter diag instrumentation: dispatchMeta/schemaPreset via displayMeta
+ * (the consult experts/consultOf parts are retired — #40 PS1a), and the
+ * notification textPreview switch to renderStructuredForHost.
  */
 
 function fastBudget() {
@@ -91,156 +89,50 @@ function spec(overrides: Partial<RunnerSpec["request"]> = {}, runId = "r1"): Run
   return { runId, type: workerType, request: { type: "worker", prompt: "do it", ...overrides }, budget: fastBudget() };
 }
 
-const consultFactory = vi.fn(() => ({ name: "consult" }) as unknown as ToolDefinition);
+const META = { lane: "L2" as const, packageId: "pkg-2026-10-08-a" };
 
-const EXPERTS = [
-  { runId: "r_E1", sessionFile: "/s/e1.jsonl", agentType: "explorer", label: "explorer" },
-  { runId: "r_E2", sessionFile: "/s/e2.jsonl", agentType: "reviewer", kind: "main" as const, pending: true },
-];
-
-const META = { lane: "L2" as const, packageId: "pkg-2026-10-08-a", abArm: "experts" as const };
-
-describe("runtime-adapter: consult A/B diag instrumentation (P1b)", () => {
-  it("folds experts {refs, granted:true}, dispatchMeta and schemaPreset into diag when the consult tool is injected", async () => {
-    const clock = new FakeClock();
-    const store = new MemoryRunStore();
-    const driver: SessionDriver = {
-      create: async () => handle(),
-      bind: async () => undefined,
-      onLateArrival: () => undefined,
-    };
-    const runner = buildAdapter(clock, { driver, store, consult: consultFactory });
-    await runner.run(spec({ consultExperts: EXPERTS, dispatchMeta: META, schemaPreset: "verdict/v1" }));
-    const diag = store.get("r1")?.diag;
-    expect(diag?.experts).toEqual({
-      refs: [
-        { runId: "r_E1", label: "explorer", agentType: "explorer" },
-        { runId: "r_E2", agentType: "reviewer", kind: "main", pending: true },
-      ],
-      granted: true,
-    });
-    expect(diag?.dispatchMeta).toEqual(META);
-    expect(diag?.schemaPreset).toBe("verdict/v1");
-    expect(consultFactory).toHaveBeenCalled();
-  });
-
-  it("mirrors the display-only consult marker into diag.consultOf (web fleet rows read it, never the label prefix)", async () => {
-    const clock = new FakeClock();
-    const store = new MemoryRunStore();
-    const driver: SessionDriver = {
-      create: async () => handle(),
-      bind: async () => undefined,
-      onLateArrival: () => undefined,
-    };
-    const runner = buildAdapter(clock, { driver, store });
-    await runner.run(spec({ forkSessionFrom: "/s/expert.jsonl", parentRunId: "r_asker" }));
-    expect(store.get("r1")?.diag.consultOf).toEqual({ askerRunId: "r_asker" });
-    // a plain run never carries the marker
-    await runner.run(spec({}, "r2"));
-    expect(store.get("r2")?.diag.consultOf).toBeUndefined();
-  });
-
-  it("records granted:false when the whitelist reached a non-readonly run but the consult tool was withheld (consult disabled)", async () => {
-    const clock = new FakeClock();
-    const store = new MemoryRunStore();
-    const driver: SessionDriver = {
-      create: async () => handle(),
-      bind: async () => undefined,
-      onLateArrival: () => undefined,
-    };
-    // No `consult` dep — the wiring's disabled/inert shape.
-    const runner = buildAdapter(clock, { driver, store });
-    await runner.run(spec({ consultExperts: EXPERTS }));
-    expect(store.get("r1")?.diag.experts).toEqual({
-      refs: [
-        { runId: "r_E1", label: "explorer", agentType: "explorer" },
-        { runId: "r_E2", agentType: "reviewer", kind: "main", pending: true },
-      ],
-      granted: false,
-    });
-  });
-
-  it("writes no experts key for a readonly-domain run even when consultExperts is (deliberately) carried", async () => {
-    const clock = new FakeClock();
-    const store = new MemoryRunStore();
-    const driver: SessionDriver = {
-      create: async () => handle(),
-      bind: async () => undefined,
-      onLateArrival: () => undefined,
-    };
-    const runner = buildAdapter(clock, { driver, store, consult: consultFactory });
-    await runner.run(spec({ toolDomain: "readonly", consultExperts: EXPERTS, dispatchMeta: META }));
-    const diag = store.get("r1")?.diag;
-    expect(diag).not.toHaveProperty("experts");
-    // dispatchMeta still flows — readonly says nothing about enrollment meta.
-    expect(diag?.dispatchMeta).toEqual(META);
-  });
-
-  it("writes no experts key for a consult fork (forkSessionFrom), and consultOf still marks it", async () => {
-    const clock = new FakeClock();
-    const captured: { spec?: SessionSpec } = {};
-    const store = new MemoryRunStore();
-    // A fork copy opens through the driver's resume seam (consult plan §4.4).
-    const driver: SessionDriver = {
+describe("runtime-adapter: diag instrumentation (dispatchMeta / schemaPreset) and retired consult inputs (#40)", () => {
+  function plainDriver(captured: { spec?: SessionSpec; resumed?: boolean } = {}): SessionDriver {
+    return {
       create: async (s) => {
         captured.spec = s;
         return handle();
       },
       resume: async (_file, s) => {
         captured.spec = s;
+        captured.resumed = true;
         return handle();
       },
       bind: async () => undefined,
       onLateArrival: () => undefined,
     };
-    const runner = buildAdapter(clock, { driver, store, consult: consultFactory });
-    await runner.run(
-      spec({
-        forkSessionFrom: "/cache/consult-sessions/fork-1.jsonl",
-        parentRunId: "r_ASKER",
-        consultExperts: EXPERTS,
-      }),
-    );
+  }
+
+  it("folds dispatchMeta and schemaPreset into diag", async () => {
+    const clock = new FakeClock();
+    const store = new MemoryRunStore();
+    const runner = buildAdapter(clock, { driver: plainDriver(), store });
+    await runner.run(spec({ dispatchMeta: META, schemaPreset: "verdict/v1" }));
     const diag = store.get("r1")?.diag;
-    expect(diag).not.toHaveProperty("experts");
-    expect((captured.spec as { displayMeta?: { consultOf?: unknown } } | undefined)?.displayMeta?.consultOf).toEqual({
-      askerRunId: "r_ASKER",
-    });
+    expect(diag?.dispatchMeta).toEqual(META);
+    expect(diag?.schemaPreset).toBe("verdict/v1");
+  });
+
+  it("a readonly-domain run still folds dispatchMeta into diag", async () => {
+    const clock = new FakeClock();
+    const store = new MemoryRunStore();
+    const runner = buildAdapter(clock, { driver: plainDriver(), store });
+    await runner.run(spec({ toolDomain: "readonly", dispatchMeta: META }));
+    expect(store.get("r1")?.diag.dispatchMeta).toEqual(META);
   });
 
   it("runs without any new request fields produce a diag with none of the new keys (zero-change when absent)", async () => {
     const clock = new FakeClock();
     const store = new MemoryRunStore();
-    const driver: SessionDriver = {
-      create: async () => handle(),
-      bind: async () => undefined,
-      onLateArrival: () => undefined,
-    };
-    const runner = buildAdapter(clock, { driver, store, consult: consultFactory });
+    const runner = buildAdapter(clock, { driver: plainDriver(), store });
     await runner.run(spec());
     const diag = store.get("r1")?.diag;
-    for (const key of ["experts", "dispatchMeta", "schemaPreset", "consults"]) expect(diag).not.toHaveProperty(key);
-  });
-
-  it("caps experts.refs at EXPERTS_REFS_CAP (16), keeping the first entries", async () => {
-    const clock = new FakeClock();
-    const store = new MemoryRunStore();
-    const driver: SessionDriver = {
-      create: async () => handle(),
-      bind: async () => undefined,
-      onLateArrival: () => undefined,
-    };
-    const runner = buildAdapter(clock, { driver, store, consult: consultFactory });
-    const many = Array.from({ length: 20 }, (_, i) => ({
-      runId: `r_E${i}`,
-      sessionFile: `/s/e${i}.jsonl`,
-      agentType: "explorer",
-    }));
-    await runner.run(spec({ consultExperts: many }));
-    const refs = store.get("r1")?.diag.experts?.refs;
-    expect(refs).toHaveLength(16);
-    expect(refs?.[0]).toMatchObject({ runId: "r_E0" });
-    expect(refs?.[15]).toMatchObject({ runId: "r_E15" });
+    for (const key of ["dispatchMeta", "schemaPreset"]) expect(diag).not.toHaveProperty(key);
   });
 });
 

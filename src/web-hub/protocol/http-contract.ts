@@ -52,15 +52,23 @@ export const SSE_EVENTS = [
   // "agent_removed" (rather than after) so `agent-remove.test.ts`'s existing "agent_removed
   // sits immediately before spawns" adjacency pin keeps holding untouched.
   "load",
-  // web-hub-delete-session plan v2 §2.3/§4.3: card removal (agent or managed-session) broadcast.
-  // Must stay BEFORE "spawns" for the same reason run_history/run_ev/run_end do — this file's
-  // own `.at(-1) === "spawns"` pin (see `spawn.test.ts:225`) must keep holding.
+  // scheduled-reports plan r3 §5.6 (H1): the hub-global schedule projection snapshot
+  // (SchedulesPayloadWire, fingerprint-gated direct-send — never the replay ring, no `id:`;
+  // the connect burst sends it right AFTER `load`, W1's §7.2「随 agents 重发快照」). Slotted
+  // here (after `load`, before `privacy`) purely to keep the two tail pins below untouched;
+  // the relative order against privacy/load carries no protocol meaning. Only sent while
+  // `sched.v1` is a live hub cap (config.schedule absent ⇒ this event is NEVER emitted,
+  // byte-identical hub).
+  "schedules",
   // web-hub-privacy plan v2.1 (P1): the hub-global locked-sessionId set (full snapshot,
   // direct-send only — never the replay ring; connect burst sends it BEFORE `agents`). Slotted
   // BEFORE "agent_removed" for the same reason `load` is — `agent-remove.test.ts`'s
   // "agent_removed sits immediately before spawns" adjacency pin and `spawn.test.ts`'s
   // `.at(-1) === "spawns"` pin both keep holding untouched.
   "privacy",
+  // web-hub-delete-session plan v2 §2.3/§4.3: card removal (agent or managed-session) broadcast.
+  // Must stay BEFORE "spawns" for the same reason run_history/run_ev/run_end do — this file's
+  // own `.at(-1) === "spawns"` pin (see `spawn.test.ts:225`) must keep holding.
   "agent_removed",
   "spawns", // web-hub-spawn arch §8.2: `SpawnsPayload` snapshot/broadcast (Public projection only)
 ] as const;

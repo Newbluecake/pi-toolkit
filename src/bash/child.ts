@@ -25,8 +25,8 @@ import {
   type ChildBashRegistry,
   type KillAllReport,
 } from "./child-registry.js";
-import { createBashTool } from "../tools/bash-tool.js";
-import { createBashJobTool } from "../tools/bash-job-tool.js";
+import { createBashTool } from "./tool.js";
+import { createBashJobTool } from "./job-tool.js";
 import { recordBashDiag } from "./diag.js";
 
 /**

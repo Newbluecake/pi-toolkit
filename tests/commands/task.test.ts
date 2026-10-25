@@ -69,7 +69,6 @@ describe("/task command dispatch", () => {
     expect(req.resumeFrom).toBeUndefined();
     expect(req.isolation).toBeUndefined();
     expect(req.schema).toBeUndefined();
-    expect(req.consultExperts).toBeUndefined();
     expect(req.signal).toBeUndefined();
   });
 

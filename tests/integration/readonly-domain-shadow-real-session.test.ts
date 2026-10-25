@@ -31,7 +31,7 @@ import {
 import { createAssistantMessageEventStream, getCurrentTools } from "@earendil-works/pi-ai";
 import { toolSourcesOf } from "../../src/runtime/session-driver.js";
 import {
-  CONSULT_READONLY_TOOLS,
+  READONLY_DOMAIN_TOOLS,
   buildToolScopePolicy,
   createToolScopeEnforcer,
   type ScopeSessionHandle,
@@ -219,7 +219,7 @@ async function runScenario(opts: ScenarioOpts) {
     sessionManager,
     settingsManager,
     resourceLoader: loader,
-    tools: [...CONSULT_READONLY_TOOLS, ...(opts.schema ? ["StructuredOutput"] : [])],
+    tools: [...READONLY_DOMAIN_TOOLS, ...(opts.schema ? ["StructuredOutput"] : [])],
     customTools: [...(opts.asSdkCustomTool ? [evilTool] : []), ...(structuredTool ? [structuredTool] : [])] as never,
   } as never);
   const session = created.session;
@@ -237,7 +237,7 @@ async function runScenario(opts: ScenarioOpts) {
     ...(opts.schema ? ([["StructuredOutput", "sdk"]] as [string, string][]) : []),
   ]);
   const policy = buildToolScopePolicy({
-    tools: CONSULT_READONLY_TOOLS,
+    tools: READONLY_DOMAIN_TOOLS,
     granted: opts.schema ? ["StructuredOutput"] : [],
     provenance,
   });

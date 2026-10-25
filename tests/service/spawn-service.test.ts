@@ -200,7 +200,9 @@ describe("SpawnService", () => {
     const resumed = await service.spawn({ type: "worker", prompt: "rework", resumeFrom: "r_DMETA01" });
     if ("error" in resumed) throw new Error(resumed.error.message);
     await tick();
-    expect(seen[0]?.dispatchMeta).toEqual(META);
+    // (the legacy `abArm` on the seeded diag is dropped, never re-written — #40)
+    expect(seen[0]?.dispatchMeta).toEqual({ lane: "L2", packageId: "pkg-2026-10-08-a" });
+    expect(seen[0]?.dispatchMeta).not.toHaveProperty("abArm");
 
     // ② explicit meta on the request ⇒ wins over the inherited value.
     const explicit = { lane: "L3" as const, packageId: "pkg-other" };
@@ -248,8 +250,11 @@ describe("SpawnService", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     // Provisional row (admission-time) and the request the runner received
     // both carry the inherited meta — consistent with what the adapter folds.
-    expect(service.snapshots().find((s) => s.runId === resumed.runId)?.diag.dispatchMeta).toEqual(META);
-    expect(seenDispatchMeta).toEqual(META);
+    expect(service.snapshots().find((s) => s.runId === resumed.runId)?.diag.dispatchMeta).toEqual({
+      lane: "L2",
+      packageId: "pkg-2026-10-08-a",
+    });
+    expect(seenDispatchMeta).toEqual({ lane: "L2", packageId: "pkg-2026-10-08-a" });
     rmSync(dir, { recursive: true, force: true });
   });
 

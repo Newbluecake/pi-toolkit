@@ -56,6 +56,8 @@ function makeExec(
      *  (F5's common path), run later by the test (deferred), or never. */
     reentry?: "immediate" | "deferred" | "none";
     switchImpl?: ExecHarness["switchImpl"];
+    /** web-hub-cmd-history A1: optional recorder port, threaded straight through. */
+    recorder?: () => import("../../../src/web-hub/agent/command-record.js").CommandRecorder | undefined;
   } = {},
 ): ExecHarness {
   const layout = makeLayout();
@@ -127,6 +129,7 @@ function makeExec(
       return { cancel: () => (t.cancelled = true) };
     },
     sendLate: (frame, result) => h.lates.push({ frame, result }),
+    ...(over.recorder !== undefined ? { recorder: over.recorder } : {}),
   });
   return h;
 }
@@ -250,7 +253,7 @@ describe("resume-exec — synchronous pick rejects (§2.5 steps 2-4)", () => {
     expect(nonce).toBeDefined();
     const refused = h.exec.pick(pickFrame("target1", w.gen).frame, pickFrame("target1", w.gen).cmd, pickCtxOf(h));
     expect(err(refused)).toMatchObject({ code: "E_COMMAND_DENIED", message: "exec:in-flight" });
-    expect(h.gate.consumeNew(nonce!)).toBe(true);
+    expect(h.gate.consumeNew(nonce!)).toEqual({ ok: true, cmdId: undefined });
     // pick armed ⇒ /new refused
     const picked = await pickTarget(h, w);
     expect(picked.result.ok).toBe(true);
@@ -601,3 +604,115 @@ async function runDeferredExec2(h: ExecHarness): Promise<boolean> {
   const nonce = h.sent[h.sent.length - 1]!.text.split(" ")[3]!;
   return h.exec.internalExecResume(nonce, cmdCtxFor(h));
 }
+
+// ---------------------------------------------------------------------------
+// web-hub-cmd-history plan §5.2 (A1) — ExecGate cmdId threading + the /resume card at the
+// execution point (AFTER every authoritative check, BEFORE ctx.switchSession).
+// ---------------------------------------------------------------------------
+
+describe("exec gate — cmdId threading (web-hub-cmd-history A1)", () => {
+  it("armNew(cmdId) stores it; consumeNew returns {ok:true, cmdId}; unknown/expired ⇒ {ok:false}", () => {
+    const clock = fakeClock(1_000);
+    const gate = createExecGate({ now: clock.now });
+    const nonce = gate.armNew("cmd-0000000000000042")!;
+    expect(gate.consumeNew("wrong")).toEqual({ ok: false });
+    expect(gate.consumeNew(nonce)).toEqual({ ok: true, cmdId: "cmd-0000000000000042" });
+    // expiry
+    const nonce2 = gate.armNew()!;
+    clock.advance(6_000);
+    expect(gate.consumeNew(nonce2)).toEqual({ ok: false });
+  });
+});
+
+describe("cmd-history — /resume __pick card at the execution point (§5.2, R12)", () => {
+  function recRecorder() {
+    const immediates: Array<Record<string, unknown>> = [];
+    const recorder = {
+      policyFor: () => "record" as const,
+      noteIntent: () => undefined,
+      begin: () => undefined,
+      beginExternal: () => undefined,
+      recordImmediate: (r: Record<string, unknown>) => immediates.push(r),
+      running: () => [],
+      counters: () => ({ appended: 0, skipped: 0, failed: 0 }),
+      dispose: () => undefined,
+    };
+    return { recorder: recorder as never, immediates };
+  }
+
+  it("success: recordImmediate(done, left-session) AFTER the checks and BEFORE switchSession; history on the late", async () => {
+    const rec = recRecorder();
+    const order: string[] = [];
+    const h = makeExec({
+      recorder: () => rec.recorder,
+      switchImpl: async (path, opts) => {
+        order.push("switch");
+        await opts.withSession?.({
+          sessionManager: { getSessionId: () => headerIdOf(path), getSessionFile: () => path },
+        });
+        return {};
+      },
+    });
+    // patch recordImmediate to log ordering relative to switchSession
+    (rec.recorder as unknown as { recordImmediate: unknown }).recordImmediate = (r: Record<string, unknown>) => {
+      order.push(`record:${String(r.state)}`);
+      rec.immediates.push(r);
+      return true; // the real recorder returns whether the entry landed
+    };
+    const w = await scene(h);
+    const { result } = await pickTarget(h, w);
+    expect(result.ok).toBe(true);
+    await h.execPromises[0]!;
+    expect(order[0]).toBe("record:done"); // BEFORE the switch call
+    expect(order[1]).toBe("switch");
+    expect(rec.immediates).toHaveLength(1);
+    expect(rec.immediates[0]).toMatchObject({
+      cmdId: "cmd-0000000000000001",
+      name: "resume",
+      source: "web",
+      state: "done",
+      notice: "left-session",
+    });
+    const out = (rec.immediates[0] as { output?: { entries: Array<{ text?: string }> } }).output;
+    expect(out?.entries[0]?.text).toContain("已切换到会话");
+    // the late result carries history:"recorded" (m2)
+    expect(h.lates.at(-1)?.result).toMatchObject({ ok: true });
+    expect((h.lates.at(-1)!.result as { data: { history?: string } }).data.history).toBe("recorded");
+  });
+
+  it("cancelled switch ⇒ a SECOND recordImmediate(failed) under the same cmdId", async () => {
+    const rec = recRecorder();
+    const h = makeExec({
+      recorder: () => rec.recorder,
+      switchImpl: async () => ({ cancelled: true }),
+    });
+    const w = await scene(h);
+    const { result } = await pickTarget(h, w);
+    expect(result.ok).toBe(true);
+    await h.execPromises[0]!;
+    expect(rec.immediates).toHaveLength(2);
+    expect(rec.immediates[0]).toMatchObject({ state: "done", notice: "left-session" });
+    expect(rec.immediates[1]).toMatchObject({ state: "failed", cmdId: "cmd-0000000000000001" });
+    expect((rec.immediates[1] as { error?: string }).error).toBeDefined();
+  });
+
+  it("every check-failure path records NOTHING (effect none ⇒ no card)", async () => {
+    const rec = recRecorder();
+    const h = makeExec({ recorder: () => rec.recorder, reentry: "deferred" });
+    const w = await scene(h);
+    // source session changes between pick and exec ⇒ E_SESSION_CHANGED at the execution point
+    const { result } = await pickTarget(h, w);
+    expect(result.ok).toBe(true);
+    h.sessionId = "someone-else";
+    await runDeferredExec(h);
+    expect(rec.immediates).toHaveLength(0);
+    // and the reject itself went out late with retryable:false — an ERROR body carries no
+    // CmdData at all (pre-feature shape), so no history field: the UI's placeholder degrades
+    // via its own 60 s path (no card will ever appear for this call)
+    const late = h.lates.at(-1)!.result as { ok: boolean; code: string; retryable: boolean; data?: unknown };
+    expect(late.ok).toBe(false);
+    expect(late.code).toBe("E_SESSION_CHANGED");
+    expect(late.retryable).toBe(false);
+    expect(late.data).toBeUndefined();
+  });
+});

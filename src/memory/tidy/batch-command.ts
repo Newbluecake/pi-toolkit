@@ -48,7 +48,7 @@ import {
   type LeasePayload,
 } from "./lease.js";
 import { withMemoryDirLock } from "../lock.js";
-import { isWebInvocation } from "../../web-hub/agent/command-capture.js";
+import { isWebInvocation } from "../../commands/capture.js";
 import { showBoundedViewer } from "./ui/bounded-viewer.js";
 
 const DIALOG_MAX_MS = 600_000;

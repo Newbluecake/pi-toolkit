@@ -177,6 +177,73 @@ export function groupByProvider(items) {
   return groups;
 }
 
+/** localStorage key for the sort-mode preference (sibling of {@link SPAWN_MODELS_CACHE_KEY}). */
+export const MODEL_SORT_STORAGE_KEY = "pwh_model_sort";
+
+/**
+ * Provider sort-mode preference (2026-10 request: provider 标签 + 排序切换) — a pure
+ * browser display preference in the `pwh_spawn_models_cache` family: storage INJECTED so
+ * this module stays DOM-free (components pass `shell/themeStorage.ts`'s
+ * `browserLocalStorage()`; the source-scan localStorage rule never sees the identifier).
+ * Only the exact token `"provider"` selects provider grouping; absent/junk/unknown values
+ * (and a throwing/unavailable storage) all fall back to `"name"`.
+ * @param {unknown} raw @returns {"name" | "provider"}
+ */
+export function parseModelSort(raw) {
+  return raw === "provider" ? "provider" : "name";
+}
+
+/** Read the sort preference; every failure mode degrades to `"name"`. Never throws. */
+export function readModelSort(storage) {
+  if (storage === null || storage === undefined || typeof storage.getItem !== "function") return "name";
+  try {
+    return parseModelSort(storage.getItem(MODEL_SORT_STORAGE_KEY));
+  } catch {
+    return "name";
+  }
+}
+
+/** Persist the sort preference (normalized through {@link parseModelSort}); write failures
+ *  are swallowed — the in-memory choice still applies for this open panel. */
+export function writeModelSort(storage, mode) {
+  if (storage === null || storage === undefined || typeof storage.setItem !== "function") return;
+  try {
+    storage.setItem(MODEL_SORT_STORAGE_KEY, parseModelSort(mode));
+  } catch {
+    /* storage disabled/unavailable */
+  }
+}
+
+/** Natural (numeric-aware, case-insensitive) `en` collation — `gpt-5.10` sorts after
+ * `gpt-5.5`, matching the preview's comparator. */
+function natCmp(a, b) {
+  return a.localeCompare(b, "en", { numeric: true, sensitivity: "base" });
+}
+
+/** Id-first compare: natural id A→Z, exact-same-id rows tie-break by provider. */
+export function compareModelsById(a, b) {
+  return natCmp(a.id, b.id) || natCmp(a.provider, b.provider);
+}
+
+/** "名称" sort: fresh array sorted by id (natural A→Z; provider tie-break). Input untouched. */
+export function sortModelsById(items) {
+  return [...items].sort(compareModelsById);
+}
+
+/** "provider" sort input order: provider A→Z, then id within a provider. */
+export function sortModelsByProvider(items) {
+  return [...items].sort((a, b) => natCmp(a.provider, b.provider) || natCmp(a.id, b.id));
+}
+
+/** Id-sort WITHIN each group while keeping the group order itself (the `all` tab keeps its
+ * first-seen provider order; only the rows inside a group get the natural id order).
+ * @param {{ provider: string, items: ModelOption[] }[]} groups
+ * @returns {{ provider: string, items: ModelOption[] }[]}
+ */
+export function sortGroupedModels(groups) {
+  return groups.map((g) => ({ provider: g.provider, items: sortModelsById(g.items) }));
+}
+
 /**
  * §5.2's error-code → i18n leaf mapping (`control.*` namespace). Only the code is consulted
  * (#7: `cmd_late` carries no message); a bridge-provided message is an optional add-on the

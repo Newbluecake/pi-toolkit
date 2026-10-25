@@ -77,6 +77,10 @@ const SOURCE_BANNED: Array<[string, RegExp]> = [
 const SOURCE_BANNED_EXCEPT: Record<string, RegExp> = {
   "createObjectURL (banned — preview uses data: URLs; blob: would need CSP relaxed, D1/HP8)":
     /composables\/usePreviewDownload\.ts/,
+  // preview-perf plan §6.1 (PB): the perf probe page measures frame gaps and "open to first
+  // frame" with requestAnimationFrame — that is the measurement itself, not UI scheduling. It
+  // lives under csp-probe/ (never in the product bundle). Product code stays banned.
+  "requestAnimationFrame (banned — renderGate.ts owns scheduling, plan §3.5)": /csp-probe\/preview-perf\.ts/,
 };
 
 /** localStorage is only legitimate for the theme preference, the token-mode transport, and a

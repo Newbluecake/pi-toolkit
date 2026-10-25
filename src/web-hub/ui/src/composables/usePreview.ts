@@ -141,6 +141,11 @@ export type PreviewViewDir = PreviewView | PreviewDirPhase;
 export interface PreviewNavRef {
   readonly path: string;
   readonly dir?: true;
+  /** 2026-10-24 验收裁定 (ask-paths fix #1): `"ask"` marks a ref opened FROM the ask_user
+   * dialog/float — the windows manager puts such windows (and windows they in turn open) on
+   * the dedicated ask tier above the ask-float and avoids the float's rectangle at
+   * placement. Absent ⇒ the legacy tier, byte-identical behavior. */
+  readonly origin?: "ask";
 }
 
 /**

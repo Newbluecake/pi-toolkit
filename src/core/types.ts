@@ -5,7 +5,6 @@ export type Generation = number;
 export type TimerId = string;
 
 import type { CanMessage, WakeExclusion, WakeOrigin } from "./message.js";
-import type { ConsultCallFact, ConsultSummary } from "./consult-summary.js";
 import type { DispatchMeta } from "./dispatch-meta.js";
 import type { SchemaPresetId } from "./verdict-schema.js";
 
@@ -167,134 +166,23 @@ export interface AgentTypeConfig {
   canMessage?: CanMessage[];
 }
 /**
- * consult (docs/dev/consult/plan.md §4.3, frozen surface): one entry of the
- * expert whitelist a dispatcher attached to an `Agent({ experts: [...] })`
- * call, **already resolved at dispatch time** (hence trusted downstream).
- *
- * `label` is display-only — matching a model-supplied `expert` handle is done
- * on `runId` (labels are process-local, only ever written, and reset by
- * `/reload`, so the same label can legitimately point at two different runs
- * across reload generations; the dispatch-time resolver reports those as
- * ambiguous instead of guessing).
+ * Legacy consult sentinel agent type (#40). The consult tool is gone, but run entries written before the
+ * removal can still carry `agentType: "consult:main-snapshot"`; renderers fold it to `"main"` through
+ * `displayAgentType`. Nothing produces it any more.
  */
-export interface ConsultExpertRef {
-  runId: RunId;
-  /** Display only (fleet rows / tool echo); never a matching key. */
-  label?: string;
-  /** The expert's persisted session file — the fork source. */
-  sessionFile: string;
-  agentType: string;
-  model?: { provider: string; id: string };
-  /**
-   * consult (plan §16 "consult the main session"): "run" (the default when
-   * absent — every pre-§16 ref) is a real finished subagent; "main" is the
-   * reserved main-session ref built from `CONSULT_MAIN_EXPERT_ID`. For a
-   * "main" ref, `runId`/`label` are both the literal string "main" (there is
-   * no generated run id) and the consult tool skips the still-running
-   * re-check (the host session is always live) and treats a missing live
-   * model/context reading as a hard nack rather than silently skipping the
-   * cost pre-check (§16 rule 4). Additive field — every existing ref
-   * (`kind` absent) keeps its exact pre-§16 behavior.
-   */
-  kind?: "run" | "main";
-  /** Context usage (0-100) snapshotted at dispatch time; re-checked live at consult time. */
-  contextPercent?: number;
-  /** Context token count snapshotted at dispatch time (first-request cost pre-check); re-checked live. */
-  contextTokens?: number;
-  /** The expert was still running at dispatch time (consult must wait for its terminal state). */
-  pending?: boolean;
-  /**
-   * Display only: the expert's original task prompt, whitespace-collapsed and truncated
-   * (`summarizeExpertTask`), rendered into the asker's consult tool description so the asker
-   * knows what each expert covered without the dispatcher restating it.
-   */
-  task?: string;
-}
+export const LEGACY_CONSULT_MAIN_AGENT_TYPE = "consult:main-snapshot";
 
 /**
- * consult A/B instrumentation plan (§2, frozen): display-only per-expert
- * record folded into `RunDisplayMeta.experts.refs` / `RunDiagnostics.experts.refs`
- * at enqueue time (write once, read-only afterwards). Deliberately slimmer
- * than `ConsultExpertRef` — it drops the fork-admission fields
- * (`sessionFile`/`contextPercent`/`contextTokens`/`task`) that only matter
- * before the whitelist is resolved and never belong in a persisted diag.
- */
-export interface RunExpertRecord {
-  runId: RunId;
-  label?: string;
-  agentType: string;
-  kind?: "main";
-  pending?: true;
-}
-
-/**
- * consult A/B instrumentation plan (§2, review §8 ⚠️ item): the frozen 16-ref
- * cap on `RunDisplayMeta.experts.refs` / `RunDiagnostics.experts.refs`. The
- * real producer (P1b's runtime adapter, building this list from the
- * dispatch-time resolved `SpawnRequest.consultExperts` whitelist) is outside
- * `src/core/` by design — this is a defensive, pure re-application of the
- * same cap at every point core itself builds or copies an `experts` value
- * (the `enqueued` reducer branch in `state-machine.ts`, and the journal
- * projection in `run-journal.ts`), so an uncapped list handed in from
- * anywhere can never make it into a persisted diag/journal entry.
- */
-export const EXPERTS_REFS_CAP = 16;
-
-/** Pure cap helper (review §8 ⚠️ item): truncates to `EXPERTS_REFS_CAP`, keeping the first entries; always returns a fresh array. */
-export function capExpertRefs<T>(refs: readonly T[]): T[] {
-  return refs.length > EXPERTS_REFS_CAP ? refs.slice(0, EXPERTS_REFS_CAP) : [...refs];
-}
-
-/**
- * consult (plan §16 "consult the main session via the reserved expert id
- * 'main'"): reserved expert handle that ALWAYS names the host main session,
- * never a spawned run — it takes priority over any label a real run happens
- * to share (rule 2). A dispatcher must still list it explicitly in
- * `Agent({ experts: ["main", ...] })` to authorize the child it dispatches;
- * nothing else about the whitelist/authorization model changes (§4.2).
- */
-export const CONSULT_MAIN_EXPERT_ID = "main";
-
-/**
- * consult (plan §16): the sentinel `AgentTypeName` the fork-admission "no
- * type" branch in `spawn-service.ts` recognizes. `deps.types.get()` is
- * bypassed entirely (in favor of an in-memory `AgentTypeConfig`) only when
- * this exact name is paired with a `forkSessionFrom` request — without one,
- * dispatching this name fails exactly like any other unknown type, and the
- * bypass never touches (or shadows) a real registered type of the same
- * name. Deliberately distinct from `CONSULT_MAIN_EXPERT_ID`: a real expert
- * whose ORIGINAL agent type happens to be named "main" must still resolve
- * through the real registry when it is (normally) consulted — only refs
- * built for the reserved main-session handle ever carry this agentType.
- */
-export const CONSULT_MAIN_AGENT_TYPE = "consult:main-snapshot";
-
-/**
- * consult (plan §16.5, acceptance follow-up): the presentation-layer name for
- * a spawned run's agent type. A main-session consult run carries the sentinel
- * `CONSULT_MAIN_AGENT_TYPE` in its spec — spawn admission and the fork bypass
- * compare that RAW value and must keep seeing it — but renderers (fleet
- * widget/panel rows, `/agent` tables, progress lines) fold it back to the
- * reserved expert id `CONSULT_MAIN_EXPERT_ID` ("main") so the internal type
- * name never reaches a user-facing surface. Identity for every other type
- * name; `undefined` passes through untouched. Safe to apply repeatedly
- * ("main" is not the sentinel).
+ * Presentation-layer name for a run's agent type: folds the legacy consult sentinel
+ * (`LEGACY_CONSULT_MAIN_AGENT_TYPE`, only present on pre-removal run entries) to `"main"` so the internal
+ * name never reaches a user-facing surface. Identity for every other type name; `undefined` passes through
+ * untouched. Safe to apply repeatedly ("main" is not the sentinel).
  */
 export function displayAgentType(type: string): string;
 export function displayAgentType(type: string | undefined): string | undefined;
 export function displayAgentType(type: string | undefined): string | undefined {
-  return type === CONSULT_MAIN_AGENT_TYPE ? CONSULT_MAIN_EXPERT_ID : type;
+  return type === LEGACY_CONSULT_MAIN_AGENT_TYPE ? "main" : type;
 }
-
-/**
- * consult (plan §6 C-9, frozen surface): result of forking an expert's
- * persisted session. `forkExpertSession` **never throws** — every failure mode
- * of pi's `SessionManager.forkFrom` (empty/unparsable source, missing
- * `type:"session"` header, `flag:"wx"` collision, mkdir/write failure) is
- * folded into `{ ok: false, reason }` so the consult tool can nack instead of
- * throwing at a caller that did nothing wrong.
- */
-export type ForkExpertSessionResult = { ok: true; path: string } | { ok: false; reason: string };
 
 export interface InputBudget {
   maxInputTokens: number;
@@ -308,119 +196,6 @@ export interface DispatchMeasure {
   preTokens: number;
   payloadBytes?: number;
   payloadTokens?: number;
-}
-
-/** A pi tool declaration captured from an expert's last provider request. */
-export type ToolDeclaration = Record<string, unknown>;
-
-/** The immutable expert request facts used to construct a C2 consult session. */
-export interface ExpertRequestSnapshot {
-  tools: ToolDeclaration[];
-  systemSections: Record<string, string>;
-  model?: { provider: string; id: string };
-  thinkingLevel?: string;
-  sourceSessionId: string;
-  lastRequestUsage?: { input: number; cacheRead: number; cacheWrite: number };
-}
-
-/**
- * Narrow, per-session consult guard. It deliberately consists of methods and
- * is therefore not serializable; it is carried only on SessionSpec, never on
- * SpawnRequest or any persisted/journaled shape.
- */
-export type ConsultGuardPreflight = { ok: true } | { ok: false; code: string; detail?: string };
-
-export interface ConsultGuardCounters {
-  readonly calls: number;
-  readonly batches: number;
-  readonly terminated: boolean;
-  readonly identity: number;
-  readonly nested: number;
-  readonly costAfterUsd: number;
-}
-
-export interface ConsultGuard {
-  preflight(session: unknown): ConsultGuardPreflight;
-  install(session: unknown): void;
-  counters(): ConsultGuardCounters;
-}
-
-/** Record-only C2 identity comparison attached to a consult session handle. */
-export interface ConsultIdentityPrediction {
-  system?: boolean;
-  model?: boolean;
-  thinking?: boolean;
-  cwd?: boolean;
-  forcedPrompt?: boolean;
-}
-
-/** Trusted host-side anchor identity (consult cache/thread plan §3.2). Never persisted in diag. */
-export interface AnchorIdentity {
-  /** Expert history message count in the converted provider payload. */
-  k: number;
-  /** Anchor block index in messages[k - 1]. */
-  block: number;
-  blockType: "text" | "tool_use" | "tool_result" | "image";
-  /** sha256 of the anchor block without cache_control. */
-  blockHash: string;
-  /** sha256 of messages[0..k - 1] without cache_control. */
-  prefixHash: string;
-  systemHash: string;
-  toolsHash: string;
-  route: { provider: string; model: string; api: string };
-  /** Inherited breakpoint ttl; empty string means the default 5m. */
-  ttl: string | "";
-}
-
-/** Internal, per-consult handoff. Never serialized, inherited on resume, or appended to a child prompt. */
-export interface ConsultAnchorSpec {
-  /** Exact host-generated user message appended for this consult. */
-  prompt: string;
-  /** Original expert baseline, reused and revalidated for thread follow-ups. */
-  base?: AnchorIdentity;
-}
-
-/** Known skip reasons are shape/block/identity/limit; open for future diagnostic reasons. */
-export type ConsultAnchorStatus = "added" | "relocated" | "n/a" | `skipped:${string}`;
-
-/** Frozen first-request cache metric (§5.2); independent of the consult's execution outcome. */
-export interface ConsultCacheResult {
-  v: 1;
-  /** cacheRead / (cacheRead + cacheWrite + input); null when no usable first request exists. */
-  readShare: number | null;
-  /** hit >= 0.80; partial >= 0.20 and < 0.80; miss < 0.20; n/a for null. */
-  label: "hit" | "partial" | "miss" | "n/a";
-  anchor: ConsultAnchorStatus;
-  /** OAuth breakpoint limit or unverified M4 path: baseline hits are not promised. */
-  degraded?: true;
-}
-
-/** Pre-consult prediction, not a post-response cache result (§5.1). */
-export interface ConsultWarmPrediction {
-  state: "warm" | "cold" | "unknown";
-  reason?: string;
-  /** Identity/route matching stays in the ledger; persist only bounded, non-secret evidence facts. */
-  evidence?: {
-    source: "anchor-ledger" | "keepalive" | "expert-settle";
-    ttlMs: Millis;
-    /** Request START time of the last response-proven touch, never its completion time. */
-    lastProvenTouchAt?: Millis;
-    settledAt?: Millis;
-  };
-}
-
-/** Consult run's own dispatch-time thread association (R2-4), independent of the asker's FIFO. */
-export interface ConsultThreadRef {
-  threadId: string;
-  /** 1-based position in the thread. */
-  seq: number;
-}
-
-/** Consult run's own cache facts; prediction and first response are each written once (§5.3). */
-export interface ConsultCacheDiagnostics {
-  v: 1;
-  predicted: ConsultWarmPrediction;
-  first?: ConsultCacheResult & { at: Millis };
 }
 
 export interface SpawnRequest {
@@ -558,17 +333,6 @@ export interface SpawnRequest {
    *      (see ResolvedSpawnRequest.parentRunId below).
    */
   deadlineAt?: Millis;
-  /** C2 consult: immutable snapshot of the expert request used to build the consult session. */
-  consultSnapshot?: ExpertRequestSnapshot;
-  /** Adapter-only consult anchor handoff (NOT_THREADED); never part of child prompts or resume inheritance. */
-  consultAnchor?: ConsultAnchorSpec;
-  /**
-   * F7 (consult plan §4.3): expert whitelist already resolved at dispatch
-   * time by the Agent tool. The runtime adapter injects the `consult` tool
-   * into this run when the list is non-empty. Consumed by the adapter, never
-   * threaded verbatim into `ResolvedSpawnRequest`.
-   */
-  consultExperts?: ConsultExpertRef[];
   /**
    * consult A/B instrumentation plan (§3): optional analytics-only metadata
    * set by the Agent tool's `meta` param (top-level only, never nested — see
@@ -591,27 +355,13 @@ export interface SpawnRequest {
    */
   schemaPreset?: SchemaPresetId;
   /**
-   * consult-only (plan §4.3/§4.4): absolute path of the forked copy of an
-   * expert's session file. Produced exclusively inside the consult tool (by
-   * fork-store, right before the spawn) and mutually exclusive with
-   * `resumeFrom`. Spawn admission only validates existsSync + isFile and
-   * takes the fork branch (skips the canSpawn gate, writes no `canSpawn` into
-   * the nesting entry); the runner opens it through `driver.resume` and hands
-   * the same path back via `onReaped` once the run is physically reaped.
-   *
-   * Its presence is also the sole "this is a consult run" predicate used by
-   * the runtime adapter to force the read-only tool domain
-   * (`CONSULT_READONLY_TOOLS`).
-   */
-  forkSessionFrom?: string;
-  /**
    * L1 (agent-tool pool-full plan §1/§2): admission-time policy when this
    * (non-slotless) request would exceed the concurrency pool. `"reject"` —
    * fail admission immediately (no run, no worktree, no record) with a
    * self-explanatory config error; `"queue"` — the pre-L1 behavior (proceed
    * to the real SlotPool queue, bounded by `budget.queueWaitMs`). Undefined
    * (every caller except the top-level/nested Agent tool: workflow children,
-   * consult forks, /task, resume) is also "queue" — this field only ever
+   * /task, resume) is also "queue" — this field only ever
    * narrows admission, never widens it. Ignored entirely for `slotless`
    * requests, which never occupy a conceptual slot in the first place.
    */
@@ -621,7 +371,7 @@ export interface SpawnRequest {
    * non-slotless top-level/nested Agent-tool dispatch. `"reject"` — fail admission immediately
    * (no run, no label, no worktree) with a self-explanatory config error when the effective load
    * gate (§5.3) is active; absent — never load-gated at admission (every caller except the
-   * top-level/nested Agent tool: workflow children, consult forks, `/task`, `@mention`, RPC
+   * top-level/nested Agent tool: workflow children, `/task`, `@mention`, RPC
    * spawn, cron, resume — §6.3's entry matrix). Written ONLY by `createAgentTool`'s
    * `prepareSpawn` when `deps.loadGate?.()` is true; checked by `spawn-service.ts` AFTER the
    * quota gate and BEFORE nesting/runId/label (§6.2). Mutually independent of `poolFullPolicy`
@@ -630,19 +380,17 @@ export interface SpawnRequest {
   loadPolicy?: "reject";
   /**
    * P0-r (todo #22 memory optimize-plan §7.0/§7.0.0): request the runtime's
-   * forced read-only tool domain for this run — same enforcement point as a
-   * consult run (`forkSessionFrom`), reused so `/mem tidy`'s proposal-drafting
+   * forced read-only tool domain for this run, so `/mem tidy`'s proposal-drafting
    * subagent gets zero write-capable tools without a second mechanism.
-   * `readonlyDomain = isConsultRun || toolDomain === "readonly"`
-   * (runtime-adapter.ts). Threat model (§7.0.0): this defends against the
+   * `readonlyDomain = toolDomain === "readonly"` (runtime-adapter.ts). Threat model (§7.0.0): this defends against the
    * RUN'S OWN MODEL calling a write tool, not against a same-process
    * malicious extension — trusting same-process code is this package's
-   * existing trust boundary (see consult's identical premise). Only ever set
+   * existing trust boundary. Only ever set
    * by an in-process caller (the tidy port) that constructs its own
    * `SpawnRequest` field-by-field; the Agent tool / RPC spawn / workflow
    * `agent()` opts all reject or silently drop an unknown key, so a model
    * can never set this itself (N6). Mutually exclusive with `isolation` /
-   * `forkSessionFrom` / `resumeFrom` — spawn admission rejects the
+   * `resumeFrom` — spawn admission rejects the
    * combination as a config error (§7.0 point 4) since tidy never needs any
    * of them and combining them would be a latent misuse waiting to happen.
    */
@@ -676,37 +424,6 @@ export interface RunDisplayMeta {
   /** X1 (agent tree): set for `isolation:"worktree"` spawns as `{ state: "active" }`;
    *  beforeReap later replaces it with the disposal outcome via setWorktreeDisposition. */
   worktree?: WorktreeDisposition;
-  /**
-   * consult (consult plan §6 C-12): present iff this run is a consult run
-   * (spawned with `forkSessionFrom` by the consult tool). Carries the asking
-   * run's id — a display-only marker that lets the fleet row / status views
-   * badge the run without parsing the `consult-` label prefix (labels are
-   * display-only and user-visible, so prefixes are not a reliable signal).
-   */
-  consultOf?: { askerRunId?: RunId };
-  /** §5.3: prediction only at enqueue; the first-response slot is owned exclusively by the driver event. */
-  consultCache?: Pick<ConsultCacheDiagnostics, "v" | "predicted">;
-  /** R2-4: written once on this consult run, not reconstructed from the asker's probe ring. */
-  consultThread?: ConsultThreadRef;
-  /**
-   * consult A/B instrumentation plan (§2/§3, review §8 minor — fixed existence
-   * condition): present iff the run was DISPATCHED with a non-empty expert
-   * whitelist (`SpawnRequest.consultExperts` resolved non-empty at admission)
-   * — not "iff the tool was actually injected", which would make `granted:
-   * false` an impossible state instead of the real one it documents. `refs`
-   * mirrors that resolved whitelist (slimmed to `RunExpertRecord`, capped at
-   * `EXPERTS_REFS_CAP` — see `capExpertRefs`); `granted` is `true` iff the
-   * runtime adapter actually injected the `consult` tool (a non-readonly-
-   * domain, non-consult-fork run) and `false` when it was dispatched with
-   * experts but the tool was withheld (e.g. `consult.enabled=false`, or a
-   * readonly tool domain) — analysis must exclude `granted:false` runs from
-   * the "experts" arm (§2). Written exactly once at enqueue, never revised
-   * afterwards; absent on every run dispatched without an expert whitelist,
-   * and on any run persisted before this plan shipped (old entries may lack
-   * the field entirely — treat absence as "no experts", never as `granted:
-   * false`).
-   */
-  experts?: { refs: RunExpertRecord[]; granted: boolean };
   /**
    * consult A/B instrumentation plan (§3): mirrors `SpawnRequest.dispatchMeta`
    * verbatim, written exactly once at enqueue and never revised afterwards.
@@ -862,17 +579,15 @@ export type DriverEvent =
       usage?: UsageDelta;
       /**
        * X12: run ids whose lifetime spend rode into THIS run's X9 accumulator
-       * on this usage-bearing toolResult (nested Agent / get_subagent_result /
-       * consult). Extracted by the session driver from the pi message's
-       * `details` (runId / runIds / consultRunId); only present when the
+       * on this usage-bearing toolResult (nested Agent / get_subagent_result).
+       * Extracted by the session driver from the pi message's
+       * `details` (runId / runIds); only present when the
        * message carries usage (a background-spawn ack references a run whose
        * spend is NOT yet inside the parent). Cost consumers (usage broadcast,
        * /agent costs) use it to avoid double-counting the nested run.
        */
       absorbedRunIds?: readonly string[];
     }
-  /** §5.3: first assistant response paired with request usage. Diag-only, generation-checked, write-once. */
-  | { t: "consult_cache_first"; result: ConsultCacheResult }
   | { t: "context_usage"; usage: ContextUsageInfo }
   | { t: "tool_start"; toolCallId: string; toolName: string; argsPreview?: string }
   | {
@@ -880,13 +595,6 @@ export type DriverEvent =
       toolCallId: string;
       toolName: string;
       isError: boolean;
-      /**
-       * consult A/B instrumentation plan (§2/§5 P1b): present iff `toolName
-       * === "consult"` — the session driver's classification of this specific
-       * call (`classifyConsultToolEnd`, src/core/consult-summary.ts) of the
-       * raw pi tool result. Every other tool's `tool_end` never sets this.
-       */
-      consult?: ConsultCallFact;
     }
   | { t: "tool_update"; toolCallId: string }
   | { t: "retry_start"; attempt: number; maxAttempts: number; delayMs: Millis }
@@ -1001,9 +709,7 @@ export type DriverEvent =
    * src/child/activation-signal.ts): emitted synchronously by
    * `PiSessionDriver.bind()` when this run's child session never activated
    * pi-toolkit at all (the process-wide activation counter did not advance
-   * during the create/resume await window) — never emitted for a consult
-   * fork (its read-only tool domain makes the missing features moot, see
-   * `resume()`'s `isConsultFork` check). Diagnostic only, same best-effort
+   * during the create/resume await window). Diagnostic only, same best-effort
    * family as `context_usage`/`compaction_failed` above: accepted in every
    * state (see state-machine.ts's reduce()), no effect, `lastEventAt`/
    * `lastEventType` untouched.
@@ -1288,7 +994,7 @@ export interface RunDiagnostics {
   usage?: UsageDelta;
   /**
    * X12: bounded, deduped set of run ids whose lifetime spend was absorbed
-   * into `usage` via a usage-bearing toolResult (nested Agent / consult /
+   * into `usage` via a usage-bearing toolResult (nested Agent /
    * get_subagent_result fetches inside THIS run's session). Cost consumers use
    * it to skip those runs when summing per-run costs (usage broadcast's
    * `absorbed` flag, /agent costs Total). Monotone — ids are only ever added
@@ -1305,8 +1011,6 @@ export interface RunDiagnostics {
    *  `model_changed` after a set_model switch. Display-only; absent when the
    *  driver exposes no level and on runs persisted before this field shipped. */
   thinkingLevel?: string;
-  /** C2 M2: record-only comparison of a consult session against its expert snapshot. */
-  consultIdentityPrediction?: ConsultIdentityPrediction;
   label?: string;
   /** Display-only raw title (the Agent tool's un-sanitized description), kept only
    *  when it differs from `label`; the web fleet tree renders it as the row's main
@@ -1324,16 +1028,6 @@ export interface RunDiagnostics {
   /** M-A: lifetime per-tool-name counters — unaffected by toolHistory ring eviction. */
   toolCounts?: Record<string, number>;
   /**
-   * consult A/B instrumentation plan (§2/§3): mirrors `RunDisplayMeta.experts`
-   * (write-once at enqueue, read-only afterwards). Absent for every run
-   * dispatched without an expert whitelist, and on any run persisted before
-   * this plan shipped (old entries may lack the field entirely); see
-   * `RunDisplayMeta.experts`'s JSDoc for `granted`'s semantics and the
-   * `EXPERTS_REFS_CAP` cap on `refs`. Carried through the journal whitelist
-   * (`run-journal.ts`) so a restart-interrupted run and its resume both keep it.
-   */
-  experts?: { refs: RunExpertRecord[]; granted: boolean };
-  /**
    * consult A/B instrumentation plan (§3): mirrors `SpawnRequest.dispatchMeta`
    * verbatim (write-once at enqueue, read-only afterwards). Absent when the
    * dispatcher passed no `meta`, and on any run persisted before this plan
@@ -1349,33 +1043,6 @@ export interface RunDiagnostics {
    * through the journal whitelist.
    */
   schemaPreset?: SchemaPresetId;
-  /**
-   * Display-only consult marker mirrored from `RunDisplayMeta.consultOf`
-   * (write-once at enqueue). Present iff this run is a consult run; lets views
-   * badge it without parsing the `consult-` label prefix.
-   */
-  consultOf?: { askerRunId?: RunId };
-  /** §5.3: enqueue-time prediction + write-once first-response cache metric; absent when unused. */
-  consultCache?: ConsultCacheDiagnostics;
-  /** R2-4: this consult run's own immutable thread association. */
-  consultThread?: ConsultThreadRef;
-  /**
-   * consult A/B instrumentation plan (§5 P1a §2): per-run rollup of every
-   * `consult` tool call observed via `tool_end`'s `consult` fact (folded by
-   * `foldConsultCall`, computed strictly before `toolTrailPatch`'s
-   * `!toolHistory` early return so it is never skipped by ring eviction or a
-   * missing toolHistory — M1: even a `tool_end` the reducer otherwise treats
-   * as illegal still folds this diag-only patch). Absent when this run never
-   * called `consult` — the key itself must not appear (fields-absent-when-
-   * no-events is part of the "zero change when unused" contract), and on any
-   * run persisted before this plan shipped (old entries may lack it even if
-   * they did call consult — it is reconstructed from events, not backfilled).
-   * Mutated incrementally thereafter (NOT write-once, unlike the three fields
-   * above); read-only once the run reaches a terminal status. Invariant:
-   * `consults.calls <= (toolCounts.consult ?? 0)`. Carried through the
-   * journal whitelist.
-   */
-  consults?: ConsultSummary;
   stopRequestedAt?: Millis;
   stopCause?: StopCause;
   timeoutReason?: TimeoutReason;
@@ -1482,8 +1149,7 @@ export interface RunDiagnostics {
    * written otherwise — exactOptionalPropertyTypes) when this run's child
    * session never activated pi-toolkit at all — see
    * `src/child/activation-signal.ts` and the `child_extension_missing`
-   * DriverEvent above. Absent for every normal run, and never written for a
-   * consult fork (session-driver.ts's `resume()` skips the check for it).
+   * DriverEvent above. Absent for every normal run.
    * get_subagent_result surfaces it via `formatChildExtensionMissing`
    * (src/tools/result-text.ts); the runner also WARNs once per process
    * (dedup'd) the first time it observes the event.
@@ -1602,8 +1268,6 @@ export type RunInput =
        *  session_created time). Absent when the driver exposes none — old journals
        *  and runs without the field keep loading unchanged. */
       thinking?: string;
-      /** C2 M2: handle-side record-only identity comparison, when available. */
-      consultIdentityPrediction?: ConsultIdentityPrediction;
     }
   | {
       kind: "startup_failed";
@@ -1693,12 +1357,6 @@ export interface RunState {
  * the original SpawnRequest and the DeadlineBudget.
  */
 export interface SessionSpec {
-  /** Internal consult anchor handoff; only consult forks consume it. Never serialized or exposed to tools. */
-  consultAnchor?: ConsultAnchorSpec;
-  /** C2 consult guard; intentionally non-serializable and never threaded as a SpawnRequest field. */
-  consultGuard?: ConsultGuard;
-  /** Internal C2 handoff from the adapter to the driver; never serialized or exposed to tools. */
-  consultSnapshot?: ExpertRequestSnapshot;
   cwd?: string;
   agentDir?: string;
   model?: unknown;
@@ -1721,18 +1379,6 @@ export interface SessionSpec {
   persist?: boolean;
   /** Existing session file to open for X2 resume. */
   resumeFrom?: string;
-  /**
-   * todo #27 (child-extension-missing diagnostic, purely a read hint for
-   * `PiSessionDriver.resume()`): mirrors `SpawnRequest.forkSessionFrom`
-   * (already threaded through untyped, structurally, from
-   * `ResolvedSpawnRequest` — see runner.ts's `req.forkSessionFrom ??
-   * req.resumeFrom` call site) so `resume()` can type-safely recognize "this
-   * is a consult fork" and skip the child-extension-missing check for it
-   * (consult's read-only tool domain makes the features that check protects
-   * irrelevant). Never read for any other purpose here — the actual file to
-   * open is still `resume()`'s own `sessionFile` argument.
-   */
-  forkSessionFrom?: string;
   /**
    * Additional tool definitions to register for this session (pi's
    * `createAgentSession({ customTools })`, see 2.9). Typed `unknown[]` here

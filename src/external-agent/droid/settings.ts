@@ -129,12 +129,3 @@ export function mapThinkingToEffort(
   }
   return best ?? lowest;
 }
-
-/** 从目录里取模型的 effort 信息（目录可能不可用 ⇒ undefined）。 */
-export function effortInfoOf(
-  catalogModels: readonly { id: string; reasoningEfforts: readonly string[]; defaultEffort?: string }[] | undefined,
-  modelId: string,
-): { efforts: readonly string[] | undefined; defaultEffort: string | undefined } {
-  const info = catalogModels?.find((m) => m.id === modelId);
-  return { efforts: info?.reasoningEfforts, defaultEffort: info?.defaultEffort };
-}

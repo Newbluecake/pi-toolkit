@@ -78,8 +78,8 @@ describe("GraphPanel", () => {
       "src/web-hub/ui/src/components/detail/DetailHeader.vue",
     ]) {
       const source = readFileSync(resolve(file), "utf8");
-      expect(source).not.toMatch(/from [\"'][^\"']*@logic\/gitGraph(?:\.ts|\.js)[\"']/);
-      expect(source).not.toMatch(/import\([^)]*gitGraph(?:\.ts|\.js)/);
+      expect(source).not.toMatch(/from [\"'][^\"']*@logic\/gitGraph(?:Merged)?(?:\.ts|\.js)[\"']/);
+      expect(source).not.toMatch(/import\([^)]*gitGraph(?:Merged)?(?:\.ts|\.js)/);
     }
   });
 

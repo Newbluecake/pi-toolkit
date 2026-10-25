@@ -87,18 +87,6 @@ export interface ResolvedSpawnRequest extends SessionSpec {
    * `diag.wakeLevel` from it right after the `enqueued` dispatch (reducer input `wake_level`). Absent ⇒ wake off.
    */
   wakeLevel?: number;
-  /**
-   * consult (plan §4.3/§4.4): threaded verbatim from
-   * `SpawnRequest.forkSessionFrom`. The runner uses it for two things:
-   * ① session_create opens this file through `driver.resume` instead of
-   * creating a fresh session; ② after the run is physically reaped it is
-   * handed back to `RunnerDeps.onReaped(runId, forkSessionFrom)` so the fork
-   * copy can be deleted at the one point in time where nothing can write to
-   * it again. Declared here (rather than only in package B) because
-   * `service/request-threading.ts`'s Gate C requires every THREADED field to
-   * exist under the same name on this interface.
-   */
-  forkSessionFrom?: string;
   /** M-A: display-only spawn metadata (model/label/agent type) folded into diag at enqueue time for the presentation layer (fleet tree / Agent tool card). */
   displayMeta?: RunDisplayMeta;
   /** Dispatch-time input budget (consumed by the runner; never sent to pi). */
@@ -282,21 +270,17 @@ export interface RunnerDeps {
    */
   sealSession?: (runId: RunId, sessionId: string) => RunExitFacts | undefined;
   /**
-   * consult (plan §4.4, frozen surface) + bash-timeout-grace plan §3.2:
-   * physical-reclaim-completed hook. Called once per run after the
+   * bash-timeout-grace plan §3.2: physical-reclaim-completed hook. Called once per run after the
    * finally-block's `runReap()` finishes (beforeReap + reaper dispose
    * included, success or failure), and once more from each late-arrival path
-   * after `disposeLate`. `forkSessionFrom` is taken straight from
-   * `req.forkSessionFrom` (undefined for every non-consult run) — the
-   * deletion fact travels with the request, so no side registry (the v2
-   * pendingDeletions race) exists. `sessionId` (added by the
+   * after `disposeLate`. `sessionId` (added by the
    * bash-timeout-grace plan, §3.2) is the child session id observed at the
    * call site — `handle?.sessionId` on the normal reap path, `h.sessionId` on
    * both late-arrival paths — so a host-side listener can defensively seal a
    * session `sealBeforeTerminal` never reached (e.g. a late-arrival session
    * created outside the normal handle lifecycle); additive parameter,
-   * existing wiring that ignores the third argument is unaffected.
-   * `info.disposed` (consult cache-thread plan R2-1) is the seal proof: true
+   * existing wiring that ignores the second argument is unaffected.
+   * `info.disposed` is the seal proof: true
    * only when the session was positively disposed — the reaper reported
    * `disposed:true` with nothing unkillable, or a late-arrival session went
    * through `disposeLate`. A reap rejection / `disposed:false` / unkillable
@@ -305,7 +289,7 @@ export interface RunnerDeps {
    * Implementations must be idempotent, synchronous and non-throwing (a
    * throw is swallowed and only loses the cleanup).
    */
-  onReaped?: (runId: RunId, forkSessionFrom?: string, sessionId?: string, info?: { disposed: boolean }) => void;
+  onReaped?: (runId: RunId, sessionId?: string, info?: { disposed: boolean }) => void;
 }
 export interface Runner {
   run(req: ResolvedSpawnRequest, budget: DeadlineBudget): Promise<RunOutcome>;
@@ -870,12 +854,7 @@ export class RuntimeRunner implements Runner {
       ticket = acq.value.ticket;
       dispatch({ kind: "slot_acquired", at: this.d.clock.now() });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "session_create" });
-      // consult (plan §4.4): a fork copy is just "an existing session file" —
-      // open it through the same driver.resume seam as Agent({resume}); the
-      // driver is unchanged (cwd arrives via SpawnRequest.cwd, overriding the
-      // header cwd). forkSessionFrom is admitted mutually exclusive with
-      // resumeFrom upstream, and wins the ?? so the ordering is total anyway.
-      const openFile = req.forkSessionFrom ?? req.resumeFrom;
+      const openFile = req.resumeFrom;
       createP = openFile
         ? this.d.driver.resume
           ? this.d.driver.resume(openFile, req)
@@ -930,9 +909,6 @@ export class RuntimeRunner implements Runner {
         ...(handle.sessionFile === undefined ? {} : { sessionFile: handle.sessionFile }),
         ...(modelRef === undefined ? {} : { model: modelRef }),
         ...(thinking === undefined ? {} : { thinking }),
-        ...(handle.consultIdentityPrediction === undefined
-          ? {}
-          : { consultIdentityPrediction: handle.consultIdentityPrediction }),
       });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "extension_bind" });
       const bindBudget = remainingFor(budget.bindMs, this.d.clock.now(), state.deadlines);
@@ -953,8 +929,7 @@ export class RuntimeRunner implements Runner {
           if (e.t === "switch_selfcheck_failed" && selfcheckLatch === undefined) selfcheckLatch = e.reason;
           // todo #27: WARN once per process (this RuntimeRunner instance's lifetime, i.e. until
           // the next /reload rebuilds a fresh one) the first time any spawned child session
-          // reports it never activated pi-toolkit at all — never for a consult fork (session-
-          // driver.ts's resume() never emits the event for one).
+          // reports it never activated pi-toolkit at all.
           if (e.t === "child_extension_missing" && !this.warnedChildExtensionMissing) {
             this.warnedChildExtensionMissing = true;
             console.warn(`[pi-subagent] ${CHILD_EXTENSION_MISSING_WARNING}`);
@@ -1271,7 +1246,7 @@ export class RuntimeRunner implements Runner {
       this.endObservers(req.runId, gen, state.status);
     }
   }
-  /** consult (§4.4): post-reap cleanup seam. Swallows everything — a cleanup callback must never affect the runner. */
+  /** Post-reap cleanup seam. Swallows everything — a cleanup callback must never affect the runner. */
   private notifyReaped(
     req: ResolvedSpawnRequest,
     sessionId?: string,
@@ -1281,7 +1256,7 @@ export class RuntimeRunner implements Runner {
     // run-persistence plan D8: release this run's live child-session mark.
     if (liveSessionFile !== undefined) releaseLiveSessionFile(liveSessionFile, req.runId);
     try {
-      this.d.onReaped?.(req.runId, req.forkSessionFrom, sessionId, { disposed });
+      this.d.onReaped?.(req.runId, sessionId, { disposed });
     } catch {
       /* 清理回调不得影响 runner */
     }

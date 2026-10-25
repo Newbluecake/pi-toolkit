@@ -39,6 +39,7 @@ import {
   protoCompatible,
 } from "../protocol/version.js";
 import type { FsbReqFrame, FsbResFrame } from "../protocol/feishu.js";
+import type { SchedAgentFrame } from "../protocol/schedule.js";
 import { xsFrameBytesOk } from "../protocol/xs.js";
 import type { XsRouter } from "./xs/router.js";
 import type { AdminHandler } from "./admin.js";
@@ -85,6 +86,13 @@ export function createAgentServer(
      * never this file's per-frame logging); absent ⇒ they fall through to the registry exactly
      * as before (ignored). */
     xs?: XsRouter;
+    /** scheduled-reports plan r3 §10.1 (H1): the hub's schedule coordinator, present ONLY when
+     * `HubConfig.schedule` exists. The three `sched_*` agent frames route here BEFORE the
+     * registry (same posture as `fsb_req`/`xs_req` — never the registry record path, the bus,
+     * or the normal per-frame handling); absent ⇒ the frames are still swallowed early and
+     * never reach the registry (unreachable in the real assembly — the `sched.v1` cap is only
+     * declared when a coordinator exists). */
+    schedule?: { onAgentFrame(agentKey: string, frame: SchedAgentFrame): void };
   },
 ): AgentServer {
   const { registry, config, log, now } = deps;
@@ -246,6 +254,16 @@ export function createAgentServer(
       // fabric phase-2 X1: xs requests never enter the registry/bus (the router replies itself).
       if (frame.t === "xs_req" && deps.xs !== undefined) {
         deps.xs.handle(agentKey, frame, write);
+        return;
+      }
+      // scheduled-reports H1 (§10.1): sched_* frames never enter the registry/bus — they go to
+      // the coordinator (targeted rescan for `sched_changed`; `sched_bound` is tapped into the
+      // bot's event stream and `sched_run_ack` resolves a run() waiter). The frames exist only
+      // under the `sched.v1` cap, which hub.ts declares iff a coordinator was built — with
+      // `deps.schedule` absent the intercept still swallows them early (unreachable in the real
+      // assembly; keeps the registry path free of schedule knowledge either way).
+      if (frame.t === "sched_changed" || frame.t === "sched_bound" || frame.t === "sched_run_ack") {
+        deps.schedule?.onAgentFrame(agentKey, frame);
         return;
       }
       if (frame.t === "tfa_req") {

@@ -727,3 +727,107 @@ describe("F8 LAN security wiring (§4.3)", () => {
     expect(sentContent(r)).not.toContain("密码已修改");
   });
 });
+
+describe("feishu-xs-mirror service wiring", () => {
+  const mirrorEv = (n: string, text = "mirror body") => ({
+    sessionId: "session-1",
+    agentKey: "agent-1",
+    xid: `x${n}`,
+    kind: "message" as const,
+    from: { ref: "019abc", name: "peer" },
+    text,
+  });
+  const cardsOut = (r: Awaited<ReturnType<typeof f8Rig>>) =>
+    r.fake.sent.filter((s) => String(s.body["content"]).includes("跨会话来信"));
+
+  it("xsMirror absent/false ⇒ inert; true ⇒ one card to the bound p2p chat", async () => {
+    const off = await rig({}, { xsMirror: false });
+    await off.bind();
+    off.service.xsMirror(mirrorEv("1"));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(cardsOut(off)).toHaveLength(0);
+    const unset = await rig();
+    await unset.bind();
+    unset.service.xsMirror(mirrorEv("1"));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(cardsOut(unset)).toHaveLength(0);
+
+    const on = await rig({}, { xsMirror: true });
+    await on.bind();
+    on.service.xsMirror(mirrorEv("1"));
+    await eventually(() => expect(cardsOut(on)).toHaveLength(1));
+    const c = String(cardsOut(on)[0]!.body["content"]);
+    expect(c).toContain("mirror body");
+    expect(c).not.toContain('"button"');
+    expect(c).toContain("http://localhost:7777/#/agent/agent-1");
+  });
+  it("group bindings are never mirrored; unbound sessions are silent", async () => {
+    const r = await rig({}, { xsMirror: true });
+    await r.bind({ chatType: "group", threadId: "thread-1", mentions: true });
+    r.service.xsMirror(mirrorEv("1"));
+    r.service.xsMirror({ ...mirrorEv("2"), sessionId: "nobody" });
+    await new Promise((res) => setTimeout(res, 300));
+    expect(cardsOut(r)).toHaveLength(0);
+  });
+  it("after stop (no runtime) xsMirror is a silent no-op", async () => {
+    const r = await rig({}, { xsMirror: true });
+    await r.bind();
+    await r.service.stop();
+    const n = r.fake.sent.length;
+    expect(() => r.service.xsMirror(mirrorEv("1"))).not.toThrow();
+    await new Promise((res) => setTimeout(res, 200));
+    expect(r.fake.sent.length).toBe(n);
+  });
+  it("mirror counters land in snapshot().counters.dropped (rate)", async () => {
+    const r = await rig({}, { xsMirror: true });
+    await r.bind();
+    for (let i = 0; i < 8; i++) r.service.xsMirror(mirrorEv(`c${i}`));
+    await eventually(() => expect(r.service.snapshot().counters.dropped["xs-mirror-rate"]).toBe(2));
+  });
+  it("restart with xsMirror:false purges queued xsm: notices only; true keeps them", async () => {
+    // run 1: sends fail with a retryable 429 so mirror notices stay queued on disk
+    const first = await f8Rig({}, { xsMirror: true });
+    first.fake.on("POST", /\/open-apis\/im\/v1\/messages$/, (call) =>
+      call.json && JSON.stringify(call.json).includes("跨会话来信")
+        ? { status: 429, json: { code: 99991400, msg: "rate" } }
+        : undefined,
+    );
+    await first.ready();
+    await first.bind();
+    first.service.xsMirror(mirrorEv("p1"));
+    first.service.xsMirror(mirrorEv("p2"));
+    await eventually(async () => {
+      const parts = Object.values((await first.disk())["outbox"] ?? {}) as { requestId?: string }[];
+      expect(parts.filter((p) => p.requestId?.startsWith("xsm:")).length).toBe(2);
+    });
+    const dir = first.stateDir;
+    await first.service.dispose();
+    // keep: xsMirror true
+    const keep = await f8Rig({ stateDir: dir }, { xsMirror: true });
+    keep.fake.on("POST", /\/open-apis\/im\/v1\/messages$/, (call) =>
+      JSON.stringify(call.json ?? "").includes("跨会话来信")
+        ? { status: 429, json: { code: 99991400, msg: "rate" } }
+        : undefined,
+    );
+    cleanups.push(async () => {
+      await keep.close(false);
+    });
+    await keep.ready();
+    const kept = Object.values((await keep.disk())["outbox"] ?? {}) as { requestId?: string }[];
+    expect(kept.filter((p) => p.requestId?.startsWith("xsm:")).length).toBe(2);
+    await keep.service.dispose();
+    // purge: xsMirror false
+    const purge = await f8Rig({ stateDir: dir }, { xsMirror: false });
+    cleanups.push(async () => {
+      await purge.close(true);
+    });
+    await purge.ready();
+    await eventually(async () => {
+      const left = Object.values((await purge.disk())["outbox"] ?? {}) as { requestId?: string }[];
+      expect(left.filter((p) => p.requestId?.startsWith("xsm:"))).toHaveLength(0);
+    });
+    expect(purge.service.snapshot().counters.dropped["xs-mirror-purged"]).toBe(2);
+    await new Promise((res) => setTimeout(res, 300));
+    expect(cardsOut(purge)).toHaveLength(0);
+  });
+});

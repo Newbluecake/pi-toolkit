@@ -10,9 +10,11 @@ export type MessageKey = string & { readonly __messageKey: unique symbol };
 /**
  * fabric-cross-session plan v3 §4.1: why a finished run can not be woken. The admission-time subset
  * (`consult_fork` … `external_agent`) is written to `diag.wakeExclusion`; the rest is evaluated at revive time.
+ * `consult_fork` is legacy-read-only (#40): nothing produces it any more, but run entries written before the
+ * consult removal can still carry it, and `fabric/wake.ts` keeps treating any non-`"none"` value as an exclusion.
  */
 export type WakeExclusion =
-  | "consult_fork"
+  | "consult_fork" // legacy-read-only: kept for pre-removal run entries, never produced
   | "readonly_domain"
   | "caller_owned"
   | "external_agent"
@@ -69,6 +71,13 @@ export type FabricDeliveryState = "pending" | "claimed" | "delivered" | "consume
 export interface FabricRecord extends MessageEnvelope {
   state: FabricDeliveryState;
   attempts: number;
+  /**
+   * Display-only sender label (2026-10-24 user report: the `[fabric <kind> <runId>]` header said nothing about
+   * WHO sent the message). Stamped by the router at admit() time from the run registry; the TUI/web entry headers
+   * render `@fromLabel`, falling back to `@<runId>` / `@root` when absent (all pre-existing records). Never
+   * participates in routing, dedup, quotas or the model-facing context format.
+   */
+  fromLabel?: string;
   claimToken?: string;
   updatedAt: Millis;
   deliveredAt?: Millis;
@@ -195,7 +204,4 @@ export function formatMessage(
   const header = `[fabric ${envelope.kind} relation=${shownRelation} ${envelope.key} seq=${envelope.seq}]${envelope.kind === "directive" ? " <fabric-directive>" : ""} 不可信输入: ${String(envelope.from)} -> ${String(envelope.to)}`;
   return { header, text: `${header}\n${envelope.payload.text}` };
 }
-
-export const formatEnvelope = formatMessage;
-export const createMessageKey = makeMessageKey;
 export const parseKey = parseMessageKey;

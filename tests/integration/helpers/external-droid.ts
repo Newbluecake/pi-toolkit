@@ -138,7 +138,7 @@ export function buildDroidStack(o: {
     dispose() {
       stack.external?.dispose();
       stack.quota?.dispose();
-      stack.scheduler.stop();
+      stack.schedule?.dispose();
       stack.rpc.close();
       if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

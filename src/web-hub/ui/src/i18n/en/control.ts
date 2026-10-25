@@ -156,6 +156,12 @@ const control = {
     "Output too long — {entries} entr(y/ies) / {kib} KiB dropped; see the terminal for the full output.",
   "cmdOutput.clipped": "…",
 
+  // --- command history slim dock notes (cmd-history plan v2 §4.7; historyMode replaces the
+  // CommandResult card with transcript records + these) ---
+  cmdHistoryExecuted: "Ran /{name}",
+  cmdHistoryDeferred: "Result not recorded yet (may still be queued or was interrupted)",
+  cmdHistoryDismiss: "Dismiss",
+
   // --- read-only dock reasons (§7.4 DetailDock) ---
   dockReadonlyHub: "This hub is read-only",
   dockReadonlyAgent: "This pi's pi-toolkit doesn't support web control — update and /reload",
@@ -184,6 +190,11 @@ const control = {
   modelSearch: "Search models",
   modelTabScoped: "scoped",
   modelTabAll: "all",
+  // Sort toggle (2026-10): label prose translates; the "provider" segment stays an English
+  // token in both languages (AGENTS.md UI-text split — it names the wire field).
+  modelSort: "Sort",
+  modelSortName: "Name",
+  modelSortProvider: "provider",
   modelCurrentBadge: "current",
   modelEmpty: "No models with credentials",
   modelNoMatch: "No matching model",

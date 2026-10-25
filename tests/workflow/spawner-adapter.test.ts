@@ -112,56 +112,6 @@ describe("createWorkflowChildSpawner: model/thinking override forwarding", () =>
   });
 });
 
-describe("createWorkflowChildSpawner: workflow-experts (§4.8)", () => {
-  it("forwards consultExperts verbatim to SpawnService.spawn when present, and omits the key entirely when absent", async () => {
-    const { service, requests } = fakeSpawnService();
-    const adapter = createWorkflowChildSpawner(service, fakeTypes());
-    const refs = [{ runId: "r1", sessionFile: "/tmp/r1.jsonl", agentType: "gp" }];
-    await adapter.spawn({ type: "general", prompt: "p", consultExperts: refs });
-    await adapter.spawn({ type: "general", prompt: "p2" });
-    expect(requests[0]).toMatchObject({ consultExperts: refs });
-    expect(requests[1]).not.toHaveProperty("consultExperts");
-  });
-
-  it("omits consultExperts when the array is empty (never sends an empty whitelist)", async () => {
-    const { service, requests } = fakeSpawnService();
-    const adapter = createWorkflowChildSpawner(service, fakeTypes());
-    await adapter.spawn({ type: "general", prompt: "p", consultExperts: [] });
-    expect(requests[0]).not.toHaveProperty("consultExperts");
-  });
-
-  it("resolveExperts is absent from the ChildSpawner when no option was supplied", () => {
-    const { service } = fakeSpawnService();
-    const adapter = createWorkflowChildSpawner(service, fakeTypes());
-    expect(adapter.resolveExperts).toBeUndefined();
-  });
-
-  it("resolveExperts always calls the injected resolver with { completedOnly: true } fixed (D8), regardless of caller intent", () => {
-    const { service } = fakeSpawnService();
-    const injected = vi.fn(() => ({ refs: [] }));
-    const adapter = createWorkflowChildSpawner(service, fakeTypes(), { resolveExperts: injected });
-    adapter.resolveExperts!(["dev"]);
-    expect(injected).toHaveBeenCalledWith(["dev"], { completedOnly: true });
-  });
-
-  it("a throwing injected resolver is caught and turned into { error } (D17 belt-and-braces)", () => {
-    const { service } = fakeSpawnService();
-    const injected = vi.fn(() => {
-      throw new Error("consult exploded");
-    });
-    const adapter = createWorkflowChildSpawner(service, fakeTypes(), { resolveExperts: injected });
-    expect(adapter.resolveExperts!(["dev"])).toEqual({ error: { message: "consult exploded" } });
-  });
-
-  it("a successful injected resolver's refs/error pass through verbatim", () => {
-    const { service } = fakeSpawnService();
-    const refs = [{ runId: "r1", sessionFile: "/tmp/r1.jsonl", agentType: "gp" }];
-    const injected = vi.fn(() => ({ refs }));
-    const adapter = createWorkflowChildSpawner(service, fakeTypes(), { resolveExperts: injected });
-    expect(adapter.resolveExperts!(["dev"])).toEqual({ refs });
-  });
-});
-
 describe("createWorkflowChildSpawner: workflow-worktree (D1/D2/D5)", () => {
   it('forwards isolation:"worktree" verbatim to SpawnService.spawn, and omits the key entirely when absent', async () => {
     const { service, requests } = fakeSpawnService();

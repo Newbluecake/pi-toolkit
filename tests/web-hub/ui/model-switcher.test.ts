@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import ModelSwitcher from "../../../src/web-hub/ui/src/components/control/ModelSwitcher.vue";
 import { clampPopoverX } from "../../../src/web-hub/ui/src/composables/usePopoverClamp.js";
 import { CONTROL_VIEW, type ControlView } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
+import { MODEL_SORT_STORAGE_KEY } from "../../../src/web-hub/ui/src/logic/models.js";
 import type { AgentState, CmdOutcome, ControlHandle } from "../../../src/web-hub/ui/src/types.js";
 
 /**
@@ -29,6 +30,7 @@ const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
   vi.useRealTimers();
   for (const w of mounted.splice(0)) w.unmount();
+  window.localStorage.removeItem(MODEL_SORT_STORAGE_KEY); // sort pref leaks across tests otherwise
 });
 
 const ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
@@ -287,6 +289,105 @@ describe("ModelSwitcher.vue — panel content (§5.1, A2)", () => {
     document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".model-panel").exists()).toBe(false);
+  });
+});
+
+/** 2026-10 (provider 标签 + 排序) multi-item session: 3 scoped models across 2 providers
+ * (registry order deliberately NOT id order) + the non-scoped current model. */
+const MULTI_MODELS = {
+  ...V1_MODELS,
+  items: [
+    { provider: "zai", id: "glm-4", name: "GLM 4", scoped: true },
+    { provider: "deepseek", id: "ds-10", scoped: true, ctx: 262144, reasoning: true },
+    { provider: "zai", id: "glm-2", scoped: true },
+    { provider: "openai", id: "gpt-5", ctx: 400000, reasoning: true },
+  ],
+};
+
+describe("ModelSwitcher.vue — provider chip + sort toggle (2026-10 方案 A)", () => {
+  it("name sort (default): scoped rows id-sorted A→Z, each carrying the provider chip BEFORE ctx/R", async () => {
+    const { control } = fakeControl();
+    const { wrapper } = mountSwitcher(control, { session: sessionWith(MULTI_MODELS) });
+    await wrapper.find("button.model-chip").trigger("click");
+    expect(wrapper.find(".model-sort-row").exists()).toBe(true); // scoped tab shows the toggle
+    const rows = wrapper.findAll(".model-row");
+    expect(rows.map((r) => r.find(".row-id").text())).toEqual(["ds-10", "glm-2", "glm-4"]); // natural order
+    const chips = rows.map((r) => r.find(".model-prov"));
+    expect(chips.every((c) => c.exists())).toBe(true);
+    expect(chips.map((c) => c.text())).toEqual(["deepseek", "zai", "zai"]);
+    // 方案 A position pin: the chip is the FIRST child of the badges area, ahead of ctx/R
+    const badges = rows[0]!.find(".row-badges").element;
+    expect(badges.children[0]!.classList.contains("model-prov")).toBe(true);
+    expect(badges.children[1]!.classList.contains("model-badge")).toBe(true); // 262k
+    expect(badges.children[2]!.classList.contains("model-badge-reasoning")).toBe(true); // R
+    expect(wrapper.find(".model-group").exists()).toBe(false); // flat view, no group headers
+  });
+
+  it("provider sort: sticky provider groups A→Z, no per-row chip; the choice persists and reloads", async () => {
+    const { control } = fakeControl();
+    const { wrapper } = mountSwitcher(control, { session: sessionWith(MULTI_MODELS) });
+    await wrapper.find("button.model-chip").trigger("click");
+    const seg = wrapper.findAll(".model-sort-seg button");
+    expect(seg.map((b) => b.text())).toEqual(["Name", "provider"]);
+    expect(seg[0]!.attributes("aria-pressed")).toBe("true");
+    expect(seg[1]!.attributes("aria-pressed")).toBe("false");
+    await seg[1]!.trigger("click");
+    expect(seg[1]!.attributes("aria-pressed")).toBe("true");
+    expect(wrapper.findAll(".model-group").map((g) => g.text())).toEqual(["deepseek", "zai"]); // A→Z
+    expect(wrapper.find(".model-prov").exists()).toBe(false); // grouped ⇒ header carries it, no chip
+    expect(wrapper.findAll(".model-row").map((r) => r.find(".row-id").text())).toEqual(["ds-10", "glm-2", "glm-4"]);
+    expect(window.localStorage.getItem(MODEL_SORT_STORAGE_KEY)).toBe("provider");
+    // a FRESH mount (same browser) opens straight into the persisted provider sort
+    const again = mountSwitcher(control, { session: sessionWith(MULTI_MODELS) });
+    await again.wrapper.find("button.model-chip").trigger("click");
+    expect(again.wrapper.findAll(".model-group").map((g) => g.text())).toEqual(["deepseek", "zai"]);
+  });
+
+  it("corrupt stored value falls back to name; all tab hides the toggle, keeps first-seen groups, id-sorts within", async () => {
+    window.localStorage.setItem(MODEL_SORT_STORAGE_KEY, "garbage");
+    const { control } = fakeControl();
+    const { wrapper } = mountSwitcher(control, { session: sessionWith(MULTI_MODELS) });
+    await wrapper.find("button.model-chip").trigger("click");
+    expect(wrapper.findAll(".model-sort-seg button")[0]!.attributes("aria-pressed")).toBe("true");
+    expect(wrapper.find(".model-group").exists()).toBe(false); // fell back to the name sort
+    // all tab: ALWAYS grouped (registry first-seen order), the toggle is hidden there
+    await wrapper.findAll(".model-tabs button")[1]!.trigger("click");
+    expect(wrapper.find(".model-sort-row").exists()).toBe(false);
+    expect(wrapper.findAll(".model-group").map((g) => g.text())).toEqual(["zai", "deepseek", "openai"]);
+    expect(wrapper.findAll(".model-row").map((r) => r.find(".row-id").text())).toEqual([
+      "glm-2",
+      "glm-4",
+      "ds-10",
+      "gpt-5",
+    ]);
+    expect(wrapper.find(".model-prov").exists()).toBe(false);
+  });
+
+  it("provider sort: ↑↓/Enter walk the GROUPED display order (aria-activedescendant follows)", async () => {
+    window.localStorage.setItem(MODEL_SORT_STORAGE_KEY, "provider");
+    const { control, calls } = fakeControl(() => ({ ok: true, data: { completion: "sync" } }));
+    const { wrapper } = mountSwitcher(control, { session: sessionWith(MULTI_MODELS) });
+    await wrapper.find("button.model-chip").trigger("click");
+    const search = wrapper.find(".model-search");
+    await search.trigger("keydown", { key: "ArrowDown" }); // ds-10 (deepseek group)
+    await search.trigger("keydown", { key: "ArrowDown" }); // glm-2 (first zai row — across the group hop)
+    const active = wrapper.findAll(".model-row")[1]!;
+    expect(active.find(".row-id").text()).toBe("glm-2");
+    expect(active.classes()).toContain("active");
+    expect(search.attributes("aria-activedescendant")).toBe(active.attributes("id"));
+    await search.trigger("keydown", { key: "Enter" });
+    const runs = calls.filter((c) => c.method === "runCommand");
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.args[2]).toBe("zai/glm-2");
+  });
+
+  it("search keeps the sort and the chips (filter, then order)", async () => {
+    const { control } = fakeControl();
+    const { wrapper } = mountSwitcher(control, { session: sessionWith(MULTI_MODELS) });
+    await wrapper.find("button.model-chip").trigger("click");
+    await wrapper.find(".model-search").setValue("GLM");
+    expect(wrapper.findAll(".model-row").map((r) => r.find(".row-id").text())).toEqual(["glm-2", "glm-4"]);
+    expect(wrapper.findAll(".model-prov").map((c) => c.text())).toEqual(["zai", "zai"]);
   });
 });
 

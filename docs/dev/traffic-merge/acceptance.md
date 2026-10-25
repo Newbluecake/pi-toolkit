@@ -1,0 +1,156 @@
+# traffic 合并 · 真机验收清单（T7；plan r3 §11 V1–V13 + 各报告观察点）
+
+对应施工方案：`docs/dev/traffic-merge/plan.md`（r3）§11；行为以 T1–T7 各报告为准（`T{1,2a,2b,3,4,5,6}-report.md`）。
+每条给出**操作 → 预期 → 取证方式**。集成 / conformance 测试（`tests/traffic/**`、`tests/integration/traffic-lifecycle-process.test.ts`、`tests/conformance/traffic{,-coexist}.test.ts`）已覆盖服务端语义；本清单验的是**真机端到端的人感**（TUI、网页、子 agent、锁竞争、进程收尾），两者互补。
+
+## 通用前置
+
+- 本机 `pi`（装了本仓库 dev 分支）+ Node ≥22.13（录制需要 `node:sqlite`；低版本只 `/record` 报本功能错误，其余功能不受影响）。
+- 库路径固定：`~/.pi/agent/records/traffic.db`（`-wal`/`-shm` 同目录）；历史 / 规则 / 计数与独立插件同库沿用。
+- 网页默认 `http://127.0.0.1:4177/`（被占用自增，最多 20 次）；token 在页面 `<meta name="record-token">`，`/api/*` 一律要 token。
+- 常用取证：`/record status`（归属 / 墓碑 / 写入 / checkpoint / 改写暂停各行的计数都在里面）、HUD 状态键（录制中 `rec`、有丢弃 `rec·drop N`）、`sqlite3 ~/.pi/agent/records/traffic.db "…"`、`ss -ltnp | grep -E '417[0-9]'`、pi stderr（`[pi-subagent]` 前缀）。
+- 性能门是**独立**跑的：`npm run test:traffic-gate`（= `PI_TRAFFIC_PERF_GATE=1 vitest run tests/traffic/db-contention.test.ts`，≈17s）。常规套件 / CI 只做功能断言，计时数字照常打印但不断言；≤10ms / ≤80ms / ≤5s 门槛以独立运行 + 本清单 V11（含真机 IO 负载）为准，**V11 复现超限 ⇒ 启动 T2c worker 分支**（plan §3.2）。
+- 建议先跑一遍 `npm run test:traffic-gate` 与 `npx vitest run tests/traffic tests/integration/traffic-lifecycle-process.test.ts`（≈18s）确认基线绿，再开始真机项。
+- 记录格式：每条 V 记 通过/不通过 + 日期 / 机器 / Node 版本 / 关键数字（计数、耗时、WAL 大小）。
+
+---
+
+## V1 未开启时零面
+
+| 项   | 内容                                                                                                                                                                      |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 操作 | 不设 `traffic.enabled`（settings 无 `traffic` 段），正常使用 pi：TUI 起一个会话、跑一个子 agent、`pi -p hi` 各一次。                                                      |
+| 预期 | 无 `/record` 命令；`~/.pi/agent/records/` 目录 mtime 不变（不建库不建目录）；`pi -p hi` 正常退出；stderr 无 `SQLite` / `ExperimentalWarning` 字样（node:sqlite 不加载）。 |
+| 取证 | ① `/record` 补全不存在（或执行报 unknown command）；② `stat ~/.pi/agent/records` 前后 mtime 一致；③ `pi -p hi` 退出码 0，stderr 无 SQLite 字样。                          |
+
+## V2 与外部 pi-traffic-record 共存（认领协议，两种顺序）
+
+> 本机现状：`~/.pi/agent/settings.json` 的 packages 仍装着外部 `../../ai/pi-traffic-record`（v0.2.x）——本条前半正好可复现（T3-report §3）。
+
+| 项   | 内容                                                                                                                                                                                                                                                                                                   |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 操作 | ① `traffic.enabled=true` 且**保留外部包 v0.2.1**，重启 pi 起主会话并发一条真实请求；② 把外部包换成墓碑版 v0.3.0（认领协议侧）重复；③ 两种加载顺序各验一次（toolkit 先 / 外部先由 packages 数组顺序控制）。                                                                                             |
+| 预期 | ① 外部旧版实际加载 ⇒ toolkit 让位：session_start 出现一次「pi-traffic-record 已在运行，toolkit traffic 让位；请从 settings.json 移除后重启」提示，`/record` 只回复让位说明，零行落库；只有外部录制器写库。 ② 墓碑版 ⇒ 外部让位（零注册零命令），toolkit 活动录制。③ 任何组合活动录制器恰为 1，无双写。 |
+| 取证 | ① session_start 的 notify（终端肉眼 + 截图）；② 对比两边 `/record status`（或外部版 status）的行数增量：只有一方 +N；③ `pi -p hi` 后 `SELECT COUNT(*) FROM requests` 前后差值归属唯一。                                                                                                                |
+
+## V3 移除外部包后无缝接管
+
+| 项   | 内容                                                                                                                                                          |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 操作 | 记下外部版的行数 / 规则 / 引擎设置 → 按 README「从独立 pi-traffic-record 迁移」移除 packages 条目并重启 pi → `/record status`。                               |
+| 预期 | `/record` 恰一个；计数与迁移前一致；历史可浏览；改写规则仍在；库、规则、引擎设置在 DB 中自动沿用。                                                            |
+| 取证 | ① 迁移前后 `SELECT COUNT(*) FROM requests` / `rewrite_rules` / `rewrite_settings` 一致；② 网页历史列表与规则页可见旧数据；③ `/record status` 的累计计数衔接。 |
+
+## V4 主 / 子会话录制与 childSessions 开关
+
+| 项   | 内容                                                                                                                                                                                                                                                                                |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 操作 | `/record on` → 主会话一个 turn + 派一个 Agent 子 agent（带 label）→ 查库；再设 `traffic.childSessions=false` → `/reload` → `/record on` → 再派一个子 agent。                                                                                                                        |
+| 预期 | 两轮子 agent 都正常回答。第一轮：主会话与子会话**各自的 session id** 均有 requests/messages 行（拍板①：consult fork、`/goal` verifier、workflow 子 agent 同理）。第二轮：子会话请求**不落库**（无新行），但若改写规则启用，其请求仍会被规则作用（`childSessions=false` 只关落库）。 |
+| 取证 | ① `SELECT DISTINCT session_id FROM requests WHERE id > <首轮前 max>` 恰为两个 id；② 第二轮后无子会话新行（`SELECT COUNT(*)` 不变）；③ tool 内部请求（keepalive/quota/标题/topic）从不在库中（对照 V8）。                                                                            |
+
+## V5 改写规则、HUD 与 keepalive/warming 共存
+
+| 项   | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 操作 | 网页或库中启用一条改写规则（例如 jq：`.temperature = 0`）→ 主会话与子会话**并行**发请求；HUD 看状态键；cache keepalive 开着（`cacheTtl.keepalive`）时观察 ping 状态。追加观察 A：让 pi 原生 cache warming 有机会触发（`cacheWarming:"idle"` 的模型，如 anthropic promptCache 短 TTL），看改写暂停与恢复。追加观察 B：用一个 codex（`openai-codex-responses`）会话在规则启用时发请求。                                                                                                                                                                                                                                                                               |
+| 预期 | 主/子会话请求都被改写（stub/上游侧 `temperature=0`），双栏（线上字段 vs payload）正确、无跨会话错位；HUD 显示 `rec`（有丢弃时 `rec·drop N`）；keepalive 显示 `ping off:traffic-rewrite`（窗口级暂停，不熔断、不清 capture；规则停用 + 一次未改写真实请求后自愈）。A：观测到任何 `cache_warming_decision` 后改写**暂停**（fail closed，行 `rewrite_status='suspended'`，录制照常），`/record status` 有「改写暂停」行与恢复提示，`/record off → on` 后恢复改写。B：codex 请求只录钩子级字段（payload/状态/响应头），**不改写**，status 计 `unsupportedApiPayloads`，一次性提示「不在票据白名单，改写规则对其不生效」，网页提示 codex WS 警告（`codex_ws_warning`）。 |
+| 取证 | ① 上游/网页双栏比对每行的 `session_id` 与线级 `x-api-key` 归属；② `/record status` 的归属行（`unattributedPayloads`/`unattributedFetches` 应为 0 或可解释）与「改写暂停」「checkpoint」「串行化已停用」各行；③ HUD 截图（`rec` / `ping off:traffic-rewrite`）；④ codex 会话行 `rewrite_status` 为 NULL（非 `unattributed`）。                                                                                                                                                                                                                                                                                                                                       |
+
+### 解除边界（逐条勾选）
+
+- [ ] **keepalive 否决解除**：先完成一次实际改写，确认 `ping off:traffic-rewrite`；停用全部规则并等规则快照刷新。预期：armed 否决解除，但旧 capture 仍被进程级最近改写标记否决，不能立即恢复 ping（`/record off` 或 `/reload` 也不清该标记）。随后同一会话发一次未改写的真实请求，产生晚于最近改写时刻的新 capture；预期：在 keepalive 其余条件满足的下个发送窗口，不再因 traffic 被否决，无需重启或重置熔断器。取证：规则快照/请求双栏、HUD 前后截图与实际 ping 记录。
+- [ ] **warming 否决与改写暂停分别解除**：armed 时触发一次 `cache_warming_decision`，预期 traffic 返回 `{action:"stop"}`，同时观察器仍将改写暂停；停用全部规则并确认快照为零，或 `/record off`，预期 traffic 不再否决后续 warming（是否预热由 pi 自己决定，不能要求已停止的 warmer 自动重启）。改写暂停不靠等待、普通请求或 `agent_settled` 解除：在无新 warming decision 干扰下，分别验证 `/record off → on`，以及暂停后让快照实际观测到启用规则为零、再重新启用规则；下一次白名单真实请求应恢复改写，`rewriteResumes` 增加，行不再为 `suspended`。取证：warming 事件/返回值、`/record status` 暂停/解除计数、请求双栏与 `rewrite_status`；再次观测到 warming decision 时应再次暂停。
+
+## V6 重放与导出
+
+| 项   | 内容                                                                                                                                                                              |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 操作 | 网页选一条历史请求 → Replay → 观察；再点导出（JSONL）。                                                                                                                           |
+| 预期 | 重放真实发往上游并产生**新记录**（`origin='replay'`）；导出得到 JSONL 文件（请求/assistant 逐行配对，文件名 `record-<safe-name>.jsonl`，无总行数头）。                            |
+| 取证 | ① `SELECT origin, COUNT(*) FROM requests WHERE origin='replay'` 增量 = 重放次数；② 导出文件行数与库中该会话行数一致；③ 上游确实收到第二次请求（改写规则若启用则同样作用于重放）。 |
+
+## V7 网页加固
+
+| 项   | 内容                                                                                                                                                                                           |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 操作 | ① `curl -H 'Host: evil.test' http://127.0.0.1:4177/api/state`（不带 token）；② 回环无 token 访问 `/api/state`；③ 浏览器打开页面正常浏览；④ 写一个本地 HTML 页 `<iframe>` 该服务。              |
+| 预期 | ① 421（Host 白名单，鉴权之前）；② 401（`/api/*` 回环也要 token）；③ 页面正常（token 从 meta 读取，`/api/*` 带 `x-record-token` 头）；④ 浏览器拒绝渲染（XFO DENY + `frame-ancestors 'none'`）。 |
+| 取证 | ① `curl -i` 状态码与 `connection: close`；② 401；③ 网页功能正常（列表/详情/规则）；④ iframe 区域空白 + 控制台 refused to display。                                                             |
+
+## V8 `/reload` 与冻结面
+
+| 项   | 内容                                                                                                                                                                                                                                          |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 操作 | `/record on` 并录几条 → 连续 `/reload` 三次 → 每次后 `/record status`；再观察一次自动标题 / topic 判定 / keepalive 窗口（若触发）后的库。                                                                                                     |
+| 预期 | 每次 reload 录制停止（新激活未 `/record on`）；fetch 链还原或旧 wrapper 退役为透传（`/record status` 可见 tap 状态）；无残留 claim；keepalive / 标题 / topic 判定请求**不在库中**（结构上无票据，拍板⑥）；外部包（若装）不被残留 claim 压制。 |
+| 取证 | ① reload 后新请求不产生新行（`SELECT COUNT(*)` 不变）；② `globalThis.fetch` 行为正常（普通请求照发）；③ `/record status` 各计数归零 / 显示未激活；④ `SELECT COUNT(*) FROM requests` 对比内部请求发生前后无增量。                              |
+
+## V9 加密会话强制关闭
+
+| 项   | 内容                                                                                                                                               |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 操作 | `PI_SECURE_SESSION=1 pi`（或进一个已配置的 pi-secure 保险库会话）→ 尝试 `/record`；若此前在录，看是否停。                                          |
+| 预期 | 无 `/record` 命令（`traffic.enabled` 被两个加载入口强制 false）；库 mtime 不变；既有 engine 若在运行中切域则同步停录并有界关库（不发未捕获异常）。 |
+| 取证 | ① `/record` 不存在；② `stat` 库三件套 mtime 前后一致；③ pi stderr 无异常栈。                                                                       |
+
+## V10 web 端 `/record on` 需确认
+
+前置：`traffic.enabled=true`、Web Hub 已开启（`webHub.enabled` + 控制面），会话空闲，未设置 `webHub.webCommandPolicy.record`。先从 TUI `/record off`，记录录制状态与现有 traffic 监听端口（`off` 不关闭已启动的查看页）；Web Hub 自身端口不计入 traffic 端口。
+
+- [ ] **默认策略，未确认**：网页发送 `/record on`，预期返回 `E_CONFIRM_REQUIRED` 并出现确认提示；尚未开始录制、没有新增 traffic 监听端口。取证：控制面结果、`/record status` 与 `ss -ltnp` 前后对照。
+- [ ] **取消确认**：取消上述提示，预期命令不执行，仍未录制、监听端口不变。取证：取消后的状态与端口对照。
+- [ ] **确认执行**：再次发送 `/record on` 并确认，预期才开始录制，与 TUI 执行等价；默认查看页监听 `127.0.0.1`，已有服务则复用，页面 token 可正常使用，HUD 显示 `rec`。随后发一次真实请求，预期产生新录制行。取证：确认结果、状态/URL、监听地址、HUD 与库行数增量。
+- [ ] **无参读取**：网页发送 `/record`，预期不弹确认，只返回状态，不改变录制状态或监听端口。取证：控制面结果与状态前后对照。
+- [ ] **显式读取**：网页发送 `/record status`，预期同无参读取，不弹确认。取证：控制面结果与状态前后对照。
+- [ ] **停止录制**：网页发送 `/record off`，预期不弹确认，停止录制但历史保留、已启动的查看页仍可浏览；再发一次真实请求不新增录制行。取证：状态、网页历史与库行数前后对照。
+- [ ] **非法子命令**：无策略覆盖时，网页发送 `/record typo`，预期 `E_COMMAND_DENIED`，不执行、不改变状态。取证：控制面结果与状态前后对照。
+- [ ] **显式 allow 覆盖**：设置 `webHub.webCommandPolicy.record="allow"` 并 `/reload`，确认未录制，再从网页发送 `/record on`；预期不弹确认，直接开启录制。取证：控制面结果与状态变化。
+- [ ] **显式 confirm 覆盖**：设置 `webHub.webCommandPolicy.record="confirm"` 并 `/reload`，分别从网页发送无参 `/record`、`/record status`、`/record off`；预期三者都需确认，未确认不执行。取证：每条的 `E_CONFIRM_REQUIRED` 与确认前后结果。
+- [ ] **显式 deny 覆盖与还原**：设置 `webHub.webCommandPolicy.record="deny"` 并 `/reload`，逐条发送无参 `/record`、`status`、`on`、`off`，预期都返回 `E_COMMAND_DENIED` 且状态不变；最后移除覆盖并 `/reload`，复核默认 `on` 需确认、`status/off` 不需确认。取证：逐条控制面结果及还原后的结果。
+
+覆盖键作用于整个 `record` 命令，不是分别配置各子命令；默认分支由代码区分 `on`（confirm）、无参/`status`/`off`（allow）与非法子命令（deny）。
+
+## V11 锁竞争、WAL 与性能门（真机仲裁）
+
+| 项   | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 操作 | ① `/record on`，另开终端 `sqlite3 ~/.pi/agent/records/traffic.db "BEGIN IMMEDIATE;"` 持锁 10s，期间正常对话（含一个子 agent）；② 释放后查 `/record status`；③ 用一个**大会话**（长上下文，单条 payload 数 MiB）重放同样的持锁对话；④ 关闭录制（`/record off` 后 `/quit` 或 `/reload`）时看 stderr。前置/并行：先独立跑 `npm run test:traffic-gate`（≈17s）应全绿。                                                                                                                                                                                                         |
+| 预期 | ① 持锁期间 TUI **不卡顿**（输入/流式正常，发送路径零 DB 调用）；② status 显示 BUSY 退避（`busyBackoffs`）与丢弃计数（`droppedRows`/`droppedByKind`），锁释放后 ≤5s 账本排空、无行错位；③ 大 payload 下单 tick 线性变长（≈8ms/MiB）但仍在心跳门内——若真机（含 IO 负载）复现 p99 >10ms / 心跳 >80ms ⇒ 启动 T2c；④ 运行时 checkpoint 只在 `-wal` ≤2 MiB 时执行：积压后 `checkpointsDeferred > 0`、WAL 持续增长（已接受残留）；关库时 `-wal` >64 MiB 先打一行 `[pi-subagent] traffic: 关闭录制库时 WAL 为 N.N MiB…` 警告（隐式 checkpoint 在 shutdown/reload，不在发送路径）。 |
+| 取证 | ① 持锁 10s 内打字/流式体感 + `/record status` 心跳相关计数；② 释放后 `SELECT COUNT(*)` 与丢弃计数自洽（`droppedInserts` = 丢的请求行 + messages）；③ `ls -l` 观察 `-wal` 大小变化与 `/record status` 的 `checkpointsDeferred`/`walBytes`；④ 关库警告行截图；⑤ `npm run test:traffic-gate` 输出（5 例全过 + `[traffic-gate]` 数字）。                                                                                                                                                                                                                                       |
+
+## V12 会话结束中止在途重放
+
+| 项   | 内容                                                                                                                                                                                                                        |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 操作 | 浏览器保持页面打开，发起一个重放到「永不回响应头」（或「回头后永不结束流」）的上游（可临时把某条历史请求的 baseUrl 指到本地挂起服务）→ `/quit`。                                                                            |
+| 预期 | 进程 3s 内退出；上游观察到连接被中止（`session_shutdown` → engine.close → 取消域 abort，`reader.cancel()` 只触发不等待）；SSE 连接被销毁；无残留 handle/端口。`/reload` 变体：同样 3s 内完成，且新激活可重新 `/record on`。 |
+| 取证 | ① `time` 记录 `/quit` 到 shell 返回 ≤3s；② 挂起上游侧日志看到 socket 关闭；③ `ss -ltnp` 无 417x 残留。                                                                                                                      |
+
+## V13 print / json 模式无服务无重放
+
+| 项   | 内容                                                                                                                                                                                             |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 操作 | ① `pi -p "/record on"`（print 模式，`traffic.enabled=true`）再跟一句正常请求；② `pi --mode json` 同样跑一轮。                                                                                    |
+| 预期 | 两者都录制（库有行）但**不启动网页服务**：无监听端口；`/record on` 的回复注明「print 模式不启动网页服务」；`/api/replay` 不可达；进程正常退出（不被未 unref 的句柄拖住）。子会话同理只录不重放。 |
+| 取证 | ① `ss -ltnp \| grep -E '417[7-9]\|41[8-9][0-9]'` 为空；②`SELECT COUNT(*)` 有本轮增量；③ 进程退出码 0 且无挂起（`time` 观察）。                                                                   |
+
+---
+
+## 结果记录
+
+| V   | 结论 | 日期 | 机器 / Node | 关键数字 |
+| --- | ---- | ---- | ----------- | -------- |
+| V1  |      |      |             |          |
+| V2  |      |      |             |          |
+| V3  |      |      |             |          |
+| V4  |      |      |             |          |
+| V5  |      |      |             |          |
+| V6  |      |      |             |          |
+| V7  |      |      |             |          |
+| V8  |      |      |             |          |
+| V9  |      |      |             |          |
+| V10 |      |      |             |          |
+| V11 |      |      |             |          |
+| V12 |      |      |             |          |
+| V13 |      |      |             |          |

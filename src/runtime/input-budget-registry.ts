@@ -79,17 +79,6 @@ export function getInputBudgetRegistry(): InputBudgetRegistry {
   return created;
 }
 
-export function isValidInputBudget(value: unknown): value is InputBudget {
-  if (!value || typeof value !== "object") return false;
-  const entry = value as Record<string, unknown>;
-  return (
-    typeof entry.maxInputTokens === "number" &&
-    Number.isFinite(entry.maxInputTokens) &&
-    entry.maxInputTokens >= 0 &&
-    entry.bytesPerToken === 2
-  );
-}
-
 export function inputTokensForBytes(bytes: number): number {
   return Math.ceil(Math.max(0, bytes) / 2);
 }

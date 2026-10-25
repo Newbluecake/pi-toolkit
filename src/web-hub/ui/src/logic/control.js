@@ -279,7 +279,12 @@ export function buildDialogAnswers(questions, selections) {
     );
     const raw = Array.isArray(sel.selected) ? sel.selected : [];
     const selected = [...new Set(raw.filter((s) => typeof s === "string" && labels.has(s)))];
-    const other = typeof sel.other === "string" && sel.other.trim() !== "" ? sel.other : null;
+    let other = typeof sel.other === "string" && sel.other.trim() !== "" ? sel.other : null;
+    // 2026-10-24 复验 blocker backstop: a single-select question submits ONE answer. The UI
+    // now enforces option ⟂ Other both ways, but a pre-fix draft can still carry both — the
+    // picked option wins (TUI parity: component.ts clears freeTextValue when confirming an
+    // option), the Other is dropped.
+    if (other !== null && q?.multiSelect !== true && selected.length > 0) other = null;
     answers.push({ selected, other });
   }
   return answers;

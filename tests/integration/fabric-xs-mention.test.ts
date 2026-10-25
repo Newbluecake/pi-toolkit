@@ -66,10 +66,13 @@ describe("MW @session mention wiring (real hub × real stacks)", () => {
   it("RX7 R4: a human-origin reply to a deliver-mode A is shown (display:true) but never wakes A", async () => {
     h = new XsHarness();
     const hub = await h.boot("hub");
-    const [a, b] = await Promise.all([
-      h.boot("agent", "alpha", undefined, true, false, { XW_RECEIVE: "deliver" }),
-      h.boot("agent", "beta"),
-    ]);
+    // Sequential on purpose: every fixture agent writes the SAME `$HOME/.pi/agent/pi-subagent.json`
+    // (HOME is shared by the harness's peers), and `XW_RECEIVE` only lives in that file. Booting
+    // alpha and beta concurrently lets beta's config (no `receive`) overwrite alpha's before alpha
+    // reads it, so alpha silently ran in the default `wake` mode. `boot` resolves only after the
+    // agent has activated and read its settings, so beta may write the file afterwards.
+    const a = await h.boot("agent", "alpha", undefined, true, false, { XW_RECEIVE: "deliver" });
+    const b = await h.boot("agent", "beta");
     await Promise.all([a.rpc("cmd", { args: "join" }), b.rpc("cmd", { args: "join" })]);
     const aid: string = (await a.rpc("inspect")).sessionId;
     const bid: string = (await b.rpc("inspect")).sessionId;
@@ -78,6 +81,8 @@ describe("MW @session mention wiring (real hub × real stacks)", () => {
       (l) => l.rows?.some((r: any) => bid.startsWith(r.ref)),
       "membership publish",
     );
+    // Precondition: alpha really is in deliver mode (the persisted membership entry carries it).
+    expect((await a.rpc("inspect")).members.at(-1)?.data).toMatchObject({ joined: true, receive: "deliver" });
     void hub;
     await a.rpc("prime");
     await b.rpc("prime");

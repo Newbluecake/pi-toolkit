@@ -15,9 +15,6 @@ export function createLedger(capUsd: number): TidyLedgerState {
 export function reservedUsd(state: TidyLedgerState, exceptRunId?: string): number {
   return state.reservations.reduce((sum, item) => sum + (item.runId === exceptRunId ? 0 : item.amountUsd), 0);
 }
-export function remainingUsd(state: TidyLedgerState, exceptRunId?: string): number {
-  return Math.max(0, state.capUsd - state.spentUsd - reservedUsd(state, exceptRunId));
-}
 /** Reserve before dispatch. A duplicate run id is never allowed to reserve twice. */
 export function reserve(state: TidyLedgerState, runId: string, amountUsd: number): LedgerResult {
   if (!runId || !validAmount(amountUsd)) return { state, ok: false, reason: "invalid reservation" };
@@ -49,13 +46,4 @@ export function watcherCap(state: TidyLedgerState, runId?: string, tidyMaxCostUs
   const cap = validAmount(tidyMaxCostUsd) ? tidyMaxCostUsd : 0;
   return Math.max(0, Math.min(cap, state.capUsd - state.spentUsd - reservedUsd(state, runId)));
 }
-export function canDispatch(state: TidyLedgerState, estimateUsd: number): boolean {
-  return validAmount(estimateUsd) && state.spentUsd + reservedUsd(state) + estimateUsd <= state.capUsd;
-}
-export function releaseReservation(state: TidyLedgerState, runId: string): TidyLedgerState {
-  return { ...state, reservations: state.reservations.filter((item) => item.runId !== runId) };
-}
-
-export const reserveRun = reserve;
 export const settleRun = settle;
-export const watcherAllowance = watcherCap;
