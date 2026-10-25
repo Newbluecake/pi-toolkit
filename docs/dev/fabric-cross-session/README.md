@@ -41,7 +41,7 @@ session chain already has a successor waits for it (pending_start) or is redirec
 `steerAttempt`; a steer timeout/restart ⇒ audited consume, never a retry). **Revive** (`WakeService.revive`, the single
 exit): root-direct resume with the pinned model/thinking, fixed `resumeBudgetS` budget, `poolFullPolicy/loadPolicy:"reject"`
 (pool/load/quota/closing/lock ⇒ park, config-class ⇒ `wake_refused` dead letter); exclusions recorded at admission
-(`wakeExclusion`: consult fork, readonly domain, caller-owned incl. workflow children, external/droid) + worktree gone /
+(`wakeExclusion`: readonly domain, caller-owned incl. workflow children, external/droid; `consult_fork` is a legacy value — read-only, never produced since #40, still excludes revive) + worktree gone /
 unknown type / user-stopped (Q6) / legacy entry without a verdict (fail closed). Reservation ownership is claim-aware
 (`engine.reserveStrict`, persist-first; a failed rollback ⇒ quarantine); **at-most-once rule** (NQ2): the linearization
 point is `diag.inputAcceptedAt` (driver `input_accepted`, `trackInput` runs only) — only a REAL terminal entry proves
@@ -59,7 +59,7 @@ Accepted limitation: after a real `/reload` the old stack's `onReaped` closure i
 was still closing is re-judged by the NEW stack's 60 s fresh-`getBranch()` fallback (bounded, never unbounded
 waiting). Cross-session wake (C1, RootWakeController, mutation fence) is phase 2 — plan §12 is an archive that must be
 re-reviewed first. Gates: `tests/integration/fabric-wake*.test.ts`, conformance C-P1…C-P5
-(`tests/conformance/fabric-wake.test.ts`; run before any pi peer bump together with consult-preserve), state-machine
+(`tests/conformance/fabric-wake.test.ts`; run before any pi peer bump), state-machine
 matrix/property in `tests/core/`.
 
 ## Cross-session phase 2
@@ -97,7 +97,7 @@ pair interval 30s + wakes 2/h, in-flight 4/session, hub 60/min, inbox 12; hub ow
 AgentCard's cap-gated `xs wake|deliver|off` badge is display-only, never authorization.
 `details` (token/xid/source) never enters provider payload; enabled tools/system stay stable.
 Peer-upgrade gates: `tests/conformance/fabric-xs.test.ts` C-X1/X1b/X2/X3/X4/X5/X6/X7 with real pi
-and a local Anthropic stub, alongside fabric-wake C-P1–C-P5 and consult-preserve C1–C7; C-X7 records
+and a local Anthropic stub, alongside fabric-wake C-P1–C-P5; C-X7 records
 duplicate-tool arbitration without relying on a winner. Both off goldens must remain unchanged.
 
 ## Request-reply

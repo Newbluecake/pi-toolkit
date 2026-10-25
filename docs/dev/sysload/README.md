@@ -16,8 +16,7 @@ pid+starttime reuse check, aggregated by comm, instantaneous CPU% across scans, 
 NaN on the wire); `gate.ts` evaluates admission + renders the rejection text; `hook.ts` turn_end hints (`subagent:load`,
 `triggerTurn:false`). Settings `load.*` + `webHub.load` are non-live (session_start / hub start). Entry matrix (P2a,
 `src/stack.ts` + `spawn-service.ts`): top-level and nested `Agent` (incl. resume) are rejected while gated (before any
-run/label/worktree), workflow `agent()` waits FIFO via the injected `LoadAdmission` (`src/workflow/host.ts`), consult /
-`/goal` verifier / tidy / `/task` / @mention / RPC / cron are exempt; gate off, unknown, stale, print/json ⇒ fail open.
+run/label/worktree), workflow `agent()` waits FIFO via the injected `LoadAdmission` (`src/workflow/host.ts`), `/goal` verifier / tidy / `/task` / @mention / RPC / cron are exempt; gate off, unknown, stale, print/json ⇒ fail open.
 Hub side (`src/web-hub/hub/load.ts`): one hub sampler, fingerprint-gated `load` SSE frames, cap `load.v1`,
 `GET /api/load/top` (X-PWH + same auth as other GETs, LAN same width, per-principal rate limit, 1.5 s deadline); UI
 `src/web-hub/ui/src/components/load/` (pill / card / drawer banner from `StatusInfo.loadGate`). `load.enabled=false` /

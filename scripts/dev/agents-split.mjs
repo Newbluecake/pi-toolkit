@@ -3,6 +3,8 @@
 //   node scripts/dev/agents-split.mjs build <srcRev>   write the sinking blocks (D01–D66) into docs/dev/**/README.md
 //   node scripts/dev/agents-split.mjs check <srcRev>   conservation check against `git show <srcRev>:AGENTS.md`
 // Blocks are cut by CHARACTER OFFSET from marker strings (never by line numbers).
+// HISTORICAL one-shot (#40 PS2): the D17 target `docs/dev/consult/README.md` was deleted when the consult
+// subsystem was removed, so `build`/`check` against a pre-#40 srcRev no longer reproduce the repo; kept as the P1 record.
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -112,6 +114,7 @@ const E = [
   { id: "D14", kind: "d", marker: "**Request-reply", file: FAB, title: "Request-reply" },
   { id: "D15", kind: "d", marker: "**Channels + broadcast", file: FAB, title: "Channels + broadcast + unread inbox" },
   { id: "D16", kind: "d", marker: "**Session aliases", file: FAB, title: "Session aliases" },
+  // D17 (src/consult/) — target README removed by #40; see header note.
   { id: "D17", kind: "d", marker: "- `src/consult/` —", file: "docs/dev/consult/README.md", title: "src/consult/" },
   { id: "D18", kind: "d", marker: "- `src/hud/` —", file: PLUG, title: "src/hud/" },
   { id: "D19", kind: "d", marker: "- `src/web-search/` —", file: PLUG, title: "src/web-search/" },

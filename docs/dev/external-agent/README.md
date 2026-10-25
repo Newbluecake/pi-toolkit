@@ -72,7 +72,7 @@ Factory 额度是 standard / core 两个池，窗口为 month（HUD 紧凑标记
 - ~~resume 后模型不记得前情~~ **已修复（#31）**：根因是 `droid.initialize_session(sessionId)` 只续会话文件、不恢复 LLM 历史；resume 现改走 `droid.load_session`，真正恢复上下文。副作用（fail closed）：droid 原生会话文件（`~/.factory/sessions/…`）被清理/换机器时 resume 直接报 `config`（`Session not found -32004`），不再静默失忆续跑。详见 `resume-memory.md`。
 - resume 钉 transcript 头行记录的原 cwd；该目录（如已清理的 worktree）不存在则报 `config` 错误，不回落；外部 resume 不能与 isolation 同用。
 - **R10 残余风险**：droid 以完整权限（autonomy high，权限请求自动批准）运行，并读取用户全局 skills / AGENTS.md / MCP 配置，子 agent 可调用你配置的 MCP 工具。建议在 droid 侧为 exec 场景收紧 MCP；破坏性任务用 worktree 隔离。
-- 只读工具域（consult 专家、tidy）拒绝走 droid。
+- 只读工具域（tidy）拒绝走 droid。
 - D10 实测 turn 进行中关闭 stdin 不会让 droid 退出——已由 `sh` owner-watchdog 哨兵兜底，pi 被强杀后孤儿会被清理。
 - 并发受 `concurrencyLimit` 与 sysload 闸门约束（droid 二进制约 290MB/进程）。
 
@@ -108,7 +108,7 @@ wrapped by an `sh` owner-watchdog because D10 measured that closing stdin mid-tu
 does); `DROID_EXITS_ON_STDIN_EOF=false`, auto-update disabled via child env (strong guarantee is the user's
 `~/.factory/update-policy.json`). Permissions: `autonomyLevel:"high"` with `autoRejectPermissionRequests:false` and a
 synchronous `proceed_once` auto-approve (R10: droid also reads the user's global skills/AGENTS.md/MCP). `toolDomain:"readonly"`
-is refused for droid (consult and tidy can never use it — droid cannot be sandboxed read-only). Resume pins the
+is refused for droid (tidy can never use it — droid cannot be sandboxed read-only). Resume pins the
 transcript's header-line cwd (missing ⇒ `config` error, never a fallback; external resume + isolation rejected).
 Billing: droid usage × the underlying model's pi price (`pricing.ts`; family/consensus matches are `approx`; no match ⇒
 `unpriced` "all"/"partial", never inferred from costUsd≈0). The model catalog is probed lazily (an empty session is

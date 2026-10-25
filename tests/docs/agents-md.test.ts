@@ -33,7 +33,6 @@ describe("AGENTS.md guard", () => {
     expect(s).toContain("PI_TOOLKIT_DROID_CONFORMANCE=1");
     const suites = [
       "cmd-history",
-      "consult-preserve",
       "droid-protocol",
       "fabric-wake",
       "fabric-xs",
@@ -46,7 +45,7 @@ describe("AGENTS.md guard", () => {
     ];
     let checked = 0;
     for (const name of suites) {
-      if (!existsSync(join(ROOT, "tests", "conformance", `${name}.test.ts`))) continue; // e.g. consult-preserve after #40
+      if (!existsSync(join(ROOT, "tests", "conformance", `${name}.test.ts`))) continue; // self-gating: skip suites that no longer exist
       expect(s, `${name}.test.ts missing from the checklist`).toContain(`${name}.test.ts`);
       checked++;
     }

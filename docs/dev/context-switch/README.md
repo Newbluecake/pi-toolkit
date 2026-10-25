@@ -16,7 +16,7 @@ every port degrades silently). The mechanical appendix also carries an "in-servi
 optional `skills` param) are listed for re-reading — never injected — and the appendix stays
 byte-identical when none are found. Tool surface: `src/context-switch/tool.ts`. Design:
 `docs/dev/context-switch/context-switch-plan.md`. **Child-session switch_context** (child-context-switch
-plan §2/§3, `src/context-switch/child.ts` + `capability.ts`): every non-consult child run is granted
+plan §2/§3, `src/context-switch/child.ts` + `capability.ts`): every child run is granted
 `switch_context` (turn_end handler commits a boundary draft on top of `event.entries`), gated by a
 process-wide runtime capability state machine — never pi's version — walking `unknown →
 static-ok(L0 export probe) → observed(L1 turn_end shape) → ready(L2 zero-impact

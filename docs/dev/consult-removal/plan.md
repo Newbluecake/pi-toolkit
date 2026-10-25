@@ -530,10 +530,21 @@ rg -ln "abArm" src tests scripts   # 期望（r3 按名列出）：命中文件 
 # PS1a：consult 运行时路径的使用点为空；typecheck 绿就证明 src/consult 仍可编译
 rg -n "isConsultRun|consultC2|createConsultGuard|shadow-tools|installConsultAnchor|installPrefixProbe|classifyConsultToolEnd" src -g '!src/consult/**'   # 期望：空
 # PS1b
-test ! -e src/consult && rg -n "consult/|consult-summary|consult-cache-marker|consult-transcript|ConsultExpertRef|consultExperts|forkSessionFrom|@deprecated #40" src tests -g '!tests/fixtures/**'   # 期望：空
+test ! -e src/consult && rg -n "consult/|consult-summary|consult-cache-marker|consult-transcript|ConsultExpertRef|consultExperts|forkSessionFrom|@deprecated #40" src tests -g '!tests/fixtures/**'   # 期望：空，除 PS2 域与旧数据/否定断言允许列表外（见下；PS2 合入后 PS2 域一项不再命中）
 # PS2
 rg -n -i "consult" src/config                                                                                                               # 期望：空
+rg -n -i consult src AGENTS.md docs/dev/*/README.md skills                                                                                  # 期望：只剩下面的允许列表；每条在 PS2 报告里归类
 ```
+
+**允许列表（PS2 定稿）**——上面 PS1b 命令与 PS2 最终扫描的剩余命中只能属于这些类别：
+
+- **PS2 域（PS2 合入后消失）**：`src/config/settings.ts` 的 consult 注释、`src/core/verdict-schema.ts` 里指向 `docs/dev/consult/…` 的注释（PS2 已改写为「档案 + #40 已移除」措辞）。
+- **旧数据读取兼容输入 / 否定断言（刻意保留）**：`tests/workflow/replay.test.ts` 的旧 journal 行输入；`tests/tools/agent-tool-experts.test.ts` 的 `not.toHaveProperty("consultExperts")` 与 `not.toContain("consult")` 兼容断言；`tests/integration/consult-legacy-entries.test.ts`（旧字段输入 + `/consult/i` 否定断言）；`tests/core/{run-journal,presentation-diag}.test.ts` 的旧 consult 事实输入与 `not.toContain("consult")`。
+- **保留资产**：`RESERVED_TOOL_NAMES` 里的 `"consult"`（fabric-xs-off golden）及其测试（`tests/runtime/tool-scope.test.ts`、`tests/service/runtime-adapter-readonly-domain.test.ts`）；`wakeExclusion: "consult_fork"` 字面量（`core/message.ts`、`fabric/wake.ts` 等只读不产出）；`src/runtime/legacy-consult-forks.ts`（`consult-sessions` 目录的只清扫）与 `src/runtime/cap-watcher.ts` 的 legacy 注释；`src/secure/**` 的 `STATE_SUBDIRS` `consult` 与 foreign-dir 白名单（#43 冻结面）及 `tests/secure/**` 对应断言；`LEGACY_CONSULT_MAIN_AGENT_TYPE`/`displayAgentType` 折叠；`src/commands/schedule.ts` 的 `--consult` 报错与 `--no-consult` 忽略；`bg.consultMain` 持久化字段。
+- **legacy / 已移除说明**：带 `legacy|#40|removed|移除` 标记的注释与 README 说明（`docs/dev/{subagent-core,fabric-cross-session,scheduled-reports,data-encryption,workflow}/README.md`、`docs/dev/consult/REMOVED.md`）。
+- **append-only wire / UI 兼容面（Q7）**：`src/web-hub/protocol/{messages,run-transcript}.ts` 的 `consult`/`consultCache`/`consultFallback` 字段与 `hub/run-transcript.ts` 的 fallback 分支；`src/web-hub/protocol/schedule.ts`、`ScheduleReview.vue`、`i18n/schedule-extra.ts`（`consultMain` legacy 展示，值为 true 时才显示）；`src/schedule/{core/reader,agent/ops,agent/bg,agent/view}.ts` 的 `consultMain` 持久化字段处理；`src/secure/**` 的 `consult-sessions` 目录与 `STATE_SUBDIRS`（#43 冻结面）。
+- **历史出处注释（只引用被移除设计的章节号，不描述现行行为，本次不改）**：`consult plan §x`、`consult A/B instrumentation plan §x`、`(consult, …)`/`non-consult` 一类括注，例如 `src/{service,tools,core,delivery,memory,hud,traffic}/**` 与 `src/web-hub/protocol/{worktree-graph,feishu}.ts`（「作者 consult 裁定」= 向方案作者请教）。它们不影响行为；后续碰到相应文件时顺手清理，不单独成包。
+- **英文动词用法**：`consulted/consults/consulting`（如 `web-hub/README.md:201`、`fabric-cross-session/README.md:205`）。
 
 ### 4.3.1 S0 闭合基线（r3，2026-10-25 @88da5b81，「开工前」各导出的导入方）
 

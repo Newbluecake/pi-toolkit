@@ -33,13 +33,14 @@ injection / cache-ttl keepalive all silently do nothing for that run — use `pi
 settings.json actually lists the package. `src/child/activation-signal.ts`'s process-wide,
 `Symbol.for`-keyed activation counter (incremented unconditionally from `src/index.ts`'s
 `isChildSession` branch) lets the driver detect this synchronously, in-process, without parsing
-settings.json itself: a non-consult `create()`/`resume()` call whose counter never advances during
+settings.json itself: a `create()`/`resume()` call whose counter never advances during
 its own create-await window emits a `child_extension_missing` DriverEvent, folded into
 `RunDiagnostics.childExtensionMissing` (best-effort, diag-only, never affects the run) and surfaced
 in `get_subagent_result`'s text (`formatChildExtensionMissing`); the runner also `console.warn`s
-once per process (deduped). Consult forks are exempt (their read-only tool domain makes the
-affected features moot) — detection, not inheritance, is the whole feature (no attempt to make a
+once per process (deduped). Detection, not inheritance, is the whole feature (no attempt to make a
 child session inherit the parent's `-e` extension list).
+
+**Legacy consult data (#40)**: the consult subsystem was removed. Old run entries may still carry `diag.experts/consults/consultOf/consultCache/consultThread/consultIdentityPrediction` and `dispatchMeta.abArm`; these are ignored on read (never projected into new journals), and `displayAgentType` folds the `consult:main-snapshot` sentinel to `main`. Retained assets: `src/runtime/cap-watcher.ts` (the cap watcher tidy uses) and `src/runtime/legacy-consult-forks.ts` (sweeps the old `<state>/cache/consult-sessions` fork dir; never creates it). Compat test: `tests/integration/consult-legacy-entries.test.ts`.
 
 ## src/service/
 
@@ -51,7 +52,7 @@ Pool-full admission (L1, `agent.queueWhenFull` default false): a non-slotless to
 rejected immediately (no run/label/worktree ever created) once `SpawnService`'s own admission-time reservation
 (`slotfulLabel`, never `SlotPool.stats.inUse` — that only updates deep inside the runtime adapter, after H2/worktree
 creation) reaches `concurrencyLimit`; every successful `spawn()` call also returns `slots` (limit/inUse/free, same
-slotless-exclusion rule as the real pool) for the Agent tool to surface. Workflow children/consult/resume/`/task`
+slotless-exclusion rule as the real pool) for the Agent tool to surface. Workflow children/resume/`/task`
 never set `poolFullPolicy` and keep the legacy queue-and-`queueWaitMs`-timeout behavior. Tidy proposals use
 `SpawnRequest.toolDomain: "readonly"`, which is consumed at admission/runtime and forces only the builtin
 read-only tools plus the runtime-owned `StructuredOutput`; the field is deliberately not threaded into child
@@ -61,7 +62,7 @@ default `fixed` — only the Agent tool (top-level and nested, when passing `tim
 spawn admission resolves it once (`req.timeoutPolicy` ?? resume-inherited ?? shape-derived from
 `budgetOverride.totalMs`), applies it via `applyBudgetPolicy({ fixedDeadline })`, and the resolved value lands
 in `diag.timeoutPolicy`, persisted through terminal entries, the non-terminal journal, tombstones and
-terminal rebuilds, and inherited by resumes (R-inherit). Program-derived runs (workflow children, consult,
+terminal rebuilds, and inherited by resumes (R-inherit). Program-derived runs (workflow children,
 `/goal` verifier, tidy, RPC) stay fixed-deadline. **Known accepted trade-off**: a nested extendable run's
 grace window notifies nobody (CC2 suppression) and child sessions have no `extend_subagent_timeout` —
 it silently lives up to `min(G,(f−1)·T)` past its deadline while the parent turn keeps waiting; the main

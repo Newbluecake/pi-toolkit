@@ -52,7 +52,7 @@ both call `resetBlockers()` (fence windows + ui_prompt counts). `pause`/`rm` rev
 `finishRun(dropped, "task-changed")` (also `--all`), in-memory half `MessageScheduler.revokeTask` (own process only).
 **Gates**: off golden (above); `tests/integration/schedule-{wiring,hub,fault-matrix,off-golden,surface-wiring}.test.ts` (real activate ×
 fake pi / real hub child × fake Feishu / 9 SIGKILL points); conformance `tests/conformance/schedule.test.ts` C-S1…C-S8 (real pi + local
-Anthropic stub, C-S6 needs tsx else skip) — **run before any pi peer bump**, together with fabric C-P/C-X and consult-preserve.
+Anthropic stub, C-S6 needs tsx else skip) — **run before any pi peer bump**, together with fabric C-P/C-X. Legacy (#40): `bg.consultMain` stays a persisted field (it feeds `defHash`); the executor ignores it.
 **Accepted residuals** (I1-report §6): `--all` revocation cannot reach another process's in-memory queue (the send-time CAS with the
 task-snapshot compare is the backstop); same-uid hostile model can edit the ledger file (same-uid trust); vault predicate is agent-side
 only (hub has no vault roots — H1 #3); Feishu global budgets live in F1's process memory; a ui dialog end/late-start interleave on the same `(kind,title)` that exceeds `UI_END_SETTLE_MS` (2 s buffer after the last end) can let one dispatch through while a dialog is still open (exits: `/schedule repair`, `/fabric fence reset`); hub per-task accumulators are capped (64 observed/`pendingUnknown` runKeys per task; per H1 residual #4 the excess is left to the session-reopen digest);

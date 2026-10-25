@@ -458,3 +458,5 @@ ui <-> web-hub            1/1 vs 1/1   ★  (ui/settings-editor→agent/command-
 - `skills/dev-flow/references/{consult.md,consult-ab.md}`、`skills/dev-flow/SKILL.md`、`skills/dev-flow/references/subagent-workflow.md`、`skills/agent-handoff/SKILL.md`。
 - AGENTS.md：`src/consult/` 条目（4.5 KB）加其余 34 行提及（runtime/service/workflow/fabric wake 的 `wakeExclusion: consult fork`、secure 的 `consultSessionDir`、peer bump 检查单等）；`docs/dev/consult/`（17 份 plan/report）；`docs/dev/topic-switch/*`、`docs/dev/feishu-bot/F6-report.md` 有顺带引用。
 - fabric wake 的排除逻辑：`wakeExclusion`（consult fork 是其中一个取值）定义与使用分布在 `core/types.ts`、`core/{state-machine,message,run-journal}.ts`、`fabric/wake.ts`、`service/{spawn-service,runtime-adapter,tombstone,request-threading}.ts`、`stack.ts`，移除后该取值会变成死分支（持久化条目里可能仍有旧值，需宽松读回）。
+
+> 后续（#40）：consult 已按 [`../consult-removal/plan.md`](../consult-removal/plan.md) 移除；本附录保留为移除前的影响面快照，实际处置以该方案及各包报告为准。

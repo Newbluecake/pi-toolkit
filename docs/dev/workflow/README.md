@@ -2,7 +2,7 @@
 
 > 何时读：改动 `src/workflow/**`、`workflow.*` 设置键、`SubagentWorkflow` 工具、workflow 的 agent()/journal/replay/worktree 之前。
 > 来源：AGENTS.md@fcbf71dc 的对应条目，原文搬运，未改写（仅路径按目录移动更新）。新的实现细节直接写在这里，不要再写回 AGENTS.md。
-> 相关：`../workflow-background/`、`../workflow-agent-queue/`、`../workflow-experts/`、`../workflow-worktree/`
+> 相关：`../workflow-background/`、`../workflow-agent-queue/`、`../workflow-experts/`（已随 #40 移除）、`../workflow-worktree/`
 
 ## src/workflow/
 
@@ -26,22 +26,16 @@ max(ceil(f·workflowTotalMs), workflowTotalMs + maxExtensions·extendStepMs)` wi
 (`extendStepMs` reused from `settings.budget`, same 「每次延长最多 1h」 ruling; per-grant cap applies to `extend()` too)
 — while the workflow's children stay
 fixed-deadline). `agent(prompt, opts?)` opts are strictly validated (`agent-opts.ts`: only
-`label`/`agentType`/`phase`/`fullResult`/`model`/`thinking`/`isolation`/`experts` — any other key, a non-plain-object
-`opts`, an accessor/Proxy/function-valued known key, or a malformed `experts` array reject with the full allowed-key
-list and a mistaken-key hint; the worker (`worker-source.ts`) takes its own structural snapshot first and never
-`postMessage`s an unclonable value — host.ts re-snapshots independently and either side's defect wins) and
-`agent({ experts })` lets a workflow child consult in-turn (`expert-scope.ts`: resolution order is `"main"` → this
-workflow's own same-labeled call (by declared or effective label, rejecting on any unsettled/ambiguous/non-completed
-candidate) → the consult wiring's `resolveExperts(refs, { completedOnly: true })`, D8 — stricter than the top-level
-Agent tool, which stays completedOnly-agnostic); any call that declares `experts`, and every call submitted after one
-whose experts resolved successfully, never reads or writes the journal (`replay.ts`'s `"experts"`/`"chain_tainted"`
-skip reasons, checked before `config_hash_unavailable`/lookup) — `TaskSemantics`/`taskKeyOf` are unchanged (experts
-never join the key). `agent(prompt, { isolation: "worktree" })` (workflow-worktree plan, packages P1/P2) now
+`label`/`agentType`/`phase`/`fullResult`/`model`/`thinking`/`isolation` — any other key, a non-plain-object
+`opts`, or an accessor/Proxy/function-valued known key rejects with the full allowed-key
+list and a mistaken-key hint (`opts.experts` gets a dedicated "removed (#40), use message_agent" rejection); the worker (`worker-source.ts`) takes its own structural snapshot first and never
+`postMessage`s an unclonable value — host.ts re-snapshots independently and either side's defect wins).
+`agent(prompt, { isolation: "worktree" })` (workflow-worktree plan, packages P1/P2) now
 really isolates that one call in its own git worktree (built from the current HEAD by the same H2/H3 extension
 the top-level `Agent` tool uses) instead of only marking the journal entry: `ChildSpawner.worktreeAvailable()`
 (stack.ts wires it to `worktree.enabled`, no fallback) gates admission (`isolation_unavailable` reject, never
-journaled, never taints); an accepted isolation call taints the rest of the run's replay chain exactly like
-`experts` does, and is itself never journaled/replayed (`replay.ts`'s `isolation` input, checked before
+journaled, never taints); an accepted isolation call taints the rest of the run's replay chain (the only chain-taint trigger),
+and is itself never journaled/replayed (`replay.ts`'s `isolation` input, checked before
 `configHashAvailable`/lookup). The host waits up to `min(remainingWorkflowMs(), worktreeSettleMaxMs)` for H3's
 disposition before settling (`worktree:{state}` on the settle envelope and in `fullResult`'s extra `worktree`
 key — the only new key, and only for an isolated call); a give-up settles `pending` (frozen, the worker never
@@ -69,5 +63,5 @@ it never revises the settle the script already received. Design: `docs/dev/workf
 **todo #21**: `buildJournalConfig`'s pre-boot `store.load()` is bounded by `WorkflowRunBudget.journalLoadMs`
 (default 5s); a timed-out load degrades that run to fully live and skips writing the journal (`WorkflowOutcome.replay.loadError`), never fails the run.
 Design:
-`docs/dev/workflow-background/plan.md`, `docs/dev/workflow-agent-queue/plan.md`, `docs/dev/workflow-experts/plan.md`,
+`docs/dev/workflow-background/plan.md`, `docs/dev/workflow-agent-queue/plan.md`, `docs/dev/workflow-experts/plan.md` (removed with #40; historical),
 `docs/dev/workflow-worktree/plan.md`.
