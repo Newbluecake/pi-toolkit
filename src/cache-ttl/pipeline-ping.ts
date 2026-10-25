@@ -6,8 +6,8 @@ import {
   isMessageStartEvent,
   networkErrorDescriptor,
   rawUsageFrom,
-  redactSecrets,
 } from "./ping-client.js";
+import { redactSecrets } from "../core/redact.js";
 import { LATE_USAGE_SCAN_LIMIT_BYTES, createLateUsageScanner } from "./late-usage.js";
 import { MEASURE_RAW_USAGE_MAX_BYTES, VALIDATOR_LIMITS } from "./measure-types.js";
 import { measureEndpointSuffix } from "./measure-route.js";

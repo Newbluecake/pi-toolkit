@@ -1,7 +1,9 @@
 /**
- * Retry/timeout/secret-redaction primitives for the web_search tool.
+ * Retry/timeout primitives for the web_search tool.
  * Pure logic plus timers — every timer is unref'd (pi print-mode rule).
  */
+
+import { redactSecrets } from "../core/redact.js";
 
 export const REQUEST_TIMEOUT_MS = 15_000;
 export const MAX_ATTEMPTS = 3; // 1 initial attempt + 2 retries
@@ -87,17 +89,6 @@ export async function withRequestTimeout<T>(
     clearTimeout(timeout);
     parentSignal?.removeEventListener("abort", onParentAbort);
   }
-}
-
-export function redactSecrets(message: string, secrets: string[]): string {
-  let redacted = message
-    .replace(/([?&](?:api_key|apikey|key)=)[^&\s]+/gi, "$1[REDACTED]")
-    .replace(/(authorization:\s*bearer\s+)[^\s]+/gi, "$1[REDACTED]");
-
-  for (const secret of secrets) {
-    if (secret) redacted = redacted.split(secret).join("[REDACTED]");
-  }
-  return redacted;
 }
 
 export function errorMessage(error: unknown, secrets: string[]): string {

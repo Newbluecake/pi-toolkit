@@ -11,6 +11,8 @@
  * (owned by a parallel workstream). Do not import that file from here.
  */
 
+import { redactSecrets } from "../core/redact.js";
+
 type RecordValue = Record<string, unknown>;
 
 function isObjectRecord(value: unknown): value is RecordValue {
@@ -76,22 +78,6 @@ export const HTTP_ERROR_BODY_CAP_BYTES = 2048;
 const DEFAULT_PING_TIMEOUT_MS = 20_000;
 
 const OAUTH_TOKEN_MARKER = "sk-ant-oat";
-
-/**
- * Redact obvious secrets (bearer tokens, api-key query params, and any literal
- * secret values passed in) from an error/log message before it can surface anywhere.
- * Mirrors the approach in `src/web-search/resilience.ts` (kept local to stay pi-free
- * and avoid a cross-feature import).
- */
-export function redactSecrets(message: string, secrets: readonly (string | undefined)[]): string {
-  let redacted = message
-    .replace(/([?&](?:api_key|apikey|key)=)[^&\s]+/gi, "$1[REDACTED]")
-    .replace(/(authorization:\s*bearer\s+)[^\s]+/gi, "$1[REDACTED]");
-  for (const secret of secrets) {
-    if (secret) redacted = redacted.split(secret).join("[REDACTED]");
-  }
-  return redacted;
-}
 
 /**
  * Prepare the ping payload from a verbatim-captured provider request body.
