@@ -3,7 +3,7 @@ import { sandboxHome } from "./helpers/home-sandbox.js";
 import { createCompactHintHook, buildSessionStack, type CompactHintState, type Stack } from "../../src/stack.js";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createSetCompactThresholdTool } from "../../src/tools/set-compact-threshold-tool.js";
+import { createSetCompactThresholdTool } from "../../src/compact-hint/threshold-tool.js";
 
 let homeSandbox: ReturnType<typeof sandboxHome> | undefined;
 beforeEach(() => {

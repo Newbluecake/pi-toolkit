@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import activate from "../../src/index.js";
-import { SWITCH_RESUME_TEXT } from "../../src/tools/switch-context-tool.js";
-import { RESUME_TEXT as COMPACT_RESUME_TEXT } from "../../src/tools/compact-tool.js";
+import { SWITCH_RESUME_TEXT } from "../../src/context-switch/tool.js";
+import { RESUME_TEXT as COMPACT_RESUME_TEXT } from "../../src/compact-hint/compact-tool.js";
 import { DROP_ALL_SENTINEL } from "../../src/context-switch/hook.js";
 
 /**

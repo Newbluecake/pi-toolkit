@@ -72,7 +72,7 @@ import { createCausalLevel, readRootLevel, WAKE_LEVEL_CUSTOM_TYPE, type CausalLe
 import { createWakeService, inboxDurability, type WakeStatusView } from "./fabric/wake.js";
 import { isLiveSessionFile } from "./core/live-session-files.js";
 import { isRunId } from "./core/ids.js";
-import { RESUME_TEXT } from "./tools/compact-tool.js";
+import { RESUME_TEXT } from "./compact-hint/compact-tool.js";
 import { createFabricRouter } from "./fabric/router.js";
 import { createFabricThrottle } from "./fabric/throttle.js";
 import { createFabricTree } from "./fabric/tree.js";

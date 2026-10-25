@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createSetCompactThresholdTool } from "../../src/tools/set-compact-threshold-tool.js";
+import { createSetCompactThresholdTool } from "../../src/compact-hint/threshold-tool.js";
 import type { CompactHintState } from "../../src/stack.js";
 
 function state(): CompactHintState {

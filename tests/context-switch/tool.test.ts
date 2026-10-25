@@ -1,9 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  SWITCH_FALLBACK_TEXT,
-  SWITCH_RESUME_TEXT,
-  createSwitchContextTool,
-} from "../../src/tools/switch-context-tool.js";
+import { SWITCH_FALLBACK_TEXT, SWITCH_RESUME_TEXT, createSwitchContextTool } from "../../src/context-switch/tool.js";
 import type { CapabilityStatus } from "../../src/context-switch/capability.js";
 import { ChildSwitchStore, PendingHandoffStore } from "../../src/context-switch/store.js";
 import type { TodoTrackerSnapshot } from "../../src/todo/nudge.js";
@@ -46,7 +42,7 @@ function harness(
   return { callbacks: () => callbacks, compact, execute, notify, sendUserMessage, store, tool };
 }
 
-describe("tools/switch-context-tool", () => {
+describe("context-switch/tool", () => {
   it("rejects print and json modes without switching", async () => {
     for (const mode of ["print", "json"] as const) {
       const h = harness({ mode });
@@ -192,7 +188,7 @@ describe("tools/switch-context-tool", () => {
   });
 });
 
-describe("tools/switch-context-tool: todo-nudge handoff advisory", () => {
+describe("context-switch/tool: todo-nudge handoff advisory", () => {
   it("appends the advisory when open tasks exist and evidence fired", async () => {
     const h = harness({ todoTracker: () => ({ openTaskCount: 2, turnsSinceTouch: 1, hasEvidence: true }) });
     const result = await h.execute();
@@ -299,7 +295,7 @@ function boundaryHarness(
   return { childStore, compact, execute, notify, sendUserMessage, tool };
 }
 
-describe("tools/switch-context-tool boundary mode (child-context-switch plan §2.1)", () => {
+describe("context-switch/tool boundary mode (child-context-switch plan §2.1)", () => {
   it("does not reject print/json — boundary mode is for non-interactive child sessions", async () => {
     for (const mode of ["print", "json"] as const) {
       const h = boundaryHarness({ mode });

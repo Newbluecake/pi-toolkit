@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createCompactTool } from "../../src/tools/compact-tool.js";
+import { createCompactTool } from "../../src/compact-hint/compact-tool.js";
 
 type CompactCallbacks = {
   customInstructions?: string;
@@ -29,7 +29,7 @@ function harness(options: { mode?: "print" | "json"; now?: () => number; cooldow
   return { callbacks: () => callbacks, compact, ctx, execute, sendUserMessage };
 }
 
-describe("tools/compact-tool", () => {
+describe("compact-hint/compact-tool", () => {
   it("rejects print and json modes without compacting", async () => {
     for (const mode of ["print", "json"] as const) {
       const h = harness({ mode });

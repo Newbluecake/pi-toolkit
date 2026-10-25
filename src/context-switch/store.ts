@@ -2,7 +2,7 @@
  * context-switch · 待交付交接文本的暂存（纯数据，无 pi import）。
  *
  * 为什么需要它：`switch_context` 工具必须 fire-and-forget 地调 `ctx.compact()`
- * （await 压缩会与 abort 死锁，见 src/tools/compact-tool.ts 头注释），真正把文本交给 pi 的是
+ * （await 压缩会与 abort 死锁，见 src/compact-hint/compact-tool.ts 头注释），真正把文本交给 pi 的是
  * 之后触发的 `session_before_compact` hook。两者之间需要一个带**新鲜度**语义的交接槽：
  * 陈旧的交接文本比 pi 的通用摘要更危险（它会把几十轮之前的状态冒充成现状），所以过期即作废，
  * 消费一次即清空。

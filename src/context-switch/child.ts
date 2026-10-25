@@ -31,7 +31,7 @@ import { getChildSwitchCapability, type CapabilityStatus } from "./capability.js
 import { collectSessionFacts } from "./session-facts.js";
 import { checkSwitchSelfCheck, type DroppedFingerprintSet, type FingerprintableMessage } from "./selfcheck.js";
 import { CHILD_SWITCH_SOURCE, ChildSwitchStore, PendingHandoffStore, countChildSwitches } from "./store.js";
-import { createSwitchContextTool } from "../tools/switch-context-tool.js";
+import { createSwitchContextTool } from "./tool.js";
 
 /** Zero-impact L2 commit probe (plan §3.1): a `custom` entry, never fed to the LLM. */
 export const BOUNDARY_PROBE_CUSTOM_TYPE = "subagent:boundary-probe";

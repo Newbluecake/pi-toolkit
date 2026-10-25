@@ -7,8 +7,8 @@ import {
   thresholdLineTokens,
   tokenLineExceedsWindow,
   windowScaledForcePercent,
-} from "../compact-hint/threshold.js";
-import type { DynamicStatusView } from "../compact-hint/dynamic/wire.js";
+} from "./threshold.js";
+import type { DynamicStatusView } from "./dynamic/wire.js";
 import type { CompactHintState } from "../stack.js";
 
 export const SetCompactThresholdParams = Type.Object({

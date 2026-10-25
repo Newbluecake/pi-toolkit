@@ -1,10 +1,10 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { CapabilityStatus } from "../context-switch/capability.js";
-import { renderHandoffCore, validateHandoff } from "../context-switch/handoff.js";
-import { normalizeReportedSkills, readSkillFileSniffSync, type SkillFileReader } from "../context-switch/skills.js";
-import { countChildSwitches, type ChildSwitchStore, type PendingHandoffStore } from "../context-switch/store.js";
+import type { CapabilityStatus } from "./capability.js";
+import { renderHandoffCore, validateHandoff } from "./handoff.js";
+import { normalizeReportedSkills, readSkillFileSniffSync, type SkillFileReader } from "./skills.js";
+import { countChildSwitches, type ChildSwitchStore, type PendingHandoffStore } from "./store.js";
 import { buildHandoffAdvisory, type TodoTrackerSnapshot } from "../todo/nudge.js";
 
 /**
