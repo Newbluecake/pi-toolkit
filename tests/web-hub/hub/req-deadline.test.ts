@@ -75,25 +75,33 @@ type Case = "resolve" | "reject" | "timeout";
 
 async function trace(race: Race, kind: Case): Promise<string[]> {
   const ev: string[] = [];
-  let res!: (v: number) => void;
-  let rej!: (e: unknown) => void;
-  const p = new Promise<number>((a, b) => {
-    res = a;
-    rej = b;
-  });
-  const r = race(p, 5, () => new Error("t"));
-  r.then(
-    () => ev.push("resolved"),
-    () => ev.push("rejected"),
-  );
-  queueMicrotask(() => {
-    ev.push("q1");
-    queueMicrotask(() => ev.push("q2"));
-  });
-  if (kind === "resolve") res(1);
-  if (kind === "reject") rej(new Error("x"));
-  await new Promise((r2) => setTimeout(r2, 30));
-  return ev;
+  vi.useFakeTimers();
+  try {
+    let res!: (v: number) => void;
+    let rej!: (e: unknown) => void;
+    const p = new Promise<number>((a, b) => {
+      res = a;
+      rej = b;
+    });
+    const r = race(p, 5, () => new Error("t"));
+    r.then(
+      () => ev.push("resolved"),
+      () => ev.push("rejected"),
+    );
+    queueMicrotask(() => {
+      ev.push("q1");
+      // Deterministic timeout: fire the (fake) timer inside q1, THEN enqueue q2. The relative
+      // order of "rejected" vs q2 exposes how many microtask hops the timeout rejection takes.
+      if (kind === "timeout") vi.advanceTimersByTime(5);
+      queueMicrotask(() => ev.push("q2"));
+    });
+    if (kind === "resolve") res(1);
+    if (kind === "reject") rej(new Error("x"));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    return ev;
+  } finally {
+    vi.useRealTimers();
+  }
 }
 
 describe("deadlineRace", () => {
@@ -101,7 +109,9 @@ describe("deadlineRace", () => {
   const recorded: Record<Case, string[]> = {
     resolve: ["q1", "q2", "resolved"],
     reject: ["q1", "q2", "rejected"],
-    timeout: ["q1", "q2", "rejected"],
+    // Timeout rejects `r` directly (no extra hop), so it lands BEFORE q2. A Promise.race-based
+    // implementation adds a hop and yields ["q1","q2","rejected"] instead.
+    timeout: ["q1", "rejected", "q2"],
   };
   for (const kind of ["resolve", "reject", "timeout"] as const) {
     it(`microtask interleaving matches the baseline (${kind})`, async () => {

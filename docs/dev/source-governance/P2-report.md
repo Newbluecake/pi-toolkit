@@ -17,3 +17,20 @@ Base: 85cf78bb. Three commits, zero behaviour change.
 Verification: typecheck clean; vitest over the §2.5 directories: 384 files / 8860 tests green; `tests/fixtures` diff vs base empty.
 Hub boundary: the only new hub imports are hub-internal (`./req-deadline.js`); `tests/web-hub/boundary.test.ts` green.
 Not done (by plan): consult/tool.ts isTerminalStatus (#40), ask-user Clock.
+
+## Follow-up: discriminating D3 interleaving test (acceptance minor)
+
+**Behaviour-zero argument.** The three replaced helpers (`http.ts`, `run-routes.ts`, `lifecycle.ts` `withDeadline`) shared one body:
+a `new Promise` whose timer calls `reject(mk())` directly and whose `p.then` clears the timer then settles. `deadlineRace` is that body
+verbatim (same timer, same `unref`, same synchronous settle inside the `then` callbacks), so the outer promise settles in the same
+microtask turn as before; the wrappers only differ in the error they build, which they still supply via `onTimeout`/`mapReject`.
+
+**Test fix.** The old timeout case relied on a real 5 ms timer firing after both microtasks, so it could not tell a direct reject from a
+`Promise.race` (one extra hop). `trace()` now uses fake timers and, inside microtask `q1`, fires the timer (`vi.advanceTimersByTime`)
+and only then enqueues `q2`. Sequences measured on the baseline body (`baselineRace`, a verbatim copy of the pre-D3 implementation):
+resolve `[q1,q2,resolved]`, reject `[q1,q2,rejected]`, timeout `[q1,rejected,q2]`. The test asserts both the baseline copy and
+`deadlineRace` against these.
+
+**Mutation check.** Temporarily replacing `deadlineRace` with a `Promise.race([p.then(...), timeoutPromise]).finally(clearTimeout)`
+version made `microtask interleaving matches the baseline (timeout)` fail (`[q1,q2,rejected]` vs expected `[q1,rejected,q2]`);
+the other 12 stayed green. The implementation was restored byte-for-byte (`git status` shows no change to `src/`).
