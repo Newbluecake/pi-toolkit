@@ -331,7 +331,13 @@ describe("cmd-history H1 §4.10 — runTail ENOENT branch fallback", () => {
     a.branchWith("silent");
     status(a, "n1");
     await vi.advanceTimersByTimeAsync(500); // leaf debounce
-    await vi.advanceTimersByTimeAsync(50); // let the ENOENT read settle into the pending request
+    // The ENOENT read is REAL fs I/O: fake timers cannot advance it, so a fixed fake-time slice is a
+    // race on a loaded runner. Poll in real time (≤5 s) until the pending branch_req appears; each
+    // step advances only 1 fake ms, far below TIMING.snapshotMs.
+    for (let i = 0; i < 1_000 && branchReqs(a.sent).length === 0; i++) {
+      await vi.advanceTimersByTimeAsync(1);
+      await sleepReal(5);
+    }
     expect(branchReqs(a.sent)).toHaveLength(1);
 
     await vi.advanceTimersByTimeAsync(TIMING.snapshotMs); // registry deadline fires
@@ -345,7 +351,10 @@ describe("cmd-history H1 §4.10 — runTail ENOENT branch fallback", () => {
     a.branchWith([...baseline(), entry("n2", "m2")]);
     status(a, "n2");
     await vi.advanceTimersByTimeAsync(500);
-    await vi.advanceTimersByTimeAsync(50);
+    for (let i = 0; i < 1_000 && appends(a.events).length === 0; i++) {
+      await vi.advanceTimersByTimeAsync(1); // real fs I/O in the loop — poll, don't guess a fake-time slice
+      await sleepReal(5);
+    }
     expect(appends(a.events)).toHaveLength(1);
     expect(appends(a.events)[0]!.map((e) => e.id)).toEqual(["n2"]);
     h.dispose();

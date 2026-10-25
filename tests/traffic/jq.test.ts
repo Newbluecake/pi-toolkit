@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +18,22 @@ const cleanupJqTempDir = jq.cleanupTempDir;
 
 const jqAvailable = existsSync("/usr/bin/jq");
 const jqDescribe = jqAvailable ? describe : describe.skip;
+
+/**
+ * Installed jq version, probed once. The test expectations that depend on it:
+ *  - exit code of unparsable INPUT: 4 up to jq 1.6, 5 from jq 1.7 ("jq: parse error: …" on stderr);
+ *  - `--version` prints "jq-1.6" / "jq-1.7" / "jq-1.7.1" — probeJq must report exactly that.
+ */
+const jqVersionText = jqAvailable
+  ? (spawnSync("/usr/bin/jq", ["--version"], { encoding: "utf8" }).stdout ?? "").trim()
+  : "";
+const jqVersionMatch = jqVersionText.match(/jq-(\d+)\.(\d+)(?:\.(\d+))?/i);
+const jqMajor = Number(jqVersionMatch?.[1] ?? 0);
+const jqMinor = Number(jqVersionMatch?.[2] ?? 0);
+const jqExpectedVersion = jqVersionMatch
+  ? `${jqMajor}.${jqMinor}${jqVersionMatch[3] === undefined ? "" : `.${jqVersionMatch[3]}`}`
+  : "";
+const jqInputParseExit = jqMajor > 1 || (jqMajor === 1 && jqMinor >= 7) ? 5 : 4;
 
 if (!jqAvailable) console.warn("跳过 jq 测试：/usr/bin/jq 不存在");
 
@@ -80,7 +97,10 @@ jqDescribe("runJq（真 jq）", () => {
   });
 
   it("把非 JSON 输入归类为 input_parse", async () => {
-    await expect(runJq(".", "not json")).rejects.toMatchObject({ kind: "input_parse", exitCode: 4 });
+    await expect(runJq(".", "not json")).rejects.toMatchObject({
+      kind: "input_parse",
+      exitCode: jqInputParseExit,
+    });
   });
 
   it("把不存在的 jq 路径归类为 not_found", async () => {
@@ -109,17 +129,38 @@ jqDescribe("runJq（真 jq）", () => {
     }
   });
 
-  it("probeJq 解析 1.6 并缓存同一路径结果", async () => {
+  it("probeJq 解析已安装 jq 的版本并缓存同一路径结果", async () => {
+    expect(jqExpectedVersion).not.toBe(""); // `jq --version` must be parsable at all
     const before = getSpawnCount();
-    await expect(probeJq("/usr/bin/jq")).resolves.toMatchObject({ ok: true, version: "1.6" });
+    await expect(probeJq("/usr/bin/jq")).resolves.toMatchObject({ ok: true, version: jqExpectedVersion });
     const afterFirst = getSpawnCount();
-    await expect(probeJq("/usr/bin/jq")).resolves.toMatchObject({ ok: true, version: "1.6" });
+    await expect(probeJq("/usr/bin/jq")).resolves.toMatchObject({ ok: true, version: jqExpectedVersion });
     expect(afterFirst).toBeGreaterThan(before);
     expect(getSpawnCount()).toBe(afterFirst);
   });
 });
 
 describe("runJq（stub jq）", () => {
+  // jq ≥ 1.7 reports unparsable input as exit 5 + "jq: parse error: …" (1.6: exit 4). Pinned
+  // against stubs so the classification is verified whatever jq the host has installed.
+  it.each([
+    ["exit 4（jq ≤ 1.6）", "echo 'parse error: Invalid literal at line 1, column 4' >&2; exit 4", "input_parse", 4],
+    [
+      "exit 5 + parse error（jq ≥ 1.7）",
+      "echo 'jq: parse error: Invalid numeric literal at line 1, column 4' >&2; exit 5",
+      "input_parse",
+      5,
+    ],
+    ["exit 5 + 过滤器运行期错误", "echo 'jq: error (at <stdin>:0): x (while parsing)' >&2; exit 5", "runtime_error", 5],
+  ] as const)("输入解析错误分类：%s", async (_name, script, kind, code) => {
+    const stub = makeStubJq(script);
+    try {
+      await expect(runJq(".", "not json", { jqPath: stub.jqPath })).rejects.toMatchObject({ kind, exitCode: code });
+    } finally {
+      stub.cleanup();
+    }
+  });
+
   it("把成功但非 JSON 的 stub 输出归类为 output_invalid", async () => {
     const stub = makeStubJq("echo 'not json'");
     try {

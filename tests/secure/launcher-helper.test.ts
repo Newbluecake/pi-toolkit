@@ -410,6 +410,7 @@ describe("layout / sentinels (§L.1)", () => {
     expect(H.checkLayout(v, { home }).problems.join()).toMatch(/须为真实目录/);
     const home2 = join(root, "home2");
     mkdirSync(join(home2, "gww"), { recursive: true, mode: 0o770 }); // group-writable, not sticky
+    chmodSync(join(home2, "gww"), 0o770); // mkdir's mode is masked by umask (CI: 022 ⇒ 0750) — set it explicitly
     const v2 = buildSkeleton(join(root, "meta2"), join(home2, "gww", "acme"));
     expect(H.checkLayout(v2, { home: home2 }).problems.join()).toMatch(/组\/其他可写/);
   });

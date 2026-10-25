@@ -490,16 +490,27 @@ describe("renameNoReplace (mv -n -T + identity judgement)", () => {
     expect(idOf(join(parent, "bak"))).toEqual(id);
   });
 
-  it("target appears between pre-check and mv: mv exits 0, verdict = failure, nothing replaced", async () => {
-    const { parent, id } = pair("mv2");
-    const bin = mkTmp("mv2bin");
-    const racer = script(bin, "mv", `mkdir "$5" && exec mv "$@"`); // args: -n -T -- from to
-    const r = await T.renameNoReplace({ parent, from: "src", to: "bak", expect: id, mvBin: racer });
-    expect(r.mv.exit).toBe(0);
-    expect(r).toMatchObject({ ok: false, state: "unchanged", reason: "target-exists" });
-    expect(readdirSync(join(parent, "bak"))).toEqual([]);
-    expect(idOf(join(parent, "src"))).toEqual(id);
-  });
+  // `mv -n` exits 0 (coreutils ≤ 9.1) or 1 (≥ 9.2, e.g. CI's Ubuntu 24.04) when it skips because the
+  // target exists. The verdict must be the same for BOTH, whatever the installed mv does — so the
+  // forced variants pin each exit code deterministically and the "real" one follows the host mv.
+  it.each([
+    ["real mv exit (host coreutils)", `mkdir "$5" && exec mv "$@"`, undefined],
+    ["mv exit forced to 0", `mkdir "$5"; mv "$@"; exit 0`, 0],
+    ["mv exit forced to 1", `mkdir "$5"; mv "$@"; exit 1`, 1],
+  ] as const)(
+    "target appears between pre-check and mv (%s): verdict = failure, nothing replaced",
+    async (_n, body, forced) => {
+      const { parent, id } = pair("mv2");
+      const bin = mkTmp("mv2bin");
+      const racer = script(bin, "mv", body); // args: -n -T -- from to
+      const r = await T.renameNoReplace({ parent, from: "src", to: "bak", expect: id, mvBin: racer });
+      if (forced === undefined) expect([0, 1]).toContain(r.mv.exit);
+      else expect(r.mv.exit).toBe(forced);
+      expect(r).toMatchObject({ ok: false, state: "unchanged", reason: "target-exists" });
+      expect(readdirSync(join(parent, "bak"))).toEqual([]);
+      expect(idOf(join(parent, "src"))).toEqual(id);
+    },
+  );
 
   it("existing target (empty dir / file) ⇒ refused before mv", async () => {
     const { parent, id } = pair("mv3");

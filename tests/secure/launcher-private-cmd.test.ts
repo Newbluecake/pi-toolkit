@@ -563,22 +563,29 @@ describe.skipIf(!HAVE_FLOCK || !which("script"))(
       expect((await cli("unlock acme --global")).text).toMatch(/需要在终端里输入口令/);
     }, 60_000);
 
-    it("--global never bypasses mutual exclusion: a private record blocks it 76 before any prompt", async () => {
-      writeSettings({ acme: { private: true } });
-      const f = await fakeInstance();
-      writeRecord({
-        phase: "session",
-        supervisor: f.sup,
-        gocryptfs: f.sup,
-        pi: f.sup,
-        ns: { mnt: f.nsMnt, user: f.nsUser },
-      });
-      const r = await cli("unlock acme --global", { tty: true });
-      expect(r.code, r.text).toBe(76);
-      expect(r.text).toMatch(new RegExp(`正在运行（session，pi pid ${f.sup.pid}）`));
-      expect(r.text).not.toMatch(/Password|口令/);
-      expect(existsSync(join(root, "gocryptfs-calls.log"))).toBe(false);
-    }, 30_000);
+    // fakeInstance() needs `unshare --user --map-root-user --mount` (HAVE_USERNS): on hosts that
+    // forbid unprivileged user namespaces (Ubuntu 24.04 AppArmor, i.e. GitHub's ubuntu-latest) the
+    // flock/unshare child dies at once and /proc/<pid>/task/<pid>/children vanishes (ENOENT).
+    it.skipIf(!HAVE_USERNS)(
+      "--global never bypasses mutual exclusion: a private record blocks it 76 before any prompt",
+      async () => {
+        writeSettings({ acme: { private: true } });
+        const f = await fakeInstance();
+        writeRecord({
+          phase: "session",
+          supervisor: f.sup,
+          gocryptfs: f.sup,
+          pi: f.sup,
+          ns: { mnt: f.nsMnt, user: f.nsUser },
+        });
+        const r = await cli("unlock acme --global", { tty: true });
+        expect(r.code, r.text).toBe(76);
+        expect(r.text).toMatch(new RegExp(`正在运行（session，pi pid ${f.sup.pid}）`));
+        expect(r.text).not.toMatch(/Password|口令/);
+        expect(existsSync(join(root, "gocryptfs-calls.log"))).toBe(false);
+      },
+      30_000,
+    );
 
     it("lock: --lazy --kill together is a usage error; --kill on an ordinary vault notes and runs the old path", async () => {
       expect((await cli("lock acme --lazy --kill")).code).toBe(2);

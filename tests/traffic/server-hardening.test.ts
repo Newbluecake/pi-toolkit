@@ -13,6 +13,7 @@
  * - 外部持锁（busy_timeout=0）下规则写 ⇒ 503「数据库忙」（不无限重试）；
  * - T2b：rewrite settings 响应无 gate 键、serialize_* 标注停用。
  */
+import { connect } from "node:net";
 import { createServer, request as httpRequest, type IncomingMessage } from "node:http";
 import { createRequire } from "node:module";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -500,11 +501,22 @@ describe("T4：连接记账不被加固破坏（T2a 行为保持）", () => {
   it("accepted socket unref 并记账，close 后清空", async () => {
     web = createTrafficServer(engine);
     port = await web.startServer();
+    // `raw()` sends `Connection: close`: on a fast runner the accepted socket is already gone from the
+    // ledger by the time the response is read, so counting after it is a race. Hold one idle
+    // connection open instead — its presence in the ledger is then deterministic.
+    const held = connect({ host: "127.0.0.1", port });
+    const heldClosed = new Promise<void>((resolve) => held.once("close", () => resolve()));
+    await new Promise<void>((resolve, reject) => {
+      held.once("connect", () => resolve());
+      held.once("error", reject);
+    });
+    for (let i = 0; i < 200 && engine.connections.size === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(engine.connections.size).toBeGreaterThanOrEqual(1);
     const res = await raw("/api/state", tokenHeader());
     expect(res.status).toBe(200);
-    expect(engine.connections.size).toBeGreaterThanOrEqual(1);
     await engine.close("test");
     expect(engine.connections.size).toBe(0);
+    await heldClosed; // engine.close destroyed the accepted socket ⇒ our client end closes too
     // close 后端口可重绑（无残留 listener）
     const probe = createServer();
     await new Promise<void>((resolve) => probe.listen(port, "127.0.0.1", () => resolve()));

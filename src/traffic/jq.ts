@@ -265,11 +265,9 @@ export function createJqRunner(): JqRunner {
           ? "not_found"
           : result.code === 3
             ? "compile_error"
-            : result.code === 4
-              ? "input_parse"
-              : result.code === 5
-                ? "runtime_error"
-                : "runtime_error";
+            : result.code === 4 || (result.code === 5 && /^jq: parse error\b/m.test(result.stderr))
+              ? "input_parse" // jq ≤ 1.6: exit 4; jq ≥ 1.7: exit 5 + "jq: parse error: …" on stderr
+              : "runtime_error";
       throw makeError(kind, result.stderr, result.code);
     }
     const lines = result.stdout

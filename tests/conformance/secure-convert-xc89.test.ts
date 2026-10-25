@@ -74,6 +74,12 @@ describe.skipIf(!GNU_MV)("XC8 mv -n -T", () => {
     expect(Object.values(T.FS_MAGIC)).toContain(magic);
   });
 
+  // What `mv -n` exits with when it SKIPS because the target exists depends on the coreutils
+  // release: 0 up to 9.1, 1 from 9.2 on (CI's Ubuntu 24.04 ships 9.4). The safety property pinned
+  // here is only that the exit code is never the verdict — tree.mjs judges by inode — so both are
+  // accepted; the "nothing moved / target untouched" assertions below stay exact.
+  const MV_SKIP_EXITS = [0, 1];
+
   const mvIn = (cwd: string, ...args: string[]) => {
     if (!STRACE) return { status: spawnSync("mv", args, { cwd }).status, trace: "" };
     const traceFile = join(tmp, `trace-${Math.random().toString(36).slice(2)}`);
@@ -97,7 +103,7 @@ describe.skipIf(!GNU_MV)("XC8 mv -n -T", () => {
     const a0 = lstatSync(join(d, "a"));
     const b0 = lstatSync(join(d, "b"));
     const r = mvIn(d, "-n", "-T", "--", "a", "b");
-    expect(r.status).toBe(0); // ⇒ the exit code can never be trusted
+    expect(MV_SKIP_EXITS).toContain(r.status); // ⇒ the exit code can never be trusted
     expect(lstatSync(join(d, "a")).ino).toBe(a0.ino);
     expect(lstatSync(join(d, "b")).ino).toBe(b0.ino);
     expect(readdirSync(join(d, "b"))).toEqual([]);
@@ -113,7 +119,7 @@ describe.skipIf(!GNU_MV)("XC8 mv -n -T", () => {
     mkdirSync(join(d, "a"), { recursive: true });
     writeFileSync(join(d, "c"), "keep");
     const r = mvIn(d, "-n", "-T", "--", "a", "c");
-    expect(r.status).toBe(0);
+    expect(MV_SKIP_EXITS).toContain(r.status);
     expect(readFileSync(join(d, "c"), "utf8")).toBe("keep");
     expect(lstatSync(join(d, "a")).isDirectory()).toBe(true);
     if (STRACE) expect(r.trace).toMatch(/RENAME_NOREPLACE\)\s*=\s*-1 EEXIST/);
