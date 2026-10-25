@@ -11,7 +11,7 @@
  * this file defines its own minimal local types/constants instead of depending on it — P2 is
  * the package that wires the two together.
  *
- * Two frozen, pinned commands (plan §2.2):
+ * Four frozen, pinned commands (plan §2.2 + merged-plan §3.3 — Gr / Gl / Gm / Cc):
  * - Gr — one bounded `for-each-ref` snapshot. Record separator is `\n` (one ref per line);
  *   field separator is a literal NUL from the `%00` escape in the `--format` string (git's own
  *   escape, not a JS escape) — this is NOT `-z` mode. Fields: objecttype, objectname,
@@ -29,11 +29,22 @@
  * - `log -z --format=%H%x1f%P%x1f%an%x1f%at%x1f%s`: NUL between records, `\x1f` between the
  *   first four fields, the subject is the verbatim remainder (may itself contain `\x1f`, though
  *   git's `%s` already collapses the message to one line).
+ * - Gm — one `rev-list --cherry-mark --right-only <H>...<B> --` per merged-badge candidate
+ *   (merged-plan §3.3, P1). Unlike Gr/Gl it READS OBJECT CONTENT (commit/tree/blob, to compute
+ *   patch-ids) — an accepted user decision (merged-plan §0) — so its argv carries the wtdiff-style
+ *   neutralization: L1 (`attrSourceArgs`: empty-tree `--attr-source` + `core.attributesFile=
+ *   /dev/null`), L2 (`neutralizeArgs`: every known driver name blanked), `diff.external=` and a
+ *   fixed `core.bigFileThreshold=512m` (the full-blob patch-id path consumes that key). It never
+ *   reads the work tree or index and never has a pathspec (`--` terminates the revisions).
+ *   Output: one `=<oid>` / `+<oid>` line per right-side commit (`parseCherryMark`).
+ * - Cc — the driver scan; `wtGraphArgs.driverScan()` delegates byte-for-byte to
+ *   `wtDiffArgs.driverScan()` so the graph's source-scan rule "argv only via `wtGraphArgs.*`"
+ *   keeps holding. Graph CONSUMES (never widens) `WTDIFF_DRIVER_NAME_RE` and the Cc regex.
  * - A root commit's `%P` field is empty (zero parents); a shallow boundary commit's `%P` is
  *   also empty even though it logically has history beyond the shallow horizon.
  */
 
-import { WT_PINNED_PREFIX } from "./diff.js";
+import { WTDIFF_DRIVER_NAME_RE, WT_PINNED_PREFIX, attrSourceArgs, neutralizeArgs, wtDiffArgs } from "./diff.js";
 
 // ---------------------------------------------------------------------------
 // Mirrored protocol constants (§3 draft; src/web-hub/protocol/worktree-graph.ts is P0's
@@ -81,6 +92,9 @@ const GR_FORMAT =
 /** Gl's format string, frozen byte-for-byte (§2.2 table / §2.6). */
 const GL_FORMAT = "--format=%H%x1f%P%x1f%an%x1f%at%x1f%s";
 
+/** Gm's fixed `core.bigFileThreshold` (git's own default): the full-blob patch-id path reads it (merged-plan E5). */
+const CHERRY_BIG_FILE_THRESHOLD = "512m";
+
 /**
  * Frozen argv constructors (§2.2). Both are pinned (start with `WT_PINNED_PREFIX`); `log()`'s
  * only request-derived values are the tips themselves, which are git-reported hex object names
@@ -91,6 +105,14 @@ export const wtGraphArgs: {
   refs(): string[];
   /** Gl — commit list over EXACTLY the given tips; never resolves refs itself (plan I4). */
   log(tips: readonly string[]): string[];
+  /**
+   * Gm — `rev-list --cherry-mark --right-only <head>...<tip> --` (merged-plan §3.3). `head`/`tip`
+   * must be full-length lowercase hex for `format` and every driver name must satisfy
+   * `WTDIFF_DRIVER_NAME_RE`; anything else THROWS (caller bug — fail-closed, never "skip and run").
+   */
+  cherry(head: string, tip: string, format: "sha1" | "sha256", drivers: readonly string[]): string[];
+  /** Cc — driver scan; byte-for-byte `wtDiffArgs.driverScan()`. */
+  driverScan(): string[];
 } = {
   refs() {
     return [...graphBase(), "for-each-ref", "--count=2001", GR_FORMAT, "refs/heads", "refs/remotes", "refs/tags"];
@@ -117,6 +139,32 @@ export const wtGraphArgs: {
       ...tips,
       "--",
     ];
+  },
+  cherry(head, tip, format, drivers) {
+    const hexLen = format === "sha1" ? 40 : 64;
+    const hexRe = new RegExp(`^[0-9a-f]{${hexLen}}$`);
+    if (!hexRe.test(head)) throw new Error("wtGraphArgs.cherry: head is not a full-length lowercase hex oid");
+    if (!hexRe.test(tip)) throw new Error("wtGraphArgs.cherry: tip is not a full-length lowercase hex oid");
+    for (const name of drivers) {
+      if (!WTDIFF_DRIVER_NAME_RE.test(name)) throw new Error("wtGraphArgs.cherry: unsafe driver name");
+    }
+    return [
+      ...graphBase(),
+      ...attrSourceArgs(format),
+      ...neutralizeArgs(drivers),
+      "-c",
+      "diff.external=",
+      "-c",
+      `core.bigFileThreshold=${CHERRY_BIG_FILE_THRESHOLD}`,
+      "rev-list",
+      "--cherry-mark",
+      "--right-only",
+      `${head}...${tip}`,
+      "--",
+    ];
+  },
+  driverScan() {
+    return wtDiffArgs.driverScan();
   },
 };
 
@@ -422,4 +470,36 @@ export function classifyGraphExit(code: number, stderr: string): GraphExitReason
   if (code === 129) return "git-too-old";
   if (MISSING_OBJECT_RE.test(stderr)) return "missing-object";
   return "git-failed";
+}
+
+// ---------------------------------------------------------------------------
+// parseCherryMark (Gm's output, merged-plan §3.3)
+// ---------------------------------------------------------------------------
+
+export type CherryMarkResult = { eq: string[]; plus: string[] } | { bad: true };
+
+/**
+ * Parse Gm's output: one `=<oid>` (patch-equivalent to a commit on the HEAD side) or `+<oid>`
+ * line per right-side commit, where `<oid>` is exactly `format`'s hex length. ANY other line —
+ * wrong prefix, wrong length, uppercase, embedded whitespace, a blank line in the middle — makes
+ * the whole result `{ bad: true }`: a half-trusted judgement could only ever over-claim "merged",
+ * so it is all-or-nothing. A `capped` run is also `{ bad: true }` (the last line is cut mid-oid
+ * and the count is unknowable); callers rule `capped` out first and report `unk:"too-many"`. The
+ * single trailing newline git emits is not a line; empty stdout is a valid empty result.
+ */
+export function parseCherryMark(stdout: string, capped: boolean, format: "sha1" | "sha256"): CherryMarkResult {
+  if (capped) return { bad: true };
+  if (stdout === "") return { eq: [], plus: [] };
+  const lines = stdout.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  const hexLen = format === "sha1" ? 40 : 64;
+  const lineRe = new RegExp(`^([=+])([0-9a-f]{${hexLen}})$`);
+  const eq: string[] = [];
+  const plus: string[] = [];
+  for (const line of lines) {
+    const match = lineRe.exec(line);
+    if (match === null) return { bad: true };
+    (match[1] === "=" ? eq : plus).push(match[2]!);
+  }
+  return { eq, plus };
 }
