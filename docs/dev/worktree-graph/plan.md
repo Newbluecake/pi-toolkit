@@ -24,7 +24,8 @@
   暴露面（精确）：up to N commits' subjects, author names, author times, hashes, ref names across local branches / remote-tracking branches / tags /
   detached worktree HEADs; no dedicated email field collected, no file contents read; free text (subjects, author names, ref names) MAY itself contain
   emails/paths/secrets — residual accepted by the user (sole LAN user, password auth, U1 precedent).
-  补注：`wtHeads[].path` 是 worktree 绝对路径，与 `StatusInfo.worktrees` 已广播的同一资产（worktree-web Q1），非新增。
+  - **2026-10-25 补充裁定**：允许 Gm 读取对象内容计算 patch-id（已中和，见 `merged-plan.md` r3）；上文「no file contents read」原文不改，Gm 是唯一例外。
+    补注：`wtHeads[].path` 是 worktree 绝对路径，与 `StatusInfo.worktrees` 已广播的同一资产（worktree-web Q1），非新增。
 - **Q2 refs**：local branches + remote-tracking branches + tags + detached worktree HEADs (no `--all`, no stash/notes).
 - **Q3 mobile (≤480px)**：up to 4 lanes + subject + short hash.
 - **Q4**：expansion state not remembered; default collapsed.
@@ -66,7 +67,7 @@
 - **快照截断（#3）**：for-each-ref 按 refname 排序 ⇒ heads → remotes → tags；行数 >2000 或字节截断 ⇒ 只用完整行，`refsTruncated:true`（遍历范围缩小为这些 refs 的可达集），UI 显示降级。
 - **格式**：仓库对象格式取 tips 的 oid 长度（40|64）；混长 ⇒ 少数派丢弃计 `refsSkipped`。HEAD 取自 membership 的 porcelain 自身行（仅决定「当前」高亮，与 Gr 有毫秒级时差、只影响外观）。
 - **浅克隆**：不 spawn——hub 在 `/proc/self/fd/<common.fd>/shallow` 上一次 `previewFsStep` stat（ENOENT ⇒ 非浅），同 membership 读 `worktrees/<name>` 的手法。
-- **字段与隐私措辞（#10）**：格式串冻结为 `%H %P %an %at %s`——**不采集专用 email 字段**（无 `%ae/%ce/%cn/%b/%N/%G*`），**不读取任何文件正文**；自由文本可能自带邮箱/路径/秘密，属 §0.2 已接受残余。
+- **字段与隐私措辞（#10）**：格式串冻结为 `%H %P %an %at %s`——**不采集专用 email 字段**（无 `%ae/%ce/%cn/%b/%N/%G*`），**不读取任何文件正文**（唯一例外：Gm 的 patch-id 判定读对象，见 `merged-plan.md` §5）；自由文本可能自带邮箱/路径/秘密，属 §0.2 已接受残余。
   解析 `parseGraphLogZ`：NUL 切记录、前四个 `\x1f` 切字段、余为 subject；h/p 须为同格式 hex、t 非负整数，否则丢弃计 `badRecords`；subject ≤200 B、作者 ≤64 B（`truncateText`），C0 控制符 → U+FFFD；父 >8 截断并标 `pT`。
 - **date-order 正确性（#5）**：无回退；`--date-order` 保证集内任何父都排在其所有子之后（拓扑约束），布局测试逐条核验（§3.4）。
   巨型仓库无 commit-graph ⇒ 6 s 超时 ⇒ 504 `E_DEADLINE{reason:"log-timeout"}`，UI 提示「可运行 `git commit-graph write` 后重试」。
@@ -261,7 +262,7 @@ layoutGraph(commits) → { nodes: {lane, color}[], routes: Route[], stubs: Stub[
 ## 6. 不变量
 
 - **I1** 零 agent / `StatusInfo` 改动；无新帧、无 PROTO bump；无 cap ⇒ 面板 DOM 逐字节回落。
-- **I2** 只读、不读工作区内容、无 lazy fetch / transport / gpg / hook / pager；对象、ref、index 不写。
+- **I2** 只读、不读工作区；对象内容只在 Gm 内读取且已中和（L1 + L2）；无 lazy fetch / transport / gpg / hook / pager；对象、ref、index 不写。
 - **I3** 所有 graph git 走 `createPinnedGit`，argv 只来自 `wtGraphArgs`；请求派生值为零（`wt` 只进 membership；tips 来自 git 自己的输出且过 hex 校验）。
 - **I4** Gl 的 tips 只来自同一请求的 Gr 快照 + porcelain；Gl 不解析 ref。
 - **I5** 有界：§2.4 总账、stdout 上限、单飞、在途/令牌桶、响应 ≤512 KiB、渲染 ≤200 行 / 可见 lane ≤12。
@@ -330,3 +331,5 @@ Wave 1：P0 协议 ∥ P1 git 层    Wave 2：P2 hub（P0+P1）∥ P3 UI 逻辑�
 | 14  | Minor   | **接受**：环按完整 `wtHeads.h`（hub 下发 path 与 StatusInfo 精确匹配 label）；暗色三处选择器（含 `.theme-dark`）；芯片文字 4.5:1 测试；sr 文本承载 merge/折叠/父提交                                            | §4.2、§4.3、P5、K6    |
 
 驳回项：无。
+
+> 脚注（#48）：上表 #10「不读取文件正文」为当时的历史处置，保持原样；Gm 例外见 `merged-plan.md` §5.1（暴露面与 r3 裁定）。

@@ -30,8 +30,14 @@ with evidence. This document is a procedure, not a claim that device acceptance 
 
 LAN exposure is deliberately the same as loopback under `"on"`: commit subjects, author
 names/times, hashes, local/remote/tag names and worktree paths. No dedicated email field
-or file body is collected; free text may still contain emails, paths or secrets. This
+or file body is returned; free text may still contain emails, paths or secrets. This
 is the accepted sole-LAN-user boundary, not a secret-scrubbing guarantee.
+
+With `wtgraph.merged.v1` (#48) the hub additionally reads commit/tree/blob objects inside Gm
+(patch-id; neutralised, never the work tree or index) and exposes, per selected branch, full-history
+counts (`t`/`k`), patch-equivalence to the current HEAD, per-commit equivalence marks `e` for
+partly merged branches, and `co` (checked out by a worktree). These derive from blob content and
+may involve denylisted paths; accepted residual (user ruling 2026-10-25), same-width on LAN.
 
 ## K1: Entry, Date Order And CSP
 
@@ -187,6 +193,36 @@ against that limit. Its later mixed-tree measurement is main 219,241 B, lazy 6,8
 total 248,175 B under the 245 KiB total budget. Re-measure current artifacts and report
 the exception separately; do not claim those mixed-tree numbers isolate P5's delta.
 
+## K10: Merged-Branch Marks (#48)
+
+前置：本节验证 `wtgraph.merged.v1`。`npm run build:web` 之后须 `/webhub restart`（hub 与 UI 资产
+都要换新）；已打开的页面请刷新。`webHub.preview` 为 `on`。每条步骤做完在下面 Results 表打勾。
+
+- [ ] **K10a 默认折叠**（本仓库，session 在 dev）：打开 web 详情页 → worktree 面板 → 展开表头
+      「git graph · 最近 N 条提交」（zh；en 为对应英文表头）。默认看不到已合入分支的平行轨道；工具行显示
+      「显示已合入的 N 个分支」，**这个 N 是实际被隐藏的分支数**（P3 `wouldHide`）：`merged.branches` 中
+      `v:"eq"`，且未受保护（不是 HEAD 分支、不是 `co`、不是 `rows[].branch`、tip 不是任何
+      `wtHeads[].h`），且 tip 未被任何保留 tip 依赖的分支。所以 N 可以小于 DevTools Network 里
+      `/api/worktree-graph?...&merged=1` 响应中 `eq` 条目数——逐个核对差额分支确属受保护。
+      逐分支对照 `git rev-list --cherry-mark --right-only dev...<b>`：输出全为 `=` 的分支才可能被折叠。
+- [ ] **K10b 开关、徽章、tooltip**：点开关 → 被藏轨道回来，点和线变为 landed 色，分支芯片后出现
+      「已合入」；部分合入的分支显示「部分已合入 k/t」且默认不折叠；未合入分支无徽章。开关文案变为
+      「隐藏已合入的 N 个分支」（N 即上面的实际被隐藏数），脚注 `· N merged hidden` 消失。hover「已合入」徽章：
+      「按补丁等价判定（git patch-id，忽略空白差异）：本分支独有的 t 个提交在 HEAD 中都有补丁等价的提交」；
+      hover「部分已合入」徽章：同上前缀 + 「本分支独有的 t 个提交中有 k 个…有补丁等价的提交；解冲突或修改后的
+      cherry-pick 可能计为未合入」（「可能计为未合入」只出现在这一个 tooltip）。窗内逐提交标记不完整时追加
+      「（窗内逐提交标记不完整）」。切到英文界面：`merged` / `merged k/t`、`Show/Hide N merged branches`。
+- [ ] **K10c 窄屏** 390×844：默认折叠下 lane ≤3，无折叠泳道菱形，无徽章，无横向溢出。
+- [ ] **K10d 主题**：light / dark 等三个主题下 landed 线与点可辨；merge 行、当前行底色、worktree
+      文字徽章在折叠前后不变；读屏能读出「已合入 HEAD」。
+- [ ] **K10e 不记忆**：同页收起再展开，开关状态保留；刷新页面后恢复默认折叠。
+- [ ] **K10f 执行面与旧 UI 对照**：展开时对 hub 进程执行 `strace -f -e execve -p <hub-pid>`：只出现
+      git 子进程，无 ssh / textconv / filter 程序。另用不认识新 cap 的旧 UI 标签页（或不带 `merged=1`
+      的请求）取图，响应与升级前逐字节相同；旧 hub × 新 UI 时面板不出现开关与徽章。
+- [ ] **K10g 门禁**：`webHub.preview:"loopback"` ⇒ LAN 端没有 `wtgraph.merged.v1`；`"off"` ⇒ 两边都没有。
+      `/webhub restart` 切换后，已展开的页面按新能力重拉。fold 被阻止（refs 被截断）时只有脚注
+      `· fold off`，没有开关（P5 偏差，非缺陷）。
+
 ## Results
 
 | Check                     | Pass / Fail / Not Exercised | Evidence / Exception                                        |
@@ -201,6 +237,7 @@ the exception separately; do not claim those mixed-tree numbers isolate P5's del
 | K7                        |                             |                                                             |
 | K8                        |                             |                                                             |
 | K9                        |                             | Original main delta exceeded; P5 exception documented above |
+| K10 (a–g)                 |                             |                                                             |
 
 Record tester/date, toolkit commit, git version, browser/OS, device/viewport and all
 settings changes. Restore the original preview/LAN settings with `/reload` +

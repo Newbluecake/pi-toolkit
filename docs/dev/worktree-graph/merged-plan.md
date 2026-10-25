@@ -490,3 +490,28 @@ git diff --quiet origin/dev -- tests/fixtures/
 - §8.2 放行条件：① `B40` 在 dev 祖先链上；② I4 已绿；③ 工作区干净；④ §1 坐标复核——`302223c5..B40` 在 §1 涉及的 git/protocol/hub worktree-graph/worktree-diff/hub.ts/audit.ts/UI graph/scope/transport 文件上零改动，坐标沿用。
 - 文件域白名单：`docs/dev/worktree-graph/merged-files.txt`（§8.3；之后只由主会话修改）。
 - 并行方式：各包在主仓库工作区开发（文件域互不相交），主会话按精确路径提交；不开 worktree。
+
+## 实施状态（P6，2026-10-25）
+
+基线 `74f6c916`（B40 `adebe2d6`）。各包均已提交：
+
+| 包                  | 提交       |
+| ------------------- | ---------- |
+| P0 协议             | `49d9c698` |
+| P1 git 层           | `51534296` |
+| P3 UI 逻辑          | `02621b0c` |
+| P2 hub 路由         | `1ff99be9` |
+| P4 UI 传输          | `13d14056` |
+| P5 UI 组件          | `19fedbf7` |
+| P6 文档（本次提交） | 待提交     |
+
+偏差与自定默认汇总（详见各 `merged-P*-report.md`）：
+
+- P0（主会话裁定的边缘语义）：`e` 为 oid 集合，同一 `e` 内重复 oid 拒绝；`eP` 只允许 `part` 上的字面量 `true`（可无 `e`），同 tip 后续条目不能带 `e` 但可带 `eP`。`skipped` 固定为 `branches:[]`（有无 `base` 依 payload.head），拒绝同时携带 `omitted`。
+- P1：`cherry()` 对非法 oid / 驱动名抛异常（fail-closed）；`parseCherryMark` capped ⇒ bad；坏行全或无。
+- P2：无任何 tip 得出判定时跳过尾段；无候选不 spawn；`skipped` 映射（unconfirmed / git-too-old / filter-config / no-head 优先于 shallow）；复核 io 错 ⇒ `attr-changed`；`SingleFlightCache` 增 `itemMaxBytes` / `drop` / `clear`（加法）。
+- P3：`MergedView` / `FoldMergedResult` 增加本地诊断计数 `ops`（BFS 节点 + 父边访问数，不进 wire）；同名 remote 跟随者按首个 `/` 切分（`origin/feat/topic` 跟随 `feat/topic`），remote 名自身含 `/` 无法与含 `/` 的分支名区分，歧义时保守保留提交；同名同 tip 的 remote 跟随者不单独保护目标。
+- P4：`merged=1` 请求用 48 s 客户端超时，其余 35 s 不变。
+- P5：fold off（被阻止折叠）时不渲染开关，只有脚注 `fold off`（与预览场景 7 不同，K10 已按此写）；en 开关文案 `Show/Hide {n} merged branches`；徽章不新增令牌；`--gg-lane-landed` 取 `#566772` / `#93a3aa`；预算增量首屏 +543 B、lazy +1,617 B、CSS +123 B。
+- P6：AGENTS.md 无 graph R11 描述，未改动；R11 条目、Gm、48 s 账本与 §5.2 措辞已写入 `worktree-diff/README.md`，`plan.md` / `acceptance.md` 按清单更新，`src/git/graph.ts` 文件头已在 P1 改完。
+- 真机验收 K10 待用户逐条勾选（`acceptance.md` §K10）。
