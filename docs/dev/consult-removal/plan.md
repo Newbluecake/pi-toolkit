@@ -787,3 +787,11 @@ r1 的 Q1–Q11 已由用户拍板，见文末。r3（S0）也不新增拍板项
 - Q5：schedule 保留持久化字段 `bg.consultMain`（defHash 稳定），工具参数删除、`/schedule --consult` 报错、执行端遇到 true 忽略并提示。
 - Q9（与低风险治理 Q8 冲突，主会话裁定 + 用户确认）：**AGENTS.md 瘦身（治理 ①）先合**；consult 段整段下沉到 `docs/dev/consult/README.md`（带「#40 将删除」横幅），PS2 改为删除该 README 与 AGENTS.md 目录表中的一行。
 - Q2–Q4、Q6–Q8、Q10、Q11：全部按推荐。
+
+## I1 结果与主会话裁定（2026-10-25，dev @ `bd50422e`）
+
+- 全量 vitest（--maxWorkers=4）29295 过 / 6 失败，conformance 33 文件中 31 过。fixtures 只有授权改动（Q1 golden 一处 + PDOC 删除的 `consult-{ab,cache}/` 六个文件）。
+- 失败全部同源：`tests/conformance/consult-preserve.test.ts`（C1/C1 shape/C2/C11 等）在阶段 1 后必然失败——PT 已让 Agent 忽略 `experts`，该 conformance 依赖 `Agent({experts})` 派 consult（`byResult: invalid`）。r3 「PS1b 前保持绿」的预期不成立；**裁定：这是停用入口的预期后果，不是回归**，由 PS1a 删除该套件。
+- `tests/conformance/fabric-xs.test.ts` C-X6（「phase-1 C-P1–C-P5 and consult-preserve C1–C7 remain green」）连带失败——**r3 漏列**：PS1a 文件域加入 `tests/conformance/fabric-xs.test.ts`，把 consult-preserve 从 C-X6 的子运行列表与标题中移除（C-P1–C-P5 保留）。
+- `tests/web-hub/hub/cmd-history-runtail.test.ts` 1 例为既知高负载 flake，与本批无关，另行跟踪。
+- I2（PS1a 合入后）判据：全量 vitest 与 conformance 除既知 flake 外全绿。
