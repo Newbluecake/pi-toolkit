@@ -59,11 +59,13 @@ const detail = {
   // bash-jobs-panel plan §3 包 B (D4)：后台 bash 任务面板。紧凑行内标记（摘要分段、状态/
   // exit/grace/字节/新鲜度 token）两种语言都只用英文 token（AGENTS.md UI 文本规则）——zh 保
   // 持逐字节一致；只有 aria 标签真正翻译。
+  // 2026-10-25 用户要求「对齐语言」：抽屉 Bash 分组标题的计数段（运行中/已完成/失败/已归档）
+  // 改为中文，与相邻的「已归档 {n}」折叠行一致；exit/grace 等状态 token 仍保持英文。
   bashJobsTitle: "Bash",
   bashJobsSummary: "后台 bash 任务：{running} 个进行中、{done} 个已完成、{failed} 个失败",
-  bashJobsRunning: "{n} running",
-  bashJobsDone: "{n} done",
-  bashJobsFailed: "{n} failed",
+  bashJobsRunning: "运行中 {n}",
+  bashJobsDone: "已完成 {n}",
+  bashJobsFailed: "失败 {n}",
   bashJobsExit: "exit {n}",
   bashJobsGrace: "grace",
   bashJobsNoOutput: "no output yet",
@@ -95,7 +97,7 @@ const detail = {
   clearBusyLabel: "清空中…",
   clearTitle: "新会话（/clear）",
   clearFailed: "新会话启动失败（{code}）",
-  bashJobsArchived: "{n} archived",
+  bashJobsArchived: "已归档 {n}",
   // scheduled-reports W1（方案 r3 §5.6）：详情头部「定时」按钮，打开懒加载的 SchedulePanel
   //（hub cap sched.v1 + 卡片有 sessionId 才出现；否则零痕迹）。
   scheduleOpenTitle: "定时任务",
