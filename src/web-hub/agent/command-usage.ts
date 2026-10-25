@@ -17,7 +17,7 @@
  */
 import { CMD_ARGS } from "../protocol/command-args.js";
 import type { CommandKind } from "./command-policy.js";
-import { sanitizeText } from "./command-capture.js";
+import { sanitizeText } from "../../commands/capture.js";
 
 /**
  * Hand-written usage lines for pi-toolkit's own commands. Values are taken from the

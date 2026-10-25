@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { createWebHubCommand } from "../../src/commands/webhub.js";
-import { createCommandCaptureEngine, wrapCommandApi } from "../../src/web-hub/agent/command-capture.js";
+import { createCommandCaptureEngine, wrapCommandApi } from "../../src/commands/capture.js";
 import type { LanReqFrame } from "../../src/web-hub/protocol/messages.js";
 
 function harness(confirmed = true) {

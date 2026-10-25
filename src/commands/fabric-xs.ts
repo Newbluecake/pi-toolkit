@@ -1,5 +1,5 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
-import { isFeishuInvocation, isWebInvocation } from "../web-hub/agent/command-capture.js";
+import { isFeishuInvocation, isWebInvocation } from "./capture.js";
 import { isValidXsSessionId } from "../config/settings.js";
 import type { XsReplyLedger } from "../fabric/xs/reply-ledger.js";
 import type { SessionFence } from "../fabric/xs/fence.js";

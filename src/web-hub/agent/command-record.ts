@@ -41,7 +41,7 @@ import {
   type CmdRecordSource,
   type CmdRecordState,
 } from "../protocol/cmd-record.js";
-import { sanitizeText } from "./command-capture.js";
+import { sanitizeText } from "../../commands/capture.js";
 
 /** §4.3: lazy-start threshold — a handler settling within this window writes ONE end, no start. */
 export const START_DELAY_MS = 400;

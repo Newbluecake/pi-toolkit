@@ -1,5 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { isWebInvocation } from "../web-hub/agent/command-capture.js";
+import { isWebInvocation } from "../commands/capture.js";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {

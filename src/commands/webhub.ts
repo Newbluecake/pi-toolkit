@@ -65,7 +65,7 @@ import {
 import { currentConnection, newAdminRid } from "../web-hub/agent/connection.js";
 import { fetchTfaStatus, runTwofaCommand, type TwofaCommandDeps } from "../web-hub/agent/twofa-cmd.js";
 import { runUsersCommand, type LanUsersPort } from "../web-hub/agent/users-cmd.js";
-import { isWebInvocation } from "../web-hub/agent/command-capture.js";
+import { isWebInvocation } from "./capture.js";
 import { isPrivateNsSession, judgePrivateNsGate, type PrivateNsGateVerdict } from "../secure/domain.js";
 import { FEISHU_OPEN_ID_RE } from "../web-hub/protocol/feishu.js";
 import { loadFeishuBotWarnings, type FeishuBotWarning } from "../config/settings.js";

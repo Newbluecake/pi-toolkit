@@ -36,7 +36,7 @@ import {
   type CompleteReplyFrame,
   type CompleteReqFrame,
 } from "../protocol/command-args.js";
-import { sanitizeText } from "./command-capture.js";
+import { sanitizeText } from "../../commands/capture.js";
 import { effectivePolicy, resolveCommandPolicy, type CommandPolicy } from "./command-policy.js";
 import { classifyCommand, type CommandsPort } from "./slash.js";
 

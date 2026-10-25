@@ -5,7 +5,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { createBuiltinBridge, type BuiltinBridgeDeps } from "../../../src/web-hub/agent/builtin-bridge.js";
-import type { CommandCapturePort, CaptureInvocation } from "../../../src/web-hub/agent/command-capture.js";
+import type { CommandCapturePort, CaptureInvocation } from "../../../src/commands/capture.js";
 import type { CmdFrame, CmdOrigin, CommandOutputWire } from "../../../src/web-hub/protocol/messages.js";
 
 const ORIGIN: CmdOrigin = { listener: "loopback", ip: "127.0.0.1", reqId: "abcdef0123456789" };

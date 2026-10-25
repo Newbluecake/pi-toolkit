@@ -132,7 +132,7 @@ import { createPromptSectionHub } from "./sysprompt/hub.js";
 import { agentTypesSection, availableModelsSection } from "./sysprompt/core-sections.js";
 import { wireHud } from "./hud/index.js";
 import wireAskUser from "./ask-user/index.js";
-import { wrapCommandApi, type CommandCapturePort } from "./web-hub/agent/command-capture.js";
+import { wrapCommandApi, type CommandCapturePort } from "./commands/capture.js";
 import type { CommandRecorder } from "./web-hub/agent/command-record.js";
 import type { ArgCompleter } from "./web-hub/agent/command-complete.js";
 import wireFeishuNotify from "./feishu-notify/index.js";

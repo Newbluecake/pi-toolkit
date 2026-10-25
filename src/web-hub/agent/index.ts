@@ -114,7 +114,7 @@ import type { CacheKeepaliveWire, QuotaWire } from "../protocol/messages.js";
 import { cacheKeepaliveFingerprint, projectCacheKeepalive, type CacheKeepaliveInput } from "./cache-keepalive.js";
 import type { ProviderVerdict } from "../../quota/ladder.js";
 import type { QuotaProblem } from "../../quota/types.js";
-import { createCommandCapture, type CommandCapturePort } from "./command-capture.js";
+import { createCommandCapture, type CommandCapturePort } from "../../commands/capture.js";
 import { createCommandRecorder, type CommandRecorder, type CommandRecorderDeps } from "./command-record.js";
 import { cmdHistoryStatusLevel, formatCmdHistoryStatusLines } from "./cmd-history-status.js";
 import { createCommandHandler, type InputEventLike, type MessageStartLike } from "./commands.js";

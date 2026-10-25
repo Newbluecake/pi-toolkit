@@ -5,7 +5,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
-import { wrapCommandApi, type CommandCapturePort } from "../../../src/web-hub/agent/command-capture.js";
+import { wrapCommandApi, type CommandCapturePort } from "../../../src/commands/capture.js";
 import type { CommandRecorder, RecordHandle } from "../../../src/web-hub/agent/command-record.js";
 import type { CmdRecordData } from "../../../src/web-hub/protocol/cmd-record.js";
 

@@ -29,7 +29,7 @@
 // per spec) without touching each of the five tool bodies.
 
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { isWebInvocation } from "../web-hub/agent/command-capture.js";
+import { isWebInvocation } from "../commands/capture.js";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
 import { TodoPanel, TodoWidget, WIDGET_RECENT_COMPLETED } from "./ui.js";

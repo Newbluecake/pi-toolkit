@@ -4,14 +4,14 @@ import type {
   ExtensionUIContext,
   RegisteredCommand,
 } from "@earendil-works/pi-coding-agent";
-import type { ArgCompleter } from "./command-complete.js";
-import type { CommandRecorder as CommandRecorderLike, RecordHandle } from "./command-record.js";
+import type { ArgCompleter } from "../web-hub/agent/command-complete.js";
+import type { CommandRecorder as CommandRecorderLike, RecordHandle } from "../web-hub/agent/command-record.js";
 import {
   isFeishuCmdOrigin,
   type CmdOrigin,
   type CommandOutputEntry,
   type CommandOutputWire,
-} from "../protocol/messages.js";
+} from "../web-hub/protocol/messages.js";
 
 export interface CaptureInvocation {
   cmdId: string;

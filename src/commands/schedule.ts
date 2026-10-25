@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { randomBytes } from "node:crypto";
-import { isFeishuInvocation, isWebInvocation } from "../web-hub/agent/command-capture.js";
+import { isFeishuInvocation, isWebInvocation } from "./capture.js";
 import { actionRefusal } from "../schedule/agent/mode.js";
 import {
   createTask,

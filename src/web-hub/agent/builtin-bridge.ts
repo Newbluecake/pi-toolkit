@@ -30,7 +30,7 @@ import type {
 } from "../protocol/messages.js";
 import { buildSlashText, classifyCommand, type CommandsPort } from "./slash.js";
 import { effectivePolicy, resolveCommandPolicy, type CommandPolicy } from "./command-policy.js";
-import type { CommandCapturePort } from "./command-capture.js";
+import type { CommandCapturePort } from "../../commands/capture.js";
 import type { CommandRecorder } from "./command-record.js";
 import type { CmdRecordNotice, CmdRecordState } from "../protocol/cmd-record.js";
 import { isFeishuCmdOrigin, type CmdOrigin } from "../protocol/messages.js";

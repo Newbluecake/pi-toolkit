@@ -16,9 +16,9 @@ import {
   isWebInvocation,
   wrapCommandApi,
   type CommandCapturePort,
-} from "../../../src/web-hub/agent/command-capture.js";
-import { wireWebHub } from "../../../src/web-hub/agent/index.js";
-import { SETTINGS } from "./helpers.js";
+} from "../../src/commands/capture.js";
+import { wireWebHub } from "../../src/web-hub/agent/index.js";
+import { SETTINGS } from "../web-hub/agent/helpers.js";
 
 /** A minimal fake ExtensionAPI that records every call and its `this` receiver. */
 function fakeApi(): ExtensionAPI & { calls: Array<{ prop: string; args: unknown[]; self: unknown }> } {

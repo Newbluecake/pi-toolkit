@@ -28,7 +28,7 @@ import {
   createCommandCaptureEngine,
   wrapCommandApi,
   type CommandCaptureEngine,
-} from "../../../src/web-hub/agent/command-capture.js";
+} from "../../../src/commands/capture.js";
 import { createBuiltinBridge } from "../../../src/web-hub/agent/builtin-bridge.js";
 import { createCommandHandler, type CommandHandlerDeps } from "../../../src/web-hub/agent/commands.js";
 import { createCommandLedger } from "../../../src/web-hub/agent/ledger.js";

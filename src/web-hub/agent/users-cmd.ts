@@ -1,7 +1,7 @@
 /** Local-TUI-only LAN account management over the trusted, deadline-bounded agent socket. */
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { LanReqFrame, LanResFrame } from "../protocol/messages.js";
-import { isWebInvocation } from "./command-capture.js";
+import { isWebInvocation } from "../../commands/capture.js";
 import { newAdminRid } from "./connection.js";
 
 export interface LanUsersPort {

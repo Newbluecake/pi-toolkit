@@ -76,7 +76,7 @@ export const CMD_RECORD_ARGS_MAX_CHARS = 512;
 export const CMD_RECORD_ERROR_MAX_CHARS = 512;
 
 // --- output re-budget (§4.5: same numbers as the capture engine, mirrored here because
-// protocol must not import agent/command-capture.ts; the UI hand-mirrors them in turn) ---
+// protocol must not import commands/capture.ts; the UI hand-mirrors them in turn) ---
 
 /** Single output entry text cap, UTF-8 bytes (clip + "…" + `clipped:true` beyond). */
 export const CMD_RECORD_OUTPUT_MAX_ENTRY_BYTES = 8 * 1024;
