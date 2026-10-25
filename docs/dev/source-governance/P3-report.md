@@ -29,3 +29,9 @@ C：见上。测试改动：`tests/rpc/rpc.test.ts`（import 路径）、`tests/
 - `npm run typecheck`（tsc×2 + vue-tsc）通过。
 - `npx vitest run tests/memory tests/sysload tests/schedule tests/web-hub tests/todo tests/cache-ttl tests/external-agent tests/extensions tests/core tests/delivery tests/runtime tests/rpc`：915 个文件、19668 通过、4 跳过，含 `tests/web-hub/boundary.test.ts` 与 lan-security-surfaces。
 - 改动文件 `prettier --check` 通过。
+
+## 补充（主会话，2026-10-25）
+
+- 观察组（本批未删，留待后续）：完整清单见 `plan-lowrisk.md` §3.5，本包未删其中任何一项；核验中降为观察的条目已在上文列出。
+- 逐条 rg 核验输出未内联：原始证据由开发阶段生成（`/tmp/p3-evidence.json`、`/tmp/p3-c-evidence.json`，临时文件），验收员已对 63 项删除逐条重新核验（全部只剩声明命中），结论见验收记录。
+- 历史文档例外（主会话裁定）：`readStopMarker` 在 `docs/dev/web-hub/control-plan.md` 3 处；`lan-security-stubs` / `unimplementedLanSecurityStore` 在 `docs/dev/web-hub/lan-security-P0-surfaces.md:36`。
