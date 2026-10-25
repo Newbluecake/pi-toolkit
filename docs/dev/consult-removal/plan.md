@@ -1,10 +1,22 @@
-# #40 彻底移除 consult 子系统 — 施工方案（r2，只出方案）
+# #40 彻底移除 consult 子系统 — 施工方案（r3，S0 坐标已刷新，待开工）
 
 > 状态：r2，按评审（gpt-6.1-sol：1 Blocker / 4 Major / 4 Minor）和主会话排期裁定修订。用户已拍板的内容见文末「用户拍板（2026-10-25）」，与该节冲突的以该节为准。
 > **排期**：#40 的全部包都 **blockedBy 低风险治理批**（`docs/dev/source-governance/plan-lowrisk.md`，合入顺序 P6B→P2→P3→P6M→P1）**整批合入**之后才开工，第一步是 §4.0 的 S0 坐标刷新。两者不再并行。
-> 基线：本稿的坐标取自 dev @ `b667d880`，并在 r2 写作时复核过。低风险批合入后，所有坐标都要由 S0 重新生成。
+> 基线：**r3 起坐标以 dev @ `88da5b81` 为准**（S0 于 2026-10-25 完成，结果见 §4.0.1）。低风险批对 #40 文件域的改动只有：`ui/fleet-panel.ts` 少 5 行、几处 import 行替换（`index.ts`/`stack.ts`/`commands/{schedule,status}.ts`/`web-hub/agent/index.ts`，这些文件行数不变）。所以 §1.3 的其余坐标与 b667d880 相同，已逐项复核。
 
 ## 修订记录
+
+### r3（2026-10-25，S0 坐标刷新）
+
+1. **前置确认**：低风险批 17 个提交（P6B、P2×4、P3×2、P6M×4、P1×4、302223c5、88da5b81）、#43 的 2 个提交、本方案 2c019f17，全部在 dev 祖先链上（§4.0.1 表）。
+2. **路径替换**：按 P6M/P2/P3 报告套用。#40 文件域里需要更新的只有 `src/cache-ttl/keepalive-service.ts`（原 `service/cache-keepalive.ts`，只有注释命中，不改）和 `ui/fleet-panel.ts` 的行号（consult 行改为 :16、:104-108、:404、:454）。bash/context/compact 工具、command-capture、redact、rpc/client 的移动不触及 #40 文件域；`tests/tools/model-facing-strings.test.ts` 和 `commands/schedule.ts` 的 import 已被 P6M 改过，PT 在新内容上修改。
+3. **grep 增删**（相对 r2/b667d880）：src 命中文件少了 `service/cache-keepalive.ts`、`tools/bash-tool.ts`，多了 `cache-ttl/keepalive-service.ts`、`bash/tool.ts`，四处都是英文动词或注释，不改。tests 少了 `web-hub/agent/command-capture.test.ts`，多了 `commands/capture.test.ts`（注释）和 **`tests/docs/agents-md.test.ts`**（K2 套件名单里有 `consult-preserve`，自带门控；K8 链接存在性），后者归 PS2。字符串复核新增 `extend-timeout-tool.ts:239`（工具描述，模型可见）归 PT，`settings.ts:1725` 归 PS2，`SchedulePanel.vue:16`（模板注释）不改；`convert.mjs` 行号变为 :2734。
+4. **闭合检查基线**（§4.3.1）：`expert-scope` 的导入方多了 `tests/workflow/host.test.ts`、`tests/integration/workflow-experts.test.ts`，都在 PW 域内，闭合。**新发现**：`tests/service/spawn-service.test.ts:172-250` 断言 resume 原样继承带 `abArm` 的 META（:204 `toEqual(META)`），PT 的 `pickInheritableDispatchMeta` 会让它失败，所以**并入 PT 文件域**。`tests/service/runtime-adapter-instrumentation.test.ts:101` 只是原样镜像，不受影响，列入 abArm 允许列表（PS1a 处理）。
+5. **P1 搬迁清单落到 PS2**（§4.2 PS2 表按实际行号重写）：AGENTS.md :82（peer bump 第 2 条的 consult-preserve）、:95、:110（`src/consult/` 行）、:134、:139；README 共 9 份 17 处，另有 `docs/dev/consult/README.md` 整删。`web-hub/README.md:201`、`fabric-cross-session/README.md:205` 是英文动词，不改。PS2 文件域加入 `tests/docs/agents-md.test.ts`（K2 名单去掉 `consult-preserve`）。
+6. **P3 影响**：P3 没有删除 #40 依赖的导出。`core/message.ts` 只删了 `isMessageKey`，`WakeExclusion` 不受影响；P2 有意保留了 `consult/tool.ts` 自己的 `isTerminalStatus` 副本，它随 PS1b 删除。
+7. **#43 已合入**：PS1b 改 `tests/secure/guard-points.test.ts` 不再需要等待（§4.2、§4.4）。
+8. **冲突预检**：附录 A 的 spec 跑 `conflict-check.mjs` 结果 exit 0，五包零交集。
+9. **无新增拍板项。**
 
 - r2.1（2026-10-25，主会话）：复审有条件通过（7/9 闭合），收口两条：PT 的 abArm 检查拆为「生产者/schema」与「旧数据兼容用例精确允许列表」（复审 #1）；PDOC 文件域加入 `scripts/exp/topic-judge-eval/README.md`，只删引用 exp6 脚本的历史先例句（复审 #8）。
 
@@ -41,7 +53,7 @@
 
 ---
 
-## 1. 影响面清单（b667d880 坐标；S0 会按低风险批合入后的布局刷新）
+## 1. 影响面清单（坐标 @88da5b81，S0 已刷新）
 
 ### 1.1 冻结物核查
 
@@ -102,7 +114,7 @@
   - PS1b：删除这个成员和对 `consult/index.js` 的类型导入。
 - `src/tools/result-tool.ts`（11，PD）：停止调用 `formatConsultCacheLine`，去掉 import。
 - `src/tools/list-subagents-tool.ts:322`（PT）：模型可见描述。
-- `src/tools/extend-timeout-tool.ts:126`（PT）：运行时报错文本里的「e.g. a consult,」。
+- `src/tools/extend-timeout-tool.ts:126`（PT）：运行时报错文本里的「e.g. a consult,」；**:239 工具描述里的「(consult, /goal verifier, RPC)」**（r3 新增）。
 - `src/tools/workflow-tool.ts:67,87-95`（PW）。
 - `src/tools/schedule-tool.ts:100-102,171`（PT）：删除参数。
 - `src/commands/schedule.ts:44,77,145-146,204`（PT）。
@@ -123,7 +135,7 @@
 
 **TUI / web 显示（PD）**
 
-- `src/ui/fleet-panel.ts`（低风险 P2 D2 先改过 :41）、`src/ui/fleet-widget.ts`。
+- `src/ui/fleet-panel.ts`（P2 D2 后为 :16 import、:104-108 字段、:404 注释、:454 赋值）、`src/ui/fleet-widget.ts`。
 - `src/web-hub/agent/{status,run-transcript,index}.ts`：index 改用本地结构类型，不再导入 `ConsultTranscriptDiagnostics`。
 - UI：`drawer/RunTranscript.vue`、`fleet/FleetTree.vue`（含 `run-cachemark` span 和 `cacheMarkOf`）、`styles/drawer.css:178-200`、i18n `{zh,en}/{fleet,drawer}.ts`。
 - `ScheduleReview.vue` 和 `i18n/schedule-extra.ts` 归 PT。
@@ -136,18 +148,21 @@
 
 *_字符串命中复核（r2 新增；方法：`rg -n -i consult src -g '!src/consult/**' | rg -v '^\S+:\d+:\s*(//|\*|/\*)' | rg -i "[\"'\`][^\"'\`]*consult"`）*_
 
-| 位置                                                                                                                                                                                                                            | 性质                              | 归属         |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | ------------ |
-| `quota/render.ts:212`                                                                                                                                                                                                           | 模型提示（`droidPoolAdviceLine`） | PT           |
-| `extend-timeout-tool.ts:126`                                                                                                                                                                                                    | 运行时报错文本                    | PT           |
-| `setting-specs.ts:114`                                                                                                                                                                                                          | `/agent settings` 描述            | PS2          |
-| `secure/command.ts:131`                                                                                                                                                                                                         | `/secure status` 文本             | 不动（R-F1） |
-| `agent-tool.ts:206,221-230,477`、`list-subagents-tool.ts:322`、`schedule-tool.ts:101`、`workflow-tool.ts:88`、`external-agent/messages.ts:11,14,118,138`、`schedule/agent/bg.ts:152,157`、`commands/schedule.ts:77,145-146,204` | 模型或用户可见                    | 已在各包     |
-| `runtime-adapter.ts:840,921,1155,1174,1236`、`session-driver.ts:962-982`、`spawn-service.ts:62,1217`、`stack.ts:2772,3457`、`request-threading.ts:66-68`、`run-journal.ts:60-88`、`core/*`                                      | 代码标识或日志                    | PS1a/PS1b    |
-| `web-hub/hub/run-transcript.ts:349`、`web-hub/protocol/**`                                                                                                                                                                      | 协议兼容                          | 不动         |
-| `secure/bin/*.mjs`、`secure/domain.ts:176`                                                                                                                                                                                      | vault 布局                        | 不动         |
+| 位置                                                                                                                                                                                                                            | 性质                                                | 归属         |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ------------ |
+| `quota/render.ts:212`                                                                                                                                                                                                           | 模型提示（`droidPoolAdviceLine`）                   | PT           |
+| `extend-timeout-tool.ts:126`                                                                                                                                                                                                    | 运行时报错文本                                      | PT           |
+| `extend-timeout-tool.ts:239`（r3 新增）                                                                                                                                                                                         | **工具描述**（`extend_subagent_timeout`，模型可见） | PT           |
+| `config/settings.ts:1725`（r3 新增）                                                                                                                                                                                            | `TIME_SETTING_MS_PATHS` 条目                        | PS2          |
+| `web-hub/ui/src/components/schedule/SchedulePanel.vue:16`（r3 新增）                                                                                                                                                            | 模板注释（「consult r1 Q3」）                       | 不改         |
+| `setting-specs.ts:114`                                                                                                                                                                                                          | `/agent settings` 描述                              | PS2          |
+| `secure/command.ts:131`                                                                                                                                                                                                         | `/secure status` 文本                               | 不动（R-F1） |
+| `agent-tool.ts:206,221-230,477`、`list-subagents-tool.ts:322`、`schedule-tool.ts:101`、`workflow-tool.ts:88`、`external-agent/messages.ts:11,14,118,138`、`schedule/agent/bg.ts:152,157`、`commands/schedule.ts:77,145-146,204` | 模型或用户可见                                      | 已在各包     |
+| `runtime-adapter.ts:840,921,1155,1174,1236`、`session-driver.ts:962-982`、`spawn-service.ts:62,1217`、`stack.ts:2772,3457`、`request-threading.ts:66-68`、`run-journal.ts:60-88`、`core/*`                                      | 代码标识或日志                                      | PS1a/PS1b    |
+| `web-hub/hub/run-transcript.ts:349`、`web-hub/protocol/**`                                                                                                                                                                      | 协议兼容                                            | 不动         |
+| `secure/bin/*.mjs`、`secure/domain.ts:176`                                                                                                                                                                                      | vault 布局                                          | 不动         |
 
-r1 列为「仅注释命中」的其余文件（`cache-ttl/*`、`traffic/warming.ts`、`bash/process.ts`、`hud/footer.ts`、`delivery/*`、`core/format.ts`、`tools/result-text.ts`、`fabric/*`、`external-agent/droid/session.ts`、`web-hub/agent/{xs,commands}.ts`、`web-hub/protocol/{feishu,worktree-graph}.ts`、`web-hub/ui/**` 的 logic/composables 等），经上面的过滤确认都只在注释里，或者是英文动词 consult，**不改**。S0 刷新时重跑同一条命令，确认没有新增。
+r1 列为「仅注释命中」的其余文件（`cache-ttl/*`（含 P6M 移入的 `cache-ttl/keepalive-service.ts:178,307`）、`bash/tool.ts:135`、`traffic/warming.ts`、`bash/process.ts`、`hud/footer.ts`、`delivery/*`、`core/format.ts`、`tools/result-text.ts`、`fabric/*`、`external-agent/droid/session.ts`、`web-hub/agent/{xs,commands}.ts`、`web-hub/protocol/{feishu,worktree-graph}.ts`、`web-hub/ui/**` 的 logic/composables 等），经上面的过滤确认都只在注释里，或者是英文动词 consult，**不改**。S0 刷新时重跑同一条命令，确认没有新增。
 
 ### 1.4 tests（归属见 §4.2；完整清单以 S0 重跑的 `rg -li 'consult|experts|abArm|consultMain|forkSessionFrom' tests` 为准）
 
@@ -175,6 +190,8 @@ r1 列为「仅注释命中」的其余文件（`cache-ttl/*`、`traffic/warming
   - `tests/integration/explicit-timeout-producers.test.ts:323-327`（经 Agent `experts:["main"]` 走 consult-main）：PT 删除该用例。
   - `tests/integration/consult-ab-instrumentation.test.ts`：PT 删掉 abArm 用例，只保留 lane/packageId 继承和 verdict 断言，并改名为 `dispatch-meta-instrumentation.test.ts`；`diag.experts`/`consults` 断言随 PS1a 删除。
   - `tests/service/admission-reason.test.ts:240`（"external: consult experts unsupported"）：PS1a。
+  - **r3 新增** `tests/docs/agents-md.test.ts:36,49`：K2 名单里有 `consult-preserve`，套件文件不存在时自动跳过，所以 PS1a 删套件不会让它变红；PS2 把这一项从名单里删掉。K8 要求 AGENTS.md 链接的 README 存在，所以删 `docs/dev/consult/README.md` 时必须同一提交删掉 AGENTS.md:110 那一行。
+  - **r3 新增** `tests/service/spawn-service.test.ts:172-250`（resume 继承 dispatchMeta 的两例，META 带 `abArm`）：归 PT。`tests/service/runtime-adapter-instrumentation.test.ts:101`（原样镜像）：不受 PT 影响，留到 PS1a。
   - `tests/runtime/tool-scope.test.ts:43-49`（consult 是 reserved）：保留，因为 reservation 还在；`bashJobGrant({consult})` 的调用在 PS1a 改名。
 - **其余修改**（按包，见 §4.2）：core（core、run-journal、presentation-diag、state-machine 矩阵和 property、dispatch-meta、verdict-schema）、service、runtime、workflow、tools、schedule、memory、sysprompt、web-hub、ui、commands、fabric/revive。
 - **不动**：`tests/conformance/traffic.test.ts:299` 的 `consult: { enabled: false }`（正好证明残留键被忽略）、`tests/fixtures/**`（Q1 那份 golden 除外）、`tests/secure/stack-roots.test.ts`（清扫语义逐字保留，所以真实装配测试继续有效）。
@@ -262,7 +279,7 @@ r1 列为「仅注释命中」的其余文件（`cache-ttl/*`、`traffic/warming
 
 ## 4. 拆包
 
-### 4.0 S0：开工前坐标刷新（blockedBy 低风险批 P1 合入；L1，只读调研 + 主会话提交文档）
+### 4.0 S0：开工前坐标刷新（blockedBy 低风险批 P1 合入；L1，只读调研 + 主会话提交文档）——r3 已完成，结果见 §4.0.1
 
 低风险批（P6B→P2→P3→P6M→P1）全部合入 dev 之后、#40 任何写包开工之前执行。产出是本文件的 r3（只改文档）。
 
@@ -289,6 +306,48 @@ r1 列为「仅注释命中」的其余文件（`cache-ttl/*`、`traffic/warming
 4. **重跑闭合检查**（§4.3 命令）的「开工前」版本：确认每包要删的导出，其导入方都在本包文件域内。
 5. **冲突预检**：按 §4.2 文件域写 `/tmp/consult-removal-spec.json`，跑 `node skills/dev-flow/scripts/conflict-check.mjs /tmp/consult-removal-spec.json`。阶段 1 的五个包须零交集；`ext:#43` 用 `src/secure/**`、`tests/secure/**`、`tests/integration/traffic-lifecycle-process.test.ts` 表示，与阶段 1 零交集。
 6. 把刷新结果写回本文件（r3 修订记录写明变化），主会话精确路径提交后，阶段 1 开工。
+
+#### 4.0.1 S0 结果（r3，2026-10-25，dev @ `88da5b81`）
+
+**① 祖先链**：`git merge-base --is-ancestor <c> dev` 全部通过。
+
+| 批          | 提交                                                                   |
+| ----------- | ---------------------------------------------------------------------- |
+| 低风险 P6B  | `c1454719`                                                             |
+| 低风险 P2   | `36b8857c`、`9fb9b96e`、`71942242`、`bcfd753a`                         |
+| 低风险 P3   | `a1d4ccdd`、`fcbf71dc`                                                 |
+| 低风险 P6M  | `ce76d830`（M1）、`99aa0cde`（M2）、`add4ec1f`（M3）、`930de1fa`（M4） |
+| 低风险 P1   | `3b980ad1`、`611cf525`、`a488b429`、`0707b9df`                         |
+| 其他        | `302223c5`、`88da5b81`                                                 |
+| #43         | `0f74709d`、`4ea6bfec`                                                 |
+| 本方案 r2.1 | `2c019f17`                                                             |
+
+**② 路径替换**（以 P6M/P2/P3 报告为准）：
+
+| 移动                                                                                                        | #40 文件域受影响处                                                                                                                                                |
+| ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M1 `service/cache-keepalive.ts` → `cache-ttl/keepalive-service.ts`                                          | 只有注释（:178、:307），不改                                                                                                                                      |
+| M2 bash 工具 → `src/bash/{tool,job-tool}.ts`，测试 → `tests/bash/`                                          | `bash/tool.ts:135` 注释，不改；`tests/tools/model-facing-strings.test.ts` 的 import 已改，PT 在其上修改                                                           |
+| M3 context/compact 工具 → `src/context-switch/tool.ts`、`src/compact-hint/{compact-tool,threshold-tool}.ts` | 无；`index.ts`/`stack.ts` 行数不变，#40 引用的行号（index :977/:1474/:1611，stack :143-154/:322/:758/:2173/:2266/:2772-2779/:2963/:3069-3127/:3449-3458）复核未变 |
+| M4 `web-hub/agent/command-capture.ts` → `commands/capture.ts`                                               | `commands/schedule.ts`、`web-hub/agent/index.ts` 的 import 行已改，行数不变（`commands/schedule.ts` :44/:77/:145-146/:204、`web-hub/agent/index.ts:83` 未变）     |
+| P2 D1 `core/redact.ts`                                                                                      | 无                                                                                                                                                                |
+| P2 D2 `isTerminalStatus`                                                                                    | `ui/fleet-panel.ts` −5 行，consult 行改为 :16/:104-108/:404/:454；`consult/tool.ts` 的副本被 P2 有意保留，随 PS1b 删除                                            |
+| P3 死代码、`rpc/client` → `tests/rpc/helpers/rpc-client.ts`、`lan-security-stubs` 删除                      | P3 报告写明「未触及 consult」；`core/message.ts` 只删了 `isMessageKey`，`WakeExclusion` 不变；#40 依赖的导出没有被删                                              |
+| P1 AGENTS.md 下沉                                                                                           | consult 句子落到 9 份 README，归 PS2（§4.2 PS2 处理表）                                                                                                           |
+| P6B `tests/boundary/pi-free.test.ts`                                                                        | 新文件放 `src/runtime/` 不在 pi-free 根内；删 `core/consult-*.ts` 不影响按 glob 发现文件                                                                          |
+
+**③ grep 重跑与增删**
+
+- `rg -li 'consult|experts|abArm|consultMain|forkSessionFrom'`：tests 由 183 个文件变为 184 个。
+  - 减少 `tests/web-hub/agent/command-capture.test.ts`；增加 `tests/commands/capture.test.ts`（只是注释）和 `tests/docs/agents-md.test.ts`（归 PS2）。
+  - src 减少 `service/cache-keepalive.ts`、`tools/bash-tool.ts`，增加 `cache-ttl/keepalive-service.ts`、`bash/tool.ts`（都是注释或动词）。
+- 字符串过滤（§1.3）：新增 `extend-timeout-tool.ts:239`（PT）、`settings.ts:1725`（PS2）、`SchedulePanel.vue:16`（模板注释，不改）；`convert.mjs` 行号变为 :2734；其余与 r2 一致。
+
+**④ 闭合基线**：见 §4.3.1。新发现 `tests/service/spawn-service.test.ts:172-250`，已并入 PT。
+
+**⑤ P1 清单**：见 §4.2 PS2 处理表。AGENTS.md 新结构下，consult-preserve 门禁在 `## pi peer bump checklist` 第 2 条（:82），由 `tests/docs/agents-md.test.ts` K2 守护（自带门控）。
+
+**⑥ 冲突预检**：附录 A 的 spec，`node skills/dev-flow/scripts/conflict-check.mjs /tmp/consult-removal-spec.json --cwd .` 输出 P0 18、PW 19、PD 25、PT 34、PDOC 50 个已存在文件，「无交集，可同树并行」，**exit 0**。新建文件（P0 的 4 个、PT 的 `dispatch-meta-instrumentation.test.ts`、PDOC 的 `REMOVED.md`）的路径互不重叠。
 
 ### 4.1 规则（r2：依赖闭合）
 
@@ -355,21 +414,21 @@ r1 列为「仅注释命中」的其余文件（`cache-ttl/*`、`traffic/warming
 
 #### PT 工具与调度面（L2）
 
-- **文件域**：`src/tools/agent-tool.ts`、`src/core/dispatch-meta.ts`、`src/service/resolve-target.ts`（**只改** :221 的继承调用）、`src/tools/{list-subagents,extend-timeout,schedule}-tool.ts`、`src/commands/schedule.ts`、`src/schedule/agent/{bg,executors,view}.ts`、`src/external-agent/messages.ts`（只改 `capabilitiesText`/`externalModelsPromptHeader`）、`src/quota/render.ts`（:201、:212）、UI `components/schedule/ScheduleReview.vue`、`i18n/schedule-extra.ts`、`tests/fixtures/tools/agent-nested-surface-golden.json`。
+- **文件域**：`src/tools/agent-tool.ts`、`src/core/dispatch-meta.ts`、`src/service/resolve-target.ts`（**只改** :221 的继承调用）、`src/tools/{list-subagents,extend-timeout,schedule}-tool.ts`、`src/commands/schedule.ts`、`src/schedule/agent/{bg,executors,view}.ts`、`src/external-agent/messages.ts`（只改 `capabilitiesText`/`externalModelsPromptHeader`）、`src/quota/render.ts`（:201、:212）、UI `components/schedule/ScheduleReview.vue`、`i18n/schedule-extra.ts`、`tests/fixtures/tools/agent-nested-surface-golden.json`。 测试文件域以附录 A 的 PT 条目为准（r3 并入 `tests/service/spawn-service.test.ts`，只改 :172-250 两例）。
 - **删除**：Agent 两份 schema 的 `experts`、`timeout_s` 描述里的「consult, 」、`meta.abArm`、A/B 一致性校验、`expertEcho`、`AB_ARM_EXPERTS_OPTIONAL_AGENT_TYPES`；schedule-tool 的 `consultMain` 参数；`/schedule` 的 consult flag（`--consult` 报错，`--no-consult` 静默接受）；bg 的 consult-main 解析（值为 true 时只给提示）；quota 和 external-agent 文案里的 consult。
 - **保留（R1）**：`AgentToolCommonDeps.resolveExperts?`、`ScheduleExecutorsDeps.consult?`、`bg` deps 的 `consult?`（`@deprecated` 不读）；`MSG_EXPERTS_UNSUPPORTED`/`msgExpertIsExternal`（spawn-service 和 consult 仍在用）；schedule 持久化字段、`defHash`、reader、protocol。
 - **测试**
   - `tests/tools/agent-tool.test.ts`；`tests/tools/agent-tool-experts.test.ts` 改写为 compat 测试（带 `experts` 照常派发，有一行提示，spawn 请求里没有 `consultExperts`）；`tests/tools/model-facing-strings.test.ts`（含 nested golden 断言）。
-  - `tests/core/dispatch-meta.test.ts`（含「继承丢弃旧 abArm」）、`tests/service/resolve-target.test.ts` 中 dispatchMeta 部分。
+  - `tests/core/dispatch-meta.test.ts`（含「继承丢弃旧 abArm」）、`tests/service/resolve-target.test.ts:180-215` 中 dispatchMeta 部分、**`tests/service/spawn-service.test.ts:172-250`**（r3：期望改为继承结果不含 `abArm`，显式覆盖那一例不变）。
   - `tests/integration/explicit-timeout-producers.test.ts:323-327` 删除该用例。
   - `tests/integration/consult-ab-instrumentation.test.ts` → `git mv` 为 `dispatch-meta-instrumentation.test.ts`，删除 abArm 用例；`diag.experts`/`consults` 的断言留到 PS1a。
-  - `tests/schedule/agent/{bg,dispatch}.test.ts`，新增 `/schedule --consult` 报错用例（放在现有 schedule 命令测试文件里，S0 时确认文件名）；`tests/schedule/core/spec.test.ts` 增加「`consultMain:true` 的旧任务 `defHash` 不变、仍处于已批准状态」。
+  - `tests/schedule/agent/{bg,dispatch}.test.ts`，新增 `/schedule --consult` 报错用例（放在 `tests/commands/schedule.test.ts`）；`tests/schedule/core/spec.test.ts` 增加「`consultMain:true` 的旧任务 `defHash` 不变、仍处于已批准状态」。
   - `tests/external-agent/{messages,port}.test.ts`（port.test.ts:220 改为断言不再包含 "consulting experts"）。
   - `tests/quota/{gate,hook,render}.test.ts`（期望文本改为「不能当验收」）。
-  - `tests/web-hub/ui` 中 schedule review 相关用例。
+  - `tests/web-hub/ui/schedule-panel.test.ts`（ScheduleReview 用例）。
 - **定向**：
   ```sh
-  npx vitest run tests/tools tests/core/dispatch-meta.test.ts tests/service/resolve-target.test.ts tests/schedule tests/commands tests/external-agent tests/quota tests/integration/explicit-timeout-producers.test.ts tests/integration/dispatch-meta-instrumentation.test.ts tests/integration/external-disabled-bytes.test.ts tests/web-hub/ui
+  npx vitest run tests/tools tests/core/dispatch-meta.test.ts tests/service/resolve-target.test.ts tests/schedule tests/commands tests/external-agent tests/quota tests/integration/explicit-timeout-producers.test.ts tests/integration/dispatch-meta-instrumentation.test.ts tests/integration/external-disabled-bytes.test.ts tests/web-hub/ui/schedule-panel.test.ts tests/service/spawn-service.test.ts
   npm run build:web && npm run check:web
   ```
   再加 §4.5 的 golden 断言脚本。
@@ -398,7 +457,7 @@ r1 列为「仅注释命中」的其余文件（`cache-ttl/*`、`traffic/warming
   npm run test:conformance
   ```
 
-#### PS1b 装配/类型物理删除（L3，PS1a 合入且 I2 绿后；`tests/secure/**` 的改动要等 #43 合入，否则 rebase）
+#### PS1b 装配/类型物理删除（L3，PS1a 合入且 I2 绿后；#43 已合入，`tests/secure/guard-points.test.ts` 可以直接改）
 
 - **文件域**
   - 删除：`src/consult/**`、`src/core/{consult-summary,consult-cache-marker}.ts`、`src/web-hub/agent/consult-transcript.ts`。
@@ -417,22 +476,35 @@ r1 列为「仅注释命中」的其余文件（`cache-ttl/*`、`traffic/warming
 #### PS2 设置 + AGENTS.md + 下沉 README 收口（L2，PS1b 合入且 I3 绿后）
 
 - **输入**：低风险 P1 交付报告里的 `rg -n -i consult AGENTS.md docs/dev/*/README.md` 清单（S0 时已取得），以及 PS2 开工时重跑的同一命令结果。
-- **文件域**：`src/config/{settings,setting-specs}.ts`（含 `setting-specs.ts:114`）、`src/core/verdict-schema.ts`（注释）、`tests/config/**`（consult 部分；`consult-settings.test.ts` 改写成「残留块被忽略」）、`AGENTS.md`、清单命中的全部开发者 README，删除 `docs/dev/consult/README.md`（拍板 Q9）、`docs/dev/source-governance/analysis.md`（附录 D 末尾加一行指向本 plan）。
-- **README 的预期命中**（按 plan-lowrisk §1.6 的映射推断，以清单为准）及处理：
+- **文件域**：`src/config/{settings,setting-specs}.ts`（含 `setting-specs.ts:114`、`settings.ts:1725`）、`tests/docs/agents-md.test.ts`（只删 K2 名单里的 `consult-preserve`）、`src/core/verdict-schema.ts`（注释）、`tests/config/**`（consult 部分；`consult-settings.test.ts` 改写成「残留块被忽略」）、`AGENTS.md`、清单命中的全部开发者 README，删除 `docs/dev/consult/README.md`（拍板 Q9）、`docs/dev/source-governance/analysis.md`（附录 D 末尾加一行指向本 plan）。
+- **处理表**（r3：按 P1 交付清单 `docs/dev/source-governance/P1-report.md` §consult 清单，坐标 @88da5b81；PS2 开工时再重跑 `rg -n -i "consult|experts|consultSessionDir" AGENTS.md docs/dev/*/README.md` 核对）
 
-  | README（下沉自 AGENTS 原行）                                                                                                                     | 处理                                                                                                                                                                                                                                  |
-  | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | `docs/dev/subagent-core/README.md`（原 :110-114 child-extension-missing 的 consult 豁免、:125 slot 规则里的 consult、:135 program-derived runs） | 删掉 consult 的功能描述和豁免；新增一段 legacy：「旧 run 条目里的 `diag.experts/consults/consultOf/consultCache…` 被忽略；`displayAgentType` 折叠 `consult:main-snapshot`」；登记 `src/runtime/{cap-watcher,legacy-consult-forks}.ts` |
-  | `docs/dev/context-switch/README.md`（原 :186 「every non-consult child run」）                                                                   | 改为「every child run」                                                                                                                                                                                                               |
-  | `docs/dev/fabric-cross-session/README.md`（原 :295 `wakeExclusion: consult fork`、:313/:348 consult-preserve 门禁）                              | 门禁条目删除；`consult_fork` 改写为「legacy 值，只读不产出，仍然排除 revive」                                                                                                                                                         |
-  | `docs/dev/scheduled-reports/README.md`（原 :1141 「together with … consult-preserve」）                                                          | 门禁删除；补一行 legacy：「`bg.consultMain` 保留为持久化字段（defHash），执行端忽略」                                                                                                                                                 |
-  | `docs/dev/workflow/README.md`（原 :1176-1191 experts）                                                                                           | 允许的 key 从 8 个改为 7 个；删 experts 段；chain taint 改为只由 isolation 触发                                                                                                                                                       |
-  | `docs/dev/data-encryption/README.md`（原 :1093 `consultSessionDir()` 路由）                                                                      | 改为 `legacyConsultForkDir()`，并标 legacy：「`<state>/cache/consult-sessions` 只用于清扫旧 fork，不再创建新文件」                                                                                                                    |
-  | `docs/dev/external-agent/README.md`（原 :1044 和既有 :73）                                                                                       | 删掉「consult 专家」，保留「tidy 只读域拒绝走 droid」                                                                                                                                                                                 |
-  | `docs/dev/sysload/README.md`（原 :1086 「consult / …exempt」）                                                                                   | 从豁免列表里删除 consult                                                                                                                                                                                                              |
-  | `docs/dev/traffic-merge/README.md`（若带有 README.md:365 同类的「consult forks」）                                                               | 删除                                                                                                                                                                                                                                  |
-  | `AGENTS.md`：peer bump 检查单（plan-lowrisk §1.5，含「consult-preserve C1–C7（#40 移除时删掉）」）、目录表里的 `src/consult/` 行、其他残留       | 删除；`tests/docs/agents-md.test.ts`（如存在）必须绿                                                                                                                                                                                  |
-  | `docs/dev/consult/README.md`                                                                                                                     | 删除（拍板 Q9），与 AGENTS.md 表行在**同一提交**                                                                                                                                                                                      |
+  | 位置                                                                            | 现文要点                                                                                                                        | 处理                                                                                                                                                                                                                                                |
+  | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `AGENTS.md:82`（`## pi peer bump checklist` 第 2 条）                           | 「`consult-preserve.test.ts` C1–C7 (remove with #40)」                                                                          | 删除这一项；同时删 `tests/docs/agents-md.test.ts:36` 套件名单里的 `"consult-preserve"`（K2 自带门控，删不删都不会红，删掉是为了干净）                                                                                                               |
+  | `AGENTS.md:95`（`skills/` 行）                                                  | 「`agent-handoff` (structured handoffs and consult usage …)」                                                                   | 改为「structured handoffs and asking the parent via message_agent」                                                                                                                                                                                 |
+  | `AGENTS.md:110`（`src/consult/` 行）                                            | 「#40 将删除」                                                                                                                  | 删除整行，**与删除 `docs/dev/consult/README.md` 同一提交**（K8）；K9 在 `src/consult/` 消失后不再要求这一行                                                                                                                                         |
+  | `AGENTS.md:134`（`src/workflow/` 行）                                           | 「`agent()` queue/experts/worktree」                                                                                            | 去掉 experts                                                                                                                                                                                                                                        |
+  | `AGENTS.md:139`（`docs/dev/` 行）                                               | 列表里有「consult」                                                                                                             | 改为「consult（已移除，档案）」或删除；`docs/dev/consult/` 作为档案保留                                                                                                                                                                             |
+  | `docs/dev/consult/README.md`（整份，24 处）                                     | 横幅「本文件由 #40 移除时整体删除」                                                                                             | 删除（拍板 Q9）；档案说明由 PDOC 新建的 `docs/dev/consult/REMOVED.md` 承担                                                                                                                                                                          |
+  | `docs/dev/subagent-core/README.md:36`                                           | 「a non-consult `create()`/`resume()` call」                                                                                    | 改为「a `create()`/`resume()` call」                                                                                                                                                                                                                |
+  | `docs/dev/subagent-core/README.md:40`                                           | 「Consult forks are exempt …」                                                                                                  | 删除该句；追加一段 legacy：旧 run 条目里的 `diag.experts/consults/consultOf/consultCache/consultThread/consultIdentityPrediction` 被忽略，`displayAgentType` 折叠 `consult:main-snapshot`；登记 `src/runtime/{cap-watcher,legacy-consult-forks}.ts` |
+  | `docs/dev/subagent-core/README.md:54`                                           | 「Workflow children/consult/resume/`/task`」                                                                                    | 去掉 consult                                                                                                                                                                                                                                        |
+  | `docs/dev/subagent-core/README.md:64`                                           | 「Program-derived runs (workflow children, consult, …)」                                                                        | 去掉 consult                                                                                                                                                                                                                                        |
+  | `docs/dev/context-switch/README.md:19`                                          | 「every non-consult child run」                                                                                                 | 改为「every child run」                                                                                                                                                                                                                             |
+  | `docs/dev/fabric-cross-session/README.md:44`                                    | 「`wakeExclusion`: consult fork, readonly domain …」                                                                            | 改为「readonly domain, caller-owned …；`consult_fork` 是 legacy 值，只读不产出，仍然排除 revive」                                                                                                                                                   |
+  | `docs/dev/fabric-cross-session/README.md:62`                                    | 「run before any pi peer bump together with consult-preserve」                                                                  | 删掉「together with consult-preserve」                                                                                                                                                                                                              |
+  | `docs/dev/fabric-cross-session/README.md:100`                                   | 「alongside fabric-wake C-P1–C-P5 and consult-preserve C1–C7」                                                                  | 删掉 consult-preserve                                                                                                                                                                                                                               |
+  | `docs/dev/scheduled-reports/README.md:55`                                       | 「together with fabric C-P/C-X and consult-preserve」                                                                           | 删掉 consult-preserve；补一行 legacy：「`bg.consultMain` 保留为持久化字段（defHash），执行端忽略」                                                                                                                                                  |
+  | `docs/dev/workflow/README.md:29-30`                                             | 允许的 8 个 key 含 experts，「malformed `experts` array」                                                                       | 改为 7 个 key；删掉 experts 的畸形数组条款                                                                                                                                                                                                          |
+  | `docs/dev/workflow/README.md:33-38`                                             | `agent({ experts })` 整段（expert-scope、journal skip reasons）                                                                 | 删整段；改写为「chain taint 只由 isolation 触发」                                                                                                                                                                                                   |
+  | `docs/dev/workflow/README.md:44`                                                | 「… exactly like `experts` does」                                                                                               | 改写为不比较 experts                                                                                                                                                                                                                                |
+  | `docs/dev/workflow/README.md:5,72`                                              | 链接 `workflow-experts/` plan                                                                                                   | 保留（历史 plan 链接），后缀「（已随 #40 移除）」                                                                                                                                                                                                   |
+  | `docs/dev/data-encryption/README.md:10`                                         | 「`consultSessionDir()` (`fork-store.ts`) routes create/main-fork/remove/sweep/index through `<state>/cache/consult-sessions`」 | 改为「`legacyConsultForkDir()`（`src/runtime/legacy-consult-forks.ts`）：legacy，`<state>/cache/consult-sessions` 只用于清扫旧 fork，不再创建」；vault 布局（`STATE_SUBDIRS` 里的 `consult`）按 legacy 说明保留                                     |
+  | `docs/dev/external-agent/README.md:75`                                          | 「只读工具域（consult 专家、tidy）拒绝走 droid」                                                                                | 改为「只读工具域（tidy）拒绝走 droid」                                                                                                                                                                                                              |
+  | `docs/dev/external-agent/README.md:111`                                         | 「(consult and tidy can never use it …)」                                                                                       | 改为「(tidy can never use it …)」                                                                                                                                                                                                                   |
+  | `docs/dev/sysload/README.md:19`                                                 | 「consult / `/goal` verifier / tidy … are exempt」                                                                              | 去掉 consult                                                                                                                                                                                                                                        |
+  | `docs/dev/web-hub/README.md:201`、`docs/dev/fabric-cross-session/README.md:205` | 英文动词「consults/consulted」                                                                                                  | 不改                                                                                                                                                                                                                                                |
 
 - **定向**：
   ```sh
@@ -454,7 +526,7 @@ rg -n "consult-cache-marker|consult-transcript" src -g '!src/core/consult-cache-
 rg -ln "consult-cache-marker|consult-transcript" tests                                                                                      # 期望 ⊆ {conformance/consult-preserve, core/consult-cache-marker, consult/prompt, web-hub/agent/consult-transcript}
 # PT
 rg -n "abArm" src/tools src/core/dispatch-meta.ts src/service/resolve-target.ts   # 期望（生产者/schema）：只有 dispatch-meta.ts 的 legacy 丢弃注释；schema 不再接受、resume 不再写入 abArm
-rg -ln "abArm" src tests   # 期望：命中文件 ⊆ 精确允许列表 {src/core/dispatch-meta.ts, src/core/run-journal.ts（注释，PS1b 处理）, tests/core/dispatch-meta.test.ts, tests/core/run-journal.test.ts（旧元数据兼容用例，PS1b）, PS1a 才调整的 service 测试（S0 刷新时按名列出）}；旧数据兼容输入里的 abArm 不要求消失（复审 r2 #1）
+rg -ln "abArm" src tests scripts   # 期望（r3 按名列出）：命中文件 ⊆ {src/core/dispatch-meta.ts（legacy 丢弃注释）, src/core/run-journal.ts:30（注释，PS1b）, tests/core/dispatch-meta.test.ts、tests/core/run-journal.test.ts:71,246,318（旧元数据兼容输入）, tests/service/resolve-target.test.ts:186、tests/service/spawn-service.test.ts:172,226（PT 改为「输入带 abArm、继承结果不含」）, tests/tools/agent-tool.test.ts（只剩「abArm 作为未知 key 被拒」的输入）, tests/service/runtime-adapter-instrumentation.test.ts:101（原样镜像，PS1a 处理）}；scripts/exp/consult-ab-lib.mjs、tests/exp/consult-ab-analyze.test.ts、tests/fixtures/consult-ab/** 由 PDOC 删除后不得再出现
 # PS1a：consult 运行时路径的使用点为空；typecheck 绿就证明 src/consult 仍可编译
 rg -n "isConsultRun|consultC2|createConsultGuard|shadow-tools|installConsultAnchor|installPrefixProbe|classifyConsultToolEnd" src -g '!src/consult/**'   # 期望：空
 # PS1b
@@ -463,10 +535,21 @@ test ! -e src/consult && rg -n "consult/|consult-summary|consult-cache-marker|co
 rg -n -i "consult" src/config                                                                                                               # 期望：空
 ```
 
+### 4.3.1 S0 闭合基线（r3，2026-10-25 @88da5b81，「开工前」各导出的导入方）
+
+| 将在阶段 1 改动的导出 / 文件                                          | 当前导入方（src + tests + scripts）                                                                                                                                                                                                                                                          | 阶段 1 处置                                                                                                  | 闭合                                        |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------- |
+| `workflow/expert-scope.ts`                                            | `src/workflow/host.ts`、`tests/workflow/{host,expert-scope}.test.ts`、`tests/integration/workflow-experts.test.ts`                                                                                                                                                                           | PW 删除                                                                                                      | 是（都在 PW 域内）                          |
+| `core/consult-cache-marker.ts`、`web-hub/agent/consult-transcript.ts` | src：`tools/result-tool.ts`、`ui/fleet-panel.ts`、`web-hub/agent/{index,run-transcript,consult-transcript}.ts`；tests：`consult/prompt`、`conformance/consult-preserve`、`core/consult-cache-marker`、`web-hub/agent/consult-transcript`、`web-hub/{hub,ui}/run-transcript`                  | PD 停止 src 调用，并把两个 run-transcript 测试改用写死的 entries；模块保留                                   | 是（剩余导入方都是 PS1a/PS1b 才删的测试）   |
+| `consult/watcher.ts` / `createCapWatcher`                             | `src/consult/{watcher,tool}.ts`、`src/memory/tidy/{command,cost}.ts`、`tests/consult/watcher.test.ts`                                                                                                                                                                                        | P0 迁移实现 + 垫片                                                                                           | 是                                          |
+| `consult/fork-store.ts` 的三个导出                                    | 非 consult 导入方：`src/{stack,runtime/session-driver,schedule/agent/wire}.ts`、`tests/{secure/guard-points,runtime/runner-consult-reap,conformance/consult-preserve,schedule/agent/wire,integration/consult-reload-dispose}`、`tests/fixtures/preview-perf/stack-3609.ts.txt`（语料，不动） | P0 改为委托，签名不变；只迁 `schedule/agent/wire.ts`、`stack.ts:2266` 和 `tests/schedule/agent/wire.test.ts` | 是（不删导出）                              |
+| `CONSULT_READONLY_TOOLS`                                              | 18 个文件（与 r2 一致），见 §2                                                                                                                                                                                                                                                               | P0 加新名 + 别名，迁移非 consult 消费者                                                                      | 是（不删导出）                              |
+| `dispatch-meta` 的 `abArm`                                            | 见 §4.3 PT 允许列表                                                                                                                                                                                                                                                                          | PT                                                                                                           | 是（r3 把 `spawn-service.test.ts` 并入 PT） |
+
 ### 4.4 与并行工作的关系（r2：低风险批改为前置，不再并行）
 
 - **低风险治理批**：#40 全部包 blockedBy 低风险 P1 合入（主会话裁定）。所有交互点都由 S0 处理（§4.0 表）。r1 的并行冲突表整表删除，包括其中错误的「治理 #6：schedule 文件搬家」一行：低风险批不搬 schedule 文件。
-- **#43**（`src/secure/bin/convert.mjs`、`tests/secure/convert-*`、`tests/integration/traffic-lifecycle-process.test.ts`）：#40 全程冻结 `src/secure/**`。唯一交点是 PS1b 改 `tests/secure/guard-points.test.ts`（同目录、不同文件）：#43 未合入时，PS1b 对该文件的改动等 #43 合入后再 rebase 落地。P0 只**运行** `tests/secure/{stack-roots,guard-points}.test.ts` 作回归，不改它们。
+- **#43**：已合入（`0f74709d`、`4ea6bfec`）。#40 仍冻结 `src/secure/**`（`convert.mjs:2734` 的 consult-sessions foreign dir 保留）；PS1b 改 `tests/secure/guard-points.test.ts` 不再需要等待。P0 只**运行** `tests/secure/{stack-roots,guard-points}.test.ts` 作回归，不改它们。
 
 ### 4.5 验收判据
 
@@ -547,7 +630,156 @@ npx vitest run tests/integration/fabric-xs-off-golden.test.ts tests/integration/
 
 ## 6. 需用户拍板项
 
-r1 的 Q1–Q11 已由用户拍板，见文末。**r2 不新增拍板项**：第 7 条是 Q1 的范围细化（主会话转述用户已批准一次性更新），其余都是工程处置。
+r1 的 Q1–Q11 已由用户拍板，见文末。r3（S0）也不新增拍板项。**r2 不新增拍板项**：第 7 条是 Q1 的范围细化（主会话转述用户已批准一次性更新），其余都是工程处置。
+
+## 附录 A：阶段 1 冲突预检 spec（r3）
+
+运行：`node skills/dev-flow/scripts/conflict-check.mjs <spec> --cwd .`，2026-10-25 @88da5b81 时 exit 0。
+
+```json
+[
+  {
+    "id": "P0",
+    "globs": [
+      "src/runtime/cap-watcher.ts",
+      "src/runtime/legacy-consult-forks.ts",
+      "src/runtime/tool-scope.ts",
+      "src/memory/tiered.ts",
+      "src/memory/tidy/command.ts",
+      "src/memory/tidy/cost.ts",
+      "src/schedule/agent/wire.ts",
+      "src/service/runtime-adapter.ts",
+      "src/stack.ts",
+      "src/consult/watcher.ts",
+      "src/consult/fork-store.ts",
+      "tests/consult/watcher.test.ts",
+      "tests/runtime/cap-watcher.test.ts",
+      "tests/runtime/legacy-consult-forks.test.ts",
+      "tests/memory/tiered.test.ts",
+      "tests/runtime/tool-scope.test.ts",
+      "tests/runtime/tool-scope-provenance.test.ts",
+      "tests/service/runtime-adapter-readonly-domain.test.ts",
+      "tests/service/runtime-adapter-child-switch.test.ts",
+      "tests/integration/readonly-domain-shadow-real-session.test.ts",
+      "tests/schedule/agent/wire.test.ts",
+      "tests/sysprompt/memory-tiered-section.test.ts"
+    ]
+  },
+  {
+    "id": "PW",
+    "globs": [
+      "src/workflow/host.ts",
+      "src/workflow/agent-opts.ts",
+      "src/workflow/worker-source.ts",
+      "src/workflow/replay.ts",
+      "src/workflow/types.ts",
+      "src/workflow/spawner-adapter.ts",
+      "src/workflow/expert-scope.ts",
+      "src/tools/workflow-tool.ts",
+      "tests/workflow/host.test.ts",
+      "tests/workflow/agent-opts.test.ts",
+      "tests/workflow/replay.test.ts",
+      "tests/workflow/replay-taint.property.test.ts",
+      "tests/workflow/replay-taint-isolation.property.test.ts",
+      "tests/workflow/host-iso-fold.property.test.ts",
+      "tests/workflow/spawner-adapter.test.ts",
+      "tests/workflow/worker-host-call.test.ts",
+      "tests/workflow/expert-scope.test.ts",
+      "tests/tools/workflow-tool.test.ts",
+      "tests/integration/workflow-experts.test.ts"
+    ]
+  },
+  {
+    "id": "PD",
+    "globs": [
+      "src/ui/fleet-panel.ts",
+      "src/ui/fleet-widget.ts",
+      "src/tools/result-tool.ts",
+      "src/web-hub/agent/status.ts",
+      "src/web-hub/agent/run-transcript.ts",
+      "src/web-hub/agent/index.ts",
+      "src/web-hub/ui/src/components/drawer/RunTranscript.vue",
+      "src/web-hub/ui/src/components/fleet/FleetTree.vue",
+      "src/web-hub/ui/src/styles/drawer.css",
+      "src/web-hub/ui/src/i18n/zh/fleet.ts",
+      "src/web-hub/ui/src/i18n/en/fleet.ts",
+      "src/web-hub/ui/src/i18n/zh/drawer.ts",
+      "src/web-hub/ui/src/i18n/en/drawer.ts",
+      "tests/ui/fleet-consult-cache.test.ts",
+      "tests/ui/fleet-widget.test.ts",
+      "tests/ui/fleet.test.ts",
+      "tests/tools/result-consult-cache.test.ts",
+      "tests/tools/result-tool.test.ts",
+      "tests/web-hub/agent/status-consult-cache.test.ts",
+      "tests/web-hub/agent/snapshot.test.ts",
+      "tests/web-hub/agent/wiring-control.test.ts",
+      "tests/web-hub/ui/consult-cache-display.test.ts",
+      "tests/web-hub/ui/fleet-tree.test.ts",
+      "tests/web-hub/ui/run-transcript.test.ts",
+      "tests/web-hub/hub/run-transcript.test.ts"
+    ]
+  },
+  {
+    "id": "PT",
+    "globs": [
+      "src/tools/agent-tool.ts",
+      "src/core/dispatch-meta.ts",
+      "src/service/resolve-target.ts",
+      "src/tools/list-subagents-tool.ts",
+      "src/tools/extend-timeout-tool.ts",
+      "src/tools/schedule-tool.ts",
+      "src/commands/schedule.ts",
+      "src/schedule/agent/bg.ts",
+      "src/schedule/agent/executors.ts",
+      "src/schedule/agent/view.ts",
+      "src/external-agent/messages.ts",
+      "src/quota/render.ts",
+      "src/web-hub/ui/src/components/schedule/ScheduleReview.vue",
+      "src/web-hub/ui/src/i18n/schedule-extra.ts",
+      "tests/fixtures/tools/agent-nested-surface-golden.json",
+      "tests/tools/agent-tool.test.ts",
+      "tests/tools/agent-tool-experts.test.ts",
+      "tests/tools/model-facing-strings.test.ts",
+      "tests/core/dispatch-meta.test.ts",
+      "tests/core/run-journal.test.ts",
+      "tests/service/resolve-target.test.ts",
+      "tests/service/spawn-service.test.ts",
+      "tests/integration/explicit-timeout-producers.test.ts",
+      "tests/integration/consult-ab-instrumentation.test.ts",
+      "tests/integration/dispatch-meta-instrumentation.test.ts",
+      "tests/schedule/agent/bg.test.ts",
+      "tests/schedule/agent/dispatch.test.ts",
+      "tests/schedule/core/spec.test.ts",
+      "tests/commands/schedule.test.ts",
+      "tests/external-agent/messages.test.ts",
+      "tests/external-agent/port.test.ts",
+      "tests/quota/gate.test.ts",
+      "tests/quota/hook.test.ts",
+      "tests/quota/render.test.ts",
+      "tests/web-hub/ui/schedule-panel.test.ts"
+    ]
+  },
+  {
+    "id": "PDOC",
+    "globs": [
+      "scripts/exp/consult-*",
+      "scripts/exp/exp6-*",
+      "scripts/dev/readme-shots/**",
+      "tests/exp/consult-*",
+      "tests/fixtures/consult-ab/**",
+      "tests/fixtures/consult-cache/**",
+      "skills/**",
+      "README.md",
+      "README.en.md",
+      "docs/guide/subagents.md",
+      "docs/guide/quota-load.md",
+      "docs/dev/consult/REMOVED.md",
+      "docs/dev/workflow-experts/plan.md",
+      "scripts/exp/topic-judge-eval/README.md"
+    ]
+  }
+]
+```
 
 ## 用户拍板（2026-10-25）
 
