@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-26
+
+### Added
+
+- **web-hub**: mark and fold merged branches in the worktree graph (`19fedbf7`)
+- **web-hub**: request merged verdicts for the worktree graph when the hub supports them (`13d14056`)
+- **web-hub**: judge merged branches in the worktree graph route (`1ff99be9`)
+- **web-hub**: compute which merged branches the worktree graph can fold (`02621b0c`)
+- **git**: add the frozen cherry-mark argv for merged-branch detection (`51534296`)
+- **web-hub**: extend the worktree graph protocol with merged-branch verdicts (`49d9c698`)
+- **web-hub,ui**: stop producing and rendering consult transcript/cache surfaces (#40 PD) (`bd50422e`)
+- **web-hub**: fold detail header buttons into a menu on narrow screens (`569d7ea9`)
+
+### Fixed
+
+- **traffic**: classify jq 1.7 parse errors as input errors (`9806f1dc`)
+- **sysprompt**: stop forked sessions from inheriting the parent's prompt section updates (`eebae142`)
+- **commands**: pass every dialog argument through the TUI command recorder (`4eb913d0`)
+- **traffic**: describe /record's loopback default accurately (`338fd210`)
+- **web-hub**: show the Bash group counts in Chinese in the Chinese UI (`302223c5`)
+- **secure**: wait for the vault lease to free before giving up a rollback (`0f74709d`)
+- **web-hub**: keep /reload out of the command history (`9e78cb24`)
+
+### Changed
+
+- **config**: drop the consult settings and finish the consult docs cleanup (`adebe2d6`)
+- remove the consult subsystem (`8000a519`)
+- **runtime**: remove consult from the session driver, runner and spawn service (`d6e49e7c`)
+- **schedule**: remove consult from scheduled tasks (`bbedfb05`)
+- **agent**: drop the consult experts parameter and meta.abArm from the Agent tool (`d32a4a21`)
+- **workflow**: remove expert consultation from agent calls (`2f468dfa`)
+- **runtime**: move the readonly tool set and cap watcher out of consult (`9f344d84`)
+- **commands**: move command capture out of web-hub/agent (`930de1fa`)
+- **context-switch**: move context tools beside their modules (`add4ec1f`)
+- **bash**: move bash and bash_job tools into src/bash (`99aa0cde`)
+- **cache-ttl**: move keepalive service into src/cache-ttl (`ce76d830`)
+- remove unused exports and unreachable files (`a1d4ccdd`)
+- **web-hub**: fold the hub's three promise-timeout helpers into deadlineRace (`71942242`)
+- **core**: use the shared isTerminalStatus in fleet panel and archive control (`9fb9b96e`)
+- **core**: share one redactSecrets between web-search, quota and cache-ttl (`36b8857c`)
+
+### Documentation
+
+- **worktree-graph**: document merged-branch marks and add the K10 acceptance steps (`deeb6f21`)
+- **worktree-graph**: record the B40 baseline and the merged-marks file allowlist (`74f6c916`)
+- **consult**: record the I1 gate result and the C-X6 follow-up (`19d15657`)
+- **worktree-graph**: record the remaining merged-marks rulings (`842f8899`)
+- **worktree-graph**: plan merged-branch marks in the git graph (`531853df`)
+- **consult**: add the PT work-package report (`228adb3b`)
+- **tools**: remove consult from model-facing and droid wording (`fe8b279d`)
+- record consult removal documentation checks (`fa405771`)
+- remove consult guides and experiment assets (`49586e9d`)
+- **consult**: refresh the removal plan against the new layout (r3) (`b8f9a43e`)
+- **governance**: add P1 report for the AGENTS.md split (`0707b9df`)
+- **skills**: tell dev-flow to read the target directory README before exploring (`a488b429`)
+- slim AGENTS.md to global invariants, frozen artifacts and a README index (`611cf525`)
+- split AGENTS.md subsystem notes into per-directory READMEs (`3b980ad1`)
+- **governance**: note observation list and evidence for the dead code pass (`fcbf71dc`)
+- **consult**: plan the removal of the consult subsystem (`2c019f17`)
+- **governance**: plan the low-risk source cleanup batch (`85cf78bb`)
+- **governance**: add the source organization analysis (`b667d880`)
+
+### Tests
+
+- **fabric**: boot the deliver-mode peer before its partner in the mention test (`88da5b81`)
+- **web-hub**: make the deadline ordering test tell the two race forms apart (`bcfd753a`)
+- **boundary**: enforce pi-free imports and preserve capture isolation (`c1454719`)
+- **traffic**: count recorded rows after the print child exits (`4ea6bfec`)
+
+### Chores
+
+- type-check and build with the native TypeScript 7 compiler (`d05ba6ec`)
+
+Stats: 8 feat, 7 fix, 15 refactor/perf, 18 docs, 4 test, 1 chore
+
 ## [0.8.1] - 2026-10-25
 
 ### Added
@@ -1136,7 +1211,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.7.0...v0.7.1
