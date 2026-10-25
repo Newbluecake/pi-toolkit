@@ -18,7 +18,7 @@ import { createRuntimeRunnerAdapter } from "../../src/service/runtime-adapter.js
 import { createSpawnService } from "../../src/service/spawn-service.js";
 
 /**
- * consult A/B instrumentation plan §5 P1b integration acceptance (review §8 #1):
+ * dispatch-meta persistence integration (formerly consult A/B instrumentation; the A/B arm was removed with consult, #40):
  * `wrapWithRunLog` + fake host — (a) a schema run's LATEST `subagent:run` entry
  * carries `outcome.structuredResult` (post-policy entry) and `diag.schemaPreset`;
  * (b) resume inherits `dispatchMeta` from the terminal snapshot, an explicit
@@ -170,7 +170,7 @@ function latestRunEntry(entries: Entry[], runId: string): RunSnapshot | undefine
     );
 }
 
-describe("consult A/B instrumentation: persisted run-log surface (plan §5 P1b, review §8 #1)", () => {
+describe("dispatch-meta instrumentation: persisted run-log surface", () => {
   let dir: string | undefined;
   afterEach(() => {
     simulateProcessDeath();
@@ -178,7 +178,7 @@ describe("consult A/B instrumentation: persisted run-log surface (plan §5 P1b, 
     dir = undefined;
   });
   function childSessionFile(name = "child.jsonl"): string {
-    dir = mkdtempSync(join(tmpdir(), "pi-consult-ab-"));
+    dir = mkdtempSync(join(tmpdir(), "pi-dispatch-meta-"));
     const file = join(dir, name);
     writeFileSync(file, `${JSON.stringify({ type: "session", id: "child" })}\n`);
     return file;
@@ -187,7 +187,7 @@ describe("consult A/B instrumentation: persisted run-log surface (plan §5 P1b, 
   it("a verdict/v1 schema run's latest subagent:run entry carries structuredResult + diag.schemaPreset (§6 item 6)", async () => {
     const file = childSessionFile();
     const entries: Entry[] = [];
-    const META = { lane: "L2" as const, packageId: "pkg-2026-10-08-a", abArm: "experts" as const };
+    const META = { lane: "L2" as const, packageId: "pkg-2026-10-08-a" };
     const p1 = proc(entries, { sessionFile: file, promptHangs: false, seed: false, submitStructured: VERDICT });
     const started = await p1.spawn.spawn({
       type: "worker",
@@ -216,7 +216,7 @@ describe("consult A/B instrumentation: persisted run-log surface (plan §5 P1b, 
   it("resume inherits dispatchMeta from the terminal snapshot; an explicit value overrides (D3)", async () => {
     const file = childSessionFile();
     const entries: Entry[] = [];
-    const META = { lane: "L2" as const, packageId: "pkg-2026-10-08-a", abArm: "experts" as const };
+    const META = { lane: "L2" as const, packageId: "pkg-2026-10-08-a" };
     // Process 1: an enrolled run completes and lands its terminal entry.
     const p1 = proc(entries, { sessionFile: file, promptHangs: false, seed: false });
     const first = await p1.spawn.spawn({ type: "worker", prompt: "dev", dispatchMeta: META, label: "dev" });

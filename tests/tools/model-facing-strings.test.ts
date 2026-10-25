@@ -120,7 +120,7 @@ describe("model-facing tool strings", () => {
   it("U4: extend_subagent_timeout description covers timeout_s runs and names the fixed-deadline exception", () => {
     const extendTimeout = tools().find((tool) => tool.name === "extend_subagent_timeout")!;
     expect(extendTimeout.description).toContain("runs dispatched with an explicit timeout_s alike");
-    expect(extendTimeout.description).toContain("consult, /goal verifier, RPC");
+    expect(extendTimeout.description).toContain("(/goal verifier, RPC)");
     expect(extendTimeout.description).not.toContain("Only default-budget runs");
   });
 
@@ -293,7 +293,7 @@ describe("bash deadline strings (bash-timeout-grace T17)", () => {
  * parameter, and the preset is not a promised nested capability). The
  * top-level surface alone gains `meta` and the verdict/v1 preset hint.
  */
-describe("consult A/B instrumentation (P2): Agent surface split", () => {
+describe("Agent surface split (top-level vs nested)", () => {
   const golden = JSON.parse(
     readFileSync(fileURLToPath(new URL("../fixtures/tools/agent-nested-surface-golden.json", import.meta.url)), "utf8"),
   ) as { allowedTypes: string[]; parameters: string; description: string };

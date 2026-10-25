@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import type { DispatchMeta } from "../core/dispatch-meta.js";
+import { pickInheritableDispatchMeta, type DispatchMeta } from "../core/dispatch-meta.js";
 import type { RunId, RunSnapshot, RunStatus, TimeoutPolicy } from "../core/types.js";
 import type { Tombstone, TombstoneStore } from "./tombstone.js";
 
@@ -218,9 +218,9 @@ export function resolveResumeTarget(handle: string, deps: ResolveTargetDeps): Re
   // 被逐出后靠 tombstone；旧条目缺字段 ⇒ undefined，解析式落第 ③ 项（按请求形状）。
   const timeoutPolicy =
     snapshotWithSessionFile(deps, runId)?.diag.timeoutPolicy ?? deps.tombstones.get(runId)?.timeoutPolicy;
-  // consult A/B 计划（§5 P1b，D3 推荐）：dispatchMeta 的继承源只取终态快照的
-  // diag（tombstone 不扩展 —— 它是 TTL 兜底视图，不带分析字段）。
-  const dispatchMeta = snapshotWithSessionFile(deps, runId)?.diag.dispatchMeta;
+  // dispatchMeta 的继承源只取终态快照的 diag（tombstone 不扩展 —— 它是 TTL
+  // 兜底视图，不带分析字段）；旧条目里已移除的 A/B 臂字段由 pickInheritableDispatchMeta 丢弃。
+  const dispatchMeta = pickInheritableDispatchMeta(snapshotWithSessionFile(deps, runId)?.diag.dispatchMeta);
   const title = snapshotWithSessionFile(deps, runId)?.diag.title;
   const wakeLevel = snapshotWithSessionFile(deps, runId)?.diag.wakeLevel ?? deps.tombstones.get(runId)?.wakeLevel;
   return {

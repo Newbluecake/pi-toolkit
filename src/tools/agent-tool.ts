@@ -3,7 +3,6 @@ import { Container, Markdown, Text, type MarkdownTheme } from "@earendil-works/p
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ErrorInfo, JsonSchema, RunId, RunOutcome, RunSnapshot, SpawnRequest } from "../core/types.js";
 import { displayAgentType } from "../core/types.js";
-import type { ResolveExpertsResult } from "../consult/index.js";
 import { normalizeSchemaInput } from "../core/json-schema.js";
 import { parseDispatchMeta } from "../core/dispatch-meta.js";
 import { renderStructuredForHost, resolveSchemaPreset, type SchemaPresetId } from "../core/verdict-schema.js";
@@ -15,9 +14,6 @@ import { formatWidgetCost } from "../ui/fleet-widget.js";
 import { toPiToolUsage } from "./usage.js";
 import { COLLAPSED_BODY_LINES, CappedBody } from "../ui/capped-body.js";
 import { truncateResultText } from "./result-text.js";
-
-/** A/B verifier/reviewer roles submit verdicts without consulting experts. Keep aligned with consult-ab-lib.mjs. */
-const AB_ARM_EXPERTS_OPTIONAL_AGENT_TYPES = new Set(["verifier", "reviewer"]);
 
 /**
  * Narrow port the Agent tool needs from SpawnService (X3: also the shape the
@@ -203,7 +199,7 @@ const leadingFields = {
         "earlier, and each extension adds at most budget.extendStepS (default 3600s). With extensions " +
         "disabled (extend.enabled=false) the timeout is a hard cap and the run stops right at it. Inside a subagent " +
         "the grace window is silent: nobody is notified and there is no extension tool there. Runs the system starts " +
-        "with a fixed deadline (consult, /goal verifier, RPC, workflow children) are not affected. To stop a run right " +
+        "with a fixed deadline (/goal verifier, RPC, workflow children) are not affected. To stop a run right " +
         "at its deadline, abort_subagent it when the grace notice arrives.",
     }),
   ),
@@ -215,29 +211,11 @@ const SCHEMA_FIELD_DESCRIPTION =
   "without a schema-valid submission it is reported as failed, not completed with free text.";
 const trailingFields = {
   schema: Type.Optional(Type.Unknown({ description: SCHEMA_FIELD_DESCRIPTION })),
-  experts: Type.Optional(
-    Type.Array(Type.String(), {
-      description:
-        "Optional whitelist of subagent runs (labels or run_ids) this subagent may consult in-turn via the " +
-        'consult tool — e.g. an upstream agent whose decisions it needs. The reserved id "main" always names ' +
-        "the HOST main session (this one, or the one that ultimately dispatched this chain), never a real run, " +
-        "and takes priority over any run/label that happens to share the name — include it to let the " +
-        "subagent ask the main session directly. Entries are resolved at dispatch " +
-        "time: unresolvable or ambiguous entries fail the dispatch (use the run_id to disambiguate); " +
-        "still-running entries are accepted with a warning and become consultable once they finish. " +
-        "The consulted copy is read-only and runs in the consulting agent's checkout. " +
-        "Use it when the subagent needs what an upstream agent (or the main session) holds but cannot be read " +
-        "from code (decisions, rejected alternatives, user preferences). The subagent's consult tool already " +
-        "lists each expert's label, type, state and original task; add to the task prompt only what that " +
-        "summary does not convey, and still put file locations and key conclusions in the prompt itself.",
-    }),
-  ),
 };
 
 /**
- * Top-level-only trailing fields (consult A/B instrumentation plan P2). The
- * `schema` copy appends the preset-name sentence; `experts` is shared by
- * reference with the nested surface (byte-identical). The nested surface
+ * Top-level-only trailing fields (dispatch-meta plan P2). The
+ * `schema` copy appends the preset-name sentence. The nested surface
  * keeps the original `trailingFields` verbatim — its params JSON and
  * descriptions are frozen byte-for-byte (tests/tools/model-facing-strings).
  */
@@ -247,7 +225,6 @@ const topLevelTrailingFields = {
       description: SCHEMA_FIELD_DESCRIPTION + ' Or pass the preset name "verdict/v1" for verifier/reviewer verdicts.',
     }),
   ),
-  experts: trailingFields.experts,
   meta: Type.Optional(
     Type.Object(
       {
@@ -259,21 +236,15 @@ const topLevelTrailingFields = {
         packageId: Type.Optional(
           Type.String({
             description:
-              "Id of the work package this dispatch belongs to. Use the SAME id for every dispatch of a package (initial work, rework, re-dispatch); required when abArm is set.",
+              "Id of the work package this dispatch belongs to. Use the SAME id for every dispatch of a package (initial work, rework, re-dispatch).",
           }),
         ),
         feature: Type.Optional(Type.String({ description: "Optional feature id this dispatch belongs to." })),
-        abArm: Type.Optional(
-          Type.Union([Type.Literal("experts"), Type.Literal("control")], {
-            description:
-              'A/B arm drawn for this package. "control" always dispatches WITHOUT experts. "experts" requires a non-empty experts list for dev/work roles; verifier/reviewer dispatches may omit experts.',
-          }),
-        ),
       },
       {
         additionalProperties: false,
         description:
-          "Optional dispatch metadata for analytics: lane, package id, feature, A/B arm. " +
+          "Optional dispatch metadata for analytics: lane, package id, feature. " +
           "Analytics only — never shown to the subagent, never added to its prompt, and it does not change how the run executes.",
       },
     ),
@@ -316,19 +287,15 @@ interface AgentToolCommonDeps {
    */
   markdownTheme?: () => MarkdownTheme | undefined;
   /**
-   * consult (consult plan §4.2): dispatch-time expert-whitelist resolver.
-   * Wired for BOTH the top-level Agent tool (src/index.ts holder) and the
-   * nested one injected by runtime-adapter — any Agent caller that can pass
-   * `experts` must be able to resolve them; an unresolvable/ambiguous entry
-   * throws here so the dispatcher gets immediate feedback. Absent +
-   * `experts` passed ⇒ execute throws (never silently ignored, review-2 #11③).
+   * @deprecated #40 — consult removed; never read (an `experts` argument is
+   * ignored with a one-line notice). Kept only until PS1b drops the wiring.
    */
-  resolveExperts?: (refs: readonly string[]) => ResolveExpertsResult;
+  resolveExperts?: (refs: readonly string[]) => unknown;
   /**
    * L1 (agent-tool pool-full plan §2): pool-full dispatch policy —
    * `settings.agent.queueWhenFull`, read fresh on every call (a `/reload` or
    * live `/agent settings` edit takes effect immediately, same convention as
-   * `worktreeAvailable`/`resolveExperts`). Absent or returning false (the
+   * `worktreeAvailable`). Absent or returning false (the
    * default) — reject immediately when the concurrency pool is full;
    * `true` — restore the pre-L1 queue-and-wait behavior.
    */
@@ -411,7 +378,7 @@ function nestedDescription(allowedTypes: readonly string[]): string {
 function prepareSpawn(
   deps: AnyAgentToolDeps,
   params: AgentToolParams,
-): { baseRequest: SpawnRequest; expertEcho: Array<{ type: "text"; text: string }> } {
+): { baseRequest: SpawnRequest; notices: Array<{ type: "text"; text: string }> } {
   if (deps.allowedTypes !== undefined && !deps.allowedTypes.includes(params.subagent_type)) {
     throw new Error(
       `nested delegation is not permitted: this agent may only spawn [${deps.allowedTypes.join(", ")}], not "${params.subagent_type}"`,
@@ -449,42 +416,21 @@ function prepareSpawn(
   const parsedMeta = parseDispatchMeta(params.meta);
   if (!parsedMeta.ok) throw new Error(parsedMeta.error);
   const dispatchMeta = parsedMeta.meta;
-  // A/B arm must be consistent with the experts whitelist (same plan P2):
-  // the control arm dispatches WITHOUT experts, the experts arm WITH them.
-  // Checked against the raw param (before expert resolution) so the model
-  // gets the consistency error first, self-correcting in one round trip.
-  if (dispatchMeta?.abArm === "control" && params.experts !== undefined && params.experts.length > 0) {
-    throw new Error(
-      'meta.abArm "control" is inconsistent with a non-empty experts list: drop experts for this arm, or pass abArm "experts"',
-    );
-  }
-  if (
-    dispatchMeta?.abArm === "experts" &&
-    (params.experts === undefined || params.experts.length === 0) &&
-    !AB_ARM_EXPERTS_OPTIONAL_AGENT_TYPES.has(params.subagent_type)
-  ) {
-    throw new Error(
-      `meta.abArm "experts" requires a non-empty experts list for ${params.subagent_type} dispatches; ` +
-        'verifier/reviewer dispatches may omit experts, or pass abArm "control"',
-    );
-  }
   const modelOverride = parseModel(params.model);
-  // consult §4.2: `experts` must be resolvable in THIS context — an
-  // unresolvable/ambiguous entry is a dispatcher config error and throws
-  // here (fail-fast at dispatch, never silently ignored).
-  if (params.experts?.length && !deps.resolveExperts)
-    throw new Error(
-      "experts is not supported in this context (no consult whitelist resolver is wired); drop the experts parameter",
-    );
-  const experts = params.experts?.length ? deps.resolveExperts!(params.experts) : undefined;
-  // consult §4.3: the resolved refs ride on the spawn request (trusted,
-  // already resolved — the runtime adapter injects the consult tool off
-  // them). Every spawn path spreads baseRequest, so background and nested
-  // blocking runs both carry them.
-  const expertEcho = (experts === undefined ? [] : [...experts.lines, ...experts.warnings]).map((line) => ({
-    type: "text" as const,
-    text: line,
-  }));
+  // #40: `experts` is no longer part of the schema. pi's validator lets the
+  // extra key through (no additionalProperties:false), so an old-habit call
+  // is ignored with a one-line notice instead of failing. Remove the notice
+  // at the next minor.
+  const legacyExperts = (params as { experts?: unknown }).experts;
+  const notices: Array<{ type: "text"; text: string }> =
+    legacyExperts !== undefined
+      ? [
+          {
+            type: "text" as const,
+            text: "Note: `experts` was ignored — the consult feature was removed. To ask the parent a question, use message_agent.",
+          },
+        ]
+      : [];
   const nested = deps.allowedTypes !== undefined ? deps : undefined;
   // Display-only title: the raw description (whitespace preserved), so the
   // web fleet tree can show "implement /title auto+status" instead of the
@@ -513,7 +459,6 @@ function prepareSpawn(
     ...(schema !== undefined ? { schema } : {}),
     ...(schemaPreset !== undefined ? { schemaPreset } : {}),
     ...(dispatchMeta !== undefined ? { dispatchMeta } : {}),
-    ...(experts !== undefined && experts.refs.length > 0 ? { consultExperts: experts.refs } : {}),
     // L1 (agent-tool pool-full plan §1/§2): both the top-level and nested
     // Agent tool set this — it is a no-op for nested calls in practice
     // (`forceSlotless` above always makes them slotless, and
@@ -523,7 +468,7 @@ function prepareSpawn(
     poolFullPolicy: deps.queueWhenFull?.() ? "queue" : "reject",
     ...(deps.loadGate?.() === true ? { loadPolicy: "reject" as const } : {}),
   };
-  return { baseRequest, expertEcho };
+  return { baseRequest, notices };
 }
 
 /**
@@ -567,7 +512,7 @@ async function spawnInBackground(
       // convention — English tokens only). Real SpawnService always supplies
       // `slots`; the field is optional on the port only for test doubles.
       ...(spawned.slots ? [{ type: "text" as const, text: formatSlots(spawned.slots) }] : []),
-      ...prepared.expertEcho,
+      ...prepared.notices,
     ],
     details: {
       runId: spawned.runId,
@@ -632,7 +577,7 @@ async function spawnAndCollect(
       // nested run itself is slotless, so this reports the WHOLE pool's
       // occupancy at dispatch time — see nestedDescription's caveat.
       ...(slots ? [{ type: "text" as const, text: formatSlots(slots) }] : []),
-      ...prepared.expertEcho,
+      ...prepared.notices,
     ],
     // pi usage accounting: the child session's spend rides on this tool
     // result so pi's own totals (footer, /session, RPC) include it.

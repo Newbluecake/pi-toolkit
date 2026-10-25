@@ -182,8 +182,10 @@ describe("resolveResumeTarget timeoutPolicy (R-inherit source, §2.7)", () => {
  * analytics fields), so once every snapshot view is gone the meta is not
  * inherited (the resume lands as unenrolled — accepted trade-off).
  */
-describe("resolveResumeTarget dispatchMeta (consult A/B plan P1b)", () => {
+describe("resolveResumeTarget dispatchMeta", () => {
+  // The persisted entry still carries the removed `abArm` (#40): inheritance drops it.
   const META = { lane: "L2" as const, packageId: "pkg-2026-10-08-a", abArm: "experts" as const };
+  const INHERITED = { lane: "L2" as const, packageId: "pkg-2026-10-08-a" };
   function metaSnapshot(runId: string): RunSnapshot {
     return { ...snapshot(runId), diag: { ...snapshot(runId).diag, dispatchMeta: META } };
   }
@@ -200,13 +202,14 @@ describe("resolveResumeTarget dispatchMeta (consult A/B plan P1b)", () => {
       ok: true,
       runId: "r_DMETA001",
       sessionFile,
-      dispatchMeta: META,
+      dispatchMeta: INHERITED,
     });
   });
 
   it("falls back to the durable record when no live snapshot exists", () => {
     const result = resolveResumeTarget("r_DMETA002", deps([metaSnapshot("r_DMETA002")]));
-    expect(result.ok && result.dispatchMeta).toEqual(META);
+    expect(result.ok && result.dispatchMeta).toEqual(INHERITED);
+    expect(result.ok && result.dispatchMeta).not.toHaveProperty("abArm");
   });
 
   it("does NOT fall back to the tombstone once every snapshot view is gone", () => {

@@ -1,16 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { createAgentTool, type NestedSpawnPort } from "../../src/tools/agent-tool.js";
-import type { ConsultExpertRef, RunOutcome, SpawnRequest } from "../../src/core/types.js";
-import type { ResolveExpertsResult } from "../../src/consult/index.js";
+import type { RunOutcome, SpawnRequest } from "../../src/core/types.js";
 
-/** T-20 / §4.2: Agent({ experts }) is dispatch-time resolved, never silently ignored. */
+/**
+ * #40 compat: `experts` left the Agent schema with the consult feature. An
+ * old-habit call still reaches execute (pi's validator lets the extra key
+ * through): it is IGNORED with a one-line notice and the run is dispatched
+ * normally — no consult wiring, nothing on the spawn request.
+ */
 
-const ref: ConsultExpertRef = {
-  runId: "r_EXPERT01",
-  label: "explorer",
-  sessionFile: "/tmp/expert.jsonl",
-  agentType: "explorer",
-};
+const NOTICE = "`experts` was ignored";
 
 function outcome(): RunOutcome {
   return {
@@ -36,13 +35,13 @@ function outcome(): RunOutcome {
   };
 }
 
-function params(experts?: string[]) {
+function params(experts?: unknown) {
   return {
     description: "delegate",
     prompt: "do the work",
     subagent_type: "worker",
     ...(experts === undefined ? {} : { experts }),
-  };
+  } as never;
 }
 
 function port(calls: SpawnRequest[]): NestedSpawnPort {
@@ -58,103 +57,87 @@ function port(calls: SpawnRequest[]): NestedSpawnPort {
   };
 }
 
-describe("Agent tool experts parameter", () => {
-  it("throws when experts is passed in a context without a resolver", async () => {
+const textOf = (result: unknown): string =>
+  (result as { content: Array<{ text: string }> }).content.map((c) => c.text).join("\n");
+
+describe("Agent tool: legacy `experts` argument (#40)", () => {
+  it("is not part of either Agent schema", () => {
+    const top = createAgentTool({ spawn: port([]) });
+    const nested = createAgentTool({ spawn: port([]), allowedTypes: ["worker"], parentRunId: "p" });
+    for (const tool of [top, nested]) {
+      expect(Object.keys((tool.parameters as { properties: object }).properties)).not.toContain("experts");
+      expect(JSON.stringify(tool.parameters)).not.toContain("consult");
+    }
+  });
+
+  it("top-level: ignores experts, dispatches normally, adds exactly one notice line, no consultExperts", async () => {
     const calls: SpawnRequest[] = [];
-    const tool = createAgentTool({ spawn: port(calls) });
-    await expect(tool.execute("c", params(["explorer"]), undefined, undefined, undefined as never)).rejects.toThrow(
-      "experts is not supported in this context",
-    );
-    expect(calls).toHaveLength(0);
-  });
-
-  it("propagates resolver configuration errors", async () => {
-    const tool = createAgentTool({
-      spawn: port([]),
-      resolveExperts: () => {
-        throw new Error('ambiguous expert "explorer": use run_id');
-      },
-    });
-    await expect(tool.execute("c", params(["explorer"]), undefined, undefined, undefined as never)).rejects.toThrow(
-      /ambiguous expert.*run_id/,
-    );
-  });
-
-  it("stores resolved refs on the SpawnRequest and echoes mapping + running warning", async () => {
-    const calls: SpawnRequest[] = [];
-    const resolved: ResolveExpertsResult = {
-      refs: [ref],
-      lines: ['expert "explorer" → run_id r_EXPERT01 (explorer)'],
-      warnings: ['⚠ expert "explorer" is still running; consult will nack until it finishes.'],
-    };
-    const tool = createAgentTool({ spawn: port(calls), resolveExperts: () => resolved });
-    const result = (await tool.execute("c", params(["explorer"]), undefined, undefined, undefined as never)) as {
-      content: Array<{ text: string }>;
-    };
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.consultExperts).toEqual([ref]);
-    const text = result.content.map((c) => c.text).join("\n");
-    expect(text).toContain('expert "explorer" → run_id r_EXPERT01 (explorer)');
-    expect(text).toContain("still running; consult will nack");
-  });
-
-  it("carries consultExperts through the top-level background path and the nested blocking path", async () => {
-    const resolved: ResolveExpertsResult = { refs: [ref], lines: ["mapping"], warnings: [] };
-    const topCalls: SpawnRequest[] = [];
-    await createAgentTool({ spawn: port(topCalls), resolveExperts: () => resolved }).execute(
+    const result = await createAgentTool({ spawn: port(calls) }).execute(
       "c",
-      params(["explorer"]),
+      params(["explorer", "main"]),
       undefined,
       undefined,
       undefined as never,
     );
-    expect(topCalls).toHaveLength(1);
-    expect(topCalls[0]!.consultExperts).toEqual([ref]);
-    expect(topCalls[0]!.detachSignalOnStart).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).not.toHaveProperty("consultExperts");
+    expect(calls[0]!.detachSignalOnStart).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain("started in background");
+    expect(text.split(NOTICE)).toHaveLength(2);
+    expect(text).toContain("message_agent");
+  });
 
-    const nestedCalls: SpawnRequest[] = [];
+  it("never calls a wired (deprecated) resolveExperts", async () => {
+    const calls: SpawnRequest[] = [];
+    let resolved = 0;
+    await createAgentTool({
+      spawn: port(calls),
+      resolveExperts: () => {
+        resolved++;
+        throw new Error("must not be read");
+      },
+    }).execute("c", params(["explorer"]), undefined, undefined, undefined as never);
+    expect(resolved).toBe(0);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("nested blocking path: ignores experts and appends the notice to the result", async () => {
+    const calls: SpawnRequest[] = [];
     const nested = await createAgentTool({
-      spawn: port(nestedCalls),
+      spawn: port(calls),
       parentRunId: "parent-1",
       allowedTypes: ["worker"],
-      resolveExperts: () => resolved,
     }).execute("c", params(["explorer"]), undefined, undefined, undefined as never);
-    expect(nestedCalls).toHaveLength(1);
-    expect(nestedCalls[0]!.consultExperts).toEqual([ref]);
-    expect(nestedCalls[0]!.detachSignalOnStart).toBeUndefined();
-    expect(nested.content.map((c) => (c.type === "text" ? c.text : "")).join("\n")).toContain("mapping");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).not.toHaveProperty("consultExperts");
+    expect(calls[0]!.parentRunId).toBe("parent-1");
+    const text = textOf(nested);
+    expect(text).toContain("child answer");
+    expect(text).toContain(NOTICE);
   });
 
-  it("experts remains optional and does not affect ordinary Agent calls", async () => {
+  it("without experts: no notice and no consultExperts (byte-identical result content)", async () => {
     const calls: SpawnRequest[] = [];
-    const tool = createAgentTool({ spawn: port(calls) });
-    await tool.execute("c", params(), undefined, undefined, undefined as never);
-    expect(calls[0]!.consultExperts).toBeUndefined();
+    const result = await createAgentTool({ spawn: port(calls) }).execute(
+      "c",
+      params(),
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    expect(textOf(result)).not.toContain(NOTICE);
+    expect(calls[0]).not.toHaveProperty("consultExperts");
   });
 
-  it('the reserved "main" ref (kind:"main") flows through untouched — agent-tool.ts needs no §16-specific code', async () => {
-    // agent-tool.ts is deliberately unaware of §16: whatever resolveExperts
-    // (wireConsult) hands back for "main" is threaded through exactly like
-    // any other resolved ref — this is the whole point of putting all of
-    // §16's logic in src/consult/index.ts instead of here.
-    const mainRef: ConsultExpertRef = {
-      runId: "main",
-      label: "main",
-      sessionFile: "/tmp/host-main.jsonl",
-      agentType: "consult:main-snapshot",
-      kind: "main",
-    };
-    const resolved: ResolveExpertsResult = {
-      refs: [mainRef],
-      lines: ['expert "main" → the host main session'],
-      warnings: [],
-    };
-    const calls: SpawnRequest[] = [];
-    const tool = createAgentTool({ spawn: port(calls), resolveExperts: () => resolved });
-    const result = (await tool.execute("c", params(["main"]), undefined, undefined, undefined as never)) as {
-      content: Array<{ text: string }>;
-    };
-    expect(calls[0]!.consultExperts).toEqual([mainRef]);
-    expect(result.content.map((c) => c.text).join("\n")).toContain("the host main session");
+  it("an empty experts array is still an `experts` argument: ignored with the notice", async () => {
+    const result = await createAgentTool({ spawn: port([]) }).execute(
+      "c",
+      params([]),
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    expect(textOf(result)).toContain(NOTICE);
   });
 });

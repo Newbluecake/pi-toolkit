@@ -1,7 +1,6 @@
 /**
- * consult A/B instrumentation plan (docs/dev/consult/ab-instrumentation-plan.md
- * §2/§3, P1a): pure validation for the Agent tool's optional `meta` param —
- * analytics-only dispatch metadata (lane / package id / feature / A-B arm)
+ * Pure validation for the Agent tool's optional `meta` param —
+ * analytics-only dispatch metadata (lane / package id / feature)
  * that never reaches the subagent (`buildPrompt` never reads it) and never
  * changes dispatch behavior by itself. Pi-free, no I/O.
  */
@@ -9,24 +8,19 @@
 /** Dev-flow lane classification (skills/dev-flow/SKILL.md): L0 direct edit .. L3 complex. */
 export type DispatchLane = "L0" | "L1" | "L2" | "L3";
 
-/** Which arm of the consult-whitelist A/B experiment this dispatch belongs to. */
-export type AbArm = "experts" | "control";
-
 export interface DispatchMeta {
   lane?: DispatchLane;
   packageId?: string;
   feature?: string;
-  abArm?: AbArm;
 }
 
 /** The only keys `parseDispatchMeta` accepts; an unknown key is a hard error. */
-export const DISPATCH_META_KEYS = ["lane", "packageId", "feature", "abArm"] as const;
+export const DISPATCH_META_KEYS = ["lane", "packageId", "feature"] as const;
 
 /** Shared id shape for `packageId` and `feature`: starts alphanumeric, then up to 63 more id-safe chars. */
 export const DISPATCH_META_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,63}$/;
 
 const LANES: readonly DispatchLane[] = ["L0", "L1", "L2", "L3"];
-const ARMS: readonly AbArm[] = ["experts", "control"];
 
 export type ParseDispatchMetaResult = { ok: true; meta: DispatchMeta | undefined } | { ok: false; error: string };
 
@@ -60,6 +54,20 @@ function describeRaw(value: unknown): string {
 }
 
 /**
+ * Resume inheritance (#40): copy only the still-defined keys. A legacy
+ * persisted `abArm` (removed A/B arm) is dropped, never re-written.
+ */
+export function pickInheritableDispatchMeta(prev: unknown): DispatchMeta | undefined {
+  if (prev === null || typeof prev !== "object") return undefined;
+  const src = prev as Record<string, unknown>;
+  const out: DispatchMeta = {};
+  if (src.lane !== undefined) out.lane = src.lane as DispatchLane;
+  if (src.packageId !== undefined) out.packageId = src.packageId as string;
+  if (src.feature !== undefined) out.feature = src.feature as string;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
  * Validate a raw (model-supplied or programmatic) `meta` value.
  *
  * `undefined` and `{}` both map to `{ ok: true, meta: undefined }` so the
@@ -67,7 +75,7 @@ function describeRaw(value: unknown): string {
  * "zero fields when unused" contract — §2). Everything else that is not a
  * plain object (including a `Date`, a class instance, or any object with a
  * custom/inherited prototype), carries an unknown OWN key, fails the
- * per-field validation, or sets `abArm` without `packageId` is a hard error
+ * per-field validation is a hard error
  * with a self-correcting message (the caller — the Agent tool, P2 — throws
  * it verbatim so the model can fix its own call). Only OWN enumerable
  * fields are ever read (`Object.keys` + `ownValue`): an inherited field
@@ -119,16 +127,6 @@ export function parseDispatchMeta(raw: unknown): ParseDispatchMetaResult {
       };
     }
     meta.feature = feature;
-  }
-  const abArm = ownValue(obj, "abArm");
-  if (abArm !== undefined) {
-    if (typeof abArm !== "string" || !ARMS.includes(abArm as AbArm)) {
-      return { ok: false, error: `meta.abArm must be one of: ${ARMS.join(", ")}; got ${JSON.stringify(abArm)}` };
-    }
-    meta.abArm = abArm as AbArm;
-  }
-  if (meta.abArm !== undefined && meta.packageId === undefined) {
-    return { ok: false, error: "meta.abArm requires meta.packageId (the A/B arm is tracked per package)" };
   }
   return { ok: true, meta };
 }
