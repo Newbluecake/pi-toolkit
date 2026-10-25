@@ -57,6 +57,11 @@
 | 预期 | 主/子会话请求都被改写（stub/上游侧 `temperature=0`），双栏（线上字段 vs payload）正确、无跨会话错位；HUD 显示 `rec`（有丢弃时 `rec·drop N`）；keepalive 显示 `ping off:traffic-rewrite`（窗口级暂停，不熔断、不清 capture；规则停用 + 一次未改写真实请求后自愈）。A：观测到任何 `cache_warming_decision` 后改写**暂停**（fail closed，行 `rewrite_status='suspended'`，录制照常），`/record status` 有「改写暂停」行与恢复提示，`/record off → on` 后恢复改写。B：codex 请求只录钩子级字段（payload/状态/响应头），**不改写**，status 计 `unsupportedApiPayloads`，一次性提示「不在票据白名单，改写规则对其不生效」，网页提示 codex WS 警告（`codex_ws_warning`）。 |
 | 取证 | ① 上游/网页双栏比对每行的 `session_id` 与线级 `x-api-key` 归属；② `/record status` 的归属行（`unattributedPayloads`/`unattributedFetches` 应为 0 或可解释）与「改写暂停」「checkpoint」「串行化已停用」各行；③ HUD 截图（`rec` / `ping off:traffic-rewrite`）；④ codex 会话行 `rewrite_status` 为 NULL（非 `unattributed`）。                                                                                                                                                                                                                                                                                                                                       |
 
+### 解除边界（逐条勾选）
+
+- [ ] **keepalive 否决解除**：先完成一次实际改写，确认 `ping off:traffic-rewrite`；停用全部规则并等规则快照刷新。预期：armed 否决解除，但旧 capture 仍被进程级最近改写标记否决，不能立即恢复 ping（`/record off` 或 `/reload` 也不清该标记）。随后同一会话发一次未改写的真实请求，产生晚于最近改写时刻的新 capture；预期：在 keepalive 其余条件满足的下个发送窗口，不再因 traffic 被否决，无需重启或重置熔断器。取证：规则快照/请求双栏、HUD 前后截图与实际 ping 记录。
+- [ ] **warming 否决与改写暂停分别解除**：armed 时触发一次 `cache_warming_decision`，预期 traffic 返回 `{action:"stop"}`，同时观察器仍将改写暂停；停用全部规则并确认快照为零，或 `/record off`，预期 traffic 不再否决后续 warming（是否预热由 pi 自己决定，不能要求已停止的 warmer 自动重启）。改写暂停不靠等待、普通请求或 `agent_settled` 解除：在无新 warming decision 干扰下，分别验证 `/record off → on`，以及暂停后让快照实际观测到启用规则为零、再重新启用规则；下一次白名单真实请求应恢复改写，`rewriteResumes` 增加，行不再为 `suspended`。取证：warming 事件/返回值、`/record status` 暂停/解除计数、请求双栏与 `rewrite_status`；再次观测到 warming decision 时应再次暂停。
+
 ## V6 重放与导出
 
 | 项   | 内容                                                                                                                                                                              |
@@ -91,11 +96,20 @@
 
 ## V10 web 端 `/record on` 需确认
 
-| 项   | 内容                                                                                                                                                                                                 |
-| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 操作 | Web Hub 打开（`webHub.enabled` + 控制面）→ 在网页输入框发 `/record on`。                                                                                                                             |
-| 预期 | 弹出 `E_CONFIRM_REQUIRED` 确认；确认后才执行。`/record`（无参 / `status` / `off`）不弹。默认表外命令策略为 confirm，可用 `webCommandPolicy.record` 显式覆盖（`on` 的 confirm / `off` 的 allow 等）。 |
-| 取证 | ① 未确认时库无新监听端口、未开始录制；② 确认后与 TUI `/record on` 等价（端口 / token / HUD）。                                                                                                       |
+前置：`traffic.enabled=true`、Web Hub 已开启（`webHub.enabled` + 控制面），会话空闲，未设置 `webHub.webCommandPolicy.record`。先从 TUI `/record off`，记录录制状态与现有 traffic 监听端口（`off` 不关闭已启动的查看页）；Web Hub 自身端口不计入 traffic 端口。
+
+- [ ] **默认策略，未确认**：网页发送 `/record on`，预期返回 `E_CONFIRM_REQUIRED` 并出现确认提示；尚未开始录制、没有新增 traffic 监听端口。取证：控制面结果、`/record status` 与 `ss -ltnp` 前后对照。
+- [ ] **取消确认**：取消上述提示，预期命令不执行，仍未录制、监听端口不变。取证：取消后的状态与端口对照。
+- [ ] **确认执行**：再次发送 `/record on` 并确认，预期才开始录制，与 TUI 执行等价；默认查看页监听 `127.0.0.1`，已有服务则复用，页面 token 可正常使用，HUD 显示 `rec`。随后发一次真实请求，预期产生新录制行。取证：确认结果、状态/URL、监听地址、HUD 与库行数增量。
+- [ ] **无参读取**：网页发送 `/record`，预期不弹确认，只返回状态，不改变录制状态或监听端口。取证：控制面结果与状态前后对照。
+- [ ] **显式读取**：网页发送 `/record status`，预期同无参读取，不弹确认。取证：控制面结果与状态前后对照。
+- [ ] **停止录制**：网页发送 `/record off`，预期不弹确认，停止录制但历史保留、已启动的查看页仍可浏览；再发一次真实请求不新增录制行。取证：状态、网页历史与库行数前后对照。
+- [ ] **非法子命令**：无策略覆盖时，网页发送 `/record typo`，预期 `E_COMMAND_DENIED`，不执行、不改变状态。取证：控制面结果与状态前后对照。
+- [ ] **显式 allow 覆盖**：设置 `webHub.webCommandPolicy.record="allow"` 并 `/reload`，确认未录制，再从网页发送 `/record on`；预期不弹确认，直接开启录制。取证：控制面结果与状态变化。
+- [ ] **显式 confirm 覆盖**：设置 `webHub.webCommandPolicy.record="confirm"` 并 `/reload`，分别从网页发送无参 `/record`、`/record status`、`/record off`；预期三者都需确认，未确认不执行。取证：每条的 `E_CONFIRM_REQUIRED` 与确认前后结果。
+- [ ] **显式 deny 覆盖与还原**：设置 `webHub.webCommandPolicy.record="deny"` 并 `/reload`，逐条发送无参 `/record`、`status`、`on`、`off`，预期都返回 `E_COMMAND_DENIED` 且状态不变；最后移除覆盖并 `/reload`，复核默认 `on` 需确认、`status/off` 不需确认。取证：逐条控制面结果及还原后的结果。
+
+覆盖键作用于整个 `record` 命令，不是分别配置各子命令；默认分支由代码区分 `on`（confirm）、无参/`status`/`off`（allow）与非法子命令（deny）。
 
 ## V11 锁竞争、WAL 与性能门（真机仲裁）
 

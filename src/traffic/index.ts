@@ -282,10 +282,15 @@ function registerRecordCommand(
   };
 
   pi.registerCommand("record", {
-    description: "流量录制: /record on|off|status — 记录模型输入输出到 SQLite，Web 页面实时查看（支持局域网）",
+    description:
+      '流量录制: /record on|off|status — 记录模型输入输出到 SQLite，Web 默认仅限 127.0.0.1（局域网需 traffic.web.host="0.0.0.0"）',
     getArgumentCompletions: (prefix) =>
       [
-        { value: "on", label: "on", description: "开始录制 + 启动 Web 查看页（本机 + 局域网）" },
+        {
+          value: "on",
+          label: "on",
+          description: '开始录制 + 启动 Web 查看页（默认 127.0.0.1；局域网需 traffic.web.host="0.0.0.0"）',
+        },
         { value: "off", label: "off", description: "停止录制（历史保留，页面仍可浏览）" },
         { value: "status", label: "status", description: "查看录制状态、统计与访问 URL" },
       ].filter((item) => item.value.startsWith(prefix)),
