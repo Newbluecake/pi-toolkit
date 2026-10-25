@@ -396,8 +396,8 @@ describe("I4 (BW2): a call that arrives after the workflow's own deadline never 
   });
 });
 
-describe("I4: experts_unresolved on an isolated+experts call never folds", () => {
-  it("a resolver failure rejects with experts_unresolved before F2 is ever reached — the next call's chainDigestBefore is the plain UNFOLDED key", async () => {
+describe("I4: removed experts on an isolated call never folds", () => {
+  it("removed experts rejects before journal bookkeeping or F2 — the next call starts at CHAIN_SEED", async () => {
     const h = harness();
     await h.boot();
     const c = controllableWorktreeSpawner();
@@ -409,9 +409,9 @@ describe("I4: experts_unresolved on an isolated+experts call never folds", () =>
     });
     h.postHostCall("1", "agent", { prompt: "isolated", opts: { isolation: "worktree", experts: ["dev"] } });
     await flush();
-    expect(resolveExperts).toHaveBeenCalledTimes(1);
+    expect(resolveExperts).not.toHaveBeenCalled();
     expect(ackFor(h.sent, "1")?.ok).toBe(false);
-    expect(ackFor(h.sent, "1")?.error?.message).toBe("expert not found");
+    expect(ackFor(h.sent, "1")?.error?.message).toContain("opts.experts is no longer supported");
     expect(c.spawns).toHaveLength(0); // rejected before ever reaching spawn/F2
     h.postHostCall("2", "agent", { prompt: "plain", opts: null });
     await flush();
@@ -421,8 +421,7 @@ describe("I4: experts_unresolved on an isolated+experts call never folds", () =>
     await flush();
     expect(appendSpy).toHaveBeenCalledTimes(1);
     const plain = appendSpy.mock.calls[0]![1] as { chainDigestBefore: string };
-    const unfolded = nextChainDigest(CHAIN_SEED, isolatedTaskKey("isolated"));
-    expect(plain.chainDigestBefore).toBe(unfolded); // NO "iso:" fold applied anywhere
+    expect(plain.chainDigestBefore).toBe(CHAIN_SEED); // NO "iso:" fold applied anywhere
   });
 });
 

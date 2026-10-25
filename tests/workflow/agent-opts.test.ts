@@ -136,66 +136,39 @@ describe("snapshotAgentOpts: shape classification (D2-D6)", () => {
   });
 });
 
-describe("snapshotAgentOpts: the experts array (D2/D6, bad_array)", () => {
-  it("a well-formed experts array of strings passes through", () => {
-    const snap = snapshotAgentOpts({ experts: ["dev", "review"] });
-    expect(snap.defect).toBeUndefined();
-    expect(snap.values.experts).toEqual(["dev", "review"]);
+describe("removed experts option", () => {
+  it("has exactly seven allowed keys", () => {
+    expect(AGENT_OPTS_KEYS).toEqual(["label", "agentType", "phase", "fullResult", "model", "thinking", "isolation"]);
   });
 
-  it("experts: a non-array scalar is not bad_array — passed through raw for the later 'must be an array' check", () => {
-    const snap = snapshotAgentOpts({ experts: "dev" });
-    expect(snap.defect).toBeUndefined();
-    expect(snap.values.experts).toBe("dev");
-  });
+  it.each([undefined, [], ["main"], "dev", [() => {}], new Proxy([], {})])(
+    "rejects experts regardless of value (%s)",
+    (experts) => {
+      const snap = snapshotAgentOpts({ experts });
+      expect(snap).toEqual({ values: {}, unknownKeys: ["experts"] });
+      const result = validateAgentOpts(snap);
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected rejection");
+      expect(result.message).toContain("opts.experts is no longer supported");
+      expect(result.message).toContain("message_agent");
+      expect(result.message).toContain("allowed: " + AGENT_OPTS_KEYS.join(", "));
+    },
+  );
 
-  it("experts containing a function/symbol/Proxy element is bad_array (N1 — never embedded)", () => {
-    expect(snapshotAgentOpts({ experts: [() => {}] }).defect).toEqual({ code: "bad_array", key: "experts" });
-    expect(snapshotAgentOpts({ experts: [Symbol("x")] }).defect?.code).toBe("bad_array");
-    expect(snapshotAgentOpts({ experts: [new Proxy({}, {})] }).defect?.code).toBe("bad_array");
-  });
-
-  it("experts itself as a Proxy array is bad_array without ever touching its traps", () => {
-    let trapCalls = 0;
-    const proxy = new Proxy([], {
-      ownKeys() {
-        trapCalls += 1;
-        return [];
-      },
+  it("does not inspect a removed experts accessor", () => {
+    const getter = vi.fn(() => {
+      throw new Error("must not run");
     });
-    expect(snapshotAgentOpts({ experts: proxy }).defect).toEqual({ code: "bad_array", key: "experts" });
-    expect(trapCalls).toBe(0);
+    const opts = Object.defineProperty({}, "experts", { get: getter });
+    expect(validateAgentOpts(snapshotAgentOpts(opts)).ok).toBe(false);
+    expect(getter).not.toHaveBeenCalled();
   });
 
-  it("a hole in the experts array is bad_array", () => {
-    // eslint-disable-next-line no-sparse-arrays
-    const arr = ["a", , "c"];
-    expect(snapshotAgentOpts({ experts: arr }).defect).toEqual({ code: "bad_array", key: "experts" });
-  });
-
-  it("an extra own property on the experts array is bad_array", () => {
-    const arr: string[] & { extra?: string } = ["a", "b"];
-    arr.extra = "surprise";
-    expect(snapshotAgentOpts({ experts: arr }).defect).toEqual({ code: "bad_array", key: "experts" });
-  });
-
-  it("an accessor element in the experts array is bad_array", () => {
-    const arr: unknown[] = [];
-    Object.defineProperty(arr, 0, { enumerable: true, configurable: true, get: () => "x" });
-    Object.defineProperty(arr, "length", { value: 1 });
-    expect(snapshotAgentOpts({ experts: arr }).defect).toEqual({ code: "bad_array", key: "experts" });
-  });
-
-  it("a non-string element (number) is NOT bad_array — passes through, caught later as a type error", () => {
-    const snap = snapshotAgentOpts({ experts: [1] });
-    expect(snap.defect).toBeUndefined();
-    expect(snap.values.experts).toEqual([1]);
-  });
-
-  it("experts: [] is captured as an empty array here (validateAgentOpts turns it into undefined)", () => {
-    const snap = snapshotAgentOpts({ experts: [] });
-    expect(snap.defect).toBeUndefined();
-    expect(snap.values.experts).toEqual([]);
+  it("honors a worker report for experts even when the snapshot dropped its value", () => {
+    const result = validateAgentOpts({ values: {}, unknownKeys: [] }, { unknownKeys: ["experts"] });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected rejection");
+    expect(result.message).toContain("opts.experts is no longer supported");
   });
 });
 
@@ -296,28 +269,6 @@ describe("validateAgentOpts: known-key type errors (D6) — model/thinking wordi
     const good = validateAgentOpts(wrap({ isolation: "worktree" }));
     expect(good).toEqual({ ok: true, opts: { isolation: "worktree" } });
   });
-
-  it("opts.experts: must be an array of non-empty strings; no duplicates after trimming", () => {
-    expect(validateAgentOpts(wrap({ experts: "a" as never })).ok).toBe(false);
-    expect(validateAgentOpts(wrap({ experts: [1] as never })).ok).toBe(false);
-    expect(validateAgentOpts(wrap({ experts: [""] })).ok).toBe(false);
-    expect(validateAgentOpts(wrap({ experts: ["  "] })).ok).toBe(false);
-    const dup = validateAgentOpts(wrap({ experts: ["a", " a"] }));
-    expect(dup.ok).toBe(false);
-    if (dup.ok) throw new Error("expected failure");
-    expect(dup.message).toContain("duplicate");
-    expect(dup.message).toContain('"a"');
-  });
-
-  it("experts: [] is treated as not passed (undefined in ValidatedAgentOpts, not tainting)", () => {
-    const r = validateAgentOpts(wrap({ experts: [] }));
-    expect(r).toEqual({ ok: true, opts: {} });
-  });
-
-  it("experts trims and dedupes are stable and order-preserving", () => {
-    const r = validateAgentOpts(wrap({ experts: [" dev ", "review"] }));
-    expect(r).toEqual({ ok: true, opts: { experts: ["dev", "review"] } });
-  });
 });
 
 describe("validateAgentOpts: the full valid set round-trips (D8, all keys including phase from the worker merge)", () => {
@@ -331,7 +282,6 @@ describe("validateAgentOpts: the full valid set round-trips (D8, all keys includ
         model: "cr-anthropic/claude-sonnet-5",
         thinking: "high",
         isolation: "worktree",
-        experts: ["dev"],
       },
       unknownKeys: [],
     });
@@ -345,7 +295,6 @@ describe("validateAgentOpts: the full valid set round-trips (D8, all keys includ
         model: "cr-anthropic/claude-sonnet-5",
         thinking: "high",
         isolation: "worktree",
-        experts: ["dev"],
       },
     });
   });

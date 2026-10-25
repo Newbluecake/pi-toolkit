@@ -656,7 +656,7 @@ describe("real-worker agent() opts snapshot (workflow-experts §4.5, N1)", () =>
     await host.terminate("test-done");
   }, 10_000);
 
-  it("a function element inside experts[] is bad_array, immediately, never spawns", async () => {
+  it("an unclonable removed experts value is rejected immediately, never spawns", async () => {
     const spawns: unknown[] = [];
     const spawner: ChildSpawner = {
       spawn: async (req) => {
@@ -713,9 +713,8 @@ describe("real-worker agent() opts snapshot (workflow-experts §4.5, N1)", () =>
     await host.terminate("test-done");
   }, 10_000);
 
-  it("a well-formed experts array round-trips through the real worker and reaches the ChildSpawner", async () => {
+  it("removed experts rejects through the real worker and catch can continue with a plain call", async () => {
     const spawns: Parameters<ChildSpawner["spawn"]>[0][] = [];
-    const refs = [{ runId: "r-expert", sessionFile: "/tmp/r-expert.jsonl", agentType: "gp" }];
     const spawner: ChildSpawner = {
       spawn: async (req) => {
         spawns.push(req);
@@ -726,13 +725,30 @@ describe("real-worker agent() opts snapshot (workflow-experts §4.5, N1)", () =>
         settled: runIds.map((runId) => ({ runId, status: "completed" as const, text: "ok" })),
         pending: [],
       }),
-      resolveExperts: (handles) => ({ refs: handles.map(() => refs[0]!) }),
+      resolveExperts: () => {
+        throw new Error("must not run");
+      },
     };
-    const { host, outcome } = await bootReal(scriptWith('return await agent("x", { experts: ["dev"] });'), spawner);
-    const result = await outcome;
-    expect(result.threw).toBeUndefined();
-    expect(result.returned).toBe("ok");
-    expect(spawns[0]).toMatchObject({ consultExperts: refs });
-    await host.terminate("test-done");
+    const { host, outcome } = await bootReal(
+      scriptWith(`
+      const error = await agent("removed", { experts: ["dev"] }).catch(e => e.message);
+      const value = await agent("plain");
+      return { error, value };
+    `),
+      spawner,
+    );
+    try {
+      const result = await outcome;
+      expect(result.threw).toBeUndefined();
+      expect(result.returned).toMatchObject({
+        error: expect.stringContaining("opts.experts is no longer supported"),
+        value: "ok",
+      });
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]!.prompt).toBe("plain");
+      expect(spawns[0]).not.toHaveProperty("consultExperts");
+    } finally {
+      await host.terminate("test-done");
+    }
   }, 10_000);
 });

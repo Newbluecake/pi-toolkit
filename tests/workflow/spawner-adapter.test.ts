@@ -136,29 +136,15 @@ describe("createWorkflowChildSpawner: workflow-experts (§4.8)", () => {
     expect(adapter.resolveExperts).toBeUndefined();
   });
 
-  it("resolveExperts always calls the injected resolver with { completedOnly: true } fixed (D8), regardless of caller intent", () => {
-    const { service } = fakeSpawnService();
-    const injected = vi.fn(() => ({ refs: [] }));
-    const adapter = createWorkflowChildSpawner(service, fakeTypes(), { resolveExperts: injected });
-    adapter.resolveExperts!(["dev"]);
-    expect(injected).toHaveBeenCalledWith(["dev"], { completedOnly: true });
-  });
-
-  it("a throwing injected resolver is caught and turned into { error } (D17 belt-and-braces)", () => {
+  it("accepts the deprecated resolver option without reading or exposing it", () => {
     const { service } = fakeSpawnService();
     const injected = vi.fn(() => {
-      throw new Error("consult exploded");
+      throw new Error("must not run");
     });
-    const adapter = createWorkflowChildSpawner(service, fakeTypes(), { resolveExperts: injected });
-    expect(adapter.resolveExperts!(["dev"])).toEqual({ error: { message: "consult exploded" } });
-  });
-
-  it("a successful injected resolver's refs/error pass through verbatim", () => {
-    const { service } = fakeSpawnService();
-    const refs = [{ runId: "r1", sessionFile: "/tmp/r1.jsonl", agentType: "gp" }];
-    const injected = vi.fn(() => ({ refs }));
-    const adapter = createWorkflowChildSpawner(service, fakeTypes(), { resolveExperts: injected });
-    expect(adapter.resolveExperts!(["dev"])).toEqual({ refs });
+    const options = Object.defineProperty({}, "resolveExperts", { get: injected });
+    const adapter = createWorkflowChildSpawner(service, fakeTypes(), options);
+    expect(adapter.resolveExperts).toBeUndefined();
+    expect(injected).not.toHaveBeenCalled();
   });
 });
 

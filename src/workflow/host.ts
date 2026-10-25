@@ -5,7 +5,6 @@ import type { LoadAdmission } from "../sysload/types.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { deriveChildBudget } from "./budget.js";
 import { snapshotAgentOpts, validateAgentOpts, type OptsDefect } from "./agent-opts.js";
-import { createWorkflowExpertScope, resolveWorkflowExperts, type WorkflowExpertResolver } from "./expert-scope.js";
 import { createCallRegistry, type CallRegistry } from "./call-registry.js";
 import { buildEntry, CHAIN_SEED, nextChainDigest, sha256Hex, taskKeyOf, type JournalStore } from "./journal.js";
 import { decideReplay, type ReplayIndex } from "./replay.js";
@@ -90,14 +89,7 @@ export interface ChildSpawner {
     modelHintOverride?: string;
     /** Per-call thinking-level override (agent()'s `opts.thinking`), same values as the Agent tool's `thinking` param. */
     thinkingOverride?: ThinkingLevel;
-    /**
-     * workflow-experts (docs/dev/workflow-experts/plan.md §4.2/§4.8): the
-     * resolved (trusted) expert whitelist for this child — structurally the
-     * same field `SpawnRequest.consultExperts` already carries for the
-     * top-level/nested Agent tool. Host.ts only ever populates this from a
-     * successful `resolveWorkflowExperts` call; the script itself can never
-     * construct a `ConsultExpertRef` (it only ever passes handle strings).
-     */
+    /** @deprecated #40 — removed in PS1b; legacy adapter request only. */
     consultExperts?: readonly ConsultExpertRef[];
     /**
      * workflow-worktree plan D1: opt-in per-call worktree isolation
@@ -139,17 +131,10 @@ export interface ChildSpawner {
    * changed agent-type definition.
    */
   configHashOf?(type: string): string | undefined;
-  /**
-   * workflow-experts §4.2/§4.8/D17: dispatch-time expert resolution for this
-   * workflow run — the production wiring (`spawner-adapter.ts`, `stack.ts`)
-   * forwards to `consult`'s `resolveExperts` (package C) with `{
-   * completedOnly: true }` (D8) fixed. Never throws (contract, not just
-   * convention — `resolveWorkflowExperts` also wraps a throw defensively).
-   * Absent — e.g. a `ChildSpawner` test double, or `consult.enabled=false` at
-   * the real wiring — fails closed: `agent({ experts })` rejects with "not
-   * supported in this context" (D17), it never silently drops `experts`.
-   */
-  resolveExperts?: WorkflowExpertResolver;
+  /** @deprecated #40 — removed in PS1b; retained for stack wiring, never read. */
+  resolveExperts?: (
+    handles: readonly string[],
+  ) => { refs: readonly ConsultExpertRef[] } | { error: { message: string } };
   /**
    * workflow-worktree plan D2: the live availability gate for
    * `isolation:"worktree"` (decision 1 — no fallback to the shared
@@ -254,7 +239,7 @@ export interface WorkflowChildEvent {
   readonly at: Millis;
 }
 
-/** workflow-agent-queue §5 (workflow-experts adds "experts_unresolved"): why an `agent()` call was rejected. */
+/** Why an `agent()` call was rejected. */
 export type WorkflowChildRejectReason =
   | "invalid_args"
   | "max_children"
@@ -262,7 +247,6 @@ export type WorkflowChildRejectReason =
   | "spawn_error"
   | "spawn_timeout"
   | "host_call_timeout"
-  | "experts_unresolved"
   /** workflow-worktree plan D2: `isolation:"worktree"` requested while `ChildSpawner.worktreeAvailable?.()` is not `true` — no fallback to the shared checkout (decision 1). */
   | "isolation_unavailable";
 
@@ -426,10 +410,7 @@ interface QueuedAgentCall {
   readonly modelOverride?: { provider: string; id: string };
   readonly modelHintOverride?: string;
   readonly thinkingOverride?: ThinkingLevel;
-  /** workflow-experts §4.4: the resolved refs (bound to `spawnRequestFor`'s `consultExperts`) and the ids they resolved to (diagnostics, `WorkflowChildSummary.experts`). Set only when `opts.experts` was present and resolution succeeded — a call never reaches this struct otherwise (§4.4's admission gate rejects it first). */
-  readonly consultExperts?: readonly ConsultExpertRef[];
-  readonly expertIds?: readonly string[];
-  /** workflow-worktree plan D1/D2: set only when `opts.isolation` was present AND the D2 availability gate passed — a rejected isolation request never reaches this struct (mirrors `consultExperts`'s admission-gated-first pattern). */
+  /** workflow-worktree plan D1/D2: set only when `opts.isolation` was present AND the D2 availability gate passed — a rejected isolation request never reaches this struct. */
   readonly isolation?: "worktree";
 }
 
@@ -522,8 +503,6 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   // existed in the type since M3.x but was never populated until now.
   const labelOf = new Map<CallId, string>();
   const agentTypeOf = new Map<CallId, string>();
-  /** workflow-experts D22: set alongside `call.expertIds` at submission time, consumed once by `recordSettled` to fold `experts` into the recorded `WorkflowChildSummary`. */
-  const expertIdsOf = new Map<CallId, readonly string[]>();
   /** workflow-worktree plan D5/D2: set once (in `runBoundChild`) for a call that requested `isolation:"worktree"` and was actually bound to a run — read by `forceSettleActive` (which has no other way to know) and deleted by `recordSettled` alongside the other per-callId maps. */
   const isolationOf = new Map<CallId, true>();
   /** workflow-worktree plan D5 step 3/4: a disposition the "late" listener (no cap, no host timer) delivered after this call's own settle — folded into `worktreeFinal` by the `children` getter at read time, never mutating the frozen `worktree` field. */
@@ -620,14 +599,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
    */
   let freshFolds = 0;
   let staleReplayCount = 0;
-  // workflow-experts D13-D15: one scope per run (closure-local, not module
-  // scope). `replayTainted` starts false and is set (never cleared) the
-  // instant some call's experts resolve successfully (§4.4) — every call
-  // *submitted* afterwards reads `tainted:true` at its own journal-block
-  // decideReplay (the call that itself set it still reads the pre-taint
-  // value, D13's "解析成功" row uses `experts:true`, not `tainted:true`, for
-  // itself).
-  const expertScope = createWorkflowExpertScope();
+  // Accepted isolation calls taint replay unless chain-scope verification folds their identity.
   let replayTainted = false;
   /**
    * M3.4 fix (found while adding real WT7 coverage): a *single* "current
@@ -734,25 +706,16 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     const label = labelOf.get(summary.callId);
     const agentType = agentTypeOf.get(summary.callId);
     const queueWaitMs = queueWaitMsOf(summary.callId);
-    const experts = expertIdsOf.get(summary.callId);
     labelOf.delete(summary.callId);
     agentTypeOf.delete(summary.callId);
     enqueuedAtOf.delete(summary.callId);
     queueWaitOf.delete(summary.callId);
-    expertIdsOf.delete(summary.callId);
     isolationOf.delete(summary.callId);
     const labelled = summary.label === undefined && label !== undefined ? { ...summary, label } : summary;
-    const withQueueWait =
-      queueWaitMs !== undefined && labelled.queueWaitMs === undefined ? { ...labelled, queueWaitMs } : labelled;
     const enriched =
-      experts !== undefined && withQueueWait.experts === undefined ? { ...withQueueWait, experts } : withQueueWait;
+      queueWaitMs !== undefined && labelled.queueWaitMs === undefined ? { ...labelled, queueWaitMs } : labelled;
     children.push(enriched);
     deps.onChildSettled?.(enriched);
-    // workflow-experts §4.4: the single chokepoint every settlement (live,
-    // replay hit, withheld, force-settled) passes through — the workflow
-    // expert scope needs to see every one of them (D10's "still running" /
-    // "completed" / "failed" classification depends on it).
-    expertScope.noteSettled(enriched);
     // M10: "settled" fires here — the single chokepoint every child outcome
     // (live settle, replay hit, withheld, force-settled abort) passes through.
     deps.onChildEvent?.({
@@ -983,16 +946,6 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // for older, already-written entries) can veto replaying it.
     const isolation = validOpts.isolation;
 
-    // workflow-experts §4.4/D9-D11/P1 fix: recorded at each of the three
-    // REAL `registry.submit` sites below (replay hit / FIFO queue /
-    // immediate dispatch) — never here. A call rejected before any of those
-    // (invalid_args, max_children, budget_exhausted, experts_unresolved)
-    // never occupies a `CallInfo` slot, so a later call reusing the same
-    // label never sees a phantom "still running" candidate (§5's table: a
-    // rejection must leave zero trace in `expertScope`, matching D10/#23's
-    // "caught experts_unresolved, then continue" semantics).
-    const declaresExperts = validOpts.experts !== undefined;
-
     // M3.5 §6.2/§6.4: the replay short-circuit. Computed unconditionally
     // whenever a journal is configured, before any admission-limit checks
     // below — occurrence/chain-digest must advance on *every* submission,
@@ -1061,13 +1014,6 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         deterministic: journal.deterministic.current,
         now: deps.clock.now(),
         configHashAvailable,
-        // workflow-experts §4.4/§5: `experts` is "this call itself declared
-        // opts.experts" (regardless of whether resolution below ends up
-        // succeeding — the contract table's "解析成功" row still reads
-        // `skip:experts` for itself); `tainted` is the run-wide flag set by
-        // some *earlier* call's successful resolution (D13). Both bypass
-        // `index.lookup` entirely.
-        experts: declaresExperts,
         tainted: replayTainted,
         // workflow-worktree plan D3 / replay-verify plan D5: an isolated call
         // is unconditionally skip UNLESS `verify` mode is on, in which case
@@ -1103,7 +1049,6 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
             : decision.entry.worktree.state === "committed"
               ? { state: "committed", branch: decision.entry.worktree.branch, commit: decision.entry.worktree.commit }
               : { state: "clean" };
-        expertScope.noteSubmitted(callId, label);
         registry.submit(callId, deps.clock.now());
         startedAt.set(callId, deps.clock.now());
         if (phaseId !== undefined) phaseOf.set(callId, phaseId);
@@ -1143,21 +1088,12 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       }
       if (decision.kind === "miss") replayStats.misses += 1;
       else replayStats.skipped += 1; // covers a genuine skip decision AND an isoHitBlocked hit
-      // workflow-experts D12/D13/P3: an experts call (this one) or anything
-      // submitted after the chain was tainted is NEVER journaled, regardless
-      // of how its live settle turns out — skip the bookkeeping that would
-      // otherwise let `runBoundChild`'s completion handler write an entry.
-      // replay-verify plan D3/D9: an isolated call under `off` mode is never
-      // journaled either (the pre-plan behavior, `isolation === undefined ||
-      // verify` below is false for it); under `verify` mode it IS eligible
-      // (independent of scope — content scope keeps writing too, D6.4's "弱
-      // 模式"), unless `declaresExperts`/`replayTainted` already vetoes it
-      // (same rule as any other call).
+      // A tainted chain never journals. Isolated calls are eligible only in verify mode.
       const isoIdLive =
         isolation !== undefined && verify
           ? sha256Hex(`${journal.isolationReplay!.nonce}:${kForOccurrence}:${occurrence}`).slice(0, 32)
           : undefined;
-      if (!declaresExperts && !replayTainted && (isolation === undefined || verify)) {
+      if (!replayTainted && (isolation === undefined || verify)) {
         journalMetaOf.set(callId, {
           taskKey,
           chainDigestBefore,
@@ -1166,10 +1102,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
           ...(isoIdLive !== undefined ? { isolation: "worktree" as const, isoId: isoIdLive } : {}),
         });
       }
-      // D6.3 I3/I4: `pendingFold` is set purely from `foldable`/`isoIdLive` —
-      // NOT gated by `declaresExperts`/`replayTainted` (D8: an accepted
-      // isolated call still folds even after the chain was independently
-      // tainted by an earlier experts call; I3: at most one fold per call).
+      // D6.3 I3/I4: each accepted foldable call folds at most once.
       pendingFold = foldable ? isoIdLive : undefined;
     }
 
@@ -1199,11 +1132,10 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       return { kind: "host_ack", id: callId, ok: false, error: { message } };
     }
 
-    // workflow-worktree plan D2 (same admission stage as the experts
-    // resolution right below): the live availability gate for
+    // workflow-worktree plan D2: the live availability gate for
     // `isolation:"worktree"` — decision 1, no fallback to the shared
     // checkout. Checked before this call ever touches the registry,
-    // `expertScope`, or `replayTainted` — a rejected isolation call leaves
+    // or `replayTainted` — a rejected isolation call leaves
     // no trace anywhere (`journalMetaOf` — replay-verify plan D6.2: possibly
     // just set above, for a `verify`-mode isolated call — is explicitly
     // deleted here so a rejected call never lingers as if it were pending a
@@ -1216,37 +1148,12 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       return { kind: "host_ack", id: callId, ok: false, error: { message } };
     }
     if (isolation !== undefined && !foldable) {
-      // D3: an accepted isolation call taints the rest of the chain exactly
-      // like a successful experts resolution below — this call's own
+      // D3: an accepted isolation call taints the rest of the chain — its own
       // journal-block decision already ran above reading the pre-taint
       // value (`isolation:true` already forced it to `skip`, independent of
       // `tainted`). replay-verify plan D6: when `foldable` (verify mode,
       // chain scope) the taint is replaced by the F2 fold below instead —
       // D9/off mode and content scope keep this unconditional taint.
-      replayTainted = true;
-    }
-
-    // workflow-experts §4.2/§4.4 stage ④ (§5's ordering: after journal/
-    // maxChildren/BW2, before queueing/dispatch): resolve the whitelist.
-    // `mapLocal`'s own rejects and the resolver's failures are both reported
-    // the same way — `experts_unresolved`, an ordinary ack failure the
-    // script can `.catch()` (D11: fast, synchronous, bounded — a handful of
-    // `statSync`s at most, never a new wait).
-    let consultExperts: readonly ConsultExpertRef[] | undefined;
-    let expertIds: readonly string[] | undefined;
-    if (declaresExperts) {
-      const resolved = resolveWorkflowExperts(validOpts.experts!, expertScope, deps.spawner.resolveExperts);
-      if (!resolved.ok) {
-        emitRejected(callId, "admission", "experts_unresolved", resolved.message, { label, agentType, phaseId });
-        return { kind: "host_ack", id: callId, ok: false, error: { message: resolved.message } };
-      }
-      consultExperts = resolved.refs;
-      expertIds = resolved.ids;
-      expertIdsOf.set(callId, expertIds);
-      // D13: taint takes effect for every call *submitted after this point* —
-      // this call's own journal-block decision already ran (above) reading
-      // the pre-taint value, exactly matching the contract table's "带
-      // experts，解析成功" row (`experts:true`, not `tainted:true`, for itself).
       replayTainted = true;
     }
 
@@ -1272,8 +1179,6 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       ...(modelOverride !== undefined ? { modelOverride } : {}),
       ...(modelHintOverride !== undefined ? { modelHintOverride } : {}),
       ...(thinkingOverride !== undefined ? { thinkingOverride } : {}),
-      ...(consultExperts !== undefined ? { consultExperts } : {}),
-      ...(expertIds !== undefined ? { expertIds } : {}),
       ...(isolation !== undefined ? { isolation } : {}),
     };
     if (phaseId !== undefined) phaseOf.set(callId, phaseId);
@@ -1287,7 +1192,6 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     const blockedByMaxParallel = waitQueue.length > 0 || activeCount() >= budget.maxParallel;
     if (blockedByMaxParallel || blockedByLoad) {
       const at = deps.clock.now();
-      expertScope.noteSubmitted(callId, label);
       registry.submit(callId, at, { queued: true });
       enqueuedAtOf.set(callId, at);
       waitQueue.push(call);
@@ -1316,7 +1220,6 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
 
     // D2 ⑤: a free slot — the pre-queue immediate path, unchanged (the ack
     // waits for spawn() itself, bounded by HR2).
-    expertScope.noteSubmitted(callId, label);
     registry.submit(callId, deps.clock.now());
     startedAt.set(callId, deps.clock.now());
 
@@ -1367,7 +1270,6 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       return { kind: "host_ack", id: callId, ok: false, cancelled: true, cause: bound.cause };
     }
     if (effectiveLabel !== undefined) labelOf.set(callId, effectiveLabel);
-    expertScope.noteBound(callId, spawned.runId, effectiveLabel);
     runBoundChild(callId, spawned.runId, {
       agentType,
       phaseId,
@@ -1419,7 +1321,6 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       ...(call.modelOverride !== undefined ? { modelOverride: call.modelOverride } : {}),
       ...(call.modelHintOverride !== undefined ? { modelHintOverride: call.modelHintOverride } : {}),
       ...(call.thinkingOverride !== undefined ? { thinkingOverride: call.thinkingOverride } : {}),
-      ...(call.consultExperts !== undefined ? { consultExperts: call.consultExperts } : {}),
       ...(call.isolation !== undefined ? { isolation: call.isolation } : {}),
       ...(isolationCwd !== undefined ? { cwd: isolationCwd } : {}),
       ...(derived.deadlineAt !== undefined ? { deadlineAt: derived.deadlineAt } : {}),
@@ -1683,7 +1584,6 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       const effectiveLabel = r.label ?? call.label;
       if (bindSpawned(callId, r.runId).kind === "orphaned") return;
       if (effectiveLabel !== undefined) labelOf.set(callId, effectiveLabel);
-      expertScope.noteBound(callId, r.runId, effectiveLabel);
       runBoundChild(callId, r.runId, {
         agentType: call.agentType,
         phaseId: call.phaseId,

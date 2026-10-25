@@ -107,9 +107,7 @@ export type ReplayDecision =
         | "expired"
         | "config_hash_unavailable"
         | "truncated"
-        /** workflow-experts D12: this call itself passed `opts.experts` — never replayed, never journaled. */
-        | "experts"
-        /** workflow-experts D13-D15: submitted after some earlier call's experts resolved successfully this run — the whole rest of the chain is live. */
+        /** An earlier accepted isolation call tainted the replay chain. */
         | "chain_tainted"
         /** replay-verify plan D5: a `committed` isolated entry whose recorded branch did not verify (missing, or tip mismatch) against the load-time snapshot probe — never a `clean` entry (D3.1: clean isn't checked at all). */
         | "worktree_unverified";
@@ -139,9 +137,7 @@ export interface DecideReplayInput {
    * concept to begin with).
    */
   readonly configHashAvailable?: boolean;
-  /** workflow-experts D12: `true` for a call that itself carries `opts.experts` (regardless of whether resolution ends up succeeding — host.ts only sets this when experts resolved, see its own call site doc). */
-  readonly experts?: boolean;
-  /** workflow-experts D13-D15: `true` once this run's chain has been tainted by an earlier successfully-resolved experts call. */
+  /** An earlier accepted isolation call tainted the replay chain. */
   readonly tainted?: boolean;
   /**
    * workflow-worktree plan D3 (option A): `true` for a call that itself
@@ -180,15 +176,11 @@ export const DEFAULT_REPLAY_TTL_MS: Millis = 7 * 24 * 60 * 60 * 1000;
 export function decideReplay(input: DecideReplayInput): ReplayDecision {
   if (input.noReplay) return { kind: "skip", reason: "no_replay" };
   if (!input.deterministic) return { kind: "skip", reason: "non_deterministic" };
-  // workflow-experts §4.6/§5: an experts call and everything chain-tainted
-  // after it are unconditionally skip — checked *before* the index is ever
-  // touched (§5's contract table: lookup must never run for either case).
-  if (input.experts === true) return { kind: "skip", reason: "experts" };
+  // Tainted isolation chains bypass lookup entirely.
   if (input.tainted === true) return { kind: "skip", reason: "chain_tainted" };
   // workflow-worktree plan D3: an isolated call is unconditionally skip,
-  // checked before the index is ever touched — same shape as the `experts`/
-  // `tainted` checks above, and distinct from the post-lookup RP7 check
-  // below (which only fires for an *already-written* entry that happens to
+  // checked before the index is ever touched — like the taint check above,
+  // and distinct from the post-lookup RP7 check below (which only fires for an *already-written* entry that happens to
   // carry `isolation:"worktree"`, kept for entries journaled before this
   // input field existed).
   // replay-verify plan D5: in `verify` mode this call itself is allowed past

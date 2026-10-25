@@ -45,17 +45,7 @@ function toCoreStopCause(cause?: string): StopCause | undefined {
 export interface WorkflowChildSpawnerOptions {
   /** Optional sysload workflow FIFO gate; late-bound and absent by default. */
   loadAdmission?: LoadAdmission;
-  /**
-   * workflow-experts §4.8: the workflow-facing seam onto `consult`'s
-   * `resolveExperts(refs, opts?)` (package C's frozen-face signature).
-   * `stack.ts` wires this to a late-bound ref over the real consult wiring.
-   * `createWorkflowChildSpawner` itself always calls it with `{
-   * completedOnly: true }` (D8) and wraps any throw into `{ error }` before
-   * handing a plain 1-arg `WorkflowExpertResolver` down to `host.ts`
-   * (`ChildSpawner.resolveExperts`) — host.ts/`resolveWorkflowExperts` never
-   * know about `completedOnly` at all, that policy choice lives entirely at
-   * this seam.
-   */
+  /** @deprecated #40 — removed in PS1b; retained for stack wiring, never read. */
   resolveExperts?: (
     refs: readonly string[],
     opts: { completedOnly: true },
@@ -64,8 +54,7 @@ export interface WorkflowChildSpawnerOptions {
    * workflow-worktree plan D2: the live availability gate for
    * `isolation:"worktree"` — `stack.ts` wires this to `() =>
    * settings.worktree.enabled`, read fresh on every call (a `/reload` that
-   * flips the setting takes effect immediately, same convention as
-   * `resolveExperts` being a late-bound ref rather than a snapshot). Absent
+   * flips the setting takes effect immediately, rather than a snapshot). Absent
    * — e.g. a test that never configures it — `handleAgent`'s D2 gate fails
    * closed (`worktreeAvailable?.() !== true` reads `undefined`).
    */
@@ -89,10 +78,7 @@ export function createWorkflowChildSpawner(
         type: req.type,
         prompt: req.prompt,
         ...(req.label !== undefined ? { label: req.label } : {}),
-        // workflow-experts §4.8: forwarded verbatim — already-resolved,
-        // trusted refs (host.ts only ever populates this from a successful
-        // `resolveWorkflowExperts`, never from anything the script itself
-        // could construct).
+        // Legacy request passthrough; workflow host no longer produces this field.
         ...(req.consultExperts !== undefined && req.consultExperts.length > 0
           ? { consultExperts: [...req.consultExperts] }
           : {}),
@@ -188,16 +174,5 @@ export function createWorkflowChildSpawner(
           return { state: "pending" };
       }
     },
-    ...(opts?.resolveExperts
-      ? {
-          resolveExperts(handles) {
-            try {
-              return opts.resolveExperts!(handles, { completedOnly: true });
-            } catch (e) {
-              return { error: { message: e instanceof Error ? e.message : String(e) } };
-            }
-          },
-        }
-      : {}),
   };
 }
