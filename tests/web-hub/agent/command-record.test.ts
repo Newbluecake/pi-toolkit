@@ -306,7 +306,30 @@ describe("createCommandRecorder — policyFor (§5.2 freeze F5)", () => {
     expect(r.policyFor("webhub", "stop", "extension", true)).toBe("record");
     expect(r.policyFor("webhub", "start", "extension", true)).toBe("record");
     expect(r.policyFor("record", "status", "extension", true)).toBe("record");
-    expect(r.policyFor("agent", "reload", "extension", true)).toBe("record");
+    expect(r.policyFor("agent", "status", "extension", true)).toBe("record");
+  });
+  it("skip: whole reload family (#42)", () => {
+    for (const a of ["reload", "reload now", "reload cancel", "reload fire", "  reload  "])
+      expect(r.policyFor("agent", a, "extension", true)).toBe("skip");
+    expect(r.policyFor("reload", "", "builtin", true)).toBe("skip");
+    expect(r.policyFor("reload", "", "extension", true)).toBe("skip");
+  });
+  it("reload family begin() yields no handle and writes nothing (#42)", () => {
+    const h = makeHarness();
+    const rr = createCommandRecorder(h.deps);
+    for (const a of ["reload", "reload now", "reload cancel"])
+      expect(rr.begin({ name: "agent", args: a, ctx })).toBeUndefined();
+    expect(h.appended).toHaveLength(0);
+  });
+  it("commitBeforeLeave('reload') on a recorded command writes no leave line (#42)", () => {
+    const h = makeHarness();
+    const rr = createCommandRecorder(h.deps);
+    const rec = rr.begin({ name: "other", args: "", ctx });
+    rec!.commitBeforeLeave("reload");
+    const ends = endDatas(h.appended).filter((d) => d.phase === "end");
+    expect(ends).toHaveLength(1);
+    expect(ends[0]!.notice).toBeUndefined();
+    expect(JSON.stringify(ends[0])).not.toContain("重载");
   });
   it("template/skill never recorded", () => {
     expect(r.policyFor("anything", "", "template", true)).toBe("skip");
@@ -420,7 +443,7 @@ describe("createCommandRecorder — intent ledger (D7 / G7)", () => {
     expect(begins(r, "record", "")!.cmdId.startsWith("c")).toBe(true);
   });
 
-  it("display overrides the card name/args (web /reload shows 'reload')", () => {
+  it("display overrides the card name/args (display mechanism)", () => {
     const h = makeHarness();
     const r = createCommandRecorder(h.deps);
     r.noteIntent({
@@ -428,10 +451,10 @@ describe("createCommandRecorder — intent ledger (D7 / G7)", () => {
       source: "web",
       sessionId: "sess-1",
       at: h.now,
-      match: { name: "agent", args: "reload" },
+      match: { name: "record", args: "status" },
       display: { name: "reload", args: "" },
     });
-    const rec = begins(r, "agent", "reload");
+    const rec = begins(r, "record", "status");
     rec!.settle({});
     const datas = endDatas(h.appended);
     expect(datas[0]!.name).toBe("reload");

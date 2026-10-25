@@ -832,6 +832,16 @@ describe("cmd-history I1 integration — web dispatch over a real hub × real st
     const stillSame = await agent.rpc("inspect");
     expect(stillSame.sessionId).toBe(newSessionId); // never left
 
+    // ---- #42: /reload is never recorded (no card, no leave line), reply history none ----
+    const countBefore = readCmdEntries(inspectNew.sessionFile).length;
+    const rl = await hub.rpc("webCmd", { sessionId: newSessionId, name: "reload", confirm: true });
+    expect(rl.first.ok).toBe(true);
+    expect(rl.first.data.history).toBe("none");
+    await new Promise((r) => setTimeout(r, 500));
+    const after = readCmdEntries(inspectNew.sessionFile);
+    expect(after.length).toBe(countBefore);
+    expect(after.some((e: any) => e.name === "reload" || String(e.args ?? "").startsWith("reload"))).toBe(false);
+
     // ---- log hygiene (§5.3/§8.5 #7): no command output bodies in hub.log or agent stderr ----
     const hubLog = readFileSync(join(home, ".pi/agent/web-hub/hub.log"), "utf8");
     for (const probe of [sessionFile, "THIRDPARTY-PROBE", "cmd-history: on", "新建会话被取消"]) {

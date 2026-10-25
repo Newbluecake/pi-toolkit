@@ -884,22 +884,13 @@ describe("execute â€” cmd-history: builtin cards at the real settlement point (Â
     expect(rec.calls.immediates).toHaveLength(0);
   });
 
-  it("/reload: noteIntent(match /agent reload, display reload) BEFORE dispatch; reply carries history", () => {
+  it("/reload (#42): no intent noted, reply history none, still dispatches /agent reload", () => {
     const { pi, sent } = fakePi({ commands: [{ name: "agent", source: "extension" }] });
     const rec = recRecorder();
     const bridge = createBuiltinBridge(baseDeps({ pi, recorder: () => rec.recorder }));
     const result = bridge.execute(frame("reload", "", {}, true)) as { data: { history?: string } };
-    expect(result.data.history).toBe("recorded");
-    expect(rec.calls.intents).toEqual([
-      {
-        cmdId: "cmd-0000000000000001",
-        source: "web",
-        sessionId: "sess-1",
-        at: 1000,
-        match: { name: "agent", args: "reload" },
-        display: { name: "reload", args: "" },
-      },
-    ]);
+    expect(result.data.history).toBe("none");
+    expect(rec.calls.intents).toEqual([]);
     expect(sent[0]?.text).toBe("/agent reload");
   });
 

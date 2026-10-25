@@ -602,19 +602,7 @@ function dispatchBuiltin(
     }
     case "reload": {
       if (deps.pi === undefined) return errResult("E_UNSUPPORTED", false, "none");
-      // web-hub-cmd-history §5.2: the card for a web /reload is the `/agent reload` handler's
-      // own record — the intent carries the display name so the card reads "reload" while the
-      // match keys on what actually executes.
-      if (recorder !== undefined) {
-        recorder.noteIntent({
-          cmdId: frame.id,
-          source,
-          sessionId: safe(() => deps.getSessionId?.() ?? "", "") || "",
-          at: at(),
-          match: { name: "agent", args: "reload" },
-          display: { name: "reload", args: "" },
-        });
-      }
+      // #42: /reload is never recorded (policyFor skips the whole reload family) — no intent.
       try {
         deps.pi.sendUserMessage("/agent reload", { expandPromptTemplates: true, deliverAs: "followUp" });
       } catch {
@@ -622,7 +610,7 @@ function dispatchBuiltin(
       }
       return okResult(
         recorder !== undefined
-          ? withHistory({ op: "command", kind: "builtin", completion: "unknown" }, "recorded")
+          ? withHistory({ op: "command", kind: "builtin", completion: "unknown" }, "none")
           : { op: "command", kind: "builtin", completion: "unknown" },
       );
     }

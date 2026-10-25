@@ -161,7 +161,9 @@ function policyFor(
   if (kind === "template" || kind === "skill") return "skip";
   const first = firstToken(args);
   if (first.startsWith("__")) return "skip"; // /webhub __exec, /topic-switch __go, resume __list
-  if (name === "agent" && first === "reload" && (args.trim().split(/\s+/)[1] ?? "") === "fire") return "skip"; // deferred reload's internal trigger — the user's /agent reload has its own card
+  // #42: reload is never recorded — the whole `/agent reload` family (now|cancel|fire|bare) and
+  // the builtin `/reload` leave no card, no session-history entry and no leave line.
+  if (name === "reload" || (name === "agent" && first === "reload")) return "skip";
   if (name === "webhub") {
     return first === "" || WEBHUB_RECORDED_SUBS.has(first) ? "record" : "header-only";
   }
@@ -241,11 +243,10 @@ function capText(s: string, max: number): string {
 // records & intents
 // ---------------------------------------------------------------------------
 
-const LEAVE_LINE: Readonly<Record<"new" | "fork" | "switch" | "reload", string>> = {
+const LEAVE_LINE: Readonly<Record<"new" | "fork" | "switch", string>> = {
   new: "→ 已离开本会话（新建）",
   fork: "→ 已离开本会话（分叉）",
   switch: "→ 已离开本会话（切换）",
-  reload: "→ 已离开本会话（重载）",
 };
 
 interface OpenRecord {
@@ -464,7 +465,9 @@ export function createCommandRecorder(deps: CommandRecorderDeps): CommandRecorde
           state: "done",
           ...(rec.policy === "header-only"
             ? { notice: "sensitive" as const }
-            : { notice: "left-session" as const, leaveLine: LEAVE_LINE[kind] }),
+            : kind === "reload"
+              ? {} // #42 defensive: unreachable in production (the reload family is skipped in policyFor ⇒ no handle); kept so a reload leave can never write a leave line
+              : { notice: "left-session" as const, leaveLine: LEAVE_LINE[kind] }),
         });
         rec.leftCommitted = true;
         closeRecord(rec);

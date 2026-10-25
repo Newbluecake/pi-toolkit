@@ -9,12 +9,13 @@
 | ---- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | v1   | 2026-10-24 | 初稿                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | v2   | 2026-10-24 | 方案评审（kimi，`/tmp/cmd-history-review1.json`，2B/4M/8m/2N）打回后修订：全文对齐 Q1–Q5 拍板（删脱敏管线 / 原文覆盖 / 追加脱敏规则；内置命令全记并逐个定义）；删除 prompt op 登记意图（源码证伪）；重新论证延迟执行的唯一触发源；secure LOCKED 只读查询入冻结面；原文落盘凭据登记为已接受残留；异步 builtin 在真实结算处写 end；runTail 回落规格重写；会话离开类命令在离开前提交记录；其余 minor/nit 逐条处置（见下表） |
+| #42  | 2026-10-25 | 用户要求：`/reload` 与 `/agent reload` 族（now/cancel/fire/裸）不进命令历史（修订 Q3「内置命令全记」对 reload 的适用）：policyFor 对 reload 族一律 skip，bridge 不再 noteIntent 且回复 `history:"none"`，离场行 LEAVE_LINE 删除 reload；其它命令不变                                                                                                                                                                     |
 
 ## 用户拍板（2026-10-24，正文已全部对齐）
 
 - **Q1 原文落盘**（不脱敏，与终端所见一致）。唯一例外：Q5 的敏感子命令只记头部；另保留 editor 预填内容不落盘（§4.4，与脱敏无关）。
 - **Q2** 网页按钮 / 控件触发的命令**也记**（不改协议）。
-- **Q3** pi 内置命令**全都记**（能观测到的范围内：网页执行的 `/session /name /thinking /model /compact /new /reload` 以及网页恢复对话框的 `/resume` 各留一张卡，正文与写入时机见 §5.2）。
+- **Q3** pi 内置命令**全都记**（能观测到的范围内：网页执行的 `/session /name /thinking /model /compact /new /reload` 以及网页恢复对话框的 `/resume` 各留一张卡，正文与写入时机见 §5.2）。**#42 修订：`/reload` 与整个 `/agent reload` 族（now/cancel/fire/裸）不再记录——无卡、不写会话历史、无「已离开本会话（重载）」离场行。**
 - **Q4** 网页执行的第三方扩展命令记「输出仅在终端」占位卡；终端执行的第三方 / 内置命令观测不到，不记。
 - **Q5** `/webhub` 敏感子命令（`open/token/2fa/passwd/user/unlock/feishu/lan` 及未知子命令）**只记头部**（命令名 + 状态，不记输出）。
 
@@ -115,13 +116,13 @@ agent 在 **toolkit 命令 handler 真正执行时**（`wrapCommandApi` 内）�
                     │         ├ session/name/thinking：pi 调用成功后 recordImmediate                           │
                     │         ├ model/compact：recorder.beginExternal → 在 Promise / onComplete 结算处 settle  │
                     │         ├ new：execGate.armNew(cmdId) → internalExec 执行点 → recordImmediate → newSession│
-                    │         ├ reload：noteIntent(match:"agent reload", display:"reload") → /agent reload     │
+                    │         ├ reload：#42 不记录（无 noteIntent），仅转发 /agent reload       │
                     │         └ resume __pick：resume-exec 最后一道同步检查之后、switchSession 之前 record      │
                     │                                                                                        │
                     │  handler 包装：invocation = capture.take() ; rec = recorder.begin()                     │
                     │    ├ 认领（web 窗口）：createCapturedUi 现有行为 + tee → rec.sink                          │
                     │    └ 未认领（TUI / 被推迟的 web / rpc）：createObservedUi（全透传，旁路记账）→ rec.sink     │
-                    │    ctx 代理拦截 newSession/fork/switchSession/reload：离开前 rec.commitBeforeLeave()      │
+                    │    ctx 代理拦截 newSession/fork/switchSession/reload：离开前 rec.commitBeforeLeave()（reload 不写离场行）      │
                     │  rec：懒 start(400ms) → settle → secure.recheckForWrite → try pi.appendEntry             │
                     │  StatusInfo.features ∋ "cmd.history.v1"（仅已持久化会话）；StatusInfo.cmdRunning          │
                     └────────────────────────────────────────────────────────────────────────────────────────┘
@@ -180,13 +181,13 @@ export type CmdRecordNotice =
   | "terminal-only" // 第三方扩展命令：已发送，输出只在终端
   | "sensitive" // Q5 敏感子命令：只记头部
   | "no-output" // 正常结束但没有任何可记录输出
-  | "left-session"; // 命令执行中离开了本会话（新建 / 切换 / 分叉 / 重载），之后的输出不在本会话
+  | "left-session"; // 命令执行中离开了本会话（新建 / 切换 / 分叉；#42 起重载不写此提示），之后的输出不在本会话
 
 export interface CmdRecordData {
   v: 1;
   cmdId: string; // ^[A-Za-z0-9_-]{16,64}$；web = 帧 id；本地 = "c" + 20 位 base64url
   phase: "start" | "end";
-  name: string; // 卡片显示的命令名（与 CommandArgsSchema.name 同 pattern）；web /reload 显示 "reload"（§4.3 display）
+  name: string; // 卡片显示的命令名（与 CommandArgsSchema.name 同 pattern；见 §4.3 display；#42 起 web /reload 不记录，不再用作示例）
   args: string; // 原文，≤512 字符（超出截断 + "…"）
   source: CmdRecordSource;
   startedAt: number; // epoch ms
@@ -246,8 +247,8 @@ export interface CommandRecorder {
     source: "web" | "feishu";
     sessionId: string;
     at: number;
-    match: { name: string; args: string }; // 实际会执行的命令（web /reload ⇒ {name:"agent", args:"reload"}）
-    display?: { name: string; args: string }; // 卡片显示（web /reload ⇒ {name:"reload", args:""}）；缺省 = match
+    match: { name: string; args: string }; // 实际会执行的命令
+    display?: { name: string; args: string }; // 卡片显示；缺省 = match
   }): void;
   /** toolkit handler 进入时（wrapCommandApi 调用）。skip / 停用 ⇒ undefined。 */
   begin(i: {
@@ -285,7 +286,7 @@ export interface CommandRecorder {
 export interface RecordHandle {
   readonly cmdId: string;
   sink(entry: CommandOutputEntry): void; // 关闭后静默丢弃并释放 buffer
-  commitBeforeLeave(kind: "new" | "fork" | "switch" | "reload"): void; // 立即写 end(done, notice:"left-session") 并关闭
+  commitBeforeLeave(kind: "new" | "fork" | "switch" | "reload"): void; // 立即写 end(done, notice:"left-session") 并关闭；kind="reload" 时不带离场行/notice（#42，防御性分支——reload 族已 skip，通常无 handle）
   afterLeaveCancelled(error?: string): void; // 离开被取消 / 抛错：再写一条 end(failed)，同 cmdId（最后一条生效）
   settle(outcome: { error?: unknown; failed?: string }): void; // 只生效一次；commitBeforeLeave 之后为 no-op
 }
@@ -339,12 +340,12 @@ return runRecorded(...)   // finally：capture?.finish(cmdId) + handle?.settle({
 
 **认领模式**（web）：`createCapturedUi` 现有行为一字不改，只在每个 `collect` 处追加 `handle?.sink(entry)`。例外（**与脱敏无关，保留**）：落盘记录里 `kind:"text"`（editor 预填）只保留 title，正文替换为 `"(编辑器内容未记录)"`——预填可能是草稿或密钥，web 实时窗口仍按今天显示。
 
-**会话离开拦截**（两种模式都有）：ctx 代理拦截 `newSession / fork / switchSession / reload`：
+**会话离开拦截**（两种模式都有）：ctx 代理拦截 `newSession / fork / switchSession / reload`（#42：reload 仍被拦截并提交记录，但不写离场行；reload 族命令本身 policy=skip，通常无记录可提交）：
 
-- 调用前 `handle.commitBeforeLeave(kind)`：立刻写 end（`state:"done"`、已收集输出 + 一行 `{kind:"notify",level:"info",text:"→ 已离开本会话（新建/分叉/切换/重载）"}`、`notice:"left-session"`），记录关闭；
+- 调用前 `handle.commitBeforeLeave(kind)`：立刻写 end（`state:"done"`、已收集输出 + 一行 `{kind:"notify",level:"info",text:"→ 已离开本会话（新建/分叉/切换；reload 不写此行，#42）"}`、`notice:"left-session"`），记录关闭；
 - 以相同参数转发，**返回原 Promise 对象**；另挂一个吞错的 `.then` 观察：结果 `{cancelled:true}` 或 Promise 拒绝 ⇒ `handle.afterLeaveCancelled(...)` 写第二条 `end{failed}`（此时没离开，ctx 仍有效；写失败照常吞掉）；
 - 切换成功后旧 ctx 失效，handler 后续的 `settle` 是 no-op。
-- 这让 `/clear`、`/resume-recent`、`/agent reload`、`/topic-switch` 的非内部子命令都能正常记录，不需要排除。
+- 这让 `/clear`、`/resume-recent`、`/topic-switch` 的非内部子命令都能正常记录，不需要排除。
 
 ### 4.5 hub 投影（契约 F3）
 
@@ -383,14 +384,14 @@ if (r.customType === CMD_RECORD_ENTRY_TYPE) {
 
 `history` 取值（bridge，按 §5.2 策略）：
 
-| 调用                                                                      | history                                                                                                  |
-| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| toolkit 扩展命令 policy=record / header-only（含被推迟执行）              | `recorded`                                                                                               |
-| toolkit 扩展命令 policy=skip（只剩内部跳板，§5.2）                        | `none`                                                                                                   |
-| 第三方扩展命令                                                            | `recorded`                                                                                               |
-| builtin `session/name/thinking/model/compact/new/reload`，`resume __pick` | `recorded`；执行前就被拒的（参数错、exec 被占、ctx 失效等 effect-none 错误）返回错误本身，不出现 history |
-| `resume __list`、template、skill                                          | `none`                                                                                                   |
-| **字段缺失**（防御）                                                      | 一律视同 `none`（不放占位）——唯一推断规则（n1）                                                          |
+| 调用                                                               | history                                                                                                  |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| toolkit 扩展命令 policy=record / header-only（含被推迟执行）       | `recorded`                                                                                               |
+| toolkit 扩展命令 policy=skip（只剩内部跳板，§5.2）                 | `none`                                                                                                   |
+| 第三方扩展命令                                                     | `recorded`                                                                                               |
+| builtin `session/name/thinking/model/compact/new`，`resume __pick` | `recorded`；执行前就被拒的（参数错、exec 被占、ctx 失效等 effect-none 错误）返回错误本身，不出现 history |
+| `resume __list`、template、skill                                   | `none`                                                                                                   |
+| **字段缺失**（防御）                                               | 一律视同 `none`（不放占位）——唯一推断规则（n1）                                                          |
 
 ### 4.7 UI 契约
 
@@ -468,16 +469,16 @@ export function cmdLineCount(v: CmdCardView): number;
 
 ### 5.1 记什么 / 抓不到什么
 
-| 场景                                                                                              | 能否看到                                                                  | 处理                                                 |
-| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------- |
-| TUI 执行的 toolkit 命令                                                                           | 能                                                                        | observe 模式，source `tui`                           |
-| web 执行的 toolkit 命令（含 agent_settled 推迟）                                                  | 能                                                                        | 认领或意图账本对回 cmdId，source `web`               |
-| web 执行的第三方扩展命令                                                                          | 只知道派发                                                                | 记 `notice:"terminal-only"`（Q4）                    |
-| web 执行的 builtin（session/name/thinking/model/compact/new/reload）、网页恢复对话框 `/resume`    | 能                                                                        | 全记（Q3），见 §5.2                                  |
-| GUI 控件触发的命令（ModelSwitcher、ThinkingChip、RenameButton、频道 / 别名对话框、`/title auto`） | 能                                                                        | 全记（Q2）                                           |
-| prompt op 里的 `/x` 文本（飞书、未开命令模式）                                                    | 不是命令                                                                  | pi 不执行，作为普通用户消息进 transcript（B2）；不记 |
-| TUI 执行的第三方扩展命令 / pi 内置命令                                                            | **看不到**（pi 自己的 ctx；扩展命令不触发 `input`；内置命令在交互层处理） | 不记（Q4）                                           |
-| template / skill                                                                                  | 变成用户消息                                                              | 不记                                                 |
+| 场景                                                                                                      | 能否看到                                                                  | 处理                                                 |
+| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------- |
+| TUI 执行的 toolkit 命令                                                                                   | 能                                                                        | observe 模式，source `tui`                           |
+| web 执行的 toolkit 命令（含 agent_settled 推迟）                                                          | 能                                                                        | 认领或意图账本对回 cmdId，source `web`               |
+| web 执行的第三方扩展命令                                                                                  | 只知道派发                                                                | 记 `notice:"terminal-only"`（Q4）                    |
+| web 执行的 builtin（session/name/thinking/model/compact/new；reload 除外，#42）、网页恢复对话框 `/resume` | 能                                                                        | 全记（Q3），见 §5.2                                  |
+| GUI 控件触发的命令（ModelSwitcher、ThinkingChip、RenameButton、频道 / 别名对话框、`/title auto`）         | 能                                                                        | 全记（Q2）                                           |
+| prompt op 里的 `/x` 文本（飞书、未开命令模式）                                                            | 不是命令                                                                  | pi 不执行，作为普通用户消息进 transcript（B2）；不记 |
+| TUI 执行的第三方扩展命令 / pi 内置命令                                                                    | **看不到**（pi 自己的 ctx；扩展命令不触发 `input`；内置命令在交互层处理） | 不记（Q4）                                           |
+| template / skill                                                                                          | 变成用户消息                                                              | 不记                                                 |
 
 toolkit 命令内部抓不到的输出：经**之前存下的其它 ctx** 调 `ui.notify`；handler 结束之后的异步通知；`pi.sendMessage` 的 custom_message（本来就进 transcript）；`setWidget` 组件工厂与 `ui.custom` 的画面（只记标记）；`console.*`。
 
@@ -485,29 +486,29 @@ toolkit 命令内部抓不到的输出：经**之前存下的其它 ctx** 调 `u
 
 **skip（完全不记）**——只剩内部跳板：
 
-| 规则                                                      | 原因                                                                           |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| 任意命令，args 首 token 以 `__` 开头（`/webhub __exec new | resume`、`/topic-switch __go`）                                                | 内部 nonce 跳板；它们代表的用户动作由 bridge 记录（`/new`、`/resume`） |
-| `agent reload fire`                                       | deferred reload 的内部触发；用户的 `/agent reload`（或 web `/reload`）已有卡片 |
-| `resume __list`                                           | 恢复对话框的只读轮询                                                           |
-| template / skill                                          | 见 §5.1                                                                        |
+| 规则                                                      | 原因                                |
+| --------------------------------------------------------- | ----------------------------------- |
+| 任意命令，args 首 token 以 `__` 开头（`/webhub __exec new | resume`、`/topic-switch __go`）     | 内部 nonce 跳板；它们代表的用户动作由 bridge 记录（`/new`、`/resume`） |
+| `agent reload`（含 now/cancel/fire）、`/reload`           | #42：reload 族一律不记录（修订 Q3） |
+| `resume __list`                                           | 恢复对话框的只读轮询                |
+| template / skill                                          | 见 §5.1                             |
 
 **header-only（`notice:"sensitive"`，不落 output）**——Q5：`/webhub` 的 `open`（`#t=` 令牌 URL）、`token`、`2fa`、`passwd`、`user`、`unlock`、`feishu`、`lan` 及**未知子命令**（fail-closed）。可完整记录的 `/webhub` 子命令白名单：`status`（含裸 `/webhub`）、`restart`、`stop`、`start`。
 
-**record**：其余全部 toolkit 命令（含 `/clear`、`/resume-recent`、`/agent reload`、`/topic-switch status|last`，借 §4.4 离开拦截）、第三方 terminal-only 占位、以及下列 builtin。
+**record**：其余全部 toolkit 命令（含 `/clear`、`/resume-recent`、`/topic-switch status|last`，借 §4.4 离开拦截）、第三方 terminal-only 占位、以及下列 builtin。
 
 **builtin 卡片定义**（全部 source `web`，cmdId = 帧 id，均由 bridge 写；bridge 的返回值与 ledger 结算路径**一字不改**，记录是旁路观察，M3）：
 
-| 命令                                 | 写入时机                                                                                                                                                                                                                                                | done 正文                                                                                                | failed                                                                                                                          |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `/session`                           | `buildSessionText` 之后，`recordImmediate`                                                                                                                                                                                                              | `{kind:"text"}` = 现有会话信息文本                                                                       | —                                                                                                                               |
-| `/name <x>`                          | `pi.setSessionName` 成功返回后                                                                                                                                                                                                                          | notify：`会话名称：<x>`                                                                                  | `setSessionName` 抛错 ⇒ 不记（返回 `E_STALE_CTX`，effect none）                                                                 |
-| `/thinking <lv>`                     | `pi.setThinkingLevel` 成功返回后                                                                                                                                                                                                                        | notify：`思考等级：<lv>`                                                                                 | 同上                                                                                                                            |
-| `/model <p/m>`                       | `beginExternal(lazyStart:true)` 于 `setModel` 调用前；在**同一个 `pending` Promise 上另挂**的观察回调里 settle（不改原 `.then` 链与返回值，`sendLate` 有无都挂）                                                                                        | `accepted===true` ⇒ notify：`模型：<p/m>`                                                                | `accepted===false` ⇒ `failed`，error：`authentication not configured for that model`；Promise 拒绝 ⇒ `failed`，error 为拒绝消息 |
-| `/compact [指令]`                    | `beginExternal(lazyStart:false)`（**不写 start**，避免在压缩进行中追加条目）；把 `ctx.compact` 的 `onComplete/onError` 包一层：先调原回调（`sendLate`，若有），再 settle；`sendLate` 缺失时也传入仅用于记录的回调                                       | notify：`上下文已压缩`（有指令时追加一行 `指令：<…>`）                                                   | `onError(e)` ⇒ `failed`，error：`e.message`                                                                                     |
-| `/new`                               | bridge `armExec("new", cmdId)`；`internalExec("new")` 在 `consumeNew` 成功之后、`ctx.newSession()` 之前 `recordImmediate(done, notice:"left-session")`；`newSession` 返回 `{cancelled:true}` 或抛错 ⇒ 再 `recordImmediate(failed)`（最后一条 end 生效） | notify：`已新建会话并切换过去（之后的对话在新会话中）`                                                   | `新建会话被取消` / 抛错消息。nonce 过期 ⇒ 不记（TUI 已有 warning）                                                              |
-| `/reload`                            | bridge `noteIntent({match:{name:"agent",args:"reload"}, display:{name:"reload",args:""}})` 后转发；`/agent reload` handler 经 wrapCommandApi 正常记录（显示为 `/reload`）                                                                               | handler 原有输出（「已延后，fleet 空闲后重载」或重载提示）；立即重载时由离开拦截在 `ctx.reload()` 前提交 | handler 抛错                                                                                                                    |
-| `/resume`（网页恢复对话框 `__pick`） | `resume-exec.ts` 执行点：**全部权威同步检查（含「源会话未变」）通过之后**、`ctx.switchSession` 之前 `recordImmediate(done, notice:"left-session")`——必须在检查之后，否则写入会让「源会话未变」检查自我失败；`switchSession` 取消 / 失败 ⇒ 再记 `failed` | notify：`已切换到会话 <标题或 id 前 8 位>`                                                               | 取消 / `resume:mismatch` 等错误码                                                                                               |
+| 命令                                 | 写入时机                                                                                                                                                                                                                                                | done 正文                                              | failed                                                                                                                          |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `/session`                           | `buildSessionText` 之后，`recordImmediate`                                                                                                                                                                                                              | `{kind:"text"}` = 现有会话信息文本                     | —                                                                                                                               |
+| `/name <x>`                          | `pi.setSessionName` 成功返回后                                                                                                                                                                                                                          | notify：`会话名称：<x>`                                | `setSessionName` 抛错 ⇒ 不记（返回 `E_STALE_CTX`，effect none）                                                                 |
+| `/thinking <lv>`                     | `pi.setThinkingLevel` 成功返回后                                                                                                                                                                                                                        | notify：`思考等级：<lv>`                               | 同上                                                                                                                            |
+| `/model <p/m>`                       | `beginExternal(lazyStart:true)` 于 `setModel` 调用前；在**同一个 `pending` Promise 上另挂**的观察回调里 settle（不改原 `.then` 链与返回值，`sendLate` 有无都挂）                                                                                        | `accepted===true` ⇒ notify：`模型：<p/m>`              | `accepted===false` ⇒ `failed`，error：`authentication not configured for that model`；Promise 拒绝 ⇒ `failed`，error 为拒绝消息 |
+| `/compact [指令]`                    | `beginExternal(lazyStart:false)`（**不写 start**，避免在压缩进行中追加条目）；把 `ctx.compact` 的 `onComplete/onError` 包一层：先调原回调（`sendLate`，若有），再 settle；`sendLate` 缺失时也传入仅用于记录的回调                                       | notify：`上下文已压缩`（有指令时追加一行 `指令：<…>`） | `onError(e)` ⇒ `failed`，error：`e.message`                                                                                     |
+| `/new`                               | bridge `armExec("new", cmdId)`；`internalExec("new")` 在 `consumeNew` 成功之后、`ctx.newSession()` 之前 `recordImmediate(done, notice:"left-session")`；`newSession` 返回 `{cancelled:true}` 或抛错 ⇒ 再 `recordImmediate(failed)`（最后一条 end 生效） | notify：`已新建会话并切换过去（之后的对话在新会话中）` | `新建会话被取消` / 抛错消息。nonce 过期 ⇒ 不记（TUI 已有 warning）                                                              |
+| `/reload`（#42：不记录）             | 仅转发 `/agent reload`；reload 族 policy=skip，bridge 不 `noteIntent`、不写卡，回复 `history:"none"`                                                                                                                                                    | —                                                      | —                                                                                                                               |
+| `/resume`（网页恢复对话框 `__pick`） | `resume-exec.ts` 执行点：**全部权威同步检查（含「源会话未变」）通过之后**、`ctx.switchSession` 之前 `recordImmediate(done, notice:"left-session")`——必须在检查之后，否则写入会让「源会话未变」检查自我失败；`switchSession` 取消 / 失败 ⇒ 再记 `failed` | notify：`已切换到会话 <标题或 id 前 8 位>`             | 取消 / `resume:mismatch` 等错误码                                                                                               |
 
 执行前就被拒的调用（参数错误、`exec:in-flight`、ctx 失效等 effect-none 错误）不记录，UI 显示精简错误提示——「记录」的定义是「真正执行了的调用」。
 
@@ -611,7 +612,7 @@ P0 协议冻结（串行，先做）
 - recorder（fake timers）：<400 ms ⇒ 1 条 end；>400 ms ⇒ start+end；抛错 ⇒ `failed` + 原样重抛；30 min ⇒ `timeout`；会话变化 ⇒ skip；`recheckForWrite` 有原因 ⇒ 不调 appendEntry、`skipped++`；`appendEntry` 抛错 ⇒ 吞、`failed++`；`dispose` 后不写；计时器全 `unref`。
 - 输出原文落盘（含 `?token=`、`--take=` 样例原样存在）；editor 预填与 input 值不落盘。
 - 策略表 §5.2 每行；`/webhub` 未知子命令 ⇒ header-only。
-- 意图账本：agent_settled 推迟 <5 s（认领成功但 bridge 已答 `unknown`）与 >5 s（认领失败）两种 ⇒ 记录 cmdId=帧 id、source `web`、含完整输出 **← G7 回归钉**；同名同参多意图 ⇒ 最旧优先；跨会话不匹配、会话切换清空；TTL 过期 ⇒ 本地 id；`display` 生效（web `/reload` 卡名为 `reload`）。
+- 意图账本：agent_settled 推迟 <5 s（认领成功但 bridge 已答 `unknown`）与 >5 s（认领失败）两种 ⇒ 记录 cmdId=帧 id、source `web`、含完整输出 **← G7 回归钉**；同名同参多意图 ⇒ 最旧优先；跨会话不匹配、会话切换清空；TTL 过期 ⇒ 本地 id；`display` 覆写生效（以非 reload 命令验证；reload 族 skip，#42）。
 - observe 契约：真实 ui 每个方法 spy，参数相同、返回同一对象、调用次数相同；无 `webInvocation`。
 - 认领模式：web 窗口输出与今天相同（现有 capture 测试全绿）+ 记录 tee。
 - 会话离开拦截：`newSession` 成功 ⇒ 仅 1 条 end（left-session），后续 settle no-op；`{cancelled:true}` ⇒ 第二条 end `failed`；拒绝 ⇒ 同；返回的 Promise 与原对象同一。
@@ -667,7 +668,7 @@ P0 协议冻结（串行，先做）
 2. 网页执行 `/fabric status`（await 型）、`/mem doctor`、`/cache-ttl status`：卡片 running→done 原地更新。
 3. **G7**：额外 `-e` 加载一个探针扩展，其 `agent_settled` 处理器 `await` 8 s；发一条消息，助手回复结束、探针保持期间，从网页发 `/record status` ⇒ 探针结束后卡片出现且有完整输出（改前：legacy 卡片无输出）。再测 2 s 保持（<5 s 认领路径）。
 4. 新开会话、无任何消息时网页跑命令 ⇒ 卡片实时出现（§4.10）。
-5. 网页依次执行 `/session`、`/name x`、`/thinking high`、`/model <有效>`、`/model <无凭据>`（应 failed）、`/compact`、`/reload`、`/new`、恢复对话框切会话 ⇒ 每个一张卡、正文符合 §5.2；`/new`、`/resume` 的卡在**旧**会话末尾。
+5. 网页依次执行 `/session`、`/name x`、`/thinking high`、`/model <有效>`、`/model <无凭据>`（应 failed）、`/compact`、`/new`、恢复对话框切会话 ⇒ 每个一张卡、正文符合 §5.2；`/new`、`/resume` 的卡在**旧**会话末尾。（`/reload` 不应出现卡片，#42）
 6. ModelSwitcher、频道对话框勾选、RenameButton 操作 ⇒ 各出卡（Q2）。
 7. **日志卫生**：上述操作后 `grep` hub.log（`<stateDir>`）与 agent 侧日志，找不到任何命令输出正文（以 `/record status` 的 token 和 `/session` 的会话文件路径为探针字符串）。
 8. `/webhub open`（TUI）⇒ 卡片只有头部 +「敏感命令，输出未记录」；会话文件 grep 不到 `#t=`。
