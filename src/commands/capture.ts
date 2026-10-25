@@ -616,24 +616,24 @@ function createObservedUi(ui: ExtensionUIContext, handle: RecordHandle): Extensi
             return Reflect.apply(target.setStatus, target, [key, text]);
           };
         case "editor":
-          return (title: string, prefill?: string) => {
-            record({ kind: "interactive", title, text: "editor" });
-            return Reflect.apply(target.editor, target, [title, prefill]);
+          return (...args: unknown[]) => {
+            record({ kind: "interactive", title: args[0] as string, text: "editor" });
+            return Reflect.apply(target.editor, target, args);
           };
         case "select":
-          return (title: string) => {
-            record({ kind: "interactive", title, text: "select" });
-            return Reflect.apply(target.select, target, [title]);
+          return (...args: unknown[]) => {
+            record({ kind: "interactive", title: args[0] as string, text: "select" });
+            return Reflect.apply(target.select, target, args);
           };
         case "input":
-          return (title: string) => {
-            record({ kind: "interactive", title, text: "input" });
-            return Reflect.apply(target.input, target, [title]);
+          return (...args: unknown[]) => {
+            record({ kind: "interactive", title: args[0] as string, text: "input" });
+            return Reflect.apply(target.input, target, args);
           };
         case "confirm":
-          return (title: string) => {
-            record({ kind: "interactive", title, text: "confirm" });
-            return Reflect.apply(target.confirm, target, [title]);
+          return (...args: unknown[]) => {
+            record({ kind: "interactive", title: args[0] as string, text: "confirm" });
+            return Reflect.apply(target.confirm, target, args);
           };
         case "custom":
           return (...args: unknown[]) => {
