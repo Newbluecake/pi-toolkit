@@ -161,6 +161,10 @@ export function makeEnv(tag: string, opts: { failAt?: string; project?: boolean 
     reg,
     mounted: false,
     busy: false,
+    /** scripted `leaseState` answers (consumed in order); once empty ⇒ `leaseDefault`. */
+    leaseQueue: [] as string[],
+    leaseDefault: "free",
+    leaseCalls: 0,
     promptAnswer: undefined as string | undefined,
     /** V8: forced result of the layoutPreflight port (undefined ⇒ the real helper function). */
     layoutProblem: undefined as undefined | null | { title: string; lines: string[] },
@@ -257,7 +261,10 @@ export function makeEnv(tag: string, opts: { failAt?: string; project?: boolean 
       world.mounted = false;
       return { code: 0, lines: [`${v.name}：已卸载`] };
     },
-    leaseState: async () => "free",
+    leaseState: async () => {
+      world.leaseCalls++;
+      return world.leaseQueue.shift() ?? world.leaseDefault;
+    },
     preflight: () => ({ ok: true, problems: [] }),
     isTty: () => true,
     prompt: async () => world.promptAnswer ?? "proj",

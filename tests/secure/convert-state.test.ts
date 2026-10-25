@@ -507,6 +507,66 @@ describe("§1.6 --abort decision table", () => {
     expectRolledBack(E, before, { vault: true });
   });
 
+  describe("rollback waits (bounded) for a transiently held lease after the unmount", () => {
+    const fast = { leaseWait: { budgetMs: 50, stepMs: 10 } };
+
+    it("first probe held, then free ⇒ the rollback completes", async () => {
+      const E = makeEnv("a8l1");
+      const before = snapshot(E.src);
+      await build(E, "synced", { renamed: true, frozen: true, base: true, mounted: true });
+      E.world.leaseQueue = ["held", "held"];
+      expect(await E.run(["--abort", "proj"], fast)).toBe(1);
+      expect(E.world.leaseCalls).toBe(3);
+      expectRolledBack(E, before, { vault: true });
+    });
+
+    it("held for the whole budget ⇒ stops at the cap, keeps vault + state (fail-safe)", async () => {
+      const E = makeEnv("a8l2");
+      const before = snapshot(E.src);
+      await build(E, "synced", { renamed: true, frozen: true, base: true, mounted: true });
+      E.world.leaseDefault = "held";
+      expect(await E.run(["--abort", "proj"], fast)).toBe(74);
+      expect(E.world.leaseCalls).toBe(6); // 1 probe + ceil(50/10) retries, iteration-bounded
+      expect(E.err.join("\n")).toContain("新库租约未空闲（held）");
+      expect(snapshot(E.src)).toEqual(before);
+      expect(existsSync(E.vault().dir)).toBe(true);
+      expect(existsSync(join(E.txnDir, "convert-proj.json"))).toBe(true);
+    });
+
+    it("unknown ⇒ no retry, kept as before", async () => {
+      const E = makeEnv("a8l3");
+      await build(E, "synced", { renamed: true, frozen: true, base: true, mounted: true });
+      E.world.leaseDefault = "unknown";
+      expect(await E.run(["--abort", "proj"], fast)).toBe(74);
+      expect(E.world.leaseCalls).toBe(1);
+      expect(E.err.join("\n")).toContain("新库租约未空闲（unknown）");
+    });
+
+    it("waitLeaseReleased: a throwing probe ⇒ unknown without retry", async () => {
+      let n = 0;
+      const r = await C.waitLeaseReleased(
+        async () => {
+          n++;
+          throw new Error("boom");
+        },
+        {},
+        { budgetMs: 100, stepMs: 5 },
+      );
+      expect(r).toBe("unknown");
+      expect(n).toBe(1);
+    });
+
+    it("waitLeaseReleased: invalid stepMs / budgetMs are clamped (no spin, no throw, bounded probes)", async () => {
+      let n = 0;
+      const held = async () => (n++, "held");
+      expect(await C.waitLeaseReleased(held, {}, { budgetMs: 3, stepMs: 0 })).toBe("held");
+      expect(n).toBe(4); // step clamped to 1 ⇒ 1 + ceil(3/1)
+      n = 0;
+      expect(await C.waitLeaseReleased(held, {}, { budgetMs: -5, stepMs: 10 })).toBe("held");
+      expect(n).toBe(1); // budget clamped to 0 ⇒ one probe, no retry
+    });
+  });
+
   it("vault dir replaced by a foreign one ⇒ never deleted, reported", async () => {
     const E = makeEnv("a9");
     const b = await build(E, "claimed");

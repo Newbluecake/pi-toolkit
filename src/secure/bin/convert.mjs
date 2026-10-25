@@ -2211,6 +2211,35 @@ export async function recoverConvert(s, { ports, ctx }) {
   return { done: remaining.length === 0, remaining, lines };
 }
 
+const LEASE_RELEASE_WAIT = Object.freeze({ budgetMs: 3000, stepMs: 100 });
+
+/**
+ * After an unmount the lease flock is released only when the gocryptfs process actually exits, which can
+ * trail `fusermount -u` by a moment under load. A transient `held` is therefore retried (bounded);
+ * `free`/`absent`/`unknown`/anything else is returned at once (unknown stays fail-safe, never retried).
+ * Still `held` at the cap ⇒ returns "held" and the caller keeps its state exactly as before.
+ *
+ * The bound is an ITERATION count (≈ budgetMs/stepMs retries), not a wall-clock deadline, and the sleep is
+ * REF'd on purpose (like helper.mjs `sleep`): an unref'd back-off is the only thing alive in the CLI and
+ * the process would silently exit mid-rollback. stepMs is clamped to ≥1, budgetMs to ≥0.
+ */
+export async function waitLeaseReleased(leaseState, v, { budgetMs, stepMs } = {}) {
+  const num = (x, dflt, min) => (Number.isFinite(x) ? Math.max(min, x) : dflt);
+  const step = num(stepMs, LEASE_RELEASE_WAIT.stepMs, 1);
+  const budget = num(budgetMs, LEASE_RELEASE_WAIT.budgetMs, 0);
+  const retries = Math.ceil(budget / step);
+  for (let i = 0; ; i++) {
+    let lease;
+    try {
+      lease = await leaseState(v);
+    } catch {
+      return "unknown";
+    }
+    if (lease !== "held" || i >= retries) return lease;
+    await new Promise((r) => setTimeout(r, step));
+  }
+}
+
 async function rollbackVault(s, v, { ports, ctx }) {
   const lines = [];
   const remaining = [];
@@ -2250,12 +2279,7 @@ async function rollbackVault(s, v, { ports, ctx }) {
     dirSt = lstatBigOrNull(v.dir);
     mntSt = lstatBigOrNull(v.mnt);
     if (dirSt) {
-      let lease = "unknown";
-      try {
-        lease = await ports.leaseState(v);
-      } catch {
-        lease = "unknown";
-      }
+      const lease = await waitLeaseReleased(ports.leaseState, v, ctx.leaseWait);
       if (lease !== "free" && lease !== "absent") {
         remaining.push(`新库租约未空闲（${lease}），保留 ${v.dir}`);
         return { lines, remaining };
