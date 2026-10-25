@@ -58,3 +58,4 @@ docs/dev/worktree-graph/merged-P3-report.md
 docs/dev/worktree-graph/merged-P4-report.md
 docs/dev/worktree-graph/merged-P5-report.md
 docs/dev/worktree-graph/merged-P6-report.md
+tests/web-hub/contract/types.test-d.ts
