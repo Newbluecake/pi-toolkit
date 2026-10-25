@@ -10,6 +10,10 @@
  *   visible under `refreshing` (aria-busy) while re-pulled.
  * - the SCOPE (agentKey|sessionId) changing — session switch, caps lost, transport gone —
  *   clears state, timers and expansion (the graph section hides until re-expanded).
+ * - merged-plan r3 §7.1 (R2-11): the `wtgraph.merged.v1` CAP flipping under the SAME scope is
+ *   NOT a scope change — it aborts in-flight, strips `merged` from displayed data on cap loss
+ *   and re-pulls immediately when expanded (URL gains/loses `merged=1`, the deadline switches
+ *   35 s ⇄ 48 s); collapsed it only marks the kept data stale (no request fires).
  * - errors keep their `reason` verbatim so the component can map the REUSED codes +
  *   `WtGraphErrorReason` vocabulary to §4.3's per-reason copy; `retryable` follows the same
  *   client-local/429/5xx rule as wtdiff, EXCEPT `log-timeout` (a 504 whose fix is
@@ -64,6 +68,13 @@ function scopeKeyOf(scope: GraphScope | null): string {
   return scope === null ? "" : `${scope.agentKey}\u0000${scope.sessionId}`;
 }
 
+/** merged-plan r3 §7.1 (R2-11): the merged-capability invalidation key — same agent/session,
+ *  but the hub gained or lost `wtgraph.merged.v1`. Kept SEPARATE from `scopeKeyOf` on purpose:
+ *  a capability flip must NOT collapse the section the way a session switch does. */
+function mergedKeyOf(scope: GraphScope | null): string {
+  return scope?.merged === true ? "1" : "0";
+}
+
 function isSessionChanged(outcome: Extract<WtDiffOutcome<unknown>, { ok: false }>): boolean {
   return outcome.error === "E_SESSION_CHANGED";
 }
@@ -82,6 +93,9 @@ export function useWorktreeGraph(deps: UseWorktreeGraphDeps): UseWorktreeGraphHa
   let liveSig = "";
   let ctl: AbortController | null = null;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /** §7.1 ③: a cap flip while COLLAPSED only marks the kept data stale — no request fires
+   *  until the next expansion (未展开时 cap 变化不发请求). */
+  let mergedDirty = false;
 
   function abortInFlight(): void {
     if (ctl !== null) {
@@ -117,8 +131,12 @@ export function useWorktreeGraph(deps: UseWorktreeGraphDeps): UseWorktreeGraphHa
       prev.phase === "ok" && prev.data !== undefined
         ? { ...prev, refreshing: true }
         : { phase: "loading", sig: sigAtStart };
+    mergedDirty = false;
     void transport
-      .graph({ agentKey: sc.agentKey, sessionId: sc.sessionId, wt }, { signal: ac.signal })
+      .graph(
+        { agentKey: sc.agentKey, sessionId: sc.sessionId, wt, ...(sc.merged ? { merged: true as const } : {}) },
+        { signal: ac.signal },
+      )
       .then((outcome) => {
         if (ctl !== ac) return; // superseded by a newer pull / collapse / clear
         ctl = null;
@@ -161,9 +179,9 @@ export function useWorktreeGraph(deps: UseWorktreeGraphDeps): UseWorktreeGraphHa
       return;
     }
     expanded.value = true;
-    // 展开拉一次 — only the FIRST expansion (or after a scope clear) pulls
+    // 展开拉一次 — only the FIRST expansion (or after a scope clear / cap flip) pulls
     if (state.value.phase === "idle" || state.value.phase === "error") pull();
-    else if (state.value.sig !== liveSig) pull();
+    else if (mergedDirty || state.value.sig !== liveSig) pull();
   }
 
   function refresh(): void {
@@ -189,8 +207,33 @@ export function useWorktreeGraph(deps: UseWorktreeGraphDeps): UseWorktreeGraphHa
       if (next === prev) return;
       clearTimer();
       abortInFlight();
+      mergedDirty = false;
       state.value = { phase: "idle", sig: "" };
       expanded.value = false;
+    },
+  );
+
+  // merged-plan r3 §7.1 (R2-11): the merged capability flipping under the SAME agent/session
+  // (a `/webhub restart` changed the preview mode, the hub was upgraded…) — NOT a scope
+  // change, so the section never collapses: ① abort the in-flight request; ② on cap LOSS
+  // strip `merged` from the displayed payload at once (the UI drops badges/fold immediately);
+  // ③ expanded ⇒ re-pull right away with the new capability (the URL and the 35/48 s
+  // deadline follow `sc.merged`); collapsed ⇒ mark dirty only, the next expansion pulls.
+  const stopMergedWatch = watch(
+    () => mergedKeyOf(deps.scope.value),
+    (next, prev) => {
+      if (next === prev) return;
+      clearTimer();
+      abortInFlight();
+      if (next === "0") {
+        const st = state.value;
+        if (st.phase === "ok" && st.data !== undefined && st.data.merged !== undefined) {
+          const { merged: _dropped, ...rest } = st.data;
+          state.value = { ...st, data: rest };
+        }
+      }
+      if (expanded.value) pull();
+      else mergedDirty = true;
     },
   );
 
@@ -217,6 +260,7 @@ export function useWorktreeGraph(deps: UseWorktreeGraphDeps): UseWorktreeGraphHa
     if (disposed) return;
     disposed = true;
     stopScopeWatch();
+    stopMergedWatch();
     stopWtWatch();
     clearTimer();
     abortInFlight();

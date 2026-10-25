@@ -58,7 +58,7 @@ import {
   type WtGraphPayload,
   type WtGraphRef,
 } from "../../../src/web-hub/protocol/worktree-graph.js";
-import { PREVIEW_LAN_HUB_CAP, WTGRAPH_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
+import { PREVIEW_LAN_HUB_CAP, WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import type { WorktreeRowWire } from "../../../src/web-hub/protocol/messages.js";
 
 // ---------------------------------------------------------------------------
@@ -404,12 +404,14 @@ describe("logic/gitGraphScope wtgraphScopeOf — truth table", () => {
     expect(wtgraphScopeOf({ mode: "token", hubCaps: caps, hasTransport: true, agentKey: "a", session })).toEqual({
       agentKey: "a",
       sessionId: "sess-1",
+      merged: false,
     });
   });
   it("loopback (non-password) mode does not need preview.lan.v1", () => {
     expect(wtgraphScopeOf({ mode: "loopback", hubCaps: caps, hasTransport: true, agentKey: "a", session })).toEqual({
       agentKey: "a",
       sessionId: "sess-1",
+      merged: false,
     });
   });
   it("password (LAN) mode additionally requires preview.lan.v1 (§0.2 Q1)", () => {
@@ -422,7 +424,39 @@ describe("logic/gitGraphScope wtgraphScopeOf — truth table", () => {
         agentKey: "a",
         session,
       }),
-    ).toEqual({ agentKey: "a", sessionId: "sess-1" });
+    ).toEqual({ agentKey: "a", sessionId: "sess-1", merged: false });
+  });
+  // merged-plan r3 §6/§7.1 (P4): the scope's `merged` column — `wtgraph.merged.v1` rides the
+  // SAME declaration conditions as `wtgraph.v1` (§5.1), so no extra gate exists here.
+  it("merged column: wtgraph.merged.v1 present ⇒ merged:true, absent ⇒ merged:false", () => {
+    const withMerged = [...caps, WTGRAPH_MERGED_HUB_CAP];
+    expect(wtgraphScopeOf({ mode: "token", hubCaps: withMerged, hasTransport: true, agentKey: "a", session })).toEqual({
+      agentKey: "a",
+      sessionId: "sess-1",
+      merged: true,
+    });
+    expect(
+      wtgraphScopeOf({
+        mode: "loopback",
+        hubCaps: withMerged,
+        hasTransport: true,
+        agentKey: "a",
+        session,
+      }),
+    ).toEqual({ agentKey: "a", sessionId: "sess-1", merged: true });
+    expect(
+      wtgraphScopeOf({
+        mode: "password",
+        hubCaps: [WTGRAPH_HUB_CAP, PREVIEW_LAN_HUB_CAP, WTGRAPH_MERGED_HUB_CAP],
+        hasTransport: true,
+        agentKey: "a",
+        session,
+      }),
+    ).toEqual({ agentKey: "a", sessionId: "sess-1", merged: true });
+    // the merged cap alone never makes a scope — wtgraph.v1 stays mandatory
+    expect(
+      wtgraphScopeOf({ mode: "token", hubCaps: [WTGRAPH_MERGED_HUB_CAP], hasTransport: true, agentKey: "a", session }),
+    ).toBeNull();
   });
   it("bad agentKey / session ⇒ null", () => {
     expect(wtgraphScopeOf({ mode: "token", hubCaps: caps, hasTransport: true, agentKey: "", session })).toBeNull();

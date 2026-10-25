@@ -157,7 +157,7 @@ async function mountExpanded(
 ): Promise<ReturnType<typeof mount>> {
   const w = mount(WorktreeGraph, {
     props: {
-      scope: { agentKey: "a-1", sessionId: "s-1" },
+      scope: { agentKey: "a-1", sessionId: "s-1", merged: false },
       wt: "/home/dev/repo",
       transport,
       rows,
@@ -179,7 +179,13 @@ describe("WorktreeGraph.vue — §4.3 five states + degraded", () => {
   it("default collapsed: the header renders, no request until expanded", () => {
     const { transport } = transportOf();
     const w = mount(WorktreeGraph, {
-      props: { scope: { agentKey: "a-1", sessionId: "s-1" }, wt: "/home/dev/repo", transport, rows, mobile: false },
+      props: {
+        scope: { agentKey: "a-1", sessionId: "s-1", merged: false },
+        wt: "/home/dev/repo",
+        transport,
+        rows,
+        mobile: false,
+      },
     });
     expect((w.vm as unknown as { expanded: boolean }).expanded).toBe(false);
     expect(w.find(".gg").exists()).toBe(false);
@@ -500,7 +506,13 @@ describe("WorktreeGraph.vue — geometry + columns (#8, Q3)", () => {
     vi.useFakeTimers();
     const { transport } = transportOf();
     const w = mount(WorktreeGraph, {
-      props: { scope: { agentKey: "a-1", sessionId: "s-1" }, wt: "/home/dev/repo", transport, rows, mobile: false },
+      props: {
+        scope: { agentKey: "a-1", sessionId: "s-1", merged: false },
+        wt: "/home/dev/repo",
+        transport,
+        rows,
+        mobile: false,
+      },
     });
     (w.vm as unknown as { toggle: () => void }).toggle();
     await vi.advanceTimersByTimeAsync(0);
@@ -533,7 +545,11 @@ describe("useWorktreeGraph — §4.3 state machine", () => {
   });
 
   const setup = (graph: ReturnType<typeof vi.fn>) => {
-    const scope = ref<{ agentKey: string; sessionId: string } | null>({ agentKey: "a1", sessionId: "s1" });
+    const scope = ref<{ agentKey: string; sessionId: string; merged: boolean } | null>({
+      agentKey: "a1",
+      sessionId: "s1",
+      merged: false,
+    });
     const wt = ref<string | null>("/wt/main");
     const handle = useWorktreeGraph({ transport: { graph } as WorktreeGraphTransport, scope, wt });
     return { handle, scope, wt };
@@ -579,7 +595,7 @@ describe("useWorktreeGraph — §4.3 state machine", () => {
     const { handle, scope, wt } = setup(graph);
     handle.toggle();
     await flushPromises();
-    scope.value = { agentKey: "a2", sessionId: "s2" };
+    scope.value = { agentKey: "a2", sessionId: "s2", merged: false };
     await flushPromises();
     expect(handle.expanded.value).toBe(false);
     expect(handle.state.value.phase).toBe("idle");
@@ -604,6 +620,95 @@ describe("useWorktreeGraph — §4.3 state machine", () => {
     handle.toggle();
     await flushPromises();
     expect(handle.state.value.error).toEqual({ code: "E_DEADLINE", reason: "log-timeout", retryable: true });
+    handle.dispose();
+  });
+
+  // merged-plan r3 §7.1 (R2-11, P4): the merged-capability invalidation key — a cap flip under
+  // the SAME agent/session is NOT a scope change (never collapses). A payload carrying a
+  // parser-valid `merged` block (skipped shape — no head in this fixture, so no `base`).
+  const MERGED_PAYLOAD = payloadOf([commit("a", [])], { merged: { v: 1, skipped: "no-head", branches: [] } });
+
+  it("cap GAINED while expanded: immediate re-pull with merged:true, never collapses", async () => {
+    const graph = vi.fn(async (): Promise<Outcome> => ok(payloadOf([commit("a", [])])));
+    const { handle, scope } = setup(graph);
+    handle.toggle();
+    await flushPromises();
+    expect(graph).toHaveBeenCalledTimes(1);
+    expect(graph.mock.calls[0]?.[0]).toEqual({ agentKey: "a1", sessionId: "s1", wt: "/wt/main" });
+    scope.value = { agentKey: "a1", sessionId: "s1", merged: true };
+    await flushPromises();
+    expect(handle.expanded.value).toBe(true); // 不收起
+    expect(handle.state.value.phase).toBe("ok");
+    expect(graph).toHaveBeenCalledTimes(2); // 立即重拉
+    expect(graph.mock.calls[1]?.[0]).toEqual({ agentKey: "a1", sessionId: "s1", wt: "/wt/main", merged: true });
+    handle.dispose();
+  });
+
+  it("cap LOST while expanded: displayed merged stripped at once, immediate re-pull on the baseline request, never collapses", async () => {
+    let calls = 0;
+    // The re-pull NEVER settles: without the strip the stale merged would stay visible — this
+    // is what keeps the strip assertion discriminative (mutation-checked: commenting the strip
+    // out turns this test red).
+    const graph = vi.fn((): Promise<Outcome> =>
+      calls++ === 0 ? Promise.resolve(ok(MERGED_PAYLOAD)) : new Promise<Outcome>(() => {}),
+    );
+    const { handle, scope } = setup(graph);
+    scope.value = { agentKey: "a1", sessionId: "s1", merged: true };
+    await flushPromises(); // the cap lands while collapsed: dirty mark only, no request
+    expect(graph).not.toHaveBeenCalled();
+    handle.toggle();
+    await flushPromises();
+    expect(graph).toHaveBeenCalledTimes(1);
+    expect(handle.state.value.data?.merged).toBeDefined();
+    scope.value = { agentKey: "a1", sessionId: "s1", merged: false };
+    await nextTick(); // the watch fired; the re-pull is still in flight
+    expect(handle.state.value.data?.merged).toBeUndefined(); // 立即去掉显示中的 merged
+    expect(handle.state.value.phase).toBe("ok");
+    expect(handle.state.value.refreshing).toBe(true); // re-pull in flight, old data kept visible
+    expect(handle.expanded.value).toBe(true); // 不收起
+    expect(graph).toHaveBeenCalledTimes(2);
+    expect(graph.mock.calls[1]?.[0]).toEqual({ agentKey: "a1", sessionId: "s1", wt: "/wt/main" }); // no merged key ⇒ 35 s baseline URL/timeout downstream
+    handle.dispose(); // aborts the never-settling re-pull
+  });
+
+  it("cap flip ABORTS the in-flight request (§7.1 ①): old signal aborted, second request carries the new capability", async () => {
+    const graph = vi.fn((): Promise<Outcome> => new Promise<Outcome>(() => {})); // every pull hangs
+    const { handle, scope } = setup(graph);
+    handle.toggle();
+    await flushPromises();
+    expect(graph).toHaveBeenCalledTimes(1);
+    const firstSignal = graph.mock.calls[0]?.[1]?.signal as AbortSignal;
+    expect(firstSignal.aborted).toBe(false);
+    scope.value = { agentKey: "a1", sessionId: "s1", merged: true }; // cap gained mid-flight
+    await flushPromises();
+    expect(firstSignal.aborted).toBe(true); // ① in-flight aborted
+    expect(graph).toHaveBeenCalledTimes(2); // and re-pulled with the new capability
+    expect(graph.mock.calls[1]?.[0]).toEqual({ agentKey: "a1", sessionId: "s1", wt: "/wt/main", merged: true });
+    const secondSignal = graph.mock.calls[1]?.[1]?.signal as AbortSignal;
+    expect(secondSignal.aborted).toBe(false);
+    scope.value = { agentKey: "a1", sessionId: "s1", merged: false }; // cap lost mid-flight
+    await flushPromises();
+    expect(secondSignal.aborted).toBe(true);
+    expect(graph).toHaveBeenCalledTimes(3);
+    expect(graph.mock.calls[2]?.[0]).toEqual({ agentKey: "a1", sessionId: "s1", wt: "/wt/main" }); // baseline request again
+    handle.dispose();
+  });
+
+  it("cap flips while COLLAPSED: no request fires; the next expansion pulls with the new capability", async () => {
+    const graph = vi.fn(async (): Promise<Outcome> => ok(payloadOf([commit("a", [])])));
+    const { handle, scope } = setup(graph);
+    handle.toggle(); // expand ⇒ one pull
+    await flushPromises();
+    handle.toggle(); // collapse, data kept
+    expect(graph).toHaveBeenCalledTimes(1);
+    scope.value = { agentKey: "a1", sessionId: "s1", merged: true };
+    await flushPromises();
+    expect(graph).toHaveBeenCalledTimes(1); // 未展开时 cap 变化不发请求
+    expect(handle.expanded.value).toBe(false);
+    handle.toggle(); // re-expand ⇒ the dirty mark pulls with the new capability
+    await flushPromises();
+    expect(graph).toHaveBeenCalledTimes(2);
+    expect(graph.mock.calls[1]?.[0]).toMatchObject({ merged: true });
     handle.dispose();
   });
 });

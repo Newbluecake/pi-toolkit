@@ -818,10 +818,16 @@ export interface WorktreeDiffTransport {
  * reaches the UI verbatim. The client cap is `WTGRAPH_BODY_MAX_BYTES` and its deadline
  * `WTGRAPH_CLIENT_TIMEOUT_MS` (both from the frozen P0 protocol module); this layer never
  * retries on its own — the UI owns the retry (§4.3).
+ *
+ * merged-plan r3 §6/§7.1 (package P4): `merged: true` (only ever set when the hub declared
+ * `wtgraph.merged.v1` — `wtgraphScopeOf` derives it) appends `&merged=1` to the query and
+ * switches the deadline to `WTGRAPH_MERGED_CLIENT_TIMEOUT_MS` (48 s — the M phase lifts the
+ * server wall-clock to 37 s + the 10 s transfer reserve); without it the URL and the 35 s
+ * deadline stay byte-identical to the baseline (an old hub ignores unknown query keys anyway).
  */
 export interface WorktreeGraphTransport {
   graph(
-    req: WtDiffScope & { readonly wt: string },
+    req: WtDiffScope & { readonly wt: string; readonly merged?: true },
     opts?: { readonly signal?: AbortSignal },
   ): Promise<WtDiffOutcome<WtGraphPayload>>;
 }

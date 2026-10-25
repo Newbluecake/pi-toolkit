@@ -8,7 +8,12 @@ import {
   WTDIFF_FILE_BODY_MAX_BYTES,
   WTDIFF_LIST_BODY_MAX_BYTES,
 } from "@protocol/worktree-diff.ts";
-import { parseWtGraphPayload, WTGRAPH_BODY_MAX_BYTES, WTGRAPH_CLIENT_TIMEOUT_MS } from "@protocol/worktree-graph.ts";
+import {
+  parseWtGraphPayload,
+  WTGRAPH_BODY_MAX_BYTES,
+  WTGRAPH_CLIENT_TIMEOUT_MS,
+  WTGRAPH_MERGED_CLIENT_TIMEOUT_MS,
+} from "@protocol/worktree-graph.ts";
 import { createTokenTransport, TOKEN_KEY } from "../../../src/web-hub/ui/src/transport/token.js";
 import { createPasswordTransport } from "../../../src/web-hub/ui/src/transport/password.js";
 import { HISTORY_LIMIT_MAX } from "../../../src/web-hub/ui/src/logic/contract.js";
@@ -2693,6 +2698,9 @@ const GRAPH_BODY = {
 const wtgBytes = (body: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(body));
 const GRAPH_REQ = { agentKey: "A", sessionId: "s1", wt: "/home/u/wt main" };
 const GRAPH_URL = `/api/worktree-graph?agentKey=A&sessionId=s1&wt=${encodeURIComponent("/home/u/wt main")}`;
+/** merged-plan r3 §6/§7.1 (P4): the opt-in merged request — URL gains `&merged=1`, deadline 48 s. */
+const GRAPH_REQ_MERGED = { ...GRAPH_REQ, merged: true as const };
+const GRAPH_URL_MERGED = `${GRAPH_URL}&merged=1`;
 
 describe.each([
   ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
@@ -2862,6 +2870,47 @@ describe.each([
       error: "E_ABORT",
     });
     expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/worktree-graph"))).toHaveLength(0);
+  });
+
+  it('merged-plan §7.1 (P4): merged:true ⇒ GET …&merged=1 with X-PWH:"1"; streamed 200 ⇒ ok value', async () => {
+    const h = make(async () => respStream(200, [wtgBytes(GRAPH_BODY)], GRAPH_HEADERS));
+    const out = await h.transport.worktreeGraph!.graph(GRAPH_REQ_MERGED);
+    expect(out).toEqual({ ok: true, value: parseWtGraphPayload(GRAPH_BODY) });
+    const call = h.fetchCalls.find((c) => c.url === GRAPH_URL_MERGED);
+    expect(call).toBeDefined();
+    expect(call!.init.method).toBe("GET");
+    expect(call!.init.headers?.["X-PWH"]).toBe("1");
+  });
+
+  it("merged-plan §7.1 (P4): merged:true switches the deadline to WTGRAPH_MERGED_CLIENT_TIMEOUT_MS (48 s) — the 35 s baseline deadline stays silent", async () => {
+    const h = make(async () => new Promise<never>(() => {}));
+    const p = h.transport.worktreeGraph!.graph(GRAPH_REQ_MERGED);
+    let settled = false;
+    void p.then(() => {
+      settled = true;
+    });
+    h.clock.advance(WTGRAPH_CLIENT_TIMEOUT_MS); // the baseline deadline must NOT fire
+    await new Promise((r) => setTimeout(r, 0)); // flush every microtask
+    expect(settled).toBe(false);
+    h.clock.advance(WTGRAPH_MERGED_CLIENT_TIMEOUT_MS - WTGRAPH_CLIENT_TIMEOUT_MS); // the 48 s one does
+    expect(await p).toEqual({ ok: false, status: 0, error: "E_DEADLINE" });
+    expect(settled).toBe(true);
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/worktree-graph"))).toHaveLength(1); // no auto-retry
+  });
+
+  it("merged-plan §7.1 (P4): without merged the URL and the 35 s deadline stay byte-identical to the baseline", async () => {
+    const h = make(async () => new Promise<never>(() => {}));
+    const p = h.transport.worktreeGraph!.graph(GRAPH_REQ);
+    expect(h.fetchCalls.map((c) => c.url)).toEqual([GRAPH_URL]); // exact string, no merged key
+    let settled = false;
+    void p.then(() => {
+      settled = true;
+    });
+    h.clock.advance(WTGRAPH_CLIENT_TIMEOUT_MS - 1);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(settled).toBe(false); // 34.999 s: still waiting
+    h.clock.advance(1);
+    expect(await p).toEqual({ ok: false, status: 0, error: "E_DEADLINE" }); // 35 s on the dot
   });
 
   it("an external abort mid-flight ⇒ E_ABORT (the fetch's own abort rejection surfaces)", async () => {

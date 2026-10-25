@@ -57,7 +57,13 @@ import {
   WTDIFF_FILE_BODY_MAX_BYTES,
   WTDIFF_LIST_BODY_MAX_BYTES,
 } from "@protocol/worktree-diff.ts";
-import { parseWtGraphPayload, WTGRAPH_BODY_MAX_BYTES, WTGRAPH_CLIENT_TIMEOUT_MS } from "@protocol/worktree-graph.ts";
+import {
+  parseWtGraphPayload,
+  WTGRAPH_BODY_MAX_BYTES,
+  WTGRAPH_CLIENT_TIMEOUT_MS,
+  WTGRAPH_MERGED_CLIENT_TIMEOUT_MS,
+  WTGRAPH_MERGED_QUERY,
+} from "@protocol/worktree-graph.ts";
 import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 import { parseProbeResults } from "./previewProbe.js";
 import { historyOutcomeFromResponse } from "./sessionHistory.ts";
@@ -1571,11 +1577,16 @@ export function createClient(deps) {
    * `E_DEADLINE{reason:"log-timeout"}`, 503 `E_WTDIFF_UNSUPPORTED{reason:"missing-object"|
    * "git-too-old"}`, 500 `E_INTERNAL{reason:"git-failed"}` — this layer never retries on
    * its own (the UI owns the retry, §4.3).
-   * @param {string} url @param {any} signal
+   * merged-plan r3 §6/§7.1 (package P4): `merged === true` (the hub declared
+   * `wtgraph.merged.v1`) switches the deadline to `WTGRAPH_MERGED_CLIENT_TIMEOUT_MS` 48 s
+   * (the M phase lifts the server wall-clock to 37 s + the 10 s transfer reserve); without
+   * it the deadline stays `WTGRAPH_CLIENT_TIMEOUT_MS` 35 s — byte-identical to the baseline.
+   * @param {string} url @param {any} signal @param {boolean} [merged]
    * @returns {Promise<any>}
    */
-  async function wtgraphGet(url, signal) {
-    return await wtdiffGet(url, WTGRAPH_BODY_MAX_BYTES, parseWtGraphPayload, signal, WTGRAPH_CLIENT_TIMEOUT_MS);
+  async function wtgraphGet(url, signal, merged) {
+    const deadline = merged === true ? WTGRAPH_MERGED_CLIENT_TIMEOUT_MS : WTGRAPH_CLIENT_TIMEOUT_MS;
+    return await wtdiffGet(url, WTGRAPH_BODY_MAX_BYTES, parseWtGraphPayload, signal, deadline);
   }
 
   /**
@@ -1583,7 +1594,10 @@ export function createClient(deps) {
    * graph section. `wt` is the `WorktreeRowWire.path` input (the same request input wtdiff
    * uses, never derived from the session); a 409 `E_SESSION_CHANGED` (hub-side
    * registry/sessionId mismatch) rides verbatim, never retried here.
-   * @param {{ agentKey: string, sessionId: string, wt: string }} req
+   * merged-plan r3 §6/§7.1 (P4): `req.merged === true` appends `&merged=1` (the query key is
+   * the protocol module's `WTGRAPH_MERGED_QUERY`, never a hand copy) and the 48 s deadline;
+   * without it the URL is byte-identical to the baseline (old hubs ignore unknown query keys).
+   * @param {{ agentKey: string, sessionId: string, wt: string, merged?: true }} req
    * @param {{ signal?: any }} [opts]
    * @returns {Promise<any>}
    */
@@ -1592,8 +1606,9 @@ export function createClient(deps) {
     if (signal !== undefined && signal !== null && signal.aborted === true) {
       return { ok: false, status: 0, error: "E_ABORT" };
     }
-    const url = `${API.wtgraph}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&wt=${encodeURIComponent(req.wt)}`;
-    return await wtgraphGet(url, signal);
+    const merged = req.merged === true;
+    const url = `${API.wtgraph}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&wt=${encodeURIComponent(req.wt)}${merged ? `&${WTGRAPH_MERGED_QUERY}=1` : ""}`;
+    return await wtgraphGet(url, signal, merged);
   }
 
   const worktreeGraph = { graph: wtgraph };

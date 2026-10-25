@@ -756,9 +756,9 @@ describe("types.test-d.ts (worktree-graph plan v2 §4.4 P4 transport surface)", 
     expectTypeOf<GraphValue>().toEqualTypeOf<WtGraphPayload>();
   });
 
-  it("request shape: the shared WtDiffScope plus wt; opts optional and carries only signal", () => {
+  it("request shape: the shared WtDiffScope plus wt (+ merged-plan r3 §7.1's opt-in merged flag); opts optional and carries only signal", () => {
     expectTypeOf<Parameters<WorktreeGraphTransport["graph"]>[0]>().toEqualTypeOf<
-      WtDiffScope & { readonly wt: string }
+      WtDiffScope & { readonly wt: string; readonly merged?: true }
     >();
     expectTypeOf<Parameters<WorktreeGraphTransport["graph"]>[1]>().toEqualTypeOf<
       { readonly signal?: AbortSignal } | undefined
