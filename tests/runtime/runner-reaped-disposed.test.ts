@@ -86,7 +86,7 @@ function setup(driver: SessionDriver, opts: { reapRejects?: boolean; voidDispose
 
 const base = (extra: Partial<SessionDriver> = {}): SessionDriver => ({
   create: async () => {
-    throw new Error("create must not run for a fork");
+    throw new Error("create must not run for a resumed session");
   },
   bind: async () => undefined,
   onLateArrival() {},
@@ -96,9 +96,9 @@ const base = (extra: Partial<SessionDriver> = {}): SessionDriver => ({
 describe("RunnerDeps.onReaped { disposed } (R2-1)", () => {
   it("normal settle with a positively disposed session ⇒ disposed:true", async () => {
     const t = setup(base({ resume: async (file) => handle({ sessionFile: file }) }));
-    await t.runner.run({ runId: "r1", prompt: "q", forkSessionFrom: "/c/f1.jsonl" }, budget);
+    await t.runner.run({ runId: "r1", prompt: "q", resumeFrom: "/c/f1.jsonl" }, budget);
     await drain();
-    expect(t.calls).toEqual([{ runId: "r1", fork: "/c/f1.jsonl", info: { disposed: true } }]);
+    expect(t.calls).toEqual([{ runId: "r1", info: { disposed: true } }]);
   });
 
   it("dispose() reports returned:false ⇒ disposed:false (the file may still be written)", async () => {
@@ -108,7 +108,7 @@ describe("RunnerDeps.onReaped { disposed } (R2-1)", () => {
           handle({ sessionFile: file, dispose: () => ({ returned: false, killed: 0, unkillable: [] }) }),
       }),
     );
-    await t.runner.run({ runId: "r2", prompt: "q", forkSessionFrom: "/c/f2.jsonl" }, budget);
+    await t.runner.run({ runId: "r2", prompt: "q", resumeFrom: "/c/f2.jsonl" }, budget);
     await drain();
     expect(t.calls[0]!.info).toEqual({ disposed: false });
   });
@@ -123,14 +123,14 @@ describe("RunnerDeps.onReaped { disposed } (R2-1)", () => {
           }),
       }),
     );
-    await t.runner.run({ runId: "r3", prompt: "q", forkSessionFrom: "/c/f3.jsonl" }, budget);
+    await t.runner.run({ runId: "r3", prompt: "q", resumeFrom: "/c/f3.jsonl" }, budget);
     await drain();
     expect(t.calls[0]!.info).toEqual({ disposed: false });
   });
 
   it("a rejecting reap ⇒ disposed:false", async () => {
     const t = setup(base({ resume: async (file) => handle({ sessionFile: file }) }), { reapRejects: true });
-    await t.runner.run({ runId: "r4", prompt: "q", forkSessionFrom: "/c/f4.jsonl" }, budget);
+    await t.runner.run({ runId: "r4", prompt: "q", resumeFrom: "/c/f4.jsonl" }, budget);
     await drain();
     expect(t.calls[0]!.info).toEqual({ disposed: false });
   });
@@ -143,9 +143,9 @@ describe("RunnerDeps.onReaped { disposed } (R2-1)", () => {
         },
       }),
     );
-    await t.runner.run({ runId: "r5", prompt: "q", forkSessionFrom: "/c/f5.jsonl" }, budget);
+    await t.runner.run({ runId: "r5", prompt: "q", resumeFrom: "/c/f5.jsonl" }, budget);
     await drain();
-    expect(t.calls).toEqual([{ runId: "r5", fork: "/c/f5.jsonl", info: { disposed: false } }]);
+    expect(t.calls).toEqual([{ runId: "r5", info: { disposed: false } }]);
   });
 
   it("a late-arriving session that goes through disposeLate ⇒ a second callback with disposed:true", async () => {
@@ -161,7 +161,7 @@ describe("RunnerDeps.onReaped { disposed } (R2-1)", () => {
         },
       }),
     );
-    const run = t.runner.run({ runId: "r6", prompt: "q", forkSessionFrom: "/c/f6.jsonl" }, budget);
+    const run = t.runner.run({ runId: "r6", prompt: "q", resumeFrom: "/c/f6.jsonl" }, budget);
     await drain();
     t.clock.advance(11);
     await run;
@@ -188,7 +188,7 @@ describe("RunnerDeps.onReaped { disposed } (R2-1)", () => {
           },
         }),
       );
-      const run = t.runner.run({ runId: "r8", prompt: "q", forkSessionFrom: "/c/f8.jsonl" }, budget);
+      const run = t.runner.run({ runId: "r8", prompt: "q", resumeFrom: "/c/f8.jsonl" }, budget);
       await drain();
       t.clock.advance(11);
       await run;
@@ -213,7 +213,7 @@ describe("RunnerDeps.onReaped { disposed } (R2-1)", () => {
       }),
       { voidDisposeLate: true },
     );
-    const run = t.runner.run({ runId: "r9", prompt: "q", forkSessionFrom: "/c/f9.jsonl" }, budget);
+    const run = t.runner.run({ runId: "r9", prompt: "q", resumeFrom: "/c/f9.jsonl" }, budget);
     await drain();
     t.clock.advance(11);
     await run;
@@ -223,7 +223,7 @@ describe("RunnerDeps.onReaped { disposed } (R2-1)", () => {
     expect(t.calls.map((c) => c.info?.disposed)).toEqual([false, false]);
   });
 
-  it("non-fork runs still call onReaped with forkSessionFrom undefined (4th arg is simply extra)", async () => {
+  it("runs call onReaped with forkSessionFrom undefined (legacy 2nd arg) (4th arg is simply extra)", async () => {
     const t = setup(base({ create: async () => handle() }));
     await t.runner.run({ runId: "r7", prompt: "q" }, budget);
     await drain();

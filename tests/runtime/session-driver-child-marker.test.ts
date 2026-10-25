@@ -3,15 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { isConsultForkSpec, markChildSession, SUBAGENT_CHILD_CUSTOM_TYPE } from "../../src/runtime/session-driver.js";
-import type { SessionSpec } from "../../src/runtime/session-driver.js";
+import { markChildSession, SUBAGENT_CHILD_CUSTOM_TYPE } from "../../src/runtime/session-driver.js";
 
 /**
  * web-hub session-history plan §4.3 (H0, PD2): every persisted child (subagent) session gets a
  * `subagent:child` custom entry as its very FIRST entry, written by the DRIVER right after
  * `SessionManager.create()` — before any setup entry `createAgentSession` appends — so it is
- * fixed on line 2 of the lazily-flushed jsonl. Consult forks (`forkSessionFrom`) and
- * non-persisted runs never get it; `resume()` never writes it (source-scan pinned below).
+ * fixed on line 2 of the lazily-flushed jsonl. Non-persisted runs never get it; `resume()` never writes it (source-scan pinned below).
  */
 describe("H0 markChildSession: unit (real devDep SessionManager)", () => {
   const dirs: string[] = [];
@@ -29,7 +27,7 @@ describe("H0 markChildSession: unit (real devDep SessionManager)", () => {
   it("marker lands on line 2, right after the header, once a user message flushes the file", () => {
     const { cwd, sessions } = scratch();
     const sm = SessionManager.create(cwd, sessions);
-    markChildSession(sm, {}, true);
+    markChildSession(sm, true);
     // Lazy persistence: no conversation yet -> no file at all (pinned separately below).
     sm.appendMessage({
       role: "user",
@@ -56,50 +54,41 @@ describe("H0 markChildSession: unit (real devDep SessionManager)", () => {
   it("pi's lazy persistence: marking alone never creates the file", () => {
     const { cwd, sessions } = scratch();
     const sm = SessionManager.create(cwd, sessions);
-    markChildSession(sm, {}, true);
+    markChildSession(sm, true);
     expect(sm.getSessionFile()).toBeDefined();
     expect(existsSync(sm.getSessionFile()!)).toBe(false);
   });
 
   it("writes nothing (and does not throw) when persist=false", () => {
     const appendCustomEntry = vi.fn();
-    markChildSession({ appendCustomEntry }, {}, false);
-    expect(appendCustomEntry).not.toHaveBeenCalled();
-  });
-
-  it("writes nothing for a consult fork spec (forkSessionFrom)", () => {
-    const appendCustomEntry = vi.fn();
-    const spec: SessionSpec = { forkSessionFrom: "/tmp/expert.jsonl" };
-    expect(isConsultForkSpec(spec)).toBe(true); // premise: this IS the consult-fork shape
-    markChildSession({ appendCustomEntry }, spec, true);
+    markChildSession({ appendCustomEntry }, false);
     expect(appendCustomEntry).not.toHaveBeenCalled();
   });
 
   it("writes nothing when appendCustomEntry is absent or not a function (never throws)", () => {
-    expect(() => markChildSession({}, {}, true)).not.toThrow();
-    expect(() => markChildSession({ appendCustomEntry: "not-a-fn" }, {}, true)).not.toThrow();
-    expect(() => markChildSession(null, {}, true)).not.toThrow();
-    expect(() => markChildSession(undefined, {}, true)).not.toThrow();
+    expect(() => markChildSession({}, true)).not.toThrow();
+    expect(() => markChildSession({ appendCustomEntry: "not-a-fn" }, true)).not.toThrow();
+    expect(() => markChildSession(null, true)).not.toThrow();
+    expect(() => markChildSession(undefined, true)).not.toThrow();
   });
 
   it("swallows a throwing appendCustomEntry (best-effort marker, never fails the run)", () => {
     const appendCustomEntry = vi.fn(() => {
       throw new Error("boom");
     });
-    expect(() => markChildSession({ appendCustomEntry }, {}, true)).not.toThrow();
+    expect(() => markChildSession({ appendCustomEntry }, true)).not.toThrow();
     expect(appendCustomEntry).toHaveBeenCalledTimes(1); // it really tried, then swallowed
   });
 
   it("passes ({v: 1}) as the marker data on the happy path", () => {
     const appendCustomEntry = vi.fn();
-    markChildSession({ appendCustomEntry }, {}, true);
+    markChildSession({ appendCustomEntry }, true);
     expect(appendCustomEntry).toHaveBeenCalledTimes(1);
     expect(appendCustomEntry).toHaveBeenCalledWith(SUBAGENT_CHILD_CUSTOM_TYPE, { v: 1 });
   });
 });
 
-/** Source-scan: `resume()` never marks — a resumed session's provenance is already on disk, and a
- *  consult fork (which resumes) must stay unmarked. The positive control (create DOES mark) keeps
+/** Source-scan: `resume()` never marks — a resumed session's provenance is already on disk. The positive control (create DOES mark) keeps
  *  the scan from passing vacuously if the method extraction ever drifts. */
 describe("H0 source scan: markChildSession call sites in session-driver.ts", () => {
   const source = readFileSync("src/runtime/session-driver.ts", "utf8");

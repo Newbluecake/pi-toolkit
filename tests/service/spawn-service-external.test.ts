@@ -10,7 +10,6 @@ import type { ModelCandidate } from "../../src/config/model-hint.js";
 import { formatUnknownModelError } from "../../src/config/model-hint.js";
 import type { ExternalAgentsPort } from "../../src/external-agent/types.js";
 import {
-  MSG_EXPERTS_UNSUPPORTED,
   MSG_READONLY_DOMAIN,
   MSG_RESUME_ISOLATION,
   msgDroidModelNotAllowed,
@@ -181,24 +180,6 @@ describe("spawn admission: external (droid) gate", () => {
     await flush();
     expect("runId" in r).toBe(true);
     expect(h2.runs[0]?.model).toEqual(DROID);
-  });
-  it("consultExperts / forkSessionFrom ⇒ MSG_EXPERTS_UNSUPPORTED", async () => {
-    const h = harness({ external: port(), agentDir });
-    await expectRejected(
-      h,
-      {
-        type: "worker",
-        prompt: "x",
-        modelOverride: DROID,
-        consultExperts: [{ runId: "r_X", sessionFile: piFile, agentType: "worker" }],
-      },
-      MSG_EXPERTS_UNSUPPORTED,
-    );
-    await expectRejected(
-      h,
-      { type: "worker", prompt: "x", modelOverride: DROID, forkSessionFrom: piFile, parentRunId: "r_P" },
-      MSG_EXPERTS_UNSUPPORTED,
-    );
   });
   it("droid model + resume of a pi session ⇒ msgResumeCrossRuntime(pi)", async () => {
     const h = harness({

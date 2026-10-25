@@ -12,7 +12,7 @@ import { createSpawnService } from "../../src/service/spawn-service.js";
 /**
  * fabric-cross-session plan v3 §4.1/§4.6 (S0): every spawn-service ADMISSION rejection carries a typed
  * `error.reason`. This is annotation only — `kind`/`message`/`retryable` stay exactly what they were (pinned by the
- * existing admission suites + the wake-off golden); this table pins the reason of each of the 29 `return { error }`
+ * existing admission suites + the wake-off golden); this table pins the reason of each of the 24 `return { error }`
  * sites in `spawn()`, plus a static guard so a future branch cannot be added without one.
  */
 const plain: AgentTypeConfig = { name: "worker", description: "w", systemPrompt: "", promptMode: "append" };
@@ -237,31 +237,6 @@ describe("AdmissionReason on every spawn() admission rejection (plan v3 §4.6)",
         }),
     ],
     [
-      "external: consult experts unsupported",
-      "config",
-      false,
-      () =>
-        reject(harness({ external: port(), withAgentDir: true }), {
-          type: "worker",
-          prompt: "x",
-          modelOverride: DROID,
-          consultExperts: [{ runId: "r_X", sessionFile: piFile, agentType: "worker" }],
-        }),
-    ],
-    [
-      "external: fork unsupported",
-      "config",
-      false,
-      () =>
-        reject(harness({ external: port(), withAgentDir: true }), {
-          type: "worker",
-          prompt: "x",
-          modelOverride: DROID,
-          forkSessionFrom: piFile,
-          parentRunId: "r_P",
-        }),
-    ],
-    [
       "external: droid model resuming a pi session (cross-runtime)",
       "config",
       false,
@@ -335,43 +310,6 @@ describe("AdmissionReason on every spawn() admission rejection (plan v3 §4.6)",
       },
     ],
     [
-      "fork: parent stopping or gone",
-      "config",
-      false,
-      () => reject(harness(), { type: "worker", prompt: "x", forkSessionFrom: piFile }),
-    ],
-    [
-      "fork + resume together",
-      "config",
-      false,
-      async () => {
-        const s = harness();
-        const parent = await admit(s, { type: "parent", prompt: "p", label: "p" });
-        return reject(s, {
-          type: "worker",
-          prompt: "x",
-          forkSessionFrom: piFile,
-          resumeFrom: "p",
-          parentRunId: parent.runId,
-        });
-      },
-    ],
-    [
-      "fork: file missing",
-      "config",
-      false,
-      async () => {
-        const s = harness();
-        const parent = await admit(s, { type: "parent", prompt: "p", label: "p" });
-        return reject(s, {
-          type: "worker",
-          prompt: "x",
-          forkSessionFrom: join(tmp, "nope.jsonl"),
-          parentRunId: parent.runId,
-        });
-      },
-    ],
-    [
       "resume: target not found",
       "config",
       false,
@@ -430,8 +368,8 @@ describe("AdmissionReason on every spawn() admission rejection (plan v3 §4.6)",
     expect(error.kind).toBe("config");
   });
 
-  it("covers every rejection site (29) — no reason is accidentally shared by a wrong branch", () => {
-    expect(cases).toHaveLength(29);
+  it("covers every rejection site (24) — no reason is accidentally shared by a wrong branch", () => {
+    expect(cases).toHaveLength(24);
     const distinct = new Set(cases.map((c) => c[1]));
     expect([...distinct].sort()).toEqual(
       [
@@ -457,7 +395,7 @@ describe("AdmissionReason on every spawn() admission rejection (plan v3 §4.6)",
     const retryable = (body.match(/retryable: (true|false)/g) ?? []).length;
     const reasons = (body.match(/reason: "/g) ?? []).length;
     // W3 adds the persist-first inbox reservation rejection before any label/tree write.
-    expect(retryable).toBe(30);
+    expect(retryable).toBe(25);
     expect(reasons).toBe(retryable);
   });
 

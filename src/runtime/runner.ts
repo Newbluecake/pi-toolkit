@@ -88,15 +88,10 @@ export interface ResolvedSpawnRequest extends SessionSpec {
    */
   wakeLevel?: number;
   /**
-   * consult (plan §4.3/§4.4): threaded verbatim from
-   * `SpawnRequest.forkSessionFrom`. The runner uses it for two things:
-   * ① session_create opens this file through `driver.resume` instead of
-   * creating a fresh session; ② after the run is physically reaped it is
-   * handed back to `RunnerDeps.onReaped(runId, forkSessionFrom)` so the fork
-   * copy can be deleted at the one point in time where nothing can write to
-   * it again. Declared here (rather than only in package B) because
-   * `service/request-threading.ts`'s Gate C requires every THREADED field to
-   * exist under the same name on this interface.
+   * @deprecated #40 — legacy consult field, no longer produced or honoured: the runner does NOT open
+   * this file any more (session_create only looks at `resumeFrom`); it is only handed back verbatim
+   * to `RunnerDeps.onReaped(runId, forkSessionFrom)` (always `undefined` now). Kept until PS1b because
+   * `service/request-threading.ts`'s Gate C requires every THREADED field to exist under the same name here.
    */
   forkSessionFrom?: string;
   /** M-A: display-only spawn metadata (model/label/agent type) folded into diag at enqueue time for the presentation layer (fleet tree / Agent tool card). */
@@ -870,12 +865,7 @@ export class RuntimeRunner implements Runner {
       ticket = acq.value.ticket;
       dispatch({ kind: "slot_acquired", at: this.d.clock.now() });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "session_create" });
-      // consult (plan §4.4): a fork copy is just "an existing session file" —
-      // open it through the same driver.resume seam as Agent({resume}); the
-      // driver is unchanged (cwd arrives via SpawnRequest.cwd, overriding the
-      // header cwd). forkSessionFrom is admitted mutually exclusive with
-      // resumeFrom upstream, and wins the ?? so the ordering is total anyway.
-      const openFile = req.forkSessionFrom ?? req.resumeFrom;
+      const openFile = req.resumeFrom;
       createP = openFile
         ? this.d.driver.resume
           ? this.d.driver.resume(openFile, req)
@@ -930,9 +920,6 @@ export class RuntimeRunner implements Runner {
         ...(handle.sessionFile === undefined ? {} : { sessionFile: handle.sessionFile }),
         ...(modelRef === undefined ? {} : { model: modelRef }),
         ...(thinking === undefined ? {} : { thinking }),
-        ...(handle.consultIdentityPrediction === undefined
-          ? {}
-          : { consultIdentityPrediction: handle.consultIdentityPrediction }),
       });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "extension_bind" });
       const bindBudget = remainingFor(budget.bindMs, this.d.clock.now(), state.deadlines);
@@ -953,8 +940,7 @@ export class RuntimeRunner implements Runner {
           if (e.t === "switch_selfcheck_failed" && selfcheckLatch === undefined) selfcheckLatch = e.reason;
           // todo #27: WARN once per process (this RuntimeRunner instance's lifetime, i.e. until
           // the next /reload rebuilds a fresh one) the first time any spawned child session
-          // reports it never activated pi-toolkit at all — never for a consult fork (session-
-          // driver.ts's resume() never emits the event for one).
+          // reports it never activated pi-toolkit at all.
           if (e.t === "child_extension_missing" && !this.warnedChildExtensionMissing) {
             this.warnedChildExtensionMissing = true;
             console.warn(`[pi-subagent] ${CHILD_EXTENSION_MISSING_WARNING}`);

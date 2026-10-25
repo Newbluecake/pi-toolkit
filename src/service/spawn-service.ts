@@ -1,4 +1,3 @@
-import { statSync } from "node:fs";
 import { applyBudgetPolicy } from "../core/deadline.js";
 import { mergeBudget } from "../config/settings.js";
 import { newRunId, isRunId } from "../core/ids.js";
@@ -11,7 +10,7 @@ import { formatSlots, slotsInfo, type SlotsInfo } from "../core/format.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
 import { formatModelCandidates, formatUnknownModelError, type ModelCandidate } from "../config/model-hint.js";
 import type { QuotaGateVerdict } from "../quota/gate.js";
-import { CONSULT_MAIN_AGENT_TYPE, displayAgentType } from "../core/types.js";
+import { displayAgentType } from "../core/types.js";
 import { createInitialState, TASK_PROMPT_CAP } from "../core/state-machine.js";
 import type {
   AgentTypeConfig,
@@ -37,32 +36,11 @@ import type { ExternalAgentsPort } from "../external-agent/types.js";
 import { isExternalSessionPath } from "../external-agent/paths.js";
 import type { InboxPort } from "../fabric/wake.js";
 import {
-  MSG_EXPERTS_UNSUPPORTED,
   MSG_READONLY_DOMAIN,
   MSG_RESUME_ISOLATION,
   msgResumeCrossRuntime,
   msgResumeDisabled,
 } from "../external-agent/messages.js";
-
-/**
- * consult (plan §16): the "no type" admission branch for `consult("main",
- * …)` — a static, in-memory `AgentTypeConfig` used ONLY when a request names
- * `CONSULT_MAIN_AGENT_TYPE` AND carries `forkSessionFrom`. Deliberately NOT
- * registered anywhere (no `AgentTypeRegistry` involvement at all): it never
- * appears in `list()`/the system-prompt agent-types section, and a plain
- * dispatch of this type name (no `forkSessionFrom`) is rejected exactly like
- * any other unknown type, since `deps.types.get()` is only ever bypassed
- * below when both conditions hold. Every field the runtime adapter forces
- * for a consult run anyway (tools, prompt) is irrelevant here; this only
- * needs to exist so admission has *some* config to build the run's
- * RunnerSpec from.
- */
-const MAIN_SNAPSHOT_TYPE_CONFIG: AgentTypeConfig = {
-  name: CONSULT_MAIN_AGENT_TYPE,
-  description: 'Internal: a read-only fork of the host main session (consult("main", …) only).',
-  systemPrompt: "",
-  promptMode: "append",
-};
 
 export interface SpawnLabelTarget {
   readonly runId: RunId;
@@ -288,14 +266,6 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const outcomes = new Map<RunId, RunOutcome>();
   const waits = new Map<RunId, Set<(outcome: RunOutcome) => void>>();
   const running = new Set<RunId>();
-  // D19 (workflow-experts §4.7): idempotent set of runIds currently being
-  // torn down. Populated synchronously by abort() BEFORE its first `await`
-  // (cascadeChildren) so a consult fork admission racing the same tick sees
-  // it; cleared in finish() (also idempotent — Set.delete on an absent key
-  // is a no-op). This is deliberately separate from `running`: a run stays
-  // in `running` until finish() actually settles it, but must be rejected
-  // for new fork admission the instant abort() is called.
-  const stopping = new Set<RunId>();
   const claimedRunIds = new Set<RunId>();
   // fabric-cross-session plan v3 §3.4a (S0): the resume mutex is now an OWNER registry — resume key (target run id AND
   // session file) → the run that holds it. Mutual exclusion is unchanged (a held key rejects `resume_locked`, released
@@ -395,7 +365,6 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const finish = (outcome: RunOutcome) => {
     outcomes.set(outcome.runId, outcome);
     running.delete(outcome.runId);
-    stopping.delete(outcome.runId);
     claimedRunIds.delete(outcome.runId);
     admissionAbort.delete(outcome.runId); // Fix 3: release the admission-time cancel lever once settled
     nesting.delete(outcome.runId);
@@ -491,16 +460,9 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       ...(req.title !== undefined ? { title: req.title } : {}),
       agentType: displayAgentType(req.type),
       taskPrompt: req.prompt.slice(0, TASK_PROMPT_CAP),
-      // consult A/B instrumentation plan (§5 P1b): mirror the two write-once
-      // display fields the runtime adapter will fold into diag at enqueue
-      // time (identical values — pure req passthrough) so the provisional row
+      // Mirror the two write-once display fields the runtime adapter will fold into diag at
+      // enqueue time (identical values — pure req passthrough) so the provisional row
       // stays consistent with the real snapshot that replaces it.
-      // `experts` is deliberately NOT mirrored: `granted` is only knowable
-      // after the adapter's injection decision (deps.consult present and
-      // returned a tool), and a guessed value here would put a wrong
-      // "granted" into a diag analysis treats as authoritative. The
-      // provisional snapshot is never journaled/persisted, so nothing that
-      // reads persisted entries ever sees this gap.
       ...(req.dispatchMeta === undefined ? {} : { dispatchMeta: req.dispatchMeta }),
       ...(req.schemaPreset === undefined ? {} : { schemaPreset: req.schemaPreset }),
     };
@@ -642,19 +604,15 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       if (req.deadlineAt !== undefined && req.deadlineAt <= now())
         return { error: { kind: "config", message: "deadlineAt already expired", retryable: false, reason: "config" } };
       // P0-r (todo #22 optimize-plan §7.0 point 4): toolDomain:"readonly" never
-      // combines with isolation / forkSessionFrom / resumeFrom — tidy never
-      // needs any of them, and combining them would be a latent misuse
-      // waiting to happen (e.g. a readonly consult-like run also asking for a
-      // worktree). Zero side effects, same admission discipline as the CC4
-      // check right above.
-      if (
-        req.toolDomain === "readonly" &&
-        (req.isolation !== undefined || req.forkSessionFrom !== undefined || req.resumeFrom !== undefined)
-      ) {
+      // combines with isolation / resumeFrom — tidy never needs either, and
+      // combining them would be a latent misuse waiting to happen (e.g. a
+      // readonly run also asking for a worktree). Zero side effects, same
+      // admission discipline as the CC4 check right above.
+      if (req.toolDomain === "readonly" && (req.isolation !== undefined || req.resumeFrom !== undefined)) {
         return {
           error: {
             kind: "config",
-            message: 'toolDomain:"readonly" cannot be combined with isolation, forkSessionFrom, or resumeFrom',
+            message: 'toolDomain:"readonly" cannot be combined with isolation or resumeFrom',
             retryable: false,
             reason: "config",
           },
@@ -687,15 +645,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           };
         }
       }
-      // consult (plan §16): the "no type" bypass for `consult("main", …)` —
-      // never touches `deps.types` at all when it fires, so it has zero
-      // effect on the registry, `list()`, or a real type of the same name
-      // dispatched WITHOUT a forkSessionFrom (that still falls through to
-      // the normal lookup below and is rejected as unknown, same as today).
-      const config =
-        req.type === CONSULT_MAIN_AGENT_TYPE && req.forkSessionFrom !== undefined
-          ? MAIN_SNAPSHOT_TYPE_CONFIG
-          : deps.types.get(req.type);
+      const config = deps.types.get(req.type);
       if (!config) {
         // Self-correcting error: list the valid names so a model that missed
         // (or predates) the system-prompt type section recovers in one turn
@@ -816,12 +766,6 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
             },
           };
         }
-        if (req.consultExperts !== undefined && req.consultExperts.length > 0) {
-          return { error: { kind: "config", message: MSG_EXPERTS_UNSUPPORTED, retryable: false, reason: "config" } };
-        }
-        if (req.forkSessionFrom !== undefined) {
-          return { error: { kind: "config", message: MSG_EXPERTS_UNSUPPORTED, retryable: false, reason: "config" } };
-        }
         if (resumeTargetRunId !== undefined && !resumeTargetExternal) {
           return {
             error: {
@@ -890,12 +834,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       if (req.parentRunId) {
         const parent = nesting.get(req.parentRunId);
         if (parent) {
-          // consult (plan §4.4, review-1 #1): fork requests (a consulted
-          // expert's copy) skip the canSpawn gate — the asking run's type
-          // generally has no canSpawn for the *expert's* type, and requiring
-          // it would reject every consult. Depth still counts and is still
-          // capped: a consult run is a real nested run for depth purposes.
-          if (!req.forkSessionFrom && !parent.canSpawn?.includes(req.type))
+          if (!parent.canSpawn?.includes(req.type))
             return {
               error: {
                 kind: "config",
@@ -921,13 +860,12 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // §2.2 解析式第 ② 项（R-inherit）：resume 目标已持久化的策略；旧条目缺字段
       // 保持 undefined（落第 ③ 项按请求形状推导）。非 resume 请求恒 undefined。
       let resumeTimeoutPolicy: SpawnRequest["timeoutPolicy"] = undefined;
-      // consult A/B instrumentation plan (§5 P1b, D3 recommendation):
       // `dispatchMeta = req.dispatchMeta ?? resume.dispatchMeta` — a rework
       // resume naturally belongs to the same package, so inheriting keeps
       // the enrollment without the main session re-stating it every time.
       // Source is the terminal snapshot's diag ONLY (resolve-target does not
-      // read tombstones for this field). `schemaPreset`/`experts` are NOT
-      // inherited — they are per-dispatch fields.
+      // read tombstones for this field). `schemaPreset` is NOT
+      // inherited — it is a per-dispatch field.
       let resumeDispatchMeta: SpawnRequest["dispatchMeta"] = undefined;
       let resumePrevWakeLevel: number | undefined = undefined;
       const runId = newRunId(
@@ -960,53 +898,6 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           },
         };
       const labelAction: "register" | "repoint" = repoint ? "repoint" : "register";
-
-      // consult (plan §4.4): fork admission branch. Validated here — after
-      // label planning, before the resume branch — and deliberately takes no
-      // locks: a fork copy is private to this one run (concurrent consults of
-      // the same expert each hold their own copy), so resumeOwners has nothing
-      // to mutex. statSync (not existsSync+statSync) keeps the check a single
-      // race-free syscall.
-      if (req.forkSessionFrom) {
-        // D19 (workflow-experts §4.7, N3): a fork (consult) request must be
-        // rejected while its parent is stopping or already gone — not just
-        // absent from `running` but also present in `stopping` (abort() has
-        // been called but the run hasn't settled yet). This runs before any
-        // mutable state write, same admission discipline as the rest of
-        // spawn(). The tool-call `signal` remains a second line of defense.
-        if (!req.parentRunId || !running.has(req.parentRunId) || stopping.has(req.parentRunId)) {
-          return {
-            error: {
-              kind: "config",
-              message: "parent run is stopping or gone",
-              retryable: false,
-              reason: "config",
-            },
-          };
-        }
-        if (req.resumeFrom)
-          return {
-            error: {
-              kind: "config",
-              message: "forkSessionFrom and resumeFrom are mutually exclusive",
-              retryable: false,
-              reason: "config",
-            },
-          };
-        try {
-          if (!statSync(req.forkSessionFrom).isFile())
-            throw new Error(`fork session file missing: ${req.forkSessionFrom}`);
-        } catch {
-          return {
-            error: {
-              kind: "config",
-              message: `fork session file missing: ${req.forkSessionFrom}`,
-              retryable: false,
-              reason: "config",
-            },
-          };
-        }
-      }
 
       if (req.resumeFrom) {
         // Resolve once for the running hint, then resolve the owned session
@@ -1181,13 +1072,9 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // separately as `queued`, so the two numbers together always add up to
       // the true admitted count while `inUse` never exceeds `limit`.
       const slots: SlotsInfo = slotsInfo(limit, slotfulLabel.size, Math.max(0, slotfulLabel.size - limit));
-      // consult (plan §4.4, review-2 #6): a fork run's nesting entry carries
-      // NO canSpawn — a consulted expert must not delegate further. Together
-      // with the adapter not injecting the nested Agent tool and pi's
-      // read-only tools allowlist, this is one of three independent guards.
       nesting.set(runId, {
         depth,
-        ...(config.canSpawn && !req.forkSessionFrom ? { canSpawn: config.canSpawn } : {}),
+        ...(config.canSpawn ? { canSpawn: config.canSpawn } : {}),
       });
       resolvedReq = { ...resolvedReq, timeoutPolicy: resolvedPolicy };
       // fabric-cross-session plan §3.3 L4 (W1): initial effective causal level, written BEFORE `void start` below.
@@ -1213,15 +1100,13 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // (never trusted from a caller; absent with wake off ⇒ no new diag bytes). Priority: the first cause that applies.
       if (deps.inbox) {
         const wakeExclusion: WakeExclusion | "none" =
-          req.forkSessionFrom !== undefined
-            ? "consult_fork"
-            : req.toolDomain === "readonly"
-              ? "readonly_domain"
-              : req.suppressDelivery === true || req.expectAck === true || req.callerOwned === true
-                ? "caller_owned"
-                : admittedExternal
-                  ? "external_agent"
-                  : "none";
+          req.toolDomain === "readonly"
+            ? "readonly_domain"
+            : req.suppressDelivery === true || req.expectAck === true || req.callerOwned === true
+              ? "caller_owned"
+              : admittedExternal
+                ? "external_agent"
+                : "none";
         resolvedReq = { ...resolvedReq, wakeExclusion };
         // Provenance rides the display meta; the mailbox claim token is a secret that must not outlive admission.
         if (req.wakeOrigin !== undefined)
@@ -1416,13 +1301,6 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     },
     async abort(runId, cause = "user_stop") {
       if (!running.has(runId)) return false;
-      // D19 (workflow-experts §4.7, N3): synchronous, before the first
-      // `await` below (cascadeChildren) — a fork admission racing this same
-      // tick must see `runId` as stopping. `stopping` is an idempotent set
-      // (repeated abort() calls on the same runId, or the production path
-      // stopChildrenOf → abort, just re-add the same member); cleared once
-      // in finish(), also idempotent.
-      stopping.add(runId);
       // X3: cascade to nested children before/alongside aborting this run
       // itself. Recurses through `service.abort` so grandchildren are
       // reached too; idempotent against the double-hop that also arrives via

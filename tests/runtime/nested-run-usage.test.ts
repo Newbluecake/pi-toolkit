@@ -7,7 +7,7 @@ import { mapEvent } from "../../src/runtime/session-driver.js";
 /**
  * Nested-run spend absorption (usage-broadcast / HUD dedupe contract):
  *
- * A child run R that consults an expert (consult run C) or delegates via the
+ * A child run R that delegates via the
  * nested Agent tool (grandchild run G) gets the nested session's spend
  * delivered back on the *toolResult* message: pi emits `message_end` for the
  * toolResult (agent-core tool-placement.js), PiSessionDriver.bind maps it
@@ -19,7 +19,7 @@ import { mapEvent } from "../../src/runtime/session-driver.js";
  * the broadcast (subagent:usage) lists C/G as independent tracked runs, so a
  * consumer can only avoid double-counting if it can tell that C/G's cost is
  * already inside R's accumulator. The run ids riding on the toolResult
- * details (`runId` / `runIds` / `consultRunId`) are that marker, folded into
+ * details (`runId` / `runIds`) are that marker, folded into
  * diag.absorbedRunIds by the same message_end reduction.
  */
 
@@ -54,10 +54,10 @@ function toolResultEnd(details: Record<string, unknown>, costTotal: number) {
 }
 
 describe("nested spend rides the parent's toolResult message_end (X9 chain)", () => {
-  it("mapEvent + reduce: a consult toolResult's usage lands in the parent run's diag.usage", () => {
-    // Consult run C cost $0.42; its spend rides the consult toolResult of R.
+  it("a legacy consult toolResult's usage still lands in diag.usage, but consultRunId is no longer absorbed (#40)", () => {
     const ev = mapEvent(toolResultEnd({ consultRunId: "run_c", outcome: "completed" }, 0.42));
     expect(ev).toMatchObject({ t: "message_end", usage: { costUsd: 0.42 } });
+    expect(ev).not.toHaveProperty("absorbedRunIds");
     const s = apply(runningState(), { kind: "session_event", event: ev! } as never, 6);
     expect(s.diag.usage?.costUsd).toBeCloseTo(0.42, 10);
   });

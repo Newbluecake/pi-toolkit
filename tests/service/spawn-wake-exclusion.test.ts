@@ -81,20 +81,12 @@ describe("W5 spawn admission: wakeExclusion (plan §4.5) — written once, only 
     await h.service.spawn({ type: "worker", prompt: "x", ...extra });
     expect(h.specs[0]!.request.wakeExclusion).toBe(expected);
   });
-  it("a consult fork is consult_fork (and wins over every later cause)", async () => {
+  it("a legacy forkSessionFrom request is no longer consult_fork: it is classified from its other causes (#40)", async () => {
     const h = rig({ inbox });
-    const parent = await h.service.spawn({ type: "worker", prompt: "parent" });
-    if (!("runId" in parent)) throw new Error("parent");
-    const fork = join(h.dir, "fork.jsonl");
-    writeFileSync(fork, "fork");
-    await h.service.spawn({
-      type: "worker",
-      prompt: "ask",
-      parentRunId: parent.runId,
-      forkSessionFrom: fork,
-      expectAck: true,
-    });
-    expect(h.specs[1]!.request.wakeExclusion).toBe("consult_fork");
+    await h.service.spawn({ type: "worker", prompt: "ask", forkSessionFrom: "/legacy/fork.jsonl", expectAck: true });
+    expect(h.specs[0]!.request.wakeExclusion).toBe("caller_owned"); // expectAck, nothing consult-specific
+    await h.service.spawn({ type: "worker", prompt: "ask2", forkSessionFrom: "/legacy/fork.jsonl" });
+    expect(h.specs[1]!.request.wakeExclusion).toBe("none");
   });
   it("an external (droid) model is external_agent", async () => {
     const h = rig({ inbox, external: {} });

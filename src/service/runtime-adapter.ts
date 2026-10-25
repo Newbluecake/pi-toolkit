@@ -13,7 +13,6 @@ import type {
   RunDiagnostics,
   RunEffect,
   RunExitFacts,
-  RunExpertRecord,
   RunId,
   RunOutcome,
   RunSnapshot,
@@ -23,7 +22,7 @@ import type {
   WorktreeDisposal,
   Millis,
 } from "../core/types.js";
-import { capExpertRefs, displayAgentType } from "../core/types.js";
+import { displayAgentType } from "../core/types.js";
 import { renderStructuredForHost } from "../core/verdict-schema.js";
 import { deliveryKey } from "../core/delivery-key.js";
 import type { Notifier } from "../delivery/notifier.js";
@@ -48,21 +47,12 @@ import {
   buildToolScopePolicy,
   bashJobGrant,
   READONLY_DOMAIN_TOOLS,
-  RESERVED_TOOL_NAMES,
   createToolScopeEnforcer,
 } from "../runtime/tool-scope.js";
 import type { Watchdog } from "../runtime/watchdog.js";
 import { threadThroughRequestFields } from "./request-threading.js";
 import { createAgentTool, type NestedSpawnPort } from "../tools/agent-tool.js";
 import type { ResolveExpertsResult } from "../consult/index.js";
-import { createConsultGuard } from "../consult/preserve-guard.js";
-import {
-  CONSULT_ADAPTER_TOOL_NAMES,
-  consultAdapterDeclarations,
-  createConsultShadowTool,
-  isConsultAdapterToolName,
-  type ShadowPromptSource,
-} from "../consult/shadow-tools.js";
 import { createStructuredOutputTool } from "../tools/structured-output-tool.js";
 import { createMessageAgentTool } from "../tools/message-agent-tool.js";
 import { createSetModelTool } from "../tools/set-model-tool.js";
@@ -146,38 +136,20 @@ export interface RuntimeAdapterDeps {
       spawn: () => SpawnService | undefined;
     };
   };
-  /**
-   * consult (consult plan §6 C-12; cwd getter — workflow-worktree plan §2
-   * D10): per-run consult-tool factory. Injected into a (non-consult) child
-   * run iff its dispatcher attached a resolved expert whitelist
-   * (`SpawnRequest.consultExperts`). Returns undefined when consult is
-   * disabled or the whitelist is empty — no tool, no grant. `selfCwd` is a
-   * getter (structural type, this module never imports consult's own
-   * `ConsultAskerCwd`) because the run's cwd cell is written once, AFTER H2
-   * resolves — the factory is called before H2, but its returned tool's
-   * `execute()` only ever runs later, once the session exists.
-   */
+  /** @deprecated #40 — consult tool factory, no longer read (the tool is never injected); stack still passes it. Removed in PS1b. */
   consult?: (
     selfRunId: RunId,
     selfCwd: () => { cwd: string; isolated: boolean },
     whitelist: readonly ConsultExpertRef[],
   ) => ToolDefinition | undefined;
-  /** consult: dispatch-time `experts` resolver handed to the nested Agent tool (same trust level as `resume`, plan §5.2). */
+  /** @deprecated #40 — no longer read (the nested Agent tool ignores `experts`); stack still passes it. Removed in PS1b. */
   consultResolveExperts?: (refs: readonly string[]) => ResolveExpertsResult;
   /**
-   * consult §4.4: forwarded to RunnerDeps.onReaped (runner calls it after
-   * physical reap / late disposal) AND invoked by this adapter directly on
-   * its early-exit paths (settleConfigFailure and any pre-runner throw) —
-   * those never reach the runner's own finally, so the fork copy would leak
-   * to the 24h sweep without this second call site. Must be idempotent.
+   * Forwarded to RunnerDeps.onReaped (runner calls it after physical reap / late disposal).
+   * Must be idempotent. `forkSessionFrom` is always `undefined` now (legacy consult argument, PS1b removes it).
    */
   onReaped?: (runId: RunId, forkSessionFrom?: string, sessionId?: string, info?: { disposed: boolean }) => void;
-  /**
-   * consult cache-thread plan (package C, Q1 ruling (d)): take-once display
-   * metadata for a consult run, keyed by its `forkSessionFrom` path (unique,
-   * generated before spawn). Evaluated exactly once per run when the enqueue
-   * displayMeta is built. Absent ⇒ byte-identical to the pre-feature adapter.
-   */
+  /** @deprecated #40 — no longer read; stack still passes it. Removed in PS1b. */
   consultDisplayMeta?: (
     forkSessionFrom: string,
   ) =>
@@ -269,25 +241,6 @@ export function deadlineNoticeHandler(
  * must surface its *real* message (used for G4 diagnosability), which
  * guard()'s generic "cancelled" reason would otherwise erase.
  */
-/**
- * consult A/B instrumentation plan (§2/§5 P1b): slim a dispatch-time resolved
- * expert whitelist (`ConsultExpertRef`) down to the display-only
- * `RunExpertRecord` diag shape (drops fork-admission fields that never
- * belong in a persisted diag), capped at `EXPERTS_REFS_CAP` — the same cap
- * the reducer and journal projection defensively re-apply.
- */
-function toExpertRecords(refs: readonly ConsultExpertRef[]): RunExpertRecord[] {
-  return capExpertRefs(
-    refs.map((ref) => ({
-      runId: ref.runId,
-      ...(ref.label === undefined ? {} : { label: ref.label }),
-      agentType: ref.agentType,
-      ...(ref.kind === "main" ? { kind: "main" as const } : {}),
-      ...(ref.pending === true ? { pending: true as const } : {}),
-    })),
-  );
-}
-
 function withStartupTimeout<T>(
   p: Promise<T>,
   ms: number,
@@ -420,9 +373,8 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
   const notificationSuppressedRunIds = new Set<string>();
   const schemaRunIds = new Set<string>();
   const policyPendingRunIds = new Map<string, number>();
-  // run-persistence plan D10: readonly-domain runs (consult forks, toolDomain
-  // "readonly") never journal — a consult copy must never be seeded as
-  // resumable, and /mem tidy has no continuation semantics. Same lifecycle as
+  // run-persistence plan D10: readonly-domain runs (toolDomain "readonly") never
+  // journal — /mem tidy has no continuation semantics. Same lifecycle as
   // notificationSuppressedRunIds (added once readonlyDomain is known, removed
   // in the run's finally).
   const journalSuppressedRunIds = new Set<string>();
@@ -564,10 +516,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     onExtensionError: (hook, runId, error) =>
       console.warn(`[pi-subagent] extension hook ${hook} failed for run ${runId} (ignored): ${error}`),
     ...(deps.onChildAbort ? { onChildAbort: deps.onChildAbort } : {}), // X3 cascade
-    // consult §6 C-12 / §4.4: forwarded to RunnerDeps.onReaped — the field
-    // itself is package B's addition to RunnerDeps (frozen surface
-    // `onReaped(runId, forkSessionFrom?)`); spreading it here is a no-op
-    // until B lands (the runner simply ignores the extra property).
+    // forwarded to RunnerDeps.onReaped.
     ...(deps.onReaped ? { onReaped: deps.onReaped } : {}),
     // bash-timeout-grace plan §3.2 (P0b-frozen field, P5 wiring): forwarded
     // verbatim — `sealBeforeTerminal` is the runner's own call site.
@@ -649,29 +598,20 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
       // — architecture §7.2 X10 "双重校验").
       const structured: { value?: unknown } = {};
       let settled: RunOutcome | undefined;
-      // consult §5.4 B: the sole "this is a consult run" predicate — a fork
-      // request produced exclusively by the consult tool (plan §4.3). Gates
-      // the read-only tool domain AND every injection skip below.
-      const isConsultRun = spec.request.forkSessionFrom !== undefined;
       // P0-r (todo #22 optimize-plan §7.0 point 1): the runtime-forced readonly
-      // tool domain also covers a plain (non-consult) request that opted into
-      // it via SpawnRequest.toolDomain (today: /mem tidy's proposal-drafting
-      // subagent). Only conditions 1-3 and 6 below switch from isConsultRun to
-      // readonlyDomain — consult's OWN prompt/displayMeta/onReaped branches
-      // (L819/843/889-area) stay on isConsultRun, unaffected by tidy.
-      const readonlyDomain = isConsultRun || spec.request.toolDomain === "readonly";
+      // tool domain — a request that opted into it via SpawnRequest.toolDomain
+      // (today: /mem tidy's proposal-drafting subagent).
+      const readonlyDomain = spec.request.toolDomain === "readonly";
       if (readonlyDomain) journalSuppressedRunIds.add(spec.runId); // run-persistence plan D10
       // external-agent plan §5.2 (P4b): the sole "this is an external (droid)
       // run" predicate — the admitted model's provider is claimed by the port.
-      // External runs are never consult forks nor readonly-domain (spawn
-      // admission rejects both), so all three flags stay mutually exclusive.
+      // External runs are never readonly-domain (spawn admission rejects it), so the
+      // two flags stay mutually exclusive.
       const isExternal = spec.model !== undefined && deps.external?.owns(spec.model.provider) === true;
-      // consult §4.4 early-exit bookkeeping: set right before the runner is
-      // entered. Every return/throw before that point (settleConfigFailure,
-      // pre-runner sync throws) never reaches the runner's own finally, so
-      // the adapter's finally below is the only onReaped call site for them.
+      // Set right before the runner is entered. Every return/throw before that point
+      // (settleConfigFailure, pre-runner sync throws) never reaches the runner's own finally.
       let runnerEntered = false;
-      // D12 (v2.1 condition 1): mirrors the onReaped bookkeeping above for
+      // D12 (v2.1 condition 1): bookkeeping for
       // `abandonSessionSpec` — fired (fire-and-forget) in this same finally
       // whenever H2 ran on this runId but the runner never got entered
       // afterwards (startup timeout, the hook itself throwing, a LATER
@@ -702,40 +642,13 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // Per-spawn thinkingOverride (Agent tool `thinking` param) wins over
         // the agent type's configured thinkingLevel; neither set => leave the
         // session to pi's global defaultThinkingLevel.
-        const consultSnapshot = isConsultRun ? spec.request.consultSnapshot : undefined;
-        const consultC2 = consultSnapshot !== undefined;
-        const thinkingLevel = consultC2
-          ? consultSnapshot.thinkingLevel
-          : (spec.request.thinkingOverride ?? spec.type.thinkingLevel);
-        // D10 consult cwd (workflow-worktree plan §2 D10): a cell read by the
-        // consult tool's getter. The consult factory below is called BEFORE
-        // H2 runs, but the tool it returns only ever executes later (once the
-        // session exists, which is always after H2) — so writing this cell
-        // once, right after H2 succeeds, is enough for every `execute()` call
-        // to observe the post-H2 value. H2 failing, or never running at all
-        // (no resolveSessionSpec hook, or isolation not requested), leaves it
-        // at this pre-H2 value with `isolated:false`.
+        const thinkingLevel = spec.request.thinkingOverride ?? spec.type.thinkingLevel;
+        // Pre-H2 cwd: the fallback when H2 never runs (no resolveSessionSpec hook) or fails.
         const preH2Cwd = spec.cwd ?? process.cwd();
-        let askerCwd: { cwd: string; isolated: boolean } = { cwd: preH2Cwd, isolated: false };
         let sessionSpec: SessionSpec = {
-          ...(consultC2 ? { consultSnapshot } : {}),
           ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
-          ...(consultC2
-            ? consultSnapshot.model === undefined && spec.model === undefined
-              ? {}
-              : { model: consultSnapshot.model ?? spec.model }
-            : spec.model === undefined
-              ? {}
-              : { model: spec.model }),
-          ...(consultC2
-            ? {
-                tools: consultSnapshot.tools
-                  .map((tool) => tool.name)
-                  .filter((name): name is string => typeof name === "string"),
-              }
-            : spec.type.tools === undefined || isExternal
-              ? {}
-              : { tools: spec.type.tools }),
+          ...(spec.model === undefined ? {} : { model: spec.model }),
+          ...(spec.type.tools === undefined || isExternal ? {} : { tools: spec.type.tools }),
           ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
           ...(!isExternal && spec.type.promptMode === "replace" && spec.type.systemPrompt
             ? { systemPrompt: spec.type.systemPrompt }
@@ -746,15 +659,10 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // further extend — the full customTools list).
         const grantedReserved: string[] = [];
         const customTools: unknown[] = [];
-        const shadowPromptSources = new Map<string, ShadowPromptSource>();
-        // consult §5.4 B-1: a consulted expert copy gets NONE of the injected
-        // tools (message_agent / set_model / nested Agent / StructuredOutput /
-        // consult) — every injection branch below is explicitly
-        // !readonlyDomain-guarded (P0-r §7.0 point 1 widens this from
-        // !isConsultRun so a toolDomain:"readonly" tidy run gets the same
-        // treatment) rather than relying on the implicit "a consult request
-        // carries no consultExperts" premise (review-2 #13). StructuredOutput
-        // below is the one deliberate exception — see its own comment.
+        // A readonly-domain run (toolDomain:"readonly", e.g. /mem tidy) gets NONE of the injected
+        // tools (message_agent / set_model / nested Agent) — every injection branch below is
+        // explicitly !readonlyDomain-guarded (P0-r §7.0 point 1). StructuredOutput below is the one
+        // deliberate exception — see its own comment.
         if (deps.fabric && !readonlyDomain && !isExternal) {
           customTools.push(
             createMessageAgentTool({
@@ -792,8 +700,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // below (M1). All deps are injected explicitly — no ExtensionContext
         // reads (unreliable inside child sessions) — which also keeps the
         // tool 100% unit-testable.
-        // consult §5.4 B-1: a consulted expert copy gets none of the injected
-        // tools — read-only four only. P0-r §7.0 point 1: widened to readonlyDomain.
+        // P0-r §7.0 point 1: a readonly-domain run gets none of the injected tools — read-only four only.
         // external-agent plan §5.2: a droid run gets none of them either.
         if (!readonlyDomain && !isExternal) {
           customTools.push(
@@ -819,42 +726,20 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                 ...(deps.resultMaxChars ? { resultMaxChars: deps.resultMaxChars } : {}),
                 ...(deps.queueWhenFull ? { queueWhenFull: deps.queueWhenFull } : {}),
                 ...(deps.loadGate ? { loadGate: deps.loadGate } : {}),
-                // consult §4.2: nested dispatchers resolve `experts` with the
-                // same dispatch-time resolver as the top-level Agent tool
-                // (same trust level as `resume`, plan §5.2); agent-tool
-                // throws on an `experts` param when this is not wired.
-                ...(deps.consultResolveExperts ? { resolveExperts: deps.consultResolveExperts } : {}),
               }),
             );
             grantedReserved.push("Agent");
           }
         }
-        // consult injection (plan §6 C-12, after set_model): only a run whose
-        // dispatcher attached a resolved expert whitelist gets the consult
-        // tool — and never a readonly-domain run itself (widened from
-        // !isConsultRun to !readonlyDomain, P0-r §7.0 point 1; review-2 #13).
-        if (!readonlyDomain && !isExternal && spec.request.consultExperts?.length && deps.consult) {
-          const consultTool = deps.consult(spec.runId, () => askerCwd, spec.request.consultExperts);
-          if (consultTool !== undefined) {
-            customTools.push(consultTool);
-            grantedReserved.push("consult");
-          }
-        }
-        // P0-r §7.0 point 1 ("唯一例外"): every OTHER injection branch above moved
-        // from !isConsultRun to !readonlyDomain, but this one deliberately did
-        // NOT — toolDomain:"readonly" (tidy) always sets `schema` and needs
-        // StructuredOutput to submit its proposal, while a consult run
-        // (isConsultRun) never sets `schema` in the first place (existing
-        // invariant, unchanged by this package). Leaving the guard as
-        // `!isConsultRun` therefore already does the right thing for BOTH
-        // cases with zero special-casing: tidy (isConsultRun===false) still
-        // gets it when schema is set, consult (isConsultRun===true) still
-        // never does. `readonlyDomain` only decides whether to Object.freeze
+        // P0-r §7.0 point 1 ("唯一例外"): every OTHER injection branch above is
+        // !readonlyDomain-guarded, but this one deliberately is not —
+        // toolDomain:"readonly" (tidy) always sets `schema` and needs
+        // StructuredOutput to submit its proposal. `readonlyDomain` only decides whether to Object.freeze
         // the tool definition (§7.0.0 hygiene — pi never rewrites customTools
         // definitions, §1) and whether pi's own `tools` allowlist and the
         // enforcer policy's `provenance` map need to carry "StructuredOutput"
         // (handled after H2, below).
-        if (!isConsultRun && !isExternal && spec.request.schema !== undefined) {
+        if (!isExternal && spec.request.schema !== undefined) {
           const schema = spec.request.schema;
           const structuredOutputTool = createStructuredOutputTool({
             schema,
@@ -869,72 +754,6 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           customTools.push(structuredOutputTool);
           grantedReserved.push("StructuredOutput");
         }
-        // C2: preserve the expert's adapter-owned declarations as inert shadows.
-        // Build presentation metadata with the same factories used by ordinary runs,
-        // but retain only the shadow objects (never their execute implementations).
-        if (consultC2) {
-          const declared = new Set(consultAdapterDeclarations(consultSnapshot.tools).map((tool) => tool.name));
-          const addSource = (name: string, source: ShadowPromptSource | undefined) => {
-            if (declared.has(name) && source !== undefined) shadowPromptSources.set(name, source);
-          };
-          addSource(
-            "set_model",
-            createSetModelTool({
-              selfRunId: spec.runId,
-              runs: { setModel: (runId, model, opts) => runtime.setModelForRun(runId, model, opts ?? {}) },
-              ...(deps.resolveModelHint ? { resolveHint: deps.resolveModelHint } : {}),
-              ...(deps.availableModels ? { available: deps.availableModels } : {}),
-            }),
-          );
-          if (deps.fabric) {
-            addSource(
-              "message_agent",
-              createMessageAgentTool({
-                router: deps.fabric.router,
-                from: spec.runId,
-                generation: () => runtime.getRunState(spec.runId)?.generation,
-                ...(spec.type.canMessage === undefined ? {} : { canMessage: spec.type.canMessage }),
-                ...(deps.fabric.wake ? { wakeOn: true } : {}),
-              }),
-            );
-          }
-          if (spec.type.canSpawn?.length && deps.nestedSpawn) {
-            const port = deps.nestedSpawn();
-            if (port) {
-              addSource(
-                "Agent",
-                createAgentTool({
-                  spawn: port,
-                  parentRunId: spec.runId,
-                  allowedTypes: spec.type.canSpawn,
-                  forceSlotless: true,
-                  ...(deps.resultMaxChars ? { resultMaxChars: deps.resultMaxChars } : {}),
-                  ...(deps.queueWhenFull ? { queueWhenFull: deps.queueWhenFull } : {}),
-                  ...(deps.loadGate ? { loadGate: deps.loadGate } : {}),
-                  ...(deps.consultResolveExperts ? { resolveExperts: deps.consultResolveExperts } : {}),
-                }),
-              );
-            }
-          }
-          if (deps.consult) {
-            addSource(
-              "consult",
-              deps.consult(spec.runId, () => askerCwd, spec.request.consultExperts ?? []),
-            );
-          }
-          if (declared.has("StructuredOutput")) {
-            addSource(
-              "StructuredOutput",
-              createStructuredOutputTool({ schema: { type: "object" }, onSubmit: () => ({ ok: true, errors: [] }) }),
-            );
-          }
-          for (const declaration of consultAdapterDeclarations(consultSnapshot.tools)) {
-            const name = declaration.name;
-            if (typeof name !== "string" || !isConsultAdapterToolName(name)) continue;
-            customTools.push(createConsultShadowTool(declaration, shadowPromptSources.get(name)));
-            if ((CONSULT_ADAPTER_TOOL_NAMES as readonly string[]).includes(name)) grantedReserved.push(name);
-          }
-        }
         // bash-timeout-grace plan §3.10 (P5): no customTools injection — `bash`/
         // `bash_job` are registered by the CHILD session's own pre-guard
         // `activate()` (src/bash/child.ts, src/index.ts), not injected here.
@@ -948,16 +767,16 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           bashJobGrant({
             ...(spec.type.tools !== undefined ? { typeTools: spec.type.tools } : {}),
             childBashJobs: deps.childBashJobsEnabled ?? false,
-            // P0-r §7.0 point 1 (complements review v3-3, review-2 #13): widened from
-            // isConsultRun to readonlyDomain — a tidy run with bashJobs.childSessions
-            // on AND an agent type that declares `bash` would otherwise get bash_job.
-            consult: readonlyDomain,
+            // P0-r §7.0 point 1 (complements review v3-3, review-2 #13): a tidy run with
+            // bashJobs.childSessions on AND an agent type that declares `bash` would
+            // otherwise get bash_job.
+            readonlyDomain,
           })
         ) {
           grantedReserved.push("bash_job");
         }
         // child-context-switch plan.md §4 (user confirm 2): switch_context is granted to every
-        // non-consult child run, gated only by the wiring layer's live capability read (never
+        // child run, gated only by the wiring layer's live capability read (never
         // granted once the process-wide state machine has disabled the feature). P0-r §7.0 point 1:
         // widened to readonlyDomain so a tidy run never gets it either.
         if (!readonlyDomain && !isExternal && (deps.childSwitchContextGrant?.() ?? false)) {
@@ -1005,16 +824,6 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             );
           }
           sessionSpec = resolved.value;
-          // D10: write the cwd cell exactly once, now that H2 has finished
-          // successfully. `isolated` requires all three: isolation was
-          // actually requested, H2 gave sessionSpec a cwd, and that cwd
-          // differs from the pre-H2 value (a no-op H2 that echoes the same
-          // cwd back is not isolation).
-          askerCwd = {
-            cwd: sessionSpec.cwd ?? preH2Cwd,
-            isolated:
-              spec.request.isolation === "worktree" && sessionSpec.cwd !== undefined && sessionSpec.cwd !== preH2Cwd,
-          };
         }
         // external-agent plan §5.2 (P4b): attach the pure-data ExternalRunSpec
         // AFTER H2 (so the post-H2 cwd is authoritative), so no extension that
@@ -1041,34 +850,24 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             }),
           };
         }
-        // consult §5.4 B-2 / P0-r §7.0 points 2/6a: FORCE the read-only tool
-        // domain AFTER H2 (widened from isConsultRun to readonlyDomain), so no
+        // P0-r §7.0 points 2/6a: FORCE the read-only tool
+        // domain AFTER H2, so no
         // extension (worktree or future) can ever widen it. Same constant as
         // the enforcer policy below — single source (READONLY_DOMAIN_TOOLS),
         // never a second list. This also activates grep/find/ls, which pi only
         // activates when named in `tools` (an unset `tools` means
         // read/bash/edit/write — the two fixture shapes `tools: undefined` and
         // `tools: ["bash","write"]` both collapse to the read-only four here).
-        // A tidy run (readonlyDomain via toolDomain, never via isConsultRun —
-        // it always sets `schema`) additionally allows "StructuredOutput" by
-        // name so pi's own registry filter (M1 below) doesn't drop it; a
-        // consult run never sets schema, so this collapses to exactly
-        // READONLY_DOMAIN_TOOLS for it — byte-identical to before. Read off
+        // A tidy run (it always sets `schema`) additionally allows "StructuredOutput" by
+        // name so pi's own registry filter (M1 below) doesn't drop it. Read off
         // `grantedReserved` (not `spec.request.schema` directly) so this
         // exactly tracks whether the StructuredOutput injection branch above
-        // actually fired — that branch stays gated on `!isConsultRun`, so a
-        // (hypothetical, never real) consult request that carried a schema
-        // would still correctly get nothing here.
+        // actually fired.
         const readonlyHasSchema = grantedReserved.includes("StructuredOutput");
         if (readonlyDomain) {
           sessionSpec = {
             ...sessionSpec,
-            tools: consultC2
-              ? consultSnapshot.tools
-                  .map((tool) => tool.name)
-                  .filter((name): name is string => typeof name === "string")
-              : [...READONLY_DOMAIN_TOOLS, ...(readonlyHasSchema ? ["StructuredOutput"] : [])],
-            ...(consultC2 ? { consultGuard: createConsultGuard(consultSnapshot) } : {}),
+            tools: [...READONLY_DOMAIN_TOOLS, ...(readonlyHasSchema ? ["StructuredOutput"] : [])],
           };
           // §7.0 point 6a: narrow customTools down to ONLY the tool instance(s)
           // THIS adapter call itself created (object identity, not name) —
@@ -1097,46 +896,30 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // gap (architecture §7.5). `undefined` allow-list preserves the pre-X11
         // behavior for agent types without a `tools` field: no restriction
         // beyond the always-on reserved-name protection.
-        // consult §5.4 B-3 / P0-r §7.0 points 3/6b: a readonly-domain run's
+        // P0-r §7.0 points 3/6b: a readonly-domain run's
         // policy is built from the SAME constant as the pi-level allowlist
         // above, with no grants beyond StructuredOutput (when a schema was
         // requested), plus a `provenance` map so the enforcer also verifies
         // each surviving name's actual tool-implementation source (§7.0.0
         // defense-in-depth — fail-closed against a same-named custom tool
         // shadowing a builtin one, §1 "pi 同名覆盖").
-        const readonlyProvenance =
-          readonlyDomain && !consultC2
-            ? new Map<string, string>([
-                ["read", "builtin"],
-                ["grep", "builtin"],
-                ["find", "builtin"],
-                ["ls", "builtin"],
-                ...(readonlyHasSchema ? ([["StructuredOutput", "sdk"]] as [string, string][]) : []),
-              ])
-            : undefined;
-        const consultGranted = consultC2
-          ? [
-              ...new Set(
-                consultSnapshot.tools
-                  .map((tool) => tool.name)
-                  .filter((name): name is string => typeof name === "string")
-                  .filter((name) => RESERVED_TOOL_NAMES.includes(name)),
-              ),
-            ]
-          : [];
+        const readonlyProvenance = readonlyDomain
+          ? new Map<string, string>([
+              ["read", "builtin"],
+              ["grep", "builtin"],
+              ["find", "builtin"],
+              ["ls", "builtin"],
+              ...(readonlyHasSchema ? ([["StructuredOutput", "sdk"]] as [string, string][]) : []),
+            ])
+          : undefined;
         const toolScope = isExternal
           ? undefined
           : {
               policy: readonlyDomain
                 ? buildToolScopePolicy({
-                    tools: consultC2
-                      ? consultSnapshot.tools
-                          .map((tool) => tool.name)
-                          .filter((name): name is string => typeof name === "string")
-                      : READONLY_DOMAIN_TOOLS,
-                    granted: consultC2 ? consultGranted : readonlyHasSchema ? ["StructuredOutput"] : [],
+                    tools: READONLY_DOMAIN_TOOLS,
+                    granted: readonlyHasSchema ? ["StructuredOutput"] : [],
                     ...(readonlyProvenance ? { provenance: readonlyProvenance } : {}),
-                    ...(consultC2 ? { reportBlockedOnBind: true } : {}),
                   })
                 : buildToolScopePolicy({
                     ...(spec.type.tools ? { tools: spec.type.tools } : {}),
@@ -1151,10 +934,6 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                   console.warn(
                     `[pi-subagent] tool scope: blocked late-registered/reserved tool(s) not in run ${spec.runId}'s whitelist: ${names.join(", ")}`,
                   );
-                  if (consultC2) {
-                    console.warn(`[pi-subagent] consult identity_mismatch:enforcer-strip (${names.join(", ")})`);
-                    void runtime.abortRun(spec.runId, "user_stop");
-                  }
                 },
                 onError: (error) =>
                   console.warn(
@@ -1170,10 +949,6 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                       `[pi-subagent] readonly domain: removed shadowed tool ${e.name} (source: ${e.actual ?? "unknown"}, expected ${e.expected}) from run ${spec.runId}`,
                     );
                   }
-                  if (consultC2) {
-                    console.warn(`[pi-subagent] consult identity_mismatch:enforcer-strip`);
-                    void runtime.abortRun(spec.runId, "user_stop");
-                  }
                 },
               }),
             };
@@ -1184,22 +959,10 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // (the `prompt` field on SessionSpec itself is always overridden by
         // the request's own prompt on the next line regardless).
         const { promptNotes, ...sessionFields } = sessionSpec;
-        const consultMeta =
-          isConsultRun && spec.request.forkSessionFrom !== undefined
-            ? deps.consultDisplayMeta?.(spec.request.forkSessionFrom)
-            : undefined;
         const req: ResolvedSpawnRequest = {
           runId: spec.runId,
           ...sessionFields,
-          // NOT_THREADED host-only anchor: opt in explicitly, never inherited on resume.
-          ...(isConsultRun && spec.request.consultAnchor !== undefined
-            ? { consultAnchor: spec.request.consultAnchor }
-            : {}),
-          // consult §5.4 B-4: a consult run's prompt is the consult question
-          // verbatim — buildPrompt's agent-type prefix (the whole task
-          // instruction of the expert's type) is already in the fork's
-          // history; replace-mode systemPrompt above survives untouched.
-          prompt: isConsultRun ? spec.request.prompt : appendPromptNotes(buildPrompt(spec), promptNotes),
+          prompt: appendPromptNotes(buildPrompt(spec), promptNotes),
           // F3/F4: includes inputBudget as a runtime-only field; it is
           // consumed by RuntimeRunner and never copied into SessionSpec/pi.
           ...threadThroughRequestFields(spec.request), // F3/F4 (CC4 — also carries deadlineAt)
@@ -1212,31 +975,11 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             ...(spec.model === undefined ? {} : { model: spec.model }),
             ...(spec.request.label === undefined ? {} : { label: spec.request.label }),
             ...(spec.request.title === undefined ? {} : { title: spec.request.title }),
-            // consult §16.5 (acceptance follow-up): display-only — the main-session
-            // sentinel type is folded to "main" here so every diag-driven renderer
-            // shows the reserved id; spawn/admission keep comparing the raw
-            // spec.type.name (and consult runs can never re-enter admission: the
-            // expert index excludes them structurally by session-file location).
+            // display-only: the legacy consult main-session sentinel type is folded to "main"
+            // so every diag-driven renderer shows the reserved id; spawn/admission keep
+            // comparing the raw spec.type.name.
             agentType: displayAgentType(spec.type.name),
             taskPrompt: spec.request.prompt.slice(0, TASK_PROMPT_CAP),
-            // consult A/B instrumentation plan (§5 P1b ①/②): write-once
-            // display meta folded into diag by the `enqueued` reducer branch
-            // exactly once. `experts` is written whenever a resolved whitelist
-            // reached a NON-readonly run — `granted` records whether the
-            // consult tool was actually injected at that point (injection at
-            // line ~732 runs strictly before this construction), so
-            // `consult.enabled=false` lands as granted:false and analysis can
-            // drop such runs from the experts arm. Readonly-domain runs and
-            // consult forks never carry consultExperts in practice, and are
-            // structurally excluded here on top (plan P1b ①).
-            ...(!readonlyDomain && spec.request.consultExperts?.length
-              ? {
-                  experts: {
-                    refs: toExpertRecords(spec.request.consultExperts),
-                    granted: grantedReserved.includes("consult"),
-                  },
-                }
-              : {}),
             ...(spec.request.dispatchMeta === undefined ? {} : { dispatchMeta: spec.request.dispatchMeta }),
             ...(spec.request.schemaPreset === undefined ? {} : { schemaPreset: spec.request.schemaPreset }),
             // fabric-cross-session plan §4.1/§4.5 (W5): write-once wake provenance (claimToken stripped) and the
@@ -1250,17 +993,6 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             // (disabled/uncreatable worktree) never fold displayMeta, so a
             // failed(config) row shows no marker at all.
             ...(spec.request.isolation === "worktree" ? { worktree: { state: "active" } } : {}),
-            // consult §6 C-12: display-only consult marker (badge without
-            // parsing the `consult-` label prefix).
-            ...(isConsultRun
-              ? {
-                  consultOf: {
-                    ...(spec.request.parentRunId !== undefined ? { askerRunId: spec.request.parentRunId } : {}),
-                  },
-                }
-              : {}),
-            ...(consultMeta?.consultCache === undefined ? {} : { consultCache: consultMeta.consultCache }),
-            ...(consultMeta?.consultThread === undefined ? {} : { consultThread: consultMeta.consultThread }),
           },
         };
         runnerEntered = true;
@@ -1330,19 +1062,6 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                 `[pi-subagent] abandonSessionSpec failed for run ${spec.runId} (ignored): ${err instanceof Error ? err.message : String(err)}`,
               ),
             );
-        }
-        // consult §4.4 early-exit path: the runner was never entered, so its
-        // own finally/onReaped will not run — delete the fork copy here while
-        // nothing can write to it (no session was ever opened against it).
-        // Deliberately NOT unconditional: deleting for an entered runner
-        // would race its runReap()/disposeLate `_persist` (appendFileSync)
-        // and resurrect a header-less fragment — the exact race §4.4 removed.
-        if (!runnerEntered && isConsultRun) {
-          try {
-            deps.onReaped?.(spec.runId, spec.request.forkSessionFrom);
-          } catch {
-            /* cleanup must never mask the run's own outcome */
-          }
         }
         perRun.delete(spec.runId);
         notificationSuppressedRunIds.delete(spec.runId); // CC2 + caller-owned

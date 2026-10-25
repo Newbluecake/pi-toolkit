@@ -15,7 +15,7 @@ import type { Runner, SlotPool } from "../../src/service/ports.js";
  * request. This file pins that down for the three surfaces the plan names:
  * the Agent tool, RPC spawn, and workflow `agent()` opts. It also pins the
  * spawn-service admission guard (§7.0 point 4): `toolDomain:"readonly"`
- * combined with isolation/forkSessionFrom/resumeFrom is a config error.
+ * combined with isolation/resumeFrom is a config error.
  */
 
 function fakePort(): NestedSpawnPort & { seen?: SpawnRequest } {
@@ -94,7 +94,7 @@ describe("N6: SpawnRequest.toolDomain cannot leak in through workflow agent() op
   });
 });
 
-describe("N6 / §7.0 point 4: spawn-service admission rejects toolDomain combined with isolation/forkSessionFrom/resumeFrom", () => {
+describe("N6 / §7.0 point 4: spawn-service admission rejects toolDomain combined with isolation/resumeFrom", () => {
   const type: AgentTypeConfig = { name: "Plan", description: "x", systemPrompt: "", promptMode: "append" };
   const outcome: RunOutcome = {
     runId: "x",
@@ -129,7 +129,6 @@ describe("N6 / §7.0 point 4: spawn-service admission rejects toolDomain combine
 
   it.each([
     ["isolation", { isolation: "worktree" as const }],
-    ["forkSessionFrom", { forkSessionFrom: "/tmp/fork.jsonl" }],
     ["resumeFrom", { resumeFrom: "does-not-exist" }],
   ] as const)("rejects toolDomain:readonly combined with %s", async (_label, extra) => {
     const service = createSpawnService(deps());

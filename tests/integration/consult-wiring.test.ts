@@ -164,7 +164,7 @@ async function drain(ticks = 20) {
 }
 
 describe("consult wiring: buildSessionStack → runtime-adapter → driver", () => {
-  it("a dispatch carrying consultExperts gets the consult tool injected into its SessionSpec", async () => {
+  it("a dispatch carrying consultExperts no longer gets the consult tool injected (#40 PS1a), even with consult enabled", async () => {
     const { calls } = spyOnDriver();
     const h = harness();
     const stack = buildSessionStack(
@@ -182,7 +182,7 @@ describe("consult wiring: buildSessionStack → runtime-adapter → driver", () 
     if ("error" in spawned) throw new Error(spawned.error.message);
     await drain();
     expect(calls.length).toBeGreaterThan(0);
-    expect(toolNames(calls[0]!.spec)).toContain("consult");
+    expect(toolNames(calls[0]!.spec)).not.toContain("consult");
   });
 
   it("a plain dispatch (no consultExperts) never gets the consult tool", async () => {
@@ -368,69 +368,5 @@ describe('consult wiring: the reserved "main" expert, end to end (§16)', () => 
     expect(ref.sessionFile).toBe(mainSessionFile);
     expect(ref.model).toEqual({ provider: "acme", id: "host-model" });
     expect(ref.contextTokens).toBe(4_321);
-  });
-
-  it('a dispatched child\'s consult("main", …) forks the LIVE main session file, not the expert path', async () => {
-    const { calls } = spyOnDriver();
-    const mainDir = mkdtempSync(join(tmpdir(), "consult-main-wiring-"));
-    const mainSessionFile = join(mainDir, "main-session.jsonl");
-    writeFileSync(
-      mainSessionFile,
-      `${JSON.stringify({ type: "session", version: 3, id: "host", timestamp: "t", cwd: mainDir })}\n`,
-    );
-    const h = harness([], {
-      sessionFile: mainSessionFile,
-      model: { provider: "acme", id: "host-model" },
-      contextUsage: { tokens: 4_321, contextWindow: 200_000, percent: 2 },
-    });
-    const stack = buildSessionStack(
-      h.pi,
-      h.ctx,
-      settings({ consult: { ...DEFAULT_SETTINGS.consult, enabled: true, timeoutMs: 300 } }),
-      types,
-      [],
-    );
-    const mainRef = stack.consult.resolveExperts(["main"]).refs[0]!;
-    // Keep the dispatched parent run genuinely live while it consults: a real
-    // consult() call happens inside the parent's own tool call, and fork
-    // admission rejects a parent that is stopping or gone (spawn-fork-guard,
-    // workflow-experts plan §4.7). The default fake handle settles at once.
-    let releaseParent!: () => void;
-    const parentGate = new Promise<void>((resolve) => (releaseParent = resolve));
-    vi.mocked(PiSessionDriver.prototype.create).mockImplementationOnce(async (spec) => {
-      calls.push({ kind: "create", spec: spec as { customTools?: unknown[] } });
-      return { ...fakeHandle(), prompt: () => parentGate } as never;
-    });
-    const spawned = await stack.spawn.spawn({
-      type: "dispatcher",
-      prompt: "consult main",
-      consultExperts: [mainRef],
-    });
-    if ("error" in spawned) throw new Error(spawned.error.message);
-    await drain();
-    expect(calls).toHaveLength(1); // the dispatched child itself (create)
-    const consultTool = (calls[0]!.spec.customTools ?? []).find((t) => (t as { name?: string }).name === "consult") as {
-      execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }>; details: unknown }>;
-    };
-    expect(consultTool).toBeDefined();
-
-    const result = await consultTool.execute(
-      "call-1",
-      { expert: "main", question: "what did we decide?" },
-      undefined,
-      undefined,
-      undefined as never,
-    );
-    await drain();
-    expect(calls).toHaveLength(2); // + the consult run's own resume
-    const consultCall = calls[1]!;
-    expect(consultCall.kind).toBe("resume");
-    const forkPath = (consultCall.spec as unknown as { forkSessionFrom?: string }).forkSessionFrom;
-    // Never resumes the LIVE main file directly — always a private fork copy.
-    expect(forkPath).toBeDefined();
-    expect(forkPath).not.toBe(mainSessionFile);
-    expect((result.details as { expertRunId?: string }).expertRunId).toBe("main");
-    releaseParent();
-    await drain();
   });
 });
