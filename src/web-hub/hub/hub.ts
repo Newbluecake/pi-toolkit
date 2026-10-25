@@ -55,6 +55,7 @@ import {
   PREVIEW_HTML_HUB_CAP,
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
+  WTGRAPH_MERGED_HUB_CAP,
   SPAWN_HISTORY_HUB_CAP,
   AVATAR_HUB_CAP,
   PRIVACY_HUB_CAP,
@@ -489,7 +490,9 @@ export async function startHub(
             // worktree-graph plan v2 §3/§2.6: `wtgraph.v1` rides the SAME gate as `wtdiff.v1`
             // (「与 wtdiff 同门」— same `config.preview` existence AND /proc probe); LAN availability
             // rides `PREVIEW_LAN_HUB_CAP` below, same width as preview/wtdiff (§0.2 Q1).
-            ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP] : []),
+            // merged-plan §6: `wtgraph.merged.v1` — the SAME condition as `wtgraph.v1` (preview + /proc);
+            // LAN width rides `PREVIEW_LAN_HUB_CAP` below (mode `loopback` ⇒ LAN 404, no new setting).
+            ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP] : []),
             // web-hub-html-preview plan v2 §4 (P1b): `preview.html.v1` rides the SAME
             // `config.preview` gate AND the /proc probe (`htmlEnabled` — dir-fd anchoring is
             // /proc-bound, fail-closed); both cap surfaces share this one array. LAN width rides
@@ -1466,6 +1469,8 @@ export async function startHub(
           run: graphGitRunner,
           log,
           now,
+          // routes are only built when the /proc probe passed ⇒ exactly when the cap is declared
+          mergedEnabled: true,
         });
       }
     }

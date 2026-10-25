@@ -254,3 +254,103 @@ describe("join-only cache (the C4 single-flight, I6)", () => {
     expect(WTDIFF_CHANGESET_TTL_MS).toBe(5_000);
   });
 });
+
+describe("SingleFlightCache — merged-plan §3.6 additions (itemMaxBytes / drop / clear)", () => {
+  const dl = (): ReturnType<typeof createReqDeadline> => createReqDeadline(() => 0, 1_000);
+  function cacheOf(extra: { itemMaxBytes?: number; totalBytes?: number; lruMax?: number } = {}) {
+    const clock = { t: 0 };
+    const cache = new SingleFlightCache<string>({
+      ttlMs: 10_000,
+      lruMax: extra.lruMax ?? 100,
+      totalBytes: extra.totalBytes ?? 1_000,
+      ...(extra.itemMaxBytes === undefined ? {} : { itemMaxBytes: extra.itemMaxBytes }),
+      store: true,
+      now: () => clock.t,
+    });
+    return { cache, clock };
+  }
+  async function put(cache: SingleFlightCache<string>, key: string, v: string): Promise<void> {
+    const a = cache.acquire(key, dl(), async () => v);
+    await a.promise;
+    a.release();
+  }
+  const isCached = (cache: SingleFlightCache<string>, key: string): boolean => {
+    // a miss starts a compute that never settles (so probing can never pollute the cache)
+    const a = cache.acquire(key, dl(), () => new Promise<string>(() => undefined));
+    const hit = a.cached;
+    a.release();
+    return hit;
+  };
+
+  it("itemMaxBytes: a value over it is returned but never stored; at/under it is stored", async () => {
+    const { cache } = cacheOf({ itemMaxBytes: 20 });
+    const big = "x".repeat(40); // JSON ≈ 42 bytes
+    const a = cache.acquire("big", dl(), async () => big);
+    await expect(a.promise).resolves.toBe(big);
+    a.release();
+    await put(cache, "small", "tiny");
+    expect(cache.size().cached).toBe(1);
+    expect(isCached(cache, "big")).toBe(false);
+    expect(isCached(cache, "small")).toBe(true);
+  });
+
+  it("itemMaxBytes absent ⇒ exactly the old behaviour (bounded only by totalBytes) — wtdiff's instances pass nothing", async () => {
+    const { cache } = cacheOf({ totalBytes: 100 });
+    await put(cache, "k", "x".repeat(60));
+    expect(isCached(cache, "k")).toBe(true);
+    await put(cache, "huge", "y".repeat(200)); // > totalBytes ⇒ not stored (pre-existing rule)
+    expect(isCached(cache, "huge")).toBe(false);
+  });
+
+  it("itemMaxBytes can never RAISE the total cap: min(totalBytes, itemMaxBytes) applies", async () => {
+    const { cache } = cacheOf({ totalBytes: 50, itemMaxBytes: 5_000 });
+    await put(cache, "k", "z".repeat(80));
+    expect(isCached(cache, "k")).toBe(false);
+  });
+
+  it("totalBytes evicts the OLDEST entries to admit a new one", async () => {
+    const { cache } = cacheOf({ totalBytes: 100, itemMaxBytes: 60 });
+    await put(cache, "a", "a".repeat(40)); // ~42 B
+    await put(cache, "b", "b".repeat(40)); // ~84 B total
+    await put(cache, "c", "c".repeat(40)); // would be 126 ⇒ evict a
+    expect(isCached(cache, "a")).toBe(false);
+    expect(isCached(cache, "b")).toBe(true);
+    expect(isCached(cache, "c")).toBe(true);
+  });
+
+  it("drop(key) evicts one stored key and leaves the rest; clear() forgets everything (byte accounting reset)", async () => {
+    const { cache } = cacheOf({ totalBytes: 100 });
+    await put(cache, "a", "a".repeat(40));
+    await put(cache, "b", "b".repeat(40));
+    cache.drop("a");
+    cache.drop("missing"); // no-op
+    expect(isCached(cache, "a")).toBe(false);
+    expect(isCached(cache, "b")).toBe(true);
+    cache.clear();
+    expect(cache.size()).toEqual({ cached: 0, inflight: 0 });
+    // accounting restarted: two 42-byte values fit again
+    await put(cache, "c", "c".repeat(40));
+    await put(cache, "d", "d".repeat(40));
+    expect(isCached(cache, "c")).toBe(true);
+    expect(isCached(cache, "d")).toBe(true);
+  });
+
+  it("TTL expiry still applies with itemMaxBytes set", async () => {
+    const { cache, clock } = cacheOf({ itemMaxBytes: 100 });
+    await put(cache, "k", "v");
+    clock.t = 9_000;
+    expect(isCached(cache, "k")).toBe(true);
+    clock.t = 20_000;
+    expect(isCached(cache, "k")).toBe(false);
+  });
+
+  it("wtdiff's own factory is unaffected: createChangesetCache still stores a normal changeset", async () => {
+    const cache = createChangesetCache(() => 0);
+    const a = cache.acquire("k", dl(), async () => value(["a"]));
+    await a.promise;
+    a.release();
+    const b = cache.acquire("k", dl(), async () => value(["zzz"]));
+    expect(b.cached).toBe(true);
+    b.release();
+  });
+});

@@ -102,6 +102,9 @@ export class SingleFlightCache<T> {
       ttlMs: number;
       lruMax: number;
       totalBytes: number;
+      /** merged-plan §3.6 (additive): a single value larger than this is returned but never
+       * stored. Absent ⇒ `totalBytes` (the pre-existing behaviour — wtdiff passes nothing). */
+      itemMaxBytes?: number;
       /** 0 ⇒ join-only (never stored). */
       store: boolean;
       now(): number;
@@ -182,13 +185,24 @@ export class SingleFlightCache<T> {
     for (const exec of [...this.inflight.values()]) exec.ctl.abort(reason);
   }
 
+  /** merged-plan §3.6 (additive): evict one stored key (no effect on a running execution). */
+  drop(key: string): void {
+    this.evict(key);
+  }
+
+  /** merged-plan §3.6 (additive): dispose — forget every stored value. */
+  clear(): void {
+    this.cache.clear();
+    this.cachedBytes = 0;
+  }
+
   size(): { cached: number; inflight: number } {
     return { cached: this.cache.size, inflight: this.inflight.size };
   }
 
   private store(key: string, value: T): void {
     const bytes = approxBytes(value);
-    if (bytes > this.deps.totalBytes) return;
+    if (bytes > Math.min(this.deps.totalBytes, this.deps.itemMaxBytes ?? this.deps.totalBytes)) return;
     const prev = this.cache.get(key);
     if (prev !== undefined) this.evict(key);
     while (this.cache.size >= this.deps.lruMax || this.cachedBytes + bytes > this.deps.totalBytes) {

@@ -9,6 +9,8 @@ import { describe, expect, it } from "vitest";
 
 import type { ForEachRefRow, TipsFromRefsResult } from "../../../../src/git/graph.js";
 import {
+  WTGRAPH_BODY_MAX_BYTES,
+  WTGRAPH_MERGED_MAX_BYTES,
   WTGRAPH_N,
   WTGRAPH_PATH_MAX_BYTES,
   WTGRAPH_REFS_MAX,
@@ -439,5 +441,75 @@ describe("projectGraph (§2.5)", () => {
     expect(payload.commits).toEqual([]);
     expect(payload.empty).toBe(true);
     expectValid(payload);
+  });
+});
+
+const PATH_LEN = 3700;
+
+describe("projectGraph — the merged=1 body reserve (merged-plan §3.4, uses the EXISTING maxBodyBytes parameter only)", () => {
+  const H64 = (n: number): string => n.toString(16).padStart(64, "0");
+  function bigInput(): ProjectGraphInput {
+    // near-worst real-cap input (sha256, 8 parents, 200-byte subjects/names/upstreams, long worktree paths):
+    // total lands between the reduced cap (491,520 B) and the full 512 KiB, so ONLY the reduced
+    // call has to trim.
+    const commits = Array.from({ length: 200 }, (_, i) => ({
+      h: H64(i + 1),
+      p: Array.from({ length: 8 }, (_, j) => H64(i + j + 2)),
+      a: "a".repeat(64),
+      t: 1_700_000_000 - i,
+      s: "s".repeat(200),
+    }));
+    const refRows = Array.from({ length: 400 }, (_, i) =>
+      refRow({
+        objectName: H64((i % 200) + 1),
+        refname: `refs/heads/${String(i).padStart(4, "0")}-${"r".repeat(180)}`, // 200 B total
+        upstream: "u".repeat(200),
+      }),
+    );
+    const wtHeadCandidates: WtHeadCandidate[] = Array.from({ length: WTGRAPH_WT_HEADS_MAX }, (_, i) => ({
+      h: H64(i + 1),
+      path: `/${"p".repeat(PATH_LEN)}${String(i).padStart(2, "0")}`,
+      ...(i === 0 ? { b: "main", self: true as const } : {}),
+    }));
+    return baseInput({
+      refRows,
+      tips: tips({ tips: [H64(1)], format: "sha256" }),
+      gl: { commits, badRecords: 0, parentsTruncated: 0, logCapped: false },
+      wtHeadCandidates,
+    });
+  }
+  const bytes = (p: unknown): number => Buffer.byteLength(JSON.stringify(p), "utf8");
+
+  it("with the reserve the base payload leaves 32 KiB of the 512 KiB total; the default call is unchanged", () => {
+    const input = bigInput();
+    const reduced = projectGraph({ ...input, maxBodyBytes: WTGRAPH_BODY_MAX_BYTES - WTGRAPH_MERGED_MAX_BYTES });
+    expectValid(reduced);
+    expect(bytes(reduced)).toBeLessThanOrEqual(WTGRAPH_BODY_MAX_BYTES - WTGRAPH_MERGED_MAX_BYTES);
+    const plain = projectGraph(input);
+    expectValid(plain);
+    expect(bytes(plain)).toBeLessThanOrEqual(WTGRAPH_BODY_MAX_BYTES);
+    // the fixture really sits between the two caps: only the reduced call had to trim
+    expect(bytes(plain)).toBeGreaterThan(WTGRAPH_BODY_MAX_BYTES - WTGRAPH_MERGED_MAX_BYTES);
+    expect(reduced.degrade.refsOmitted ?? 0).toBeGreaterThan(plain.degrade.refsOmitted ?? 0);
+    // omitting the parameter and passing the default explicitly are the same (baseline bytes)
+    expect(JSON.stringify(projectGraph({ ...input, maxBodyBytes: WTGRAPH_BODY_MAX_BYTES }))).toBe(
+      JSON.stringify(plain),
+    );
+  });
+
+  it("a small payload is byte-identical with or without the reserve", () => {
+    const input = baseInput({
+      refRows: [refRow()],
+      tips: tips({ tips: [SHA1(1)] }),
+      gl: {
+        commits: [{ h: SHA1(1), p: [], a: "a", t: 1, s: "s" }],
+        badRecords: 0,
+        parentsTruncated: 0,
+        logCapped: false,
+      },
+    });
+    expect(
+      JSON.stringify(projectGraph({ ...input, maxBodyBytes: WTGRAPH_BODY_MAX_BYTES - WTGRAPH_MERGED_MAX_BYTES })),
+    ).toBe(JSON.stringify(projectGraph(input)));
   });
 });

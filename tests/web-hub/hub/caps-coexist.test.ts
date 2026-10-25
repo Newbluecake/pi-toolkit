@@ -16,6 +16,8 @@ import {
   SPAWN_MODEL_HUB_CAP,
   UPLOAD_HUB_CAPS,
   WTDIFF_HUB_CAP,
+  WTGRAPH_HUB_CAP,
+  WTGRAPH_MERGED_HUB_CAP,
   AVATAR_HUB_CAP,
   PRIVACY_HUB_CAP,
   PREVIEW_HUB_CAP,
@@ -396,6 +398,9 @@ describe("wtdiff.v1 cap coexistence (worktree-diff D3, §1.6)", () => {
 
     expect(browserCaps.sort()).toEqual(agentCaps.sort());
     expect(browserCaps).toContain(WTDIFF_HUB_CAP);
+    // merged-plan §6: wtgraph.merged.v1 coexists with wtgraph.v1, on both surfaces (sets were equal above)
+    expect(browserCaps).toContain(WTGRAPH_HUB_CAP);
+    expect(browserCaps).toContain(WTGRAPH_MERGED_HUB_CAP);
     for (const cap of [...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...RUNTX_HUB_CAPS, PREVIEW_HUB_CAP, PREVIEW_LAN_HUB_CAP]) {
       expect(browserCaps).toContain(cap);
     }
@@ -409,6 +414,7 @@ describe("wtdiff.v1 cap coexistence (worktree-diff D3, §1.6)", () => {
     });
     if ("exists" in hub) throw new Error("unexpected exists");
     expect(hub.info.caps).toContain(WTDIFF_HUB_CAP);
+    expect(hub.info.caps).toContain(WTGRAPH_MERGED_HUB_CAP);
     expect(hub.info.caps).not.toContain(PREVIEW_LAN_HUB_CAP);
   });
 
@@ -418,10 +424,12 @@ describe("wtdiff.v1 cap coexistence (worktree-diff D3, §1.6)", () => {
     const hub = await start(fe.factory, home);
     if ("exists" in hub) throw new Error("unexpected exists");
     expect(hub.info.caps).not.toContain(WTDIFF_HUB_CAP);
+    expect(hub.info.caps).not.toContain(WTGRAPH_MERGED_HUB_CAP);
     const c = await connectClient(hub.paths.socketPath);
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
     expect(ack["caps"]).not.toContain(WTDIFF_HUB_CAP);
+    expect(ack["caps"]).not.toContain(WTGRAPH_MERGED_HUB_CAP);
     c.sock.destroy();
   });
 });

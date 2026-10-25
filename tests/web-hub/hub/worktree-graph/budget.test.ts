@@ -310,3 +310,138 @@ describe("worktree-graph budget §2.4 — git phase independence + per-step caps
     expect(k.fx.runner.calls.some((c) => k.isGl(c.argv))).toBe(false);
   });
 });
+
+// ===========================================================================
+// merged-plan r3 §3.4: the M-phase ledger (head / loop / tail), fake clock
+// ===========================================================================
+
+import {
+  WTGRAPH_MERGED_CLIENT_TIMEOUT_MS,
+  WTGRAPH_MERGED_PHASE_MS,
+  WTGRAPH_MERGED_TAIL_MS,
+  WTGRAPH_CLIENT_TIMEOUT_MS,
+  type WtGraphPayload as MergedBudgetPayload,
+} from "../../../../src/web-hub/protocol/worktree-graph.js";
+import { WTDIFF_TRANSFER_RESERVE_MS } from "../../../../src/web-hub/protocol/worktree-diff.js";
+import { cherryOut, hookFs, installMergedHandler, isCcArgv, isGmArgv, mergedWindow, oidOf } from "./helpers.js";
+
+function mergedBudgetKit(wrap: (fs: FakeFs, clock: { t: number }) => FakeFs) {
+  const clock = { t: 1_000_000 };
+  const fx = repoFixture();
+  const routes = createWorktreeGraphRoutes({
+    mode: "on",
+    denyCtx: DENY,
+    registry: fakeRegistry(REPO),
+    run: fx.runner,
+    log: memLog(),
+    now: () => clock.t,
+    fs: wrap(fx.fs, clock),
+    mergedEnabled: true,
+  });
+  const io = fakeIo();
+  const q = query({ agentKey: AGENT, sessionId: SESSION, wt: LINKED, merged: "1" });
+  return {
+    clock,
+    fx,
+    io,
+    call: async () => {
+      await routes.handle(fakeReq({ "x-pwh": "1" }), fakeRes(), q, io);
+      return io.sent[0]!.body as MergedBudgetPayload;
+    },
+    gmCount: () => fx.runner.calls.filter((c) => isGmArgv(c.argv)).length,
+  };
+}
+
+describe("merged budget ledger (§3.4)", () => {
+  it("arithmetic: wall 8+14+14+1 = 37 s, +10 s transfer = 47 ≤ 48 s (merged only); legacy 23 / 33 ≤ 35 untouched; head 6 + tail 4 leave a 4 s minimum loop", () => {
+    expect(WTDIFF_ADMIT_MS + WTGRAPH_GIT_PHASE_MS + WTGRAPH_MERGED_PHASE_MS + 1_000).toBe(37_000);
+    expect(37_000 + WTDIFF_TRANSFER_RESERVE_MS).toBeLessThanOrEqual(WTGRAPH_MERGED_CLIENT_TIMEOUT_MS);
+    expect(23_000 + WTDIFF_TRANSFER_RESERVE_MS).toBeLessThanOrEqual(WTGRAPH_CLIENT_TIMEOUT_MS);
+    expect(WTGRAPH_MERGED_PHASE_MS - 3 * WTDIFF_STEP_MS - WTGRAPH_MERGED_TAIL_MS).toBe(4_000);
+  });
+
+  it("head consumed nearly the whole loop budget ⇒ every candidate is unk:budget, no Gm is spawned, the tail is skipped", async () => {
+    const w = mergedWindow(3);
+    const k = mergedBudgetKit((fs, clock) => hookFs(fs, { onInfoOpen: () => void (clock.t += 9_900) }));
+    installMergedHandler(k.fx, { gr: w.gr, gl: w.gl, gm: () => okRun(cherryOut([oidOf(500)], [])) });
+    const body = await k.call();
+    expect(k.io.sent[0]!.status).toBe(200);
+    expect(body.merged!.branches.map((b) => [b.v, b.why])).toEqual([
+      ["unk", "budget"],
+      ["unk", "budget"],
+      ["unk", "budget"],
+    ]);
+    expect(k.gmCount()).toBe(0);
+    expect(k.fx.fs.leakCount()).toBe(0);
+  });
+
+  it("the loop stops spawning below 250 ms: the first tip is judged, the next ones are unk:budget", async () => {
+    const w = mergedWindow(3);
+    const k = mergedBudgetKit((fs) => fs);
+    installMergedHandler(k.fx, {
+      gr: w.gr,
+      gl: w.gl,
+      gm: () => {
+        k.clock.t += 9_800; // leaves 200 ms of the 10 s loop budget after the first Gm
+        return okRun(cherryOut([oidOf(500)], []));
+      },
+    });
+    const body = await k.call();
+    expect(body.merged!.branches.map((b) => [b.v, b.why])).toEqual([
+      ["eq", undefined],
+      ["unk", "budget"],
+      ["unk", "budget"],
+    ]);
+    expect(k.gmCount()).toBe(1);
+  });
+
+  it("worst head (6 s) then timed-out Gm ⇒ zero verdicts, all unknown, M never exceeds its 14 s, no tail", async () => {
+    const w = mergedWindow(4);
+    const k = mergedBudgetKit((fs, clock) => hookFs(fs, { onInfoOpen: () => void (clock.t += 2_000) }));
+    const startedAt = k.clock.t;
+    installMergedHandler(k.fx, {
+      gr: w.gr,
+      gl: w.gl,
+      onCc: () => void (k.clock.t += 4_000), // pin fstat + Cc burn 4 s; with the 2 s info read (hook) the head uses 6 s
+      gm: () => {
+        k.clock.t += 2_000; // every Gm burns its full 2 s cap and is killed
+        return { code: null, stdout: "", stdoutCapped: false, stderr: "", killed: "timeout" };
+      },
+    });
+    const body = await k.call();
+    expect(body.merged!.branches.some((b) => b.v === "eq" || b.v === "part" || b.v === "none" || b.v === "anc")).toBe(
+      false,
+    );
+    // 6 s head + 2 s + 2 s Gm = the whole 10 s loop budget: the 2nd Gm ran but ended with 0 left
+    // (budget), the rest never spawned
+    expect(body.merged!.branches.map((b) => b.why)).toEqual(["timeout", "budget", "budget", "budget"]);
+    expect(k.clock.t - startedAt).toBeLessThanOrEqual(WTGRAPH_MERGED_PHASE_MS);
+    expect(k.gmCount()).toBe(2);
+  });
+
+  it("a phase-end shallow stat that hangs ⇒ that tip is unk:budget (the step is bounded by the exhausted loop budget, not 2 s)", async () => {
+    const w = mergedWindow(1);
+    const k = mergedBudgetKit((fs, clock) =>
+      hookFs(fs, {
+        onShallowStat: (n) => {
+          if (n !== 2) return undefined; // 1 = S1, 2 = the per-Gm recheck
+          clock.t += 300;
+          return new Promise<void>(() => undefined);
+        },
+      }),
+    );
+    installMergedHandler(k.fx, {
+      gr: w.gr,
+      gl: w.gl,
+      gm: () => {
+        k.clock.t += 9_700; // leaves 300 ms for the recheck
+        return okRun(cherryOut([oidOf(500)], []));
+      },
+    });
+    const started = Date.now();
+    const body = await k.call();
+    expect(Date.now() - started).toBeLessThan(1_500); // 300 ms step, never the 2 s step cap
+    expect(body.merged!.branches).toEqual([{ n: "side-0", h: w.tips[0], v: "unk", why: "budget" }]);
+    expect(k.fx.fs.leakCount()).toBe(0);
+  });
+});

@@ -552,6 +552,23 @@ export interface WtGraphAuditRecord {
   joined?: boolean;
   /** HMAC-12(W) under the routes instance's random key — never the worktree path itself. */
   wtTag?: string;
+  // merged-plan §3.7 (append-only COUNTS; never a branch name / oid / driver name):
+  /** 1 on a request that carried `merged=1` (and the route has it enabled). */
+  mergedReq?: number;
+  /** selected candidates (≤24). */
+  mergedCand?: number;
+  /** candidates beyond the cap (not run, not sent). */
+  mergedOmitted?: number;
+  /** Gm spawns this request led. */
+  mergedRun?: number;
+  /** cache hits. */
+  mergedHit?: number;
+  /** `unk` entries. */
+  mergedUnk?: number;
+  /** 1 when the whole M phase was `skipped`. */
+  mergedSkip?: number;
+  /** M phase wall time. */
+  mergedMs?: number;
 }
 
 /** Runtime whitelist for `auditWorktreeGraph` — anything not listed here is dropped. */
@@ -572,6 +589,14 @@ export const WTGRAPH_AUDIT_KEYS = [
   "ms",
   "joined",
   "wtTag",
+  "mergedReq",
+  "mergedCand",
+  "mergedOmitted",
+  "mergedRun",
+  "mergedHit",
+  "mergedUnk",
+  "mergedSkip",
+  "mergedMs",
 ] as const;
 
 /** `log.info("wtgraph", { audit: "wtgraph", ...pick(record, WTGRAPH_AUDIT_KEYS) })` (§2.6). */
