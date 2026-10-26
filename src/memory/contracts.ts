@@ -2,7 +2,7 @@
 // (optimize-plan §10 "P0 冻结面完整性核对": P1 renderTiered, P2 tool-v2/edit/
 // search/budget/normalize, P3 doctor, P4 tidy all consume this file without
 // redefining any of it). P0-b's own consumers (`inject.ts`'s layout routing,
-// `tool-surface.ts`) plus the pi-facing `TidyPort` adapter in `src/index.ts`
+// `tool-surface.ts`) plus the pi-facing `TidyPort` adapter in `src/holder.ts`
 // are the only real callers today — everything else here is typed ahead of
 // the package that implements it, per the plan's "冻结接口先行" ordering.
 //
@@ -386,7 +386,7 @@ export const TIDY_SCHEMA: JsonSchema = {
  * The host-side port `/mem tidy` spawns a proposal-drafting subagent
  * through — a thin projection of `SpawnService` (§7.0's `toolDomain` is a
  * REQUIRED literal so a caller can't forget the readonly domain the P0-r
- * runtime enforces). `src/index.ts` implements this by reading the current
+ * runtime enforces). `src/holder.ts` (createTidyPort) implements this by reading the current
  * session stack (same `holder.current` pattern as every other forwarded
  * port); P4's `tidy/*.ts` is the only in-package consumer.
  */
