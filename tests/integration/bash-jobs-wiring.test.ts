@@ -7,7 +7,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { Component } from "@earendil-works/pi-tui";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
-import { bashJobsEnabled, buildSessionStack } from "../../src/stack.js";
+import { buildSessionStack } from "../../src/stack.js";
+import { bashJobsEnabled } from "../../src/bash/host.js";
 import {
   formatBashJobExtendedNotice,
   formatBashJobGraceNotice,

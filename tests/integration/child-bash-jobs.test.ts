@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
-import { bashJobsEnabled, checkBashToolReturnLag, scheduleBashJobRecovery } from "../../src/stack.js";
+import { bashJobsEnabled, checkBashToolReturnLag, scheduleBashJobRecovery } from "../../src/bash/host.js";
 import { computeHoldCap, HOLD_MIN_MS, MARGIN_HOLD_MS, W_HOLD_MS, wireChildBashJobs } from "../../src/bash/child.js";
 import {
   getChildBashRegistry,

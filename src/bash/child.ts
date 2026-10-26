@@ -38,7 +38,7 @@ import { recordBashDiag } from "./diag.js";
  * Condition to call this at all (index.ts): `isChildSession &&
  * bashJobsEnabled(preGuardSettings) && preGuardSettings.bashJobs.childSessions`.
  *
- * Mirrors `src/stack.ts`'s main-session wiring (`buildBashJobManager` +
+ * Mirrors `src/bash/host.ts`'s main-session wiring (`buildBashJobManager` +
  * `createBashTool`/`createBashJobTool` registration in `src/index.ts`) but:
  *  - the manager is `owner: "subagent"` and gated by `admit()` on the process-
  *    global `ChildBashRegistry`'s seal state (§3.6 S1);

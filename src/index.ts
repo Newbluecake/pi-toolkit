@@ -32,14 +32,13 @@ import { createNotifier, type Notifier, type PersistedDelivery } from "./deliver
 import { mergeExtensionPoints } from "./extensions/registry.js";
 import {
   buildSessionStack,
-  bashJobsEnabled,
-  BASH_JOB_SEAL_GRACE_MS,
   createCompactHintHook,
   createBackgroundCompletionEventHook,
   createNotificationReceiptHook,
   type Stack,
 } from "./stack.js";
 import { readBashJobTail } from "./bash/notify.js";
+import { bashJobsEnabled, BASH_JOB_SEAL_GRACE_MS } from "./bash/host.js";
 import { createMentionRouteDeps, installMentionInput } from "./mention/mention.js";
 import { createWakeInputHook } from "./fabric/wake-input.js";
 import { observeRootWakeTrigger } from "./fabric/root-wake.js";
@@ -1136,7 +1135,7 @@ export default function activate(rawPi: ExtensionAPI): void {
         // P5b: without this the main session's `timeoutGraceMs`/`maxExtensions`/
         // `maxTimeoutFactor` settings never reach the tool surface (the
         // description suffix stays off even when the manager's own
-        // deadlinePolicy — src/stack.ts's `buildBashJobManager` — is enabled).
+        // deadlinePolicy — src/bash/host.ts's `buildBashJobManager` — is enabled).
         deadline: () => ({
           graceMs: settings.bashJobs.timeoutGraceMs,
           maxExtensions: settings.bashJobs.maxExtensions,
