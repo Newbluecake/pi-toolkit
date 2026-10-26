@@ -21,7 +21,7 @@
  * `redactSecrets()` → line/byte cap (drop from the HEAD, keep the tail).
  */
 
-/** The tail read window `stack.ts`'s `readBashJobTail` uses (`BASH_JOB_TAIL_BYTES`, 1 KiB). */
+/** The tail read window `bash/notify.ts`'s `readBashJobTail` uses (`BASH_JOB_TAIL_BYTES`, 1 KiB). */
 export const TAIL_READ_WINDOW_BYTES = 1024;
 /** Max lines in a projected tail (`BASH_JOB_TAIL_LINES`, 10). */
 export const TAIL_MAX_LINES = 10;

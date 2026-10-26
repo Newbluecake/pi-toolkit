@@ -10,7 +10,7 @@ import { describe, expect, test, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { TODO_NUDGE_CUSTOM_TYPE, wireTodo } from "../../src/todo/index.js";
 import { WORKFLOW_NOTIFICATION_TYPE } from "../../src/adapters/workflow-notice.js";
-import { BASH_JOB_NOTIFICATION_TYPE } from "../../src/stack.js";
+import { BASH_JOB_NOTIFICATION_TYPE } from "../../src/bash/notify.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyTool = ToolDefinition<any, any, any>;

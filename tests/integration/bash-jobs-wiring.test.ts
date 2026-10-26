@@ -7,14 +7,13 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { Component } from "@earendil-works/pi-tui";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
+import { bashJobsEnabled, buildSessionStack } from "../../src/stack.js";
 import {
-  bashJobsEnabled,
-  buildSessionStack,
   formatBashJobExtendedNotice,
   formatBashJobGraceNotice,
   formatBashJobNotification,
   readBashJobTail,
-} from "../../src/stack.js";
+} from "../../src/bash/notify.js";
 import { probePid, readProcStartTime } from "../../src/bash/process.js";
 import {
   getChildBashRegistry,

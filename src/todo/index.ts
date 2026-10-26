@@ -34,7 +34,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
 import { TodoPanel, TodoWidget, WIDGET_RECENT_COMPLETED } from "./ui.js";
 import { WORKFLOW_NOTIFICATION_TYPE } from "../adapters/workflow-notice.js";
-import { BASH_JOB_NOTIFICATION_TYPE } from "../stack.js";
+import { BASH_JOB_NOTIFICATION_TYPE } from "../bash/notify.js";
 import { TODO_WIDGET_MOUNTED_EVENT } from "../ui/widget-mount-events.js";
 import {
   buildNudgeText,

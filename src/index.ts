@@ -37,9 +37,9 @@ import {
   createCompactHintHook,
   createBackgroundCompletionEventHook,
   createNotificationReceiptHook,
-  readBashJobTail,
   type Stack,
 } from "./stack.js";
+import { readBashJobTail } from "./bash/notify.js";
 import { createMentionRouteDeps, installMentionInput } from "./mention/mention.js";
 import { createWakeInputHook } from "./fabric/wake-input.js";
 import { observeRootWakeTrigger } from "./fabric/root-wake.js";
