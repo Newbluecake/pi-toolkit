@@ -33,7 +33,14 @@ import { isTerminalStatus } from "../../core/status.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
 import type { HubConfig, HubLanConfig } from "../hub/ports.js";
 import type { ScheduleWebHubPort } from "../../schedule/agent/coordinator.js";
-import { SCHED_AGENT_CAPS, SCHED_HUB_CAP, type SchedReceiptsFrame, type SchedRunFrame } from "../protocol/schedule.js";
+import {
+  SCHED_AGENT_CAPS,
+  SCHED_CONFIRM_CAP,
+  SCHED_HUB_CAP,
+  type SchedDecideFrame,
+  type SchedReceiptsFrame,
+  type SchedRunFrame,
+} from "../protocol/schedule.js";
 import type { HubSpawnConfig } from "../protocol/spawn.js";
 import { PREVIEW_DEFAULT_MODE, type PreviewMode } from "../protocol/preview.js";
 import { PROXY_PORTS_FILE_NAME, PROXY_STATE_DIR_NAME, parseProxyPortRange } from "../protocol/proxy.js";
@@ -1338,6 +1345,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const schedulePort = deps.schedule;
   schedulePort?.bindLink({
     ready: () => conn?.status().state === "live" && (conn?.caps.includes(SCHED_HUB_CAP) ?? false),
+    // #61 C2: the confirm channel needs the hub's sched.confirm.v1 on top of sched.v1 (the hub
+    // advertises it iff HubConfig.schedule exists); absent ⇒ the coordinator drops sched_offers
+    // and confirm falls back to TUI-only, zero new frames on the wire.
+    confirmReady: () => {
+      const c = conn;
+      if (c === undefined || c.status().state !== "live") return false;
+      return c.caps.includes(SCHED_HUB_CAP) && c.caps.includes(SCHED_CONFIRM_CAP);
+    },
     send: (frame) => conn?.send(frame),
   });
   const binding: BindingPort = {
@@ -1346,6 +1361,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       ? {
           onSchedRun: (frame: SchedRunFrame) => schedulePort.onSchedRun(frame),
           onSchedReceipts: (frame: SchedReceiptsFrame) => schedulePort.onSchedReceipts(frame),
+          onSchedDecide: (frame: SchedDecideFrame) => schedulePort.onSchedDecide(frame),
         }
       : {}),
     onCmd: (frame) => {
@@ -1641,8 +1657,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // `extraHubCaps` tail append. xsOn ⇒ control is on (the switch requires it), so the early
     // `!control` return above has already passed when we get here.
     if (xsBridge !== undefined) caps.push(...xsBridge.caps());
-    // scheduled-reports A0 (§10.1): tail-appended, only while the schedule router exists.
-    if (schedulePort !== undefined) caps.push(...SCHED_AGENT_CAPS);
+    // scheduled-reports A0 (§10.1) + #61 C2 (sched.confirm.v1): tail-appended, only while the
+    // schedule router exists.
+    if (schedulePort !== undefined) caps.push(...SCHED_AGENT_CAPS, SCHED_CONFIRM_CAP);
     return caps;
   };
 

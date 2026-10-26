@@ -35,12 +35,14 @@ function port(): ScheduleWebHubPort & {
   link: SchedHubLink | undefined;
   runs: unknown[];
   receipts: unknown[];
+  decides: unknown[];
   caps: number;
 } {
   const p = {
     link: undefined as SchedHubLink | undefined,
     runs: [] as unknown[],
     receipts: [] as unknown[],
+    decides: [] as unknown[],
     caps: 0,
     hubConfig: () => ({ dir: "/var/sched", toleranceS: 60 as const }),
     bindLink(l: SchedHubLink) {
@@ -48,6 +50,7 @@ function port(): ScheduleWebHubPort & {
     },
     onSchedRun: (f: unknown) => p.runs.push(f),
     onSchedReceipts: (f: unknown) => p.receipts.push(f),
+    onSchedDecide: (f: unknown) => p.decides.push(f),
     onHubCaps: () => {
       p.caps += 1;
     },
@@ -131,6 +134,41 @@ describe("wireWebHub × schedule port", () => {
     const p = port();
     await live(deps({ schedule: p }), []);
     expect(p.link?.ready()).toBe(false);
+  });
+
+  it("#61 C2: hello carries sched.confirm.v1 with the port; sched_decide reaches it; confirmReady needs both caps", async () => {
+    const p = port();
+    const s = await live(deps({ schedule: p }), ["sched.v1", "sched.confirm.v1"]);
+    const hello = s.frames().find((f) => f.t === "hello") as { caps: string[] };
+    expect(hello.caps).toContain("sched.v1");
+    expect(hello.caps).toContain("sched.confirm.v1");
+    expect(p.link?.ready()).toBe(true);
+    expect(p.link?.confirmReady?.()).toBe(true);
+    const decide = {
+      t: "sched_decide" as const,
+      reqId: "fsAbCdEfGhIjKlMnOpQrStUvWxYz0123",
+      sessionId: "sid-1",
+      offerId: "ofAbCdEfGhIjKlMnOpQrStUvWxYz0123",
+      taskId: "s_abcdefgh",
+      defHash: "a".repeat(64),
+      decision: "approve" as const,
+      expiresAt: 1,
+    };
+    s.hub(decide);
+    expect(p.decides).toEqual([decide]);
+  });
+
+  it("#61 C2: sched.v1 without sched.confirm.v1 ⇒ link ready but NOT confirmReady (TUI-only)", async () => {
+    const p = port();
+    await live(deps({ schedule: p }), ["sched.v1"]);
+    expect(p.link?.ready()).toBe(true);
+    expect(p.link?.confirmReady?.()).toBe(false);
+  });
+
+  it("#61 C2: no port ⇒ no sched.confirm.v1 in hello (pre-feature shape)", async () => {
+    const s = await live(deps(), ["sched.v1", "sched.confirm.v1"]);
+    const hello = s.frames().find((f) => f.t === "hello") as { caps: string[] };
+    expect(hello.caps).not.toContain("sched.confirm.v1");
   });
 
   it("no port ⇒ no sched.v1 in hello (pre-feature shape)", async () => {

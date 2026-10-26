@@ -49,6 +49,7 @@ import {
   type ScheduleWebHubPort,
   type SchedRunVerdict,
 } from "./coordinator.js";
+import type { ScheduleConfirm } from "./confirm.js";
 import type { MessageSchedulerInstall } from "./message.js";
 import { assertExecutable, resolveScheduleMode, type ScheduleModeVerdict, type ScheduleRefusal } from "./mode.js";
 
@@ -209,6 +210,9 @@ export interface ScheduleWireOpts {
   webHub: boolean;
   /** Late-bound current session agent (holder.current?.schedule). */
   current: () => ScheduleAgent | undefined;
+  /** #61 C2: the surface's confirm module, late-bound (created per session_start, after the
+   *  coordinator); threaded to the hub coordinator for `sched_decide` / hello_ack republish. */
+  confirm?: () => ScheduleConfirm | undefined;
   clock?: Clock;
   warn?: (message: string) => void;
   /** Tests: identity / flock probes. */
@@ -311,6 +315,7 @@ export function wireSchedule(pi: Pick<ExtensionAPI, "on">, opts: ScheduleWireOpt
         warn,
         router,
         ...(opts.lockedReason !== undefined ? { lockedReason: opts.lockedReason } : {}),
+        ...(opts.confirm !== undefined ? { confirm: opts.confirm } : {}),
       });
     },
   };
@@ -331,6 +336,8 @@ export interface ScheduleAgentDeps {
   warn: (message: string) => void;
   router: ScheduleHubRouter | undefined;
   lockedReason?: () => string | undefined;
+  /** #61 C2: late-bound confirm module (see ScheduleWireOpts.confirm). */
+  confirm?: () => ScheduleConfirm | undefined;
   /** Store test hooks (lock timeout / flock binary). */
   storeOpts?: { flockBin?: string; lockTimeoutMs?: number };
 }
@@ -495,6 +502,7 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
       retryLater: (fn) => {
         deps.clock.setTimer(5_000, fn);
       },
+      ...(deps.confirm !== undefined ? { confirm: deps.confirm } : {}),
       warn: deps.warn,
     });
     detach = router.attach(coordinator);

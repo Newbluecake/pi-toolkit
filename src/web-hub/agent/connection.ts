@@ -51,7 +51,7 @@ import type { HubPaths } from "../protocol/paths.js";
 import type { RunTxReqFrame, RunWatchFrame } from "../protocol/run-transcript.js";
 import type { CompleteReqFrame } from "../protocol/command-args.js";
 import type { XsDeliverFrame, XsReqFrame, XsResFrame } from "../protocol/xs.js";
-import type { SchedReceiptsFrame, SchedRunFrame } from "../protocol/schedule.js";
+import type { SchedDecideFrame, SchedReceiptsFrame, SchedRunFrame } from "../protocol/schedule.js";
 import { XS_HUB_CAP, XS_SLOT_KIND, xsReqDeadlineMs } from "../protocol/xs.js";
 import { P1_CAPS, PROTO, SLOT_REQUIRED_CAP, compareVersions, protoCompatible } from "../protocol/version.js";
 import { readStopMarkerSync } from "../protocol/stop-marker.js";
@@ -124,6 +124,10 @@ export interface BindingPort {
   /** scheduled-reports A0 (§4.2.1/§7.1): hub→agent receipts (no reply). Live-link-only;
    *  ignored without the hook. */
   onSchedReceipts?(frame: SchedReceiptsFrame): void;
+  /** #61 C2 (sched.confirm.v1): hub→agent Feishu-card decision. The handler answers EXACTLY ONE
+   *  `sched_decide_ack` (`schedule/agent/coordinator.ts`). Live-link-only; a binding without it
+   *  (schedule off) silently ignores the frame — the hub's own ack wait settles it. */
+  onSchedDecide?(frame: SchedDecideFrame): void;
   /** web-hub-slash-args plan r1 评审 #1 ③ (P1): fired once per `hello_ack` after the slot
    *  replay, with the hub's freshly-advertised caps — the wiring republishes cap-sensitive
    *  slots (`commands`), covering late caps, reconnects and hub downgrades. */
@@ -731,6 +735,10 @@ class Connection implements HubConnection {
         return;
       case "sched_receipts":
         if (this.link === "live") this.callBinding((b) => b.onSchedReceipts?.(frame));
+        return;
+      case "sched_decide":
+        // #61 C2: live-link-only, same shape as sched_run; no hook ⇒ the hub's ack wait settles it.
+        if (this.link === "live") this.callBinding((b) => b.onSchedDecide?.(frame));
         return;
     }
   }
