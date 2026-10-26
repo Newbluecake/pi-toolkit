@@ -11,3 +11,15 @@ Follow-up to `ci-fix-2026-10-25.md`. No `src/` change, no `tests/fixtures/` chan
 | 4   | self-built git repos whose `.git` / tree is snapshotted                                         | Same `maintenance.auto=false` / `gc.auto=0` after `git init` in: `convert-fixtures.ts` (earlier), `launcher-convert.test.ts`, `integration/git-graph.test.ts` (`repo()`, used by `snapshotWrites`), `integration/git-graph-cherry.test.ts` (`repo()`, used by `snapshotGitDir`), `integration/web-hub-worktree-graph.test.ts` (`repo()`, objects/refs/index snapshot). Audited by rg of all `git init` in tests/: `convert-preflight` r2 (init only, no commit), `git-wtdiff`, `web-hub-worktree-diff`, `git-worktrees`, `version-git`, `worktrees-real-git`, workflow/extensions worktree tests and `release-script` do not snapshot the repo contents, so left alone. Bare origins/clones in git-graph are not snapshotted. |
 
 Suggested commit: `test(ci): userns-free --global exclusion test, CPU-time perf ratio, CI-scaled hub startup, no git auto-maintenance in convert fixtures`
+
+## 3a′ — `logic-markdown-perf` growth gate: exponent fit instead of a two-size ratio
+
+CI (shared 2-worker runner) still failed the ratio gate (63.89/7.28 = 8.77 > 8) even with CPU time and 5 windows; a ratio of two noisy timings is inherently fragile. Test-only change (`tests/web-hub/ui/logic-markdown-perf.test.ts`); no `src/`, no `tests/fixtures/` change, no product-side counters (a counter would have meant touching the parser — not needed).
+
+- **New criterion**: least-squares power-law exponent k in t ≈ c·nᵏ over 64/128/256/512 KiB (ln–ln fit), per-size time = minimum per-parse process CPU time over 6 interleaved rounds; assert **k ≤ 1.5** (linear ≈ 1, quadratic ≈ 2), best of up to 3 windows (a truly super-linear parser fails every window). The 200 ms @256 KiB bound stays as a loose sentinel. Per-test timeout raised to 90 s (the 512 KiB set costs 1.5–7 s/shape).
+- **Observed on the live parser** (10 pathological shapes): k = 1.09–1.27, i.e. ≥0.23 headroom; a single noisy size moves k far less than it moves a 2-point ratio.
+- **Mutation proof (detection power kept)**: a permanent in-file guard feeds the frozen O(n²) reference (`fixtures/markdown-ref.js`) on `"*a ".repeat` at 2/4/8/16 KiB through the same `fitExponent`, and asserts k > 1.5 (measured k = 1.99). So an O(n²) regression is separated from linear by ~0.5 on both sides of the 1.5 line; at 16× growth per 4× size step the fitted k is ≈ 2.
+- Only this file used wall/CPU growth ratios among the perf tests; the older `ref > live × 10` self-check (16 KiB, ~100× in practice) is unchanged.
+- **Verification**: file ×5 with `--maxWorkers=1` all green; `npx vitest run tests/web-hub/ui --maxWorkers=6` ×2 (5907 tests) green with the perf file running under that load; `npm run typecheck` and prettier clean.
+
+Suggested commit: `test(web-hub): markdown perf gate fits growth exponent (≤1.5 over 64–512 KiB) instead of a two-size timing ratio`

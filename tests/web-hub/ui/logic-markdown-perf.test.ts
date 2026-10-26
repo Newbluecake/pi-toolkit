@@ -12,9 +12,8 @@ import { parseMarkdown as parseMarkdownRef } from "./fixtures/markdown-ref.js";
  *    every pathological shape at a small size (the ref is still O(n²) on those — diffing at
  *    the full 256 KiB would take minutes by design; 8 KiB already pins the shape).
  * 2. **Performance**: each pathological 256 KiB input parses within 200 ms (median of 3
- *    samples) and grows at most 8× from 64 KiB to 256 KiB (linear ≈ 4×, quadratic ≈ 16×).
- *    Each sample times a batch of iterations (scaled so one sample ≈ tens of ms) to keep the
- *    ratio measurement out of timer noise.
+ *    samples) and fits a growth exponent ≤1.5 over 64/128/256/512 KiB (CPU-time minima per size;
+ *    linear ≈ 1, quadratic ≈ 2). No wall-clock ratio of two sizes is asserted.
  */
 
 /**
@@ -58,40 +57,41 @@ function medianPerParse(fn: () => void, iters: number): number {
   return samples[1]!;
 }
 
+const cpuMs = (): number => {
+  const u = process.cpuUsage();
+  return (u.user + u.system) / 1000;
+};
+
 /**
- * The growth criterion's estimator: the two sizes are measured in INTERLEAVED rounds with the
- * per-size MINIMUM as the answer. Rationale (measured, not theorized): the vitest worker's
- * heap phase drifts the SAME 256 KiB parse between ~27 ms (fresh worker) and ~44 ms (late in
- * the suite) while the 64 KiB one wobbles the other way, so two sequential median blocks can
- * cross the 8× line for a perfectly linear parser. Interleaving makes any monotone phase
- * shift hit both sizes in the same round, and the minimum never picks up a stray GC pause —
- * the pair is stable run-to-run (observed ratios: 4.9–6.1 across the corpus).
+ * Growth criterion: fit the power-law exponent k in t ≈ c·n^k by least squares on
+ * (ln n, ln t) over several input sizes. Linear ⇒ k≈1, quadratic ⇒ k≈2; a fit over 4 sizes
+ * is far less sensitive to a single noisy size than one ratio of two timings. Each size's
+ * time is the MINIMUM per-parse process CPU time over interleaved rounds (preemption on a
+ * shared runner and stray GC pauses only ever add time, never remove it).
  */
-function interleavedMinPair(
-  small: () => void,
-  big: () => void,
-  itersSmall: number,
-  itersBig: number,
-): { t64: number; t256: number } {
-  const smalls: number[] = [];
-  const bigs: number[] = [];
-  // Process CPU time (user+system, µs → ms), not wall time: on a shared/oversubscribed CI runner the
-  // worker is preempted for whole windows, which wall-clock charges to whichever size was running.
-  // CPU time still scales with the parser's real work, so a quadratic parser is caught identically.
-  const cpuMs = (): number => {
-    const u = process.cpuUsage();
-    return (u.user + u.system) / 1000;
-  };
-  for (let round = 0; round < 6; round++) {
-    let t0 = cpuMs();
-    for (let k = 0; k < itersSmall; k++) small();
-    smalls.push((cpuMs() - t0) / itersSmall);
-    t0 = cpuMs();
-    for (let k = 0; k < itersBig; k++) big();
-    bigs.push((cpuMs() - t0) / itersBig);
+function fitExponent(sizes: number[], fns: Array<() => void>, iters: number[], rounds = 6): number {
+  const best = sizes.map(() => Infinity);
+  for (let r = 0; r < rounds; r++) {
+    for (let i = 0; i < fns.length; i++) {
+      const t0 = cpuMs();
+      for (let k = 0; k < iters[i]!; k++) fns[i]!();
+      best[i] = Math.min(best[i]!, (cpuMs() - t0) / iters[i]!);
+    }
   }
-  return { t64: Math.min(...smalls), t256: Math.min(...bigs) };
+  const xs = sizes.map((n) => Math.log(n));
+  const ys = best.map((t) => Math.log(Math.max(t, 1e-3)));
+  const mx = xs.reduce((a, v) => a + v, 0) / xs.length;
+  const my = ys.reduce((a, v) => a + v, 0) / ys.length;
+  let num = 0;
+  let den = 0;
+  for (let i = 0; i < xs.length; i++) {
+    num += (xs[i]! - mx) * (ys[i]! - my);
+    den += (xs[i]! - mx) ** 2;
+  }
+  return num / den;
 }
+
+const MAX_EXPONENT = 1.5;
 
 const KIB = 1024;
 
@@ -195,33 +195,39 @@ describe("logic/markdown.js — §4.2 differential (live ≡ frozen reference)",
   });
 });
 
-describe("logic/markdown.js — §4.2 linearization benchmarks (256 KiB corpus)", () => {
-  it.each(PATHOLOGICAL)("%s: ≤200 ms @256 KiB and growth ratio ≤8 (64→256 KiB)", (_name, build) => {
-    const s64 = build(64 * KIB);
-    const s256 = build(256 * KIB);
-    parseMarkdown(s64); // warm-up: get both inputs past first-parse JIT/GC tiers
-    parseMarkdown(s256);
-    // Absolute bound — the plan's median-of-3 estimator, batched so one sample is real work.
-    const median256 = medianPerParse(() => parseMarkdown(s256), 4);
-    // Growth bound — interleaved min pair (see interleavedMinPair for why not two medians).
-    // CPU contention (full-suite load, shared CI runners) can inflate one size's samples
-    // for a whole measurement window, so a single window may cross the 8x line for a perfectly
-    // linear parser (seen: 23.2/2.1). A genuinely super-linear parser (quadratic ⇒ ~16x for
-    // this 4x size step, and far worse on the pathological shapes) exceeds the bound in EVERY
-    // window, so the gate asserts on the best ratio over up to 5 independent windows.
-    let best = { t64: 1, t256: Infinity };
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const pair = interleavedMinPair(
-        () => parseMarkdown(s64),
-        () => parseMarkdown(s256),
-        12,
-        4,
-      );
-      if (pair.t256 / pair.t64 < best.t256 / best.t64) best = pair;
-      if (best.t256 / best.t64 <= 8) break;
-    }
-    const { t64, t256 } = best;
-    expect(median256, `256 KiB median ${median256.toFixed(2)} ms`).toBeLessThanOrEqual(200);
-    expect(t256 / t64, `ratio ${t256.toFixed(2)}/${t64.toFixed(2)}`).toBeLessThanOrEqual(8);
-  });
+describe("logic/markdown.js — §4.2 linearization benchmarks (up to 512 KiB corpus)", () => {
+  it('the exponent estimator separates linear from quadratic (frozen O(n²) ref on "*a ".repeat, 2–16 KiB)', () => {
+    const sizes = [2, 4, 8, 16];
+    const inputs = sizes.map((k) => "*a ".repeat(Math.floor((k * KIB) / 3)));
+    for (const x of inputs) parseMarkdownRef(x);
+    const k = fitExponent(
+      sizes,
+      inputs.map((x) => () => parseMarkdownRef(x)),
+      [4, 2, 1, 1],
+      3,
+    );
+    if (process.env.PERF_DBG) console.log("ref exponent", k);
+    expect(k, `ref exponent ${k.toFixed(2)}`).toBeGreaterThan(MAX_EXPONENT);
+  }, 60_000);
+
+  it.each(PATHOLOGICAL)(
+    "%s: ≤200 ms @256 KiB and growth exponent ≤1.5 (64→512 KiB)",
+    (_name, build) => {
+      const sizes = [64, 128, 256, 512];
+      const inputs = sizes.map((k) => build(k * KIB));
+      for (const x of inputs) parseMarkdown(x); // warm-up past first-parse JIT/GC tiers
+      const fns = inputs.map((x) => () => parseMarkdown(x));
+      const s256 = inputs[2]!;
+      // Absolute bound — loose sentinel (median of 3 batched samples), not the growth gate.
+      const median256 = medianPerParse(() => parseMarkdown(s256), 4);
+      // Up to 3 independent windows; a truly super-linear parser exceeds 1.5 in every one.
+      let k = Infinity;
+      for (let attempt = 0; attempt < 3 && k > MAX_EXPONENT; attempt++) {
+        k = Math.min(k, fitExponent(sizes, fns, [16, 8, 4, 2]));
+      }
+      expect(median256, `256 KiB median ${median256.toFixed(2)} ms`).toBeLessThanOrEqual(200);
+      expect(k, `growth exponent ${k.toFixed(2)}`).toBeLessThanOrEqual(MAX_EXPONENT);
+    },
+    90_000,
+  );
 });
