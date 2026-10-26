@@ -262,7 +262,13 @@ export function createAgentServer(
       // under the `sched.v1` cap, which hub.ts declares iff a coordinator was built — with
       // `deps.schedule` absent the intercept still swallows them early (unreachable in the real
       // assembly; keeps the registry path free of schedule knowledge either way).
-      if (frame.t === "sched_changed" || frame.t === "sched_bound" || frame.t === "sched_run_ack") {
+      if (
+        frame.t === "sched_changed" ||
+        frame.t === "sched_bound" ||
+        frame.t === "sched_run_ack" ||
+        frame.t === "sched_offers" || // #61 sched.confirm.v1
+        frame.t === "sched_decide_ack"
+      ) {
         deps.schedule?.onAgentFrame(agentKey, frame);
         return;
       }

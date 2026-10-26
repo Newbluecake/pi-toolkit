@@ -50,6 +50,7 @@ import { safeFeishuLink } from "./link.js";
 import { createFeishuXsMirror } from "./xs-mirror.js";
 import type { FeishuXsMirrorEvent } from "./xs-mirror.js";
 import { createFeishuSessionCard } from "./session-card.js";
+import { createFeishuScheduleConfirm } from "./schedule-confirm.js";
 import { createFeishuFiles, feishuFileCandidates, type FeishuFilesDeps } from "./files.js";
 import { createFeishuNotify, type FeishuIdleEvidence } from "./notify.js";
 import {
@@ -365,6 +366,9 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     publish();
   }
   async function install(input: CredentialInput, guard: () => boolean) {
+    // Coordinates only; replacement still stops the connector before ANY cleanup/IO.
+    const oldScheduleAnchors =
+      deps.schedule?.offers !== undefined ? state.nonces.list((n) => n.action === "sched-card") : [];
     // Stop is FIRST, even when replacement eventually fails. Generation fences all old follow-ups.
     await stopRuntime();
     if (disposed || !guard()) return { ok: false as const, reason: "cancelled" };
@@ -386,6 +390,8 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     if (!disposed && guard()) {
       await startLoaded();
       const current = runtime;
+      current?.scheduleConfirm?.revoked(oldScheduleAnchors);
+      current?.scheduleConfirm?.reconcileAll(8); // new installation generation tap
       current?.work.run(() => current.notify.owner("configured"));
     }
     return { ok: true as const };
@@ -771,6 +777,8 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
           state.bindings.set(binding.key, { ...binding, sessionId: sid, offline: null });
           work.run(async () => {
             await state.commit();
+            void scheduleConfirm?.reconcile(r.sessionId);
+            void scheduleConfirm?.reconcile(sid);
             await notice(targetFor(r), `会话已随请求转移到 ${label(sid)}`, r.chatId);
           });
         }
@@ -801,6 +809,30 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       notice: bindingNotice,
       log: diagnose,
     });
+    // #61 F2: independent owner proof. Never reuse dialogs.operator's owner fallback.
+    const scheduleConfirm =
+      schedulePort?.offers !== undefined
+        ? createFeishuScheduleConfirm({
+            state,
+            port: schedulePort,
+            installation,
+            admission,
+            clock,
+            provenOwner: (binding) => {
+              const sender = lastRequest(binding)?.senderOpenId;
+              return sender !== undefined && sender === credentials.current()?.ownerOpenId;
+            },
+            ready: () => active && connector.snapshot().status === "open",
+            link: (sid) => link(deps.sessions.views().find((v) => v.sessionId === sid && v.live)?.agentKey ?? ""),
+            sendCard,
+            patch,
+            deleteMessage: (messageId) => api.deleteMessage({ messageId }),
+            notice: (target, text, lane) => notice(target, text, lane),
+            count: (reason) => {
+              mirrorDropped[reason] = (mirrorDropped[reason] ?? 0) + 1;
+            },
+          })
+        : undefined;
     const sessionCard = createFeishuSessionCard({
       state,
       sessions,
@@ -809,7 +841,14 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       cardsDenied: () => caps.cards === "denied",
       sendCard,
       patchCard: (p) => api.patchCard(p),
-      notice,
+      notice:
+        scheduleConfirm === undefined
+          ? notice
+          : async (...args) => {
+              await notice(...args);
+              // session-pick commits its new binding before its receipt notice (including /list card picks).
+              scheduleConfirm.reconcileAll();
+            },
       capability,
       clock,
       onError: () => {
@@ -855,6 +894,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
               work.run(() => dialogs.text(message, identity));
             },
           };
+        const beforeBinding = bindingKey ? state.bindings.get(bindingKey) : undefined;
         const prepared = await router.prepare(message, identity);
         if (
           prepared.drop ||
@@ -870,6 +910,15 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
                 ...(message.threadId ? { threadId: message.threadId } : {}),
               });
             prepared.durable?.();
+            // Binding add/remove/switch is already durable here, including /unbind (no bound intent).
+            const afterBinding = bindingKey ? state.bindings.get(bindingKey) : undefined;
+            if (beforeBinding?.rev !== afterBinding?.rev) {
+              if (beforeBinding?.sessionId) void scheduleConfirm?.reconcile(beforeBinding.sessionId);
+              if (afterBinding?.sessionId) void scheduleConfirm?.reconcile(afterBinding.sessionId);
+            } else if (afterBinding?.sessionId) {
+              // A newly received request can establish the otherwise missing owner proof.
+              void scheduleConfirm?.reconcile(afterBinding.sessionId);
+            }
           },
         };
       },
@@ -879,6 +928,12 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         if (intent.type === "action" && intent.record.action === "session-pick") {
           capability("cardCallback", true);
           sessionCard.pick(intent.record, intent.identity, intent.eventId);
+          return;
+        }
+        if (intent.type === "action" && (intent.record.action === "sched-ok" || intent.record.action === "sched-no")) {
+          capability("cardCallback", true);
+          // Reserve per-card inFlight now, not after the generic work queue starts.
+          void scheduleConfirm?.callback(intent.record, intent.identity, intent.eventId);
           return;
         }
         work.run(() => inboundIntent(intent));
@@ -917,7 +972,9 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       },
       onStatus: (view) => {
         if (!active) return;
+        const reopened = view.status === "open" && connectorView?.status !== "open";
         connectorView = view;
+        if (reopened) scheduleConfirm?.reconcileAll(8); // reconnect catch-up queue is bounded
         if (view.status === "auth_failed" || view.status === "conn_limit" || view.status === "degraded")
           work.run(() => notify.owner(view.status === "degraded" ? (view.reason ?? "ws-unavailable") : view.status));
         publish();
@@ -1503,6 +1560,8 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         if (received?.ok) state.requests.patch(received.value.id, { code: "new-first" });
         state.requests.transition(r.id, "replied");
         if (!(await state.commit()) || !active) continue;
+        if (currentBinding?.sessionId) void scheduleConfirm?.reconcile(currentBinding.sessionId);
+        void scheduleConfirm?.reconcile(record.sessionId);
         await notice(
           targetFor(r),
           `已创建并绑定：${label(record.sessionId)}${skippedOnBoot ? "；hub 已重启，首条消息未自动发送，请重发" : ""}${first.trim() && !received?.ok ? "；首条消息无法排队，请重发" : ""}`,
@@ -1732,6 +1791,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       work.run(() => dialogs.sweep());
       work.run(bindFresh);
       mirror?.pump();
+      scheduleConfirm?.reconcileAll(); // also covers transfer/bindFresh and expiry; hub scan taps at 60 s
       maintenance = clock.setTimeout(maintain, 30_000);
     }
     return {
@@ -1749,6 +1809,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       approval,
       sessionCard,
       schedule,
+      scheduleConfirm,
       xsMirror(e: FeishuXsMirrorEvent): void {
         if (!active || !mirror) return;
         mirror.deliver(e);
@@ -1830,6 +1891,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         requests.dispose();
         dialogs.dispose();
         sessionCard.dispose();
+        scheduleConfirm?.dispose();
         sessions.clear();
         runs.dispose();
         files.dispose();
@@ -2030,6 +2092,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         const result = state.allowList.add(frame.openId);
         if (!result.ok) return fail("E_FSB_CAP");
         if (!(await bounded(state.commit(), 1_500, clock))) return fail("E_FSB_STATE");
+        runtime?.scheduleConfirm?.reconcileAll(); // live allow-list generation/authorization change
         publish();
         return ok({ changed: result.value.added, count: state.allowList.size });
       }
@@ -2042,6 +2105,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         await state.commit();
       }
       runtime?.sessionCard.revokeOperator(frame.openId); // G4: silent, cancels timers/aborts IO
+      runtime?.scheduleConfirm?.reconcileAll();
       publish();
       return ok({ changed, count: state.allowList.size });
     } catch {
@@ -2078,6 +2142,10 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
      */
     schedule: {
       enabled: deps.schedule !== undefined,
+      /** H2's scan/authoritative sched_offers tap (also on agent attach); inert for old ports. */
+      offersChanged(sessionId: string): void {
+        void runtime?.scheduleConfirm?.reconcile(sessionId);
+      },
       async pushReport(offer: ScheduleReportOffer): Promise<ReportOfferResult> {
         const none = (outcome: ReportOfferResult["outcome"]): ReportOfferResult => ({
           reportId: offer.reportId,

@@ -76,6 +76,21 @@ describe("agent-server: sched_* frame routing", () => {
     expect(last.reason).toBe("E_OVERLAP");
   });
 
+  it("#61 sched_offers / sched_decide_ack reach the coordinator too; malformed ones are decoded away", async () => {
+    const c = await client();
+    c.send({
+      t: "sched_offers",
+      sessionId: "sid-a",
+      open: [{ offerId: "offer-0123456789abcdef", taskId: "s_abcd2345", defHash: "a".repeat(64), expiresAt: 1 }],
+      closed: [],
+    });
+    c.send({ t: "sched_decide_ack", reqId: "req-1234567890abcdef", result: "refused", reason: "E_REV" });
+    c.send({ t: "sched_offers", sessionId: "sid-a", open: [{ offerId: "short" }], closed: [] }); // bad offer
+    c.send({ t: "sched_decide_ack", reqId: "req-1234567890abcdef", result: "maybe" }); // bad result
+    await new Promise((r) => setTimeout(r, 50));
+    expect(frames.map((f) => f.frame.t)).toEqual(["sched_offers", "sched_decide_ack"]);
+  });
+
   it("malformed sched frames are dropped by the decoder (never reach the coordinator)", async () => {
     const c = await client();
     c.send({ t: "sched_changed" }); // missing sessionId

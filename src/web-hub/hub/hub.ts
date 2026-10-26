@@ -161,7 +161,7 @@ import type { FsDeps } from "../protocol/paths.js";
 import { parseCmdline } from "../protocol/proc-identity.js";
 import { createRegistry } from "./registry.js";
 import { createXsAliasBinding, createXsRelay, hubXsAliasParamsOf, type XsAliasBinding } from "./xs/router.js";
-import { SCHED_HUB_CAP } from "../protocol/schedule.js";
+import { SCHED_CONFIRM_CAP, SCHED_HUB_CAP } from "../protocol/schedule.js";
 import { createScheduleService } from "./schedule/service.js";
 import { XS_ALIAS_HUB_CAP, XS_CHANNEL_HUB_CAP, XS_HUB_CAP, XS_REPLY_HUB_CAP } from "../protocol/xs.js";
 import { acquireSingleton, startFence } from "./singleton.js";
@@ -540,7 +540,7 @@ export async function startHub(
       // scheduled-reports plan r3 §10.1 (H1): `sched.v1` iff `config.schedule` exists (same
       // two-surface tail-append rule; absent ⇒ caps byte-identical). Declared even when the
       // store root failed to resolve (spawn.v1 precedent: the UI needs the cap to explain).
-      ...(config.schedule === undefined ? [] : [SCHED_HUB_CAP]),
+      ...(config.schedule === undefined ? [] : [SCHED_HUB_CAP, SCHED_CONFIRM_CAP]),
     ];
 
     let supersede: SupersedeController | undefined = undefined;

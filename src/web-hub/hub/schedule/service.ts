@@ -26,12 +26,23 @@
  */
 import type { HubEvent, HubLog } from "../ports.js";
 import {
+  SCHED_CONFIRM_CAP,
+  SCHED_CONFIRM_CLOSED_MAX,
+  SCHED_CONFIRM_OFFERS_MAX,
+  SCHED_DECIDE_ACK_WAIT_MS,
+  SCHED_DECIDE_TTL_MS,
+  SCHED_HASH_RE,
   SCHED_HUB_CAP,
+  SCHED_REQ_ID_RE,
   SCHED_RUN_ACK_WAIT_MS,
   SCHED_RUN_TTL_MS,
   SCHED_SESSION_ID_RE,
+  SCHED_TASK_ID_RE,
   type HubScheduleConfig,
   type SchedAgentFrame,
+  type SchedOfferClosedWire,
+  type SchedOffersFrame,
+  type SchedOfferWire,
   type SchedulesPayloadWire,
   type ScheduleReceiptState,
 } from "../../protocol/schedule.js";
@@ -62,7 +73,13 @@ import { gateAttempt, gateFresh, NOTICE_UNKNOWNS_PER_CARD, PENDING_UNKNOWNS_MAX,
 import { reconcileTask } from "./reconcile.js";
 import { projectPayload, type BotStatus, type ReceiptView } from "./project.js";
 import type {
+  FeishuScheduleOfferClosed,
+  FeishuScheduleOfferRow,
   FeishuSchedulePort,
+  HubScheduleExtras,
+  HubSchedulePort,
+  ScheduleDecideRequest,
+  ScheduleDecideResult,
   ScheduleDelivery,
   ScheduleReportOffer,
   ScheduleRunRequest,
@@ -76,6 +93,10 @@ export const SCHED_OBSERVE_DELAY_MS = 60_000 + 30_000;
 export const SCHED_OBSERVE_CATCHUP_MS = 10 * 60_000;
 export const SCHED_FULL_SCAN_INTERVAL_MS = 60_000;
 export const SCHED_OBSERVE_CANDIDATES_MAX = 16;
+/** #61: sessions whose `sched_offers` the hub remembers (oldest frame evicted beyond this). */
+export const SCHED_OFFERS_SESSIONS_MAX = 256;
+/** #61: concurrent `sched_decide` waiters (each one is ≤ SCHED_DECIDE_ACK_WAIT_MS long). */
+export const SCHED_DECIDE_WAITERS_MAX = 64;
 
 export interface RegistryLike {
   list(): readonly { agentKey: string; session?: { sessionId: string; name?: string }; cwd?: string }[];
@@ -150,6 +171,15 @@ export interface ScheduleCounters {
   persistFailures: number;
   scanTimeouts: number;
   scanTruncated: number;
+  /** #61: accepted `sched_offers` frames. */
+  offersFrames: number;
+  /** #61: `sched_offers` frames dropped (sid ≠ the sending agent's session, or no confirm cap). */
+  offersDropped: number;
+  /** #61: `sched_decide` frames sent / acks that settled a waiter / acks ignored (unknown reqId or foreign agent). */
+  decidesSent: number;
+  decideAcks: number;
+  decideAcksIgnored: number;
+  decideTimeouts: number;
 }
 
 export interface ScheduleStatus {
@@ -173,7 +203,7 @@ export interface ScheduleCoordinator {
   /** §7.5 tap: hub.ts forwards sched_bound into the bot's FeishuServiceEvent stream. */
   setBoundTap(tap: SchedBoundTap | undefined): void;
   /** The port hub.ts injects into FeishuBotServiceDeps.schedule (F1's construction-time seam). */
-  port(): FeishuSchedulePort;
+  port(): HubSchedulePort;
   /** Receipt updates (any accepted/sent/failed/uncertain/refused) — fed by F1's receiptsChanged. */
   receipts(
     sessionId: string,
@@ -258,8 +288,27 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
     persistFailures: 0,
     scanTimeouts: 0,
     scanTruncated: 0,
+    offersFrames: 0,
+    offersDropped: 0,
+    decidesSent: 0,
+    decideAcks: 0,
+    decideAcksIgnored: 0,
+    decideTimeouts: 0,
   };
   let pendingSeen = 0;
+
+  // ---- #61 confirm offers (memory only; the agent's `sched_offers` frame is the authority) ----
+  interface OffersEntry {
+    agentKey: string;
+    open: SchedOfferWire[];
+    closed: SchedOfferClosedWire[];
+    at: number;
+  }
+  const offersBySid = new Map<string, OffersEntry>();
+  /** sid → start time of the scan that produced `states.get(sid)` (deletion evidence needs it). */
+  const scannedAt = new Map<string, number>();
+  /** sid → fingerprint of the visible offer set last announced through `offersChanged`. */
+  const offersAnnounced = new Map<string, string>();
 
   const coordOf = (sid: string, taskId: string): SchedHubTaskState => taskStateOf(store.data, sid, taskId, now());
 
@@ -282,6 +331,7 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
         now: now(),
         receipts: receiptStates,
         bot: botStatus,
+        offerOf,
       },
     );
     for (const [sid, reason] of degradedSessions) {
@@ -318,9 +368,111 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
     return w.kind === "cron" ? `cron ${w.expr} @ ${w.tz}` : `once ${w.at} @ ${w.tz}`;
   };
 
+  // ---- #61 offers helpers -----------------------------------------------------------------------
+
+  /** exactly one live view AND it is the view that sent the offers frame (stale views never offer). */
+  const offersOnline = (sid: string, entry: OffersEntry): boolean => {
+    const views = onlineViews(sid);
+    return views.length === 1 && views[0] === entry.agentKey;
+  };
+
+  /** Projection hook: one live, unexpired, hash-matching offer of an ONLINE single-view session. */
+  function offerOf(sid: string, taskId: string, hash: string): { offerId: string; expiresAt: number } | undefined {
+    const entry = offersBySid.get(sid);
+    if (entry === undefined || !offersOnline(sid, entry)) return undefined;
+    const t = now();
+    const o = entry.open.find((x) => x.taskId === taskId && x.defHash === hash && x.expiresAt > t);
+    return o === undefined ? undefined : { offerId: o.offerId, expiresAt: o.expiresAt };
+  }
+
+  /**
+   * Offers whose task still exists in the SCANNED ledger with the same defHash and is still pending.
+   * A scan that lags the frame (hash not yet / no longer equal) neither lists nor closes the offer —
+   * it simply is not visible until the ledger catches up.
+   */
+  const visibleOffers = (): FeishuScheduleOfferRow[] => {
+    const rows: FeishuScheduleOfferRow[] = [];
+    const t = now();
+    for (const [sid, entry] of offersBySid) {
+      const state = states.get(sid);
+      if (state === undefined) continue;
+      const online = offersOnline(sid, entry);
+      for (const o of entry.open) {
+        if (o.expiresAt <= t) continue;
+        const task = state.tasks.find((x) => x.id === o.taskId);
+        if (task === undefined || defHash(task) !== o.defHash || isApproved(task)) continue;
+        rows.push({
+          sessionId: sid,
+          sessionLabel: sessionLabel(sid),
+          online,
+          offerId: o.offerId,
+          expiresAt: o.expiresAt,
+          task,
+          defHash: o.defHash,
+        });
+      }
+    }
+    return rows;
+  };
+
+  const visibleFingerprint = (sid: string): string => {
+    const entry = offersBySid.get(sid);
+    if (entry === undefined) return "";
+    return JSON.stringify([
+      offersOnline(sid, entry),
+      visibleOffers()
+        .filter((r) => r.sessionId === sid)
+        .map((r) => r.offerId),
+      entry.closed.map((c) => [c.offerId, c.outcome, c.by ?? ""]),
+    ]);
+  };
+
+  /** Best-effort, never awaited; `force` re-announces even when the visible set did not change. */
+  const announceOffers = (sid: string, force: boolean): void => {
+    if (disposed) return;
+    const fp = visibleFingerprint(sid);
+    if (!force && offersAnnounced.get(sid) === fp) return;
+    offersAnnounced.set(sid, fp);
+    try {
+      delivery?.offersChanged?.(sid);
+    } catch (err) {
+      log.error("web-hub schedule: offersChanged threw", { error: String(err) });
+    }
+  };
+  const announceAllOffers = (): void => {
+    for (const sid of [...offersBySid.keys()]) announceOffers(sid, false);
+  };
+
+  const acceptOffers = (agentKey: string, frame: SchedOffersFrame): void => {
+    const sid = frame.sessionId;
+    const sender = deps.registry.list().find((a) => a.agentKey === agentKey);
+    const caps = deps.registry.getCaps?.(agentKey);
+    if (sender?.session?.sessionId !== sid || caps === undefined || !caps.includes(SCHED_CONFIRM_CAP)) {
+      counters.offersDropped++; // sid ≠ the sender's own session, or the agent never declared the cap
+      return;
+    }
+    counters.offersFrames++;
+    // Re-insert so Map order == recency; evict the stalest session beyond the cap.
+    offersBySid.delete(sid);
+    offersBySid.set(sid, {
+      agentKey,
+      open: frame.open.slice(0, SCHED_CONFIRM_OFFERS_MAX),
+      closed: frame.closed.slice(0, SCHED_CONFIRM_CLOSED_MAX),
+      at: now(),
+    });
+    while (offersBySid.size > SCHED_OFFERS_SESSIONS_MAX) {
+      const oldest = offersBySid.keys().next().value;
+      if (oldest === undefined) break;
+      offersBySid.delete(oldest);
+      offersAnnounced.delete(oldest);
+    }
+    rebuildPayload(); // the projection's `offer` field follows the frame immediately
+    announceOffers(sid, true);
+  };
+
   // ---- one scan round ------------------------------------------------------------------------
 
-  const applyScan = (result: ScanResult): void => {
+  const applyScan = (result: ScanResult, startedAt: number): void => {
     if (result.rootDegraded !== undefined) {
       rootError = result.rootDegraded;
       states.clear();
@@ -337,14 +489,20 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
       seen.add(s.sessionId);
       if (s.read.kind === "ok") {
         states.set(s.sessionId, s.read.state);
+        scannedAt.set(s.sessionId, startedAt);
         degradedSessions.delete(s.sessionId);
       } else if (s.read.kind === "degraded") {
         states.delete(s.sessionId);
+        scannedAt.delete(s.sessionId);
         degradedSessions.set(s.sessionId, `${s.read.reason}: ${s.read.detail}`);
       }
     }
     if (complete) {
-      for (const sid of [...states.keys()]) if (!seen.has(sid)) states.delete(sid);
+      for (const sid of [...states.keys()])
+        if (!seen.has(sid)) {
+          states.delete(sid);
+          scannedAt.delete(sid);
+        }
       for (const sid of [...degradedSessions.keys()]) if (!seen.has(sid)) degradedSessions.delete(sid);
     }
   };
@@ -762,6 +920,7 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
         }
         if (kind === "full") {
           const mine = ++scanGen;
+          const startedAt = now();
           const result = await scanAllFn(root, {
             isCurrent: () => !disposed && mine === scanGen,
             startAt: scanStart,
@@ -777,18 +936,21 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
             scanStart = 0;
           }
           if (result.truncated) counters.scanTruncated++;
-          applyScan(result);
+          applyScan(result, startedAt);
         } else {
           for (const sid of sids) {
             if (!SCHED_SESSION_ID_RE.test(sid)) continue;
+            const startedAt = now();
             const read = await scanOneFn(root, sid, { isCurrent: () => !disposed });
             if (disposed) return;
             counters.scans++;
             if (read.kind === "ok") {
               states.set(sid, read.state);
+              scannedAt.set(sid, startedAt);
               degradedSessions.delete(sid);
             } else if (read.kind === "degraded") {
               states.delete(sid);
+              scannedAt.delete(sid);
               degradedSessions.set(sid, `${read.reason}: ${read.detail}`);
             }
           }
@@ -802,6 +964,8 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
       pendingSeen = await discoverReports();
       await deliverRound();
       rebuildPayload();
+      // #61: a rescan may have flipped a task's defHash (offer now visible / no longer matching).
+      if (kind === "full" || kind === "targeted") announceAllOffers();
       if (dirty || delivery !== undefined) {
         await store.flush();
         counters.capOverflow = store.overflowSessions;
@@ -849,7 +1013,106 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
 
   // ---- port (F1's construction-time seam) ------------------------------------------------------------
 
-  const port: FeishuSchedulePort = {
+  // ---- sched_decide waiters (#61): exactly one settle per reqId, ack bounded, dispose-safe ----------
+
+  interface DecideWaiter {
+    agentKey: string;
+    promise: Promise<ScheduleDecideResult>;
+    settle(result: ScheduleDecideResult): void;
+  }
+  const decideWaiters = new Map<string, DecideWaiter>();
+
+  const extras: HubScheduleExtras = {
+    ledgerTask(sid, taskId, opts) {
+      if (rootError !== undefined) return { kind: "unknown", reason: "root-degraded" };
+      if (degradedSessions.has(sid)) return { kind: "unknown", reason: "degraded" };
+      const state = states.get(sid);
+      if (state === undefined) return { kind: "unknown", reason: "no-session" };
+      const at = scannedAt.get(sid) ?? 0;
+      const found = state.tasks.find((x) => x.id === taskId);
+      if (found !== undefined)
+        return { kind: "present", approved: isApproved(found), defHash: defHash(found), scannedAt: at };
+      // Absence only proves deletion when the scan started no earlier than the caller's anchor.
+      if (at < (opts?.since ?? 0) || at === 0) return { kind: "unknown", reason: "stale" };
+      return { kind: "deleted", scannedAt: at };
+    },
+    offersSeen(sid) {
+      const entry = offersBySid.get(sid);
+      return entry === undefined ? undefined : { at: entry.at, online: offersOnline(sid, entry) };
+    },
+  };
+
+  const port: HubSchedulePort = {
+    ...extras,
+    offers(): readonly FeishuScheduleOfferRow[] {
+      return visibleOffers();
+    },
+    closedOffers(sessionId: string): readonly FeishuScheduleOfferClosed[] {
+      return (offersBySid.get(sessionId)?.closed ?? []).map((c) => ({
+        sessionId,
+        offerId: c.offerId,
+        outcome: c.outcome,
+        ...(c.by === undefined ? {} : { by: c.by }),
+      }));
+    },
+    decide(req: ScheduleDecideRequest): Promise<ScheduleDecideResult> {
+      if (disposed) return Promise.resolve({ kind: "unavailable" });
+      if (
+        !SCHED_REQ_ID_RE.test(req.reqId) ||
+        !SCHED_REQ_ID_RE.test(req.offerId) ||
+        !SCHED_SESSION_ID_RE.test(req.sessionId) ||
+        !SCHED_TASK_ID_RE.test(req.taskId) ||
+        !SCHED_HASH_RE.test(req.defHash) ||
+        (req.decision !== "approve" && req.decision !== "reject")
+      )
+        return Promise.resolve({ kind: "refused", reason: "bad-request" });
+      // Same reqId in flight ⇒ join it (the agent dedupes by reqId too): never a second frame.
+      const inflight = decideWaiters.get(req.reqId);
+      if (inflight !== undefined) return inflight.promise;
+      const views = onlineViews(req.sessionId);
+      if (views.length === 0) return Promise.resolve({ kind: "offline" });
+      if (views.length > 1) return Promise.resolve({ kind: "multi" });
+      const agentKey = views[0]!;
+      const caps = deps.registry.getCaps?.(agentKey);
+      if (caps === undefined || !caps.includes(SCHED_CONFIRM_CAP))
+        return Promise.resolve({ kind: "refused", reason: "no-cap" });
+      if (decideWaiters.size >= SCHED_DECIDE_WAITERS_MAX) return Promise.resolve({ kind: "refused", reason: "busy" });
+      const sent = deps.registry.send(agentKey, {
+        t: "sched_decide",
+        reqId: req.reqId,
+        sessionId: req.sessionId,
+        offerId: req.offerId,
+        taskId: req.taskId,
+        defHash: req.defHash,
+        decision: req.decision,
+        expiresAt: now() + SCHED_DECIDE_TTL_MS,
+      });
+      if (!sent) return Promise.resolve({ kind: "offline" });
+      counters.decidesSent++;
+      let handle: SchedTimerHandle | undefined;
+      let resolveFn: (r: ScheduleDecideResult) => void = () => {};
+      const promise = new Promise<ScheduleDecideResult>((resolve) => {
+        resolveFn = resolve;
+      });
+      let settled = false;
+      const waiter: DecideWaiter = {
+        agentKey,
+        promise,
+        settle(result) {
+          if (settled) return;
+          settled = true;
+          decideWaiters.delete(req.reqId);
+          timer.clear(handle);
+          resolveFn(result);
+        },
+      };
+      decideWaiters.set(req.reqId, waiter);
+      handle = timer.set(SCHED_DECIDE_ACK_WAIT_MS, () => {
+        counters.decideTimeouts++;
+        waiter.settle({ kind: "timeout" });
+      });
+      return promise;
+    },
     list(): ReturnType<FeishuSchedulePort["list"]> {
       const rows: import("../feishu/schedule.js").FeishuScheduleRow[] = [];
       for (const [sid, state] of states) {
@@ -937,25 +1200,50 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
     },
     onAgentFrame(agentKey: string, frame: SchedAgentFrame): void {
       counters.frames++;
-      if (frame.t === "sched_changed") {
-        void rescanSession(frame.sessionId);
-        return;
-      }
-      if (frame.t === "sched_bound") {
-        try {
-          boundTap?.(agentKey, frame.runKey);
-        } catch (err) {
-          log.error("web-hub schedule: sched_bound tap threw", { error: String(err) });
+      // Exhaustive by `t` (#61): an unknown/new frame is NEVER mistaken for a run ack.
+      switch (frame.t) {
+        case "sched_changed":
+          void rescanSession(frame.sessionId);
+          return;
+        case "sched_bound":
+          try {
+            boundTap?.(agentKey, frame.runKey);
+          } catch (err) {
+            log.error("web-hub schedule: sched_bound tap threw", { error: String(err) });
+          }
+          return;
+        case "sched_run_ack":
+          // resolves the port's run() waiter (§7.4).
+          if (frame.result === "started") settleRun(frame.reqId, { kind: "started" });
+          else settleRun(frame.reqId, { kind: "refused", reason: frame.reason ?? "refused" });
+          return;
+        case "sched_offers":
+          acceptOffers(agentKey, frame);
+          return;
+        case "sched_decide_ack": {
+          const w = decideWaiters.get(frame.reqId);
+          if (w === undefined || w.agentKey !== agentKey) {
+            counters.decideAcksIgnored++; // late (already settled) or from a view we never asked
+            return;
+          }
+          counters.decideAcks++;
+          if (frame.result === "approved") w.settle({ kind: "approved" });
+          else if (frame.result === "rejected") w.settle({ kind: "rejected" });
+          else w.settle({ kind: "refused", reason: frame.reason ?? "refused" });
+          return;
         }
-        return;
+        default: {
+          const unreachable: never = frame;
+          void unreachable; // a future frame type must be routed explicitly above
+          return;
+        }
       }
-      // sched_run_ack resolves the port's run() waiter (§7.4).
-      if (frame.result === "started") settleRun(frame.reqId, { kind: "started" });
-      else settleRun(frame.reqId, { kind: "refused", reason: frame.reason ?? "refused" });
     },
     bindDelivery(d: ScheduleDelivery | undefined): void {
       delivery = d;
       botStatus.configured = d !== undefined;
+      // #61: offers that arrived before the bot (or while it was down) are announced once now.
+      if (d !== undefined) for (const sid of [...offersBySid.keys()]) announceOffers(sid, true);
       // Refill the receipt view from F1's durable table (hub restart window).
       if (d !== undefined) {
         for (const sid of states.keys()) {
@@ -1034,6 +1322,11 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
         timer.clear(h);
         settleRun(reqId, { kind: "unavailable" });
       }
+      // #61: no decide waiter may outlive the service — settle them all as unavailable.
+      for (const w of [...decideWaiters.values()]) w.settle({ kind: "unavailable" });
+      offersBySid.clear();
+      offersAnnounced.clear();
+      scannedAt.clear();
       unsubscribeBus?.();
       unsubscribeBus = undefined;
       await store.flush();
@@ -1046,6 +1339,17 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
     const bus = deps.registry.bus;
     unsubscribeBus = bus.subscribe((e: HubEvent) => {
       if (disposed) return;
+      // #61: a view going away flips `online` for its sessions' offers (projection + cards).
+      if (e.type === "agent_down" || e.type === "agent_removed") {
+        let touched = false;
+        for (const [osid, entry] of offersBySid) {
+          if (entry.agentKey !== e.agentKey) continue;
+          touched = true;
+          announceOffers(osid, false);
+        }
+        if (touched) rebuildPayload();
+        return;
+      }
       const sid =
         e.type === "session" ? e.session?.sessionId : e.type === "agent_up" ? e.agent.session?.sessionId : undefined;
       if (sid === undefined) return;
