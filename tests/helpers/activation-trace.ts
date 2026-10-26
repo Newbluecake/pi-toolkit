@@ -16,7 +16,14 @@ const SAFE_RETURN: Record<string, unknown> = {
   getThinkingLevel: "off",
 };
 
-export function traceActivation(activate: (pi: ExtensionAPI) => void): ActivationTrace {
+export interface TraceOptions {
+  /** Properties read as `undefined` on the traced pi (builds a compat failure, e.g. `["appendEntry"]`). */
+  omit?: readonly string[];
+  /** Receives every handler registered through `pi.on` (for phase-2 event replay). */
+  onHandler?: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => void;
+}
+
+export function traceActivation(activate: (pi: ExtensionAPI) => void, options: TraceOptions = {}): ActivationTrace {
   const calls: string[] = [];
   const envBefore = { ...process.env };
   const describe = (name: string, args: unknown[]): string => {
@@ -24,6 +31,12 @@ export function traceActivation(activate: (pi: ExtensionAPI) => void): Activatio
     if (typeof first === "string") return `${name}(${first})`;
     if (first !== null && typeof first === "object" && typeof (first as { name?: unknown }).name === "string")
       return `${name}(${(first as { name: string }).name})`;
+    if (
+      first !== null &&
+      typeof first === "object" &&
+      typeof (first as { customType?: unknown }).customType === "string"
+    )
+      return `${name}(${(first as { customType: string }).customType})`;
     return `${name}()`;
   };
   const events = new Proxy(
@@ -45,8 +58,11 @@ export function traceActivation(activate: (pi: ExtensionAPI) => void): Activatio
         if (typeof prop !== "string") return undefined;
         if (prop === "events") return events;
         if (prop === "then") return undefined;
+        if (options.omit?.includes(prop)) return undefined;
         return (...args: unknown[]) => {
           calls.push(describe(prop, args));
+          if (prop === "on" && typeof args[0] === "string" && typeof args[1] === "function")
+            options.onHandler?.(args[0], args[1] as (event: unknown, ctx: unknown) => unknown);
           if (prop in SAFE_RETURN) return SAFE_RETURN[prop];
           if (prop === "exec") return Promise.resolve({ code: 1, stdout: "", stderr: "", killed: false });
           return () => undefined;
