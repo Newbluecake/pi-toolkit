@@ -24,7 +24,6 @@ import { mergeExtensionPoints } from "./extensions/registry.js";
 import { buildSessionStack, type Stack } from "./stack.js";
 import {
   createTidyPort,
-  forwardBashJobs,
   forwardNotifier,
   forwardOrphans,
   forwardQuery,
@@ -38,7 +37,7 @@ import { registerSubagentTools } from "./tools/register.js";
 import { createBackgroundCompletionEventHook, createNotificationReceiptHook } from "./delivery/stack-hooks.js";
 import { readBashJobTail } from "./bash/notify.js";
 import { createCompactHintHook } from "./compact-hint/hook.js";
-import { bashJobsEnabled, BASH_JOB_SEAL_GRACE_MS } from "./bash/host.js";
+import { bashJobsEnabled, BASH_JOB_SEAL_GRACE_MS, killBashJobsBounded, registerBashTools } from "./bash/host.js";
 import { createMentionRouteDeps, installMentionInput } from "./mention/mention.js";
 import { createWakeInputHook } from "./fabric/wake-input.js";
 import { observeRootWakeTrigger } from "./fabric/root-wake.js";
@@ -81,10 +80,7 @@ import { createSwitchContextCompactHook } from "./context-switch/hook.js";
 import { getChildSwitchCapability } from "./context-switch/capability.js";
 import { createSessionFactsProvider } from "./context-switch/session-facts.js";
 import { createSetCompactThresholdTool } from "./compact-hint/threshold-tool.js";
-import { createBashTool } from "./bash/tool.js";
-import { createBashJobTool } from "./bash/job-tool.js";
-import type { BashJobManager } from "./bash/manager.js";
-import { isTerminalJobStatus, type JobRecord } from "./bash/types.js";
+import type { JobRecord } from "./bash/types.js";
 import { createStatusCommand } from "./commands/status.js";
 import { createWebHubCommand } from "./commands/webhub.js";
 import { wireWebHub, type WebHubControl } from "./web-hub/agent/index.js";
@@ -997,39 +993,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   // bash auto-background (§2.6/R6): the same-name `bash` override and its
   // `bash_job` management tool exist only when the feature is on — off means
   // pi's built-in bash stays in place with zero behaviour change.
-  if (bashJobsEnabled(settings)) {
-    pi.registerTool(
-      createBashTool({
-        manager: forwardBashJobs(holder),
-        autoBackgroundMs: () => settings.bashJobs.autoBackgroundMs,
-        // 2026-10-17 shell-resolution revision: pi's `shellCommandPrefix`,
-        // honoured exactly like pi's built-in bash tool (`${prefix}\n${command}`)
-        // — read off the current stack (rebuilt per session_start, non-live).
-        commandPrefix: () => holder.current?.bashShell?.shellCommandPrefix,
-        // P5b: without this the main session's `timeoutGraceMs`/`maxExtensions`/
-        // `maxTimeoutFactor` settings never reach the tool surface (the
-        // description suffix stays off even when the manager's own
-        // deadlinePolicy — src/bash/host.ts's `buildBashJobManager` — is enabled).
-        deadline: () => ({
-          graceMs: settings.bashJobs.timeoutGraceMs,
-          maxExtensions: settings.bashJobs.maxExtensions,
-          maxTimeoutFactor: settings.bashJobs.maxTimeoutFactor,
-        }),
-      }),
-    );
-    pi.registerTool(
-      createBashJobTool({
-        manager: forwardBashJobs(holder),
-        // P5b: same as above — without this `bash_job`'s schema never gains
-        // the `extend` action for the main session, no matter the settings.
-        deadline: () => ({
-          graceMs: settings.bashJobs.timeoutGraceMs,
-          maxExtensions: settings.bashJobs.maxExtensions,
-          maxTimeoutFactor: settings.bashJobs.maxTimeoutFactor,
-        }),
-      }),
-    );
-  }
+  if (bashJobsEnabled(settings)) registerBashTools(pi, { holder, settings });
   // Inject the registered agent types and available models through the hub.
   // The hub owns the stable/live/legacy mode, persistence, updates, and wake
   // replay capture. Its registration order is the existing types -> models
@@ -1791,16 +1755,6 @@ export default function activate(rawPi: ExtensionAPI): void {
   // 协议同步执行：external-active ⇒ 整体让位零注册，否则发布 claim + session_start 权威复核）。
   // enabled=false（默认）/ secure 域 ⇒ assembleTrafficHost 首行即返回，零注册零 IO 零全局符号。
   assembleTrafficHost(pi, { settings: settings.traffic, cwd: process.cwd() });
-}
-
-/** §3.7 `shutdownPolicy: "kill"` — signal every live job, wait at most `graceMs`. */
-async function killBashJobsBounded(bashJobs: BashJobManager, graceMs: number): Promise<void> {
-  const live = bashJobs
-    .list()
-    .filter((record) => !isTerminalJobStatus(record.status) || bashJobs.hasOpenLocalHandle(record.jobId));
-  if (live.length === 0) return;
-  const kills = Promise.allSettled(live.map((record) => bashJobs.kill(record.jobId).catch(() => undefined)));
-  await Promise.race([kills, new Promise<void>((resolve) => systemClock.setTimer(Math.max(0, graceMs), resolve))]);
 }
 
 /**

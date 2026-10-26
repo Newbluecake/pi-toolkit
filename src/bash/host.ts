@@ -9,6 +9,10 @@ import {
   readBashJobTail,
 } from "./notify.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { forwardBashJobs, type StackHolder } from "../holder.js";
+import { createBashTool } from "./tool.js";
+import { createBashJobTool } from "./job-tool.js";
+import { isTerminalJobStatus } from "./types.js";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -257,4 +261,53 @@ export function scheduleBashJobRecovery(opts: {
       cleanup.abort();
     },
   };
+}
+
+/**
+ * The `bash` override + `bash_job` management tool (moved verbatim out of `activate()`, #56 batch 2 step 5-3).
+ * The caller keeps the `bashJobsEnabled(settings)` gate; both tools read the manager through the holder at call time.
+ */
+export function registerBashTools(pi: ExtensionAPI, deps: { holder: StackHolder; settings: AgentSettings }): void {
+  const { holder, settings } = deps;
+  pi.registerTool(
+    createBashTool({
+      manager: forwardBashJobs(holder),
+      autoBackgroundMs: () => settings.bashJobs.autoBackgroundMs,
+      // 2026-10-17 shell-resolution revision: pi's `shellCommandPrefix`,
+      // honoured exactly like pi's built-in bash tool (`${prefix}\n${command}`)
+      // — read off the current stack (rebuilt per session_start, non-live).
+      commandPrefix: () => holder.current?.bashShell?.shellCommandPrefix,
+      // P5b: without this the main session's `timeoutGraceMs`/`maxExtensions`/
+      // `maxTimeoutFactor` settings never reach the tool surface (the
+      // description suffix stays off even when the manager's own
+      // deadlinePolicy — src/bash/host.ts's `buildBashJobManager` — is enabled).
+      deadline: () => ({
+        graceMs: settings.bashJobs.timeoutGraceMs,
+        maxExtensions: settings.bashJobs.maxExtensions,
+        maxTimeoutFactor: settings.bashJobs.maxTimeoutFactor,
+      }),
+    }),
+  );
+  pi.registerTool(
+    createBashJobTool({
+      manager: forwardBashJobs(holder),
+      // P5b: same as above — without this `bash_job`'s schema never gains
+      // the `extend` action for the main session, no matter the settings.
+      deadline: () => ({
+        graceMs: settings.bashJobs.timeoutGraceMs,
+        maxExtensions: settings.bashJobs.maxExtensions,
+        maxTimeoutFactor: settings.bashJobs.maxTimeoutFactor,
+      }),
+    }),
+  );
+}
+
+/** §3.7 `shutdownPolicy: "kill"` — signal every live job, wait at most `graceMs`. */
+export async function killBashJobsBounded(bashJobs: BashJobManager, graceMs: number): Promise<void> {
+  const live = bashJobs
+    .list()
+    .filter((record) => !isTerminalJobStatus(record.status) || bashJobs.hasOpenLocalHandle(record.jobId));
+  if (live.length === 0) return;
+  const kills = Promise.allSettled(live.map((record) => bashJobs.kill(record.jobId).catch(() => undefined)));
+  await Promise.race([kills, new Promise<void>((resolve) => systemClock.setTimer(Math.max(0, graceMs), resolve))]);
 }
