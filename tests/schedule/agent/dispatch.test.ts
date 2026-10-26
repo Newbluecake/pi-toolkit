@@ -234,6 +234,8 @@ describe("readScheduleTrigger", () => {
     expect(readScheduleTrigger(wakeEvent("t1"))).toEqual({ kind: "wake", wake: "message", token: "t1" });
     expect(readScheduleTrigger(wakeEvent("t2", "handoff"))).toEqual({ kind: "wake", wake: "handoff", token: "t2" });
     expect(readScheduleTrigger(wakeEvent("t3", "result"))).toEqual({ kind: "quiet" });
+    // #61: the confirm-outcome notice (sendMessage triggerTurn:false) is quiet — the orphan guard must not abort it
+    expect(readScheduleTrigger(wakeEvent("t4", "confirm"))).toEqual({ kind: "quiet" });
     expect(readScheduleTrigger({ messageType: "custom", message: { customType: SCHED_CUSTOM_TYPE } })).toEqual({
       kind: "wake",
       wake: "unknown",

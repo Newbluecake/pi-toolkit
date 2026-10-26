@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createScheduleConfirm } from "../../src/schedule/agent/confirm.js";
 import { createScheduleCommand, parseFlags, splitPrompt, tokenizeScheduleArgs } from "../../src/commands/schedule.js";
 import { createTask, updateTask } from "../../src/schedule/agent/ops.js";
 import { manualClaim } from "../../src/schedule/core/claim.js";
@@ -419,5 +420,135 @@ describe("__put — frozen web review contract", () => {
     expect(await h.run(`__put ${body({ baseHash: "a".repeat(64) })} ${ZERO}`)).toMatch(/创建不能带 baseHash/);
     expect(await h.run(`__put ${body({ id: "bad", baseHash: "a".repeat(64) })} ${ZERO}`)).toMatch(/id 无效/);
     expect(env.agent.readState().kind).toBe("absent");
+  });
+});
+
+describe("/schedule reject (#61)", () => {
+  async function setupReject(kind: "create" | "update" = "create") {
+    env = a3Env();
+    const confirm = createScheduleConfirm({
+      agent: env.agent,
+      hubConfirmReady: () => true, // a channel exists, no local box
+      publish: () => undefined,
+      notice: () => undefined,
+      clock: env.fake,
+    });
+    const confirms: Array<{ title: string; message: string }> = [];
+    let answer = true;
+    const cmd = createScheduleCommand({
+      enabled: () => true,
+      agent: () => env.agent,
+      ports: () => env.ports,
+      confirm: () => confirm,
+      inVault: () => false,
+      now: () => env.fake.now(),
+    });
+    const run = async (args: string, over: Record<string, unknown> = {}) => {
+      const out: string[] = [];
+      await cmd.handler(args, {
+        ui: {
+          notify: (m: string) => out.push(m),
+          confirm: async (title: string, message: string) => (confirms.push({ title, message }), answer),
+          input: async () => undefined,
+        },
+        ...over,
+      } as never);
+      return out.join("\n");
+    };
+    const c = await createTask(env.ports, basicRaw(), AI);
+    if (!c.ok) throw new Error(c.detail);
+    let task = c.value;
+    if (kind === "update") {
+      const { approveTask } = await import("../../src/schedule/core/claim.js");
+      await approveTask(env.agent.store()!, task.id, defHash(task), "tui");
+      let before: any;
+      const u = await updateTask(env.ports, task.id, { prompt: "ai edit" }, AI, { onBase: (b) => void (before = b) });
+      if (!u.ok) throw new Error(u.detail);
+      confirm.offer(u.value, {
+        kind: "update",
+        base: { form: before.form, when: before.when, prompt: before.prompt, feishu: before.feishu, bg: before.bg },
+        wasApproved: true,
+      });
+      task = u.value;
+    } else confirm.offer(task, { kind: "create" });
+    return { confirm, run, confirms, task, setAnswer: (v: boolean) => (answer = v) };
+  }
+  const tasks = () => {
+    const r = env.agent.readState();
+    return r.kind === "ok" ? r.state.tasks : [];
+  };
+
+  it("without a hash: shows what will happen, then deletes an AI-created task (web invocations too)", async () => {
+    const s = await setupReject("create");
+    const out = await s.run(`reject ${s.task.id}`);
+    expect(s.confirms).toHaveLength(1);
+    expect(s.confirms[0]!.message).toContain("拒绝将删除该任务");
+    expect(out).toMatch(/已拒绝并删除/);
+    expect(tasks()).toHaveLength(0);
+    expect(s.confirm.liveOffer(s.task.id)).toBeUndefined();
+  });
+
+  it("declining the dialog changes nothing and keeps the offer", async () => {
+    const s = await setupReject("create");
+    s.setAnswer(false);
+    expect(await s.run(`reject ${s.task.id}`)).toMatch(/已取消/);
+    expect(tasks()).toHaveLength(1);
+    expect(s.confirm.liveOffer(s.task.id)).toBeDefined();
+  });
+
+  it("an AI edit is restored to the old definition (and the dialog says so)", async () => {
+    const s = await setupReject("update");
+    const out = await s.run(`reject ${s.task.id}`);
+    expect(s.confirms[0]!.message).toContain("恢复到 AI 修改之前的定义");
+    expect(out).toMatch(/已恢复到修改前的定义/);
+    expect(tasks()[0]!.prompt).toBe("do the thing");
+    expect(isApproved(tasks()[0]!)).toBe(true);
+  });
+
+  it("with the 64-hex hash (web form): no dialog; a wrong hash ⇒ E_REV and nothing happens", async () => {
+    const s = await setupReject("create");
+    const bad = await s.run(`reject ${s.task.id} ${"a".repeat(64)}`, { webInvocation: true });
+    expect(bad).toMatch(/E_REV/);
+    expect(tasks()).toHaveLength(1);
+    const ok = await s.run(`reject ${s.task.id} ${defHash(s.task)}`, { webInvocation: true });
+    expect(s.confirms).toHaveLength(0);
+    expect(ok).toMatch(/已拒绝并删除/);
+    expect(tasks()).toHaveLength(0);
+  });
+
+  it("no live offer ⇒ pointed at /schedule rm; user-created / unknown ids never reach decide", async () => {
+    env = a3Env();
+    const h = harness(env);
+    const c = await createTask(env.ports, basicRaw(), AI);
+    if (!c.ok) throw new Error(c.detail);
+    expect(await h.run(`reject ${c.value.id}`)).toMatch(/没有待确认的 AI 改动.*\/schedule rm/);
+    expect(readOk(env.agent.store()!).tasks).toHaveLength(1);
+  });
+
+  it("usage / --all / bad hash / Feishu are refused", async () => {
+    const s = await setupReject("create");
+    expect(await s.run("reject")).toMatch(/用法/);
+    expect(await s.run(`reject ${s.task.id} --all`)).toMatch(/不支持 --all/);
+    expect(await s.run(`reject ${s.task.id} nothex`)).toMatch(/64 位十六进制/);
+    expect(await s.run(`reject ${s.task.id}`, { feishuInvocation: true, webInvocation: true })).toMatch(
+      /飞书入口不能修改/,
+    );
+    expect(tasks()).toHaveLength(1);
+  });
+
+  it("already approved elsewhere ⇒ refused politely, nothing deleted", async () => {
+    const s = await setupReject("create");
+    const { approveTask } = await import("../../src/schedule/core/claim.js");
+    await approveTask(env.agent.store()!, s.task.id, defHash(s.task), "web");
+    const out = await s.run(`reject ${s.task.id} ${defHash(s.task)}`);
+    expect(out).toMatch(/没有待确认|已是批准状态/);
+    expect(tasks()).toHaveLength(1);
+  });
+
+  it("/schedule approve of an already-approved task keeps its friendly text", async () => {
+    const s = await setupReject("create");
+    await s.run(`approve ${s.task.id} ${defHash(s.task)}`);
+    const again = await s.run(`approve ${s.task.id} ${defHash(s.task)}`);
+    expect(again).toMatch(/已是批准状态/);
   });
 });

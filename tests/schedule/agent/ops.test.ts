@@ -348,3 +348,41 @@ describe("pause / delete revoke queued message runs (I1, A2 residual 3)", () => 
     expect(revoked).toEqual([]);
   });
 });
+
+describe("updateTask onBase (#61)", () => {
+  it("receives a clone of the task as it was, once, inside the write — and not at all when the update is refused", async () => {
+    env = a3Env();
+    const c = await createTask(env.ports, basicRaw(), USER);
+    if (!c.ok) throw new Error(c.detail);
+    const seen: ReturnType<typeof structuredClone>[] = [];
+    const ok = await updateTask(env.ports, c.value.id, { prompt: "new" }, AI, {
+      onBase: (b) => {
+        seen.push(b);
+        b.prompt = "mutated by the observer"; // a clone: must not leak into the ledger
+      },
+    });
+    if (!ok.ok) throw new Error(ok.detail);
+    expect(seen).toHaveLength(1);
+    expect((seen[0] as { prompt: string }).prompt).toBe("mutated by the observer");
+    expect(state().tasks[0]!.prompt).toBe("new");
+    expect(isApproved(state().tasks[0]!)).toBe(false);
+
+    let refusedCalls = 0;
+    const bad = await updateTask(env.ports, c.value.id, { form: "nope" }, AI, { onBase: () => void refusedCalls++ });
+    expect(bad.ok).toBe(false);
+    expect(refusedCalls).toBe(0);
+  });
+
+  it("a throwing observer never breaks the write", async () => {
+    env = a3Env();
+    const c = await createTask(env.ports, basicRaw(), AI);
+    if (!c.ok) throw new Error(c.detail);
+    const r = await updateTask(env.ports, c.value.id, { prompt: "x" }, AI, {
+      onBase: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(r.ok).toBe(true);
+    expect(state().tasks[0]!.prompt).toBe("x");
+  });
+});

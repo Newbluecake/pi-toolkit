@@ -546,6 +546,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       createScheduleTool({
         agent: () => holder.current?.schedule,
         ports: (agent, ctx) => scheduleSurface.opsPorts(agent, ctx),
+        confirm: () => scheduleSurface.confirm(),
       }),
     );
     pi.registerCommand(
@@ -554,6 +555,7 @@ export default function activate(rawPi: ExtensionAPI): void {
         enabled: () => settings.schedule.enabled,
         agent: () => holder.current?.schedule,
         ports: (agent, ctx) => scheduleSurface.opsPorts(agent, ctx),
+        confirm: () => scheduleSurface.confirm(),
         inVault: vaultPredicateOf(secureDomain),
         // `/schedule repair` is the local-only escape for a stuck dispatcher when fabric/xs (and its
         // `/fabric fence reset`) is not enabled; web policy keeps `repair` denied (frozen S0 table).

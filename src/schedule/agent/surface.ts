@@ -17,7 +17,9 @@ import type { ScheduleSettings } from "../../config/settings.js";
 import type { AgentTypeRegistry } from "../../config/agent-types.js";
 import { systemClock } from "../../core/clock.js";
 import { getXsHostCapability } from "../../fabric/xs/host-cap.js";
-import { SCHED_STATUS_KEY } from "../core/spec.js";
+import type { SchedOffersFrame } from "../../web-hub/protocol/schedule.js";
+import { SCHED_CUSTOM_TYPE, SCHED_STATUS_KEY } from "../core/spec.js";
+import { createScheduleConfirm, type ScheduleConfirm } from "./confirm.js";
 import { createScheduleDigest, type ScheduleDigest } from "./digest.js";
 import { systemTimeZone, type OpsPorts } from "./ops.js";
 import { createScheduleStatus, type ScheduleStatus } from "./status.js";
@@ -32,11 +34,23 @@ export interface ScheduleSurfaceDeps {
   revokeQueued?(taskId: string): void;
 }
 
+/**
+ * What the session coordinator offers the confirm module (#61 C2 adds these members to
+ * `ScheduleCoordinator`; read structurally so the C1 surface compiles and degrades to TUI-only —
+ * `NULL_SCHEDULE_COORDINATOR` and a pre-C2 coordinator have neither).
+ */
+interface ConfirmCoordinatorPort {
+  offers?(frame: Omit<SchedOffersFrame, "t">): void;
+  confirmReady?(): boolean;
+}
+
 export interface ScheduleSurface {
   opsPorts(agent: ScheduleAgent, ctx: Pick<ExtensionContext, "cwd" | "modelRegistry">): OpsPorts;
   /** session_start, after `agent.start()` has been kicked off. Resolves when the opening digest ran. */
   start(ctx: ExtensionContext, agent: ScheduleAgent | undefined): Promise<void>;
   shutdown(): void;
+  /** The current session's confirm module (#61); undefined for non-interactive / not started. */
+  confirm(): ScheduleConfirm | undefined;
 }
 
 function canonicalCwd(cwd: string): string {
@@ -50,20 +64,42 @@ function canonicalCwd(cwd: string): string {
 export function wireScheduleSurface(pi: ExtensionAPI, deps: ScheduleSurfaceDeps): ScheduleSurface {
   let status: ScheduleStatus | undefined;
   let digest: ScheduleDigest | undefined;
+  let confirm: ScheduleConfirm | undefined;
   let lastTick = -Infinity;
   const TICK_MIN_MS = 5_000;
 
   const teardown = (): void => {
     status?.dispose();
     digest?.dispose();
+    confirm?.dispose();
     status = undefined;
     digest = undefined;
+    confirm = undefined;
   };
 
   pi.on("turn_start", () => {
     status?.refresh();
   });
+  // #61: events the confirm presenter needs (forwarded to the CURRENT session's module; registered once per activate).
+  pi.on("input", (event) => {
+    if ((event as { source?: string }).source !== "extension") confirm?.onInput();
+    return { action: "continue" };
+  });
+  pi.on("before_agent_start", () => {
+    confirm?.onBeforeAgentStart();
+  });
+  pi.on("ui_prompt_start", (event) => {
+    confirm?.onUiPrompt(true, { kind: event.kind, ...(event.title !== undefined ? { title: event.title } : {}) });
+  });
+  pi.on("ui_prompt_end", (event) => {
+    const e = event as { kind?: string; title?: string };
+    confirm?.onUiPrompt(false, {
+      ...(e.kind !== undefined ? { kind: e.kind } : {}),
+      ...(e.title !== undefined ? { title: e.title } : {}),
+    });
+  });
   pi.on("agent_settled", () => {
+    confirm?.onAgentSettled();
     status?.refresh();
     const now = systemClock.now();
     if (digest !== undefined && now - lastTick >= TICK_MIN_MS) {
@@ -108,6 +144,31 @@ export function wireScheduleSurface(pi: ExtensionAPI, deps: ScheduleSurfaceDeps)
         clock: systemClock,
       });
       status = st;
+      const coordinator = (): ConfirmCoordinatorPort => agent.coordinator as ConfirmCoordinatorPort;
+      const hasUI = (ctx as { hasUI?: boolean }).hasUI === true;
+      confirm = createScheduleConfirm({
+        agent,
+        ...(hasUI
+          ? {
+              ui: {
+                mode: (ctx as { mode?: string }).mode ?? "print",
+                hasUI: true,
+                select: (title, options) => ctx.ui.select(title, options),
+                notify: (text, level) => ctx.ui.notify(text, level),
+                isIdle: () => ctx.isIdle(),
+              },
+            }
+          : {}),
+        hubConfirmReady: () => coordinator().confirmReady?.() === true,
+        publish: (frame) => coordinator().offers?.(frame),
+        notice: (text, details) =>
+          pi.sendMessage(
+            { customType: SCHED_CUSTOM_TYPE, content: text, display: true, details },
+            { triggerTurn: false },
+          ),
+        ...(deps.revokeQueued !== undefined ? { revoke: deps.revokeQueued } : {}),
+        clock: systemClock,
+      });
       st.start();
       const dg = createScheduleDigest({
         agent,
@@ -145,5 +206,6 @@ export function wireScheduleSurface(pi: ExtensionAPI, deps: ScheduleSurfaceDeps)
       st.refresh();
     },
     shutdown: teardown,
+    confirm: () => confirm,
   };
 }

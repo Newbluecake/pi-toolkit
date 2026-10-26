@@ -11,6 +11,7 @@ import {
   type OpsPorts,
   type RawFields,
 } from "../schedule/agent/ops.js";
+import type { ScheduleConfirm } from "../schedule/agent/confirm.js";
 import { runLine, taskDetail, taskLine } from "../schedule/agent/view.js";
 import type { ScheduleAgent } from "../schedule/agent/wire.js";
 import { compileTask } from "../schedule/core/occurrence.js";
@@ -117,12 +118,20 @@ export interface ScheduleToolDeps {
   agent(): ScheduleAgent | undefined;
   /** Ports for the shared task operations (agent types, settings limits, cwd, …). */
   ports(agent: ScheduleAgent, ctx: ExtensionContext): OpsPorts;
+  /** The current session's confirm module (#61); undefined ⇒ nobody is asked on the spot (pending stays pending). */
+  confirm?(): ScheduleConfirm | undefined;
   now?: () => number;
 }
 
 const HISTORY_LIMIT = 20;
 const PENDING_NOTE =
   "PENDING USER APPROVAL: it will not run until the user approves it (terminal: /schedule approve <id>; or the web schedule panel). " +
+  "It only runs while this session is open, and each run's result appears as a message in this session.";
+
+/** Result text when the user has been asked to confirm right now (#61); the tool description stays frozen. */
+const CONFIRM_NOTE =
+  "PENDING USER APPROVAL: the user has been asked to confirm it now (terminal / web / Feishu) and it will not run until they approve it. " +
+  "Do not ask them to run /schedule approve unless they say they dismissed it. " +
   "It only runs while this session is open, and each run's result appears as a message in this session.";
 
 function out(text: string, extra: Record<string, unknown> = {}) {
@@ -255,10 +264,11 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
           if ("ok" in raw) return failOp(raw);
           const res = await createTask(ports(), raw, { by: "agent", via: "tool" });
           if (!res.ok) return failOp(res);
-          return out(`Created task ${res.value.id} "${res.value.name}". It is ${PENDING_NOTE}`, {
-            id: res.value.id,
-            pending: true,
-          });
+          const asked = !isApproved(res.value) ? deps.confirm?.()?.offer(res.value, { kind: "create" }) : undefined;
+          return out(
+            `Created task ${res.value.id} "${res.value.name}". It is ${asked === "offered" ? CONFIRM_NOTE : PENDING_NOTE}`,
+            { id: res.value.id, pending: true, ...(asked !== undefined ? { confirm: asked } : {}) },
+          );
         }
         case "update": {
           const bad = needId();
@@ -266,12 +276,42 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
           const raw = flatToRaw(params);
           if ("ok" in raw) return failOp(raw);
           if (Object.keys(raw).length === 0) return failure("E_INVALID", "nothing to update");
-          const res = await updateTask(ports(), taskId!, raw, { by: "agent", via: "tool" });
+          let base: ScheduleTask | undefined;
+          const res = await updateTask(
+            ports(),
+            taskId!,
+            raw,
+            { by: "agent", via: "tool" },
+            {
+              onBase: (before) => {
+                base = before;
+              },
+            },
+          );
           if (!res.ok) return failOp(res);
-          return out(`Updated task ${res.value.id}. ${statusNote(res.value)}`, {
-            id: res.value.id,
-            pending: !isApproved(res.value),
-          });
+          const pending = !isApproved(res.value);
+          const asked =
+            pending && base !== undefined
+              ? deps.confirm?.()?.offer(res.value, {
+                  kind: "update",
+                  base: {
+                    form: base.form,
+                    when: base.when,
+                    prompt: base.prompt,
+                    feishu: base.feishu,
+                    ...(base.bg === undefined ? {} : { bg: base.bg }),
+                  },
+                  wasApproved: isApproved(base),
+                })
+              : undefined;
+          return out(
+            `Updated task ${res.value.id}. ${asked === "offered" ? `Task is ${CONFIRM_NOTE}` : statusNote(res.value)}`,
+            {
+              id: res.value.id,
+              pending,
+              ...(asked !== undefined ? { confirm: asked } : {}),
+            },
+          );
         }
         case "pause":
         case "resume": {

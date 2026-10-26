@@ -476,6 +476,10 @@
       "on(session_shutdown)",
       "on(turn_start)",
       "on(turn_start)",
+      "on(input)",
+      "on(before_agent_start)",
+      "on(ui_prompt_start)",
+      "on(ui_prompt_end)",
       "on(agent_settled)",
       "on(agent_settled)",
       "registerTool(schedule)",
@@ -602,7 +606,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 232,
+    "count": 236,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",

@@ -165,11 +165,13 @@ describe("schedule surface — OFF (default)", () => {
     }
     // A3: +2 turn_start (A0 clock poke, status bar), +1 agent_settled (status/digest). I1: the A2 message scheduler's
     // fence/ui-prompt/input/run-lifecycle hooks and the A1 notes `agent_settled` hook (before_agent_start/context
-    // are present OFF already — the guard — so they do not diff).
+    // are present OFF already — the guard — so they do not diff). #61: the confirm presenter's own forwarders on the
+    // surface: +1 input, +1 before_agent_start, +1 ui_prompt_start, +1 ui_prompt_end.
     expect(diff).toEqual({
       agent_settled: 2,
       agent_start: 1,
-      input: 1,
+      before_agent_start: 1,
+      input: 2,
       message_end: 1,
       message_start: 1,
       session_before_compact: 1,
@@ -182,8 +184,8 @@ describe("schedule surface — OFF (default)", () => {
       session_start: 1,
       session_tree: 1,
       turn_start: 2,
-      ui_prompt_end: 1,
-      ui_prompt_start: 1,
+      ui_prompt_end: 2,
+      ui_prompt_start: 2,
     });
     expect([...on.tools.keys()].filter((k) => !off.tools.has(k))).toEqual(["schedule"]);
   });

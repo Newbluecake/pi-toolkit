@@ -236,7 +236,7 @@ export interface MessageScheduler {
 export type ScheduleTrigger =
   { kind: "none" } | { kind: "quiet" } | { kind: "wake"; wake: "message" | "handoff" | "unknown"; token?: string };
 
-const QUIET_KINDS: ReadonlySet<unknown> = new Set(["result", "digest", "handoff-recap"]);
+const QUIET_KINDS: ReadonlySet<unknown> = new Set(["result", "digest", "handoff-recap", "confirm"]);
 
 /**
  * What a `before_agent_start` event says about OUR message type. `quiet` kinds never start a run;

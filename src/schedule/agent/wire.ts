@@ -181,6 +181,12 @@ export interface ScheduleAgent {
   runNow(req: { taskId: string; reqId: string; defHash?: string }): Promise<ScheduleRunNowResult>;
   /** A local ledger write happened (A1/A2/A3): notify the hub and re-check the clock. */
   changed(): void;
+  /**
+   * Subscribe to every local ledger write (the same signal `changed()` forwards to the coordinator; also
+   * fired for the clock's / executors' writes). Synchronous, errors swallowed; returns the unsubscribe.
+   * Used by `confirm` to re-validate its offers (#61).
+   */
+  onChanged(fn: () => void): () => void;
   /** Interactive only: first sweep + recovery + arm. Never throws. */
   start(): Promise<void>;
   /** turn_start: cheap rev check. */
@@ -404,8 +410,16 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
   let coordinator: ScheduleCoordinator = NULL_SCHEDULE_COORDINATOR;
   let detach: (() => void) | undefined;
 
+  const changeListeners = new Set<() => void>();
   const changed = (): void => {
     coordinator.changed();
+    for (const fn of [...changeListeners]) {
+      try {
+        fn();
+      } catch (err) {
+        deps.warn(`onChanged listener threw: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   };
 
   /** Terminal write for a claimed run that has no executor (never left dispatching/queued). */
@@ -568,6 +582,11 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
       changed();
       clock?.poke();
     },
+    onChanged(fn) {
+      if (disposed) return () => undefined;
+      changeListeners.add(fn);
+      return () => void changeListeners.delete(fn);
+    },
     async start() {
       if (disposed || clock === undefined) return;
       try {
@@ -594,6 +613,7 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
     dispose() {
       if (disposed) return;
       disposed = true;
+      changeListeners.clear();
       markEpochDisposed(epoch);
       clock?.dispose();
       coordinator.dispose();

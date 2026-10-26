@@ -212,3 +212,92 @@ describe("schedule report path rendering", () => {
     },
   );
 });
+
+describe("schedule tool — confirm on the spot (#61)", () => {
+  function withConfirm(e: A3Env, verdict: "offered" | "unavailable") {
+    const offers: Array<{ task: any; origin: any }> = [];
+    const confirm = { offer: (task: any, origin: any) => (offers.push({ task, origin }), verdict) };
+    const t = createScheduleTool({
+      agent: () => e.agent,
+      ports: () => e.ports,
+      confirm: () => confirm as never,
+      now: () => e.fake.now(),
+    });
+    return {
+      offers,
+      async call(params: Record<string, unknown>) {
+        const r = await t.execute("id", params as never, undefined, undefined, {} as never);
+        return { text: (r.content[0] as { text: string }).text, details: r.details as Record<string, unknown> };
+      },
+    };
+  }
+
+  it("create ⇒ offer(create); an offered task's text tells the model the user is being asked and not to send them to /schedule approve", async () => {
+    env = a3Env();
+    const w = withConfirm(env, "offered");
+    const r = await w.call({ action: "create", ...DAILY });
+    expect(w.offers).toHaveLength(1);
+    expect(w.offers[0]!.origin).toEqual({ kind: "create" });
+    expect(w.offers[0]!.task.id).toBe(r.details.id);
+    expect(r.details).toMatchObject({ ok: true, pending: true, confirm: "offered" });
+    expect(r.text).toMatch(/PENDING USER APPROVAL/);
+    expect(r.text).toMatch(/asked to confirm it now/);
+    expect(r.text).toMatch(/Do not ask them to run \/schedule approve unless they say they dismissed it/);
+    expect(r.text).toMatch(/only runs while this session is open/);
+  });
+
+  it("unavailable ⇒ the original pending note (terminal /schedule approve) and details.confirm=unavailable", async () => {
+    env = a3Env();
+    const w = withConfirm(env, "unavailable");
+    const r = await w.call({ action: "create", ...DAILY });
+    expect(r.details).toMatchObject({ pending: true, confirm: "unavailable" });
+    expect(r.text).toContain("/schedule approve");
+    expect(r.text).not.toMatch(/asked to confirm/);
+  });
+
+  it("no confirm dep ⇒ byte-identical to the pre-#61 result (no `confirm` key)", async () => {
+    env = a3Env();
+    const r = await call(env, { action: "create", ...DAILY });
+    expect(r.details).toEqual({ ok: true, id: r.details.id, pending: true });
+  });
+
+  it("update of an approved task ⇒ offer(update) carrying the PRE-change definition as the rollback base", async () => {
+    env = a3Env();
+    const w = withConfirm(env, "offered");
+    const c = await w.call({ action: "create", ...DAILY });
+    const id = c.details.id as string;
+    const store = env.agent.ensureStore();
+    const { approveTask } = await import("../../src/schedule/core/claim.js");
+    const snap = store.read();
+    if (snap.kind !== "ok") throw new Error("state");
+    await approveTask(store, id, defHash(snap.state.tasks[0]!), "tui");
+    w.offers.length = 0;
+    const u = await w.call({ action: "update", id, prompt: "a different instruction" });
+    expect(u.details).toMatchObject({ pending: true, confirm: "offered" });
+    expect(u.text).toMatch(/asked to confirm it now/);
+    expect(w.offers).toHaveLength(1);
+    const o = w.offers[0]!.origin;
+    expect(o.kind).toBe("update");
+    expect(o.wasApproved).toBe(true);
+    expect(o.base.prompt).toBe(DAILY.prompt);
+    expect(o.base.when).toMatchObject({ kind: "cron", expr: "0 8 * * *" });
+    expect(o).not.toHaveProperty("base.name");
+  });
+
+  it("a rename (hash unchanged, still approved) asks nobody", async () => {
+    env = a3Env();
+    const w = withConfirm(env, "offered");
+    const c = await w.call({ action: "create", ...DAILY });
+    const id = c.details.id as string;
+    const store = env.agent.ensureStore();
+    const { approveTask } = await import("../../src/schedule/core/claim.js");
+    const snap = store.read();
+    if (snap.kind !== "ok") throw new Error("state");
+    await approveTask(store, id, defHash(snap.state.tasks[0]!), "tui");
+    w.offers.length = 0;
+    const u = await w.call({ action: "update", id, name: "renamed" });
+    expect(u.details).toMatchObject({ pending: false });
+    expect(u.details).not.toHaveProperty("confirm");
+    expect(w.offers).toHaveLength(0);
+  });
+});

@@ -6,7 +6,14 @@
  * exact numbers (R2-2), chunking and truncation, and approval semantics (S2).
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { approveTask, autoClaim, changeTask, manualClaim, sweep } from "../../../src/schedule/core/claim.js";
+import {
+  approveTask,
+  autoClaim,
+  changeTask,
+  manualClaim,
+  rejectTask,
+  sweep,
+} from "../../../src/schedule/core/claim.js";
 import { applySweep, planSweep, voidUntil } from "../../../src/schedule/core/occurrence.js";
 import {
   defHash,
@@ -653,4 +660,118 @@ describe("definition change over a huge backlog (review m3)", () => {
     expect(occ.missedTotal).toBe(owed); // pre-fix: 640 000 (the 999 were voided by the new definition)
     expect(occ.decidedThrough).toBe(E.clock.t);
   }, 60_000);
+});
+
+describe("approveTask idempotence (#61 r2)", () => {
+  it("same hash twice ⇒ first changed, second refused E_INVALID already-approved (approval written once)", async () => {
+    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
+    const store = await setup(t);
+    const h = defHash(t);
+    expect(await approveTask(store, t.id, h, "tui")).toMatchObject({ kind: "changed" });
+    const at = readOk(store).tasks[0]!.approval!.at;
+    E.clock.t += 5_000;
+    expect(await approveTask(store, t.id, h, "web")).toMatchObject({
+      kind: "refused",
+      code: "E_INVALID",
+      detail: "already-approved",
+    });
+    expect(readOk(store).tasks[0]!.approval).toMatchObject({ at, via: "tui" });
+  });
+
+  it("two concurrent approvals of the same hash ⇒ exactly one changed", async () => {
+    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
+    const store = await setup(t);
+    const h = defHash(t);
+    const rs = await Promise.all([approveTask(store, t.id, h, "tui"), approveTask(store, t.id, h, "web")]);
+    expect(rs.filter((r) => r.kind === "changed")).toHaveLength(1);
+    expect(rs.filter((r) => r.kind === "refused" && r.detail === "already-approved")).toHaveLength(1);
+  });
+});
+
+describe("rejectTask (#61)", () => {
+  const baseOf = (t: ScheduleTask) => ({
+    form: t.form,
+    when: t.when,
+    prompt: t.prompt,
+    feishu: t.feishu,
+    ...(t.bg === undefined ? {} : { bg: t.bg }),
+  });
+
+  it("no revertTo (AI-created) ⇒ removed in one transaction, occ state gone", async () => {
+    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
+    const store = await setup(t);
+    expect(await rejectTask(store, t.id, defHash(t))).toEqual({ kind: "removed" });
+    const s = readOk(store);
+    expect(s.tasks).toHaveLength(0);
+    expect(s.occ[t.id]).toBeUndefined();
+  });
+
+  it("revertTo ⇒ the old execution definition is back and the old approval applies again; name is NOT rolled back", async () => {
+    const t = approve(makeTask({ name: "before" }));
+    const store = await setup(t);
+    const before = baseOf(readOk(store).tasks[0]!);
+    // the AI edits the prompt (approval stops matching), the user then renames it by hand
+    await changeTask(store, t.id, (task) => {
+      task.prompt = "ai change";
+    });
+    await changeTask(store, t.id, (task) => {
+      task.name = "my own name";
+    });
+    const cur = readOk(store).tasks[0]!;
+    expect(isExecutable(cur)).toBe(false);
+    const r = await rejectTask(store, t.id, defHash(cur), before);
+    expect(r).toMatchObject({ kind: "changed", hashChanged: true });
+    const after = readOk(store).tasks[0]!;
+    expect(after.prompt).toBe(t.prompt);
+    expect(after.name).toBe("my own name");
+    expect(isExecutable(after)).toBe(true);
+    // changeTask's watermark rule: the hash changed ⇒ nothing is owed from before (no replay)
+    expect(readOk(store).occ[t.id]).toMatchObject({ defHash: defHash(after), decidedThrough: E.clock.t });
+  });
+
+  it("revertTo on an originally pending task keeps it pending", async () => {
+    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
+    const store = await setup(t);
+    const before = baseOf(t);
+    await changeTask(store, t.id, (task) => {
+      task.prompt = "second ai change";
+    });
+    const cur = readOk(store).tasks[0]!;
+    await rejectTask(store, t.id, defHash(cur), before);
+    const after = readOk(store).tasks[0]!;
+    expect(after.prompt).toBe(t.prompt);
+    expect(isExecutable(after)).toBe(false);
+  });
+
+  it("E_REV / already-approved / no-task refusals write nothing", async () => {
+    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
+    const store = await setup(t);
+    const rev = readOk(store).rev;
+    expect(await rejectTask(store, t.id, "0".repeat(64))).toMatchObject({ kind: "refused", code: "E_REV" });
+    expect(await rejectTask(store, "s_zzzzzzzz", defHash(t))).toMatchObject({ kind: "refused", detail: "no-task" });
+    expect(await rejectTask(store, "s_zzzzzzzz", defHash(t), baseOf(t))).toMatchObject({
+      kind: "refused",
+      detail: "no-task",
+    });
+    await approveTask(store, t.id, defHash(t), "tui");
+    const rev2 = readOk(store).rev;
+    expect(await rejectTask(store, t.id, defHash(t))).toMatchObject({ kind: "refused", detail: "already-approved" });
+    expect(await rejectTask(store, t.id, defHash(t), baseOf(t))).toMatchObject({
+      kind: "refused",
+      detail: "already-approved",
+    });
+    expect(rev).toBeLessThan(rev2);
+    expect(readOk(store).rev).toBe(rev2);
+  });
+
+  it("racing approve vs reject of the same hash: exactly one wins", async () => {
+    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
+    const store = await setup(t);
+    const [a, r] = await Promise.all([
+      approveTask(store, t.id, defHash(t), "tui"),
+      rejectTask(store, t.id, defHash(t)),
+    ]);
+    const wins = [a.kind === "changed", r.kind === "removed"].filter(Boolean);
+    expect(wins).toHaveLength(1);
+  });
 });

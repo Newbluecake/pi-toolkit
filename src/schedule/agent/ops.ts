@@ -400,6 +400,12 @@ export interface UpdateOpts {
    * `expectHash` binds it): a user edit then approves it even when the task was pending before.
    */
   approveReviewed?: boolean;
+  /**
+   * Called once INSIDE the lock, after validation and before the fields are rewritten, with a structured
+   * clone of the task as it was (#61: `confirm` records the rollback baseline for "reject = undo the AI's
+   * change"). Read-only; a throw is swallowed.
+   */
+  onBase?: (before: ScheduleTask) => void;
 }
 
 /** Edit any of name / when / prompt / feishu / bg / form. `origin` decides re-approval (module header). */
@@ -429,6 +435,13 @@ export async function updateTask(
     const nextHash = defHash(next);
     if (opts.expectHash !== undefined && nextHash !== opts.expectHash)
       return { refuse: "E_REV", detail: "the submitted content differs from the reviewed content; review again" };
+    if (opts.onBase !== undefined) {
+      try {
+        opts.onBase(structuredClone(task));
+      } catch {
+        /* a baseline observer must never break the write */
+      }
+    }
     const wasApproved = isApproved(task);
     const hashChanged = nextHash !== defHash(task);
     task.name = next.name;
@@ -462,7 +475,8 @@ export interface RevokeOpts {
   revoke?: (taskId: string) => void;
 }
 
-async function dropQueuedRuns(store: SessionStore, taskId: string): Promise<void> {
+/** Ledger half of the I1 revocation (queued message runs of `taskId` → `dropped(task-changed)`); shared with confirm's reject-delete. */
+export async function dropQueuedRuns(store: SessionStore, taskId: string): Promise<void> {
   // Best effort: a failed write leaves the runs to the dispatcher's own CAS (task-changed / E_REV paths).
   await store.transact<number>((draft, ctx) => {
     let n = 0;
