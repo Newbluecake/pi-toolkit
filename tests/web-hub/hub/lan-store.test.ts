@@ -11,8 +11,15 @@ import { join } from "node:path";
 import { createLanStore, type LanStore } from "../../../src/web-hub/hub/lan-store.js";
 import { hasNodeSqlite } from "../../../src/web-hub/hub/db.js";
 import { WRITER_SOAK_MS } from "../../../src/web-hub/hub/hardening.js";
-import { KDF_LEGACY, KDF_PHASE2 } from "../../../src/web-hub/hub/kdf.js";
+import { createKdf, newKdfParams, validateKdfParams, KDF_LEGACY, KDF_PHASE2 } from "../../../src/web-hub/hub/kdf.js";
 import { memLog } from "./helpers.js";
+import { createKdfUpgrader } from "../../../src/web-hub/hub/kdf-upgrade.js";
+import { hashSid } from "../../../src/web-hub/hub/sid-hash.js";
+import { vi } from "vitest";
+import { createLanLoginCore } from "../../../src/web-hub/hub/lan-login.js";
+import { createAuthRevokeBus } from "../../../src/web-hub/hub/auth-revoke.js";
+import { createSecurityEventBus } from "../../../src/web-hub/hub/security-events.js";
+import { fakeKdfAdmission, fakeLoginLimiter } from "../contract/fakes.js";
 
 const skipIfNoSqlite = (await hasNodeSqlite()) ? describe : describe.skip;
 // L8 "用户名默认系统登录名": the real `createLanStore` seeds this OS username, not the P1
@@ -474,4 +481,268 @@ skipIfNoSqlite("createLanStore — #66 hardening verdict (plan §4.0/§4.1)", ()
       t.cleanup();
     }
   });
+});
+
+skipIfNoSqlite("#66 P2 real SQLite CAS / upgrade", () => {
+  const NOW = 1_800_000_000_000;
+  async function fixture(phase: 1 | 2 = 2) {
+    const t = tmp();
+    const first = await createLanStore({ dbFile: t.dbFile, log: memLog(), maintHardening: { now: NOW } });
+    if (!first.ok) throw new Error(first.reason);
+    await first.store.close();
+    const next = await createLanStore({
+      dbFile: t.dbFile,
+      log: memLog(),
+      now: () => NOW + WRITER_SOAK_MS,
+      maintHardening: { hardeningPhase: phase, now: NOW + WRITER_SOAK_MS },
+    });
+    if (!next.ok) throw new Error(next.reason);
+    const user = (await next.store.getUser(USERNAME))!;
+    const params = newKdfParams(KDF_PHASE2);
+    const input = {
+      userId: user.id,
+      old: user,
+      next: { ...params, hash: new Uint8Array(32).fill(29) },
+    };
+    return { ...t, store: next.store, user, input };
+  }
+
+  it("CAS changes only KDF/updated_at; epoch/initial_* and checked/live sessions survive", async () => {
+    const h = await fixture();
+    try {
+      const before = await h.store.createSessionChecked({
+        userId: h.user.id,
+        expectedEpoch: h.user.epoch,
+        expectedFactorGen: 0,
+        boundOrigin: "http://hub",
+        createdIp: "1.2.3.4",
+        now: NOW + WRITER_SOAK_MS,
+        method: "password",
+      });
+      expect(before.ok).toBe(true);
+      expect(await h.store.rehashPassword!(h.input)).toEqual({ ok: true });
+      const after = (await h.store.getUser(USERNAME))!;
+      expect(after).toEqual({
+        ...h.user,
+        n: h.input.next.n,
+        r: h.input.next.r,
+        p: h.input.next.p,
+        salt: new Uint8Array(h.input.next.salt),
+        hash: h.input.next.hash,
+        updatedAt: NOW + WRITER_SOAK_MS,
+      });
+      if (!before.ok) throw new Error("checked insert failed");
+      expect(await h.store.touchSession(hashSid(before.sid), NOW + WRITER_SOAK_MS + 1)).toMatchObject({
+        epoch: h.user.epoch,
+      });
+      expect(
+        (
+          await h.store.createSessionChecked({
+            userId: h.user.id,
+            expectedEpoch: h.user.epoch,
+            expectedFactorGen: 0,
+            boundOrigin: "http://hub",
+            createdIp: "1.2.3.5",
+            now: NOW + WRITER_SOAK_MS,
+            method: "password",
+          })
+        ).ok,
+      ).toBe(true);
+      expect(await h.store.rehashPassword!(h.input)).toEqual({ ok: false, reason: "stale" });
+    } finally {
+      await h.store.close();
+      h.cleanup();
+    }
+  });
+
+  it.each(["salt", "hash", "n", "r", "p", "deleted"])(
+    "CAS rejects %s mismatch without changing the row",
+    async (field) => {
+      const h = await fixture();
+      try {
+        const old = { ...h.input.old },
+          input = { ...h.input, old };
+        if (field === "salt" || field === "hash") old[field] = new Uint8Array(old[field].length).fill(99);
+        else if (field === "deleted") input.userId = 9999;
+        else old[field as "n" | "r" | "p"]++;
+        expect(await h.store.rehashPassword!(input)).toEqual({ ok: false, reason: "stale" });
+        expect(await h.store.getUser(USERNAME)).toEqual(h.user);
+      } finally {
+        await h.store.close();
+        h.cleanup();
+      }
+    },
+  );
+
+  it("revokeAllSessions does not invalidate rehash: the pre-revoke credential snapshot still succeeds", async () => {
+    const h = await fixture();
+    try {
+      await h.store.revokeAllSessions();
+      const revoked = (await h.store.getUser(USERNAME))!;
+      expect(revoked.epoch).toBe(h.user.epoch + 1);
+      expect(revoked.salt).toEqual(h.user.salt);
+      expect(revoked.hash).toEqual(h.user.hash);
+      // No refresh of old: revocation must not discard an otherwise valid password upgrade.
+      expect(await h.store.rehashPassword!(h.input)).toEqual({ ok: true });
+      const upgraded = (await h.store.getUser(USERNAME))!;
+      expect(upgraded.epoch).toBe(revoked.epoch);
+      expect(upgraded.n).toBe(KDF_PHASE2.n);
+      expect(upgraded.salt).toEqual(new Uint8Array(h.input.next.salt));
+      expect(upgraded.hash).toEqual(h.input.next.hash);
+    } finally {
+      await h.store.close();
+      h.cleanup();
+    }
+  });
+
+  it("password reset wins during a held background computation: old job returns stale and cannot overwrite", async () => {
+    const h = await fixture();
+    let resolve!: (hash: Uint8Array) => void;
+    const held = new Promise<Uint8Array>((yes) => {
+      resolve = yes;
+    });
+    const rehash = vi.spyOn(h.store, "rehashPassword");
+    const upgrade = createKdfUpgrader({
+      kdf: { run: () => held },
+      store: h.store,
+      log: memLog(),
+      now: () => NOW + WRITER_SOAK_MS,
+      target: KDF_PHASE2,
+    });
+    try {
+      upgrade.maybeRehash(h.user, h.user.initialPassword!);
+      await Promise.resolve();
+      const params = newKdfParams(KDF_LEGACY),
+        kdf = createKdf(),
+        newPw = "new-long-secret";
+      const hash = await kdf.run(newPw, params);
+      await h.store.setPassword({ username: USERNAME, kdf: "scrypt", ...params, hash });
+      resolve(new Uint8Array(32).fill(53));
+      await vi.waitFor(() => expect(rehash).toHaveBeenCalledTimes(1));
+      expect(await rehash.mock.results[0]!.value).toEqual({ ok: false, reason: "stale" });
+      const current = (await h.store.getUser(USERNAME))!;
+      expect(current.n).toBe(KDF_LEGACY.n);
+      expect(current.epoch).toBe(h.user.epoch + 1);
+      expect(current.salt).not.toEqual(h.user.salt);
+      expect(current.hash).not.toEqual(h.user.hash);
+      expect(await kdf.run(newPw, params)).toEqual(current.hash);
+      expect(await kdf.run(h.user.initialPassword!, params)).not.toEqual(current.hash);
+    } finally {
+      upgrade.dispose();
+      await h.store.close();
+      h.cleanup();
+    }
+  });
+
+  it("phase 1 even with old marker blocks direct upgrades", async () => {
+    const h = await fixture(1);
+    try {
+      expect(h.store.hardening?.writerActive).toBe(false);
+      expect(await h.store.rehashPassword!(h.input)).toEqual({ ok: false, reason: "stale" });
+      expect(await h.store.getUser(USERNAME)).toEqual(h.user);
+    } finally {
+      await h.store.close();
+      h.cleanup();
+    }
+  });
+
+  it("two concurrent real logins write one background upgrade; sessions survive and password reset fences old credentials", async () => {
+    const h = await fixture(),
+      kdf = createKdf();
+    const log = memLog();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const rehash = vi.spyOn(h.store, "rehashPassword");
+    const upgrade = createKdfUpgrader({
+      kdf: {
+        run: async (password, params, opts) => {
+          await held;
+          return await kdf.run(password, params, opts);
+        },
+      },
+      store: h.store,
+      log,
+      now: () => NOW + WRITER_SOAK_MS,
+      target: KDF_PHASE2,
+    });
+    const core = createLanLoginCore({
+      store: h.store,
+      kdf,
+      kdfUpgrader: upgrade,
+      limiter: fakeLoginLimiter(),
+      admission: fakeKdfAdmission(),
+      approval: { request: async () => "unavailable", close() {} },
+      security: createSecurityEventBus(log),
+      authRevoke: createAuthRevokeBus(log),
+      revokeSse() {},
+      now: () => NOW + WRITER_SOAK_MS,
+      log,
+      kdfPolicy: { verifyTarget: KDF_PHASE2 },
+    });
+    const login = (pw: string) =>
+      core.passwordLogin(
+        {
+          kind: "lan",
+          peerIp: "1.2.3.4",
+          clientIp: "1.2.3.4",
+          viaTrustedProxy: false,
+          scheme: "http",
+          hostKey: "hub:80",
+          externalOrigin: "http://hub",
+        },
+        { username: USERNAME, password: pw },
+        "test",
+        { signal: new AbortController().signal, responseOpen: () => true },
+      );
+    try {
+      const pw = h.user.initialPassword!;
+      const session = await h.store.createSession({
+        userId: h.user.id,
+        epoch: h.user.epoch,
+        boundOrigin: "http://hub",
+        createdIp: "1.2.3.4",
+        now: NOW + WRITER_SOAK_MS,
+      });
+      const responses = await Promise.all([login(pw), login(pw)]);
+      expect(responses.map((response) => response.status)).toEqual([200, 200]);
+      await Promise.all(responses.map((response) => response.after?.()));
+      expect(rehash).not.toHaveBeenCalled();
+      release();
+      await vi.waitFor(async () => expect((await h.store.getUser(USERNAME))!.n).toBe(131072), { timeout: 5000 });
+      expect(rehash).toHaveBeenCalledTimes(1);
+      expect(await rehash.mock.results[0]!.value).toEqual({ ok: true });
+      expect(await h.store.listSessions(h.user.id, NOW + WRITER_SOAK_MS)).toHaveLength(3);
+      const upgraded = (await h.store.getUser(USERNAME))!;
+      const params = { n: upgraded.n, r: upgraded.r, p: upgraded.p, salt: upgraded.salt, keyLen: 32 };
+      expect(await kdf.run(pw, params)).toEqual(upgraded.hash);
+      expect(validateKdfParams(upgraded).ok).toBe(true);
+      expect(await h.store.touchSession(hashSid(session.sid), NOW + WRITER_SOAK_MS + 1)).toMatchObject({
+        epoch: h.user.epoch,
+      });
+      rehash.mockClear();
+      const repeat = await login(pw);
+      expect(repeat.status).toBe(200);
+      await repeat.after?.();
+      expect(rehash).not.toHaveBeenCalled();
+      // Old upgrade result arrives after a real password reset transaction.
+      const fresh = newKdfParams(KDF_LEGACY),
+        newPw = "new-random-long-secret";
+      const hash = await kdf.run(newPw, fresh);
+      await h.store.setPassword({ username: USERNAME, kdf: "scrypt", ...fresh, hash });
+      expect(await h.store.rehashPassword!({ ...h.input, old: upgraded })).toEqual({ ok: false, reason: "stale" });
+      const changed = (await h.store.getUser(USERNAME))!;
+      const verifyParams = { ...fresh, salt: changed.salt };
+      expect(await kdf.run(newPw, verifyParams)).toEqual(changed.hash);
+      expect(await kdf.run(pw, verifyParams)).not.toEqual(changed.hash);
+      expect(await h.store.touchSession(hashSid(session.sid), NOW + WRITER_SOAK_MS + 1)).toBeUndefined();
+    } finally {
+      release();
+      core.dispose();
+      upgrade.dispose();
+      await h.store.close();
+      h.cleanup();
+    }
+  }, 15000);
 });

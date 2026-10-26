@@ -3,6 +3,8 @@ import { createLanSessionsRoutes } from "../../../src/web-hub/hub/lan-sessions.j
 import { publicSessionId } from "../../../src/web-hub/hub/sid-hash.js";
 import { scryptSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createKdfUpgrader } from "../../../src/web-hub/hub/kdf-upgrade.js";
+import { KDF_PHASE2 } from "../../../src/web-hub/hub/kdf.js";
 import { createLanLoginCore } from "../../../src/web-hub/hub/lan-login.js";
 import { createAuthRevokeBus } from "../../../src/web-hub/hub/auth-revoke.js";
 import { createSecurityEventBus, type SecurityEvent } from "../../../src/web-hub/hub/security-events.js";
@@ -66,7 +68,11 @@ async function flush() {
 }
 const cores: LanLoginCore[] = [];
 let wall = 1_800_000_000_000;
-function setup(options: FakeLanStoreOptions = {}, initial = false) {
+function setup(
+  options: FakeLanStoreOptions = {},
+  initial = false,
+  kdfUpgrader?: import("../../../src/web-hub/hub/kdf-upgrade.js").KdfUpgrader,
+) {
   const store = fakeLanStore(options);
   const salt = new Uint8Array(16).fill(7);
   const user: LanUserRecord = {
@@ -108,6 +114,7 @@ function setup(options: FakeLanStoreOptions = {}, initial = false) {
   const kdf = fakeKdf();
   const admission = fakeKdfAdmission();
   const core = createLanLoginCore({
+    ...(kdfUpgrader === undefined ? {} : { kdfUpgrader }),
     store,
     kdf,
     // #66: the fixture user is seeded at N=2^14 r=1 — time against that shape (no compensation run).
@@ -1291,5 +1298,71 @@ describe("verification rework regressions", () => {
     expect(h.store.sessionsBySidHash.size).toBe(0);
     expect(h.approval.close).toHaveBeenCalledWith(h.requests[0]!.challengeId, "deadline");
     expect(h.approval.close).not.toHaveBeenCalledWith(h.requests[0]!.challengeId, "revoked");
+  });
+});
+
+describe("#66 P2 login-only trigger", () => {
+  it("concurrent verified logins return sessions while the one shared upgrade remains pending", async () => {
+    let upgrade!: import("../../../src/web-hub/hub/kdf-upgrade.js").KdfUpgrader;
+    const h = setup({}, false, { maybeRehash: (user, pw) => upgrade.maybeRehash(user, pw), dispose() {} });
+    const gate = latch<Uint8Array>(),
+      run = vi.fn(() => gate.promise),
+      rehashPassword = vi.fn(async () => ({ ok: true as const }));
+    upgrade = createKdfUpgrader({
+      kdf: { run },
+      store: { rehashPassword },
+      log: h.log,
+      now: h.now,
+      target: KDF_PHASE2,
+    });
+    try {
+      const replies = await Promise.all([h.password(), h.password(context("192.168.1.11"))]);
+      expect(replies.map((r) => r.status)).toEqual([200, 200]);
+      await Promise.all(replies.map((r) => r.after?.()));
+      expect(h.store.sessionsBySidHash.size).toBe(2);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(rehashPassword).not.toHaveBeenCalled();
+      gate.resolve(new Uint8Array(32));
+      await flush();
+      expect(rehashPassword).toHaveBeenCalledTimes(1);
+      expect(h.store.sessionsBySidHash.size).toBe(2);
+    } finally {
+      upgrade.dispose();
+    }
+  });
+  it("triggers after match and before second-factor gate, never waits for background work", async () => {
+    const maybeRehash = vi.fn(),
+      h = setup({}, false, { maybeRehash, dispose: vi.fn() });
+    await h.enroll();
+    const gate = vi.spyOn(h.store, "isKnownIp").mockImplementation(async () => {
+      expect(maybeRehash).toHaveBeenCalledWith(h.user, "correct");
+      return false;
+    });
+    const r = await h.password();
+    expect(r.status).toBe(401);
+    expect(r.body).toMatchObject({ error: "E_2FA", methods: ["recovery", "feishu"] });
+    expect(maybeRehash).toHaveBeenCalledTimes(1);
+    expect(gate).toHaveBeenCalled();
+  });
+  it("does not trigger for wrong/missing users, revoked snapshots or disposed core", async () => {
+    const maybeRehash = vi.fn(),
+      h = setup({}, false, { maybeRehash, dispose: vi.fn() });
+    expect((await h.core.passwordLogin(context(), { username: "owner", password: "bad" }, UA, io().value)).status).toBe(
+      401,
+    );
+    expect(
+      (await h.core.passwordLogin(context(), { username: "missing", password: "correct" }, UA, io().value)).status,
+    ).toBe(401);
+    const wait = latch<Uint8Array>();
+    vi.spyOn(h.kdf, "run").mockReturnValueOnce(wait.promise);
+    const pending = h.password();
+    await flush();
+    h.core.onRevoke({ sel: { userId: h.user.id }, reason: "passwd" });
+    wait.resolve(h.user.hash);
+    await flush();
+    expect((await pending).status).toBe(401);
+    h.core.dispose();
+    expect((await h.password()).status).toBe(503);
+    expect(maybeRehash).not.toHaveBeenCalled();
   });
 });

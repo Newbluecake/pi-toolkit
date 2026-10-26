@@ -143,6 +143,25 @@ describe("createAdminHandler (plan §8)", () => {
   });
 
   describe("lan_req passwd", () => {
+    it.each([false, true])(
+      "uses open-time writerActive=%s for password writes, not stored verify cost",
+      async (writerActive) => {
+        const store = Object.assign(fakeLanStore(), { hardening: Object.freeze({ writerActive }) });
+        seedAdmin(store);
+        const run = vi.spyOn(fakeKdf(), "run");
+        const write = vi.spyOn(store, "setPassword");
+        const { deps } = baseDeps({ store: () => store, kdf: () => ({ run }) });
+        const result = await createAdminHandler(deps).handleLanReq(
+          { t: "lan_req", rid: "r", op: "passwd", username: "admin", password: "correct-horse-battery" },
+          { agentKey: "local" },
+        );
+        expect(result.ok).toBe(true);
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(run.mock.calls[0]![1]).toMatchObject({ n: writerActive ? 131072 : 32768, r: 8, p: 1 });
+        expect(write).toHaveBeenCalledWith(expect.objectContaining({ n: writerActive ? 131072 : 32768 }));
+      },
+    );
+
     it.each([
       ["password123", "common"],
       ["p@ssw0rd!!", "common"],

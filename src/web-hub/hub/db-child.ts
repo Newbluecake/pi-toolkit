@@ -435,6 +435,7 @@ const stmtDeleteSession = db.prepare('DELETE FROM sessions WHERE sid_hash=?');
 const stmtDeleteAllSessions = db.prepare('DELETE FROM sessions WHERE user_id=?');
 const stmtMarkInitialLogin = db.prepare('UPDATE users SET initial_login_at=?, initial_login_ip=? WHERE username=? AND initial_login_at IS NULL');
 const stmtUpdateUser = db.prepare('UPDATE users SET kdf=?, n=?, r=?, p=?, salt=?, hash=?, epoch=epoch+1, initial_password=NULL, initial_created_at=NULL, updated_at=? WHERE username=?');
+const stmtRehashUser = db.prepare('UPDATE users SET n=?, r=?, p=?, salt=?, hash=?, updated_at=? WHERE id=? AND n=? AND r=? AND p=? AND salt=? AND hash=?');
 const stmtInsertUser = db.prepare('INSERT INTO users (username, kdf, n, r, p, salt, hash, epoch, created_at, updated_at) VALUES (?,?,?,?,?,?,?,1,?,?)');
 const stmtInitialInfo = db.prepare('SELECT username, initial_password, initial_login_at, initial_login_ip FROM users ORDER BY id LIMIT 1');
 const stmtPurge = db.prepare('DELETE FROM sessions WHERE sid_hash IN (SELECT sid_hash FROM sessions WHERE expires_at<=? OR absolute_expires_at<=? LIMIT 256)');
@@ -535,6 +536,13 @@ ${crashAfterCommit}
       }
 ${crashAfterCommit}
       return null;
+    }
+    case 'rehashPassword': {
+      const old = args.old, next = args.next;
+      const changes = stmtRehashUser.run(next.n, next.r, next.p, unb64(next.salt), unb64(next.hash), args.now,
+        args.userId, old.n, old.r, old.p, unb64(old.salt), unb64(old.hash)).changes;
+${crashAfterCommit}
+      return changes === 1 ? {ok:true} : {ok:false,reason:'stale'};
     }
     case 'markInitialLogin': {
       stmtMarkInitialLogin.run(args.at, args.ip, args.username);

@@ -18,6 +18,7 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { KdfShape } from "./kdf.js";
+import type { KdfUpgrader } from "./kdf-upgrade.js";
 import type { AgentCard, HistoryPayload } from "../protocol/http-contract.js";
 import type { AvatarInfo, AvatarPath } from "../protocol/avatar.js";
 import type {
@@ -335,7 +336,25 @@ export interface LanUserSummary {
 export type DeleteLanUserResult =
   { ok: true; userId: number } | { ok: false; reason: "not-found" | "primary" | "last-user" };
 
+export interface KdfRow {
+  n: number;
+  r: number;
+  p: number;
+  salt: Uint8Array;
+  hash: Uint8Array;
+}
+export interface PasswordRehashInput {
+  userId: number;
+  old: KdfRow;
+  next: KdfRow;
+}
+export type PasswordRehashResult = { ok: true } | { ok: false; reason: "stale" };
+
 export interface LanStorePort extends LanSecurityStorePort {
+  /** #66: immutable open-time writer verdict; absent on legacy fakes means writes stay legacy. */
+  readonly hardening?: { readonly writerActive: boolean };
+  /** Upgrade-only CAS. Never bumps epoch, removes sessions or changes initial_* fields. */
+  rehashPassword?(input: PasswordRehashInput, opts?: PortOptions): Promise<PasswordRehashResult>;
   /** Local admin only. Bounded projection (at most 256 accounts; overflow refuses). */
   listUsers(now: number, opts?: PortOptions): Promise<import("../protocol/messages.js").LanAccountSummary[]>;
   /** Refusal checks and CASCADE deletion share one transaction. */
@@ -1355,6 +1374,8 @@ export interface LanLoginCore {
   dispose(): void;
 }
 export interface LanLoginCoreDeps {
+  /** Login only (not privacy verification); owned/disposed by the HTTP frontend. */
+  kdfUpgrader?: KdfUpgrader;
   /** false keeps password completion usable until the second-factor UI is integrated. */
   secondFactorEnabled?: boolean;
   onCorruptKdfParams?: (username: string, reason: string) => void;

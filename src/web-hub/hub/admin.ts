@@ -51,7 +51,7 @@ import {
 import { cleanupTokenTemps, generateToken, replaceTokenAtomic } from "../protocol/token-file.js";
 import { auditLan2fa } from "./audit.js";
 import type { Auth } from "./auth.js";
-import { defaultKdfParams } from "./kdf.js";
+import { effectiveWriteTarget, newKdfParams } from "./kdf.js";
 import type { RepairLan2faResult } from "./lan-store.js";
 import type { SecurityEvent } from "./security-events.js";
 import type { HubLog, KdfPort, LanFacade, LanStatus, LanStorePort, LanUserRecord, LoginLimiterPort } from "./ports.js";
@@ -445,7 +445,7 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
       audit("passwd", { ok: false, code: "E_WEAK_PASSWORD", reason: verdict.reason }, meta);
       return { t: "lan_res", rid, ok: false, code: "E_WEAK_PASSWORD", message: `password rejected: ${verdict.reason}` };
     }
-    const params = defaultKdfParams();
+    const params = newKdfParams(effectiveWriteTarget(store.hardening?.writerActive === true));
     const hash = await kdf.run(password, params);
     // §4.2 "撤销的顺序": `setPassword`'s own transaction already bumps epoch, clears
     // initial_password and deletes every session for that user (db-child.ts) — revoke only

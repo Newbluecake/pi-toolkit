@@ -638,6 +638,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
         const user = run.user!;
         const deadline = createReqDeadline(deps.now, L.postKdfMs);
         if (run.revoked || disposed) return error(401, "E_AUTH");
+        deps.kdfUpgrader?.maybeRehash(user, password); // fire-and-forget, before the second-factor gate
         const known = await step(io, deadline.remaining() - L.completionReserveMs, (opts) =>
           deps.store.isKnownIp(user.id, ctx.clientIp, deps.now(), NEW_IP_WINDOW_MS, opts),
         );

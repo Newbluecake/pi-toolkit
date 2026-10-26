@@ -182,6 +182,53 @@ skipIfNoSqlite("query script run directly (bypassing db-client.ts)", () => {
     }
   });
 
+  it("#66 P2 rehash is an autocommit CAS: child exit after UPDATE preserves epoch/session/initial fields; retry is stale", async () => {
+    const t = tmp();
+    await migrate(t.dbFile);
+    const q = spawnQuery(t.dbFile);
+    let again: ReturnType<typeof spawnQuery> | undefined;
+    try {
+      q.send(1, "getUser", { username: "admin" });
+      const user = (await q.waitFor(1)).result as Record<string, unknown>;
+      q.send(2, "createSession", {
+        userId: user["id"],
+        epoch: user["epoch"],
+        sidHash: "AAAA",
+        boundOrigin: "http://hub",
+        createdIp: "1.2.3.4",
+        now: 1000,
+      });
+      expect((await q.waitFor(2)).ok).toBe(true);
+      const args = {
+        userId: user["id"],
+        old: user,
+        next: {
+          n: 131072,
+          r: 8,
+          p: 1,
+          salt: Buffer.alloc(16, 9).toString("base64"),
+          hash: Buffer.alloc(32, 8).toString("base64"),
+        },
+        now: 2000,
+      };
+      const exited = new Promise<void>((resolve) => q.child.once("exit", () => resolve()));
+      q.send(3, "rehashPassword", { ...args, __crashAfterCommit: true });
+      await exited;
+      expect(q.lines.find((line) => line.id === 3)).toBeUndefined();
+      again = spawnQuery(t.dbFile);
+      again.send(1, "getUser", { username: "admin" });
+      expect((await again.waitFor(1)).result).toEqual({ ...user, ...args.next, updatedAt: 2000 });
+      again.send(2, "rehashPassword", args);
+      expect((await again.waitFor(2)).result).toEqual({ ok: false, reason: "stale" });
+      again.send(3, "touchSession", { sidHash: "AAAA", now: 2001 });
+      expect((await again.waitFor(3)).result).toMatchObject({ userId: user["id"], epoch: user["epoch"] });
+    } finally {
+      q.child.kill("SIGKILL");
+      again?.child.kill("SIGKILL");
+      t.cleanup();
+    }
+  });
+
   it("unknown op ⇒ ok:false E_DB, connection stays alive for the next request", async () => {
     const t = tmp();
     await migrate(t.dbFile);

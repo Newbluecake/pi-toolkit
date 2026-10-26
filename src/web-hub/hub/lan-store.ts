@@ -203,6 +203,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
   }
 
   const store: LanStore = {
+    hardening: Object.freeze({ writerActive }),
     async createSessionChecked(input, opts) {
       const sid = randomBytes(32).toString("base64url");
       const result = await dbClient.call<{ ok: true; evicted: string[] } | { ok: false; reason: "stale" }>(
@@ -349,6 +350,28 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
           p: input.p,
           salt: base64(input.salt),
           hash: base64(input.hash),
+          now: now(),
+        },
+        opts,
+      );
+    },
+
+    async rehashPassword(input, opts) {
+      // Defense in depth: even direct callers cannot write upgrades before the open-time gate.
+      if (!writerActive) return { ok: false, reason: "stale" };
+      const encode = (row: typeof input.old) => ({
+        n: row.n,
+        r: row.r,
+        p: row.p,
+        salt: base64(row.salt),
+        hash: base64(row.hash),
+      });
+      return await dbClient.call(
+        "rehashPassword",
+        {
+          userId: input.userId,
+          old: encode(input.old),
+          next: encode(input.next),
           now: now(),
         },
         opts,

@@ -1,6 +1,10 @@
+import { scryptSync } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as upgradeModule from "../../../src/web-hub/hub/kdf-upgrade.js";
+import { fakeLanStore } from "../contract/fakes.js";
+import { KDF_PHASE2 } from "../../../src/web-hub/hub/kdf.js";
 import * as coreModule from "../../../src/web-hub/hub/lan-login.js";
 import { writeLanLoginReply } from "../../../src/web-hub/hub/http.js";
 import { createSecurityEventBus, type SecurityEvent } from "../../../src/web-hub/hub/security-events.js";
@@ -248,4 +252,102 @@ describe("LAN-I response finish adapter", () => {
     r.res.emit("finish");
     expect(r.after).not.toHaveBeenCalled();
   });
+});
+
+describe("#66 P2 HTTP writer gate / background upgrade", () => {
+  it("writer off never constructs upgrader or adds KDF even when verify target/stored record is stronger", async () => {
+    const factory = vi.spyOn(upgradeModule, "createKdfUpgrader");
+    const cores = vi.spyOn(coreModule, "createLanLoginCore");
+    const store = Object.assign(fakeLanStore(), { hardening: Object.freeze({ writerActive: false }) });
+    const h = await startLan({ store });
+    try {
+      seedLanUser(h.store, credentials);
+      const record = (await store.getUser(credentials.username))!;
+      store.seedUser({
+        ...record,
+        ...KDF_PHASE2,
+        hash: scryptSync(credentials.password, record.salt, 32, {
+          N: KDF_PHASE2.n,
+          r: 8,
+          p: 1,
+          maxmem: 129 * 1024 * 1024,
+        }),
+      });
+      const run = vi.spyOn(cores.mock.calls[0]![0].kdf, "run");
+      expect((await lanPostJson(h.port, "/api/login", credentials)).status).toBe(200);
+      expect(factory).not.toHaveBeenCalled();
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("writer on: HTTP response precedes rehash, repeat login skips it, live cookies survive; close aborts", async () => {
+    const store = Object.assign(fakeLanStore(), {
+      hardening: Object.freeze({ writerActive: true }),
+      rehashPassword: vi.fn(async (input: import("../../../src/web-hub/hub/ports.js").PasswordRehashInput) => {
+        const current = await store.getUser(credentials.username);
+        if (
+          !current ||
+          current.n !== input.old.n ||
+          current.r !== input.old.r ||
+          current.p !== input.old.p ||
+          !Buffer.from(current.salt).equals(Buffer.from(input.old.salt)) ||
+          !Buffer.from(current.hash).equals(Buffer.from(input.old.hash))
+        )
+          return { ok: false as const, reason: "stale" as const };
+        store.seedUser({ ...current, ...input.next });
+        return { ok: true as const };
+      }),
+    });
+    let release!: () => void, backgroundSignal: AbortSignal | undefined;
+    let blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const factory = upgradeModule.createKdfUpgrader;
+    const created = vi.spyOn(upgradeModule, "createKdfUpgrader").mockImplementation((deps) =>
+      factory({
+        ...deps,
+        kdf: {
+          run: async (pw, params, opts) => {
+            backgroundSignal = opts?.signal;
+            await blocked;
+            return await deps.kdf.run(pw, params, opts);
+          },
+        },
+      }),
+    );
+    const h = await startLan({ store });
+    try {
+      seedLanUser(store, credentials);
+      const login = await lanPostJson(h.port, "/api/login", credentials);
+      expect(login.status).toBe(200);
+      expect(created).toHaveBeenCalledTimes(1);
+      expect(backgroundSignal?.aborted).toBe(false);
+      expect(store.rehashPassword).not.toHaveBeenCalled();
+      const cookie = login.headers["set-cookie"]![0]!.split(";")[0]!;
+      release();
+      await vi.waitFor(() => expect(store.rehashPassword).toHaveBeenCalledTimes(1), { timeout: 5000 });
+      expect(await store.getUser(credentials.username)).toMatchObject({ n: KDF_PHASE2.n, epoch: 1 });
+      expect((await lanPostJson(h.port, "/api/login", credentials)).status).toBe(200);
+      expect(store.rehashPassword).toHaveBeenCalledTimes(1);
+      expect((await lanRequest(h.port, { path: "/api/session", headers: { Cookie: cookie } })).status).toBe(200);
+      // A new low-cost user initiates another upgrade; close proactively aborts the owned job.
+      blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      seedLanUser(store, { ...credentials, username: "bob", id: 2 });
+      expect(
+        (await lanPostJson(h.port, "/api/login", { username: "bob", password: credentials.password })).status,
+      ).toBe(200);
+      await h.fe.lan!.close();
+      expect(backgroundSignal?.aborted).toBe(true);
+      release();
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      expect(store.rehashPassword).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      await h.cleanup();
+    }
+  }, 15000);
 });

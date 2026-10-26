@@ -99,6 +99,8 @@ import { formatLanCookie, hashSid, LAN_SESSION_COOKIE } from "./lan-auth.js";
 import { Value } from "@sinclair/typebox/value";
 import { createLanSessionsRoutes } from "./lan-sessions.js";
 import type { LanSessionsRoutes } from "./ports.js";
+import { createKdfUpgrader } from "./kdf-upgrade.js";
+import { effectiveWriteTarget } from "./kdf.js";
 import { createLanLoginCore } from "./lan-login.js";
 import { createSecurityEventBus } from "./security-events.js";
 import {
@@ -3255,7 +3257,15 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         lan.onStatus(status);
       },
     };
+    // One open-time verdict, shared with admin writes; never infer it from verifyTarget (which
+    // can be stronger after rollback). Phase 1 therefore allocates no upgrader or extra KDF.
+    const kdfUpgrader =
+      lan.store.hardening?.writerActive === true
+        ? createKdfUpgrader({ kdf: lan.kdf, store: lan.store, log, now, target: effectiveWriteTarget(true) })
+        : undefined;
+    lan.scope.defer(() => kdfUpgrader?.dispose());
     const loginCore = createLanLoginCore({
+      ...(kdfUpgrader === undefined ? {} : { kdfUpgrader }),
       store: lan.store,
       kdf: lan.kdf,
       limiter: lan.limiter,
@@ -3291,6 +3301,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     const offLoginRevoke = authRevoke.subscribe((ev) => loginCore.onRevoke(ev));
     lan.scope.defer(() => {
       offLoginRevoke();
+      kdfUpgrader?.dispose();
       loginCore.dispose();
       lan.onLoginCore?.(undefined);
     });
@@ -3430,6 +3441,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         for (const c of inFlightStartAborts) c.abort(new Error("web-hub: LAN closed"));
         inFlightStartAborts.clear();
         offLoginRevoke();
+        kdfUpgrader?.dispose();
         loginCore.dispose();
         lan.onLoginCore?.(undefined);
         rt.sessions?.dispose();
