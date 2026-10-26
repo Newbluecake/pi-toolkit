@@ -3,6 +3,12 @@ import { availableParallelism } from "node:os";
 import { defineConfig } from "vitest/config";
 import { uiAliases } from "./src/web-hub/ui/aliases.js";
 
+function testWorkers(): number {
+  const raw = process.env.PI_TOOLKIT_TEST_WORKERS?.trim();
+  if (raw !== undefined && /^[1-9][0-9]*$/.test(raw)) return Number(raw);
+  return Math.max(1, Math.min(8, availableParallelism() - 1));
+}
+
 export default defineConfig({
   plugins: [vue()],
   resolve: { alias: uiAliases },
@@ -26,7 +32,9 @@ export default defineConfig({
     // faster than 8 (4 full runs: ~210s either way) but doubled CPU contention, which is what
     // surfaced the load-sensitive flakes that blocked the v0.5.4 release. min() keeps smaller
     // machines (CI runners) on vitest's own default.
-    maxWorkers: Math.max(1, Math.min(8, availableParallelism() - 1)),
+    // PI_TOOLKIT_TEST_WORKERS overrides it (CI and release.sh lower it on purpose: time is cheap
+    // there, while timing-sensitive integration tests flake under CPU contention).
+    maxWorkers: testWorkers(),
     minWorkers: 1,
   },
 });

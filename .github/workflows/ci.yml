@@ -37,6 +37,9 @@ jobs:
         run: npm test
         env:
           PWH_REQUIRE_UI_DIST: "1"
+          # Fewer workers than the 4-vCPU runner allows: CI time is cheap, and the timing-sensitive
+          # integration tests (real hub children, perf ratios) flake under CPU contention.
+          PI_TOOLKIT_TEST_WORKERS: "2"
 
       - name: Build
         run: npm run build

@@ -541,8 +541,10 @@ if [[ $SKIP_TESTS -eq 0 ]]; then
   [[ $DRY_RUN -eq 0 ]] && NODE_ENV=production npm run build
   info "  -> npm run build:web (NODE_ENV=production) && npm run check:web"
   [[ $DRY_RUN -eq 0 ]] && { NODE_ENV=production npm run build:web && npm run check:web; }
-  info "  -> npm test"
-  [[ $DRY_RUN -eq 0 ]] && npm test
+  info "  -> npm test (PI_TOOLKIT_TEST_WORKERS=${PI_TOOLKIT_TEST_WORKERS:-4})"
+  # Release preflight favors determinism over speed: the release box usually has other agents
+  # running, and load-sensitive tests flake at the default 8 workers. Override via the env var.
+  [[ $DRY_RUN -eq 0 ]] && PI_TOOLKIT_TEST_WORKERS="${PI_TOOLKIT_TEST_WORKERS:-4}" npm test
   ok "Pre-release checks passed"
 else
   warn "[5/9] Skipping pre-release checks (--skip-tests — emergency use only)"
