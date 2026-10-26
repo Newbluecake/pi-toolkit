@@ -185,7 +185,10 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
     async getUserSummary(userId): Promise<LanUserSummary | undefined> {
       const u = userById(userId);
       if (u === undefined) return undefined;
-      return { username: u.username, initialPasswordInUse: u.initialPassword !== undefined };
+      return {
+        username: u.username,
+        initialPasswordInUse: u.initialCreatedAt !== undefined || u.initialPassword !== undefined,
+      };
     },
 
     async initialInfo() {
@@ -194,10 +197,12 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
           u.initialLoginIp !== undefined && u.initialLoginAt !== undefined
             ? { ip: u.initialLoginIp, at: u.initialLoginAt }
             : undefined;
+        // #66 D4: the first-login record is only reported while the generated password is in use.
+        const inUse = u.initialCreatedAt !== undefined || u.initialPassword !== undefined;
         return {
           username: u.username,
           ...(u.initialPassword === undefined ? {} : { initialPassword: u.initialPassword }),
-          ...(initialLogin === undefined ? {} : { initialLogin }),
+          ...(initialLogin === undefined || !inUse ? {} : { initialLogin }),
         };
       }
       return undefined;
@@ -422,9 +427,17 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
       });
     },
 
+    // #66 D4: mirrors the real single statement — record (COALESCE) + wipe, only while plaintext remains.
     async markInitialLogin(username, ip, at) {
       const u = users.get(username);
-      if (u !== undefined) users.set(username, { ...u, initialLoginIp: ip, initialLoginAt: at });
+      if (u === undefined || u.initialPassword === undefined) return { cleared: false };
+      const { initialPassword: _wiped, ...rest } = u;
+      users.set(username, {
+        ...rest,
+        initialLoginIp: u.initialLoginIp ?? ip,
+        initialLoginAt: u.initialLoginAt ?? at,
+      });
+      return { cleared: true };
     },
 
     async purgeExpired(now) {

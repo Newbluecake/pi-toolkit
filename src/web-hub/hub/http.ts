@@ -3334,8 +3334,16 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     }
 
     function extraWarnings(): string[] {
-      return kdfInvalidWarning ? ["db-invalid:kdf"] : [];
+      return [...(kdfInvalidWarning ? ["db-invalid:kdf"] : []), ...(lan.store.warnings?.() ?? [])];
     }
+
+    // #66 D4: store-raised warnings (e.g. `initial-password-residue`) refresh the published status.
+    const offStoreWarnings = lan.store.onWarningsChanged?.(() => {
+      if (handle === undefined || lanClosed) return;
+      status = withAllowlist(buildLanStatus(lan.cfg, handle.current(), handle.port, extraWarnings()));
+      lan.onStatus(status);
+    });
+    lan.scope.defer(() => offStoreWarnings?.());
 
     function recompute(force: boolean): void {
       if (handle === undefined || lanClosed) return;

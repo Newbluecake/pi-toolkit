@@ -433,11 +433,13 @@ const stmtTouchSelect = db.prepare('SELECT s.user_id, s.epoch, s.bound_origin, s
 const stmtTouchUpdate = db.prepare('UPDATE sessions SET last_seen_at=?, expires_at=? WHERE sid_hash=? AND last_seen_at <= ?');
 const stmtDeleteSession = db.prepare('DELETE FROM sessions WHERE sid_hash=?');
 const stmtDeleteAllSessions = db.prepare('DELETE FROM sessions WHERE user_id=?');
-const stmtMarkInitialLogin = db.prepare('UPDATE users SET initial_login_at=?, initial_login_ip=? WHERE username=? AND initial_login_at IS NULL');
+// #66 D4: record the first initial-password login AND wipe the plaintext in one statement. No epoch
+// condition: \`initial_password IS NOT NULL\` is already idempotent and survives revokeAll/rehash.
+const stmtMarkInitialLogin = db.prepare('UPDATE users SET initial_login_at=COALESCE(initial_login_at,?), initial_login_ip=COALESCE(initial_login_ip,?), initial_password=NULL WHERE username=? AND initial_password IS NOT NULL');
 const stmtUpdateUser = db.prepare('UPDATE users SET kdf=?, n=?, r=?, p=?, salt=?, hash=?, epoch=epoch+1, initial_password=NULL, initial_created_at=NULL, updated_at=? WHERE username=?');
 const stmtRehashUser = db.prepare('UPDATE users SET n=?, r=?, p=?, salt=?, hash=?, updated_at=? WHERE id=? AND n=? AND r=? AND p=? AND salt=? AND hash=?');
 const stmtInsertUser = db.prepare('INSERT INTO users (username, kdf, n, r, p, salt, hash, epoch, created_at, updated_at) VALUES (?,?,?,?,?,?,?,1,?,?)');
-const stmtInitialInfo = db.prepare('SELECT username, initial_password, initial_login_at, initial_login_ip FROM users ORDER BY id LIMIT 1');
+const stmtInitialInfo = db.prepare('SELECT username, initial_password, initial_created_at, initial_login_at, initial_login_ip FROM users ORDER BY id LIMIT 1');
 const stmtPurge = db.prepare('DELETE FROM sessions WHERE sid_hash IN (SELECT sid_hash FROM sessions WHERE expires_at<=? OR absolute_expires_at<=? LIMIT 256)');
 
 ${SECURITY_QUERY}
@@ -466,14 +468,16 @@ ${testHooks}
     case 'getUserSummary': {
       const row = stmtGetUserById.get(args.userId);
       if (!row) return undefined;
-      return { username: row.username, initialPasswordInUse: row.initial_password !== null };
+      return { username: row.username, initialPasswordInUse: row.initial_created_at !== null || row.initial_password !== null };
     }
     case 'initialInfo': {
       const row = stmtInitialInfo.get();
       if (!row) return undefined;
       const out = { username: row.username };
       if (row.initial_password !== null) out.initialPassword = row.initial_password;
-      if (row.initial_login_ip !== null && row.initial_login_at !== null) {
+      // #66 D4: the first-login record only matters while the generated password is still in use.
+      const inUse = row.initial_created_at !== null || row.initial_password !== null;
+      if (inUse && row.initial_login_ip !== null && row.initial_login_at !== null) {
         out.initialLogin = { ip: row.initial_login_ip, at: row.initial_login_at };
       }
       return out;
@@ -545,8 +549,8 @@ ${crashAfterCommit}
       return changes === 1 ? {ok:true} : {ok:false,reason:'stale'};
     }
     case 'markInitialLogin': {
-      stmtMarkInitialLogin.run(args.at, args.ip, args.username);
-      return null;
+      const changes = stmtMarkInitialLogin.run(args.at, args.ip, args.username).changes;
+      return { cleared: changes === 1 };
     }
     case 'purgeExpired': {
       return stmtPurge.run(args.now, args.now).changes;
@@ -829,7 +833,12 @@ function run() {
       return;
     }
     if (op === 'checkpoint-truncate') {
-      db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      // wal_checkpoint does not throw when a reader blocks it; busy=1 means the WAL was NOT truncated.
+      const cp = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+      if (cp && Number(cp.busy) !== 0) {
+        reply({ ok: true, warning: 'checkpoint-truncate-busy' });
+        return;
+      }
       reply({ ok: true });
       return;
     }

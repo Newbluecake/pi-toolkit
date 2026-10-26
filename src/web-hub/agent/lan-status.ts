@@ -282,10 +282,20 @@ function formatLocalMinute(ms: number): string {
  * `LanInfoPayload` → the initial-password lines for the given UI mode.
  * `initialPassword` present ⇒ still in use: TUI shows the plaintext + reminder;
  * every other mode shows only the reminder (never the plaintext, plan §11 LE
- * row: "非 TUI 不显示初始密码"). Absent ⇒ already changed ⇒ no lines at all.
+ * row: "非 TUI 不显示初始密码"). Absent + `initialLogin` ⇒ plaintext wiped at first sign-in but
+ * the account still uses it (#66 D4): one warning line; absent + no `initialLogin` ⇒ no lines.
  */
 export function formatInitialPasswordLines(info: LanInfoPayload | undefined, mode: UiMode): string[] {
-  if (info === undefined || info.initialPassword === undefined) return [];
+  if (info === undefined) return [];
+  if (info.initialPassword === undefined) {
+    // #66 D4: the hub wipes the plaintext at the first sign-in; it only reports `initialLogin` while
+    // the generated password is still the account's password, so its presence means "wiped, in use".
+    if (info.initialLogin === undefined) return [];
+    return [
+      `初始密码已于 ${formatLocalMinute(info.initialLogin.at)} 被 ${info.initialLogin.ip} 用于登录，明文已从 hub.db 清除；该账号仍在使用初始密码，若不是你本人登录，立即在本机执行 /webhub passwd。`,
+      "请尽快修改初始密码：在本机执行 /webhub passwd。",
+    ];
+  }
   const lines: string[] = [];
   if (mode === "tui") {
     lines.push(

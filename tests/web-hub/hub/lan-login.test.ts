@@ -900,21 +900,68 @@ describe("absolute deadlines and late-result isolation", () => {
     expect(h.store.sessionsBySidHash.size).toBe(0);
     expect((await h.core.waitApproval(token, context(), io().value)).body).toEqual({ error: "E_2FA_EXPIRED" });
   });
-  it("markInitialLogin is INSIDE completion deadline and failure revokes insert", async () => {
+  it("#66 D4: a hung markInitialLogin is bounded (2s) and the login still succeeds with its session", async () => {
     const h = setup({}, true);
     const dispatched = latch();
     vi.spyOn(h.store, "markInitialLogin").mockImplementation(async () => {
       dispatched.resolve();
       await new Promise<void>(() => {});
     });
+    const truncate = vi.fn();
+    (h.store as { requestCheckpointTruncate?: () => void }).requestCheckpointTruncate = truncate;
     const pending = h.password();
     await dispatched.promise;
     expect(h.store.sessionsBySidHash.size).toBe(1);
-    await vi.advanceTimersByTimeAsync(L.postKdfMs);
-    expect(await pending).toEqual({ status: 503, body: { error: "E_DEADLINE" } });
-    await flush();
-    expect(h.store.sessionsBySidHash.size).toBe(0);
-    expect(h.succeed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_000);
+    const reply = await pending;
+    expect(reply.status).toBe(200);
+    expect(reply.body).toEqual({ ok: true, initialPassword: true });
+    expect(h.store.sessionsBySidHash.size).toBe(1);
+    expect(h.succeed).toHaveBeenCalledTimes(1);
+    expect(truncate).not.toHaveBeenCalled();
+    expect(h.log.warn).toHaveBeenCalledWith("web-hub lan login: initial-password-clear-failed", expect.anything());
+  });
+  it("#66 D4: a rejecting markInitialLogin never fails the login (only a warn; the secret never reaches the log)", async () => {
+    const h = setup({}, true);
+    vi.spyOn(h.store, "markInitialLogin").mockRejectedValue(new Error("E_DB: boom correct"));
+    const reply = await h.password();
+    expect(reply.status).toBe(200);
+    expect(h.store.sessionsBySidHash.size).toBe(1);
+    expect(h.succeed).toHaveBeenCalledTimes(1);
+    expect(h.log.warn).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(h.log.warn.mock.calls)).not.toContain("correct");
+  });
+  it("#66 D4: cleared:true requests exactly one checkpoint truncate; cleared:false / no plaintext does not", async () => {
+    const h = setup({}, true);
+    const truncate = vi.fn();
+    (h.store as { requestCheckpointTruncate?: () => void }).requestCheckpointTruncate = truncate;
+    expect((await h.password()).status).toBe(200);
+    expect(truncate).toHaveBeenCalledTimes(1);
+    // The fake wiped the plaintext: a second login re-reads the user and neither marks nor truncates.
+    const mark = vi.spyOn(h.store, "markInitialLogin");
+    const again = await h.password();
+    expect(again.status).toBe(200);
+    // Plaintext gone but `initialCreatedAt` is absent in this fixture ⇒ not "in use" any more.
+    expect(mark).not.toHaveBeenCalled();
+    expect(truncate).toHaveBeenCalledTimes(1);
+    const racing = setup({}, true);
+    const truncate2 = vi.fn();
+    (racing.store as { requestCheckpointTruncate?: () => void }).requestCheckpointTruncate = truncate2;
+    vi.spyOn(racing.store, "markInitialLogin").mockResolvedValue({ cleared: false });
+    expect((await racing.password()).status).toBe(200);
+    expect(truncate2).not.toHaveBeenCalled();
+  });
+  it("#66 D4: after the wipe the response still reports initialPassword:true via initialCreatedAt; a changed password reports false", async () => {
+    const h = setup({}, true);
+    const wiped = (await h.store.getUser("owner"))!;
+    const { initialPassword: _plain, ...rest } = wiped;
+    h.store.seedUser({ ...rest, initialCreatedAt: wall });
+    const mark = vi.spyOn(h.store, "markInitialLogin");
+    const reply = await h.password();
+    expect(reply.body).toEqual({ ok: true, initialPassword: true });
+    expect(mark).not.toHaveBeenCalled();
+    const changed = setup({}, false);
+    expect((await changed.password()).body).toEqual({ ok: true, initialPassword: false });
   });
   it("approval complete has total ≤23s even with dispatched INSERT ignoring abort", async () => {
     let block = false;

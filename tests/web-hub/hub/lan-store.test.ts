@@ -5,6 +5,7 @@
  * SQLite file. `skipIf(!hasNodeSqlite)`.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createRequire } from "node:module";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -22,6 +23,9 @@ import { createSecurityEventBus } from "../../../src/web-hub/hub/security-events
 import { fakeKdfAdmission, fakeLoginLimiter } from "../contract/fakes.js";
 
 const skipIfNoSqlite = (await hasNodeSqlite()) ? describe : describe.skip;
+const sqlite = (await hasNodeSqlite())
+  ? (createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite"))
+  : undefined;
 // L8 "用户名默认系统登录名": the real `createLanStore` seeds this OS username, not the P1
 // literal `"admin"` — asserted against whatever account this test process actually runs as.
 const USERNAME = userInfo().username;
@@ -220,6 +224,158 @@ skipIfNoSqlite("lan-store.ts (plan §4 LanStorePort contract)", () => {
     await store.markInitialLogin(USERNAME, "10.0.0.9", 99);
     info = await store.initialInfo();
     expect(info?.initialLogin).toEqual({ ip: "10.0.0.5", at: 42 }); // unchanged
+  });
+
+  describe("#66 D4: first login wipes the initial plaintext (one statement)", () => {
+    const rawRow = async () => {
+      const { DatabaseSync } = sqlite!;
+      const db = new DatabaseSync(dir.dbFile, { readOnly: true });
+      try {
+        return db
+          .prepare(
+            "SELECT initial_password AS pw, initial_created_at AS created, initial_login_at AS at, initial_login_ip AS ip, epoch FROM users WHERE username=?",
+          )
+          .get(USERNAME) as {
+          pw: string | null;
+          created: number | null;
+          at: number | null;
+          ip: string | null;
+          epoch: number;
+        };
+      } finally {
+        db.close();
+      }
+    };
+    const fileHas = (needle: string) =>
+      [dir.dbFile, `${dir.dbFile}-wal`].some((f) => {
+        try {
+          return readFileSync(f).includes(needle);
+        } catch {
+          return false;
+        }
+      });
+
+    it("records ip/at and NULLs initial_password in one call; created_at stays; epoch untouched", async () => {
+      const before = await rawRow();
+      expect(typeof before.pw).toBe("string");
+      expect(before.created).not.toBeNull();
+      expect(await store.markInitialLogin(USERNAME, "10.0.0.5", 42)).toEqual({ cleared: true });
+      const after = await rawRow();
+      expect(after).toEqual({ pw: null, created: before.created, at: 42, ip: "10.0.0.5", epoch: before.epoch });
+      const user = await store.getUser(USERNAME);
+      expect(user?.initialPassword).toBeUndefined();
+      expect(user?.initialCreatedAt).toBe(before.created);
+      expect(user?.initialLoginAt).toBe(42);
+    });
+
+    it("the three old criteria agree on the new one: summary in-use, info has initialLogin but no plaintext", async () => {
+      await store.markInitialLogin(USERNAME, "10.0.0.5", 42);
+      expect(await store.getUserSummary(1)).toEqual({ username: USERNAME, initialPasswordInUse: true });
+      const info = await store.initialInfo();
+      expect(info).toEqual({ username: USERNAME, initialLogin: { ip: "10.0.0.5", at: 42 } });
+    });
+
+    it("a second call is a no-op ({cleared:false}) and never overwrites the first ip/at", async () => {
+      await store.markInitialLogin(USERNAME, "10.0.0.5", 42);
+      expect(await store.markInitialLogin(USERNAME, "10.0.0.9", 99)).toEqual({ cleared: false });
+      expect((await rawRow()).ip).toBe("10.0.0.5");
+      expect((await rawRow()).at).toBe(42);
+    });
+
+    it("unknown user ⇒ cleared:false and the real row keeps its plaintext", async () => {
+      expect(await store.markInitialLogin("nobody", "10.0.0.5", 42)).toEqual({ cleared: false });
+      expect(typeof (await rawRow()).pw).toBe("string");
+    });
+
+    it("after setPassword all criteria flip to 'not in use' (initialLogin hidden although initial_login_* remain)", async () => {
+      const { scryptSync, randomBytes } = await import("node:crypto");
+      await store.markInitialLogin(USERNAME, "10.0.0.5", 42);
+      const salt = randomBytes(16);
+      const hash = scryptSync("anotherpass1", salt, 32, {
+        N: 32768,
+        r: 8,
+        p: 1,
+        maxmem: 128 * 32768 * 8 + 1024 * 1024,
+      });
+      await store.setPassword({ username: USERNAME, kdf: "scrypt", n: 32768, r: 8, p: 1, salt, hash });
+      expect(await store.getUserSummary(1)).toEqual({ username: USERNAME, initialPasswordInUse: false });
+      expect(await store.initialInfo()).toEqual({ username: USERNAME });
+      expect((await rawRow()).created).toBeNull();
+      expect((await rawRow()).ip).toBe("10.0.0.5"); // the record itself is kept; only the reporting is gated
+    });
+
+    it("racing setPassword first: the wipe matches nothing (cleared:false), no error, no stray login record", async () => {
+      const { scryptSync, randomBytes } = await import("node:crypto");
+      const salt = randomBytes(16);
+      const hash = scryptSync("anotherpass1", salt, 32, {
+        N: 32768,
+        r: 8,
+        p: 1,
+        maxmem: 128 * 32768 * 8 + 1024 * 1024,
+      });
+      await store.setPassword({ username: USERNAME, kdf: "scrypt", n: 32768, r: 8, p: 1, salt, hash });
+      expect(await store.markInitialLogin(USERNAME, "10.0.0.5", 42)).toEqual({ cleared: false });
+      const row = await rawRow();
+      expect(row.at).toBeNull();
+      expect(row.ip).toBeNull();
+    });
+
+    it("legacy db (plaintext present, initial_login_* already set by an old hub): wipes, keeps the FIRST record", async () => {
+      const { DatabaseSync } = sqlite!;
+      const db = new DatabaseSync(dir.dbFile);
+      db.prepare("UPDATE users SET initial_login_at=7, initial_login_ip='9.9.9.9' WHERE username=?").run(USERNAME);
+      db.close();
+      expect(await store.markInitialLogin(USERNAME, "10.0.0.5", 42)).toEqual({ cleared: true });
+      const row = await rawRow();
+      expect(row).toMatchObject({ pw: null, at: 7, ip: "9.9.9.9" });
+    });
+
+    it("legacy db (created_at NULL, plaintext present) still counts as in use and is wiped", async () => {
+      const { DatabaseSync } = sqlite!;
+      const db = new DatabaseSync(dir.dbFile);
+      db.prepare("UPDATE users SET initial_created_at=NULL WHERE username=?").run(USERNAME);
+      db.close();
+      expect(await store.getUserSummary(1)).toEqual({ username: USERNAME, initialPasswordInUse: true });
+      expect(await store.markInitialLogin(USERNAME, "10.0.0.5", 42)).toEqual({ cleared: true });
+      // plaintext gone and created_at NULL ⇒ the only remaining evidence is initial_login_*; not "in use".
+      expect(await store.getUserSummary(1)).toEqual({ username: USERNAME, initialPasswordInUse: false });
+    });
+
+    it("requestCheckpointTruncate: the plaintext is gone from hub.db and -wal afterwards", async () => {
+      const plain = (await store.initialInfo())!.initialPassword!;
+      expect(fileHas(plain)).toBe(true);
+      await store.markInitialLogin(USERNAME, "10.0.0.5", 42);
+      store.requestCheckpointTruncate?.();
+      await vi.waitFor(() => expect(fileHas(plain)).toBe(false), { timeout: 5_000 });
+      expect(store.warnings?.()).toEqual([]);
+    });
+
+    it("a blocked TRUNCATE raises initial-password-residue (notified), a later successful one clears it", async () => {
+      const { DatabaseSync } = sqlite!;
+      const reader = new DatabaseSync(dir.dbFile);
+      const events: string[][] = [];
+      store.onWarningsChanged?.(() => events.push([...(store.warnings?.() ?? [])]));
+      await store.getUserSummary(1); // spawn the resident query child before the reader pins its snapshot
+      try {
+        reader.exec("BEGIN");
+        reader.prepare("SELECT count(*) FROM users").get(); // pins a read snapshot
+        await store.markInitialLogin(USERNAME, "10.0.0.5", 42); // new frames the reader cannot see
+        store.requestCheckpointTruncate?.();
+        await vi.waitFor(() => expect(store.warnings?.()).toEqual(["initial-password-residue"]), { timeout: 6_000 });
+      } finally {
+        reader.exec("ROLLBACK");
+        reader.close();
+      }
+      store.requestCheckpointTruncate?.();
+      await vi.waitFor(() => expect(store.warnings?.()).toEqual([]), { timeout: 6_000 });
+      expect(events).toEqual([["initial-password-residue"], []]);
+    }, 20_000);
+
+    it("concurrent requestCheckpointTruncate calls are coalesced and never throw", async () => {
+      await store.markInitialLogin(USERNAME, "10.0.0.5", 42);
+      for (let i = 0; i < 20; i++) store.requestCheckpointTruncate?.();
+      await vi.waitFor(() => expect(store.warnings?.()).toEqual([]));
+    });
   });
 
   it("getUserSummary reports initialPasswordInUse by userId, flips false after setPassword", async () => {

@@ -325,8 +325,9 @@ export interface LanSessionRecord {
  * narrow lookup rather than widening `LanSessionRecord` itself, since
  * `initialPasswordInUse` has nothing to do with session validity and every
  * *other* `touchSession` call site (SSE open/subscribe/unsubscribe/history,
- * §4.2) has no use for it. `initialPasswordInUse` is `users.initial_password
- * IS NOT NULL` (§5.2: "只要初始密码还在使用").
+ * §4.2) has no use for it. `initialPasswordInUse` is
+ * `initial_created_at IS NOT NULL OR initial_password IS NOT NULL` (#66 D4: the plaintext is wiped
+ * at the first login, but the generated password is still the account's password until a change).
  */
 export interface LanUserSummary {
   username: string;
@@ -404,7 +405,18 @@ export interface LanStorePort extends LanSecurityStorePort {
     input: { username: string; kdf: "scrypt"; n: number; r: number; p: number; salt: Uint8Array; hash: Uint8Array },
     opts?: PortOptions,
   ): Promise<void>;
-  markInitialLogin(username: string, ip: string, at: number, opts?: PortOptions): Promise<void>;
+  /**
+   * #66 D4: records the first initial-password login AND wipes the plaintext in one statement
+   * (`WHERE initial_password IS NOT NULL`, no epoch condition). `cleared` is whether this call did
+   * the wipe; legacy fakes may still resolve void.
+   */
+  markInitialLogin(username: string, ip: string, at: number, opts?: PortOptions): Promise<{ cleared: boolean } | void>;
+  /** #66 D4: coalesced fire-and-forget WAL TRUNCATE after a wipe; a failure raises a status warning. */
+  requestCheckpointTruncate?(): void;
+  /** #66: store-raised `LanStatus.warnings` tokens (currently `initial-password-residue`). */
+  warnings?(): readonly string[];
+  /** Fires when `warnings()` changed; returns the unsubscribe. */
+  onWarningsChanged?(cb: () => void): () => void;
   purgeExpired(now: number, opts?: PortOptions): Promise<number>;
 }
 

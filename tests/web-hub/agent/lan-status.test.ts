@@ -240,6 +240,28 @@ describe("formatInitialPasswordLines (plan §5.2 展示规则 + §9.3; L17 持�
     expect(lines.some((l) => l.includes("192.168.31.40") && l.includes("用初始密码登录过"))).toBe(true);
   });
 
+  it("#66 D4: plaintext wiped but initialLogin present ⇒ wiped notice (time + ip, still in use) + the usual change reminder, in every mode, never a plaintext", () => {
+    const at = new Date(2026, 9, 26, 21, 3).getTime();
+    const wiped: LanInfoPayload = {
+      username: "alice",
+      initialLogin: { ip: "192.168.31.40", at },
+      lan: { state: "starting" },
+    };
+    for (const mode of ["tui", "rpc", "print", "json"] as const) {
+      expect(formatInitialPasswordLines(wiped, mode)).toEqual([
+        "初始密码已于 2026-10-26 21:03 被 192.168.31.40 用于登录，明文已从 hub.db 清除；该账号仍在使用初始密码，若不是你本人登录，立即在本机执行 /webhub passwd。",
+        "请尽快修改初始密码：在本机执行 /webhub passwd。",
+      ]);
+    }
+  });
+
+  it("#66 D4: plaintext still present keeps the legacy output even when initialLogin exists", () => {
+    const withLogin: LanInfoPayload = { ...payload, initialLogin: { ip: "10.0.0.2", at: 1 } };
+    const lines = formatInitialPasswordLines(withLogin, "tui");
+    expect(lines.some((l) => l.includes("abcde-fghij-kmnpq-rstuv"))).toBe(true);
+    expect(lines.some((l) => l.includes("明文已清除"))).toBe(false);
+  });
+
   it("persists regardless of mode even long after generation (L17: only reminds, never expires)", () => {
     // No time is consulted at all — presence of initialPassword is the only signal.
     const lines = formatInitialPasswordLines(payload, "rpc");

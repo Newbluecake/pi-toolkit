@@ -134,6 +134,19 @@ padded run) against `kdfPolicy.verifyTarget` (absent ⇒ `KDF_LEGACY`, i.e. v0.1
 `lan-helpers.ts`). `hub.ts` counts both `run` and `runPadded` in `kdfInflight` so the quiet-replace path cannot cut across
 a login. Residual: compensation scrypt is a smaller-memory computation, so wall-clock can differ by ~10–30 % (A2 live check).
 
+**Initial-password wipe (#66 P5, plan §4.5/D4)**: the auto-generated initial account stays (Q14/L6), but its plaintext
+lives only until the FIRST successful sign-in. `markInitialLogin` is ONE statement (`initial_login_at/ip =
+COALESCE(…)`, `initial_password = NULL … WHERE username=? AND initial_password IS NOT NULL`, no epoch condition) and
+returns `{cleared}`; `lan-login.complete()` calls it best-effort (≤2 s, failure ⇒ `initial-password-clear-failed` warn,
+the login still succeeds and the next one retries) and, when `cleared`, asks `store.requestCheckpointTruncate()` — a
+coalesced maintenance `checkpoint-truncate` (now reporting `checkpoint-truncate-busy` when a reader blocked it) whose
+failure raises the store warning `initial-password-residue` into `LanStatus.warnings` (`store.warnings()` /
+`onWarningsChanged`, in-memory ⇒ gone after a restart whose open check re-truncates). "Initial password still in use"
+is now `initial_created_at IS NOT NULL OR initial_password IS NOT NULL` for the login response, `getUserSummary` and
+`initialInfo`; `initialInfo` reports `initialLogin` only while in use and `initialPassword` only while the plaintext is
+there, so the TUI shows «初始密码已于 <时间> 被 <ip> 用于登录，明文已从 hub.db 清除；该账号仍在使用初始密码…» plus the usual change reminder. No wire change. Residual: backups taken
+before the wipe still hold the plaintext; an open-check TRUNCATE failure alone does not raise the residue warning.
+
 ## Worktree panel
 
 **Worktree panel (worktree-web plan v1.1)**: `agent/worktree-sampler.ts` samples the session cwd's repo through

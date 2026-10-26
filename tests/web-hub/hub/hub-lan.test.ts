@@ -383,6 +383,8 @@ skipIfNoSqlite(
       await waitFor(() => hub.lanStatus()?.state === "on");
       await waitFor(() => sink.store !== undefined);
 
+      const plain = (await sink.store!.initialInfo())?.initialPassword;
+      expect(typeof plain).toBe("string");
       await sink.store!.markInitialLogin(USERNAME, "192.168.1.40", 1_700_000_000_000);
 
       const paths = resolveHubPaths({ home, uid: process.getuid?.() ?? 0 });
@@ -394,6 +396,8 @@ skipIfNoSqlite(
       const res1 = await c.waitFrame((f) => f["t"] === "lan_res" && f["rid"] === "r1");
       const info1 = (res1 as Record<string, unknown>)["info"] as Record<string, unknown>;
       expect(info1["initialLogin"]).toEqual({ ip: "192.168.1.40", at: 1_700_000_000_000 });
+      // #66 D4: that same call wiped the plaintext, so `info` can no longer return it.
+      expect(info1["initialPassword"]).toBeUndefined();
 
       // A second `info` call must not repeat the one-time audit warning.
       c.send({ t: "lan_req", rid: "r2", op: "info" });
@@ -407,8 +411,7 @@ skipIfNoSqlite(
       expect(initialLoginAudits).toHaveLength(1);
       expect(initialLoginAudits[0]).toMatchObject({ audit: "admin", ip: "192.168.1.40", at: 1_700_000_000_000 });
       // Never leaks the actual initial password value anywhere in hub.log.
-      const info = await sink.store!.initialInfo();
-      expect(readFileSync(paths.logFile, "utf8")).not.toContain(info?.initialPassword ?? "\u0000never\u0000");
+      expect(readFileSync(paths.logFile, "utf8")).not.toContain(plain!);
     }, 20_000);
 
     it("lan_req passwd updates the password and revokes all LAN sessions via fe.lan.revoke; audited without leaking the password", async () => {

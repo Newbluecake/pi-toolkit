@@ -61,6 +61,9 @@ const execFileP = promisify(execFile);
  * name (review fix, L8 "用户名默认系统登录名"). */
 const FALLBACK_INITIAL_USERNAME = "admin";
 
+/** `LanStatus.warnings` token raised when the WAL TRUNCATE after wiping the initial password failed. */
+const INITIAL_RESIDUE_WARNING = "initial-password-residue";
+
 export interface LanStore extends LanStorePort {
   /** §6.7.1 step ④ (rotate token, C8): single-transaction revoke of every LAN session — bumps
    * every user's epoch and deletes every session row. Deliberately NOT on the frozen
@@ -189,6 +192,54 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
   checkpointTimer.unref?.();
 
   let closed = false;
+
+  // #66 D4: status warnings raised by the store itself (hub never reads them from the db).
+  const warningTokens = new Set<string>();
+  const warningListeners = new Set<() => void>();
+  function setWarning(token: string, on: boolean): void {
+    if (warningTokens.has(token) === on) return;
+    if (on) warningTokens.add(token);
+    else warningTokens.delete(token);
+    for (const cb of [...warningListeners]) {
+      try {
+        cb();
+      } catch {
+        /* a listener must never break the store */
+      }
+    }
+  }
+  // Coalesced: concurrent requests share one in-flight TRUNCATE; one more run is queued if a wipe
+  // landed while it was running (its pages may postdate the checkpoint already in progress).
+  let truncating = false;
+  let truncateAgain = false;
+  function requestCheckpointTruncate(): void {
+    if (closed) return;
+    if (truncating) {
+      truncateAgain = true;
+      return;
+    }
+    truncating = true;
+    void (async () => {
+      let failed = false;
+      try {
+        const res = await runMaint(deps.dbFile, "checkpoint-truncate", MAINT_DEADLINE_MS["checkpoint-truncate"]);
+        failed = !res.ok || res.warning !== undefined;
+      } catch {
+        failed = true;
+      }
+      truncating = false;
+      if (failed) {
+        log.warn("web-hub lan-store: checkpoint-truncate after initial-password wipe failed");
+        setWarning(INITIAL_RESIDUE_WARNING, true);
+      } else if (!truncateAgain) {
+        setWarning(INITIAL_RESIDUE_WARNING, false);
+      }
+      if (truncateAgain && !closed) {
+        truncateAgain = false;
+        requestCheckpointTruncate();
+      }
+    })();
+  }
 
   async function close(): Promise<void> {
     if (closed) return;
@@ -379,7 +430,23 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
     },
 
     async markInitialLogin(username, ip, at, opts) {
-      await dbClient.call("markInitialLogin", { username, ip, at }, opts);
+      const out = await dbClient.call<{ cleared?: boolean } | null | undefined>(
+        "markInitialLogin",
+        { username, ip, at },
+        opts,
+      );
+      return { cleared: out?.cleared === true };
+    },
+
+    requestCheckpointTruncate,
+
+    warnings: () => [...warningTokens],
+
+    onWarningsChanged(cb) {
+      warningListeners.add(cb);
+      return () => {
+        warningListeners.delete(cb);
+      };
     },
 
     async purgeExpired(now2, opts) {
