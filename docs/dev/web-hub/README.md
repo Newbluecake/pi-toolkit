@@ -151,6 +151,17 @@ get_run_result/`/agent status`/notifications). Web ops ride the `archive` cmd op
 (no proto bump/caps, absent when empty); user-unarchived ids are `held` and never re-auto-archived. Report:
 `docs/dev/web-hub/archive-report.md`.
 
+**#59 count + age gates**: `webHub.archiveKeepRuns` defaults to 6 and
+`webHub.archiveKeepBash` to 5 (non-negative integers; `0` = no count gate, legacy
+age-only behavior). Each sweep counts unarchived TERMINAL items per kind, including
+held items; running and already archived items do not count. Only when a kind exceeds
+its keep count does it archive eligible items oldest-settled-first, stopping at the
+keep count or when no age-eligible non-held items remain. Held items never auto-archive.
+`archiveAfterMin=0` still disables the timer; manual archive remains available.
+`src/archive/sweep.ts` performs pure selection; control adapts snapshots and batch-commits
+once. All three settings are agent-only, non-live: `/reload` suffices, no hub restart.
+Evidence: `docs/dev/web-hub/archive-threshold-report.md`.
+
 ## Cache keepalive panel
 
 **Cache keepalive panel (cache-ttl-keepalive webhub plan)**: `agent/cache-keepalive.ts` projects the keepalive report to the

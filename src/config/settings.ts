@@ -1549,6 +1549,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     // the web drawer always works. AGENT-side only (never read by buildHubConfig) — a change
     // needs `/reload` (picked up at the next stack build), NOT `/webhub restart`.
     archiveAfterMin: 30,
+    archiveKeepRuns: 6,
+    archiveKeepBash: 5,
     lan: DEFAULT_WEBHUB_LAN_SETTINGS,
     spawn: DEFAULT_WEBHUB_SPAWN_SETTINGS,
     // web-hub-proxy plan v2 §5 (X0): off by default, non-live.
@@ -2759,6 +2761,19 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
       record.archiveAfterMin >= 0
         ? record.archiveAfterMin
         : (defaults.archiveAfterMin ?? 30),
+    // #59: non-negative integer count gates; 0 preserves time-only archiving.
+    archiveKeepRuns:
+      typeof record.archiveKeepRuns === "number" &&
+      Number.isInteger(record.archiveKeepRuns) &&
+      record.archiveKeepRuns >= 0
+        ? record.archiveKeepRuns
+        : (defaults.archiveKeepRuns ?? 6),
+    archiveKeepBash:
+      typeof record.archiveKeepBash === "number" &&
+      Number.isInteger(record.archiveKeepBash) &&
+      record.archiveKeepBash >= 0
+        ? record.archiveKeepBash
+        : (defaults.archiveKeepBash ?? 5),
     lan: lanParsed.lan,
     spawn: parseWebHubSpawnBlock(record.spawn),
     proxy: parseWebHubProxyBlock(record.proxy, resolvedPort, lanParsed.lan.port).proxy,

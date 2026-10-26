@@ -226,6 +226,9 @@ export interface WebHubSettings {
    *  from the drawer still works). AGENT-side only — never read by buildHubConfig, so a change
    *  needs just `/reload` (picked up at the next stack build), NOT a hub restart. */
   archiveAfterMin?: number;
+  /** #59: unarchived terminal keep counts (held included); 0 = time-only. Agent-side, /reload. */
+  archiveKeepRuns?: number;
+  archiveKeepBash?: number;
   /** web-hub-steer-recall plan §2/§4.7 (A6) / arch §11 Q1: hold busy web steer/followUp in the
    *  agent-side buffer until pi's next queue drain so the browser can recall/re-edit them.
    *  Default `true`; `false` (or `control:false`) ⇒ no driver, no hold handlers, no `hold.v1`

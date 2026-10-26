@@ -335,6 +335,16 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     min: 0,
     description: "web-hub: auto-archive finished agent cards / bash rows in the fleet drawer after N minutes (0 = off)",
   },
+  "webHub.archiveKeepRuns": count(
+    "webHub.archiveKeepRuns",
+    0,
+    "web-hub: keep N unarchived finished agent runs; held items count but are never auto-archived (default 6; 0 = time-only; /reload)",
+  ),
+  "webHub.archiveKeepBash": count(
+    "webHub.archiveKeepBash",
+    0,
+    "web-hub: keep N unarchived finished bash jobs; held items count but are never auto-archived (default 5; 0 = time-only; /reload)",
+  ),
   // web-hub LAN (lan-plan.md §9.1, S1-W3 LI): five more keys under webHub.lan.*, all non-live like
   // the rest of webHub.* (captured at activate; change → /reload). extraHosts/trustProxyFrom/
   // externalOrigins are comma-separated on disk and in the editor (`csvString`'s `csv: true`

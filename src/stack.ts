@@ -3025,7 +3025,11 @@ export function buildSessionStack(
       ? ((ctx.sessionManager as unknown as { getBranch?: () => readonly unknown[] }).getBranch?.() ?? [])
       : [];
     archive.restore(archiveBranch);
-    archive.start(Math.max(0, settings.webHub.archiveAfterMin ?? 30) * 60_000);
+    archive.start(
+      Math.max(0, settings.webHub.archiveAfterMin ?? 30) * 60_000,
+      settings.webHub.archiveKeepRuns ?? 6,
+      settings.webHub.archiveKeepBash ?? 5,
+    );
   }
   previousArchive = archive;
 

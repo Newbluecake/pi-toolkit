@@ -18,16 +18,15 @@
  * user unarchived is `held` and never auto-archived again (state.ts).
  */
 import {
-  autoArchiveDue,
   archiveItem,
   emptyArchiveState,
-  isArchived,
   readArchiveState,
   unarchiveItem,
   type ArchiveEntry,
   type ArchiveKind,
   type ArchiveState,
 } from "./state.js";
+import { selectAutoArchives } from "./sweep.js";
 import { isTerminalStatus } from "../core/status.js";
 import { isTerminalJobStatus, type JobRecord } from "../bash/types.js";
 import type { RunSnapshot } from "../core/types.js";
@@ -63,6 +62,8 @@ export class ArchiveControl {
   private readonly candidates: ArchiveCandidates;
   private timer: ReturnType<typeof setInterval> | undefined;
   private autoAfterMs = 0;
+  private keepRuns = 6;
+  private keepBash = 5;
   private disposed = false;
 
   constructor(candidates: ArchiveCandidates, deps: ArchiveControlDeps) {
@@ -80,9 +81,11 @@ export class ArchiveControl {
   }
 
   /** Start the auto-archive sweep. `afterMs <= 0` disables it (timer never armed). */
-  start(afterMs: number): void {
+  start(afterMs: number, keepRuns = 6, keepBash = 5): void {
     if (this.disposed) return;
     this.autoAfterMs = Math.max(0, afterMs);
+    this.keepRuns = keepRuns;
+    this.keepBash = keepBash;
     if (this.autoAfterMs <= 0) return;
     const period = this.deps.sweepMs ?? DEFAULT_SWEEP_MS;
     this.timer = setInterval(() => this.sweep(), period);
@@ -178,21 +181,27 @@ export class ArchiveControl {
     const now = this.deps.now();
     let next = this.state;
     let changed = false;
-    for (const snap of this.candidates.runs()) {
-      if (!isTerminalStatus(snap.status)) continue;
-      const settled = snap.diag.settledAt ?? snap.updatedAt;
-      if (!autoArchiveDue(next, { kind: "run", id: snap.runId }, settled, now, this.autoAfterMs)) continue;
-      const after = archiveItem(next, { kind: "run", id: snap.runId, auto: true, now });
-      if (after !== undefined) {
-        next = after;
-        changed = true;
-      }
-    }
-    for (const record of this.candidates.bashJobs()) {
-      if (!isTerminalJobStatus(record.status)) continue;
-      const settled = record.endedAt ?? record.createdAt;
-      if (!autoArchiveDue(next, { kind: "bash", id: record.jobId }, settled, now, this.autoAfterMs)) continue;
-      const after = archiveItem(next, { kind: "bash", id: record.jobId, auto: true, now });
+    const selected = selectAutoArchives(
+      this.state,
+      [
+        ...this.candidates.runs().map((snap) => ({
+          kind: "run" as const,
+          id: snap.runId,
+          terminal: isTerminalStatus(snap.status),
+          settledAt: snap.diag.settledAt ?? snap.updatedAt,
+        })),
+        ...this.candidates.bashJobs().map((record) => ({
+          kind: "bash" as const,
+          id: record.jobId,
+          terminal: isTerminalJobStatus(record.status),
+          settledAt: record.endedAt ?? record.createdAt,
+        })),
+      ],
+      now,
+      { afterMs: this.autoAfterMs, keepRuns: this.keepRuns, keepBash: this.keepBash },
+    );
+    for (const item of selected) {
+      const after = archiveItem(next, { kind: item.kind, id: item.id, auto: true, now });
       if (after !== undefined) {
         next = after;
         changed = true;

@@ -143,7 +143,7 @@ describe("ArchiveControl: auto sweep", () => {
         jobs: [job({ jobId: "b-old", status: "completed", endedAt: 0 })],
         sweepMs: 1000,
       });
-      h.control.start(30 * 60_000); // threshold 1_800_000; now = 1_000_000
+      h.control.start(30 * 60_000, 0, 0); // threshold 1_800_000; now = 1_000_000
       vi.advanceTimersByTime(1000);
       // r-old settled at 0 (age 1_000_000 < 1_800_000) — NOT due yet; nothing committed.
       expect(h.appended).toHaveLength(0);
@@ -156,6 +156,29 @@ describe("ArchiveControl: auto sweep", () => {
       ]);
       // r-fresh (settled 999_999, age 1_000_001 < 1_800_000) still live.
       expect(h.control.view().runs.has("r-fresh")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses default keep counts and commits the oldest excess run/bash in one snapshot", () => {
+    vi.useFakeTimers();
+    try {
+      const h = makeControl({
+        runs: Array.from({ length: 7 }, (_, i) => runSnap({ runId: `r-${i}`, updatedAt: i })),
+        jobs: Array.from({ length: 6 }, (_, i) => job({ jobId: `b-${i}`, status: "completed", endedAt: i })),
+        sweepMs: 1000,
+      });
+      h.control.start(60_000);
+      vi.advanceTimersByTime(1000);
+      expect(h.appended).toHaveLength(1);
+      expect(h.control.wire()?.entries).toEqual([
+        { kind: "run", id: "r-0", at: 1_000_000, auto: true },
+        { kind: "bash", id: "b-0", at: 1_000_000, auto: true },
+      ]);
+      vi.advanceTimersByTime(1000);
+      expect(h.appended).toHaveLength(1);
+      h.control.dispose();
     } finally {
       vi.useRealTimers();
     }
@@ -174,7 +197,7 @@ describe("ArchiveControl: auto sweep", () => {
       const h = makeControl({ runs: [runSnap({ runId: "r-1", updatedAt: 0 })], sweepMs: 1000 });
       h.control.setArchived("run", "r-1", "archive");
       h.control.setArchived("run", "r-1", "unarchive");
-      h.control.start(60_000);
+      h.control.start(60_000, 0, 0);
       h.setNow(10_000_000);
       vi.advanceTimersByTime(10_000);
       expect(h.control.wire()).toBeUndefined(); // still unarchived

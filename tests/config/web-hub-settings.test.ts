@@ -48,6 +48,8 @@ describe("web-hub settings", () => {
       quota: true,
       load: true,
       archiveAfterMin: 30,
+      archiveKeepRuns: 6,
+      archiveKeepBash: 5,
       lan: {
         enabled: false,
         port: 7879,
@@ -143,6 +145,8 @@ describe("web-hub settings", () => {
       quota: true,
       load: true,
       archiveAfterMin: 30,
+      archiveKeepRuns: 6,
+      archiveKeepBash: 5,
       lan: lanDefaults,
       spawn: spawnDefaults,
       proxy: proxyDefaults,
@@ -965,5 +969,31 @@ describe("webHub.cmdHistory (web-hub-cmd-history plan §4.9, A1)", () => {
     expect(parseWebHubSettings({ cmdHistory: true }).cmdHistory).toBe(true);
     expect(parseWebHubSettings({ cmdHistory: "no" }).cmdHistory).toBe(true);
     expect(parseWebHubSettings({ cmdHistory: 0 }).cmdHistory).toBe(true);
+  });
+});
+
+// #59: shared spec drives the text settings command and TUI settings editor.
+describe("webHub archive keep counts", () => {
+  it.each([
+    ["archiveKeepRuns", 6],
+    ["archiveKeepBash", 5],
+  ] as const)("validates %s in both parser and editable spec", (leaf, fallback) => {
+    const key = `webHub.${leaf}`;
+    const spec = SETTING_SPECS[key]!;
+    expect(isKnownSettingKey(key)).toBe(true);
+    expect(spec).toMatchObject({ kind: "number", path: key, min: 0, integer: true });
+    expect(defaultOf(spec)).toBe(fallback);
+    expect(currentOf(DEFAULT_SETTINGS, spec)).toBe(fallback);
+    expect(spec.live).toBeUndefined();
+    for (const value of [0, 1, 12]) {
+      expect(parseWebHubSettings({ [leaf]: value })[leaf]).toBe(value);
+      expect(parseSettingValue(spec, String(value))).toEqual({ ok: true, stored: value, live: value });
+    }
+    for (const value of [-1, 1.5, Number.NaN, Infinity, "6", null]) {
+      expect(parseWebHubSettings({ [leaf]: value })[leaf]).toBe(fallback);
+    }
+    for (const value of ["-1", "1.5", "NaN", "Infinity"]) {
+      expect(parseSettingValue(spec, value).ok).toBe(false);
+    }
   });
 });
