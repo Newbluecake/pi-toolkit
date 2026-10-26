@@ -33,6 +33,16 @@ describe("command policy: /schedule (§5.2 web column)", () => {
     expect(policy(`approve s_abcd2345 ${HASH} --all`)).toBe("deny");
   });
 
+  it("reject mirrors approve: allow ONLY with exactly <id> <64-hex hash> (#61)", () => {
+    expect(policy(`reject s_abcd2345 ${HASH}`)).toBe("allow");
+    expect(policy("reject s_abcd2345")).toBe("deny");
+    expect(policy("reject")).toBe("deny");
+    expect(policy(`reject s_abcd2345 ${HASH.slice(0, 8)}`)).toBe("deny");
+    expect(policy(`reject s_abcd2345 ${HASH} extra`)).toBe("deny");
+    expect(policy(`reject s_abcd2345 ${HASH} --all`)).toBe("deny");
+    expect(policy(`reject s_abcd2345 ${HASH}`, { schedule: "confirm" })).toBe("confirm");
+  });
+
   it("approve is allow ONLY with exactly <id> <64-hex hash>", () => {
     expect(policy(`approve s_abcd2345 ${HASH}`)).toBe("allow");
     expect(policy("approve s_abcd2345")).toBe("deny");

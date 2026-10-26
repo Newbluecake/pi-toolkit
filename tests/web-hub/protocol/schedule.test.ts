@@ -88,9 +88,15 @@ describe("sched_* hub→agent frames", () => {
 });
 
 describe("tables / caps (§10.1)", () => {
-  it("exactly five frame types, three agent→hub and two hub→agent", () => {
-    expect(Object.keys(SCHED_AGENT_FRAME_SCHEMAS)).toEqual(["sched_changed", "sched_bound", "sched_run_ack"]);
-    expect(Object.keys(SCHED_HUB_FRAME_SCHEMAS)).toEqual(["sched_run", "sched_receipts"]);
+  it("eight frame types: five agent→hub and three hub→agent (#61 appended confirm frames)", () => {
+    expect(Object.keys(SCHED_AGENT_FRAME_SCHEMAS)).toEqual([
+      "sched_changed",
+      "sched_bound",
+      "sched_run_ack",
+      "sched_offers",
+      "sched_decide_ack",
+    ]);
+    expect(Object.keys(SCHED_HUB_FRAME_SCHEMAS)).toEqual(["sched_run", "sched_receipts", "sched_decide"]);
   });
 
   it("cap is sched.v1 on both sides; PROTO is not bumped (1.2)", () => {

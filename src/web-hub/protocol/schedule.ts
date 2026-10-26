@@ -199,8 +199,69 @@ export interface SchedReceiptsFrame {
   reportIds: string[];
 }
 
-export type SchedAgentFrame = SchedChangedFrame | SchedBoundFrame | SchedRunAckFrame;
-export type SchedHubFrame = SchedRunFrame | SchedReceiptsFrame;
+// ----------------------------------------------------------------- confirm offers (#61, sched.confirm.v1)
+
+/** Both sides use this cap string; hub advertises it when HubConfig.schedule exists, agent when a schedule port exists. */
+export const SCHED_CONFIRM_CAP = "sched.confirm.v1";
+/** Open offers per session (agent evicts the oldest). */
+export const SCHED_CONFIRM_OFFERS_MAX = 8;
+/** Closed echo entries per `sched_offers` frame. */
+export const SCHED_CONFIRM_CLOSED_MAX = 8;
+/** Offer lifetime (constant, not a setting). */
+export const SCHED_CONFIRM_TTL_MS = 2 * 3_600_000;
+/** `sched_decide.expiresAt = now + 30 s`. */
+export const SCHED_DECIDE_TTL_MS = 30_000;
+export const SCHED_DECIDE_ACK_WAIT_MS = 10_000;
+
+export const SCHED_OFFER_OUTCOMES = ["approved", "rejected", "superseded", "expired", "withdrawn"] as const;
+export type SchedOfferOutcome = (typeof SCHED_OFFER_OUTCOMES)[number];
+export const SCHED_OFFER_BYS = ["tui", "web", "feishu", "elsewhere"] as const;
+export type SchedOfferBy = (typeof SCHED_OFFER_BYS)[number];
+
+export interface SchedOfferWire {
+  offerId: string;
+  taskId: string;
+  defHash: string;
+  expiresAt: number;
+}
+export interface SchedOfferClosedWire {
+  offerId: string;
+  taskId: string;
+  defHash: string;
+  outcome: SchedOfferOutcome;
+  /** Who won; "elsewhere" = ledger approved outside the confirm flow (web command / --all / other process / after reload). */
+  by?: SchedOfferBy;
+}
+/** agent→hub: authoritative full list of this session's offers (every change + every hello_ack; empty list too). */
+export interface SchedOffersFrame {
+  t: "sched_offers";
+  sessionId: string;
+  open: SchedOfferWire[];
+  closed: SchedOfferClosedWire[];
+}
+/** hub→agent: the Feishu card's decision. */
+export interface SchedDecideFrame {
+  t: "sched_decide";
+  reqId: string;
+  sessionId: string;
+  offerId: string;
+  taskId: string;
+  defHash: string;
+  decision: "approve" | "reject";
+  expiresAt: number;
+}
+/** agent→hub: exactly one per unexpired `sched_decide`. */
+export interface SchedDecideAckFrame {
+  t: "sched_decide_ack";
+  reqId: string;
+  result: "approved" | "rejected" | "refused";
+  /** Static reason (E_REV | already-approved | offer-gone | expired | E_NOT_OWNER | E_SECURE | E_DEGRADED | E_BUSY …), ≤128 chars. */
+  reason?: string;
+}
+
+export type SchedAgentFrame =
+  SchedChangedFrame | SchedBoundFrame | SchedRunAckFrame | SchedOffersFrame | SchedDecideAckFrame;
+export type SchedHubFrame = SchedRunFrame | SchedReceiptsFrame | SchedDecideFrame;
 
 const strict = { additionalProperties: false } as const;
 const SessionIdSchema = Type.String({ pattern: SCHED_SESSION_ID_RE.source, maxLength: 128 });
@@ -245,16 +306,69 @@ export const SchedReceiptsSchema = Type.Object(
   strict,
 );
 
+const OfferIdSchema = ReqIdSchema;
+const TaskIdSchema = Type.String({ pattern: SCHED_TASK_ID_RE.source });
+const OfferOutcomeSchema = Type.Union(SCHED_OFFER_OUTCOMES.map((o) => Type.Literal(o)));
+const OfferBySchema = Type.Union(SCHED_OFFER_BYS.map((o) => Type.Literal(o)));
+export const SchedOfferSchema = Type.Object(
+  { offerId: OfferIdSchema, taskId: TaskIdSchema, defHash: HashSchema, expiresAt: Type.Integer({ minimum: 0 }) },
+  strict,
+);
+export const SchedOfferClosedSchema = Type.Object(
+  {
+    offerId: OfferIdSchema,
+    taskId: TaskIdSchema,
+    defHash: HashSchema,
+    outcome: OfferOutcomeSchema,
+    by: Type.Optional(OfferBySchema),
+  },
+  strict,
+);
+export const SchedOffersSchema = Type.Object(
+  {
+    t: Type.Literal("sched_offers"),
+    sessionId: SessionIdSchema,
+    open: Type.Array(SchedOfferSchema, { maxItems: SCHED_CONFIRM_OFFERS_MAX }),
+    closed: Type.Array(SchedOfferClosedSchema, { maxItems: SCHED_CONFIRM_CLOSED_MAX }),
+  },
+  strict,
+);
+export const SchedDecideSchema = Type.Object(
+  {
+    t: Type.Literal("sched_decide"),
+    reqId: ReqIdSchema,
+    sessionId: SessionIdSchema,
+    offerId: OfferIdSchema,
+    taskId: TaskIdSchema,
+    defHash: HashSchema,
+    decision: Type.Union([Type.Literal("approve"), Type.Literal("reject")]),
+    expiresAt: Type.Integer({ minimum: 0 }),
+  },
+  strict,
+);
+export const SchedDecideAckSchema = Type.Object(
+  {
+    t: Type.Literal("sched_decide_ack"),
+    reqId: ReqIdSchema,
+    result: Type.Union([Type.Literal("approved"), Type.Literal("rejected"), Type.Literal("refused")]),
+    reason: Type.Optional(Type.String({ minLength: 1, maxLength: SCHED_REASON_MAX_CHARS })),
+  },
+  strict,
+);
+
 /** Folded into messages.ts's agent→hub decode table (append-only). */
 export const SCHED_AGENT_FRAME_SCHEMAS: Readonly<Record<string, TSchema>> = {
   sched_changed: SchedChangedSchema,
   sched_bound: SchedBoundSchema,
   sched_run_ack: SchedRunAckSchema,
+  sched_offers: SchedOffersSchema,
+  sched_decide_ack: SchedDecideAckSchema,
 };
 /** Folded into messages.ts's hub→agent decode table (append-only). */
 export const SCHED_HUB_FRAME_SCHEMAS: Readonly<Record<string, TSchema>> = {
   sched_run: SchedRunSchema,
   sched_receipts: SchedReceiptsSchema,
+  sched_decide: SchedDecideSchema,
 };
 
 /** hub waits at most this long for `sched_run_ack` before replying 「执行结果未确认」 (§7.4). */
@@ -316,6 +430,8 @@ export interface ScheduleTaskProjectionWire {
   /** `"never"` = no occurrence within the 400-day horizon / budget. */
   degraded?: "never";
   totals: { fired: number; missed: number; skipped: number; manual: number };
+  /** #61: open confirm offer for this exact definition (append-only; absent unless one live, matching, unexpired offer). */
+  offer?: { offerId: string; expiresAt: number };
 }
 
 export interface ScheduleRunProjectionWire {

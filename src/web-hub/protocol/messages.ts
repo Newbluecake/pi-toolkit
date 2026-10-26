@@ -48,6 +48,9 @@ import {
   SCHED_HUB_FRAME_SCHEMAS,
   type SchedBoundFrame,
   type SchedChangedFrame,
+  type SchedDecideAckFrame,
+  type SchedDecideFrame,
+  type SchedOffersFrame,
   type SchedReceiptsFrame,
   type SchedRunAckFrame,
   type SchedRunFrame,
@@ -55,6 +58,9 @@ import {
 export type {
   SchedBoundFrame,
   SchedChangedFrame,
+  SchedDecideAckFrame,
+  SchedDecideFrame,
+  SchedOffersFrame,
   SchedReceiptsFrame,
   SchedRunAckFrame,
   SchedRunFrame,
@@ -1144,7 +1150,9 @@ export type AgentFrame =
   // scheduled-reports S0 (§10.1): inert until A0/H1 route them; sent only under `sched.v1`.
   | SchedChangedFrame
   | SchedBoundFrame
-  | SchedRunAckFrame;
+  | SchedRunAckFrame
+  | SchedOffersFrame
+  | SchedDecideAckFrame;
 
 // ---- S1 LAN control-plane frames (§8.1; 同一个 unix socket，hello 之后才接受，不进 registry/bus/普通日志，不做额外鉴权——同 uid 完全可信) ----
 
@@ -1222,7 +1230,8 @@ export type HubFrame =
   | XsDeliverFrame
   // scheduled-reports S0 (§10.1): inert until A0/H1 route them; sent only under `sched.v1`.
   | SchedRunFrame
-  | SchedReceiptsFrame;
+  | SchedReceiptsFrame
+  | SchedDecideFrame;
 
 export const TIMING = {
   connectMs: 1_000,

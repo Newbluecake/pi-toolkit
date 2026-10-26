@@ -149,6 +149,7 @@ const SCHEDULE_HASH_RE = /^[0-9a-f]{64}$/;
  *     approve, wrong arity, non-hash or `--all` → deny
  *   - __put <json…> <64-hex hash> → allow (the panel review form; the JSON may contain spaces, so
  *     only the LAST token is checked as the hash); without a trailing hash → deny
+ *   - reject <id> <64-hex hash> → same shape/rule as approve (#61: discards the AI's unconfirmed change)
  *   - add / edit / repair / anything else → deny
  */
 export function schedulePolicy(tokens: readonly string[]): PolicyDecision {
@@ -168,7 +169,8 @@ export function schedulePolicy(tokens: readonly string[]): PolicyDecision {
     case "rm":
     case "run":
       return { policy: all ? "deny" : "confirm" };
-    case "approve": {
+    case "approve":
+    case "reject": {
       const hash = tokens[2];
       return {
         policy: !all && tokens.length === 3 && hash !== undefined && SCHEDULE_HASH_RE.test(hash) ? "allow" : "deny",
