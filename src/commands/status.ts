@@ -30,7 +30,7 @@ import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor
 import { countActiveRuns } from "../reload/defer.js";
 import { canReload, notifyReloadUnavailable, type ReloadCommandPort } from "../reload/command-port.js";
 import { formatWakeStatusLine, type WakeStatusView } from "../fabric/wake.js";
-import type { StackXs } from "../stack.js";
+import type { StackXs } from "../fabric/xs/stack.js";
 import { XS_DEFAULT_CHANNEL, XS_MAX_CHANNELS, displayChannel } from "../fabric/xs/channel.js";
 import type { DynamicStatusView } from "../compact-hint/dynamic/wire.js";
 import { effectiveThresholdPercentWithTokens, windowScaledForcePercent } from "../compact-hint/threshold.js";

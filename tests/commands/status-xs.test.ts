@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderStatus, type StatusCommandDeps } from "../../src/commands/status.js";
-import type { StackXs } from "../../src/stack.js";
+import type { StackXs } from "../../src/fabric/xs/stack.js";
 const deps = (): StatusCommandDeps => ({
   query: { list: () => [] } as never,
   orphans: { totalCount: 0, recent: [], lateRecoveredCount: 0 } as never,
