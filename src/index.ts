@@ -140,6 +140,7 @@ import wireFeishuNotify from "./feishu-notify/index.js";
 import { wireSessionNav } from "./session-nav/index.js";
 import { wireTitle } from "./title/index.js";
 import { wireDeferredReload, type DeferredReloadDeps } from "./reload/index.js";
+import { createReloadCommandPort } from "./reload/command-port.js";
 import { countActiveRuns, type DeferredReloadController } from "./reload/defer.js";
 import type { WorkflowToolDeps } from "./tools/workflow-tool.js";
 import type { AskUserRemotePort } from "./ask-user/remote.js";
@@ -327,6 +328,8 @@ export default function activate(rawPi: ExtensionAPI): void {
   if (secureCommandWanted(secureDomain))
     registerSecureCommand(pi, { domain: secureDomain, runtimeLock: () => secureGuards?.lockedReason() });
   const holder: { current?: Stack } = {};
+  const reloadRef: { current?: DeferredReloadController } = {};
+  const isReloadPending = () => reloadRef.current?.pending ?? false;
   const xsEnabled = xsOn({
     fabric: settings.fabric,
     webHub: { enabled: settings.webHub.enabled, control: settings.webHub.control !== false },
@@ -977,6 +980,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       // Top-level Agent always runs in the background (docs/dev/agent-background-only):
       // only spawn() is reached; the outcome arrives through the notification outbox.
       spawn: forwardSpawn(holder),
+      isReloadPending,
       markdownTheme: resolveMarkdownTheme,
       // L1 (agent-tool pool-full plan §2): read fresh on every call so a
       // live `/agent settings` edit (or /reload) takes effect immediately,
@@ -1191,7 +1195,9 @@ export default function activate(rawPi: ExtensionAPI): void {
   // error message) unless settings.workflow.enabled — decided once here
   // rather than per-session, since `settings` itself is loaded once.
   pi.registerTool(
-    settings.workflow.enabled ? createWorkflowTool(forwardWorkflow(holder)) : createDisabledWorkflowToolStub(),
+    settings.workflow.enabled
+      ? createWorkflowTool(forwardWorkflow(holder, isReloadPending))
+      : createDisabledWorkflowToolStub(),
   );
   // /goal 目标驱动持续运行（goal-plan v4 条件 5）：循环钩子挂 agent_settled
   // （唯一「无 retry/压缩/续跑待决」信号）；abort 检测所需的末条 stopReason
@@ -1216,7 +1222,6 @@ export default function activate(rawPi: ExtensionAPI): void {
   // bottom of activate() — its session_start handler must run AFTER
   // session-nav's so the editor wrapper layers on top of SessionNavEditor —
   // but /agent needs it now, so the command gets a facade over this ref.
-  const reloadRef: { current?: DeferredReloadController } = {};
   // Background workflows count too (a workflow between child runs has no live run but is still busy).
   // admitted-run-visibility fix (2026-10-08 incident): union with SpawnService's own admission-time
   // truth (runningIds()) — a just-admitted run has no registry snapshot yet (resume's session-open
@@ -1317,13 +1322,7 @@ export default function activate(rawPi: ExtensionAPI): void {
           if (key === "concurrencyLimit" && typeof value === "number") holder.current?.spawn.setConcurrencyLimit(value);
         },
       },
-      reload: {
-        arm: (n) => reloadRef.current?.arm(n),
-        disarm: () => reloadRef.current?.disarm(),
-        get pending() {
-          return reloadRef.current?.pending ?? false;
-        },
-      },
+      reload: createReloadCommandPort(() => reloadRef.current, pi),
     }),
   );
 
@@ -2056,8 +2055,9 @@ function forwardQuery(holder: { current?: Stack }): QueryService {
     extendTimeout: (runId, extendMs, opts) => requireStack(holder).query.extendTimeout(runId, extendMs, opts),
   };
 }
-function forwardWorkflow(holder: { current?: Stack }): WorkflowToolDeps {
+function forwardWorkflow(holder: { current?: Stack }, isReloadPending: () => boolean): WorkflowToolDeps {
   return {
+    isReloadPending,
     get defaultBudget() {
       return requireStack(holder).workflow.defaultBudget;
     },

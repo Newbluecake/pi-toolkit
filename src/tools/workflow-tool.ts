@@ -14,6 +14,7 @@ import { formatDuration } from "../ui/fleet-panel.js";
 import { formatWidgetCost } from "../ui/fleet-widget.js";
 import { truncateResultText } from "./result-text.js";
 import { RESULT_TOOL_NAME } from "../core/tool-names.js";
+import { reloadPendingResult } from "../reload/admission.js";
 
 /**
  * The `SubagentWorkflow` tool — the model-facing entry point into the engine
@@ -37,6 +38,8 @@ import { RESULT_TOOL_NAME } from "../core/tool-names.js";
  * print-mode (blocking) flavour to keep.
  */
 export interface WorkflowToolDeps {
+  /** Main-session entry point only, not the running workflow's internal agent() calls. */
+  isReloadPending?: () => boolean;
   readonly defaultBudget: WorkflowRunBudget;
   readonly runs: Pick<BackgroundWorkflows, "start">;
 }
@@ -596,6 +599,7 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
       return text;
     },
     async execute(_toolCallId, params, signal) {
+      if (deps.isReloadPending?.()) return reloadPendingResult();
       // §5.1 rule 1: check signal?.aborted before anything else — never boot a worker for an already-cancelled call.
       // After this check the run is detached from `signal` (Esc on this turn does not stop the workflow).
       if (signal?.aborted) {

@@ -15,6 +15,7 @@ import { toPiToolUsage } from "./usage.js";
 import { COLLAPSED_BODY_LINES, CappedBody } from "../ui/capped-body.js";
 import { truncateResultText } from "./result-text.js";
 import { RESULT_TOOL_NAME } from "../core/tool-names.js";
+import { reloadPendingResult } from "../reload/admission.js";
 
 /**
  * Narrow port the Agent tool needs from SpawnService (X3: also the shape the
@@ -308,6 +309,8 @@ interface AgentToolCommonDeps {
  * Only `spawn` is ever reached (never spawnAndWait).
  */
 export interface TopLevelAgentToolDeps extends AgentToolCommonDeps {
+  /** Main-session dispatch only (including resume); nested/workflow children stay unblocked. */
+  isReloadPending?: () => boolean;
   spawn: Pick<NestedSpawnPort, "spawn">;
   allowedTypes?: undefined;
 }
@@ -699,6 +702,7 @@ function createTopLevelAgentTool(deps: TopLevelAgentToolDeps): ToolDefinition<ty
       return renderAgentCall(shown, theme, context.lastComponent);
     },
     async execute(_toolCallId, params, signal) {
+      if (deps.isReloadPending?.()) return reloadPendingResult();
       // Every call is a background spawn — a legacy `run_in_background`
       // field (even `false`) is accepted by validation and ignored here.
       return spawnInBackground(deps.spawn, params, prepareSpawn(deps, params), signal);

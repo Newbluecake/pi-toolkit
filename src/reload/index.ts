@@ -26,6 +26,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentSettings } from "../config/settings.js";
 import { DeferredReloadController } from "./defer.js";
 import { createReloadEditorFactory } from "./editor.js";
+import { consumeReloadContinue, isReloadStreaming } from "./continue.js";
 import { WORKFLOW_SETTLED_EVENT } from "../workflow/background.js";
 
 export interface DeferredReloadDeps {
@@ -58,7 +59,21 @@ export function wireDeferredReload(pi: ExtensionAPI, deps: DeferredReloadDeps): 
     pi.events.on(WORKFLOW_SETTLED_EVENT, onSettle),
   ];
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
+    controller.disarm(); // a session switch must not retain another session's parked fire
+    // Main-session only (post-HOST_KEY). Reuse this hook even with defer off:
+    // explicit /agent reload can still have interrupted unfinished work.
+    if (consumeReloadContinue(ctx, event.reason)) {
+      pi.sendMessage(
+        {
+          customType: "subagent:reload-continue",
+          display: true,
+          content:
+            "reload 已完成（插件已更新）。请继续 reload 前未完成的任务；之前派发的子 agent 结果如尚未处理，用 get_run_result 取回。",
+        },
+        { triggerTurn: true, ...(isReloadStreaming(ctx) ? { deliverAs: "followUp" as const } : {}) },
+      );
+    }
     // TUI-only: child/rpc sessions never replace the editor component, and
     // print mode has no editor at all. The setting gates the interception
     // only — `/agent reload` stays usable regardless.
@@ -68,6 +83,7 @@ export function wireDeferredReload(pi: ExtensionAPI, deps: DeferredReloadDeps): 
   });
 
   pi.on("session_shutdown", () => {
+    controller.disarm(); // cancel natural-idle wait/timer and invalidate late callbacks
     while (busUnsubscribers.length > 0) busUnsubscribers.pop()?.();
   });
 

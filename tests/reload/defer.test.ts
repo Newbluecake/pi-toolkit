@@ -59,6 +59,27 @@ describe("countActiveRuns", () => {
 });
 
 describe("DeferredReloadController", () => {
+  it("natural wait uses an unref timer and disarm disposes it", () => {
+    const nativeSetTimeout = globalThis.setTimeout;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((...args: Parameters<typeof setTimeout>) => {
+      timer = nativeSetTimeout(...args);
+      return timer;
+    }) as typeof setTimeout);
+    const ctl = new DeferredReloadController({ fire: vi.fn() });
+    try {
+      ctl.arm(1);
+      ctl.waitForIdle(
+        () => new Promise(() => undefined),
+        () => false,
+        vi.fn(),
+      );
+      expect(timer?.hasRef()).toBe(false);
+    } finally {
+      ctl.disarm();
+      spy.mockRestore();
+    }
+  });
   it("does not fire while runs remain active", () => {
     const fire = vi.fn();
     const ctl = new DeferredReloadController({ fire });
@@ -69,14 +90,16 @@ describe("DeferredReloadController", () => {
     expect(ctl.pending).toBe(true);
   });
 
-  it("fires and disarms when the fleet drains", () => {
+  it("queues fire once and remains pending when the fleet drains", () => {
     const fire = vi.fn();
     const ctl = new DeferredReloadController({ fire });
     ctl.arm(2);
     ctl.handleRunSettled(1);
     ctl.handleRunSettled(0);
     expect(fire).toHaveBeenCalledTimes(1);
-    expect(ctl.pending).toBe(false);
+    expect(ctl.pending).toBe(true);
+    ctl.handleRunSettled(0);
+    expect(fire).toHaveBeenCalledTimes(1);
   });
 
   it("ignores settle events when not armed", () => {
@@ -107,11 +130,12 @@ describe("DeferredReloadController", () => {
     expect(fire).toHaveBeenCalledTimes(1);
   });
 
-  it("can be re-armed after firing", () => {
+  it("can be re-armed after fire has completed", () => {
     const fire = vi.fn();
     const ctl = new DeferredReloadController({ fire });
     ctl.arm(1);
     ctl.handleRunSettled(0);
+    ctl.disarm(); // the command performs the reload
     ctl.arm(2);
     expect(ctl.pending).toBe(true);
     ctl.handleRunSettled(2);
