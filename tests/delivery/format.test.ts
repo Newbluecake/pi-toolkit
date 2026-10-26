@@ -19,7 +19,7 @@ describe("delivery formatting", () => {
     const payload = { ...base("a", "worker"), textPreview: "x".repeat(201) };
     expect(formatSingle(payload, { stats: "1 turn · 2 tools" })).toBe(
       'Subagent "worker" (#run-1234) completed — 1 turn · 2 tools: ' +
-        `${"x".repeat(200)} — get_subagent_result "run-1234" for full output`,
+        `${"x".repeat(200)} — get_run_result "run-1234" for full output`,
     );
   });
 
@@ -60,7 +60,7 @@ describe("delivery formatting", () => {
       // The half-cut tail line must not appear.
       expect(kept).not.toContain(lines[3]);
       const out = formatSingle({ ...base("a", "worker"), textPreview: src });
-      expect(out).toContain('get_subagent_result "run-1234" for full output');
+      expect(out).toContain('get_run_result "run-1234" for full output');
     });
 
     it("puts the full-output hint in its own paragraph for multi-line previews", () => {
@@ -73,10 +73,10 @@ describe("delivery formatting", () => {
         ...Array.from({ length: 30 }, (_, i) => `| r${i} | ${"x".repeat(40)} |`),
       ].join("\n");
       const out = formatSingle({ ...base("a", "worker"), textPreview: src });
-      expect(out).toContain('\n\n— get_subagent_result "run-1234" for full output');
+      expect(out).toContain('\n\n— get_run_result "run-1234" for full output');
       // The hint is not part of any table row.
       for (const line of out.split("\n")) {
-        if (line.includes("get_subagent_result")) expect(line.startsWith("|")).toBe(false);
+        if (line.includes("get_run_result")) expect(line.startsWith("|")).toBe(false);
       }
     });
 
@@ -145,12 +145,12 @@ describe("delivery formatting", () => {
       // the note would corrupt that markdown construct.
       const src = ["## 结果", "", "第一段 " + "长".repeat(90), "第二段 " + "长".repeat(90)].join("\n");
       const out = formatSingle({ ...base("a", "worker"), textPreview: src, degradedReason: "pre-finalize" });
-      expect(out).toContain('\n\n(pre-finalize snapshot; run get_subagent_result "run-1234" to confirm)');
+      expect(out).toContain('\n\n(pre-finalize snapshot; run get_run_result "run-1234" to confirm)');
     });
 
     it("keeps the historical inline pre-finalize note for single-line previews", () => {
       const out = formatSingle({ ...base("a", "worker"), degradedReason: "pre-finalize" });
-      expect(out).toContain(': done (pre-finalize snapshot; run get_subagent_result "run-1234" to confirm)');
+      expect(out).toContain(': done (pre-finalize snapshot; run get_run_result "run-1234" to confirm)');
     });
   });
 });

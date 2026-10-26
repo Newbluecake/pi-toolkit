@@ -201,7 +201,7 @@ describe("terminal failure notification deduplication", () => {
     const { sendMessage, stack } = await buildHarness();
     stack.notifier.enqueue({ ...existing("pending"), degradedReason: "pre-finalize", finalized: false });
     expect(sendMessage.mock.calls[0]![0].content).toContain("pre-finalize snapshot");
-    expect(sendMessage.mock.calls[0]![0].content).toContain('get_subagent_result "r_failur"');
+    expect(sendMessage.mock.calls[0]![0].content).toContain('get_run_result "r_failur"');
   });
 
   it("W6: a wake-revived run's terminal failure is sent QUIETLY (triggerTurn:false, details.quiet); others are unchanged", async () => {

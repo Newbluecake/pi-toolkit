@@ -10,7 +10,7 @@
     "memory",
     "ask_user",
     "Agent",
-    "get_subagent_result",
+    "get_run_result",
     "list_subagents",
     "steer_subagent",
     "set_model",
@@ -33,7 +33,8 @@
     "consult",
     "bash_job",
     "list_subagents",
-    "switch_context"
+    "switch_context",
+    "get_run_result"
   ],
   "messageAgentSchema": {
     "type": "object",

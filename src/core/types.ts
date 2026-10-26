@@ -399,7 +399,7 @@ export interface SpawnRequest {
 /**
  * M-A (presentation): one observed tool call of a run, kept in
  * RunDiagnostics.toolHistory (bounded ring, TOOL_HISTORY_CAP) so both the
- * progress tool cards (get_subagent_result wait, workflow) and the fleet/agent-tree widget can render a
+ * progress tool cards (get_run_result wait, workflow) and the fleet/agent-tree widget can render a
  * live execution trail without re-reading the child session file.
  */
 export interface ToolCallRecord {
@@ -579,7 +579,7 @@ export type DriverEvent =
       usage?: UsageDelta;
       /**
        * X12: run ids whose lifetime spend rode into THIS run's X9 accumulator
-       * on this usage-bearing toolResult (nested Agent / get_subagent_result).
+       * on this usage-bearing toolResult (nested Agent / get_run_result).
        * Extracted by the session driver from the pi message's
        * `details` (runId / runIds); only present when the
        * message carries usage (a background-spawn ack references a run whose
@@ -785,7 +785,7 @@ export interface ContextSwitchDroppedRange {
  * child-context-switch plan P0 (§2.3.1): best-effort diagnostics folded into
  * `RunDiagnostics.contextSwitches` by the DriverEvent kinds
  * (`context_switch` / `switch_selfcheck_failed` / `switch_capability` /
- * `context_switch_rejected`), surfaced through `get_subagent_result` and the
+ * `context_switch_rejected`), surfaced through `get_run_result` and the
  * completion notice. `count`/`last` are written by successful switches;
  * `selfcheck` is the (run-fatal) self-check-failed latch also read by the
  * runner's settlement priority (§2.3.1 point 3); `capability` is a non-fatal
@@ -794,7 +794,7 @@ export interface ContextSwitchDroppedRange {
  * `rejected` (P3 acceptance follow-up, additive) is a bounded FIFO ring of
  * V1-V6 structural rejections and non-disabling "uncommitted" self-check
  * recheck failures — the reasons a model saw in its own turn's failure
- * notice, now also readable by the calling session via get_subagent_result
+ * notice, now also readable by the calling session via get_run_result
  * without changing the switch-count or capability semantics.
  */
 export interface ContextSwitchDiag {
@@ -995,7 +995,7 @@ export interface RunDiagnostics {
   /**
    * X12: bounded, deduped set of run ids whose lifetime spend was absorbed
    * into `usage` via a usage-bearing toolResult (nested Agent /
-   * get_subagent_result fetches inside THIS run's session). Cost consumers use
+   * get_run_result fetches inside THIS run's session). Cost consumers use
    * it to skip those runs when summing per-run costs (usage broadcast's
    * `absorbed` flag, /agent costs Total). Monotone — ids are only ever added
    * (cap: ABSORBED_RUN_IDS_CAP, FIFO).
@@ -1150,7 +1150,7 @@ export interface RunDiagnostics {
    * session never activated pi-toolkit at all — see
    * `src/child/activation-signal.ts` and the `child_extension_missing`
    * DriverEvent above. Absent for every normal run.
-   * get_subagent_result surfaces it via `formatChildExtensionMissing`
+   * get_run_result surfaces it via `formatChildExtensionMissing`
    * (src/tools/result-text.ts); the runner also WARNs once per process
    * (dedup'd) the first time it observes the event.
    */

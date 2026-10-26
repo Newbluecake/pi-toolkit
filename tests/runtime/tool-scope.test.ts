@@ -26,10 +26,18 @@ describe("runtime/tool-scope: buildToolScopePolicy", () => {
     const policy = buildToolScopePolicy({});
     for (const n of RESERVED_TOOL_NAMES) expect(policy.deny.has(n)).toBe(true);
   });
+  it("result-tool rename: the legacy name keeps its frozen slot, the new name is appended last; both are denied", () => {
+    expect(RESERVED_TOOL_NAMES.indexOf("get_subagent_result")).toBe(1);
+    expect(RESERVED_TOOL_NAMES.at(-1)).toBe("get_run_result");
+    expect(RESERVED_TOOL_NAMES.filter((n) => n === "get_run_result")).toHaveLength(1);
+    const policy = buildToolScopePolicy({});
+    expect(policy.deny.has("get_subagent_result")).toBe(true);
+    expect(policy.deny.has("get_run_result")).toBe(true);
+  });
   it("excludes explicitly granted reserved names from deny (the X3/X10 carve-out)", () => {
     const policy = buildToolScopePolicy({ granted: ["Agent"] });
     expect(policy.deny.has("Agent")).toBe(false);
-    expect(policy.deny.has("get_subagent_result")).toBe(true);
+    expect(policy.deny.has("get_run_result")).toBe(true);
   });
   it("timeout-notify: extend_subagent_timeout is reserved and denied by default (host-only tool)", () => {
     expect(RESERVED_TOOL_NAMES).toContain("extend_subagent_timeout");

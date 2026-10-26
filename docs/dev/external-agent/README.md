@@ -51,7 +51,7 @@ pi-toolkit 可以把 [Factory droid](https://factory.ai) 当作虚拟 provider `
 
 子 agent 用量 × 底层模型的 pi 单价折算为美元。匹配规则：规范 provider 优先；Factory 自托管模型（glm/kimi/deepseek/minimax/mistral 等）按同名模型厂商 API 牌价**近似**计（显示 `approx`，**不是** Factory 实际成本——Factory 按 credits 计费）；匹配不到则 `unpriced`，可用 `externalAgents.droid.pricing["<id>"]` 覆盖（`"provider/id"`、`"unpriced"` 或四项 USD/1M 单价）。
 
-已知缺口（v1）：HUD footer 的子 agent 成本、web-hub 卡片/汇总、回报给 pi 的会话总计、workflow 通知按数字合计，未定价部分按 0 计；展示 `unpriced` / `$x+?` 的位置以 `get_subagent_result` 与 fleet 为准。
+已知缺口（v1）：HUD footer 的子 agent 成本、web-hub 卡片/汇总、回报给 pi 的会话总计、workflow 通知按数字合计，未定价部分按 0 计；展示 `unpriced` / `$x+?` 的位置以 `get_run_result` 与 fleet 为准。
 
 ## 额度显示与闸门
 

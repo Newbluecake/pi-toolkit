@@ -5,6 +5,7 @@
  * tokens; prose aimed at the user lives with the callers.
  */
 import { compileWhen, formatLocal } from "../core/cron.js";
+import { absoluteReportPath, type ReportLocation } from "./result-reference.js";
 import {
   defHash,
   isApproved,
@@ -90,7 +91,8 @@ const DROPPED_NOTE: Readonly<Record<string, string>> = {
   "task-changed": "the task was paused, changed or deleted while queued; not sent",
 };
 
-export function runLine(run: RunRecord, when?: ScheduleWhen): string {
+export function runLine(run: RunRecord, when?: ScheduleWhen, location?: ReportLocation): string {
+  const report = absoluteReportPath(location, run.reportFile);
   const at = when === undefined ? new Date(run.scheduledAt).toISOString() : localTime(when, run.scheduledAt);
   const end = run.endedAt !== undefined && isTerminalRunState(run.state) ? "" : " (in progress)";
   return [
@@ -101,7 +103,7 @@ export function runLine(run: RunRecord, when?: ScheduleWhen): string {
       ? [DROPPED_NOTE[run.reason]!]
       : []),
     ...(run.runId ? [`run ${run.runId}`] : []),
-    ...(run.reportFile ? [`report ${run.reportFile}`] : []),
+    ...(report === undefined ? [] : [`report ${report}`]),
     ...(run.note === "unverified" ? ["note unverified"] : []),
   ].join(" · ");
 }

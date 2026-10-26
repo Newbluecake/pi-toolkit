@@ -1,0 +1,153 @@
+/*
+ * #65 outdated-reload（预览 docs/dev/web-hub/outdated-reload-preview.html §1–§7）—
+ * 详情页提示条 / 仪表盘汇总条 / 卡片「需更新」chip。全部颜色走 tokens.css 的
+ * warning/info/danger/success 变量（深色自动跟随）；按钮/chip/pill 形状沿用
+ * primitives.css（.btn 在 coarse pointer 下已有 44px floor）。
+ */
+
+/* ---- 提示条（boxed 形态；details 页顶部 / 汇总条共用） ---- */
+.or-banner {
+  --n-fg: var(--c-warning-text);
+  --n-bg: var(--c-warning-soft);
+  --n-border: var(--c-warning-border);
+  --n-text: var(--c-warning-text);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--n-border);
+  border-radius: var(--r-md);
+  background: var(--n-bg);
+  color: var(--n-text);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+}
+.or-banner > .icon {
+  margin-top: 1px;
+  color: var(--n-fg);
+}
+.or-banner[data-tone="info"] {
+  --n-fg: var(--c-info);
+  --n-bg: var(--c-info-soft);
+  --n-border: transparent;
+  --n-text: var(--c-text-2);
+}
+.or-banner[data-tone="danger"] {
+  --n-fg: var(--c-danger);
+  --n-bg: var(--c-danger-soft);
+  --n-border: var(--c-danger-border);
+  --n-text: var(--c-text);
+}
+.or-banner-text {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+/* 版本号/错误码的 mono 片段：深浅色都用 surface 混色，无需双写 dark 块。 */
+.or-banner-text .mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  background: color-mix(in srgb, var(--c-surface) 55%, transparent);
+}
+.or-banner-actions {
+  display: flex;
+  flex: none;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+
+/* 详情页挂载点（.detail-main 内流式）：与 NoticeBanner 的全宽条错开，给盒形留边距。 */
+.detail-main > .or-banner,
+.detail-main > .or-toast {
+  margin: var(--sp-2) var(--sp-3) 0;
+}
+
+/* 侧边栏挂载点（AgentList 的 .sidebar-head 之后）。 */
+.sidebar > .or-banner,
+.sidebar > .or-toast,
+.sidebar > .or-progress {
+  margin: var(--sp-2) var(--sp-2) 0;
+}
+.sidebar > .or-banner {
+  padding: var(--sp-2) var(--sp-3);
+}
+/* 桌面收起成窄轨时不显示汇总条（与其它 sidebar 内容同规则）。 */
+.sidebar.is-collapsed > .or-banner,
+.sidebar.is-collapsed > .or-toast,
+.sidebar.is-collapsed > .or-progress {
+  display: none;
+}
+
+/* ---- 成功 toast（出现在提示条原位，数秒后由状态机消去） ---- */
+.or-toast {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--r-md);
+  background: var(--c-success-soft);
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+  box-shadow: var(--shadow-2);
+}
+.or-toast > .icon {
+  color: var(--c-success);
+}
+
+/* ---- 汇总条进度行（预览 §6 的 pv-progress） ---- */
+.or-progress {
+  margin: var(--sp-1) 0 0;
+  padding: 0 var(--sp-2);
+  list-style: none;
+  display: grid;
+  gap: var(--sp-1);
+  font-size: var(--fs-sm);
+}
+.or-progress li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--c-text-2);
+  min-width: 0;
+}
+.or-progress .or-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.or-progress .or-ok {
+  color: var(--c-success);
+}
+.or-progress .or-wait {
+  color: var(--c-text-3);
+}
+.or-progress .or-bad {
+  color: var(--c-danger);
+}
+
+/* ---- 卡片「需更新」chip（预览 §5；与现有 chip 同形，warning 配色） ---- */
+.chip-outdated {
+  border-color: var(--c-warning-border);
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+}
+
+/* ---- 窄屏 ≤480px（预览 §7）：按钮换行占满、触控 44px ---- */
+@media (max-width: 480px) {
+  .or-banner {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .or-banner-text {
+    flex-basis: auto;
+  }
+  .or-banner-actions {
+    margin-left: 0;
+  }
+  .or-banner-actions .btn {
+    flex: 1;
+    min-height: 44px;
+  }
+}

@@ -224,7 +224,7 @@ export { previewToolArgs };
 
 /**
  * X12: collect the tracked-run ids a toolResult message's `details` carries:
- * `runId` (nested Agent blocking result / get_subagent_result), `runIds`
+ * `runId` (nested Agent blocking result / get_run_result), `runIds`
  * (SubagentWorkflow batch results).
  * Purely structural — no pi types, defensive against host shapes. Returns
  * undefined when nothing recognizable is present (the common case: assistant
@@ -313,7 +313,7 @@ function mapEvent(e: any): DriverEvent | undefined {
     // X12: pi emits message_end for toolResult messages too (agent-core
     // tool-placement.js); a *usage-bearing* one carries some nested run's
     // spend INTO this run's X9 accumulator, and its `details` name the run(s)
-    // (nested Agent / get_subagent_result: runId; workflow batch: runIds).
+    // (nested Agent / get_run_result: runId; workflow batch: runIds).
     // Extract those ids so cost consumers can skip
     // the nested runs instead of double-counting them. Gated on usage: a
     // background-spawn ack (or a "still running" poll) references a run whose

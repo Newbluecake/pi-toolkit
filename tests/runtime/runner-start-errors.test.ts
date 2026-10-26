@@ -22,7 +22,7 @@ import type { QueryService } from "../../src/service/query-service.js";
  * threw `No API key found for cloudrouter-anthropic.` — which the runner's
  * prompt guard reported as reason "cancelled" ⇒ `aborted — 0 turns: cancelled`.
  * A start-phase rejection must settle `failed` with the real cause visible in
- * the delivery notice and in get_subagent_result; a real abort must not change.
+ * the delivery notice and in get_run_result; a real abort must not change.
  */
 const NO_KEY = "No API key found for cloudrouter-anthropic.\n\nUse /login to log into a provider via OAuth or API key.";
 const request: ResolvedSpawnRequest = { runId: "r_start", prompt: "hello", displayMeta: { label: "P2" } };
@@ -106,7 +106,7 @@ async function resultText(outcome: RunOutcome, snapshot: RunSnapshot): Promise<s
 }
 
 describe("start-phase rejections settle failed with the cause visible", () => {
-  it("prompt() rejecting (the incident) ⇒ failed, notice + get_subagent_result show the pi error", async () => {
+  it("prompt() rejecting (the incident) ⇒ failed, notice + get_run_result show the pi error", async () => {
     const h = harness({
       create: async () => handle({ prompt: () => Promise.reject(new Error(NO_KEY)) }),
       bind: async () => undefined,

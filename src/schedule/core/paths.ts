@@ -1,7 +1,7 @@
 /**
  * Scheduled tasks — store layout + READ-ONLY fd-anchored file primitives (plan r3 §4.7/§7.6, S1).
  *
- * Layout: `<storeDir>/<sessionDirName(sid)>/{state.json,.lock,reports/<64hex>.md}`.
+ * Layout: `<storeDir>/<sessionDirName(sid)>/{state.json,.lock,reports/<taskId>-<YYYYMMDD-HHmm>[-n].md} (legacy <64hex>.md retained)`.
  *
  * Every open is anchored on an already-open DIRECTORY fd through `/proc/self/fd/<fd>/<name>`
  * (the hub's spawn-history precedent): each level is opened `O_DIRECTORY|O_NOFOLLOW` (files

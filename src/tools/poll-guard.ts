@@ -1,8 +1,9 @@
 import { formatDuration } from "../ui/fleet-panel.js";
+import { RESULT_TOOL_NAME } from "../core/tool-names.js";
 
 /**
  * Anti-polling-loop guards shared by the "check on a background thing" tools
- * (get_subagent_result, bash_job status/wait). A model that polls the same
+ * (get_run_result, bash_job status/wait). A model that polls the same
  * target in a loop burns turns and can deadlock the agent loop — completion
  * notifications are only injected between turns, so the poll never sees the
  * event it is waiting for.
@@ -35,7 +36,7 @@ export interface PollGuardOptions {
   maxCalls?: number | undefined;
   /** Clock override for tests. Default Date.now. */
   now?: (() => number) | undefined;
-  /** Custom warning text; defaults to the get_subagent_result wording. */
+  /** Custom warning text; defaults to the get_run_result wording. */
   message?: ((key: string, count: number, windowMs: number) => string) | undefined;
 }
 
@@ -46,7 +47,7 @@ export function createPollGuard(opts?: PollGuardOptions) {
   const message =
     opts?.message ??
     ((key: string, count: number, window: number) =>
-      `⚠️ Polling too frequently: get_subagent_result has been called ${count} times for run "${key}" ` +
+      `⚠️ Polling too frequently: ${RESULT_TOOL_NAME} has been called ${count} times for run "${key}" ` +
       `within ${formatDuration(window)}. This looks like a polling loop — STOP calling this tool for now. ` +
       `End your turn and wait for the run's completion notification to arrive; if the notification genuinely ` +
       `seems lost, make ONE final call with wait: true instead of repeated non-wait polls.`);

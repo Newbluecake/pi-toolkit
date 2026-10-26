@@ -28,6 +28,7 @@ import { describeJobStatus } from "../bash/job-tool.js";
 import type { MentionAutocompleteEntry } from "../mention/autocomplete.js";
 import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor.js";
 import { countActiveRuns } from "../reload/defer.js";
+import { canReload, notifyReloadUnavailable, type ReloadCommandPort } from "../reload/command-port.js";
 import { formatWakeStatusLine, type WakeStatusView } from "../fabric/wake.js";
 import type { StackXs } from "../stack.js";
 import { XS_DEFAULT_CHANNEL, XS_MAX_CHANNELS, displayChannel } from "../fabric/xs/channel.js";
@@ -68,7 +69,7 @@ export interface StatusCommandDeps {
    * reload while runs are active and the controller fires once they settle.
    * Absent ⇒ the reload subcommand degrades to a hint to use built-in /reload.
    */
-  reload?: { arm(activeCount: number): void; disarm(): void; readonly pending: boolean };
+  reload?: ReloadCommandPort;
   /**
    * compact-hint 动态阈值（dynamic-threshold-plan.md §10.3，P1-11）：只读端口。
    * 缺席（mode=off / 惰性 runtime / 旧宿主）⇒ 输出与今天**逐字节相同**。
@@ -213,16 +214,7 @@ function countBusy(deps: StatusCommandDeps): number {
   return runs + workflows;
 }
 
-/** True when this pi build exposes ctx.reload (older builds do not — degrade to a manual-/reload hint). */
-function canReload(ctx: ExtensionCommandContext): boolean {
-  return typeof ctx.reload === "function";
-}
-
-/**
- * `/agent reload [now|cancel|fire]` — deferred reload entry point. The editor
- * wrapper rewrites exact `/reload` submissions to here; `fire` is the internal
- * action the controller's followUp message sends once the fleet settles.
- */
+/** `/agent reload [now|cancel|fire]` — command routing; lifecycle lives in reload/. */
 async function handleReload(
   deps: StatusCommandDeps,
   action: string | undefined,
@@ -233,57 +225,53 @@ async function handleReload(
     ctx.ui.notify("Deferred reload is not wired in this host; use pi's built-in /reload.", "warning");
     return;
   }
-  if (action === "now") {
-    ctl.disarm();
-    if (!canReload(ctx)) {
-      ctx.ui.notify("This pi build cannot reload programmatically — run /reload manually.", "warning");
-      return;
-    }
-    await ctx.reload();
-    return;
-  }
   if (action === "cancel") {
-    const wasPending = ctl.pending;
-    ctl.disarm();
+    const wasPending = ctl.cancel(ctx);
     ctx.ui.notify(wasPending ? "Deferred reload cancelled." : "No deferred reload was pending.", "info");
     return;
   }
+  if (action !== undefined && action !== "now" && action !== "fire") {
+    ctx.ui.notify(`Unknown reload action "${action}". Usage: /agent reload [now|cancel]`, "warning");
+    return;
+  }
+  // No arming, model messages or handoff writes on hosts without reload support.
+  if (!canReload(ctx)) {
+    notifyReloadUnavailable(ctx);
+    return;
+  }
+  if (action === "now") {
+    await ctl.reload(ctx);
+    return;
+  }
   if (action === "fire") {
-    // Internal: the deferred fire re-counts rather than trusting the event
-    // count — a run spawned between settle and fire keeps the reload parked.
+    // A queued fire after cancellation must not reload the session.
+    if (!ctl.pending) return;
+    if (ctl.deferFire(ctx)) return;
     const busy = countBusy(deps);
     if (busy > 0) {
-      ctl.arm(busy);
+      ctl.arm(busy, ctx);
       ctx.ui.notify(`${busy} run(s) still active — reload stays deferred.`, "info");
       return;
     }
-    ctl.disarm();
-    if (!canReload(ctx)) {
-      ctx.ui.notify("This pi build cannot reload programmatically — run /reload manually.", "warning");
-      return;
-    }
     ctx.ui.notify("Subagents settled — reloading.", "info");
-    await ctx.reload();
-    return;
-  }
-  if (action !== undefined) {
-    ctx.ui.notify(`Unknown reload action "${action}". Usage: /agent reload [now|cancel]`, "warning");
+    await ctl.reload(ctx, "deferred");
     return;
   }
   const busy = countBusy(deps);
   if (busy > 0) {
-    ctl.arm(busy);
+    ctl.arm(busy, ctx);
     ctx.ui.notify(
       `${busy} run(s) active — reload deferred until they settle. \`/agent reload now\` to force, \`/agent reload cancel\` to cancel.`,
       "info",
     );
     return;
   }
-  if (!canReload(ctx)) {
-    ctx.ui.notify("This pi build cannot reload programmatically — run /reload manually.", "warning");
-    return;
+  // A direct request with no child runs still waits naturally for the model.
+  if (typeof ctx.isIdle === "function" && !ctx.isIdle()) {
+    ctl.arm(0, ctx);
+    if (ctl.deferFire(ctx)) return;
   }
-  await ctx.reload();
+  await ctl.reload(ctx, "deferred");
 }
 
 function renderSettings(store: SettingsStore, budgetOnly: boolean): string {
@@ -453,7 +441,7 @@ export function renderRunDetail(
  *
  * X12: a run's `diag.usage` already includes the lifetime spend of any
  * nested run absorbed on one of its usage-bearing toolResults (nested Agent /
- * get_subagent_result — see src/core/state-machine.ts
+ * get_run_result — see src/core/state-machine.ts
  * absorbRunIds). Listing every run's cost AND summing all of them would
  * double-count the absorbed child on top of the parent that already carries
  * its spend, so the grand total skips any run whose id shows up in another

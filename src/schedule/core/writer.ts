@@ -61,8 +61,8 @@ import type { ProcessIdentity } from "./recovery.js";
 import {
   emptyStateFile,
   isTerminalRunState,
-  reportFileOf,
   reportIdOf,
+  SCHED_REPORT_NAME_RE,
   SCHED_LOCK_FILE,
   SCHED_MANUAL_REQ_TTL_MS,
   SCHED_MAX_SESSION_DIRS,
@@ -94,7 +94,7 @@ export const SCHED_REPORT_GC_GRACE_MS = 10 * 60_000;
 export const SCHED_TMP_GC_AGE_MS = 60 * 60_000;
 /** Empty-directory recycling requires no report newer than this (§4.7). */
 export const SCHED_RECYCLE_REPORT_QUIET_MS = 24 * 3_600_000;
-export const SCHED_REPORT_NAME_RE = /^[0-9a-f]{64}\.md$/;
+export { SCHED_REPORT_NAME_RE } from "./spec.js";
 
 export type WriterErrorCode = "E_BUSY" | "E_DEGRADED" | "E_LIMIT";
 export type TxResult<T> =
@@ -368,8 +368,9 @@ export function expirePendingReports(draft: ScheduleStateFile, now: number): num
   return before - draft.pendingReports.length;
 }
 
-/** The index entry for a terminal `run` of session `sessionId` (reportId / path per spec helpers). */
+/** Index the ACTUAL allocated path; reportId remains the stable session/run deduplication key. */
 export function pendingReportFor(sessionId: string, run: RunRecord, status: string): PendingReport {
+  if (run.reportFile === undefined) throw new TypeError("pending report requires a written reportFile");
   const endedAt = run.endedAt ?? run.startedAt;
   return {
     reportId: reportIdOf(sessionId, run.runKey),
@@ -378,7 +379,7 @@ export function pendingReportFor(sessionId: string, run: RunRecord, status: stri
     form: run.form,
     endedAt,
     expiresAt: endedAt + SCHED_REPORT_MAX_AGE_MS,
-    reportFile: reportFileOf(sessionId, run.runKey),
+    reportFile: run.reportFile,
     status: status.slice(0, 256),
   };
 }
@@ -852,7 +853,7 @@ export function sessionTemps(sessFd: number): ReportFileStat[] {
   return out;
 }
 
-/** Report names (`<64hex>.md`) protected by the pending-delivery index. */
+/** Report names (short or legacy) protected by the pending-delivery index. */
 export function referencedReports(state: ScheduleStateFile): Set<string> {
   return new Set(state.pendingReports.map((p) => p.reportFile.slice(SCHED_REPORTS_DIR.length + 1)));
 }
@@ -997,18 +998,22 @@ export async function gcSessionReports(
 }
 
 export interface ReportWriteInput<T> {
-  /** `reports/<64hex>.md` exactly as produced by `reportFileOf`. */
+  /** Relative report path. For new runs pass the base path from `reportFileOf`. */
   reportFile: string;
+  /** Allocate -2, -3, … under the writer lock instead of replacing an existing file. */
+  allocateUnique?: boolean;
   data: Buffer;
   now: number;
   caps?: GcCaps;
   /** Ledger update committed in the SAME transaction (e.g. `finishRun` + `addPendingReport`);
    *  `written` says whether the report file landed (false ⇒ mark `report-skipped(cap)`). */
-  commit?: (draft: ScheduleStateFile, ctx: TxCtx, written: boolean) => TxBody<T>;
+  commit?: (draft: ScheduleStateFile, ctx: TxCtx, written: boolean, reportFile: string) => TxBody<T>;
 }
 
 export interface ReportWriteResult<T> {
   written: boolean;
+  /** Actual allocated path, present only when the file was written. */
+  reportFile?: string;
   /** True ⇔ even after GC the session caps leave no room for this report (nothing written). */
   overCap: boolean;
   deleted: string[];
@@ -1042,8 +1047,28 @@ export async function writeReportLocked<T = undefined>(
     const fd = ctx.dirFd;
     const refs = referencedReports(draft);
     const fresh = reportInventory(fd);
-    // A same-named file is being REPLACED, not added.
-    const others = fresh.reports.filter((r) => r.name !== name);
+    let allocated = name;
+    if (input.allocateUnique) {
+      // Include ledger references as well as disk entries: GC/eviction never reassigns a live
+      // run's name. lstat also reserves non-regular entries without following them.
+      const used = new Set([...refs, ...draft.runs.flatMap((r) => r.reportFile?.slice(prefix.length) ?? [])]);
+      let available = false;
+      for (let n = 1; n <= INVENTORY_SCAN_MAX; n++) {
+        allocated = n === 1 ? name : `${name.slice(0, -3)}-${n}.md`;
+        if (used.has(allocated)) continue;
+        try {
+          lstatSync(fdPath(fd, `${SCHED_REPORTS_DIR}/${allocated}`));
+        } catch (err) {
+          if (errCode(err) !== "ENOENT") throw err;
+          available = true;
+          break;
+        }
+      }
+      if (!available) throw new SchedFsError("io", "report name allocation exhausted");
+    }
+    const reportFile = `${prefix}${allocated}`;
+    // Explicit legacy writes may replace a same-named file; allocated new reports never do.
+    const others = fresh.reports.filter((r) => r.name !== allocated);
     const plan = planReportDeletions(others, refs, input.now, caps, incoming);
     const deleted = unlinkReports(fd, plan.delete, refs);
     const overCap = !fresh.complete || overCapAfter(others, new Set(deleted), caps, incoming);
@@ -1056,15 +1081,21 @@ export async function writeReportLocked<T = undefined>(
       }
       const repFd = openDirAt(fd, SCHED_REPORTS_DIR).fd;
       try {
-        atomicWriteAt(repFd, name, input.data);
+        atomicWriteAt(repFd, allocated, input.data);
       } finally {
         closeQuiet(repFd);
       }
       written = true;
     }
-    const c = input.commit?.(draft, ctx, written);
+    const c = input.commit?.(draft, ctx, written, reportFile);
     return {
-      value: { written, overCap, deleted, ...(c === undefined ? {} : { value: c.value }) },
+      value: {
+        written,
+        overCap,
+        deleted,
+        ...(written ? { reportFile } : {}),
+        ...(c === undefined ? {} : { value: c.value }),
+      },
       write: c?.write ?? false,
     };
   });

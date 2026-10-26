@@ -23,6 +23,7 @@ import { judgeHolder } from "../core/recovery.js";
 import { findSessionEntry, sessionFileAnchor, type FileAnchor, type ProofResult } from "../core/session-proof.js";
 import { isTerminalRunState, SCHED_CUSTOM_TYPE, type RunRecord, type ScheduleStateFile } from "../core/spec.js";
 import { localTime } from "./view.js";
+import { absoluteReportPath, type ReportLocation } from "./result-reference.js";
 import type { ScheduleAgent } from "./wire.js";
 
 export interface DigestCovers {
@@ -43,7 +44,11 @@ const DIGEST_STATES = new Set(["unknown", "dropped", "refused"]);
 const MAX_RUN_LINES = 12;
 
 /** What is new relative to the ledger's digest watermarks (undefined ⇒ nothing to tell). */
-export function computeDigest(state: ScheduleStateFile, now: number): DigestContent | undefined {
+export function computeDigest(
+  state: ScheduleStateFile,
+  now: number,
+  location?: ReportLocation,
+): DigestContent | undefined {
   const lines: string[] = [];
   const covers: DigestCovers = { missed: {}, runsThrough: now };
   const byId = new Map(state.tasks.map((t) => [t.id, t]));
@@ -71,9 +76,10 @@ export function computeDigest(state: ScheduleStateFile, now: number): DigestCont
   const describe = (r: RunRecord): string => {
     const t = byId.get(r.taskId);
     const when = t === undefined ? new Date(r.scheduledAt).toISOString() : localTime(t.when, r.scheduledAt);
+    const report = absoluteReportPath(location, r.reportFile);
     return (
       `任务「${t?.name ?? r.taskId}」（${r.taskId}）${when} 的运行：${RUN_WORDS[r.state] ?? r.state}` +
-      `${r.reason ? `（${r.reason}）` : ""}。`
+      `${r.reason ? `（${r.reason}）` : ""}。${report === undefined ? "" : `报告：${report}`}`
     );
   };
   for (const r of fresh.slice(0, MAX_RUN_LINES)) lines.push(describe(r));
@@ -84,7 +90,7 @@ export function computeDigest(state: ScheduleStateFile, now: number): DigestCont
     lines.push(`有 ${state.reportStats.droppedIndexCap} 份报告因积压未推送到飞书，请在会话或网页查看。`);
   if (lines.length === 0) return undefined;
   const text = [
-    "[定时任务提示] 自上次提示以来发生了下列情况（结果详情可用 schedule 工具 history 查看，报告在对应 reportFile）：",
+    "[定时任务提示] 自上次提示以来发生了下列情况（结果详情可用 schedule 工具 history 查看，报告可按所列绝对路径 read）：",
     ...lines.map((l) => `- ${l}`),
   ].join("\n");
   return { text, summary: `定时任务：${lines.length} 条新情况（已写入会话）`, covers };
@@ -238,7 +244,7 @@ export function createScheduleDigest(deps: DigestDeps): ScheduleDigest {
     const claimed = await s.transact<DigestContent | "busy" | "none">((draft, ctx) => {
       const cur = draft.digest.inflight;
       if (cur !== undefined && cur.id !== reclaim) return { value: "busy", write: false };
-      const content = computeDigest(draft, ctx.now);
+      const content = computeDigest(draft, ctx.now, s);
       if (content === undefined) {
         if (cur === undefined) return { value: "none", write: false };
         delete draft.digest.inflight; // stale claim, nothing left to tell

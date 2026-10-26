@@ -1,4 +1,5 @@
 import type { DeliveryPayload } from "../core/types.js";
+import { RESULT_TOOL_NAME } from "../core/tool-names.js";
 
 /** Character budget for the result preview in a completion notification. */
 export const PREVIEW_BUDGET_CHARS = 200;
@@ -75,7 +76,7 @@ export function formatSingle(p: DeliveryPayload, ctx?: { stats?: string }): stri
   const multiline = preview?.text.includes("\n") ?? false;
   // Same paragraph rule as the hint below: glued onto the last line of a
   // multi-line preview, this note would corrupt that markdown construct.
-  const degradedNote = 'pre-finalize snapshot; run get_subagent_result "' + p.runId.slice(0, 8) + '" to confirm';
+  const degradedNote = "pre-finalize snapshot; run " + RESULT_TOOL_NAME + ' "' + p.runId.slice(0, 8) + '" to confirm';
   const degradedTail =
     p.degradedReason === "pre-finalize" ? (multiline ? `\n\n(${degradedNote})` : ` (${degradedNote})`) : "";
   const who = p.label ? `"${p.label}" (#${p.runId.slice(0, 8)})` : `#${p.runId.slice(0, 8)}`;
@@ -84,7 +85,7 @@ export function formatSingle(p: DeliveryPayload, ctx?: { stats?: string }): stri
   // a separating blank line a trailing table would absorb it as a data row.
   // Single-line previews keep the historical inline " — hint" form
   // (byte-identical to the pre-markdown behavior).
-  const hintText = `get_subagent_result "${p.runId.slice(0, 8)}" for full output`;
+  const hintText = `${RESULT_TOOL_NAME} "${p.runId.slice(0, 8)}" for full output`;
   const hint = preview?.truncated ? (multiline ? `\n\n— ${hintText}` : ` — ${hintText}`) : "";
   return (
     `Subagent ${who} ${p.status}` +

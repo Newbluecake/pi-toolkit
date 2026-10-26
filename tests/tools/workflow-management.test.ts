@@ -11,7 +11,7 @@ import type { Orchestrator } from "../../src/workflow/orchestrator.js";
 import type { WorkflowOutcome, WorkflowRunBudget } from "../../src/workflow/types.js";
 
 /**
- * get_subagent_result / abort_subagent accept a background workflow id
+ * get_run_result / abort_subagent accept a background workflow id
  * (docs/dev/workflow-background/plan.md §2.3): resolution, running progress,
  * terminal outcome, bounded wait + anti-polling, abort idempotency, and
  * usage accounting that never double-counts a child run.
@@ -128,7 +128,7 @@ const exec = (tool: { execute: (...a: never[]) => unknown }, params: Record<stri
     {},
   );
 
-describe("get_subagent_result with a workflow id", () => {
+describe("get_run_result with a workflow id", () => {
   it("running: returns progress (not an error) and warns on a polling loop", async () => {
     const h = harness();
     const wf = h.start();
@@ -302,7 +302,7 @@ describe("abort_subagent with a workflow id", () => {
 });
 
 describe("model-facing descriptions mention workflow ids", () => {
-  it("get_subagent_result and abort_subagent document wf_ ids in the tool and parameter text", () => {
+  it("get_run_result and abort_subagent document wf_ ids in the tool and parameter text", () => {
     const h = harness();
     for (const tool of [
       createResultTool({ query: h.query, workflows: h.workflows }),

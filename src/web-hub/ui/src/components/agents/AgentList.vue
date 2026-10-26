@@ -70,6 +70,7 @@ import NewSessionMenu from "../spawn/NewSessionMenu.vue";
 import SessionHistoryDialog from "../spawn/SessionHistoryDialog.vue";
 import SpawnRow from "../spawn/SpawnRow.vue";
 import AgentCard from "./AgentCard.vue";
+import OutdatedSummaryBanner from "./OutdatedSummaryBanner.vue";
 import RemoveButton from "./RemoveButton.vue";
 import RenameButton from "./RenameButton.vue";
 
@@ -585,6 +586,9 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
         </div>
       </div>
     </div>
+
+    <!-- #65 outdated-reload（预览 §6）：≥2 个落后会话时的汇总条 + 批量重载进度。 -->
+    <OutdatedSummaryBanner />
 
     <DirPicker
       v-if="pickerOpen"

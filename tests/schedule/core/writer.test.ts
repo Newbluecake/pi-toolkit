@@ -24,7 +24,6 @@ import { autoClaim } from "../../../src/schedule/core/claim.js";
 import { sessionDirName } from "../../../src/schedule/core/paths.js";
 import {
   emptyStateFile,
-  reportFileOf,
   reportIdOf,
   SCHED_PENDING_REPORTS_MAX,
   SCHED_REPORT_MAX_AGE_MS,
@@ -47,7 +46,21 @@ import {
   writeReportLocked,
   type WriterFaultPoint,
 } from "../../../src/schedule/core/writer.js";
-import { addTask, approve, env, holder, HOUR, makeTask, MIN, readOk, self, SID, utc, type Env } from "./fixtures.js";
+import {
+  legacyReportFileOf as reportFileOf,
+  addTask,
+  approve,
+  env,
+  holder,
+  HOUR,
+  makeTask,
+  MIN,
+  readOk,
+  self,
+  SID,
+  utc,
+  type Env,
+} from "./fixtures.js";
 
 let E: Env;
 afterEach(() => E?.cleanup());
@@ -290,26 +303,29 @@ describe("report GC and recycling (§4.7)", () => {
     expect(plan.overCap).toBe(true);
   });
 
-  it("session GC deletes expired unreferenced reports only, and reaps old temps", async () => {
-    E = env(T8);
-    const store = E.store();
-    const t = approve(makeTask());
-    await addTask(store, t, T8);
-    const dir = join(E.storeDir, sessionDirName(SID));
-    const keep = reportFileOf(SID, `${t.id}@1`).slice(8);
-    const drop = reportFileOf(SID, `${t.id}@2`).slice(8);
-    const old = T8 - 20 * 86_400_000;
-    writeReport(dir, keep, old);
-    writeReport(dir, drop, old);
-    writeReport(dir, ".x.md.1.abc.tmp", old);
-    await store.transact((d, c) => {
-      addPendingReport(d, pending(SID, `${t.id}@1`, t.id, c.now), c.now);
-      return { value: 0, write: true };
-    });
-    const r = await gcSessionReports(store, T8);
-    expect(r).toMatchObject({ ok: true, value: { deleted: [drop], tempsReaped: 1, overCap: false } });
-    expect(readdirSync(join(dir, "reports"))).toEqual([keep]);
-  });
+  it.each(["legacy", "short"])(
+    "session GC deletes expired unreferenced %s reports only, and reaps old temps",
+    async (format) => {
+      E = env(T8);
+      const store = E.store();
+      const t = approve(makeTask());
+      await addTask(store, t, T8);
+      const dir = join(E.storeDir, sessionDirName(SID));
+      const keep = format === "legacy" ? reportFileOf(SID, `${t.id}@1`).slice(8) : `${t.id}-20261024-0800.md`;
+      const drop = format === "legacy" ? reportFileOf(SID, `${t.id}@2`).slice(8) : `${t.id}-20261024-0800-2.md`;
+      const old = T8 - 20 * 86_400_000;
+      writeReport(dir, keep, old);
+      writeReport(dir, drop, old);
+      writeReport(dir, ".x.md.1.abc.tmp", old);
+      await store.transact((d, c) => {
+        addPendingReport(d, { ...pending(SID, `${t.id}@1`, t.id, c.now), reportFile: `reports/${keep}` }, c.now);
+        return { value: 0, write: true };
+      });
+      const r = await gcSessionReports(store, T8);
+      expect(r).toMatchObject({ ok: true, value: { deleted: [drop], tempsReaped: 1, overCap: false } });
+      expect(readdirSync(join(dir, "reports"))).toEqual([keep]);
+    },
+  );
 
   it("global GC trims across sessions oldest-first, never touching referenced files", async () => {
     E = env(T8);
@@ -542,6 +558,34 @@ describe("report admission is single-writer (review round 2, m2)", () => {
     expect(outs.filter((o) => o?.written === true)).toHaveLength(1);
     expect(outs.filter((o) => o?.written === false && o.overCap)).toHaveLength(1);
     expect(readdirSync(join(dir, "reports"))).toHaveLength(200); // pre-fix ("GC, then write"): 201
+  });
+
+  it("allocates same-minute names inside the writer lock across concurrent store handles", async () => {
+    E = env(T8);
+    const t = approve(makeTask());
+    await addTask(E.store(), t, T8);
+    const base = `reports/${t.id}-20261024-0800`;
+    const results = await Promise.all(
+      ["A", "B", "C"].map((text) =>
+        writeReportLocked(E.store(undefined, { lockTimeoutMs: 5_000 }), {
+          reportFile: `${base}.md`,
+          allocateUnique: true,
+          data: Buffer.from(text),
+          now: T8,
+          commit: (_draft, _ctx, written, path) => ({ value: { text, written, path }, write: false }),
+        }),
+      ),
+    );
+    const paths: string[] = [];
+    for (const result of results) {
+      expect(result).toMatchObject({ ok: true, value: { written: true, overCap: false } });
+      if (!result.ok || result.value.value === undefined) throw new Error("write failed");
+      const { path, text } = result.value.value;
+      paths.push(path);
+      expect(result.value.reportFile).toBe(path);
+      expect(readFileSync(join(E.storeDir, sessionDirName(SID), path), "utf8")).toBe(text);
+    }
+    expect(paths.sort()).toEqual([`${base}.md`, `${base}-2.md`, `${base}-3.md`].sort());
   });
 
   it("the ledger update commits in the SAME transaction and learns whether the file landed", async () => {

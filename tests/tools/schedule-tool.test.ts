@@ -1,3 +1,7 @@
+import { join } from "node:path";
+import { manualClaim } from "../../src/schedule/core/claim.js";
+import { finishRun } from "../../src/schedule/core/writer.js";
+import { addTask, approve, makeTask, readOk } from "../schedule/core/fixtures.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { createScheduleTool, SCHEDULE_TOOL_DESCRIPTION } from "../../src/tools/schedule-tool.js";
 import { createScheduleAgent } from "../../src/schedule/agent/wire.js";
@@ -176,4 +180,35 @@ describe("schedule tool — mode matrix (§3.3)", () => {
     const r = await t.execute("i", { action: "list" } as never, undefined, undefined, {} as never);
     expect(r.details).toMatchObject({ ok: false, code: "E_NOT_OWNER" });
   });
+});
+
+describe("schedule report path rendering", () => {
+  it.each(["short", "legacy"])(
+    "get/history display an absolute %s report path without changing the ledger",
+    async (format) => {
+      env = a3Env();
+      const store = env.agent.ensureStore();
+      const task = approve(makeTask());
+      await addTask(store, task, env.fake.now());
+      const claim = await manualClaim(store, {
+        taskId: task.id,
+        reqId: "tool_path_request",
+        holder: env.agent.holder!,
+      });
+      if (claim.kind !== "started") throw new Error("claim failed");
+      const reportFile = format === "short" ? `reports/${task.id}-20260101-0800-2.md` : `reports/${"a".repeat(64)}.md`;
+      await store.transact((d, ctx) => ({
+        value: finishRun(d, claim.runKey, { state: "completed", reportFile }, ctx.now),
+        write: true,
+      }));
+      const path = join(store.root.real, store.dirName, reportFile);
+      for (const action of ["get", "history"]) {
+        const result = await call(env, { action, id: task.id });
+        expect(result.details.ok).toBe(true);
+        expect(result.text).toContain(`report ${path}`);
+        expect(result.text).not.toContain(`report ${reportFile}`);
+      }
+      expect(readOk(store).runs[0]!.reportFile).toBe(reportFile);
+    },
+  );
 });

@@ -184,7 +184,7 @@ describe("formatExitFacts (bash-timeout-grace plan \u00a73.7)", () => {
 /**
  * child-context-switch plan P0 (§2.3.1, result text line): formatContextSwitches
  * renders RunDiagnostics.contextSwitches into the one-line summary the
- * (later-package) get_subagent_result formatter appends.
+ * (later-package) get_run_result formatter appends.
  */
 describe("formatContextSwitches (child-context-switch plan P0 §2.3.1)", () => {
   it("returns undefined when there is nothing to report", () => {

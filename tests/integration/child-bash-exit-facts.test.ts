@@ -15,7 +15,7 @@ import { createNotifier, type PersistedDelivery } from "../../src/delivery/notif
 
 /**
  * bash-timeout-grace plan §3.2/§3.7/§3.8 (P5, T25-T27): the value chain from
- * a sealed run's `RunExitFacts` all the way to `get_subagent_result`'s
+ * a sealed run's `RunExitFacts` all the way to `get_run_result`'s
  * rendered text, exercised through `createRuntimeRunnerAdapter` with a fake
  * driver (same harness shape as tests/service/runtime-adapter-x3-x10.test.ts)
  * so this covers the ACTUAL wiring this package added (`RuntimeAdapterDeps.
@@ -126,7 +126,7 @@ function realOutboxHost(
 }
 
 describe("exit facts value chain (T25-T27)", () => {
-  it("T25: sealSession's facts land in the outcome, the store snapshot, AND get_subagent_result's rendered text", async () => {
+  it("T25: sealSession's facts land in the outcome, the store snapshot, AND get_run_result's rendered text", async () => {
     const clock = new FakeClock();
     const facts = makeFacts("t25");
     const driver: SessionDriver = {
@@ -148,7 +148,7 @@ describe("exit facts value chain (T25-T27)", () => {
     expect(outcome.diag.exitFacts).toEqual(facts);
     // persist_snapshot (state-machine finish()) — the store snapshot mirrors it (P0b, frozen).
     expect(store.get("r1")?.outcome?.diag.exitFacts).toEqual(facts);
-    // get_subagent_result's formatOutcome (this package's T25 wiring).
+    // get_run_result's formatOutcome (this package's T25 wiring).
     const rendered = formatExitFacts(outcome.diag.exitFacts);
     expect(rendered).toContain("j_t25");
     expect(rendered).toContain("terminating");

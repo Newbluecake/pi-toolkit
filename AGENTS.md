@@ -8,11 +8,11 @@ Guidance for AI coding agents working in this repository.
 
 `pi-toolkit` (formerly `pi-subagent`) — a toolbox extension for [pi](https://github.com/earendil-works/pi)
 (the `@earendil-works/pi-coding-agent` CLI) whose flagship is an anti-hang subagent system: a drop-in
-replacement for the core of `@tintinweb/pi-subagents`: it provides the `Agent` / `get_subagent_result` / `steer_subagent` /
+replacement for the core of `@tintinweb/pi-subagents`: it provides the `Agent` / `get_run_result` / `steer_subagent` /
 `abort_subagent` tools (the main-session `Agent` is background-only — every call returns a run_id and completion is
 notified; only the nested `Agent` injected into a child keeps the blocking default, see
 `docs/dev/agent-background-only/plan.md`), the `SubagentWorkflow` orchestration tool (also background-only: returns a
-`wf_…` id, notifies on terminal state, managed through `get_subagent_result` / `abort_subagent` — see
+`wf_…` id, notifies on terminal state, managed through `get_run_result` / `abort_subagent` — see
 `docs/dev/workflow-background/plan.md`), the `/agent` command, a live
 fleet widget (agent tree), a notification delivery subsystem, and session-aware scheduled tasks (`src/schedule/`). Beyond that
 core it optionally (settings-gated) overrides pi's built-in `bash` with auto-backgrounding plus
@@ -38,7 +38,7 @@ npm install          # dev setup (Node >= 22, enforced by engines + CI)
 npm run build        # TS 7 (native tsc, `typescript-7` alias) -p tsconfig.build.json → dist/
 npm run build:web    # web-hub UI (vite) → dist/web-hub-ui/ — toolchain needs Node ≥22.12 (mermaid's engines; CI has a 22.12.0 job)
 npm run check:web    # UI bundle gates (CSP/size/provenance/licences) · npm run probe:mermaid = real-browser mermaid gate (Chromium+Firefox, not in CI)
-npm test             # vitest run — 17,000+ tests; must stay green
+npm test             # vitest run — 17,000+ tests; must stay green (PI_TOOLKIT_TEST_WORKERS=N caps workers; CI uses 2, release.sh 4)
 npm run typecheck    # TS 7 tsc --noEmit ×2 (strict; see tsconfig flags) + vue-tsc on TS 6; toolchain: docs/dev/toolchain/ts7-report.md
 npm run format       # prettier --write .
 npm run format:check # CI gate
@@ -127,7 +127,7 @@ Format: entry — one-line role | README to read first and when. `src/*` rows wi
 | `src/secure/` — encrypted session vaults over gocryptfs (`pi-secure` launcher + plugin guards). | `docs/dev/data-encryption/README.md` · 动 secure 或新增读设置/写盘功能前（D8 强制关闭） |
 | `src/traffic/` — provider traffic recording (`node:sqlite`, default off), rewrite rules, web viewer. | `docs/dev/traffic-merge/README.md` · 动 traffic 前 |
 | `src/schedule/` — session-aware scheduled tasks (cron/once; default off). | `docs/dev/scheduled-reports/README.md` · 动 schedule 前（schedule-off golden 勿重生） |
-| `src/reload/` — deferred `/reload` (settings-gated by `reload.defer`): an editor wrapper rewrites exact `/reload` submissions to `/agent reload`, which parks the reload while subagents/workflows are active and fires it (via a followUp `/agent reload fire` message) once the fleet settles; `now` forces, `cancel` cancels. | — |
+| `src/reload/` — deferred `/reload` (settings-gated by `reload.defer`): an editor wrapper rewrites exact `/reload` submissions to `/agent reload`, which parks the reload while subagents/workflows are active and fires it (via a followUp `/agent reload fire` message) once the fleet settles; `now` forces, `cancel` cancels. | `docs/dev/deferred-reload/README.md` · 动 deferred reload/派发门/自动继续前 |
 | `src/goal/` — `/goal` objective-driven loop: pure state machine (four phases), text builders, appendEntry session store, `agent_settled` loop hook (until-cmd via `pi.exec`, verifier via `spawnAndWait` + schema, delivery/eval watchdogs), `/goal` command. See `docs/dev/goal/goal-plan.md` (v4 评审修订为最终施工口径). | — |
 | `src/delivery/` — notification outbox: staged → finalize → batched → delivered → consumed, with caller-ack suppression and a coalescer for hold-window merges. | — |
 | `src/workflow/` — `SubagentWorkflow` engine: orchestrator, journal/replay, background registry, `agent()` queue/worktree. | `docs/dev/workflow/README.md` · 动 workflow 前 |

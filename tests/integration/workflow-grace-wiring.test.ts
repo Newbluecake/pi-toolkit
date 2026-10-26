@@ -159,7 +159,7 @@ describe("workflow grace + extension wiring (activate → stack)", () => {
     expect(host.busEvents.some((e) => e.channel === "subagent:workflow:deadline" && e.payload.kind === "grace")).toBe(
       true,
     );
-    const view = await host.call("get_subagent_result", { run_id: id });
+    const view = await host.call("get_run_result", { run_id: id });
     expect(view.content[0]!.text).toContain("is still running");
 
     // Rescue it through the real tool (wf id routed to the background registry).
@@ -192,7 +192,7 @@ describe("workflow grace + extension wiring (activate → stack)", () => {
     // The timeout channel never used the outbox.
     expect(host.sent.some((s) => s.message.customType === "subagent:notification")).toBe(false);
     expect(branch.some((e) => (e as { customType?: string }).customType === OUTBOX_CUSTOM_TYPE)).toBe(false);
-    const read = await host.call("get_subagent_result", { run_id: id });
+    const read = await host.call("get_run_result", { run_id: id });
     expect(read.details).toMatchObject({ workflowId: id, status: "timed_out" });
     await expect(host.call("extend_subagent_timeout", { run_id: id, extend_s: 1 })).rejects.toThrow(
       /already finished \(timed_out\)/,
@@ -300,14 +300,14 @@ describe("workflow grace + extension wiring (activate → stack)", () => {
       // stop), never left running past its owner. The timing assertion
       // separates this from the child's own ~1h deadline (W.hardAt − now):
       // it must already be terminal within seconds of the workflow settling.
-      const read = await host.call("get_subagent_result", { run_id: id });
+      const read = await host.call("get_run_result", { run_id: id });
       expect(read.details).toMatchObject({ workflowId: id, status: "timed_out" });
       const childIds = (read.details.runIds ?? []) as string[];
       expect(childIds.length).toBeGreaterThanOrEqual(1);
       const settledAt = Date.now();
       let childStatus: string | undefined;
       await until(async () => {
-        const child = await host.call("get_subagent_result", { run_id: childIds[0]! });
+        const child = await host.call("get_run_result", { run_id: childIds[0]! });
         childStatus = child.details?.status;
         return childStatus === "aborted" || childStatus === "timed_out";
       });

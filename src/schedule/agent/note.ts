@@ -18,6 +18,8 @@ import {
 import { findRun } from "../core/writer.js";
 import { isEpochDisposed, type ScheduleAgent } from "./wire.js";
 import { backgroundHeader, truncateUtf8 } from "./report-file.js";
+import { RESULT_TOOL_NAME } from "../../core/tool-names.js";
+import { absoluteReportPath } from "./result-reference.js";
 
 export type ScheduleNoteOwner = Pick<
   ScheduleAgent,
@@ -126,9 +128,7 @@ export function createScheduleNotes(schedule: ScheduleNoteOwner, deps: ScheduleN
     kind: ScheduleResultMessage["details"]["kind"],
   ): ScheduleResultMessage {
     const head = task === undefined ? `[定时任务 ${run.taskId}]` : backgroundHeader(task, run);
-    const full = [run.runId ? `get_subagent_result ${run.runId}` : undefined, run.reportFile]
-      .filter(Boolean)
-      .join(" 或 ");
+    const full = run.runId ? `${RESULT_TOOL_NAME} ${run.runId}` : absoluteReportPath(schedule.store(), run.reportFile);
     return {
       customType: SCHED_CUSTOM_TYPE,
       display: true,

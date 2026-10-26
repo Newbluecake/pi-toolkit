@@ -157,7 +157,7 @@ export function readStatus(
   // web-hub archive plan: same overwrite-only-slot rationale as the siblings above — no getter
   // (web-hub off / no live stack) or an empty archive set ⇒ the field stays absent, byte-equal
   // to the pre-feature status shape. The slot is display-only hiding; /agent status,
-  // get_subagent_result, notifications and the runs themselves never read it.
+  // get_run_result, notifications and the runs themselves never read it.
   if (archived !== undefined) {
     const wire = archived();
     if (wire !== undefined && wire.entries.length > 0) status.archived = wire;

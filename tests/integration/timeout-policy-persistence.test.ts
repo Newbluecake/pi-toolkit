@@ -408,7 +408,7 @@ describe("timeoutPolicy persistence across resume paths (R1-R6)", () => {
 
     // /reload: a second session_start rebuilds the stack over the same branch.
     await host.emit("session_start", { reason: "reload" });
-    const seeded = await host.call("get_subagent_result", { run_id: reloadId });
+    const seeded = await host.call("get_run_result", { run_id: reloadId });
     expect(seeded.details.status).toBe("completed"); // the terminal entry seeded back
 
     // Plain resume of the seeded FIXED entry inherits fixed (② through the
@@ -452,7 +452,7 @@ describe("timeoutPolicy persistence across resume paths (R1-R6)", () => {
     activate(host.pi);
     await host.emit("session_start", { reason: "startup" });
 
-    const seeded = await host.call("get_subagent_result", { run_id: "r_FIXEDSEED" });
+    const seeded = await host.call("get_run_result", { run_id: "r_FIXEDSEED" });
     expect(seeded.details.status).toBe("completed");
 
     await host.call("Agent", {
@@ -487,7 +487,7 @@ describe("timeoutPolicy persistence across resume paths (R1-R6)", () => {
 
     // The journal entry maps to a terminal aborted snapshot (D4) and the
     // interrupted message names the restart.
-    const seeded = await host.call("get_subagent_result", { run_id: "r_JOURNALFX" });
+    const seeded = await host.call("get_run_result", { run_id: "r_JOURNALFX" });
     expect(seeded.details.status).toBe("aborted");
     expect(seeded.content[0]!.text).toContain("interrupted by a pi restart");
 

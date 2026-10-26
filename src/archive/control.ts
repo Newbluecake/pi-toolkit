@@ -10,7 +10,7 @@
  *  - the `cmd` op `archive` (agent/commands.ts — manual archive/unarchive);
  *  - the TUI fleet widget's row filter (ui/fleet-widget.ts) and the web
  *    drawer's partition (both hide archived rows, display only — never
- *    get_subagent_result, /agent status, notifications or the runs themselves).
+ *    get_run_result, /agent status, notifications or the runs themselves).
  *
  * Auto-archive (`webHub.archiveAfterMin`, default 30, 0 = off): a 60s unref'd
  * sweep over the terminal runs / terminal bash jobs supplied by the injected

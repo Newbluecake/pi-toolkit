@@ -14,6 +14,8 @@ import { formatWidgetCost } from "../ui/fleet-widget.js";
 import { toPiToolUsage } from "./usage.js";
 import { COLLAPSED_BODY_LINES, CappedBody } from "../ui/capped-body.js";
 import { truncateResultText } from "./result-text.js";
+import { RESULT_TOOL_NAME } from "../core/tool-names.js";
+import { reloadPendingResult } from "../reload/admission.js";
 
 /**
  * Narrow port the Agent tool needs from SpawnService (X3: also the shape the
@@ -69,7 +71,7 @@ export interface AgentToolDetails {
 
 /**
  * M-B: live progress lines for a run's tool card (shared by
- * get_subagent_result's wait stream and SubagentWorkflow). Line 1 is a status
+ * get_run_result's wait stream and SubagentWorkflow). Line 1 is a status
  * header (model · phase · turn · elapsed · cost); lines 2..N are the most
  * recent tool calls (✓ done, ✗ failed, ▸ running) with args preview and
  * per-call duration.
@@ -128,7 +130,7 @@ export function formatOutcomeSummary(outcome: RunOutcome): string {
  * the fields the original plugin's model-facing contract relies on
  * (description / prompt / subagent_type / model) so existing agent .md files
  * and calling conventions keep working; steering and result retrieval are
- * separate tools (steer_subagent / get_subagent_result) rather than crammed
+ * separate tools (steer_subagent / get_run_result) rather than crammed
  * into this one, and supports X2 resume by label or run id.
  *
  * Two parameter surfaces (docs/dev/agent-background-only/plan.md):
@@ -261,7 +263,9 @@ export const NestedAgentToolParams = Type.Object({
   run_in_background: Type.Optional(
     Type.Boolean({
       description:
-        "If true, returns immediately with a run id instead of waiting for completion. Retrieve the result later with get_subagent_result.",
+        "If true, returns immediately with a run id instead of waiting for completion. Retrieve the result later with " +
+        RESULT_TOOL_NAME +
+        ".",
     }),
   ),
   ...trailingFields,
@@ -305,6 +309,8 @@ interface AgentToolCommonDeps {
  * Only `spawn` is ever reached (never spawnAndWait).
  */
 export interface TopLevelAgentToolDeps extends AgentToolCommonDeps {
+  /** Main-session dispatch only (including resume); nested/workflow children stay unblocked. */
+  isReloadPending?: () => boolean;
   spawn: Pick<NestedSpawnPort, "spawn">;
   allowedTypes?: undefined;
 }
@@ -343,8 +349,12 @@ const TOP_LEVEL_DESCRIPTION =
   DESCRIPTION_HEAD +
   "Agent always runs in the background: the call returns immediately with a run_id, and a completion " +
   "notification is pushed to you when the run reaches a terminal state. Do not poll or block waiting for it — " +
-  "continue other work or end your turn, then collect the result with get_subagent_result after the " +
-  "notification arrives (a blocking get_subagent_result wait monopolizes the agent loop, so the user cannot " +
+  "continue other work or end your turn, then collect the result with " +
+  RESULT_TOOL_NAME +
+  " after the " +
+  "notification arrives (a blocking " +
+  RESULT_TOOL_NAME +
+  " wait monopolizes the agent loop, so the user cannot " +
   "enter a new command until it returns). Independent tasks can be dispatched in parallel: issue several " +
   "Agent calls in the same message. Use steer_subagent to send a follow-up instruction to a still-running one; " +
   "abort_subagent stops a running subagent. " +
@@ -356,7 +366,9 @@ function nestedDescription(allowedTypes: readonly string[]): string {
     "By default the call blocks until the subagent finishes and returns its result directly. " +
     "With run_in_background: true it returns a run_id immediately instead; a background run pushes a completion " +
     "notification to you when it reaches a terminal state: prefer continuing other work (or ending your turn) " +
-    "and collecting the result with get_subagent_result after that notification arrives, rather than blocking " +
+    "and collecting the result with " +
+    RESULT_TOOL_NAME +
+    " after that notification arrives, rather than blocking " +
     "with wait: true — a blocking wait monopolizes the agent loop, so the user cannot enter a new command until " +
     "it returns. Use steer_subagent to send a follow-up instruction to a still-running one. abort_subagent stops " +
     "a running subagent. " +
@@ -499,7 +511,7 @@ async function spawnInBackground(
     content: [
       {
         type: "text" as const,
-        text: `Subagent "${effectiveLabel}" started in background (run_id: ${spawned.runId}).${queuedNote} You will receive a completion notification when it finishes — do not block or poll for it now; collect the result with get_subagent_result(run_id: "${spawned.runId}") after the notification arrives.`,
+        text: `Subagent "${effectiveLabel}" started in background (run_id: ${spawned.runId}).${queuedNote} You will receive a completion notification when it finishes — do not block or poll for it now; collect the result with ${RESULT_TOOL_NAME}(run_id: "${spawned.runId}") after the notification arrives.`,
       },
       { type: "text" as const, text: labelMarker(effectiveLabel, spawned.runId, "running") },
       // §5 (user follow-up, agent-tool pool-full plan): compact concurrency-
@@ -690,6 +702,7 @@ function createTopLevelAgentTool(deps: TopLevelAgentToolDeps): ToolDefinition<ty
       return renderAgentCall(shown, theme, context.lastComponent);
     },
     async execute(_toolCallId, params, signal) {
+      if (deps.isReloadPending?.()) return reloadPendingResult();
       // Every call is a background spawn — a legacy `run_in_background`
       // field (even `false`) is accepted by validation and ignored here.
       return spawnInBackground(deps.spawn, params, prepareSpawn(deps, params), signal);

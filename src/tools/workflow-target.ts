@@ -4,7 +4,7 @@ import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
 import type { BackgroundWorkflows } from "../workflow/background.js";
 
 /**
- * Background-workflow management port shared by `get_subagent_result` and
+ * Background-workflow management port shared by `get_run_result` and
  * `abort_subagent` (docs/dev/workflow-background/plan.md §2.3). Structural —
  * `index.ts` forwards it through the session holder like every other port.
  */

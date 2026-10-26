@@ -25,6 +25,7 @@ import type { ExtensionCommandContext, MessageRenderer, RegisteredCommand } from
 import { Text } from "@earendil-works/pi-tui";
 import { firstNonEmptyLine, sanitizeLabelBase } from "../core/labels.js";
 import type { ErrorInfo, RunId, SpawnRequest } from "../core/types.js";
+import { RESULT_TOOL_NAME } from "../core/tool-names.js";
 
 /** customType of the start record injected into the main-session context (`subagent:*` naming convention). */
 export const TASK_STARTED_CUSTOM_TYPE = "subagent:task-started";
@@ -91,7 +92,7 @@ export function buildTaskStartedContent(runId: RunId, label: string, taskPreview
     `label: ${label}\n` +
     `agent type: ${TASK_AGENT_TYPE}\n` +
     `Task: ${taskPreview}\n\n` +
-    `A completion notification will arrive when the run settles; read the full result then with get_subagent_result(run_id: "${runId}"). No action is needed before that.`
+    `A completion notification will arrive when the run settles; read the full result then with ${RESULT_TOOL_NAME}(run_id: "${runId}"). No action is needed before that.`
   );
 }
 
@@ -140,7 +141,9 @@ function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "
 export function createTaskCommand(deps: TaskCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
     description:
-      "启动一个后台 general-purpose subagent 执行任务：/task <任务描述>。整段文本原样作为任务 prompt（不支持参数）；启动后可继续对话，完成时会收到通知，用 get_subagent_result 读取结果。",
+      "启动一个后台 general-purpose subagent 执行任务：/task <任务描述>。整段文本原样作为任务 prompt（不支持参数）；启动后可继续对话，完成时会收到通知，用 " +
+      RESULT_TOOL_NAME +
+      " 读取结果。",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       // The whole argument text is the task prompt — verbatim, no flags.
       const prompt = args.trim();
@@ -170,7 +173,7 @@ export function createTaskCommand(deps: TaskCommandDeps): Omit<RegisteredCommand
         return;
       }
       // SpawnService may have uniquified the label ("-2", …) — the record must
-      // carry the effective one (@mention / get_subagent_result target).
+      // carry the effective one (@mention / get_run_result target).
       const effectiveLabel = spawned.label ?? label ?? spawned.runId;
       try {
         deps.sendMessage(

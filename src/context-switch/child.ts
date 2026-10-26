@@ -43,7 +43,7 @@ export const SWITCH_SELFCHECK_CUSTOM_TYPE = "subagent:switch-selfcheck";
  * P3 acceptance follow-up (plan §2.3.1 V1-V6 visibility gap, additive): the driver
  * (`src/runtime/session-driver.ts`'s `CHILD_SWITCH_REJECTED_CUSTOM_TYPE`, matched by string
  * value only — same decoupling as the two consts above) folds this into
- * `diag.contextSwitches.rejected[]` (bounded FIFO, cap 5), readable from `get_subagent_result`.
+ * `diag.contextSwitches.rejected[]` (bounded FIFO, cap 5), readable from `get_run_result`.
  * Written for every V1-V6 structural rejection, the tool-result-not-ok "unpersisted" case, and a
  * `verified`-state self-check recheck failure that does NOT by itself disable the capability
  * (a single post-verified "uncommitted" — previously invisible in diagnostics).
@@ -326,7 +326,7 @@ export function wireChildContextSwitch(
    * P3 acceptance follow-up (plan §2.3.1 V1-V6 visibility gap, additive best-effort diag):
    * called at every point that already tells the MODEL a switch did not commit (V1-V6
    * structural rejection, "unpersisted", and a non-disabling post-verified self-check
-   * recheck failure) so the same reason also reaches `get_subagent_result` via
+   * recheck failure) so the same reason also reaches `get_run_result` via
    * `diag.contextSwitches.rejected[]`. Best effort — never load-bearing for the switch
    * itself or for the capability state machine.
    */

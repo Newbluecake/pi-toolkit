@@ -76,7 +76,7 @@ export function createSteerTool(deps: {
       "steer_subagent(run_id, text, reply?) - send a follow-up instruction to a running subagent; " +
       "reply=ack|report asks it to answer back via message_agent",
     parameters: SteerToolParams,
-    /** Same rationale as get_subagent_result's renderCall: show *which* run is being steered and a preview of the instruction, not a bare tool name. */
+    /** Same rationale as get_run_result's renderCall: show *which* run is being steered and a preview of the instruction, not a bare tool name. */
     renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const title = theme.fg(

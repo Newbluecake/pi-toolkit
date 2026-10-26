@@ -38,7 +38,7 @@ function deps(runner: Runner) {
 }
 describe("SpawnService", () => {
   // admitted-run-visibility fix (2026-10-08 incident): list_subagents /
-  // get_subagent_result / @label resolution must see a run the instant
+  // get_run_result / @label resolution must see a run the instant
   // spawn() admits it — not only once the runner's first real onSnapshot
   // lands (for a resume, opening the old session file can take a while
   // before the runtime adapter even enters RuntimeRunner.run()). Simulated

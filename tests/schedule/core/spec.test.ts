@@ -254,11 +254,27 @@ describe("keys (§4.2/§4.5b/§7.1)", () => {
     expect(reportIdOf(SID, "s_abcd2345@1761350400000")).toBe(
       "9c128a4cc3583e27532af0a668aab529f7c717931f22d79ede0847d949ce9c70",
     );
-    const file = reportFileOf(SID, "s_abcd2345@1761350400000");
-    expect(file).toBe("reports/9c128a4cc3583e27532af0a668aab529f7c717931f22d79ede0847d949ce9c70.md");
+    const file = reportFileOf("s_abcd2345", Date.parse("2026-10-24T08:00:00Z"), "Asia/Shanghai");
+    expect(file).toBe("reports/s_abcd2345-20261024-1600.md");
+    expect(SCHED_REPORT_FILE_RE.test(`reports/${reportIdOf(SID, "s_abcd2345@1761350400000")}.md`)).toBe(true);
     expect(SCHED_REPORT_FILE_RE.test(file)).toBe(true);
     for (const bad of ["reports/../x.md", "/abs/reports/a.md", "reports/ABC.md", "reports/a.md"])
       expect(SCHED_REPORT_FILE_RE.test(bad)).toBe(false);
+  });
+
+  it("report names use occurrence time and task timezone, including local fallback and DST", () => {
+    const at = Date.parse("2026-10-25T23:52:59Z");
+    expect(reportFileOf("s_abcd2345", at, "UTC")).toBe("reports/s_abcd2345-20261025-2352.md");
+    expect(reportFileOf("s_abcd2345", at, "Asia/Shanghai")).toBe("reports/s_abcd2345-20261026-0752.md");
+    expect(reportFileOf("s_abcd2345", at, "America/New_York")).toBe("reports/s_abcd2345-20261025-1952.md");
+    expect(reportFileOf("s_abcd2345", at)).toBe(
+      reportFileOf("s_abcd2345", at, Intl.DateTimeFormat().resolvedOptions().timeZone),
+    );
+    const localMinute = "reports/s_abcd2345-20261101-0130.md";
+    expect(reportFileOf("s_abcd2345", Date.parse("2026-11-01T05:30:00Z"), "America/New_York")).toBe(localMinute);
+    expect(reportFileOf("s_abcd2345", Date.parse("2026-11-01T06:30:00Z"), "America/New_York")).toBe(localMinute);
+    for (const suffix of ["", "-2", "-3", "-10", "-23"])
+      expect(SCHED_REPORT_FILE_RE.test(localMinute.replace(".md", `${suffix}.md`))).toBe(true);
   });
 
   it("auto runKey round-trips and rejects malformed input", () => {

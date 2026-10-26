@@ -31,6 +31,7 @@ const props = defineProps<AgentCardProps>();
 const i18n = useI18n();
 const compactChips = computed(
   () =>
+    props.card.outdated ||
     xsAlias.value !== undefined ||
     xsUnread.value !== undefined ||
     schedBadge.value !== undefined ||
@@ -197,6 +198,17 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
               <AppIcon v-else-if="card.outdated" name="info" class="icon-sm" />
               {{ card.statusLabel }}
             </span>
+            <!-- #65 outdated-reload（预览 §5）：落后会话的「需更新」chip（warning 配色）。
+                 statusLabel 只在非 running 时才让位给 outdated 文案，此 chip 与此无关、
+                 运行中也显示；点卡片进详情页即见顶部提示条（§1）。 -->
+            <span
+              v-if="card.outdated"
+              class="chip chip-outdated"
+              data-compact="outdated"
+              :title="t('outdated.chipNeedsUpdate')"
+            >
+              <AppIcon name="info" class="icon-sm" />{{ t("outdated.chipNeedsUpdate") }}
+            </span>
             <span
               v-if="card.runningSubCount > 0"
               class="chip chip-run-count"
@@ -266,6 +278,10 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
           <Teleport :to="belowEl ?? 'body'" :disabled="!chipsBelow || !belowEl">
             <span ref="chipsEl" class="agent-chips">
               <span class="chip" translate="no">{{ kindLabel }}</span>
+              <!-- #65 outdated-reload（预览 §5）：「需更新」chip（warning 配色），状态类位置。 -->
+              <span v-if="card.outdated" class="chip chip-outdated" :title="t('outdated.chipNeedsUpdate')">
+                <AppIcon name="info" class="icon-sm" />{{ t("outdated.chipNeedsUpdate") }}
+              </span>
               <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
                 {{ t("agents.stopped") }}
               </span>

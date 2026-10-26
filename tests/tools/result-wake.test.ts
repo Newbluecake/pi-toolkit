@@ -4,7 +4,7 @@ import { formatWakeProvenance } from "../../src/tools/result-text.js";
 import type { QueryService } from "../../src/service/query-service.js";
 import type { RunSnapshot } from "../../src/core/types.js";
 
-/** Gate G (plan §7): get_subagent_result states who woke a revived run and how many inbox messages rode along. */
+/** Gate G (plan §7): get_run_result states who woke a revived run and how many inbox messages rode along. */
 const diag = (extra: Record<string, unknown> = {}) =>
   ({
     createdAt: 0,
@@ -75,7 +75,7 @@ describe("formatWakeProvenance", () => {
   });
 });
 
-describe("get_subagent_result wake provenance", () => {
+describe("get_run_result wake provenance", () => {
   const sender = snap("r_SENDER01", { label: "scout" });
   const woken = snap("r_REVIVE01", { wakeOrigin: { by: "r_SENDER01", key: "k", level: 1, via: "fabric" } });
   it("terminal read (get and wait) carries the line; plain runs and wake-off hosts are unchanged", async () => {

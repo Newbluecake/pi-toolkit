@@ -1086,7 +1086,7 @@ export interface Stack {
     level: CausalLevel;
     /** G (plan §7): read-only `/agent status` view — counters from `WakeService.stats()` plus level/durability facts. */
     status(): WakeStatusView;
-    /** G (plan §7): messages carried into resume run `runId` (committed or reserved); drives `get_subagent_result` text. */
+    /** G (plan §7): messages carried into resume run `runId` (committed or reserved); drives `get_run_result` text. */
     inboxCount(runId: string): number;
   };
   /** 提示词缓存保活调度器（plan.md §2）；settings.cacheTtl.keepalive=false 时缺席。 */

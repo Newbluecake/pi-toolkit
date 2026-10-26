@@ -12,11 +12,11 @@ import type { Millis, RunSnapshot, RunStatus } from "../core/types.js";
  *    costUsd — terminal entries let a consumer that missed ticks reconcile;
  *  - dedupe against pi's session-accounted usage by runId: a toolResult
  *    message carrying usage also carries details.runId (Agent /
- *    get_subagent_result), so a consumer counts an event run only until its
+ *    get_run_result), so a consumer counts an event run only until its
  *    runId shows up on an usage-bearing toolResult;
  *  - X12: `absorbed: true` marks a run whose lifetime spend already rode
  *    into ANOTHER tracked run's accumulator on a usage-bearing toolResult
- *    (nested Agent / get_subagent_result / consult) — summing both would
+ *    (nested Agent / get_run_result / consult) — summing both would
  *    double-count. Computed here as the union of every snapshot's
  *    diag.absorbedRunIds, so consumers never re-derive it.
  */

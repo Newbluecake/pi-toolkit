@@ -4,7 +4,8 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createScheduleCommand, parseFlags, splitPrompt, tokenizeScheduleArgs } from "../../src/commands/schedule.js";
 import { createTask, updateTask } from "../../src/schedule/agent/ops.js";
-import { openSessionStore } from "../../src/schedule/core/writer.js";
+import { manualClaim } from "../../src/schedule/core/claim.js";
+import { finishRun, openSessionStore } from "../../src/schedule/core/writer.js";
 import { sessionDirName } from "../../src/schedule/core/paths.js";
 import { defHash, isApproved } from "../../src/schedule/core/spec.js";
 import { a3Env, basicRaw, CRON, type A3Env } from "../schedule/agent/a3-helpers.js";
@@ -297,6 +298,29 @@ describe("--all matrix (§5.2)", () => {
     expect(await h.run(`show ${foreign.id}`)).toMatch(/本会话没有任务/); // without --all it is not visible
     expect(await h.run(`edit ${foreign.id} --all --no-feishu`)).toMatch(/不支持 --all/);
     expect(await h.run(`run ${foreign.id} --all`)).toMatch(/执行只发生在归属会话内/);
+  });
+
+  it.each([false, true])("show/log use the owning session's absolute report paths (all=%s)", async (all) => {
+    const { h, other, foreign } = await twoSessions();
+    const store = all ? other : env.agent.store()!;
+    const task = all ? foreign : readOk(store).tasks[0]!;
+    await store.transact((d) => {
+      d.tasks[0] = approve(d.tasks[0]!);
+      return { value: undefined, write: true };
+    });
+    const claim = await manualClaim(store, { taskId: task.id, reqId: "cmd_path_request", holder: env.agent.holder! });
+    if (claim.kind !== "started") throw new Error("claim failed");
+    const reportFile = `reports/${task.id}-20260101-0800.md`;
+    await store.transact((d, ctx) => ({
+      value: finishRun(d, claim.runKey, { state: "completed", reportFile }, ctx.now),
+      write: true,
+    }));
+    for (const sub of ["show", "log"]) {
+      const output = await h.run(`${sub} ${task.id}${all ? " --all" : ""}`);
+      expect(output).toContain(`report ${join(store.root.real, store.dirName, reportFile)}`);
+      expect(output).not.toContain(`report ${reportFile}`);
+    }
+    expect(readOk(store).runs[0]!.reportFile).toBe(reportFile);
   });
 
   it("approve --all reviews + CASes under the foreign lock; pause/resume/rm --all work; resume never approves", async () => {

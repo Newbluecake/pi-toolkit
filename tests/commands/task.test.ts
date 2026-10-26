@@ -85,7 +85,7 @@ describe("/task command dispatch", () => {
     expect(message.content).toContain("r_12345678");
     expect(message.content).toContain("fix-login-bug");
     expect(message.content).toContain("/task");
-    expect(message.content).toContain("get_subagent_result");
+    expect(message.content).toContain("get_run_result");
     const details = message.details as ReturnType<typeof buildTaskStartedDetails>;
     expect(details).toMatchObject({
       kind: "task-started",
@@ -168,7 +168,7 @@ describe("/task content and details builders", () => {
     expect(content).toContain("label: my-label");
     expect(content).toContain(`agent type: ${TASK_AGENT_TYPE}`);
     expect(content).toContain("Task: do things");
-    expect(content).toContain('get_subagent_result(run_id: "r_abc12345")');
+    expect(content).toContain('get_run_result(run_id: "r_abc12345")');
   });
 
   it("details embed the truncated preview", () => {

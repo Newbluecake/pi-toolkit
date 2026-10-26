@@ -46,7 +46,8 @@ export function safeJson(v, pretty) {
 
 /**
  * Subagent-tool result `details` → `{runId,label?}` (append-only optional; the agent side adds
- * it for steer/abort/extend/set_model/get_subagent_result). Anything malformed ⇒ undefined.
+ * it for steer/abort/extend/set_model/get_run_result (≤ v0.9: get_subagent_result).
+ * Anything malformed ⇒ undefined.
  * @param {any} src  toolResult message or live result (`{ details }`)
  * @returns {{ runId: string, label?: string } | undefined}
  */
@@ -55,7 +56,8 @@ export const RUN_REF_TOOLS = new Set([
   "steer_subagent",
   "abort_subagent",
   "extend_subagent_timeout",
-  "get_subagent_result",
+  "get_subagent_result", // legacy (≤ v0.9) result-tool name — historical transcripts only
+  "get_run_result",
   "set_model",
 ]);
 

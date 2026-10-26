@@ -229,7 +229,8 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
           if (t === undefined) return failure("E_INVALID", `no such task ${taskId}`);
           const recent = (r.state?.runs ?? []).filter((x) => x.taskId === t.id).slice(-5);
           const lines = taskDetail(t, r.state?.occ[t.id], r.state?.manualTotal[t.id]);
-          if (recent.length > 0) lines.push("recent runs:", ...recent.map((x) => `  ${runLine(x, t.when)}`));
+          if (recent.length > 0)
+            lines.push("recent runs:", ...recent.map((x) => `  ${runLine(x, t.when, agent.store())}`));
           return out(lines.join("\n"), { id: t.id });
         }
         case "history": {
@@ -242,9 +243,12 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
             .sort((a, b) => b.scheduledAt - a.scheduledAt)
             .slice(0, HISTORY_LIMIT);
           if (runs.length === 0) return out("No runs recorded.", { runs: 0 });
-          return out(runs.map((x) => `${x.taskId} · ${runLine(x, tasks.get(x.taskId)?.when)}`).join("\n"), {
-            runs: runs.length,
-          });
+          return out(
+            runs.map((x) => `${x.taskId} · ${runLine(x, tasks.get(x.taskId)?.when, agent.store())}`).join("\n"),
+            {
+              runs: runs.length,
+            },
+          );
         }
         case "create": {
           const raw = flatToRaw(params);

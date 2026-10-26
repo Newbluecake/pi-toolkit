@@ -58,6 +58,7 @@ import { bashJobsOf } from "./bashJobsView.js";
 import DetailBody from "../body/DetailBody.vue";
 import DetailDock from "./DetailDock.vue";
 import DetailHeader from "./DetailHeader.vue";
+import OutdatedReloadBanner from "./OutdatedReloadBanner.vue";
 import NoticeBanner from "../shell/NoticeBanner.vue";
 import FleetDrawer, { useFleetDrawerMode, useFleetDrawerOpen } from "../drawer/FleetDrawer.vue";
 
@@ -557,6 +558,8 @@ function onCloseDrawer(): void {
 
     <div class="detail-split">
       <div class="detail-main">
+        <!-- #65 outdated-reload（预览 §1–§4）：落后会话的顶部提示条，无 provider/不落后时自隐。 -->
+        <OutdatedReloadBanner :agent-key="agent.key" />
         <NoticeBanner v-for="notice in notices" :key="notice.id" :notice="notice" @action="onNoticeAction" />
 
         <div v-if="agent.history === 'waiting'" class="detail-body" aria-busy="true">

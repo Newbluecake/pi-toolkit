@@ -97,7 +97,7 @@ describe("tools/agent-tool: top-level Agent is background-only", () => {
     expect(result.details).toEqual({ runId: "child-1", label: "d", background: true });
     const text = result.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
     expect(text).toContain("started in background (run_id: child-1)");
-    expect(text).toContain('get_subagent_result(run_id: "child-1")');
+    expect(text).toContain('get_run_result(run_id: "child-1")');
     expect(text).toContain('[subagent label: "d" · run_id: child-1 · status: running]');
   });
 
@@ -171,7 +171,7 @@ describe("tools/agent-tool: top-level Agent is background-only", () => {
   it("describes the background-only protocol and drops the foreground/auto-background wording", () => {
     const tool = createAgentTool({ spawn: fakePort() });
     expect(tool.description).toContain("always runs in the background");
-    expect(tool.description).toContain("get_subagent_result");
+    expect(tool.description).toContain("get_run_result");
     expect(tool.description).toContain("steer_subagent");
     expect(tool.description).toContain("abort_subagent");
     expect(tool.description).toContain("same message");

@@ -327,6 +327,10 @@ export function gitInit(dir: string): void {
     return r.stdout;
   };
   g("init", "-q", "-b", "main");
+  // No detached auto-maintenance/gc after commit: newer git (CI runners) spawns it in the
+  // background, and its transient .git/objects/maintenance.lock races tree snapshots.
+  g("config", "maintenance.auto", "false");
+  g("config", "gc.auto", "0");
   g("add", "-A");
   g("commit", "-q", "-m", "one");
 }

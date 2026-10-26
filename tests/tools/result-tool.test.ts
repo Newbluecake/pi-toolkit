@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
-import { createResultTool } from "../../src/tools/result-tool.js";
+import { createResultTool, legacyResultToolRenderer } from "../../src/tools/result-tool.js";
 import { CappedBody } from "../../src/ui/capped-body.js";
 import type { QueryService } from "../../src/service/query-service.js";
 import type { RunSnapshot, UsageDelta } from "../../src/core/types.js";
@@ -233,7 +233,7 @@ function queryForSnapshot(snapshot: RunSnapshot): QueryService {
   };
 }
 
-describe("X9 get_subagent_result usage output", () => {
+describe("X9 get_run_result usage output", () => {
   it("includes usage in both the details payload and the rendered text for a non-waiting lookup", async () => {
     const query: QueryService = {
       get: () => completedSnapshot(),
@@ -581,17 +581,17 @@ describe("TUI visibility: renderCall + wait-path partial updates", () => {
     const tool = createResultTool({ query: idleQuery() });
     const comp = tool.renderCall!({ run_id: "r1", wait: true, wait_ms: 60_000 }, theme as never, ctx() as never);
     const out = (comp as Text).render(120).join("\n");
-    expect(out).toContain("Get Subagent Result: r1");
+    expect(out).toContain("Get Run Result: r1");
     expect(out).toContain("wait (budget: 1m00s)");
   });
 
   it("renders a plain poll without a wait line and tolerates partial streaming args", () => {
     const tool = createResultTool({ query: idleQuery() });
     const polled = (tool.renderCall!({ run_id: "r2" }, theme as never, ctx() as never) as Text).render(120).join("\n");
-    expect(polled).toContain("Get Subagent Result: r2");
+    expect(polled).toContain("Get Run Result: r2");
     expect(polled).not.toContain("wait (budget");
     const streaming = (tool.renderCall!({}, theme as never, ctx() as never) as Text).render(120).join("\n");
-    expect(streaming).toContain("Get Subagent Result:");
+    expect(streaming).toContain("Get Run Result:");
   });
 
   it("streams a waiting header (elapsed/budget) plus the run's progress lines while wait blocks", async () => {
@@ -920,5 +920,26 @@ describe("renderResult (notification-style card)", () => {
         componentText(legacy.renderResult!(result, options, theme, ctx)),
       );
     }
+  });
+});
+
+describe("legacyResultToolRenderer (history cards for the pre-rename name)", () => {
+  it("returns the current tool's renderers for get_subagent_result only; everything else goes to next()", () => {
+    const tool = createResultTool({ query: {} as never });
+    const resolver = legacyResultToolRenderer(tool);
+    const next = vi.fn(() => ({ renderCall: undefined }) as never);
+    const legacy = resolver("get_subagent_result", next);
+    expect(legacy?.renderCall).toBe(tool.renderCall);
+    expect(legacy?.renderResult).toBe(tool.renderResult);
+    expect(next).not.toHaveBeenCalled();
+    resolver("get_run_result", next);
+    resolver("bash", next);
+    expect(next).toHaveBeenCalledTimes(2);
+  });
+
+  it("registered tool is named get_run_result and no longer carries the legacy label/title", () => {
+    const tool = createResultTool({ query: {} as never });
+    expect(tool.name).toBe("get_run_result");
+    expect(tool.label).toBe("Get Run Result");
   });
 });

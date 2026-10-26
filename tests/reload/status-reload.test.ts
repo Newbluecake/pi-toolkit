@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createReloadCommandPort } from "../../src/reload/command-port.js";
+import { consumeReloadContinue } from "../../src/reload/continue.js";
 import { createStatusCommand } from "../../src/commands/status.js";
 import type { StatusCommandDeps } from "../../src/commands/status.js";
 import { DeferredReloadController } from "../../src/reload/defer.js";
@@ -66,22 +68,45 @@ interface Harness {
   notified: string[];
   reload: ReturnType<typeof vi.fn>;
   fire: ReturnType<typeof vi.fn>;
-  ctx: unknown;
+  ctx: ReturnType<typeof commandContext>;
+  sendMessage: ReturnType<typeof vi.fn>;
+  state: { idle: boolean; queued: boolean };
 }
+
+function commandContext(state: { idle: boolean; queued: boolean }) {
+  return {
+    mode: "tui",
+    isIdle: () => state.idle,
+    hasPendingMessages: () => state.queued,
+    waitForIdle: async () => {
+      state.idle = true;
+    },
+    sessionManager: { getSessionId: () => "session-1", getSessionFile: () => "/tmp/session-1.jsonl" },
+  };
+}
+
+afterEach(() => {
+  delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:reload-continue")];
+});
 
 function harness(runs: RunSnapshot[], opts: { withReload?: boolean; withCtxReload?: boolean } = {}): Harness {
   const fire = vi.fn();
   const ctl = new DeferredReloadController({ fire });
-  const deps = { ...baseDeps(runs), reload: ctl } as unknown as StatusCommandDeps;
+  const sendMessage = vi.fn();
+  const deps = {
+    ...baseDeps(runs),
+    reload: createReloadCommandPort(() => ctl, { sendMessage }),
+  } as unknown as StatusCommandDeps;
   if (opts.withReload === false) delete (deps as { reload?: unknown }).reload;
   const notified: string[] = [];
   const reload = vi.fn(async () => undefined);
+  const state = { idle: true, queued: false };
   const ctx = {
-    mode: "tui",
+    ...commandContext(state),
     ui: { notify: (m: string) => notified.push(m) },
     ...(opts.withCtxReload === false ? {} : { reload }),
   };
-  return { deps, ctl, notified, reload, fire, ctx };
+  return { deps, ctl, notified, reload, fire, ctx, sendMessage, state };
 }
 
 describe("/agent reload", () => {
@@ -184,7 +209,8 @@ describe("/agent reload", () => {
     await createStatusCommand(h.deps).handler("reload", h.ctx as never);
     h.ctl.handleRunSettled(0);
     expect(h.fire).toHaveBeenCalledTimes(1);
-    expect(h.ctl.pending).toBe(false);
+    // Keep dispatches blocked until the queued command actually reloads.
+    expect(h.ctl.pending).toBe(true);
   });
 
   it("without a wired controller, points at the built-in /reload", async () => {
@@ -205,5 +231,126 @@ describe("/agent reload", () => {
     await createStatusCommand(h.deps).handler("reload frobnicate", h.ctx as never);
     expect(h.notified[0]).toContain("Unknown reload action");
     expect(h.reload).not.toHaveBeenCalled();
+  });
+});
+
+describe("reload model coordination", () => {
+  it.each([true, false])("first arm notifies exactly once (idle=%s)", async (idle) => {
+    const h = harness([snapshot({ status: "running" })]);
+    h.state.idle = idle;
+    const cmd = createStatusCommand(h.deps);
+    await cmd.handler("reload", h.ctx as never);
+    h.state.idle = !idle;
+    await cmd.handler("reload", h.ctx as never);
+    expect(h.sendMessage).toHaveBeenCalledTimes(1);
+    expect(h.sendMessage).toHaveBeenCalledWith(
+      { customType: "subagent:reload-pending", display: true, content: expect.stringContaining("等待 1 个") },
+      { deliverAs: idle ? "nextTurn" : "steer" },
+    );
+    const content = h.sendMessage.mock.calls[0]![0].content;
+    expect(content).toContain("Agent / SubagentWorkflow（会被拒绝）");
+    expect(content).toContain("后台 bash 任务");
+    expect(content).toContain("自动通知你继续");
+    expect(h.ctl.interruptedAtArm).toBe(!idle);
+  });
+
+  it.each([true, false])("cancel notifies only if pending, using current idle=%s", async (idle) => {
+    const h = harness([snapshot({ status: "running" })]);
+    const cmd = createStatusCommand(h.deps);
+    await cmd.handler("reload", h.ctx as never);
+    h.sendMessage.mockClear();
+    h.state.idle = idle;
+    await cmd.handler("reload cancel", h.ctx as never);
+    await cmd.handler("reload cancel", h.ctx as never);
+    expect(h.sendMessage).toHaveBeenCalledTimes(1);
+    expect(h.sendMessage).toHaveBeenCalledWith(
+      { customType: "subagent:reload-pending", display: true, content: expect.stringContaining("reload 已取消") },
+      { deliverAs: idle ? "nextTurn" : "steer" },
+    );
+    expect(h.ctl.interruptedAtArm).toBe(false);
+  });
+
+  it("cancel after drain invalidates the queued fire", async () => {
+    const runs = [snapshot({ status: "running" })];
+    const h = harness(runs);
+    const cmd = createStatusCommand(h.deps);
+    await cmd.handler("reload", h.ctx as never);
+    runs.length = 0;
+    h.ctl.handleRunSettled(0);
+    await cmd.handler("reload cancel", h.ctx as never);
+    await cmd.handler("reload fire", h.ctx as never);
+    expect(h.reload).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { armStreaming: true, streaming: false, queued: false, expected: true },
+    { armStreaming: false, streaming: true, queued: false, expected: true },
+    { armStreaming: false, streaming: false, queued: true, expected: true },
+    { armStreaming: false, streaming: false, queued: false, expected: false },
+  ])("fire records unfinished work: %j", async ({ armStreaming, streaming, queued, expected }) => {
+    const runs = [snapshot({ status: "running" })];
+    const h = harness(runs);
+    const cmd = createStatusCommand(h.deps);
+    h.state.idle = !armStreaming;
+    await cmd.handler("reload", h.ctx as never);
+    h.state.idle = !streaming;
+    h.state.queued = queued;
+    runs.length = 0;
+    h.ctl.handleRunSettled(0);
+    h.reload.mockImplementation(async () => {
+      // Assert the handoff exists BEFORE invoking the actual reload implementation.
+      expect(consumeReloadContinue(h.ctx as never, "reload")).toBe(expected);
+    });
+    await cmd.handler("reload fire", h.ctx as never);
+    if (streaming) {
+      expect(h.reload).not.toHaveBeenCalled();
+      // The parked wait re-sends a fire; this harness records it instead of dispatching.
+      await Promise.resolve();
+      await Promise.resolve();
+      await cmd.handler("reload fire", h.ctx as never);
+    }
+    expect(h.reload).toHaveBeenCalledTimes(1);
+    expect(h.ctl.pending).toBe(false);
+  });
+
+  it.each(["reload now"])("%s immediately marks only unfinished work, without pending messages", async (action) => {
+    const h = harness([]);
+    h.state.idle = false;
+    await createStatusCommand(h.deps).handler(action, h.ctx as never);
+    expect(h.reload).toHaveBeenCalledTimes(1);
+    expect(h.sendMessage).not.toHaveBeenCalled();
+    expect(consumeReloadContinue(h.ctx as never, "reload")).toBe(true);
+  });
+
+  it("now preserves the first-arm interruption even if currently idle", async () => {
+    const h = harness([snapshot({ status: "running" })]);
+    const cmd = createStatusCommand(h.deps);
+    h.state.idle = false;
+    await cmd.handler("reload", h.ctx as never);
+    h.state.idle = true;
+    await cmd.handler("reload now", h.ctx as never);
+    expect(consumeReloadContinue(h.ctx as never, "reload")).toBe(true);
+    expect(h.sendMessage).toHaveBeenCalledTimes(1); // arm only, never cancel on force
+  });
+
+  it("failed reload rolls back the continuation handoff", async () => {
+    const h = harness([]);
+    h.state.queued = true;
+    h.reload.mockRejectedValue(new Error("reload failed"));
+    await expect(createStatusCommand(h.deps).handler("reload now", h.ctx as never)).rejects.toThrow("reload failed");
+    expect(consumeReloadContinue(h.ctx as never, "reload")).toBe(false);
+  });
+
+  it.each(["rpc", "print"])("missing reload API in %s has no coordination side effects", async (mode) => {
+    const h = harness([snapshot({ status: "running" })], { withCtxReload: false });
+    h.state.idle = false;
+    const ctx = { ...h.ctx, mode };
+    const cmd = createStatusCommand(h.deps);
+    await cmd.handler("reload", ctx as never);
+    await cmd.handler("reload now", ctx as never);
+    expect(h.ctl.pending).toBe(false);
+    expect(h.sendMessage).not.toHaveBeenCalled();
+    expect(h.reload).not.toHaveBeenCalled();
+    expect(consumeReloadContinue(ctx as never, "reload")).toBe(false);
   });
 });

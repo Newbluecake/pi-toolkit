@@ -1,0 +1,1156 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>插件版本落后 · 重新加载提示 — 交互预览</title>
+    <style>
+      /* ===== tokens.css 内联（浅色，与 src/web-hub/ui/src/styles/tokens.css 一致） ===== */
+      :root {
+        color-scheme: light;
+        --c-bg: #f4f7f7;
+        --c-surface: #ffffff;
+        --c-surface-2: #f8fafa;
+        --c-sunken: #eef3f3;
+        --c-border: #e1e8e9;
+        --c-border-strong: #c9d4d6;
+        --c-text: #132026;
+        --c-text-2: #3b4a52;
+        --c-text-3: #5a6a72;
+        --c-primary: #0b7a70;
+        --c-primary-hover: #09665e;
+        --c-primary-soft: #e3f4f1;
+        --c-on-primary: #ffffff;
+        --c-on-primary-soft: #0a5f58;
+        --c-focus: #1f8f84;
+        --c-success: #177a3e;
+        --c-success-soft: #e6f4ea;
+        --c-warning: #9a5a06;
+        --c-warning-soft: #fff7e8;
+        --c-warning-border: #f3dcae;
+        --c-warning-text: #7a4604;
+        --c-danger: #c0262d;
+        --c-danger-soft: #fdeeee;
+        --c-danger-border: #f5c9cb;
+        --c-info: #1f5fc4;
+        --c-info-soft: #e8f0fc;
+        --st-running: #0b7a70;
+        --st-running-soft: #e3f4f1;
+        --st-idle: #5a6a72;
+        --st-idle-soft: #edf1f2;
+        --st-done: #177a3e;
+        --st-done-soft: #e6f4ea;
+        --st-failed: #c0262d;
+        --st-failed-soft: #fdeeee;
+        --st-stale: #8f6412;
+        --st-stale-soft: #fbf3e2;
+        --st-offline: #5e6b73;
+        --st-offline-soft: #edf0f1;
+        --font-sans:
+          system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+          "Noto Sans CJK SC", "Source Han Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+        --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
+        --fs-2xs: 11px;
+        --fs-xs: 12px;
+        --fs-sm: 13px;
+        --fs-md: 14px;
+        --fs-lg: 16px;
+        --fs-xl: 18px;
+        --lh-snug: 1.4;
+        --fw-medium: 500;
+        --fw-semibold: 600;
+        --sp-1: 4px;
+        --sp-2: 8px;
+        --sp-3: 12px;
+        --sp-4: 16px;
+        --sp-5: 20px;
+        --sp-6: 24px;
+        --sp-8: 32px;
+        --r-xs: 4px;
+        --r-sm: 6px;
+        --r-md: 10px;
+        --r-lg: 14px;
+        --r-pill: 999px;
+        --shadow-2: 0 1px 2px rgb(16 32 38 / 0.04), 0 4px 12px -2px rgb(16 32 38 / 0.08);
+        --dur-fast: 120ms;
+        --dur-base: 180ms;
+        --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+      }
+
+      /* ===== 深色 token（预览第 7 节用，作用域限定在 .theme-dark 容器） ===== */
+      .theme-dark {
+        color-scheme: dark;
+        --c-bg: #0d1417;
+        --c-surface: #141c20;
+        --c-surface-2: #192328;
+        --c-sunken: #10171a;
+        --c-border: #243037;
+        --c-border-strong: #33424a;
+        --c-text: #e4ecee;
+        --c-text-2: #b6c3c8;
+        --c-text-3: #8d9da4;
+        --c-primary: #3ccbb9;
+        --c-primary-hover: #5fd8c8;
+        --c-primary-soft: #12302d;
+        --c-on-primary: #062522;
+        --c-on-primary-soft: #8ae6d9;
+        --c-focus: #5fd8c8;
+        --c-success: #4cc77e;
+        --c-success-soft: #13291c;
+        --c-warning: #e5a93d;
+        --c-warning-soft: #2a2112;
+        --c-warning-border: #4a3a1c;
+        --c-warning-text: #f0c77a;
+        --c-danger: #f2767a;
+        --c-danger-soft: #2e1719;
+        --c-danger-border: #52282b;
+        --c-info: #72a7f5;
+        --c-info-soft: #16243a;
+        --st-running: #3ccbb9;
+        --st-running-soft: #12302d;
+        --st-idle: #8d9da4;
+        --st-idle-soft: #1b2428;
+        --st-done: #4cc77e;
+        --st-done-soft: #13291c;
+        --st-failed: #f2767a;
+        --st-failed-soft: #2e1719;
+        --st-stale: #d6a84e;
+        --st-stale-soft: #2a2112;
+        --st-offline: #7d8b92;
+        --st-offline-soft: #1a2125;
+        --shadow-2: 0 0 0 1px rgb(255 255 255 / 0.02);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--c-bg);
+        color: var(--c-text);
+        font-family: var(--font-sans);
+        font-size: var(--fs-md);
+        line-height: var(--lh-snug);
+      }
+
+      /* ===== primitives.css 子集：.btn / .chip / .pill / .dot / .spin ===== */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--sp-2);
+        min-height: 32px;
+        padding: 0 var(--sp-3);
+        border: 1px solid var(--c-border-strong);
+        border-radius: var(--r-sm);
+        background: var(--c-surface);
+        color: var(--c-text);
+        font: inherit;
+        font-size: var(--fs-sm);
+        font-weight: var(--fw-medium);
+        line-height: 1;
+        white-space: nowrap;
+        cursor: pointer;
+        transition:
+          background-color var(--dur-fast) var(--ease-out),
+          border-color var(--dur-fast) var(--ease-out),
+          color var(--dur-fast) var(--ease-out);
+      }
+      .btn:hover {
+        background: var(--c-surface-2);
+        border-color: var(--c-text-3);
+      }
+      .btn:active {
+        transform: translateY(1px);
+      }
+      .btn:focus-visible {
+        outline: none;
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-focus) 25%, transparent);
+      }
+      .btn-primary {
+        border-color: var(--c-primary);
+        background: var(--c-primary);
+        color: var(--c-on-primary);
+      }
+      .btn-primary:hover {
+        border-color: var(--c-primary-hover);
+        background: var(--c-primary-hover);
+        color: var(--c-on-primary);
+      }
+      .btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      .btn-ghost {
+        border-color: transparent;
+        background: transparent;
+        color: var(--c-text-2);
+      }
+      .btn-ghost:hover {
+        background: var(--c-sunken);
+        border-color: transparent;
+      }
+      .btn-xs {
+        min-height: 24px;
+        padding: 0 var(--sp-2);
+        font-size: var(--fs-xs);
+      }
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--sp-1);
+        min-height: 20px;
+        padding: 1px 6px;
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-sm);
+        background: var(--c-surface);
+        color: var(--c-text-3);
+        font-size: var(--fs-2xs);
+        font-weight: var(--fw-semibold);
+        letter-spacing: 0.02em;
+        line-height: 1;
+        white-space: nowrap;
+      }
+      /* 拟新增：outdated 卡片上的「需更新」徽章 —— 与现有 chip 同形，warning 配色 */
+      .chip-outdated {
+        border-color: var(--c-warning-border);
+        background: var(--c-warning-soft);
+        color: var(--c-warning-text);
+      }
+
+      .pill {
+        --pill-fg: var(--st-idle);
+        --pill-bg: var(--st-idle-soft);
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 22px;
+        padding: 1px 8px;
+        border-radius: var(--r-pill);
+        background: var(--pill-bg);
+        color: var(--pill-fg);
+        font-size: var(--fs-xs);
+        font-weight: var(--fw-semibold);
+        line-height: 1;
+        white-space: nowrap;
+      }
+      [data-st="running"] {
+        --pill-fg: var(--st-running);
+        --pill-bg: var(--st-running-soft);
+      }
+      [data-st="stale"] {
+        --pill-fg: var(--st-stale);
+        --pill-bg: var(--st-stale-soft);
+      }
+      [data-st="idle"] {
+        --pill-fg: var(--st-idle);
+        --pill-bg: var(--st-idle-soft);
+      }
+
+      .dot {
+        position: relative;
+        width: 8px;
+        height: 8px;
+        flex: none;
+        border-radius: 50%;
+        background: var(--pill-fg, var(--st-idle));
+      }
+      .dot-live::after {
+        content: "";
+        position: absolute;
+        inset: -3px;
+        border-radius: 50%;
+        background: var(--pill-fg, var(--st-running));
+        opacity: 0.35;
+        animation: halo 1.6s var(--ease-out) infinite;
+      }
+      @keyframes halo {
+        0% {
+          transform: scale(0.6);
+          opacity: 0.45;
+        }
+        80%,
+        100% {
+          transform: scale(1.6);
+          opacity: 0;
+        }
+      }
+
+      .spin {
+        animation: spin 1s linear infinite;
+        transform-origin: center;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .icon {
+        width: 16px;
+        height: 16px;
+        flex: none;
+      }
+      .icon-sm {
+        width: 14px;
+        height: 14px;
+        flex: none;
+      }
+
+      /* ===== notices.css 子集 + 本特性的提示条 ===== */
+      .notice {
+        --n-fg: var(--c-info);
+        --n-bg: var(--c-info-soft);
+        --n-border: transparent;
+        --n-text: var(--c-text-2);
+        display: flex;
+        align-items: flex-start;
+        gap: var(--sp-2);
+        padding: var(--sp-2) var(--sp-4);
+        background: var(--n-bg);
+        color: var(--n-text);
+        font-size: var(--fs-sm);
+        line-height: var(--lh-snug);
+      }
+      .notice--warn {
+        --n-fg: var(--c-warning-text);
+        --n-bg: var(--c-warning-soft);
+        --n-border: var(--c-warning-border);
+        --n-text: var(--c-warning-text);
+      }
+      .notice--danger {
+        --n-fg: var(--c-danger);
+        --n-bg: var(--c-danger-soft);
+        --n-border: var(--c-danger-border);
+        --n-text: var(--c-text);
+      }
+      .notice--success {
+        --n-fg: var(--c-success);
+        --n-bg: var(--c-success-soft);
+        --n-border: transparent;
+        --n-text: var(--c-text-2);
+      }
+
+      /* 拟新增：会话详情页顶部的 outdated 提示条（boxed 形态，置于详情区顶部） */
+      .or-banner {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: var(--sp-2) var(--sp-3);
+        padding: var(--sp-3) var(--sp-4);
+        border: 1px solid var(--n-border, var(--c-warning-border));
+        border-radius: var(--r-md);
+        background: var(--n-bg, var(--c-warning-soft));
+        color: var(--n-text, var(--c-warning-text));
+        font-size: var(--fs-sm);
+        line-height: var(--lh-snug);
+      }
+      .or-banner > .icon {
+        margin-top: 1px;
+        color: var(--n-fg, var(--c-warning-text));
+      }
+      .or-banner-text {
+        flex: 1 1 280px;
+        min-width: 0;
+      }
+      .or-banner-text .mono {
+        font-family: var(--font-mono);
+        font-size: 0.92em;
+        padding: 1px 5px;
+        border-radius: var(--r-xs);
+        background: rgb(255 255 255 / 0.55);
+      }
+      .theme-dark .or-banner-text .mono {
+        background: rgb(0 0 0 / 0.25);
+      }
+      .or-banner-actions {
+        display: flex;
+        flex: none;
+        gap: var(--sp-2);
+        margin-left: auto;
+      }
+      .or-banner[data-tone="info"] {
+        --n-fg: var(--c-info);
+        --n-bg: var(--c-info-soft);
+        --n-border: transparent;
+        --n-text: var(--c-text-2);
+      }
+      .or-banner[data-tone="danger"] {
+        --n-fg: var(--c-danger);
+        --n-bg: var(--c-danger-soft);
+        --n-border: var(--c-danger-border);
+        --n-text: var(--c-text);
+      }
+      .or-banner[data-tone="success"] {
+        --n-fg: var(--c-success);
+        --n-bg: var(--c-success-soft);
+        --n-border: transparent;
+        --n-text: var(--c-text-2);
+      }
+
+      /* 短暂通知（toast）：出现在提示条原位，数秒后消失 */
+      .or-toast {
+        display: flex;
+        align-items: center;
+        gap: var(--sp-2);
+        padding: var(--sp-2) var(--sp-4);
+        border-radius: var(--r-md);
+        background: var(--c-success-soft);
+        color: var(--c-text-2);
+        font-size: var(--fs-sm);
+        box-shadow: var(--shadow-2);
+      }
+      .or-toast > .icon {
+        color: var(--c-success);
+      }
+
+      /* ===== agents.css 子集：侧边栏会话卡片 ===== */
+      .agent-card {
+        position: relative;
+        display: grid;
+        gap: 3px;
+        margin: 2px 0;
+        padding: 10px var(--sp-3) 10px 14px;
+        border: 1px solid transparent;
+        border-radius: var(--r-md);
+        color: inherit;
+        text-decoration: none;
+        cursor: pointer;
+        transition:
+          background-color var(--dur-fast) var(--ease-out),
+          border-color var(--dur-fast) var(--ease-out);
+      }
+      .agent-card:hover {
+        background: var(--c-surface-2);
+        border-color: var(--c-border);
+      }
+      .agent-card[aria-current="page"] {
+        background: var(--c-primary-soft);
+        border-color: color-mix(in srgb, var(--c-primary) 28%, transparent);
+      }
+      .agent-card[aria-current="page"]::before {
+        content: "";
+        position: absolute;
+        left: 4px;
+        top: 12px;
+        bottom: 12px;
+        width: 3px;
+        border-radius: var(--r-pill);
+        background: var(--c-primary);
+      }
+      .agent-row1 {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: start;
+        column-gap: var(--sp-2);
+        min-width: 0;
+      }
+      .agent-row1 > .dot {
+        margin-top: 0.45em;
+      }
+      .agent-main {
+        display: flex;
+        align-items: center;
+        column-gap: var(--sp-2);
+        min-width: 0;
+      }
+      .agent-title {
+        font-weight: var(--fw-semibold);
+        font-size: var(--fs-sm);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+      .agent-chips {
+        display: inline-flex;
+        align-items: center;
+        flex: none;
+        gap: var(--sp-2);
+      }
+      .agent-line2 {
+        display: flex;
+        min-width: 0;
+        font-size: var(--fs-xs);
+        color: var(--c-text-3);
+      }
+      .agent-session {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .agent-cost {
+        font-size: var(--fs-xs);
+        color: var(--c-text-3);
+      }
+
+      /* ===== 预览页面自身的排版（不属于产品样式） ===== */
+      .pv-wrap {
+        max-width: 880px;
+        margin: 0 auto;
+        padding: var(--sp-6) var(--sp-4) 96px;
+      }
+      .pv-h1 {
+        font-size: var(--fs-2xl, 22px);
+        margin: 0 0 var(--sp-1);
+      }
+      .pv-sub {
+        color: var(--c-text-3);
+        font-size: var(--fs-sm);
+        margin: 0 0 var(--sp-6);
+      }
+      .pv-section {
+        margin-top: var(--sp-8);
+      }
+      .pv-h2 {
+        font-size: var(--fs-lg);
+        margin: 0 0 var(--sp-1);
+      }
+      .pv-note {
+        margin: 0 0 var(--sp-3);
+        color: var(--c-text-2);
+        font-size: var(--fs-sm);
+      }
+      .pv-stage {
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-lg);
+        background: var(--c-surface);
+        padding: var(--sp-4);
+        display: grid;
+        gap: var(--sp-3);
+        align-content: start;
+      }
+      .pv-stage-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--sp-2);
+        font-size: var(--fs-2xs);
+        font-weight: var(--fw-semibold);
+        color: var(--c-text-3);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .pv-flash {
+        animation: pv-flash 1.2s var(--ease-out);
+      }
+      @keyframes pv-flash {
+        0%,
+        40% {
+          box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-focus) 45%, transparent);
+        }
+        100% {
+          box-shadow: none;
+        }
+      }
+      .pv-sidebar {
+        width: 300px;
+        max-width: 100%;
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-md);
+        background: var(--c-surface);
+        padding: var(--sp-1) var(--sp-2) var(--sp-2);
+      }
+      .pv-narrow {
+        width: 400px;
+        max-width: 100%;
+        border: 1px dashed var(--c-border-strong);
+        border-radius: var(--r-md);
+        padding: var(--sp-2);
+      }
+      /* 窄屏（≤480px 容器）：按钮行换到文字下方、占满一行 */
+      .pv-narrow .or-banner {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .pv-narrow .or-banner-text {
+        flex-basis: auto;
+      }
+      .pv-narrow .or-banner-actions {
+        margin-left: 0;
+      }
+      .pv-narrow .or-banner-actions .btn {
+        flex: 1;
+        min-height: 44px;
+      }
+      .pv-hidden {
+        display: none !important;
+      }
+      .pv-progress {
+        margin: var(--sp-2) 0 0;
+        padding: 0;
+        list-style: none;
+        display: grid;
+        gap: var(--sp-1);
+        font-size: var(--fs-sm);
+      }
+      .pv-progress li {
+        display: flex;
+        align-items: center;
+        gap: var(--sp-2);
+        color: var(--c-text-2);
+      }
+      .pv-progress .ok {
+        color: var(--c-success);
+      }
+      .pv-progress .wait {
+        color: var(--c-text-3);
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 图标（与 AppIcon 同风格的 inline SVG） -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <symbol id="i-info" viewBox="0 0 16 16">
+        <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5" />
+        <path d="M8 7.2v3.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        <circle cx="8" cy="5" r="1" fill="currentColor" />
+      </symbol>
+      <symbol id="i-alert" viewBox="0 0 16 16">
+        <path
+          d="M8 2.2 14.5 13h-13L8 2.2Z"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linejoin="round"
+        />
+        <path d="M8 6.5v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        <circle cx="8" cy="11.2" r="0.9" fill="currentColor" />
+      </symbol>
+      <symbol id="i-loader" viewBox="0 0 16 16">
+        <path
+          d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.6"
+          stroke-linecap="round"
+        />
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 16 16">
+        <path
+          d="m3 8.5 3.2 3.2L13 5"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </symbol>
+      <symbol id="i-x" viewBox="0 0 16 16">
+        <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+      </symbol>
+    </svg>
+
+    <div class="pv-wrap">
+      <h1 class="pv-h1">插件版本落后于 hub · 重新加载提示</h1>
+      <p class="pv-sub">
+        交互预览（静态 HTML，按钮可点）。配色 / 圆角 / 字号 / 按钮沿用 web-hub 现有 tokens 与 primitives（notice / btn /
+        chip / pill）。每节右上角「重置」可重放该节。
+      </p>
+
+      <!-- ============ 1 ============ -->
+      <section class="pv-section" id="sec1">
+        <h2 class="pv-h2">1 · 会话详情页顶部提示条（推荐主方案）</h2>
+        <p class="pv-note">
+          进入落后会话的详情页，顶部出现 warning 提示条。点【重新加载】→「正在重新加载…」→
+          成功后提示条消失，短暂出现「已重新加载到 0.9.0」通知。点【暂不】见第 4 节。
+        </p>
+        <div class="pv-stage">
+          <div class="pv-stage-head">
+            <span>详情页 · ~/ai/pi-toolkit</span>
+            <button class="btn btn-ghost btn-xs" type="button" data-reset="s1">重置</button>
+          </div>
+          <div id="s1-banner" class="or-banner" role="status">
+            <svg class="icon"><use href="#i-info" /></svg>
+            <span class="or-banner-text">
+              此会话的插件版本 <span class="mono">0.8.1</span> 落后于 hub
+              <span class="mono">0.9.0</span>。重新加载后生效（会话内容不丢失）。
+            </span>
+            <span class="or-banner-actions">
+              <button class="btn btn-primary" type="button" id="s1-reload">重新加载</button>
+              <button class="btn" type="button" id="s1-later">暂不</button>
+            </span>
+          </div>
+          <div id="s1-toast" class="or-toast pv-hidden" role="status">
+            <svg class="icon"><use href="#i-check" /></svg>
+            <span>已重新加载到 <b>0.9.0</b></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 2 ============ -->
+      <section class="pv-section">
+        <h2 class="pv-h2">2 · 会话忙（正在运行）时排队</h2>
+        <p class="pv-note">
+          会话正在运行时点【重新加载】：提示条转为 info
+          态，说明将排队到本轮结束、空闲后自动重新加载，并提供【取消排队】；取消后回到初始提示条。（预览里可用「模拟本轮结束」看后续自动重载。）
+        </p>
+        <div class="pv-stage">
+          <div class="pv-stage-head">
+            <span>详情页 · ~/ai/claude2api（<span class="pill" data-st="running">运行中</span>）</span>
+            <button class="btn btn-ghost btn-xs" type="button" data-reset="s2">重置</button>
+          </div>
+          <div id="s2-banner" class="or-banner" role="status">
+            <svg class="icon"><use href="#i-info" /></svg>
+            <span class="or-banner-text">
+              此会话的插件版本 <span class="mono">0.8.1</span> 落后于 hub
+              <span class="mono">0.9.0</span>。重新加载后生效（会话内容不丢失）。
+            </span>
+            <span class="or-banner-actions">
+              <button class="btn btn-primary" type="button" id="s2-reload">重新加载</button>
+              <button class="btn" type="button" id="s2-later">暂不</button>
+            </span>
+          </div>
+          <div id="s2-queued" class="or-banner pv-hidden" data-tone="info" role="status">
+            <svg class="icon spin"><use href="#i-loader" /></svg>
+            <span class="or-banner-text">当前正在运行，将在本轮结束、空闲后自动重新加载。</span>
+            <span class="or-banner-actions">
+              <button class="btn" type="button" id="s2-cancel">取消排队</button>
+              <button class="btn btn-ghost" type="button" id="s2-finish">模拟本轮结束</button>
+            </span>
+          </div>
+          <div id="s2-toast" class="or-toast pv-hidden" role="status">
+            <svg class="icon"><use href="#i-check" /></svg>
+            <span>已重新加载到 <b>0.9.0</b></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 3 ============ -->
+      <section class="pv-section">
+        <h2 class="pv-h2">3 · 重新加载失败</h2>
+        <p class="pv-note">
+          命令通道失败（如会话进程已退出 / 连接断开）时，提示条转为 danger
+          态，给出原因与【重试】【关闭】。（预览里「重试」会演示一次成功重载。）
+        </p>
+        <div class="pv-stage">
+          <div class="pv-stage-head">
+            <span>详情页 · ~/ai/pi-toolkit</span>
+            <button class="btn btn-ghost btn-xs" type="button" data-reset="s3">重置</button>
+          </div>
+          <div id="s3-failed" class="or-banner" data-tone="danger" role="alert">
+            <svg class="icon"><use href="#i-alert" /></svg>
+            <span class="or-banner-text">
+              重新加载失败：会话进程已退出，无法送达 /reload（<span class="mono">E_OFFLINE</span>）。
+            </span>
+            <span class="or-banner-actions">
+              <button class="btn btn-primary" type="button" id="s3-retry">重试</button>
+              <button class="btn" type="button" id="s3-close">关闭</button>
+            </span>
+          </div>
+          <div id="s3-closed" class="pv-hidden" style="font-size: var(--fs-sm); color: var(--c-text-3)">
+            提示条已关闭；hub 版本再次变化前不再提示。
+          </div>
+          <div id="s3-toast" class="or-toast pv-hidden" role="status">
+            <svg class="icon"><use href="#i-check" /></svg>
+            <span>已重新加载到 <b>0.9.0</b></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 4 ============ -->
+      <section class="pv-section">
+        <h2 class="pv-h2">4 · 点【暂不】后</h2>
+        <p class="pv-note">
+          提示条收起，侧边栏卡片上的 outdated 标记（info 图标 pill「插件旧于 hub，需 /reload」）保留；hub
+          版本再次变化前不再提示。
+        </p>
+        <div class="pv-stage">
+          <div class="pv-stage-head">
+            <span>详情页 · ~/ai/pi-toolkit</span>
+            <button class="btn btn-ghost btn-xs" type="button" data-reset="s4">重置</button>
+          </div>
+          <div id="s4-banner" class="or-banner" role="status">
+            <svg class="icon"><use href="#i-info" /></svg>
+            <span class="or-banner-text">
+              此会话的插件版本 <span class="mono">0.8.1</span> 落后于 hub
+              <span class="mono">0.9.0</span>。重新加载后生效（会话内容不丢失）。
+            </span>
+            <span class="or-banner-actions">
+              <button class="btn btn-primary" type="button" id="s4-reload">重新加载</button>
+              <button class="btn" type="button" id="s4-later">暂不</button>
+            </span>
+          </div>
+          <div id="s4-dismissed" class="pv-hidden" style="font-size: var(--fs-sm); color: var(--c-text-3)">
+            已暂不。hub 版本再次变化前不再提示（卡片上的 outdated 图标保留 ↓）。
+          </div>
+          <div class="pv-sidebar" aria-label="侧边栏卡片（标记保留）">
+            <a class="agent-card" aria-current="page" data-st="idle">
+              <span class="agent-row1">
+                <span class="dot"></span>
+                <span class="agent-main">
+                  <span class="agent-title">~/ai/pi-toolkit</span>
+                  <span class="agent-chips">
+                    <span class="pill" data-st="stale">
+                      <svg class="icon-sm"><use href="#i-info" /></svg>插件旧于 hub，需 /reload
+                    </span>
+                  </span>
+                </span>
+                <span class="agent-cost">$1.24</span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">修复 reaper 竞态</span></span>
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 5 ============ -->
+      <section class="pv-section">
+        <h2 class="pv-h2">5 · 侧边栏会话卡片标记更醒目</h2>
+        <p class="pv-note">
+          落后会话的卡片在原有 info 图标之外加一枚小号「需更新」徽章（chip 形，warning
+          配色）。点击卡片进入详情页即看到第 1 节的提示条（预览里点击会滚动并高亮第 1 节）。
+        </p>
+        <div class="pv-stage">
+          <div class="pv-stage-head"><span>侧边栏 · 会话列表</span></div>
+          <div class="pv-sidebar">
+            <a class="agent-card" data-st="running">
+              <span class="agent-row1">
+                <span class="dot dot-live" data-st="running" style="--pill-fg: var(--st-running)"></span>
+                <span class="agent-main">
+                  <span class="agent-title">~/ai/claude2api</span>
+                  <span class="agent-chips"><span class="pill" data-st="running">运行中</span></span>
+                </span>
+                <span class="agent-cost">$3.87</span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">weekly report 生成</span></span>
+            </a>
+            <a class="agent-card" data-st="idle" id="s5-outdated-card">
+              <span class="agent-row1">
+                <span class="dot"></span>
+                <span class="agent-main">
+                  <span class="agent-title">~/ai/pi-toolkit</span>
+                  <span class="agent-chips">
+                    <span class="chip chip-outdated">
+                      <svg class="icon-sm"><use href="#i-info" /></svg>需更新
+                    </span>
+                  </span>
+                </span>
+                <span class="agent-cost">$1.24</span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">修复 reaper 竞态</span></span>
+            </a>
+            <a class="agent-card" data-st="idle">
+              <span class="agent-row1">
+                <span class="dot"></span>
+                <span class="agent-main">
+                  <span class="agent-title">~/notes</span>
+                </span>
+                <span class="agent-cost">$0.12</span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">无会话名称</span></span>
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 6 ============ -->
+      <section class="pv-section">
+        <h2 class="pv-h2">6 ·（可选方案）顶栏 / 仪表盘汇总</h2>
+        <p class="pv-note">
+          多个会话同时落后时给一条汇总（info
+          态）。点【全部重新加载】逐个执行并显示进度；忙的会话进入排队，空闲后自动续上。点【查看】滚动到第 5
+          节的卡片列表。
+        </p>
+        <div class="pv-stage">
+          <div class="pv-stage-head">
+            <span>仪表盘 · 全部会话</span>
+            <button class="btn btn-ghost btn-xs" type="button" data-reset="s6">重置</button>
+          </div>
+          <div id="s6-banner" class="or-banner" data-tone="info" role="status">
+            <svg class="icon"><use href="#i-info" /></svg>
+            <span class="or-banner-text"> <b>3 个会话</b>的插件版本落后于 hub <span class="mono">0.9.0</span>。 </span>
+            <span class="or-banner-actions">
+              <button class="btn btn-primary" type="button" id="s6-all">全部重新加载</button>
+              <button class="btn" type="button" id="s6-view">查看</button>
+            </span>
+          </div>
+          <ul id="s6-progress" class="pv-progress pv-hidden">
+            <li data-name="~/ai/pi-toolkit">
+              <span class="st"
+                ><svg class="icon-sm spin"><use href="#i-loader" /></svg
+              ></span>
+              <span>~/ai/pi-toolkit</span><span class="msg">正在重新加载…</span>
+            </li>
+            <li data-name="~/ai/claude2api">
+              <span class="st wait">·</span> <span>~/ai/claude2api</span><span class="msg wait">排队等待空闲…</span>
+            </li>
+            <li data-name="~/notes">
+              <span class="st wait">·</span> <span>~/notes</span><span class="msg wait">等待中…</span>
+            </li>
+          </ul>
+          <div id="s6-toast" class="or-toast pv-hidden" role="status">
+            <svg class="icon"><use href="#i-check" /></svg>
+            <span>3 个会话已全部重新加载到 <b>0.9.0</b></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 7 ============ -->
+      <section class="pv-section">
+        <h2 class="pv-h2">7 · 深色主题 / 窄屏（≤480px）</h2>
+        <p class="pv-note">
+          左：深色主题下第 1 节提示条（token 取自 tokens.css 的 dark 块）。右：≤480px
+          窄屏模拟——按钮换行并占满一行、触控高度 44px（沿用现有 coarse-pointer 规则）。
+        </p>
+        <div class="pv-stage" style="grid-template-columns: 1fr; gap: var(--sp-4)">
+          <div class="theme-dark" style="border-radius: var(--r-md); background: var(--c-bg); padding: var(--sp-3)">
+            <div class="pv-stage-head" style="margin-bottom: var(--sp-2)"><span>深色 · 详情页</span></div>
+            <div class="or-banner" role="status">
+              <svg class="icon"><use href="#i-info" /></svg>
+              <span class="or-banner-text">
+                此会话的插件版本 <span class="mono">0.8.1</span> 落后于 hub
+                <span class="mono">0.9.0</span>。重新加载后生效（会话内容不丢失）。
+              </span>
+              <span class="or-banner-actions">
+                <button class="btn btn-primary" type="button">重新加载</button>
+                <button class="btn" type="button">暂不</button>
+              </span>
+            </div>
+          </div>
+          <div>
+            <div class="pv-stage-head" style="margin-bottom: var(--sp-2)"><span>窄屏 ≤480px · 详情页</span></div>
+            <div class="pv-narrow">
+              <div class="or-banner" role="status">
+                <svg class="icon"><use href="#i-info" /></svg>
+                <span class="or-banner-text">
+                  此会话的插件版本 <span class="mono">0.8.1</span> 落后于 hub
+                  <span class="mono">0.9.0</span>。重新加载后生效（会话内容不丢失）。
+                </span>
+                <span class="or-banner-actions">
+                  <button class="btn btn-primary" type="button">重新加载</button>
+                  <button class="btn" type="button">暂不</button>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      "use strict";
+      const $ = (id) => document.getElementById(id);
+      const show = (el, on) => el.classList.toggle("pv-hidden", !on);
+      const later = (fn, ms) => window.setTimeout(fn, ms);
+
+      /* ---------- 第 1 节：立即重新加载 → 成功 ---------- */
+      const s1 = { banner: $("s1-banner"), toast: $("s1-toast"), reload: $("s1-reload"), later: $("s1-later") };
+      let s1Timer;
+      function s1Reset() {
+        window.clearTimeout(s1Timer);
+        show(s1.banner, true);
+        show(s1.toast, false);
+        s1.banner.removeAttribute("data-tone");
+        s1.banner.querySelector(".icon use").setAttribute("href", "#i-info");
+        s1.banner.querySelector(".icon").classList.remove("spin");
+        s1.banner.querySelector(".or-banner-text").innerHTML =
+          '此会话的插件版本 <span class="mono">0.8.1</span> 落后于 hub <span class="mono">0.9.0</span>。重新加载后生效（会话内容不丢失）。';
+        s1.reload.disabled = false;
+        s1.later.disabled = false;
+        s1.reload.textContent = "重新加载";
+      }
+      s1.reload.addEventListener("click", () => {
+        s1.reload.disabled = true;
+        s1.later.disabled = true;
+        s1.reload.textContent = "正在重新加载…";
+        s1.banner.querySelector(".icon").classList.add("spin");
+        s1.banner.querySelector(".icon use").setAttribute("href", "#i-loader");
+        s1Timer = later(() => {
+          show(s1.banner, false);
+          show(s1.toast, true);
+          s1Timer = later(() => show(s1.toast, false), 3000);
+        }, 1400);
+      });
+      s1.later.addEventListener("click", () => show(s1.banner, false));
+
+      /* ---------- 第 2 节：运行中 → 排队 ---------- */
+      const s2 = {
+        banner: $("s2-banner"),
+        queued: $("s2-queued"),
+        toast: $("s2-toast"),
+        reload: $("s2-reload"),
+        laterBtn: $("s2-later"),
+        cancel: $("s2-cancel"),
+        finish: $("s2-finish"),
+      };
+      let s2Timer;
+      function s2Reset() {
+        window.clearTimeout(s2Timer);
+        show(s2.banner, true);
+        show(s2.queued, false);
+        show(s2.toast, false);
+        s2.reload.disabled = false;
+        s2.laterBtn.disabled = false;
+        s2.reload.textContent = "重新加载";
+      }
+      function s2Succeed() {
+        show(s2.queued, false);
+        show(s2.toast, true);
+        s2Timer = later(() => show(s2.toast, false), 3000);
+      }
+      s2.reload.addEventListener("click", () => {
+        show(s2.banner, false);
+        show(s2.queued, true);
+      });
+      s2.laterBtn.addEventListener("click", () => show(s2.banner, false));
+      s2.cancel.addEventListener("click", () => {
+        show(s2.queued, false);
+        s2Reset();
+      });
+      s2.finish.addEventListener("click", () => {
+        s2.queued.querySelector(".or-banner-text").textContent = "本轮已结束，正在重新加载…";
+        s2.cancel.disabled = true;
+        s2.finish.disabled = true;
+        s2Timer = later(() => {
+          s2.cancel.disabled = false;
+          s2.finish.disabled = false;
+          s2.queued.querySelector(".or-banner-text").textContent = "当前正在运行，将在本轮结束、空闲后自动重新加载。";
+          s2Succeed();
+        }, 1200);
+      });
+
+      /* ---------- 第 3 节：失败 → 重试 / 关闭 ---------- */
+      const s3 = {
+        failed: $("s3-failed"),
+        closed: $("s3-closed"),
+        toast: $("s3-toast"),
+        retry: $("s3-retry"),
+        close: $("s3-close"),
+      };
+      let s3Timer;
+      function s3Reset() {
+        window.clearTimeout(s3Timer);
+        show(s3.failed, true);
+        show(s3.closed, false);
+        show(s3.toast, false);
+        s3.failed.setAttribute("data-tone", "danger");
+        s3.failed.querySelector(".icon use").setAttribute("href", "#i-alert");
+        s3.failed.querySelector(".icon").classList.remove("spin");
+        s3.failed.querySelector(".or-banner-text").innerHTML =
+          '重新加载失败：会话进程已退出，无法送达 /reload（<span class="mono">E_OFFLINE</span>）。';
+        s3.retry.disabled = false;
+        s3.close.disabled = false;
+        s3.retry.textContent = "重试";
+      }
+      s3.retry.addEventListener("click", () => {
+        s3.retry.disabled = true;
+        s3.close.disabled = true;
+        s3.retry.textContent = "正在重新加载…";
+        s3.failed.removeAttribute("data-tone");
+        s3.failed.querySelector(".icon use").setAttribute("href", "#i-loader");
+        s3.failed.querySelector(".icon").classList.add("spin");
+        s3Timer = later(() => {
+          show(s3.failed, false);
+          show(s3.toast, true);
+          s3Timer = later(() => show(s3.toast, false), 3000);
+        }, 1400);
+      });
+      s3.close.addEventListener("click", () => {
+        show(s3.failed, false);
+        show(s3.closed, true);
+      });
+
+      /* ---------- 第 4 节：暂不 → 收起，标记保留 ---------- */
+      const s4 = {
+        banner: $("s4-banner"),
+        dismissed: $("s4-dismissed"),
+        reload: $("s4-reload"),
+        laterBtn: $("s4-later"),
+      };
+      function s4Reset() {
+        show(s4.banner, true);
+        show(s4.dismissed, false);
+      }
+      s4.laterBtn.addEventListener("click", () => {
+        show(s4.banner, false);
+        show(s4.dismissed, true);
+      });
+      s4.reload.addEventListener("click", () => show(s4.banner, false));
+
+      /* ---------- 第 5 节：点卡片 → 滚动高亮第 1 节 ---------- */
+      $("s5-outdated-card").addEventListener("click", () => {
+        const target = $("sec1");
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+        const banner = $("s1-banner");
+        banner.classList.remove("pv-flash");
+        void banner.offsetWidth;
+        banner.classList.add("pv-flash");
+      });
+
+      /* ---------- 第 6 节：全部重新加载（逐个进度，忙的排队） ---------- */
+      const s6 = {
+        banner: $("s6-banner"),
+        progress: $("s6-progress"),
+        toast: $("s6-toast"),
+        all: $("s6-all"),
+        view: $("s6-view"),
+      };
+      const s6Timers = [];
+      function s6Reset() {
+        for (const t of s6Timers.splice(0)) window.clearTimeout(t);
+        show(s6.banner, true);
+        show(s6.progress, false);
+        show(s6.toast, false);
+        s6.all.disabled = false;
+        const rows = s6.progress.querySelectorAll("li");
+        rows[0].querySelector(".st").innerHTML = '<svg class="icon-sm spin"><use href="#i-loader" /></svg>';
+        rows[0].querySelector(".msg").textContent = "正在重新加载…";
+        rows[0].querySelector(".msg").className = "msg";
+        for (const [i, label] of [
+          [1, "排队等待空闲…"],
+          [2, "等待中…"],
+        ]) {
+          rows[i].querySelector(".st").textContent = "·";
+          rows[i].querySelector(".st").className = "st wait";
+          rows[i].querySelector(".msg").textContent = label;
+          rows[i].querySelector(".msg").className = "msg wait";
+        }
+      }
+      function s6RowDone(row, text) {
+        row.querySelector(".st").innerHTML = '<svg class="icon-sm ok"><use href="#i-check" /></svg>';
+        row.querySelector(".st").className = "st ok";
+        const msg = row.querySelector(".msg");
+        msg.textContent = text;
+        msg.className = "msg ok";
+      }
+      s6.all.addEventListener("click", () => {
+        s6.all.disabled = true;
+        show(s6.progress, true);
+        const rows = s6.progress.querySelectorAll("li");
+        s6Timers.push(
+          later(() => s6RowDone(rows[0], "已重新加载"), 1300),
+          later(() => {
+            rows[1].querySelector(".st").innerHTML = '<svg class="icon-sm spin"><use href="#i-loader" /></svg>';
+            rows[1].querySelector(".st").className = "st";
+            rows[1].querySelector(".msg").textContent = "运行中 · 已排队，本轮结束后自动重新加载…";
+            rows[1].querySelector(".msg").className = "msg";
+            rows[2].querySelector(".st").innerHTML = '<svg class="icon-sm spin"><use href="#i-loader" /></svg>';
+            rows[2].querySelector(".st").className = "st";
+            rows[2].querySelector(".msg").textContent = "正在重新加载…";
+            rows[2].querySelector(".msg").className = "msg";
+          }, 1500),
+          later(() => s6RowDone(rows[2], "已重新加载"), 2800),
+          later(() => s6RowDone(rows[1], "本轮结束 · 已重新加载"), 3600),
+          later(() => {
+            show(s6.banner, false);
+            show(s6.progress, false);
+            show(s6.toast, true);
+            s6Timers.push(later(() => show(s6.toast, false), 3200));
+          }, 4000),
+        );
+      });
+      s6.view.addEventListener("click", () => {
+        document.querySelector(".pv-sidebar")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+
+      /* ---------- 各节重置 ---------- */
+      const resets = { s1: s1Reset, s2: s2Reset, s3: s3Reset, s4: s4Reset, s6: s6Reset };
+      for (const btn of document.querySelectorAll("[data-reset]")) {
+        btn.addEventListener("click", () => resets[btn.getAttribute("data-reset")]?.());
+      }
+    </script>
+  </body>
+</html>

@@ -398,7 +398,7 @@ export type ReportRead =
   | { kind: "ok"; text: string; bytes: number }
   | { kind: "degraded"; reason: SchedFsReason | "bad-path"; detail: string };
 
-/** Read a report file. Only the exact `reports/<64hex>.md` shape is accepted. */
+/** Read a report file using the bounded short-name or legacy 64hex relative path contract. */
 export function readReportFile(
   root: StoreRoot,
   dirName: string,

@@ -150,13 +150,13 @@ export function createLedgerResultSink(deps: LedgerResultSinkDeps): SchedResultS
         });
         return r.ok;
       }
-      const reportFile = reportFileOf(deps.sessionId, run.runKey);
       const r = await writeReportLocked(store, {
-        reportFile,
+        reportFile: reportFileOf(run.taskId, run.scheduledAt, task.when.tz),
+        allocateUnique: true,
         data: renderReport(task, run, text),
         now: deps.now(),
         ...(deps.caps !== undefined ? { caps: deps.caps } : {}),
-        commit: (draft, ctx, written) => {
+        commit: (draft, ctx, written, reportFile) => {
           const out = written
             ? finishRun(draft, run.runKey, { state: "settled", reportFile, ...(reason ? { reason } : {}) }, ctx.now)
             : finishRun(draft, run.runKey, { state: "settled", reason: "report-skipped(cap)" }, ctx.now);

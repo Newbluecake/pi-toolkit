@@ -10,7 +10,7 @@
  * schedule-push.test.ts uses); everything on the H1 side is production code + real files.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -156,59 +156,100 @@ function fakeRegistry() {
 }
 
 describe("real F1 schedule × real H1 coordinator", () => {
-  it("报告发现 → 飞书 final + accepted 回执 → receiptsChanged → sched_receipts 推在线会话", async () => {
-    const root = tmp();
-    const rid = createHash("sha256").update(`${SID}\0s_abcd2345@1`).digest("hex");
-    writeState(root, (s) => {
-      s.tasks.push(task());
-      s.pendingReports.push({
-        reportId: rid,
-        runKey: "s_abcd2345@1",
-        taskId: "s_abcd2345",
-        form: "background",
-        endedAt: T(1),
-        expiresAt: T(1) + DAY,
-        reportFile: `reports/${rid}.md`,
-        status: "completed",
+  it.each(["legacy", "short", "short-suffix"])(
+    "%s 报告 → 飞书附件 + receipts；hub restart 不重复推送且不写账本",
+    async (format) => {
+      const root = tmp();
+      const rid = createHash("sha256").update(`${SID}\0s_abcd2345@1`).digest("hex");
+      const fileName =
+        format === "legacy" ? `${rid}.md` : `s_abcd2345-20261026-0100${format === "short-suffix" ? "-3" : ""}.md`;
+      const reportFile = `reports/${fileName}`;
+      writeState(root, (s) => {
+        s.tasks.push(task());
+        s.pendingReports.push({
+          reportId: rid,
+          runKey: "s_abcd2345@1",
+          taskId: "s_abcd2345",
+          form: "background",
+          endedAt: T(1),
+          expiresAt: T(1) + DAY,
+          reportFile,
+          status: "completed",
+        });
       });
-    });
-    mkdirSync(join(root, SID, "reports"), { recursive: true, mode: 0o700 });
-    writeFileSync(join(root, SID, "reports", `${rid}.md`), "# 日报正文", { mode: 0o600 });
+      mkdirSync(join(root, SID, "reports"), { recursive: true, mode: 0o700 });
+      writeFileSync(join(root, SID, reportFile), "# 日报正文\n\n" + "段落\n\n".repeat(10_000), { mode: 0o600 });
+      const ledgerBefore = readFileSync(join(root, SID, "state.json"));
 
-    const reg = fakeRegistry();
-    reg.agents.set("a1", { session: { sessionId: SID }, connected: true, caps: [SCHED_HUB_CAP] });
-    let now = T(2);
-    const f1 = rigFeishu(() => now);
-    // Wire the two committed seams exactly like hub.ts: F1's receiptsChanged → coordinator,
-    // coordinator's port → F1's deps (construction-time), delivery after "bot start".
-    const svc = createScheduleService({
-      config: { dir: root, toleranceS: 60 },
-      stateDir: tmp(),
-      registry: reg,
-      log: { info: () => {}, warn: () => {}, error: () => {} },
-      now: () => now,
-    });
-    services.push(svc);
-    // Production wiring (service.ts): F1's receiptsChanged → the hub port → sched_receipts.
-    f1.deps.onReceipts = (sid, rows) => svc.port().receiptsChanged(sid, rows);
-    await svc.rescanAll();
-    svc.bindDelivery(f1.schedule);
-    await svc.rescanAll();
+      const reg = fakeRegistry();
+      reg.agents.set("a1", { session: { sessionId: SID }, connected: true, caps: [SCHED_HUB_CAP] });
+      let now = T(2);
+      const f1 = rigFeishu(() => now);
+      const upload = vi.fn(async (_input: { bytes: Buffer; fileName: string }) => ({
+        ok: true as const,
+        fileKey: "fk",
+      }));
+      f1.deps.upload = upload;
+      const hubStateDir = tmp();
+      // Wire the two committed seams exactly like hub.ts: F1's receiptsChanged → coordinator,
+      // coordinator's port → F1's deps (construction-time), delivery after "bot start".
+      const svc = createScheduleService({
+        config: { dir: root, toleranceS: 60 },
+        stateDir: hubStateDir,
+        registry: reg,
+        log: { info: () => {}, warn: () => {}, error: () => {} },
+        now: () => now,
+      });
+      services.push(svc);
+      // Production wiring (service.ts): F1's receiptsChanged → the hub port → sched_receipts.
+      f1.deps.onReceipts = (sid, rows) => svc.port().receiptsChanged(sid, rows);
+      await svc.rescanAll();
+      svc.bindDelivery(f1.schedule);
+      await svc.rescanAll();
 
-    // F1 turned the discovery into exactly one outbox final with the report body.
-    expect(f1.finals).toHaveLength(1);
-    expect(f1.finals[0]!.requestId).toBe(scheduleRequestId(rid));
-    // The receipt exists (accepted) — and the coordinator learned it via receiptsChanged →
-    // sched_receipts reached the ONLINE owning session.
-    expect(f1.receipts.get(rid)?.state).toBe("accepted");
-    const frame = reg.sent.find((f) => f.t === "sched_receipts") as { sessionId: string; reportIds: string[] };
-    expect(frame.sessionId).toBe(SID);
-    expect(frame.reportIds).toEqual([rid]);
-    // A later round does not re-offer (F1's receipt table dedups via hasReceipt).
-    const offersBefore = svc.status().counters.reportsOffered;
-    await svc.rescanAll();
-    expect(svc.status().counters.reportsOffered).toBe(offersBefore);
-  });
+      // F1 turned the discovery into exactly one outbox final with the report body.
+      expect(f1.finals).toHaveLength(1);
+      expect(f1.finals[0]!.requestId).toBe(scheduleRequestId(rid));
+      expect(upload).toHaveBeenCalledOnce();
+      const attachmentFileName = format === "legacy" ? "reply-sidalp.md" : fileName;
+      expect(upload.mock.calls[0]![0].fileName).toBe(attachmentFileName);
+      expect(f1.finals[0]!.messages[0]!.content).toContain(`完整内容见附件 \`${attachmentFileName}\``);
+      expect(upload.mock.calls[0]![0].bytes.toString("utf8")).toContain("日报正文");
+      expect(f1.finals[0]!.messages.some((m) => m.msgType === "file")).toBe(true);
+      // The receipt exists (accepted) — and the coordinator learned it via receiptsChanged →
+      // sched_receipts reached the ONLINE owning session.
+      expect(f1.receipts.get(rid)?.state).toBe("accepted");
+      const frame = reg.sent.find((f) => f.t === "sched_receipts") as { sessionId: string; reportIds: string[] };
+      expect(frame.sessionId).toBe(SID);
+      expect(frame.reportIds).toEqual([rid]);
+      // A later round does not re-offer (F1's receipt table dedups via hasReceipt).
+      const offersBefore = svc.status().counters.reportsOffered;
+      await svc.rescanAll();
+      expect(svc.status().counters.reportsOffered).toBe(offersBefore);
+      await svc.dispose();
+      const restarted = createScheduleService({
+        config: { dir: root, toleranceS: 60 },
+        stateDir: hubStateDir,
+        registry: reg,
+        log: { info: () => {}, warn: () => {}, error: () => {} },
+        now: () => now,
+      });
+      services.push(restarted);
+      f1.deps.onReceipts = (sid, rows) => restarted.port().receiptsChanged(sid, rows);
+      const restartedBot = createFeishuSchedule(f1.deps); // durable receipt/outbox survive process recreation
+      await restartedBot.reconcile();
+      restarted.bindDelivery(restartedBot);
+      await restarted.rescanAll();
+      expect(restarted.readReport(SID, reportFile)).toMatchObject({
+        ok: true,
+        text: expect.stringContaining("日报正文"),
+      });
+      expect(f1.finals).toHaveLength(1);
+      expect(upload).toHaveBeenCalledOnce();
+      expect(f1.receipts.get(rid)?.state).toBe("accepted");
+      expect(readFileSync(join(root, SID, "state.json"))).toEqual(ledgerBefore);
+    },
+  );
 
   it("错过 → 每小时合并卡：第一批发出，同小时第二批被 F1 拒后结转，下一小时合并", async () => {
     const root = tmp();

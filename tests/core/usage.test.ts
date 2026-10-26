@@ -186,7 +186,7 @@ describe("X12 absorbed run ids", () => {
       6,
     );
     expect(s.diag.absorbedRunIds).toEqual(["run_a", "run_b"]);
-    // "run_a" repeats (e.g. a get_subagent_result poll re-fetching the same
+    // "run_a" repeats (e.g. a get_run_result poll re-fetching the same
     // finished run) — must not duplicate; "run_c" is new — must be appended.
     s = apply(
       s,
