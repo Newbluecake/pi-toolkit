@@ -536,7 +536,15 @@ skipIfNoSqlite("maintenance open check — #66 hardening reader marker / verdict
     try {
       const res = await open(t.dbFile, { now: NOW });
       expect(res.ok).toBe(true);
-      expect(res.hardening).toEqual({ readerSince: NOW, writerActive: false, maxKdf: { n: 32768, r: 8, p: 1 } });
+      expect(res.hardening).toEqual({
+        readerSince: NOW,
+        writerActive: false,
+        maxKdf: { n: 32768, r: 8, p: 1 },
+        totpKey: "none",
+        totpMigrated: 0,
+        truncateFailed: false,
+        totpWarnings: [],
+      });
       expect(JSON.parse((await marker(t.dbFile))!)).toEqual({ v: 1, since: NOW });
     } finally {
       t.cleanup();

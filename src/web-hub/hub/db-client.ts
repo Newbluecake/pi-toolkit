@@ -37,7 +37,7 @@ export const DEFAULT_RESERVED_QUEUE_SLOTS = 8;
 /** After the breaker opens, let the existing hub restart path drain/reconnect. */
 export const DEFAULT_RESTART_COOLDOWN_MS = 60_000;
 
-export type DbClientErrorCode = "E_BUSY" | "E_DB" | "E_RATE";
+export type DbClientErrorCode = "E_BUSY" | "E_DB" | "E_RATE" | "E_TOTP_KEY";
 
 export class DbClientError extends Error {
   readonly code: DbClientErrorCode;
@@ -62,6 +62,8 @@ export interface DbCallOptions {
 
 export interface DbClientDeps {
   dbFile: string;
+  /** Open-time maintenance verdict + key PATH only; snapshotted across every respawn. */
+  childEnv?: Readonly<Record<string, string>>;
   log: HubLog;
   now?: () => number;
   interactiveSlots?: number;
@@ -113,6 +115,7 @@ interface DedupEntry {
 
 export function createDbClient(deps: DbClientDeps): DbClient {
   const log = deps.log;
+  const childEnv = Object.freeze({ ...deps.childEnv });
   const now = deps.now ?? Date.now;
   const interactiveSlots = deps.interactiveSlots ?? DEFAULT_INTERACTIVE_SLOTS;
   const queueSlots = deps.queueSlots ?? DEFAULT_QUEUE_SLOTS;
@@ -235,7 +238,7 @@ export function createDbClient(deps: DbClientDeps): DbClient {
     let c: ChildProcessWithoutNullStreams;
     try {
       c = spawnFn(process.execPath, ["--disable-warning=ExperimentalWarning", "-e", script], {
-        env: { ...process.env, PI_WEBHUB_DB_PATH: deps.dbFile },
+        env: { ...process.env, ...childEnv, PI_WEBHUB_DB_PATH: deps.dbFile },
         stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (err) {
@@ -252,6 +255,12 @@ export function createDbClient(deps: DbClientDeps): DbClient {
     });
     c.stdout.on("data", (chunk: Buffer) => dec.push(chunk));
     c.stderr.on("data", (chunk: Buffer) => {
+      // Production query key warnings are fixed-code only. Never forward arbitrary stderr.
+      const lines = chunk.toString("utf8").split("\n");
+      for (const line of lines) {
+        const code = /^WARN totp-key code=([a-z-]{1,32})$/.exec(line)?.[1];
+        if (code) log.warn("web-hub db-client: TOTP key warning", { code });
+      }
       if (deps.test) log.info("web-hub db-client: query subprocess stderr", { line: chunk.toString("utf8").trimEnd() });
     });
     c.on("error", (err) => log.error("web-hub db-client: spawn error", { error: String(err) }));
@@ -275,7 +284,8 @@ export function createDbClient(deps: DbClientDeps): DbClient {
     if (frame.ok === true) {
       settleResolve(pc, frame.result);
     } else {
-      const code: DbClientErrorCode = frame.code === "E_RATE" || frame.code === "E_BUSY" ? frame.code : "E_DB";
+      const code: DbClientErrorCode =
+        frame.code === "E_RATE" || frame.code === "E_BUSY" || frame.code === "E_TOTP_KEY" ? frame.code : "E_DB";
       settleReject(
         pc,
         new DbClientError(code, typeof frame.detail === "string" ? frame.detail : "web-hub db: op failed"),

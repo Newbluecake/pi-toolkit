@@ -61,7 +61,7 @@ export function formatTfaStatusLines(data: TfaStatusData): string[] {
   if (data.state === "inconsistent") {
     return [
       "2fa=inconsistent —— 2FA 数据不一致，新 IP 的 LAN 登录会被拒绝（503）。",
-      `请执行 /webhub 2fa repair --confirm 修复（将清空 2FA 数据，之后需重新 enroll）。`,
+      `请执行 /webhub 2fa repair --confirm 修复（将清空 2FA 数据，同时解除 TOTP 密钥绑定，密钥文件保留，之后需重新 enroll）。`,
     ];
   }
   const factors = [data.totp ? "totp" : "", data.feishu ? "feishu" : ""].filter((f) => f !== "").join("+");
@@ -89,6 +89,8 @@ export function formatTfaError(code: string, message: string): string {
       return "2FA 状态在操作期间已变化，请重新执行。";
     case "E_2FA_NONE":
       return "未启用 2FA（或没有待完成的注册）。";
+    case "E_TOTP_KEY":
+      return "TOTP 密钥缺失或不匹配；本机 reset（主账号）或 repair（全部账号）后 /webhub restart，再重新 enroll；密钥文件保留。";
     case "E_NO_FEISHU":
       return "飞书机器人未就绪：需要先 /webhub feishu setup 并确认 owner。";
     default:
@@ -280,7 +282,7 @@ export async function runTwofaCommand(
     case "repair": {
       if (rest.length !== 1 || rest[0] !== "--confirm") {
         deps.notify(
-          "用法：/webhub 2fa repair --confirm（修复不一致的 2FA 表：清空 2FA 数据，保留 schema v2）",
+          "用法：/webhub 2fa repair --confirm（修复不一致的 2FA 表：清空 2FA 数据，保留 schema v2；同时解除 TOTP 密钥绑定，密钥文件保留）",
           "warning",
         );
         return;

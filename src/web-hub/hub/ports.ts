@@ -1273,13 +1273,15 @@ export interface LanSessionListRecord extends LanSessionRecord {
 export interface Lan2faState {
   state: "none" | "enrolled" | "inconsistent";
   totp: boolean;
+  /** Internal only; absent means usable. Never included in strict tfa status wire. */
+  totpUsable?: boolean;
   feishu: boolean;
   recoveryLeft: number;
   factorGen: number;
   repairNeeded?: string;
 }
 export type LanFactorVerdict =
-  { ok: true; recoveryLeft?: number } | { ok: false; reason: "bad" | "replay" | "stale" | "none" };
+  { ok: true; recoveryLeft?: number } | { ok: false; reason: "bad" | "replay" | "stale" | "none" | "unavailable" };
 export interface CreateSessionCheckedInput {
   userId: number;
   expectedEpoch: number;

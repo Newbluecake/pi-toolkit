@@ -1413,3 +1413,72 @@ describe("#66 P2 login-only trigger", () => {
     expect(maybeRehash).not.toHaveBeenCalled();
   });
 });
+
+describe("#66 P6 TOTP key unavailable is not a bad factor", () => {
+  it("missing-key challenge omits TOTP but recovery and Feishu stay available", async () => {
+    const h = setup({ totpStep: (_s, c, n) => (c === "111111" ? Math.floor(n / 30000) : undefined) });
+    await h.enroll(true);
+    const get = h.store.get2faState.bind(h.store);
+    vi.spyOn(h.store, "get2faState").mockImplementation(async (...args) => ({
+      ...(await get(...args)),
+      totpUsable: false,
+    }));
+    const ch = await h.challenge();
+    expect(ch.result.body).toMatchObject({ methods: ["recovery", "feishu"] });
+    expect(await h.core.submitFactor(ch.token, { method: "totp", code: "111111" }, ch.ctx, io().value)).toMatchObject({
+      status: 429,
+      body: { error: "E_2FA_METHOD_LOCKED" },
+    });
+    expect(h.fail).not.toHaveBeenCalled();
+    const codes = await h.store.regenRecovery(1, h.now());
+    // New generation: start a new challenge and prove the escape hatch completes a session.
+    const next = await h.challenge();
+    const res = await h.core.submitFactor(
+      next.token,
+      { method: "recovery", code: codes.recoveryCodes[0]! },
+      next.ctx,
+      io().value,
+    );
+    expect(res.status).toBe(200);
+  });
+  it("no usable TOTP/recovery/live Feishu returns existing 503 E_DB (not 2FA off)", async () => {
+    const h = setup();
+    await h.enroll();
+    vi.spyOn(h.store, "get2faState").mockResolvedValue({
+      state: "enrolled",
+      totp: true,
+      totpUsable: false,
+      feishu: false,
+      recoveryLeft: 0,
+      factorGen: 1,
+    });
+    const res = await h.password();
+    expect(res).toMatchObject({ status: 503, body: { error: "E_DB" } });
+    expect(h.fail).not.toHaveBeenCalled();
+  });
+  it("unavailable refunds BOTH budgets, remains pending, audits reason and never limiter.fail", async () => {
+    const h = setup({ totpStep: (_s, c, n) => (c === "111111" ? Math.floor(n / 30000) : undefined) });
+    await h.enroll(true);
+    const verify = vi.spyOn(h.store, "verifyTotp").mockResolvedValue({ ok: false, reason: "unavailable" });
+    const ch = await h.challenge();
+    for (let i = 0; i < L.methodAttempts + L.attempts + 2; i++)
+      expect(await h.core.submitFactor(ch.token, { method: "totp", code: "111111" }, ch.ctx, io().value)).toMatchObject(
+        { status: 503, body: { error: "E_DB" } },
+      );
+    expect(h.fail).not.toHaveBeenCalled();
+    expect(h.events.some((e) => e.type === "login-2fa-burst")).toBe(false);
+    const logs = JSON.stringify(h.log.info.mock.calls);
+    expect(logs).toContain('"reason":"unavailable"');
+    expect(logs).toContain(`"left":${L.attempts}`);
+    verify.mockResolvedValueOnce({ ok: false, reason: "bad" });
+    expect(await h.core.submitFactor(ch.token, { method: "totp", code: "111111" }, ch.ctx, io().value)).toMatchObject({
+      status: 401,
+      body: { attemptsLeft: L.attempts - 1 },
+    });
+    expect(h.fail).toHaveBeenCalledTimes(1);
+    verify.mockResolvedValueOnce({ ok: true });
+    expect((await h.core.submitFactor(ch.token, { method: "totp", code: "111111" }, ch.ctx, io().value)).status).toBe(
+      200,
+    );
+  });
+});

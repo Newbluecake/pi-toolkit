@@ -408,3 +408,37 @@ describe("admin tfa_req audit + secret boundary (§8, §5.8, §10 row F)", () =>
     expect(h.emitted).toEqual([]);
   });
 });
+
+describe("#66 P6 TOTP key errors are append-only, status remains strict", () => {
+  it("E_TOTP_KEY returns fixed recovery hint and no error/key material", async () => {
+    const h = harness();
+    seedAdmin(h.store);
+    h.store.commitTotp = async () => {
+      throw Object.assign(Error("should-not-appear-in-logs"), { code: "E_TOTP_KEY" });
+    };
+    const res = await h.call({ op: "totp_confirm", code: "123456" });
+    expectValid(res);
+    expect(res).toMatchObject({ ok: false, code: "E_TOTP_KEY" });
+    if (res.ok) throw Error("expected refusal");
+    expect(res.message).toContain("/webhub restart");
+    expect(res.message).toContain("reset or repair");
+    expect(logText(h.log)).not.toContain("should-not-appear-in-logs");
+    expect(logText(h.log)).not.toContain("123456");
+  });
+  it("internal totpUsable=false never leaks into strict status payload", async () => {
+    const h = harness();
+    seedAdmin(h.store);
+    h.store.get2faState = async () => ({
+      state: "enrolled",
+      totp: true,
+      totpUsable: false,
+      feishu: true,
+      recoveryLeft: 10,
+      factorGen: 7,
+    });
+    const res = await h.call({ op: "status" });
+    expectValid(res);
+    expect(res).toMatchObject({ ok: true, data: { state: "enrolled", totp: true, feishu: true, recoveryLeft: 10 } });
+    expect(JSON.stringify(res)).not.toContain("totpUsable");
+  });
+});

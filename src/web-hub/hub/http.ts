@@ -3337,7 +3337,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       return [...(kdfInvalidWarning ? ["db-invalid:kdf"] : []), ...(lan.store.warnings?.() ?? [])];
     }
 
-    // #66 D4: store-raised warnings (e.g. `initial-password-residue`) refresh the published status.
+    // #66 P5/P6: store-raised residue and TOTP key-state warnings share this append-only channel.
     const offStoreWarnings = lan.store.onWarningsChanged?.(() => {
       if (handle === undefined || lanClosed) return;
       status = withAllowlist(buildLanStatus(lan.cfg, handle.current(), handle.port, extraWarnings()));

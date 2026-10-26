@@ -53,6 +53,7 @@ import {
   LAN_SESSION_IDLE_MAX,
   LAN_SESSION_IDLE_MINUTES,
 } from "../protocol/lan-2fa.js";
+import { webHubTotpKeyFile } from "../protocol/paths.js";
 import { auditLan2fa } from "./audit.js";
 
 const execFileP = promisify(execFile);
@@ -88,6 +89,8 @@ export interface LanStore extends LanStorePort {
 
 export interface CreateLanStoreDeps {
   dbFile: string;
+  /** Explicit key-path test seam; production derives the same home as HubPaths from dbFile. */
+  totpKeyPath?: string;
   /** Idle expiry policy (clamped to 5 minutes–7 days; default 12 hours). */
   idleMs?: number;
   log: HubLog;
@@ -119,7 +122,7 @@ export interface CreateLanStoreDeps {
 /**
  * #66 hardening verdict of the open check (plan §4.0/§5). `writerActive` is decided ONCE by the
  * maintenance subprocess; `verifyTarget` is `max(write target, strongest stored record)`.
- * `totpKey`/`totpMigrated` are placeholders until the TOTP-encryption pack fills them.
+ * TOTP key state is independent of schema consistency: missing keys never close LAN.
  */
 export interface LanHardening {
   readerSince: number;
@@ -142,6 +145,11 @@ export type CreateLanStoreResult =
  */
 export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLanStoreResult> {
   const log = deps.log;
+  // Assembly's frozen input supplies only dbFile. It embeds the exact HubPaths home prefix;
+  // never consult process.env/HOME/XDG here (custom DB paths require an explicit test key path).
+  const suffix = "/.pi/agent/web-hub/hub.db";
+  const totpKeyPath =
+    deps.totpKeyPath ?? (deps.dbFile.endsWith(suffix) ? webHubTotpKeyFile(deps.dbFile.slice(0, -suffix.length)) : "");
   const now = deps.now ?? Date.now;
   const idleMs = Number.isFinite(deps.idleMs)
     ? Math.min(LAN_SESSION_IDLE_MAX * 60_000, Math.max(LAN_SESSION_IDLE_MIN * 60_000, Math.trunc(deps.idleMs!)))
@@ -157,14 +165,13 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
     maintDeadline,
     resolveInitialUsername(log),
     undefined,
-    deps.maintHardening,
+    { ...deps.maintHardening, totpKeyPath },
   );
   if (!maintResult.ok) return maintResult;
   if (maintResult.loginIpsRebuilt) log.warn("web-hub lan-store: login_ips migrated or rebuilt");
   // The open check's final TRUNCATE failing used to be dropped silently; surface it (stays bounded:
   // the next open / the close-time truncate retries it).
-  const truncateFailed =
-    maintResult.warning !== undefined && maintResult.warning.startsWith("checkpoint-truncate-failed");
+  const truncateFailed = maintResult.warning !== undefined && maintResult.warning.startsWith("checkpoint-truncate-");
   if (maintResult.warning !== undefined)
     log.warn("web-hub lan-store: open check warning", { warning: maintResult.warning });
   const writerActive = maintResult.hardening?.writerActive === true;
@@ -172,9 +179,9 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
     readerSince: maintResult.hardening?.readerSince ?? now(),
     writerActive,
     verifyTarget: computeVerifyTarget(effectiveWriteTarget(writerActive), maintResult.hardening?.maxKdf ?? undefined),
-    totpKey: "none",
-    totpMigrated: 0,
-    truncateFailed,
+    totpKey: maintResult.hardening?.totpKey ?? "none",
+    totpMigrated: maintResult.hardening?.totpMigrated ?? 0,
+    truncateFailed: maintResult.hardening?.truncateFailed ?? truncateFailed,
   };
 
   const dbClient = createDbClient({
@@ -183,6 +190,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
     now,
     ...(deps.test === undefined ? {} : { test: deps.test }),
     ...deps.dbClient,
+    childEnv: { PI_WEBHUB_TOTP_KEY: totpKeyPath, PI_WEBHUB_TOTP_WRITE: writerActive ? "1" : "0" },
   });
 
   const checkpointIntervalMs = deps.checkpointIntervalMs ?? CHECKPOINT_PASSIVE_INTERVAL_MS;
@@ -195,6 +203,12 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
 
   // #66 D4: status warnings raised by the store itself (hub never reads them from the db).
   const warningTokens = new Set<string>();
+  if (hardening.totpKey === "missing") warningTokens.add("totp-key-missing");
+  if (hardening.totpKey === "mismatch") warningTokens.add("totp-key-mismatch");
+  if (hardening.totpMigrated > 0 && hardening.truncateFailed) warningTokens.add("totp-plaintext-residue");
+  for (const code of maintResult.hardening?.totpWarnings ?? []) {
+    if (/^[a-z-]{1,32}$/.test(code)) log.warn("web-hub lan-store: TOTP key warning", { code });
+  }
   const warningListeners = new Set<() => void>();
   function setWarning(token: string, on: boolean): void {
     if (warningTokens.has(token) === on) return;
@@ -233,6 +247,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
         setWarning(INITIAL_RESIDUE_WARNING, true);
       } else if (!truncateAgain) {
         setWarning(INITIAL_RESIDUE_WARNING, false);
+        setWarning("totp-plaintext-residue", false);
       }
       if (truncateAgain && !closed) {
         truncateAgain = false;
@@ -503,6 +518,10 @@ interface MaintHardeningReply {
   readerSince: number;
   writerActive: boolean;
   maxKdf: { n: number; r: number; p: number } | null;
+  totpKey?: LanHardening["totpKey"];
+  totpMigrated?: number;
+  truncateFailed?: boolean;
+  totpWarnings?: string[];
 }
 interface MaintOk {
   ok: true;
@@ -517,7 +536,7 @@ async function runMaint(
   deadlineMs: number,
   initialUsername: string = FALLBACK_INITIAL_USERNAME,
   signal?: AbortSignal,
-  hardeningOpts?: { hardeningPhase?: 1 | 2; now?: number },
+  hardeningOpts?: { hardeningPhase?: 1 | 2; now?: number; totpKeyPath?: string },
 ): Promise<MaintOk | { ok: false; reason: LanOffReason; detail?: string }> {
   const script = buildMaintScript({
     initialUsername,
@@ -529,6 +548,7 @@ async function runMaint(
       env: {
         ...process.env,
         PI_WEBHUB_DB_PATH: dbFile,
+        PI_WEBHUB_TOTP_KEY: hardeningOpts?.totpKeyPath ?? "",
         PI_WEBHUB_DB_OP: op,
         PI_WEBHUB_DB_DEADLINE_MS: String(deadlineMs),
       },

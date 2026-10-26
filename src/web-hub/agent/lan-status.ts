@@ -146,6 +146,12 @@ function warningLine(w: string, counts: LanLimiterCounts | undefined): string | 
   }
   if (w === "db-checkpoint-failed") return "警告：数据库 checkpoint 失败，详见 hub.log。";
   if (w === "initial-password-residue") return "警告：旧初始密码在磁盘上可能仍有残留，详见 hub.log。";
+  if (w === "totp-key-missing" || w === "totp-key-mismatch") {
+    const detail = w === "totp-key-missing" ? "缺失" : "不匹配";
+    return `警告：TOTP 密钥${detail}：受影响账号只能用恢复码或飞书登录；本机执行 /webhub 2fa reset --confirm（主账号）或 /webhub 2fa repair --confirm（全部账号），再 /webhub restart 后重新 enroll。repair 同时解除 TOTP 密钥绑定，密钥文件保留。`;
+  }
+  if (w === "totp-plaintext-residue")
+    return "警告：TOTP 迁移后的磁盘明文可能仍有残留，详见 hub.log；/webhub restart 重试 TRUNCATE。";
   if (w === "db-restarting") return "数据库子进程正在重启。";
   if (w === "proxy-xff-warnings") return "警告：最近收到过不受信任的转发头，详见 hub.log。";
   if (w === "db-invalid:kdf") return "警告：检测到损坏的密码 KDF 参数，相关账号登录将失败，详见 hub.log。";
@@ -194,7 +200,7 @@ export function formatLanOffLine(status: Extract<LanStatus, { state: "off" }>, p
       const tfaDetail = /^(?:db-invalid:)?(2fa-at-v1|2fa-schema|2fa-missing-row)$/.exec(detail)?.[1];
       if (tfaDetail !== undefined) {
         // 2FA tables are security data: never suggest moving hub.db away (that would silently drop 2FA).
-        return `未开启：hub.db 的 2FA 数据无法使用（db-invalid:${tfaDetail}）。为避免把「已启用 2FA」误当成「未启用」，局域网入口保持关闭；执行 ${TFA_REPAIR_HINT} 清空并重建 2FA 表（之后请立即重新 enroll），然后 /webhub restart。`;
+        return `未开启：hub.db 的 2FA 数据无法使用（db-invalid:${tfaDetail}）。为避免把「已启用 2FA」误当成「未启用」，局域网入口保持关闭；执行 ${TFA_REPAIR_HINT} 清空并重建 2FA 表（同时解除 TOTP 密钥绑定，密钥文件保留；之后请立即重新 enroll），然后 /webhub restart。`;
       }
       return `未开启：hub.db 无法使用（${detail}）。把 ${paths.dbFile} 移走后执行 /webhub restart 会重建（生成新的初始密码，旧会话失效）。`;
     }

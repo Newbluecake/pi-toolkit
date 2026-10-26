@@ -549,6 +549,15 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
             return await handleTfaRepair(frame.rid);
         }
       } catch (err) {
+        if ((err as { code?: unknown })?.code === "E_TOTP_KEY") {
+          auditTfa(frame.op, false);
+          return tfaFail(
+            frame.rid,
+            frame.op,
+            "E_TOTP_KEY",
+            "TOTP key unavailable or mismatched; reset or repair 2FA locally, then /webhub restart and enroll again (key file retained)",
+          );
+        }
         deps.log.error("web-hub admin: tfa_req handler threw", sanitizedErrorFields(err));
         auditTfa(frame.op, false);
         return { t: "tfa_res", rid: frame.rid, ok: false, code: "E_INTERNAL", message: "internal error" };

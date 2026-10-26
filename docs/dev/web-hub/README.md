@@ -147,6 +147,53 @@ is now `initial_created_at IS NOT NULL OR initial_password IS NOT NULL` for the 
 there, so the TUI shows «初始密码已于 <时间> 被 <ip> 用于登录，明文已从 hub.db 清除；该账号仍在使用初始密码…» plus the usual change reminder. No wire change. Residual: backups taken
 before the wipe still hold the plaintext; an open-check TRUNCATE failure alone does not raise the residue warning.
 
+**TOTP at-rest encryption (#66 P6, plan §4.2 / r3)**: the reader accepts legacy 20B secrets and version-1 53B
+AES-256-GCM envelopes (`version | kid(4) | nonce(12) | ciphertext(20) | tag(16)`, AAD binds `user_id`). The 32B
+machine key is `<home>/.local/state/pi-webhub/totp.key`, never under `.pi/agent`, and never derived from
+`XDG_STATE_HOME`. `HubPaths.totpKeyFile` exposes this path; the existing assembly only passes `dbFile`, so
+`lan-store` extracts the **same home prefix** from the canonical `/.pi/agent/web-hub/hub.db` suffix (custom DB
+paths need the explicit test seam). Only the children read key bytes; IPC/env carry a path, not a key. This protects
+against a DB-only or `.pi/agent`-only leak, **not a whole-home backup or same-uid/root access**. The hub/key stay outside
+secure vaults (accepted secure R12); no settings path or D8 override is added, and LAN-off creates no key/store.
+
+The maintenance child is the **sole** `writerActive` judge. `lan-store` forwards its frozen verdict through
+`DbClientDeps.childEnv` as `PI_WEBHUB_TOTP_WRITE=1|0` plus `PI_WEBHUB_TOTP_KEY`; query respawns reuse a snapshot and
+never re-evaluate phase/soak. **This release remains `HARDENING_PHASE=1`: no key creation, no migration, enrollment
+still writes 20B**. Phase 2 additionally requires the reader marker to be ≥14 days old at the next hub startup.
+When active, only maintenance can create/replace a key, and **only with `rows53=0`**: validate 0700 owned directory,
+`wx` 0600 temp → write/fsync/close → rename → directory fsync → readback. Unsupported directory fsync (`EINVAL` /
+`EISDIR`) is tolerated; other failures warn, clean the temp and skip migration. File reads use lstat, owned regular
+32B checks and NOFOLLOW/NONBLOCK open + fstat. Wide modes are repaired with fixed-code warnings. Invalid files
+(including symlinks/foreign owners/wrong sizes) may be replaced only without encrypted rows; rename replaces the
+symlink itself, not its target. A nonempty-directory target or foreign-owned key directory fails creation safely.
+
+`rows53=0` always means `none`, regardless of stale `meta.totp_key_fp`; adopting an existing or newly created key
+**overwrites fp**. With encrypted rows, absent/unreadable/noncompliant key ⇒ `key-missing`, valid key but missing/wrong
+fp ⇒ `key-mismatch`; neither is schema inconsistency or closes LAN. Internal `totpUsable:false` removes TOTP from
+new challenges, leaving recovery and live Feishu usable. An undecryptable row returns `unavailable`: HTTP 503 `E_DB`,
+both verification budgets refunded, no limiter failure. Bad per-row kid/tag affects only that row. Reset and recovery
+bypass decryption; repair clears 2FA tables **and fp in one transaction**, retaining the key file. Public strict status
+schemas/PROTO stay unchanged; warnings use append-only `totp-key-missing`, `totp-key-mismatch`, `totp-plaintext-residue`.
+Warnings are startup snapshots (restart after recovery to refresh). Recovery codes remain `sha256(salt || code)` and
+**are not bound to this key**.
+
+Active-writer enrollment rereads the file at commit inside its transaction: no other 53B rows ⇒ overwrite fp and
+encrypt (or warn/fall back to 20B if no compliant key); other 53B rows ⇒ require the existing fp to match, else
+`E_TOTP_KEY`. Queries never build keys. Verification uses the startup-cached key, so deleting the file only affects
+verification after a restart. Migration CAS-replaces 20B rows without bumping `factor_gen`, atomically with fp, then
+immediately checkpoint-TRUNCATEs; failures/busy raise `totp-plaintext-residue` if rows migrated and retry on next open.
+Before TRUNCATE the WAL may retain plaintext; **pre-migration backups retain plaintext**, and released filesystem blocks
+are outside scope. Crash after key creation reuses it next open; crash after COMMIT replays only TRUNCATE.
+
+Recovery: restore DB + matching key ⇒ usable; DB-only restore/new machine ⇒ missing; unpaired key ⇒ mismatch. Use
+recovery/Feishu, then local `/webhub 2fa reset --confirm` (primary) or `/webhub 2fa repair --confirm` (all accounts),
+`/webhub restart`, and enroll again. **Online rotation is not implemented this period**: for suspected leakage reset
+all TOTP accounts (or repair), remove `totp.key`, restart and re-enroll (new key creation requires phase 2 + soak).
+A rollback to phase 1 can read 53B and enrolls 20B; rollback to ≤v0.10.x rejects 53B and closes LAN — reset before
+rollback, or use the old version's explicit repair (clears all 2FA). Gate evidence: `totp-key.test.ts` fs/crypto fault
+matrix + real child crash/recovery/HTTP tests, `db-client.test.ts` env snapshots across restart, and the shared contract
+run against fake, plaintext SQLite and encrypted SQLite.
+
 ## Worktree panel
 
 **Worktree panel (worktree-web plan v1.1)**: `agent/worktree-sampler.ts` samples the session cwd's repo through

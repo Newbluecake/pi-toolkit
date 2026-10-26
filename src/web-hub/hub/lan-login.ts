@@ -503,7 +503,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
 
   async function newChallenge(
     user: LanUserRecord,
-    factor: { factorGen: number; totp: boolean; feishu: boolean; recoveryLeft: number },
+    factor: { factorGen: number; totp: boolean; totpUsable?: boolean; feishu: boolean; recoveryLeft: number },
     ctx: RequestContext,
     ua: string,
     knownAtGate: boolean,
@@ -535,7 +535,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
       expiresAt: deps.now() + L.challengeMs,
       attemptsLeft: L.attempts,
       state: "pending",
-      totp: factor.totp,
+      totp: factor.totp && factor.totpUsable !== false,
       recovery: factor.recoveryLeft > 0,
     };
     challenges.set(ch.idHash, ch);
@@ -734,6 +734,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
           return body.method === "totp" ? deps.store.verifyTotp(input, opts) : deps.store.consumeRecovery(input, opts);
         });
         if (ch.state !== "verifying") return error(409, "E_2FA_EXPIRED");
+        if (!verified.ok && verified.reason === "unavailable") reservation.refund();
         auditLan2fa(deps.log, {
           phase: "verify",
           method: body.method,
@@ -744,6 +745,11 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
           left: ch.attemptsLeft,
         });
         if (!verified.ok) {
+          if (verified.reason === "unavailable") {
+            ch.state = "pending";
+            wakeApproval(ch);
+            return error(503, "E_DB");
+          }
           deps.limiter.fail(ctx.clientIp);
           ch.state = "pending";
           if (ch.attemptsLeft === 0) dead(ch, "attempts");

@@ -112,6 +112,8 @@ export interface HubPaths {
   rotateIntentFile?: string;
   policies: { readonly stateDir: DirPolicy; readonly socketDir: DirPolicy };
   dbFile: string; // §4.1
+  /** #66 P6, outside the .pi tree; optional for older assembly fakes. */
+  totpKeyFile?: string;
 }
 
 export interface HubPathsEnv {
@@ -157,6 +159,11 @@ function defaultFsDeps(): FsDeps {
 /** `<home>/.pi/agent/web-hub` */
 export function webHubStateDir(home: string): string {
   return `${home}/.pi/agent/web-hub`;
+}
+
+/** Fixed home-derived key location; deliberately ignores XDG_STATE_HOME. */
+export function webHubTotpKeyFile(home: string): string {
+  return `${home}/.local/state/pi-webhub/totp.key`;
 }
 
 /**
@@ -267,6 +274,7 @@ export function resolveHubPaths(env: HubPathsEnv): HubPaths {
     stoppedFile: `${stateDir}/stopped`,
     rotateIntentFile: `${stateDir}/rotate.intent`,
     dbFile: `${stateDir}/hub.db`,
+    totpKeyFile: webHubTotpKeyFile(env.home),
     policies: { stateDir: STATE_DIR_POLICY, socketDir: policyFor(socketDir, stateDir, env.xdgRuntimeDir) },
   };
 }
