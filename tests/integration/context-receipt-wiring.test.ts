@@ -4,7 +4,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
 import type { DeliveryPayload } from "../../src/core/types.js";
-import { buildSessionStack, createNotificationReceiptHook } from "../../src/stack.js";
+import { buildSessionStack } from "../../src/stack.js";
+import { createNotificationReceiptHook } from "../../src/delivery/stack-hooks.js";
 
 let homeSandbox: ReturnType<typeof sandboxHome> | undefined;
 beforeEach(() => {

@@ -183,7 +183,7 @@ export interface TodoWireResult {
 
 /** Hidden customType for the nudge message (new, todo-nudge plan); `subagent:*` prefix matches the repo's existing channel convention. */
 export const TODO_NUDGE_CUSTOM_TYPE = "subagent:todo-nudge";
-/** Run/subagent completion notification customType (stack.ts's createNotificationReceiptHook uses the same literal). */
+/** Run/subagent completion notification customType (delivery/stack-hooks.ts's createNotificationReceiptHook uses the same literal). */
 const RUN_NOTIFICATION_CUSTOM_TYPE = "subagent:notification";
 /** Bash tool_execution_start/end correlation map is bounded — a session with hundreds of concurrent bash calls is not realistic, and an unbounded map would be the one module-scope-shaped leak this feature could introduce. */
 const MAX_PENDING_BASH_COMMANDS = 32;
@@ -586,7 +586,7 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
   if (nudgeTrackingEnabled) {
     // E1: a completion notification (subagent / workflow / bash job) entered
     // the session. message_start fires for every message regardless of
-    // display, matching stack.ts's createNotificationReceiptHook pattern.
+    // display, matching delivery/stack-hooks.ts's createNotificationReceiptHook pattern.
     pi.on("message_start", (event) => {
       const message = (event as { message?: { role?: string; customType?: string } }).message;
       if (message?.role !== "custom") return;

@@ -30,12 +30,8 @@ import {
 } from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
-import {
-  buildSessionStack,
-  createBackgroundCompletionEventHook,
-  createNotificationReceiptHook,
-  type Stack,
-} from "./stack.js";
+import { buildSessionStack, type Stack } from "./stack.js";
+import { createBackgroundCompletionEventHook, createNotificationReceiptHook } from "./delivery/stack-hooks.js";
 import { readBashJobTail } from "./bash/notify.js";
 import { createCompactHintHook } from "./compact-hint/hook.js";
 import { bashJobsEnabled, BASH_JOB_SEAL_GRACE_MS } from "./bash/host.js";
