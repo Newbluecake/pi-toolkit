@@ -36,7 +36,9 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
 
 ## 渠道与独立性规则
 
-- **gpt-6.1-sol 是评审首选**：与 Claude 系的方案/开发模型天然异源，保证评审独立；实测评审质量好。
+- **评审首选 gpt-6.1-sol ⇄ kimi-k3**：两者都与 Claude 系的方案/开发模型天然异源，保证评审独立。gpt-6.1-sol
+  实测评审质量好；kimi-k3（`kimi-coding/k3-256k`，订阅）2026-10-26 用户令可做评审，与 gpt-6.1-sol 并列——多个方案
+  并行评审时按包分摊，GPT 线 429/503 时直接改派 kimi-k3（kimi 开发/制定的方案不派 kimi 评审）。
   首选 copilot 渠道 `copilot-response/gpt-6.1-sol`，备线 `cr-response/gpt-6.1-sol`（同价，2026-10-19 用户令恢复
   cr-response；cr-response 不接受 reasoning `minimal`/`none`，最低用 `low`）。zhipu-pool 仍不使用；gpt-6-astra /
   gpt-5.6-terra / gpt-5.6-luna / gpt-5.5 虽可调用，但未分配 dev-flow 角色，不进路由表。

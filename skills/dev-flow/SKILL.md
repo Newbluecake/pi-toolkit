@@ -83,17 +83,17 @@ metadata:
 「订阅余量」指 [quota] 行未触 L3（≥90%）；GLM 订阅有余量时在候选阶段升为首选（前端开发除外：kimi-k3 首选）。droid 线已于 2026-10-24 移出路由（用户令）。
 「kimi-k3（订阅）」在可用时优先派 **kimi-coding/k3-256k**（同订阅，价格约为 k3 的一半）；仅当任务需要超过 256k 上下文（大文件通读、大包验收、长会话 resume）才用 kimi-coding/k3。
 
-| 阶段                        | 首选                                                | 回退                           | 说明                                                                                                             |
-| --------------------------- | --------------------------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| **核心调度**（主会话）      | opus-5.5                                            | kimi-k3（订阅）                | 拆解、派单、汇总、裁定                                                                                           |
-| **代码探索**                | glm-5.3（订阅）→ sonnet                             | kimi-k3（订阅）                | `Explore`，只读                                                                                                  |
-| **架构设计**                | opus-5.5                                            | gpt-6.1-sol                    | `architect`，仅 L3 / 新模块从零搭建                                                                              |
-| **方案制定**                | opus-5.5                                            | sonnet（简单方案）→ kimi-k3    | `Plan`                                                                                                           |
-| **复杂任务方案 / 疑难攻坚** | opus-5.5                                            | gpt-6.1-sol                    | 仅 L3 / 连续 2 轮无进展；Blocker 或仍卡死 → `ask_user` 批准后升 fable                                            |
-| **前端开发**                | kimi-k3（订阅）→ glm-5.3（订阅）                    | sonnet → opus-5.5（视觉/疑难） | `frontend-dev`（内置 deveye 浏览器调试，页面 bug 派单给可访问 URL/端口）；2026-10-24 用户令：kimi-k3 首选        |
-| **方案评审**                | gpt-6.1-sol（`copilot-response/` → `cr-response/`） | glm-5.3（订阅）→ kimi-k3       | `reviewer`；必须与方案模型异源                                                                                   |
-| **开发实施**                | glm-5.3（订阅）→ sonnet ⇄ gpt-6.1-sol               | kimi-k3（订阅）→ opus-5.5      | `general`（`general-purpose` 仅杂项多步）；sonnet 与 gpt-6.1-sol 并列，多包按包分摊                              |
-| **任务验收**                | glm-5.3（订阅；开发用了 GLM 的包禁派）→ kimi-k3     | deepseek-flash → sonnet        | `verifier`；异源；**禁任何 GPT 系**；kimi 订阅将尽（≥80%）优先 deepseek-flash；打回后复验优先 resume 原 verifier |
+| 阶段                        | 首选                                                                 | 回退                           | 说明                                                                                                                          |
+| --------------------------- | -------------------------------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| **核心调度**（主会话）      | opus-5.5                                                             | kimi-k3（订阅）                | 拆解、派单、汇总、裁定                                                                                                        |
+| **代码探索**                | glm-5.3（订阅）→ sonnet                                              | kimi-k3（订阅）                | `Explore`，只读                                                                                                               |
+| **架构设计**                | opus-5.5                                                             | gpt-6.1-sol                    | `architect`，仅 L3 / 新模块从零搭建                                                                                           |
+| **方案制定**                | opus-5.5                                                             | sonnet（简单方案）→ kimi-k3    | `Plan`                                                                                                                        |
+| **复杂任务方案 / 疑难攻坚** | opus-5.5                                                             | gpt-6.1-sol                    | 仅 L3 / 连续 2 轮无进展；Blocker 或仍卡死 → `ask_user` 批准后升 fable                                                         |
+| **前端开发**                | kimi-k3（订阅）→ glm-5.3（订阅）                                     | sonnet → opus-5.5（视觉/疑难） | `frontend-dev`（内置 deveye 浏览器调试，页面 bug 派单给可访问 URL/端口）；2026-10-24 用户令：kimi-k3 首选                     |
+| **方案评审**                | gpt-6.1-sol（`copilot-response/` → `cr-response/`）⇄ kimi-k3（订阅） | glm-5.3（订阅）→ sonnet        | `reviewer`；必须与方案模型异源；2026-10-26 用户令：kimi-k3 也可做评审，与 gpt-6.1-sol 并列（GPT 线限流/不可用时首选 kimi-k3） |
+| **开发实施**                | glm-5.3（订阅）→ sonnet ⇄ gpt-6.1-sol                                | kimi-k3（订阅）→ opus-5.5      | `general`（`general-purpose` 仅杂项多步）；sonnet 与 gpt-6.1-sol 并列，多包按包分摊                                           |
+| **任务验收**                | glm-5.3（订阅；开发用了 GLM 的包禁派）→ kimi-k3                      | deepseek-flash → sonnet        | `verifier`；异源；**禁任何 GPT 系**；kimi 订阅将尽（≥80%）优先 deepseek-flash；打回后复验优先 resume 原 verifier              |
 
 - droid 线（`droid/<model>`）2026-10-24 起不进路由表（用户令），任何阶段都不派。
 - gpt-6.1-sol 开发的包，验收改派 Claude 系（sonnet）。开发用了 GLM 的包，验收不派 GLM。
@@ -127,7 +127,7 @@ metadata:
 1. 主会话定车道 + TaskCreate 建 todo
 2‖3. 同一条消息派：Explore(glm 订阅首选，回退见阶段表) ‖ Plan(opus-5.5)
      —— 改动点未知、方案强依赖探索结论时才退化为先 Explore 后 Plan
-4‖5. 方案到手：立刻呈给用户确认，同时后台派 reviewer(gpt-6.1-sol)
+4‖5. 方案到手：立刻呈给用户确认，同时后台派 reviewer(gpt-6.1-sol 或 kimi-k3)
      —— 用户读方案的时间 = 评审时间；两者都通过才开工（HARD GATE）
      —— 呈给用户的是一页决策摘要：需拍板项走 ask_user（每项带推荐选项与一句理由）+
         关键取舍 / 主要风险 / 已由主会话裁定项（各 1 行）+ 方案文件路径
@@ -144,7 +144,7 @@ metadata:
 2. 前置 architect(opus-5.5) 产出 docs/dev/<feature>/arch.md（可与 Explore 同消息并行）
 3. Plan(opus-5.5) 以 arch.md 与 Explore 产物路径为输入
    —— 方案被 reviewer 判 Blocker 且 opus-5.5 二次仍不过，才 ask_user 批准后升 fable
-4‖5. reviewer(gpt-6.1-sol → glm-5.3 → kimi-k3，须与方案模型异源) ‖ 用户确认（HARD GATE）
+4‖5. reviewer(gpt-6.1-sol ⇄ kimi-k3 → glm-5.3 → sonnet，须与方案模型异源) ‖ 用户确认（HARD GATE）
 6. 冲突预检 → 按文件域拆 ≥2 个写包同消息派 dev；跨包共享文件进冻结面；
    prompt 给 arch.md / 方案 / 已拍板决策的路径（先推后问）
 7. 每包 dev 返回即派对应 verifier（不等全部完成），主会话后台跑全量测试
