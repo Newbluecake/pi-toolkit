@@ -39,6 +39,7 @@ import { usePrivacyLock } from "../../composables/usePrivacyLock.js";
 import { createScrollMemory, SCROLL_MEMORY } from "../../composables/useScrollMemory.js";
 import { useSidebarWidth } from "../../composables/useSidebarWidth.js";
 import { SIDEBAR_RAIL_WIDTH, useSidebarCollapse } from "../../composables/useSidebarCollapse.js";
+import { OUTDATED_RELOAD_CTX, useOutdatedReload } from "../../composables/useOutdatedReload.js";
 import { useTicker } from "../../composables/useTicker.js";
 import type { UseHubHandle } from "../../composables/useHub.js";
 import type { DashboardViewProps } from "../../contracts.js";
@@ -263,6 +264,17 @@ function onKeydown(ev: KeyboardEvent): void {
   if (target && /^(input|textarea|select)$/i.test(target.tagName)) return;
   onBack();
 }
+
+// #65 outdated-reload：唯一的 per-dashboard 管理器（详情页提示条 + 列表汇总条共用）。
+// 状态页面级（切会话不丢、刷新即丢——报告残留风险 §R1）；定时器与 storage 全部注入。
+const outdatedReload = useOutdatedReload({
+  hub: props.hub,
+  storage: browserLocalStorage(),
+  setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+  clearTimeout: (h) => window.clearTimeout(h as number),
+});
+provide(OUTDATED_RELOAD_CTX, outdatedReload);
+onUnmounted(() => outdatedReload.dispose());
 
 onMounted(() => window.addEventListener("keydown", onKeydown));
 onUnmounted(() => window.removeEventListener("keydown", onKeydown));

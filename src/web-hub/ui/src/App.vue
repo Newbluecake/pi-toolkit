@@ -36,6 +36,8 @@ import "./styles/preview.css";
 // web-hub-privacy plan v2.1 (P2): the session privacy lock (lock screen / unmark dialog /
 // card affordance).
 import "./styles/privacy.css";
+// #65 outdated-reload：提示条/汇总条/「需更新」chip。
+import "./styles/outdated-reload.css";
 // syntax-highlight (2026-10): tok-* token colors (CSS vars, light/dark per tokens.css).
 import "./styles/highlight.css";
 import IconSprite from "./icons/IconSprite.vue";
