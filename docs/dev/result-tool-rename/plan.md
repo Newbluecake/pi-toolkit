@@ -501,7 +501,7 @@ web-hub/ui（独立 bundle，字面量，新旧两个名字）
 - D1 方案：A′（只注册新名 + r3 迁移规则 + 被动兼容）。
 - D2 新名：`get_run_result`。
 - D3：一次性授权更新 3 份 A 级 golden（fabric-xs-off、schedule-off、tools/agent-nested-surface），范围按 r3 R2-B2，由字节级脚本证明。
-- D4：改名提交标 BREAKING（`!:`），先在 dev 上攒着，择机一起发 v1.0.0；改名合入前可以先发 v0.9.x patch。
+- D4（用户 2026-10-26 改判，覆盖前一版 D4 与正文中的 v1.0.0 建议）：本次改名随 **minor** 版本发布（不升 major）。提交**不**用 `!:`、不加 `BREAKING CHANGE` footer，免得 release.sh 建议 major；在提交正文和发版说明里写明工具改名与兼容处理。release.sh 若因 feat 数不足 50 给出 WARN，以用户本条裁定为准。
 - D5：只改结果工具，其余 subagent 工具名不动。
 - D6：加过渡半句 `(Formerly named get_subagent_result.)`，按推荐处理。
 - D7：#62 已先提交（8505261d），常量 `SCHEDULE_RESULT_TOOL` 并入统一名字常量。
