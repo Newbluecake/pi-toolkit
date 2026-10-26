@@ -25,6 +25,7 @@ import type {
   WorktreeDisposal,
 } from "../core/types.js";
 import type { LifecycleSink, Runner, RunnerSpec, SlotPool } from "./ports.js";
+import { SCHEMA_PRESETS } from "../core/verdict-schema.js";
 import { TombstoneStore } from "./tombstone.js";
 import {
   resolveResumeTarget,
@@ -964,6 +965,14 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           // description keeps showing the original one (same terminal-snapshot
           // source rule as dispatchMeta).
           ...(req.title === undefined && resume.title !== undefined ? { title: resume.title } : {}),
+          // #68: Agent-tool resume without `schema` keeps the original run's schema (preset id wins; else inline).
+          ...(req.inheritSchema === true && req.schema === undefined
+            ? resume.schemaPreset !== undefined
+              ? { schema: SCHEMA_PRESETS[resume.schemaPreset], schemaPreset: resume.schemaPreset }
+              : resume.schema !== undefined
+                ? { schema: resume.schema }
+                : {}
+            : {}),
         };
         lockKeys = [targetId, resume.sessionFile];
       }

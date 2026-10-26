@@ -355,6 +355,16 @@ export interface SpawnRequest {
    */
   schemaPreset?: SchemaPresetId;
   /**
+   * #68: set ONLY by the Agent tool when a `resume` call carries no `schema`
+   * argument. Spawn admission then inherits the resumed run's schema (preset
+   * id → frozen preset schema, else the inline `diag.schema` persisted with
+   * the run). Consumed at admission, never threaded. Absent for every other
+   * resume source (@mention, fabric wake, RPC) and when the caller passed an
+   * explicit `schema` (override) or `schema: null` (opt out of inheritance).
+   * A resume target persisted before #68 has no schema record ⇒ no inheritance.
+   */
+  inheritSchema?: true;
+  /**
    * L1 (agent-tool pool-full plan §1/§2): admission-time policy when this
    * (non-slotless) request would exceed the concurrency pool. `"reject"` —
    * fail admission immediately (no run, no worktree, no record) with a
@@ -439,6 +449,8 @@ export interface RunDisplayMeta {
    * (old entries may lack it).
    */
   schemaPreset?: SchemaPresetId;
+  /** #68: inline (non-preset) JSON Schema of the run, folded write-once by `enqueued` (size-capped by the adapter; absent for presets/oversize/legacy). Resume inheritance source. */
+  schema?: JsonSchema;
   /** fabric-cross-session plan §4.1 (W5): wake provenance (without `trigger.claimToken`), folded write-once by `enqueued`. */
   wakeOrigin?: WakeOrigin;
   /** fabric-cross-session plan §4.5 (W5): admission-time wake-ability verdict, folded write-once by `enqueued`. */
@@ -1043,6 +1055,8 @@ export interface RunDiagnostics {
    * through the journal whitelist.
    */
   schemaPreset?: SchemaPresetId;
+  /** #68: mirrors `RunDisplayMeta.schema` (inline schema, write-once, journal-whitelisted); resume `schema`-less inheritance source. Absent on legacy runs. */
+  schema?: JsonSchema;
   stopRequestedAt?: Millis;
   stopCause?: StopCause;
   timeoutReason?: TimeoutReason;

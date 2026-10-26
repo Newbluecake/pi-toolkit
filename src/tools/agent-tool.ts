@@ -224,7 +224,11 @@ const trailingFields = {
 const topLevelTrailingFields = {
   schema: Type.Optional(
     Type.Unknown({
-      description: SCHEMA_FIELD_DESCRIPTION + ' Or pass the preset name "verdict/v1" for verifier/reviewer verdicts.',
+      description:
+        SCHEMA_FIELD_DESCRIPTION +
+        ' Or pass the preset name "verdict/v1" for verifier/reviewer verdicts.' +
+        " When resuming a run that had a schema and you pass none, the original run's schema (and host re-validation) is reused; " +
+        "pass a different schema to override it, or null to resume without any schema.",
     }),
   ),
   meta: Type.Optional(
@@ -401,7 +405,9 @@ function prepareSpawn(
   // capability (its description does not mention it, no test locks it).
   let schema: JsonSchema | undefined;
   let schemaPreset: SchemaPresetId | undefined;
-  if (params.schema !== undefined) {
+  // #68: `schema: null` on a resume = explicit opt-out of schema inheritance (no schema at all).
+  const optOutInherit = params.schema === null && params.resume !== undefined;
+  if (params.schema !== undefined && !optOutInherit) {
     const preset = resolveSchemaPreset(params.schema);
     if (preset !== undefined) {
       schema = preset.schema;
@@ -464,6 +470,8 @@ function prepareSpawn(
       : {}),
     ...(params.isolation ? { isolation: params.isolation } : {}),
     ...(schema !== undefined ? { schema } : {}),
+    // #68: resume without any `schema` argument ⇒ spawn admission inherits the resumed run's schema.
+    ...(params.resume && params.schema === undefined ? { inheritSchema: true as const } : {}),
     ...(schemaPreset !== undefined ? { schemaPreset } : {}),
     ...(dispatchMeta !== undefined ? { dispatchMeta } : {}),
     // L1 (agent-tool pool-full plan §1/§2): both the top-level and nested

@@ -67,3 +67,14 @@ terminal rebuilds, and inherited by resumes (R-inherit). Program-derived runs (w
 grace window notifies nobody (CC2 suppression) and child sessions have no `extend_subagent_timeout` —
 it silently lives up to `min(G,(f−1)·T)` past its deadline while the parent turn keeps waiting; the main
 session can still extend it by run id.
+
+**Resume schema inheritance (#68)**: an Agent-tool `resume` that passes no `schema` keeps the original run's schema
+(StructuredOutput injection + host re-validation + `schemaPreset` verdict rendering). The tool sets
+`SpawnRequest.inheritSchema: true`; spawn admission (`spawn-service.ts`) fills `schema`/`schemaPreset` from
+`resolveResumeTarget`'s `schemaPreset` (preset id → frozen `SCHEMA_PRESETS`) or `schema` (inline). Source is the
+terminal snapshot diag only (like `dispatchMeta`; tombstones do not carry it). Persistence is append-only:
+`diag.schema` (inline, non-preset runs, ≤ `PERSISTED_SCHEMA_MAX_CHARS` = 16384 JSON chars, journal-whitelisted) next to
+the existing `diag.schemaPreset`. No record (pre-#68 runs, oversize inline schema, schema-less runs) ⇒ no inheritance,
+old behavior. Explicit `schema` overrides; top-level `schema: null` on a resume opts out (null without `resume` is still
+the usual "schema must be a JSON Schema object" error). @mention / fabric wake / RPC resumes never set the flag ⇒
+unchanged. Only the top-level `schema` description gained the sentence; the nested surface (frozen golden) is untouched.

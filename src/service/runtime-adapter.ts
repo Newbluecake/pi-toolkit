@@ -1,6 +1,6 @@
 import type { Clock } from "../core/clock.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { applyStructuredOutputPolicy, validateAgainstSchema } from "../core/json-schema.js";
+import { applyStructuredOutputPolicy, isPersistableSchema, validateAgainstSchema } from "../core/json-schema.js";
 import { validateVerdictV1Semantics } from "../core/verdict-schema.js";
 import type { SnapshotStore } from "../core/store.js";
 import type {
@@ -965,6 +965,12 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             taskPrompt: spec.request.prompt.slice(0, TASK_PROMPT_CAP),
             ...(spec.request.dispatchMeta === undefined ? {} : { dispatchMeta: spec.request.dispatchMeta }),
             ...(spec.request.schemaPreset === undefined ? {} : { schemaPreset: spec.request.schemaPreset }),
+            // #68: persist the inline schema (presets are re-resolved by id) so a schema-less resume can inherit it.
+            ...(spec.request.schema !== undefined &&
+            spec.request.schemaPreset === undefined &&
+            isPersistableSchema(spec.request.schema)
+              ? { schema: spec.request.schema }
+              : {}),
             // fabric-cross-session plan §4.1/§4.5 (W5): write-once wake provenance (claimToken stripped) and the
             // admission verdict. Both are absent unless the wake inbox is wired ⇒ wake-off diag bytes unchanged.
             ...(spec.request.wakeOrigin === undefined

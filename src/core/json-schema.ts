@@ -56,6 +56,19 @@ export function normalizeSchemaInput(raw: unknown): SchemaInputResult {
   return { ok: true, schema: value as JsonSchema };
 }
 
+/** #68: inline schemas larger than this (JSON chars) are not persisted on the run, so a later schema-less resume does not inherit them. */
+export const PERSISTED_SCHEMA_MAX_CHARS = 16_384;
+
+/** #68: true when the schema serializes within {@link PERSISTED_SCHEMA_MAX_CHARS}. */
+export function isPersistableSchema(schema: JsonSchema): boolean {
+  try {
+    const text = JSON.stringify(schema);
+    return typeof text === "string" && text.length <= PERSISTED_SCHEMA_MAX_CHARS;
+  } catch {
+    return false;
+  }
+}
+
 export function validateAgainstSchema(schema: JsonSchema | undefined, data: unknown): ValidationResult {
   const errors: string[] = [];
   walk("$", schema, data, errors);

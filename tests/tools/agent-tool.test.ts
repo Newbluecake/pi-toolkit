@@ -286,6 +286,50 @@ describe("tools/agent-tool: X3 nested delegation gating (allowedTypes/forceSlotl
     expect(port.seen?.schema).toEqual(schema);
   });
 
+  describe("#68 resume schema inheritance", () => {
+    const base = { description: "d", prompt: "p", subagent_type: "worker" };
+    const run = async (extra: Record<string, unknown>) => {
+      const port = fakePort();
+      await createAgentTool({ spawn: port }).execute(
+        "tc",
+        { ...base, ...extra } as never,
+        undefined,
+        undefined,
+        {} as never,
+      );
+      return port.seen!;
+    };
+
+    it("resume without schema asks admission to inherit", async () => {
+      const seen = await run({ resume: "r_X" });
+      expect(seen.inheritSchema).toBe(true);
+      expect(seen.schema).toBeUndefined();
+    });
+    it("resume with an explicit schema or preset overrides (no inherit flag)", async () => {
+      const inline = { type: "object" };
+      const a = await run({ resume: "r_X", schema: inline });
+      expect(a.inheritSchema).toBeUndefined();
+      expect(a.schema).toEqual(inline);
+      const b = await run({ resume: "r_X", schema: "verdict/v1" });
+      expect(b.inheritSchema).toBeUndefined();
+      expect(b.schemaPreset).toBe("verdict/v1");
+    });
+    it("resume with schema:null opts out of inheritance", async () => {
+      const seen = await run({ resume: "r_X", schema: null });
+      expect(seen.inheritSchema).toBeUndefined();
+      expect(seen.schema).toBeUndefined();
+      expect(seen.schemaPreset).toBeUndefined();
+    });
+    it("a fresh (non-resume) dispatch never sets the flag; null stays an error there", async () => {
+      expect((await run({})).inheritSchema).toBeUndefined();
+      await expect(run({ schema: null })).rejects.toThrow(/schema must be a JSON Schema object/);
+    });
+    it("the top-level schema description documents inheritance", () => {
+      const desc = JSON.stringify(createAgentTool({ spawn: fakePort() }).parameters);
+      expect(desc).toContain("original run's schema");
+    });
+  });
+
   // Regression: models serialize object args as JSON strings; a string schema
   // used to reach Type.Unsafe and crash pi's typebox 1.x at session
   // construction ("Object.defineProperty called on non-object", 0ms, no stack).

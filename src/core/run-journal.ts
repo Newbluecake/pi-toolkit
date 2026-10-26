@@ -75,6 +75,7 @@ const JOURNAL_DIAG_FIELDS = [
   "childExtensionMissing",
   "dispatchMeta",
   "schemaPreset",
+  "schema",
   "external",
   // fabric-cross-session plan v3 §4.1 (S0): wake facts are run facts and ride every persistence surface; absent ⇒ not
   // copied (so a wake-off run's journal bytes never change). `wakeOrigin` is re-stripped of its claimToken in projectDiag.

@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { pickInheritableDispatchMeta, type DispatchMeta } from "../core/dispatch-meta.js";
-import type { RunId, RunSnapshot, RunStatus, TimeoutPolicy } from "../core/types.js";
+import type { JsonSchema, RunId, RunSnapshot, RunStatus, TimeoutPolicy } from "../core/types.js";
+import type { SchemaPresetId } from "../core/verdict-schema.js";
 import type { Tombstone, TombstoneStore } from "./tombstone.js";
 
 // RPC intentionally keeps exact-string semantics. This resolver is only for
@@ -56,6 +57,12 @@ export type ResolveResumeResult =
        * terminal snapshot first, then the tombstone (which S0 extended with it). Absent for runs that never had one.
        */
       readonly wakeLevel?: number;
+      /**
+       * #68: the resumed run's schema record (terminal snapshot diag only, like `dispatchMeta`): preset id, or the
+       * inline schema. Absent for schema-less runs and for runs persisted before #68 (⇒ no inheritance).
+       */
+      readonly schemaPreset?: SchemaPresetId;
+      readonly schema?: JsonSchema;
     }
   | { readonly ok: false; readonly error: string; readonly candidates: readonly ResumeCandidate[] };
 
@@ -216,10 +223,13 @@ export function resolveResumeTarget(handle: string, deps: ResolveTargetDeps): Re
   const dispatchMeta = pickInheritableDispatchMeta(snapshotWithSessionFile(deps, runId)?.diag.dispatchMeta);
   const title = snapshotWithSessionFile(deps, runId)?.diag.title;
   const wakeLevel = snapshotWithSessionFile(deps, runId)?.diag.wakeLevel ?? deps.tombstones.get(runId)?.wakeLevel;
+  const schemaDiag = snapshotWithSessionFile(deps, runId)?.diag;
   return {
     ok: true,
     runId,
     sessionFile,
+    ...(schemaDiag?.schemaPreset === undefined ? {} : { schemaPreset: schemaDiag.schemaPreset }),
+    ...(schemaDiag?.schema === undefined ? {} : { schema: schemaDiag.schema }),
     ...(timeoutPolicy === undefined ? {} : { timeoutPolicy }),
     ...(dispatchMeta === undefined ? {} : { dispatchMeta }),
     ...(title === undefined ? {} : { title }),
