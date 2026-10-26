@@ -107,6 +107,10 @@ type Format = "sha1" | "sha256";
 async function repo(prefix: string, format: Format = "sha1"): Promise<string> {
   const root = await tempDir(prefix);
   git(root, ["init", "-q", "-b", "main", "--object-format", format]);
+  // No detached auto-maintenance/gc after commit (newer git on CI): its transient writes under
+  // .git/objects (maintenance.lock, packs) would race the write-proof snapshots taken below.
+  git(root, ["config", "maintenance.auto", "false"]);
+  git(root, ["config", "gc.auto", "0"]);
   git(root, ["config", "user.email", "test@example.invalid"]);
   git(root, ["config", "user.name", "Test"]);
   return root;

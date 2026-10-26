@@ -235,6 +235,10 @@ function makeFixture(T: RealHarness, { sessions = true }: { sessions?: boolean }
   symlinkSync("../scripts/tool.sh", join(proj, ".bin", "tool"));
   writeFileSync(join(proj, "sub", "deep", "data.bin"), Buffer.alloc(200 * 1024 + 3, 7));
   git(proj, "init", "-q", "-b", "main");
+  // No detached auto-maintenance/gc after commit (newer git on CI): its transient
+  // .git/objects/maintenance.lock would race the tree snapshots taken below.
+  git(proj, "config", "maintenance.auto", "false");
+  git(proj, "config", "gc.auto", "0");
   git(proj, "add", "-A");
   git(proj, "commit", "-q", "-m", "one");
   writeFileSync(join(proj, "a.txt"), "hello\nworld\n");

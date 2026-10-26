@@ -79,6 +79,10 @@ async function repo(prefix: string, opts: { objectFormat?: "sha1" | "sha256" } =
   const initArgs = ["init", "-q", "-b", "main"];
   if (opts.objectFormat !== undefined) initArgs.push("--object-format", opts.objectFormat);
   git(root, initArgs);
+  // No detached auto-maintenance/gc after commit (newer git on CI): its transient writes under
+  // .git/objects (maintenance.lock, packs) would race the write-proof snapshots taken below.
+  git(root, ["config", "maintenance.auto", "false"]);
+  git(root, ["config", "gc.auto", "0"]);
   git(root, ["config", "user.email", "test@example.invalid"]);
   git(root, ["config", "user.name", "Test"]);
   return root;

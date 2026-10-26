@@ -75,13 +75,20 @@ function interleavedMinPair(
 ): { t64: number; t256: number } {
   const smalls: number[] = [];
   const bigs: number[] = [];
-  for (let round = 0; round < 4; round++) {
-    let t0 = performance.now();
+  // Process CPU time (user+system, µs → ms), not wall time: on a shared/oversubscribed CI runner the
+  // worker is preempted for whole windows, which wall-clock charges to whichever size was running.
+  // CPU time still scales with the parser's real work, so a quadratic parser is caught identically.
+  const cpuMs = (): number => {
+    const u = process.cpuUsage();
+    return (u.user + u.system) / 1000;
+  };
+  for (let round = 0; round < 6; round++) {
+    let t0 = cpuMs();
     for (let k = 0; k < itersSmall; k++) small();
-    smalls.push((performance.now() - t0) / itersSmall);
-    t0 = performance.now();
+    smalls.push((cpuMs() - t0) / itersSmall);
+    t0 = cpuMs();
     for (let k = 0; k < itersBig; k++) big();
-    bigs.push((performance.now() - t0) / itersBig);
+    bigs.push((cpuMs() - t0) / itersBig);
   }
   return { t64: Math.min(...smalls), t256: Math.min(...bigs) };
 }
@@ -201,9 +208,9 @@ describe("logic/markdown.js — §4.2 linearization benchmarks (256 KiB corpus)"
     // for a whole measurement window, so a single window may cross the 8x line for a perfectly
     // linear parser (seen: 23.2/2.1). A genuinely super-linear parser (quadratic ⇒ ~16x for
     // this 4x size step, and far worse on the pathological shapes) exceeds the bound in EVERY
-    // window, so the gate asserts on the best ratio over up to 3 independent windows.
+    // window, so the gate asserts on the best ratio over up to 5 independent windows.
     let best = { t64: 1, t256: Infinity };
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       const pair = interleavedMinPair(
         () => parseMarkdown(s64),
         () => parseMarkdown(s256),

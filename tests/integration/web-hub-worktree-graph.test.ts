@@ -65,6 +65,10 @@ async function tempDir(): Promise<string> {
 async function repo(): Promise<string> {
   const root = await tempDir();
   git(root, ["init", "-q", "-b", "main"]);
+  // No detached auto-maintenance/gc after commit (newer git on CI): its transient writes under
+  // .git/objects (maintenance.lock, packs) would race the write-proof snapshots taken below.
+  git(root, ["config", "maintenance.auto", "false"]);
+  git(root, ["config", "gc.auto", "0"]);
   git(root, ["config", "user.name", "P6 Author"]);
   git(root, ["config", "user.email", "p6@example.invalid"]);
   git(root, ["config", "commit.gpgSign", "false"]);

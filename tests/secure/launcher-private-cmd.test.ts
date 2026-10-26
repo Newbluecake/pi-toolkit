@@ -587,6 +587,32 @@ describe.skipIf(!HAVE_FLOCK || !which("script"))(
       30_000,
     );
 
+    // userns-free twin of the test above (runs on AppArmor-restricted CI): a record WITHOUT `ns`
+    // (P1 never got that far) is judged by lease + supervisor liveness only, so a plain `sleep`
+    // holding the lease under flock is a sufficient live "mounting" instance — same gate
+    // (plainMountPrivateGate ⇒ BUSY 76), same "before any prompt / no gocryptfs call" claims.
+    it("--global never bypasses mutual exclusion (no userns needed): a live ns-less private record blocks it 76", async () => {
+      writeSettings({ acme: { private: true } });
+      const c = holder("flock", [v.lease, "sleep", "60"]);
+      const flockPid = c.pid!;
+      let sup: { pid: number; start: number } | undefined;
+      for (const end = Date.now() + 5_000; !sup && Date.now() < end; await sleep(20)) {
+        const kids = readFileSync(`/proc/${flockPid}/task/${flockPid}/children`, "utf8").trim().split(/\s+/);
+        const pid = Number(kids[0]);
+        if (pid && readFileSync(`/proc/${pid}/comm`, "utf8").trim() === "sleep") sup = liveIdentity(pid);
+      }
+      expect(sup, "lease holder did not start").toBeDefined();
+      // pure verdict first: live supervisor + held lease + no ns ⇒ a blocking (non-stale) state
+      writeRecord({ phase: "mounting", supervisor: sup, gocryptfs: sup, pi: sup });
+      const st = await H.privateInstanceState(v);
+      expect(st.state).toBe("mounting");
+      const r = await cli("unlock acme --global", { tty: true });
+      expect(r.code, r.text).toBe(76);
+      expect(r.text).toMatch(/--private 实例正在挂载（mounting）/);
+      expect(r.text).not.toMatch(/Password|口令/);
+      expect(existsSync(join(root, "gocryptfs-calls.log"))).toBe(false);
+    }, 30_000);
+
     it("lock: --lazy --kill together is a usage error; --kill on an ordinary vault notes and runs the old path", async () => {
       expect((await cli("lock acme --lazy --kill")).code).toBe(2);
       const k = await cli("lock acme --kill");
