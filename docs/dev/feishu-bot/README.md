@@ -11,7 +11,7 @@
 ## 安装与首次连接
 
 1. 使用 Node.js ≥22（需原生 WebSocket），正常安装并启动 pi-toolkit，打开 **本地 TUI**。先确认 `/webhub status` 能看到本机 hub。
-2. 在 `~/.pi/agent/pi-subagent.json` 合并以下设置，不要覆盖其他已有键：
+2. 在 `~/.pi/agent/pi-toolkit.json`（旧名 `pi-subagent.json`，跟随 `PI_CODING_AGENT_DIR`）合并以下设置，不要覆盖其他已有键：
 
    ```json
    {

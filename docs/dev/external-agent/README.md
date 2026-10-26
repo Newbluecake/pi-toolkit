@@ -9,7 +9,7 @@ pi-toolkit 可以把 [Factory droid](https://factory.ai) 当作虚拟 provider `
 
 1. 安装 droid CLI，确认 `droid --version` 可用。
 2. 登录或设置 `FACTORY_API_KEY`（环境变量，pi 进程要能继承到）。
-3. 在 `~/.pi/agent/pi-subagent.json` 加入：
+3. 在 `~/.pi/agent/pi-toolkit.json`（旧名 `pi-subagent.json`，跟随 `PI_CODING_AGENT_DIR`）加入：
 
    ```json
    {

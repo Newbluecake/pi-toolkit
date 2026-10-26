@@ -3639,7 +3639,7 @@ export function loadSettingsFromFile(path: string = defaultSettingsPath()): Agen
  * anything. This is the only loader safe to call before the HOST_KEY guard —
  * child subagent sessions re-activate this extension too, and the full
  * loadSettingsFromFile would concurrently write the shared settings file
- * (~/.pi/agent/pi-subagent.json) from every child. Malformed/missing file →
+ * (~/.pi/agent/pi-toolkit.json by default) from every child. Malformed/missing file →
  * defaults, silently: child sessions must not spam stderr with warnings the
  * main session already emitted. Legacy `*Ms` keys are still tolerated
  * (normalizeTimeUnits handles them in memory); the on-disk rewrite stays the

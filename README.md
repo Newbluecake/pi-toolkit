@@ -110,8 +110,9 @@ pi install .
 
 ## 配置
 
-用户配置文件：`~/.pi/agent/pi-subagent.json`（沿用历史文件名；缺失或格式错误一律用默认值，不抛错）。
+用户配置文件：`<agentDir>/pi-toolkit.json`（`<agentDir>` 默认为 `~/.pi/agent`，跟随 `PI_CODING_AGENT_DIR`，见下文「PI_CODING_AGENT_DIR 与本插件」；缺失或格式错误一律用默认值，不抛错）。
 
+- 旧文件名 `pi-subagent.json` 在升级后由主会话自动迁移：内容发布为 `pi-toolkit.json`，旧名保留为指向它的兼容符号链接，旧版插件 / pi-secure 经链接照常读写。两份同时存在且内容分叉时（例如 `sed -i` 把链接改回普通文件）以 `pi-toolkit.json` 为准并给出可见告警——**请编辑 `pi-toolkit.json`**。没有 `flock` 的主机（常见于 macOS）不自动迁移，继续读写旧名，功能完整。
 - `/agent settings` 打开交互式编辑器（↑↓ 选择、回车编辑、空格切换布尔、`r` 重置默认，改动即时落盘）；脚本场景用 `/agent settings list` / `set <key> <value>` / `reset <key>`。
 - **时间字段通常以整数秒配置**（键名以 `S` 结尾，如 `budget.idleS`）；旧版毫秒键首次加载时自动迁移。例外：下表 `feishuBot.debounceMs` 保持毫秒，不迁移。
 - 各模块的详细键与默认值见对应指南。
@@ -147,7 +148,7 @@ pi install .
 
 ### 飞书机器人设置（可选）
 
-以下为 `pi-subagent.json` 的**顶层** `feishuBot.*`（不是 `webHub.feishuBot`）；改动后 `/reload` → `/webhub restart`，还需 `webHub.enabled:true` 与控制面开启。[配置/命令/安全说明](docs/dev/feishu-bot/README.md) · [真租户验收](docs/dev/feishu-bot/acceptance.md)。**一个应用只连接一个 hub**，双连接会分流事件。
+以下为设置文件（`pi-toolkit.json`）的**顶层** `feishuBot.*`（不是 `webHub.feishuBot`）；改动后 `/reload` → `/webhub restart`，还需 `webHub.enabled:true` 与控制面开启。[配置/命令/安全说明](docs/dev/feishu-bot/README.md) · [真租户验收](docs/dev/feishu-bot/acceptance.md)。**一个应用只连接一个 hub**，双连接会分流事件。
 
 | 键                              | 默认值    | 含义                                                       |
 | ------------------------------- | --------- | ---------------------------------------------------------- |
@@ -162,6 +163,32 @@ pi install .
 | `feishuBot.files.inbound`       | `true`    | 接收入站图片/文件附件。                                    |
 | `feishuBot.files.maxInboundMiB` | `30`      | 解析范围 1–100 MiB，实际仍受共享上传的 30 MiB 上限约束。   |
 | `feishuBot.securityAlerts`      | `true`    | LAN 安全告警：新 IP 登录、白名单拒绝、会话下线、2FA 变更。 |
+
+## PI_CODING_AGENT_DIR 与本插件
+
+pi 的 agent 目录可以用 `PI_CODING_AGENT_DIR` 改变（默认 `~/.pi/agent`）。本插件的设置文件与流量库跟随它，其余状态仍固定在 home：
+
+| 状态                                                     | 跟随 agentDir？                                                                 |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| 设置文件 `pi-toolkit.json`                               | 是（带继承，见下）                                                              |
+| `traffic.db`                                             | 是（带继承；外部 pi-traffic-record 仍装着时固定 `~/.pi/agent`，两边写同一个库） |
+| bash-jobs、quota-state、cache-ttl 测量与证据             | 是（现状如此）                                                                  |
+| memory、workflows journal                                | 否（各有覆盖项）                                                                |
+| Web Hub 状态、UI、uploads、socket                        | 否（每个 uid 一个 hub）                                                         |
+| `feishu-notify.json`、`~/.local/share/pi-toolkit-secure` | 否                                                                              |
+
+- **继承规则**：设了变量但 `$PI_CODING_AGENT_DIR` 下没有设置文件时，读写都回落到 `~/.pi/agent`（与升级前完全一致；编辑器标题与 `/agent settings list` 会标注 `inherited from ~/.pi/agent`）。想隔离：在 `$PI_CODING_AGENT_DIR` 下放一个 `pi-toolkit.json`（哪怕是 `{}`），之后即切到该目录。不做自动复制——复制会让 `secure.vaults` 与 token 出现两份并静默分叉。traffic.db 同规则。
+- **相对路径的变量值一律被忽略**（回落默认目录并告警一次）：pi 会把相对值相对各进程自己的 cwd 解析，而 pi-secure launcher 先 `cd /`，两边必然错位；此类配置下 pi 的会话目录本就随 cwd 漂移，属于不支持。Windows 上创建符号链接需要特权，不自动迁移时继续读写旧名。
+- **traffic.db 不复制、不移动**（SQLite 有 `-wal`/`-shm`，外部 recorder 可能正在写）。想迁到新 agentDir：所有运行中的 pi 执行 `/record off` 并退出，再 `mv ~/.pi/agent/records "$PI_CODING_AGENT_DIR"/`。
+- **hub 级单一 agentDir**：hub 每个 uid 一个，状态固定在 `~/.pi/agent`；hub 拉起的网页会话使用 hub 自己的 agentDir（继承自拉起它的那个会话）。`/webhub status` 在两边不一致时提示，从期望的环境里 `/webhub restart` 切换。
+- **pi-secure 与 pi 必须在同一套环境变量下运行**：`pi-secure run` 起的 pi 继承 launcher 的环境，天然一致；变量只设在 pi 的 wrapper 里会错位（`pi-secure status` 与 `/secure status` 都打印实际使用的设置路径与来源）。`PI_CODING_AGENT_DIR` 指向保险库内部属于不支持的配置（登记表会藏进它自己描述的保险库）：插件判 locked，launcher 以退出码 78 拒绝。
+
+## 降级与回滚
+
+- **回到旧文件名布局**：退出所有 pi，然后 `mv ~/.pi/agent/pi-toolkit.json ~/.pi/agent/pi-subagent.json`（旧版与新版都认旧名；之后升级新版会重新迁移并重建兼容链接）。
+- **两份设置文件同时存在且分叉**（例如 `sed -i`、编辑器原子保存把兼容链接改回普通文件）：以 `pi-toolkit.json` 为准并给出可见告警；把需要的改动合并进 `pi-toolkit.json`，然后删除或改名 `pi-subagent.json`。两份的 `secure` 段不一致时 secure 域 fail-closed（状态栏 `secure:invalid`，launcher 拒绝 run/unlock），必须合并后重启。
+- **旧版 pi-secure 启动器**：`~/.local/bin/pi-secure` 若指向另一个更旧的检出，迁移后它改写设置（init / convert / import 登记、`--resume` / `--abort`）会因「是符号链接」被拒（fail-closed，可恢复）。改指本检出：`ln -sf <本仓库>/src/secure/bin/pi-secure ~/.local/bin/pi-secure`；临时补救可用上面的 `mv`。pi-secure 与插件同版发布，请让链接始终指向插件的同一检出；`/secure status` 会探测 PATH 上的旧启动器并给出这条命令。
+- **traffic**：改名与跟随从不移动库文件，回滚不需要任何数据操作。
 
 ## 定时任务（schedule）
 
@@ -247,6 +274,8 @@ pi install .
   ```
 
   配置过保险库后，会话内 `/secure status` 也会打印这条安装命令（未配置时该命令不注册）。
+
+  pi-secure 与插件同版发布：链接必须指向当前插件检出里的启动器，不要指向另一个更旧的检出（旧版不认识新设置文件名 `pi-toolkit.json`，迁移后它的写操作会被拒；`/secure status` 会探测并提示，修复命令见「降级与回滚」）。
 
 ### 初始化
 
@@ -339,11 +368,11 @@ pi-secure unlock demo --global       # 私有库默认拒绝全局解锁，--glo
 | 退出码 77                            | 口令连错 3 次（间隔 1s/2s/4s），重新执行命令                                                                                               |
 | 退出码 73                            | 另一个 pi-secure 正在挂载/卸载（mount.lock 被占），稍后重试                                                                                |
 | 状态栏 `secure:locked`、输入被拦     | 会话被 LOCKED：保险库未挂载、会话与所属库不一致或跨域打开。按提示重开（如 `pi-secure run acme -C sub`）；LOCKED 不会自动退出，`/quit` 可用 |
-| 状态栏 `secure:invalid`              | `pi-subagent.json` 的 `secure` 段无法解析：修复 JSON 后重启 pi                                                                             |
+| 状态栏 `secure:invalid`              | 设置文件（`pi-toolkit.json`）的 `secure` 段无法解析，或新旧两份设置文件的 `secure` 段不一致：修复 / 合并后重启 pi                          |
 
 ## 流量录制（traffic）
 
-把发往 provider 的请求与响应（含流式 chunk）录进本地 SQLite：`~/.pi/agent/records/traffic.db`，与独立插件 pi-traffic-record 同库同表，历史、改写规则与计数自动沿用。配合 jq 改写规则和一个加固的网页查看 / 重放界面。默认关闭，开启需 Node ≥22.13（`node:sqlite`）；off 时零注册、零 IO。内部设计见 [traffic-merge 方案](docs/dev/traffic-merge/plan.md)，真机验收清单见 [acceptance](docs/dev/traffic-merge/acceptance.md)。
+把发往 provider 的请求与响应（含流式 chunk）录进本地 SQLite（默认 `~/.pi/agent/records/traffic.db`，跟随 `PI_CODING_AGENT_DIR`，见上文「PI_CODING_AGENT_DIR 与本插件」），与独立插件 pi-traffic-record 同库同表，历史、改写规则与计数自动沿用。配合 jq 改写规则和一个加固的网页查看 / 重放界面。默认关闭，开启需 Node ≥22.13（`node:sqlite`）；off 时零注册、零 IO。内部设计见 [traffic-merge 方案](docs/dev/traffic-merge/plan.md)，真机验收清单见 [acceptance](docs/dev/traffic-merge/acceptance.md)。
 
 - 命令：`/record on` / `off` / `status`，在主会话注册（包括 print / json 模式），子会话不注册；print / json 模式只录制、不启动网页服务、不能重放；网页端执行 `on` 需要确认。
 - 请求归属靠一次性票据头（铸造后在上游 fetch 层剥离，provider 看不到）；改写只作用于能证明归属的请求，无法证明的按原样发送并记 `unattributed`。改写白名单：anthropic-messages / openai-completions / openai-responses（Codex 的 WS 握手绕过 fetch，票据剥不掉，只能录不改写）。
@@ -359,7 +388,7 @@ pi-secure unlock demo --global       # 私有库默认拒绝全局解锁，--glo
 | `traffic.web.host`      | `127.0.0.1` | 绑定地址；`"0.0.0.0"` 显式开启 LAN（见下方风险）。                           |
 | `traffic.web.port`      | `4177`      | 起始端口，被占用自增，最多 20 次。                                           |
 
-以上键均非 live：改完 settings 文件后 `/reload` 生效；库路径固定在 `~/.pi/agent/records/traffic.db`，不随 `PI_CODING_AGENT_DIR`，也无可配置项。
+以上键均非 live：改完 settings 文件后 `/reload` 生效。库路径跟随 `PI_CODING_AGENT_DIR`（带 `~/.pi/agent` 继承回退，外部 pi-traffic-record 仍装着时固定 home，保证两边写同一个库；详见「PI_CODING_AGENT_DIR 与本插件」），无可配置项。
 
 ### 数据范围（拍板①）
 
@@ -374,7 +403,7 @@ pi-secure unlock demo --global       # 私有库默认拒绝全局解锁，--glo
 1. 所有运行中的 pi 执行 `/record off`。
 2. 升级 pi-toolkit。
 3. 从 `~/.pi/agent/settings.json` 的 `packages` 删掉 `"../../ai/pi-traffic-record"`（装过 `~/.pi/agent/extensions/traffic-dump.ts` 的一并删）。
-4. `~/.pi/agent/pi-subagent.json` 写 `"traffic": { "enabled": true }`（或用 `/agent settings`）；需要 LAN 再加 `"web": { "host": "0.0.0.0" }`。
+4. `~/.pi/agent/pi-toolkit.json` 写 `"traffic": { "enabled": true }`（或用 `/agent settings`）；需要 LAN 再加 `"web": { "host": "0.0.0.0" }`。
 5. **重启 pi**（只 `/reload` 不够）。
 6. 验证：只有一个 `/record`；`/record status` 计数与迁移前一致（库、规则、引擎设置在 DB 中自动沿用）；网页历史可浏览。
 7. 回滚：`traffic.enabled=false` 并把 package 加回去（另一个进程仍在跑旧版时，两者可共享同一个库，schema 不变）。

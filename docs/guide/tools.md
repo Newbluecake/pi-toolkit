@@ -1,6 +1,6 @@
 # 日常工具模块
 
-可单独开关的日常基础设施：任务工具、`/goal`、`ask_user`、`web_search`、HUD、飞书通知、会话导航、topic-switch、自动标题、延迟 `/reload`。除特别说明外，开关都在 `~/.pi/agent/pi-subagent.json`，改动 `/reload` 生效。
+可单独开关的日常基础设施：任务工具、`/goal`、`ask_user`、`web_search`、HUD、飞书通知、会话导航、topic-switch、自动标题、延迟 `/reload`。除特别说明外，开关都在 `~/.pi/agent/pi-toolkit.json`（旧名 `pi-subagent.json` 保留为兼容链接；跟随 `PI_CODING_AGENT_DIR`），改动 `/reload` 生效。
 
 ## 任务工具（todo）
 

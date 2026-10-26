@@ -25,9 +25,12 @@ The whole point of the project is **zero-hang guarantees**: every run has layere
 acknowledgeable delivery of results. Preserve these invariants when editing.
 
 Renamed `pi-subagent` → `pi-toolkit` (2026-09): runtime identifiers keep the old name on purpose —
-the settings file `~/.pi/agent/pi-subagent.json`, `Symbol.for("pi-subagent:*")` host guards,
-`subagent:*` customTypes/event channels, widget/status keys and the `[pi-subagent]` log prefix all
-carry existing session data and cross-module contracts. Do NOT "finish the rename" inside `src/`.
+`Symbol.for("pi-subagent:*")` host guards, `subagent:*` customTypes/event channels, widget/status
+keys and the `[pi-subagent]` log prefix all carry existing session data and cross-module contracts.
+The settings file moved to `~/.pi/agent/pi-toolkit.json` (#54, and it follows `PI_CODING_AGENT_DIR`
+with a home fallback): legacy `pi-subagent.json` survives only as a read fallback / compatibility
+symlink, and the lock file keeps its fixed name `.pi-subagent.json.lock` so old and new
+plugins/launchers contend on one lock. Do NOT "finish the rename" inside `src/`.
 
 The eight merged plugins (HUD, web_search, todo, ask_user, Feishu notify, session-nav, memory, traffic) and their pre/post-guard registration are summarised in invariant I3; full text: `docs/dev/plugin-merge/README.md`.
 
@@ -57,7 +60,7 @@ Each holds for every task; details and the evidence live in the README of the su
 - **I4 no module-scope mutable state**: `/reload` re-activates in the same process without busting the module cache. Cross-activation sharing only via `Symbol.for("pi-subagent:*")` globals with stated capacity/TTL.
 - **I5 `unref()` every timer** (a ref'd timer wedges `pi -p`).
 - **I6 child sessions stay inert**; child extensions are discovered only from settings.json (use `pi install`, never `-e`).
-- **I7 runtime old names stay**: `pi-subagent.json`, `Symbol.for("pi-subagent:*")`, `subagent:*` customTypes/events, widget/status keys, `[pi-subagent]` log prefix. Never "finish the rename" in `src/`.
+- **I7 runtime old names stay**: the settings file became `pi-toolkit.json` in #54 — legacy `pi-subagent.json` stays only a read fallback / compat symlink, and the settings lock keeps its fixed name `.pi-subagent.json.lock`. Everything else never moves: `Symbol.for("pi-subagent:*")`, `subagent:*` customTypes/events, widget/status keys, `[pi-subagent]` log prefix. Never "finish the rename" in `src/`.
 - **I8 pi-free boundaries**: `src/core`, `src/prompt-sections`, `src/git` import no pi (`tests/boundary/pi-free.test.ts`); hub/protocol import only `node:*`, typebox and whitelisted files (`tests/web-hub/boundary.test.ts`) — the whitelist only tightens; share code via a mirror copy in `web-hub/protocol/`.
 - **I9 off ⇒ byte-identical**: a settings-gated feature that is off leaves hooks, prompts and output unchanged, proven by the golden files below. Non-live settings need `/reload` (hub side also `/webhub restart`).
 - **I10 append-only wire**: `StatusInfo` open slots, optional frame fields and caps; no PROTO bump; old hub × new agent (and reverse) must stay byte-identical.
@@ -79,7 +82,7 @@ Check before and after any refactor: `git diff --quiet origin/dev -- tests/fixtu
 ## pi peer bump checklist
 
 1. Change the pi peer range in `package.json` (now `>=1.0.0 <1.4.0` for each of `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`) only deliberately, and re-check `src/adapters/pi-compat.ts`.
-2. Run `npm run test:conformance` (= `vitest run tests/conformance`, the whole directory): `pi-boundary`/context-switch capability, `fabric-wake.test.ts` C-P1–C-P5, `fabric-xs.test.ts` C-X1–C-X11, `schedule.test.ts` C-S1–C-S8 (C-S6 skips without tsx), `traffic.test.ts` + `traffic-coexist.test.ts`, `cmd-history.test.ts`, `slash-args.test.ts`, `rpc-spawn.test.ts`, `keepalive-pipeline.test.ts`, `web-resume.test.ts`, `secure-gocryptfs.test.ts` C1–C5 (self-gating), and the rest. The premises each suite pins are in the matching README (traffic → `docs/dev/traffic-merge/README.md`; cmd-history → `docs/dev/web-hub/README.md`; fabric → `docs/dev/fabric-cross-session/README.md`; schedule → `docs/dev/scheduled-reports/README.md`).
+2. Run `npm run test:conformance` (= `vitest run tests/conformance`, the whole directory): `pi-boundary`/context-switch capability, `fabric-wake.test.ts` C-P1–C-P5, `fabric-xs.test.ts` C-X1–C-X11, `schedule.test.ts` C-S1–C-S8 (C-S6 skips without tsx), `traffic.test.ts` + `traffic-coexist.test.ts`, `cmd-history.test.ts`, `slash-args.test.ts`, `rpc-spawn.test.ts`, `keepalive-pipeline.test.ts`, `web-resume.test.ts`, `secure-gocryptfs.test.ts` C1–C5 (self-gating), `agent-dir.test.ts` (agentDir public-API probe: `CONFIG_DIR_NAME === ".pi"` + behavioural env-name check, added in #54), and the rest. The premises each suite pins are in the matching README (traffic → `docs/dev/traffic-merge/README.md`; cmd-history → `docs/dev/web-hub/README.md`; fabric → `docs/dev/fabric-cross-session/README.md`; schedule → `docs/dev/scheduled-reports/README.md`).
 3. Before upgrading pi or droid also run `PI_TOOLKIT_DROID_CONFORMANCE=1 npx vitest run tests/conformance/droid-protocol.test.ts`; before upgrading gocryptfs run `tests/conformance/secure-gocryptfs.test.ts`.
 4. Confirm the A-tier frozen artifacts did not change (above).
 

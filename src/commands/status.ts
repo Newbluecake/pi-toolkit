@@ -285,7 +285,8 @@ function renderSettings(store: SettingsStore, budgetOnly: boolean): string {
   const usage = budgetOnly
     ? "`/agent budget` opens the interactive editor; `/agent budget set <key> <value>` / `reset <key>` (budget.* keys) stay scriptable. Durations are seconds. Applies to new runs immediately; in-flight runs keep the budget armed at their start. 0 disables a phase timeout."
     : "`/agent settings` opens the interactive editor; `set <key> <value>` / `reset <key>` / `list` stay scriptable. Durations are seconds (keys end in `S`). budget.* applies to new runs immediately; every other key is persisted but takes effect after /reload. All changes persist to the settings file.";
-  return [`Extension settings — ${store.path}:`, ...lines, "", usage].join("\n");
+  const note = store.pathNote === undefined ? "" : ` (${store.pathNote})`;
+  return [`Extension settings — ${store.path}${note}:`, ...lines, "", usage].join("\n");
 }
 
 function handleSettings(store: SettingsStore | undefined, args: string[], budgetOnly: boolean): string {

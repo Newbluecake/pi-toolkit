@@ -1167,7 +1167,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   // `feishuBot.debounceMs` is JSON-ONLY (externalAgents.droid.* pattern): the shared spec-table
   // invariant (tests/ui/settings-editor.test.ts: no exposed key ends in "Ms") means a
   // milliseconds storage key cannot enter the editor without an out-of-domain test change —
-  // edit it directly in pi-subagent.json. See docs/dev/feishu-bot/F9-report.md.
+  // edit it directly in pi-toolkit.json (legacy name: pi-subagent.json). See docs/dev/feishu-bot/F9-report.md.
   "feishuBot.securityAlerts": bool(
     "feishuBot.securityAlerts",
     "Feishu bot: high-risk LAN security alerts (default on; change: /reload then /webhub restart)",
