@@ -60,6 +60,8 @@ export interface ScheduleReportOffer {
   /** display label of the owning session (untrusted ⇒ sanitized on render) */
   sessionLabel: string;
   reportId: string;
+  /** Validated relative ledger path; filename is independent of the receipt/deduplication key. */
+  reportFile?: string;
   runKey: string;
   taskId: string;
   taskName: string;
@@ -277,10 +279,16 @@ export function createFeishuSchedule(deps: FeishuScheduleDeps) {
     const ok = offer.status === "completed";
     const label = `定时 · ${offer.taskName} · ${offer.sessionLabel}`;
     const body = `状态：${offer.status}\n\n${text}`;
+    // The offer carries a validated ledger path. Only new short names override render's
+    // original reply-<sid6>.md default; legacy 64hex paths keep that readable default.
+    const attachmentFileName = offer.reportFile?.startsWith("reports/s_")
+      ? offer.reportFile.slice("reports/".length)
+      : undefined;
     const base = {
       kind: ok ? ("done" as const) : ("failed" as const),
       label,
       shortId: offer.sessionId,
+      ...(attachmentFileName === undefined ? {} : { attachmentFileName }),
       text: ok ? body : text,
       ...(ok ? {} : { failure: { stopReason: offer.status } }),
     };

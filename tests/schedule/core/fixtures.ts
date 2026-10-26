@@ -10,7 +10,13 @@ import {
 } from "../../../src/schedule/core/writer.js";
 import { holderOf, readSelfIdentity, type ProcessIdentity } from "../../../src/schedule/core/recovery.js";
 import { initOcc } from "../../../src/schedule/core/occurrence.js";
-import { defHash, type Holder, type ScheduleStateFile, type ScheduleTask } from "../../../src/schedule/core/spec.js";
+import {
+  defHash,
+  reportIdOf,
+  type Holder,
+  type ScheduleStateFile,
+  type ScheduleTask,
+} from "../../../src/schedule/core/spec.js";
 import type { StoreRoot } from "../../../src/schedule/core/paths.js";
 
 export const SID = "019a0000-aaaa-7bbb-8ccc-dddddddddddd";
@@ -124,3 +130,6 @@ export function readOk(store: SessionStore): ScheduleStateFile {
 export const utc = (s: string): number => Date.parse(s);
 export const MIN = 60_000;
 export const HOUR = 3_600_000;
+
+/** Pre-#62 paths, retained only as compatibility fixtures (never used by new writers). */
+export const legacyReportFileOf = (sid: string, runKey: string): string => `reports/${reportIdOf(sid, runKey)}.md`;

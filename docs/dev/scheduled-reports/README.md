@@ -4,6 +4,15 @@
 > 来源：AGENTS.md@fcbf71dc 的对应条目，原文搬运，未改写（仅路径按目录移动更新）。新的实现细节直接写在这里，不要再写回 AGENTS.md。
 > 相关：`plan.md`、`acceptance.md`
 
+## 报告引用与文件名（#62）
+
+- 结果消息的「全文」入口互斥：有 `runId` 只显示 `get_subagent_result <runId>`；否则有报告时显示 `<store.root.real>/<sessionDirName>/<run.reportFile>` 的绝对路径；两者均无则省略。工具名仅定义在 `agent/result-reference.ts` 的 `SCHEDULE_RESULT_TOOL`，报告截断提示复用它，且不为无 runId 的运行虚构可查询全文。
+- digest、schedule 工具的 get/history、`/schedule show/log`（含 `--all`，使用实际归属会话的 store）也只展示报告绝对路径；展示不改账本。
+- 新报告路径为 `reports/<taskId>-<YYYYMMDD-HHmm>[-n].md`，取 `run.scheduledAt`（auto occurrence / manual trigger），使用任务 tz，无 tz 时使用本地时区。`reportFileOf` 只生成基名；background / message writer 在 `writeReportLocked` 的同一 session writer 锁内通过 `allocateUnique` 分配 `-2`、`-3` 等后缀，同时避开磁盘条目与仍存账本引用。回调拿实际分配路径再一次性提交 terminal run 与 pendingReports。
+- `run.reportFile` / `pendingReports.reportFile` 继续存相对路径；旧 64-hex 文件名仍可读取并参与原有 14 天 GC，**不迁移旧文件**。共享 filename/path 白名单只接受短名或旧哈希名；fd-anchored 读取与目录/owner/mode 检查不变。
+- `reportIdOf(sessionId, runKey)`、receipts 键、outbox `sch:<reportId>`、24 h 推送窗口和 pendingReports ≤64 均不变；hub 仍只读账本。hub 将已验证的 reportFile 传给飞书投递器，超长报告附件的新短名 basename 传入 renderer，由同一 fileName 同时生成卡片 fileNote 和上传信息；旧 64-hex 报告回退原有 `reply-<sid6>.md`；重复扫描、hub 重启不重复推送。没有新增 wire 字段/cap/PROTO 或 off 表面。更新运行中的 agent/hub 需 `/reload`、`/webhub restart`，旧 hub 未认识新文件名，不能只更新 agent。
+- 验证记录与完整改动清单：[report-paths-report.md](report-paths-report.md)。
+
 ## src/schedule/
 
 `src/schedule/` — session-aware scheduled tasks (cron/once; `schedule.enabled`, default **false**; design + rulings:

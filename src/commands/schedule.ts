@@ -492,6 +492,7 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
   }
 
   function showTask(agent: ScheduleAgent, id: string | undefined, all: boolean): string {
+    let reportStore = agent.store();
     let state: ScheduleStateFile | undefined;
     let task: ScheduleTask | undefined;
     if (all) {
@@ -501,6 +502,7 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
       if (snap.kind !== "ok") return "E_DEGRADED: 账本不可读";
       state = snap.state;
       task = l.task;
+      reportStore = l.store;
     } else {
       const f = findOwn(agent, id);
       if (f.error !== undefined) return f.error;
@@ -509,11 +511,12 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
     }
     const lines = taskDetail(task!, state!.occ[task!.id], state!.manualTotal[task!.id]);
     const recent = state!.runs.filter((r) => r.taskId === task!.id).slice(-5);
-    if (recent.length > 0) lines.push("最近运行：", ...recent.map((r) => `  ${runLine(r, task!.when)}`));
+    if (recent.length > 0) lines.push("最近运行：", ...recent.map((r) => `  ${runLine(r, task!.when, reportStore)}`));
     return lines.join("\n");
   }
 
   function logTask(agent: ScheduleAgent, id: string | undefined, all: boolean): string {
+    let reportStore = agent.store();
     let state: ScheduleStateFile | undefined;
     if (all) {
       if (id === undefined) return "用法：/schedule log <id> --all";
@@ -522,6 +525,7 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
       const snap = l.store.read();
       if (snap.kind !== "ok") return "E_DEGRADED: 账本不可读";
       state = snap.state;
+      reportStore = l.store;
     } else {
       const r = ownState(agent);
       if (r.error !== undefined) return r.error;
@@ -535,7 +539,7 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
       .sort((a, b) => b.scheduledAt - a.scheduledAt)
       .slice(0, 20);
     if (runs.length === 0) return "没有运行记录。";
-    return runs.map((r) => `${r.taskId} · ${runLine(r, tasks.get(r.taskId)?.when)}`).join("\n");
+    return runs.map((r) => `${r.taskId} · ${runLine(r, tasks.get(r.taskId)?.when, reportStore)}`).join("\n");
   }
 
   // ------------------------------------------------------------- write paths

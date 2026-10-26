@@ -29,8 +29,18 @@ import {
   readSessionStateById,
   validateStateFile,
 } from "../../../src/schedule/core/reader.js";
-import { emptyStateFile, reportFileOf, SCHED_STATE_MAX_BYTES } from "../../../src/schedule/core/spec.js";
-import { addTask, approve, env, makeTask, self, SID, utc, type Env } from "./fixtures.js";
+import { emptyStateFile, SCHED_STATE_MAX_BYTES } from "../../../src/schedule/core/spec.js";
+import {
+  legacyReportFileOf as reportFileOf,
+  addTask,
+  approve,
+  env,
+  makeTask,
+  self,
+  SID,
+  utc,
+  type Env,
+} from "./fixtures.js";
 import { ensureStoreRoot, openSessionStore } from "../../../src/schedule/core/writer.js";
 
 let E: Env;

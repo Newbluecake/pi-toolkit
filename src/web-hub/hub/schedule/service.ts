@@ -644,6 +644,7 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
           sessionId: sid,
           sessionLabel: sessionLabel(sid),
           reportId: p.reportId,
+          reportFile: p.reportFile,
           runKey: p.runKey,
           taskId: p.taskId,
           taskName: taskNameOf(state, p.taskId),

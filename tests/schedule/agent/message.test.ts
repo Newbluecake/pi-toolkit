@@ -20,6 +20,7 @@ import {
 } from "../../../src/schedule/agent/message.js";
 import { createScheduleAgent, type ScheduleAgent, type ScheduleAgentDeps } from "../../../src/schedule/agent/wire.js";
 import { holderOf } from "../../../src/schedule/core/recovery.js";
+import { writeReportLocked } from "../../../src/schedule/core/writer.js";
 import {
   reportFileOf,
   reportIdOf,
@@ -213,7 +214,11 @@ describe("settled result sink (一次提交：终态 + 报告文件 + pendingRep
     expect(await sink.settled({ run, task, text: "daily result" })).toBe(true);
     const st = readOk(store);
     const rec = st.runs.find((r) => r.runKey === run.runKey)!;
-    expect(rec).toMatchObject({ state: "settled", reportFile: reportFileOf(SID, run.runKey), note: "none" });
+    expect(rec).toMatchObject({
+      state: "settled",
+      reportFile: reportFileOf(task.id, run.scheduledAt, task.when.tz),
+      note: "none",
+    });
     expect(st.pendingReports).toHaveLength(1);
     expect(st.pendingReports[0]).toMatchObject({
       reportId: reportIdOf(SID, run.runKey),
@@ -224,6 +229,24 @@ describe("settled result sink (一次提交：终态 + 报告文件 + pendingRep
     const file = join(e.storeDir, store.dirName, rec.reportFile!);
     expect(existsSync(file)).toBe(true);
     expect(readFileSync(file, "utf8")).toContain("daily result");
+  });
+
+  it("a short-name collision keeps the existing file and records the allocated suffix in run and pendingReports", async () => {
+    const { store, task, run, sink } = await setup({ feishu: true });
+    const base = reportFileOf(task.id, run.scheduledAt, task.when.tz);
+    expect(
+      await writeReportLocked(store, { reportFile: base, data: Buffer.from("previous report"), now: fake.now() }),
+    ).toMatchObject({ ok: true, value: { written: true } });
+    expect(await sink.settled({ run, task, text: "current result" })).toBe(true);
+    const path = base.replace(".md", "-2.md");
+    const st = readOk(store);
+    expect(st.runs[0]!.reportFile).toBe(path);
+    expect(st.pendingReports[0]!.reportFile).toBe(path);
+    expect(readFileSync(join(store.root.real, store.dirName, base), "utf8")).toBe("previous report");
+    expect(readFileSync(join(store.root.real, store.dirName, path), "utf8")).toContain("current result");
+    await sink.settled({ run, task, text: "duplicate result" });
+    expect(readOk(store).pendingReports).toHaveLength(1);
+    expect(readFileSync(join(store.root.real, store.dirName, path), "utf8")).not.toContain("duplicate result");
   });
 
   it("feishu off: settled with no report and no index entry", async () => {

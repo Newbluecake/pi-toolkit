@@ -328,6 +328,8 @@ export interface ReplyInput {
   label: string;
   /** 6-char session id prefix for the overflow attachment name `reply-<sid6>.md` */
   shortId?: string;
+  /** Optional ASCII md basename, shared by the card note and the returned overflow upload. */
+  attachmentFileName?: string;
   /** assistant markdown (untrusted) */
   text: string;
   /** the wire delivered a truncated text (`truncated:true`) ⇒ explicit "output incomplete" label */
@@ -414,7 +416,10 @@ export function renderReply(input: ReplyInput): RenderedReply {
     input.mention !== undefined && FEISHU_OPEN_ID_RE.test(input.mention) ? `<at id=${input.mention}></at> ` : "";
   const incomplete = input.truncated === true;
   const sid = safeShortId(input.shortId);
-  const fileName = `reply-${sid}.md`;
+  const fileName =
+    input.attachmentFileName !== undefined && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}\.md$/.test(input.attachmentFileName)
+      ? input.attachmentFileName
+      : `reply-${sid}.md`;
   const trailerBase = incomplete ? `\n\n${OUTPUT_INCOMPLETE_LABEL}` : "";
   const fileNote = `\n\n${OVERFLOW_FILE_NOTE_PREFIX}\`${fileName}\``;
   const truncNote = `\n\n${OVERFLOW_TRUNCATED_NOTE}`;

@@ -263,7 +263,7 @@ describe("pushScheduleReport", () => {
     const big = "段落\n\n".repeat(30_000);
     let inflight = 0,
       max = 0;
-    const upload = vi.fn(async () => {
+    const upload = vi.fn(async (_input: { bytes: Buffer; fileName: string }) => {
       inflight++;
       max = Math.max(max, inflight);
       await new Promise((r) => setTimeout(r, 5));
@@ -272,12 +272,18 @@ describe("pushScheduleReport", () => {
     });
     const r = rig({ upload });
     await Promise.all([
-      r.sch.pushReport(r.offer(1, { read: () => big })),
-      r.sch.pushReport(r.offer(2, { read: () => big })),
+      r.sch.pushReport(r.offer(1, { read: () => big, reportFile: "reports/s_abcd2345-20261026-0852-3.md" })),
+      r.sch.pushReport(r.offer(2, { read: () => big, reportFile: `reports/${H(2)}.md` })),
     ]);
     expect(max).toBe(1);
     expect(upload).toHaveBeenCalledTimes(2);
-    expect(r.finals[0]!.messages.some((m) => m.msgType === "file")).toBe(true);
+    for (const [i, fileName] of ["s_abcd2345-20261026-0852-3.md", "reply-019a00.md"].entries()) {
+      expect(upload.mock.calls[i]![0]).toMatchObject({ fileName });
+      expect(r.finals[i]!.messages[0]!.content).toContain(`完整内容见附件 \`${fileName}\``);
+      expect(r.finals[i]!.messages.some((m) => m.msgType === "file")).toBe(true);
+    }
+    expect(r.finals[0]!.messages[0]!.content).not.toContain("reply-019a00.md");
+    expect(r.finals[1]!.messages[0]!.content).not.toContain(`${H(2)}.md`);
     const f = rig({ upload: async () => ({ ok: false as const }) });
     await f.sch.pushReport(f.offer(1, { read: () => big }));
     expect(f.finals[0]!.messages.every((m) => m.msgType === "interactive")).toBe(true);

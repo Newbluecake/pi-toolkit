@@ -115,6 +115,40 @@ describe("computeDigest (pure)", () => {
     st.digest.shownRunsThrough = 1000;
     expect(computeDigest(st, 2000)).toBeUndefined();
   });
+  it("controller lists readable absolute paths for both new and legacy report records", async () => {
+    const h = setup();
+    const t = await missedScenario();
+    const store = env.agent.store()!;
+    const reports = [`reports/${t.id}-20260101-0800.md`, `reports/${"a".repeat(64)}.md`];
+    await store.transact((d, ctx) => {
+      for (let i = 0; i < reports.length; i++)
+        d.runs.push({
+          runKey: `${t.id}@${i + 1}`,
+          taskId: t.id,
+          kind: "auto",
+          form: "background",
+          scheduledAt: ctx.now,
+          startedAt: ctx.now,
+          endedAt: ctx.now,
+          defHash: d.tasks[0]!.approval!.hash,
+          state: "unknown",
+          reason: "owner-closed",
+          holder: env.agent.holder!,
+          note: "none",
+          reportFile: reports[i]!,
+        });
+      return { value: undefined, write: true };
+    });
+    const d = h.mk();
+    await d.run();
+    expect(h.sentMsgs).toHaveLength(1);
+    for (const file of reports)
+      expect(h.sentMsgs[0]!.content).toContain(`报告：${join(store.root.real, store.dirName, file)}`);
+    expect(h.sentMsgs[0]!.content).not.toContain("对应 reportFile");
+    expect(readOk(store).runs.map((r) => r.reportFile)).toEqual(reports);
+    d.dispose();
+  });
+
   it("deriveCoversAt uses the last missed entry written no later than the claim instant", () => {
     const st = emptyStateFile(SID);
     const t = makeTask();

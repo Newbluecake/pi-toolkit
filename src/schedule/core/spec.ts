@@ -132,8 +132,9 @@ export const SCHED_STATUS_KEY = "pi-subagent:schedule";
 export const SCHED_SECTION_NAME = "pi_schedules";
 /** Process-level dispatcher claim (§6.2). */
 export const SCHED_DISPATCH_SYMBOL_KEY = "pi-subagent:sched-dispatch";
-/** Only accepted report path shape (relative to the session dir): `reports/<64-hex>.md`. */
-export const SCHED_REPORT_FILE_RE = /^reports\/[0-9a-f]{64}\.md$/;
+/** New short names and legacy reportId names; both remain relative to the session directory. */
+export const SCHED_REPORT_NAME_RE = /^(?:[0-9a-f]{64}|s_[a-z2-7]{8}-[0-9]{8}-[0-9]{4}(?:-(?:[2-9]|[1-9][0-9]+))?)\.md$/;
+export const SCHED_REPORT_FILE_RE = new RegExp(`^reports/${SCHED_REPORT_NAME_RE.source.slice(1)}`);
 
 // ----------------------------------------------------------------- error codes (§10.2)
 
@@ -251,7 +252,7 @@ export interface PendingReport {
   endedAt: number;
   /** endedAt + SCHED_REPORT_MAX_AGE_MS (N1). */
   expiresAt: number;
-  /** `reports/<64-hex>.md`. */
+  /** Relative report path (short name for new runs, legacy 64-hex names remain readable). */
   reportFile: string;
   /** Terminal summary for the card title. */
   status: string;
@@ -434,9 +435,21 @@ export function reportIdOf(sessionId: string, runKey: string): string {
   return sha256Hex(`${sessionId}\0${runKey}`);
 }
 
-/** Canonical report path for a run: `reports/<reportId>.md`. */
-export function reportFileOf(sessionId: string, runKey: string): string {
-  return `${SCHED_REPORTS_DIR}/${reportIdOf(sessionId, runKey)}.md`;
+/** Base report path from the occurrence/trigger time, in task tz (absent ⇒ system local time).
+ * The writer allocates a collision suffix UNDER the session lock; reportId stays independent. */
+export function reportFileOf(taskId: string, scheduledAt: number, tz?: string): string {
+  if (!SCHED_TASK_ID_RE.test(taskId)) throw new TypeError("invalid report task id");
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    ...(tz === undefined ? {} : { timeZone: tz }),
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(scheduledAt);
+  const get = (type: string): string => parts.find((p) => p.type === type)!.value;
+  return `${SCHED_REPORTS_DIR}/${taskId}-${get("year")}${get("month")}${get("day")}-${get("hour")}${get("minute")}.md`;
 }
 
 export function isHash(value: unknown): value is string {

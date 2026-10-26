@@ -2,6 +2,7 @@ import { appendFileSync, readFileSync, truncateSync, writeFileSync } from "node:
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createScheduleNotes } from "../../../src/schedule/agent/note.js";
+import { absoluteReportPath } from "../../../src/schedule/agent/result-reference.js";
 import { FakeClock } from "../../../src/core/clock.js";
 import { manualClaim } from "../../../src/schedule/core/claim.js";
 import { finishRun } from "../../../src/schedule/core/writer.js";
@@ -68,6 +69,45 @@ const diskEntry = () =>
   }) + "\n";
 
 describe("schedule result notes — file proof only", () => {
+  it("uses a handwritten absolute path expectation for a fixed report location", () => {
+    expect(
+      absoluteReportPath(
+        {
+          root: { literal: "/var/tmp/pi-toolkit-schedules", real: "/var/tmp/pi-toolkit-schedules", dev: 1, ino: 1 },
+          dirName: "session-fixed",
+        },
+        "reports/s_aaaaaaaa-20261026-0852.md",
+      ),
+    ).toBe("/var/tmp/pi-toolkit-schedules/session-fixed/reports/s_aaaaaaaa-20261026-0852.md");
+  });
+  it.each([
+    { runId: "r_full", reportFile: "reports/s_aaaaaaaa-20261026-0852.md", expected: "get_subagent_result r_full" },
+    { runId: undefined, reportFile: "reports/s_aaaaaaaa-20261026-0852.md", expected: "path" },
+    { runId: undefined, reportFile: `reports/${"a".repeat(64)}.md`, expected: "path" },
+    { runId: undefined, reportFile: undefined, expected: undefined },
+  ])("full result reference is exclusive: $expected ($reportFile)", async ({ runId, reportFile, expected }) => {
+    const f = await fixture();
+    await f.store.transact((d) => {
+      const run = d.runs[0]!;
+      if (runId !== undefined) run.runId = runId;
+      if (reportFile !== undefined) run.reportFile = reportFile;
+      return { value: undefined, write: true };
+    });
+    const notes = createScheduleNotes(f.schedule, f.deps);
+    await notes.deliver(f.run.runKey, "summary", false);
+    expect(f.sendMessage).toHaveBeenCalledOnce();
+    const text = f.sendMessage.mock.calls[0]![0].content as string;
+    const full = text.split("\n").filter((l) => l.startsWith("全文："));
+    expect(full).toEqual(
+      expected === undefined
+        ? []
+        : [`全文：${expected === "path" ? join(f.store.root.real, f.store.dirName, reportFile!) : expected}`],
+    );
+    expect(text).not.toContain(" 或 ");
+    if (runId !== undefined) expect(text).not.toContain("reports/");
+    expect(readOk(f.store).runs[0]?.reportFile).toBe(reportFile); // display never rewrites the ledger
+    notes.dispose();
+  });
   it("streaming can retain a note over 10 minutes without resend; disk proof marks written", async () => {
     const f = await fixture();
     const notes = createScheduleNotes(f.schedule, f.deps);

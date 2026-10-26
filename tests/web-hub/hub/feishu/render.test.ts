@@ -344,6 +344,16 @@ describe("renderReply: size cap + splitting", () => {
     expect(r.overflow).toEqual({ fullText: text, fileName: "reply-a1b2c3.md", clipped: false });
     expect(r.truncatedByOverflow).toBe(false);
   });
+  it("uses one custom attachment name for both fileNote and overflow metadata", () => {
+    const text = "report row\n\n".repeat(15_000);
+    const fileName = "s_abcd2345-20261026-0852-3.md";
+    const r = renderReply(base({ text, shortId: "a1b2c3d4", attachmentFileName: fileName }));
+    expect(r.parts).toHaveLength(1);
+    expect(md(r.parts[0]!)).toContain(`${OVERFLOW_FILE_NOTE_PREFIX}\`${fileName}\``);
+    expect(md(r.parts[0]!)).not.toContain("reply-a1b2c3.md");
+    expect(r.overflow).toMatchObject({ fullText: text, fileName });
+    expect(r.parts[0]!.bytes).toBeLessThanOrEqual(CAP);
+  });
   it("the attachment is the RAW sanitized text (not neutralized) and carries the incomplete label when truncated", () => {
     const text = `<b>x</b>\n${"w".repeat(100_000)}`;
     const r = renderReply(base({ text, truncated: true }));
