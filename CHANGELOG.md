@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-26
+
+### Added
+
+- **reload**: tell the model about a pending reload and resume after it (`8ef0e7d3`)
+- **web-hub**: prompt to reload sessions whose plugin is behind the hub (`be943165`)
+- **web-hub**: render get_run_result cards like the legacy result tool (`9decdf0a`)
+
+### Fixed
+
+- **schedule**: point result messages at get_subagent_result and give reports short absolute paths (`8505261d`)
+
+### Changed
+
+- **tools**: rename get_subagent_result to get_run_result (`7dc45d17`)
+
+### Documentation
+
+- rename get_subagent_result to get_run_result in guides and skills (`e4b4464d`)
+- **result-tool-rename**: live smoke on four provider lines (`deedf2ee`)
+- **result-tool**: ship the rename in a minor release (`490d8ce9`)
+- **result-tool**: plan renaming get_subagent_result to get_run_result (`b9463655`)
+
+### Tests
+
+- **secure**: keep git auto-maintenance out of convert fixture snapshots (`8221aecf`)
+
+### Chores
+
+- run the test suite with fewer workers in CI and release preflight (`a4151048`)
+
+Stats: 3 feat, 1 fix, 1 refactor/perf, 4 docs, 1 test, 1 chore
+
 ## [0.9.0] - 2026-10-26
 
 ### Added
@@ -1211,7 +1244,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.7.1...v0.8.0
