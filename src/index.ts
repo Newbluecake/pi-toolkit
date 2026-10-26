@@ -32,12 +32,12 @@ import { createNotifier, type Notifier, type PersistedDelivery } from "./deliver
 import { mergeExtensionPoints } from "./extensions/registry.js";
 import {
   buildSessionStack,
-  createCompactHintHook,
   createBackgroundCompletionEventHook,
   createNotificationReceiptHook,
   type Stack,
 } from "./stack.js";
 import { readBashJobTail } from "./bash/notify.js";
+import { createCompactHintHook } from "./compact-hint/hook.js";
 import { bashJobsEnabled, BASH_JOB_SEAL_GRACE_MS } from "./bash/host.js";
 import { createMentionRouteDeps, installMentionInput } from "./mention/mention.js";
 import { createWakeInputHook } from "./fabric/wake-input.js";

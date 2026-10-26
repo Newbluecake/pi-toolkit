@@ -1,4 +1,5 @@
-import { createCompactHintHook, type CompactHintState, type Stack } from "../../src/stack.js";
+import { createCompactHintHook, type CompactHintState } from "../../src/compact-hint/hook.js";
+import type { Stack } from "../../src/stack.js";
 import { wireDynamicThreshold } from "../../src/compact-hint/dynamic/wire.js";
 import { DEFAULT_DYNAMIC_THRESHOLD_SETTINGS } from "../../src/config/settings.js";
 import { readTelemetryLines } from "../../src/compact-hint/dynamic/telemetry-store.js";

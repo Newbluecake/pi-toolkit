@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createCompactHintHook, type CompactHintState, type Stack } from "../../src/stack.js";
+import { createCompactHintHook, type CompactHintState } from "../../src/compact-hint/hook.js";
+import type { Stack } from "../../src/stack.js";
 
 function baseState(initial: Partial<CompactHintState> = {}): CompactHintState {
   return {

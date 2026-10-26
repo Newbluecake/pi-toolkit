@@ -9,7 +9,7 @@ import {
   windowScaledForcePercent,
 } from "./threshold.js";
 import type { DynamicStatusView } from "./dynamic/wire.js";
-import type { CompactHintState } from "../stack.js";
+import type { CompactHintState } from "./hook.js";
 
 export const SetCompactThresholdParams = Type.Object({
   percent: Type.Optional(

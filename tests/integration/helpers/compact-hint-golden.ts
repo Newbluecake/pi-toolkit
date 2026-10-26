@@ -11,7 +11,8 @@
  * `sendMessage` 的 `customType` + `content` + `details`。
  */
 
-import { createCompactHintHook, type CompactHintState, type Stack } from "../../../src/stack.js";
+import { createCompactHintHook, type CompactHintState } from "../../../src/compact-hint/hook.js";
+import type { Stack } from "../../../src/stack.js";
 
 export interface GoldenSentMessage {
   scenario: string;

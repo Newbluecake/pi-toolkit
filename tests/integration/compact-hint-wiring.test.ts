@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sandboxHome } from "./helpers/home-sandbox.js";
-import { createCompactHintHook, buildSessionStack, type CompactHintState, type Stack } from "../../src/stack.js";
+import { createCompactHintHook, type CompactHintState } from "../../src/compact-hint/hook.js";
+import { buildSessionStack, type Stack } from "../../src/stack.js";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createSetCompactThresholdTool } from "../../src/compact-hint/threshold-tool.js";

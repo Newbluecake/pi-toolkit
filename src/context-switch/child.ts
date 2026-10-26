@@ -25,7 +25,7 @@ import type {
 import type { AgentSettings } from "../config/settings.js";
 import { checkTurnEndShape, probeBoundaryStatic, type BoundaryStaticProbeInput } from "../adapters/pi-compat.js";
 import { resolveKeepRecentTokens, resolveReserveTokens } from "../compact-hint/pi-settings.js";
-import { createCompactHintHook, type CompactHintState, type Stack } from "../stack.js";
+import { createCompactHintHook, type CompactHintHolder, type CompactHintState } from "../compact-hint/hook.js";
 import { buildChildSwitchDrafts } from "./boundary.js";
 import { getChildSwitchCapability, type CapabilityStatus } from "./capability.js";
 import { collectSessionFacts } from "./session-facts.js";
@@ -301,8 +301,8 @@ export function wireChildContextSwitch(
 
   // Built once (plan §2.2): the returned closure owns its own forcing/backoff state across turns.
   // `headless:true` skips print/json early-return and never calls `ctx.compact()`. The `holder`
-  // param is unused (getState replaces it) — an empty object structurally satisfies `{current?: Stack}`.
-  const hintHandler = createCompactHintHook({} as { current?: Stack }, {
+  // param is unused (getState replaces it) — an empty object structurally satisfies `CompactHintHolder`.
+  const hintHandler = createCompactHintHook({} as CompactHintHolder, {
     sendMessage: (message, options) => pi.sendMessage(message, options),
     headless: true,
     getState: () => (lastCtx ? getOrBuildHintState(lastCtx.cwd) : undefined),
