@@ -25,3 +25,18 @@ export function sandboxHome(): { home: string; restore: () => void } {
     },
   };
 }
+
+/**
+ * Remove BOTH settings-file names (+ the lock) in `dir`. After #54 a bare `rmSync(pi-subagent.json)` only drops
+ * the compat symlink and leaves a stale `pi-toolkit.json` behind, so a test that "starts from no settings"
+ * must go through this (or `resetSettingsFiles`).
+ */
+export function resetSettingsFilesIn(dir: string): void {
+  for (const name of ["pi-toolkit.json", "pi-subagent.json", ".pi-subagent.json.lock"])
+    rmSync(join(dir, name), { force: true });
+}
+
+/** `resetSettingsFilesIn(<home>/.pi/agent)`. */
+export function resetSettingsFiles(home: string): void {
+  resetSettingsFilesIn(join(home, ".pi", "agent"));
+}

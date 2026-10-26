@@ -101,6 +101,10 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "node:path",
     "../cache-ttl/keepalive-state.js",
     "../compact-hint/threshold.js",
+    // settings-rename P2 (plan §6.3): settingsLocation()/prepareSettingsFile() resolve the agentDir through the
+    // pi-free core resolver (node:path + node:url only; pinned above). A conscious table update — the hub
+    // whitelist is NOT loosened: the hub reaches agent-dir through its own protocol mirror.
+    "../core/agent-dir.js",
     "../core/deadline.js",
     "../extensions/worktree-link-paths.js",
     // channel-plan CH0: pure channel-name rules (imports only the protocol xs schema module).

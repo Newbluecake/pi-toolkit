@@ -18,7 +18,7 @@ import {
   SETTINGS,
   tmpDir,
 } from "../web-hub/agent/helpers.js";
-import { sandboxHome } from "./helpers/home-sandbox.js";
+import { resetSettingsFiles, sandboxHome } from "./helpers/home-sandbox.js";
 
 /**
  * fabric phase-2 XS0 (phase2-plan.md §2.8 H3 / §10.1 XI1): the xs-OFF golden. Captured from
@@ -165,7 +165,7 @@ async function capture(): Promise<Record<string, unknown>> {
   const home = sandboxHome();
   releaseGuards();
   try {
-    rmSync(join(home.home, ".pi", "agent", "pi-subagent.json"), { force: true });
+    resetSettingsFiles(home.home);
     const rec = recordingPi();
     activate(rec.pi);
     const mainSessionTools = [...rec.tools];

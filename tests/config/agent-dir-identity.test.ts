@@ -25,8 +25,11 @@ describe("T-ID1 P0: default-equivalent values preserve legacy literal paths", ()
     vi.stubEnv("PI_CODING_AGENT_DIR", raw);
     expect(homedir()).toBe(sandbox.home);
     expect(resolveAgentDir(process.env, sandbox.home)).toEqual({ dir: H, home: H, source: "default" });
-    expect(defaultSettingsPath()).toBe(join(sandbox.home, ".pi", "agent", "pi-subagent.json"));
-    expect(defaultRecordPaths(sandbox.home)).toEqual({
+    // #54 P2: with no settings file the plugin side resolves to the NEW name in the same directory (plan §3.3 S0).
+    expect(defaultSettingsPath()).toBe(join(sandbox.home, ".pi", "agent", "pi-toolkit.json"));
+    expect(defaultRecordPaths({ home: sandbox.home })).toEqual({
+      root: H,
+      source: "default",
       recordDir: join(H, "records"),
       dbPath: join(H, "records", "traffic.db"),
       legacyDir: join(H, "dumps"),
@@ -55,15 +58,21 @@ describe("T-ID1 P0: default-equivalent values preserve legacy literal paths", ()
     }
   });
 
-  it("keeps traffic DB defaults fixed even for custom agentDir (P3 is not part of P0)", () => {
+  it("traffic DB follows the agentDir root rules (#54 P3): fresh custom agentDir ⇒ root at P", () => {
     vi.stubEnv("PI_CODING_AGENT_DIR", join(sandbox.home, "custom"));
-    expect(defaultRecordPaths(sandbox.home).dbPath).toBe(join(H, "records", "traffic.db"));
+    // P 与 H 都没有库 ⇒ 新建在 P（继承/五分支细节见 tests/traffic/root-select.test.ts）。
+    expect(defaultRecordPaths({ home: sandbox.home })).toMatchObject({
+      root: join(sandbox.home, "custom"),
+      source: "agentDir",
+      dbPath: join(sandbox.home, "custom", "records", "traffic.db"),
+    });
   });
 
   it("hub computes one resolved agentDir and all six consumers use it; convert gets the same value", () => {
     const hub = readFileSync(new URL("../../src/web-hub/hub/hub.ts", import.meta.url), "utf8");
     expect(hub.match(/const hubAgentDir = resolveAgentDir\(process.env, config.home\).dir;/g)).toHaveLength(1);
-    expect(hub.match(/agentDir: hubAgentDir/g)).toHaveLength(6);
+    // P4 为 hub.json 的 agentDir 写入加了第 7 处消费（仍共用同一个 hubAgentDir）。
+    expect(hub.match(/agentDir: hubAgentDir/g)).toHaveLength(7);
     expect(hub).not.toContain('process.env["PI_CODING_AGENT_DIR"]');
     const launcher = readFileSync(new URL("../../src/secure/bin/helper.mjs", import.meta.url), "utf8");
     expect(launcher).toContain("C.defaultConvertContext(process.env, { home, cwd, agentDir: piAgentDir(home) })");

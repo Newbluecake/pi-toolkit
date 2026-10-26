@@ -12,12 +12,13 @@ import { assertCompatible, detectPiCapabilities } from "./adapters/pi-compat.js"
 import { FABRIC_ENTRY_CUSTOM_TYPE, createFabricEntryRenderer } from "./adapters/fabric-entry-renderer.js";
 import { createAgentTypeRegistry } from "./config/agent-types.js";
 import {
-  defaultSettingsPath,
   loadSettingsFromFile,
   loadWebHubLanSettingsWarnings,
   loadWebHubProxyWarnings,
   persistSettingOverride,
+  prepareSettingsFile,
   readSettingsNoMigrate,
+  settingsPathNote,
   type AgentSettings,
 } from "./config/settings.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
@@ -272,7 +273,8 @@ export default function activate(rawPi: ExtensionAPI): void {
   // Registered before the compat gate below so even the disabled-stub path
   // releases its claim (otherwise a bad-compat activation would wedge every
   // later reload into the inert branch).
-  const settings = loadSettingsFromFile();
+  const settingsFile = prepareSettingsFile();
+  const settings = loadSettingsFromFile(settingsFile.path);
   // data-encryption §2.2: the one read-only plugin command — only when there is something to report
   // (non-plain verdict, configured vaults, or an enabled-but-broken section). No `secure` section or
   // `secure.enabled=false` ⇒ command list unchanged (secure-off golden).
@@ -754,7 +756,8 @@ export default function activate(rawPi: ExtensionAPI): void {
         // command tells the user to /reload for those.
         current: settings,
         persist: (key, value) => persistSettingOverride(key, value),
-        path: defaultSettingsPath(),
+        path: settingsFile.path,
+        pathNote: settingsPathNote(settingsFile.location),
         // L1 (agent-tool pool-full plan §4): concurrencyLimit is the one
         // exception — the SlotPool captures it once in its constructor
         // (stack.ts), so mutating settings.concurrencyLimit in place does not
@@ -852,6 +855,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       memoryWiring !== undefined ? { memoryBlock: (cwd: string) => memoryWiring?.renderForExternal(cwd) } : undefined,
       xs.stackInput(),
       scheduleWiring,
+      settingsFile,
     );
     holder.current = stack;
     xs.attach(stack, ctx, pi, nextXsSessionId);

@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import activate from "../../src/index.js";
 import { resetChildSwitchCapabilityForTests } from "../../src/context-switch/capability.js";
+import { resetSettingsFilesIn } from "./helpers/home-sandbox.js";
 
 /**
  * child-context-switch plan.md §7 P3 — T-S6 / T-Z1 (registration wiring only; the real
@@ -54,13 +55,13 @@ function writeSettings(raw: unknown): void {
 beforeEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
   delete (globalThis as Record<symbol, unknown>)[FEISHU_HOST_KEY];
-  rmSync(settingsPath, { force: true });
+  resetSettingsFilesIn(dirname(settingsPath));
   resetChildSwitchCapabilityForTests();
 });
 afterEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
   delete (globalThis as Record<symbol, unknown>)[FEISHU_HOST_KEY];
-  rmSync(settingsPath, { force: true });
+  resetSettingsFilesIn(dirname(settingsPath));
   resetChildSwitchCapabilityForTests();
 });
 afterAll(() => {

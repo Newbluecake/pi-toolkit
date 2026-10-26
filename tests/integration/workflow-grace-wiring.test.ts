@@ -8,6 +8,7 @@ import { PiSessionDriver } from "../../src/runtime/session-driver.js";
 import { WORKFLOW_NOTIFICATION_TYPE } from "../../src/adapters/workflow-notice.js";
 import { OUTBOX_CUSTOM_TYPE } from "../../src/adapters/pi-outbox-store.js";
 import { TIMEOUT_NOTICE_TYPE } from "../../src/delivery/deadline-notice.js";
+import { resetSettingsFilesIn } from "./helpers/home-sandbox.js";
 
 /**
  * workflow-agent-queue §4.5 / §7 stage B: a background workflow's timeout
@@ -129,7 +130,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   for (const key of [HOST_KEY, FEISHU_HOST_KEY, STATUS_KEY]) delete (globalThis as Record<symbol, unknown>)[key];
-  rmSync(settingsPath, { force: true });
+  resetSettingsFilesIn(dirname(settingsPath));
 });
 afterAll(() => {
   if (realHome === undefined) delete process.env.HOME;

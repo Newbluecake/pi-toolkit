@@ -12,7 +12,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createCompactHintHook, type CompactHintState } from "../../src/compact-hint/hook.js";
 import type { Stack } from "../../src/stack.js";
@@ -21,6 +21,7 @@ import { readTelemetryLines } from "../../src/compact-hint/dynamic/telemetry-sto
 import { MARKER_TTL_MS } from "../../src/compact-hint/dynamic/telemetry.js";
 import { DEFAULT_DYNAMIC_THRESHOLD_SETTINGS } from "../../src/config/settings.js";
 import activate from "../../src/index.js";
+import { resetSettingsFilesIn } from "./helpers/home-sandbox.js";
 
 const HOST_KEY = Symbol.for("pi-subagent:host");
 
@@ -643,7 +644,7 @@ describe("T-D3-DISPOSE (P1-4) + T-D3-TOOLCALL-PASSTHRU（activate 级）", () =>
       // mode=off ⇒ runtime 不构造 ⇒ handler 首行判空 ⇒ 无遥测
       expect(existsSync(agentTelemetryPath())).toBe(false);
     } finally {
-      rmSync(settingsPath, { force: true });
+      resetSettingsFilesIn(dirname(settingsPath));
     }
   });
 });

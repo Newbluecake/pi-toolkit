@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { DEFAULT_BUDGET } from "../core/deadline.js";
@@ -10,7 +10,16 @@ import { MAX_SAFE_KEEPALIVE_INTERVAL_MS } from "../cache-ttl/keepalive-state.js"
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 import { parseStrictModelRef } from "./model-hint.js";
 import { getSecureDomain, statePathsOf } from "../secure/domain.js";
-import { withSettingsFileLock, writeSettingsFileAtomic } from "../secure/settings-lock.js";
+import { resolveAgentDir } from "../core/agent-dir.js";
+import {
+  healSettingsFileLocked,
+  migrateLegacySettingsFile,
+  resolveSettingsLocation,
+  withSettingsFileLock,
+  writeSettingsFileAtomic,
+  type SettingsLocation,
+  type SettingsMigrationOutcome,
+} from "../secure/settings-lock.js";
 import {
   DEFAULT_FORCE_THRESHOLD_PERCENT,
   DEFAULT_HINT_THRESHOLD_PERCENT,
@@ -3444,9 +3453,84 @@ function parseWorkflowSettings(input: unknown): WorkflowSettings {
   };
 }
 
-/** Default user-level settings file: ~/.pi/agent/pi-subagent.json */
+/**
+ * Where the user-level settings file lives right now (docs/dev/settings-rename/plan.md §3.3): the
+ * agentDir (`$PI_CODING_AGENT_DIR`, default `~/.pi/agent`) × the file name (`pi-toolkit.json`, legacy
+ * `pi-subagent.json`). Pure read — never migrates (see `prepareSettingsFile`). With the variable unset
+ * the directory is the historical `~/.pi/agent`.
+ */
+export function settingsLocation(): SettingsLocation {
+  return resolveSettingsLocation(resolveAgentDir(process.env, homedir()));
+}
+
+/** Default user-level settings file: `<agentDir>/pi-toolkit.json` (or the legacy name while unmigrated). */
 export function defaultSettingsPath(): string {
-  return join(homedir(), ".pi", "agent", "pi-subagent.json");
+  return settingsLocation().path;
+}
+
+/** Editor-title suffix naming where a non-default settings file came from (undefined for the default scope). */
+export function settingsPathNote(location: SettingsLocation): string | undefined {
+  if (location.scope === "inherited") return "inherited from ~/.pi/agent";
+  if (location.scope === "agentDir") return "PI_CODING_AGENT_DIR";
+  return undefined;
+}
+
+export interface SettingsFileReport {
+  /** The settings file to load / edit (after any migration). */
+  path: string;
+  location: SettingsLocation;
+  migration: SettingsMigrationOutcome;
+  /** Set by the stack once `notices` were surfaced (once per activation; lives on the activate closure's report). */
+  notified: boolean;
+  /** User-facing warnings for the first session_start (S6b conflict, ignored relative PI_CODING_AGENT_DIR). */
+  notices: readonly string[];
+}
+
+/**
+ * The main session's ONE settings-file migration point (legacy `pi-subagent.json` → `pi-toolkit.json`,
+ * plan §3.4). Called only by `src/index.ts` after the HOST_KEY claim, so child sessions never reach it.
+ * Synchronous, no timers; never throws — a failed migration just means the legacy name keeps being used.
+ */
+export function prepareSettingsFile(): SettingsFileReport {
+  const notices: string[] = [];
+  let migration: SettingsMigrationOutcome = { kind: "noop" };
+  try {
+    const agent = resolveAgentDir(process.env, homedir());
+    if (agent.ignored) {
+      const msg = "PI_CODING_AGENT_DIR is relative; toolkit settings/traffic stay under ~/.pi/agent";
+      console.warn(`[pi-subagent] ${msg}`);
+      notices.push(msg);
+    }
+    const before = resolveSettingsLocation(agent);
+    migration = migrateLegacySettingsFile(dirname(before.path));
+    switch (migration.kind) {
+      case "migrated":
+        console.warn(
+          `[pi-subagent] settings moved: ${migration.from} → ${migration.to} (kept ${migration.from} as a compatibility symlink for older versions)`,
+        );
+        break;
+      case "conflict": {
+        const msg =
+          `settings conflict: ${migration.newPath} and ${migration.legacyPath} both exist as separate files; using ${migration.newPath}. ` +
+          `Merge your changes into pi-toolkit.json, then remove pi-subagent.json` +
+          (migration.legacyNewer ? " (pi-subagent.json is the newer file — your latest edits may be there)" : "");
+        console.warn(`[pi-subagent] ${msg}`);
+        notices.push(msg);
+        break;
+      }
+      case "skipped":
+        if (migration.reason === "lock" || migration.reason === "io")
+          console.warn(`[pi-subagent] settings rename postponed (${migration.detail}); still reading ${before.path}`);
+        break;
+      case "noop":
+        break;
+    }
+    const location = migration.kind === "noop" ? before : resolveSettingsLocation(agent);
+    return { path: location.path, location, migration, notified: false, notices };
+  } catch {
+    const location = settingsLocation();
+    return { path: location.path, location, migration, notified: false, notices };
+  }
 }
 
 /**
@@ -3476,11 +3560,12 @@ export function loadSettingsFromFile(path: string = defaultSettingsPath()): Agen
       // P1 review #5: held under the cross-process settings lock, and skipped when
       // another writer changed the file since we read it (retried next time).
       const outcome = withSettingsFileLock(path, () => {
+        // plan §3.4.1: heal a crash-window S6a BEFORE comparing/writing, so this write can never turn it
+        // into the permanent conflict S6b. writeSettingsFileAtomic follows a symlinked settings file.
+        healSettingsFileLocked(dirname(path));
         const now = existsSync(path) ? readFileSync(path, "utf8") : undefined;
         if (now !== rawText) throw new Error("the file changed while migrating");
-        const tmpPath = `${path}.${process.pid}.tmp`;
-        writeFileSync(tmpPath, JSON.stringify(cache.value, null, 2) + "\n", "utf8");
-        renameSync(tmpPath, path);
+        writeSettingsFileAtomic(path, JSON.stringify(cache.value, null, 2) + "\n");
       });
       if (!outcome.ok) {
         writeSucceeded = false;
@@ -3709,14 +3794,22 @@ function migrateLegacyCacheTtlState(
  * error message on failure, undefined on success; never throws — a
  * malformed existing file is reported rather than silently clobbered.
  */
-export function persistSettingOverride(
-  dottedKey: string,
-  value: unknown,
-  path: string = defaultSettingsPath(),
-): string | undefined {
+export function persistSettingOverride(dottedKey: string, value: unknown, explicitPath?: string): string | undefined {
   // data-encryption P1 review #5: the whole re-read → merge → write runs under the cross-process
   // settings lock shared with the `pi-secure` launcher; a lock failure refuses the write.
-  const outcome = withSettingsFileLock(path, (): string | undefined => {
+  // plan §3.4.1: lock → heal → resolve the target → atomic write. With no explicit path the target is
+  // resolved INSIDE the lock, after the heal (it can change: S6a→S5 keeps NEW, an unsupported symlink
+  // reverts to LEGACY); an explicit path (tests) is written as given, its directory healed first.
+  const lockPath = explicitPath ?? defaultSettingsPath();
+  let path = lockPath;
+  const outcome = withSettingsFileLock(lockPath, (): string | undefined => {
+    healSettingsFileLocked(dirname(lockPath));
+    if (explicitPath === undefined) {
+      path = defaultSettingsPath();
+      // The directory chose a different lock file meanwhile (e.g. a settings file appeared under the
+      // agentDir): we do not hold that lock — refuse rather than write unlocked.
+      if (dirname(path) !== dirname(lockPath)) return `${path}: settings location changed while writing; retry`;
+    }
     let raw: Record<string, unknown> = {};
     try {
       if (existsSync(path)) {

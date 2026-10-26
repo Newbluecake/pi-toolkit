@@ -1276,6 +1276,8 @@ export interface SettingsStore {
   persist: (dottedKey: string, value: unknown) => string | undefined;
   /** Settings file path, shown in messages. */
   path: string;
+  /** Where a non-default settings file came from (editor title suffix); absent for the default scope. */
+  pathNote?: string | undefined;
   /**
    * L1 (agent-tool pool-full plan §4): fired after `writeSetting`/`resetSetting`
    * mutate `current` in place, with the storage key and the new *live*

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import activate from "../../src/index.js";
+import { resetSettingsFilesIn } from "./helpers/home-sandbox.js";
 
 /**
  * scheduled-reports A3 — real `activate()` wiring of the session-visible surface.
@@ -97,12 +98,12 @@ async function systemPromptFor(h: ReturnType<typeof fakePi>, ctx: unknown): Prom
 beforeEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
   delete (globalThis as Record<symbol, unknown>)[FEISHU_HOST_KEY];
-  rmSync(settingsPath, { force: true });
+  resetSettingsFilesIn(dirname(settingsPath));
 });
 afterEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
   delete (globalThis as Record<symbol, unknown>)[FEISHU_HOST_KEY];
-  rmSync(settingsPath, { force: true });
+  resetSettingsFilesIn(dirname(settingsPath));
 });
 afterAll(() => {
   if (realHome === undefined) delete process.env.HOME;

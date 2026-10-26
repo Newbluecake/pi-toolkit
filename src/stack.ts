@@ -65,7 +65,7 @@ import {
   type ModelLookupLike,
 } from "./config/available-models.js";
 import { parseStrictModelRef, resolveModelHint } from "./config/model-hint.js";
-import type { AgentSettings } from "./config/settings.js";
+import type { AgentSettings, SettingsFileReport } from "./config/settings.js";
 import { createExternalAgentsPort } from "./external-agent/port.js";
 import { RoutingSessionDriver } from "./external-agent/router.js";
 import type { ExternalAgentsPort } from "./external-agent/types.js";
@@ -532,7 +532,24 @@ export function buildSessionStack(
   xsInput: StackXsInput = {},
   /** scheduled-reports A0: activate-level wiring (present ⇔ schedule.enabled). */
   scheduleWiring?: ScheduleWiring,
+  /** #54: the activate-time settings-file report; its notices are surfaced once, on the first stack build. */
+  settingsFile?: SettingsFileReport,
 ): Stack {
+  // settings-rename plan §3.8: S6b conflict / ignored relative PI_CODING_AGENT_DIR reach the user through the
+  // existing session_start path (no new pi.on registration). Once per activation: the flag lives on the report,
+  // which is owned by the activate closure (I4). Headless modes already got the console.warn at activate time.
+  if (settingsFile !== undefined && !settingsFile.notified) {
+    settingsFile.notified = true;
+    if (ctx.hasUI) {
+      for (const notice of settingsFile.notices) {
+        try {
+          ctx.ui.notify(notice, "warning");
+        } catch {
+          // stale ctx / ui not ready — the console.warn at activate time already told the user
+        }
+      }
+    }
+  }
   // ask-user-async plan §3.3 (P2): FIRST disposal of the rebuild — the old
   // hub must stop broadcasting before the old coalescer/bash manager below
   // flush their final completion notices during their own dispose.
