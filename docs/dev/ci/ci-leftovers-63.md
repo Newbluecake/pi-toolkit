@@ -23,3 +23,31 @@ CI (shared 2-worker runner) still failed the ratio gate (63.89/7.28 = 8.77 > 8) 
 - **Verification**: file ×5 with `--maxWorkers=1` all green; `npx vitest run tests/web-hub/ui --maxWorkers=6` ×2 (5907 tests) green with the perf file running under that load; `npm run typecheck` and prettier clean.
 
 Suggested commit: `test(web-hub): markdown perf gate fits growth exponent (≤1.5 over 64–512 KiB) instead of a two-size timing ratio`
+
+## J1 #2 — `highlight-j1-batches` selection-defer flake: MutationObserver microtask seam
+
+CI (shared 2-worker runner) flaked on "a non-collapsed selection INSIDE the body defers the remaining
+batches": `expect(kwHeld).toBeLessThan(200)` got 200 (`tests/web-hub/ui/highlight-j1-batches.test.ts:125`).
+Test-only change; no `src/`, no `tests/fixtures/` change. **Not a product race** — the deferral check
+(`startHighlightBatches`' `deferredBySelection()` in `highlight-core.ts`) runs synchronously at every
+step boundary; the test just established its selection too late.
+
+- **Root cause**: batches apply via chained `setTimeout(step, 0)` macrotasks (one per batch, 3–4 batches
+  for the 200-line body). The old test did `await vi.waitFor(kw>0)` (default 50 ms poll) and only THEN
+  created the selection. On a loaded runner all batch timers can fire before waitFor's first successful
+  poll — the poll then already observes the COMPLETED run (kw=200), the selection holds nothing, and the
+  "held" assertion reads 200. Locally the poll wins the race and the flake never shows.
+- **Fix**: establish the selection inside a `MutationObserver` callback armed before parts arrive. The
+  callback is a microtask queued by batch 1's DOM swap, so it runs after batch 1 lands but BEFORE the
+  next batch's `setTimeout(0)` macrotask can fire — guaranteed by the event loop on any runner, no fake
+  timers needed. The selection still spans two plain tail lines (100/101) the next batch would rewrite.
+- **Detection power kept**: asserts a partial state at selection time (`0 < heldKw < 200`); asserts the
+  run is HELD across ≥1 deferral-poll window (`kw() === heldKw` after 650 ms; any batch leaking through
+  the deferral moves the count); asserts `textContent` is byte-identical while held; clearing the
+  selection must resume to full completion (`waitFor(kw=200)`, covers both the `selectionchange` and the
+  500 ms fallback-poll resume paths).
+- **Verification**: file ×10 with `--maxWorkers=1` all green; `npx vitest run tests/web-hub/ui
+--maxWorkers=6` ×3 (5910 tests each) green under concurrent load; `npm run typecheck` clean; prettier
+  clean.
+
+Suggested commit: `test(web-hub): make J1 selection-defer batch test deterministic via MutationObserver seam`
