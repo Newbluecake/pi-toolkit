@@ -1,6 +1,7 @@
 /**
- * #12 db-path（plan §3.1 / §3.3）：固定路径 `homedir()/.pi/agent/records/traffic.db`（不随
- * PI_CODING_AGENT_DIR）；旧 `dumps/` 不再自动搬迁——未迁移 / 半迁移拒绝打开并给人工步骤，绝不开空库。
+ * #12 db-path（plan §3.1 / §3.3）+ #54 §3.5：默认路径 `homedir()/.pi/agent/records/traffic.db`；
+ * 设了 PI_CODING_AGENT_DIR 时按根目录规则选择（P 有库 ⇒ P；否则 H 有库 ⇒ 继承 H）。
+ * 旧 `dumps/` 不再自动搬迁——未迁移 / 半迁移拒绝打开并给人工步骤，绝不开空库。
  */
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -70,11 +71,13 @@ afterEach(async () => {
 describe("db-path", () => {
   it("默认路径调用时计算 = homedir()/.pi/agent/records/traffic.db", () => {
     const paths = defaultRecordPaths();
+    expect(paths.root).toBe(join(home, ".pi", "agent"));
+    expect(paths.source).toBe("default");
     expect(paths.dbPath).toBe(join(home, ".pi", "agent", "records", "traffic.db"));
     expect(paths.legacyDbPath).toBe(join(home, ".pi", "agent", "dumps", "traffic.db"));
   });
 
-  it("非默认 PI_CODING_AGENT_DIR 下仍打开 homedir 下的库：历史、规则、计数可读", async () => {
+  it("非默认 PI_CODING_AGENT_DIR 且 P 无库 ⇒ 继承 H 的库（inherited）：历史、规则、计数可读", async () => {
     const paths = defaultRecordPaths();
     mkdirSync(join(home, ".pi", "agent", "records"), { recursive: true });
     seed(paths.dbPath, "old-session");
@@ -86,6 +89,7 @@ describe("db-path", () => {
     await command()("status", c);
     const text = c.notes.join("\n");
     expect(text).toContain(paths.dbPath);
+    expect(text).toContain("（继承 ~/.pi/agent）");
     expect(text).toContain("0 请求 / 0 消息 / 1 会话");
     expect(text).toContain("改写规则: 1 启用 / 1 总计");
     expect(existsSync(otherAgent)).toBe(false);

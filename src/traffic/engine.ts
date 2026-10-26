@@ -24,7 +24,13 @@ import { createCancelDomain, REPLAY_DEADLINES, type CancelDomain, type ReplayDea
 import { createCapture, type Capture } from "./capture.js";
 import { ensureTrafficGlobal, nextEpoch, peekTrafficGlobal } from "./container.js";
 import { createInThreadDbPort, type DbPort } from "./db-port.js";
-import { defaultRecordPaths, ensureDb, loadSqlite as defaultLoadSqlite, type SqliteLoader } from "./db.js";
+import {
+  defaultRecordPaths,
+  ensureDb,
+  loadSqlite as defaultLoadSqlite,
+  type RecordPaths,
+  type SqliteLoader,
+} from "./db.js";
 import { createJqRunner, type JqRunner } from "./jq.js";
 import { serviceAllowed as computeServiceAllowed, type TrafficRole } from "./mode.js";
 import { drainAllowed } from "./persist.js";
@@ -196,6 +202,11 @@ export interface CreateEngineOptions {
   dbPath?: string;
   /** 旧库检测路径（null = 不检测）；缺省：dbPath 为默认路径时检测默认 dumps/。 */
   legacyDbPath?: string | null;
+  /**
+   * #54 §3.5：调用方（wireTraffic）已选好的根目录（含 source），legacy 判定与**传入的** defaults
+   * 成对比较。缺省回落 `defaultRecordPaths()`（测试直调 / 兼容）。
+   */
+  recordPaths?: RecordPaths;
   loadSqlite?: SqliteLoader;
   role?: TrafficRole;
   /** ctx.mode（tui/rpc/json/print）。 */
@@ -241,7 +252,8 @@ function isBusyError(err: unknown): boolean {
 
 /** 创建一个**不注册到容器**的 engine（测试 / acquireEngine 内部使用）。 */
 export function createTrafficEngine(opts: CreateEngineOptions = {}): TrafficEngine {
-  const defaults = defaultRecordPaths();
+  // #54：defaults 由 wireTraffic 算好后传入（评审 #4 iii：legacy 判定始终在选中的根上成对进行）。
+  const defaults = opts.recordPaths ?? defaultRecordPaths();
   const dbPath = opts.dbPath ?? defaults.dbPath;
   const legacyDbPath =
     opts.legacyDbPath === undefined ? (dbPath === defaults.dbPath ? defaults.legacyDbPath : null) : opts.legacyDbPath;

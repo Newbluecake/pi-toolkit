@@ -43,6 +43,8 @@ import {
   openDb,
   sessionUpsertParams,
   UPSERT_SESSION_SQL,
+  type RecordPaths,
+  type RecordPathSource,
   type SqliteLoader,
 } from "./db.js";
 import {
@@ -79,10 +81,12 @@ export interface WireTrafficOptions {
   role?: TrafficRole;
   /** 主会话激活身份（T3 与 claim.token 同一对象）。缺省每次 wire 新建。 */
   owner?: object;
-  /** 测试注入；缺省固定 `homedir()/.pi/agent/records/traffic.db`。 */
+  /** 测试注入；缺省由 `defaultRecordPaths` 按 agentDir 规则选择（#54 §3.5）。 */
   dbPath?: string;
   legacyDbPath?: string | null;
   loadSqlite?: SqliteLoader;
+  /** #54 §3.5：外部 pi-traffic-record 仍装着 ⇒ 根目录钉在 `~/.pi/agent`（跨进程同库）。 */
+  externalRecorder?: boolean;
   /** 认领协议端口（T3：claim 属于 toolkit 且存活）。缺省恒 true。 */
   isActive?: () => boolean;
   /** 子会话请求是否落库（T3：`traffic.childSessions`，缺省 true）。 */
@@ -215,6 +219,20 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** #54 §3.5：`/record` 数据库行的根目录来源后缀（`default` 时为空串，输出逐字节不变）。 */
+function dbSourceSuffix(source: RecordPathSource): string {
+  switch (source) {
+    case "agentDir":
+      return "（agentDir）";
+    case "inherited":
+      return "（继承 ~/.pi/agent）";
+    case "external-recorder":
+      return "（外部 recorder 共用 ~/.pi/agent）";
+    default:
+      return "";
+  }
+}
+
 function noteDbError(engine: TrafficEngine, err: unknown): void {
   const message = errorText(err);
   engine.dbError = message;
@@ -281,6 +299,15 @@ function registerRecordCommand(
     return engine && engine.owner === owner && engine.state === "open" ? engine : undefined;
   };
 
+  // #54 §3.5：根目录选择在首次显式 DB 访问时才计算（含 fs 探测），每个装配闭包记忆一次；
+  // 未设变量时短路为旧固定公式、零探测。注入 dbPath 的测试不走根目录后缀。
+  let cachedPaths: RecordPaths | null = null;
+  const recordPaths = (): RecordPaths => {
+    cachedPaths ??= defaultRecordPaths({ externalRecorder: opts.externalRecorder === true });
+    return cachedPaths;
+  };
+  const dbSuffix = (): string => (opts.dbPath === undefined ? dbSourceSuffix(recordPaths().source) : "");
+
   pi.registerCommand("record", {
     description:
       '流量录制: /record on|off|status — 记录模型输入输出到 SQLite，Web 默认仅限 127.0.0.1（局域网需 traffic.web.host="0.0.0.0"）',
@@ -332,6 +359,7 @@ function registerRecordCommand(
       ...(opts.dbPath !== undefined ? { dbPath: opts.dbPath } : {}),
       ...(opts.legacyDbPath !== undefined ? { legacyDbPath: opts.legacyDbPath } : {}),
       ...(opts.loadSqlite !== undefined ? { loadSqlite: opts.loadSqlite } : {}),
+      recordPaths: recordPaths(),
       role: "host",
       mode: ctx.mode,
     });
@@ -362,7 +390,7 @@ function registerRecordCommand(
       } else {
         lines.push(`（${PRINT_MODE_NOTE}）`, "");
       }
-      lines.push(`数据库: ${engine.dbPath}`);
+      lines.push(`数据库: ${engine.dbPath}${dbSuffix()}`);
       broadcast(engine, { type: "state", recording: true, sessionId: engine.currentSessionId });
       status.noteCtx(ctx.ui as StatusUi | undefined);
       status.refresh();
@@ -405,7 +433,8 @@ function registerRecordCommand(
       sessions: null,
       settings: FALLBACK_ENGINE_SETTINGS,
     };
-    const dbPath = engine?.dbPath ?? opts.dbPath ?? defaultRecordPaths().dbPath;
+    const paths = recordPaths();
+    const dbPath = engine?.dbPath ?? opts.dbPath ?? paths.dbPath;
     if (engine) {
       try {
         const db = ensureDb(engine);
@@ -421,7 +450,9 @@ function registerRecordCommand(
       try {
         const db = openDb(dbPath, {
           ...(opts.loadSqlite !== undefined ? { loadSqlite: opts.loadSqlite } : {}),
-          ...(opts.legacyDbPath !== undefined ? { legacyDbPath: opts.legacyDbPath } : {}),
+          // #54：legacy 判定与选中的根成对（评审 #4 iii）；注入 dbPath 时不检测。
+          legacyDbPath:
+            opts.legacyDbPath !== undefined ? opts.legacyDbPath : dbPath === paths.dbPath ? paths.legacyDbPath : null,
         });
         try {
           counts.enabledRules = loadEnabledRules(db).length;
@@ -461,7 +492,7 @@ function registerRecordCommand(
     const lines = [
       `录制状态: ${recording ? "🔴 开启" : "⏹ 关闭"}`,
       `记录: ${counts.requests ?? "?"} 请求 / ${counts.messages ?? "?"} 消息 / ${counts.sessions ?? "?"} 会话`,
-      `数据库: ${dbPath} (${dbSize})`,
+      `数据库: ${dbPath} (${dbSize})${dbSuffix()}`,
       `改写规则: ${counts.enabledRules ?? "?"} 启用 / ${counts.totalRules ?? "?"} 总计${rulesSuffix}`,
       `关联模式: ${correlation}`,
       ...formatAttributionStatus(engine),
@@ -977,6 +1008,8 @@ export function assembleTrafficHost(pi: ExtensionAPI, opts: AssembleTrafficOptio
     // 评审 #4：主会话 isActive 绑定自身 claim 对象身份（claimIsOurs），不只问进程内是否有 claim。
     isActive: () => claimIsOurs(claim),
     web: opts.settings.web,
+    // #54 §3.5：外部 recorder 仍装着 ⇒ traffic.db 钉在 ~/.pi/agent，两边写同一个库。
+    externalRecorder: dupFindings.length > 0,
   });
   if (!wiring) {
     // 不可达防御（isSecure 已查，wireTraffic 自身也复查）：不留半装配的 claim。

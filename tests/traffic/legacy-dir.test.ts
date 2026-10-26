@@ -1,6 +1,7 @@
 /**
- * #12 legacy-dir（plan §3.3）：固定路径 `homedir()/.pi/agent/records/traffic.db`（不随
- * PI_CODING_AGENT_DIR）；旧 `dumps/` 不再自动搬迁——未迁移 / 半迁移拒绝打开并给人工步骤，绝不开空库。
+ * #12 legacy-dir（plan §3.3）：默认路径 `homedir()/.pi/agent/records/traffic.db`（#54 起跟随
+ * PI_CODING_AGENT_DIR 的根目录规则，未设变量时与该公式逐字节一致）；旧 `dumps/` 不再自动搬迁——
+ * 未迁移 / 半迁移拒绝打开并给人工步骤，绝不开空库；legacy 检测在选中的根上成对判定。
  */
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
