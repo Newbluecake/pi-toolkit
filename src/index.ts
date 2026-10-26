@@ -7,17 +7,9 @@ import { getAgentDir, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
 import { wireCacheTtl } from "./cache-ttl/cache-ttl.js";
 import { getProviderEvidenceStore } from "./cache-ttl/provider-evidence.js";
-import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
-import type { RunSnapshot, SpawnRequest, SubagentExtensionPoints, UsageDelta } from "./core/types.js";
-import {
-  assertCompatible,
-  detectPiCapabilities,
-  probeReadBackEntries,
-  readBeforeAgentStartTrigger,
-} from "./adapters/pi-compat.js";
-import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
+import type { SpawnRequest, SubagentExtensionPoints } from "./core/types.js";
+import { assertCompatible, detectPiCapabilities, readBeforeAgentStartTrigger } from "./adapters/pi-compat.js";
 import { FABRIC_ENTRY_CUSTOM_TYPE, createFabricEntryRenderer } from "./adapters/fabric-entry-renderer.js";
-import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import { createAgentTypeRegistry } from "./config/agent-types.js";
 import {
   defaultSettingsPath,
@@ -28,7 +20,7 @@ import {
   readSettingsNoMigrate,
   type AgentSettings,
 } from "./config/settings.js";
-import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
+import type { Notifier } from "./delivery/notifier.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
 import { buildSessionStack, type Stack } from "./stack.js";
 import { createBackgroundCompletionEventHook, createNotificationReceiptHook } from "./delivery/stack-hooks.js";
@@ -66,14 +58,9 @@ import {
 } from "./mention/session.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
 import { worktreeRoot } from "./extensions/worktree-orphans.js";
-import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
-import { PiSessionDriver } from "./runtime/session-driver.js";
-import { SingleSlotPool } from "./runtime/slot-pool.js";
-import { EventWatchdog } from "./runtime/watchdog.js";
-import { createQueryService, type QueryService } from "./service/query-service.js";
-import { createRunRegistry } from "./service/run-registry.js";
-import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
-import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
+import type { OrphanRegistry } from "./runtime/reaper.js";
+import type { QueryService } from "./service/query-service.js";
+import type { SpawnService } from "./service/spawn-service.js";
 import { publishBackgroundStatus } from "./service/background-status.js";
 import { createAgentTool } from "./tools/agent-tool.js";
 import { createResultTool, legacyResultToolRenderer } from "./tools/result-tool.js";
