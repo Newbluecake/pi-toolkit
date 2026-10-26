@@ -13,6 +13,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveAgentDir } from "../core/agent-dir.js";
+
 export const EXTERNAL_PACKAGE_NAMES = ["pi-traffic-record", "@bluecake/pi-traffic-record"] as const;
 export const LEGACY_EXTENSION_FILE = "traffic-dump.ts";
 
@@ -39,10 +41,9 @@ export interface DupFinding {
   readonly detail: string;
 }
 
-/** 默认 agentDir：`$PI_CODING_AGENT_DIR` else `~/.pi/agent`（pi 的 getAgentDir，无 pi import）。 */
+/** 默认 agentDir：复用 pi-free 收敛实现；相对覆盖值回落 `~/.pi/agent`。 */
 export function defaultAgentDir(home: string = process.env.HOME ?? ""): string {
-  const env = process.env.PI_CODING_AGENT_DIR;
-  return env && env.trim() !== "" ? env : join(home, ".pi", "agent");
+  return resolveAgentDir(process.env, home).dir;
 }
 
 /**

@@ -9,13 +9,19 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import { homedir } from "node:os";
 import { isAbsolute, normalize, resolve } from "node:path";
 import net from "node:net";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import { resolveAgentDir } from "../../src/core/agent-dir.js";
 import childProcess from "node:child_process";
 import { afterEach } from "vitest";
 import { resolveHubPaths, webHubStateDir } from "../../src/web-hub/protocol/paths.js";
 
 /** Captured while this setup module is evaluated, before any test can mutate HOME. */
 export const REAL_HOME = process.env.HOME !== undefined && process.env.HOME !== "" ? process.env.HOME : homedir();
-export const REAL_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? `${REAL_HOME}/.pi/agent`;
+export const REAL_AGENT_DIR = resolveAgentDir(process.env, REAL_HOME).dir;
+delete process.env.PI_CODING_AGENT_DIR;
+
+const protectedAgentRoots = [...new Set([REAL_AGENT_DIR, resolve(REAL_HOME, ".pi", "agent")])];
 
 const realUid = process.getuid?.() ?? 0;
 const realXdg = process.env.XDG_RUNTIME_DIR;
@@ -88,9 +94,46 @@ function guardSocket(operation: string, args: readonly unknown[]): void {
   if (target !== undefined && root !== undefined) violation(operation, target);
 }
 
+function spawnOptions(args: readonly unknown[]): unknown {
+  return Array.isArray(args[1]) ? args[2] : args[1];
+}
+
 function guardSpawn(operation: string, args: readonly unknown[]): void {
-  const home = configHome(args[2]);
+  const options = spawnOptions(args);
+  const home = configHome(options);
   if (home !== undefined && resolve(home) === resolve(REAL_HOME)) violation(operation, `PI_WEBHUB_CONFIG.home=${home}`);
+  const env =
+    typeof options === "object" && options !== null && "env" in options
+      ? ((options as { env?: NodeJS.ProcessEnv }).env ?? process.env)
+      : process.env;
+  // Only an explicit/nonempty override is checked here: normal children with a sandbox HOME
+  // and no override remain allowed. Their default agentDir is guarded by the existing HOME harness.
+  if (env.PI_CODING_AGENT_DIR && resolveAgentDir(env, env.HOME || REAL_HOME).dir === REAL_AGENT_DIR) {
+    violation(operation, `PI_CODING_AGENT_DIR=${env.PI_CODING_AGENT_DIR}`);
+  }
+}
+
+function guardFs(operation: string, target: unknown): void {
+  const value = target instanceof URL ? fileURLToPath(target) : Buffer.isBuffer(target) ? target.toString() : target;
+  if (typeof value !== "string") return; // file descriptors are not paths
+  const absolute = resolve(value);
+  for (const root of protectedAgentRoots) {
+    if (!pathInRoot(absolute, root)) continue;
+    const suffix = absolute.slice(resolve(root).length + 1);
+    if (
+      /^(?:pi-toolkit\.json[^/]*|pi-subagent\.json[^/]*|\.pi-subagent\.json\.lock)$/.test(suffix) ||
+      suffix === "records" ||
+      suffix.startsWith("records/")
+    )
+      violation(operation, value);
+  }
+}
+
+function writableOpen(flags: unknown): boolean {
+  if (typeof flags === "string") return /[wa+]/.test(flags);
+  if (typeof flags !== "number") return false;
+  const c = fs.constants;
+  return (flags & (c.O_WRONLY | c.O_RDWR | c.O_CREAT | c.O_TRUNC | c.O_APPEND)) !== 0;
 }
 
 // Built-in ESM named exports are snapshots of the CJS built-in exports. Mutate the CJS objects and
@@ -140,6 +183,26 @@ const guardedFork = function (this: unknown, ...args: unknown[]): childProcess.C
 (childCjs as { spawnSync: typeof childProcess.spawnSync }).spawnSync =
   guardedSpawnSync as typeof childProcess.spawnSync;
 (childCjs as { fork: typeof childProcess.fork }).fork = guardedFork as typeof childProcess.fork;
+const fsCjs = require("node:fs") as typeof fs;
+for (const name of [
+  "writeFileSync",
+  "renameSync",
+  "linkSync",
+  "symlinkSync",
+  "unlinkSync",
+  "rmSync",
+  "openSync",
+] as const) {
+  const original = fsCjs[name] as (...args: unknown[]) => unknown;
+  const wrapper = function (this: unknown, ...args: unknown[]): unknown {
+    if (name !== "openSync" || writableOpen(args[1])) {
+      guardFs(`fs.${name}`, args[0]);
+      if (name === "renameSync" || name === "linkSync" || name === "symlinkSync") guardFs(`fs.${name}`, args[1]);
+    }
+    return original.apply(this, args);
+  };
+  Object.assign(fsCjs, { [name]: wrapper });
+}
 syncBuiltinESMExports();
 
 /** Test-only escape hatch for an intentional real-home integration test. */
@@ -166,5 +229,5 @@ afterEach(() => {
   if (violations.length === 0) return;
   const details = violations.map((v) => `${v.operation} → ${v.target}\n${v.stack}`).join("\n\n");
   violations.length = 0;
-  throw new Error(`sandbox-home guard caught real hub access:\n${details}`);
+  throw new Error(`sandbox-home guard caught real home/agentDir access:\n${details}`);
 });

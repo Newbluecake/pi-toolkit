@@ -2475,10 +2475,27 @@ export function coreWarnings(corePattern) {
   return [];
 }
 
-function piAgentDir(home) {
-  const env = process.env.PI_CODING_AGENT_DIR;
-  if (env) return env === "~" ? home : env.startsWith("~/") ? path.join(home, env.slice(2)) : path.resolve(env);
-  return path.join(home, ".pi", "agent");
+// Mirror of src/core/agent-dir.ts — parity: tests/config/agent-dir-parity.test.ts.
+/** Lexical resolution only: no trim, realpath, I/O or pi imports. Relative values are unsupported. */
+export function resolveAgentDir(env, home) {
+  const H = path.join(home, ".pi", "agent");
+  const raw = env.PI_CODING_AGENT_DIR;
+  if (raw === undefined || raw === "") return { dir: H, home: H, source: "default" };
+  let expanded = raw === "~" ? home : raw.startsWith("~/") ? path.join(home, raw.slice(2)) : raw;
+  if (raw.startsWith("file://")) {
+    try {
+      expanded = fileURLToPath(raw);
+    } catch {
+      // Invalid file URLs are unsupported too; fall back without throwing.
+    }
+  }
+  if (!path.isAbsolute(expanded)) return { dir: H, home: H, source: "default", ignored: { raw, reason: "relative" } };
+  const dir = path.resolve(expanded);
+  return dir === H ? { dir: H, home: H, source: "default" } : { dir, home: H, source: "env" };
+}
+
+export function piAgentDir(home) {
+  return resolveAgentDir(process.env, home).dir;
 }
 
 /** Candidate install dirs for one pi package source (pi package-manager layout; best effort). */
@@ -6480,7 +6497,7 @@ function expandTilde(p, home) {
 async function cmdConvertEntry(args, cwd) {
   const C = await import("./convert.mjs");
   const home = homeDir();
-  const ctx = C.defaultConvertContext(process.env, { home, cwd });
+  const ctx = C.defaultConvertContext(process.env, { home, cwd, agentDir: piAgentDir(home) });
   return await C.cmdConvert(args, { ports: launcherPorts(home), ctx });
 }
 

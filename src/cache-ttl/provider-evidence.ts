@@ -34,6 +34,7 @@
 import * as fs from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
+import { resolveAgentDir } from "../core/agent-dir.js";
 import type { Millis } from "../core/types.js";
 import { readLatestAssistantUsage, type LedgerCtxLike } from "./usage-ledger.js";
 
@@ -397,13 +398,11 @@ export function createProviderEvidenceStore(filePath: string): ProviderEvidenceS
 export const PROVIDER_EVIDENCE_KEY = Symbol.for("pi-subagent:cache-provider-evidence");
 
 /**
- * Mirrors pi's `getAgentDir()` (`$PI_CODING_AGENT_DIR` else `~/.pi/agent`) without a runtime pi
- * import — this module stays pi-free so both main and child sessions (and tests) can use it.
+ * Uses the pi-free agentDir authority (`$PI_CODING_AGENT_DIR` else `~/.pi/agent`);
+ * unsupported relative overrides fall back to home, consistently with hub and launcher.
  */
 function defaultEvidencePath(): string {
-  const envDir = process.env.PI_CODING_AGENT_DIR;
-  const agentDir = typeof envDir === "string" && envDir !== "" ? envDir : path.join(homedir(), ".pi", "agent");
-  return path.join(agentDir, "cache-provider-evidence.json");
+  return path.join(resolveAgentDir(process.env, homedir()).dir, "cache-provider-evidence.json");
 }
 
 /** Lazily builds (or reuses, across `/reload`) the single process-wide store instance. */

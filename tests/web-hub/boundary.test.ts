@@ -93,6 +93,8 @@ const GIT_FILE_CLOSURE: Record<string, Array<{ spec: string; typeOnly: boolean }
  */
 const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/core/clock.ts": [],
+  "src/core/agent-dir.ts": ["node:path", "node:url"],
+  "src/web-hub/protocol/agent-dir.ts": ["node:path", "node:url"],
   "src/config/settings.ts": [
     "node:fs",
     "node:os",

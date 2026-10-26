@@ -21,6 +21,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { resolveAgentDir } from "../protocol/agent-dir.js";
 import type { LanOffReason, LanStatus } from "../protocol/lan.js";
 import {
   ensurePrivateDir,
@@ -302,6 +303,7 @@ export async function startHub(
   if (config.lan !== undefined && deps.lanConfigError !== undefined) {
     throw new Error("web-hub: startHub received both config.lan and deps.lanConfigError");
   }
+  const hubAgentDir = resolveAgentDir(process.env, config.home).dir;
   const now = deps.now ?? Date.now;
   const startup = new AbortController(); // ① startup scope: the sole cancellation source
   const startTimer = setTimeout(() => startup.abort(new Error("web-hub: start timeout")), HUB_START_DEADLINE_MS);
@@ -1125,8 +1127,8 @@ export async function startHub(
       };
       const spawnDirs = createDirService({
         home: config.home,
-        // SP3: `process.env.PI_CODING_AGENT_DIR ?? `${home}/.pi/agent`` — source ② of known dirs.
-        agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent`,
+        // SP3 source ② of known dirs: one resolved agentDir shared with history and preview.
+        agentDir: hubAgentDir,
         roots: spawnCfg.roots,
         registry,
         spawnHistory: () => spawnSup?.records() ?? [],
@@ -1176,7 +1178,7 @@ export async function startHub(
         stderrDir: spawnFiles.logDir,
         // spawn-relaunch: the base for `locateSessionFile`'s default-session-dir fallback (same
         // expression as spawnDirs'/history's agentDir above).
-        agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent`,
+        agentDir: hubAgentDir,
         // session-history plan §4.6.3/§4.8 (v3.4 X1): the restore re-fork's path-pin pair —
         // injected ONLY when history is on; absent ⇒ restore keeps its exact pre-history
         // behavior (no capture, no goLive verify, §5). Same `HistorySyncFs` for both halves.
@@ -1223,7 +1225,7 @@ export async function startHub(
       if (historyOn) {
         let historySvc = createSpawnHistoryService(
           {
-            agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent`,
+            agentDir: hubAgentDir,
             forkSrcDir: spawnFiles.forkSrcDir,
             registry,
             managed: () => (spawnSup?.records() ?? []).map(toManagedView),
@@ -1283,7 +1285,7 @@ export async function startHub(
       // the preview resolution (a degraded member keeps its literal form + a path-free WARN).
       previewDenyCtx = await startupStep(
         resolvePreviewDenyContext(
-          { home: config.home, agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent` },
+          { home: config.home, agentDir: hubAgentDir },
           {
             tracker: createPreviewIoTracker(),
             now,
@@ -1403,7 +1405,7 @@ export async function startHub(
         previewDenyCtx ??
         (await startupStep(
           resolvePreviewDenyContext(
-            { home: config.home, agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent` },
+            { home: config.home, agentDir: hubAgentDir },
             {
               tracker: createPreviewIoTracker(),
               now,
@@ -1488,7 +1490,7 @@ export async function startHub(
       // preview UI disabled. No raw-fs fallback and no bot-local upload store.
       previewDenyCtx ??= await startupStep(
         resolvePreviewDenyContext(
-          { home: config.home, agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent` },
+          { home: config.home, agentDir: hubAgentDir },
           { tracker: createPreviewIoTracker(), now, log, signal: startup.signal },
         ),
       );
