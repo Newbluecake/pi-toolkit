@@ -137,7 +137,7 @@ describe("workflow notice sink: settle during shutdown → persisted → re-deli
     expect(resent).toHaveLength(1);
     expect(resent[0]!.triggerTurn).toBe(false);
     expect(resent[0]!.details).toMatchObject({ workflowId: "wf_n1", status: "aborted", redelivered: true });
-    // get_subagent_result keeps working for it in the new stack.
+    // get_run_result keeps working for it in the new stack.
     expect(runs.get("wf_n1")).toMatchObject({ status: "aborted", name: "notify-flow" });
     expect(runs.get("wf_n1")?.usage?.costUsd).toBeCloseTo(0.75);
     // The delivered marker makes a second rebuild a no-op.

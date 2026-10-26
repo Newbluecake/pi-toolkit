@@ -33,7 +33,7 @@ import type {
  * - `stop()` is the management entry (`abort_subagent`): it asks the driver to
  *   stop early, and the driver applies the same bounded settle + fallback.
  * - Terminal entries are retained (bounded count + TTL, pruned lazily — no
- *   timers) so `get_subagent_result` can read them after the fact.
+ *   timers) so `get_run_result` can read them after the fact.
  * - Shutdown: `shutdown()` requests a stop on everything still running,
  *   `drain()` waits (bounded), `seal()` finalizes stragglers with their
  *   degraded snapshot and suppresses any later settle; `abandon()` is the

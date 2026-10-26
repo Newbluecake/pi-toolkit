@@ -72,6 +72,17 @@ describe("truncate", () => {
 });
 
 describe("parseConfig", () => {
+  it("waitNotifyTools: the legacy get_subagent_result name maps to get_run_result (order kept, de-duplicated)", () => {
+    expect(parseConfig({ waitNotifyTools: ["ask_user", "get_subagent_result"] }, {}).waitNotifyTools).toEqual([
+      "ask_user",
+      "get_run_result",
+    ]);
+    expect(parseConfig({ waitNotifyTools: ["get_subagent_result", "get_run_result"] }, {}).waitNotifyTools).toEqual([
+      "get_run_result",
+    ]);
+    expect(parseConfig({}, {}).waitNotifyTools).toEqual(["ask_user"]);
+  });
+
   const cases: Array<[unknown, string]> = [
     [0, "0"],
     [-1, "-1"],

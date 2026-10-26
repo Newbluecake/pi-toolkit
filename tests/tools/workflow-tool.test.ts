@@ -141,7 +141,7 @@ describe("SubagentWorkflow tool: background-only", () => {
       expect(runs.get(details.workflowId)?.status).toBe("running");
       const body = text(result);
       expect(body).toContain(`workflow_id: ${details.workflowId}`);
-      expect(body).toContain(`get_subagent_result(run_id: "${details.workflowId}")`);
+      expect(body).toContain(`get_run_result(run_id: "${details.workflowId}")`);
       expect(body).toContain(`abort_subagent(run_id: "${details.workflowId}")`);
       expect(body).toMatch(/do not block or poll/);
       expect(body).toContain(`[workflow label: "held-flow" · workflow_id: ${details.workflowId} · status: running]`);
@@ -220,7 +220,7 @@ describe("SubagentWorkflow tool: background-only", () => {
   it("describes the background model and no longer claims to block", () => {
     const tool = toolWith(realRuns(makeSpawner().spawner));
     expect(tool.description).toContain("always runs in the background");
-    expect(tool.description).toContain("get_subagent_result");
+    expect(tool.description).toContain("get_run_result");
     expect(tool.description).toContain("abort_subagent");
     expect(tool.description).not.toMatch(/BLOCKS|blocks until/);
     expect(tool.promptSnippet).toMatch(/background/);
@@ -794,7 +794,7 @@ describe("formatWorkflowNotification", () => {
       'Workflow "review-flow" (wf_abc) completed — completed · 1m05s · 1 children (✓1) · $0.25',
     );
     expect(body).toContain("result: ALL GOOD");
-    expect(body).toContain('get_subagent_result(run_id: "wf_abc")');
+    expect(body).toContain('get_run_result(run_id: "wf_abc")');
   });
 
   it("caps the outcome text by resultMaxChars (control: 0 = no cap)", () => {

@@ -86,7 +86,7 @@ export const TASK_PROMPT_CAP = 4096;
 
 /**
  * X12: bounded cap for RunDiagnostics.absorbedRunIds. A run that delegates a
- * lot (nested Agents, repeated get_subagent_result fetches)
+ * lot (nested Agents, repeated get_run_result fetches)
  * absorbs one id per usage-bearing toolResult; the cap keeps persist_snapshot
  * bounded. FIFO: the OLDEST id drops first — the residual risk is that a run
  * absorbing more than this many children loses the earliest absorption
@@ -914,7 +914,7 @@ export function reduce(
     // session_create / extension_bind failing with a real cause (driver
     // rejection: unknown model, createAgentSession throwing, …): carry the
     // error like resolve_config does, so the outbox failReason and
-    // get_subagent_result show *why* instead of an empty failed.
+    // get_run_result show *why* instead of an empty failed.
     return finish(state, "failed", input.at, budget, { lastEventType: input.error.kind, error: input.error });
   }
   if (input.kind === "session_event") {

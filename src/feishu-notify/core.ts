@@ -6,6 +6,7 @@
  */
 
 import { createHmac } from "node:crypto";
+import { migrateToolNames } from "../core/tool-names.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -64,7 +65,10 @@ export function parseConfig(fileConfig: Config, env: NodeJS.ProcessEnv): Config 
     webhookUrl: fileConfig.webhookUrl ?? env.FEISHU_WEBHOOK_URL,
     secret: fileConfig.secret ?? env.FEISHU_WEBHOOK_SECRET,
     waitNotifyTimeoutSec: normalizeNumber(fileConfig.waitNotifyTimeoutSec, DEFAULT_WAIT_NOTIFY_TIMEOUT_SEC),
-    waitNotifyTools: Array.isArray(fileConfig.waitNotifyTools) ? fileConfig.waitNotifyTools : DEFAULT_WAIT_NOTIFY_TOOLS,
+    // Tool renames (e.g. get_subagent_result → get_run_result) are mapped on read so old configs keep matching.
+    waitNotifyTools: Array.isArray(fileConfig.waitNotifyTools)
+      ? migrateToolNames(fileConfig.waitNotifyTools)
+      : DEFAULT_WAIT_NOTIFY_TOOLS,
     heartbeatIntervalSec: normalizeNumber(fileConfig.heartbeatIntervalSec, DEFAULT_HEARTBEAT_INTERVAL_SEC),
     idleNotifyTimeoutSec: normalizeNumber(fileConfig.idleNotifyTimeoutSec, DEFAULT_IDLE_NOTIFY_TIMEOUT_SEC),
     subagentSummaryEnabled: fileConfig.subagentSummaryEnabled === false ? false : true,

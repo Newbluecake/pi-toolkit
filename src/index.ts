@@ -81,7 +81,8 @@ import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
 import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
 import { publishBackgroundStatus } from "./service/background-status.js";
 import { createAgentTool } from "./tools/agent-tool.js";
-import { createResultTool } from "./tools/result-tool.js";
+import { createResultTool, legacyResultToolRenderer } from "./tools/result-tool.js";
+import { createResultToolActivation } from "./tools/result-tool-activation.js";
 import { createListSubagentsTool } from "./tools/list-subagents-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
 import { createSetModelTool } from "./tools/set-model-tool.js";
@@ -434,7 +435,14 @@ export default function activate(rawPi: ExtensionAPI): void {
   // web-hub archive plan: the archive control re-seeds on session_tree (the stack is NOT rebuilt
   // there) and session_compact — same restore points as todo's wiring, registered OUTSIDE the
   // xsEnabled blocks above so they run regardless of fabric.
-  pi.on("session_tree", (_event, ctx) => restoreArchive(ctx));
+  // result-tool rename: pi ≥ 1.3 restores the active tools from the transcript on resume / fork / `/tree`
+  // and would leave get_run_result inactive for sessions recorded under the old name. Piggybacks on the
+  // existing session_start / session_tree handlers (no new handler); see tools/result-tool-activation.ts.
+  const activateResultTool = createResultToolActivation(pi);
+  pi.on("session_tree", (_event, ctx) => {
+    restoreArchive(ctx);
+    activateResultTool(ctx);
+  });
   pi.on("session_compact", (_event, ctx) => restoreArchive(ctx));
   if (xsEnabled) {
     // Registered ahead of other async mutation hooks: the window closes BEFORE their awaits.
@@ -953,7 +961,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   } else {
     console.warn("[pi-subagent] registerEntryRenderer unavailable; fabric display messages fall back to context");
   }
-  // Markdown body rendering for the Agent / get_subagent_result cards.
+  // Markdown body rendering for the Agent / get_run_result cards.
   // getMarkdownTheme() reads pi's global theme, which throws before the
   // interactive theme subsystem is initialized (headless/print mode, tests)
   // — the tools fall back to their legacy plain-text cards in that case.
@@ -977,17 +985,19 @@ export default function activate(rawPi: ExtensionAPI): void {
       loadGate: () => holder.current?.load?.port().verdict().gating === true,
     }),
   );
-  pi.registerTool(
-    createResultTool({
-      query: forwardQuery(holder),
-      resolveRun: forwardResolveRun(holder),
-      notifier: forwardNotifier(holder),
-      resultMaxChars: () => settings.resultMaxChars,
-      markdownTheme: resolveMarkdownTheme,
-      workflows: forwardWorkflowQuery(holder),
-      wake: { inboxCount: (runId) => holder.current?.wake?.inboxCount(runId) ?? 0 },
-    }),
-  );
+  const resultTool = createResultTool({
+    query: forwardQuery(holder),
+    resolveRun: forwardResolveRun(holder),
+    notifier: forwardNotifier(holder),
+    resultMaxChars: () => settings.resultMaxChars,
+    markdownTheme: resolveMarkdownTheme,
+    workflows: forwardWorkflowQuery(holder),
+    wake: { inboxCount: (runId) => holder.current?.wake?.inboxCount(runId) ?? 0 },
+  });
+  pi.registerTool(resultTool);
+  // Resumed transcripts still carry calls under the pre-rename name: draw them with the same cards
+  // (pi ≥ 1.0.1; absent on older pi / stub hosts, where history simply falls back to the generic card).
+  if (typeof pi.registerToolRenderer === "function") pi.registerToolRenderer(legacyResultToolRenderer(resultTool));
   pi.registerTool(
     createListSubagentsTool({
       query: forwardQuery(holder),
@@ -1437,6 +1447,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   installMentionInput(pi, mentionRouteDeps);
 
   pi.on("session_start", async (_event, ctx) => {
+    activateResultTool(ctx);
     xsAttached = false;
     const nextXsSessionId = xsEnabled || xsLedger.size > 0 ? xsSessionOf(ctx) : undefined;
     notifyCapabilityCtx.current = ctx;
@@ -2053,7 +2064,7 @@ function forwardWorkflow(holder: { current?: Stack }): WorkflowToolDeps {
     runs: { start: (req) => requireStack(holder).workflow.runs.start(req) },
   };
 }
-/** Background workflow management for get_subagent_result / abort_subagent (plan §2.3). Lenient when no
+/** Background workflow management for get_run_result / abort_subagent (plan §2.3). Lenient when no
  *  session exists yet: nothing resolves as a workflow, so the run path produces its usual error. */
 function forwardWorkflowQuery(holder: { current?: Stack }): WorkflowQueryPort {
   return {

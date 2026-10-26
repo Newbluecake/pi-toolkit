@@ -3,7 +3,7 @@ import type { ResolveRunResult } from "../service/resolve-target.js";
 
 /**
  * Shared "human name next to the run id" formatting for every tool surface that
- * prints a subagent run id (steer / abort / extend / set_model / get_subagent_result).
+ * prints a subagent run id (steer / abort / extend / set_model / get_run_result).
  *
  * Result text form: `<label> (run_id: r_XXXX)`; a run without a label falls back to
  * the bare `run r_XXXX` phrase exactly as before (never "undefined", never empty parens).

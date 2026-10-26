@@ -323,7 +323,7 @@ function capStartErrorMessage(raw: string): string {
  * cancel or a deadline) is a real failure with a real cause — e.g. pi's
  * `No API key found for <provider>.` when the child session's fresh model
  * runtime does not know the requested provider. Keep the message (capped) so
- * the completion notice and get_subagent_result show it instead of the
+ * the completion notice and get_run_result show it instead of the
  * generic "cancelled" the guards used to report for every rejection.
  */
 function startError(e: unknown): ErrorInfo {
@@ -924,7 +924,7 @@ export class RuntimeRunner implements Runner {
           // child-context-switch plan P0 (§2.3.1 point 3): fold the diagnostic
           // into the state machine FIRST (above), then latch locally — the
           // local latch is what settlement actually reads (see promptError
-          // below); the diag write is display/get_subagent_result plumbing
+          // below); the diag write is display/get_run_result plumbing
           // only. First value wins (see selfcheckLatch's own doc above).
           if (e.t === "switch_selfcheck_failed" && selfcheckLatch === undefined) selfcheckLatch = e.reason;
           // todo #27: WARN once per process (this RuntimeRunner instance's lifetime, i.e. until

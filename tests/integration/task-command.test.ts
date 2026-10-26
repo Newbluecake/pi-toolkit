@@ -175,7 +175,7 @@ describe("/task integration: completion notification path", () => {
     }
 
     // The /task run is a root run: label registered, resolvable via the query
-    // service exactly like an Agent run (get_subagent_result / @mention / steer).
+    // service exactly like an Agent run (get_run_result / @mention / steer).
     expect(h.queryService.get(taskRunId)?.diag.label).toBe("fix-the-login-timeout-bug");
   });
 

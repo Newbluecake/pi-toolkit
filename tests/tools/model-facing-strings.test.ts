@@ -51,6 +51,14 @@ function tools() {
 }
 
 describe("model-facing tool strings", () => {
+  it("result tool: new name, covers r_/wf_/scheduled runs, carries the one-line transition note", () => {
+    const tool = createResultTool({ query: {} as never });
+    expect(tool.name).toBe("get_run_result");
+    expect(tool.description).toContain("wf_");
+    expect(tool.description).toContain("scheduled task");
+    expect(tool.description).toContain("(Formerly named get_subagent_result.)");
+    expect(tool.promptSnippet).toMatch(/^get_run_result\(run_id, wait\?, wait_ms\?\)/);
+  });
   it("contain no internal architecture references", () => {
     for (const tool of tools()) {
       const strings = [tool.description, tool.promptSnippet, ...collectDescriptions(tool.parameters)];
@@ -125,7 +133,7 @@ describe("model-facing tool strings", () => {
   });
 
   /**
-   * A blocking wait (get_subagent_result wait:true, bash_job wait) occupies
+   * A blocking wait (get_run_result wait:true, bash_job wait) occupies
    * the agent loop for its whole duration — the user cannot type a new
    * message or command until it returns. The descriptions must state that
    * consequence, or models treat wait as a free default instead of the

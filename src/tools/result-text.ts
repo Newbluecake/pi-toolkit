@@ -80,7 +80,7 @@ function formatExitJob(job: RunExitJob): string {
 /**
  * bash-timeout-grace plan §3.7 (P0b, frozen): renders `RunOutcome.diag.exitFacts`
  * (already threaded there via the `exit_facts` session_event, §3.8) into the
- * trailing lines `get_subagent_result`'s `formatOutcome` (src/tools/result-tool.ts,
+ * trailing lines `get_run_result`'s `formatOutcome` (src/tools/result-tool.ts,
  * a later package) appends to a subagent's result text, and that the parent
  * completion notice reuses via `DeliveryPayload.exitFacts`. Pure text
  * formatting only — no pi imports, matches this file's existing convention
@@ -107,7 +107,7 @@ export function formatExitFacts(facts: RunExitFacts | undefined): string | undef
 /**
  * child-context-switch plan P0 (§2.3.1, result text line): renders
  * `RunOutcome.diag.contextSwitches` into the one-line summary
- * `get_subagent_result`'s formatOutcome (src/tools/result-tool.ts, wired by
+ * `get_run_result`'s formatOutcome (src/tools/result-tool.ts, wired by
  * the child-wiring package) appends to a subagent's result text and the
  * parent completion notice reuses. Returns `undefined` when the run never
  * produced any context-switch diagnostics at all (the common case: the
@@ -186,7 +186,7 @@ function formatExternalCredits(credits: number): string {
 /**
  * external-agent plan §3.4 (P4c, frozen signature): renders
  * `RunDiagnostics.external` as one identity/pricing line, appended by
- * get_subagent_result's formatOutcome (src/tools/result-tool.ts) — same
+ * get_run_result's formatOutcome (src/tools/result-tool.ts) — same
  * threading pattern as formatExitFacts/formatContextSwitches above. Returns
  * `undefined` when the run has no external metadata at all (every pi run), so
  * callers simply skip the line and non-external output stays byte-identical.

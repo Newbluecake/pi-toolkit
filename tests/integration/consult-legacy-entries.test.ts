@@ -226,7 +226,7 @@ describe("legacy consult run entries (#40 compat)", () => {
     for (const key of LEGACY_KEYS) expect(got.diag).toHaveProperty(key); // seeding is a cast: nothing is stripped, nothing reads it
   });
 
-  it("get_subagent_result, list_subagents, /agent status, the fleet view and the web projection render it as an ordinary run", async () => {
+  it("get_run_result, list_subagents, /agent status, the fleet view and the web projection render it as an ordinary run", async () => {
     const { snap } = legacyEntries();
     const query = queryOf(snap);
     const result = await createResultTool({ query }).execute(

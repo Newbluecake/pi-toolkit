@@ -1,7 +1,7 @@
 /** A1: report bytes and terminal/index commit under S1's single writer lock. */
 import { randomUUID } from "node:crypto";
 import { sameHolder } from "../core/recovery.js";
-import { SCHEDULE_RESULT_TOOL } from "./result-reference.js";
+import { RESULT_TOOL_NAME } from "../../core/tool-names.js";
 import {
   isTerminalRunState,
   reportFileOf,
@@ -58,7 +58,7 @@ export function backgroundHeader(task: ScheduleTask, run: RunRecord): string {
 function reportBytes(task: ScheduleTask, run: RunRecord, result: BackgroundResult): Buffer {
   const head = `${backgroundHeader(task, run)}\n\n状态：${result.state}${result.reason ? `（${result.reason}）` : ""}\n\n`;
   const suffix = run.runId
-    ? `\n\n[报告已截断；完整输出请使用 ${SCHEDULE_RESULT_TOOL} ${run.runId}。]\n`
+    ? `\n\n[报告已截断；完整输出请使用 ${RESULT_TOOL_NAME} ${run.runId}。]\n`
     : "\n\n[报告已截断；本次运行没有可查询的子任务全文。]\n";
   const prefix = truncateUtf8(head, 2048);
   const room = SCHED_REPORT_MAX_BYTES - Buffer.byteLength(prefix) - Buffer.byteLength(suffix);

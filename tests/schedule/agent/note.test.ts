@@ -81,7 +81,7 @@ describe("schedule result notes — file proof only", () => {
     ).toBe("/var/tmp/pi-toolkit-schedules/session-fixed/reports/s_aaaaaaaa-20261026-0852.md");
   });
   it.each([
-    { runId: "r_full", reportFile: "reports/s_aaaaaaaa-20261026-0852.md", expected: "get_subagent_result r_full" },
+    { runId: "r_full", reportFile: "reports/s_aaaaaaaa-20261026-0852.md", expected: "get_run_result r_full" },
     { runId: undefined, reportFile: "reports/s_aaaaaaaa-20261026-0852.md", expected: "path" },
     { runId: undefined, reportFile: `reports/${"a".repeat(64)}.md`, expected: "path" },
     { runId: undefined, reportFile: undefined, expected: undefined },

@@ -250,7 +250,7 @@ export function renderExtensionStatusLines(
  * as kept by the HUD session and folded by computeLiveSubagentCost().
  * `absorbed` marks a run whose lifetime spend already rode into its parent
  * run's accumulator on a usage-bearing toolResult (nested Agent /
- * get_subagent_result / consult) — see usage-broadcast.ts.
+ * get_run_result / consult) — see usage-broadcast.ts.
  */
 export interface SubUsageEntry {
   costUsd: number;
@@ -262,7 +262,7 @@ export interface SubUsageEntry {
  * Fold the broadcast map into the footer's `+agents` component: the spend of
  * every run NOT yet accounted on a session toolResult (subAccounted) and not
  * absorbed into another tracked run's accumulator (X12 — nested Agent /
- * consult / get_subagent_result spend rides the parent's toolResult usage;
+ * consult / get_run_result spend rides the parent's toolResult usage;
  * counting both would double-bill). Returns the total and whether any counted
  * run is still burning money (yellow vs grey).
  */
@@ -330,7 +330,7 @@ export function installFooter(session: HudSession, ctx: ExtensionContext): void 
           if (entry.type !== "message") continue;
           // 子代理/嵌套 LLM 调用的花费：pi 的 usage accounting 把它们
           // 挂在 toolResult 消息上（如 pi-subagent 的 Agent /
-          // get_subagent_result）。计入 total，不计入 req（req 语义为
+          // get_run_result）。计入 total，不计入 req（req 语义为
           // 主会话最近一次 LLM 请求）。
           if (entry.message.role === "toolResult") {
             const tu = (

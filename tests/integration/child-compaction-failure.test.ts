@@ -320,7 +320,7 @@ describe("T-F1: real context overflow, twice in a row (compact-and-retry exhaust
         expect(outcome.diag.compactionFailures ?? []).toHaveLength(1);
         expect(outcome.diag.compactionFailures?.[0]?.reason).toBe("overflow");
         // The runner's OWN error-concatenation already folded the compaction failure reason into
-        // error.message, so result-text's helper (used by get_subagent_result / the completion
+        // error.message, so result-text's helper (used by get_run_result / the completion
         // notice) recognizes it as already-covered and adds nothing extra — no doubled line.
         const note = formatCompactionFailureNote(outcome.diag.compactionFailures, outcome.error?.message);
         expect(note).toBeUndefined();
@@ -501,7 +501,7 @@ describe("T-F3: two INDEPENDENT compaction failures in the same run", () => {
   });
 });
 
-describe("get_subagent_result / notification text surfaces the same reasons (T-F1/T-F2/T-F3, §2.3.1)", () => {
+describe("get_run_result / notification text surfaces the same reasons (T-F1/T-F2/T-F3, §2.3.1)", () => {
   it("formatContextSwitches stays silent (no switch happened) while formatCompactionFailureNote carries the failure for a completed-with-trouble run", async () => {
     const smallModel = fakeModel({ contextWindow: 500 });
     const padding = "x".repeat(6000);

@@ -432,7 +432,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   };
   /**
    * Fix 2 (admitted-run-visibility plan): a run becomes visible to
-   * list_subagents / get_subagent_result / @label resolution the INSTANT
+   * list_subagents / get_run_result / @label resolution the INSTANT
    * spawn() admits it, not only once the runtime adapter's first real
    * onSnapshot lands — for a resume that can be seconds away (the adapter
    * opens the old session file before even entering RuntimeRunner.run()).

@@ -283,11 +283,11 @@ describe("program-derived producers stay fixed (X1-X6, real entries)", () => {
     // Clean up: stop the workflow; its child must not outlive it.
     await host.call("abort_subagent", { run_id: wfId });
     await until(async () => {
-      const read = await host.call("get_subagent_result", { run_id: wfId });
+      const read = await host.call("get_run_result", { run_id: wfId });
       return read.details.status !== "running";
     });
     await until(async () => {
-      const read = await host.call("get_subagent_result", { run_id: child.req.runId });
+      const read = await host.call("get_run_result", { run_id: child.req.runId });
       return ["aborted", "timed_out", "failed"].includes(String(read.details?.status));
     });
     await host.emit("session_shutdown", { reason: "quit" });

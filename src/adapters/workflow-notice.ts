@@ -192,7 +192,7 @@ export function readPendingWorkflowNotices(branch: readonly unknown[], now: numb
 
 /**
  * Re-deliver pending notices left by the previous stack on this session file:
- * seed the registry (so get_subagent_result still answers for them), send the
+ * seed the registry (so get_run_result still answers for them), send the
  * message without triggering a turn, and append a `delivered` marker so the
  * next rebuild does not repeat it.
  */

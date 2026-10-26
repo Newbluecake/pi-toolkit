@@ -1,7 +1,7 @@
 import type { Component } from "@earendil-works/pi-tui";
 
 /**
- * Collapsed body line budget for tool result cards (Agent / get_subagent_result),
+ * Collapsed body line budget for tool result cards (Agent / get_run_result),
  * shared by the plain-text fallback and the markdown render paths.
  */
 export const COLLAPSED_BODY_LINES = 6;

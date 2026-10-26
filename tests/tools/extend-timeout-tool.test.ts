@@ -209,12 +209,12 @@ describe("tools/extend-timeout-tool: rejection matrix (arch §4.4 — every refu
     expect(message).toContain("respawn"); // next step
   });
 
-  it("not_started → extend only once executing; check with get_subagent_result", async () => {
+  it("not_started → extend only once executing; check with get_run_result", async () => {
     const { tool } = setup(rejected("not_started"), snapshot({ status: "queued" }));
     const message = await executeError(tool, { run_id: RUN_ID, extend_s: 60 });
     expect(message).toContain("has not started running yet (queued)");
     expect(message).toContain("extend after it starts"); // next step
-    expect(message).toContain(`get_subagent_result(run_id: "${RUN_ID.slice(0, 8)}")`);
+    expect(message).toContain(`get_run_result(run_id: "${RUN_ID.slice(0, 8)}")`);
   });
 
   it("stopping → cannot bring it back; collect the terminal outcome", async () => {
@@ -222,7 +222,7 @@ describe("tools/extend-timeout-tool: rejection matrix (arch §4.4 — every refu
     const message = await executeError(tool, { run_id: RUN_ID, extend_s: 60 });
     expect(message).toContain("already shutting down");
     expect(message).toContain("would not bring it back");
-    expect(message).toContain("get_subagent_result"); // next step
+    expect(message).toContain("get_run_result"); // next step
   });
 
   it("already_terminal → read the output instead", async () => {
@@ -246,7 +246,7 @@ describe("tools/extend-timeout-tool: rejection matrix (arch §4.4 — every refu
     const message = await executeError(tool, { run_id: RUN_ID, extend_s: 60 });
     expect(message).toContain("has already used all 3 deadline extensions");
     expect(message).toContain("It will stop at its current deadline (in 42s)");
-    expect(message).toContain("get_subagent_result"); // next step ①
+    expect(message).toContain("get_run_result"); // next step ①
     expect(message).toContain("abort_subagent and respawn with a larger timeout_s"); // next step ②
   });
 
@@ -259,7 +259,7 @@ describe("tools/extend-timeout-tool: rejection matrix (arch §4.4 — every refu
     expect(message).toContain("has a fixed deadline (the system started it with a non-extendable time cap");
     expect(message).toContain("/goal verifier or RPC run, or a resume of one");
     expect(message).toContain("it stops at its deadline (in 42s) and cannot be extended");
-    expect(message).toContain("get_subagent_result"); // next step ①
+    expect(message).toContain("get_run_result"); // next step ①
     expect(message).toContain("abort_subagent and respawn with a larger timeout_s"); // next step ②
   });
 
@@ -273,7 +273,7 @@ describe("tools/extend-timeout-tool: rejection matrix (arch §4.4 — every refu
       "has no headroom above its deadline (budget.maxTotalFactor is 1, or an absolute deadline cap applies)",
     );
     expect(message).toContain("it stops at its deadline (in 42s)");
-    expect(message).toContain("get_subagent_result"); // next step
+    expect(message).toContain("get_run_result"); // next step
     // 废弃启发式的回归锁：同一 H === D0 形状不得再被推断为 fixed/hard cap
     expect(message).not.toContain("fixed deadline");
     expect(message).not.toContain("hard cap");
@@ -303,7 +303,7 @@ describe("tools/extend-timeout-tool: rejection matrix (arch §4.4 — every refu
     );
     const message = await executeError(tool, { run_id: RUN_ID, extend_s: 60 });
     expect(message).toContain("is at its hard ceiling (1h00m from start); no further extension is possible");
-    expect(message).toContain("get_subagent_result"); // next step
+    expect(message).toContain("get_run_result"); // next step
   });
 
   it("U6: no_headroom on an old run without the policy field → neutral ceiling variant (no cause claim)", async () => {
@@ -439,7 +439,7 @@ describe("tools/extend-timeout-tool: SubagentWorkflow targets", () => {
     const message = await executeError(tool, { run_id: WF, extend_s: 60 });
     expect(message).toBe(
       `workflow ${WF} ("review-flow") has no headroom above its deadline (budget.maxTotalFactor is 1); it stops at its ` +
-        `deadline (in 1m00s) and cannot be extended. Read what it produced with get_subagent_result(run_id: "${WF}") ` +
+        `deadline (in 1m00s) and cannot be extended. Read what it produced with get_run_result(run_id: "${WF}") ` +
         "after the notification, or abort_subagent and restart the workflow with a larger timeout_s.",
     );
     // 主会话 R4 裁定锁：workflow 无策略字段，不得以 H === D0 形状推断「显式 timeout 是硬顶」

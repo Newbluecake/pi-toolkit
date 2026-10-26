@@ -1,7 +1,8 @@
 import { formatTokens } from "../hud/format.js";
+import { LEGACY_RESULT_TOOL_NAME, RESULT_TOOL_NAME } from "../core/tool-names.js";
 import { Type, type Static } from "@sinclair/typebox";
 import { Container, Markdown, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ToolDefinition, ToolRendererResolver } from "@earendil-works/pi-coding-agent";
 import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
 import { deliveryKey, type Notifier } from "../delivery/notifier.js";
@@ -43,7 +44,7 @@ import type { WorkflowOutcome } from "../workflow/types.js";
 import type { UsageDelta } from "../core/types.js";
 
 /**
- * "get_subagent_result" — drop-in replacement for @tintinweb/pi-subagents'
+ * "get_run_result" (≤ v0.9.x: get_subagent_result) — successor of @tintinweb/pi-subagents'
  * result-retrieval tool. `wait` is bounded by `wait_ms` (architecture G1/G2:
  * QueryService.wait() never blocks unboundedly, see service/query-service.ts)
  * — this closes the original plugin's P2 defect (unbounded wait:true).
@@ -60,7 +61,8 @@ import type { UsageDelta } from "../core/types.js";
 export const ResultToolParams = Type.Object({
   run_id: Type.String({
     description:
-      "The run id returned by the Agent tool; also accepts a unique run_id prefix or the Agent call's label (its description). " +
+      "The id of the run to read: a run id (r_…) returned by the Agent tool or named in a /task or scheduled-task " +
+      "notification; also accepts a unique run_id prefix or the Agent call's label (its description). " +
       "A SubagentWorkflow id (wf_…, or a unique prefix / the workflow's script name) reads that background workflow instead.",
   }),
   wait: Type.Optional(
@@ -83,7 +85,7 @@ export type ResultToolParams = Static<typeof ResultToolParams>;
 
 export type { PollGuardOptions } from "./poll-guard.js";
 
-/** Default blocking-wait budget for get_subagent_result when wait:true and no explicit wait_ms (5 minutes). */
+/** Default blocking-wait budget for get_run_result when wait:true and no explicit wait_ms (5 minutes). */
 export const DEFAULT_WAIT_MS = 300_000;
 
 /** Partial-update / final-result details consumed by renderResult (mirrors AgentToolDetails in agent-tool.ts). */
@@ -104,6 +106,22 @@ export interface ResultToolDetails {
   structuredResult?: unknown;
   truncated?: true;
   totalChars?: number;
+}
+
+/**
+ * Draws HISTORICAL calls of the pre-rename tool name (≤ v0.9.x get_subagent_result) with the current
+ * tool's cards: the legacy name is no longer registered, so without a renderer pi would fall back to a
+ * bare generic card when a resumed session replays the old transcript. Any other name goes to `next()`.
+ * Pure — wired in src/index.ts behind a `registerToolRenderer` capability probe (pi ≥ 1.0.1).
+ */
+export function legacyResultToolRenderer(tool: { renderCall?: unknown; renderResult?: unknown }): ToolRendererResolver {
+  return (toolName, next) =>
+    toolName === LEGACY_RESULT_TOOL_NAME
+      ? ({
+          ...(tool.renderCall ? { renderCall: tool.renderCall } : {}),
+          ...(tool.renderResult ? { renderResult: tool.renderResult } : {}),
+        } as NonNullable<ReturnType<ToolRendererResolver>>)
+      : next();
 }
 
 export function createResultTool(deps: {
@@ -139,7 +157,7 @@ export function createResultTool(deps: {
   const pollGuard = createPollGuard(deps.pollGuard);
   const waitStreak = createTimeoutStreak(deps.timeoutStreak);
   // pi usage accounting dedupe: a background run's spend is attached to the
-  // FIRST tool result that reports its terminal outcome — get_subagent_result
+  // FIRST tool result that reports its terminal outcome — get_run_result
   // can be called repeatedly for the same run, and re-attaching usage each
   // time would double-count the cost in pi's session totals.
   const usageReported = new Set<string>();
@@ -152,7 +170,7 @@ export function createResultTool(deps: {
     if (!deps.notifier) return;
     try {
       deps.notifier.ack(runId, generation, {
-        extensionOwner: "get_subagent_result",
+        extensionOwner: RESULT_TOOL_NAME,
       });
     } catch {
       // Defensive boundary for future notifier implementations.
@@ -161,7 +179,7 @@ export function createResultTool(deps: {
   /**
    * Workflow spend accounting, same "first terminal read attaches it" rule as
    * runs, with ONE dedupe set shared with the run path: each live child run is
-   * reported at most once, whether it is read individually (get_subagent_result
+   * reported at most once, whether it is read individually (get_run_result
    * on the child run_id) or through its workflow. After /reload the child runs
    * are gone from the query service; the aggregate captured at settle time
    * (view.usage) is used then — only when none of its children was reported.
@@ -273,13 +291,13 @@ export function createResultTool(deps: {
     };
   }
   return {
-    name: "get_subagent_result",
-    label: "Get Subagent Result",
+    name: RESULT_TOOL_NAME,
+    label: "Get Run Result",
     description:
-      "Check on, or collect the result of, a subagent run started with the Agent tool — or a background " +
-      "SubagentWorkflow, by its workflow id (wf_…): progress while it runs, the full outcome plus its children's " +
-      "spend once it is terminal. " +
-      "Agent runs push a completion notification on terminal state, so the normal flow is: continue other " +
+      "Check on, or collect the result of, a background run by its id: a subagent run (r_…) started with the " +
+      "Agent tool, /task or a scheduled task, or a SubagentWorkflow (wf_…) — progress while it runs, the full " +
+      `outcome (for a workflow, plus its children's spend) once it is terminal. (Formerly named ${LEGACY_RESULT_TOOL_NAME}.) ` +
+      "Every such run pushes a completion notification on terminal state, so the normal flow is: continue other " +
       "work (or end your turn), then call this tool without wait once the notification arrives. Set wait: true " +
       "to block until the run finishes (up to wait_ms) — while it blocks, the user cannot send new input, so " +
       "avoid it whenever anything else could proceed (ending your turn counts); it is a fallback for when an " +
@@ -290,11 +308,10 @@ export function createResultTool(deps: {
       "same run returns a warning; await the completion notification instead. " +
       "A wait that times out tells you how to proceed; repeated timeouts on the same run escalate that " +
       "guidance (raise wait_ms, or stop blocking and await the notification).",
-    promptSnippet:
-      "get_subagent_result(run_id, wait?, wait_ms?) - check a background subagent's or workflow's status/result",
+    promptSnippet: `${RESULT_TOOL_NAME}(run_id, wait?, wait_ms?) - check a background run's status/result (subagent, scheduled task or workflow)`,
     parameters: ResultToolParams,
     /**
-     * Without a renderCall the TUI shows a bare "get_subagent_result ⠦" while
+     * Without a renderCall the TUI shows a bare "get_run_result ⠦" while
      * a wait blocks — no hint of *which* run is being awaited or under what
      * budget. Mirror the Agent tool: surface the key arguments on the card.
      */
@@ -303,7 +320,7 @@ export function createResultTool(deps: {
       const title = theme.fg(
         "toolTitle",
         theme.bold(
-          `Get Subagent Result: ${titleForHandle(args?.run_id, { resolveRun: deps.resolveRun, get: (id) => deps.query.get(id) })}`,
+          `Get Run Result: ${titleForHandle(args?.run_id, { resolveRun: deps.resolveRun, get: (id) => deps.query.get(id) })}`,
         ),
       );
       const meta = args?.wait

@@ -97,12 +97,12 @@ describe("system prompt: background-only Agent tool protocol", () => {
   const prompt = formatAgentTypesForPrompt([type]);
   const protocol = prompt.split("\n").find((line) => line.startsWith("Tool protocol:"));
 
-  it("states the background-only protocol: immediate run_id, pushed notification, then get_subagent_result", () => {
+  it("states the background-only protocol: immediate run_id, pushed notification, then get_run_result", () => {
     expect(protocol).toBeDefined();
     expect(protocol).toContain("always runs in the background");
     expect(protocol).toContain("returns immediately with a run_id");
     expect(protocol).toContain("completion notification is pushed");
-    expect(protocol).toMatch(/after that notification arrives, collect the result with get_subagent_result/);
+    expect(protocol).toMatch(/after that notification arrives, collect the result with get_run_result/);
     expect(protocol).toContain("steer_subagent");
     expect(protocol).toContain("abort_subagent");
     expect(protocol).toContain("Do not poll or block");
@@ -114,7 +114,7 @@ describe("system prompt: background-only Agent tool protocol", () => {
     expect(line).toBeDefined();
     expect(line).toContain("always runs in the background");
     expect(line).toContain("wf_");
-    expect(line).toContain("get_subagent_result");
+    expect(line).toContain("get_run_result");
     expect(line).toContain("abort_subagent");
   });
 

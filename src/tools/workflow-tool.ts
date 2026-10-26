@@ -13,6 +13,7 @@ import { buildProgressLines } from "./agent-tool.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 import { formatWidgetCost } from "../ui/fleet-widget.js";
 import { truncateResultText } from "./result-text.js";
+import { RESULT_TOOL_NAME } from "../core/tool-names.js";
 
 /**
  * The `SubagentWorkflow` tool — the model-facing entry point into the engine
@@ -23,7 +24,7 @@ import { truncateResultText } from "./result-text.js";
  * workflow registry (`src/workflow/background.ts`, which owns the bounded
  * run → stop → settle → degraded-fallback sequence formerly enforced here)
  * and returns the `workflowId` immediately. Completion is pushed to the main
- * session as a notification; `get_subagent_result` / `abort_subagent` accept
+ * session as a notification; `get_run_result` / `abort_subagent` accept
  * the workflow id. The run is detached from this call's AbortSignal (an
  * already-aborted signal still rejects before anything starts).
  *
@@ -50,7 +51,7 @@ export interface WorkflowToolDetails {
   durationMs?: number;
   /** Legacy (pre-background) sessions: partial live progress lines. Kept so old history still renders. */
   progress?: string[];
-  /** Final-result stats line (legacy blocking results + get_subagent_result reads). */
+  /** Final-result stats line (legacy blocking results + get_run_result reads). */
   summary?: string;
   costUsd?: number;
   children?: WorkflowOutcome["children"];
@@ -175,7 +176,7 @@ function settledMark(status: string, source: "live" | "replay"): string {
 }
 
 /**
- * M10: live progress lines for a running workflow (get_subagent_result's
+ * M10: live progress lines for a running workflow (get_run_result's
  * running read and its wait stream; formerly the blocking tool card) — the
  * workflow-level counterpart of agent-tool.ts's `buildProgressLines`.
  * Line 1 is a status header (name · phase · elapsed · budget left); line 2
@@ -283,7 +284,7 @@ function renderChildren(children: WorkflowOutcome["children"], omitCompletedPrev
     const preview = showPreview && c.textPreview ? c.textPreview.slice(0, MAX_CHILD_PREVIEW) : "";
     let line = `  - [${c.status}${c.source === "replay" ? "/replay" : ""}] ${c.label ?? c.callId}${preview ? `: ${preview}` : ""}`;
     if (line.length > budget) {
-      line = `${line.slice(0, Math.max(0, budget))}\u2026(truncated, see get_subagent_result for the full run)`;
+      line = `${line.slice(0, Math.max(0, budget))}\u2026(truncated, see ${RESULT_TOOL_NAME} for the full run)`;
     }
     lines.push(line);
     budget -= line.length;
@@ -422,7 +423,7 @@ export function renderOutcomeText(outcome: WorkflowOutcome): string {
   if (outcome.error) parts.push(`error: ${outcome.error.message}`);
   if (outcome.children.length) {
     const hasResult = outcome.result !== undefined;
-    const note = hasResult ? ", completed outputs omitted \u2014 see result or get_subagent_result" : "";
+    const note = hasResult ? ", completed outputs omitted \u2014 see result or " + RESULT_TOOL_NAME + "" : "";
     parts.push(`children (${outcome.children.length}${note}):\n${renderChildren(outcome.children, hasResult)}`);
   }
   if (outcome.orphanChildren?.length) parts.push(`orphaned children: ${outcome.orphanChildren.length} (see diag)`);
@@ -480,7 +481,7 @@ function workflowLabelMarker(name: string, workflowId: string, status: string): 
 }
 
 /**
- * Terminal read text (get_subagent_result): the outcome rendering capped by
+ * Terminal read text (get_run_result): the outcome rendering capped by
  * resultMaxChars, plus a duration/children/cost trailer — the workflow
  * counterpart of the run result trailer.
  */
@@ -524,7 +525,7 @@ export function formatWorkflowNotification(
   const worktreeBlock = renderWorktreeBlock(outcome);
   const worktreeSection = worktreeBlock !== undefined ? `\n\n${worktreeBlock}` : "";
   const hint =
-    `Re-read the full outcome with get_subagent_result(run_id: "${settled.workflowId}")` +
+    `Re-read the full outcome with ${RESULT_TOOL_NAME}(run_id: "${settled.workflowId}")` +
     (outcome.children.length > 0 ? " (it also reports the children's spend to the session totals)." : ".");
   return `${header}\n\n${body}${worktreeSection}\n\n${hint}`;
 }
@@ -534,7 +535,7 @@ export function formatWorkflowNotification(
  *
  * Honest capability declaration (§5.3 compat matrix, §1.2 non-goals):
  *  - Always background: the call returns a workflow id at once; a completion
- *    notification follows; get_subagent_result / abort_subagent manage it.
+ *    notification follows; get_run_result / abort_subagent manage it.
  *  - NW3: no pause/step/skip/retry — the only control once started is stop
  *    (abort_subagent), which stops the whole run.
  *  - NW5: `workflow(nameOrRef)` (nested workflow calls) is not implemented;
@@ -551,7 +552,9 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
       "The workflow always runs in the background: the call returns immediately with a workflow id (wf_…), and " +
       "a completion notification is pushed to you when the workflow reaches a terminal state " +
       "(completed/failed/timed_out/aborted — it never hangs). After that notification arrives, collect the full " +
-      "outcome with get_subagent_result(run_id: <workflow id>); stop it early with abort_subagent(run_id: " +
+      "outcome with " +
+      RESULT_TOOL_NAME +
+      "(run_id: <workflow id>); stop it early with abort_subagent(run_id: " +
       "<workflow id>), which stops every child run. Do not poll or block waiting for it — continue other work or " +
       "end your turn. Differences from a general multi-agent orchestrator you may have used before: (1) there is " +
       "no pause/step/skip/retry control once started — only stop; (2) nested workflow(...) calls are not " +
@@ -628,7 +631,7 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
             text:
               `Workflow "${name}" started in background (workflow_id: ${id}, budget: ${formatDuration(budget.workflowTotalMs)}${extendableSuffix(budget)}). ` +
               "You will receive a completion notification when it reaches a terminal state — do not block or poll " +
-              `for it now; collect the full outcome with get_subagent_result(run_id: "${id}") after the notification ` +
+              `for it now; collect the full outcome with ${RESULT_TOOL_NAME}(run_id: "${id}") after the notification ` +
               `arrives, or stop it early with abort_subagent(run_id: "${id}").`,
           },
           { type: "text" as const, text: workflowLabelMarker(name, id, "running") },

@@ -6,6 +6,7 @@ import type { ResolveRunResult } from "../service/resolve-target.js";
 import { resolveToolTarget, type WorkflowQueryPort } from "./workflow-target.js";
 import { labelOfRun, labelOfSnapshot, runRefDetails, runRefText, titleForHandle } from "./run-ref.js";
 import type { BackgroundWorkflowView } from "../workflow/background.js";
+import { RESULT_TOOL_NAME } from "../core/tool-names.js";
 
 export const AbortToolParams = Type.Object({
   run_id: Type.String({
@@ -39,7 +40,7 @@ function workflowStopText(view: BackgroundWorkflowView, settled: boolean): strin
   const children = outcome ? outcome.children.length : 0;
   return (
     `Workflow ${id} ("${view.name}") stopped: ${view.status}${cause}; ${children} child call(s) recorded. ` +
-    `A completion notification follows; get_subagent_result(run_id: "${id}") returns the final outcome.`
+    `A completion notification follows; ${RESULT_TOOL_NAME}(run_id: "${id}") returns the final outcome.`
   );
 }
 
@@ -110,7 +111,7 @@ export function createAbortTool(deps: {
           content: [
             {
               type: "text" as const,
-              text: `Abort requested for ${who} (escalation: ${result.escalatedTo}). Use get_subagent_result(run_id: "${runId}", wait: true) to wait for its terminal state.`,
+              text: `Abort requested for ${who} (escalation: ${result.escalatedTo}). Use ${RESULT_TOOL_NAME}(run_id: "${runId}", wait: true) to wait for its terminal state.`,
             },
           ],
           details: {

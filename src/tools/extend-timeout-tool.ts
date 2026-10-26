@@ -9,6 +9,7 @@ import type { BackgroundWorkflowView } from "../workflow/background.js";
 import type { WorkflowExtendOutcome } from "../workflow/deadline.js";
 import { resolveToolTarget, WORKFLOW_ID_PREFIX, type WorkflowQueryPort } from "./workflow-target.js";
 import { labelOfRun, labelOfSnapshot, runRefDetails, titleForHandle } from "./run-ref.js";
+import { RESULT_TOOL_NAME } from "../core/tool-names.js";
 
 /**
  * timeout-notify (arch §4) + agent-explicit-timeout-extend (§3.5/§5.2): extend
@@ -66,7 +67,7 @@ const short = (runId: string) => runId.slice(0, 8);
 /** `run r_x` without a label, `label (run_id: r_x)` with one (short id, same as before). */
 const shortRef = (runId: string, label: string | undefined) =>
   label === undefined ? `run ${short(runId)}` : `${label} (run_id: ${short(runId)})`;
-const readResultHint = (runId: string) => `get_subagent_result(run_id: "${short(runId)}")`;
+const readResultHint = (runId: string) => `${RESULT_TOOL_NAME}(run_id: "${short(runId)}")`;
 const respawnHint = "or abort_subagent and respawn with a larger timeout_s";
 
 /** Remaining milliseconds until the run's current soft deadline (best-effort; 0 when unknown). */
@@ -90,17 +91,17 @@ function rejectionMessage(
     case "not_started":
       return (
         `${name} has not started running yet (${snapshot?.status ?? "unknown"}); its deadline can only be extended ` +
-        `once it is executing. Check on it with ${runId ? readResultHint(runId) : "get_subagent_result"} and extend after it starts.`
+        `once it is executing. Check on it with ${runId ? readResultHint(runId) : "${RESULT_TOOL_NAME}"} and extend after it starts.`
       );
     case "stopping":
       return (
         `${name} is already shutting down (abort in progress); extending its deadline would not bring it back. ` +
-        `Collect its terminal outcome with ${runId ? readResultHint(runId) : "get_subagent_result"}.`
+        `Collect its terminal outcome with ${runId ? readResultHint(runId) : "${RESULT_TOOL_NAME}"}.`
       );
     case "already_terminal":
       return (
         `${name} already finished (${snapshot?.status ?? "terminal"}). ` +
-        `Use ${runId ? readResultHint(runId) : "get_subagent_result"} to read its output.`
+        `Use ${runId ? readResultHint(runId) : "${RESULT_TOOL_NAME}"} to read its output.`
       );
     case "uncapped":
       // Defensive (the config layer forbids an uncapped total budget, D-11) —
@@ -112,7 +113,7 @@ function rejectionMessage(
       return (
         `${name} has already used ${count} deadline extensions. It will stop at its current deadline ` +
         `(in ${formatDuration(remainingMs(snapshot, now))}). Read what it has so far with ` +
-        `${runId ? readResultHint(runId) : "get_subagent_result"}, ${respawnHint}.`
+        `${runId ? readResultHint(runId) : "${RESULT_TOOL_NAME}"}, ${respawnHint}.`
       );
     }
     case "no_headroom": {
@@ -126,7 +127,7 @@ function rejectionMessage(
           `${name} has a fixed deadline (the system started it with a non-extendable time cap — e.g. a ` +
           `/goal verifier or RPC run, or a resume of one); it stops at its deadline ` +
           `(in ${formatDuration(remainingMs(snapshot, now))}) and cannot be extended. Read what it has so far with ` +
-          `${runId ? readResultHint(runId) : "get_subagent_result"}, ${respawnHint}.`
+          `${runId ? readResultHint(runId) : "${RESULT_TOOL_NAME}"}, ${respawnHint}.`
         );
       }
       const atConfigCeiling =
@@ -139,7 +140,7 @@ function rejectionMessage(
         return (
           `${name} has no headroom above its deadline (budget.maxTotalFactor is 1, or an absolute deadline cap ` +
           `applies); it stops at its deadline (in ${formatDuration(remainingMs(snapshot, now))}). Read what it has so ` +
-          `far with ${runId ? readResultHint(runId) : "get_subagent_result"}, ${respawnHint}.`
+          `far with ${runId ? readResultHint(runId) : "${RESULT_TOOL_NAME}"}, ${respawnHint}.`
         );
       }
       const fromStart =
@@ -149,13 +150,13 @@ function rejectionMessage(
       return (
         `${name} is at its hard ceiling (${fromStart} from start); no further extension is possible. ` +
         `It stops at its deadline (in ${formatDuration(remainingMs(snapshot, now))}). Read what it has so far with ` +
-        `${runId ? readResultHint(runId) : "get_subagent_result"}, ${respawnHint}.`
+        `${runId ? readResultHint(runId) : "${RESULT_TOOL_NAME}"}, ${respawnHint}.`
       );
     }
   }
 }
 
-const workflowReadHint = (workflowId: string) => `get_subagent_result(run_id: "${workflowId}")`;
+const workflowReadHint = (workflowId: string) => `${RESULT_TOOL_NAME}(run_id: "${workflowId}")`;
 const workflowRestartHint = "or abort_subagent and restart the workflow with a larger timeout_s";
 
 function workflowRejectionMessage(

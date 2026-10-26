@@ -15,12 +15,16 @@
  * active") as the sole source of truth for what actually needs filtering.
  */
 
+import { LEGACY_RESULT_TOOL_NAME, RESULT_TOOL_NAME } from "../core/tool-names.js";
+
 /** Tool names this package itself registers; a late-registered tool that
  *  collides with one of these must never be silently trusted (TS1). Only
  *  reflects tools actually deployed by this package's own tools/ modules. */
 export const RESERVED_TOOL_NAMES: readonly string[] = [
   "Agent",
-  "get_subagent_result",
+  // LEGACY_RESULT_TOOL_NAME (≤ v0.9.x get_subagent_result): kept in place because the reserved-name list is frozen in
+  // the fabric-xs-off golden; the current name RESULT_TOOL_NAME is appended at the END of the list.
+  LEGACY_RESULT_TOOL_NAME,
   "steer_subagent",
   "StructuredOutput",
   "message_agent",
@@ -46,7 +50,7 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
   // powers (extend/kill/wait/status/list) it was never granted.
   "bash_job",
   // list_subagents (todo #19): host-registered only, same treatment as
-  // get_subagent_result/steer_subagent above — never pushed to
+  // get_run_result/steer_subagent above — never pushed to
   // grantedReserved, so deny-by-default strips an MCP/late-registered
   // same-name tool from every child session.
   "list_subagents",
@@ -57,6 +61,8 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
   // MCP/late-registered tool is stripped even when the FEATURE itself is off — accepted, same
   // precedent as bash_job/set_model/consult (T-S11).
   "switch_context",
+  // get_run_result (result-tool rename): appended last so the legacy entry keeps its frozen position above.
+  RESULT_TOOL_NAME,
 ];
 
 /**

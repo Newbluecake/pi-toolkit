@@ -55,8 +55,8 @@ describe("background report transaction", () => {
         expect(report.bytes).toBeLessThanOrEqual(SCHED_REPORT_MAX_BYTES);
         expect(report.text).not.toContain("�");
         expect(report.text).toContain("截断");
-        if (runId === undefined) expect(report.text).not.toContain("get_subagent_result");
-        else expect(report.text).toContain(`get_subagent_result ${runId}`);
+        if (runId === undefined) expect(report.text).not.toContain("get_run_result");
+        else expect(report.text).toContain(`get_run_result ${runId}`);
       }
       expect(truncateUtf8("a😀中", 5)).toBe("a😀");
     },

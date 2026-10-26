@@ -9,6 +9,7 @@ import { formatDuration } from "../core/format.js";
 import { formatSlots, type SlotsInfo } from "../core/format.js";
 import { formatModelRef } from "../ui/fleet-panel.js";
 import type { WorkflowActivitySnapshot, WorkflowChildActivity, WorkflowQueuedChild } from "../workflow/activity.js";
+import { RESULT_TOOL_NAME } from "../core/tool-names.js";
 
 /** L1 todo #19: hard cap on `recent` — a runaway session could have thousands of terminal runs recorded. */
 export const LIST_SUBAGENTS_MAX_RECENT = 20;
@@ -282,7 +283,7 @@ function buildWorkflowRow(
 
 /**
  * "list_subagents" — L1 todo #19 (2026-09-26 user decision: a standalone
- * read-only tool, registered alongside get_subagent_result). Answers the two
+ * read-only tool, registered alongside get_run_result). Answers the two
  * questions a dispatcher otherwise has no tool for: "is there a free slot
  * right now" and "what is the run_id / workflow id of the thing I want to
  * check on / steer / abort / message" — without guessing a label or waiting
@@ -291,16 +292,16 @@ function buildWorkflowRow(
  * subagent's own progress).
  *
  * Registration (see AGENTS.md HOST_KEY guard / runtime/tool-scope.ts):
- * main-session only. `get_subagent_result` — the tool this one is meant to
+ * main-session only. `get_run_result` — the tool this one is meant to
  * sit next to — is injected into a child (subagent) session ONLY via the
  * nested Agent tool's own blocking result path (service/runtime-adapter.ts),
  * never as a standalone tool; a child never gets a standalone
- * `get_subagent_result` to pair this with. Mirroring that: this tool is
+ * `get_run_result` to pair this with. Mirroring that: this tool is
  * main-session only too, and NOT added to a nested-Agent child's tool set.
  * `list_subagents` is still added to `RESERVED_TOOL_NAMES`
  * (runtime/tool-scope.ts) purely as defense-in-depth against an
  * MCP/late-registered same-name tool leaking into a child session — the
- * same treatment `get_subagent_result`/`steer_subagent` already get despite
+ * same treatment `get_run_result`/`steer_subagent` already get despite
  * never being granted there.
  */
 export function createListSubagentsTool(deps: {
@@ -320,7 +321,9 @@ export function createListSubagentsTool(deps: {
       "under their workflow) — plus the current concurrency pool occupancy (`slots: N/limit in use, K free`, " +
       "same accounting as the Agent tool's own trailer: a workflow itself never occupies a slot, its children " +
       "do). Call this BEFORE dispatching with the Agent tool to check for a free slot, " +
-      "and whenever you need a run_id or workflow id (wf_…) for get_subagent_result / steer_subagent / " +
+      "and whenever you need a run_id or workflow id (wf_…) for " +
+      RESULT_TOOL_NAME +
+      " / steer_subagent / " +
       "abort_subagent / message_agent / extend_subagent_timeout without guessing a label. Set `recent` " +
       "(0-20, default 0) to also list the most recently finished runs, newest first — handy right after a " +
       "run just settled. Read-only: never starts, stops, or steers anything.",

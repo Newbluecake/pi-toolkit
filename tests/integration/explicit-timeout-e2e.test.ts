@@ -173,7 +173,7 @@ const TERMINAL = new Set(["completed", "failed", "timed_out", "aborted"]);
  *  (a slotless spawn returns before the runner's first onSnapshot lands). */
 async function readStatus(host: ReturnType<typeof fakePi>, runId: string): Promise<string> {
   try {
-    const read = await host.call("get_subagent_result", { run_id: runId });
+    const read = await host.call("get_run_result", { run_id: runId });
     return String(read.details?.status ?? "unknown");
   } catch {
     return "unresolved";
@@ -287,7 +287,7 @@ describe("explicit timeout_s end to end (activate → stack → tools)", () => {
     expect(grace1.message.details).toMatchObject({ kind: "grace", runId });
     // factor 3 ⇒ H − D0 = 2×T = 4s (H = enqueuedAt + 6s).
     expect(grace1.message.details.hardDeadlineAt - grace1.message.details.deadlineAt).toBe(4_000);
-    const mid = await host.call("get_subagent_result", { run_id: runId });
+    const mid = await host.call("get_run_result", { run_id: runId });
     expect(TERMINAL.has(String(mid.details.status))).toBe(false);
     expect(mid.content[0]!.text).toContain("is still");
 
@@ -322,7 +322,7 @@ describe("explicit timeout_s end to end (activate → stack → tools)", () => {
       expect(n.options).toEqual({ triggerTurn: false });
     expect(completions(host.sent, runId)).toHaveLength(1);
 
-    const done = await host.call("get_subagent_result", { run_id: runId });
+    const done = await host.call("get_run_result", { run_id: runId });
     expect(done.details.status).toBe("timed_out");
     expect(done.content[0]!.text).toContain("total budget exceeded");
     expect(done.content[0]!.text).not.toContain("fixed deadline");
@@ -351,7 +351,7 @@ describe("explicit timeout_s end to end (activate → stack → tools)", () => {
     });
     const nextId = next.details.runId as string;
     await until(() => completions(host.sent, nextId).length > 0);
-    const nextRead = await host.call("get_subagent_result", { run_id: nextId });
+    const nextRead = await host.call("get_run_result", { run_id: nextId });
     expect(nextRead.details.status).toBe("completed");
     await host.emit("session_shutdown", { reason: "quit" });
   }, 40_000);
@@ -376,7 +376,7 @@ describe("explicit timeout_s end to end (activate → stack → tools)", () => {
     await until(() => graceNotices(host.sent).length === 1);
     expect(graceNotices(host.sent)[0]!.message.details).toMatchObject({ kind: "grace", runId: firstId });
     await until(() => completions(host.sent, firstId).length > 0);
-    const read1 = await host.call("get_subagent_result", { run_id: firstId });
+    const read1 = await host.call("get_run_result", { run_id: firstId });
     expect(read1.details.status).toBe("timed_out");
     expect(read1.content[0]!.text).toContain("total budget exceeded after grace");
     expect(timeoutNotices(host.sent)).toHaveLength(1);
@@ -393,7 +393,7 @@ describe("explicit timeout_s end to end (activate → stack → tools)", () => {
     const stopped = await host.call("abort_subagent", { run_id: secondId });
     expect(stopped.details).toMatchObject({ runId: secondId, ok: true });
     await until(() => completions(host.sent, secondId).length > 0);
-    const read2 = await host.call("get_subagent_result", { run_id: secondId });
+    const read2 = await host.call("get_run_result", { run_id: secondId });
     expect(read2.details.status).toBe("aborted");
     await host.emit("session_shutdown", { reason: "quit" });
   }, 30_000);
@@ -416,7 +416,7 @@ describe("explicit timeout_s end to end (activate → stack → tools)", () => {
     });
     const runId = started.details.runId as string;
     await until(() => completions(host.sent, runId).length > 0);
-    const done = await host.call("get_subagent_result", { run_id: runId });
+    const done = await host.call("get_run_result", { run_id: runId });
     expect(done.details.status).toBe("timed_out");
     expect(timeoutNotices(host.sent)).toHaveLength(0); // no grace, no receipts
     await host.emit("session_shutdown", { reason: "quit" });
@@ -489,7 +489,7 @@ describe("nested Agent timeout_s (N1-N3, real injected tool)", () => {
     await until(() => outcome.state === "rejected", 12_000);
     expect(outcome.error?.message).toContain("total budget exceeded after grace"); // diag.overtime ⇒ graced
     expect(outcome.error?.message).not.toContain("fixed deadline");
-    const grandchildRead = await host.call("get_subagent_result", { run_id: grandchildId });
+    const grandchildRead = await host.call("get_run_result", { run_id: grandchildId });
     expect(grandchildRead.details.status).toBe("timed_out");
     // Plan §7 N1 ★: the persisted terminal snapshot proves exactly one grace was
     // taken (the error-text inference above is only indirect evidence).
@@ -506,7 +506,7 @@ describe("nested Agent timeout_s (N1-N3, real injected tool)", () => {
 
     await host.call("abort_subagent", { run_id: parentRunId });
     await until(async () => {
-      const read = await host.call("get_subagent_result", { run_id: parentRunId });
+      const read = await host.call("get_run_result", { run_id: parentRunId });
       return read.details.status === "aborted";
     });
     await host.emit("session_shutdown", { reason: "quit" });

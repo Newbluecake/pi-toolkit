@@ -28,7 +28,7 @@ export function createRunRegistry(store: SnapshotStore): RunRegistry {
  * in-flight runs) with the durable store as fallback for terminal runs.
  *
  * Backing the registry ONLY with the store made running runs invisible to
- * get_subagent_result / fleet / status — persist_snapshot is a terminal-only
+ * get_run_result / fleet / status — persist_snapshot is a terminal-only
  * effect by design (I4), so a store-only registry never sees a live run.
  */
 export function createLiveRunRegistry(

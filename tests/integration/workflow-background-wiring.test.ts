@@ -10,7 +10,7 @@ import { WORKFLOW_NOTICE_ENTRY_TYPE, WORKFLOW_NOTIFICATION_TYPE } from "../../sr
 /**
  * Background SubagentWorkflow end-to-end through the real activate() / stack
  * (docs/dev/workflow-background/plan.md): immediate return, management via
- * get_subagent_result / abort_subagent, exactly-once completion notice, and
+ * get_run_result / abort_subagent, exactly-once completion notice, and
  * the shutdown path (running workflow stopped, notice persisted, re-delivered
  * once by the next activation on the same session file).
  *
@@ -128,14 +128,14 @@ describe("background SubagentWorkflow wiring (activate → stack)", () => {
     expect(started.details).toMatchObject({ status: "running", background: true, label: "held-flow" });
     await until(() => host.execs.length > 0); // the script is really parked in gate()
 
-    const running = await host.call("get_subagent_result", { run_id: id });
+    const running = await host.call("get_run_result", { run_id: id });
     expect(running.content[0]!.text).toContain("is still running");
     // Busy for background-idle gating (feishu) even with no live child run.
     expect(readBackgroundStatus()?.runningSubagents).toBe(1);
     expect(workflowNotices(host.sent)).toHaveLength(0);
 
     host.execs[0]!();
-    const done = await host.call("get_subagent_result", { run_id: id, wait: true, wait_ms: 10_000 });
+    const done = await host.call("get_run_result", { run_id: id, wait: true, wait_ms: 10_000 });
     expect(done.details).toMatchObject({ workflowId: id, status: "completed" });
     expect(done.content[0]!.text).toContain("result: released");
     await until(() => workflowNotices(host.sent).length > 0);
@@ -197,7 +197,7 @@ describe("background SubagentWorkflow wiring (activate → stack)", () => {
     expect(redelivered).toHaveLength(1);
     expect(redelivered[0]!.options).toEqual({ triggerTurn: false });
     expect(redelivered[0]!.message.details).toMatchObject({ workflowId: id, redelivered: true });
-    const read = await second.call("get_subagent_result", { run_id: id });
+    const read = await second.call("get_run_result", { run_id: id });
     expect(read.details).toMatchObject({ workflowId: id, status: "aborted" });
     await second.emit("session_shutdown", { reason: "reload" });
 
@@ -218,7 +218,7 @@ describe("background SubagentWorkflow wiring (activate → stack)", () => {
     await until(() => host.execs.length > 0);
     await host.emit("session_start", { reason: "new" }); // defensive rebuild path
     // The orphaned workflow is not visible from the new stack …
-    await expect(host.call("get_subagent_result", { run_id: id })).rejects.toThrow(/unknown workflow id/);
+    await expect(host.call("get_run_result", { run_id: id })).rejects.toThrow(/unknown workflow id/);
     // … but it was stopped (the orchestrator's own terminal event: aborted/shutdown — no orphan) …
     await until(() =>
       host.busEvents.some((e) => e.channel === "subagent:workflow:aborted" && e.payload?.workflowId === id),

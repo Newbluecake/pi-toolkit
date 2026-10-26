@@ -224,7 +224,7 @@ describe("computeLiveSubagentCost (+agents component)", () => {
 
   it("复现：嵌套 run 花费已随父 run 的 toolResult 入账，但广播仍单列它 ⇒ 总额虚增", () => {
     // 场景：主会话派出 R（$1.0），R 内部 consult 产生 C（$0.2，父 R）。
-    // 主会话 get_subagent_result(R) 的 toolResult usage 已含 C 的 $0.2（X9 链，
+    // 主会话 get_run_result(R) 的 toolResult usage 已含 C 的 $0.2（X9 链，
     // 见 tests/runtime/nested-run-usage.test.ts），subAccounted 只记下 R。
     const subUsage = new Map([
       ["run_r", entry(1.0, true)],

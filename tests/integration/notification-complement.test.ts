@@ -68,15 +68,15 @@ describe("notification sender output guidance", () => {
     const { stack, sendMessage } = buildStackForSender();
     stack.notifier.enqueue(payload("x".repeat(200)));
     const content = sendMessage.mock.calls[0][0].content as string;
-    expect(content).not.toContain("get_subagent_result");
+    expect(content).not.toContain("get_run_result");
   });
 
   it("appends a retrieval hint with a bare eight-character prefix when the output tail is truncated", () => {
     const { stack, sendMessage } = buildStackForSender();
     stack.notifier.enqueue(payload("x".repeat(201)));
     const content = sendMessage.mock.calls[0][0].content as string;
-    expect(content).toContain('get_subagent_result "r_123456"');
-    expect(content).not.toContain('get_subagent_result "#r_123456"');
+    expect(content).toContain('get_run_result "r_123456"');
+    expect(content).not.toContain('get_run_result "#r_123456"');
   });
 
   it("19: keeps the windowMs=0 sender path immediate and P1-compatible", () => {
