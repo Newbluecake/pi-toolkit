@@ -89,24 +89,24 @@ pi install .
 
 ## 命令
 
-| 命令                                                                      | 内容                                                                                                                                                         |
-| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/agent`（`status [runId]` / `costs` / `settings` / `budget` / `reload`） | 运行诊断、费用明细、设置编辑器、延迟 reload                                                                                                                  |
-| `/task <描述>`                                                            | 启动一个后台 general-purpose subagent                                                                                                                        |
-| `/goal`                                                                   | 目标循环（`status` / `pause` / `resume` / `clear`）                                                                                                          |
-| `/mem`                                                                    | 项目记忆：`list` / `path` / `import` / `doctor` / `tidy` / `restore`                                                                                         |
-| `/tasklist`                                                               | 任务面板（`clear` 清空）                                                                                                                                     |
-| `/cache-ttl`                                                              | `on` / `off` / `auto` / `save` / `keepalive on\|off\|reset` / `status` / `probe`                                                                             |
-| `/topic-switch`                                                           | 查看状态（`status`），`last [--send]` 取回上次截留的请求                                                                                                     |
-| `/webhub`                                                                 | `status` / `open` / `restart` / `stop` / `start` / `token rotate` / `passwd` / `unlock` / `2fa` / `user` / `feishu`                                          |
-| `/schedule`                                                               | 定时任务（需 `schedule.enabled`）：`list` / `add` / `edit` / `show` / `log` / `approve` / `pause` / `resume` / `rm` / `run` / `repair`，`--all` 管理其他会话 |
-| `/watch`                                                                  | 本会话每次任务结束都通知飞书                                                                                                                                 |
-| `/feishu-test`                                                            | 发送飞书测试卡片                                                                                                                                             |
-| `/pi-hud-refresh`                                                         | `git fetch` 并刷新 HUD                                                                                                                                       |
-| `/resume-recent`                                                          | 恢复最近 48 小时的会话（`--all` 全量）                                                                                                                       |
-| `/secure status`                                                          | 加密会话判定与挂载状态（配置过 `secure` 段才注册）                                                                                                           |
-| `/record`                                                                 | 流量录制：`on` / `off` / `status`（需 `traffic.enabled`，Node ≥22.13；网页端 `on` 需确认）                                                                   |
-| `/clear`                                                                  | 开新会话                                                                                                                                                     |
+| 命令                                                                      | 内容                                                                                                                                                                    |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/agent`（`status [runId]` / `costs` / `settings` / `budget` / `reload`） | 运行诊断、费用明细、设置编辑器、延迟 reload                                                                                                                             |
+| `/task <描述>`                                                            | 启动一个后台 general-purpose subagent                                                                                                                                   |
+| `/goal`                                                                   | 目标循环（`status` / `pause` / `resume` / `clear`）                                                                                                                     |
+| `/mem`                                                                    | 项目记忆：`list` / `path` / `import` / `doctor` / `tidy` / `restore`                                                                                                    |
+| `/tasklist`                                                               | 任务面板（`clear` 清空）                                                                                                                                                |
+| `/cache-ttl`                                                              | `on` / `off` / `auto` / `save` / `keepalive on\|off\|reset` / `status` / `probe`                                                                                        |
+| `/topic-switch`                                                           | 查看状态（`status`），`last [--send]` 取回上次截留的请求                                                                                                                |
+| `/webhub`                                                                 | `status` / `open` / `restart` / `stop` / `start` / `token rotate` / `passwd` / `unlock` / `2fa` / `user` / `feishu`                                                     |
+| `/schedule`                                                               | 定时任务（需 `schedule.enabled`）：`list` / `add` / `edit` / `show` / `log` / `approve` / `reject` / `pause` / `resume` / `rm` / `run` / `repair`，`--all` 管理其他会话 |
+| `/watch`                                                                  | 本会话每次任务结束都通知飞书                                                                                                                                            |
+| `/feishu-test`                                                            | 发送飞书测试卡片                                                                                                                                                        |
+| `/pi-hud-refresh`                                                         | `git fetch` 并刷新 HUD                                                                                                                                                  |
+| `/resume-recent`                                                          | 恢复最近 48 小时的会话（`--all` 全量）                                                                                                                                  |
+| `/secure status`                                                          | 加密会话判定与挂载状态（配置过 `secure` 段才注册）                                                                                                                      |
+| `/record`                                                                 | 流量录制：`on` / `off` / `status`（需 `traffic.enabled`，Node ≥22.13；网页端 `on` 需确认）                                                                              |
+| `/clear`                                                                  | 开新会话                                                                                                                                                                |
 
 ## 配置
 
@@ -189,6 +189,8 @@ pi install .
 - 你用 `/schedule add` 创建的任务直接生效。
 - **AI 通过 `schedule` 工具创建或修改的任务必须由你批准**：批准绑定任务定义的哈希（`defHash`），之后任何来源改了时间、形式或 prompt 等执行字段，旧批准自动失效。AI 没有批准动作，`resume` 只取消暂停，也不等于批准。
 - 批准：终端里 `/schedule approve <id>`，会展示完整定义和哈希，确认后才落批准；也可以在网页面板里审阅批准。编辑一个还没批准的任务，不会顺带批准它。
+- **当场确认**：AI 创建或修改任务后，终端当场弹出确认框（批准 / 拒绝 / 稍后；会话空闲且没有别的对话框时才弹，已显示的框不会被自动关掉）；开了 Web Hub 时网页自动打开该任务的审阅面板；绑定了飞书机器人的私聊（且你在里面发过请求）会收到带完整 prompt 的审批卡片。三处任一处先批准，其余自动收回；晚到的操作只会得到「已在其他端处理」之类的提示，不会重复生效。
+- **拒绝** = 撤销 AI 这次未经确认的改动：新建的任务被删除；修改的任务恢复到修改前的执行定义（之前的批准重新生效，任务名不回滚）。也可手动 `/schedule reject <id>`（仅在确认请求还有效时可用）。「稍后」或关掉框，任务保持待确认，仍可 `/schedule approve`。确认请求只在内存里、2 小时有效；`/reload` 或重启后不再补弹，遗留的待确认任务仍用 `/schedule approve` 或网页面板处理。
 
 **命令**
 
@@ -199,6 +201,7 @@ pi install .
 | `/schedule edit <id> [选项] [-- <prompt>]`                                 | 修改（仅本会话）                                                                                                                                                |
 | `/schedule show <id>` / `log [<id>]`                                       | 完整定义与哈希 / 运行历史                                                                                                                                       |
 | `/schedule approve <id> [<hash>]`                                          | 审阅并批准                                                                                                                                                      |
+| `/schedule reject <id> [<hash>]`                                           | 撤销 AI 未确认的改动（新建 ⇒ 删除；修改 ⇒ 恢复原定义），仅在当场确认请求有效时可用                                                                              |
 | `/schedule pause\|resume\|rm <id>`                                         | 暂停 / 恢复 / 删除；暂停和删除会一并撤销该任务已排队、尚未发出的定时消息                                                                                        |
 | `/schedule run <id>`                                                       | 立即运行一次（仅本会话、仅已批准任务）                                                                                                                          |
 | `/schedule repair`                                                         | 隔离损坏的账本；账本正常时重置卡住的定时消息调度（对话框计数、会话栅栏）。仅本地终端可用，网页调用一律拒绝；启用跨会话时 `/fabric fence reset` 也会做同样的重置 |
@@ -210,12 +213,12 @@ pi install .
 - AI 工具 `schedule`：`list` / `get` / `create` / `update` / `pause` / `resume` / `delete` / `run_now` / `history`。
 - system prompt 里有会话级的任务定义段（只含定义，不含下次运行时间，不破坏缓存前缀；fork 出的会话不继承）。
 - TUI 状态栏形如 `sched 2 · next 08:00 · run 1 · pending 1`。
-- 网页：详情头的「定时」按钮打开面板，列出任务、运行记录与待确认项；首期以只读为主，唯一的写操作是批准。需要 `webHub.enabled`。
+- 网页：详情头的「定时」按钮打开面板，列出任务、运行记录与待确认项；首期以只读为主，写操作只有批准和拒绝（AI 刚建/改任务时面板会自动弹出）。需要 `webHub.enabled`。
 
 **飞书**
 
 - 后台任务的报告由 Web Hub 推送给飞书机器人的 owner 私聊，需要 `feishuBot` 与 Web Hub 控制面（见上文「飞书机器人设置」）。hub 停机或本地模式期间完成的报告，hub 恢复后补推 24 小时内的。
-- 在飞书私聊里发 `/schedule` 得到只读任务列表，`/schedule run <序号>` 立即运行（要求归属会话在线，否则回复不在线）。飞书入口不能创建、修改或批准任务。
+- 在飞书私聊里发 `/schedule` 得到只读任务列表，`/schedule run <序号>` 立即运行（要求归属会话在线，否则回复不在线）。飞书命令入口不能创建、修改或批准任务；唯一的例外是上面「当场确认」的审批卡片——只发给 owner 的私聊，且该私聊要能证明是 owner（owner 在里面发过请求；很久没发过则先随便发一条再等卡片），群聊与话题从不发卡，卡片只有「批准 / 拒绝」两个按钮，只有 owner 本人点击有效。
 
 **设置**（均非 live）
 

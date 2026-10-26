@@ -13,6 +13,7 @@ import type {
   FeishuScheduleRow,
   ScheduleDecideResult,
 } from "../../../../src/web-hub/hub/feishu/schedule.js";
+import type { HubSchedulePort } from "../../../../src/web-hub/hub/schedule/feishu-port.js";
 import { FEISHU_CAPS } from "../../../../src/web-hub/protocol/feishu.js";
 import { SCHED_REQ_ID_RE } from "../../../../src/web-hub/protocol/schedule.js";
 import { createFakeClock, settle as flush } from "../../../fixtures/feishu/fake-http.js";
@@ -90,6 +91,7 @@ function rig(initial = [offer()]) {
   let rows = initial,
     closed: FeishuScheduleOfferClosed[] = [],
     ledger: FeishuScheduleRow[] = [];
+  let evidence: NonNullable<HubSchedulePort["ledgerTask"]> = () => ({ kind: "unknown", reason: "no-session" });
   const commit = vi.fn(async () => true);
   const state: ScheduleConfirmStatePort = {
     commit,
@@ -142,6 +144,7 @@ function rig(initial = [offer()]) {
       offers: () => rows,
       closedOffers: () => closed,
       list: () => ledger,
+      ledgerTask: (sid, taskId, opts) => evidence(sid, taskId, opts),
       decide,
       run: async () => ({ kind: "unavailable" }),
       receiptsChanged: () => {},
@@ -220,6 +223,9 @@ function rig(initial = [offer()]) {
     },
     setClosed(v: FeishuScheduleOfferClosed[]) {
       closed = v;
+    },
+    setEvidence(fn: NonNullable<HubSchedulePort["ledgerTask"]>) {
+      evidence = fn;
     },
     setLedger(approved: boolean, hash = HASH) {
       ledger = [
@@ -497,6 +503,88 @@ describe("#61 F2 owner-only schedule cards (fake C0 port)", () => {
     expect(r.patch.mock.calls.at(-1)?.[1]).toContain("已批准");
     expect(r.nonces.size).toBe(0);
     expect(r.deleteMessage).not.toHaveBeenCalled();
+  });
+  describe("ledger evidence port (H2 ledgerTask) for a card whose offer is neither open nor closed", () => {
+    const gone = async () => {
+      const r = rig();
+      await r.kit.reconcile("session-1");
+      r.restart(); // agent /reload: open + closed lists are empty
+      r.setRows([]);
+      return r;
+    };
+    it("deleted (proved by a scan that started after the anchor) ⇒ neutral 「任务已删除」 PATCH, purge, no DELETE", async () => {
+      const r = await gone();
+      const since: Array<number | undefined> = [];
+      r.setEvidence((_sid, _id, o) => {
+        since.push(o?.since);
+        return { kind: "deleted", scannedAt: NOW + 1 };
+      });
+      await r.kit.reconcile("session-1");
+      expect(r.patch.mock.calls.at(-1)?.[1]).toContain("任务已删除");
+      expect(r.nonces.size).toBe(0);
+      expect(r.deleteMessage).not.toHaveBeenCalled();
+      expect(r.decide).not.toHaveBeenCalled();
+      expect(since.every((v) => v === NOW)).toBe(true); // anchor createdAt is the proof floor
+    });
+    it.each([
+      ["stale", { kind: "unknown", reason: "stale" }],
+      ["degraded", { kind: "unknown", reason: "degraded" }],
+      ["root-degraded", { kind: "unknown", reason: "root-degraded" }],
+      ["no-session", { kind: "unknown", reason: "no-session" }],
+    ] as const)("unknown/%s ⇒ the card is kept (fail-closed, never a guessed deletion)", async (_n, ev) => {
+      const r = await gone();
+      r.setEvidence(() => ev);
+      await r.kit.reconcile("session-1");
+      expect(r.nonces.size).toBe(3);
+      expect(r.deleteMessage).not.toHaveBeenCalled();
+      expect(text(r)).not.toContain("任务已删除");
+    });
+    it("present + approved + same hash ⇒ 「已批准」; a different hash (definition changed) keeps the card", async () => {
+      const r = await gone();
+      r.setEvidence(() => ({ kind: "present", approved: true, defHash: "b".repeat(64), scannedAt: NOW }));
+      await r.kit.reconcile("session-1");
+      expect(r.nonces.size).toBe(3);
+      r.setEvidence(() => ({ kind: "present", approved: false, defHash: HASH, scannedAt: NOW }));
+      await r.kit.reconcile("session-1");
+      expect(r.nonces.size).toBe(3);
+      r.setEvidence(() => ({ kind: "present", approved: true, defHash: HASH, scannedAt: NOW }));
+      await r.kit.reconcile("session-1");
+      expect(r.patch.mock.calls.at(-1)?.[1]).toContain("已批准");
+      expect(r.nonces.size).toBe(0);
+    });
+    it("a throwing evidence port is unknown, not a crash", async () => {
+      const r = await gone();
+      r.setEvidence(() => {
+        throw new Error("boom");
+      });
+      await expect(r.kit.reconcile("session-1")).resolves.toBeUndefined();
+      expect(r.nonces.size).toBe(3);
+    });
+    it("a refused decide on a task the ledger proves deleted says 「任务已删除」, not 「已批准」 and not a recall", async () => {
+      const r = rig();
+      await r.kit.reconcile("session-1");
+      r.decide.mockImplementation(async () => {
+        r.setEvidence(() => ({ kind: "deleted", scannedAt: NOW + 5 }));
+        return { kind: "refused", reason: "E_REV" };
+      });
+      await r.kit.callback(r.redeem(r.button()), IDENTITY, "event");
+      expect(r.patch.mock.calls.at(-1)?.[1]).toContain("任务已删除");
+      expect(r.deleteMessage).not.toHaveBeenCalled();
+    });
+    it("a delayed second click after settle reports the proven deletion instead of 「已在其他端处理」", async () => {
+      const r = rig();
+      await r.kit.reconcile("session-1");
+      const stale = { ...r.button() };
+      r.setRows([]);
+      r.setEvidence(() => ({ kind: "deleted", scannedAt: NOW + 5 }));
+      await r.kit.reconcile("session-1"); // settles the card as deleted
+      expect(r.patch.mock.calls.at(-1)?.[1]).toContain("任务已删除");
+      r.nonces.set(stale.nonce, stale);
+      await r.kit.callback(r.redeem(stale), IDENTITY, "late");
+      expect(r.decide).not.toHaveBeenCalled();
+      expect(text(r)).not.toContain("已在其他端处理");
+      expect(r.notice.mock.calls.at(-1)?.[1]).toContain("卡片已失效");
+    });
   });
   it("already-approved and E_REV responses re-read latest approved evidence before PATCH/recall", async () => {
     const r = rig();

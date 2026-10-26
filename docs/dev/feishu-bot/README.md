@@ -32,15 +32,16 @@
 
 命令必须位于文本开头第一行；群内还须 **@ 机器人**。这些不是 pi 的任意 slash 命令转发接口。
 
-| 命令                         | 用法与结果                                                                                                                                                                                                            |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/help`                      | 短帮助，每个命令一行；未绑定也可使用。                                                                                                                                                                                |
-| `/list`                      | 列出可用会话，含名称、sid 短码和状态；不会自动绑定。在线会话（≤8 个）带可点击按钮卡片：点按钮即绑定/切换当前私聊或群话题，卡片可复用；目标离线/失效时整卡关闭并提示重新 `/list`。卡片能力被拒或超额时退回纯文字列表。 |
-| `/use <n\|sid-prefix\|name>` | 显式绑定当前私聊或群话题。匹配不唯一会拒绝，请用更长 sid。                                                                                                                                                            |
-| `/cur`                       | 显示当前绑定；离线时给出指引。符合 restore 条件的已终止托管会话可出现 Relaunch 按钮，仍受存活身份检查约束。                                                                                                           |
-| `/new <dir> [first message]` | 创建托管会话并在实际收到其 session 坐标后绑定；路径有空格可双引号包裹。后续行也可作为首条请求。需 spawn 开启。                                                                                                        |
-| `/unbind`                    | 解除当前私聊/话题绑定；目前回执文本为 `unbound`。不停止或删除 pi 会话。                                                                                                                                               |
-| `/file <absolute path>`      | 显式发送绑定会话主机上的文件；仍经过权限、绑定、大小与 preview 拒绝链检查。                                                                                                                                           |
+| 命令                         | 用法与结果                                                                                                                                                                                                                                                                    |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/help`                      | 短帮助，每个命令一行；未绑定也可使用。                                                                                                                                                                                                                                        |
+| `/list`                      | 列出可用会话，含名称、sid 短码和状态；不会自动绑定。在线会话（≤8 个）带可点击按钮卡片：点按钮即绑定/切换当前私聊或群话题，卡片可复用；目标离线/失效时整卡关闭并提示重新 `/list`。卡片能力被拒或超额时退回纯文字列表。                                                         |
+| `/use <n\|sid-prefix\|name>` | 显式绑定当前私聊或群话题。匹配不唯一会拒绝，请用更长 sid。                                                                                                                                                                                                                    |
+| `/cur`                       | 显示当前绑定；离线时给出指引。符合 restore 条件的已终止托管会话可出现 Relaunch 按钮，仍受存活身份检查约束。                                                                                                                                                                   |
+| `/new <dir> [first message]` | 创建托管会话并在实际收到其 session 坐标后绑定；路径有空格可双引号包裹。后续行也可作为首条请求。需 spawn 开启。                                                                                                                                                                |
+| `/unbind`                    | 解除当前私聊/话题绑定；目前回执文本为 `unbound`。不停止或删除 pi 会话。                                                                                                                                                                                                       |
+| `/file <absolute path>`      | 显式发送绑定会话主机上的文件；仍经过权限、绑定、大小与 preview 拒绝链检查。                                                                                                                                                                                                   |
+| （卡片，非命令）定时任务审批 | #61：AI 创建/修改 `schedule` 任务后，owner 的 p2p 绑定收到带完整定义的审批卡片，只有「批准 / 拒绝」两个按钮；不是命令、不能由文本触发，也不经 `admission.dispatch` 的 op 白名单（走 `port.decide → sched_decide`）。详见 `docs/dev/scheduled-reports/README.md`「当场确认」。 |
 
 未知首行命令（如 `/oops`）只回复“未知命令”加帮助，**不会送给 agent**。需要字面斜杠开头的请求时用 `//text`（转为 `/text`）。`/home/me/file.txt 帮我看看` 是路径类请求，不是未知命令；普通句子或后续行中的 `/` 不触发命令解析。
 
@@ -95,6 +96,7 @@
 
 ## 安全模型与恢复边界
 
+- **定时任务审批卡片（#61，owner-only fail-closed）**：只发 p2p、在线、且 **证明是 owner** 的绑定——`lastRequest(binding).senderOpenId` 必须存在并逐字等于凭据 owner（不复用 `operator()` 的 `?? owner` 回退；无请求记录 / 超过 24 h 元数据保留期 ⇒ 视为未证明、不发卡，该私聊里再发任意一条消息即恢复）；群与话题从不发卡，owner 还须在 allow-list。回调走一次性 nonce（anchor `sched-card` + 按钮 `sched-ok`/`sched-no`，绑定安装代/租户/owner/聊天/消息）→ `admission.callback` → sender 必须等于当前 owner → offer 仍在且 hash 相同 → agent 侧再校验。批准绑定 `defHash`（卡片超 20 KB 只截断 prompt，hash 绑全文）；飞书批准记 `approval.via:"web"`。无法证明的一切（owner、offer 已关闭、任务已删除/已批准）都不推进安全动作：只 PATCH 中性文案或保留卡片。
 - 默认仅注册 owner 在 allow-list；陌生人请求不送 agent，owner 可收到限流的授权卡片。卡片只给 owner 决策，授权后也不补跑陌生人的旧请求。使用 **每应用 open_id**，不是无通讯录权限时为 null 的 user_id。
 - `allow` 代表授权使用本机 pi（可能执行 shell、读写本机文件），与受信 LAN 用户同等级，**不是只读聊天权限**。V12 非创建者能否看到个人应用尚未实测；以实际租户可见性为准。
 - 入站必须匹配 app/tenant；回调 nonce 一次性且绑定安装代、操作者、聊天、消息与 action。hub 命令账本使用私有品牌选择 `fsb:<gen>:<openId>` 命名空间，普通 origin 文本不能伪造。agent 自己的账本仍以 cmdId 为键：受信 LAN 用户刻意复用 bot cmdId 属于已接受的自攻击风险。
@@ -169,6 +171,16 @@ redispatch. Gates: `tests/web-hub/{hub/feishu,hub/hub-feishu.test.ts}` + caps/id
 `tests/integration/web-hub-feishu-bot.test.ts` (real child hub + fake Feishu/fake-pi), typecheck/build.
 Design/user/tenant gates: `docs/dev/feishu-bot/{plan,README,acceptance,probe-results,F10-report}.md`;
 V12 non-creator visibility and real client card/form behavior still need tenant acceptance.
+
+**Schedule approval cards (#61)**: `hub/feishu/schedule-confirm.ts` (pi-free, closure state, injected clock; persistence is the
+existing nonce table only — no new state key, D9) + taps in `service.ts`. Port: `FeishuSchedulePort.offers?/closedOffers?/decide?`
+(absent ⇒ no confirm controller). Card ownership is judged by `closed(offerId, by)` only — never by reqId. When the offer is
+neither open nor closed (agent `/reload` after a decide) the card consults the hub's ledger evidence port
+(`HubSchedulePort.ledgerTask(sid, taskId, {since: anchor.createdAt})`): `deleted` ⇒ neutral 「任务已删除」, same-hash `approved` ⇒
+「已批准」, anything else (`unknown/stale/degraded`, no port, throwing port) ⇒ keep the card (fail-closed, never recall by guess).
+Gates: `tests/web-hub/hub/feishu/schedule-confirm.test.ts`; `tests/integration/web-hub-feishu-bot.test.ts` block
+「#61 I2 — owner-only schedule approval cards」; full chain `tests/integration/schedule-confirm.test.ts`. Design:
+`docs/dev/scheduled-reports/README.md`「当场确认」.
 
 ## 开发者要点：Cross-session mirror
 

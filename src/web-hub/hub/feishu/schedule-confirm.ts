@@ -23,6 +23,7 @@ import type {
   ScheduleDecideResult,
 } from "./schedule.js";
 import type { FeishuBinding, FeishuNonce, FeishuState } from "./state.js";
+import type { HubSchedulePort } from "../schedule/feishu-port.js";
 
 const ANCHOR = "sched-card";
 const OK = "sched-ok";
@@ -279,8 +280,21 @@ export function createFeishuScheduleConfirm(deps: ScheduleConfirmDeps) {
   function closedOf(t: AnchorTarget): FeishuScheduleOfferClosed | undefined {
     return deps.port.closedOffers?.(t.sid).find((r) => r.sessionId === t.sid && r.offerId === t.offerId);
   }
-  /** Positive same-hash approval evidence only. A missing list row is NOT proof of deletion. */
-  function ledgerText(t: AnchorTarget): string | undefined {
+  /**
+   * Ledger evidence for a card whose offer is neither open nor closed (r2 #6; #61 I2 wires H2's evidence port).
+   * Only PROOF settles a card: same-hash approval ⇒ 「已批准」; a scan that started after the anchor was
+   * issued and holds no such task ⇒ 「任务已删除」. `unknown`/`stale`/`degraded`/no port ⇒ undefined (keep
+   * the card). The legacy `list()` row is a second, approval-only witness (a missing row proves nothing).
+   */
+  function ledgerText(t: AnchorTarget, since: number): string | undefined {
+    let ev: ReturnType<NonNullable<HubSchedulePort["ledgerTask"]>> | undefined;
+    try {
+      ev = (deps.port as HubSchedulePort).ledgerTask?.(t.sid, t.taskId, { since });
+    } catch {
+      ev = undefined; // evidence must never crash a reconcile ⇒ treated as unknown
+    }
+    if (ev?.kind === "deleted") return "任务已删除";
+    if (ev?.kind === "present" && ev.approved && ev.defHash === t.defHash) return "已批准";
     const r = deps.port.list().find((r) => r.sessionId === t.sid && r.taskId === t.taskId);
     return r?.defHash === t.defHash && r.approved ? "已批准" : undefined;
   }
@@ -484,7 +498,7 @@ export function createFeishuScheduleConfirm(deps: ScheduleConfirmDeps) {
       return;
     }
     // r2 #6: before recall/missing-offer decisions consult positive ledger evidence.
-    const ledger = ledgerText(c.target);
+    const ledger = ledgerText(c.target, c.anchor.createdAt);
     if (ledger) {
       await settle(c, ledger, false);
       return;
@@ -590,7 +604,7 @@ export function createFeishuScheduleConfirm(deps: ScheduleConfirmDeps) {
       // r2 #10: second click after settle re-reads CURRENT outcome before PATCH.
       if (c) {
         const closed = closedOf(t),
-          text = closed?.outcome === "approved" || ledgerText(t) ? "已批准" : "已在其他端处理";
+          text = closed?.outcome === "approved" ? "已批准" : (ledgerText(t, c.anchor.createdAt) ?? "已在其他端处理");
         await patch(c, text);
       }
       await notice(record, "卡片已失效");
@@ -631,8 +645,9 @@ export function createFeishuScheduleConfirm(deps: ScheduleConfirmDeps) {
         );
       } else if (result.kind === "refused") {
         const closed = closedOf(t),
-          ledger = ledgerText(t); // ALWAYS re-read before deciding wording/recall
-        if (closed?.outcome === "approved" || ledger) await settle(c, "已批准", false);
+          ledger = ledgerText(t, c.anchor.createdAt); // ALWAYS re-read before deciding wording/recall
+        if (closed?.outcome === "approved") await settle(c, "已批准", false);
+        else if (ledger) await settle(c, ledger, false);
         else if (result.reason === "E_REV" || result.reason === "offer-gone")
           await settle(c, "定义已变更，本卡作废", true);
         else await settle(c, "已在其他端处理", false);

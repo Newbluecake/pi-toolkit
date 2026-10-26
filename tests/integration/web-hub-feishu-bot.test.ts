@@ -20,6 +20,9 @@ import { login, openSse } from "../web-hub/http/helpers.js";
 import { parseAttachmentBlock } from "../../src/web-hub/protocol/upload.js";
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
 import { FSB_HUB_CAP } from "../../src/web-hub/protocol/version.js";
+import { SCHED_CONFIRM_CAP, SCHED_HUB_CAP } from "../../src/web-hub/protocol/schedule.js";
+import { defHash } from "../../src/schedule/core/spec.js";
+import { addTask, env as scheduleEnv, makeTask } from "../schedule/core/fixtures.js";
 import type { CmdFrame } from "../../src/web-hub/protocol/messages.js";
 
 // Kept here (rather than a production-only environment flag or another fixture file) so the
@@ -171,6 +174,8 @@ async function boot(
     xs?: boolean;
     xsMirror?: boolean;
     noCreds?: boolean;
+    /** #61 I2: schedule store directory ⇒ `HubConfig.schedule` (the confirm-card tests). */
+    schedule?: string;
   } = {},
 ) {
   const home = options.home ?? newHome();
@@ -192,6 +197,7 @@ async function boot(
     home,
     ...(launcher ? { launcher } : {}),
     ...(options.xs ? { crossSession: { limits: { hubSendsPerMin: 600 } } } : {}),
+    ...(options.schedule === undefined ? {} : { schedule: { dir: options.schedule, toleranceS: 60 } }),
     ...(options.lanSecurity
       ? { lan: { port: await freeTcpPort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] } }
       : {}),
@@ -1547,4 +1553,248 @@ describe("feishu-xs-mirror (A′) — real hub × fake Feishu × fake xs agents"
     const d = await h.mirrorDropped(R);
     expect((d["xs-mirror-rate"] ?? 0) + (d["xs-mirror-cap"] ?? 0)).toBe(40 - all.length);
   }, 120_000);
+});
+
+describe("#61 I2 — owner-only schedule approval cards (real hub child × fake Feishu × scripted agent)", () => {
+  const SID = "019a4444-aaaa-7bbb-8ccc-dddddddddddd";
+  const cleanupEnvs: Array<() => void> = [];
+  afterEach(() => {
+    for (const c of cleanupEnvs.splice(0)) c();
+  });
+
+  /** A scripted agent: owns a pending task in the real ledger, speaks sched.v1 + sched.confirm.v1 by hand. */
+  async function schedFixture() {
+    const E = scheduleEnv(Date.now());
+    cleanupEnvs.push(E.cleanup);
+    const task = makeTask({ name: "夜间巡检", prompt: "检查所有服务的健康状态 🩺", feishu: true });
+    delete task.approval;
+    await addTask(E.store(SID), task, Date.now());
+    const hash = defHash(task);
+    const h = await boot({ schedule: E.storeDir });
+    const c = await connectClient(h.paths.socketPath);
+    agents.add(c);
+    c.send(
+      hello({
+        agentId: { pid: process.pid, nonce: `i2-sched-agent-AAAAAAAA` },
+        cwd: h.cwd,
+        caps: ["ev.v1", "cmd.v1", "dialog.v1", "upload.v1", SCHED_HUB_CAP, SCHED_CONFIRM_CAP],
+      }),
+    );
+    const ack: any = await c.waitFrame((f) => f.t === "hello_ack");
+    expect(ack.caps).toContain(SCHED_CONFIRM_CAP);
+    c.send({ t: "session", sessionId: SID, cwd: h.cwd, name: "巡检", reason: "startup", leafId: null, mode: "tui" });
+    c.send({ t: "fsb_req", rid: "barrier-i2", op: "info" });
+    await c.waitFrame((f) => f.t === "fsb_res" && f.rid === "barrier-i2");
+    const offerId = "offer-i2-0001-abcdefgh";
+    const expiresAt = Date.now() + 3_600_000;
+    const publish = (open: boolean, closed: object[] = []) =>
+      c.send({
+        t: "sched_offers",
+        sessionId: SID,
+        open: open ? [{ offerId, taskId: task.id, defHash: hash, expiresAt }] : [],
+        closed,
+      });
+    const decides = () => (c.frames as any[]).filter((f) => f.t === "sched_decide");
+    let seenCmd = 0;
+    /** every owner request is accepted (that is what records `lastRequest` for the owner proof) */
+    const acceptRequests = setInterval(() => {
+      const cmds = (c.frames as any[]).filter((f) => f.t === "cmd" && !f.queryOnly);
+      for (; seenCmd < cmds.length; seenCmd++) {
+        const f = cmds[seenCmd];
+        c.send({ t: "cmd_result", rid: f.rid, id: f.id, ok: true, data: { op: "prompt", delivery: "observed" } });
+      }
+    }, 20);
+    acceptRequests.unref();
+    closers.add(async () => void clearInterval(acceptRequests));
+    const bindAndProve = async () => {
+      const before = (await h.inspect()).sent.length;
+      await h.send(`/use ${SID}`);
+      await until(
+        h.inspect,
+        (s) => s.sent.slice(before).some((m) => String(m.body.content).includes("已绑定")),
+        "bound",
+      );
+      await h.send("开始巡检");
+      await until(
+        async () => h.disk(),
+        (d: any) => Object.values(d.requests ?? {}).some((r: any) => r.senderOpenId === "ou_owner"),
+        "owner request recorded",
+      );
+    };
+    const nonces = (action: string): any[] =>
+      Object.values(h.disk().nonces as Record<string, any>).filter((n: any) => n.action === action);
+    const cardMessages = (s: Inspection) =>
+      s.sent.filter((m) => JSON.stringify(m.body).includes("定时任务待确认")).map((m) => m.messageId);
+    const clickOf = (n: any, id: string, sender = "ou_owner") =>
+      h.rpc("send", { raw: callback(n.nonce, { id, chatId: n.chatId, messageId: n.messageId, sender }) });
+    const patchText = (s: Inspection, messageId: string) =>
+      s.calls
+        .filter((x) => x.method === "PATCH" && x.path.endsWith(`/${messageId}`))
+        .map((x) => JSON.stringify(x.json))
+        .join("\n");
+    return { E, h, c, task, hash, offerId, publish, decides, bindAndProve, nonces, cardMessages, clickOf, patchText };
+  }
+
+  it("owner-bound p2p chat gets ONE card (full prompt, hash, both buttons); an owner click sends exactly one sched_decide with the full hash; the agent's ack becomes the terminal PATCH", async () => {
+    const f = await schedFixture();
+    await f.bindAndProve();
+    f.publish(true);
+    const sent = await until(f.h.inspect, (s) => f.cardMessages(s).length === 1, "card sent");
+    const [messageId] = f.cardMessages(sent);
+    await until(
+      async () => f.nonces("sched-ok").length === 1 && f.nonces("sched-no").length === 1,
+      (v) => v,
+      "buttons durable",
+    );
+    const shown = await until(
+      f.h.inspect,
+      (s) => f.patchText(s, messageId!).includes("检查所有服务的健康状态"),
+      "full card rendered via PATCH",
+    );
+    expect(f.patchText(shown, messageId!)).toContain(f.hash.slice(0, 8));
+    expect(f.decides()).toHaveLength(0); // sending a card decides nothing
+
+    const okButton = f.nonces("sched-ok")[0];
+    await f.clickOf(okButton, "i2-click-ok");
+    const frame = await until(
+      async () => f.decides(),
+      (d) => d.length === 1,
+      "sched_decide frame",
+    );
+    expect(frame[0]).toMatchObject({
+      sessionId: SID,
+      offerId: f.offerId,
+      taskId: f.task.id,
+      defHash: f.hash,
+      decision: "approve",
+    });
+    expect(frame[0].reqId).toMatch(/^[A-Za-z0-9_-]{16,64}$/);
+    f.c.send({ t: "sched_decide_ack", reqId: frame[0].reqId, result: "approved" });
+    const done = await until(
+      f.h.inspect,
+      (s) => f.patchText(s, messageId!).includes("已通过飞书批准"),
+      "terminal PATCH",
+    );
+    expect(done.calls.filter((x) => x.method === "DELETE")).toHaveLength(0);
+    expect(f.nonces("sched-ok")).toHaveLength(0); // buttons are single-use and purged on settle
+    await f.clickOf(okButton, "i2-replay"); // a replayed (already redeemed) callback decides nothing
+    await f.h.quiet(400);
+    expect(f.decides()).toHaveLength(1);
+  }, 60_000);
+
+  it("fail-closed owner proof: a bound p2p chat with NO owner request on record never receives the prompt; the first owner request makes the card appear", async () => {
+    const f = await schedFixture();
+    const before = (await f.h.inspect()).sent.length;
+    await f.h.send(`/use ${SID}`); // binds, but is a command — not a request to the session
+    await until(
+      f.h.inspect,
+      (s) => s.sent.slice(before).some((m) => String(m.body.content).includes("已绑定")),
+      "bound",
+    );
+    f.publish(true);
+    await f.h.quiet(900);
+    const s0 = await f.h.inspect();
+    expect(f.cardMessages(s0)).toEqual([]);
+    expect(JSON.stringify(s0.sent)).not.toContain("检查所有服务的健康状态");
+    expect(f.nonces("sched-card")).toHaveLength(0);
+    await f.h.send("现在发一个请求");
+    await until(f.h.inspect, (s) => f.cardMessages(s).length === 1, "card after the owner proved themselves");
+  }, 60_000);
+
+  it("a stranger's click on the owner's card (valid nonce, wrong operator) never reaches the agent and leaves the card live", async () => {
+    const f = await schedFixture();
+    await f.bindAndProve();
+    f.publish(true);
+    await until(
+      async () => f.nonces("sched-ok").length,
+      (n) => n === 1,
+      "buttons durable",
+    );
+    const before = (await f.h.inspect()).acks;
+    await f.clickOf(f.nonces("sched-ok")[0], "i2-stranger", "ou_stranger");
+    await until(f.h.inspect, (s) => s.acks > before, "callback acknowledged");
+    await f.h.quiet(400);
+    expect(f.decides()).toHaveLength(0);
+    expect(f.nonces("sched-ok").length).toBe(1);
+  }, 60_000);
+
+  it("the agent refuses the decision (offer-gone) ⇒ the stale card is recalled, never left clickable", async () => {
+    const f = await schedFixture();
+    await f.bindAndProve();
+    f.publish(true);
+    await until(
+      async () => f.nonces("sched-ok").length,
+      (n) => n === 1,
+      "buttons durable",
+    );
+    const messageId = f.nonces("sched-ok")[0].messageId as string;
+    await f.clickOf(f.nonces("sched-ok")[0], "i2-gone");
+    const frame = await until(
+      async () => f.decides(),
+      (d) => d.length === 1,
+      "decide",
+    );
+    f.c.send({ t: "sched_decide_ack", reqId: frame[0].reqId, result: "refused", reason: "offer-gone" });
+    const s = await until(
+      f.h.inspect,
+      (x) => x.calls.some((c) => c.method === "DELETE" && c.path.endsWith(`/${messageId}`)),
+      "stale card recalled",
+    );
+    expect(s.calls.filter((c) => c.method === "DELETE" && c.path.endsWith(`/${messageId}`))).toHaveLength(1);
+    expect(f.nonces("sched-ok")).toHaveLength(0);
+  }, 60_000);
+
+  it("the agent's authoritative closed(approved, by: tui) recalls the card and nothing is decided", async () => {
+    const f = await schedFixture();
+    await f.bindAndProve();
+    f.publish(true);
+    await until(
+      async () => f.nonces("sched-ok").length,
+      (n) => n === 1,
+      "buttons durable",
+    );
+    const messageId = f.nonces("sched-ok")[0].messageId as string;
+    f.publish(false, [{ offerId: f.offerId, taskId: f.task.id, defHash: f.hash, outcome: "approved", by: "tui" }]);
+    await until(
+      f.h.inspect,
+      (x) => x.calls.some((c) => c.method === "DELETE" && c.path.endsWith(`/${messageId}`)),
+      "recalled after the TUI won",
+    );
+    expect(f.nonces("sched-ok")).toHaveLength(0);
+    expect(f.decides()).toHaveLength(0);
+  }, 60_000);
+
+  it("schedule off on the hub: the same agent frames produce no card and no sched_decide ever", async () => {
+    const h = await boot();
+    const c = await connectClient(h.paths.socketPath);
+    agents.add(c);
+    c.send(
+      hello({
+        agentId: { pid: process.pid, nonce: "i2-off-agent-AAAAAAAAA" },
+        cwd: h.cwd,
+        caps: ["ev.v1", "cmd.v1", SCHED_HUB_CAP, SCHED_CONFIRM_CAP],
+      }),
+    );
+    const ack: any = await c.waitFrame((f) => f.t === "hello_ack");
+    expect(ack.caps).not.toContain(SCHED_CONFIRM_CAP);
+    expect(ack.caps).not.toContain(SCHED_HUB_CAP);
+    c.send({ t: "session", sessionId: SID, cwd: h.cwd, name: "巡检", reason: "startup", leafId: null, mode: "tui" });
+    c.send({
+      t: "sched_offers",
+      sessionId: SID,
+      open: [
+        {
+          offerId: "offer-off-0001-abcdefg",
+          taskId: "s_aaaaaaaa",
+          defHash: "a".repeat(64),
+          expiresAt: Date.now() + 1000,
+        },
+      ],
+      closed: [],
+    });
+    await h.quiet(500);
+    const s = await h.inspect();
+    expect(s.sent.some((m) => JSON.stringify(m.body).includes("定时任务待确认"))).toBe(false);
+    expect((c.frames as any[]).some((f) => f.t === "sched_decide")).toBe(false);
+  }, 60_000);
 });
