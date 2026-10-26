@@ -18,6 +18,11 @@
 
   Read-only unless `canWrite` (online session + control channel) AND `task.pendingApproval`.
   Offline sessions (E3) and non-pending tasks show no action buttons at all.
+
+  #61 W2 (confirm-plan r2 §4.6): an offer-carrying pending task also gets 「拒绝」 (danger,
+  `/schedule reject <id> <fullHash>` — delete for a never-approved AI create, restore the
+  pre-change definition otherwise); an offer-OPENED review (`fromOffer`) whose offer vanishes
+  without a local click shows 「已在其他端批准」 once the task sits approved.
 -->
 <script setup lang="ts">
 import { computed, inject, ref } from "vue";
@@ -25,12 +30,25 @@ import type { ScheduleTaskProjectionWire } from "@protocol/schedule.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useTrackedCommand, type TrackedCommandResult } from "../../composables/useTrackedCommand.js";
-import { approveArgs, fmtTs, shortHash, whenParts } from "../../logic/schedule.js";
+import { approveArgs, fmtTs, rejectArgs, shortHash, whenParts } from "../../logic/schedule.js";
 import CommandConfirm from "../control/CommandConfirm.vue";
 import { CONTROL_VIEW } from "../control/controlContext.js";
 
-const props = defineProps<{ readonly task: ScheduleTaskProjectionWire; readonly canWrite: boolean }>();
-const emit = defineEmits<{ back: []; close: [] }>();
+const props = defineProps<{
+  readonly task: ScheduleTaskProjectionWire;
+  readonly canWrite: boolean;
+  /** #61 W2 (confirm-plan r2 §4.6): this review view was auto-opened by a live confirm offer
+   *  (vs a manually picked 详情/审阅). Offer-opened reviews surface the「已在其他端批准」note
+   *  when the offer vanishes under the dialog without a local click. */
+  readonly fromOffer?: boolean;
+}>();
+const emit = defineEmits<{
+  back: [];
+  close: [];
+  /** #61 W2: a local approve/reject settled ok — the panel uses "reject-delete" to keep the
+   *  conclusion copy when the task vanishes on the next SSE snapshot. */
+  decided: [kind: "approved" | "reject-delete" | "reject-restore"];
+}>();
 const { t } = useI18n();
 
 const view = inject(CONTROL_VIEW, null);
@@ -47,6 +65,10 @@ const trackedPhase = tracked.phase;
 const trackedConfirm = tracked.confirmReq;
 
 const note = ref<{ kind: "ok" | "err" | "rev"; text: string } | null>(null);
+/** #61 W2 (verifier fix): WHICH action is in flight — the two buttons share one tracked
+ *  command, so only the in-flight one shows the spinner/「…中」copy; the other is merely
+ *  disabled (via `busy`). null ⇔ idle (incl. the E_CONFIRM_REQUIRED think-time phase). */
+const busyAction = ref<"approve" | "reject" | null>(null);
 
 const def = computed(() => props.task.task);
 const when = computed(() => whenParts(def.value.when));
@@ -74,18 +96,71 @@ function isRev(r: TrackedCommandResult): boolean {
   return /\bE_REV\b/.test(r.error) || (r.message !== undefined && /\bE_REV\b/.test(r.message));
 }
 
+/** #61 W2 (confirm-plan r2 §4.6): an offer-carrying pending task on a writable channel also
+ *  gets 「拒绝」 (sends `/schedule reject <id> <fullHash>` — C0's policy allows exactly that
+ *  shape). The label distinguishes the two undo shapes: a never-approved AI create is deleted;
+ *  a previously approved task whose definition the AI changed is restored to the old
+ *  definition (its original approval comes back into effect). */
+const rejectable = computed(
+  () => props.canWrite && props.task.pendingApproval === true && props.task.offer !== undefined && !busy.value,
+);
+const rejectKind = computed<"delete" | "restore">(() => (def.value.approval === undefined ? "delete" : "restore"));
+
+/** #61 W2: an offer-opened review whose offer VANISHED without a local click means another
+ *  channel won the race — with the task now approved that reads as「已在其他端批准」(the
+ *  buttons hide themselves with pendingApproval). A still-pending task whose offer lapsed
+ *  (superseded by a newer definition / expired) gets NO note — the live-refreshed definition
+ *  speaks for itself. A locally settled action (note set) always wins over this note. */
+const offerNote = computed(() => {
+  if (props.fromOffer !== true || note.value !== null) return null;
+  if (props.task.offer !== undefined || props.task.pendingApproval === true) return null;
+  return t("schedule.offerApprovedElsewhere");
+});
+
+async function onReject(): Promise<void> {
+  if (!rejectable.value) return;
+  note.value = null;
+  const kind = rejectKind.value;
+  busyAction.value = "reject";
+  try {
+    const r = await tracked.run("schedule", rejectArgs(def.value.id, props.task.defHash));
+    if (r.ok) {
+      note.value = {
+        kind: "ok",
+        text: t(kind === "delete" ? "schedule.rejectOkDelete" : "schedule.rejectOkRestore"),
+      };
+      // tell the panel WHO settled, so the task-vanish fallback keeps this conclusion copy
+      // (verifier nit #4) instead of swapping to the generic「任务已删除」on the next snapshot
+      emit("decided", kind === "delete" ? "reject-delete" : "reject-restore");
+      return;
+    }
+    if ("cancelled" in r) return; // timeout/close/switch — the next SSE snapshot is the truth
+    note.value = isRev(r)
+      ? { kind: "rev", text: t("schedule.approveRev") }
+      : { kind: "err", text: t("schedule.rejectFailed", { reason: r.message ?? r.error }) };
+  } finally {
+    busyAction.value = null;
+  }
+}
+
 async function onApprove(): Promise<void> {
   if (!approvable.value) return;
   note.value = null;
-  const r = await tracked.run("schedule", approveArgs(def.value.id, props.task.defHash));
-  if (r.ok) {
-    note.value = { kind: "ok", text: t("schedule.approveOk") };
-    return;
+  busyAction.value = "approve";
+  try {
+    const r = await tracked.run("schedule", approveArgs(def.value.id, props.task.defHash));
+    if (r.ok) {
+      note.value = { kind: "ok", text: t("schedule.approveOk") };
+      emit("decided", "approved");
+      return;
+    }
+    if ("cancelled" in r) return; // timeout/close/switch — the next SSE snapshot is the truth
+    note.value = isRev(r)
+      ? { kind: "rev", text: t("schedule.approveRev") }
+      : { kind: "err", text: t("schedule.approveFailed", { reason: r.message ?? r.error }) };
+  } finally {
+    busyAction.value = null;
   }
-  if ("cancelled" in r) return; // timeout/close/switch — the next SSE snapshot is the truth
-  note.value = isRev(r)
-    ? { kind: "rev", text: t("schedule.approveRev") }
-    : { kind: "err", text: t("schedule.approveFailed", { reason: r.message ?? r.error }) };
 }
 </script>
 
@@ -177,9 +252,27 @@ async function onApprove(): Promise<void> {
     >
       {{ note.text }}
     </p>
+    <p v-else-if="offerNote !== null" class="review-status" data-kind="ok" role="status">
+      {{ offerNote }}
+    </p>
 
     <div v-if="task.pendingApproval" class="review-actions">
       <button class="btn btn-ghost" type="button" @click="emit('back')">{{ t("schedule.cancel") }}</button>
+      <button
+        v-if="canWrite && task.offer !== undefined"
+        class="btn btn-danger"
+        type="button"
+        :disabled="!rejectable"
+        :aria-label="t('schedule.rejectAria')"
+        @click="void onReject()"
+      >
+        <AppIcon v-if="trackedPhase === 'running' && busyAction === 'reject'" name="loader" class="icon-sm spin" />
+        {{
+          trackedPhase === "running" && busyAction === "reject"
+            ? t("schedule.rejecting")
+            : t(rejectKind === "delete" ? "schedule.rejectDelete" : "schedule.rejectRestore")
+        }}
+      </button>
       <button
         v-if="canWrite"
         class="btn btn-primary"
@@ -188,8 +281,8 @@ async function onApprove(): Promise<void> {
         :aria-label="t('schedule.approveAria')"
         @click="void onApprove()"
       >
-        <AppIcon v-if="trackedPhase === 'running'" name="loader" class="icon-sm spin" />
-        {{ trackedPhase === "running" ? t("schedule.approving") : t("schedule.approve") }}
+        <AppIcon v-if="trackedPhase === 'running' && busyAction === 'approve'" name="loader" class="icon-sm spin" />
+        {{ trackedPhase === "running" && busyAction === "approve" ? t("schedule.approving") : t("schedule.approve") }}
       </button>
     </div>
   </div>

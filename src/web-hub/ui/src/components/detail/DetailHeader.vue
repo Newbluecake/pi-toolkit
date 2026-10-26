@@ -77,7 +77,7 @@ import WorktreePanel from "./WorktreePanel.vue";
 import GraphPanel from "./GraphPanel.vue";
 import { cacheKeepaliveOf } from "./cacheKeepaliveView.js";
 import { XS_CHANNEL_CAP, xsAliasOf, xsUnreadLabel, xsUnreadOf } from "../agents/agentCardModel.js";
-import { schedCapOn } from "../../logic/schedule.js";
+import { offerOf, schedCapOn, sessionProjectionOf } from "../../logic/schedule.js";
 import { worktreesOf } from "./worktreesView.js";
 
 const props = defineProps<DetailHeaderProps>();
@@ -300,6 +300,77 @@ const schedSessionId = computed(() => {
   return typeof sid === "string" && sid !== "" ? sid : undefined;
 });
 const schedUsable = computed(() => schedCapOn(hub?.state.value.hub?.["caps"]) && schedSessionId.value !== undefined);
+
+// ---------------------------------------------------------------------------
+// #61 confirm-plan r2 §4.6 (W2): a live confirm offer on this session's tasks auto-opens the
+// SchedulePanel STRAIGHT INTO that task's ScheduleReview — once per offerId per browser tab
+// (a sessionStorage set, capped 64; ControlNotice.vue's window.sessionStorage precedent).
+// Gate: schedUsable ∧ the control-writable surface (the 「清空」 gate) ∧ online — read-only or
+// offline surfaces never pop. Multiple offers: the earliest expiry wins (offerOf picks it).
+// Closing an auto-opened panel marks the offer 「已呈现」 so it never re-pops; an offer handled
+// elsewhere just disappears from the wire (the open review shows its own「已在其他端批准」note).
+// ---------------------------------------------------------------------------
+const SCHED_OFFER_SEEN_KEY = "pwh_sched_offer_seen";
+const SCHED_OFFER_SEEN_MAX = 64;
+/** The offerId this header auto-opened for (panel close ⇒ mark seen); null while manual/none. */
+const schedAutoOfferId = ref<string | null>(null);
+const schedReviewTaskId = ref<string | undefined>(undefined);
+
+function schedOfferSeenSet(): Set<string> {
+  try {
+    const raw = window.sessionStorage.getItem(SCHED_OFFER_SEEN_KEY);
+    if (raw === null) return new Set();
+    const arr: unknown = JSON.parse(raw);
+    return Array.isArray(arr) ? new Set(arr.filter((x): x is string => typeof x === "string")) : new Set();
+  } catch {
+    return new Set(); // corrupt value / storage denied ⇒ nothing seen (fail-open: re-pop)
+  }
+}
+function schedOfferMarkSeen(offerId: string): void {
+  try {
+    const seen = [...schedOfferSeenSet().add(offerId)].slice(-SCHED_OFFER_SEEN_MAX);
+    window.sessionStorage.setItem(SCHED_OFFER_SEEN_KEY, JSON.stringify(seen));
+  } catch {
+    // storage denied (private mode) — worst case is one re-pop in this tab; fail-open
+  }
+}
+
+const schedOffer = computed(() => {
+  if (!schedUsable.value || !clearUsable.value || props.agent.down === true) return undefined;
+  return offerOf(sessionProjectionOf(hub?.state.value.schedules, schedSessionId.value));
+});
+/** Open the panel straight into the given offer's review (watcher + close re-check share this). */
+function schedOfferPop(offer: { taskId: string; offerId: string }): void {
+  schedReviewTaskId.value = offer.taskId;
+  schedAutoOfferId.value = offer.offerId;
+  schedOpen.value = true;
+}
+watch(
+  schedOffer,
+  (offer) => {
+    if (offer === undefined || schedOpen.value || schedOfferSeenSet().has(offer.offerId)) return;
+    schedOfferPop(offer);
+  },
+  { immediate: true }, // an offer already on the wire when the header mounts pops too
+);
+function onSchedClose(): void {
+  schedOpen.value = false;
+  if (schedAutoOfferId.value !== null) {
+    schedOfferMarkSeen(schedAutoOfferId.value);
+    schedAutoOfferId.value = null;
+  }
+  schedReviewTaskId.value = undefined;
+  // verifier fix #2 (§4.6 「没见过且面板未开 ⇒ 打开」): the watcher alone returns early while
+  // the panel is open — a second offer that arrived meanwhile (or one still live and unseen)
+  // would never pop. Re-check on close: the just-closed offer is now marked seen, so only a
+  // genuinely unseen offer re-opens the panel. Deferred a tick so the closed panel unmounts
+  // first — `initialReviewTaskId` is only read at setup, a same-tick false→true would keep the
+  // stale mount aimed at the previous task.
+  void nextTick(() => {
+    const next = schedOffer.value;
+    if (next !== undefined && !schedOpen.value && !schedOfferSeenSet().has(next.offerId)) schedOfferPop(next);
+  });
+}
 
 // alias-plan r4 §7.2 (ALU): the held alias renders as a small `@alias` right after the title;
 // clicking it opens the same (lazily loaded) 「频道与别名」 dialog. Drawn only when the hub
@@ -679,7 +750,8 @@ function onOverflowRun(id: string): void {
       <SchedulePanel
         v-if="schedOpen && schedSessionId !== undefined"
         :session-id="schedSessionId"
-        @close="schedOpen = false"
+        :initial-review-task-id="schedReviewTaskId"
+        @close="onSchedClose"
       />
       <button
         v-if="resumeUsable && !isFolded('resume')"

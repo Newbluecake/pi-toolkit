@@ -112,6 +112,18 @@ const en = {
   /** E_REV (§4.3): the definition changed under the dialog — re-review. */
   approveRev: "The definition changed meanwhile — review the refreshed content and approve again.",
   approveFailed: "Approve failed: {reason}",
+  /** #61 W2 (confirm-plan r2 §4.6) — the offer-driven 「拒绝」 path and the elsewhere-handled notes. */
+  rejectDelete: "Reject (delete task)",
+  rejectRestore: "Reject (restore previous definition)",
+  rejecting: "Rejecting…",
+  rejectAria: "Reject the AI's unconfirmed change",
+  rejectOkDelete: "Rejected — the task has been deleted.",
+  rejectOkRestore: "Rejected — restored to the pre-change definition; its original approval is back in effect.",
+  rejectFailed: "Reject failed: {reason}",
+  /** Offer-opened review: the offer vanished and the task sits approved ⇒ another channel won. */
+  offerApprovedElsewhere: "Already approved elsewhere — another channel (terminal or Feishu) confirmed this task.",
+  /** Panel list fallback: the offer-opened review's task vanished mid-review. */
+  offerTaskGone: "Task deleted.",
   cancel: "Cancel",
 } satisfies Record<string, string>;
 
@@ -208,6 +220,16 @@ const zh: Record<keyof typeof en, string> = {
   approveOk: "已批准——任务现在可以执行。",
   approveRev: "内容已变更，请重新审阅——任务在审阅期间被修改，已刷新为最新版本。",
   approveFailed: "批准失败：{reason}",
+  /** #61 W2（confirm-plan r2 §4.6）——由 offer 驱动的「拒绝」路径与「已在其他端处理」提示。 */
+  rejectDelete: "拒绝（删除该任务）",
+  rejectRestore: "拒绝（恢复修改前定义）",
+  rejecting: "拒绝中…",
+  rejectAria: "拒绝 AI 的这次未确认改动",
+  rejectOkDelete: "已拒绝——任务已删除。",
+  rejectOkRestore: "已拒绝——已恢复到修改前的定义，原批准重新生效。",
+  rejectFailed: "拒绝失败：{reason}",
+  offerApprovedElsewhere: "已在其他端批准——该任务已在其他渠道（终端或飞书）确认。",
+  offerTaskGone: "任务已删除。",
   cancel: "取消",
 };
 

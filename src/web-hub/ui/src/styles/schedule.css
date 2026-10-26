@@ -314,3 +314,17 @@
     min-height: 36px;
   }
 }
+
+/* Narrow phones (≤480px, verifier fix #3): with the #61 W2 reject button the row is
+ * Cancel / Reject / Approve — the en copy overflows horizontally at 360–390px. Wrap and let
+ * each button fill its row with the 44px touch height (spawn.css's ≤480px action grammar). */
+@media (max-width: 480px) {
+  .review-actions {
+    flex-wrap: wrap;
+  }
+  .review-actions .btn {
+    flex: 1 1 100%;
+    justify-content: center;
+    min-height: 44px;
+  }
+}

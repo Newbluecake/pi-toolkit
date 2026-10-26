@@ -14,8 +14,10 @@ import {
   fmtTs,
   isRunLive,
   isSchedulesPayloadLike,
+  offerOf,
   panelView,
   relIn,
+  rejectArgs,
   runReasonKey,
   runStateKey,
   scheduleBadgeOf,
@@ -138,9 +140,50 @@ describe("display helpers", () => {
     expect(feishuKey("sent", true)).toBe("q"); // stale overrides everything
     expect(feishuKey("bogus", false)).toBe("q");
   });
-  it("approveArgs / shortHash", () => {
+  it("approveArgs / rejectArgs / shortHash", () => {
     expect(approveArgs("s_abcd2345", "fd9fcbba".repeat(8))).toBe(`approve s_abcd2345 ${"fd9fcbba".repeat(8)}`);
+    expect(rejectArgs("s_abcd2345", "fd9fcbba".repeat(8))).toBe(`reject s_abcd2345 ${"fd9fcbba".repeat(8)}`);
     expect(shortHash("1b4611e2ff4f7bc06a36a751b84306214878c05506d49e70aec1d8394ec06655")).toBe("1b4611e2");
+  });
+});
+
+describe("offerOf (#61 W2, confirm-plan r2 §4.6)", () => {
+  it("picks the earliest-expiring structurally valid offer across the session's tasks", () => {
+    const later = makeTask({
+      task: { id: "s_aaaa2345" },
+      offer: { offerId: "offer-aaaa1111bbbb2222", expiresAt: 9_000 },
+    });
+    const sooner = makeTask({
+      task: { id: "s_bbbb2345" },
+      pendingApproval: true,
+      executable: false,
+      offer: { offerId: "offer-bbbb3333cccc4444", expiresAt: 3_000 },
+    });
+    expect(offerOf(makeSession({ tasks: [later, sooner] }))).toEqual({
+      taskId: "s_bbbb2345",
+      offerId: "offer-bbbb3333cccc4444",
+      expiresAt: 3_000,
+    });
+  });
+  it("undefined without offers, on malformed projections; malformed entries are skipped", () => {
+    expect(offerOf(makeSession())).toBeUndefined();
+    expect(offerOf(undefined)).toBeUndefined();
+    expect(offerOf(null)).toBeUndefined();
+    expect(offerOf({ tasks: "x" })).toBeUndefined();
+    // malformed offer entries are skipped, a later valid one still wins
+    const badOffer = makeTask({
+      task: { id: "s_aaaa2345" },
+      offer: { offerId: "", expiresAt: 1 },
+    });
+    expect(offerOf(makeSession({ tasks: [badOffer] }))).toBeUndefined();
+    const good = makeTask({
+      task: { id: "s_bbbb2345" },
+      offer: { offerId: "offer-dddd5555eeee6666", expiresAt: 7_000 },
+    });
+    expect(offerOf(makeSession({ tasks: [badOffer, good] }))?.offerId).toBe("offer-dddd5555eeee6666");
+    // expiresAt non-finite ⇒ skipped
+    const nanOffer = makeTask({ task: { id: "s_cccc2345" }, offer: { offerId: "offer-x", expiresAt: Number.NaN } });
+    expect(offerOf(makeSession({ tasks: [nanOffer] }))).toBeUndefined();
   });
 });
 

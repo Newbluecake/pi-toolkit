@@ -19,7 +19,7 @@
   relock unmounts it with everything else (ResumeDialog precedent).
 -->
 <script setup lang="ts">
-import { computed, inject, onUnmounted, ref } from "vue";
+import { computed, inject, onUnmounted, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useTicker } from "../../composables/useTicker.js";
@@ -30,7 +30,13 @@ import PickerSheet from "../control/PickerSheet.vue";
 import ScheduleReview from "./ScheduleReview.vue";
 import "../../styles/schedule.css";
 
-const props = defineProps<{ readonly sessionId: string | undefined }>();
+const props = defineProps<{
+  readonly sessionId: string | undefined;
+  /** #61 W2 (confirm-plan r2 §4.6): DetailHeader may mount the panel already aimed at one
+   *  task — the live confirm offer's auto-open. The panel starts on that task's review view.
+   *  (`| undefined` explicit: exactOptionalPropertyTypes — the header passes a maybe-undefined.) */
+  readonly initialReviewTaskId?: string | undefined;
+}>();
 const emit = defineEmits<{ close: [] }>();
 registerScheduleExtra(); // before any t() this dialog renders
 const { t } = useI18n();
@@ -130,7 +136,15 @@ function nextLabel(nextAt: number | undefined, degraded: boolean): string {
 
 // --- review view (in-dialog swap; ONE PickerSheet — stacked sheets would double the scroll lock) ---
 
-const reviewTaskId = ref<string | null>(null);
+const reviewTaskId = ref<string | null>(props.initialReviewTaskId ?? null);
+/** #61 W2: WHICH review view was offer-opened (vs a manually picked one — cleared on 返回).
+ *  Drives ScheduleReview's `fromOffer` note and the「任务已删除」fallback note below. */
+const offerOpenedId = ref<string | null>(props.initialReviewTaskId ?? null);
+/** Transient list-view note after an offer-opened review's task vanished mid-review — or the
+ *  SAME conclusion copy when the vanish was our own reject-delete (verifier nit #4). */
+const listNote = ref<"gone" | "rejectDeleted" | null>(null);
+/** Task id of the review's locally settled reject-delete (ScheduleReview's `decided` event). */
+const decidedDeleteId = ref<string | null>(null);
 /** The raw projection task under review — read live off the hub slot so an E_REV refresh (the
  *  next SSE snapshot) automatically re-renders the dialog with the changed definition. */
 const reviewTask = computed(() => {
@@ -139,11 +153,38 @@ const reviewTask = computed(() => {
   return proj?.tasks.find((task) => task.task.id === reviewTaskId.value) ?? null;
 });
 
+// #61 W2 (confirm-plan r2 §4.6): an offer-opened review whose task VANISHED mid-review (the
+// own reject-delete, or a delete/reject elsewhere) falls back to the list WITH the「任务已删
+// 除」note instead of vanishing silently. Manual reviews keep the pre-feature silent fallback.
+watch(reviewTask, (task) => {
+  if (task !== null || reviewTaskId.value === null) return;
+  if (model.value.kind !== "ready") return; // a degraded/unscanned store is not「任务已删除」
+  // verifier nit #4: our own reject-delete vanished the task — keep the conclusion copy
+  // (「已拒绝——任务已删除。」) instead of the generic「任务已删除」across the SSE snapshot.
+  if (decidedDeleteId.value === reviewTaskId.value) {
+    listNote.value = "rejectDeleted";
+    decidedDeleteId.value = null;
+  } else {
+    if (offerOpenedId.value === null) return; // manual reviews keep the silent fallback
+    listNote.value = "gone";
+  }
+  reviewTaskId.value = null;
+  offerOpenedId.value = null;
+});
+
+function onReviewDecided(kind: "approved" | "reject-delete" | "reject-restore"): void {
+  if (kind === "reject-delete") decidedDeleteId.value = reviewTaskId.value;
+}
+
 function openReview(taskId: string): void {
+  listNote.value = null;
+  decidedDeleteId.value = null;
   reviewTaskId.value = taskId;
 }
 function closeReview(): void {
   reviewTaskId.value = null;
+  offerOpenedId.value = null;
+  decidedDeleteId.value = null;
 }
 </script>
 
@@ -155,8 +196,10 @@ function closeReview(): void {
       v-if="reviewTask !== null"
       :task="reviewTask"
       :can-write="canWrite"
+      :from-offer="offerOpenedId !== null && offerOpenedId === reviewTaskId"
       @back="closeReview"
       @close="emit('close')"
+      @decided="onReviewDecided"
     />
     <div v-else class="sched-dialog">
       <header class="sched-head">
@@ -181,6 +224,11 @@ function closeReview(): void {
       </p>
       <p v-if="model.kind !== 'none' && model.offline" class="sched-note" data-kind="info" role="status">
         {{ t("schedule.offlineNote") }}
+      </p>
+      <!-- #61 W2: the offer-opened review's task vanished mid-review (deleted here or
+           elsewhere) — a local reject-delete keeps its own conclusion copy (verifier nit #4). -->
+      <p v-if="listNote !== null" class="sched-note" data-kind="info" role="status">
+        {{ t(listNote === "rejectDeleted" ? "schedule.rejectOkDelete" : "schedule.offerTaskGone") }}
       </p>
 
       <template v-if="model.kind === 'degraded'">

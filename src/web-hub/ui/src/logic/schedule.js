@@ -111,6 +111,31 @@ export function sessionProjectionOf(payload, sessionId) {
   return undefined;
 }
 
+/**
+ * The ONE confirm offer a session projection currently carries (#61 confirm-plan r2 §4.6, W2):
+ * the earliest-expiring structurally valid `offer` across the projection's tasks. Loose reads
+ * only (untrusted JSON, same posture as `isSchedulesPayloadLike`): a task whose offer/taskId/
+ * expiresAt is malformed is skipped, never fatal. undefined ⇒ no live offer (nothing to pop).
+ * @param {ScheduleSessionProjectionWire | unknown} proj
+ * @returns {{ taskId: string, offerId: string, expiresAt: number } | undefined}
+ */
+export function offerOf(proj) {
+  if (proj === null || typeof proj !== "object" || Array.isArray(proj)) return undefined;
+  const tasks = /** @type {Record<string, unknown>} */ (proj).tasks;
+  if (!Array.isArray(tasks)) return undefined;
+  let best = undefined;
+  for (const task of tasks) {
+    const t = record(task);
+    const offer = record(t.offer);
+    const offerId = str(offer.offerId);
+    const expiresAt = num(offer.expiresAt);
+    const taskId = str(record(t.task).id);
+    if (offerId === undefined || expiresAt === undefined || taskId === undefined) continue;
+    if (best === undefined || expiresAt < best.expiresAt) best = { taskId, offerId, expiresAt };
+  }
+  return best;
+}
+
 /** @typedef {{ count: number, pending: boolean }} ScheduleBadge */
 /**
  * AgentCard badge: `⏰<n>` while the session has tasks, `⏰!` when any task is pendingApproval.
@@ -219,6 +244,13 @@ export function whenParts(when) {
  *  projection; the agent does the lock-internal CAS). Callers pass the wire values through. */
 export function approveArgs(taskId, defHash) {
   return `approve ${taskId} ${defHash}`;
+}
+
+/** `/schedule reject <id> <fullHash>` args (#61 confirm-plan r2 §4.6): the web 「拒绝」 path —
+ *  same hash-binding discipline as approveArgs (the hash comes ONLY from the review dialog's
+ *  projection); the agent's live-offer check + lock-internal CAS are the arbiters. */
+export function rejectArgs(taskId, defHash) {
+  return `reject ${taskId} ${defHash}`;
 }
 
 /** First 8 hex chars of a defHash for display (§5.6「hash 前 8 位」). */
