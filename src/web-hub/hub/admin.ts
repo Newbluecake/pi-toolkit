@@ -37,7 +37,8 @@ import { LAN_2FA_HUB_CAP } from "../protocol/version.js";
 // L8 "密码 ≥10 位": shared with the TUI `/webhub passwd` client-side precheck
 // (`agent/passwd-prompt.ts`'s `MIN_LAN_PASSWORD_LENGTH`) so a password the client accepts is
 // never turned around and rejected by the hub — review fix, this used to be a locally-defined 8.
-import { MIN_LAN_PASSWORD_LENGTH } from "../protocol/lan.js";
+import { MAX_LAN_PASSWORD_LENGTH, MIN_LAN_PASSWORD_LENGTH } from "../protocol/lan.js";
+import { checkLanPassword } from "../protocol/password-policy.js";
 import {
   advanceRotateIntentSync,
   cleanupRotateIntentTemps,
@@ -425,9 +426,10 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
     const kdf = deps.kdf();
     if (!deps.hasLan() || store === undefined || kdf === undefined) return noLan(rid, "passwd", meta);
     if (
+      password.length < MIN_LAN_PASSWORD_LENGTH ||
+      password.length > MAX_LAN_PASSWORD_LENGTH ||
       username.trim().length === 0 ||
-      (username.includes(":") && (await store.getUser(username)) === undefined) ||
-      password.length < MIN_LAN_PASSWORD_LENGTH
+      (username.includes(":") && (await store.getUser(username)) === undefined)
     ) {
       audit("passwd", { ok: false, code: "E_BAD_REQUEST" }, meta);
       return {
@@ -435,8 +437,13 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
         rid,
         ok: false,
         code: "E_BAD_REQUEST",
-        message: `username must be non-empty and must not contain :; password must be at least ${MIN_LAN_PASSWORD_LENGTH} characters`,
+        message: `username must be non-empty and must not contain :; password must be ${MIN_LAN_PASSWORD_LENGTH}..${MAX_LAN_PASSWORD_LENGTH} characters`,
       };
+    }
+    const verdict = checkLanPassword(password, { username });
+    if (!verdict.ok) {
+      audit("passwd", { ok: false, code: "E_WEAK_PASSWORD", reason: verdict.reason }, meta);
+      return { t: "lan_res", rid, ok: false, code: "E_WEAK_PASSWORD", message: `password rejected: ${verdict.reason}` };
     }
     const params = defaultKdfParams();
     const hash = await kdf.run(password, params);

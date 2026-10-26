@@ -3,7 +3,7 @@
  * logic against fake ports (`tests/web-hub/contract/fakes.ts`), no real
  * sqlite/scrypt — that end-to-end coverage lives in `hub-lan.test.ts`.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fakeKdf, fakeLanStore, fakeLoginLimiter, type FakeLanStore } from "../contract/fakes.js";
 import { createAdminHandler, type AdminDeps } from "../../../src/web-hub/hub/admin.js";
 import type { LanFacade, LanStatus } from "../../../src/web-hub/hub/ports.js";
@@ -143,6 +143,79 @@ describe("createAdminHandler (plan §8)", () => {
   });
 
   describe("lan_req passwd", () => {
+    it.each([
+      ["password123", "common"],
+      ["p@ssw0rd!!", "common"],
+      ["9876543210", "pattern"],
+      ["abcabcabca", "pattern"],
+      ["aaaaaaaaaa", "pattern"],
+      ["alice-secret-1", "username"],
+      ["my-webhub-pass", "username"],
+    ])("rejects %s before KDF/write, with redacted fixed reply/audit", async (password, reason) => {
+      const store = fakeLanStore();
+      const kdf = fakeKdf();
+      const run = vi.spyOn(kdf, "run");
+      const write = vi.spyOn(store, "setPassword");
+      const { deps, log } = baseDeps({ store: () => store, kdf: () => kdf });
+      const res = await createAdminHandler(deps).handleLanReq(
+        { t: "lan_req", rid: "weak", op: "passwd", username: "alice", password: password! },
+        { agentKey: "a1" },
+      );
+      expect(res).toEqual({
+        t: "lan_res",
+        rid: "weak",
+        ok: false,
+        code: "E_WEAK_PASSWORD",
+        message: `password rejected: ${reason}`,
+      });
+      expect(run).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+      expect(log.lines).toHaveLength(1);
+      expect(log.lines[0]?.data).toEqual({
+        audit: "admin",
+        op: "passwd",
+        agentKey: "a1",
+        ok: false,
+        code: "E_WEAK_PASSWORD",
+        reason,
+      });
+      expect(JSON.stringify([res, log.lines])).not.toContain(password!);
+    });
+    it("rejects 257 UTF-16 units before KDF, write or username lookup", async () => {
+      const store = fakeLanStore();
+      const kdf = fakeKdf();
+      const run = vi.spyOn(kdf, "run");
+      const write = vi.spyOn(store, "setPassword");
+      const get = vi.spyOn(store, "getUser");
+      const { deps } = baseDeps({ store: () => store, kdf: () => kdf });
+      const res = await createAdminHandler(deps).handleLanReq(
+        { t: "lan_req", rid: "long", op: "passwd", username: "legacy:user", password: "x".repeat(257) },
+        { agentKey: "a1" },
+      );
+      expect(res).toMatchObject({ ok: false, code: "E_BAD_REQUEST" });
+      expect(run).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+    });
+    it.each(["ＶＪ８！ｋＲ２＠ｘＱ", "maple orbit velvet canoe".padEnd(256, "x")])(
+      "hashes the original accepted input %s",
+      async (password) => {
+        const store = fakeLanStore();
+        const kdf = fakeKdf();
+        const run = vi.spyOn(kdf, "run");
+        const write = vi.spyOn(store, "setPassword");
+        const { deps } = baseDeps({ store: () => store, kdf: () => kdf });
+        expect(
+          await createAdminHandler(deps).handleLanReq(
+            { t: "lan_req", rid: "ok", op: "passwd", username: "alice", password },
+            { agentKey: "a1" },
+          ),
+        ).toMatchObject({ ok: true });
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(run.mock.calls[0]?.[0]).toBe(password);
+        expect(write).toHaveBeenCalledTimes(1);
+      },
+    );
     it("updates the password, revokes the user's LAN sessions, and audits (never the password)", async () => {
       const store = fakeLanStore();
       seedAdmin(store);

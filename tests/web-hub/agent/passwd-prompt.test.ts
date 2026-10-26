@@ -119,6 +119,54 @@ function deps(over: Partial<PasswdPromptDeps> = {}): PasswdPromptDeps {
 }
 
 describe("runPasswdPrompt (plan §9.3 passwd flow)", () => {
+  it.each([
+    ["password123", "common"],
+    ["Password2024!", "common"],
+    ["p@ssw0rd!!", "common"],
+    ["qwertyuiop", "pattern"],
+    ["9876543210", "pattern"],
+    ["abcabcabca", "pattern"],
+    ["alice-secret-1", "username"],
+    ["my-webhub-pass", "username"],
+  ])("P4 rejects %s locally without sending any lan_req", async (password, reason) => {
+    const request = vi.fn();
+    const outcome = await runPasswdPrompt(deps({ promptPassword: async () => password!, request }));
+    expect(outcome).toEqual({
+      ok: false,
+      reason: "rejected",
+      code: "E_WEAK_PASSWORD",
+      message: `password rejected: ${reason}`,
+    });
+    expect(request).not.toHaveBeenCalled();
+    expect(formatPasswdOutcomeMessage(outcome)).not.toContain(password!);
+  });
+  it("passes an unknown future hub error code and message through unchanged", async () => {
+    const request = vi.fn(async (frame: LanReqFrame): Promise<LanResFrame> =>
+      frame.op === "users"
+        ? { t: "lan_res", rid: frame.rid, ok: true, users: [] }
+        : { t: "lan_res", rid: frame.rid, ok: false, code: "E_FUTURE_POLICY", message: "future reason" },
+    );
+    expect(await runPasswdPrompt(deps({ request }))).toEqual({
+      ok: false,
+      reason: "rejected",
+      code: "E_FUTURE_POLICY",
+      message: "future reason",
+    });
+    expect(request.mock.calls.map(([f]) => f.op)).toEqual(["users", "passwd"]);
+  });
+  it.each(["ＶＪ８！ｋＲ２＠ｘＱ", "Tr0ub4dor&3x9", "maple orbit velvet canoe", "清晨山间微风伴我漫步看星空"])(
+    "sends original strong input %s, without normalizing the transmitted password",
+    async (password) => {
+      const request = vi.fn(async (frame: LanReqFrame): Promise<LanResFrame> => ({
+        t: "lan_res",
+        rid: frame.rid,
+        ok: true,
+        ...(frame.op === "users" ? { users: [] } : {}),
+      }));
+      expect(await runPasswdPrompt(deps({ request, promptPassword: async () => password }))).toEqual({ ok: true });
+      expect(request.mock.calls[1]?.[0]).toMatchObject({ op: "passwd", password });
+    },
+  );
   it("no lan.v1 cap ⇒ rejects before prompting anything", async () => {
     const promptUsername = vi.fn(async () => "alice");
     const outcome = await runPasswdPrompt(deps({ hasCap: () => false, promptUsername }));
