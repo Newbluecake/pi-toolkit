@@ -438,13 +438,171 @@ function writeFileAtomic(file, text, mode) {
   }
 }
 
-// ───────────────────────────── user settings file (~/.pi/agent/pi-subagent.json) ─────────────────────────────
+// ───────────────────────────── user settings file (<agentDir>/pi-toolkit.json, legacy pi-subagent.json) ─────────────────────────────
+// Mirror of src/secure/settings-lock.ts (file-name resolution S0–S7, location, write-time heal) —
+// parity: tests/secure/settings-file-resolve.test.ts / settings-file-heal.test.ts. The launcher NEVER initiates the legacy→new
+// migration; it only completes an existing crash-window S6a (healSettingsFileLocked) before it writes.
+
+export const SETTINGS_FILE_NAME = "pi-toolkit.json";
+export const LEGACY_SETTINGS_FILE_NAME = "pi-subagent.json";
 
 export function homeDir() {
   return os.homedir();
 }
-export function settingsFilePath(home = homeDir()) {
-  return path.join(home, ".pi", "agent", "pi-subagent.json");
+
+function settingsProbe(p, lstat) {
+  try {
+    const st = lstat(p);
+    return { type: st.isSymbolicLink() ? "symlink" : st.isFile() ? "file" : "other", st };
+  } catch (e) {
+    return e && (e.code === "ENOENT" || e.code === "ENOTDIR") ? { type: "none" } : { type: "other" };
+  }
+}
+function settingsSameInode(a, b) {
+  return a.st !== undefined && b.st !== undefined && a.st.dev === b.st.dev && a.st.ino === b.st.ino;
+}
+function settingsTry(fn) {
+  try {
+    return fn();
+  } catch {
+    return undefined;
+  }
+}
+
+/** S0–S7 (plan §3.3). Pure read, never throws. deps: {lstat, readlink, realpath} test seams. */
+export function resolveSettingsFile(dir, deps = {}) {
+  const lstat = deps.lstat ?? ((p) => fs.lstatSync(p));
+  const readlink = deps.readlink ?? ((p) => fs.readlinkSync(p));
+  const realpath = deps.realpath ?? ((p) => fs.realpathSync(p));
+  const newPath = path.join(dir, SETTINGS_FILE_NAME);
+  const legacyPath = path.join(dir, LEGACY_SETTINGS_FILE_NAME);
+  const n = settingsProbe(newPath, lstat);
+  const l = settingsProbe(legacyPath, lstat);
+  const isCompatLink = () => {
+    const target = settingsTry(() => readlink(legacyPath));
+    if (target === SETTINGS_FILE_NAME || target === newPath) return true;
+    const rl = settingsTry(() => realpath(legacyPath));
+    const rn = settingsTry(() => realpath(newPath));
+    return rl !== undefined && rn !== undefined && rl === rn;
+  };
+  if (n.type !== "none") {
+    let legacy;
+    if (l.type === "none") legacy = "absent";
+    else if (l.type === "symlink") legacy = isCompatLink() ? "compat-link" : "conflict";
+    else if (l.type === "file" && n.type === "file" && settingsSameInode(n, l)) legacy = "same-inode";
+    else legacy = "conflict";
+    const legacyNewer =
+      legacy === "conflict" && l.type === "file" && n.st !== undefined && l.st !== undefined
+        ? l.st.mtimeMs > n.st.mtimeMs
+        : undefined;
+    return {
+      kind: "new",
+      path: newPath,
+      newPath,
+      legacyPath,
+      legacy,
+      ...(legacyNewer === undefined ? {} : { legacyNewer }),
+    };
+  }
+  if (l.type === "none") return { kind: "none", path: newPath, newPath, legacyPath, compatLinkDangling: false };
+  if (l.type === "symlink") {
+    const target = settingsTry(() => readlink(legacyPath));
+    if (target === SETTINGS_FILE_NAME || target === newPath)
+      return { kind: "none", path: newPath, newPath, legacyPath, compatLinkDangling: true };
+    return { kind: "legacy", path: legacyPath, newPath, legacyPath, legacyType: "symlink" };
+  }
+  return { kind: "legacy", path: legacyPath, newPath, legacyPath, legacyType: l.type === "file" ? "file" : "other" };
+}
+
+/** Directory tiers over the file-name level (default / agentDir / inherited, plan §3.3). */
+export function resolveSettingsLocation(agent, deps = {}) {
+  const primary = resolveSettingsFile(agent.dir, deps);
+  if (agent.source === "default") return { ...primary, scope: "default", agent };
+  if (primary.kind !== "none" || primary.compatLinkDangling) return { ...primary, scope: "agentDir", agent };
+  const home = resolveSettingsFile(agent.home, deps);
+  if (home.kind !== "none") return { ...home, scope: "inherited", agent };
+  return { ...primary, scope: "agentDir", agent };
+}
+
+const SETTINGS_LNK_RE = /^pi-subagent\.json\.[0-9a-f]{16}\.lnk$/;
+function settingsLnkSuffix() {
+  return `${process.pid.toString(16)}${Date.now().toString(16)}`.padStart(16, "0").slice(-16);
+}
+function settingsCleanupLnk(dir) {
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!SETTINGS_LNK_RE.test(name)) continue;
+    const full = path.join(dir, name);
+    try {
+      if (fs.lstatSync(full).isSymbolicLink()) fs.unlinkSync(full);
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
+/**
+ * LOCK-HELD ONLY (plan §3.4.1): completes a crash-window S6a (two names, ONE inode) into S5 — compat
+ * symlink swapped over the legacy name. Every other state is a no-op. Never throws.
+ * → "healed" | "reverted-to-legacy" | "noop" | "conflict". deps: {lstat, symlink, readlink, realpath}.
+ */
+export function healSettingsFileLocked(dir, deps = {}) {
+  try {
+    const lstat = deps.lstat ?? ((p) => fs.lstatSync(p));
+    const st = resolveSettingsFile(dir, deps);
+    if (!(st.kind === "new" && st.legacy === "same-inode")) return "noop";
+    settingsCleanupLnk(dir);
+    const newPath = path.join(dir, SETTINGS_FILE_NAME);
+    const legacyPath = path.join(dir, LEGACY_SETTINGS_FILE_NAME);
+    const lnk = path.join(dir, `pi-subagent.json.${settingsLnkSuffix()}.lnk`);
+    try {
+      (deps.symlink ?? ((t, p) => fs.symlinkSync(t, p)))(SETTINGS_FILE_NAME, lnk);
+    } catch {
+      if (settingsSameInode(settingsProbe(newPath, lstat), settingsProbe(legacyPath, lstat))) {
+        try {
+          fs.unlinkSync(newPath);
+        } catch {
+          return "noop";
+        }
+        return "reverted-to-legacy";
+      }
+      return "conflict";
+    }
+    const n = settingsProbe(newPath, lstat);
+    const l = settingsProbe(legacyPath, lstat);
+    if (!(n.type === "file" && l.type === "file" && settingsSameInode(n, l))) {
+      settingsTry(() => fs.unlinkSync(lnk));
+      return "conflict";
+    }
+    try {
+      fs.renameSync(lnk, legacyPath);
+    } catch {
+      settingsTry(() => fs.unlinkSync(lnk));
+      return "noop";
+    }
+    return "healed";
+  } catch {
+    return "noop";
+  }
+}
+
+/** The launcher's settings file: new name when it exists / is a dangling compat target, else the legacy
+ *  name — and with NO settings file at all the legacy name (拍板②: keeps the A′ golden byte-identical). */
+export function settingsFilePath(home = homeDir(), env = process.env) {
+  const loc = resolveSettingsLocation(resolveAgentDir(env, home));
+  if (loc.kind !== "none" || loc.compatLinkDangling) return loc.path;
+  return path.join(path.dirname(loc.newPath), LEGACY_SETTINGS_FILE_NAME);
+}
+
+/** Write-time heal + resolve, to be called INSIDE the settings lock before reading the target. */
+function healedSettingsFilePath(home, env = process.env) {
+  healSettingsFileLocked(path.dirname(settingsFilePath(home, env)));
+  return settingsFilePath(home, env);
 }
 
 /** {kind:"missing"} | {kind:"ok", value} | {kind:"error", message} */
@@ -463,17 +621,67 @@ export function readJsonFile(file) {
   }
 }
 
-export function loadSecureConfig(home = homeDir()) {
-  const file = settingsFilePath(home);
+/** First registered vault whose dir/mnt nests with the (env-selected) agentDir — lexical AND physical. */
+export function agentDirVaultOverlap(agentDir, vaults) {
+  const lex = path.resolve(agentDir);
+  const phys = realpathNearest(lex);
+  const nested = (a, b) => pathWithin(a, b) || pathWithin(b, a);
+  return vaults.find(
+    (v) =>
+      nested(lex, path.resolve(v.dir)) ||
+      nested(lex, path.resolve(v.mnt)) ||
+      nested(phys, realpathNearest(v.dir)) ||
+      nested(phys, path.join(realpathNearest(path.dirname(v.mnt)), path.basename(v.mnt))),
+  );
+}
+
+/**
+ * {file, cfg, readError?, agentProblem?}. S6b (two diverging settings files): their `secure` sections
+ * must agree, else an INVALID config (fail-closed ⇒ run/unlock exit 78). An env-selected agentDir
+ * nested with a registered vault ⇒ `agentProblem` (resolveVault refuses; status prints it).
+ */
+export function loadSecureConfig(home = homeDir(), env = process.env) {
+  const agent = resolveAgentDir(env, home);
+  const loc = resolveSettingsLocation(agent);
+  const file = loc.kind === "none" && !loc.compatLinkDangling ? settingsFilePath(home, env) : loc.path;
   const r = readJsonFile(file);
   if (r.kind === "error") return { file, readError: r.message, cfg: parseSecureConfig(undefined, home) };
-  return { file, cfg: parseSecureConfig(r.kind === "ok" ? r.value : undefined, home) };
+  if (loc.kind === "new" && loc.legacy === "conflict") {
+    const o = readJsonFile(loc.legacyPath);
+    if (o.kind === "error") return { file, readError: o.message, cfg: parseSecureConfig(undefined, home) };
+    if (o.kind === "ok") {
+      const secureOf = (x) => (x.kind === "ok" && isPlainObject(x.value) ? x.value.secure : undefined);
+      if (canonicalJson(secureOf(r)) !== canonicalJson(secureOf(o)))
+        return {
+          file,
+          cfg: {
+            present: true,
+            enabled: true,
+            valid: false,
+            vaults: [],
+            invalid: [],
+            error: `两份设置文件的 secure 段不一致：${loc.newPath} 与 ${loc.legacyPath}（请手动合并到 ${SETTINGS_FILE_NAME} 后删除或改名 ${LEGACY_SETTINGS_FILE_NAME}）`,
+          },
+        };
+    }
+  }
+  const cfg = parseSecureConfig(r.kind === "ok" ? r.value : undefined, home);
+  if (agent.source === "env" && cfg.valid && cfg.enabled) {
+    const hit = agentDirVaultOverlap(agent.dir, cfg.vaults);
+    if (hit)
+      return {
+        file,
+        cfg,
+        agentProblem: `PI_CODING_AGENT_DIR（${agent.dir}）位于保险库 ${hit.name} 内：不支持（设置登记会藏进它自己描述的保险库）`,
+      };
+  }
+  return { file, cfg };
 }
 
 export const SETTINGS_LOCK_NAME = ".pi-subagent.json.lock";
 export const SETTINGS_LOCK_WAIT_S = 10;
-export function settingsLockPath(home = homeDir()) {
-  return path.join(path.dirname(settingsFilePath(home)), SETTINGS_LOCK_NAME);
+export function settingsLockPath(home = homeDir(), env = process.env) {
+  return path.join(path.dirname(settingsFilePath(home, env)), SETTINGS_LOCK_NAME);
 }
 
 /**
@@ -551,8 +759,8 @@ export function registerVaultUnlocked(
     throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
   if (pending !== undefined && (typeof pending !== "string" || !PENDING_RE.test(pending)))
     throw new Error(`pending 须匹配 ${PENDING_RE}：${JSON.stringify(pending)}`);
-  const file = settingsFilePath(home);
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.dirname(settingsFilePath(home)), { recursive: true, mode: 0o700 });
+  const file = healedSettingsFilePath(home);
   const { st, root } = loadMutableSettings(file);
   const secure = { ...(root.secure ?? {}) };
   const vaults = mutableVaults(secure, file);
@@ -709,7 +917,7 @@ export function patchVaultEntryUnlocked(name, guard, patch, home = homeDir()) {
     throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
   assertTxnGuard(guard);
   assertTxnPatch(patch);
-  const file = settingsFilePath(home);
+  const file = healedSettingsFilePath(home);
   if (!lstatOrNull(file)) return { kind: "missing" }; // nothing claimed — never create for a patch
   const { st, root } = loadMutableSettings(file);
   const secure = { ...(root.secure ?? {}) };
@@ -743,7 +951,7 @@ export function removeVaultEntryUnlocked(name, guard, home = homeDir()) {
   if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
     throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
   assertTxnGuard(guard, { requirePending: true });
-  const file = settingsFilePath(home);
+  const file = healedSettingsFilePath(home);
   if (!lstatOrNull(file)) return { kind: "missing" };
   const { st, root } = loadMutableSettings(file);
   const secure = { ...(root.secure ?? {}) };
@@ -803,16 +1011,17 @@ export function removeVaultEntry(name, guard, { home = homeDir(), lockWaitS = SE
  * {kind:"ok", vault, registered} | {kind:"error", code, message}. `allowUnregistered` (init only)
  * derives the default paths for a name that is not in settings yet.
  */
-export function resolveVault(name, { allowUnregistered = false, home = homeDir() } = {}) {
+export function resolveVault(name, { allowUnregistered = false, home = homeDir(), allowAgentInVault = false } = {}) {
   if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
     return {
       kind: "error",
       code: EXIT.USAGE,
       message: `保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`,
     };
-  const { file, cfg, readError } = loadSecureConfig(home);
+  const { file, cfg, readError, agentProblem } = loadSecureConfig(home);
   if (readError) return { kind: "error", code: EXIT.CONFIG, message: `设置文件无法读取：${readError}` };
   if (!cfg.valid) return { kind: "error", code: EXIT.CONFIG, message: `${file}：${cfg.error}` };
+  if (agentProblem && !allowAgentInVault) return { kind: "error", code: EXIT.CONFIG, message: agentProblem };
   const bad = cfg.invalid.find((x) => x.name === name);
   if (bad) return { kind: "error", code: EXIT.CONFIG, message: `${file}：secure.vaults.${name} 非法（${bad.reason}）` };
   const v = cfg.vaults.find((x) => x.name === name);
@@ -1361,7 +1570,7 @@ export function unclaimInitEntryUnlocked(name, written, before, home = homeDir()
     throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
   assertVaultEntryShape(written);
   if (before !== undefined && !isPlainObject(before)) throw new Error("before 须为对象");
-  const file = settingsFilePath(home);
+  const file = healedSettingsFilePath(home);
   if (!lstatOrNull(file)) return { kind: "missing" };
   const { st, root } = loadMutableSettings(file);
   const secure = { ...(root.secure ?? {}) };
@@ -3082,7 +3291,7 @@ async function cmdLock(args) {
   }
   if (pos.length !== 1) throw new CliError(EXIT.USAGE, usageText());
   if (lazy && kill) throw new CliError(EXIT.USAGE, "--lazy 与 --kill 不能同用");
-  const { vault: v } = must(resolveVault(pos[0]));
+  const { vault: v } = must(resolveVault(pos[0], { allowAgentInVault: true })); // locking stays possible
   // §3.7: private instances first; `none` ⇒ the original lock path below, output unchanged.
   if (v.layout !== "legacy") {
     const view = await freshView(v);
@@ -3446,16 +3655,27 @@ function otherRegisteredVaults(v) {
 async function cmdStatus(args) {
   if (args.length > 1) throw new CliError(EXIT.USAGE, usageText());
   const home = homeDir();
-  const { file, cfg, readError } = loadSecureConfig(home);
+  const { file, cfg, readError, agentProblem } = loadSecureConfig(home);
   const p = preflight();
   out(`gocryptfs: ${p.version ? p.version.join(".") : "n/a"}${p.ok ? "" : "  (" + p.problems.join("; ") + ")"}`);
+  // settings-rename §3.6.1: path-source suffix ONLY off the default dir (default output is byte-identical)
+  const agentInfo = resolveAgentDir(process.env, home);
+  const settingsTag =
+    agentInfo.source === "env"
+      ? resolveSettingsLocation(agentInfo).scope === "inherited"
+        ? "  [inherited]"
+        : "  [agentDir: env]"
+      : "";
   out(
-    `settings: ${file}${readError ? `  ! ${readError}` : !cfg.valid ? `  ! ${cfg.error}` : cfg.present ? (cfg.enabled ? "" : "  secure.enabled=false") : "  (no secure section)"}`,
+    `settings: ${file}${settingsTag}${readError ? `  ! ${readError}` : !cfg.valid ? `  ! ${cfg.error}` : cfg.present ? (cfg.enabled ? "" : "  secure.enabled=false") : "  (no secure section)"}`,
   );
+  if (agentInfo.ignored)
+    out("  ! PI_CODING_AGENT_DIR 是相对路径，已忽略：插件设置与 traffic 仍在 ~/.pi/agent（不支持的配置）");
+  if (agentProblem) out(`  ! ${agentProblem}`);
   for (const bad of cfg.invalid) out(`  ! secure.vaults.${bad.name} invalid (${bad.reason})`);
   let vaults = cfg.vaults;
   if (args[0]) {
-    const r = resolveVault(args[0], { allowUnregistered: true });
+    const r = resolveVault(args[0], { allowUnregistered: true, allowAgentInVault: true });
     if (r.kind === "error") throw new CliError(r.code, r.message);
     vaults = [r.vault];
     if (!r.registered) out(`  ${args[0]}：未在设置中登记`);

@@ -1141,3 +1141,58 @@ describe("review #5/#6: settings file writes are locked, and never through a sym
     expect(existsSync(join(home, ".pi", "agent", "pi-subagent.json"))).toBe(false);
   });
 });
+
+describe("settings-rename P1: launcher settings location (default legacy name, agentDir tiers)", () => {
+  const w = (f: string, v = "{}") => {
+    mkdirSync(join(f, ".."), { recursive: true });
+    writeFileSync(f, v);
+  };
+
+  it("no settings anywhere ⇒ the LEGACY name in the default dir (拍板②); lock name fixed", () => {
+    const home = tmp("ps-sf-");
+    expect(H.settingsFilePath(home, {})).toBe(join(home, ".pi", "agent", "pi-subagent.json"));
+    expect(H.settingsLockPath(home, {})).toBe(join(home, ".pi", "agent", ".pi-subagent.json.lock"));
+    expect(H.settingsFilePath(home, { PI_CODING_AGENT_DIR: "" })).toBe(H.settingsFilePath(home, {}));
+    expect(H.settingsFilePath(home, { PI_CODING_AGENT_DIR: join(home, ".pi", "agent") + "/" })).toBe(
+      H.settingsFilePath(home, {}),
+    );
+    expect(H.settingsFilePath(home, { PI_CODING_AGENT_DIR: "relative/dir" })).toBe(H.settingsFilePath(home, {}));
+  });
+
+  it("the new name wins when present; a dangling compat link also points at the new name", () => {
+    const home = tmp("ps-sf-");
+    const agent = join(home, ".pi", "agent");
+    w(join(agent, "pi-toolkit.json"));
+    expect(H.settingsFilePath(home, {})).toBe(join(agent, "pi-toolkit.json"));
+    const home2 = tmp("ps-sf-");
+    mkdirSync(join(home2, ".pi", "agent"), { recursive: true });
+    symlinkSync("pi-toolkit.json", join(home2, ".pi", "agent", "pi-subagent.json"));
+    expect(H.settingsFilePath(home2, {})).toBe(join(home2, ".pi", "agent", "pi-toolkit.json"));
+  });
+
+  it("env agentDir: its own file when present, else inherited from the default dir, else created in it as LEGACY", () => {
+    const home = tmp("ps-sf-");
+    const P = join(home, "custom-agent");
+    const env = { PI_CODING_AGENT_DIR: P };
+    mkdirSync(P, { recursive: true });
+    expect(H.settingsFilePath(home, env)).toBe(join(P, "pi-subagent.json")); // nothing anywhere
+    expect(H.settingsLockPath(home, env)).toBe(join(P, ".pi-subagent.json.lock"));
+    w(join(home, ".pi", "agent", "pi-subagent.json"));
+    expect(H.settingsFilePath(home, env)).toBe(join(home, ".pi", "agent", "pi-subagent.json")); // inherited
+    expect(H.settingsLockPath(home, env)).toBe(join(home, ".pi", "agent", ".pi-subagent.json.lock"));
+    w(join(P, "pi-toolkit.json"));
+    expect(H.settingsFilePath(home, env)).toBe(join(P, "pi-toolkit.json")); // isolated once P has a file
+  });
+
+  it("loadSecureConfig keeps its exact default shape and reads the resolved file", () => {
+    const home = tmp("ps-sf-");
+    w(
+      join(home, ".pi", "agent", "pi-toolkit.json"),
+      JSON.stringify({ secure: { vaults: { acme: { dir: "/d/a", mnt: "/m/a" } } } }),
+    );
+    const r = H.loadSecureConfig(home, {});
+    expect(Object.keys(r).sort()).toEqual(["cfg", "file"]);
+    expect(r.file).toBe(join(home, ".pi", "agent", "pi-toolkit.json"));
+    expect(r.cfg.vaults.map((v: { name: string }) => v.name)).toEqual(["acme"]);
+  });
+});

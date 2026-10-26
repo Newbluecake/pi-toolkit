@@ -4,13 +4,16 @@
  * section / verdict worth reporting, so a plain process without vaults keeps its command list
  * byte-identical.
  */
-import { existsSync, lstatSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SecureVault } from "./config.js";
+import { resolveAgentDir } from "../core/agent-dir.js";
 import { judgeVaultMount, readProcMountinfo, statePathsOf, type SecureDomain } from "./domain.js";
 import { PI_SECURE_SESSION } from "./env.js";
+import { resolveSettingsLocation, SETTINGS_FILE_NAME, type SettingsLocation } from "./settings-lock.js";
 
 export const TRAFFIC_RECORD_HONORS = "PI_SECURE_SESSION/1";
 
@@ -79,6 +82,10 @@ export interface SecureStatusInput {
   existsPrivateRecord?: (file: string) => boolean;
   /** convert-plan §1.7 (V6): does the vault's `backup` path still exist (default lstat, never follows)? */
   existsBackup?: (path: string) => boolean;
+  /** settings-rename §3.6: the resolved settings location (a line is printed only when it is NOT the default dir). */
+  settings?: SettingsLocation;
+  /** settings-rename §3.6.5: pre-rendered stale-launcher warning (see {@link staleLauncherWarning}). */
+  launcherWarning?: string;
 }
 
 function lstatExists(p: string): boolean {
@@ -161,10 +168,77 @@ export function renderSecureStatus(input: SecureStatusInput): string {
         `警告：traffic-record（${t.spec}）${t.verdict === "missing" ? "未声明" : "无法确认是否"}遵守 ${PI_SECURE_SESSION}=1，加密会话的请求正文可能写进 traffic.db（R10）`,
       );
   }
+  if (input.settings !== undefined && input.settings.scope !== "default")
+    lines.push(
+      `设置文件：${input.settings.path}（${input.settings.scope === "inherited" ? "继承 ~/.pi/agent，agentDir 下无设置文件" : "agentDir，来自 PI_CODING_AGENT_DIR"}）`,
+    );
   // Security review P2 #3: the verdict is frozen per pi process.
   lines.push("注意：secure 配置变更（如 pi-secure init 登记新保险库）需重启 pi 进程才生效；/reload 不会重新判定。");
+  if (input.launcherWarning !== undefined) lines.push(input.launcherWarning);
   lines.push(`启动器：ln -s ${join(input.packageRoot, "src", "secure", "bin", "pi-secure")} ~/.local/bin/pi-secure`);
   return lines.join("\n");
+}
+
+const STALE_PROBE_BYTES = 64 * 1024;
+
+export interface StaleLauncherProbe {
+  packageRoot: string;
+  location: SettingsLocation | undefined;
+  /** First `pi-secure` on PATH (default: scan `$PATH`). */
+  which?: () => string | undefined;
+  /** First 64 KiB of a file as text (default: bounded fd read); undefined on any failure. */
+  readHead?: (file: string) => string | undefined;
+}
+
+function whichPiSecure(): string | undefined {
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (dir === "") continue;
+    const candidate = join(dir, "pi-secure");
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function readHead64k(file: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, "r");
+    const buf = Buffer.alloc(STALE_PROBE_BYTES);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    return buf.subarray(0, n).toString("utf8");
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * r3 #3: the `pi-secure` on PATH may belong to an older checkout that does not know
+ * `pi-toolkit.json` and would refuse to rewrite the (now symlinked) legacy name. Read-only, only
+ * evaluated by `/secure status`. Undefined = nothing to say (no pi-secure, own checkout, unreadable,
+ * or the settings file has not left the legacy name yet).
+ */
+export function staleLauncherWarning(probe: StaleLauncherProbe): string | undefined {
+  if (probe.location === undefined || probe.location.kind !== "new") return undefined;
+  try {
+    const found = (probe.which ?? whichPiSecure)();
+    if (found === undefined) return undefined;
+    const real = realpathSync(found);
+    const own = join(probe.packageRoot, "src", "secure", "bin", "pi-secure");
+    let ownReal = own;
+    try {
+      ownReal = realpathSync(own);
+    } catch {
+      /* keep the literal */
+    }
+    if (real === ownReal) return undefined;
+    const head = (probe.readHead ?? readHead64k)(join(dirname(real), "helper.mjs"));
+    if (head === undefined || head.includes(`SETTINGS_FILE_NAME = "${SETTINGS_FILE_NAME}"`)) return undefined;
+    return `警告：PATH 上的 pi-secure（${real}）是旧版，不认识 ${SETTINGS_FILE_NAME}；设置迁移后它改写设置（init/convert/import 登记、--resume/--abort）会被拒绝。请改指本检出：ln -sf ${own} ~/.local/bin/pi-secure`;
+  } catch {
+    return undefined;
+  }
 }
 
 interface CommandCtx {
@@ -198,6 +272,13 @@ export function registerSecureCommand(
       } catch {
         agentDir = join(process.env.HOME ?? "", ".pi", "agent");
       }
+      let settings: SettingsLocation | undefined;
+      try {
+        settings = resolveSettingsLocation(resolveAgentDir(process.env, homedir()));
+      } catch {
+        settings = undefined;
+      }
+      const launcherWarning = staleLauncherWarning({ packageRoot, location: settings });
       ctx.ui?.notify?.(
         renderSecureStatus({
           domain: deps.domain,
@@ -205,6 +286,8 @@ export function registerSecureCommand(
           agentDir,
           packageRoot,
           env: process.env,
+          ...(settings === undefined ? {} : { settings }),
+          ...(launcherWarning === undefined ? {} : { launcherWarning }),
         }),
         "info",
       );

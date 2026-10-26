@@ -697,3 +697,62 @@ describe.skipIf(!HAVE_REAL)("N0 golden — real gocryptfs (test-side mounts, fak
     }
   }, 120_000);
 });
+
+// ─────────────── settings-rename T-ID3: PI_CODING_AGENT_DIR ""/default-equivalent ⇒ same bytes ───────────────
+// The golden above is never regenerated. Here the SAME frozen cases (the 7 without a settings file —
+// they exercise the "no settings file ⇒ legacy name" default of 拍板② — plus the registered-vault status)
+// are re-run with the variable set to "" and to the default dir spelled out; stdout/stderr/exit/calls must
+// equal the frozen bytes.
+describe.skipIf(!HAVE_FAKE || WRITE)(
+  "T-ID3 launcher golden under a default-equivalent PI_CODING_AGENT_DIR (fake gocryptfs)",
+  () => {
+    const spellings: Array<[string, (e: Env) => string]> = [
+      ['""', () => ""],
+      ["default dir spelled out", (e) => join(e.home, ".pi", "agent")],
+      ["default dir with a trailing slash", (e) => `${join(e.home, ".pi", "agent")}/`],
+    ];
+
+    function variant(name: string, e: Env, argv: string[], value: string, status = false): void {
+      const r = runPlain(e, argv, { PI_CODING_AGENT_DIR: value });
+      const c: GoldenCase = {
+        name,
+        argv,
+        tty: false,
+        exit: r.code,
+        stdout: normalize(r.out, e.root, { status }),
+        stderr: normalize(r.err, e.root),
+      };
+      const calls = readCalls(e);
+      if (calls) c.calls = calls;
+      const pi = readPi(e);
+      if (pi !== undefined) c.pi = pi;
+      const frozen = golden!.fake.find((x) => x.name === name);
+      expect(frozen, `golden case missing: fake/${name}`).toBeDefined();
+      expect(c).toEqual(frozen);
+    }
+
+    for (const [label, valueOf] of spellings) {
+      it(`no-settings-file cases + status-locked-all with PI_CODING_AGENT_DIR=${label}`, () => {
+        const mk = () => makeEnv({ fakeGocryptfs: true });
+        let e = mk();
+        variant("status-no-settings", e, ["status"], valueOf(e), true);
+        e = mk();
+        variant("status-unregistered-name", e, ["status", "zed"], valueOf(e), true);
+        e = mk();
+        variant("status-bad-name", e, ["status", "Bad"], valueOf(e), true);
+        e = mk();
+        variant("unlock-not-found", e, ["unlock", "acme"], valueOf(e));
+        e = mk();
+        variant("lock-not-found", e, ["lock", "acme"], valueOf(e));
+        e = mk();
+        variant("init-fix-not-found", e, ["init", "acme", "--fix-settings"], valueOf(e));
+        e = mk();
+        variant("run-not-found", e, ["run", "acme"], valueOf(e));
+        e = mk();
+        register(e, "acme");
+        layout(e);
+        variant("status-locked-all", e, ["status"], valueOf(e), true);
+      }, 120_000);
+    }
+  },
+);

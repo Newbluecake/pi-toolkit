@@ -120,7 +120,16 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "./time-units.js",
   ],
   "src/secure/settings-lock.ts": ["node:child_process", "node:fs", "node:path"],
-  "src/secure/domain.ts": ["node:fs", "node:os", "node:path", "./config.js", "./env.js"],
+  // settings-rename P1: domain resolves the settings file through the agentDir + file-name protocol.
+  "src/secure/domain.ts": [
+    "node:fs",
+    "node:os",
+    "node:path",
+    "../core/agent-dir.js",
+    "./config.js",
+    "./env.js",
+    "./settings-lock.js",
+  ],
   "src/secure/config.ts": ["node:path"],
   "src/secure/env.ts": [],
   "src/config/model-hint.ts": [],
