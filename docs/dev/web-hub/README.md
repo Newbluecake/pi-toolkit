@@ -345,3 +345,12 @@ streaming and defer ONLY inside the `_isEmittingAgentSettled` window (deferred a
 order); `sendUserMessage` never executes slash text (`expandPromptTemplates:false` default);
 `appendEntry` before the first conversation does not create the session file; `ctx.newSession()`
 returns `{cancelled}` and every read of a replaced ctx throws the stale error.
+
+## agentDir 与 hub 状态（#54 P4）
+
+- hub 是每个 uid 一个的单例；状态目录、socket（既有 fallback 除外）、`hub.json`、外置 UI、uploads 仍固定在 `<home>/.pi/agent`，不跟随 `PI_CODING_AGENT_DIR`。
+- hub 的 agentDir 由 hub 自己的环境通过 `protocol/agent-dir.ts` 解析，继承自拉起它的会话；仅驱动会话发现与 spawned children 的环境。网页新建的 headless 会话，其设置与 traffic 按 hub 的 agentDir 解析：目标目录没有设置文件时仍继承 `~/.pi/agent`，创建设置文件后隔离。这是 **hub 级单一 agentDir** 的限制；spawn 请求不携带 agentDir，wire / PROTO 不变。
+- `PI_WEBHUB_CONFIG` 仍取自拉起 hub 的会话设置，不随其他会话连接改变。
+- `hub.json.agentDir?: string` 只在 hub 解析来源为 `env` 时写入；未设变量、空串、显式默认目录或被忽略的相对值不新增字段，默认记录字节不变。既有 LAN/UI/spawn/proxy 更新保留该字段。
+- agent 结构化读取该可选字段，非字符串/空串当缺失。`/webhub status` 复用已有 `alias.statusLines()` 的 status-only warning 通道输出中文诊断，不新增工具、命令注册或 wire 字段：hub 目录（缺字段按 `~/.pi/agent`）与本会话不同，提示网页新建会话使用 hub 的目录，并建议从目标环境执行 `/webhub restart`；字段缺失且本会话为 env 来源，另提示「hub 的 agentDir 未知（旧版 hub 或默认）」。无 hub 记录/损坏文件不诊断；路径中的控制字符在展示时剥除。
+- 兼容：旧 hub × 新 agent 按缺字段处理；新 hub × 旧 agent 按字段挑选读取，忽略未知键。hub 边界白名单不变（I8），追加式可选磁盘字段（I10）。门禁：`tests/web-hub/agent/agent-dir-status.test.ts`、`tests/web-hub/hub/{hub,hub-json}.test.ts`（T-HB1）。

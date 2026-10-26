@@ -56,6 +56,7 @@ import {
 } from "../protocol/messages.js";
 import type { CompleteReqFrame } from "../protocol/command-args.js";
 import { resolveHubPaths, type HubPaths } from "../protocol/paths.js";
+import { resolveAgentDir } from "../protocol/agent-dir.js";
 import { pidAlive } from "../protocol/pid.js";
 import {
   readStopMarkerSync,
@@ -1933,6 +1934,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   }
 
   interface HubJsonSnapshot {
+    agentDir?: string;
     pid?: number;
     procStartTicks?: number;
     argv?: string[];
@@ -1947,6 +1949,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     try {
       const parsed = JSON.parse(readFileSync(paths.hubJson, "utf8")) as Record<string, unknown>;
       const rec: HubJsonSnapshot = {};
+      if (typeof parsed.agentDir === "string" && parsed.agentDir !== "") rec.agentDir = parsed.agentDir;
       if (typeof parsed.pid === "number") rec.pid = parsed.pid;
       if (typeof parsed.procStartTicks === "number") rec.procStartTicks = parsed.procStartTicks;
       if (Array.isArray(parsed.argv) && parsed.argv.every((a) => typeof a === "string")) {
@@ -2055,7 +2058,24 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     });
   };
 
-  const aliasStatusLines = (): string[] => formatAliasStatusLines(readHubJsonRecord()?.alias);
+  // #54 P4: reuse the existing status-only warning channel; no new command or wire surface.
+  const aliasStatusLines = (): string[] => {
+    const rec = readHubJsonRecord();
+    const lines = formatAliasStatusLines(rec?.alias);
+    if (rec === undefined) return lines; // stopped / unreadable hub: no directory to diagnose
+    const sessionDir = resolveAgentDir(env, home);
+    const hubDir = rec.agentDir ?? sessionDir.home;
+    const display = (dir: string): string => dir.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+    if (rec.agentDir === undefined && sessionDir.source === "env") {
+      lines.push("hub 的 agentDir 未知（旧版 hub 或默认）；缺失字段按 ~/.pi/agent 判断。");
+    }
+    if (hubDir !== sessionDir.dir) {
+      lines.push(
+        `hub agentDir ${display(hubDir)} ≠ 本会话 ${display(sessionDir.dir)}：网页新建会话使用 hub 的目录；如需切换，请从目标环境执行 /webhub restart。`,
+      );
+    }
+    return lines;
+  };
 
   const sendLanReq = async (op: "info" | "unlock"): Promise<LanAdminResult<LanInfoPayload | undefined>> => {
     const c = conn;

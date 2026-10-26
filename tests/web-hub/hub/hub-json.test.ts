@@ -26,12 +26,33 @@ function baseRecord(over: Partial<HubRecord> = {}): HubRecord {
 }
 
 describe("createHubJsonWriter (plan §1.4.2)", () => {
+  it("#54 P4: optional agentDir survives status patches; legacy readers can ignore it", () => {
+    const { file, cleanup } = tmpFile();
+    try {
+      const w = createHubJsonWriter(file, memLog());
+      w.write(baseRecord({ agentDir: "/custom/agent" }));
+      w.patchLan({ state: "starting" });
+      w.patchUi({ state: "unbuilt", candidates: [] });
+      w.patchSpawn({ count: 0 });
+      const onDisk = JSON.parse(readFileSync(file, "utf8")) as HubRecord;
+      expect(onDisk.agentDir).toBe("/custom/agent");
+      const { agentDir, ...legacy } = onDisk;
+      expect(agentDir).toBe("/custom/agent");
+      expect(legacy).toEqual(
+        baseRecord({ lan: { state: "starting" }, ui: { state: "unbuilt", candidates: [] }, spawn: { count: 0 } }),
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   it("write() creates a 0600 file with the exact record", () => {
     const { file, cleanup } = tmpFile();
     try {
       const w = createHubJsonWriter(file, memLog());
       w.write(baseRecord());
       expect(statSync(file).mode & 0o777).toBe(0o600);
+      expect(readFileSync(file, "utf8")).toBe(`${JSON.stringify(baseRecord(), null, 2)}\n`);
       expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(baseRecord());
       expect(w.current()).toEqual(baseRecord());
     } finally {

@@ -2075,6 +2075,7 @@ export async function startHub(
       port: httpPort,
       startedAt: info.startedAt,
       ...identity,
+      ...(resolveAgentDir(process.env, config.home).source === "env" ? { agentDir: hubAgentDir } : {}),
       ...(initialLan === undefined ? {} : { lan: initialLan }),
       ...(initialSpawn === undefined ? {} : { spawn: initialSpawn }),
       ...(initialPrivacy === undefined ? {} : { privacy: initialPrivacy }),

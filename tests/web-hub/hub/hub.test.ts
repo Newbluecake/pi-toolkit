@@ -17,6 +17,7 @@ const hubs: RunningHub[] = [];
 
 afterEach(async () => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   for (const h of hubs.splice(0)) await h.close("test");
   tmp.cleanup();
 });
@@ -60,6 +61,18 @@ async function start(home: string, fe: FrontendFactory, idleExitMinutes = 10): P
 }
 
 describe("startHub", () => {
+  it.each([undefined, "", "relative", "default", "/custom/agent"])(
+    "#54 P4 T-HB1: hub.json agentDir follows resolved env %s only when non-default",
+    async (raw) => {
+      const home = tmp.make("wh-hub-agent-dir-");
+      vi.stubEnv("PI_CODING_AGENT_DIR", raw === "default" ? `${home}/.pi/agent` : raw);
+      const hub = await start(home, fakeFrontend());
+      const json = JSON.parse(readFileSync(hub.paths.hubJson, "utf8")) as Record<string, unknown>;
+      if (raw === "/custom/agent") expect(json.agentDir).toBe(raw);
+      else expect(Object.hasOwn(json, "agentDir")).toBe(false);
+    },
+  );
+
   it("writes hub.json (0600) in a 0700 state dir after socket + HTTP listen", async () => {
     const home = tmp.make("wh-hub-");
     const fe = fakeFrontend({ port: 43210 });

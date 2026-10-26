@@ -1,7 +1,9 @@
 /**
  * web-hub on-disk layout (plan §1.3.1 — frozen interface, S1-W1 接口包).
  *
- * State lives under `<home>/.pi/agent/web-hub/`. Unix domain socket paths are
+ * State lives under `<home>/.pi/agent/web-hub/`.
+ * Hub state never follows `PI_CODING_AGENT_DIR`; the hub's agentDir only drives
+ * session discovery and the env of spawned children. Unix domain socket paths are
  * capped by the kernel sockaddr limit, so `hub.sock` has a fallback chain
  * (arch §3 状态目录): `<stateDir>/hub.sock` → `$XDG_RUNTIME_DIR/pi-webhub.sock`
  * → `/tmp/pi-webhub-<uid>/hub.sock`. Only the socket moves; hub.json / token /
@@ -193,8 +195,8 @@ export function packageRootDir(): string {
  * P5a). Version-specific subdirectories (`<webHubUiDir(home)>/<hubVersion>/`) are
  * populated by hand (release zip unpacked by the user) or by
  * `scripts/release/package-web-ui.sh`; this function only resolves the parent.
- * Same `home` as `webHubStateDir` — hub always uses `<home>/.pi/agent`, never
- * `PI_CODING_AGENT_DIR`.
+ * Same `home` as `webHubStateDir` — hub state never follows `PI_CODING_AGENT_DIR`;
+ * the hub's agentDir only drives session discovery and the env of spawned children.
  */
 export function webHubUiDir(home: string): string {
   return `${home}/.pi/agent/web-hub-ui`;
