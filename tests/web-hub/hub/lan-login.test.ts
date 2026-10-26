@@ -110,6 +110,8 @@ function setup(options: FakeLanStoreOptions = {}, initial = false) {
   const core = createLanLoginCore({
     store,
     kdf,
+    // #66: the fixture user is seeded at N=2^14 r=1 — time against that shape (no compensation run).
+    kdfPolicy: { verifyTarget: { n: 16384, r: 1, p: 1, keyLen: 32, saltBytes: 16 } },
     admission,
     limiter,
     approval,

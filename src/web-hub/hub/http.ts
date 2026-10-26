@@ -3260,6 +3260,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       kdf: lan.kdf,
       limiter: lan.limiter,
       admission: lan.admission,
+      ...(lan.kdfPolicy === undefined ? {} : { kdfPolicy: lan.kdfPolicy }),
       secondFactorEnabled: lan.secondFactorEnabled === true,
       approval: lan.approval ?? { request: async () => "unavailable", close() {} },
       security: lan.security ?? createSecurityEventBus(log),

@@ -27,6 +27,7 @@ import {
   SCHEMA_V1_OBJECTS,
   USER_VERSION,
 } from "./db.js";
+import { HARDENING_PHASE, READER_MARKER_KEY, READER_MARKER_VERSION, WRITER_SOAK_MS } from "./hardening.js";
 import { totpCode, verifyTotpCandidates } from "./totp.js";
 
 export function dbTestModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -575,7 +576,16 @@ process.stdout.on('error', () => {});
 // short-lived maintenance subprocess (§4.2 "维护子进程（短命）")
 // ---------------------------------------------------------------------------
 
-export function buildMaintScript(opts: { initialUsername?: string } = {}): string {
+export function buildMaintScript(
+  opts: {
+    initialUsername?: string;
+    /** #66 test seams: release phase and a fixed clock (default: `HARDENING_PHASE` / `Date.now()` in the child). */
+    hardeningPhase?: 1 | 2;
+    now?: number;
+  } = {},
+): string {
+  const hardeningPhase = opts.hardeningPhase ?? HARDENING_PHASE;
+  const fixedNow = opts.now === undefined ? "undefined" : JSON.stringify(Math.trunc(opts.now));
   // L8 "用户名默认系统登录名": `lan-store.ts`'s `createLanStore` resolves the real value via
   // `os.userInfo().username` (falling back to the P1 literal `"admin"` on any failure) and
   // passes it in — this module has no `node:os` dependency of its own, so any caller that omits
@@ -587,6 +597,41 @@ export function buildMaintScript(opts: { initialUsername?: string } = {}): strin
 ${SECURITY_PRELUDE}
 function reply(obj) {
   process.stdout.write(JSON.stringify(obj) + '\\n');
+}
+// #66 (plan §4.0): hardening phase gate. The writerActive verdict is computed HERE, once, at open
+// time (mirror of hub/hardening.ts \`writerActive\`; tests pin both against the same truth table).
+const HARDENING_PHASE = ${hardeningPhase};
+const READER_MARKER_KEY = ${JSON.stringify(READER_MARKER_KEY)};
+const READER_MARKER_VERSION = ${READER_MARKER_VERSION};
+const WRITER_SOAK_MS = ${WRITER_SOAK_MS};
+const FIXED_NOW = ${fixedNow};
+function hardeningNow() { return FIXED_NOW !== undefined ? FIXED_NOW : Date.now(); }
+function parseReaderMarker(raw) {
+  if (typeof raw !== 'string') return undefined;
+  try {
+    const o = JSON.parse(raw);
+    if (typeof o !== 'object' || o === null) return undefined;
+    if (!Number.isSafeInteger(o.v) || !Number.isSafeInteger(o.since) || o.v < 0 || o.since < 0) return undefined;
+    return { v: o.v, since: o.since };
+  } catch { return undefined; }
+}
+function writerActiveVerdict(phase, marker, now) {
+  if (phase !== 2 || marker === undefined) return false;
+  if (marker.v < READER_MARKER_VERSION) return false;
+  return marker.since <= now - WRITER_SOAK_MS;
+}
+function stampReaderMarker(db, now) {
+  // Missing/invalid ⇒ {v:1,since:now}; older v ⇒ only v is raised (since kept); never moves since.
+  let marker = parseReaderMarker(metaGet(db, READER_MARKER_KEY));
+  if (marker === undefined) marker = { v: READER_MARKER_VERSION, since: now };
+  else if (marker.v < READER_MARKER_VERSION) marker = { v: READER_MARKER_VERSION, since: marker.since };
+  else return marker;
+  metaSet(db, READER_MARKER_KEY, JSON.stringify(marker));
+  return marker;
+}
+function maxStoredKdf(db) {
+  const row = db.prepare('SELECT n,r,p FROM users ORDER BY n*r*p DESC, id ASC LIMIT 1').get();
+  return row ? { n: row.n, r: row.r, p: row.p } : null;
 }
 function openWxIfMissing() {
   try {
@@ -725,6 +770,7 @@ function run() {
         }
       }
       let loginIpsRebuilt = false;
+      let hardening;
       tx(db, () => {
         // Preserve existing device metadata through this additive migration.
         if (tableMatches(db, 'session_meta', securityColumns.session_meta.filter(c => c[0] !== 'method'))) {
@@ -754,14 +800,19 @@ function run() {
         }
         db.exec('DELETE FROM login_ips WHERE rowid IN (SELECT rowid FROM (SELECT rowid,row_number() OVER (PARTITION BY user_id ORDER BY last_at DESC,rowid DESC) AS n FROM login_ips) WHERE n>256)');
         db.exec('DELETE FROM sessions WHERE rowid IN (SELECT rowid FROM (SELECT rowid,row_number() OVER (PARTITION BY user_id ORDER BY last_seen_at DESC,created_at DESC,rowid DESC) AS n FROM sessions) WHERE n>32)');
+        if (op === 'open-check-migrate') {
+          const hnow = hardeningNow();
+          const marker = stampReaderMarker(db, hnow);
+          hardening = { readerSince: marker.since, writerActive: writerActiveVerdict(HARDENING_PHASE, marker, hnow), maxKdf: maxStoredKdf(db) };
+        }
       });
       try {
         db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
       } catch (err) {
-        reply({ ok: true, loginIpsRebuilt, warning: 'checkpoint-truncate-failed: ' + String(err && err.message) });
+        reply({ ok: true, loginIpsRebuilt, ...(hardening ? { hardening } : {}), warning: 'checkpoint-truncate-failed: ' + String(err && err.message) });
         return;
       }
-      reply({ ok: true, loginIpsRebuilt });
+      reply({ ok: true, loginIpsRebuilt, ...(hardening ? { hardening } : {}) });
       return;
     }
     if (op === 'checkpoint-passive') {

@@ -984,19 +984,28 @@ export async function startHub(
         cleanup.push(async () => unsubscribeDbRestart());
       }
       // KDF work is not part of the command router's in-flight counter, but it
-      // must keep the quiet replacement path from cutting across a login.
-      const originalKdfRun = lanDeps.kdf.run;
-      lanDeps.kdf.run = (...args: Parameters<typeof originalKdfRun>) => {
-        kdfInFlight++;
-        try {
-          return Promise.resolve(originalKdfRun(...args)).finally(() => {
+      // must keep the quiet replacement path from cutting across a login. #66: EVERY compute
+      // method counts (`run` and `runPadded`) — a padded compensation run is still a login.
+      const countInFlight = <A extends unknown[]>(fn: (...args: A) => Promise<Uint8Array>) => {
+        return (...args: A): Promise<Uint8Array> => {
+          kdfInFlight++;
+          try {
+            return Promise.resolve(fn(...args)).finally(() => {
+              kdfInFlight = Math.max(0, kdfInFlight - 1);
+            });
+          } catch (err) {
             kdfInFlight = Math.max(0, kdfInFlight - 1);
-          });
-        } catch (err) {
-          kdfInFlight = Math.max(0, kdfInFlight - 1);
-          throw err;
-        }
+            throw err;
+          }
+        };
       };
+      const kdfPort = lanDeps.kdf;
+      const originalKdfRun = kdfPort.run.bind(kdfPort);
+      kdfPort.run = countInFlight(originalKdfRun);
+      if (kdfPort.runPadded !== undefined) {
+        const originalRunPadded = kdfPort.runPadded.bind(kdfPort);
+        kdfPort.runPadded = countInFlight(originalRunPadded);
+      }
     }
 
     // §6.7.1 (C8) — "意图恢复是 hub 启动的第一步": before `auth.token()`'s first real call (inside
@@ -1650,6 +1659,7 @@ export async function startHub(
                   kdf: lanDeps.kdf,
                   limiter: lanDeps.limiter,
                   admission: lanDeps.admission,
+                  ...(lanDeps.kdfPolicy === undefined ? {} : { kdfPolicy: lanDeps.kdfPolicy }),
                   onCorruptKdfParams: (username, reason) => {
                     log.error("web-hub privacy: corrupt kdf params (db-invalid:kdf)", { username, reason });
                   },

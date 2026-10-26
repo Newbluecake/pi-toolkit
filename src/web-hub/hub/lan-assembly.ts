@@ -82,6 +82,8 @@ export const defaultLanAssembly: LanAssembly = {
       cfg,
       store,
       kdf: createKdf(),
+      // #66: every verification is timed against max(write target, strongest stored record).
+      kdfPolicy: { verifyTarget: result.hardening.verifyTarget },
       limiter,
       admission,
       hosts: createHostsPort(),

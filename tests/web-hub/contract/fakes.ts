@@ -495,14 +495,22 @@ const securityFakeOps: readonly (keyof LanStorePort)[] = [
 
 /** Real scrypt under the hood (fast test params are the caller's job via `KdfParams`). */
 export function fakeKdf(): KdfPort {
+  const derive = (password: string, params: Parameters<KdfPort["run"]>[1]): Uint8Array =>
+    scryptSync(password, Buffer.from(params.salt), params.keyLen, {
+      N: params.n,
+      r: params.r,
+      p: params.p,
+      maxmem: 128 * params.n * params.r + 1024 * 1024,
+    });
   return {
     async run(password, params) {
-      return scryptSync(password, Buffer.from(params.salt), params.keyLen, {
-        N: params.n,
-        r: params.r,
-        p: params.p,
-        maxmem: 128 * params.n * params.r + 1024 * 1024,
-      });
+      return derive(password, params);
+    },
+    // #66: same contract as the real pool — the REAL result is returned after the compensation ran.
+    async runPadded(password, params, pad) {
+      const real = derive(password, params);
+      derive(password, pad);
+      return real;
     },
   };
 }

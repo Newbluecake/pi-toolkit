@@ -10,6 +10,8 @@ import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { createLanStore, type LanStore } from "../../../src/web-hub/hub/lan-store.js";
 import { hasNodeSqlite } from "../../../src/web-hub/hub/db.js";
+import { WRITER_SOAK_MS } from "../../../src/web-hub/hub/hardening.js";
+import { KDF_LEGACY, KDF_PHASE2 } from "../../../src/web-hub/hub/kdf.js";
 import { memLog } from "./helpers.js";
 
 const skipIfNoSqlite = (await hasNodeSqlite()) ? describe : describe.skip;
@@ -373,5 +375,103 @@ describe("createLanStore (plan §4.1 前置条件)", () => {
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.reason).toBe("db-invalid");
     dir.cleanup();
+  });
+});
+
+skipIfNoSqlite("createLanStore — #66 hardening verdict (plan §4.0/§4.1)", () => {
+  const NOW = 1_800_000_000_000;
+  const open = async (dbFile: string, extra: Partial<Parameters<typeof createLanStore>[0]> = {}) => {
+    const res = await createLanStore({ dbFile, log: memLog(), test: true, ...extra });
+    if (!res.ok) throw new Error(`createLanStore failed: ${res.reason} ${res.detail ?? ""}`);
+    return res;
+  };
+  async function seedDb(dbFile: string, fn: (db: import("node:sqlite").DatabaseSync) => void): Promise<void> {
+    const { createRequire } = await import("node:module");
+    const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+    const db = new DatabaseSync(dbFile);
+    try {
+      fn(db);
+    } finally {
+      db.close();
+    }
+  }
+
+  it("first release (phase 1): writer off, verify target = the legacy 2^15 shape, nothing flagged", async () => {
+    const t = tmp();
+    const res = await open(t.dbFile, { maintHardening: { now: NOW } });
+    try {
+      expect(res.hardening).toEqual({
+        readerSince: NOW,
+        writerActive: false,
+        verifyTarget: KDF_LEGACY,
+        totpKey: "none",
+        totpMigrated: 0,
+        truncateFailed: false,
+      });
+    } finally {
+      await res.store.close();
+      t.cleanup();
+    }
+  });
+
+  it("phase 2 with a 14-day-old marker: writer on ⇒ verify target = 2^17; a young marker keeps it legacy", async () => {
+    const t = tmp();
+    const first = await open(t.dbFile, { maintHardening: { hardeningPhase: 2, now: NOW } });
+    try {
+      expect(first.hardening.writerActive).toBe(false);
+      expect(first.hardening.verifyTarget).toBe(KDF_LEGACY);
+    } finally {
+      await first.store.close();
+    }
+    const later = await open(t.dbFile, { maintHardening: { hardeningPhase: 2, now: NOW + WRITER_SOAK_MS } });
+    try {
+      expect(later.hardening.writerActive).toBe(true);
+      expect(later.hardening.readerSince).toBe(NOW);
+      expect(later.hardening.verifyTarget).toEqual(KDF_PHASE2);
+    } finally {
+      await later.store.close();
+      t.cleanup();
+    }
+  });
+
+  it("a stored record stronger than the write target lifts the verify target (never faster than an unknown user)", async () => {
+    const t = tmp();
+    const first = await open(t.dbFile, { maintHardening: { now: NOW } });
+    await first.store.close();
+    await seedDb(t.dbFile, (db) =>
+      db
+        .prepare(
+          "INSERT INTO users (username,kdf,n,r,p,salt,hash,epoch,created_at,updated_at) VALUES ('strong','scrypt',131072,8,1,?,?,1,1,1)",
+        )
+        .run(Buffer.alloc(16), Buffer.alloc(32)),
+    );
+    const res = await open(t.dbFile, { maintHardening: { now: NOW } });
+    try {
+      expect(res.hardening.writerActive).toBe(false);
+      expect(res.hardening.verifyTarget).toMatchObject({ n: 131072, r: 8, p: 1 });
+    } finally {
+      await res.store.close();
+      t.cleanup();
+    }
+  });
+
+  it("a corrupt stronger row (n out of range) never lifts the verify target", async () => {
+    const t = tmp();
+    const first = await open(t.dbFile);
+    await first.store.close();
+    await seedDb(t.dbFile, (db) =>
+      db
+        .prepare(
+          "INSERT INTO users (username,kdf,n,r,p,salt,hash,epoch,created_at,updated_at) VALUES ('bad','scrypt',1048576,8,1,?,?,1,1,1)",
+        )
+        .run(Buffer.alloc(16), Buffer.alloc(32)),
+    );
+    const res = await open(t.dbFile);
+    try {
+      expect(res.hardening.verifyTarget).toEqual(KDF_LEGACY);
+    } finally {
+      await res.store.close();
+      t.cleanup();
+    }
   });
 });

@@ -560,3 +560,96 @@ skipIfNoSqlite("LAN-F real socket + SQLite enrollment (Q15 joint gate)", () => {
     expect(JSON.stringify(JSON.parse(readFileSync(hub.paths.hubJson, "utf8")))).not.toContain(b32);
   });
 });
+
+skipIfNoSqlite("startHub — #66 KDF in-flight accounting covers runPadded and the verify policy", () => {
+  /** Wraps the real assembly: `run`/`runPadded` hang until the test releases them. */
+  function hangingAssembly(gate: { release(): void; started: string[] }): LanAssembly {
+    let resolveGate!: () => void;
+    const open = new Promise<void>((r) => (resolveGate = r));
+    gate.release = () => resolveGate();
+    return {
+      async build(args): Promise<LanFrontendDeps> {
+        const deps = await defaultLanAssembly.build(args);
+        deps.kdf = {
+          run: async () => {
+            gate.started.push("run");
+            await open;
+            return new Uint8Array(32);
+          },
+          runPadded: async () => {
+            gate.started.push("runPadded");
+            await open;
+            return new Uint8Array(32);
+          },
+        };
+        return deps;
+      },
+    };
+  }
+
+  async function startWith(assembly: LanAssembly) {
+    const home = tmp.make("wh-lan-inflight-");
+    const uid = process.getuid?.() ?? 0;
+    const fe = fakeFrontendWithLan();
+    const hub = await startHub(
+      { ...config({ home }), lan: { port: 0, extraHosts: [], trustProxyFrom: [], externalOrigins: [] } },
+      fe,
+      { uid, lanAssembly: assembly },
+    );
+    if ("exists" in hub) throw new Error("unexpected exists");
+    hubs.push(hub);
+    return { hub, fe, paths: resolveHubPaths({ home, uid }) };
+  }
+
+  for (const method of ["run", "runPadded"] as const) {
+    it(`a pending kdf.${method}() keeps the quiet replacement path from firing; completing it lets it proceed`, async () => {
+      const gate = { release: () => {}, started: [] as string[] };
+      const { fe, paths } = await startWith(hangingAssembly(gate));
+      const kdf = fe.deps[0]!.lan!.kdf;
+      const params = { n: 16384, r: 8, p: 1, keyLen: 32, salt: new Uint8Array(16) };
+      const pending =
+        method === "run"
+          ? kdf.run("pw", params)
+          : kdf.runPadded!("pw", params, { ...params, salt: new Uint8Array(16) });
+      expect(gate.started).toEqual([method]);
+
+      const c = await client(paths.socketPath);
+      c.send(hello({ pluginVersion: "2.0.0" })); // newer plugin ⇒ the hub wants to replace itself when quiet
+      await c.waitFrame((f) => f["t"] === "hello_ack");
+      await new Promise((r) => setTimeout(r, 2_200)); // > the 1.5 s dialogs handshake + a 250 ms tick
+      expect(c.frames.some((f) => (f as Record<string, unknown>)["t"] === "superseded")).toBe(false);
+
+      gate.release();
+      await pending;
+      await c.waitFrame((f) => f["t"] === "superseded");
+    }, 15_000);
+  }
+
+  it("a throwing kdf.runPadded() still decrements the counter", async () => {
+    const gate = { release: () => {}, started: [] as string[] };
+    const assembly: LanAssembly = {
+      async build(args) {
+        const deps = await hangingAssembly(gate).build(args);
+        deps.kdf = {
+          run: deps.kdf.run,
+          runPadded: () => {
+            throw new Error("sync boom");
+          },
+        };
+        return deps;
+      },
+    };
+    const { fe, paths } = await startWith(assembly);
+    const params = { n: 16384, r: 8, p: 1, keyLen: 32, salt: new Uint8Array(16) };
+    expect(() => fe.deps[0]!.lan!.kdf.runPadded!("pw", params, params)).toThrow("sync boom");
+    const c = await client(paths.socketPath);
+    c.send(hello({ pluginVersion: "2.0.0" }));
+    await c.waitFrame((f) => f["t"] === "hello_ack");
+    await c.waitFrame((f) => f["t"] === "superseded");
+  }, 15_000);
+
+  it("the assembled LAN deps carry a kdfPolicy whose verify target is the legacy shape on a fresh db", async () => {
+    const { fe } = await startWith(defaultLanAssembly);
+    expect(fe.deps[0]!.lan!.kdfPolicy?.verifyTarget).toEqual({ n: 32768, r: 8, p: 1, keyLen: 32, saltBytes: 16 });
+  });
+});

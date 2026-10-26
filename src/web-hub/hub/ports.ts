@@ -17,6 +17,7 @@
  * per §11's "改签名 ⇒ 回到 W1 文件重新过 typecheck + 契约测试".
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { KdfShape } from "./kdf.js";
 import type { AgentCard, HistoryPayload } from "../protocol/http-contract.js";
 import type { AvatarInfo, AvatarPath } from "../protocol/avatar.js";
 import type {
@@ -128,6 +129,8 @@ export interface LanFrontendDeps {
   approval?: LoginApprovalPort;
   /** Core registration for the late-bound Feishu decision sink. Cleared on dispose. */
   onLoginCore?(core: LanLoginCore | undefined): void;
+  /** #66: KDF timing/dummy target (see `KdfPolicy`); absent = v0.10 behaviour. */
+  kdfPolicy?: KdfPolicy;
   cfg: HubLanConfig;
   store: LanStorePort; // §4
   kdf: KdfPort; // §5.1
@@ -400,6 +403,20 @@ export interface KdfParams {
 
 export interface KdfPort {
   run(password: string, params: KdfParams, opts?: PortOptions): Promise<Uint8Array>;
+  /**
+   * #66 D6 timing compensation: ONE pool acquisition runs the real computation (`params`) and then a
+   * compensation computation (`pad`), resolving with the REAL result only after both finish. Optional
+   * so legacy fakes keep working — callers fall back to two `run` calls.
+   */
+  runPadded?(password: string, params: KdfParams, pad: KdfParams, opts?: PortOptions): Promise<Uint8Array>;
+}
+
+/**
+ * #66: the KDF shape every login/verify is timed against (`max(write target, strongest stored)`).
+ * Absent ⇒ the v0.10 shape (`KDF_LEGACY`, N=2^15). Supplied by the LAN store assembly.
+ */
+export interface KdfPolicy {
+  readonly verifyTarget: KdfShape;
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,6 +1358,8 @@ export interface LanLoginCoreDeps {
   /** false keeps password completion usable until the second-factor UI is integrated. */
   secondFactorEnabled?: boolean;
   onCorruptKdfParams?: (username: string, reason: string) => void;
+  /** #66: KDF timing/dummy target (see `KdfPolicy`); absent = v0.10 behaviour. */
+  kdfPolicy?: KdfPolicy;
   store: LanStorePort;
   kdf: KdfPort;
   limiter: LoginLimiterPort & { isFresh?(ip: string): boolean };

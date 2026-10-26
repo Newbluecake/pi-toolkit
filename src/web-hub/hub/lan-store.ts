@@ -41,6 +41,7 @@ import { promisify } from "node:util";
 import type { LanOffReason } from "../protocol/lan.js";
 import { checkDbFiles, CHECKPOINT_PASSIVE_INTERVAL_MS, MAINT_DEADLINE_MS } from "./db.js";
 import { buildMaintScript } from "./db-child.js";
+import { computeVerifyTarget, effectiveWriteTarget, type KdfShape } from "./kdf.js";
 import { createDbClient, type DbClient, type DbClientDeps } from "./db-client.js";
 import type { HubLog, LanSessionRecord, LanStorePort, LanUserRecord, LanUserSummary, PortOptions } from "./ports.js";
 import { hashSid as sharedHashSid } from "./sid-hash.js";
@@ -93,6 +94,8 @@ export interface CreateLanStoreDeps {
   test?: boolean;
   checkpointIntervalMs?: number;
   maintOpenDeadlineMs?: number;
+  /** Test seams for the maintenance open check (#66): release phase / fixed clock (ms). */
+  maintHardening?: { hardeningPhase?: 1 | 2; now?: number };
   dbClient?: Partial<
     Pick<
       DbClientDeps,
@@ -110,8 +113,23 @@ export interface CreateLanStoreDeps {
   >;
 }
 
+/**
+ * #66 hardening verdict of the open check (plan §4.0/§5). `writerActive` is decided ONCE by the
+ * maintenance subprocess; `verifyTarget` is `max(write target, strongest stored record)`.
+ * `totpKey`/`totpMigrated` are placeholders until the TOTP-encryption pack fills them.
+ */
+export interface LanHardening {
+  readerSince: number;
+  writerActive: boolean;
+  verifyTarget: KdfShape;
+  totpKey: "none" | "ok" | "missing" | "mismatch";
+  totpMigrated: number;
+  truncateFailed: boolean;
+}
+
 export type CreateLanStoreResult =
-  { ok: true; store: LanStore; loginIpsRebuilt: boolean } | { ok: false; reason: LanOffReason; detail?: string };
+  | { ok: true; store: LanStore; loginIpsRebuilt: boolean; hardening: LanHardening }
+  | { ok: false; reason: LanOffReason; detail?: string };
 
 /**
  * §4.1 "前置条件（按顺序）": file check → maintenance open-check-migrate →
@@ -130,9 +148,31 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
   if (!fileCheck.ok) return { ok: false, reason: fileCheck.reason, detail: fileCheck.detail };
 
   const maintDeadline = deps.maintOpenDeadlineMs ?? MAINT_DEADLINE_MS["open-check-migrate"];
-  const maintResult = await runMaint(deps.dbFile, "open-check-migrate", maintDeadline, resolveInitialUsername(log));
+  const maintResult = await runMaint(
+    deps.dbFile,
+    "open-check-migrate",
+    maintDeadline,
+    resolveInitialUsername(log),
+    undefined,
+    deps.maintHardening,
+  );
   if (!maintResult.ok) return maintResult;
   if (maintResult.loginIpsRebuilt) log.warn("web-hub lan-store: login_ips migrated or rebuilt");
+  // The open check's final TRUNCATE failing used to be dropped silently; surface it (stays bounded:
+  // the next open / the close-time truncate retries it).
+  const truncateFailed =
+    maintResult.warning !== undefined && maintResult.warning.startsWith("checkpoint-truncate-failed");
+  if (maintResult.warning !== undefined)
+    log.warn("web-hub lan-store: open check warning", { warning: maintResult.warning });
+  const writerActive = maintResult.hardening?.writerActive === true;
+  const hardening: LanHardening = {
+    readerSince: maintResult.hardening?.readerSince ?? now(),
+    writerActive,
+    verifyTarget: computeVerifyTarget(effectiveWriteTarget(writerActive), maintResult.hardening?.maxKdf ?? undefined),
+    totpKey: "none",
+    totpMigrated: 0,
+    truncateFailed,
+  };
 
   const dbClient = createDbClient({
     dbFile: deps.dbFile,
@@ -334,7 +374,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
     close,
   };
 
-  return { ok: true, store, loginIpsRebuilt: maintResult.loginIpsRebuilt === true };
+  return { ok: true, store, loginIpsRebuilt: maintResult.loginIpsRebuilt === true, hardening };
 }
 
 // ---------------------------------------------------------------------------
@@ -369,14 +409,31 @@ function resolveInitialUsername(log: HubLog): string {
   }
 }
 
+interface MaintHardeningReply {
+  readerSince: number;
+  writerActive: boolean;
+  maxKdf: { n: number; r: number; p: number } | null;
+}
+interface MaintOk {
+  ok: true;
+  loginIpsRebuilt?: boolean;
+  warning?: string;
+  hardening?: MaintHardeningReply;
+}
+
 async function runMaint(
   dbFile: string,
   op: "open-check-migrate" | "checkpoint-passive" | "checkpoint-truncate" | "repair-2fa",
   deadlineMs: number,
   initialUsername: string = FALLBACK_INITIAL_USERNAME,
   signal?: AbortSignal,
-): Promise<{ ok: true; loginIpsRebuilt?: boolean } | { ok: false; reason: LanOffReason; detail?: string }> {
-  const script = buildMaintScript({ initialUsername });
+  hardeningOpts?: { hardeningPhase?: 1 | 2; now?: number },
+): Promise<MaintOk | { ok: false; reason: LanOffReason; detail?: string }> {
+  const script = buildMaintScript({
+    initialUsername,
+    ...(hardeningOpts?.hardeningPhase === undefined ? {} : { hardeningPhase: hardeningOpts.hardeningPhase }),
+    ...(hardeningOpts?.now === undefined ? {} : { now: hardeningOpts.now }),
+  });
   try {
     const { stdout } = await execFileP(process.execPath, ["--disable-warning=ExperimentalWarning", "-e", script], {
       env: {
@@ -393,10 +450,22 @@ async function runMaint(
     const line = stdout.trim().split("\n").pop() ?? "";
     const parsed =
       line.length > 0
-        ? (JSON.parse(line) as { ok: boolean; code?: string; detail?: string; loginIpsRebuilt?: boolean })
+        ? (JSON.parse(line) as {
+            ok: boolean;
+            code?: string;
+            detail?: string;
+            loginIpsRebuilt?: boolean;
+            warning?: string;
+            hardening?: MaintHardeningReply;
+          })
         : { ok: false, code: "db-invalid", detail: "maintenance returned no result" };
     if (parsed.ok === true)
-      return { ok: true, ...(parsed.loginIpsRebuilt === undefined ? {} : { loginIpsRebuilt: parsed.loginIpsRebuilt }) };
+      return {
+        ok: true,
+        ...(parsed.loginIpsRebuilt === undefined ? {} : { loginIpsRebuilt: parsed.loginIpsRebuilt }),
+        ...(typeof parsed.warning === "string" ? { warning: parsed.warning } : {}),
+        ...(isMaintHardening(parsed.hardening) ? { hardening: parsed.hardening } : {}),
+      };
     return parsed.detail === undefined
       ? { ok: false, reason: mapMaintCode(parsed.code) }
       : { ok: false, reason: mapMaintCode(parsed.code), detail: parsed.detail };
@@ -406,6 +475,17 @@ async function runMaint(
       return { ok: false, reason: "db-timeout", detail: `${op} exceeded ${deadlineMs}ms` };
     return { ok: false, reason: "db-invalid", detail: e.message ?? String(err) };
   }
+}
+
+function isMaintHardening(h: unknown): h is MaintHardeningReply {
+  if (typeof h !== "object" || h === null) return false;
+  const o = h as Record<string, unknown>;
+  if (typeof o["readerSince"] !== "number" || typeof o["writerActive"] !== "boolean") return false;
+  const m = o["maxKdf"];
+  if (m === null) return true;
+  if (typeof m !== "object") return false;
+  const k = m as Record<string, unknown>;
+  return typeof k["n"] === "number" && typeof k["r"] === "number" && typeof k["p"] === "number";
 }
 
 function mapMaintCode(code: string | undefined): LanOffReason {

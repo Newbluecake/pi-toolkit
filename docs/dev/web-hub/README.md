@@ -121,6 +121,19 @@ contracts, real revoke consumers, real-socket Q15 enrollment, LAN-P5 real child 
 integration, `tests/web-hub/http/lan-rollout.test.ts` (startHub-level activation). Design / evidence:
 `docs/dev/web-hub/{lan-security-plan,lan-security-P0-surfaces,lan-security-DEFG-integration-report}.md`.
 
+**Credential hardening, read side (#66 P1, `docs/dev/web-hub-auth-hardening/plan.md`)**: `hub/hardening.ts` (zero imports)
+holds the phase gate — `HARDENING_PHASE=1` this release (reads only; every write stays at scrypt 2^15). The maintenance
+`open-check-migrate` stamps `meta.hardening_reader={"v":1,"since":…}` (older v only raised, `since` never moves), decides
+`writerActive` ONCE (phase 2 ∧ marker ≥14 d old) and returns it in `reply.hardening{readerSince,writerActive,maxKdf}`;
+`lan-store` turns that into `CreateLanStoreResult.hardening` (+ `verifyTarget = max(write target, strongest stored)`) and
+no longer drops the open check's `warning` (TRUNCATE failure ⇒ `truncateFailed`). `validateKdfParams` accepts
+N∈[2^14,2^17], 128·N·r ≤ 128 MiB. `createKdf` frees a pool slot only when scrypt PHYSICALLY calls back (an aborted caller
+still rejects at once), so physical concurrency stays ≤2 (≈258 MiB worst case at 2^17); `runPadded` runs real +
+compensation scrypt inside ONE slot. `kdfMatches` times every path (unknown/corrupt ⇒ dummy, cheaper valid record ⇒ one
+padded run) against `kdfPolicy.verifyTarget` (absent ⇒ `KDF_LEGACY`, i.e. v0.10 behaviour; tests inject it via
+`lan-helpers.ts`). `hub.ts` counts both `run` and `runPadded` in `kdfInflight` so the quiet-replace path cannot cut across
+a login. Residual: compensation scrypt is a smaller-memory computation, so wall-clock can differ by ~10–30 % (A2 live check).
+
 ## Worktree panel
 
 **Worktree panel (worktree-web plan v1.1)**: `agent/worktree-sampler.ts` samples the session cwd's repo through

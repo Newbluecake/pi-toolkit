@@ -13,6 +13,9 @@ import { createAuthRevokeBus } from "../../../src/web-hub/hub/auth-revoke.js";
 import { createSecurityEventBus } from "../../../src/web-hub/hub/security-events.js";
 import type { LanLoginCoreDeps } from "../../../src/web-hub/hub/ports.js";
 import { memLog } from "./helpers.js";
+import { kdfMatches, verifyPassword } from "../../../src/web-hub/hub/lan-auth.js";
+import { KDF_LEGACY, KDF_PHASE2, kdfCost } from "../../../src/web-hub/hub/kdf.js";
+import type { KdfParams, KdfPort, LanUserRecord } from "../../../src/web-hub/hub/ports.js";
 async function login(
   ctx: RequestContext,
   body: unknown,
@@ -186,5 +189,173 @@ describe('login corrupt KDF params (plan §5.1 "读取校验"; LC review fix, la
     );
     expect(calls).toBe(1);
     expect(sawCorruptN).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #66 D6: constant-work compensation (docs/dev/web-hub-auth-hardening/plan.md §4.1/§9 P1)
+// ---------------------------------------------------------------------------
+
+/** Records every pool entry (one `run` or `runPadded` call = one pool acquisition) and its work. */
+function spyKdf(opts: { padded?: boolean } = {}) {
+  const acquisitions: Array<{ via: "run" | "runPadded"; total: number }> = [];
+  const runs: KdfParams[] = [];
+  const answer = (password: string, params: KdfParams, hash: Uint8Array): Uint8Array =>
+    password === "right" && Buffer.from(params.salt).equals(Buffer.alloc(params.salt.length, 7))
+      ? hash
+      : new Uint8Array(params.keyLen);
+  let currentHash = new Uint8Array(32);
+  const kdf: KdfPort = {
+    async run(password, params) {
+      acquisitions.push({ via: "run", total: kdfCost(params) });
+      runs.push(params);
+      return answer(password, params, currentHash);
+    },
+    ...(opts.padded === false
+      ? {}
+      : {
+          async runPadded(password: string, params: KdfParams, pad: KdfParams) {
+            acquisitions.push({ via: "runPadded", total: kdfCost(params) + kdfCost(pad) });
+            runs.push(params, pad);
+            return answer(password, params, currentHash);
+          },
+        }),
+  };
+  return {
+    kdf,
+    acquisitions,
+    runs,
+    setHash(h: Uint8Array) {
+      currentHash = h;
+    },
+  };
+}
+
+function rec(over: Partial<LanUserRecord> = {}): LanUserRecord {
+  return {
+    id: 1,
+    username: "alice",
+    kdf: "scrypt",
+    n: 32768,
+    r: 8,
+    p: 1,
+    salt: new Uint8Array(16).fill(7),
+    hash: new Uint8Array(32).fill(9),
+    epoch: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  };
+}
+
+async function matchesWith(
+  spy: ReturnType<typeof spyKdf>,
+  user: LanUserRecord | undefined,
+  password: string,
+  verifyTarget?: typeof KDF_PHASE2,
+): Promise<boolean> {
+  if (user !== undefined) spy.setHash(user.hash);
+  return kdfMatches(user, password, {
+    store: fakeLanStore(),
+    kdf: spy.kdf,
+    limiter: fakeLoginLimiter(),
+    admission: alwaysAdmits(),
+    ...(verifyTarget === undefined ? {} : { kdfPolicy: { verifyTarget } }),
+  });
+}
+
+describe("kdfMatches constant work (#66 D6)", () => {
+  const T = KDF_PHASE2;
+  const cases: Array<[string, LanUserRecord | undefined]> = [
+    ["unknown user", undefined],
+    ["2^17 record", rec({ n: 2 ** 17 })],
+    ["2^15 record", rec({ n: 2 ** 15 })],
+    ["2^14 record", rec({ n: 2 ** 14 })],
+    ["N=2^16 p=2 strong record", rec({ n: 2 ** 16, p: 2 })],
+    ["r=1 record", rec({ n: 2 ** 14, r: 1 })],
+    ["corrupt record (n=12345)", rec({ n: 12345 })],
+    ["corrupt record (bad hash length)", rec({ hash: new Uint8Array(5) })],
+  ];
+
+  for (const [label, user] of cases) {
+    for (const password of ["right", "wrong"]) {
+      it(`${label} / ${password} password: exactly ONE pool acquisition and total work ≥ the verify target (< one step over)`, async () => {
+        const spy = spyKdf();
+        await matchesWith(spy, user, password, T);
+        expect(spy.acquisitions).toHaveLength(1);
+        const total = spy.acquisitions[0]!.total;
+        expect(total).toBeGreaterThanOrEqual(kdfCost(T));
+        // never grossly over the target (one `p` step of the record's own N·T.r at most)
+        expect(total - kdfCost(T)).toBeLessThan(Math.max(1, (user?.n ?? T.n) * T.r));
+      });
+    }
+  }
+
+  it("equal-cost records (2^15, 2^17, p=2) all total exactly the target; unknown user and corrupt record run only the dummy", async () => {
+    for (const user of [
+      undefined,
+      rec({ n: 2 ** 17 }),
+      rec({ n: 2 ** 15 }),
+      rec({ n: 2 ** 16, p: 2 }),
+      rec({ n: 777 }),
+    ]) {
+      const spy = spyKdf();
+      await matchesWith(spy, user, "wrong", T);
+      expect(spy.acquisitions[0]!.total).toBe(kdfCost(T));
+    }
+    const dummy = spyKdf();
+    await matchesWith(dummy, undefined, "x", T);
+    expect(dummy.acquisitions[0]!.via).toBe("run");
+    expect(dummy.runs[0]).toMatchObject({ n: T.n, r: T.r, p: T.p, keyLen: 32 });
+    expect(Buffer.from(dummy.runs[0]!.salt).equals(Buffer.alloc(16))).toBe(true);
+  });
+
+  it("verdicts are unchanged by the compensation (right password matches, wrong one does not)", async () => {
+    const user = rec({ n: 2 ** 15 });
+    expect(await matchesWith(spyKdf(), user, "right", T)).toBe(true);
+    expect(await matchesWith(spyKdf(), user, "wrong", T)).toBe(false);
+    expect(await matchesWith(spyKdf(), rec({ n: 777 }), "right", T)).toBe(false);
+    expect(await matchesWith(spyKdf(), undefined, "right", T)).toBe(false);
+  });
+
+  it("a KdfPort without runPadded falls back to two plain runs, REAL result first", async () => {
+    const spy = spyKdf({ padded: false });
+    const ok = await matchesWith(spy, rec({ n: 2 ** 15 }), "right", T);
+    expect(ok).toBe(true);
+    expect(spy.acquisitions.map((a) => a.via)).toEqual(["run", "run"]);
+    expect(spy.runs[0]).toMatchObject({ n: 2 ** 15 });
+  });
+
+  it("production default (no kdfPolicy) is byte-for-byte v0.10: 2^15 record and unknown user each run exactly one plain 2^15 KDF", async () => {
+    for (const user of [undefined, rec({ n: 2 ** 15 }), rec({ n: 777 })]) {
+      const spy = spyKdf();
+      await matchesWith(spy, user, "wrong");
+      expect(spy.acquisitions).toEqual([{ via: "run", total: kdfCost(KDF_LEGACY) }]);
+      expect(spy.runs[0]).toMatchObject({ n: 32768, r: 8, p: 1, keyLen: 32 });
+    }
+  });
+
+  it("production default with a cheaper (2^14) seed gets exactly one compensation (the declared behaviour change)", async () => {
+    const spy = spyKdf();
+    await matchesWith(spy, rec({ n: 2 ** 14 }), "wrong");
+    expect(spy.acquisitions).toHaveLength(1);
+    expect(spy.acquisitions[0]).toMatchObject({ via: "runPadded" });
+    expect(spy.acquisitions[0]!.total).toBeGreaterThanOrEqual(kdfCost(KDF_LEGACY));
+  });
+
+  it("verifyPassword (privacy) shares the same policy: its work equals login's", async () => {
+    const store = fakeLanStore();
+    store.seedUser(rec({ n: 2 ** 15, username: "alice" }));
+    const spy = spyKdf();
+    spy.setHash(new Uint8Array(32).fill(9));
+    await verifyPassword({ clientIp: "10.0.0.5" }, 1, "wrong", {
+      store,
+      kdf: spy.kdf,
+      limiter: fakeLoginLimiter(),
+      admission: alwaysAdmits(),
+      kdfPolicy: { verifyTarget: KDF_PHASE2 },
+    });
+    expect(spy.acquisitions).toHaveLength(1);
+    expect(spy.acquisitions[0]!.total).toBe(kdfCost(KDF_PHASE2));
   });
 });
