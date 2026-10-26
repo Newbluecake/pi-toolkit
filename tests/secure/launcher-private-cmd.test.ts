@@ -720,15 +720,28 @@ describe.skipIf(!HAVE_FLOCK || !HAVE_USERNS || !which("script"))(
     }, 30_000);
 
     it("--kill: TERM to the verified supervisor, then waits for the instance to go (stale ⇒ released) ⇒ 0", async () => {
-      const f = await fakeInstance();
-      writeRecord({ phase: "session", supervisor: f.sup, pi: f.sup, ns: { mnt: f.nsMnt, user: f.nsUser } });
-      const k = await cli("lock acme --kill");
-      expect(k.code, k.text).toBe(0);
-      expect(k.out).toMatch(new RegExp(`已通知监督进程（pid ${f.sup.pid}）结束会话并收尾`));
-      expect(existsSync(`/proc/${f.sup.pid}`)).toBe(false);
+      // #69: the fake supervisor is a bare `sleep` — after the TERM it dies at once, its mount-ns
+      // id is freed, and under a parallel full-suite run the kernel may hand the SAME ns id to a
+      // concurrent real private session; the re-judge then sees members it cannot prove (recorded
+      // supervisor is dead) and fails closed (75, record kept). That is the designed ns-recycling
+      // safeguard, not a kill-path defect: TERM already landed (pid gone). Retry the whole scenario
+      // with a fresh fake instance, bounded; any OTHER outcome fails immediately.
+      let f: Awaited<ReturnType<typeof fakeInstance>> | undefined;
+      let k: Awaited<ReturnType<typeof cli>> | undefined;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        f = await fakeInstance();
+        writeRecord({ phase: "session", supervisor: f.sup, pi: f.sup, ns: { mnt: f.nsMnt, user: f.nsUser } });
+        k = await cli("lock acme --kill");
+        if (k.code === 0) break;
+        if (k.code === 75 && k.text.includes("未经证明的进程") && attempt < 3) continue;
+        break;
+      }
+      expect(k!.code, k!.text).toBe(0);
+      expect(k!.out).toMatch(new RegExp(`已通知监督进程（pid ${f!.sup.pid}）结束会话并收尾`));
+      expect(existsSync(`/proc/${f!.sup.pid}`)).toBe(false);
       expect(existsSync(recordFile())).toBe(false);
       expect(spawnSync("flock", ["-n", v.lease, "true"]).status).toBe(0);
-    }, 30_000);
+    }, 90_000);
 
     it("--kill never signals a recycled identity: wrong starttime ⇒ nothing signalled, re-judged", async () => {
       const f = await fakeInstance();
@@ -752,8 +765,11 @@ const HAVE_REAL =
 describe.skipIf(!HAVE_REAL)("N2 real: command surface against real --private instances", () => {
   let releaseGocryptfsLock: (() => void) | undefined;
   beforeAll(async () => {
-    releaseGocryptfsLock = await acquireGocryptfsTestLock();
-  }, 250_000);
+    // 590 s like launcher-convert's per-test acquisition (#69): under a parallel full-suite run the
+    // cross-file gocryptfs lock can stay queued behind another file's long real block for minutes;
+    // the previous default (240 s acquire / 250 s hook) timed out the whole block occasionally.
+    releaseGocryptfsLock = await acquireGocryptfsTestLock(590_000);
+  }, 600_000);
   afterAll(() => releaseGocryptfsLock?.());
   const PW = "TESTPASS-fake-not-a-secret";
 
@@ -942,11 +958,26 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
     const run = tty(e, "run acme --private -- hi", { FAKE_PI_SLEEP: "60000" });
     await untilPhase(e, "session");
     const piPid = recordOf(e).pi.pid;
-    const t0 = Date.now();
-    const k = plain(e, "lock acme --kill");
-    expect(k.code, k.text).toBe(0);
-    expect(Date.now() - t0).toBeLessThan(12_000);
-    expect(k.text).not.toMatch(/外部收尾/);
+    // #69: `lock --kill` first judges the instance via a /proc scan that FAILS CLOSED (76
+    // scan-incomplete) when a same-uid non-dumpable process (e.g. a transient setuid fusermount3
+    // from a concurrent suite) is mid-flight — correct product behaviour on a busy machine, not a
+    // kill-path failure. A refused attempt signals nothing, so a bounded retry is safe.
+    let k: ReturnType<typeof plain> | undefined;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const t0 = Date.now();
+      k = plain(e, "lock acme --kill");
+      if (k.code === 0) {
+        expect(Date.now() - t0).toBeLessThan(12_000);
+        break;
+      }
+      if (k.code === 76 && k.text.includes("scan-incomplete") && attempt < 9) {
+        await sleep(300);
+        continue;
+      }
+      break;
+    }
+    expect(k!.code, k!.text).toBe(0);
+    expect(k!.text).not.toMatch(/外部收尾/);
     const r = await run;
     expect(r.code, r.text).toBe(143);
     expect(existsSync(`/proc/${piPid}`)).toBe(false);
