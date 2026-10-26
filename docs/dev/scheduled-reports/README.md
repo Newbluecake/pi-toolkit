@@ -6,7 +6,7 @@
 
 ## 报告引用与文件名（#62）
 
-- 结果消息的「全文」入口互斥：有 `runId` 只显示 `get_subagent_result <runId>`；否则有报告时显示 `<store.root.real>/<sessionDirName>/<run.reportFile>` 的绝对路径；两者均无则省略。工具名仅定义在 `agent/result-reference.ts` 的 `SCHEDULE_RESULT_TOOL`，报告截断提示复用它，且不为无 runId 的运行虚构可查询全文。
+- 结果消息的「全文」入口互斥：有 `runId` 只显示 `get_run_result <runId>`；否则有报告时显示 `<store.root.real>/<sessionDirName>/<run.reportFile>` 的绝对路径；两者均无则省略。工具名仅定义在 `src/core/tool-names.ts` 的 `RESULT_TOOL_NAME`（原名 `get_subagent_result`），报告截断提示复用它，且不为无 runId 的运行虚构可查询全文。
 - digest、schedule 工具的 get/history、`/schedule show/log`（含 `--all`，使用实际归属会话的 store）也只展示报告绝对路径；展示不改账本。
 - 新报告路径为 `reports/<taskId>-<YYYYMMDD-HHmm>[-n].md`，取 `run.scheduledAt`（auto occurrence / manual trigger），使用任务 tz，无 tz 时使用本地时区。`reportFileOf` 只生成基名；background / message writer 在 `writeReportLocked` 的同一 session writer 锁内通过 `allocateUnique` 分配 `-2`、`-3` 等后缀，同时避开磁盘条目与仍存账本引用。回调拿实际分配路径再一次性提交 terminal run 与 pendingReports。
 - `run.reportFile` / `pendingReports.reportFile` 继续存相对路径；旧 64-hex 文件名仍可读取并参与原有 14 天 GC，**不迁移旧文件**。共享 filename/path 白名单只接受短名或旧哈希名；fd-anchored 读取与目录/owner/mode 检查不变。

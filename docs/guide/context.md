@@ -7,7 +7,7 @@
 - **`switch_context`**（`compact.switchTool` 默认 `true`）：模型自己写交接，pi 直接用它作为压缩结果，跳过通用摘要器。必填 `goal`、`progress`、`next_steps`；可选 `decisions`、`key_files`、`pitfalls`、`open_questions`、`keep_recent`（`false` = 丢弃此前全部对话，只留交接）、`resume`（默认 `true`，切换后自动继续任务）、`skills`。
   - 交接文本后会机械追加会话事实（在跑的 run / bash job、未完成 todo、会话文件路径）和"在役 skill"清单（被丢弃范围内读过的 `SKILL.md` 只提示重读，不重新注入）。
   - 交接草稿有 TTL、只消费一次。
-  - 子 agent 会话同样可用（`compact.childSessions` 默认 `true`，每个 run 最多 `compact.childMaxSwitches`=5 次），受运行时能力自检门控；失败原因记入 run 诊断，`get_subagent_result` 可读。
+  - 子 agent 会话同样可用（`compact.childSessions` 默认 `true`，每个 run 最多 `compact.childMaxSwitches`=5 次），受运行时能力自检门控；失败原因记入 run 诊断，`get_run_result` 可读。
 - **`compact_context`**：`compact.switchTool` 关闭时（或 `compact.keepCompactTool` 为 `true`）可用的手动压缩工具，等价 `/compact`。
 - **`set_compact_threshold`**：不带参数查询当前用量，带参数调整提示线 / 强制线（`0` = 关闭）。
 

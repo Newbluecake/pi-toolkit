@@ -8,11 +8,11 @@ Guidance for AI coding agents working in this repository.
 
 `pi-toolkit` (formerly `pi-subagent`) — a toolbox extension for [pi](https://github.com/earendil-works/pi)
 (the `@earendil-works/pi-coding-agent` CLI) whose flagship is an anti-hang subagent system: a drop-in
-replacement for the core of `@tintinweb/pi-subagents`: it provides the `Agent` / `get_subagent_result` / `steer_subagent` /
+replacement for the core of `@tintinweb/pi-subagents`: it provides the `Agent` / `get_run_result` / `steer_subagent` /
 `abort_subagent` tools (the main-session `Agent` is background-only — every call returns a run_id and completion is
 notified; only the nested `Agent` injected into a child keeps the blocking default, see
 `docs/dev/agent-background-only/plan.md`), the `SubagentWorkflow` orchestration tool (also background-only: returns a
-`wf_…` id, notifies on terminal state, managed through `get_subagent_result` / `abort_subagent` — see
+`wf_…` id, notifies on terminal state, managed through `get_run_result` / `abort_subagent` — see
 `docs/dev/workflow-background/plan.md`), the `/agent` command, a live
 fleet widget (agent tree), a notification delivery subsystem, and session-aware scheduled tasks (`src/schedule/`). Beyond that
 core it optionally (settings-gated) overrides pi's built-in `bash` with auto-backgrounding plus

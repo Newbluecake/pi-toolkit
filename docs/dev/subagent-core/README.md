@@ -36,7 +36,7 @@ settings.json actually lists the package. `src/child/activation-signal.ts`'s pro
 settings.json itself: a `create()`/`resume()` call whose counter never advances during
 its own create-await window emits a `child_extension_missing` DriverEvent, folded into
 `RunDiagnostics.childExtensionMissing` (best-effort, diag-only, never affects the run) and surfaced
-in `get_subagent_result`'s text (`formatChildExtensionMissing`); the runner also `console.warn`s
+in `get_run_result`'s text (`formatChildExtensionMissing`); the runner also `console.warn`s
 once per process (deduped). Detection, not inheritance, is the whole feature (no attempt to make a
 child session inherit the parent's `-e` extension list).
 

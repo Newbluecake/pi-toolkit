@@ -10,7 +10,7 @@ pi-toolkit 的核心：一套带多层 deadline 的 subagent 运行时，以及�
   - 主会话的 `Agent` **一律后台运行**：立即返回 run_id，终态时推送完成通知。可在同一条消息里并行派发多个。
   - 子 agent 里注入的嵌套 `Agent` 保持默认阻塞，可选 `run_in_background`（子会话是 print 模式，本轮结束即 run 结束，等不到通知）。
   - 并发满时直接拒绝（`agent.queueWhenFull` 默认 `false`），不会创建 run/worktree；成功派发的返回里带槽位占用。
-- **`get_subagent_result`** — 取结果。默认非阻塞，`wait: true` + `wait_ms` 为有界阻塞。也接受工作流 ID（`wf_…`）。
+- **`get_run_result`** — 取结果。默认非阻塞，`wait: true` + `wait_ms` 为有界阻塞。也接受工作流 ID（`wf_…`）。原名 `get_subagent_result`（≤ v0.9），升级说明见[迁移](migration.md#结果工具改名get_subagent_result--get_run_result)。
 - **`steer_subagent`** — 给运行中的子 agent 追加指令，可要求它回复。
 - **`abort_subagent`** — 停止子 agent；对终态 run 幂等。传 `wf_…` 则停止整个后台工作流。
 - **`extend_subagent_timeout`** — 延长运行中 run 的总超时。到点先进宽限并通知主会话，宽限内可延长，宽限耗尽才终止。每次延长最多 1 小时（`budget.extendStepS`，默认 3600，`0` = 旧行为），次数与硬天花板双上限。程序派生的固定预算 run（workflow 子 run、`/goal` 验证、RPC）不能延长。也接受工作流 ID。
@@ -42,7 +42,7 @@ run 活跃期间，编辑器上方常驻实时 agent tree（`fleetWidget`，默�
 
 沙箱化 JS 编排（`agent()` / `parallel()` / `pipeline()` / `phase()`），带独立 wall-clock 预算、runaway 检测和可回放 journal。默认关闭（`workflow.enabled`）。
 
-- **一律后台运行**：调用返回 `wf_…` ID，终态时推送完成通知。用 `get_subagent_result(run_id: "wf_…")` 看进度或取结果（完整 ID、唯一前缀、脚本 `meta.name` 均可），用 `abort_subagent` 停止，用 `extend_subagent_timeout` 延长。
+- **一律后台运行**：调用返回 `wf_…` ID，终态时推送完成通知。用 `get_run_result(run_id: "wf_…")` 看进度或取结果（完整 ID、唯一前缀、脚本 `meta.name` 均可），用 `abort_subagent` 停止，用 `extend_subagent_timeout` 延长。
 - 超出并发上限的 `agent()` 按 FIFO 排队而不是失败；停止或时间耗尽时排队中的调用解析为 `null`，派发失败则 reject。
 - `agent(prompt, opts)` 的 `opts` 严格校验，只接受 `label` / `agentType` / `phase` / `fullResult` / `model` / `thinking` / `isolation`。`isolation: "worktree"` 真正给该调用开独立 worktree，结果里带 `worktrees:` 汇总块；工作流自己不合并分支。
 - journal 回放：同一 journal 再跑时命中即复用（`workflow.replayScope` 默认 `chain`，`workflow.isolationReplay` 默认 `verify`——隔离调用仅在其分支仍指向记录的 commit 时才回放）。

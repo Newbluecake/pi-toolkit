@@ -59,7 +59,7 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
   把 `args.tasks` 的文件域分配表跑一遍 `conflict-check.mjs`，交集任务重切或移出 workflow 用 `Agent` 隔离派，
   分配表四件事写进每个任务的 prompt。
 - `SubagentWorkflow` 一律**后台运行**：调用立即返回 `wf_…` 工作流 ID，终态时推送完成通知；
-  通知到达后用 `get_subagent_result(run_id: "wf_…")` 取完整结果，需要中途叫停用 `abort_subagent`。
+  通知到达后用 `get_run_result(run_id: "wf_…")` 取完整结果，需要中途叫停用 `abort_subagent`。
   不要轮询或 `wait` 干等——主会话在工作流运行期间照常接收用户输入、可以做别的事。
 
 ## 模型映射与回退

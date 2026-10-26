@@ -25,4 +25,4 @@ with`messages.length === 0`, not "absent from entries") → verifying → verifi
 self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`verified` L0-L3
 failure disables immediately, a post-`verified` recheck disables only after 2 consecutive
 uncommitted). All rejection reasons fold into `diag.contextSwitches.rejected[]` (FIFO cap 5),
-readable from `get_subagent_result`.
+readable from `get_run_result`.

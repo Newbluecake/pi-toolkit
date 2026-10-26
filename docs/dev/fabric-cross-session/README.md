@@ -54,7 +54,7 @@ when the successor ends (cap 8 per successor ⇒ `subscriptionUnavailable` recei
 audit line, never woken; root is covered by the owner notice; entries are watched by one unref'd 10-min timer and an
 evicted/unknown successor's entry is dropped). Visibility: `/agent status` adds one `wake on · lvl≤N · root L· ·
 resumes a/b h · parked · reserved · unverified · quarantined · durability · results · dead <reason>=n` line (absent when
-wake is off), `get_subagent_result` adds `Woken by <ref> (level n) · +N inbox messages` / `Resumed with +N inbox messages`.
+wake is off), `get_run_result` adds `Woken by <ref> (level n) · +N inbox messages` / `Resumed with +N inbox messages`.
 Accepted limitation: after a real `/reload` the old stack's `onReaped` closure is dead, so a reservation whose run
 was still closing is re-judged by the NEW stack's 60 s fresh-`getBranch()` fallback (bounded, never unbounded
 waiting). Cross-session wake (C1, RootWakeController, mutation fence) is phase 2 — plan §12 is an archive that must be

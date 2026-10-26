@@ -146,7 +146,7 @@ ruling — `agent/redact.ts`'s secret scrubbing is HYGIENE ONLY, never a securit
 `buildSessionStack`, `webHub.enabled`-gated, state in the `subagent:archive` session entry, full-snapshot-per-change,
 60s unref'd auto-sweep under `webHub.archiveAfterMin` — default 30, 0 = off, agent-side only ⇒ `/reload` suffices)
 hides TERMINAL run rows / bash rows from the fleet drawer and the TUI fleet widget (display only — never
-get_subagent_result/`/agent status`/notifications). Web ops ride the `archive` cmd op (`{kind,target,set}`, hub
+get_run_result/`/agent status`/notifications). Web ops ride the `archive` cmd op (`{kind,target,set}`, hub
 `parseCmdBody` whitelist ⇒ needs one `/webhub restart`); the set rides the open `StatusInfo.archived` slot
 (no proto bump/caps, absent when empty); user-unarchived ids are `held` and never re-auto-archived. Report:
 `docs/dev/web-hub/archive-report.md`.

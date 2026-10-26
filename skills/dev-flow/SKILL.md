@@ -207,7 +207,7 @@ metadata:
 ## Agent 调用要点
 
 - **传输层故障**（stream 中断 / 502 / 503 / 0 轮无进展 / 模型侧「no model progress」timed_out）：直接 `resume` 同一 run 换线续跑，不必请示。
-- **后台 + 通知驱动**：派发后做不冲突的准备工作，没活干就结束本轮并说明在等谁；收到通知再 `get_subagent_result`，多任务按到达顺序逐个收取；仅通知疑似丢失时用一次 `wait: true` 兜底。
+- **后台 + 通知驱动**：派发后做不冲突的准备工作，没活干就结束本轮并说明在等谁；收到通知再 `get_run_result`，多任务按到达顺序逐个收取；仅通知疑似丢失时用一次 `wait: true` 兜底。
 - **prompt 自包含**：背景、文件路径、约束、验收标准、项目规范（发版铁律、测试命令）都要写清，不要写「基于你的发现做 X」。
 - **trust but verify**：subagent 自报的完成/用例数不可信，验收必须自己跑命令取证。前端 verifier 只记录 `npm run check:web` 通过/失败（预算为粗粒度告警，不逐功能谈字节）。
 - **只读 agent 不能写文件**：`Explore` 等只读类型不要让它写 explore.md；由主会话落盘其最终报告（如从 subagent session 提取）或改用可写类型。
@@ -228,7 +228,7 @@ metadata:
 ## 反模式（禁止）
 
 - 默认串行 / 顺序派发假装并行；每轮只派一个任务却说不出剩余任务的硬依赖。
-- `get_subagent_result(wait: true)` 干等；高频轮询同一 run_id。
+- `get_run_result(wait: true)` 干等；高频轮询同一 run_id。
 - 给 L0 套 Plan/评审；给 L1 套 Plan + 评审 + 全流程（L1 的 verifier 是唯一加项）。
 - 下游重复探索（prompt 没给产物路径）；单模型报错后原地重试。
 - worktree 并行包里用 `git stash`（全 worktree 共享，会互相 pop 走改动）：prompt 禁用，基线对比用 `git diff > patch` 或临时 commit。
