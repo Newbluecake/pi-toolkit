@@ -3,7 +3,7 @@ import { initSecureDomain } from "./secure/domain.js";
 import { secureGuardsNeeded, wireSecureGuards } from "./secure/guards.js";
 import { registerSecureCommand, secureCommandWanted } from "./secure/command.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
 import { wireCacheTtl } from "./cache-ttl/cache-ttl.js";
 import { getProviderEvidenceStore } from "./cache-ttl/provider-evidence.js";
@@ -31,10 +31,10 @@ import {
   forwardResolveRun,
   forwardSpawn,
   forwardWorkflow,
-  forwardWorkflowQuery,
   requireStack,
   type StackHolder,
 } from "./holder.js";
+import { registerSubagentTools } from "./tools/register.js";
 import { createBackgroundCompletionEventHook, createNotificationReceiptHook } from "./delivery/stack-hooks.js";
 import { readBashJobTail } from "./bash/notify.js";
 import { createCompactHintHook } from "./compact-hint/hook.js";
@@ -71,14 +71,7 @@ import {
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
 import { worktreeRoot } from "./extensions/worktree-orphans.js";
 import { publishBackgroundStatus } from "./service/background-status.js";
-import { createAgentTool } from "./tools/agent-tool.js";
-import { createResultTool, legacyResultToolRenderer } from "./tools/result-tool.js";
 import { createResultToolActivation } from "./tools/result-tool-activation.js";
-import { createListSubagentsTool } from "./tools/list-subagents-tool.js";
-import { createSteerTool } from "./tools/steer-tool.js";
-import { createSetModelTool } from "./tools/set-model-tool.js";
-import { createAbortTool } from "./tools/abort-tool.js";
-import { createExtendTimeoutTool } from "./tools/extend-timeout-tool.js";
 import { createCompactTool } from "./compact-hint/compact-tool.js";
 import { createSwitchContextTool } from "./context-switch/tool.js";
 import { PendingHandoffStore } from "./context-switch/store.js";
@@ -947,110 +940,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   } else {
     console.warn("[pi-subagent] registerEntryRenderer unavailable; fabric display messages fall back to context");
   }
-  // Markdown body rendering for the Agent / get_run_result cards.
-  // getMarkdownTheme() reads pi's global theme, which throws before the
-  // interactive theme subsystem is initialized (headless/print mode, tests)
-  // — the tools fall back to their legacy plain-text cards in that case.
-  const resolveMarkdownTheme = () => {
-    try {
-      return getMarkdownTheme();
-    } catch {
-      return undefined;
-    }
-  };
-  pi.registerTool(
-    createAgentTool({
-      // Top-level Agent always runs in the background (docs/dev/agent-background-only):
-      // only spawn() is reached; the outcome arrives through the notification outbox.
-      spawn: forwardSpawn(holder),
-      isReloadPending,
-      markdownTheme: resolveMarkdownTheme,
-      // L1 (agent-tool pool-full plan §2): read fresh on every call so a
-      // live `/agent settings` edit (or /reload) takes effect immediately,
-      // same convention as worktreeAvailable above.
-      queueWhenFull: () => settings.agent.queueWhenFull,
-      loadGate: () => holder.current?.load?.port().verdict().gating === true,
-    }),
-  );
-  const resultTool = createResultTool({
-    query: forwardQuery(holder),
-    resolveRun: forwardResolveRun(holder),
-    notifier: forwardNotifier(holder),
-    resultMaxChars: () => settings.resultMaxChars,
-    markdownTheme: resolveMarkdownTheme,
-    workflows: forwardWorkflowQuery(holder),
-    wake: { inboxCount: (runId) => holder.current?.wake?.inboxCount(runId) ?? 0 },
-  });
-  pi.registerTool(resultTool);
-  // Resumed transcripts still carry calls under the pre-rename name: draw them with the same cards
-  // (pi ≥ 1.0.1; absent on older pi / stub hosts, where history simply falls back to the generic card).
-  if (typeof pi.registerToolRenderer === "function") pi.registerToolRenderer(legacyResultToolRenderer(resultTool));
-  pi.registerTool(
-    createListSubagentsTool({
-      query: forwardQuery(holder),
-      spawn: { slots: () => requireStack(holder).spawn.slots() },
-      workflow: { activity: { list: () => requireStack(holder).workflow.activity.list() } },
-      now: () => systemClock.now(),
-    }),
-  );
-  // steer reply (steer-tool reply param): same fabric signal as the @mention
-  // wiring below (`holder.current?.fabric != null`) — read live at call time
-  // so a /reload or settings change takes effect without re-registration.
-  pi.registerTool(
-    createSteerTool({
-      query: forwardQuery(holder),
-      resolveRun: forwardResolveRun(holder),
-      fabricEnabled: () => holder.current?.fabric != null,
-    }),
-  );
-  // set_model host form (plan §4.11): self-switch goes through the ExtensionAPI
-  // (only available when the pi build exposes it — otherwise `host` stays
-  // absent and self-switching degrades to a clear error while switching a
-  // running subagent keeps working). All stack reads go through the holder at
-  // call time so the tool survives session_start rebuilds.
-  pi.registerTool(
-    createSetModelTool({
-      ...(caps.canSetModel
-        ? {
-            host: {
-              setModel: (model) => pi.setModel(model as never),
-              getThinkingLevel: () => pi.getThinkingLevel(),
-              setThinkingLevel: (level) => pi.setThinkingLevel(level as never),
-              findModel: (p, id) => holder.current?.models.find(p, id),
-            },
-          }
-        : {}),
-      runs: { setModel: (runId, model, opts) => requireStack(holder).query.setModel(runId, model, opts) },
-      resolveHint: (hint) => holder.current?.models.resolveHint(hint),
-      available: () => holder.current?.models.available() ?? [],
-      // external-agent plan §5.4/§5.5（P5）：仅 externalAgents.droid.enabled 时注入（settings
-      // 在 activate() 快照；enabled ⇒ 每个 session stack 都带端口）。谓词经 holder 晚绑定，
-      // /reload 后新栈缺席即自动失效；缺席 ⇒ droid/x 走原未知模型路径（字节一致，评审 #7）。
-      ...(settings.externalAgents.droid.enabled
-        ? { externalOwns: (p: string) => holder.current?.external?.owns(p) === true }
-        : {}),
-      resolveRun: forwardResolveRun(holder),
-      labelOf: (runId) => holder.current?.query.get(runId)?.diag.label,
-    }),
-  );
-  pi.registerTool(
-    createAbortTool({
-      query: forwardQuery(holder),
-      resolveRun: forwardResolveRun(holder),
-      workflows: forwardWorkflowQuery(holder),
-    }),
-  );
-  // timeout-notify：extend.enabled=false 时工具不注册（spawn 侧同步钳 maxExtensions=0，D-16）。
-  if (settings.extend.enabled) {
-    pi.registerTool(
-      createExtendTimeoutTool({
-        query: forwardQuery(holder),
-        resolveRun: forwardResolveRun(holder),
-        workflows: forwardWorkflowQuery(holder),
-        now: () => systemClock.now(),
-      }),
-    );
-  }
+  registerSubagentTools(pi, { holder, settings, caps, isReloadPending });
   // HOST_KEY guard above means this registration is visible only in the main session.
   if (settings.compact.enabled) {
     if (settings.compact.switchTool) {
