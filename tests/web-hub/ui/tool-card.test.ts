@@ -3,6 +3,7 @@ import { mount } from "@vue/test-utils";
 import { ref, type Ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import ToolCard from "../../../src/web-hub/ui/src/components/transcript/ToolCard.vue";
+import { toolView } from "../../../src/web-hub/ui/src/logic/tools.js";
 import { PREVIEW_CTX, type PreviewContext } from "../../../src/web-hub/ui/src/components/preview/previewContext.js";
 import type { PreviewHandle, PreviewPathScope, PreviewView } from "../../../src/web-hub/ui/src/types.js";
 import type { ToolView } from "../../../src/web-hub/ui/src/types.js";
@@ -319,6 +320,20 @@ describe("ToolCard.vue — markdown-rendered results (MD_RESULT_TOOLS)", () => {
     expect(wrapper.find(".tool-md .codeblock button").exists()).toBe(true);
   });
 
+  it("done get_run_result (new result-tool name) renders markdown the same way as the legacy name", () => {
+    const wrapper = mdCard({ toolCallId: "m1n", toolName: "get_run_result", state: "done", result: mdResult });
+    const md = wrapper.get(".tool-md");
+    expect(md.find("h3").text()).toBe("Run report");
+    expect(
+      md
+        .get("table.md-table")
+        .findAll("td")
+        .map((c) => c.text()),
+    ).toEqual(["kimi", "3", "$0.42"]);
+    expect(wrapper.find(".tool-section .pre").exists()).toBe(false);
+    expect(md.find(".md-list li").text()).toContain("fixed");
+  });
+
   it("other done tools stay plain text with no toggle, even for markdown-looking results", () => {
     for (const toolName of ["bash", "read", "Agent"]) {
       const wrapper = mdCard({ toolCallId: "m3", toolName, state: "done", result: mdResult });
@@ -427,6 +442,30 @@ describe("ToolCard.vue — subagent run label header", () => {
     });
     expect(bare.get(".tool-args").text()).toContain("r_ABC");
     expect(bare.get(".tool-args").text()).not.toContain("run_id: r_ABC)");
+  });
+});
+
+/**
+ * Result-tool rename (result-tool-rename plan §7.1.8 — P2): `get_subagent_result` was renamed
+ * `get_run_result`; web transcripts mix both (§3.7). Both names are in `RUN_REF_TOOLS`, so
+ * `toolView` surfaces the result details' `{runId,label}` as `runRef` and the card header
+ * renders `label (run_id: …)` for either name — historical cards must stay byte-identical.
+ */
+describe("ToolCard.vue — result-tool rename (get_run_result / get_subagent_result)", () => {
+  it("toolView surfaces runRef for BOTH names and the header shows `label (run_id: …)`", () => {
+    for (const toolName of ["get_run_result", "get_subagent_result"]) {
+      const call = { id: `rr-${toolName}`, name: toolName, arguments: { run_id: "dev-x" } };
+      const res = {
+        role: "toolResult",
+        toolCallId: `rr-${toolName}`,
+        content: [{ type: "text", text: "done" }],
+        details: { runId: "r_ABC", label: "dev-x" },
+      };
+      const v = toolView(call, res);
+      expect(v.runRef, toolName).toEqual({ runId: "r_ABC", label: "dev-x" });
+      const wrapper = mount(ToolCard, { props: { view: v } });
+      expect(wrapper.get(".tool-args").text(), toolName).toBe("dev-x (run_id: r_ABC)");
+    }
   });
 });
 

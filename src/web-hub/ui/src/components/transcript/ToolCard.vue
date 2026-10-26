@@ -50,7 +50,10 @@ const TOOL_STATE_ATTR = { pending: "pending", running: "running", done: "done", 
  * as the preview dialog's md/source toggle), default rendered; the raw text is always one
  * click away and remains what the source `<pre>` shows (CodeBlock's copy inside the rendered
  * view already copies its raw fenced text). */
-const MD_RESULT_TOOLS: ReadonlySet<string> = new Set(["get_subagent_result"]);
+const MD_RESULT_TOOLS: ReadonlySet<string> = new Set([
+  "get_subagent_result", // legacy (≤ v0.9) result-tool name — historical transcripts only
+  "get_run_result",
+]);
 
 const resultAsMd = computed(
   () =>
