@@ -286,6 +286,9 @@ const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
   { id: "worktreeLate", run: (stack) => void stack.worktreeLate?.dispose() },
   // workflow-worktree §3 (P4): a scan still resolving when the session ends must never surface a stale prompt.
   { id: "worktreeOrphansStartup", run: (stack) => void stack.worktreeOrphansStartup?.dispose() },
+  // external-agent §5.5 (P5), GAP-G7 fixed: stop the directory probe on shutdown too. A /reload or cross-cwd resume
+  // re-imports the module, so the next-build handoff never reaches the old port. Never kills a running run.
+  { id: "external", run: (stack) => void stack.external?.dispose() },
   // child-bash no-host-view diag: idempotent, so this and the next build's own top-of-build release never double-release.
   { id: "hostBashViewCapability", run: (stack) => void stack.hostBashViewCapability.dispose() },
   {
@@ -311,7 +314,7 @@ const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
     run: (_stack, env, entry) =>
       entry.kind === "shutdown" && entry.reason === "quit" ? env.activation.sealChildBashJobs() : undefined,
   },
-  // GAP-G1 usageBroadcaster · GAP-G2 coalescer · GAP-G3 ackHold · GAP-G4 bashJobs manager · GAP-G7 external:
+  // GAP-G1 usageBroadcaster · GAP-G2 coalescer · GAP-G3 ackHold · GAP-G4 bashJobs manager:
   // not reachable from the Stack (path A only).
 ];
 

@@ -319,8 +319,11 @@ function pathC(g: string, reason: string, profile: Profile = "full", o: { kill?:
     `${g}.workflow.runs.seal`,
     `${g}.worktreeLate.dispose`, // after seal
     `${g}.worktreeOrphansStartup.dispose`,
+    // G7 FIXED (7b): the external-agent port's directory probe is now stopped on shutdown too — /reload and cross-cwd
+    // resume re-import the module, so path A never reaches the old port there.
+    ...(profile === "extRoot" ? [`${g}.external.dispose`] : []),
     `${g}.hostBashViewCapability.release`,
-    // GAP-G1 usageBroadcaster · GAP-G2 coalescer · GAP-G3 ackHold · GAP-G4 bashJobs manager · GAP-G7 external:
+    // GAP-G1 usageBroadcaster · GAP-G2 coalescer · GAP-G3 ackHold · GAP-G4 bashJobs manager:
     // none of them is touched on this path — they are disposed only by path A (same-module rebuild).
     ...(reason === "quit" ? [...(o.kill ? ["bashJobs.killBounded"] : []), "childBashRegistry.sealAll"] : []),
   ];
@@ -555,7 +558,7 @@ describe("teardown matrix: ordered calls per entry (FULL profile)", () => {
 });
 
 describe("teardown matrix: rootWakeRecovery + external agent (EXT_ROOT profile)", () => {
-  it("same-cwd new: C disposes rootWakeRecovery, A disposes it again and — only A — the external port (GAP-G7)", async () => {
+  it("same-cwd new: C disposes rootWakeRecovery and the external port (G7), A disposes both again (idempotent)", async () => {
     expect(await sameModuleSwitch("new", EXT_ROOT, true)).toEqual([
       ...startupLog(),
       "-- session_shutdown(new)",
@@ -588,7 +591,7 @@ describe("teardown matrix: rootWakeRecovery + external agent (EXT_ROOT profile)"
 
 const FAKE = { toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] as const };
 // web-hub (its reconnect timer) is out of ⑦'s scope; external-agent's background catalog probe of the EXT_ROOT tests
-// (GAP-G7: nothing disposes the port on path C) can still be settling when the next test installs fake timers.
+// (started during EXT_ROOT boot, before any shutdown can stop it) can still be settling when the next test installs fake timers.
 const notWebHub = (sites: Array<{ site: string }>) =>
   sites.filter((o) => !o.site.startsWith("src/web-hub/") && !o.site.startsWith("src/external-agent/"));
 const payload = (runId: string, status: string) => ({
