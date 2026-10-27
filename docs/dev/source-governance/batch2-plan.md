@@ -514,6 +514,22 @@ git diff --quiet <base> -- tests/fixtures
 - 路径 B 在 pi 1.3 的运行时流程里**不可达**：每次替换都是新的激活，holder 是空的。它只在某个激活收到两次 session_start 时才会触发，属于纯防御。
 - 同 cwd 的 new/resume/fork 上，同时出现在 C 和 A 的组件会被拆**两次**（先 C，后 A），依赖各自的幂等性。
 
+**7-0 实测结果**（`tests/conformance/lifecycle-entries.test.ts`，真实 pi 1.3.0 `AgentSessionRuntime` + 按路径加载的探针扩展；上面的推论全部成立，没有需要改的格子）：
+
+| 入口                    | 模块                                                          | 激活     | 实测事件序（逐项断言）                                                             |
+| ----------------------- | ------------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------- |
+| startup                 | 新（moduleLoads=1）                                           | 1        | `activate:1` → `session_start(startup)`                                            |
+| new（同 cwd）           | **复用**（仍为 1）                                            | 2        | 旧激活的全部 `session_shutdown(new)` handler → `activate:2` → `session_start(new)` |
+| resume（同 cwd）        | **复用**                                                      | 2        | 同上，reason=`resume`                                                              |
+| resume（跨 cwd）        | **新**（moduleLoads=2）                                       | 2        | 同上，但 `activate:2:module2`                                                      |
+| fork（同 cwd）          | **复用**                                                      | 2        | 同上，reason=`fork`                                                                |
+| `/reload`               | **新**（moduleLoads=2）                                       | 2        | `session_shutdown(reload)` → `activate:2:module2` → `session_start(reload)`        |
+| `/new` 之后再 `/reload` | 新（替换出来的 loader 此时 `loaded=true`，reload 照样清缓存） | 3        | —                                                                                  |
+| `/reload` 之后再 `/new` | 复用 reload 重新导入的那个模块（没有第三次导入）              | 3        | —                                                                                  |
+| quit                    | —                                                             | 不再激活 | `session_shutdown(quit)`                                                           |
+
+另外钉住：同一事件的多个 handler 由 `ExtensionRunner.emit` **严格顺序 await**（第一个 handler 的异步段 `:1:end` 一定出现在第二个 handler 的 `:2` 之前）；旧激活的 shutdown 完整结束之后，新激活才 `activate()`。这条是 7a 能把 C4 保持成「单个 async handler、内部顺序」的前提，也是矩阵测试里「顺序锚点」的依据。
+
 ### 4.2 组件 × 路径 × 顺序矩阵（现状，`43d892fd`）
 
 各列含义：
