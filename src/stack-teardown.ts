@@ -59,6 +59,8 @@ export interface ActivationTeardown {
   defensiveXsTeardown(nextXsSessionId: string | undefined): void;
   /** C4 (first step): drop this activation's child-switch `onDisabled` subscription (G11). */
   releaseCapabilityAlert(): void;
+  /** C4 (right after backgroundCompletions): cancel the /goal loop's delivery/eval timers and silence it (G9). */
+  disposeGoalHook(): void;
   /** C4-2: status bar cleared + digest disposed BEFORE the schedule executor closes its runs. */
   scheduleSurfaceShutdown(): void;
   /** C4-23: only on a real quit — bounded best-effort seal/kill of every child session's bash jobs. */
@@ -233,6 +235,10 @@ const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
   // ask-user-async §3.3 (P2): FIRST — the hub stops broadcasting before the drain/seal below settles anything;
   // completions surfacing during shutdown must not interrupt whatever session comes next.
   { id: "backgroundCompletions", run: (stack) => void stack.backgroundCompletions.dispose() },
+  // G9 (7b): the /goal delivery/eval watchdogs are activate-level timers; without this one kept re-sending the
+  // continuation (and the brake report) through the OLD pi after the session ended. Before the run drain, so an
+  // evaluation settling during the drain cannot inject a continuation into the closing session.
+  { id: "goalHook", run: (_stack, env) => void env.activation.disposeGoalHook() },
   // scheduled-reports A0 (§4.6): the schedule executor goes FIRST — dispose, then this epoch's non-terminal runs
   // become unknown(owner-closed) (lock wait ≤ 500 ms) BEFORE the run drain below can land a shutdown `aborted`
   // (first terminal write wins).

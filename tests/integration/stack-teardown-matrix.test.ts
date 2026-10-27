@@ -682,7 +682,7 @@ describe("teardown matrix: residual timers and the gaps they prove (after a /rel
     expect(notWebHub(timers.outstanding())).toEqual([]);
   }, 60_000);
 
-  it("GAP-G9: the /goal delivery watchdog survives shutdown and keeps talking through the OLD pi", async () => {
+  it("G9 FIXED: the /goal delivery watchdog is cancelled at shutdown and no longer talks through the OLD pi", async () => {
     const a = await boot();
     await fire(a, "session_start", "startup");
     const goal = probe.stacks[0].goal;
@@ -701,9 +701,10 @@ describe("teardown matrix: residual timers and the gaps they prove (after a /rel
     expect(a.userMessages.length).toBe(1); // the continuation
     expect(timers.outstanding().map((o) => o.site)).toContain("src/goal/hook.ts");
     await fire(a, "session_shutdown", "reload");
-    expect(timers.outstanding().map((o) => o.site)).toContain("src/goal/hook.ts"); // not cancelled
+    // 7b G9: the activation teardown cancels it (before: still pending, retry at 30 s + brake report at 60 s on the old pi)
+    expect(timers.outstanding().map((o) => o.site)).not.toContain("src/goal/hook.ts");
     await vi.advanceTimersByTimeAsync(120_000);
-    expect(a.userMessages.length).toBe(3); // retry at 30 s + brake report at 60 s, both after shutdown
+    expect(a.userMessages.length).toBe(1);
   }, 60_000);
 
   it("GAP-G12 CLOSED: wake-service timers are cleared by fabric.dispose (mailbox.dispose → inbox.dispose), nothing outlives shutdown", async () => {

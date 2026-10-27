@@ -825,6 +825,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   const activationTeardown: ActivationTeardown = {
     defensiveXsTeardown: (nextXsSessionId) => xs.defensiveTeardown(nextXsSessionId),
     scheduleSurfaceShutdown: () => scheduleSurface?.shutdown(), // status bar cleared + digest disposed BEFORE the executor closes its runs
+    disposeGoalHook: () => goalHook.dispose(),
     releaseCapabilityAlert: () => {
       capabilityAlertOff?.();
       capabilityAlertOff = undefined;
