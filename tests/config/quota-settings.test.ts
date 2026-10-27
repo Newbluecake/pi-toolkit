@@ -3,13 +3,8 @@
 // memory-settings.test.ts (per-block settings test file).
 
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_SETTINGS,
-  isTimeSettingKey,
-  loadSettings,
-  parseQuotaSettings,
-  TIME_SETTING_MS_PATHS,
-} from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, isTimeSettingKey, loadSettings, TIME_SETTING_MS_PATHS } from "../../src/config/settings.js";
+import { parseQuotaSettings } from "../../src/quota/settings.js";
 import { currentOf, defaultOf, isKnownSettingKey, SETTING_SPECS } from "../../src/config/setting-specs.js";
 
 const defaults = DEFAULT_SETTINGS.quota;

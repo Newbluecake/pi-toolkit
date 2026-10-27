@@ -111,6 +111,7 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     // #56 ⑧: the `fabric` block lives in fabric/settings.ts (pinned below).
     "../fabric/settings.js",
     "../memory/tidy/batch-settings.js",
+    "../quota/settings.js",
     "../sysload/types.js",
     "../topic-switch/settings.js",
     // #56 ⑧: the `webHub` / `feishuBot` blocks live in web-hub/agent/settings.ts (pinned below).
@@ -142,6 +143,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/fabric/settings.ts": ["./xs/channel.js", "./xs/receive.js"],
   "src/fabric/xs/receive.ts": [],
   "src/cache-ttl/settings.ts": ["./keepalive-state.js"],
+  // #56 ⑧: quota block settings — `./types.js` is type-only (erased), so no value import at all.
+  "src/quota/settings.ts": [],
   // #56 ⑧: webHub/feishuBot block settings — LAN host/origin classification (L16 第一处) + the browser-safe,
   // import-free shared CIDR parser (LAN security P0). The hub whitelist is NOT loosened: these are the same two files.
   "src/web-hub/agent/settings.ts": ["../protocol/client-allow.js", "../protocol/lan.js"],
