@@ -4,7 +4,15 @@ import { isValidXsSessionId } from "../fabric/xs/receive.js";
 import type { XsReplyLedger } from "../fabric/xs/reply-ledger.js";
 import type { SessionFence } from "../fabric/xs/fence.js";
 import type { XsMembership, XsBlockEntry, XsJoinResult, XsLeaveResult } from "../fabric/xs/membership.js";
-import type { XsAliasBridgePort, XsAliasBridgeResult, XsAliasCachePort } from "../fabric/xs/types-alias.js";
+import type {
+  XsAliasAutoSkipReason,
+  XsAliasBridgePort,
+  XsAliasBridgePortV2,
+  XsAliasBridgeResult,
+  XsAliasCacheEntry,
+  XsAliasCachePort,
+} from "../fabric/xs/types-alias.js";
+import type { XsAliasMarkDecided } from "../fabric/xs/alias-decided.js";
 import {
   XS_ALIAS_TAKE_TOKEN_RE,
   formatTakeConfirmLine,
@@ -144,8 +152,18 @@ export interface FabricXsCommandDeps {
 export interface FabricXsAliasPort {
   /** `fabric.crossSession.alias.enabled` (local). */
   localEnabled: boolean;
-  bridge?: XsAliasBridgePort;
-  cache?: XsAliasCachePort;
+  bridge?: XsAliasBridgePort & Partial<Pick<XsAliasBridgePortV2, "forcePreview">>;
+  cache?: Omit<XsAliasCachePort, "current"> & {
+    current(): (XsAliasCacheEntry & { origin?: "auto" }) | undefined;
+  };
+  /** AFW: CURRENT hub caps include xs.alias.v2 (not merely local support). */
+  hubAliasV2?(): boolean;
+  /** Frozen setting; absent/false keeps the old status bytes. */
+  autoFromCwd?: boolean;
+  decided?(): boolean;
+  markDecided?: XsAliasMarkDecided;
+  /** AFW forwards the auto engine's cached reason; read-only, never triggers an auto attempt. */
+  autoSkipReason?(): XsAliasAutoSkipReason | undefined;
   /** Display-only parameters for the status line (lease days / cooling minutes). */
   leaseDays?: number;
   coolMin?: number;
@@ -210,6 +228,9 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
   const now = deps.now ?? (() => Date.now());
   /** m5: the last hub `op:"channels"` names — the ONLY network-derived completion source, refreshed by commands only. */
   let hubChannelNames: readonly string[] = [];
+  // Display/persistence provenance only: the hub token owns the actual execution mode.
+  // Per command/activation, FIFO <=32, no globals or timers. Unknown (e.g. reload) tokens use "take".
+  const forceTokens = new Map<string, string>();
   const fetchChannels = async (): Promise<FabricXsChannelsListing | undefined> => {
     if (deps.channels === undefined) return undefined;
     let listing: FabricXsChannelsListing;
@@ -277,10 +298,19 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
               }));
           }
           const last = parts[parts.length - 1] ?? "";
-          if (parts.length === 2 && "--take".startsWith(last) && last !== "--take" && parts[0] !== "--clear") {
-            return [
-              { value: `alias ${parts[0]} --take`, label: "--take", description: "抢占离线持有者的别名（需确认）" },
+          if (parts.length === 2 && parts[0] !== "--clear") {
+            const flags = [
+              { label: "--take", description: "抢占离线持有者的别名（需确认）" },
+              ...(safe(safe(deps.alias)?.hubAliasV2) === true && normalizeAlias(parts[0]).ok
+                ? [{ label: "--force", description: "强制抢占（持有者在线也可，需确认）" }]
+                : []),
             ];
+            return flags
+              .filter((f) => f.label.startsWith(last) && f.label !== last)
+              .map((f) => ({
+                value: `alias ${parts[0]} ${f.label}`,
+                ...f,
+              }));
           }
           return [];
         }
@@ -327,7 +357,14 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
       }
 
       if (!SUBS.includes(sub as (typeof SUBS)[number])) {
-        notify(ctx, USAGE, "warning");
+        notify(
+          ctx,
+          USAGE +
+            (safe(safe(deps.alias)?.hubAliasV2) === true
+              ? "\n/fabric alias <名> --force — 强制抢占（持有者在线也可，需确认）"
+              : ""),
+          "warning",
+        );
         return;
       }
       if (!deps.enabled()) {
@@ -472,7 +509,7 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
           runUnblock(ctx, tokens.slice(1).join(" "), membership);
           return;
         case "alias":
-          await runAlias(ctx, tokens.slice(1), deps);
+          await runAlias(ctx, tokens.slice(1), deps, forceTokens);
           return;
         case "fence": {
           if (tokens[1] !== "reset") {
@@ -650,25 +687,28 @@ const ALIAS_REASON_TEXT: Record<XsAliasRejectReason, string> = {
 };
 
 /** Hub error → fixed user text. `code` may carry a `{detail}` suffix; otherwise `reason` is the detail. */
-function aliasErrorText(code: string, reason: string | undefined): string {
+function aliasErrorText(code: string, reason: string | undefined, forceAlias?: string): string {
   const m = /^([A-Z_]+)(?:\{([^}]*)\})?$/.exec(code);
   const base = m?.[1] ?? code;
   const detail = m?.[2] ?? reason;
+  const forceHint = forceAlias === undefined ? "" : ` 可用 /fabric alias ${forceAlias} --force 强制抢占（需确认）`;
   switch (base) {
     case "E_XS_ALIAS_INVALID":
       return ALIAS_REASON_TEXT[
         (detail as XsAliasRejectReason) in ALIAS_REASON_TEXT ? (detail as XsAliasRejectReason) : "invalid"
       ];
     case "E_XS_ALIAS_TAKEN":
-      return detail === "confusable" ? "别名与已有别名过于相似，未设置。" : "别名已被占用，未设置。";
+      return detail === "confusable" ? "别名与已有别名过于相似，未设置。" : `别名已被占用，未设置。${forceHint}`;
     case "E_XS_ALIAS_TAKE":
       return detail === "online"
-        ? "持有者仍在线，不能抢占。"
+        ? `持有者仍在线，不能抢占。${forceHint}`
         : detail === "recent"
-          ? "持有者离线不足 10 分钟，暂不能抢占。"
+          ? `持有者离线不足 10 分钟，暂不能抢占。${forceHint}`
           : detail === "stale"
             ? "状态已变化或确认已失效，请重新预览：/fabric alias <名> --take"
-            : "该别名当前没有可抢占的持有者。";
+            : detail === "unnotifiable"
+              ? "持有会话在线但无法实时通知（版本较旧或未启用跨会话），不能强制抢占；请待其离线 ≥10 分钟后用 --take。"
+              : "该别名当前没有可抢占的持有者。";
     case "E_XS_ALIAS_FULL":
       return "hub 别名表已满，未设置。";
     case "E_XS_ALIAS_BUSY":
@@ -717,11 +757,16 @@ function aliasStatusLines(deps: FabricXsCommandDeps): string[] {
   if (!port.localEnabled) return ["alias n/a (alias.enabled=false)"];
   if (aliasUnavailable(port) !== undefined) return ["alias n/a (hub-cap off)"];
   const e = safe(() => port.cache?.current());
+  // Preserve v1 / autoFromCwd=false display byte-for-byte.
+  const auto = port.autoFromCwd === true && safe(port.hubAliasV2) === true;
   if (e?.alias !== undefined) {
-    return [`alias @${e.alias} held · lease ${port.leaseDays ?? 7}d · cool ${port.coolMin ?? 10}m`];
+    return [
+      `alias @${e.alias} held${auto && e.origin === "auto" ? " (auto)" : ""} · lease ${port.leaseDays ?? 7}d · cool ${port.coolMin ?? 10}m`,
+    ];
   }
-  if (e?.lostAt !== undefined) return [`alias - (lost: ${e.lostReason ?? "taken"})`];
-  return ["alias -"];
+  const line = e?.lostAt !== undefined ? `alias - (lost: ${e.lostReason ?? "taken"})` : "alias -";
+  const skip = auto ? (safe(port.decided) === true ? "decided" : safe(port.autoSkipReason)) : undefined;
+  return [line + (skip === undefined ? "" : ` · auto skip:${skip}`)];
 }
 
 /** Non-blocking reconcile after `/fabric status` / `/fabric alias` (never awaited, never throws). */
@@ -756,105 +801,141 @@ async function runAlias(
   ctx: ExtensionCommandContext,
   args: readonly string[],
   deps: FabricXsCommandDeps,
+  forceTokens: Map<string, string>,
 ): Promise<void> {
   const port = aliasPort(deps);
+  const hasForceInput = args.some((a) => a === "--force" || a.startsWith("--force="));
+  const usage =
+    "用法：/fabric alias [<名>|--clear] · /fabric alias <名> --take" +
+    (safe(port?.hubAliasV2) === true || hasForceInput ? " · /fabric alias <名> --force" : "");
+  const flags = args.filter((a) => a.startsWith("--"));
+  const words = args.filter((a) => !a.startsWith("--"));
+  const clear = flags.includes("--clear");
+  const force = flags.includes("--force");
+  const takeFlag = flags.find((f) => f === "--take" || f.startsWith("--take="));
+  const unknownFlag = flags.some(
+    (f) => f !== "--clear" && f !== "--force" && f !== "--take" && !f.startsWith("--take="),
+  );
+  // Validate the WHOLE call before marking, previewing or any other bridge request.
+  if (
+    unknownFlag ||
+    flags.length > 2 ||
+    (force && flags.length !== 1) ||
+    words.length > 1 ||
+    (clear && (words.length !== 0 || takeFlag !== undefined)) ||
+    ((force || takeFlag !== undefined) && words.length !== 1)
+  ) {
+    // Without the new flag, preserve the legacy unavailable-before-usage diagnostic.
+    notify(ctx, (!hasForceInput ? aliasUnavailable(port) : undefined) ?? usage, "warning");
+    return;
+  }
+  const execute = takeFlag?.startsWith("--take=") === true;
+  const token = execute ? takeFlag!.slice("--take=".length) : undefined;
+  const n = words.length === 1 ? normalizeAlias(words[0]) : undefined;
+  const forceToken = token !== undefined && n?.ok && forceTokens.get(token) === n.alias;
+  // D6: even a locally invalid alias, bad token or failed/offline write is a human decision.
+  // Syntax errors, reads, previews and disabled alias mode are NOT writes.
+  if (port?.localEnabled && (clear || execute || (words.length === 1 && !force && takeFlag === undefined))) {
+    port.markDecided?.(clear ? "clear" : execute ? (forceToken ? "force" : "take") : "set");
+  }
+  if (token !== undefined) forceTokens.delete(token);
+
   const refusal = aliasUnavailable(port);
   const bridge = port?.bridge;
   if (refusal !== undefined || bridge === undefined) {
     notify(ctx, refusal ?? "hub 不支持别名或别名服务降级，需 /webhub restart", "warning");
     return;
   }
-  const usage = "用法：/fabric alias [<名>|--clear] · /fabric alias <名> --take";
-  const flags = args.filter((a) => a.startsWith("--"));
-  const words = args.filter((a) => !a.startsWith("--"));
-  const clear = flags.includes("--clear");
-  const takeFlag = flags.find((f) => f === "--take" || f.startsWith("--take="));
-  const unknownFlag = flags.some((f) => f !== "--clear" && f !== "--take" && !f.startsWith("--take="));
-  if (unknownFlag || words.length > 1 || (clear && (words.length > 0 || takeFlag !== undefined)) || flags.length > 2) {
-    notify(ctx, usage, "warning");
+  const v2 = safe(port?.hubAliasV2) === true;
+  if (force && (!v2 || bridge.forcePreview === undefined)) {
+    notify(ctx, "hub 不支持强制抢占，需 /webhub restart", "warning");
     return;
   }
-  if (takeFlag !== undefined && words.length !== 1) {
-    notify(ctx, usage, "warning");
-    return;
-  }
+  const errorText = (r: Extract<XsAliasBridgeResult, { ok: false }>) =>
+    aliasErrorText(r.code, r.reason, v2 && n?.ok ? n.alias : undefined);
 
-  // get
   if (!clear && words.length === 0) {
     const r = await bridgeCall(() => bridge.get());
-    if (!r.ok) return notify(ctx, aliasErrorText(r.code, r.reason), "warning");
+    if (!r.ok) return notify(ctx, errorText(r), "warning");
     notify(ctx, stateText(r.res));
     refreshAlias(deps);
     return;
   }
-  // clear
   if (clear) {
     const r = await bridgeCall(() => bridge.clear());
-    if (!r.ok) return notify(ctx, aliasErrorText(r.code, r.reason), "warning");
-    notify(ctx, "已清除本会话别名（10 分钟内只有本会话能收回）。");
+    if (!r.ok) return notify(ctx, errorText(r), "warning");
+    notify(
+      ctx,
+      "已清除本会话别名（10 分钟内只有本会话能收回）。" +
+        (v2 && port?.autoFromCwd === true ? "已关闭本会话的目录名自动别名。" : ""),
+    );
     refreshAlias(deps);
     return;
   }
-
-  const n = normalizeAlias(words[0]);
-  if (!n.ok) {
-    notify(ctx, `${ALIAS_REASON_TEXT[n.reason]}。`, "warning");
+  if (n === undefined || !n.ok) {
+    notify(ctx, `${ALIAS_REASON_TEXT[n?.reason ?? "invalid"]}。`, "warning");
     return;
   }
-
-  // set
-  if (takeFlag === undefined) {
+  if (takeFlag === undefined && !force) {
     const r = await bridgeCall(() => bridge.set(n.alias));
-    if (!r.ok) return notify(ctx, aliasErrorText(r.code, r.reason), "warning");
+    if (!r.ok) return notify(ctx, errorText(r), "warning");
     notify(ctx, `别名已设置：${stateText(r.res)}`);
     refreshAlias(deps);
     return;
   }
-
-  // take — execute with token
-  if (takeFlag.startsWith("--take=")) {
-    const token = takeFlag.slice("--take=".length);
-    if (!XS_ALIAS_TAKE_TOKEN_RE.test(token)) {
+  if (execute) {
+    if (token === undefined || !XS_ALIAS_TAKE_TOKEN_RE.test(token)) {
       notify(ctx, "抢占确认串格式无效，请重新预览：/fabric alias <名> --take", "warning");
       return;
     }
     const r = await bridgeCall(() => bridge.take(n.alias, token));
-    if (!r.ok) return notify(ctx, aliasErrorText(r.code, r.reason), "warning");
+    if (!r.ok) return notify(ctx, errorText(r), "warning");
     notify(ctx, `已抢占别名：${stateText(r.res)}`);
     refreshAlias(deps);
     return;
   }
 
-  // take — preview
-  const p = await bridgeCall(() => bridge.takePreview(n.alias));
-  if (!p.ok) return notify(ctx, aliasErrorText(p.code, p.reason), "warning");
-  const take = (p.res as { take?: { cwdLabel?: unknown; offlineForS?: unknown; token?: unknown } }).take;
+  // --force is PREVIEW ONLY. Both modes execute through the existing --take=<token> path.
+  const p = await bridgeCall(() => (force ? bridge.forcePreview!(n.alias) : bridge.takePreview(n.alias)));
+  if (!p.ok) return notify(ctx, errorText(p), "warning");
+  const take = (
+    p.res as { take?: { cwdLabel?: unknown; offlineForS?: unknown; token?: unknown; online?: unknown; auto?: unknown } }
+  ).take;
   if (take === undefined || typeof take.token !== "string" || !XS_ALIAS_TAKE_TOKEN_RE.test(take.token)) {
     notify(ctx, "别名服务返回了无效的抢占预览。", "warning");
     return;
   }
-  const token = take.token;
+  const previewToken = take.token;
+  if (force) {
+    if (forceTokens.size >= 32) forceTokens.delete(forceTokens.keys().next().value!);
+    forceTokens.set(previewToken, n.alias);
+  }
   const offline = typeof take.offlineForS === "number" ? dhm(take.offlineForS) : "未知时长";
-  const detail = `持有会话：${cleanCwdLabel(take.cwdLabel) || "(未知目录)"}，已离线 ${offline}。抢占后对方回来会失去此别名并收到提示。`;
+  const holder = `${cleanCwdLabel(take.cwdLabel) || "(未知目录)"}${v2 && take.auto === true ? "（自动认领）" : ""}`;
+  const detail = force
+    ? `持有会话：${holder}，${take.online === true ? "当前在线" : `已离线 ${offline}`}。对方会立即收到「别名被强制抢占」提示；此后发给「${n.alias}」的消息将改投本会话（已发出的仍送达对方）。`
+    : `持有会话：${holder}，已离线 ${offline}。抢占后对方回来会失去此别名并收到提示。`;
+  const title = `${force ? "强制抢占" : "抢占"}别名「${n.alias}」？`;
 
-  // Local TUI (not a web/Feishu-captured invocation): confirm in-process, then execute with the token.
   if (ctx.mode === "tui" && !isWebInvocation(ctx)) {
     let ok = false;
     try {
-      ok = (await ctx.ui.confirm(`抢占别名「${n.alias}」？`, detail)) === true;
+      ok = (await ctx.ui.confirm(title, detail)) === true;
     } catch {
-      ok = false;
+      /* cancellation */
     }
     if (!ok) {
       notify(ctx, "已取消抢占。");
       return;
     }
-    const r = await bridgeCall(() => bridge.take(n.alias, token));
-    if (!r.ok) return notify(ctx, aliasErrorText(r.code, r.reason), "warning");
+    port?.markDecided?.(force ? "force" : "take");
+    forceTokens.delete(previewToken);
+    const r = await bridgeCall(() => bridge.take(n.alias, previewToken));
+    if (!r.ok) return notify(ctx, errorText(r), "warning");
     notify(ctx, `已抢占别名：${stateText(r.res)}`);
     refreshAlias(deps);
     return;
   }
-  // web / RPC: no dialog here. The LAST line is the fixed confirm line the web parses (XS_ALIAS_TAKE_CONFIRM_RE).
-  notify(ctx, [`抢占别名「${n.alias}」？${detail}`, formatTakeConfirmLine(n.alias, token)].join("\n"));
+  // Fixed last line: parseTakeConfirm and the web parser remain unchanged.
+  notify(ctx, [title + detail, formatTakeConfirmLine(n.alias, previewToken)].join("\n"));
 }
