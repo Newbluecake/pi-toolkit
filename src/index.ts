@@ -891,7 +891,18 @@ export default function activate(rawPi: ExtensionAPI): void {
     xs.stashMembershipHandoff(event.reason);
     // Path C4 of src/stack-teardown.ts: the ordered, awaited shutdown (background completions first, schedule
     // closeEpoch before the run drain, fabric before run shutdown, worktree disposal after seal, bash kill/seal on quit).
-    await stack.dispose({ kind: "shutdown", reason: event.reason }, { ctx, settings, activation: activationTeardown });
+    try {
+      await stack.dispose(
+        { kind: "shutdown", reason: event.reason },
+        { ctx, settings, activation: activationTeardown },
+      );
+    } finally {
+      // G8 (7b): the torn-down stack must not keep serving. A holder-routed call that arrives afterwards now fails
+      // with "no active session yet" (holder.ts `requireStack`) or reads `undefined` (`holder.current?.…` getters)
+      // instead of being answered by a dead stack whose notifier/outbox/pi are gone. Identity-checked, and in
+      // `finally` so a throwing teardown step cannot leave the stale stack published.
+      if (holder.current === stack) delete holder.current;
+    }
   });
 
   // Merged main-session modules are wired LAST: as standalone extensions

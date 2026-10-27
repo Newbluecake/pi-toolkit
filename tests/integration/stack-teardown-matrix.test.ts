@@ -767,16 +767,41 @@ describe("teardown matrix: residual timers and the gaps they prove (after a /rel
 });
 
 describe("teardown matrix: activate-level gaps (no timers needed)", () => {
-  it("GAP-G8: holder.current is never cleared — a tool call after shutdown is still served by the torn-down stack", async () => {
+  it("G8 FIXED: session_shutdown clears holder.current — a late holder-routed tool call fails loudly instead of being answered by the dead stack", async () => {
     const a = await boot();
     await fire(a, "session_start", "startup");
+    const call = (name: string, params: unknown) =>
+      a.h.tools.get(name).execute("call-1", params, undefined, undefined, fakeCtx(box.home).ctx);
+    // Before shutdown the stack answers (unknown run ⇒ a result, not "no active session").
+    const live = await call("get_run_result", { run_id: "r_missing" }).catch((e: Error) => e);
+    expect(String((live as any)?.message ?? "")).not.toMatch(/no active session yet/);
     await fire(a, "session_shutdown", "reload");
-    const tool = a.h.tools.get("get_run_result");
-    expect(tool).toBeDefined();
-    const result = await tool
-      .execute("call-1", { runId: "r_missing" }, undefined, undefined, fakeCtx(box.home).ctx)
-      .catch((e: Error) => e);
-    expect(String((result as any)?.message ?? "")).not.toMatch(/no active session yet/);
+    // After shutdown: the holder-routed forwarders refuse (before 7b the torn-down stack still answered).
+    await expect(call("get_run_result", { run_id: "r_missing" })).rejects.toThrow(/no active session yet/);
+    // Late paths that must NOT throw: the main `bash` override passes through to pi's own tool when no stack is behind
+    // the holder (tool.ts "no session stack" branch) — covered by tests/bash; `holder.current?.…` getters read undefined.
+  }, 60_000);
+
+  it("G8: a second shutdown on the same activation (nothing left to tear down) is a no-op, and the next session_start rebuilds", async () => {
+    const a = await boot();
+    await fire(a, "session_start", "startup");
+    await fire(a, "session_shutdown", "new");
+    probe.log.length = 0;
+    await fire(a, "session_shutdown", "new"); // holder already cleared ⇒ early return
+    // C1–C3 are independent handlers and still run; the C4 stack teardown is skipped (holder already cleared).
+    expect(probe.log).toEqual([
+      "-- session_shutdown(new)",
+      "xsLedger.teardown",
+      "backgroundStatus.release",
+      "handoffStore.clear",
+      FREE,
+    ]);
+    await fire(a, "session_start", "new"); // same activation, no defensive teardown of a dead stack
+    const afterStart = probe.log.slice(5);
+    expect(afterStart).toContain("build:g2:end");
+    // no path-B teardown of the dead stack (its B-only steps are absent); only the same-module handoff (path A) ran
+    expect(afterStart).not.toContain("g1.rpc.close");
+    expect(afterStart).not.toContain("g1.dynamic.dispose");
   }, 60_000);
 
   // G11 FIXED (7b): the capability record is process-global and outlives /reload; each activation now releases its

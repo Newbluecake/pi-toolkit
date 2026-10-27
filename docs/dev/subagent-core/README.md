@@ -121,6 +121,6 @@ schedule at all). Rules that are easy to break:
   timers only — the `parts.bashJobs` slot stays, path A still needs it as `prevBashJobs`); the child-switch `onDisabled`
   subscription is released at the head of the shutdown (G11). Components outside the `Stack` are reached through the build's
   `parts` (`StackStep.run(stack, env, entry, parts)`).
-  **Still open:** G5/G6 (missing from the unreachable path B — decided not to fix) and **G8** (`holder.current` is never cleared
-  after shutdown): a fix is parked on branch `gov/step7-g8-wip` because it changes the frozen activation-trace golden and two
-  pinned `ask-user-interrupt` tests (see the report).
+  G8: `session_shutdown` ends by `delete holder.current` (identity-checked, in `finally`), so a late holder-routed call fails with
+  `no active session yet` instead of being answered by the torn-down stack; `createTidyPort` degrades instead of throwing.
+  **Still open:** G5/G6 only (missing from the unreachable path B — deliberately not fixed).

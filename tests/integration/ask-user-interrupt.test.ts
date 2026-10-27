@@ -558,20 +558,31 @@ async function runAgentOnce(host: ActivateHost, tag: string): Promise<void> {
   );
 }
 
-/** 7b G10: shutdown disposes the OLD stack's notifier, so a run that settles on the old activation AFTER session_shutdown
- *  is no longer pushed through the (dead) pi at all — its record stays in the persisted outbox for the next stack's
- *  reconcile. Dispatch one through the REAL Agent tool and prove nothing is delivered (and so nothing can interrupt). */
-async function runAgentLateExpectSilence(host: ActivateHost, tag: string): Promise<void> {
+/**
+ * #56 ⑦ 7b (G10 + G8): after session_shutdown the OLD activation has no stack behind its holder any more. A late call
+ * through the REAL Agent tool must therefore FAIL LOUDLY with the stable "no active session yet" error — not be served
+ * by a torn-down stack, and not vanish silently. The rejection is awaited here (so an unhandled rejection fails the
+ * run) and nothing is delivered through the dead pi: the run is never admitted, so the user's result is not swallowed
+ * into a session that ended either — Test "session_shutdown ..." below proves the outbox half with a run that settled
+ * while the session was still alive.
+ */
+async function expectLateAgentRefused(host: ActivateHost, tag: string): Promise<void> {
   const before = host.sent.length;
-  await toolOf(host, "Agent").execute(
-    `a-${tag}`,
-    { description: `bg ${tag}`, prompt: "do nothing and finish", subagent_type: "general-purpose" },
-    undefined,
-  );
-  await new Promise((resolve) => setTimeout(resolve, 800));
+  const error = await toolOf(host, "Agent")
+    .execute(
+      `a-${tag}`,
+      { description: `bg ${tag}`, prompt: "do nothing and finish", subagent_type: "general-purpose" },
+      undefined,
+    )
+    .then(
+      () => undefined,
+      (e: Error) => e,
+    );
+  expect(String(error?.message ?? ""), `late Agent call ${tag}`).toMatch(/no active session yet/);
+  await new Promise((resolve) => setTimeout(resolve, 300));
   expect(
     host.sent.slice(before).filter((m) => m.message.customType === "subagent:notification"),
-    `late completion ${tag} must not be delivered through the old pi`,
+    `late Agent call ${tag} must not be delivered through the dead pi`,
   ).toEqual([]);
 }
 
@@ -672,40 +683,77 @@ describe("ask-user background interrupt: activate-level lifecycle (P2-5)", () =>
     await host.emit("session_shutdown", {}, ctxB);
   });
 
-  it("session_shutdown's first-line hub dispose: a late completion on the OLD stack is neither delivered (G10) nor interrupts — neither a straddling dialog nor one opened after shutdown", async () => {
+  it("session_shutdown disposes the hub first and drops the holder (G8): a late Agent call on the OLD activation is refused, no dialog is interrupted, and a result that settled while the session was alive is still delivered by the NEXT activation", async () => {
     const host = activatePi();
     activate(host.pi);
     const { ctx } = fakeCtx();
+    const sessionEntries: any[] = []; // what pi would have written into the session file
+    (host.pi as any).appendEntry = (customType: string, data: unknown) =>
+      void sessionEntries.push({ type: "custom", customType, data });
     await host.emit("session_start", {}, ctx);
 
     // Dialog 1 straddles the shutdown.
     const ask1 = hangAsk(host, "straddle");
+
+    // A background run is admitted and settles while the session is still alive, but its notice cannot be delivered:
+    // pi.sendMessage throws (a closing session). The record stays `pending` in the persisted outbox with a retry armed
+    // — which session_shutdown then cancels (G10); the outbox half is proven at the end through the next activation.
+    const realSend = (host.pi as any).sendMessage as (...args: unknown[]) => void;
+    (host.pi as any).sendMessage = (...args: unknown[]) => {
+      const message = args[0] as { customType?: string } | undefined;
+      if (message?.customType === "subagent:notification") throw new Error("closing session");
+      realSend(...args);
+    };
+    await toolOf(host, "Agent").execute(
+      "a-before-shutdown",
+      { description: "bg before-shutdown", prompt: "do nothing and finish", subagent_type: "general-purpose" },
+      undefined,
+    );
+    await vi.waitFor(
+      () =>
+        expect(
+          sessionEntries.some((e) => e.customType === "subagent:outbox" && e.data?.state === "pending"),
+          "pending outbox record while the session is still alive",
+        ).toBe(true),
+      { timeout: 5_000 },
+    );
+    (host.pi as any).sendMessage = realSend;
     await host.emit("session_shutdown", {}, ctx);
 
-    // The OLD stack still completes runs after shutdown (holder still points at it). Since 7b G10 its notifier is
-    // disposed, so the completion is no longer pushed through pi.sendMessage at all (it stays in the outbox for the next
-    // stack)…
-    await runAgentLateExpectSilence(host, "post-shutdown");
-    // …and nothing is broadcast: dialog 1 is not interrupted (hub disposed first
-    // line of the shutdown handler; wireAskUser's own coordinator is disposed too).
+    // The OLD activation has no stack any more: a late Agent call fails loudly instead of being served by the
+    // torn-down stack (before 7b it silently produced a run whose notice went through the dead pi).
+    await expectLateAgentRefused(host, "post-shutdown");
+    // …and nothing is broadcast: dialog 1 is not interrupted (hub disposed first line of the shutdown handler;
+    // wireAskUser's own coordinator is disposed too).
     await expectStillHanging(ask1, "straddling dialog");
-    // Settle dialog 1 BEFORE opening dialog 2: the ask queue is a per-activate FIFO
-    // mutex, so a second ask would queue behind the straddling one and could never
-    // be cancelled (its component is only created once it acquires).
+    // Settle dialog 1 BEFORE opening dialog 2: the ask queue is a per-activate FIFO mutex, so a second ask would queue
+    // behind the straddling one and could never be cancelled (its component is only created once it acquires).
     ask1.cancel();
-    await ask1.promise;
+    const res1 = await ask1.promise;
+    expect(res1.content[0]?.text).toContain("User cancelled");
 
-    // A dialog opened AFTER shutdown reads the same disposed hub (holder unchanged)
-    // and is equally immune to old-stack flushes.
+    // A dialog opened AFTER shutdown is equally immune (same disposed hub).
     const ask2 = hangAsk(host, "after-shutdown");
-    await runAgentLateExpectSilence(host, "post-shutdown-2");
+    await expectLateAgentRefused(host, "post-shutdown-2");
     await expectStillHanging(ask2, "post-shutdown dialog");
-
     ask2.cancel();
     await ask2.promise;
+
+    // I1 (persistent, acknowledgeable delivery) survives G8+G10: a completion that went into the outbox before the
+    // shutdown is redelivered ONCE by the next activation (a fresh holder on the same session file).
+    const next = activatePi();
+    activate(next.pi);
+    const { ctx: nextCtx } = fakeCtx();
+    nextCtx.sessionManager.getEntries = () => sessionEntries;
+    const seeded = sessionEntries.filter((e) => e.customType === "subagent:outbox");
+    expect(seeded.length).toBeGreaterThan(0);
+    await next.emit("session_start", {}, nextCtx);
+    const redelivered = next.sent.filter((m) => m.message.customType === "subagent:notification");
+    expect(redelivered).toHaveLength(1);
+    await next.emit("session_shutdown", {}, nextCtx);
   });
 
-  it("/reload (new activate + new holder): the old holder's late completion is not delivered and never interrupts; the new holder works end to end", async () => {
+  it("/reload (new activate + new holder): the old activation refuses a late Agent call (G8) without interrupting, and the new holder works end to end", async () => {
     const hostA = activatePi();
     activate(hostA.pi);
     const { ctx: ctxA } = fakeCtx();
@@ -726,9 +774,9 @@ describe("ask-user background interrupt: activate-level lifecycle (P2-5)", () =>
     });
     await hostA.emit("agent_settled", {});
 
-    // A completion driven through the OLD activation (old holder → old stack →
-    // old hub): since 7b G10 it is no longer delivered on the old bus at all, and it cannot interrupt its dialog.
-    await runAgentLateExpectSilence(hostA, "old-late");
+    // A late call driven through the OLD activation is refused (G8: the old holder was cleared at its shutdown) and
+    // cannot interrupt its dialog; nothing is delivered through the old bus either.
+    await expectLateAgentRefused(hostA, "old-late");
     await expectStillHanging(askOld, "old holder after reload");
 
     // The NEW holder works end to end: real completion → broadcast → interrupt.

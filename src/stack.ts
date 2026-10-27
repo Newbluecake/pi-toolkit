@@ -240,7 +240,7 @@ export interface Stack {
    *  - `{kind:"defensive", nextXsSessionId?}` — index.ts's session_start when this activation already holds a stack (sync);
    *  - `{kind:"rebuild-handoff"}` — the steps the NEXT `buildSessionStack` in this module runs over this build's parts
    *    (sync; includes the components that are not `Stack` members).
-   * Idempotent per component; the remaining known holes are G5/G6 (path B) and G8 (see src/stack-teardown.ts).
+   * Idempotent per component; the remaining known holes are G5/G6 (path B, deliberately not fixed; see src/stack-teardown.ts).
    */
   dispose(entry: { kind: "shutdown"; reason: string }, env: StackTeardownEnv): Promise<void>;
   dispose(entry: { kind: "defensive"; nextXsSessionId?: string | undefined }, env: StackTeardownEnv): void;

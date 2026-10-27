@@ -156,10 +156,17 @@ export function forwardNotifier(holder: StackHolder): Notifier {
 /** todo #22 optimize-plan P0-b (§7's spawn port): reads the CURRENT session stack, same late-bound
  *  `holder.current` pattern as `forwardSpawn`. Only reached for the main session (post-guard). */
 export function createTidyPort(holder: StackHolder): TidyPort {
+  // G8 (7b): once the session stack is gone (shutdown cleared the holder) a still-running `/mem tidy` must degrade
+  // instead of throwing out of its command: spawn reports an error outcome, waitOutcome says "pending" (⇒ the
+  // command's existing timeout/withhold path), abort says "nothing aborted".
   return {
-    spawn: (req) => requireStack(holder).spawn.spawn(mapTidySpawnRequest(req)),
-    waitOutcome: (runId, waitMs) => requireStack(holder).spawn.waitOutcome(runId, waitMs),
-    abort: (runId, cause) => requireStack(holder).spawn.abort(runId, cause),
+    spawn: (req) =>
+      holder.current
+        ? holder.current.spawn.spawn(mapTidySpawnRequest(req))
+        : Promise.resolve({ error: { message: "no active session" } }),
+    waitOutcome: (runId, waitMs) =>
+      holder.current ? holder.current.spawn.waitOutcome(runId, waitMs) : Promise.resolve({ kind: "pending" as const }),
+    abort: (runId, cause) => (holder.current ? holder.current.spawn.abort(runId, cause) : Promise.resolve(false)),
     snapshot: (runId) => holder.current?.query.get(runId),
   };
 }

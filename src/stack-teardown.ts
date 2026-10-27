@@ -5,8 +5,8 @@
  * A session stack is torn down through three different entries; each has its own ordered step list below.
  * The lists are deliberately NOT merged into one: the orders differ on purpose (see the "why this order" notes)
  * and so do the member sets. A component that is missing from a list is a known gap (`GAP-Gn`, matrix test
- * tests/integration/stack-teardown-matrix.test.ts pins every one of them). 7b fixed G1–G4, G7, G9–G11 one per commit; still open: G5/G6
- * (unreachable path B, not fixed) and G8 (`holder.current` never cleared; parked on branch gov/step7-g8-wip).
+ * tests/integration/stack-teardown-matrix.test.ts pins every one of them). 7b fixed G1–G4, G7–G11 one per commit; still open: G5/G6
+ * (unreachable path B, deliberately not fixed).
  *
  *  - `rebuild-handoff` (path A): the top of the NEXT `buildSessionStack` in the SAME module. Works on the previous
  *    build's `TeardownParts` — including components that are not `Stack` members (usage broadcaster, coalescers,

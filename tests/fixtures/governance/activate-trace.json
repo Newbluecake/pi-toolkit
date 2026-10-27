@@ -202,8 +202,7 @@
       "appendEntry(subagent:compact-dynamic)",
       "ui.setStatus(topic-switch:clear)",
       "ui.setStatus(claude-code-todo-status:clear)",
-      "ui.setStatus(cache-ttl:set)",
-      "ui.setStatus(cache-ttl:set)",
+      "ui.setStatus(cache-ttl:clear)",
       "ui.setStatus(quota:clear)",
       "ui.notify(warning)",
       "ui.notify(warning)",
@@ -218,7 +217,7 @@
       "appendEntry(subagent:compact-dynamic)",
       "ui.setStatus(topic-switch:clear)"
     ],
-    "phase2Count": 31
+    "phase2Count": 30
   },
   "minimal": {
     "calls": [
@@ -350,8 +349,7 @@
       "ui.setStatus(quota:clear)",
       "appendEntry(subagent:compact-dynamic)",
       "ui.setStatus(topic-switch:clear)",
-      "ui.setStatus(cache-ttl:set)",
-      "ui.setStatus(cache-ttl:set)",
+      "ui.setStatus(cache-ttl:clear)",
       "ui.setStatus(quota:clear)",
       "ui.notify(warning)",
       "ui.notify(warning)",
@@ -365,7 +363,7 @@
       "appendEntry(subagent:compact-dynamic)",
       "ui.setStatus(topic-switch:clear)"
     ],
-    "phase2Count": 27
+    "phase2Count": 26
   },
   "max": {
     "calls": [
@@ -625,8 +623,7 @@
       "appendEntry(subagent:compact-dynamic)",
       "ui.setStatus(topic-switch:clear)",
       "ui.setStatus(claude-code-todo-status:clear)",
-      "ui.setStatus(cache-ttl:set)",
-      "ui.setStatus(cache-ttl:set)",
+      "ui.setStatus(cache-ttl:clear)",
       "ui.setStatus(quota:clear)",
       "ui.notify(warning)",
       "ui.notify(warning)",
@@ -642,7 +639,7 @@
       "appendEntry(subagent:compact-dynamic)",
       "ui.setStatus(topic-switch:clear)"
     ],
-    "phase2Count": 33
+    "phase2Count": 32
   },
   "child": {
     "calls": [
