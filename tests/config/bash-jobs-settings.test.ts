@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS, loadSettings, parseBashJobsSettings } from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings } from "../../src/config/settings.js";
+import { parseBashJobsSettings } from "../../src/bash/settings.js";
 
 const defaults = DEFAULT_SETTINGS.bashJobs;
 
