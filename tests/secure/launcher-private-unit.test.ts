@@ -35,8 +35,9 @@ const PI_ARGS = join(REPO, "node_modules", "@earendil-works", "pi-coding-agent",
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- plain-JS module, no typings by design
 const H: any = await import(pathToFileURL(HELPER).href);
 const HELPER_SRC = readFileSync(HELPER, "utf8");
-// #56 ⑩-S: the in-ns finalize steps (finalizeInNs, lazyDetach) live in finalize.mjs; the source pins
-// below follow the code there.
+// #56 ⑩-S: the --private command bodies live in private.mjs, the in-ns finalize steps in finalize.mjs
+// (helper.mjs loads both lazily); the source pins below follow the code there.
+const PRIVATE_SRC = readFileSync(join(dirname(HELPER), "private.mjs"), "utf8");
 const FINALIZE_SRC = readFileSync(join(dirname(HELPER), "finalize.mjs"), "utf8");
 
 const which = (b: string) => spawnSync("sh", ["-c", `command -v ${b}`]).status === 0;
@@ -426,15 +427,17 @@ describe.skipIf(!HAVE_FLOCK)("releaseRecord — the only deleter (§3.2, I-P3)",
     expect(existsSync(recordFile())).toBe(false);
   });
   it("structural: only __private-release / __private-abort-start delete; the ns-root never releases (spy by source)", () => {
-    const callers = [...HELPER_SRC.matchAll(/deletePrivateRecordSync\(/g)].length;
+    const callers = [...PRIVATE_SRC.matchAll(/deletePrivateRecordSync\(/g)].length;
     expect(callers).toBe(3); // definition + the two sanctioned callers
-    const body = (start: string, end: string) => HELPER_SRC.slice(HELPER_SRC.indexOf(start), HELPER_SRC.indexOf(end));
+    expect(HELPER_SRC).not.toContain("deletePrivateRecordSync"); // nothing else (helper dispatch, record primitives) deletes
+    const body = (start: string, end: string) =>
+      PRIVATE_SRC.slice(PRIVATE_SRC.indexOf(start), PRIVATE_SRC.indexOf(end));
     const rel = body("async function cmdPrivateRelease", "function cmdPrivateAbortStart");
     const abort = body("function cmdPrivateAbortStart", "async function cmdPrivateTerminate");
     expect(rel).toContain("deletePrivateRecordSync(v)");
     expect(abort).toContain("deletePrivateRecordSync(v)");
-    // the ns-root: cmdNsRoot plus everything it runs from finalize.mjs
-    const p1 = body("async function cmdNsRoot", "export async function main") + FINALIZE_SRC;
+    // the ns-root: cmdNsRoot (last function of private.mjs) plus everything it runs from finalize.mjs
+    const p1 = PRIVATE_SRC.slice(PRIVATE_SRC.indexOf("async function cmdNsRoot")) + FINALIZE_SRC;
     for (const forbidden of [
       "deletePrivateRecordSync",
       "__private-release",
@@ -537,13 +540,15 @@ describe("scanNsMembers (never reports an incomplete scan as empty)", () => {
     expect((await inNs({ "/21/ns/mnt": "EACCES" })).kind).toBe("done");
     expect((await inNs({ "/21/ns/mnt": "EIO" })).kind).toBe("incomplete");
     // the deletion gate never uses that mode: structural check on the source
-    const relBody = HELPER_SRC.slice(
-      HELPER_SRC.indexOf("async function cmdPrivateRelease"),
-      HELPER_SRC.indexOf("function cmdPrivateAbortStart"),
+    const relBody = PRIVATE_SRC.slice(
+      PRIVATE_SRC.indexOf("async function cmdPrivateRelease"),
+      PRIVATE_SRC.indexOf("function cmdPrivateAbortStart"),
     );
     expect(relBody).not.toContain("deniedMeans");
-    // the single in-ns use (finalizeInNs) — none left in helper.mjs
-    expect([HELPER_SRC, FINALIZE_SRC].map((t) => [...t.matchAll(/deniedMeans: "outside"/g)].length)).toEqual([0, 1]);
+    // the single in-ns use (finalizeInNs) — none in helper.mjs or private.mjs
+    expect(
+      [HELPER_SRC, PRIVATE_SRC, FINALIZE_SRC].map((t) => [...t.matchAll(/deniedMeans: "outside"/g)].length),
+    ).toEqual([0, 0, 1]);
     // status / stat / ns-user failures other than ENOENT ⇒ incomplete; ENOENT/ESRCH ⇒ skipped
     expect((await scan({ "/21/status": "EIO" })).kind).toBe("incomplete");
     expect((await scan({ "/21/status": "EACCES" })).kind).toBe("incomplete");
