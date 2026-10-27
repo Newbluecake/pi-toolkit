@@ -92,6 +92,9 @@ export type {
   ExternalAgentsSettings,
   ExternalProtocolCheck,
 } from "../external-agent/settings.js";
+import { parseEnabledGroup } from "./enabled-group.js";
+import type { EnabledGroup } from "./enabled-group.js";
+export type { EnabledGroup } from "./enabled-group.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 import { getSecureDomain, statePathsOf } from "../secure/domain.js";
 import { resolveAgentDir } from "../core/agent-dir.js";
@@ -329,13 +332,6 @@ export interface AgentSettings {
   /** 定时任务（scheduled-reports plan r3 §10.3）：默认 enabled=false ⇒ 零面。全部非 live（/reload；涉及 hub 的还需 /webhub restart）。 */
   schedule: ScheduleSettings;
 }
-
-/** Simple on/off settings group shared by the merged plugins (webSearch / todo). */
-export interface EnabledGroup {
-  enabled: boolean;
-}
-
-// ── 流量录制（traffic-merge plan §2.2）：设置形状 / 默认值 / 解析。全部非 live。 ──
 
 /**
  * ask-user background interrupt (docs/dev/ask-user-async/plan.md §5.2.1/§6.1,
@@ -789,13 +785,6 @@ export function parseGoalSettings(input: unknown): GoalSettings {
     untilCmdTimeoutMs: num(value.untilCmdTimeoutMs, defaults.untilCmdTimeoutMs),
     deliveryWatchdogMs: num(value.deliveryWatchdogMs, defaults.deliveryWatchdogMs),
   };
-}
-
-/** Parse an `{enabled}` on/off group (merged plugins); field-level fallback to defaults, never throws. */
-function parseEnabledGroup(input: unknown, defaults: EnabledGroup): EnabledGroup {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
-  const enabled = (input as Record<string, unknown>).enabled;
-  return { enabled: typeof enabled === "boolean" ? enabled : defaults.enabled };
 }
 
 /**

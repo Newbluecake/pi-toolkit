@@ -126,6 +126,7 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../secure/domain.js",
     // data-encryption P1 review #5: cross-process settings-file lock (flock child, pi-free).
     "../secure/settings-lock.js",
+    "./enabled-group.js",
     "./time-units.js",
   ],
   "src/secure/settings-lock.ts": ["node:child_process", "node:fs", "node:path"],
@@ -155,6 +156,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/compact-hint/settings.ts": ["./threshold.js"],
   // #56 ⑧: bashJobs block settings — self-contained (no imports at all).
   "src/bash/settings.ts": [],
+  // #56 ⑧: the shared { enabled } group — self-contained.
+  "src/config/enabled-group.ts": [],
   // #56 ⑧: externalAgents block settings — droid pricing refs use the pure model-hint parser.
   "src/external-agent/settings.ts": ["../config/model-hint.js"],
   // #56 ⑧: schedule block settings — self-contained (no imports at all).
