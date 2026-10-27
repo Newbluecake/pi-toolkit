@@ -245,6 +245,6 @@ DetailDock untouched). `composables/useTrackedCommand.ts` is the only path that 
 `queryOnly` and unwraps `data.output`, 15 s timeout/dialog close/session switch drop late results (never undoes the command). `ChannelsDialog.vue`
 (titled 「频道与别名」) has an alias area: live `normalizeAlias` pre-validation, ≤3 suggestion chips (others' taken ones greyed from pushed
 `status.xs.alias`), save/clear/take (take: preview → token parsed from that one output → confirm dialog with countdown → execute), no optimistic
-update. AgentCard chip order `kind → state → xs badge → @alias → #channels → unread` (alias cut at 8 grapheme clusters, title = full);
+update. AgentCard chip order `kind → state → xs badge → @alias → #channels → unread` (alias shown whole — cap = protocol max 16 clusters since 2026-10-27, title = full);
 DetailHeader shows `@alias` opening the dialog; the `@` panel matches/shows alias but still inserts `session:<ref>`; `logic/xsMessage.ts` reads
 ` alias="…"` from the first line independently of field order. Design: `docs/dev/fabric-cross-session/alias-plan.md` §7.

@@ -1071,6 +1071,20 @@
   color: var(--c-text-2);
 }
 
+/* Q8 r2 (2026-10-27): the chip now carries the WHOLE alias (≤16 clusters), so it needs the same
+ * guard rail as the channel chip — a 16-CJK alias would otherwise squeeze the directory name to
+ * zero and overflow a 240px sidebar. Block-level box so text-overflow actually applies (it is a
+ * no-op on an inline-flex container); the title attribute keeps the full alias. */
+.agent-card .chip-xs-alias {
+  display: inline-block;
+  max-width: 10em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+  vertical-align: middle;
+}
+
 .chip-xs-unread {
   display: inline-flex;
   align-items: center;

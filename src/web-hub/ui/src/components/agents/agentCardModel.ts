@@ -7,7 +7,7 @@
  * priority order), re-expressed against the frozen `AgentState`/`AgentCardView` shapes and the
  * shared `common.status.*` i18n vocabulary instead of hard-coded English badge text.
  */
-import { normalizeAlias } from "@protocol/xs-alias.js";
+import { normalizeAlias, XS_ALIAS_MAX_GRAPHEMES } from "@protocol/xs-alias.js";
 import { agentVisualState } from "../../composables/visual-state.js";
 import type { I18nHandle } from "../../composables/useI18n.js";
 import { formatUsd } from "../../format.js";
@@ -220,8 +220,10 @@ export function xsChannelChipOf(agent: AgentState | undefined, hubCaps: unknown)
 
 export const XS_ALIAS_CAP = "xs.alias.v1";
 
-/** Q8: the card chip shows at most the first 8 grapheme clusters (title carries the full text). */
-export const XS_ALIAS_CARD_GRAPHEMES = 8;
+/** Q8 (revised 2026-10-27, user report: `@claude2a…` clipped a 10-char alias while the row had room):
+ *  the card chip shows the whole alias — the cap equals the protocol maximum (16 clusters), so
+ *  truncation is only a defensive backstop against an out-of-contract wire value. */
+export const XS_ALIAS_CARD_GRAPHEMES = XS_ALIAS_MAX_GRAPHEMES;
 
 /** The session's held alias (`status.xs.alias`, written only while held). undefined = no cap /
  *  no field / malformed — the caller renders nothing. Length-capped defensively: the wire caps
@@ -262,7 +264,8 @@ export function truncateGraphemes(s: string, max: number): { readonly text: stri
   return { text, truncated };
 }
 
-/** Card chip text: `@` + the first 8 grapheme clusters, `…` when clipped (Q8). */
+/** Card chip text: `@` + the whole alias (≤ protocol max), `…` only for an out-of-contract value (Q8 r2);
+ *  narrow layouts are clipped by CSS (`.chip-xs-alias`), the title keeps the full text. */
 export function aliasChipText(alias: string): string {
   const t = truncateGraphemes(alias, XS_ALIAS_CARD_GRAPHEMES);
   return `@${t.text}${t.truncated ? "\u2026" : ""}`;

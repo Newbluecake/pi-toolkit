@@ -4,7 +4,7 @@
 import { DOMWrapper, flushPromises, mount } from "@vue/test-utils";
 import { computed, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { formatTakeConfirmLine } from "../../../src/web-hub/protocol/xs-alias.js";
+import { formatTakeConfirmLine, XS_ALIAS_MAX_GRAPHEMES } from "../../../src/web-hub/protocol/xs-alias.js";
 import AgentCard from "../../../src/web-hub/ui/src/components/agents/AgentCard.vue";
 import {
   aliasChipText,
@@ -89,11 +89,14 @@ describe("model", () => {
     expect(xsAliasOf(undefined, CAPS)).toBeUndefined();
   });
 
-  it("truncateGraphemes / aliasChipText: first 8 grapheme clusters (Q8)", () => {
-    const long = "前端开发工作台一二三四五"; // 12 clusters
-    const t = truncateGraphemes(long, XS_ALIAS_CARD_GRAPHEMES);
-    expect(t).toEqual({ text: "前端开发工作台一", truncated: true });
-    expect(aliasChipText(long)).toBe("@前端开发工作台一…");
+  it("truncateGraphemes / aliasChipText: whole alias up to the 16-cluster protocol max (Q8 r2)", () => {
+    expect(XS_ALIAS_CARD_GRAPHEMES).toBe(XS_ALIAS_MAX_GRAPHEMES);
+    expect(aliasChipText("claude2api")).toBe("@claude2api");
+    const max = "前端开发工作台一二三四五六七八九"; // 16 clusters ⇒ untouched
+    expect(aliasChipText(max)).toBe(`@${max}`);
+    const over = `${max}十`; // 17 (out of contract) ⇒ defensive cut
+    expect(truncateGraphemes(over, XS_ALIAS_CARD_GRAPHEMES)).toEqual({ text: max, truncated: true });
+    expect(aliasChipText(over)).toBe(`@${max}…`);
     expect(aliasChipText("web")).toBe("@web");
     expect(truncateGraphemes("abc", 8)).toEqual({ text: "abc", truncated: false });
   });
@@ -145,11 +148,12 @@ describe("card chip", () => {
     w.unmount();
     return out;
   };
-  it("@alias chip sits before the channel chip, truncated at 8 graphemes, title carries full", () => {
+  it("@alias chip sits before the channel chip, shows the whole alias (Q8 r2), title carries full", () => {
     const h = html(ag("a", { joined: true, channels: ["default", "x"], alias: "前端开发工作台一二三四" }), CAPS);
     expect(h).toContain("chip-xs-alias");
     expect(h.indexOf("chip-xs-alias")).toBeLessThan(h.indexOf("chip-xs-channels"));
-    expect(h).toContain("@前端开发工作台一…");
+    expect(h).toContain(">@前端开发工作台一二三四<");
+    expect(h).not.toContain("…");
     expect(h).toContain('title="@前端开发工作台一二三四"');
   });
   it("no cap or no field ⇒ no alias chip (byte-identical surface)", () => {
