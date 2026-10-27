@@ -24,6 +24,7 @@
 import type { AgentId, AgentKind, XsMemberFrame } from "../../protocol/messages.js";
 import {
   XS_ALIAS_AGENT_CAP,
+  XS_ALIAS_V2_AGENT_CAP,
   XS_CHANNEL_AGENT_CAP,
   XS_CHANNEL_NAME_RE,
   XS_HUB_CAP,
@@ -86,6 +87,9 @@ export interface XsEffectiveMember extends XsMemberRecord {
   /** Alias-plan §3.6 (AL2): `caps ∋ xs.alias.v1` (agent side). The router further requires the hub to
    *  have advertised the cap (`aliasUsable`); this flag alone never enables any alias semantics. */
   aliasCapable: boolean;
+  /** Alias-force-default (#72, AF2): `caps ∋ xs.alias.v2` (agent side). Only such a peer is ever sent `intent`-era reply
+   *  keys or `xs_alias_evt`, and a holder counts as force-`notifiable` only when EVERY member has it. */
+  aliasV2Capable: boolean;
   name: string | undefined;
   cwd: string;
   kind: AgentKind;
@@ -298,6 +302,7 @@ export function createXsMembers(deps: {
       replyCapable: v.caps.includes(XS_REPLY_AGENT_CAP),
       channelCapable: v.caps.includes(XS_CHANNEL_AGENT_CAP),
       aliasCapable: v.caps.includes(XS_ALIAS_AGENT_CAP),
+      aliasV2Capable: v.caps.includes(XS_ALIAS_V2_AGENT_CAP),
       name: v.sessionName,
       cwd: v.cwd,
       kind: v.kind,

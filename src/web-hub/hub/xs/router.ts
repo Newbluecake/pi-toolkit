@@ -174,6 +174,9 @@ function reservedAddress(to: string): boolean {
   return RESERVED_PREFIXES.some((p) => t.startsWith(p));
 }
 
+/** Audit `reason` / dispatch key of an `op:"alias"` request (alias-force-default adds the last three). */
+type AliasSub = "get" | "set" | "clear" | "preview" | "take" | "auto" | "force-preview" | "handoff";
+
 type Resolved =
   | { kind: "one"; member: XsEffectiveMember }
   | { kind: "unavailable" }
@@ -193,6 +196,9 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
   /** §3.6: `aliasUsable(m) = aliasAdvertised ∧ m.aliasCapable` (ready/wedged/disabled alike). */
   const aliasUsable = (m: XsEffectiveMember): boolean =>
     aliasStore !== undefined && aliasStore.advertised && m.aliasCapable;
+  /** Alias-force-default (#72): `aliasUsable ∧ caps ∋ xs.alias.v2` — the only requesters that may send `intent` and be
+   *  written the v2 reply keys (`origin`, `lost.forced`, preview `online`/`auto`). */
+  const aliasV2Usable = (m: XsEffectiveMember): boolean => aliasUsable(m) && m.aliasV2Capable;
   /** §5.1 degraded guard: a table exists but is not trusted (never advertised) ∧ the requester is
    *  alias-capable. A hub without a table (key absent) never guards. */
   const aliasGuarded = (m: XsEffectiveMember): boolean =>
@@ -304,6 +310,14 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
    * "preview"` ⇒ take preview; `alias` + `take:<token>` ⇒ take. get and preview count against
    * `listPerMin`; writes are bounded by the store's own queue/budget. Audit lines carry the sub-op
    * and the code only — never the alias text, the token or the cwd label.
+   *
+   * Alias-force-default (#72, AF2): a requester that declared `xs.alias.v2` may add `intent`:
+   * `{alias, intent:"auto"}` ⇒ auto-claim (requires `joined`); `{alias, take:"preview", intent:"force"}` ⇒
+   * force preview; `{alias, take:<token>[, intent:"force"]}` ⇒ execute (the token's `mode` decides, a
+   * present `intent:"force"` is ignored). `intent:"handoff"` is not implemented by this hub yet (AF7) and is
+   * answered like any unknown shape: `E_XS_BAD_FRAME`. Every other combination — `intent`/`prevSessionId` from
+   * a requester without v2, `intent` with `clear`, `prevSessionId` without `handoff`, `intent:"auto"` with
+   * `take` — is `E_XS_BAD_FRAME`, before anything reaches the store.
    */
   function handleAlias(
     agentKey: string,
@@ -316,7 +330,10 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     const store = aliasStore!;
     const from = self.sessionId;
     const take = frame.take;
-    const sub: "get" | "set" | "clear" | "preview" | "take" =
+    const v2 = aliasV2Usable(self);
+    const intent = frame.intent;
+    // Sub-op: `intent` (v2) refines the legacy field-derived choice. `handoff` has no store yet (AF7) ⇒ malformed.
+    const legacySub: "get" | "set" | "clear" | "preview" | "take" =
       take !== undefined
         ? take === XS_ALIAS_TAKE_PREVIEW
           ? "preview"
@@ -326,9 +343,26 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
           : frame.alias !== undefined
             ? "set"
             : "get";
+    const sub: AliasSub =
+      intent === "auto"
+        ? "auto"
+        : intent === "handoff"
+          ? "handoff"
+          : intent === "force" && legacySub === "preview"
+            ? "force-preview"
+            : legacySub;
+    const intentMalformed =
+      (intent !== undefined || frame.prevSessionId !== undefined) &&
+      (!v2 ||
+        frame.clear !== undefined ||
+        (frame.prevSessionId !== undefined && intent !== "handoff") ||
+        intent === "handoff" || // AF7
+        (intent === "auto" && (frame.alias === undefined || take !== undefined || !self.joined)) ||
+        (intent === "force" && (frame.alias === undefined || take === undefined)));
     const malformed =
+      intentMalformed ||
       (frame.clear !== undefined && (frame.clear !== true || frame.alias !== undefined || take !== undefined)) ||
-      ((sub === "preview" || sub === "take") && frame.alias === undefined) ||
+      ((sub === "preview" || sub === "take" || sub === "force-preview") && frame.alias === undefined) ||
       (sub === "take" && !XS_ALIAS_TAKE_TOKEN_RE.test(take!));
     const fail = (code: string, effect: "none" | "unknown"): void => {
       res({ ok: false, code, effect });
@@ -348,14 +382,22 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       const w = xsAliasFailureWire(f);
       fail(w.code, w.effect);
     };
-    const requester: XsAliasRequester = { sessionId: self.sessionId, epoch: self.epoch, agentKey };
-    if (sub === "get" || sub === "preview") {
+    const requester: XsAliasRequester = {
+      sessionId: self.sessionId,
+      epoch: self.epoch,
+      agentKey,
+      ...(v2 ? { v2: true } : {}),
+    };
+    if (sub === "get" || sub === "preview" || sub === "force-preview") {
       if (!limits.admitList(agentKey, self.limits)) return fail("E_XS_RATE_LIMITED", "none");
       if (sub === "get") {
         res({ ok: true, alias: store.get(requester) });
         return okLine();
       }
-      const p = store.takePreview(requester, frame.alias!);
+      const p =
+        sub === "force-preview"
+          ? store.forcePreview(requester, frame.alias!)
+          : store.takePreview(requester, frame.alias!);
       if (!p.ok) return failure(p.failure);
       res({ ok: true, alias: p.res });
       return okLine();
@@ -365,9 +407,11 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     const pending: Promise<XsAliasWriteResult> =
       sub === "set"
         ? store.set(requester, frame.alias!, cwdLabel)
-        : sub === "clear"
-          ? store.clear(requester)
-          : store.take(requester, frame.alias!, take!, cwdLabel);
+        : sub === "auto"
+          ? store.autoClaim(requester, frame.alias!, cwdLabel)
+          : sub === "clear"
+            ? store.clear(requester)
+            : store.take(requester, frame.alias!, take!, cwdLabel);
     pending
       .then((out) => {
         if (!out.ok) return failure(out.failure);
@@ -912,8 +956,9 @@ export function hubXsAliasParamsOf(crossSession: HubCrossSessionConfig | undefin
 /** The binding table + its late-bound presence/liveness ports (members are built by the relay). */
 export interface XsAliasBinding {
   readonly store: XsAliasStore;
-  /** Called once by {@link createXsRelay}. Before it, nobody is online and no requester is live. */
-  attach(members: XsMembers): void;
+  /** Called once by {@link createXsRelay}. Before it, nobody is online and no requester is live. `registry` (alias-force-default,
+   *  #72) feeds `isLinked` and the `xs_alias_evt` push; absent ⇒ nobody is `linked` and nothing is pushed. */
+  attach(members: XsMembers, registry?: Pick<Registry, "list" | "xsView" | "send">): void;
 }
 
 /** Built by `hub.ts` BEFORE the cap array (load must decide `xs.alias.v1`), and loaded there. */
@@ -927,6 +972,7 @@ export function createXsAliasBinding(deps: {
   randomHex?: (bytes: number) => string;
 }): XsAliasBinding {
   let members: XsMembers | undefined;
+  let registry: Pick<Registry, "list" | "xsView" | "send"> | undefined;
   const store = createXsAliasStore({
     stateDir: deps.stateDir,
     params: deps.params,
@@ -936,6 +982,26 @@ export function createXsAliasBinding(deps: {
       const e = members.effective(r.agentKey);
       return e !== undefined && e.sessionId === r.sessionId && e.epoch === r.epoch && e.aliasCapable;
     },
+    // §2 `linked`: a live-ish registry record carrying this sessionId that is NOT an effective xs member
+    // (the store only asks after `isOnline` said no). Read-only, bounded by the registry size.
+    isLinked: (sid) => {
+      if (registry === undefined) return false;
+      for (const v of registry.list()) {
+        const x = registry.xsView(v.agentKey);
+        if (x !== undefined && x.connected && x.phase !== "stale" && x.sessionId === sid) return true;
+      }
+      return false;
+    },
+    allMembersV2: (sid) => members?.effectiveAll().every((m) => m.sessionId !== sid || m.aliasV2Capable) ?? false,
+    // I9: after a force committed, nudge every v2 effective member of the holder session. Best effort — a failed
+    // `send` is not rolled back (the tombstone is the safety net, R23).
+    onForcedCommit: (e) => {
+      if (members === undefined || registry === undefined) return;
+      for (const m of members.effectiveAll()) {
+        if (m.sessionId !== e.holderSessionId || !m.aliasV2Capable) continue;
+        registry.send(m.agentKey, { t: "xs_alias_evt", sessionId: e.holderSessionId, at: e.at });
+      }
+    },
     ...(deps.log === undefined ? {} : { log: deps.log }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
     ...(deps.fs === undefined ? {} : { fs: deps.fs }),
@@ -944,8 +1010,9 @@ export function createXsAliasBinding(deps: {
   });
   return {
     store,
-    attach(m) {
+    attach(m, r) {
       members = m;
+      registry = r;
     },
   };
 }
@@ -1017,7 +1084,7 @@ export function createXsRelay(deps: {
   });
   const limits = createXsLimits({ now: deps.now, hubSendsPerMin });
   const aliasStore = deps.aliases?.store;
-  deps.aliases?.attach(members);
+  deps.aliases?.attach(members, deps.registry);
   router = createXsRouter({
     registry: deps.registry,
     members,

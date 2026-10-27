@@ -26,7 +26,13 @@ import {
   WTGRAPH_HUB_CAP,
   WTGRAPH_MERGED_HUB_CAP,
 } from "../protocol/version.js";
-import { XS_ALIAS_HUB_CAP, XS_CHANNEL_HUB_CAP, XS_HUB_CAP, XS_REPLY_HUB_CAP } from "../protocol/xs.js";
+import {
+  XS_ALIAS_HUB_CAP,
+  XS_ALIAS_V2_HUB_CAP,
+  XS_CHANNEL_HUB_CAP,
+  XS_HUB_CAP,
+  XS_REPLY_HUB_CAP,
+} from "../protocol/xs.js";
 import type { HubAssembly } from "./assembly.js";
 import { hubLoadProbe, LOAD_HUB_CAP, normalizeHubLoadConfig } from "./load.js";
 import { previewProcFdAvailable } from "./preview/fs.js";
@@ -180,7 +186,8 @@ export function assembleHubCaps(ctx: HubAssembly): readonly string[] {
           ...(config.crossSession.reply === false ? [] : [XS_REPLY_HUB_CAP]),
           XS_CHANNEL_HUB_CAP,
           // Alias-plan §3.6 (AL2): tail-appended, only for a table that loaded `ready`.
-          ...(xsAlias?.store.advertised === true ? [XS_ALIAS_HUB_CAP] : []),
+          // Alias-force-default (#72): `xs.alias.v2` follows v1 under the SAME condition (intent / force / xs_alias_evt).
+          ...(xsAlias?.store.advertised === true ? [XS_ALIAS_HUB_CAP, XS_ALIAS_V2_HUB_CAP] : []),
         ]),
     // scheduled-reports plan r3 §10.1 (H1): `sched.v1` iff `config.schedule` exists (same
     // two-surface tail-append rule; absent ⇒ caps byte-identical). Declared even when the

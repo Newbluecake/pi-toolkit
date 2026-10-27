@@ -831,6 +831,8 @@ export interface XsAuditRecord {
   textLen?: number;
   wake?: boolean;
   outcome?: "ok" | "applied" | "none" | "unknown" | "error";
+  /** For `op:"alias"` the sub-operation: `get|set|clear|preview|take|auto|force-preview|handoff` (alias-force-default #72;
+   *  a `mode:"force"` execution is audited as `take`). Never the alias text, token, cwd label or prevSessionId. */
   reason?: string;
   code?: string;
   ms?: number;
