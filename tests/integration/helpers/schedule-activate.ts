@@ -117,7 +117,9 @@ export function sandbox(prefix = "pi-sched-i1-"): Sandbox {
     cleanup() {
       if (realHome === undefined) delete process.env.HOME;
       else process.env.HOME = realHome;
-      rmSync(home, { recursive: true, force: true });
+      // CI flake 2026-10-28 (activate-trace): an activation's async bash-jobs store write can
+      // land while the tree is being removed ⇒ ENOTEMPTY. rmSync retries EBUSY/ENOTEMPTY/EPERM.
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     },
   };
 }
