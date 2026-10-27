@@ -110,6 +110,9 @@ export type { GoalSettings } from "../goal/settings.js";
 import { DEFAULT_TITLE_SETTINGS, parseTitleSettings } from "../title/settings.js";
 import type { TitleSettings } from "../title/settings.js";
 export type { TitleSettings } from "../title/settings.js";
+import { DEFAULT_RELOAD_SETTINGS, parseReloadSettings } from "../reload/settings.js";
+import type { ReloadSettings } from "../reload/settings.js";
+export type { ReloadSettings } from "../reload/settings.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 import { getSecureDomain, statePathsOf } from "../secure/domain.js";
 import { resolveAgentDir } from "../core/agent-dir.js";
@@ -158,16 +161,6 @@ export interface ExtendSettings {
   enabled: boolean;
   /** 宽限通知投递策略：background = 跳过仍在前台阻塞宿主的 caller-ack run；always = 调试用（D-17）；off = 不发（宽限仍生效）。 */
   notify: "background" | "always" | "off";
-}
-
-/**
- * Deferred /reload (src/reload/): intercept exact `/reload` submissions while
- * subagents are still running and fire the real reload once the fleet settles.
- * Field-by-field tolerant parsing (parseReloadSettings), never throws.
- */
-export interface ReloadSettings {
-  /** Gate for the editor interception only; `/agent reload` works regardless. Default true. */
-  defer: boolean;
 }
 
 /**
@@ -322,7 +315,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   feishuNotify: { enabled: true },
   sessionNav: { enabled: true },
   memory: DEFAULT_MEMORY_SETTINGS,
-  reload: { defer: true },
+  reload: DEFAULT_RELOAD_SETTINGS,
   systemPrompt: { wakeReplay: true, mode: "stable", adoptForeignForcedPrompt: false },
   title: DEFAULT_TITLE_SETTINGS,
   topicSwitch: { ...DEFAULT_TOPIC_SWITCH_SETTINGS },
@@ -594,14 +587,6 @@ function parseSettingsSource(source: unknown): AgentSettings {
     traffic: parseTrafficSettings(value.traffic),
     schedule: parseScheduleSettings(value.schedule),
   });
-}
-
-/** Parse the optional deferred-reload settings block (parseCacheTtlSettings 同款容错, never throws). */
-export function parseReloadSettings(input: unknown): ReloadSettings {
-  const defaults = DEFAULT_SETTINGS.reload;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
-  const defer = (input as Record<string, unknown>).defer;
-  return { defer: typeof defer === "boolean" ? defer : defaults.defer };
 }
 
 /** Parse the optional `systemPrompt` settings block (sysprompt-stable §3.2). Field-by-field fallback to defaults, never throws. */
