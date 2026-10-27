@@ -101,7 +101,9 @@ describe("identifiers", () => {
 
   it("FA advertises fsb.v1 only from the config-key conditional shared hub cap fold", () => {
     const root = fileURLToPath(new URL("../../../src/web-hub/", import.meta.url));
-    expect(readFileSync(root + "hub/hub.ts", "utf8")).toContain("config.feishuBot === undefined ? [] : [FSB_HUB_CAP]");
+    expect(readFileSync(root + "hub/assembly-channels.ts", "utf8")).toContain(
+      "config.feishuBot === undefined ? [] : [FSB_HUB_CAP]",
+    );
     expect(readFileSync(root + "hub/agent-server.ts", "utf8")).toContain("...(deps.extraHubCaps ?? [])");
   });
 });

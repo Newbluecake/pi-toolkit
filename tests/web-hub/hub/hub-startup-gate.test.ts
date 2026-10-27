@@ -87,6 +87,19 @@ describe("startup close gate", () => {
     };
     walk(source);
     expect(Number.isFinite(exposure)).toBe(true);
+    const assemblyText = readFileSync(new URL("../../../src/web-hub/hub/assembly.ts", import.meta.url), "utf8");
+    const assembly = ts.createSourceFile("assembly.ts", assemblyText, ts.ScriptTarget.Latest, true);
+    const factory = assembly.statements.find(
+      (node): node is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(node) && node.name?.text === "createHubAssembly",
+    );
+    expect(factory?.body).toBeDefined();
+    const initialized = new Set<string>();
+    const collect = (node: ts.Node) => {
+      if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name)) initialized.add(node.name.text);
+      ts.forEachChild(node, collect);
+    };
+    collect(factory!.body!);
     for (const name of [
       "supersedeWaitCancels",
       "supersedeTimer",
@@ -104,12 +117,35 @@ describe("startup close gate", () => {
       "previewRoutes",
       "worktreeDiffRoutes",
       "worktreeGraphRoutes",
-      "history",
-      "runTx",
-      "runFileReader",
       "agentServer",
       "fe",
       "uploads",
+    ]) {
+      expect(initialized.has(name), `${name} must have an explicit initial value`).toBe(true);
+    }
+    const ctxDeclaration = vars.get("ctx");
+    expect(ctxDeclaration?.initializer?.getText(source)).toContain("createHubAssembly(");
+    expect(ctxDeclaration!.getStart(source)).toBeLessThan(exposure);
+
+    // Registry/history handles now come from the synchronous sub-assembly. Its invocation
+    // and initialized outputs must still precede socket exposure (no late/TDZ dependencies).
+    const registryText = readFileSync(
+      new URL("../../../src/web-hub/hub/assembly-registry.ts", import.meta.url),
+      "utf8",
+    );
+    const registrySource = ts.createSourceFile("assembly-registry.ts", registryText, ts.ScriptTarget.Latest, true);
+    const registryVars = new Map<string, ts.VariableDeclaration>();
+    const collectRegistry = (node: ts.Node) => {
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) registryVars.set(node.name.text, node);
+      ts.forEachChild(node, collectRegistry);
+    };
+    collectRegistry(registrySource);
+    expect(text.indexOf("= assembleRegistry(ctx)")).toBeGreaterThan(-1);
+    expect(text.indexOf("= assembleRegistry(ctx)")).toBeLessThan(exposure);
+    for (const name of ["registry", "history", "runTx", "runFileReader"]) {
+      expect(registryVars.get(name)?.initializer, name).toBeDefined();
+    }
+    for (const name of [
       "owner",
       "hubJson",
       "closing",

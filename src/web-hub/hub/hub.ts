@@ -21,153 +21,113 @@
  */
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { createGitRunner, type GitRunner } from "../../git/run.js";
 import { resolveAgentDir } from "../protocol/agent-dir.js";
+import { FEISHU_SHUTDOWN_BUDGET_MS, type FsbReqFrame } from "../protocol/feishu.js";
 import type { LanOffReason, LanStatus } from "../protocol/lan.js";
 import {
   ensurePrivateDir,
+  packageRootDir,
   resolveHubPaths,
   webHubSpawnFiles,
   webHubUploadsDir,
-  packageRootDir,
   type HubPaths,
   type SocketIdentity,
 } from "../protocol/paths.js";
-import {
-  PROTO,
-  CMD_ARGS_HUB_CAPS,
-  CMD_HISTORY_HUB_CAPS,
-  P2_HUB_CAPS,
-  UPLOAD_HUB_CAPS,
-  DIALOG_BG_HUB_CAPS,
-  HOLD_HUB_CAPS,
-  RUNTX_HUB_CAPS,
-  QUOTA_POOLS_HUB_CAPS,
-  TODO_ARCHIVE_HUB_CAPS,
-  SPAWN_HUB_CAP,
-  SPAWN_MODEL_HUB_CAP,
-  SPAWN_RELAUNCH_HUB_CAP,
-  PREVIEW_HUB_CAP,
-  PREVIEW_LAN_HUB_CAP,
-  PREVIEW_ABS_HUB_CAP,
-  PREVIEW_TILDE_HUB_CAP,
-  PREVIEW_DIR_HUB_CAP,
-  PREVIEW_DOWNLOAD_HUB_CAP,
-  PREVIEW_CHUNK_HUB_CAP,
-  PREVIEW_HTML_HUB_CAP,
-  WTDIFF_HUB_CAP,
-  WTGRAPH_HUB_CAP,
-  WTGRAPH_MERGED_HUB_CAP,
-  SPAWN_HISTORY_HUB_CAP,
-  AVATAR_HUB_CAP,
-  PRIVACY_HUB_CAP,
-  VERSION_HUB_CAP,
-  PROXY_HUB_CAP,
-  PROXY_LAN_HUB_CAP,
-  PROXY_FRAME_HUB_CAP,
-  FSB_HUB_CAP,
-  LAN_SESSIONS_HUB_CAP,
-} from "../protocol/version.js";
 import type { HubUiBuildWire } from "../protocol/version-info.js";
-import { createVersionInfoService } from "./version-info.js";
+import {
+  DIALOG_BG_HUB_CAPS,
+  FSB_HUB_CAP,
+  HOLD_HUB_CAPS,
+  P2_HUB_CAPS,
+  PROTO,
+  QUOTA_POOLS_HUB_CAPS,
+  RUNTX_HUB_CAPS,
+  TODO_ARCHIVE_HUB_CAPS,
+  UPLOAD_HUB_CAPS,
+} from "../protocol/version.js";
+import type { XsAliasHubStatus } from "../protocol/xs-alias.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
-import { createAgentServer } from "./agent-server.js";
 import { createAgentRemoveService } from "./agent-remove.js";
-import { auditSpawn, auditUpload, createUploadHttpMetrics, uploadStatsFields } from "./audit.js";
+import { createAgentServer } from "./agent-server.js";
+import { assembleHubCaps, assembleXsRelay, prepareHubChannels } from "./assembly-channels.js";
+import { assembleRegistry } from "./assembly-registry.js";
+import { assembleSchedule } from "./assembly-schedule.js";
+import { assembleAvatarStore, assembleUploads, loadPrivacyStore } from "./assembly-storage.js";
+import { createHubAssembly } from "./assembly.js";
+import { auditSpawn, uploadStatsFields } from "./audit.js";
+import { createClientAllowGuard } from "./client-allow.js";
 import { createCmdLimit } from "./cmd-limit.js";
 import { createCommandCompleteRoutes } from "./command-complete.js";
 import { createCommandRouter } from "./commands.js";
-import { createSupersede, SUPERSEDE_YIELD_MS, type SupersedeController } from "./supersede.js";
-import { AGENT_NOSPAWN_CAP } from "../protocol/nospawn.js";
-import { createHistoryService } from "./history.js";
-import { createHubJsonWriter, type HubJsonWriter, type HubRecord } from "./hub-json.js";
-import { createIdleMonitor } from "./idle.js";
-import { createSelfRestartStore, type SelfRestartDecision } from "./self-restart.js";
-import { withDeadline, withSignal, createScope, type Scope } from "./lifecycle.js";
-import { createHubLog } from "./log.js";
-import { defaultLanAssembly, LanAssemblyOffError } from "./lan-assembly.js";
-import { createReqDeadline, type ReqDeadline } from "./req-deadline.js";
-import { createRunFileReader } from "./run-file-reader.js";
-import { createRunTranscriptService } from "./run-transcript.js";
-import { probePlatform, type PlatformProbeDeps } from "./spawn/config.js";
-import { createDirService } from "./spawn/dirs.js";
-import { createCreatedDirsStore } from "./spawn/created-dirs.js";
-import { createFirstPromptForwarder, type FirstPromptForwarder } from "./spawn/first-prompt.js";
-import type { SpawnFrontendPort } from "./spawn/ports.js";
-import { createReaper, type Reaper } from "./spawn/reaper.js";
-import { createSpawnRoutes } from "./spawn/routes.js";
-import { createSpawnPrefs } from "./spawn/prefs.js";
-import { createPreviewRoutes } from "./preview/routes.js";
-import { createAvatarRoutes } from "./avatar/routes.js";
-import { createAvatarStore } from "./avatar/store.js";
-import type { XsAliasHubStatus } from "../protocol/xs-alias.js";
-import { createPrivacyRoutes } from "./privacy/routes.js";
-import { createPrivacyStore, type PrivacyStore } from "./privacy/store.js";
-import { verifyPassword } from "./lan-auth.js";
-import type { AvatarRoutes } from "./ports.js";
-import { auditAvatar } from "./audit.js";
-import { readBody } from "./http.js";
-import { createPreviewIoTracker, previewProcFdAvailable, resolvePreviewDenyContext } from "./preview/fs.js";
-import { createFsAdmitter, type FsAdmitter, type PreviewDenyContext } from "./preview/admit.js";
-import { FEISHU_SHUTDOWN_BUDGET_MS, type FsbReqFrame } from "../protocol/feishu.js";
+import type { FeishuIdleEvidence } from "./feishu/notify.js";
 import {
   createFeishuBotService,
   type FeishuBotService,
   type FeishuBotServiceDeps,
   type FeishuSpawnPort,
 } from "./feishu/service.js";
-import type { FeishuIdleEvidence } from "./feishu/notify.js";
-import { isTerminalSpawnState } from "./spawn/store.js";
-import { createMkdirService } from "./spawn/mkdir.js";
-import { createWorktreeDiffRoutes } from "./worktree-diff/routes.js";
-import { createWorktreeGraphRoutes } from "./worktree-graph/routes.js";
+import { createHubJsonWriter, type HubJsonWriter, type HubRecord } from "./hub-json.js";
+import { createIdleMonitor } from "./idle.js";
+import { defaultLanAssembly, LanAssemblyOffError } from "./lan-assembly.js";
+import { verifyPassword } from "./lan-auth.js";
+import { createScope, withDeadline, withSignal, type Scope } from "./lifecycle.js";
+import { createHubLog } from "./log.js";
+import { createFsAdmitter } from "./preview/admit.js";
+import { createPreviewIoTracker, previewProcFdAvailable, resolvePreviewDenyContext } from "./preview/fs.js";
+import { createPreviewRoutes } from "./preview/routes.js";
+import { createPrivacyRoutes } from "./privacy/routes.js";
 import { proxyErrCode } from "./proxy/audit.js";
 import { createProxyRoutes } from "./proxy/routes.js";
-import { createClientAllowGuard } from "./client-allow.js";
-import { createSecurityEventBus } from "./security-events.js";
 import { createProxyService } from "./proxy/service.js";
-import { hubLoadProbe, LOAD_HUB_CAP, normalizeHubLoadConfig } from "./load.js";
-import { createGitRunner, type GitRunner } from "../../git/run.js";
-import { createSpawnStore } from "./spawn/store.js";
+import { createReqDeadline, type ReqDeadline } from "./req-deadline.js";
+import { createSecurityEventBus } from "./security-events.js";
+import { createSelfRestartStore, type SelfRestartDecision } from "./self-restart.js";
+import { probePlatform, type PlatformProbeDeps } from "./spawn/config.js";
+import { createCreatedDirsStore } from "./spawn/created-dirs.js";
+import { createDirService } from "./spawn/dirs.js";
+import { createFirstPromptForwarder, type FirstPromptForwarder } from "./spawn/first-prompt.js";
+import { createMkdirService } from "./spawn/mkdir.js";
+import { createSpawnPrefs } from "./spawn/prefs.js";
+import { createReaper, type Reaper } from "./spawn/reaper.js";
+import { createSpawnRoutes } from "./spawn/routes.js";
+import { createSpawnStore, isTerminalSpawnState } from "./spawn/store.js";
 import {
   createSpawnSupervisor,
   type InternalRecord,
   type SpawnSupervisor,
   type SpawnSupervisorDeps,
 } from "./spawn/supervisor.js";
+import { createSupersede, SUPERSEDE_YIELD_MS } from "./supersede.js";
+import { createVersionInfoService } from "./version-info.js";
+import { createWorktreeDiffRoutes } from "./worktree-diff/routes.js";
+import { createWorktreeGraphRoutes } from "./worktree-graph/routes.js";
 // session-history plan §4.8 (P-int): the spawn-history assembly — P-scan's service, P-route's
 // ports; hub.ts is the only place they meet (PD5). Aliased so the unrelated fleet-history
 // service (`./history.js`, browser transcript replay) keeps its plain name below.
-import { createHistoryService as createSpawnHistoryService } from "./spawn/history/service.js";
-import type { HistoryService as SpawnHistoryService, ManagedSessionView } from "./spawn/history/ports.js";
-import type { ProcFs, ProcSyncFs } from "./spawn/history/proc.js";
-import { defaultHistorySyncFs } from "./spawn/history/fs.js";
-import { makeCaptureSessionPathPin, makeVerifySessionPathPin } from "./spawn/history/pin.js";
-import { createUploadStore, type UploadStore } from "./uploads.js";
-import type {
-  FrontendFactory,
-  HttpFrontend,
-  HubConfig,
-  HubInfo,
-  HubLog,
-  HostSnapshot,
-  LanAssembly,
-  LanFrontendDeps,
-  ProxyService,
-  HubEvent,
-  FrontendDeps,
-} from "./ports.js";
-import { createFeishuLinks } from "./feishu/link.js";
 import type { FsDeps } from "../protocol/paths.js";
 import { parseCmdline } from "../protocol/proc-identity.js";
-import { createRegistry } from "./registry.js";
-import { createXsAliasBinding, createXsRelay, hubXsAliasParamsOf, type XsAliasBinding } from "./xs/router.js";
-import { SCHED_CONFIRM_CAP, SCHED_HUB_CAP } from "../protocol/schedule.js";
-import { createScheduleService } from "./schedule/service.js";
-import { XS_ALIAS_HUB_CAP, XS_CHANNEL_HUB_CAP, XS_HUB_CAP, XS_REPLY_HUB_CAP } from "../protocol/xs.js";
-import { acquireSingleton, startFence } from "./singleton.js";
-import type { Auth } from "./auth.js";
 import type { AuthRevokeEvent } from "./auth-revoke.js";
+import type { Auth } from "./auth.js";
+import { createFeishuLinks } from "./feishu/link.js";
 import { repairLan2fa, type LanStore } from "./lan-store.js";
+import type {
+  FrontendDeps,
+  FrontendFactory,
+  HostSnapshot,
+  HttpFrontend,
+  HubConfig,
+  HubEvent,
+  HubInfo,
+  HubLog,
+  LanAssembly,
+} from "./ports.js";
+import { acquireSingleton, startFence } from "./singleton.js";
+import { defaultHistorySyncFs } from "./spawn/history/fs.js";
+import { makeCaptureSessionPathPin, makeVerifySessionPathPin } from "./spawn/history/pin.js";
+import type { ManagedSessionView, HistoryService as SpawnHistoryService } from "./spawn/history/ports.js";
+import type { ProcFs, ProcSyncFs } from "./spawn/history/proc.js";
+import { createHistoryService as createSpawnHistoryService } from "./spawn/history/service.js";
 
 /**
  * §6.7.1 (C8) — the duck-typed extras `http.ts`'s `createHttpFrontend` attaches beyond the
@@ -325,22 +285,21 @@ export async function startHub(
   const rootScope: Scope = createScope({ log, now }); // ③ hub-lifetime scope
   const cleanup: Array<() => Promise<void>> = []; // executed in reverse on failure, each bounded
   let closing: Promise<void> | undefined = undefined;
-  let bot: FeishuBotService | undefined;
   let botCleanup: Promise<void> | undefined;
   // Shared by rollback and close. Call stop synchronously FIRST; dispose cancels setup in
   // parallel, not as another 2s tail after the 6s stop budget.
   function stopBot(): Promise<void> {
     if (botCleanup !== undefined) return botCleanup;
-    if (bot === undefined) return Promise.resolve();
+    if (ctx.bot === undefined) return Promise.resolve();
     let stopped: Promise<void> = Promise.resolve();
     let disposed: Promise<void> = Promise.resolve();
     try {
-      stopped = bot.stop(); // Still the first cleanup call, even if an implementation throws.
+      stopped = ctx.bot.stop(); // Still the first cleanup call, even if an implementation throws.
     } catch {
       log.error("web-hub feishu: stop threw; continuing bounded cleanup");
     }
     try {
-      disposed = bot.dispose(); // A throwing stop must not skip the independent final fence.
+      disposed = ctx.bot.dispose(); // A throwing stop must not skip the independent final fence.
     } catch {
       log.error("web-hub feishu: dispose threw; continuing bounded cleanup");
     }
@@ -376,6 +335,22 @@ export async function startHub(
     return { exists: false, closed: true, reason: await closed };
   }
 
+  const ctx = createHubAssembly({
+    config,
+    deps,
+    paths,
+    log,
+    now,
+    startup,
+    rootScope,
+    cleanup,
+    startupStep,
+    isClosing: () => closing !== undefined,
+    stopBot,
+    bounded,
+    stepDeadlineMs: STEP_DEADLINE_MS,
+  });
+
   try {
     await withSignal(ensurePrivateDir(paths.stateDir, paths.policies.stateDir, fsWithWarn), startup.signal); // ②
 
@@ -396,285 +371,36 @@ export async function startHub(
     const owner = single; // narrow once here; closures defined below (e.g. `close`) don't retain flow narrowing
     cleanup.push(() => owner.release());
     startup.signal.throwIfAborted();
-    // web-hub-spawn plan §SP10 (arch §7.1): `spawn.v1` rides BOTH cap surfaces whenever
-    // `config.spawn` exists — even when the platform probe or launcher check failed (the UI
-    // needs the cap to explain WHY spawn is unavailable, `GET /api/headless` carries the
-    // `policy.reason`). Absent (feature off) ⇒ caps stay byte-identical to pre-SP10.
-    // web-hub-spawn default-model plan §2/D4: `spawn.model.v1` joins the SAME conditional tail
-    // (prefs endpoint + `model` tri-state + the record vocabulary) — an old browser ignores the
-    // unknown string (`caps.includes`), and a browser without it MUST NOT send `model` anywhere
-    // (the pre-feature schema is `additionalProperties:false` ⇒ an old hub would 400).
-    // web-hub-preview plan v3 §4.1/§4.7 (PV3): the two preview caps ride the same two surfaces
-    // (同源数组展开，集合与顺序一致 — the §4.7 "两处声明的集合必须一致" invariant; the two consumers
-    // each SPREAD this one source array, so they are not the same array instance, but the sets
-    // and order can never drift): `preview.v1` whenever `config.preview` exists (mode loopback
-    // OR on), `preview.lan.v1` only when mode is on. Absent (mode off) ⇒ caps stay
-    // byte-identical to pre-PV3.
-    // dir-plan v3.1 §2.2/§1.2 (P1a): `PREVIEW_ABS_HUB_CAP` rides the SAME `preview.v1` feature
-    // gate (the mere presence of `config.preview`) — global-path admission is not a separate
-    // setting, and the cap's only job is telling the UI it may widen recognition (C4).
-    // dir-plan §3.5/§3.6 (P1b): `PREVIEW_DIR_HUB_CAP` rides the same gate AND the /proc probe —
-    // the listing itself is `/proc/self/fd`-bound, so a platform without /proc never declares
-    // it (the UI then never sends `dir=1` / `dirs:true`, and directories stay 415 fail-closed).
-    //
-    // session-history plan §4.8 (P-int): `SPAWN_HISTORY_HUB_CAP` rides the SAME conditional tail
-    // as `spawn.v1`/`spawn.model.v1`, but demands more — `config.spawn.history === true` AND the
-    // platform probe passing. The probe is hoisted HERE (before the caps array) because the
-    // spawn assembly further down used to run it itself; both read the one `spawnPlatform`
-    // value now, so the cap and the fail-closed supervisor can never disagree. Absent/off ⇒
-    // caps stay byte-identical to pre-feature (§5).
-    const spawnPlatform = config.spawn === undefined ? undefined : probePlatform(deps.spawnSeams?.probe);
-    // web-hub-html-preview plan v2 §4: ONE value read by the cap declaration below AND the
-    // `createPreviewRoutes({ html })` attachment further down, so they can never disagree.
-    const htmlEnabled = config.preview !== undefined && previewProcFdAvailable();
-    // Alias-plan AL2 (§3.3/§3.6, key-absent convention): the binding table exists iff
-    // `config.crossSession.alias` exists (absent ⇒ no table, no file IO, no cap — byte-identical).
-    // It is LOADED here, before the cap array (`xs.alias.v1` iff the load came back `ready`, fixed for
-    // the run) and long before `createAgentServer` lets any xs request in. `degraded` never touches
-    // the file and only logs; recovery is a human fixing/moving the file + `/webhub restart`.
-    const xsAliasParams = hubXsAliasParamsOf(config.crossSession);
-    let xsAlias: XsAliasBinding | undefined;
-    let xsAliasDegraded: { reason: string; path: string } | undefined;
-    if (xsAliasParams !== undefined) {
-      const binding = createXsAliasBinding({ stateDir: paths.stateDir, params: xsAliasParams, log, now });
-      xsAlias = binding;
-      cleanup.push(async () => binding.store.close());
-      const loaded = await startupStep(binding.store.load());
-      if (loaded.state === "degraded") {
-        const path = binding.store.status().path;
-        log.warn("xs alias store degraded", { reason: loaded.reason, path });
-        xsAliasDegraded = { reason: String(loaded.reason), path };
-      }
-    }
-    const extraHubCaps: readonly string[] = [
-      ...(config.cmdArgs === "all" || config.cmdArgs === "toolkit" ? CMD_ARGS_HUB_CAPS : []),
-      // cmd-history plan §4.6 (F4, H1): `cmd.history.v1` is UNCONDITIONAL on the hub — the P0
-      // projection and the §4.10 runTail ENOENT fallback ship with every hub build (the
-      // fallback deliberately ignores the agent's cmdHistory setting, M4/R9), so the cap has
-      // no settings gate; it only tells new agents/UIs this hub understands them (the agent's
-      // matching `StatusInfo.features` token gates the feature itself). Old hubs never
-      // declare it ⇒ the UI stays in legacy mode. Both cap surfaces share this one array.
-      ...CMD_HISTORY_HUB_CAPS,
-      // web-hub-version plan §3.7: unconditional (no settings gate, D3) — the service below is
-      // always constructed, so the cap and the route can never disagree.
-      VERSION_HUB_CAP,
-      ...(config.lan === undefined ? [] : [LAN_SESSIONS_HUB_CAP]),
-      ...(config.spawn === undefined
-        ? []
-        : [
-            SPAWN_HUB_CAP,
-            SPAWN_MODEL_HUB_CAP,
-            ...(config.spawn.history === true && spawnPlatform?.ok === true ? [SPAWN_HISTORY_HUB_CAP] : []),
-            // spawn-relaunch: `POST /api/headless/relaunch` reuses the restore machinery (L6
-            // death confirmation is /proc-bound), so the cap demands BOTH the restore config
-            // flag AND the platform probe — a hub without it 404s the route like a restore-off
-            // hub does (the UI renders no relaunch affordance without the cap anyway).
-            ...(config.spawn.restore === true && spawnPlatform?.ok === true ? [SPAWN_RELAUNCH_HUB_CAP] : []),
-          ]),
-      ...(config.preview === undefined
-        ? []
-        : [
-            PREVIEW_HUB_CAP,
-            PREVIEW_ABS_HUB_CAP,
-            PREVIEW_TILDE_HUB_CAP,
-            // preview-download: rides the SAME `config.preview` gate as ABS/TILDE (the
-            // admission chain is fd-agnostic — no /proc dependency, unlike DIR above).
-            PREVIEW_DOWNLOAD_HUB_CAP,
-            // chunked-plan §3.4/§2.4: `preview.chunk.v1` rides the SAME `config.preview` gate
-            // too (continuations re-walk the full admission chain — fd-agnostic, no /proc
-            // condition); both cap surfaces share this one array, so §4.7 holds by construction.
-            PREVIEW_CHUNK_HUB_CAP,
-            ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
-            // worktree-diff D21: `wtdiff.v1` rides the SAME preview gate AND the /proc probe —
-            // the three-fd pin is /proc-bound, so a platform without it never declares the cap
-            // (and hub.ts below never builds the routes at all).
-            ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
-            // worktree-graph plan v2 §3/§2.6: `wtgraph.v1` rides the SAME gate as `wtdiff.v1`
-            // (「与 wtdiff 同门」— same `config.preview` existence AND /proc probe); LAN availability
-            // rides `PREVIEW_LAN_HUB_CAP` below, same width as preview/wtdiff (§0.2 Q1).
-            // merged-plan §6: `wtgraph.merged.v1` — the SAME condition as `wtgraph.v1` (preview + /proc);
-            // LAN width rides `PREVIEW_LAN_HUB_CAP` below (mode `loopback` ⇒ LAN 404, no new setting).
-            ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP] : []),
-            // web-hub-html-preview plan v2 §4 (P1b): `preview.html.v1` rides the SAME
-            // `config.preview` gate AND the /proc probe (`htmlEnabled` — dir-fd anchoring is
-            // /proc-bound, fail-closed); both cap surfaces share this one array. LAN width rides
-            // `preview.lan.v1` below (mode `loopback` ⇒ LAN mint + /pv + /pvw 404).
-            ...(htmlEnabled ? [PREVIEW_HTML_HUB_CAP] : []),
-          ]),
-      ...(config.preview === "on" ? [PREVIEW_LAN_HUB_CAP] : []),
-      // web-hub-avatar plan v2.1 §4.2: the one hub-declared cap is carried through
-      // extraHubCaps onto both HubInfo.caps and hello_ack.caps. Agent sessions do not
-      // advertise a corresponding capability of their own.
-      ...(config.avatar === true ? [AVATAR_HUB_CAP] : []),
-      // web-hub-privacy plan v2.1 (P1): `privacy.v1` rides the SAME two surfaces through this
-      // one array (评审 #10: HubInfo.caps 与 hello_ack.caps 两面同源) whenever
-      // `config.privacy` exists. STATIC — it never follows whether the LAN listener came up.
-      ...(config.privacy === true ? [PRIVACY_HUB_CAP] : []),
-      // sysload P3: the hub-side sampler is available only after the bounded Linux
-      // startup probe.  Feature-off (absent config.load) keeps every cap surface
-      // byte-identical.
-      ...(config.load !== undefined && normalizeHubLoadConfig(config.load) !== undefined && hubLoadProbe()
-        ? [LOAD_HUB_CAP]
-        : []),
-      // web-hub-proxy plan v2 §5 (X1c): `proxy.v1` iff `config.proxy`; `proxy.lan.v1` iff
-      // `config.proxy && config.lan` (Q2 — LAN reach follows the LAN config, STATIC like
-      // `privacy.v1`: it never follows whether the LAN listener actually came up). Both cap
-      // surfaces share this one array. Tail-appended: proxy off ⇒ caps byte-identical.
-      ...(config.proxy === undefined ? [] : [PROXY_HUB_CAP, ...(config.lan === undefined ? [] : [PROXY_LAN_HUB_CAP])]),
-      // Link-preview D1: additive, after the existing proxy caps on both surfaces.
-      ...(config.proxy === undefined ? [] : [PROXY_FRAME_HUB_CAP]),
-      ...(config.feishuBot === undefined ? [] : [FSB_HUB_CAP]),
-      // fabric phase-2 X1: `xs.v1` iff `config.crossSession` (tail-appended, same two-surface rule;
-      // absent ⇒ caps byte-identical). Reply cap shares the same gate plus reply !== false.
-      // Channel-plan §3.1 (CH1): `xs.channel.v1` iff `config.crossSession` — a hub protocol
-      // capability with NO hub-level off key (`crossSession.channels` only carries params).
-      ...(config.crossSession === undefined
-        ? []
-        : [
-            XS_HUB_CAP,
-            ...(config.crossSession.reply === false ? [] : [XS_REPLY_HUB_CAP]),
-            XS_CHANNEL_HUB_CAP,
-            // Alias-plan §3.6 (AL2): tail-appended, only for a table that loaded `ready`.
-            ...(xsAlias?.store.advertised === true ? [XS_ALIAS_HUB_CAP] : []),
-          ]),
-      // scheduled-reports plan r3 §10.1 (H1): `sched.v1` iff `config.schedule` exists (same
-      // two-surface tail-append rule; absent ⇒ caps byte-identical). Declared even when the
-      // store root failed to resolve (spawn.v1 precedent: the UI needs the cap to explain).
-      ...(config.schedule === undefined ? [] : [SCHED_HUB_CAP, SCHED_CONFIRM_CAP]),
-    ];
-
-    let supersede: SupersedeController | undefined = undefined;
-    // web-hub-spawn plan §SP10: the spawn assembly handles, declared early (same lazy-closure
-    // pattern as `supersede`) — the registry's `onVersion` below reads `spawnSup` long before
-    // the assembly itself is constructed further down (after `commandRouter`).
-    let spawnSup: SpawnSupervisor | undefined = undefined;
-    let spawnRoutes: SpawnFrontendPort | undefined = undefined;
-    let firstPromptFwd: FirstPromptForwarder | undefined = undefined;
-    // session-history plan §4.8 (P-int): P-scan's history service, constructed inside the spawn
-    // assembly only when `config.spawn.history === true` AND the platform probe passes; disposed
-    // on BOTH shutdown paths (v3.3 W3 — see the close()/cleanup pushes below).
-    let spawnHistory: SpawnHistoryService | undefined = undefined;
-    /** Verifier r2 P1: the ONE idempotent, bounded supervisor shutdown both rollback entries
-     * share (assigned inside the spawn assembly; `SpawnSupervisor.shutdown` itself is
-     * first-call-wins, so a second entry's call resolves through the same promise). */
-    let spawnShutdownOnce: (() => Promise<void>) | undefined;
-    let recoverRotateOnHello: (() => void) | undefined;
-    // Initialize every late teardown binding before exposing admin shutdown on the socket.
-    const supersedeWaitCancels = new Set<() => void>();
-    let supersedeTimer: ReturnType<typeof setInterval> | undefined = undefined;
-    let unsubscribeSupersedeOnDialogs = (): void => {};
-    let stopFence = (): void => {};
-    let idle: Pick<ReturnType<typeof createIdleMonitor>, "stop"> = { stop() {} };
-    let tick: ReturnType<typeof setInterval> | undefined = undefined;
-    let rotateScan: ReturnType<typeof setInterval> | undefined = undefined;
-    let uploadInflightTick: ReturnType<typeof setInterval> | undefined = undefined;
-    let uploadSweepTick: ReturnType<typeof setInterval> | undefined = undefined;
-    let uploads: UploadStore | undefined = undefined;
-    // spawn-dirmkdir: preview's §2.6 deny context, hoisted to assembly scope — `POST
-    // /api/headless/mkdir`'s admission reuses the SAME deny chain, so spawn-on hubs resolve it
-    // even when preview itself is off (the preview block below reuses the resolved value
-    // instead of resolving twice). `undefined` when neither feature is on.
-    let previewDenyCtx: PreviewDenyContext | undefined = undefined;
-    let botPreview: FsAdmitter | undefined;
-    // web-hub-privacy plan v2.1 (P1): DECLARED here with every other early assembly binding —
-    // `close()` reads it (the write-chain drain below) and can run BEFORE the assembly point
-    // further down ever executes (a `let` at the assembly point would be a TDZ throw in that
-    // window — the startup-gate tests pin exactly this).
-    let privacyStore: PrivacyStore | undefined;
-    let previewRoutes: ReturnType<typeof createPreviewRoutes> | undefined = undefined;
-    let worktreeDiffRoutes: ReturnType<typeof createWorktreeDiffRoutes> | undefined = undefined;
-    let worktreeGraphRoutes: ReturnType<typeof createWorktreeGraphRoutes> | undefined = undefined;
-    let lanDeps: LanFrontendDeps | undefined = undefined;
-    let lanLoginCore: import("./ports.js").LanLoginCore | undefined;
+    const channelsReady = prepareHubChannels(ctx);
+    if (channelsReady !== undefined) await channelsReady;
+    const { spawnPlatform, htmlEnabled, xsAliasDegraded } = ctx;
+    const extraHubCaps = assembleHubCaps(ctx);
     const security = config.lan === undefined ? undefined : createSecurityEventBus(log);
-    // web-hub-version plan §3.7: assigned just before the frontend is built; close() may run
-    // earlier (admin close during startup), hence `?.` there.
-    let versionService: ReturnType<typeof createVersionInfoService> | undefined = undefined;
-    // web-hub-proxy (X1c): declared with the other early bindings — `close()` is a hoisted
-    // function that can run (admin close during startup) before the assembly point below.
-    // Constructed ONLY when `config.proxy` exists, AFTER `fe.listen()` (it needs the real ports).
-    let proxyService: ProxyService | undefined = undefined;
-    let unsubscribeProxyRevoke: () => void = () => {};
+    ctx.security = security;
     const proxyRoutes =
       config.proxy === undefined
         ? undefined
-        : createProxyRoutes({ service: () => proxyService, log, now, ...(security === undefined ? {} : { security }) });
-    let agentServer: ReturnType<typeof createAgentServer> | undefined = undefined;
-    let fe: HttpFrontend = {
-      listen: async () => ({ port: 0 }),
-      close: async () => {},
-      clientCount: () => 0,
-      ui: {
-        serve: async () => false,
-        refresh: async () => ({ state: "unbuilt", candidates: [] }),
-        probe: async () => ({ state: "unbuilt", candidates: [] }),
-        status: () => ({ state: "unbuilt", candidates: [] }),
-      },
-    };
-    let botOnHello: ((key: string) => void) | undefined;
-    /** scheduled-reports H1: the bot's event listener, captured so sched_bound frames (which
-     *  never reach the registry) can be forwarded as FeishuServiceEvents (§7.5). */
-    let botSchedEventListener: ((event: never) => void) | undefined;
+        : createProxyRoutes({
+            service: () => ctx.proxyService,
+            log,
+            now,
+            ...(security === undefined ? {} : { security }),
+          });
     const botDialogSlots =
       config.feishuBot === undefined ? undefined : new Map<string, Extract<HubEvent, { type: "dialogs" }>>();
-    const registry = createRegistry({
-      now,
-      log,
-      hubVersion: config.pluginVersion,
-      // web-hub-spawn plan §SP10 (arch §4.3 “版本观察”): a MANAGED agent's plugin version never
-      // reaches `supersede.observe` — a hub-spawned agent that merely loaded a newer pi-toolkit
-      // (settings.json pointing at a newer package) would otherwise trigger a hub version
-      // replacement that ends its own session with the stdin EOF; it only records a
-      // `hint:"newer-plugin"` on the spawn record instead.
-      onVersion: (pluginVersion, agentKey) => {
-        botDialogSlots?.delete(agentKey);
-        botOnHello?.(agentKey); // EVERY reconnect, even same epoch/caps, breaks attribution proof.
-        if (spawnSup?.isManaged(agentKey) === true) {
-          spawnSup.noteVersion(agentKey, pluginVersion);
-          return;
-        }
-        // private-plan §4.1-5 (Q2): an agent advertising agent.nospawn.v1 (a private-mount-ns
-        // session) never enters the version observer either — the replacement hub could only
-        // be spawned from inside the ns, which spawnHub refuses. Caps are registered before
-        // onVersion fires, so getCaps sees THIS hello's set (R25 covers a hub that predates
-        // the cap).
-        if (registry.getCaps(agentKey)?.includes(AGENT_NOSPAWN_CAP) === true) return;
-        supersede?.observe(pluginVersion, agentKey);
-      },
-      onTick: () => supersede?.tick(),
-    });
-    const unsubscribeBotSlots =
-      botDialogSlots === undefined
-        ? () => {}
-        : registry.bus.subscribe((e) => {
-            if (e.type === "dialogs") botDialogSlots.set(e.agentKey, e);
-            else if (e.type === "agent_down" || e.type === "agent_stale") botDialogSlots.delete(e.agentKey);
-          });
-    cleanup.push(async () => unsubscribeBotSlots());
-    const history = createHistoryService({ registry, log });
-    cleanup.push(async () => history.dispose());
-    // fleet-drawer plan §5.2/§5.3 (F3b): the run-transcript service + its F3a file reader —
-    // constructed unconditionally (per-request capability gating happens against the AGENT's
-    // hello caps in the service's `requireCap`, §7.1; an agent without `runtx.*` caps is simply
-    // refused there). The service owns no timers; `dispose()` drops its bus subscription and
-    // every held watch. Both the runtime `close()` below and this startup-failure `cleanup`
-    // entry dispose explicitly — the runtime path never runs the cleanup array (upload plan
-    // #13's finding), so `close()` carries its own calls next to `history.dispose()`.
-    const runFileReader = createRunFileReader({ now });
-    const runTx = createRunTranscriptService({ registry, reader: runFileReader, log, now });
-    cleanup.push(async () => {
-      runTx.dispose();
-      runFileReader.dispose();
-    });
+    ctx.botDialogSlots = botDialogSlots;
+    const { registry, unsubscribeBotSlots, history, runFileReader, runTx } = assembleRegistry(ctx);
     let httpPort = 0;
+    ctx.httpPort = httpPort;
     const feishuLinks =
       config.feishuBot === undefined
         ? undefined
         : createFeishuLinks({
             loopbackPort: () => httpPort,
             ...(config.lan === undefined ? {} : { lan: config.lan }),
-            snapshot: () => (fe as HttpFrontendExt).lanHostSnapshot?.(),
+            snapshot: () => (ctx.fe as HttpFrontendExt).lanHostSnapshot?.(),
           });
+    ctx.feishuLinks = feishuLinks;
     // One restart entry point for both admin `/webhub restart` and the DB
     // breaker. Keeping this as one function is important: self-restart must
     // publish the same superseded frame and stop banner semantics as admin.
@@ -705,24 +431,24 @@ export async function startHub(
       advertiseTfa: config.lan !== undefined,
       emit: (e) => security?.emit(e),
       repair2fa: () => repairLan2fa({ dbFile: paths.dbFile, log }),
-      feishuOwner: () => bot?.snapshot().owner !== undefined,
-      store: () => lanDeps?.store,
-      kdf: () => lanDeps?.kdf,
-      limiter: () => lanDeps?.limiter,
-      lan: () => fe.lan,
+      feishuOwner: () => ctx.bot?.snapshot().owner !== undefined,
+      store: () => ctx.lanDeps?.store,
+      kdf: () => ctx.lanDeps?.kdf,
+      limiter: () => ctx.lanDeps?.limiter,
+      lan: () => ctx.fe.lan,
       lanStatus: () => hubJson.current()?.lan,
       shutdown: requestAdminShutdown,
       now,
       // Token rotation is only supported once the frontend has supplied its auth port.
-      auth: () => (fe as HttpFrontendExt).auth!,
+      auth: () => (ctx.fe as HttpFrontendExt).auth!,
       rotateIntentFile: paths.rotateIntentFile ?? `${paths.stateDir}/rotate.intent`,
       revokeLanSessions: async () => {
-        const store = lanDeps?.store as Partial<LanStore> | undefined;
+        const store = ctx.lanDeps?.store as Partial<LanStore> | undefined;
         return (await store?.revokeAllSessions?.()) ?? 0;
       },
-      revokeLoopbackSse: () => (fe as HttpFrontendExt).revokeAllSse?.() ?? 0,
-      revokeLanSse: () => (fe.lan as LanFacadeExt | undefined)?.revokeAll?.() ?? 0,
-      bumpLanRevokeGen: () => (fe as HttpFrontendExt).bumpLanRevokeGen?.(),
+      revokeLoopbackSse: () => (ctx.fe as HttpFrontendExt).revokeAllSse?.() ?? 0,
+      revokeLanSse: () => (ctx.fe.lan as LanFacadeExt | undefined)?.revokeAll?.() ?? 0,
+      bumpLanRevokeGen: () => (ctx.fe as HttpFrontendExt).bumpLanRevokeGen?.(),
     });
     // Install the listener only after every admin getter and teardown dependency exists.
     const info: HubInfo = {
@@ -765,54 +491,10 @@ export async function startHub(
         ...extraHubCaps,
       ],
     };
+    ctx.info = info;
     const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);
-    let avatarRoutes: AvatarRoutes | undefined;
-    if (config.avatar === true) {
-      const store = createAvatarStore({
-        stateDir: paths.stateDir,
-        now,
-        log,
-        audit: (record) => {
-          const op =
-            record.op === "get" || record.op === "put" || record.op === "delete" || record.op === "load"
-              ? record.op
-              : "load";
-          const phase =
-            record.phase === "request" || record.phase === "reject" || record.phase === "reconcile"
-              ? record.phase
-              : "request";
-          auditAvatar(log, {
-            reqId: op === "load" ? "load" : "store",
-            op,
-            phase,
-            ok: record.ok === true,
-            ms: typeof record.ms === "number" ? record.ms : 0,
-            ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
-            ...(typeof record.v === "string" ? { v: record.v } : {}),
-            ...(typeof record.gen === "number" ? { gen: record.gen } : {}),
-            ...(typeof record.bytes === "number" ? { bytes: record.bytes } : {}),
-            ...(typeof record.side === "number" ? { side: record.side } : {}),
-          });
-        },
-        onChange: (change) => {
-          // The store has its own epoch fence; this second fence covers hub shutdown.
-          if (closing !== undefined) return;
-          info.avatar = change.info;
-          registry.publish({ type: "hub" });
-        },
-      });
-      avatarRoutes = createAvatarRoutes({
-        store,
-        hub: () => ({ pid: info.pid, startedAt: info.startedAt }),
-        readBody,
-        log,
-        now,
-      });
-      // A factory/startup failure before the frontend is built must still close the store.
-      cleanup.push(() => store.close(createReqDeadline(now, STEP_DEADLINE_MS).at));
-      // Avatar loading is deliberately not on the startup critical path.
-      void store.load();
-    }
+    ctx.hubJson = hubJson;
+    assembleAvatarStore(ctx);
     const selfRestart = createSelfRestartStore(`${paths.stateDir}/self-restart.json`);
     let unsubscribeDbRestart = (): void => {};
     function requestDbSelfRestart(): void {
@@ -837,35 +519,9 @@ export async function startHub(
       // replacement DB is created here.
       requestAdminShutdown("restart");
     }
-    // fabric phase-2 X1: the cross-session relay exists iff `config.crossSession` (key absence IS
-    // off — no router, no observer, no frame handling). Disposed on both teardown paths.
-    // feishu-xs-mirror (A′): the quiet-delivery observer exists iff `feishuBot.xsMirror === true` ∧
-    // `config.crossSession` — otherwise the key is not passed at all (hub byte-identical). `bot` is
-    // assigned later; the closure reads it lazily (undefined ⇒ dropped).
-    const xsMirrorOn = config.feishuBot?.xsMirror === true && config.crossSession !== undefined;
-    const xsRelay =
-      config.crossSession === undefined
-        ? undefined
-        : createXsRelay({
-            registry,
-            config: { home: config.home, crossSession: config.crossSession },
-            log,
-            now,
-            ...(xsAlias === undefined ? {} : { aliases: xsAlias }),
-            ...(xsMirrorOn ? { onQuietDelivered: (e) => bot?.xsMirror(e) } : {}),
-          });
-    if (xsRelay !== undefined) cleanup.push(async () => xsRelay.dispose());
-    // scheduled-reports plan r3 §7 (H1): the read-only schedule coordinator — constructed ONLY
-    // when `config.schedule` exists (key absence IS off: no reader, no `sched.v1`, no frames, no
-    // disk). A store root that fails to resolve degrades INSIDE the coordinator (empty
-    // projection + WARN, hub keeps running); dispose drains its hub-state flush. The 60s scan
-    // loop, observation clock and every timer it owns are unref'd.
-    const scheduleHub =
-      config.schedule === undefined
-        ? undefined
-        : createScheduleService({ config: config.schedule, stateDir: paths.stateDir, registry, log, now });
-    if (scheduleHub !== undefined) cleanup.push(() => scheduleHub.dispose());
-    agentServer = createAgentServer(owner.server, {
+    const xsRelay = assembleXsRelay(ctx);
+    const scheduleHub = assembleSchedule(ctx);
+    ctx.agentServer = createAgentServer(owner.server, {
       registry,
       config,
       log,
@@ -880,7 +536,7 @@ export async function startHub(
         ? {}
         : {
             feishuAdmin: (frame: FsbReqFrame) =>
-              bot?.admin(frame) ??
+              ctx.bot?.admin(frame) ??
               Promise.resolve({
                 t: "fsb_res" as const,
                 rid: frame.rid,
@@ -889,10 +545,10 @@ export async function startHub(
                 message: "机器人正在启动或关闭",
               }),
           }),
-      onHello: () => recoverRotateOnHello?.(),
-      restoreCount: () => spawnSup?.restoreCandidateCount() ?? 0,
+      onHello: () => ctx.recoverRotateOnHello?.(),
+      restoreCount: () => ctx.spawnSup?.restoreCandidateCount() ?? 0,
     });
-    cleanup.push(() => agentServer!.close());
+    cleanup.push(() => ctx.agentServer!.close());
     // web-hub-spawn plan §SP10 (arch §7.8 "/webhub stop、restart 在 TUI 提示中显示 hub.json 的
     // spawn.count"): the hub.json `spawn` summary — supervisor `liveCount` plus the policy
     // `reason` whenever the loopback view of the policy is currently refusing spawns. Seeded
@@ -905,8 +561,8 @@ export async function startHub(
     }
     let lastSpawnStatus: { count: number; reason?: string } | undefined;
     function syncSpawnStatus(): void {
-      if (spawnSup === undefined) return;
-      const next = spawnStatusOf(spawnSup);
+      if (ctx.spawnSup === undefined) return;
+      const next = spawnStatusOf(ctx.spawnSup);
       const prev = lastSpawnStatus;
       if (prev !== undefined && prev.count === next.count && prev.reason === next.reason) return;
       lastSpawnStatus = next;
@@ -944,7 +600,7 @@ export async function startHub(
             else scope.defer(fn);
           },
         };
-        lanDeps = await startupStep(
+        ctx.lanDeps = await startupStep(
           (deps.lanAssembly ?? defaultLanAssembly).build({
             cfg: config.lan,
             ...(security === undefined ? {} : { security }),
@@ -971,16 +627,16 @@ export async function startHub(
         }
       }
     }
-    if (lanDeps !== undefined) {
-      if (clientAllow !== undefined) lanDeps.clientAllow = clientAllow;
-      if (security !== undefined) lanDeps.security = security;
-      if (feishuLinks) lanDeps.onAuthenticated = feishuLinks.authenticated;
-      lanDeps.onLoginCore = (core) => {
-        lanLoginCore = core;
+    if (ctx.lanDeps !== undefined) {
+      if (clientAllow !== undefined) ctx.lanDeps!.clientAllow = clientAllow;
+      if (security !== undefined) ctx.lanDeps!.security = security;
+      if (feishuLinks) ctx.lanDeps!.onAuthenticated = feishuLinks.authenticated;
+      ctx.lanDeps!.onLoginCore = (core) => {
+        ctx.lanLoginCore = core;
       };
       // D/E/F/G are wired and verified. Internal invariant, never configurable through settings/env.
-      lanDeps.secondFactorEnabled = true;
-      const dbRestartStore = lanDeps.store as Partial<LanStore>;
+      ctx.lanDeps!.secondFactorEnabled = true;
+      const dbRestartStore = ctx.lanDeps!.store as Partial<LanStore>;
       if (typeof dbRestartStore.onRestartNeeded === "function") {
         unsubscribeDbRestart = dbRestartStore.onRestartNeeded(requestDbSelfRestart);
         cleanup.push(async () => unsubscribeDbRestart());
@@ -1001,7 +657,7 @@ export async function startHub(
           }
         };
       };
-      const kdfPort = lanDeps.kdf;
+      const kdfPort = ctx.lanDeps!.kdf;
       const originalKdfRun = kdfPort.run.bind(kdfPort);
       kdfPort.run = countInFlight(originalKdfRun);
       if (kdfPort.runPadded !== undefined) {
@@ -1022,9 +678,9 @@ export async function startHub(
     // through `recoverRotateIntent`'s own `deps.revokeLan === undefined` branch, which already
     // does the right fail-closed thing: `lanBlocked:true`, intent kept on disk for the next pass.
     const revokeLanForRecovery =
-      lanDeps !== undefined
+      ctx.lanDeps !== undefined
         ? async (): Promise<number> => {
-            const store = lanDeps!.store as Partial<LanStore>;
+            const store = ctx.lanDeps!.store as Partial<LanStore>;
             return (await store.revokeAllSessions?.()) ?? 0;
           }
         : undefined;
@@ -1047,34 +703,11 @@ export async function startHub(
      * "previously blocked, now resolved ⇒ start()" path must not try to resurrect it. */
     let lanClosedByRotateScan = false;
 
-    // web-hub-privacy plan v2.1 (P1): the privacy-lock STORE is created and loaded HERE —
-    // before the spawn assembly below — because the session-history fork path
-    // (`spawn/routes.ts`'s doSessionBranch) inherits a locked source session's mark onto the
-    // new sessionId BEFORE the fork is launched (「先写新 sessionId 标记再 spawn」), so the
-    // store must already exist by the time `createSpawnRoutes` is called. Gated on
-    // `config.privacy === true` (off ⇒ no store, `privacy.json` never touched — a re-enable
-    // finds every mark intact). `load()` never throws: corrupt/unreadable ⇒ renamed to .bak +
-    // empty set + WARN (`degraded` is P3's `/webhub status` source). The ROUTES are assembled
-    // later (right before the frontend), where every successful mutation republishes the full
-    // set as the direct-send `privacy` bus event. (Declared at assembly scope above —
-    // `close()` reads it before this point may ever run.)
-    if (config.privacy === true) {
-      privacyStore = createPrivacyStore({
-        stateDir: paths.stateDir,
-        log,
-        onChange: (locked) => {
-          // Same shutdown fence as the avatar store's onChange below.
-          if (closing !== undefined) return;
-          registry.publish({ type: "privacy", locked });
-        },
-      });
-      await startupStep(privacyStore.load());
-      // Startup-failure path: drain the store's write chain (idempotent, never throws).
-      cleanup.push(() => privacyStore!.close());
-    }
-
+    if (config.privacy === true) await loadPrivacyStore(ctx);
     const commandRouter = createCommandRouter({ registry, log, now });
-    const cmdLimit = createCmdLimit(now); // ONE HTTP + Feishu admission limiter (same agent bucket).
+    ctx.commandRouter = commandRouter;
+    const cmdLimit = createCmdLimit(now);
+    ctx.cmdLimit = cmdLimit; // ONE HTTP + Feishu admission limiter (same agent bucket).
     let botSpawn: FeishuSpawnPort | undefined;
     // ---------------------------------------------------------------------
     // web-hub-spawn plan §SP10 (arch §4.1/§7): the managed-spawn assembly — the ONLY place
@@ -1131,11 +764,11 @@ export async function startHub(
         agentDir: hubAgentDir,
         roots: spawnCfg.roots,
         registry,
-        spawnHistory: () => spawnSup?.records() ?? [],
+        spawnHistory: () => ctx.spawnSup?.records() ?? [],
         now,
         createdDirs: () => createdDirsStore.list(),
       });
-      firstPromptFwd = createFirstPromptForwarder({
+      ctx.firstPromptFwd = createFirstPromptForwarder({
         router: commandRouter,
         now,
         log,
@@ -1146,9 +779,9 @@ export async function startHub(
         // `noteSpawnChanged` so the SSE push and the GET snapshot (which reads
         // `firstPrompt.state()` through SP9's routes) can never disagree.
         onChange: (spawnId) => {
-          const sup = spawnSup;
+          const sup = ctx.spawnSup;
           if (sup === undefined) return;
-          const view = firstPromptFwd?.state(spawnId);
+          const view = ctx.firstPromptFwd?.state(spawnId);
           if (view !== undefined) {
             const rec = sup.records().find((r) => r.spawnId === spawnId);
             if (rec !== undefined) {
@@ -1159,7 +792,7 @@ export async function startHub(
         },
       });
       if (deps.spawnSeams?.wrapFirstPrompt !== undefined) {
-        firstPromptFwd = deps.spawnSeams.wrapFirstPrompt(firstPromptFwd);
+        ctx.firstPromptFwd = deps.spawnSeams.wrapFirstPrompt(ctx.firstPromptFwd);
       }
       const rawSupervisor = createSpawnSupervisor({
         cfg: spawnCfg,
@@ -1193,11 +826,11 @@ export async function startHub(
           : {}),
         onLive: (rec) => {
           if (rec.agentKey !== undefined && rec.sessionId !== undefined) {
-            firstPromptFwd?.onLive(rec.spawnId, rec.agentKey, rec.sessionId, rec.control === true);
+            ctx.firstPromptFwd?.onLive(rec.spawnId, rec.agentKey, rec.sessionId, rec.control === true);
           }
         },
-        onLink: (spawnId, linked) => firstPromptFwd?.onLink(spawnId, linked),
-        onTerminal: (spawnId, reason) => firstPromptFwd?.onTerminal(spawnId, reason),
+        onLink: (spawnId, linked) => ctx.firstPromptFwd?.onLink(spawnId, linked),
+        onTerminal: (spawnId, reason) => ctx.firstPromptFwd?.onTerminal(spawnId, reason),
         // web-hub-delete-session plan v2 §2.2/§2.9: a managed record's death was confirmed and it
         // was actually deleted — drop the matching agent card too. `allowConnected:true` is safe
         // here specifically because `deleteRecord` only ever runs AFTER the supervisor's own
@@ -1216,7 +849,7 @@ export async function startHub(
         ...(deps.spawnSeams?.restoreStableMs === undefined ? {} : { restoreStableMs: deps.spawnSeams.restoreStableMs }),
         ...(deps.spawnSeams?.spawnFn === undefined ? {} : { spawnFn: deps.spawnSeams.spawnFn }),
       });
-      spawnSup =
+      ctx.spawnSup =
         deps.spawnSeams?.wrapSupervisor === undefined ? rawSupervisor : deps.spawnSeams.wrapSupervisor(rawSupervisor);
       // session-history plan §4.8 step 1: the history service — built only when `historyOn`, with
       // the P0-frozen dep shape. `managed`/`deathOf` read the supervisor LAZILLY per call (the
@@ -1228,8 +861,8 @@ export async function startHub(
             agentDir: hubAgentDir,
             forkSrcDir: spawnFiles.forkSrcDir,
             registry,
-            managed: () => (spawnSup?.records() ?? []).map(toManagedView),
-            deathOf: (id) => spawnSup?.deathOf(id),
+            managed: () => (ctx.spawnSup?.records() ?? []).map(toManagedView),
+            deathOf: (id) => ctx.spawnSup?.deathOf(id),
             uid: deps.uid ?? process.getuid?.() ?? -1,
             hubPid: process.pid,
             now,
@@ -1245,7 +878,7 @@ export async function startHub(
               },
         );
         if (deps.spawnSeams?.wrapHistory !== undefined) historySvc = deps.spawnSeams.wrapHistory(historySvc);
-        spawnHistory = historySvc;
+        ctx.spawnHistory = historySvc;
         // v3.3 W3 / X3.4 #4 + verifier P1-a: the rollback dispose is registered HERE, at the
         // assignment — a failure in `spawnSup.init()`, `createSpawnRoutes()` or ANY later
         // assembly step must still unwind the service's fds/gens (previously the push lived
@@ -1256,7 +889,7 @@ export async function startHub(
         // double-run. Ordering: the spawn shutdown entry is pushed LATER (after the frontend's
         // own entries, keeping §SP13's domain-first unwind), so the reverse-order rollback
         // still runs supervisor shutdown BEFORE this dispose — the runtime close() order.
-        cleanup.push(() => spawnHistory!.dispose());
+        cleanup.push(() => ctx.spawnHistory!.dispose());
       }
       // Verifier r2 P1: an EARLY idempotent supervisor-shutdown entry, registered immediately
       // after the history dispose entry above — a startup failure anywhere between here
@@ -1266,24 +899,24 @@ export async function startHub(
       // Bounded (`STEP_DEADLINE_MS`) and never throws out of rollback; `shutdown` on a
       // supervisor whose init() rejected is safe (first-call-wins promise; the catch keeps a
       // rejection from aborting the unwind — the rollback's own `bounded()` also swallows).
-      const supForRollback = spawnSup;
+      const supForRollback = ctx.spawnSup;
       let shutdownPromise: Promise<void> | undefined;
-      spawnShutdownOnce = (): Promise<void> => {
+      ctx.spawnShutdownOnce = (): Promise<void> => {
         if (shutdownPromise === undefined) {
           shutdownPromise = supForRollback.shutdown(createReqDeadline(now, STEP_DEADLINE_MS)).catch(() => undefined);
         }
         return shutdownPromise;
       };
-      cleanup.push(() => spawnShutdownOnce!());
+      cleanup.push(() => ctx.spawnShutdownOnce!());
       // Bounded init (plan §SP10: store load + orphan recovery + launcher check ≤1s + reaper
       // ready ≤2s — 4s total budget); `withSignal` folds a startup abort into the same await.
-      await startupStep(spawnSup.init(createReqDeadline(now, SPAWN_INIT_BUDGET_MS)));
+      await startupStep(ctx.spawnSup.init(createReqDeadline(now, SPAWN_INIT_BUDGET_MS)));
       startup.signal.throwIfAborted();
       // spawn-dirmkdir: the browse panel's 「新建文件夹」 endpoint reuses preview's §2.6 deny
       // chain, so its deny context resolves HERE when spawn is on — even with preview off (the
       // preview block below reuses this value when it runs). Same 2s/never-fails semantics as
       // the preview resolution (a degraded member keeps its literal form + a path-free WARN).
-      previewDenyCtx = await startupStep(
+      ctx.previewDenyCtx = await startupStep(
         resolvePreviewDenyContext(
           { home: config.home, agentDir: hubAgentDir },
           {
@@ -1296,7 +929,7 @@ export async function startHub(
       );
       startup.signal.throwIfAborted();
       const mkdirSvc = createMkdirService({
-        denyCtx: previewDenyCtx,
+        denyCtx: ctx.previewDenyCtx,
         tracker: createPreviewIoTracker(),
         log,
         now,
@@ -1306,11 +939,11 @@ export async function startHub(
         // post-create mode (best-effort inside the service: failure ⇒ warn, still ok:true).
         ...(deps.childUmask === undefined ? {} : { dirMode: 0o777 & ~deps.childUmask }),
       });
-      spawnRoutes = createSpawnRoutes({
+      ctx.spawnRoutes = createSpawnRoutes({
         ...(security === undefined ? {} : { security }),
-        supervisor: spawnSup,
+        supervisor: ctx.spawnSup,
         dirs: spawnDirs,
-        firstPrompt: firstPromptFwd,
+        firstPrompt: ctx.firstPromptFwd,
         prefs: spawnPrefs,
         cfg: spawnCfg,
         limit: createCmdLimit(now),
@@ -1321,23 +954,23 @@ export async function startHub(
         createdDirs: createdDirsStore,
         // session-history plan §4.8: `historyOn` already required it — absent keeps the route
         // surface byte-identical to history-off (P-route's §5 gate reads `deps.history`).
-        ...(spawnHistory === undefined ? {} : { history: spawnHistory }),
+        ...(ctx.spawnHistory === undefined ? {} : { history: ctx.spawnHistory }),
         // web-hub-privacy plan v2.1 (P1, 「Fork 继承」): a hub-initiated fork inherits a locked
         // source session's mark — the store was created/loaded ABOVE this assembly, so the
         // dependency is available exactly when the feature is on (off ⇒ byte-identical).
-        ...(privacyStore === undefined ? {} : { privacy: privacyStore }),
+        ...(ctx.privacyStore === undefined ? {} : { privacy: ctx.privacyStore }),
       });
       if (config.feishuBot !== undefined) {
         botSpawn = {
           dirs: spawnDirs,
-          supervisor: spawnSup,
-          firstPrompt: firstPromptFwd,
+          supervisor: ctx.spawnSup,
+          firstPrompt: ctx.firstPromptFwd,
           prefs: spawnPrefs,
           registerTimeoutS: spawnCfg.registerTimeoutS,
           restore: spawnCfg.restore === true,
-          relaunch: (...args) => spawnSup!.relaunch(...args),
+          relaunch: (...args) => ctx.spawnSup!.relaunch(...args),
           lookup: (id) => {
-            const record = spawnSup!.records().find((r) => r.spawnId === id);
+            const record = ctx.spawnSup!.records().find((r) => r.spawnId === id);
             return record === undefined
               ? undefined
               : {
@@ -1358,32 +991,7 @@ export async function startHub(
       // process — the reaper child's stdin EOF (L3) bounds any leak, and no spawn request can
       // have arrived before `fe.listen()`.
     }
-    // web-hub-upload plan §2.2/§2.6 (U3): the upload store is constructed unconditionally —
-    // `webHub.uploads` gating happens through agent hello caps (§5.1), not here. Construction
-    // never throws for an unusable root (the store disables itself and `begin` answers
-    // `E_UPLOAD_DISABLED`); a synchronous throw (a bug, not a fs state) degrades uploads to 501
-    // while the rest of the hub starts normally (plan §6 U3: "根校验失败 ⇒ 不传 store").
-    try {
-      uploads = createUploadStore({
-        root: webHubUploadsDir(config.home),
-        now,
-        log,
-        audit: (e) => auditUpload(log, e),
-      });
-    } catch (err) {
-      log.error("web-hub: upload store construction failed — /api/upload/* will answer 501", {
-        error: String(err),
-      });
-      uploads = undefined;
-    }
-    // §5.4 (U3 P2-2): HTTP-layer (pre-store) upload reject counters, shared by both listeners and
-    // merged into the 30-min `upload stats` row below.
-    const uploadMetrics = createUploadHttpMetrics();
-    // §2.6 #13: pushed BEFORE the frontend's own cleanup so the startup-failure reverse-order
-    // path also closes the store after the frontend stops accepting requests.
-    cleanup.push(async () => {
-      await uploads?.close();
-    });
+    const uploadMetrics = assembleUploads(ctx);
     // web-hub-preview plan v3 §4.5/§6 (PV3): the preview route frontend — constructed only when
     // `config.preview` exists (PV1: mode "off" is the key's ABSENCE, so the cap declaration and
     // this construction read the same config key and can never disagree). Pure closure
@@ -1402,7 +1010,7 @@ export async function startHub(
       // spawn-dirmkdir: reuse the spawn assembly's resolution when it already ran (spawn on);
       // otherwise resolve here exactly as before (spawn-off + preview-on stays byte-identical).
       const denyCtx =
-        previewDenyCtx ??
+        ctx.previewDenyCtx ??
         (await startupStep(
           resolvePreviewDenyContext(
             { home: config.home, agentDir: hubAgentDir },
@@ -1415,26 +1023,26 @@ export async function startHub(
           ),
         ));
       startup.signal.throwIfAborted();
-      previewDenyCtx = denyCtx;
+      ctx.previewDenyCtx = denyCtx;
       const sharedPreview =
         config.feishuBot === undefined
           ? undefined
           : (() => {
               const tracker = createPreviewIoTracker();
-              botPreview = createFsAdmitter({ denyCtx, tracker, log, now });
-              return { tracker, admitter: botPreview };
+              ctx.botPreview = createFsAdmitter({ denyCtx, tracker, log, now });
+              return { tracker, admitter: ctx.botPreview };
             })();
-      previewRoutes = createPreviewRoutes({
+      ctx.previewRoutes = createPreviewRoutes({
         mode: config.preview,
         denyCtx,
         ...sharedPreview,
         uploadsRoot: webHubUploadsDir(config.home),
         registry,
-        ...(uploads === undefined
+        ...(ctx.uploads === undefined
           ? {}
           : {
               uploads: {
-                openForPreview: (p, ctx) => uploads!.openForPreview(p, ctx),
+                openForPreview: (p, requestCtx) => ctx.uploads!.openForPreview(p, requestCtx),
               },
             }),
         log,
@@ -1462,7 +1070,7 @@ export async function startHub(
       // (D15). Pure closure building — nothing here can fail.
       if (previewProcFdAvailable()) {
         const graphGitRunner = deps.gitRunner ?? createGitRunner();
-        worktreeDiffRoutes = createWorktreeDiffRoutes({
+        ctx.worktreeDiffRoutes = createWorktreeDiffRoutes({
           mode: config.preview,
           denyCtx,
           registry,
@@ -1473,7 +1081,7 @@ export async function startHub(
         // worktree-graph plan v2 §2.6 (P2): the commit-graph route frontend — the SAME feature
         // gate as wtdiff above (「与 wtdiff 同门」, §3), the SAME denyCtx AND the SAME hub-side git
         // runner (D15 precedent — one runner, two route frontends).
-        worktreeGraphRoutes = createWorktreeGraphRoutes({
+        ctx.worktreeGraphRoutes = createWorktreeGraphRoutes({
           mode: config.preview,
           denyCtx,
           registry,
@@ -1488,7 +1096,7 @@ export async function startHub(
     if (config.feishuBot !== undefined) {
       // Outbound file admission always uses the preview safety chain, even with the browser
       // preview UI disabled. No raw-fs fallback and no bot-local upload store.
-      previewDenyCtx ??= await startupStep(
+      ctx.previewDenyCtx ??= await startupStep(
         resolvePreviewDenyContext(
           { home: config.home, agentDir: hubAgentDir },
           { tracker: createPreviewIoTracker(), now, log, signal: startup.signal },
@@ -1499,7 +1107,7 @@ export async function startHub(
       const { wrapService: _wrapService, ...platformSeams } = deps.feishuSeams ?? {};
       const botDeps: FeishuBotServiceDeps = {
         ...(security === undefined ? {} : { security }),
-        onApprovalDecision: (id, allowed, gen) => lanLoginCore?.onApprovalDecision(id, allowed, gen),
+        onApprovalDecision: (id, allowed, gen) => ctx.lanLoginCore?.onApprovalDecision(id, allowed, gen),
         stateDir: paths.stateDir,
         config: config.feishuBot,
         limit: cmdLimit,
@@ -1528,7 +1136,7 @@ export async function startHub(
                   ],
             ),
           managed: () =>
-            (spawnSup?.records() ?? []).flatMap((r) =>
+            (ctx.spawnSup?.records() ?? []).flatMap((r) =>
               r.sessionId === undefined ? [] : [{ sessionId: r.sessionId, cwd: r.cwd }],
             ),
         },
@@ -1539,8 +1147,8 @@ export async function startHub(
         ...(scheduleHub === undefined ? {} : { schedule: scheduleHub.port() }),
         events: {
           subscribe: (listener) => {
-            botSchedEventListener = listener;
-            botOnHello = (key) => {
+            ctx.botSchedEventListener = listener;
+            ctx.botOnHello = (key) => {
               evidence.delete(key);
               listener({ type: "agent_up", agentKey: key });
             };
@@ -1579,7 +1187,7 @@ export async function startHub(
               }
             });
             return () => {
-              botOnHello = undefined;
+              ctx.botOnHello = undefined;
               unsubscribe();
             };
           },
@@ -1588,9 +1196,10 @@ export async function startHub(
               .filter((slot) => registry.isConnected(slot.agentKey))
               .map(({ type: _type, ...slot }) => slot),
         },
-        ...(uploads === undefined ? {} : { uploads }),
+        ...(ctx.uploads === undefined ? {} : { uploads: ctx.uploads }),
         preview:
-          botPreview ?? createFsAdmitter({ denyCtx: previewDenyCtx, tracker: createPreviewIoTracker(), now, log }),
+          ctx.botPreview ??
+          createFsAdmitter({ denyCtx: ctx.previewDenyCtx, tracker: createPreviewIoTracker(), now, log }),
         ...(botSpawn === undefined ? {} : { spawn: botSpawn }),
         idleEvidence: (key) => {
           const sample = evidence.get(key),
@@ -1609,9 +1218,9 @@ export async function startHub(
         ...platformSeams,
       };
       const created = createFeishuBotService(botDeps);
-      bot = deps.feishuSeams?.wrapService?.(created, botDeps) ?? created;
-      if (lanDeps !== undefined) lanDeps.approval = bot.approval;
-      await startupStep(bot.start());
+      ctx.bot = deps.feishuSeams?.wrapService?.(created, botDeps) ?? created;
+      if (ctx.lanDeps !== undefined) ctx.lanDeps!.approval = ctx.bot.approval;
+      await startupStep(ctx.bot.start());
       startup.signal.throwIfAborted();
       // scheduled-reports H1 → F1 (§7.1–§7.5): hand over F1's own delivery half
       // (`service.schedule`: pushReport/pushNotice/receiptsFor/hasReceipt) — discovery, notices
@@ -1621,12 +1230,12 @@ export async function startHub(
       if (scheduleHub !== undefined) {
         scheduleHub.setBoundTap((agentKey, runKey) => {
           try {
-            botSchedEventListener?.({ type: "sched_bound", agentKey, runKey } as never);
+            ctx.botSchedEventListener?.({ type: "sched_bound", agentKey, runKey } as never);
           } catch {
             /* the bot's listener must never break the coordinator */
           }
         });
-        if (bot.schedule !== undefined) scheduleHub.bindDelivery(bot.schedule);
+        if (ctx.bot.schedule !== undefined) scheduleHub.bindDelivery(ctx.bot.schedule);
       }
     }
     // web-hub-delete-session plan v2 §2.9: the removal route frontend is wired UNCONDITIONALLY
@@ -1635,8 +1244,8 @@ export async function startHub(
     // `agentKey`-form requests fall straight to `registry.remove` (§2.4 row 6).
     const agentRemoveService = createAgentRemoveService({
       registry,
-      ...(spawnSup !== undefined && config.spawn !== undefined
-        ? { managed: { sup: spawnSup, lan: config.spawn.lan } }
+      ...(ctx.spawnSup !== undefined && config.spawn !== undefined
+        ? { managed: { sup: ctx.spawnSup, lan: config.spawn.lan } }
         : {}),
       log,
       now,
@@ -1645,23 +1254,23 @@ export async function startHub(
     // above, before the spawn assembly — see the comment there). Gated on the same
     // `config.privacy === true`; off ⇒ no routes, no `privacy` frame, no cap.
     let privacyRoutes: ReturnType<typeof createPrivacyRoutes> | undefined;
-    if (privacyStore !== undefined) {
+    if (ctx.privacyStore !== undefined) {
       privacyRoutes = createPrivacyRoutes({
-        store: privacyStore,
+        store: ctx.privacyStore,
         registry,
         // 「校验管线」(v2 评审 #3): the extracted `verifyPassword` rides the SAME LAN store/KDF/
         // limiter/admission instances login uses — fail-only limiter accounting lives inside
         // `verifyPassword` itself. Absent LAN assembly ⇒ verify 404s and LAN unlocks fail closed.
-        ...(lanDeps === undefined
+        ...(ctx.lanDeps === undefined
           ? {}
           : {
               verifyPassword: (userId: number, password: string, clientIp: string) =>
                 verifyPassword({ clientIp }, userId, password, {
-                  store: lanDeps.store,
-                  kdf: lanDeps.kdf,
-                  limiter: lanDeps.limiter,
-                  admission: lanDeps.admission,
-                  ...(lanDeps.kdfPolicy === undefined ? {} : { kdfPolicy: lanDeps.kdfPolicy }),
+                  store: ctx.lanDeps!.store,
+                  kdf: ctx.lanDeps!.kdf,
+                  limiter: ctx.lanDeps!.limiter,
+                  admission: ctx.lanDeps!.admission,
+                  ...(ctx.lanDeps!.kdfPolicy === undefined ? {} : { kdfPolicy: ctx.lanDeps!.kdfPolicy }),
                   onCorruptKdfParams: (username, reason) => {
                     log.error("web-hub privacy: corrupt kdf params (db-invalid:kdf)", { username, reason });
                   },
@@ -1674,7 +1283,7 @@ export async function startHub(
     // web-hub-version plan §3.5/§3.7: the version-info service (no resident timers; `dispose`d
     // on both teardown paths) and the served-UI identity sink (`HubInfo.ui` + one `hub` frame
     // per real change; `onUiStatus → hubJson.patchUi` below stays untouched).
-    versionService = createVersionInfoService({
+    ctx.versionService = createVersionInfoService({
       pkgRoot: packageRootDir(),
       info,
       now,
@@ -1683,7 +1292,7 @@ export async function startHub(
         if (closing === undefined) registry.publish({ type: "hub" });
       },
     });
-    const versionSvc = versionService;
+    const versionSvc = ctx.versionService;
     cleanup.push(async () => versionSvc.dispose());
     const sameUi = (a: HubUiBuildWire | undefined, b: HubUiBuildWire | undefined): boolean =>
       a === b || (a !== undefined && b !== undefined && JSON.stringify(a) === JSON.stringify(b));
@@ -1716,15 +1325,15 @@ export async function startHub(
         : {}),
       uploadMetrics,
       agentRemove: agentRemoveService,
-      ...(avatarRoutes === undefined ? {} : { avatar: avatarRoutes }),
+      ...(ctx.avatarRoutes === undefined ? {} : { avatar: ctx.avatarRoutes }),
       ...(privacyRoutes === undefined ? {} : { privacy: privacyRoutes }),
-      ...(uploads === undefined ? {} : { uploads }),
-      ...(spawnRoutes === undefined ? {} : { spawn: spawnRoutes }),
-      ...(previewRoutes === undefined ? {} : { preview: previewRoutes }),
-      ...(worktreeDiffRoutes === undefined ? {} : { worktreeDiff: worktreeDiffRoutes }),
-      ...(worktreeGraphRoutes === undefined ? {} : { worktreeGraph: worktreeGraphRoutes }),
+      ...(ctx.uploads === undefined ? {} : { uploads: ctx.uploads }),
+      ...(ctx.spawnRoutes === undefined ? {} : { spawn: ctx.spawnRoutes }),
+      ...(ctx.previewRoutes === undefined ? {} : { preview: ctx.previewRoutes }),
+      ...(ctx.worktreeDiffRoutes === undefined ? {} : { worktreeDiff: ctx.worktreeDiffRoutes }),
+      ...(ctx.worktreeGraphRoutes === undefined ? {} : { worktreeGraph: ctx.worktreeGraphRoutes }),
       ...(proxyRoutes === undefined ? {} : { proxy: proxyRoutes }),
-      ...(lanDeps === undefined ? {} : { lan: lanDeps }),
+      ...(ctx.lanDeps === undefined ? {} : { lan: ctx.lanDeps }),
       // fleet-drawer plan §5.3 (F3b): the run-transcript service — F4's `createRunRoutes`
       // reads it through this dep (absent ⇒ no `/api/run/*` wiring, byte-identical today).
       runTx,
@@ -1735,28 +1344,28 @@ export async function startHub(
     if (scheduleHub !== undefined) {
       (frontendDeps as FrontendDeps & { schedules?: typeof scheduleHub }).schedules = scheduleHub;
     }
-    fe = frontend(frontendDeps);
-    cleanup.push(() => fe.close());
+    ctx.fe = frontend(frontendDeps);
+    cleanup.push(() => ctx.fe.close());
     // web-hub-preview plan v3 §4.5.1 (PV3): pushed right after the frontend's own entry so the
     // startup-failure reverse-order unwind runs preview dispose BEFORE `fe.close()` — the same
     // domain-first order the runtime `close()` path below uses; before the spawn push so the two
     // unwind in the same relative order as the runtime path (spawn shutdown → preview dispose →
     // fe.close).
-    if (previewRoutes !== undefined) {
-      cleanup.push(() => previewRoutes.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
+    if (ctx.previewRoutes !== undefined) {
+      cleanup.push(() => ctx.previewRoutes!.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
     }
-    if (avatarRoutes !== undefined) {
-      cleanup.push(() => avatarRoutes.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
+    if (ctx.avatarRoutes !== undefined) {
+      cleanup.push(() => ctx.avatarRoutes!.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
     }
     // worktree-diff plan §1.6 (D3): right after preview's push — the startup-failure unwind
     // disposes wtdiff AFTER preview and BEFORE `fe.close()`, mirroring the runtime order below.
-    if (worktreeDiffRoutes !== undefined) {
-      cleanup.push(() => worktreeDiffRoutes.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
+    if (ctx.worktreeDiffRoutes !== undefined) {
+      cleanup.push(() => ctx.worktreeDiffRoutes!.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
     }
     // worktree-graph plan v2 §2.6 (P2): right after wtdiff's push — the startup-failure unwind
     // disposes wtgraph AFTER wtdiff and BEFORE `fe.close()`, mirroring the runtime order below.
-    if (worktreeGraphRoutes !== undefined) {
-      cleanup.push(() => worktreeGraphRoutes.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
+    if (ctx.worktreeGraphRoutes !== undefined) {
+      cleanup.push(() => ctx.worktreeGraphRoutes!.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
     }
     // web-hub-spawn §SP10 (startup-failure path only — the runtime close() path wires its own
     // call inside `close`): pushed right after the frontend's entry so reverse-order release
@@ -1766,13 +1375,13 @@ export async function startHub(
     // entry inside the spawn assembly — on failures past this point it runs FIRST (SP13
     // order preserved); on earlier failures the early entry already ran it and this call is
     // the same settled promise (exactly-once either way).
-    if (spawnShutdownOnce !== undefined) {
-      cleanup.push(() => spawnShutdownOnce!());
+    if (ctx.spawnShutdownOnce !== undefined) {
+      cleanup.push(() => ctx.spawnShutdownOnce!());
     }
     // §2.2.4: the startup scan never blocks listen(); `begin` answers 503 E_BUSY until it lands.
-    if (uploads !== undefined) {
-      void uploads
-        .recover()
+    if (ctx.uploads !== undefined) {
+      void ctx
+        .uploads!.recover()
         .catch((err: unknown) =>
           log.error("web-hub: upload startup recovery rejected unexpectedly", { error: String(err) }),
         );
@@ -1780,13 +1389,13 @@ export async function startHub(
     // §6.7.1: "恢复后无条件 auth.reload()，双保险" — cheap even when nothing was recovered (the very
     // next real call is `auth.token()` inside `fe.listen()` below, so there is nothing cached yet
     // in the startup path; this still matters once the periodic scan reuses the same helper).
-    (fe as HttpFrontendExt).auth?.reload();
+    (ctx.fe as HttpFrontendExt).auth?.reload();
 
     // C10: assemble version replacement after the command router and frontend exist.
     // The socket can already accept hello; tests hold ui.refresh below to exercise early close.
     // Cancel handles for in-flight acc32-B9 dialogs-handshake waits — drained on close/dispose
     // so a pending one-shot bus subscription never outlives the hub.
-    supersede = createSupersede({
+    ctx.supersede = createSupersede({
       hubVersion: config.pluginVersion,
       now,
       ...(paths.stoppedFile === undefined ? {} : { stopFile: paths.stoppedFile }),
@@ -1802,7 +1411,7 @@ export async function startHub(
       // replacing the hub under a busy web-spawned agent ends that session with the stdin EOF.
       // SP13（SP10 验收遗留评估）：busy 分量并入首条消息在途/退避重发计数（`sending` 状态）——
       // 一条尚未送达的首条消息同样会被 hub 替换的 stdin EOF 打断，绝不计为 quiet。
-      managedBusy: () => (spawnSup?.busyCount() ?? 0) + (firstPromptFwd?.sendingCount() ?? 0),
+      managedBusy: () => (ctx.spawnSup?.busyCount() ?? 0) + (ctx.firstPromptFwd?.sendingCount() ?? 0),
       // acc32-B9: a reliable handshake for the first quiet judgment after a hello — resolve
       // immediately if the registry already has *any* dialogs snapshot for this agent (a
       // reclaimed/reconnected Rec whose `dialogs` field survived the reconnect, §registry.ts
@@ -1815,14 +1424,14 @@ export async function startHub(
           const finish = (): void => {
             if (settled) return;
             settled = true;
-            supersedeWaitCancels.delete(finish);
+            ctx.supersedeWaitCancels.delete(finish);
             clearTimeout(timer);
             unsubscribe();
             resolve();
           };
           // Registered so hub close/dispose can cancel a still-pending handshake wait
           // immediately instead of leaking the bus subscription until the timeout fires.
-          supersedeWaitCancels.add(finish);
+          ctx.supersedeWaitCancels.add(finish);
           const unsubscribe = registry.bus.subscribe((e) => {
             if (e.type === "dialogs" && e.agentKey === agentKey) finish();
           });
@@ -1851,7 +1460,7 @@ export async function startHub(
       audit: (op, fields) => log.info("web-hub admin op", { audit: "admin", op, ...fields }),
       log,
       restart: async ({ nextVersion, forced, openDialogs, inflightAtDrain }) => {
-        if (bot !== undefined) await stopBot(); // also precedes forced command-router drain.
+        if (ctx.bot !== undefined) await stopBot(); // also precedes forced command-router drain.
         info.state = "restarting";
         info.nextVersion = nextVersion;
         info.supersedePending = true;
@@ -1888,26 +1497,26 @@ export async function startHub(
         await close("superseded");
       },
     });
-    supersedeTimer = setInterval(() => supersede?.tick(), 250);
-    supersedeTimer.unref();
+    ctx.supersedeTimer = setInterval(() => ctx.supersede?.tick(), 250);
+    ctx.supersedeTimer.unref();
     // acc32-B9 defense in depth: re-check quiet immediately whenever a `dialogs` slot changes
     // (a dialog opening OR closing), rather than relying solely on the 250ms periodic tick —
     // this is on top of (not instead of) `observe()`'s own deferred first check above.
-    unsubscribeSupersedeOnDialogs = registry.bus.subscribe((e) => {
-      if (e.type === "dialogs") supersede?.tick();
+    ctx.unsubscribeSupersedeOnDialogs = registry.bus.subscribe((e) => {
+      if (e.type === "dialogs") ctx.supersede?.tick();
     });
     cleanup.push(async () => {
-      unsubscribeSupersedeOnDialogs();
-      if (supersedeTimer !== undefined) clearInterval(supersedeTimer);
-      for (const cancel of [...supersedeWaitCancels]) cancel();
-      supersede?.dispose();
+      ctx.unsubscribeSupersedeOnDialogs();
+      if (ctx.supersedeTimer !== undefined) clearInterval(ctx.supersedeTimer);
+      for (const cancel of [...ctx.supersedeWaitCancels]) cancel();
+      ctx.supersede?.dispose();
     });
     const scanRotateIntent = async (): Promise<void> => {
       if (closing !== undefined) return;
       const revokeLan =
-        lanDeps === undefined
+        ctx.lanDeps === undefined
           ? undefined
-          : async (): Promise<number> => (await (lanDeps!.store as Partial<LanStore>).revokeAllSessions?.()) ?? 0;
+          : async (): Promise<number> => (await (ctx.lanDeps!.store as Partial<LanStore>).revokeAllSessions?.()) ?? 0;
       const outcome = await recoverRotateIntent({
         paths: {
           tokenFile: paths.tokenFile,
@@ -1924,16 +1533,16 @@ export async function startHub(
         audit: (fields) => log.info("web-hub admin op", { audit: "admin", op: "rotate_token", ...fields }),
       });
       if (closing !== undefined || !outcome.recovered) return;
-      (fe as HttpFrontendExt).auth?.reload();
-      (fe as HttpFrontendExt).revokeAllSse?.();
+      (ctx.fe as HttpFrontendExt).auth?.reload();
+      (ctx.fe as HttpFrontendExt).revokeAllSse?.();
       if (outcome.lanBlocked === true) {
         lanBlockedByRotate = true;
-        if (fe.lan !== undefined) {
+        if (ctx.fe.lan !== undefined) {
           lanClosedByRotateScan = true;
           log.warn(
             "web-hub: closing the LAN listener (rotate revoke failed); run /webhub restart to re-open it once the pending rotate completes",
           );
-          void fe.lan
+          void ctx.fe.lan
             .close()
             .catch((err: unknown) =>
               log.error("web-hub: failed to close LAN listener after rotate revoke failure", { error: String(err) }),
@@ -1942,13 +1551,13 @@ export async function startHub(
         hubJson.patchLan({ state: "off", reason: "rotate-pending" });
         return;
       }
-      if (fe.lan !== undefined) {
-        (fe.lan as LanFacadeExt | undefined)?.revokeAll?.();
-        (fe as HttpFrontendExt).bumpLanRevokeGen?.();
+      if (ctx.fe.lan !== undefined) {
+        (ctx.fe.lan as LanFacadeExt | undefined)?.revokeAll?.();
+        (ctx.fe as HttpFrontendExt).bumpLanRevokeGen?.();
       }
-      if (lanBlockedByRotate && fe.lan !== undefined && !lanClosedByRotateScan) {
+      if (lanBlockedByRotate && ctx.fe.lan !== undefined && !lanClosedByRotateScan) {
         lanBlockedByRotate = false;
-        void fe.lan.start().then(
+        void ctx.fe.lan.start().then(
           (s) => hubJson.patchLan(s),
           (err: unknown) =>
             log.error("web-hub: LAN start() (post rotate-pending recovery) rejected unexpectedly", {
@@ -1957,13 +1566,14 @@ export async function startHub(
         );
       }
     };
-    recoverRotateOnHello = () => {
+    ctx.recoverRotateOnHello = () => {
       void scanRotateIntent().catch((err: unknown) =>
         log.error("web-hub: hello rotate-intent scan failed", { error: String(err) }),
       );
     };
 
-    httpPort = (await startupStep(fe.listen({ signal: startup.signal }), () => fe.close())).port; // ⑥
+    httpPort = (await startupStep(ctx.fe.listen({ signal: startup.signal }), () => ctx.fe.close())).port; // ⑥
+    ctx.httpPort = httpPort;
     startup.signal.throwIfAborted();
 
     // web-hub-proxy plan v2 §3.4/§12 (X1c): the service needs the ACTUAL bound ports (the
@@ -1982,18 +1592,18 @@ export async function startHub(
             stateDir: paths.stateDir,
             hubPort: httpPort,
             ...(config.lan === undefined ? {} : { lanPort: config.lan.port }),
-            lanHostSnapshot: () => (fe as HttpFrontendExt).lanHostSnapshot?.(),
+            lanHostSnapshot: () => (ctx.fe as HttpFrontendExt).lanHostSnapshot?.(),
             log,
             now,
           }),
           (late) => late.dispose(),
         );
-        proxyService = created;
+        ctx.proxyService = created;
         cleanup.push(() => created.dispose());
         // §4.2: the service's revocation hook rides the frontend's bus; unsubscribed on close.
-        const unsubscribe = (fe as HttpFrontendExt).subscribeAuthRevoke?.((ev) => created.revoke(ev));
+        const unsubscribe = (ctx.fe as HttpFrontendExt).subscribeAuthRevoke?.((ev) => created.revoke(ev));
         if (unsubscribe !== undefined) {
-          unsubscribeProxyRevoke = unsubscribe;
+          ctx.unsubscribeProxyRevoke = unsubscribe;
           cleanup.push(async () => unsubscribe());
         }
       } catch (err) {
@@ -2010,7 +1620,7 @@ export async function startHub(
     // first `refresh()` call is also what fires `onUiStatus` for the initial status (wired above), so
     // `hubJson`'s `pendingUi` picks it up before `write()` below even runs (same queue-before-first-
     // write race `lan`'s `onStatus` already relies on, §2.1's "诊断" bullet).
-    const initialUi = await startupStep(fe.ui.refresh());
+    const initialUi = await startupStep(ctx.fe.ui.refresh());
     startup.signal.throwIfAborted();
 
     const initialLan: LanStatus | undefined =
@@ -2036,12 +1646,12 @@ export async function startHub(
                 reason: lanAssemblyOff.reason,
                 ...(lanAssemblyOff.detail === undefined ? {} : { detail: lanAssemblyOff.detail }),
               }
-            : fe.lan !== undefined
+            : ctx.fe.lan !== undefined
               ? { state: "starting" }
               : undefined;
     let initialSpawn: { count: number; reason?: string } | undefined;
-    if (spawnSup !== undefined) {
-      initialSpawn = spawnStatusOf(spawnSup);
+    if (ctx.spawnSup !== undefined) {
+      initialSpawn = spawnStatusOf(ctx.spawnSup);
       lastSpawnStatus = initialSpawn;
     }
     // web-hub-privacy plan v2.1 (P3): surface the store's load-time `degraded` flag through
@@ -2050,11 +1660,11 @@ export async function startHub(
     // write() — no patchPrivacy needed. Key absent when the feature is off (hub.json stays
     // byte-identical to a hub without the feature).
     const initialPrivacy =
-      config.privacy === true && privacyStore !== undefined ? { degraded: privacyStore.degraded } : undefined;
+      config.privacy === true && ctx.privacyStore !== undefined ? { degraded: ctx.privacyStore.degraded } : undefined;
     // web-hub-proxy (X1c): `/webhub status` reads the ports-store state from hub.json. Key absent
     // when the proxy is off (hub.json byte-identical); `unavailable` construction ⇒ no key either.
     const proxyStatusOf = (): HubRecord["proxy"] | undefined => {
-      const st = proxyService?.status?.();
+      const st = ctx.proxyService?.status?.();
       return st === undefined ? undefined : { portsStore: st.portsStore };
     };
     let lastProxyPortsStore = proxyStatusOf()?.portsStore;
@@ -2087,8 +1697,8 @@ export async function startHub(
     clearTimeout(startTimer); // startup complete; further cancellation is close()'s job
     // web-hub-version plan §3.5: one-shot, silent-on-failure boot HEAD observation (git, bounded,
     // aborted by dispose); broadcasts one `hub` frame when it lands.
-    versionService.captureBootHead();
-    if (fe.lan !== undefined && !lanBlockedByRotate) {
+    ctx.versionService.captureBootHead();
+    if (ctx.fe.lan !== undefined && !lanBlockedByRotate) {
       // Review fix (LC, plan §1.4/§3, W3 acceptance item 1/3): `LanFacade.start()` is bounded by
       // its own `LAN_START_DEADLINE_MS` and always *resolves* with a correctly classified
       // `LanStatus` (`off/timeout`, `off/listen-failed`, ...) instead of rejecting for any
@@ -2096,7 +1706,7 @@ export async function startHub(
       // causes (e.g. a port conflict) behind the wrong reason. A rejection reaching this handler
       // therefore means something escaped that classification (a genuine bug in `start()` itself),
       // so log it loudly rather than writing a second, silently-wrong guess into `hub.json`.
-      void fe.lan.start().then(
+      void ctx.fe.lan.start().then(
         (s) => hubJson.patchLan(s),
         (err: unknown) => {
           log.error("web-hub: LAN start() rejected unexpectedly (not a classified LanStatus)", {
@@ -2109,7 +1719,7 @@ export async function startHub(
 
     log.info("hub started", { pid: process.pid, port: httpPort, socket: paths.socketPath, version: info.version });
 
-    tick = setInterval(() => {
+    ctx.tick = setInterval(() => {
       try {
         registry.tick(now());
       } catch (err) {
@@ -2129,7 +1739,7 @@ export async function startHub(
         }
       }
     }, REGISTRY_TICK_MS);
-    tick.unref();
+    ctx.tick.unref();
 
     // \u00a76.7.1 (C8) "hub \u8fd0\u884c\u671f" row: every `ROTATE_SCAN_MS` (unref), re-run the same
     // recovery helper against whatever is on disk right now \u2014 catches an intent this hub process
@@ -2137,57 +1747,57 @@ export async function startHub(
     // previously-`lanBlocked` revoke once the LAN store is healthy again. NOTE (delivery report):
     // The same recovery helper is also invoked by agent-server.ts on every
     // successful hello; this timer covers offline rotations and quiet periods.
-    rotateScan = setInterval(() => {
+    ctx.rotateScan = setInterval(() => {
       void scanRotateIntent().catch((err: unknown) =>
         log.error("web-hub: periodic rotate-intent scan failed", { error: String(err) }),
       );
     }, ROTATE_SCAN_MS);
-    rotateScan.unref();
+    ctx.rotateScan.unref();
 
     // web-hub-upload plan §2.6 (U3): upload lifecycle ticks (both unref'd). The 60s tick covers
     // idle in-flight invalidation (10 min TTL) and retries dirty `referencedAt` persistence
     // (sweep() always flushes dirty references first); the 30-min tick additionally writes the
     // §5.4 `upload stats` aggregate row. `sweep("tick")`'s committed-file TTL eviction is
     // exact-time based, so running it at both cadences changes nothing semantically.
-    uploadInflightTick =
-      uploads === undefined
+    ctx.uploadInflightTick =
+      ctx.uploads === undefined
         ? undefined
         : setInterval(() => {
-            void uploads
-              .sweep("tick")
+            void ctx
+              .uploads!.sweep("tick")
               .catch((err: unknown) => log.error("web-hub: upload sweep tick failed", { error: String(err) }));
           }, UPLOAD_INFLIGHT_TICK_MS);
-    uploadInflightTick?.unref();
-    uploadSweepTick =
-      uploads === undefined
+    ctx.uploadInflightTick?.unref();
+    ctx.uploadSweepTick =
+      ctx.uploads === undefined
         ? undefined
         : setInterval(() => {
-            void uploads
-              .sweep("tick")
+            void ctx
+              .uploads!.sweep("tick")
               .then(() => {
                 log.info("upload stats", {
                   audit: "upload-stats",
-                  ...uploadStatsFields(uploads!.stats(), uploadMetrics.snapshot()),
+                  ...uploadStatsFields(ctx.uploads!.stats(), uploadMetrics.snapshot()),
                 });
               })
               .catch((err: unknown) => log.error("web-hub: upload sweep tick failed", { error: String(err) }));
           }, UPLOAD_SWEEP_TICK_MS);
-    uploadSweepTick?.unref();
+    ctx.uploadSweepTick?.unref();
 
-    stopFence = startFence(paths.socketPath, owner.identity, (why) => {
+    ctx.stopFence = startFence(paths.socketPath, owner.identity, (why) => {
       log.warn("socket fence lost: another hub owns the socket path", { why });
       void close("fence");
     });
 
-    idle = createIdleMonitor({
+    ctx.idle = createIdleMonitor({
       counts: () => ({
-        agents: Math.max(agentServer?.connectionCount() ?? 0, registry.list().length),
+        agents: Math.max(ctx.agentServer?.connectionCount() ?? 0, registry.list().length),
         // web-hub-proxy §3.4 (X1c): a working proxy tab (open sockets) keeps the hub alive.
-        sse: fe.clientCount() + (proxyService?.activeConnections() ?? 0),
+        sse: ctx.fe.clientCount() + (ctx.proxyService?.activeConnections() ?? 0),
         // web-hub-spawn plan §SP10 (arch §7.8 "idle 自退"): a live managed child keeps the
         // hub alive — the absolute lifetime deadline (§6.5 maxLifetimeMinutes) is the backstop.
-        headless: spawnSup?.liveCount() ?? 0,
-        ...(bot === undefined ? {} : { bot: bot.keepalive() ? 1 : 0 }),
+        headless: ctx.spawnSup?.liveCount() ?? 0,
+        ...(ctx.bot === undefined ? {} : { bot: ctx.bot.keepalive() ? 1 : 0 }),
       }),
       idleMs: Math.max(1, config.idleExitMinutes) * 60_000,
       now,
@@ -2211,18 +1821,18 @@ export async function startHub(
         await botStopped; // FIRST cleanup operation: connector must stop ACKing before any teardown.
         unsubscribeBotSlots();
         log.info("hub closing", { reason });
-        unsubscribeSupersedeOnDialogs();
+        ctx.unsubscribeSupersedeOnDialogs();
         unsubscribeDbRestart();
-        for (const cancel of [...supersedeWaitCancels]) cancel();
-        supersede?.dispose();
-        if (supersedeTimer !== undefined) clearInterval(supersedeTimer);
-        stopFence();
-        idle.stop();
-        versionService?.dispose();
-        if (tick !== undefined) clearInterval(tick);
-        if (rotateScan !== undefined) clearInterval(rotateScan);
-        if (uploadInflightTick !== undefined) clearInterval(uploadInflightTick);
-        if (uploadSweepTick !== undefined) clearInterval(uploadSweepTick);
+        for (const cancel of [...ctx.supersedeWaitCancels]) cancel();
+        ctx.supersede?.dispose();
+        if (ctx.supersedeTimer !== undefined) clearInterval(ctx.supersedeTimer);
+        ctx.stopFence();
+        ctx.idle.stop();
+        ctx.versionService?.dispose();
+        if (ctx.tick !== undefined) clearInterval(ctx.tick);
+        if (ctx.rotateScan !== undefined) clearInterval(ctx.rotateScan);
+        if (ctx.uploadInflightTick !== undefined) clearInterval(ctx.uploadInflightTick);
+        if (ctx.uploadSweepTick !== undefined) clearInterval(ctx.uploadSweepTick);
         // web-hub-spawn plan §SP10 (arch §7.6): the spawn domain shuts down BEFORE the HTTP
         // face stops accepting — supervisor.shutdown is itself bounded (graceful wait budget
         // deriveBudget(r,3000,6500) ⇒ 0 on the crash deadline; verified SIGTERM to survivors;
@@ -2230,11 +1840,11 @@ export async function startHub(
         // LAST so its EOF-armed TERM→KILL escalation covers whatever outlives this process).
         // The forwarder is disposed first: unsent first prompts become `expired{hub_restart}`
         // (arch §4.6) while the bus is still live enough for the final `spawns` push.
-        firstPromptFwd?.dispose("hub_restart");
+        ctx.firstPromptFwd?.dispose("hub_restart");
         // web-hub-spawn-restore plan §10.4: reason → mode, in this ONE place (D2).
-        if (spawnSup !== undefined) {
+        if (ctx.spawnSup !== undefined) {
           const mode = config.spawn?.restore === true && RESTORE_REASONS.has(reason) ? "restore" : "terminate";
-          await spawnSup.shutdown(deadline, { mode });
+          await ctx.spawnSup.shutdown(deadline, { mode });
         }
         // session-history plan v3.3 W3 / X3.4 #4: history dispose — AFTER the spawn supervisor
         // shut down, BEFORE the HTTP face stops accepting. Awaited and bounded at 2.5s: dispose
@@ -2244,43 +1854,43 @@ export async function startHub(
         // cleanup array holds the same underlying promise. (The fleet-history dispose above used
         // to run un-awaited only after the HTTP frontend had already closed — moved up into this
         // same window so both history services tear down domain-first.)
-        if (spawnHistory !== undefined) await bounded(spawnHistory.dispose(), HISTORY_SERVICE_DISPOSE_MS);
+        if (ctx.spawnHistory !== undefined) await bounded(ctx.spawnHistory.dispose(), HISTORY_SERVICE_DISPOSE_MS);
         history.dispose();
         // web-hub-preview plan v3 §4.5.1 (PV3): preview dispose — after the spawn domain shuts
         // down, BEFORE the HTTP face stops accepting. Bounded (≤1s inside dispose itself:
         // verifier tasks aborted, every active request aborted "hub-close", head-sent streams
         // destroyed) and idempotent (shares the startup-failure promise).
-        if (previewRoutes !== undefined) await bounded(previewRoutes.dispose("close", deadline));
+        if (ctx.previewRoutes !== undefined) await bounded(ctx.previewRoutes!.dispose("close", deadline));
         // worktree-diff plan §1.6 (D3): after preview dispose, still BEFORE the HTTP face stops
         // accepting — aborts every in-flight request and single-flight git execution, waits
         // ≤1 s, idempotent (shares the startup-failure promise).
-        if (worktreeDiffRoutes !== undefined) await bounded(worktreeDiffRoutes.dispose("close", deadline));
+        if (ctx.worktreeDiffRoutes !== undefined) await bounded(ctx.worktreeDiffRoutes!.dispose("close", deadline));
         // worktree-graph plan v2 §2.6 (P2): after wtdiff dispose, still BEFORE the HTTP face
         // stops accepting — same bounded/idempotent contract.
-        if (worktreeGraphRoutes !== undefined) await bounded(worktreeGraphRoutes.dispose("close", deadline));
-        if (avatarRoutes !== undefined) await bounded(avatarRoutes.dispose("close", deadline));
+        if (ctx.worktreeGraphRoutes !== undefined) await bounded(ctx.worktreeGraphRoutes!.dispose("close", deadline));
+        if (ctx.avatarRoutes !== undefined) await bounded(ctx.avatarRoutes!.dispose("close", deadline));
         // web-hub-proxy §3.4 (X1c): unsubscribe the revocation hook, then the irreversible
         // closing fence (destroys every proxied socket, closes the proxy listeners) — BEFORE the
         // HTTP face stops accepting, bounded, idempotent (shares the startup-failure promise).
-        unsubscribeProxyRevoke();
-        if (proxyService !== undefined) await bounded(proxyService.dispose());
-        await bounded(fe.close());
+        ctx.unsubscribeProxyRevoke();
+        if (ctx.proxyService !== undefined) await bounded(ctx.proxyService.dispose());
+        await bounded(ctx.fe.close());
         // web-hub-upload plan §2.6 #13 (U3): AFTER the frontend has stopped accepting requests
         // (srv.close + closeAllConnections), poison+reap in-flight upload dirs (committed files
         // are retained) before the rest of the teardown. The crash path may not reach this —
         // those orphans are the next startup's sweep("startup") job (§2.2.4).
-        if (uploads !== undefined) await bounded(uploads.close());
+        if (ctx.uploads !== undefined) await bounded(ctx.uploads!.close());
         // web-hub-privacy plan v2.1 (P1): drain the privacy store's write chain AFTER the
         // frontend stopped accepting requests (no new mutations can start), same posture as the
         // upload store above. The chain itself carries no timers; close() never rejects.
-        if (privacyStore !== undefined) await bounded(privacyStore.close());
+        if (ctx.privacyStore !== undefined) await bounded(ctx.privacyStore.close());
         // fleet-drawer plan §5.3 (F3b): explicit runtime-path dispose (the cleanup array is
         // startup-failure-only, upload plan #13) — service first (drops the bus subscription
         // and held watches), then the reader (fails in-flight scans as `busy`).
         runTx.dispose();
         runFileReader.dispose();
         xsRelay?.dispose();
-        if (agentServer !== undefined) await bounded(agentServer.close());
+        if (ctx.agentServer !== undefined) await bounded(ctx.agentServer.close());
         await bounded(rootScope.dispose());
         await bounded(owner.release());
         hubJson.removeIfOurs();
@@ -2302,7 +1912,7 @@ export async function startHub(
       httpPort,
       info,
       identity: owner.identity,
-      ...(fe.lan === undefined ? {} : { lan: fe.lan }),
+      ...(ctx.fe.lan === undefined ? {} : { lan: ctx.fe.lan }),
       lanStatus: () => hubJson.current()?.lan,
       close,
       closed,

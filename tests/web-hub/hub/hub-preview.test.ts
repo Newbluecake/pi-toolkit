@@ -261,7 +261,7 @@ describe("hub assembly × preview dispose wiring (§4.5.1)", () => {
     const closeBody = src.slice(src.indexOf("hub closing"));
     const at = {
       spawn: closeBody.indexOf("spawnSup.shutdown"),
-      preview: closeBody.indexOf('previewRoutes.dispose("close"'),
+      preview: closeBody.indexOf('previewRoutes!.dispose("close"'),
       fe: closeBody.indexOf("fe.close"),
     };
     expect(at.spawn).toBeGreaterThan(-1);
@@ -401,8 +401,8 @@ describe("hub assembly × worktree-diff wiring (D3, §1.6)", () => {
     const closeBody = src.slice(src.indexOf("hub closing"));
     const at = {
       spawn: closeBody.indexOf("spawnSup.shutdown"),
-      preview: closeBody.indexOf('previewRoutes.dispose("close"'),
-      wtdiff: closeBody.indexOf('worktreeDiffRoutes.dispose("close"'),
+      preview: closeBody.indexOf('previewRoutes!.dispose("close"'),
+      wtdiff: closeBody.indexOf('worktreeDiffRoutes!.dispose("close"'),
       fe: closeBody.indexOf("fe.close"),
     };
     expect(at.spawn).toBeGreaterThan(-1);
