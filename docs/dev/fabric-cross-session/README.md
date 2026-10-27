@@ -226,6 +226,73 @@ before any pi peer bump). The three off goldens and `tests/fixtures/legacy-xs-v0
 (hand-deleted file ⇒ fresh table, display name equal to an unreachable alias, >20 aliases truncate list, cooling only mitigates stale-list mis-sends,
 `lost` notice once per process, preview discloses holder cwd/offline time).
 
+**Force takeover + cwd-basename auto alias (#72, `alias-force-default-plan.md` r2 — the 「用户拍板」 and 「r2 修订对照表」 at its end override the
+body; packages AF0–AF4/AFU/AFW/AF6, reports `AF*-report.md`; AF7 `/new` handoff is NOT in yet)**: everything above stays; this layer is additive and
+gated on the cap `xs.alias.v2` (both surfaces, same condition as v1, declared right after it; no PROTO bump).
+
+- **`--force`**: `/fabric alias <名> --force` is PREVIEW ONLY and mutually exclusive with `--take`/`--take=<t>`/`--clear` (any combination or
+  `--force=x` ⇒ usage error, zero requests). Unlike `--take` it works on an ONLINE or just-offline holder. TUI: `ctx.ui.confirm` (title
+  `强制抢占别名「x」？`, detail names the holder's cwd, 「（自动认领）」 when the record's `origin` is `auto`, online / offline time, and that later
+  messages re-route); web/RPC: the same text ending with the unchanged fixed `XS_ALIAS_TAKE_CONFIRM_RE` line. Execution is the existing
+  `--take=<token>`; the token carries `mode:"force"` + `presenceKey` (`on` | `off:<offlineSince>`), a mode=take token never executes as force and vice
+  versa, every outcome consumes it. A `--take` refusal (`online`/`recent`) or a `set` on a taken name appends the `--force` pointer when the hub is v2
+  (D5). Hub order in the transaction: token + `R.sessionId===H` + `R.rev` + presence + `notifiable(H)` re-checked at execute AND before rename.
+- **Presence is three-state** (hub read-time): `xs-online` (an effective xs member) / `linked` (connected, phase≠stale, same sessionId, but no xs
+  member — xs off, or not yet published) / `offline`. `take`, lease expiry and `offlineSince` still look at xs-online only (the 10-minute rule is
+  unchanged); `linked` exists for force. `notifiable(H)` = offline, or xs-online with EVERY effective member declaring `xs.alias.v2`; linked ⇒ never.
+  Unnotifiable ⇒ `E_XS_ALIAS_TAKE{unnotifiable}` (「持有会话在线但无法实时通知…请待其离线 ≥10 分钟后用 --take」); only `--take` remains.
+- **Real-time notice**: after the commit (also a wedged rename that lands late; never a late failure) the hub pushes `xs_alias_evt{sessionId,at}` — no
+  alias text — to every v2 effective member of the evicted session; the agent only answers it with a `get` reconcile, which yields `lost{taken, forced:true}`
+  and the one-shot 「别名…已被其他会话强制抢占（对方已人工确认）」 notice (same per-process `(sid, lost.at)` dedup as the plain lost notice; `StatusInfo`
+  is untouched, `publishStatus()` clears the card's `@alias`). The tombstone (`taken`, optional `forced:true`) remains the fallback if the push is lost.
+- **Auto alias** (`fabric.crossSession.alias.autoFromCwd`, default **true**, non-live, agent-side only — never written into the hub config; it is the only
+  crossSession key in `/agent settings`): after a `get` that was applied and says `none`, a main session that is joined, not `decided`, on a v2 hub,
+  derives `deriveAliasFromDirName(cwd basename)` (NFKC → illegal code points to `-` → trim → ≤16 clusters/≤48 bytes; `/`, `$HOME`, tmpdir, reserved
+  prefixes such as this repo's `pi-toolkit` and id-like names are SKIPPED, never prefixed/suffixed/stripped) and sends `intent:"auto"`. The hub only
+  CREATES a record (`origin:"auto"`): refused (`TAKEN`, a synchronous pre-check that does not use the queue) while the name has any held record (expired
+  included) or live cooling, or while the session owns a held/live-cooling record or a tombstone younger than 30 days. Dedup key
+  `(connGen, sessionId, membershipEpoch)`; `BUSY{queue|io}` retried once after 1–5 s (unref'd, `clampSpanMs`); one-shot success notice through its own
+  process set `pi-subagent:xs-alias-auto-noticed` (≤32). Sub-sessions have no xs bridge and never auto; secure (D8) forces xs off.
+  `/fabric status`: `alias @x held (auto) · lease …` and `alias - · auto skip:<off|decided|not-joined|dir|invalid|taken|busy>` (English tokens). With
+  `autoFromCwd=false` or a non-v2 hub the status lines are byte-identical to the v1 build.
+- **「decided」mark**: custom session entry `subagent:xs-alias-decided {v:1,sessionId,at,via:set|clear|take|force|inherit}`, read from
+  `sessionManager.getEntries()` (NOT `getBranch()`: `/tree` must not undo a human decision; a fork's copied entries carry the old sid and are ignored).
+  Written BEFORE the xs_req leaves (memory flag + `appendEntry`; a failing append is swallowed and a throwing `markDecided` never blocks the write)
+  by `set`, `clear` (also on a session with no alias — the explicit 「关闭目录名自动别名」), and by TUI-confirmed or `--take=<token>` execution;
+  failed human writes count too (D6). Reads, previews, a cancelled confirm and Feishu do not. Survives `/reload`, resume and hub restart.
+- **Invariants** (extend alias-plan r4 §3.1): **I5′** (replaces I5 「online holder is never taken」) — someone else's held record moves only by human
+  `take` (holder xs-offline ≥ takeMin), human `force`, `set` over an EXPIRED record, or (AF7) `handoff`; `take`/`force` re-check the token tuple at
+  execute and before rename, and **an online holder can be forced only if it is notifiable**. **I7** — `auto` only creates; it never edits, moves or
+  demotes a record (step G is a no-op for it). **I8** — decided is write-before-send, so a human op always lands after an in-flight auto (FIFO per
+  connection). **I9** — a committed force pushes `xs_alias_evt` to each v2 member of the evicted session; push failure never rolls back. **I10** — `handoff`
+  (AF7) moves a name only along a same-connection predecessor edge ≤120 s old, from an `offline` previous session, without tombstone/cooling.
+- **r4 §5.2 revised**: it is no longer true that an evicted holder is always offline. A `send` pins the full sessionId at resolve time; if a force lands
+  between resolve and send the message still goes to the holder it was resolved to (online ⇒ delivered; offline ⇒ `NO_TARGET`) — never to the new holder.
+- **Mixed fleets** (additive wire; old keys never change): new agent × v1 hub ⇒ no `intent` frame is ever sent (a `xs_req` with unknown fields would be
+  dropped whole by the old hub's strict schema), auto/force are off locally (`--force` ⇒ 「hub 不支持强制抢占，需 /webhub restart」), `--take`/`set`/
+  delivery unchanged; old agent × new hub ⇒ the hub writes it no new keys and pushes nothing, it cannot be forced while online, and when it comes back
+  it gets the legacy `lost{taken}` (no `forced`). The file keeps `version:1` with optional `origin`/`forced` keys only; an older hub reads such a file
+  without degrading (and drops the keys at its next write).
+- **Gates**: `tests/integration/fabric-xs-alias-v2.test.ts` (AF6: real hub child × 3 stacks; fixture knobs `XW_CWD`, `XW_TUI_CONFIRM`, `XW_STRIP_V2`,
+  `XW_HUB_STRIP_V2` in `helpers/fabric-xs-process.ts` strip `xs.alias.v2` from the peer's own handshake caps so the other side sees a pre-v2 agent/hub
+  on the wire), `fabric-xs-alias-wiring.test.ts` (real `activate()` × fake hub socket), `tests/web-hub/hub/xs-aliases-v2*.test.ts`,
+  `xs-alias-v2-router.test.ts`, `tests/web-hub/agent/xs-alias-auto.test.ts`, `tests/fabric/xs-alias-{auto,decided,suggest}.test.ts`,
+  `tests/commands/fabric-xs-alias.test.ts`. `tests/config/__corpus__/setting-specs-pin.json` gained exactly the `autoFromCwd` spec on purpose and
+  `settings-corpus.json` was regenerated (only `"autoFromCwd"` differs).
+- **Accepted residuals** (plan §11 R14–R23, plus what the packages found): **R14** common directory names (`web`, `app`) become a hub-global alias for the
+  first session in; **R15** after a force, a sender holding a stale list/mention cache addresses the new holder (resolved-before-force messages still
+  go to the old one); **R16** the decided mark is per process until the other process of the same session sees it; **R17** a human clear made before this
+  upgrade left no mark, so after cooling that session may auto once (run `--clear` again); **R18** a hub downgrade drops `origin`/`forced` at its next
+  write (display only); **R19** an old agent or an xs-off-but-linked holder cannot be forced while online, only taken after 10 offline minutes, with no
+  real-time notice; **R20** auto never takes an expired record, so an abandoned session keeps its basename until a human sets/takes/forces; **R21**
+  restart claim storms may answer BUSY — one retry, then the next hello; **R22** (AF7) the `/new` window is hub-memory only; **R23** the push is best effort
+  — an evicted session that never reattaches shows a stale local `/fabric status`/card `@alias` until the next hello_ack, attach or status reconcile
+  (hub data, addressing and delivery are already correct). Also: the audit records a forced execution as `take` (force vs take indistinguishable;
+  `force-preview` is distinct, and no alias text/token/cwd is ever logged); an old hub's `/fabric status` has no `auto skip:hub-cap` (AF4 chose
+  byte-identity with the v1 build over the plan's suffix); a `--take` refusal shows the `--force` pointer even when the holder will turn out
+  unnotifiable (the next command then explains); a force token executed after `/reload` (or evicted from the 32-entry hint map) is logged as `via:"take"` in
+  the decided mark (both mark decided; the hub enforces the real mode); `intent:"handoff"` answers `E_XS_BAD_FRAME` until AF7.
+
 ## Web UI：Channels
 
 **Channels in the web UI (channel-plan §7, CHU/CHU-b)**: all gated on hub caps ∋ `xs.channel.v1` (absent ⇒ UI byte-identical). AgentCard shows a
@@ -248,3 +315,14 @@ DetailDock untouched). `composables/useTrackedCommand.ts` is the only path that 
 update. AgentCard chip order `kind → state → xs badge → @alias → #channels → unread` (alias shown whole — cap = protocol max 16 clusters since 2026-10-27, title = full);
 DetailHeader shows `@alias` opening the dialog; the `@` panel matches/shows alias but still inserts `session:<ref>`; `logic/xsMessage.ts` reads
 ` alias="…"` from the first line independently of field order. Design: `docs/dev/fabric-cross-session/alias-plan.md` §7.
+
+**Force takeover + cwd chip in the web UI (#72 AFU)**: everything is gated on hub caps ∋ `xs.alias.v2` (the UI mirrors the cap as
+`XS_ALIAS_V2_CAP` in `agentCardModel.ts`; no v2 ⇒ the dialog and chips are byte-identical to the v1 build). When the 「尝试抢占」 preview is refused as
+online/recent (`TAKE_REJECT_FORCE_RE` on the two fixed refusal sentences) the dialog shows a danger button 「强制抢占…」 under the echo. Clicking runs
+`alias <名> --force`, parses the token from THAT command's output with the unchanged `parseTakeConfirm`, and reuses the existing confirm dialog
+(holder cwd / online state / 「自动认领」 + 5-minute countdown); execution is `--take=<token>`. A refused force (e.g. `unnotifiable`) only echoes — no
+button; the offer follows the input (changing the name drops it) and is re-checked against the live caps at render time (`forceOffer`, two-layer v2
+gate). `webCommandPolicy.fabric=confirm` ⇒ the generic confirm appears once for the preview and once for the execution. The cwd suggestion chip uses
+`deriveAliasFromDirName` (only when v2), so the chip equals what auto-claim would pick (`My Project` → `my-project`; reserved/id-like ⇒ no chip). Two
+i18n keys (`alias.force`, `alias.forceAria`) live in the lazy `i18n/alias-extra.ts`, not `detail.ts`. Gate: `tests/web-hub/ui/alias-ui.test.ts`; the
+end-to-end web path is `tests/integration/fabric-xs-alias-v2.test.ts` ⑤.
