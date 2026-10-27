@@ -571,6 +571,24 @@ describe("ChannelsDialog alias section", () => {
     expect(w.get(".alias-output").text()).toBe("别名已设置为：@web");
   });
 
+  it.each([
+    ["no holder", "该别名当前没有可抢占的持有者。"],
+    ["stale preview", "状态已变化或确认已失效，请重新预览：/fabric alias <名> --take"],
+  ])("force (AFU): v2 caps but a non-online/recent --take refusal (%s) never offers force", async (_n, refused) => {
+    const CAPS2 = [...CAPS, "xs.alias.v2"];
+    const { w, calls } = setupDialog(ag("s", { joined: true }), [], CAPS2, syncEcho(refused));
+    await w.get("input[name=alias-name]").setValue("web");
+    await w
+      .findAll(".alias-actions button")
+      .find((b) => b.text() === "Try take")!
+      .trigger("click");
+    await flushPromises();
+    expect(calls[0]!.args).toBe("alias web --take");
+    expect(w.get(".alias-output").text()).toBe(refused);
+    expect(w.find(".alias-take-confirm").exists()).toBe(false);
+    expect(w.find(".alias-force-row").exists()).toBe(false);
+  });
+
   it("force (AFU): the offer follows the draft and dies with the input; force refusal shows its echo", async () => {
     const CAPS2 = [...CAPS, "xs.alias.v2"];
     const refused = "别名「web」的持有者离线不足 10 分钟，暂不能抢占。";
