@@ -95,6 +95,7 @@ mock("../../src/delivery/coalescer.js", async (importOriginal) => {
       const c = real.createCoalescer(deps);
       const label = deps.windowMs === ACK_WINDOW_MS ? "ackHold" : "coalescer";
       wrap(probe, `g${probe.gen}.${label}`, c, "dispose");
+      wrap(probe, `g${probe.gen}.${label}`, c, "discard");
       probe.coalescers[label] = c;
       return c;
     },
@@ -321,13 +322,17 @@ function pathC(g: string, reason: string, profile: Profile = "full", o: { kill?:
     `${g}.usageBroadcaster.dispose`,
     `${g}.worktreeLate.dispose`, // after seal
     `${g}.worktreeOrphansStartup.dispose`,
+    // G2/G3 FIXED (7b): the hold windows are DISCARDED (never flushed) after the drain/seal; the outbox keeps the
+    // `batched` records and the next stack's reconcile redelivers them.
+    `${g}.coalescer.discard`,
+    `${g}.ackHold.discard`,
     // G10 FIXED (7b): pending notifier retries are cancelled after the drain/seal; the outbox keeps the records.
     `${g}.notifier.dispose`,
     // G7 FIXED (7b): the external-agent port's directory probe is now stopped on shutdown too — /reload and cross-cwd
     // resume re-import the module, so path A never reaches the old port there.
     ...(profile === "extRoot" ? [`${g}.external.dispose`] : []),
     `${g}.hostBashViewCapability.release`,
-    // GAP-G2 coalescer · GAP-G3 ackHold · GAP-G4 bashJobs manager:
+    // GAP-G4 bashJobs manager:
     // none of them is touched on this path — they are disposed only by path A (same-module rebuild).
     ...(reason === "quit" ? [...(o.kill ? ["bashJobs.killBounded"] : []), "childBashRegistry.sealAll"] : []),
   ];
@@ -653,23 +658,43 @@ describe("teardown matrix: residual timers and the gaps they prove (after a /rel
     expect(emitted - atShutdown).toBe(0);
   }, 60_000);
 
-  it("GAP-G2/G3: a coalescer / ackHold hold-window of the outgoing stack still flushes through the OLD pi after shutdown", async () => {
+  it("G2/G3 FIXED: buffered hold-windows are discarded at shutdown (nothing sent through the OLD pi) and the NEXT session redelivers the persisted records (I1)", async () => {
     const a = await boot();
+    const sessionEntries: any[] = []; // what pi would have written into the session file
+    (a.h.pi as any).appendEntry = (customType: string, data: unknown) =>
+      void sessionEntries.push({ type: "custom", customType, data });
     await fire(a, "session_start", "startup");
-    probe.coalescers.coalescer.submit(payload("r_c", "completed"));
-    probe.coalescers.ackHold.submit(payload("r_a", "completed"));
-    expect(completionsOf(a.h)).toBe(0); // both buffered
-    await fire(a, "session_shutdown", "reload");
-    expect(completionsOf(a.h)).toBe(0); // path C did not flush or dispose them
+    const stack = probe.stacks[0];
+    // The REAL path: notifier.enqueue persists the record as `batched`, then hands the payload to a hold window.
+    stack.notifier.enqueue({ ...payload("r_c", "completed"), createdAt: Date.now() });
+    expect(completionsOf(a.h)).toBe(0); // buffered
+    // The ack-hold window is exercised directly (no run in the fake stack expects an ack, so the notifier would
+    // never route a payload there; nothing in it ever touched the outbox).
+    probe.coalescers.ackHold.submit(payload("r_x", "completed"));
     expect(
-      notWebHub(timers.outstanding())
-        .map((o) => `${o.site}:${o.ms}`)
+      timers
+        .outstanding()
+        .filter((o) => o.site === "src/delivery/coalescer.ts")
+        .map((o) => o.ms)
         .sort(),
-    ).toEqual(["src/delivery/coalescer.ts:1000", "src/delivery/coalescer.ts:2000"]);
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(completionsOf(a.h)).toBe(1); // coalescer window (GAP-G2)
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(completionsOf(a.h)).toBe(2); // ackHold window (GAP-G3)
+    ).toEqual([1000, 2000]); // both hold windows armed
+    await fire(a, "session_shutdown", "reload");
+    expect(completionsOf(a.h)).toBe(0); // dropped, not flushed (before 7b: both windows flushed through the dead pi later)
+    expect(notWebHub(timers.outstanding())).toEqual([]); // both hold-window timers are gone
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(completionsOf(a.h)).toBe(0);
+    // I1: the record never left the outbox as `batched`; the next session (same session file) delivers it once.
+    expect(
+      sessionEntries.filter((e) => e.customType === "subagent:outbox" && e.data?.key === "r_c:1").at(-1)?.data.state,
+    ).toBe("batched");
+    freshModules();
+    const b = await boot();
+    const nextCtx = fakeCtx(box.home, { sid: a.sid }).ctx;
+    nextCtx.sessionManager.getEntries = () => sessionEntries;
+    await fire(b, "session_start", "reload", { ctx: nextCtx });
+    const redelivered = b.h.sent.filter((m) => m.message?.customType === "subagent:notification");
+    expect(redelivered.length).toBe(1);
+    expect(JSON.stringify(redelivered[0])).toContain("r_c");
   }, 60_000);
 
   it("G10 FIXED: a notifier retry pending at shutdown is cancelled (no more sends through the OLD pi) and the NEXT session redelivers it from the outbox", async () => {

@@ -90,7 +90,7 @@ export interface TeardownParts {
   fleetWidget?: FleetWidgetController | undefined;
   /** M-E: not a `Stack` member; path C reaches it through `parts` (G1 fixed), path A through the handoff. */
   usageBroadcaster?: UsageBroadcaster | undefined;
-  /** Not `Stack` members (GAP-G2/G3: path C never reaches them). `dispose()` flushes what is buffered. */
+  /** Not `Stack` members; path C discards them through `parts` (G2/G3 fixed), path A disposes (= flushes) them. */
   coalescer?: Coalescer | undefined;
   ackHold?: Coalescer | undefined;
   /** §3.6/§3.7: `dispose()` only clears timers — it never kills a process and never notifies afterwards, so the next
@@ -303,6 +303,17 @@ const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
   { id: "worktreeLate", run: (stack) => void stack.worktreeLate?.dispose() },
   // workflow-worktree §3 (P4): a scan still resolving when the session ends must never surface a stale prompt.
   { id: "worktreeOrphansStartup", run: (stack) => void stack.worktreeOrphansStartup?.dispose() },
+  // G2/G3 (7b): DISCARD (no flush) whatever the coalescer / ack-hold windows still buffer. Decision (2026-10-27): a
+  // flush at shutdown would send through the closing pi — in a /reload that is a session already being replaced. The
+  // payloads are not lost: each was persisted to the outbox as `batched` before it was buffered, and the next stack's
+  // `notifier.reconcile()` (session_start) redelivers it. Before the notifier is disposed, after the drain/seal.
+  {
+    id: "coalescers",
+    run: (_stack, _env, _entry, parts) => {
+      parts.coalescer?.discard();
+      parts.ackHold?.discard();
+    },
+  },
   // G10 (7b): cancel the notifier's pending retry timers — AFTER the drain/seal and the late-report redirect, because
   // notices produced while the run drain settles must still reach THIS (closing) session. Whatever is still
   // retrying stays `pending` in the persisted outbox and is redelivered by the next stack's `notifier.reconcile()`
@@ -336,8 +347,7 @@ const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
     run: (_stack, env, entry) =>
       entry.kind === "shutdown" && entry.reason === "quit" ? env.activation.sealChildBashJobs() : undefined,
   },
-  // GAP-G2 coalescer · GAP-G3 ackHold · GAP-G4 bashJobs manager:
-  // not reachable from the Stack (path A only).
+  // GAP-G4 bashJobs manager: not reachable from the Stack (path A only).
 ];
 
 /** Path B (sync) and path C4 (async). Path A is `runRebuildHandoff` over the parts. */

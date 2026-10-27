@@ -6,7 +6,15 @@ export interface Coalescer {
   submit(payload: DeliveryPayload): SendResult;
   cancel(key: DeliveryKey): boolean;
   flush(): void;
+  /** Flushes what is buffered, then stops (later `submit`s send straight through). */
   dispose(): void;
+  /**
+   * Session shutdown (7b G2/G3): stop WITHOUT flushing — the buffered payloads and the hold-window timer are dropped,
+   * `onSettled` is never called for them. Safe because every buffered payload was written to the persisted outbox as
+   * `batched` before it was handed over; the next stack's `notifier.reconcile()` redelivers it. Idempotent, and a
+   * later `dispose()` is a no-op (nothing left to flush).
+   */
+  discard(): void;
 }
 
 export function isCoalescible(payload: DeliveryPayload): boolean {
@@ -62,6 +70,14 @@ export function createCoalescer(deps: {
       return buffered.delete(key);
     },
     flush,
+    discard() {
+      disposed = true;
+      if (timer) {
+        deps.clock.clearTimer(timer);
+        timer = undefined;
+      }
+      buffered.clear();
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
