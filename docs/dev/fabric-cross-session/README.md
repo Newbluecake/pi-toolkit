@@ -86,7 +86,7 @@ pref, blocklist, joinedAt) rides a consume-once `Symbol.for("pi-subagent:xs-memb
 `session_shutdown{reason:"new"}` into the next stack, which `adopt()`s it (re-persisted under the NEW
 sessionId, so `/reload` keeps it) and it suppresses autoJoin exactly like a restored entry — an explicit
 leave therefore survives `/new` too. A pristine (never-touched) membership stashes nothing, so autoJoin
-behaviour for fresh sessions is unchanged. Aliases deliberately do NOT transfer on `/new` (alias-plan 「不做」). `message_session` omits wake = deliver-only; `wake:true` alone may
+behaviour for fresh sessions is unchanged. **Aliases follow `/new` too (#72 AF7, section 「Force takeover…」 below) — only `/new`; fork never inherits an alias.** `message_session` omits wake = deliver-only; `wake:true` alone may
 start a turn through `RootWakeController` (no steer), gated by `fabric.wake.enabled`, causal level,
 capability, goal and quotas. Unknown host capability downgrades to deliver-only until real runtime
 shape evidence; root deadline `fabric.wake.rootRunMaxS` (default 900s) starts at dispatch, including
@@ -227,7 +227,7 @@ before any pi peer bump). The three off goldens and `tests/fixtures/legacy-xs-v0
 `lost` notice once per process, preview discloses holder cwd/offline time).
 
 **Force takeover + cwd-basename auto alias (#72, `alias-force-default-plan.md` r2 — the 「用户拍板」 and 「r2 修订对照表」 at its end override the
-body; packages AF0–AF4/AFU/AFW/AF6, reports `AF*-report.md`; AF7 `/new` handoff is NOT in yet)**: everything above stays; this layer is additive and
+body; packages AF0–AF4/AFU/AFW/AF6/AF7, reports `AF*-report.md`)**: everything above stays; this layer is additive and
 gated on the cap `xs.alias.v2` (both surfaces, same condition as v1, declared right after it; no PROTO bump).
 
 - **`--force`**: `/fabric alias <名> --force` is PREVIEW ONLY and mutually exclusive with `--take`/`--take=<t>`/`--clear` (any combination or
@@ -260,6 +260,21 @@ gated on the cap `xs.alias.v2` (both surfaces, same condition as v1, declared ri
   Written BEFORE the xs_req leaves (memory flag + `appendEntry`; a failing append is swallowed and a throwing `markDecided` never blocks the write)
   by `set`, `clear` (also on a session with no alias — the explicit 「关闭目录名自动别名」), and by TUI-confirmed or `--take=<token>` execution;
   failed human writes count too (D6). Reads, previews, a cancelled confirm and Feishu do not. Survives `/reload`, resume and hub restart.
+- **`/new` handoff (AF7, D3)**: `/new` and the web 「清空」 (same `session_shutdown{reason:"new"}`) move the held alias to the new session id; fork and resume never do.
+  - _Agent_: at shutdown (`stashMembershipHandoff` → `stashAliasHandoff`, `fabric/xs/alias-handoff.ts`) the outgoing session's held alias (read **by explicit sid** from the bridge cache — the fence hook has
+    already detached the stack, so `current()` cannot see it) and its decided mark go into ONE consume-once `Symbol.for("pi-subagent:xs-alias-handoff")` slot (TTL 60 s, nothing to carry ⇒ nothing stashed).
+    `beginSessionStart` always clears the slot and adopts it only for `reason:"new"` ∧ a different sid. The decided mark is re-written for the new sid as `via:"inherit"` (so `/reload` keeps it, and
+    `aliasHumanDecided` — any human set/clear/take/force on the new session — cancels a still-pending handoff). The alias becomes `aliasHandoff().pending(sid)` (expires after 120 s).
+  - _Bridge_ (`agent/xs.ts` reconcile ①, before auto): after an APPLIED `state:"none"` get, hub ∋ `xs.alias.v2`, ONE `{alias, intent:"handoff", prevSessionId}` per `/new` (settled before the frame goes out;
+    a concurrent reconcile cannot auto-claim meanwhile). It works with `autoFromCwd=false` (a continuation, not an auto-claim) and is silent on success. ANY failure — stale, BAD_FRAME from a hub that
+    predates AF7, BUSY, UNKNOWN, link loss — falls straight through to the ordinary auto path (which the inherited decided mark still suppresses). A v1 hub gets nothing; hub offline at `/new` ⇒ no frame, the
+    pending expires, the old name stays on the old sid until take/force (R22).
+  - _Hub anti-forgery_ (I10): `members.predecessorOf(agentKey)` is the **hub's own observation** on that one socket — `onInvalidate("detached")` remembers the departing sid (a `/new` reaches the hub as
+    `session_detached` → `session(new)` → `xs_member(new)`), `onSession`/`onMember` with another sid write `{from, to, at}` before the old record is dropped; one slot per agentKey, TTL 120 s, memory only, cleared by
+    any non-detach invalidation (socket down/closed/reclaimed) and by a successful handoff. The frame's `prevSessionId` is only compared with that edge, never trusted: another socket has no edge, a socket
+    with its own succession can only name its own predecessor. On top of the edge `store.handoff` requires (plan time AND again right before rename) `held(prev)` of exactly that alias, `prev`
+    **offline** (neither xs-online on another socket nor `linked`), and the requester holding nothing yet. Transfer = in place (`rev+1`, `origin` kept, cwd label refreshed, no tombstone for prev, no cooling, prev's and
+    the new sid's tombstones dropped). Every refusal is `E_XS_ALIAS_TAKE{stale}`; queue/IO trouble stays BUSY/UNKNOWN. A pre-v2 requester gets `E_XS_BAD_FRAME`.
 - **Invariants** (extend alias-plan r4 §3.1): **I5′** (replaces I5 「online holder is never taken」) — someone else's held record moves only by human
   `take` (holder xs-offline ≥ takeMin), human `force`, `set` over an EXPIRED record, or (AF7) `handoff`; `take`/`force` re-check the token tuple at
   execute and before rename, and **an online holder can be forced only if it is notifiable**. **I7** — `auto` only creates; it never edits, moves or
@@ -291,7 +306,7 @@ gated on the cap `xs.alias.v2` (both surfaces, same condition as v1, declared ri
   `force-preview` is distinct, and no alias text/token/cwd is ever logged); an old hub's `/fabric status` has no `auto skip:hub-cap` (AF4 chose
   byte-identity with the v1 build over the plan's suffix); a `--take` refusal shows the `--force` pointer even when the holder will turn out
   unnotifiable (the next command then explains); a force token executed after `/reload` (or evicted from the 32-entry hint map) is logged as `via:"take"` in
-  the decided mark (both mark decided; the hub enforces the real mode); `intent:"handoff"` answers `E_XS_BAD_FRAME` until AF7.
+  the decided mark (both mark decided; the hub enforces the real mode).
 
 ## Web UI：Channels
 
