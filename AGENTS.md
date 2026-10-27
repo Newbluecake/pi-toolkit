@@ -81,7 +81,7 @@ Check before and after any refactor: `git diff --quiet origin/dev -- tests/fixtu
 
 ## pi peer bump checklist
 
-1. Change the pi peer range in `package.json` (now `>=1.0.0 <1.4.0` for each of `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`) only deliberately, and re-check `src/adapters/pi-compat.ts`.
+1. Change the pi peer range in `package.json` (now `>=1.0.0 <1.5.0` for each of `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`) only deliberately, and re-check `src/adapters/pi-compat.ts`.
 2. Run `npm run test:conformance` (= `vitest run tests/conformance`, the whole directory): `pi-boundary`/context-switch capability, `fabric-wake.test.ts` C-P1–C-P5, `fabric-xs.test.ts` C-X1–C-X11, `schedule.test.ts` C-S1–C-S8 (C-S6 skips without tsx), `traffic.test.ts` + `traffic-coexist.test.ts`, `cmd-history.test.ts`, `slash-args.test.ts`, `rpc-spawn.test.ts`, `keepalive-pipeline.test.ts`, `web-resume.test.ts`, `secure-gocryptfs.test.ts` C1–C5 (self-gating), `agent-dir.test.ts` (agentDir public-API probe: `CONFIG_DIR_NAME === ".pi"` + behavioural env-name check, added in #54), and the rest. The premises each suite pins are in the matching README (traffic → `docs/dev/traffic-merge/README.md`; cmd-history → `docs/dev/web-hub/README.md`; fabric → `docs/dev/fabric-cross-session/README.md`; schedule → `docs/dev/scheduled-reports/README.md`).
 3. Before upgrading pi or droid also run `PI_TOOLKIT_DROID_CONFORMANCE=1 npx vitest run tests/conformance/droid-protocol.test.ts`; before upgrading gocryptfs run `tests/conformance/secure-gocryptfs.test.ts`.
 4. Confirm the A-tier frozen artifacts did not change (above).
@@ -159,7 +159,7 @@ Format: entry — one-line role | README to read first and when. `src/*` rows wi
   for local tests) — never in `dependencies`: pi ≥1.0 warns, since an installed copy can bypass the
   loader's module mapping and duplicate runtime modules. There are no runtime `dependencies`.
 - Peer dependencies on `@earendil-works/pi-ai` / `pi-coding-agent` / `pi-tui` are pinned to
-  `>=1.0.0 <1.4.0`; bump deliberately and re-check `src/adapters/pi-compat.ts`. Before bumping, run
+  `>=1.0.0 <1.5.0`; bump deliberately and re-check `src/adapters/pi-compat.ts`. Before bumping, run
   `npm run test:conformance` (real `AgentSession` boundary-draft contract + runtime capability
   self-check, `tests/conformance/`) — it never gates pi-compat's structural probes (I14), it just
   tells you ahead of users whether `src/context-switch/capability.ts` still reaches `verified`.

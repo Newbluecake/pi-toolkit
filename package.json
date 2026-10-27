@@ -51,9 +51,9 @@
     "agent"
   ],
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=1.0.0 <1.4.0",
-    "@earendil-works/pi-coding-agent": ">=1.0.0 <1.4.0",
-    "@earendil-works/pi-tui": ">=1.0.0 <1.4.0",
+    "@earendil-works/pi-ai": ">=1.0.0 <1.5.0",
+    "@earendil-works/pi-coding-agent": ">=1.0.0 <1.5.0",
+    "@earendil-works/pi-tui": ">=1.0.0 <1.5.0",
     "@sinclair/typebox": "*"
   },
   "peerDependenciesMeta": {
@@ -68,9 +68,9 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^1.3.0",
-    "@earendil-works/pi-coding-agent": "^1.3.0",
-    "@earendil-works/pi-tui": "^1.3.0",
+    "@earendil-works/pi-ai": "^1.4.0",
+    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "@earendil-works/pi-tui": "^1.4.0",
     "@sinclair/typebox": "^0.34.49",
     "@types/node": "^22.0.0",
     "@vitejs/plugin-vue": "~5.2.4",
