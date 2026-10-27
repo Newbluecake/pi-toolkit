@@ -25,10 +25,24 @@
  *
  * Boundary: `deps.xs` UNSET (xs off — the only state before XW wires it) ⇒ this module is never
  * constructed and the agent is byte-identical to the pre-xs shape (fabric-xs-off-golden.json).
- * No timers of its own (requests ride connection's unref'd deadline timers); never throws into
- * the connection machinery.
+ * Never throws into the connection machinery. Timers: requests ride connection's unref'd deadline
+ * timers; the AF3 auto-claim retry below is the one own timer (unref'd, clampSpanMs-clamped, I1/I5).
+ *
+ * Alias-force-default plan §5 (AF3, #72), layered on the AL3 alias bridge:
+ *  - the `xs.alias.v2` agent cap (immediately after v1, same `aliasEnabled()` condition);
+ *  - the `intent` ops (`auto` / `forcePreview` / `handoff`) — `intent`/`prevSessionId` go ONLY to a
+ *    hub that declared `xs.alias.v2` (a v1 hub's strict decoder would drop the whole frame, S1);
+ *  - the cwd-basename auto-claim engine at the END of a reconcile (attach / hello_ack / join's
+ *    refreshAlias): only after an APPLIED `state:"none"` get, gated by AF0's pure `shouldAutoClaim`,
+ *    one attempt per `(connGen, sessionId, membershipEpoch)`, one bounded (1–5s) retry on
+ *    BUSY{queue|io}; success notifies once via the INDEPENDENT process set
+ *    `pi-subagent:xs-alias-auto-noticed` (≤32 sids FIFO — never shares the lost set's 64, r2#10);
+ *  - `onAliasEvt` (the hub's `xs_alias_evt` nudge for the CURRENT sid ⇒ reconcile; a `lost{forced}`
+ *    rides the existing one-shot lost path with the §7 forced wording).
  */
+import { clampSpanMs } from "../../core/deadline.js";
 import { effectiveReceive, isValidXsSessionId } from "../../fabric/xs/receive.js";
+import { deriveAutoAlias, shouldAutoClaim } from "../../fabric/xs/alias-auto.js";
 import type { XsAckVerdict } from "../../fabric/xs/dedup.js";
 import { channelsFieldToWrite, linkJoined as channelLinkJoined, XS_DEFAULT_CHANNEL } from "../../fabric/xs/channel.js";
 import type { XsChannelView } from "../../fabric/xs/types-channel.js";
@@ -43,7 +57,8 @@ import type {
 } from "../../fabric/xs/sender.js";
 import type { XsBlockResolve } from "../../commands/fabric-xs.js";
 import type {
-  XsAliasBridgePort,
+  XsAliasAutoSkipReason,
+  XsAliasBridgePortV2,
   XsAliasBridgeResult,
   XsAliasCacheEntry,
   XsAliasCachePort,
@@ -53,6 +68,8 @@ import {
   XS_ALIAS_AGENT_CAP,
   XS_ALIAS_HUB_CAP,
   XS_ALIAS_TAKE_PREVIEW,
+  XS_ALIAS_V2_AGENT_CAP,
+  XS_ALIAS_V2_HUB_CAP,
   XS_CHANNEL_AGENT_CAP,
   XS_CHANNEL_HUB_CAP,
   XS_HUB_CAP,
@@ -61,6 +78,8 @@ import {
   XS_SLOT_KIND,
 } from "../protocol/xs.js";
 import type {
+  XsAliasEvtFrame,
+  XsAliasIntent,
   XsAliasStateWire,
   XsDeliverFrame,
   XsHubLimitsWire,
@@ -132,12 +151,37 @@ export interface XsAgentPort {
   /** Alias-plan §4 (Q3): display-only one-shot notice text (the bridge already de-duplicated it process-wide
    *  by `(sessionId, lost.at)`). ALW wires it to `ctx.ui.notify`. Never throws into the bridge. */
   notifyAliasLost?(text: string): void;
+  /** Alias-force-default plan §5.1 (AF3): the cwd-basename auto-claim inputs. ABSENT ⇒ the auto engine
+   *  never fires and records nothing (the pre-AFW wiring stays byte-identical). `enabled` is the frozen
+   *  `fabric.crossSession.alias.autoFromCwd`; `cwd`/`home`/`tmpdir` feed AF0's `deriveAutoAlias`;
+   *  `decided` is the I8 human-decided marker (AF4 writes it before any human alias write op, AFW reads
+   *  it back); `handoffPending` is AF7's `/new` handoff slot (false until AF7 lands). Every read is live
+   *  and must be cheap and non-throwing — the bridge fail-closes (treats a throw as "do not auto"). */
+  aliasAuto?():
+    | {
+        readonly enabled: boolean;
+        readonly cwd: string | undefined;
+        readonly home: string | undefined;
+        readonly tmpdir: string | undefined;
+        decided(sessionId: string): boolean;
+        handoffPending(): boolean;
+      }
+    | undefined;
+  /** Alias-force-default plan §7 (AF3): display-only one-shot "auto-claimed" notice text (the bridge
+   *  de-duplicates process-wide by sessionId in `pi-subagent:xs-alias-auto-noticed`, ≤32 FIFO).
+   *  AFW wires it like {@link notifyAliasLost}. Never throws into the bridge. */
+  notifyAliasAuto?(text: string): void;
 }
 
 export interface XsAgentBridgeDeps {
   port: XsAgentPort;
   /** Late-bound connection accessor (agent/index.ts's `conn` closure variable). */
   conn(): HubConnection | undefined;
+  /** agent/index.ts's attach-generation counter (AF3: one leg of the auto-claim dedup key
+   *  `(connGen, sessionId, membershipEpoch)`). Absent ⇒ 0 (tests / pre-AF3 wiring). */
+  connGen?(): number;
+  /** AF3: randomness for the 1–5s BUSY retry delay (defaults to `Math.random`; tests inject). */
+  random?(): number;
   /** Republishes the status slot (agent/index.ts's `publishStatus`); driven by
    *  `notifyUnreadChanged()` so IBW only has to say "the count changed". */
   publishStatus?(): void;
@@ -178,9 +222,19 @@ export interface XsAgentBridge {
   /** X4's `/fabric status` hub-limits port: `xs_req{op:"info"}` (§4.6 — the hub's frozen
    *  effective globals); undefined when there is no stack or the hub did not answer. */
   hubInfo(): Promise<XsHubLimitsWire | undefined>;
-  /** Alias-plan §4/§5 (AL3): the `op:"alias"` bridge (bounded 5s; zero frames unless alias on ∧ hub declared
-   *  `xs.alias.v1`). Always the same object; `supported` is read live. */
-  aliasBridge(): XsAliasBridgePort;
+  /** Alias-plan §4/§5 (AL3) + alias-force-default §3.2 (AF3): the `op:"alias"` bridge (bounded 5s; zero
+   *  frames unless alias on ∧ hub declared `xs.alias.v1`). Always the same object; `supported` is read
+   *  live. The v2 methods (`auto`/`forcePreview`/`handoff`) ADDITIONALLY require the live hub's
+   *  `xs.alias.v2` — toward a v1 hub they send nothing and answer `E_XS_OFF{hub-v2}` (§3.4). */
+  aliasBridge(): XsAliasBridgePortV2;
+  /** Alias-force-default §5.4 (AF3): `xs_alias_evt` handler — a frame for the CURRENT sessionId triggers
+   *  a reconcile (the forced `lost` notice rides the one-shot path); any other sid is ignored.
+   *  Fire-and-forget, never throws. */
+  onAliasEvt(frame: XsAliasEvtFrame): void;
+  /** Alias-force-default §7 (AF3): the last recorded `auto skip:<token>` reason for the CURRENT session
+   *  (AF4 renders it in `/fabric status`; `undefined` ⇒ no suffix — e.g. autoFromCwd off, alias held, or
+   *  never evaluated). Display only. */
+  aliasAutoSkip(): XsAliasAutoSkipReason | undefined;
   /** Alias-plan §4: the agent-side alias cache (per bridge = per activate, keyed by sessionId, ≤8 FIFO,
    *  never persisted). Always the same object. */
   aliasCache(): XsAliasCachePort;
@@ -265,6 +319,37 @@ const REF_MAP_CAP = 64;
 const ALIAS_CACHE_CAP = 8;
 const ALIAS_LOST_SEEN_CAP = 64;
 const ALIAS_LOST_KEY = Symbol.for("pi-subagent:xs-alias-lost");
+/** Alias-force-default §5.1 (AF3): the INDEPENDENT process-wide auto-claim notice de-dup set
+ *  (r2#10 — never shares the lost set's 64 cap), the per-bridge tried-key bound, the per-bridge
+ *  skip-reason bound, and the BUSY retry delay band (clamped through `clampSpanMs`, I1). */
+const ALIAS_AUTO_NOTICED_CAP = 32;
+const ALIAS_AUTO_NOTICED_KEY = Symbol.for("pi-subagent:xs-alias-auto-noticed");
+const ALIAS_AUTO_TRIED_CAP = 64;
+const ALIAS_AUTO_SKIP_CAP = 8;
+const ALIAS_AUTO_RETRY_MIN_MS = 1_000;
+const ALIAS_AUTO_RETRY_SPAN_MS = 4_000;
+
+function aliasAutoNoticed(): Set<string> {
+  const g = globalThis as unknown as Record<symbol, Set<string> | undefined>;
+  let set = g[ALIAS_AUTO_NOTICED_KEY];
+  if (set === undefined) {
+    set = new Set<string>();
+    g[ALIAS_AUTO_NOTICED_KEY] = set;
+  }
+  return set;
+}
+
+/** True the FIRST time this sessionId's auto-claim is noticed in this process (FIFO-bounded, sids only). */
+function markAliasAutoNoticed(sessionId: string): boolean {
+  const seen = aliasAutoNoticed();
+  if (seen.has(sessionId)) return false;
+  if (seen.size >= ALIAS_AUTO_NOTICED_CAP) {
+    const first = seen.values().next().value;
+    if (first !== undefined) seen.delete(first);
+  }
+  seen.add(sessionId);
+  return true;
+}
 
 function aliasLostSeen(): Set<string> {
   const g = globalThis as unknown as Record<symbol, Set<string> | undefined>;
@@ -289,7 +374,10 @@ function markAliasLost(sessionId: string, at: number): boolean {
   return true;
 }
 
-function aliasLostText(lost: { alias: string; reason: "taken" | "expired" }): string {
+function aliasLostText(lost: { alias: string; reason: "taken" | "expired"; forced?: boolean }): string {
+  // alias-force-default §7 (AF3): a forced take carries `forced:true` on the tombstone (v2 hubs only).
+  if (lost.forced === true)
+    return `别名「${lost.alias}」已被其他会话强制抢占（对方已人工确认），可以用 /fabric alias 重新设置`;
   const why = lost.reason === "taken" ? "已被其他会话抢占" : "离线超过保留期后被他人认领";
   return `别名「${lost.alias}」${why}，可以用 /fabric alias 重新设置`;
 }
@@ -320,6 +408,8 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     }
   };
   const hubHasAlias = (): boolean => deps.conn()?.caps.includes(XS_ALIAS_HUB_CAP) === true;
+  /** AF3: the live hub declared `xs.alias.v2` (understands `intent`, pushes `xs_alias_evt`). */
+  const hubHasAliasV2 = (): boolean => deps.conn()?.caps.includes(XS_ALIAS_V2_HUB_CAP) === true;
   /** alias on ∧ the live hub declared the cap (symmetric with the hub's `aliasUsable`). */
   const aliasUsable = (): boolean => aliasEnabled() && deps.conn()?.status().state === "live" && hubHasAlias();
 
@@ -465,6 +555,8 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
   const applyAliasState = (sessionId: string, state: XsAliasStateWire): void => {
     const next: XsAliasCacheEntry = {};
     if (state.state === "held" && state.alias !== undefined) next.alias = state.alias;
+    // alias-force-default §7 (AF3): mirror the wire `origin` so AF4 can render `held (auto)`.
+    if (state.origin === "auto") next.origin = "auto";
     if (state.lost !== undefined) next.lostAt = state.lost.at;
     const prev = aliasCache.get(sessionId);
     if (prev === undefined && aliasCache.size >= ALIAS_CACHE_CAP) {
@@ -495,15 +587,22 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
 
   /** One bounded alias op. The response is applied to the cache iff it is still for the connection
    *  generation (same `HubConnection`, same hello_ack caps array) and the sessionId it was issued for;
-   *  otherwise it is returned to the caller but never applied (§4 应用规则). Arrival order = apply order. */
+   *  otherwise it is returned to the caller but never applied (§4 应用规则). Arrival order = apply order.
+   *  AF3: `intent`/`prevSessionId` (alias-force-default §3.2) go ONLY to a hub that declared `xs.alias.v2` —
+   *  toward a v1 hub NOTHING is sent (`E_XS_OFF{hub-v2}`, the §3.4 local refusal). `appliedSink`, when
+   *  given, receives the state wire IFF it was applied (the auto engine's "本次 get 已应用" gate). */
   const aliasOp = async (
-    fields: { alias?: string; clear?: true; take?: string },
+    fields: { alias?: string; clear?: true; take?: string; intent?: XsAliasIntent; prevSessionId?: string },
     kind: "read" | "write",
+    appliedSink?: { applied?: XsAliasStateWire },
   ): Promise<XsAliasBridgeResult> => {
     const conn = deps.conn();
     const origin = originOf();
     if (conn === undefined || origin === undefined) return { ok: false, code: "E_XS_OFF", reason: "no_session" };
     if (!aliasEnabled()) return { ok: false, code: "E_XS_OFF", reason: "alias" };
+    if ((fields.intent !== undefined || fields.prevSessionId !== undefined) && !hubHasAliasV2()) {
+      return { ok: false, code: "E_XS_OFF", reason: "hub-v2" };
+    }
     const capsRef = conn.caps;
     const reply = await roundTrip({ t: "xs_req", rid: newAdminRid(), op: "alias", origin, ...fields });
     if (reply.kind === "off") return { ok: false, code: "E_XS_OFF", reason: "hub" };
@@ -526,11 +625,14 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       };
     if (res.alias === undefined) return { ok: false, code: "E_XS_BAD_FRAME", reason: "no_alias_body" };
     const fresh = deps.conn() === conn && conn.caps === capsRef && deps.port.stack()?.sessionId() === origin.sessionId;
-    if (fresh && isStateWire(res.alias)) applyAliasState(origin.sessionId, res.alias);
+    if (fresh && isStateWire(res.alias)) {
+      applyAliasState(origin.sessionId, res.alias);
+      if (appliedSink !== undefined) appliedSink.applied = res.alias;
+    }
     return { ok: true, res: res.alias };
   };
 
-  const aliasBridge: XsAliasBridgePort = {
+  const aliasBridge: XsAliasBridgePortV2 = {
     get supported() {
       return aliasUsable();
     },
@@ -539,6 +641,164 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     clear: () => aliasOp({ clear: true }, "write"),
     takePreview: (rawAlias) => aliasOp({ alias: rawAlias, take: XS_ALIAS_TAKE_PREVIEW }, "read"),
     take: (rawAlias, token) => aliasOp({ alias: rawAlias, take: token }, "write"),
+    // alias-force-default §3.2 (AF3): the intent ops — aliasOp itself withholds them from a v1 hub.
+    auto: (candidate) => aliasOp({ alias: candidate, intent: "auto" }, "write"),
+    forcePreview: (rawAlias) => aliasOp({ alias: rawAlias, take: XS_ALIAS_TAKE_PREVIEW, intent: "force" }, "read"),
+    handoff: (alias, prevSessionId) => aliasOp({ alias, intent: "handoff", prevSessionId }, "write"),
+  };
+
+  // -------------------------------------------- auto-claim engine (alias-force-default §5.1, AF3)
+
+  /** `(connGen, sessionId, membershipEpoch)` keys already attempted (per bridge, FIFO ≤64). A join/leave
+   *  bumps the membership epoch and thus re-arms exactly one new attempt (§5.1 去重键). */
+  const autoTried = new Set<string>();
+  /** sessionId → last skip reason, for `/fabric status`'s `auto skip:<token>` (AF4 reads it via
+   *  `aliasAutoSkip()`). Cleared on a held state / a disabled setting; `handoff-pending` never recorded
+   *  (transient, not a status token — AF0 report「契约要点备忘」). */
+  const autoSkipBySid = new Map<string, XsAliasAutoSkipReason>();
+  let autoRetryTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const recordAutoSkip = (sessionId: string, skip: XsAliasAutoSkipReason): void => {
+    if (!autoSkipBySid.has(sessionId) && autoSkipBySid.size >= ALIAS_AUTO_SKIP_CAP) {
+      const first = autoSkipBySid.keys().next().value;
+      if (first !== undefined) autoSkipBySid.delete(first);
+    }
+    autoSkipBySid.set(sessionId, skip);
+  };
+
+  /** Every port read goes through here: a throwing port must never break the reconcile path, and the
+   *  failure direction is always "do not auto" (I8 — a human decision must never lose to a read error). */
+  const autoInputs = (): (NonNullable<ReturnType<NonNullable<XsAgentPort["aliasAuto"]>>> & {}) | undefined => {
+    try {
+      return deps.port.aliasAuto?.();
+    } catch {
+      return undefined;
+    }
+  };
+
+  const autoAttempt = async (sessionId: string, candidate: string, isRetry: boolean): Promise<void> => {
+    const r = await aliasOp({ alias: candidate, intent: "auto" }, "write");
+    if (r.ok) {
+      const st = isStateWire(r.res) ? r.res : undefined;
+      // §4 row 2: an ok may also be "S already holds y" (no write). Only a held matching OUR candidate
+      // is a fresh auto-claim worth the one-shot notice.
+      if (st?.state === "held" && st.alias === candidate) {
+        autoSkipBySid.delete(sessionId);
+        if (deps.port.notifyAliasAuto !== undefined && markAliasAutoNoticed(sessionId)) {
+          try {
+            deps.port.notifyAliasAuto(
+              `已按目录名自动设置别名 @${candidate}；/fabric alias <名> 可改名，/fabric alias --clear 可取消（之后不再自动设置）`,
+            );
+          } catch {
+            /* display-only */
+          }
+        }
+      }
+      return;
+    }
+    // Hub codes carry the detail as a `{…}` brace suffix on `code` (commands/fabric-xs.ts's
+    // aliasErrorText parses the same shape); `reason` is the fallback detail.
+    const m = /^([A-Z_]+)(?:\{([^}]*)\})?$/.exec(r.code);
+    const base = m?.[1] ?? r.code;
+    const detail = m?.[2] ?? r.reason;
+    if (base === "E_XS_ALIAS_TAKEN") {
+      recordAutoSkip(sessionId, "taken");
+      return;
+    }
+    if (base === "E_XS_ALIAS_BUSY") {
+      // §5.1: BUSY{queue|io} gets exactly ONE retry after a random 1–5s; anything else busy ⇒ skip.
+      if (!isRetry && (detail === "queue" || detail === "io")) {
+        scheduleAutoRetry(sessionId, candidate);
+        return;
+      }
+      recordAutoSkip(sessionId, "busy");
+      return;
+    }
+    // UNKNOWN (effect unknown — the write may have committed) / hub refusals: leave the previous skip
+    // untouched; the next reconcile's get picks up any committed grant.
+  };
+
+  const scheduleAutoRetry = (sessionId: string, candidate: string): void => {
+    if (autoRetryTimer !== undefined) return; // one pending retry per bridge; the first wins
+    const rand = deps.random?.() ?? Math.random();
+    const delay =
+      clampSpanMs(ALIAS_AUTO_RETRY_MIN_MS + Math.floor(Math.min(1, Math.max(0, rand)) * ALIAS_AUTO_RETRY_SPAN_MS)) ??
+      ALIAS_AUTO_RETRY_MIN_MS;
+    const key = autoKey(sessionId);
+    autoRetryTimer = setTimeout(() => {
+      autoRetryTimer = undefined;
+      try {
+        // freshness: the dedup key must still be exact (a join/leave/attach/session-switch cancels),
+        // the gates must still hold, and the cache must still hold no alias for the session (a human
+        // set in the window wins without a fight, I8).
+        if (key === undefined || autoKey(sessionId) !== key) return;
+        const stack = deps.port.stack();
+        if (stack === undefined || stack.sessionId() !== sessionId) return;
+        if (!aliasUsable() || !hubHasAliasV2()) return;
+        if (aliasCache.get(sessionId)?.alias !== undefined) return;
+        const auto = autoInputs();
+        if (auto === undefined || !auto.enabled) return;
+        if (safeFlag(() => auto.decided(sessionId), true) || safeFlag(() => auto.handoffPending(), true)) return;
+        void autoAttempt(sessionId, candidate, true).catch(() => undefined);
+      } catch {
+        /* never throws */
+      }
+    }, delay);
+    autoRetryTimer.unref(); // I5: a ref'd timer wedges `pi -p`
+  };
+
+  const safeFlag = (f: () => boolean, onError: boolean): boolean => {
+    try {
+      return f() === true;
+    } catch {
+      return onError;
+    }
+  };
+
+  const autoKey = (sessionId: string): string | undefined => {
+    const stack = deps.port.stack();
+    if (stack === undefined) return undefined;
+    const epoch = stack.member().epoch;
+    return `${deps.connGen?.() ?? 0}|${sessionId}|${epoch}`;
+  };
+
+  /** §5.1 ②: evaluated at the END of a reconcile whose get was APPLIED and answered `state:"none"`. */
+  const maybeAutoClaim = (sessionId: string): void => {
+    const auto = autoInputs();
+    if (auto === undefined) return; // pre-AFW wiring: the engine is inert, nothing recorded
+    if (!auto.enabled) {
+      // §7: autoFromCwd=false renders NO status suffix (byte-identical to the pre-auto shape).
+      autoSkipBySid.delete(sessionId);
+      return;
+    }
+    const stack = deps.port.stack();
+    const member = stack?.member();
+    const verdict = shouldAutoClaim({
+      autoFromCwd: true,
+      mainSession: true, // the bridge is only constructed for the main session (I6; AF0 keeps the gate explicit)
+      aliasUsable: aliasUsable(),
+      hubAliasV2: hubHasAliasV2(),
+      joined: member?.joined === true,
+      decided: safeFlag(() => auto.decided(sessionId), true),
+      pendingHandoff: safeFlag(() => auto.handoffPending(), true),
+    });
+    if (!verdict.claim) {
+      if (verdict.skip !== "handoff-pending") recordAutoSkip(sessionId, verdict.skip);
+      return;
+    }
+    const key = autoKey(sessionId);
+    if (key === undefined || autoTried.has(key)) return; // `/fabric status` reconciles re-enter here
+    if (autoTried.size >= ALIAS_AUTO_TRIED_CAP) {
+      const first = autoTried.values().next().value;
+      if (first !== undefined) autoTried.delete(first);
+    }
+    autoTried.add(key); // one attempt per key, whatever the outcome (BUSY gets its single retry)
+    const derived = deriveAutoAlias(auto.cwd, { home: auto.home, tmpdir: auto.tmpdir });
+    if (!derived.ok) {
+      recordAutoSkip(sessionId, derived.reason);
+      return;
+    }
+    void autoAttempt(sessionId, derived.alias, false).catch(() => undefined);
   };
 
   const aliasCachePort: XsAliasCachePort = {
@@ -551,7 +811,14 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     async reconcile() {
       try {
         if (!aliasUsable()) return;
-        await aliasOp({}, "read"); // applies itself iff still current; failure waits for the next trigger
+        const sink: { applied?: XsAliasStateWire } = {};
+        await aliasOp({}, "read", sink); // applies itself iff still current; failure waits for the next trigger
+        // alias-force-default §5.1 (AF3): the auto tail fires only on an APPLIED `state:"none"` — a
+        // stale/discarded get or a hub error never starts a write.
+        if (sink.applied === undefined || sink.applied.state !== "none") return;
+        const sid = deps.port.stack()?.sessionId();
+        if (sid === undefined) return;
+        maybeAutoClaim(sid);
       } catch {
         /* never throws */
       }
@@ -573,7 +840,8 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         ...XS_AGENT_CAPS,
         ...(reply ? [XS_REPLY_AGENT_CAP] : []),
         ...(ch ? [XS_CHANNEL_AGENT_CAP] : []),
-        ...(al ? [XS_ALIAS_AGENT_CAP] : []),
+        // alias-force-default §3.1 (AF3): v2 immediately after v1, declared under the SAME condition.
+        ...(al ? [XS_ALIAS_AGENT_CAP, XS_ALIAS_V2_AGENT_CAP] : []),
       ];
     },
 
@@ -774,6 +1042,25 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     aliasCache: () => aliasCachePort,
     onHubCapsAlias() {
       void aliasCachePort.reconcile();
+    },
+
+    onAliasEvt(frame) {
+      // alias-force-default §5.4 (AF3): the hub's push is a bare nudge — a matching sessionId re-runs the
+      // normal get reconcile (a `lost{forced}` then rides the one-shot notice path and `publishStatus`
+      // drops the card's `@alias`); anything else is ignored. Never throws.
+      try {
+        const sid = deps.port.stack()?.sessionId();
+        if (sid === undefined || frame.sessionId !== sid) return;
+        void aliasCachePort.reconcile();
+      } catch {
+        /* never throws */
+      }
+    },
+
+    aliasAutoSkip() {
+      const sid = deps.port.stack()?.sessionId();
+      if (sid === undefined) return undefined;
+      return autoSkipBySid.get(sid);
     },
 
     async hubInfo() {

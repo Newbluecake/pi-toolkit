@@ -129,6 +129,9 @@ export interface XsAliasCacheEntry {
   lostAt?: number;
   /** AL4: why the alias was lost (for `/fabric status`'s `alias - (lost: taken)`); optional, display only. */
   lostReason?: "taken" | "expired";
+  /** Alias-force-default §7 (AF3): `"auto"` iff the hub marked the held record `origin:"auto"` (AF4 renders
+   *  `held (auto)`). Mirrored from the wire; optional, display only. */
+  origin?: "auto";
 }
 
 /** Outcome of a bounded (5s) alias op over the xs bridge (`op:"alias"`). */

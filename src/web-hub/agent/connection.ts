@@ -50,7 +50,7 @@ import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
 import type { HubPaths } from "../protocol/paths.js";
 import type { RunTxReqFrame, RunWatchFrame } from "../protocol/run-transcript.js";
 import type { CompleteReqFrame } from "../protocol/command-args.js";
-import type { XsDeliverFrame, XsReqFrame, XsResFrame } from "../protocol/xs.js";
+import type { XsAliasEvtFrame, XsDeliverFrame, XsReqFrame, XsResFrame } from "../protocol/xs.js";
 import type { SchedDecideFrame, SchedReceiptsFrame, SchedRunFrame } from "../protocol/schedule.js";
 import { XS_HUB_CAP, XS_SLOT_KIND, xsReqDeadlineMs } from "../protocol/xs.js";
 import { P1_CAPS, PROTO, SLOT_REQUIRED_CAP, compareVersions, protoCompatible } from "../protocol/version.js";
@@ -117,6 +117,11 @@ export interface BindingPort {
    *  bridge owns that contract; without it the hub's 5s registry deadline settles unknown).
    *  Live-link-only, like every other hub→agent request. */
   onXsDeliver?(frame: XsDeliverFrame): void;
+  /** Alias-force-default plan §3.2/§5.4 (AF3): hub→agent nudge that the session's alias binding changed
+   *  (a force take). No reply — the handler re-runs the normal get reconcile (`agent/xs.ts`).
+   *  Live-link-only; a binding without it silently ignores the frame (a v2 hub only sends it to
+   *  effective members whose hello declared `xs.alias.v2`, so this is purely defensive). */
+  onXsAliasEvt?(frame: XsAliasEvtFrame): void;
   /** scheduled-reports A0 (§7.4/§10.1): hub→agent manual-run request. The handler answers
    *  EXACTLY ONE `sched_run_ack` (`schedule/agent/coordinator.ts`). Live-link-only; a binding
    *  without it (schedule off) silently ignores the frame — the hub's own ack wait settles it. */
@@ -725,6 +730,10 @@ class Connection implements HubConnection {
         // 5s registry deadline settles the pending as unknown (an agent that never advertised
         // xs.v1 is not an effective member and never receives one of these anyway).
         if (this.link === "live") this.callBinding((b) => b.onXsDeliver?.(frame));
+        return;
+      case "xs_alias_evt":
+        // alias-force-default §3.2 (AF3): live-link-only, no reply; no hook ⇒ ignored.
+        if (this.link === "live") this.callBinding((b) => b.onXsAliasEvt?.(frame));
         return;
       case "run_watch":
         if (this.link === "live") this.callBinding((b) => b.onRunWatch?.(frame));

@@ -1243,7 +1243,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // getter (the closure variable swaps on every connectWith/handover).
   const xsBridge =
     deps.xs !== undefined
-      ? createXsAgentBridge({ port: deps.xs, conn: () => conn, publishStatus: () => publishStatus() })
+      ? createXsAgentBridge({
+          port: deps.xs,
+          conn: () => conn,
+          // alias-force-default §5.1 (AF3): the attach generation is one leg of the auto-claim dedup key.
+          connGen: () => connGen,
+          publishStatus: () => publishStatus(),
+        })
       : undefined;
   // scheduled-reports A0: the router sends only while the live link's hello_ack carries sched.v1.
   const schedulePort = deps.schedule;
@@ -1260,7 +1266,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     send: (frame) => conn?.send(frame),
   });
   const binding: BindingPort = {
-    ...(xsBridge !== undefined ? { onXsDeliver: (frame) => xsBridge.onDeliver(frame) } : {}),
+    ...(xsBridge !== undefined
+      ? {
+          onXsDeliver: (frame) => xsBridge.onDeliver(frame),
+          // alias-force-default §5.4 (AF3): the hub's alias-force nudge → the bridge's reconcile.
+          onXsAliasEvt: (frame) => xsBridge.onAliasEvt(frame),
+        }
+      : {}),
     ...(schedulePort !== undefined
       ? {
           onSchedRun: (frame: SchedRunFrame) => schedulePort.onSchedRun(frame),
