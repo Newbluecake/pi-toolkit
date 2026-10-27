@@ -215,3 +215,16 @@ export const wakeEvent = (details: unknown) => ({
   messageType: "custom",
   message: { customType: "subagent:schedule", details },
 });
+
+/** Like `pi.emit`: every handler in registration order, each awaited; a throwing handler is recorded, not fatal. */
+export async function emitAll(h: FakePi, event: string, payload: unknown, ctx: unknown): Promise<unknown[]> {
+  const out: unknown[] = [];
+  for (const fn of h.handlers.get(event) ?? []) {
+    try {
+      out.push(await fn(payload, ctx));
+    } catch (error) {
+      out.push(error);
+    }
+  }
+  return out;
+}
