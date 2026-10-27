@@ -21,8 +21,21 @@
  *   bad file stays in place, so the next start is degraded again until a human fixes/moves it (R10).
  *   `advertised` is fixed for the run (true iff the initial load was `ready`).
  * - **Take tokens**: in-memory only, ≤32, 5 min TTL, bound to (requester sid, alias, holder sid,
- *   record rev, holder offlineSince); removed from the table the moment an execute request
+ *   record rev, `mode`, holder `presenceKey`); removed from the table the moment an execute request
  *   arrives, so ANY outcome consumes it.
+ *
+ * Alias-force-default plan (#72, AF1) additions — all append-only, a v1 requester sees v1 bytes:
+ * - **auto** (`autoClaim`, I7): creates a record only; a SYNCHRONOUS pre-check answers every "name is
+ *   taken / session already settled" case without occupying a queue slot; only an auto that can succeed
+ *   is enqueued, and the same predicate is re-run inside the transaction.
+ * - **force** (`forcePreview` + a `mode:"force"` token, I5′): takes a held alias from a holder that is
+ *   `notifiable` (offline, or xs-online with EVERY effective member declaring `xs.alias.v2`; a holder that
+ *   is merely `linked` — connected to the hub but not an effective xs member — is never notifiable).
+ *   The token binds `presenceKey` (`on` | `off:<offlineSince>`) and the record `rev`; execution re-checks
+ *   both inside the plan and again before rename. `onForcedCommit` fires after the commit (incl. a late
+ *   wedged rename success) so the router can push `xs_alias_evt`.
+ * - persisted optional keys: `origin:"auto"` on a record, `forced:true` on a tombstone (never a new
+ *   `reason` value — an old hub must not degrade on the file).
  *
  * Timers: only per-transaction budget timers (all unref'd via the default `timer` dep, cancelled
  * on settle). The clock (`now`) and the timer factory are injectable for deterministic tests.
@@ -101,12 +114,16 @@ export interface XsAliasRecord {
   coolUntil?: number;
   rev: number;
   cwdLabel: string;
+  /** `"auto"` iff auto-claimed from the cwd basename; any human grant drops it. Optional on disk. */
+  origin?: "auto";
 }
 export interface XsAliasTombstone {
   sessionId: string;
   alias: string;
   reason: "taken" | "expired";
   at: number;
+  /** `true` iff the take was a `--force`. Optional on disk (reason stays `taken`). */
+  forced?: true;
 }
 
 export type XsAliasStoreState = "loading" | "ready" | "wedged" | "disabled" | "degraded";
@@ -138,7 +155,7 @@ export interface XsAliasStoreStatus {
 export type XsAliasWriteFailure =
   | { code: "E_XS_ALIAS_INVALID"; detail: XsAliasRejectReason }
   | { code: "E_XS_ALIAS_TAKEN"; detail: "taken" | "confusable" }
-  | { code: "E_XS_ALIAS_TAKE"; detail: "online" | "recent" | "stale" | "not_held" }
+  | { code: "E_XS_ALIAS_TAKE"; detail: "online" | "recent" | "stale" | "not_held" | "unnotifiable" }
   | { code: "E_XS_ALIAS_FULL" }
   | { code: "E_XS_ALIAS_BUSY"; detail: "queue" | "io" | "tokens" }
   | { code: "E_XS_ALIAS_UNKNOWN" };
@@ -149,6 +166,9 @@ export interface XsAliasRequester {
   sessionId: string;
   epoch: number;
   agentKey?: string;
+  /** The requester declared `xs.alias.v2` (set by the router): only then may `origin` / `lost.forced` /
+   *  preview `online`+`auto` be written into a reply. Absent ⇒ v1 bytes. */
+  v2?: boolean;
 }
 
 export type XsAliasWriteResult = { ok: true; res: XsAliasStateWire } | { ok: false; failure: XsAliasWriteFailure };
@@ -187,6 +207,15 @@ export interface XsAliasStoreDeps {
   isOnline(sessionId: string): boolean;
   /** Rename-before re-check (§3.3-4): requester is still the same sid/epoch effective member. */
   isRequesterLive(requester: XsAliasRequester): boolean;
+  /** Alias-force-default §2: the sid has a registry record that is connected ∧ phase≠stale but is NOT an
+   *  effective xs member (checked only after `isOnline` said no). Absent ⇒ never linked. */
+  isLinked?(sessionId: string): boolean;
+  /** Alias-force-default §4: EVERY effective member of the (xs-online) sid declares `xs.alias.v2`. Absent ⇒
+   *  false, i.e. force is refused `unnotifiable` for any online holder. */
+  allMembersV2?(sessionId: string): boolean;
+  /** Alias-force-default I9: a force committed (also a wedged rename that settled OK). Never throws into the
+   *  store (exceptions are swallowed); a failed push is never rolled back. */
+  onForcedCommit?(event: { holderSessionId: string; requesterSessionId: string; at: number }): void;
   fs?: XsAliasFs;
   now?: () => number;
   timer?: XsAliasTimer;
@@ -213,7 +242,12 @@ export interface XsAliasStore {
   set(requester: XsAliasRequester, rawAlias: string, cwdLabel: string): Promise<XsAliasWriteResult>;
   clear(requester: XsAliasRequester): Promise<XsAliasWriteResult>;
   takePreview(requester: XsAliasRequester, rawAlias: string): XsAliasPreviewResult;
-  /** Any outcome consumes the token (§3.5). */
+  /** Alias-force-default `intent:"auto"` (I7): new record only; "taken"-class answers are synchronous. */
+  autoClaim(requester: XsAliasRequester, rawAlias: string, cwdLabel: string): Promise<XsAliasWriteResult>;
+  /** Alias-force-default `intent:"force"` + `take:"preview"`: refuses `unnotifiable` / `not_held`; the
+   *  issued token binds `mode:"force"` and the holder's `presenceKey`. */
+  forcePreview(requester: XsAliasRequester, rawAlias: string): XsAliasPreviewResult;
+  /** Any outcome consumes the token (§3.5). The token's `mode` (not the caller) decides take vs force. */
   take(requester: XsAliasRequester, rawAlias: string, token: string, cwdLabel: string): Promise<XsAliasWriteResult>;
   /** Presence hint from the members observer (onMember / onSession / onInvalidate): re-evaluates
    *  `isOnline(sid)` and stamps `offlineSince` on an online→offline edge. Never writes. */
@@ -281,10 +315,17 @@ function serializeTable(t: Table): Uint8Array {
       ...(r.state === "cooling" && r.coolUntil !== undefined ? { coolUntil: r.coolUntil } : {}),
       rev: r.rev,
       cwdLabel: r.cwdLabel,
+      ...(r.origin === "auto" ? { origin: "auto" } : {}),
     }));
   const tombstones = [...t.tombs.values()]
     .sort((a, b) => (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0))
-    .map((x) => ({ sessionId: x.sessionId, alias: x.alias, reason: x.reason, at: x.at }));
+    .map((x) => ({
+      sessionId: x.sessionId,
+      alias: x.alias,
+      reason: x.reason,
+      at: x.at,
+      ...(x.forced === true ? { forced: true } : {}),
+    }));
   const shape = { version: 1, skeletonVersion: XS_ALIAS_SKELETON_VERSION, seq: t.seq, records, tombstones };
   return new TextEncoder().encode(`${JSON.stringify(shape)}\n`);
 }
@@ -323,7 +364,7 @@ function parseTable(bytes: Uint8Array, log?: XsAliasStoreDeps["log"]): Table {
   let reskeleton = 0;
   for (const r of rawRecords) {
     if (!isObj(r)) return corrupt("record");
-    const { alias, skeleton, sessionId, state, coolUntil, rev, cwdLabel } = r;
+    const { alias, skeleton, sessionId, state, coolUntil, rev, cwdLabel, origin } = r;
     if (!isStr(alias, ALIAS_RAW_MAX) || CONTROL_RE.test(alias)) return corrupt("record.alias");
     if (typeof skeleton !== "string") return corrupt("record.skeleton");
     if (!isStr(sessionId, SESSION_ID_MAX) || CONTROL_RE.test(sessionId)) return corrupt("record.sessionId");
@@ -346,18 +387,20 @@ function parseTable(bytes: Uint8Array, log?: XsAliasStoreDeps["log"]): Table {
       ...(state === "cooling" ? { coolUntil: coolUntil as number } : {}),
       rev,
       cwdLabel: sanitizeAliasCwdLabel(cwdLabel),
+      // optional v2 key: only the exact value counts (anything else ⇒ human-granted; never `corrupt`)
+      ...(origin === "auto" ? { origin: "auto" as const } : {}),
     });
     seq = Math.max(seq, rev);
   }
   for (const x of rawTombs) {
     if (!isObj(x)) return corrupt("tombstone");
-    const { sessionId, alias, reason, at } = x;
+    const { sessionId, alias, reason, at, forced } = x;
     if (!isStr(sessionId, SESSION_ID_MAX) || CONTROL_RE.test(sessionId)) return corrupt("tombstone.sessionId");
     if (!isStr(alias, ALIAS_RAW_MAX) || CONTROL_RE.test(alias)) return corrupt("tombstone.alias");
     if (reason !== "taken" && reason !== "expired") return corrupt("tombstone.reason");
     if (!isTime(at)) return corrupt("tombstone.at");
     if (t.tombs.has(sessionId)) return corrupt("tombstone.dup");
-    t.tombs.set(sessionId, { sessionId, alias, reason, at });
+    t.tombs.set(sessionId, { sessionId, alias, reason, at, ...(forced === true ? { forced: true as const } : {}) });
   }
   t.seq = seq;
   if (reskeleton > 0 || parsed["skeletonVersion"] !== XS_ALIAS_SKELETON_VERSION) {
@@ -455,9 +498,16 @@ interface TokenEntry {
   alias: string;
   holder: string;
   rev: number;
-  offlineSince: number;
+  /** How the token executes; bound at preview time, never taken from the execute frame. */
+  mode: "take" | "force";
+  /** Holder presence at preview: `on` (xs-online) | `off:<offlineSince>`. A `linked` holder never gets a token. */
+  presenceKey: string;
   expiresAt: number;
 }
+
+/** Alias-force-default §2/§4: the read-time presence of a sid. `key` is absent for `linked`. */
+type PresenceInfo =
+  { kind: "xs-online"; key: "on" } | { kind: "linked" } | { kind: "offline"; key: string; off: number };
 
 interface Presence {
   online: boolean;
@@ -476,6 +526,8 @@ type Plan =
       recheck: () => XsAliasWriteFailure | undefined;
       /** The sid granted a held record (presence ⇒ online on commit). */
       grantee?: string;
+      /** Runs right after the in-memory table was replaced (also on a late wedged success). Never throws out. */
+      afterCommit?: () => void;
     };
 
 interface Job {
@@ -604,6 +656,21 @@ export function createXsAliasStore(deps: XsAliasStoreDeps): XsAliasStore {
       if (heldIndex.has(sid)) presence.set(sid, p);
     }
     return p.offlineSince;
+  }
+
+  /** One read of a holder's three-state presence (alias-force-default §2). `offlineSinceOf` stamps/reads the
+   *  xs-online edge exactly as take always did; `linked` only refines "not xs-online" for force. */
+  function presenceOf(sid: string): PresenceInfo {
+    const off = offlineSinceOf(sid);
+    if (off === undefined) return { kind: "xs-online", key: "on" };
+    if (deps.isLinked?.(sid) === true) return { kind: "linked" };
+    return { kind: "offline", key: `off:${off}`, off };
+  }
+
+  /** §4 `notifiable`: offline, or xs-online with EVERY effective member declaring v2. `linked` never is. */
+  function notifiableOf(p: PresenceInfo, sid: string): boolean {
+    if (p.kind === "offline") return true;
+    return p.kind === "xs-online" && deps.allMembersV2?.(sid) === true;
   }
 
   const coolingLive = (r: XsAliasRecord, t: number): boolean =>
@@ -805,6 +872,7 @@ export function createXsAliasStore(deps: XsAliasStoreDeps): XsAliasStore {
     if (rr.kind === "ok") {
       usedTemps.delete(tmp); // renamed onto the main file: the temp name no longer exists
       commit(p.next, p.grantee);
+      runAfterCommit(p.afterCommit);
       return { ok: true, res: p.res };
     }
     if (rr.kind === "err") {
@@ -818,11 +886,15 @@ export function createXsAliasStore(deps: XsAliasStoreDeps): XsAliasStore {
     deps.log?.warn("xs alias store wedged", { reason: "rename-slow" });
     const nextTable = p.next;
     const grantee = p.grantee;
+    const afterCommit = p.afterCommit;
     void rn.p.then(
       () => {
         // disk now holds nextTable: memory follows even if we already went disabled
         usedTemps.delete(tmp);
-        if (gen === baseGen) commit(nextTable, grantee);
+        if (gen === baseGen) {
+          commit(nextTable, grantee);
+          runAfterCommit(afterCommit); // I9: a late success still notifies; a late failure never does
+        }
         settleWedge();
       },
       () => {
@@ -831,6 +903,15 @@ export function createXsAliasStore(deps: XsAliasStoreDeps): XsAliasStore {
       },
     );
     return fail({ code: "E_XS_ALIAS_UNKNOWN" });
+  }
+
+  function runAfterCommit(fn: (() => void) | undefined): void {
+    if (fn === undefined) return;
+    try {
+      fn();
+    } catch (err) {
+      deps.log?.warn("xs alias afterCommit threw", { err: String(err) });
+    }
   }
 
   function settleWedge(): void {
@@ -873,7 +954,7 @@ export function createXsAliasStore(deps: XsAliasStoreDeps): XsAliasStore {
       changed = true;
     } else if (kind === "reclaim") {
       const cur = R as XsAliasRecord;
-      if (cur.state !== "held" || cur.cwdLabel !== label || cur.skeleton !== skeleton) {
+      if (cur.state !== "held" || cur.cwdLabel !== label || cur.skeleton !== skeleton || cur.origin !== undefined) {
         next.records.set(alias, { alias, skeleton, sessionId: sid, state: "held", rev: ++next.seq, cwdLabel: label });
         changed = true;
       }
@@ -941,14 +1022,15 @@ export function createXsAliasStore(deps: XsAliasStoreDeps): XsAliasStore {
     }
     const off = offlineSinceOf(R.sessionId);
     if (off === undefined) return { kind: "fail", failure: { code: "E_XS_ALIAS_TAKE", detail: "online" } };
-    if (off !== tok.offlineSince) return { kind: "fail", failure: TAKE_STALE };
+    if (`off:${off}` !== tok.presenceKey) return { kind: "fail", failure: TAKE_STALE };
     if (t - off < takeMinMs) return { kind: "fail", failure: { code: "E_XS_ALIAS_TAKE", detail: "recent" } };
     const H = R.sessionId;
     stepG(next, sid, alias, skeleton, t);
     for (const [k, r] of next.records) {
       if (r.sessionId === H && r.state === "cooling" && r.skeleton === skeleton) next.records.delete(k);
     }
-    next.records.set(alias, { ...R, skeleton, sessionId: sid, state: "held", rev: ++next.seq, cwdLabel: label });
+    // a human grant: `origin` is dropped (explicit fields, never `...R`)
+    next.records.set(alias, { alias, skeleton, sessionId: sid, state: "held", rev: ++next.seq, cwdLabel: label });
     addTomb(next, { sessionId: H, alias, reason: "taken", at: t });
     next.tombs.delete(sid);
     return {
@@ -960,14 +1042,159 @@ export function createXsAliasStore(deps: XsAliasStoreDeps): XsAliasStore {
         const c = table.records.get(alias);
         if (c === undefined || c.state !== "held" || c.sessionId !== H || c.rev !== tok.rev) return TAKE_STALE;
         const o = offlineSinceOf(H);
-        if (o === undefined || o !== tok.offlineSince || now() - o < takeMinMs) return TAKE_STALE;
+        if (o === undefined || `off:${o}` !== tok.presenceKey || now() - o < takeMinMs) return TAKE_STALE;
         return undefined;
       },
     };
   }
 
+  /** Force conditions that must hold at plan time AND again right before rename (I5′): same holder, same
+   *  record rev, unchanged presenceKey, holder still notifiable (a holder that became `linked` ⇒ stale). */
+  function forceStale(c: XsAliasRecord | undefined, tok: TokenEntry): XsAliasWriteFailure | undefined {
+    if (c === undefined || c.state !== "held" || c.sessionId !== tok.holder || c.rev !== tok.rev) return TAKE_STALE;
+    const p = presenceOf(tok.holder);
+    if (p.kind === "linked" || p.key !== tok.presenceKey || !notifiableOf(p, tok.holder)) return TAKE_STALE;
+    return undefined;
+  }
+
+  function planForce(sid: string, alias: string, skeleton: string, tok: TokenEntry, label: string, t: number): Plan {
+    const next = cloneTable(table);
+    prune(next, t);
+    const R = next.records.get(alias);
+    if (R === undefined || R.sessionId === sid) return { kind: "fail", failure: TAKE_STALE };
+    const stale = forceStale(R, tok);
+    if (stale !== undefined) return { kind: "fail", failure: stale };
+    const H = R.sessionId;
+    stepG(next, sid, alias, skeleton, t);
+    for (const [k, r] of next.records) {
+      if (r.sessionId === H && r.state === "cooling" && r.skeleton === skeleton) next.records.delete(k);
+    }
+    next.records.set(alias, { alias, skeleton, sessionId: sid, state: "held", rev: ++next.seq, cwdLabel: label });
+    addTomb(next, { sessionId: H, alias, reason: "taken", at: t, forced: true });
+    next.tombs.delete(sid);
+    return {
+      kind: "write",
+      next,
+      res: { alias, state: "held" },
+      grantee: sid,
+      recheck: () => forceStale(table.records.get(alias), tok),
+      afterCommit: () => deps.onForcedCommit?.({ holderSessionId: H, requesterSessionId: sid, at: now() }),
+    };
+  }
+
+  /** Alias-force-default §4 `auto` predicate (I7), read-time on `tbl`: `undefined` ⇒ the claim may proceed.
+   *  Expired coolings and ≥30-day tombstones do not exist; an EXPIRED held still blocks (auto never takes over). */
+  function autoVerdict(
+    tbl: Table,
+    sid: string,
+    alias: string,
+    skeleton: string,
+    t: number,
+  ): { kind: "fail"; failure: XsAliasWriteFailure } | { kind: "noop"; res: XsAliasStateWire } | undefined {
+    const taken = {
+      kind: "fail" as const,
+      failure: { code: "E_XS_ALIAS_TAKEN", detail: "taken" } as XsAliasWriteFailure,
+    };
+    let live = 0;
+    for (const r of tbl.records.values()) {
+      if (r.state === "held" && r.sessionId === sid) {
+        return {
+          kind: "noop",
+          res: { alias: r.alias, state: "held", ...(r.origin === "auto" ? { origin: "auto" } : {}) },
+        };
+      }
+    }
+    for (const r of tbl.records.values()) {
+      if (r.state === "cooling" && !coolingLive(r, t)) continue;
+      live++;
+      if (r.sessionId === sid) return taken; // S's own coolingLive
+    }
+    const tomb = tbl.tombs.get(sid);
+    if (tomb !== undefined && t - tomb.at <= XS_ALIAS_TOMBSTONE_TTL_MS) return taken;
+    const X = tbl.records.get(alias);
+    if (X !== undefined && (X.state === "held" || coolingLive(X, t))) return taken;
+    for (const r of tbl.records.values()) {
+      if (r.alias === alias || r.skeleton !== skeleton) continue;
+      if (r.state === "cooling" && !coolingLive(r, t)) continue;
+      return { kind: "fail", failure: { code: "E_XS_ALIAS_TAKEN", detail: "confusable" } };
+    }
+    if (live >= XS_ALIAS_MAX_RECORDS) return { kind: "fail", failure: { code: "E_XS_ALIAS_FULL" } };
+    return undefined;
+  }
+
+  function planAuto(sid: string, alias: string, skeleton: string, label: string, t: number): Plan {
+    const next = cloneTable(table);
+    prune(next, t);
+    const v = autoVerdict(next, sid, alias, skeleton, t);
+    if (v !== undefined) return v;
+    // I7: S has no held / coolingLive / live tombstone and x has no live record ⇒ step G is a no-op, nothing is demoted
+    next.records.set(alias, {
+      alias,
+      skeleton,
+      sessionId: sid,
+      state: "held",
+      rev: ++next.seq,
+      cwdLabel: label,
+      origin: "auto",
+    });
+    const expectRev = table.records.get(alias)?.rev;
+    return {
+      kind: "write",
+      next,
+      res: { alias, state: "held", origin: "auto" },
+      grantee: sid,
+      recheck: () => (table.records.get(alias)?.rev !== expectRev ? BUSY_IO : undefined),
+    };
+  }
+
   function sweepTokens(t: number): void {
     for (const [k, v] of tokens) if (v.expiresAt <= t) tokens.delete(k);
+  }
+
+  /** Mint a preview token (≤32 live, bounded random retries) and build the reply. `v2` extras (`online`,
+   *  `auto`) are written only for a v2 requester. */
+  function issueToken(
+    requester: XsAliasRequester,
+    alias: string,
+    R: XsAliasRecord,
+    mode: "take" | "force",
+    presenceKey: string,
+    offlineForS: number,
+    online: boolean,
+    t: number,
+  ): XsAliasPreviewResult {
+    sweepTokens(t);
+    if (tokens.size >= XS_ALIAS_TOKENS_MAX) return fail({ code: "E_XS_ALIAS_BUSY", detail: "tokens" });
+    let token: string | undefined;
+    for (let i = 0; i < 8 && token === undefined; i++) {
+      const c = `k${hex(8)}`;
+      if (XS_ALIAS_TAKE_TOKEN_RE.test(c) && !tokens.has(c)) token = c;
+    }
+    if (token === undefined) return fail({ code: "E_XS_ALIAS_BUSY", detail: "tokens" }); // bounded: never spin
+    const expiresAt = t + XS_ALIAS_TOKEN_TTL_MS;
+    tokens.set(token, {
+      requester: requester.sessionId,
+      alias,
+      holder: R.sessionId,
+      rev: R.rev,
+      mode,
+      presenceKey,
+      expiresAt,
+    });
+    const v2 = requester.v2 === true;
+    return {
+      ok: true,
+      res: {
+        take: {
+          cwdLabel: sanitizeAliasCwdLabel(R.cwdLabel),
+          offlineForS,
+          token,
+          expiresAt,
+          ...(v2 && online ? { online: true as const } : {}),
+          ...(v2 && R.origin === "auto" ? { auto: true as const } : {}),
+        },
+      },
+    };
   }
 
   // ----------------------------------------------------------- public API
@@ -1062,11 +1289,18 @@ export function createXsAliasStore(deps: XsAliasStoreDeps): XsAliasStore {
       const tomb = table.tombs.get(sid);
       const lost =
         tomb !== undefined && now() - tomb.at <= XS_ALIAS_TOMBSTONE_TTL_MS
-          ? { alias: tomb.alias, reason: tomb.reason, at: tomb.at }
+          ? {
+              alias: tomb.alias,
+              reason: tomb.reason,
+              at: tomb.at,
+              ...(requester.v2 === true && tomb.forced === true ? { forced: true as const } : {}),
+            }
           : undefined;
+      const origin = requester.v2 === true && alias !== undefined ? table.records.get(alias)?.origin : undefined;
       return {
         ...(alias !== undefined ? { alias } : {}),
         state: alias !== undefined ? "held" : "none",
+        ...(origin === "auto" ? { origin } : {}),
         ...(lost !== undefined ? { lost } : {}),
       };
     },
@@ -1095,34 +1329,47 @@ export function createXsAliasStore(deps: XsAliasStoreDeps): XsAliasStore {
       const off = offlineSinceOf(R.sessionId);
       if (off === undefined) return fail({ code: "E_XS_ALIAS_TAKE", detail: "online" });
       if (t - off < takeMinMs) return fail({ code: "E_XS_ALIAS_TAKE", detail: "recent" });
-      sweepTokens(t);
-      if (tokens.size >= XS_ALIAS_TOKENS_MAX) return fail({ code: "E_XS_ALIAS_BUSY", detail: "tokens" });
-      let token: string | undefined;
-      for (let i = 0; i < 8 && token === undefined; i++) {
-        const c = `k${hex(8)}`;
-        if (XS_ALIAS_TAKE_TOKEN_RE.test(c) && !tokens.has(c)) token = c;
+      return issueToken(
+        requester,
+        n.alias,
+        R,
+        "take",
+        `off:${off}`,
+        Math.max(0, Math.floor((t - off) / 1000)),
+        false,
+        t,
+      );
+    },
+
+    forcePreview(requester, rawAlias) {
+      const gate = writeGate();
+      if (gate !== undefined) return fail(gate);
+      const n = normalizeAlias(rawAlias, { stripAt: true });
+      if (!n.ok) return fail({ code: "E_XS_ALIAS_INVALID", detail: n.reason });
+      const t = now();
+      const R = table.records.get(n.alias);
+      if (R === undefined || R.state !== "held" || R.sessionId === requester.sessionId) {
+        return fail({ code: "E_XS_ALIAS_TAKE", detail: "not_held" });
       }
-      if (token === undefined) return fail({ code: "E_XS_ALIAS_BUSY", detail: "tokens" }); // bounded: never spin
-      const expiresAt = t + XS_ALIAS_TOKEN_TTL_MS;
-      tokens.set(token, {
-        requester: requester.sessionId,
-        alias: n.alias,
-        holder: R.sessionId,
-        rev: R.rev,
-        offlineSince: off,
-        expiresAt,
-      });
-      return {
-        ok: true,
-        res: {
-          take: {
-            cwdLabel: sanitizeAliasCwdLabel(R.cwdLabel),
-            offlineForS: Math.max(0, Math.floor((t - off) / 1000)),
-            token,
-            expiresAt,
-          },
-        },
-      };
+      const p = presenceOf(R.sessionId);
+      if (p.kind === "linked" || !notifiableOf(p, R.sessionId)) {
+        return fail({ code: "E_XS_ALIAS_TAKE", detail: "unnotifiable" });
+      }
+      const offlineForS = p.kind === "offline" ? Math.max(0, Math.floor((t - p.off) / 1000)) : 0;
+      return issueToken(requester, n.alias, R, "force", p.key, offlineForS, p.kind === "xs-online", t);
+    },
+
+    autoClaim(requester, rawAlias, cwdLabel) {
+      const gate = writeGate();
+      if (gate !== undefined) return Promise.resolve(fail(gate));
+      const n = normalizeAlias(rawAlias, { stripAt: true });
+      if (!n.ok) return Promise.resolve(fail({ code: "E_XS_ALIAS_INVALID", detail: n.reason }));
+      const label = sanitizeAliasCwdLabel(cwdLabel);
+      // synchronous pre-check: every "taken"-class answer is immediate and never occupies the queue (§4)
+      const pre = autoVerdict(table, requester.sessionId, n.alias, n.skeleton, now());
+      if (pre?.kind === "fail") return Promise.resolve(fail(pre.failure));
+      if (pre?.kind === "noop") return Promise.resolve({ ok: true, res: pre.res });
+      return enqueue((t) => planAuto(requester.sessionId, n.alias, n.skeleton, label, t), requester, false);
     },
 
     take(requester, rawAlias, token, cwdLabel) {
@@ -1140,7 +1387,14 @@ export function createXsAliasStore(deps: XsAliasStoreDeps): XsAliasStore {
         return Promise.resolve(fail(TAKE_STALE));
       }
       const label = sanitizeAliasCwdLabel(cwdLabel);
-      return enqueue((t) => planTake(requester.sessionId, n.alias, n.skeleton, tok, label, t), requester, true);
+      return enqueue(
+        (t) =>
+          tok.mode === "force"
+            ? planForce(requester.sessionId, n.alias, n.skeleton, tok, label, t)
+            : planTake(requester.sessionId, n.alias, n.skeleton, tok, label, t),
+        requester,
+        true,
+      );
     },
 
     touchPresence(sessionId) {
