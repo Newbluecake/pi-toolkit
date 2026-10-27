@@ -6,8 +6,10 @@
  * model. Nothing here is a stub of pi's tool-restore behaviour: the premise tests (R1) pin what pi
  * actually does so a pi change surfaces here first.
  *
- *  R1  premise: pi ≥ 1.3 resume restores the transcript's tool declarations ⇒ the new tool is registered
- *      but NOT active (only holds without the toolkit migration).
+ *  R1  premise: pi 1.3 resume restored the transcript's tool declarations ⇒ the new tool was registered
+ *      but NOT active without the toolkit migration. pi 1.4 (#11062/#11075) activates extension tools the
+ *      branch never added/removed, so on 1.4 the new tool is active natively; the migration is then a no-op
+ *      and stays only as the fallback for pi 1.0–1.3 (the peer range still allows them). R1 pins the 1.4 fact.
  *  R2  resume with the toolkit ⇒ new name active, request declares it (not the legacy one), history intact.
  *  R3  fork ⇒ same.
  *  R4  `/tree` back to the pre-rename node ⇒ session_tree re-activates it.
@@ -175,14 +177,15 @@ async function firstRequest(session: AgentSession, modelRuntime: ReturnType<type
 }
 
 describe("result-tool rename conformance (real createAgentSession × real activate)", () => {
-  it("R1 premise: pi restores transcript tools on resume — the new tool is registered but NOT active without the migration", async () => {
+  it("R1 premise (pi ≥1.4): resume activates extension tools the branch never mentioned — the new tool is active even without the migration", async () => {
     const { file } = await seedLegacySession();
     const { session } = await openSession({
       factories: [textTool(NEW)],
       manager: SessionManager.open(file, sessionsDir()),
     });
     expect(session.getAllTools().map((t) => t.name)).toContain(NEW);
-    expect(session.getActiveToolNames()).not.toContain(NEW);
+    // pi 1.3 asserted `.not.toContain(NEW)` here (the reason the migration exists).
+    expect(session.getActiveToolNames()).toContain(NEW);
   });
 
   it("R2 resume with the toolkit: new name active, request declares it (not the legacy one), history keeps the old call", async () => {
@@ -227,9 +230,21 @@ describe("result-tool rename conformance (real createAgentSession × real activa
   });
 
   it("R5a a user who disabled the new tool (transcript never declared the legacy name) keeps it disabled across resume", async () => {
-    // Fresh session under the toolkit; disable the tool and run one turn.
-    const first = await openSession({ factories: [activate], manager: SessionManager.create(cwd(), sessionsDir()) });
+    // Fresh session under the toolkit. One turn with the tool active records it in the transcript; then
+    // the user disables it and a second turn records the removal. (pi ≥1.4 re-activates a tool the branch
+    // never mentioned at all, so "disabled before the first turn" no longer survives a resume — that is
+    // pi's behaviour, not the migration's; see docs/dev/toolchain/pi-1.4-report.md.)
+    const first = await openSession({
+      factories: [activate],
+      manager: SessionManager.create(cwd(), sessionsDir()),
+      scripted: [
+        { toolCall: false, build: (m) => assistantTextMsg(m, "ok") },
+        { toolCall: false, build: (m) => assistantTextMsg(m, "ok2") },
+      ],
+    });
     expect(first.session.getActiveToolNames()).toContain(NEW);
+    await first.session.prompt("hello");
+    await first.session.agent.waitForIdle?.();
     first.session.setActiveToolsByName(first.session.getActiveToolNames().filter((n) => n !== NEW));
     await first.session.prompt("hi");
     await first.session.agent.waitForIdle?.();
