@@ -124,6 +124,7 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../title/settings.js",
     "../reload/settings.js",
     "../sysprompt/settings.js",
+    "../delivery/extend-settings.js",
     "../sysload/settings.js",
     "../topic-switch/settings.js",
     // #56 ⑧: the `webHub` / `feishuBot` blocks live in web-hub/agent/settings.ts (pinned below).
@@ -163,6 +164,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/compact-hint/settings.ts": ["./threshold.js"],
   // #56 ⑧: bashJobs block settings — self-contained (no imports at all).
   "src/bash/settings.ts": [],
+  // #56 ⑧: extend block settings — self-contained (no imports at all).
+  "src/delivery/extend-settings.ts": [],
   // #56 ⑧: systemPrompt block settings — self-contained (no imports at all).
   "src/sysprompt/settings.ts": [],
   // #56 ⑧: reload block settings — self-contained (no imports at all).

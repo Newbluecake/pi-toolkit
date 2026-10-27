@@ -116,6 +116,9 @@ export type { ReloadSettings } from "../reload/settings.js";
 import { DEFAULT_SYSTEM_PROMPT_SETTINGS, parseSystemPromptSettings } from "../sysprompt/settings.js";
 import type { SystemPromptSettings } from "../sysprompt/settings.js";
 export type { SystemPromptSettings } from "../sysprompt/settings.js";
+import { DEFAULT_EXTEND_SETTINGS, parseExtendSettings } from "../delivery/extend-settings.js";
+import type { ExtendSettings } from "../delivery/extend-settings.js";
+export type { ExtendSettings } from "../delivery/extend-settings.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 import { getSecureDomain, statePathsOf } from "../secure/domain.js";
 import { resolveAgentDir } from "../core/agent-dir.js";
@@ -154,17 +157,6 @@ import {
   type TopicSwitchSettings,
 } from "../topic-switch/settings.js";
 export type { TopicSwitchSettings };
-
-/**
- * timeout-notify：超时宽限 + 延长设置（arch §7.2）。逐字段容错解析见
- * parseExtendSettings。
- */
-export interface ExtendSettings {
-  /** 总开关。false 时：不注册 extend_subagent_timeout 工具，且 spawn 合并后钳 maxExtensions = 0（D-16）。Default true. */
-  enabled: boolean;
-  /** 宽限通知投递策略：background = 跳过仍在前台阻塞宿主的 caller-ack run；always = 调试用（D-17）；off = 不发（宽限仍生效）。 */
-  notify: "background" | "always" | "off";
-}
 
 /**
  * L1 (agent-tool pool-full plan §2): top-level/nested Agent tool dispatch
@@ -290,7 +282,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   cacheTtl: DEFAULT_CACHE_TTL_SETTINGS,
   quota: DEFAULT_QUOTA_SETTINGS,
   load: DEFAULT_LOAD_SETTINGS,
-  extend: { enabled: true, notify: "background" },
+  extend: DEFAULT_EXTEND_SETTINGS,
   goal: DEFAULT_GOAL_SETTINGS,
   hud: DEFAULT_HUD_SETTINGS,
   webHub: DEFAULT_WEBHUB_SETTINGS,
@@ -573,20 +565,6 @@ function parseSettingsSource(source: unknown): AgentSettings {
     traffic: parseTrafficSettings(value.traffic),
     schedule: parseScheduleSettings(value.schedule),
   });
-}
-
-/** Parse the optional timeout grace/extension settings block（parseCacheTtlSettings 同款容错，never throws）。 */
-export function parseExtendSettings(input: unknown): ExtendSettings {
-  const defaults = DEFAULT_SETTINGS.extend;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
-  const value = input as Record<string, unknown>;
-  return {
-    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
-    notify:
-      value.notify === "background" || value.notify === "always" || value.notify === "off"
-        ? value.notify
-        : defaults.notify,
-  };
 }
 
 /**
