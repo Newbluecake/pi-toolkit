@@ -144,7 +144,7 @@ import {
 import { resolveCommandUsage } from "./command-usage.js";
 import { modelsFingerprint, projectModels } from "./models.js";
 import { effectivePolicy, parameterizedBuiltinPolicy } from "./command-policy.js";
-import { createDialogBridge } from "./dialogs.js";
+import { wireDialogs } from "./dialogs-wire.js";
 import { clearRestoreVetoSync, createAdminCommands, type AdminCommands } from "./admin-cmds.js";
 import type { AskUserRemotePort } from "../../ask-user/remote.js";
 import type { MentionRouteDeps } from "../../mention/mention.js";
@@ -1258,27 +1258,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         : undefined,
     );
   };
-  const remoteAskUserEnabled = (): boolean =>
-    settings.control !== false && settings.remoteAskUser !== false && (deps.askUserEnabled?.() ?? true);
-  const dialogBridge = createDialogBridge({
-    setSlot: (kind, f) => conn?.setSlot(kind, f),
+  // source-governance batch2 ⑨-H1: the remote-ask_user gate + dialog bridge assembly live in
+  // dialogs-wire.ts — a pure extraction (conn/attached/ctx threaded as call-time getters).
+  const { remoteAskUserEnabled, dialogBridge } = wireDialogs({
+    settings,
+    askUserEnabled: deps.askUserEnabled,
+    conn: () => conn,
     isAttached: () => attached,
-    notify: (message) => {
-      const x = ctx;
-      try {
-        if (x === undefined || x.mode !== "tui" || !x.hasUI) return;
-        x.ui.notify(message);
-      } catch {
-        /* a stale ctx / notify failure must never affect the reply already sent */
-      }
-    },
+    getCtx: () => ctx,
     now,
-    enabled: remoteAskUserEnabled(),
     epoch: MODULE_INSTANCE,
-    send: (frame) => conn?.send(frame),
-    // ask-user-async §7.2 (P3): live hub caps — drives the by:"background" → "abort" downgrade
-    // in dialogs.ts while the connected hub lacks `dialog.bg.v1` (empty until hello_ack lands).
-    hubCaps: () => conn?.caps ?? [],
   });
   attributePromptRef.current = dialogBridge.attributePrompt;
   // fabric phase-2 X2: the xs bridge exists iff deps.xs was threaded (xsOn) — every surface it
