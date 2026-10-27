@@ -6,12 +6,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_DYNAMIC_THRESHOLD_SETTINGS,
-  DEFAULT_SETTINGS,
-  loadSettings,
-  parseDynamicThresholdSettings,
-} from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings } from "../../src/config/settings.js";
+import { DEFAULT_DYNAMIC_THRESHOLD_SETTINGS, parseDynamicThresholdSettings } from "../../src/compact-hint/settings.js";
 import {
   SETTING_SPECS,
   currentOf,

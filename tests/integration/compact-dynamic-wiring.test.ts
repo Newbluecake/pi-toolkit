@@ -19,7 +19,7 @@ import type { Stack } from "../../src/stack.js";
 import { wireDynamicThreshold, type DynamicRuntime } from "../../src/compact-hint/dynamic/wire.js";
 import { readTelemetryLines } from "../../src/compact-hint/dynamic/telemetry-store.js";
 import { MARKER_TTL_MS } from "../../src/compact-hint/dynamic/telemetry.js";
-import { DEFAULT_DYNAMIC_THRESHOLD_SETTINGS } from "../../src/config/settings.js";
+import { DEFAULT_DYNAMIC_THRESHOLD_SETTINGS } from "../../src/compact-hint/settings.js";
 import activate from "../../src/index.js";
 import { resetSettingsFilesIn } from "./helpers/home-sandbox.js";
 

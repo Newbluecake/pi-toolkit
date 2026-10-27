@@ -101,7 +101,7 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "node:path",
     // #56 ⑧: the `cacheTtl` block lives in cache-ttl/settings.ts (pinned below) — config no longer imports keepalive-state.
     "../cache-ttl/settings.js",
-    "../compact-hint/threshold.js",
+    "../compact-hint/settings.js",
     // settings-rename P2 (plan §6.3): settingsLocation()/prepareSettingsFile() resolve the agentDir through the
     // pi-free core resolver (node:path + node:url only; pinned above). A conscious table update — the hub
     // whitelist is NOT loosened: the hub reaches agent-dir through its own protocol mirror.
@@ -147,6 +147,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/quota/settings.ts": [],
   // #56 ⑧: load block settings — the frozen sysload domain constants.
   "src/sysload/settings.ts": ["./types.js"],
+  // #56 ⑧: compact block settings — the pure threshold defaults.
+  "src/compact-hint/settings.ts": ["./threshold.js"],
   // #56 ⑧: webHub/feishuBot block settings — LAN host/origin classification (L16 第一处) + the browser-safe,
   // import-free shared CIDR parser (LAN security P0). The hub whitelist is NOT loosened: these are the same two files.
   "src/web-hub/agent/settings.ts": ["../protocol/client-allow.js", "../protocol/lan.js"],
