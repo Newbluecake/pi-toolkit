@@ -78,6 +78,9 @@ export type {
 import { DEFAULT_WORKFLOW_BUDGET, DEFAULT_WORKFLOW_SETTINGS, parseWorkflowSettings } from "../workflow/settings.js";
 import type { WorkflowSettings } from "../workflow/settings.js";
 export type { RunawayPolicy, WorkflowBudget, WorkflowSettings } from "../workflow/settings.js";
+import { DEFAULT_TRAFFIC_SETTINGS, parseTrafficSettings } from "../traffic/settings.js";
+import type { TrafficSettings } from "../traffic/settings.js";
+export type { TrafficSettings, TrafficWebSettings } from "../traffic/settings.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 import { parseStrictModelRef } from "./model-hint.js";
 import { getSecureDomain, statePathsOf } from "../secure/domain.js";
@@ -323,51 +326,6 @@ export interface EnabledGroup {
 }
 
 // ── 流量录制（traffic-merge plan §2.2）：设置形状 / 默认值 / 解析。全部非 live。 ──
-
-export interface TrafficWebSettings {
-  /** 绑定地址（拍板②）：默认仅回环；`"0.0.0.0"` = LAN 显式 opt-in。 */
-  host: "127.0.0.1" | "0.0.0.0";
-  /** 起始端口（占用自增，最多 20 次）。 */
-  port: number;
-}
-export interface TrafficSettings {
-  /** 总开关，默认 false。off ⇒ 不调用任何 wire 函数；secure/locked 域强制 false（§6）。 */
-  enabled: boolean;
-  /** 子会话请求是否落库（拍板①，默认 true）：为 false 时子会话钩子仍注册（票据仍用于改写归属），只是不写行。 */
-  childSessions: boolean;
-  web: TrafficWebSettings;
-}
-export const DEFAULT_TRAFFIC_SETTINGS: TrafficSettings = {
-  enabled: false,
-  childSessions: true,
-  web: { host: "127.0.0.1", port: 4177 },
-};
-/** 解析 `traffic` 组：逐字段回落默认，永不抛错（web.host 只接受两个枚举值，端口整数 1024..65535）。 */
-export function parseTrafficSettings(input: unknown): TrafficSettings {
-  const d = DEFAULT_TRAFFIC_SETTINGS;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...d, web: { ...d.web } };
-  const value = input as Record<string, unknown>;
-  const webInput = value.web;
-  const web =
-    webInput && typeof webInput === "object" && !Array.isArray(webInput) ? (webInput as Record<string, unknown>) : {};
-  const host = web.host;
-  const port = web.port;
-  return {
-    enabled: typeof value.enabled === "boolean" ? value.enabled : d.enabled,
-    childSessions: typeof value.childSessions === "boolean" ? value.childSessions : d.childSessions,
-    web: {
-      host: host === "0.0.0.0" ? "0.0.0.0" : d.web.host,
-      port: typeof port === "number" && Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : d.web.port,
-    },
-  };
-}
-
-// ── 定时任务（scheduled-reports plan r3 §10.3，S0 冻结面）：设置形状 / 默认值 / 解析。全部非 live。 ──
-//
-// `src/config/settings.ts` may NOT value-import the schedule modules (tests/web-hub/boundary.test.ts
-// freezes this file's import closure); the ranges below are literal mirrors of
-// `src/schedule/core/spec.ts`'s SCHED_BG_TIMEOUT_* constants — parity pinned by
-// tests/config/schedule-settings.test.ts.
 
 /** Hard floor / ceiling (ms) for both timeout knobs; the stored file keys are integer seconds (`*S`). */
 export const SCHEDULE_TIMEOUT_MIN_MS = 60_000;
