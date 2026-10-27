@@ -711,3 +711,80 @@ describe("FleetBashJobs.vue — archive (web-hub archive plan)", () => {
     expect(w.find(".bj-sum-text").text()).not.toContain("archived");
   });
 });
+
+// ---------------------------------------------------------------------------
+// omitted-orphan fix (2026-10-27): the wire caps terminal rows at 12 and archiving is
+// display-only, so when every wire row is archived the bare `(+N more)` marker would hang in
+// an empty live list (unidentifiable, un-archivable). It moves next to the archived fold with
+// a prose note — ONLY in that case.
+// ---------------------------------------------------------------------------
+describe("FleetBashJobs.vue — omitted orphan (all rows archived)", () => {
+  const doneRow = (id: string): BashJobRowWire =>
+    row({ id, status: "completed", exitCode: 0, endedAt: SAMPLED_AT - 1_000 });
+  const archiveAll = (rows: BashJobRowWire[]) =>
+    new Map(rows.map((r, i) => [String(r.id), { kind: "bash" as const, id: String(r.id), at: i + 1 }]));
+
+  it("all wire rows archived + omitted>0 ⇒ prose note next to the fold, no orphan `(+N more)`", async () => {
+    const rows = Array.from({ length: 12 }, (_, i) => doneRow(`job-done${String(i).padStart(4, "0")}`));
+    const w = mount(FleetBashJobs, {
+      props: { jobs: wire(rows, { total: 13, omitted: 1 }), now: SAMPLED_AT, archived: archiveAll(rows) },
+    });
+    // 13 all-terminal > BASH_OPEN_FEW ⇒ the group defaults to collapsed; open it.
+    await w.find(".bj-sum").trigger("click");
+    expect(w.find(".bj-more-orphan").exists()).toBe(true);
+    expect(w.find(".bj-more-orphan").text()).toBe(
+      "1 older finished job(s) not sent to the web (cannot be viewed or archived)",
+    );
+    expect(w.find(".bj-more:not(.bj-more-orphan)").exists()).toBe(false);
+    // The note sits AFTER the archived fold, inside the same list.
+    const items = w.findAll(".bj-list > li");
+    const foldIdx = items.findIndex((li) => li.classes().includes("bj-archived"));
+    const noteIdx = items.findIndex((li) => li.classes().includes("bj-more-orphan"));
+    expect(foldIdx).toBeGreaterThanOrEqual(0);
+    expect(noteIdx).toBe(foldIdx + 1);
+  });
+
+  it("live rows present + omitted>0 ⇒ unchanged `(+N more)` in the live list", async () => {
+    const rows = [row({ id: "job-live0001" }), doneRow("job-done0001")];
+    const w = mount(FleetBashJobs, {
+      props: {
+        jobs: wire(rows, { total: 8, running: 1, omitted: 6 }),
+        now: SAMPLED_AT,
+        archived: new Map([["job-done0001", { kind: "bash", id: "job-done0001", at: 1 }]]),
+      },
+    });
+    expect(w.find(".bj-more-orphan").exists()).toBe(false);
+    expect(w.find(".bj-more").text()).toBe("(+6 more)");
+  });
+
+  it("all wire rows archived + no omitted ⇒ no marker at all", async () => {
+    const rows = [doneRow("job-done0001"), doneRow("job-done0002")];
+    const w = mount(FleetBashJobs, {
+      props: { jobs: wire(rows), now: SAMPLED_AT, archived: archiveAll(rows) },
+    });
+    expect(w.find(".bj-archived").exists()).toBe(true);
+    expect(w.find(".bj-more").exists()).toBe(false);
+    expect(w.find(".bj-more-orphan").exists()).toBe(false);
+  });
+
+  it("all wire rows archived + omitted:0 ⇒ no marker at all", async () => {
+    const rows = [doneRow("job-done0001"), doneRow("job-done0002")];
+    const w = mount(FleetBashJobs, {
+      props: { jobs: wire(rows, { total: 2, omitted: 0 }), now: SAMPLED_AT, archived: archiveAll(rows) },
+    });
+    expect(w.find(".bj-more").exists()).toBe(false);
+    expect(w.find(".bj-more-orphan").exists()).toBe(false);
+  });
+
+  it("no wire rows at all + omitted>0 (nothing archived) ⇒ legacy `(+N more)`, no note", async () => {
+    const w = await mountGroupOpen(wire([], { total: 3, omitted: 3 }));
+    expect(w.find(".bj-more-orphan").exists()).toBe(false);
+    expect(w.find(".bj-more").text()).toBe("(+3 more)");
+  });
+
+  it("omitted>0 without any archived rows ⇒ byte-identical `(+N more)` (no note)", async () => {
+    const w = await mountGroupOpen(wire([doneRow("job-done0001")], { total: 5, omitted: 4 }));
+    expect(w.find(".bj-more").text()).toBe("(+4 more)");
+    expect(w.find(".bj-more-orphan").exists()).toBe(false);
+  });
+});

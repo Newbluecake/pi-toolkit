@@ -58,6 +58,18 @@ const expandedId = ref<string | null>(null);
 // ---------------------------------------------------------------------------
 const archivedRows = computed(() => props.jobs.rows.filter((row) => props.archived?.has(String(row.id)) === true));
 const liveRows = computed(() => props.jobs.rows.filter((row) => props.archived?.has(String(row.id)) !== true));
+/** omitted-orphan fix (2026-10-27): the wire caps terminal rows at 12 and the agent does not
+ *  know which rows are archived (display-only hiding). When ALL wire rows are archived, the
+ *  live list is empty and a bare `(+N more)` would hang in the empty list — unidentifiable and
+ *  un-archivable. In that one case the marker moves next to the archived fold with an explicit
+ *  prose note. live rows present ⇒ unchanged; no archived rows ⇒ byte-identical render. */
+const orphanOmitted = computed(
+  () =>
+    liveRows.value.length === 0 &&
+    archivedRows.value.length > 0 &&
+    props.jobs.omitted !== undefined &&
+    props.jobs.omitted > 0,
+);
 function isAuto(row: BashJobRowWire): boolean {
   return props.archived?.get(String(row.id))?.auto === true;
 }
@@ -239,7 +251,7 @@ function toggleRow(row: BashJobRowWire): void {
         <!-- plain-text tail: arbitrary process output, never v-html / never markdown -->
         <pre v-if="expandedId === row.id && row.tail !== undefined" class="bj-tail">{{ row.tail }}</pre>
       </li>
-      <li v-if="jobs.omitted !== undefined && jobs.omitted > 0" class="bj-more">
+      <li v-if="jobs.omitted !== undefined && jobs.omitted > 0 && !orphanOmitted" class="bj-more">
         {{ t("detail.bashJobsMore", { n: jobs.omitted }) }}
       </li>
       <!-- web-hub archive plan: the archived fold — dimmed rows, `auto` badge for sweep-archived
@@ -278,6 +290,11 @@ function toggleRow(row: BashJobRowWire): void {
             </button>
           </li>
         </ul>
+      </li>
+      <!-- omitted-orphan fix: all wire rows archived ⇒ the `(+N more)` marker moves here with a
+           prose note instead of hanging in the empty live list. -->
+      <li v-if="orphanOmitted" class="bj-more bj-more-orphan">
+        {{ t("detail.bashJobsOlderOmitted", { n: jobs.omitted ?? 0 }) }}
       </li>
     </ul>
   </section>

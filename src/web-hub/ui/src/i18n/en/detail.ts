@@ -109,6 +109,9 @@ const detail = {
   // issue #41 (titlebar overflow): the 「⋯」 menu trigger + menu aria-label receiving the
   // folded low-frequency titlebar buttons on narrow bars.
   moreActions: "More actions",
+  // omitted-orphan fix (2026-10-27): fleet bash group — every wire row archived + omitted>0 ⇒
+  // the `(+N more)` marker becomes this prose note next to the archived fold.
+  bashJobsOlderOmitted: "{n} older finished job(s) not sent to the web (cannot be viewed or archived)",
 } satisfies Record<string, string>;
 
 export default detail;
