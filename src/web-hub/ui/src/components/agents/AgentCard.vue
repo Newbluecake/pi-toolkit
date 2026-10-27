@@ -26,6 +26,7 @@ import type { AgentCardProps } from "../../contracts.js";
 import { scheduleBadgeOf, scheduleBadgeText } from "../../logic/schedule.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import { PRIVACY_LOCK_CTX } from "../privacy/privacyContext.js";
+import { injectOutdatedReload } from "../../composables/useOutdatedReload.js";
 
 const props = defineProps<AgentCardProps>();
 const i18n = useI18n();
@@ -75,6 +76,24 @@ const schedBadge = computed(() => {
   const sid = typeof session?.sessionId === "string" ? session.sessionId : undefined;
   return scheduleBadgeOf(hub?.state.value.hub?.["caps"], hub?.state.value.schedules, sid);
 });
+
+// 2026-10-27 outdated chip 收敛：卡片上唯一的 outdated 表达就是这枚「需更新」chip（warning
+// 配色）。状态 pill 恢复真实状态（agentCardModel.statusLabelOf 不再返回 outdated 文案）。
+// chip 可点击：复用 #65 的 OrCoordinator（request 自动排队 / queued·parked 点击取消），
+// `.prevent.stop` 阻止外层 <a> 导航（与 privacy-lock-btn 同款）。无 provider（单测/独立
+// 挂载）⇒ 退化为纯展示 chip，点击无操作。
+const outdatedReload = injectOutdatedReload();
+const orPhase = computed(() => (props.card.outdated ? outdatedReload?.entryOf(props.card.key).phase : undefined));
+const orBusy = computed(() => {
+  const p = orPhase.value;
+  return p === "queued" || p === "sending" || p === "awaiting" || p === "parked";
+});
+function onOutdatedClick(): void {
+  if (outdatedReload === undefined) return;
+  const p = outdatedReload.entryOf(props.card.key).phase;
+  if (p === "queued" || p === "parked") outdatedReload.cancelQueue(props.card.key);
+  else if (p === "idle" || p === "failed" || p === "done") outdatedReload.request(props.card.key);
+}
 
 // ---------------------------------------------------------------------------
 // web-hub-privacy plan v2.1 (P2): the 标记入口 — a lock affordance on the card. 锁定态常显
@@ -168,6 +187,7 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
     :aria-current="selected ? 'page' : undefined"
     :data-st="card.visualState"
     :data-density="compact ? 'compact' : 'detailed'"
+    :data-outdated="card.outdated ? 'true' : undefined"
   >
     <!-- Compact (default): directory + run state (state pill, running sub-agent / background
          command counts, needs-answer) + @alias (+ unread badge) on row 1, title on row 2. Cost,
@@ -195,20 +215,24 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             >
               <AppIcon v-if="card.visualState === 'waiting'" name="message" class="icon-sm" />
               <AppIcon v-else-if="card.visualState === 'offline'" name="unplug" class="icon-sm" />
-              <AppIcon v-else-if="card.outdated" name="info" class="icon-sm" />
               {{ card.statusLabel }}
             </span>
-            <!-- #65 outdated-reload（预览 §5）：落后会话的「需更新」chip（warning 配色）。
-                 statusLabel 只在非 running 时才让位给 outdated 文案，此 chip 与此无关、
-                 运行中也显示；点卡片进详情页即见顶部提示条（§1）。 -->
-            <span
+            <!-- #65 outdated-reload（预览 §5）+ 2026-10-27 chip 收敛：落后会话唯一的
+                 outdated 表达——紧凑「需更新」chip（warning 配色），tooltip 带完整说明；
+                 点击触发该会话 /agent reload（复用 OrCoordinator，运行中自动排队，
+                 排队中再点取消）。状态 pill 恢复真实状态，不再被 outdated 文案顶替。 -->
+            <button
               v-if="card.outdated"
+              type="button"
               class="chip chip-outdated"
               data-compact="outdated"
-              :title="t('outdated.chipNeedsUpdate')"
+              :title="orBusy ? t('outdated.chipQueuedTitle') : t('outdated.chipTitle')"
+              @click.prevent.stop="onOutdatedClick"
             >
-              <AppIcon name="info" class="icon-sm" />{{ t("outdated.chipNeedsUpdate") }}
-            </span>
+              <AppIcon :name="orBusy ? 'loader' : 'info'" class="icon-sm" :class="{ spin: orBusy }" />{{
+                orBusy ? t("outdated.chipQueued") : t("outdated.chipNeedsUpdate")
+              }}
+            </button>
             <span
               v-if="card.runningSubCount > 0"
               class="chip chip-run-count"
@@ -278,10 +302,19 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
           <Teleport :to="belowEl ?? 'body'" :disabled="!chipsBelow || !belowEl">
             <span ref="chipsEl" class="agent-chips">
               <span class="chip" translate="no">{{ kindLabel }}</span>
-              <!-- #65 outdated-reload（预览 §5）：「需更新」chip（warning 配色），状态类位置。 -->
-              <span v-if="card.outdated" class="chip chip-outdated" :title="t('outdated.chipNeedsUpdate')">
-                <AppIcon name="info" class="icon-sm" />{{ t("outdated.chipNeedsUpdate") }}
-              </span>
+              <!-- #65 outdated-reload（预览 §5）+ 2026-10-27 chip 收敛：「需更新」chip
+                   （warning 配色），状态类位置；点击触发单会话 /agent reload。 -->
+              <button
+                v-if="card.outdated"
+                type="button"
+                class="chip chip-outdated"
+                :title="orBusy ? t('outdated.chipQueuedTitle') : t('outdated.chipTitle')"
+                @click.prevent.stop="onOutdatedClick"
+              >
+                <AppIcon :name="orBusy ? 'loader' : 'info'" class="icon-sm" :class="{ spin: orBusy }" />{{
+                  orBusy ? t("outdated.chipQueued") : t("outdated.chipNeedsUpdate")
+                }}
+              </button>
               <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
                 {{ t("agents.stopped") }}
               </span>
@@ -446,7 +479,6 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
           <span class="pill pill-inline" :data-st="card.visualState">
             <AppIcon v-if="card.visualState === 'waiting'" name="message" class="icon-sm" />
             <AppIcon v-else-if="card.visualState === 'offline'" name="unplug" class="icon-sm" />
-            <AppIcon v-else-if="card.outdated" name="info" class="icon-sm" />
             {{ card.statusLabel }}
           </span>
         </template>

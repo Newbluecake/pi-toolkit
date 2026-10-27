@@ -126,13 +126,13 @@ function runningBashCountOf(agent: AgentState): number {
   return wire === undefined ? 0 : summaryCounts(wire).running;
 }
 
-/** ui-design.md §5.1's per-card status pill — only shown for a "worth flagging" state. */
-function statusLabelOf(agent: AgentState, visual: RunVisualState, t: I18nHandle["t"]): string | null {
-  const card = record(agent.card);
+/** ui-design.md §5.1's per-card status pill — only shown for a "worth flagging" state.
+ *  2026-10-27 outdated chip 收敛：pill 只表达真实运行状态；outdated 不再顶替它，卡片上
+ *  由唯一的「需更新」chip（tooltip 带完整说明、点击即 reload）承担。 */
+function statusLabelOf(visual: RunVisualState, t: I18nHandle["t"]): string | null {
   if (visual === "offline") return t("common.status.offline");
   if (visual === "waiting") return t("common.status.waiting");
   if (visual === "stale") return t("common.status.stale");
-  if (card["outdated"] === true) return t("common.status.outdated");
   if (visual === "running") return t("common.status.running");
   return null;
 }
@@ -164,7 +164,7 @@ export function toAgentCardView(agent: AgentState, t: I18nHandle["t"], home?: st
     costLabel: agentCostLabel(agent),
     ...(costTitleOf(agent, t) ?? {}),
     visualState: visual,
-    statusLabel: statusLabelOf(agent, visual, t),
+    statusLabel: statusLabelOf(visual, t),
     stale: visual === "stale",
     down: agent.down,
     outdated: card["outdated"] === true,

@@ -3,8 +3,9 @@
  *
  * `DashboardView.vue` 创建唯一实例并经 `OUTDATED_RELOAD_CTX` provide；详情页
  * `OutdatedReloadBanner.vue`（第 1–4 节）与会话列表 `OutdatedSummaryBanner.vue`
- *（第 6 节）注入消费；AgentCard 的「需更新」chip（第 5 节）不需要它（纯展示
- * `card.outdated`）。无 provider（单测/独立挂载）⇒ 两个横幅都不渲染。
+ *（第 6 节）注入消费；AgentCard 的「需更新」chip（第 5 节，2026-10-27 收敛为可点击）
+ * 可选注入——有点击即 `request(key)`（queued/parked 再点 `cancelQueue`），无 provider
+ *（单测/独立挂载）⇒ chip 退化为纯展示，两个横幅不渲染。
  *
  * 状态真源是 `@logic/outdatedReload.ts` 的 `OrCoordinator`（框架无关、注入定时器、可单
  * 测）；这里只做三件事：

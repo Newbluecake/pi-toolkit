@@ -26,7 +26,6 @@ const common = {
   "status.stale": "Stale · no recent heartbeat",
   "status.offline": "Offline · process exited",
   "status.aborted": "Aborted",
-  "status.outdated": "Plugin older than hub — /reload",
 } satisfies Record<string, string>;
 
 export default common;

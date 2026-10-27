@@ -134,6 +134,24 @@
   color: var(--c-warning-text);
 }
 
+/* 2026-10-27 chip 收敛：chip 改为 <button>，点击触发该会话 /agent reload（复用
+ * OrCoordinator）。button 默认不继承字体，需补回 .chip 的字重/字号；hover/focus
+ * 与其它可点 chip（channel-filter）同款。 */
+button.chip-outdated {
+  font: inherit;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+button.chip-outdated:hover {
+  border-color: var(--c-warning);
+}
+button.chip-outdated:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
 /* ---- 窄屏 ≤480px（预览 §7）：按钮换行占满、触控 44px ---- */
 @media (max-width: 480px) {
   .or-banner {

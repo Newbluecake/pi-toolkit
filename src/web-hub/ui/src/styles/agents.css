@@ -1162,6 +1162,16 @@
   gap: var(--sp-1);
 }
 
+/* 2026-10-27 outdated chip 收敛：仅 outdated 卡片的 chip 组允许收缩——放不下时尾部
+ * chip（@alias → #频道 → 未读，保持既有 DOM 顺序）从右侧截断，目录名与状态标识不再被
+ * 压没/挤出。非 outdated 卡片不带 data-outdated，渲染逐字节不变。detailed 密度有既有
+ * 的 Teleport 整体折行机制，无需此规则。 */
+.agent-card[data-density="compact"][data-outdated="true"] .agent-chips {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .agent-card[data-density="compact"] .agent-chips > .pill {
   padding: 2px 6px;
 }
