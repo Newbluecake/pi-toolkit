@@ -51,3 +51,31 @@ step boundary; the test just established its selection too late.
   clean.
 
 Suggested commit: `test(web-hub): make J1 selection-defer batch test deterministic via MutationObserver seam`
+
+## uploads #3 — `flushReferences` referencedAt lower-bound flake: refBefore captured after settle
+
+CI (run 40477864007) flaked on "flushReferences persists referencedAt atomically; failure keeps it
+dirty; no budget ⇒ timeout": `expect(meta.referencedAt).toBeGreaterThanOrEqual(refBefore)` got
+1793091967443 < 1793091967444 — off by 1 ms (`tests/web-hub/hub/uploads.test.ts:525`). Test-only
+change; no `src/`, no `tests/fixtures/` change. **Not a product clock bug** — `settlePins` sets
+`rec.referencedAt = now()` through the injected clock (`createUploadStore({ now: clock.now })`), the
+same `Date.now() + offset` source the test reads; no `Date.now()` bypass, no truncation, no
+non-monotonic seam in `src/web-hub/hub/uploads.ts`.
+
+- **Root cause**: the test read `const refBefore = clock.now()` AFTER `settlePins(...)`, but
+  referencedAt is stamped inside settlePins. The lower bound was therefore "now at a point strictly
+  after the stamp", and whenever `Date.now()` ticked 1 ms between the two statements the assertion
+  inverted. The inline comment ("real clock: settle ≤ flush read") shows the intended semantics —
+  refBefore was meant to bracket settle from before.
+- **Fix**: move `refBefore = clock.now()` to immediately before `store.settlePins(pin.token,
+"referenced")`. The bracket is now sound: referencedAt (settle's `now()`) ∈ [refBefore, read of
+  clock.now() after flush], since `Date.now()` is non-decreasing in practice. Upper-bound assertion
+  (line 526) unchanged; assertion semantics not loosened.
+- **Sibling sweep**: the only other `≥ lower bound` timestamp assertions in the file
+  (`:344` expiryHi, `:978/981` committedAt+offset) capture their bounds before the stamped action —
+  correct order already; no other instances of this pattern.
+- **Verification**: file ×10 with `--maxWorkers=1` all green; `npx vitest run tests/web-hub/hub
+--maxWorkers=4` (5238 tests) green; `npm run typecheck` clean; prettier clean;
+  `git diff --quiet HEAD -- tests/fixtures/` clean.
+
+Suggested commit: `test(web-hub): capture refBefore before settlePins in flushReferences referencedAt bracket`
