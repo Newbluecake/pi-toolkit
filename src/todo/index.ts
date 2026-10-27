@@ -81,7 +81,7 @@ const TaskIdSchema = Type.String({ description: 'Task ID, for example "1" or "#1
 // pi-ai's StringEnum (agent-tool.ts precedent) — @sinclair/typebox is the
 // only runtime dependency; the two typebox versions are not TS-compatible.
 const StatusSchema = Type.Union([Type.Literal("pending"), Type.Literal("in_progress"), Type.Literal("completed")]);
-const DependencyIdsSchema = Type.Optional(Type.Array(Type.String(), { description: 'Task IDs such as ["1", "2"].' }));
+const DependencyIdsSchema = Type.Optional(Type.Array(Type.String(), { description: "Task IDs." }));
 
 const TaskCreateSchema = Type.Object({
   subject: Type.String({ description: "Short imperative task title." }),
@@ -97,8 +97,7 @@ type TaskCreateInput = Static<typeof TaskCreateSchema>;
 const TaskListSchema = Type.Object({
   includeCompleted: Type.Optional(
     Type.Boolean({
-      description:
-        "Also list completed and archived tasks (the default output lists open tasks only and appends a footer with the hidden counts).",
+      description: "Also list completed and archived tasks.",
     }),
   ),
 });

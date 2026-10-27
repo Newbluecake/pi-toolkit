@@ -236,22 +236,19 @@ const topLevelTrailingFields = {
       {
         lane: Type.Optional(
           Type.Union([Type.Literal("L0"), Type.Literal("L1"), Type.Literal("L2"), Type.Literal("L3")], {
-            description: "Dev-flow lane of this dispatch (L0 direct edit .. L3 complex).",
+            description: "Dev-flow lane (L0 direct edit .. L3 complex).",
           }),
         ),
         packageId: Type.Optional(
           Type.String({
-            description:
-              "Id of the work package this dispatch belongs to. Use the SAME id for every dispatch of a package (initial work, rework, re-dispatch).",
+            description: "Work package id; use the SAME id for every dispatch of a package (rework included).",
           }),
         ),
-        feature: Type.Optional(Type.String({ description: "Optional feature id this dispatch belongs to." })),
+        feature: Type.Optional(Type.String({ description: "Feature id." })),
       },
       {
         additionalProperties: false,
-        description:
-          "Optional dispatch metadata for analytics: lane, package id, feature. " +
-          "Analytics only — never shown to the subagent, never added to its prompt, and it does not change how the run executes.",
+        description: "Analytics-only dispatch metadata; never shown to the subagent, does not change execution.",
       },
     ),
   ),

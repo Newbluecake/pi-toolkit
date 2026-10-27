@@ -318,15 +318,12 @@ export function createListSubagentsTool(deps: {
       "List every currently active subagent run and SubagentWorkflow in this session: label, run_id, agent " +
       "type, model (provider/id), phase (including queue_wait), elapsed time, turns, accumulated cost, and " +
       "parent/child nesting (nested Agent-tool children indented under their parent; workflow children listed " +
-      "under their workflow) — plus the current concurrency pool occupancy (`slots: N/limit in use, K free`, " +
-      "same accounting as the Agent tool's own trailer: a workflow itself never occupies a slot, its children " +
-      "do). Call this BEFORE dispatching with the Agent tool to check for a free slot, " +
+      "under their workflow) — plus the current concurrency pool occupancy (`slots: N/limit in use, K free`; " +
+      "a workflow itself never occupies a slot, its children do). Call this BEFORE dispatching with the Agent tool to check for a free slot, " +
       "and whenever you need a run_id or workflow id (wf_…) for " +
       RESULT_TOOL_NAME +
       " / steer_subagent / " +
-      "abort_subagent / message_agent / extend_subagent_timeout without guessing a label. Set `recent` " +
-      "(0-20, default 0) to also list the most recently finished runs, newest first — handy right after a " +
-      "run just settled. Read-only: never starts, stops, or steers anything.",
+      "abort_subagent / message_agent / extend_subagent_timeout without guessing a label. Read-only: never starts, stops, or steers anything.",
     promptSnippet: "list_subagents(recent?) - list active subagent runs/workflows, free slots, and run_ids",
     parameters: ListSubagentsParams,
     renderCall(_args, theme, context) {

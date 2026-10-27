@@ -13,8 +13,7 @@ export const SPLIT_PANE_RIGHT_MIN = 28;
 
 export const OptionSchema = Type.Object({
   label: Type.String({
-    description:
-      "Short, mutually exclusive option label (also the answer value returned to the LLM - keep it concise, <= ~40 chars). To recommend an option, prefix its label with '(Recommended)' and list it first.",
+    description: "Short option label; also the answer value returned to you (<= ~40 chars).",
   }),
   description: Type.Optional(
     Type.String({
@@ -83,7 +82,7 @@ export const InputSchema = Type.Object({
   dismissParked: Type.Optional(
     Type.Boolean({
       description:
-        "Set true (with questions omitted) to dismiss ALL questions parked by background-completion interrupts — use when a background result already settled them. Returns immediately without showing any UI. Cannot be combined with questions.",
+        "Set true (questions omitted) to dismiss ALL parked questions without showing any UI. Cannot be combined with questions.",
     }),
   ),
 });

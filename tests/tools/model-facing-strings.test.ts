@@ -142,7 +142,8 @@ describe("model-facing tool strings", () => {
   it("states that a blocking wait prevents new user input", () => {
     const [agent, result] = tools();
     const bashJob = tools().find((tool) => tool.name === "bash_job")!;
-    expect(result.description).toMatch(/user cannot send new input/);
+    // the consequence is spelled once, on the `wait` parameter (asserted next); the description only points there
+    expect(result.description).toMatch(/wait: true blocks .* only a fallback — see the wait parameter/);
     expect(collectDescriptions(result.parameters).join(" ")).toMatch(/user\s+cannot type a new message/);
     expect(agent.description).toMatch(/monopolizes the agent loop/);
     expect(bashJob.description).toMatch(/user cannot send new input/);
@@ -316,7 +317,7 @@ describe("Agent surface split (top-level vs nested)", () => {
     const agent = tools().find((tool) => tool.name === "Agent")!;
     const params = JSON.stringify(agent.parameters);
     expect(params).toContain('"meta"');
-    expect(params).toContain("Analytics only — never shown to the subagent");
+    expect(params).toContain("Analytics-only dispatch metadata; never shown to the subagent");
     expect(params).not.toContain('"run_in_background"');
     // the preset hint rides the top-level schema field's description (raw
     // text, not the JSON-escaped form the serialized params would show)

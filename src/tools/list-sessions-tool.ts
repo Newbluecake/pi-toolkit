@@ -96,7 +96,7 @@ const CHANNEL_DESCRIPTION =
   LEGACY_DESCRIPTION +
   " You only see sessions that share at least one channel with you; rows outside #default show channels=#a,#b.";
 
-const ALIAS_SUFFIX = " alias is a human-assigned, hub-unique short name; prefer it when the user names a session.";
+const ALIAS_SUFFIX = " alias is a human-assigned, hub-unique short name.";
 
 export function createListSessionsTool(deps: ListSessionsToolDeps): ToolDefinition<typeof ListSessionsParamsLegacy> {
   const channelsOn = deps.channels === true;
