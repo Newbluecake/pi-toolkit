@@ -7,6 +7,141 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-27
+
+### Added
+
+- **config**: move the settings file to pi-toolkit.json (`ab6bdc05`)
+- **traffic**: keep traffic records in the pi agent directory (`bf530982`)
+- **web-hub**: warn when the hub and a session use different agent directories (`293ef8c4`)
+- **secure**: resolve and migrate the settings file as pi-toolkit.json (`0b20c95e`)
+- **schedule**: show deleted tasks on Feishu confirmation cards; document in-place confirmation (`50c98825`)
+- **web-hub**: confirm AI-created schedules from the web UI (`0c62defc`)
+- **schedule**: connect schedule confirmations to the web hub (`414e306b`)
+- **web-hub**: relay schedule confirmations and send Feishu approval cards (`28764841`)
+- **schedule**: ask in the terminal to confirm AI-created schedules (`b5dcaf55`)
+- **web-hub**: add wire types for confirming AI-created schedules (`3d5b37f3`)
+- **web-hub**: prepare encrypted storage for LAN 2FA secrets (`303710a8`)
+- **web-hub**: wipe the generated LAN password plaintext at first sign-in (`de0f1f52`)
+- **web-hub**: transparently re-hash LAN passwords after login (`c2a1293e`)
+- **web-hub**: read stronger LAN password hashes and even out login timing (`3001afde`)
+- **web-hub**: reject weak LAN passwords (`3b62a6eb`)
+- **agent**: keep a run's result schema when it is resumed (`c0e604f3`)
+- **archive**: archive finished runs only beyond a keep count (`43d892fd`)
+
+### Fixed
+
+- **stack**: stop a shut-down session's stack from answering late calls (`8ceb6c63`)
+- **fabric**: keep a session's channels when starting a new session (`5d27213b`)
+- **stack**: stop the old bash-job poll from double-announcing finished jobs on /reload (`ecdb5a95`)
+- **stack**: drop unsent merged notices at shutdown instead of leaking them (`5fedc710`)
+- **stack**: stop the live usage ticker when the session shuts down (`22c1ea1e`)
+- **stack**: stop notification retries from firing after the session ended (`39f28881`)
+- **stack**: cancel the /goal watchdogs when the session shuts down (`77f92fe2`)
+- **stack**: stop piling up child-switch disable alerts across /reload (`46c09204`)
+- **stack**: stop the external-agent directory probe on session shutdown (`3bbc30bb`)
+- **secure**: allow more time for the vault lease to release during conversion (`edf7c88b`)
+
+### Changed
+
+- **config**: split SETTING_SPECS into per-subsystem setting-specs.ts shards (`82eeaff9`)
+- **config**: tidy the settings.ts header after the subsystem split (`b875d3a7`)
+- **service**: move agent dispatch settings into service/dispatch-settings.ts (`f486cdb3`)
+- **delivery**: move extend settings into delivery/extend-settings.ts (`18b91f96`)
+- **sysprompt**: move systemPrompt settings into sysprompt/settings.ts (`edd6c7a7`)
+- **reload**: move reload settings into reload/settings.ts (`f6b0923a`)
+- **title**: move title settings into title/settings.ts (`c61102a0`)
+- **goal**: move goal settings into goal/settings.ts (`610d1b39`)
+- **hud**: move hud settings into hud/settings.ts (`ba6da4c4`)
+- **todo**: move todo settings into todo/settings.ts (`32b44757`)
+- **ask-user**: move askUser settings into ask-user/settings.ts (`1a09c642`)
+- **config**: move the shared EnabledGroup helper into config/enabled-group.ts (`8405b5ca`)
+- **external-agent**: move externalAgents settings into external-agent/settings.ts (`945b6970`)
+- **schedule**: move schedule settings into schedule/settings.ts (`82c66a84`)
+- **traffic**: move traffic settings into traffic/settings.ts (`fe7377e4`)
+- **workflow**: move workflow settings into workflow/settings.ts (`a526a2e5`)
+- **memory**: move memory settings into memory/settings.ts (`d00d684c`)
+- **bash**: move bashJobs settings into bash/settings.ts (`54f74f85`)
+- **compact-hint**: move compact settings into compact-hint/settings.ts (`44d91e0d`)
+- **sysload**: move load settings into sysload/settings.ts (`a9c71937`)
+- **quota**: move quota settings into quota/settings.ts (`60184f0c`)
+- **cache-ttl**: move cacheTtl settings into cache-ttl/settings.ts (`d45fdbfc`)
+- **web-hub**: move webHub and feishuBot settings into web-hub/agent/settings.ts (`ee84d2e3`)
+- **fabric**: move fabric settings into fabric/settings.ts (`fb53c0a2`)
+- **secure**: move the --private command bodies out of helper.mjs into private.mjs (`6c718438`)
+- **secure**: move the in-namespace finalize steps into finalize.mjs (`35b7ebd4`)
+- **secure**: move cmdInit out of helper.mjs into init.mjs (`c619a2ed`)
+- **web-hub**: extract runtime monitor assembly (`6d5e0683`)
+- **web-hub**: extract spawn preview and feishu assembly (`b1b5a0c2`)
+- **web-hub**: extract storage registry and channel assembly (`4a47b9b3`)
+- **web-hub**: move the password client's stream lifecycle onto transport-core.js (`cc72df75`)
+- **web-hub**: extract the shared EventSource lifecycle into transport-core.js (token side) (`d8f51a76`)
+- **web-hub**: extract the LAN application router and login from hub/http.ts into hub/http-lan.ts (`c50ef12b`)
+- **web-hub**: extract createLanTransport from hub/http.ts into hub/http-lan.ts (`aedf5f97`)
+- **web-hub**: extract the /api/cmd|/api/dialog pipeline from hub/http.ts into hub/http-cmd.ts (`a3112234`)
+- **web-hub**: extract hold wiring into agent/hold-wire.ts (`b0cf6f9a`)
+- **web-hub**: extract dialog bridge wiring into agent/dialogs-wire.ts (`3eed858c`)
+- **web-hub**: extract StatusInfo slot projections into agent/status-slots.ts (`8064a1b5`)
+- **stack**: route all teardown paths through Stack.dispose (`81ba9934`)
+- **config**: resolve the pi agent dir in one place (`f1f199e6`)
+- **mention**: wire mentions from mention/wire.ts (`a44ec55d`)
+- **fabric**: wire cross-session activation from fabric/xs/activate.ts (`0946509d`)
+- **compact-hint**: register compact hooks and tools from compact-hint/register.ts (`928d54db`)
+- **bash**: register the bash tools from bash/host.ts (`a888c5de`)
+- **index**: register the subagent core tools from tools/register.ts (`25900cd3`)
+- **index**: move holder forwarders to src/holder.ts (`afe62587`)
+- **index**: drop imports left behind by the stack extraction (`15279916`)
+- **stack**: move holder-routed delivery hooks out of stack.ts (`3efaf78e`)
+- **stack**: move the cross-session stack builder out of stack.ts (`f0e1162f`)
+- **stack**: move buildFabric out of stack.ts (`26a245b0`)
+- **stack**: move the compact hint hook out of stack.ts (`50988ddf`)
+- **stack**: move host bash job manager assembly and recovery out of stack.ts (`b25d2c0a`)
+- **stack**: move bash job notice formatting out of stack.ts (`86c8705a`)
+
+### Documentation
+
+- **toolchain**: pi 1.4 adaptation report (`c1bbb1fc`)
+- **fabric**: plan forced alias takeover and directory-name default aliases (`483b8433`)
+- **governance**: batch2 ⑧ settings decomposition implementation report (`3e83764c`)
+- **governance**: record the 7b teardown gap fixes and the parked G8 (`23bc3278`)
+- **dev-flow**: allow deepseek-flash for code exploration (`fc23386a`)
+- **governance**: report batch 2 step 10-S (helper.mjs split) (`72097769`)
+- **secure**: describe the helper.mjs / init / private / finalize split (`ddc8d64d`)
+- **source-governance**: add batch2 step 9-H3 report (`3863faee`)
+- **governance**: batch2 ⑩-U implementation report (`90dbb88e`)
+- **governance**: batch2 ⑨-H2 implementation report (`3557fb36`)
+- **governance**: add batch2 ⑨-H1 implementation report (`7581a07f`)
+- **governance**: record the G2/G3 shutdown decision (`efa4ea3a`)
+- **governance**: record the remaining step-7 decisions (`74703578`)
+- describe the pi-toolkit.json settings file (`92322bee`)
+- **source-governance**: add batch2 step 5 report (`e84062d3`)
+- **source-governance**: add batch2 step 4 report (`69d2c6f2`)
+- plan in-place confirmation for AI-created schedules and source-governance batch 2 (`9bd7b975`)
+- **settings**: record the agent-dir transition decision (`58913ab0`)
+- **settings**: plan renaming the settings file to pi-toolkit.json (`4ffcba7c`)
+- **web-hub**: plan LAN password storage hardening (`8accf3cc`)
+- **dev-flow**: let kimi-k3 review plans alongside gpt-6.1-sol (`a61231ba`)
+
+### Tests
+
+- **web-hub**: take the reference timestamp before settling upload pins (`64219a08`)
+- **conformance**: follow pi 1.4 tool restore in the result-tool rename suite (`76798840`)
+- **config**: follow the hub agentDir consumers into the assembly files (`5406bf49`)
+- **config**: pin SETTING_SPECS order and content before sharding it (`788f7ff1`)
+- **config**: pin the settings parse output byte for byte before the ⑧ decomposition (`13f8498b`)
+- **stack**: pin teardown order per entry and component (`b8135fd4`)
+- **conformance**: pin the extension module lifecycle per session entry (`a6939ec5`)
+- **web-hub**: make the deferred-highlight selection test deterministic (`45f6274c`)
+- **web-hub**: gate markdown growth on a fitted exponent, not a timing ratio (`a9cf414b`)
+- **governance**: pin activate() call traces as a registration-order golden (`2d7a51aa`)
+- harden the CI flakes left over from the v0.9.0 release (`26ed77a9`)
+
+### Chores
+
+- **deps**: support pi 1.4 (`1ab814c9`)
+
+Stats: 17 feat, 10 fix, 53 refactor/perf, 21 docs, 11 test, 1 chore
+
 ## [0.10.0] - 2026-10-26
 
 ### Added
@@ -1244,7 +1379,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.0...v0.8.1
