@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClassifiedError, classifiedInfo } from "../../../src/core/errors.js";
-import { DEFAULT_EXTERNAL_AGENTS_SETTINGS } from "../../../src/config/settings.js";
+import { DEFAULT_EXTERNAL_AGENTS_SETTINGS } from "../../../src/external-agent/settings.js";
 import { createDroidProvider } from "../../../src/external-agent/droid/provider.js";
 import { DROID_CHILD_ENV, DROID_EXEC_ARGS, DROID_METHODS } from "../../../src/external-agent/droid/protocol.js";
 import { msgBinaryNotFound, msgResumeCwdGone } from "../../../src/external-agent/messages.js";

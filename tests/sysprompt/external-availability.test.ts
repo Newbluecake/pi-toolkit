@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { FakeClock } from "../../src/core/clock.js";
-import { DEFAULT_EXTERNAL_AGENTS_SETTINGS } from "../../src/config/settings.js";
+import { DEFAULT_EXTERNAL_AGENTS_SETTINGS } from "../../src/external-agent/settings.js";
 import { formatAvailableModelsForPrompt } from "../../src/config/available-models.js";
 import { createExternalAgentsPort } from "../../src/external-agent/port.js";
 import { availableModelsSection } from "../../src/sysprompt/core-sections.js";

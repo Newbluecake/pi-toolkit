@@ -116,12 +116,12 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../workflow/settings.js",
     "../traffic/settings.js",
     "../schedule/settings.js",
+    "../external-agent/settings.js",
     "../sysload/settings.js",
     "../topic-switch/settings.js",
     // #56 ⑧: the `webHub` / `feishuBot` blocks live in web-hub/agent/settings.ts (pinned below).
     "../web-hub/agent/settings.js",
     // external-agent plan §2.8: droid pricing refs validated with parseStrictModelRef (pure, zero imports).
-    "./model-hint.js",
     // data-encryption P2 §2.4 step 2: the secure-domain settings override (pi-free closure below).
     "../secure/domain.js",
     // data-encryption P1 review #5: cross-process settings-file lock (flock child, pi-free).
@@ -155,6 +155,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/compact-hint/settings.ts": ["./threshold.js"],
   // #56 ⑧: bashJobs block settings — self-contained (no imports at all).
   "src/bash/settings.ts": [],
+  // #56 ⑧: externalAgents block settings — droid pricing refs use the pure model-hint parser.
+  "src/external-agent/settings.ts": ["../config/model-hint.js"],
   // #56 ⑧: schedule block settings — self-contained (no imports at all).
   "src/schedule/settings.ts": [],
   // #56 ⑧: traffic block settings — self-contained (no imports at all).
