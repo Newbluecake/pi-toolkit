@@ -6,6 +6,12 @@
  * EventSource) ⇒ one silent re-login with the stored token. Every request has a deadline
  * (AbortController), every timer is cleared on close.
  *
+ * The EventSource lifecycle itself (one stream per tab, the 45s-silence watchdog, the
+ * exponential reopen backoff, the connect-handshake deadline) is shared with the password
+ * client through `./transport-core.js` (source-governance batch2 ⑩-U — extracted verbatim);
+ * this file keeps only the token-mode differences: the `#t=`/localStorage login handshake,
+ * the one-shot silent `reloginOnce` refresh, and the 401 `withRelogin` dance.
+ *
  * `app.js` only imports `createClient` from here now — behavior is unchanged
  * (`tests/web-hub/web/client.test.ts` is the byte-for-byte proof, just repointed at this
  * file). Splitting it out means the new Vue UI (`src/web-hub/ui/`) can reuse this pure
@@ -20,14 +26,8 @@
  * timeout the outcome is `E_DEADLINE{effect:"unknown"}` — never auto re-executed, the
  * queryOnly flow (§3.4) decides.
  */
-import {
-  API,
-  HISTORY_LIMIT_MAX,
-  PROXY_CLIENT_TIMEOUT_MS,
-  SILENCE_MS,
-  SSE_EVENTS,
-  VERSION_INFO_CLIENT_TIMEOUT_MS,
-} from "./contract.js";
+import { API, HISTORY_LIMIT_MAX, PROXY_CLIENT_TIMEOUT_MS, VERSION_INFO_CLIENT_TIMEOUT_MS } from "./contract.js";
+import { createStreamLifecycle, createTimer } from "./transport-core.js";
 import {
   PROXY_LIST_BODY_MAX_BYTES,
   PROXY_OPEN_BODY_MAX_BYTES,
@@ -75,16 +75,6 @@ import { validateAvatarPng } from "@protocol/avatar-png.ts";
 export const TOKEN_KEY = "pwh_token";
 export const REQUEST_TIMEOUT_MS = 10_000;
 export const CMD_REQUEST_TIMEOUT_MS = 16_000; // control-plan §3.3 browser write budget
-export const WATCHDOG_TICK_MS = 5_000;
-export const BACKOFF_MIN_MS = 1_000;
-export const BACKOFF_MAX_MS = 30_000;
-// Handshake deadline for a fresh EventSource (mirrors password-client's, restated here so the
-// two transports stay independent modules): a healthy hello lands in a few hundred ms, and
-// Chromium fires NO `error` for an accepted-but-silent connection — it just sits at readyState
-// CONNECTING, so without this timer the only guard was the 45s SILENCE watchdog (2026-10-13 LAN
-// incident: /api/events hung mid-handshake, conn stuck "connecting" forever). 10s is ~an order
-// of magnitude above the healthy case yet far below the silence watchdog.
-export const CONNECT_TIMEOUT_MS = 10_000;
 // web-hub-upload plan §4.2/§1.2 (package U4b): a 503 `E_BUSY` (startup scan not finished, §2.2.4)
 // is auto-retried on a bounded backoff before it ever reaches the tray. Mirrors
 // password-client's login busy policy (`BUSY_RETRY_MAX`/`BUSY_RETRY_DEFAULT_MS`) — restated
@@ -93,7 +83,6 @@ export const CONNECT_TIMEOUT_MS = 10_000;
 // upload suite pins both sides to identical behavior.
 export const UPLOAD_BUSY_RETRY_MAX = 5;
 export const UPLOAD_BUSY_RETRY_DEFAULT_MS = 2_000;
-const ES_CLOSED = 2;
 
 /** `#t=<token>` (optionally among other `&` params) → token. @param {unknown} hash */
 export function readHashToken(hash) {
@@ -122,26 +111,28 @@ export function readHashToken(hash) {
  * @param {ClientDeps} deps
  */
 export function createClient(deps) {
-  /** @type {any} */
-  let es = null;
-  let lastFrameAt = deps.now();
-  /** @type {any} */
-  let watchdog = null;
-  /** @type {any} */
-  let reopenTimer = null;
-  /** @type {any} */
-  let connectTimer = null;
+  const timer = createTimer(deps);
   let reloginUsed = false;
-  let backoff = BACKOFF_MIN_MS;
-  let closed = false;
-  let opens = 0;
-
-  /** @param {() => void} fn @param {number} ms */
-  const timer = (fn, ms) => {
-    const t = deps.setTimeout(fn, ms);
-    if (t && typeof t.unref === "function") t.unref();
-    return t;
-  };
+  const stream = createStreamLifecycle(deps, {
+    /** One silent re-login per failure episode (reset by the next `hello`). */
+    onHello() {
+      reloginUsed = false;
+    },
+    /**
+     * CLOSED ⇒ HTTP error (401 after hub restart, …): one silent re-login, then back off.
+     * The connect deadline was already cleared by the lifecycle core before this hook runs —
+     * it must not race the relogin/reopen flow.
+     */
+    onClosedError() {
+      stream.clearCurrent(); // the CLOSED source is dead, never reused
+      void reloginOnce().then((ok) => {
+        if (stream.isClosed()) return;
+        if (!ok && !deps.storage.getItem(TOKEN_KEY)) deps.onConn("auth");
+        else deps.onConn("reconnecting");
+        stream.scheduleReopen();
+      });
+    },
+  });
 
   /**
    * Fetch with a deadline. The optional `signal` (web-hub-upload plan U4b: chunk abort-on-remove)
@@ -275,116 +266,6 @@ export function createClient(deps) {
     return out;
   }
 
-  function clearConnectTimer() {
-    if (connectTimer !== null) deps.clearTimeout(connectTimer);
-    connectTimer = null;
-  }
-
-  function armWatchdog() {
-    if (watchdog !== null) deps.clearTimeout(watchdog);
-    watchdog = timer(() => {
-      watchdog = null;
-      if (closed) return;
-      if (es && deps.now() - lastFrameAt > SILENCE_MS) {
-        deps.onConn("reconnecting");
-        openStream();
-        return;
-      }
-      armWatchdog();
-    }, WATCHDOG_TICK_MS);
-  }
-
-  function scheduleReopen() {
-    if (closed || reopenTimer !== null) return;
-    const delay = backoff;
-    backoff = Math.min(BACKOFF_MAX_MS, backoff * 2);
-    reopenTimer = timer(() => {
-      reopenTimer = null;
-      if (!closed) openStream();
-    }, delay);
-  }
-
-  function openStream() {
-    if (closed) return;
-    if (es) {
-      try {
-        es.close();
-      } catch {
-        /* already closed */
-      }
-      es = null;
-    }
-    if (reopenTimer !== null) {
-      deps.clearTimeout(reopenTimer);
-      reopenTimer = null;
-    }
-    const source = new deps.EventSource(API.events, { withCredentials: true });
-    es = source;
-    opens++;
-    lastFrameAt = deps.now();
-    // Handshake deadline (see CONNECT_TIMEOUT_MS): no hello in time ⇒ the connection hung
-    // mid-handshake — Chromium never reports that as `error`, and the 45s silence watchdog is
-    // far too late for boot. Close the hung stream ourselves and retry on the normal backoff.
-    // Cleared by `hello`, by close(), and by the CLOSED `error` branch (which hands the stream
-    // to the relogin/reopen flow — the timer must not race it); deliberately NOT cleared by a
-    // transient (CONNECTING) `error`: the spec is "hello within CONNECT_TIMEOUT_MS of
-    // creation", a browser auto-retry does not buy a fresh deadline.
-    clearConnectTimer();
-    connectTimer = timer(() => {
-      connectTimer = null;
-      if (closed || es !== source) return;
-      try {
-        source.close();
-      } catch {
-        /* already closed */
-      }
-      es = null;
-      deps.onConn("reconnecting");
-      scheduleReopen();
-    }, CONNECT_TIMEOUT_MS);
-    for (const name of SSE_EVENTS) {
-      source.addEventListener(name, (/** @type {any} */ ev) => {
-        if (es !== source) return; // stale stream
-        lastFrameAt = deps.now();
-        let data = null;
-        try {
-          data = typeof ev.data === "string" && ev.data !== "" ? JSON.parse(ev.data) : null;
-        } catch {
-          return; // malformed frame: ignore
-        }
-        if (name === "hello") {
-          clearConnectTimer();
-          reloginUsed = false;
-          backoff = BACKOFF_MIN_MS;
-          deps.onConn("open");
-        }
-        const id = Number(ev.lastEventId);
-        deps.onMessage(
-          Number.isFinite(id) && ev.lastEventId !== "" ? { event: name, data, id } : { event: name, data },
-        );
-      });
-    }
-    source.addEventListener("error", () => {
-      if (es !== source || closed) return;
-      if (source.readyState !== ES_CLOSED) {
-        deps.onConn("reconnecting"); // browser auto-reconnects with Last-Event-ID
-        return;
-      }
-      // CLOSED ⇒ HTTP error (401 after hub restart, …): the connect attempt is over, so its
-      // handshake deadline must not race the relogin/reopen flow below.
-      clearConnectTimer();
-      // CLOSED ⇒ HTTP error (401 after hub restart, …): one silent re-login, then back off.
-      es = null;
-      void reloginOnce().then((ok) => {
-        if (closed) return;
-        if (!ok && !deps.storage.getItem(TOKEN_KEY)) deps.onConn("auth");
-        else deps.onConn("reconnecting");
-        scheduleReopen();
-      });
-    });
-    armWatchdog();
-  }
-
   /**
    * §7.2: `withRelogin(() => postRaw(API.cmd, req))` — a 401 re-logs in silently and replays
    * the SAME body (same id ⇒ deduped, D7). Timeout/network ⇒ outcomeFromError's
@@ -482,10 +363,10 @@ export function createClient(deps) {
       const out = await send();
       if (!(out.ok === false && out.error === "E_BUSY")) return out;
       busyAttempts++;
-      if (busyAttempts > UPLOAD_BUSY_RETRY_MAX || closed) return out;
+      if (busyAttempts > UPLOAD_BUSY_RETRY_MAX || stream.isClosed()) return out;
       const ms = out.retryAfterS !== undefined ? out.retryAfterS * 1000 : UPLOAD_BUSY_RETRY_DEFAULT_MS;
       await sleep(ms);
-      if (closed) return out; // closed during the backoff — stop hammering a dead client
+      if (stream.isClosed()) return out; // closed during the backoff — stop hammering a dead client
     }
   }
 
@@ -1878,7 +1759,7 @@ export function createClient(deps) {
         if (await login(token)) deps.storage.setItem(TOKEN_KEY, token);
         else if (!(await reloginOnce())) deps.onConn("auth");
       }
-      if (!closed) openStream();
+      if (!stream.isClosed()) stream.openStream();
     },
     /** @param {string} clientId @param {string} agentKey @returns {Promise<{ ok: true } | { ok: false, error: string }>} */
     async subscribe(clientId, agentKey) {
@@ -1976,23 +1857,12 @@ export function createClient(deps) {
     privacy,
     proxy,
     close() {
-      closed = true;
-      if (watchdog !== null) deps.clearTimeout(watchdog);
-      if (reopenTimer !== null) deps.clearTimeout(reopenTimer);
-      clearConnectTimer();
-      watchdog = reopenTimer = null;
-      if (es) {
-        try {
-          es.close();
-        } catch {
-          /* ignore */
-        }
-      }
-      es = null;
+      stream.close();
     },
     /** Test/diagnostic hooks. */
     stats() {
-      return { opens, open: es !== null, reloginUsed, backoff };
+      const s = stream.stats();
+      return { opens: s.opens, open: s.open, reloginUsed, backoff: s.backoff };
     },
   };
 }
