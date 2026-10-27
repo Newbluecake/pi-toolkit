@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { MemoryRunStore } from "../../src/core/store.js";
-import { parseLoadSettings } from "../../src/config/settings.js";
+import { parseLoadSettings } from "../../src/sysload/settings.js";
 import type { AgentTypeConfig, RunDiagnostics, SessionSpec } from "../../src/core/types.js";
 import { EscalatingReaper } from "../../src/runtime/reaper.js";
 import type { SessionDriver, SessionHandle } from "../../src/runtime/session-driver.js";

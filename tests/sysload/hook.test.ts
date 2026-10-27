@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseLoadSettings } from "../../src/config/settings.js";
+import { parseLoadSettings } from "../../src/sysload/settings.js";
 import { createLoadHintHook, createLoadHintState } from "../../src/sysload/hook.js";
 import type { LoadPort, LoadVerdict } from "../../src/sysload/types.js";
 

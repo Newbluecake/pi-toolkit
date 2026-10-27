@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
-import { parseLoadSettings } from "../../src/config/settings.js";
+import { parseLoadSettings } from "../../src/sysload/settings.js";
 import { createLoadActivation, escalated } from "../../src/sysload/activation.js";
 import { IoLedger } from "../../src/sysload/io-ledger.js";
 import { aggregateTop } from "../../src/sysload/top.js";

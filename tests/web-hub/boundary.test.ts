@@ -112,7 +112,7 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../fabric/settings.js",
     "../memory/tidy/batch-settings.js",
     "../quota/settings.js",
-    "../sysload/types.js",
+    "../sysload/settings.js",
     "../topic-switch/settings.js",
     // #56 ⑧: the `webHub` / `feishuBot` blocks live in web-hub/agent/settings.ts (pinned below).
     "../web-hub/agent/settings.js",
@@ -145,6 +145,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/cache-ttl/settings.ts": ["./keepalive-state.js"],
   // #56 ⑧: quota block settings — `./types.js` is type-only (erased), so no value import at all.
   "src/quota/settings.ts": [],
+  // #56 ⑧: load block settings — the frozen sysload domain constants.
+  "src/sysload/settings.ts": ["./types.js"],
   // #56 ⑧: webHub/feishuBot block settings — LAN host/origin classification (L16 第一处) + the browser-safe,
   // import-free shared CIDR parser (LAN security P0). The hub whitelist is NOT loosened: these are the same two files.
   "src/web-hub/agent/settings.ts": ["../protocol/client-allow.js", "../protocol/lan.js"],

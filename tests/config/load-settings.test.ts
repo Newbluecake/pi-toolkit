@@ -3,13 +3,8 @@
 // quota-settings.test.ts (per-block settings test file).
 
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_SETTINGS,
-  isTimeSettingKey,
-  loadSettings,
-  parseLoadSettings,
-  TIME_SETTING_MS_PATHS,
-} from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, isTimeSettingKey, loadSettings, TIME_SETTING_MS_PATHS } from "../../src/config/settings.js";
+import { parseLoadSettings } from "../../src/sysload/settings.js";
 import { parseWebHubSettings } from "../../src/web-hub/agent/settings.js";
 import { currentOf, defaultOf, isKnownSettingKey, SETTING_SPECS } from "../../src/config/setting-specs.js";
 import {
