@@ -113,8 +113,14 @@ schedule at all). Rules that are easy to break:
 - C1 (xs ledger, `fabric/xs/activate.ts`), C2 (background-status + HOST_KEY release, `index.ts`) and C3 (`handoffStore.clear`,
   `compact-hint/register.ts`) stay separate `session_shutdown` handlers: their registration order relative to the other plugins'
   handlers is pinned by the activation-trace golden and the matrix test's handler counts;
-- the known holes are marked `GAP-Gn` in the lists and pinned (with timer evidence) by `tests/integration/stack-teardown-matrix.test.ts`:
-  G1/G2/G3/G4/G7 are only disposed by path A (so not after `/reload` or a cross-cwd resume), G5/G6 are missing from the unreachable
-  path B, G8 `holder.current` is never cleared, G9 the `/goal` watchdog is not cancelled, G10 notifier retries outlive shutdown,
-  G11 `onDisabled` listeners accumulate per activation; G12 (wake service timers) is closed — `mailbox.dispose` disposes it.
-  A fix changes exactly the matrix cells of its own gap and says so in its commit.
+- the gaps found in 7-1 were fixed one per commit in 7b (`docs/dev/source-governance/batch2-step7-report.md` §7b); the matrix test
+  `tests/integration/stack-teardown-matrix.test.ts` pins each fix. Path C now also disposes: `external` (G7), the `/goal` hook
+  timers (G9, activate-level), the usage broadcaster (G1, after drain/seal), the coalescer/ack-hold windows by **discard, not
+  flush** (G2/G3 — the persisted `batched` outbox records are redelivered by the next stack's `reconcile`), the notifier retry
+  timers (G10, after drain/seal so shutdown-time notices still reach the closing session) and the bash job manager (G4,
+  timers only — the `parts.bashJobs` slot stays, path A still needs it as `prevBashJobs`); the child-switch `onDisabled`
+  subscription is released at the head of the shutdown (G11). Components outside the `Stack` are reached through the build's
+  `parts` (`StackStep.run(stack, env, entry, parts)`).
+  **Still open:** G5/G6 (missing from the unreachable path B — decided not to fix) and **G8** (`holder.current` is never cleared
+  after shutdown): a fix is parked on branch `gov/step7-g8-wip` because it changes the frozen activation-trace golden and two
+  pinned `ask-user-interrupt` tests (see the report).
