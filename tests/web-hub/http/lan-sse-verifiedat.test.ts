@@ -1,13 +1,14 @@
 /**
  * §4.2 "SSE 到期复核" (LC review fix, lan-plan.md §15.9 #3): a successful recheck (session still
  * valid) updates the connection's own `auth.verifiedAt` — a focused unit test on
- * `recheckLanSseExpiry` directly (exported from `hub/http.ts` for exactly this purpose; not part
+ * `recheckLanSseExpiry` directly (exported from `hub/http-lan.ts` — moved there by the ⑨-H2
+ * split, before: `hub/http.ts` — for exactly this purpose; not part
  * of any frozen `ports.ts` surface). The end-to-end revoke/keep-open/batch paths are already
  * covered through the real HTTP harness in `lan-sse-expiry.test.ts`.
  */
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { recheckLanSseExpiry, type LanRuntime } from "../../../src/web-hub/hub/http.js";
+import { recheckLanSseExpiry, type LanRuntime } from "../../../src/web-hub/hub/http-lan.js";
 import { createSseHub, type SseClient, type SseHub } from "../../../src/web-hub/hub/sse.js";
 import { fakeLanStore } from "../contract/fakes.js";
 import { captureLog, openSse } from "./helpers.js";

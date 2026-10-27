@@ -6,7 +6,7 @@ import * as upgradeModule from "../../../src/web-hub/hub/kdf-upgrade.js";
 import { fakeLanStore } from "../contract/fakes.js";
 import { KDF_PHASE2 } from "../../../src/web-hub/hub/kdf.js";
 import * as coreModule from "../../../src/web-hub/hub/lan-login.js";
-import { writeLanLoginReply } from "../../../src/web-hub/hub/http.js";
+import { writeLanLoginReply } from "../../../src/web-hub/hub/http-lan.js";
 import { createSecurityEventBus, type SecurityEvent } from "../../../src/web-hub/hub/security-events.js";
 import type { ConnLease, LoginIo } from "../../../src/web-hub/hub/ports.js";
 import { lanPostJson, lanRequest, seedLanUser, startLan } from "./lan-helpers.js";
