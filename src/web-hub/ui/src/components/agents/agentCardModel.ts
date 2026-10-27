@@ -7,7 +7,7 @@
  * priority order), re-expressed against the frozen `AgentState`/`AgentCardView` shapes and the
  * shared `common.status.*` i18n vocabulary instead of hard-coded English badge text.
  */
-import { normalizeAlias, XS_ALIAS_MAX_GRAPHEMES } from "@protocol/xs-alias.js";
+import { deriveAliasFromDirName, normalizeAlias, XS_ALIAS_MAX_GRAPHEMES } from "@protocol/xs-alias.js";
 import { agentVisualState } from "../../composables/visual-state.js";
 import type { I18nHandle } from "../../composables/useI18n.js";
 import { formatUsd } from "../../format.js";
@@ -220,6 +220,11 @@ export function xsChannelChipOf(agent: AgentState | undefined, hubCaps: unknown)
 
 export const XS_ALIAS_CAP = "xs.alias.v1";
 
+/** alias-force-default §3.1 (AFU): v2 adds force-take previews and the cwd-derived auto-claim
+ *  (UI mirror of `XS_ALIAS_V2_HUB_CAP` in protocol/xs.ts). Everything v2-only in the UI gates on
+ *  this cap so a v1/absent hub keeps the pre-AFU UI byte-identical. */
+export const XS_ALIAS_V2_CAP = "xs.alias.v2";
+
 /** Q8 (revised 2026-10-27, user report: `@claude2a…` clipped a 10-char alias while the row had room):
  *  the card chip shows the whole alias — the cap equals the protocol maximum (16 clusters), so
  *  truncation is only a defensive backstop against an out-of-contract wire value. */
@@ -303,7 +308,16 @@ export function aliasSuggestions(
   const raw: Array<string | undefined> = [];
   const cwd = cwdOf(self);
   const segments = cwd.split("/").filter((s) => s !== "");
-  raw.push(segments[segments.length - 1]);
+  const base = segments[segments.length - 1];
+  // alias-force-default §5.2-6 (AFU): with hub caps ∋ xs.alias.v2 the cwd chip is derived by the
+  // SAME function the agent's auto-claim uses (chip ≡ auto; underivable names drop the chip).
+  // Without v2 there is no auto-claim, so the chip keeps the raw-basename behaviour.
+  if (base !== undefined && hubCaps.includes(XS_ALIAS_V2_CAP)) {
+    const d = deriveAliasFromDirName(base);
+    raw.push(d.ok ? d.alias : undefined);
+  } else {
+    raw.push(base);
+  }
   const name = record(self.session)["name"];
   if (typeof name === "string") raw.push(ALIAS_RUN_RE.exec(name)?.[0]);
   for (let i = segments.length - 1; i >= 0; i--) {

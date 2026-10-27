@@ -22,6 +22,13 @@
   cwd label + offline duration) plus the token's remaining lifetime, and only then sends
   `--take=<token>`. No optimistic update anywhere: the echo plus the following status push
   (`status.xs.alias`) is the truth.
+
+  alias-force-default §7 (AFU): with hub caps ∋ `xs.alias.v2`, a `--take` preview refused
+  online/recent offers a danger button 「强制抢占…」 below the echo. It runs `alias X --force`,
+  parses the token out of THAT output with the SAME `parseTakeConfirm` (unchanged), and reuses
+  the existing confirm box (holder dir / online state / auto-claim origin + countdown); the
+  execution is still `--take=<token>` (the token remembers mode=force). Without the v2 cap none
+  of this renders — the dialog stays byte-identical.
 -->
 <script setup lang="ts">
 import { computed, inject, onUnmounted, ref } from "vue";
@@ -35,6 +42,7 @@ import { registerChannelsExtra } from "../../i18n/channels-extra.js";
 import {
   aliasSuggestions,
   XS_ALIAS_CAP,
+  XS_ALIAS_V2_CAP,
   XS_DEFAULT_CHANNEL,
   xsAliasOf,
   xsChannelsOf,
@@ -125,6 +133,11 @@ const aliasOn = computed(() => {
   const xs = (view?.agent.value.status as { xs?: unknown } | undefined)?.xs;
   return typeof xs === "object" && xs !== null;
 });
+/** AFU: hub declared `xs.alias.v2` (force-take previews + cwd-derived auto-claim). */
+const aliasV2 = computed(() => {
+  const c = caps.value;
+  return Array.isArray(c) && c.includes(XS_ALIAS_V2_CAP);
+});
 const dialogTitle = computed(() => (aliasOn.value ? t("alias.dialogTitle") : t("channels.dialogTitle")));
 const currentAlias = computed(() => (aliasOn.value ? xsAliasOf(view?.agent.value, caps.value) : undefined));
 
@@ -184,12 +197,14 @@ async function onAliasSave(): Promise<void> {
   const a = aliasValid.value;
   if (a === null || !canSaveAlias.value) return;
   takePreview.value = null;
+  takeRejected.value = null;
   showAliasResult(await tracked.run("fabric", `alias ${a}`));
 }
 
 async function onAliasClear(): Promise<void> {
   if (currentAlias.value === undefined || aliasBusy.value) return;
   takePreview.value = null;
+  takeRejected.value = null;
   showAliasResult(await tracked.run("fabric", "alias --clear"));
 }
 
@@ -218,22 +233,52 @@ const takeRemaining = computed(() => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 });
 
-async function onAliasTake(): Promise<void> {
-  const a = aliasValid.value;
-  if (a === null || !canTakeAlias.value) return;
+/** §7: only an online/recent refusal of `--take` (the two fixed agent-side sentences,
+ *  commands/fabric-xs.ts aliasErrorText TAKE{online|recent}) opens the force path. AF4 appends
+ *  a 「--force」 hint line to exactly these refusals when the hub speaks v2. */
+const TAKE_REJECT_FORCE_RE = /持有者仍在线，不能抢占|持有者离线不足 10 分钟/;
+
+/** A `--take` preview refused online/recent, escalatable to `--force` (rendered only when the
+ *  draft still names the same alias and the hub declared xs.alias.v2 — else nothing renders). */
+const takeRejected = ref<{ readonly alias: string } | null>(null);
+const forceOffer = computed(() => {
+  const p = takeRejected.value;
+  return p !== null && aliasV2.value && p.alias === aliasValid.value ? p : null;
+});
+
+/** Shared take/force preview: the token comes ONLY out of this one command's captured output. */
+async function previewTakeover(command: string, refusedAlias: string | null): Promise<void> {
   takePreview.value = null;
-  const r = await tracked.run("fabric", `alias ${a} --take`);
+  takeRejected.value = null;
+  const r = await tracked.run("fabric", command);
   if (!r.ok) {
     showAliasResult(r);
     return;
   }
   const parsed = parseTakeConfirm(r.output);
   if (parsed === undefined) {
-    showAliasResult(r); // e.g. holder online / not held — the handler's echo explains
+    showAliasResult(r); // e.g. holder online / not held / unnotifiable — the echo explains
+    if (refusedAlias !== null && aliasV2.value && TAKE_REJECT_FORCE_RE.test(r.output)) {
+      takeRejected.value = { alias: refusedAlias };
+    }
     return;
   }
   aliasNote.value = null;
   takePreview.value = { alias: parsed.alias, token: parsed.token, text: r.output, receivedAt: Date.now() };
+}
+
+async function onAliasTake(): Promise<void> {
+  const a = aliasValid.value;
+  if (a === null || !canTakeAlias.value) return;
+  await previewTakeover(`alias ${a} --take`, a);
+}
+
+/** §7 force: preview via `--force`; the SAME confirm box then executes `--take=<token>` (the
+ *  token remembers mode=force — `XS_ALIAS_TAKE_CONFIRM_RE`/`parseTakeConfirm` are unchanged). */
+async function onAliasForce(): Promise<void> {
+  const p = forceOffer.value;
+  if (p === null || aliasBusy.value) return;
+  await previewTakeover(`alias ${p.alias} --force`, null);
 }
 
 async function onAliasTakeConfirm(): Promise<void> {
@@ -393,6 +438,20 @@ async function onAliasTakeConfirm(): Promise<void> {
             {{ aliasNote.text }}
           </p>
         </template>
+
+        <!-- AFU §7: below the refusal echo, a v2 hub offers the force path. Renders NOTHING
+             without xs.alias.v2 or when the draft no longer names the refused alias. -->
+        <div v-if="forceOffer !== null" class="alias-actions alias-force-row">
+          <button
+            class="btn btn-danger btn-xs"
+            type="button"
+            :disabled="aliasBusy"
+            :aria-label="t('alias.forceAria')"
+            @click="void onAliasForce()"
+          >
+            {{ t("alias.force") }}
+          </button>
+        </div>
       </section>
 
       <ul class="channels-list" role="group" :aria-label="t('channels.listAria')">
