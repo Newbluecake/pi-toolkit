@@ -780,6 +780,15 @@ function refreshAlias(deps: FabricXsCommandDeps): void {
   }
 }
 
+/** Writing the decided mark is best effort: a failing store must never block the write request itself. */
+function markDecidedSafe(port: FabricXsAliasPort | undefined, via: Parameters<XsAliasMarkDecided>[0]): void {
+  try {
+    port?.markDecided?.(via);
+  } catch {
+    /* the mark is a hint; the human's request still goes out */
+  }
+}
+
 async function bridgeCall(run: () => Promise<XsAliasBridgeResult>): Promise<XsAliasBridgeResult> {
   try {
     return await run();
@@ -836,7 +845,7 @@ async function runAlias(
   // D6: even a locally invalid alias, bad token or failed/offline write is a human decision.
   // Syntax errors, reads, previews and disabled alias mode are NOT writes.
   if (port?.localEnabled && (clear || execute || (words.length === 1 && !force && takeFlag === undefined))) {
-    port.markDecided?.(clear ? "clear" : execute ? (forceToken ? "force" : "take") : "set");
+    markDecidedSafe(port, clear ? "clear" : execute ? (forceToken ? "force" : "take") : "set");
   }
   if (token !== undefined) forceTokens.delete(token);
 
@@ -928,7 +937,7 @@ async function runAlias(
       notify(ctx, "已取消抢占。");
       return;
     }
-    port?.markDecided?.(force ? "force" : "take");
+    markDecidedSafe(port, force ? "force" : "take");
     forceTokens.delete(previewToken);
     const r = await bridgeCall(() => bridge.take(n.alias, previewToken));
     if (!r.ok) return notify(ctx, errorText(r), "warning");

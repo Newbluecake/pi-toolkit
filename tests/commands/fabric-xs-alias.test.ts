@@ -488,6 +488,41 @@ describe("#72 AF4 human decision ordering", () => {
     expect(b.calls.list).toEqual(["preview 前端", "mark:take", `take 前端 ${TOKEN}`]);
   });
 
+  it("a throwing markDecided never blocks the write request (set / clear / take / force)", async () => {
+    const boom = vi.fn(() => {
+      throw new Error("appendEntry failed");
+    });
+    const port = { hubAliasV2: () => true, markDecided: boom };
+    const set = harness({ port });
+    expect((await set.run("alias 前端"))[0]?.message).toBe("别名已设置：alias @前端 held");
+    expect(set.calls.list).toEqual(["set 前端"]);
+    const clr = harness({ port });
+    expect((await clr.run("alias --clear"))[0]?.message).toContain("已清除本会话别名");
+    expect(clr.calls.list).toEqual(["clear"]);
+    const take = harness({ port });
+    expect((await take.run("alias 前端 --take"))[0]?.message).toContain("已抢占别名");
+    expect(take.calls.list).toEqual(["preview 前端", "take 前端 " + TOKEN]);
+    const force = harness({ port });
+    expect((await force.run("alias 前端 --force"))[0]?.message).toContain("已抢占别名");
+    expect(force.calls.list).toEqual(["force-preview 前端", "take 前端 " + TOKEN]);
+    // every mark site was really reached (and threw) before its write
+    expect(boom.mock.calls.map((c) => (c as unknown[])[0])).toEqual(["set", "clear", "take", "force"]);
+  });
+
+  it("a throwing markDecided on the web --take=<token> path still executes the take", async () => {
+    const boom = vi.fn(() => {
+      throw new Error("appendEntry failed");
+    });
+    const h = harness({ port: { hubAliasV2: () => true, markDecided: boom } });
+    const notes = await h.run("alias 前端 --take", { web: true });
+    expect(notes[0]?.message).toContain("--take=" + TOKEN);
+    expect(boom).not.toHaveBeenCalled(); // preview marks nothing
+    const done = await h.run("alias 前端 --take=" + TOKEN, { web: true });
+    expect(done[0]?.message).toContain("已抢占别名");
+    expect(h.calls.list.at(-1)).toBe("take 前端 " + TOKEN);
+    expect(boom).toHaveBeenCalledTimes(1);
+  });
+
   it("clear explicitly opts out; v1/auto-off clear text unchanged", async () => {
     const port = { hubAliasV2: () => true, autoFromCwd: true };
     expect((await harness({ port }).run("alias --clear"))[0]?.message).toContain("已关闭本会话的目录名自动别名");
