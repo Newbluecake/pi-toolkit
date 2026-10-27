@@ -909,10 +909,10 @@ describe("V6 review #2 — plain init never overwrites an unfinished transaction
     // pinned parent fd — never rmSync, never a recursive delete, never an absolute path.
     const src = readFileSync(HELPER, "utf8");
     expect(src).not.toMatch(/removeInitSkeleton/);
-    const body = src.slice(
-      src.indexOf("async function cmdInit("),
-      src.indexOf("\nexport async function describeVault("),
-    );
+    // cmdInit lives in init.mjs (#56 ⑩-S) — it is the only function in that file.
+    const initSrc = readFileSync(join(dirname(HELPER), "init.mjs"), "utf8");
+    expect(initSrc).not.toMatch(/removeInitSkeleton/);
+    const body = initSrc.slice(initSrc.indexOf("async function cmdInit("));
     expect(body).toContain("setAsideInitSkeleton(v, made)");
     expect(body).not.toMatch(/unlinkSync|rmSync|rmdirSync/);
     const fn = src.slice(src.indexOf("export async function setAsideInitSkeleton("));
