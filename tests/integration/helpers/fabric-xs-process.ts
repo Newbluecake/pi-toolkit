@@ -2,6 +2,7 @@
  * Only the pi host/provider is fake; no live credentials or provider requests are used. */
 import { EventEmitter } from "node:events";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { Socket } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -24,8 +25,27 @@ const PACKAGE_VERSION = (
 ).version;
 
 const reply = (id: number, value: unknown) => process.send?.({ id, value });
+/**
+ * alias-force-default AF6 (mixed fleets): make this process look like a pre-v2 peer ON THE WIRE by removing
+ * `xs.alias.v2` from the caps of its own outgoing handshake frame (`hello` for an agent, `hello_ack` for the hub).
+ * Test fixture only — production has no such hook. The peers keep running the current code; what changes is
+ * exactly what the other side can see, which is what the v2 gates key on.
+ */
+function stripAliasV2OnWire(frameType: "hello" | "hello_ack"): void {
+  const original = Socket.prototype.write;
+  const prefix = `{"t":"${frameType}"`;
+  Socket.prototype.write = function (this: Socket, chunk: unknown, ...rest: unknown[]) {
+    if (typeof chunk === "string" && chunk.startsWith(prefix)) {
+      const frame = JSON.parse(chunk) as { caps?: string[] };
+      frame.caps = (frame.caps ?? []).filter((c) => c !== "xs.alias.v2");
+      chunk = `${JSON.stringify(frame)}\n`;
+    }
+    return (original as (...a: unknown[]) => boolean).call(this, chunk, ...rest);
+  } as typeof Socket.prototype.write;
+}
 let handle: (m: any) => Promise<unknown>;
 if (process.argv[2] === "hub") {
+  if (process.env.XW_HUB_STRIP_V2 === "1") stripAliasV2OnWire("hello_ack");
   let registry!: Registry;
   const slotFrames: Array<{ key: string; t: string; sessionId?: string; joined?: boolean }> = [];
   // channel-plan §12 (IBW): every agent status frame's `xsInbox` (undefined ⇒ key absent).
@@ -199,6 +219,9 @@ if (process.argv[2] === "hub") {
     throw new Error(`unknown hub op ${m.op}`);
   };
 } else {
+  if (process.env.XW_STRIP_V2 === "1") stripAliasV2OnWire("hello");
+  // alias-force-default AF6: per-peer working directory (the cwd basename is what auto-claim derives the alias from).
+  const peerCwd = process.env.XW_CWD ?? process.cwd();
   const agentDir = join(process.env.HOME!, ".pi/agent");
   mkdirSync(agentDir, { recursive: true });
   const config = {
@@ -260,7 +283,7 @@ if (process.argv[2] === "hub") {
   const sessionDir = join(process.env.PI_CODING_AGENT_DIR!, "sessions");
   mkdirSync(sessionDir, { recursive: true });
   const newSession = () => {
-    const session = SessionManager.create(process.cwd(), sessionDir);
+    const session = SessionManager.create(peerCwd, sessionDir);
     session.appendMessage({ role: "user", content: "fixture startup", timestamp: Date.now() });
     // MW: published session name (bare `@name` needs a row `name`); opt-in so older suites stay unnamed.
     if (process.env.XW_SESSION_NAME === "1") session.appendSessionInfo(process.env.XW_NAME!);
@@ -291,9 +314,14 @@ if (process.argv[2] === "hub") {
   const messages: any[] = [],
     queued: any[] = [],
     notifications: string[] = [];
+  // alias-force-default AF6: XW_TUI_CONFIRM=1 ⇒ a TUI-mode peer whose `ui.confirm` is recorded and answered by the
+  // `confirmAnswer` op (default yes) — the interactive force/take confirmation path. Absent ⇒ rpc mode, unchanged.
+  const tuiConfirm = process.env.XW_TUI_CONFIRM === "1";
+  let confirmAnswer = true;
+  const confirms: Array<{ title: string; detail: string }> = [];
   const ctx: any = {
-    cwd: process.cwd(),
-    mode: "rpc",
+    cwd: peerCwd,
+    mode: tuiConfirm ? "tui" : "rpc",
     hasUI: process.env.XW_UI === "1",
     get sessionManager() {
       return sm;
@@ -308,8 +336,15 @@ if (process.argv[2] === "hub") {
     getContextUsage: () => undefined,
     ui: {
       notify: (text: string) => notifications.push(text),
+      confirm: async (title: string, detail: string) => {
+        confirms.push({ title, detail });
+        return confirmAnswer;
+      },
       setStatus: (key: string, text: string | undefined) => statuses.push({ key, text }),
       setWidget() {},
+      // a TUI-mode peer (XW_TUI_CONFIRM=1) reaches the TUI-only session_start hooks
+      getEditorComponent: () => undefined,
+      setEditorComponent() {},
       addAutocompleteProvider: (factory: Function) => autocompleteFactories.push(factory),
     },
   };
@@ -503,6 +538,10 @@ if (process.argv[2] === "hub") {
       skew += m.ms;
       return skew;
     }
+    if (m.op === "confirmAnswer") {
+      confirmAnswer = m.answer === true;
+      return true;
+    }
     if (m.op === "clearReplyLedger") {
       delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:xs-reply-ledger")];
       return true;
@@ -533,6 +572,7 @@ if (process.argv[2] === "hub") {
         aborts,
         members: sm.getBranch().filter((e) => e.type === "custom" && e.customType === "subagent:xs-membership"),
         notifications,
+        confirms,
         userMessages,
         mentionNotices,
         turns,
