@@ -11,6 +11,11 @@
 //
 // Every exported function is pure or takes its side effects as parameters so tests can drive it;
 // the CLI dispatcher at the bottom only runs when this file is the process entry point.
+//
+// Layout: this file keeps the CLI dispatcher and the shared primitives (every exported function).
+// The `init` body, the `--private` command bodies and the in-namespace finalize steps live in
+// init.mjs / private.mjs / finalize.mjs; they import from here and are loaded only through lazy
+// `await import("./x.mjs")` below, so a copy of this file alone still runs the other commands.
 import { spawn, spawnSync } from "node:child_process";
 import { constants as fsc } from "node:fs";
 import fs from "node:fs";
