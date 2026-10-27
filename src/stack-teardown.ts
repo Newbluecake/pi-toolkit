@@ -261,6 +261,14 @@ const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
   // bash-timeout-grace P5: abort whichever recovery/cleanup phase this stack still has outstanding — covers the
   // fresh-module /reload case.
   { id: "bashJobRecovery", run: (stack) => void stack.bashJobRecovery?.dispose() },
+  // G4 (7b): stop the OLD manager's notification poll / deadline timers. On /reload and cross-cwd resume the module is
+  // re-imported, so no handoff ever disposed it: its poll kept running next to the new stack's `recover()`/adoption of
+  // the same jobs ⇒ a double "bash job finished" notice, one of them through the OLD pi. `dispose()` only clears
+  // timers — no process is signalled (the next stack adopts the still-running jobs) and a job that ends from now on
+  // stays un-notified on disk for the next stack's recovery to announce. Deliberately NOT cleared from `parts`: the
+  // same-cwd rebuild handoff (path A) still captures this very manager as `prevBashJobs` for `handoffInProcess`
+  // (its `exportLocalJobs()`/live LocalHandles are unaffected by dispose, exactly as before when A disposed it).
+  { id: "bashJobs", run: (stack) => void stack.bashJobs?.dispose() },
   // Fabric must freeze before run shutdown so late verdicts from the old stack cannot write into the shared outbox; the
   // next stack owns pending records. (Also disposes the wake service through the mailbox — closes G12.)
   { id: "fabric", run: (stack) => void stack.fabric?.dispose() },
@@ -347,7 +355,6 @@ const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
     run: (_stack, env, entry) =>
       entry.kind === "shutdown" && entry.reason === "quit" ? env.activation.sealChildBashJobs() : undefined,
   },
-  // GAP-G4 bashJobs manager: not reachable from the Stack (path A only).
 ];
 
 /** Path B (sync) and path C4 (async). Path A is `runRebuildHandoff` over the parts. */

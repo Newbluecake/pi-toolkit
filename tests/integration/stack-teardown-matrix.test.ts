@@ -311,6 +311,9 @@ function pathC(g: string, reason: string, profile: Profile = "full", o: { kill?:
     `${g}.load.dispose`,
     `${g}.rpc.close`,
     `${g}.bashJobRecovery.dispose`,
+    // G4 FIXED (7b): the old manager's poll/deadline timers stop at shutdown (path A still disposes it again and
+    // hands its live jobs to the next build — see tests/integration/bash-jobs-wiring.test.ts "G4").
+    `${g}.bashJobs.dispose`,
     `${g}.fabric.mailbox.dispose`, // before run shutdown: late verdicts must not reach the shared outbox
     `${g}.fabric.wake.dispose`, // (nested inside mailbox.dispose ⇒ closes G12)
     `${g}.workflow.runs.shutdown`,
@@ -332,8 +335,7 @@ function pathC(g: string, reason: string, profile: Profile = "full", o: { kill?:
     // resume re-import the module, so path A never reaches the old port there.
     ...(profile === "extRoot" ? [`${g}.external.dispose`] : []),
     `${g}.hostBashViewCapability.release`,
-    // GAP-G4 bashJobs manager:
-    // none of them is touched on this path — they are disposed only by path A (same-module rebuild).
+    // (every previously missing component of path C is now disposed above — G1/G2/G3/G4/G7/G10; B's G5/G6 are not fixed.)
     ...(reason === "quit" ? [...(o.kill ? ["bashJobs.killBounded"] : []), "childBashRegistry.sealAll"] : []),
   ];
 }

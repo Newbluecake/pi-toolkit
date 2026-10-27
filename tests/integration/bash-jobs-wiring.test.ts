@@ -1105,3 +1105,95 @@ describe("L1 todo #20: host-view capability declaration lifecycle across stack r
     },
   );
 });
+
+/**
+ * #56 ⑦ 7b G4: session shutdown disposes the bash job manager (poll + deadline timers only).
+ *  - /reload and cross-cwd resume re-import the module ⇒ no handoff ever disposed the OLD manager, so its notification
+ *    poll ran next to the new stack's recovery of the same jobs (double notice, one through the old pi);
+ *  - same-cwd new/resume/fork stays the in-process handoff (path A): the live job and its LocalHandle move to the next
+ *    manager, which owns the one and only notice.
+ */
+describe("G4: bash job manager disposal at shutdown", () => {
+  const stubActivation = {
+    defensiveXsTeardown: () => undefined,
+    disposeGoalHook: () => undefined,
+    releaseCapabilityAlert: () => undefined,
+    scheduleSurfaceShutdown: () => undefined,
+    sealChildBashJobs: async () => undefined,
+  };
+  const shutdown = (stack: ReturnType<typeof buildSessionStack>, settings: AgentSettings, reason: string) =>
+    stack.dispose({ kind: "shutdown", reason }, { ctx, settings, activation: stubActivation });
+  const bashNotices = (host: ReturnType<typeof fakePi>) =>
+    host.sent.filter((m) => m.message.customType === "bash-job:notification");
+
+  it.runIf(posix)(
+    "/reload (fresh module, no handoff): the old manager no longer notifies; the new stack announces the finished job exactly once",
+    async () => {
+      const dir = join(tmpRoot, "g4-reload");
+      const settings = settingsWith(dir);
+      const oldHost = fakePi();
+      const stack1 = buildSessionStack(oldHost.pi, ctx, settings, types, []);
+      const job = await stack1.bashJobs!.create({ command: "sleep 1", cwd: process.cwd() });
+      await stack1.bashJobs!.markBackgrounded(job.jobId);
+      await shutdown(stack1, settings, "reload");
+
+      // The job ends AFTER shutdown; the old manager's 2 s poll would have announced it through the OLD pi.
+      await job.exit;
+      await new Promise((resolve) => setTimeout(resolve, 4_500));
+      expect(bashNotices(oldHost)).toEqual([]);
+
+      // The next activation (fresh module, same session) recovers the finished job and announces it once.
+      vi.resetModules();
+      const fresh = await import("../../src/stack.js");
+      const newHost = fakePi();
+      const stack2 = fresh.buildSessionStack(newHost.pi, ctx, settings, types, []);
+      await vi.waitFor(() => expect(bashNotices(newHost).length).toBe(1), { timeout: 8_000, interval: 50 });
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      expect(bashNotices(newHost).length).toBe(1);
+      expect(bashNotices(oldHost)).toEqual([]);
+      expect(String(bashNotices(newHost)[0]!.message.content)).toContain(job.jobId);
+      stack2.bashJobs?.dispose();
+    },
+    30_000,
+  );
+
+  it.runIf(posix)(
+    "same-cwd switch (same module): shutdown disposes the old manager, yet the live job still moves in-process to the next stack, which owns the single notice",
+    async () => {
+      const dir = join(tmpRoot, "g4-handoff");
+      const settings = settingsWith(dir);
+      const oldHost = fakePi();
+      const stack1 = buildSessionStack(oldHost.pi, ctx, settings, types, []);
+      const job = await stack1.bashJobs!.create({ command: "sleep 30", cwd: process.cwd() });
+      await stack1.bashJobs!.markBackgrounded(job.jobId);
+      const pid = stack1.bashJobs!.get(job.jobId)!.pid!;
+      expect(stack1.bashJobs!.hasOpenLocalHandle(job.jobId)).toBe(true);
+      try {
+        await shutdown(stack1, settings, "new");
+        // Same module ⇒ the next build runs path A: handoffInProcess(previous = the already-disposed manager).
+        const newHost = fakePi();
+        const stack2 = buildSessionStack(newHost.pi, ctx, settings, types, []);
+        await vi.waitFor(() => expect(stack2.bashJobs!.get(job.jobId)?.status).toBe("running"), {
+          timeout: 5_000,
+          interval: 25,
+        });
+        // the in-process handoff moved the LIVE handle (not a re-adopted orphan) and the process was never signalled
+        expect(stack2.bashJobs!.hasOpenLocalHandle(job.jobId)).toBe(true);
+        expect(probePid(pid)).toBe(true);
+        await stack2.bashJobs!.kill(job.jobId);
+        await vi.waitFor(() => expect(bashNotices(newHost).length).toBe(1), { timeout: 8_000, interval: 50 });
+        await new Promise((resolve) => setTimeout(resolve, 2_500));
+        expect(bashNotices(newHost).length).toBe(1); // exactly one, from the stack that owns the job now
+        expect(bashNotices(oldHost)).toEqual([]); // and none from the disposed predecessor
+        stack2.bashJobs?.dispose();
+      } finally {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+    },
+    30_000,
+  );
+});
