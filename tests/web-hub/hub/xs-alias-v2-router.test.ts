@@ -274,8 +274,10 @@ describe("intent dispatch and shape validation", () => {
       { alias: "web", intent: "force" as const, clear: true as const },
       { clear: true as const, intent: "auto" as const },
       { alias: "web", prevSessionId: PREV }, // prevSessionId without handoff
-      { alias: "web", intent: "handoff" as const, prevSessionId: PREV }, // AF7 — not implemented ⇒ unknown shape
-      { alias: "web", intent: "handoff" as const },
+      { alias: "web", intent: "handoff" as const }, // handoff needs prevSessionId
+      { intent: "handoff" as const, prevSessionId: PREV }, // … and an alias
+      { alias: "web", intent: "handoff" as const, prevSessionId: PREV, take: "preview" },
+      { alias: "web", intent: "handoff" as const, prevSessionId: PREV, clear: true as const },
     ]) {
       expect(call(r, A, { op: "alias", ...over }), JSON.stringify(over)).toMatchObject({ code: "E_XS_BAD_FRAME" });
     }
@@ -518,5 +520,249 @@ describe("members: aliasV2Capable", () => {
       [true, false],
       [false, false],
     ]);
+  });
+});
+
+// ----------------------------------------------------------------- AF7: /new handoff (I10)
+
+/** `/new` on the SAME socket: session_detached → session(new id) → xs_member(new id), exactly the agent's order. */
+function newSession(
+  r: AliasRig,
+  a: Agent,
+  sessionId: string,
+  opts: { detach?: boolean; member?: boolean } = {},
+): Agent {
+  if (opts.detach !== false) r.registry.onFrame(a.key, { t: "session_detached", reason: "new" } as never);
+  r.registry.onFrame(a.key, session({ sessionId, cwd: "/home/u/work" }));
+  if (opts.member !== false) {
+    r.registry.onFrame(
+      a.key,
+      memberFrame({
+        sessionId,
+        joined: true,
+        receive: "wake",
+        limits: { ...LIMITS, listPerMin: 600, sendsOutPerMin: 600, sendsOutPerHour: 6000, ...BCAST_LIMITS },
+      }),
+    );
+  }
+  r.clock.t += 1;
+  return { ...a, sessionId };
+}
+const handoff = (r: AliasRig, who: Agent, alias: string, prev: string): Promise<XsResFrame | undefined> =>
+  callAsync(r, who, { op: "alias", alias, intent: "handoff", prevSessionId: prev });
+const tableOf = (r: AliasRig): { records: Record<string, unknown>[]; tombstones: Record<string, unknown>[] } =>
+  JSON.parse(r.fs.text() ?? "{}") as never;
+const STALE = "E_XS_ALIAS_TAKE{stale}";
+
+describe("handoff (AF7, I10): /new moves the alias along the same socket", () => {
+  it("human alias: moved in place to the new sid; no tombstone, no cooling, old sid holds nothing, rev bumps", async () => {
+    const r = await aliasRig({ table: "fresh" });
+    const A = r.agent({ pid: 1, sessionId: SID_A, caps: V2_CAPS });
+    await setAlias(r, A, "front");
+    const before = tableOf(r).records.find((x) => x.alias === "front")!;
+    const A2 = newSession(r, A, SID_B);
+    expect(r.relay.members.predecessorOf(A.key)).toMatchObject({ from: SID_A });
+    const res = await handoff(r, A2, "front", SID_A);
+    expect(res).toMatchObject({ ok: true, alias: { alias: "front", state: "held" } });
+    expect(aliasOf(res).origin).toBeUndefined();
+    const t = tableOf(r);
+    expect(t.records.filter((x) => x.sessionId === SID_A)).toEqual([]); // no cooling / no leftover
+    expect(t.records.find((x) => x.alias === "front")).toMatchObject({ sessionId: SID_B, state: "held" });
+    expect((t.records.find((x) => x.alias === "front") as { rev: number }).rev).toBeGreaterThan(
+      (before as { rev: number }).rev,
+    );
+    expect(t.tombstones ?? []).toEqual([]);
+    // new sid reads it back; the old one does not
+    expect(call(r, A2, { op: "alias" })).toMatchObject({ ok: true, alias: { alias: "front", state: "held" } });
+    const peer = r.agent({ pid: 5, sessionId: SID_C, caps: V2_CAPS });
+    expect(call(r, peer, { op: "resolve", to: "front" })).toMatchObject({ ok: true, target: { sessionId: SID_B } });
+    // single-use: the edge is consumed
+    expect(r.relay.members.predecessorOf(A.key)).toBeUndefined();
+  });
+
+  it("auto-origin survives the handoff (get reports origin:auto to the v2 requester)", async () => {
+    const r = await aliasRig({ table: "fresh" });
+    const A = r.agent({ pid: 1, sessionId: SID_A, caps: V2_CAPS, cwd: "/home/u/proj" });
+    await callAsync(r, A, { op: "alias", alias: "proj", intent: "auto" });
+    const A2 = newSession(r, A, SID_B);
+    const res = await handoff(r, A2, "proj", SID_A);
+    expect(res).toMatchObject({ ok: true, alias: { alias: "proj", state: "held", origin: "auto" } });
+    expect(tableOf(r).records.find((x) => x.alias === "proj")).toMatchObject({ sessionId: SID_B, origin: "auto" });
+    expect(call(r, A2, { op: "alias" })).toMatchObject({ alias: { alias: "proj", origin: "auto" } });
+  });
+
+  it("old sid's earlier tombstone is dropped with the move (the successor starts clean)", async () => {
+    const r = await aliasRig({ table: "fresh" });
+    const A = r.agent({ pid: 1, sessionId: SID_A, caps: V2_CAPS });
+    const Z = r.agent({ pid: 9, sessionId: SID_D, caps: V2_CAPS });
+    await setAlias(r, A, "old-name");
+    expect((await forceTake(r, Z, "old-name"))?.ok).toBe(true); // A now has a forced tombstone, then re-claims another name
+    await setAlias(r, A, "new-name");
+    expect(tableOf(r).tombstones.some((x) => x.sessionId === SID_A)).toBe(false); // set already cleared it
+    const A2 = newSession(r, A, SID_B);
+    expect((await handoff(r, A2, "new-name", SID_A))?.ok).toBe(true);
+    expect(tableOf(r).tombstones.some((x) => x.sessionId === SID_A || x.sessionId === SID_B)).toBe(false);
+  });
+
+  it("works when the hub only saw a direct `session` switch (no detach) as well", async () => {
+    const r = await aliasRig({ table: "fresh" });
+    const A = r.agent({ pid: 1, sessionId: SID_A, caps: V2_CAPS });
+    await setAlias(r, A, "front");
+    const A2 = newSession(r, A, SID_B, { detach: false });
+    expect((await handoff(r, A2, "front", SID_A))?.ok).toBe(true);
+  });
+
+  it("the aliased target is reachable at the new sid right after the move (send by alias)", async () => {
+    const r = await aliasRig({ table: "fresh" });
+    const A = r.agent({ pid: 1, sessionId: SID_A, caps: V2_CAPS });
+    const B = r.agent({ pid: 3, sessionId: SID_C, caps: V2_CAPS, name: "beta" });
+    await setAlias(r, A, "front");
+    const A2 = newSession(r, A, SID_B);
+    await handoff(r, A2, "front", SID_A);
+    const resolved = call(r, B, { op: "resolve", to: "front" });
+    expect(resolved).toMatchObject({ ok: true, target: { sessionId: SID_B } });
+    const out: XsResFrame[] = [];
+    r.relay.router.handle(B.key, req(B, { op: "send", to: SID_B, text: "hi" }), (x) => out.push(x));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(delivers(A.conn)).toHaveLength(1);
+    expect(delivers(A.conn)[0]).toMatchObject({ to: { sessionId: SID_B } });
+  });
+});
+
+describe("handoff (AF7, I10): every refusal is TAKE{stale} and moves nothing", () => {
+  async function held(): Promise<{ r: AliasRig; A: Agent }> {
+    const r = await aliasRig({ table: "fresh" });
+    const A = r.agent({ pid: 1, sessionId: SID_A, caps: V2_CAPS });
+    await setAlias(r, A, "front");
+    return { r, A };
+  }
+  const stillA = (r: AliasRig): void => {
+    expect(tableOf(r).records.find((x) => x.alias === "front")).toMatchObject({ sessionId: SID_A, state: "held" });
+  };
+
+  it("FORGERY: another socket claims prev = the victim's sid ⇒ stale (no edge for ITS agentKey), also while the victim is offline", async () => {
+    const { r, A } = await held();
+    const X = r.agent({ pid: 7, sessionId: SID_C, caps: V2_CAPS });
+    expect(r.relay.members.predecessorOf(X.key)).toBeUndefined();
+    expect(await handoff(r, X, "front", SID_A)).toMatchObject({ ok: false, code: STALE });
+    r.close(A);
+    expect(await handoff(r, X, "front", SID_A)).toMatchObject({ ok: false, code: STALE });
+    stillA(r);
+  });
+
+  it("FORGERY: the attacker has its OWN succession (X → Y) and names the victim as prev ⇒ stale", async () => {
+    const { r, A } = await held();
+    const X = r.agent({ pid: 7, sessionId: SID_C, caps: V2_CAPS });
+    const Y = newSession(r, X, SID_D);
+    expect(r.relay.members.predecessorOf(X.key)).toMatchObject({ from: SID_C });
+    r.close(A);
+    expect(await handoff(r, Y, "front", SID_A)).toMatchObject({ ok: false, code: STALE });
+    stillA(r);
+    // …and its legitimate edge cannot move a name the old sid never held either
+    expect(await handoff(r, Y, "front", SID_C)).toMatchObject({ ok: false, code: STALE });
+    stillA(r);
+  });
+
+  it("the alias is not the one prev holds (wrong alias / nothing held) ⇒ stale", async () => {
+    const { r, A } = await held();
+    await setAlias(r, r.agent({ pid: 8, sessionId: SID_D, caps: V2_CAPS }), "other");
+    const A2 = newSession(r, A, SID_B);
+    expect(await handoff(r, A2, "other", SID_A)).toMatchObject({ ok: false, code: STALE });
+    expect(await handoff(r, A2, "nonexistent", SID_A)).toMatchObject({ ok: false, code: STALE });
+    expect(await handoff(r, A2, "front", SID_A)).toMatchObject({ ok: true }); // the right one still works afterwards
+  });
+
+  it("prev === own sid ⇒ stale", async () => {
+    const { r, A } = await held();
+    expect(await handoff(r, A, "front", SID_A)).toMatchObject({ ok: false, code: STALE });
+    stillA(r);
+  });
+
+  it("the edge expires after 120 s ⇒ stale (hub-memory only, R22)", async () => {
+    const { r, A } = await held();
+    const A2 = newSession(r, A, SID_B);
+    r.clock.t += 121_000;
+    expect(r.relay.members.predecessorOf(A.key)).toBeUndefined();
+    expect(await handoff(r, A2, "front", SID_A)).toMatchObject({ ok: false, code: STALE });
+    stillA(r);
+  });
+
+  it("the old sid is still online on ANOTHER socket (xs member) ⇒ stale", async () => {
+    const { r, A } = await held();
+    const A2 = newSession(r, A, SID_B);
+    r.agent({ pid: 2, sessionId: SID_A, caps: V2_CAPS }); // the same sid alive elsewhere
+    expect(await handoff(r, A2, "front", SID_A)).toMatchObject({ ok: false, code: STALE });
+    stillA(r);
+  });
+
+  it("the old sid is merely linked (connected, xs off) on another socket ⇒ stale", async () => {
+    const { r, A } = await held();
+    const A2 = newSession(r, A, SID_B);
+    r.agent({ pid: 2, sessionId: SID_A, caps: OLD_CAPS }); // connected but no xs.v1 ⇒ not an effective member
+    expect(await handoff(r, A2, "front", SID_A)).toMatchObject({ ok: false, code: STALE });
+    stillA(r);
+  });
+
+  it("someone else already took the alias from the old sid ⇒ stale, the thief keeps it", async () => {
+    const { r, A } = await held();
+    const A2 = newSession(r, A, SID_B);
+    const Z = r.agent({ pid: 9, sessionId: SID_D, caps: V2_CAPS });
+    expect((await forceTake(r, Z, "front"))?.ok).toBe(true);
+    expect(await handoff(r, A2, "front", SID_A)).toMatchObject({ ok: false, code: STALE });
+    expect(tableOf(r).records.find((x) => x.alias === "front")).toMatchObject({ sessionId: SID_D });
+  });
+
+  it("the new session already holds a name (human set / auto won the race) ⇒ stale, that name is untouched", async () => {
+    const { r, A } = await held();
+    const A2 = newSession(r, A, SID_B);
+    await setAlias(r, A2, "mine");
+    expect(await handoff(r, A2, "front", SID_A)).toMatchObject({ ok: false, code: STALE });
+    stillA(r);
+    expect(call(r, A2, { op: "alias" })).toMatchObject({ alias: { alias: "mine", state: "held" } });
+  });
+
+  it("a reload / resume of the SAME sid is not a succession ⇒ no edge", async () => {
+    const { r, A } = await held();
+    r.registry.onFrame(A.key, { t: "session_detached", reason: "reload" } as never);
+    r.registry.onFrame(A.key, session({ sessionId: SID_A }));
+    r.registry.onFrame(A.key, memberFrame({ sessionId: SID_A, epoch: 2 }));
+    expect(r.relay.members.predecessorOf(A.key)).toBeUndefined();
+  });
+
+  it("the socket going away forgets the edge (down / closed / reclaimed ⇒ nothing can follow)", async () => {
+    const { r, A } = await held();
+    newSession(r, A, SID_B);
+    expect(r.relay.members.predecessorOf(A.key)).toBeDefined();
+    r.close(A);
+    expect(r.relay.members.predecessorOf(A.key)).toBeUndefined();
+  });
+
+  it("a requester without xs.alias.v2 gets BAD_FRAME even with a genuine edge", async () => {
+    const r = await aliasRig({ table: "fresh" });
+    const A = r.agent({ pid: 1, sessionId: SID_A, caps: ALIAS_CAPS });
+    await setAlias(r, A, "front");
+    const A2 = newSession(r, A, SID_B);
+    expect(await handoff(r, A2, "front", SID_A)).toMatchObject({ ok: false, code: "E_XS_BAD_FRAME" });
+  });
+
+  it("a successful handoff cannot be replayed by a second socket: the edge is single-use and the record moved", async () => {
+    const { r, A } = await held();
+    const A2 = newSession(r, A, SID_B);
+    expect((await handoff(r, A2, "front", SID_A))?.ok).toBe(true);
+    const X = r.agent({ pid: 7, sessionId: SID_C, caps: V2_CAPS });
+    expect(await handoff(r, X, "front", SID_A)).toMatchObject({ ok: false, code: STALE });
+    expect(await handoff(r, A2, "front", SID_A)).toMatchObject({ ok: false, code: STALE });
+    expect(tableOf(r).records.find((x) => x.alias === "front")).toMatchObject({ sessionId: SID_B });
+  });
+
+  it("audit: logged as sub-op `handoff` — no alias text, no prevSessionId", async () => {
+    const { r, A } = await held();
+    const A2 = newSession(r, A, SID_B);
+    await handoff(r, A2, "front", SID_A);
+    const lines = r.log.lines.filter((l) => l.msg === "xs" && (l.data as { op?: string }).op === "alias");
+    expect(lines.some((l) => (l.data as { reason?: string }).reason === "handoff")).toBe(true);
+    const text = JSON.stringify(r.log.lines.filter((l) => l.msg.startsWith("xs")));
+    expect(text).not.toContain("front");
+    expect(text).not.toContain(SID_A);
   });
 });

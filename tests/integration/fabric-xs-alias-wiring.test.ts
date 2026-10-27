@@ -266,6 +266,7 @@ async function boot(opts: BootOpts) {
       appended,
       sm,
       net,
+      sessionDir,
     };
   }
 }
@@ -687,5 +688,224 @@ describe("#72 AFW: alias auto-claim wiring", () => {
     expect(r.commands.has("fabric")).toBe(false);
     expect(r.tools.has("list_sessions")).toBe(false);
     expect(r.appended.filter((a) => a.customType === DECIDED_TYPE)).toHaveLength(0);
+  }, 30_000);
+});
+
+// ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+// #72 AF7: `/new` hands the alias to the new session id — REAL activate() × REAL stack × fake hub socket.
+
+const HANDOFF_ERR_STALE = "E_XS_ALIAS_TAKE{stale}";
+const handoffFrames = (r: Booted): Frame[] => intentFrames(r).filter((f) => f.intent === "handoff");
+
+/** The old session holds `alias` (what the attach `get` answered). */
+async function attachHeld(r: Booted, alias = AUTO_ALIAS, origin?: "auto"): Promise<void> {
+  r.answer(r.reqs("alias")[0]!, { ok: true, alias: { state: "held", alias, ...(origin ? { origin } : {}) } });
+  await settle();
+}
+
+/** pi's session replacement: shutdown(reason) on the old stack, then a fresh sessionId's session_start(reason). */
+async function replaceSession(r: Booted, reason: "new" | "fork" | "resume" = "new"): Promise<string> {
+  for (const h of r.handlers.get("session_shutdown") ?? []) await h({ type: "session_shutdown", reason }, r.ctx);
+  const sm2 = SessionManager.create("/tmp/wa", r.sessionDir);
+  sm2.appendMessage({ role: "user", content: "fresh", timestamp: FIXED_NOW });
+  r.ctx.sessionManager = sm2;
+  for (const h of r.handlers.get("session_start") ?? []) await h({ type: "session_start", reason }, r.ctx);
+  await settle(50);
+  return sm2.getSessionId();
+}
+/** The newest reconcile `get` (no alias field) still unanswered. */
+const lastGet = (r: Booted): Frame =>
+  r
+    .reqs("alias")
+    .filter((f) => f.alias === undefined && f.clear === undefined)
+    .at(-1)!;
+
+describe("#72 AF7: /new alias handoff wiring", () => {
+  it("/new: the new sid's first empty get is followed by ONE handoff{alias, prevSessionId=old sid} BEFORE any auto; ok ⇒ no auto, status shows the alias", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true });
+    const oldSid = r.sm.getSessionId();
+    await attachHeld(r, "front-door");
+    const newSid = await replaceSession(r, "new");
+    expect(newSid).not.toBe(oldSid);
+    r.answer(lastGet(r), { ok: true, alias: { state: "none" } });
+    await settle();
+    const h = handoffFrames(r);
+    expect(h).toHaveLength(1);
+    expect(h[0]).toMatchObject({ op: "alias", alias: "front-door", intent: "handoff", prevSessionId: oldSid });
+    expect(h[0]!.origin.sessionId).toBe(newSid);
+    expect(autoFrames(r)).toHaveLength(0); // the auto path waits for the handoff outcome
+    r.answer(h[0]!, { ok: true, alias: { state: "held", alias: "front-door", origin: "auto" } });
+    await settle(6_000);
+    expect(autoFrames(r)).toHaveLength(0);
+    expect(handoffFrames(r)).toHaveLength(1); // one attempt per /new
+    const status = [...r.frames()].reverse().find((f) => f.t === "status")!;
+    expect(status.xs.alias).toBe("front-door");
+    expect(r.notifies.some((n) => n.text.includes("自动设置别名"))).toBe(false); // handoff is silent
+  }, 30_000);
+
+  it("handoff refused (stale: hub restarted / name taken) ⇒ falls back to the auto path exactly once, with no handoff retry", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true });
+    await attachHeld(r, "front-door");
+    await replaceSession(r, "new");
+    r.answer(lastGet(r), { ok: true, alias: { state: "none" } });
+    await settle();
+    r.answer(handoffFrames(r)[0]!, { ok: false, code: HANDOFF_ERR_STALE });
+    await settle();
+    expect(autoFrames(r)).toHaveLength(1);
+    expect(autoFrames(r)[0]).toMatchObject({ alias: AUTO_ALIAS });
+    expect(handoffFrames(r)).toHaveLength(1);
+    await settle(6_000);
+    expect(handoffFrames(r)).toHaveLength(1);
+  }, 30_000);
+
+  it("old hub that answers BAD_FRAME to handoff (before AF7 lands) is treated like any failure ⇒ auto", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true });
+    await attachHeld(r, "front-door");
+    await replaceSession(r, "new");
+    r.answer(lastGet(r), { ok: true, alias: { state: "none" } });
+    await settle();
+    r.answer(handoffFrames(r)[0]!, { ok: false, code: "E_XS_BAD_FRAME" });
+    await settle();
+    expect(autoFrames(r)).toHaveLength(1);
+  }, 30_000);
+
+  it("fork: no handoff (the parent keeps the name) and nothing is inherited — not even a decided mark", async () => {
+    const r = await boot({
+      alias: true,
+      hubAlias: true,
+      hubV2: true,
+      seed: (sm) => {
+        sm.appendCustomEntry(DECIDED_TYPE, { v: 1, sessionId: sm.getSessionId(), at: 5, via: "set" });
+      },
+    });
+    await attachHeld(r, "front-door");
+    await replaceSession(r, "fork");
+    r.answer(lastGet(r), { ok: true, alias: { state: "none" } });
+    await settle(6_000);
+    expect(handoffFrames(r)).toHaveLength(0);
+    expect(r.appended.filter((a) => a.customType === DECIDED_TYPE)).toHaveLength(0);
+  }, 30_000);
+
+  it("resume: no handoff either; and a stash left by a /new that never started a session is not adopted by a later fork", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true });
+    await attachHeld(r, "front-door");
+    await replaceSession(r, "resume");
+    r.answer(lastGet(r), { ok: true, alias: { state: "none" } });
+    await settle();
+    expect(handoffFrames(r)).toHaveLength(0);
+    // a stray stash (shutdown{new} whose session_start never came) is consumed — and dropped — by the next start
+    const g = globalThis as Record<symbol, unknown>;
+    g[Symbol.for("pi-subagent:xs-alias-handoff")] = {
+      fromSessionId: "stray-sid",
+      alias: "stray",
+      decided: false,
+      at: Date.now(),
+    };
+    await replaceSession(r, "fork");
+    r.answer(lastGet(r), { ok: true, alias: { state: "none" } });
+    await settle();
+    expect(handoffFrames(r)).toHaveLength(0);
+    expect(g[Symbol.for("pi-subagent:xs-alias-handoff")]).toBeUndefined();
+  }, 30_000);
+
+  it("decided inherits: the new sid gets a via:inherit marker (own sid) and, even after a refused handoff, no auto", async () => {
+    const r = await boot({
+      alias: true,
+      hubAlias: true,
+      hubV2: true,
+      seed: (sm) => {
+        sm.appendCustomEntry(DECIDED_TYPE, { v: 1, sessionId: sm.getSessionId(), at: 5, via: "set" });
+      },
+    });
+    await attachHeld(r, "front-door");
+    const newSid = await replaceSession(r, "new");
+    const marks = r.appended.filter((a) => a.customType === DECIDED_TYPE);
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.data).toMatchObject({ v: 1, sessionId: newSid, via: "inherit" });
+    r.answer(lastGet(r), { ok: true, alias: { state: "none" } });
+    await settle();
+    r.answer(handoffFrames(r)[0]!, { ok: false, code: HANDOFF_ERR_STALE });
+    await settle(6_000);
+    expect(autoFrames(r)).toHaveLength(0);
+  }, 30_000);
+
+  it("a non-decided old session writes NO marker for the new one (inheritance is only of a human decision)", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true });
+    await attachHeld(r, "front-door", "auto");
+    await replaceSession(r, "new");
+    expect(r.appended.filter((a) => a.customType === DECIDED_TYPE)).toHaveLength(0);
+  }, 30_000);
+
+  it("decided old session WITHOUT an alias (human --clear): marker inherited, nothing to hand off, no auto", async () => {
+    const r = await boot({
+      alias: true,
+      hubAlias: true,
+      hubV2: true,
+      seed: (sm) => {
+        sm.appendCustomEntry(DECIDED_TYPE, { v: 1, sessionId: sm.getSessionId(), at: 5, via: "clear" });
+      },
+    });
+    await attachNone(r);
+    const newSid = await replaceSession(r, "new");
+    expect(r.appended.filter((a) => a.customType === DECIDED_TYPE).map((a) => a.data)).toEqual([
+      expect.objectContaining({ sessionId: newSid, via: "inherit" }),
+    ]);
+    r.answer(lastGet(r), { ok: true, alias: { state: "none" } });
+    await settle(6_000);
+    expect(intentFrames(r)).toHaveLength(0);
+  }, 30_000);
+
+  it("autoFromCwd=false: the handoff still goes out (a continuation, not an auto-claim)", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true, autoFromCwd: false });
+    await attachHeld(r, "front-door");
+    const oldSid = r.sm.getSessionId();
+    await replaceSession(r, "new");
+    r.answer(lastGet(r), { ok: true, alias: { state: "none" } });
+    await settle();
+    expect(handoffFrames(r)).toHaveLength(1);
+    expect(handoffFrames(r)[0]).toMatchObject({ prevSessionId: oldSid });
+    r.answer(handoffFrames(r)[0]!, { ok: false, code: HANDOFF_ERR_STALE });
+    await settle(6_000);
+    expect(autoFrames(r)).toHaveLength(0);
+  }, 30_000);
+
+  it("v1 hub: zero intent frames of any kind; alias off: nothing stashed and nothing sent", async () => {
+    const v1 = await boot({ alias: true, hubAlias: true });
+    await attachHeld(v1, "front-door");
+    await replaceSession(v1, "new");
+    v1.answer(lastGet(v1), { ok: true, alias: { state: "none" } });
+    await settle(6_000);
+    expect(intentFrames(v1)).toHaveLength(0);
+    for (const f of cleanup.splice(0).reverse()) f();
+
+    const off = await boot({ alias: false, hubAlias: true, hubV2: true });
+    await replaceSession(off, "new");
+    await settle(6_000);
+    expect(off.reqs("alias")).toHaveLength(0);
+    expect((globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:xs-alias-handoff")]).toBeUndefined();
+  }, 30_000);
+
+  it("a human decision on the NEW session before the hub answers wins: the pending handoff is dropped, nothing is restored", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true });
+    await attachHeld(r, "front-door");
+    await replaceSession(r, "new");
+    const pendingGet = lastGet(r);
+    await fabric(r, "alias --clear", hubNone); // human: no alias for this session, please
+    r.answer(pendingGet, { ok: true, alias: { state: "none" } });
+    await settle(6_000);
+    expect(handoffFrames(r)).toHaveLength(0);
+    expect(autoFrames(r)).toHaveLength(0); // decided ⇒ no auto either
+  }, 30_000);
+
+  it("hub unreachable for longer than the handoff window: the stale intent is NOT sent later; the ordinary auto path decides", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true });
+    await attachHeld(r, "front-door");
+    await replaceSession(r, "new");
+    vi.setSystemTime(Date.now() + 125_000);
+    // the new session's first get never got answered; by the time the link is next reconciled the hub's succession edge
+    // (120 s) is long gone — only the wall clock moves here, the link itself stays up
+    await fabric(r, "status", hubNone);
+    expect(handoffFrames(r)).toHaveLength(0);
+    expect(autoFrames(r)).toHaveLength(1);
   }, 30_000);
 });

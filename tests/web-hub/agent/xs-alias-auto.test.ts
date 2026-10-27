@@ -97,9 +97,21 @@ interface Rig {
   auto: AutoState;
   lostNotices: string[];
   autoNotices: string[];
+  /** AF7: the `/new` handoff slot the port exposes (`pending` undefined ⇒ nothing owed). */
+  handoff: { pending: { alias: string; prevSessionId: string } | undefined; settled: number };
 }
 
-function rig(opt: { caps?: string[]; auto?: Partial<AutoState>; aliasOn?: boolean; random?: () => number } = {}): Rig {
+function rig(
+  opt: {
+    caps?: string[];
+    auto?: Partial<AutoState>;
+    aliasOn?: boolean;
+    random?: () => number;
+    /** AF7: a pending `/new` handoff; `noAuto` ⇒ no `aliasAuto` hook at all (autoFromCwd=false wiring). */
+    handoff?: { alias: string; prevSessionId: string };
+    noAuto?: boolean;
+  } = {},
+): Rig {
   const n = fakeNet();
   const conn = acquireConnection(opts({ netConnect: n.netConnect }));
   const state = { sessionId: "sess-aaaaaaaaaaaa", epoch: 3, joined: true };
@@ -113,6 +125,7 @@ function rig(opt: { caps?: string[]; auto?: Partial<AutoState>; aliasOn?: boolea
   };
   const lostNotices: string[] = [];
   const autoNotices: string[] = [];
+  const handoff: Rig["handoff"] = { pending: opt.handoff, settled: 0 };
   const stack = {
     sessionId: () => state.sessionId,
     member: () => ({ epoch: state.epoch, joined: state.joined, receive: "wake" as const }),
@@ -124,14 +137,29 @@ function rig(opt: { caps?: string[]; auto?: Partial<AutoState>; aliasOn?: boolea
     memberLimits: () => ({ ...LIMITS }),
     hubSendsPerMin: () => 60,
     ...(opt.aliasOn === false ? {} : { aliasEnabled: () => true }),
-    aliasAuto: () => ({
-      enabled: auto.enabled,
-      cwd: auto.cwd,
-      home: "/home/u",
-      tmpdir: "/tmp",
-      decided: (sid) => auto.decided.has(sid),
-      handoffPending: () => auto.handoffPending,
-    }),
+    ...(opt.handoff === undefined
+      ? {}
+      : {
+          aliasHandoff: () => ({
+            pending: (sid: string) => (sid === state.sessionId ? handoff.pending : undefined),
+            settle: () => {
+              handoff.pending = undefined;
+              handoff.settled++;
+            },
+          }),
+        }),
+    ...(opt.noAuto === true
+      ? {}
+      : {
+          aliasAuto: () => ({
+            enabled: auto.enabled,
+            cwd: auto.cwd,
+            home: "/home/u",
+            tmpdir: "/tmp",
+            decided: (sid) => auto.decided.has(sid),
+            handoffPending: () => auto.handoffPending || handoff.pending !== undefined,
+          }),
+        }),
     notifyAliasLost: (t) => lostNotices.push(t),
     notifyAliasAuto: (t) => autoNotices.push(t),
   };
@@ -155,7 +183,7 @@ function rig(opt: { caps?: string[]; auto?: Partial<AutoState>; aliasOn?: boolea
   const s = n.sockets[0]!;
   s.emit("connect");
   s.hub(ackFrame("k", 4242, opt.caps ?? WITH_ALIAS_V2));
-  return { conn, net: n, bridge, state, gen, auto, lostNotices, autoNotices };
+  return { conn, net: n, bridge, state, gen, auto, lostNotices, autoNotices, handoff };
 }
 
 const aliasReqs = (s: FakeSocket): Array<Record<string, unknown>> =>
@@ -512,5 +540,131 @@ describe("xs_alias_evt (§5.4)", () => {
     reply(s, aliasReqs(s).at(-1)!, { state: "none" });
     await p;
     expect(r.bridge.aliasCache().current()).toEqual({});
+  });
+});
+
+describe("/new alias handoff (AF7, §5.1 ①)", () => {
+  const PREV = "sess-000000000000";
+  const pend = { alias: "front", prevSessionId: PREV };
+
+  it("applied none + pending ⇒ ONE handoff frame (alias, prevSessionId) BEFORE any auto; ok ⇒ cached, no auto, silent", async () => {
+    const r = rig({ handoff: pend });
+    const s = r.net.sockets[0]!;
+    const reqs = await reconcileNone(r);
+    expect(reqs).toHaveLength(2);
+    expect(reqs[1]).toMatchObject({ op: "alias", alias: "front", intent: "handoff", prevSessionId: PREV });
+    expect(r.handoff.settled).toBe(1); // settled before the request went out: one attempt per /new
+    reply(s, reqs[1]!, { alias: "front", state: "held", origin: "auto" });
+    await flush();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(aliasReqs(s)).toHaveLength(2); // no auto afterwards
+    expect(r.bridge.aliasCache().current()).toEqual({ alias: "front", origin: "auto" });
+    expect(r.autoNotices).toEqual([]);
+    expect(r.bridge.aliasAutoSkip()).toBeUndefined();
+  });
+
+  it("every failure falls through to the auto path in the same reconcile (stale / BAD_FRAME / BUSY / UNKNOWN) — and never retries the handoff", async () => {
+    for (const code of [
+      "E_XS_ALIAS_TAKE{stale}",
+      "E_XS_BAD_FRAME",
+      "E_XS_ALIAS_BUSY{io}",
+      "E_XS_ALIAS_UNKNOWN",
+      "E_XS_OFF",
+    ]) {
+      resetGlobals();
+      delete (globalThis as Record<symbol, unknown>)[AUTO_NOTICED_KEY];
+      const r = rig({ handoff: pend });
+      const s = r.net.sockets[0]!;
+      const reqs = await reconcileNone(r);
+      fail(s, reqs[1]!, code);
+      await flush();
+      const all = aliasReqs(s);
+      expect(
+        all.filter((f) => f.intent === "auto"),
+        code,
+      ).toHaveLength(1);
+      expect(
+        all.filter((f) => f.intent === "handoff"),
+        code,
+      ).toHaveLength(1);
+      expect(all[2]).toMatchObject({ intent: "auto", alias: "wa" });
+    }
+  });
+
+  it("autoFromCwd=false wiring (no aliasAuto hook): the handoff still goes out, a refusal leaves the session aliasless", async () => {
+    const r = rig({ handoff: pend, noAuto: true });
+    const s = r.net.sockets[0]!;
+    const reqs = await reconcileNone(r);
+    expect(reqs[1]).toMatchObject({ intent: "handoff", prevSessionId: PREV });
+    fail(s, reqs[1]!, "E_XS_ALIAS_TAKE{stale}");
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(aliasReqs(s)).toHaveLength(2);
+  });
+
+  it("a get that is already `held` (human set / resumed session) never triggers a handoff; the pending stays for expiry", async () => {
+    const r = rig({ handoff: pend });
+    const s = r.net.sockets[0]!;
+    await flush();
+    reply(s, aliasReqs(s)[0]!, { alias: "mine", state: "held" });
+    await flush();
+    expect(aliasReqs(s)).toHaveLength(1);
+    expect(r.handoff.settled).toBe(0);
+  });
+
+  it("v1 hub: nothing is sent and the pending is not consumed (it simply expires); auto stays off (hub-cap)", async () => {
+    const r = rig({ caps: WITH_ALIAS_V1, handoff: pend });
+    const s = r.net.sockets[0]!;
+    await flush();
+    reply(s, aliasReqs(s)[0]!, { state: "none" });
+    await flush();
+    expect(aliasReqs(s)).toHaveLength(1);
+    expect(r.handoff.settled).toBe(0);
+  });
+
+  it("while the handoff is in flight a concurrent reconcile cannot auto-claim (and a second handoff is never framed)", async () => {
+    const r = rig({ handoff: pend });
+    const s = r.net.sockets[0]!;
+    const reqs = await reconcileNone(r);
+    expect(reqs[1]).toMatchObject({ intent: "handoff" });
+    // the hub has not answered yet; an evt/status-driven reconcile lands: bare get ⇒ none again
+    void r.bridge.aliasCache().reconcile();
+    await flush();
+    const gets = aliasReqs(s).filter((f) => f.alias === undefined);
+    expect(gets).toHaveLength(2);
+    reply(s, gets[1]!, { state: "none" });
+    await flush();
+    expect(aliasReqs(s).filter((f) => f.intent === "auto")).toHaveLength(0);
+    expect(aliasReqs(s).filter((f) => f.intent === "handoff")).toHaveLength(1);
+    // the handoff outcome then decides
+    reply(s, reqs[1]!, { alias: "front", state: "held" });
+    await flush();
+    expect(aliasReqs(s).filter((f) => f.intent === "auto")).toHaveLength(0);
+  });
+
+  it("no pending (fork / resume / alias nothing to move) ⇒ exactly the pre-AF7 behaviour: get, then auto", async () => {
+    const r = rig();
+    const reqs = await reconcileNone(r);
+    expect(reqs).toHaveLength(2);
+    expect(reqs[1]).toMatchObject({ intent: "auto" });
+    expect(aliasReqs(r.net.sockets[0]!).some((f) => f.intent === "handoff")).toBe(false);
+  });
+
+  it("a port that throws is treated as nothing pending (never breaks the reconcile)", async () => {
+    const r = rig();
+    // swap in a throwing hook through a fresh bridge on the same rig is overkill: assert via a throwing port directly
+    expect(r.bridge.aliasAutoSkip()).toBeUndefined();
+    const bad = createXsAgentBridge({
+      port: {
+        stack: () => undefined,
+        memberLimits: () => ({ ...LIMITS }),
+        hubSendsPerMin: () => 60,
+        aliasEnabled: () => true,
+        aliasHandoff: () => {
+          throw new Error("boom");
+        },
+      },
+      conn: () => undefined,
+    });
+    await expect(bad.aliasCache().reconcile()).resolves.toBeUndefined();
   });
 });

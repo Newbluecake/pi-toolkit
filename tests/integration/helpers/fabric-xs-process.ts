@@ -294,6 +294,10 @@ if (process.argv[2] === "hub") {
     deferred = false,
     aborts = 0;
   let holdResolve = false;
+  // AF7: hold bare alias `get`s (the reconcile) so a test can freeze the agent's alias cache while the hub moves on.
+  let holdAliasGets = false;
+  let aliasGateWaiters: Array<() => void> = [];
+  let aliasGatePatched = false;
   let releaseResolve: (() => void) | undefined;
   const bus = new EventEmitter();
   let handlers = new Map<string, Function[]>();
@@ -466,6 +470,44 @@ if (process.argv[2] === "hub") {
         return result;
       }) as typeof conn.request;
       return true;
+    }
+    if (m.op === "holdAlias") {
+      holdAliasGets = true;
+      const conn = currentConnection()!;
+      if (!aliasGatePatched) {
+        aliasGatePatched = true;
+        const original = conn.request.bind(conn);
+        conn.request = (async (frame: any, cap: any) => {
+          if (
+            holdAliasGets &&
+            frame.t === "xs_req" &&
+            frame.op === "alias" &&
+            frame.alias === undefined &&
+            frame.clear === undefined &&
+            frame.intent === undefined
+          )
+            await new Promise<void>((r) => aliasGateWaiters.push(r));
+          return original(frame, cap);
+        }) as typeof conn.request;
+      }
+      return true;
+    }
+    if (m.op === "releaseAlias") {
+      holdAliasGets = false;
+      for (const r of aliasGateWaiters.splice(0)) r();
+      return true;
+    }
+    // AF7: an arbitrary `op:"alias"` request as THIS peer (origin = its current sid/epoch) — used to forge handoffs.
+    if (m.op === "rawAlias") {
+      const conn = currentConnection()!;
+      const frame = {
+        t: "xs_req",
+        rid: `raw-${Math.random().toString(16).slice(2, 12)}`,
+        op: "alias",
+        origin: { sessionId: sm.getSessionId(), epoch: getXsEpochCounter().value },
+        ...(m.fields ?? {}),
+      };
+      return conn.request(frame as any, "xs.v1");
     }
     if (m.op === "releaseResolve") {
       holdResolve = false;

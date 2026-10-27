@@ -57,6 +57,8 @@ class Clock {
 class MemFs implements XsAliasFs {
   files = new Map<string, Uint8Array>();
   ops: string[] = [];
+  /** Runs inside the next temp write (between plan and rename-before re-check): lets a test change the world. */
+  onWrite: (() => void) | undefined;
   /** `hold`: the next rename blocks until `release(ok)`. */
   hold = false;
   pending: { release(ok: boolean): void } | undefined;
@@ -69,6 +71,9 @@ class MemFs implements XsAliasFs {
   async writeTemp(path: string, bytes: Uint8Array) {
     this.ops.push("write");
     this.files.set(path, bytes);
+    const hook = this.onWrite;
+    this.onWrite = undefined;
+    hook?.();
   }
   rename(from: string, to: string): Promise<void> {
     this.ops.push("rename");
@@ -112,6 +117,8 @@ class World {
   online = new Map<string, boolean[]>(); // sid → per-member v2 flags
   epochs = new Map<string, number>();
   linked = new Set<string>();
+  /** AF7: requester sid → the sid the hub saw its socket leave (the succession edge). */
+  succ = new Map<string, string>();
   forced: { holderSessionId: string; requesterSessionId: string; at: number }[] = [];
   up(sid: string, v2 = true): XsAliasRequester {
     const l = this.online.get(sid) ?? [];
@@ -150,6 +157,7 @@ async function rig(opts: { preload?: string } = {}): Promise<Rig> {
       isOnline: (s) => (w.online.get(s)?.length ?? 0) > 0,
       isRequesterLive: (r) => (w.online.get(r.sessionId)?.length ?? 0) > 0 && w.epochs.get(r.sessionId) === r.epoch,
       isLinked: (s) => w.linked.has(s),
+      isSuccessor: (q, prev) => w.succ.get(q.sessionId) === prev,
       allMembersV2: (s) => (w.online.get(s) ?? []).every((x) => x),
       onForcedCommit: (e) => void w.forced.push(e),
       fs,
@@ -624,5 +632,160 @@ describe("alias v2 store: origin and forced on disk", () => {
     expect(legacy.store.status().state).toBe("ready");
     expect(legacy.store.inspect().records.every((x) => x.origin === undefined)).toBe(true);
     expect(legacy.store.inspect().tombstones[0]!.forced).toBeUndefined();
+  });
+});
+
+// ----------------------------------------------------------------- AF7 handoff (I10)
+
+describe("alias v2 store: handoff (I10)", () => {
+  /** P (human or auto) holds `front` and is offline; S is the up-and-running successor with a genuine edge. */
+  async function setup(origin: "human" | "auto" = "human") {
+    const r = await rig();
+    let P: XsAliasRequester;
+    if (origin === "auto") {
+      P = r.w.up("sid-P");
+      must(await r.store.autoClaim(P, "front", "~/old"));
+      r.w.down("sid-P");
+      r.store.touchPresence("sid-P");
+    } else {
+      P = await hold(r, "sid-P", "front");
+    }
+    const S = r.w.up("sid-S");
+    r.w.succ.set("sid-S", "sid-P");
+    return { r, P, S };
+  }
+  const rec = (r: Rig, alias = "front") => r.store.inspect().records.find((x) => x.alias === alias);
+
+  it("moves the record in place: new owner, rev+1, label of the requester, no tombstone, no cooling", async () => {
+    const { r, S } = await setup();
+    const before = rec(r)!;
+    const res = await r.store.handoff(S, "front", "sid-P", "~/new");
+    expect(res).toEqual({ ok: true, res: { alias: "front", state: "held" } });
+    const after = rec(r)!;
+    expect(after).toMatchObject({ sessionId: "sid-S", state: "held", cwdLabel: "~/new", skeleton: before.skeleton });
+    expect(after.rev).toBeGreaterThan(before.rev);
+    expect(r.store.inspect().tombstones).toEqual([]);
+    expect(r.store.inspect().records.filter((x) => x.sessionId === "sid-P")).toEqual([]);
+    expect(r.store.heldBy("sid-S")).toBe("front");
+    expect(r.store.heldBy("sid-P")).toBeUndefined();
+    expect(r.fs.json().records).toHaveLength(1); // persisted
+  });
+
+  it("keeps origin:auto (and reports it to a v2 requester only); human stays human", async () => {
+    const a = await setup("auto");
+    expect(await a.r.store.handoff(a.S, "front", "sid-P", "~/new")).toEqual({
+      ok: true,
+      res: { alias: "front", state: "held", origin: "auto" },
+    });
+    expect(rec(a.r)!.origin).toBe("auto");
+    expect(a.r.fs.json().records[0]!.origin).toBe("auto");
+    const h = await setup("human");
+    await h.r.store.handoff(h.S, "front", "sid-P", "~/new");
+    expect(rec(h.r)!.origin).toBeUndefined();
+    expect(h.r.store.get(h.S)).toEqual({ alias: "front", state: "held" });
+  });
+
+  it("survives a hub restart (persisted, readable)", async () => {
+    const { r, S } = await setup();
+    must(await r.store.handoff(S, "front", "sid-P", "~/new"));
+    const reloaded = await r.restart();
+    expect(reloaded.heldBy("sid-S")).toBe("front");
+    expect(reloaded.heldBy("sid-P")).toBeUndefined();
+  });
+
+  it("refusals — all `TAKE{stale}`, table untouched", async () => {
+    const { r, S } = await setup();
+    const snap = JSON.stringify(r.store.inspect());
+    const stale = async (q: XsAliasRequester, alias: string, prev: string): Promise<void> => {
+      const out = await r.store.handoff(q, alias, prev, "~/new");
+      expect(code(out), `${alias}/${prev}`).toBe("E_XS_ALIAS_TAKE{stale}");
+      expect(JSON.stringify(r.store.inspect())).toBe(snap);
+    };
+    // no evidence / evidence for another sid
+    r.w.succ.delete("sid-S");
+    await stale(S, "front", "sid-P");
+    r.w.succ.set("sid-S", "sid-OTHER");
+    await stale(S, "front", "sid-P");
+    r.w.succ.set("sid-S", "sid-P");
+    // a stranger quoting P's sid
+    const X = r.w.up("sid-X");
+    await stale(X, "front", "sid-P");
+    // wrong alias, unknown alias, invalid alias text, prev === self
+    await stale(S, "other", "sid-P");
+    await stale(S, "no such!", "sid-P");
+    r.w.succ.set("sid-S", "sid-S");
+    await stale(S, "front", "sid-S");
+    r.w.succ.set("sid-S", "sid-P");
+    // P xs-online again / linked
+    r.w.up("sid-P");
+    await stale(S, "front", "sid-P");
+    r.w.down("sid-P");
+    r.w.linked.add("sid-P");
+    await stale(S, "front", "sid-P");
+    r.w.linked.delete("sid-P");
+    // sanity: with everything right it works
+    expect((await r.store.handoff(S, "front", "sid-P", "~/new")).ok).toBe(true);
+  });
+
+  it("refuses when the record is cooling(P) (P cleared it) or P's name was taken by someone else", async () => {
+    const { r, S, P } = await setup();
+    r.w.up("sid-P");
+    must(await r.store.clear(P)); // held → cooling(P)
+    r.w.down("sid-P");
+    r.store.touchPresence("sid-P");
+    expect(code(await r.store.handoff(S, "front", "sid-P", "~/new"))).toBe("E_XS_ALIAS_TAKE{stale}");
+    expect(rec(r)).toMatchObject({ sessionId: "sid-P", state: "cooling" });
+  });
+
+  it("refuses when the successor already holds a name (a human/auto grant on the new session wins)", async () => {
+    const { r, S } = await setup();
+    must(await r.store.set(S, "mine", "~/new"));
+    expect(code(await r.store.handoff(S, "front", "sid-P", "~/new"))).toBe("E_XS_ALIAS_TAKE{stale}");
+    expect(rec(r)).toMatchObject({ sessionId: "sid-P" });
+    expect(r.store.heldBy("sid-S")).toBe("mine");
+  });
+
+  it("re-checks right before rename: evidence withdrawn / P back online / a rival grant ⇒ stale and nothing committed", async () => {
+    for (const mutate of [
+      (r: Rig): void => void r.w.succ.delete("sid-S"),
+      (r: Rig): void => void r.w.up("sid-P"),
+      (r: Rig): void => void r.w.linked.add("sid-P"),
+    ]) {
+      const { r, S } = await setup();
+      r.fs.onWrite = () => mutate(r);
+      expect(code(await r.store.handoff(S, "front", "sid-P", "~/new"))).toBe("E_XS_ALIAS_TAKE{stale}");
+      expect(rec(r)).toMatchObject({ sessionId: "sid-P" });
+      expect(r.fs.json().records[0]!.sessionId).toBe("sid-P");
+    }
+  });
+
+  it("two successors racing for the same old name: exactly one wins, the other gets stale", async () => {
+    const { r, S } = await setup();
+    const S2 = r.w.up("sid-S2");
+    r.w.succ.set("sid-S2", "sid-P");
+    const [a, b] = await Promise.all([
+      r.store.handoff(S, "front", "sid-P", "~/a"),
+      r.store.handoff(S2, "front", "sid-P", "~/b"),
+    ]);
+    expect([a.ok, b.ok].sort()).toEqual([false, true]);
+    expect(code(a.ok ? b : a)).toBe("E_XS_ALIAS_TAKE{stale}");
+    expect(r.store.inspect().records.filter((x) => x.alias === "front")).toHaveLength(1);
+  });
+
+  it("no isSuccessor dep ⇒ never moves", async () => {
+    const r = await rig();
+    await hold(r, "sid-P", "front");
+    const lone = createXsAliasStore({
+      stateDir: STATE,
+      isOnline: () => false,
+      isRequesterLive: () => true,
+      fs: r.fs,
+      now: r.clock.now,
+      timer: r.clock.timer,
+    });
+    await lone.load();
+    expect(code(await lone.handoff({ sessionId: "sid-S", epoch: 1, v2: true }, "front", "sid-P", "~/x"))).toBe(
+      "E_XS_ALIAS_TAKE{stale}",
+    );
   });
 });

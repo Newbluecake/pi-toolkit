@@ -408,6 +408,117 @@ describe("alias-force-default §9 (AF6): auto-claim and forced takeover over a r
     expect(await texts(a, "over the v1 hub")).toHaveLength(1);
     expect(((await hub.rpc("inspect")).deliveries as unknown[]).length).toBe(1);
   }, 120_000);
+
+  it("⑨a /new hands the alias to the new sid (origin kept, no tombstone, human mark inherited); a human-granted name moves too; fork inherits nothing", async () => {
+    h = new XsHarness();
+    await h.boot("hub", "hub", undefined, true, false, HUB_ALIAS);
+    const [a, f] = (await agents(
+      ["alpha", { XW_UI: "1", XW_CWD: mkcwd("billing") }],
+      ["forky", { XW_UI: "1", XW_CWD: mkcwd("forky") }],
+    )) as [Peer, Peer];
+    for (const p of [a, f]) await cmd(p, "join");
+    const held = (p: Peer, name: string, auto: boolean) =>
+      settle(
+        () => cmd(p, "status"),
+        (t) => new RegExp(`alias @${name} held`).test(t) && /\(auto\)/.test(t) === auto,
+        `${name} held${auto ? " (auto)" : ""}`,
+      );
+    await held(a, "billing", true);
+    const sid0 = await sid(a);
+    expect(holderOf("billing")).toBe(sid0);
+
+    // /new (web 「清空」 fires the same session_shutdown{new}): the alias moves to the NEW sid, still auto-origin.
+    const sid1 = (await a.rpc("replace")).sessionId as string;
+    expect(sid1).not.toBe(sid0);
+    await held(a, "billing", true);
+    expect(holderOf("billing")).toBe(sid1);
+    expect(aliasTable()!.records.find((r) => r.alias === "billing")).toMatchObject({ origin: "auto", state: "held" });
+    expect(aliasTable()!.records.some((r) => r.sessionId === sid0)).toBe(false); // old sid: no record, no cooling
+    expect((aliasTable()!.tombstones ?? []).some((t) => t.sessionId === sid0 || t.sessionId === sid1)).toBe(false);
+    // handoff is silent: the one-shot auto notice belongs to the FIRST claim only
+    expect((await notes(a)).filter((n) => n.includes("已按目录名自动设置别名 @billing"))).toHaveLength(1);
+
+    // a human-granted name moves too (origin stays absent) and the human "decided" mark rides along
+    expect(await cmd(a, "alias front-desk")).toContain("front-desk");
+    await held(a, "front-desk", false);
+    const sid2 = (await a.rpc("replace")).sessionId as string;
+    await held(a, "front-desk", false);
+    expect(holderOf("front-desk")).toBe(sid2);
+    expect(aliasTable()!.records.find((r) => r.alias === "front-desk")!.origin).toBeUndefined();
+    expect(aliasTable()!.records.some((r) => r.sessionId === sid1 && r.state === "held")).toBe(false);
+    const { sessionFile } = await a.rpc("inspect");
+    expect(readFileSync(sessionFile, "utf8")).toMatch(/subagent:xs-alias-decided[^\n]*"via":"inherit"/);
+    // …so even a /reload that finds the old cwd name free never auto-claims it behind the human's back
+    await a.rpc("reload");
+    await nap(1500);
+    expect(await cmd(a, "status")).toMatch(/alias @front-desk held/);
+    expect(holderOf("billing")).toBeUndefined();
+
+    // fork: the child session gets NOTHING — the parent keeps the name, no handoff, no inherited mark
+    await held(f, "forky", true);
+    const parent = await sid(f);
+    const child = (await f.rpc("replace", { reason: "fork" })).sessionId as string;
+    expect(child).not.toBe(parent);
+    await nap(2500);
+    expect(holderOf("forky")).toBe(parent);
+    expect(aliasTable()!.records.some((r) => r.sessionId === child)).toBe(false);
+    expect(await cmd(f, "status")).not.toMatch(/alias @forky held/);
+    expect((aliasTable()!.tombstones ?? []).length).toBe(0);
+  }, 240_000);
+
+  it("⑨b forged prevSessionId is refused (online and offline victims); an alias taken before the /new is not restored by it", async () => {
+    h = new XsHarness();
+    const hub = await h.boot("hub", "hub", undefined, true, false, HUB_ALIAS);
+    const [v, x, z] = (await agents(
+      ["victim", { XW_UI: "1", XW_CWD: mkcwd("victim-dir") }],
+      ["xeno", { XW_UI: "1", XW_TUI_CONFIRM: "1", XW_CWD: mkcwd("xeno-dir") }],
+      ["zulu", { XW_UI: "1", XW_CWD: mkcwd("zulu-dir") }],
+    )) as [Peer, Peer, Peer];
+    for (const p of [v, x, z]) await cmd(p, "join");
+    for (const [p, name] of [
+      [v, "victim-dir"],
+      [x, "xeno-dir"],
+      [z, "zulu-dir"],
+    ] as const)
+      await settle(
+        () => cmd(p, "status"),
+        (t) => new RegExp(`alias @${name} held \\(auto\\)`).test(t),
+        `${name} auto`,
+      );
+    const [vid, xid, zid] = await Promise.all([v, x, z].map(sid));
+    const unknownSid = "0190a1b2-c3d4-7000-8000-0000000000ff";
+    const forge = async (prev: string, alias: string) =>
+      x.rpc("rawAlias", { fields: { alias, intent: "handoff", prevSessionId: prev } });
+
+    // FORGERY: another socket names someone else's sid as its predecessor ⇒ stale, nothing moves
+    for (const prev of [vid, zid, unknownSid])
+      for (const alias of ["victim-dir", "zulu-dir"])
+        expect(await forge(prev, alias), `${alias}/${prev}`).toMatchObject({
+          ok: false,
+          code: "E_XS_ALIAS_TAKE{stale}",
+        });
+    expect(holderOf("victim-dir")).toBe(vid);
+    expect(holderOf("zulu-dir")).toBe(zid);
+    // …and the victim being gone (offline holders are exactly what a thief aims at) changes nothing
+    await killAndWait(hub, v, vid);
+    expect(await forge(vid, "victim-dir")).toMatchObject({ ok: false, code: "E_XS_ALIAS_TAKE{stale}" });
+    expect(holderOf("victim-dir")).toBe(vid);
+    expect(holderOf("xeno-dir")).toBe(xid);
+
+    // TAKEN BEFORE the /new: zulu's alias cache is frozen (bare gets held), xeno force-takes its name, zulu `/new`s.
+    // The stale cache is stashed, the new sid asks for the handoff, the hub refuses — xeno keeps the name and zulu's
+    // new session does not get it back (nor steal it via auto).
+    await z.rpc("holdAlias");
+    expect(await cmd(x, "alias zulu-dir --force")).toContain("已抢占别名");
+    expect(holderOf("zulu-dir")).toBe(xid);
+    const znew = (await z.rpc("replace")).sessionId as string;
+    expect(znew).not.toBe(zid);
+    await z.rpc("releaseAlias");
+    await nap(3000);
+    expect(holderOf("zulu-dir")).toBe(xid);
+    expect(aliasTable()!.records.some((r) => r.sessionId === znew)).toBe(false);
+    expect(await cmd(z, "status")).not.toMatch(/alias @zulu-dir held/);
+  }, 240_000);
 });
 
 /** The captured command output of a web `cmd_late` frame: `data.output.entries[].text` joined by newlines. */
