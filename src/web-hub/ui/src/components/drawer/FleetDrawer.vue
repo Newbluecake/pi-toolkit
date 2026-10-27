@@ -125,8 +125,16 @@ import AppIcon from "../../icons/AppIcon.vue";
 import FleetTree from "../fleet/FleetTree.vue";
 import FleetBashJobs from "../fleet/FleetBashJobs.vue";
 import FleetArchived from "../fleet/FleetArchived.vue";
-import { bashJobsOf } from "../detail/bashJobsView.js";
+import { bashJobsOf, statusToken } from "../detail/bashJobsView.js";
 import { archivedOf, archiveSetOf, partitionArchived } from "../fleet/archiveView.js";
+import {
+  computeFillBudget,
+  fixedAgentRowCount,
+  topTerminalRowCount,
+  type FillBudget,
+  type FillCounts,
+} from "../fleet/fillBudget.js";
+import { observeResize } from "../../composables/useSharedResize.js";
 import { bannerView } from "@logic/load.js";
 import { buildFleetTree, orphanRunIds, runTranscriptAvailable, FLEET_ARCHIVE, FLEET_SELECT } from "../fleet/summary.js";
 import RunHeader from "./RunHeader.vue";
@@ -201,6 +209,152 @@ const selectedRunId = computed(() => props.agent.runSel ?? null);
 // bashJobsOf narrowed;缺失/零行 ⇒ 分组不出现,旧 hub/agent 与现状一致)。agent 计数
 // (fleetSummary/徽标)不混入 bash。
 const bashJobs = computed(() => bashJobsOf(props.agent));
+
+// ---------------------------------------------------------------------------
+// fleet-fill-budget(docs/dev/web-hub/fleet-fill-budget.md;2026-10-28 用户需求「调配显示数量
+// 把整个高度填满」):按 `.tree-scroll` 的 clientHeight 实测可用高度,动态分配 agent 树顶层 /
+// bash 分组各显示多少条已结束行。要点:
+// - 行高/附加高度全部实测已渲染行的 offsetHeight(--fs-scale 字号缩放与密度变化自适应),
+//   不写死像素;测不到(happy-dom 返回 0、无 ResizeObserver 的旧浏览器)⇒ computeFillBudget
+//   返回 null ⇒ 子组件收到 undefined ⇒ 旧固定 3/5 行为,字节不变。
+// - 可用高度只取 clientHeight(不取 scrollHeight):预算改变 → 内容高度改变不会反过来改变
+//   clientHeight,无反馈环。ResizeObserver 回调天然按帧对齐(每帧至多一次),无需再加节流
+//   (requestAnimationFrame 被 source-scan 全仓禁用,§3.5)。不新增任何 timer。
+// - bash 行高/折叠按钮高用 last-good 缓存:预算把 bash 组收起后行不在 DOM,仍用上次实测值。
+// ---------------------------------------------------------------------------
+const treeScrollEl = ref<HTMLElement | null>(null);
+const fillBudget = ref<FillBudget | null>(null);
+/** 首轮测量是否已完成(2026-10-28 验收 #1):true 且预算仍 null ⇒ 测量失败,FleetBashJobs
+ *  回退到与不传 fill 完全一致的旧默认开合。 */
+const fillReady = ref(false);
+let lastAgentRowPx = 0;
+let lastBashRowPx = 0;
+// 验收 #4:两块折叠按钮(.run-more)高度分别测量、分别缓存;未测到时用该块已测行高估计。
+let lastAgentFoldPx = 0;
+let lastBashFoldPx = 0;
+
+// 验收 #3:用户手动操作回传 —— bash 组开合 / 两块「显示已完成」点击都改变该块的高度诉求,
+// 以用户操作为准重分(FillOverrides),手动状态一旦置位不被预算覆盖。
+const bashUserOpen = ref<boolean | null>(null);
+const bashShowAll = ref(false);
+const agentShowAll = ref(false);
+function onBashOpenChange(open: boolean): void {
+  bashUserOpen.value = open;
+  void nextTick(recomputeFill);
+}
+function onBashShowAll(): void {
+  bashShowAll.value = true;
+  void nextTick(recomputeFill);
+}
+function onAgentShowAll(): void {
+  agentShowAll.value = true;
+  void nextTick(recomputeFill);
+}
+
+const fillCounts = computed<FillCounts>(() => {
+  const nodes = treeNodes.value;
+  const jobs = bashJobs.value;
+  const liveBashRows = jobs === undefined ? [] : jobs.rows.filter((r) => bashArchive.value.has(String(r.id)) !== true);
+  let bashMust = 0;
+  for (const r of liveBashRows) if (statusToken(r).live) bashMust++;
+  return {
+    agentFixedRows: fixedAgentRowCount(nodes),
+    agentTerminalTop: topTerminalRowCount(nodes),
+    bashMustRows: bashMust,
+    bashTerminalRows: liveBashRows.length - bashMust,
+  };
+});
+
+function recomputeFill(): void {
+  const el = treeScrollEl.value;
+  if (el === null) return;
+  const agentRow = el.querySelector<HTMLElement>(".tree .run")?.offsetHeight ?? 0;
+  if (agentRow > 0) lastAgentRowPx = agentRow;
+  const bashRow = el.querySelector<HTMLElement>(".fleet-bash .bj-row")?.offsetHeight ?? 0;
+  if (bashRow > 0) lastBashRowPx = bashRow;
+  // 验收 #4:两块折叠按钮分别测量(agent 的是 tree-scroll 直属的 .run-more;bash 的在
+  // .bj-fill-more 里)。首轮按钮还没渲染 ⇒ 0 ⇒ 下面用该块行高估计,不按 0 预留。
+  const agentFold = el.querySelector<HTMLElement>(":scope > .run-more")?.offsetHeight ?? 0;
+  if (agentFold > 0) lastAgentFoldPx = agentFold;
+  const bashFold = el.querySelector<HTMLElement>(".fleet-bash .bj-fill-more .run-more")?.offsetHeight ?? 0;
+  if (bashFold > 0) lastBashFoldPx = bashFold;
+  let agentExtraPx = 0;
+  for (const p of el.querySelectorAll<HTMLElement>(".fleet-omitted")) agentExtraPx += p.offsetHeight;
+  // Whole archived section (fold header + its rows once the user opened it), not just the header.
+  agentExtraPx += el.querySelector<HTMLElement>(".fleet-archived")?.offsetHeight ?? 0;
+  let bashHeaderPx = el.querySelector<HTMLElement>(".fleet-bash .bj-sum")?.offsetHeight ?? 0;
+  bashHeaderPx += el.querySelector<HTMLElement>(".fleet-bash .bj-archived-fold")?.offsetHeight ?? 0;
+  for (const p of el.querySelectorAll<HTMLElement>(".fleet-bash .bj-more")) bashHeaderPx += p.offsetHeight;
+  fillBudget.value = computeFillBudget(
+    {
+      heightPx: contentHeightOf(el),
+      agentRowPx: lastAgentRowPx,
+      bashRowPx: lastBashRowPx,
+      agentExtraPx,
+      bashHeaderPx,
+      agentFoldPx: lastAgentFoldPx > 0 ? lastAgentFoldPx : lastAgentRowPx,
+      bashFoldPx: lastBashFoldPx > 0 ? lastBashFoldPx : lastBashRowPx,
+    },
+    fillCounts.value,
+    {
+      bashCollapsed: bashUserOpen.value === false,
+      agentShowAll: agentShowAll.value,
+      bashShowAll: bashShowAll.value,
+    },
+  );
+  fillReady.value = true;
+}
+
+/** clientHeight includes the scroller's own padding and the Bash group's top margin/border —
+ *  neither can hold rows, so counting them made an "exactly full" budget overflow by ~8–10px
+ *  (verify r2). Computed styles are read per measure (cheap; no layout thrash beyond the
+ *  offsetHeight reads already done). */
+function contentHeightOf(el: HTMLElement): number {
+  const px = (v: string): number => {
+    const n = Number.parseFloat(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const cs = getComputedStyle(el);
+  let h = el.clientHeight - px(cs.paddingTop) - px(cs.paddingBottom);
+  const bash = el.querySelector<HTMLElement>(".fleet-bash");
+  if (bash !== null) {
+    const bs = getComputedStyle(bash);
+    h -= px(bs.marginTop) + px(bs.borderTopWidth) + px(bs.borderBottomWidth) + px(bs.marginBottom);
+  }
+  return Math.max(0, h);
+}
+
+function onArchivedOpen(): void {
+  void nextTick(recomputeFill);
+}
+
+let unobserveFill: (() => void) | undefined;
+// tree-scroll 只在树视图(未选中 run)时存在:用 ref watch 接管挂载/卸载,flush:"post"
+// 保证元素插入且子组件渲染后再测量。immediate 覆盖常规挂载路径。
+watch(
+  treeScrollEl,
+  (el) => {
+    unobserveFill?.();
+    unobserveFill = undefined;
+    if (el !== null) unobserveFill = observeResize(el, recomputeFill);
+    void nextTick(recomputeFill);
+  },
+  { immediate: true, flush: "post" },
+);
+// 行数变化(fleet 帧/bash 帧)后重算:等 DOM 更新再测;字符串键避免同值重复触发。
+watch(
+  () => {
+    const c = fillCounts.value;
+    return `${c.agentFixedRows}/${c.agentTerminalTop}/${c.bashMustRows}/${c.bashTerminalRows}`;
+  },
+  () => {
+    void nextTick(recomputeFill);
+  },
+);
+onBeforeUnmount(() => unobserveFill?.());
+
+const agentTerminalBudget = computed(() => fillBudget.value?.agentTerminal);
+const bashTerminalBudget = computed(() => fillBudget.value?.bashTerminal);
 
 // ---------------------------------------------------------------------------
 // sysload plan §6.4/§7.4/§10 (package P4): the crit/warn dispatch-paused banner, reading the
@@ -340,10 +494,22 @@ watch(
           <template v-else> · {{ banner.level.toUpperCase() }}</template>
         </span>
       </div>
-      <div class="tree-scroll">
-        <FleetTree :nodes="treeNodes" :now="now" :orphans="orphans" :omitted="agent.fleetOmitted" />
+      <div ref="treeScrollEl" class="tree-scroll">
+        <FleetTree
+          :nodes="treeNodes"
+          :now="now"
+          :orphans="orphans"
+          :omitted="agent.fleetOmitted"
+          :terminal-budget="agentTerminalBudget"
+          @show-all-terminal="onAgentShowAll"
+        />
         <!-- web-hub archive plan: the archived-runs fold (hidden when nothing archived). -->
-        <FleetArchived v-if="archivedRows.length > 0" :rows="archivedRows" :set="runArchive" />
+        <FleetArchived
+          v-if="archivedRows.length > 0"
+          :rows="archivedRows"
+          :set="runArchive"
+          @update:open="onArchivedOpen"
+        />
         <!-- 2026-10-15:子 agent 树之后的独立 bash 分组(无任务/无字段 ⇒ 不渲染)。 -->
         <FleetBashJobs
           v-if="bashJobs"
@@ -351,6 +517,11 @@ watch(
           :jobs="bashJobs"
           :now="now"
           :archived="bashArchive"
+          :fill="true"
+          :fill-ready="fillReady"
+          :terminal-budget="bashTerminalBudget"
+          @update:open="onBashOpenChange"
+          @show-all-terminal="onBashShowAll"
         />
       </div>
     </template>

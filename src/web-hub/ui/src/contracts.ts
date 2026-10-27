@@ -314,6 +314,25 @@ export interface FleetBashJobsProps {
   /** web-hub archive plan: archived bash-job id→entry map (`status.archived` kind "bash"; empty
    *  map ⇔ nothing archived ⇒ the group renders exactly as before). */
   readonly archived?: ReadonlyMap<string, { kind: "run" | "bash"; id: string; at: number; auto?: true }>;
+  /** fleet-fill-budget(docs/dev/web-hub/fleet-fill-budget.md):抽屉填充模式 —— 仅 FleetDrawer
+   *  传 true:初始恒展开(供测量行高),首个预算到达后按其建议开合;用户手动开合后不再被预算
+   *  覆盖。不传 ⇒ 旧默认开合逻辑,字节不变。 */
+  readonly fill?: boolean;
+  /** fleet-fill-budget:可见已结束行数配额(由 FleetDrawer 实测计算)。undefined ⇒ 旧行为
+   *  (展开即显示全部 liveRows,无行数裁断)。 */
+  readonly terminalBudget?: number | undefined;
+  /** fleet-fill-budget(2026-10-28 验收 #1):父级已完成首轮测量。true 且 terminalBudget 仍
+   *  undefined ⇒ 测量失败(happy-dom 等),回退到与不传 fill 完全一致的旧默认开合;
+   *  false/undefined ⇒ 还在等首轮测量,保持展开供测量。 */
+  readonly fillReady?: boolean;
+}
+
+export interface FleetBashJobsEmits {
+  /** fleet-fill-budget(验收 #3):用户点了组标题开合 —— 抽屉需要据此重分两块高度
+   *  (折叠 ⇒ bash 块只占标题高,余量让给 agents)。仅用户操作触发,预算建议不触发。 */
+  "update:open": [open: boolean];
+  /** fleet-fill-budget(验收 #3):用户点了「显示已完成的 N 个」⇒ bash 块全显,余量给 agents。 */
+  "show-all-terminal": [];
 }
 
 export interface FleetTreeProps {
@@ -326,6 +345,15 @@ export interface FleetTreeProps {
   /** §3.2/#12: fleet 帧的 omitted 计数(仅根层级消费;`undefined` 显式允许 ——
    *  `exactOptionalPropertyTypes` 下模板绑定的 `agent.fleetOmitted` 可能为 undefined)。 */
   readonly omitted?: FleetOmittedWire | undefined;
+  /** fleet-fill-budget(docs/dev/web-hub/fleet-fill-budget.md):仅根层级(depth 0)消费的
+   *  可见已结束行数配额,替代旧的固定 3/5 折叠;子层与 undefined(测量不可用回退)保持旧逻辑。 */
+  readonly terminalBudget?: number | undefined;
+}
+
+export interface FleetTreeEmits {
+  /** fleet-fill-budget(验收 #3):用户点开了根层级的「显示已完成的 N 个」⇒ agents 块全显,
+   *  剩余空间给 bash。仅 depth 0 触发。 */
+  "show-all-terminal": [];
 }
 
 export interface FleetDrawerProps {

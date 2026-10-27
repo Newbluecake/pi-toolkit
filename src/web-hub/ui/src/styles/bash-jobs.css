@@ -381,6 +381,13 @@
   font-size: var(--fs-xs);
 }
 
+/* fleet-fill-budget: 预算裁断后的「显示已完成的 N 个」折叠行(按钮复用 fleet.css 的
+ * `.run-more` 语法 —— FleetTree 同页必已加载该样式)。 */
+.bj-fill-more {
+  padding: 2px 0 2px calc(16px + var(--sp-2));
+  list-style: none;
+}
+
 /* Narrow (<480px CONTAINER — the drawer's `.tree-scroll` is an inline-size container; a docked
  * or overlay drawer is narrow on a wide viewport, so a viewport media query would never fire
  * there): same two lines (they already fit). When line 2 overflows the id goes first (lowest
