@@ -21,7 +21,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { createGitRunner, type GitRunner } from "../../git/run.js";
+import { type GitRunner } from "../../git/run.js";
 import { resolveAgentDir } from "../protocol/agent-dir.js";
 import { FEISHU_SHUTDOWN_BUDGET_MS, type FsbReqFrame } from "../protocol/feishu.js";
 import type { LanOffReason, LanStatus } from "../protocol/lan.js";
@@ -29,8 +29,6 @@ import {
   ensurePrivateDir,
   packageRootDir,
   resolveHubPaths,
-  webHubSpawnFiles,
-  webHubUploadsDir,
   type HubPaths,
   type SocketIdentity,
 } from "../protocol/paths.js";
@@ -51,31 +49,25 @@ import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } f
 import { createAgentRemoveService } from "./agent-remove.js";
 import { createAgentServer } from "./agent-server.js";
 import { assembleHubCaps, assembleXsRelay, prepareHubChannels } from "./assembly-channels.js";
+import { assembleFeishu } from "./assembly-feishu.js";
+import { assemblePreview } from "./assembly-preview.js";
 import { assembleRegistry } from "./assembly-registry.js";
 import { assembleSchedule } from "./assembly-schedule.js";
+import { assembleSpawn } from "./assembly-spawn.js";
 import { assembleAvatarStore, assembleUploads, loadPrivacyStore } from "./assembly-storage.js";
 import { createHubAssembly } from "./assembly.js";
-import { auditSpawn, uploadStatsFields } from "./audit.js";
+import { uploadStatsFields } from "./audit.js";
 import { createClientAllowGuard } from "./client-allow.js";
 import { createCmdLimit } from "./cmd-limit.js";
 import { createCommandCompleteRoutes } from "./command-complete.js";
 import { createCommandRouter } from "./commands.js";
-import type { FeishuIdleEvidence } from "./feishu/notify.js";
-import {
-  createFeishuBotService,
-  type FeishuBotService,
-  type FeishuBotServiceDeps,
-  type FeishuSpawnPort,
-} from "./feishu/service.js";
+import { type FeishuBotService, type FeishuBotServiceDeps } from "./feishu/service.js";
 import { createHubJsonWriter, type HubJsonWriter, type HubRecord } from "./hub-json.js";
 import { createIdleMonitor } from "./idle.js";
 import { defaultLanAssembly, LanAssemblyOffError } from "./lan-assembly.js";
 import { verifyPassword } from "./lan-auth.js";
 import { createScope, withDeadline, withSignal, type Scope } from "./lifecycle.js";
 import { createHubLog } from "./log.js";
-import { createFsAdmitter } from "./preview/admit.js";
-import { createPreviewIoTracker, previewProcFdAvailable, resolvePreviewDenyContext } from "./preview/fs.js";
-import { createPreviewRoutes } from "./preview/routes.js";
 import { createPrivacyRoutes } from "./privacy/routes.js";
 import { proxyErrCode } from "./proxy/audit.js";
 import { createProxyRoutes } from "./proxy/routes.js";
@@ -83,25 +75,12 @@ import { createProxyService } from "./proxy/service.js";
 import { createReqDeadline, type ReqDeadline } from "./req-deadline.js";
 import { createSecurityEventBus } from "./security-events.js";
 import { createSelfRestartStore, type SelfRestartDecision } from "./self-restart.js";
-import { probePlatform, type PlatformProbeDeps } from "./spawn/config.js";
-import { createCreatedDirsStore } from "./spawn/created-dirs.js";
-import { createDirService } from "./spawn/dirs.js";
-import { createFirstPromptForwarder, type FirstPromptForwarder } from "./spawn/first-prompt.js";
-import { createMkdirService } from "./spawn/mkdir.js";
-import { createSpawnPrefs } from "./spawn/prefs.js";
-import { createReaper, type Reaper } from "./spawn/reaper.js";
-import { createSpawnRoutes } from "./spawn/routes.js";
-import { createSpawnStore, isTerminalSpawnState } from "./spawn/store.js";
-import {
-  createSpawnSupervisor,
-  type InternalRecord,
-  type SpawnSupervisor,
-  type SpawnSupervisorDeps,
-} from "./spawn/supervisor.js";
+import { type PlatformProbeDeps } from "./spawn/config.js";
+import { type FirstPromptForwarder } from "./spawn/first-prompt.js";
+import { type Reaper } from "./spawn/reaper.js";
+import { type SpawnSupervisor, type SpawnSupervisorDeps } from "./spawn/supervisor.js";
 import { createSupersede, SUPERSEDE_YIELD_MS } from "./supersede.js";
 import { createVersionInfoService } from "./version-info.js";
-import { createWorktreeDiffRoutes } from "./worktree-diff/routes.js";
-import { createWorktreeGraphRoutes } from "./worktree-graph/routes.js";
 // session-history plan §4.8 (P-int): the spawn-history assembly — P-scan's service, P-route's
 // ports; hub.ts is the only place they meet (PD5). Aliased so the unrelated fleet-history
 // service (`./history.js`, browser transcript replay) keeps its plain name below.
@@ -123,11 +102,8 @@ import type {
   LanAssembly,
 } from "./ports.js";
 import { acquireSingleton, startFence } from "./singleton.js";
-import { defaultHistorySyncFs } from "./spawn/history/fs.js";
-import { makeCaptureSessionPathPin, makeVerifySessionPathPin } from "./spawn/history/pin.js";
-import type { ManagedSessionView, HistoryService as SpawnHistoryService } from "./spawn/history/ports.js";
+import type { HistoryService as SpawnHistoryService } from "./spawn/history/ports.js";
 import type { ProcFs, ProcSyncFs } from "./spawn/history/proc.js";
-import { createHistoryService as createSpawnHistoryService } from "./spawn/history/service.js";
 
 /**
  * §6.7.1 (C8) — the duck-typed extras `http.ts`'s `createHttpFrontend` attaches beyond the
@@ -192,10 +168,6 @@ const HISTORY_SERVICE_DISPOSE_MS = 2_500;
  * (and anything else) terminate exactly as before.
  */
 export const RESTORE_REASONS: ReadonlySet<string> = new Set(["restart", "superseded", "crash"]);
-/** web-hub-spawn plan §SP10: supervisor `init()`'s own startup budget (store load + orphan
- * recovery + launcher check ≤1s + reaper ready ≤2s — see arch §4.2/§7.3), folded into the
- * hub's overall `HUB_START_DEADLINE_MS` via `withSignal`. */
-const SPAWN_INIT_BUDGET_MS = 4_000;
 /** web-hub-upload plan §2.6 (U3): committed-file TTL sweep + `upload stats` aggregate row cadence. */
 const UPLOAD_SWEEP_TICK_MS = 30 * 60_000;
 /** §2.6: idle in-flight invalidation (10 min idle TTL) + dirty `referencedAt` flush retry cadence. */
@@ -338,6 +310,7 @@ export async function startHub(
   const ctx = createHubAssembly({
     config,
     deps,
+    hubAgentDir,
     paths,
     log,
     now,
@@ -521,6 +494,7 @@ export async function startHub(
     }
     const xsRelay = assembleXsRelay(ctx);
     const scheduleHub = assembleSchedule(ctx);
+    ctx.scheduleHub = scheduleHub;
     ctx.agentServer = createAgentServer(owner.server, {
       registry,
       config,
@@ -708,536 +682,10 @@ export async function startHub(
     ctx.commandRouter = commandRouter;
     const cmdLimit = createCmdLimit(now);
     ctx.cmdLimit = cmdLimit; // ONE HTTP + Feishu admission limiter (same agent bucket).
-    let botSpawn: FeishuSpawnPort | undefined;
-    // ---------------------------------------------------------------------
-    // web-hub-spawn plan §SP10 (arch §4.1/§7): the managed-spawn assembly — the ONLY place
-    // SP1–SP9's parts meet. Everything below runs only when `config.spawn` exists (feature
-    // off ⇒ no reaper process, no spawns.json, no spawn key anywhere: caps/hub.json/FrontendDeps
-    // stay byte-identical, arch §8.2's not-enabled matrix). Order (plan §SP10): probe →
-    // store → reaper → dirs → first-prompt forwarder → supervisor → bounded init → routes.
-    // `registry` (above) and `commandRouter` (above) are passed directly as the supervisor's /
-    // forwarder's ports — no casts (#3 硬门槛: pinned by tests/web-hub/contract/types.test-d.ts).
-    if (config.spawn !== undefined) {
-      const spawnCfg = config.spawn;
-      const spawnFiles = webHubSpawnFiles(paths.stateDir);
-      // default-model plan §3/§3.1 (D1): the hub-wide 「新建会话默认模型」 preference — one
-      // global value under <stateDir>/spawn-prefs.json, loaded synchronously HERE (hub boot,
-      // the one and only load), served by GET /api/headless's `prefs` and written synchronously
-      // by POST /api/headless/prefs. `close()` is a no-op by design (no pending writes), so it
-      // needs no cleanup entry.
-      const spawnPrefs = createSpawnPrefs({ file: spawnFiles.prefsJson, log });
-      // created-dirs plan r2 §5: source ④ — folders made through the hub's mkdir inside
-      // `spawn.roots`. Sync single-writer store, loaded once here; no cleanup entry (no timers).
-      const createdDirsStore = createCreatedDirsStore({ file: spawnFiles.createdDirsJson, log, now });
-      const platform = spawnPlatform ?? probePlatform(deps.spawnSeams?.probe);
-      // session-history plan §4.8 step 1: the effective history switch — the config flag AND the
-      // platform probe. Everything history-related below (service, sessionPathPin, forkSrcDir,
-      // routes dep, the SPAWN_HISTORY_HUB_CAP tail above) keys off this one value, so `history`
-      // off ⇒ the whole hub stays byte-identical (§5): no service, no cap, routes 404 as P-route
-      // already guarantees, restore never captures a path pin.
-      const historyOn = spawnCfg.history === true && platform.ok;
-      // One shared sync-fs for the capture/verify pair (§4.5.6): pure object factory, no fd, no
-      // timer — harmless to build even on the (platform-failed) off path, read only when on.
-      const historySyncFs = defaultHistorySyncFs();
-      if (!platform.ok) {
-        // §7.1 fail closed: caps still carry spawn.v1 (so the UI can explain), but supervisor
-        // init() is a no-op past this point — no reaper, no spawns.json write, no fork.
-        log.warn("web-hub: spawn platform probe failed — managed spawn disabled (fail closed)", {
-          detail: platform.detail,
-        });
-      }
-      const spawnStore = createSpawnStore({ file: spawnFiles.spawnsJson, log, now });
-      const rawReaper: Reaper = deps.spawnSeams?.reaper ?? createReaper({ log, now });
-      const spawnReaper: Reaper = {
-        ...rawReaper,
-        get available() {
-          return rawReaper.available;
-        },
-        start: (deadline) => {
-          if (startup.signal.aborted) return Promise.reject(startup.signal.reason);
-          return startupStep(rawReaper.start(deadline), () => rawReaper.close());
-        },
-      };
-      const spawnDirs = createDirService({
-        home: config.home,
-        // SP3 source ② of known dirs: one resolved agentDir shared with history and preview.
-        agentDir: hubAgentDir,
-        roots: spawnCfg.roots,
-        registry,
-        spawnHistory: () => ctx.spawnSup?.records() ?? [],
-        now,
-        createdDirs: () => createdDirsStore.list(),
-      });
-      ctx.firstPromptFwd = createFirstPromptForwarder({
-        router: commandRouter,
-        now,
-        log,
-        audit: (r) => auditSpawn(log, r),
-        // SP9 hand-off (plan §SP10): the forwarder owns the AUTHORITATIVE first-prompt state;
-        // the supervisor's record slice (which its SSE `spawns` push renders, §6.4 Public
-        // projection) is advisory only. Sync the slice from the authoritative view BEFORE
-        // `noteSpawnChanged` so the SSE push and the GET snapshot (which reads
-        // `firstPrompt.state()` through SP9's routes) can never disagree.
-        onChange: (spawnId) => {
-          const sup = ctx.spawnSup;
-          if (sup === undefined) return;
-          const view = ctx.firstPromptFwd?.state(spawnId);
-          if (view !== undefined) {
-            const rec = sup.records().find((r) => r.spawnId === spawnId);
-            if (rec !== undefined) {
-              rec.firstPrompt = { state: view.state, textLen: view.textLen, attempts: view.attempts };
-            }
-          }
-          sup.noteSpawnChanged(spawnId);
-        },
-      });
-      if (deps.spawnSeams?.wrapFirstPrompt !== undefined) {
-        ctx.firstPromptFwd = deps.spawnSeams.wrapFirstPrompt(ctx.firstPromptFwd);
-      }
-      const rawSupervisor = createSpawnSupervisor({
-        cfg: spawnCfg,
-        registry,
-        log,
-        now,
-        store: spawnStore,
-        reaper: spawnReaper,
-        dirs: spawnDirs,
-        launcher: config.launcher,
-        env: process.env,
-        childUmask: deps.childUmask,
-        platform,
-        audit: (r) => auditSpawn(log, r),
-        pluginVersion: config.pluginVersion,
-        stderrDir: spawnFiles.logDir,
-        // spawn-relaunch: the base for `locateSessionFile`'s default-session-dir fallback (same
-        // expression as spawnDirs'/history's agentDir above).
-        agentDir: hubAgentDir,
-        // session-history plan §4.6.3/§4.8 (v3.4 X1): the restore re-fork's path-pin pair —
-        // injected ONLY when history is on; absent ⇒ restore keeps its exact pre-history
-        // behavior (no capture, no goLive verify, §5). Same `HistorySyncFs` for both halves.
-        ...(historyOn
-          ? {
-              sessionPathPin: {
-                capture: makeCaptureSessionPathPin(historySyncFs),
-                verify: makeVerifySessionPathPin(historySyncFs),
-              },
-              forkSrcDir: spawnFiles.forkSrcDir,
-            }
-          : {}),
-        onLive: (rec) => {
-          if (rec.agentKey !== undefined && rec.sessionId !== undefined) {
-            ctx.firstPromptFwd?.onLive(rec.spawnId, rec.agentKey, rec.sessionId, rec.control === true);
-          }
-        },
-        onLink: (spawnId, linked) => ctx.firstPromptFwd?.onLink(spawnId, linked),
-        onTerminal: (spawnId, reason) => ctx.firstPromptFwd?.onTerminal(spawnId, reason),
-        // web-hub-delete-session plan v2 §2.2/§2.9: a managed record's death was confirmed and it
-        // was actually deleted — drop the matching agent card too. `allowConnected:true` is safe
-        // here specifically because `deleteRecord` only ever runs AFTER the supervisor's own
-        // death confirmation (§2.1); a registry record still `live`/`claiming` at that instant
-        // just means its socket-close bookkeeping hasn't caught up yet.
-        onRemoved: (_spawnId, agentKey) => {
-          if (agentKey !== undefined) registry.remove(agentKey, { allowConnected: true });
-        },
-        // web-hub-spawn-restore plan D9/§10.4: a restore confirmed the OLD process dead — its card
-        // (if it ever reconnected to this hub) goes too; `agent_removed` lets the UI switch to the
-        // successor. Same post-death-confirmation safety argument as `onRemoved` above.
-        onPrevAgentGone: (_spawnId, prevAgentKey) => {
-          registry.remove(prevAgentKey, { allowConnected: true });
-        },
-        restoreVetoFile: spawnFiles.restoreVeto,
-        ...(deps.spawnSeams?.restoreStableMs === undefined ? {} : { restoreStableMs: deps.spawnSeams.restoreStableMs }),
-        ...(deps.spawnSeams?.spawnFn === undefined ? {} : { spawnFn: deps.spawnSeams.spawnFn }),
-      });
-      ctx.spawnSup =
-        deps.spawnSeams?.wrapSupervisor === undefined ? rawSupervisor : deps.spawnSeams.wrapSupervisor(rawSupervisor);
-      // session-history plan §4.8 step 1: the history service — built only when `historyOn`, with
-      // the P0-frozen dep shape. `managed`/`deathOf` read the supervisor LAZILLY per call (the
-      // closures resolve `spawnSup` at call time, long after this assignment). The PD22 seams
-      // (procFs / wrapHistory) arrive exclusively through `deps.spawnSeams` — never env/config.
-      if (historyOn) {
-        let historySvc = createSpawnHistoryService(
-          {
-            agentDir: hubAgentDir,
-            forkSrcDir: spawnFiles.forkSrcDir,
-            registry,
-            managed: () => (ctx.spawnSup?.records() ?? []).map(toManagedView),
-            deathOf: (id) => ctx.spawnSup?.deathOf(id),
-            uid: deps.uid ?? process.getuid?.() ?? -1,
-            hubPid: process.pid,
-            now,
-            log,
-          },
-          deps.spawnSeams?.historyProcFs === undefined && deps.spawnSeams?.historyProcSyncFs === undefined
-            ? undefined
-            : {
-                ...(deps.spawnSeams?.historyProcFs === undefined ? {} : { procFs: deps.spawnSeams.historyProcFs }),
-                ...(deps.spawnSeams?.historyProcSyncFs === undefined
-                  ? {}
-                  : { procSyncFs: deps.spawnSeams.historyProcSyncFs }),
-              },
-        );
-        if (deps.spawnSeams?.wrapHistory !== undefined) historySvc = deps.spawnSeams.wrapHistory(historySvc);
-        ctx.spawnHistory = historySvc;
-        // v3.3 W3 / X3.4 #4 + verifier P1-a: the rollback dispose is registered HERE, at the
-        // assignment — a failure in `spawnSup.init()`, `createSpawnRoutes()` or ANY later
-        // assembly step must still unwind the service's fds/gens (previously the push lived
-        // further down, past init/routes/frontend assembly, and leaked on those failures).
-        // Idempotent (dispose shares one underlying promise) and bounded (the rollback's own
-        // `bounded()` wrapper + dispose's internal HISTORY_DISPOSE_MS); the runtime close()
-        // path awaits the SAME promise and never runs this cleanup array, so the two can never
-        // double-run. Ordering: the spawn shutdown entry is pushed LATER (after the frontend's
-        // own entries, keeping §SP13's domain-first unwind), so the reverse-order rollback
-        // still runs supervisor shutdown BEFORE this dispose — the runtime close() order.
-        cleanup.push(() => ctx.spawnHistory!.dispose());
-      }
-      // Verifier r2 P1: an EARLY idempotent supervisor-shutdown entry, registered immediately
-      // after the history dispose entry above — a startup failure anywhere between here
-      // (init/routes/uploads/frontend CONSTRUCTION — before the §SP13 entry further down)
-      // used to roll back the history service with NO supervisor shutdown. Reverse order
-      // still runs this shutdown BEFORE the history dispose, the runtime close() order.
-      // Bounded (`STEP_DEADLINE_MS`) and never throws out of rollback; `shutdown` on a
-      // supervisor whose init() rejected is safe (first-call-wins promise; the catch keeps a
-      // rejection from aborting the unwind — the rollback's own `bounded()` also swallows).
-      const supForRollback = ctx.spawnSup;
-      let shutdownPromise: Promise<void> | undefined;
-      ctx.spawnShutdownOnce = (): Promise<void> => {
-        if (shutdownPromise === undefined) {
-          shutdownPromise = supForRollback.shutdown(createReqDeadline(now, STEP_DEADLINE_MS)).catch(() => undefined);
-        }
-        return shutdownPromise;
-      };
-      cleanup.push(() => ctx.spawnShutdownOnce!());
-      // Bounded init (plan §SP10: store load + orphan recovery + launcher check ≤1s + reaper
-      // ready ≤2s — 4s total budget); `withSignal` folds a startup abort into the same await.
-      await startupStep(ctx.spawnSup.init(createReqDeadline(now, SPAWN_INIT_BUDGET_MS)));
-      startup.signal.throwIfAborted();
-      // spawn-dirmkdir: the browse panel's 「新建文件夹」 endpoint reuses preview's §2.6 deny
-      // chain, so its deny context resolves HERE when spawn is on — even with preview off (the
-      // preview block below reuses this value when it runs). Same 2s/never-fails semantics as
-      // the preview resolution (a degraded member keeps its literal form + a path-free WARN).
-      ctx.previewDenyCtx = await startupStep(
-        resolvePreviewDenyContext(
-          { home: config.home, agentDir: hubAgentDir },
-          {
-            tracker: createPreviewIoTracker(),
-            now,
-            log,
-            signal: startup.signal,
-          },
-        ),
-      );
-      startup.signal.throwIfAborted();
-      const mkdirSvc = createMkdirService({
-        denyCtx: ctx.previewDenyCtx,
-        tracker: createPreviewIoTracker(),
-        log,
-        now,
-        identify: true,
-        // 2026-10-16 用户拍板（「新建文件夹」可以和终端一样是 775）: the hub's own 0o077 umask must
-        // not mask web-created folders — main.ts's captured pre-hub umask becomes the explicit
-        // post-create mode (best-effort inside the service: failure ⇒ warn, still ok:true).
-        ...(deps.childUmask === undefined ? {} : { dirMode: 0o777 & ~deps.childUmask }),
-      });
-      ctx.spawnRoutes = createSpawnRoutes({
-        ...(security === undefined ? {} : { security }),
-        supervisor: ctx.spawnSup,
-        dirs: spawnDirs,
-        firstPrompt: ctx.firstPromptFwd,
-        prefs: spawnPrefs,
-        cfg: spawnCfg,
-        limit: createCmdLimit(now),
-        rejectAudit429: new Map(),
-        log,
-        now,
-        mkdir: mkdirSvc,
-        createdDirs: createdDirsStore,
-        // session-history plan §4.8: `historyOn` already required it — absent keeps the route
-        // surface byte-identical to history-off (P-route's §5 gate reads `deps.history`).
-        ...(ctx.spawnHistory === undefined ? {} : { history: ctx.spawnHistory }),
-        // web-hub-privacy plan v2.1 (P1, 「Fork 继承」): a hub-initiated fork inherits a locked
-        // source session's mark — the store was created/loaded ABOVE this assembly, so the
-        // dependency is available exactly when the feature is on (off ⇒ byte-identical).
-        ...(ctx.privacyStore === undefined ? {} : { privacy: ctx.privacyStore }),
-      });
-      if (config.feishuBot !== undefined) {
-        botSpawn = {
-          dirs: spawnDirs,
-          supervisor: ctx.spawnSup,
-          firstPrompt: ctx.firstPromptFwd,
-          prefs: spawnPrefs,
-          registerTimeoutS: spawnCfg.registerTimeoutS,
-          restore: spawnCfg.restore === true,
-          relaunch: (...args) => ctx.spawnSup!.relaunch(...args),
-          lookup: (id) => {
-            const record = ctx.spawnSup!.records().find((r) => r.spawnId === id);
-            return record === undefined
-              ? undefined
-              : {
-                  ...(record.agentKey === undefined ? {} : { agentKey: record.agentKey }),
-                  ...(record.sessionId === undefined ? {} : { sessionId: record.sessionId }),
-                  terminal: isTerminalSpawnState(record.state),
-                };
-          },
-        };
-      }
-      // SP13 (SP10 acceptance leftover P3): the shutdown entry itself is pushed AFTER the
-      // frontend's own cleanup entry further below — reverse-order release then runs it BEFORE
-      // `fe.close()`, the same domain-first order the runtime `close()` path uses (arch §7.6:
-      // spawn subsystem shuts down before the HTTP face stops accepting). The push CANNOT live
-      // here: it would run AFTER `fe.close()` in the startup-failure unwind (last pushed runs
-      // first), contradicting the order it was documenting. A frontend factory that throws
-      // before its own cleanup push leaves no shutdown call, but that path still ends the hub
-      // process — the reaper child's stdin EOF (L3) bounds any leak, and no spawn request can
-      // have arrived before `fe.listen()`.
-    }
+    if (config.spawn !== undefined) await assembleSpawn(ctx);
     const uploadMetrics = assembleUploads(ctx);
-    // web-hub-preview plan v3 §4.5/§6 (PV3): the preview route frontend — constructed only when
-    // `config.preview` exists (PV1: mode "off" is the key's ABSENCE, so the cap declaration and
-    // this construction read the same config key and can never disagree). Pure closure
-    // building: no fs, no I/O, nothing that can fail. The limiter is deliberately NOT passed —
-    // `createPreviewRoutes` defaults to its own private `CmdLimit` (§7-D14: preview bucket
-    // churn must never evict the cmd/upload lines' buckets).
-    //
-    // dir-plan v3.1 §2.6 (P1a): BEFORE the routes are built, home/agentDir are resolved to
-    // their literal+canonical forms (each may itself be a symlink; under global admission a
-    // literal-only deny context would miss every canonical-path request). The resolution is
-    // tracked by its OWN startup tracker (never the request instance, §2.4's parameter-flow
-    // table), bounded at 2 s, and NEVER fails the hub — a degraded member keeps its literal
-    // form + a path-free WARN, backstopped by the §2.3 global twins. agentDir shares the
-    // spawn assembly's exact source (L512's SP3): `PI_CODING_AGENT_DIR ?? ${home}/.pi/agent`.
-    if (config.preview !== undefined) {
-      // spawn-dirmkdir: reuse the spawn assembly's resolution when it already ran (spawn on);
-      // otherwise resolve here exactly as before (spawn-off + preview-on stays byte-identical).
-      const denyCtx =
-        ctx.previewDenyCtx ??
-        (await startupStep(
-          resolvePreviewDenyContext(
-            { home: config.home, agentDir: hubAgentDir },
-            {
-              tracker: createPreviewIoTracker(),
-              now,
-              log,
-              signal: startup.signal,
-            },
-          ),
-        ));
-      startup.signal.throwIfAborted();
-      ctx.previewDenyCtx = denyCtx;
-      const sharedPreview =
-        config.feishuBot === undefined
-          ? undefined
-          : (() => {
-              const tracker = createPreviewIoTracker();
-              ctx.botPreview = createFsAdmitter({ denyCtx, tracker, log, now });
-              return { tracker, admitter: ctx.botPreview };
-            })();
-      ctx.previewRoutes = createPreviewRoutes({
-        mode: config.preview,
-        denyCtx,
-        ...sharedPreview,
-        uploadsRoot: webHubUploadsDir(config.home),
-        registry,
-        ...(ctx.uploads === undefined
-          ? {}
-          : {
-              uploads: {
-                openForPreview: (p, requestCtx) => ctx.uploads!.openForPreview(p, requestCtx),
-              },
-            }),
-        log,
-        now,
-        // web-hub-html-preview plan v2 §4: the HTML surface (mint/serve/wrapper/revoke) is
-        // attached only under `htmlEnabled`; absent ⇒ every existing route is byte-identical.
-        ...(htmlEnabled ? { html: {} } : {}),
-      });
-      // dir-plan v3.1 §2.9 (P1a): ONE stable WARN per hub process when preview runs as root —
-      // OS permission checks no longer bound what preview could read, only the denylist does
-      // (the §2.7 boundary). Only `event` and `mode` ride the line — never a path or username.
-      // `/webhub restart` produces a new process, which warns again by design.
-      const uid = deps.getuid?.() ?? process.getuid?.();
-      if (uid === 0) {
-        log.warn(
-          "web-hub preview: hub is running as root — OS permission checks no longer limit preview; only the denylist applies",
-          { event: "preview.root_uid", mode: config.preview },
-        );
-      }
-      // worktree-diff plan §1.6 (D3): the worktree-diff route frontend — same feature gate as
-      // preview (`config.preview` exists) PLUS the /proc probe (D21: the three-fd pin is
-      // /proc-bound; without /proc the routes are never built and `wtdiff.v1` never declared —
-      // loopback AND LAN both fall back to the not-enabled matrix byte-identically). Shares the
-      // SAME denyCtx object preview just resolved (§2.5) and takes the hub-side git runner
-      // (D15). Pure closure building — nothing here can fail.
-      if (previewProcFdAvailable()) {
-        const graphGitRunner = deps.gitRunner ?? createGitRunner();
-        ctx.worktreeDiffRoutes = createWorktreeDiffRoutes({
-          mode: config.preview,
-          denyCtx,
-          registry,
-          run: graphGitRunner,
-          log,
-          now,
-        });
-        // worktree-graph plan v2 §2.6 (P2): the commit-graph route frontend — the SAME feature
-        // gate as wtdiff above (「与 wtdiff 同门」, §3), the SAME denyCtx AND the SAME hub-side git
-        // runner (D15 precedent — one runner, two route frontends).
-        ctx.worktreeGraphRoutes = createWorktreeGraphRoutes({
-          mode: config.preview,
-          denyCtx,
-          registry,
-          run: graphGitRunner,
-          log,
-          now,
-          // routes are only built when the /proc probe passed ⇒ exactly when the cap is declared
-          mergedEnabled: true,
-        });
-      }
-    }
-    if (config.feishuBot !== undefined) {
-      // Outbound file admission always uses the preview safety chain, even with the browser
-      // preview UI disabled. No raw-fs fallback and no bot-local upload store.
-      ctx.previewDenyCtx ??= await startupStep(
-        resolvePreviewDenyContext(
-          { home: config.home, agentDir: hubAgentDir },
-          { tracker: createPreviewIoTracker(), now, log, signal: startup.signal },
-        ),
-      );
-      startup.signal.throwIfAborted();
-      const evidence = new Map<string, { statusAt?: number; fleetAt?: number; fleet?: FeishuIdleEvidence["fleet"] }>();
-      const { wrapService: _wrapService, ...platformSeams } = deps.feishuSeams ?? {};
-      const botDeps: FeishuBotServiceDeps = {
-        ...(security === undefined ? {} : { security }),
-        onApprovalDecision: (id, allowed, gen) => ctx.lanLoginCore?.onApprovalDecision(id, allowed, gen),
-        stateDir: paths.stateDir,
-        config: config.feishuBot,
-        limit: cmdLimit,
-        commands: commandRouter,
-        sessions: {
-          views: () =>
-            registry.list().flatMap((a) =>
-              a.session === undefined
-                ? []
-                : [
-                    {
-                      sessionId: a.session.sessionId,
-                      agentKey: a.agentKey,
-                      cwd: a.cwd,
-                      ...(a.session.name === undefined ? {} : { name: a.session.name }),
-                      live: registry.isConnected(a.agentKey),
-                      mode: a.kind,
-                      state: !a.control
-                        ? ("read-only" as const)
-                        : a.prompts.length > 0
-                          ? ("waiting" as const)
-                          : a.status?.busy
-                            ? ("busy" as const)
-                            : ("idle" as const),
-                    },
-                  ],
-            ),
-          managed: () =>
-            (ctx.spawnSup?.records() ?? []).flatMap((r) =>
-              r.sessionId === undefined ? [] : [{ sessionId: r.sessionId, cwd: r.cwd }],
-            ),
-        },
-        // scheduled-reports H1 → F1 (verify r1 major): the port rides FeishuBotServiceDeps at
-        // CONSTRUCTION time (F1 builds its whole schedule surface iff it is present; the
-        // coordinator implements list/run/receiptsChanged). Key absence (schedule off / no
-        // coordinator) keeps the bot byte-identical.
-        ...(scheduleHub === undefined ? {} : { schedule: scheduleHub.port() }),
-        events: {
-          subscribe: (listener) => {
-            ctx.botSchedEventListener = listener;
-            ctx.botOnHello = (key) => {
-              evidence.delete(key);
-              listener({ type: "agent_up", agentKey: key });
-            };
-            const unsubscribe = registry.bus.subscribe((e) => {
-              if (e.type === "agent_up" || e.type === "agent_down" || e.type === "agent_stale" || e.type === "gap") {
-                evidence.delete(e.type === "agent_up" ? e.agent.agentKey : e.agentKey);
-              }
-              if (e.type === "status" || e.type === "fleet") {
-                const sample = evidence.get(e.agentKey) ?? {};
-                if (e.type === "status") sample.statusAt = now();
-                else {
-                  sample.fleetAt = now();
-                  sample.fleet = {
-                    complete: e.omitted === undefined || (e.omitted.active === 0 && e.omitted.terminal === 0),
-                    terminal: e.runs.map((r) => r.terminal === true),
-                  };
-                }
-                evidence.set(e.agentKey, sample);
-              }
-              switch (e.type) {
-                case "agent_up":
-                  listener({ type: "agent_up", agentKey: e.agent.agentKey });
-                  break;
-                case "ev":
-                case "ctl":
-                case "session":
-                case "dialogs":
-                case "gap":
-                case "agent_down":
-                case "agent_stale":
-                case "spawns":
-                case "status":
-                case "fleet":
-                  listener(e);
-                  break;
-              }
-            });
-            return () => {
-              ctx.botOnHello = undefined;
-              unsubscribe();
-            };
-          },
-          dialogs: () =>
-            [...(botDialogSlots?.values() ?? [])]
-              .filter((slot) => registry.isConnected(slot.agentKey))
-              .map(({ type: _type, ...slot }) => slot),
-        },
-        ...(ctx.uploads === undefined ? {} : { uploads: ctx.uploads }),
-        preview:
-          ctx.botPreview ??
-          createFsAdmitter({ denyCtx: ctx.previewDenyCtx, tracker: createPreviewIoTracker(), now, log }),
-        ...(botSpawn === undefined ? {} : { spawn: botSpawn }),
-        idleEvidence: (key) => {
-          const sample = evidence.get(key),
-            bash = registry.get(key)?.status?.bashJobs;
-          if (sample?.statusAt === undefined || sample.fleetAt === undefined || bash === undefined) return undefined;
-          return {
-            at: Math.min(sample.statusAt, sample.fleetAt, bash.sampledAt),
-            fleet: sample.fleet,
-            bash: { complete: (bash.omitted ?? 0) === 0 && bash.total === bash.rows.length, running: bash.running },
-          };
-        },
-        // Every Feishu surface shares phone-facing origin selection. Before listen(), absent
-        // external/LAN evidence returns empty for F8's honest "web 会话页面" fallback.
-        link: (key) => feishuLinks!.link(key),
-        log: (event) => log.info("web-hub feishu:", event),
-        ...platformSeams,
-      };
-      const created = createFeishuBotService(botDeps);
-      ctx.bot = deps.feishuSeams?.wrapService?.(created, botDeps) ?? created;
-      if (ctx.lanDeps !== undefined) ctx.lanDeps!.approval = ctx.bot.approval;
-      await startupStep(ctx.bot.start());
-      startup.signal.throwIfAborted();
-      // scheduled-reports H1 → F1 (§7.1–§7.5): hand over F1's own delivery half
-      // (`service.schedule`: pushReport/pushNotice/receiptsFor/hasReceipt) — discovery, notices
-      // and the receipt view flow through it from now on — and tap `sched_bound` into the bot's
-      // event stream (those frames are routed to the coordinator BEFORE the registry, so the
-      // bot's registry-bus subscription can never see them by itself).
-      if (scheduleHub !== undefined) {
-        scheduleHub.setBoundTap((agentKey, runKey) => {
-          try {
-            ctx.botSchedEventListener?.({ type: "sched_bound", agentKey, runKey } as never);
-          } catch {
-            /* the bot's listener must never break the coordinator */
-          }
-        });
-        if (ctx.bot.schedule !== undefined) scheduleHub.bindDelivery(ctx.bot.schedule);
-      }
-    }
+    if (config.preview !== undefined) await assemblePreview(ctx);
+    if (config.feishuBot !== undefined) await assembleFeishu(ctx);
     // web-hub-delete-session plan v2 §2.9: the removal route frontend is wired UNCONDITIONALLY
     // (unlike spawn/preview/upload) — deleting an offline/stale TUI card never depended on
     // managed spawn being enabled at all; `managed` is simply absent when it isn't, and
@@ -2025,20 +1473,4 @@ function bounded(p: Promise<void>, ms: number = STEP_DEADLINE_MS): Promise<void>
       },
     );
   });
-}
-
-/** session-history plan §4.8 step 1: the supervisor's `InternalRecord` → the P0-frozen
- * `ManagedSessionView` the history service's occupancy checks consume — a FIELD-BY-FIELD copy
- * (including `procStartTicks`, C2's pid+starttime pairing) so the service can never reach a
- * mutable record through it. Terminal states keep their exact strings; `sessionTarget` rides
- * along so a restore re-fork's record still counts as occupying its target session. */
-function toManagedView(r: InternalRecord): ManagedSessionView {
-  const view: ManagedSessionView = { spawnId: r.spawnId, state: r.state };
-  if (r.agentKey !== undefined) view.agentKey = r.agentKey;
-  if (r.pid !== undefined) view.pid = r.pid;
-  if (r.procStartTicks !== undefined) view.procStartTicks = r.procStartTicks;
-  if (r.sessionId !== undefined) view.sessionId = r.sessionId;
-  if (r.sessionFile !== undefined) view.sessionFile = r.sessionFile;
-  if (r.sessionTarget !== undefined) view.sessionTarget = { ...r.sessionTarget };
-  return view;
 }

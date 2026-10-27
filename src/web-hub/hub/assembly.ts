@@ -3,7 +3,7 @@ import type { createAgentServer } from "./agent-server.js";
 import type { createCmdLimit } from "./cmd-limit.js";
 import type { createCommandRouter } from "./commands.js";
 import type { createFeishuLinks } from "./feishu/link.js";
-import type { FeishuBotService } from "./feishu/service.js";
+import type { FeishuBotService, FeishuSpawnPort } from "./feishu/service.js";
 import type { HubJsonWriter } from "./hub-json.js";
 import type { StartHubDeps } from "./hub.js";
 import type { createIdleMonitor } from "./idle.js";
@@ -22,6 +22,7 @@ import type { FsAdmitter, PreviewDenyContext } from "./preview/admit.js";
 import type { createPreviewRoutes } from "./preview/routes.js";
 import type { PrivacyStore } from "./privacy/store.js";
 import type { createRegistry } from "./registry.js";
+import type { createScheduleService } from "./schedule/service.js";
 import type { createSecurityEventBus } from "./security-events.js";
 import type { probePlatform } from "./spawn/config.js";
 import type { FirstPromptForwarder } from "./spawn/first-prompt.js";
@@ -36,6 +37,7 @@ import type { createWorktreeGraphRoutes } from "./worktree-graph/routes.js";
 import type { XsAliasBinding } from "./xs/router.js";
 export interface HubAssemblyBase {
   config: HubConfig;
+  hubAgentDir: string;
   deps: StartHubDeps;
   paths: HubPaths;
   log: HubLog;
@@ -54,6 +56,8 @@ export interface HubAssemblyBase {
  * mutable handles from this same object, never a snapshot of a later assignment. */
 export interface HubAssembly extends HubAssemblyBase {
   bot: FeishuBotService | undefined;
+  botSpawn: FeishuSpawnPort | undefined;
+  scheduleHub?: ReturnType<typeof createScheduleService> | undefined;
 
   supersede: SupersedeController | undefined;
 
@@ -174,6 +178,7 @@ export function createHubAssembly(base: HubAssemblyBase): HubAssembly {
     htmlEnabled: false,
     avatarRoutes: undefined,
     bot: undefined,
+    botSpawn: undefined,
     supersede: undefined,
     spawnSup: undefined,
     spawnRoutes: undefined,

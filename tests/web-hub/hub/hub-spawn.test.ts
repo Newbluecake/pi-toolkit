@@ -520,7 +520,7 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
   });
 
   it("web-hub-spawn-restore D9/§10.4 wiring pin: onPrevAgentGone ⇒ registry.remove(prevKey, {allowConnected:true}); veto file wired", () => {
-    const src = readFileSync("src/web-hub/hub/hub.ts", "utf8");
+    const src = readFileSync("src/web-hub/hub/assembly-spawn.ts", "utf8");
     expect(src).toMatch(
       /onPrevAgentGone:\s*\(_spawnId, prevAgentKey\)\s*=>\s*\{\s*registry\.remove\(prevAgentKey, \{ allowConnected: true \}\);/,
     );
