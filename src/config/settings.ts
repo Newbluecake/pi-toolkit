@@ -1,3 +1,10 @@
+/**
+ * The settings aggregator (#56 batch 2 ⑧): reads/migrates/locks the settings file, assembles `AgentSettings`,
+ * owns `DEFAULT_SETTINGS` and the `parseSettingsSource` orchestration. Every subsystem block's types, frozen
+ * defaults and never-throws parser live in `<subsystem>/settings.ts` and are imported from there; the
+ * subsystem types are re-exported below (`export type … from`) so type-only consumers keep one import path.
+ * Its value-import closure stays pi-free (pinned by `tests/web-hub/boundary.test.ts` SYSLOAD_FILE_CLOSURE).
+ */
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -147,10 +154,6 @@ import type { WebHubLanSettingsWarnings } from "../commands/webhub.js";
 /** The agent-side `WebHubSettings` (owned by `web-hub/agent/index.ts`; `proxy?` is folded in there, X1c). */
 export type WebHubSettings = AgentWebHubSettings;
 export type { WebHubLanSettings, WebHubSpawnSettings };
-// web-hub LAN (S1-W3 LI, lan-plan.md §9.1): host-token / origin classification is W1-frozen and
-// shared by every layer that needs to agree on what counts as a valid host — settings validation
-// (here, L16 第一处) is one of those layers, alongside `hub/main.ts`'s `parseHubLanConfig` (L16
-// 第二处) and the request pipeline. Pure functions only, no pi import, no side effects.
 
 // topic-switch plan.md P1 "settings.ts": config/settings.ts imports ONLY this module for the
 // `topicSwitch` block — it owns the interface, the frozen defaults and the never-throws parser.
