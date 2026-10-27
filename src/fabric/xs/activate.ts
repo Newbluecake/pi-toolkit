@@ -16,6 +16,7 @@ import { aliasSuggestions } from "./alias-suggest.js";
 import { getXsHostCapability } from "./host-cap.js";
 import { getXsReplyLedger } from "./reply-ledger.js";
 import { createXsSender, detectXsToolCollisions, type XsSender } from "./sender.js";
+import { stashXsMembershipHandoff, takeXsMembershipHandoff, type XsMembershipEntryData } from "./membership.js";
 import type { StackXsInput } from "./stack.js";
 import { xsOn } from "./switch.js";
 import type { XsChannelView } from "./types-channel.js";
@@ -52,8 +53,11 @@ export interface XsActivation {
   registerFenceHooks(pi: ExtensionAPI): void;
   /** Phase c: sender, list_sessions / message_session / message_channel, `/fabric`. */
   registerSurface(pi: ExtensionAPI): void;
+  /** session_shutdown: on a `/new` boundary (reason "new") stash the outgoing stack's explicit
+   *  membership for the successor session (new-session-channels-fix). No-op otherwise. */
+  stashMembershipHandoff(reason: string): void;
   /** session_start: clears `attached`, returns the session id this start proves (undefined when xs is idle). */
-  beginSessionStart(ctx: ExtensionContext): string | undefined;
+  beginSessionStart(ctx: ExtensionContext, reason?: string): string | undefined;
   /** session_start with a live previous stack: a NEW session identity proves the old one ended. */
   defensiveTeardown(nextSessionId: string | undefined): void;
   /** `buildSessionStack`'s xs argument (undefined when xs is off). */
@@ -120,6 +124,9 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
   let xsSessionId: string | undefined;
   let xsCollisions: string[] = [];
   let xsHubLimits: XsHubLimitsWire | undefined;
+  // /new membership handoff (new-session-channels-fix): the snapshot taken at
+  // `session_shutdown{new}`, consumed by the immediately following `stackInput()`.
+  let pendingHandoff: XsMembershipEntryData | undefined;
 
   // Reply-plan §9 (MW): the @session port reuses the SAME sender instance as the tools.
   let xsSender: XsSender | undefined;
@@ -391,8 +398,21 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     }
   }
 
-  function beginSessionStart(ctx: ExtensionContext): string | undefined {
+  function stashMembershipHandoff(reason: string): void {
+    if (reason !== "new") return; // fork never inherits (P10); resume/quit have their own state
+    try {
+      const shot = holder.current?.xs?.membership.handoffSnapshot();
+      if (shot !== undefined) stashXsMembershipHandoff(shot);
+    } catch {
+      /* handoff is best-effort: a failure just keeps today's behaviour */
+    }
+  }
+
+  function beginSessionStart(ctx: ExtensionContext, reason?: string): string | undefined {
     xsAttached = false;
+    // Consume-once (any reason clears the slot): only a `/new` start adopts the handoff.
+    const shot = takeXsMembershipHandoff();
+    pendingHandoff = reason === "new" ? shot : undefined;
     return xsEnabled || xsLedger.size > 0 ? xsSessionOf(ctx) : undefined;
   }
 
@@ -401,8 +421,11 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
   }
 
   function stackInput(): StackXsInput | undefined {
+    const handoff = pendingHandoff;
+    pendingHandoff = undefined;
     return xsEnabled
       ? {
+          ...(handoff !== undefined ? { membershipHandoff: handoff } : {}),
           ports: {
             webExec: () => webHubRef.current?.webExecBusy?.() === true,
             topicSwitch: () => xsFencePorts.topicSwitch?.(),
@@ -519,6 +542,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     registerTriggerGuard,
     registerFenceHooks,
     registerSurface,
+    stashMembershipHandoff,
     beginSessionStart,
     defensiveTeardown,
     stackInput,

@@ -243,3 +243,42 @@ it("web /new exec claim fences actual socket ingress before its command trampoli
   });
   expect((await b.rpc("inspect")).messages).toHaveLength(0);
 }, 25_000);
+
+it("/new (web 清空) keeps the joined channels: the new sid re-joins and stays reachable; fork still does not inherit", async () => {
+  h = new XsHarness();
+  const hub = await h.boot("hub");
+  const [a, b] = await Promise.all([h.boot("agent", "alpha"), h.boot("agent", "beta")]);
+  await a.rpc("cmd", { args: "join #team" });
+  await b.rpc("cmd", { args: "join #team" });
+  const aid = (await a.rpc("inspect")).sessionId;
+  const bid = (await b.rpc("inspect")).sessionId;
+  await until(
+    () => list(b),
+    (l) => l.rows?.some((r: any) => aid.startsWith(r.ref)),
+    "a visible in #team",
+  );
+  expect(await a.rpc("cmd")).toContain("channels #team");
+
+  // Web 「清空」/ builtin /new: session_shutdown{new} → session_start{new} with a fresh sessionId.
+  const moved = await a.rpc("replace");
+  expect(moved.sessionId).not.toBe(aid);
+  // The membership rides the /new boundary: the local status AND the hub member table keep #team.
+  const status = await a.rpc("cmd");
+  expect(status).toContain("xs: joined");
+  expect(status).toContain("channels #team");
+  await until(
+    () => list(b),
+    (l) => l.rows?.some((r: any) => moved.sessionId.startsWith(r.ref)),
+    "new sid joined #team",
+  );
+  expect(await send(b, moved.sessionId, "still in the channel after /new")).toMatchObject({ effect: "applied" });
+  expect((await a.rpc("inspect")).messages.map((m: any) => m.content)).toEqual([
+    expect.stringContaining("still in the channel after /new"),
+  ]);
+  // A reload after the /new still restores the inherited membership (adopt persisted it).
+  await a.rpc("reload");
+  expect(await a.rpc("cmd")).toContain("channels #team");
+  // The OLD session keeps its own membership: resuming it restores #team on the old sid.
+  // (fork semantics stay untouched — covered by the dedicated fork tests above.)
+  await send(a, bid, "pair throttle separator");
+}, 30_000);

@@ -838,7 +838,7 @@ export default function activate(rawPi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     activateResultTool(ctx);
-    const nextXsSessionId = xs.beginSessionStart(ctx);
+    const nextXsSessionId = xs.beginSessionStart(ctx, _event.reason);
     notifyCapabilityCtx.current = ctx;
     subscribeCapabilityAlert();
     if (compat.warning) console.warn(`[pi-subagent] ${compat.warning}`);
@@ -886,6 +886,9 @@ export default function activate(rawPi: ExtensionAPI): void {
       activationTeardown.releaseCapabilityAlert(); // no stack (compat gate failed): still drop the G11 subscription
       return;
     }
+    // /new channel handoff (new-session-channels-fix): stash the outgoing membership BEFORE
+    // dispose so the next session_start{new} can adopt it (a no-op for any other reason).
+    xs.stashMembershipHandoff(event.reason);
     // Path C4 of src/stack-teardown.ts: the ordered, awaited shutdown (background completions first, schedule
     // closeEpoch before the run drain, fabric before run shutdown, worktree disposal after seal, bash kill/seal on quit).
     await stack.dispose({ kind: "shutdown", reason: event.reason }, { ctx, settings, activation: activationTeardown });

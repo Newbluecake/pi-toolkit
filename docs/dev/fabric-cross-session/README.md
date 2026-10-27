@@ -80,7 +80,13 @@ invocations via `isFeishuInvocation`, derived from the hub-internal `ip:"feishu"
 marker); web prompt text carrying `/fabric <mutation>` is likewise refused (defense-in-depth
 so prompt text can never bypass the policy gate). status/blocks stay read-only. Joined
 receive defaults to `wake` (`fabric.crossSession.receive`, `allowFrom`); fork/copy never inherits
-membership, even with autoJoin. `message_session` omits wake = deliver-only; `wake:true` alone may
+membership, even with autoJoin. **`/new` (and its web 「清空」 twin) DOES inherit** (2026-10-27 fix,
+`new-session-channels-fix.md`): the outgoing stack's explicit membership snapshot (channel pref, receive
+pref, blocklist, joinedAt) rides a consume-once `Symbol.for("pi-subagent:xs-membership-handoff")` slot from
+`session_shutdown{reason:"new"}` into the next stack, which `adopt()`s it (re-persisted under the NEW
+sessionId, so `/reload` keeps it) and it suppresses autoJoin exactly like a restored entry — an explicit
+leave therefore survives `/new` too. A pristine (never-touched) membership stashes nothing, so autoJoin
+behaviour for fresh sessions is unchanged. Aliases deliberately do NOT transfer on `/new` (alias-plan 「不做」). `message_session` omits wake = deliver-only; `wake:true` alone may
 start a turn through `RootWakeController` (no steer), gated by `fabric.wake.enabled`, causal level,
 capability, goal and quotas. Unknown host capability downgrades to deliver-only until real runtime
 shape evidence; root deadline `fabric.wake.rootRunMaxS` (default 900s) starts at dispatch, including

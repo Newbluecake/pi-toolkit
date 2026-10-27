@@ -9,7 +9,12 @@ import {
 import { type CausalLevel } from "../wake-level.js";
 import { RootWakeController, type RootWakeAudit } from "../root-wake.js";
 import { createSessionFence, type FencePorts, type SessionFence } from "./fence.js";
-import { XsMembership, readXsMembershipEntry, XS_MEMBERSHIP_CUSTOM_TYPE } from "./membership.js";
+import {
+  XsMembership,
+  readXsMembershipEntry,
+  XS_MEMBERSHIP_CUSTOM_TYPE,
+  type XsMembershipEntryData,
+} from "./membership.js";
 import { channelsFieldToWrite, isDefaultOnly, XS_DEFAULT_CHANNEL } from "./channel.js";
 import { XsInbox } from "./inbox.js";
 import { createXsDirectoryCache, type XsDirectoryCache, type XsDirectoryRow } from "./directory.js";
@@ -47,6 +52,10 @@ export interface StackXsInput {
    *  not usable: a hub-stamped `from.alias` is dropped before the receiver formats the header, so an alias-off
    *  agent's model-visible content stays byte-identical even facing a non-conforming hub. */
   aliasUsable?: () => boolean;
+  /** /new handoff (new-session-channels-fix): the outgoing session's explicit membership snapshot,
+   *  present only for a `session_start{reason:"new"}` that had one stashed at shutdown. Adopted
+   *  only when the new branch has no entry of its own; suppresses autoJoin like a restored entry. */
+  membershipHandoff?: XsMembershipEntryData;
 }
 
 export interface StackXs extends XsStackPort {
@@ -124,12 +133,29 @@ export function buildStackXs(
   membership.attach();
   const restored = readXsMembershipEntry(ctx.sessionManager.getBranch());
   membership.restore(restored);
+  // /new handoff (new-session-channels-fix): a `/new` (web 「清空」) session starts with an empty
+  // branch, so without this the operator's channels would be silently dropped. The outgoing
+  // stack's explicit membership was stashed at `session_shutdown{new}`; adopt it (re-persisted
+  // under the NEW sessionId) — fork never stashes, so P10 is untouched. Same-session restore
+  // (restored !== undefined) always wins over the handoff.
+  const handoff =
+    reason === "new" && restored === undefined && input.membershipHandoff?.sessionId !== sessionId
+      ? input.membershipHandoff
+      : undefined;
+  if (handoff !== undefined) membership.adopt(handoff);
   // Explicit persisted leave wins over autoJoin; fork/copy never inherits the parent's opt-in.
   // Channel-plan §2.4 (CHW): the boolean `autoJoin` stays the master switch; it joins
   // `channels.autoJoin` (default ["default"] ⇒ the legacy join). All entries invalid ⇒ join nothing
   // (`/fabric status` says so). Channels off ⇒ only `#default` may be auto-joined (named entries are
-  // never folded into default; with no default entry nothing is joined).
-  if (config.autoJoin && reason !== "fork" && restored === undefined && !config.channels.autoJoinInvalid) {
+  // never folded into default; with no default entry nothing is joined). An adopted /new handoff
+  // (possibly an explicit leave) suppresses autoJoin exactly like a restored entry does.
+  if (
+    config.autoJoin &&
+    reason !== "fork" &&
+    restored === undefined &&
+    handoff === undefined &&
+    !config.channels.autoJoinInvalid
+  ) {
     const names = config.channels.enabled
       ? config.channels.autoJoin
       : config.channels.autoJoin.filter((name) => name === XS_DEFAULT_CHANNEL);
