@@ -235,6 +235,13 @@ keep count or when no age-eligible non-held items remain. Held items never auto-
 once. All three settings are agent-only, non-live: `/reload` suffices, no hub restart.
 Evidence: `docs/dev/web-hub/archive-threshold-report.md`.
 
+**Cap-stable sweep (flip-flop fix)**: the archive snapshot is FIFO-capped at 256. A sweep must never select more
+than `archiveRoom` (free slots + entries whose item is gone from the live lists) — selecting past the cap made
+FIFO eviction drop still-live entries that the next sweep re-selected, rewriting a full 256-entry snapshot every
+minute and flipping archived/unarchived (a 687-run session wrote 4,882 `subagent:archive` entries). When more
+items are eligible than fit, the newest-settled win (the visible rows); `makeArchiveRoom` drops gone entries first.
+Tests: `tests/archive/control.test.ts` ("flip-flop regression"), `tests/archive/sweep.test.ts`.
+
 ## Cache keepalive panel
 
 **Cache keepalive panel (cache-ttl-keepalive webhub plan)**: `agent/cache-keepalive.ts` projects the keepalive report to the

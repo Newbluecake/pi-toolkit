@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { emptyArchiveState, type ArchiveState } from "../../src/archive/state.js";
-import { selectAutoArchives, type ArchiveCandidate } from "../../src/archive/sweep.js";
+import { ARCHIVE_ENTRIES_CAP, archiveItem, emptyArchiveState, type ArchiveState } from "../../src/archive/state.js";
+import { makeArchiveRoom, selectAutoArchives, type ArchiveCandidate } from "../../src/archive/sweep.js";
 
 const policy = { afterMs: 100, keepRuns: 6, keepBash: 5 };
 function rows(kind: "run" | "bash", count: number): ArchiveCandidate[] {
@@ -67,5 +67,30 @@ describe("fleet auto-archive count + age gates", () => {
     expect(
       ids([...rows("run", 9), ...rows("bash", 9)], emptyArchiveState(), { afterMs: 0, keepRuns: 0, keepBash: 0 }),
     ).toEqual([]);
+  });
+});
+
+describe("archive capacity (flip-flop regression)", () => {
+  it("never selects more than fits under the cap; the newest-settled eligible items win", () => {
+    const picked = ids(rows("run", 300));
+    expect(picked).toHaveLength(ARCHIVE_ENTRIES_CAP);
+    expect(picked[0]).toBe("run-38"); // oldest-first order preserved among the winners
+    expect(picked).toContain("run-293");
+    expect(picked).not.toContain("run-37");
+  });
+
+  it("a full state of live entries leaves no room; gone entries free exactly their slots", () => {
+    let state: ArchiveState = emptyArchiveState();
+    const live = rows("run", ARCHIVE_ENTRIES_CAP + 20);
+    for (let i = 0; i < ARCHIVE_ENTRIES_CAP; i++)
+      state = archiveItem(state, { kind: "run", id: `run-${i}`, auto: true, now: 1 }) ?? state;
+    expect(ids(live, state)).toEqual([]);
+    const candidates = live.filter((c) => c.id !== "run-0" && c.id !== "run-1"); // two archived runs vanished
+    const picked = ids(candidates, state);
+    expect(picked).toHaveLength(2);
+    const next = makeArchiveRoom(state, candidates, 2);
+    expect(next.entries).toHaveLength(ARCHIVE_ENTRIES_CAP - 2);
+    expect(next.entries.some((e) => e.id === "run-0" || e.id === "run-1")).toBe(false);
+    expect(next.entries.some((e) => e.id === "run-2")).toBe(true);
   });
 });

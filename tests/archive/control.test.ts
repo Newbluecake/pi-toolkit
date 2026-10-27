@@ -134,6 +134,79 @@ describe("ArchiveControl: restore", () => {
   });
 });
 
+describe("ArchiveControl: auto sweep above the 256-entry archive cap (flip-flop regression)", () => {
+  // Field evidence: a session whose fleet held 687 terminal runs committed a full 256-entry
+  // snapshot EVERY sweep (4882 `subagent:archive` entries in 3.5 days), alternating between two
+  // disjoint id sets — the sweep selected every run beyond the keep count, FIFO eviction dropped
+  // the oldest-inserted ones, and the evicted (still live) runs were re-selected next minute.
+  const manyRuns = (n: number) => Array.from({ length: n }, (_, i) => runSnap({ runId: `r-${i}`, updatedAt: i }));
+  const archivedRuns = (h: ReturnType<typeof makeControl>) => [...h.control.view().runs].sort();
+
+  it("converges: once the cap is full, further sweeps neither change the set nor write entries", () => {
+    vi.useFakeTimers();
+    try {
+      const h = makeControl({ runs: manyRuns(300), sweepMs: 1000 });
+      h.control.start(60_000, 6, 5);
+      vi.advanceTimersByTime(1000);
+      const first = archivedRuns(h);
+      expect(first).toHaveLength(256);
+      expect(h.appended).toHaveLength(1);
+      for (let i = 0; i < 5; i++) vi.advanceTimersByTime(1000);
+      expect(archivedRuns(h)).toEqual(first); // no A/B alternation
+      expect(h.appended).toHaveLength(1); // no per-minute re-commit of an unchanged-in-spirit snapshot
+      // The rows a user can actually see (newest terminal) are the ones archived: r-293 is the
+      // newest run beyond the keep-6 window (r-294..r-299 stay live).
+      expect(h.control.view().runs.has("r-293")).toBe(true);
+      expect(h.control.view().runs.has("r-299")).toBe(false);
+      h.control.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a manual archive is not erased by later sweeps", () => {
+    vi.useFakeTimers();
+    try {
+      const h = makeControl({ runs: manyRuns(700), sweepMs: 1000 });
+      h.control.start(60_000, 6, 5);
+      vi.advanceTimersByTime(1000);
+      expect(h.control.setArchived("run", "r-699", "archive")).toEqual({ ok: true, changed: true });
+      for (let i = 0; i < 5; i++) vi.advanceTimersByTime(1000);
+      expect(h.control.view().runs.has("r-699")).toBe(true);
+      expect(h.control.wire()?.entries.find((e) => e.id === "r-699")?.auto).toBeUndefined();
+      h.control.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("makes room by dropping archive entries whose run is gone, not live ones", () => {
+    vi.useFakeTimers();
+    try {
+      const runs = manyRuns(300);
+      const h = makeControl({ runs, sweepMs: 1000 });
+      h.control.start(60_000, 6, 5);
+      vi.advanceTimersByTime(1000);
+      const before = archivedRuns(h);
+      // 20 archived runs vanish from memory, 20 new terminal runs appear.
+      const gone = new Set(["r-0", "r-1", "r-2"].concat(before.slice(0, 17)));
+      for (let i = runs.length - 1; i >= 0; i--) if (gone.has(runs[i]!.runId)) runs.splice(i, 1);
+      for (let i = 0; i < 20; i++) runs.push(runSnap({ runId: `n-${i}`, updatedAt: 1000 + i }));
+      vi.advanceTimersByTime(1000);
+      const after = archivedRuns(h);
+      expect(after).toHaveLength(256);
+      for (const id of before) if (!gone.has(id)) expect(after).toContain(id); // live entries survive
+      expect(after.filter((id) => gone.has(id))).toEqual([]); // gone ones were the evictees
+      expect(after).toContain("n-13"); // newest beyond keep-6 (n-14..n-19 stay live)
+      vi.advanceTimersByTime(3000);
+      expect(archivedRuns(h)).toEqual(after);
+      h.control.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("ArchiveControl: auto sweep", () => {
   it("archives terminal runs and bash jobs past the threshold in ONE batch commit", () => {
     vi.useFakeTimers();

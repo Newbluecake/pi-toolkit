@@ -26,7 +26,7 @@ import {
   type ArchiveKind,
   type ArchiveState,
 } from "./state.js";
-import { selectAutoArchives } from "./sweep.js";
+import { makeArchiveRoom, selectAutoArchives, type ArchiveCandidate } from "./sweep.js";
 import { isTerminalStatus } from "../core/status.js";
 import { isTerminalJobStatus, type JobRecord } from "../bash/types.js";
 import type { RunSnapshot } from "../core/types.js";
@@ -179,27 +179,30 @@ export class ArchiveControl {
   private sweep(): void {
     if (this.disposed || this.autoAfterMs <= 0) return;
     const now = this.deps.now();
-    let next = this.state;
-    let changed = false;
-    const selected = selectAutoArchives(
-      this.state,
-      [
-        ...this.candidates.runs().map((snap) => ({
-          kind: "run" as const,
-          id: snap.runId,
-          terminal: isTerminalStatus(snap.status),
-          settledAt: snap.diag.settledAt ?? snap.updatedAt,
-        })),
-        ...this.candidates.bashJobs().map((record) => ({
-          kind: "bash" as const,
-          id: record.jobId,
-          terminal: isTerminalJobStatus(record.status),
-          settledAt: record.endedAt ?? record.createdAt,
-        })),
-      ],
-      now,
-      { afterMs: this.autoAfterMs, keepRuns: this.keepRuns, keepBash: this.keepBash },
-    );
+    const candidates: ArchiveCandidate[] = [
+      ...this.candidates.runs().map((snap) => ({
+        kind: "run" as const,
+        id: snap.runId,
+        terminal: isTerminalStatus(snap.status),
+        settledAt: snap.diag.settledAt ?? snap.updatedAt,
+      })),
+      ...this.candidates.bashJobs().map((record) => ({
+        kind: "bash" as const,
+        id: record.jobId,
+        terminal: isTerminalJobStatus(record.status),
+        settledAt: record.endedAt ?? record.createdAt,
+      })),
+    ];
+    const selected = selectAutoArchives(this.state, candidates, now, {
+      afterMs: this.autoAfterMs,
+      keepRuns: this.keepRuns,
+      keepBash: this.keepBash,
+    });
+    if (selected.length === 0) return;
+    // Evict gone entries (not live ones) so the state's FIFO cap never bites during a sweep.
+    const base = makeArchiveRoom(this.state, candidates, selected.length);
+    let next = base;
+    let changed = base !== this.state;
     for (const item of selected) {
       const after = archiveItem(next, { kind: item.kind, id: item.id, auto: true, now });
       if (after !== undefined) {
