@@ -565,3 +565,46 @@ describe("#72 AF4 auto status", () => {
     }
   });
 });
+
+describe("#72 AF3 N1: /fabric join re-runs the alias reconcile", () => {
+  const withReconcile = () => {
+    const reconcile = vi.fn(async () => undefined);
+    const h = harness({ port: { cache: { usable: true, current: () => undefined, reconcile } } });
+    return { h, reconcile };
+  };
+
+  it("a successful join triggers exactly one reconcile (the auto-claim tail rides on it)", async () => {
+    const { h, reconcile } = withReconcile();
+    const notes = await h.run("join");
+    expect(notes[0]?.message).toContain("已加入");
+    expect(reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it("an already-joined / refused join does not reconcile", async () => {
+    const { h, reconcile } = withReconcile();
+    await h.run("join");
+    reconcile.mockClear();
+    const again = await h.run("join");
+    expect(again[0]?.message).toContain("已经加入");
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it("join with alias disabled / degraded cache never reconciles and still succeeds", async () => {
+    const reconcile = vi.fn(async () => undefined);
+    const off = harness({
+      port: { localEnabled: false, cache: { usable: true, current: () => undefined, reconcile } },
+    });
+    expect((await off.run("join"))[0]?.message).toContain("已加入");
+    const degraded = harness({ port: { cache: { usable: false, current: () => undefined, reconcile } } });
+    expect((await degraded.run("join"))[0]?.message).toContain("已加入");
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it("a throwing reconcile never breaks the join", async () => {
+    const reconcile = vi.fn(async () => {
+      throw new Error("hub down");
+    });
+    const h = harness({ port: { cache: { usable: true, current: () => undefined, reconcile } } });
+    expect((await h.run("join"))[0]?.message).toContain("已加入");
+  });
+});

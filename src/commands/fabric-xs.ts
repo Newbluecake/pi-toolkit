@@ -457,6 +457,9 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
           }
           deps.onPolicyChange?.();
           refreshChannels();
+          // §5.1: a join bumps the membership epoch ⇒ the alias reconcile (and its auto-claim tail) gets a
+          // fresh attempt key; the member frame from onPolicyChange is already queued ahead of the get.
+          refreshAlias(deps);
           notify(
             ctx,
             [`已加入（epoch ${result.epoch}）。${currentSetText(membership)}`, ...mixHint(membership)].join("\n"),
