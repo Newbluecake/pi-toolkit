@@ -35,6 +35,9 @@ const PI_ARGS = join(REPO, "node_modules", "@earendil-works", "pi-coding-agent",
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- plain-JS module, no typings by design
 const H: any = await import(pathToFileURL(HELPER).href);
 const HELPER_SRC = readFileSync(HELPER, "utf8");
+// #56 ⑩-S: the in-ns finalize steps (finalizeInNs, lazyDetach) live in finalize.mjs; the source pins
+// below follow the code there.
+const FINALIZE_SRC = readFileSync(join(dirname(HELPER), "finalize.mjs"), "utf8");
 
 const which = (b: string) => spawnSync("sh", ["-c", `command -v ${b}`]).status === 0;
 const HAVE_FLOCK = process.platform === "linux" && which("flock");
@@ -430,8 +433,8 @@ describe.skipIf(!HAVE_FLOCK)("releaseRecord — the only deleter (§3.2, I-P3)",
     const abort = body("function cmdPrivateAbortStart", "async function cmdPrivateTerminate");
     expect(rel).toContain("deletePrivateRecordSync(v)");
     expect(abort).toContain("deletePrivateRecordSync(v)");
-    const p1 =
-      body("async function cmdNsRoot", "// ═════") || body("async function cmdNsRoot", "export async function main");
+    // the ns-root: cmdNsRoot plus everything it runs from finalize.mjs
+    const p1 = body("async function cmdNsRoot", "export async function main") + FINALIZE_SRC;
     for (const forbidden of [
       "deletePrivateRecordSync",
       "__private-release",
@@ -539,7 +542,8 @@ describe("scanNsMembers (never reports an incomplete scan as empty)", () => {
       HELPER_SRC.indexOf("function cmdPrivateAbortStart"),
     );
     expect(relBody).not.toContain("deniedMeans");
-    expect([...HELPER_SRC.matchAll(/deniedMeans: "outside"/g)].length).toBe(1);
+    // the single in-ns use (finalizeInNs) — none left in helper.mjs
+    expect([HELPER_SRC, FINALIZE_SRC].map((t) => [...t.matchAll(/deniedMeans: "outside"/g)].length)).toEqual([0, 1]);
     // status / stat / ns-user failures other than ENOENT ⇒ incomplete; ENOENT/ESRCH ⇒ skipped
     expect((await scan({ "/21/status": "EIO" })).kind).toBe("incomplete");
     expect((await scan({ "/21/status": "EACCES" })).kind).toBe("incomplete");
