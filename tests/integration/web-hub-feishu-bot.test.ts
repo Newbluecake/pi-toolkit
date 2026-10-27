@@ -595,7 +595,7 @@ describe("F10 Feishu bot — real hub child assembly", () => {
     );
     // Establish real tenant evidence before the real approval port issues callback nonces.
     await h.send("/list");
-    await h.sent("One · sessio");
+    await h.sent("One · idle");
     expect(await admin("tfa_req", { op: "feishu", on: true })).toMatchObject({ ok: true });
     const f = await post("127.0.0.5", "/api/login", loginBody);
     expect(f.status).toBe(401);
@@ -648,7 +648,7 @@ describe("F10 Feishu bot — real hub child assembly", () => {
     expect(a.ack.caps).toEqual(h.ready.caps);
     expect(h.ready.caps).toContain(FSB_HUB_CAP);
     await h.send("/list");
-    await h.sent("One · sessio");
+    await h.sent("One · idle");
     await h.send("/use 1");
     await h.sent("已绑定");
     await h.send("write report");

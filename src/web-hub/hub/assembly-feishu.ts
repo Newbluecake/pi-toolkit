@@ -34,6 +34,8 @@ export async function assembleFeishu(ctx: HubAssembly): Promise<void> {
       limit: cmdLimit,
       commands: commandRouter,
       sessions: {
+        // xs alias off ⇒ key absent (byte-identical); read lazily from the loaded store.
+        ...(ctx.xsAlias === undefined ? {} : { alias: (sid: string) => ctx.xsAlias?.store.heldBy(sid) }),
         views: () =>
           registry.list().flatMap((a) =>
             a.session === undefined

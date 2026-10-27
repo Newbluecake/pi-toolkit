@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanupF6, f6Rig, OWNER, OTHER } from "../../../fixtures/feishu/f6.js";
-import { feishuBindingKey } from "../../../../src/web-hub/hub/feishu/sessions.js";
+import { createFeishuSessions, feishuBindingKey } from "../../../../src/web-hub/hub/feishu/sessions.js";
 
 afterEach(cleanupF6);
 describe("F6 session directory", () => {
@@ -68,5 +68,62 @@ describe("F6 session directory", () => {
     expect(r.sessions.list("chat", OWNER).ok).toBe(true);
     r.sessions.clear();
     expect(r.sessions.select("chat", OWNER, "1")).toEqual({ ok: false, code: "list-expired" });
+  });
+});
+
+describe("F6 session directory × xs alias", () => {
+  const mk = (alias?: (sid: string) => string | undefined) => {
+    const views = ["a", "b", "c"].map((id) => ({
+      sessionId: `sid-${id}00000`,
+      agentKey: `k-${id}`,
+      cwd: "/repo",
+      name: id === "c" ? "A" : `n-${id}`,
+      live: true,
+      mode: "tui" as const,
+      state: "idle" as const,
+    }));
+    return createFeishuSessions({
+      views: () => views,
+      managed: () => [],
+      bindings: () => [],
+      ...(alias === undefined ? {} : { alias }),
+    });
+  };
+  const aliases: Record<string, string> = { "sid-a00000": "reviewer", "sid-b00000": "builder" };
+  it("rows carry alias only when held; xs off (no port) ⇒ no alias key, selector behaves as before", () => {
+    const withAlias = mk((sid) => aliases[sid]).rows();
+    expect(withAlias.find((r) => r.sessionId === "sid-a00000")?.alias).toBe("reviewer");
+    expect("alias" in withAlias.find((r) => r.sessionId === "sid-c00000")!).toBe(false);
+    const off = mk().rows();
+    expect(off.every((r) => !("alias" in r))).toBe(true);
+    expect(mk().select("chat", "u", "@reviewer")).toEqual({ ok: false, code: "not-found" });
+    expect(mk().select("chat", "u", "sid-")).toEqual({ ok: false, code: "ambiguous" });
+  });
+  it("select by @alias / bare alias (case-insensitive), alias wins over name, sid prefix still works", () => {
+    const s = mk((sid) => aliases[sid]);
+    expect(s.select("chat", "u", "@reviewer")).toMatchObject({ ok: true, row: { sessionId: "sid-a00000" } });
+    expect(s.select("chat", "u", "Builder")).toMatchObject({ ok: true, row: { sessionId: "sid-b00000" } });
+    expect(s.select("chat", "u", "@nobody")).toEqual({ ok: false, code: "not-found" });
+    expect(s.select("chat", "u", "sid-b0")).toMatchObject({ ok: true, row: { sessionId: "sid-b00000" } });
+    // "A" is both session c's name and (lowercased) not an alias ⇒ falls through to name match
+    expect(s.select("chat", "u", "A")).toMatchObject({ ok: true, row: { sessionId: "sid-c00000" } });
+  });
+  it("an alias on a duplicated live session stays ambiguous", () => {
+    const view = {
+      sessionId: "s1",
+      agentKey: "k1",
+      cwd: "/r",
+      name: "x",
+      live: true,
+      mode: "tui" as const,
+      state: "idle" as const,
+    };
+    const s = createFeishuSessions({
+      views: () => [view, { ...view, agentKey: "k2" }],
+      managed: () => [],
+      bindings: () => [],
+      alias: () => "dup",
+    });
+    expect(s.select("chat", "u", "@dup")).toEqual({ ok: false, code: "ambiguous" });
   });
 });

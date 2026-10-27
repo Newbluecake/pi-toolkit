@@ -108,11 +108,15 @@ const truncateCp = (s: string, max: number): string => {
   return chars.length <= max ? s : chars.slice(0, Math.max(0, max)).join("");
 };
 
+/** `名称 · @alias` (alias only when held; sid never shown). */
+const rowTitle = (row: FeishuSessionRow, nameMax?: number): string =>
+  `${nameMax === undefined ? row.name : truncateCp(row.name, nameMax)}${row.alias === undefined ? "" : ` · @${row.alias}`}`;
+
 /** The pre-card plain text list (D2: text is the base). The bound session is marked ✅. */
 export function renderListText(rows: readonly FeishuSessionRow[], currentSessionId?: string): string {
   return (
     rows
-      .map((r, i) => `${i + 1}. ${r.label} [${r.state}/${r.mode}]${r.sessionId === currentSessionId ? " ✅" : ""}`)
+      .map((r, i) => `${i + 1}. ${rowTitle(r)} [${r.state}/${r.mode}]${r.sessionId === currentSessionId ? " ✅" : ""}`)
       .join("\n") || "没有可用会话"
   );
 }
@@ -126,9 +130,9 @@ export interface ListCardButton {
   label: string;
 }
 
-/** `名称 · sid6 · 状态`, the name truncated by code points (surrogate-safe); sid6/state never truncated. */
+/** `名称 · @alias · 状态` (no alias ⇒ `名称 · 状态`), the name truncated by code points (surrogate-safe); alias/state never truncated. */
 export function listButtonLabel(row: FeishuSessionRow): string {
-  const suffix = ` · ${row.sessionId.slice(0, 6)} · ${row.state}`;
+  const suffix = `${row.alias === undefined ? "" : ` · @${row.alias}`} · ${row.state}`;
   const name = truncateCp(row.name, Math.max(1, FEISHU_CAPS.listButtonLabelMax - cpLength(suffix)));
   return `${name}${suffix}`;
 }
@@ -153,8 +157,8 @@ function cardJson(content: string, buttons: readonly ListCardButton[], currentSe
 }
 
 /**
- * Card body: every row (≤`listCardMaxRows`) as a numbered compact line `名称(≤16cp) · sid6 · 状态`,
- * a tail line for the overflow, and a `/use <sid6>` hint once not every clickable row gets a button.
+ * Card body: every row (≤`listCardMaxRows`) as a numbered compact line `名称(≤16cp) · @alias · 状态` (alias omitted when none),
+ * a tail line for the overflow, and a `/use` hint once not every clickable row gets a button.
  * `undefined` when even the reduced (20-line) card exceeds the byte budget ⇒ caller degrades to text.
  */
 export function renderListCard(
@@ -165,14 +169,13 @@ export function renderListCard(
   const build = (lineCap: number): string => {
     const shown = rows.slice(0, Math.min(lineCap, FEISHU_CAPS.listCardMaxRows));
     const lines = shown.map(
-      (r, i) =>
-        `${i + 1}. ${truncateCp(r.name, 16)} · ${r.sessionId.slice(0, 6)} · ${r.state}${r.sessionId === currentSessionId ? " ✅" : ""}`,
+      (r, i) => `${i + 1}. ${rowTitle(r, 16)} · ${r.state}${r.sessionId === currentSessionId ? " ✅" : ""}`,
     );
     const hints: string[] = [];
     if (rows.length > shown.length) hints.push(`另有 ${rows.length - shown.length} 个未显示`);
     if (rows.filter(isClickable).length > FEISHU_CAPS.listCardMaxButtons)
-      hints.push(`更多会话：/use <sid6> 或 /use <序号>`);
-    if (rows.length > 0) hints.push(`切换会话：点击按钮，或 /use <序号|sid前缀|名称>`);
+      hints.push(`更多会话：/use <序号|@别名|名称>`);
+    if (rows.length > 0) hints.push(`切换会话：点击按钮，或 /use <序号|@别名|名称>`);
     // Blank line before the hint block: Feishu markdown merges a plain line right after an ordered
     // list item INTO that item (live-acceptance 2026-10-19: the hint fused with the last row).
     if (hints.length > 0) lines.push("", ...hints);
@@ -372,7 +375,7 @@ export function createFeishuSessionCard(deps: SessionCardDeps) {
       out.push({
         sessionId: sid,
         nonce: slot.nonce,
-        label: row ? listButtonLabel(row) : `${sid.slice(0, 6)} · unknown`,
+        label: row ? listButtonLabel(row) : "未知会话 · unknown",
       });
     }
     return out;

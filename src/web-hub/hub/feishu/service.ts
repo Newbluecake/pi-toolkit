@@ -99,7 +99,11 @@ export interface FeishuBotServiceDeps {
   /** SAME object as HTTP uses (FA hoists it). */
   limit: CmdLimit;
   commands: FeishuAdmissionDeps["commands"];
-  sessions: { views(): readonly FeishuSessionView[]; managed(): readonly FeishuManagedSession[] };
+  sessions: {
+    views(): readonly FeishuSessionView[];
+    managed(): readonly FeishuManagedSession[];
+    alias?(sessionId: string): string | undefined;
+  };
   events: {
     subscribe(listener: (event: FeishuServiceEvent) => void): () => void;
     /** Authoritative registry dialog slots only (absence is NOT an empty list). */
@@ -142,7 +146,7 @@ const NEW_SESSION = "feishu:new";
 const SCHEDULE_HELP_LINE = "/schedule [run <序号>] — 查看定时任务 / 立即运行（仅私聊）";
 const HELP_BASE = [
   "/list — 列出可用会话（卡片可直接点击切换）",
-  "/use <n|sid-prefix|name> — 绑定/切换会话",
+  "/use <n|@alias|name> — 绑定/切换会话",
   "/cur — 查看当前绑定会话",
   "/new <dir> [first message] — 创建并绑定新会话",
   "/unbind — 解除当前绑定",
@@ -1377,7 +1381,9 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         const result = await sendCard(
           `ft${feishuKey(m.messageId)}`,
           { scope: "group-root", messageId: m.messageId, inThread: true },
-          simpleCard("话题已建立。请在话题内 @ 机器人使用 /new <dir> 或 /use <id> 绑定会话。未绑定前不会运行 agent。"),
+          simpleCard(
+            "话题已建立。请在话题内 @ 机器人使用 /new <dir> 或 /use <序号|@别名|名称> 绑定会话。未绑定前不会运行 agent。",
+          ),
           m.chatId,
         );
         if (result?.threadId && active && admission.authorize(intent.identity).ok) {

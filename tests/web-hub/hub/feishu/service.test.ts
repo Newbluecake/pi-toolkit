@@ -490,7 +490,7 @@ describe("F8 /help transport", () => {
     await eventually(() => expect(sentContent(r)).toContain("未知命令 /xxx"));
     for (const command of [
       "/list",
-      "/use <n|sid-prefix|name>",
+      "/use <n|@alias|name>",
       "/cur",
       "/new <dir> [first message]",
       "/unbind",
@@ -656,7 +656,7 @@ describe("F8 /list session-switch card (session-card-plan r3)", () => {
     const cards = () => r.fake.sent.filter((s) => s.body["msg_type"] === "interactive").length;
     const before = cards();
     r.send(messageEnvelope("list-2", "/list"));
-    await eventually(() => expect(sentContent(r).replaceAll("\u200b", "")).toContain("1. One · sessio [idle/tui]"));
+    await eventually(() => expect(sentContent(r).replaceAll("\u200b", "")).toContain("1. One [idle/tui]"));
     expect(cards()).toBe(before); // no new card after the denial
     expect(r.request).not.toHaveBeenCalled();
   });
