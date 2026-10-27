@@ -98,6 +98,9 @@ export type { EnabledGroup } from "./enabled-group.js";
 import { DEFAULT_ASK_USER_SETTINGS, parseAskUserSettings } from "../ask-user/settings.js";
 import type { AskUserSettings } from "../ask-user/settings.js";
 export type { AskUserBackgroundInterruptSettings, AskUserSettings } from "../ask-user/settings.js";
+import { DEFAULT_TODO_SETTINGS, parseTodoSettings } from "../todo/settings.js";
+import type { TodoSettings } from "../todo/settings.js";
+export type { TodoArchiveSettings, TodoNudgeSettings, TodoSettings } from "../todo/settings.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 import { getSecureDomain, statePathsOf } from "../secure/domain.js";
 import { resolveAgentDir } from "../core/agent-dir.js";
@@ -337,45 +340,6 @@ export interface AgentSettings {
 }
 
 /**
- * Main-session todo staleness nudge (L1 feature). All four counters are turn
- * counts, never durations, so they are excluded from the time-unit `*Ms`/`*S`
- * migration — a plain integer setting stays a plain integer setting.
- * `enabled:false` registers zero new handlers/messages (behavior identical to
- * before the feature existed); the nudge tracker is main-session only
- * (child subagent sessions never enable it — src/index.ts's `isChildSession`).
- */
-export interface TodoNudgeSettings {
-  enabled: boolean;
-  /** Turns to wait, from the FIRST unconfirmed E1/E2 evidence, before firing the evidence-based trigger. */
-  graceTurns: number;
-  /** Turns with zero evidence before the fallback trigger fires. */
-  fallbackTurns: number;
-  /** Turns to suppress re-nudging after a nudge fires; doubles per consecutive no-touch nudge, capped at 4x. */
-  cooldownTurns: number;
-}
-
-/** Merged plugins: TaskCreate/List/Get/Update/Delete + /tasklist widget, plus the staleness nudge sub-block. */
-export interface TodoSettings extends EnabledGroup {
-  nudge: TodoNudgeSettings;
-  /** Completed-task auto-archive (todo-archive plan D1). Both knobs are non-live (/reload). */
-  archive: TodoArchiveSettings;
-}
-
-/**
- * Completed-task auto-archive (todo-archive plan §2, user ruling 2026-10-15): `onCompact` sweeps
- * every completed task when the session compacts; `afterTurns` archives a completed task on the
- * Nth `turn_end` after its completion (turns are finer-grained than user requests — tune N
- * accordingly). Both are turn/compaction-count semantics, never durations, so like the nudge
- * block they stay out of the `*Ms`/`*S` time-unit migration. Non-live: read at wiring time only.
- */
-export interface TodoArchiveSettings {
-  /** Archive all completed tasks on session compaction. Default true. */
-  onCompact: boolean;
-  /** Archive a completed task after this many turn_end events; 0 disables the per-turn sweeper. Default 30, min 0. */
-  afterTurns: number;
-}
-
-/**
  * HUD settings group. `autoFetchMinutes`: HUD 周期 `git fetch --quiet --prune`
  * 的间隔（分钟）——↑/↓ 计数对比的是本地 remote-tracking ref，不 fetch 就永远
  * 看不到别处推进的远程提交；0 = 关闭（只保留手动 /pi-hud-refresh）。
@@ -429,11 +393,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   webHub: DEFAULT_WEBHUB_SETTINGS,
   webSearch: { enabled: true },
   date: { enabled: true },
-  todo: {
-    enabled: true,
-    nudge: { enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 8 },
-    archive: { onCompact: true, afterTurns: 30 },
-  },
+  todo: DEFAULT_TODO_SETTINGS,
   askUser: DEFAULT_ASK_USER_SETTINGS,
   feishuNotify: { enabled: true },
   sessionNav: { enabled: true },
@@ -757,53 +717,6 @@ function parseHudSettings(input: unknown): HudSettings {
     enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
     autoFetchMinutes:
       typeof minutes === "number" && Number.isFinite(minutes) && minutes >= 0 ? minutes : defaults.autoFetchMinutes,
-  };
-}
-
-/**
- * Parse the `todo` settings block: `enabled` is the existing EnabledGroup
- * semantics, `nudge` is a nested sub-block (todo-nudge plan) that falls back
- * field-by-field to DEFAULT_SETTINGS.todo.nudge — all four fields are plain
- * turn counts (not durations), positive integers required, illegal/missing
- * values fall back individually; never throws.
- */
-function parseTodoSettings(input: unknown): TodoSettings {
-  const defaults = DEFAULT_SETTINGS.todo;
-  if (!input || typeof input !== "object" || Array.isArray(input))
-    return { ...defaults, nudge: { ...defaults.nudge }, archive: { ...defaults.archive } };
-  const record = input as Record<string, unknown>;
-  return {
-    enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
-    nudge: parseTodoNudgeSettings(record.nudge, defaults.nudge),
-    archive: parseTodoArchiveSettings(record.archive, defaults.archive),
-  };
-}
-
-/** todo-archive plan §2: field-by-field fallback to DEFAULT_SETTINGS.todo.archive; `afterTurns`
- * accepts integers >= 0 (0 = off); never throws. */
-function parseTodoArchiveSettings(input: unknown, defaults: TodoArchiveSettings): TodoArchiveSettings {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
-  const record = input as Record<string, unknown>;
-  const afterTurns = record.afterTurns;
-  return {
-    onCompact: typeof record.onCompact === "boolean" ? record.onCompact : defaults.onCompact,
-    afterTurns:
-      typeof afterTurns === "number" && Number.isFinite(afterTurns) && Number.isInteger(afterTurns) && afterTurns >= 0
-        ? afterTurns
-        : defaults.afterTurns,
-  };
-}
-
-function parseTodoNudgeSettings(input: unknown, defaults: TodoNudgeSettings): TodoNudgeSettings {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
-  const record = input as Record<string, unknown>;
-  const positiveInt = (value: unknown, fallback: number): number =>
-    typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value > 0 ? value : fallback;
-  return {
-    enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
-    graceTurns: positiveInt(record.graceTurns, defaults.graceTurns),
-    fallbackTurns: positiveInt(record.fallbackTurns, defaults.fallbackTurns),
-    cooldownTurns: positiveInt(record.cooldownTurns, defaults.cooldownTurns),
   };
 }
 

@@ -118,6 +118,7 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../schedule/settings.js",
     "../external-agent/settings.js",
     "../ask-user/settings.js",
+    "../todo/settings.js",
     "../sysload/settings.js",
     "../topic-switch/settings.js",
     // #56 ⑧: the `webHub` / `feishuBot` blocks live in web-hub/agent/settings.ts (pinned below).
@@ -157,6 +158,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/compact-hint/settings.ts": ["./threshold.js"],
   // #56 ⑧: bashJobs block settings — self-contained (no imports at all).
   "src/bash/settings.ts": [],
+  // #56 ⑧: todo block settings — EnabledGroup is a type-only import.
+  "src/todo/settings.ts": [],
   // #56 ⑧: askUser block settings — EnabledGroup is a type-only import.
   "src/ask-user/settings.ts": [],
   // #56 ⑧: the shared { enabled } group — self-contained.
