@@ -357,21 +357,30 @@ export default function activate(rawPi: ExtensionAPI): void {
   // always points at the latest live session_start ctx, so the toast still uses fresh UI state.
   // No ctx yet (disablement happened before the very first session_start, or a headless main
   // process) — falls back to `console.warn`, same convention as every other startup warning.
-  getChildSwitchCapability().onDisabled((reason) => {
-    const message =
-      `\u5b50\u4f1a\u8bdd switch_context \u5df2\u5728\u672c\u8fdb\u7a0b\u505c\u7528\uff1a${reason}` +
-      `\uff08pi \u8fd0\u884c\u65f6\u80fd\u529b\u68c0\u6d4b\u672a\u901a\u8fc7\uff09\uff0c\u5b50\u4f1a\u8bdd\u56de\u9000\u4e3a\u4ec5 pi \u81ea\u52a8\u538b\u7f29\u3002`;
-    try {
-      const ctx = notifyCapabilityCtx.current;
-      if (ctx?.hasUI && typeof ctx.ui?.notify === "function") {
-        ctx.ui.notify(message, "warning");
-        return;
+  //
+  // G11 (7b): the capability record is process-global (Symbol.for) and outlives /reload, so a listener that is never
+  // unsubscribed piles up one per activate() — one disabling event then toasts N times, N-1 of them on dead contexts.
+  // The shutdown teardown releases it (`releaseCapabilityAlert`); this activation's own session_start re-arms it
+  // idempotently, so a session_start that follows a shutdown on the same activation is still covered.
+  let capabilityAlertOff: (() => void) | undefined;
+  const subscribeCapabilityAlert = (): void => {
+    capabilityAlertOff ??= getChildSwitchCapability().onDisabled((reason) => {
+      const message =
+        `\u5b50\u4f1a\u8bdd switch_context \u5df2\u5728\u672c\u8fdb\u7a0b\u505c\u7528\uff1a${reason}` +
+        `\uff08pi \u8fd0\u884c\u65f6\u80fd\u529b\u68c0\u6d4b\u672a\u901a\u8fc7\uff09\uff0c\u5b50\u4f1a\u8bdd\u56de\u9000\u4e3a\u4ec5 pi \u81ea\u52a8\u538b\u7f29\u3002`;
+      try {
+        const ctx = notifyCapabilityCtx.current;
+        if (ctx?.hasUI && typeof ctx.ui?.notify === "function") {
+          ctx.ui.notify(message, "warning");
+          return;
+        }
+      } catch {
+        // fall through to console.warn below.
       }
-    } catch {
-      // fall through to console.warn below.
-    }
-    console.warn(`[pi-subagent] ${message}`);
-  });
+      console.warn(`[pi-subagent] ${message}`);
+    });
+  };
+  subscribeCapabilityAlert();
 
   // Merged ask_user (plugin-merge): HOST-SESSION ONLY. A child subagent session
   // runs in print mode (createAgentSession never binds a UI/mode), so the tool
@@ -816,6 +825,10 @@ export default function activate(rawPi: ExtensionAPI): void {
   const activationTeardown: ActivationTeardown = {
     defensiveXsTeardown: (nextXsSessionId) => xs.defensiveTeardown(nextXsSessionId),
     scheduleSurfaceShutdown: () => scheduleSurface?.shutdown(), // status bar cleared + digest disposed BEFORE the executor closes its runs
+    releaseCapabilityAlert: () => {
+      capabilityAlertOff?.();
+      capabilityAlertOff = undefined;
+    },
     sealChildBashJobs: () =>
       getChildBashRegistry()
         .sealAll(BASH_JOB_SEAL_GRACE_MS)
@@ -826,6 +839,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     activateResultTool(ctx);
     const nextXsSessionId = xs.beginSessionStart(ctx);
     notifyCapabilityCtx.current = ctx;
+    subscribeCapabilityAlert();
     if (compat.warning) console.warn(`[pi-subagent] ${compat.warning}`);
     // Defensive: if pi ever fires session_start without a paired shutdown, stop the previous stack's timer/RPC
     // surfaces so they cannot double-fire (path B of src/stack-teardown.ts; synchronous, like the block it replaced).
@@ -867,7 +881,10 @@ export default function activate(rawPi: ExtensionAPI): void {
 
   pi.on("session_shutdown", async (event, ctx) => {
     const stack = holder.current;
-    if (!stack) return;
+    if (!stack) {
+      activationTeardown.releaseCapabilityAlert(); // no stack (compat gate failed): still drop the G11 subscription
+      return;
+    }
     // Path C4 of src/stack-teardown.ts: the ordered, awaited shutdown (background completions first, schedule
     // closeEpoch before the run drain, fabric before run shutdown, worktree disposal after seal, bash kill/seal on quit).
     await stack.dispose({ kind: "shutdown", reason: event.reason }, { ctx, settings, activation: activationTeardown });

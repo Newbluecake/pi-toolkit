@@ -730,7 +730,10 @@ describe("teardown matrix: activate-level gaps (no timers needed)", () => {
     expect(String((result as any)?.message ?? "")).not.toMatch(/no active session yet/);
   }, 60_000);
 
-  it("GAP-G11: every activate() leaves one more child-switch onDisabled listener behind (N toasts for one event)", async () => {
+  // G11 FIXED (7b): the capability record is process-global and outlives /reload; each activation now releases its
+  // `onDisabled` subscription at the head of the shutdown teardown, so one disabling event toasts exactly once, on the
+  // newest live context (before: once per activate() ever made — N-1 of them on dead contexts).
+  const toastHarness = () => {
     const toasts: string[] = [];
     const uiCtx = (label: string) => {
       const { ctx } = fakeCtx(box.home, { sid: newSid() });
@@ -738,6 +741,11 @@ describe("teardown matrix: activate-level gaps (no timers needed)", () => {
       ctx.ui.notify = (message: string) => /switch_context/.test(message) && void toasts.push(label);
       return ctx;
     };
+    return { toasts, uiCtx };
+  };
+
+  it("GAP-G11 fixed: one disabling event toasts once, on the newest activation, however many reloads came before", async () => {
+    const { toasts, uiCtx } = toastHarness();
     const a = await boot();
     await fire(a, "session_start", "startup", { ctx: uiCtx("a") });
     await fire(a, "session_shutdown", "new");
@@ -747,7 +755,22 @@ describe("teardown matrix: activate-level gaps (no timers needed)", () => {
     const c = await boot();
     await fire(c, "session_start", "new", { ctx: uiCtx("c") });
     getChildSwitchCapability().noteFatal("matrix-probe");
-    expect(toasts.sort()).toEqual(["a", "b", "c"]); // one event, three toasts — two of them on dead contexts
+    expect(toasts).toEqual(["c"]);
+    resetChildSwitchCapabilityForTests();
+  }, 60_000);
+
+  it("G11: a shut-down activation no longer toasts, and a session_start on it re-arms exactly one subscription", async () => {
+    const { toasts, uiCtx } = toastHarness();
+    const a = await boot();
+    await fire(a, "session_start", "startup", { ctx: uiCtx("a1") });
+    await fire(a, "session_shutdown", "new");
+    getChildSwitchCapability().noteFatal("matrix-probe-1");
+    expect(toasts).toEqual([]); // released: nothing left to toast on the dead context
+    resetChildSwitchCapabilityForTests();
+    await fire(a, "session_start", "new", { ctx: uiCtx("a2") }); // same activation, no activate() in between
+    await fire(a, "session_start", "new", { ctx: uiCtx("a3") }); // a second start must not double-subscribe
+    getChildSwitchCapability().noteFatal("matrix-probe-2");
+    expect(toasts).toEqual(["a3"]);
     resetChildSwitchCapabilityForTests();
   }, 60_000);
 });

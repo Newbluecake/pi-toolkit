@@ -57,6 +57,8 @@ export type StackTeardownEntry =
 export interface ActivationTeardown {
   /** B: xs ledger teardown when the next session id differs (`xs.defensiveTeardown`). */
   defensiveXsTeardown(nextXsSessionId: string | undefined): void;
+  /** C4 (first step): drop this activation's child-switch `onDisabled` subscription (G11). */
+  releaseCapabilityAlert(): void;
   /** C4-2: status bar cleared + digest disposed BEFORE the schedule executor closes its runs. */
   scheduleSurfaceShutdown(): void;
   /** C4-23: only on a real quit — bounded best-effort seal/kill of every child session's bash jobs. */
@@ -225,6 +227,9 @@ const DEFENSIVE_STEPS: readonly StackStep<void>[] = [
 
 // ───────────────────────────── path C4 — shutdown (order = §4.2 column C4) ─────────────────────────────
 const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
+  // G11 (7b): FIRST — nothing that settles during the drain below may toast on a context that is about to die, and
+  // the process-global capability record must not keep this activation's listener across /reload.
+  { id: "capabilityAlert", run: (_stack, env) => void env.activation.releaseCapabilityAlert() },
   // ask-user-async §3.3 (P2): FIRST — the hub stops broadcasting before the drain/seal below settles anything;
   // completions surfacing during shutdown must not interrupt whatever session comes next.
   { id: "backgroundCompletions", run: (stack) => void stack.backgroundCompletions.dispose() },
