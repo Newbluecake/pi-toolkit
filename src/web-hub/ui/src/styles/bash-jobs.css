@@ -105,6 +105,14 @@
   overflow-y: auto;
 }
 
+/* In the fleet drawer the whole `.tree-scroll` already scrolls, so the detail-header cap above
+ * only produced a nested 320px scroller with an empty band under it (field report 2026-10-27).
+ * Lift it there: one scroll container, the list uses the drawer's full height. */
+.tree-scroll .bj-list {
+  max-height: none;
+  overflow-y: visible;
+}
+
 .bj-item {
   padding: 1px 0;
 }
