@@ -68,7 +68,6 @@ import {
   UPLOAD_AGENT_CAPS,
   RUNTX_AGENT_CAPS,
   HOLD_AGENT_CAPS,
-  HOLD_CAP,
   CMD_ARGS_AGENT_CAPS,
   CMD_ARGS_HUB_CAP,
 } from "../protocol/version.js";
@@ -127,8 +126,9 @@ import { createCommandLedger } from "./ledger.js";
 import { createQueueMirror } from "./queue-mirror.js";
 import { createCompactionState } from "./compaction-state.js";
 import { createOriginEntry, registerOriginEntryRenderer } from "./origin-entry.js";
-import { createHoldBuffer, holdWired } from "./hold.js";
-import { createHoldDriver, type HoldDriver, type TurnEndLike } from "./hold-driver.js";
+import { holdWired } from "./hold.js";
+import type { HoldDriver } from "./hold-driver.js";
+import { createHoldGates, registerHoldHandlers, wireHoldDriver } from "./hold-wire.js";
 import type { PromptGatePort } from "./prompt-gate.js";
 import { appendToolTimingEntries, registerToolTimingEntryRenderer } from "./tool-timing.js";
 import { createBuiltinBridge, type BuiltinBridgeDeps } from "./builtin-bridge.js";
@@ -680,25 +680,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const compactionState = createCompactionState(pi);
   const originEntry = createOriginEntry(pi);
 
-  // ── web-hub-steer-recall plan §4.7 (A6): hold wiring ──────────────────────────────────────
-  // `holdOn` is the ONE gate (plan §8.1): it decides cap advertisement, handler registration and
-  // the `status.held` projection together. `false` (⇐ `steerRecall:false` or `control:false`)
-  // ⇒ no driver, no hold handlers, no cap, no held rows — the agent is byte-identical to the
-  // pre-feature agent on the wire (W1/W2). The buffer is the process-level `Symbol.for` bag
-  // (plain data, survives /reload — P-core's `hold.ts`); creating it here even when off is
-  // allocation-only and invisible on the wire.
-  const holdOn = holdWired(settings);
-  const holdBuffer = createHoldBuffer();
-  /** PURE read of the current link (plan C1 / §4.7 step 2): same shape as `isLiveWithCap` — read
-   *  at hold-decision time and at every tick, never cached, never bound to a link generation. */
-  const holdCap = (): boolean => conn?.status().state === "live" && (conn?.caps.includes(HOLD_CAP) ?? false);
-  /** `true` ⇔ the link is live AND the hub demonstrably lacks `hold.v1` — the ONLY case where
-   *  the ctl projection filters the hold vocabulary (§4.7 step 11): a hub without the cap has a
-   *  CLOSED CtlItemSchema that would drop the whole frame on a `state:"held"` row. While
-   *  disconnected nothing is filtered — the slot keeps the full projection and replays
-   *  correctly to whatever hub comes next (D3). */
-  const capKnownAbsent = (): boolean =>
-    holdOn && conn?.status().state === "live" && !(conn?.caps.includes(HOLD_CAP) ?? false);
+  // ── web-hub-steer-recall plan §4.7 (A6): hold wiring — the gate/buffer/cap probes and the
+  // `status.held` projection live in hold-wire.ts (source-governance batch2 ⑨-H1, pure
+  // extraction; conn/ctx threaded as call-time getters, same as the captured closure vars).
+  const { holdOn, holdBuffer, holdCap, capKnownAbsent, heldStatus } = createHoldGates({
+    settings,
+    conn: () => conn,
+    getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
+    now,
+    epoch: MODULE_INSTANCE,
+  });
 
   // fleet-drawer §4.4 (F2): the run-transcript service. Enabled only while the live link's
   // hello_ack.caps carries runtx.v1 AND webHub.subagentTranscript ≠ "off" (§3.2 compat:
@@ -949,12 +940,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       // §4.7 step 10 (A6): held rows ride the OPEN status slot — gated ONLY on holdWired, never
       // on holdCap() (D3): a disconnect keeps the full projection in the slot, and an old hub's
       // open StatusInfoSchema ignores the unknown fields instead of dropping the frame.
-      holdOn
-        ? () => {
-            const sid = safe(() => ctx?.sessionManager.getSessionId() ?? "", "");
-            return { items: holdBuffer.project(sid, now()), rev: holdBuffer.rev(), epoch: MODULE_INSTANCE };
-          }
-        : undefined,
+      heldStatus,
       deps.load?.port,
       deps.cacheKeepalive !== undefined ? cacheKeepaliveProjection : undefined,
       resumeFeatures,
@@ -1189,39 +1175,21 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
 
   // §4.7 step 4 (A6): the hold driver — `undefined` while `holdWired(settings)` is false (no
   // handlers registered below, no cap advertised, prompts take the native path unconditionally).
-  // `setRefTimer` is REF'd (v4.3 Y3 / T-REF): the driver uses it exclusively inside its ≤200 ms
-  // bounded confirm phase — a wait pi is actually awaiting — while every other timer this wiring
-  // owns (commands' 30s/3s display timers, the 1Hz tick) stays unref'd so `pi -p` never wedges.
-  const holdDriver: HoldDriver | undefined = holdOn
-    ? createHoldDriver({
-        buffer: holdBuffer,
-        owner: MODULE_INSTANCE,
-        getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
-        holdCap,
-        dispatchToPi: (item) => commandHandler.dispatchHeld(item),
-        onReturned: (items) => {
-          for (const it of items) {
-            commandLedger.updatePrompt(
-              it.cmdId,
-              { promptState: "returned", ...(it.reason !== undefined ? { reason: it.reason } : {}) },
-              now(),
-            );
-          }
-        },
-        publish: () => {
-          // same never-throw isolation as onChanged (stale ctx after a real session switch)
-          safe(() => publishStatus(), undefined);
-          safe(() => publishCtl(), undefined);
-          safe(() => refreshStatusLine(), undefined);
-        },
-        now,
-        setRefTimer: (ms, fn) => {
-          const t = setTimeout(fn, ms);
-          return { cancel: () => clearTimeout(t) };
-        },
-        nextMacrotask: () => new Promise<void>((r) => setImmediate(r)),
-      })
-    : undefined;
+  // Assembly lives in hold-wire.ts (⑨-H1 pure extraction); `setRefTimer` stays REF'd (v4.3 Y3 /
+  // T-REF: the ≤200 ms bounded confirm phase is a wait pi is actually awaiting).
+  const holdDriver: HoldDriver | undefined = wireHoldDriver({
+    holdOn,
+    buffer: holdBuffer,
+    owner: MODULE_INSTANCE,
+    getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
+    holdCap,
+    ledger: commandLedger,
+    dispatchToPi: (item) => commandHandler.dispatchHeld(item),
+    publishStatus,
+    publishCtl,
+    refreshStatusLine,
+    now,
+  });
 
   /** §3.2 commands slot: the web's slash palette (policy + §4.9 output badge), refreshed on
    * (re)connect, `resources_discover` (extensions loaded mid-session change the list), hello_ack
@@ -1823,48 +1791,20 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
 
   // web-hub-steer-recall §4.7 step 5 (A6): the hold driver's OWN handlers, registered exactly
   // once per activate() — this wiring is their single owner (W5: /new・/resume・/fork re-enter
-  // session_start inside the same activation and re-register nothing). They sit AFTER the
-  // FORWARDED loop above so the tap/publish bookkeeping for the same event runs first; the
-  // `turn_end`/`agent_end` handlers may return a Promise (pi awaits them — the bounded confirm
-  // phase) and NEVER return `entries`/`continue` (the loop's own turn_end handler owns those
-  // semantics). Every handler detaches on its first line while not attached (child sessions,
-  // print mode). Registered ONLY while `holdOn` (W1: zero new handlers with steerRecall off).
+  // session_start inside the same activation and re-register nothing). The registrations sit
+  // AFTER the FORWARDED loop above so the tap/publish bookkeeping for the same event runs first
+  // (the bodies live in hold-wire.ts, ⑨-H1 pure extraction; the guard's ctx adoption writes
+  // back through adoptCtx). Registered ONLY while `holdOn` (W1: zero new handlers with
+  // steerRecall off).
   if (holdDriver !== undefined) {
-    const drv = holdDriver;
-    // Plan §4.7 step 5's handler preamble, verbatim order: detach FIRST, then adopt the event's
-    // ctx — an unattached event (child session / post-shutdown) writes nothing at all.
-    const guard = (c: ExtensionContext | undefined): ExtensionContext | undefined => {
-      if (!attached) return undefined;
-      if (c !== undefined) ctx = c;
-      return ctx;
-    };
-    on("context", (_event, c) => {
-      const x = guard(c);
-      if (x === undefined) return undefined;
-      drv.onContext(x); // ARM (P-core §5.1): the only phase a new prompt can be held in
-      return undefined;
-    });
-    on("turn_start", (_event, c) => {
-      const x = guard(c);
-      if (x === undefined) return undefined;
-      drv.onTurnStart(x); // best-effort skip-detect (C4/A-SKIP): phase still armed ⇒ last turn_end never ran
-      return undefined;
-    });
-    on("turn_end", (event, c) => {
-      const x = guard(c);
-      if (x === undefined) return undefined;
-      return drv.onTurnEnd(event as TurnEndLike, x); // Promise ⇔ exactly one item was handed to pi
-    });
-    on("agent_end", (_event, c) => {
-      const x = guard(c);
-      if (x === undefined) return undefined;
-      return drv.onAgentEnd(x); // run ending: B1-blocked leftovers return to the browser (R-A)
-    });
-    on("agent_settled", (_event, c) => {
-      const x = guard(c);
-      if (x === undefined) return undefined;
-      drv.onAgentSettled(x); // NEVER dispatches (I-EMPTY / C3); defensive leftovers ⇒ returned{stale}
-      return undefined;
+    registerHoldHandlers({
+      on,
+      driver: holdDriver,
+      isAttached: () => attached,
+      getCtx: () => ctx,
+      adoptCtx: (c) => {
+        ctx = c;
+      },
     });
   }
 
