@@ -99,7 +99,7 @@ interface Rig {
   autoNotices: string[];
 }
 
-function rig(opt: { caps?: string[]; auto?: Partial<AutoState>; aliasOn?: boolean } = {}): Rig {
+function rig(opt: { caps?: string[]; auto?: Partial<AutoState>; aliasOn?: boolean; random?: () => number } = {}): Rig {
   const n = fakeNet();
   const conn = acquireConnection(opts({ netConnect: n.netConnect }));
   const state = { sessionId: "sess-aaaaaaaaaaaa", epoch: 3, joined: true };
@@ -139,7 +139,7 @@ function rig(opt: { caps?: string[]; auto?: Partial<AutoState>; aliasOn?: boolea
     port,
     conn: () => conn,
     connGen: () => gen.n,
-    random: () => 0, // deterministic 1000ms BUSY retry
+    random: opt.random ?? (() => 0), // default: deterministic 1000ms BUSY retry
   });
   const binding: BindingPort = {
     onStateChange: () => undefined,
@@ -276,7 +276,7 @@ describe("auto-claim engine (§5.1)", () => {
     expect(r2.autoNotices).toHaveLength(0);
   });
 
-  it("BUSY{queue} ⇒ exactly ONE unref'd retry after the clamped 1s; a second BUSY records skip busy", async () => {
+  it("BUSY{queue} ⇒ exactly ONE unref'd retry after the random 1–5s; a second BUSY records skip busy", async () => {
     const unrefSeen: Array<{ ms: number | undefined; hasRef: boolean | undefined }> = [];
     const realFakeSetTimeout = globalThis.setTimeout;
     vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
@@ -292,20 +292,24 @@ describe("auto-claim engine (§5.1)", () => {
       return t;
     }) as typeof setTimeout);
 
-    const r = rig();
+    // random=0.4321 ⇒ delay = 1000 + floor(0.4321 × 4000) = 2728ms: a value no other timer in the stack
+    // uses (connection END_DESTROY_MS=1000, request deadlines 5s…), so the unref assertion below can
+    // only be satisfied by the retry timer itself.
+    const RETRY_MS = 2_728;
+    const r = rig({ random: () => 0.4321 });
     const s = r.net.sockets[0]!;
     const reqs = await reconcileNone(r);
     expect(reqs).toHaveLength(2);
     fail(s, reqs[1]!, "E_XS_ALIAS_BUSY{queue}");
     await flush();
     expect(aliasReqs(s)).toHaveLength(2); // no immediate retry
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(RETRY_MS - 1);
     expect(aliasReqs(s)).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(2); // 1001ms ≥ the 1000ms retry (random=0)
+    await vi.advanceTimersByTimeAsync(2);
     expect(aliasReqs(s)).toHaveLength(3);
     expect(aliasReqs(s)[2]).toMatchObject({ alias: "wa", intent: "auto" });
-    // the retry timer is unref'd (I5) — the 5s request-deadline timers are a different ms
-    expect(unrefSeen.some((e) => e.ms === 1_000 && e.hasRef === false)).toBe(true);
+    // the retry timer is unref'd (I5)
+    expect(unrefSeen.filter((e) => e.ms === RETRY_MS)).toEqual([{ ms: RETRY_MS, hasRef: false }]);
 
     fail(s, aliasReqs(s)[2]!, "E_XS_ALIAS_BUSY{queue}");
     await vi.advanceTimersByTimeAsync(10_000);
