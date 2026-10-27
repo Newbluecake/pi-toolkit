@@ -5,14 +5,13 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  DEFAULT_FEISHU_BOT_SETTINGS,
   DEFAULT_SETTINGS,
   loadFeishuBotWarnings,
   loadSettings,
   loadSettingsFromFile,
-  parseFeishuBotBlock,
   TIME_SETTING_MS_PATHS,
 } from "../../src/config/settings.js";
+import { DEFAULT_FEISHU_BOT_SETTINGS, parseFeishuBotBlock } from "../../src/web-hub/agent/settings.js";
 
 const defaults = DEFAULT_FEISHU_BOT_SETTINGS;
 

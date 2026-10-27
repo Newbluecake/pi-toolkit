@@ -112,9 +112,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../memory/tidy/batch-settings.js",
     "../sysload/types.js",
     "../topic-switch/settings.js",
-    "../web-hub/protocol/lan.js",
-    // LAN security P0: browser-safe, import-free shared CIDR parser.
-    "../web-hub/protocol/client-allow.js",
+    // #56 ⑧: the `webHub` / `feishuBot` blocks live in web-hub/agent/settings.ts (pinned below).
+    "../web-hub/agent/settings.js",
     // external-agent plan §2.8: droid pricing refs validated with parseStrictModelRef (pure, zero imports).
     "./model-hint.js",
     // data-encryption P2 §2.4 step 2: the secure-domain settings override (pi-free closure below).
@@ -141,6 +140,9 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   // #56 ⑧: fabric block settings — channel-plan CH0 pure channel-name rules + the pure receive/session-id rules.
   "src/fabric/settings.ts": ["./xs/channel.js", "./xs/receive.js"],
   "src/fabric/xs/receive.ts": [],
+  // #56 ⑧: webHub/feishuBot block settings — LAN host/origin classification (L16 第一处) + the browser-safe,
+  // import-free shared CIDR parser (LAN security P0). The hub whitelist is NOT loosened: these are the same two files.
+  "src/web-hub/agent/settings.ts": ["../protocol/client-allow.js", "../protocol/lan.js"],
   "src/sysload/io-ledger.ts": [],
   // P0's compatibility re-export keeps the shared file limits available to pi-free callers.
   "src/memory/tidy/batch-settings.ts": ["../contracts.js"],

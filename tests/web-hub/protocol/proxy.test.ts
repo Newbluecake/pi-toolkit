@@ -10,13 +10,12 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_SETTINGS, loadSettings } from "../../../src/config/settings.js";
 import {
-  DEFAULT_SETTINGS,
   DEFAULT_WEBHUB_PROXY_SETTINGS,
-  loadSettings,
   parseWebHubProxyBlock,
   parseWebHubSettings,
-} from "../../../src/config/settings.js";
+} from "../../../src/web-hub/agent/settings.js";
 import {
   currentOf,
   defaultOf,

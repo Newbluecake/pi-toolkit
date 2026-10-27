@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { wireWebHub, type WebHubDeps, type WebHubSettings } from "../../../src/web-hub/agent/index.js";
-import { DEFAULT_FEISHU_BOT_SETTINGS, type FeishuBotSettings } from "../../../src/config/settings.js";
+import { type FeishuBotSettings } from "../../../src/config/settings.js";
+import { DEFAULT_FEISHU_BOT_SETTINGS } from "../../../src/web-hub/agent/settings.js";
 import { fakeCtx, fakePi, pathsIn, resetGlobals, SETTINGS, tmpDir } from "./helpers.js";
 let tmp: ReturnType<typeof tmpDir>;
 beforeEach(() => {

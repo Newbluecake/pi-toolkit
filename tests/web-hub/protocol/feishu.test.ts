@@ -9,7 +9,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_FEISHU_BOT_SETTINGS, DEFAULT_SETTINGS, parseFeishuBotBlock } from "../../../src/config/settings.js";
+import { DEFAULT_SETTINGS } from "../../../src/config/settings.js";
+import { DEFAULT_FEISHU_BOT_SETTINGS, parseFeishuBotBlock } from "../../../src/web-hub/agent/settings.js";
 import {
   buildRequestText,
   capabilityDeniedReason,

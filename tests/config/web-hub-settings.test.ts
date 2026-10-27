@@ -5,13 +5,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  DEFAULT_SETTINGS,
-  loadSettings,
-  loadWebHubLanSettingsWarnings,
-  parseWebHubLanValidation,
-  parseWebHubSettings,
-} from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings, loadWebHubLanSettingsWarnings } from "../../src/config/settings.js";
+import { parseWebHubLanValidation, parseWebHubSettings } from "../../src/web-hub/agent/settings.js";
 import {
   currentOf,
   defaultOf,

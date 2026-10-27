@@ -8,9 +8,9 @@ import {
   isTimeSettingKey,
   loadSettings,
   parseLoadSettings,
-  parseWebHubSettings,
   TIME_SETTING_MS_PATHS,
 } from "../../src/config/settings.js";
+import { parseWebHubSettings } from "../../src/web-hub/agent/settings.js";
 import { currentOf, defaultOf, isKnownSettingKey, SETTING_SPECS } from "../../src/config/setting-specs.js";
 import {
   DEFAULT_LOAD_RECOVER_MS,
