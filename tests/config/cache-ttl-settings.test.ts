@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_SETTINGS, isTimeSettingKey, loadSettings, parseCacheTtlSettings } from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, isTimeSettingKey, loadSettings } from "../../src/config/settings.js";
+import { parseCacheTtlSettings } from "../../src/cache-ttl/settings.js";
 import { SETTING_SPECS } from "../../src/config/setting-specs.js";
 
 describe("cache-ttl keepalive settings", () => {

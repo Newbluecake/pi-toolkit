@@ -99,7 +99,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "node:fs",
     "node:os",
     "node:path",
-    "../cache-ttl/keepalive-state.js",
+    // #56 ⑧: the `cacheTtl` block lives in cache-ttl/settings.ts (pinned below) — config no longer imports keepalive-state.
+    "../cache-ttl/settings.js",
     "../compact-hint/threshold.js",
     // settings-rename P2 (plan §6.3): settingsLocation()/prepareSettingsFile() resolve the agentDir through the
     // pi-free core resolver (node:path + node:url only; pinned above). A conscious table update — the hub
@@ -140,6 +141,7 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   // #56 ⑧: fabric block settings — channel-plan CH0 pure channel-name rules + the pure receive/session-id rules.
   "src/fabric/settings.ts": ["./xs/channel.js", "./xs/receive.js"],
   "src/fabric/xs/receive.ts": [],
+  "src/cache-ttl/settings.ts": ["./keepalive-state.js"],
   // #56 ⑧: webHub/feishuBot block settings — LAN host/origin classification (L16 第一处) + the browser-safe,
   // import-free shared CIDR parser (LAN security P0). The hub whitelist is NOT loosened: these are the same two files.
   "src/web-hub/agent/settings.ts": ["../protocol/client-allow.js", "../protocol/lan.js"],
