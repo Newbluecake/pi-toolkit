@@ -241,6 +241,10 @@ const TAKE_REJECT_FORCE_RE = /持有者仍在线，不能抢占|持有者离线�
 /** A `--take` preview refused online/recent, escalatable to `--force` (rendered only when the
  *  draft still names the same alias and the hub declared xs.alias.v2 — else nothing renders). */
 const takeRejected = ref<{ readonly alias: string } | null>(null);
+// Two v2 gates on purpose: `takeRejected` is only SET when v2 held at the refusal (previewTakeover),
+// but caps are live — the hub can lose xs.alias.v2 (restart/downgrade) while the offer is on screen.
+// `aliasV2.value` is therefore evaluated again here at render time, so a stale offer disappears
+// instead of sending a `--force` the agent would refuse.
 const forceOffer = computed(() => {
   const p = takeRejected.value;
   return p !== null && aliasV2.value && p.alias === aliasValid.value ? p : null;
