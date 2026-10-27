@@ -10,11 +10,6 @@ import {
 } from "./tidy/batch-settings.js";
 
 /**
- * CC3/§2.3 HB2–HB5: heartbeat stall is a diagnostic/fast-detection signal,
- * never the hard termination guarantee (that's the absolute workflowTotalMs
- * deadline, CC4). "diagnose_only" (default) never terminates on stall alone.
- */
-/**
  * Merged armory-memory (memory-plan §3.1): cwd-keyed project memory under
  * `~/.pi/agent/memory/<slug>/` — auto-injection, the `memory` tool, `/mem`.
  * Field-by-field tolerant parsing in `parseMemorySettings` (never throws,

@@ -2,12 +2,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  DEFAULT_SETTINGS,
-  DEFAULT_WORKFLOW_BUDGET,
-  loadSettings,
-  loadSettingsFromFile,
-} from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings, loadSettingsFromFile } from "../../src/config/settings.js";
+import { DEFAULT_WORKFLOW_BUDGET } from "../../src/workflow/settings.js";
 import { SETTING_SPECS } from "../../src/config/setting-specs.js";
 import { buildWorkflowRunBudget } from "../../src/workflow/run-budget.js";
 import { mergeBudget } from "../../src/tools/workflow-tool.js";

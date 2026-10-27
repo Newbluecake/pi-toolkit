@@ -113,6 +113,7 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../fabric/settings.js",
     "../quota/settings.js",
     "../memory/settings.js",
+    "../workflow/settings.js",
     "../sysload/settings.js",
     "../topic-switch/settings.js",
     // #56 ⑧: the `webHub` / `feishuBot` blocks live in web-hub/agent/settings.ts (pinned below).
@@ -152,6 +153,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/compact-hint/settings.ts": ["./threshold.js"],
   // #56 ⑧: bashJobs block settings — self-contained (no imports at all).
   "src/bash/settings.ts": [],
+  // #56 ⑧: workflow block settings — self-contained (type-only core/types import).
+  "src/workflow/settings.ts": [],
   // #56 ⑧: memory block settings — the tidy batch limits (pinned below: only ../contracts.js).
   "src/memory/settings.ts": ["./tidy/batch-settings.js"],
   // #56 ⑧: webHub/feishuBot block settings — LAN host/origin classification (L16 第一处) + the browser-safe,

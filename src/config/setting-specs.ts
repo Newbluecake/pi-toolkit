@@ -1,11 +1,6 @@
 import { DEFAULT_BUDGET } from "../core/deadline.js";
-import {
-  DEFAULT_SETTINGS,
-  DEFAULT_WORKFLOW_BUDGET,
-  isTimeSettingKey,
-  type AgentSettings,
-  type WorkflowBudget,
-} from "./settings.js";
+import { DEFAULT_SETTINGS, isTimeSettingKey, type AgentSettings, type WorkflowBudget } from "./settings.js";
+import { DEFAULT_WORKFLOW_BUDGET } from "../workflow/settings.js";
 import type { DeadlineBudget } from "../core/types.js";
 import { getPath, msKeyOf, msToSeconds, secondsKeyOf, secondsToMs, setPath } from "./time-units.js";
 
