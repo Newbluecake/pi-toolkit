@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_SETTINGS, loadSettings, parseFabricXsChannelSettings } from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings } from "../../src/config/settings.js";
+import { parseFabricXsChannelSettings } from "../../src/fabric/settings.js";
 
 /** channel-plan §6.4 (CH0). */
 const d = DEFAULT_SETTINGS.fabric.crossSession.channels;

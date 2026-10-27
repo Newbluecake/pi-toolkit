@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { isFeishuInvocation, isWebInvocation } from "./capture.js";
-import { isValidXsSessionId } from "../config/settings.js";
+import { isValidXsSessionId } from "../fabric/xs/receive.js";
 import type { XsReplyLedger } from "../fabric/xs/reply-ledger.js";
 import type { SessionFence } from "../fabric/xs/fence.js";
 import type { XsMembership, XsBlockEntry, XsJoinResult, XsLeaveResult } from "../fabric/xs/membership.js";

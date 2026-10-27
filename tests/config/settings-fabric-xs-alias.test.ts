@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS, loadSettings, parseFabricXsAliasSettings } from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings } from "../../src/config/settings.js";
+import { parseFabricXsAliasSettings } from "../../src/fabric/settings.js";
 
 /** alias-plan §3.6 (AL0b). */
 const d = DEFAULT_SETTINGS.fabric.crossSession.alias;

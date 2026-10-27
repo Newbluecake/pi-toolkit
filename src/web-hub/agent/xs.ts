@@ -28,7 +28,7 @@
  * No timers of its own (requests ride connection's unref'd deadline timers); never throws into
  * the connection machinery.
  */
-import { effectiveReceive, isValidXsSessionId } from "../../config/settings.js";
+import { effectiveReceive, isValidXsSessionId } from "../../fabric/xs/receive.js";
 import type { XsAckVerdict } from "../../fabric/xs/dedup.js";
 import { channelsFieldToWrite, linkJoined as channelLinkJoined, XS_DEFAULT_CHANNEL } from "../../fabric/xs/channel.js";
 import type { XsChannelView } from "../../fabric/xs/types-channel.js";

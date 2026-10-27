@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_SETTINGS,
-  FABRIC_WAKE_RESUME_BUDGET_MAX_S,
-  FABRIC_WAKE_RESUME_BUDGET_MIN_S,
-  loadSettings,
-} from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings } from "../../src/config/settings.js";
+import { FABRIC_WAKE_RESUME_BUDGET_MAX_S, FABRIC_WAKE_RESUME_BUDGET_MIN_S } from "../../src/fabric/settings.js";
 import { currentOf, defaultOf, isKnownSettingKey, SETTING_SPECS } from "../../src/config/setting-specs.js";
 
 /** fabric-cross-session plan v3 §4.8 (S0): the phase-1 `fabric.wake.*` leaves. */

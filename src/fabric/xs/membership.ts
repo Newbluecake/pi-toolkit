@@ -1,5 +1,5 @@
 import { systemClock, type Clock } from "../../core/clock.js";
-import { effectiveReceive, isValidXsSessionId } from "../../config/settings.js";
+import { effectiveReceive, isValidXsSessionId } from "./receive.js";
 import type { XsReceiveWire } from "../../web-hub/protocol/xs.js";
 import {
   XS_DEFAULT_CHANNEL,

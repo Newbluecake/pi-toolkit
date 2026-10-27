@@ -107,8 +107,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../core/agent-dir.js",
     "../core/deadline.js",
     "../extensions/worktree-link-paths.js",
-    // channel-plan CH0: pure channel-name rules (imports only the protocol xs schema module).
-    "../fabric/xs/channel.js",
+    // #56 ⑧: the `fabric` block lives in fabric/settings.ts (pinned below).
+    "../fabric/settings.js",
     "../memory/tidy/batch-settings.js",
     "../sysload/types.js",
     "../topic-switch/settings.js",
@@ -138,6 +138,9 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/secure/env.ts": [],
   "src/config/model-hint.ts": [],
   "src/fabric/xs/channel.ts": ["../../web-hub/protocol/xs.js"],
+  // #56 ⑧: fabric block settings — channel-plan CH0 pure channel-name rules + the pure receive/session-id rules.
+  "src/fabric/settings.ts": ["./xs/channel.js", "./xs/receive.js"],
+  "src/fabric/xs/receive.ts": [],
   "src/sysload/io-ledger.ts": [],
   // P0's compatibility re-export keeps the shared file limits available to pi-free callers.
   "src/memory/tidy/batch-settings.ts": ["../contracts.js"],

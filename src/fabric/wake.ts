@@ -10,11 +10,8 @@ import {
   type RunSnapshot,
   type ThinkingLevel,
 } from "../core/types.js";
-import {
-  FABRIC_WAKE_RESUME_BUDGET_MAX_S,
-  FABRIC_WAKE_RESUME_BUDGET_MIN_S,
-  type FabricWakeSettings,
-} from "../config/settings.js";
+import { type FabricWakeSettings } from "../config/settings.js";
+import { FABRIC_WAKE_RESUME_BUDGET_MAX_S, FABRIC_WAKE_RESUME_BUDGET_MIN_S } from "./settings.js";
 import type { DeliveryEngine } from "../delivery/engine.js";
 import type { QueryService } from "../service/query-service.js";
 import type { SpawnService } from "../service/spawn-service.js";
