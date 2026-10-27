@@ -11,7 +11,13 @@ import {
   type HubConnection,
 } from "../../../src/web-hub/agent/connection.js";
 import { createXsAgentBridge, type XsAgentBridge, type XsAgentPort } from "../../../src/web-hub/agent/xs.js";
-import { XS_AGENT_CAPS, XS_ALIAS_AGENT_CAP, XS_ALIAS_HUB_CAP, XS_HUB_CAP } from "../../../src/web-hub/protocol/xs.js";
+import {
+  XS_AGENT_CAPS,
+  XS_ALIAS_AGENT_CAP,
+  XS_ALIAS_HUB_CAP,
+  XS_ALIAS_V2_AGENT_CAP,
+  XS_HUB_CAP,
+} from "../../../src/web-hub/protocol/xs.js";
 import { P2_HUB_CAPS, VERSION_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import type { XsAliasStateWire, XsMemberLimitsWire } from "../../../src/web-hub/protocol/xs.js";
 import { ackFrame, fakeNet, pathsIn, resetGlobals, SETTINGS, tmpDir, type FakeSocket } from "./helpers.js";
@@ -129,9 +135,9 @@ describe("caps + zero-frame guards", () => {
     expect(r.bridge.hubCrossSessionConfig()).toEqual({ limits: { hubSendsPerMin: 60 } });
   });
 
-  it("alias on ⇒ cap appended after the frozen set", () => {
+  it("alias on ⇒ v1 cap appended after the frozen set, v2 immediately after v1 (alias-force-default §3.1)", () => {
     const r = rig();
-    expect(r.bridge.caps()).toEqual([...XS_AGENT_CAPS, XS_ALIAS_AGENT_CAP]);
+    expect(r.bridge.caps()).toEqual([...XS_AGENT_CAPS, XS_ALIAS_AGENT_CAP, XS_ALIAS_V2_AGENT_CAP]);
   });
 
   it("hub without xs.alias.v1 ⇒ nothing sent on hello_ack nor any op", async () => {

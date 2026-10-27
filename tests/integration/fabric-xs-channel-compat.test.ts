@@ -9,6 +9,7 @@ import { XS_MEMBERSHIP_CUSTOM_TYPE } from "../../src/fabric/xs/membership.js";
 import { P2_HUB_CAPS, VERSION_HUB_CAP } from "../../src/web-hub/protocol/version.js";
 import {
   XS_ALIAS_AGENT_CAP,
+  XS_ALIAS_V2_AGENT_CAP,
   XS_CHANNEL_AGENT_CAP,
   XS_CHANNEL_HUB_CAP,
   XS_HUB_CAP,
@@ -334,9 +335,17 @@ function withoutExceptions(c: Capture, opts: { channelCap: boolean; aliasCap?: b
   const caps = [...((c.hello.caps as string[]) ?? [])];
   if (opts.aliasCap === true) {
     expect(caps.filter((x) => x === XS_ALIAS_AGENT_CAP)).toHaveLength(1);
-    expect(caps[caps.length - 1]).toBe(XS_ALIAS_AGENT_CAP); // tail-appended after the channel cap
+    // alias-force-default §3.1 (AF3): v2 is tail-appended immediately after v1 — both are declared
+    // exceptions over the v0.7.1 golden, spliced out here.
+    expect(caps.filter((x) => x === XS_ALIAS_V2_AGENT_CAP)).toHaveLength(1);
+    expect(caps.indexOf(XS_ALIAS_V2_AGENT_CAP)).toBe(caps.indexOf(XS_ALIAS_AGENT_CAP) + 1);
+    expect(caps[caps.length - 1]).toBe(XS_ALIAS_V2_AGENT_CAP);
+    caps.splice(caps.indexOf(XS_ALIAS_V2_AGENT_CAP), 1);
     caps.splice(caps.indexOf(XS_ALIAS_AGENT_CAP), 1);
-  } else expect(caps).not.toContain(XS_ALIAS_AGENT_CAP);
+  } else {
+    expect(caps).not.toContain(XS_ALIAS_AGENT_CAP);
+    expect(caps).not.toContain(XS_ALIAS_V2_AGENT_CAP);
+  }
   if (opts.channelCap) {
     expect(caps.filter((x) => x === XS_CHANNEL_AGENT_CAP)).toHaveLength(1);
     caps.splice(caps.indexOf(XS_CHANNEL_AGENT_CAP), 1);
