@@ -286,15 +286,17 @@ describe("spawn prefs wire (default-model plan §2: SpawnPrefsWire/schema/parse/
 });
 
 describe("同源常量 pins (plan §SP1 验收)", () => {
-  const httpSrc = readFileSync(new URL("../../../src/web-hub/hub/http.ts", import.meta.url), "utf8");
+  // ⑨-H2: the cmd/dialog pipeline (CMD_ID_RE, PROMPT_TEXT_MAX_BYTES, …) moved verbatim from
+  // `hub/http.ts` to `hub/http-cmd.ts` — the pin intent (same-source constants) is unchanged.
+  const httpSrc = readFileSync(new URL("../../../src/web-hub/hub/http-cmd.ts", import.meta.url), "utf8");
 
-  it("SPAWN_ID_RE.source === http.ts's CMD_ID_RE.source", () => {
+  it("SPAWN_ID_RE.source === http-cmd.ts's CMD_ID_RE.source", () => {
     expect(SPAWN_ID_RE.source).toBe("^[A-Za-z0-9_-]{16,64}$");
-    // http.ts's CMD_ID_RE is module-private and outside SP1's file domain — pin via source text.
+    // http-cmd.ts's CMD_ID_RE is module-private and outside SP1's file domain — pin via source text.
     expect(httpSrc).toContain(`const CMD_ID_RE = /${SPAWN_ID_RE.source}/;`);
   });
 
-  it("PROMPT_TEXT_MAX_BYTES === http.ts's PROMPT_TEXT_MAX_BYTES (48 KiB)", () => {
+  it("PROMPT_TEXT_MAX_BYTES === http-cmd.ts's PROMPT_TEXT_MAX_BYTES (48 KiB)", () => {
     expect(PROMPT_TEXT_MAX_BYTES).toBe(48 * 1024);
     expect(httpSrc).toContain("const PROMPT_TEXT_MAX_BYTES = 48 * 1024;");
   });
