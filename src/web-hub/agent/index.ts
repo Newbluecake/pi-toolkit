@@ -83,7 +83,12 @@ import {
 import { createXsAgentBridge, type XsAgentPort } from "./xs.js";
 import type { XsHubPort } from "../../fabric/xs/sender.js";
 import type { XsBlockResolve } from "../../commands/fabric-xs.js";
-import type { XsAliasBridgePort, XsAliasCachePort } from "../../fabric/xs/types-alias.js";
+import type {
+  XsAliasAutoSkipReason,
+  XsAliasBridgePort,
+  XsAliasBridgePortV2,
+  XsAliasCachePort,
+} from "../../fabric/xs/types-alias.js";
 import type { XsHubLimitsWire } from "../protocol/xs.js";
 import { createRunTranscripts, type RunTxRunInfo, type RunTranscriptPort } from "./run-transcript.js";
 import { createEventTap } from "./event-tap.js";
@@ -492,8 +497,11 @@ export interface WebHubControl {
     resolveBlock(query: string): Promise<XsBlockResolve>;
     hubInfo(): Promise<XsHubLimitsWire | undefined>;
     /** alias-plan §4/§7 (ALW): AL3's `op:"alias"` bridge and per-activate alias cache for `/fabric alias`. */
-    aliasBridge(): XsAliasBridgePort;
+    /** The live bridge object also carries the v2 methods (`forcePreview` …); typed optional so v1-shaped doubles compile. */
+    aliasBridge(): XsAliasBridgePort & Partial<Pick<XsAliasBridgePortV2, "forcePreview">>;
     aliasCache(): XsAliasCachePort;
+    /** alias-force-default §7 (AFW): the auto engine's cached `auto skip:<token>` reason for the CURRENT session. */
+    aliasAutoSkip?(): XsAliasAutoSkipReason | undefined;
   };
   /** web-hub-slash-args plan §5 (P4): `/`-command argument-completion status line (agent-side
    * mode + live hub cap). Optional for the same double-compatibility reason as `proxy`. */
@@ -2218,6 +2226,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             hubInfo: () => xsBridge.hubInfo(),
             aliasBridge: () => xsBridge.aliasBridge(),
             aliasCache: () => xsBridge.aliasCache(),
+            aliasAutoSkip: () => xsBridge.aliasAutoSkip(),
           },
         }
       : {}),

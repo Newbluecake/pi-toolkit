@@ -10,6 +10,7 @@ import { P2_HUB_CAPS, VERSION_HUB_CAP } from "../../src/web-hub/protocol/version
 import {
   XS_ALIAS_AGENT_CAP,
   XS_ALIAS_HUB_CAP,
+  XS_ALIAS_V2_HUB_CAP,
   XS_CHANNEL_HUB_CAP,
   XS_HUB_CAP,
   XS_REPLY_HUB_CAP,
@@ -50,6 +51,7 @@ function clearXsGlobals(): void {
     "pi-subagent:xs-reply-ledger",
     "pi-subagent:xs-dedup",
     "pi-subagent:xs-alias-lost",
+    "pi-subagent:xs-alias-auto-noticed",
   ])
     delete g[Symbol.for(key)];
 }
@@ -63,7 +65,20 @@ afterEach(() => {
 
 type Frame = Record<string, any>;
 
-async function boot(opts: { alias: boolean; hubAlias: boolean }) {
+interface BootOpts {
+  alias: boolean;
+  hubAlias: boolean;
+  /** AFW: the fake hub also declares `xs.alias.v2`. */
+  hubV2?: boolean;
+  /** AFW: `fabric.crossSession.alias.autoFromCwd` (absent ⇒ the default, true). */
+  autoFromCwd?: boolean;
+  /** AFW: activate as a CHILD session (the host claim is already taken). */
+  child?: boolean;
+  /** AFW: runs on the session manager before `session_start` (seed history entries). */
+  seed?: (sm: SessionManager) => void;
+}
+
+async function boot(opts: BootOpts) {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
   vi.setSystemTime(FIXED_NOW);
   clearXsGlobals();
@@ -105,7 +120,11 @@ async function boot(opts: { alias: boolean; hubAlias: boolean }) {
       fabric: {
         enabled: true,
         wake: { enabled: true },
-        crossSession: { enabled: true, autoJoin: true, alias: { enabled: opts.alias } },
+        crossSession: {
+          enabled: true,
+          autoJoin: true,
+          alias: { enabled: opts.alias, ...(opts.autoFromCwd !== undefined ? { autoFromCwd: opts.autoFromCwd } : {}) },
+        },
       },
     }),
   );
@@ -132,6 +151,7 @@ async function boot(opts: { alias: boolean; hubAlias: boolean }) {
   const tools = new Map<string, any>();
   const commands = new Map<string, any>();
   const sent: Array<{ content?: unknown; customType?: string }> = [];
+  const appended: Array<{ customType: string; data: unknown }> = [];
   const pi = {
     on: (event: string, fn: Function) => {
       handlers.set(event, [...(handlers.get(event) ?? []), fn]);
@@ -144,7 +164,7 @@ async function boot(opts: { alias: boolean; hubAlias: boolean }) {
     registerShortcut() {},
     sendMessage: (m: any) => sent.push(m),
     sendUserMessage() {},
-    appendEntry() {},
+    appendEntry: (customType: string, data: unknown) => appended.push({ customType, data }),
     getAllTools: () => [...tools.values()],
     getActiveTools: () => [...tools.keys()],
     setActiveTools() {},
@@ -158,6 +178,7 @@ async function boot(opts: { alias: boolean; hubAlias: boolean }) {
   mkdirSync(sessionDir, { recursive: true });
   const sm = SessionManager.create("/tmp/wa", sessionDir);
   sm.appendMessage({ role: "user", content: "fixture", timestamp: FIXED_NOW });
+  opts.seed?.(sm);
   const notifies: Array<{ text: string; level?: string }> = [];
   const ctx: any = {
     mode: "tui",
@@ -185,35 +206,68 @@ async function boot(opts: { alias: boolean; hubAlias: boolean }) {
     },
   };
 
+  if (opts.child) (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:host")] = { activatedAt: FIXED_NOW };
   activate(pi);
   for (const h of handlers.get("session_start") ?? []) await h({ type: "session_start", reason: "startup" }, ctx);
   await vi.advanceTimersByTimeAsync(50);
-  net.sockets[0]!.emit("error", Object.assign(new Error("connect ENOENT"), { code: "ENOENT" }));
-  for (let i = 0; i < 40 && net.sockets.length < 2; i++) await vi.advanceTimersByTimeAsync(100);
-  const socket = net.sockets[1]!;
-  socket.emit("connect");
-  const hubCaps = [...P2_HUB_CAPS, VERSION_HUB_CAP, XS_HUB_CAP, XS_REPLY_HUB_CAP, XS_CHANNEL_HUB_CAP];
-  socket.hub(ackFrame("a1-key", 4242, opts.hubAlias ? [...hubCaps, XS_ALIAS_HUB_CAP] : hubCaps));
-  await vi.advanceTimersByTimeAsync(50);
-  const frames = (): Frame[] => socket.frames() as Frame[];
-  const reqs = (op: string): Frame[] => frames().filter((f) => f.t === "xs_req" && f.op === op);
-  const answer = (req: Frame, body: Frame) => socket.hub({ t: "xs_res", rid: String(req.rid), ...body } as never);
-  const member = () => [...frames()].reverse().find((f) => f.t === "xs_member")!;
-  const deliver = (from: Frame) => {
-    const m = member();
-    socket.hub({
-      t: "xs_deliver",
-      rid: `d${Math.random().toString(16).slice(2, 10)}`,
-      xid: `x${"0".repeat(17)}${sent.length}`,
-      to: { sessionId: m.sessionId, epoch: m.epoch },
-      from: { sessionId: PEER_SID, ref: PEER_SID.slice(0, 12), cwdLabel: "~/peer", agentId: "peer-agent", ...from },
-      text: "hello",
-      wake: false,
-      expiresAt: FIXED_NOW + 60_000,
-    } as never);
-  };
-  const config = JSON.parse(String(spawnEnv[0]?.PI_WEBHUB_CONFIG ?? "{}")) as Frame;
-  return { socket, frames, reqs, answer, deliver, tools, commands, sent, notifies, ctx, config, handlers };
+  if (opts.child) {
+    // A child session is inert: no hub link at all (I6). Nothing else of the return shape is meaningful.
+    await vi.advanceTimersByTimeAsync(5_000);
+    return { net, tools, commands, handlers, notifies, appended, sm, ctx } as unknown as Awaited<
+      ReturnType<typeof bootMain>
+    >;
+  }
+  return bootMain();
+  async function bootMain() {
+    net.sockets[0]!.emit("error", Object.assign(new Error("connect ENOENT"), { code: "ENOENT" }));
+    for (let i = 0; i < 40 && net.sockets.length < 2; i++) await vi.advanceTimersByTimeAsync(100);
+    const socket = net.sockets[1]!;
+    socket.emit("connect");
+    const hubCaps = [...P2_HUB_CAPS, VERSION_HUB_CAP, XS_HUB_CAP, XS_REPLY_HUB_CAP, XS_CHANNEL_HUB_CAP];
+    socket.hub(
+      ackFrame(
+        "a1-key",
+        4242,
+        opts.hubAlias ? [...hubCaps, XS_ALIAS_HUB_CAP, ...(opts.hubV2 === true ? [XS_ALIAS_V2_HUB_CAP] : [])] : hubCaps,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(50);
+    const frames = (): Frame[] => socket.frames() as Frame[];
+    const reqs = (op: string): Frame[] => frames().filter((f) => f.t === "xs_req" && f.op === op);
+    const answer = (req: Frame, body: Frame) => socket.hub({ t: "xs_res", rid: String(req.rid), ...body } as never);
+    const member = () => [...frames()].reverse().find((f) => f.t === "xs_member")!;
+    const deliver = (from: Frame) => {
+      const m = member();
+      socket.hub({
+        t: "xs_deliver",
+        rid: `d${Math.random().toString(16).slice(2, 10)}`,
+        xid: `x${"0".repeat(17)}${sent.length}`,
+        to: { sessionId: m.sessionId, epoch: m.epoch },
+        from: { sessionId: PEER_SID, ref: PEER_SID.slice(0, 12), cwdLabel: "~/peer", agentId: "peer-agent", ...from },
+        text: "hello",
+        wake: false,
+        expiresAt: FIXED_NOW + 60_000,
+      } as never);
+    };
+    const config = JSON.parse(String(spawnEnv[0]?.PI_WEBHUB_CONFIG ?? "{}")) as Frame;
+    return {
+      socket,
+      frames,
+      reqs,
+      answer,
+      deliver,
+      tools,
+      commands,
+      sent,
+      notifies,
+      ctx,
+      config,
+      handlers,
+      appended,
+      sm,
+      net,
+    };
+  }
 }
 
 const stubSender = {} as XsSender;
@@ -385,5 +439,253 @@ describe("alias-plan ALW: activate assembly", () => {
     await vi.advanceTimersByTimeAsync(10);
     await run;
     expect(r.notifies.some((n) => n.text.includes("alias n/a (alias.enabled=false)"))).toBe(true);
+  }, 30_000);
+});
+
+// ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+// #72 AFW: alias auto-claim + forced takeover wiring — REAL activate() × REAL stack × fake hub socket.
+
+const DECIDED_TYPE = "subagent:xs-alias-decided";
+const AUTO_ALIAS = "前端项目"; // basename of the fixture cwd `/tmp/wa/前端项目`
+
+type Booted = Awaited<ReturnType<typeof boot>>;
+const intentFrames = (r: Booted): Frame[] => r.frames().filter((f) => f.t === "xs_req" && f.intent !== undefined);
+const autoFrames = (r: Booted): Frame[] => intentFrames(r).filter((f) => f.intent === "auto");
+const settle = (ms = 50) => vi.advanceTimersByTimeAsync(ms);
+
+/** Answer the attach reconcile `get` with `state:"none"` and let the auto tail run. */
+async function attachNone(r: Booted): Promise<void> {
+  const get = r.reqs("alias")[0]!;
+  expect(get.alias).toBeUndefined();
+  r.answer(get, { ok: true, alias: { state: "none" } });
+  await settle();
+}
+
+/** Run a `/fabric …` command, answering every alias request the way a hub with no record would. */
+async function fabric(r: Booted, args: string, answerWith: (req: Frame) => Frame): Promise<void> {
+  const seen = new Set<string>(r.reqs("alias").map((f) => String(f.rid)));
+  const other = new Set<string>();
+  const run = r.commands.get("fabric").handler(args, r.ctx);
+  for (let i = 0; i < 6; i++) {
+    await settle(10);
+    for (const req of r.reqs("alias")) {
+      if (seen.has(String(req.rid))) continue;
+      seen.add(String(req.rid));
+      r.answer(req, answerWith(req));
+    }
+    // `/fabric status|join|leave` also ask the hub for limits / channels: refuse them (display only)
+    for (const op of ["info", "channels", "list"])
+      for (const req of r.reqs(op)) {
+        if (other.has(String(req.rid))) continue;
+        other.add(String(req.rid));
+        r.answer(req, { ok: false, code: "E_XS_BAD_FRAME" });
+      }
+  }
+  await run;
+  await settle();
+}
+const hubNone = (): Frame => ({ ok: true, alias: { state: "none" } });
+const hubEcho = (req: Frame): Frame =>
+  req.alias === undefined
+    ? hubNone()
+    : req.clear === true
+      ? hubNone()
+      : { ok: true, alias: { state: "held", alias: req.alias, ...(req.intent === "auto" ? { origin: "auto" } : {}) } };
+
+describe("#72 AFW: alias auto-claim wiring", () => {
+  it("v2 hub: attach ⇒ get(none) ⇒ exactly one intent:auto for the cwd basename, one-shot notice, held (auto) in /fabric status", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true });
+    expect(r.frames()[0]!.caps).toContain("xs.alias.v2");
+    expect(r.reqs("alias")).toHaveLength(1);
+    await attachNone(r);
+    const auto = autoFrames(r);
+    expect(auto).toHaveLength(1);
+    expect(auto[0]).toMatchObject({ op: "alias", alias: AUTO_ALIAS, intent: "auto" });
+    // the auto write goes out AFTER the (re)published member slot (the hub requires joined for auto)
+    const all = r.frames();
+    expect(all.findIndex((f) => f.t === "xs_member")).toBeLessThan(all.findIndex((f) => f.intent === "auto"));
+    // joined member ⇒ the auto frame is the ONLY write; no decided marker was written by the machine
+    expect(r.appended.filter((a) => a.customType === DECIDED_TYPE)).toHaveLength(0);
+
+    r.answer(auto[0]!, { ok: true, alias: { state: "held", alias: AUTO_ALIAS, origin: "auto" } });
+    await settle();
+    expect(r.notifies.filter((n) => n.text.includes(`已按目录名自动设置别名 @${AUTO_ALIAS}`))).toHaveLength(1);
+    const status = [...r.frames()].reverse().find((f) => f.t === "status")!;
+    expect(status.xs.alias).toBe(AUTO_ALIAS);
+
+    // /fabric status: the cached origin renders `held (auto)`; its own reconcile never re-fires auto
+    await fabric(r, "status", (req) => ({ ok: true, alias: { state: "held", alias: AUTO_ALIAS, origin: "auto" } }));
+    expect(r.notifies.some((n) => n.text.includes(`alias @${AUTO_ALIAS} held (auto)`))).toBe(true);
+    expect(autoFrames(r)).toHaveLength(1);
+  }, 30_000);
+
+  it("a `taken` refusal records `auto skip:taken` for /fabric status and is not retried", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true });
+    await attachNone(r);
+    r.answer(autoFrames(r)[0]!, { ok: false, code: "E_XS_ALIAS_TAKEN{taken}" });
+    await settle(6_000); // well past any BUSY retry window
+    expect(autoFrames(r)).toHaveLength(1);
+    await fabric(r, "status", hubNone);
+    expect(r.notifies.some((n) => n.text.includes("alias - · auto skip:taken"))).toBe(true);
+    expect(autoFrames(r)).toHaveLength(1);
+  }, 30_000);
+
+  it("/fabric join re-arms exactly one new auto attempt (N1)", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true });
+    await attachNone(r);
+    r.answer(autoFrames(r)[0]!, { ok: false, code: "E_XS_ALIAS_TAKEN{taken}" });
+    await settle();
+    await fabric(r, "leave", hubNone); // leave bumps the epoch; leave itself triggers no auto (not joined)
+    expect(autoFrames(r)).toHaveLength(1);
+    await fabric(r, "join", hubNone); // join ⇒ refreshAlias ⇒ get(none) ⇒ a fresh attempt key
+    expect(autoFrames(r)).toHaveLength(2);
+    expect(autoFrames(r)[1]).toMatchObject({ alias: AUTO_ALIAS });
+  }, 30_000);
+
+  it.each([
+    ["set", "alias 后端", "set"],
+    ["clear", "alias --clear", "clear"],
+  ])(
+    "a human `/fabric alias` %s writes the decided marker BEFORE its request and ends auto for good",
+    async (_name, command, via) => {
+      const r = await boot({ alias: true, hubAlias: true, hubV2: true });
+      await attachNone(r);
+      r.answer(autoFrames(r)[0]!, { ok: false, code: "E_XS_ALIAS_TAKEN{taken}" });
+      await settle();
+      expect(autoFrames(r)).toHaveLength(1);
+
+      const framesBefore = r.frames().length;
+      const run = r.commands.get("fabric").handler(command, r.ctx);
+      await settle(10);
+      // mark first (appendEntry), request second — the marker is already there when the write frame exists
+      const marks = r.appended.filter((a) => a.customType === DECIDED_TYPE);
+      expect(marks).toHaveLength(1);
+      expect(marks[0]!.data).toMatchObject({ v: 1, sessionId: r.sm.getSessionId(), via });
+      const write = r
+        .frames()
+        .slice(framesBefore)
+        .find((f) => f.t === "xs_req" && f.op === "alias")!;
+      expect(write).toBeDefined();
+      expect(write.intent).toBeUndefined();
+      r.answer(write, hubEcho(write));
+      await settle(10);
+      for (const req of r
+        .reqs("alias")
+        .filter((q) => q !== write && q.intent === undefined)
+        .slice(-2))
+        r.answer(req, hubNone());
+      await run;
+      await settle();
+
+      // a new membership epoch (leave + join) would re-arm auto for an undecided session — here it must not
+      await fabric(r, "leave", hubNone);
+      await fabric(r, "join", hubNone);
+      await fabric(r, "status", hubNone);
+      expect(autoFrames(r)).toHaveLength(1);
+      expect(r.notifies.some((n) => n.text.includes("auto skip:decided"))).toBe(true);
+    },
+    30_000,
+  );
+
+  it("a decided marker already in the session file (getEntries) blocks auto; a foreign-sid marker does not", async () => {
+    const decided = await boot({
+      alias: true,
+      hubAlias: true,
+      hubV2: true,
+      seed: (sm) => {
+        sm.appendCustomEntry(DECIDED_TYPE, { v: 1, sessionId: sm.getSessionId(), at: 5, via: "set" });
+      },
+    });
+    await attachNone(decided);
+    expect(autoFrames(decided)).toHaveLength(0);
+    await fabric(decided, "status", hubNone);
+    expect(decided.notifies.some((n) => n.text.includes("auto skip:decided"))).toBe(true);
+    for (const f of cleanup.splice(0).reverse()) f();
+
+    const foreign = await boot({
+      alias: true,
+      hubAlias: true,
+      hubV2: true,
+      seed: (sm) => {
+        sm.appendCustomEntry(DECIDED_TYPE, { v: 1, sessionId: "some-other-session", at: 5, via: "set" });
+      },
+    });
+    await attachNone(foreign);
+    expect(autoFrames(foreign)).toHaveLength(1);
+  }, 30_000);
+
+  it("autoFromCwd=false ⇒ zero auto frames even on a v2 hub, and /fabric status keeps the pre-auto shape", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true, autoFromCwd: false });
+    await attachNone(r);
+    await settle(6_000);
+    expect(intentFrames(r)).toHaveLength(0);
+    await fabric(r, "leave", hubNone);
+    await fabric(r, "join", hubNone);
+    await fabric(r, "status", hubNone);
+    expect(intentFrames(r)).toHaveLength(0);
+    expect(r.notifies.some((n) => n.text.includes("auto skip"))).toBe(false);
+    expect(r.notifies.some((n) => /\balias -(\n|$)/.test(n.text))).toBe(true);
+    // a human write is still allowed and still carries no intent
+    await fabric(r, "alias 后端", hubEcho);
+    expect(intentFrames(r)).toHaveLength(0);
+  }, 30_000);
+
+  it("v1 hub (alias cap, no xs.alias.v2): zero intent frames anywhere, status shows no auto suffix, --force refused locally", async () => {
+    const r = await boot({ alias: true, hubAlias: true });
+    await attachNone(r);
+    await settle(6_000);
+    await fabric(r, "leave", hubNone);
+    await fabric(r, "join", hubNone);
+    await fabric(r, "status", hubNone);
+    await fabric(r, "alias 后端", hubEcho);
+    await fabric(r, "alias 后端 --force", hubNone);
+    expect(intentFrames(r)).toHaveLength(0);
+    expect(r.frames().some((f) => f.take === "preview")).toBe(false); // no force preview frame was ever sent
+    expect(r.notifies.some((n) => n.text.includes("auto skip"))).toBe(false);
+    expect(r.notifies.some((n) => n.text === "hub 不支持强制抢占，需 /webhub restart")).toBe(true);
+  }, 30_000);
+
+  it("v2 hub: /fabric alias <名> --force previews with intent:force (v2 port live: hubAliasV2, forcePreview)", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true, autoFromCwd: false });
+    await attachNone(r);
+    const run = r.commands.get("fabric").handler("alias 后端 --force", r.ctx);
+    await settle(10);
+    const preview = r.reqs("alias").find((f) => f.intent === "force")!;
+    expect(preview).toMatchObject({ alias: "后端", take: "preview", intent: "force" });
+    r.answer(preview, {
+      ok: true,
+      alias: {
+        take: {
+          cwdLabel: "~/ai/foo",
+          offlineForS: 0,
+          online: true,
+          auto: true,
+          token: "k0123456789abcdef",
+          expiresAt: FIXED_NOW + 300_000,
+        },
+      },
+    });
+    await settle(10);
+    await run; // TUI path: ctx.ui.confirm answers false ⇒ cancelled, nothing executed
+    expect(r.notifies.some((n) => n.text === "已取消抢占。")).toBe(true);
+    expect(r.reqs("alias").some((f) => f.take === "k0123456789abcdef")).toBe(false);
+    // cancelled ⇒ not a decision (D6: previews/cancels never mark)
+    expect(r.appended.filter((a) => a.customType === DECIDED_TYPE)).toHaveLength(0);
+  }, 30_000);
+
+  it("alias off: no auto, and a (refused) `/fabric alias` writes no decided marker", async () => {
+    const r = await boot({ alias: false, hubAlias: true, hubV2: true });
+    await settle(100);
+    expect(r.reqs("alias")).toHaveLength(0);
+    await fabric(r, "alias 后端", hubEcho);
+    expect(r.appended.filter((a) => a.customType === DECIDED_TYPE)).toHaveLength(0);
+  }, 30_000);
+
+  it("child session: inert — no hub link, no alias frames, no xs tools or command", async () => {
+    const r = await boot({ alias: true, hubAlias: true, hubV2: true, child: true });
+    expect(r.net.sockets).toHaveLength(0);
+    expect(r.commands.has("fabric")).toBe(false);
+    expect(r.tools.has("list_sessions")).toBe(false);
+    expect(r.appended.filter((a) => a.customType === DECIDED_TYPE)).toHaveLength(0);
   }, 30_000);
 });

@@ -1,3 +1,4 @@
+import { homedir, tmpdir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readBeforeAgentStartTrigger } from "../../adapters/pi-compat.js";
 import type { AgentSettings } from "../../config/settings.js";
@@ -5,7 +6,7 @@ import type { StackHolder } from "../../holder.js";
 import type { Stack } from "../../stack.js";
 import type { WebHubControl, WebHubDeps } from "../../web-hub/agent/index.js";
 import { currentConnection } from "../../web-hub/agent/connection.js";
-import { XS_CHANNEL_HUB_CAP } from "../../web-hub/protocol/xs.js";
+import { XS_ALIAS_V2_HUB_CAP, XS_CHANNEL_HUB_CAP } from "../../web-hub/protocol/xs.js";
 import type { XsHubLimitsWire } from "../../web-hub/protocol/xs.js";
 import { createFabricXsCommand } from "../../commands/fabric-xs.js";
 import { createListSessionsTool, listSessionsParamsFor } from "../../tools/list-sessions-tool.js";
@@ -13,6 +14,7 @@ import { createMessageChannelTool, MessageChannelParams } from "../../tools/mess
 import { createMessageSessionTool, messageSessionParamsFor } from "../../tools/message-session-tool.js";
 import { observeRootWakeTrigger } from "../root-wake.js";
 import { aliasSuggestions } from "./alias-suggest.js";
+import type { XsAliasMarkDecided } from "./alias-decided.js";
 import { getXsHostCapability } from "./host-cap.js";
 import { getXsReplyLedger } from "./reply-ledger.js";
 import { createXsSender, detectXsToolCollisions, type XsSender } from "./sender.js";
@@ -134,6 +136,14 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
   const xsHubChannelCap = (): boolean => webHubRef.current?.xs?.hubPort().hubChannelCap?.() === true;
   // Alias-plan §3.6 (ALW): live probe — local alias on ∧ live link ∧ the hub declared xs.alias.v1 (AL3's state).
   const xsAliasUsable = (): boolean => aliasOn && webHubRef.current?.xs?.hubPort().aliasUsable?.() === true;
+  // Alias-force-default §3.4 (AFW): live probe — the CURRENT hub link declared `xs.alias.v2` (not merely local support).
+  const xsAliasHubV2 = (): boolean => {
+    if (!aliasOn || webHubRef.current?.xs === undefined) return false;
+    const conn = currentConnection();
+    return conn !== undefined && conn.status().state === "live" && conn.caps.includes(XS_ALIAS_V2_HUB_CAP);
+  };
+  // Alias-force-default §5.1/§5.3 (AFW): the main session's decided marker, only while the xs stack is attached.
+  const xsAliasDecided = () => (xsAttached ? holder.current?.xs?.aliasDecided : undefined);
   // Channel-plan §2.3/§10 (CHW): the sender's channel view delegates to the CURRENT stack's membership
   // (rebuilt per session_start); no attached stack ⇒ empty sets / not joined (fail closed).
   const xsChannelView: XsChannelView = {
@@ -318,6 +328,17 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
             ...(xs ? { bridge: xs.aliasBridge(), cache: xs.aliasCache() } : {}),
             leaseDays: Math.round((settings.fabric.crossSession.alias.offlineLeaseH / 24) * 10) / 10,
             coolMin: settings.fabric.crossSession.alias.coolMin,
+            // Alias-force-default (AFW → AF4 port): v2 probe, frozen auto setting, the SAME decided instance the
+            // auto engine reads, and the engine's cached skip reason. All live/guarded; absent while alias is off.
+            ...(aliasOn
+              ? {
+                  hubAliasV2: xsAliasHubV2,
+                  autoFromCwd: settings.fabric.crossSession.alias.autoFromCwd,
+                  decided: () => xsAliasDecided()?.decided() === true,
+                  markDecided: (via: Parameters<XsAliasMarkDecided>[0]) => xsAliasDecided()?.markDecided(via),
+                  autoSkipReason: () => webHubRef.current?.xs?.aliasAutoSkip?.(),
+                }
+              : {}),
             suggestions: () =>
               aliasSuggestions({
                 cwd: notifyCapabilityCtx.current?.cwd,
@@ -434,7 +455,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
           memberChanged: () => webHubRef.current?.xs?.publishMember(),
           unreadChanged: refreshXsInbox,
           ...(channelsOn ? { hubChannelCap: xsHubChannelCap } : {}),
-          ...(aliasOn ? { aliasUsable: xsAliasUsable } : {}),
+          ...(aliasOn ? { aliasUsable: xsAliasUsable, aliasDecided: true } : {}),
           listRows: async (origin) => {
             const reply = await webHubRef.current?.xs?.hubPort().list({ origin });
             return reply?.kind === "res" && reply.res.ok ? (reply.res.rows ?? []) : undefined;
@@ -513,6 +534,42 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
                     coolMin: settings.fabric.crossSession.alias.coolMin,
                     takeMinOfflineMin: settings.fabric.crossSession.alias.takeMinOfflineMin,
                   }),
+                  // Alias-force-default §5.1 (AFW): the cwd-basename auto-claim inputs. Wired ONLY while
+                  // `autoFromCwd` is on (frozen per activate) — off ⇒ no hook ⇒ the engine is inert and the agent is
+                  // byte-identical to the pre-auto wiring. Main session only by construction (this whole object
+                  // exists only in the post-guard activate; secure D8 forces crossSession off ⇒ no xs at all).
+                  ...(settings.fabric.crossSession.alias.autoFromCwd
+                    ? {
+                        aliasAuto: () => ({
+                          enabled: true,
+                          cwd: (() => {
+                            try {
+                              return notifyCapabilityCtx.current?.cwd;
+                            } catch {
+                              return undefined; // stale ctx after a session switch
+                            }
+                          })(),
+                          home: homedir(),
+                          tmpdir: tmpdir(),
+                          // Fail closed: no attached stack, a foreign sid, or no decided port ⇒ "decided" ⇒ no auto.
+                          decided: (sessionId: string) => {
+                            const xs = xsAttached ? holder.current?.xs : undefined;
+                            return (
+                              xs === undefined || xs.sessionId() !== sessionId || xs.aliasDecided?.decided() !== false
+                            );
+                          },
+                          handoffPending: () => false, // AF7 (the /new handoff slot) is not built yet
+                        }),
+                        notifyAliasAuto: (text: string) => {
+                          try {
+                            const ctx = notifyCapabilityCtx.current;
+                            if (ctx?.hasUI && typeof ctx.ui?.notify === "function") ctx.ui.notify(text, "info");
+                          } catch {
+                            /* display hint only */
+                          }
+                        },
+                      }
+                    : {}),
                   // Q3: display-only one-shot notice (the bridge de-duplicates by (sessionId, lost.at)).
                   notifyAliasLost: (text: string) => {
                     try {

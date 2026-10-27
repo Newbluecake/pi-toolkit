@@ -16,6 +16,7 @@ import {
   type XsMembershipEntryData,
 } from "./membership.js";
 import { channelsFieldToWrite, isDefaultOnly, XS_DEFAULT_CHANNEL } from "./channel.js";
+import { createXsAliasDecided, XS_ALIAS_DECIDED_CUSTOM_TYPE, type XsAliasDecidedPort } from "./alias-decided.js";
 import { XsInbox } from "./inbox.js";
 import { createXsDirectoryCache, type XsDirectoryCache, type XsDirectoryRow } from "./directory.js";
 import { XsReceiver } from "./receiver.js";
@@ -56,6 +57,10 @@ export interface StackXsInput {
    *  present only for a `session_start{reason:"new"}` that had one stashed at shutdown. Adopted
    *  only when the new branch has no entry of its own; suppresses autoJoin like a restored entry. */
   membershipHandoff?: XsMembershipEntryData;
+  /** Alias-force-default §5.3 (AFW): build the per-stack "human already decided the alias" port. Set only
+   *  while the LOCAL alias mode is on (frozen per activate); absent ⇒ `StackXs.aliasDecided` stays absent and
+   *  nothing is read from the session file (alias off ⇒ byte-identical stack). */
+  aliasDecided?: boolean;
 }
 
 export interface StackXs extends XsStackPort {
@@ -68,6 +73,10 @@ export interface StackXs extends XsStackPort {
   reply?: StackXsReply;
   /** Reply-plan §9.2 (MW): @mention session directory cache (closure-owned per stack). */
   directory: XsDirectoryCache;
+  /** Alias-force-default §5.3 (AFW): the I8 "human decided" marker of THIS stack's session id (present iff
+   *  `StackXsInput.aliasDecided`). `decided()` feeds the auto-claim gate; `markDecided` is the `/fabric alias`
+   *  write hook (memory first, then a best-effort `appendEntry`). */
+  aliasDecided?: XsAliasDecidedPort;
   audit: Partial<Record<RootWakeAudit, number>>;
   beforeAgentStart(event: unknown): void;
   settled(): void;
@@ -95,6 +104,31 @@ export interface StackXsReply {
 }
 
 const XS_REPLY_INBOUND_SCAN_CAP = 2000;
+
+/**
+ * Alias-force-default §5.3 (AFW): the decided marker is read from ALL session entries (`getEntries`, never
+ * `getBranch`) — a `/tree` rewind must not undo a human decision, and entries a fork copied carry the parent's
+ * sid so `readXsAliasDecidedEntry` ignores them. Writes go through the synchronous `appendEntry` adapter and are
+ * dropped (memory flag still set) once the stack is disposed or the session id moved on. A session file that
+ * cannot be read fails CLOSED: decided reads true (never auto-claim on unknown history) while writes still work.
+ */
+function buildAliasDecided(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  sessionId: string,
+  isDisposed: () => boolean,
+): XsAliasDecidedPort {
+  const persist = (data: Parameters<Parameters<typeof createXsAliasDecided>[0]["persist"]>[0]): void => {
+    if (isDisposed() || ctx.sessionManager.getSessionId() !== sessionId) return;
+    pi.appendEntry(XS_ALIAS_DECIDED_CUSTOM_TYPE, data);
+  };
+  try {
+    return createXsAliasDecided({ sessionId, entries: ctx.sessionManager.getEntries(), persist });
+  } catch {
+    const port = createXsAliasDecided({ sessionId, entries: [], persist });
+    return { decided: () => true, markDecided: port.markDecided };
+  }
+}
 
 /** XW: all pi-facing adaptation stays here; the receiver/controller/fence remain pi-free. */
 export function buildStackXs(
@@ -179,6 +213,7 @@ export function buildStackXs(
       return false;
     }
   };
+  const aliasDecided = input.aliasDecided === true ? buildAliasDecided(pi, ctx, sessionId, () => disposed) : undefined;
   const fence = createSessionFence({ ...(input.ports ? { ports: input.ports } : {}) });
   fence.onEvent({ type: "session_start" });
   const inbox = new XsInbox(config.limits.inboxCap);
@@ -425,6 +460,7 @@ export function buildStackXs(
   return {
     sessionId: () => sessionId,
     directory,
+    ...(aliasDecided !== undefined ? { aliasDecided } : {}),
     member: () => ({ epoch: membership.epoch, joined: membership.joined, receive: membership.receive }),
     // Channel-plan §3.2 (CHW): `channels` only when the effective set is not default-only (the
     // per-write slotFlush trims it — and sets `joined ← linkJoined` — for a hub without the cap).
