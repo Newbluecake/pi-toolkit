@@ -5,16 +5,13 @@
  * value-import it — tests/web-hub/boundary.test.ts freezes its import closure).
  */
 import { afterEach, describe, expect, it } from "vitest";
+import { DEFAULT_SETTINGS, isTimeSettingKey, loadSettings, TIME_SETTING_MS_PATHS } from "../../src/config/settings.js";
 import {
   DEFAULT_SCHEDULE_SETTINGS,
-  DEFAULT_SETTINGS,
-  isTimeSettingKey,
-  loadSettings,
   parseScheduleSettings,
   SCHEDULE_TIMEOUT_MAX_MS,
   SCHEDULE_TIMEOUT_MIN_MS,
-  TIME_SETTING_MS_PATHS,
-} from "../../src/config/settings.js";
+} from "../../src/schedule/settings.js";
 import {
   currentOf,
   defaultOf,
