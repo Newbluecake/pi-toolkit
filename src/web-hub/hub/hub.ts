@@ -25,6 +25,7 @@ import { type GitRunner } from "../../git/run.js";
 import { resolveAgentDir } from "../protocol/agent-dir.js";
 import { FEISHU_SHUTDOWN_BUDGET_MS, type FsbReqFrame } from "../protocol/feishu.js";
 import type { LanOffReason, LanStatus } from "../protocol/lan.js";
+import type { FsDeps } from "../protocol/paths.js";
 import {
   ensurePrivateDir,
   packageRootDir,
@@ -32,6 +33,7 @@ import {
   type HubPaths,
   type SocketIdentity,
 } from "../protocol/paths.js";
+import { parseCmdline } from "../protocol/proc-identity.js";
 import type { HubUiBuildWire } from "../protocol/version-info.js";
 import {
   DIALOG_BG_HUB_CAPS,
@@ -52,22 +54,24 @@ import { assembleHubCaps, assembleXsRelay, prepareHubChannels } from "./assembly
 import { assembleFeishu } from "./assembly-feishu.js";
 import { assemblePreview } from "./assembly-preview.js";
 import { assembleRegistry } from "./assembly-registry.js";
+import { assembleSupersede, proxyStatusOf, startRuntimeMonitors } from "./assembly-runtime.js";
 import { assembleSchedule } from "./assembly-schedule.js";
-import { assembleSpawn } from "./assembly-spawn.js";
+import { assembleSpawn, spawnStatusOf } from "./assembly-spawn.js";
 import { assembleAvatarStore, assembleUploads, loadPrivacyStore } from "./assembly-storage.js";
-import { createHubAssembly } from "./assembly.js";
-import { uploadStatsFields } from "./audit.js";
+import { createHubAssembly, type HttpFrontendExt, type LanFacadeExt } from "./assembly.js";
 import { createClientAllowGuard } from "./client-allow.js";
 import { createCmdLimit } from "./cmd-limit.js";
 import { createCommandCompleteRoutes } from "./command-complete.js";
 import { createCommandRouter } from "./commands.js";
+import { createFeishuLinks } from "./feishu/link.js";
 import { type FeishuBotService, type FeishuBotServiceDeps } from "./feishu/service.js";
 import { createHubJsonWriter, type HubJsonWriter, type HubRecord } from "./hub-json.js";
-import { createIdleMonitor } from "./idle.js";
 import { defaultLanAssembly, LanAssemblyOffError } from "./lan-assembly.js";
 import { verifyPassword } from "./lan-auth.js";
+import { repairLan2fa, type LanStore } from "./lan-store.js";
 import { createScope, withDeadline, withSignal, type Scope } from "./lifecycle.js";
 import { createHubLog } from "./log.js";
+import type { FrontendDeps, FrontendFactory, HubConfig, HubEvent, HubInfo, HubLog, LanAssembly } from "./ports.js";
 import { createPrivacyRoutes } from "./privacy/routes.js";
 import { proxyErrCode } from "./proxy/audit.js";
 import { createProxyRoutes } from "./proxy/routes.js";
@@ -75,52 +79,15 @@ import { createProxyService } from "./proxy/service.js";
 import { createReqDeadline, type ReqDeadline } from "./req-deadline.js";
 import { createSecurityEventBus } from "./security-events.js";
 import { createSelfRestartStore, type SelfRestartDecision } from "./self-restart.js";
+import { acquireSingleton } from "./singleton.js";
 import { type PlatformProbeDeps } from "./spawn/config.js";
 import { type FirstPromptForwarder } from "./spawn/first-prompt.js";
-import { type Reaper } from "./spawn/reaper.js";
-import { type SpawnSupervisor, type SpawnSupervisorDeps } from "./spawn/supervisor.js";
-import { createSupersede, SUPERSEDE_YIELD_MS } from "./supersede.js";
-import { createVersionInfoService } from "./version-info.js";
-// session-history plan §4.8 (P-int): the spawn-history assembly — P-scan's service, P-route's
-// ports; hub.ts is the only place they meet (PD5). Aliased so the unrelated fleet-history
-// service (`./history.js`, browser transcript replay) keeps its plain name below.
-import type { FsDeps } from "../protocol/paths.js";
-import { parseCmdline } from "../protocol/proc-identity.js";
-import type { AuthRevokeEvent } from "./auth-revoke.js";
-import type { Auth } from "./auth.js";
-import { createFeishuLinks } from "./feishu/link.js";
-import { repairLan2fa, type LanStore } from "./lan-store.js";
-import type {
-  FrontendDeps,
-  FrontendFactory,
-  HostSnapshot,
-  HttpFrontend,
-  HubConfig,
-  HubEvent,
-  HubInfo,
-  HubLog,
-  LanAssembly,
-} from "./ports.js";
-import { acquireSingleton, startFence } from "./singleton.js";
 import type { HistoryService as SpawnHistoryService } from "./spawn/history/ports.js";
 import type { ProcFs, ProcSyncFs } from "./spawn/history/proc.js";
-
-/**
- * §6.7.1 (C8) — the duck-typed extras `http.ts`'s `createHttpFrontend` attaches beyond the
- * frozen `HttpFrontend` shape (same widening pattern as `storeWithUnavailable` in `http.ts`
- * itself): never part of the `HttpFrontend` type, only ever reached through this cast.
- */
-type HttpFrontendExt = HttpFrontend & {
-  auth?: Auth;
-  revokeAllSse?(): number;
-  bumpLanRevokeGen?(): void;
-  /** web-hub-proxy §4.2 (XA): attach a synchronous auth-revocation subscriber (the proxy
-   * service's hook, wired by a later package only when `config.proxy`); returns the unsubscribe. */
-  subscribeAuthRevoke?(fn: (ev: AuthRevokeEvent) => void): () => void;
-  /** web-hub-proxy §3.4 (X1c): the LIVE LAN host allow-list (`undefined` ⇒ LAN down). */
-  lanHostSnapshot?(): HostSnapshot | undefined;
-};
-type LanFacadeExt = NonNullable<HttpFrontend["lan"]> & { revokeAll?(): number };
+import { type Reaper } from "./spawn/reaper.js";
+import { type SpawnSupervisor, type SpawnSupervisorDeps } from "./spawn/supervisor.js";
+import { SUPERSEDE_YIELD_MS } from "./supersede.js";
+import { createVersionInfoService } from "./version-info.js";
 
 export interface RunningHub {
   paths: HubPaths;
@@ -168,11 +135,6 @@ const HISTORY_SERVICE_DISPOSE_MS = 2_500;
  * (and anything else) terminate exactly as before.
  */
 export const RESTORE_REASONS: ReadonlySet<string> = new Set(["restart", "superseded", "crash"]);
-/** web-hub-upload plan §2.6 (U3): committed-file TTL sweep + `upload stats` aggregate row cadence. */
-const UPLOAD_SWEEP_TICK_MS = 30 * 60_000;
-/** §2.6: idle in-flight invalidation (10 min idle TTL) + dirty `referencedAt` flush retry cadence. */
-const UPLOAD_INFLIGHT_TICK_MS = 60_000;
-
 export interface StartHubDeps {
   now?: () => number;
   uid?: number;
@@ -322,6 +284,8 @@ export async function startHub(
     stopBot,
     bounded,
     stepDeadlineMs: STEP_DEADLINE_MS,
+    registryTickMs: REGISTRY_TICK_MS,
+    rotateScanMs: ROTATE_SCAN_MS,
   });
 
   try {
@@ -341,6 +305,7 @@ export async function startHub(
       return { exists: true };
     }
     if (single.kind === "failed") throw new Error(`web-hub: ${single.error}`);
+    ctx.socketIdentity = single.identity;
     const owner = single; // narrow once here; closures defined below (e.g. `close`) don't retain flow narrowing
     cleanup.push(() => owner.release());
     startup.signal.throwIfAborted();
@@ -495,6 +460,7 @@ export async function startHub(
     const xsRelay = assembleXsRelay(ctx);
     const scheduleHub = assembleSchedule(ctx);
     ctx.scheduleHub = scheduleHub;
+    ctx.close = close;
     ctx.agentServer = createAgentServer(owner.server, {
       registry,
       config,
@@ -523,26 +489,6 @@ export async function startHub(
       restoreCount: () => ctx.spawnSup?.restoreCandidateCount() ?? 0,
     });
     cleanup.push(() => ctx.agentServer!.close());
-    // web-hub-spawn plan §SP10 (arch §7.8 "/webhub stop、restart 在 TUI 提示中显示 hub.json 的
-    // spawn.count"): the hub.json `spawn` summary — supervisor `liveCount` plus the policy
-    // `reason` whenever the loopback view of the policy is currently refusing spawns. Seeded
-    // into the step-⑦ `write()` below, then re-synced by the registry tick (change-gated).
-    function spawnStatusOf(sup: SpawnSupervisor): { count: number; reason?: string } {
-      const count = sup.liveCount();
-      const policy = sup.policy("loopback:token", "loopback", "http", false);
-      if (policy.allowed || policy.reason === undefined) return { count };
-      return { count, reason: policy.reason };
-    }
-    let lastSpawnStatus: { count: number; reason?: string } | undefined;
-    function syncSpawnStatus(): void {
-      if (ctx.spawnSup === undefined) return;
-      const next = spawnStatusOf(ctx.spawnSup);
-      const prev = lastSpawnStatus;
-      if (prev !== undefined && prev.count === next.count && prev.reason === next.reason) return;
-      lastSpawnStatus = next;
-      hubJson.patchSpawn(next);
-    }
-
     // §4.1's recognized db-open failures degrade to loopback-only (never fail the whole hub) —
     // `LanAssemblyOffError` is `defaultLanAssembly`'s (LD's own file) way of saying exactly that;
     // any other rejection (a real bug, an injected test double's `E_NOT_IMPLEMENTED:LD`, …) still
@@ -562,7 +508,7 @@ export async function startHub(
       cleanup.push(async () => off());
     }
     let lanAssemblyOff: { reason: LanOffReason; detail?: string } | undefined;
-    let kdfInFlight = 0;
+
     if (config.lan !== undefined) {
       try {
         const scope = rootScope.child();
@@ -620,13 +566,13 @@ export async function startHub(
       // method counts (`run` and `runPadded`) — a padded compensation run is still a login.
       const countInFlight = <A extends unknown[]>(fn: (...args: A) => Promise<Uint8Array>) => {
         return (...args: A): Promise<Uint8Array> => {
-          kdfInFlight++;
+          ctx.kdfInFlight++;
           try {
             return Promise.resolve(fn(...args)).finally(() => {
-              kdfInFlight = Math.max(0, kdfInFlight - 1);
+              ctx.kdfInFlight = Math.max(0, ctx.kdfInFlight - 1);
             });
           } catch (err) {
-            kdfInFlight = Math.max(0, kdfInFlight - 1);
+            ctx.kdfInFlight = Math.max(0, ctx.kdfInFlight - 1);
             throw err;
           }
         };
@@ -672,10 +618,10 @@ export async function startHub(
       }),
     );
     startup.signal.throwIfAborted();
-    let lanBlockedByRotate = rotateRecovery.lanBlocked === true;
+    ctx.lanBlockedByRotate = rotateRecovery.lanBlocked === true;
     /** Set when the runtime scan had to close an already-open LAN listener (permanent) — the
      * "previously blocked, now resolved ⇒ start()" path must not try to resurrect it. */
-    let lanClosedByRotateScan = false;
+    ctx.lanClosedByRotateScan = false;
 
     if (config.privacy === true) await loadPrivacyStore(ctx);
     const commandRouter = createCommandRouter({ registry, log, now });
@@ -839,186 +785,7 @@ export async function startHub(
     // in the startup path; this still matters once the periodic scan reuses the same helper).
     (ctx.fe as HttpFrontendExt).auth?.reload();
 
-    // C10: assemble version replacement after the command router and frontend exist.
-    // The socket can already accept hello; tests hold ui.refresh below to exercise early close.
-    // Cancel handles for in-flight acc32-B9 dialogs-handshake waits — drained on close/dispose
-    // so a pending one-shot bus subscription never outlives the hub.
-    ctx.supersede = createSupersede({
-      hubVersion: config.pluginVersion,
-      now,
-      ...(paths.stoppedFile === undefined ? {} : { stopFile: paths.stoppedFile }),
-      openDialogs: () =>
-        registry.list().flatMap((a) => {
-          const dialogs = a.dialogs as { open?: unknown[] } | null | undefined;
-          const count = dialogs?.open?.length ?? 0;
-          return count === 0 ? [] : [{ agentKey: a.agentKey, count }];
-        }),
-      inflight: () => commandRouter.inflight(),
-      kdfInflight: () => kdfInFlight,
-      // web-hub-spawn plan §SP10 (arch §7.8): quiet also requires zero busy managed spawns —
-      // replacing the hub under a busy web-spawned agent ends that session with the stdin EOF.
-      // SP13（SP10 验收遗留评估）：busy 分量并入首条消息在途/退避重发计数（`sending` 状态）——
-      // 一条尚未送达的首条消息同样会被 hub 替换的 stdin EOF 打断，绝不计为 quiet。
-      managedBusy: () => (ctx.spawnSup?.busyCount() ?? 0) + (ctx.firstPromptFwd?.sendingCount() ?? 0),
-      // acc32-B9: a reliable handshake for the first quiet judgment after a hello — resolve
-      // immediately if the registry already has *any* dialogs snapshot for this agent (a
-      // reclaimed/reconnected Rec whose `dialogs` field survived the reconnect, §registry.ts
-      // `register()`'s reclaim branch never touches it), otherwise wait for the one-shot
-      // `dialogs` bus event for this exact `agentKey` or the bounded timeout, whichever is first.
-      awaitDialogsSlot: (agentKey, timeoutMs) => {
-        if (registry.get(agentKey)?.dialogs !== undefined) return Promise.resolve();
-        return new Promise<void>((resolve) => {
-          let settled = false;
-          const finish = (): void => {
-            if (settled) return;
-            settled = true;
-            ctx.supersedeWaitCancels.delete(finish);
-            clearTimeout(timer);
-            unsubscribe();
-            resolve();
-          };
-          // Registered so hub close/dispose can cancel a still-pending handshake wait
-          // immediately instead of leaking the bus subscription until the timeout fires.
-          ctx.supersedeWaitCancels.add(finish);
-          const unsubscribe = registry.bus.subscribe((e) => {
-            if (e.type === "dialogs" && e.agentKey === agentKey) finish();
-          });
-          const timer = setTimeout(finish, timeoutMs);
-          timer.unref();
-        });
-      },
-      stateChanged: (s) => {
-        if (s === undefined) {
-          delete info.state;
-          delete info.nextVersion;
-          info.supersedePending = false;
-          delete info.supersedeDeadlineAt;
-          delete info.forced;
-          delete info.draining;
-          delete info.supersedeBlocked;
-        } else {
-          info.supersedePending = true;
-          info.nextVersion = s.nextVersion;
-          info.supersedeDeadlineAt = s.deadlineAt;
-          if (s.forced === true) info.forced = true;
-          if (s.blocked !== undefined) info.supersedeBlocked = s.blocked;
-          else delete info.supersedeBlocked;
-        }
-      },
-      audit: (op, fields) => log.info("web-hub admin op", { audit: "admin", op, ...fields }),
-      log,
-      restart: async ({ nextVersion, forced, openDialogs, inflightAtDrain }) => {
-        if (ctx.bot !== undefined) await stopBot(); // also precedes forced command-router drain.
-        info.state = "restarting";
-        info.nextVersion = nextVersion;
-        info.supersedePending = true;
-        info.forced = forced;
-        info.draining = forced;
-        if (forced) {
-          const drained = await commandRouter.drain();
-          info.draining = false;
-          // §6.7.3's audit row carries `drainTimedOut` — folded into the SAME tagged audit
-          // channel (`audit:"admin"`), emitted here because the controller's begin()-time audit
-          // necessarily precedes the drain (C10 verifier finding).
-          log.info("web-hub admin op", {
-            audit: "admin",
-            op: "supersede",
-            phase: "drain",
-            nextVersion,
-            forced,
-            inflightAtDrain,
-            drainTimedOut: drained.timedOut,
-            inflight: drained.inflight,
-          });
-        }
-        const openByAgent = new Map(openDialogs.map((x) => [x.agentKey, x.count]));
-        registry.broadcast((agentKey) => {
-          const count = openByAgent.get(agentKey) ?? 0;
-          return {
-            t: "superseded",
-            nextVersion,
-            yieldMs: SUPERSEDE_YIELD_MS,
-            ...(forced ? { forced: true as const } : {}),
-            ...(count > 0 ? { openDialogs: count } : {}),
-          };
-        });
-        await close("superseded");
-      },
-    });
-    ctx.supersedeTimer = setInterval(() => ctx.supersede?.tick(), 250);
-    ctx.supersedeTimer.unref();
-    // acc32-B9 defense in depth: re-check quiet immediately whenever a `dialogs` slot changes
-    // (a dialog opening OR closing), rather than relying solely on the 250ms periodic tick —
-    // this is on top of (not instead of) `observe()`'s own deferred first check above.
-    ctx.unsubscribeSupersedeOnDialogs = registry.bus.subscribe((e) => {
-      if (e.type === "dialogs") ctx.supersede?.tick();
-    });
-    cleanup.push(async () => {
-      ctx.unsubscribeSupersedeOnDialogs();
-      if (ctx.supersedeTimer !== undefined) clearInterval(ctx.supersedeTimer);
-      for (const cancel of [...ctx.supersedeWaitCancels]) cancel();
-      ctx.supersede?.dispose();
-    });
-    const scanRotateIntent = async (): Promise<void> => {
-      if (closing !== undefined) return;
-      const revokeLan =
-        ctx.lanDeps === undefined
-          ? undefined
-          : async (): Promise<number> => (await (ctx.lanDeps!.store as Partial<LanStore>).revokeAllSessions?.()) ?? 0;
-      const outcome = await recoverRotateIntent({
-        paths: {
-          tokenFile: paths.tokenFile,
-          rotateIntentFile: paths.rotateIntentFile ?? `${paths.stateDir}/rotate.intent`,
-        },
-        log,
-        // acc32-B7: same fix as the startup pass above — `hasLan` must not fold in whether LAN
-        // assembly ever succeeded (`lanDeps !== undefined`); a still-unopened store still needs
-        // `revokeLan === undefined` to reach `recoverRotateIntent`'s own fail-closed branch rather
-        // than being masked as "no LAN configured".
-        hasLan: config.lan !== undefined,
-        ...(revokeLan === undefined ? {} : { revokeLan }),
-        now,
-        audit: (fields) => log.info("web-hub admin op", { audit: "admin", op: "rotate_token", ...fields }),
-      });
-      if (closing !== undefined || !outcome.recovered) return;
-      (ctx.fe as HttpFrontendExt).auth?.reload();
-      (ctx.fe as HttpFrontendExt).revokeAllSse?.();
-      if (outcome.lanBlocked === true) {
-        lanBlockedByRotate = true;
-        if (ctx.fe.lan !== undefined) {
-          lanClosedByRotateScan = true;
-          log.warn(
-            "web-hub: closing the LAN listener (rotate revoke failed); run /webhub restart to re-open it once the pending rotate completes",
-          );
-          void ctx.fe.lan
-            .close()
-            .catch((err: unknown) =>
-              log.error("web-hub: failed to close LAN listener after rotate revoke failure", { error: String(err) }),
-            );
-        }
-        hubJson.patchLan({ state: "off", reason: "rotate-pending" });
-        return;
-      }
-      if (ctx.fe.lan !== undefined) {
-        (ctx.fe.lan as LanFacadeExt | undefined)?.revokeAll?.();
-        (ctx.fe as HttpFrontendExt).bumpLanRevokeGen?.();
-      }
-      if (lanBlockedByRotate && ctx.fe.lan !== undefined && !lanClosedByRotateScan) {
-        lanBlockedByRotate = false;
-        void ctx.fe.lan.start().then(
-          (s) => hubJson.patchLan(s),
-          (err: unknown) =>
-            log.error("web-hub: LAN start() (post rotate-pending recovery) rejected unexpectedly", {
-              error: String(err),
-            }),
-        );
-      }
-    };
-    ctx.recoverRotateOnHello = () => {
-      void scanRotateIntent().catch((err: unknown) =>
-        log.error("web-hub: hello rotate-intent scan failed", { error: String(err) }),
-      );
-    };
+    assembleSupersede(ctx);
 
     httpPort = (await startupStep(ctx.fe.listen({ signal: startup.signal }), () => ctx.fe.close())).port; // ⑥
     ctx.httpPort = httpPort;
@@ -1074,18 +841,18 @@ export async function startHub(
     const initialLan: LanStatus | undefined =
       deps.lanConfigError !== undefined
         ? { state: "off", reason: "bad-config", detail: deps.lanConfigError.detail }
-        : lanBlockedByRotate
+        : ctx.lanBlockedByRotate
           ? // acc32-B7 (verifier r_29729WTC): `rotate-pending` must outrank `lanAssemblyOff` here,
             // not just come after it — a store that failed to open (e.g. `db-invalid`) is exactly
             // the case where `recoverRotateIntent`'s fail-closed revoke also has no store to
-            // revoke against, so `lanBlockedByRotate` and `lanAssemblyOff` are routinely BOTH set
+            // revoke against, so `ctx.lanBlockedByRotate` and `lanAssemblyOff` are routinely BOTH set
             // at once. Checking `lanAssemblyOff` first (the original order) always won that race
             // and reported the (real but less actionable) `db-invalid` reason while masking the
             // fact that a rotation is stuck pending recovery — exactly the security-relevant state
             // §6.7.1 requires `/webhub status` to surface ("lan off · rotate-pending · /webhub
             // restart to retry"). `deps.lanConfigError` stays first: it implies `config.lan ===
             // undefined` (the constructor guard above), so `hasLan` was `false` for the rotate
-            // recovery call and `lanBlockedByRotate` can never be true alongside it — no ordering
+            // recovery call and `ctx.lanBlockedByRotate` can never be true alongside it — no ordering
             // conflict there.
             { state: "off", reason: "rotate-pending" }
           : lanAssemblyOff !== undefined
@@ -1100,7 +867,7 @@ export async function startHub(
     let initialSpawn: { count: number; reason?: string } | undefined;
     if (ctx.spawnSup !== undefined) {
       initialSpawn = spawnStatusOf(ctx.spawnSup);
-      lastSpawnStatus = initialSpawn;
+      ctx.lastSpawnStatus = initialSpawn;
     }
     // web-hub-privacy plan v2.1 (P3): surface the store's load-time `degraded` flag through
     // hub.json so `/webhub status` can warn about a corrupted-then-renamed privacy.json. The
@@ -1111,12 +878,8 @@ export async function startHub(
       config.privacy === true && ctx.privacyStore !== undefined ? { degraded: ctx.privacyStore.degraded } : undefined;
     // web-hub-proxy (X1c): `/webhub status` reads the ports-store state from hub.json. Key absent
     // when the proxy is off (hub.json byte-identical); `unavailable` construction ⇒ no key either.
-    const proxyStatusOf = (): HubRecord["proxy"] | undefined => {
-      const st = ctx.proxyService?.status?.();
-      return st === undefined ? undefined : { portsStore: st.portsStore };
-    };
-    let lastProxyPortsStore = proxyStatusOf()?.portsStore;
-    const initialProxy = proxyStatusOf();
+    ctx.lastProxyPortsStore = proxyStatusOf(ctx)?.portsStore;
+    const initialProxy = proxyStatusOf(ctx);
     const initialAlias: XsAliasHubStatus | undefined =
       xsAliasDegraded === undefined ? undefined : { degraded: true, ...xsAliasDegraded };
     const identity = await startupStep(identityFields());
@@ -1146,7 +909,7 @@ export async function startHub(
     // web-hub-version plan §3.5: one-shot, silent-on-failure boot HEAD observation (git, bounded,
     // aborted by dispose); broadcasts one `hub` frame when it lands.
     ctx.versionService.captureBootHead();
-    if (ctx.fe.lan !== undefined && !lanBlockedByRotate) {
+    if (ctx.fe.lan !== undefined && !ctx.lanBlockedByRotate) {
       // Review fix (LC, plan §1.4/§3, W3 acceptance item 1/3): `LanFacade.start()` is bounded by
       // its own `LAN_START_DEADLINE_MS` and always *resolves* with a correctly classified
       // `LanStatus` (`off/timeout`, `off/listen-failed`, ...) instead of rejecting for any
@@ -1167,93 +930,7 @@ export async function startHub(
 
     log.info("hub started", { pid: process.pid, port: httpPort, socket: paths.socketPath, version: info.version });
 
-    ctx.tick = setInterval(() => {
-      try {
-        registry.tick(now());
-      } catch (err) {
-        log.error("registry tick threw", { error: String(err) });
-      }
-      // web-hub-spawn plan §SP10: ride the same 5s tick to re-sync hub.json's `spawn` summary
-      // (pure in-memory compare; the file is only rewritten when the value actually changed).
-      syncSpawnStatus();
-      // web-hub-proxy (X1c): a runtime persist failure latches the ports store `broken`; mirror it
-      // into hub.json (pure in-memory compare, rewritten only on a real change).
-      const proxySt = proxyStatusOf();
-      if (proxySt !== undefined && proxySt.portsStore !== lastProxyPortsStore) {
-        const cur = hubJson.current();
-        if (cur !== undefined) {
-          lastProxyPortsStore = proxySt.portsStore;
-          hubJson.write({ ...cur, proxy: proxySt });
-        }
-      }
-    }, REGISTRY_TICK_MS);
-    ctx.tick.unref();
-
-    // \u00a76.7.1 (C8) "hub \u8fd0\u884c\u671f" row: every `ROTATE_SCAN_MS` (unref), re-run the same
-    // recovery helper against whatever is on disk right now \u2014 catches an intent this hub process
-    // didn't itself create (the offline agent path, or another hub racing this one), and retries a
-    // previously-`lanBlocked` revoke once the LAN store is healthy again. NOTE (delivery report):
-    // The same recovery helper is also invoked by agent-server.ts on every
-    // successful hello; this timer covers offline rotations and quiet periods.
-    ctx.rotateScan = setInterval(() => {
-      void scanRotateIntent().catch((err: unknown) =>
-        log.error("web-hub: periodic rotate-intent scan failed", { error: String(err) }),
-      );
-    }, ROTATE_SCAN_MS);
-    ctx.rotateScan.unref();
-
-    // web-hub-upload plan §2.6 (U3): upload lifecycle ticks (both unref'd). The 60s tick covers
-    // idle in-flight invalidation (10 min TTL) and retries dirty `referencedAt` persistence
-    // (sweep() always flushes dirty references first); the 30-min tick additionally writes the
-    // §5.4 `upload stats` aggregate row. `sweep("tick")`'s committed-file TTL eviction is
-    // exact-time based, so running it at both cadences changes nothing semantically.
-    ctx.uploadInflightTick =
-      ctx.uploads === undefined
-        ? undefined
-        : setInterval(() => {
-            void ctx
-              .uploads!.sweep("tick")
-              .catch((err: unknown) => log.error("web-hub: upload sweep tick failed", { error: String(err) }));
-          }, UPLOAD_INFLIGHT_TICK_MS);
-    ctx.uploadInflightTick?.unref();
-    ctx.uploadSweepTick =
-      ctx.uploads === undefined
-        ? undefined
-        : setInterval(() => {
-            void ctx
-              .uploads!.sweep("tick")
-              .then(() => {
-                log.info("upload stats", {
-                  audit: "upload-stats",
-                  ...uploadStatsFields(ctx.uploads!.stats(), uploadMetrics.snapshot()),
-                });
-              })
-              .catch((err: unknown) => log.error("web-hub: upload sweep tick failed", { error: String(err) }));
-          }, UPLOAD_SWEEP_TICK_MS);
-    ctx.uploadSweepTick?.unref();
-
-    ctx.stopFence = startFence(paths.socketPath, owner.identity, (why) => {
-      log.warn("socket fence lost: another hub owns the socket path", { why });
-      void close("fence");
-    });
-
-    ctx.idle = createIdleMonitor({
-      counts: () => ({
-        agents: Math.max(ctx.agentServer?.connectionCount() ?? 0, registry.list().length),
-        // web-hub-proxy §3.4 (X1c): a working proxy tab (open sockets) keeps the hub alive.
-        sse: ctx.fe.clientCount() + (ctx.proxyService?.activeConnections() ?? 0),
-        // web-hub-spawn plan §SP10 (arch §7.8 "idle 自退"): a live managed child keeps the
-        // hub alive — the absolute lifetime deadline (§6.5 maxLifetimeMinutes) is the backstop.
-        headless: ctx.spawnSup?.liveCount() ?? 0,
-        ...(ctx.bot === undefined ? {} : { bot: ctx.bot.keepalive() ? 1 : 0 }),
-      }),
-      idleMs: Math.max(1, config.idleExitMinutes) * 60_000,
-      now,
-      onIdle: () => {
-        log.info("idle timeout reached");
-        void close("idle");
-      },
-    });
+    startRuntimeMonitors(ctx, uploadMetrics);
 
     function close(reason: string, opts?: { deadline?: ReqDeadline }): Promise<void> {
       if (closing !== undefined) return closing;

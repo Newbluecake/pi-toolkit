@@ -101,6 +101,9 @@ describe("startup close gate", () => {
     };
     collect(factory!.body!);
     for (const name of [
+      "kdfInFlight",
+      "lanBlockedByRotate",
+      "lanClosedByRotateScan",
       "supersedeWaitCancels",
       "supersedeTimer",
       "unsubscribeSupersedeOnDialogs",
@@ -126,6 +129,8 @@ describe("startup close gate", () => {
     const ctxDeclaration = vars.get("ctx");
     expect(ctxDeclaration?.initializer?.getText(source)).toContain("createHubAssembly(");
     expect(ctxDeclaration!.getStart(source)).toBeLessThan(exposure);
+    expect(text.indexOf("ctx.close = close;")).toBeGreaterThan(-1);
+    expect(text.indexOf("ctx.close = close;")).toBeLessThan(exposure);
 
     // Registry/history handles now come from the synchronous sub-assembly. Its invocation
     // and initialized outputs must still precede socket exposure (no late/TDZ dependencies).

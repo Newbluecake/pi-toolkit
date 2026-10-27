@@ -17,8 +17,8 @@ import { createSpawnPrefs } from "./spawn/prefs.js";
 import { createReaper, type Reaper } from "./spawn/reaper.js";
 import { createSpawnRoutes } from "./spawn/routes.js";
 import { createSpawnStore, isTerminalSpawnState } from "./spawn/store.js";
+import type { SpawnSupervisor } from "./spawn/supervisor.js";
 import { createSpawnSupervisor, type InternalRecord } from "./spawn/supervisor.js";
-/** Pure extraction of the assembleSpawn phase; invoked only at the original feature gate. */
 /** web-hub-spawn §SP10: unchanged bounded supervisor startup budget. */
 const SPAWN_INIT_BUDGET_MS = 4_000;
 
@@ -327,4 +327,24 @@ function toManagedView(r: InternalRecord): ManagedSessionView {
   if (r.sessionFile !== undefined) view.sessionFile = r.sessionFile;
   if (r.sessionTarget !== undefined) view.sessionTarget = { ...r.sessionTarget };
   return view;
+}
+
+// web-hub-spawn plan §SP10 (arch §7.8 "/webhub stop、restart 在 TUI 提示中显示 hub.json 的
+// spawn.count"): the hub.json `spawn` summary — supervisor `liveCount` plus the policy
+// `reason` whenever the loopback view of the policy is currently refusing spawns. Seeded
+// into the step-⑦ `write()` below, then re-synced by the registry tick (change-gated).
+export function spawnStatusOf(sup: SpawnSupervisor): { count: number; reason?: string } {
+  const count = sup.liveCount();
+  const policy = sup.policy("loopback:token", "loopback", "http", false);
+  if (policy.allowed || policy.reason === undefined) return { count };
+  return { count, reason: policy.reason };
+}
+export function syncSpawnStatus(ctx: HubAssembly): void {
+  const hubJson = ctx.hubJson!;
+  if (ctx.spawnSup === undefined) return;
+  const next = spawnStatusOf(ctx.spawnSup);
+  const prev = ctx.lastSpawnStatus;
+  if (prev !== undefined && prev.count === next.count && prev.reason === next.reason) return;
+  ctx.lastSpawnStatus = next;
+  hubJson.patchSpawn(next);
 }

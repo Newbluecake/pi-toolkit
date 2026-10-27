@@ -1,15 +1,18 @@
-import type { HubPaths } from "../protocol/paths.js";
+import type { HubPaths, SocketIdentity } from "../protocol/paths.js";
 import type { createAgentServer } from "./agent-server.js";
+import type { AuthRevokeEvent } from "./auth-revoke.js";
+import type { Auth } from "./auth.js";
 import type { createCmdLimit } from "./cmd-limit.js";
 import type { createCommandRouter } from "./commands.js";
 import type { createFeishuLinks } from "./feishu/link.js";
 import type { FeishuBotService, FeishuSpawnPort } from "./feishu/service.js";
-import type { HubJsonWriter } from "./hub-json.js";
-import type { StartHubDeps } from "./hub.js";
+import type { HubJsonWriter, HubRecord } from "./hub-json.js";
+import type { RunningHub, StartHubDeps } from "./hub.js";
 import type { createIdleMonitor } from "./idle.js";
 import type { Scope } from "./lifecycle.js";
 import type {
   AvatarRoutes,
+  HostSnapshot,
   HttpFrontend,
   HubConfig,
   HubEvent,
@@ -47,6 +50,8 @@ export interface HubAssemblyBase {
   cleanup: Array<() => Promise<void>>;
   startupStep<T>(pending: Promise<T>, disposeLate?: (value: T) => Promise<void> | void): Promise<T>;
   stepDeadlineMs: number;
+  registryTickMs: number;
+  rotateScanMs: number;
   isClosing(): boolean;
   stopBot(): Promise<void>;
   bounded(p: Promise<void>, ms?: number): Promise<void>;
@@ -55,6 +60,14 @@ export interface HubAssemblyBase {
  * Helpers read stable phase outputs only after the root publishes them; callbacks read
  * mutable handles from this same object, never a snapshot of a later assignment. */
 export interface HubAssembly extends HubAssemblyBase {
+  close?: RunningHub["close"];
+  socketIdentity?: SocketIdentity;
+  kdfInFlight: number;
+  lanBlockedByRotate: boolean;
+  lanClosedByRotateScan: boolean;
+  scanRotateIntent?: () => Promise<void>;
+  lastSpawnStatus: { count: number; reason?: string } | undefined;
+  lastProxyPortsStore: NonNullable<HubRecord["proxy"]>["portsStore"] | undefined;
   bot: FeishuBotService | undefined;
   botSpawn: FeishuSpawnPort | undefined;
   scheduleHub?: ReturnType<typeof createScheduleService> | undefined;
@@ -175,6 +188,11 @@ export function createHubAssembly(base: HubAssemblyBase): HubAssembly {
   return {
     ...base,
     httpPort: 0,
+    kdfInFlight: 0,
+    lanBlockedByRotate: false,
+    lanClosedByRotateScan: false,
+    lastSpawnStatus: undefined,
+    lastProxyPortsStore: undefined,
     htmlEnabled: false,
     avatarRoutes: undefined,
     bot: undefined,
@@ -223,3 +241,20 @@ export function createHubAssembly(base: HubAssemblyBase): HubAssembly {
     botSchedEventListener: undefined,
   };
 }
+
+/**
+ * §6.7.1 (C8) — the duck-typed extras `http.ts`'s `createHttpFrontend` attaches beyond the
+ * frozen `HttpFrontend` shape (same widening pattern as `storeWithUnavailable` in `http.ts`
+ * itself): never part of the `HttpFrontend` type, only ever reached through this cast.
+ */
+export type HttpFrontendExt = HttpFrontend & {
+  auth?: Auth;
+  revokeAllSse?(): number;
+  bumpLanRevokeGen?(): void;
+  /** web-hub-proxy §4.2 (XA): attach a synchronous auth-revocation subscriber (the proxy
+   * service's hook, wired by a later package only when `config.proxy`); returns the unsubscribe. */
+  subscribeAuthRevoke?(fn: (ev: AuthRevokeEvent) => void): () => void;
+  /** web-hub-proxy §3.4 (X1c): the LIVE LAN host allow-list (`undefined` ⇒ LAN down). */
+  lanHostSnapshot?(): HostSnapshot | undefined;
+};
+export type LanFacadeExt = NonNullable<HttpFrontend["lan"]> & { revokeAll?(): number };
