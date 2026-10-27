@@ -119,6 +119,9 @@ export type { SystemPromptSettings } from "../sysprompt/settings.js";
 import { DEFAULT_EXTEND_SETTINGS, parseExtendSettings } from "../delivery/extend-settings.js";
 import type { ExtendSettings } from "../delivery/extend-settings.js";
 export type { ExtendSettings } from "../delivery/extend-settings.js";
+import { DEFAULT_AGENT_DISPATCH_SETTINGS, parseAgentDispatchSettings } from "../service/dispatch-settings.js";
+import type { AgentDispatchSettings } from "../service/dispatch-settings.js";
+export type { AgentDispatchSettings } from "../service/dispatch-settings.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 import { getSecureDomain, statePathsOf } from "../secure/domain.js";
 import { resolveAgentDir } from "../core/agent-dir.js";
@@ -157,18 +160,6 @@ import {
   type TopicSwitchSettings,
 } from "../topic-switch/settings.js";
 export type { TopicSwitchSettings };
-
-/**
- * L1 (agent-tool pool-full plan §2): top-level/nested Agent tool dispatch
- * policy when the concurrency pool is already full. Default is `false`
- * (reject immediately, no queueing); `true` restores the pre-L1 queue-wait
- * behavior (subject to `budget.queueWaitS`'s own timeout). Workflow children
- * (src/workflow/) and every other spawn path (/task, resume) never
- * read this setting — they always queue, unaffected by this toggle.
- */
-export interface AgentDispatchSettings {
-  queueWhenFull: boolean;
-}
 
 export interface AgentSettings {
   concurrencyLimit: number;
@@ -256,7 +247,7 @@ export interface AgentSettings {
 
 export const DEFAULT_SETTINGS: AgentSettings = {
   concurrencyLimit: 6,
-  agent: { queueWhenFull: false },
+  agent: DEFAULT_AGENT_DISPATCH_SETTINGS,
   budget: DEFAULT_BUDGET,
   deliveryAttempts: 3,
   deliveryBackoffMs: 1_000,
@@ -302,13 +293,6 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   traffic: { ...DEFAULT_TRAFFIC_SETTINGS, web: { ...DEFAULT_TRAFFIC_SETTINGS.web } },
   schedule: { ...DEFAULT_SCHEDULE_SETTINGS },
 };
-/** Parse the optional `agent` settings block (L1). Field-by-field fallback to defaults, never throws. */
-export function parseAgentDispatchSettings(input: unknown): AgentDispatchSettings {
-  const defaults = DEFAULT_SETTINGS.agent;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
-  const queueWhenFull = (input as Record<string, unknown>).queueWhenFull;
-  return { queueWhenFull: typeof queueWhenFull === "boolean" ? queueWhenFull : defaults.queueWhenFull };
-}
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
   // D-11：totalMs 恒 > 0。某一层的 totalMs 非法（≤ 0 / 非有限数）时丢弃该层的
   // 这一个键（其余键保留），回退下一层；DEFAULT_BUDGET.totalMs = 1_800_000 是
