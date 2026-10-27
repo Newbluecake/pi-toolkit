@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS, loadSettings, parseGoalSettings, TIME_SETTING_MS_PATHS } from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings, TIME_SETTING_MS_PATHS } from "../../src/config/settings.js";
+import { parseGoalSettings } from "../../src/goal/settings.js";
 import { currentOf, defaultOf, isKnownSettingKey, SETTING_SPECS } from "../../src/config/setting-specs.js";
 
 const defaults = DEFAULT_SETTINGS.goal;
