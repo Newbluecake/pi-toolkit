@@ -111,8 +111,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../extensions/worktree-link-paths.js",
     // #56 ⑧: the `fabric` block lives in fabric/settings.ts (pinned below).
     "../fabric/settings.js",
-    "../memory/tidy/batch-settings.js",
     "../quota/settings.js",
+    "../memory/settings.js",
     "../sysload/settings.js",
     "../topic-switch/settings.js",
     // #56 ⑧: the `webHub` / `feishuBot` blocks live in web-hub/agent/settings.ts (pinned below).
@@ -152,6 +152,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/compact-hint/settings.ts": ["./threshold.js"],
   // #56 ⑧: bashJobs block settings — self-contained (no imports at all).
   "src/bash/settings.ts": [],
+  // #56 ⑧: memory block settings — the tidy batch limits (pinned below: only ../contracts.js).
+  "src/memory/settings.ts": ["./tidy/batch-settings.js"],
   // #56 ⑧: webHub/feishuBot block settings — LAN host/origin classification (L16 第一处) + the browser-safe,
   // import-free shared CIDR parser (LAN security P0). The hub whitelist is NOT loosened: these are the same two files.
   "src/web-hub/agent/settings.ts": ["../protocol/client-allow.js", "../protocol/lan.js"],

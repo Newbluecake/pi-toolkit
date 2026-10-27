@@ -3,12 +3,8 @@
 // explicit legacy remains the byte-compatible opt-out.
 
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_SETTINGS,
-  loadSettings,
-  parseMemorySettings,
-  TIME_SETTING_MS_PATHS,
-} from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings, TIME_SETTING_MS_PATHS } from "../../src/config/settings.js";
+import { parseMemorySettings } from "../../src/memory/settings.js";
 import { currentOf, defaultOf, isKnownSettingKey, SETTING_SPECS, settingKeys } from "../../src/config/setting-specs.js";
 import { DEFAULT_TIDY_BATCH_SETTINGS } from "../../src/memory/tidy/batch-settings.js";
 
