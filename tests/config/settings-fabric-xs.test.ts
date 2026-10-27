@@ -44,7 +44,7 @@ describe("fabric.crossSession settings (phase2 §4.1)", () => {
         broadcast: { outPerHour: 6, minIntervalS: 60, wakeOutPerHour: 2, maxRecipients: 16, wakeMaxRecipients: 4 },
       },
       // alias-plan §3.6 (AL0b)
-      alias: { enabled: true, offlineLeaseH: 168, coolMin: 10, takeMinOfflineMin: 10 },
+      alias: { enabled: true, offlineLeaseH: 168, coolMin: 10, takeMinOfflineMin: 10, autoFromCwd: true },
     });
   });
 

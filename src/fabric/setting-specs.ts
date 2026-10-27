@@ -48,4 +48,10 @@ export const FABRIC_SETTING_SPECS: Record<string, SettingSpec> = {
     "Max revives per hour for one target",
   ),
   "fabric.wake.parkCapPerTarget": count("fabric.wake.parkCapPerTarget", 0, "Max parked messages per finished target"),
+  // alias-force-default plan §6 (AF0): the first crossSession key on this surface. Non-live (stack build, needs /reload);
+  // agent-side only — it never rides HubConfig.
+  "fabric.crossSession.alias.autoFromCwd": bool(
+    "fabric.crossSession.alias.autoFromCwd",
+    "Auto-claim the cwd basename as this session's alias when free (needs crossSession + alias)",
+  ),
 };

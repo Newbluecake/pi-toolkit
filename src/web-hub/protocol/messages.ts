@@ -32,6 +32,7 @@ import {
   XS_HUB_FRAME_SCHEMAS,
   XsStatusSchema,
   type XsAckFrame,
+  type XsAliasEvtFrame,
   type XsDeliverFrame,
   type XsEffect,
   type XsMemberFrame,
@@ -40,7 +41,15 @@ import {
   type XsStatusWire,
   xsFrameBytesOk,
 } from "./xs.js";
-export type { XsAckFrame, XsDeliverFrame, XsMemberFrame, XsReqFrame, XsResFrame, XsStatusWire } from "./xs.js";
+export type {
+  XsAckFrame,
+  XsAliasEvtFrame,
+  XsDeliverFrame,
+  XsMemberFrame,
+  XsReqFrame,
+  XsResFrame,
+  XsStatusWire,
+} from "./xs.js";
 // scheduled-reports plan r3 §10.1 (S0): `sched_*` frame schemas + types live in protocol/schedule.ts;
 // only folded in here (cap-gated on `sched.v1`, no PROTO bump — 只加帧不改).
 import {
@@ -1228,6 +1237,7 @@ export type HubFrame =
   | TfaResFrame
   | XsResFrame
   | XsDeliverFrame
+  | XsAliasEvtFrame // alias-force-default plan §3.2 (AF0): inert until AF2/AF3 route it; v2 members only
   // scheduled-reports S0 (§10.1): inert until A0/H1 route them; sent only under `sched.v1`.
   | SchedRunFrame
   | SchedReceiptsFrame

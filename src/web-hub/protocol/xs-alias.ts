@@ -102,6 +102,21 @@ function isAllowedCodePoint(ch: string): boolean {
   return false;
 }
 
+/**
+ * Alias-force-default plan §5.2 (AF0): `true` iff `ch` (ONE code point) survives `normalizeAlias`' character
+ * screening — not on the deny lists (§2.1-3) and on the whitelist (§2.1-4). It is the single source of truth:
+ * `normalizeAlias` and `deriveAliasFromDirName` both call it, so the two can never drift apart.
+ * Case is not folded here (`A` is allowed; `normalizeAlias` lower-cases afterwards). Anything that is not exactly
+ * one code point ⇒ false.
+ */
+export function isAliasCodePoint(ch: string): boolean {
+  if (typeof ch !== "string" || ch.length === 0 || ch.length > 2) return false;
+  const cp = ch.codePointAt(0);
+  if (cp === undefined || String.fromCodePoint(cp) !== ch) return false;
+  if (DENY_RE.test(ch) || DENY_RANGE_RE.test(ch)) return false;
+  return isAllowedCodePoint(ch);
+}
+
 // ------------------------------------------------------------------ sizing
 
 function utf8Bytes(s: string): number {
@@ -179,8 +194,7 @@ export function normalizeAlias(input: unknown, opts?: { readonly stripAt?: boole
   if (s.length === 0) return bad("invalid");
 
   for (const ch of s) {
-    if (DENY_RE.test(ch) || DENY_RANGE_RE.test(ch)) return bad("invalid");
-    if (!isAllowedCodePoint(ch)) return bad("invalid");
+    if (!isAliasCodePoint(ch)) return bad("invalid");
   }
 
   const alias = s.replace(/[A-Z]/g, (c) => c.toLowerCase());
@@ -197,6 +211,89 @@ export function normalizeAlias(input: unknown, opts?: { readonly stripAt?: boole
   if (isReservedAlias(alias)) return bad("reserved");
 
   return { ok: true, alias, skeleton: aliasSkeleton(alias) };
+}
+
+// ------------------------------------------------------------------ directory name → alias (alias-force-default §5.2)
+
+export type XsAliasDeriveResult =
+  | { readonly ok: true; readonly alias: string; readonly skeleton: string }
+  | { readonly ok: false; readonly reason: "invalid" };
+
+/** Cheap bound on the work done for an absurd directory name (real basenames are ≤255 bytes). */
+const DERIVE_MAX_INPUT = 512;
+
+/** Grapheme clusters of `s` (`Intl.Segmenter`; code points where unavailable — after sanitising they agree). */
+function graphemeClusters(s: string): string[] {
+  const Seg = (
+    globalThis as {
+      Intl?: {
+        Segmenter?: new (
+          l?: string,
+          o?: { granularity: "grapheme" },
+        ) => { segment(x: string): Iterable<{ segment: string }> };
+      };
+    }
+  ).Intl?.Segmenter;
+  if (typeof Seg === "function") {
+    const out: string[] = [];
+    for (const g of new Seg(undefined, { granularity: "grapheme" }).segment(s)) out.push(g.segment);
+    return out;
+  }
+  return Array.from(s);
+}
+
+/** §5.2-3: NFKC → every non-whitelisted code point becomes `-` → collapse `-` runs → trim `[-_ー]` head / `[-_]` tail. */
+function sanitizeDirName(name: string): string {
+  let out = "";
+  for (const ch of name.normalize("NFKC")) out += isAliasCodePoint(ch) ? ch : "-";
+  return out
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-_ー]+/, "")
+    .replace(/[-_]+$/, "");
+}
+
+/** §5.2-4: cut to ≤16 grapheme clusters and ≤48 UTF-8 bytes on a cluster boundary, then trim a trailing `[-_]`. */
+function truncateForAlias(s: string): string {
+  let out = "";
+  let bytes = 0;
+  let n = 0;
+  for (const g of graphemeClusters(s)) {
+    const b = utf8Bytes(g);
+    if (n + 1 > XS_ALIAS_MAX_GRAPHEMES || bytes + b > XS_ALIAS_MAX_BYTES) break;
+    out += g;
+    bytes += b;
+    n++;
+  }
+  return out.replace(/[-_]+$/, "");
+}
+
+/**
+ * Alias-force-default plan §5.2 (AF0): derive a canonical alias from ONE directory name (a path's last segment).
+ * Pure; `ok:false` (always `reason:"invalid"`) means "do not auto-claim anything" — there is no parent-directory
+ * fallback, no suffix, and a reserved/id-like result is NEVER repaired (D4: `pi-toolkit` is skipped, the `pi-` prefix is
+ * not stripped).
+ *  1. `normalizeAlias` succeeds ⇒ adopt it; `id_like` / `reserved` ⇒ skip.
+ *  2. otherwise sanitise (NFKC, non-whitelisted code points ⇒ `-`, collapse, trim) and normalise again.
+ *  3. `too_long` ⇒ truncate on a grapheme boundary (≤16 clusters, ≤48 bytes) and normalise once more.
+ * Skipping `/`, `$HOME` and `os.tmpdir()` is the caller's job (`alias-auto.ts` `deriveAutoAlias`).
+ */
+export function deriveAliasFromDirName(dirName: unknown): XsAliasDeriveResult {
+  const fail: XsAliasDeriveResult = { ok: false, reason: "invalid" };
+  if (typeof dirName !== "string" || dirName.length === 0) return fail;
+  const direct = normalizeAlias(dirName, { stripAt: false });
+  if (direct.ok) return direct;
+  if (direct.reason === "id_like" || direct.reason === "reserved") return fail;
+
+  const clean = sanitizeDirName(dirName.slice(0, DERIVE_MAX_INPUT));
+  if (clean.length === 0) return fail;
+  const second = normalizeAlias(clean, { stripAt: false });
+  if (second.ok) return second;
+  if (second.reason !== "too_long") return fail;
+
+  const cut = truncateForAlias(clean);
+  if (cut.length === 0) return fail;
+  const third = normalizeAlias(cut, { stripAt: false });
+  return third.ok ? third : fail;
 }
 
 // ------------------------------------------------------------------ take token / confirm line (§3.5)

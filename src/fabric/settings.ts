@@ -167,6 +167,10 @@ export interface FabricXsAliasSettings {
   coolMin: number;
   /** NQ1: minutes a holder must be offline before `--take` (default 10, floor 10). */
   takeMinOfflineMin: number;
+  /** Alias-force-default plan §6 (AF0): default true. Auto-claim the normalised cwd basename when the session has no alias
+   *  and the name is free. Agent-side only: frozen at stack build (non-live, `/reload`), NEVER written into `HubConfig`
+   *  (the hub does not know it, so hub bytes are unchanged). */
+  autoFromCwd: boolean;
 }
 
 /** `fabric.crossSession.limits.*` (phase2 §5.2, P8 defaults; every leaf parse-time clamped to its bounds). */
@@ -288,6 +292,7 @@ export function parseFabricXsAliasSettings(input: unknown): FabricXsAliasSetting
       FABRIC_XS_ALIAS_TAKE_MIN_OFFLINE_MIN_MIN,
       FABRIC_XS_ALIAS_TAKE_MIN_OFFLINE_MIN_MAX,
     ),
+    autoFromCwd: typeof value.autoFromCwd === "boolean" ? value.autoFromCwd : defaults.autoFromCwd,
   };
 }
 
@@ -576,6 +581,6 @@ export const DEFAULT_FABRIC_SETTINGS: FabricSettings = {
       },
     },
     // alias-plan §3.6 (AL0b): Q9 on by default, Q2 7 d lease, Q4 10 min cooling, NQ1 10 min take floor.
-    alias: { enabled: true, offlineLeaseH: 168, coolMin: 10, takeMinOfflineMin: 10 },
+    alias: { enabled: true, offlineLeaseH: 168, coolMin: 10, takeMinOfflineMin: 10, autoFromCwd: true },
   },
 };
