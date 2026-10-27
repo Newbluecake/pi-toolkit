@@ -50,7 +50,6 @@
  * point — this is a fully additive implementation choice).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { Socket } from "node:net";
 import {
   API_ERRORS,
   AGENT_REMOVE_PATH,
@@ -113,6 +112,7 @@ import type { SpawnsPayload } from "../protocol/spawn.js";
 import { handleUploadRequest } from "./upload-http.js";
 import { sendJsonNegotiated } from "./gzip.js";
 import { dispatchCmdOrDialog } from "./http-cmd.js";
+import { createLanTransport } from "./http-lan.js";
 import type { UploadStore } from "./uploads.js";
 import type { SpawnFrontendPort } from "./spawn/ports.js";
 import { errCode, isPvLogUrl, redactLogUrl } from "./preview/pv-path.js";
@@ -133,7 +133,6 @@ import type {
   AgentView,
   AvatarRoutes,
   CommandRouter,
-  ConnGuard,
   ConnLease,
   FrontendDeps,
   FrontendFactory,
@@ -149,7 +148,6 @@ import type {
   LanOffReason,
   LanSessionRecord,
   LanStatus,
-  LanTransport,
   ListenerKind,
   FileSearchRoutes,
   PreviewRoutes,
@@ -194,19 +192,15 @@ export const HISTORY_PAGE_MAX = 400;
 const BODY_DEADLINE_MS = 10_000;
 /** Outer guard on history calls; B enforces TIMING.snapshotMs itself, this only bounds a misbehaving port. */
 const HISTORY_GUARD_MS = TIMING.snapshotMs + 1_000;
-const CLOSE_DEADLINE_MS = 2_000;
+export const CLOSE_DEADLINE_MS = 2_000;
 const MAX_PENDING_FRAMES = 4_096;
 const BIND_HOST = "127.0.0.1"; // not configurable by design (arch §9)
-const LAN_BIND_HOST = "0.0.0.0";
-const LAN_SOCKET_IDLE_MS = 60_000;
-const LAN_HEADERS_TIMEOUT_MS = 10_000;
 const LAN_REQUEST_TIMEOUT_MS = 15_000;
 /** §3.3 nesting invariant (C3 acceptance): both listeners' Node HTTP `requestTimeout` share this
  * one value — `srv.requestTimeout` below (loopback) and `LAN_REQUEST_TIMEOUT_MS` (LAN) must never
  * drift apart, since `deadline-nesting.test.ts` asserts `WRITE_TOTAL_MS(13s) < LAN_REQUEST_TIMEOUT_MS
  * (15s) < ui/*-client.js's CMD_REQUEST_TIMEOUT_MS (16s, the browser fetch AbortController)`. */
 export { LAN_REQUEST_TIMEOUT_MS };
-const LAN_KEEPALIVE_TIMEOUT_MS = 5_000;
 /** web-hub-upload plan §1.3 (U3): a LAN chunk request's SECOND authorize (after the body read)
  * shares the final ~1s of `UPLOAD_TOTAL_MS` with the disk write — its `touchSession` race keeps
  * only this much in reserve for the write (the first authorize keeps `UPLOAD_TOTAL_MS -
@@ -246,7 +240,7 @@ function proxyBrowserHost(host: string): string {
   }
   return host.split(":")[0] ?? "";
 }
-function toAbortError(signal: AbortSignal): Error {
+export function toAbortError(signal: AbortSignal): Error {
   const reason: unknown = signal.reason;
   return reason instanceof Error ? reason : new Error(typeof reason === "string" ? reason : "web-hub: aborted");
 }
@@ -351,13 +345,13 @@ function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
  * fs error message carries paths, so those two fields are redacted (`/pv/[redacted]`, error code
  * only). Every other URL keeps the exact original fields.
  */
-function requestFailedFields(req: IncomingMessage, err: unknown): { url: string | undefined; error: string } {
+export function requestFailedFields(req: IncomingMessage, err: unknown): { url: string | undefined; error: string } {
   const url = req.url;
   if (url !== undefined && isPvLogUrl(url)) return { url: redactLogUrl(url), error: errCode(err) };
   return { url, error: String(err) };
 }
 
-function setSecurityHeaders(res: ServerResponse, csp = CSP): void {
+export function setSecurityHeaders(res: ServerResponse, csp = CSP): void {
   res.setHeader("Content-Security-Policy", csp);
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -479,20 +473,12 @@ function toCard(v: AgentView): AgentCard {
 // ---------------------------------------------------------------------------
 
 /** `::ffff:1.2.3.4` → `1.2.3.4` (IPv4-mapped IPv6, as node's `net`/`http` report dual-stack peers). */
-function normalizePeerIp(ip: string | undefined): string {
+export function normalizePeerIp(ip: string | undefined): string {
   if (ip === undefined) return "";
   return ip.startsWith("::ffff:") ? ip.slice(7) : ip;
 }
 
 type BuildContextReject = { reject: 400 | 421; code: "E_BAD_REQUEST" | "E_HOST"; detail: string };
-
-/** First label-ish token before an optional `:port` — used only to decide whether a rejected
- * Host looks IPv4-shaped enough to justify a throttled recompute (§2.3). Not a validator. */
-function hostPartOf(raw: string | undefined): string {
-  if (raw === undefined) return "";
-  const idx = raw.lastIndexOf(":");
-  return (idx < 0 ? raw : raw.slice(0, idx)).toLowerCase();
-}
 
 function buildLanContext(
   req: IncomingMessage,
@@ -543,7 +529,6 @@ function buildLanContext(
 // canonical, tested implementation lives in `hub/proxy.ts` (`resolveProxy`) and this delegates to
 // it byte-for-byte (kept as a thin re-export, not a duplicate) — see below.
 import { tagClientAllowGuard } from "./client-allow.js";
-import type { ClientAllowGuard } from "./ports.js";
 import { resolveProxy as resolveProxyLocal } from "./proxy.js";
 
 /**
@@ -577,157 +562,6 @@ export function buildContext(
     scheme: "http",
     hostKey,
     externalOrigin: canonicalOrigin("http", hostKey),
-  };
-}
-
-/** §2.3's transport seam for the LAN listener; §6.3's `ConnGuard` is now frozen in `hub/ports.ts` (review fix #9). */
-export interface LanTransportCtx {
-  clientAllow: ClientAllowGuard;
-  csp?: string;
-  handleRequest(req: IncomingMessage, res: ServerResponse, ctx: RequestContext, lease: ConnLease): Promise<void>;
-  log: HubLog;
-  connGuard: ConnGuard;
-  /**
-   * Called synchronously — never `await`ed by the transport — whenever a request was rejected
-   * with `E_HOST` from a *direct* (non-proxy) peer whose `Host` header's host part parses as an
-   * IPv4 literal (§2.3: "直连请求收到 421 且 Host 的主机部分是 IPv4 语法 ⇒ 一次节流重算").
-   * The transport itself has no `HostsPort`/`cfg` access — throttling and the actual
-   * `hosts.compute()` + `handle.swap()` are the caller's job (`createHttpFrontend`'s LAN facade).
-   */
-  onIPv4HostReject?(hostPart: string): void;
-}
-
-interface SocketWithLease extends Socket {
-  __lanLease?: ConnLease;
-}
-
-export function createLanTransport(ctx: LanTransportCtx): LanTransport {
-  return {
-    bind(port: number, first: HostSnapshot, signal: AbortSignal): Promise<LanListenerHandle> {
-      if (signal.aborted) return Promise.reject(toAbortError(signal));
-      let snapshot = first;
-      const srv: Server = createServer();
-      srv.headersTimeout = LAN_HEADERS_TIMEOUT_MS;
-      srv.requestTimeout = LAN_REQUEST_TIMEOUT_MS;
-      srv.keepAliveTimeout = LAN_KEEPALIVE_TIMEOUT_MS;
-      srv.on("clientError", (_err, socket) => socket.destroy());
-      srv.on("connection", (socket: SocketWithLease) => {
-        const peerIp = normalizePeerIp(socket.remoteAddress);
-        const viaTrustedProxy = snapshot.trustProxyFrom.has(peerIp);
-        if (!ctx.clientAllow.admitPeer(peerIp, viaTrustedProxy)) {
-          socket.destroy();
-          return;
-        }
-        socket.unref();
-        const lease = ctx.connGuard.admit({ peerIp, viaTrustedProxy, onEvict: () => socket.destroy() });
-        if (lease === undefined) {
-          socket.destroy();
-          return;
-        }
-        socket.__lanLease = lease;
-        socket.setTimeout(LAN_SOCKET_IDLE_MS, () => socket.destroy());
-        socket.once("close", () => lease.release());
-      });
-      srv.on("request", (req: IncomingMessage, res: ServerResponse) => {
-        const socket = req.socket as SocketWithLease;
-        const lease = socket.__lanLease;
-        if (lease === undefined) {
-          res.destroy();
-          return;
-        }
-        const result = buildContext(req, "lan", { snapshot, trust: snapshot.trustProxyFrom });
-        if ("reject" in result) {
-          if (result.code === "E_HOST" && !snapshot.trustProxyFrom.has(normalizePeerIp(socket.remoteAddress))) {
-            const hostPart = hostPartOf(req.headers.host);
-            const cls = classifyHostToken(hostPart);
-            if (cls.ok && cls.kind === "ipv4") ctx.onIPv4HostReject?.(hostPart);
-          }
-          setSecurityHeaders(res, ctx.csp);
-          sendError(res, result.reject, result.code, result.detail);
-          return;
-        }
-        if (
-          result.viaTrustedProxy &&
-          !ctx.clientAllow.admitForwarded({ clientIp: result.clientIp, xffUsable: result.xffUsable === true })
-        ) {
-          setSecurityHeaders(res, ctx.csp);
-          sendError(res, 403, "E_CLIENT");
-          return;
-        }
-        ctx.handleRequest(req, res, result, lease).catch((err: unknown) => {
-          ctx.log.error("web-hub lan http: request failed", requestFailedFields(req, err));
-          if (!res.headersSent) sendError(res, 500, "E_INTERNAL");
-          else res.destroy();
-        });
-      });
-      // Review fix (LC, plan §1.4/§3, W3 acceptance item 1): the entry check above only catches
-      // a signal that was *already* aborted before `bind()` was even called — a signal that
-      // aborts while `listen()` is still in flight (the caller's `LAN_START_DEADLINE_MS` timer, or
-      // a concurrent `LanFacade.close()`) was previously ignored entirely: `listen()`'s callback
-      // would still fire, still `resolve()`, and hand back a fully bound, listening server that
-      // nobody asked for anymore — a leaked listener holding the port. Wire an `abort` listener for
-      // the whole lifetime of this bind attempt so whichever settles first (the real `listening`/
-      // `error` event, or the caller giving up) wins exactly once; the loser's side effect (a
-      // half-bound or fully-bound `srv`) is always closed by this function itself — the caller
-      // never has to know a server object ever existed for an attempt it abandoned.
-      return new Promise<LanListenerHandle>((resolve, reject) => {
-        let settled = false;
-        const onAbort = (): void => {
-          if (settled) return;
-          settled = true;
-          srv.off("error", onError);
-          // `srv.close()` is safe to call even before `listening` has fired (Node queues the
-          // close behind the in-flight bind); either way the port is released and no 'listening'
-          // server is left dangling.
-          srv.close();
-          reject(toAbortError(signal));
-        };
-        const onError = (err: Error): void => {
-          if (settled) return;
-          settled = true;
-          signal.removeEventListener("abort", onAbort);
-          reject(err);
-        };
-        signal.addEventListener("abort", onAbort, { once: true });
-        srv.once("error", onError);
-        srv.listen(port, LAN_BIND_HOST, () => {
-          srv.off("error", onError);
-          signal.removeEventListener("abort", onAbort);
-          if (settled) return; // `onAbort` (or `onError`) already won the race and closed `srv`
-          if (signal.aborted) {
-            // Belt-and-suspenders for the boundary case where `listening` fires without our own
-            // `abort` listener having run first — either way, a caller that gave up must never
-            // receive a resolved handle.
-            settled = true;
-            srv.close();
-            reject(toAbortError(signal));
-            return;
-          }
-          settled = true;
-          srv.on("error", (err) => ctx.log.error("web-hub lan http: server error", { error: String(err) }));
-          srv.unref();
-          const addr = srv.address();
-          const boundPort = addr !== null && typeof addr === "object" ? addr.port : port;
-          resolve({
-            port: boundPort,
-            current: () => snapshot,
-            swap: (next) => {
-              snapshot = next;
-            },
-            close: () =>
-              new Promise<void>((res2) => {
-                const timer = setTimeout(res2, CLOSE_DEADLINE_MS);
-                timer.unref?.();
-                srv.close(() => {
-                  clearTimeout(timer);
-                  res2();
-                });
-                srv.closeAllConnections();
-              }),
-          });
-        });
-      });
-    },
   };
 }
 
