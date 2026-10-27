@@ -49,7 +49,6 @@ import type {
 import { probeReadBackEntries } from "./adapters/pi-compat.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
 import { createPiOutboxStore, OUTBOX_CUSTOM_TYPE } from "./adapters/pi-outbox-store.js";
-import { createFabricMailbox } from "./fabric/mailbox.js";
 import { type CausalLevel } from "./fabric/wake-level.js";
 import { type WakeStatusView } from "./fabric/wake.js";
 import { getXsWakeLedger } from "./fabric/xs/wake-ledger.js";
@@ -84,7 +83,7 @@ import {
   runIdsFromNotificationDetails,
   type ContextReceiptTracker,
 } from "./delivery/context-receipt.js";
-import { createCoalescer, isCoalescible, type Coalescer } from "./delivery/coalescer.js";
+import { createCoalescer, isCoalescible } from "./delivery/coalescer.js";
 import { formatDigest, formatSingle } from "./delivery/format.js";
 import {
   deliveryOptionsFor,
@@ -164,99 +163,23 @@ import {
   type SendCompletion,
 } from "./service/background-completions.js";
 import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
+import {
+  disposeXsSync,
+  runRebuildHandoff,
+  runStackTeardown,
+  type StackTeardownEnv,
+  type StackTeardownEntry,
+  type TeardownParts,
+} from "./stack-teardown.js";
 import type { WorkflowDeadlineNotice } from "./workflow/deadline.js";
 
-/** X7b: the previous session's fleet widget, disposed at the top of buildSessionStack.
- *  This module-level handoff only covers SAME-module session swaps (new/fork/resume):
- *  pi's /reload re-imports the extension as a fresh module (jiti moduleCache:false),
- *  leaving this undefined — that path is covered by session_shutdown disposing
- *  Stack.fleetWidget instead (see the Stack interface note). */
-let previousFleetWidget: FleetWidgetController | undefined;
-/** Same-module defensive rebuild; fresh-module reload is disposed by index.ts. */
-let previousXs: StackXs | undefined;
-let previousRootWakeRecovery: RootWakeController | undefined;
-/** M-E: the previous session's usage broadcaster — same rebuild-dispose pattern as the fleet widget. */
-let previousUsageBroadcaster: UsageBroadcaster | undefined;
-let previousCoalescer: Coalescer | undefined;
-let previousAckHold: Coalescer | undefined;
 /**
- * ask-user-async plan §3.3 (P2): the previous session's background-completion
- * hub, disposed at the VERY TOP of the next build — before the old coalescer
- * and bash manager, so a completion notice they still flush while being
- * disposed can no longer broadcast to the new session's ask_user. The other
- * two teardown paths are index.ts's session_start defensive block and the
- * first line of session_shutdown (all three idempotent).
+ * The previous build's teardown-relevant components (src/stack-teardown.ts documents each slot). The next
+ * `buildSessionStack` in the SAME module runs the `rebuild-handoff` steps over it (path A): pi's /reload and cross-cwd
+ * resume re-import the extension as a fresh module (jiti moduleCache:false), so this starts empty there and the
+ * `shutdown` entry (`Stack.dispose`) is the only teardown. The one module-level mutable of this file (I4).
  */
-let previousBackgroundCompletions: BackgroundCompletionHub | undefined;
-/**
- * bash auto-background §3.6: the previous session's job manager, disposed at
- * the top of the next build. `dispose()` only clears timers — it never kills a
- * process and never notifies afterwards, so the next stack's `recover()` can
- * adopt the still-running jobs and own the single notification channel.
- */
-let previousBashJobs: BashJobManager | undefined;
-// web-hub archive plan (docs/dev/web-hub/archive-report.md): the previous session's archive
-// control — disposed at the top of the next build (same dual-path discipline as
-// previousBashJobs: index.ts's session_shutdown is the other path). Disposing is REQUIRED, not
-// cosmetic: a stale control's auto-sweep would appendEntry the OLD session's archive state into
-// the NEW session's file.
-let previousArchive: ArchiveControl | undefined;
-/**
- * bash-timeout-grace plan §2.5 step 4/6 (P5): the previous stack's bash-job
- * recovery/cleanup dual-timer handle (see `scheduleBashJobRecovery` below),
- * disposed at the top of the next build — same dual-path discipline as
- * `previousBashJobs`/`previousFleetWidget` (the OTHER path is index.ts's
- * `session_shutdown` calling `Stack.bashJobRecovery.dispose()` directly).
- */
-let previousBashJobRecovery: { dispose(): void } | undefined;
-let previousFabricMailbox: ReturnType<typeof createFabricMailbox> | undefined;
-/** cache-ttl keepalive (plan.md §2.2): same rebuild-dispose pattern as the usage broadcaster. */
-let previousKeepalive: CacheKeepaliveService | undefined;
-/** quota（quota-plan §4.1）：与 keepalive 同款「下一次 build 顶部 dispose」
- *  交接。`/reload` 走 session_shutdown dispose Stack.quota（M3：QuotaService.dispose
- *  是唯一清理所有者且幂等），与 previousFleetWidget 同一套双路径纪律。 */
-let previousQuota: QuotaStack | undefined;
-/** Background workflows (docs/dev/workflow-background/plan.md §4): the primary teardown is
- *  index.ts's session_shutdown (shutdown → drain → seal); this top-of-build handoff is the
- *  defensive path for a session_start without a paired shutdown — stop everything, report nothing. */
-let previousWorkflowRuns: BackgroundWorkflows | undefined;
-/**
- * workflow-worktree plan D13 (v2.1 condition 2): the previous stack's
- * spawn-service + runtime-adapter pair, disposed at the top of the next
- * build (same-module rebuild handoff, same dual-path discipline as
- * previousFleetWidget/previousQuota — the OTHER path is index.ts's
- * session_shutdown calling `Stack.worktreeLate.dispose()` directly, which
- * covers the `/reload` case where this module-level variable is reset to
- * undefined by the fresh re-import).
- */
-let previousWorktreeLate: { dispose(): void } | undefined;
-/**
- * workflow-worktree plan §3 (P4 fix, 2026 review): the previous stack's fire-and-forget
- * startup orphan scan "live" flag, disposed at the top of the next build — same dual-path
- * discipline as `previousWorktreeLate` (the OTHER path is index.ts's session_shutdown
- * calling `Stack.worktreeOrphansStartup.dispose()` directly). Flipping `live` to false
- * before the next build's own scan starts means a scan that is still resolving when the
- * stack gets rebuilt/torn down can NEVER fire a stale notify after the fact.
- */
-let previousWorktreeOrphansStartup: { dispose(): void } | undefined;
-/**
- * child-bash no-host-view diag plan (L1 todo #20): the previous build's
- * release for the "host-view" capability declaration on the process-global
- * `ChildBashRegistry`, released at the top of the next build. Reference-
- * counted on the registry side (not "last build wins", see
- * `ChildBashRegistry.declareHostCapability`'s doc) precisely so this
- * same-module rebuild handoff can never clear a declaration a DIFFERENT,
- * still-live stack in this process also holds — release() is idempotent, so
- * this dual-path teardown (also index.ts's `session_shutdown`, covering the
- * fresh-module `/reload` case) can never double-release.
- */
-let previousHostBashViewCapabilityRelease: (() => void) | undefined;
-/**
- * external-agent plan §5.5 (P5)：上一个 build 的外部 agent 端口（停目录探测；不杀运行中
- * 的 run）。与 previousWorktreeLate 同款双路径 dispose（下一次 build 顶部 + index.ts 的
- * session_shutdown，覆盖 /reload 重建新模块的情形）。
- */
-let previousExternal: { dispose(): void } | undefined;
+let previousParts: TeardownParts = {};
 
 export interface WorkflowSupport {
   readonly enabled: boolean;
@@ -311,6 +234,19 @@ export interface StackModelPort {
 }
 
 export interface Stack {
+  /**
+   * The one teardown entry (src/stack-teardown.ts holds the ordered step lists and the per-component rationale):
+   *  - `{kind:"shutdown", reason}` — index.ts's session_shutdown main handler (async: schedule closeEpoch, run drain, seal);
+   *  - `{kind:"defensive", nextXsSessionId?}` — index.ts's session_start when this activation already holds a stack (sync);
+   *  - `{kind:"rebuild-handoff"}` — the steps the NEXT `buildSessionStack` in this module runs over this build's parts
+   *    (sync; includes the components that are not `Stack` members).
+   * Idempotent per component; every entry keeps today's gaps (GAP-Gn in the matrix test) until 7b fixes them.
+   */
+  dispose(entry: { kind: "shutdown"; reason: string }, env: StackTeardownEnv): Promise<void>;
+  dispose(entry: { kind: "defensive"; nextXsSessionId?: string | undefined }, env: StackTeardownEnv): void;
+  dispose(entry: { kind: "rebuild-handoff" }): void;
+  /** C1: the synchronous xs part of session_shutdown (fence event, xs, rootWakeRecovery) — registered early, must stay sync. */
+  disposeXsSync(): void;
   compactHint: CompactHintState;
   /** 动态阈值运行时（compact-hint dynamic plan D3；mode=off 或 print/json 构造时缺席或惰性）。
    *  dispose 的接入点在 index.ts 的 session_shutdown / session_start 防御性清理（P1-4）。 */
@@ -342,7 +278,7 @@ export interface Stack {
   workflow: WorkflowSupport;
   /** X7b fleet widget; absent when settings.fleetWidget is off. Exposed so session_shutdown
    *  can dispose it: pi's /reload re-imports the extension as a FRESH module (jiti
-   *  moduleCache:false), so the module-level previousFleetWidget handoff in
+   *  moduleCache:false), so the module-level previousParts.fleetWidget handoff in
    *  buildSessionStack only covers same-module session swaps (new/fork/resume) — after a
    *  reload the old controller is unreachable module state, and since the stale ctx.ui
    *  closures keep working (no assertActive on setWidget), an undisposed controller's
@@ -550,54 +486,15 @@ export function buildSessionStack(
       }
     }
   }
-  // ask-user-async plan §3.3 (P2): FIRST disposal of the rebuild — the old
-  // hub must stop broadcasting before the old coalescer/bash manager below
-  // flush their final completion notices during their own dispose.
-  previousXs?.dispose();
-  previousXs = undefined;
-  previousRootWakeRecovery?.dispose();
-  previousRootWakeRecovery = undefined;
-  previousBackgroundCompletions?.dispose();
-  previousBackgroundCompletions = undefined;
-  // X7b: session rebuild — dispose the previous session's fleet widget
-  // (stop its tick + setWidget(key, undefined)) before the new one mounts.
-  previousFleetWidget?.dispose();
-  previousFleetWidget = undefined;
-  previousUsageBroadcaster?.dispose();
-  previousUsageBroadcaster = undefined;
-  previousCoalescer?.dispose();
-  previousCoalescer = undefined;
-  previousAckHold?.dispose();
-  previousAckHold = undefined;
-  // §3.6/§3.7: capture before dispose so in-process jobs can transfer their
-  // live LocalHandle to the new manager; dispose keeps those handles alive.
-  const prevBashJobs = previousBashJobs;
-  prevBashJobs?.dispose();
-  previousBashJobs = undefined;
-  // web-hub archive plan: stop the previous session's auto-sweep before anything else —
-  // see previousArchive's declaration comment for why this is not optional.
-  previousArchive?.dispose();
-  previousArchive = undefined;
-  // bash-timeout-grace plan §2.5 step 4/6 (P5): abort whichever of the
-  // previous stack's recovery/cleanup phases is still outstanding.
-  previousBashJobRecovery?.dispose();
-  previousBashJobRecovery = undefined;
-  previousFabricMailbox?.dispose();
-  previousFabricMailbox = undefined;
-  previousKeepalive?.dispose();
-  previousKeepalive = undefined;
-  previousQuota?.dispose();
-  previousQuota = undefined;
-  previousWorkflowRuns?.abandon();
-  previousWorkflowRuns = undefined;
-  previousWorktreeLate?.dispose();
-  previousWorktreeLate = undefined;
-  previousWorktreeOrphansStartup?.dispose();
-  previousWorktreeOrphansStartup = undefined;
-  previousHostBashViewCapabilityRelease?.();
-  previousHostBashViewCapabilityRelease = undefined;
-  previousExternal?.dispose();
-  previousExternal = undefined;
+  // Path A (src/stack-teardown.ts REBUILD_STEPS): tear down what the previous build in this module left behind, in the
+  // order of §4.2 column A (backgroundCompletions before the old coalescer/bash manager: ask-user-async §3.3 (P2)).
+  // `parts` is this build's own slot set, published as `previousParts` immediately and filled INCREMENTALLY below at the
+  // places the components are created — a build that throws half-way still leaves its already-created components
+  // for the next build's handoff. Assigned only after the handoff succeeded: if a step throws, the same (partially
+  // cleared) parts are retried by the next build.
+  const { prevBashJobs } = runRebuildHandoff(previousParts);
+  const parts: TeardownParts = {};
+  previousParts = parts;
 
   if (loadHintState !== undefined) {
     loadHintState.latches.clear();
@@ -677,7 +574,7 @@ export function buildSessionStack(
     isStreaming: () => typeof ctx.isIdle === "function" && !ctx.isIdle(),
     now: () => systemClock.now(),
   });
-  previousBackgroundCompletions = backgroundCompletions;
+  parts.backgroundCompletions = backgroundCompletions;
   const sendCompletion = backgroundCompletions.createSender((message, options) => pi.sendMessage(message, options));
 
   // Legacy consult fork-copy GC (#40): the consult tool is gone, but older versions left fork copies under
@@ -835,7 +732,7 @@ export function buildSessionStack(
         },
       )
     : undefined;
-  if (fabric) previousFabricMailbox = fabric.mailbox;
+  if (fabric) parts.fabricMailbox = fabric.mailbox;
   const sendFormatted = (items: readonly DeliveryPayload[]): void => {
     // fabric-cross-session plan §3.7 (W6): a wake-revived run's completion is QUIET — it reaches the owner's context
     // without a turn and without the background-completion hub (no token, no broadcast ⇒ an active ask_user dialog,
@@ -977,8 +874,8 @@ export function buildSessionStack(
       },
     },
   });
-  previousCoalescer = coalescer;
-  previousAckHold = ackHold;
+  parts.coalescer = coalescer;
+  parts.ackHold = ackHold;
   // X3: lazy ref — nested Agent tool + abort-cascade need SpawnService, built just below.
   // M-D: runIds whose "subagent:started" event has already been emitted (once per run).
   const announcedStarts = new Set<string>();
@@ -1022,7 +919,7 @@ export function buildSessionStack(
     },
   });
   if (externalPort !== undefined) {
-    previousExternal = externalPort.port;
+    parts.external = externalPort.port;
     // §4.7：构建期后台目录探测（single-flight、有界、unref、失败静默）。
     externalPort.providers.get("droid")?.catalog.refreshInBackground("stack_build");
   }
@@ -1102,7 +999,7 @@ export function buildSessionStack(
   // build (module-level handoff above) and by index.ts's session_shutdown
   // (the `/reload` fresh-module case).
   const hostBashViewCapabilityRelease = declareHostBashViewCapability(childBashRegistry);
-  previousHostBashViewCapabilityRelease = hostBashViewCapabilityRelease;
+  parts.hostBashViewRelease = hostBashViewCapabilityRelease;
   const pendingToolReturns = new Map<string, number>();
   const warnedToolLag = new Set<string>();
   const hostViewFor = (runId: RunId): HostRunView => ({
@@ -1390,7 +1287,7 @@ export function buildSessionStack(
       releaseDispositionSink(worktreeSinkToken);
     },
   };
-  previousWorktreeLate = worktreeLate;
+  parts.worktreeLate = worktreeLate;
   // workflow-worktree plan §3 (P4 wt-orphans): read-only startup discovery of worktree
   // directories a dead/gone owner left behind (§0 decision 8 — no automatic GC, ever).
   // `worktreeOrphans()` below re-scans live on every call (bounded, synchronous fs, no
@@ -1416,7 +1313,7 @@ export function buildSessionStack(
   // timeout so a hung/slow filesystem can never hang the process it was meant to protect
   // either — past the timeout the scan is simply abandoned (no notify, diagnostic only).
   // `worktreeOrphansLiveState.live` flips to false at the top of the NEXT
-  // `buildSessionStack` (`previousWorktreeOrphansStartup?.dispose()`, same-module rebuild)
+  // `buildSessionStack` (the `worktreeOrphansStartup` rebuild-handoff step, same-module rebuild)
   // or via `Stack.worktreeOrphansStartup` in index.ts's `session_shutdown` (covers
   // `/reload`) — either path guarantees a scan that settles after this stack was
   // rebuilt/torn down can never fire a stale notify. The once-per-PROCESS notify flag
@@ -1429,7 +1326,7 @@ export function buildSessionStack(
       worktreeOrphansLiveState.live = false;
     },
   };
-  previousWorktreeOrphansStartup = worktreeOrphansStartup;
+  parts.worktreeOrphansStartup = worktreeOrphansStartup;
   const WORKTREE_ORPHANS_NOTIFIED_KEY = Symbol.for("pi-subagent:worktree-orphans-notified");
   void runOrphanStartupScan({
     hasUI: ctx.hasUI,
@@ -1475,7 +1372,7 @@ export function buildSessionStack(
     clock: systemClock,
   });
   usageRef.current = usageBroadcaster;
-  previousUsageBroadcaster = usageBroadcaster;
+  parts.usageBroadcaster = usageBroadcaster;
   // D5: build the manager before the widget so its synchronous first frame can
   // receive the manager-bound list/tail closures below.
   // 2026-10-17 shell-resolution revision: pi's `shellPath`/
@@ -1486,7 +1383,7 @@ export function buildSessionStack(
   const bashJobs = bashJobsEnabled(settings)
     ? buildBashJobManager(pi, ctx, settings, (message, options) => sendCompletion("bash", message, options), piShell)
     : undefined;
-  previousBashJobs = bashJobs;
+  parts.bashJobs = bashJobs;
 
   // web-hub archive plan (docs/dev/web-hub/archive-report.md): per-session archive control —
   // seeded from the branch's last `subagent:archive` entry (the G5a read-back discipline),
@@ -1510,7 +1407,7 @@ export function buildSessionStack(
       settings.webHub.archiveKeepBash ?? 5,
     );
   }
-  previousArchive = archive;
+  parts.archive = archive;
 
   const keepalive = settings.cacheTtl.keepalive
     ? createCacheKeepaliveService({
@@ -1523,7 +1420,7 @@ export function buildSessionStack(
           (bashJobs?.backgroundJobCount() ?? 0) > 0 ||
           // A background workflow between child runs is still background work.
           workflowActivity.list().length > 0,
-        isCurrent: (self) => previousKeepalive === self,
+        isCurrent: (self) => parts.keepalive === self,
         appendEntry: (type, data) => pi.appendEntry(type, data),
         emit: (channel, payload) => pi.events.emit(channel, payload),
         // Keepalive breaker state is session-level; restore it from this branch
@@ -1540,7 +1437,7 @@ export function buildSessionStack(
         evidence: getProviderEvidenceStore(),
       })
     : undefined;
-  previousKeepalive = keepalive;
+  parts.keepalive = keepalive;
 
   // quota（quota-plan §4.1）：额度感知派单——与 keepalive 同款可选构造 +
   // previous* 交接。构造零副作用（demotion store 惰性加载）；providers="" 时
@@ -1577,7 +1474,7 @@ export function buildSessionStack(
         warn: (message) => hostWarn(ctx, message),
       })
     : undefined;
-  previousQuota = quota;
+  parts.quota = quota;
   quotaRef.current = quota;
   // 预热：fire-and-forget，绝不 await（session_start 必须保持同步快）；
   // refreshIfStale 永不返回被拒 Promise，失败静默降级（R1）。
@@ -1693,7 +1590,7 @@ export function buildSessionStack(
       onExternalWidgetMounted: (handler) => pi.events.on(TODO_WIDGET_MOUNTED_EVENT, handler),
     });
     widgetRef.current = widget;
-    previousFleetWidget = widget;
+    parts.fleetWidget = widget;
   }
   // /goal：session 级运行态重建（goal-plan v4 条件 8）。读回走 getBranch()
   // （MAJ-5：防 fork 废弃分支复活 goal）；读回到的 active 一律已降级 paused
@@ -1781,7 +1678,7 @@ export function buildSessionStack(
       warn: (message) => hostWarn(ctx, message),
     });
   }
-  previousBashJobRecovery = bashJobRecovery;
+  parts.bashJobRecovery = bashJobRecovery;
 
   // M3.6 (CC3, §11 M3.6): the workflow engine's session-lifetime pieces —
   // built unconditionally (cheap: a spawner adapter closure + a budget
@@ -1895,7 +1792,7 @@ export function buildSessionStack(
       now: () => systemClock.now(),
     }),
   });
-  previousWorkflowRuns = workflowRuns;
+  parts.workflowRuns = workflowRuns;
   const workflow: WorkflowSupport = {
     enabled: settings.workflow.enabled,
     defaultBudget: buildWorkflowRunBudget(settings),
@@ -1946,9 +1843,14 @@ export function buildSessionStack(
     });
     rootWakeRecovery.recover();
   }
-  previousRootWakeRecovery = rootWakeRecovery;
-  previousXs = xs;
-  return {
+  parts.rootWakeRecovery = rootWakeRecovery;
+  parts.xs = xs;
+  const stack: Stack = {
+    dispose: ((entry: StackTeardownEntry, env?: StackTeardownEnv) =>
+      entry.kind === "rebuild-handoff"
+        ? void runRebuildHandoff(parts)
+        : runStackTeardown(entry as never, stack, env as StackTeardownEnv)) as Stack["dispose"],
+    disposeXsSync: () => disposeXsSync(stack),
     ...(xs ? { xs } : {}),
     ...(rootWakeRecovery ? { rootWakeRecovery } : {}),
     compactHint,
@@ -2007,4 +1909,5 @@ export function buildSessionStack(
         }
       : {}),
   };
+  return stack;
 }

@@ -23,6 +23,7 @@ import {
 } from "./config/settings.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
 import { buildSessionStack } from "./stack.js";
+import type { ActivationTeardown } from "./stack-teardown.js";
 import {
   createTidyPort,
   forwardNotifier,
@@ -37,7 +38,7 @@ import { registerSubagentTools } from "./tools/register.js";
 import { createBackgroundCompletionEventHook, createNotificationReceiptHook } from "./delivery/stack-hooks.js";
 import { readBashJobTail } from "./bash/notify.js";
 import { registerCompactHooks, registerCompactTools } from "./compact-hint/register.js";
-import { bashJobsEnabled, BASH_JOB_SEAL_GRACE_MS, killBashJobsBounded, registerBashTools } from "./bash/host.js";
+import { bashJobsEnabled, BASH_JOB_SEAL_GRACE_MS, registerBashTools } from "./bash/host.js";
 import { createMentionRouteDeps } from "./mention/mention.js";
 import { createMentionWiring, mentionAutocompleteEntries } from "./mention/wire.js";
 import { createWakeInputHook } from "./fabric/wake-input.js";
@@ -810,35 +811,26 @@ export default function activate(rawPi: ExtensionAPI): void {
   });
   mention.install(pi);
 
+  // The activate-level pieces that run BETWEEN stack steps during teardown (see ActivationTeardown); C1/C2/C3 stay in
+  // their own session_shutdown handlers — their registration order is pinned (activation-trace golden).
+  const activationTeardown: ActivationTeardown = {
+    defensiveXsTeardown: (nextXsSessionId) => xs.defensiveTeardown(nextXsSessionId),
+    scheduleSurfaceShutdown: () => scheduleSurface?.shutdown(), // status bar cleared + digest disposed BEFORE the executor closes its runs
+    sealChildBashJobs: () =>
+      getChildBashRegistry()
+        .sealAll(BASH_JOB_SEAL_GRACE_MS)
+        .catch(() => undefined),
+  };
+
   pi.on("session_start", async (_event, ctx) => {
     activateResultTool(ctx);
     const nextXsSessionId = xs.beginSessionStart(ctx);
     notifyCapabilityCtx.current = ctx;
     if (compat.warning) console.warn(`[pi-subagent] ${compat.warning}`);
-    // Defensive: if pi ever fires session_start without a paired shutdown,
-    // stop the previous stack's timer/RPC surfaces so they cannot double-fire.
+    // Defensive: if pi ever fires session_start without a paired shutdown, stop the previous stack's timer/RPC
+    // surfaces so they cannot double-fire (path B of src/stack-teardown.ts; synchronous, like the block it replaced).
     if (holder.current) {
-      // ask-user-async §3.3 (P2): stop the old hub's broadcast FIRST so a
-      // completion flushed by the teardown below can never reach the new
-      // session's ask_user (idempotent; shutdown is the other path).
-      holder.current.xs?.dispose();
-      holder.current.rootWakeRecovery?.dispose();
-      // Defensive replacement without shutdown: a NEW identity proves the old session ended.
-      // Same-session reload is deliberately not proof.
-      xs.defensiveTeardown(nextXsSessionId);
-      holder.current.backgroundCompletions.dispose();
-      holder.current.fleetWidget?.dispose();
-      holder.current.archive?.dispose(); // web-hub archive plan: stop the stale auto-sweep (dual-path with buildSessionStack)
-      holder.current.keepalive?.dispose();
-      holder.current.quota?.dispose();
-      holder.current.external?.dispose(); // external-agent plan §5.5（P5）：停目录探测（与 /reload 重建双保险）
-      holder.current.dynamic?.dispose(ctx); // P1-4：防御性清理（与 shutdown 双保险，幂等）
-      holder.current.load?.dispose();
-      holder.current.schedule?.dispose(); // defensive: the next stack recovers this epoch's runs (unknown(reload))
-      holder.current.scheduleBackground?.dispose();
-      holder.current.rpc.close();
-      holder.current.fabric?.dispose();
-      holder.current.workflow.runs.abandon(); // stop orphaned background workflows; their notices are dropped
+      holder.current.dispose({ kind: "defensive", nextXsSessionId }, { ctx, settings, activation: activationTeardown });
     }
     await types.reload();
     const stack = buildSessionStack(
@@ -876,102 +868,9 @@ export default function activate(rawPi: ExtensionAPI): void {
   pi.on("session_shutdown", async (event, ctx) => {
     const stack = holder.current;
     if (!stack) return;
-    // ask-user-async §3.3 (P2): FIRST — the hub stops broadcasting before the
-    // drain/seal below settles anything; completions surfacing during shutdown
-    // must not interrupt whatever session comes next. Idempotent (the next
-    // buildSessionStack's top-of-build dispose is the same call).
-    stack.backgroundCompletions.dispose();
-    // scheduled-reports A0 (§4.6): the schedule executor goes FIRST — dispose, then this epoch's
-    // non-terminal runs become unknown(owner-closed) (lock wait ≤ 500 ms) BEFORE the run drain
-    // below can land a shutdown `aborted` (first terminal write wins).
-    scheduleSurface?.shutdown(); // status bar cleared + digest disposed BEFORE the executor closes its runs
-    await stack.schedule?.shutdown();
-    stack.scheduleBackground?.dispose(); // AFTER closeEpoch wrote unknown(owner-closed): late outcomes only append lateOutcome
-    // X7b: kill the fleet widget FIRST and unconditionally. pi's /reload
-    // re-imports this extension as a fresh module (jiti moduleCache:false), so
-    // the module-level previousFleetWidget handoff in buildSessionStack never
-    // sees the pre-reload controller — and because the stale ctx.ui closures
-    // keep working (setWidget has no assertActive), its self-rescheduling 1Hz
-    // tick would otherwise outlive the session forever, pushing
-    // setWidget(undefined) over the new session's frames: the agent tree
-    // blinks off/on at the combined tick rate, worse with every reload.
-    stack.fleetWidget?.dispose();
-    stack.archive?.dispose(); // web-hub archive plan: same fresh-module /reload rationale as the widget above
-    stack.keepalive?.dispose();
-    stack.quota?.dispose();
-    stack.dynamic?.dispose(ctx); // P1-4：flush 遥测观察窗 + 估计量落盘（T-D3-DISPOSE）
-    stack.load?.dispose();
-    stack.rpc.close(); // X8
-    // bash-timeout-grace plan §2.5 step 4/6 (P5): abort whichever recovery/
-    // cleanup phase this stack still has outstanding — covers the fresh-
-    // module `/reload` case (buildSessionStack's own module-level handoff
-    // only sees a same-module rebuild).
-    stack.bashJobRecovery?.dispose();
-    // Fabric must freeze before run shutdown so late verdicts from the old
-    // stack cannot write into the shared outbox; the next stack owns pending records.
-    stack.fabric?.dispose();
-    const drainMs = Math.min(settings.budget.abortGraceMs * 3, 15_000);
-    // Background workflows (docs/dev/workflow-background/plan.md §4): request a stop on every
-    // running workflow first (so no script spawns another child), then stop runs; both drains
-    // share one bound. seal() finalizes any workflow still settling with its degraded snapshot
-    // — its notice is persisted into THIS session while it is still current.
-    stack.workflow.runs.shutdown();
-    const pending = stack.query
-      .list()
-      .filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status));
-    // admitted-run-visibility fix (2026-10-08 incident): spawn.abort() (unlike query.stop(),
-    // which calls straight into the runtime adapter's activeCancels map) also falls back to
-    // the admission-time AbortController wired into start() when the runtime adapter does not
-    // know this runId yet — the exact state a just-admitted, not-yet-entered resume is in. Gated
-    // on `running.has(runId)` (SpawnService's own admission-time truth), same as fix 1/2 above.
-    await Promise.all(pending.map((s) => stack.spawn.abort(s.runId, "shutdown")));
-    await Promise.all([
-      stack.query.waitAll({ runIds: pending.map((s) => s.runId), waitMs: drainMs }),
-      stack.workflow.runs.drain(drainMs),
-    ]);
-    // run-persistence plan D5: synchronous best-effort journal flush for runs the drain did not
-    // settle — written into THIS session while pi has not yet invalidated the ctx.
-    stack.runJournal.flushPending(
-      pending.map((s) => s.runId),
-      event.reason,
-    );
-    stack.workflow.runs.seal();
-    // workflow-worktree plan D13 (v2.1 condition 2): tear down THIS stack's
-    // spawn-service worktree waiters/timers, flip the runtime-adapter's
-    // write-back to redirect-only, and release its disposition-sink
-    // registration. Placed after seal() (same ordering rationale as the
-    // fabric-before-workflow-shutdown note above): any run this stack is
-    // still settling must get its chance to write through the normal path
-    // first; only truly late reports after this point are redirected.
-    stack.worktreeLate?.dispose();
-    // workflow-worktree plan §3 (P4 fix, 2026 review): stop this stack's fire-and-forget
-    // startup orphan scan from ever firing a notify after shutdown — same rationale as
-    // worktreeLate.dispose() just above (a scan still resolving when the session ends must
-    // never surface a stale prompt into a torn-down UI).
-    stack.worktreeOrphansStartup?.dispose();
-    // child-bash no-host-view diag plan (L1 todo #20): covers the fresh-
-    // module `/reload` case the same way as worktreeOrphansStartup just
-    // above — idempotent, so this and buildSessionStack's own top-of-build
-    // release can never double-release.
-    stack.hostBashViewCapability.dispose();
-    // bash auto-background §3.7: reload/new/resume/fork always keep the
-    // processes (the next stack adopts them); only a real `quit` consults
-    // shutdownPolicy, and even `kill` is bounded best-effort — a background
-    // job that refuses to die must never delay pi's exit.
-    if (stack.bashJobs && event.reason === "quit" && settings.bashJobs.shutdownPolicy === "kill") {
-      await killBashJobsBounded(stack.bashJobs, settings.budget.abortGraceMs);
-    }
-    // bash-timeout-grace plan §3.3 S6: same "only a real quit" gate as the
-    // main session's own jobs above — a child subagent that is STILL
-    // RUNNING when the main session merely `/reload`s must keep its
-    // background jobs (they are not this stack's to kill); only when the
-    // whole process is exiting does every still-registered child session's
-    // bash jobs get a bounded best-effort kill.
-    if (event.reason === "quit") {
-      await getChildBashRegistry()
-        .sealAll(BASH_JOB_SEAL_GRACE_MS)
-        .catch(() => undefined);
-    }
+    // Path C4 of src/stack-teardown.ts: the ordered, awaited shutdown (background completions first, schedule
+    // closeEpoch before the run drain, fabric before run shutdown, worktree disposal after seal, bash kill/seal on quit).
+    await stack.dispose({ kind: "shutdown", reason: event.reason }, { ctx, settings, activation: activationTeardown });
   });
 
   // Merged main-session modules are wired LAST: as standalone extensions

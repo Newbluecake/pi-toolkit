@@ -216,9 +216,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     // its authorizations/leases for explicit recovery. No time-based ledger cleanup.
     pi.on("session_shutdown", (event, ctx) => {
       xsAttached = false;
-      holder.current?.xs?.fence.onEvent({ type: "session_shutdown" });
-      holder.current?.xs?.dispose();
-      holder.current?.rootWakeRecovery?.dispose();
+      holder.current?.disposeXsSync(); // fence session_shutdown event, xs.dispose, rootWakeRecovery.dispose (Stack-owned)
       if (event.reason !== "reload") {
         const sessionId = xsSessionId ?? (xsEnabled || xsLedger.size > 0 ? xsSessionOf(ctx) : undefined);
         if (sessionId !== undefined) xsLedger.teardown(sessionId);

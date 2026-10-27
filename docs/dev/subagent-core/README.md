@@ -78,3 +78,43 @@ the existing `diag.schemaPreset`. No record (pre-#68 runs, oversize inline schem
 old behavior. Explicit `schema` overrides; top-level `schema: null` on a resume opts out (null without `resume` is still
 the usual "schema must be a JSON Schema object" error). @mention / fabric wake / RPC resumes never set the flag ⇒
 unchanged. Only the top-level `schema` description gained the sentence; the nested surface (frozen golden) is untouched.
+
+## Stack teardown (`src/stack-teardown.ts`, #56 ⑦)
+
+One place says which component of a session stack is torn down, on which entry and in which order. Read this before touching
+any `dispose` / `session_shutdown` / `session_start` cleanup, a new stack member that owns a timer, or `/reload` behaviour.
+
+**Entries** (what pi 1.3 really does is pinned by `tests/conformance/lifecycle-entries.test.ts`):
+
+| Entry                                     | When                                                                      | Module                               | Teardown                                                                        |
+| ----------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------- |
+| startup                                   | first `session_start`                                                     | new                                  | nothing to tear down                                                            |
+| same-cwd new / resume / fork              | `session_shutdown(reason)` on the old activation, then `activate()` again | **same** (pi's `extensionCache` hit) | path C on the old stack, then path A at the top of the next build               |
+| `/reload`, cross-cwd resume               | `session_shutdown`, then a freshly imported module                        | **new**                              | path C only — `previousParts` starts empty                                      |
+| quit                                      | `session_shutdown(quit)`                                                  | —                                    | path C, then bash kill (`shutdownPolicy=kill`) and the child bash registry seal |
+| second `session_start` without a shutdown | not reachable in pi 1.3                                                   | —                                    | path B, then A                                                                  |
+
+**API**: `Stack.dispose({ kind: "shutdown", reason }, env)` (async, awaited by pi), `Stack.dispose({ kind: "defensive", nextXsSessionId }, env)`
+(sync), `Stack.dispose({ kind: "rebuild-handoff" })` (sync; what the next build in the same module runs over the previous
+build's `TeardownParts`), `Stack.disposeXsSync()` (C1: the early-registered synchronous xs part of `session_shutdown`).
+`StackTeardownEnv = { ctx, settings, activation }`; `activation` (`ActivationTeardown`, built in `index.ts`) holds the
+activate-level pieces that run between stack steps: the xs ledger teardown (B), the schedule surface shutdown and the child
+bash seal (C4).
+
+**Step lists** (`REBUILD_STEPS` / `DEFENSIVE_STEPS` / `SHUTDOWN_STEPS`): array index is execution order. They are three lists on
+purpose — the orders and member sets differ (e.g. C4 closes the schedule epoch before the run drain, A does not touch the
+schedule at all). Rules that are easy to break:
+
+- a step is idempotent in the component it calls — the same component is legitimately reached twice (C then A);
+- sync steps stay synchronous and a step only returns a promise where the inline code awaited (no new microtask hops);
+- `previousParts` is the ONLY module-level mutable of `stack.ts` (I4); a build publishes its own `parts` immediately and fills
+  it at the places the components are created, so a build that throws half-way still hands its already-created pieces to the
+  next build; it is replaced only after the handoff succeeded;
+- C1 (xs ledger, `fabric/xs/activate.ts`), C2 (background-status + HOST_KEY release, `index.ts`) and C3 (`handoffStore.clear`,
+  `compact-hint/register.ts`) stay separate `session_shutdown` handlers: their registration order relative to the other plugins'
+  handlers is pinned by the activation-trace golden and the matrix test's handler counts;
+- the known holes are marked `GAP-Gn` in the lists and pinned (with timer evidence) by `tests/integration/stack-teardown-matrix.test.ts`:
+  G1/G2/G3/G4/G7 are only disposed by path A (so not after `/reload` or a cross-cwd resume), G5/G6 are missing from the unreachable
+  path B, G8 `holder.current` is never cleared, G9 the `/goal` watchdog is not cancelled, G10 notifier retries outlive shutdown,
+  G11 `onDisabled` listeners accumulate per activation; G12 (wake service timers) is closed — `mailbox.dispose` disposes it.
+  A fix changes exactly the matrix cells of its own gap and says so in its commit.
