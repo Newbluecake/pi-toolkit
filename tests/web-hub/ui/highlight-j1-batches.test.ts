@@ -77,17 +77,15 @@ describe("J1 #2 — NumberedCode progressive line-block application", () => {
     expect(w.element.querySelectorAll(".pv-line").length).toBe(149);
     expect(w.element.querySelectorAll("span.tok-keyword").length).toBe(0); // plain first frame
 
-    // wait for SOME highlight, then assert a partial state exists (batches in flight)
-    await vi.waitFor(() => {
-      expect(w.element.querySelectorAll("span.tok-keyword").length).toBeGreaterThan(0);
-    });
     const kw = () => w.element.querySelectorAll("span.tok-keyword").length;
     const total = () => w.element.querySelectorAll(".pv-line").length;
     // intermediate: not all 149 lines highlighted yet (line count never changes).
-    // Poll every MACROTASK — each batch is one timer slot, so a 0 ms sweep catches the
-    // in-between states a coarse waitFor would sleep through.
+    // Sweep every MACROTASK from the first frame on — each batch is one timer slot, so a 0 ms
+    // sweep catches the in-between states. (CI flake 2026-10-28: a coarse `vi.waitFor` for the
+    // FIRST keyword polled at 50 ms and on a slow runner woke only after the last batch, so the
+    // partial state was already gone. Sweeping from mount removes that blind window.)
     let sawPartial = false;
-    for (let i = 0; i < 400 && !sawPartial; i++) {
+    for (let i = 0; i < 20_000 && !sawPartial && kw() < 149; i++) {
       sawPartial = kw() > 0 && kw() < 149 && total() === 149;
       if (!sawPartial) await new Promise((r) => setTimeout(r, 0));
     }
