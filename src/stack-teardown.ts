@@ -297,6 +297,11 @@ const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
   { id: "worktreeLate", run: (stack) => void stack.worktreeLate?.dispose() },
   // workflow-worktree §3 (P4): a scan still resolving when the session ends must never surface a stale prompt.
   { id: "worktreeOrphansStartup", run: (stack) => void stack.worktreeOrphansStartup?.dispose() },
+  // G10 (7b): cancel the notifier's pending retry timers — AFTER the drain/seal and the late-report redirect, because
+  // notices produced while the run drain settles must still reach THIS (closing) session. Whatever is still
+  // retrying stays `pending` in the persisted outbox and is redelivered by the next stack's `notifier.reconcile()`
+  // (session_start), the same way a crash would be recovered — before this fix the retries kept firing on the OLD pi.
+  { id: "notifier", run: (stack) => void stack.notifier.dispose() },
   // external-agent §5.5 (P5), GAP-G7 fixed: stop the directory probe on shutdown too. A /reload or cross-cwd resume
   // re-imports the module, so the next-build handoff never reaches the old port. Never kills a running run.
   { id: "external", run: (stack) => void stack.external?.dispose() },

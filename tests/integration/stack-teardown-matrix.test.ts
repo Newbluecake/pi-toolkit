@@ -319,6 +319,8 @@ function pathC(g: string, reason: string, profile: Profile = "full", o: { kill?:
     `${g}.workflow.runs.seal`,
     `${g}.worktreeLate.dispose`, // after seal
     `${g}.worktreeOrphansStartup.dispose`,
+    // G10 FIXED (7b): pending notifier retries are cancelled after the drain/seal; the outbox keeps the records.
+    `${g}.notifier.dispose`,
     // G7 FIXED (7b): the external-agent port's directory probe is now stopped on shutdown too — /reload and cross-cwd
     // resume re-import the module, so path A never reaches the old port there.
     ...(profile === "extRoot" ? [`${g}.external.dispose`] : []),
@@ -665,21 +667,35 @@ describe("teardown matrix: residual timers and the gaps they prove (after a /rel
     expect(completionsOf(a.h)).toBe(2); // ackHold window (GAP-G3)
   }, 60_000);
 
-  it("GAP-G10: a notifier retry already scheduled at shutdown still runs on the OLD pi (bounded by deliveryAttempts=3)", async () => {
+  it("G10 FIXED: a notifier retry pending at shutdown is cancelled (no more sends through the OLD pi) and the NEXT session redelivers it from the outbox", async () => {
     const a = await boot();
     let sends = 0;
     (a.h.pi as any).sendMessage = () => {
       sends++;
       throw new Error("stale ctx");
     };
+    const sessionEntries: any[] = []; // what pi would have written into the session file
+    (a.h.pi as any).appendEntry = (customType: string, data: unknown) =>
+      void sessionEntries.push({ type: "custom", customType, data });
     await fire(a, "session_start", "startup");
-    probe.stacks[0].notifier.enqueue(payload("r_n", "failed")); // not coalescible ⇒ sent at once, throws, retry armed
+    probe.stacks[0].notifier.enqueue({ ...payload("r_n", "failed"), createdAt: Date.now() }); // not coalescible ⇒ sent at once, throws, retry armed
     expect(sends).toBe(1);
-    await fire(a, "session_shutdown", "reload");
     expect(timers.outstanding().map((o) => o.site)).toContain("src/delivery/notifier.ts");
+    await fire(a, "session_shutdown", "reload");
+    expect(timers.outstanding().map((o) => o.site)).not.toContain("src/delivery/notifier.ts");
     await vi.advanceTimersByTimeAsync(600_000);
-    expect(sends).toBe(3); // two more attempts after shutdown, then the notifier gives up
+    expect(sends).toBe(1); // before 7b: 3 (two more attempts after shutdown, on the dead session)
     expect(notWebHub(timers.outstanding())).toEqual([]);
+    // I1 (persistent, acknowledgeable delivery) is intact: the record is still in the outbox as `pending`, and the
+    // next session (same session id, /reload ⇒ fresh module) redelivers it through ITS pi at session_start.
+    freshModules();
+    const b = await boot();
+    const nextCtx = fakeCtx(box.home, { sid: a.sid }).ctx;
+    nextCtx.sessionManager.getEntries = () => sessionEntries;
+    await fire(b, "session_start", "reload", { ctx: nextCtx });
+    const redelivered = b.h.sent.filter((m) => m.message?.customType === "subagent:notification");
+    expect(redelivered.length).toBe(1);
+    expect(JSON.stringify(redelivered[0])).toContain("r_n");
   }, 60_000);
 
   it("G9 FIXED: the /goal delivery watchdog is cancelled at shutdown and no longer talks through the OLD pi", async () => {

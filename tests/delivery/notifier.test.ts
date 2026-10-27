@@ -114,6 +114,53 @@ describe("Notifier", () => {
     expect(notifier.stats.dropped).toBe(1);
     expect(store.records.get(payload.key)?.state).toBe("dropped");
   });
+  it("G10 dispose: pending retries are cancelled, the record stays pending in the outbox, a successor's reconcile redelivers it (I1)", () => {
+    const clock = new FakeClock(1_000);
+    const store = new FakeOutbox();
+    let attempts = 0;
+    const old = createNotifier({
+      store,
+      clock,
+      backoffMs: 10,
+      maxAttempts: 3,
+      sender: () => {
+        attempts++;
+        throw new Error("closed");
+      },
+    });
+    old.enqueue({ ...payload, createdAt: 1_000 });
+    expect(attempts).toBe(1);
+    old.dispose();
+    old.dispose(); // idempotent
+    clock.advance(1_000);
+    expect(attempts).toBe(1); // the armed retry never fired
+    expect(store.records.get(payload.key)?.state).toBe("pending");
+    // The next stack (same outbox) picks the record up.
+    const sent: string[] = [];
+    const next = createNotifier({ store, clock, sender: (p) => sent.push(p.key) });
+    expect(next.reconcile().redelivered).toEqual([payload.key]);
+    expect(sent).toEqual([payload.key]);
+    expect(store.records.get(payload.key)?.state).toBe("delivered");
+  });
+
+  it("G10 dispose: enqueue/finalize after dispose still persist the record but send nothing", () => {
+    const clock = new FakeClock(1_000);
+    const store = new FakeOutbox();
+    const sent: string[] = [];
+    const notifier = createNotifier({ store, clock, sender: (p) => sent.push(p.key) });
+    notifier.dispose();
+    notifier.enqueue({ ...payload, createdAt: 1_000 });
+    notifier.enqueue({ ...payload, key: "s:1", runId: "s", createdAt: 1_000 }, { hold: true });
+    expect(notifier.finalize("s", 1, { textPreview: "late" })).toBe("sent"); // state moved on, delivery deferred
+    expect(sent).toEqual([]);
+    expect(store.records.get(payload.key)?.state).toBe("pending");
+    expect(store.records.get("s:1")?.state).toBe("pending");
+    // the successor delivers both
+    const next = createNotifier({ store, clock, sender: (p) => sent.push(p.key) });
+    next.reconcile();
+    expect(sent.sort()).toEqual([payload.key, "s:1"].sort());
+  });
+
   it("uses CAS-like consume and suppresses stale deliveries during reconcile", () => {
     const clock = new FakeClock(100);
     const store = new FakeOutbox();

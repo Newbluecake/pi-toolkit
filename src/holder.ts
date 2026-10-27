@@ -137,6 +137,7 @@ export function forwardNotifier(holder: StackHolder): Notifier {
     settleBatch: (keys, ok) => requireStack(holder).notifier.settleBatch(keys, ok),
     ack: (runId, generation, by) => requireStack(holder).notifier.ack(runId, generation, by),
     peek: (key) => requireStack(holder).notifier.peek(key),
+    dispose: () => requireStack(holder).notifier.dispose(),
     consume: (key, by) => requireStack(holder).notifier.consume(key, by),
     reconcile: (persisted) => requireStack(holder).notifier.reconcile(persisted),
     verifyPersisted: (keys) => requireStack(holder).notifier.verifyPersisted(keys),

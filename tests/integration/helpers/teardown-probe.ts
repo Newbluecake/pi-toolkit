@@ -68,6 +68,7 @@ export function instrumentStack(probe: TeardownProbe, stack: any, gen: number): 
   on("load", stack.load, "dispose");
   on("rpc", stack.rpc, "close");
   on("external", stack.external, "dispose");
+  on("notifier", stack.notifier, "dispose");
   on("workflow.runs", stack.workflow?.runs, "abandon", "shutdown", "drain", "seal");
   on("runJournal", stack.runJournal, "flushPending");
   on("spawn", stack.spawn, "abort");
