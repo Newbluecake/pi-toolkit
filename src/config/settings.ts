@@ -101,6 +101,9 @@ export type { AskUserBackgroundInterruptSettings, AskUserSettings } from "../ask
 import { DEFAULT_TODO_SETTINGS, parseTodoSettings } from "../todo/settings.js";
 import type { TodoSettings } from "../todo/settings.js";
 export type { TodoArchiveSettings, TodoNudgeSettings, TodoSettings } from "../todo/settings.js";
+import { DEFAULT_HUD_SETTINGS, parseHudSettings } from "../hud/settings.js";
+import type { HudSettings } from "../hud/settings.js";
+export type { HudSettings } from "../hud/settings.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 import { getSecureDomain, statePathsOf } from "../secure/domain.js";
 import { resolveAgentDir } from "../core/agent-dir.js";
@@ -339,15 +342,6 @@ export interface AgentSettings {
   schedule: ScheduleSettings;
 }
 
-/**
- * HUD settings group. `autoFetchMinutes`: HUD 周期 `git fetch --quiet --prune`
- * 的间隔（分钟）——↑/↓ 计数对比的是本地 remote-tracking ref，不 fetch 就永远
- * 看不到别处推进的远程提交；0 = 关闭（只保留手动 /pi-hud-refresh）。
- */
-export interface HudSettings extends EnabledGroup {
-  autoFetchMinutes: number;
-}
-
 export const DEFAULT_SETTINGS: AgentSettings = {
   concurrencyLimit: 6,
   agent: { queueWhenFull: false },
@@ -389,7 +383,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     untilCmdTimeoutMs: 300_000,
     deliveryWatchdogMs: 30_000,
   },
-  hud: { enabled: true, autoFetchMinutes: 5 },
+  hud: DEFAULT_HUD_SETTINGS,
   webHub: DEFAULT_WEBHUB_SETTINGS,
   webSearch: { enabled: true },
   date: { enabled: true },
@@ -704,19 +698,6 @@ export function parseGoalSettings(input: unknown): GoalSettings {
     evalTimeoutMs: num(value.evalTimeoutMs, defaults.evalTimeoutMs),
     untilCmdTimeoutMs: num(value.untilCmdTimeoutMs, defaults.untilCmdTimeoutMs),
     deliveryWatchdogMs: num(value.deliveryWatchdogMs, defaults.deliveryWatchdogMs),
-  };
-}
-
-/** HUD 设置块解析：enabled 复用 EnabledGroup 语义，autoFetchMinutes 须 finite 且 ≥ 0；逐字段回落默认，never throws。 */
-function parseHudSettings(input: unknown): HudSettings {
-  const defaults = DEFAULT_SETTINGS.hud;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
-  const record = input as Record<string, unknown>;
-  const minutes = record.autoFetchMinutes;
-  return {
-    enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
-    autoFetchMinutes:
-      typeof minutes === "number" && Number.isFinite(minutes) && minutes >= 0 ? minutes : defaults.autoFetchMinutes,
   };
 }
 
