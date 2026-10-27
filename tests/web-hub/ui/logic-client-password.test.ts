@@ -5,10 +5,9 @@ import {
   BUSY_RETRY_MAX,
   CLOSE_PROBE_MAX,
   CLOSE_PROBE_BACKOFF_MS,
-  BACKOFF_MIN_MS,
   CMD_REQUEST_TIMEOUT_MS,
-  CONNECT_TIMEOUT_MS,
 } from "../../../src/web-hub/ui/src/logic/password-client.js";
+import { BACKOFF_MIN_MS, CONNECT_TIMEOUT_MS } from "../../../src/web-hub/ui/src/logic/transport-core.js";
 import { SILENCE_MS } from "../../../src/web-hub/ui/src/logic/contract.js";
 
 /**

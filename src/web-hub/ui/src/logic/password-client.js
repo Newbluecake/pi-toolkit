@@ -1,9 +1,10 @@
 /**
  * Password-mode browser transport (plan §10, package LF).
  *
- * Mirrors `createClient` in `app.js` (same EventSource lifecycle: one stream
- * per tab, 45s-silence watchdog, exponential reopen backoff) but for the LAN
- * `data-auth-mode="password"` listener instead of the loopback token one:
+ * Shares the EventSource lifecycle with the token client through
+ * `./transport-core.js` (one stream per tab, 45s-silence watchdog, exponential reopen
+ * backoff, connect-handshake deadline — source-governance batch2 ⑩-U, extracted verbatim),
+ * driving the LAN `data-auth-mode="password"` listener instead of the loopback token one:
  *
  * - No `#t=` hash is ever read or sent; if present it is only cleared via
  *   `history.replaceState` (plan §10 "token 只在 token 模式").
@@ -51,14 +52,8 @@
  *   success aborts the loop (settles `cancelled`, which callers ignore) so a stale `/wait`
  *   answer can never bounce a completed login back to the password form.
  */
-import {
-  API,
-  HISTORY_LIMIT_MAX,
-  PROXY_CLIENT_TIMEOUT_MS,
-  SILENCE_MS,
-  SSE_EVENTS,
-  VERSION_INFO_CLIENT_TIMEOUT_MS,
-} from "./contract.js";
+import { API, HISTORY_LIMIT_MAX, PROXY_CLIENT_TIMEOUT_MS, VERSION_INFO_CLIENT_TIMEOUT_MS } from "./contract.js";
+import { createStreamLifecycle, createTimer } from "./transport-core.js";
 import {
   PROXY_LIST_BODY_MAX_BYTES,
   PROXY_OPEN_BODY_MAX_BYTES,
@@ -114,16 +109,6 @@ import {
 export const REQUEST_TIMEOUT_MS = 10_000;
 export const CMD_REQUEST_TIMEOUT_MS = 16_000; // control-plan §3.3 browser write budget
 export const LOGIN_TIMEOUT_MS = 25_000; // plan §10 "排队等待": KDF fair-scheduling wait can run up to 20s
-export const WATCHDOG_TICK_MS = 5_000;
-export const BACKOFF_MIN_MS = 1_000;
-export const BACKOFF_MAX_MS = 30_000;
-// Handshake deadline for a fresh EventSource: a healthy hello lands in a few hundred ms (the
-// password-mode boot splash was built on exactly that observation), and Chromium fires NO
-// `error` for an accepted-but-silent connection — it just sits at readyState CONNECTING, so
-// without this timer the only guard was the 45s SILENCE watchdog (2026-10-13 LAN incident:
-// /api/events hung mid-handshake, conn stuck "connecting" forever). 10s is ~an order of
-// magnitude above the healthy case yet far below the silence watchdog.
-export const CONNECT_TIMEOUT_MS = 10_000;
 export const BUSY_RETRY_MAX = 5;
 export const BUSY_RETRY_DEFAULT_MS = 2_000;
 export const RATE_RETRY_DEFAULT_MS = 1_000;
@@ -145,7 +130,6 @@ export const WAIT_MIN_POLL_MS = 1_000;
 // Bounded backoff after consecutive TRANSPORT errors in the wait loop (verifier rework #4):
 // 1s→2s→4s→… capped here, reset by any HTTP response. Never below WAIT_MIN_POLL_MS.
 export const WAIT_ERROR_BACKOFF_MAX_MS = 8_000;
-const ES_CLOSED = 2;
 
 /**
  * @typedef {{
@@ -212,24 +196,33 @@ function retryAfterMs(r, fallbackMs) {
  * @param {PasswordClientDeps} deps
  */
 export function createPasswordClient(deps) {
-  /** @type {any} */
-  let es = null;
-  let lastFrameAt = deps.now();
-  /** @type {any} */
-  let watchdog = null;
-  /** @type {any} */
-  let reopenTimer = null;
-  /** @type {any} */
-  let connectTimer = null;
-  let backoff = BACKOFF_MIN_MS;
-  let closed = false;
-
-  /** @param {() => void} fn @param {number} ms */
-  const timer = (fn, ms) => {
-    const t = deps.setTimeout(fn, ms);
-    if (t && typeof t.unref === "function") t.unref();
-    return t;
-  };
+  const timer = createTimer(deps);
+  const stream = createStreamLifecycle(deps, {
+    /**
+     * `event: auth` (`{reason:"revoked"|"expired"}`) closes the stream immediately and
+     * reports the reason instead of waiting for the generic `error` path.
+     * @param {string} name @param {any} data @param {any} source @returns {boolean}
+     */
+    handleFrame(name, data, source) {
+      if (name !== "auth") return false;
+      const reason = data && (data.reason === "revoked" || data.reason === "expired") ? data.reason : "revoked";
+      stream.dropSource(source);
+      stream.resetBackoff();
+      deps.onConn("auth");
+      deps.onAuthEvent(reason);
+      return true;
+    },
+    /**
+     * CLOSED: 401 and 503 are indistinguishable from `error` alone (both fail the connection
+     * with no browser retry) — the §10 review-fix probe (lan-plan.md §15.9 #8) disambiguates
+     * before deciding what to show. The connect deadline was already cleared by the lifecycle
+     * core before this hook runs — it must not race the probe's own reopen schedule.
+     * @param {any} source
+     */
+    onClosedError(source) {
+      void probeSessionAfterClose(source);
+    },
+  });
 
   /** @param {number} ms */
   const sleep = (ms) => new Promise((resolve) => timer(resolve, ms));
@@ -373,12 +366,12 @@ export function createPasswordClient(deps) {
   async function login(username, password) {
     let busyAttempts = 0;
     for (;;) {
-      if (closed) return { ok: false, kind: "network" };
+      if (stream.isClosed()) return { ok: false, kind: "network" };
       const res = await postLoginOnce(username, password);
       switch (res.kind) {
         case "ok":
-          backoff = BACKOFF_MIN_MS;
-          openStream();
+          stream.resetBackoff();
+          stream.openStream();
           return { ok: true, initialPassword: res.body.initialPassword === true };
         case "invalid":
           return { ok: false, kind: "invalid" };
@@ -418,8 +411,8 @@ export function createPasswordClient(deps) {
     } catch {
       /* best effort — the client-side state is reset regardless */
     }
-    closeStream();
-    backoff = BACKOFF_MIN_MS;
+    stream.closeStream();
+    stream.resetBackoff();
     deps.onConn("auth");
     deps.onUnauthenticated();
   }
@@ -662,10 +655,10 @@ export function createPasswordClient(deps) {
       const out = await send();
       if (!(out.ok === false && out.error === "E_BUSY")) return out;
       busyAttempts++;
-      if (busyAttempts > BUSY_RETRY_MAX || closed) return out;
+      if (busyAttempts > BUSY_RETRY_MAX || stream.isClosed()) return out;
       const ms = out.retryAfterS !== undefined ? out.retryAfterS * 1000 : BUSY_RETRY_DEFAULT_MS;
       await sleep(ms);
-      if (closed) return out; // closed during the backoff — stop hammering a dead client
+      if (stream.isClosed()) return out; // closed during the backoff — stop hammering a dead client
     }
   }
 
@@ -1034,50 +1027,6 @@ export function createPasswordClient(deps) {
     }
   }
 
-  function clearConnectTimer() {
-    if (connectTimer !== null) deps.clearTimeout(connectTimer);
-    connectTimer = null;
-  }
-
-  function closeStream() {
-    if (watchdog !== null) deps.clearTimeout(watchdog);
-    if (reopenTimer !== null) deps.clearTimeout(reopenTimer);
-    clearConnectTimer();
-    watchdog = reopenTimer = null;
-    if (es) {
-      try {
-        es.close();
-      } catch {
-        /* already closed */
-      }
-      es = null;
-    }
-  }
-
-  function armWatchdog() {
-    if (watchdog !== null) deps.clearTimeout(watchdog);
-    watchdog = timer(() => {
-      watchdog = null;
-      if (closed) return;
-      if (es && deps.now() - lastFrameAt > SILENCE_MS) {
-        deps.onConn("reconnecting");
-        openStream();
-        return;
-      }
-      armWatchdog();
-    }, WATCHDOG_TICK_MS);
-  }
-
-  function scheduleReopen() {
-    if (closed || reopenTimer !== null) return;
-    const delay = backoff;
-    backoff = Math.min(BACKOFF_MAX_MS, backoff * 2);
-    reopenTimer = timer(() => {
-      reopenTimer = null;
-      if (!closed) openStream();
-    }, delay);
-  }
-
   /**
    * plan §10 review fix (lan-plan.md §15.9 #8): an SSE stream that goes CLOSED is ambiguous
    * between “not signed in” (401) and “hub momentarily busy / network hiccup” (503, or the probe
@@ -1093,7 +1042,7 @@ export function createPasswordClient(deps) {
    */
   async function probeSessionAfterClose(source) {
     for (let attempt = 1; ; attempt++) {
-      if (closed || es !== source) return; // superseded by a newer stream, logout, or close()
+      if (stream.isClosed() || !stream.currentIs(source)) return; // superseded by a newer stream, logout, or close()
       /** @type {"ok" | "unauthenticated" | "busy" | "network"} */
       let outcome;
       try {
@@ -1102,115 +1051,26 @@ export function createPasswordClient(deps) {
       } catch {
         outcome = "network";
       }
-      if (closed || es !== source) return;
+      if (stream.isClosed() || !stream.currentIs(source)) return;
       if (outcome === "ok") {
         deps.onConn("reconnecting");
-        scheduleReopen();
+        stream.scheduleReopen();
         return;
       }
       if (outcome === "unauthenticated") {
-        es = null;
+        stream.clearCurrent();
         deps.onConn("auth");
         deps.onUnauthenticated();
-        scheduleReopen(); // picks a freshly-authenticated cookie back up (e.g. signed in from another tab)
+        stream.scheduleReopen(); // picks a freshly-authenticated cookie back up (e.g. signed in from another tab)
         return;
       }
       // "busy" (503) or "network": keep the current page state, re-probe after a bounded backoff.
       if (attempt >= CLOSE_PROBE_MAX) {
-        scheduleReopen();
+        stream.scheduleReopen();
         return;
       }
       await sleep(CLOSE_PROBE_BACKOFF_MS);
     }
-  }
-
-  function openStream() {
-    if (closed) return;
-    if (es) {
-      try {
-        es.close();
-      } catch {
-        /* already closed */
-      }
-      es = null;
-    }
-    if (reopenTimer !== null) {
-      deps.clearTimeout(reopenTimer);
-      reopenTimer = null;
-    }
-    const source = new deps.EventSource(API.events, { withCredentials: true });
-    es = source;
-    lastFrameAt = deps.now();
-    // Handshake deadline (see CONNECT_TIMEOUT_MS): no hello in time ⇒ the connection hung
-    // mid-handshake — Chromium never reports that as `error`, and the 45s silence watchdog is
-    // far too late for boot. Close the hung stream ourselves and retry on the normal backoff.
-    // Cleared by `hello`, by closeStream(), and by the CLOSED `error` branch (which hands the
-    // stream to probeSessionAfterClose — the timer must not race that probe); deliberately NOT
-    // cleared by a transient (CONNECTING) `error`: the spec is "hello within CONNECT_TIMEOUT_MS
-    // of creation", a browser auto-retry does not buy a fresh deadline.
-    clearConnectTimer();
-    connectTimer = timer(() => {
-      connectTimer = null;
-      if (closed || es !== source) return;
-      try {
-        source.close();
-      } catch {
-        /* already closed */
-      }
-      es = null;
-      deps.onConn("reconnecting");
-      scheduleReopen();
-    }, CONNECT_TIMEOUT_MS);
-    for (const name of SSE_EVENTS) {
-      source.addEventListener(name, (/** @type {any} */ ev) => {
-        if (es !== source) return; // stale stream
-        lastFrameAt = deps.now();
-        let data = null;
-        try {
-          data = typeof ev.data === "string" && ev.data !== "" ? JSON.parse(ev.data) : null;
-        } catch {
-          return; // malformed frame: ignore
-        }
-        if (name === "auth") {
-          const reason = data && (data.reason === "revoked" || data.reason === "expired") ? data.reason : "revoked";
-          clearConnectTimer();
-          es = null;
-          try {
-            source.close();
-          } catch {
-            /* already closed */
-          }
-          backoff = BACKOFF_MIN_MS;
-          deps.onConn("auth");
-          deps.onAuthEvent(reason);
-          return;
-        }
-        if (name === "hello") {
-          clearConnectTimer();
-          backoff = BACKOFF_MIN_MS;
-          deps.onConn("open");
-        }
-        const id = Number(ev.lastEventId);
-        deps.onMessage(
-          Number.isFinite(id) && ev.lastEventId !== "" ? { event: name, data, id } : { event: name, data },
-        );
-      });
-    }
-    source.addEventListener("error", () => {
-      if (es !== source || closed) return;
-      if (source.readyState !== ES_CLOSED) {
-        deps.onConn("reconnecting"); // browser auto-reconnects (genuine network hiccup, never a plain HTTP error — verified against Chromium)
-        return;
-      }
-      // CLOSED: the connect attempt is over (the stream failed outright), so its handshake
-      // deadline must not fire mid-probe and race probeSessionAfterClose's own reopen schedule.
-      clearConnectTimer();
-      // CLOSED: 401 and 503 are indistinguishable here (both fail the connection, no browser
-      // retry) — probe §10 review fix (lan-plan.md §15.9 #8) disambiguates instead of treating
-      // every CLOSED as "not signed in".
-      void probeSessionAfterClose(source);
-    });
-    armWatchdog();
   }
 
   // -------------------------------------------------------------------------
@@ -2222,7 +2082,7 @@ export function createPasswordClient(deps) {
    * >}
    */
   async function submitSecondFactor(input) {
-    if (closed) return { ok: false, error: "network" };
+    if (stream.isClosed()) return { ok: false, error: "network" };
     /** @type {"totp" | "recovery"} */
     let method;
     /** @type {string} */
@@ -2261,8 +2121,8 @@ export function createPasswordClient(deps) {
       // `{state:"cancelled"}`, which callers ignore; its post-fetch abort check discards a
       // response that raced in just before the abort.
       abortWaitSession();
-      backoff = BACKOFF_MIN_MS;
-      openStream();
+      stream.resetBackoff();
+      stream.openStream();
       return { ok: true, initialPassword: b.initialPassword === true };
     }
     /** @type {any} */
@@ -2342,7 +2202,7 @@ export function createPasswordClient(deps) {
     let errorStreak = 0; // consecutive TRANSPORT errors; any HTTP response resets it (§5.6)
     try {
       for (;;) {
-        if (closed || signal?.aborted === true) return { ok: false, state: "cancelled" };
+        if (stream.isClosed() || signal?.aborted === true) return { ok: false, state: "cancelled" };
         const started = deps.now();
         if (started >= expiresAt) return { ok: false, state: "expired" };
         /** @type {any} */
@@ -2359,7 +2219,7 @@ export function createPasswordClient(deps) {
         } catch (e) {
           fetchErr = e;
         }
-        if (closed || signal?.aborted === true) return { ok: false, state: "cancelled" };
+        if (stream.isClosed() || signal?.aborted === true) return { ok: false, state: "cancelled" };
         if (fetchErr !== undefined) {
           errorStreak += 1;
           // §5.6: any poll timeout/failure ⇒ retry, never a tight loop; consecutive
@@ -2381,8 +2241,8 @@ export function createPasswordClient(deps) {
         }
         const b = body !== null && typeof body === "object" ? body : {};
         if (r.ok && b.ok === true) {
-          backoff = BACKOFF_MIN_MS;
-          openStream();
+          stream.resetBackoff();
+          stream.openStream();
           return { ok: true, initialPassword: b.initialPassword === true };
         }
         if (b.state === "pending") {
@@ -2435,7 +2295,7 @@ export function createPasswordClient(deps) {
         deps.history.replaceState(null, "", `${deps.location.pathname}${deps.location.search}`);
       }
       void fetchSessionInfo();
-      if (!closed) openStream();
+      if (!stream.isClosed()) stream.openStream();
     },
     login,
     logout,
@@ -2462,13 +2322,13 @@ export function createPasswordClient(deps) {
     privacy,
     proxy,
     close() {
-      closed = true;
+      stream.close();
       abortWaitSession();
-      closeStream();
     },
     /** Test/diagnostic hooks. */
     stats() {
-      return { open: es !== null, backoff };
+      const s = stream.stats();
+      return { open: s.open, backoff: s.backoff };
     },
   };
 }
