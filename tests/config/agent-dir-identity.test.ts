@@ -69,11 +69,17 @@ describe("T-ID1 P0: default-equivalent values preserve legacy literal paths", ()
   });
 
   it("hub computes one resolved agentDir and all six consumers use it; convert gets the same value", () => {
-    const hub = readFileSync(new URL("../../src/web-hub/hub/hub.ts", import.meta.url), "utf8");
+    const read = (f: string): string => readFileSync(new URL(`../../src/web-hub/hub/${f}`, import.meta.url), "utf8");
+    const hub = read("hub.ts");
     expect(hub.match(/const hubAgentDir = resolveAgentDir\(process.env, config.home\).dir;/g)).toHaveLength(1);
+    // ⑨-H3 moved the consumers into assembly-*.ts; each takes the one value from the HubAssembly ctx.
+    const parts = ["assembly-feishu.ts", "assembly-preview.ts", "assembly-spawn.ts"].map(read);
+    for (const p of parts) expect(p).toContain("const hubAgentDir = ctx.hubAgentDir;");
+    expect(hub).toMatch(/^\s+hubAgentDir,$/m);
     // P4 为 hub.json 的 agentDir 写入加了第 7 处消费（仍共用同一个 hubAgentDir）。
-    expect(hub.match(/agentDir: hubAgentDir/g)).toHaveLength(7);
-    expect(hub).not.toContain('process.env["PI_CODING_AGENT_DIR"]');
+    const uses = [hub, ...parts].reduce((n, src) => n + (src.match(/agentDir: hubAgentDir/g)?.length ?? 0), 0);
+    expect(uses).toBe(7);
+    for (const src of [hub, ...parts]) expect(src).not.toContain('process.env["PI_CODING_AGENT_DIR"]');
     const launcher = readFileSync(new URL("../../src/secure/bin/helper.mjs", import.meta.url), "utf8");
     expect(launcher).toContain("C.defaultConvertContext(process.env, { home, cwd, agentDir: piAgentDir(home) })");
   });
