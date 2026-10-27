@@ -1849,7 +1849,7 @@ export function buildSessionStack(
     dispose: ((entry: StackTeardownEntry, env?: StackTeardownEnv) =>
       entry.kind === "rebuild-handoff"
         ? void runRebuildHandoff(parts)
-        : runStackTeardown(entry as never, stack, env as StackTeardownEnv)) as Stack["dispose"],
+        : runStackTeardown(entry as never, stack, env as StackTeardownEnv, parts)) as Stack["dispose"],
     disposeXsSync: () => disposeXsSync(stack),
     ...(xs ? { xs } : {}),
     ...(rootWakeRecovery ? { rootWakeRecovery } : {}),

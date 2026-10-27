@@ -88,7 +88,7 @@ export interface TeardownParts {
   backgroundCompletions?: BackgroundCompletionHub | undefined;
   /** X7b: stop the old widget's 1 Hz tick + `setWidget(key, undefined)` before the new one mounts. */
   fleetWidget?: FleetWidgetController | undefined;
-  /** M-E: not a `Stack` member (GAP-G1: path C never reaches it). */
+  /** M-E: not a `Stack` member; path C reaches it through `parts` (G1 fixed), path A through the handoff. */
   usageBroadcaster?: UsageBroadcaster | undefined;
   /** Not `Stack` members (GAP-G2/G3: path C never reaches them). `dispose()` flushes what is buffered. */
   coalescer?: Coalescer | undefined;
@@ -128,7 +128,9 @@ interface RebuildStep {
 }
 interface StackStep<Result extends void | Promise<void>> {
   readonly id: string;
-  run(stack: Stack, env: StackTeardownEnv, entry: StackTeardownEntry): Result;
+  /** `parts` = the build's own slot set: reaches components that are not `Stack` members (7b). Read-only here — only
+   *  path A clears slots, so the next build's handoff still sees what path C disposed (and `prevBashJobs`). */
+  run(stack: Stack, env: StackTeardownEnv, entry: StackTeardownEntry, parts: TeardownParts): Result;
 }
 
 /** `parts.x?.dispose(); parts.x = undefined` — the original two-line pattern, one slot at a time. */
@@ -292,6 +294,10 @@ const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
       stack.workflow.runs.seal();
     },
   },
+  // G1 (7b): the usage broadcaster is a build-local (not a Stack member). Its self-rearming 1 Hz tick kept emitting
+  // `subagent:usage` frames on the OLD pi's event bus for as long as it believed a run was active. AFTER the drain/seal
+  // so the last frames of the runs that settled during shutdown are still published; dispose only clears the timer.
+  { id: "usageBroadcaster", run: (_stack, _env, _entry, parts) => void parts.usageBroadcaster?.dispose() },
   // workflow-worktree D13: after seal() — any run this stack is still settling gets its chance to write through the
   // normal path first; only truly late reports after this point are redirected.
   { id: "worktreeLate", run: (stack) => void stack.worktreeLate?.dispose() },
@@ -330,7 +336,7 @@ const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
     run: (_stack, env, entry) =>
       entry.kind === "shutdown" && entry.reason === "quit" ? env.activation.sealChildBashJobs() : undefined,
   },
-  // GAP-G1 usageBroadcaster · GAP-G2 coalescer · GAP-G3 ackHold · GAP-G4 bashJobs manager:
+  // GAP-G2 coalescer · GAP-G3 ackHold · GAP-G4 bashJobs manager:
   // not reachable from the Stack (path A only).
 ];
 
@@ -339,24 +345,36 @@ export function runStackTeardown(
   entry: { kind: "defensive"; nextXsSessionId?: string | undefined },
   stack: Stack,
   env: StackTeardownEnv,
+  parts: TeardownParts,
 ): void;
 export function runStackTeardown(
   entry: { kind: "shutdown"; reason: string },
   stack: Stack,
   env: StackTeardownEnv,
+  parts: TeardownParts,
 ): Promise<void>;
-export function runStackTeardown(entry: StackTeardownEntry, stack: Stack, env: StackTeardownEnv): void | Promise<void> {
+export function runStackTeardown(
+  entry: StackTeardownEntry,
+  stack: Stack,
+  env: StackTeardownEnv,
+  parts: TeardownParts,
+): void | Promise<void> {
   if (entry.kind === "defensive") {
-    for (const step of DEFENSIVE_STEPS) step.run(stack, env, entry);
+    for (const step of DEFENSIVE_STEPS) step.run(stack, env, entry, parts);
     return;
   }
-  if (entry.kind === "shutdown") return runShutdown(entry, stack, env);
+  if (entry.kind === "shutdown") return runShutdown(entry, stack, env, parts);
   throw new Error("runStackTeardown: use runRebuildHandoff for the rebuild-handoff entry");
 }
 
-async function runShutdown(entry: StackTeardownEntry, stack: Stack, env: StackTeardownEnv): Promise<void> {
+async function runShutdown(
+  entry: StackTeardownEntry,
+  stack: Stack,
+  env: StackTeardownEnv,
+  parts: TeardownParts,
+): Promise<void> {
   for (const step of SHUTDOWN_STEPS) {
-    const pending = step.run(stack, env, entry);
+    const pending = step.run(stack, env, entry, parts);
     if (pending !== undefined) await pending;
   }
 }

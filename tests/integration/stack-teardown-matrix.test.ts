@@ -317,6 +317,8 @@ function pathC(g: string, reason: string, profile: Profile = "full", o: { kill?:
     `${g}.workflow.runs.drain`,
     `${g}.runJournal.flushPending`,
     `${g}.workflow.runs.seal`,
+    // G1 FIXED (7b): the build-local usage broadcaster is disposed after the drain/seal (its last frames still go out).
+    `${g}.usageBroadcaster.dispose`,
     `${g}.worktreeLate.dispose`, // after seal
     `${g}.worktreeOrphansStartup.dispose`,
     // G10 FIXED (7b): pending notifier retries are cancelled after the drain/seal; the outbox keeps the records.
@@ -325,7 +327,7 @@ function pathC(g: string, reason: string, profile: Profile = "full", o: { kill?:
     // resume re-import the module, so path A never reaches the old port there.
     ...(profile === "extRoot" ? [`${g}.external.dispose`] : []),
     `${g}.hostBashViewCapability.release`,
-    // GAP-G1 usageBroadcaster · GAP-G2 coalescer · GAP-G3 ackHold · GAP-G4 bashJobs manager:
+    // GAP-G2 coalescer · GAP-G3 ackHold · GAP-G4 bashJobs manager:
     // none of them is touched on this path — they are disposed only by path A (same-module rebuild).
     ...(reason === "quit" ? [...(o.kill ? ["bashJobs.killBounded"] : []), "childBashRegistry.sealAll"] : []),
   ];
@@ -633,19 +635,22 @@ describe("teardown matrix: residual timers and the gaps they prove (after a /rel
     expect(live.filter((o) => o.ref).map((o) => o.site)).toEqual([]);
   }, 60_000);
 
-  it("GAP-G1: the usage broadcaster of the outgoing stack keeps ticking at 1 Hz on the OLD pi after session_shutdown", async () => {
-    probe.fakeActiveRun = true; // the broadcaster believes one run is in flight ⇒ it re-arms forever
+  it("G1 FIXED: the usage broadcaster of the outgoing stack stops ticking at shutdown (it used to emit 1 Hz on the OLD pi forever)", async () => {
+    probe.fakeActiveRun = true; // the broadcaster believes one run is in flight ⇒ it would re-arm forever
     const a = await boot();
     let emitted = 0;
     (a.h.pi as any).events.emit = (channel: string) => channel === "subagent:usage" && void emitted++;
     await fire(a, "session_start", "startup");
     probe.broadcasters[0].poke();
     expect(emitted).toBe(1);
+    expect(timers.outstanding().map((o) => o.site)).toContain("src/delivery/usage-broadcast.ts"); // armed…
     await fire(a, "session_shutdown", "reload");
     const atShutdown = emitted;
-    expect(timers.outstanding().map((o) => o.site)).toContain("src/delivery/usage-broadcast.ts");
+    expect(timers.outstanding().map((o) => o.site)).not.toContain("src/delivery/usage-broadcast.ts"); // …and cleared
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(emitted - atShutdown).toBe(60); // one frame per second, indefinitely (only process exit stops it)
+    expect(emitted - atShutdown).toBe(0); // before 7b: 60 frames in 60 s
+    probe.broadcasters[0].poke(); // a late lifecycle poke after dispose is inert too
+    expect(emitted - atShutdown).toBe(0);
   }, 60_000);
 
   it("GAP-G2/G3: a coalescer / ackHold hold-window of the outgoing stack still flushes through the OLD pi after shutdown", async () => {
