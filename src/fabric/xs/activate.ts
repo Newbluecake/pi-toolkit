@@ -19,6 +19,12 @@ import { getXsHostCapability } from "./host-cap.js";
 import { getXsReplyLedger } from "./reply-ledger.js";
 import { createXsSender, detectXsToolCollisions, type XsSender } from "./sender.js";
 import { stashXsMembershipHandoff, takeXsMembershipHandoff, type XsMembershipEntryData } from "./membership.js";
+import {
+  stashXsAliasHandoff,
+  takeXsAliasHandoff,
+  XS_ALIAS_HANDOFF_PENDING_MS,
+  type XsAliasHandoffShot,
+} from "./alias-handoff.js";
 import type { StackXsInput } from "./stack.js";
 import { xsOn } from "./switch.js";
 import type { XsChannelView } from "./types-channel.js";
@@ -129,6 +135,11 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
   // /new membership handoff (new-session-channels-fix): the snapshot taken at
   // `session_shutdown{new}`, consumed by the immediately following `stackInput()`.
   let pendingHandoff: XsMembershipEntryData | undefined;
+  // Alias-force-default AF7 (§5.5): the `/new` alias snapshot of the previous session id. `aliasInherit` is the one-shot
+  // "predecessor was decided" input of the NEXT stack build; `aliasPending` is the handoff still to be asked of the hub
+  // (cleared when attempted, expired, or a human decides on the new session first).
+  let aliasInherit = false;
+  let aliasPending: { prevSessionId: string; alias: string; expiresAt: number } | undefined;
 
   // Reply-plan §9 (MW): the @session port reuses the SAME sender instance as the tools.
   let xsSender: XsSender | undefined;
@@ -427,6 +438,29 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     } catch {
       /* handoff is best-effort: a failure just keeps today's behaviour */
     }
+    if (aliasOn) stashAliasHandoff();
+  }
+
+  /** AF7: park the outgoing session's held alias + decided mark (display cache view; the hub re-verifies everything).
+   *  Nothing to carry ⇒ nothing parked. Any read failure ⇒ no handoff (the auto path decides). */
+  function stashAliasHandoff(): void {
+    try {
+      const xs = holder.current?.xs;
+      if (xs === undefined) return;
+      const fromSessionId = xs.sessionId();
+      // by explicit sid: the fence hook already ran (`xsAttached=false`), so `current()` (which goes through the attached
+      // stack) would read nothing here
+      const alias = webHubRef.current?.xs?.aliasCache().heldFor?.(fromSessionId);
+      const decided = xs.aliasDecided?.decided() === true;
+      stashXsAliasHandoff({
+        fromSessionId,
+        ...(alias !== undefined ? { alias } : {}),
+        decided,
+        at: Date.now(),
+      });
+    } catch {
+      /* best-effort */
+    }
   }
 
   function beginSessionStart(ctx: ExtensionContext, reason?: string): string | undefined {
@@ -434,7 +468,23 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     // Consume-once (any reason clears the slot): only a `/new` start adopts the handoff.
     const shot = takeXsMembershipHandoff();
     pendingHandoff = reason === "new" ? shot : undefined;
-    return xsEnabled || xsLedger.size > 0 ? xsSessionOf(ctx) : undefined;
+    // AF7: same rules for the alias snapshot — any reason clears the slot, only `new` adopts it (fork/resume never),
+    // and only for a genuinely NEW session id (a stash from the same id is a leftover, not a predecessor).
+    const aliasShot: XsAliasHandoffShot | undefined = takeXsAliasHandoff(Date.now());
+    const nextSid = xsSessionOf(ctx);
+    aliasInherit = false;
+    aliasPending = undefined;
+    if (aliasOn && reason === "new" && aliasShot !== undefined && aliasShot.fromSessionId !== nextSid) {
+      aliasInherit = aliasShot.decided;
+      if (aliasShot.alias !== undefined) {
+        aliasPending = {
+          prevSessionId: aliasShot.fromSessionId,
+          alias: aliasShot.alias,
+          expiresAt: Date.now() + XS_ALIAS_HANDOFF_PENDING_MS,
+        };
+      }
+    }
+    return xsEnabled || xsLedger.size > 0 ? nextSid : undefined;
   }
 
   function defensiveTeardown(nextXsSessionId: string | undefined): void {
@@ -444,6 +494,8 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
   function stackInput(): StackXsInput | undefined {
     const handoff = pendingHandoff;
     pendingHandoff = undefined;
+    const inheritDecided = aliasInherit;
+    aliasInherit = false;
     return xsEnabled
       ? {
           ...(handoff !== undefined ? { membershipHandoff: handoff } : {}),
@@ -455,7 +507,17 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
           memberChanged: () => webHubRef.current?.xs?.publishMember(),
           unreadChanged: refreshXsInbox,
           ...(channelsOn ? { hubChannelCap: xsHubChannelCap } : {}),
-          ...(aliasOn ? { aliasUsable: xsAliasUsable, aliasDecided: true } : {}),
+          ...(aliasOn
+            ? {
+                aliasUsable: xsAliasUsable,
+                aliasDecided: true,
+                ...(inheritDecided ? { aliasDecidedInherit: true } : {}),
+                // AF7: a human decision on the new session wins over a still-pending handoff.
+                aliasHumanDecided: () => {
+                  aliasPending = undefined;
+                },
+              }
+            : {}),
           listRows: async (origin) => {
             const reply = await webHubRef.current?.xs?.hubPort().list({ origin });
             return reply?.kind === "res" && reply.res.ok ? (reply.res.rows ?? []) : undefined;
@@ -558,7 +620,8 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
                               xs === undefined || xs.sessionId() !== sessionId || xs.aliasDecided?.decided() !== false
                             );
                           },
-                          handoffPending: () => false, // AF7 (the /new handoff slot) is not built yet
+                          // AF7: a pending `/new` handoff outranks the auto claim (the bridge also tracks one in flight)
+                          handoffPending: () => aliasPending !== undefined && Date.now() <= aliasPending.expiresAt,
                         }),
                         notifyAliasAuto: (text: string) => {
                           try {
@@ -570,6 +633,22 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
                         },
                       }
                     : {}),
+                  // AF7 (§5.5): the `/new` handoff still owed to the hub for the CURRENT session. Wired whenever alias is on
+                  // — independent of `autoFromCwd` (a handoff is a continuation, not an auto-claim). Expired ⇒ gone.
+                  aliasHandoff: () => ({
+                    pending: (sessionId: string) => {
+                      const p = aliasPending;
+                      if (p === undefined) return undefined;
+                      if (Date.now() > p.expiresAt || p.prevSessionId === sessionId) {
+                        aliasPending = undefined;
+                        return undefined;
+                      }
+                      return { alias: p.alias, prevSessionId: p.prevSessionId };
+                    },
+                    settle: () => {
+                      aliasPending = undefined;
+                    },
+                  }),
                   // Q3: display-only one-shot notice (the bridge de-duplicates by (sessionId, lost.at)).
                   notifyAliasLost: (text: string) => {
                     try {

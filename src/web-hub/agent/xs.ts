@@ -155,7 +155,7 @@ export interface XsAgentPort {
    *  never fires and records nothing (the pre-AFW wiring stays byte-identical). `enabled` is the frozen
    *  `fabric.crossSession.alias.autoFromCwd`; `cwd`/`home`/`tmpdir` feed AF0's `deriveAutoAlias`;
    *  `decided` is the I8 human-decided marker (AF4 writes it before any human alias write op, AFW reads
-   *  it back); `handoffPending` is AF7's `/new` handoff slot (false until AF7 lands). Every read is live
+   *  it back); `handoffPending` is true while AF7's `/new` alias handoff is still pending. Every read is live
    *  and must be cheap and non-throwing — the bridge fail-closes (treats a throw as "do not auto"). */
   aliasAuto?():
     | {
@@ -165,6 +165,16 @@ export interface XsAgentPort {
         readonly tmpdir: string | undefined;
         decided(sessionId: string): boolean;
         handoffPending(): boolean;
+      }
+    | undefined;
+  /** Alias-force-default AF7 (§5.5): the `/new` alias handoff still owed to the hub for session `sessionId`. `pending`
+   *  is `undefined` once expired / consumed / superseded by a human decision on the new session; `settle()` clears it
+   *  (called the moment an attempt starts — one attempt per `/new`, whatever the outcome). ABSENT ⇒ no handoff ever
+   *  (alias off, child, secure). Independent of `aliasAuto` (works with `autoFromCwd=false`). Never throws into the bridge. */
+  aliasHandoff?():
+    | {
+        pending(sessionId: string): { alias: string; prevSessionId: string } | undefined;
+        settle(): void;
       }
     | undefined;
   /** Alias-force-default plan §7 (AF3): display-only one-shot "auto-claimed" notice text (the bridge
@@ -762,6 +772,47 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     return `${deps.connGen?.() ?? 0}|${sessionId}|${epoch}`;
   };
 
+  /** AF7: a `/new` handoff request is on the wire right now (a concurrent reconcile must not auto-claim meanwhile). */
+  let handoffBusy = false;
+
+  const handoffInputs = (): ReturnType<NonNullable<XsAgentPort["aliasHandoff"]>> => {
+    try {
+      return deps.port.aliasHandoff?.();
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** §5.1 ①: after an APPLIED `state:"none"`, ask the hub to move the previous session's alias (`/new` only; the port
+   *  exists only for a `session_start{new}` that stashed one). ONE attempt per `/new`: settled before the request goes
+   *  out. Any failure (stale — hub restarted, edge expired, someone else took it —, BUSY, UNKNOWN, link loss) just falls
+   *  through to ② auto; a successful reply is applied to the cache by `aliasOp` itself. A v1 hub gets nothing (the
+   *  pending state simply expires). Never throws. */
+  const maybeHandoff = async (sessionId: string): Promise<void> => {
+    const h = handoffInputs();
+    if (h === undefined) return;
+    let p: { alias: string; prevSessionId: string } | undefined;
+    try {
+      p = h.pending(sessionId);
+    } catch {
+      p = undefined;
+    }
+    if (p === undefined || !aliasUsable() || !hubHasAliasV2()) return;
+    try {
+      h.settle();
+    } catch {
+      /* the attempt proceeds; worst case the port re-offers it once more and the hub answers stale */
+    }
+    handoffBusy = true;
+    try {
+      await aliasOp({ alias: p.alias, intent: "handoff", prevSessionId: p.prevSessionId }, "write");
+    } catch {
+      /* fall through to the auto path */
+    } finally {
+      handoffBusy = false;
+    }
+  };
+
   /** §5.1 ②: evaluated at the END of a reconcile whose get was APPLIED and answered `state:"none"`. */
   const maybeAutoClaim = (sessionId: string): void => {
     const auto = autoInputs();
@@ -780,7 +831,7 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       hubAliasV2: hubHasAliasV2(),
       joined: member?.joined === true,
       decided: safeFlag(() => auto.decided(sessionId), true),
-      pendingHandoff: safeFlag(() => auto.handoffPending(), true),
+      pendingHandoff: handoffBusy || safeFlag(() => auto.handoffPending(), true),
     });
     if (!verdict.claim) {
       if (verdict.skip !== "handoff-pending") recordAutoSkip(sessionId, verdict.skip);
@@ -802,6 +853,7 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
   };
 
   const aliasCachePort: XsAliasCachePort = {
+    heldFor: (sessionId) => aliasCache.get(sessionId)?.alias,
     current() {
       const sid = deps.port.stack()?.sessionId();
       if (sid === undefined) return undefined;
@@ -818,6 +870,9 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         if (sink.applied === undefined || sink.applied.state !== "none") return;
         const sid = deps.port.stack()?.sessionId();
         if (sid === undefined) return;
+        await maybeHandoff(sid);
+        // a successful handoff was applied to the cache by aliasOp: the session holds the alias ⇒ no auto
+        if (deps.port.stack()?.sessionId() !== sid || aliasCache.get(sid)?.alias !== undefined) return;
         maybeAutoClaim(sid);
       } catch {
         /* never throws */

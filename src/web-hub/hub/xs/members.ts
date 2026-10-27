@@ -109,7 +109,20 @@ export interface XsMembers {
   /** Alias-plan §3.1 (AL2): the STORED record's sessionId behind an agentKey (effective or not) —
    *  lets the presence feed learn which sid an invalidation/session switch just took offline. */
   sessionOf(agentKey: string): string | undefined;
+  /**
+   * Alias-force-default AF7 (I10): the succession edge this hub itself observed on ONE socket — "this agentKey was on
+   * session `from` and is now on the session of its current member record" (`/new`, `/resume`, `/fork` all look the same
+   * to the hub; the agent only asks for a handoff after `/new`). Never derived from anything a frame claims: `from` is
+   * the sid the hub had already recorded for that same agentKey. `undefined` ⇒ no edge, expired (120 s), or the edge does
+   * not lead to the member's current sid. In-memory only: a hub restart forgets it (R22).
+   */
+  predecessorOf(agentKey: string): { from: string; at: number } | undefined;
+  /** AF7: forget the edge (a handoff consumed it). */
+  clearPredecessor(agentKey: string): void;
 }
+
+/** AF7: how long a succession edge stays usable. */
+export const XS_SUCCESSION_TTL_MS = 120_000;
 
 // ----------------------------------------------------------------- shared stamping helpers (router + broadcast)
 
@@ -252,9 +265,38 @@ export function createXsMembers(deps: {
   onLateAck?: (agentKey: string) => void;
 }): XsMembers {
   const table = new Map<string, XsMemberRecord>();
+  /** AF7 succession edges: one slot per agentKey (= one socket). `to` is unknown while only the detach was seen. */
+  const succession = new Map<string, { from: string; to?: string; at: number }>();
+
+  /** Drop edges that expired or whose socket record is gone (bounded by the number of sockets). */
+  function sweepSuccession(): void {
+    const t = deps.now();
+    for (const [key, e] of succession) {
+      if (t - e.at > XS_SUCCESSION_TTL_MS || deps.view(key) === undefined) succession.delete(key);
+    }
+  }
+
+  /**
+   * Called BEFORE the table is overwritten/deleted for `sessionId` arriving on `agentKey`. Three cases: the table
+   * still held another sid (direct switch); the table was emptied by a `detached` invalidation and a detach-only edge
+   * waits for its successor; the very same sid came back (not a succession ⇒ forget).
+   */
+  function noteSession(agentKey: string, sessionId: string): void {
+    const prev = table.get(agentKey)?.sessionId;
+    const e = succession.get(agentKey);
+    if (prev !== undefined && prev !== sessionId) {
+      sweepSuccession();
+      succession.set(agentKey, { from: prev, to: sessionId, at: deps.now() });
+    } else if (e !== undefined && e.to === undefined && e.from !== sessionId) {
+      succession.set(agentKey, { from: e.from, to: sessionId, at: deps.now() });
+    } else if (e !== undefined && e.from === sessionId) {
+      succession.delete(agentKey);
+    }
+  }
 
   const observer: XsRegistryObserver = {
     onMember(agentKey, frame) {
+      noteSession(agentKey, frame.sessionId);
       const channels = memberChannelsOf(frame);
       table.set(agentKey, {
         sessionId: frame.sessionId,
@@ -267,13 +309,24 @@ export function createXsMembers(deps: {
       });
     },
     onSession(agentKey, sessionId) {
+      noteSession(agentKey, sessionId);
       const m = table.get(agentKey);
       if (m === undefined) return;
       if (m.sessionId !== sessionId)
         table.delete(agentKey); // r1 #4: another session ⇒ void
       else m.activityAt = deps.now();
     },
-    onInvalidate(agentKey) {
+    onInvalidate(agentKey, reason) {
+      // `detached` is how a `/new` (same socket, new session) reaches the hub: the old record goes away BEFORE the
+      // successor's `session` frame, so the departing sid is remembered here (a detach-only edge, `to` filled later).
+      // Any other reason means the socket/agent is gone ⇒ no succession can follow.
+      const m = table.get(agentKey);
+      if (reason === "detached" && m !== undefined) {
+        sweepSuccession();
+        succession.set(agentKey, { from: m.sessionId, at: deps.now() });
+      } else if (reason !== "detached") {
+        succession.delete(agentKey);
+      }
       table.delete(agentKey);
     },
     onActivity(agentKey) {
@@ -324,5 +377,19 @@ export function createXsMembers(deps: {
     },
     size: () => table.size,
     sessionOf: (agentKey) => table.get(agentKey)?.sessionId,
+    predecessorOf(agentKey) {
+      const e = succession.get(agentKey);
+      if (e === undefined) return undefined;
+      if (deps.now() - e.at > XS_SUCCESSION_TTL_MS) {
+        succession.delete(agentKey);
+        return undefined;
+      }
+      const cur = table.get(agentKey)?.sessionId;
+      if (e.to === undefined || cur === undefined || cur !== e.to || e.from === cur) return undefined;
+      return { from: e.from, at: e.at };
+    },
+    clearPredecessor: (agentKey) => {
+      succession.delete(agentKey);
+    },
   };
 }

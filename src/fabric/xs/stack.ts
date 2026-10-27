@@ -61,6 +61,13 @@ export interface StackXsInput {
    *  while the LOCAL alias mode is on (frozen per activate); absent ⇒ `StackXs.aliasDecided` stays absent and
    *  nothing is read from the session file (alias off ⇒ byte-identical stack). */
   aliasDecided?: boolean;
+  /** Alias-force-default AF7 (§5.5): the `/new` predecessor carried the I8 mark. Written for THIS session id as
+   *  `via:"inherit"` right at stack build (so a `/reload` keeps it) unless the new session already has its own mark.
+   *  Only meaningful together with `aliasDecided`; the caller sets it for `reason:"new"` only (fork/resume never). */
+  aliasDecidedInherit?: boolean;
+  /** AF7: a HUMAN alias decision (`set`/`clear`/`take`/`force`, never `inherit`) was just marked on this session — the
+   *  pending `/new` handoff must not undo it. Never throws into the marker. */
+  aliasHumanDecided?: () => void;
 }
 
 export interface StackXs extends XsStackPort {
@@ -117,16 +124,34 @@ function buildAliasDecided(
   ctx: ExtensionContext,
   sessionId: string,
   isDisposed: () => boolean,
+  inherit: boolean,
+  onHuman: (() => void) | undefined,
 ): XsAliasDecidedPort {
   const persist = (data: Parameters<Parameters<typeof createXsAliasDecided>[0]["persist"]>[0]): void => {
     if (isDisposed() || ctx.sessionManager.getSessionId() !== sessionId) return;
     pi.appendEntry(XS_ALIAS_DECIDED_CUSTOM_TYPE, data);
   };
+  const withHook = (port: XsAliasDecidedPort): XsAliasDecidedPort => ({
+    decided: port.decided,
+    markDecided: (via) => {
+      if (via !== "inherit") {
+        try {
+          onHuman?.();
+        } catch {
+          /* the marker itself must never fail */
+        }
+      }
+      port.markDecided(via);
+    },
+  });
   try {
-    return createXsAliasDecided({ sessionId, entries: ctx.sessionManager.getEntries(), persist });
+    const port = withHook(createXsAliasDecided({ sessionId, entries: ctx.sessionManager.getEntries(), persist }));
+    // AF7: the /new predecessor was decided ⇒ so is this session (a session that already has its own mark keeps it).
+    if (inherit && !port.decided()) port.markDecided("inherit");
+    return port;
   } catch {
     const port = createXsAliasDecided({ sessionId, entries: [], persist });
-    return { decided: () => true, markDecided: port.markDecided };
+    return { decided: () => true, markDecided: withHook(port).markDecided };
   }
 }
 
@@ -213,7 +238,17 @@ export function buildStackXs(
       return false;
     }
   };
-  const aliasDecided = input.aliasDecided === true ? buildAliasDecided(pi, ctx, sessionId, () => disposed) : undefined;
+  const aliasDecided =
+    input.aliasDecided === true
+      ? buildAliasDecided(
+          pi,
+          ctx,
+          sessionId,
+          () => disposed,
+          reason === "new" && input.aliasDecidedInherit === true,
+          input.aliasHumanDecided,
+        )
+      : undefined;
   const fence = createSessionFence({ ...(input.ports ? { ports: input.ports } : {}) });
   fence.onEvent({ type: "session_start" });
   const inbox = new XsInbox(config.limits.inboxCap);

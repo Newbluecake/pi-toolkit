@@ -314,8 +314,9 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
    * Alias-force-default (#72, AF2): a requester that declared `xs.alias.v2` may add `intent`:
    * `{alias, intent:"auto"}` ⇒ auto-claim (requires `joined`); `{alias, take:"preview", intent:"force"}` ⇒
    * force preview; `{alias, take:<token>[, intent:"force"]}` ⇒ execute (the token's `mode` decides, a
-   * present `intent:"force"` is ignored). `intent:"handoff"` is not implemented by this hub yet (AF7) and is
-   * answered like any unknown shape: `E_XS_BAD_FRAME`. Every other combination — `intent`/`prevSessionId` from
+   * present `intent:"force"` is ignored); `{alias, intent:"handoff", prevSessionId}` ⇒ `/new` handoff (AF7, I10: the store
+   * only moves the record when this hub itself saw THIS socket go prevSessionId → the requester's sid; every refusal is
+   * `E_XS_ALIAS_TAKE{stale}`, and a success consumes the succession edge). Every other combination — `intent`/`prevSessionId` from
    * a requester without v2, `intent` with `clear`, `prevSessionId` without `handoff`, `intent:"auto"` with
    * `take` — is `E_XS_BAD_FRAME`, before anything reaches the store.
    */
@@ -332,7 +333,7 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     const take = frame.take;
     const v2 = aliasV2Usable(self);
     const intent = frame.intent;
-    // Sub-op: `intent` (v2) refines the legacy field-derived choice. `handoff` has no store yet (AF7) ⇒ malformed.
+    // Sub-op: `intent` (v2) refines the legacy field-derived choice. `handoff` is the AF7 `/new` handoff.
     const legacySub: "get" | "set" | "clear" | "preview" | "take" =
       take !== undefined
         ? take === XS_ALIAS_TAKE_PREVIEW
@@ -356,7 +357,8 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       (!v2 ||
         frame.clear !== undefined ||
         (frame.prevSessionId !== undefined && intent !== "handoff") ||
-        intent === "handoff" || // AF7
+        (intent === "handoff" &&
+          (frame.alias === undefined || frame.prevSessionId === undefined || take !== undefined)) ||
         (intent === "auto" && (frame.alias === undefined || take !== undefined || !self.joined)) ||
         (intent === "force" && (frame.alias === undefined || take === undefined)));
     const malformed =
@@ -409,12 +411,15 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
         ? store.set(requester, frame.alias!, cwdLabel)
         : sub === "auto"
           ? store.autoClaim(requester, frame.alias!, cwdLabel)
-          : sub === "clear"
-            ? store.clear(requester)
-            : store.take(requester, frame.alias!, take!, cwdLabel);
+          : sub === "handoff"
+            ? store.handoff(requester, frame.alias!, frame.prevSessionId!, cwdLabel)
+            : sub === "clear"
+              ? store.clear(requester)
+              : store.take(requester, frame.alias!, take!, cwdLabel);
     pending
       .then((out) => {
         if (!out.ok) return failure(out.failure);
+        if (sub === "handoff") members.clearPredecessor(agentKey); // the edge is single-use
         res({ ok: true, alias: out.res });
         okLine();
       })
@@ -991,6 +996,12 @@ export function createXsAliasBinding(deps: {
         if (x !== undefined && x.connected && x.phase !== "stale" && x.sessionId === sid) return true;
       }
       return false;
+    },
+    // I10 (AF7): the succession edge the member table recorded for THIS requester's socket — never the frame's word.
+    isSuccessor: (r, prev) => {
+      if (members === undefined || r.agentKey === undefined) return false;
+      const e = members.predecessorOf(r.agentKey);
+      return e !== undefined && e.from === prev && members.sessionOf(r.agentKey) === r.sessionId;
     },
     allMembersV2: (sid) => members?.effectiveAll().every((m) => m.sessionId !== sid || m.aliasV2Capable) ?? false,
     // I9: after a force committed, nudge every v2 effective member of the holder session. Best effort — a failed

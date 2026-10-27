@@ -213,6 +213,9 @@ export interface XsAliasStoreDeps {
   /** Alias-force-default §4: EVERY effective member of the (xs-online) sid declares `xs.alias.v2`. Absent ⇒
    *  false, i.e. force is refused `unnotifiable` for any online holder. */
   allMembersV2?(sessionId: string): boolean;
+  /** Alias-force-default I10 (AF7): the HUB's own evidence that `requester`'s socket moved from `prevSessionId` to
+   *  `requester.sessionId` (members' succession edge, ≤120 s). Absent ⇒ no handoff ever succeeds. Read-only. */
+  isSuccessor?(requester: XsAliasRequester, prevSessionId: string): boolean;
   /** Alias-force-default I9: a force committed (also a wedged rename that settled OK). Never throws into the
    *  store (exceptions are swallowed); a failed push is never rolled back. */
   onForcedCommit?(event: { holderSessionId: string; requesterSessionId: string; at: number }): void;
@@ -247,6 +250,16 @@ export interface XsAliasStore {
   /** Alias-force-default `intent:"force"` + `take:"preview"`: refuses `unnotifiable` / `not_held`; the
    *  issued token binds `mode:"force"` and the holder's `presenceKey`. */
   forcePreview(requester: XsAliasRequester, rawAlias: string): XsAliasPreviewResult;
+  /** Alias-force-default `intent:"handoff"` (I10, AF7): moves `rawAlias` in place from `prevSessionId` to the requester
+   *  iff the hub saw this very socket go prev → requester, prev is offline (neither xs-online nor linked), the record is
+   *  `held(prev)` and the requester holds nothing. Keeps `origin`, writes no tombstone, leaves no cooling. EVERY refusal
+   *  is `E_XS_ALIAS_TAKE{stale}` (the agent falls back to the auto path); queue/IO trouble stays BUSY/UNKNOWN. */
+  handoff(
+    requester: XsAliasRequester,
+    rawAlias: string,
+    prevSessionId: string,
+    cwdLabel: string,
+  ): Promise<XsAliasWriteResult>;
   /** Any outcome consumes the token (§3.5). The token's `mode` (not the caller) decides take vs force. */
   take(requester: XsAliasRequester, rawAlias: string, token: string, cwdLabel: string): Promise<XsAliasWriteResult>;
   /** Presence hint from the members observer (onMember / onSession / onInvalidate): re-evaluates
@@ -1147,6 +1160,68 @@ export function createXsAliasStore(deps: XsAliasStoreDeps): XsAliasStore {
     };
   }
 
+  /** I10 conditions that must hold at plan time AND again right before rename. `undefined` ⇒ the handoff may proceed. */
+  function handoffStale(
+    c: XsAliasRecord | undefined,
+    requester: XsAliasRequester,
+    prev: string,
+    rev?: number,
+  ): XsAliasWriteFailure | undefined {
+    const sid = requester.sessionId;
+    if (prev === sid || c === undefined || c.state !== "held" || c.sessionId !== prev) return TAKE_STALE;
+    if (rev !== undefined && c.rev !== rev) return TAKE_STALE;
+    // evidence 1: the hub itself saw this socket move prev → sid (members' succession edge); nothing the frame says
+    if (deps.isSuccessor?.(requester, prev) !== true) return TAKE_STALE;
+    // evidence 2: nobody is using prev any more — not another xs member, not a merely linked connection
+    if (presenceOf(prev).kind !== "offline") return TAKE_STALE;
+    // I10: the successor holds nothing yet (a human/auto grant already made on the new session always wins)
+    if (heldIndex.has(sid)) return TAKE_STALE;
+    return undefined;
+  }
+
+  function planHandoff(
+    requester: XsAliasRequester,
+    alias: string,
+    skeleton: string,
+    prev: string,
+    label: string,
+    t: number,
+  ): Plan {
+    const sid = requester.sessionId;
+    const next = cloneTable(table);
+    prune(next, t);
+    const R = next.records.get(alias);
+    const stale = handoffStale(R, requester, prev);
+    if (stale !== undefined) return { kind: "fail", failure: stale };
+    const held = R as XsAliasRecord;
+    stepG(next, sid, alias, skeleton, t);
+    // in place: same alias/skeleton, `origin` KEPT (explicit fields, never a blind spread of `held` + new owner), no
+    // tombstone for prev and no cooling — the name never becomes free in between
+    next.records.set(alias, {
+      alias,
+      skeleton: held.skeleton,
+      sessionId: sid,
+      state: "held",
+      rev: ++next.seq,
+      cwdLabel: label,
+      ...(held.origin === "auto" ? { origin: "auto" as const } : {}),
+    });
+    next.tombs.delete(prev);
+    next.tombs.delete(sid);
+    const rev = held.rev;
+    return {
+      kind: "write",
+      next,
+      res: {
+        alias,
+        state: "held",
+        ...(requester.v2 === true && held.origin === "auto" ? { origin: "auto" as const } : {}),
+      },
+      grantee: sid,
+      recheck: () => handoffStale(table.records.get(alias), requester, prev, rev),
+    };
+  }
+
   function sweepTokens(t: number): void {
     for (const [k, v] of tokens) if (v.expiresAt <= t) tokens.delete(k);
   }
@@ -1370,6 +1445,13 @@ export function createXsAliasStore(deps: XsAliasStoreDeps): XsAliasStore {
       if (pre?.kind === "fail") return Promise.resolve(fail(pre.failure));
       if (pre?.kind === "noop") return Promise.resolve({ ok: true, res: pre.res });
       return enqueue((t) => planAuto(requester.sessionId, n.alias, n.skeleton, label, t), requester, false);
+    },
+
+    handoff(requester, rawAlias, prevSessionId, cwdLabel) {
+      const n = normalizeAlias(rawAlias, { stripAt: true });
+      if (!n.ok) return Promise.resolve(fail(TAKE_STALE)); // every handoff refusal looks the same (§3.2)
+      const label = sanitizeAliasCwdLabel(cwdLabel);
+      return enqueue((t) => planHandoff(requester, n.alias, n.skeleton, prevSessionId, label, t), requester, true);
     },
 
     take(requester, rawAlias, token, cwdLabel) {

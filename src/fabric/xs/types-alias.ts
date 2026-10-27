@@ -166,6 +166,9 @@ export interface XsAliasBridgePortV2 extends XsAliasBridgePort {
 export interface XsAliasCachePort {
   /** Local cached alias for the CURRENT sessionId (display only). */
   current(): XsAliasCacheEntry | undefined;
+  /** AF7: the cached held alias of a SPECIFIC sessionId (display cache, never persisted) — the `/new` stash reads the
+   *  outgoing session after the fence hook already detached the stack, when `current()` can no longer see it. */
+  heldFor?(sessionId: string): string | undefined;
   /** Reconcile with the hub (bounded get). Never throws; failure waits for the next trigger. */
   reconcile(): Promise<void>;
   /** True iff alias mode is on: local `alias.enabled` ∧ hub advertised `xs.alias.v1` (symmetric with hub `aliasUsable`). */
