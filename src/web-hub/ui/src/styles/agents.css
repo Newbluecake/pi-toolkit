@@ -1083,6 +1083,10 @@
   white-space: nowrap;
   flex-shrink: 1;
   vertical-align: middle;
+  /* inline-block loses the base chip's align-items:center and .chip sets line-height:1, which
+   * pinned the text to the top of the 20px box (field report 2026-10-27). One line box filling
+   * the border-box content height (min-height − 2×padding − 2×border) centres it again. */
+  line-height: calc(20px * var(--fs-scale, 1) - 4px);
 }
 
 .chip-xs-unread {
