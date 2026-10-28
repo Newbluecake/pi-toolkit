@@ -363,6 +363,7 @@ need the whole branch for `hasMore`/paging). Tests: `tests/web-hub/hub/history.t
 Diagnosing a stalled hub: `/proc/<pid>/task/<pid>/stat` utime sampling shows busy runs on the main
 thread; a short `SIGUSR1` inspector CPU profile (close it again with
 `process.getBuiltinModule('node:inspector').close()`) names the function.
+
 ## Peer-bump conformance premises (cmd-history)
 
 **Also run `tests/conformance/cmd-history.test.ts`** (web-hub-cmd-history I1):
