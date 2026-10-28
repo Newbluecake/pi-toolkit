@@ -48,6 +48,14 @@ origin slash commands with pi-toolkit's own commands captured and echoed back to
 never captured, `captured:false`, terminal-only), version-supersede/`/webhub stop`/`start`/`token rotate`
 admin flows, and a `hub-state-banner` covering pending/blocked/restarting/stopping.
 
+**#88 subscribe 定向补发 ctl/status**（36ca30e3 的 hub 侧后续）：`ctl`/`status` 槽是纯广播（无 per-agent 快照、
+不进订阅回放），断线重连/resync 后队列条会丢推进信息。`hub/http.ts` 的 `runSnapshot` 在 `history` 之后、
+缓冲帧之前，向该订阅者**定向**补发：registry 保留的最近 `status`（复用广播帧形状，重建 UI 侧
+queue/held 镜像与空缓冲清扫）+ 路由层 `ctlCache`（`fleetCache` 同构，随广播同步更新、dropAgent 清除）
+里**仍活跃**的 ctl 条目（`CTL_ACTIVE_STATES`：dispatched/observed/started/queued/consumed/running/held；
+终态不补 —— UI 侧已有自愈）。定向 send 不入 ring、无新 timer/模块态；同 tick 同步读保证补发不会
+旧于已收帧、也不会乱于后续实时帧。
+
 ## Web resume (resume.v1)
 
 **Web resume

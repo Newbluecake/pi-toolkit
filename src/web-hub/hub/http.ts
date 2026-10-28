@@ -29,7 +29,12 @@
  * for that (client, agent) are buffered until `history.snapshot()` settles,
  * then `history` is pushed first, followed by buffered frames (ev with
  * `seq < fromSeq` dropped — already merged into the snapshot), and only then
- * does the client join the live subscriber set.
+ * does the client join the live subscriber set. #88: right after `history`
+ * (and before the buffered frames) the hub DIRECTED-RESENDS this agent's last
+ * known `status` and the still-ACTIVE `ctl` entries to this one subscriber —
+ * ctl/status are unscoped broadcasts with no per-agent snapshot in the replay
+ * path, so a resyncing/reconnecting tab would otherwise lose the queue-bar
+ * state (status.queue/held mirrors + per-cmdId ledger advancement).
  *
  * ---------------------------------------------------------------------------
  * LAN listener (plan §2.5, §6, §7 — S1-W2 `LC:http`). The LAN side lives in
@@ -63,7 +68,7 @@ import {
   type HistoryPayload,
 } from "../protocol/http-contract.js";
 import { canonicalHostKey, canonicalOrigin, classifyHostToken, parseOrigin } from "../protocol/lan.js";
-import type { CmdOp, FleetRowWire } from "../protocol/messages.js";
+import type { CmdOp, CtlItemWire, FleetRowWire } from "../protocol/messages.js";
 import { TIMING } from "../protocol/messages.js";
 import { createAuth, SESSION_COOKIE, LOGIN_WINDOW_MS } from "./auth.js";
 import {
@@ -209,6 +214,32 @@ interface PendingFrame {
 interface PendingSub {
   frames: PendingFrame[];
   overflow: boolean;
+}
+
+/**
+ * #88: `CtlItemWire.state` values that still need a subscriber's attention on a directed
+ * re-send — the pre-consumption lifecycle plus `running`/`held`. Terminal states
+ * (`ok`/`failed`/`late_ok`/`late_failed`/`dropped`/`unconfirmed`/`recalled`/`returned`) are
+ * deliberately NOT re-sent: the UI already self-heals those (36ca30e3's empty-buffer sweep +
+ * whole-slot `status.held` replace + the HTTP receipt/cmd_late settling the optimistic item),
+ * and the re-sent `status` frame carries the authoritative current projection anyway. Immutable
+ * frozen set at module scope (I4-safe); the per-agent cache below lives in the route-set closure.
+ */
+const CTL_ACTIVE_STATES: ReadonlySet<string> = new Set([
+  "dispatched",
+  "observed",
+  "started",
+  "queued",
+  "consumed",
+  "running",
+  "held",
+]);
+
+/** #88: the last `ctl` broadcast per agent, filtered to ACTIVE items (see `CTL_ACTIVE_STATES`). */
+interface CtlReplay {
+  epoch: string;
+  sessionId: string;
+  items: CtlItemWire[];
 }
 
 function isApiError(v: unknown): v is ApiError {
@@ -572,6 +603,12 @@ function createRouteSet(
 ): RouteSet {
   const pending = new Map<string, Map<string, PendingSub>>();
   const fleetCache = new Map<string, FleetRowWire[]>();
+  // #88: last ACTIVE-items `ctl` per agent (route-set closure state — one per listener, I4/I5
+  // clean: no module scope, no timers). Fed from the SAME bus event the broadcast fans out
+  // from (so the cache is never staler than what subscribers already received) and cleared in
+  // dropAgent alongside fleetCache. Bounded: the agent's own projection caps at 32 items; the
+  // slice is a defensive ceiling for a misbehaving agent (the wire schema has no maxItems).
+  const ctlCache = new Map<string, CtlReplay>();
   // F4 (fleet-drawer §5.4): one run-route instance per listener; the sink it exposes is
   // combined with the other listener's by `createHttpFrontend` (the service's `setSink` is a
   // single slot) — construction here, installation there.
@@ -600,6 +637,7 @@ function createRouteSet(
 
   function dropAgent(agentKey: string): void {
     fleetCache.delete(agentKey);
+    ctlCache.delete(agentKey);
     for (const clientId of [...pending.keys()]) deletePending(clientId, agentKey);
   }
 
@@ -683,6 +721,15 @@ function createRouteSet(
           break;
         case "ctl":
           sse.publish("ctl", { agentKey: e.agentKey, epoch: e.epoch, sessionId: e.sessionId, items: e.items });
+          // #88: retain the still-ACTIVE subset for the subscribe-time directed re-send below.
+          // Updated in the SAME synchronous dispatch as the broadcast above, so a re-send read
+          // after this tick can never be staler than a frame a client already received. An empty
+          // active set deletes the entry (nothing left to advance — no re-send at all).
+          {
+            const active = e.items.filter((it) => CTL_ACTIVE_STATES.has(it.state)).slice(0, 64);
+            if (active.length === 0) ctlCache.delete(e.agentKey);
+            else ctlCache.set(e.agentKey, { epoch: e.epoch, sessionId: e.sessionId, items: active });
+          }
           break;
         case "commands":
           sse.publish("commands", { agentKey: e.agentKey, epoch: e.epoch, items: e.items });
@@ -750,6 +797,21 @@ function createRouteSet(
       return;
     }
     if (!client.send("history", payload)) return;
+    // #88 directed re-send — BEFORE the buffered frames, so a newer buffered/live frame always
+    // lands after (and can overwrite) this snapshot. Both reads are synchronous in this tick:
+    // every ctl/status mutation whose broadcast this client already received happened before
+    // the read (registry.onFrame and onHubEvent above are synchronous), and anything published
+    // later is written to the socket after these sends — no double-advance, no stale overwrite.
+    // Frames reuse the live broadcast shapes exactly (`status{agentKey,status}` /
+    // `ctl{agentKey,epoch,sessionId,items}`); directed sends never enter the replay ring. The
+    // registry view IS the status retention (cleared on `down()`, which also 404s a re-subscribe);
+    // ctl comes from the active-only cache. An agent that never published either slot is skipped.
+    {
+      const lastStatus = routeDeps.registry.get(agentKey)?.status;
+      if (lastStatus !== undefined && !client.send("status", { agentKey, status: lastStatus })) return;
+      const ctl = ctlCache.get(agentKey);
+      if (ctl !== undefined && !client.send("ctl", { agentKey, ...ctl })) return;
+    }
     for (const f of p.frames) {
       if (f.event === "ev" && f.seq !== undefined && f.seq < payload.fromSeq) continue;
       if (!client.send(f.event, f.data)) return;
