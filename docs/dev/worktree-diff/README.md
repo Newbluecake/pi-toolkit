@@ -60,7 +60,7 @@ Results are single-flight cached (10 min TTL, `store` only after a passing re-ch
 with `merged=1`**: admission 8 s + git 14 s + M phase 14 s (head 6 / loop ≥4 / tail 4) + close 1 s =
 37 s, +10 s transfer = 47 s ≤ 48 s client deadline (`WTGRAPH_MERGED_CLIENT_TIMEOUT_MS`); non-merged
 requests keep 23 s / 35 s. Response ≤512 KiB (merged reserve 32 KiB; drop `e`, then `skipped:"bytes"`).
-**R11-style upgrade gate**: when upgrading the git baseline, or changing ANY Gr/Gl/Gm/Cc argv —
+**R11-style upgrade gate**: when upgrading the git baseline, or changing ANY Gr/Gl/Gm/Gf/Cc argv —
 (1) re-check `git help config` for new rev-list / patch-id / diff-machinery keys that execute
 programs, trigger transport, write files or change patch-id results (cf. `core.bigFileThreshold`);
 (2) update the matrix with paired unhardened/hardened tests; (3) re-run E4's 36-cell driver matrix

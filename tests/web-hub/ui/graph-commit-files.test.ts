@@ -156,12 +156,13 @@ describe("gitGraphScope — files flag", () => {
 });
 
 describe("WorktreeGraph — commit rows inert without the cap", () => {
-  it("no files flag ⇒ no tabindex/aria-expanded/data-toggle, click does nothing, no request", async () => {
+  it("no files flag ⇒ no tabindex/aria-expanded/aria-label/data-toggle, click does nothing, no request", async () => {
     const f = fake();
     const w = await mountGraph(f, { scope: { agentKey: "a-1", sessionId: "s-1", merged: false } });
     const r = dataRows(w)[1]!;
     expect(r.attributes("tabindex")).toBeUndefined();
     expect(r.attributes("aria-expanded")).toBeUndefined();
+    expect(r.attributes("aria-label")).toBeUndefined();
     expect(r.attributes("data-toggle")).toBeUndefined();
     await r.trigger("click");
     await r.trigger("keydown", { key: "Enter" });
@@ -185,6 +186,8 @@ describe("WorktreeGraph — expand / collapse / switch", () => {
     const w = await mountGraph(f);
     const [r0, r1] = dataRows(w);
     expect(r1!.attributes("tabindex")).toBe("0");
+    // the disclosure name rides the row (role stays row — see rowAttrs): rowToggle {hash}
+    expect(r1!.attributes("aria-label")).toBe(`Show files changed in commit ${oid("c2")}`);
     expect(r1!.attributes("aria-expanded")).toBe("false");
 
     await r1!.trigger("click");

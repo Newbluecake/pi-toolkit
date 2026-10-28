@@ -79,7 +79,7 @@ const graph = {
   /** Only when eq targets exist but the fold is blocked by incomplete information (§7.2). */
   footFoldOff: "fold off",
   // ---- commit files (wtgraph.files.v1): click a row to list the files it changed ----
-  /** aria/title of a clickable commit row. */
+  /** Accessible name (aria-label) of a clickable commit row; `{hash}` = the full commit oid. */
   rowToggle: "Show files changed in commit {hash}",
   filesLoading: "Loading changed files…",
   filesEmpty: "No file changes.",

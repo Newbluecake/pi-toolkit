@@ -28,7 +28,9 @@
 
   - wtgraph.files.v1 (only when the hub declared the cap — otherwise rows stay inert and the
     DOM is byte-identical): a commit row is a disclosure control (click / Enter / Space,
-    `tabindex=0`, `aria-expanded`); the open row gets ONE detail row right below it listing the
+    `tabindex=0`, `aria-expanded`, `aria-label` from `graph.rowToggle` — the row KEEPS its
+    implicit `role="row"`; see `rowAttrs` for why not `role="button"`); the open row gets ONE
+    detail row right below it listing the
     commit's changed files (status badge, `+add −del`, path — left-ellipsized, full path on
     `title`), with loading / error+retry / empty states. The detail row carries NO `data-row`,
     so the lane measurement skips it: the SVG's row centers stay the commit rows' own centers
@@ -166,6 +168,13 @@ function rowAttrs(h: string): Record<string, string> {
   const open = files.open.value === h;
   return {
     tabindex: "0",
+    // a11y: the row keeps its implicit role="row" — ARIA-in-HTML does not allow role="button"
+    // on <tr>, and overriding the role would strip the row out of the table's row/cell
+    // structure (screen readers would stop announcing it as a table row). The disclosure
+    // instead rides the named-focusable-row pattern: tabindex + aria-label (the per-row name,
+    // `graph.rowToggle`) + aria-expanded — a state role=row supports (cf. treegrid rows). In
+    // browse mode the row's own cells still read; the label names the toggle when focused.
+    "aria-label": t("graph.rowToggle", { hash: h }),
     "aria-expanded": open ? "true" : "false",
     ...(open ? { "aria-controls": `gg-files-${h}` } : {}),
     "data-toggle": "",

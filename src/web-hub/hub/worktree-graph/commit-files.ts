@@ -205,6 +205,8 @@ const NUMSTAT_RE = /^(\d+|-)\t(\d+|-)\t([\s\S]*)$/;
 function statusOf(letter: string): WtGraphFileStatus {
   if (letter === "A" || letter === "D" || letter === "M" || letter === "R" || letter === "T") return letter;
   if (letter === "C") return "A"; // never produced without -C; a copy's post-image is new
+  // Unknown/unmodelled letters (a future git status class) deliberately fail-safe to "M": a
+  // wrong-but-renderable badge (modified) beats dropping the entry — counts and total stay whole.
   return "M";
 }
 
