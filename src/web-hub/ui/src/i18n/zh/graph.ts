@@ -67,6 +67,31 @@ const graph = {
   footMergedHidden: "{n} merged hidden",
   footMergedUnknown: "merged ? {m}",
   footFoldOff: "fold off",
+  // ---- 提交文件（wtgraph.files.v1）：点击提交行展开它修改的文件 ----
+  rowToggle: "查看提交 {hash} 修改的文件",
+  filesLoading: "正在加载修改的文件…",
+  filesEmpty: "无文件变更。",
+  filesErrorTitle: "无法加载修改的文件",
+  filesRetry: "重试",
+  filesRefreshGraph: "刷新提交图",
+  filesErrStale: "该提交已不在 hub 当前提供的提交图中，请刷新提交图后重试。",
+  filesErrBusy: "hub 正忙，请稍后重试。",
+  filesErrFilter: "该仓库配置了 hub 无法安全中和的 filter/diff 驱动。",
+  filesErrMissing: "本地缺少该提交或其对象。",
+  filesErrGeneric: "请求失败（{code}）。",
+  // 紧凑标记保持英文 token
+  filesCount: "{n} files",
+  filesMergeNote: "合并提交：相对第一父提交的变更",
+  filesRootNote: "根提交：所有文件均为新增",
+  filesShallowNote: "浅克隆：边界提交会显示为全部新增",
+  filesTruncated: "显示 {total} 个文件中的 {shown} 个",
+  filesTruncatedOutput: "列表超出大小上限被截断，部分文件未显示",
+  filesBinary: "bin",
+  statusM: "修改",
+  statusA: "新增",
+  statusD: "删除",
+  statusR: "重命名自 {orig}",
+  statusT: "类型变更",
 } satisfies Messages<typeof en>;
 
 export default graph;

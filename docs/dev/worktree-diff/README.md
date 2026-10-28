@@ -78,3 +78,52 @@ with a "merged" / "merged k/t" badge (hidden at ≤480px); the toggle is not ren
 is blocked (`fold off` footnote). Plan: `docs/dev/worktree-graph/merged-plan.md`.
 Design: `docs/dev/worktree-graph/plan.md`; device checklist:
 `docs/dev/worktree-graph/acceptance.md`.
+
+## Worktree graph · commit files（`wtgraph.files.v1`）
+
+**What**: clicking a commit row in the graph (or Enter/Space on the focused row) expands ONE
+detail row listing that commit's changed files — status badge (M/A/D/R/T), `+add −del` (or `bin`),
+left-ellipsized path (full path on `title`); loading spinner / error + retry / 「无文件变更」.
+Cap `wtgraph.files.v1` (same preview + `/proc` gate as `wtgraph.v1`, LAN via `preview.lan.v1`);
+without it rows stay inert and the graph DOM is byte-identical. Endpoint
+`GET /api/worktree-graph/files?agentKey&sessionId&wt&h` (`X-PWH: 1`), a separate path + optional
+`WorktreeGraphRoutes.handleFiles` (append-only; no PROTO bump). Code: `hub/worktree-graph/commit-files.ts`,
+UI `composables/useCommitFiles.ts` + `components/graph/WorktreeGraph.vue`.
+
+**Asset gate (A1)**: `h` must be a commit THIS routes instance served in a graph window for the
+same pinned repository (common-dir dev:ino) within 30 min (`ServedCommitWindows`, ≤4000 oids × 64
+repos) — checked after membership and BEFORE any git-phase spawn, else 409
+`E_STALE_CTX{reason:"commit"}` (UI: 「刷新提交图」 re-pulls the graph, then the files fetch re-runs).
+Denylist hits are hidden from entries AND `total` (D14), applied after the cache, per request.
+
+**Gf (the only new git command)**: `log --no-walk --max-count=1 -z --format= --raw --numstat -M
+-O/dev/null --diff-merges=first-parent --ignore-submodules=none --no-textconv --no-ext-diff <h> --`
+with Gm's neutralization (L1 empty-tree `--attr-source` + `core.attributesFile=/dev/null`, L2 every
+driver from Cc ∪ `info/attributes` blanked, `diff.external=`), `--no-lazy-fetch`,
+`--no-replace-objects`, pinned `core.bigFileThreshold=512m` / `diff.renameLimit=1000` /
+`log.showRoot=true`. **Why not `diff-tree`**: git 2.53's `diff-tree` reads the index and, via
+`reuse_worktree_file`, opens work-tree files whose stat matches the index (strace-verified);
+`log` loads no index, and `--ignore-submodules=none` avoids the `.gitmodules`/index lookup a
+gitlink diff otherwise triggers — so Gf keeps the graph's "never reads the work tree or the
+index" rule (single execve, no helper processes). The argv lives in `wtGraphFilesArgs`
+(hub-local because this feature was scoped to `src/web-hub/**`; source-scan pins argv-only-via
+that builder) — if it ever moves to `src/git/graph.ts`, follow the R11 upgrade gate above.
+
+**Merge semantics (fixed)**: first parent — a merge lists only what it brought onto parent 1; a
+root commit (and a shallow boundary commit, flagged `shallow:true`) diffs against the empty tree.
+
+**Budgets / caps**: admission 8 s + git 10 s (Cc 2 s, info read, Gf 5 s, recheck) + close 1 s,
+client deadline 30 s; Gf stdout ≤512 KiB (cut ⇒ `limits.output`, counts may be missing, list a
+lower bound), ≤1000 entries (`limits.files`), body ≤256 KiB (tail dropped ⇒ `limits.bytes`).
+Own rate bucket (20 tok / 250 ms) and in-flight caps (per principal 2, global 4). Post-Gf
+`info/attributes` recheck: changed ⇒ 503 `E_BUSY{attr-changed}`, never stored. Cache: PARSED
+entries (never raw stdout) per `(repo, oid, attribute signature)`, TTL 10 min, LRU 256, 4 MiB
+total / 512 KiB per item. Audit: same `wtgraph` channel, `phase:"files"`, new count keys
+`files` / `cached` (never paths or oids).
+
+**UI lane alignment**: the detail row carries no `data-row`, so `measure()` keeps returning the
+commit rows' own centers (SVG lines stretch across the inserted row); the lane cell's rowspan
+grows by one; the pitch (lane gap, dot radius) comes from the first adjacent pair that does not
+straddle the open row; the measurement also re-runs on open/switch (the tbody size may not change
+when switching between equally tall detail rows). Pinned at 100/200/300 % in
+`tests/web-hub/ui/graph-commit-files.test.ts`.

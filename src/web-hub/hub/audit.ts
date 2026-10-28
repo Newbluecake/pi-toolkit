@@ -534,7 +534,8 @@ export function auditWorktreeDiff(log: { info(msg: string, data?: object): void 
  * the route's finally; 429 is throttled to one line per `wtgraph:${principal}` per 60 s.
  */
 export interface WtGraphAuditRecord {
-  phase: "graph";
+  /** "files" = `GET /api/worktree-graph/files` (wtgraph.files.v1), same channel + whitelist. */
+  phase: "graph" | "files";
   listener?: "loopback" | "lan";
   ip?: string;
   user?: string;
@@ -569,6 +570,11 @@ export interface WtGraphAuditRecord {
   mergedSkip?: number;
   /** M phase wall time. */
   mergedMs?: number;
+  // commit-files (append-only COUNTS/flags; never a path / oid):
+  /** entries sent on a `phase:"files"` answer. */
+  files?: number;
+  /** the per-commit file list came from the hub cache. */
+  cached?: boolean;
 }
 
 /** Runtime whitelist for `auditWorktreeGraph` — anything not listed here is dropped. */
@@ -597,6 +603,8 @@ export const WTGRAPH_AUDIT_KEYS = [
   "mergedUnk",
   "mergedSkip",
   "mergedMs",
+  "files",
+  "cached",
 ] as const;
 
 /** `log.info("wtgraph", { audit: "wtgraph", ...pick(record, WTGRAPH_AUDIT_KEYS) })` (§2.6). */

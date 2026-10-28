@@ -1121,6 +1121,9 @@ export interface WorktreeGraphRoutes {
   readonly mode: "on" | "loopback";
   /** `GET /api/worktree-graph` — the one endpoint (§3; `X-PWH: 1` required). */
   handle(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
+  /** `GET /api/worktree-graph/files` (`wtgraph.files.v1`) — one served commit's changed files.
+   * Optional so test doubles keep compiling; absent ⇒ the path answers like any unknown path. */
+  handleFiles?(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
   /** Idempotent; aborts every active request and single-flight Gl execution ("hub-close"), ≤1 s. */
   dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void>;
 }

@@ -362,3 +362,9 @@ export const LAN_SESSIONS_HUB_CAP = "lan.sessions.v1";
  * surfaces). Without it clients keep the legacy query and 35 s deadline. No frames or
  * SSE events are added, so PROTO and all pre-existing cap arrays stay unchanged. */
 export const WTGRAPH_MERGED_HUB_CAP = "wtgraph.merged.v1";
+
+/** worktree-graph commit-files: optional `GET /api/worktree-graph/files` (one commit's changed
+ * files against its first parent). Declared under the same preview + /proc gate as
+ * WTGRAPH_HUB_CAP; LAN width rides `preview.lan.v1`. Without it the UI keeps graph rows inert.
+ * A new path + cap only — no frames, no SSE events, no PROTO bump. */
+export const WTGRAPH_FILES_HUB_CAP = "wtgraph.files.v1";

@@ -103,7 +103,7 @@ import { errCode, isPvLogUrl, redactLogUrl } from "./preview/pv-path.js";
 import { WTDIFF_FILES_PATH, WTDIFF_FILE_PATH } from "../protocol/worktree-diff.js";
 import { SCHED_API_PATH, SCHED_SESSION_ID_RE, type SchedulesPayloadWire } from "../protocol/schedule.js";
 import type { ScheduleCoordinator } from "./schedule/service.js";
-import { WTGRAPH_PATH } from "../protocol/worktree-graph.js";
+import { WTGRAPH_FILES_PATH, WTGRAPH_PATH } from "../protocol/worktree-graph.js";
 import { createHubLoad, loadTopErrorCode, LOAD_TOP_DEADLINE_MS, type HubLoadService } from "./load.js";
 import type {
   AgentView,
@@ -1830,8 +1830,18 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     // wtdiff branch above; absent ⇒ falls through to the original paths (unauth GET ⇒ 401,
     // authed ⇒ 404, byte-identical). The loopback authorize segment is the same sync cookie
     // lookup every other loopback branch uses.
-    if (worktreeGraphRoutes !== undefined && method === "GET" && path === WTGRAPH_PATH) {
-      return worktreeGraphRoutes.handle(req, res, query, {
+    // wtgraph.files.v1: the commit-files GET rides the SAME branch, io and authorize segment;
+    // a routes object without `handleFiles` leaves that path on the original fall-through.
+    if (
+      worktreeGraphRoutes !== undefined &&
+      method === "GET" &&
+      (path === WTGRAPH_PATH || (path === WTGRAPH_FILES_PATH && worktreeGraphRoutes.handleFiles !== undefined))
+    ) {
+      const graphHandler =
+        path === WTGRAPH_FILES_PATH && worktreeGraphRoutes.handleFiles !== undefined
+          ? worktreeGraphRoutes.handleFiles.bind(worktreeGraphRoutes)
+          : worktreeGraphRoutes.handle.bind(worktreeGraphRoutes);
+      return graphHandler(req, res, query, {
         listener: "loopback",
         ip: normalizePeerIp(req.socket.remoteAddress),
         expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),

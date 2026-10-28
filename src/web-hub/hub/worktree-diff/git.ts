@@ -127,7 +127,7 @@ export class PinSet {
  * never reach `warnGitFailed`/`auditWorktreeDiff` (graph has its own audit channel), but they
  * share the pinned executor and its closed command-id union. merged-plan §3.7 appends `"Gm"`
  * (the cherry-mark run; Cc is graph's driver scan too). */
-export type WtGitCmd = "C1a" | "C1" | "C0" | "Cc" | "C2" | "Ca" | "C3" | "C4" | "Gr" | "Gl" | "Gm";
+export type WtGitCmd = "C1a" | "C1" | "C0" | "Cc" | "C2" | "Ca" | "C3" | "C4" | "Gr" | "Gl" | "Gm" | "Gf";
 
 export type PinnedGitOutcome =
   | { ok: true; code: number; stdout: string; capped: boolean; stderrBytes: number; stderr?: string }

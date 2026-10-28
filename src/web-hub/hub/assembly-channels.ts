@@ -25,6 +25,7 @@ import {
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
   WTGRAPH_MERGED_HUB_CAP,
+  WTGRAPH_FILES_HUB_CAP,
 } from "../protocol/version.js";
 import {
   XS_ALIAS_HUB_CAP,
@@ -146,6 +147,9 @@ export function assembleHubCaps(ctx: HubAssembly): readonly string[] {
           // merged-plan §6: `wtgraph.merged.v1` — the SAME condition as `wtgraph.v1` (preview + /proc);
           // LAN width rides `PREVIEW_LAN_HUB_CAP` below (mode `loopback` ⇒ LAN 404, no new setting).
           ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP] : []),
+          // wtgraph.files.v1: the per-commit file list — SAME gate as wtgraph.v1 (the routes are
+          // built exactly then and always carry `handleFiles`); LAN width rides preview.lan.v1.
+          ...(previewProcFdAvailable() ? [WTGRAPH_FILES_HUB_CAP] : []),
           // web-hub-html-preview plan v2 §4 (P1b): `preview.html.v1` rides the SAME
           // `config.preview` gate AND the /proc probe (`htmlEnabled` — dir-fd anchoring is
           // /proc-bound, fail-closed); both cap surfaces share this one array. LAN width rides

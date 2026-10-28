@@ -89,6 +89,10 @@ import {
   WTGRAPH_CLIENT_TIMEOUT_MS,
   WTGRAPH_MERGED_CLIENT_TIMEOUT_MS,
   WTGRAPH_MERGED_QUERY,
+  parseWtGraphCommitFiles,
+  WTGRAPH_FILES_BODY_MAX_BYTES,
+  WTGRAPH_FILES_CLIENT_TIMEOUT_MS,
+  WTGRAPH_FILES_QUERY,
 } from "@protocol/worktree-graph.ts";
 import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 import { parseProbeResults } from "./previewProbe.js";
@@ -1806,7 +1810,32 @@ export function createPasswordClient(deps) {
     return await wtgraphGet(url, signal, merged);
   }
 
-  const worktreeGraph = { graph: wtgraph };
+  /**
+   * `GET /api/worktree-graph/files?agentKey&sessionId&wt&h` (wtgraph.files.v1) — one served
+   * commit's changed files (first-parent diff). Same capped-JSON GET flow as `wtgraphGet`, with
+   * `WTGRAPH_FILES_BODY_MAX_BYTES` / `WTGRAPH_FILES_CLIENT_TIMEOUT_MS` and the strict
+   * `parseWtGraphCommitFiles` gate; 409 `E_STALE_CTX{reason:"commit"}` (the oid is not in a graph
+   * window the hub served) rides verbatim — the UI re-pulls the graph, this layer never retries.
+   * @param {{ agentKey: string, sessionId: string, wt: string, h: string }} req
+   * @param {{ signal?: any }} [opts]
+   * @returns {Promise<any>}
+   */
+  async function wtgraphFiles(req, opts) {
+    const signal = opts !== undefined ? opts.signal : undefined;
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    const url = `${API.wtgraphFiles}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&wt=${encodeURIComponent(req.wt)}&${WTGRAPH_FILES_QUERY}=${encodeURIComponent(req.h)}`;
+    return await wtdiffGet(
+      url,
+      WTGRAPH_FILES_BODY_MAX_BYTES,
+      parseWtGraphCommitFiles,
+      signal,
+      WTGRAPH_FILES_CLIENT_TIMEOUT_MS,
+    );
+  }
+
+  const worktreeGraph = { graph: wtgraph, commitFiles: wtgraphFiles };
 
   // -------------------------------------------------------------------------
   // sysload plan §7.1/§7.3/§10 (package P4): `GET /api/load/top` — same flow as token.ts's

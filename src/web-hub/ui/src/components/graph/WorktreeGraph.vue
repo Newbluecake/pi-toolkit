@@ -26,6 +26,15 @@
     ≥32px under coarse pointers via `--gg-row-min`); `useClipboard` + a local sr-only
     `role="status"` region announce the result (CopyButton's pattern, tray-local precedent).
 
+  - wtgraph.files.v1 (only when the hub declared the cap — otherwise rows stay inert and the
+    DOM is byte-identical): a commit row is a disclosure control (click / Enter / Space,
+    `tabindex=0`, `aria-expanded`); the open row gets ONE detail row right below it listing the
+    commit's changed files (status badge, `+add −del`, path — left-ellipsized, full path on
+    `title`), with loading / error+retry / empty states. The detail row carries NO `data-row`,
+    so the lane measurement skips it: the SVG's row centers stay the commit rows' own centers
+    (lines simply stretch across the inserted row), the lane cell's rowspan grows by one, and
+    the pitch is taken from a row pair that does not straddle the open row.
+
   No v-html, no <Transition>, no rAF, no createObjectURL; plain-text interpolation only.
 -->
 <script setup lang="ts">
@@ -48,6 +57,8 @@ import type { WorktreeRowWire } from "@protocol/messages.js";
 import { useClipboard } from "../../composables/useClipboard.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { useWorktreeGraph } from "../../composables/useWorktreeGraph.js";
+import { useCommitFiles } from "../../composables/useCommitFiles.js";
+import type { WtGraphFileEntry } from "@protocol/worktree-graph.js";
 import type { WorktreeGraphTransport } from "../../transport/types.js";
 import GraphLanes from "./GraphLanes.vue";
 import { foldMerged, mergedBadgeOf, mergedViewOf, type MergedBadge } from "@logic/gitGraphMerged.js";
@@ -77,7 +88,12 @@ const state = useWorktreeGraph({
   scope: computed(() => props.scope),
   wt: computed(() => props.wt),
 });
-defineExpose({ state, toggle: state.toggle, expanded: state.expanded });
+const files = useCommitFiles({
+  transport: props.transport,
+  scope: computed(() => props.scope),
+  wt: computed(() => props.wt),
+});
+defineExpose({ state, toggle: state.toggle, expanded: state.expanded, files });
 
 // D13's graph twin: every status frame re-samples the rows — an expanded graph re-pulls
 // (debounced in the composable) when `graphSigOf` moves.
@@ -125,6 +141,85 @@ const fold = computed(() => (layout.value === null ? null : foldLayout(layout.va
 
 /** The payload's own `n` caps the rendered rows (the parser pins it to WTGRAPH_N). */
 const commits = computed(() => (payload.value === undefined ? [] : graphCommits.value.slice(0, payload.value.n)));
+
+// ---------------------------------------------------------------------------
+// commit files (wtgraph.files.v1) — one open row, its detail row right below
+// ---------------------------------------------------------------------------
+
+// a new visible window OR a completed graph pull (even one returning identical data — the
+// stale-oid retry path relies on it) re-validates the open row
+watch([commits, () => state.state.value], ([next, st]) => {
+  if (st.phase === "ok" && st.refreshing !== true) files.onCommitsChanged(next.map((c) => c.h));
+});
+
+/** Row index of the open commit among the RENDERED rows (-1 = none open / not visible). */
+const openIdx = computed(() => {
+  const h = files.open.value;
+  return h === null ? -1 : commits.value.findIndex((c) => c.h === h);
+});
+/** The detail row spans every column right of the (rowspanned) lane cell. */
+const filesColspan = computed(() => (props.mobile ? 2 : 4));
+
+/** Disclosure attributes for a commit row — EMPTY when the cap is absent (byte-identical DOM). */
+function rowAttrs(h: string): Record<string, string> {
+  if (!files.enabled.value) return {};
+  const open = files.open.value === h;
+  return {
+    tabindex: "0",
+    "aria-expanded": open ? "true" : "false",
+    ...(open ? { "aria-controls": `gg-files-${h}` } : {}),
+    "data-toggle": "",
+  };
+}
+
+function onRowClick(ev: MouseEvent, h: string): void {
+  if (!files.enabled.value) return;
+  const target = ev.target as Element | null;
+  if (target !== null && typeof target.closest === "function" && target.closest("button, a") !== null) return;
+  // a drag-selection of the subject text is not a click
+  const sel = typeof window !== "undefined" && typeof window.getSelection === "function" ? window.getSelection() : null;
+  if (sel !== null && !sel.isCollapsed && sel.toString() !== "") return;
+  files.toggle(h);
+}
+
+function onRowKey(ev: KeyboardEvent, h: string): void {
+  if (!files.enabled.value || ev.target !== ev.currentTarget) return;
+  if (ev.key === "Enter" || ev.key === " ") {
+    ev.preventDefault();
+    files.toggle(h);
+  }
+}
+
+const fileStateOf = (h: string) => files.states.value.get(h);
+
+function filesErrorText(h: string): string {
+  const err = fileStateOf(h)?.error;
+  if (err === undefined) return "";
+  if (err.code === "E_STALE_CTX") return t("graph.filesErrStale");
+  if (err.code === "E_BUSY" || err.code === "E_RATE") return t("graph.filesErrBusy");
+  if (err.reason === "filter-config") return t("graph.filesErrFilter");
+  if (err.reason === "missing-object") return t("graph.filesErrMissing");
+  return t("graph.filesErrGeneric", { code: err.code });
+}
+
+/** The error button: a stale oid needs a fresh graph (the files fetch re-runs after it). */
+function filesRetry(h: string): void {
+  if (fileStateOf(h)?.error?.code === "E_STALE_CTX") state.refresh();
+  else files.retry(h);
+}
+
+function statusTitle(e: WtGraphFileEntry): string {
+  if (e.status === "R") return t("graph.statusR", { orig: e.orig ?? "" });
+  if (e.status === "A") return t("graph.statusA");
+  if (e.status === "D") return t("graph.statusD");
+  if (e.status === "T") return t("graph.statusT");
+  return t("graph.statusM");
+}
+
+/** The detail row's text starts just right of the lane SVG (lines keep running through the
+ *  row). 2026-10-28 user preview: `svgW + 6` read as one notch too deep — pull it back so the
+ *  text edge sits 2px right of the lane cell, not 6px right of the (already padded) SVG. */
+const filesIndent = computed(() => ({ paddingLeft: `${Math.max(0, svgW.value - 4)}px` }));
 
 /** §7.3 badges: one per visible eq/part tip (never on ≤480px, where only the HEAD chip
  *  survives — Q3). Computed once per payload, not per row render. */
@@ -282,7 +377,14 @@ function observe(): void {
 }
 
 watch(
-  [tbodyEl, () => state.state.value.data, laneLimit, () => props.mobile],
+  [
+    tbodyEl,
+    () => state.state.value.data,
+    laneLimit,
+    () => props.mobile,
+    () => files.open.value,
+    () => files.states.value,
+  ],
   () => {
     void nextTick(observe);
   },
@@ -302,9 +404,13 @@ const effCenters = computed<readonly number[]>(() =>
 /** Row pitch: adjacent measured centers when they exist, else the measured row height. */
 const pitch = computed(() => {
   const c = effCenters.value;
-  if (c.length >= 2) {
-    const dy = c[1]! - c[0]!;
+  // the first adjacent pair that does NOT straddle an open commit's detail row (none open ⇒
+  // exactly the old c[1] − c[0])
+  for (let k = 0; k + 1 < c.length; k++) {
+    if (k === openIdx.value) continue;
+    const dy = c[k + 1]! - c[k]!;
     if (dy > 0) return dy;
+    break;
   }
   return rowH.value > 0 ? rowH.value : 22;
 });
@@ -428,95 +534,166 @@ onBeforeUnmount(() => {
               <col class="gg-col-hash" />
             </colgroup>
             <tbody ref="tbodyEl">
-              <tr
-                v-for="(c, i) in commits"
-                :key="c.h"
-                data-row
-                :class="{ 'is-merge': isMerge(i), 'is-landed': isLanded(c.h) }"
-                :data-current="isCurrent(c.h) === true ? 'true' : undefined"
-              >
-                <td v-if="i === 0 && fold !== null" class="gg-lanes" :rowspan="commits.length" aria-hidden="true">
-                  <GraphLanes
-                    :fold="fold"
-                    :centers="effCenters"
-                    :merges="commits.map((_, index) => isMerge(index))"
-                    :lane-x="laneX"
-                    :pitch="pitch"
-                    :fold-x="foldX"
-                    :dot-radius="dotRadius"
-                    :width="svgW"
-                    :height="svgH"
-                    :landed="landedRows"
-                  />
-                </td>
-                <td class="gg-cell gg-subject" :title="c.s" :style="subjectStyle(i)">
-                  <span class="gg-refs">
-                    <span
-                      v-for="chip in chipsOf(c.h)"
-                      :key="chip.text"
-                      class="gg-ref"
-                      :class="[`k-${chip.kind}`, { 'is-sym': chip.sym === true }]"
-                      :title="chip.text"
-                      translate="no"
-                      >{{ chip.text }}</span
-                    >
-                    <!-- §7.3 merged badge: after the branch chips, before `+n`, outside the
-                         ≤3-chip quota; suppressed entirely on ≤480px (badgeMap is empty) -->
-                    <span v-if="badgeMap.has(c.h)" class="gg-mbadge" :title="badgeTitle(badgeMap.get(c.h)!)">{{
-                      badgeText(badgeMap.get(c.h)!)
-                    }}</span>
-                    <span v-if="chipOverflow(c.h) > 0" class="gg-ref gg-ref-overflow" :title="chipTitle(c.h)"
-                      >+{{ chipOverflow(c.h) }}</span
-                    >
-                    <span
-                      v-for="ring in ringsOf(c.h)"
-                      :key="`wt-${ring.path}`"
-                      class="gg-wtbadge"
-                      :class="{ 'is-self': ring.self }"
-                      :title="t('graph.srRing', { label: ring.label })"
-                      ><span class="dot" aria-hidden="true"></span>{{ ring.label }}</span
-                    >
-                  </span>
-                  <span class="gg-sub" translate="no">{{ c.s }}</span>
-                  <!-- sr-only topology (#14): merge parents / current checkout / worktree
-                       ring / folded lane / out-of-set parent — readable without the SVG -->
-                  <span class="sr-only">
-                    <template v-if="isMerge(i)"
-                      >{{ t("graph.srMerge", { parents: c.p.map((p) => p.slice(0, 7)).join(", ") }) }}
-                    </template>
-                    <template v-if="isCurrent(c.h)">{{ t("graph.srCurrent") }} </template>
-                    <template v-for="ring in ringsOf(c.h)" :key="`sr-${ring.path}`"
-                      >{{ t("graph.srRing", { label: ring.label }) }}
-                    </template>
-                    <template v-if="fold !== null && (fold.nodes[i]?.folded ?? false)"
-                      >{{ t("graph.srFold") }}
-                    </template>
-                    <template v-if="isLanded(c.h)">{{ t("graph.srLanded") }} </template>
-                    <template v-if="stubRows.has(i)">{{ t("graph.srOutOfSet") }}</template>
-                  </span>
-                </td>
-                <td v-if="!mobile" class="gg-cell gg-date" translate="no">{{ dateOf(c.t) }}</td>
-                <td v-if="!mobile" class="gg-cell gg-author" translate="no">{{ c.a }}</td>
-                <td class="gg-cell gg-hashcell">
-                  <button
-                    class="gg-hash"
-                    type="button"
-                    :aria-label="t('graph.copyHash', { hash: c.h })"
-                    :title="t('graph.copyHash', { hash: c.h })"
-                    translate="no"
-                    @click="copyHash(i, c.h)"
+              <template v-for="(c, i) in commits" :key="c.h">
+                <tr
+                  data-row
+                  :class="{ 'is-merge': isMerge(i), 'is-landed': isLanded(c.h), 'is-open': files.open.value === c.h }"
+                  :data-current="isCurrent(c.h) === true ? 'true' : undefined"
+                  v-bind="rowAttrs(c.h)"
+                  @click="onRowClick($event, c.h)"
+                  @keydown="onRowKey($event, c.h)"
+                >
+                  <td
+                    v-if="i === 0 && fold !== null"
+                    class="gg-lanes"
+                    :rowspan="commits.length + (openIdx >= 0 ? 1 : 0)"
+                    aria-hidden="true"
                   >
-                    {{ c.h.slice(0, 7) }}
-                  </button>
-                  <span class="sr-only" role="status">{{
-                    copyFeedback[i] === "copied"
-                      ? t("graph.copiedHash")
-                      : copyFeedback[i] === "selected"
-                        ? t("graph.selectedHash")
-                        : ""
-                  }}</span>
-                </td>
-              </tr>
+                    <GraphLanes
+                      :fold="fold"
+                      :centers="effCenters"
+                      :merges="commits.map((_, index) => isMerge(index))"
+                      :lane-x="laneX"
+                      :pitch="pitch"
+                      :fold-x="foldX"
+                      :dot-radius="dotRadius"
+                      :width="svgW"
+                      :height="svgH"
+                      :landed="landedRows"
+                    />
+                  </td>
+                  <td class="gg-cell gg-subject" :title="c.s" :style="subjectStyle(i)">
+                    <span class="gg-refs">
+                      <span
+                        v-for="chip in chipsOf(c.h)"
+                        :key="chip.text"
+                        class="gg-ref"
+                        :class="[`k-${chip.kind}`, { 'is-sym': chip.sym === true }]"
+                        :title="chip.text"
+                        translate="no"
+                        >{{ chip.text }}</span
+                      >
+                      <!-- §7.3 merged badge: after the branch chips, before `+n`, outside the
+                         ≤3-chip quota; suppressed entirely on ≤480px (badgeMap is empty) -->
+                      <span v-if="badgeMap.has(c.h)" class="gg-mbadge" :title="badgeTitle(badgeMap.get(c.h)!)">{{
+                        badgeText(badgeMap.get(c.h)!)
+                      }}</span>
+                      <span v-if="chipOverflow(c.h) > 0" class="gg-ref gg-ref-overflow" :title="chipTitle(c.h)"
+                        >+{{ chipOverflow(c.h) }}</span
+                      >
+                      <span
+                        v-for="ring in ringsOf(c.h)"
+                        :key="`wt-${ring.path}`"
+                        class="gg-wtbadge"
+                        :class="{ 'is-self': ring.self }"
+                        :title="t('graph.srRing', { label: ring.label })"
+                        ><span class="dot" aria-hidden="true"></span>{{ ring.label }}</span
+                      >
+                    </span>
+                    <span class="gg-sub" translate="no">{{ c.s }}</span>
+                    <!-- sr-only topology (#14): merge parents / current checkout / worktree
+                       ring / folded lane / out-of-set parent — readable without the SVG -->
+                    <span class="sr-only">
+                      <template v-if="isMerge(i)"
+                        >{{ t("graph.srMerge", { parents: c.p.map((p) => p.slice(0, 7)).join(", ") }) }}
+                      </template>
+                      <template v-if="isCurrent(c.h)">{{ t("graph.srCurrent") }} </template>
+                      <template v-for="ring in ringsOf(c.h)" :key="`sr-${ring.path}`"
+                        >{{ t("graph.srRing", { label: ring.label }) }}
+                      </template>
+                      <template v-if="fold !== null && (fold.nodes[i]?.folded ?? false)"
+                        >{{ t("graph.srFold") }}
+                      </template>
+                      <template v-if="isLanded(c.h)">{{ t("graph.srLanded") }} </template>
+                      <template v-if="stubRows.has(i)">{{ t("graph.srOutOfSet") }}</template>
+                    </span>
+                  </td>
+                  <td v-if="!mobile" class="gg-cell gg-date" translate="no">{{ dateOf(c.t) }}</td>
+                  <td v-if="!mobile" class="gg-cell gg-author" translate="no">{{ c.a }}</td>
+                  <td class="gg-cell gg-hashcell">
+                    <button
+                      class="gg-hash"
+                      type="button"
+                      :aria-label="t('graph.copyHash', { hash: c.h })"
+                      :title="t('graph.copyHash', { hash: c.h })"
+                      translate="no"
+                      @click="copyHash(i, c.h)"
+                    >
+                      {{ c.h.slice(0, 7) }}
+                    </button>
+                    <span class="sr-only" role="status">{{
+                      copyFeedback[i] === "copied"
+                        ? t("graph.copiedHash")
+                        : copyFeedback[i] === "selected"
+                          ? t("graph.selectedHash")
+                          : ""
+                    }}</span>
+                  </td>
+                </tr>
+                <!-- wtgraph.files.v1 detail row: NO data-row (the lane measurement skips it) -->
+                <tr v-if="files.enabled.value && files.open.value === c.h" class="gg-files-row">
+                  <td :id="`gg-files-${c.h}`" class="gg-files-cell" :colspan="filesColspan" :style="filesIndent">
+                    <div v-if="fileStateOf(c.h)?.phase === 'error'" class="gg-files-error" role="alert">
+                      <span class="gg-files-error-title">{{ t("graph.filesErrorTitle") }}</span>
+                      <span class="gg-files-error-text">{{ filesErrorText(c.h) }}</span>
+                      <button class="btn gg-files-retry" type="button" @click="filesRetry(c.h)">
+                        {{
+                          fileStateOf(c.h)?.error?.code === "E_STALE_CTX"
+                            ? t("graph.filesRefreshGraph")
+                            : t("graph.filesRetry")
+                        }}
+                      </button>
+                    </div>
+                    <template v-else-if="fileStateOf(c.h)?.phase === 'ok' && fileStateOf(c.h)?.data !== undefined">
+                      <p class="gg-files-meta">
+                        <span translate="no">{{ t("graph.filesCount", { n: fileStateOf(c.h)!.data!.total }) }}</span
+                        ><template v-if="c.p.length > 1"> · {{ t("graph.filesMergeNote") }}</template
+                        ><template v-else-if="c.p.length === 0 && fileStateOf(c.h)!.data!.shallow !== true">
+                          · {{ t("graph.filesRootNote") }}</template
+                        ><template v-if="fileStateOf(c.h)!.data!.shallow === true">
+                          · {{ t("graph.filesShallowNote") }}</template
+                        >
+                      </p>
+                      <p v-if="fileStateOf(c.h)!.data!.entries.length === 0" class="gg-files-state">
+                        {{ t("graph.filesEmpty") }}
+                      </p>
+                      <ul v-else class="gg-files-list">
+                        <li v-for="(e, fi) in fileStateOf(c.h)!.data!.entries" :key="`${fi}:${e.path}`" class="gg-file">
+                          <span class="gg-fst" :class="`s-${e.status}`" :title="statusTitle(e)" translate="no">{{
+                            e.status
+                          }}</span>
+                          <span class="gg-fnum" translate="no"
+                            ><template v-if="e.binary === true">{{ t("graph.filesBinary") }}</template
+                            ><template v-else-if="e.add !== undefined"
+                              ><span class="gg-fadd">+{{ e.add }}</span>
+                              <span class="gg-fdel">−{{ e.del }}</span></template
+                            ></span
+                          >
+                          <span
+                            class="gg-fpath"
+                            :title="e.orig !== undefined ? `${e.orig} → ${e.path}` : e.path"
+                            translate="no"
+                            ><bdi dir="ltr">{{ e.path }}</bdi></span
+                          >
+                        </li>
+                      </ul>
+                      <p v-if="fileStateOf(c.h)!.data!.truncated" class="gg-files-state">
+                        {{
+                          fileStateOf(c.h)!.data!.limits.output
+                            ? t("graph.filesTruncatedOutput")
+                            : t("graph.filesTruncated", {
+                                shown: fileStateOf(c.h)!.data!.entries.length,
+                                total: fileStateOf(c.h)!.data!.total,
+                              })
+                        }}
+                      </p>
+                    </template>
+                    <p v-else class="gg-files-state" role="status">
+                      <span class="gg-spinner" aria-hidden="true"></span>{{ t("graph.filesLoading") }}
+                    </p>
+                  </td>
+                </tr>
+              </template>
             </tbody>
           </table>
         </div>

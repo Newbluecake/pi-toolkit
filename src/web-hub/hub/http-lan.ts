@@ -30,7 +30,7 @@ import { SCHED_API_PATH } from "../protocol/schedule.js";
 import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
 import { VERSION_INFO_PATH, VERSION_LIMITS } from "../protocol/version-info.js";
 import { WTDIFF_FILES_PATH, WTDIFF_FILE_PATH } from "../protocol/worktree-diff.js";
-import { WTGRAPH_PATH } from "../protocol/worktree-graph.js";
+import { WTGRAPH_FILES_PATH, WTGRAPH_PATH } from "../protocol/worktree-graph.js";
 import { WTDIFF_AUTH_RESERVE_MS } from "./worktree-diff/routes.js";
 import type { AgentRemoveFrontendPort } from "./agent-remove.js";
 import {
@@ -1122,8 +1122,18 @@ async function handleLanRequestInner(
   // branch above, same insertion-point class and the same LAN gate (`mode === "on"`;
   // `mode:"loopback"` falls through to the original 404 below, byte-identical to not-enabled).
   // The LAN authorize segment reuses wtdiff's own §1.7 ② reserve (same §2.4 admission budget).
-  if (rt.worktreeGraph !== undefined && rt.worktreeGraph.mode === "on" && method === "GET" && path === WTGRAPH_PATH) {
-    return rt.worktreeGraph.handle(req, res, query, {
+  // wtgraph.files.v1: the commit-files GET rides the SAME branch, LAN gate and authorize segment.
+  if (
+    rt.worktreeGraph !== undefined &&
+    rt.worktreeGraph.mode === "on" &&
+    method === "GET" &&
+    (path === WTGRAPH_PATH || (path === WTGRAPH_FILES_PATH && rt.worktreeGraph.handleFiles !== undefined))
+  ) {
+    const graphHandler =
+      path === WTGRAPH_FILES_PATH && rt.worktreeGraph.handleFiles !== undefined
+        ? rt.worktreeGraph.handleFiles.bind(rt.worktreeGraph)
+        : rt.worktreeGraph.handle.bind(rt.worktreeGraph);
+    return graphHandler(req, res, query, {
       listener: "lan",
       ip: ctx.clientIp,
       expectedOrigin: ctx.externalOrigin,

@@ -11,7 +11,7 @@ import type { Lan2faChallenge, LanFactorBody } from "@protocol/lan-2fa.js";
 import type { PreviewDims, PreviewDirListing, PreviewImageMime, PreviewProbeKind } from "@protocol/preview.js";
 import type { PreviewHtmlCapResponseBody } from "@protocol/preview-html.js";
 import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
-import type { WtGraphPayload } from "@protocol/worktree-graph.js";
+import type { WtGraphCommitFiles, WtGraphPayload } from "@protocol/worktree-graph.js";
 import type { RunTxReason } from "@protocol/run-transcript.js";
 import type { AgentRemoveErrorReason } from "@protocol/http-contract.js";
 import type { AvatarDeleteOutcome, AvatarFetchOutcome, AvatarWriteOutcome } from "@protocol/avatar.js";
@@ -830,6 +830,16 @@ export interface WorktreeGraphTransport {
     req: WtDiffScope & { readonly wt: string; readonly merged?: true },
     opts?: { readonly signal?: AbortSignal },
   ): Promise<WtDiffOutcome<WtGraphPayload>>;
+  /**
+   * wtgraph.files.v1: `GET /api/worktree-graph/files` — one commit's changed files (first-parent
+   * diff). Optional so pre-feature fakes keep compiling; the UI only calls it when the hub
+   * declared the cap (`GraphScope.files`). 409 `E_STALE_CTX{reason:"commit"}` means the oid is
+   * not in a graph window this hub served (hub restarted / window moved) — re-pull the graph.
+   */
+  commitFiles?(
+    req: WtDiffScope & { readonly wt: string; readonly h: string },
+    opts?: { readonly signal?: AbortSignal },
+  ): Promise<WtDiffOutcome<WtGraphCommitFiles>>;
 }
 
 // ---------------------------------------------------------------------------

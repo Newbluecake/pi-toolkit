@@ -78,5 +78,34 @@ const graph = {
   footMergedUnknown: "merged ? {m}",
   /** Only when eq targets exist but the fold is blocked by incomplete information (§7.2). */
   footFoldOff: "fold off",
+  // ---- commit files (wtgraph.files.v1): click a row to list the files it changed ----
+  /** aria/title of a clickable commit row. */
+  rowToggle: "Show files changed in commit {hash}",
+  filesLoading: "Loading changed files…",
+  filesEmpty: "No file changes.",
+  filesErrorTitle: "Could not load the changed files",
+  filesRetry: "Retry",
+  filesRefreshGraph: "Refresh graph",
+  filesErrStale: "This commit is no longer in the graph the hub served — refresh the graph and try again.",
+  filesErrBusy: "The hub is busy — try again in a moment.",
+  filesErrFilter: "This repository configures filter/diff drivers the hub cannot neutralize safely.",
+  filesErrMissing: "The commit or one of its objects is missing locally.",
+  filesErrGeneric: "Request failed ({code}).",
+  /** Header line above the list: `{n} files` (compact marker). */
+  filesCount: "{n} files",
+  /** Merge commits list only what they brought onto their first parent. */
+  filesMergeNote: "merge commit: changes against the first parent",
+  /** Root commits (and shallow boundaries) diff against the empty tree. */
+  filesRootNote: "root commit: every file is new",
+  filesShallowNote: "shallow clone: a boundary commit shows every file as new",
+  filesTruncated: "Showing {shown} of {total} files",
+  filesTruncatedOutput: "The list was cut by the size limit — some files are missing",
+  filesBinary: "bin",
+  /** Status badge titles (the badge text itself is the git letter). */
+  statusM: "modified",
+  statusA: "added",
+  statusD: "deleted",
+  statusR: "renamed from {orig}",
+  statusT: "type changed",
 };
 export default graph;

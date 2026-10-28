@@ -32,7 +32,7 @@ import {
 import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "@protocol/preview.ts";
 import { PREVIEW_HTML_CAP_PATH } from "@protocol/preview-html.ts";
 import { WTDIFF_FILE_PATH, WTDIFF_FILES_PATH } from "@protocol/worktree-diff.ts";
-import { WTGRAPH_PATH } from "@protocol/worktree-graph.ts";
+import { WTGRAPH_FILES_PATH, WTGRAPH_PATH } from "@protocol/worktree-graph.ts";
 import { VERSION_INFO_PATH } from "@protocol/version-info.ts";
 import { UPLOAD_ABORT_PATH, UPLOAD_BEGIN_PATH, UPLOAD_CHUNK_PATH, UPLOAD_COMMIT_PATH } from "@protocol/upload.ts";
 import { PRIVACY_LOCK_PATH, PRIVACY_VERIFY_PATH } from "@protocol/privacy.ts";
@@ -115,6 +115,8 @@ export const API = Object.freeze({
   // routes and this object can never disagree). `tests/web-hub/ui/logic-contract.test.ts`
   // pins it against the protocol constant.
   wtgraph: WTGRAPH_PATH,
+  // wtgraph.files.v1: one served commit's changed files (same anti-drift rule).
+  wtgraphFiles: WTGRAPH_FILES_PATH,
   // sysload plan §7.1/§7.3 (package P4): the on-demand top-process endpoint, imported from
   // `protocol/http-contract.ts` — same anti-drift rule as the wtgraph/wtdiff paths above.
   loadTop: LOAD_TOP_PATH,

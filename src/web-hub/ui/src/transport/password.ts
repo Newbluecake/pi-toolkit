@@ -51,7 +51,7 @@ import type {
   WtDiffOutcome,
 } from "./types.js";
 import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
-import type { WtGraphPayload } from "@protocol/worktree-graph.js";
+import type { WtGraphCommitFiles, WtGraphPayload } from "@protocol/worktree-graph.js";
 
 export type PasswordTransportDeps = Parameters<typeof createPasswordClient>[0];
 
@@ -238,6 +238,9 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       // (`isRestAuthEndpoint` covers `/api/worktree-graph` by prefix) — never inside the
       // client, so nothing double-fires.
       graph: (req, opts) => client.worktreeGraph.graph(req, opts) as Promise<WtDiffOutcome<WtGraphPayload>>,
+      // wtgraph.files.v1: same prefix-rule 401 reporting (`/api/worktree-graph/files?…`).
+      commitFiles: (req, opts) =>
+        client.worktreeGraph.commitFiles(req, opts) as Promise<WtDiffOutcome<WtGraphCommitFiles>>,
     } satisfies WorktreeGraphTransport,
     // sysload plan §7.1/§7.3/§10 (package P4): thin cast over the logic client's `loadTop` —
     // 401 ⇒ onConn("auth") is reported by the fetch wrapper above (`REST_AUTH_PATHS` has an
