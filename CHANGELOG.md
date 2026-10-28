@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-10-28
+
+### Added
+
+- **web-hub**: size the fleet drawer's Agents and Bash lists to fill its height (`e86909d3`)
+- **feishu**: show aliases instead of session ids in /list (`da978b9e`)
+- **fabric**: hand the session alias to the new session on /new (#72 AF7) (`7e5e329e`)
+- **fabric**: wire alias auto-claim and forced takeover into the session (`fbe58af2`)
+- **web-hub**: alias force-take button and cwd-derived suggestion chip in ChannelsDialog (#72 AFU) (`ce7f44b3`)
+- **fabric**: document AF4 delivery and assembly ports (`6e855c75`)
+- **fabric**: preview and confirm forced alias takeovers (`41c1b773`)
+- **fabric**: remember human alias decisions per session (`3a51da37`)
+- **fabric**: agent alias v2 bridge — xs.alias.v2 cap, intent ops, auto-claim engine, xs_alias_evt (#72 AF3) (`3da2c094`)
+- **web-hub**: route alias auto-claim and forced takeover, push a nudge to the loser (#72 AF2) (`824c6692`)
+- **fabric**: hub alias table learns auto-claim and forced takeover (#72 AF1) (`e2ca385c`)
+- **fabric**: define the alias v2 contract for forced takeover and default aliases (`eab22312`)
+
+### Fixed
+
+- **web-hub**: let the fleet drawer's Bash list use the full drawer height (`e616b65b`)
+- **web-hub**: vertically centre the @alias chip text on session cards (`ea782652`)
+- **archive**: stop archived agents and bash jobs from flipping back (`cd57bdf9`)
+- **fabric**: re-run the alias reconcile after /fabric join (`d813a793`)
+- **fabric**: a failing decided-mark write no longer blocks /fabric alias writes (`270ae377`)
+- **web-hub**: show the whole @alias on session cards (`e009a1ba`)
+- **web-hub**: explain hidden bash jobs when every listed job is archived (`820ccc4c`)
+- **web-hub**: show one compact update chip on outdated session cards (`6d599f7f`)
+
+### Changed
+
+- **tools**: trim duplicated wording from tool descriptions (`a4e575f9`)
+
+### Documentation
+
+- **fabric**: document the /new alias handoff (#72 AF7) (`e74c0981`)
+- **fabric**: document alias force takeover, cwd auto-claim and the v2 gate (#72) (`c90c2dda`)
+- **fabric**: AFW report — alias auto-claim and forced takeover assembly (#72) (`fec15027`)
+- **web-hub**: explain the two-layer v2 gate on the force offer (`2d80bf33`)
+- **fabric**: AFU report — web force-take button and cwd chip delivery notes (#72) (`ff569e77`)
+- **fabric**: AF3 delivery report — agent alias v2 bridge (#72) (`2f0350b5`)
+- **fabric**: AF1/AF2 delivery report for the hub alias table and routing (#72) (`1ac76ea3`)
+
+### Tests
+
+- retry sandbox removal when a late write races cleanup (`684724cd`)
+- **web-hub**: watch highlight batches from the first frame (`f447fc39`)
+- **fabric**: cover the /new alias handoff end to end (#72 AF7) (`b700df20`)
+- **fabric**: end-to-end coverage of alias force takeover and cwd auto-claim (#72) (`6d6dda82`)
+- **web-hub**: no force offer after a no-holder or stale --take refusal (`a480b41f`)
+- **fabric**: make the alias auto-retry unref assertion discriminating (`7f0b5ada`)
+- **fabric**: AF3 agent-bridge coverage — intent frames, auto engine, evt reconcile (#72) (`24e4bb95`)
+
+Stats: 12 feat, 8 fix, 1 refactor/perf, 7 docs, 7 test
+
 ## [0.10.1] - 2026-10-27
 
 ### Added
@@ -1379,7 +1433,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.1...v0.9.0
