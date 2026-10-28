@@ -342,6 +342,27 @@ no-renderer, streaming/settled-deferral timing, `expandPromptTemplates:false`,
 no-file-before-first-message, newSession cancelled/stale-ctx) before any pi peer bump;
 real-device checklist `docs/dev/web-hub-cmd-history/acceptance.md`.
 
+## History tail reads (`hub/history.ts`)
+
+**Hub main-thread rule (perf incident 2026-10-28):** nothing that runs on every leaf change may
+scale with the session FILE size. A 193 MB live session made `runTail` (500 ms debounce per
+subscribed agent) re-read + `JSON.parse` the whole file — `FileCache` is keyed on size/mtime, so an
+append-only file always misses — and project the whole branch (`canonicalJson` per custom entry)
+only to keep the last `APPEND_TAIL_ENTRIES` (64): 1–6 s of synchronous main-thread CPU each time,
+queueing EVERY hub request (a `/api/preview?dir=1` showed ~3 ms of handler time in the audit line
+but 1.8–5 s on the wire). `runTail` now uses `readBranchTail`: positioned reads from the end
+(512 KiB, ×4 until the leaf's ancestry is covered, ≤ `TAIL_CHUNK_MAX_BYTES` 32 MiB), cut at a
+newline byte, projecting newest-first until `count` PROJECTED entries — result equals the full
+reader's `.slice(-count)`. `undefined` ⇒ not answerable from the tail (chunk would cover the whole
+file, budget spent, leaf not on disk yet, corrupt NON-trailing line inside the chunk) ⇒ fall back
+to the full cached reader, whose verdicts (`PARSE`, `LEAF_NOT_FOUND`, …) are unchanged.
+Deliberate relaxation: a corrupt line OUTSIDE the chunk no longer silences tail appends (the full
+reader would answer `PARSE`). `snapshot()`/`page()` still use the full reader (user-triggered,
+need the whole branch for `hasMore`/paging). Tests: `tests/web-hub/hub/history.test.ts`
+(`readBranchTail` equivalence + bytes-read gate; `runTail` integration).
+Diagnosing a stalled hub: `/proc/<pid>/task/<pid>/stat` utime sampling shows busy runs on the main
+thread; a short `SIGUSR1` inspector CPU profile (close it again with
+`process.getBuiltinModule('node:inspector').close()`) names the function.
 ## Peer-bump conformance premises (cmd-history)
 
 **Also run `tests/conformance/cmd-history.test.ts`** (web-hub-cmd-history I1):

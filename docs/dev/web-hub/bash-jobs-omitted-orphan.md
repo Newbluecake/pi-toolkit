@@ -2,6 +2,8 @@
 
 2026-10-27 · 纯 UI 修复（wire / agent / hub 均未动）
 
+> 2026-10-28 更新：下文「agent 不知道哪些行被归档」已不再成立 —— `omitted` 现在是归档感知的，见 [`bash-omitted-archive.md`](./bash-omitted-archive.md)。
+
 ## 现象
 
 fleet 抽屉的 Bash 分组标题为「Bash · 已完成 11 · 失败 2 · 已归档 12」，展开后没有任何可见行，

@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { appendFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { join } from "node:path";
 import type {
   AgentFrame,
@@ -14,6 +23,10 @@ import {
   createHistoryService,
   mergeSnapshot,
   readBranchFromFile,
+  readBranchTail,
+  TAIL_CHUNK_BYTES,
+  TAIL_CHUNK_MAX_BYTES,
+  APPEND_TAIL_ENTRIES,
   capEntriesByBytes,
   MAX_HISTORY_PAYLOAD_BYTES,
 } from "../../../src/web-hub/hub/history.js";
@@ -145,6 +158,128 @@ describe("readBranchFromFile", () => {
   it("a trailing partial line (writer mid-append) is tolerated", async () => {
     const r = await readBranchFromFile(writeFixture(`${fixtureLines()}{"type":"message","id":"half`), "t2");
     expect(r.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readBranchTail — runTail's O(chunk) reader (perf incident 2026-10-28: a 193 MB live session made
+// every leaf change re-read + re-parse the whole file on the hub main thread, queueing ALL requests)
+// ---------------------------------------------------------------------------
+
+/** Linear chain m0..m(n-1) (≈2 KiB each) + a side branch hanging off m2; a header line first. */
+function bigSessionLines(n: number): string {
+  const pad = "x".repeat(2000);
+  const out = [line({ type: "session", version: 3, id: "sess", timestamp: iso(0), cwd: "/tmp/w" })];
+  for (let i = 0; i < n; i++) {
+    out.push(
+      line({
+        type: "message",
+        id: `m${i}`,
+        parentId: i === 0 ? null : `m${i - 1}`,
+        timestamp: iso(i + 1),
+        message: msg(i % 2 === 0 ? "user" : "assistant", 10_000 + i, { content: `${i}:${pad}` }),
+      }),
+    );
+  }
+  return out.join("");
+}
+
+const sideEntry = (id: string, parentId: string): string =>
+  line({ type: "message", id, parentId, timestamp: iso(9_000), message: msg("assistant", 99_000, { content: id }) });
+
+describe("readBranchTail (runTail's tail-only reader)", () => {
+  const N = 2400; // ≈ 4.9 MB ≫ TAIL_CHUNK_BYTES
+  const bigFile = (extra = ""): string => writeFixture(bigSessionLines(N) + extra);
+  const fullTail = async (file: string, leaf: string, count: number): Promise<WireEntry[]> => {
+    const r = await readBranchFromFile(file, leaf);
+    if (!r.ok) throw new Error(r.reason);
+    return r.entries.slice(-count);
+  };
+
+  it("fixture really exceeds the chunk (the gate below is meaningful)", () => {
+    expect(statSync(bigFile()).size).toBeGreaterThan(4 * TAIL_CHUNK_BYTES);
+  });
+
+  it("tail case: equals the full reader's last 64 entries and reads exactly ONE chunk (≪ file)", async () => {
+    const file = bigFile();
+    const reads: number[] = [];
+    const r = await readBranchTail(file, `m${N - 1}`, APPEND_TAIL_ENTRIES, undefined, (b) => reads.push(b));
+    expect(r).toEqual({ ok: true, entries: await fullTail(file, `m${N - 1}`, APPEND_TAIL_ENTRIES) });
+    expect(reads).toEqual([TAIL_CHUNK_BYTES]); // operation-count gate: one positioned read, not the 4.9 MB file
+  });
+
+  it("ancestry reaching past the first chunk grows ×4 geometrically and still equals the full reader", async () => {
+    // the new leaf hangs off m1800 (≈1.2 MB before EOF): not in the first 512 KiB, inside 2 MiB
+    const file = bigFile(sideEntry("late", "m1800"));
+    const reads: number[] = [];
+    const r = await readBranchTail(file, "late", APPEND_TAIL_ENTRIES, undefined, (b) => reads.push(b));
+    expect(r).toEqual({ ok: true, entries: await fullTail(file, "late", APPEND_TAIL_ENTRIES) });
+    expect(reads).toEqual([TAIL_CHUNK_BYTES, TAIL_CHUNK_BYTES * 4]);
+    expect(r && r.ok && r.entries.at(-1)?.id).toBe("late");
+    expect(r && r.ok && r.entries.at(-2)?.id).toBe("m1800");
+  });
+
+  it("an ancestry that only the whole file can answer ⇒ undefined (full reader's job), bounded reads", async () => {
+    const file = bigFile(sideEntry("deep", "m3")); // parent near the START of a ~4.9 MB file
+    const reads: number[] = [];
+    expect(await readBranchTail(file, "deep", APPEND_TAIL_ENTRIES, undefined, (b) => reads.push(b))).toBeUndefined();
+    expect(reads.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(TAIL_CHUNK_MAX_BYTES * 2);
+    // …and the full reader still answers it (the runTail fallback)
+    const full = await readBranchFromFile(file, "deep");
+    expect(full.ok && full.entries.at(-1)?.id).toBe("deep");
+  });
+
+  it("a file no larger than the chunk ⇒ undefined (nothing to save; the cached full reader answers)", async () => {
+    expect(await readBranchTail(writeFixture(), "t2", 64)).toBeUndefined();
+  });
+
+  it("projects newest-first until `count` PROJECTED entries: unprojected lines (labels) do not eat the budget", async () => {
+    const labels = Array.from({ length: 30 }, (_, i) =>
+      line({
+        type: "label",
+        id: `lb${i}`,
+        parentId: i === 0 ? `m${N - 1}` : `lb${i - 1}`,
+        timestamp: iso(8_000 + i),
+        label: "x",
+      }),
+    ).join("");
+    const file = bigFile(labels);
+    const r = await readBranchTail(file, "lb29", 64);
+    expect(r).toEqual({ ok: true, entries: await fullTail(file, "lb29", 64) });
+    expect(r && r.ok && r.entries).toHaveLength(64); // 64 messages, the 30 labels are skipped, not counted
+  });
+
+  it("corrupt line OUTSIDE the chunk is not read (documented relaxation); INSIDE it ⇒ undefined (PARSE stays the full reader's verdict)", async () => {
+    const good = bigSessionLines(N);
+    const head = good.indexOf("\n", 100) + 1; // after the session header line
+    const bad = `${good.slice(0, head)}{broken-line\n${good.slice(head)}`;
+    expect(await readBranchFromFile(writeFixture(bad), `m${N - 1}`)).toEqual({ ok: false, reason: "PARSE" });
+    const outside = await readBranchTail(writeFixture(bad), `m${N - 1}`, 64);
+    expect(outside).toEqual({ ok: true, entries: await fullTail(bigFile(), `m${N - 1}`, 64) });
+
+    const inside = `${good}{broken-line\n${line({ type: "label", id: "z", parentId: "m1", timestamp: iso(1), label: "y" })}`;
+    expect(await readBranchTail(writeFixture(inside), `m${N - 1}`, 64)).toBeUndefined();
+  });
+
+  it("a trailing partial line (writer mid-append) is skipped", async () => {
+    const file = bigFile(`{"type":"message","id":"half`);
+    const r = await readBranchTail(file, `m${N - 1}`, 64);
+    expect(r).toEqual({ ok: true, entries: await fullTail(bigFile(), `m${N - 1}`, 64) });
+  });
+
+  it("a leaf that is not on disk yet ⇒ bounded reads then undefined (never a whole-file read here)", async () => {
+    const file = bigFile();
+    const reads: number[] = [];
+    expect(await readBranchTail(file, "not-flushed", 64, undefined, (b) => reads.push(b))).toBeUndefined();
+    expect(reads.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(TAIL_CHUNK_MAX_BYTES * 2);
+  });
+
+  it.each([
+    ["missing file", async () => readBranchTail(join(tmp.make(), "none.jsonl"), "m1", 64), "ENOENT"],
+    ["non-.jsonl path", async () => readBranchTail(join(tmp.make(), "s.json"), "m1", 64), "ENOENT"],
+    ["file over maxFileBytes", async () => readBranchTail(bigFile(), "m1", 64, 100), "TOO_LARGE"],
+  ])("%s ⇒ %s (same meaning as the full reader)", async (_n, run, reason) => {
+    expect(await run()).toEqual({ ok: false, reason });
   });
 });
 
@@ -487,6 +622,35 @@ describe("history tail fill (onLeafChanged)", () => {
     status(a, "dd");
     await sleepReal(700);
     expect(appends(a.events)).toHaveLength(2);
+    h.dispose();
+  });
+
+  it("runTail reads only the file tail: an append is delivered even when an early line of a huge file is corrupt (the full reader would answer PARSE and stay silent)", async () => {
+    const big = bigSessionLines(2400);
+    const file = writeFixture(big);
+    const a = agent(file, "m2399");
+    const h = createHistoryService({ registry: a.reg, log: memLog() });
+    await h.snapshot(a.agentKey);
+    // corrupt (same length) the 2nd line far outside the 512 KiB tail chunk, then append a new entry
+    const firstMsgStart = big.indexOf("\n") + 1;
+    const fd = openSync(file, "r+");
+    writeSync(fd, "{{{{", firstMsgStart);
+    closeSync(fd);
+    expect(await readBranchFromFile(file, "m2399")).toEqual({ ok: false, reason: "PARSE" });
+    appendFileSync(
+      file,
+      line({
+        type: "custom_message",
+        id: "tail1",
+        parentId: "m2399",
+        timestamp: iso(9_100),
+        customType: "task",
+        content: "hi",
+      }),
+    );
+    status(a, "tail1");
+    await waitFor(() => appends(a.events).length === 1, 3000);
+    expect(ids(appends(a.events)[0]!)).toEqual(["tail1"]);
     h.dispose();
   });
 

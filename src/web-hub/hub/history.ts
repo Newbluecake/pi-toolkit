@@ -16,7 +16,7 @@
  * (realpath) to a regular `.jsonl` file.
  */
 import { Buffer } from "node:buffer";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { open, readFile, realpath, stat } from "node:fs/promises";
 import type { HistoryPayload } from "../protocol/http-contract.js";
 import { diffAppended, entryKey, messageKey, projectSessionEntry, reconcileRecent } from "../protocol/keys.js";
 import {
@@ -53,6 +53,14 @@ export const DELIVERED_CAP = 512;
 export const MAX_HISTORY_PAYLOAD_BYTES = LIMITS.branchReplyBytes;
 const FILE_CACHE_SIZE = 4;
 const PAGE_MAX = 400;
+/** `readBranchTail`: first positioned read from the end of the file, and the growth factor when the
+ * leaf's ancestry does not fit in the chunk yet (geometric ⇒ total bytes read ≤ ~1.34× the final chunk). */
+export const TAIL_CHUNK_BYTES = 512 << 10;
+const TAIL_CHUNK_GROWTH = 4;
+/** `readBranchTail` never reads more than this from the end: a leaf that is not on disk yet (the
+ * "leaf not flushed" case) or an ancestry reaching further back falls to the full reader instead of
+ * escalating to a whole-file read here (0.5 → 2 → 8 → 32 MiB ⇒ ≤ ~42 MiB total). */
+export const TAIL_CHUNK_MAX_BYTES = 32 << 20;
 
 type ReadFailure = "ENOENT" | "LEAF_NOT_FOUND" | "TOO_LARGE" | "PARSE";
 type ReadResult = { ok: true; entries: WireEntry[] } | { ok: false; reason: ReadFailure };
@@ -118,6 +126,117 @@ async function readBranchCached(
     cache?.set(real, size, mtimeMs, index);
   }
   return walkBranch(index, leafId);
+}
+
+/**
+ * `runTail`'s reader — the last `count` projected entries of the branch ending at `leafId`,
+ * WITHOUT reading/parsing the whole session file. Perf incident 2026-10-28: a 193 MB live session
+ * made every leaf change (500 ms debounce) re-read + `JSON.parse` the full file (size/mtime changed,
+ * so `FileCache` always missed) and project the whole branch (`canonicalJson` per custom entry) only
+ * to keep the last `APPEND_TAIL_ENTRIES` — 1–5 s of synchronous main-thread CPU per change, which
+ * queued EVERY hub request (a /api/preview?dir=1 answered in ~3 ms of handler time but 1.8–5 s on
+ * the wire).
+ *
+ * Reads positioned chunks from the end (`TAIL_CHUNK_BYTES`, ×`TAIL_CHUNK_GROWTH` until the ancestry
+ * is covered). The chunk is cut at a newline BYTE (0x0A never occurs inside a UTF-8 sequence), so a
+ * partial first line is dropped, never mis-decoded. The result equals `readBranchCached(...).entries
+ * .slice(-count)` for every file the full reader accepts (projection is per-entry pure; duplicate ids
+ * resolve last-wins in both). Returns `undefined` ⇒ "cannot answer from the tail" and the caller
+ * falls back to the full reader: a corrupt NON-trailing line inside the chunk (the full reader's
+ * PARSE failure), the chunk would cover the whole file anyway, or the `TAIL_CHUNK_MAX_BYTES` budget is spent. ENOENT / TOO_LARGE / LEAF_NOT_FOUND
+ * keep the full reader's exact meaning. `onRead` is a test seam (bytes of each positioned read).
+ */
+export async function readBranchTail(
+  file: string,
+  leafId: string,
+  count: number,
+  maxFileBytes: number = DEFAULT_MAX_FILE_BYTES,
+  onRead?: (bytes: number) => void,
+): Promise<ReadResult | undefined> {
+  if (!file.endsWith(".jsonl")) return { ok: false, reason: "ENOENT" };
+  let real: string;
+  let size: number;
+  try {
+    real = await realpath(file);
+    if (!real.endsWith(".jsonl")) return { ok: false, reason: "ENOENT" };
+    const st = await stat(real);
+    if (!st.isFile()) return { ok: false, reason: "ENOENT" };
+    size = st.size;
+  } catch {
+    return { ok: false, reason: "ENOENT" };
+  }
+  if (size > maxFileBytes) return { ok: false, reason: "TOO_LARGE" };
+
+  let fh: Awaited<ReturnType<typeof open>>;
+  try {
+    fh = await open(real, "r");
+  } catch {
+    return { ok: false, reason: "ENOENT" };
+  }
+  try {
+    let chunk = TAIL_CHUNK_BYTES;
+    for (;;) {
+      // the chunk is the whole file, or the tail budget is spent ⇒ the full (cached) reader's job
+      if (chunk >= size || chunk > TAIL_CHUNK_MAX_BYTES) return undefined;
+      const start = size - chunk;
+      const buf = Buffer.allocUnsafe(chunk);
+      let got = 0;
+      while (got < chunk) {
+        const { bytesRead } = await fh.read(buf, got, chunk - got, start + got);
+        if (bytesRead === 0) break; // file shrank under us ⇒ let the full reader decide
+        got += bytesRead;
+      }
+      onRead?.(got);
+      if (got < chunk) return undefined;
+      const nl = buf.indexOf(0x0a);
+      if (nl === -1) {
+        chunk *= TAIL_CHUNK_GROWTH; // a single line longer than the chunk
+        continue;
+      }
+      const lines = buf.toString("utf8", nl + 1, got).split("\n");
+      const byId = new Map<string, RawEntry>();
+      for (let i = 0; i < lines.length; i++) {
+        const text = lines[i]!.trim();
+        if (text === "") continue;
+        let v: unknown;
+        try {
+          v = JSON.parse(text);
+        } catch {
+          if (isLastNonEmpty(lines, i)) continue; // writer mid-append
+          return undefined; // corrupt non-trailing line: the full reader owns the PARSE verdict
+        }
+        if (v === null || typeof v !== "object" || Array.isArray(v)) continue;
+        const r = v as Record<string, unknown>;
+        if (typeof r["id"] === "string") byId.set(r["id"], r as RawEntry);
+      }
+      // walk leaf → root, projecting newest-first until `count` entries exist
+      const seen = new Set<string>();
+      const out: WireEntry[] = [];
+      let cur: string | null = leafId;
+      let covered = true; // false ⇒ the ancestry continues before the chunk
+      while (cur !== null && !seen.has(cur) && out.length < count) {
+        seen.add(cur);
+        const raw = byId.get(cur);
+        if (raw === undefined) {
+          covered = false;
+          break;
+        }
+        const e = projectSessionEntry(raw);
+        if (e !== undefined) out.push(e);
+        const parent: unknown = raw["parentId"];
+        cur = typeof parent === "string" ? parent : null;
+      }
+      if (out.length >= count || covered) {
+        out.reverse();
+        return { ok: true, entries: out };
+      }
+      chunk *= TAIL_CHUNK_GROWTH; // leaf/parent not in this chunk: look further back
+    }
+  } catch {
+    return { ok: false, reason: "ENOENT" };
+  } finally {
+    await fh.close().catch(() => undefined);
+  }
 }
 
 /** Every line must parse, except a trailing partial line (writer mid-append), which is skipped. */
@@ -443,7 +562,8 @@ export function createHistoryService(deps: {
     if (st.delivered === undefined || leaf === null || file === undefined) return;
     st.reading = true;
     try {
-      const res = await readBranch(file, leaf);
+      // tail-only fast path; `undefined` ⇒ not answerable from the tail ⇒ the full cached reader
+      const res = (await readBranchTail(file, leaf, APPEND_TAIL_ENTRIES)) ?? (await readBranch(file, leaf));
       let entries: readonly WireEntry[] | undefined;
       if (res.ok) {
         entries = res.entries;
