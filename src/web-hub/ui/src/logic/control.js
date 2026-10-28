@@ -21,7 +21,7 @@
  * @typedef {{ id: string, kind: string, state: string, text?: string, deliver?: string,
  *   runId?: string, dialogId?: string, name?: string, at: number, behavior?: string,
  *   error?: string, message?: string, retryable?: boolean, effect?: string, reason?: string,
- *   offline?: boolean, lateQuery?: boolean }} PendingItem
+ *   offline?: boolean, lateQuery?: boolean, ctlAt?: number }} PendingItem
  *
  * @typedef {{ type: "result", outcome: CmdOutcome }
  *   | { type: "query_start" }
@@ -368,6 +368,11 @@ export function pendingTransition(item, event) {
           // — once held/handed/tooLate, a later ok result never regresses it (a dup or queryOnly
           // replay re-answers the ORIGINAL delivery; anything else is stale). Y8.1: a degraded
           // native delivery answers observed/unobserved here and never creates a held row.
+          // U1 invariant: 「状态只前进不回退」. The agent publishes its ctl frame BEFORE the HTTP
+          // receipt, so the receipt routinely lands AFTER the ctl slot already advanced this
+          // item (`ctlAt` is only ever set by an applied ctl entry). Such a receipt is stale —
+          // drop it, otherwise `held`/`observed` would overwrite handed/started/queued/….
+          if (typeof item.ctlAt === "number") return item;
           if (data.delivery === "held") {
             return patchItem(item, {
               state: "held",
@@ -517,27 +522,30 @@ export function pendingTransition(item, event) {
         case "observed":
           return patchItem(item, {
             state: "observed",
+            ...ctlAtPatch,
             ...(typeof e.behavior === "string" ? { behavior: e.behavior } : {}),
           });
         case "started":
         case "queued":
         case "running":
-          return patchItem(item, { state: e.state });
+          return patchItem(item, { state: e.state, ...ctlAtPatch });
         case "consumed":
         case "ok":
         case "late_ok":
           return null;
         case "dropped":
-          return patchItem(item, { state: "dropped" });
+          return patchItem(item, { state: "dropped", ...ctlAtPatch });
         case "unconfirmed":
           return patchItem(item, {
             state: "unconfirmed",
+            ...ctlAtPatch,
             ...(typeof e.reason === "string" ? { reason: e.reason } : {}),
           });
         case "failed":
         case "late_failed":
           return patchItem(item, {
             state: "failed",
+            ...ctlAtPatch,
             error: typeof e.code === "string" ? e.code : "E_FAILED",
             retryable: false,
             effect: "none",

@@ -212,6 +212,24 @@ const err = (error, extra = {}) => ({ ok: false, error, retryable: false, effect
 
 describe("pendingTransition (§7.7)", () => {
   describe('event "result" (HTTP response of the initial send)', () => {
+    it("U1: a receipt that lands after a ctl frame advanced the item never regresses it", () => {
+      const ctl = (state: string, updatedAt: number) => ({ type: "ctl", entry: { state, updatedAt } });
+      // held → (ctl) handed → late held receipt: stays handed
+      let it: any = pendingTransition(item({ state: "held", ctlAt: 0 }), ctl("dispatched", 5));
+      expect(it).toMatchObject({ state: "handed", ctlAt: 5 });
+      expect(pendingTransition(it, { type: "result", outcome: ok({ delivery: "held" }) })).toBe(it);
+      // sending → (ctl) started → late observed / unobserved receipt: stays started
+      it = pendingTransition(item(), ctl("started", 7));
+      expect(it).toMatchObject({ state: "started", ctlAt: 7 });
+      for (const delivery of ["observed", "unobserved"]) {
+        expect(pendingTransition(it, { type: "result", outcome: ok({ delivery }) })).toBe(it);
+      }
+      // no ctl seen yet ⇒ the receipt still applies
+      expect(pendingTransition(item(), { type: "result", outcome: ok({ delivery: "held" }) })).toMatchObject({
+        state: "held",
+      });
+    });
+
     it("prompt ok observed ⇒ observed (+behavior); unobserved otherwise", () => {
       expect(
         pendingTransition(item(), { type: "result", outcome: ok({ delivery: "observed", behavior: "steer" }) }),

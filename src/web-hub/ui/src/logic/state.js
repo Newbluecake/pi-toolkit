@@ -779,6 +779,19 @@ function reduceInner(s, event, d, at) {
           heldScopeOf(a),
           a.heldTombs,
         );
+        // U2 反证清扫: ctl is a pure broadcast (no hub snapshot/replay), so a tab that missed the
+        // terminal frame would keep a hold row at `held` forever. A status frame carrying NO
+        // `held` (agent/status.ts writes it only when the buffer is non-empty) and no
+        // `heldEpoch` is authoritative proof the agent's buffer is empty ⇒ no prompt item can
+        // still be buffered (`held`/`returned`). `handed`/`tooLate` are NOT swept: they assert
+        // the buffer was already left, so they contradict nothing. Scope: pendingCtl is this
+        // card's own current-session list; prevSession rows live in the history/`held` snapshot
+        // (never in pendingCtl) and non-prompt kinds are untouched.
+        if (!Array.isArray(d.status.held) && d.status.heldEpoch === undefined) {
+          next.pendingCtl = transitionPending(next.pendingCtl, (it) =>
+            it.kind === "prompt" && (it.state === "held" || it.state === "returned") ? null : it,
+          );
+        }
         if (acc !== undefined) {
           next.held = acc.rows;
           next.heldRev = acc.rev;
