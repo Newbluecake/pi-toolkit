@@ -32,10 +32,13 @@
   `execute(toolCallId, params, signal, onUpdate, ctx: ExtensionContext)`；`ctx.cwd`（:217）
   在调用时可用——**覆盖工具可以在 execute 内按当次 ctx.cwd 现建 definition**。
 - **detached 子进程跟踪**：内置 localOps 会 `trackDetachedChildPid(pid)`，进程退出才
-  untrack；pi 的 **RPC 模式入口**在 SIGTERM/SIGHUP 时 `killTrackedDetachedChildren()`
-  （dist/bundle rpc-entry，registerSignalHandlers）——即复用 localOps 的后台 job 在
-  **RPC 模式收到 SIGTERM 时会被 pi 杀掉**；交互模式无此钩子（进程退出不管 detached 子
-  进程）。记为已知边界（§11）。
+  untrack；`killTrackedDetachedChildren()` 在 pi 的 **interactive / print / rpc 三种模式**的
+  SIGTERM/SIGHUP 处理器里都会被调用（另有 interactive 的 `emergencyTerminalExit` 与
+  `uncaughtCrash`），*不是*只有 RPC（#73 调查，grep pi `dist/` 核实；本条此前「仅 RPC」已过时）。
+  但它只杀**登记过**的 pid：`trackDetachedChildPid` 不在 pi 的公共导出里，本仓自己
+  `spawn` 的 job 从未登记，所以 pi 不会杀我们的 job；TUI `/quit`、Ctrl+C/D 走
+  `shutdown()` → `runtimeHost.dispose()` → `process.exit(0)`，也不调用它。记为已知边界（§11）：
+  若将来改成复用 pi 的 localOps，`keep` 会在上述信号下被 pi 杀掉。
 - **本仓既有件**：settings 加载/校验（src/config/settings.ts:104-176 模式）；
   `/agent settings` SETTING_SPECS（src/commands/status.ts:121-147）；holder 转发 +
   assembly-only index.ts（src/index.ts）；buildSessionStack 组装 + previousX dispose
@@ -245,12 +248,13 @@ stack.ts notifier.reconcile）：
      `startedAt` + cmdline 比对，实现时按平台能力降级，降级路径只信 kill(pid,0) 并在
      status.json 标 `pidGuard: "weak"`）。
    - 存活且校验通过 → **reattach**：unref 轮询（默认 2s，可配）探测存活；死亡时若
-     旧 recorder 已写终态则采用，否则置 `lost`。
+     `<jobId>.exit` 存在则按其退出码落 `completed`/`failed`（#73；原稿写的 recorder 续体
+     从未实现），否则置 `lost`（即 `exited_unknown`）。
 3. **reload 同进程场景**（/reload、session 切换）：旧 stack dispose 时进程未被杀
-   （detached），但旧 manager 持有的 exitPromise 仍会在进程退出时 settle——dispose
-   给每个在途 job 留一个**纯 fs 的 recorder 续体**（只写终态 status.json，不碰 pi 句柄、
-   不通知）。新 stack reconcile 时优先读 recorder 写的终态，避免重复通知（status.json
-   `notifiedAt` 幂等键）。
+   （detached），live handle（含 tail 读取器、WriteStream、`processExitPromise`）经
+   `exportLocalJobs`→`adoptLocalJobs` 移交给新 manager，由新 manager 重新 `finalizeLocal`
+   并落终态（`notifiedAt` 幂等键避免重复通知）。_原稿设想的「纯 fs recorder 续体」在实现里
+   并不存在；整进程退出的情形由 #73 的 exit 文件覆盖（见 §3.6）。_
 4. 重启期间结束的 job：reconcile 发现 → 下次 session_start 注入一条合并摘要
    （一条 sendMessage 列全部，triggerTurn: true），保证完成通知不丢（弥补不走 notifier
    outbox 的缺口，§5）。
@@ -258,11 +262,30 @@ stack.ts notifier.reconcile）：
 ### 3.6 孤儿清理策略（session_shutdown）
 
 - 配置 `shutdownPolicy: "keep" | "kill"`，**默认 "keep"**：session_shutdown / /reload
-  不杀 job（进程 detached 本就独立于会话； recorder 续体负责落终态）。
+  不杀 job（进程 detached 本就独立于会话）。
+- **#73 修订——"keep" 现在在「pi 进程整体退出」下也成立。** 原设计只论证了 `/reload`（同进程：
+  live handle 经 `exportLocalJobs`→`adoptLocalJobs` 移交，管道没关）；**"detached" 只解决了
+  进程组/信号隔离，没解决 stdio 生命周期**：job 的 stdout/stderr 当时是接到 pi 的管道，pi
+  一退出读端关闭，job 下一次写就收到 SIGPIPE，退出码随 `wait()` 丢失，重启后只能报
+  `exited_unknown`，且日志为空（输出发生在 pi 退出之后）。正文里的「recorder 续体」代码里并不
+  存在（`/reload` 靠的是 live handle 移交）。现在的机制：
+  - job 的 stdio **直接是日志文件 fd**（`stdio: ["ignore", logFd, logFd]`），日志由 job 树自己写；
+    外层 `/bin/sh` 包装脚本在内层 shell 退出后把退出码原子写进 `<jobId>.exit`（tmp+rename），
+    并用 `dd bs=512 | cat >/dev/null` 在 job 树内部封顶（写满后继续排空，命令不收 SIGPIPE，
+    §3.3 的「写满后进程继续跑」语义不变）；
+  - pi 侧的 `stdout` 是日志文件的 tail 读取器，只负责 `onData` 实时中继与计数；
+  - 恢复（`recover()`、轮询 tick、`kill()` 无本地 handle、deadline 兜底）里凡判 `dead`
+    先读 `<jobId>.exit`：有 → `completed`/`failed(exitCode)` + footer + 正确的 `logBytes`，
+    并走正常的启动摘要通知；无（整组被 SIGKILL 等）→ 仍 `exited_unknown`。
+  - `JobRecord` schema 不变（`v:1`），exit 路径由 jobId 派生。
+  - 已知取舍：外部 `kill -TERM <shell>` 变成 `failed (exit 143)`；pi 不在场时没人执行
+    `timeout`/grace（deadline 仅存在于 pi 内存，重启后 adopt 的 job 不再有 deadline）。
+    实现细节与残余风险见 `docs/dev/bash-timeout-grace/README.md`「#73」一节。
 - `"kill"`：shutdown 时对 running job 按 §3.2 升级序列杀（有界 drain，
   `min(killGraceMs*3, 10_000)`，仿 index.ts:182-191）。
-- 注意边界：pi **RPC 模式** SIGTERM 时 pi 自己 killTrackedDetachedChildren 会杀我们
-  复用 localOps 启动的 job（§0）——"keep" 也保不住，文档写明。
+- 注意边界：pi 自己的 `killTrackedDetachedChildren`（interactive/print/rpc 的信号处理器都会调，
+  见 §0）只杀它登记过的 pid；本仓自己 spawn 的 job 未登记，所以不受影响（文档此前写成
+  「仅 RPC、会杀我们的 job」，已更正）。
 
 ### 3.7 并发上限
 
@@ -413,25 +436,25 @@ this call still applies and will kill the process.
 
 用例矩阵（覆盖探索结论 §4.3 的 12 类并细化）：
 
-| #   | 场景                                                                                                                                                   | 测试                                                         |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
-| C1  | 短命令透传：结果文本/details 与内置 formatOutput 逐字节一致（含截断页脚、exit≠0 抛错文案）                                                             | ops/bash-tool 单测（stub localOps）；断言 def.execute 被委托 |
-| C2  | 阈值到 → 返回 job_id 文案 + details；进程未杀（localOps stub 仍 pending）；日志已含阈值前输出                                                          | ops 单测 fake timers                                         |
-| C3  | 阈值前 abort 原 signal → relay 传导、抛 "aborted"、job 文件已 discard                                                                                  | ops 单测                                                     |
-| C4  | 阈值后 abort 原 signal → 进程不受影响的（relay 门关 + listener 摘）                                                                                    | ops 单测 + I2 真实 relay                                     |
-| C5  | 进入时已 aborted → 立即取消（透传内置语义）                                                                                                            | ops 单测                                                     |
-| C6  | timeout < 阈值 → "Command timed out after N seconds"，无 job 残留                                                                                      | ops 单测                                                     |
-| C7  | timeout > 阈值 → 转后台后被 localOps 杀 → 终态 timed_out + 通知                                                                                        | manager 单测                                                 |
-| C8  | 增量 output：offset 续读、tail N、截断标记、终态后仍可读                                                                                               | store/manager/job-tool 单测                                  |
-| C9  | kill：running → TERM→KILL 升级序列；已终态 → alreadyTerminal 幂等返回；未知 id → 抛候选错误；前缀解析 exact/唯一前缀/歧义                              | manager + job-tool 单测                                      |
-| C10 | 完成通知：退出/被杀/超时三态各触发一次（幂等 notifiedAt）；多 job 同 tick 合并一条                                                                     | manager 单测（spy onFinished）                               |
-| C11 | 持久化/恢复：reconcile 发现存活 pid → reattach 轮询 → 死亡落 lost（或采用 recorder 终态）；pid 复用（starttime 不符）→ lost；终态未通知 → 启动摘要一条 | manager 单测（mock kill(pid,0)/procfs 读取）+ I3             |
-| C12 | 日志上限：写满标记 + 停写 + status logTruncated；output 可读标记                                                                                       | store 单测                                                   |
-| C13 | shutdownPolicy：keep（dispose 后 recorder 续体仍落终态）/ kill（升级序列 + 有界 drain）                                                                | manager 单测 + I4                                            |
-| C14 | 并发：maxBackgroundJobs 达上限 → 不转后台继续前台；多 job 并行互不串日志                                                                               | manager/ops 单测                                             |
-| C15 | 设置解析：默认值、0 关闭、非法值回落；/agent settings set/reset bashJobs.*                                                                             | config/commands 单测                                         |
-| C16 | 关闭语义：enabled=false 或 autoBackgroundMs=0 → ops 完全透传（不建 job、relay 不存在、signal 直传断言 `===`）                                          | ops 单测                                                     |
-| C17 | win32 分支：kill 走 taskkill 参数、reattach 禁用置 lost（mock platform）                                                                               | kill/manager 单测                                            |
+| #   | 场景                                                                                                                                                                    | 测试                                                         |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| C1  | 短命令透传：结果文本/details 与内置 formatOutput 逐字节一致（含截断页脚、exit≠0 抛错文案）                                                                              | ops/bash-tool 单测（stub localOps）；断言 def.execute 被委托 |
+| C2  | 阈值到 → 返回 job_id 文案 + details；进程未杀（localOps stub 仍 pending）；日志已含阈值前输出                                                                           | ops 单测 fake timers                                         |
+| C3  | 阈值前 abort 原 signal → relay 传导、抛 "aborted"、job 文件已 discard                                                                                                   | ops 单测                                                     |
+| C4  | 阈值后 abort 原 signal → 进程不受影响的（relay 门关 + listener 摘）                                                                                                     | ops 单测 + I2 真实 relay                                     |
+| C5  | 进入时已 aborted → 立即取消（透传内置语义）                                                                                                                             | ops 单测                                                     |
+| C6  | timeout < 阈值 → "Command timed out after N seconds"，无 job 残留                                                                                                       | ops 单测                                                     |
+| C7  | timeout > 阈值 → 转后台后被 localOps 杀 → 终态 timed_out + 通知                                                                                                         | manager 单测                                                 |
+| C8  | 增量 output：offset 续读、tail N、截断标记、终态后仍可读                                                                                                                | store/manager/job-tool 单测                                  |
+| C9  | kill：running → TERM→KILL 升级序列；已终态 → alreadyTerminal 幂等返回；未知 id → 抛候选错误；前缀解析 exact/唯一前缀/歧义                                               | manager + job-tool 单测                                      |
+| C10 | 完成通知：退出/被杀/超时三态各触发一次（幂等 notifiedAt）；多 job 同 tick 合并一条                                                                                      | manager 单测（spy onFinished）                               |
+| C11 | 持久化/恢复：reconcile 发现存活 pid → reattach 轮询 → 死亡落 lost（#73 起：有 `.exit` 文件则采用其退出码）；pid 复用（starttime 不符）→ lost；终态未通知 → 启动摘要一条 | manager 单测（mock kill(pid,0)/procfs 读取）+ I3             |
+| C12 | 日志上限：写满标记 + 停写 + status logTruncated；output 可读标记                                                                                                        | store 单测                                                   |
+| C13 | shutdownPolicy：keep（dispose 后 job 与日志继续；终态由 live handle 移交或 `.exit` 文件恢复，#73）/ kill（升级序列 + 有界 drain）                                       | manager 单测 + I4                                            |
+| C14 | 并发：maxBackgroundJobs 达上限 → 不转后台继续前台；多 job 并行互不串日志                                                                                                | manager/ops 单测                                             |
+| C15 | 设置解析：默认值、0 关闭、非法值回落；/agent settings set/reset bashJobs.*                                                                                              | config/commands 单测                                         |
+| C16 | 关闭语义：enabled=false 或 autoBackgroundMs=0 → ops 完全透传（不建 job、relay 不存在、signal 直传断言 `===`）                                                           | ops 单测                                                     |
+| C17 | win32 分支：kill 走 taskkill 参数、reattach 禁用置 lost（mock platform）                                                                                                | kill/manager 单测                                            |
 
 集成（tests/integration/bash-jobs-wiring.test.ts，仿 wiring.test.ts 真实组件装配）：
 
@@ -450,7 +473,7 @@ this call still applies and will kill the process.
 | 其他扩展先注册同名 bash（首个注册 wins） | 无法检测；README 写明「pi-subagent 需在扩展加载序中靠前」；compat 层后续可探测 getToolDefinition("bash") 来源并 warn（列入开放问题）               |
 | pi 升级改 definition catch 分支吞掉哨兵  | I1 集成测试钉死「哨兵穿透」行为；pi peer 版本本就钉 >=0.84 <0.86                                                                                   |
 | 日志膨胀                                 | maxLogBytes 硬上限 + 截断标记 + 前台 job discard 不留痕；终态 job 文件 TTL 清理（reconcile 时删 > 7 天的终态 job，对齐 workflow replayTtlMs 惯例） |
-| 长进程跨 session/重启                    | JSON 状态文件 + reconcile + recorder 续体（§3.5）；RPC 模式 SIGTERM 会被 pi 杀（§0，文档写明）                                                     |
+| 长进程跨 session/重启                    | JSON 状态文件 + reconcile + `.exit` 退出码文件（§3.5/§3.6，#73）；pi 的 killTrackedDetachedChildren 只杀登记过的 pid，不含本仓 job（§0）           |
 | 并发 job 失控                            | maxBackgroundJobs 软上限（§3.7）；日志目录总大小不做硬治理（记录为已知缺口）                                                                       |
 | 误杀别人进程                             | kill 只接受本扩展发的 job_id；kill 前校验 status.json pid 与 starttime；reattach 的 job 校验失败置 lost 后**拒绝 kill**（宁可漏杀）                |
 | 模块级可变状态                           | 全部状态在 manager 实例；stack 重建走 previousBashJobs dispose 模式；timer 全 unref                                                                |

@@ -1,8 +1,8 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
 import { uptime } from "node:os";
-import { basename } from "node:path";
-import type { Readable } from "node:stream";
+import { basename, dirname } from "node:path";
+import { Readable } from "node:stream";
 import type { Millis } from "../core/types.js";
 import type { JobRecord } from "./types.js";
 
@@ -60,6 +60,32 @@ export interface SpawnedJob {
   readonly drainedPromise: Promise<DrainedResult>;
   /** `/proc/<pid>/stat` field 22 — Linux best-effort pid-reuse guard. */
   readonly procStartTime?: string;
+  /**
+   * Issue #73 (plan A+): `true` when the **child tree writes the log file
+   * itself** (file-fd stdio) and `stdout` is a tail reader over that same
+   * file. The manager must then never write log *data* a second time — only
+   * its own footer / truncation notices (O_APPEND keeps them ordered).
+   * `false` for the classic pipe tee.
+   */
+  readonly logWrittenByChild: boolean;
+  /** Absolute path of the wrapper's exit-code file (`<jobId>.exit`), file-fd mode only. */
+  readonly exitFilePath?: string;
+}
+
+/**
+ * Issue #73: per-job stdio topology. Present ⇒ the job's log is a plain file
+ * the child tree writes itself, the exit code is persisted by the wrapper, and
+ * `pid` is the outer `/bin/sh` (the group leader). Absent ⇒ the classic pipe
+ * tee (`createProcessPort` v1 semantics, kept for `tests/bash/process.test.ts`
+ * and any caller that wants plain pipes).
+ */
+export interface JobStdioOptions {
+  /** Absolute log path; opened `a`, mode 0o600, becomes the child's stdout+stderr. */
+  logPath: string;
+  /** Absolute exit-code path the wrapper writes (`tmp` + rename). */
+  exitPath: string;
+  /** Hard cap on log bytes the wrapper enforces with `head -c`; `<= 0` means no cap. */
+  maxLogBytes: number;
 }
 
 export type KillOutcome =
@@ -94,8 +120,12 @@ export interface ProcessPort {
    * leader. Resolves on the `spawn` event (so `pid` is real), rejects with the
    * spawn error (ENOENT, missing `cwd`, …) — the caller maps that to
    * `staged → failed`.
+   *
+   * `stdio` (issue #73) switches the job's I/O topology: with it the log is a
+   * file the child tree writes itself and `pid` is the outer `/bin/sh`
+   * wrapper; without it the child streams into pipes exactly as before.
    */
-  spawnJob(command: string, cwd: string, env?: NodeJS.ProcessEnv): Promise<SpawnedJob>;
+  spawnJob(command: string, cwd: string, env?: NodeJS.ProcessEnv, stdio?: JobStdioOptions): Promise<SpawnedJob>;
   /** TERM → grace → KILL on the whole process group. Idempotent. */
   killJobTree(pid: number, options?: KillJobTreeOptions): Promise<KillOutcome>;
   /** `kill(pid, 0)` liveness probe; EPERM counts as alive. */
@@ -123,6 +153,8 @@ export interface ProcessPortOptions {
   killPollMs?: Millis;
   /** Hard cap on post-exit pipe draining; defaults to 30 seconds. */
   drainTimeoutMs?: Millis;
+  /** Diagnostic sink; defaults to `console.warn` with the project prefix. */
+  warn?: (message: string) => void;
 }
 export interface ShellConfig {
   readonly shell: string;
@@ -333,18 +365,30 @@ function signalGroup(pid: number, signal: NodeJS.Signals): boolean {
 /**
  * Exit/drain watcher. The first exit or close event freezes the result and
  * settles processExitPromise; pipe draining continues independently.
+ *
+ * Issue #73: the streams are injectable. With file-fd stdio there are no pipes
+ * — `stdout` is a tail reader over the log file and `stderr` is an inert empty
+ * stream — so `child.stdout`/`child.stderr` are `null` and the `close` event
+ * must NOT be read as "both streams ended" (it fires with `exit`, before the
+ * tail has finished reading). `opts.streams` + `opts.closeEndsStreams: false`
+ * express exactly that; the default reproduces the pipe behaviour byte for
+ * byte.
  */
 export function watchChild(
   child: ChildProcess,
   drainTimeoutMs: Millis,
+  opts: { streams?: { stdout: Readable | null; stderr: Readable | null }; closeEndsStreams?: boolean } = {},
 ): {
   processExitPromise: Promise<JobExit>;
   drainedPromise: Promise<DrainedResult>;
 } {
+  const stdout = opts.streams ? opts.streams.stdout : child.stdout;
+  const stderr = opts.streams ? opts.streams.stderr : child.stderr;
+  const closeEndsStreams = opts.closeEndsStreams ?? true;
   let resultCaptured = false;
   let exited = false;
-  let stdoutEnded = child.stdout === null;
-  let stderrEnded = child.stderr === null;
+  let stdoutEnded = stdout === null;
+  let stderrEnded = stderr === null;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let capTimer: ReturnType<typeof setTimeout> | undefined;
   let resolveExit!: (exit: JobExit) => void;
@@ -367,15 +411,15 @@ export function watchChild(
     child.removeListener("error", onError);
     child.removeListener("exit", onExit);
     child.removeListener("close", onClose);
-    child.stdout?.removeListener("end", onStdoutEnd);
-    child.stderr?.removeListener("end", onStderrEnd);
-    child.stdout?.removeListener("data", onData);
-    child.stderr?.removeListener("data", onData);
+    stdout?.removeListener("end", onStdoutEnd);
+    stderr?.removeListener("end", onStderrEnd);
+    stdout?.removeListener("data", onData);
+    stderr?.removeListener("data", onData);
   };
   const finishDrain = (stop: DrainStop): void => {
     cleanup();
-    child.stdout?.destroy();
-    child.stderr?.destroy();
+    stdout?.destroy();
+    stderr?.destroy();
     resolveDrained({ exit: exitResult, stop });
   };
   const armIdleTimer = (): void => {
@@ -395,7 +439,11 @@ export function watchChild(
     resolveExit(exitResult);
     maybeEnd();
     if (!stdoutEnded || !stderrEnded) {
-      armIdleTimer();
+      // Issue #73: a file tail must never be cut 100ms after exit. The bytes
+      // are already on disk; the reader only has to walk them, so ending is
+      // its own business (first EOF after exit, or the cap).
+      // The absolute `drainTimeoutMs` bound below still guarantees no wedge.
+      if (closeEndsStreams) armIdleTimer();
       // The cap arms exactly once and is never re-armed: it is the absolute
       // bound that keeps a perpetually chatty detached descendant from
       // wedging the event loop (the idle timer alone would defer forever).
@@ -413,8 +461,10 @@ export function watchChild(
   };
   const onExit = (code: number | null, signal: NodeJS.Signals | null): void => captureExit(code, signal);
   const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
-    stdoutEnded = true;
-    stderrEnded = true;
+    if (closeEndsStreams) {
+      stdoutEnded = true;
+      stderrEnded = true;
+    }
     captureExit(code, signal);
     maybeEnd();
   };
@@ -426,7 +476,10 @@ export function watchChild(
    * `drainTimeoutMs` >= EXIT_STDIO_GRACE_MS.
    */
   const onData = (): void => {
-    if (resultCaptured) armIdleTimer();
+    // File-fd mode: the tail's own quiet window is the only ending rule (see
+    // `createLogTail`); re-arming the 100ms pipe cutoff here would truncate it
+    // the moment a byte arrives after exit.
+    if (resultCaptured && closeEndsStreams) armIdleTimer();
   };
   const onError = (error: Error): void => {
     if (resultCaptured) return;
@@ -437,25 +490,431 @@ export function watchChild(
     finishDrain("error");
   };
 
-  child.stdout?.once("end", onStdoutEnd);
-  child.stderr?.once("end", onStderrEnd);
-  child.stdout?.on("data", onData);
-  child.stderr?.on("data", onData);
+  stdout?.once("end", onStdoutEnd);
+  stderr?.once("end", onStderrEnd);
+  stdout?.on("data", onData);
+  stderr?.on("data", onData);
   child.once("error", onError);
   child.once("exit", onExit);
   child.once("close", onClose);
   return { processExitPromise, drainedPromise };
 }
 
+/**
+ * Issue #73 (plan A+, `/tmp/i73/report.md` §6.1): the outer `/bin/sh` job
+ * wrapper. `$0` is `_`, `$1` the user command, `$2` the exit file, `$3` the
+ * block cap, `$4` the resolved shell and `$5` the exit file's directory —
+ * **the command is passed as a positional parameter, never interpolated**, so
+ * nothing the model writes can escape into wrapper syntax.
+ *
+ *  1. run the command in `$4 -c` and remember `$?`;
+ *  2. write that code to `$2.tmp` then `mv` it onto `$2` — atomic, so a
+ *     concurrent reader never sees a half-written number. `mkdir -p "$5"`
+ *     runs immediately before the write because the directory can be swept
+ *     while the job runs (a fork/handoff moves the log and GCs the old
+ *     session directory), and a missing one would silently cost the code;
+ *  3. merge stderr into stdout and funnel it through `dd bs=512 count=$3` +
+ *     `cat >/dev/null`: the cap is enforced **inside the job tree**, and once
+ *     the cap is hit the pipe keeps being drained, so the command never gets
+ *     SIGPIPE and keeps running (§3.3 "写满后进程继续跑" semantics). `dd`
+ *     (not `head -c`) because GNU `head` buffers a whole 8KiB block before
+ *     writing, which would make a running job's log unreadable until it had
+ *     produced that much — `dd` writes every block it copies;
+ *  4. `exit` with the code read back from the file, so the `exit` event's code
+ *     and the persisted file always agree while pi is alive.
+ *
+ * Everything here only touches the job's own files and its own pipe: nothing
+ * outlives the job if pi exits, which is the whole point (the v1 pipe tee died
+ * with SIGPIPE the moment pi's read end closed).
+ */
+export const JOB_WRAPPER =
+  '{ "$4" -c "$1"; c=$?; mkdir -p "$5" 2>/dev/null; ' +
+  'printf "%s\\n" "$c" > "$2.tmp" && mv "$2.tmp" "$2"; } 2>&1 ' +
+  '| { dd bs=512 count="$3" 2>/dev/null; cat >/dev/null; }; IFS= read -r c < "$2"; exit "${c:-1}"';
+
+/**
+ * Degraded wrapper for hosts without `dd`/`cat` (R5): same exit-code
+ * contract, **no byte cap** — the log fd is used directly. Reached only when
+ * the capability probe below fails; the manager still sees
+ * `logWrittenByChild: true` and applies its own (weaker) bookkeeping.
+ */
+export const JOB_WRAPPER_UNCAPPED =
+  '{ "$4" -c "$1"; c=$?; mkdir -p "$5" 2>/dev/null; ' +
+  'printf "%s\\n" "$c" > "$2.tmp" && mv "$2.tmp" "$2"; } 2>&1; IFS= read -r c < "$2"; exit "${c:-1}"';
+
+/**
+ * Read the wrapper's exit-code file (`<jobId>.exit`). `undefined` means "no
+ * authoritative code": file missing (job killed/SIGKILLed before the wrapper
+ * could write it, or still running), unreadable, empty, or not an integer.
+ * Never throws — this is a recovery-path read and must stay total.
+ */
+export function readJobExitFile(path: string): number | undefined {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+  const first = text.split("\n", 1)[0]?.trim();
+  if (first === undefined || !/^-?\d+$/.test(first)) return undefined;
+  const parsed = Number.parseInt(first, 10);
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 255 ? parsed : undefined;
+}
+
+/**
+ * Block size of the wrapper's `dd` cap. Two consequences, both deliberate:
+ * `dd` writes each block as it arrives (a `head -c` would buffer 8KiB and make
+ * a live job's log unreadable until it filled one), and the log may overshoot
+ * `maxLogBytes` by at most one block — the truncation witness (a body of
+ * exactly `maxLogBytes` bytes can only be told apart from a capped one when
+ * `maxLogBytes` is not a multiple of this).
+ */
+export const LOG_CAP_BLOCK_BYTES = 512;
+/** The wrapper copies one block more than the cap needs, so a capped log is detectable. */
+export const LOG_CAP_OVERSHOOT_BYTES = 1;
+
+/** Tail-reader tunables (issue #73). Exported for tests, not for callers. */
+export const LOG_TAIL_POLL_MS = 50;
+export const LOG_TAIL_IDLE_POLL_MS = 250;
+export const LOG_TAIL_CHUNK_BYTES = 256 * 1024;
+
+/**
+ * Issue #73: a `Readable` that tails the job's log file from byte 0.
+ *
+ * Why a file tail instead of a pipe: with file-fd stdio the child tree writes
+ * the log itself, so pi has nothing to read from — and nothing to lose when pi
+ * exits. The tail only restores the *streaming* half of the old contract
+ * (`onData` relay, the tool layer's foreground output).
+ *
+ * Ending rules (all timers `unref()`ed, one per job):
+ * - `maxBytes` reached → stop reading (the cap is the wrapper's `dd`; the
+ *   manager turns this into the truncation notice + `truncated` flag);
+ * - process exited and a read hit EOF → `push(null)`, **immediately**. No
+ *   quiet window is needed: the outer `sh` only exits after its `dd | cat`
+ *   pipeline has, and that pipeline only ends once every writer of the job's
+ *   merged output closed — so at `exit` the file is already final. (Without the
+ *   capping pipeline — the no-`dd` degraded wrapper — a stray descendant could
+ *   still write; that is best effort, R7.) The `exit` event also *wakes* the
+ *   poll, so a short command does not wait out an idle-poll interval;
+ * - `destroy()` → timer cleared, fd closed, no further reads.
+ *
+ * Cost: one `readSync` + one `setTimeout` per job per poll. Idle (running but
+ * silent) polls at `LOG_TAIL_IDLE_POLL_MS`, and every successful read keeps the
+ * fast cadence, so a chatty job stays at the old ~50ms streaming latency while
+ * a quiet one costs 4 wake-ups a second.
+ */
+export function createLogTail(
+  path: string,
+  processExited: () => boolean,
+  options: {
+    maxBytes?: number;
+    pollMs?: Millis;
+    idlePollMs?: Millis;
+    chunkBytes?: number;
+    /** Emits `exit` when the process is gone: wakes the poll instead of waiting out the idle interval. */
+    wakeOn?: { once(event: "exit", listener: () => void): unknown };
+  } = {},
+): Readable {
+  const pollMs = options.pollMs ?? LOG_TAIL_POLL_MS;
+  const idlePollMs = options.idlePollMs ?? LOG_TAIL_IDLE_POLL_MS;
+  const chunkBytes = Math.max(1, Math.trunc(options.chunkBytes ?? LOG_TAIL_CHUNK_BYTES));
+  const maxBytes = options.maxBytes !== undefined && options.maxBytes > 0 ? Math.trunc(options.maxBytes) : Infinity;
+
+  let fd: number | undefined;
+  let offset = 0;
+  let destroyed = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const stop = (): void => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+      fd = undefined;
+    }
+  };
+
+  /**
+   * Single-flight latch. `_read()` fires as soon as the consumer attaches a
+   * `data` listener, which can land while the timer-armed poll is already
+   * scheduled or running; without the latch both read the same offset and
+   * every chunk is emitted twice (found live in the #73 integration run).
+   */
+  let pumping = false;
+
+  const stream = new Readable({
+    read() {
+      if (destroyed) return;
+      // `_read` is called again whenever the consumer drains the buffer.
+      if (timer === undefined && !pumping) pump();
+    },
+    destroy(error, callback) {
+      destroyed = true;
+      stop();
+      callback(error ?? null);
+    },
+  });
+
+  /** One poll: read what is there, decide whether/when to poll again. */
+  const pump = (): void => {
+    timer = undefined;
+    if (destroyed || pumping) return;
+    pumping = true;
+    try {
+      pumpOnce();
+    } finally {
+      pumping = false;
+    }
+  };
+
+  const pumpOnce = (): void => {
+    if (destroyed) return;
+    if (fd === undefined) {
+      try {
+        fd = openSync(path, "r");
+      } catch {
+        // The log file is created before spawn, so a missing file means the job
+        // is gone or the directory vanished: nothing to stream once it exited.
+        if (processExited()) {
+          stream.push(null);
+          return;
+        }
+        arm(idlePollMs);
+        return;
+      }
+    }
+    const room = maxBytes === Infinity ? chunkBytes : Math.max(0, Math.min(chunkBytes, maxBytes - offset));
+    if (room <= 0) {
+      stream.push(null);
+      return;
+    }
+    const buffer = Buffer.allocUnsafe(room);
+    let bytesRead = 0;
+    try {
+      bytesRead = fd === undefined ? 0 : readSync(fd, buffer, 0, room, offset);
+    } catch {
+      if (processExited()) {
+        stream.push(null);
+        return;
+      }
+      arm(idlePollMs);
+      return;
+    }
+    if (bytesRead > 0) {
+      offset += bytesRead;
+      stream.push(buffer.subarray(0, bytesRead));
+      // More may be waiting (a chunk was a full read) or the writer is chatty:
+      // stay on the fast cadence; at exit, keep reading until EOF.
+      arm(processExited() ? 0 : pollMs);
+      return;
+    }
+    if (processExited()) {
+      stream.push(null);
+      return;
+    }
+    arm(idlePollMs);
+  };
+
+  const arm = (ms: Millis): void => {
+    if (destroyed || timer !== undefined) return;
+    timer = setTimeout(pump, Math.max(0, ms));
+    (timer as { unref?: () => void }).unref?.();
+  };
+
+  options.wakeOn?.once("exit", () => {
+    if (destroyed) return;
+    // Cancel the pending idle wait and poll right away.
+    if (timer !== undefined && !pumping) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    arm(0);
+  });
+  arm(0);
+  return stream;
+}
+
+/**
+ * Empty stream that ends by itself: the `stderr` slot in file-fd mode.
+ *
+ * `setImmediate(() => push(null))` instead of `_read() { push(null) }`:
+ * `_read` only runs once a consumer reads, and `watchChild`'s "both streams
+ * ended" test (`maybeEnd`) can be reached long before that — with a lazy push
+ * the drain never settled at all (found live in the #73 integration run).
+ * `Readable.from([])` is not a substitute either: it also waits for its first
+ * read. An explicit deferred `push(null)` ends the stream for good.
+ */
+function emptyStream(): Readable {
+  const stream = new Readable({ read() {} });
+  // `null` on the next turn, whether or not anybody reads: `watchChild` treats
+  // "stderr ended" as half of its settle condition and never reads stderr in
+  // this mode, so a `push(null)` from `_read` would never happen.
+  setImmediate(() => {
+    if (!stream.destroyed) stream.push(null);
+  });
+  return stream;
+}
+
+/**
+ * R5 capability probe for the capping wrapper: `dd` and `cat` must exist.
+ * Cached per port instance (one `sh` spawn per activation, not per job) and
+ * degraded to the uncapped wrapper with a warning rather than refusing to
+ * work — a missing `head` must not cost the user their background job.
+ */
+function hasCapTools(warn: (message: string) => void, cache: { value: boolean | undefined }): boolean {
+  if (cache.value !== undefined) return cache.value;
+  let ok = false;
+  try {
+    const result = spawnSync("/bin/sh", ["-c", "command -v dd >/dev/null 2>&1 && command -v cat >/dev/null 2>&1"], {
+      timeout: 5_000,
+    });
+    ok = result.status === 0;
+  } catch {
+    ok = false;
+  }
+  cache.value = ok;
+  if (!ok) {
+    warn(
+      "bash auto-background: `dd`/`cat` not found — background job logs are no longer capped " +
+        "(the command still runs; only the byte limit is lost)",
+    );
+  }
+  return ok;
+}
+
 export function createProcessPort(options: ProcessPortOptions = {}): ProcessPort {
   const graceDefault = options.graceMs ?? DEFAULT_KILL_GRACE_MS;
   const pollMs = options.killPollMs ?? DEFAULT_KILL_POLL_MS;
+  const warn = options.warn ?? ((message: string) => console.warn(`[pi-subagent] ${message}`));
+  /** Per-port latch for the `head`/`cat` probe (never module scope). */
+  const capTools = { value: undefined as boolean | undefined };
 
-  async function spawnJob(command: string, cwd: string, env?: NodeJS.ProcessEnv): Promise<SpawnedJob> {
+  async function spawnJob(
+    command: string,
+    cwd: string,
+    env?: NodeJS.ProcessEnv,
+    stdio?: JobStdioOptions,
+  ): Promise<SpawnedJob> {
     // 2026-10-17 revision: resolved per call from the injected settings
     // (explicit `bashJobs.shellPath` → pi's `shellPath` → pi's default
     // chain); `$SHELL` is no longer consulted.
     const { shell, args } = resolveShell(options.shellPath, options.piShellPath);
+    const drainTimeoutMs =
+      Number.isFinite(options.drainTimeoutMs) && (options.drainTimeoutMs ?? 0) >= 0
+        ? Math.trunc(options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS)
+        : DEFAULT_DRAIN_TIMEOUT_MS;
+
+    // Issue #73 (plan A+): file-fd mode. The job's stdio *is* the log file, so
+    // a pi exit cannot close it, and the wrapper persists the exit code in the
+    // job's own directory. `pid` becomes the outer `/bin/sh` (still the group
+    // leader, so `killJobTree` semantics are unchanged).
+    if (stdio !== undefined) {
+      const cap = Number.isFinite(stdio.maxLogBytes) && stdio.maxLogBytes > 0 ? Math.trunc(stdio.maxLogBytes) : 0;
+      const wrapper = cap > 0 && hasCapTools(warn, capTools) ? JOB_WRAPPER : JOB_WRAPPER_UNCAPPED;
+      // `dd` copies whole blocks: asking for ceil((cap+1)/bs) blocks lets the
+      // file grow just past `cap` (the overshoot witness) while never writing
+      // more than one block worth of extra bytes.
+      const capBlocks = cap > 0 ? Math.ceil((cap + LOG_CAP_OVERSHOOT_BYTES) / LOG_CAP_BLOCK_BYTES) : 0;
+      const capArg = String(capBlocks);
+      /** Largest file the wrapper may leave behind. */
+      const capFileBytes = capBlocks * LOG_CAP_BLOCK_BYTES;
+      // `openSync` before spawn: the fd is inherited (dup'd) by the child, so a
+      // missing directory/permission error becomes a spawn-level rejection the
+      // manager already maps to `staged → failed`. O_APPEND keeps the child's
+      // writes and the manager's footer on one shared offset.
+      const logFd = openSync(stdio.logPath, "a", 0o600);
+      let child: ChildProcess;
+      try {
+        child = spawn(
+          "/bin/sh",
+          ["-c", wrapper, "_", command, stdio.exitPath, capArg, shell, dirname(stdio.exitPath)],
+          {
+            cwd,
+            detached: isPosix(),
+            env: env ?? process.env,
+            stdio: ["ignore", logFd, logFd],
+            windowsHide: true,
+          },
+        );
+      } catch (error) {
+        try {
+          closeSync(logFd);
+        } catch {
+          /* ignore */
+        }
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+      // The child holds its own duplicate; ours must not leak per spawn.
+      try {
+        closeSync(logFd);
+      } catch {
+        /* ignore */
+      }
+
+      let exited = false;
+      const exitPromise = child.exitCode !== null || child.signalCode !== null;
+      if (exitPromise) exited = true;
+      child.once("exit", () => {
+        exited = true;
+      });
+      // One byte past the cap: the wrapper caps the file at `cap`, so a file
+      // that holds `cap + 1` bytes proves truncation happened, while a command
+      // that produced exactly `cap` bytes reads as "not truncated". Without the
+      // overshoot the two are indistinguishable (issue #73 §6.1 item 3).
+      const stdout = createLogTail(stdio.logPath, () => exited, {
+        wakeOn: child,
+        ...(cap > 0 ? { maxBytes: capFileBytes } : {}),
+      });
+      const stderr = emptyStream();
+      const watched = watchChild(child, drainTimeoutMs, { streams: { stdout, stderr }, closeEndsStreams: false });
+      void watched.processExitPromise.catch(() => {});
+      void watched.drainedPromise.catch(() => {});
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const onSpawn = (): void => {
+            child.removeListener("error", onError);
+            resolve();
+          };
+          const onError = (error: Error): void => {
+            child.removeListener("spawn", onSpawn);
+            reject(error);
+          };
+          child.once("spawn", onSpawn);
+          child.once("error", onError);
+        });
+      } catch (error) {
+        stdout.destroy();
+        stderr.destroy();
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+
+      const pid = child.pid;
+      if (pid === undefined) {
+        stdout.destroy();
+        stderr.destroy();
+        throw new Error(`failed to spawn /bin/sh wrapper for ${shell}: no pid`);
+      }
+      const procStartTime = readProcStartTime(pid);
+      return {
+        pid,
+        pgid: readProcGroup(pid) ?? pid,
+        stdout,
+        stderr,
+        processExitPromise: watched.processExitPromise,
+        drainedPromise: watched.drainedPromise,
+        logWrittenByChild: true,
+        exitFilePath: stdio.exitPath,
+        ...(procStartTime !== undefined ? { procStartTime } : {}),
+      };
+    }
+
     const child = spawn(shell, [...args, command], {
       cwd,
       // POSIX: detached makes the child a process-group leader (pgid === pid),
@@ -470,12 +929,7 @@ export function createProcessPort(options: ProcessPortOptions = {}): ProcessPort
     // Bind the exit watcher before awaiting `spawn` so an immediate exit is
     // never missed, and keep an inert catch on it: the promise may be handed
     // to an owner that only consumes it much later.
-    const { processExitPromise, drainedPromise } = watchChild(
-      child,
-      Number.isFinite(options.drainTimeoutMs) && (options.drainTimeoutMs ?? 0) >= 0
-        ? Math.trunc(options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS)
-        : DEFAULT_DRAIN_TIMEOUT_MS,
-    );
+    const { processExitPromise, drainedPromise } = watchChild(child, drainTimeoutMs);
     void processExitPromise.catch(() => {});
     void drainedPromise.catch(() => {});
 
@@ -514,6 +968,7 @@ export function createProcessPort(options: ProcessPortOptions = {}): ProcessPort
       stderr: child.stderr,
       processExitPromise,
       drainedPromise,
+      logWrittenByChild: false,
       ...(procStartTime !== undefined ? { procStartTime } : {}),
     };
   }

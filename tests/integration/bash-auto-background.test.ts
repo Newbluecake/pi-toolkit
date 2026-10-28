@@ -426,6 +426,12 @@ describe("I3 fork handoff exit code", () => {
         { timeout: WAIT_TIMEOUT_MS, interval: 50 },
       );
       expect((await loadRecord(second.manager, jobId)).exitCode).toBe(7);
+      // Wait for this job's own notification to land before the test ends:
+      // the notice is delivered by the *forked* session's manager, and a late
+      // one would otherwise surface inside the next test's harness (issue #73
+      // integration run: I4 saw two notices, one of them this job's).
+      const ownNotices = () => notices(second.host).filter((n) => n.message.details?.jobId === jobId);
+      await vi.waitFor(() => expect(ownNotices().length).toBe(1), { timeout: WAIT_TIMEOUT_MS, interval: 50 });
     },
     60_000,
   );

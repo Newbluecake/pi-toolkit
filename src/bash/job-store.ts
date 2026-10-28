@@ -52,6 +52,14 @@ export interface JobStore {
   recordPath(jobId: JobId): string;
   /** Absolute path of the job's merged stdout+stderr log (§3.4 D3). */
   logPath(jobId: JobId): string;
+  /**
+   * Absolute path of the job's **exit-code file** (issue #73, plan A+): the
+   * outer `sh` wrapper writes the inner shell's status here (tmp + rename), so
+   * the code survives a pi process that is no longer around to `wait()`.
+   * Named `<jobId>.exit` — derived from the job id, deliberately NOT part of
+   * the `JobRecord` schema (`v: 1` unchanged).
+   */
+  exitPath(jobId: JobId): string;
   /** Atomically persist a record (tmp + rename). Writes are serialized per store. */
   save(record: JobRecord): Promise<void>;
   /** `undefined` when the file is missing or unreadable (a WARN is emitted for the latter). */
@@ -80,13 +88,14 @@ export interface JobStore {
   ): Promise<JobRecord | undefined>;
   /** Persist the `bash_job output` cursor (§4.3). Monotonic: never moves backwards. */
   setReadCursor(jobId: JobId, cursor: number): Promise<JobRecord | undefined>;
-  /** Delete the record and its log file. Idempotent. */
+  /** Delete the record, its log file and its exit file. Idempotent. */
   remove(jobId: JobId): Promise<void>;
   /**
-   * Full-directory sweep: expired terminal job records (with their logs),
-   * plus the litter that never reaches `records` — unreadable/badly named
-   * `.json` files, orphan `.log` files and crashed atomic-write `.tmp` files.
-   * Only `.json` / `.log` / `.tmp` names are ever touched (safety boundary).
+   * Full-directory sweep: expired terminal job records (with their logs and
+   * exit files), plus the litter that never reaches `records` —
+   * unreadable/badly named `.json` files, orphan `.log` / `.exit` files and
+   * crashed atomic-write `.tmp` / `.exit.tmp` files. Only `.json` / `.log` /
+   * `.exit` / `.tmp` / `.exit.tmp` names are ever touched (safety boundary).
    */
   pruneExpired(options?: PruneOptions): Promise<PruneResult>;
 }
@@ -94,6 +103,9 @@ export interface JobStore {
 const RECORD_SUFFIX = ".json";
 const LOG_SUFFIX = ".log";
 const TMP_SUFFIX = ".tmp";
+/** Issue #73: the wrapper's atomic exit-code write (`<jobId>.exit` / `.exit.tmp`). */
+const EXIT_SUFFIX = ".exit";
+const EXIT_TMP_SUFFIX = `${EXIT_SUFFIX}${TMP_SUFFIX}`;
 
 /**
  * bash-timeout-grace plan §2.5 "共享写链": every `JobStore` instance writing to
@@ -230,6 +242,7 @@ export function createJobStore(options: JobStoreOptions): JobStore {
   const warn = options.warn ?? ((message: string) => console.warn(`[pi-subagent] ${message}`));
   const recordPath = (jobId: JobId) => join(dir, `${jobId}${RECORD_SUFFIX}`);
   const logPath = (jobId: JobId) => join(dir, `${jobId}${LOG_SUFFIX}`);
+  const exitPath = (jobId: JobId) => join(dir, `${jobId}${EXIT_SUFFIX}`);
 
   /**
    * Every write/read-modify-write for this store's `dir` goes through the
@@ -361,6 +374,11 @@ export function createJobStore(options: JobStoreOptions): JobStore {
       const record = await readRecord(jobId);
       await unlink(recordPath(jobId)).catch(() => undefined);
       await unlink(logPath(jobId)).catch(() => undefined);
+      // Issue #73: the wrapper's exit-code artefacts are the job's too —
+      // left behind they would resurface under a future job that happens to
+      // reuse the id (and they are pure litter once the record is gone).
+      await unlink(exitPath(jobId)).catch(() => undefined);
+      await unlink(`${exitPath(jobId)}${TMP_SUFFIX}`).catch(() => undefined);
       const alternate = record?.logPath;
       if (alternate === undefined || alternate === logPath(jobId)) return;
       const root = extraLogRoot === undefined ? undefined : resolve(extraLogRoot);
@@ -413,9 +431,10 @@ export function createJobStore(options: JobStoreOptions): JobStore {
 
   /**
    * Whole-directory classification sweep (§15). Exactly one `readdir`, a `stat`
-   * only for entries whose age cannot be read from a record, and three
-   * suffixes of blast radius: `.json`, `.log`, `.tmp`. Anything else in `dir`
-   * — whatever the user or another tool put there — is left alone.
+   * only for entries whose age cannot be read from a record, and this
+   * file's suffixes of blast radius: `.json`, `.log`, `.tmp`, `.exit`,
+   * `.exit.tmp`. Anything else in `dir` — whatever the user or another tool
+   * put there — is left alone.
    */
   async function prune(pruneOptions: PruneOptions): Promise<PruneResult> {
     const isTracked = pruneOptions.isTracked ?? (() => false);
@@ -437,6 +456,9 @@ export function createJobStore(options: JobStoreOptions): JobStore {
       // Crash debris from `writeAtomic`; swept even when retention is off,
       // because a tmp file is never a job artefact the user asked us to keep.
       if (entry.endsWith(TMP_SUFFIX)) {
+        // Covers both the store's own `.json.<pid>.<now>.<seq>.tmp` debris and
+        // the wrapper's `<jobId>.exit.tmp` (same TTL, same "interrupted atomic
+        // write" reason — a half-written exit file is never actionable).
         const age = await fileAge(entry, now);
         if (age !== undefined && age >= TMP_RETENTION_MS) {
           await dropFile(entry, "interrupted atomic write", files);
@@ -478,6 +500,21 @@ export function createJobStore(options: JobStoreOptions): JobStore {
         const age = await fileAge(entry, now);
         if (age === undefined || age < retentionMs) continue;
         await dropFile(entry, "orphan log with no job record", files);
+        continue;
+      }
+
+      if (entry.endsWith(EXIT_SUFFIX)) {
+        // Note the order above: `.exit.tmp` was already handled by the `.tmp`
+        // branch, so reaching here means a completed `<jobId>.exit`.
+        const jobId = entry.slice(0, -EXIT_SUFFIX.length);
+        if (!isJobId(jobId)) continue;
+        // Same rule as logs: a record or an in-memory entry owns it. An exit
+        // file with neither is the only remnant of a job whose record was
+        // already swept (or never landed) — junk, once aged.
+        if (present.has(`${jobId}${RECORD_SUFFIX}`) || isTracked(jobId)) continue;
+        const age = await fileAge(entry, now);
+        if (age === undefined || age < retentionMs) continue;
+        await dropFile(entry, "orphan exit file with no job record", files);
       }
       // Any other suffix: not ours. Never touched.
     }
@@ -488,6 +525,7 @@ export function createJobStore(options: JobStoreOptions): JobStore {
     dir,
     recordPath,
     logPath,
+    exitPath,
     loadAll,
     update,
     upsert,

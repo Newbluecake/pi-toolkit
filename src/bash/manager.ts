@@ -1,5 +1,6 @@
 import { createWriteStream, type WriteStream } from "node:fs";
-import { mkdir, open, stat } from "node:fs/promises";
+import { appendFile, mkdir, open, stat } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import type { Clock, TimerHandle } from "../core/clock.js";
 import type { Millis } from "../core/types.js";
 import {
@@ -12,7 +13,14 @@ import {
 } from "./deadline.js";
 import { newJobId } from "./ids.js";
 import type { JobStore } from "./job-store.js";
-import type { JobExit, KillOutcome, ProcessPort, SpawnedJob } from "./process.js";
+import {
+  readJobExitFile,
+  type JobExit,
+  type JobStdioOptions,
+  type KillOutcome,
+  type ProcessPort,
+  type SpawnedJob,
+} from "./process.js";
 import {
   createJobRecord,
   formatJobLogFooter,
@@ -222,6 +230,12 @@ export interface RecoverSummary {
   readonly adopted: readonly JobId[];
   /** `running` jobs whose pid was certainly gone (exit code lost). */
   readonly exitedUnknown: readonly JobId[];
+  /**
+   * Issue #73: `running` jobs whose pid was gone but whose wrapper-written
+   * exit file survived — settled `completed`/`failed(exitCode)` with their
+   * footer and byte count, and announced through the normal notice channel.
+   */
+  readonly recovered: readonly JobId[];
   /** `running` jobs whose pid could not be attributed — marked, never killed. */
   readonly orphaned: readonly JobId[];
   /** `staged` jobs whose spawn outcome was lost with the previous process. */
@@ -428,6 +442,18 @@ export interface LocalHandle {
   /** Explicit ownership token for cross-stack finalization. */
   owner: object;
   termination?: "killed" | "timed_out";
+  /**
+   * Issue #73: the job tree writes the log file itself (`spawned.logWrittenByChild`),
+   * so the manager's WriteStream carries only its own footer / truncation
+   * notice and `written` counts bytes *observed* (tail reads or the final file
+   * size), not bytes it pushed. Cached on the handle so the hot path in
+   * `teeChunk` never re-reads through `spawned`.
+   */
+  readonly logWrittenByChild: boolean;
+  /** Body bytes the wrapper's cap allows, before the footer/notice (§3.4). */
+  readonly maxBodyBytes: number;
+  /** Idempotency latch for the file-fd truncation notice (issue #73). */
+  capNoticeWritten?: boolean;
 }
 
 interface Waiter {
@@ -714,6 +740,8 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       return;
     }
     if (ownership === "dead") {
+      // Issue #73: prefer the wrapper's own exit code before conceding loss.
+      if ((await settleFromExitFile(jobId, record)) !== undefined) return;
       await applyTransition(jobId, "exited_unknown", { at: clock.now(), exitCode: null });
       return;
     }
@@ -841,6 +869,9 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       putRecord(fresh);
       return;
     }
+    // Issue #73: "pid gone" no longer implies "exit code lost" — the job tree
+    // persists its own status. Only a job with no exit file is unknown.
+    if ((await settleFromExitFile(record.jobId, record)) !== undefined) return;
     await applyTransition(record.jobId, "exited_unknown", { at: clock.now(), exitCode: null });
   }
 
@@ -940,6 +971,23 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       }
     }
     if (handle.truncated) return;
+    // Issue #73: with file-fd stdio the job tree already wrote these bytes to
+    // the log file. This stream is only *observed* here — re-pushing it would
+    // duplicate every line. The cap is still decided in this process (the
+    // wrapper caps on disk; we only report the fact).
+    if (handle.logWrittenByChild) {
+      handle.written += buffer.length;
+      if (buffer.length > 0) handle.atLineStart = buffer[buffer.length - 1] === 0x0a;
+      if (handle.written > handle.maxBodyBytes) {
+        handle.truncated = true;
+        const bytes = handle.written;
+        void applyPatch(entry.record.jobId, (current) =>
+          current.outputTruncated ? undefined : { ...current, outputTruncated: true, logBytes: bytes },
+        ).catch(() => undefined);
+      }
+      entry.record = { ...entry.record, logBytes: handle.written, outputTruncated: handle.truncated };
+      return;
+    }
     const room = Math.max(0, maxLogBytes - handle.written);
     const overflow = buffer.length > room;
     pushWrite(handle, overflow ? buffer.subarray(0, room) : buffer);
@@ -991,8 +1039,150 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     entry.record = { ...entry.record, logBytes: handle.written };
   }
 
+  /**
+   * Issue #73: settle a job from the wrapper's exit file, for paths where
+   * nothing is left to `wait()` — recovery, the adopted-liveness poll, a kill
+   * of a job whose local handle is gone, and the deadline fallback.
+   *
+   * Returns `undefined` when there is no authoritative code (no exit file):
+   * SIGKILLed group, killed-before-write, pre-#73 record. The caller keeps its
+   * `exited_unknown` verdict in that case. Never throws.
+   *
+   * `logBytes` is recomputed from the file itself — an `exited_unknown`
+   * record used to report 0 bytes forever while its log had content.
+   */
+  async function settleFromExitFile(
+    jobId: JobId,
+    record: JobRecord,
+    guard?: () => boolean,
+  ): Promise<JobRecord | undefined> {
+    let code: number | undefined;
+    for (const candidate of exitFileCandidates(jobId, record)) {
+      code = readJobExitFile(candidate);
+      if (code !== undefined) break;
+    }
+    if (code === undefined) return undefined;
+    if (guard?.()) return undefined;
+    const status: JobStatus = code === 0 ? "completed" : "failed";
+    const at = clock.now();
+    // Nobody survived to stamp `backgroundedAt` (pi was gone when the job
+    // finished): the job is ownerless now, which is exactly what makes it
+    // notification-eligible (§5) — same rule as the adopted-alive branch.
+    await applyPatch(
+      jobId,
+      (current) => (current.backgroundedAt === undefined ? { ...current, backgroundedAt: at } : undefined),
+      guard,
+    );
+    if (guard?.()) return undefined;
+    const { bytes, truncated } = await appendRecoveredFooter(jobId, record, status, code, at).catch((error) => {
+      warn(`bash job ${jobId} recovered log footer failed (ignored): ${String(error)}`);
+      return { bytes: record.logBytes, truncated: record.outputTruncated };
+    });
+    if (guard?.()) return undefined;
+    return applyTransition(jobId, status, { at, exitCode: code, logBytes: bytes, outputTruncated: truncated }, guard);
+  }
+
+  /**
+   * Append the file-fd job's own end-of-log bytes without a live stream: the
+   * cap notice (when the log reached `maxLogBytes`) and the terminal footer,
+   * so a log recovered after pi exited is as self-describing as one finished
+   * in-session. Idempotent: a footer/notice already present in the tail is
+   * never written twice (a repeated recovery of the same job must not stack
+   * them).
+   */
+  async function appendRecoveredFooter(
+    jobId: JobId,
+    record: JobRecord,
+    status: JobStatus,
+    exitCode: number,
+    at: Millis,
+  ): Promise<{ bytes: number; truncated: boolean }> {
+    const before = await fileSize(record.logPath);
+    const tail = await readTailWindow(record.logPath, 512);
+    const truncated = record.outputTruncated || before >= maxLogBytes;
+    const needsNotice = truncated && !tail.includes("[log truncated at ");
+    const footerText = formatJobLogFooter({
+      jobId,
+      status,
+      exitCode,
+      duration: formatDuration(Math.max(0, at - (record.spawnedAt ?? record.createdAt))),
+    });
+    const needsFooter = !tail.includes(`[pi-subagent] job ${jobId} `);
+    if (!needsNotice && !needsFooter) return { bytes: before, truncated: record.outputTruncated };
+    const startsLine = tail.length === 0 || tail.endsWith("\n");
+    const notice = formatLogTruncationNotice(maxLogBytes); // "\n[…]" — a leading break of its own
+    const footer = `${footerText}\n`;
+    let text = "";
+    if (needsNotice) text += startsLine ? notice.slice(1) : notice;
+    if (needsFooter) text += startsLine && needsNotice === false ? footer : `\n${footer}`;
+    await appendFile(record.logPath, text, { encoding: "utf8", mode: 0o600 });
+    const after = await fileSize(record.logPath);
+    return { bytes: after > 0 ? after : before, truncated };
+  }
+
   function formatDrainCapNotice(): string {
     return `\n[pi-subagent] log tail capture stopped: pipes still busy ${drainTimeoutMs}ms after process exit\n`;
+  }
+
+  /**
+   * The authoritative exit code (issue #73): the wrapper's `<jobId>.exit` file
+   * when it has one, else the value the `exit` event carried. A wrapper-written
+   * file wins because it is the code of the *inner shell*, while the event's
+   * code belongs to the outer `sh` (normally identical — the wrapper exits with
+   * the file's content — but never assumed).
+   */
+  function exitCodeFor(handle: LocalHandle, exit: JobExit): number | null {
+    // The path baked into the wrapper at spawn time wins: after a fork/handoff
+    // the log moves but the wrapper keeps writing where it was started.
+    const fromFile = spawnExitCode(handle.spawned.exitFilePath);
+    if (fromFile !== undefined) return fromFile;
+    return exit.exitCode;
+  }
+
+  /**
+   * Recovery-side lookup, in order of authority:
+   *  1. `spawnExitFilePath` — the live handle's own path, when there is one;
+   *  2. `<logDir>/<jobId>.exit` — next to the log the record currently points
+   *     at (a cross-directory move keeps them together);
+   *  3. `store.exitPath(jobId)` — this session directory's canonical slot.
+   * The wrapper's `mkdir -p` means a recreated directory is fine; the candidates
+   * only differ because a relocation can leave the original behind.
+   */
+  function exitFileCandidates(jobId: JobId, record: JobRecord, spawnExitFilePath?: string): string[] {
+    const out: string[] = [];
+    if (spawnExitFilePath !== undefined) out.push(spawnExitFilePath);
+    out.push(join(dirname(record.logPath), `${jobId}.exit`));
+    out.push(store.exitPath(jobId));
+    return [...new Set(out)];
+  }
+
+  /**
+   * Issue #73: the per-job stdio descriptor handed to `ProcessPort.spawnJob`.
+   * Every job spawns through it — a background job whose log stops growing the
+   * moment pi exits is exactly the bug this shapes away. The exit file lives
+   * next to the log, keyed by job id, so `recover()` can find it with no
+   * schema change (`JobRecord` stays `v: 1`).
+   */
+  function jobStdio(jobId: JobId): JobStdioOptions {
+    return { logPath: store.logPath(jobId), exitPath: store.exitPath(jobId), maxLogBytes };
+  }
+
+  function makeHandle(spawned: SpawnedJob, logPath: string): LocalHandle {
+    return {
+      spawned,
+      stream: createWriteStream(logPath, { flags: "a", mode: 0o600 }),
+      flush: Promise.resolve(),
+      written: 0,
+      truncated: false,
+      closed: false,
+      adopted: false,
+      atLineStart: true,
+      footerWritten: false,
+      owner: myToken,
+      pendingTerminal: undefined,
+      logWrittenByChild: spawned.logWrittenByChild,
+      maxBodyBytes: maxLogBytes,
+    };
   }
 
   async function finalizeLocal(jobId: JobId, entry: Entry, handle: LocalHandle): Promise<JobRecord> {
@@ -1000,10 +1190,11 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     const exit = await handle.spawned.processExitPromise;
     const at = clock.now();
     if (handle.owner !== mine) return entry.record;
-    const status = terminalStatusFor(handle, exit);
+    const resolvedExitCode = exitCodeFor(handle, exit);
+    const status = terminalStatusFor(handle, { ...exit, exitCode: resolvedExitCode });
     const patch: JobTransitionPatch = {
       at,
-      exitCode: exit.exitCode,
+      exitCode: resolvedExitCode,
       logBytes: handle.written,
       outputTruncated: handle.truncated,
       ...(exit.error !== undefined ? { finalText: exit.error.message } : {}),
@@ -1016,7 +1207,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
           const local = transitionJob(entry.record, status, patch);
           if (local.ok) {
             entry.record = putRecord(local.record);
-            handle.pendingTerminal = { status, exitCode: exit.exitCode, at };
+            handle.pendingTerminal = { status, exitCode: resolvedExitCode, at };
           }
           warn(`bash job ${jobId} terminal state persistence failed for ${status}`);
         }
@@ -1024,7 +1215,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         const local = transitionJob(entry.record, status, patch);
         if (local.ok) {
           entry.record = putRecord(local.record);
-          handle.pendingTerminal = { status, exitCode: exit.exitCode, at };
+          handle.pendingTerminal = { status, exitCode: resolvedExitCode, at };
         }
         warn(`bash job ${jobId} terminal state persistence failed for ${status}: ${String(error)}`);
       }
@@ -1052,7 +1243,15 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         pushWrite(handle, Buffer.from(handle.atLineStart ? marker.slice(1) : marker, "utf8"));
         handle.truncated = true;
       }
-      appendLogFooter(entry, handle, entry.record.status, exit.exitCode, at);
+      // Issue #73: with file-fd stdio the cap fired inside the wrapper, which
+      // stopped *writing* — the manager only records it, in the same single
+      // place the pipe path uses, so the log shape stays one format.
+      if (handle.logWrittenByChild && handle.truncated && !handle.capNoticeWritten) {
+        handle.capNoticeWritten = true;
+        const notice = formatLogTruncationNotice(handle.maxBodyBytes);
+        pushWrite(handle, Buffer.from(handle.atLineStart ? notice.replace(/^\n/, "") : notice, "utf8"));
+      }
+      appendLogFooter(entry, handle, entry.record.status, resolvedExitCode, at);
       await handle.flush.catch(() => undefined);
       handle.closed = true;
       await new Promise<void>((resolve) => {
@@ -1162,7 +1361,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     entry.stage = "spawning";
     let spawned: SpawnedJob;
     try {
-      spawned = await processPort.spawnJob(init.command, init.cwd, init.env);
+      spawned = await processPort.spawnJob(init.command, init.cwd, init.env, jobStdio(jobId));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       entry.stage = undefined;
@@ -1187,19 +1386,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     // decision, in the same synchronous section — there is no window where a
     // returned pid belongs to nobody.
     const logPath = store.logPath(jobId);
-    const handle: LocalHandle = {
-      spawned,
-      stream: createWriteStream(logPath, { flags: "a", mode: 0o600 }),
-      flush: Promise.resolve(),
-      written: 0,
-      truncated: false,
-      closed: false,
-      adopted: false,
-      atLineStart: true,
-      footerWritten: false,
-      owner: myToken,
-      pendingTerminal: undefined,
-    };
+    const handle: LocalHandle = makeHandle(spawned, logPath);
     entry.local = handle;
     entry.stage = undefined;
     const cancelledAfterSpawn = Boolean(entry.cancelled);
@@ -1339,7 +1526,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
 
     let spawned: SpawnedJob;
     try {
-      spawned = await processPort.spawnJob(init.command, init.cwd, init.env);
+      spawned = await processPort.spawnJob(init.command, init.cwd, init.env, jobStdio(jobId));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await applyTransition(jobId, "failed", { at: clock.now(), exitCode: null, finalText: message });
@@ -1347,19 +1534,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     }
 
     const entry = ensureEntry(staged);
-    const handle: LocalHandle = {
-      spawned,
-      stream: createWriteStream(logPath, { flags: "a", mode: 0o600 }),
-      flush: Promise.resolve(),
-      written: 0,
-      truncated: false,
-      closed: false,
-      adopted: false,
-      atLineStart: true,
-      footerWritten: false,
-      owner: myToken,
-      pendingTerminal: undefined,
-    };
+    const handle: LocalHandle = makeHandle(spawned, logPath);
     handle.stream.on("error", (error) => {
       warn(`bash job ${jobId} log write failed: ${String(error)}`);
     });
@@ -1588,7 +1763,11 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     const record = entry?.record ?? (await store.load(jobId));
     if (!record) throw new Error(`bash job not found: ${jobId}`);
     if (isTerminalJobStatus(record.status)) {
-      const openLocal = entry?.local && !entry.local.closed;
+      // A settled job whose local handle is closed is done: the handle only
+      // closes after its log tail reached EOF (or the drain cap), i.e. after
+      // the last writer in the tree stopped — so there is nothing left to
+      // signal and nothing to reap (§4.3 idempotence, no syscall).
+      const openLocal = entry?.local !== undefined && !entry.local.closed;
       if (!openLocal) {
         return { jobId, outcome: "already-terminal", alreadyTerminal: true, record };
       }
@@ -1596,24 +1775,31 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       if (pid === undefined) {
         return {
           jobId,
-          outcome: "already-dead",
+          outcome: "already-terminal",
           alreadyTerminal: true,
-          reason: `job already exited with code ${record.exitCode ?? "unknown"}; surviving pipe holders could not be signalled safely`,
+          reason: `job already exited with code ${record.exitCode ?? "unknown"}; nothing left to signal`,
           record,
         };
       }
+      // Still open (issue #73: the file tail can legitimately outlive the
+      // leader by a poll interval, and a descendant may still hold the log
+      // fd). Ask the group: an empty one answers "already-dead" and nothing
+      // was signalled, which is still "already terminal" to the caller.
       const outcome = await processPort.killJobTree(pid, {
         ...(killOptions.graceMs !== undefined ? { graceMs: killOptions.graceMs } : {}),
         ...(record.procStartTime !== undefined ? { expectedProcStartTime: record.procStartTime } : {}),
       });
+      if (outcome === "already-dead") {
+        return { jobId, outcome: "already-terminal", alreadyTerminal: true, record };
+      }
       return {
         jobId,
         outcome,
         alreadyTerminal: true,
         reason:
           outcome === "refused"
-            ? `job already exited with code ${record.exitCode ?? "unknown"}; surviving pipe holders could not be signalled safely`
-            : `job already exited with code ${record.exitCode ?? "unknown"}; surviving pipe holders were terminated`,
+            ? `job already exited with code ${record.exitCode ?? "unknown"}; surviving log writers could not be signalled safely`
+            : `job already exited with code ${record.exitCode ?? "unknown"}; surviving log writers were terminated`,
         record,
       };
     }
@@ -1677,6 +1863,12 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       const ownership = processPort.checkPidOwnership(record);
       if (ownership === "unsafe") return refuseAsOrphan(jobId, record, guard);
       if (ownership === "dead") {
+        // Issue #73: the job may have finished cleanly while nobody watched.
+        const settled = await settleFromExitFile(jobId, record, guard);
+        if (!guard?.()) ensurePolling();
+        if (settled !== undefined) {
+          return { jobId, outcome: "already-dead", alreadyTerminal: false, record: settled };
+        }
         const stored = await applyTransition(jobId, "exited_unknown", { at: clock.now(), exitCode: null }, guard);
         if (!guard?.()) ensurePolling();
         return { jobId, outcome: "already-dead", alreadyTerminal: false, record: stored ?? record };
@@ -1737,6 +1929,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     const emptySummary = (): RecoverSummary => ({
       adopted: [],
       exitedUnknown: [],
+      recovered: [],
       orphaned: [],
       lostStaged: [],
       foreign: [],
@@ -1753,6 +1946,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     const records = await store.loadAll();
     const adopted: JobId[] = [];
     const exitedUnknown: JobId[] = [];
+    const recovered: JobId[] = [];
     const orphaned: JobId[] = [];
     const lostStaged: JobId[] = [];
     const foreign: JobId[] = [];
@@ -1773,6 +1967,43 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       if (localJobs.has(record.jobId)) continue;
       if (isTerminalJobStatus(record.status)) {
         putRecord(record);
+        // Issue #73: a terminal record can still be *unfinished on disk* — the
+        // previous pi died between "persist the status" and "persist the log
+        // bookkeeping" (finalization writes them in that order on purpose, so
+        // a crash leaves a correct status with a stale `logBytes`). The log
+        // file is the truth; reconcile it rather than showing 0 bytes forever.
+        if (!record.outputTruncated || record.logBytes === 0) {
+          const size = await fileSize(record.logPath);
+          const truncated = record.outputTruncated || size > maxLogBytes;
+          // A capped file that never got its notice (the crash landed between
+          // the cap and finalization) still needs one: the recovered log must
+          // say why it stops where it stops.
+          let bytes = size;
+          if (truncated && size >= maxLogBytes) {
+            const appended = await appendRecoveredFooter(
+              record.jobId,
+              record,
+              record.status,
+              record.exitCode ?? 0,
+              clock.now(),
+            ).catch(() => undefined);
+            if (appended !== undefined) bytes = appended.bytes;
+          }
+          if (bytes > record.logBytes || (truncated && !record.outputTruncated)) {
+            await applyPatch(
+              record.jobId,
+              (current) =>
+                bytes > current.logBytes || (truncated && !current.outputTruncated)
+                  ? { ...current, logBytes: bytes, outputTruncated: truncated }
+                  : undefined,
+              aborted,
+            );
+            if (aborted()) {
+              partial = true;
+              break;
+            }
+          }
+        }
         continue;
       }
       putRecord(record);
@@ -1824,6 +2055,11 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         else if (finalStatus === "orphaned") {
           orphaned.push(record.jobId);
           subagentOrphanedCount++;
+        } else if (finalStatus === "completed" || finalStatus === "failed") {
+          // Issue #73: `kill()` settled it from the exit file — the job had
+          // already finished on its own before the crash, so it was never
+          // killed (and must be announced like any other finished job).
+          recovered.push(record.jobId);
         } else if (finalStatus === "exited_unknown") exitedUnknown.push(record.jobId);
         continue;
       }
@@ -1844,6 +2080,18 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         continue;
       }
       if (ownership === "dead") {
+        // Issue #73: the wrapper persisted the exit code before dying, so a
+        // job that finished while pi was away is recoverable in full —
+        // status, code, footer, byte count and the normal startup summary.
+        const settled = await settleFromExitFile(record.jobId, record, aborted);
+        if (aborted()) {
+          partial = true;
+          break;
+        }
+        if (settled !== undefined) {
+          recovered.push(record.jobId);
+          continue;
+        }
         const stored = await applyTransition(
           record.jobId,
           "exited_unknown",
@@ -1891,6 +2139,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     return {
       adopted,
       exitedUnknown,
+      recovered,
       orphaned,
       lostStaged,
       foreign,
@@ -2088,6 +2337,29 @@ function normalizePositive(value: number | undefined, fallback: number): number 
 function clampOffset(value: number, size: number): number {
   if (!Number.isFinite(value) || value < 0) return 0;
   return Math.min(Math.trunc(value), size);
+}
+
+/** `readJobExitFile` with the "no path" case folded in, for live handles. */
+function spawnExitCode(path: string | undefined): number | undefined {
+  return path === undefined ? undefined : readJobExitFile(path);
+}
+
+/** Last `maxBytes` bytes of a file as utf8 ("" when unreadable). */
+async function readTailWindow(path: string, maxBytes: number): Promise<string> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(path, "r");
+    const size = (await handle.stat()).size;
+    const length = Math.min(size, maxBytes);
+    if (length <= 0) return "";
+    const buffer = Buffer.alloc(length);
+    const result = await handle.read(buffer, 0, length, size - length);
+    return buffer.subarray(0, result.bytesRead).toString("utf8");
+  } catch {
+    return "";
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 async function fileSize(path: string): Promise<number> {

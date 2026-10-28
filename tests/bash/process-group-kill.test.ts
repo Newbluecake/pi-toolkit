@@ -109,13 +109,21 @@ describe.skipIf(process.platform !== "linux")("BashJobManager.kill against a SIG
     pgids.push(s.job.pid);
     expect(await until(() => fixture!.workerPid() !== undefined)).toBe(true);
     const result = await m.kill(jobId, { graceMs: GRACE });
-    expect(result.outcome).toBe("killed");
+    // Issue #73 changed *which* outcome this is, not the guarantee: the job's
+    // stdio is a plain file now, so SIGTERM takes down `dd`/`cat` with the
+    // leader and the trapped `TERM` in the worker no longer keeps the tree
+    // alive for the full grace window — the group empties in the grace, i.e.
+    // "terminated" (a SIGTERM-resistant *writer* used to hold a pipe open;
+    // with a file fd there is nothing to hold). A group that does outlive the
+    // grace is still SIGKILLed ("killed", covered by the ProcessPort cases
+    // above); what must never change is "terminal + group empty".
+    expect(["terminated", "killed"]).toContain(result.outcome);
     const record = await s.job.exit;
     expect(record.status).toBe("killed");
     expect(await groupEmpty(s.job.pid)).toBe(true);
   }, 15_000);
 
-  it("job already exited but a pipe holder survives ⇒ kill() SIGKILLs the leftover group", async () => {
+  it("a descendant that outlives the leader keeps the job running until it is killed", async () => {
     fixture = createOrphanFixture();
     const m = await build();
     const { jobId, started } = m.reserve({ command: fixture.command("exit"), cwd: process.cwd() });
@@ -123,22 +131,35 @@ describe.skipIf(process.platform !== "linux")("BashJobManager.kill against a SIG
     expect(s.ok).toBe(true);
     if (!s.ok) return;
     pgids.push(s.job.pid);
-    // Leader gone while the worker still holds (and writes to) the inherited pipes ⇒ local handle still open.
-    expect(await until(() => !probePid(s.job.pid))).toBe(true);
-    // Under load the manager may not have processed the leader's exit yet; the
-    // pipe-holder branch only runs once the record itself is terminal.
-    expect(
-      await until(() => {
-        const r = m.get(jobId);
-        return r !== undefined && isTerminalJobStatus(r.status);
-      }),
-    ).toBe(true);
+    expect(await until(() => fixture!.workerPid() !== undefined)).toBe(true);
+
+    // Issue #73 topology: the leader cannot exit while a descendant still
+    // holds the log fd (the wrapper's pipeline — `dd`/`cat` — waits for the
+    // last writer, exactly like the old pipe did). So "leader gone, workers
+    // survive" is no longer reachable: the job is still *running* and
+    // `kill()` must take the normal path and reap the whole group.
+    expect(probePid(s.job.pid)).toBe(true);
     expect(liveGroupMembers(s.job.pid)).toBeGreaterThan(0);
+    expect(isTerminalJobStatus(m.get(jobId)!.status)).toBe(false);
+
     const result = await m.kill(jobId, { graceMs: GRACE });
-    expect(result.reason).toMatch(/surviving pipe holders were terminated/);
-    expect(result.outcome).toBe("killed");
+    expect(result.alreadyTerminal).toBe(false);
+    expect(["terminated", "killed"]).toContain(result.outcome);
+    const record = await s.job.exit;
+    expect(record.status).toBe("killed");
     expect(await groupEmpty(s.job.pid)).toBe(true);
-    // Wait for the job's final settle/flush so no async store write races afterEach's rm.
-    await s.job.exit;
+  }, 15_000);
+
+  it("kill() on a settled job whose group is empty is already-terminal, not a second signal", async () => {
+    const m = await build();
+    const { jobId, started } = m.reserve({ command: "exit 3", cwd: process.cwd() });
+    const s = await started;
+    expect(s.ok).toBe(true);
+    if (!s.ok) return;
+    const record = await s.job.exit;
+    expect(record.status).toBe("failed");
+    expect(record.exitCode).toBe(3);
+    const result = await m.kill(jobId, { graceMs: GRACE });
+    expect(result).toMatchObject({ alreadyTerminal: true, outcome: "already-terminal" });
   }, 15_000);
 });
