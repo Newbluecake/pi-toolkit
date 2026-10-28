@@ -27,21 +27,10 @@ describe("layout CSS invariants (no real layout engine in vitest; real render ch
     expect(rule(agents, ".agent-end")).toContain("white-space: nowrap");
     expect(rule(agents, ".agent-cost")).not.toContain("margin-left");
   });
-  it("second-line badges right-align to row 1's cost edge; removable cards lift the line clear of the delete button instead", () => {
+  it("second-line badges right-align to row 1's cost edge; no delete-button room is reserved any more", () => {
     expect(rule(agents, ".agent-line2 .agent-chips")).toContain("margin-left: auto");
-    // no side reservation when badges are on this line (they must reach the cost edge) …
-    expect(rule(agents, '.removable > .agent-card > .agent-line2[data-below="true"]')).toContain("padding-right: 0");
-    // … the button's reach (--remove-reach above the card bottom) is cleared vertically instead …
-    expect(rule(agents, '.removable > .agent-card > .agent-line2[data-below="true"]:not(:last-child)')).toMatch(
-      /margin-bottom:[^;]*--remove-reach/,
-    );
-    expect(rule(agents, ".agent-item.removable")).toContain("--remove-reach: 48px");
-    // … except when the line is the last row (no row 3 to lift it above the button)
-    expect(rule(agents, '.removable > .agent-card > .agent-line2[data-below="true"]:last-child')).toContain(
-      "padding-right",
-    );
-    // name-only line (badges on row 1) keeps the generic 60px reservation
-    expect(rule(agents, ".removable > .agent-card > :not(.agent-row1)")).toContain("padding-right");
+    // the corner × is gone (2026-10-28): no `.removable` side reservations / lifts remain
+    expect(agents).not.toMatch(/\.removable|--remove-reach/);
   });
   it("dir footnote pins to the bottom-left of a flex-column body", () => {
     expect(rule(preview, ".preview-dir-footnote")).toMatch(/margin:\s*auto 0 0/);

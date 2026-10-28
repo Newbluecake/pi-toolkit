@@ -104,6 +104,10 @@ const detail = {
   scheduleOpenLabel: "定时",
   // issue #41（顶栏窄屏溢出）：接收折入按钮的「⋯」菜单——触发器与菜单的 aria-label。
   moreActions: "更多操作",
+  // 2026-10-28: the cards' corner × moved here — ⋯ menu entry + in-bar ✓/✕ confirm pill.
+  deleteSessionLabel: "删除会话",
+  deleteSessionGroupAria: "确认删除会话",
+  deleteSessionConfirmAria: "立即删除会话",
   // omitted-orphan 修复（2026-10-27）：fleet bash 分组——wire 行全部归档且 omitted>0 时，
   // 「(+N more)」改为此说明文案，放在归档折叠旁。
   bashJobsOlderOmitted: "另有 {n} 条更早的已结束任务未传到网页（无法查看或归档）",

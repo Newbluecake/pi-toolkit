@@ -944,142 +944,43 @@ function hubForRemove(opts: {
   };
 }
 
-describe("AgentList.vue — delete entry (web-hub-delete-session v2 §5.4)", () => {
-  it("an online, unmanaged card gets no delete button at all", () => {
-    const hub = hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]) });
-    const wrapper = mount(AgentList, {
+describe("AgentList.vue — no corner × on cards (2026-10-28: deletion moved to the detail header's ⋯ menu)", () => {
+  const mountOne = (hub: ReturnType<typeof hubForRemove>) =>
+    mount(AgentList, {
       props: { cards: [card()], selectedKey: null, filter: "" },
       global: { provide: { [HUB_CTX as symbol]: hub } },
     });
-    expect(wrapper.find(".remove-btn").exists()).toBe(false);
-  });
 
-  it("an offline card gets a delete button; two-step confirm calls removeAgent({agentKey})", async () => {
-    const calls: RemoveTarget[] = [];
-    const hub = hubForRemove({
-      agents: new Map([["agent-1", fullAgentState("agent-1", { down: true, card: { state: "stale" } })]]),
-      removeAgent: async (target) => {
-        calls.push(target);
-        return { ok: true, removed: true };
-      },
-    });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    const btn = wrapper.get(".remove-btn");
-    await btn.trigger("click"); // arm
-    expect(calls).toHaveLength(0);
-    await btn.trigger("click"); // confirm
-    await flushPromises();
-    expect(calls).toEqual([{ agentKey: "agent-1" }]);
-  });
-
-  it("a managed card (live/stopping/starting record) deletes by spawnId instead, with aria-kind managed", async () => {
-    const spawns: SpawnsPayload = {
-      items: [spawnRec({ state: "live", agentKey: "agent-1", spawnId: "sp9" })],
+  it("online, offline and managed (incl. removing) cards render no delete button and no `removable` class", () => {
+    const managedSpawns = (removing: boolean): SpawnsPayload => ({
+      items: [spawnRec({ state: "live", agentKey: "agent-1", spawnId: "sp9", removing })],
       active: 1,
       max: 4,
-    };
-    const calls: RemoveTarget[] = [];
-    const hub = hubForRemove({
-      agents: new Map([["agent-1", fullAgentState("agent-1")]]),
-      spawns,
-      removeAgent: async (target) => {
-        calls.push(target);
-        return { ok: true, removed: true };
-      },
     });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    const btn = wrapper.get(".remove-btn");
-    expect(btn.attributes("aria-label")).toBe("Stop and delete this web-started session (session file is kept)");
-    await btn.trigger("click");
-    await btn.trigger("click");
-    await flushPromises();
-    expect(calls).toEqual([{ spawnId: "sp9" }]);
+    const hubs = [
+      hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]) }),
+      hubForRemove({
+        agents: new Map([["agent-1", fullAgentState("agent-1", { down: true, card: { state: "stale" } })]]),
+      }),
+      hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]), spawns: managedSpawns(false) }),
+      hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]), spawns: managedSpawns(true) }),
+    ];
+    for (const hub of hubs) {
+      const wrapper = mountOne(hub);
+      expect(wrapper.find(".remove-btn").exists()).toBe(false);
+      expect(wrapper.find(".remove-wrap").exists()).toBe(false);
+      expect(wrapper.find("li.agent-item").classes()).not.toContain("removable");
+    }
   });
 
-  it("Esc disarms before the second click; no call is made", async () => {
-    const calls: RemoveTarget[] = [];
-    const hub = hubForRemove({
-      agents: new Map([["agent-1", fullAgentState("agent-1", { down: true })]]),
-      removeAgent: async (target) => {
-        calls.push(target);
-        return { ok: true, removed: true };
-      },
-    });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    const btn = wrapper.get(".remove-btn");
-    await btn.trigger("click"); // arm
-    expect(btn.attributes("aria-label")).toContain("Click again");
-    await btn.trigger("keydown", { key: "Escape" });
-    expect(btn.attributes("aria-label")).not.toContain("Click again");
-    await btn.trigger("click"); // this is now a FIRST click again (re-arm), not a confirm
-    await flushPromises();
-    expect(calls).toHaveLength(0);
-  });
-
-  it("a removing:true managed record disables the button and shows the removing note", () => {
+  it("a removing managed record still shows AgentCard's own 「removing」 chip", () => {
     const spawns: SpawnsPayload = {
       items: [spawnRec({ state: "stopping", agentKey: "agent-1", spawnId: "sp9", removing: true })],
       active: 1,
       max: 4,
     };
-    const hub = hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]), spawns });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    const btn = wrapper.get(".remove-btn");
-    expect(btn.attributes("disabled")).toBeDefined();
-    expect(wrapper.find(".remove-note").text()).toBe("removing…");
-    // AgentCard's own row1 chip also shows removing
+    const wrapper = mountOne(hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]), spawns }));
     expect(wrapper.find(".chip-removing").exists()).toBe(true);
-  });
-
-  it("a failed delete shows an inline error bucket derived from classifyRemoveError", async () => {
-    const hub = hubForRemove({
-      agents: new Map([["agent-1", fullAgentState("agent-1", { down: true })]]),
-      removeAgent: async () => ({ ok: false, error: "E_AGENT_ONLINE", reason: "online" }),
-    });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    const btn = wrapper.get(".remove-btn");
-    await btn.trigger("click");
-    await btn.trigger("click");
-    await flushPromises();
-    expect(wrapper.get(".remove-note").text()).toBe("Delete failed: the session is still online");
-  });
-
-  it("no removeAgent on the hub (older hub / test fake) ⇒ unsupported note, no throw", async () => {
-    const hub = hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1", { down: true })]]) });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    const btn = wrapper.get(".remove-btn");
-    await btn.trigger("click");
-    await btn.trigger("click");
-    await flushPromises();
-    expect(wrapper.get(".remove-note").text()).toBe("Delete failed: hub does not support this, reload the page");
-  });
-
-  it("the button is never nested inside the card's <a> (buttons can't nest in anchors)", () => {
-    const hub = hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1", { down: true })]]) });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    expect(wrapper.find("a.agent-card .remove-btn").exists()).toBe(false);
-    expect(wrapper.find("li.agent-item > .remove-wrap > .remove-btn").exists()).toBe(true);
   });
 });
 
@@ -1690,7 +1591,7 @@ describe("AgentList.vue — rename entry (web-hub-rename plan)", () => {
     expect(wrapper.find(".rename-input").exists()).toBe(true); // stays open for retry
   });
 
-  it("a live, web-managed card can show BOTH rename and remove buttons without overlap/conflict", () => {
+  it("a live, web-managed card shows the rename pencil and no corner remove button (deletion lives in the detail ⋯ menu)", () => {
     const spawns: SpawnsPayload = {
       items: [
         {
@@ -1707,9 +1608,9 @@ describe("AgentList.vue — rename entry (web-hub-rename plan)", () => {
     };
     const { wrapper } = mountWithAgent({}, { control: fakeControlHandle(), spawns });
     expect(wrapper.find(".rename-btn").exists()).toBe(true);
-    expect(wrapper.find(".remove-btn").exists()).toBe(true);
+    expect(wrapper.find(".remove-btn").exists()).toBe(false);
     expect(wrapper.find("li.agent-item").classes()).toContain("renamable");
-    expect(wrapper.find("li.agent-item").classes()).toContain("removable");
+    expect(wrapper.find("li.agent-item").classes()).not.toContain("removable");
   });
 });
 
@@ -1725,36 +1626,29 @@ describe("agents.css — rename pencil placement at the title line (2026-10-20 r
     resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/agents.css"),
     "utf8",
   );
-  /** Extracts the body of the `@supports (anchor-name…)` block (no nested-brace parser —
-   *  the block's own inner rules are matched individually off its raw substring). */
-  const supportsBlock = (() => {
-    const start = css.indexOf("@supports (anchor-name: --x) and (anchor-scope: --x)");
-    return start === -1 ? "" : css.slice(start, css.indexOf(".rename-btn {", start));
-  })();
   const rule = (selector: string): string => {
     const m = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{[^}]*\\}`).exec(css);
     return m?.[0] ?? "";
   };
 
-  it("anchor positioning is the primary technique, scoped per card so same-named anchors never collide", () => {
-    expect(supportsBlock).not.toBe("");
-    // anchor-scope on the <li> — without it every card's --rename-anchor collides and all
-    // pencils would snap to the LAST card's title.
-    expect(supportsBlock).toMatch(/\.agent-item\.renamable\s*\{[^}]*anchor-scope:\s*--rename-anchor/);
-    expect(supportsBlock).toMatch(/\.agent-session\s*\{[^}]*anchor-name:\s*--rename-anchor/);
-    // pencil: left edge at the title text's right edge, vertically centred on that line.
-    expect(supportsBlock).toMatch(/position-anchor:\s*--rename-anchor/);
-    expect(supportsBlock).toMatch(/top:\s*anchor\(center\)/);
-    expect(supportsBlock).toMatch(/left:\s*calc\(anchor\(right\) \+ 4px\)/);
-    // no -100% translate any more: the editing form must never leave the card
+  it("one layout for every browser: no CSS-anchor branch, pencil pinned at the card's right edge", () => {
+    // NOTE: CSS-text-level regression guard only — it does not cover real layout (see the
+    // playwright measurements in the task report). user ruling 2026-10-28: supporting and non-supporting browsers render the same layout —
+    // there is no @supports/anchor rule left that could make them differ.
+    expect(css).not.toMatch(/@supports\s*\(anchor-name/);
+    expect(css).not.toMatch(/anchor-scope|anchor-name|position-anchor|anchor\(/);
+    const pin = rule(".agent-item .rename-wrap");
+    expect(pin).toMatch(/position:\s*absolute/);
+    expect(pin).toMatch(/right:\s*calc\(var\(--sp-3\) - 6px\)/);
+    // no -100% translate: the editing form must never leave the card
     expect(css).not.toMatch(/translate\(-100%/);
   });
 
-  it("the title shrink-wraps its text and reserves the pencil's width (max-width)", () => {
+  it("the title reserves the pencil's width (max-width)", () => {
     const session = rule(".agent-item.renamable > .agent-card .agent-session");
-    expect(session).toMatch(/justify-self:\s*start/); // anchor(right) = TEXT end, not the stretched grid box
+    expect(session).toMatch(/justify-self:\s*start/);
     expect(session).toMatch(/max-width:\s*calc\(100% - var\(--rename-hit\) - 8px\)/);
-    // `.removable`'s 60px right reservation must not push the anchor box past the text end.
+    // `.removable`'s 60px right reservation is replaced by the pencil's own.
     expect(session).toMatch(/padding-right:\s*0/);
   });
 
@@ -1763,7 +1657,7 @@ describe("agents.css — rename pencil placement at the title line (2026-10-20 r
     // primitives.css floors every `.btn` at 44×44 on coarse pointers — the reservation must
     // cover the real rendered size, not the 24px ideal.
     expect(css).toMatch(
-      /@media \(pointer: coarse\)\s*\{\s*\.agent-item\.renamable\s*\{\s*(?:\/\*[\s\S]*?\*\/\s*)*--rename-hit:\s*44px;\s*--remove-col:\s*48px;\s*\}\s*\}/,
+      /@media \(pointer: coarse\)\s*\{\s*\.agent-item\.renamable\s*\{\s*(?:\/\*[\s\S]*?\*\/\s*)*--rename-hit:\s*44px;\s*\}\s*\}/,
     );
     expect(rule("\n.rename-btn")).toMatch(/width:\s*var\(--rename-hit, 24px\)/);
     expect(rule("\n.rename-btn")).toMatch(/height:\s*var\(--rename-hit, 24px\)/);
@@ -1773,19 +1667,24 @@ describe("agents.css — rename pencil placement at the title line (2026-10-20 r
     const edit = rule(".agent-item.renamable > .rename-wrap.is-editing");
     expect(edit).toMatch(/left:\s*15px/);
     expect(edit).toMatch(/right:\s*13px/);
-    expect(rule(".agent-item.renamable.removable > .rename-wrap.is-editing")).toMatch(
-      /right:\s*calc\(13px \+ var\(--remove-col\)\)/,
-    );
     expect(rule(".agent-item .rename-wrap.is-editing .rename-input")).toMatch(/flex:\s*1/);
     expect(rule(".agent-item .rename-wrap.is-editing .rename-input")).toMatch(/max-width:\s*none/);
   });
 
-  it("removable: title reservation and fallback pin both leave the delete button's column free", () => {
-    expect(rule(".agent-item.renamable.removable > .agent-card .agent-session")).toMatch(
-      /max-width:\s*calc\(100% - var\(--rename-hit\) - 8px - var\(--remove-col\)\)/,
+  it("no delete-column leftovers: every card's pencil sits at the same right edge (no --remove-col offsets)", () => {
+    expect(css).not.toMatch(/--remove-col|--remove-reach|\.removable/);
+    expect(rule(".agent-item .rename-wrap")).toMatch(/right:\s*calc\(var\(--sp-3\) - 6px\)/);
+  });
+
+  it("pencil vertical offset is the playwright-measured one: 9px compact, 14px detailed (+ lock variants)", () => {
+    expect(rule(".agent-item .rename-wrap")).toMatch(/top:\s*calc\(9px \+ 31\.8px \* var\(--fs-scale, 1\)\)/);
+    expect(rule(".agent-item:has(.privacy-lock-btn) .rename-wrap")).toMatch(/top:\s*calc\(9px \+ max\(/);
+    expect(rule('.agent-item:has(.agent-card[data-density="detailed"]) .rename-wrap')).toMatch(
+      /top:\s*calc\(14px \+ 31\.8px/,
     );
-    expect(rule(".agent-item.removable .rename-wrap")).toMatch(/var\(--remove-col/);
-    expect(rule(".agent-item.renamable")).toMatch(/--remove-col:\s*44px/);
+    expect(rule('.agent-item:has(.agent-card[data-density="detailed"] .privacy-lock-btn) .rename-wrap')).toMatch(
+      /top:\s*calc\(14px \+ max\(/,
+    );
   });
 
   it("pencil box is as tall as the title line (+5px): never touches the next row", () => {
@@ -1977,16 +1876,13 @@ describe("AgentList.vue — spawn-relaunch (offline managed card)", () => {
     expect(fake.calls).toHaveLength(0);
   });
 
-  it("the row's own × button still works inside a relaunchable row (click is NOT intercepted)", async () => {
+  it("an offline relaunchable row has no × (deletion moved to the detail menu); no click-through to relaunch", async () => {
     const fake = relaunchHub("a-off", { items: [terminalSpawnRec("a-off")], active: 0, max: 4 });
     const wrapper = mount(AgentList, {
       props: { cards: [offCard("a-off")], selectedKey: null, filter: "" },
       global: { provide: { [HUB_CTX_KEY as symbol]: fake.hub } },
     });
-    // the offline row gets the RemoveButton (removalTargetForAgent ⇒ offline); clicking it must
-    // arm the delete, never relaunch
-    const btn = wrapper.get(".remove-btn");
-    await btn.trigger("click");
+    expect(wrapper.find(".remove-btn").exists()).toBe(false);
     await flushPromises();
     expect(fake.calls).toHaveLength(0);
     expect(window.location.hash).toBe("");

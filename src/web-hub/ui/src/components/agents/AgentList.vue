@@ -33,7 +33,7 @@
   ok/err line, not a toast.
 
   Rename entry (web-hub-rename plan): `RenameButton.vue`, a sibling of `AgentCard` exactly like
-  `RemoveButton` below — `toRow`'s `rename` field precomputes `@logic/control.js`'s
+  the (since removed) corner delete button — `toRow`'s `rename` field precomputes `@logic/control.js`'s
   `renameEnabled()` gate (hub `cmd.v1` AND agent card `control` AND agent live AND not mid-
   restore AND the agent's `commands` slot present) plus the current raw session name off the
   injected hub state (the frozen `AgentCardView.sessionLabel` is a localized placeholder-or-name
@@ -59,7 +59,6 @@ import {
   spawnDeniedKey,
   type NewSessionAction,
 } from "../../logic/spawn.js";
-import { removalTargetForAgent } from "../../logic/remove.js";
 import type { SpawnListOutcome } from "../../transport/types.js";
 import type { AgentCardView } from "../../types.js";
 import type { AgentListEmits, AgentListProps } from "../../contracts.js";
@@ -71,7 +70,6 @@ import SessionHistoryDialog from "../spawn/SessionHistoryDialog.vue";
 import SpawnRow from "../spawn/SpawnRow.vue";
 import AgentCard from "./AgentCard.vue";
 import OutdatedSummaryBanner from "./OutdatedSummaryBanner.vue";
-import RemoveButton from "./RemoveButton.vue";
 import RenameButton from "./RenameButton.vue";
 
 const props = withDefaults(defineProps<AgentListProps>(), { collapsed: false });
@@ -335,16 +333,13 @@ const spawnRows = computed(() =>
 );
 
 // ---------------------------------------------------------------------------
-// delete entry (web-hub-delete-session plan v2 §5.4): the full `AgentState` (down/card.state)
-// backing each card lives in the injected hub state, not the frozen `AgentCardView` prop —
-// `removalTargetForAgent` wants that richer shape, same injection pattern as `managed` above.
-// `target: null` (online, unmanaged card) hides the button entirely (user 拍板: 在线 TUI 会话
-// 不可删). Precomputed per row (rather than called inline from the template) so the union
-// narrowing on `target.kind` only has to happen once per card.
+// Per-row view model. The cards' corner × delete button is gone (2026-10-28 user ruling):
+// deletion lives in the detail header's ⋯ menu (`DetailHeader.vue`, same
+// `removalTargetForAgent` target). The full `AgentState` backing each card lives in the
+// injected hub state, not the frozen `AgentCardView` prop.
 // ---------------------------------------------------------------------------
 interface AgentRow {
   readonly card: AgentCardView;
-  readonly target: ReturnType<typeof removalTargetForAgent>;
   readonly rename: { readonly enabled: boolean; readonly name: string; readonly titleAuto: boolean };
   /** spawn-relaunch: the terminal managed record this offline card may re-fork
    *  (`relaunchableFor` — undefined ⇒ the row keeps the plain click=select behavior). */
@@ -354,7 +349,7 @@ interface AgentRow {
 /** web-hub-rename plan: same enable formula as `AgentDetail.vue`'s `controlEnabled` +
  *  `commandsEnabled` (duplicated, not imported — that file is outside this package's exclusive
  *  `components/agents/**` scope), evaluated against the raw `AgentState` this list already
- *  injects for `removalTargetForAgent`/`managedFor`. */
+ *  injects for `managedFor`. */
 function renameInfoFor(c: AgentCardView): { enabled: boolean; name: string; titleAuto: boolean } {
   const agent = hub?.state.value.agents.get(c.key) as
     | {
@@ -386,7 +381,6 @@ function renameInfoFor(c: AgentCardView): { enabled: boolean; name: string; titl
 function toRow(c: AgentCardView): AgentRow {
   return {
     card: c,
-    target: removalTargetForAgent(hub?.state.value.agents.get(c.key), hub?.state.value.spawns ?? null),
     rename: renameInfoFor(c),
     relaunch: relaunchableFor(hub?.state.value.spawns ?? null, c.key, hubCaps.value),
   };
@@ -622,24 +616,13 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
       </template>
     </EmptyState>
     <ul v-else class="agent-list">
-      <li
-        v-for="row in liveRows"
-        :key="row.card.key"
-        class="agent-item"
-        :class="{ removable: !!row.target, renamable: row.rename.enabled }"
-      >
+      <li v-for="row in liveRows" :key="row.card.key" class="agent-item" :class="{ renamable: row.rename.enabled }">
         <AgentCard :key="listDensity.density.value" :card="row.card" :selected="row.card.key === selectedKey" />
         <RenameButton
           v-if="row.rename.enabled"
           :agent-key="row.card.key"
           :name="row.rename.name"
           :title-auto="row.rename.titleAuto"
-        />
-        <RemoveButton
-          v-if="row.target"
-          :target="row.target.kind === 'managed' ? { spawnId: row.target.spawnId } : { agentKey: row.card.key }"
-          :removing="row.target.kind === 'managed' && row.target.removing"
-          :ariaKind="row.target.kind === 'managed' ? 'managed' : 'agent'"
         />
       </li>
       <li v-if="staleOrDown.length > 0" class="agent-group">{{ t("agents.staleOffline") }}</li>
@@ -648,7 +631,6 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
         :key="row.card.key"
         class="agent-item"
         :class="{
-          removable: !!row.target,
           renamable: row.rename.enabled,
           relaunchable: row.relaunch !== undefined,
           relaunching: relaunching.has(row.card.key),
@@ -676,12 +658,6 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
           :agent-key="row.card.key"
           :name="row.rename.name"
           :title-auto="row.rename.titleAuto"
-        />
-        <RemoveButton
-          v-if="row.target"
-          :target="row.target.kind === 'managed' ? { spawnId: row.target.spawnId } : { agentKey: row.card.key }"
-          :removing="row.target.kind === 'managed' && row.target.removing"
-          :ariaKind="row.target.kind === 'managed' ? 'managed' : 'agent'"
         />
       </li>
     </ul>

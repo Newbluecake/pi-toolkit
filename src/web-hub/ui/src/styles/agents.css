@@ -592,50 +592,12 @@
 }
 
 /* ---------------------------------------------------------------- delete entry (web-hub-
- * delete-session plan v2 §5.4): the `<li>` wrapping AgentCard + RemoveButton as siblings (a
- * button can't nest inside AgentCard's `<a>`). `.removable` (only present when a target
- * exists) reserves room on the card so the absolutely-positioned button never overlaps text;
- * plain `.agent-item` (no button) needs none. */
+ * delete-session plan v2 §5.4): `.agent-item` is the `<li>` wrapping AgentCard + RenameButton
+ * as siblings (a button can't nest inside AgentCard's `<a>`). The card's corner × (and the
+ * side room it reserved) is gone — deletion lives in the detail header's ⋯ menu; the
+ * `.remove-*` rules below remain for SpawnRow's inline use of RemoveButton. */
 .agent-item {
   position: relative;
-}
-
-/* Only the rows the bottom-right button can reach give up the room: the first row (title, chips,
- * cost) sits above it, so it keeps the full width and the cost stays right-aligned with plain
- * cards (2026-10-19 user report: the cost of a removable card sat ~48px left of the others). */
-.removable > .agent-card > :not(.agent-row1) {
-  padding-right: calc(60px * var(--fs-scale, 1));
-}
-
-/* Delete button geometry (AgentList context): a 40×40 circle (44 coarse) absolutely placed
- * `bottom: 8px; right: 8px` of the `<li>`, i.e. it reaches `--remove-reach` above the card's
- * bottom edge — normally beside the model/context row (row 3) but ALSO into the lower part of
- * the session-name line (measured: line spans 33→53px above the bottom, button 8→48px).
- * Badges on that line are right-aligned to row 1's cost edge, so instead of making them yield
- * horizontally, the line is lifted clear of the button's top edge (margin-bottom), and the
- * 60px side reservation only stays where nothing can lift it: no row 3 (line is the last row),
- * or badges still on row 1 (the name itself must not run under the button). */
-.agent-item.removable {
-  --remove-reach: 48px;
-}
-
-@media (pointer: coarse) {
-  .agent-item.removable {
-    --remove-reach: 52px;
-  }
-}
-
-.removable > .agent-card > .agent-line2[data-below="true"] {
-  padding-right: 0;
-}
-
-.removable > .agent-card > .agent-line2[data-below="true"]:not(:last-child) {
-  /* card padding+border 11px + meta row ≈19px·scale + grid gap 3px sit below this line; +2px slack */
-  margin-bottom: max(0px, calc(var(--remove-reach) + 2px - 14px - 19px * var(--fs-scale, 1)));
-}
-
-.removable > .agent-card > .agent-line2[data-below="true"]:last-child {
-  padding-right: calc(60px * var(--fs-scale, 1));
 }
 
 .remove-wrap {
@@ -643,16 +605,6 @@
   flex: none;
   justify-items: end;
   gap: 2px;
-}
-
-/* AgentList context only: absolutely positioned over the card's bottom-right corner (a button
- * can't nest inside AgentCard's `<a>`). SpawnRow renders the same component inline among its
- * other action buttons — no positioning override there, it just flows with the flex row. */
-.agent-item .remove-wrap {
-  position: absolute;
-  right: var(--sp-2);
-  bottom: 8px;
-  z-index: 2;
 }
 
 .remove-btn {
@@ -686,23 +638,6 @@
   cursor: not-allowed;
 }
 
-/* AgentList context, hover-capable pointers: hidden until the card (or the button itself, for
- * keyboard focus) is interacted with, or the button is mid-confirm/busy — never permanently
- * obscuring the card. */
-@media (hover: hover) {
-  .agent-item .remove-btn {
-    opacity: 0;
-  }
-
-  .agent-item:hover .remove-btn,
-  .agent-item:focus-within .remove-btn,
-  .remove-btn:focus-visible,
-  .remove-btn.armed,
-  .remove-btn.busy {
-    opacity: 1;
-  }
-}
-
 /* verifier P2 r1 #3: any device with NO hover capability (touch, and some stylus/hybrid inputs
  * `pointer: coarse` alone doesn't catch) must always show the button — independent of, and
  * stronger than, the `(hover: hover)` opacity:0 default above. */
@@ -729,13 +664,6 @@
   color: var(--c-danger);
   font-size: var(--fs-2xs);
   overflow-wrap: anywhere;
-}
-
-/* AgentList context: floats over the card, right-aligned text on a solid backdrop. */
-.agent-item .remove-note {
-  background: var(--c-surface);
-  box-shadow: var(--shadow-1);
-  text-align: right;
 }
 
 /* ---------------------------------------------------------------- spawn-relaunch
@@ -818,14 +746,10 @@
 /* ---------------------------------------------------------------- rename entry (web-hub-
  * rename plan; 2026-10-20 placement rework, user screenshot report): `RenameButton.vue`
  * rendered as a sibling of `AgentCard` (same "a button can't nest inside AgentCard's `<a>`"
- * rule as `.remove-wrap` above). The pencil now sits AT THE END OF THE TITLE TEXT
- * (`.agent-session`), vertically centred on that line — the old bottom-right corner spot
- * covered the meta/fleet row (「N 个运行中」).
- * Primary technique: CSS anchor positioning — the title span carries `anchor-name`, scoped
- * per card by `anchor-scope` on the `<li>` (without the scope, every card's same-named
- * anchor collides and ALL pencils would snap to the LAST card's title — hence the @supports
- * gate is on BOTH features, not `anchor-name` alone). The title itself is capped
- * (`max-width` below) so a long title truncates and the pencil always fits on the line.
+ * rule as `.remove-wrap` above). The pencil is pinned at the RIGHT EDGE of the card's title
+ * line, vertically centred on it, in EVERY browser (user ruling 2026-10-28: one layout, no
+ * CSS-anchor branch — the former "pencil right after the title text" variant is gone, so Chromium and Firefox/Safari render identically). The title is
+ * still capped (`max-width` below) so a long title truncates before the pencil's box.
  * `--rename-hit` is the title's reservation for the button box: 24px on precise pointers,
  * 44px on coarse ones (primitives.css floors every `.btn` there — the reservation must cover
  * the REAL size). The pencil shares its line only with the (already shortened) title, so the
@@ -835,9 +759,6 @@
   /* Pencil box height = the title line (20px·scale) + 5px: the 3px grid gaps above and below
    * keep the hit box inside its own row (never touching row1 / the meta row). */
   --rename-h: calc(20px * var(--fs-scale, 1) + 5px);
-  /* Horizontal column the bottom-right delete button owns (40px box + 8px inset − the card's
-   * 13px border+padding, + gap); a `.removable` card keeps the pencil out of it. */
-  --remove-col: 44px;
 }
 
 @media (pointer: coarse) {
@@ -846,85 +767,56 @@
      * win over the 32px below) — reserve for the REAL rendered size so the truncated title
      * never runs under the button. */
     --rename-hit: 44px;
-    --remove-col: 48px;
   }
 }
 
-/* The title row shrink-wraps its text (`justify-self: start`) and stops short of the
- * pencil, so the anchored pencil lands right after the last visible character (or the
- * ellipsis). `.removable`'s 60px right reservation would otherwise push the anchor BOX (and
- * with it the pencil) 60px past the text end — drop it on THIS row only: the pencil's own
- * reservation replaces it, and the bottom-right buttons never reach the title line. */
+/* The title row stops short of the right-edge pencil (`--rename-hit` reservation, kept: it
+ * stops text running under the button). */
 .agent-item.renamable > .agent-card .agent-session {
   justify-self: start;
   max-width: calc(100% - var(--rename-hit) - 8px);
   padding-right: 0;
 }
 
-/* `.removable`: the delete button sits in the bottom-right corner and, being taller than the
- * meta row, reaches up to the title line — the title (hence the pencil right after it) stops
- * short of that column, so pencil and delete button never overlap. */
-.agent-item.renamable.removable > .agent-card .agent-session {
-  max-width: calc(100% - var(--rename-hit) - 8px - var(--remove-col));
-}
-
-/* Fallback (no anchor positioning — Firefox/Safari): pin the pencil at the right end of
- * the title row, centred on it. The top offset walks the card's geometry down to the
- * `.agent-session` line centre (measured in Chromium): the card's 2px margin-top collapses
- * with the `<li>` (no border/padding), so the fixed part is card border 1px + padding-top
- * 10px + grid gap 3px = 14px; row1's height is the title's line box (fs-md 14px · lh-body
+/* Pin the pencil at the right end of the title row (every browser, every card), centred on the
+ * `.agent-session` line. The top offset walks the card's geometry down to that line's centre
+ * (re-measured in Chromium with playwright, 2026-10-28; compact density): the card's margin-top collapses with
+ * the `<li>`, so the fixed part is card border 1px + padding-top 7px + grid gap 1px = 9px
+ * (the old 14px over-shot by 5px); row1's height is the title's line box (fs-md 14px · lh-body
  * 1.55 = 21.7px·scale — it always beats the 20px·scale chip) and the session line's half is
- * fs-sm 13px · 1.55 / 2 ≈ 10.1px·scale. `translateY(-50%)` then
- * centres the button box — and the taller editing form — on the line regardless of its own
- * height. Approximation, not exact, when a 24px privacy-lock button is in row1 at small
- * font scales — acceptable for a fallback. The old touch-only last-row `padding-right`
- * reservation is gone: the pencil no longer sits at the bottom corner, and the title's
- * `max-width` above already reserves its room. */
+ * fs-sm 13px · 1.55 / 2 ≈ 10.1px·scale. `translateY(-50%)` then centres the button box — and
+ * the taller editing form — on the line regardless of its own height. The title's `max-width`
+ * above reserves the pencil's room. */
 .agent-item .rename-wrap {
   position: absolute;
   right: calc(var(--sp-3) - 6px);
-  top: calc(14px + 31.8px * var(--fs-scale, 1));
+  top: calc(9px + 31.8px * var(--fs-scale, 1));
   transform: translateY(-50%);
   z-index: 2;
-}
-
-.agent-item.removable .rename-wrap {
-  right: calc(var(--sp-3) - 6px + var(--remove-col, 44px));
 }
 
 /* A 24px privacy-lock button in row1 (fixed px) can make row1 taller than the title's line box
  * — `:has()` is supported everywhere the fallback is used; re-derive the same geometry. */
 .agent-item:has(.privacy-lock-btn) .rename-wrap {
+  top: calc(9px + max(21.7px * var(--fs-scale, 1), 24px) + 10.1px * var(--fs-scale, 1));
+}
+
+/* `detailed` density (data-density on the card): card padding-top is 10px (row1 top 11px, session
+ * line top ≈ row1 + height + 3px gap — measured with playwright 2026-10-28), i.e. 5px more fixed
+ * offset than the compact card's 9px: border 1 + padding 10 + gap 3 = 14. */
+.agent-item:has(.agent-card[data-density="detailed"]) .rename-wrap {
+  top: calc(14px + 31.8px * var(--fs-scale, 1));
+}
+
+.agent-item:has(.agent-card[data-density="detailed"] .privacy-lock-btn) .rename-wrap {
   top: calc(14px + max(21.7px * var(--fs-scale, 1), 24px) + 10.1px * var(--fs-scale, 1));
 }
 
-@supports (anchor-name: --x) and (anchor-scope: --x) {
-  .agent-item.renamable {
-    anchor-scope: --rename-anchor;
-  }
-
-  .agent-item.renamable > .agent-card .agent-session {
-    anchor-name: --rename-anchor;
-  }
-
-  .agent-item.renamable > .rename-wrap {
-    position-anchor: --rename-anchor;
-    top: anchor(center);
-    right: auto;
-    left: calc(anchor(right) + 4px);
-  }
-}
-
 /* Editing (both modes): the form spans the card's content box on the title row (left = card
- * border+padding 15px, right = 13px; a `.removable` card also stops short of the delete
- * column), so it is always fully inside the card whatever the title length. */
+ * border+padding 15px, right = 13px), so it is always fully inside the card whatever the title length. */
 .agent-item.renamable > .rename-wrap.is-editing {
   left: 15px;
   right: 13px;
-}
-
-.agent-item.renamable.removable > .rename-wrap.is-editing {
-  right: calc(13px + var(--remove-col));
 }
 
 .agent-item .rename-wrap.is-editing .rename-form {

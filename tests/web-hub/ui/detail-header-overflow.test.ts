@@ -134,17 +134,23 @@ function fakeView(control: ControlHandle): ControlView {
   };
 }
 
-function fakeHub(opts: { managed?: boolean } = {}): {
+function fakeHub(opts: { managed?: boolean; removeOutcome?: Record<string, unknown> } = {}): {
   hub: HubHandle;
   stops: string[];
+  removes: unknown[];
 } {
   const stops: string[] = [];
+  const removes: unknown[] = [];
   const spawns = opts.managed
     ? { items: [{ spawnId: "sp-1", agentKey: "agent-1", state: "live", updatedAt: 1 }] }
     : null;
   const hub = {
     state: ref({ hub: { caps: CAPS }, spawns } as unknown as HubState),
     dispatch() {},
+    removeAgent: (target: unknown) => {
+      removes.push(target);
+      return Promise.resolve(opts.removeOutcome ?? { ok: true });
+    },
     spawn: {
       stop: (spawnId: string) => {
         stops.push(spawnId);
@@ -153,7 +159,7 @@ function fakeHub(opts: { managed?: boolean } = {}): {
       newSession: { flow: ref(undefined) },
     },
   } as unknown as HubHandle;
-  return { hub, stops };
+  return { hub, stops, removes };
 }
 
 function fakePrivacy(opts: { marked?: boolean } = {}) {
@@ -175,19 +181,27 @@ interface Harness {
   wrapper: ReturnType<typeof mount>;
   runs: string[][];
   stops: string[];
+  removes: unknown[];
   resume: { opens: number };
   remarks: unknown[];
 }
 
 function mountHeader(
-  opts: { managed?: boolean; narrow?: boolean; privacyMarked?: boolean; holdCommands?: boolean } = {},
+  opts: {
+    managed?: boolean;
+    narrow?: boolean;
+    privacyMarked?: boolean;
+    holdCommands?: boolean;
+    offline?: boolean;
+    removeOutcome?: Record<string, unknown>;
+  } = {},
 ): Harness {
   const { control, runs } = fakeControl({ holdCommands: opts.holdCommands });
-  const { hub, stops } = fakeHub(opts);
+  const { hub, stops, removes } = fakeHub(opts);
   const privacy = fakePrivacy({ marked: opts.privacyMarked });
   const resume = { opens: 0 };
   const wrapper = mount(DetailHeader, {
-    props: { agent: agent(), narrow: opts.narrow ?? false },
+    props: { agent: agent(opts.offline === true ? { down: true } : {}), narrow: opts.narrow ?? false },
     attachTo: document.body, // focus assertions need a real document attachment
     global: {
       provide: {
@@ -199,7 +213,7 @@ function mountHeader(
     },
   });
   mounted.push(wrapper);
-  return { wrapper, runs, stops, resume, remarks: privacy.mark.mock.calls };
+  return { wrapper, runs, stops, removes, resume, remarks: privacy.mark.mock.calls };
 }
 
 /** Stub layout widths (happy-dom is all-zero) and fire the RO callback once. */
@@ -226,7 +240,7 @@ async function layOut(wrapper: ReturnType<typeof mount>, barWidth: number): Prom
 }
 
 describe("DetailHeader overflow (issue #41)", () => {
-  it("wide bar ⇒ pre-feature DOM: every button visible, no ⋯ trigger, pill + alias in full form", async () => {
+  it("wide bar ⇒ every button visible, ⋯ holds only delete (managed), pill + alias in full form", async () => {
     const h = mountHeader({ managed: true, narrow: true });
     await layOut(h.wrapper, 1200);
     const bar = h.wrapper.get(".detail-titlebar");
@@ -236,7 +250,8 @@ describe("DetailHeader overflow (issue #41)", () => {
     expect(bar.find(".detail-resume-btn").exists()).toBe(true);
     expect(bar.find(".privacy-head-btn").exists()).toBe(true);
     expect(bar.find(".spawn-stop-btn").exists()).toBe(true);
-    expect(bar.find(".detail-more-btn").exists()).toBe(false);
+    // a managed (removable) session always carries ⋯ — holding only 「Delete session」 on a wide bar
+    expect(bar.find(".detail-more-btn").exists()).toBe(true);
     expect(bar.find(".detail-head-menu").exists()).toBe(false);
     expect(bar.get(".pill").text()).toContain("Working");
     expect(bar.get(".detail-alias-btn").text()).toBe("@小艾");
@@ -250,7 +265,13 @@ describe("DetailHeader overflow (issue #41)", () => {
     expect(bar.find(".detail-more-btn").exists()).toBe(true);
     expect(bar.find(".spawn-stop-btn").exists()).toBe(false);
     await layOut(h.wrapper, 1200); // RO refires on the resize ⇒ fold recomputes to flat
-    expect(bar.find(".detail-more-btn").exists()).toBe(false);
+    // ⋯ stays (managed ⇒ permanent 「Delete session」) but nothing else is folded into it
+    await bar.get(".detail-more-btn").trigger("click");
+    await flushPromises();
+    expect(h.wrapper.findAll(".detail-head-menu .detail-head-menu-item").map((i) => i.text())).toEqual([
+      "Delete session",
+    ]);
+    await bar.get(".detail-more-btn").trigger("click");
     expect(bar.find(".detail-clear-btn").exists()).toBe(true);
     expect(bar.find(".detail-channels-btn").exists()).toBe(true);
     expect(bar.find(".detail-sched-btn").exists()).toBe(true);
@@ -286,7 +307,14 @@ describe("DetailHeader overflow (issue #41)", () => {
     await flushPromises();
     const items = h.wrapper.findAll(".detail-head-menu .detail-head-menu-item");
     // bar order among the folded five; the channels item carries the held alias (issue #41)
-    expect(items.map((i) => i.text())).toEqual(["Channels @小艾", "Schedules", "Resume", "Private", "Stop"]);
+    expect(items.map((i) => i.text())).toEqual([
+      "Channels @小艾",
+      "Schedules",
+      "Resume",
+      "Private",
+      "Stop",
+      "Delete session",
+    ]);
     // review pass — secondary action states: dialogs announce aria-haspopup, the privacy item is
     // a checkbox reflecting the (un)marked state, the danger stop row is set off by a separator
     const byText = (s: string) => items.find((i) => i.text().includes(s))!;
@@ -295,9 +323,10 @@ describe("DetailHeader overflow (issue #41)", () => {
     expect(byText("Private").attributes("aria-checked")).toBe("false");
     expect(byText("Stop").attributes("aria-haspopup")).toBeUndefined();
     const seps = h.wrapper.findAll(".detail-head-menu-sep");
-    expect(seps.length).toBe(1);
+    expect(seps.length).toBe(2); // before Stop, and before the permanent Delete row
     expect(seps[0]!.attributes("role")).toBe("separator");
     expect((seps[0]!.element.nextElementSibling as HTMLElement).textContent).toContain("Stop");
+    expect((seps[1]!.element.nextElementSibling as HTMLElement).textContent).toContain("Delete session");
     // the ⋯ wrap sits before the trailing state chips; the unread chip is the bar's LAST child
     const barEl = h.wrapper.get(".detail-titlebar").element;
     const kids = [...barEl.children];
@@ -323,10 +352,10 @@ describe("DetailHeader overflow (issue #41)", () => {
     await trigger.trigger("keydown", { key: "ArrowDown" });
     await flushPromises();
     const items = h.wrapper.findAll(".detail-head-menu .detail-head-menu-item");
-    expect(items.length).toBe(5);
+    expect(items.length).toBe(6);
     expect(document.activeElement).toBe(items[0]!.element);
     await h.wrapper.get(".detail-head-menu").trigger("keydown", { key: "ArrowUp" }); // wraps to last
-    expect(document.activeElement).toBe(items[4]!.element);
+    expect(document.activeElement).toBe(items[5]!.element);
     await h.wrapper.get(".detail-head-menu").trigger("keydown", { key: "ArrowDown" }); // wraps back
     expect(document.activeElement).toBe(items[0]!.element);
     await h.wrapper.get(".detail-head-menu").trigger("keydown", { key: "Escape" });
@@ -459,5 +488,147 @@ describe("icon-tier breakpoint sync (TS ⇆ CSS)", () => {
     // …and coarse pointers compact via the bar's own gap, never via overlap
     const coarseBlock = css.slice(css.indexOf("@media (pointer: coarse) and", fineStart));
     expect(coarseBlock).toMatch(/\.detail-titlebar\s*\{\s*gap:\s*4px/);
+  });
+});
+
+describe("DetailHeader — touch screens fold the idle stop button into ⋯", () => {
+  const stubPointer = (coarse: boolean): void => {
+    vi.stubGlobal("matchMedia", (q: string) => ({
+      matches: coarse && q === "(pointer: coarse)",
+      media: q,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  };
+
+  it("coarse pointer: no bare stop icon even on a wide bar; the ⋯ menu still stops (arm → ✓)", async () => {
+    stubPointer(true);
+    const h = mountHeader({ managed: true });
+    await layOut(h.wrapper, 1200);
+    expect(h.wrapper.find(".spawn-stop-btn").exists()).toBe(false);
+    // idle + folded ⇒ NO stop control of any kind in the bar (not even the armed pill)
+    expect(h.wrapper.find(".spawn-stop-armed").exists()).toBe(false);
+    expect(h.wrapper.find(".spawn-stop-busy").exists()).toBe(false);
+    await h.wrapper.get(".detail-more-btn").trigger("click");
+    await flushPromises();
+    const stopItem = h.wrapper
+      .findAll(".detail-head-menu .detail-head-menu-item")
+      .find((i) => i.text().includes("Stop"));
+    expect(stopItem).toBeDefined();
+    await stopItem!.trigger("click");
+    await flushPromises();
+    // armed pill stays in the bar (never folded)
+    expect(h.wrapper.find(".spawn-stop-armed").exists()).toBe(true);
+    await h.wrapper.get(".spawn-stop-armed-ok").trigger("click");
+    await flushPromises();
+    expect(h.stops).toEqual(["sp-1"]);
+  });
+
+  it("fine pointer (desktop): wide bar keeps the bare stop icon; ⋯ holds only delete", async () => {
+    stubPointer(false);
+    const h = mountHeader({ managed: true });
+    await layOut(h.wrapper, 1200);
+    expect(h.wrapper.find(".spawn-stop-btn").exists()).toBe(true);
+    expect(h.wrapper.find(".spawn-stop-armed").exists()).toBe(false);
+  });
+
+  it("narrow desktop bar, stop folded and idle ⇒ no armed pill in the bar (only after arming from ⋯)", async () => {
+    stubPointer(false);
+    const h = mountHeader({ managed: true, narrow: true });
+    await layOut(h.wrapper, 400); // folds stop
+    expect(h.wrapper.find(".spawn-stop-btn").exists()).toBe(false);
+    expect(h.wrapper.find(".spawn-stop-armed").exists()).toBe(false);
+  });
+
+  it("coarse pointer, unmanaged online session: no stop anywhere, no ⋯ trigger, no delete", async () => {
+    stubPointer(true);
+    const h = mountHeader({});
+    await layOut(h.wrapper, 1200);
+    expect(h.wrapper.find(".spawn-stop-btn").exists()).toBe(false);
+    expect(h.wrapper.find(".detail-more-btn").exists()).toBe(false);
+  });
+});
+
+describe("DetailHeader — 「删除会话」 lives in the ⋯ menu (the cards' corner × is gone)", () => {
+  async function openMenu(h: Harness): Promise<void> {
+    await h.wrapper.get(".detail-more-btn").trigger("click");
+    await flushPromises();
+  }
+  const deleteItem = (h: Harness) =>
+    h.wrapper.findAll(".detail-head-menu .detail-head-menu-item").find((i) => i.text().includes("Delete session"));
+
+  it("an online unmanaged session has no delete entry (and no ⋯ on a wide bar)", async () => {
+    const h = mountHeader({});
+    await layOut(h.wrapper, 1200);
+    expect(h.wrapper.find(".detail-more-btn").exists()).toBe(false);
+  });
+
+  it("an offline session gets ⋯ with a danger 「Delete session」; arm → ✓ calls removeAgent({agentKey})", async () => {
+    const h = mountHeader({ offline: true });
+    await layOut(h.wrapper, 1200);
+    await openMenu(h);
+    const item = deleteItem(h);
+    expect(item!.classes()).toContain("is-danger");
+    await item!.trigger("click");
+    await flushPromises();
+    // armed pill in the bar (menu closed), nothing deleted yet
+    expect(h.wrapper.find(".detail-head-menu").exists()).toBe(false);
+    expect(h.wrapper.find(".detail-del-pill").exists()).toBe(true);
+    expect(h.removes).toEqual([]);
+    await h.wrapper.get(".detail-del-pill .spawn-stop-armed-ok").trigger("click");
+    await flushPromises();
+    expect(h.removes).toEqual([{ agentKey: "agent-1" }]);
+    expect(h.wrapper.find(".detail-del-pill").exists()).toBe(false);
+  });
+
+  it("a managed session deletes by spawnId", async () => {
+    const h = mountHeader({ managed: true });
+    await layOut(h.wrapper, 1200);
+    await openMenu(h);
+    await deleteItem(h)!.trigger("click");
+    await flushPromises();
+    await h.wrapper.get(".detail-del-pill .spawn-stop-armed-confirm").trigger("click");
+    await flushPromises();
+    expect(h.removes).toEqual([{ spawnId: "sp-1" }]);
+  });
+
+  it("✕ and Esc cancel without a call; the 4s timer auto-disarms", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = mountHeader({ offline: true });
+      await layOut(h.wrapper, 1200);
+      await openMenu(h);
+      await deleteItem(h)!.trigger("click");
+      await flushPromises();
+      await h.wrapper.get(".detail-del-pill .spawn-stop-armed-no").trigger("click");
+      expect(h.wrapper.find(".detail-del-pill").exists()).toBe(false);
+      await openMenu(h);
+      await deleteItem(h)!.trigger("click");
+      await flushPromises();
+      await h.wrapper.get(".detail-del-pill").trigger("keydown", { key: "Escape" });
+      expect(h.wrapper.find(".detail-del-pill").exists()).toBe(false);
+      await openMenu(h);
+      await deleteItem(h)!.trigger("click");
+      await flushPromises();
+      vi.advanceTimersByTime(4100);
+      await flushPromises();
+      expect(h.wrapper.find(".detail-del-pill").exists()).toBe(false);
+      expect(h.removes).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a failed delete shows the classified reason in a role=alert note", async () => {
+    const h = mountHeader({ offline: true, removeOutcome: { ok: false, error: "E_RATE" } });
+    await layOut(h.wrapper, 1200);
+    await openMenu(h);
+    await deleteItem(h)!.trigger("click");
+    await flushPromises();
+    await h.wrapper.get(".detail-del-pill .spawn-stop-armed-ok").trigger("click");
+    await flushPromises();
+    const note = h.wrapper.get(".detail-del-note");
+    expect(note.attributes("role")).toBe("alert");
+    expect(note.text()).toContain("too many requests");
   });
 });
