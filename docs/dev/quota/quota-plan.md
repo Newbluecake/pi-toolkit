@@ -77,7 +77,8 @@
 
 - **选择**（`shouldAnnounce`，纯函数，见 §5）：满足任一即发，否则静默：
   1. **等级抬升**：`level > last.level`（L0→L1、L1→L2、L2→L3 各必发一次）；
-  2. **网格前进**：`gridStep(usedPct) > last.step`（网格 = `quota.tickStepPercent` 的整数倍，默认 10 ⇒ 50/60/70/80/90）；
+  2. **网格前进**：`gridStep(usedPct) > last.step`（网格 = `quota.tickStepPercent` 的整数倍，默认 10 ⇒ 50/60/70/80/90）。
+     L1 另加**轮次冷却**（2026-10-28 用户：「L1 还要考虑上一次播报过去了多少轮次」）：还必须 `turns - last.turn >= quota.l1MinTurns`（默认 10，0 = 只看网格）。冷却没到时这一步被吞掉但闩锁前进，到期后下一轮自动补报（与 minInterval 的回滚语义一致）；L2/L3 与等级抬升闸不受冷却约束；
   3. **重复计时到期**：`level >= 2 && now - last.at >= quota.repeatMs`（默认 30min）——L2/L3 会周期性复读，因为它要改变派单决策；L1 不复读。
   - 无论多少 provider 命中，**每轮只发一条合并消息**（所有 provider 拼在一个 `[quota]` 块里）。
   - **重新武装**：`level < last.level` 且 `usedPct <= last.usedPct - QUOTA_HYSTERESIS_PCT`（默认 15）⇒ 判定为真实窗口重置，清空该 provider 的闩锁（照抄 `USAGE_TICK_HYSTERESIS_PERCENT` 的边界抖动区分思路）。
@@ -488,6 +489,8 @@ export interface QuotaAnnounceLatch {
   step: number;
   at: Millis;
   usedPct: number;
+  /** 2026-10-28 L1 轮次冷却：距上次播报的 turn_end 序号（缺省 = 视为很久以前）。 */
+  turn?: number;
 }
 
 /** 会话级可变状态，挂在 Stack 上（每次 session_start 重建；无模块级状态）。 */
@@ -496,6 +499,8 @@ export interface QuotaHintState {
   readonly tickStepPercent: number;
   readonly repeatMs: Millis;
   readonly minIntervalMs: Millis;
+  readonly l1MinTurns: number;
+  turns: number;
   readonly display: boolean;
   /** provider → 上次播报的闩锁。 */
   readonly latches: Map<string, QuotaAnnounceLatch>;
@@ -518,7 +523,13 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
 export function shouldAnnounce(
   verdict: ProviderVerdict,
   latch: QuotaAnnounceLatch | undefined,
-  input: { readonly now: Millis; readonly tickStepPercent: number; readonly repeatMs: Millis },
+  input: {
+    readonly now: Millis;
+    readonly tickStepPercent: number;
+    readonly repeatMs: Millis;
+    readonly turn?: number;
+    readonly l1MinTurns?: number;
+  },
 ): { readonly announce: boolean; readonly next: QuotaAnnounceLatch };
 ```
 

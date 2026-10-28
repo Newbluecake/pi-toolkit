@@ -111,6 +111,9 @@ export interface QuotaAnnounceLatch {
   step: number;
   at: Millis;
   usedPct: number;
+  /** turn_end sequence number at the announce (2026-10-28 L1 turn cooldown). Absent on latches
+   *  written before the field existed ⇒ treated as "long ago" (announce is allowed). */
+  turn?: number;
 }
 
 /** 会话级可变状态，挂在 Stack 上（每次 session_start 重建；无模块级状态）。 */
@@ -119,6 +122,11 @@ export interface QuotaHintState {
   readonly tickStepPercent: number;
   readonly repeatMs: Millis;
   readonly minIntervalMs: Millis;
+  /** L1 turn cooldown: a grid step alone is not enough at L1 — it must also be at least this
+   *  many turn_ends since the last announce (0 = off, grid-only, the pre-2026-10-28 rule). */
+  readonly l1MinTurns: number;
+  /** turn_end counter, monotone per stack (the unit `l1MinTurns` is measured in). */
+  turns: number;
   readonly display: boolean;
   /** provider → 上次播报的闩锁。 */
   readonly latches: Map<string, QuotaAnnounceLatch>;
@@ -163,7 +171,15 @@ export interface QuotaHintDeps {
 export function shouldAnnounce(
   verdict: ProviderVerdict,
   latch: QuotaAnnounceLatch | undefined,
-  input: { readonly now: Millis; readonly tickStepPercent: number; readonly repeatMs: Millis },
+  input: {
+    readonly now: Millis;
+    readonly tickStepPercent: number;
+    readonly repeatMs: Millis;
+    /** turn_end counter for this stack (see `QuotaHintState.turns`). */
+    readonly turn?: number;
+    /** L1 turn cooldown; 0/undefined = grid only (legacy). */
+    readonly l1MinTurns?: number;
+  },
 ): { readonly announce: boolean; readonly next: QuotaAnnounceLatch } {
   // provider 的代表百分比：全部窗口取最高（余额型无窗口 ⇒ 0）。
   let pct = 0;
@@ -171,7 +187,13 @@ export function shouldAnnounce(
     if (w.usedPct > pct) pct = w.usedPct;
   }
   const step = gridStep(pct, input.tickStepPercent);
-  const next: QuotaAnnounceLatch = { level: verdict.level, step, at: input.now, usedPct: pct };
+  const next: QuotaAnnounceLatch = {
+    level: verdict.level,
+    step,
+    at: input.now,
+    usedPct: pct,
+    ...(input.turn === undefined ? {} : { turn: input.turn }),
+  };
 
   if (latch === undefined) return { announce: true, next }; // 首次进入 L>=1
 
@@ -180,8 +202,17 @@ export function shouldAnnounce(
     return { announce: verdict.level >= 1, next };
   }
 
-  if (verdict.level > latch.level) return { announce: true, next }; // 闸① 等级抬升
-  if (step > latch.step) return { announce: true, next }; // 闸② 网格前进
+  if (verdict.level > latch.level) return { announce: true, next }; // 闸① 等级抬升（不受轮次冷却）
+  if (step > latch.step) {
+    // 闸② 网格前进。L1 额外要求轮次冷却（2026-10-28 用户：「L1 还要考虑上一次播报过去了多少轮次」）：
+    // 短会话里连跨几档不该连报几条；被吞掉的那一步不丢——闩锁不前进，等冷却到期后重算
+    // `step > latch.step` 仍然成立，下一轮就补报（与 minInterval 的回滚语义一致）。
+    if (verdict.level === 1 && (input.l1MinTurns ?? 0) > 0) {
+      const since = input.turn !== undefined && latch.turn !== undefined ? input.turn - latch.turn : Infinity;
+      if (since < (input.l1MinTurns ?? 0)) return { announce: false, next: latch };
+    }
+    return { announce: true, next };
+  }
   // 闸③ 复读只给 L3：L2 是纯提示（订阅优先用完），复读只会刷屏。
   if (verdict.level >= 3 && input.now - latch.at >= input.repeatMs) return { announce: true, next };
   return { announce: false, next: latch };
@@ -215,6 +246,7 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
     if (state === undefined || !state.enabled) return;
 
     const t = now();
+    state.turns++;
 
     // ②.5 可用播报读回（跨 /reload 去重）：栈重建后的首轮从会话分支取回已播键。
     if (restoredFor !== state) {
@@ -294,6 +326,8 @@ export function createQuotaHintHook(deps: QuotaHintDeps): (event: unknown, ctx: 
         now: t,
         tickStepPercent: state.tickStepPercent,
         repeatMs: state.repeatMs,
+        turn: state.turns,
+        l1MinTurns: state.l1MinTurns,
       });
       if (recoveredProviders.has(v.provider)) {
         // 恢复块已携带该 provider 的当前读数与闸门状态：本轮不再注入常规块（「每个

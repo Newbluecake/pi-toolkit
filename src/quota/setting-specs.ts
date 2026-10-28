@@ -103,6 +103,11 @@ export const QUOTA_SETTING_SPECS: Record<string, SettingSpec> = {
   ),
   "quota.l3EtaS": seconds("quota.l3EtaMs", { max: 86_400, description: "Predicted exhaustion horizon that forces L3" }),
   "quota.tickStepPercent": count("quota.tickStepPercent", 0, "Used-% grid between L1 ticks; 0 = level latch only"),
+  "quota.l1MinTurns": count(
+    "quota.l1MinTurns",
+    0,
+    "L1 turn cooldown: min turns since the last notice before a grid step re-announces; 0 = grid only",
+  ),
   "quota.minIntervalS": seconds("quota.minIntervalMs", {
     max: 86_400,
     hint: "L3 bypasses this floor",

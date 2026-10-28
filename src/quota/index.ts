@@ -158,6 +158,8 @@ export function createQuotaStack(input: QuotaStackInput): QuotaStack | undefined
   const hintState: QuotaHintState = {
     enabled: true,
     tickStepPercent: settings.tickStepPercent,
+    l1MinTurns: settings.l1MinTurns,
+    turns: 0,
     repeatMs: settings.repeatMs,
     minIntervalMs: settings.minIntervalMs,
     display: settings.display,

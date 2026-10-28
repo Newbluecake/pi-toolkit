@@ -58,6 +58,8 @@ export interface QuotaSettings {
   windows: Readonly<Record<WindowScope, QuotaWindowThresholds>>;
   /** L1 tick 的 usedPct 网格步；0 = 关闭网格闸（只剩等级闩锁）。 */
   tickStepPercent: number;
+  /** L1 的轮次冷却：跨档之后还要距上次播报 ≥ 这么多轮才再播；0 = 只看网格。 */
+  l1MinTurns: number;
   /** 两条 quota 消息之间的全局最小间隔（L3 不受限）。 */
   minIntervalMs: number;
   /** L3 的复读周期；L2 纯提示不复读。 */
@@ -129,6 +131,7 @@ export function parseQuotaSettings(input: unknown): QuotaSettings {
     l3EtaMs: num(value.l3EtaMs, defaults.l3EtaMs, 0, 86_400_000),
     windows,
     tickStepPercent: num(value.tickStepPercent, defaults.tickStepPercent, 0, 50),
+    l1MinTurns: num(value.l1MinTurns, defaults.l1MinTurns, 0, 1000),
     minIntervalMs: num(value.minIntervalMs, defaults.minIntervalMs, 0, 86_400_000),
     repeatMs: num(value.repeatMs, defaults.repeatMs, 0, 86_400_000),
     display: bool(value.display, defaults.display),
@@ -216,6 +219,7 @@ export const DEFAULT_QUOTA_SETTINGS: QuotaSettings = {
     month: { l1Percent: 50, l2Percent: 95, l3Percent: 98 },
   },
   tickStepPercent: 10,
+  l1MinTurns: 10,
   minIntervalMs: 300_000, // 5min
   repeatMs: 1_800_000, // 30min
   display: true,
