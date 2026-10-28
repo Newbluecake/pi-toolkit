@@ -328,8 +328,15 @@ export interface BashJobsWire {
   total: number; // selected rows before the 20/12 caps (D1)
   running: number; // non-terminal rows
   failed: number; // terminal rows the agent counts as failed
-  /** Dropped by the 20-row/12-terminal caps (D1) or the five-pass byte budget (D6); absent when 0. */
+  /** Terminal rows this session has NOT archived and the wire could not carry (the 20-row /
+   *  12-terminal caps, plus the D6 five-pass byte budget). Absent when 0. This is what the
+   *  drawer's `(+N more)` counts and what `archive_omitted` archives — archived rows never count
+   *  here (they sit in `rows` and show up in the drawer's「已归档」fold instead). */
   omitted?: number;
+  /** 2026-10-28 append-only field (no PROTO bump): running rows the caps/budget pushed OUT of
+   *  `rows`. Running rows are never archivable, so they must not inflate `omitted`; they are
+   *  reported separately and the drawer hints them with one muted line. Absent ⇔ 0. */
+  rowsOverflowRunning?: number;
   sampledAt: number; // agent-clock epoch ms of the projection that produced this content
 }
 
@@ -828,7 +835,8 @@ export type CmdOp =
   | "dialog_cancel"
   | "command"
   | "recall"
-  | "archive";
+  | "archive"
+  | "archive_omitted";
 
 export interface CmdOrigin {
   listener: "loopback" | "lan";
@@ -879,7 +887,13 @@ export type CmdArgs =
   | { op: "dialog_cancel"; dialogId: string; epoch: string }
   | { op: "command"; name: string; args: string; confirm?: true; deliver?: "steer" | "followUp"; expect?: CmdExpect }
   | { op: "recall"; target: string }
-  | { op: "archive"; kind: "run" | "bash"; id: string; set: "archive" | "unarchive" };
+  | { op: "archive"; kind: "run" | "bash"; id: string; set: "archive" | "unarchive" }
+  /** 2026-10-28 user request (fleet bash 「(+N more)」 either shows or archives): archive every
+   *  terminal bash job the wire had to omit — the rows beyond the projection's row caps
+   *  (`bash-jobs.ts` D1) plus anything the byte budget dropped (D6 ⑤). Kind-only on purpose:
+   *  the agent re-derives the set from its own live snapshot, so the browser never enumerates
+   *  ids it cannot see. `run` stays out (its fold has no wire cap of this shape). */
+  | { op: "archive_omitted"; kind: "bash" };
 export interface CommandOutputEntry {
   kind: "notify" | "widget" | "status" | "text" | "error" | "interactive";
   level?: "info" | "warning" | "error";
@@ -985,7 +999,9 @@ export type CmdData =
     }
   | { op: "query"; state: "running" | "ok" | "failed"; late?: true; result?: CmdResultBody }
   | RecallResultData
-  | { op: "archive"; set: "archive" | "unarchive"; changed?: boolean };
+  | { op: "archive"; set: "archive" | "unarchive"; changed?: boolean }
+  /** `changed` = how many jobs this call newly archived (0 on a second call — idempotent). */
+  | { op: "archive_omitted"; changed: number };
 export type CmdErrorCode =
   | "E_UNSUPPORTED"
   | "E_STALE_CTX"
@@ -1469,6 +1485,10 @@ export const BashJobsWireSchema = Type.Object(
     running: Type.Integer({ minimum: 0 }),
     failed: Type.Integer({ minimum: 0 }),
     omitted: Type.Optional(Type.Integer({ minimum: 0 })),
+    // 2026-10-28: running rows the caps/budget dropped (never part of `omitted`). Append-only
+    // optional field on an OPEN schema (`additionalProperties: true`) — an old peer forwards or
+    // ignores it, so no PROTO bump.
+    rowsOverflowRunning: Type.Optional(Type.Integer({ minimum: 0 })),
     sampledAt: Type.Number({ minimum: 0 }),
   },
   { additionalProperties: true },
@@ -2040,6 +2060,12 @@ export const ArchiveArgsSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+// 2026-10-28 (fleet bash 「(+N more)」): the bulk archive of the omitted tail. Closed schema like
+// `archive`/`recall` — exactly {op, kind}; the id set is derived agent-side from the live snapshot.
+export const ArchiveOmittedArgsSchema = Type.Object(
+  { op: Type.Literal("archive_omitted"), kind: Type.Literal("bash") },
+  { additionalProperties: false },
+);
 const CmdSchema = Type.Object(
   {
     t: Type.Literal("cmd"),
@@ -2059,6 +2085,7 @@ const CmdSchema = Type.Object(
       CommandArgsSchema,
       RecallArgsSchema,
       ArchiveArgsSchema,
+      ArchiveOmittedArgsSchema,
     ]),
   },
   { additionalProperties: false },

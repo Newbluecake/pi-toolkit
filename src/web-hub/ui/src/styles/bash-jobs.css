@@ -388,6 +388,19 @@
   list-style: none;
 }
 
+/* 2026-10-28 用户(红框对齐):两条尾部提示行(「显示已完成的 N 个」与「归档 N 条…」)的文字
+ * 左边缘必须与 `.bj-row` 的内容左边缘一致 —— 即 `.bj-row` 的 16px 图标列 + `--sp-2` 列间距。
+ * 两处偏差各来自一层:
+ *  - fleet.css 的 `.run-more` 带 `margin: var(--sp-1) 0 0 var(--sp-2)`,在 bj 上下文里多出
+ *    一段左边距(那是给 FleetTree 的 `.run` 行对齐用的,这里不需要);
+ *  - `.btn` 基础样式自带 `padding: 0 var(--sp-3)`,按钮文字因此在 li 的 padding 之外再退 12px。
+ * 所以把两者的左 margin / 左 padding 归零:text 左边缘 = li 的 content 左边缘 = 24px。 */
+.bj-more .run-more,
+.bj-fill-more .run-more {
+  margin-left: 0;
+  padding-left: 0;
+}
+
 /* Narrow (<480px CONTAINER — the drawer's `.tree-scroll` is an inline-size container; a docked
  * or overlay drawer is narrow on a wide viewport, so a viewport media query would never fire
  * there): same two lines (they already fit). When line 2 overflows the id goes first (lowest

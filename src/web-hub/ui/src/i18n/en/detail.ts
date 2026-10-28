@@ -112,6 +112,12 @@ const detail = {
   // omitted-orphan fix (2026-10-27): fleet bash group — every wire row archived + omitted>0 ⇒
   // the `(+N more)` marker becomes this prose note next to the archived fold.
   bashJobsOlderOmitted: "{n} older finished job(s) not sent to the web (cannot be viewed or archived)",
+  // 2026-10-28 user request: the `(+N more)` marker becomes an ACTION — archive every terminal
+  // bash job the wire could not carry (agent-derived set, one batch commit). Title-style like its
+  // sibling `.run-more` button `fleet.showFinished` («Show {n} Finished Runs»).
+  bashJobsArchiveOmitted: "Archive {n} Older Finished Jobs",
+  // 2026-10-28: running rows pushed out of the wire by the 20-row cap / byte budget (not archivable).
+  bashJobsRunningOverflow: "{n} more running job(s) not shown",
 } satisfies Record<string, string>;
 
 export default detail;

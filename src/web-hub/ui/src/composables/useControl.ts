@@ -212,6 +212,9 @@ export function createControl(
     // drawer's own 4s undo toast is the feedback). Agent-side terminality is re-checked anyway.
     setArchived: (agentKey, kind, target, set) =>
       transport.command({ agentKey, id: newCmdId(), op: "archive", target, kind, set }),
+    // 2026-10-28 (fleet bash 「(+N more)」): bulk-archive the omitted tail. Kind-only — the agent
+    // owns the id set. Same no-optimistic-item posture as `setArchived` above.
+    archiveOmitted: (agentKey, kind) => transport.command({ agentKey, id: newCmdId(), op: "archive_omitted", kind }),
     answerDialog: (agentKey, dialogId, epoch, answers, id = newCmdId()) => {
       return sendDialog(
         agentKey,

@@ -18,8 +18,10 @@
  * user unarchived is `held` and never auto-archived again (state.ts).
  */
 import {
+  ARCHIVE_ENTRIES_CAP,
   archiveItem,
   emptyArchiveState,
+  isArchived,
   readArchiveState,
   unarchiveItem,
   type ArchiveEntry,
@@ -107,6 +109,34 @@ export class ArchiveControl {
     return { runs, bash };
   }
 
+  /**
+   * Size one `archive_omitted`-style batch (ids NEWEST-first, the wire's order) so it SETTLES:
+   * the batch archives `ids.slice(-N)` — the OLDEST ids of the tail — and the archive set
+   * afterwards holds every id the batch touched (it did not churn the 256-entry FIFO window,
+   * 2026-10-28 verify r2 P1). Evicting FOREIGN archives (ids not in `ids`) is fine and moves
+   * the window forward; what must not happen is evicting an id that is already in `ids` — it
+   * would bounce back into `omitted` on the next projection, and the click would never
+   * converge. The answer is `cap - alreadyArchivedOutsideIds`; it can be 0, in which case the
+   * caller must still archive SOMETHING (see `archiveBatch`) rather than spin.
+   */
+  archiveRoomFor(kind: ArchiveKind, ids: readonly string[]): number {
+    const inIds = new Set(ids);
+    const outside = this.state.entries.filter((e) => e.kind === kind && !inIds.has(e.id)).length;
+    return Math.max(0, ARCHIVE_ENTRIES_CAP - outside);
+  }
+
+  /**
+   * The batch itself: `ids.slice(-N)` with N from `archiveRoomFor`, but at least one id (the
+   * very oldest) even when the room is 0 — archiving one old id evicts exactly one older
+   * archive and the tail strictly shrinks, so the click still converges one row at a time
+   * instead of reporting `changed: 0` forever (the 256-cap steady state).
+   */
+  archiveBatch(kind: ArchiveKind, ids: readonly string[]): string[] {
+    if (ids.length === 0) return [];
+    const room = this.archiveRoomFor(kind, ids);
+    return ids.slice(-Math.max(1, room));
+  }
+
   /** Wire projection (`StatusInfo.archived`): entries snapshot + monotone rev.
    *  Empty ⇒ `undefined` so the status frame stays byte-equal (no archives). */
   wire(): { rev: number; entries: ArchiveEntry[] } | undefined {
@@ -141,6 +171,48 @@ export class ArchiveControl {
     if (next === undefined) return { ok: true, changed: false };
     this.commit(next);
     return { ok: true, changed: true };
+  }
+
+  /**
+   * 2026-10-28 (fleet bash 「(+N more)」 either shows or archives): archive MANY in ONE commit.
+   * Same discipline as the auto sweep — N rows archived in one pass must not write N session
+   * entries (each `commit` is one `appendEntry` + one rev bump), so this folds `archiveItem`
+   * over the ids and commits exactly once.
+   *
+   * Counted semantics: `changed` = ids that went from NOT-archived to archived. An id that is
+   * live-and-non-terminal is skipped defensively (`terminalInstant` `false`); an id that is
+   * ALREADY archived — including a sweep-archived (`auto: true`) one being re-marked manual — is
+   * NOT counted: from the caller's point of view nothing became hidden, so a caller that reports
+   * `changed: 0` truthfully says "nothing to archive". 0 also means no entry was written at all.
+   *
+   * Cap overflow rides `archiveItem`'s own FIFO tail (`ARCHIVE_ENTRIES_CAP`): the oldest archive
+   * entries are evicted, so a batch larger than the cap keeps its NEWEST rows — the same
+   * semantics a per-id loop would have produced, just with one write. Batch callers should size
+   * their batch to `archiveRoom(kind)` first so their batch converges instead of churning the
+   * window (2026-10-28 verifier: the wire orders the ids NEWEST-first, which evicts the newest).
+   *
+   * Archive only (no `unarchive` arm): the only production caller is the `archive_omitted` op, and
+   * un-archiving a batch has no such caller — a single row un-archives through `setArchived`, which
+   * is the surface the drawer's undo/un-archive button uses. Keeping a second, untested write path
+   * for an operation nobody performs was the cheaper thing to delete than to pin with tests.
+   */
+  setArchivedMany(kind: ArchiveKind, ids: readonly string[]): number {
+    if (this.disposed) return 0;
+    const now = this.deps.now();
+    let next = this.state;
+    let changed = 0;
+    for (const id of ids) {
+      if (this.terminalInstant(kind, id) === false) continue;
+      const already = isArchived(next, { kind, id });
+      const after = archiveItem(next, { kind, id, auto: false, now });
+      if (after === undefined) continue;
+      next = after;
+      if (!already) changed += 1;
+    }
+    // An auto→manual re-mark changes the state (the badge drops) even though `changed` stays 0 —
+    // commit it, or the entry would silently diverge from what the session file records.
+    if (next !== this.state) this.commit(next);
+    return changed;
   }
 
   // -- internals ------------------------------------------------------------

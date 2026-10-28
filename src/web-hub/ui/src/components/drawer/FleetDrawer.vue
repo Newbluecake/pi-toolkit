@@ -158,14 +158,36 @@ const liveRows = computed(() => partitionArchived(rows.value, runArchive.value).
 const archivedRows = computed(() => partitionArchived(rows.value, runArchive.value).archivedRows);
 
 const hub = inject(HUB_CTX, null);
-const archToast = ref<{ kind: "run" | "bash"; id: string; label: string } | null>(null);
+/** One toast for BOTH archive halves: a single-row archive carries an undo affordance, the bulk
+ *  `archive_omitted` click carries a one-shot outcome note (2026-10-28 rework: previously its
+ *  promise was dropped on the floor, so success / nothing-to-do / failure all looked identical —
+ *  i.e. like a dead button). */
+const archToast = ref<{
+  text: string;
+  kind: "run" | "bash";
+  id: string;
+  undo: boolean;
+  /** Diagnostics only (the error code on a failed bulk archive) — surfaced via `title`. */
+  title?: string;
+} | null>(null);
 let archToastTimer: ReturnType<typeof setTimeout> | undefined;
-function showArchToast(kind: "run" | "bash", id: string, label: string): void {
-  archToast.value = { kind, id, label };
+const TOAST_MS = 4000;
+const TOAST_ERR_MS = 8000;
+function showArchToast(
+  text: string,
+  opts: { kind?: "run" | "bash"; id?: string; undo?: boolean; title?: string; ms?: number } = {},
+): void {
+  archToast.value = {
+    text,
+    kind: opts.kind ?? "run",
+    id: opts.id ?? "",
+    undo: opts.undo === true,
+    ...(opts.title === undefined ? {} : { title: opts.title }),
+  };
   if (archToastTimer !== undefined) clearTimeout(archToastTimer);
   archToastTimer = setTimeout(() => {
     archToast.value = null;
-  }, 4000);
+  }, opts.ms ?? TOAST_MS);
 }
 function sendArchive(kind: "run" | "bash", id: string, set: "archive" | "unarchive"): void {
   const control = hub?.control;
@@ -174,7 +196,7 @@ function sendArchive(kind: "run" | "bash", id: string, set: "archive" | "unarchi
 }
 function undoArchive(): void {
   const t = archToast.value;
-  if (t !== null) sendArchive(t.kind, t.id, "unarchive");
+  if (t !== null && t.undo) sendArchive(t.kind, t.id, "unarchive");
   archToast.value = null;
 }
 onBeforeUnmount(() => {
@@ -184,9 +206,43 @@ provide(FLEET_ARCHIVE, {
   canArchive: computed(() => hub?.control !== undefined),
   archive: (kind, id, label) => {
     sendArchive(kind, id, "archive");
-    showArchToast(kind, id, label);
+    showArchToast(t("fleet.archivedToast", { name: label }), { kind, id, undo: true });
   },
   unarchive: (kind, id) => sendArchive(kind, id, "unarchive"),
+  // 2026-10-28 rework (acceptance blocker: "clicking does nothing"): the op's outcome is now
+  // REPORTED. Three distinct shapes, never the same render:
+  //   changed > 0  →「已归档 N 条更早的任务」(the next `status.archived` frame moves the rows into
+  //                  the fold and the `(+N more)` line disappears);
+  //   changed === 0 →「没有可归档的任务」 (an honest no-op instead of a silent dead button);
+  //   error/timeout →「归档失败」+ the code in `title`, i.e. a failure affordance that lasts
+  //                  longer (8s) and never pretends to have archived anything.
+  // No undo affordance on the bulk path: it has no single id to reverse (un-archive per row from
+  // the fold instead). `n` is only gone: the agent re-derives (and re-counts) the real set, and the toast copy uses its answer.
+  archiveOmitted: async (): Promise<void> => {
+    const control = hub?.control;
+    if (control?.archiveOmitted === undefined) {
+      showArchToast(t("fleet.archiveOmittedFailed"), { title: "E_UNSUPPORTED", ms: TOAST_ERR_MS });
+      return;
+    }
+    let changed: number | undefined;
+    let code = "E_DEADLINE";
+    try {
+      const outcome = await control.archiveOmitted(props.agent.key, "bash");
+      if (outcome.ok) {
+        const data = outcome.data as { changed?: unknown } | undefined;
+        changed = typeof data?.changed === "number" ? data.changed : 0;
+      } else {
+        code = outcome.error ?? "E_UNKNOWN";
+      }
+    } catch {
+      code = "E_NETWORK";
+    }
+    if (changed === undefined) {
+      showArchToast(t("fleet.archiveOmittedFailed"), { title: code, ms: TOAST_ERR_MS });
+      return;
+    }
+    showArchToast(changed > 0 ? t("fleet.archiveOmittedDone", { n: changed }) : t("fleet.archiveOmittedNone"));
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -526,10 +582,13 @@ watch(
       </div>
     </template>
   </aside>
-  <!-- web-hub archive plan: the shared undo toast (viewport-fixed; both the tree's and the bash
-       group's archive actions land here). -->
-  <div v-if="archToast !== null" class="arch-toast" role="status">
-    <span class="arch-toast-text">{{ t("fleet.archivedToast", { name: archToast.label }) }}</span>
-    <button class="btn btn-ghost arch-toast-undo" type="button" @click="undoArchive">{{ t("fleet.undo") }}</button>
+  <!-- web-hub archive plan: the shared toast (viewport-fixed; the tree's and the bash group's
+       archive actions land here). A single-row archive shows「撤销」; the bulk `archive_omitted`
+       click shows its outcome (done / nothing to do / failed + code in `title`). -->
+  <div v-if="archToast !== null" class="arch-toast" role="status" :title="archToast.title">
+    <span class="arch-toast-text">{{ archToast.text }}</span>
+    <button v-if="archToast.undo" class="btn btn-ghost arch-toast-undo" type="button" @click="undoArchive">
+      {{ t("fleet.undo") }}
+    </button>
   </div>
 </template>

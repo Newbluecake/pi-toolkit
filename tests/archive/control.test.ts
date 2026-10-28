@@ -5,7 +5,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { ArchiveControl } from "../../src/archive/control.js";
-import { ARCHIVE_ENTRY_TYPE } from "../../src/archive/state.js";
+import { ARCHIVE_ENTRIES_CAP, ARCHIVE_ENTRY_TYPE } from "../../src/archive/state.js";
 import type { JobRecord } from "../../src/bash/types.js";
 import type { RunSnapshot } from "../../src/core/types.js";
 
@@ -117,6 +117,122 @@ describe("ArchiveControl: manual archive/unarchive", () => {
       type: ARCHIVE_ENTRY_TYPE,
       data: { entries: [], held: [{ kind: "run", id: "r-1", at: 1_000_000 }] },
     });
+  });
+});
+
+describe("ArchiveControl: setArchivedMany (2026-10-28 fleet bash「归档 N 条」)", () => {
+  it("archives N ids in ONE session entry (one appendEntry, one rev bump)", () => {
+    const h = makeControl({
+      jobs: [
+        job({ jobId: "b-1", status: "completed", endedAt: 10 }),
+        job({ jobId: "b-2", status: "failed", endedAt: 20 }),
+        job({ jobId: "b-3", status: "timed_out", endedAt: 30 }),
+      ],
+    });
+    expect(h.control.setArchivedMany("bash", ["b-1", "b-2", "b-3"])).toBe(3);
+    expect(h.appended).toHaveLength(1);
+    expect(h.control.wire()).toEqual({
+      rev: 1,
+      entries: [
+        { kind: "bash", id: "b-1", at: 1_000_000 },
+        { kind: "bash", id: "b-2", at: 1_000_000 },
+        { kind: "bash", id: "b-3", at: 1_000_000 },
+      ],
+    });
+    expect([...h.control.view().bash]).toEqual(["b-1", "b-2", "b-3"]);
+  });
+
+  it("skips already-archived ids and returns 0 (no second entry) when nothing is new", () => {
+    const h = makeControl({ jobs: [job({ jobId: "b-1", status: "completed", endedAt: 10 })] });
+    h.control.setArchived("bash", "b-1", "archive");
+    expect(h.appended).toHaveLength(1);
+    expect(h.control.setArchivedMany("bash", ["b-1", "b-1"])).toBe(0);
+    expect(h.appended).toHaveLength(1);
+    expect(h.control.currentRev()).toBe(1);
+  });
+
+  it("never archives a RUNNING job, even when the caller names it", () => {
+    const h = makeControl({
+      jobs: [job({ jobId: "b-live", status: "running" }), job({ jobId: "b-done", status: "completed", endedAt: 10 })],
+    });
+    expect(h.control.setArchivedMany("bash", ["b-live", "b-done"])).toBe(1);
+    expect(h.control.view().bash.has("b-live")).toBe(false);
+    expect(h.control.view().bash.has("b-done")).toBe(true);
+  });
+
+  it("stores ids under the requested kind only (a run id never enters the run fold)", () => {
+    const h = makeControl({ runs: [runSnap({ runId: "r-1" })] });
+    expect(h.control.setArchivedMany("bash", ["r-1"])).toBe(1);
+    expect(h.control.view().runs.has("r-1")).toBe(false);
+    expect(h.control.view().bash.has("r-1")).toBe(true);
+  });
+
+  it("cap overflow keeps the NEWEST entries and still writes exactly one entry", () => {
+    const jobs = Array.from({ length: 300 }, (_, i) => job({ jobId: `b-${i}`, status: "completed", endedAt: i }));
+    const h = makeControl({ jobs });
+    expect(
+      h.control.setArchivedMany(
+        "bash",
+        jobs.map((j) => j.jobId),
+      ),
+    ).toBe(300);
+    expect(h.appended).toHaveLength(1);
+    const entries = h.control.wire()?.entries ?? [];
+    expect(entries).toHaveLength(ARCHIVE_ENTRIES_CAP);
+    expect(entries[0]?.id).toBe("b-44");
+    expect(entries[entries.length - 1]?.id).toBe("b-299");
+  });
+
+  it("an auto-archived id re-marked manual is NOT counted in `changed` (it was already archived)", () => {
+    const h = makeControl({
+      jobs: [
+        job({ jobId: "b-auto", status: "completed", endedAt: 10 }),
+        job({ jobId: "b-new", status: "completed", endedAt: 20 }),
+      ],
+    });
+    h.control.restore([
+      {
+        type: "custom",
+        customType: ARCHIVE_ENTRY_TYPE,
+        data: { entries: [{ kind: "bash", id: "b-auto", at: 5, auto: true }], held: [] },
+      },
+    ]);
+    // Only the genuinely new id counts: the caller's "archived N" toast must not claim b-auto.
+    expect(h.control.setArchivedMany("bash", ["b-auto", "b-new"])).toBe(1);
+    // …but the auto→manual transition is still persisted (the `auto` badge drops), once.
+    expect(h.appended).toHaveLength(1);
+    expect(h.control.wire()?.entries).toEqual([
+      { kind: "bash", id: "b-auto", at: 1_000_000 },
+      { kind: "bash", id: "b-new", at: 1_000_000 },
+    ]);
+  });
+
+  it("re-marking ONLY auto-archived ids: changed is 0, yet the manual state is persisted", () => {
+    const h = makeControl({ jobs: [job({ jobId: "b-auto", status: "completed", endedAt: 10 })] });
+    h.control.restore([
+      {
+        type: "custom",
+        customType: ARCHIVE_ENTRY_TYPE,
+        data: { entries: [{ kind: "bash", id: "b-auto", at: 5, auto: true }], held: [] },
+      },
+    ]);
+    expect(h.control.setArchivedMany("bash", ["b-auto"])).toBe(0);
+    expect(h.control.wire()?.entries).toEqual([{ kind: "bash", id: "b-auto", at: 1_000_000 }]);
+    expect(h.appended).toHaveLength(1);
+  });
+
+  it("an empty list is a no-op (no entry, rev unchanged)", () => {
+    const h = makeControl();
+    expect(h.control.setArchivedMany("bash", [])).toBe(0);
+    expect(h.appended).toHaveLength(0);
+    expect(h.control.currentRev()).toBe(0);
+  });
+
+  it("dispose makes it a no-op", () => {
+    const h = makeControl({ jobs: [job({ jobId: "b-1", status: "completed", endedAt: 10 })] });
+    h.control.dispose();
+    expect(h.control.setArchivedMany("bash", ["b-1"])).toBe(0);
+    expect(h.appended).toHaveLength(0);
   });
 });
 

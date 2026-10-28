@@ -68,7 +68,10 @@ function parseExpect(body: unknown): CmdExpect | undefined {
   return typeof sid === "string" && sid.length > 0 ? { sessionId: sid } : undefined;
 }
 
-function parseCmdBody(body: unknown): ParseOutcome {
+/** Exported for tests only (2026-10-28 `archive_omitted`): the op switch is the single place
+ *  that decides which body fields survive onto the wire frame, so its closed-shape guarantees
+ *  are worth pinning directly instead of through a full HTTP round-trip. */
+export function parseCmdBody(body: unknown): ParseOutcome {
   const agentKey = stringField(body, "agentKey");
   const id = stringField(body, "id");
   if (agentKey === undefined) return { error: "E_BAD_REQUEST", message: "agentKey required" };
@@ -164,6 +167,20 @@ function parseCmdBody(body: unknown): ParseOutcome {
         id,
         ...(queryOnlyFlag ? { queryOnly: true as const } : {}),
         cmd: { op: "archive", kind, id: target, set },
+      };
+    }
+    case "archive_omitted": {
+      // 2026-10-28 user request (fleet bash 「(+N more)」 either shows or archives): the bulk
+      // archive of the OMITTED tail. Kind-only — the agent derives the id set from its own live
+      // bash-jobs snapshot, so nothing id-shaped rides the wire and a stale browser view cannot
+      // over-reach. Same /api/cmd authorization as every other op.
+      const kind = field(body, "kind");
+      if (kind !== "bash") return { error: "E_BAD_REQUEST", message: "bad kind" };
+      return {
+        agentKey,
+        id,
+        ...(queryOnlyFlag ? { queryOnly: true as const } : {}),
+        cmd: { op: "archive_omitted", kind: "bash" },
       };
     }
     case "recall": {

@@ -107,6 +107,11 @@ const detail = {
   // omitted-orphan 修复（2026-10-27）：fleet bash 分组——wire 行全部归档且 omitted>0 时，
   // 「(+N more)」改为此说明文案，放在归档折叠旁。
   bashJobsOlderOmitted: "另有 {n} 条更早的已结束任务未传到网页（无法查看或归档）",
+  // 2026-10-28 用户需求：「(+N more)」变成可操作的归档按钮——把 wire 装不下的已完成任务一次性
+  // 归档（id 集合由 agent 侧重算，一次批量提交）。
+  bashJobsArchiveOmitted: "归档 {n} 条更早的已完成任务",
+  // 2026-10-28: running rows pushed out of the wire by the 20-row cap / byte budget (not archivable).
+  bashJobsRunningOverflow: "另有 {n} 条运行中的任务未显示",
 } satisfies Messages<typeof en>;
 
 export default detail;

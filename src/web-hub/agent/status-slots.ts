@@ -58,13 +58,30 @@ export function createStatusSlotProjections(args: StatusSlotProjectionDeps): Sta
 
   /** `readStatus`'s bash-jobs projection closure (hot path: source read + in-memory list + cache
    *  — zero fs I/O; the sampler owns every read). Rows and tails provably share one source
-   *  generation: `tails(src.gen)` reconciles on mismatch (D3-4 ③/④). */
+   *  generation: `tails(src.gen)` reconciles on mismatch (D3-4 ③/④).
+   *
+   *  2026-10-28 (archive-aware `omitted`): the closure also reads this session's archived bash ids
+   *  (`ArchiveControl.view().bash`, display-only hiding) so an archived row stops counting into
+   *  `omitted` — archiving the `(+N more)` tail is what makes that line disappear. The archive
+   *  source is optional and read through the same never-throw posture as `archiveProjection`
+   *  below; missing/archived-less ⇒ `undefined` ⇒ byte-identical to the pre-change wire. */
   const bashJobsProjection = (): BashJobsWire | undefined => {
     const d = sources.bashJobs;
     if (d === undefined) return undefined;
     const src = d.current();
     if (src === undefined) return undefined;
-    return projectBashJobs(src.list(), bashTails(src.gen), now(), d.retentionMs());
+    return projectBashJobs(src.list(), bashTails(src.gen), now(), d.retentionMs(), bashArchiveIds());
+  };
+
+  /** `ArchiveControl.view().bash` — `undefined` when no archive source / not wired / the getter
+   *  throws (a broken getter must never take the status frame down: the bash-jobs clip is a
+   *  display nicety, the frame is not). */
+  const bashArchiveIds = (): ReadonlySet<string> | undefined => {
+    try {
+      return sources.archive?.()?.view().bash;
+    } catch {
+      return undefined;
+    }
   };
 
   // quota-web plan §2 (D3): pure, stateless projection — `QuotaService.verdicts()` is already a

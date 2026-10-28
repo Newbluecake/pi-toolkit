@@ -62,7 +62,7 @@ export interface TransportHooks {
 export interface CmdRequest {
   agentKey: string;
   id: string;
-  op: "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "command" | "recall" | "archive";
+  op: "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "command" | "recall" | "archive" | "archive_omitted";
   text?: string;
   deliver?: "steer" | "followUp";
   runId?: string;

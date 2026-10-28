@@ -399,6 +399,12 @@ export interface ControlHandle {
    *  row / bash row. No optimistic ctl item (the `queryCommand` precedent — the state change
    *  arrives via the next `status.archived` frame); the drawer owns its own undo toast. */
   setArchived(agentKey: string, kind: "run" | "bash", id: string, set: "archive" | "unarchive"): Promise<CmdOutcome>;
+  /** 2026-10-28 (fleet bash 「(+N more)」 must be displayable or archivable): archive the omitted
+   *  tail of a session's terminal bash jobs in one batch. Kind-only — the agent derives the id set
+   *  itself (the browser cannot see those rows). No optimistic ctl item, same as `setArchived`.
+   *  Optional per the frozen-handle convention (component fakes may omit it — the button then
+   *  stays hidden, which is also the no-provider render). */
+  archiveOmitted?(agentKey: string, kind: "bash"): Promise<CmdOutcome>;
   // `id` is optional (defaults to a freshly generated one inside `createControl`) — the caller
   // may instead generate it itself and pass it through, so it can be tracked synchronously
   // BEFORE the wire round-trip settles (acc32-B3 fix, see AgentDetail.vue's `onDialogAnswer`).

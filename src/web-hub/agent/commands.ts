@@ -32,6 +32,8 @@ import type { HoldItem } from "./hold.js";
 import type { DispatchOutcome, HoldDriver } from "./hold-driver.js";
 import type { PromptGatePort, WebPromptRelease } from "./prompt-gate.js";
 import type { ArchiveControl } from "../../archive/control.js";
+import type { JobRecord } from "../../bash/types.js";
+import { projectBashJobsDetail } from "./bash-jobs.js";
 import { parseMention, routeMention, type MentionRouteDeps } from "../../mention/mention.js";
 import { safeParseSessionMention } from "../../mention/session.js";
 import type { MentionResultData } from "../protocol/messages.js";
@@ -88,6 +90,17 @@ export interface CommandHandlerDeps {
    *  off / no live stack — the op then settles `E_UNSUPPORTED`). Manual archive/unarchive
    *  only; the auto sweep lives inside the control itself. */
   archive?: () => ArchiveControl | undefined;
+  /** 2026-10-28 (`archive_omitted`): the same late-bound port the status projection reads
+   *  (`status-slots.ts` / agent/index.ts D3-4) — the live bash-jobs manager plus the store
+   *  retention used to rank rows. `tails(gen)` is the SAME cache read the projection uses, so the
+   *  op derives the omitted set from an identical projection (byte budget included) instead of a
+   *  re-implementation that could disagree with the `(+N more)` the user clicked. Absent
+   *  (bashJobs disabled, or an embedder that never wired it) ⇒ the op settles `E_UNSUPPORTED`. */
+  bashJobs?: {
+    current(): { readonly gen: object; list(): readonly JobRecord[] } | undefined;
+    retentionMs(): number;
+    tails?(gen: object): ReadonlyMap<string, unknown> | undefined;
+  };
   /** Late-bound shared TUI/web mention router. Absent preserves legacy prompt handling. */
   mention?: () => MentionRouteDeps | undefined;
   /** web-resume plan §2.5 step c: true while a resume switch sits between its execution-point
@@ -678,6 +691,61 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     settleAndReply(frame, okResult({ op: "archive", set: cmd.set, ...(result.changed ? { changed: true } : {}) }));
   }
 
+  /**
+   * 2026-10-28 user request (the fleet bash group's `(+N more)` must either be displayable or
+   * archivable): archive every terminal bash job the wire counts as `omitted`.
+   *
+   * The browser never enumerates ids — it cannot see them. The set is derived HERE by running the
+   * SAME projection the status slot publishes (`projectBashJobsDetail`, same list + same tail
+   * cache + same retention + same archived set + same byte budget), so `omittedIds.length` IS the
+   * `omitted` the user saw, including rows the D6 ⑤ ladder dropped for bytes. `projectBashJobs`
+   * itself is the `.wire` half of that one call — the two can never drift. Running rows are
+   * structurally excluded (they are reported as `rowsOverflowRunning`, never `omitted`).
+   * One batch commit ⇒ one session entry, however many ids.
+   *
+   * Idempotent: a second click re-derives the set, finds every id already archived (they are no
+   * longer omitted) and answers `changed: 0` without writing anything (the ledger also replays a
+   * reused cmdId verbatim).
+   */
+  function handleArchiveOmitted(frame: CmdFrame): void {
+    if (frame.cmd.op !== "archive_omitted") return;
+    const cmd = frame.cmd;
+    if (!beginOrReply(frame)) return;
+    if (cmd.kind !== "bash") return settleAndReply(frame, errResult("E_BAD_REQUEST", false, "none"));
+    const control = deps.archive?.();
+    if (control === undefined) return settleAndReply(frame, errResult("E_UNSUPPORTED", false, "none"));
+    const port = deps.bashJobs;
+    const source = port?.current();
+    if (port === undefined || source === undefined)
+      return settleAndReply(frame, errResult("E_UNSUPPORTED", false, "none"));
+    // Display hiding only: the archive set is an INPUT to the projection (an archived row is not
+    // "omitted" any more), exactly the value the status slot passed in.
+    let archived: ReadonlySet<string> | undefined;
+    try {
+      archived = control.view().bash;
+    } catch {
+      archived = undefined;
+    }
+    const { omittedIds } = projectBashJobsDetail(
+      source.list(),
+      port.tails?.(source.gen) as Parameters<typeof projectBashJobsDetail>[1],
+      deps.now(),
+      port.retentionMs(),
+      archived,
+    );
+    if (omittedIds.length === 0) return settleAndReply(frame, okResult({ op: "archive_omitted", changed: 0 }));
+    // Size the batch so it settles (2026-10-28 verify r2 P1): the wire orders omitted ids
+    // NEWEST-first, so a batch bigger than the archive set can absorb either evicts
+    // already-archived ids from this very tail (they bounce back into `omitted` on the next
+    // projection — the click churns the 256-entry window forever, every toast reporting a
+    // success that left the newest rows visible) or counts dropped ids as `changed`.
+    // `archiveBatch` takes the OLDEST ids of the tail, at least one even at the 256-cap steady
+    // state, so every click strictly shrinks the tail and the button converges.
+    const batch = control.archiveBatch("bash", omittedIds);
+    const changed = control.setArchivedMany("bash", batch);
+    settleAndReply(frame, okResult({ op: "archive_omitted", changed }));
+  }
+
   function mapSteerError(r: { ok: false; reason: string; detail?: string }): LedgerResult {
     if (r.reason === "not_running") return errResult("E_NOT_RUNNING", false, "none");
     if (r.reason === "steer_rejected") return errResult("E_SUBAGENT_REJECTED", false, "none", r.detail);
@@ -942,6 +1010,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       if (op === "command") return handleCommand(frame);
       if (op === "recall") return handleRecall(frame);
       if (op === "archive") return handleArchive(frame);
+      if (op === "archive_omitted") return handleArchiveOmitted(frame);
       // dialog_answer / dialog_cancel: routed straight to the dialog bridge by the caller.
     },
     onInputEvent(ev) {

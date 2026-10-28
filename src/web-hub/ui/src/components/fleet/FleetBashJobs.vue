@@ -132,6 +132,23 @@ const orphanOmitted = computed(
 function isAuto(row: BashJobRowWire): boolean {
   return props.archived?.get(String(row.id))?.auto === true;
 }
+// ---------------------------------------------------------------------------
+// 2026-10-28 用户需求(「(+N more) 要么能显示，要么直接归档」):wire 的行上限/字节预算决定了
+// 「全部显示」做不到,所以把这一行变成可操作的「归档 N 条更早的已完成任务」。id 集合由 agent
+// 侧从自己的 live 快照重算(浏览器看不到这些行),UI 只发一个 kind-only 的 op。
+// 没有 FLEET_ARCHIVE 提供者(独立挂载/控制面关闭)或 handle 不带该 op(旧构建)⇒ 退回纯文本,
+// 渲染与之前逐字节一致。
+// ---------------------------------------------------------------------------
+// 2026-10-28 rework: the button's presence is exactly `omitted > 0` (plus the provider/handle gates).
+// The agent now guarantees `omitted` counts ONLY terminal, unarchived, un-sent rows (archived rows
+// stay in `rows` and fold; running overflow rides `rowsOverflowRunning`), so a visible button is
+// always a button that can do something — there is no "ids empty but omitted > 0" state to hide.
+const canArchiveOmitted = computed(
+  () => (props.jobs.omitted ?? 0) > 0 && arch !== null && arch.canArchive.value && arch.archiveOmitted !== undefined,
+);
+function onArchiveOmitted(): void {
+  arch?.archiveOmitted?.(props.jobs.omitted ?? 0);
+}
 function canArchiveRow(row: BashJobRowWire): boolean {
   return arch !== null && arch.canArchive.value && !statusToken(row).live;
 }
@@ -316,7 +333,15 @@ function toggleRow(row: BashJobRowWire): void {
         </button>
       </li>
       <li v-if="jobs.omitted !== undefined && jobs.omitted > 0 && !orphanOmitted" class="bj-more">
-        {{ t("detail.bashJobsMore", { n: jobs.omitted }) }}
+        <button v-if="canArchiveOmitted" class="btn btn-ghost run-more" type="button" @click="onArchiveOmitted">
+          {{ t("detail.bashJobsArchiveOmitted", { n: jobs.omitted }) }}
+        </button>
+        <template v-else>{{ t("detail.bashJobsMore", { n: jobs.omitted }) }}</template>
+      </li>
+      <!-- 2026-10-28: running rows the wire could not carry. Not archivable, so deliberately a quiet
+           prose line, never the `(+N more)` button (and never counted into `omitted`). -->
+      <li v-if="(jobs.rowsOverflowRunning ?? 0) > 0" class="bj-more bj-more-running">
+        {{ t("detail.bashJobsRunningOverflow", { n: jobs.rowsOverflowRunning ?? 0 }) }}
       </li>
       <!-- web-hub archive plan: the archived fold — dimmed rows, `auto` badge for sweep-archived
            ones,「取消归档」on hover. -->
@@ -355,10 +380,13 @@ function toggleRow(row: BashJobRowWire): void {
           </li>
         </ul>
       </li>
-      <!-- omitted-orphan fix: all wire rows archived ⇒ the `(+N more)` marker moves here with a
-           prose note instead of hanging in the empty live list. -->
+      <!-- omitted-orphan fix: all wire rows archived ⇒ the marker moves here, with the SAME action
+           (2026-10-28: the remaining tail is still archivable — the note alone left the user stuck). -->
       <li v-if="orphanOmitted" class="bj-more bj-more-orphan">
-        {{ t("detail.bashJobsOlderOmitted", { n: jobs.omitted ?? 0 }) }}
+        <button v-if="canArchiveOmitted" class="btn btn-ghost run-more" type="button" @click="onArchiveOmitted">
+          {{ t("detail.bashJobsArchiveOmitted", { n: jobs.omitted ?? 0 }) }}
+        </button>
+        <template v-else>{{ t("detail.bashJobsOlderOmitted", { n: jobs.omitted ?? 0 }) }}</template>
       </li>
     </ul>
   </section>
