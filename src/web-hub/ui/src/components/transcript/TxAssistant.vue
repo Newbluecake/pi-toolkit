@@ -60,7 +60,7 @@ provide(
       </div>
       <template v-for="(b, i) in assistant.blocks" :key="i">
         <ThinkingBlock
-          v-if="b.kind === 'thinking'"
+          v-if="b.kind === 'thinking' && b.text.trim() !== ''"
           :text="b.text"
           :live="assistant.streaming && i === assistant.blocks.length - 1"
         />

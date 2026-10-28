@@ -68,10 +68,14 @@ export type TxEntry =
   | { readonly type: "command"; readonly key: string; readonly view: CmdCardView };
 
 function isNonEmptyString(x: unknown): x is string {
-  return typeof x === "string" && x !== "";
+  // 2026-10-28 user (no visible thinking ⇒ no pill): a thinking block whose text is
+  // whitespace-only must not render as a bare 0-line header — trim drops the "\n\n" / " "
+  // blocks the reducer can accumulate when the provider emits a thinking_start/thinking_end
+  // pair with no content.
+  return typeof x === "string" && x.trim() !== "";
 }
 
-function assistantBlocks(m: Record<string, unknown>, idx: ToolIndex): AssistantBlockView[] {
+export function assistantBlocks(m: Record<string, unknown>, idx: ToolIndex): AssistantBlockView[] {
   const content: unknown[] =
     typeof m.content === "string" ? [{ type: "text", text: m.content }] : Array.isArray(m.content) ? m.content : [];
   const out: AssistantBlockView[] = [];

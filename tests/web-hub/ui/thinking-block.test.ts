@@ -2,6 +2,7 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import ThinkingBlock from "../../../src/web-hub/ui/src/components/transcript/ThinkingBlock.vue";
+import { assistantBlocks } from "../../../src/web-hub/ui/src/components/transcript/entries.js";
 
 /**
  * `ThinkingBlock.vue` live-display + auto-collapse (transcript-improvements task, item ②).
@@ -72,6 +73,22 @@ describe("ThinkingBlock.vue", () => {
     expect(wrapper.get(".thinking-text").text()).toBe("**not bold** <b>not html</b>");
     expect(wrapper.html()).not.toContain("<b>not html</b>");
   });
+  it("a whitespace-only thinking block is dropped from the transcript (no bare 0-line pill)", () => {
+    // 2026-10-28 user ("没有思考就不需要展示了"): models that streamed nothing visible left a
+    // bare "思考 · 0 行" header with an empty panel. The transcript reducer drops the block
+    // outright (entries.ts), so neither streaming nor history replay can render it.
+    const blocks = assistantBlocks(
+      {
+        content: [
+          { type: "thinking", thinking: "\n\n" },
+          { type: "text", text: "hi" },
+        ],
+      },
+      { results: new Map(), live: new Map(), durations: new Map() } as never,
+    );
+    expect(blocks.map((b) => b.kind)).toEqual(["text"]);
+  });
+
   it("trims the trailing blank lines models append (no visible empty line, correct line count)", () => {
     const wrapper = mount(ThinkingBlock, { props: { text: "\nfirst line\nsecond line\n\n", live: false } });
     expect(wrapper.get(".thinking-text").element.textContent).toBe("first line\nsecond line");
