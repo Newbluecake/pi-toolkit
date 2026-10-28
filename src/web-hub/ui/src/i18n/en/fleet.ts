@@ -17,6 +17,12 @@ const fleet = {
   archivedFold: "Archived {n}",
   archivedToast: "Archived {name}",
   undo: "Undo",
+  // 2026-10-28 rework (acceptance blocker): the bulk archive of the omitted tail now reports its
+  // outcome. Same title-style grammar as `showFinished` (「Show {n} Finished Runs」 / 「显示已完成的
+  // {n} 个」): a statement of what happened, not a sentence fragment.
+  archiveOmittedDone: "Archived {n} Older Job(s)",
+  archiveOmittedNone: "No Older Jobs to Archive",
+  archiveOmittedFailed: "Archive Failed",
 } satisfies Record<string, string>;
 
 export default fleet;

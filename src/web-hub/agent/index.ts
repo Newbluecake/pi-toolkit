@@ -688,6 +688,17 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const compactionState = createCompactionState(pi);
   const originEntry = createOriginEntry(pi);
 
+  /** 2026-10-28 (archive-aware `omitted`): this session's archived bash ids, the same display-side
+   *  input `bashJobsProjection` and the `archive_omitted` op receive. Never throws — a broken
+   *  archive getter must not take the 1Hz tick or a status frame down. */
+  const archivedBashIds = (): ReadonlySet<string> | undefined => {
+    try {
+      return deps.archive?.()?.view().bash;
+    } catch {
+      return undefined;
+    }
+  };
+
   // ── web-hub-steer-recall plan §4.7 (A6): hold wiring — the gate/buffer/cap probes and the
   // `status.held` projection live in hold-wire.ts (source-governance batch2 ⑨-H1, pure
   // extraction; conn/ctx threaded as call-time getters, same as the captured closure vars).
@@ -1080,7 +1091,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       let fp = "";
       const sigs = new Map<string, string>();
       if (src !== undefined) {
-        const selected = selectJobs(src.list(), now(), deps.bashJobs.retentionMs());
+        // Same archived set the projection gets: archiving a row must flip this fingerprint (the
+        // `omitted` count changes) so the frame republishes without waiting for a job edge.
+        const selected = selectJobs(src.list(), now(), deps.bashJobs.retentionMs(), archivedBashIds());
         fp = bashJobsLightFingerprint(selected, now());
         for (const r of selected.rows) sigs.set(r.jobId, bashJobsRowSignature(r, now()));
       }
@@ -1146,6 +1159,18 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // web-hub archive plan: manual archive/unarchive from the drawer (auto sweep lives in the
     // control itself, wired from the stack).
     archive: () => deps.archive?.(),
+    // 2026-10-28 (`archive_omitted`): the same late-bound bash-jobs port the status projection
+    // reads — plus the SAME tail cache (`bashSampler.tails`) the projection consumes, so the op
+    // derives its id set from an identical projection (byte budget included).
+    ...(deps.bashJobs !== undefined
+      ? {
+          bashJobs: {
+            current: () => deps.bashJobs?.current(),
+            retentionMs: () => deps.bashJobs?.retentionMs() ?? 0,
+            tails: (gen: object) => bashSampler.tails(gen),
+          },
+        }
+      : {}),
     controlEnabled: () => settings.control !== false,
     now,
     send: (frame) => conn?.send(frame),

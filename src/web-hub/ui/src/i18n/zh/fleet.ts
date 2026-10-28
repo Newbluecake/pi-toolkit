@@ -18,6 +18,9 @@ const fleet = {
   archivedFold: "已归档 {n}",
   archivedToast: "已归档 {name}",
   undo: "撤销",
+  archiveOmittedDone: "已归档 {n} 条更早的任务",
+  archiveOmittedNone: "没有可归档的任务",
+  archiveOmittedFailed: "归档失败",
 } satisfies Messages<typeof en>;
 
 export default fleet;

@@ -466,6 +466,17 @@ details[open] > summary.run .chev {
   margin: var(--sp-1) 0 0 var(--sp-2);
 }
 
+/* 2026-10-28 user ("两个已完成提示需要左对齐"): the agents fold and the bash group's folds must
+ * start on ONE x. Bash reaches it structurally — `.bj-list` pads 6px and `.bj-more` /
+ * `.bj-fill-more` pad `16px + --sp-2`, so the text lands 30px from the drawer's content edge.
+ * The tree's fold is a plain `.btn` (12px padding) under an 8px margin ⇒ 20px. Match the bash
+ * value instead of the other way round: only the depth-0 fold (direct child of `.tree-scroll`)
+ * is targeted; nested levels keep the plain rule. */
+.tree-scroll > .run-more {
+  margin-left: 0;
+  padding-left: calc(16px + var(--sp-2) + 6px);
+}
+
 /* status → { --pill-fg, --pill-bg } for `.run-icon`/`.run-activity .phase`/the highlight box-shadows */
 .run[data-st="running"] {
   --pill-fg: var(--st-running);
