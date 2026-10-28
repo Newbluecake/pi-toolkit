@@ -27,6 +27,12 @@ import { sandboxHome } from "./helpers/home-sandbox.js";
 
 const PI_CLI = resolve("node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
 const HUB_MAIN = resolve("src/web-hub/hub/main.ts");
+// The hub child self-resolves its version from this checkout's package.json
+// (src/web-hub/hub/self-version.ts); the in-process agent's claim must agree or the
+// supersede gate reads the fresh hub as stale and waits forever. (Since v0.10.2's
+// self-versioning, the helpers' synthetic 1.2.3 > the real package version — the
+// kill -9 respawn test hung on this skew.)
+const PKG_VERSION = (JSON.parse(readFileSync(resolve("package.json"), "utf8")) as { version: string }).version;
 
 function launcherOrSkip(): LauncherPlan | undefined {
   if (!existsSync(PI_CLI)) {
@@ -67,6 +73,8 @@ describe("web-hub spawn (real child processes)", () => {
   beforeEach(() => {
     home = sandboxHome();
     cfg = hubConfig({ home: home.home, port: 0, idleExitMinutes: 10 });
+    cfg.pluginVersion = PKG_VERSION;
+    cfg.buildId = `${PKG_VERSION}@test`;
   });
 
   afterEach(async () => {
