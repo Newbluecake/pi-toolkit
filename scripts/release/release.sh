@@ -34,6 +34,11 @@
 #   --skip-push     Commit + tag locally but do not push, package or publish.
 #   --skip-publish  Push <branch> + tag but skip scripts/release/package.sh and
 #                   `gh release create`.
+#   --skip-hub-restart
+#                   Do not restart the local web-hub after a successful publish
+#                   (default: step 9 asks the hub running on this machine to
+#                   restart, WARN-only on any failure — see
+#                   scripts/release/hub-restart-step.sh).
 #
 # What it does:
 #   1. Preflight — bump kind (patch/minor/major, version vs latest tag)
@@ -66,7 +71,9 @@
 #      minor/major on master it prints a reminder to sync dev (never pushes
 #      dev itself).
 #   9. Runs scripts/release/package.sh <version> and `gh release create`
-#      (unless --skip-push or --skip-publish).
+#      (unless --skip-push or --skip-publish), then — unless --skip-hub-restart —
+#      asks the local web-hub to restart (best-effort: no hub / stopped hub ⇒
+#      INFO and skip; any failure ⇒ WARN; the release is never failed by it).
 #
 # Version bump rule (computed, printed, never auto-applied):
 #   - BREAKING CHANGE (subject `!:` or a `BREAKING CHANGE:` footer anywhere
@@ -98,6 +105,7 @@ CHANGELOG_ONLY=0
 SKIP_TESTS=0
 SKIP_PUSH=0
 SKIP_PUBLISH=0
+SKIP_HUB_RESTART=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -106,6 +114,7 @@ while [[ $# -gt 0 ]]; do
     --skip-tests)   SKIP_TESTS=1 ;;
     --skip-push)    SKIP_PUSH=1 ;;
     --skip-publish) SKIP_PUBLISH=1 ;;
+    --skip-hub-restart) SKIP_HUB_RESTART=1 ;;
     -h|--help)
       grep -E '^# ?' "$0" | sed 's/^# \{0,1\}//' | sed -n '1,70p'
       exit 0
@@ -644,5 +653,13 @@ else
       || die "gh release create failed (branch + tag pushed, assets built in release/). Resume with:
     gh release create $TAG release/pi-toolkit-${VERSION}.zip release/pi-toolkit-${VERSION}.zip.sha256 release/pi-toolkit-web-ui-${VERSION}.zip release/pi-toolkit-web-ui-${VERSION}.zip.sha256 --title $TAG --notes-file release/CHANGELOG-${VERSION}.md"
     ok "✅ Released $TAG"
+
+    # ─── Step 9b: restart the local web-hub (best-effort, never fails the release) ───
+    if [[ $SKIP_HUB_RESTART -eq 1 ]]; then
+      info "Skipping local web-hub restart (--skip-hub-restart)"
+    else
+      bash "$PROJECT_ROOT/scripts/release/hub-restart-step.sh" \
+        || warn "hub restart step failed — restart the hub by hand with /webhub restart"
+    fi
   fi
 fi

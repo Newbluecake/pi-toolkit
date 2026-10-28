@@ -32,6 +32,7 @@ import { normalizeHubProxyConfig } from "./proxy/config.js";
 import { normalizeHubCrossSessionConfig } from "./xs/limits.js";
 import { mergeHubXsAliasConfig } from "./xs/router.js";
 import { createHubLog } from "./log.js";
+import { resolveSelfVersionHere, type SelfVersionResult } from "./self-version.js";
 import type { HubConfig } from "./ports.js";
 
 export { checkLanPortConflict, parseHubLanConfig } from "./lan-config.js";
@@ -64,6 +65,16 @@ async function main(): Promise<void> {
   // the hub via StartHubDeps.childUmask so the spawn supervisor (SP7/SP10) restores the user's own
   // umask around each fork — children must not inherit the hub's private 0o077.
   const inheritedUmask = process.umask(0o077); // before any file-system operation (§1.3.1)
+
+  // Self-version (web-hub-version self-version): the hub's identity is the version of the package
+  // IT was loaded from, not whatever the (possibly long-activated) launcher cached. Applied here,
+  // before any assembly, so `config.pluginVersion`/`config.buildId` — the single source every
+  // consumer reads (HubInfo, hub.json, `ui-root`'s version match, registry `outdated`, supersede,
+  // `buildUiCandidates`) — already carries the self-read values. The launcher's pair survives as
+  // the fallback (unreadable/malformed/non-semver package.json); see self-version.ts.
+  const launcherVersion = config.pluginVersion;
+  const selfVersion: SelfVersionResult = resolveSelfVersionHere(config.pluginVersion, config.buildId);
+  config = { ...config, pluginVersion: selfVersion.version, buildId: selfVersion.buildId };
 
   const startDeps: StartHubDeps = {};
   if (config.lan !== undefined) {
@@ -252,7 +263,6 @@ async function main(): Promise<void> {
   });
   const log = createHubLog(paths.logFile);
   log.info("hub process starting", { port: config.port, idleExitMinutes: config.idleExitMinutes });
-
   // Every exit from main() is an explicit process.exit(). A close() (startup-time supersede, or a
   // later fence/idle/admin/self-restart close) shuts the listening sockets first and then awaits
   // bounded teardown steps whose deadline timers are unref'd; with no ref'd handle left Node would
@@ -281,6 +291,20 @@ async function main(): Promise<void> {
     clearInterval(keepAlive);
     log.close();
     process.exit(0);
+  }
+
+  // Logged AFTER startHub: the state dir (and so hub.log's directory) only exists once the hub has
+  // started, and `createHubLog` is best-effort — a line written earlier on a fresh home is lost.
+  if (selfVersion.source === "package") {
+    // INFO, not WARN: reading the package is the normal path now; a launcher disagreement is
+    // exactly the old-launcher situation this exists for and deserves one line in hub.log.
+    log.info("hub version from package", {
+      version: selfVersion.version,
+      buildId: selfVersion.buildId,
+      launcher: launcherVersion,
+    });
+  } else {
+    log.warn("hub version fell back to launcher", { reason: selfVersion.fallback, version: selfVersion.version });
   }
 
   installProcessHandlers(hub, log);
