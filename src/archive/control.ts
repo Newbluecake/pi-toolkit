@@ -23,6 +23,7 @@ import {
   emptyArchiveState,
   isArchived,
   readArchiveState,
+  sameArchiveState,
   unarchiveItem,
   type ArchiveEntry,
   type ArchiveKind,
@@ -59,6 +60,13 @@ const DEFAULT_SWEEP_MS = 60_000;
 
 export class ArchiveControl {
   private state: ArchiveState = emptyArchiveState();
+  /** The last snapshot that ACTUALLY hit the session file (append succeeded). A
+   *  commit equal to it writes nothing (#89 A1 dedup guard — defense in depth on
+   *  top of the cd57bdf9 convergence fix; tests/archive/write-rate.test.ts pins the
+   *  write rate). Per-instance on purpose: a Symbol.for global would survive into a
+   * /new or /resume pointing at a DIFFERENT session file and mis-baseline it.
+   *  Alias-safe: ArchiveState values are immutable (mutations return fresh objects). */
+  private lastPersisted: ArchiveState = emptyArchiveState();
   private rev = 0;
   private readonly deps: ArchiveControlDeps;
   private readonly candidates: ArchiveCandidates;
@@ -79,6 +87,9 @@ export class ArchiveControl {
   restore(branch: readonly unknown[]): void {
     if (this.disposed) return;
     this.state = readArchiveState(branch);
+    // The read-back IS the last snapshot persisted on this branch — seed the dedup
+    // baseline with it, so a freshly restored (/reload, fork) control writes nothing.
+    this.lastPersisted = this.state;
     this.rev++;
   }
 
@@ -218,10 +229,15 @@ export class ArchiveControl {
   // -- internals ------------------------------------------------------------
 
   private commit(next: ArchiveState): void {
-    this.state = next;
-    this.rev++;
+    if (!sameArchiveState(next, this.state)) {
+      this.state = next;
+      this.rev++;
+    }
+    if (sameArchiveState(next, this.lastPersisted)) return; // the file already holds this exact content
     try {
       this.deps.appendEntry("subagent:archive", { entries: next.entries, held: next.held });
+      this.lastPersisted = next; // advance ONLY on success: a failed append leaves the baseline behind,
+      // so the next real change re-appends the full state — nothing is silently lost.
     } catch {
       // Persistence is best-effort: the in-memory state still serves this
       // session; the next change re-appends. Never take the caller down.

@@ -11,8 +11,10 @@ import {
   emptyArchiveState,
   isArchived,
   readArchiveState,
+  sameArchiveState,
   sanitizeArchiveState,
   unarchiveItem,
+  type ArchiveEntry,
   type ArchiveState,
 } from "../../src/archive/state.js";
 
@@ -131,6 +133,67 @@ describe("archive state: mutations", () => {
     expect(isArchived(state, { kind: "bash", id: "r1" })).toBe(false);
     expect(archivedSetOf(state, "run")).toEqual(new Set(["r1"]));
     expect(archivedSetOf(state, "bash")).toEqual(new Set(["b1"]));
+  });
+});
+
+describe("archive state: sameArchiveState (#89 A1 dedup guard)", () => {
+  it("empty states are equal; any real field difference is not", () => {
+    expect(sameArchiveState(emptyArchiveState(), emptyArchiveState())).toBe(true);
+    const base: ArchiveState = {
+      entries: [
+        { kind: "run", id: "r1", at: 1, auto: true },
+        { kind: "bash", id: "b1", at: 2 },
+      ],
+      held: [{ kind: "run", id: "r2", at: 3 }],
+    };
+    expect(sameArchiveState(base, JSON.parse(JSON.stringify(base)))).toBe(true);
+    // `at` participates: an at-only rewrite is NOT "the same state" for the guard.
+    expect(
+      sameArchiveState(base, { ...base, entries: [{ kind: "run", id: "r1", at: 99, auto: true }, base.entries[1]!] }),
+    ).toBe(false);
+    // kind / id / auto differences
+    expect(
+      sameArchiveState(base, { ...base, entries: [{ kind: "bash", id: "r1", at: 1, auto: true }, base.entries[1]!] }),
+    ).toBe(false);
+    expect(
+      sameArchiveState(base, { ...base, entries: [{ kind: "run", id: "rx", at: 1, auto: true }, base.entries[1]!] }),
+    ).toBe(false);
+    expect(sameArchiveState(base, { ...base, entries: [{ kind: "run", id: "r1", at: 1 }, base.entries[1]!] })).toBe(
+      false,
+    );
+  });
+
+  it("is ORDER-sensitive: the same rows in a different order are not equal", () => {
+    const a: ArchiveState = {
+      entries: [
+        { kind: "run", id: "r1", at: 1 },
+        { kind: "run", id: "r2", at: 2 },
+      ],
+      held: [],
+    };
+    const b: ArchiveState = {
+      entries: [
+        { kind: "run", id: "r2", at: 2 },
+        { kind: "run", id: "r1", at: 1 },
+      ],
+      held: [],
+    };
+    expect(sameArchiveState(a, b)).toBe(false);
+  });
+
+  it("treats an absent `auto` and an explicit non-true `auto` as equal (sanitize normalizes to absent)", () => {
+    const plain: ArchiveEntry = { kind: "run", id: "r1", at: 1 };
+    expect(sameArchiveState({ entries: [plain], held: [] }, { entries: [plain], held: [] })).toBe(true);
+    const explicitFalse = { kind: "run", id: "r1", at: 1, auto: false } as unknown as ArchiveEntry;
+    expect(sameArchiveState({ entries: [plain], held: [] }, { entries: [explicitFalse], held: [] })).toBe(true);
+  });
+
+  it("length mismatches and `held` differences count", () => {
+    const base: ArchiveState = { entries: [{ kind: "run", id: "r1", at: 1 }], held: [] };
+    expect(sameArchiveState(base, { entries: [], held: [] })).toBe(false);
+    expect(sameArchiveState(base, { entries: base.entries, held: [{ kind: "run", id: "h1", at: 5 }] })).toBe(false);
+    const withHold: ArchiveState = { entries: [], held: [{ kind: "run", id: "h1", at: 5 }] };
+    expect(sameArchiveState(withHold, { entries: [], held: [{ kind: "run", id: "h1", at: 6 }] })).toBe(false);
   });
 });
 

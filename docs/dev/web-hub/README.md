@@ -249,6 +249,13 @@ FIFO eviction drop still-live entries that the next sweep re-selected, rewriting
 minute and flipping archived/unarchived (a 687-run session wrote 4,882 `subagent:archive` entries). When more
 items are eligible than fit, the newest-settled win (the visible rows); `makeArchiveRoom` drops gone entries first.
 Tests: `tests/archive/control.test.ts` ("flip-flop regression"), `tests/archive/sweep.test.ts`.
+Write-dedup safety net (#89 A1): `commit()` compares the next snapshot against the per-instance
+`lastPersisted` baseline (`sameArchiveState`, plain ordered field comparison, `at` included — seeded
+by `restore()` from the branch read-back; advanced only on a successful append) and skips the write
+when the content already matches, retrying on the next real change after a failure. The write RATE
+itself is pinned by `tests/archive/write-rate.test.ts` (24 h sweep simulation; red against both the
+998dce27 at-rewrite and the 43d892fd id-flip forms, replayed as in-file counterfactuals):
+docs/dev/web-hub/refresh-slow/archive-dedup-plan.md.
 
 ## Cache keepalive panel
 

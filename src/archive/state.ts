@@ -18,6 +18,8 @@
  * change (`pi.appendEntry`), read back through `getBranch()` taking the LAST
  * valid candidate — the exact todo/prompt-sections discipline. /reload and
  * cross-browser consistency fall out of "the session file is the truth".
+ * A commit whose content equals the last PERSISTED snapshot writes nothing
+ * (`sameArchiveState` vs the control's per-instance baseline, #89 A1).
  */
 export type ArchiveKind = "run" | "bash";
 
@@ -157,6 +159,35 @@ export function unarchiveItem(
     entries: capTail(entries, ARCHIVE_ENTRIES_CAP) as ArchiveEntry[],
     held: capTail(held, ARCHIVE_HELD_CAP) as ArchiveHold[],
   };
+}
+
+// ---------------------------------------------------------------------------
+// equality
+// ---------------------------------------------------------------------------
+
+/** Ordered, field-by-field equality of two archive states — the #89 A1 write-dedup
+ *  guard: a commit whose content equals the last PERSISTED snapshot must not append
+ *  again. Plain comparison on purpose, no hash: 256×4 scalars is microsecond-level,
+ *  and hashing would need a canonicalize pass first (the explore report's `canonicalJson`
+ *  hotspot). `at` PARTICIPATES — this compares what the snapshot would literally contain,
+ *  not "the same ids"; an at-only rewrite (the 998dce27 form) is NOT suppressed here, it
+ *  is outlawed by tests/archive/write-rate.test.ts, because the honest fix for it is
+ *  convergence (cd57bdf9), not silent dedup. `auto` is compared as truthiness, so an
+ *  absent flag equals an explicit `false`/`undefined` (sanitize normalizes to absent). */
+export function sameArchiveState(a: ArchiveState, b: ArchiveState): boolean {
+  if (a.entries.length !== b.entries.length || a.held.length !== b.held.length) return false;
+  for (let i = 0; i < a.entries.length; i++) {
+    const x = a.entries[i]!;
+    const y = b.entries[i]!;
+    if (x.kind !== y.kind || x.id !== y.id || x.at !== y.at) return false;
+    if ((x.auto === true) !== (y.auto === true)) return false;
+  }
+  for (let i = 0; i < a.held.length; i++) {
+    const x = a.held[i]!;
+    const y = b.held[i]!;
+    if (x.kind !== y.kind || x.id !== y.id || x.at !== y.at) return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
