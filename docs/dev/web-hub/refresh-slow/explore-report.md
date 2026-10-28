@@ -44,11 +44,11 @@
 
 ## 修复建议（用户拍板：P0+P1，P2 另开 #89）
 
-| # | 改动 | 收益 | 落点 |
-|---|---|---|---|
-| P0 | `snapshot()` 改用 `readBranchTail(file, leafId, max(tailEntries, 2×|recent|))`，undefined/TOO_LARGE 才回落 loadBranch；readBranchTail 返回值补 `chainContinues` 保 hasMore | 7000→50–90ms；消 1.6GB RSS 尖峰 | history.ts:625-640、:683-710、:145-241 |
-| P0 | `page()` 同款：从 leaf 反向走到 before，配游标缓存+字节预算+让出 | 翻页 6.4s→数十 ms | history.ts:715-750；机制照抄 run-file-reader.ts:1-45 |
-| P1 | ①tail 路径不吃 maxFileBytes；②buildBranchReply 改从末尾往前投影达预算即停；③runTail 遇 TOO_LARGE 不再静默 | 拆悬崖 | history.ts:~150、agent/snapshot.ts:45-66、history.ts:~630 |
+| #   | 改动                                                                                                      | 收益              | 落点                                                                                            |
+| --- | --------------------------------------------------------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------- |
+| P0  | `snapshot()` 改用 `readBranchTail(file, leafId, max(tailEntries, 2×                                       | recent            | ))`，undefined/TOO_LARGE 才回落 loadBranch；readBranchTail 返回值补 `chainContinues` 保 hasMore | 7000→50–90ms；消 1.6GB RSS 尖峰 | history.ts:625-640、:683-710、:145-241 |
+| P0  | `page()` 同款：从 leaf 反向走到 before，配游标缓存+字节预算+让出                                          | 翻页 6.4s→数十 ms | history.ts:715-750；机制照抄 run-file-reader.ts:1-45                                            |
+| P1  | ①tail 路径不吃 maxFileBytes；②buildBranchReply 改从末尾往前投影达预算即停；③runTail 遇 TOO_LARGE 不再静默 | 拆悬崖            | history.ts:~150、agent/snapshot.ts:45-66、history.ts:~630                                       |
 
 验收口径：首条 .tx-item <300ms；subscribe→history 帧 <150ms；快照期间 /api/version <50ms；RSS 无 GB 尖峰。
 需同步：docs/dev/web-hub/README.md:343-363「History tail reads」节；tests/web-hub/hub/history.test.ts:190/:501/:731/:788（hasMore/oldestEntryId/source 断言随尾读语义更新）。wire 不变（HistoryPayload 字段不变），无 golden 影响。

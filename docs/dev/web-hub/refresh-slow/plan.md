@@ -13,14 +13,14 @@
 **D1：snapshot 和 page 共用一个由 history 服务持有的反向读取器，即 `run-file-reader` 的第二个实例；`readBranchTail` 只留给 `runTail` 用。**
 探索报告原本建议 snapshot 用「`readBranchTail` + `chainContinues`」。这里改为复用 `createRunFileReader`，理由：
 
-| 维度 | A：反向读取器（采用） | B：`readBranchTail` + `chainContinues`（否决，规格见 §2.6） |
-|---|---|---|
-| 解析量 | 子串预滤，只 `JSON.parse` 分支命中行 | 每轮把整块（0.5→2→8→32 MiB）所有行全部 parse；块增长时从头重 parse |
-| 主线程 | 每块之后 `setImmediate` 让出一次，带 deadline | 每块同步跑完；8 MiB 块约 80–100 ms 不让出 |
-| 预算悬崖 | 只有累计扫描量 `maxScanBytes`（从 EOF 起算 256 MiB），和文件总大小无关 | 超过 32 MiB 返回 `undefined`，回落整文件读（又是 7 s）；图片多的会话 400 条可能就超 32 MiB |
-| 和 page 衔接 | 游标 LRU：snapshot 读到第 512 条，紧接着第一次「Show earlier」直接命中缓存 | 无状态，page 还得另写一套 |
-| 单飞/并发 | 已有：同 key 单飞，全局 ≤2 并发，排队受 deadline 约束 | 无 |
-| 等价性 | 需要补 parity 选项（§2.1），并新写等价测试 | 已有 190–309 的等价测试 |
+| 维度         | A：反向读取器（采用）                                                      | B：`readBranchTail` + `chainContinues`（否决，规格见 §2.6）                                |
+| ------------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| 解析量       | 子串预滤，只 `JSON.parse` 分支命中行                                       | 每轮把整块（0.5→2→8→32 MiB）所有行全部 parse；块增长时从头重 parse                         |
+| 主线程       | 每块之后 `setImmediate` 让出一次，带 deadline                              | 每块同步跑完；8 MiB 块约 80–100 ms 不让出                                                  |
+| 预算悬崖     | 只有累计扫描量 `maxScanBytes`（从 EOF 起算 256 MiB），和文件总大小无关     | 超过 32 MiB 返回 `undefined`，回落整文件读（又是 7 s）；图片多的会话 400 条可能就超 32 MiB |
+| 和 page 衔接 | 游标 LRU：snapshot 读到第 512 条，紧接着第一次「Show earlier」直接命中缓存 | 无状态，page 还得另写一套                                                                  |
+| 单飞/并发    | 已有：同 key 单飞，全局 ≤2 并发，排队受 deadline 约束                      | 无                                                                                         |
+| 等价性       | 需要补 parity 选项（§2.1），并新写等价测试                                 | 已有 190–309 的等价测试                                                                    |
 
 **D2：共用方式是「同一模块的独立实例 + 新增 opts」，不另写一个读取器，也不和 run transcript 共用实例。** 新增的 opts 默认值都不改变现有行为，所以 run transcript（`assembly-registry.ts:55`）的行为逐字节不变。实例独立的原因：两边配置不同（parity、块大小、缓存容量），而且 history 和 run transcript 不应在同一道 ≤2 的并发门上互相饿死。全 hub 最多 4 个并发扫描，每个都是协作式的。
 
@@ -54,8 +54,13 @@
    let limit = SNAPSHOT_READ_MIN;
    for (;;) {
      const r = await branchReader.read(file, leafId, { limit, maxBytes: Number.MAX_SAFE_INTEGER, deadlineAt });
-     if (!r.ok || !r.hasMore || limit >= SNAPSHOT_READ_MIN * SNAPSHOT_READ_GROWTH_MAX
-         || countMessageLike(r.entries) >= needMessageLike) return r;
+     if (
+       !r.ok ||
+       !r.hasMore ||
+       limit >= SNAPSHOT_READ_MIN * SNAPSHOT_READ_GROWTH_MAX ||
+       countMessageLike(r.entries) >= needMessageLike
+     )
+       return r;
      limit *= 2; // 游标已缓存 ⇒ 增量扫描，不从 EOF 重来
    }
    ```
@@ -71,16 +76,16 @@
 
 ### 2.3 回落矩阵（snapshot）
 
-| 反向读结果 | 处置 | 对照：现状 |
-|---|---|---|
-| `ok` | `source:"file"` | 文件 ≤256 MiB 时一样（但耗时 7 s） |
-| `file_missing`（ENOENT、非 `.jsonl`、realpath 不是普通文件） | `branch_req`（`source:"agent"`）+ `log.info(reason)` | ENOENT → `branch_req` ✓ |
-| `leaf_missing`（leaf 未落盘；leaf 行不是紧凑 JSON 格式） | `branch_req` | LEAF_NOT_FOUND → `branch_req` ✓ |
-| `parse_error`（**分支命中行**损坏；或 I/O 中途出错） | `branch_req` | PARSE（任意一行坏）→ `branch_req`；**放宽**：分支外的坏行不再迫使走 agent |
-| `too_large`（从 EOF 累计扫描超过 256 MiB 仍未凑够） | `branch_req` | 文件 >256 MiB 就 TOO_LARGE → `branch_req`；**悬崖消失**：超大文件的尾读照常走文件 |
-| `busy`（2.5 s 子 deadline 到，或并发门排队超时） | `branch_req` + `log.info` | 无对应（以前同步卡死） |
-| `reply.leafId === null` | 空历史，不碰文件 | 不变 |
-| `file === undefined`（`--no-session`） | 直接 `branch_req` | 不变 |
+| 反向读结果                                                   | 处置                                                 | 对照：现状                                                                        |
+| ------------------------------------------------------------ | ---------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `ok`                                                         | `source:"file"`                                      | 文件 ≤256 MiB 时一样（但耗时 7 s）                                                |
+| `file_missing`（ENOENT、非 `.jsonl`、realpath 不是普通文件） | `branch_req`（`source:"agent"`）+ `log.info(reason)` | ENOENT → `branch_req` ✓                                                           |
+| `leaf_missing`（leaf 未落盘；leaf 行不是紧凑 JSON 格式）     | `branch_req`                                         | LEAF_NOT_FOUND → `branch_req` ✓                                                   |
+| `parse_error`（**分支命中行**损坏；或 I/O 中途出错）         | `branch_req`                                         | PARSE（任意一行坏）→ `branch_req`；**放宽**：分支外的坏行不再迫使走 agent         |
+| `too_large`（从 EOF 累计扫描超过 256 MiB 仍未凑够）          | `branch_req`                                         | 文件 >256 MiB 就 TOO_LARGE → `branch_req`；**悬崖消失**：超大文件的尾读照常走文件 |
+| `busy`（2.5 s 子 deadline 到，或并发门排队超时）             | `branch_req` + `log.info`                            | 无对应（以前同步卡死）                                                            |
+| `reply.leafId === null`                                      | 空历史，不碰文件                                     | 不变                                                                              |
+| `file === undefined`（`--no-session`）                       | 直接 `branch_req`                                    | 不变                                                                              |
 
 不再回落整文件读：反向读拿不到答案的情形，整文件读也只会给出相同结论（LEAF_NOT_FOUND / PARSE / TOO_LARGE），却要多付 7 s。
 
@@ -111,12 +116,14 @@ snapshot 和 page **跳过 FileCache**。它只剩 `runTail` 的整文件回落�
 ### 2.7 测试（`tests/web-hub/hub/history.test.ts`）
 
 **现有用例：无需修改，应原样通过**：
+
 - `:501-578` snapshot 组：hasMore false / oldestEntryId `mc` / `tailEntries:3` / 文件不存在走 `branch_req` / leafId null / deadline。
 - `:788`、`:850` 字节预算组：snapshot 读 512 条，再 `slice(-50)` 并截字节，断言不变。
 
 探索报告预计 :190/:501/:731/:788 会受影响。逐条核对后，实际只有 §4.1 所列 readBranchTail 的签名/TOO_LARGE 两处要改。
 
 **新增 `describe("snapshot ≡ full reader (reverse reader parity)")`**：参照值就地用 `readBranchFromFile` 加 `mergeSnapshot` 算出来，不需要导出新的纯函数。
+
 - 场景：`fixtureLines()`；`bigSessionLines(2400)`（≈4.9 MB），leaf 取 EOF 处的 `m2399`、挂在 `m1800` 上的侧枝（祖先跨块）、挂在 `m3` 上的侧枝（祖先在文件头附近）；尾部 30 个 label；尾部半行；`tailEntries` ∈ {3, 400}；`recent` 长度 ∈ {0, 64}。
 - 断言：`p.entries == full.slice(-T)`，`p.hasMore == full.length > T`，`p.oldestEntryId`，`p.tailMessages == mergeSnapshot(full, reply, []).tailMessages`，`p.source == "file"`。
 - **hasMore 精确边界**：根端是 `label(parentId:null) → m0 → …`，`tailEntries` 恰好等于可投影条数 ⇒ `hasMore:false`（不开 parity 会是 true）。
@@ -127,6 +134,7 @@ snapshot 和 page **跳过 FileCache**。它只剩 `runTail` 的整文件回落�
 - **busy 回落**：注入一个永远 pending 的扫描不现实，改用 `vi.useFakeTimers` 加一个已过期的子 deadline。更简单的做法是把子预算做成可注入参数，用 `snapshotFileBudgetMs: 0` 验证 → 走 `branch_req`，`source:"agent"`。
 
 **`run-file-reader.test.ts` 新增 parity 组**（默认组一行不改，以此证明 run transcript 不受影响）：
+
 - 精确 hasMore；祖先缺失 ⇒ done；环 ⇒ done；`cursorCacheSize` 生效；
 - 同一批 fixture 下 parity=false 的结果与改动前逐字节一致：现有 T/P 组原样通过即为证明。
 
@@ -178,19 +186,25 @@ else → 现有 agent 路径（loadFromAgent + findIndex(before) + slice，找�
 
 ```ts
 const kept: WireEntry[] = [];
-let used = 0, truncated = false;
+let used = 0,
+  truncated = false;
 for (let i = raw.length - 1; i >= 0; i--) {
   const e = projectSessionEntry(raw[i]);
   if (e === undefined) continue;
   const size = Buffer.byteLength(JSON.stringify(e), "utf8") + 1;
-  if (used + size > budget) { truncated = true; break; }
-  used += size; kept.push(e);
+  if (used + size > budget) {
+    truncated = true;
+    break;
+  }
+  used += size;
+  kept.push(e);
 }
 kept.reverse();
 return { t: "branch_reply", rid, entries: kept, truncated };
 ```
 
 **2 MiB 裁尾语义逐字节保持**：
+
 - 旧实现先全量投影，再从最新往回、遇到第一条放不下的就 break；`truncated = start > 0`。
 - break 只会发生在一条**已投影**条目上，这时必然存在比 `start` 更旧的已投影条目，所以 `truncated` 为 true，与新实现在同一位置 break、置 `truncated=true` 等价。
 - 循环自然结束时两者都为 false。
@@ -199,6 +213,7 @@ return { t: "branch_reply", rid, entries: kept, truncated };
 - `getBranch()` 本身是 pi 内存里的 O(n) 指针遍历，代价不大；投影（`canonicalJson`）才是贵的，现在只投影预算内那段约 2 MiB 加 1 条。
 
 **测试**（`tests/web-hub/agent/snapshot.test.ts:144` 组）：
+
 - 现有两条原样通过。
 - 新增等价性：测试内保留旧实现作为 reference（逐字拷贝），用种子随机生成 200 个分支（混入 session 头、label、custom、超大消息），budget 取 {0, 1, 200 KiB, 2 MiB, 8 MiB}，断言 `buildBranchReply` 的结果与 reference 深度相等。
 - 新增操作数门禁：`getBranch()` 返回一个计数 Proxy 数组（10,000 条，每条约 60 KiB 文本），断言被读取的下标数 ≤ 保留条数 + 1 + 被跳过的不投影条数，远小于 10,000。
@@ -216,21 +231,21 @@ return { t: "branch_reply", rid, entries: kept, truncated };
 
 ## 5 风险与回退
 
-| # | 风险 | 处置 |
-|---|---|---|
-| R1 | **行内嵌换行导致切行误判** | JSON.stringify 会把字符串内的换行转义成 `\n`（两个字节），UTF-8 多字节序列里也不会出现 0x0A，所以 0x0A 只会是记录分隔符。反向读取器按字节切行，跨块的半行和被切开的 UTF-8 都拼回原始字节后才解码（已有测试 `run-file-reader.test.ts:299`）。CRLF：`JSON.parse` 能容忍尾随 `\r`。非 pi 写入的 pretty-print 文件，整文件读本来也是 PARSE；反向读会因预滤 miss 判成 leaf_missing，再走 `branch_req`，结果正确，只是来源变成 agent |
-| R2 | **预滤依赖紧凑格式 `"id":"<x>"`** | pi 用 JSON.stringify 写入，run transcript 线上已依赖这一点。不匹配时只会漏判（变成 leaf_missing → agent），不会误判，因为命中后还要 `JSON.parse` 并确认 `id === want` |
-| R3 | **mid-read 时切分支**（`/tree`） | snapshot 只认 `reply.leafId`，同 tick 读取；文件读不受之后的导航影响，导航后由 `status` → `runTail` 的 diff 或 `gap` 接管（与现状相同）。page 在请求开始时取一次 leaf（与现状 `:719` 相同）；导航后旧游标的 key 含旧 leaf，不会被误用 |
-| R4 | **mid-read 时 session 切换** | snapshot 现有的 `states.get(agentKey) === st` 守卫保留；`session` 事件仍会清空 delivered。page 在开始时取 `file`，结果属于旧会话；浏览器在 session 切换时会重新 snapshot（D2-7 守卫），旧页被丢弃 |
-| R5 | **并发 append 时的读一致性** | 读取器在开始时 stat，只扫 `[0, size)`；之后追加的字节对本次读不可见（`run-file-reader.ts` 头注「Snapshot semantics」，测试 `:387`）。snapshot 的 leaf 由 agent 先读，pi 同步落盘后它已在 `size` 之内。并发 append 只会让下一次读换 key 重扫 |
-| R6 | **文件被重写或截断**（pi 迁移、外部改动） | 读到短块或乱序字节，会得到 `parse_error` / `leaf_missing`，再走 `branch_req`；下一次读换 key 重扫。不会挂起：每块都检查 deadline |
-| R7 | **重复 id**（损坏文件） | 整文件读对重复 id 取全文件最后一次出现；反向读取的是 child 位置之前最近的一次出现。只有「重复 id 的后一份写在 child 之后」时两者才会不同，健康的 append-only 文件里不可能发生；环由 parity 规则判为链尾。写进 README 残留风险 |
-| R8 | **leaf 未落盘时扫完整个文件** | 预滤扫描 190 MB 是协作式的，约 0.5–1 s，受 2.5 s 子 deadline 约束，到期返回 busy → `branch_req`，总时长仍在 5 s 内。旧实现的整文件读要 7 s，而且同步卡死 |
-| R9 | **超长单行或无换行区域**（如稀疏区）让 `rest` 反复 `Buffer.concat`，复制量呈二次增长 | 这是读取器原有的问题。snapshot 只读尾部不会碰到；page 深扫时受 deadline（4.75 s）和 `maxScanBytes` 封顶，返回 busy / too_large。记为残留，后续可加 `maxLineBytes` |
-| R10 | **游标内存** | 每个游标持有已投影的链：snapshot 约 512 条，本例约 1.5 MB；深翻到底约等于整枝投影（本例几十 MB）。上限是 LRU 8 × 链。即便如此也远低于现状 1.6 GB 的峰值。写入 README |
-| R11 | **`TIMING.snapshotMs` 定时器跑不到** | 读取器每块让出一次，定时器能按时触发，「形同虚设」问题自然消失 |
-| R12 | **delivered 基线的边界偏差**（§2.4） | 只影响含无 key 条目的分支在 `/tree` 远跳时的 diff 边界，与 >512 条时的现有边界同类，写进 README |
-| R13 | **回退** | 每包一个 commit（§7 顺序）。P0 回退等于 revert 对应 commit，因为 `readBranchCached` / `walkBranch` 保留不删（`runTail` 回落和 `readBranchFromFile` 仍在用）。紧急止血时也可以一行切回：`loadSnapshotBranch` 里保留 `readBranch` 调用的旧分支直到评审通过。不加 settings 开关：这是纯性能修复，wire 不变，I9 不适用 |
+| #   | 风险                                                                                 | 处置                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| R1  | **行内嵌换行导致切行误判**                                                           | JSON.stringify 会把字符串内的换行转义成 `\n`（两个字节），UTF-8 多字节序列里也不会出现 0x0A，所以 0x0A 只会是记录分隔符。反向读取器按字节切行，跨块的半行和被切开的 UTF-8 都拼回原始字节后才解码（已有测试 `run-file-reader.test.ts:299`）。CRLF：`JSON.parse` 能容忍尾随 `\r`。非 pi 写入的 pretty-print 文件，整文件读本来也是 PARSE；反向读会因预滤 miss 判成 leaf_missing，再走 `branch_req`，结果正确，只是来源变成 agent |
+| R2  | **预滤依赖紧凑格式 `"id":"<x>"`**                                                    | pi 用 JSON.stringify 写入，run transcript 线上已依赖这一点。不匹配时只会漏判（变成 leaf_missing → agent），不会误判，因为命中后还要 `JSON.parse` 并确认 `id === want`                                                                                                                                                                                                                                                          |
+| R3  | **mid-read 时切分支**（`/tree`）                                                     | snapshot 只认 `reply.leafId`，同 tick 读取；文件读不受之后的导航影响，导航后由 `status` → `runTail` 的 diff 或 `gap` 接管（与现状相同）。page 在请求开始时取一次 leaf（与现状 `:719` 相同）；导航后旧游标的 key 含旧 leaf，不会被误用                                                                                                                                                                                          |
+| R4  | **mid-read 时 session 切换**                                                         | snapshot 现有的 `states.get(agentKey) === st` 守卫保留；`session` 事件仍会清空 delivered。page 在开始时取 `file`，结果属于旧会话；浏览器在 session 切换时会重新 snapshot（D2-7 守卫），旧页被丢弃                                                                                                                                                                                                                              |
+| R5  | **并发 append 时的读一致性**                                                         | 读取器在开始时 stat，只扫 `[0, size)`；之后追加的字节对本次读不可见（`run-file-reader.ts` 头注「Snapshot semantics」，测试 `:387`）。snapshot 的 leaf 由 agent 先读，pi 同步落盘后它已在 `size` 之内。并发 append 只会让下一次读换 key 重扫                                                                                                                                                                                    |
+| R6  | **文件被重写或截断**（pi 迁移、外部改动）                                            | 读到短块或乱序字节，会得到 `parse_error` / `leaf_missing`，再走 `branch_req`；下一次读换 key 重扫。不会挂起：每块都检查 deadline                                                                                                                                                                                                                                                                                               |
+| R7  | **重复 id**（损坏文件）                                                              | 整文件读对重复 id 取全文件最后一次出现；反向读取的是 child 位置之前最近的一次出现。只有「重复 id 的后一份写在 child 之后」时两者才会不同，健康的 append-only 文件里不可能发生；环由 parity 规则判为链尾。写进 README 残留风险                                                                                                                                                                                                  |
+| R8  | **leaf 未落盘时扫完整个文件**                                                        | 预滤扫描 190 MB 是协作式的，约 0.5–1 s，受 2.5 s 子 deadline 约束，到期返回 busy → `branch_req`，总时长仍在 5 s 内。旧实现的整文件读要 7 s，而且同步卡死                                                                                                                                                                                                                                                                       |
+| R9  | **超长单行或无换行区域**（如稀疏区）让 `rest` 反复 `Buffer.concat`，复制量呈二次增长 | 这是读取器原有的问题。snapshot 只读尾部不会碰到；page 深扫时受 deadline（4.75 s）和 `maxScanBytes` 封顶，返回 busy / too_large。记为残留，后续可加 `maxLineBytes`                                                                                                                                                                                                                                                              |
+| R10 | **游标内存**                                                                         | 每个游标持有已投影的链：snapshot 约 512 条，本例约 1.5 MB；深翻到底约等于整枝投影（本例几十 MB）。上限是 LRU 8 × 链。即便如此也远低于现状 1.6 GB 的峰值。写入 README                                                                                                                                                                                                                                                           |
+| R11 | **`TIMING.snapshotMs` 定时器跑不到**                                                 | 读取器每块让出一次，定时器能按时触发，「形同虚设」问题自然消失                                                                                                                                                                                                                                                                                                                                                                 |
+| R12 | **delivered 基线的边界偏差**（§2.4）                                                 | 只影响含无 key 条目的分支在 `/tree` 远跳时的 diff 边界，与 >512 条时的现有边界同类，写进 README                                                                                                                                                                                                                                                                                                                                |
+| R13 | **回退**                                                                             | 每包一个 commit（§7 顺序）。P0 回退等于 revert 对应 commit，因为 `readBranchCached` / `walkBranch` 保留不删（`runTail` 回落和 `readBranchFromFile` 仍在用）。紧急止血时也可以一行切回：`loadSnapshotBranch` 里保留 `readBranch` 调用的旧分支直到评审通过。不加 settings 开关：这是纯性能修复，wire 不变，I9 不适用                                                                                                             |
 
 ## 6 验收口径
 
@@ -247,32 +262,32 @@ return { t: "branch_reply", rid, entries: kept, truncated };
 
 ### 6.2 本地实测（对应探索报告的四个数字，在原会话 `a1556874-vDjp6f`、`/webhub restart` 后测）
 
-| 指标 | 目标 | 测法（与探索报告同构） |
-|---|---|---|
-| 进详情页到首条 `.tx-item` | <300 ms（原 7,394） | playwright 真实浏览器：从 `page.goto` 详情页起计时，到 `waitForSelector('.tx-item')`；取 3 次中位数，对照 warren（原 251） |
-| subscribe 到 history 帧 | <150 ms（原约 7,000） | 浏览器端 SSE 时间戳，或 hub.log 审计行；3 次 |
-| 快照进行中的 `GET /api/version` | <50 ms（原 5,746） | `curl -w '%{time_total}'` 循环（每 20 ms 一次），同时触发 subscribe，取期间最大值 |
-| hub RSS | 无 GB 级尖峰（原 559 MB → 1.61 GB，VmHWM 2.66 GB） | 测前 `/proc/<hubpid>/status` 记 VmRSS/VmHWM；连续 5 次 subscribe 加 10 次 Show earlier，再采样；要求 VmHWM 增量 <200 MB |
-| 附加：Show earlier | 第 1 页 <100 ms，第 10 页 <500 ms | `curl /api/history?agent=…&before=…&limit=100` |
+| 指标                            | 目标                                               | 测法（与探索报告同构）                                                                                                     |
+| ------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 进详情页到首条 `.tx-item`       | <300 ms（原 7,394）                                | playwright 真实浏览器：从 `page.goto` 详情页起计时，到 `waitForSelector('.tx-item')`；取 3 次中位数，对照 warren（原 251） |
+| subscribe 到 history 帧         | <150 ms（原约 7,000）                              | 浏览器端 SSE 时间戳，或 hub.log 审计行；3 次                                                                               |
+| 快照进行中的 `GET /api/version` | <50 ms（原 5,746）                                 | `curl -w '%{time_total}'` 循环（每 20 ms 一次），同时触发 subscribe，取期间最大值                                          |
+| hub RSS                         | 无 GB 级尖峰（原 559 MB → 1.61 GB，VmHWM 2.66 GB） | 测前 `/proc/<hubpid>/status` 记 VmRSS/VmHWM；连续 5 次 subscribe 加 10 次 Show earlier，再采样；要求 VmHWM 增量 <200 MB    |
+| 附加：Show earlier              | 第 1 页 <100 ms，第 10 页 <500 ms                  | `curl /api/history?agent=…&before=…&limit=100`                                                                             |
 
 记录结果写入 `docs/dev/web-hub/refresh-slow/acceptance.md`（由验收者产出）。
 
 ## 7 改动文件清单与实施顺序
 
-| 包 | 文件 | 改动 |
-|---|---|---|
-| ① 底座 | `src/web-hub/hub/run-file-reader.ts` | `fullReaderParity` / `cursorCacheSize` opts；注释更新（`scanChunkBytes`） |
-| | `tests/web-hub/hub/run-file-reader.test.ts` | 新增 parity 组 |
-| ② P0 | `src/web-hub/hub/history.ts` | 常量；服务内的 `branchReader`；`readTailForSnapshot` / `loadSnapshotBranch` / `loadFromAgent`；`snapshot()` hasMore；`page()` 改用反向读；`dispose`；FileCache 只缓存 ≤32 MiB；头注更新 |
-| | `tests/web-hub/hub/history.test.ts` | 新增 snapshot/page 等价、读量、稀疏文件、busy、衔接用例 |
-| | `tests/web-hub/hub/history.perf.test.ts`（新） | 性能门禁 |
-| ③ P1 | `src/web-hub/hub/history.ts` | `readBranchTail` 去掉 size 门和 `maxFileBytes` 参数（改成 opts）；`runTail` TOO_LARGE → agent + 一次性 warn；`AgentHist.tailTooLargeWarned` |
-| | `src/web-hub/agent/snapshot.ts` | `buildBranchReply` 改为反向投影 |
-| | `tests/web-hub/hub/history.test.ts` | readBranchTail 调用点改为 `{onRead}`；TOO_LARGE 行改为稀疏文件 ok |
-| | `tests/web-hub/hub/cmd-history-runtail.test.ts` | `:273` 的 TOO_LARGE 子用例改为回落 + warn 一次 |
-| | `tests/web-hub/agent/snapshot.test.ts` | 等价性（reference）+ Proxy 操作数门禁 |
-| ④ 文档 | `docs/dev/web-hub/README.md` | 重写 `:345-365`「History tail reads」：主线程规则扩展到 snapshot/page；反向读取器、parity、回落矩阵、放宽项（分支外坏行）、残留风险 R7/R9/R10/R12；删除「snapshot()/page() still use the full reader」。`:330`「ENOENT-only」改为「ENOENT/TOO_LARGE」 |
-| | `docs/dev/web-hub-cmd-history/H1-report.md` | 追加 §4.10 边界变更说明 |
+| 包     | 文件                                            | 改动                                                                                                                                                                                                                                                  |
+| ------ | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ① 底座 | `src/web-hub/hub/run-file-reader.ts`            | `fullReaderParity` / `cursorCacheSize` opts；注释更新（`scanChunkBytes`）                                                                                                                                                                             |
+|        | `tests/web-hub/hub/run-file-reader.test.ts`     | 新增 parity 组                                                                                                                                                                                                                                        |
+| ② P0   | `src/web-hub/hub/history.ts`                    | 常量；服务内的 `branchReader`；`readTailForSnapshot` / `loadSnapshotBranch` / `loadFromAgent`；`snapshot()` hasMore；`page()` 改用反向读；`dispose`；FileCache 只缓存 ≤32 MiB；头注更新                                                               |
+|        | `tests/web-hub/hub/history.test.ts`             | 新增 snapshot/page 等价、读量、稀疏文件、busy、衔接用例                                                                                                                                                                                               |
+|        | `tests/web-hub/hub/history.perf.test.ts`（新）  | 性能门禁                                                                                                                                                                                                                                              |
+| ③ P1   | `src/web-hub/hub/history.ts`                    | `readBranchTail` 去掉 size 门和 `maxFileBytes` 参数（改成 opts）；`runTail` TOO_LARGE → agent + 一次性 warn；`AgentHist.tailTooLargeWarned`                                                                                                           |
+|        | `src/web-hub/agent/snapshot.ts`                 | `buildBranchReply` 改为反向投影                                                                                                                                                                                                                       |
+|        | `tests/web-hub/hub/history.test.ts`             | readBranchTail 调用点改为 `{onRead}`；TOO_LARGE 行改为稀疏文件 ok                                                                                                                                                                                     |
+|        | `tests/web-hub/hub/cmd-history-runtail.test.ts` | `:273` 的 TOO_LARGE 子用例改为回落 + warn 一次                                                                                                                                                                                                        |
+|        | `tests/web-hub/agent/snapshot.test.ts`          | 等价性（reference）+ Proxy 操作数门禁                                                                                                                                                                                                                 |
+| ④ 文档 | `docs/dev/web-hub/README.md`                    | 重写 `:345-365`「History tail reads」：主线程规则扩展到 snapshot/page；反向读取器、parity、回落矩阵、放宽项（分支外坏行）、残留风险 R7/R9/R10/R12；删除「snapshot()/page() still use the full reader」。`:330`「ENOENT-only」改为「ENOENT/TOO_LARGE」 |
+|        | `docs/dev/web-hub-cmd-history/H1-report.md`     | 追加 §4.10 边界变更说明                                                                                                                                                                                                                               |
 
 顺序：① → ② → ③ → ④。①② 必须串行（② 依赖 ① 的 opts）。③ 里的 agent 侧（snapshot.ts）与 ①② 无依赖，可以并行派发。每包交回后由验收者跑 `format:check → typecheck → test`；②③ 还要跑 perf 测试。
 提交类型：①② 用 `perf(web-hub)`，③ 用 `fix(web-hub)`，④ 用 `docs(web-hub)`。
