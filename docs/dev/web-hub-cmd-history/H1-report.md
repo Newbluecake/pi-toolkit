@@ -56,3 +56,16 @@ All matched files use Prettier code style!
 - I1（集成 / conformance / 真机验收：真 hub 子进程 × fake agent 的「文件含记录 ⇒ history 带 cmd」「leaf 变化 ⇒ append 带 cmd」「首条对话前 ⇒ 回落 append」）不属 H1，未做。
 - hub.log 卫生目前只覆盖回落路径的机械断言；§8.5 #7 的真机 grep 验收归 I1。
 - 域外连带两文件（hub-lan / hub-preview 基线）待调度方追认（见上节）。
+
+## 边界变更（2026-10-28 · refresh-slow plan §4.3 追认）
+
+`runTail` 的回落条件从 **ENOENT-only 扩为 ENOENT / TOO_LARGE**：会话文件超过整读上限
+（`DEFAULT_MAX_FILE_BYTES`，256 MiB）且 `readBranchTail` 答不了（尾部预算耗尽 / leaf 未落盘 /
+尾块内坏行）时，同样走 256 KiB `branch_req` 回落（按 pending leaf 截断），实时 append 不再在
+256 MiB 悬崖后无声停摆。每个 agent 每段连续 TOO_LARGE 状态只记一条 `log.warn`（仅元数据：
+agentKey / reason / maxFileBytes），某次文件读成功（`res.ok`）后复位；PARSE / LEAF_NOT_FOUND
+两个分支维持原「下次 leaf 变化重试」行为，`--no-session` 排除不变（M4）。本文上文所述
+「ENOENT-only」为当时事实，以本节为准。钉子更新：`tests/web-hub/hub/cmd-history-runtail.test.ts`
+的 TOO_LARGE 子用例改为「回落 + append + warn-once + ok 读复位再警告」断言。残留：文件持续
+超限且 leaf 不在 agent 256 KiB 回复窗口内时，每次 leaf 变化仍发出一次失败的 branch_req
+（warn 只记一次）；待 agent 侧反向投影（refresh-slow P1②）落地后该往返成本可忽略。

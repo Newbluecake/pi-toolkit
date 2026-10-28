@@ -411,6 +411,107 @@ describe("run-file-reader scanning edges", () => {
 });
 
 // ---------------------------------------------------------------------------
+// walkBranch parity (refresh-slow plan §2.1) — the profile the history service's branch
+// reader runs. The default-mode groups above stay untouched: run transcripts keep that
+// behavior, and their passing unchanged is the proof parity=false is byte-identical.
+// ---------------------------------------------------------------------------
+
+describe("run-file-reader walkBranch parity (fullReaderParity)", () => {
+  it("exact hasMore: limit == projectable count with an unprojected root ancestor ⇒ false (default mode would say true)", async () => {
+    // lb(root, label) ← c0 ← … ← c4: 5 projectable. 64-byte chunks guarantee lb completes in an
+    // older round than c0 (a line is processed when the chunk carrying the newline to its LEFT
+    // arrives), so collect sees picked == limit with the walk unfinished.
+    const raws: Raw[] = [
+      { type: "label", id: "lb", parentId: null, timestamp: iso(0), label: "unprojectable root" },
+      ...chainRaw("c", 5, { parent: "lb" }),
+    ];
+    const file = writeJsonl("parity-more.jsonl", raws.map(line).join(""));
+    const expected = walkExpected(raws, "c4");
+
+    const parity = createRunFileReader({ fullReaderParity: true, scanChunkBytes: 64 });
+    const rp = await parity.read(file, "c4", q({ limit: 5 }));
+    expect(okEntries(rp)).toEqual(expected);
+    if (rp.ok) expect(rp.hasMore).toBe(false); // exact: the whole projectable branch is collected
+    parity.dispose();
+
+    // the counterfactual, pinned: default mode stops at limit with the walk unproven ⇒ true.
+    // This is exactly why snapshot/page need parity (an empty "Show earlier" page otherwise).
+    const plain = createRunFileReader({ scanChunkBytes: 64 });
+    const rn = await plain.read(file, "c4", q({ limit: 5 }));
+    if (rn.ok) expect(rn.hasMore).toBe(true);
+    plain.dispose();
+  });
+
+  it("exact hasMore for before pages at the same boundary", async () => {
+    const raws: Raw[] = [
+      { type: "label", id: "lb", parentId: null, timestamp: iso(0), label: "unprojectable root" },
+      ...chainRaw("c", 5, { parent: "lb" }),
+    ];
+    const file = writeJsonl("parity-page.jsonl", raws.map(line).join(""));
+    const reader = createRunFileReader({ fullReaderParity: true, scanChunkBytes: 64 });
+    const full = walkExpected(raws, "c4"); // 5 entries
+    // everything strictly before c4 is exactly the rest of the projectable branch ⇒ hasMore false
+    const r = await reader.read(file, "c4", q({ limit: 4, before: "c4" }));
+    expect(okEntries(r)).toEqual(full.slice(0, 4));
+    if (r.ok) expect(r.hasMore).toBe(false);
+    // and before c0 (the oldest projectable): an empty page, hasMore false — not an error
+    const r0 = await reader.read(file, "c4", q({ limit: 4, before: "c0" }));
+    expect(okEntries(r0)).toEqual([]);
+    if (r0.ok) expect(r0.hasMore).toBe(false);
+    reader.dispose();
+  });
+
+  it("a missing ANCESTOR at the file head ends the chain (ok, truncated) instead of leaf_missing — walkBranch breaks the same way", async () => {
+    const raws: Raw[] = [msgEntry("m1", "gone", 1), msgEntry("m2", "m1", 2)];
+    const file = writeJsonl("parity-ancestor.jsonl", raws.map(line).join(""));
+    const parity = createRunFileReader({ fullReaderParity: true, scanChunkBytes: 64 });
+    const r = await parity.read(file, "m2", q());
+    expect(r.ok).toBe(true);
+    expect(okEntries(r)).toEqual(walkExpected(raws, "m2")); // [m1, m2]: the chain ends where the ancestor is missing
+    if (r.ok) expect(r.hasMore).toBe(false);
+    parity.dispose();
+
+    const plain = createRunFileReader({ scanChunkBytes: 64 });
+    expect(await plain.read(file, "m2", q())).toEqual({ ok: false, reason: "leaf_missing" });
+    plain.dispose();
+  });
+
+  it("a parentId cycle ends the chain (ok, truncated) under parity — default mode keeps leaf_missing", async () => {
+    // two-cycle via duplicated ids (rewritten/corrupted file): r←s, s←r, r←s (leaf last).
+    // walkBranch's `!seen.has(cur)` stops after r, s (walkExpected has no seen-set, so the
+    // reference is spelled out here).
+    const raws: Raw[] = [msgEntry("r", "s", 1), msgEntry("s", "r", 2), msgEntry("r", "s", 3)];
+    const file = writeJsonl("parity-cycle.jsonl", raws.map(line).join(""));
+    const parity = createRunFileReader({ fullReaderParity: true, scanChunkBytes: 64 });
+    const r = await parity.read(file, "r", q());
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(ids(r.entries)).toEqual(["s", "r"]); // wire order (oldest first); the chain ends where the cycle closes
+      expect(r.entries).toEqual([projectSessionEntry(raws[1]!), projectSessionEntry(raws[2]!)]);
+      expect(r.hasMore).toBe(false);
+    }
+    parity.dispose();
+  });
+
+  it("cursorCacheSize: LRU capacity is the option (history uses 8) — an evicted cursor rescans correctly", async () => {
+    const stats = createRunFileReaderStats();
+    const reader = createRunFileReader({ stats, cursorCacheSize: 2 });
+    const raws = chainRaw("x", 3);
+    const files = Array.from({ length: 3 }, (_, i) => writeJsonl(`lru2-${i}.jsonl`, raws.map(line).join("")));
+    const expected = walkExpected(raws, "x2");
+    for (const f of files) expect(okEntries(await reader.read(f, "x2", q()))).toEqual(expected);
+    expect(stats.rounds).toBe(3);
+    // files[0]'s cursor was evicted by the LRU-2; re-reading rescans, result still correct
+    expect(okEntries(await reader.read(files[0]!, "x2", q()))).toEqual(expected);
+    expect(stats.rounds).toBe(4);
+    // files[2] is still the newest cursor: a cache hit needs no new round
+    expect(okEntries(await reader.read(files[2]!, "x2", q()))).toEqual(expected);
+    expect(stats.rounds).toBe(4);
+    reader.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // P1–P5: performance / concurrency contracts (plan §10)
 // ---------------------------------------------------------------------------
 

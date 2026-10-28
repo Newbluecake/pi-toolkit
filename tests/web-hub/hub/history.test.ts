@@ -6,6 +6,7 @@ import {
   openSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -18,7 +19,7 @@ import type {
   WireEvent,
   WireMessage,
 } from "../../../src/web-hub/protocol/messages.js";
-import type { HubEvent } from "../../../src/web-hub/hub/ports.js";
+import type { HistoryService, HubEvent } from "../../../src/web-hub/hub/ports.js";
 import {
   createHistoryService,
   mergeSnapshot,
@@ -28,8 +29,10 @@ import {
   TAIL_CHUNK_MAX_BYTES,
   APPEND_TAIL_ENTRIES,
   capEntriesByBytes,
+  DEFAULT_MAX_FILE_BYTES,
   MAX_HISTORY_PAYLOAD_BYTES,
 } from "../../../src/web-hub/hub/history.js";
+import { createRunFileReaderStats } from "../../../src/web-hub/hub/run-file-reader.js";
 import { createRegistry, type AgentConn, type Registry } from "../../../src/web-hub/hub/registry.js";
 import { formatSseFrame } from "../../../src/web-hub/hub/sse.js";
 import { hello, memLog, recordBus, sleepReal, tmpDirs, waitFor } from "./helpers.js";
@@ -203,7 +206,7 @@ describe("readBranchTail (runTail's tail-only reader)", () => {
   it("tail case: equals the full reader's last 64 entries and reads exactly ONE chunk (≪ file)", async () => {
     const file = bigFile();
     const reads: number[] = [];
-    const r = await readBranchTail(file, `m${N - 1}`, APPEND_TAIL_ENTRIES, undefined, (b) => reads.push(b));
+    const r = await readBranchTail(file, `m${N - 1}`, APPEND_TAIL_ENTRIES, { onRead: (b) => reads.push(b) });
     expect(r).toEqual({ ok: true, entries: await fullTail(file, `m${N - 1}`, APPEND_TAIL_ENTRIES) });
     expect(reads).toEqual([TAIL_CHUNK_BYTES]); // operation-count gate: one positioned read, not the 4.9 MB file
   });
@@ -212,7 +215,7 @@ describe("readBranchTail (runTail's tail-only reader)", () => {
     // the new leaf hangs off m1800 (≈1.2 MB before EOF): not in the first 512 KiB, inside 2 MiB
     const file = bigFile(sideEntry("late", "m1800"));
     const reads: number[] = [];
-    const r = await readBranchTail(file, "late", APPEND_TAIL_ENTRIES, undefined, (b) => reads.push(b));
+    const r = await readBranchTail(file, "late", APPEND_TAIL_ENTRIES, { onRead: (b) => reads.push(b) });
     expect(r).toEqual({ ok: true, entries: await fullTail(file, "late", APPEND_TAIL_ENTRIES) });
     expect(reads).toEqual([TAIL_CHUNK_BYTES, TAIL_CHUNK_BYTES * 4]);
     expect(r && r.ok && r.entries.at(-1)?.id).toBe("late");
@@ -222,7 +225,7 @@ describe("readBranchTail (runTail's tail-only reader)", () => {
   it("an ancestry that only the whole file can answer ⇒ undefined (full reader's job), bounded reads", async () => {
     const file = bigFile(sideEntry("deep", "m3")); // parent near the START of a ~4.9 MB file
     const reads: number[] = [];
-    expect(await readBranchTail(file, "deep", APPEND_TAIL_ENTRIES, undefined, (b) => reads.push(b))).toBeUndefined();
+    expect(await readBranchTail(file, "deep", APPEND_TAIL_ENTRIES, { onRead: (b) => reads.push(b) })).toBeUndefined();
     expect(reads.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(TAIL_CHUNK_MAX_BYTES * 2);
     // …and the full reader still answers it (the runTail fallback)
     const full = await readBranchFromFile(file, "deep");
@@ -270,14 +273,28 @@ describe("readBranchTail (runTail's tail-only reader)", () => {
   it("a leaf that is not on disk yet ⇒ bounded reads then undefined (never a whole-file read here)", async () => {
     const file = bigFile();
     const reads: number[] = [];
-    expect(await readBranchTail(file, "not-flushed", 64, undefined, (b) => reads.push(b))).toBeUndefined();
+    expect(await readBranchTail(file, "not-flushed", 64, { onRead: (b) => reads.push(b) })).toBeUndefined();
     expect(reads.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(TAIL_CHUNK_MAX_BYTES * 2);
+  });
+
+  it(">256 MiB sparse file, ancestry in the tail ⇒ ok from ONE chunk (the maxFileBytes cliff is gone — refresh-slow §4.1)", async () => {
+    const file = join(tmp.make("wh-h-sparse-tail-"), "sparse.jsonl");
+    writeFileSync(file, "");
+    truncateSync(file, DEFAULT_MAX_FILE_BYTES + (1 << 20)); // sparse hole, size over the old cap
+    appendFileSync(file, `\n${bigSessionLines(600)}`); // the whole chain sits at the tail
+    expect(statSync(file).size).toBeGreaterThan(DEFAULT_MAX_FILE_BYTES);
+    const clean = writeFixture(bigSessionLines(600)); // same chain, small file: the reference
+    const rFull = await readBranchFromFile(clean, "m599");
+    expect(rFull.ok).toBe(true);
+    const reads: number[] = [];
+    const r = await readBranchTail(file, "m599", 64, { onRead: (b) => reads.push(b) });
+    expect(r).toEqual({ ok: true, entries: rFull.ok ? rFull.entries.slice(-64) : [] });
+    expect(reads).toEqual([TAIL_CHUNK_BYTES]); // one positioned read; the 257 MiB hole is never touched
   });
 
   it.each([
     ["missing file", async () => readBranchTail(join(tmp.make(), "none.jsonl"), "m1", 64), "ENOENT"],
     ["non-.jsonl path", async () => readBranchTail(join(tmp.make(), "s.json"), "m1", 64), "ENOENT"],
-    ["file over maxFileBytes", async () => readBranchTail(bigFile(), "m1", 64, 100), "TOO_LARGE"],
   ])("%s ⇒ %s (same meaning as the full reader)", async (_n, run, reason) => {
     expect(await run()).toEqual({ ok: false, reason });
   });
@@ -742,6 +759,364 @@ describe("history.page", () => {
     await expect(h.page("missing", "u1", 5)).rejects.toMatchObject({ code: "E_NOT_FOUND" });
     h.dispose();
   });
+});
+
+// ---------------------------------------------------------------------------
+// refresh-slow plan §2.7 (docs/dev/web-hub/refresh-slow/plan.md): snapshot()/page() ride the
+// service's private reverse reader (walk-branch parity, 512 KiB chunks, cursor LRU 8).
+// Reference values are computed from readBranchFromFile (the old whole-file path) + the pure
+// mergeSnapshot — the two paths must be indistinguishable on the wire.
+// ---------------------------------------------------------------------------
+
+describe("snapshot ≡ full reader (reverse reader parity, refresh-slow §2.7)", () => {
+  const fakeRecent = (n: number): WireMessage[] => Array.from({ length: n }, (_, i) => msg("assistant", 50_000 + i));
+
+  const fullOf = async (file: string, leaf: string): Promise<WireEntry[]> => {
+    const r = await readBranchFromFile(file, leaf);
+    if (!r.ok) throw new Error(r.reason);
+    return r.entries;
+  };
+
+  const replyFor = (leaf: string, recent: WireMessage[]): SnapshotReplyBody =>
+    reply({ leafId: leaf, recent: recent.map((message, i) => ({ seq: i + 1, message })) });
+
+  const snapFor = async (
+    file: string,
+    leaf: string,
+    over: { tailEntries?: number; recent?: WireMessage[] } = {},
+  ): Promise<{
+    p: Awaited<ReturnType<HistoryService["snapshot"]>>;
+    readerStats: ReturnType<typeof createRunFileReaderStats>;
+  }> => {
+    const a = agent(file, leaf);
+    const readerStats = createRunFileReaderStats();
+    const h = createHistoryService({
+      registry: a.reg,
+      log: memLog(),
+      ...(over.tailEntries !== undefined ? { tailEntries: over.tailEntries } : {}),
+      readerStats,
+    });
+    if ((over.recent ?? []).length > 0) {
+      const recent = over.recent!;
+      a.replyWith({ recent: recent.map((message, i) => ({ seq: i + 1, message })), seq: recent.length });
+    }
+    const p = await h.snapshot(a.agentKey);
+    h.dispose();
+    return { p, readerStats };
+  };
+
+  const expectSnapshotEqualsFull = async (
+    file: string,
+    leaf: string,
+    tailEntries: number,
+    recentLen: number,
+  ): Promise<void> => {
+    const recent = fakeRecent(recentLen);
+    const full = await fullOf(file, leaf);
+    const ref = mergeSnapshot(full, replyFor(leaf, recent), []);
+    const { p } = await snapFor(file, leaf, { tailEntries, recent });
+    const expected = ref.entries.slice(-tailEntries);
+    expect(p.entries).toEqual(expected); // byte-equal projection of the same tail
+    expect(p.hasMore).toBe(full.length > tailEntries); // exact, incl. boundary cases
+    expect(p.source).toBe("file");
+    const oldest = expected[0]?.id;
+    if (oldest !== undefined) expect(p.oldestEntryId).toBe(oldest);
+    else expect("oldestEntryId" in p).toBe(false);
+    expect(p.tailMessages).toEqual(ref.tailMessages); // merge window complete
+  };
+
+  it.each([
+    ["small fixture", (): string => writeFixture(), "t2"],
+    ["big session, leaf at EOF", (): string => writeFixture(bigSessionLines(2400)), "m2399"],
+    [
+      "side branch, ancestry crossing chunks (m1800)",
+      (): string => writeFixture(bigSessionLines(2400) + sideEntry("late", "m1800")),
+      "late",
+    ],
+    [
+      "side branch, ancestry near the file head (m3)",
+      (): string => writeFixture(bigSessionLines(2400) + sideEntry("deep", "m3")),
+      "deep",
+    ],
+    [
+      "30 labels at the tail",
+      (): string =>
+        writeFixture(
+          bigSessionLines(2400) +
+            Array.from({ length: 30 }, (_, i) =>
+              line({
+                type: "label",
+                id: `lb${i}`,
+                parentId: i === 0 ? "m2399" : `lb${i - 1}`,
+                timestamp: iso(8_000 + i),
+                label: "x",
+              }),
+            ).join(""),
+        ),
+      "lb29",
+    ],
+    [
+      "trailing half-written line",
+      (): string => writeFixture(bigSessionLines(2400) + '{"type":"message","id":"half'),
+      "m2399",
+    ],
+  ])("%s ≡ full reader (× tailEntries × |recent|)", async (_n, mk, leaf) => {
+    const file = mk();
+    for (const tailEntries of [3, 400]) {
+      for (const recentLen of [0, 64]) {
+        await expectSnapshotEqualsFull(file, leaf, tailEntries, recentLen);
+      }
+    }
+  });
+
+  it("read-amount gate: big-session tail snapshot scans < size/4 and yields the event loop", async () => {
+    const file = writeFixture(bigSessionLines(4800)); // ≈9.8 MB ≫ the ~1.5 MB the read needs
+    const size = statSync(file).size;
+    const { p, readerStats } = await snapFor(file, "m4799");
+    expect(p.source).toBe("file");
+    expect(readerStats.bytes).toBeGreaterThan(0);
+    expect(readerStats.bytes).toBeLessThan(size / 4);
+    expect(readerStats.yields).toBeGreaterThanOrEqual(1);
+  });
+
+  it("merge-window growth: message-like density < 2×|recent| in the newest 512 ⇒ limit doubles, resuming the same cursor", async () => {
+    // every 8th entry is a message (150 of 1200); |recent|=64 ⇒ need 128 message-like. The
+    // newest 512 hold 64 ⇒ one doubling to 1024 (128 ⇒ covered) — same cursor, incremental scan.
+    const pad = "x".repeat(1000);
+    const lines: string[] = [line({ type: "session", version: 3, id: "sess", timestamp: iso(0), cwd: "/tmp/w" })];
+    let parent: string | null = null;
+    for (let i = 0; i < 1200; i++) {
+      const id = `e${i}`;
+      lines.push(
+        i % 8 === 0
+          ? line({
+              type: "message",
+              id,
+              parentId: parent,
+              timestamp: iso(i + 1),
+              message: msg("assistant", 60_000 + i, { content: `${i}:${pad}` }),
+            })
+          : line({
+              type: "custom",
+              id,
+              parentId: parent,
+              timestamp: iso(i + 1),
+              customType: "state",
+              data: { i, pad },
+            }),
+      );
+      parent = id;
+    }
+    const file = writeFixture(lines.join(""));
+    const full = await fullOf(file, "e1199");
+    expect(full).toHaveLength(1200);
+    const { p, readerStats } = await snapFor(file, "e1199", { recent: fakeRecent(64) });
+    expect(p.source).toBe("file");
+    expect(ids(p.entries)).toEqual(ids(full.slice(-400)));
+    expect(p.hasMore).toBe(true);
+    expect(p.tailMessages).toEqual(mergeSnapshot(full, replyFor("e1199", fakeRecent(64)), []).tailMessages);
+    expect(readerStats.rounds).toBe(2); // 512-round + one doubling — not a rescan from EOF
+  });
+
+  it(">256 MiB sparse file: snapshot still answers source:file from the tail (the cliff is gone), reading ≪ 32 MiB", async () => {
+    const file = join(tmp.make("wh-h-sparse-snap-"), "sparse.jsonl");
+    writeFileSync(file, "");
+    truncateSync(file, DEFAULT_MAX_FILE_BYTES + (1 << 20)); // sparse hole: over the old full-read cap
+    appendFileSync(file, `\n${bigSessionLines(600)}`); // the whole chain sits at the tail
+    expect(statSync(file).size).toBeGreaterThan(DEFAULT_MAX_FILE_BYTES);
+    const clean = writeFixture(bigSessionLines(600));
+    const full = await fullOf(clean, "m599");
+    const { p, readerStats } = await snapFor(file, "m599");
+    expect(p.source).toBe("file"); // the old path: TOO_LARGE ⇒ branch_req ⇒ "agent"
+    expect(ids(p.entries)).toEqual(ids(full.slice(-400)));
+    expect(p.hasMore).toBe(true);
+    expect(readerStats.bytes).toBeLessThan(8 << 20); // never touched the hole
+  });
+
+  it("busy (snapshotFileBudgetMs exhausted) ⇒ branch_req fallback, source:agent — same as a missing file", async () => {
+    const a = agent(writeFixture());
+    const h = createHistoryService({ registry: a.reg, log: memLog(), snapshotFileBudgetMs: 0 });
+    const e = (id: string, parentId: string | null): WireEntry => ({
+      id,
+      parentId,
+      type: "message",
+      timestamp: iso(1),
+      message: msg("user", Number(id.slice(1)) || 1),
+    });
+    a.branchWith([e("m1", null), e("m2", "m1"), e("t2", "m2"), e("m9", "t2")]);
+    const p = await h.snapshot(a.agentKey);
+    expect(p.source).toBe("agent");
+    expect(ids(p.entries)).toEqual(["m1", "m2", "t2"]); // cut at the leaf
+    expect(a.sent.some((f) => f.t === "branch_req")).toBe(true);
+    h.dispose();
+  });
+
+  it("documented relaxation: a corrupt line near the file head (off-branch) still answers source:file — the old full reader would PARSE ⇒ agent", async () => {
+    const good = bigSessionLines(2400);
+    const head = good.indexOf("\n", 100) + 1; // after the session header line
+    const bad = `${good.slice(0, head)}{broken-line\n${good.slice(head)}`;
+    const file = writeFixture(bad);
+    expect(await readBranchFromFile(file, "m2399")).toEqual({ ok: false, reason: "PARSE" }); // the old verdict
+    const { p } = await snapFor(file, "m2399");
+    expect(p.source).toBe("file"); // the prefilter never matches the corrupt line ⇒ skipped
+    const clean = await fullOf(writeFixture(good), "m2399");
+    expect(ids(p.entries)).toEqual(ids(clean.slice(-400)));
+  });
+
+  it("fallback matrix: a corrupt line ON the branch with an intact needle ⇒ parse_error ⇒ branch_req (source:agent)", async () => {
+    // m2000's line keeps its `"id":"m2000"` needle but its JSON is truncated — prefilter hits,
+    // JSON.parse fails, the read fails parse_error and the snapshot falls back to the agent.
+    const good = bigSessionLines(2400);
+    const m2000 = good.indexOf(`"id":"m2000"`);
+    const lineStart = good.lastIndexOf("\n", m2000) + 1;
+    const lineEnd = good.indexOf("\n", m2000);
+    const broken = `${good.slice(0, lineEnd - 40)}{"broken"\n${good.slice(lineEnd + 1)}`; // needle kept, tail mangled
+    expect(broken.slice(lineStart, lineStart + 200)).toContain('"id":"m2000"');
+    const a = agent(writeFixture(broken), "m2399");
+    const log = memLog();
+    const h = createHistoryService({ registry: a.reg, log });
+    a.branchWith([]); // the agent path answers empty — the point is the SOURCE
+    const p = await h.snapshot(a.agentKey);
+    expect(p.source).toBe("agent");
+    expect(a.sent.some((f) => f.t === "branch_req")).toBe(true);
+    expect(
+      log.lines.some(
+        (l) => l.level === "info" && l.msg.includes("fell back") && String(l.data?.["reason"]) === "parse_error",
+      ),
+    ).toBe(true);
+    h.dispose();
+  });
+
+  it("hasMore exact at the service boundary: tailEntries == SNAPSHOT_READ_MIN == projectable count, unprojectable root in an older chunk ⇒ false", async () => {
+    // lb(root label) ← 600 KiB of off-branch filler ← b0..b511. The 512-entry read collects the
+    // whole projectable branch with the walk unfinished (lb sits in an older 512 KiB chunk);
+    // parity must scan on and prove the end instead of reporting hasMore:true.
+    const lines: string[] = [line({ type: "label", id: "lb", parentId: null, timestamp: iso(0), label: "root" })];
+    lines.push(
+      ...Array.from({ length: 6000 }, (_, i) =>
+        line({ type: "label", id: `f${i}`, parentId: "zz", timestamp: iso(0), label: "x".repeat(90) }),
+      ),
+    );
+    let parent = "lb";
+    for (let i = 0; i < 512; i++) {
+      lines.push(
+        line({
+          type: "message",
+          id: `b${i}`,
+          parentId: parent,
+          timestamp: iso(i + 1),
+          message: msg("user", 70_000 + i),
+        }),
+      );
+      parent = `b${i}`;
+    }
+    const file = writeFixture(lines.join(""));
+    const { p } = await snapFor(file, "b511", { tailEntries: 512 });
+    expect(p.entries).toHaveLength(512);
+    expect(ids(p.entries)).toEqual(Array.from({ length: 512 }, (_, i) => `b${i}`));
+    expect(p.hasMore).toBe(false);
+  });
+});
+
+describe("page ≡ full reader (reverse reader parity, refresh-slow §3.3)", () => {
+  const fullOf = async (file: string, leaf: string): Promise<WireEntry[]> => {
+    const r = await readBranchFromFile(file, leaf);
+    if (!r.ok) throw new Error(r.reason);
+    return r.entries;
+  };
+
+  it("random before × lim ≡ full.slice (entries/hasMore/oldest/source), seeded", async () => {
+    const file = writeFixture(bigSessionLines(2400));
+    const full = await fullOf(file, "m2399");
+    const a = agent(file, "m2399");
+    const h = createHistoryService({ registry: a.reg, log: memLog() });
+    let seed = 42;
+    const rnd = (n: number): number => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    const idxs = new Set<number>();
+    while (idxs.size < 50) idxs.add(1 + rnd(full.length - 1));
+    for (const idx of idxs) {
+      for (const lim of [1, 7, 400]) {
+        const p = await h.page(a.agentKey, full[idx]!.id, lim);
+        const start = Math.max(0, idx - lim);
+        expect(ids(p.entries)).toEqual(ids(full.slice(start, idx)));
+        expect(p.hasMore).toBe(start > 0);
+        expect(p.source).toBe("file");
+        if (start < idx) expect(p.oldestEntryId).toBe(full[start]!.id);
+      }
+    }
+    h.dispose();
+  });
+
+  it("cursor handoff: the first page after a snapshot is a cache slice — ≤1 new round, no rescan", async () => {
+    const file = writeFixture(bigSessionLines(2400));
+    const size = statSync(file).size;
+    const a = agent(file, "m2399");
+    const readerStats = createRunFileReaderStats();
+    const h = createHistoryService({ registry: a.reg, log: memLog(), readerStats });
+    const p = await h.snapshot(a.agentKey);
+    expect(p.source).toBe("file");
+    expect(p.oldestEntryId).toBe("m2000"); // 400 of the 512 read entries
+    const rounds = readerStats.rounds;
+    const bytes = readerStats.bytes;
+    const page = await h.page(a.agentKey, p.oldestEntryId!, 100);
+    expect(ids(page.entries)).toEqual(Array.from({ length: 100 }, (_, i) => `m${1900 + i}`));
+    expect(page.source).toBe("file");
+    expect(page.hasMore).toBe(true);
+    expect(readerStats.rounds - rounds).toBeLessThanOrEqual(1);
+    expect(readerStats.bytes - bytes).toBeLessThan(size / 4);
+    h.dispose();
+  });
+
+  it("an append after the snapshot changes the cursor key ⇒ rescan, results still correct", async () => {
+    const file = writeFixture(bigSessionLines(2400));
+    const a = agent(file, "m2399");
+    const h = createHistoryService({ registry: a.reg, log: memLog() });
+    await h.snapshot(a.agentKey);
+    appendFileSync(
+      file,
+      line({
+        type: "custom_message",
+        id: "fresh",
+        parentId: "m2399",
+        timestamp: iso(9_500),
+        customType: "task",
+        content: "x",
+        display: true,
+      }),
+    );
+    a.reg.onFrame(a.agentKey, { t: "status", leafId: "fresh", busy: false, pending: false });
+    const full = await fullOf(file, "fresh"); // 2401 entries
+    const p = await h.page(a.agentKey, "m2000", 100);
+    expect(p.source).toBe("file");
+    expect(ids(p.entries)).toEqual(ids(full.slice(1900, 2000))); // m1900..m1999, unchanged by the append
+    h.dispose();
+  });
+
+  it(
+    "busy: the reader sub-deadline lapsing ⇒ E_BUSY (503, retryable); a retry after the clock recovers succeeds from the kept cursor",
+    { timeout: 30_000 },
+    async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      const file = writeFixture(bigSessionLines(8000)); // ≈16 MB: the scan to m2000 spans many chunks
+      const a = agent(file, "m7999");
+      const readerStats = createRunFileReaderStats();
+      const h = createHistoryService({ registry: a.reg, log: memLog(), readerStats });
+      const p1 = h.page(a.agentKey, "m2000", 400);
+      await waitFor(() => readerStats.chunks >= 1); // scan in flight (real fs I/O under a fake clock)
+      vi.setSystemTime(Date.now() + 60_000); // the reader's own deadline (≈ now+4.75 s) is long past
+      await expect(p1).rejects.toMatchObject({ code: "E_BUSY" });
+      vi.setSystemTime(Date.now() - 60_000); // clock recovered; the cursor kept its progress
+      const p2 = await h.page(a.agentKey, "m2000", 400);
+      expect(p2.source).toBe("file");
+      expect(p2.entries).toHaveLength(400);
+      expect(p2.entries[0]?.id).toBe("m1600");
+      expect(p2.entries.at(-1)?.id).toBe("m1999");
+      h.dispose();
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

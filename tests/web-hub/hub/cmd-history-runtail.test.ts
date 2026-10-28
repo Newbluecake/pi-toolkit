@@ -26,8 +26,11 @@ import { hello, memLog, recordBus, sleepReal, tmpDirs, waitFor } from "./helpers
  * persisted-session report (a path, but no file yet) used to silently drop the real-time
  * `append` for every idle custom entry written in that window — exactly where the first
  * `subagent:cmd` records of a fresh session land. The fallback asks the agent's in-memory
- * branch (`branch_req`, the same frame `loadBranch` already uses) ONLY for ENOENT reads of a
- * DEFINED session file; `--no-session` (file===undefined) keeps today's early return (M4).
+ * branch (`branch_req`, the same frame snapshot's agent path uses) for ENOENT and — since the
+ * refresh-slow plan §4.3 — TOO_LARGE reads of a DEFINED session file; `--no-session`
+ * (file===undefined) keeps today's early return (M4). The TOO_LARGE arm additionally logs ONE
+ * `warn` per agent per contiguous over-cap state (metadata only, re-armed by a later successful
+ * file read).
  *
  * Boundary pinned here too (M4/R9, honest): the fallback is unconditional — it fires for old
  * agents and `cmdHistory:false` sessions alike (the hub cannot know that setting) — and
@@ -270,14 +273,8 @@ describe("cmd-history H1 §4.10 — runTail ENOENT branch fallback", () => {
     h.dispose();
   });
 
-  it("TOO_LARGE / PARSE / LEAF_NOT_FOUND keep today's early return — the fallback is ENOENT-only (no branch_req at all)", async () => {
+  it("PARSE / LEAF_NOT_FOUND keep today's early return — the fallback is ENOENT/TOO_LARGE only", async () => {
     const cases: Array<{ name: string; break: (file: string) => void }> = [
-      {
-        name: "TOO_LARGE",
-        break: (file) => {
-          truncateSync(file, DEFAULT_MAX_FILE_BYTES + 1); // sparse: size over budget without writing 256 MiB
-        },
-      },
       {
         name: "PARSE",
         break: (file) => {
@@ -300,7 +297,7 @@ describe("cmd-history H1 §4.10 — runTail ENOENT branch fallback", () => {
       status(a, "n1"); // n1 is on disk for PARSE — irrelevant: the read must fail before the walk
       await sleepReal(700);
       expect(appends(a.events)).toHaveLength(0);
-      expect(branchReqs(a.sent)).toHaveLength(0); // non-ENOENT never falls back
+      expect(branchReqs(a.sent)).toHaveLength(0); // non-fallback failures never ask the agent
       h.dispose();
     }
 
@@ -317,6 +314,67 @@ describe("cmd-history H1 §4.10 — runTail ENOENT branch fallback", () => {
     expect(branchReqs(a.sent)).toHaveLength(0);
     h.dispose();
   });
+
+  it(
+    "TOO_LARGE (refresh-slow §4.3): sparse >256 MiB file the tail cannot answer ⇒ branch_req fallback + ONE warn per contiguous state; a later ok file read re-arms the warn",
+    { timeout: 20_000 },
+    async () => {
+      const file = writeChainFile();
+      const a = agent(file);
+      const log = memLog();
+      const h = createHistoryService({ registry: a.reg, log });
+      a.branchWith(baseline());
+      await h.snapshot(a.agentKey);
+      a.sent.length = 0;
+      a.events.length = 0;
+
+      // over the full-read cap AND the tail (a 256 MiB zero hole) cannot answer
+      truncateSync(file, DEFAULT_MAX_FILE_BYTES + (1 << 20));
+      const warns = (): number => log.lines.filter((l) => l.level === "warn" && l.msg.includes("runTail")).length;
+
+      a.branchWith([...baseline(), entry("n1", "m2")]);
+      status(a, "n1");
+      await waitFor(() => appends(a.events).length === 1, 5000);
+      expect(appends(a.events)[0]!.map((e) => e.id)).toEqual(["n1"]); // real-time append survives the cliff
+      expect(branchReqs(a.sent)).toHaveLength(1);
+      expect(warns()).toBe(1); // metadata only
+      const warn = log.lines.find((l) => l.level === "warn" && l.msg.includes("runTail"))!;
+      expect(JSON.stringify(warn)).toContain("TOO_LARGE");
+      expect(JSON.stringify(warn)).not.toContain("n1"); // no entry content
+
+      // second leaf change in the SAME contiguous over-cap state: fallback again, but no second warn
+      a.branchWith([...baseline(), entry("n1", "m2"), entry("n2", "n1")]);
+      status(a, "n2");
+      await waitFor(() => appends(a.events).length === 2, 5000);
+      expect(appends(a.events)[1]!.map((e) => e.id)).toEqual(["n2"]);
+      expect(branchReqs(a.sent)).toHaveLength(2);
+      expect(warns()).toBe(1);
+
+      // a later successful FILE read re-arms the one-shot warn (and answers without the agent)
+      const onDisk = (id: string, parentId: string): string =>
+        line({ type: "message", id, parentId, timestamp: iso(), message: msg("user", tsOf(id)) });
+      writeFileSync(
+        file,
+        [onDisk("m1", null), onDisk("m2", "m1"), onDisk("n1", "m2"), onDisk("n2", "n1"), onDisk("n3", "n2")].join(""),
+      );
+      a.branchWith([...baseline(), entry("n1", "m2"), entry("n2", "n1"), entry("n3", "n2")]);
+      status(a, "n3");
+      await waitFor(() => appends(a.events).length === 3, 5000);
+      expect(appends(a.events)[2]!.map((e) => e.id)).toEqual(["n3"]);
+      expect(branchReqs(a.sent)).toHaveLength(2); // answered from the file, no new branch_req
+      expect(warns()).toBe(1);
+
+      // over the cap again ⇒ the warn fires a SECOND time (the ok read re-armed it)
+      truncateSync(file, DEFAULT_MAX_FILE_BYTES + (1 << 20));
+      a.branchWith([...baseline(), entry("n1", "m2"), entry("n2", "n1"), entry("n3", "n2"), entry("n4", "n3")]);
+      status(a, "n4");
+      await waitFor(() => appends(a.events).length === 4, 5000);
+      expect(appends(a.events)[3]!.map((e) => e.id)).toEqual(["n4"]);
+      expect(branchReqs(a.sent)).toHaveLength(3);
+      expect(warns()).toBe(2);
+      h.dispose();
+    },
+  );
 
   it("agent never answers branch_req ⇒ E_DEADLINE at TIMING.snapshotMs: logged info, no append, no throw — and the loop is NOT wedged (next leaf change works)", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });

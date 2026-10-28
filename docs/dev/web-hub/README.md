@@ -327,7 +327,7 @@ newSession/fork/switchSession/reload, one corrective `end{failed}` if cancelled)
 `builtin-bridge.ts` records builtins at their settlement points (intent ledger D7 recovers the
 frame cmdId for agent_settled-deferred dispatches — G7) and stamps the open `history` field on
 sync/late replies. The hub statically advertises `cmd.history.v1` and projects entries as
-custom tombstones + open `cmd` field (`protocol/keys.ts`); `runTail`'s ENOENT-only
+custom tombstones + open `cmd` field (`protocol/keys.ts`); `runTail`'s ENOENT/TOO_LARGE
 `branch_req` fallback serves records live before the first conversation flushes the file
 (§4.10 — a GENERAL hub fix, deliberately outside the switch-off promise). UI: purple cards
 (`TxCommand.vue`), gated `hubCap ∧ status.features`, placeholder state machine with 60 s
@@ -344,22 +344,93 @@ real-device checklist `docs/dev/web-hub-cmd-history/acceptance.md`.
 
 ## History tail reads (`hub/history.ts`)
 
-**Hub main-thread rule (perf incident 2026-10-28):** nothing that runs on every leaf change may
-scale with the session FILE size. A 193 MB live session made `runTail` (500 ms debounce per
-subscribed agent) re-read + `JSON.parse` the whole file — `FileCache` is keyed on size/mtime, so an
-append-only file always misses — and project the whole branch (`canonicalJson` per custom entry)
-only to keep the last `APPEND_TAIL_ENTRIES` (64): 1–6 s of synchronous main-thread CPU each time,
-queueing EVERY hub request (a `/api/preview?dir=1` showed ~3 ms of handler time in the audit line
-but 1.8–5 s on the wire). `runTail` now uses `readBranchTail`: positioned reads from the end
-(512 KiB, ×4 until the leaf's ancestry is covered, ≤ `TAIL_CHUNK_MAX_BYTES` 32 MiB), cut at a
-newline byte, projecting newest-first until `count` PROJECTED entries — result equals the full
-reader's `.slice(-count)`. `undefined` ⇒ not answerable from the tail (chunk would cover the whole
-file, budget spent, leaf not on disk yet, corrupt NON-trailing line inside the chunk) ⇒ fall back
-to the full cached reader, whose verdicts (`PARSE`, `LEAF_NOT_FOUND`, …) are unchanged.
-Deliberate relaxation: a corrupt line OUTSIDE the chunk no longer silences tail appends (the full
-reader would answer `PARSE`). `snapshot()`/`page()` still use the full reader (user-triggered,
-need the whole branch for `hasMore`/paging). Tests: `tests/web-hub/hub/history.test.ts`
-(`readBranchTail` equivalence + bytes-read gate; `runTail` integration).
+**Hub main-thread rule (perf incidents 2026-10-28, `docs/dev/web-hub/refresh-slow/`):** nothing
+that runs on every leaf change — and nothing on the user-triggered history paths — may parse
+the whole session file. A 193 MB live session first made `runTail` (500 ms debounce per
+subscribed agent) re-read + `JSON.parse` the whole file — `FileCache` is keyed on size/mtime, so
+an append-only file always misses — and project the whole branch (`canonicalJson` per custom
+entry) only to keep the last `APPEND_TAIL_ENTRIES` (64): 1–6 s of synchronous main-thread CPU
+per change, queueing EVERY hub request. The same whole-file path then made `snapshot()`/`page()`
+cost ~7 s on a 30k-entry branch (only the last 400 entries were kept).
+
+**`runTail`** uses `readBranchTail`: positioned reads from the end (512 KiB, ×4 until the leaf's
+ancestry is covered, ≤ `TAIL_CHUNK_MAX_BYTES` 32 MiB — bounded by THAT budget, not by the file
+size; the old `maxFileBytes` gate is gone, so a >256 MiB file with the ancestry in the tail
+answers from the tail), cut at a newline byte, projecting newest-first until `count` PROJECTED
+entries — result equals the full reader's `.slice(-count)`. `undefined` ⇒ not answerable from
+the tail (chunk would cover the whole file, budget spent, leaf not on disk yet, corrupt
+NON-trailing line inside the chunk) ⇒ fall back to the full cached reader, whose verdicts
+(`PARSE`, `LEAF_NOT_FOUND`, …) are unchanged. On `ENOENT` (file not created yet,
+pre-first-message — cmd-history §4.10) **or `TOO_LARGE`** (file over the 256 MiB full-read cap
+AND the tail could not answer — refresh-slow §4.3) `runTail` falls back to the agent's
+in-memory branch (`branch_req`, 256 KiB, cut at the pending leaf) so real-time appends never
+silently stall on the far side of the cliff; the TOO_LARGE arm logs ONE `warn` per agent per
+contiguous over-cap state (metadata only; any later successful file read re-arms it).
+`PARSE`/`LEAF_NOT_FOUND` keep the plain retry-on-next-leaf-change behavior. Deliberate
+relaxation: a corrupt line OUTSIDE the chunk no longer silences tail appends (the full reader
+would answer `PARSE`). Residual (§4.3 disclosed): while a file stays over the cap with an
+unanswerable tail and the leaf outside the agent's 256 KiB reply window, every leaf change
+still fires one failing `branch_req` — a wasted round-trip per change (warned once; cheap once
+the agent-side reverse projection lands).
+
+**`snapshot()`/`page()`** ride a private second instance of `hub/run-file-reader.ts`
+(`fullReaderParity`, 512 KiB scan chunks, cursor LRU 8 keyed `(realpath,size,mtimeMs,leafId)`):
+backward scan with substring prefilter, cooperative `setImmediate` yields, single-flight, ≤2
+concurrent scans, and a cursor page() and snapshot() SHARE — the first "Show earlier" after a
+snapshot is mostly a cache slice. `snapshot()` reads the newest `max(tailEntries,
+DELIVERED_CAP)` = 512 projected entries (the delivered baseline, `pushDelivered`'s last-512
+keys, matches the old whole-branch read) and doubles the limit (≤ 8× ⇒ 4096, resuming the
+cursor) while the merge window lacks `2×|recent|` message-like entries. Reads are bounded by
+a file-read sub-deadline (`snapshotFileBudgetMs`, default half of `TIMING.snapshotMs` — busy
+leaves time for the fallback) and the reader's cumulative-scan cap (256 MiB), NOT by the file
+size — the 256 MiB cliff is gone (sparse >256 MiB fixtures answer `source:"file"` from the
+Tail). Parity makes the reverse walk equal `walkBranch`: exact `hasMore` (after `limit`
+entries the scan continues until one MORE projected entry appears or the walk ends — otherwise
+remaining all-unprojectable ancestors would report hasMore:true and page an empty page); a
+missing ANCESTOR at the file head ends the chain like `walkBranch`'s break (only the leaf
+itself missing stays `leaf_missing`); a parentId cycle ends the chain likewise.
+
+Fallback matrix (refresh-slow §2.3): `ok` ⇒ `source:"file"`; `file_missing` / `leaf_missing` /
+`parse_error` / `too_large` / `busy` ⇒ `branch_req` (+`log.info`) — NEVER a whole-file read (any
+verdict the full reader could add costs seconds of main-thread CPU to re-derive what the
+reverse read already proved); `leafId:null` ⇒ empty history; `--no-session` ⇒ agent directly.
+`page()` maps the reader's `busy` to `E_BUSY` (503, retryable; cursor progress kept) instead;
+its `leaf_missing` means "the walk terminated (root / file head / truncated ancestry / cycle)
+without ever crossing `before`" — `before` genuinely off-branch OR the file unable to express
+the full chain — and falls to the agent path, which still ends in `E_NOT_FOUND` when the agent
+does not know `before` either (same verdict the full reader used to reach, one extra
+round-trip).
+
+Deliberate relaxations vs the old whole-file reader, all local to this section:
+
+- a corrupt line OUTSIDE the branch no longer forces the agent fallback (old: any bad line ⇒
+  `PARSE` ⇒ agent);
+- a corrupt line ON the branch that damages the `"id":"<want>"` needle bytes makes the
+  substring prefilter MISS it — the walk silently truncates at that ancestor and snapshot/page
+  still answer `source:"file"` with a truncated branch (old: `PARSE` ⇒ agent, which answers
+  from memory). Corrupt lines that prefilter-HIT still fail `parse_error` ⇒ agent (review #2);
+- duplicate ids (corrupted files): the reverse reader resolves the child-nearest previous
+  occurrence, the full reader file-last — they differ only when a duplicate's later copy is
+  written after its child, impossible in a healthy append-only file;
+- delivered baseline: the newest 512 entries (not the whole branch) feed `pushDelivered` — a
+  branch with >512 entries and keyless entries (compaction/branch_summary) among the newest
+  512 may carry a few fewer delivered keys (only affects `/tree` jumps far back; same class
+  of boundary the old >512 cap already had);
+- cursor memory is LRU 8 × projected chain — deep pages can approach a whole-branch projection
+  (still far below the old 1.6 GB RSS spikes); very long no-newline regions (sparse holes)
+  make the reader's carried `rest` quadratic in `Buffer.concat` — bounded by the sub-deadline
+  and the 256 MiB scan cap (busy/too_large), a pre-existing reader limitation.
+
+`FileCache` is now used only by `runTail`'s full-reader fallback; its unbounded parsed-index
+memory on big files is a known residual (refresh-slow plan §8 follow-up — the ≤32 MiB cache cap
+proposed in plan §2.5 was dropped by main-session ruling). Test seams on `createHistoryService`
+deps: `readerStats` (read-amount/round gates) and `snapshotFileBudgetMs` (0 forces the busy →
+branch_req fallback). Tests: `tests/web-hub/hub/history.test.ts` (snapshot/page parity
+equivalence, read gates, sparse cliff, busy, cursor handoff), `tests/web-hub/hub/history.perf.test.ts`
+(~44 MB synthetic archive session: snapshot <1 s, event-loop gap <100 ms, scan <25% of file),
+`tests/web-hub/hub/run-file-reader.test.ts` (parity group; the unchanged default groups pin
+parity=false byte-identity for run transcripts), `tests/web-hub/hub/cmd-history-runtail.test.ts`
+(runTail fallback matrix incl. the TOO_LARGE arm).
 Diagnosing a stalled hub: `/proc/<pid>/task/<pid>/stat` utime sampling shows busy runs on the main
 thread; a short `SIGUSR1` inspector CPU profile (close it again with
 `process.getBuiltinModule('node:inspector').close()`) names the function.

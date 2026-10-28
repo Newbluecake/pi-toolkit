@@ -5,6 +5,14 @@
  * never produce an extension `message_end`) by diffing the file tail on leaf
  * changes.
  *
+ * File access (refresh-slow plan, `docs/dev/web-hub/refresh-slow/plan.md`):
+ * `snapshot()`/`page()` ride a private reverse reader (`run-file-reader.ts`,
+ * walk-branch parity — cost scales with the returned tail, never with the
+ * file); `runTail` uses `readBranchTail` with the full cached reader as its
+ * fallback. Nothing here parses a whole session file on the request path
+ * anymore (a 193 MB / 30k-entry branch used to cost ~7 s of synchronous
+ * main-thread CPU per snapshot).
+ *
  * Alignment (spike K7②): the ONLY alignment point is the `leafId` the agent
  * read in the same tick as `snapshot_reply`. Entries appended after it are
  * ignored here (they arrive as `ev` / `append`); `turn_end.messageEntryId` is
@@ -30,6 +38,7 @@ import {
   type WireMessage,
 } from "../protocol/messages.js";
 import type { HistoryService, HubLog } from "./ports.js";
+import { createRunFileReader, type RunFileReadResult, type RunFileReaderStats } from "./run-file-reader.js";
 import { HubError, type Registry } from "./registry.js";
 import { formatSseFrame } from "./sse.js";
 
@@ -61,6 +70,22 @@ const TAIL_CHUNK_GROWTH = 4;
  * "leaf not flushed" case) or an ancestry reaching further back falls to the full reader instead of
  * escalating to a whole-file read here (0.5 → 2 → 8 → 32 MiB ⇒ ≤ ~42 MiB total). */
 export const TAIL_CHUNK_MAX_BYTES = 32 << 20;
+
+/** refresh-slow plan §2.2 (`docs/dev/web-hub/refresh-slow/plan.md`): the history service's private
+ * reverse reader — 512 KiB backward scan chunks bound the synchronous projection between
+ * setImmediate yields; the cursor LRU is 8 (every append invalidates the active cursor's key, so
+ * stale cursors only hold memory). A separate instance from the run-transcript reader: different
+ * profile, and the two must not starve each other on the reader's ≤2 concurrency gate. */
+const HISTORY_SCAN_CHUNK_BYTES = 512 << 10;
+const HISTORY_CURSOR_CACHE = 8;
+/** Snapshot reads `max(tailEntries, DELIVERED_CAP)` projected entries so the delivered baseline
+ * (`pushDelivered` keeps the last `DELIVERED_CAP` keys) matches the old whole-branch read; the
+ * limit doubles (≤ 8× MIN ⇒ ≤ 4096) while the merge window (2×|recent| message-like entries) is
+ * not covered — each doubling resumes the cached cursor, never rescanning from EOF. */
+const SNAPSHOT_READ_GROWTH_MAX = 8;
+/** File-read sub-deadline for snapshot's reverse read: leaves ≥ half of `TIMING.snapshotMs` for
+ * the `branch_req` fallback when the read cannot answer in time (`busy`). */
+const SNAPSHOT_FILE_BUDGET_MS = TIMING.snapshotMs / 2;
 
 type ReadFailure = "ENOENT" | "LEAF_NOT_FOUND" | "TOO_LARGE" | "PARSE";
 type ReadResult = { ok: true; entries: WireEntry[] } | { ok: false; reason: ReadFailure };
@@ -143,16 +168,19 @@ async function readBranchCached(
  * .slice(-count)` for every file the full reader accepts (projection is per-entry pure; duplicate ids
  * resolve last-wins in both). Returns `undefined` ⇒ "cannot answer from the tail" and the caller
  * falls back to the full reader: a corrupt NON-trailing line inside the chunk (the full reader's
- * PARSE failure), the chunk would cover the whole file anyway, or the `TAIL_CHUNK_MAX_BYTES` budget is spent. ENOENT / TOO_LARGE / LEAF_NOT_FOUND
- * keep the full reader's exact meaning. `onRead` is a test seam (bytes of each positioned read).
+ * PARSE failure), the chunk would cover the whole file anyway, or the `TAIL_CHUNK_MAX_BYTES` budget is spent. ENOENT / LEAF_NOT_FOUND
+ * keep the full reader's exact meaning; TOO_LARGE never appears — the tail read is bounded by its
+ * own chunk budget (`TAIL_CHUNK_MAX_BYTES`), not by the file size (refresh-slow plan §4.1 removed the
+ * old `maxFileBytes` gate: a >256 MiB file whose ancestry sits in the tail now answers from the
+ * tail instead of falling to the full reader's TOO_LARGE). `opts.onRead` is a test seam (bytes of
+ * each positioned read).
  */
 export async function readBranchTail(
   file: string,
   leafId: string,
   count: number,
-  maxFileBytes: number = DEFAULT_MAX_FILE_BYTES,
-  onRead?: (bytes: number) => void,
-): Promise<ReadResult | undefined> {
+  opts?: { onRead?: (bytes: number) => void },
+): Promise<{ ok: true; entries: WireEntry[] } | { ok: false; reason: "ENOENT" | "LEAF_NOT_FOUND" } | undefined> {
   if (!file.endsWith(".jsonl")) return { ok: false, reason: "ENOENT" };
   let real: string;
   let size: number;
@@ -165,7 +193,6 @@ export async function readBranchTail(
   } catch {
     return { ok: false, reason: "ENOENT" };
   }
-  if (size > maxFileBytes) return { ok: false, reason: "TOO_LARGE" };
 
   let fh: Awaited<ReturnType<typeof open>>;
   try {
@@ -186,7 +213,7 @@ export async function readBranchTail(
         if (bytesRead === 0) break; // file shrank under us ⇒ let the full reader decide
         got += bytesRead;
       }
-      onRead?.(got);
+      opts?.onRead?.(got);
       if (got < chunk) return undefined;
       const nl = buf.indexOf(0x0a);
       if (nl === -1) {
@@ -413,6 +440,14 @@ export function mergeSnapshot(
   return out;
 }
 
+/** refresh-slow plan §2.2: merge-window census — `messageLike` counts exactly the entry types
+ * `mergeSnapshot`'s reconciliation window (`message` / `custom_message`) reconciles against. */
+function countMessageLike(entries: readonly WireEntry[]): number {
+  let n = 0;
+  for (const e of entries) if (e.type === "message" || e.type === "custom_message") n++;
+  return n;
+}
+
 // ---------------------------------------------------------------------------
 // service
 // ---------------------------------------------------------------------------
@@ -425,6 +460,9 @@ interface AgentHist {
   leafTimer: ReturnType<typeof setTimeout> | undefined;
   reading: boolean;
   rerun: boolean;
+  /** refresh-slow plan §4.3: ONE `runTail` TOO_LARGE warn per agent per contiguous over-cap
+   * state (set on the first warn, reset by any later successful file tail/full read). */
+  tailTooLargeWarned: boolean;
 }
 
 type SnapshotReply = Extract<AgentFrame, { t: "snapshot_reply" }>;
@@ -434,10 +472,24 @@ export function createHistoryService(deps: {
   registry: Registry;
   log: HubLog;
   tailEntries?: number; /* 400 */
+  /** Test seam (refresh-slow plan §2.7): live counters of the service's private branch reader
+   *  (read-amount / round-count gates). */
+  readerStats?: RunFileReaderStats;
+  /** Test seam (refresh-slow plan §2.7): snapshot's file-read sub-budget in ms (default
+   *  `SNAPSHOT_FILE_BUDGET_MS`); 0 forces the busy → branch_req fallback deterministically. */
+  snapshotFileBudgetMs?: number;
 }): HistoryService & { dispose(): void } {
   const { registry, log } = deps;
   const tailEntries = deps.tailEntries ?? DEFAULT_TAIL_ENTRIES;
+  const snapshotReadMin = Math.max(tailEntries, DELIVERED_CAP);
+  const fileBudgetMs = deps.snapshotFileBudgetMs ?? SNAPSHOT_FILE_BUDGET_MS;
   const cache = createFileCache();
+  const branchReader = createRunFileReader({
+    fullReaderParity: true,
+    cursorCacheSize: HISTORY_CURSOR_CACHE,
+    scanChunkBytes: HISTORY_SCAN_CHUNK_BYTES,
+    ...(deps.readerStats !== undefined ? { stats: deps.readerStats } : {}),
+  });
   const states = new Map<string, AgentHist>();
   let disposed = false;
 
@@ -452,6 +504,7 @@ export function createHistoryService(deps: {
         leafTimer: undefined,
         reading: false,
         rerun: false,
+        tailTooLargeWarned: false,
       };
       states.set(agentKey, st);
     }
@@ -464,21 +517,26 @@ export function createHistoryService(deps: {
     if (st.delivered.length > DELIVERED_CAP) st.delivered.splice(0, st.delivered.length - DELIVERED_CAP);
   };
 
+  /** refresh-slow plan §2.5: only `runTail`'s full-reader fallback still uses the cached whole-file
+   * reader (snapshot/page never do). */
   const readBranch = (file: string, leafId: string): Promise<ReadResult> =>
     readBranchCached(file, leafId, DEFAULT_MAX_FILE_BYTES, cache);
 
   /**
-   * cmd-history §4.10 (M4): the runTail ENOENT-only branch fallback.
+   * cmd-history §4.10 (M4) + refresh-slow plan §4.3: the runTail ENOENT/TOO_LARGE branch fallback.
    *
    * pi does not create the session file until the first user/assistant message lands
    * (`session-manager.js`'s "no file before the first conversation" behavior — the premise
    * conformance #5 pins), so a persisted-session report (a path exists, the file does not yet)
    * used to drop the real-time `append` for every idle custom entry written in that window —
-   * exactly where a fresh session's first `subagent:cmd` records land. Ask the agent's
-   * in-memory branch instead: the SAME `branch_req` frame `loadBranch` already uses, with a
-   * tighter 256 KiB budget, cut at the pending leaf (identical to `loadBranch`). A reply that
-   * does not contain the leaf is treated as a read failure (return `undefined`, wait for the
-   * next leaf change) so `diffAppended` never runs against an unaligned branch.
+   * exactly where a fresh session's first `subagent:cmd` records land. Since refresh-slow P1①③
+   * the same fallback also serves TOO_LARGE: the file is over the full-read cap
+   * (`DEFAULT_MAX_FILE_BYTES`) AND the tail read could not answer — real-time appends must not
+   * silently stall on the far side of the 256 MiB cliff. Both ask the agent's in-memory branch:
+   * the SAME `branch_req` frame `loadSnapshotBranch`'s agent path uses, with a tighter 256 KiB
+   * budget, cut at the pending leaf. A reply that does not contain the leaf is treated as a read
+   * failure (return `undefined`, wait for the next leaf change) so `diffAppended` never runs
+   * against an unaligned branch.
    *
    * Errors — agent offline (`E_AGENT_GONE`), the `TIMING.snapshotMs` deadline (its timer is
    * unref'd inside `registry.request`), anything else — are logged (metadata only, never entry
@@ -501,7 +559,7 @@ export function createHistoryService(deps: {
       if (cut === -1) return undefined;
       return br.entries.slice(0, cut + 1);
     } catch (err) {
-      log.info("runTail ENOENT branch fallback failed", { agentKey, error: String(err) });
+      log.info("runTail branch fallback failed", { agentKey, error: String(err) });
       return undefined;
     }
   };
@@ -567,10 +625,24 @@ export function createHistoryService(deps: {
       let entries: readonly WireEntry[] | undefined;
       if (res.ok) {
         entries = res.entries;
-      } else if (res.reason === "ENOENT") {
-        // cmd-history §4.10: the file is not there YET (pre-first-message) — ask the agent's
-        // in-memory branch. Other failures (TOO_LARGE/PARSE/LEAF_NOT_FOUND) keep the plain
-        // retry-on-next-leaf-change behavior below.
+        st.tailTooLargeWarned = false; // a timely file answer re-arms the one-shot warn below
+      } else if (res.reason === "ENOENT" || res.reason === "TOO_LARGE") {
+        // ENOENT — cmd-history §4.10: the file is not there YET (pre-first-message). TOO_LARGE —
+        // refresh-slow plan §4.3: the file is over the full-read cap AND the tail read could not
+        // answer; real-time appends must not silently stall on the far side of the 256 MiB cliff.
+        // Both ask the agent's in-memory branch (256 KiB, cut at the pending leaf). Other failures
+        // (PARSE / LEAF_NOT_FOUND) keep the plain retry-on-next-leaf-change behavior below.
+        if (res.reason === "TOO_LARGE" && !st.tailTooLargeWarned) {
+          st.tailTooLargeWarned = true; // once per agent per contiguous over-cap state
+          log.warn(
+            "runTail: session file over the full-read cap and the tail could not answer; using the agent branch",
+            {
+              agentKey,
+              reason: "TOO_LARGE",
+              maxFileBytes: DEFAULT_MAX_FILE_BYTES,
+            },
+          );
+        }
         entries = await readTailFromAgent(agentKey, leaf);
       }
       if (entries === undefined) return; // leaf not flushed yet / unreadable: retry on the next leaf change
@@ -622,17 +694,47 @@ export function createHistoryService(deps: {
     });
   };
 
-  const loadBranch = async (
+  /**
+   * refresh-slow plan §2.2: snapshot's tail read. `deadlineAt` is the file-read sub-budget
+   * (`SNAPSHOT_FILE_BUDGET_MS`); a `busy` result falls back to `branch_req` instead of stalling
+   * the request. Reads the newest `snapshotReadMin` projected entries and doubles the limit
+   * (≤ 8×, resuming the cached cursor — never rescanning from EOF) until the merge window
+   * carries `needMessageLike` (2 × |reply.recent|) message-like entries, the branch ends
+   * (hasMore:false) or the cap hits. `maxBytes` is unbounded here: the wire byte budget is
+   * applied downstream by `buildCappedHistoryPayload`, exactly as before.
+   */
+  const readTailForSnapshot = async (
+    file: string,
+    leafId: string,
+    needMessageLike: number,
+    deadlineAt: number,
+  ): Promise<RunFileReadResult> => {
+    let limit = snapshotReadMin;
+    for (;;) {
+      const r = await branchReader.read(file, leafId, { limit, maxBytes: Number.MAX_SAFE_INTEGER, deadlineAt });
+      if (
+        !r.ok ||
+        !r.hasMore ||
+        limit >= snapshotReadMin * SNAPSHOT_READ_GROWTH_MAX ||
+        countMessageLike(r.entries) >= needMessageLike
+      ) {
+        return r;
+      }
+      limit *= 2;
+    }
+  };
+
+  /**
+   * The `branch_req` path snapshot and page share (the tail of the old `loadBranch`): the
+   * agent's in-memory branch, cut at the leaf (`cut === -1` keeps the reply as-is — the leaf is
+   * the newest entry in the normal case), `truncated` carrying `hasMore` when the agent budget
+   * cut it.
+   */
+  const loadFromAgent = async (
     agentKey: string,
-    file: string | undefined,
     leafId: string,
     remaining: () => number,
-  ): Promise<{ entries: WireEntry[]; source: "file" | "agent"; truncated: boolean }> => {
-    if (file !== undefined) {
-      const res = await readBranch(file, leafId);
-      if (res.ok) return { entries: res.entries, source: "file", truncated: false };
-      log.info("history file read fell back to branch_req", { agentKey, reason: res.reason });
-    }
+  ): Promise<{ entries: WireEntry[]; source: "agent"; truncated: boolean }> => {
     const br = await registry.request<BranchReply>(
       agentKey,
       { t: "branch_req", rid: "", maxBytes: LIMITS.branchReplyBytes },
@@ -641,6 +743,31 @@ export function createHistoryService(deps: {
     const cut = br.entries.findIndex((e) => e.id === leafId);
     const entries = cut === -1 ? br.entries : br.entries.slice(0, cut + 1);
     return { entries, source: "agent", truncated: br.truncated };
+  };
+
+  /**
+   * refresh-slow plan §2.3 fallback matrix — snapshot's branch load. The reverse read answers
+   * from the file tail (`source:"file"`); every failure mode (file_missing / leaf_missing /
+   * parse_error / too_large / busy) falls back to `branch_req` — never to a whole-file read: any
+   * verdict the full reader could add (LEAF_NOT_FOUND / PARSE / TOO_LARGE) would cost seconds of
+   * main-thread CPU to re-derive what the reverse read already proved, and busy means the
+   * sub-budget expired, where the agent answer is the only timely option. `more` is the reverse
+   * read's exact hasMore (parity); the agent path has no such signal (`truncated` carries it).
+   */
+  const loadSnapshotBranch = async (
+    agentKey: string,
+    file: string | undefined,
+    leafId: string,
+    reply: SnapshotReplyBody,
+    remaining: () => number,
+  ): Promise<{ entries: WireEntry[]; source: "file" | "agent"; truncated: boolean; more: boolean }> => {
+    if (file !== undefined) {
+      const r = await readTailForSnapshot(file, leafId, 2 * reply.recent.length, Date.now() + fileBudgetMs);
+      if (r.ok) return { entries: r.entries, source: "file", truncated: false, more: r.hasMore };
+      log.info("history file read fell back to branch_req", { agentKey, reason: r.reason });
+    }
+    const agent = await loadFromAgent(agentKey, leafId, remaining);
+    return { ...agent, more: false };
   };
 
   const historyService: HistoryService & { dispose(): void } = {
@@ -653,11 +780,12 @@ export function createHistoryService(deps: {
         const reply = await registry.request<SnapshotReply>(agentKey, { t: "snapshot_req", rid: "" }, remaining());
         const base =
           reply.leafId === null
-            ? { entries: [] as WireEntry[], source: "file" as const, truncated: false }
-            : await loadBranch(
+            ? { entries: [] as WireEntry[], source: "file" as const, truncated: false, more: false }
+            : await loadSnapshotBranch(
                 agentKey,
                 reply.sessionFile ?? registry.get(agentKey)?.session?.sessionFile,
                 reply.leafId,
+                reply,
                 remaining,
               );
         const merged = mergeSnapshot(base.entries, reply, buffer);
@@ -690,7 +818,10 @@ export function createHistoryService(deps: {
               tailMessages: merged.tailMessages,
               fromSeq: merged.fromSeq,
               hasMore:
-                merged.entries.length > entries.length || base.truncated || candidateEntries.length < entries.length,
+                merged.entries.length > entries.length ||
+                base.more ||
+                base.truncated ||
+                candidateEntries.length < entries.length,
               source: base.source,
             };
             // D2-7(c) (web-hub-session-switch plan §2.2 step 4): forward the agent-reported
@@ -719,13 +850,54 @@ export function createHistoryService(deps: {
       const leaf = view.status?.leafId ?? view.session?.leafId ?? null;
       if (leaf === null) return Promise.reject(new HubError("E_NOT_FOUND"));
       return withDeadline(async (remaining) => {
-        const base = await loadBranch(agentKey, view.session?.sessionFile, leaf, remaining);
-        const idx = base.entries.findIndex((e) => e.id === beforeEntryId);
-        if (idx === -1) throw new HubError("E_NOT_FOUND");
-        const start = Math.max(0, idx - lim);
-        const entries = base.entries.slice(start, idx);
+        // refresh-slow plan §3.2: page rides the same reverse reader as snapshot (shared cursor —
+        // the first "Show earlier" after a snapshot is mostly a cache slice). The reader's
+        // collect is exactly page's semantics: on the leaf's branch, strictly before
+        // `beforeEntryId`, up to `lim` entries, byte-capped per entry with the newest kept
+        // unconditionally (same accounting as capEntriesByBytes); buildCappedHistoryPayload
+        // below still verifies the real wire unit.
+        let entries: WireEntry[] | undefined;
+        let more = false;
+        let source: "file" | "agent" = "file";
+        let agentTruncated = false;
+        const file = view.session?.sessionFile;
+        if (file !== undefined) {
+          // 250 ms headroom so the reader's busy — E_BUSY (503, retryable; cursor progress is
+          // kept) — beats the outer E_DEADLINE.
+          const deadlineAt = Date.now() + Math.max(0, remaining() - 250);
+          const r = await branchReader.read(file, leaf, {
+            before: beforeEntryId,
+            limit: lim,
+            maxBytes: MAX_HISTORY_PAYLOAD_BYTES,
+            deadlineAt,
+          });
+          if (r.ok) {
+            entries = r.entries;
+            more = r.hasMore;
+            source = "file";
+          } else if (r.reason === "busy") {
+            throw new HubError("E_BUSY");
+          }
+          // file_missing / leaf_missing / parse_error / too_large → the agent path below. The
+          // reader's leaf_missing here means "the walk terminated (root / file head / truncated
+          // ancestry / cycle) without ever crossing `before`" — either `before` is genuinely not
+          // on this branch, or the file cannot express the full chain; the agent answer (or its
+          // E_NOT_FOUND when `before` is off-branch there too) is the same verdict the full
+          // reader used to reach, at the cost of one extra branch_req round-trip.
+        }
+        if (entries === undefined) {
+          const base = await loadFromAgent(agentKey, leaf, remaining);
+          const idx = base.entries.findIndex((e) => e.id === beforeEntryId);
+          if (idx === -1) throw new HubError("E_NOT_FOUND");
+          const start = Math.max(0, idx - lim);
+          entries = base.entries.slice(start, idx);
+          more = start > 0;
+          source = base.source;
+          agentTruncated = base.truncated;
+        }
+        const pageEntries = entries;
         return buildCappedHistoryPayload(
-          entries,
+          pageEntries,
           MAX_HISTORY_PAYLOAD_BYTES,
           (candidateEntries) => {
             const payload: HistoryPayload = {
@@ -733,8 +905,8 @@ export function createHistoryService(deps: {
               entries: candidateEntries,
               tailMessages: [],
               fromSeq: view.seq + 1,
-              hasMore: start > 0 || base.truncated || candidateEntries.length < entries.length,
-              source: base.source,
+              hasMore: more || agentTruncated || candidateEntries.length < pageEntries.length,
+              source,
             };
             const oldest = candidateEntries[0]?.id;
             if (oldest !== undefined) payload.oldestEntryId = oldest;
@@ -760,6 +932,7 @@ export function createHistoryService(deps: {
 
     dispose() {
       disposed = true;
+      branchReader.dispose();
       unsubscribe();
       for (const st of states.values()) if (st.leafTimer !== undefined) clearTimeout(st.leafTimer);
       states.clear();
