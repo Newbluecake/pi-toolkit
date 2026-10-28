@@ -482,12 +482,25 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   --pill-fg: var(--st-tool);
   --pill-bg: var(--st-tool-soft);
   --tool-ring-base: color-mix(in srgb, var(--st-tool) 35%, var(--c-border));
-  border-color: var(--tool-ring-base);
-}
-
-/* the sweeping ring (`.tool-progress`) replaces the border line while it is rendered */
-.tool[data-st="running"]:has(> .tool-head > .tool-progress) {
+  /* 2026-10-28 贴合修复: ring painted on the border band itself — see the block at
+   * `.tool-progress` below. The border stays 1px wide but transparent, so the band the
+   * gradient shows through IS where the static border line sits (same 1px, same --r-md). */
+  --tool-ring-peak: color-mix(in srgb, var(--st-tool) 72%, var(--tool-ring-base));
   border-color: transparent;
+  background:
+    linear-gradient(var(--c-surface), var(--c-surface)) padding-box,
+    linear-gradient(
+        90deg,
+        var(--tool-ring-base) 0%,
+        var(--tool-ring-base) 32%,
+        var(--tool-ring-peak) 50%,
+        var(--tool-ring-base) 68%,
+        var(--tool-ring-base) 100%
+      )
+      0 0 / 300% 100% border-box;
+  /* candidate A (chosen 2026-10-28): keep the sweep, but 1.6s linear → 2.4s ease-in-out-ish
+   * (band accelerates mid-sweep, dwells at the edges) and a wider, lower-contrast peak. */
+  animation: transcript-ring-sweep 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
 }
 
 .tool[data-st="failed"] {
@@ -788,44 +801,32 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 }
 
 /* 2026-10-09 「进度条希望和 bash 胶囊贴合得更好，不要独立的一条线出现在上边缘下方」: the
- * running indicator IS the card's border now. `.tool[data-st="running"]` hides its own
- * border colour and this overlay paints a 1px ring exactly over the padding-box edge
- * (`.tool`'s overflow:hidden clips to the padding box, so the ring sits where the border
- * line used to be, following the rounded corners), filled with a gradient whose bright band
- * sweeps across — top and bottom edges shimmer, no separate line anywhere. The ring is cut
- * out with the standard two-layer mask (content-box XOR border-box). */
+ * running indicator IS the card's border now. Revised 2026-10-28 (「贴合不好、感觉粗糙」):
+ * the first version painted the ring with a `.tool-progress` overlay at inset:0 — but
+ * `.tool`'s `overflow: hidden` clips children to the PADDING box, so the ring sat 1px INSIDE
+ * the static border band and its corner radius (r-md−1) never matched the border's (r-md);
+ * measured 3 device px of dead space outside the ring at 3× scale. The overlay is gone; the
+ * running card now paints the ring on its own BORDER band with two background layers — the
+ * card surface clipped to `padding-box` over a sweep gradient clipped to `border-box`, under
+ * a transparent 1px border — so the ring's outer edge coincides pixel-for-pixel with the
+ * static border line, rounded corners included, with no dependence on child clipping.
+ * ToolCard.vue still renders the `.tool-progress` span (kept as a hook/test anchor); it must
+ * never lay out — an empty flex item would still cost a `.tool-head` gap. */
 .tool-progress {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  padding: 1px;
-  border-radius: calc(var(--r-md) - 1px);
-  pointer-events: none;
-  background: linear-gradient(
-      90deg,
-      var(--tool-ring-base) 0%,
-      var(--tool-ring-base) 35%,
-      var(--st-tool) 50%,
-      var(--tool-ring-base) 65%,
-      var(--tool-ring-base) 100%
-    )
-    0 0 / 300% 100%;
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#000 0 0) content-box exclude,
-    linear-gradient(#000 0 0);
-  animation: transcript-ring-sweep 1.6s linear infinite;
+  display: none;
 }
 
+/* both background layers must be positioned in every keyframe (list-valued interpolation) */
 @keyframes transcript-ring-sweep {
   from {
-    background-position: 100% 0;
+    background-position:
+      0 0,
+      100% 0;
   }
   to {
-    background-position: 0% 0;
+    background-position:
+      0 0,
+      0% 0;
   }
 }
 
@@ -841,14 +842,16 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .spin,
-  .tool-progress {
+  .spin {
     animation: none;
   }
 
-  /* static ring: the running border tint, no sweep */
-  .tool-progress {
-    background: var(--tool-ring-base);
+  /* static ring: the running border tint on the border band, no sweep */
+  .tool[data-st="running"] {
+    animation: none;
+    background:
+      linear-gradient(var(--c-surface), var(--c-surface)) padding-box,
+      linear-gradient(var(--tool-ring-base), var(--tool-ring-base)) border-box;
   }
 
   .caret {
