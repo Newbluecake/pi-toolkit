@@ -651,6 +651,9 @@ describe("auditWorktreeGraph (merged-plan §3.7: append-only count keys)", () =>
       "mergedUnk",
       "mergedSkip",
       "mergedMs",
+      // wtgraph.files.v1 (phase:"files"): appended after the merged keys — counts/flags only
+      "files",
+      "cached",
     ]);
   });
 

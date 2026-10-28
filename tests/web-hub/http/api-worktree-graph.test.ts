@@ -18,7 +18,12 @@ import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { startHub } from "../../../src/web-hub/hub/hub.js";
 import { createWorktreeGraphRoutes } from "../../../src/web-hub/hub/worktree-graph/routes.js";
 import { denyCtxOf } from "../../../src/web-hub/hub/preview/admit.js";
-import { WTGRAPH_PATH, parseWtGraphPayload } from "../../../src/web-hub/protocol/worktree-graph.js";
+import {
+  WTGRAPH_FILES_PATH,
+  WTGRAPH_PATH,
+  parseWtGraphCommitFiles,
+  parseWtGraphPayload,
+} from "../../../src/web-hub/protocol/worktree-graph.js";
 import { PROTO, WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import type { AgentView, HubEvent, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import type { FrontendDeps, FrontendFactory } from "../../../src/web-hub/hub/ports.js";
@@ -210,6 +215,69 @@ describe("loopback /api/worktree-graph — the §2.6/§3 matrix", () => {
     const payload = JSON.parse(r.body) as { v: number; commits: unknown[] };
     expect(payload.v).toBe(1);
     expect(payload.commits).toHaveLength(1);
+  });
+});
+
+describe("loopback /api/worktree-graph/files — wtgraph.files.v1 over real HTTP", () => {
+  it("dispatches to handleFiles: unserved oid ⇒ 409 before any git; after a graph pull ⇒ 200 parser-clean", async () => {
+    const w = wtgraphRoutes("on");
+    w.fx.runner.setHandler((call) => {
+      const j = call.argv.join(" ");
+      if (j.includes("--git-common-dir")) return okRun("/w/repo/.git\n");
+      if (j.includes("worktree list --porcelain")) return okRun(w.fx.porcelain);
+      if (call.argv.includes("for-each-ref")) return okRun(grStdout([MAIN_REF]));
+      if (call.argv.includes("--date-order")) return okRun(glStdout([{ h: HEAD_SHA1, p: [], an: "a", at: 1, s: "s" }]));
+      if (call.argv.includes("--get-regexp")) return { code: 1, stdout: "", stdoutCapped: false, stderr: "" };
+      if (call.argv.includes("--no-walk"))
+        return okRun(`:000000 100644 ${"0".repeat(40)} ${"0".repeat(40)} A\0new.txt\0` + "2\t0\tnew.txt\0");
+      return { code: 128, stdout: "", stdoutCapped: false, stderr: "unexpected" };
+    });
+    const tmp = makeTmp("pwh-api-wtgf-");
+    const deps = createBaseDeps(tmp.dir);
+    deps.worktreeGraph = w.routes;
+    const fe = createHttpFrontend(deps);
+    const port = (await fe.listen()).port;
+    const cookie = await login(port, deps.paths.tokenFile);
+    cleanups.push(async () => {
+      await fe.close();
+      tmp.cleanup();
+    });
+    const fq = `${WTGRAPH_FILES_PATH}?agentKey=${encodeURIComponent(AGENT)}&sessionId=${encodeURIComponent(SESSION)}&wt=${encodeURIComponent(LINKED)}&h=${HEAD_SHA1}`;
+    const headers = { Cookie: cookie, "X-PWH": "1" };
+    const csrf = await rawRequest(port, { method: "GET", path: fq, headers: { Cookie: cookie } });
+    expect(csrf.status).toBe(403);
+    const stale = await rawRequest(port, { method: "GET", path: fq, headers });
+    expect(stale.status).toBe(409);
+    expect(JSON.parse(stale.body)).toEqual({ error: "E_STALE_CTX", reason: "commit" });
+    expect(w.fx.runner.calls.some((c) => c.argv.includes("--no-walk"))).toBe(false);
+    expect((await rawRequest(port, { method: "GET", path: gq(), headers })).status).toBe(200);
+    const ok = await rawRequest(port, { method: "GET", path: fq, headers });
+    expect(ok.status).toBe(200);
+    expect(ok.headers["cache-control"]).toBe("no-store");
+    expect(parseWtGraphCommitFiles(JSON.parse(ok.body), Buffer.byteLength(ok.body))?.entries).toEqual([
+      { path: "new.txt", status: "A", add: 2, del: 0 },
+    ]);
+  });
+
+  it("a routes object without handleFiles leaves the path on the original fall-through (authed ⇒ 404)", async () => {
+    const tmp = makeTmp("pwh-api-wtgf2-");
+    const deps = createBaseDeps(tmp.dir);
+    const full = wtgraphRoutes("on").routes;
+    deps.worktreeGraph = { mode: full.mode, handle: full.handle, dispose: full.dispose };
+    const fe = createHttpFrontend(deps);
+    const port = (await fe.listen()).port;
+    const cookie = await login(port, deps.paths.tokenFile);
+    cleanups.push(async () => {
+      await fe.close();
+      tmp.cleanup();
+    });
+    const r = await rawRequest(port, {
+      method: "GET",
+      path: `${WTGRAPH_FILES_PATH}?h=${HEAD_SHA1}`,
+      headers: { Cookie: cookie, "X-PWH": "1" },
+    });
+    expect(r.status).toBe(404);
+    expect(r.body).toBe('{"error":"E_NOT_FOUND"}');
   });
 });
 
