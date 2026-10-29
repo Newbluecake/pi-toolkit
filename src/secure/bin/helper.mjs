@@ -4192,11 +4192,19 @@ export function parseStatusUids(text) {
  * ANOTHER uid whose ns link is unreadable (EACCES/EPERM) is skipped — it cannot be one of our
  * members without privileges over our userns; a SAME-uid process whose link is unreadable
  * (ptrace/LSM refusal, non-dumpable) is skipped ONLY when its starttime proves it predates
- * `minStart` (never a member, §3.3) — otherwise the scan is incomplete. `minStart` excludes processes started before
- * the supervisor (never its descendants, §3.3). Members carry {pid,start,ppid,user,comm}.
+ * `minStart` (never a member, §3.3) — otherwise, with `lineage`, it is judged by its ppid chain
+ * (`lineageVerdict` below, r3.2 scan-poison: by P-SP1 a lineage member stays readable to the
+ * ns-outer callers even when non-dumpable, so an unreadable process is OUTSIDE the lineage
+ * unless the walk proves IN; an LSM-refused member with a broken chain is residual R37) and is
+ * reported in `outside` (diagnostics only, the field is omitted when empty); WITHOUT `lineage`
+ * such a process makes the scan incomplete, exactly as before (finalize + legacy tests).
+ * `minStart` excludes processes started before the supervisor (never its descendants, §3.3).
+ * Members carry {pid,start,ppid,user,comm}.
  * `fsImpl` ({readdir, readlink, readFile}) is a test seam. `deniedMeans:"outside"` is reserved for
- * the supervisor's own in-ns finalize (see the inline note). Never returns an empty scan on doubt.
- * → {kind:"done", members} | {kind:"incomplete", reason}
+ * the supervisor's own in-ns finalize (see the inline note). `lineage` ({anchors:[{pid,start}…]})
+ * is reserved for the authoritative ns-OUTER callers (judge / release / outer terminate) and is
+ * never used inside the ns. Never returns an empty scan on doubt.
+ * → {kind:"done", members[, outside]} | {kind:"incomplete", reason}
  */
 export async function scanNsMembers(
   nsMnt,
@@ -4209,6 +4217,7 @@ export async function scanNsMembers(
     uid = process.getuid(),
     fsImpl = fsp,
     deniedMeans = "incomplete",
+    lineage,
   } = {},
 ) {
   const skip = new Set(exclude.map(Number));
@@ -4226,6 +4235,8 @@ export async function scanNsMembers(
     }
     if (names.length > maxEntries) return { kind: "incomplete", reason: `too-many ${names.length}` };
     const hits = [];
+    const deferred = []; // r3.2: same-uid unreadable processes awaiting the ppid-lineage walk
+    const outside = []; // r3.2: judged OUT — diagnostics only
     for (let i = 0; i < names.length; i += 64) {
       if (Date.now() >= deadline) return TIMEOUT;
       const batch = names.slice(i, i + 64);
@@ -4255,12 +4266,29 @@ export async function scanNsMembers(
           if (denied && deniedMeans === "outside") continue;
           if (denied && minStart !== undefined) {
             // Same uid but unreadable (non-dumpable: sd-pam, sshd session, setuid helpers…). Its
-            // starttime is world-readable: one that started BEFORE the supervisor can never be a
-            // counted member (§3.3), so it is safely skipped; anything newer ⇒ incomplete.
+            // starttime is world-readable (P-SP3): one that started BEFORE the supervisor can
+            // never be a counted member (§3.3), so it is safely skipped; anything newer is either
+            // deferred to the lineage walk (`lineage`, r3.2) or fails the scan (fail closed).
             const stR = await settle(fsImpl.readFile(path.join(procRoot, n, "stat"), "utf8"));
             if (stR.code && GONE_CODES.has(stR.code)) continue;
             const pst = stR.code ? undefined : parseProcStat(stR.value);
             if (pst && pst.start < minStart) continue;
+            if (pst && lineage) {
+              // r3.2 (scan-poison): `lineage` is reserved for the authoritative ns-OUTER callers
+              // (judge / release / outer terminate). P-SP1: an instance-lineage process stays
+              // readable to them even when non-dumpable, so an unreadable same-uid process is
+              // outside the lineage (P-SP2: sshd privileged split, setuid helpers — never
+              // members) or was refused by an LSM; the verdict is the ppid walk after the loop.
+              const commR = await settle(fsImpl.readFile(path.join(procRoot, n, "comm"), "utf8"));
+              deferred.push({
+                pid: Number(n),
+                start: pst.start,
+                ppid: pst.ppid,
+                comm: commR.code ? "?" : commR.value.trim(),
+                code: link.code,
+              });
+              continue;
+            }
             const comm = await settle(fsImpl.readFile(path.join(procRoot, n, "comm"), "utf8"));
             return {
               kind: "incomplete",
@@ -4270,6 +4298,29 @@ export async function scanNsMembers(
           return { kind: "incomplete", reason: `ns ${n} ${link.code}` };
         }
         if (link.value === nsMnt) hits.push(Number(n));
+      }
+    }
+    // r3.2 step 1.5: with every readable same-ns hit collected, judge the deferred unreadable
+    // processes by ppid lineage (`lineageVerdict`). IN ⇒ incomplete — by P-SP1 a lineage member
+    // should have been readable, so stay strict (`… in-lineage`); the walk's own doubt ⇒ the
+    // incomplete verdict as-is (fail closed); OUT ⇒ skipped and listed in `outside` (a process
+    // gone mid-rewalk holds no mount reference and needs no diagnostic). Residual R37: an
+    // LSM-refused lineage member whose ppid chain broke is judged OUT — deletion still requires
+    // the lease first (gocryptfs dead, FUSE gone).
+    if (deferred.length) {
+      const hitPids = new Set(hits); // pid-only compare errs toward IN
+      for (const d of deferred) {
+        const verdict = await lineageVerdict(d, {
+          anchors: lineage.anchors ?? [],
+          hitPids,
+          minStart,
+          procRoot,
+          fsImpl,
+          deadline,
+        });
+        if (verdict.kind === "in") return { kind: "incomplete", reason: `ns ${d.pid} ${d.comm} ${d.code} in-lineage` };
+        if (verdict.kind === "incomplete") return verdict;
+        if (verdict.via !== "gone") outside.push({ pid: d.pid, comm: d.comm });
       }
     }
     const members = [];
@@ -4296,10 +4347,104 @@ export async function scanNsMembers(
         comm: commR.code ? "?" : commR.value.trim(),
       });
     }
-    return { kind: "done", members };
+    return { kind: "done", members, ...(outside.length ? { outside } : {}) };
   })();
   const r = await deadlineRace(work, deadline).catch((e) => ({ kind: "incomplete", reason: String(e && e.message) }));
   return r === TIMEOUT ? { kind: "incomplete", reason: "timeout" } : r;
+}
+
+/**
+ * r3.2 (scan-poison fix, private-plan §3.3): the recorded pid+start anchors of a record —
+ * `supervisor`, `gocryptfs`, `pi` in that order, absent identities dropped. Pure extraction from
+ * `memberAuthorized` (behaviour unchanged); also the anchor list of every `lineage` scan.
+ */
+export function recordAnchors(rec) {
+  return ["supervisor", "gocryptfs", "pi"].map((k) => rec?.[k]).filter(Boolean);
+}
+
+/**
+ * r3.2 (scan-poison fix, private-plan §3.3): judge an unreadable same-uid process X by its ppid
+ * chain. Kernel premises: P-SP1 — P0 and every ns-outer caller sit in the initial userns and own
+ * `ns.user`, so by the userns owner rule they hold every capability inside the instance's userns
+ * lineage: a lineage member stays readable even when non-dumpable (PR_SET_DUMPABLE=0).
+ * P-SP2 — an unreadable same-uid process therefore has its mm OUTSIDE the lineage (sshd
+ * privileged split, setuid helpers, sd-pam — they can never become members) or was refused by an
+ * LSM. P-SP3 — /proc/<pid>/stat (ppid, starttime) stays world-readable for those processes.
+ * Walk X → ppid → …: hitting a recorded anchor (pid+start) or a readable ns member (pid only —
+ * errs toward IN) ⇒ {kind:"in", via}; an ancestor older than `minStart` or pid 1/0 ⇒
+ * {kind:"out"}; anything unreadable/unparsable/loopy/late ⇒ {kind:"incomplete", reason} (fail
+ * closed). A vanished ancestor, or a parent that started after its child (pid reuse), rewalks
+ * ONCE from X; if X itself is gone by then ⇒ {kind:"out", via:"gone"} — a dead process holds no
+ * mount reference, the same semantics as the main scan's GONE skip (review #3). Z-state
+ * ancestors are walked straight through (stat stays valid, review #4). Successful stat reads are
+ * memoized by pid within this one verdict: the scan window (≤2 s) is far below pid-reuse
+ * timescales (review #5).
+ */
+export async function lineageVerdict(
+  x,
+  {
+    anchors = [],
+    hitPids,
+    minStart,
+    procRoot = "/proc",
+    fsImpl = fsp,
+    deadline = Date.now() + PRIVATE_BUDGET.scanMs,
+    maxHops = 64,
+  } = {},
+) {
+  const memo = new Map();
+  const readStat = async (pid, fresh = false) => {
+    if (!fresh && memo.has(pid)) return memo.get(pid);
+    let text;
+    try {
+      text = await fsImpl.readFile(path.join(procRoot, String(pid), "stat"), "utf8");
+    } catch (e) {
+      const code = (e && e.code) || "EUNKNOWN";
+      return GONE_CODES.has(code) ? { gone: true } : { error: true, code };
+    }
+    const st = parseProcStat(text);
+    if (!st || !Number.isSafeInteger(st.ppid)) return { error: true, code: "unparsable" };
+    const r = { start: st.start, ppid: st.ppid };
+    memo.set(pid, r);
+    return r;
+  };
+  const isAnchor = (p) => anchors.some((a) => a?.pid === p.pid && a?.start === p.start);
+  for (let pass = 0; ; pass++) {
+    if (Date.now() >= deadline) return { kind: "incomplete", reason: "timeout" };
+    let cur;
+    if (pass === 0) cur = { pid: x.pid, start: x.start, ppid: x.ppid };
+    else {
+      // rewalk: X must still exist — a process that died mid-scan holds no mount reference
+      const again = await readStat(x.pid, true);
+      if (again.gone) return { kind: "out", via: "gone" };
+      if (again.error) return { kind: "incomplete", reason: `lineage ${x.pid} ${again.code}` };
+      cur = { pid: x.pid, start: again.start, ppid: again.ppid };
+    }
+    let rewalk = false;
+    for (let hops = 0; hops < maxHops; hops++) {
+      if (isAnchor(cur)) return { kind: "in", via: "anchor" };
+      if (hitPids?.has(cur.pid)) return { kind: "in", via: `member ${cur.pid}` };
+      if (cur.start < minStart) return { kind: "out" };
+      if (!Number.isSafeInteger(cur.ppid) || cur.ppid < 2) return { kind: "out" };
+      if (Date.now() >= deadline) return { kind: "incomplete", reason: "timeout" };
+      const p = await readStat(cur.ppid);
+      if (p.gone) {
+        // the ancestor vanished mid-walk: one rewalk from X, then fail closed
+        if (pass > 0) return { kind: "incomplete", reason: "lineage race" };
+        rewalk = true;
+        break;
+      }
+      if (p.error) return { kind: "incomplete", reason: `lineage ${cur.ppid} ${p.code}` };
+      if (p.start > cur.start) {
+        // a parent never starts after its child ⇒ the pid was reused: one rewalk, then fail closed
+        if (pass > 0) return { kind: "incomplete", reason: `lineage ${cur.ppid} reuse` };
+        rewalk = true;
+        break;
+      }
+      cur = { pid: cur.ppid, start: p.start, ppid: p.ppid };
+    }
+    if (!rewalk) return { kind: "incomplete", reason: "lineage depth" };
+  }
 }
 
 /**
@@ -4316,7 +4461,7 @@ export function memberAuthorized(rec, m, { chain, bootId } = {}) {
   const users = [rec.ns.user, rec.ns.innerUser].filter(Boolean);
   if (!users.includes(m.user)) return false;
   if (m.start < rec.supervisor.start) return false;
-  const anchors = ["supervisor", "gocryptfs", "pi"].map((k) => rec[k]).filter(Boolean);
+  const anchors = recordAnchors(rec);
   const isAnchor = (p) => anchors.some((a) => a.pid === p.pid && a.start === p.start);
   let cur = { pid: m.pid, start: m.start, ppid: m.ppid };
   for (let hops = 0; hops < 64 && cur; hops++) {
@@ -4397,8 +4542,9 @@ export function judgePrivateInstance(f) {
   return { state: "unknown", reason: "unclassified" };
 }
 
-/** Gather facts (all async, each ≤2 s) and judge. Never throws. */
-export async function privateInstanceState(v, { procRoot = "/proc", deadline, record: given, readFile } = {}) {
+/** Gather facts (all async, each ≤2 s) and judge. Never throws. `fsImpl` is a test seam for
+ * injecting /proc read faults into the ns scan (the `readFile` seam only covers identity reads). */
+export async function privateInstanceState(v, { procRoot = "/proc", deadline, record: given, readFile, fsImpl } = {}) {
   const idOpts = readFile ? { procRoot, readFile } : { procRoot }; // `readFile`: tests inject read faults
   const dl = () => deadline ?? Date.now() + PRIVATE_BUDGET.scanMs;
   const record = given ?? (await readPrivateRecord(v, { deadline: dl() }));
@@ -4418,7 +4564,14 @@ export async function privateInstanceState(v, { procRoot = "/proc", deadline, re
     // review N4-r2 #1: the supervisor is three-state; "unknown" counts as alive (session, never
     // orphan/orphan-ns, nothing signalled) and makes lock refuse
     supervisorState = rec.supervisor ? await identityState(rec.supervisor, idOpts) : "dead";
-    if (rec.ns) scan = await scanNsMembers(rec.ns.mnt, { procRoot, deadline: dl(), minStart: rec.supervisor?.start });
+    if (rec.ns)
+      scan = await scanNsMembers(rec.ns.mnt, {
+        procRoot,
+        deadline: dl(),
+        minStart: rec.supervisor?.start,
+        ...(fsImpl ? { fsImpl } : {}),
+        lineage: { anchors: recordAnchors(rec) },
+      });
     // a later scan that SEES the recorded P1 alive overrides any earlier negative reading
     const sup = rec.supervisor;
     if (sup && scan?.kind === "done" && scan.members.some((m) => m.pid === sup.pid && m.start === sup.start))
@@ -4928,6 +5081,7 @@ export async function terminateInstance(
         minStart,
         ...(uid !== undefined ? { uid } : {}),
         ...(fsImpl ? { fsImpl } : {}),
+        lineage: { anchors: recordAnchors(rec) },
       });
       if (s.kind !== "done") return { incomplete: s.reason, set };
       // Review N1 #2: only PROVEN members (memberAuthorized) enter the termination set.

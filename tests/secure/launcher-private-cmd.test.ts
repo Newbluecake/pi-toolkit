@@ -959,9 +959,11 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
     await untilPhase(e, "session");
     const piPid = recordOf(e).pi.pid;
     // #69: `lock --kill` first judges the instance via a /proc scan that FAILS CLOSED (76
-    // scan-incomplete) when a same-uid non-dumpable process (e.g. a transient setuid fusermount3
-    // from a concurrent suite) is mid-flight — correct product behaviour on a busy machine, not a
-    // kill-path failure. A refused attempt signals nothing, so a bounded retry is safe.
+    // scan-incomplete) when a same-uid non-dumpable process turns out to be INSIDE the instance
+    // lineage (r3.2 lineage rule: lineage-EXTERNAL ones — a concurrent suite's transient
+    // setuid fusermount3, an ssh session — are judged OUT and skipped) — correct product
+    // behaviour on a busy machine, not a kill-path failure. A refused attempt signals nothing,
+    // so a bounded retry is safe.
     let k: ReturnType<typeof plain> | undefined;
     for (let attempt = 0; attempt < 10; attempt++) {
       const t0 = Date.now();

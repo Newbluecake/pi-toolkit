@@ -64,6 +64,7 @@ import {
   readPrivateRecordSync,
   readProcStartSync,
   readTextOr,
+  recordAnchors,
   releaseRecord,
   releaseRecordHoldingMountLock,
   relocateInNs,
@@ -134,6 +135,7 @@ export async function cmdPrivateRelease(name, instanceId) {
     const s = await scanNsMembers(rec.ns.mnt, {
       deadline: Date.now() + PRIVATE_BUDGET.scanMs,
       minStart: rec.supervisor?.start,
+      lineage: { anchors: recordAnchors(rec) },
     });
     if (s.kind !== "done") {
       out(JSON.stringify({ ok: false, incomplete: s.reason }));
