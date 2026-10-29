@@ -18,7 +18,8 @@ auto-backgrounding + `bash_job`, context-handoff tools (`switch_context` / `comp
 The whole point is **zero-hang guarantees**: layered deadlines (watchdog sub-phases + total budget), an
 escalating reaper for orphans, persistent acknowledgeable delivery. Preserve these when editing.
 
-Renamed `pi-subagent` → `pi-toolkit` (2026-09): runtime identifiers keep the old name on purpose (rule I7).
+Renamed `pi-subagent` → `pi-toolkit` (2026-09): runtime identifiers keep the old name on purpose (rule I7) —
+Do NOT "finish the rename" inside `src/`.
 The eight merged plugins (HUD, web_search, todo, ask_user, Feishu notify, session-nav, memory, traffic)
 and their pre/post-guard registration are covered by I3; full text: `docs/dev/plugin-merge/README.md`.
 
@@ -195,14 +196,15 @@ never by skipping.
 Releases are cut by `scripts/release/release.sh <version>`, and only when the user explicitly asks.
 The script enforces the mechanics; the rules it cannot enforce:
 
-- **Branch strategy (铁律)**: day-to-day on `dev`. **patch** ⇒ cut directly on `dev`. **minor/major** ⇒
-  PR `dev`→`master` first, then cut on `master` (forbidden on `dev`); afterwards sync dev
+- **Branch strategy (铁律)**: day-to-day on `dev`. A **patch** release is cut directly on `dev`. A **minor/major**
+  release first goes through a PR `dev`→`master`, then is cut on `master`; releasing minor/major on `dev` is forbidden.
+  Afterwards sync dev
   (`git switch dev && git merge --ff-only master`). The tag must be on the release branch's ancestor
   chain (the script checks). Consequence: `pi install git:` users on the default branch get patches only
   at the next minor. Transition rule: while no `dev` exists anywhere, a patch from `master` is allowed
   with a WARN — create dev afterwards.
 - **Version bump**: default **patch** (fix/refactor/perf/chore/docs/test/ci always are); **minor** only
-  with ≥50 `feat` commits since the latest `vX.Y.0` (patch tags don't reset the count); **major** only on
+  after at least 50 `feat` commits since the latest `vX.Y.0` (patch tags don't reset the count); **major** only on
   BREAKING CHANGE (`!:` or footer). When unsure: patch.
 - **CHANGELOG is generated, never hand-edited** — commit subjects/bodies ARE the changelog; write them
   for users. To change the output, change the script.
