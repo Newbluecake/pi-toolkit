@@ -6,7 +6,7 @@
 import { describe, expect, test } from "vitest";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { wireTodo } from "../../src/todo/index.js";
-import { STATE_ENTRY, type TodoState } from "../../src/todo/state.js";
+import { replayState, STATE_ENTRY, type TodoState } from "../../src/todo/state.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyTool = ToolDefinition<any, any, any>;
@@ -79,6 +79,16 @@ async function exec(host: Host, name: string, params: unknown, ctx: ExtensionCon
   return (await tool(host, name).execute("call-1", params, undefined, undefined, ctx)) as ToolResult;
 }
 
+/** Branch view over the given appended entries — the replay source for restore(). */
+function toBranch(entries: { customType: string; data: unknown }[]): unknown[] {
+  return entries.map(({ customType, data }) => ({ type: "custom", customType, data }));
+}
+
+/** Branch view over everything persist() appended so far — the replay source for restore(). */
+function branchOf(host: Host): unknown[] {
+  return toBranch(host.appended);
+}
+
 describe("wireTodo tools", () => {
   test("registers the five Task* tools, /tasklist, and the session hooks", () => {
     const host = fakePi();
@@ -116,7 +126,10 @@ describe("wireTodo tools", () => {
     const deleted = await exec(host, "TaskDelete", { taskId: "1" }, ctx);
     expect(deleted.details.action).toBe("delete");
     expect(deleted.details.task.subject).toBe("A");
-    expect(deleted.details.state.tasks).toHaveLength(0);
+    // Quick win ① (todo-archive-split §2.3): details no longer embed the state snapshot;
+    // the task count is asserted through the replay path instead.
+    expect(deleted.details.state).toBeUndefined();
+    expect(replayState(branchOf(host))?.tasks).toHaveLength(0);
     expect(host.appended).toHaveLength(3);
     // Widget cleared after the last task is deleted (tui ctx).
     expect(host.widgetCalls.at(-1)).toEqual({ key: "claude-code-todo", content: undefined });
@@ -158,10 +171,13 @@ describe("wireTodo tools", () => {
     ]);
     expect(first.details.task.id).toBe(1);
     expect(second.details.task.id).toBe(2);
-    expect(second.details.state.tasks).toHaveLength(2);
+    // Quick win ①: no embedded state; the task count comes from the persisted snapshots.
+    expect(second.details.state).toBeUndefined();
     expect(host.appended).toHaveLength(2);
     // Each persist carries a full snapshot; the second one sees both tasks.
-    const snapshots = host.appended.map((entry) => (entry.data as TodoState).tasks.length);
+    const snapshots = host.appended
+      .filter((entry) => entry.customType === STATE_ENTRY)
+      .map((entry) => (entry.data as TodoState).tasks.length);
     expect(snapshots).toEqual([1, 2]);
   });
 
@@ -354,11 +370,6 @@ describe("wireTodo tools", () => {
 // ── todo-archive (plan §3): TaskList folding, auto-archive wiring, clear high-water ──
 
 describe("wireTodo todo-archive", () => {
-  /** Branch view over everything persist() appended so far — the replay source for restore(). */
-  function branchOf(host: Host): unknown[] {
-    return host.appended.map(({ customType, data }) => ({ type: "custom", customType, data }));
-  }
-
   describe("TaskList folding (D3)", () => {
     test("only open tasks ⇒ byte-identical to the pre-archive full output", async () => {
       const host = fakePi();
@@ -686,5 +697,83 @@ describe("wireTodo todo-archive", () => {
       await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
       expect(host.widgetCalls.at(-1)).toEqual({ key: "claude-code-todo", content: undefined });
     });
+  });
+});
+
+// ── todo-archive-split plan §7 (package 1, quick win ②): live-snapshot dedup ──
+// persist() skips a write when the snapshot content is byte-identical to the last one
+// written. The `liveKey` baseline lives in the wireTodo closure and is reset to undefined
+// by restore() at every session boundary (session_start/session_tree/session_compact) —
+// without that reset, a navigateTree rollback followed by re-deriving identical content
+// would skip the write and resurrect deleted tasks on replay (review Major #2).
+
+describe("wireTodo live-snapshot dedup (todo-archive-split quick win ②)", () => {
+  test("byte-identical snapshots are not re-written (double /tasklist clear)", async () => {
+    const host = fakePi();
+    wireTodo(host.pi);
+    const ctx = fakeCtx(host);
+    const command = host.commands.get("tasklist");
+    // Empty list: the first clear still writes (fresh baseline).
+    await command?.handler("clear", ctx);
+    expect(host.appended).toHaveLength(1);
+    // Identical content {tasks:[],nextId:1} ⇒ the second clear writes nothing.
+    await command?.handler("clear", ctx);
+    expect(host.appended).toHaveLength(1);
+    expect(replayState(branchOf(host))?.tasks).toHaveLength(0);
+  });
+
+  test("the first persist after a session boundary always writes (baseline reset)", async () => {
+    const host = fakePi();
+    wireTodo(host.pi);
+    const ctx = fakeCtx(host);
+    const command = host.commands.get("tasklist");
+    await command?.handler("clear", ctx); // arms the dedup key
+    await command?.handler("clear", ctx); // skipped
+    expect(host.appended).toHaveLength(1);
+
+    // restore() replays the very same empty snapshot but must reset the dedup key —
+    // a persist of identical content afterwards has to write anyway.
+    await host.handlers.get("session_start")?.({}, fakeCtx(host, "tui", branchOf(host)));
+    await command?.handler("clear", ctx);
+    expect(host.appended).toHaveLength(2);
+  });
+
+  test("regression (review Major #2): rollback to a leaf, re-delete writes — no resurrect on replay", async () => {
+    const host = fakePi();
+    wireTodo(host.pi);
+    const ctx = fakeCtx(host);
+    await exec(host, "TaskCreate", { subject: "A", description: "do A" }, ctx); // S1: #1 exists
+    await exec(host, "TaskDelete", { taskId: "1" }, ctx); // S0: empty (content-equal to the re-delete below)
+    expect(host.appended).toHaveLength(2);
+
+    // navigateTree back to the leaf that still contains A: the branch is truncated to
+    // [S1] and session_tree re-restores from it.
+    const rolledBack = branchOf(host).slice(0, 1);
+    await host.handlers.get("session_tree")?.({}, fakeCtx(host, "tui", rolledBack));
+    // Sanity: the rollback leaf really restored A.
+    const got = await exec(host, "TaskGet", { taskId: "1" }, ctx);
+    expect(got.content[0]?.text).toContain("#1");
+
+    // Deleting A again re-derives a snapshot byte-identical to S0. If the dedup key had
+    // survived the rollback, this write would be skipped and the branch's last valid
+    // candidate would stay S1 — replay would resurrect the deleted task.
+    await exec(host, "TaskDelete", { taskId: "1" }, ctx);
+    expect(host.appended).toHaveLength(3);
+
+    // The post-rollback branch is [S1, S0'] — replay must see the deletion.
+    const replayed = replayState(toBranch([host.appended[0]!, host.appended[2]!]));
+    expect(replayed?.tasks).toHaveLength(0);
+  });
+
+  test("dedup never skips a changed snapshot (create/update/delete chain all write)", async () => {
+    const host = fakePi();
+    wireTodo(host.pi);
+    const ctx = fakeCtx(host);
+    await exec(host, "TaskCreate", { subject: "A", description: "do A" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "1", status: "in_progress" }, ctx);
+    await exec(host, "TaskCreate", { subject: "B", description: "do B" }, ctx);
+    await exec(host, "TaskDelete", { taskId: "1" }, ctx);
+    expect(host.appended).toHaveLength(4); // every persist saw different content
+    expect(replayState(branchOf(host))?.tasks.map((task) => task.id)).toEqual([2]);
   });
 });

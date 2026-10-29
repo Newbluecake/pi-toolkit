@@ -19,6 +19,14 @@
 // (state.ts), LEGACY_STATUS_KEY "claude-code-todo-status", widget key
 // "claude-code-todo", command `/tasklist`.
 //
+// todo-archive-split plan §2.3/§7 (package 1, quick wins): Task* tool results no
+// longer embed a full state snapshot under `details.state` (replayState in state.ts
+// keeps reading that historical shape so old sessions still load), and persist()
+// skips a live snapshot whose content is byte-identical to the last written one —
+// keyed by the closure-scoped `liveKey` below, which restore() always resets
+// (session_start/session_tree/session_compact), so a branch rollback can never
+// leave a stale last-valid-candidate behind (review Major #2).
+//
 // todo-nudge (L1 feature, opt-in via `deps`): a main-session-only staleness
 // tracker piggybacked on the same closure. `deps` defaults to `{}` so every
 // existing `wireTodo(pi)` call keeps registering zero extra handlers — the
@@ -127,7 +135,6 @@ type TaskDeleteInput = Static<typeof TaskDeleteSchema>;
 type Action = "create" | "list" | "get" | "update" | "delete";
 type ToolDetails = {
   action: Action;
-  state: TodoState;
   task?: Task | undefined;
   changed?: boolean | undefined;
   error?: string | undefined;
@@ -191,6 +198,11 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
   let state = emptyState();
   let currentUI: ExtensionUIContext | undefined;
   let queue: Promise<void> = Promise.resolve();
+  // todo-archive-split §2.3/§7 (quick win ②): JSON content key of the last live snapshot
+  // actually written by persist(). Undefined until the first write and always reset by
+  // restore() (comment there) — comparing it against the freshly built key is what turns a
+  // byte-identical persist into a no-op. Closure-scoped per I4 (no module-scope state).
+  let liveKey: string | undefined;
   // Mount-once + update-in-place (same pattern as FleetWidgetController in
   // src/ui/fleet-widget.ts): `mountedWidget` tracks whether WIDGET_KEY is
   // currently registered so an ordinary task-list change only triggers a
@@ -259,6 +271,14 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     // degrade to an empty replay instead of throwing (repo convention:
     // graceful degradation on missing host APIs).
     const branch = typeof ctx.sessionManager?.getBranch === "function" ? ctx.sessionManager.getBranch() : [];
+    // todo-archive-split quick win ② (review Major #2): the dedup key restarts at EVERY
+    // session boundary — session_start/session_tree/session_compact all land here, so the
+    // first persist after restore always writes. Without the reset, navigateTree back to
+    // an earlier leaf followed by a change that re-derives byte-identical snapshot content
+    // (e.g. delete A after rolling back to a leaf that still contains A) would skip the
+    // write and leave the pre-rollback snapshot as the branch's last valid candidate —
+    // replay would resurrect the deleted task.
+    liveKey = undefined;
     commit(replayState(branch) ?? emptyState());
     // todo-archive §2: after replay the completion ages restart — register every currently
     // "completed and not archived" task at the CURRENT turnSeq (re-count from here).
@@ -270,7 +290,14 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
   };
 
   const persist = (): void => {
-    pi.appendEntry(STATE_ENTRY, cloneState(state));
+    // todo-archive-split quick win ②: skip appendEntry when the live snapshot content is
+    // unchanged since the last write. The key is armed only AFTER a successful append, so
+    // a throwing appendEntry simply retries on the next persist.
+    const snapshot = cloneState(state);
+    const key = JSON.stringify(snapshot);
+    if (key === liveKey) return;
+    pi.appendEntry(STATE_ENTRY, snapshot);
+    liveKey = key;
   };
 
   const refreshWidget = (ui = currentUI): void => {
@@ -349,7 +376,9 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     extra: Partial<ToolDetails> = {},
   ): { content: [{ type: "text"; text: string }]; details: ToolDetails } => ({
     content: [{ type: "text", text: formatToolText(action, state, extra.task, extra.changed) }],
-    details: { action, state: cloneState(state), ...extra },
+    // Quick win ① (todo-archive-split §2.3): no `state` snapshot in details — the tool
+    // text already carries what the model needs; replay reads the custom STATE_ENTRY.
+    details: { action, ...extra },
   });
 
   const registerMutation = <T extends object>(
@@ -389,7 +418,8 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
           notifyUnblocked(ctx, result.unblocked);
           return {
             content: [{ type: "text" as const, text }],
-            details: { action, state: cloneState(state), ...result },
+            // Quick win ① (todo-archive-split §2.3): no `state` snapshot in details.
+            details: { action, ...result },
           };
         });
       },
