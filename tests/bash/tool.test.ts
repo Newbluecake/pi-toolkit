@@ -371,7 +371,12 @@ describe("bash override tool — T1 built-in golden equivalence", () => {
       }
       const overrideResult = await overrideRun;
 
-      expect(overrideResult).toEqual(builtinResult);
+      // wall_time_seconds is real wall-clock on the override side but a fixed 0 in
+      // the fake-ops built-in model — it flakes on slow boxes (CI saw 0.1). Timing is
+      // not what the golden equivalence pins, so normalise it out of the comparison.
+      const stripWallTime = (r: unknown): unknown =>
+        JSON.parse(JSON.stringify(r, (k, v: unknown) => (k === "wall_time_seconds" ? 0 : v)));
+      expect(stripWallTime(overrideResult)).toEqual(stripWallTime(builtinResult));
     });
   }
 });
