@@ -7,32 +7,20 @@ Guidance for AI coding agents working in this repository.
 ## What this is
 
 `pi-toolkit` (formerly `pi-subagent`) — a toolbox extension for [pi](https://github.com/earendil-works/pi)
-(the `@earendil-works/pi-coding-agent` CLI) whose flagship is an anti-hang subagent system: a drop-in
-replacement for the core of `@tintinweb/pi-subagents`: it provides the `Agent` / `get_run_result` / `steer_subagent` /
-`abort_subagent` tools (the main-session `Agent` is background-only — every call returns a run_id and completion is
-notified; only the nested `Agent` injected into a child keeps the blocking default, see
-`docs/dev/agent-background-only/plan.md`), the `SubagentWorkflow` orchestration tool (also background-only: returns a
-`wf_…` id, notifies on terminal state, managed through `get_run_result` / `abort_subagent` — see
-`docs/dev/workflow-background/plan.md`), the `/agent` command, a live
-fleet widget (agent tree), a notification delivery subsystem, and session-aware scheduled tasks (`src/schedule/`). Beyond that
-core it optionally (settings-gated) overrides pi's built-in `bash` with auto-backgrounding plus
-a `bash_job` manager tool, provides `switch_context` / `compact_context` / `set_compact_threshold`
-for model-authored context handoff, manual and threshold-triggered compaction, and implements the
-message fabric (`message_agent`, fire-and-forget inter-agent messaging routed along the agent tree).
+(the `@earendil-works/pi-coding-agent` CLI). Flagship: an anti-hang subagent system (drop-in replacement
+for the core of `@tintinweb/pi-subagents`) — the `Agent` / `get_run_result` / `steer_subagent` /
+`abort_subagent` tools and the `SubagentWorkflow` orchestrator are all background-only in the main session
+(dispatch returns an id, completion is notified). Around that core: the `/agent` command, a live fleet
+widget, notification delivery, scheduled tasks (`src/schedule/`), an optional bash override with
+auto-backgrounding + `bash_job`, context-handoff tools (`switch_context` / `compact_context` /
+`set_compact_threshold`), and the message fabric (`message_agent`, inter-agent messaging along the tree).
 
-The whole point of the project is **zero-hang guarantees**: every run has layered deadlines
-(watchdog sub-phase budgets + total budget), an escalating reaper for orphans, and persistent,
-acknowledgeable delivery of results. Preserve these invariants when editing.
+The whole point is **zero-hang guarantees**: layered deadlines (watchdog sub-phases + total budget), an
+escalating reaper for orphans, persistent acknowledgeable delivery. Preserve these when editing.
 
-Renamed `pi-subagent` → `pi-toolkit` (2026-09): runtime identifiers keep the old name on purpose —
-`Symbol.for("pi-subagent:*")` host guards, `subagent:*` customTypes/event channels, widget/status
-keys and the `[pi-subagent]` log prefix all carry existing session data and cross-module contracts.
-The settings file moved to `~/.pi/agent/pi-toolkit.json` (#54, and it follows `PI_CODING_AGENT_DIR`
-with a home fallback): legacy `pi-subagent.json` survives only as a read fallback / compatibility
-symlink, and the lock file keeps its fixed name `.pi-subagent.json.lock` so old and new
-plugins/launchers contend on one lock. Do NOT "finish the rename" inside `src/`.
-
-The eight merged plugins (HUD, web_search, todo, ask_user, Feishu notify, session-nav, memory, traffic) and their pre/post-guard registration are summarised in invariant I3; full text: `docs/dev/plugin-merge/README.md`.
+Renamed `pi-subagent` → `pi-toolkit` (2026-09): runtime identifiers keep the old name on purpose (rule I7).
+The eight merged plugins (HUD, web_search, todo, ask_user, Feishu notify, session-nav, memory, traffic)
+and their pre/post-guard registration are covered by I3; full text: `docs/dev/plugin-merge/README.md`.
 
 ## Commands
 
@@ -60,7 +48,7 @@ Each holds for every task; details and the evidence live in the README of the su
 - **I4 no module-scope mutable state**: `/reload` re-activates in the same process without busting the module cache. Cross-activation sharing only via `Symbol.for("pi-subagent:*")` globals with stated capacity/TTL.
 - **I5 `unref()` every timer** (a ref'd timer wedges `pi -p`).
 - **I6 child sessions stay inert**; child extensions are discovered only from settings.json (use `pi install`, never `-e`).
-- **I7 runtime old names stay**: the settings file became `pi-toolkit.json` in #54 — legacy `pi-subagent.json` stays only a read fallback / compat symlink, and the settings lock keeps its fixed name `.pi-subagent.json.lock`. Everything else never moves: `Symbol.for("pi-subagent:*")`, `subagent:*` customTypes/events, widget/status keys, `[pi-subagent]` log prefix. Never "finish the rename" in `src/`.
+- **I7 runtime old names stay**: the settings file became `pi-toolkit.json` in #54 (it follows `PI_CODING_AGENT_DIR`, with a home fallback) — legacy `pi-subagent.json` stays only a read fallback / compat symlink, and the settings lock keeps its fixed name `.pi-subagent.json.lock`. Everything else never moves: `Symbol.for("pi-subagent:*")`, `subagent:*` customTypes/events, widget/status keys, `[pi-subagent]` log prefix. Never "finish the rename" in `src/`.
 - **I8 pi-free boundaries**: `src/core`, `src/prompt-sections`, `src/git` import no pi (`tests/boundary/pi-free.test.ts`); hub/protocol import only `node:*`, typebox and whitelisted files (`tests/web-hub/boundary.test.ts`) — the whitelist only tightens; share code via a mirror copy in `web-hub/protocol/`.
 - **I9 off ⇒ byte-identical**: a settings-gated feature that is off leaves hooks, prompts and output unchanged, proven by the golden files below. Non-live settings need `/reload` (hub side also `/webhub restart`).
 - **I10 append-only wire**: `StatusInfo` open slots, optional frame fields and caps; no PROTO bump; old hub × new agent (and reverse) must stay byte-identical.
@@ -93,15 +81,15 @@ Format: entry — one-line role | README to read first and when. `src/*` rows wi
 <!-- prettier-ignore -->
 | 条目 | 必读 README · 何时读 |
 | --- | --- |
-| `index.ts` — package-root entry **for pi** (the sole `pi.extensions` manifest target). pi loads extensions through jiti (runtime TypeScript), so git installs need no build step. Thin re-export of `./src/index.js` (jiti maps the `.js` suffix to the `.ts` file). Keep it thin. | — |
-| `index.js` — companion entry for plain Node consumers, re-exporting `./dist/index.js` (package.json `main`/`exports`). Not used by pi. | — |
-| `skills/` — agent skills shipped with the package (`pi.skills` in package.json; also in npm `files`): `dev-flow` (dev workflow lanes, model routing, parallel dispatch) and `agent-handoff` (structured handoffs and asking the parent via `message_agent`, backed by `docs/dev/fabric-v2` experiments). They are the source of truth — do not keep a second copy under `~/.agents/skills/` (pi keeps the first skill of a name and warns on collisions). Tool mechanics belong in tool/parameter descriptions; skills carry strategy, evidence and costs. | — · 改 skill 前先读 `skills/*/SKILL.md` 自身 |
-| `src/index.ts` — **assembly only** (invariant I7): register tools/commands/hooks once per `activate()`, own the HOST_KEY host-claim guard, rebuild the session stack on every `session_start`. No logic lives here. | — |
-| `src/stack.ts` — the per-session stack builder (`buildSessionStack`): constructs stores/services/watchdog/reaper/scheduler/widget from `ExtensionContext`. Teardown is `Stack.dispose({kind:"shutdown"|"defensive"|"rebuild-handoff"}, env)` + `Stack.disposeXsSync()`; the three ordered step lists (and the known `GAP-Gn` holes) live in `src/stack-teardown.ts`, the previous build's components in the single module-level `previousParts`. | `docs/dev/subagent-core/README.md`（Stack teardown 一节）· 动任何 dispose/shutdown/reload 清理前；顺序由 `tests/integration/stack-teardown-matrix.test.ts` 钉住 |
+| `index.ts` — package-root entry **for pi** (sole `pi.extensions` target). pi loads TS source via jiti, so git installs need no build; thin re-export of `./src/index.js`. Keep it thin. | — |
+| `index.js` — plain-Node entry re-exporting `./dist/index.js` (`main`/`exports`); pi never reads it. | — |
+| `skills/` — shipped skills (`pi.skills`): `dev-flow` (lanes/model routing) and `agent-handoff` (structured handoffs via `message_agent`). The only copy — never duplicate under `~/.agents/skills/`. Tool mechanics belong in tool descriptions; skills carry strategy. | — · 改 skill 前先读 `skills/*/SKILL.md` 自身 |
+| `src/index.ts` — **assembly only** (I2): register once per `activate()`, own the HOST_KEY host-claim guard, rebuild the session stack on `session_start`. No logic. | — |
+| `src/stack.ts` — per-session stack builder (`buildSessionStack`) + teardown (`Stack.dispose(kind, env)` + `Stack.disposeXsSync()`; ordered step lists and known `GAP-Gn` holes in `src/stack-teardown.ts`). | `docs/dev/subagent-core/README.md`（Stack teardown 一节）· 动任何 dispose/shutdown/reload 清理前；顺序由 `tests/integration/stack-teardown-matrix.test.ts` 钉住 |
 | `src/core/` — pure domain (no pi imports): state machine, deadline budgets (`clampSpanMs`, `createSegmentedClock`), ids, types, worktree-origin registry. | `docs/dev/subagent-core/README.md` · 动 run 状态机/deadline/budget/延长前 |
 | `src/runtime/` — runner, session driver, watchdog, reaper, slot pool, dynamic tool scoping, child-extension-missing diagnostic. | `docs/dev/subagent-core/README.md` · 动 runner/driver/watchdog/reaper 前 |
 | `src/service/` — spawn/query services, run registry, target resolution, spawn admission (pool-full, model registry, `timeoutPolicy`). | `docs/dev/subagent-core/README.md` · 动 spawn 准入/Agent 工具派发前 |
-| `src/child/` — child-session assembly entry point (`wire.ts`'s `wireChildSession`, called from `src/index.ts` pre-guard when `isChildSession`, alongside `wireMemory`/`wireChildBashJobs`): composes `wireChildContextSwitch` + `wireChildKeepalive`, wiring their one cross-cutting signal (a committed boundary switch invalidates the keepalive prefix like a compaction does). Reads only the existing `isChildSession` boolean — does not touch `HOST_KEY`. | `docs/dev/context-switch/README.md`、`docs/dev/cache-ttl-keepalive/README.md` · 动子会话接线前 |
+| `src/child/` — child-session assembly entry (`wireChildSession`, pre-guard when `isChildSession`): composes context-switch + keepalive wiring and their one cross-cutting signal (a committed boundary switch invalidates the keepalive prefix). Reads only `isChildSession`. | `docs/dev/context-switch/README.md`、`docs/dev/cache-ttl-keepalive/README.md` · 动子会话接线前 |
 | `src/ask-user/` — merged interactive `ask_user` tool + TUI/RPC question components; optional web-hub remote port. | `docs/dev/ask-user-async/README.md` · 动 ask_user/远程作答前 |
 | `src/feishu-notify/`, `src/hud/`, `src/web-search/` — merged plugins: Feishu notify cards, HUD footer, `web_search` tool. | `docs/dev/plugin-merge/README.md` · 动这三个插件或判断 pre/post-guard 注册前 |
 | `src/session-nav/` — `/resume-recent`, `/clear`, bare `exit`, resume-list title cleaning; subagent sessions hidden from resume lists. | `docs/dev/web-resume/README.md` · 动 session-nav/web resume 前 |
@@ -130,15 +118,15 @@ Format: entry — one-line role | README to read first and when. `src/*` rows wi
 | `src/secure/` — encrypted session vaults over gocryptfs (`pi-secure` launcher + plugin guards). | `docs/dev/data-encryption/README.md` · 动 secure 或新增读设置/写盘功能前（D8 强制关闭） |
 | `src/traffic/` — provider traffic recording (`node:sqlite`, default off), rewrite rules, web viewer. | `docs/dev/traffic-merge/README.md` · 动 traffic 前 |
 | `src/schedule/` — session-aware scheduled tasks (cron/once; default off). | `docs/dev/scheduled-reports/README.md` · 动 schedule 前（schedule-off golden 勿重生） |
-| `src/reload/` — deferred `/reload` (settings-gated by `reload.defer`): an editor wrapper rewrites exact `/reload` submissions to `/agent reload`, which parks the reload while subagents/workflows are active and fires it (via a followUp `/agent reload fire` message) once the fleet settles; `now` forces, `cancel` cancels. | `docs/dev/deferred-reload/README.md` · 动 deferred reload/派发门/自动继续前 |
-| `src/goal/` — `/goal` objective-driven loop: pure state machine (four phases), text builders, appendEntry session store, `agent_settled` loop hook (until-cmd via `pi.exec`, verifier via `spawnAndWait` + schema, delivery/eval watchdogs), `/goal` command. See `docs/dev/goal/goal-plan.md` (v4 评审修订为最终施工口径). | — |
-| `src/delivery/` — notification outbox: staged → finalize → batched → delivered → consumed, with caller-ack suppression and a coalescer for hold-window merges. | — |
+| `src/reload/` — deferred `/reload` (settings-gated by `reload.defer`): parks the reload while subagents/workflows are active, fires it once the fleet settles; `now` forces, `cancel` cancels. | `docs/dev/deferred-reload/README.md` · 动 deferred reload/派发门/自动继续前 |
+| `src/goal/` — `/goal` objective-driven loop: pure state machine (four phases), session store, `agent_settled` loop hook, `/goal` command. Design: `docs/dev/goal/goal-plan.md`. | — |
+| `src/delivery/` — notification outbox: staged → finalize → batched → delivered → consumed, with caller-ack suppression and hold-window coalescing. | — |
 | `src/workflow/` — `SubagentWorkflow` engine: orchestrator, journal/replay, background registry, `agent()` queue/worktree. | `docs/dev/workflow/README.md` · 动 workflow 前 |
 | `src/adapters/` — pi-facing shims (compat probing, outbox store, run log). | — |
-| `src/tools/`, `src/commands/`, `src/ui/`, `src/mention/`, `src/rpc/`, `src/extensions/` — tool surfaces, `/agent` command (status/settings/costs), fleet widget + TUI settings editor, `@label` mentions, RPC, extension points (worktree isolation). RPC spawn success replies weakly carry `{ runId, label? }`; keep the schema result opaque. | — |
+| `src/tools/`, `src/commands/`, `src/ui/`, `src/mention/`, `src/rpc/`, `src/extensions/` — tool surfaces, `/agent` command (status/settings/costs), fleet widget + TUI settings editor, `@label` mentions, RPC, extension points (worktree). RPC spawn success replies weakly carry `{ runId, label? }`; keep the schema result opaque. | — |
 | `src/date/`, `src/title/`, `src/vendor/` — `[date]` message injection; session-title generation; vendored `qrcodegen`. | —（无专属 README；title 设计见 `docs/dev/title/plan.md`） |
 | `tests/` — mirrors `src/` plus `integration/` and `fixtures/`. | — |
-| `docs/dev/` — per-feature design docs (agent-background-only (supersedes auto-background), workflow-background, workflow-agent-queue (agent() 排队 + workflow 宽限/延长), delivery v2, bash-auto-background, subagent-push/fabric, compact-hint, timeout-notify (宽限+延长), consult (removed in #40; archive only), sysprompt-stable (system prompt 冻结快照 + 唤醒回放), ...); read the matching one before changing that subsystem. Subsystem developer notes live in `docs/dev/<x>/README.md` — see the 必读 column above. | — |
+| `docs/dev/` — per-feature design docs; read the matching one before changing that subsystem. Subsystem developer notes live in `docs/dev/<x>/README.md` — see the 必读 column above. | — |
 | `scripts/release/package.sh` — stage 9 of the git-release flow (zip + sha256 + notes). | — |
 
 ## Conventions
@@ -154,17 +142,13 @@ Format: entry — one-line role | README to read first and when. `src/*` rows wi
   user/model (multi-line advice/warning copy).
 - **Conventional Commits** (`feat|fix|docs|refactor|perf|test|chore|ci(scope): ...`); the
   CHANGELOG is generated from them.
-- Tool parameters use `@sinclair/typebox` schemas. It is host-provided (pi aliases it to its bundled
-  `typebox` at load time), so it lives in `peerDependencies` with a `"*"` range (+ `devDependencies`
-  for local tests) — never in `dependencies`: pi ≥1.0 warns, since an installed copy can bypass the
-  loader's module mapping and duplicate runtime modules. There are no runtime `dependencies`.
+- Tool parameters use `@sinclair/typebox` schemas, host-provided (pi aliases it at load time):
+  `peerDependencies` with a `"*"` range (+ `devDependencies` for local tests) — never in
+  `dependencies` (pi ≥1.0 warns; an installed copy can bypass the loader's module mapping).
+  There are no runtime `dependencies`.
 - Peer dependencies on `@earendil-works/pi-ai` / `pi-coding-agent` / `pi-tui` are pinned to
-  `>=1.0.0 <1.5.0`; bump deliberately and re-check `src/adapters/pi-compat.ts`. Before bumping, run
-  `npm run test:conformance` (real `AgentSession` boundary-draft contract + runtime capability
-  self-check, `tests/conformance/`) — it never gates pi-compat's structural probes (I14), it just
-  tells you ahead of users whether `src/context-switch/capability.ts` still reaches `verified`.
-
-  Full peer-bump procedure: see the **pi peer bump checklist** above (the traffic and cmd-history conformance premises moved to `docs/dev/traffic-merge/README.md` and `docs/dev/web-hub/README.md`).
+  `>=1.0.0 <1.5.0`; bump deliberately and re-check `src/adapters/pi-compat.ts` — full procedure in
+  the **pi peer bump checklist** above.
 
 ## pi-extension specifics (easy to get wrong)
 
@@ -202,42 +186,28 @@ archive,quota,config,boundary,governance}`, every `tests/fixtures/**` golden com
   file alone locally: green ⇒ record as flake and the release may proceed; red ⇒ real bug.
 - **Tier 3 — probes, never in CI** (`npm run probe:mermaid` and friends): run by hand.
 
-A release requires: Tier 1 green on the release commit (local full-suite run inside release.sh
-
-- CI), and every Tier 2 failure resolved by the triage above (rerun-green or
-  local-standalone-green), never by skipping.
+A release requires Tier 1 green on the release commit (the release.sh local full-suite run plus CI)
+and every Tier 2 failure resolved by the triage above (rerun-green or local-standalone-green) —
+never by skipping.
 
 ## Releasing
 
-Releases are cut by `scripts/release/release.sh <version>` (copied from `~/ai/claude2api`'s
-dev/main release flow; `main` there is `master` here), and only when the user explicitly asks for one:
+Releases are cut by `scripts/release/release.sh <version>`, and only when the user explicitly asks.
+The script enforces the mechanics; the rules it cannot enforce:
 
-- **Branch strategy (铁律)**: day-to-day development happens on `dev`. A **patch** release is cut
-  directly on `dev` (release commit + tag on dev, no merge into `master` first). A **minor/major**
-  release must first merge `dev` into `master` via PR, then the release commit + tag are made on
-  `master`; releasing minor/major on `dev` is forbidden. Before releasing, pull the target branch and
-  confirm the commits to release are on it; the tag must be on the release branch's ancestor chain.
-  The script derives the bump kind from the requested version vs the latest tag and enforces this
-  (up-to-date check, ancestor check and push all use the release branch). Consequence: `master` only
-  advances on minor/major, so `pi install git:` users on the default branch get patches only at the
-  next minor. After a minor/major, sync dev (`git switch dev && git merge --ff-only master`) — the
-  script only prints this reminder.
-- **Transition rule**: while neither a local `dev` nor `origin/dev` exists, a patch release from
-  `master` is allowed with a WARN (create dev afterwards: `git switch -c dev && git push -u origin dev`);
-  once dev exists the strict rules above apply.
-
-- **Version bump rule**: default **patch** — fix/refactor/perf/chore/docs/test/ci are always patch;
-  **minor** only after at least 50 `feat` commits accumulated since the latest existing `vX.Y.0` tag
-  (patch tags don't reset the count); **major** only on `BREAKING CHANGE` (`!:` subject or footer).
-  The script prints its suggestion and WARNs on a mismatch. When unsure, choose patch.
-- **CHANGELOG is generated, never hand-edited**: feature/fix commits do not touch `CHANGELOG.md`;
-  the release script builds the version section from the Conventional Commits since the last tag
-  (anything already under `[Unreleased]` is merged in) and updates the compare links. Commit
-  subjects/bodies therefore ARE the changelog — write them for users. Do not hand-edit released
-  sections either; to change the output, change the script.
-- **Flow**: on the release branch (`dev` for patch, `master` for minor/major), clean tree, up to date with `origin/<branch>` ⇒ sync `package.json` /
-  `package-lock.json` ⇒ generate CHANGELOG ⇒ `format:check` → `typecheck` → `build` →
-  `build:web` + `check:web` → `test` (any failure aborts before commit/tag) ⇒ commit
-  `chore(release): bump version to vX.Y.Z` ⇒ annotated tag carrying the section (verified on the branch's ancestor chain) ⇒ push branch + tag ⇒
-  `scripts/release/package.sh` (zips + sha256 + notes) ⇒ `gh release create`. Flags: `--dry-run`,
-  `--changelog`, `--skip-tests` (emergency only), `--skip-push`, `--skip-publish`.
+- **Branch strategy (铁律)**: day-to-day on `dev`. **patch** ⇒ cut directly on `dev`. **minor/major** ⇒
+  PR `dev`→`master` first, then cut on `master` (forbidden on `dev`); afterwards sync dev
+  (`git switch dev && git merge --ff-only master`). The tag must be on the release branch's ancestor
+  chain (the script checks). Consequence: `pi install git:` users on the default branch get patches only
+  at the next minor. Transition rule: while no `dev` exists anywhere, a patch from `master` is allowed
+  with a WARN — create dev afterwards.
+- **Version bump**: default **patch** (fix/refactor/perf/chore/docs/test/ci always are); **minor** only
+  with ≥50 `feat` commits since the latest `vX.Y.0` (patch tags don't reset the count); **major** only on
+  BREAKING CHANGE (`!:` or footer). When unsure: patch.
+- **CHANGELOG is generated, never hand-edited** — commit subjects/bodies ARE the changelog; write them
+  for users. To change the output, change the script.
+- **Flow** (all in the script): clean tree, up to date with `origin/<branch>` ⇒ version sync ⇒ CHANGELOG ⇒
+  `format:check` → `typecheck` → `build` → `build:web` + `check:web` → `test` (failure aborts before
+  commit/tag) ⇒ release commit ⇒ annotated tag ⇒ push branch + tag ⇒ `scripts/release/package.sh` ⇒
+  `gh release create`. Flags: `--dry-run`, `--changelog`, `--skip-tests` (emergency only), `--skip-push`,
+  `--skip-publish`.
