@@ -186,6 +186,27 @@ Vitest. Suites include a state-machine transition matrix and seeded property inv
 when you change the run state machine (`src/core/state-machine.ts`) or delivery lifecycle,
 update the matrix/property tests in lockstep. Integration tests live in `tests/integration/`.
 
+### Test tiers and flake triage (release gate policy)
+
+- **Tier 1 — hard gate, local AND CI must both be green; a failure is always a real bug.**
+  Deterministic, no clock/process/network dependence: `tests/core`, `tests/{delivery,fabric,
+archive,quota,config,boundary,governance}`, every `tests/fixtures/**` golden comparison, and
+  the bulk of `tests/<module>/` unit tests (fake clock / fake port driven), plus format:check /
+  typecheck / build. There is no "flake" at this tier.
+- **Tier 2 — environment-sensitive; a CI red means rerun, not block.** Real child processes
+  (`tests/integration/web-hub-spawn`, `external-droid-chain`, `web-hub-headless`,
+  `bash-crash-recovery`), real mounts (`tests/secure/**` gocryptfs — contends on locks under
+  parallel workers; `PI_TOOLKIT_TEST_WORKERS=2` avoids it), real network/timing (`web-hub-lan`,
+  `cache-keepalive`, `schedule-fault-matrix`), and the self-gating conformance suites. Triage:
+  CI red ⇒ `gh run rerun --failed`; rerun green ⇒ flake, closed. Still red ⇒ run the failing
+  file alone locally: green ⇒ record as flake and the release may proceed; red ⇒ real bug.
+- **Tier 3 — probes, never in CI** (`npm run probe:mermaid` and friends): run by hand.
+
+A release requires: Tier 1 green on the release commit (local full-suite run inside release.sh
+
+- CI), and every Tier 2 failure resolved by the triage above (rerun-green or
+  local-standalone-green), never by skipping.
+
 ## Releasing
 
 Releases are cut by `scripts/release/release.sh <version>` (copied from `~/ai/claude2api`'s
