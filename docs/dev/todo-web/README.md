@@ -7,8 +7,14 @@
 ## src/todo/
 
 `src/todo/` — merged pi-claude-todo: TaskCreate/List/Get/Update/Delete + aboveEditor widget
-(key `claude-code-todo`, coexists with the fleet widget) + `/tasklist`. Persists via the
-`claude-code-todo-state` session entry; registered pre-guard; widget is TUI-only. Completed tasks
+(key `claude-code-todo`, coexists with the fleet widget) + `/tasklist`. Persists via TWO session
+entry kinds (#92, todo-archive-split): the `claude-code-todo-state` live snapshot (narrowed to
+unarchived tasks, `{v:1, nextId, tasks}`) plus incremental `claude-code-todo-archive` packages
+(`{v:1, reset?, put?, drop?}`) for archived tasks — the read-back folds + merges both in
+`replayState`/`replayTodo` (single choke point; cross-storage dependency edges are authoritative
+on the archive side), with a 256-entry eviction cap enforced in sweep. Design:
+`../todo-archive-split/plan.md`, decisions D10–D15 in `../todo-archive/plan.md` §9. Registered
+pre-guard; widget is TUI-only. Completed tasks
 collapse out of the default views and auto-archive (on compaction and after `todo.archive.afterTurns`
 turns; `TaskList includeCompleted:true` lists everything) per `docs/dev/todo-archive/plan.md`. A read-only
 summary also reaches the web hub: `TodoWireResult.getTodoSnapshot()` → `projectTodo`

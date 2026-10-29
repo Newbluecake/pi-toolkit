@@ -27,6 +27,17 @@
 // (session_start/session_tree/session_compact), so a branch rollback can never
 // leave a stale last-valid-candidate behind (review Major #2).
 //
+// todo-archive-split #92 (package 2, separated storage): persistence is now two-tier.
+// Archived tasks are written as incremental `claude-code-todo-archive` packages
+// (ARCHIVE_ENTRY, {v:1, reset?, put?, drop?}) while the live snapshot keeps the
+// STATE_ENTRY string but is narrowed to unarchived tasks (edge-stripped, OD1-c).
+// persist() derives its writes from planPersist() in the fixed order pre → live →
+// post; restore() replays through replayTodo() (fold + merge + validate, D11) and
+// seeds the two baselines. The in-memory state is UNCHANGED — it still contains
+// archived tasks, so UI/projection/TaskGet are untouched. Details:
+// docs/dev/todo-archive-split/plan.md, decisions D10–D15 in
+// docs/dev/todo-archive/plan.md §9.
+//
 // todo-nudge (L1 feature, opt-in via `deps`): a main-session-only staleness
 // tracker piggybacked on the same closure. `deps` defaults to `{}` so every
 // existing `wireTodo(pi)` call keeps registering zero extra handlers — the
@@ -60,25 +71,28 @@ import {
 import {
   activeBlockers,
   archiveCompleted,
+  ARCHIVE_ENTRY,
   clearTasks,
-  cloneState,
   completionTime,
   createTask,
   deleteTask,
   emptyState,
+  evictArchived,
   getTask,
   isArchived,
   newlyUnblockedTasks,
   orderTasks,
   partitionTasks,
-  replayState,
+  replayTodo,
   STATE_ENTRY,
+  TODO_ARCHIVE_CAP,
   type Task,
   type TaskInput,
   type TaskPartition,
   type TodoState,
   updateTask,
 } from "./state.js";
+import { applyArchiveEntryToBase, canonicalKey, planPersist } from "./persist-plan.js";
 
 const LEGACY_STATUS_KEY = "claude-code-todo-status";
 const WIDGET_KEY = "claude-code-todo";
@@ -203,6 +217,13 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
   // restore() (comment there) — comparing it against the freshly built key is what turns a
   // byte-identical persist into a no-op. Closure-scoped per I4 (no module-scope state).
   let liveKey: string | undefined;
+  // todo-archive-split #92 §4.2: archive persistence baseline — id → canonical content key
+  // of what the ARCHIVE_ENTRY fold on disk holds (advanced after each successful append via
+  // applyArchiveEntryToBase, re-seeded by restore). This is what makes persist incremental:
+  // planPersist diffs the in-memory archived tasks against it (put on change, drop on gone,
+  // reset on clear). Only mutated inside persist() (serialized work) and restore() (session
+  // boundaries) — the R6 argument. Empty while degraded: never drop what we could not read.
+  let archiveBase = new Map<number, string>();
   // Mount-once + update-in-place (same pattern as FleetWidgetController in
   // src/ui/fleet-widget.ts): `mountedWidget` tracks whether WIDGET_KEY is
   // currently registered so an ordinary task-list change only triggers a
@@ -279,7 +300,30 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     // write and leave the pre-rollback snapshot as the branch's last valid candidate —
     // replay would resurrect the deleted task.
     liveKey = undefined;
-    commit(replayState(branch) ?? emptyState());
+    // todo-archive-split #92 §4.2: replay through the three-phase reader (fold + merge +
+    // validate) and seed the archive baseline from the fold's ORIGINAL task objects
+    // (pre-tolerant-drop — review Minor #4): keys computed on the pre-drop edges are what
+    // self-heal a dangling on-disk edge with an extra put on the next persist. Copies that
+    // lost to a live snapshot stay in the baseline on purpose — the next persist then emits
+    // a `moved` drop for them (crash-window/reopen self-healing). Degraded (no merge would
+    // validate, review Minor #3): keep an EMPTY baseline and warn — "never actively drop
+    // what we could not read". Two sub-cases share this: (i) the winning candidate is a
+    // live-only split snapshot (archive package missing) — subsequent persists write no
+    // archive data; (ii) the winning candidate is an OLD full snapshot that still contains
+    // archived tasks (written by a pre-#92 extension during a rollback) — the empty baseline
+    // makes the next persist emit a one-shot full put of every archived task (migration,
+    // §4.3 #8; a put is not a drop, so it cannot violate the never-drop rule).
+    const replayed = replayTodo(branch);
+    if (replayed.degraded) {
+      archiveBase = new Map();
+      console.warn(
+        "[pi-subagent] todo archive packages failed validation; degraded to live-only " +
+          "(archived tasks stay on disk and return after the state is fixed)",
+      );
+    } else {
+      archiveBase = new Map([...replayed.archived.entries()].map(([id, task]) => [id, canonicalKey(task)]));
+    }
+    commit(replayed.state ?? emptyState());
     // todo-archive §2: after replay the completion ages restart — register every currently
     // "completed and not archived" task at the CURRENT turnSeq (re-count from here).
     doneSince.clear();
@@ -290,14 +334,27 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
   };
 
   const persist = (): void => {
-    // todo-archive-split quick win ②: skip appendEntry when the live snapshot content is
-    // unchanged since the last write. The key is armed only AFTER a successful append, so
-    // a throwing appendEntry simply retries on the next persist.
-    const snapshot = cloneState(state);
-    const key = JSON.stringify(snapshot);
-    if (key === liveKey) return;
-    pi.appendEntry(STATE_ENTRY, snapshot);
-    liveKey = key;
+    // todo-archive-split #92 §4.2: derive pre → live → post from the two baselines.
+    // Each successful append is applied to its baseline IMMEDIATELY, so a mid-persist
+    // appendEntry failure leaves the baselines at the last written position and the next
+    // persist re-derives and re-writes the remainder (idempotent convergence). persist
+    // runs only inside serialized work (tools via enqueue, sweep/clear via serialize), so
+    // the 2–3 synchronous appends are never interleaved with other entries. persist may
+    // legitimately write nothing (e.g. an archived-task edit changes no live content —
+    // only the pre put fires; a pure no-op change writes zero entries).
+    const plan = planPersist(state, archiveBase, liveKey);
+    if (plan.pre) {
+      pi.appendEntry(ARCHIVE_ENTRY, plan.pre);
+      applyArchiveEntryToBase(archiveBase, plan.pre);
+    }
+    if (plan.live) {
+      pi.appendEntry(STATE_ENTRY, plan.live);
+      liveKey = plan.liveKey;
+    }
+    if (plan.post) {
+      pi.appendEntry(ARCHIVE_ENTRY, plan.post);
+      applyArchiveEntryToBase(archiveBase, plan.post);
+    }
   };
 
   const refreshWidget = (ui = currentUI): void => {
@@ -357,11 +414,15 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     return serialize(work);
   };
 
-  /** todo-archive §2: archive the given completed tasks (or "all"), only inside serialized work.
-   *  Persists exactly once per effective change; failures are contained (warn + keep going). */
+  /** todo-archive §2 + todo-archive-split §6 (D14): archive the given completed tasks (or
+   *  "all") and enforce the TODO_ARCHIVE_CAP eviction in the SAME step — eviction only ever
+   *  runs here (the only place the archived count grows); its drops share the pre package with
+   *  the pruned neighbors' puts (atomic, §4.3 #9). Persists exactly once per effective change
+   *  (archiveCompleted and evictArchived both return the same reference on no change); failures
+   *  are contained (warn + keep going). Only inside serialized work. */
   const sweep = (ids: number[] | "all"): void => {
     try {
-      const next = archiveCompleted(state, ids, Date.now());
+      const next = evictArchived(archiveCompleted(state, ids, Date.now()), TODO_ARCHIVE_CAP);
       if (next === state) return;
       commit(next);
       persist();

@@ -160,7 +160,7 @@
 建议新 issue 的方向：
 
 - 推荐「已归档 task 一次性落 `claude-code-todo-archive` 增量条目，主快照只带 open 与未归档的 completed」。
-- 前提：archiveCompleted 只设置 `archivedAt`，已归档 task 不可变。此前提需在新 issue 里核实：TaskUpdate 能否作用于已归档 task。
+- 前提：archiveCompleted 只设置 `archivedAt`，已归档 task 不可变。~~此前提需在新 issue 里核实~~。**回填（2026-10-29，#92）：已核实，前提不成立**——已归档 task 可编辑（TaskUpdate 改 subject/description/owner/metadata）、可重开（status→非 completed）、可删除（TaskDelete）、可加/删依赖边（对向边会写到归档 task 上），见 `../../todo-archive-split/explore-report.md` §2。最终方案见 `../../todo-archive-split/plan.md`（增量 upsert/drop 包 + live 胜合并 + 256 驱逐帽，不是本节当初没写完的墓碑方案）。
 - 这样主快照稳定在约 3 KB，而且不破坏 TaskGet。
 
 ## 5. 增量 vs 去重的取舍（问题 5）

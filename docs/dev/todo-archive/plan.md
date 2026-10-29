@@ -59,7 +59,7 @@
   - `restoreState`：这两个字段是有限数且任务为 completed 时保留；否则**只丢弃该字段**，候选状态仍然有效。
   - 旧快照兼容：完成时间取 `completionTime(t) = t.completedAt ?? t.updatedAt`。代价是旧会话里完成后又被编辑过的任务会排得偏新，属于一次性的、文档化的不精确。
 - **D3 `TaskList`**：新增 `includeCompleted?: boolean`。
-  - 默认只列未完成任务。如有已完成或已归档任务，追加一行页脚，例如：`Completed: 12 hidden (latest #13, #14, #15; includeCompleted:true lists all) · Archived: 5 (TaskGet <id> still works)`。
+  - 默认只列未完成任务。如有已完成或已归档任务，追加一行页脚，例如：`Completed: 12 hidden (latest #13, #14, #15; includeCompleted:true lists all) · Archived: 5 (TaskGet <id> still works)`（#92 D14 修订：「still works」只对仍保留在归档集（≤256 帽）内的任务成立，被驱逐的返回 not found）。
   - "latest" 按 `completionTime` 取。计数为 0 的分句省略。
   - 只有未完成任务时，输出与现在逐字节一致。只有已完成/已归档任务时首行为 `No open tasks.`；完全没有任务时仍为 `No tasks.`。
   - `true` 时输出旧版全量，已归档任务行尾加 ` [archived]`。
@@ -74,7 +74,7 @@
 - **D6 已归档任务上的 `TaskUpdate`**
   - 改为非 completed 状态：清掉 `archivedAt` 和 `completedAt`，任务重新出现。
   - 改其他字段：保持归档。
-  - `TaskDelete`、`TaskGet` 照常工作；`TaskGet` 行尾加 ` [archived]`。
+  - `TaskDelete`、`TaskGet` 照常工作；`TaskGet` 行尾加 ` [archived]`（#92 D14 修订：被驱逐出归档集的 id 返回 not found，见 §9；D13：重开后跨存储边由读回复接，依赖不丢失）。
 - **D7 计数**
   - nudge、tracker、交接附录不改代码。
   - 组件和面板标题的 `done/total`，以及 `refreshWidget` 的隐藏判断，都只看未归档任务。
@@ -264,10 +264,10 @@
 
 ## 5. 风险
 
-- **R1** 每次清扫会多写一份全量快照。写盘次数有上限：每次压缩最多 1 次；按轮清扫是批量的，每轮最多 1 次。根治属于范围 ④。
+- **R1** 每次清扫会多写一份全量快照。写盘次数有上限：每次压缩最多 1 次；按轮清扫是批量的，每轮最多 1 次。根治属于范围 ④。（**已由 #92 解决**：归档任务增量落盘 `claude-code-todo-archive`，live 快照收窄且去重，见 §9 D10/D12。）
 - **R2** turn 的粒度比用户请求小，N=30 可以调；这一点在设置说明里写清楚。
 - **R3** TaskList 默认输出变了。页脚给出数量、最近的 id 和参数用法来缓解。
-- **R4** 工具结果的 `details.state` 仍是全量快照（replay 依赖它），属于范围 ④。
+- **R4** 工具结果的 `details.state` 仍是全量快照（replay 依赖它），属于范围 ④。（**已由 #92 包 1（f86e327d）解决**：新写入不再内嵌 state，读回端保留历史形状兼容读，见 §9 D15。）
 - **R5** cap 门依赖 hub 和 agent 两个 cap 面同步更新；caps-coexist 测试和 legacy schema 测试是门禁。
 - **R6** 同一轮内状态变化的计龄由 `commit` 逐次对账来保证。`restore` 在 `session_start` / `session_tree` 上是同步执行的，和 v1 一样不进入串行队列（会话边界上不存在在途的 Task 调用）。只有压缩路径改为串行。
 
@@ -299,3 +299,18 @@
 | 8   | Minor   | conformance 测试未保证 `compact()` 有可摘要区间                                                  | §3：harness 加可选压缩保留预算参数（默认不变），本测试调小，保证两次压缩都可准备 |
 
 原 1–7 项评审已确认在方案层面关闭。
+
+## 9. v3 分离存储（#92，2026-10-29）
+
+> 输入：`../todo-archive-split/plan.md`（实施方案 + 评审修订记录）、`../todo-archive-split/explore-report.md`。
+> 本节只记决策与不变式；实现细节（fold/merge 语义、写顺序表、测试清单）以 split plan 为准。
+> 同包的两个快赢已在 #92 包 1 落地（commit f86e327d）：toolResult 不再内嵌 `details.state`、live 快照内容相同不写。
+
+- **D10 双 customType，内存模型不变**：live 任务继续写 `claude-code-todo-state`（字符串不动，I7/D3），内容收窄为未归档任务 + `v:1` 标记；归档任务改写增量包 `claude-code-todo-archive`（`{v:1, reset?, put?, drop?}`，逐项 sanitize fail-closed，照 prompt-sections/store.ts 先例）。闭包内存态仍含归档任务——UI、web 投影、TaskGet、依赖计算、D7 全部零改动，只改落盘形态。
+- **D11 读回三段语义**：`replayTodo` 单遍 fold 归档包 → 候选（两种历史形状不变）从后往前 merge（id 冲突 live 胜；归档侧跨边复接/宽容丢边；`nextId=max`）→ **合并后**才 `validateState`。没有任何合法归档包 ⇒ 与 v2 逐字节一致（段 2，冻结副本 fuzz 钉住）；全部 merge 失败 ⇒ 降级 live-only（`degraded:true`），绝不比不读归档更差。三个读者（restore、session-facts、topic-switch hold）都走 `replayState` 单一收口，后两者零改动。
+- **D12 写顺序 pre → live → post**："写进新位置"先于"从旧位置移走"——崩溃窗口最多双份（live 胜消解），不会丢。删除/驱逐的 drop 与被裁边邻居的 put 在**同一个 pre 包**里（原子）。`/tasklist clear` 写 `{v:1, reset:true}`（基线非空时）先于空 live。写入基线（archiveBase + liveKey）闭包持有，restore 一律重置，append 失败停在已写位置、下次 persist 幂等补写。
+- **D13 跨边以归档侧为准**（OD1-c）：live 快照落盘时剥离指向归档 id 的边（自足，旧版扩展可正常读取全部 live 任务，nextId 高水位不回退）；跨边的权威副本随归档任务的 put 走，读回时复接。降级瑕疵：旧版看不见归档任务、旧版执行的 clear 不清归档集（升级后再 clear 一次即可）。
+- **D14 归档上限 256 与驱逐**（OD2）：`TODO_ARCHIVE_CAP=256`（常量，非设置项）；`evictArchived` 纯函数按 `(archivedAt 升序, id 升序)` 以 deleteTask 语义**永久删除**最旧的超出部分并裁邻居边；执行点只有 sweep（restore 不驱逐、编辑不驱逐）。修订 D3/D6 的「`TaskGet <id> still works`」承诺：**只对仍保留的归档任务成立**，被驱逐的返回 not found。驱逐是分支局部的：navigateTree 回退到驱逐点之前，被驱逐任务会复活（fold 语义，「session 文件即真相」）。
+- **D15 toolResult 不再带 `details.state`，live 去重**：见 #92 包 1（f86e327d）——新写入不带全量快照（读回端保留历史形状兼容读）；live 快照内容与上次相同则跳写，restore 边界重置去重键（评审 Major #2）。
+
+§5 风险处置更新：**R1（每次清扫多写一份全量快照）与 R4（details.state 全量快照）已由 #92 解决**——归档任务增量落盘、toolResult 不再内嵌 state、live 快照收窄且去重。R2/R3/R5/R6 维持原文。

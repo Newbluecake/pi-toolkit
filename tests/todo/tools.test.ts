@@ -6,7 +6,7 @@
 import { describe, expect, test } from "vitest";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { wireTodo } from "../../src/todo/index.js";
-import { replayState, STATE_ENTRY, type TodoState } from "../../src/todo/state.js";
+import { ARCHIVE_ENTRY, emptyState, replayState, STATE_ENTRY, type TodoState } from "../../src/todo/state.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyTool = ToolDefinition<any, any, any>;
@@ -87,6 +87,15 @@ function toBranch(entries: { customType: string; data: unknown }[]): unknown[] {
 /** Branch view over everything persist() appended so far — the replay source for restore(). */
 function branchOf(host: Host): unknown[] {
   return toBranch(host.appended);
+}
+
+// todo-archive-split §8.1 helpers: assertions split by entry kind — live snapshots keep
+// STATE_ENTRY, archived-task packages go to the new ARCHIVE_ENTRY.
+function liveWrites(host: Host): { customType: string; data: unknown }[] {
+  return host.appended.filter((entry) => entry.customType === STATE_ENTRY);
+}
+function archiveWrites(host: Host): { customType: string; data: unknown }[] {
+  return host.appended.filter((entry) => entry.customType === ARCHIVE_ENTRY);
 }
 
 describe("wireTodo tools", () => {
@@ -481,15 +490,27 @@ describe("wireTodo todo-archive", () => {
       expect(host.appended).toHaveLength(3);
 
       await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
-      expect(host.appended).toHaveLength(4); // ONE archive snapshot
-      const swept = host.appended.at(-1)?.data as TodoState;
-      expect(swept.tasks[0]?.archivedAt).toBeDefined();
-      expect(swept.tasks[1]?.archivedAt).toBeUndefined(); // #2 still open
-      expect(swept.tasks[0]?.completedAt).toBeDefined();
+      // todo-archive-split §4.3 #2: the sweep persists TWO entries — the archive package
+      // (put #1) first, then the narrowed live snapshot (#1 gone, #2 open).
+      expect(host.appended).toHaveLength(5);
+      const packages = archiveWrites(host);
+      expect(packages).toHaveLength(1);
+      expect(packages[0]?.data).toMatchObject({
+        v: 1,
+        put: [{ id: 1, status: "completed", archivedAt: expect.any(Number) }],
+      });
+      const live = liveWrites(host).at(-1)?.data as TodoState;
+      expect(live.v).toBe(1);
+      expect(live.tasks.map((task) => task.id)).toEqual([2]); // narrowed: #1 archived out
+      // The FULL state (archived included) comes back through the merge replay.
+      const replayed = replayState(branchOf(host))!;
+      expect(replayed.tasks.find((task) => task.id === 1)?.archivedAt).toBeDefined();
+      expect(replayed.tasks.find((task) => task.id === 1)?.completedAt).toBeDefined();
+      expect(replayed.tasks.find((task) => task.id === 2)?.archivedAt).toBeUndefined();
 
-      // Nothing new to archive ⇒ no further write.
+      // Nothing new to archive ⇒ no further write (of EITHER kind).
       await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
-      expect(host.appended).toHaveLength(4);
+      expect(host.appended).toHaveLength(5);
     });
 
     test("onCompact:false restores without sweeping", async () => {
@@ -538,13 +559,15 @@ describe("wireTodo todo-archive", () => {
       await host.handlers.get("turn_end")?.({});
       expect(host.appended).toHaveLength(before); // 1st turn_end: age 1 < 2
       await host.handlers.get("turn_end")?.({});
-      expect(host.appended).toHaveLength(before + 1); // 2nd: age 2 ⇒ archived
-      const snapshot = host.appended.at(-1)?.data as TodoState;
-      expect(snapshot.tasks[0]?.archivedAt).toBeDefined();
+      // 2nd: age 2 ⇒ archived — archive put + narrowed live (todo-archive-split §4.3 #2).
+      expect(host.appended).toHaveLength(before + 2);
+      const replayed = replayState(branchOf(host))!;
+      expect(replayed.tasks[0]?.archivedAt).toBeDefined();
+      expect(archiveWrites(host)).toHaveLength(1);
       // Already archived ⇒ further turns never write again.
       await host.handlers.get("turn_end")?.({});
       await host.handlers.get("turn_end")?.({});
-      expect(host.appended).toHaveLength(before + 1);
+      expect(host.appended).toHaveLength(before + 2);
     });
 
     test("a same-turn reopen+recomplete before the Nth boundary restarts the age", async () => {
@@ -561,8 +584,8 @@ describe("wireTodo todo-archive", () => {
       const before = host.appended.length;
       await host.handlers.get("turn_end")?.({}); // age since re-completion = 1 < 2
       expect(host.appended).toHaveLength(before);
-      await host.handlers.get("turn_end")?.({}); // age 2 ⇒ archived
-      expect(host.appended).toHaveLength(before + 1);
+      await host.handlers.get("turn_end")?.({}); // age 2 ⇒ archived (put + live)
+      expect(host.appended).toHaveLength(before + 2);
     });
 
     test("multiple tool calls in one turn all age from the same baseline", async () => {
@@ -575,9 +598,9 @@ describe("wireTodo todo-archive", () => {
       await exec(host, "TaskUpdate", { taskId: "2", status: "completed" }, ctx);
       const before = host.appended.length;
       await host.handlers.get("turn_end")?.({});
-      expect(host.appended).toHaveLength(before + 1); // both archived in one sweep
-      const snapshot = host.appended.at(-1)?.data as TodoState;
-      expect(snapshot.tasks.map((task) => task.archivedAt ?? 0).every((at) => at > 0)).toBe(true);
+      expect(host.appended).toHaveLength(before + 2); // both archived in one sweep (put + live)
+      const replayed = replayState(branchOf(host))!;
+      expect(replayed.tasks.map((task) => task.archivedAt ?? 0).every((at) => at > 0)).toBe(true);
     });
 
     test("a queued reopen and a concurrent turn_end serialize in queue order — no false archive", async () => {
@@ -616,9 +639,9 @@ describe("wireTodo todo-archive", () => {
 
       await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
       await host.handlers.get("turn_end")?.({});
-      expect(host.appended).toHaveLength(before + 2); // update + archive sweep
+      expect(host.appended).toHaveLength(before + 3); // update live + sweep (put + live)
       await host.handlers.get("turn_end")?.({});
-      expect(host.appended).toHaveLength(before + 2); // archived id cleaned from the map
+      expect(host.appended).toHaveLength(before + 3); // archived id cleaned from the map
     });
 
     test("collapsed (not displayed) completed tasks age identically", async () => {
@@ -634,9 +657,9 @@ describe("wireTodo todo-archive", () => {
       }
       const before = host.appended.length;
       await host.handlers.get("turn_end")?.({});
-      expect(host.appended).toHaveLength(before + 1);
-      const snapshot = host.appended.at(-1)?.data as TodoState;
-      expect(snapshot.tasks.filter((task) => task.archivedAt !== undefined).map((task) => task.id)).toEqual([1, 2, 3]);
+      expect(host.appended).toHaveLength(before + 2); // sweep: put(3 tasks) + live
+      const replayed = replayState(branchOf(host))!;
+      expect(replayed.tasks.filter((task) => task.archivedAt !== undefined).map((task) => task.id)).toEqual([1, 2, 3]);
     });
 
     test("isChildSession:true with nudge off still archives per turn", async () => {
@@ -648,8 +671,8 @@ describe("wireTodo todo-archive", () => {
       await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
       const before = host.appended.length;
       await host.handlers.get("turn_end")?.({});
-      expect(host.appended).toHaveLength(before + 1);
-      expect((host.appended.at(-1)?.data as TodoState).tasks[0]?.archivedAt ?? 0).toBeGreaterThan(0);
+      expect(host.appended).toHaveLength(before + 2); // sweep: put + narrowed live
+      expect(replayState(branchOf(host))?.tasks[0]?.archivedAt ?? 0).toBeGreaterThan(0);
     });
   });
 
@@ -666,9 +689,14 @@ describe("wireTodo todo-archive", () => {
 
       const command = host.commands.get("tasklist");
       await command?.handler("clear", ctx);
-      const cleared = host.appended.at(-1)?.data as TodoState;
-      expect(cleared.tasks).toEqual([]);
-      expect(cleared.nextId).toBe(3); // high-water preserved
+      // todo-archive-split §4.3 #6: clear emits the archive reset; the empty live snapshot is
+      // already on disk byte-identical (the delete left it empty), so quick-win ② dedup skips
+      // it — exactly ONE entry, and it is the reset that wipes the archived set.
+      expect(host.appended).toHaveLength(7);
+      expect(archiveWrites(host).at(-1)?.data).toEqual({ v: 1, reset: true });
+      const replayed = replayState(branchOf(host))!;
+      expect(replayed.tasks).toEqual([]);
+      expect(replayed.nextId).toBe(3); // high-water preserved through the round trip
 
       const created = await exec(host, "TaskCreate", { subject: "C", description: "C" }, ctx);
       expect(created.details.task.id).toBe(3);
@@ -775,5 +803,618 @@ describe("wireTodo live-snapshot dedup (todo-archive-split quick win ②)", () =
     await exec(host, "TaskDelete", { taskId: "1" }, ctx);
     expect(host.appended).toHaveLength(4); // every persist saw different content
     expect(replayState(branchOf(host))?.tasks.map((task) => task.id)).toEqual([2]);
+  });
+});
+
+// ── todo-archive-split #92 §8.3 (package 2): separated-storage write paths via fake host ──
+// Exact entry sequences for the §4.3 scenario table (driven through the REAL wireTodo persist),
+// the crash-window component-wise property (review Major #1), the write-rate invariant, the
+// migration put, degraded-restore behavior (review Minor #3) and mid-persist append failures.
+
+describe("wireTodo todo-archive-split §4.3 write-path scenarios", () => {
+  test("#1 plain live change: exactly ONE entry, the live snapshot (v:1 marker, narrowed)", async () => {
+    const host = fakePi();
+    wireTodo(host.pi);
+    const ctx = fakeCtx(host);
+    await exec(host, "TaskCreate", { subject: "A", description: "d" }, ctx);
+    expect(host.appended).toHaveLength(1);
+    expect(host.appended[0]?.customType).toBe(STATE_ENTRY);
+    expect(host.appended[0]?.data).toMatchObject({ v: 1, nextId: 2, tasks: [{ id: 1, subject: "A" }] });
+  });
+
+  test("#3 edit of an archived task: exactly ONE entry — the archive put; live is dedup-skipped", async () => {
+    const host = fakePi();
+    wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+    const ctx = fakeCtx(host);
+    await exec(host, "TaskCreate", { subject: "A", description: "d" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host))); // archive #1
+    const writes = host.appended.length;
+    await exec(host, "TaskUpdate", { taskId: "1", subject: "A2" }, ctx);
+    expect(host.appended).toHaveLength(writes + 1); // ONE put, no live write
+    expect(archiveWrites(host).at(-1)?.data).toMatchObject({ v: 1, put: [{ id: 1, subject: "A2" }] });
+    expect(replayState(branchOf(host))?.tasks[0]?.subject).toBe("A2");
+  });
+
+  test("#4 reopen of an archived task: live THEN post drop, in that order", async () => {
+    const host = fakePi();
+    wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+    const ctx = fakeCtx(host);
+    await exec(host, "TaskCreate", { subject: "A", description: "d" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+    const writes = host.appended.length;
+    await exec(host, "TaskUpdate", { taskId: "1", status: "pending" }, ctx);
+    const appended = host.appended.slice(writes);
+    expect(appended.map((entry) => entry.customType)).toEqual([STATE_ENTRY, ARCHIVE_ENTRY]);
+    expect((appended[0]?.data as TodoState).tasks[0]?.archivedAt).toBeUndefined(); // live copy first
+    expect(appended[1]?.data).toEqual({ v: 1, drop: [1] }); // then the archive-side drop
+    expect(replayState(branchOf(host))?.tasks[0]?.status).toBe("pending");
+  });
+
+  test("#5 delete of an archived task: ONE atomic pre package (pruned neighbor put + drop)", async () => {
+    const host = fakePi();
+    wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+    const ctx = fakeCtx(host);
+    await exec(host, "TaskCreate", { subject: "A", description: "d" }, ctx);
+    await exec(host, "TaskCreate", { subject: "B", description: "d", blockedBy: ["1"] }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "2", status: "completed" }, ctx);
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host))); // both archived
+    const writes = host.appended.length;
+    await exec(host, "TaskDelete", { taskId: "1" }, ctx);
+    expect(host.appended).toHaveLength(writes + 1); // single atomic package
+    const pre = archiveWrites(host).at(-1)?.data as { v: number; put?: Array<{ id: number }>; drop?: number[] };
+    expect(pre.v).toBe(1);
+    expect(pre.put?.map((task) => task.id)).toEqual([2]); // neighbor #2's pruned edge re-put
+    expect(pre.put?.[0]?.blockedBy).toEqual([]);
+    expect(pre.drop).toEqual([1]);
+    // Live snapshot was already empty-of-#1/#2 (both were archived) — skipped.
+    const replayed = replayState(branchOf(host))!;
+    expect(replayed.tasks.map((task) => task.id)).toEqual([2]);
+  });
+
+  test("#6 clear with a non-empty archive base: {v:1, reset:true} precedes the empty live snapshot", async () => {
+    const host = fakePi();
+    wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+    const ctx = fakeCtx(host);
+    await exec(host, "TaskCreate", { subject: "A", description: "d" }, ctx);
+    await exec(host, "TaskCreate", { subject: "B", description: "d" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host))); // archive #1
+    const writes = host.appended.length;
+    await host.commands.get("tasklist")?.handler("clear", ctx);
+    const appended = host.appended.slice(writes);
+    expect(appended.map((entry) => entry.customType)).toEqual([ARCHIVE_ENTRY, STATE_ENTRY]);
+    expect(appended[0]?.data).toEqual({ v: 1, reset: true });
+    expect(appended[1]?.data).toEqual({ v: 1, nextId: 3, tasks: [] }); // #2 was live ⇒ live changes
+    // Replay the whole branch: cleared, nextId preserved.
+    const replayed = replayState(branchOf(host))!;
+    expect(replayed.tasks).toEqual([]);
+    expect(replayed.nextId).toBe(3);
+  });
+
+  test("#7 cross-storage edge (TaskCreate blockedBy → archived id): pre put carries the authoritative edge", async () => {
+    const host = fakePi();
+    wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+    const ctx = fakeCtx(host);
+    await exec(host, "TaskCreate", { subject: "X", description: "d" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host))); // archive X
+    const writes = host.appended.length;
+    await exec(host, "TaskCreate", { subject: "P", description: "d", blockedBy: ["1"] }, ctx);
+    const appended = host.appended.slice(writes);
+    expect(appended.map((entry) => entry.customType)).toEqual([ARCHIVE_ENTRY, STATE_ENTRY]);
+    const put = (appended[0]?.data as { put: Array<{ id: number; blocks: number[] }> }).put[0]!;
+    expect(put.id).toBe(1);
+    expect(put.blocks).toEqual([2]); // X's side of the cross edge
+    const liveP = (appended[1]?.data as TodoState).tasks[0]!;
+    expect(liveP.id).toBe(2);
+    expect(liveP.blockedBy).toEqual([]); // stripped on the live side (OD1-c)
+    // Replay reattaches the edge.
+    const replayed = replayState(branchOf(host))!;
+    expect(replayed.tasks.find((task) => task.id === 2)?.blockedBy).toEqual([1]);
+  });
+
+  test("#8 migration: restore from an OLD-shape full snapshot, first persist emits one-shot full put + live", async () => {
+    // Build the old-shape payload: the legacy writer's FULL memory snapshot (archived #1 included,
+    // no v marker) — exactly what a pre-#92 extension would have persisted.
+    const legacyHost = fakePi();
+    const legacyWiring = wireTodo(legacyHost.pi, { archive: { onCompact: true, afterTurns: 0 } });
+    const legacyCtx = fakeCtx(legacyHost);
+    await exec(legacyHost, "TaskCreate", { subject: "A", description: "d" }, legacyCtx);
+    await exec(legacyHost, "TaskCreate", { subject: "B", description: "d" }, legacyCtx);
+    await exec(legacyHost, "TaskUpdate", { taskId: "1", status: "completed" }, legacyCtx);
+    await legacyHost.handlers.get("session_compact")?.({}, fakeCtx(legacyHost, "tui", branchOf(legacyHost)));
+    const oldBranch = [
+      {
+        type: "custom",
+        customType: STATE_ENTRY,
+        data: JSON.parse(JSON.stringify(legacyWiring.getTodoSnapshot())) as unknown,
+      },
+    ];
+
+    const host = fakePi();
+    wireTodo(host.pi, { archive: { onCompact: false, afterTurns: 0 } });
+    const ctx = fakeCtx(host, "tui", oldBranch);
+    await host.handlers.get("session_start")?.({}, ctx);
+    // Restore got the archived task back (段 2 read of the old shape).
+    expect(replayState(oldBranch)?.tasks).toHaveLength(2);
+
+    const writes = host.appended.length;
+    await exec(host, "TaskUpdate", { taskId: "2", subject: "B2" }, ctx);
+    const appended = host.appended.slice(writes);
+    expect(appended.map((entry) => entry.customType)).toEqual([ARCHIVE_ENTRY, STATE_ENTRY]);
+    const pre = appended[0]?.data as { v: number; put: Array<{ id: number; archivedAt?: number }> };
+    expect(pre.v).toBe(1);
+    expect(pre.put.map((task) => task.id)).toEqual([1]); // one-shot full put of the archived set
+    expect(pre.put[0]?.archivedAt).toBeDefined();
+    expect((appended[1]?.data as TodoState).tasks.map((task) => task.id)).toEqual([2]); // narrowed live
+    // Round-trip equivalence with the legacy branch content.
+    const replayed = replayState([...oldBranch, ...toBranch(appended)])!;
+    expect(replayed.tasks.find((task) => task.id === 1)?.archivedAt).toBeDefined();
+    expect(replayed.tasks.find((task) => task.id === 2)?.subject).toBe("B2");
+  });
+  test("degraded restore (inconsistent archive set): empty baseline, next persist never emits a gone drop", async () => {
+    // An archive package with a bidirectional violation inside A + a valid live candidate:
+    // every merge fails ⇒ degraded ⇒ live-only restore with an EMPTY archive baseline.
+    const branch = [
+      {
+        type: "custom",
+        customType: ARCHIVE_ENTRY,
+        data: {
+          v: 1,
+          put: [
+            {
+              id: 1,
+              subject: "X",
+              description: "d",
+              status: "completed",
+              blocks: [2],
+              blockedBy: [],
+              createdAt: 1,
+              updatedAt: 1,
+              completedAt: 1,
+              archivedAt: 1,
+            },
+            {
+              id: 2,
+              subject: "Y",
+              description: "d",
+              status: "completed",
+              blocks: [],
+              blockedBy: [],
+              createdAt: 2,
+              updatedAt: 2,
+              completedAt: 2,
+              archivedAt: 2,
+            },
+          ],
+        },
+      },
+      {
+        type: "custom",
+        customType: STATE_ENTRY,
+        data: {
+          v: 1,
+          nextId: 3,
+          tasks: [
+            {
+              id: 5,
+              subject: "P",
+              description: "d",
+              status: "pending",
+              blocks: [],
+              blockedBy: [],
+              createdAt: 5,
+              updatedAt: 5,
+            },
+          ],
+        },
+      },
+    ];
+    const host = fakePi();
+    wireTodo(host.pi, { archive: { onCompact: false, afterTurns: 0 } });
+    const ctx = fakeCtx(host, "tui", branch);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      await host.handlers.get("session_start")?.({}, ctx);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings.some((message) => message.includes("degraded"))).toBe(true);
+    const list = await exec(host, "TaskList", { includeCompleted: true }, ctx);
+    expect(list.content[0]?.text).toContain("#5"); // live-only: P survives, X/Y invisible
+
+    // Review Minor #3(i): the empty baseline means the next persist writes NO drop — and no
+    // put either (the degraded state holds no archived tasks). Only the live snapshot fires.
+    const writes = host.appended.length;
+    await exec(host, "TaskUpdate", { taskId: "5", subject: "P2" }, ctx);
+    const appended = host.appended.slice(writes);
+    expect(appended.map((entry) => entry.customType)).toEqual([STATE_ENTRY]);
+    const packages = archiveWrites(host);
+    expect(packages.every((entry) => (entry.data as { drop?: number[] }).drop === undefined)).toBe(true);
+  });
+
+  test("degraded restore (ii): an OLD-shape FULL-snapshot winner ⇒ next persist re-puts every archived task, still no drop", async () => {
+    // Branch: a dirty archive package (bidirectional violation inside A) + an OLD-shape FULL
+    // STATE_ENTRY candidate (archived tasks included, no v marker) as the LAST candidate — the
+    // exact shape a pre-#92 extension writes during a rollback window. Every merge fails on the
+    // dirty package ⇒ degraded fallback validates the full snapshot itself ⇒ memory HOLDS the
+    // archived tasks while the baseline stays empty (review Minor #3, sub-case (ii)).
+    const archived = (id: number) => ({
+      id,
+      subject: `a${id}`,
+      description: "d",
+      status: "completed",
+      blocks: [],
+      blockedBy: [],
+      createdAt: id,
+      updatedAt: id,
+      completedAt: id,
+      archivedAt: id * 10,
+    });
+    const liveTask = {
+      id: 3,
+      subject: "live",
+      description: "d",
+      status: "pending",
+      blocks: [],
+      blockedBy: [],
+      createdAt: 3,
+      updatedAt: 3,
+    };
+    const branch = [
+      {
+        type: "custom",
+        customType: ARCHIVE_ENTRY,
+        data: { v: 1, put: [{ ...archived(9), blocks: [10] }, archived(10)] },
+      },
+      {
+        type: "custom",
+        customType: STATE_ENTRY,
+        data: { nextId: 4, tasks: [archived(1), archived(2), liveTask] }, // OLD shape: no v, archived included
+      },
+    ];
+    const host = fakePi();
+    wireTodo(host.pi, { archive: { onCompact: false, afterTurns: 0 } });
+    const ctx = fakeCtx(host, "tui", branch);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      await host.handlers.get("session_start")?.({}, ctx);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings.some((message: string) => message.includes("degraded"))).toBe(true);
+    // The degraded winner is the OLD full snapshot: the archived tasks ARE in memory.
+    const list = await exec(host, "TaskList", { includeCompleted: true }, ctx);
+    expect(list.content[0]?.text).toContain("#1");
+    expect(list.content[0]?.text).toContain("[archived]");
+
+    // Minor #3(ii): the empty baseline turns the next persist into a one-shot FULL put of
+    // every archived task in memory (a put, not a drop — "never drop what you could not read").
+    const writes = host.appended.length;
+    await exec(host, "TaskUpdate", { taskId: "3", subject: "live2" }, ctx);
+    const appended = host.appended.slice(writes);
+    expect(appended.map((entry) => entry.customType)).toEqual([ARCHIVE_ENTRY, STATE_ENTRY]);
+    const pre = appended[0]?.data as { v: number; put?: Array<{ id: number }>; drop?: number[] };
+    expect(pre.put?.map((task) => task.id)).toEqual([1, 2]); // one-shot full put
+    expect(pre.drop).toBeUndefined(); // and no drop, ever, from a degraded baseline
+    expect((appended[1]?.data as TodoState).tasks.map((task) => task.id)).toEqual([3]); // narrowed live
+  });
+
+  test("mid-persist append failure (live write throws): next persist re-writes live, replay converges", async () => {
+    const host = fakePi();
+    wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+    const ctx = fakeCtx(host);
+    await exec(host, "TaskCreate", { subject: "A", description: "d" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+    await exec(host, "TaskCreate", { subject: "B", description: "d" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "2", status: "completed" }, ctx);
+    const writesBefore = host.appended.length;
+
+    // Make appendEntry fail for the sweep's SECOND call (the narrowed live write) — the patch is
+    // armed right before the compact so the counter covers exactly that persist.
+    const piAny = host.pi as unknown as { appendEntry: (customType: string, data?: unknown) => void };
+    const realAppend = piAny.appendEntry;
+    let calls = 0;
+    piAny.appendEntry = (customType: string, data?: unknown) => {
+      calls++;
+      if (calls === 2) throw new Error("disk full");
+      realAppend(customType, data);
+    };
+    // The sweep's persist: put #2 (call 1, succeeds, baseline advances) then live (call 2 — THROWS;
+    // sweep's own try/catch contains it).
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+    piAny.appendEntry = realAppend;
+    expect(host.appended.length).toBe(writesBefore + 1); // only the put made it to disk
+    // The failed live write may have left the branch at [.., put #2] — replay still works
+    // (merge: #2 comes back via the archive fold) but the LIVE snapshot is stale. A later
+    // persist with real appends must converge.
+    const replayedMidway = replayState(branchOf(host))!;
+    expect(replayedMidway.tasks.map((task) => task.id)).toEqual([1, 2]);
+
+    await exec(host, "TaskUpdate", { taskId: "2", subject: "B2" }, ctx); // reopen would also work; edit keeps it archived
+    const replayed = replayState(branchOf(host))!;
+    expect(replayed.tasks.find((task) => task.id === 2)?.subject).toBe("B2");
+    expect(replayed.tasks.find((task) => task.id === 2)?.archivedAt).toBeDefined();
+  });
+
+  test("#9 eviction write path: a later sweep crossing the 256 cap carries the eviction drop + pruned-neighbor put in ONE pre package", async () => {
+    const host = fakePi();
+    wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+    const ctx = fakeCtx(host);
+    // Batch 1: exactly 256 archived (under the cap — no eviction yet). #2 is blocked by #1,
+    // an edge INSIDE the archived set, so the eviction's pruned neighbor is itself archived.
+    await exec(host, "TaskCreate", { subject: "t1", description: "d" }, ctx);
+    await exec(host, "TaskCreate", { subject: "t2", description: "d", blockedBy: ["1"] }, ctx);
+    for (let i = 3; i <= 256; i++) {
+      await exec(host, "TaskCreate", { subject: `t${i}`, description: "d" }, ctx);
+    }
+    for (let i = 1; i <= 256; i++) {
+      await exec(host, "TaskUpdate", { taskId: String(i), status: "completed" }, ctx);
+    }
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+    const firstSweep = host.appended.filter((entry) => entry.customType === ARCHIVE_ENTRY);
+    expect(firstSweep).toHaveLength(1);
+    expect((firstSweep[0]?.data as { put: unknown[] }).put).toHaveLength(256); // all archived, no drop
+    expect((firstSweep[0]?.data as { drop?: number[] }).drop).toBeUndefined();
+
+    // Batch 2: one more completion pushes the archived count to 257 — the SAME sweep archives
+    // #257 AND evicts the oldest (#1; archivedAt ties break by id), pruning #2's edge.
+    await exec(host, "TaskCreate", { subject: "t257", description: "d" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "257", status: "completed" }, ctx);
+    const writes = host.appended.length;
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+    const appended = host.appended.slice(writes);
+    expect(appended.map((entry) => entry.customType)).toEqual([ARCHIVE_ENTRY, STATE_ENTRY]);
+    const pre = appended[0]?.data as {
+      v: number;
+      put?: Array<{ id: number; blockedBy: number[] }>;
+      drop?: number[];
+    };
+    expect(pre.v).toBe(1);
+    // Atomic §4.3 #9: eviction drop + pruned-neighbor put + the new archive in ONE package.
+    expect(pre.drop).toEqual([1]);
+    expect(pre.put?.map((task) => task.id)).toEqual([2, 257]);
+    expect(pre.put?.find((task) => task.id === 2)?.blockedBy).toEqual([]); // the pruned edge
+    expect((appended[1]?.data as TodoState).tasks).toEqual([]); // narrowed live: all archived
+
+    // Replay: exactly the retained 256 (#2..#257); #1 is permanently gone (D14).
+    const replayed = replayState(branchOf(host))!;
+    expect(replayed.tasks).toHaveLength(256);
+    expect(replayed.tasks.find((task) => task.id === 1)).toBeUndefined();
+    expect(replayed.tasks.find((task) => task.id === 2)?.blockedBy).toEqual([]);
+  });
+
+  test("restore always rewrites live on the first persist (liveKey reset)", async () => {
+    const host = fakePi();
+    wireTodo(host.pi);
+    const ctx = fakeCtx(host);
+    await exec(host, "TaskCreate", { subject: "A", description: "d" }, ctx);
+    const writes = host.appended.length;
+    // session_compact → restore (liveKey reset) + no sweep write (nothing completed).
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+    expect(host.appended).toHaveLength(writes); // the sweep itself writes nothing
+    // An edit that leaves live content IDENTICAL to what is already the last snapshot on disk
+    // still writes — the baseline was reset by restore.
+    await exec(host, "TaskDelete", { taskId: "1" }, ctx);
+    await exec(host, "TaskCreate", { subject: "A", description: "d" }, ctx);
+    expect(liveWrites(host).length).toBe(writes + 2);
+  });
+});
+
+// ── todo-archive-split #92 §8.3 properties: round-trip + crash-window (component-wise) + write rate ──
+
+describe("wireTodo todo-archive-split properties (seeded)", () => {
+  /** mulberry32 — deterministic PRNG (fixed seed ⇒ reproducible). */
+  function rng(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  /** Edge-SET equality normalizer: sorts tasks by id and edge arrays by value. */
+  function normalize(state: TodoState | undefined): unknown {
+    if (!state) return undefined;
+    return {
+      nextId: state.nextId,
+      tasks: [...state.tasks]
+        .sort((a, b) => a.id - b.id)
+        .map((task) => ({
+          ...task,
+          blocks: [...task.blocks].sort((a, b) => a - b),
+          blockedBy: [...task.blockedBy].sort((a, b) => a - b),
+        })),
+    };
+  }
+
+  /** Component signature for the crash-window assertion (ignores archivedAt presence). */
+  function partitionSig(state: TodoState | undefined): { live: string[]; archived: string[] } {
+    const tasks = state?.tasks ?? [];
+    const sig = (task: TodoState["tasks"][number]) => {
+      const { archivedAt: _dropped, ...rest } = task;
+      return JSON.stringify(rest);
+    };
+    return {
+      live: tasks
+        .filter((task) => task.archivedAt === undefined)
+        .map(sig)
+        .sort(),
+      archived: tasks
+        .filter((task) => task.archivedAt !== undefined)
+        .map(sig)
+        .sort(),
+    };
+  }
+
+  type Op =
+    | { kind: "create" }
+    | { kind: "update"; id: string; status?: "pending" | "in_progress" | "completed"; subject?: string }
+    | { kind: "delete"; id: string }
+    | { kind: "edge"; id: string; blockedBy?: string; removeBlockedBy?: string }
+    | { kind: "sweep" }
+    | { kind: "clear" }
+    | { kind: "restore" };
+
+  async function runOp(host: Host, ctx: ExtensionContext, op: Op): Promise<void> {
+    switch (op.kind) {
+      case "create":
+        await exec(host, "TaskCreate", { subject: `t${Date.now() % 97}`, description: "d" }, ctx);
+        break;
+      case "update":
+        await exec(
+          host,
+          "TaskUpdate",
+          {
+            taskId: op.id,
+            ...(op.status ? { status: op.status } : {}),
+            ...(op.subject ? { subject: op.subject } : {}),
+          },
+          ctx,
+        );
+        break;
+      case "delete":
+        await exec(host, "TaskDelete", { taskId: op.id }, ctx);
+        break;
+      case "edge":
+        await exec(
+          host,
+          "TaskUpdate",
+          {
+            taskId: op.id,
+            ...(op.blockedBy ? { addBlockedBy: [op.blockedBy] } : {}),
+            ...(op.removeBlockedBy ? { removeBlockedBy: [op.removeBlockedBy] } : {}),
+          },
+          ctx,
+        );
+        break;
+      case "sweep":
+        await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+        break;
+      case "clear":
+        await host.commands.get("tasklist")?.handler("clear", ctx);
+        break;
+      case "restore":
+        await host.handlers.get("session_start")?.({}, fakeCtx(host, "tui", branchOf(host)));
+        break;
+    }
+  }
+
+  test("round-trip: every replay equals memory (edge-set equality); crash windows stay component-wise valid", async () => {
+    for (let seed = 1; seed <= 25; seed++) {
+      const rand = rng(seed * 7919);
+      const host = fakePi();
+      const wiring = wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+      const ctx = fakeCtx(host);
+      await host.handlers.get("session_start")?.({}, ctx);
+
+      const ops: Op[] = [];
+      const opCount = 6 + Math.floor(rand() * 14);
+      for (let i = 0; i < opCount; i++) {
+        const roll = rand();
+        const ids = wiring.getTodoSnapshot().tasks.map((task) => String(task.id));
+        const pick = (): string => (ids.length > 0 ? ids[Math.floor(rand() * ids.length)]! : "1");
+        if (roll < 0.3) ops.push({ kind: "create" });
+        else if (roll < 0.5) ops.push({ kind: "update", id: pick(), status: "completed" });
+        else if (roll < 0.6)
+          ops.push({ kind: "update", id: pick(), status: "pending" }); // reopen
+        else if (roll < 0.68)
+          ops.push({ kind: "update", id: pick(), subject: `s${i}` }); // archived-edit too
+        else if (roll < 0.76 && ids.length > 0) ops.push({ kind: "delete", id: pick() });
+        else if (roll < 0.86 && ids.length > 1) {
+          const a = pick();
+          let b = pick();
+          let guard = 0;
+          while (b === a && guard++ < 5) b = pick();
+          if (roll < 0.81) ops.push({ kind: "edge", id: a, blockedBy: b });
+          else ops.push({ kind: "edge", id: a, removeBlockedBy: b });
+        } else if (roll < 0.93) ops.push({ kind: "sweep" });
+        else if (roll < 0.97) ops.push({ kind: "clear" });
+        else ops.push({ kind: "restore" });
+      }
+
+      for (const op of ops) {
+        // Ops may throw (unknown id, self-block, cycle) — those leave state and disk untouched.
+        const before = { memory: wiring.getTodoSnapshot(), branch: host.appended.length };
+        await runOp(host, ctx, op).catch(() => undefined);
+        const after = wiring.getTodoSnapshot();
+
+        // Round-trip: replay equals memory under edge-set normalization. The one legitimate
+        // exception is a branch with NOTHING persisted yet (e.g. a sweep on a pristine session)
+        // — replay is undefined and the memory state must be the pristine empty state.
+        const replayed = replayState(branchOf(host));
+        if (host.appended.length === 0) {
+          expect(normalize(replayed)).toBeUndefined();
+          expect(normalize(after)).toEqual(normalize(emptyState()));
+        } else {
+          expect(normalize(replayed)).toEqual(normalize(after));
+        }
+
+        // Crash window: every prefix boundary between this op's entries must replay to a
+        // state whose LIVE and ARCHIVED components each match the before- or after-op state
+        // (component-wise — review Major #1; an "整体 ∈ {前,后}" claim would be false for clear).
+        // A prefix with NO live candidate at all (archive-put-only, migration crash window)
+        // legitimately replays to undefined — data stays on disk, restore degrades to empty.
+        if (host.appended.length > before.branch) {
+          for (let cut = before.branch; cut < host.appended.length; cut++) {
+            const prefix = toBranch(host.appended.slice(0, cut));
+            const window = replayState(prefix);
+            if (window !== undefined) {
+              const sigs = partitionSig(window);
+              const beforeSigs = partitionSig(before.memory);
+              const afterSigs = partitionSig(after);
+              expect(
+                JSON.stringify(sigs.live) === JSON.stringify(beforeSigs.live) ||
+                  JSON.stringify(sigs.live) === JSON.stringify(afterSigs.live),
+              ).toBe(true);
+              expect(
+                JSON.stringify(sigs.archived) === JSON.stringify(beforeSigs.archived) ||
+                  JSON.stringify(sigs.archived) === JSON.stringify(afterSigs.archived),
+              ).toBe(true);
+            } else {
+              expect(prefix.some((entry) => (entry as { customType?: string }).customType === STATE_ENTRY)).toBe(false);
+            }
+          }
+          // Write-rate invariant: one persist never writes more than 3 entries.
+          expect(host.appended.length - before.branch).toBeLessThanOrEqual(3);
+        }
+      }
+      // Final full-branch round trip once more (post-restore op included).
+      if (host.appended.length > 0) {
+        expect(normalize(replayState(branchOf(host)))).toEqual(normalize(wiring.getTodoSnapshot()));
+      }
+    }
+  });
+
+  test("write-rate: no actual change ⇒ 0 entries; consecutive compacts with nothing new ⇒ 0 entries", async () => {
+    const host = fakePi();
+    wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+    const ctx = fakeCtx(host);
+    await exec(host, "TaskCreate", { subject: "A", description: "d" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+    const writes = host.appended.length;
+
+    // Read-only ops write nothing.
+    await exec(host, "TaskList", {}, ctx);
+    await exec(host, "TaskGet", { taskId: "1" }, ctx);
+    // A completed→completed status update is a no-op (changed=false) — no persist.
+    await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+    expect(host.appended).toHaveLength(writes);
+
+    // Second compact with nothing newly completed: restore writes nothing, sweep writes nothing.
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+    expect(host.appended).toHaveLength(writes);
   });
 });
