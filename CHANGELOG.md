@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-10-29
+
+### Added
+
+- **web-hub**: replay recent status/ctl to a subscriber on (re)subscribe (`64112684`)
+- **web-hub**: expand commit rows in the worktree graph with changed files (`d2e23968`)
+- **web-hub**: read the hub version from its own package.json, and restart the hub after a release (`e0146f85`)
+- **web-hub**: archive the (+N more) bash rows with one click (`b1d9d250`)
+- **quota**: require a turn cooldown before L1 re-announces on a grid step (`2257c369`)
+
+### Fixed
+
+- **archive**: skip redundant snapshot writes + write-rate regression guard (`bc88f62d`)
+- **web-hub**: a11y + test follow-ups from the gitgraph files review (`9484b6c1`)
+- **web-hub**: paint the running-tool ring on the card's own border band (`b2915618`)
+- **web-hub**: clear ghost held queue rows and stop receipt regressions (`36ca30e3`)
+- **web-hub**: align fleet drawer bash group icon with the Agents header (`c199ad5e`)
+- **web-hub**: unify rename pencil, fold stop into overflow on touch, move delete to detail (`70ca25ae`)
+- **web-hub**: drop whitespace-only thinking blocks from the transcript (`0f2fefb6`)
+- **web-hub**: finish the archive-omitted toast and fold alignment (`5d3b8430`)
+- **bash**: keep background jobs alive, logged, and exit-coded across pi exit (`caca7be5`)
+
+### Changed
+
+- **web-hub**: tail-read session history for snapshot/page, defuse the 256MiB cliff (`bb8f0d60`)
+- **web-hub**: project branch replies newest-first up to the byte budget (`00cba546`)
+- **web-hub**: read only the tail of huge session files in runTail (`89c817a1`)
+
+### Documentation
+
+- **web-hub**: prettier-format the refresh-slow docs (fixes CI format:check) (`5f5b83f3`)
+- **web-hub**: refresh-slow live acceptance numbers (7.4s -> 0.7-1.1s) (`4d60e256`)
+- **web-hub**: format the README after the history-tail + self-version sections (`06f5fb19`)
+
+### Tests
+
+- **external-agent**: stop counting the background catalog probe in cwd-pin echo assertions (`7705b77e`)
+- **bash**: normalise wall_time_seconds out of the golden equivalence (`e24cdea7`)
+- **web-hub**: align spawn e2e agent version with the hub's self-resolved one (`a7fee42d`)
+- **web-hub**: pin wtgraph.files.v1 audit keys, source scan and transport contract (`3dbdb208`)
+- **config**: format the specs pin with prettier (`218f4974`)
+- **config**: re-pin the settings corpus and specs pin for quota.l1MinTurns (`4758bae5`)
+
+Stats: 5 feat, 9 fix, 3 refactor/perf, 3 docs, 6 test
+
 ## [0.10.2] - 2026-10-28
 
 ### Added
@@ -1433,7 +1478,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.3...HEAD
+[0.10.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.9.0...v0.10.0
