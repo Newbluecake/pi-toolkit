@@ -123,6 +123,8 @@ replayTodo(entries):
 
 **边数组顺序**：复接补上的边追加在数组末尾，所以 round-trip 只保证"边集合相等"，不保证顺序。这样做是安全的：复接的边一定指向归档任务，归档任务都是 completed，而所有展示面只用 `activeBlockers`（completed 不算阻塞），所以这类边的顺序在任何输出里都看不到（`web-hub/agent/todo.ts:101`、`index.ts` `formatTaskLine`、`ui.ts`）。
 
+**克隆与基线口径（评审 Minor #4 钉死）**：merge 的宽容丢边在 **clone** 上做（不改 fold 产出的原始任务对象）；`r.archived` 返回 fold 的原始副本；restore 建 archiveBase 时用丢边**前**的 key——下次 persist 会对盘上悬挂边多发自愈 put。若用丢边后的 key，盘上悬挂边永远不被纠正。
+
 ## 4. 写路径
 
 ### 4.1 纯函数（`src/todo/state.ts` 与新文件 `src/todo/persist-plan.ts`）
@@ -158,7 +160,7 @@ planPersist(state, archiveBase: ReadonlyMap<number, string>, liveKey: string | u
 - `persist()`：依次处理 `pre → live → post`。**每成功 append 一条，就立刻把它应用到对应基线上**。若中途 `appendEntry` 抛错，基线停在已写入的位置，下一次 persist 会自动补写剩余部分（幂等收敛）。
 - `restore()`：`const r = replayTodo(branch)`，然后 `commit(r.state ?? emptyState())`。`archiveBase` 的设置分两种情况：
   - `degraded=false`：设为 `r.archived` 每项的 `key`，**包含被 live 覆盖的副本**，这样下一次 persist 会给它发 `moved` drop 来自愈；
-  - `degraded=true`：设为**空 Map**，并 `console.warn` 一次。原则是"读不出来的东西绝不主动 drop"。
+  - `degraded=true`：设为**空 Map**，并 `console.warn` 一次。原则是"读不出来的东西绝不主动 drop"。两个子情形（评审 Minor #3 钉死）：(i) 选中候选是剥离格式 live-only（缺归档包）——此后 persist 不写归档；(ii) 选中候选是**旧形态全量快照**（含归档任务，rollback 期间旧版扩展写入的正是这种）——base=空意味着下一次 persist 会对内存中全部归档任务发一次性全量 put（≤36KB，同 §4.3 #8 迁移路径；put 不是 drop，不违反"读不出不主动删"）。§8.3 补对应用例。
   - `liveKey` 一律设为 `undefined`，即 restore 之后的第一次 persist 一定写 live。这样可以覆盖三种情况：选中的候选不是最后一条、旧形态快照里含有归档任务（迁移）、toolResult 形状。restore 本身仍然不写盘。
 - 与 `serialize()/commit()` 的关系：
   - `persist` 只在串行任务内被调用。现状已经满足：TaskCreate、各 mutation、clear 都走 `enqueue`，sweep 走 `serialize`。一次 persist 的 2–3 次 `appendEntry` 是同步连续调用，中间不会插入其他条目。
@@ -217,6 +219,7 @@ planPersist(state, archiveBase: ReadonlyMap<number, string>, liveKey: string | u
   - 驱逐之后 ≤ cap，后续 sweep 返回同一引用 ⇒ 不写；
   - 写入率不变式测试见 §8。
 - 被驱逐任务的 `TaskGet` 会返回 not found。TaskList 页脚 `TaskGet <id> still works` 的承诺只对仍保留的归档任务成立，需要在 `todo-archive/plan.md` 里注明。
+- **驱逐是分支局部的**（评审 Nit #6）：navigateTree 回退到驱逐点之前，被驱逐任务会复活（fold 语义的自然结果，与「session 文件即真相」一致）；§11 D14 修订一并注明。
 
 ## 7. 改动文件域
 
@@ -231,7 +234,7 @@ planPersist(state, archiveBase: ReadonlyMap<number, string>, liveKey: string | u
 
 **打包建议**（OD5，可不问，默认这样做）：
 
-- 包 1：快赢 ① + ②，即去掉 `details.state` + live 去重。约 30 行，可以独立发版，回滚零风险。
+- 包 1：快赢 ① + ②（去掉 `details.state` + live 去重）——**必须显式携带**（评审 Major #2）：`liveKey` 闭包基线、restore（session_start/session_tree/session_compact）时 `liveKey=undefined` 重置、以及一条「navigateTree 回退后再删除，去重不得跳写」的回归测试。反例（缺了重置）：create A（写 S1）→ delete A（写 S0）→ navigateTree 回退到 S1 → 再 delete A ⇒ 新状态与 S0 内容相同 ⇒ 去重跳写 ⇒ 当前分支最后合法候选仍是 S1 ⇒ **replay 复活已删任务 A**。这是真实丢写，不是理论风险。
 - 包 2：分离存储。
 - 两个包分别提交：`perf(todo): stop embedding full state in tool results`、`perf(todo): persist archived tasks as incremental claude-code-todo-archive entries`。
 
@@ -263,7 +266,7 @@ planPersist(state, archiveBase: ReadonlyMap<number, string>, liveKey: string | u
   - 宽容：A 中 X 的边指向不存在的 id ⇒ 丢边，状态有效；
   - live 侧出现悬空边 ⇒ 该候选被拒，回落到上一个候选；
   - A 内部双向不一致或成环 ⇒ 所有 merge 都失败 ⇒ `degraded: true` 并返回 live-only 结果。
-- **段 2 等价（冻结副本 fuzz）**：新建 `tests/todo/fixtures/legacy-replay.ts`，逐字拷贝改动前的 `restoreState`/`replayState`/`validateState`，按 `legacy-quota-schema.ts` 的先例冻结，文件头注明不可修改。用 seeded 随机生成只含旧形状的分支（custom 与 toolResult 交错，夹杂脏候选、悬空边、成环），断言 `replayState(b)` 与 `legacyReplay(b)` deep-equal。
+- **段 2 等价（冻结副本 fuzz）**：新建 `tests/todo/fixtures/legacy-replay.ts`，逐字拷贝改动前的 `restoreState`/`replayState`/`validateState` **连同闭包私有依赖**（`isTaskStatus`、`uniqueIds`、`validateDependencyGraph`、`isFiniteTimestamp` 等，以实际 import 闭包为准），按 `legacy-quota-schema.ts` 的先例冻结，文件头注明不可修改（评审 Nit #5：先例实际位于 `tests/web-hub/protocol/`，本仓 `tests/todo/fixtures/` 不在 A 级 `tests/fixtures/` 范围，落位此处并在文件头注明理由）。用 seeded 随机生成只含旧形状的分支（custom 与 toolResult 交错，夹杂脏候选、悬空边、成环），断言 `replayState(b)` 与 `legacyReplay(b)` deep-equal。
 - **降级（OD1-c）**：同一份冻结旧实现读新格式分支 ⇒ 结果非 undefined，open 任务集合与新读者一致，nextId 一致，归档任务缺席。这条直接证明 §5 的推荐方案成立。
 - **evictArchived**：`≤ cap` 返回同一引用；超出时按 `(archivedAt, id)` 删除最旧的、裁掉邻居的边，且 live 任务的 `isBlocked` 不变。
 
@@ -274,7 +277,7 @@ planPersist(state, archiveBase: ReadonlyMap<number, string>, liveKey: string | u
 - 迁移：用旧形态分支（live 中含已归档任务）restore，随后任意一次变更 ⇒ 写 put（全部归档任务）+ live，replay 等价。
 - `appendEntry` 第 2 次调用抛错 ⇒ 下一次 persist 补写 live，最终 replay 等价。
 - **round-trip 性质**：seeded 随机生成工具操作序列（create/update/complete/reopen/delete/加删边/sweep/clear/restore），每一步之后断言 `replayState(branchOf(host))` 与内存 state 在"边集合相等、其余字段相等"意义下一致。
-- **崩溃窗口性质**：对每一次 persist 产生的 2–3 条条目，在条目之间截断分支并 replay，断言：结果不为 undefined，且（忽略 `archivedAt` 的有无后）等于操作前或操作后的状态之一。
+- **崩溃窗口性质**（评审 Major #1 修订，分量式断言）：对每一次 persist 产生的 2–3 条条目，在条目之间截断分支并 replay，断言：结果不为 undefined，且**按分量**判定——live 部分 ∈ {操作前, 操作后}、归档部分 ∈ {操作前, 操作后}（忽略 `archivedAt` 的有无）。整体「等于操作前或操作后状态之一」在 §4.3 #6 clear 场景（崩溃在 reset 与空 live 之间 ⇒ live 保留 + 归档集消失，两者都不是整体意义上的操作前/后）下按字面必红，故不作整体断言。
 - **写入率不变式**（照 archive A2）：随机序列中，没有实际变化的操作写入 0 条；任一 persist 写入 ≤ 3 条；连续两次 compact 之间如果没有新的完成任务，写入 0 条。
 - `degraded` 路径下 restore 之后的 persist 不会发出 gone drop（archiveBase 为空）。
 
@@ -329,3 +332,13 @@ planPersist(state, archiveBase: ReadonlyMap<number, string>, liveKey: string | u
 - `docs/dev/todo-web/README.md`：`src/todo/` 段把 "Persists via the `claude-code-todo-state` session entry" 改为说明双条目（live 快照加 `claude-code-todo-archive` 增量包，读回收口在 `replayState`），并链接本文件。
 - `docs/dev/web-hub/refresh-slow/archive-dedup-plan.md` §4：回填"前提已核实：**不成立**，归档任务可编辑、可重开、可删除、可加边（`explore-report.md` §2）；最终方案见 `../../todo-archive-split/plan.md`"。
 - `AGENTS.md`：不改。仓规要求新细节写进 README，且 `src/todo/` 一行已经指向 todo-web README。
+
+---
+
+## 12. 评审修订记录（2026-10-29，reviewer kimi-k3-256k r_XNNX916H：有条件通过）
+
+- Major #1：§8.3 崩溃窗口性质改为分量式断言（live/归档各自 ∈ {前, 后}），修掉与 §4.3 #6 的自相矛盾。
+- Major #2：§7 包 1 显式携带 liveKey 闭包基线 + restore 重置 + navigateTree 回退去重回归测试（否则引入真实丢写）。
+- Minor #3：§4.2 degraded 拆两个子情形（live-only 缺包 / 旧形态全量快照 → 一次性全量 put）。
+- Minor #4：§3.3 钉死 clone 口径与「base 用丢边前 key（悬挂边自愈）」。
+- Nit #5：§8.2 冻结副本列全闭包依赖 + 落位注明；Nit #6：§6 补「驱逐是分支局部的，回退可复活」。
