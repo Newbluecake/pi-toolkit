@@ -230,15 +230,13 @@ describe("external droid integration — chain (§7.2)", () => {
     const first = await spawnDroid(s, "in A", { cwd: dirA });
     const done = await waitFor(s.stack, first, 30_000);
     expect(done.status).toBe("completed");
-    const echoes = readLines(s.echoFile).map(
-      (l) => JSON.parse(l) as { processCwd: string; initCwd: string | null; via?: string },
-    );
-    expect(echoes.length).toBeGreaterThanOrEqual(2); // 探测 1 次 + run 1 次
-    // 目录探测（catalog probe，cwd 在 <agentDir>/cache 下）是后台的，负载下可能晚于 run 落行——按 cwd 排除它。
+    // 目录探测（catalog probe，cwd 在 <agentDir>/cache 下）是后台的，负载下可能晚于 run 落行——
+    // 按 cwd 排除它，且只断 run 自己的行（进程退出时必然已写，不能再数「探测+run ≥ 2」，CI 慢机翻过车）。
     const runEchoes = (): { processCwd: string; initCwd: string | null; via?: string }[] =>
       readLines(s.echoFile)
         .map((l) => JSON.parse(l) as { processCwd: string; initCwd: string | null; via?: string })
         .filter((e) => !e.processCwd.startsWith(s.agentDir));
+    expect(runEchoes().length).toBeGreaterThanOrEqual(1);
     const runEcho = runEchoes().at(-1)!;
     expect(runEcho.processCwd).toBe(dirA);
     expect(runEcho.initCwd).toBe(dirA);
