@@ -243,12 +243,27 @@ keep count or when no age-eligible non-held items remain. Held items never auto-
 once. All three settings are agent-only, non-live: `/reload` suffices, no hub restart.
 Evidence: `docs/dev/web-hub/archive-threshold-report.md`.
 
-**Cap-stable sweep (flip-flop fix)**: the archive snapshot is FIFO-capped at 256. A sweep must never select more
-than `archiveRoom` (free slots + entries whose item is gone from the live lists) — selecting past the cap made
-FIFO eviction drop still-live entries that the next sweep re-selected, rewriting a full 256-entry snapshot every
-minute and flipping archived/unarchived (a 687-run session wrote 4,882 `subagent:archive` entries). When more
-items are eligible than fit, the newest-settled win (the visible rows); `makeArchiveRoom` drops gone entries first.
-Tests: `tests/archive/control.test.ts` ("flip-flop regression"), `tests/archive/sweep.test.ts`.
+**Cap-full progression (#91)**: a FULL 256-entry cap no longer stalls auto-archive (the pre-#91
+`archiveRoom` clamp — free slots + gone entries — is 0 on a cap full of live entries, which the run
+registry's never-shrinking candidate union makes the steady state; a 741-run session sat dead for
+18.7 h, forensics in `docs/dev/archive-full/forensics.md`). Each kind now carries a monotone settled
+watermark, persisted as the snapshot field `horizon: {run?, bash?}` (absent until the first live
+eviction — old snapshots read back at −∞, and pre-#91 sessions never gain the key); terminal items
+settled at/below their kind's horizon are IMPLICITLY archived: never selected, not counted toward
+keep. `selectAutoArchives` is unclamped; after folding the selection, `trimToCap` enforces the cap
+by evicting, in order: P1 unprotected gone entries (insertion order), P2 oldest-settled live auto,
+P3 oldest-settled live manual, P4 protected/batch entries FIFO. Every LIVE victim raises its kind's
+horizon to its settledAt — monotone, so an evicted live item can never be re-selected: an entry
+leaves the explicit set only via gone (not a candidate), horizon (never selectable) or hold (never
+auto-selected) — no resurrect flip-flop, by construction. Writes stay bounded: a stable fleet
+converges to zero writes, every arrival settles in one write, the post-upgrade first sweep over a
+legacy full-cap snapshot is exactly one horizon-only write; `sameArchiveState`/`semanticKey` treat
+the horizon as semantic state. The horizon never rides the wire (I10) — implicit rows sit at the
+256 depth, beyond every display window (two honest boundaries, plan §5 R1: mass-gone can float
+implicit rows into view, and bash `(+N more)` eviction within retention does not converge).
+Manual paths share the trim: `setArchived` protects its own id; `setArchivedMany` protects the batch
+(P4 keeps a >cap batch's newest rows). Tests: `tests/archive/{state,sweep,control}.test.ts`
+(T1–T6), `tests/archive/write-rate.test.ts` (S5–S7, CF3). Design: `docs/dev/archive-full/plan.md`.
 Write-dedup safety net (#89 A1): `commit()` compares the next snapshot against the per-instance
 `lastPersisted` baseline (`sameArchiveState`, plain ordered field comparison, `at` included — seeded
 by `restore()` from the branch read-back; advanced only on a successful append) and skips the write

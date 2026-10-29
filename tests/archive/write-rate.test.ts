@@ -9,12 +9,14 @@
  *    flipped between two disjoint groups A/B/A every minute (659 pairs).
  *
  * Both were fixed by the convergence rework (cd57bdf9: room-capped selection +
- * makeArchiveRoom) and are additionally covered by the A1 dedup guard (sameArchiveState
+ * makeArchiveRoom — itself superseded by the #91 horizon model) and are additionally
+ * covered by the A1 dedup guard (sameArchiveState
  * vs ArchiveControl.lastPersisted). This suite pins the WRITE RATE itself, so any
  * reappearance of either form goes red. The counterfactual block at the bottom replays
  * BOTH pre-fix sweep loops (inlined from git history, seed-deterministic) against the
  * same candidate streams and asserts this suite's checker DOES flag them — proving the
- * gate has teeth rather than passing vacuously.
+ * gate has teeth rather than passing vacuously. A third counterfactual (CF3) inlines
+ * the cd57bdf9 sweep itself and shows it stalls on the #91 forensic fleet.
  *
  * Timer arming itself is covered by tests/archive/control.test.ts; here fake timers
  * just drive the sweep cadence (60 s of wall time per sweep, `now` advancing with it,
@@ -23,6 +25,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ArchiveControl } from "../../src/archive/control.js";
 import {
+  ARCHIVE_ENTRIES_CAP,
   ARCHIVE_ENTRY_TYPE,
   archiveItem,
   autoArchiveDue,
@@ -32,7 +35,7 @@ import {
   sameArchiveState,
   type ArchiveState,
 } from "../../src/archive/state.js";
-import type { ArchiveCandidate } from "../../src/archive/sweep.js";
+import { selectAutoArchives, type ArchiveCandidate } from "../../src/archive/sweep.js";
 import type { JobRecord } from "../../src/bash/types.js";
 import type { RunSnapshot } from "../../src/core/types.js";
 
@@ -127,11 +130,14 @@ function drive(control: ArchiveControl, n: number, tick: () => void, before?: (i
 
 type WriteRateViolation = { i: number; kind: "identical" | "at-only" | "aba" };
 
-/** `kind\0id\0auto` of entries + full holds, both sorted — everything but entries' `at`. */
+/** `kind\0id\0auto` of entries + full holds, both sorted — everything but entries' `at`
+ *  and the horizon. #91: the horizon IS semantic state (a horizon-only write is a
+ *  real, bounded write — the post-upgrade first sweep — and must not be mistaken
+ *  for an at-only rewrite). */
 function semanticKey(s: ArchiveState): string {
   const entries = s.entries.map((e) => `${e.kind}\u0000${e.id}\u0000${e.auto === true}`).sort();
   const held = s.held.map((h) => `${h.kind}\u0000${h.id}\u0000${h.at}`).sort();
-  return JSON.stringify([entries, held]);
+  return JSON.stringify([entries, held, s.horizon?.run ?? null, s.horizon?.bash ?? null]);
 }
 
 function idSetKey(s: ArchiveState): string {
@@ -181,6 +187,9 @@ describe("archive write-rate invariants (#89 A2, LCG seed 0x5eed89)", () => {
       // fleet must then converge to ZERO further writes — not one 16.5 KB entry per minute.
       expect(h.appended).toHaveLength(1);
       expect(h.appended[0]!.type).toBe(ARCHIVE_ENTRY_TYPE);
+      // #91: the initial fill evicted the 473 oldest-settled of the 729 selected items —
+      // the first (and only) snapshot now carries the horizon (review #4's mirror image).
+      expect((h.appended[0]!.data as ArchiveState).horizon).toEqual({ run: 472 });
       expect(checkWriteRateInvariants(h.appended.map((a) => a.data))).toEqual([]);
     } finally {
       vi.useRealTimers();
@@ -281,6 +290,163 @@ describe("archive write-rate invariants (#89 A2, LCG seed 0x5eed89)", () => {
     expect(h.control.setArchived("run", "r-y", "archive")).toEqual({ ok: true, changed: true });
     expect(h.appended).toHaveLength(1);
     expect(h.appended[0]!.data.entries.map((e) => e.id)).toEqual(["r-x", "r-y"]);
+  });
+
+  // -------------------------------------------------------------------------
+  // #91 cap-full progression scenarios (plan §6.2 S5–S7). Shared fixture: the
+  // forensic fleet shape — a candidate list that NEVER shrinks (the run registry
+  // reseeds every terminal run from the session log) fed by a slow arrival stream.
+  // -------------------------------------------------------------------------
+
+  /** One S5-style arrival: settled far below `now` (past the age gate — `now` starts
+   *  at 10_000_000 and grows 60_000/sweep while arrivals live at ~10_000+) and strictly
+   *  NEWER than every pre-existing candidate (≤ 699) and than the horizon can ever be
+   *  (the horizon only reaches a PREVIOUS arrival's settledAt; arrivals are monotone)
+   *  — review #1's fixture constraint, so a green ① can only come from real progression. */
+  const arrivalSnap = (n: number): RunSnapshot => runSnap(`n-${n}`, 10_000 + n);
+
+  /** Drive the arrival flow for `sweeps` sweeps (one arrival every 3), probing after
+   *  EVERY sweep: the stall detector (①), the horizon sequence (⑤) and every eviction
+   *  event (④). Caller owns the fake timers and disposes the control. */
+  function driveArrivalFlow(runs: RunSnapshot[], sweeps: number, h: ReturnType<typeof makeControl>) {
+    let arrivals = 0;
+    const detector: number[] = [];
+    const horizons: number[] = [];
+    const evictions: Array<{ at: number; id: string }> = [];
+    const idSets: Array<Set<string>> = [];
+    for (let i = 1; i <= sweeps; i++) {
+      h.tick();
+      if (i % 3 === 0) {
+        arrivals += 1;
+        runs.push(arrivalSnap(arrivals));
+      }
+      vi.advanceTimersByTime(SWEEP_MS);
+      const last = h.appended[h.appended.length - 1]?.data;
+      const horizon = last?.horizon?.run ?? -Infinity;
+      const archived = h.control.view().runs;
+      const seen = new Set<string>();
+      let over = 0;
+      for (const snap of runs) {
+        if (seen.has(snap.runId)) continue;
+        seen.add(snap.runId);
+        if (snap.status !== "completed") continue;
+        if (archived.has(snap.runId)) continue;
+        if ((snap.diag.settledAt ?? snap.updatedAt) > horizon) over += 1;
+      }
+      detector.push(over);
+      if (last !== undefined) {
+        horizons.push(last.horizon?.run ?? -Infinity);
+        const ids = new Set(last.entries.filter((e) => e.kind === "run").map((e) => e.id));
+        if (idSets.length > 0)
+          for (const id of idSets[idSets.length - 1]!) if (!ids.has(id)) evictions.push({ at: idSets.length, id });
+        idSets.push(ids);
+      }
+    }
+    return { arrivals, detector, horizons, evictions, idSets };
+  }
+
+  it("S5 never-shrinking fleet + arrivals: progression never stalls, evicted ids never return, horizon monotone", () => {
+    vi.useFakeTimers();
+    try {
+      const runs = Array.from({ length: RUNS }, (_, i) => runSnap(`r-${i}`, i));
+      const h = makeControl(runs, []);
+      h.control.start(AFTER_MS, 6, 5);
+      const { arrivals, detector, horizons, evictions, idSets } = driveArrivalFlow(runs, SWEEPS * 3, h);
+      h.control.dispose();
+      expect(arrivals).toBe(1_440); // the scenario is not vacuous
+      // ① the stall detector: after EVERY sweep, unarchived non-held terminal runs
+      // settled above the horizon stay within the keep count — the pre-#91 sweep left
+      // this monotonically growing past keepRuns (CF3 proves the detector has teeth).
+      // (Plain loops + one assertion each: 4k+ vitest `expect` calls dominate runtime.)
+      expect(Math.max(...detector)).toBeLessThanOrEqual(6);
+      // ② bounded writes: the initial fill + one per arrival + at most one horizon-only.
+      expect(h.appended.length).toBeLessThanOrEqual(arrivals + 2);
+      expect(h.appended.length).toBeGreaterThanOrEqual(arrivals); // …and really progressed
+      // ③ no identical / at-only / A/B/A pairs.
+      expect(checkWriteRateInvariants(h.appended.map((a) => a.data))).toEqual([]);
+      // ④ evicted ids NEVER return to any later snapshot.
+      const returns = evictions.filter((ev) => idSets.slice(ev.at).some((s) => s.has(ev.id)));
+      expect(returns).toEqual([]);
+      expect(evictions.length).toBeGreaterThan(0); // ④ is not vacuous
+      // ⑤ the horizon sequence is monotone non-decreasing.
+      const drops: Array<[number, number, number]> = [];
+      for (let i = 1; i < horizons.length; i++)
+        if (horizons[i]! < horizons[i - 1]!) drops.push([i, horizons[i - 1]!, horizons[i]!]);
+      expect(drops).toEqual([]);
+      // The explicit set stays capped, and the fill really evicted live entries.
+      expect(h.control.wire()?.entries).toHaveLength(256);
+      expect(horizons[horizons.length - 1]).toBeGreaterThan(400);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("S6 restart equivalence: a mid-flow branch restores 1:1 (horizon included) and a fresh control writes NOTHING", () => {
+    vi.useFakeTimers();
+    try {
+      const runs = Array.from({ length: RUNS }, (_, i) => runSnap(`r-${i}`, i));
+      const h = makeControl(runs, []);
+      h.control.start(AFTER_MS, 6, 5);
+      driveArrivalFlow(runs, 900, h); // 300 arrivals → a real mixed state WITH a horizon
+      h.control.dispose();
+      expect(h.appended.length).toBeGreaterThanOrEqual(2);
+      const branch = h.appended.map((a) => ({ type: "custom", customType: ARCHIVE_ENTRY_TYPE, data: a.data }));
+      const readback = readArchiveState(branch);
+      const last = h.appended[h.appended.length - 1]!.data;
+      expect(readback.entries).toEqual(last.entries); // disk == memory, entries …
+      expect(readback.horizon).toEqual(last.horizon); // …and horizon alike
+      expect(readback.horizon?.run).toBeGreaterThan(400); // a REAL horizon, not -∞
+      const h2 = makeControl(runs, []);
+      h2.control.restore(branch);
+      h2.control.start(AFTER_MS, 6, 5);
+      for (let i = 0; i < 60; i++) {
+        h2.tick();
+        vi.advanceTimersByTime(SWEEP_MS);
+      }
+      h2.control.dispose();
+      expect(h2.appended).toHaveLength(0); // the restored baseline holds: zero replay
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("S7 upgrade first sweep: a legacy full-cap snapshot (no horizon) settles in EXACTLY one horizon-only write, then goes quiet", () => {
+    vi.useFakeTimers();
+    try {
+      // The forensic scene: 741 runs, the newest 256 auto-archived, no horizon field.
+      const runs = Array.from({ length: 741 }, (_, i) => runSnap(`r-${i}`, i));
+      const h = makeControl(runs, []);
+      h.control.restore([
+        {
+          type: "custom",
+          customType: ARCHIVE_ENTRY_TYPE,
+          data: {
+            entries: Array.from({ length: 256 }, (_, i) => ({
+              kind: "run",
+              id: `r-${485 + i}`,
+              at: 1,
+              auto: true,
+            })),
+            held: [],
+          },
+        },
+      ]);
+      h.control.start(AFTER_MS, 6, 5);
+      vi.advanceTimersByTime(SWEEP_MS);
+      // First sweep: the 479 selected all-older-than-the-window items lose the trim
+      // contest — entries UNCHANGED, horizon folded in, exactly ONE write.
+      expect(h.appended).toHaveLength(1);
+      const data = h.appended[0]!.data;
+      expect(data.horizon).toEqual({ run: 478 });
+      expect(data.entries.map((e) => e.id)).toEqual(Array.from({ length: 256 }, (_, i) => `r-${485 + i}`));
+      expect(checkWriteRateInvariants(h.appended.map((a) => a.data))).toEqual([]);
+      // Then quiet: the 6 keep-window runs sit exactly at the count gate.
+      for (let i = 0; i < 60; i++) vi.advanceTimersByTime(SWEEP_MS);
+      expect(h.appended).toHaveLength(1);
+      h.control.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -426,5 +592,126 @@ describe("archive write-rate counterfactuals: the gate goes red against both his
       return b.entries.filter((e) => !sa.has(e.id)).length;
     };
     expect(diff(appended[0]!, appended[1]!)).toBeGreaterThan(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CF3 (#91): the cd57bdf9 sweep — the very code this change replaced, inlined —
+// stalls on a never-shrinking fleet. Proves S5's ① detector is not vacuous: the
+// same arrival stream that the new sweep keeps within keepRuns drives the old one
+// monotonically past it, and the old selectAutoArchives (room-clamped) returns []
+// exactly where the new one keeps selecting.
+// ---------------------------------------------------------------------------
+
+describe("archive write-rate counterfactual CF3: the cd57bdf9 room clamp stalls (#91)", () => {
+  /** HEAD's selectAutoArchives at the time #91 landed, verbatim semantics: the count
+   *  gates above are today's; the tail is the deleted `archiveRoom` truncation. */
+  function cfRoomSelect(
+    state: ArchiveState,
+    candidates: readonly ArchiveCandidate[],
+    now: number,
+    afterMs: number,
+    keepRuns: number,
+    keepBash: number,
+  ): ArchiveCandidate[] {
+    const live = new Set(candidates.map((c) => `${c.kind}\u0000${c.id}`));
+    const gone = state.entries.filter((e) => !live.has(`${e.kind}\u0000${e.id}`));
+    const room = Math.max(0, ARCHIVE_ENTRIES_CAP - state.entries.length) + gone.length;
+    const selected: ArchiveCandidate[] = [];
+    for (const kind of ["run", "bash"] as const) {
+      const seen = new Set<string>();
+      const remaining = candidates.filter((item) => {
+        if (item.kind !== kind || !item.terminal || isArchived(state, item) || seen.has(item.id)) return false;
+        seen.add(item.id);
+        return true;
+      });
+      const keep = kind === "run" ? keepRuns : keepBash;
+      const excess = keep === 0 ? remaining.length : Math.max(0, remaining.length - keep);
+      selected.push(
+        ...remaining
+          .filter((item) => autoArchiveDue(state, item, item.settledAt, now, afterMs))
+          .sort((a, b) => a.settledAt - b.settledAt)
+          .slice(0, excess),
+      );
+    }
+    if (selected.length <= room) return selected;
+    const keep = new Set(
+      selected
+        .slice()
+        .sort((a, b) => b.settledAt - a.settledAt)
+        .slice(0, room),
+    );
+    return selected.filter((item) => keep.has(item));
+  }
+
+  /** HEAD's control.sweep: select (room-clamped) → makeArchiveRoom → fold with the
+   *  archiveItem FIFO cap. States carry no horizon, so today's autoArchiveDue behaves
+   *  exactly like the historical one for this loop. */
+  function cfStallSweep(
+    state: ArchiveState,
+    candidates: readonly ArchiveCandidate[],
+    now: number,
+  ): ArchiveState | undefined {
+    const selected = cfRoomSelect(state, candidates, now, AFTER_MS, 6, 5);
+    if (selected.length === 0) return undefined;
+    const live = new Set(candidates.map((c) => `${c.kind}\u0000${c.id}`));
+    const needed = state.entries.length + selected.length - ARCHIVE_ENTRIES_CAP;
+    let base = state;
+    if (needed > 0) {
+      const drop = state.entries.filter((e) => !live.has(`${e.kind}\u0000${e.id}`)).slice(0, needed);
+      if (drop.length > 0)
+        base = {
+          entries: state.entries.filter((e) => !drop.some((d) => d.kind === e.kind && d.id === e.id)),
+          held: [],
+        };
+    }
+    let next = base;
+    let changed = base !== state;
+    for (const item of selected) {
+      const after = archiveItem(next, { kind: item.kind, id: item.id, auto: true, now });
+      if (after !== undefined) {
+        next = after;
+        changed = true;
+      }
+    }
+    return changed ? next : undefined;
+  }
+
+  it("on the S5 arrival stream the old sweep's unarchived count grows monotonically past keepRuns, while the new one keeps selecting", () => {
+    // The S5 stream, scaled to 600 sweeps (200 arrivals): enough to blow far past
+    // keepRuns without burning the suite's time budget — the stall is structural.
+    const runs = Array.from({ length: RUNS }, (_, i) => ({
+      kind: "run" as const,
+      id: `r-${i}`,
+      terminal: true,
+      settledAt: i,
+    }));
+    let state = emptyArchiveState();
+    let now = 10_000_000;
+    const detector: number[] = [];
+    let arrivals = 0;
+    for (let sweep = 1; sweep <= 600; sweep++) {
+      now += 60_000;
+      if (sweep % 3 === 0) {
+        arrivals += 1;
+        runs.push({ kind: "run", id: `n-${arrivals}`, terminal: true, settledAt: 10_000 + arrivals });
+      }
+      const next = cfStallSweep(state, runs, now);
+      if (next !== undefined) state = next;
+      const archived = new Set(state.entries.filter((e) => e.kind === "run").map((e) => e.id));
+      detector.push(runs.filter((c) => c.terminal && !archived.has(c.id)).length);
+    }
+    // The stall: after the initial fill (256 archived, 444 left over), EVERY arrival
+    // stays unarchived forever — monotone growth, never within keepRuns again.
+    expect(detector[0]).toBe(RUNS - 256);
+    for (let i = 1; i < detector.length; i++) expect(detector[i]).toBeGreaterThanOrEqual(detector[i - 1]!);
+    expect(detector[detector.length - 1]).toBe(RUNS - 256 + arrivals);
+    expect(Math.max(...detector)).toBeGreaterThan(6); // S5's ① detector goes RED here
+    // The teeth: the CURRENT selectAutoArchives on that same stalled state selects
+    // the over-keep excess (progression) where the room clamp returned [].
+    expect(cfRoomSelect(state, runs, now, AFTER_MS, 6, 5)).toHaveLength(0); // the old way: nothing
+    expect(
+      selectAutoArchives(state, runs, now, { afterMs: AFTER_MS, keepRuns: 6, keepBash: 5 }).length,
+    ).toBeGreaterThan(0); // the new way: progression
   });
 });

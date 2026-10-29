@@ -1,10 +1,12 @@
-/** Pure fleet auto-archive selection (#59). No clock, persistence or timers. */
+/** Pure fleet auto-archive selection + cap trimming (#59, #91). No clock, persistence or timers. */
 import {
   ARCHIVE_ENTRIES_CAP,
+  archivedSetOf,
   autoArchiveDue,
-  isArchived,
-  sameItem,
+  horizonOf,
+  raiseHorizon,
   type ArchiveEntry,
+  type ArchiveHorizon,
   type ArchiveKind,
   type ArchiveState,
 } from "./state.js";
@@ -23,42 +25,22 @@ export interface ArchiveSweepPolicy {
   keepBash: number;
 }
 
-/** Archive entries whose item is no longer in the live candidate lists (evicted from the fleet /
- *  bash recycle). Only these may be dropped to make room: they are invisible in the UI anyway. */
-function goneEntries(state: ArchiveState, candidates: readonly ArchiveCandidate[]): ArchiveEntry[] {
-  const live = new Set(candidates.map((c) => `${c.kind}\u0000${c.id}`));
-  return state.entries.filter((e) => !live.has(`${e.kind}\u0000${e.id}`));
-}
-
-/** How many NEW archives fit without evicting a live entry: free slots + gone entries. */
-function archiveRoom(state: ArchiveState, candidates: readonly ArchiveCandidate[]): number {
-  return Math.max(0, ARCHIVE_ENTRIES_CAP - state.entries.length) + goneEntries(state, candidates).length;
-}
-
-/** Drop (oldest first) just enough gone entries so `incoming` new archives fit under the cap.
- *  The state's own FIFO cap would instead evict the oldest-INSERTED entries — live ones included —
- *  and the evicted live items would be re-selected by the next sweep (the flip-flop bug). */
-export function makeArchiveRoom(
-  state: ArchiveState,
-  candidates: readonly ArchiveCandidate[],
-  incoming: number,
-): ArchiveState {
-  const needed = state.entries.length + incoming - ARCHIVE_ENTRIES_CAP;
-  if (needed <= 0) return state;
-  const drop = goneEntries(state, candidates).slice(0, needed);
-  if (drop.length === 0) return state;
-  return { ...state, entries: state.entries.filter((e) => !drop.some((d) => sameItem(d, e))) };
+/** Canonical key of the `live` map `trimToCap` consumes: `kind\0id`. */
+export function liveKey(kind: ArchiveKind, id: string): string {
+  return `${kind}\u0000${id}`;
 }
 
 /** Count unarchived terminal items, including held items, independently by kind.
  * Select oldest eligible items until the keep count is reached or eligibility
  * runs out. Held items count but are never selected. Input order/state are unchanged.
  *
- * Capacity: the result never exceeds `archiveRoom` (the archive snapshot is FIFO-capped at
- * ARCHIVE_ENTRIES_CAP). When more items are eligible than fit, the NEWEST-settled ones win — they
- * are the rows the drawer can show; the oldest unarchived terminal items sit beyond the fleet
- * wire's row caps. Selecting past the cap would evict live entries that the next sweep
- * re-selects, flipping archived/unarchived every minute. */
+ * #91: terminal items settled at/below their kind's horizon are IMPLICITLY archived —
+ * they neither count toward keep nor get selected (held items always count). There is
+ * NO room truncation here any more: capacity is decided once, by `trimToCap`, which
+ * must see the complete selection so the losers of a full-cap contest fold into the
+ * horizon in the SAME write instead of being re-selected next sweep (the pre-#91
+ * `archiveRoom` clamp is what made a full cap of live entries stall auto-archive —
+ * gone≈0 ⇒ room=0 ⇒ selection always empty). */
 export function selectAutoArchives(
   state: ArchiveState,
   candidates: readonly ArchiveCandidate[],
@@ -68,11 +50,16 @@ export function selectAutoArchives(
   if (policy.afterMs <= 0) return [];
   const selected: ArchiveCandidate[] = [];
   for (const kind of ["run", "bash"] as const) {
+    const archived = archivedSetOf(state, kind);
+    const held = new Set(state.held.filter((h) => h.kind === kind).map((h) => h.id));
+    const horizon = horizonOf(state, kind);
     const seen = new Set<string>();
     const remaining = candidates.filter((item) => {
-      if (item.kind !== kind || !item.terminal || isArchived(state, item) || seen.has(item.id)) return false;
+      if (item.kind !== kind || !item.terminal || seen.has(item.id)) return false;
       seen.add(item.id);
-      return true;
+      if (archived.has(item.id)) return false;
+      // Held items always count; implicitly-archived ones (settled ≤ horizon) never do.
+      return held.has(item.id) || item.settledAt > horizon;
     });
     const keep = kind === "run" ? policy.keepRuns : policy.keepBash;
     const excess = keep === 0 ? remaining.length : Math.max(0, remaining.length - keep);
@@ -83,13 +70,60 @@ export function selectAutoArchives(
         .slice(0, excess),
     );
   }
-  const room = archiveRoom(state, candidates);
-  if (selected.length <= room) return selected;
-  const keep = new Set(
-    selected
-      .slice()
-      .sort((a, b) => b.settledAt - a.settledAt)
-      .slice(0, room),
-  );
-  return selected.filter((item) => keep.has(item));
+  return selected;
+}
+
+/**
+ * Enforce the 256-entry snapshot cap after new archives were folded in with
+ * `archiveItem(·, Infinity)` (#91). No overflow ⇒ the SAME reference back.
+ * Overflow evicts `overflow` victims by priority:
+ *
+ *  P1 unprotected entries whose item is GONE from the live lists — oldest-INSERTED
+ *     first (invisible in the UI anyway);
+ *  P2 unprotected LIVE `auto` entries — oldest-SETTLED first (ties keep insertion
+ *     order via stable sort);
+ *  P3 unprotected LIVE manual entries — oldest-settled first;
+ *  P4 protected entries (a manual batch's own ids) — insertion order, i.e. the
+ *     pre-#91 capTail semantics, so a >cap batch still keeps its newest rows.
+ *
+ * Every LIVE victim raises its kind's horizon to its settledAt (`raiseHorizon`,
+ * monotone) — the evicted item is implicitly archived from then on and can never be
+ * re-selected, which is what makes resurrect flip-flop impossible by construction:
+ * an entry leaves the explicit set only via gone (not a candidate), horizon (never
+ * selectable again) or hold (never auto-selected). Gone victims do not move the
+ * horizon. `held` is untouched.
+ */
+export function trimToCap(
+  state: ArchiveState,
+  live: ReadonlyMap<string, number>,
+  protect: ReadonlySet<string>,
+): ArchiveState {
+  const overflow = state.entries.length - ARCHIVE_ENTRIES_CAP;
+  if (overflow <= 0) return state;
+  const key = (e: ArchiveEntry) => liveKey(e.kind, e.id);
+  const gone: ArchiveEntry[] = [];
+  const liveAuto: ArchiveEntry[] = [];
+  const liveManual: ArchiveEntry[] = [];
+  const safe: ArchiveEntry[] = [];
+  for (const e of state.entries) {
+    if (protect.has(key(e))) safe.push(e);
+    else if (!live.has(key(e))) gone.push(e);
+    else if (e.auto === true) liveAuto.push(e);
+    else liveManual.push(e);
+  }
+  const settled = (e: ArchiveEntry): number => live.get(key(e)) ?? -Infinity;
+  liveAuto.sort((a, b) => settled(a) - settled(b));
+  liveManual.sort((a, b) => settled(a) - settled(b));
+  const victims = [...gone, ...liveAuto, ...liveManual, ...safe].slice(0, overflow);
+  let horizon: ArchiveHorizon | undefined = state.horizon;
+  for (const v of victims) {
+    const s = live.get(key(v));
+    if (s !== undefined) horizon = raiseHorizon(horizon, v.kind, s);
+  }
+  const victimKeys = new Set(victims.map(key));
+  return {
+    entries: state.entries.filter((e) => !victimKeys.has(key(e))),
+    held: state.held,
+    ...(horizon !== undefined ? { horizon } : {}),
+  };
 }

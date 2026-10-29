@@ -29,7 +29,7 @@ import {
   type ArchiveKind,
   type ArchiveState,
 } from "./state.js";
-import { makeArchiveRoom, selectAutoArchives, type ArchiveCandidate } from "./sweep.js";
+import { liveKey, selectAutoArchives, trimToCap, type ArchiveCandidate } from "./sweep.js";
 import { isTerminalStatus } from "../core/status.js";
 import { isTerminalJobStatus, type JobRecord } from "../bash/types.js";
 import type { RunSnapshot } from "../core/types.js";
@@ -166,6 +166,10 @@ export class ArchiveControl {
    * terminal (a running run/job is refused with `not_terminal`); an id that no
    * longer appears in the live lists is accepted (idempotent — the row is gone
    * from the UI anyway, and the entry may outlive the in-memory snapshot).
+   * #91: the new entry is folded in unbounded and `trimToCap` evicts by priority
+   * (gone → oldest-settled live auto → manual, the id itself protected); the
+   * evicted live item's settledAt raises the kind's horizon, so it does not come
+   * back and squat on a keep slot.
    */
   setArchived(kind: ArchiveKind, id: string, set: "archive" | "unarchive"): SetArchiveResult {
     if (this.disposed) return { ok: false, reason: "not_found" };
@@ -173,9 +177,9 @@ export class ArchiveControl {
       const term = this.terminalInstant(kind, id);
       // `undefined` ⇔ not in the live lists (evicted/foreign) — allow it.
       if (term === false) return { ok: false, reason: "not_terminal" };
-      const next = archiveItem(this.state, { kind, id, auto: false, now: this.deps.now() });
+      const next = archiveItem(this.state, { kind, id, auto: false, now: this.deps.now() }, Infinity);
       if (next === undefined) return { ok: true, changed: false };
-      this.commit(next);
+      this.commit(trimToCap(next, this.liveSettled(), new Set([liveKey(kind, id)])));
       return { ok: true, changed: true };
     }
     const next = unarchiveItem(this.state, { kind, id }, this.deps.now());
@@ -196,11 +200,11 @@ export class ArchiveControl {
    * NOT counted: from the caller's point of view nothing became hidden, so a caller that reports
    * `changed: 0` truthfully says "nothing to archive". 0 also means no entry was written at all.
    *
-   * Cap overflow rides `archiveItem`'s own FIFO tail (`ARCHIVE_ENTRIES_CAP`): the oldest archive
-   * entries are evicted, so a batch larger than the cap keeps its NEWEST rows — the same
-   * semantics a per-id loop would have produced, just with one write. Batch callers should size
-   * their batch to `archiveRoom(kind)` first so their batch converges instead of churning the
-   * window (2026-10-28 verifier: the wire orders the ids NEWEST-first, which evicts the newest).
+   * Cap overflow goes through `trimToCap` (#91): gone entries are evicted first,
+   * then the oldest-SETTLED live ones (their settledAt raises the kind's horizon —
+   * an evicted live item never returns to squat on a keep slot); the batch's own
+   * ids are protected, so a batch larger than the cap keeps its NEWEST rows (`P4`,
+   * the pre-#91 capTail semantics) and its overflow members fold into the horizon.
    *
    * Archive only (no `unarchive` arm): the only production caller is the `archive_omitted` op, and
    * un-archiving a batch has no such caller — a single row un-archives through `setArchived`, which
@@ -215,14 +219,17 @@ export class ArchiveControl {
     for (const id of ids) {
       if (this.terminalInstant(kind, id) === false) continue;
       const already = isArchived(next, { kind, id });
-      const after = archiveItem(next, { kind, id, auto: false, now });
+      const after = archiveItem(next, { kind, id, auto: false, now }, Infinity);
       if (after === undefined) continue;
       next = after;
       if (!already) changed += 1;
     }
     // An auto→manual re-mark changes the state (the badge drops) even though `changed` stays 0 —
     // commit it, or the entry would silently diverge from what the session file records.
-    if (next !== this.state) this.commit(next);
+    if (next !== this.state) {
+      const protect = new Set(ids.map((id) => liveKey(kind, id)));
+      this.commit(trimToCap(next, this.liveSettled(), protect));
+    }
     return changed;
   }
 
@@ -235,7 +242,11 @@ export class ArchiveControl {
     }
     if (sameArchiveState(next, this.lastPersisted)) return; // the file already holds this exact content
     try {
-      this.deps.appendEntry("subagent:archive", { entries: next.entries, held: next.held });
+      this.deps.appendEntry("subagent:archive", {
+        entries: next.entries,
+        held: next.held,
+        ...(next.horizon !== undefined ? { horizon: next.horizon } : {}),
+      });
       this.lastPersisted = next; // advance ONLY on success: a failed append leaves the baseline behind,
       // so the next real change re-appends the full state — nothing is silently lost.
     } catch {
@@ -262,8 +273,30 @@ export class ArchiveControl {
     return undefined;
   }
 
-  /** One auto-archive pass. Batch-commits (one entry, one rev bump) — a sweep
-   *  touching N rows must not write N session entries. */
+  /** The live-settled map for `trimToCap` (#91): every candidate's settle instant —
+   *  run `diag.settledAt ?? updatedAt`, bash `endedAt ?? createdAt`, the exact same
+   *  expressions `sweep()`/`terminalInstant` use — keyed by `liveKey`, first
+   *  occurrence winning (the same dedup selection applies). Non-terminal items are
+   *  included too: they can never be in `entries` (archive requires terminal), so
+   *  they only keep would-be victims out of the gone pool. */
+  private liveSettled(): Map<string, number> {
+    const live = new Map<string, number>();
+    for (const snap of this.candidates.runs()) {
+      const key = liveKey("run", snap.runId);
+      if (!live.has(key)) live.set(key, snap.diag.settledAt ?? snap.updatedAt);
+    }
+    for (const record of this.candidates.bashJobs()) {
+      const key = liveKey("bash", record.jobId);
+      if (!live.has(key)) live.set(key, record.endedAt ?? record.createdAt);
+    }
+    return live;
+  }
+
+  /** One auto-archive pass (#91). Selects WITHOUT any room clamp, folds the whole
+   *  selection in unbounded, then `trimToCap` runs the new and old entries through
+   *  ONE oldest-settled contest: the newest-settled 256 become explicit entries,
+   *  everyone else folds into the horizon — all in a single batch commit (one
+   *  entry, one rev bump). A stable fleet then converges to zero writes. */
   private sweep(): void {
     if (this.disposed || this.autoAfterMs <= 0) return;
     const now = this.deps.now();
@@ -287,17 +320,13 @@ export class ArchiveControl {
       keepBash: this.keepBash,
     });
     if (selected.length === 0) return;
-    // Evict gone entries (not live ones) so the state's FIFO cap never bites during a sweep.
-    const base = makeArchiveRoom(this.state, candidates, selected.length);
-    let next = base;
-    let changed = base !== this.state;
+    let next: ArchiveState = this.state;
     for (const item of selected) {
-      const after = archiveItem(next, { kind: item.kind, id: item.id, auto: true, now });
-      if (after !== undefined) {
-        next = after;
-        changed = true;
-      }
+      const after = archiveItem(next, { kind: item.kind, id: item.id, auto: true, now }, Infinity);
+      if (after === undefined) continue; // unreachable: a selected item is never already archived
+      next = after;
     }
-    if (changed) this.commit(next);
+    if (next === this.state) return;
+    this.commit(trimToCap(next, this.liveSettled(), new Set()));
   }
 }

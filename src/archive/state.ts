@@ -5,14 +5,21 @@
  *
  * Model (todo-archive's full-snapshot-per-change precedent, `src/todo/`):
  * - `entries`: the currently-archived items (kind run|bash). Presence = archived;
- *   `auto` marks a sweep-archived item so the UI can badge it. FIFO-capped —
- *   evicting the OLDEST archive is fine: those items are long gone from the
- *   fleet list anyway.
+ *   `auto` marks a sweep-archived item so the UI can badge it.
+ * - `horizon` (#91): a per-kind monotone settled-epoch-ms watermark. Terminal
+ *   items settled at/below their kind's horizon are IMPLICITLY archived — never
+ *   selected by the sweep, not counted toward keep. The watermark only moves up
+ *   (`raiseHorizon`): every LIVE entry evicted by `trimToCap` raises its kind's
+ *   horizon to the victim's settledAt, so an evicted live item can never be
+ *   re-selected (no resurrect flip-flop, by construction). It is absent until
+ *   the first live eviction, so sessions that never overflow write snapshots
+ *   byte-identical to the pre-#91 shape.
  * - `held`: items the user explicitly UNARCHIVED. They are exempt from
  *   auto-archive forever (otherwise a 31-minute-old run unarchived at 12:31
  *   would be re-archived by the very next sweep — the unarchive would be a
  *   no-op). Re-archiving manually (or a fresh archive of the same id) clears
- *   the hold.
+ *   the hold. A hold also beats the horizon: held items still count toward
+ *   keep and stay visible even when settled below the watermark.
  *
  * The whole state is persisted as one `subagent:archive` session entry per
  * change (`pi.appendEntry`), read back through `getBranch()` taking the LAST
@@ -42,6 +49,15 @@ export interface ArchiveHold {
 export interface ArchiveState {
   entries: ArchiveEntry[];
   held: ArchiveHold[];
+  /** #91 monotone settled watermark per kind; absent ⇔ −∞ for both kinds
+   *  (exactOptionalPropertyTypes: the key is simply not written). */
+  horizon?: ArchiveHorizon;
+}
+
+/** Epoch-ms settled watermark per kind; an absent key ⇔ −∞. Monotone non-decreasing. */
+export interface ArchiveHorizon {
+  run?: number;
+  bash?: number;
 }
 
 /** FIFO caps. 256 archived rows is already far beyond what the drawer can show. */
@@ -52,6 +68,22 @@ export const ARCHIVE_ENTRY_TYPE = "subagent:archive";
 
 export function emptyArchiveState(): ArchiveState {
   return { entries: [], held: [] };
+}
+
+/** The kind's watermark, −∞ when unset (compare with `<=` on the caller side). */
+export function horizonOf(state: ArchiveState, kind: ArchiveKind): number {
+  const h = state.horizon?.[kind];
+  return typeof h === "number" && Number.isFinite(h) ? h : -Infinity;
+}
+
+/** Monotone raise: `horizon[kind] = max(current, settledAt)`, the other kind untouched. */
+export function raiseHorizon(h: ArchiveHorizon | undefined, kind: ArchiveKind, settledAt: number): ArchiveHorizon {
+  if (kind === "run") {
+    const cur = h?.run;
+    return { ...h, run: cur !== undefined && cur >= settledAt ? cur : settledAt };
+  }
+  const cur = h?.bash;
+  return { ...h, bash: cur !== undefined && cur >= settledAt ? cur : settledAt };
 }
 
 export function sameItem(a: { kind: ArchiveKind; id: string }, b: { kind: ArchiveKind; id: string }): boolean {
@@ -82,6 +114,18 @@ function sanitizeHold(input: unknown): ArchiveHold | undefined {
   return { kind: h.kind, id: h.id, at: h.at };
 }
 
+/** #91: a bad horizon loses only its own field(s), never the snapshot; both kinds
+ *  invalid/absent ⇒ the `horizon` key is not written (pre-#91 snapshots read back
+ *  byte-identical). */
+function sanitizeHorizon(input: unknown): ArchiveHorizon | undefined {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const raw = input as { run?: unknown; bash?: unknown };
+  const out: ArchiveHorizon = {};
+  if (typeof raw.run === "number" && Number.isFinite(raw.run)) out.run = raw.run;
+  if (typeof raw.bash === "number" && Number.isFinite(raw.bash)) out.bash = raw.bash;
+  return out.run !== undefined || out.bash !== undefined ? out : undefined;
+}
+
 /** Validate a persisted snapshot; `undefined` ⇒ not a valid candidate (skip it). */
 export function sanitizeArchiveState(input: unknown): ArchiveState | undefined {
   if (input === null || typeof input !== "object") return undefined;
@@ -96,7 +140,12 @@ export function sanitizeArchiveState(input: unknown): ArchiveState | undefined {
   const held: ArchiveHold[] = Array.isArray(raw.held)
     ? (raw.held.map(sanitizeHold).filter((h): h is ArchiveHold => h !== undefined) as ArchiveHold[])
     : [];
-  return { entries: entries.slice(-ARCHIVE_ENTRIES_CAP), held: held.slice(-ARCHIVE_HELD_CAP) };
+  const horizon = sanitizeHorizon((raw as { horizon?: unknown }).horizon);
+  return {
+    entries: entries.slice(-ARCHIVE_ENTRIES_CAP) as ArchiveEntry[],
+    held: held.slice(-ARCHIVE_HELD_CAP) as ArchiveHold[],
+    ...(horizon !== undefined ? { horizon } : {}),
+  };
 }
 
 /** Read the archive state off a session branch (`getBranch()`): the LAST valid
@@ -127,7 +176,16 @@ export interface ArchiveMutation {
   now: number;
 }
 
-export function archiveItem(state: ArchiveState, mut: ArchiveMutation): ArchiveState | undefined {
+/** Fold ONE archive into the state. `cap` (default the snapshot cap) bounds the
+ *  entries tail; the sweep and the manual paths pass `Infinity` and let
+ *  `trimToCap` (sweep.ts) own eviction, so capacity is decided in exactly one
+ *  place (#91). The horizon passes through untouched (a manual archive of an
+ *  implicitly-archived id is allowed and harmless). */
+export function archiveItem(
+  state: ArchiveState,
+  mut: ArchiveMutation,
+  cap: number = ARCHIVE_ENTRIES_CAP,
+): ArchiveState | undefined {
   if (mut.id.length === 0 || mut.id.length > 128) return undefined;
   const existing = state.entries.find((e) => sameItem(e, mut));
   if (existing !== undefined) {
@@ -141,8 +199,9 @@ export function archiveItem(state: ArchiveState, mut: ArchiveMutation): ArchiveS
   // A manual/auto (re-)archive lifts the auto-exemption hold.
   const held = state.held.filter((h) => !sameItem(h, mut));
   return {
-    entries: capTail(entries, ARCHIVE_ENTRIES_CAP) as ArchiveEntry[],
+    entries: capTail(entries, cap) as ArchiveEntry[],
     held: capTail(held, ARCHIVE_HELD_CAP) as ArchiveHold[],
+    ...(state.horizon !== undefined ? { horizon: state.horizon } : {}),
   };
 }
 
@@ -158,6 +217,7 @@ export function unarchiveItem(
   return {
     entries: capTail(entries, ARCHIVE_ENTRIES_CAP) as ArchiveEntry[],
     held: capTail(held, ARCHIVE_HELD_CAP) as ArchiveHold[],
+    ...(state.horizon !== undefined ? { horizon: state.horizon } : {}),
   };
 }
 
@@ -173,7 +233,10 @@ export function unarchiveItem(
  *  not "the same ids"; an at-only rewrite (the 998dce27 form) is NOT suppressed here, it
  *  is outlawed by tests/archive/write-rate.test.ts, because the honest fix for it is
  *  convergence (cd57bdf9), not silent dedup. `auto` is compared as truthiness, so an
- *  absent flag equals an explicit `false`/`undefined` (sanitize normalizes to absent). */
+ *  absent flag equals an explicit `false`/`undefined` (sanitize normalizes to absent).
+ *  `horizon` participates too (#91): it IS semantic state (a horizon-only change is a
+ *  real write, e.g. the one-shot post-upgrade first sweep), with undefined == undefined
+ *  per kind. */
 export function sameArchiveState(a: ArchiveState, b: ArchiveState): boolean {
   if (a.entries.length !== b.entries.length || a.held.length !== b.held.length) return false;
   for (let i = 0; i < a.entries.length; i++) {
@@ -187,6 +250,7 @@ export function sameArchiveState(a: ArchiveState, b: ArchiveState): boolean {
     const y = b.held[i]!;
     if (x.kind !== y.kind || x.id !== y.id || x.at !== y.at) return false;
   }
+  if (a.horizon?.run !== b.horizon?.run || a.horizon?.bash !== b.horizon?.bash) return false;
   return true;
 }
 
@@ -205,8 +269,9 @@ export function isArchived(state: ArchiveState, item: { kind: ArchiveKind; id: s
 }
 
 /** A terminal item auto-archive-eligible NOW? (terminal + past the threshold +
- *  not archived + not held). The caller supplies terminality and the settle
- *  instant — the state layer only knows archives and holds. */
+ *  not archived + not held + settled ABOVE the kind's horizon — implicitly-archived
+ *  items are never re-selected). The caller supplies terminality and the settle
+ *  instant — the state layer only knows archives, holds and horizons. */
 export function autoArchiveDue(
   state: ArchiveState,
   item: { kind: ArchiveKind; id: string },
@@ -217,5 +282,6 @@ export function autoArchiveDue(
   if (afterMs <= 0) return false;
   if (isArchived(state, item)) return false;
   if (state.held.some((h) => sameItem(h, item))) return false;
+  if (settledAt <= horizonOf(state, item.kind)) return false;
   return now - settledAt >= afterMs;
 }

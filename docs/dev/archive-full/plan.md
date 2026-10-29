@@ -244,3 +244,16 @@ tac $F | grep -m1 '"customType":"subagent:archive"' | jq '{n:(.data.entries|leng
 - #3 新增 T6（隐式条目的 unarchive/手动 archive）。
 - #4 新增「无 live 驱逐 ⇒ 快照无 horizon 键」断言（I9）。
 - #5 §4 补回滚后再升级的 horizon 重算说明；#6 修正「T2 红」表述（新 API 是编译错误）；#7 T1 补 horizon.run 断言。
+
+---
+
+## 8. 落地记录（2026-10-29，实现于 dev 分支）
+
+按 §2–§4 实现，文件与 §3 一致：`src/archive/{state,sweep,control}.ts`、`tests/archive/*`、README「Cap-full progression (#91)」段。验证：`npx vitest run tests/archive tests/web-hub/agent/commands-archive.test.ts tests/web-hub/agent/status-slots-bash-archive.test.ts`（98 通过）＋ `npm run typecheck` ＋ fixtures/stack.ts/web-hub 零差异。
+
+与规格的偏差（均已在实现中注明理由）：
+
+1. **CF3 加了「真臂」**（§6.2）：纯内联反事实在改动前后都绿（它钉的是旧语义本身），无法满足「T1/CF3 须在当前 HEAD 上为红」。给 CF3 追加了第二臂：对同一停摆终态调用**当前** `selectAutoArchives`，断言其选择数 > 0 —— HEAD 上该臂返回 0、红；新代码上绿。已在 HEAD（临时物化 origin/dev 源码，只读 `git show`，未动工作树提交）实测：T1 红（appended 0，停摆复现）、CF3 红（新选择臂 0）。T2 在 HEAD 上为编译错误（评审 #6 口径）。
+2. **sweep.test.ts「gone entries free exactly their slots」的改写形制**：room 截断删除后溢出驱逐取「恰好 overflow 个」最小驱逐，故 gone 多于溢出时只驱逐最老插入的溢出个（5/20），测试按此断言（不再是「全部 gone 让位」）。
+3. **S5 断言实现**：①④⑤用普通循环收集违规 + 单条断言（4,320 次逐条 `expect` 的 vitest 开销使单测从 ~2.7s 涨到 ~37s）；断言语义不变。
+4. `liveSettled()` 是 control 的私有方法（sweep 与手动路径共用同一口径）；`liveKey` 从 sweep.ts 导出。

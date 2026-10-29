@@ -1,6 +1,6 @@
 /**
  * Archive state model (src/archive/state.ts) — pure functions: round-trip,
- * sanitize/read-back, mutation idempotence, caps, holds and auto-eligibility.
+ * sanitize/read-back, mutation idempotence, caps, holds, horizons and auto-eligibility.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -9,7 +9,9 @@ import {
   archivedSetOf,
   autoArchiveDue,
   emptyArchiveState,
+  horizonOf,
   isArchived,
+  raiseHorizon,
   readArchiveState,
   sameArchiveState,
   sanitizeArchiveState,
@@ -72,6 +74,75 @@ describe("archive state: sanitize + read-back", () => {
   });
 });
 
+describe("archive state: horizon sanitize (#91)", () => {
+  it("a pre-#91 snapshot (no horizon field) sanitizes WITHOUT a horizon key — byte-identical", () => {
+    const clean = sanitizeArchiveState({ entries: [{ kind: "run", id: "r1", at: 5 }], held: [] });
+    expect(clean).toStrictEqual({ entries: [{ kind: "run", id: "r1", at: 5 }], held: [] });
+    expect("horizon" in (clean ?? {})).toBe(false);
+  });
+
+  it("round-trips a horizon, both kinds independently", () => {
+    const state = sanitizeArchiveState({
+      entries: [{ kind: "run", id: "r1", at: 5, auto: true }],
+      held: [],
+      horizon: { run: 5, bash: 7 },
+    });
+    expect(state).toStrictEqual({
+      entries: [{ kind: "run", id: "r1", at: 5, auto: true }],
+      held: [],
+      horizon: { run: 5, bash: 7 },
+    });
+    expect(sanitizeArchiveState({ entries: [], held: [], horizon: { run: 5 } })).toStrictEqual({
+      entries: [],
+      held: [],
+      horizon: { run: 5 },
+    });
+    expect(
+      readArchiveState([
+        { type: "custom", customType: ARCHIVE_ENTRY_TYPE, data: { entries: [], held: [], horizon: { bash: 9 } } },
+      ]).horizon,
+    ).toEqual({ bash: 9 });
+  });
+
+  it("a bad horizon loses only its own field(s), never the snapshot", () => {
+    // run invalid (string / NaN / Infinity), bash valid ⇒ run dropped, bash kept.
+    expect(
+      sanitizeArchiveState({ entries: [{ kind: "run", id: "ok", at: 5 }], held: [], horizon: { run: "x", bash: 3 } }),
+    ).toStrictEqual({ entries: [{ kind: "run", id: "ok", at: 5 }], held: [], horizon: { bash: 3 } });
+    expect(
+      sanitizeArchiveState({ entries: [{ kind: "run", id: "ok", at: 5 }], held: [], horizon: { run: Number.NaN } }),
+    ).toStrictEqual({ entries: [{ kind: "run", id: "ok", at: 5 }], held: [] });
+    expect(
+      sanitizeArchiveState({
+        entries: [{ kind: "run", id: "ok", at: 5 }],
+        held: [],
+        horizon: { run: Number.POSITIVE_INFINITY, bash: Number.POSITIVE_INFINITY },
+      }),
+    ).toStrictEqual({ entries: [{ kind: "run", id: "ok", at: 5 }], held: [] });
+    // Non-object shapes (array, string) drop the whole horizon, entries survive.
+    expect(
+      sanitizeArchiveState({ entries: [{ kind: "run", id: "ok", at: 5 }], held: [], horizon: [1, 2] }),
+    ).toStrictEqual({ entries: [{ kind: "run", id: "ok", at: 5 }], held: [] });
+    expect(
+      sanitizeArchiveState({ entries: [{ kind: "run", id: "ok", at: 5 }], held: [], horizon: "soon" }),
+    ).toStrictEqual({ entries: [{ kind: "run", id: "ok", at: 5 }], held: [] });
+  });
+
+  it("horizonOf defaults to −∞; raiseHorizon is monotone and kind-scoped", () => {
+    expect(horizonOf(emptyArchiveState(), "run")).toBe(-Infinity);
+    expect(horizonOf({ entries: [], held: [], horizon: { run: 5 } }, "bash")).toBe(-Infinity);
+    expect(horizonOf({ entries: [], held: [], horizon: { run: 5 } }, "run")).toBe(5);
+    let h = raiseHorizon(undefined, "run", 10);
+    expect(h).toEqual({ run: 10 });
+    h = raiseHorizon(h, "run", 7); // never moves down
+    expect(h).toEqual({ run: 10 });
+    h = raiseHorizon(h, "bash", 3); // the other kind untouched
+    expect(h).toEqual({ run: 10, bash: 3 });
+    h = raiseHorizon(h, "run", 12);
+    expect(h).toEqual({ run: 12, bash: 3 });
+  });
+});
+
 describe("archive state: mutations", () => {
   it("archiveItem adds an entry and is idempotent for the same auto flag", () => {
     let state = emptyArchiveState();
@@ -119,6 +190,27 @@ describe("archive state: mutations", () => {
     }
     expect(state.held).toHaveLength(256);
     expect(state.entries).toHaveLength(0);
+  });
+
+  it("archiveItem(·, Infinity) does not truncate and passes the horizon through", () => {
+    const state: ArchiveState = { entries: [], held: [], horizon: { run: 40 } };
+    let next = archiveItem(state, { kind: "run", id: "r1", auto: true, now: 1 }, Infinity)!;
+    for (let i = 2; i <= 300; i++) {
+      next = archiveItem(next, { kind: "run", id: `r${i}`, auto: true, now: i }, Infinity) ?? next;
+    }
+    expect(next.entries).toHaveLength(300); // unbounded: trimToCap owns eviction
+    expect(next.horizon).toEqual({ run: 40 });
+    // …and the default cap still FIFO-truncates for any legacy caller.
+    const capped = archiveItem(emptyArchiveState(), { kind: "run", id: "r1", auto: true, now: 1 })!;
+    expect(capped.entries).toHaveLength(1);
+  });
+
+  it("mutations on a horizon-less state never invent a horizon key", () => {
+    let state: ArchiveState = { entries: [], held: [] };
+    state = archiveItem(state, { kind: "run", id: "r1", auto: true, now: 1 }, Infinity)!;
+    expect("horizon" in state).toBe(false);
+    state = unarchiveItem(state, { kind: "run", id: "r1" }, 2)!;
+    expect("horizon" in state).toBe(false);
   });
 
   it("isArchived and archivedSetOf partition by kind", () => {
@@ -195,6 +287,15 @@ describe("archive state: sameArchiveState (#89 A1 dedup guard)", () => {
     const withHold: ArchiveState = { entries: [], held: [{ kind: "run", id: "h1", at: 5 }] };
     expect(sameArchiveState(withHold, { entries: [], held: [{ kind: "run", id: "h1", at: 6 }] })).toBe(false);
   });
+
+  it("a horizon-only difference is NOT equal (a horizon-only change is a real write)", () => {
+    const base: ArchiveState = { entries: [{ kind: "run", id: "r1", at: 1 }], held: [] };
+    expect(sameArchiveState(base, { entries: base.entries, held: [], horizon: { run: 5 } })).toBe(false);
+    expect(sameArchiveState({ ...base, horizon: { run: 5 } }, { ...base, horizon: { run: 6 } })).toBe(false);
+    expect(sameArchiveState({ ...base, horizon: { run: 5 } }, { ...base, horizon: { run: 5, bash: 5 } })).toBe(false);
+    expect(sameArchiveState({ ...base, horizon: { run: 5 } }, { ...base, horizon: { run: 5 } })).toBe(true);
+    expect(sameArchiveState({ ...base, horizon: { bash: 5 } }, { ...base, horizon: { run: 5 } })).toBe(false);
+  });
 });
 
 describe("archive state: auto eligibility", () => {
@@ -211,5 +312,14 @@ describe("archive state: auto eligibility", () => {
     const held: ArchiveState = { entries: [], held: [{ kind: "run", id: "r1", at: 1 }] };
     expect(autoArchiveDue(held, { kind: "run", id: "r1" }, 0, 1e9, 60_000)).toBe(false);
     expect(autoArchiveDue(emptyArchiveState(), { kind: "run", id: "r1" }, 0, 1e9, 0)).toBe(false);
+  });
+
+  it("settled at/below the horizon is never auto-due (boundary inclusive); kind-scoped", () => {
+    const state: ArchiveState = { entries: [], held: [], horizon: { run: 100 } };
+    expect(autoArchiveDue(state, { kind: "run", id: "r1" }, 99, 1e9, 60_000)).toBe(false);
+    expect(autoArchiveDue(state, { kind: "run", id: "r1" }, 100, 1e9, 60_000)).toBe(false); // s == horizon
+    expect(autoArchiveDue(state, { kind: "run", id: "r1" }, 101, 1e9, 60_000)).toBe(true);
+    // bash has no horizon here — only the age gate applies.
+    expect(autoArchiveDue(state, { kind: "bash", id: "b1" }, 100, 1e9, 60_000)).toBe(true);
   });
 });
