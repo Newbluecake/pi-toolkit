@@ -8,10 +8,9 @@
 // tests/memory/jev/entries.test.ts.
 
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
 import { frontmatterSource, parseFrontmatter, stripLeadingDriftHeader } from "../frontmatter.js";
 import { parseMemoryMeta } from "../meta.js";
+import { listRegular, readRegular } from "../safe-fs.js";
 import { looksSecret } from "../secret-patterns.js";
 import { INLINE_META_MAX_BYTES, type EntryHash, type InlineMeta, type MemEntry } from "./contracts.js";
 import { namedPrograms } from "./match.js";
@@ -555,25 +554,19 @@ export interface EntryIndexFs {
 class DefaultEntryIndexFs implements EntryIndexFs {
   list(dir: string): readonly EntryIndexStat[] {
     try {
-      const names = readdirSync(dir).filter((n) => n.endsWith(".md"));
-      const out: EntryIndexStat[] = [];
-      for (const name of names.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
-        try {
-          const st = statSync(join(dir, name));
-          if (!st.isFile()) continue;
-          out.push({ name, size: st.size, mtimeMs: st.mtimeMs });
-        } catch {
-          // raced away — skip
-        }
-      }
-      return out;
+      // safe-fs is the only node:fs importer under src/memory (fs-guard §3.1);
+      // listRegular skips symlinks/non-files like every other memory layer.
+      const { files } = listRegular(dir, { names: "legacy" });
+      return files
+        .map((f) => ({ name: f.name, size: f.size, mtimeMs: f.mtimeMs }))
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     } catch {
       return [];
     }
   }
   read(dir: string, name: string): string | undefined {
     try {
-      return readFileSync(join(dir, name), "utf8");
+      return readRegular(dir, name).text;
     } catch {
       return undefined;
     }
