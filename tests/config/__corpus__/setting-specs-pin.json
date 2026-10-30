@@ -144,6 +144,20 @@
     ["memory.tidy.batch.maxTotalCostUsd", "9131edf7a7a15aa2fc098c37adc324ccf619fb6ff5e125e41a071b85abde6f3a"],
     ["memory.tidy.batch.totalTimeoutS", "d2e1bfd8cf64875bab22a297e3731a033c4959c7fc4aec8639cfb8ddbafbb271"],
     ["memory.tidy.batch.outputTokPerSec", "ef03b0dd0425dc1cb18e6c6f43ec10605d093e338b00f5f2b3f6081f4c3a2980"],
+    ["memory.jev.enabled", "d1de76f34b3b29f27faa4a1ba2ecb5a197563e95ad8a2446ee2783d85386f645"],
+    ["memory.jev.classifiers", "f8271afe786508dcaa2cdef1db2c179d2b98ad6ed756892ec105533407f34c89"],
+    ["memory.jev.proxy", "c9a30dd88f1f6d3646c76338e6efc8a95c95116698f92fb701e45d28ba12da5d"],
+    ["memory.jev.childSessions", "e0ebb6125c086af7db05c31a6c52a0f621eba6d86f4c0098f1f9b1a88cc220ea"],
+    ["memory.jev.recall.threshold", "a73ed7b82a1e66d1cbec8d305f03a065d4a7c42bc84e33a73313e69c3965d382"],
+    ["memory.jev.recall.maxEntries", "8da55b17f36300a58417d60b29410129ff8754f553549d94612362cfbd990d9c"],
+    ["memory.jev.recall.maxBytes", "4e6ff777a27e47e5dcc5305e05136101ffc64a4e1747eb63b9bfc04b1eb3c2f4"],
+    ["memory.jev.recall.waitMs", "4812d30fc762c4433501993cfe47cdc2640f8b1cc772954771a5bcc615d4ce67"],
+    ["memory.jev.gate.enabled", "1c8c4c91328dc121d9e740d6aa1f7580655fa52a9e856e7c50c8117fabf75794"],
+    ["memory.jev.gate.threshold", "501e89cff223d698d89ab8ab53f4db8b9abdd7a6b60c047d269a50e197a94793"],
+    ["memory.jev.review.intervalDays", "8e7474cbd7d6d3804f71938d9b289064c794646bb23fe86a72147e0ea69b2be5"],
+    ["memory.jev.maxCostUsd", "f838faa70c599d733c387a8dc3df0a52697f9844a76585d13d9f358ae4a463fd"],
+    ["memory.jev.maxCalls", "e36ceffaab3fb713770fb6e5b88ba450cafcf472cf8e4c4f3724b4ecfcb8e0df"],
+    ["memory.jev.confirmTimeoutS", "453a77d90a759f4aab3c72f052b89b1a27b1c518bb68ee129bd46dfe9c7d5b6c"],
     ["extend.notify", "d554ffb3b6fec9d4f045958cfd14957b1ae1b686fe7771b6a01f876cc219e77a"],
     ["fleetDeadlineWarnS", "121f3850524eaed3f47e9581c450367f46746f2f206321e553e5159fbbf34d84"],
     ["fleetWidgetMaxRows", "0eb0067a65571f4d26df4f686e4017d42be9038a4cac86bb91d4fdab39bd9735"],
@@ -293,5 +307,5 @@
     ["schedule.defaultTimeoutS", "0c0a7cec1b640196d1236428b689372d961cbced729c6999200c31e29e442b30"],
     ["schedule.maxTimeoutS", "6c538e3100c646f3a64116ead976a485bc27e4fdb9e550349c75e420ec30fce3"]
   ],
-  "all": "23ce88a434fd7d4397359587335dd3791735161b5eca7174a30b47a1fb17b9ea"
+  "all": "f6c45ed5a479931c65a42c292a7f4810049d32e1be2e4ab266465533ed93a1b4"
 }

@@ -3,7 +3,7 @@
  * keep their original text and order; `config/setting-specs.ts` spreads the record at the same position, so the
  * listing order of `/agent settings` and the TUI editor is unchanged (pinned by tests/config/setting-specs-pin.test.ts).
  */
-import { seconds, count, bool, choice } from "../config/spec-helpers.js";
+import { seconds, count, bool, choice, csvString } from "../config/spec-helpers.js";
 import type { SettingSpec } from "../config/spec-helpers.js";
 
 export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
@@ -151,4 +151,72 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     max: 500,
     description: "Expected model output rate for batched tidy budgeting, tokens per second",
   },
+  // jev-plan v2 §4 J3 (jev-arch §9.1): 14 keys, non-live (change → /reload). `classifiersRejected`
+  // is NOT a setting key (parse-time derived, doctor/startup-reminder display only).
+  "memory.jev.enabled": bool(
+    "memory.jev.enabled",
+    "Jev-assisted memory: classifier-backed recall, gate, tagging, review (Q27 default on)",
+  ),
+  "memory.jev.classifiers": csvString(
+    "memory.jev.classifiers",
+    "Ordered provider/id classifier list; empty or all-invalid ⇒ jev off (Q34)",
+  ),
+  "memory.jev.proxy": {
+    kind: "string",
+    path: "memory.jev.proxy",
+    description: "Dedicated proxy URL for Jev classify calls; empty = no proxy fetch",
+  },
+  "memory.jev.childSessions": bool("memory.jev.childSessions", "Wire Jev recall + gate in child subagent sessions too"),
+  "memory.jev.recall.threshold": {
+    kind: "number",
+    path: "memory.jev.recall.threshold",
+    min: 0.5,
+    max: 0.99,
+    description: "Recall verdict probability threshold",
+  },
+  "memory.jev.recall.maxEntries": {
+    ...count("memory.jev.recall.maxEntries", 1, "Max entries injected per recall"),
+    max: 10,
+  } as SettingSpec,
+  "memory.jev.recall.maxBytes": {
+    ...count("memory.jev.recall.maxBytes", 512, "Byte budget for one recall injection"),
+    max: 16384,
+  } as SettingSpec,
+  "memory.jev.recall.waitMs": {
+    ...count(
+      "memory.jev.recall.waitMs",
+      0,
+      "Synchronous wait budget before falling back to async recall; 0 = pure async",
+    ),
+    max: 3000,
+  } as SettingSpec,
+  "memory.jev.gate.enabled": bool("memory.jev.gate.enabled", "Enable the dangerous-command gate"),
+  "memory.jev.gate.threshold": {
+    kind: "number",
+    path: "memory.jev.gate.threshold",
+    min: 0.5,
+    max: 0.95,
+    description: "Gate verdict probability threshold",
+  },
+  "memory.jev.review.intervalDays": {
+    ...count("memory.jev.review.intervalDays", 0, "Tag review interval in days; 0 = manual only"),
+    max: 90,
+  } as SettingSpec,
+  "memory.jev.maxCostUsd": {
+    kind: "number",
+    path: "memory.jev.maxCostUsd",
+    min: 0.01,
+    max: 5,
+    description: "Per-activation Jev call budget, USD",
+  },
+  "memory.jev.maxCalls": {
+    ...count("memory.jev.maxCalls", 0, "Per-activation Jev call count cap"),
+    max: 5000,
+  } as SettingSpec,
+  "memory.jev.confirmTimeoutS": seconds("memory.jev.confirmTimeoutMs", {
+    min: 10,
+    max: 600,
+    hint: "write-path confirm timeout",
+    description: "Jev write-guard confirm timeout",
+  }),
 };

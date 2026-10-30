@@ -13,8 +13,9 @@ import {
  * Merged armory-memory (memory-plan §3.1): cwd-keyed project memory under
  * `~/.pi/agent/memory/<slug>/` — auto-injection, the `memory` tool, `/mem`.
  * Field-by-field tolerant parsing in `parseMemorySettings` (never throws,
- * parseBashJobsSettings 同款风格）。No duration fields ⇒ not in
- * TIME_SETTING_MS_PATHS.
+ * parseBashJobsSettings 同款风格）。Only duration field:
+ * `jev.confirmTimeoutMs` (seconds key `memory.jev.confirmTimeoutS`), registered
+ * in TIME_SETTING_MS_PATHS.
  */
 export interface MemorySettings {
   /** 总开关。false = 不注册注入 hook、memory 工具、/mem 命令。Default true（融合后原插件被卸载，默认关=升级即功能消失，merge-plan D2 哲学）。 */
@@ -61,6 +62,50 @@ export interface MemorySettings {
   topicMaxBytes: number;
   doctor: MemoryDoctorSettings;
   tidy: MemoryTidySettings;
+  /** Jev 核心 memory：jev-plan v2 §4 J3 / jev-arch §9.1. */
+  jev: MemoryJevSettings;
+}
+
+/** 14 个 `memory.jev.*` 设置键（jev-arch §9.1；`classifiersRejected` 不是设置键，只是解析结果）。 */
+export interface MemoryJevSettings {
+  /** 总开关。false ⇒ 不接线 Jev（零注册）。Default true（Q27：有可用凭证即启用）；legacy/secure 域强制视为 false。 */
+  enabled: boolean;
+  /** provider/id 有序列表，去重保序，逗号串或字符串数组均可。Default
+   *  ["opencode/jev-1.13-free", "opencode/jev-1.13"]（arch §5.2；openrouter 项留给独立改动 E1）。
+   *  空列表（或非空但全部非法）⇒ 等同 enabled=false（Q34，off(empty-list)），零调用部分也不生效。 */
+  classifiers: string[];
+  /** 解析时丢弃的非法 classifiers 原文（≤10 项、每项 ≤80 码点），只供 doctor/启动提醒展示，不是独立设置键。Default []。 */
+  classifiersRejected: string[];
+  /** 专用代理地址，"" = 不传 fetch。Default ""。 */
+  proxy: string;
+  /** 子会话是否接线 Jev（召回 + 门禁）。Default true。 */
+  childSessions: boolean;
+  recall: {
+    /** 召回判定阈值。Default 0.6（主会话按 E0 基线评测拍板改自原架构稿 0.7；门禁阈值仍 0.6 不变）；0.5–0.99。 */
+    threshold: number;
+    /** 单次注入条目数上限。Default 3；1–10（E 层固定为 2，arch §9.1）。 */
+    maxEntries: number;
+    /** 单次注入字节预算。Default 4096；512–16384。 */
+    maxBytes: number;
+    /** 同步等待上限（ms）。Default 1500；0–3000（0 = 纯异步，Q25）。 */
+    waitMs: number;
+  };
+  gate: {
+    /** 门禁总开关。Default true。 */
+    enabled: boolean;
+    /** 门禁判定阈值。Default 0.6；0.5–0.95。 */
+    threshold: number;
+  };
+  review: {
+    /** 整理复审间隔天数，0 = 只能手动。Default 7（Q31）；0–90。 */
+    intervalDays: number;
+  };
+  /** 单次 activation 的 Jev 调用总美元预算。Default 0.5；0.01–5。 */
+  maxCostUsd: number;
+  /** 单次 activation 的 Jev 调用总次数上限。Default 800；0–5000。 */
+  maxCalls: number;
+  /** 写路径确认超时（ms）；文件键按秒存 `confirmTimeoutS`（TIME_SETTING_MS_PATHS）。Default 60_000；10_000–600_000。 */
+  confirmTimeoutMs: number;
 }
 
 export type MemoryLayout = "tiered" | "legacy";
@@ -106,6 +151,52 @@ export interface MemoryTidySettings {
   maxTurns: number;
   /** Batch tidy controls (§11); parsed by the frozen pi-free batch settings resolver. */
   batch: TidyBatchSettings;
+}
+
+/** `memory.jev.classifiers` 必须匹配 `provider/id`（斜杠两侧均非空白、无空白字符）；否则记进 `classifiersRejected`（J3，Q34）。 */
+const JEV_CLASSIFIER_RE = /^[^/\s]+\/\S+$/;
+const JEV_CLASSIFIERS_REJECTED_MAX = 10;
+const JEV_CLASSIFIERS_REJECTED_ITEM_MAX_CODEPOINTS = 80;
+
+function truncateCodepoints(s: string, max: number): string {
+  const codepoints = Array.from(s);
+  return codepoints.length <= max ? s : codepoints.slice(0, max).join("");
+}
+
+/** 逗号串或字符串数组 ⇒ 逐项 trim 后的非空 token 列表（webHub.lan 同款 CSV 解析风格）。 */
+function splitJevClassifiersCsv(raw: unknown): string[] {
+  const parts =
+    typeof raw === "string"
+      ? raw.split(",")
+      : Array.isArray(raw)
+        ? raw.flatMap((item) => (typeof item === "string" ? item.split(",") : []))
+        : [];
+  return parts.map((s) => s.trim()).filter((s) => s !== "");
+}
+
+/**
+ * Q34：`raw` 缺失 ⇒ 落回默认列表（`classifiersRejected` 清空）；`raw` 是字符串/数组（含 "" 和 []，
+ * 即显式表达“关闭”）⇒ 逐项校验，合法项去重保序进 `classifiers`，非法项（去重前，上限 10 项、每项截断
+ * 80 码点）进 `classifiersRejected`；`raw` 是其它类型（数字/布尔/对象等，视为配置错误而非故意置空）⇒
+ * 同样落回默认列表。全部非法或本就为空 ⇒ `classifiers` 为空列表（= off，由 wireMemory 消费）。
+ */
+function parseJevClassifiers(
+  raw: unknown,
+  fallback: { classifiers: readonly string[] },
+): { classifiers: string[]; classifiersRejected: string[] } {
+  if (raw === undefined || (typeof raw !== "string" && !Array.isArray(raw))) {
+    return { classifiers: [...fallback.classifiers], classifiersRejected: [] };
+  }
+  const classifiers: string[] = [];
+  const classifiersRejected: string[] = [];
+  for (const token of splitJevClassifiersCsv(raw)) {
+    if (JEV_CLASSIFIER_RE.test(token)) {
+      if (!classifiers.includes(token)) classifiers.push(token);
+    } else if (classifiersRejected.length < JEV_CLASSIFIERS_REJECTED_MAX) {
+      classifiersRejected.push(truncateCodepoints(token, JEV_CLASSIFIERS_REJECTED_ITEM_MAX_CODEPOINTS));
+    }
+  }
+  return { classifiers, classifiersRejected };
 }
 
 /**
@@ -164,6 +255,52 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     batch: resolveTidyBatchSettings(tidyObj.batch, maxInputBytes),
   };
 
+  const jevRaw = value.jev;
+  const jevObj: Record<string, unknown> =
+    jevRaw && typeof jevRaw === "object" && !Array.isArray(jevRaw) ? (jevRaw as Record<string, unknown>) : {};
+  const { classifiers: jevClassifiers, classifiersRejected: jevClassifiersRejected } = parseJevClassifiers(
+    jevObj.classifiers,
+    defaults.jev,
+  );
+  const jevRecallRaw = jevObj.recall;
+  const jevRecallObj: Record<string, unknown> =
+    jevRecallRaw && typeof jevRecallRaw === "object" && !Array.isArray(jevRecallRaw)
+      ? (jevRecallRaw as Record<string, unknown>)
+      : {};
+  const jevGateRaw = jevObj.gate;
+  const jevGateObj: Record<string, unknown> =
+    jevGateRaw && typeof jevGateRaw === "object" && !Array.isArray(jevGateRaw)
+      ? (jevGateRaw as Record<string, unknown>)
+      : {};
+  const jevReviewRaw = jevObj.review;
+  const jevReviewObj: Record<string, unknown> =
+    jevReviewRaw && typeof jevReviewRaw === "object" && !Array.isArray(jevReviewRaw)
+      ? (jevReviewRaw as Record<string, unknown>)
+      : {};
+  const jev: MemoryJevSettings = {
+    enabled: bool(jevObj.enabled, defaults.jev.enabled),
+    classifiers: jevClassifiers,
+    classifiersRejected: jevClassifiersRejected,
+    proxy: typeof jevObj.proxy === "string" ? jevObj.proxy : defaults.jev.proxy,
+    childSessions: bool(jevObj.childSessions, defaults.jev.childSessions),
+    recall: {
+      threshold: numFloat(jevRecallObj.threshold, defaults.jev.recall.threshold, 0.5, 0.99),
+      maxEntries: num(jevRecallObj.maxEntries, defaults.jev.recall.maxEntries, 1, 10),
+      maxBytes: num(jevRecallObj.maxBytes, defaults.jev.recall.maxBytes, 512, 16384),
+      waitMs: num(jevRecallObj.waitMs, defaults.jev.recall.waitMs, 0, 3000),
+    },
+    gate: {
+      enabled: bool(jevGateObj.enabled, defaults.jev.gate.enabled),
+      threshold: numFloat(jevGateObj.threshold, defaults.jev.gate.threshold, 0.5, 0.95),
+    },
+    review: {
+      intervalDays: num(jevReviewObj.intervalDays, defaults.jev.review.intervalDays, 0, 90),
+    },
+    maxCostUsd: numFloat(jevObj.maxCostUsd, defaults.jev.maxCostUsd, 0.01, 5),
+    maxCalls: num(jevObj.maxCalls, defaults.jev.maxCalls, 0, 5000),
+    confirmTimeoutMs: num(jevObj.confirmTimeoutMs, defaults.jev.confirmTimeoutMs, 10_000, 600_000),
+  };
+
   return {
     enabled: bool(value.enabled, defaults.enabled),
     injectInChildSessions: bool(value.injectInChildSessions, defaults.injectInChildSessions),
@@ -183,6 +320,7 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     topicMaxBytes,
     doctor,
     tidy,
+    jev,
   };
 }
 
@@ -213,5 +351,18 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     maxCostUsd: 2.0,
     maxTurns: 4,
     batch: { ...DEFAULT_TIDY_BATCH_SETTINGS },
+  },
+  jev: {
+    enabled: true,
+    classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
+    classifiersRejected: [],
+    proxy: "",
+    childSessions: true,
+    recall: { threshold: 0.6, maxEntries: 3, maxBytes: 4096, waitMs: 1500 },
+    gate: { enabled: true, threshold: 0.6 },
+    review: { intervalDays: 7 },
+    maxCostUsd: 0.5,
+    maxCalls: 800,
+    confirmTimeoutMs: 60_000,
   },
 };
