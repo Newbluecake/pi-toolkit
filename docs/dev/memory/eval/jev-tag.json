@@ -1,0 +1,277 @@
+{
+  "v": 1,
+  "set": "tag",
+  "note": "J0 质量评测集·打标 30 例（jev-plan §4 J0）。expected = {type ∈ rule|pitfall|procedure|preference|fact|pointer, importance 0-3}；评测判过条件：type 全对且 importance 差 ≤1。条目取材自本仓真实记忆主题，已人工脱敏。",
+  "cases": [
+    {
+      "id": "k01",
+      "entry": {
+        "file": "core.md",
+        "heading": "核心规则",
+        "body": "所有开发任务必须遵循 dev-flow：打分定车道、按车道走闸门；每包返回立即派 verifier，验收模型 ≠ 开发模型。"
+      },
+      "expected": { "type": "rule", "importance": 3 }
+    },
+    {
+      "id": "k02",
+      "entry": {
+        "file": "core.md",
+        "heading": "核心规则",
+        "body": "需要用户拍板的决策一律用 ask_user 提问，推荐项放第一个并标 (Recommended)；能自己从代码判断的事不要问。"
+      },
+      "expected": { "type": "rule", "importance": 2 }
+    },
+    {
+      "id": "k03",
+      "entry": {
+        "file": "core.md",
+        "heading": "核心规则",
+        "body": "验收通过自动 commit（精确路径，绝不 git add -A）；push/发版需用户确认。"
+      },
+      "expected": { "type": "rule", "importance": 3 }
+    },
+    {
+      "id": "k04",
+      "entry": {
+        "file": "core.md",
+        "heading": "核心规则",
+        "body": "发版规则：默认 patch；feat ≥50 才 minor；BREAKING 才 major。CHANGELOG 由 release.sh 生成。"
+      },
+      "expected": { "type": "rule", "importance": 2 }
+    },
+    {
+      "id": "k05",
+      "entry": {
+        "file": "core.md",
+        "heading": "核心规则",
+        "body": "删除只用精确路径；长命令一律加 timeout；报告里每个数字必须来自真实命令输出。"
+      },
+      "expected": { "type": "rule", "importance": 2 }
+    },
+    {
+      "id": "k06",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "heading": "并行写包",
+        "body": "（2026-10-10 违规复盘）派 ≥2 个写包前必须真跑 conflict-check.mjs，不能凭肉眼；热点共享文件有交集时三选一：串行 / 先集中改共享面 / isolation:worktree。"
+      },
+      "expected": { "type": "pitfall", "importance": 3 }
+    },
+    {
+      "id": "k07",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "heading": "git",
+        "body": "GitHub 直连不通（gh 报 EOF、TLS 失败）⇒ 走代理 export https_proxy=http://proxy.example:7897（本机 7890/1080 不可用）。gh / git push / curl github 一律带上。"
+      },
+      "expected": { "type": "pitfall", "importance": 2 }
+    },
+    {
+      "id": "k08",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "heading": "git",
+        "body": "子 agent 会无视「禁 git stash」⇒ 收报告先 git stash list && git status --short。"
+      },
+      "expected": { "type": "pitfall", "importance": 2 }
+    },
+    {
+      "id": "k09",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "heading": "git",
+        "body": "整理自动提交：从最新 master 新建 worktree 分支 → git cherry-pick --no-commit <commits> → git rm --cached node_modules → 单个提交 → 全量门禁 → merge --ff-only → 删分支。"
+      },
+      "expected": { "type": "procedure", "importance": 2 }
+    },
+    {
+      "id": "k10",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "heading": "git",
+        "body": ".githooks/pre-commit 会 prettier --write 后 git add 整个文件 ⇒ 同文件混有别人改动时先手动 prettier，git commit --no-verify。"
+      },
+      "expected": { "type": "pitfall", "importance": 2 }
+    },
+    {
+      "id": "k11",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "heading": "运行时",
+        "body": "pi 用 jiti moduleCache:false 加载扩展 ⇒ 每个新子会话从磁盘读最新源码，宿主 stack 仍是上次 /reload 的代码；合入改契约的代码后必须 reload。"
+      },
+      "expected": { "type": "pitfall", "importance": 2 }
+    },
+    {
+      "id": "k12",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "heading": "运行时",
+        "body": "bash 工具实际是 zsh：$VAR 不分词、无 declare -A、--include=*.ts 被 glob ⇒ 用 rg -g 或写脚本用 bash 跑；pkill -f 会杀自身。"
+      },
+      "expected": { "type": "pitfall", "importance": 2 }
+    },
+    {
+      "id": "k13",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "heading": "运行时",
+        "body": "pi 运行时把 @sinclair/typebox 别名到 typebox 1.x，devDep 是 0.34 ⇒ 测运行时行为要 import \"typebox\"。"
+      },
+      "expected": { "type": "fact", "importance": 1 }
+    },
+    {
+      "id": "k14",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "heading": "测试",
+        "body": "已知高负载 flake（单独重跑能过）：tests/bash/process.test.ts 计时项、tests/web-hub/protocol/pid.test.ts、tests/workflow/worker-integration.test.ts。"
+      },
+      "expected": { "type": "fact", "importance": 1 }
+    },
+    {
+      "id": "k15",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "heading": "web-hub",
+        "body": "排障先核对 hub 代码快照时间：ps -o lstart -p <hub pid> 对比相关提交时间——差几分钟就是旧代码在跑，别在磁盘新代码里瞎找。"
+      },
+      "expected": { "type": "procedure", "importance": 2 }
+    },
+    {
+      "id": "k16",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "heading": "web-hub",
+        "body": "HTTP 客户端字节数 oracle 绝不能拿 Content-Length 比解压后 body：浏览器 fetch 透明解压 gzip；凡给响应加 Content-Encoding，先全局搜客户端有没有 byteLength 校验点。"
+      },
+      "expected": { "type": "pitfall", "importance": 1 }
+    },
+    {
+      "id": "k17",
+      "entry": {
+        "file": "quota.md",
+        "heading": "用户决策",
+        "body": "quota 注入走 sendMessage triggerTurn:false，禁 systemPrompt（打脏缓存前缀）；零定时器（turn_end 懒刷新）。别推翻。"
+      },
+      "expected": { "type": "rule", "importance": 2 }
+    },
+    {
+      "id": "k18",
+      "entry": {
+        "file": "quota.md",
+        "heading": "端点契约",
+        "body": "Kimi 订阅续费（新月）会提前清零 7d 窗口且 reset_time 重新锚定；首读全零被判可疑属正常，下一次非全零读数即确认为重置——不是 bug。"
+      },
+      "expected": { "type": "fact", "importance": 1 }
+    },
+    {
+      "id": "k19",
+      "entry": {
+        "file": "quota.md",
+        "heading": "阈值",
+        "body": "阶梯阈值按窗口：5h 50/75/90、week/7d 50/95/98（ladder.ts DEFAULT_THRESHOLDS_BY_WINDOW）。"
+      },
+      "expected": { "type": "fact", "importance": 1 }
+    },
+    {
+      "id": "k20",
+      "entry": {
+        "file": "cache-ttl.md",
+        "heading": "上游缓存事实",
+        "body": "1h 与 5m 是分离的命名空间：ttl:\"1h\" 请求只读上一个 1h 写入点；首次升级 = 整前缀入场费。"
+      },
+      "expected": { "type": "fact", "importance": 1 }
+    },
+    {
+      "id": "k21",
+      "entry": {
+        "file": "cache-ttl.md",
+        "heading": "取证",
+        "body": "取证：session jsonl 的 subagent:cache-adaptive + subagent:cache-keepalive 条目 + assistant usage.cacheWrite1h 三者对齐；现场取数 node scripts/exp/cache-adaptive-field.mjs。"
+      },
+      "expected": { "type": "procedure", "importance": 1 }
+    },
+    {
+      "id": "k22",
+      "entry": {
+        "file": "live-acceptance-tmux.md",
+        "heading": "做法",
+        "body": "做法：tmux new-session -d -s piacc -x 220 -y 55 -c /tmp/<scratch> \"pi --model <provider/id>\"，用 send.sh send-keys -l 文本 + Enter，轮询 capture-pane 直到连续 3 次不变。"
+      },
+      "expected": { "type": "procedure", "importance": 2 }
+    },
+    {
+      "id": "k23",
+      "entry": {
+        "file": "live-acceptance-tmux.md",
+        "heading": "规则",
+        "body": "子会话专属特性真机验收必须用 pi install <repo> 正规装配，禁止 pi -e：子会话只按 settings packages 重新发现扩展。"
+      },
+      "expected": { "type": "rule", "importance": 2 }
+    },
+    {
+      "id": "k24",
+      "entry": {
+        "file": "multi-agent-experiments.md",
+        "heading": "实验结论",
+        "body": "结构化交接（fileIndex + ruledOut + 核验纪律）：下游成本 −34~53%、游荡文件 −91~100%；已固化为仓库 skill skills/agent-handoff/。"
+      },
+      "expected": { "type": "fact", "importance": 2 }
+    },
+    {
+      "id": "k25",
+      "entry": {
+        "file": "pitfalls.md",
+        "heading": "用户偏好",
+        "body": "传输层故障（流中断/502/503/upstream）⇒ 直接 resume 换线续跑，不问；429 按路由换线；升 opus/用 fable 先问。"
+      },
+      "expected": { "type": "preference", "importance": 2 }
+    },
+    {
+      "id": "k26",
+      "entry": {
+        "file": "pitfalls.md",
+        "heading": "用户偏好",
+        "body": "下次发版后建 dev 分支；patch 在 dev 发，minor/major 先 PR dev→master。发版须工作区干净。"
+      },
+      "expected": { "type": "preference", "importance": 2 }
+    },
+    {
+      "id": "k27",
+      "entry": {
+        "file": "pitfalls.md",
+        "heading": "并发",
+        "body": "本机 concurrencyLimit=10（配置文件）。workflow 本身不占槽，其子任务各占 1 槽；派发前自己数，给即将返回的包留验收槽。"
+      },
+      "expected": { "type": "fact", "importance": 1 }
+    },
+    {
+      "id": "k28",
+      "entry": {
+        "file": "pitfalls.md",
+        "heading": "指针",
+        "body": "详细偏好/坑见 pitfalls-git / pitfalls-runtime / cache-ttl / quota 各文件；真机验收见 live-acceptance-tmux。"
+      },
+      "expected": { "type": "pointer", "importance": 1 }
+    },
+    {
+      "id": "k29",
+      "entry": {
+        "file": "pitfalls.md",
+        "heading": "操作纪律",
+        "body": "switch_context 交接必须列出「在役 skill」：读过的 SKILL.md 正文会随 switch 丢失，handoff 写明下一段需重新 read 哪些。"
+      },
+      "expected": { "type": "rule", "importance": 2 }
+    },
+    {
+      "id": "k30",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "heading": "边界",
+        "body": "层间边界：agent/** 禁止导入 ../hub/**（仅 ports.js/ui-root.js 的 type-only 例外，tests/web-hub/boundary.test.ts 守护）；共享的 wire 类型放 protocol/。"
+      },
+      "expected": { "type": "rule", "importance": 2 }
+    }
+  ]
+}

@@ -1,0 +1,184 @@
+{
+  "v": 1,
+  "set": "review",
+  "note": "J0 质量评测集·整理 20 对（jev-plan §4 J0）。expected_merge=true 表示两段陈述同一底层事实/规则（可合并去重）；false 表示互补信息应各自保留。取材自本仓记忆主题，已人工脱敏。",
+  "cases": [
+    {
+      "id": "v01",
+      "a": {
+        "file": "pitfalls-git.md",
+        "excerpt": "基线对照改用 git show origin/dev:<path> 或 git diff -- <path>，不用 stash。"
+      },
+      "b": {
+        "file": "pitfalls.md",
+        "excerpt": "需要基线对照时用 git show HEAD:<path>；禁止 git stash / checkout / reset 等整树操作。"
+      },
+      "expected_merge": true
+    },
+    {
+      "id": "v02",
+      "a": {
+        "file": "pitfalls-git.md",
+        "excerpt": "GitHub 直连不通 ⇒ 走代理 export https_proxy=http://proxy.example:7897（2026-10-26 确认）。"
+      },
+      "b": {
+        "file": "pitfalls.md",
+        "excerpt": "gh push 超时时先设 https_proxy 再重试（代理地址以 pitfalls-git 最新为准）。"
+      },
+      "expected_merge": true
+    },
+    {
+      "id": "v03",
+      "a": { "file": "core.md", "excerpt": "发版规则：默认 patch；feat ≥50 才 minor；BREAKING 才 major。" },
+      "b": { "file": "pitfalls.md", "excerpt": "版本号裁决：拿不准就 patch；minor 看 feat 提交数是否 ≥50。" },
+      "expected_merge": true
+    },
+    {
+      "id": "v04",
+      "a": { "file": "core.md", "excerpt": "验收通过自动 commit（精确路径，绝不 git add -A）。" },
+      "b": {
+        "file": "pitfalls-git.md",
+        "excerpt": "commit 只 add 精确路径；同仓库常有另一会话并发提交，开工前 git log 查重复。"
+      },
+      "expected_merge": false
+    },
+    {
+      "id": "v05",
+      "a": {
+        "file": "pitfalls-runtime.md",
+        "excerpt": "pi 用 jiti moduleCache:false 加载扩展，子会话读最新源码，宿主是旧代码 ⇒ 契约改动后必须 reload。"
+      },
+      "b": {
+        "file": "pitfalls-runtime.md",
+        "excerpt": "HUD 末尾 toolkit v…@<commit> 显示宿主加载的提交，可用来核对版本错位。"
+      },
+      "expected_merge": false
+    },
+    {
+      "id": "v06",
+      "a": { "file": "cache-ttl.md", "excerpt": "1h 实际寿命：确认活到 23.2min、确认死亡只在 ≥27.5min。" },
+      "b": {
+        "file": "cache-ttl.md",
+        "excerpt": "早期「1h 只活 7–13.6min」是误判——实为前缀谱系分裂（唤醒轮与用户轮两条前缀）。"
+      },
+      "expected_merge": false
+    },
+    {
+      "id": "v07",
+      "a": { "file": "quota.md", "excerpt": "恢复倒计时用文字 token resets 2d11h（否决 ↻ 图标）。" },
+      "b": { "file": "quota.md", "excerpt": "HUD >95% 显示 resets；L3 多 provider 合并播报。" },
+      "expected_merge": false
+    },
+    {
+      "id": "v08",
+      "a": { "file": "quota.md", "excerpt": "用户决策：零定时器，turn_end 懒刷新，空闲时 HUD 行冻结。" },
+      "b": { "file": "pitfalls.md", "excerpt": "别给 quota 加周期轮询定时器——用户已拍板懒刷新。" },
+      "expected_merge": true
+    },
+    {
+      "id": "v09",
+      "a": { "file": "pitfalls-runtime.md", "excerpt": "长命令一律 timeout，全量 timeout 280 npx vitest run。" },
+      "b": { "file": "core.md", "excerpt": "长命令加 timeout（同 pitfalls-runtime 的全量口径）。" },
+      "expected_merge": true
+    },
+    {
+      "id": "v10",
+      "a": { "file": "pitfalls-runtime.md", "excerpt": "release.sh 别 | tail：管道吞掉退出码。" },
+      "b": { "file": "pitfalls-git.md", "excerpt": "git merge … | tail 会吞失败码。" },
+      "expected_merge": true
+    },
+    {
+      "id": "v11",
+      "a": {
+        "file": "multi-agent-experiments.md",
+        "excerpt": "结构化交接使下游成本 −34~53%、游荡文件 −91~100%，已固化为 skill skills/agent-handoff/。"
+      },
+      "b": { "file": "core.md", "excerpt": "串行交接用 agent-handoff skill（结构化交接包）。" },
+      "expected_merge": false
+    },
+    {
+      "id": "v12",
+      "a": { "file": "pitfalls.md", "excerpt": "429 按路由换线。" },
+      "b": { "file": "pitfalls.md", "excerpt": "传输层故障直接 resume 换线续跑，不问；升 opus/用 fable 先问。" },
+      "expected_merge": false
+    },
+    {
+      "id": "v13",
+      "a": { "file": "pitfalls-runtime.md", "excerpt": "调 buildSessionStack 的集成测试必须 sandboxHome()。" },
+      "b": { "file": "pitfalls-runtime.md", "excerpt": "本机真 key 会发真请求——集成测试先沙箱化 HOME。" },
+      "expected_merge": true
+    },
+    {
+      "id": "v14",
+      "a": { "file": "pitfalls-git.md", "excerpt": "isolation 只能从 master HEAD 建 worktree。" },
+      "b": {
+        "file": "pitfalls-git.md",
+        "excerpt": "别的分支要手工 git worktree add -b <br> /tmp/x <base> + ln -s node_modules。"
+      },
+      "expected_merge": false
+    },
+    {
+      "id": "v15",
+      "a": {
+        "file": "live-acceptance-tmux.md",
+        "excerpt": "斜杠命令第一次 Enter 会被补全菜单吃掉 ⇒ 隔 ~1s 再补一次 Enter。"
+      },
+      "b": {
+        "file": "live-acceptance-tmux.md",
+        "excerpt": "tmux send-keys 后轮询 capture-pane 直到连续 3 次（12s）不变。"
+      },
+      "expected_merge": false
+    },
+    {
+      "id": "v16",
+      "a": { "file": "pitfalls.md", "excerpt": "consult 停用：子 agent 用 message_agent 问 root，主会话 steer 应答。" },
+      "b": {
+        "file": "multi-agent-experiments.md",
+        "excerpt": "consult 必须是专用工具——有「新起一个 agent」退路时下游会问错对象。"
+      },
+      "expected_merge": false
+    },
+    {
+      "id": "v17",
+      "a": {
+        "file": "pitfalls-runtime.md",
+        "excerpt": "tests/commands/ 不在 tsconfig.typecheck.json 的 include 里，typecheck 有盲区。"
+      },
+      "b": {
+        "file": "pitfalls-runtime.md",
+        "excerpt": "改共享接口后必须实际跑 npx vitest run tests/commands/，不能只信 typecheck。"
+      },
+      "expected_merge": false
+    },
+    {
+      "id": "v18",
+      "a": {
+        "file": "pitfalls-git.md",
+        "excerpt": "同树并发 dev agent 时，commit 前一刻 git diff --cached 核对待提交内容的归属。"
+      },
+      "b": {
+        "file": "pitfalls-git.md",
+        "excerpt": "后台 dev agent 施工期间，主会话 git add 共享文件会把半成品扫进提交（历史事故：中间提交不可构建）。"
+      },
+      "expected_merge": false
+    },
+    {
+      "id": "v19",
+      "a": { "file": "core.md", "excerpt": "A 级 golden 永不重生；任何 diff 都是行为变化。" },
+      "b": {
+        "file": "pitfalls-runtime.md",
+        "excerpt": "golden 类测试拒绝在文件已存在时用环境变量覆盖（generate-once 规则）。"
+      },
+      "expected_merge": true
+    },
+    {
+      "id": "v20",
+      "a": { "file": "pitfalls-runtime.md", "excerpt": "改 web-hub 设置后先 /reload 再 /webhub restart。" },
+      "b": {
+        "file": "pitfalls-runtime.md",
+        "excerpt": "未 reload 的旧 pi 实例可能抢先拉起不带 LAN 的 hub（hub 配置由拉起它的 pi 传入）。"
+      },
+      "expected_merge": false
+    }
+  ]
+}
