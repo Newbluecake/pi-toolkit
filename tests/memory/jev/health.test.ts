@@ -39,6 +39,10 @@ describe("classifyError", () => {
 
   it("context classification takes priority even with a status code present", () => {
     expect(classifyError("System One API error (400): maximum context exceeded")).toBe("context");
+    // measured opencode wording (E0 C-J8): HTTP 400 + error_type max_tokens_exceeded
+    expect(classifyError('System One API error (400): {"detail":{"error_type":"max_tokens_exceeded"}}')).toBe(
+      "context",
+    );
   });
 
   it("proxy error: prefix is always transient regardless of body", () => {

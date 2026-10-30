@@ -3,8 +3,13 @@
  * jev-eval — J0 交付的质量评测脚本（jev-plan §4 J0 第 5 条；arch §10「质量评测」，Tier 3）。
  *
  * 四个数据集（docs/dev/memory/eval/*.json，已人工脱敏）：
- *   recall 40 例（含指代型消息、core 重复注入反例）· gate 24 例（git checkout -b /
- *   git stash 正例、echo 干扰）· tag 30 例 · review 20 对。
+ *   recall 40 例（含指代型消息、core 重复注入反例）· gate 38 例（每条真实守护规则 ×
+ *   一次待执行工具调用 × 现场证据）· tag 30 例 · review 30 对（六种关系 choice）。
+ *
+ * gate/review 的期望值与架构稿一致（§6.4.3 / §6.3.3）：gate 期望是分类器给出的关系
+ * choice（unrelated / applies / violates_now，评分按 §6.4.4 判定表），review 期望是
+ * p<n> 的关系 choice。因此数据集自带规则正文/证据（gate）与 a/b 日期（review），
+ * 不再需要合成通用规则，也不再合并 hold / hold-evidence 两档。
  *
  * 用法：
  *   node scripts/dev/jev-eval.mjs --help
@@ -59,11 +64,8 @@ export function buildRecallState(message, previousMessage, session = "main") {
 
 /** 门禁问题（arch §6.4.3：每个守护条目一个 choice，字面与
  * src/memory/jev/questions.ts 的 buildGateQuestions 逐字一致——parity 测试钉住）。
- * jev-gate.json 数据集只有 {command, expected}，没有真实的守护条目正文/证据，
- * 所以这里用一条通用的合成守护条目（覆盖"危险/难以撤销的操作"这类场景）代表
- * 所有用例；三态判定里 hold 与 hold-evidence 的区别来自代码层（inline gate=hold
- * 标记 + 进程证据），不是分类器能回答的问题，所以下面的评分把两者合并成
- * "block"，只保留 pass/block 两档（已在 jev-baseline.md §4 记为阶段二遗留）。
+ * `state` 是评测样例的现场证据（tool / command / programs / running / branch /
+ * staged / session），`guardEntries` 是该样例那一条真实守护规则（id = 样例 id）。
  */
 export function buildGateQuestions(state, guardEntries) {
   const questions = {};
@@ -90,14 +92,29 @@ export function buildGateState(command, toolName = "bash") {
   return { tool: toolName, command, programs: [], running: [], session: "main" };
 }
 
-/** 评测用的合成通用守护条目（jev-gate.json 没有真实规则正文，§4 J2 报告遗留项）。 */
-const GENERIC_GATE_ENTRY = {
-  file: "pitfalls.md",
-  heading: "危险或难以撤销的操作",
-  authority: "user",
-  excerpt:
-    "对仓库、历史或已发布制品的危险或难以撤销的操作（强制推送、重写历史、批量删除、发布、撤销提交等）执行前要先核实影响范围并征得确认。",
-};
+/** 从命令文本推「程序 子命令」形状（arch §6.4.4 的 `shape`，如 `["git commit"]`）：
+ * 跳过前导 `VAR=value` / `env` / `sudo` / `timeout <dur>`，取程序 basename，紧邻的
+ * 非选项 token 当作子命令。只用于 state 展示，不参与评分。 */
+export function commandShape(command) {
+  const tokens = String(command).trim().split(/\s+/u).filter(Boolean);
+  let i = 0;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(t) || t === "env" || t === "sudo" || t === "command") {
+      i += 1;
+    } else if (t === "timeout") {
+      i += 2;
+    } else {
+      break;
+    }
+  }
+  const program = tokens[i];
+  if (program === undefined) return [];
+  const name = program.split("/").pop();
+  const next = tokens[i + 1];
+  const isPlain = next !== undefined && !next.startsWith("-") && !/^["']/u.test(next);
+  return isPlain ? [`${name} ${next}`] : [name];
+}
 
 /** 打标核心 5 题（arch §6.2.2 m_*，字面与 questions.ts 的 buildTagCoreQuestions
  * 逐字一致——parity 测试钉住）。t_ 与 c 系列问题需要项目 taxonomy/比较候选，评测数据集
@@ -166,9 +183,8 @@ export function buildTagState(entry) {
 }
 
 /** 整理建议问题（arch §6.3.3 p<n>/o<n>，字面与 questions.ts 的
- * buildReviewQuestions 逐字一致——parity 测试钉住）。jev-review.json 没有
- * updated 日期字段，两侧都用 today 代入（a_supersedes_b/b_supersedes_a 的
- * 可信度因此较弱，duplicate/conflict/complementary/unrelated 仍可评测）。 */
+ * buildReviewQuestions 逐字一致——parity 测试钉住）。pair 的 updatedAt 由调用方
+ * 给出：jev-review.json 的 a/b 可带 `updated`，缺省按 today 代入。 */
 export function buildReviewQuestions(project, today, pairs, staleCands = []) {
   const questions = {};
   for (const p of pairs) {
@@ -208,14 +224,43 @@ export function buildReviewState(project, today) {
 
 const SETS = ["recall", "gate", "tag", "review"];
 
+/** 门禁关系（arch §6.4.3 的 choice 选项）与整理关系（arch §6.3.3 的 p<n> 选项）。
+ * 数据集里写错选项名时在构造阶段就报错，而不是跑完才变成“全错”。 */
+const GATE_RELATIONS = ["unrelated", "applies", "violates_now"];
+const REVIEW_RELATIONS = ["unrelated", "duplicate", "conflict", "a_supersedes_b", "b_supersedes_a", "complementary"];
+/** 门禁阈值（arch §6.4.4 `memory.jev.gate.threshold` 默认值）。 */
+const GATE_THRESHOLD = 0.6;
+
+function assertRelation(setName, c) {
+  const allowed = setName === "gate" ? GATE_RELATIONS : REVIEW_RELATIONS;
+  if (!allowed.includes(c.expected)) {
+    throw new Error(`${setName} case ${c.id}: expected must be one of ${allowed.join("|")}, got ${c.expected}`);
+  }
+}
+
+/** jev-gate.json 样例 → arch §6.4.3 的 state：命令形状（programs）+ 现场证据
+ * （running / branch / staged；staged 仅在有值时带上，同 arch §6.4.2）。 */
+function buildGateCaseState(c) {
+  const evidence = c.evidence ?? {};
+  const staged = evidence.staged ?? [];
+  return {
+    ...buildGateState(c.command, c.tool ?? "bash"),
+    programs: commandShape(c.command),
+    running: evidence.running ?? [],
+    ...(evidence.branch === undefined ? {} : { branch: evidence.branch }),
+    ...(staged.length === 0 ? {} : { staged }),
+  };
+}
+
 function loadSet(name) {
   const raw = JSON.parse(readFileSync(join(EVAL_DIR, `jev-${name}.json`), "utf8"));
   if (raw.set !== name) throw new Error(`jev-${name}.json: expected set ${name}, got ${raw.set}`);
   return raw.cases;
 }
 
-/** 为一个数据集样例构造一次 classify 调用的 {state, questions}。 */
-function buildCaseRequest(setName, c) {
+/** 为一个数据集样例构造一次 classify 调用的 {state, questions, check}。
+ * 导出供本地自检（`--dry-run` 与离线验评分规则）；不是出题模板，不受 parity 测试约束。 */
+export function buildCaseRequest(setName, c) {
   switch (setName) {
     case "recall": {
       const id = `e_${c.id}`;
@@ -230,21 +275,34 @@ function buildCaseRequest(setName, c) {
       };
     }
     case "gate": {
-      const id = `g_${c.id}`;
-      const guardEntries = [{ id, ...GENERIC_GATE_ENTRY }];
+      assertRelation("gate", c);
+      const id = c.id;
+      const guardEntries = [
+        {
+          id,
+          file: c.rule.file,
+          heading: c.rule.heading,
+          authority: c.rule.authority,
+          excerpt: c.rule.excerpt,
+        },
+      ];
+      const state = buildGateCaseState(c);
       return {
         id,
-        state: buildGateState(c.command),
-        questions: buildGateQuestions(buildGateState(c.command), guardEntries),
+        state,
+        questions: buildGateQuestions(state, guardEntries),
+        // 评分只看关系（arch §6.4.4）：a=P(applies)、v=P(violates_now)，阈值 0.6。
+        // 期望 unrelated ⇒ a+v<0.6；applies ⇒ a+v≥0.6 且 v<0.6；violates_now ⇒ v≥0.6。
         check: (answers) => {
           const a = answers[id]?.probabilities?.applies ?? 0;
           const v = answers[id]?.probabilities?.violates_now ?? 0;
-          // 阶段二遗留（见本文件顶部注释）：hold/hold-evidence 合并成一档
-          // "block"，因为两者的区分依赖 inline gate=hold 与进程证据，不是
-          // 分类器能从这条合成通用规则判断出来的。
-          const expectedBucket = c.expected === "pass" ? "pass" : "block";
-          const verdict = a + v >= 0.6 ? "block" : "pass";
-          return { p: Math.max(a, v), verdict, pass: verdict === expectedBucket };
+          const pass =
+            c.expected === "unrelated"
+              ? a + v < GATE_THRESHOLD
+              : c.expected === "applies"
+                ? a + v >= GATE_THRESHOLD && v < GATE_THRESHOLD
+                : v >= GATE_THRESHOLD;
+          return { a, v, choice: answers[id]?.choice, pass };
         },
       };
     }
@@ -264,21 +322,22 @@ function buildCaseRequest(setName, c) {
       };
     }
     case "review": {
+      assertRelation("review", c);
       const id = `p_${c.id}`;
       const today = new Date().toISOString().slice(0, 10);
       const pair = {
         id,
-        a: { file: c.a.file, updatedAt: today, excerpt: c.a.excerpt },
-        b: { file: c.b.file, updatedAt: today, excerpt: c.b.excerpt },
+        a: { file: c.a.file, updatedAt: c.a.updated ?? today, excerpt: c.a.excerpt },
+        b: { file: c.b.file, updatedAt: c.b.updated ?? today, excerpt: c.b.excerpt },
       };
       return {
         id,
         state: buildReviewState("pi-toolkit", today),
         questions: buildReviewQuestions("pi-toolkit", today, [pair]),
+        // 直接比对关系 choice（arch §6.3.3 的六个选项）。
         check: (answers) => {
           const choice = answers[id]?.choice;
-          const merge = choice === "duplicate" || choice === "a_supersedes_b" || choice === "b_supersedes_a";
-          return { p: answers[id]?.probabilities?.[choice] ?? 0, pass: merge === c.expected_merge, choice };
+          return { p: answers[id]?.probabilities?.[choice] ?? 0, choice, pass: choice === c.expected };
         },
       };
     }
@@ -449,15 +508,21 @@ async function main() {
   for (const name of setNames) {
     const cases = loadSet(name);
     counts[name] = cases.length;
-    const first = buildCaseRequest(name, cases[0]);
-    dryFirst.push({ set: name, id: first.id, request: { state: first.state, questions: first.questions } });
+    // 全量构造：dry-run 也把每个样例跑一遍构造/校验路径（选项名、必填字段、state 组装）。
+    const requests = cases.map((c) => buildCaseRequest(name, c));
+    dryFirst.push({
+      set: name,
+      id: requests[0].id,
+      count: requests.length,
+      request: { state: requests[0].state, questions: requests[0].questions },
+    });
   }
   console.log(
     `jev-eval · sets: ${setNames.map((s) => `${s}(${counts[s]})`).join(" · ")}${args.dryRun ? " · dry-run" : ""}`,
   );
   if (args.dryRun) {
     for (const item of dryFirst) {
-      console.log(`\n── ${item.set} · first batch (${item.id}) ──`);
+      console.log(`\n── ${item.set} · first batch (${item.id}) · ${item.count} cases ──`);
       console.log(JSON.stringify(item.request, null, 2));
     }
     console.log("\n(dry-run: no network. Real runs need credentials; E0 fills docs/dev/memory/eval/jev-baseline.md)");

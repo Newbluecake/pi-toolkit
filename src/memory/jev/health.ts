@@ -26,7 +26,9 @@ import {
 
 // ───────────────────────────── error classification (§5.2) ─────────────────────────────
 
-const CONTEXT_RE = /context|too many tokens|maximum context/i;
+// `max_tokens_exceeded`: measured opencode System One wording (E0 C-J8, 2026-10-31):
+// HTTP 400 `{"detail":{"error_type":"max_tokens_exceeded"}}` for an oversized state.
+const CONTEXT_RE = /context|too many tokens|maximum context|max_tokens_exceeded/i;
 const UNAVAILABLE_KEYWORD_RE = /FreeTierError|Insufficient|unavailable/i;
 const RATE_LIMIT_KEYWORD_RE = /rate limit/i;
 const API_ERROR_MARKER = "API error (";

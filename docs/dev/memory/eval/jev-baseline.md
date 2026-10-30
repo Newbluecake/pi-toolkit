@@ -61,8 +61,31 @@ J0 交付的 `jev-eval.mjs` 在联网模式下有三处问题（验收员只跑�
 
 > 提示 J2：pi-free 代理 fetch 的实现要避开第 1 条的两个坑。
 
-## 4. 待办（阶段二，J2 合入后）
+## 4. 阶段二（J2 合入后，2026-10-31）
 
-- 拦截（24 条）、整理（20 对）按 `questions.ts` 的正式模板重跑；确认门禁阈值 0.6。
-- 打标按 J1 定稿的类型描述重跑。
-- `PI_TOOLKIT_JEV_CONFORMANCE=1` 跑 C-J7 真实调用、C-J8、C-J15。
+评测集按架构语义重建（拦截：每例 = 真实规则 + 调用 + 现场证据 → `unrelated`/`applies`/`violates_now`，38 例；整理：五选一关系，30 对），题目与 `src/memory/jev/questions.ts` 逐字一致（`questions-eval-parity.test.ts` 钉住）。旧评测集（只有命令或合并布尔）的 17/24、15/20 作废。
+
+### 4.1 拦截（38 例，阈值 0.6）
+
+| 模型          | 关系判对 | 最终动作判对 | 漏拦（该拦放行）           | 误拦（不该拦拦了） | hold 降为拦一次      |
+| ------------- | -------- | ------------ | -------------------------- | ------------------ | -------------------- |
+| jev-1.13      | 31/38    | 34/38        | 0                          | 1（g07 `echo`）    | 2（g14 v=0.55、g23） |
+| jev-1.13-free | 29/38    | 31/38        | 1（g02，a+v=0.58，提醒类） | 2（g07、g08）      | 2（同左）            |
+
+- 「最终动作」按 arch §6.4.4 判定表换算：非 hold 规则下 `applies` 与 `violates_now` 都是拦一次，因此 g25/g27/g29 的关系分歧不改变动作。
+- 误拦都发生在发版进行中、命令文本里出现 `git commit`/`git tag` 字样的 `echo`/`grep`：模型被证据带偏。代价是拦一次（模型可以说明理由后重试），可接受。
+- 把 v 阈值降到 0.5 只能救回 g14，会增加误拦；**门禁阈值维持 0.6**。
+
+### 4.2 整理（30 对）
+
+两模型都是 25/30，错题相同（v01 判 conflict、v08/v09/v19 判 complementary、v10 判 duplicate），属于标注边界模糊。整理只出建议、须用户确认，风险低。
+
+### 4.3 打标（30 条，J1 定稿的类型描述）
+
+两模型 22/30，错题与阶段一相同：5 条「事实」判为「坑」（条目都来自 `pitfalls-*.md`，内容是已知失败与绕法，判断站得住），k26 偏好判为规则，k16 类型对但重要度偏高。类型分歧只在 rule/procedure 与其它类型之间才影响守护，这里不涉及；**不改 `ENTRY_TYPES` 描述**。
+
+### 4.4 一致性测试与 C-J8 实测
+
+- `PI_TOOLKIT_JEV_CONFORMANCE=1 npx vitest run tests/conformance/memory-jev-channels.test.ts`：14 通过、1 跳过（门控项是占位，真实调用由本节手工完成）。
+- **C-J8 上下文超限措辞**（两模型一致）：state 约 340KB ⇒ `HTTP 400 {"detail":{"error_type":"max_tokens_exceeded"}}`，即 pi 侧错误文本 `System One API error (400): {"detail":{"error_type":"max_tokens_exceeded"}}`。arch 预设的三个关键词都匹配不上，原先会被归为瞬态（计熔断、不拆批）；已在 `health.ts` 的 `CONTEXT_RE` 加 `max_tokens_exceeded` 并补测试。
+- 900 道题（约 167KB，state 很小）照常返回：超限主要由 state 体积触发，问题数量影响小。
