@@ -559,7 +559,7 @@ unavailable / transient ──到达 until──► unknown（下一次真实调
 | `full(active)`    | 至少成功调用过一次，且当前有未被隔离的模型                                                   | 运行             | 运行                                   | `jev: full · opencode/jev-1.13 · 142/150 tagged · 37 calls $0.006`               |
 | `partial(reason)` | 可用集为空（无凭证、不在 catalog、全部被隔离），或本 activation 的预算已用完                 | **停**           | **运行**                               | `jev: partial (451) · fast path 142/150 tagged (10-29) · retry 12:05 · /mem jev` |
 
-- **`off(pi-api)` 与 I9**：`pi-api` 只能在 `ctx` 上判出，此时注册已经发生，所以它**不在 I9「settings off ⇒ byte-identical」的字面承诺内**。设置期的四条 off 路径（disabled、legacy、secure、empty-list）仍零注册，由 off golden 证明。`off(pi-api)` 的证明方式：off-harness 增加**第 5 个重放配置**「设置开 + 无 modelRegistry」，断言除 `registrations` 外的全部字段（渲染、工具输出、`/mem` 文本、doctor、启动提醒）与 `disabled` 记录逐字段相等，且 `registrations` 的差集恰好是 jev 集合。空转时，工具描述变体、D17–D19、`/mem` 状态行仍然生效，属于与 `inactive` 同类的有意偏差（§9.2）。
+- **`off(pi-api)` 与 I9**：`pi-api` 只能在 `ctx` 上判出，此时注册已经发生，所以它**不在 I9「settings off ⇒ byte-identical」的字面承诺内**。设置期的四条 off 路径（disabled、legacy、secure、empty-list）仍零注册，由 off golden 证明。`off(pi-api)` 的证明方式：off-harness 增加**第 5 个重放配置**「设置开 + 无 modelRegistry」，断言方式为**逐字段比对 + 允许差异清单 `PI_API_ALLOWED_DIFF`**（见 jev-plan.md J0 第 4 条）：`render`、`doctor`、`tidyPrompt` 与 `disabled` 逐字节相等；`registrations` 只允许多出清单声明的 jev 注册名与 `memory` 工具描述变体；`command` 只允许 `/mem` 状态行 `jev: off (pi-api)` 与补全差异；`tool`、`reminder` 只允许确定性部件的声明差异（append 刷新 `updated`、回显 `jev: not tagged (off: pi-api)`、启动提醒追加行）。清单之外的任何差异即失败；清单只许追加。这些允许的差异（工具描述变体、确定性部件、`/mem` 状态行）属于与 `inactive` 同类的有意偏差（§9.2）。
 - **`inactive`**：`partial` 的一种显示形态，条件是覆盖率为 0、且没有任何行内 `gate*`/`tags=`。典型情形是从未配过分类器的用户，此时显示 `jev: inactive (no classifier credentials)`。
   - 零调用部分照常注册，但没有可用的数据，所以行为与今天一致（§9.2）。
   - 这样区分是为了不让没配过分类器的用户误以为「部分坏了」。
@@ -893,7 +893,7 @@ similar: core.md L5 (complementary 0.72)
   - 或者「是否过时」的 p ≥ 0.8；
   - 另外，`userLike ≥ 0.8` 而归属为 agent 的条目，生成一条「疑似用户令」建议。
 - **提示**：启动提醒追加 `jev 2 suggestions — /mem review`。
-- **`/mem review`**：主会话、有 UI 时使用；web 端只开放只读的 `--list`（交互选择没有文本回退，按 Q35 拒绝）。用 `ctx.ui.select` 逐条处理，各类建议的选项如下：
+- **`/mem review`**：主会话、有 UI 时逐条处理；web 端（Q35）执行 `review` 需要确认，确认后降级为与 `--list` 相同的只读文本清单，并提示「在终端执行 /mem review 逐条处理」，不做任何写入（`expired` 同理）。用 `ctx.ui.select` 逐条处理，各类建议的选项如下：
 
 | 建议类型   | 可选操作                                                      |
 | ---------- | ------------------------------------------------------------- |
@@ -1177,7 +1177,7 @@ review   last 2026-10-28 · 2 open → /mem review
   - `/mem tags [list|add|rm|disable|enable]`；
   - `/mem review [--run|--list]`；
   - `/mem expired`。
-- **web 端**（Q35，经 `src/web-hub/agent/command-policy.ts` 的 `mem()`）：只读的 `jev`、`tags`（裸形式）、`tags list`、`review --list` 允许执行；改动状态的子命令（`jev probe`、`jev retag`、`jev reset-index`、`tags add|rm|disable|enable`）需要确认，与 `/mem` 现有的 confirm 惯例一致；只有纯终端交互、没有文本回退的子命令（`review` 逐条选择、`expired`）才拒绝。`command-usage.ts` 不改。
+- **web 端**（Q35，经 `src/web-hub/agent/command-policy.ts` 的 `mem()`）：只读的 `jev`、`tags`（裸形式）、`tags list`、`review --list` 允许执行；改动状态的子命令（`jev probe`、`jev retag`、`jev reset-index`、`tags add|rm|disable|enable`）需要确认，与 `/mem` 现有的 confirm 惯例一致；`review`（逐条选择）与 `expired` 在 web 端需要确认，确认后降级为只读文本清单并提示回终端处理，不做写入（它们有文本回退，所以不属于拒绝条件）。Q35 的拒绝条件是「纯终端交互、没有文本回退」，本期没有命中该条件的子命令，即**本期无 deny 行**。`command-usage.ts` 不改。
 - **skill**：新增 `skills/memory-jev/SKILL.md`，承载使用策略（I12）。
 
 ## 10. 测试与验证策略
@@ -1426,7 +1426,7 @@ Jev 是一种「分类器」模型：它不会写字，只会做选择题、打�
 
 这时 `/mem` 显示 `jev: partial (451) · fast path 142/150 tagged (10-29)`，意思是：Jev 现在不在，系统正在用 10 月 29 日打好的标签工作，150 条里有 142 条有标签。`/mem jev` 会分两栏列出「停了的」和「还在跑的」。这期间推送到对话里的记忆，标记末尾带 `·partial`。如果你从没配过分类器，显示的是 `jev: inactive`，一切和以前一样。如果你把分类器列表清空（`memory.jev.classifiers` 设为空），等于把整个 Jev 功能关掉，连不调用 Jev 的部分也一起停；列表里写的名字全都不对时，也按关闭处理，并会提示你一次。
 
-**在网页端**：查看类命令（`/mem jev`、`/mem tags`）直接执行；会改动状态的命令（如 `/mem jev probe`、`/mem tags add`）会先请你确认；需要逐条点选的 `/mem review`、`/mem expired` 只能在终端里用。
+**在网页端**：查看类命令（`/mem jev`、`/mem tags`）直接执行；会改动状态的命令（如 `/mem jev probe`、`/mem tags add`）会先请你确认；需要逐条点选的 `/mem review`、`/mem expired` 在网页端确认后只列出清单（不做改动），提示你回终端逐条处理。
 
 **第一次启用时**，pi 会提示一次：Jev 已启用，用的是哪个模型，你的消息和记忆摘录会脱敏后发给它，以及怎么查看和关闭。在加密（secure）环境里，Jev 永远关闭。
 
@@ -1538,14 +1538,15 @@ Jev 是一种「分类器」模型：它不会写字，只会做选择题、打�
 
 只修正表述与实施之间的落差，不改设计意图。来源：`jev-plan.md` §10（下表记作「方案 §10 #n」）、`jev-plan-review-r1.md`（「评审 #n」）、`hygiene-flow.md` 第九轮拍板。
 
-| #   | 来源                      | 勘误                                                                                                                                                                                                                                                                                   | 落点                                         |
-| --- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| 1   | 方案 §10 #1               | 金样本表补 `tests/config/__corpus__/settings-corpus.json`（新增键须重 pin，先例 `4758bae5`）                                                                                                                                                                                           | §4.5                                         |
-| 2   | 方案 §10 #2、评审 #5      | `off(pi-api)` 改为「注册但钩子空转」，写明它不在 I9 settings-off 字面承诺内；设置期四条 off 路径仍零注册；off-harness 增加第 5 个重放配置作证明                                                                                                                                        | §0、§5.3、§9.2                               |
-| 3   | 方案 §10 #3、评审 #3      | 模块清单补 7 个 pi-free 文件（config/tagging/command-port/write-port/review-command/expired-command/entry-edit）；`expiredEntries` 归 J1；文件域补 `command-policy.ts`（J4→J8）、J7 改 `src/memory/index.ts`、`tidy/command.ts` 与 `tidy/batch-command.ts` 归 J8；依赖图与方案批次对齐 | §3.1、§15                                    |
-| 4   | 方案 §10 #4               | C-J1–C-J15 进 AGENTS.md peer bump 清单，由 J9 负责                                                                                                                                                                                                                                     | §13、§15                                     |
-| 5   | 方案 §10 #5、评审 #1      | 召回 0.7、门禁 0.6 标注「J0 基线评测后可能调整，调整需回本稿并问用户」                                                                                                                                                                                                                 | §9.1                                         |
-| 6   | 方案 §10 #6               | `memory.jev.confirmTimeoutS` 登记 `TIME_SETTING_MS_PATHS`（J3）                                                                                                                                                                                                                        | §9.1                                         |
-| 7   | 方案 §10 #7、Q33          | N1 改为已拍板（适用）                                                                                                                                                                                                                                                                  | §0、§6.4.5、§14.2                            |
-| 8   | 方案 §10 #8、评审 #6、Q34 | `classifiers` 为空列表 = off（零调用部分也不生效）；非空但全部非法时同样 off 并给 warn；§3.3 确定性部件改为「只受总开关与接线判定控制」；empty-list 留在 off 行                                                                                                                        | §3.3、§5.3、§6.2.5、§9.1、§9.2、§14.3、§16.2 |
-| 9   | 评审 #2、Q35              | web 端：改动状态的子命令改为需要确认，只有纯终端交互、无文本回退的才拒绝；`tags` 裸形式允许                                                                                                                                                                                            | §6.3.4、§9.4、§14.3、§16.2                   |
+| #   | 来源                            | 勘误                                                                                                                                                                                                                                                                                   | 落点                                         |
+| --- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| 1   | 方案 §10 #1                     | 金样本表补 `tests/config/__corpus__/settings-corpus.json`（新增键须重 pin，先例 `4758bae5`）                                                                                                                                                                                           | §4.5                                         |
+| 2   | 方案 §10 #2、评审 #5            | `off(pi-api)` 改为「注册但钩子空转」，写明它不在 I9 settings-off 字面承诺内；设置期四条 off 路径仍零注册；off-harness 增加第 5 个重放配置作证明                                                                                                                                        | §0、§5.3、§9.2                               |
+| 3   | 方案 §10 #3、评审 #3            | 模块清单补 7 个 pi-free 文件（config/tagging/command-port/write-port/review-command/expired-command/entry-edit）；`expiredEntries` 归 J1；文件域补 `command-policy.ts`（J4→J8）、J7 改 `src/memory/index.ts`、`tidy/command.ts` 与 `tidy/batch-command.ts` 归 J8；依赖图与方案批次对齐 | §3.1、§15                                    |
+| 4   | 方案 §10 #4                     | C-J1–C-J15 进 AGENTS.md peer bump 清单，由 J9 负责                                                                                                                                                                                                                                     | §13、§15                                     |
+| 5   | 方案 §10 #5、评审 #1            | 召回 0.7、门禁 0.6 标注「J0 基线评测后可能调整，调整需回本稿并问用户」                                                                                                                                                                                                                 | §9.1                                         |
+| 6   | 方案 §10 #6                     | `memory.jev.confirmTimeoutS` 登记 `TIME_SETTING_MS_PATHS`（J3）                                                                                                                                                                                                                        | §9.1                                         |
+| 7   | 方案 §10 #7、Q33                | N1 改为已拍板（适用）                                                                                                                                                                                                                                                                  | §0、§6.4.5、§14.2                            |
+| 8   | 方案 §10 #8、评审 #6、Q34       | `classifiers` 为空列表 = off（零调用部分也不生效）；非空但全部非法时同样 off 并给 warn；§3.3 确定性部件改为「只受总开关与接线判定控制」；empty-list 留在 off 行                                                                                                                        | §3.3、§5.3、§6.2.5、§9.1、§9.2、§14.3、§16.2 |
+| 9   | 评审 #2、Q35                    | web 端：改动状态的子命令改为需要确认，只有纯终端交互、无文本回退的才拒绝；`tags` 裸形式允许                                                                                                                                                                                            | §6.3.4、§9.4、§14.3、§16.2                   |
+| 补  | 实施方案复审 r2 B1/B2（主会话） | §6.3.4、§9.4：web 端 `review`/`expired` 改为确认后降级为只读清单，本期无 deny 行；§5.3：pi-api 证明改为逐字段比对 + `PI_API_ALLOWED_DIFF`，消除同段矛盾                                                                                                                                |
