@@ -391,7 +391,7 @@ describe("C-J3: two tool calls in one assistant message — dispatch order and c
 // ───────────────────────── C-J4 ─────────────────────────
 
 describe("C-J4: sendMessage(triggerTurn:false) inside tool_call — landing point", () => {
-  it("lands appended after the RUN's tool results (not visible to this run's next LLM call), no extra turn, visible to the next run", async () => {
+  it("flushes at turn_end: visible to this run's next LLM call, after the tool results, no extra turn", async () => {
     const o = freshObserved();
     const model = fakeModel();
     let piRef: ExtensionAPI | undefined;
