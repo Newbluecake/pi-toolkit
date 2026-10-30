@@ -172,4 +172,20 @@ describe("pi-free boundaries", () => {
     const offenders = memoryOffenders(roots);
     expect(offenders, offenders.join("; ")).toEqual([]);
   });
+
+  // J1 (jev-plan §4 J1 / arch §3.2): everything under src/memory/jev/ except
+  // wire.ts + segment.ts (the only pi-facing modules), plus the shared
+  // secret-patterns root. Later jev packages' new files are constrained
+  // automatically by the glob.
+  it("memory jev/* (minus wire/segment) and secret-patterns stay pi-free", () => {
+    const roots = [
+      ...globSync("src/memory/jev/*.ts", { cwd: ROOT })
+        .filter((file) => !file.endsWith("wire.ts") && !file.endsWith("segment.ts"))
+        .map((file) => resolve(ROOT, file)),
+      resolve(ROOT, "src/memory/secret-patterns.ts"),
+    ];
+    expect(roots.length, "jev roots must be discovered").toBeGreaterThanOrEqual(8);
+    const offenders = memoryOffenders(roots);
+    expect(offenders, offenders.join("; ")).toEqual([]);
+  });
 });
