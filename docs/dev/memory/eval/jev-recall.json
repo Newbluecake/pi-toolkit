@@ -410,6 +410,106 @@
         "excerpt": "UI 文案语言切分：紧凑行内标记只用英文 token（5h 62% · stale 12m），中文只出现在面向用户的散文块"
       },
       "expected": false
+    },
+    {
+      "id": "h01",
+      "message": "帮我把 dev 推到 GitHub",
+      "entry": {
+        "file": "pitfalls.md",
+        "label": "pitfall · format",
+        "excerpt": "prettier 会重排 markdown 表格对齐，按精确 oldText 编辑表格前先重读文件"
+      },
+      "expected": false
+    },
+    {
+      "id": "h02",
+      "message": "跑一下全量测试",
+      "entry": {
+        "file": "core.md",
+        "label": "rule · release",
+        "excerpt": "发版只在用户明确要求时做；patch 在 dev 分支发，minor/major 先 PR 到 master"
+      },
+      "expected": false
+    },
+    {
+      "id": "h03",
+      "message": "web-hub 全部请求 500 了，ReferenceError",
+      "entry": {
+        "file": "tasks.md",
+        "label": "fact · web-hub",
+        "excerpt": "web-hub 登录密码存储加固（scrypt 参数、TOTP 加密）排在下一个 minor 窗口"
+      },
+      "expected": false
+    },
+    {
+      "id": "h04",
+      "message": "quota 的 HUD 行加个旋转图标吧",
+      "entry": {
+        "file": "quota.md",
+        "label": "procedure · quota",
+        "excerpt": "新增 quota provider 需要写 adapter 并补 quota-kimi-zai 之外的 golden"
+      },
+      "expected": false
+    },
+    {
+      "id": "h05",
+      "message": "给 memory 工具加个 search 参数",
+      "entry": {
+        "file": "memory.md",
+        "label": "fact · memory",
+        "excerpt": "memory tidy 的事务写在 journal 里，/mem restore 可以回滚到整理前"
+      },
+      "expected": false
+    },
+    {
+      "id": "h06",
+      "message": "子 agent 报 bash 没有 host view attached，怎么回事",
+      "entry": {
+        "file": "dev-flow.md",
+        "label": "rule · dispatch",
+        "excerpt": "派单 dev 的 timeout_s 约 900，关键路径大包可给 1800"
+      },
+      "expected": false
+    },
+    {
+      "id": "h07",
+      "message": "帮我写个 commit message",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "label": "rule · git",
+        "excerpt": "GitHub 直连不通 ⇒ 走代理 export https_proxy=http://proxy.example:7897；gh / git push / curl github 一律带上"
+      },
+      "expected": false
+    },
+    {
+      "id": "h08",
+      "message": "把 README 里的拼写错误改一下",
+      "entry": {
+        "file": "pitfalls.md",
+        "label": "pitfall · docs",
+        "excerpt": "AGENTS.md 有守卫测试钉着原文短语，改 AGENTS.md 后必须跑 tests/docs/agents-md.test.ts"
+      },
+      "expected": false
+    },
+    {
+      "id": "h09",
+      "message": "翻译一下这段英文",
+      "entry": {
+        "file": "core.md",
+        "label": "rule · workflow",
+        "excerpt": "所有开发任务必须遵循 dev-flow：打分定车道、按车道走闸门"
+      },
+      "expected": false
+    },
+    {
+      "id": "h10",
+      "message": "缓存命中率怎么突然掉了",
+      "entry": {
+        "file": "quota.md",
+        "label": "rule · quota",
+        "excerpt": "quota 告警阶梯 L1/L2/L3 对应 70%/80%/90% 用量"
+      },
+      "expected": false
     }
   ]
 }

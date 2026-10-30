@@ -653,8 +653,11 @@ unavailable / transient ──到达 until──► unknown（下一次真实调
   "questions": {
     "e17": {
       "type": "bool",
-      "instructions": "Project memory entry [rule · user rule · critical · tags: release] from core.md: 「发版规则：默认 patch；feat ≥50 才 minor……」. Must the assistant know or apply this entry to handle user_message (previous_user_message is context only)?",
-      "criteria": { "true": "Directly relevant: must be applied now", "false": "Unrelated or only loosely related" }
+      "instructions": "Project memory entry [rule · user rule · critical · tags: release] from core.md: 「发版规则：默认 patch；feat ≥50 才 minor……」. Would reminding the assistant of this entry right now help it handle user_message correctly or avoid a known mistake (previous_user_message is context only)?",
+      "criteria": {
+        "true": "Yes: it applies to this request — a rule, pitfall or procedure the assistant should follow here",
+        "false": "No: unrelated, or only shares surface keywords without affecting how to handle this request"
+      }
     }
   }
 }
@@ -663,7 +666,7 @@ unavailable / transient ──到达 until──► unknown（下一次真实调
 `previous_user_message` 取分支上的上一条用户消息（`getBranch()` 回扫；回扫本来就为段播种而做）。它同样截断（600 码点）、脱敏，也同样先剥 skill 块。助手消息依然不外发（§7.2）。
 
 - **决定**：
-  - 取 p ≥ 0.7 的条目，按 p 降序排列；同分时依次比较：用户令优先、重要度高优先、文件名；
+  - 取 p ≥ 0.6 的条目（E0 实测后由 0.7 调整，见 `docs/dev/memory/eval/jev-baseline.md`），按 p 降序排列；同分时依次比较：用户令优先、重要度高优先、文件名；
   - 最多 3 条、合计 4096B；
   - 到期条目也注入，标题后加注「已到期，待用户确认」（Q1）。
 - **落点**（Q25）：
@@ -1111,7 +1114,7 @@ similar: core.md L5 (complementary 0.72)
 | `memory.jev.classifiers`         | 逗号串/数组 | `opencode/jev-1.13-free,opencode/jev-1.13` | 有序列表；openrouter 项待 J0 探测后定稿（评审 #8）。**空列表 = off**，零调用部分也不生效（Q34）；非空但全部非法 ⇒ 同样 off，并给一条 warn（doctor 或启动提醒） |
 | `memory.jev.proxy`               | string      | `""`                                       |                                                                                                                                                                |
 | `memory.jev.childSessions`       | bool        | `true`                                     |                                                                                                                                                                |
-| `memory.jev.recall.threshold`    | 0.5–0.99    | `0.7`                                      | J0 基线评测后可能调整；调整需回本稿并问用户                                                                                                                    |
+| `memory.jev.recall.threshold`    | 0.5–0.99    | `0.6`                                      | E0 实测后由 0.7 调为 0.6（Q36，措辞同步改为「提醒是否有帮助」）；再调整需回本稿并问用户                                                                        |
 | `memory.jev.recall.maxEntries`   | 1–10        | `3`                                        | E 层固定为 2                                                                                                                                                   |
 | `memory.jev.recall.maxBytes`     | 512–16384   | `4096`                                     |                                                                                                                                                                |
 | `memory.jev.recall.waitMs`       | 0–3000      | `1500`（Q25）                              | 0 = 纯异步                                                                                                                                                     |
@@ -1550,3 +1553,4 @@ Jev 是一种「分类器」模型：它不会写字，只会做选择题、打�
 | 8   | 方案 §10 #8、评审 #6、Q34       | `classifiers` 为空列表 = off（零调用部分也不生效）；非空但全部非法时同样 off 并给 warn；§3.3 确定性部件改为「只受总开关与接线判定控制」；empty-list 留在 off 行                                                                                                                        | §3.3、§5.3、§6.2.5、§9.1、§9.2、§14.3、§16.2 |
 | 9   | 评审 #2、Q35                    | web 端：改动状态的子命令改为需要确认，只有纯终端交互、无文本回退的才拒绝；`tags` 裸形式允许                                                                                                                                                                                            | §6.3.4、§9.4、§14.3、§16.2                   |
 | 补  | 实施方案复审 r2 B1/B2（主会话） | §6.3.4、§9.4：web 端 `review`/`expired` 改为确认后降级为只读清单，本期无 deny 行；§5.3：pi-api 证明改为逐字段比对 + `PI_API_ALLOWED_DIFF`，消除同段矛盾                                                                                                                                |
+| E1  | E0 评测基线、Q36（主会话）      | §6.1.1 召回题措辞改为「现在提醒这条是否有助于正确处理请求或避免已知错误」；召回阈值 0.7 → 0.6（§6.1.1、§9.1）                                                                                                                                                                          |

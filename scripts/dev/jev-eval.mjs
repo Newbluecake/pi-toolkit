@@ -22,6 +22,7 @@
  * 会对 src/memory/jev/questions.ts 做一致性对照——改模板要两处同步）。
  */
 
+import tls from "node:tls";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,10 +40,10 @@ export function buildRecallQuestion(entry, state) {
     type: "bool",
     instructions:
       `Project memory entry [${entry.label}] from ${entry.file}: 「${entry.excerpt}」. ` +
-      "Must the assistant know or apply this entry to handle user_message (previous_user_message is context only)?",
+      "Would reminding the assistant of this entry right now help it handle user_message correctly or avoid a known mistake (previous_user_message is context only)?",
     criteria: {
-      true: "Directly relevant: must be applied now",
-      false: "Unrelated or only loosely related",
+      true: "Yes: it applies to this request — a rule, pitfall or procedure the assistant should follow here",
+      false: "No: unrelated, or only shares surface keywords without affecting how to handle this request",
     },
   };
 }
@@ -156,7 +157,7 @@ function buildCaseRequest(setName, c) {
         questions: { [id]: buildRecallQuestion(c.entry) },
         check: (answers) => {
           const p = answers[id]?.probability;
-          return { p, pass: p !== undefined && p >= 0.7 === c.expected };
+          return { p, pass: p !== undefined && p >= 0.6 === c.expected }; // Q36
         },
       };
     }
@@ -180,7 +181,7 @@ function buildCaseRequest(setName, c) {
       return {
         id: `t_${c.id}`,
         state: buildTagState(c.entry),
-        questions: Object.fromEntries(Object.entries(qs).map(([k, q]) => [`m_${k}`, q])),
+        questions: qs, // buildTagQuestions 的键已带 m_ 前缀
         check: (answers) => {
           const type = answers.m_type?.choice;
           const imp = answers.m_importance?.score;
@@ -294,25 +295,30 @@ function httpsRequestVia(proxy, url, options) {
     servername: url.hostname,
     path: `${url.pathname}${url.search}`,
     headers: { ...options.headers, host: url.host },
-    agent: false,
-    createConnection: () => {
+    // 不设 agent：agent:false 会让 Node 新建默认 Agent 并忽略 createConnection。
+    // node:https 的 createConnection 必须同步返回 socket 或走回调：这里走回调，
+    // CONNECT 成功后用 tls.connect 在隧道 socket 上做 TLS（servername = 目标主机）。
+    createConnection: (_opts, cb) => {
       const tunnel = http.request({
         host: proxyUrl.hostname,
         port: Number(proxyUrl.port || 80),
         method: "CONNECT",
         path: `${url.hostname}:443`,
+        headers: { host: `${url.hostname}:443` },
       });
-      const socketPromise = new Promise((resolveTunnel, rejectTunnel) => {
-        tunnel.once("connect", (res, socket) =>
-          res.statusCode === 200
-            ? resolveTunnel(socket)
-            : rejectTunnel(new Error(`proxy CONNECT failed: ${res.statusCode}`)),
-        );
-        tunnel.once("error", rejectTunnel);
+      tunnel.once("connect", (res, socket) => {
+        if (res.statusCode !== 200) {
+          socket.destroy();
+          cb(new Error(`proxy CONNECT failed: ${res.statusCode}`));
+          return;
+        }
+        const secure = tls.connect({ socket, servername: url.hostname });
+        secure.once("error", (err) => secure.destroy(err));
+        cb(null, secure);
       });
-      // node:https 允许 createConnection 返回 promise<net.Socket>。
+      tunnel.once("error", (err) => cb(err));
       tunnel.end();
-      return socketPromise;
+      return undefined;
     },
   });
 }
