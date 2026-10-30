@@ -24,6 +24,8 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
 import type { MemorySettings } from "../config/settings.js";
 import type { TidyPort } from "./contracts.js";
+import { parseTagsAddArgs, tokenizeTagsArgs } from "./jev/command-port.js";
+import type { ClassifierRegistryLike, JevCommandPort } from "./jev/contracts.js";
 import { memoryDirFor, type MemoryPaths } from "./paths.js";
 import { discoverCCProjects, importAll, importProject, listMemory, type ImportResult } from "./store.js";
 import { formatSize } from "./render.js";
@@ -36,6 +38,9 @@ export type CommandHandler = (args: string, ctx: ExtensionCommandContext) => Pro
 
 const DESCRIPTION =
   "Project memory. /mem · /mem list · /mem init · /mem import [--force] [slug|all] · /mem path · /mem doctor · /mem tidy [--batch] · /mem restore [--legacy]";
+/** With a jev port the description gains the two new subcommands (J4);
+ *  without one it must stay byte-identical (I9 / off golden). */
+const DESCRIPTION_JEV = `${DESCRIPTION} · /mem jev · /mem tags`;
 
 function fmtImport(r: ImportResult): string {
   const s = r.skipped ? `, ${r.skipped} skipped (exists)` : "";
@@ -61,6 +66,10 @@ export interface CreateMemCommandDeps {
   renderBlock?: RenderTieredPort;
   runDoctor?: typeof import("./doctor.js").runDoctor;
   onAfterWrite?: (cwd: string) => void;
+  /** Jev command port (`/mem jev`, `/mem tags`; jev-plan J4). `undefined` ⇔
+   *  jev is not wired: every new branch below is skipped, the completion
+   *  table and DESCRIPTION stay byte-identical (I9, jev-off-golden). */
+  jev?: JevCommandPort;
 }
 
 const MEM_SUBCOMMANDS: ReadonlyArray<{ value: string; description: string }> = [
@@ -90,6 +99,27 @@ const MEM_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; descriptio
   import: [{ value: "import --force", description: "覆盖已存在的同名文件" }],
 };
 
+/** jev/tags second-level completion (J4) — appended only with a port. */
+const MEM_JEV_SUBCOMMANDS: ReadonlyArray<{ value: string; description: string }> = [
+  { value: "jev", description: "Jev 分类引擎状态 [probe|retag|reset-index]" },
+  { value: "tags", description: "场景标签管理 [list|add|rm|disable|enable]" },
+];
+const MEM_JEV_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; description: string }>> = {
+  jev: [
+    { value: "jev probe", description: "强制刷新可用集" },
+    { value: "jev retag", description: "补打 pending 条目" },
+    { value: "jev retag --all", description: "全部重打" },
+    { value: "jev reset-index", description: "清除侧车索引（保留 taxonomy）" },
+  ],
+  tags: [
+    { value: "tags list", description: "列出标签" },
+    { value: "tags add", description: "新增/更新标签（需 --label --desc）" },
+    { value: "tags rm", description: "删除用户标签" },
+    { value: "tags disable", description: "停用预置标签" },
+    { value: "tags enable", description: "启用预置标签" },
+  ],
+};
+
 export function createMemCommand(deps: CreateMemCommandDeps): {
   description: string;
   getArgumentCompletions: (argumentPrefix: string) => { value: string; label: string; description: string }[];
@@ -97,8 +127,14 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
 } {
   const isChildSession = deps.isChildSession ?? false;
   const getTidyPort = deps.getTidyPort ?? (() => undefined);
+  const jev = deps.jev;
+  // I9: without a port the tables and description stay exactly as before.
+  const subcommands = jev === undefined ? MEM_SUBCOMMANDS : [...MEM_SUBCOMMANDS, ...MEM_JEV_SUBCOMMANDS];
+  const secondLevel: Record<string, ReadonlyArray<{ value: string; description: string }>> = jev === undefined
+    ? { ...MEM_SECOND_LEVEL }
+    : { ...MEM_SECOND_LEVEL, ...MEM_JEV_SECOND_LEVEL };
   return {
-    description: DESCRIPTION,
+    description: jev === undefined ? DESCRIPTION : DESCRIPTION_JEV,
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
         const a = (argumentPrefix ?? "").trimStart();
@@ -106,7 +142,7 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
         const partial = a.endsWith(" ") || a === "" ? "" : (tokens[tokens.length - 1] ?? "");
         const head = tokens.length > 1 || (tokens.length === 1 && a.endsWith(" ")) ? tokens[0] : undefined;
         if (head !== undefined) {
-          const second = MEM_SECOND_LEVEL[head] ?? [];
+          const second = secondLevel[head] ?? [];
           // Preserve the compact legacy menu for a bare `tidy ` prompt; the
           // batch surface is discoverable as soon as the user starts typing
           // its flag (and remains available through exact completion values).
@@ -126,11 +162,13 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
               .map((item) => ({ ...item, label: item.value.slice(head.length + 1) }))
           );
         }
-        return MEM_SUBCOMMANDS.filter((item) => item.value.startsWith(partial)).map((item) => ({
-          value: item.value,
-          label: item.value,
-          description: item.description,
-        }));
+        return subcommands
+          .filter((item) => item.value.startsWith(partial))
+          .map((item) => ({
+            value: item.value,
+            label: item.value,
+            description: item.description,
+          }));
       } catch {
         return [];
       }
@@ -148,7 +186,17 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
       const listMessage = (emptyHint: string): string => {
         const files = listMemory(cwd, deps.paths);
         const body = files.length ? files.map((f) => `  ${f.name} (${formatSize(f.size)})`).join("\n") : emptyHint;
-        return body + doctorTrailer();
+        // J4: with a jev port the default listing gains ONE trailer status
+        // line (jev-plan §4 J4); without one the message is byte-identical.
+        let trailer = "";
+        if (jev !== undefined) {
+          try {
+            trailer = `\n${jev.statusLine(cwd)}`;
+          } catch {
+            trailer = "\njev: status unavailable";
+          }
+        }
+        return body + doctorTrailer() + trailer;
       };
       try {
         if (sub === "path") {
@@ -236,6 +284,14 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
           });
           return;
         }
+        if (sub === "jev" && jev !== undefined) {
+          await handleMemJev(jev, rest, ctx, cwd);
+          return;
+        }
+        if (sub === "tags" && jev !== undefined) {
+          await handleMemTags(jev, rest, ctx, cwd);
+          return;
+        }
         // default: list
         if (ctx.hasUI)
           ctx.ui.notify(listMessage(`(no memory for ${cwd} — run /mem import to bring in Claude Code memory)`), "info");
@@ -245,4 +301,122 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
       }
     },
   };
+}
+
+// ───────────────────────────── jev subcommands (J4) ─────────────────────────────
+
+/** `ctx.modelRegistry` is the classifier registry source (jev-arch §5.1);
+ *  read lazily so sessions without one stay untouched (off(pi-api)). */
+function jevRegistryOf(ctx: ExtensionCommandContext): ClassifierRegistryLike | undefined {
+  return (ctx as { modelRegistry?: ClassifierRegistryLike }).modelRegistry;
+}
+
+/** `/mem jev [probe | retag [--all] | reset-index]`. Write-ish operations
+ *  (retag/reset-index) are main-session + hasUI only (jev-plan §4 J4); the
+ *  bare report and probe are read-only. */
+async function handleMemJev(
+  jev: JevCommandPort,
+  rest: readonly string[],
+  ctx: ExtensionCommandContext,
+  cwd: string,
+): Promise<void> {
+  const op = rest[0];
+  const notify = (text: string, level: "info" | "warning" = "info"): void => {
+    // Silent refusal without a UI — the framework offers no output channel
+    // for /mem commands in print/RPC-no-UI mode (same convention as every
+    // other /mem branch and tidy's §7 gate; verifier item 2).
+    if (ctx.hasUI) ctx.ui.notify(text, level);
+  };
+  if ((op === "retag" || op === "reset-index") && (jev.isChildSession || !ctx.hasUI)) {
+    notify(`jev: ${op} requires the interactive main session`, "warning");
+    return;
+  }
+  try {
+    if (op === undefined) {
+      notify(await jev.report(cwd, jevRegistryOf(ctx)));
+      return;
+    }
+    if (op === "probe") {
+      notify(await jev.probe(jevRegistryOf(ctx)));
+      return;
+    }
+    if (op === "retag") {
+      notify(await jev.retag(cwd, rest.includes("--all"), jevRegistryOf(ctx)));
+      return;
+    }
+    if (op === "reset-index") {
+      notify(await jev.resetIndex(cwd));
+      return;
+    }
+    notify("usage: /mem jev [probe | retag [--all] | reset-index]", "warning");
+  } catch (err) {
+    notify(`jev error: ${(err as Error).message}`, "warning");
+  }
+}
+
+/** `/mem tags [list | add <id> --label … --desc "…" [--risk high]
+ *  [--commands a,b] [--paths a,b] [--tools a,b] | rm <id> | disable <id> |
+ *  enable <id>`. Everything but `list` is main-session + hasUI only. The
+ *  minimal quote-aware tokenization keeps `--desc "two words"` intact. */
+async function handleMemTags(
+  jev: JevCommandPort,
+  rest: readonly string[],
+  ctx: ExtensionCommandContext,
+  cwd: string,
+): Promise<void> {
+  const op = rest[0] ?? "list";
+  const notify = (text: string, level: "info" | "warning" = "info"): void => {
+    if (ctx.hasUI) ctx.ui.notify(text, level);
+  };
+  const gated = (): boolean => {
+    // No-UI refusals are silent (framework has no output channel here) —
+    // same convention as handleMemJev above and tidy's §7 gate.
+    if (jev.isChildSession || !ctx.hasUI) {
+      notify(`tags: ${op} requires the interactive main session`, "warning");
+      return false;
+    }
+    return true;
+  };
+  try {
+    if (op === "list") {
+      notify(jev.tags.list(cwd));
+      return;
+    }
+    if (op === "add") {
+      if (!gated()) return;
+      const parsed = parseTagsAddArgs(tokenizeTagsArgs(rest.slice(1).join(" ")));
+      if (!parsed.ok) {
+        notify(parsed.error, "warning");
+        return;
+      }
+      notify(await jev.tags.add(cwd, parsed.def));
+      return;
+    }
+    if (op === "rm") {
+      if (!gated()) return;
+      const id = rest[1];
+      if (id === undefined) {
+        notify("usage: /mem tags rm <id>", "warning");
+        return;
+      }
+      notify(await jev.tags.remove(cwd, id));
+      return;
+    }
+    if (op === "disable" || op === "enable") {
+      if (!gated()) return;
+      const id = rest[1];
+      if (id === undefined) {
+        notify(`usage: /mem tags ${op} <id>`, "warning");
+        return;
+      }
+      notify(await jev.tags.setEnabled(cwd, id, op === "enable"));
+      return;
+    }
+    notify(
+      'usage: /mem tags [list | add <id> --label … --desc "…" [--risk high] [--commands a,b] [--paths a,b] [--tools a,b] | rm <id> | disable <id> | enable <id>]',
+      "warning",
+    );
+  } catch (err) {
+    notify(`tags error: ${(err as Error).message}`, "warning");
+  }
 }

@@ -111,6 +111,29 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("mem", "tidy --break-lock", "extension").policy).toBe("confirm");
   });
 
+  // J4 (Q35, jev-plan §4 J4 / §10 #9): read-only jev surfaces allow;
+  // state-changing jev/tags subcommands confirm; NO new deny rows this phase
+  // (every subcommand has a text fallback).
+  it("mem jev/tags: read-only allow, mutating confirm (Q35)", () => {
+    // read-only
+    expect(resolve("mem", "jev", "extension").policy).toBe("allow");
+    expect(resolve("mem", "tags", "extension").policy).toBe("allow");
+    expect(resolve("mem", "tags list", "extension").policy).toBe("allow");
+    // state-changing
+    expect(resolve("mem", "jev probe", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "jev retag", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "jev retag --all", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "jev reset-index", "extension").policy).toBe("confirm");
+    expect(resolve("mem", 'tags add my-tag --label "L" --desc "D"', "extension").policy).toBe("confirm");
+    expect(resolve("mem", "tags rm my-tag", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "tags disable docs", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "tags enable docs", "extension").policy).toBe("confirm");
+    // unknown jev/tags sub-subcommands stay confirm (conservative; the
+    // terminal handler degrades them to a read-only report/usage line)
+    expect(resolve("mem", "jev typo", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "tags frobnicate", "extension").policy).toBe("confirm");
+  });
+
   it("/cache-ttl: no-args/status allow; every mode switch confirms", () => {
     expect(resolve("cache-ttl", "", "extension").policy).toBe("allow");
     expect(resolve("cache-ttl", "status", "extension").policy).toBe("allow");

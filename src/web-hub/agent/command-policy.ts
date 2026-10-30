@@ -196,9 +196,24 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
   },
   // /mem [list] · path · doctor → read-only. init/import/tidy/restore write files or (tidy/restore)
   // are multi-step interactive flows the web caller cannot drive (§4.9's downgrade-to-cancel row).
+  // J4 (Q35): the read-only jev surfaces — bare `mem jev` (report) and `mem tags` / `mem tags
+  // list` — are allow; the state-changing `mem jev probe|retag|reset-index` and
+  // `mem tags add|rm|disable|enable` follow the generic confirm class (anti-misclick only).
+  // Unknown jev/tags sub-subcommands degrade to a read-only report/usage line, but stay
+  // confirm (over-cautious is safe; the Q35 deny tier stays empty this phase).
   mem(tokens) {
     const sub = tokens[0];
     if (sub === undefined || sub === "list" || sub === "path" || sub === "doctor") return { policy: "allow" };
+    if (sub === "jev") {
+      // bare `mem jev` = read-only report; every named sub-subcommand
+      // (probe/retag/reset-index — and typos, conservatively) confirms.
+      return { policy: tokens[1] === undefined ? "allow" : "confirm" };
+    }
+    if (sub === "tags") {
+      const sub2 = tokens[1];
+      if (sub2 === undefined || sub2 === "list") return { policy: "allow" };
+      return { policy: "confirm" };
+    }
     // Batch's read-only surfaces are safe to invoke from the web hub. The
     // interactive archive/normalize and lock-break flows remain confirmed.
     if (
