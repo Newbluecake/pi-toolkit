@@ -1,6 +1,6 @@
-# 以分类器 Jev 为核心的 memory 架构（jev-arch v2）
+# 以分类器 Jev 为核心的 memory 架构（jev-arch v2.1）
 
-> 状态：架构设计稿 v2（2026-10-30），未动代码。v1 经评审 r1（`jev-arch-review-r1.md`）判为「有条件通过」；用户在第八轮拍板（`hygiene-flow.md` Q25–Q32 及一条主会话裁定）对 v1 §14 的待拍板项作了决定，v2 据此修订。处置表见 §17，变更记录见 §18。
+> 状态：架构设计稿 v2（2026-10-30），未动代码。v1 经评审 r1（`jev-arch-review-r1.md`）判为「有条件通过」；用户在第八轮拍板（`hygiene-flow.md` Q25–Q32 及一条主会话裁定）对 v1 §14 的待拍板项作了决定，v2 据此修订。处置表见 §17，变更记录见 §18；v2.1 勘误（只改表述、不改设计，`jev-plan.md` §10 与 Q33–Q35）见 §19。
 > 本稿取代 `hygiene-plan.md` v4.1（Q19），复用的部件列在 §12.2。
 > 需求基线：Q19–Q32 优先；Q1–Q18 中与之不冲突的部分继续有效，逐条处置见 §12.1。
 > 事实底图：`jev-current-state.md` 的 §1–9（代码现状）与 §10（Jev 实测）。
@@ -9,21 +9,21 @@
 
 ## 0. 结论速览
 
-| 问题     | 决定                                                                                                                                                                                                                                                                                                                      |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 一句话   | Markdown 记忆文件仍是唯一权威数据源；Jev 的派生标签存进可丢弃的侧车索引；需要 Jev 的判断（召回、打标、整理、现场拦截判定）全部经过一个 pi-free 的 Jev 客户端（有序列表、逐模型故障转移、错误分级、可选专用代理）。不调用 Jev 的部分（零调用部分）用上次的标签继续工作（Q26）                                              |
-| 条目     | 顶层列表项连同其续行，或者不含列表项的 `## ` 小节整体（§4.1）。现有语料约 150 条，绝大多数是列表项                                                                                                                                                                                                                        |
-| 谁写什么 | 权威事实写在条目的行内注释里，由用户或 agent 手写，包括：用户令、到期、门禁覆盖、手工标签增删、私密（§4.2）。Jev 选出的派生判断（类型、重要度、场景标签、是否守护危险动作、时效、像不像用户令）存进 `<slug>/.jev/index.json`，以内容哈希为键（§4.4）                                                                      |
-| 标签体系 | 预置 6 种类型、4 级重要度、22 个通用场景标签，用户可用 `/mem tags add` 增加项目标签。agent 新增标签推迟到二期（Q32）。标签的 `description` 原样作为 Jev 的 criteria。命令前缀、路径 glob 这类匹配器只挂在标签上，条目上不再写触发词（Q24）                                                                                |
-| ① 召回   | 用户消息到来时由 Jev 判定全部候选（最多 360 条，按 token 分批并行），`state` 里附带上一条用户消息。最多等 1.5 秒，结果搭本轮便车注入；超时就先开工，结果晚到再补发（Q25）。另有零调用的动作快速通道和压缩后重注。失败的工具结果由 Jev 从经验条目里挑排障条目                                                              |
-| ② 打标   | `memory` 工具写入后同步问 Jev 一次（约 50 个问题，耗时不到 1.2 秒），并把结果回显。Jev 第一次可用时，后台自动给存量条目打标：172 次调用，约 $0.02，40–60 秒（Q28）                                                                                                                                                        |
-| ③ 整理   | 每 7 天在后台跑一次，只生成建议（Q31）。用户在 `/mem review` 里逐条确认，系统绝不自动删除                                                                                                                                                                                                                                 |
-| ④ 拦截   | 先做三级粗筛，通过后才同步问 Jev。同一份证据下的判定会缓存，重复的同类调用直接复用。Jev 超时或不可用时按两档处理（Q29）：行内写了 `gate=hold` 且确定性证据已命中 ⇒ 照样拦截；其余 ⇒ 放行，并把规则正文以「未判定」注入。进程证据只在 Linux 上采集（Q30）                                                                  |
-| 可用性   | 用户可见四种状态：`off`（总开关关、legacy、secure 域）、`probing`、`full`、`partial`。`partial` 时只停需要 Jev 的功能，零调用部分继续，并用 `x/y tagged` 标出标签覆盖率；从未打过标签时显示为 `inactive`。转入 `full` 时通知一次（主会话裁定），转入 `partial` 时通知一次。可用与否以真实调用的结果为准：有凭证不等于可用 |
-| 外发     | 一律先截断再脱敏。文件正文、成功的工具结果、system prompt、助手消息与推理永不外发（§7）                                                                                                                                                                                                                                   |
-| I9       | 以下任一情况下 Jev 部件零注册：`memory.jev.enabled=false`、legacy layout 或 legacy 工具面、secure/locked 域。J0 在未改动的 dev 上录制 `jev-off-golden.json`（A′ 级）作为证明（§9.2）                                                                                                                                      |
-| 规模     | 10 个包（J0–J9，数量不变，范围缩小），新增一个子目录 `src/memory/jev/`。B 级 golden 只刷新 `activate-trace.json`；tiered、legacy、doctor 三份 golden 预期逐字节不变（§4.5）                                                                                                                                               |
-| 拍板     | v1 的 D1–D7 已全部拍板（§14.1）。v2 新增 1 项待拍板 N1（§14.2）                                                                                                                                                                                                                                                           |
+| 问题     | 决定                                                                                                                                                                                                                                                                                                                                                                                                             |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 一句话   | Markdown 记忆文件仍是唯一权威数据源；Jev 的派生标签存进可丢弃的侧车索引；需要 Jev 的判断（召回、打标、整理、现场拦截判定）全部经过一个 pi-free 的 Jev 客户端（有序列表、逐模型故障转移、错误分级、可选专用代理）。不调用 Jev 的部分（零调用部分）用上次的标签继续工作（Q26）                                                                                                                                     |
+| 条目     | 顶层列表项连同其续行，或者不含列表项的 `## ` 小节整体（§4.1）。现有语料约 150 条，绝大多数是列表项                                                                                                                                                                                                                                                                                                               |
+| 谁写什么 | 权威事实写在条目的行内注释里，由用户或 agent 手写，包括：用户令、到期、门禁覆盖、手工标签增删、私密（§4.2）。Jev 选出的派生判断（类型、重要度、场景标签、是否守护危险动作、时效、像不像用户令）存进 `<slug>/.jev/index.json`，以内容哈希为键（§4.4）                                                                                                                                                             |
+| 标签体系 | 预置 6 种类型、4 级重要度、22 个通用场景标签，用户可用 `/mem tags add` 增加项目标签。agent 新增标签推迟到二期（Q32）。标签的 `description` 原样作为 Jev 的 criteria。命令前缀、路径 glob 这类匹配器只挂在标签上，条目上不再写触发词（Q24）                                                                                                                                                                       |
+| ① 召回   | 用户消息到来时由 Jev 判定全部候选（最多 360 条，按 token 分批并行），`state` 里附带上一条用户消息。最多等 1.5 秒，结果搭本轮便车注入；超时就先开工，结果晚到再补发（Q25）。另有零调用的动作快速通道和压缩后重注。失败的工具结果由 Jev 从经验条目里挑排障条目                                                                                                                                                     |
+| ② 打标   | `memory` 工具写入后同步问 Jev 一次（约 50 个问题，耗时不到 1.2 秒），并把结果回显。Jev 第一次可用时，后台自动给存量条目打标：172 次调用，约 $0.02，40–60 秒（Q28）                                                                                                                                                                                                                                               |
+| ③ 整理   | 每 7 天在后台跑一次，只生成建议（Q31）。用户在 `/mem review` 里逐条确认，系统绝不自动删除                                                                                                                                                                                                                                                                                                                        |
+| ④ 拦截   | 先做三级粗筛，通过后才同步问 Jev。同一份证据下的判定会缓存，重复的同类调用直接复用。Jev 超时或不可用时按两档处理（Q29）：行内写了 `gate=hold` 且确定性证据已命中 ⇒ 照样拦截；其余 ⇒ 放行，并把规则正文以「未判定」注入。进程证据只在 Linux 上采集（Q30）                                                                                                                                                         |
+| 可用性   | 用户可见状态：`off`（总开关关、legacy、secure 域、分类器空列表——设置期，零注册）、`off(pi-api)`（运行时才发现 pi 无分类器 API，已注册但空转）、`probing`、`full`、`partial`。`partial` 时只停需要 Jev 的功能，零调用部分继续，并用 `x/y tagged` 标出标签覆盖率；从未打过标签时显示为 `inactive`。转入 `full` 时通知一次（主会话裁定），转入 `partial` 时通知一次。可用与否以真实调用的结果为准：有凭证不等于可用 |
+| 外发     | 一律先截断再脱敏。文件正文、成功的工具结果、system prompt、助手消息与推理永不外发（§7）                                                                                                                                                                                                                                                                                                                          |
+| I9       | 设置期 off 的四条路径——`memory.jev.enabled=false`、legacy layout/tool 面、secure/locked 域、`classifiers` 空列表（Q34）——一律零注册。J0 在未改动的 dev 上录制 `jev-off-golden.json`（A′ 级）。`off(pi-api)` 只能在运行时判定，属于「注册但钩子空转」，不在 I9 的 settings-off 字面承诺内，由 off-harness 第 5 个重放配置证明（§5.3、§9.2）                                                                       |
+| 规模     | 10 个包（J0–J9，数量不变，范围缩小），新增一个子目录 `src/memory/jev/`。B 级 golden 只刷新 `activate-trace.json`；tiered、legacy、doctor 三份 golden 预期逐字节不变（§4.5）                                                                                                                                                                                                                                      |
+| 拍板     | v1 的 D1–D7 已全部拍板（§14.1）；v2 的 N1 经 Q33 拍板为「适用」（§14.1）；Q34/Q35 见 §14.3。当前无待拍板项                                                                                                                                                                                                                                                                                                       |
 
 ## 1. 背景、目标与非目标
 
@@ -114,26 +114,35 @@
 
 ### 3.1 模块划分（新增 `src/memory/jev/`；表中「无」= 该模块不 import pi，满足 I8）
 
-| 模块                 | import pi | 职责                                                                                         | 为什么必须存在                                                                         |
-| -------------------- | --------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `jev/contracts.ts`   | 无        | 全部类型、常量、消息 details 形状；分类器类型的本地镜像                                      | 冻结包与包之间的接口；镜像 pi 的类型，这样 jev 目录下不必 import pi                    |
-| `jev/entries.ts`     | 无        | 切分条目；计算两种哈希；解析与剥离行内注释；判定归属；判定是否含密钥；按目录指纹缓存条目索引 | 四项职责共用「条目」这个单位；现有 `splitSections`（`meta.ts:174`）只能切到 `## ` 粒度 |
-| `jev/taxonomy.ts`    | 无        | 预置类型、重要度、标签；合并项目扩展；校验；生成 criteria                                    | Q24                                                                                    |
-| `jev/index-store.ts` | 无\*      | 读写 `.jev/index.json` 与 `.jev/taxonomy.json`                                               | 派生标签要落盘；\*只依赖 safe-fs 与 lock                                               |
-| `jev/redact.ts`      | 无        | 截断与脱敏流水线                                                                             | Q23                                                                                    |
-| `jev/shell-parse.ts` | 无        | 把 bash 命令解析成 argv（照搬 v4.1 §2.7.1）                                                  | 粗筛和匹配器要能区分 `git -C x push`（真推送）和 `echo "git push"`（只是打印）         |
-| `jev/match.ts`       | 无        | 标签匹配器、词面预筛、从规则正文提取点名的程序                                               | 快速通道、粗筛、证据过滤、裁剪超量候选                                                 |
-| `jev/questions.ts`   | 无        | 构造 recall/error/tag/tag-major/review/gate 六类问题，并按 token 分批                        | 问题模板集中在一处，便于评测                                                           |
-| `jev/decide.ts`      | 无        | 阈值、top-k、字节预算、门禁判定、证据档、判定缓存、整理建议                                  | 纯函数，可以表驱动测试                                                                 |
-| `jev/health.ts`      | 无        | 错误分级、逐模型隔离、汇总状态机、标签覆盖率                                                 | Q17/Q21/Q26                                                                            |
-| `jev/proxy-fetch.ts` | 无        | 只走 HTTP 代理的一次性 fetch                                                                 | Q18，零依赖                                                                            |
-| `jev/client.ts`      | 无        | `JevClient`：故障转移、预算、分批、记账、令牌桶                                              | 全仓只有这里调用 `classify()`                                                          |
-| `jev/guard.ts`       | 无        | 检测用户令是否被改动（照搬 v4.1 §3.2）                                                       | Q4                                                                                     |
-| `jev/format.ts`      | 无        | 消息、拦截文案、回显文本、`/mem jev` 的输出                                                  | 文案集中，便于金样本                                                                   |
-| `jev/review.ts`      | 无        | 组装候选对、生成建议、计算 dismissed 锚                                                      | ③                                                                                      |
-| `jev/probes.ts`      | 无        | 门禁证据：bash 任务、`/proc`（仅 Linux）、git HEAD、暂存文件                                 | ④                                                                                      |
-| `jev/wire.ts`        | 是        | 注册钩子、渲染器、`/mem` 子命令；可变状态全在闭包里                                          | I2/I4                                                                                  |
-| `jev/segment.ts`     | 是        | 段内去重记录、回扫播种、门禁闩锁（照搬 v4.1 §2.1/§2.2）                                      | 同一段上下文只注入一次                                                                 |
+| 模块                             | import pi | 职责                                                                                              | 为什么必须存在                                                                         |
+| -------------------------------- | --------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `jev/contracts.ts`               | 无        | 全部类型、常量、消息 details 形状；分类器类型的本地镜像                                           | 冻结包与包之间的接口；镜像 pi 的类型，这样 jev 目录下不必 import pi                    |
+| `jev/entries.ts`                 | 无        | 切分条目；计算两种哈希；解析与剥离行内注释；判定归属；判定是否含密钥；按目录指纹缓存条目索引      | 四项职责共用「条目」这个单位；现有 `splitSections`（`meta.ts:174`）只能切到 `## ` 粒度 |
+| `jev/taxonomy.ts`                | 无        | 预置类型、重要度、标签；合并项目扩展；校验；生成 criteria                                         | Q24                                                                                    |
+| `jev/index-store.ts`             | 无\*      | 读写 `.jev/index.json` 与 `.jev/taxonomy.json`                                                    | 派生标签要落盘；\*只依赖 safe-fs 与 lock                                               |
+| `jev/redact.ts`                  | 无        | 截断与脱敏流水线                                                                                  | Q23                                                                                    |
+| `jev/shell-parse.ts`             | 无        | 把 bash 命令解析成 argv（照搬 v4.1 §2.7.1）                                                       | 粗筛和匹配器要能区分 `git -C x push`（真推送）和 `echo "git push"`（只是打印）         |
+| `jev/match.ts`                   | 无        | 标签匹配器、词面预筛、从规则正文提取点名的程序                                                    | 快速通道、粗筛、证据过滤、裁剪超量候选                                                 |
+| `jev/questions.ts`               | 无        | 构造 recall/error/tag/tag-major/review/gate 六类问题，并按 token 分批                             | 问题模板集中在一处，便于评测                                                           |
+| `jev/decide.ts`                  | 无        | 阈值、top-k、字节预算、门禁判定、证据档、判定缓存、整理建议                                       | 纯函数，可以表驱动测试                                                                 |
+| `jev/health.ts`                  | 无        | 错误分级、逐模型隔离、汇总状态机、标签覆盖率                                                      | Q17/Q21/Q26                                                                            |
+| `jev/proxy-fetch.ts`             | 无        | 只走 HTTP 代理的一次性 fetch                                                                      | Q18，零依赖                                                                            |
+| `jev/client.ts`                  | 无        | `JevClient`：故障转移、预算、分批、记账、令牌桶                                                   | 全仓只有这里调用 `classify()`                                                          |
+| `jev/guard.ts`                   | 无        | 检测用户令是否被改动（照搬 v4.1 §3.2）                                                            | Q4                                                                                     |
+| `jev/format.ts`                  | 无        | 消息、拦截文案、回显文本、`/mem jev` 的输出                                                       | 文案集中，便于金样本                                                                   |
+| `jev/review.ts`                  | 无        | 组装候选对、生成建议、计算 dismissed 锚                                                           | ③                                                                                      |
+| `jev/probes.ts`                  | 无        | 门禁证据：bash 任务、`/proc`（仅 Linux）、git HEAD、暂存文件                                      | ④                                                                                      |
+| `jev/wire.ts`                    | 是        | 注册钩子、渲染器、`/mem` 子命令；可变状态全在闭包里                                               | I2/I4                                                                                  |
+| `jev/segment.ts`                 | 是        | 段内去重记录、回扫播种、门禁闩锁（照搬 v4.1 §2.1/§2.2）                                           | 同一段上下文只注入一次                                                                 |
+| `jev/config.ts`（v2.1）          | 无        | `resolveJevWiring(memory, domainKind)`：设置期接线判定（disabled/legacy/secure/empty-list ⇒ off） | 让「零注册」判定可单测，并供 off-harness 重放                                          |
+| `jev/tagging.ts`（v2.1）         | 无        | 单条打标与批量打标（条目为主 / 标签为主）                                                         | 写入路径与后台迁移共用                                                                 |
+| `jev/command-port.ts`（v2.1）    | 无        | `/mem jev`、`/mem tags` 的命令端口实现                                                            | `command.ts` 只通过端口调用 jev                                                        |
+| `jev/write-port.ts`（v2.1）      | 无        | `JevWritePort`：识别变化条目、打标、回显、守卫                                                    | `tool-v2.ts` 只通过端口调用 jev                                                        |
+| `jev/review-command.ts`（v2.1）  | 无        | `/mem review` 的交互流程（UI 结构化端口）                                                         | ③ 的用户确认环节                                                                       |
+| `jev/expired-command.ts`（v2.1） | 无        | `/mem expired` 的交互流程                                                                         | Q1                                                                                     |
+| `jev/entry-edit.ts`（v2.1）      | 无        | 锁内 CAS 删除条目（先复制进 `.trash`）、写入行内注释                                              | review/expired 共用的确定性写原语                                                      |
+
+模块清单以 `jev-plan.md` 为准（v2.1 勘误）；`expiredEntries(entries, today)` 纯函数放在 J1 的 `entries.ts`，供 J6（启动提醒）与 J8（D17、`/mem expired`）共同使用。
 
 需要改动的现有文件：
 
@@ -147,6 +156,9 @@
 - `tidy/prompt.ts`。
 - `src/index.ts`：传入 secure 判定和 bashJobs 端口，属于装配。
 - `src/config/settings.ts:417`：D8 清单增加 `memory.jev.enabled`。
+- `src/web-hub/agent/command-policy.ts`：`mem()` 的 web 策略追加 jev/tags/review 行（§9.4；`command-usage.ts` 不改）。
+- `tidy/command.ts`、`tidy/batch-command.ts`：只透传「保留行内注释」布尔。
+- `contracts.ts`：`DoctorId` 追加 D17–D19。
 
 ### 3.2 结构图（依赖自上而下；标 ✅ 的是不 import pi 的模块）
 
@@ -176,18 +188,18 @@ src/index.ts (assembly)
 
 ### 3.3 功能分类：需要 Jev 与零调用（Q26）
 
-| 功能                                                                   | 类别     | 依赖的数据                                 | Jev 不可用（`partial`）时              |
-| ---------------------------------------------------------------------- | -------- | ------------------------------------------ | -------------------------------------- |
-| U 用户消息召回（§6.1.1）                                               | 需要 Jev | 现场判定                                   | 停                                     |
-| E 失败结果召回（§6.1.4）                                               | 需要 Jev | 现场判定                                   | 停                                     |
-| 写后打标、待打标补打、批量打标（§6.2）                                 | 需要 Jev | 现场判定                                   | 停。新条目记为 pending，恢复后补打     |
-| 整理运行（§6.3 `--run` 及周期整理）                                    | 需要 Jev | 现场判定                                   | 停                                     |
-| 门禁的 Jev 判定档（§6.4.4）                                            | 需要 Jev | 现场判定                                   | 停，改走证据档                         |
-| A 动作快速通道（§6.1.3）                                               | 零调用   | 侧车标签、行内 `tags=`、标签匹配器         | **继续**                               |
-| B 压缩后重注（§6.1.5）                                                 | 零调用   | 段记录                                     | **继续**                               |
-| 门禁的证据档：`gate=hold` 证据拦截，其余放行并注入「未判定」（§6.4.5） | 零调用   | 行内 `gate*`、侧车 guard、标签、确定性证据 | **继续**                               |
-| 查看并执行已存在的整理建议（`/mem review`）                            | 零调用   | 侧车里的建议                               | **继续**。条目已变的建议标为过期并跳过 |
-| 用户令守卫、append 刷新 `updated`、D17–D19、`/mem expired`             | 确定性   | 文件本身                                   | 与 Jev 无关，只受总开关控制            |
+| 功能                                                                   | 类别     | 依赖的数据                                 | Jev 不可用（`partial`）时                                                                |
+| ---------------------------------------------------------------------- | -------- | ------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| U 用户消息召回（§6.1.1）                                               | 需要 Jev | 现场判定                                   | 停                                                                                       |
+| E 失败结果召回（§6.1.4）                                               | 需要 Jev | 现场判定                                   | 停                                                                                       |
+| 写后打标、待打标补打、批量打标（§6.2）                                 | 需要 Jev | 现场判定                                   | 停。新条目记为 pending，恢复后补打                                                       |
+| 整理运行（§6.3 `--run` 及周期整理）                                    | 需要 Jev | 现场判定                                   | 停                                                                                       |
+| 门禁的 Jev 判定档（§6.4.4）                                            | 需要 Jev | 现场判定                                   | 停，改走证据档                                                                           |
+| A 动作快速通道（§6.1.3）                                               | 零调用   | 侧车标签、行内 `tags=`、标签匹配器         | **继续**                                                                                 |
+| B 压缩后重注（§6.1.5）                                                 | 零调用   | 段记录                                     | **继续**                                                                                 |
+| 门禁的证据档：`gate=hold` 证据拦截，其余放行并注入「未判定」（§6.4.5） | 零调用   | 行内 `gate*`、侧车 guard、标签、确定性证据 | **继续**                                                                                 |
+| 查看并执行已存在的整理建议（`/mem review`）                            | 零调用   | 侧车里的建议                               | **继续**。条目已变的建议标为过期并跳过                                                   |
+| 用户令守卫、append 刷新 `updated`、D17–D19、`/mem expired`             | 确定性   | 文件本身                                   | 与 Jev 是否可用无关；只受总开关与接线判定控制（`classifiers` 空列表视同总开关关闭，Q34） |
 
 ## 4. 数据模型
 
@@ -421,16 +433,17 @@ export interface DismissedPair {
 - **回滚**：设置 `memory.jev.enabled=false` 后 `/reload`，off golden 保证逐字节回到旧行为；`.jev/` 目录可以直接删除；代码层面每个包可以单独 revert。
 - **金样本影响**：
 
-| 文件                                                 | 级别 | 预期                                                                                                                                 |
-| ---------------------------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `tests/fixtures/memory-legacy-golden.json`           | B    | **不变**（legacy 不接 Jev）                                                                                                          |
-| `tests/fixtures/memory/tiered-golden/*.txt`          | B    | **不变**（直接调 `renderTiered`，fixture 中没有行内注释）                                                                            |
-| `tests/fixtures/memory/doctor-golden/current-5.json` | B    | **预期不变**：没有行内注释，所以没有 D17/D18；primary 已触发 D02/D03，所以不报 D19；D02 的文案不改。J8 实测 diff，有任何变化即为 bug |
-| `tests/fixtures/governance/activate-trace.json`      | B    | **变**：jev 新增钩子与渲染器的注册。按声明刷新，commit 写明「memory jev hooks」                                                      |
-| `tests/fixtures/memory-tool-surface.json`            | 契约 | **新增**描述变体的 key（schema 不变）                                                                                                |
-| `tests/config/__corpus__/setting-specs-pin.json`     | pin  | 追加 §9.1 的新键                                                                                                                     |
-| 新增 `tests/fixtures/memory/jev-off-golden.json`     | A′   | J0 在未改动的 dev 上生成，之后永不重生                                                                                               |
-| 其余 A 级                                            | A    | 不变。每个包都跑一次 `git diff --quiet origin/dev -- tests/fixtures/`                                                                |
+| 文件                                                 | 级别 | 预期                                                                                                                                       |
+| ---------------------------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tests/fixtures/memory-legacy-golden.json`           | B    | **不变**（legacy 不接 Jev）                                                                                                                |
+| `tests/fixtures/memory/tiered-golden/*.txt`          | B    | **不变**（直接调 `renderTiered`，fixture 中没有行内注释）                                                                                  |
+| `tests/fixtures/memory/doctor-golden/current-5.json` | B    | **预期不变**：没有行内注释，所以没有 D17/D18；primary 已触发 D02/D03，所以不报 D19；D02 的文案不改。J8 实测 diff，有任何变化即为 bug       |
+| `tests/fixtures/governance/activate-trace.json`      | B    | **变**：jev 新增钩子与渲染器的注册。按声明刷新，commit 写明「memory jev hooks」                                                            |
+| `tests/fixtures/memory-tool-surface.json`            | 契约 | **新增**描述变体的 key（schema 不变）                                                                                                      |
+| `tests/config/__corpus__/setting-specs-pin.json`     | pin  | 追加 §9.1 的新键                                                                                                                           |
+| `tests/config/__corpus__/settings-corpus.json`       | pin  | **变**：逐字节 pin `DEFAULT_SETTINGS` 与 `loadSettings` 输出，新增 `memory.jev` 必然变化。J3 按先例 `4758bae5` 重 pin，commit 写明新增的键 |
+| 新增 `tests/fixtures/memory/jev-off-golden.json`     | A′   | J0 在未改动的 dev 上生成，之后永不重生                                                                                                     |
+| 其余 A 级                                            | A    | 不变。每个包都跑一次 `git diff --quiet origin/dev -- tests/fixtures/`                                                                      |
 
 ## 5. Jev 客户端与可用性
 
@@ -538,13 +551,15 @@ unavailable / transient ──到达 until──► unknown（下一次真实调
 
 **会话的汇总状态**放在 wire 闭包里，用户能看到的就是这一层：
 
-| 状态              | 条件                                                                         | 需要 Jev 的功能 | 零调用部分 | `/mem` 显示（英文 token）                                                        |
-| ----------------- | ---------------------------------------------------------------------------- | --------------- | ---------- | -------------------------------------------------------------------------------- |
-| `off(reason)`     | 总开关关闭、`secure`（含 locked）、`legacy`、`pi-api`、`empty-list`          | 不注册          | 不注册     | `jev: off (secure domain)`                                                       |
-| `probing`         | 可用集非空，但本进程还没有一次成功的调用                                     | 允许尝试        | 运行       | `jev: probing · 142/150 tagged`                                                  |
-| `full(active)`    | 至少成功调用过一次，且当前有未被隔离的模型                                   | 运行            | 运行       | `jev: full · opencode/jev-1.13 · 142/150 tagged · 37 calls $0.006`               |
-| `partial(reason)` | 可用集为空（无凭证、不在 catalog、全部被隔离），或本 activation 的预算已用完 | **停**          | **运行**   | `jev: partial (451) · fast path 142/150 tagged (10-29) · retry 12:05 · /mem jev` |
+| 状态              | 条件                                                                                         | 需要 Jev 的功能  | 零调用部分                             | `/mem` 显示（英文 token）                                                        |
+| ----------------- | -------------------------------------------------------------------------------------------- | ---------------- | -------------------------------------- | -------------------------------------------------------------------------------- |
+| `off(reason)`     | **设置期**四条路径：总开关关闭、`secure`（含 locked）、`legacy`、`classifiers` 空列表（Q34） | 不注册           | 不注册                                 | `jev: off (secure domain)` / `jev: off (empty classifier list)`                  |
+| `off(pi-api)`     | **运行时**才判出：`ctx.modelRegistry` 缺 `classify`/`getAvailableOfType`                     | 已注册但**空转** | 已注册但**空转**（不产生注入、不拦截） | `jev: off (pi-api)`                                                              |
+| `probing`         | 可用集非空，但本进程还没有一次成功的调用                                                     | 允许尝试         | 运行                                   | `jev: probing · 142/150 tagged`                                                  |
+| `full(active)`    | 至少成功调用过一次，且当前有未被隔离的模型                                                   | 运行             | 运行                                   | `jev: full · opencode/jev-1.13 · 142/150 tagged · 37 calls $0.006`               |
+| `partial(reason)` | 可用集为空（无凭证、不在 catalog、全部被隔离），或本 activation 的预算已用完                 | **停**           | **运行**                               | `jev: partial (451) · fast path 142/150 tagged (10-29) · retry 12:05 · /mem jev` |
 
+- **`off(pi-api)` 与 I9**：`pi-api` 只能在 `ctx` 上判出，此时注册已经发生，所以它**不在 I9「settings off ⇒ byte-identical」的字面承诺内**。设置期的四条 off 路径（disabled、legacy、secure、empty-list）仍零注册，由 off golden 证明。`off(pi-api)` 的证明方式：off-harness 增加**第 5 个重放配置**「设置开 + 无 modelRegistry」，断言除 `registrations` 外的全部字段（渲染、工具输出、`/mem` 文本、doctor、启动提醒）与 `disabled` 记录逐字段相等，且 `registrations` 的差集恰好是 jev 集合。空转时，工具描述变体、D17–D19、`/mem` 状态行仍然生效，属于与 `inactive` 同类的有意偏差（§9.2）。
 - **`inactive`**：`partial` 的一种显示形态，条件是覆盖率为 0、且没有任何行内 `gate*`/`tags=`。典型情形是从未配过分类器的用户，此时显示 `jev: inactive (no classifier credentials)`。
   - 零调用部分照常注册，但没有可用的数据，所以行为与今天一致（§9.2）。
   - 这样区分是为了不让没配过分类器的用户误以为「部分坏了」。
@@ -818,7 +833,7 @@ similar: core.md L5 (complementary 0.72)
 | 某个 `c*` 的结果为 duplicate、conflict 或 supersedes，且 p ≥ 0.75 | `conflict: core.md L3 (user rule, conflict 0.84) — 用户令只有用户能作废：在回复里向用户提议具体改法`。如果对方不是用户令，改为提示 agent 原地合并或删除旧条目 |
 | `m_guard ≥ 0.7`                                                   | `jev: guards a risky action (0.82) — pre-action review enabled; add gate=hold if it must block while a condition holds, nogate to opt out`                    |
 
-#### 6.2.5 同期的确定性改动（只受总开关控制）
+#### 6.2.5 同期的确定性改动（只受总开关与接线判定控制；空列表视同关闭，Q34）
 
 - v2 的 `doAppend` 在锁内 upsert `updated`；append 新建文件时带上 `source: agent`（照搬 v4.1 §3.1）。
 - 写后回显锚点。
@@ -878,7 +893,7 @@ similar: core.md L5 (complementary 0.72)
   - 或者「是否过时」的 p ≥ 0.8；
   - 另外，`userLike ≥ 0.8` 而归属为 agent 的条目，生成一条「疑似用户令」建议。
 - **提示**：启动提醒追加 `jev 2 suggestions — /mem review`。
-- **`/mem review`**：主会话、有 UI 时使用；web 端只开放只读的 `--list`。用 `ctx.ui.select` 逐条处理，各类建议的选项如下：
+- **`/mem review`**：主会话、有 UI 时使用；web 端只开放只读的 `--list`（交互选择没有文本回退，按 Q35 拒绝）。用 `ctx.ui.select` 逐条处理，各类建议的选项如下：
 
 | 建议类型   | 可选操作                                                      |
 | ---------- | ------------------------------------------------------------- |
@@ -1006,7 +1021,7 @@ similar: core.md L5 (complementary 0.72)
   - hold 规则是用户显式标注的，而「点名程序正在运行」这件事本身就不需要 Jev 判断，所以由证据兜底拦截，这正是 release.sh 事故的场景（评审 #1）；
   - 其它情况如果因为外部分类器抖动就一律拦截，会卡死全部 git 操作，所以选择放行，并把规则正文给到模型。
 - **与 pi 文档的关系**：对 hold 规则 fail closed 符合 `docs/extensions.md:214` 的建议；其余情况的放行是有意偏离。
-- **适用范围**（新待拍板 N1，§14.2）：证据档同样用于 `partial` 状态（整个 Jev 不可用），而不只是单次超时。这是把 Q26（零调用部分继续）与 Q29 合起来推出的结论。
+- **适用范围**（N1，Q33 已拍板为适用）：证据档同样用于 `partial` 状态（整个 Jev 不可用），而不只是单次超时。这是把 Q26（零调用部分继续）与 Q29 合起来推出的结论。
 - **非 Linux**：证据只有本会话的 bashJobs，见 §6.4.2。
 - **handler 异常**：一律放行，并记日志。handler 必须永不抛错（`runner.js:957-970`）。
 
@@ -1090,28 +1105,28 @@ similar: core.md L5 (complementary 0.72)
 
 ### 9.1 新键（改后 `/reload` 才生效；在 `settings.ts` 内联解析，逐字段容错，不新增 import）
 
-| 键                               | 类型/范围   | 默认                                       | 说明                                               |
-| -------------------------------- | ----------- | ------------------------------------------ | -------------------------------------------------- |
-| `memory.jev.enabled`             | bool        | `true`（Q27）                              | legacy 和 secure 域下强制视为 false                |
-| `memory.jev.classifiers`         | 逗号串/数组 | `opencode/jev-1.13-free,opencode/jev-1.13` | 有序列表；openrouter 项待 J0 探测后定稿（评审 #8） |
-| `memory.jev.proxy`               | string      | `""`                                       |                                                    |
-| `memory.jev.childSessions`       | bool        | `true`                                     |                                                    |
-| `memory.jev.recall.threshold`    | 0.5–0.99    | `0.7`                                      |                                                    |
-| `memory.jev.recall.maxEntries`   | 1–10        | `3`                                        | E 层固定为 2                                       |
-| `memory.jev.recall.maxBytes`     | 512–16384   | `4096`                                     |                                                    |
-| `memory.jev.recall.waitMs`       | 0–3000      | `1500`（Q25）                              | 0 = 纯异步                                         |
-| `memory.jev.gate.enabled`        | bool        | `true`                                     |                                                    |
-| `memory.jev.gate.threshold`      | 0.5–0.95    | `0.6`                                      |                                                    |
-| `memory.jev.review.intervalDays` | 0–90        | `7`（Q31）                                 | 0 = 只能手动                                       |
-| `memory.jev.maxCostUsd`          | 0.01–5      | `0.5`                                      |                                                    |
-| `memory.jev.maxCalls`            | 0–5000      | `800`                                      |                                                    |
-| `memory.jev.confirmTimeoutS`     | 10–600      | `60`                                       |                                                    |
+| 键                               | 类型/范围   | 默认                                       | 说明                                                                                                                                                           |
+| -------------------------------- | ----------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory.jev.enabled`             | bool        | `true`（Q27）                              | legacy 和 secure 域下强制视为 false                                                                                                                            |
+| `memory.jev.classifiers`         | 逗号串/数组 | `opencode/jev-1.13-free,opencode/jev-1.13` | 有序列表；openrouter 项待 J0 探测后定稿（评审 #8）。**空列表 = off**，零调用部分也不生效（Q34）；非空但全部非法 ⇒ 同样 off，并给一条 warn（doctor 或启动提醒） |
+| `memory.jev.proxy`               | string      | `""`                                       |                                                                                                                                                                |
+| `memory.jev.childSessions`       | bool        | `true`                                     |                                                                                                                                                                |
+| `memory.jev.recall.threshold`    | 0.5–0.99    | `0.7`                                      | J0 基线评测后可能调整；调整需回本稿并问用户                                                                                                                    |
+| `memory.jev.recall.maxEntries`   | 1–10        | `3`                                        | E 层固定为 2                                                                                                                                                   |
+| `memory.jev.recall.maxBytes`     | 512–16384   | `4096`                                     |                                                                                                                                                                |
+| `memory.jev.recall.waitMs`       | 0–3000      | `1500`（Q25）                              | 0 = 纯异步                                                                                                                                                     |
+| `memory.jev.gate.enabled`        | bool        | `true`                                     |                                                                                                                                                                |
+| `memory.jev.gate.threshold`      | 0.5–0.95    | `0.6`                                      | 同上：J0 基线评测后可能调整，调整需回本稿并问用户                                                                                                              |
+| `memory.jev.review.intervalDays` | 0–90        | `7`（Q31）                                 | 0 = 只能手动                                                                                                                                                   |
+| `memory.jev.maxCostUsd`          | 0.01–5      | `0.5`                                      |                                                                                                                                                                |
+| `memory.jev.maxCalls`            | 0–5000      | `800`                                      |                                                                                                                                                                |
+| `memory.jev.confirmTimeoutS`     | 10–600      | `60`                                       | 秒键：J3 登记进 `TIME_SETTING_MS_PATHS`（`src/config/settings.ts:329`），内部字段为 `confirmTimeoutMs`                                                         |
 
 共 14 个键。其余参数（缓存规模、`/proc` 上限、批大小）都是常量。
 
 ### 9.2 I9 论证（按 Q26 更新）
 
-- **off**：以下任一情况成立即为 off：`memory.jev.enabled=false`、legacy layout 或 legacy 工具面、非 plain 域。此时：
+- **off**（设置期，零注册）：以下任一情况成立即为 off：`memory.jev.enabled=false`、legacy layout 或 legacy 工具面、非 plain 域、`classifiers` 为空（Q34，含非空但全部非法）。此时：
   - 不调用 `wireJev`，不注册任何新钩子和渲染器；
   - 工具使用原常量，schema 本来就不变；
   - doctor 不跑 D17–D19；
@@ -1123,6 +1138,7 @@ similar: core.md L5 (complementary 0.72)
   - tidy prompt。
 
   之后分别以 `jev.enabled=false`、legacy（jev=true）、模拟 secure（jev=true）三种配置重放，结果必须逐字节相等。
+  v2.1 增补：重放配置扩为五种——再加 `classifiers=[]`（必须与 disabled 逐字节相等），以及「设置开 + 无 modelRegistry」（`off(pi-api)`，除 `registrations` 外逐字段等于 disabled，`registrations` 差集恰为 jev 集合；§5.3）。
 
 - **on，状态为 `partial` 或 `inactive`**：这种状态不在 byte-identical 的承诺之内，因为零调用部分仍会工作（Q26）。行为边界由单测钉住：
   1. **覆盖率为 0、没有任何行内 `gate*`/`tags=`**（`inactive`）：零 `sendMessage`，零 block；除了 `/mem` 多出的一行状态、工具描述变体和新注册的钩子以外，功能上与今天一致。
@@ -1161,7 +1177,7 @@ review   last 2026-10-28 · 2 open → /mem review
   - `/mem tags [list|add|rm|disable|enable]`；
   - `/mem review [--run|--list]`；
   - `/mem expired`。
-- **web 端**：`jev`、`tags list`、`review --list` 允许执行，其余拒绝。
+- **web 端**（Q35，经 `src/web-hub/agent/command-policy.ts` 的 `mem()`）：只读的 `jev`、`tags`（裸形式）、`tags list`、`review --list` 允许执行；改动状态的子命令（`jev probe`、`jev retag`、`jev reset-index`、`tags add|rm|disable|enable`）需要确认，与 `/mem` 现有的 confirm 惯例一致；只有纯终端交互、没有文本回退的子命令（`review` 逐条选择、`expired`）才拒绝。`command-usage.ts` 不改。
 - **skill**：新增 `skills/memory-jev/SKILL.md`，承载使用策略（I12）。
 
 ## 10. 测试与验证策略
@@ -1261,6 +1277,7 @@ review   last 2026-10-28 · 2 open → /mem review
 | Q18     | 保留，键改名               | `memory.jev.proxy`                                               |
 | Q19–Q24 | 落实                       | 全文                                                             |
 | Q21     | **经 Q26 细化**            | 「需要 Jev 的功能」以 Jev 为硬依赖，零调用部分继续（§3.3、§5.3） |
+| Q33–Q35 | 落实（v2.1）               | §14.2、§14.3                                                     |
 | Q25–Q32 | 落实                       | §14.1                                                            |
 
 v4.1 的 O 项：
@@ -1307,7 +1324,7 @@ v4.1 的 O 项：
 | 数据外发泄露                                             | 中   | §7；进程只收录被点名的程序；secure 双重关闭；首次启用时通知用户                                 |
 | 注入噪音                                                 | 中   | 阈值、上限、去重、熔断、评测                                                                    |
 | 默认开启导致前缀缓存失效一次                             | 低   | release note 写明（#16）                                                                        |
-| pi 的语义变化                                            | 中   | C-J1–C-J15 纳入 peer bump 清单                                                                  |
+| pi 的语义变化                                            | 中   | C-J1–C-J15 纳入 AGENTS.md「pi peer bump checklist」第 2 条，由 J9 负责改写                      |
 | agent 把用户令写成经验条目                               | 低   | `userLike` 回显提示，整理中生成「疑似用户令」建议                                               |
 
 ## 14. 拍板记录
@@ -1326,33 +1343,43 @@ v4.1 的 O 项：
 | Q32  | 评审 #15 | 推迟两段式召回；删除 Jev 判定门禁模式；推迟 agent `tag_add`                                 | §1.3、§4.2、§4.3、§9.3 |
 | 裁定 | 评审 #2  | Jev 首次转为可用时 `ctx.ui.notify` 一次（含所用模型、查看与关闭方式），每个 activation 一次 | §5.3                   |
 
-### 14.2 新待拍板
+### 14.2 v2 新增项（已拍板）
 
-| #   | 问题                                                                       | 推荐                                                                                                                          | 理由                                                                                                                      |
-| --- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| N1  | Q29 的证据档是否也用于 `partial` 状态（整个 Jev 不可用），而不只是单次超时 | **(a) 适用**：partial 期间 `gate=hold` + 证据命中照样拦截，其余放行并注入「未判定」（每段一次）；(b) partial 期间门禁完全关闭 | 证据档本身不调用 Jev，按 Q26 属于零调用部分。release.sh 规则在 Jev 宕机时最需要守住；「未判定」注入每段只发一次，噪音有限 |
+| #   | 问题                                                                       | 结论                                                                                      | 落点            |
+| --- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | --------------- |
+| N1  | Q29 的证据档是否也用于 `partial` 状态（整个 Jev 不可用），而不只是单次超时 | **Q33 已拍板 = 适用**：证据档不调用 Jev，属于零调用部分；「未判定」注入每段每条目最多一次 | §6.4.5、J7 验收 |
+
+### 14.3 第九轮拍板（2026-10-30，实施方案评审 r1）
+
+| #   | 问题                                          | 结论                                                                                                                             | 落点                   |
+| --- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| Q34 | `memory.jev.classifiers` 为空列表             | 等同总开关关闭（off，零调用部分也不生效，与今天逐字节一致）；非空但全部非法时给一条 warn。想保留证据档保护的用户保留默认列表即可 | §3.3、§5.3、§9.1、§9.2 |
+| Q35 | web 端执行改动状态的 `/mem jev`/`tags` 子命令 | 需确认（与 `/mem` 现有 confirm 惯例一致）；只有纯终端交互、无文本回退的子命令才拒绝；`tags` 裸形式允许                           | §9.4、§6.3.4           |
+
+当前无待拍板项。
 
 ## 15. 拆包建议（粗粒度，供 Plan 细化）
 
-依赖：`J0 → {J1, J3} → J2 → {J4, J5, J6} → {J7, J8} → J9`。
+依赖（v2.1，与 `jev-plan.md` 批次一致）：`J0 → {J1, J3} → J2 → J4 → {J5, J6, J8} → J7 → J9`。J7 在 J5、J6、J8 全部合入后开工（它负责这三包端口的生产接线）。
 
-| 包  | 名称          | 文件域                                                                                                                                                            | 依赖   | 要点                                                                                           |
-| --- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---------------------------------------------------------------------------------------------- |
-| J0  | 基线          | `tests/memory/jev/off-golden.test.ts` + `jev-off-golden.json`、`tests/conformance/memory-jev-channels.test.ts`（C-J1–C-J15）、`scripts/dev/jev-eval.mjs` + 评测集 | —      | 只加测试与脚本；产出评测基线、默认列表定稿（#8）                                               |
-| J1  | 纯域          | `jev/{contracts,entries,taxonomy,redact,shell-parse,match,guard,format}.ts`、`secret-patterns.ts`、pi-free 测试根                                                 | J0     | 块级结构（#13）、secret 缓存（#6）、`namedPrograms`                                            |
-| J2  | 引擎          | `jev/{client,health,proxy-fetch,questions,decide}.ts`                                                                                                             | J1     | 状态机四态、`inactive`、通知判定、判定缓存、证据档                                             |
-| J3  | 设置与 secure | `src/memory/settings.ts`、`setting-specs.ts`、pin corpus、`src/config/settings.ts:417`、`docs/dev/data-encryption/README.md`                                      | J0     | 14 个键；D8 清单                                                                               |
-| J4  | 侧车与命令    | `jev/index-store.ts`、`jev/review.ts`（纯）、`command.ts` 中的 `/mem jev`、`/mem tags` 分支                                                                       | J2, J3 | 批量打标（Q28）、覆盖率、dismissed 锚（#7）                                                    |
-| J5  | 写入路径      | `tool-v2.ts`、`tool-surface.ts`（只改描述）、`memory-tool-surface.json`、`skills/memory-jev/SKILL.md`                                                             | J2, J4 | 打标回显、`partial` 回显、append、Q4 守卫                                                      |
-| J6  | 召回运行时    | `jev/{wire,segment}.ts`（创建）、`src/memory/index.ts`、`inject.ts`、`src/index.ts`（secure 参数 + bashJobs 端口预留）、activate-trace                            | J2, J4 | U/A/E/B、上一条消息（#9）、`·partial`、通知、探测计时器；**静态 core 映射为显式风险点**（#10） |
-| J7  | 门禁          | `jev/probes.ts`、`jev/wire.ts`（门禁分支）、`src/index.ts`（bashJobs 绑定）                                                                                       | J6     | 粗筛；证据（仅 Linux）；Jev 判定档、证据档、判定缓存；release.sh 验收                          |
-| J8  | 整理与到期    | `review.ts` 的交互、`command.ts` 中的 `/mem review`、`/mem expired` 分支、`doctor.ts`、`doctor-command.ts`、`tidy/prompt.ts`                                      | J4     | doctor golden 实测不变；周期整理（Q31）                                                        |
-| J9  | 收尾          | web 紧凑分支（可选）、`docs/dev/memory/README.md`、`docs/guide/memory.md`（含非 Linux 退化）、release note（#16）、e2e、全量回归                                  | 全部   | `git diff origin/dev -- tests/fixtures/` 只出现 §4.5 声明过的文件                              |
+| 包  | 名称          | 文件域                                                                                                                                                                                                                                                                                   | 依赖                 | 要点                                                                                           |
+| --- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------- |
+| J0  | 基线          | `tests/memory/jev/off-golden.test.ts` + `jev-off-golden.json`、`tests/conformance/memory-jev-channels.test.ts`（C-J1–C-J15）、`scripts/dev/jev-eval.mjs` + 评测集                                                                                                                        | —                    | 只加测试与脚本；产出评测基线、默认列表定稿（#8）                                               |
+| J1  | 纯域          | `jev/{contracts,entries,taxonomy,redact,shell-parse,match,guard,format}.ts`（含 `expiredEntries`）、`secret-patterns.ts`、`doctor.ts`（搬家）、pi-free 测试根                                                                                                                            | J0                   | 块级结构（#13）、secret 缓存（#6）、`namedPrograms`                                            |
+| J2  | 引擎          | `jev/{client,health,proxy-fetch,questions,decide}.ts`                                                                                                                                                                                                                                    | J1                   | 状态机四态、`inactive`、通知判定、判定缓存、证据档                                             |
+| J3  | 设置与 secure | `src/memory/settings.ts`、`setting-specs.ts`、pin corpus、`src/config/settings.ts:417`、`docs/dev/data-encryption/README.md`                                                                                                                                                             | J0                   | 14 个键；D8 清单                                                                               |
+| J4  | 侧车与命令    | `jev/{index-store,tagging,review,command-port}.ts`、`command.ts` 中的 `/mem jev`、`/mem tags` 分支、`src/web-hub/agent/command-policy.ts`（jev/tags 行）                                                                                                                                 | J2, J3               | 批量打标（Q28）、覆盖率、dismissed 锚（#7）；web 端确认（Q35）                                 |
+| J5  | 写入路径      | `jev/write-port.ts`、`tool-v2.ts`、`tool-surface.ts`（只改描述）、`memory-tool-surface.json`、`skills/memory-jev/SKILL.md`                                                                                                                                                               | J2, J4               | 打标回显、`partial` 回显、append、Q4 守卫；生产接线在 J7                                       |
+| J6  | 召回运行时    | `jev/{wire,segment,config}.ts`（创建）、`src/memory/index.ts`（commandPort 接线）、`inject.ts`、`src/index.ts`（secure 参数 + bashJobs 端口预留）、activate-trace                                                                                                                        | J2, J4               | U/A/E/B、上一条消息（#9）、`·partial`、通知、探测计时器；**静态 core 映射为显式风险点**（#10） |
+| J7  | 门禁          | `jev/probes.ts`、`jev/wire.ts`（门禁分支）、`src/memory/index.ts`（J5 write 端口与 J8 doctor 端口的生产接线）、`src/index.ts`（bashJobs 绑定）                                                                                                                                           | J6（及 J5、J8 合入） | 粗筛；证据（仅 Linux）；Jev 判定档、证据档（含 partial，Q33）、判定缓存；release.sh 验收       |
+| J8  | 整理与到期    | `jev/{review-command,expired-command,entry-edit}.ts`、`command.ts` 中的 `/mem review`、`/mem expired` 分支、`contracts.ts`、`doctor.ts`、`doctor-command.ts`、`tidy/prompt.ts`、`tidy/command.ts`、`tidy/batch-command.ts`（只透传）、`src/web-hub/agent/command-policy.ts`（review 行） | J4                   | doctor golden 实测不变；周期整理（Q31）；`classifiers` 非空但全部非法时的 warn（Q34）          |
+| J9  | 收尾          | web 紧凑分支（可选）、`docs/dev/memory/README.md`、`docs/guide/memory.md`（含非 Linux 退化）、release note（#16）、`AGENTS.md`（pi peer bump checklist 第 2 条加入 C-J1–C-J15）、e2e、全量回归                                                                                           | 全部                 | `git diff origin/dev -- tests/fixtures/` 只出现 §4.5 声明过的文件                              |
 
 **共享文件的串行约束**（评审 #14）：
 
-- `src/memory/command.ts`：J4 先合入，J8 在其后开工，只追加自己的分派分支；
-- `src/index.ts`：J6 先合入（secure 参数 + 端口预留），J7 在其后（端口绑定）；
+- `src/memory/command.ts` 与 `src/web-hub/agent/command-policy.ts`：J4 先合入，J8 在其后开工，只追加自己的分派分支或策略行；
+- `src/index.ts`、`src/memory/index.ts`：J6 先合入（secure 参数、端口预留、commandPort 接线），J7 在其后（bashJobs 绑定，以及 write/doctor 端口接线）；
+- `src/memory/doctor.ts`：J1 先合入（搬出 `SECRET_PATTERNS`），J8 在其后（D17–D19）；
 - `jev/wire.ts`：J6 创建，J7 只追加门禁分支；
 - 其余文件各只属于一个包。
 
@@ -1397,7 +1424,9 @@ Jev 是一种「分类器」模型：它不会写字，只会做选择题、打�
 - 压缩上下文之后，把刚才用过的记忆补回来；
 - 你写了 `gate=hold` 的规则，在证据确凿时照样拦截。
 
-这时 `/mem` 显示 `jev: partial (451) · fast path 142/150 tagged (10-29)`，意思是：Jev 现在不在，系统正在用 10 月 29 日打好的标签工作，150 条里有 142 条有标签。`/mem jev` 会分两栏列出「停了的」和「还在跑的」。这期间推送到对话里的记忆，标记末尾带 `·partial`。如果你从没配过分类器，显示的是 `jev: inactive`，一切和以前一样。
+这时 `/mem` 显示 `jev: partial (451) · fast path 142/150 tagged (10-29)`，意思是：Jev 现在不在，系统正在用 10 月 29 日打好的标签工作，150 条里有 142 条有标签。`/mem jev` 会分两栏列出「停了的」和「还在跑的」。这期间推送到对话里的记忆，标记末尾带 `·partial`。如果你从没配过分类器，显示的是 `jev: inactive`，一切和以前一样。如果你把分类器列表清空（`memory.jev.classifiers` 设为空），等于把整个 Jev 功能关掉，连不调用 Jev 的部分也一起停；列表里写的名字全都不对时，也按关闭处理，并会提示你一次。
+
+**在网页端**：查看类命令（`/mem jev`、`/mem tags`）直接执行；会改动状态的命令（如 `/mem jev probe`、`/mem tags add`）会先请你确认；需要逐条点选的 `/mem review`、`/mem expired` 只能在终端里用。
 
 **第一次启用时**，pi 会提示一次：Jev 已启用，用的是哪个模型，你的消息和记忆摘录会脱敏后发给它，以及怎么查看和关闭。在加密（secure）环境里，Jev 永远关闭。
 
@@ -1504,3 +1533,19 @@ Jev 是一种「分类器」模型：它不会写字，只会做选择题、打�
 | §15            | 依赖图调整（J8 只依赖 J4）；共享文件串行约束；J5 去掉 `tag_add`；J7 增加证据档与缓存                                                                          |
 | §16            | 增加部分可用、首次启用通知、D2 分档、仅 Linux 的通俗说明；各例同步更新                                                                                        |
 | §17、§18（新） | r1 处置表与本变更记录                                                                                                                                         |
+
+## 19. v2.1 勘误记录（2026-10-30）
+
+只修正表述与实施之间的落差，不改设计意图。来源：`jev-plan.md` §10（下表记作「方案 §10 #n」）、`jev-plan-review-r1.md`（「评审 #n」）、`hygiene-flow.md` 第九轮拍板。
+
+| #   | 来源                      | 勘误                                                                                                                                                                                                                                                                                   | 落点                                         |
+| --- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| 1   | 方案 §10 #1               | 金样本表补 `tests/config/__corpus__/settings-corpus.json`（新增键须重 pin，先例 `4758bae5`）                                                                                                                                                                                           | §4.5                                         |
+| 2   | 方案 §10 #2、评审 #5      | `off(pi-api)` 改为「注册但钩子空转」，写明它不在 I9 settings-off 字面承诺内；设置期四条 off 路径仍零注册；off-harness 增加第 5 个重放配置作证明                                                                                                                                        | §0、§5.3、§9.2                               |
+| 3   | 方案 §10 #3、评审 #3      | 模块清单补 7 个 pi-free 文件（config/tagging/command-port/write-port/review-command/expired-command/entry-edit）；`expiredEntries` 归 J1；文件域补 `command-policy.ts`（J4→J8）、J7 改 `src/memory/index.ts`、`tidy/command.ts` 与 `tidy/batch-command.ts` 归 J8；依赖图与方案批次对齐 | §3.1、§15                                    |
+| 4   | 方案 §10 #4               | C-J1–C-J15 进 AGENTS.md peer bump 清单，由 J9 负责                                                                                                                                                                                                                                     | §13、§15                                     |
+| 5   | 方案 §10 #5、评审 #1      | 召回 0.7、门禁 0.6 标注「J0 基线评测后可能调整，调整需回本稿并问用户」                                                                                                                                                                                                                 | §9.1                                         |
+| 6   | 方案 §10 #6               | `memory.jev.confirmTimeoutS` 登记 `TIME_SETTING_MS_PATHS`（J3）                                                                                                                                                                                                                        | §9.1                                         |
+| 7   | 方案 §10 #7、Q33          | N1 改为已拍板（适用）                                                                                                                                                                                                                                                                  | §0、§6.4.5、§14.2                            |
+| 8   | 方案 §10 #8、评审 #6、Q34 | `classifiers` 为空列表 = off（零调用部分也不生效）；非空但全部非法时同样 off 并给 warn；§3.3 确定性部件改为「只受总开关与接线判定控制」；empty-list 留在 off 行                                                                                                                        | §3.3、§5.3、§6.2.5、§9.1、§9.2、§14.3、§16.2 |
+| 9   | 评审 #2、Q35              | web 端：改动状态的子命令改为需要确认，只有纯终端交互、无文本回退的才拒绝；`tags` 裸形式允许                                                                                                                                                                                            | §6.3.4、§9.4、§14.3、§16.2                   |
