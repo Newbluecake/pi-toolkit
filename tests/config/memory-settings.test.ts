@@ -46,7 +46,7 @@ describe("memory settings", () => {
         classifiersRejected: [],
         proxy: "",
         childSessions: true,
-        recall: { threshold: 0.6, maxEntries: 3, maxBytes: 4096, waitMs: 1500 },
+        recall: { threshold: 0.6, maxEntries: 3, maxBytes: 4096, waitMs: 2000 },
         gate: { enabled: true, threshold: 0.6 },
         review: { intervalDays: 7 },
         maxCostUsd: 0.5,
@@ -559,6 +559,11 @@ describe("memory settings", () => {
     expect(loadSettings({ memory: { jev: { confirmTimeoutS: 30 } } }).memory.jev.confirmTimeoutMs).toBe(30_000);
   });
 
+  it("recall.waitMs round-trips through the file's recall.waitS seconds key (TIME_SETTING_MS_PATHS, Q37)", () => {
+    expect(TIME_SETTING_MS_PATHS).toContain("memory.jev.recall.waitMs");
+    expect(loadSettings({ memory: { jev: { recall: { waitS: 2 } } } }).memory.jev.recall.waitMs).toBe(2000);
+  });
+
   it("jev is wired into loadSettings", () => {
     expect(loadSettings({ memory: { jev: { enabled: false } } }).memory.jev.enabled).toBe(false);
   });
@@ -572,7 +577,7 @@ describe("memory settings", () => {
       "memory.jev.recall.threshold",
       "memory.jev.recall.maxEntries",
       "memory.jev.recall.maxBytes",
-      "memory.jev.recall.waitMs",
+      "memory.jev.recall.waitS",
       "memory.jev.gate.enabled",
       "memory.jev.gate.threshold",
       "memory.jev.review.intervalDays",
@@ -592,6 +597,12 @@ describe("memory settings", () => {
     expect(SETTING_SPECS["memory.jev.classifiers"]).toMatchObject({ kind: "string", csv: true });
     expect(SETTING_SPECS["memory.jev.proxy"]).toMatchObject({ kind: "string", path: "memory.jev.proxy" });
     expect(SETTING_SPECS["memory.jev.recall.threshold"]).toMatchObject({ kind: "number", min: 0.5, max: 0.99 });
+    expect(SETTING_SPECS["memory.jev.recall.waitS"]).toMatchObject({
+      path: "memory.jev.recall.waitMs",
+      time: true,
+      min: 0,
+      max: 3,
+    });
     expect(SETTING_SPECS["memory.jev.gate.threshold"]).toMatchObject({ kind: "number", min: 0.5, max: 0.95 });
     expect(SETTING_SPECS["memory.jev.confirmTimeoutS"]).toMatchObject({
       path: "memory.jev.confirmTimeoutMs",

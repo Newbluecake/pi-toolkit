@@ -111,7 +111,7 @@ function makePort(dir: string, cwd: string, client: JevClient, over: Partial<Jev
       classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
       proxy: "",
       childSessions: true,
-      recall: { threshold: 0.6, maxEntries: 3, maxBytes: 4096, waitMs: 1500 },
+      recall: { threshold: 0.6, maxEntries: 3, maxBytes: 4096, waitMs: 2000 },
       gate: { enabled: true, threshold: 0.6 },
       reviewIntervalDays: 7,
       maxCostUsd: 0.5,

@@ -182,14 +182,12 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     ...count("memory.jev.recall.maxBytes", 512, "Byte budget for one recall injection"),
     max: 16384,
   } as SettingSpec,
-  "memory.jev.recall.waitMs": {
-    ...count(
-      "memory.jev.recall.waitMs",
-      0,
-      "Synchronous wait budget before falling back to async recall; 0 = pure async",
-    ),
-    max: 3000,
-  } as SettingSpec,
+  "memory.jev.recall.waitS": seconds("memory.jev.recall.waitMs", {
+    min: 0,
+    max: 3,
+    hint: "synchronous wait budget before async recall fallback",
+    description: "Synchronous wait budget before falling back to async recall; 0 = pure async (Q37)",
+  }),
   "memory.jev.gate.enabled": bool("memory.jev.gate.enabled", "Enable the dangerous-command gate"),
   "memory.jev.gate.threshold": {
     kind: "number",

@@ -420,7 +420,7 @@ export interface MemoryJevSettings {
   classifiersRejected: string[]; // 解析时丢弃的非法项（原文，≤10 项、每项 ≤80 码点）；只供提示用，不是设置键，默认 []
   proxy: string; // ""
   childSessions: boolean; // true
-  recall: { threshold: number; maxEntries: number; maxBytes: number; waitMs: number }; // 0.7 / 3 / 4096 / 1500
+  recall: { threshold: number; maxEntries: number; maxBytes: number; waitMs: number }; // 0.7 / 3 / 4096 / 1500（Q37 起为 waitS=2）
   gate: { enabled: boolean; threshold: number }; // true / 0.6
   review: { intervalDays: number }; // 7
   maxCostUsd: number; // 0.5
@@ -566,7 +566,7 @@ git diff --stat origin/dev -- tests/fixtures/   # 只允许 memory-tool-surface.
    - [ ] `doctorPort.extraReminder` 的到期数用 J1 的 `expiredEntries`，不自行解析 `expires`。
    - [ ] U 闸门四条；候选排除（private、secret、已注入、archived、静态 core）；>360 本地预筛并在 `/mem jev` 显示 `recall truncated N→360`。
    - [ ] 静态 core：primary 文件中 `section ∉ omittedSections` 的条目被排除；还没渲染过不排除；L4/L5 降级（core 未内联）时不排除——每种一例。
-   - [ ] 1500ms 内返回 ⇒ 作为本次 `message`；超时 ⇒ 后台继续，代际仍当前时 `sendMessage(triggerTurn:false)` 补发；新 prompt abort 旧调用；失败只记日志。
+   - [ ] 1500ms（Q37 起为 waitS=2）内返回 ⇒ 作为本次 `message`；超时 ⇒ 后台继续，代际仍当前时 `sendMessage(triggerTurn:false)` 补发；新 prompt abort 旧调用；失败只记日志。
    - [ ] `previous_user_message` 来自 `getBranch()` 回扫，截断脱敏剥 skill；子会话 `session:"child"`、派单 prompt 2000 码点、不带上一条。
    - [ ] A 层零调用：命中标签匹配器 → 有效标签 → importance≥2、type 过滤（pending 手工标签放行）→ ≤3 条 4KB；partial 下继续且标记 `·partial`；`inactive` 下零 `sendMessage`。
    - [ ] E 层：失败判定三级退出码来源；同签名每段一次、每段 ≤10；>150 预筛；前 2 条；唤醒轮作为 `before_agent_start` message。

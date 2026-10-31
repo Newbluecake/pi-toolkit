@@ -13,9 +13,11 @@ import {
  * Merged armory-memory (memory-plan §3.1): cwd-keyed project memory under
  * `~/.pi/agent/memory/<slug>/` — auto-injection, the `memory` tool, `/mem`.
  * Field-by-field tolerant parsing in `parseMemorySettings` (never throws,
- * parseBashJobsSettings 同款风格）。Only duration field:
- * `jev.confirmTimeoutMs` (seconds key `memory.jev.confirmTimeoutS`), registered
- * in TIME_SETTING_MS_PATHS.
+ * parseBashJobsSettings 同款风格）。Duration fields (file stores integer
+ * seconds, converted at the `*S ⇄ *Ms` boundary): `jev.confirmTimeoutMs`
+ * (seconds key `memory.jev.confirmTimeoutS`) and `jev.recall.waitMs`
+ * (seconds key `memory.jev.recall.waitS`, Q37), both registered in
+ * TIME_SETTING_MS_PATHS.
  */
 export interface MemorySettings {
   /** 总开关。false = 不注册注入 hook、memory 工具、/mem 命令。Default true（融合后原插件被卸载，默认关=升级即功能消失，merge-plan D2 哲学）。 */
@@ -87,7 +89,7 @@ export interface MemoryJevSettings {
     maxEntries: number;
     /** 单次注入字节预算。Default 4096；512–16384。 */
     maxBytes: number;
-    /** 同步等待上限（ms）。Default 1500；0–3000（0 = 纯异步，Q25）。 */
+    /** 同步等待上限（ms）；文件键按秒存 `recall.waitS`（TIME_SETTING_MS_PATHS）。Default 2000（Q37，原 1500）；0–3000（0 = 纯异步，Q25）。 */
     waitMs: number;
   };
   gate: {
@@ -358,7 +360,7 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     classifiersRejected: [],
     proxy: "",
     childSessions: true,
-    recall: { threshold: 0.6, maxEntries: 3, maxBytes: 4096, waitMs: 1500 },
+    recall: { threshold: 0.6, maxEntries: 3, maxBytes: 4096, waitMs: 2000 },
     gate: { enabled: true, threshold: 0.6 },
     review: { intervalDays: 7 },
     maxCostUsd: 0.5,

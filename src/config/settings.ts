@@ -355,6 +355,7 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "memory.tidy.timeoutMs",
   "memory.tidy.batch.totalTimeoutMs",
   "memory.jev.confirmTimeoutMs",
+  "memory.jev.recall.waitMs",
   "cacheTtl.keepaliveIntervalMs",
   "quota.refreshMs",
   "quota.refreshHotMs",
