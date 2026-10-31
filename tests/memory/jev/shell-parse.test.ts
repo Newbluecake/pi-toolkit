@@ -73,6 +73,15 @@ describe("table-driven parse cases", () => {
     { cmd: "sh -c 'rm -rf /tmp/x'", want: ["rm"] },
     { cmd: 'bash -c "cd sub && git commit"', want: ["git"] },
     { cmd: "bash -c 'bash -c \"git stash\"'", want: ["git"] },
+    // short-flag clusters containing c count as -c (J7 verifier: `bash -lc` bypass)
+    { cmd: "bash -lc 'git commit -m x'", want: ["git"] },
+    { cmd: 'bash -ic "git push"', want: ["git"] },
+    { cmd: "bash -o pipefail -c 'git push'", want: ["git"] },
+    { cmd: "bash --login -c 'git push'", want: ["git"] },
+    { cmd: "sh -xec 'rm -rf build'", want: ["rm"] },
+    { cmd: 'bash deploy.sh -c "git push"', want: ["deploy.sh"], not: ["git"] }, // -c after the script operand is a script arg
+    { cmd: "bash -o pipefail deploy.sh", want: ["deploy.sh"], not: ["pipefail"] },
+    { cmd: "bash -lc 'git commit -m x'", want: ["bash", "git"] }, // outer identity is the interpreter, not the script string
     // wrappers
     { cmd: "env git push", want: ["git"] },
     { cmd: "env -i git push", want: ["git"] },

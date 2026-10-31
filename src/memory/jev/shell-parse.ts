@@ -404,15 +404,40 @@ function buildCommand(
   // `bash -c "<script>"` — parse the script string too (depth-bounded).
   const base0 = basename(argv[0]!);
   if (INTERPRETERS.has(base0)) {
-    const cIndex = argv.indexOf("-c");
-    if (cIndex !== -1 && argv[cIndex + 1] !== undefined && depth < MAX_DEPTH) {
-      parseInto(argv[cIndex + 1]!, depth + 1, sink);
-    }
+    const script = interpreterScript(argv);
+    if (script !== undefined && depth < MAX_DEPTH) parseInto(script, depth + 1, sink);
   }
 
   const program = programIdentity(argv);
   const positionals = argv.slice(1).filter((a) => !a.startsWith("-"));
   return { argv, program, positionals, ...(cwd === undefined ? {} : { cwd }) };
+}
+
+/** First operand of an interpreter argv and whether a `-c`-style flag came
+ *  before it. Short-flag clusters that contain `c` (`-lc`, `-ic`, `-xec`) count
+ *  as `-c`; `-o`/`+o` (alone or ending a cluster) consume the next argument;
+ *  long options are skipped. Per sh/bash semantics the first operand is the
+ *  command string after `-c`, otherwise the script file. */
+function interpreterOperand(argv: readonly string[]): { operand: string | undefined; sawC: boolean } {
+  let sawC = false;
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--") return { operand: argv[i + 1], sawC };
+    if (/^[-+][A-Za-z]+$/.test(a)) {
+      if (a.startsWith("-") && a.includes("c")) sawC = true;
+      if (a.endsWith("o")) i += 1;
+      continue;
+    }
+    if (a.startsWith("-")) continue; // --login, --norc, -m=…
+    return { operand: a, sawC };
+  }
+  return { operand: undefined, sawC };
+}
+
+/** The `-c` command string of an interpreter argv (see `interpreterOperand`). */
+function interpreterScript(argv: readonly string[]): string | undefined {
+  const { operand, sawC } = interpreterOperand(argv);
+  return sawC ? operand : undefined;
 }
 
 function basename(path: string): string {
@@ -445,11 +470,9 @@ function joinCwd(cwd: string | undefined, dir: string): string {
 export function programIdentity(argv: readonly string[]): string {
   if (argv.length === 0) return "";
   const base = basename(argv[0]!);
-  if (INTERPRETERS.has(base) && !argv.slice(1).includes("-c")) {
-    for (let i = 1; i < argv.length; i++) {
-      const a = argv[i]!;
-      if (!a.startsWith("-")) return basename(a);
-    }
+  if (INTERPRETERS.has(base)) {
+    const { operand, sawC } = interpreterOperand(argv);
+    if (!sawC && operand !== undefined) return basename(operand);
   }
   return base;
 }
