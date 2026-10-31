@@ -46,7 +46,8 @@ import { canonicalDir } from "./safe-fs.js";
 import { memoryDirFor } from "./paths.js";
 import { resolveJevWiring, type JevDomainKind } from "./jev/config.js";
 import { wireJev } from "./jev/wire.js";
-import type { JevBashJobsPort, JevRenderInfo } from "./jev/contracts.js";
+import { createJevWritePort } from "./jev/write-port.js";
+import type { JevBashJobsPort, JevDoctorPort, JevRenderInfo } from "./jev/contracts.js";
 
 export interface WireMemoryOpts {
   settings: MemorySettings;
@@ -77,6 +78,35 @@ export interface WireMemoryResult {
   /** jev-plan J6/J7: post-guard bashJobs port for the gate's evidence. No-op
    *  when Jev is not wired (and in J6 only recorded — J7 consumes it). */
   attachJevBashJobs(port: JevBashJobsPort | undefined): void;
+}
+
+/** Structural subset of `JobRecord` (src/bash/types.ts) the gate needs —
+ *  kept local so memory never imports the bash module. */
+export interface BashJobRecordLike {
+  readonly jobId: string;
+  readonly status: string;
+  readonly command: string;
+  readonly createdAt: number;
+  readonly spawnedAt?: number;
+}
+
+/** jev-plan J7: adapts the session's BashJobManager listing to the frozen
+ *  `JevBashJobsPort` shape (`src/index.ts` passes a late-bound getter). */
+export function jevBashJobsFrom(list: () => readonly BashJobRecordLike[]): JevBashJobsPort {
+  return {
+    list: () =>
+      list().map((r) => ({ id: r.jobId, status: r.status, command: r.command, startedAt: r.spawnedAt ?? r.createdAt })),
+  };
+}
+
+/** Q34 (jev-plan J7): a non-empty classifiers list that parsed to zero valid
+ *  entries — one plain-English startup-reminder line. */
+export function jevSettingsWarnings(settings: MemorySettings, verdict: ReturnType<typeof resolveJevWiring>): string[] {
+  if (verdict.on || verdict.reason !== "empty-list") return [];
+  const rejected = settings.jev.classifiersRejected;
+  return rejected.length === 0
+    ? []
+    : [`memory.jev.classifiers: all entries invalid (${rejected.join(", ")}) — jev off`];
 }
 
 export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryResult {
@@ -120,11 +150,21 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     frozenBlocks.clear();
     lastBlocks.clear();
   });
+  // jev-plan J7: the production doctor port is created below (wireJev runs
+  // after the hub section); the reminder registers here (unchanged order) and
+  // reaches it late-bound. Off ⇒ no port and no warnings — byte-identical.
+  let jevDoctor: JevDoctorPort | undefined;
+  const lateJevDoctor: JevDoctorPort | undefined = jevOn
+    ? { extraReminder: (cwd) => jevDoctor?.extraReminder(cwd) ?? [] }
+    : undefined;
+  const settingsWarnings = jevSettingsWarnings(opts.settings, jevVerdict);
   if (!opts.isChildSession) {
     const reminder = createStartupReminder({
       settings: opts.settings,
       isChildSession: false,
       renderTieredPort: tieredRender,
+      ...(lateJevDoctor === undefined ? {} : { jev: lateJevDoctor }),
+      ...(settingsWarnings.length === 0 ? {} : { settingsWarnings }),
     });
     pi.on("session_start", reminder.check);
     pi.on("session_shutdown", (event) => {
@@ -165,10 +205,24 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         dirFor: (cwd) => canonicalDir(memoryDirFor(cwd))?.real,
         getRenderInfo: (cwd) => renderInfos.get(cwd),
         onAfterWriteHook: (fn) => afterWriteHooks.push(fn),
+        createWritePort: createJevWritePort,
+        // J8 acceptance #3 "core usage": doctor's D19 (≥80% of coreBytes, not
+        // when D02/D03 already flag the primary) as one reminder line.
+        coreUsageLine: (cwd) => {
+          const d19 = collectDoctorFindings(cwd, undefined, opts.settings, tieredRender, undefined, {
+            extraReminder: () => [],
+          }).find((f) => f.id === "D19");
+          return d19 === undefined ? undefined : `memory: core usage — ${d19.message}`;
+        },
       })
     : undefined;
+  jevDoctor = jev?.doctorPort;
   const doctorSummary = (cwd: string): string =>
-    summaryLine(collectDoctorFindings(cwd, undefined, opts.settings, tieredRender));
+    summaryLine(
+      jev === undefined
+        ? collectDoctorFindings(cwd, undefined, opts.settings, tieredRender)
+        : collectDoctorFindings(cwd, undefined, opts.settings, tieredRender, undefined, jev.doctorPort),
+    );
   pi.registerTool(
     opts.settings.toolSurface === "v2"
       ? createMemoryToolV2({
@@ -177,6 +231,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
           onAfterWrite,
           ...(opts.settings.layout === "tiered" ? { renderBlock: tieredRender } : {}),
           doctorSummary,
+          ...(jev === undefined ? {} : { jev: jev.makeWritePort() }),
         })
       : createMemoryTool({ settings: opts.settings, isChildSession: opts.isChildSession, onAfterWrite }),
   );

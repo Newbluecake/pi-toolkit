@@ -88,6 +88,12 @@ export const PI_API_ALLOWED_DIFF: readonly string[] = [
   // J8 completions (same port gate: only listed when the jev port is passed).
   "completion:review",
   "completion:expired",
+  // J7 (jev-plan §4 J7): production wiring passes the J5 write port ⇒ the
+  // memory tool description swaps to MEMORY_TOOL_V2_TEXT_JEV (schema
+  // unchanged, arch §9.3).
+  "tool-description:memory",
+  // J5 write echo under off(pi-api) (registry absent ⇒ no tagging call).
+  "tool-line:jev: not tagged (off: pi-api)",
 ];
 
 function hasToken(prefix: string, value?: string): boolean {

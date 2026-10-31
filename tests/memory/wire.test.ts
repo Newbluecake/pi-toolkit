@@ -12,7 +12,7 @@
 // helper) because the cache/freeze behavior is otherwise unobservable:
 // identical output twice cannot distinguish a cache hit from a re-render.
 
-import { MEMORY_TOOL_V2_TEXT } from "../../src/memory/tool-surface.js";
+import { MEMORY_TOOL_V2_TEXT, MEMORY_TOOL_V2_TEXT_JEV } from "../../src/memory/tool-surface.js";
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -254,7 +254,7 @@ describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-pla
     seedMemoryFile("core.md", "---\nsource: agent\n---\n# Core\n");
     seedMemoryFile("topic.md", "---\nsource: agent\n---\n# Topic\n");
     const tool = host.tools.get("memory")!;
-    expect(tool.description).toBe(MEMORY_TOOL_V2_TEXT.description);
+    expect(tool.description).toBe(MEMORY_TOOL_V2_TEXT_JEV.description);
     const injected = hookOf(host)("BASE")?.systemPrompt ?? "";
     expect(injected).toContain("### core.md");
     expect(injected).toContain("- topic.md");
