@@ -276,7 +276,16 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     const controller = new AbortController();
     const onOuterAbort = (): void => controller.abort();
     outerSignal?.addEventListener("abort", onOuterAbort);
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Per-tier timeout (§5.2: each tier gets at most half the budget) is a
+    // transient failure of THIS model — fail over to the next tier — not a
+    // caller abort. Only an outer-signal abort maps to "aborted".
+    let timedOut = false;
+    // read live: the signal can flip during the await (defeats TS narrowing above)
+    const outerAborted = (): boolean => outerSignal?.aborted === true;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
     (timer as { unref?: () => void }).unref?.();
 
     try {
@@ -287,7 +296,12 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
         { signal: controller.signal, ...(fetchFn === undefined ? {} : { fetch: fetchFn }) },
       );
       usageCalls += 1;
-      if (result.stopReason === "aborted") return { ok: false, grade: "aborted", errorMessage: "aborted" };
+      if (result.stopReason === "aborted" || (result.stopReason === "error" && timedOut)) {
+        if (timedOut && !outerAborted()) {
+          return { ok: false, grade: "transient", errorMessage: `timeout after ${String(timeoutMs)}ms` };
+        }
+        return { ok: false, grade: "aborted", errorMessage: "aborted" };
+      }
       if (result.stopReason === "error") {
         return { ok: false, grade: classifyError(result.errorMessage ?? ""), errorMessage: result.errorMessage ?? "" };
       }
@@ -295,6 +309,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
       return { ok: true, answers: result.answers, costUsd: result.usage?.cost?.total ?? 0 };
     } catch (err) {
       // `classify()` must never reject (docs/extensions.md) — defensive only.
+      if (outerAborted() && !timedOut) return { ok: false, grade: "aborted", errorMessage: "aborted" };
       return { ok: false, grade: "transient", errorMessage: String((err as Error)?.message ?? err) };
     } finally {
       clearTimeout(timer);

@@ -96,6 +96,56 @@ describe("createJevClient — failover chain and error grading (jev-arch §5.2)"
     expect(callCountFor("openrouter/typesafe/jev-1.14")).toBe(2);
   });
 
+  it("a per-tier timeout fails over to the next classifier (transient, not aborted)", async () => {
+    const hang = (call: { signal: AbortSignal | undefined }) =>
+      new Promise<{ stopReason: "aborted" }>((resolve) => {
+        call.signal?.addEventListener("abort", () => resolve({ stopReason: "aborted" }));
+      });
+    const { registry, callCountFor } = createFakeRegistry({
+      available: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
+      responses: {
+        "opencode/jev-1.13-free": [hang],
+        "opencode/jev-1.13": [{ stopReason: "stop", answers: { e1: { type: "bool", probability: 0.8 } } }],
+      },
+    });
+    const client = createJevClient({
+      config: cfg({ classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"] }),
+      isChild: false,
+      now: () => Date.now(),
+      health: freshHealth(),
+      bucket: freshBucket(),
+    });
+    // budget 2400ms ⇒ first tier gets max(1000, 1200) = 1200ms, then fails over.
+    const outcome = await client.ask(req({ budgetMs: 2400 }, registry));
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) expect(outcome.model).toBe("opencode/jev-1.13");
+    expect(callCountFor("opencode/jev-1.13-free")).toBe(1);
+    expect(callCountFor("opencode/jev-1.13")).toBe(1);
+  });
+
+  it("a caller abort during a tier still returns aborted without failover", async () => {
+    const hang = (call: { signal: AbortSignal | undefined }) =>
+      new Promise<{ stopReason: "aborted" }>((resolve) => {
+        call.signal?.addEventListener("abort", () => resolve({ stopReason: "aborted" }));
+      });
+    const { registry, callCountFor } = createFakeRegistry({
+      available: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
+      responses: { "opencode/jev-1.13-free": [hang] },
+    });
+    const client = createJevClient({
+      config: cfg({ classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"] }),
+      isChild: false,
+      now: () => Date.now(),
+      health: freshHealth(),
+      bucket: freshBucket(),
+    });
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50).unref?.();
+    const outcome = await client.ask(req({ budgetMs: 4000, signal: ac.signal }, registry));
+    expect(outcome).toMatchObject({ ok: false, reason: "aborted" });
+    expect(callCountFor("opencode/jev-1.13")).toBe(0);
+  });
+
   it("transient failures isolate a model for 10 minutes after 3 consecutive failures; success resets the counter", async () => {
     const { registry, callCountFor } = createFakeRegistry({
       available: ["opencode/jev-1.13-free"],
