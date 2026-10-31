@@ -66,7 +66,29 @@ assertGenerateOnceGate(UPDATE, GOLDEN_EXISTS);
 // ───────────────────────────── allowlist (pi-api) ─────────────────────────────
 
 /** 允许差异清单（jev-plan J0 第 4 条：J0 写成空清单；只许追加，见文件头 token 语法）。 */
-export const PI_API_ALLOWED_DIFF: readonly string[] = [];
+export const PI_API_ALLOWED_DIFF: readonly string[] = [
+  // J6 (jev-plan §4 J6): memory jev hooks — registered once the settings say
+  // on; under off(pi-api) every handler returns on its first line.
+  "registration:on:before_agent_start",
+  "registration:on:tool_call",
+  "registration:on:tool_result",
+  "registration:on:message_start",
+  "registration:on:session_start",
+  "registration:on:session_compact",
+  "registration:on:turn_end",
+  "registration:on:session_shutdown",
+  "registration:registerMessageRenderer:subagent:memory-inject",
+  // J4 command port in place ⇒ `/mem` description gains ` · /mem jev · /mem tags`.
+  "registration:registerCommand:mem",
+  // `/mem` / `/mem list` trailer status line under off(pi-api).
+  "command-line:jev: off (pi-api)",
+  // J4 completions that appear once the command port is passed in.
+  "completion:jev",
+  "completion:tags",
+  // J8 completions (same port gate: only listed when the jev port is passed).
+  "completion:review",
+  "completion:expired",
+];
 
 function hasToken(prefix: string, value?: string): boolean {
   const token = value === undefined ? prefix : `${prefix}:${value}`;
@@ -325,8 +347,9 @@ describe("jev off golden (A′, jev-plan J0)", () => {
     }
     expect(ri).toBe(golden.reminder.notifications.length);
     // dev 断言：pi-api 与 disabled 逐字段相同（wireMemory 尚不读 modelRegistry）。
+    // J6 起由 PI_API_ALLOWED_DIFF 白名单比对取代（上面逐 token 校验，未登记的差异即失败）。
     const disabled = cases["disabled"] ?? (await recordMemoryOff("disabled"));
-    expect(serialized(actual)).toBe(serialized(disabled));
+    if (PI_API_ALLOWED_DIFF.length === 0) expect(serialized(actual)).toBe(serialized(disabled));
   });
 
   it("generation gate refuses to overwrite an existing golden", () => {

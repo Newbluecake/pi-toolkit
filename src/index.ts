@@ -218,7 +218,12 @@ export default function activate(rawPi: ExtensionAPI): void {
   // `TidyPort` for `/mem tidy`/`/mem restore`.
   let memoryWiring: ReturnType<typeof wireMemory> | undefined;
   if (preGuardSettings.memory.enabled)
-    memoryWiring = wireMemory(pi, { settings: preGuardSettings.memory, isChildSession, sections: promptHub });
+    memoryWiring = wireMemory(pi, {
+      settings: preGuardSettings.memory,
+      isChildSession,
+      sections: promptHub,
+      secureDomainKind: secureDomain.kind,
+    });
 
   // bash-timeout-grace plan §3.4 (P5): the child (subagent) session half of
   // the auto-background feature — pre-guard, same rationale as memory/todo/

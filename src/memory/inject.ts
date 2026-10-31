@@ -46,6 +46,8 @@ import {
 } from "./render.js";
 import { canonicalDir, listRegular } from "./safe-fs.js";
 import { accessFromTools, MetaCache, renderTiered, tieredFingerprint, TieredRenderCache } from "./tiered.js";
+import type { JevRenderInfo } from "./jev/contracts.js";
+import { stripInlineMeta } from "./jev/entries.js";
 
 export interface MemorySectionDeps {
   settings: MemorySettings; // 静态（Nit 7）
@@ -59,8 +61,33 @@ export interface MemorySectionDeps {
    * throwing host APIs are collapsed by the caller. */
   getActiveTools?: () => string[];
   /** Called for each non-frozen provider result so P5 can freeze the exact
-   * tiered block that was last injected after a write. */
-  onRender?: (cwd: string, block: string | undefined) => void;
+   * tiered block that was last injected after a write. The third argument
+   * (jev-plan J6) carries the static-core map Jev needs to skip entries that
+   * are already in the system prompt; `undefined` for the legacy layout. */
+  onRender?: (cwd: string, block: string | undefined, info: JevRenderInfo | undefined) => void;
+  /** jev on (jev-plan J6, jev-arch §8): strip `<!-- mem … -->` inline
+   *  authority comments from the injected block. Settings-derived, constant
+   *  within one activation; absent/false ⇒ byte-identical to before. */
+  stripInlineMeta?: boolean;
+}
+
+const INLINE_META_PROBE_RE = /<!--[ \t]*mem\b/;
+const TIERED_HEADER_PRIMARY_RE = /^## Memory \([^\n]*\) — \d+ file\(s\)\n\n### ([^\n]+)\n/;
+
+/** Static-core map for Jev (review #10). The tiered core always starts with
+ *  the primary file's `### <name>` piece when the primary was admitted
+ *  (tiered.ts `buildCore` pushes it first; extra pinned files exist only when
+ *  a primary exists). Level 4/5 ⇒ primary demoted / frame only ⇒ not inlined. */
+export function jevRenderInfoOf(result: {
+  text: string;
+  level: number;
+  omittedSections: readonly string[];
+}): JevRenderInfo {
+  const m = result.level < 4 ? TIERED_HEADER_PRIMARY_RE.exec(result.text) : null;
+  const primary = m?.[1];
+  return primary === undefined
+    ? { omittedSections: [], coreInlined: false }
+    : { primary, omittedSections: [...result.omittedSections], coreInlined: true };
 }
 
 /** `ctx.cwd` is an `assertActive()`-guarded getter (pc87:runner.js:565-568);
@@ -225,6 +252,7 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
     indexMax: deps.settings.indexMax,
   };
   let block: string | undefined;
+  let info: JevRenderInfo | undefined;
   let usedFrozen = false;
   if (deps.frozenBlocks.has(cwd)) {
     usedFrozen = true;
@@ -263,6 +291,7 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
     const result = cached ?? renderTiered(input, { metaCache: caches.meta });
     if (!cached) caches.render.set(input, deps.settings.toolSurface, fingerprint, result);
     block = result.text;
+    if (deps.onRender !== undefined) info = jevRenderInfoOf(result);
   } else {
     const fingerprint = memoryFingerprint(cwd, deps.paths);
     const cached = deps.cache.get(cwd, budget, fingerprint);
@@ -273,7 +302,10 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
       deps.cache.set(cwd, budget, fingerprint, block);
     }
   }
-  if (!usedFrozen) deps.onRender?.(cwd, block);
+  if (deps.stripInlineMeta === true && block !== undefined && INLINE_META_PROBE_RE.test(block)) {
+    block = stripInlineMeta(block);
+  }
+  if (!usedFrozen) deps.onRender?.(cwd, block, info);
   return block ?? "";
 }
 

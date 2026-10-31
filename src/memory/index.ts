@@ -42,6 +42,11 @@ import { renderTiered } from "./tiered.js";
 import { runDoctor } from "./doctor.js";
 import { createStartupReminder, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
 import { summaryLine } from "./doctor.js";
+import { canonicalDir } from "./safe-fs.js";
+import { memoryDirFor } from "./paths.js";
+import { resolveJevWiring, type JevDomainKind } from "./jev/config.js";
+import { wireJev } from "./jev/wire.js";
+import type { JevBashJobsPort, JevRenderInfo } from "./jev/contracts.js";
 
 export interface WireMemoryOpts {
   settings: MemorySettings;
@@ -54,6 +59,9 @@ export interface WireMemoryOpts {
    *  direct unit callers; production wiring always supplies these. */
   renderBlock?: RenderTieredPort;
   runDoctor?: typeof runDoctor;
+  /** jev-plan J6 / I11: the secure-domain verdict (`secureDomain.kind`).
+   *  Anything but "plain" keeps Jev unwired. Absent ⇒ "plain". */
+  secureDomainKind?: JevDomainKind;
 }
 
 export interface WireMemoryResult {
@@ -66,6 +74,9 @@ export interface WireMemoryResult {
    *  P5 经 holder 晚绑定给 `ExternalAgentsPort` 的 `memoryBlock` 端口；
    *  `externalAgents.droid.injectMemory=false` 时 P5 干脆不传该端口。 */
   renderForExternal(cwd: string): string | undefined;
+  /** jev-plan J6/J7: post-guard bashJobs port for the gate's evidence. No-op
+   *  when Jev is not wired (and in J6 only recorded — J7 consumes it). */
+  attachJevBashJobs(port: JevBashJobsPort | undefined): void;
 }
 
 export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryResult {
@@ -80,6 +91,12 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     indexMax: opts.settings.indexMax,
   };
   let tidyPort: TidyPort | undefined;
+  // jev-plan §1.1: settings-period wiring verdict. off ⇒ nothing below
+  // changes (no hooks, no ports, no extra render work — I9).
+  const jevVerdict = resolveJevWiring(opts.settings, opts.secureDomainKind ?? "plain");
+  const jevOn = jevVerdict.on;
+  const afterWriteHooks: ((cwd: string) => void)[] = [];
+  const renderInfos = new Map<string, JevRenderInfo>();
   // §5.5: freeze=false → invalidate so the next turn re-renders (one cache
   // miss); freeze=true → capture the pre-write block (peek miss ⇒ freeze to
   // "no block", R3) so the injected bytes stay stable for this session and
@@ -96,6 +113,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     } else {
       cache.delete(cwd);
     }
+    for (const hook of afterWriteHooks) hook(cwd);
   };
 
   pi.on("session_start", () => {
@@ -120,7 +138,11 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       isChildSession: opts.isChildSession,
       cache,
       frozenBlocks,
-      onRender: (cwd, block) => lastBlocks.set(cwd, block),
+      onRender: (cwd, block, info) => {
+        lastBlocks.set(cwd, block);
+        if (jevOn && info !== undefined) renderInfos.set(cwd, info);
+      },
+      ...(jevOn ? { stripInlineMeta: true } : {}),
       // 自己不消费，俛 legacy layout 不调用它；tiered 的 `accessFromTools` 计算属于 P1）。
       // 防御地抖错把它包成安全函数：`pi.getActiveTools` 缺失或抛错都降级为 `[]`
       // （同 `context-switch/child.ts:470` 的这个先例）。
@@ -133,6 +155,18 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       },
     }),
   );
+  // jev-plan J6: Jev hooks register after the hub (src/index.ts creates the
+  // hub first) and before the tool/command so the command port exists.
+  const jev = jevVerdict.on
+    ? wireJev(pi, {
+        config: jevVerdict.config,
+        settings: opts.settings,
+        isChildSession: opts.isChildSession,
+        dirFor: (cwd) => canonicalDir(memoryDirFor(cwd))?.real,
+        getRenderInfo: (cwd) => renderInfos.get(cwd),
+        onAfterWriteHook: (fn) => afterWriteHooks.push(fn),
+      })
+    : undefined;
   const doctorSummary = (cwd: string): string =>
     summaryLine(collectDoctorFindings(cwd, undefined, opts.settings, tieredRender));
   pi.registerTool(
@@ -155,6 +189,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       renderBlock: tieredRender,
       runDoctor: doctorRunner,
       onAfterWrite,
+      ...(jev === undefined ? {} : { jev: jev.commandPort }),
     }),
   );
   return {
@@ -163,6 +198,9 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     },
     renderForExternal(cwd: string): string | undefined {
       return renderExternalMemoryBlock({ settings: opts.settings, cache }, cwd);
+    },
+    attachJevBashJobs(port) {
+      jev?.attachBashJobs(port);
     },
   };
 }
