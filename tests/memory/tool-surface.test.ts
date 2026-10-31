@@ -13,6 +13,7 @@ import { Type as DevType } from "@sinclair/typebox";
 import {
   canonicalJson,
   MEMORY_TOOL_V2_TEXT,
+  MEMORY_TOOL_V2_TEXT_JEV,
   MemoryToolParamsV2,
   toolSurfaceBytes,
   type ToolSurfaceText,
@@ -23,6 +24,9 @@ import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 const fixture = JSON.parse(readFileSync(new URL("../fixtures/memory-tool-surface.json", import.meta.url), "utf8")) as {
   legacy: { description: string; promptSnippet: string; promptGuidelines: string; parameters: string };
   v2: { description: string; promptSnippet: string; promptGuidelines: string; parameters: string };
+  /** J5 (jev-plan §4): description-variant key — additions only, the legacy
+   *  and v2 groups above are byte-frozen. */
+  jev: { description: string; bytes: number };
   bytes: { legacy: number; v2: number };
 };
 
@@ -157,6 +161,38 @@ describe("v2 tool surface (§4.5 frozen text)", () => {
     expect(v2RuntimeBytes).toBe(1443);
     expect(v2DevBytes).toBeLessThanOrEqual(1500);
     expect(fixture.bytes.v2).toBe(1443);
+  });
+
+  // J5 (jev-plan §4 / arch §9.3): the jev-on variant ONLY swaps the
+  // description — the schema's canonical JSON is byte-identical to v2 and
+  // promptSnippet/promptGuidelines are shared. Budget updated in this same
+  // test per the plan ("字节预算断言更新在同一测试").
+  it("jev variant: description = v2 text + §9.3 sentence, schema/snippet/guidelines unchanged, budget 1638B (≤1700B ceiling)", async () => {
+    const RuntimeType = await resolveRuntimeType();
+    // description: original + " " + the §9.3 sentence, verbatim.
+    expect(MEMORY_TOOL_V2_TEXT_JEV.description.startsWith(MEMORY_TOOL_V2_TEXT.description)).toBe(true);
+    expect(MEMORY_TOOL_V2_TEXT.description.endsWith("Never store secrets.")).toBe(true);
+    expect(MEMORY_TOOL_V2_TEXT_JEV.description).toContain(
+      "Entries are tagged automatically after writes. Inline authority (end of the entry's first line): " +
+        '<!-- mem user|lesson expires=YYYY-MM-DD until="…" gate|gate=hold|nogate tags=+a,-b private -->.',
+    );
+    // ~250B suffix per §9.3 (194B + the joining space, pinned exactly).
+    expect(
+      Buffer.byteLength(MEMORY_TOOL_V2_TEXT_JEV.description, "utf8") -
+        Buffer.byteLength(MEMORY_TOOL_V2_TEXT.description, "utf8"),
+    ).toBe(195);
+    // shared fields — NOT part of the variant.
+    expect(MEMORY_TOOL_V2_TEXT_JEV.promptSnippet).toBe(MEMORY_TOOL_V2_TEXT.promptSnippet);
+    expect(MEMORY_TOOL_V2_TEXT_JEV.promptGuidelines).toStrictEqual([...MEMORY_TOOL_V2_TEXT.promptGuidelines]);
+    // schema byte-identical under canonicalJson, on BOTH typebox builds.
+    const runtimeV2Params = buildV2Params(RuntimeType);
+    expect(toolSurfaceBytes({ ...MEMORY_TOOL_V2_TEXT_JEV, parameters: MemoryToolParamsV2 })).toBe(1638);
+    expect(toolSurfaceBytes({ ...MEMORY_TOOL_V2_TEXT_JEV, parameters: runtimeV2Params })).toBe(1638);
+    expect(toolSurfaceBytes({ ...MEMORY_TOOL_V2_TEXT_JEV, parameters: MemoryToolParamsV2 })).toBeLessThanOrEqual(1700);
+    expect(fixture.jev.bytes).toBe(1638);
+    // fixture: the new key matches the constant (canonical form).
+    expect(canonicalJson(MEMORY_TOOL_V2_TEXT_JEV.description)).toBe(fixture.jev.description);
+    expect(fixture.jev.description.startsWith(fixture.v2.description.slice(0, -1))).toBe(true);
   });
 });
 

@@ -51,6 +51,25 @@ export const MEMORY_TOOL_V2_TEXT = {
   ],
 } as const;
 
+/** §9.3's jev-on description variant: the v2 text with the auto-tagging +
+ *  inline-authority sentence appended (jev-plan J5). Everything else —
+ *  promptSnippet, promptGuidelines and above all the SCHEMA — is shared
+ *  with the base variant (Q32: `tag_add` deferred, schema byte-identical).
+ *  Do not edit without updating `tests/fixtures/memory-tool-surface.json`
+ *  (the `jev` key) in the same change. */
+const MEMORY_TOOL_V2_JEV_SUFFIX =
+  "Entries are tagged automatically after writes. Inline authority (end of the entry's first line): " +
+  '<!-- mem user|lesson expires=YYYY-MM-DD until="…" gate|gate=hold|nogate tags=+a,-b private -->.';
+
+export const MEMORY_TOOL_V2_TEXT_JEV: {
+  readonly description: string;
+  readonly promptSnippet: string;
+  readonly promptGuidelines: readonly string[];
+} = {
+  ...MEMORY_TOOL_V2_TEXT,
+  description: `${MEMORY_TOOL_V2_TEXT.description} ${MEMORY_TOOL_V2_JEV_SUFFIX}`,
+};
+
 export interface ToolSurfaceText {
   description: string;
   promptSnippet?: string;

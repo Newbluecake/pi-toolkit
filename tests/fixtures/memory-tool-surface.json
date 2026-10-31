@@ -13,6 +13,10 @@
     "promptGuidelines": "[\"memory: open a topic only when its `when` matches; fix stale facts with str_replace instead of appending duplicates; keep core.md to always-needed rules.\"]",
     "parameters": "{\"properties\":{\"action\":{\"anyOf\":[{\"const\":\"list\",\"type\":\"string\"},{\"const\":\"write\",\"type\":\"string\"},{\"const\":\"append\",\"type\":\"string\"}]},\"command\":{\"anyOf\":[{\"const\":\"view\",\"type\":\"string\"},{\"const\":\"create\",\"type\":\"string\"},{\"const\":\"str_replace\",\"type\":\"string\"},{\"const\":\"insert\",\"type\":\"string\"},{\"const\":\"delete\",\"type\":\"string\"},{\"const\":\"rename\",\"type\":\"string\"},{\"const\":\"search\",\"type\":\"string\"}]},\"content\":{\"type\":\"string\"},\"file_text\":{\"type\":\"string\"},\"insert_line\":{\"minimum\":0,\"type\":\"integer\"},\"insert_text\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"new_path\":{\"type\":\"string\"},\"new_str\":{\"type\":\"string\"},\"old_path\":{\"type\":\"string\"},\"old_str\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"},\"section\":{\"type\":\"string\"},\"view_range\":{\"items\":{\"type\":\"integer\"},\"maxItems\":2,\"minItems\":2,\"type\":\"array\"}},\"type\":\"object\"}"
   },
+  "jev": {
+    "description": "\"Project memory (cwd-keyed; core + topic index auto-injected). command: view [path] [view_range|section] · search query · create path file_text · str_replace path old_str [new_str] · insert path insert_line|section insert_text · delete path · rename old_path new_path. path: x.md or /memories/x.md; omit to list. Legacy: action list|write|append + name/content. Never store secrets. Entries are tagged automatically after writes. Inline authority (end of the entry's first line): <!-- mem user|lesson expires=YYYY-MM-DD until=\\\"…\\\" gate|gate=hold|nogate tags=+a,-b private -->.\"",
+    "bytes": 1638
+  },
   "bytes": {
     "legacy": 1333,
     "v2": 1443
