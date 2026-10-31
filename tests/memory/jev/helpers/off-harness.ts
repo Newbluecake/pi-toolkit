@@ -26,7 +26,7 @@
  * 该文件只被测试使用；不得 import 任何生产模块的可变单例。
  */
 
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, utimesSync } from "node:fs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -338,6 +338,28 @@ function providerOut(v: unknown): string {
   return typeof v === "string" ? v : JSON.stringify(v);
 }
 
+/** Files the tool script writes get the REAL mtime (fake timers only fake
+ *  `Date`), and the legacy `list` prints each file's mtime date — pin any file
+ *  newer than FIXED_NOW back to FIXED_NOW after every step so the recording
+ *  does not depend on the wall-clock day. Fixture files (2026-09) are older
+ *  and stay untouched. */
+function pinWrittenMtimes(fx: MaterializedFixture): void {
+  const fixed = new Date(FIXED_NOW_ISO).getTime();
+  try {
+    for (const name of readdirSync(fx.memDir)) {
+      if (!name.endsWith(".md")) continue;
+      const path = join(fx.memDir, name);
+      try {
+        if (statSync(path).mtimeMs > fixed) utimesSync(path, fixed / 1000, fixed / 1000);
+      } catch {
+        /* raced */
+      }
+    }
+  } catch {
+    /* no dir yet */
+  }
+}
+
 function snapshotDir(fx: MaterializedFixture): { files: Record<string, string>; trash: readonly string[] } {
   const files: Record<string, string> = {};
   const trash: string[] = [];
@@ -427,6 +449,7 @@ async function runToolScript(
     } catch (err) {
       error = (err as Error).message;
     }
+    pinWrittenMtimes(fx);
     out.push({
       step: step.step,
       ...(output === undefined ? {} : { output }),
