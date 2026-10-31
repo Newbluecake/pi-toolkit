@@ -214,6 +214,15 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
       if (sub2 === undefined || sub2 === "list") return { policy: "allow" };
       return { policy: "confirm" };
     }
+    // J8 (jev-plan §4 / hygiene-flow Q35): `review --list` is a read-only
+    // listing (allowed in a child session too, server-side); the bare
+    // interactive default and `--run` mutate state (or at least spend a
+    // Jev run) — generic confirm, same anti-misclick class as every other
+    // state-changing /mem subcommand here. `expired` has no read-only form.
+    if (sub === "review") {
+      return { policy: tokens[1] === "--list" ? "allow" : "confirm" };
+    }
+    if (sub === "expired") return { policy: "confirm" };
     // Batch's read-only surfaces are safe to invoke from the web hub. The
     // interactive archive/normalize and lock-break flows remain confirmed.
     if (

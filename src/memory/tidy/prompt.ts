@@ -30,6 +30,11 @@ export interface TidyPromptInput {
   /** Doctor D04's findings among THIS prompt's target files (name +
    *  whole-file bytes, over `topicWarnBytes`). */
   oversized?: readonly { name: string; bytes: number }[];
+  /** jev-plan §4 J8: jev is wired (regardless of whether any file actually
+   *  carries an inline comment yet). Only adds a rule when at least one
+   *  target file's body contains `<!-- mem` — otherwise byte-identical to
+   *  before this field existed (I9 / off golden's `tidyPrompt`). */
+  preserveInlineMeta?: boolean;
 }
 
 const RULES = [
@@ -88,6 +93,12 @@ export function buildTidyPrompt(input: TidyPromptInput): string {
     lines.push(
       "- Content overlapping AGENTS.md/skills/docs/dev is either a one-line pointer to the source doc, marked " +
         "`status: stale`, or dropped with a reason in `dropped[]` — never silently deleted.",
+    );
+  }
+  if (input.preserveInlineMeta === true && input.files.some((f) => f.body.includes("<!-- mem"))) {
+    lines.push(
+      "- Preserve every `<!-- mem … -->` inline authority comment exactly as written, on the same line of the " +
+        "same entry — these are machine-read markers (expiry/ownership/tags), not prose, and must survive untouched.",
     );
   }
   lines.push("");

@@ -586,6 +586,7 @@ export async function normalizeBatches(
     model: string;
     timeoutMs: number;
     paths?: MemoryPaths;
+    preserveInlineMeta?: boolean;
   },
   deadlineAt: number,
   timing?: BatchTiming,
@@ -625,6 +626,9 @@ export async function normalizeBatches(
       oversized: files
         .filter((f) => f.size > memorySettings.topicWarnBytes)
         .map((f) => ({ name: f.name, bytes: f.size })),
+      ...(memorySettings.preserveInlineMeta === undefined
+        ? {}
+        : { preserveInlineMeta: memorySettings.preserveInlineMeta }),
       batch: {
         index: batch.index,
         total: plan.batches.length,
@@ -796,6 +800,7 @@ export interface BatchCommandDeps {
     coreBytes: number;
     topicMaxBytes: number;
     topicWarnBytes: number;
+    preserveInlineMeta?: boolean;
   };
   port?: TidyPort;
   onAfterWrite?: (cwd: string) => void;
@@ -920,6 +925,9 @@ export async function handleBatchTidyCommand(
           topicMaxBytes: deps.settings.topicMaxBytes,
           topicWarnBytes: deps.settings.topicWarnBytes,
           ...(deps.paths === undefined ? {} : { paths: deps.paths }),
+          ...(deps.settings.preserveInlineMeta === undefined
+            ? {}
+            : { preserveInlineMeta: deps.settings.preserveInlineMeta }),
         },
         deps.settings.tidy.batch.totalTimeoutMs,
         timing,

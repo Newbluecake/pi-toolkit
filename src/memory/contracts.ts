@@ -139,7 +139,25 @@ export interface BudgetReport {
 
 // ───────────────────────────── §6 doctor ─────────────────────────────
 
-export type DoctorId = "D01" | "D02" | "D03" | "D04" | "D05" | "D06" | "D07" | "D08" | "D09" | "D11" | "D13" | "D14";
+export type DoctorId =
+  | "D01"
+  | "D02"
+  | "D03"
+  | "D04"
+  | "D05"
+  | "D06"
+  | "D07"
+  | "D08"
+  | "D09"
+  | "D11"
+  | "D13"
+  | "D14"
+  // jev-plan §4 J8 (jev-arch §6.3.5 到期 / §9.2): only reported when `runDoctor`'s
+  // optional `jev` parameter is present — absent (the common, off, case) is
+  // byte-identical to before these three codes existed (I9).
+  | "D17"
+  | "D18"
+  | "D19";
 export type DoctorSeverity = "error" | "warn" | "info";
 
 export interface DoctorFinding {

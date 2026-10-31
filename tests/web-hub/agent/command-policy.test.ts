@@ -134,6 +134,18 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("mem", "tags frobnicate", "extension").policy).toBe("confirm");
   });
 
+  // J8 (Q35, jev-plan §4 J8): `review --list` is a read-only listing —
+  // allowed even server-side, same tier as `mem list`/`mem doctor`; the
+  // bare interactive default and `--run` spend a Jev run (or at least
+  // change review state) — generic confirm. `expired` has no read-only
+  // form at all, so it is always confirm.
+  it("mem review/expired: --list allows, everything else confirms (jev-plan §4 J8)", () => {
+    expect(resolve("mem", "review --list", "extension").policy).toBe("allow");
+    expect(resolve("mem", "review", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "review --run", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "expired", "extension").policy).toBe("confirm");
+  });
+
   it("/cache-ttl: no-args/status allow; every mode switch confirms", () => {
     expect(resolve("cache-ttl", "", "extension").policy).toBe("allow");
     expect(resolve("cache-ttl", "status", "extension").policy).toBe("allow");

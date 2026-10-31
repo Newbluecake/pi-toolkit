@@ -21,12 +21,26 @@
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { isWebInvocation } from "../commands/capture.js";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
 import type { MemorySettings } from "../config/settings.js";
 import type { TidyPort } from "./contracts.js";
 import { parseTagsAddArgs, tokenizeTagsArgs } from "./jev/command-port.js";
-import type { ClassifierRegistryLike, JevCommandPort } from "./jev/contracts.js";
+import type {
+  ClassifierRegistryLike,
+  EntryHash,
+  JevCommandPort,
+  JevDoctorPort,
+  MemCommandUiLike,
+  MemEntry,
+} from "./jev/contracts.js";
+import { EntryIndex, expiredEntries, untilEntries } from "./jev/entries.js";
+import { deleteEntry as fsDeleteEntry, setInlineMeta as fsSetInlineMeta } from "./jev/entry-edit.js";
+import { handleMemExpired } from "./jev/expired-command.js";
+import { readIndex } from "./jev/index-store.js";
+import { handleMemReview } from "./jev/review-command.js";
 import { memoryDirFor, type MemoryPaths } from "./paths.js";
+import { canonicalMemoryDir } from "./safe-fs.js";
 import { discoverCCProjects, importAll, importProject, listMemory, type ImportResult } from "./store.js";
 import { formatSize } from "./render.js";
 import { handleMemDoctorCommand, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
@@ -38,9 +52,10 @@ export type CommandHandler = (args: string, ctx: ExtensionCommandContext) => Pro
 
 const DESCRIPTION =
   "Project memory. /mem · /mem list · /mem init · /mem import [--force] [slug|all] · /mem path · /mem doctor · /mem tidy [--batch] · /mem restore [--legacy]";
-/** With a jev port the description gains the two new subcommands (J4);
- *  without one it must stay byte-identical (I9 / off golden). */
-const DESCRIPTION_JEV = `${DESCRIPTION} · /mem jev · /mem tags`;
+/** With a jev port the description gains the new subcommands (J4's jev/tags,
+ *  J8's review/expired); without one it must stay byte-identical (I9 / off
+ *  golden). */
+const DESCRIPTION_JEV = `${DESCRIPTION} · /mem jev · /mem tags · /mem review · /mem expired`;
 
 function fmtImport(r: ImportResult): string {
   const s = r.skipped ? `, ${r.skipped} skipped (exists)` : "";
@@ -99,10 +114,13 @@ const MEM_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; descriptio
   import: [{ value: "import --force", description: "覆盖已存在的同名文件" }],
 };
 
-/** jev/tags second-level completion (J4) — appended only with a port. */
+/** jev/tags second-level completion (J4) — appended only with a port;
+ *  review/expired added by J8, same gating. */
 const MEM_JEV_SUBCOMMANDS: ReadonlyArray<{ value: string; description: string }> = [
   { value: "jev", description: "Jev 分类引擎状态 [probe|retag|reset-index]" },
   { value: "tags", description: "场景标签管理 [list|add|rm|disable|enable]" },
+  { value: "review", description: "整理建议逐条确认 [--list|--run]" },
+  { value: "expired", description: "到期条目处理" },
 ];
 const MEM_JEV_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; description: string }>> = {
   jev: [
@@ -118,6 +136,10 @@ const MEM_JEV_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; descri
     { value: "tags disable", description: "停用预置标签" },
     { value: "tags enable", description: "启用预置标签" },
   ],
+  review: [
+    { value: "review --list", description: "只读列出当前建议" },
+    { value: "review --run", description: "立即跑一轮整理并生成建议" },
+  ],
 };
 
 export function createMemCommand(deps: CreateMemCommandDeps): {
@@ -128,6 +150,15 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
   const isChildSession = deps.isChildSession ?? false;
   const getTidyPort = deps.getTidyPort ?? (() => undefined);
   const jev = deps.jev;
+  // J8: a dedicated `EntryIndex` for review/expired's hash→MemEntry lookups
+  // — only ever `.get()`'d on a review/expired/doctor dispatch, and only
+  // constructed at all when jev is wired (I9: zero behavior with no port).
+  const entryIndex = jev === undefined ? undefined : new EntryIndex();
+  const dirFor = (c: string): string | undefined => canonicalMemoryDir(c, deps.paths)?.real;
+  const entriesFor = (c: string): readonly MemEntry[] => {
+    const dir = dirFor(c);
+    return dir === undefined || entryIndex === undefined ? [] : entryIndex.get(dir);
+  };
   // I9: without a port the tables and description stay exactly as before.
   const subcommands = jev === undefined ? MEM_SUBCOMMANDS : [...MEM_SUBCOMMANDS, ...MEM_JEV_SUBCOMMANDS];
   const secondLevel: Record<string, ReadonlyArray<{ value: string; description: string }>> = jev === undefined
@@ -266,6 +297,7 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
               })(),
             ...(deps.paths === undefined ? {} : { paths: deps.paths }),
             ...(deps.renderBlock === undefined ? {} : { renderTieredPort: deps.renderBlock }),
+            ...(jev === undefined ? {} : { jev: jevDoctorPortFrom(jev, entriesFor) }),
           });
           return;
         }
@@ -281,6 +313,7 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
               })(),
             ...(deps.runDoctor === undefined ? {} : { runDoctor: deps.runDoctor }),
             ...(deps.onAfterWrite === undefined ? {} : { onAfterWrite: deps.onAfterWrite }),
+            ...(jev === undefined ? {} : { preserveInlineMeta: true }),
           });
           return;
         }
@@ -290,6 +323,35 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
         }
         if (sub === "tags" && jev !== undefined) {
           await handleMemTags(jev, rest, ctx, cwd);
+          return;
+        }
+        if (sub === "review" && jev !== undefined) {
+          const dir = dirFor(cwd);
+          await handleMemReview(rest.join(" "), toMemCommandUi(ctx), jev, {
+            cwd,
+            dir,
+            entries: entriesFor(cwd),
+            isChildSession,
+            interactive: isInteractive(ctx),
+            registry: jevRegistryOf(ctx),
+            updatedAtOf: updatedAtOfFor(dir),
+            deleteEntry: (entry) => (dir === undefined ? Promise.resolve("stale" as const) : fsDeleteEntry(dir, entry)),
+            setInlineMeta: (entry, patch) =>
+              dir === undefined ? Promise.resolve("stale" as const) : fsSetInlineMeta(dir, entry, patch),
+          });
+          return;
+        }
+        if (sub === "expired" && jev !== undefined) {
+          const dir = dirFor(cwd);
+          await handleMemExpired(rest.join(" "), toMemCommandUi(ctx), {
+            dir,
+            entries: entriesFor(cwd),
+            isChildSession,
+            interactive: isInteractive(ctx),
+            deleteEntry: (entry) => (dir === undefined ? Promise.resolve("stale" as const) : fsDeleteEntry(dir, entry)),
+            setInlineMeta: (entry, patch) =>
+              dir === undefined ? Promise.resolve("stale" as const) : fsSetInlineMeta(dir, entry, patch),
+          });
           return;
         }
         // default: list
@@ -309,6 +371,85 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
  *  read lazily so sessions without one stay untouched (off(pi-api)). */
 function jevRegistryOf(ctx: ExtensionCommandContext): ClassifierRegistryLike | undefined {
   return (ctx as { modelRegistry?: ClassifierRegistryLike }).modelRegistry;
+}
+
+// ────────────────────────────── review/expired plumbing (J8) ──────────────────────────────
+
+/** Composes a `JevDoctorPort` (contracts.ts, jev-plan §4 J8) out of the
+ *  existing `JevCommandPort` (J4) and the local entry lookup — production
+ *  wiring only needs to supply the `JevCommandPort`; this file does the
+ *  rest, so J7's eventual real wiring can pass the very same port through
+ *  unchanged. Never throws: every sub-line is best-effort. */
+function jevDoctorPortFrom(jevPort: JevCommandPort, entriesFor: (cwd: string) => readonly MemEntry[]): JevDoctorPort {
+  return {
+    extraReminder(cwd: string): readonly string[] {
+      const lines: string[] = [];
+      try {
+        const entries = entriesFor(cwd);
+        const today = new Date().toISOString().slice(0, 10);
+        const expired = expiredEntries(entries, today).length;
+        const untilCount = untilEntries(entries).length;
+        if (expired > 0) lines.push(`${String(expired)} entr${expired === 1 ? "y" : "ies"} expired — /mem expired`);
+        if (untilCount > 0) {
+          lines.push(
+            `${String(untilCount)} entr${untilCount === 1 ? "y" : "ies"} with an until condition — /mem expired`,
+          );
+        }
+      } catch {
+        // best effort — never block the startup reminder
+      }
+      try {
+        const open = jevPort.review.list(cwd).filter((s) => !s.stale).length;
+        if (open > 0) lines.push(`jev ${String(open)} suggestion${open === 1 ? "" : "s"} — /mem review`);
+      } catch {
+        // best effort
+      }
+      try {
+        lines.push(jevPort.statusLine(cwd));
+      } catch {
+        // best effort
+      }
+      return lines;
+    },
+  };
+}
+
+/** Adapts `ctx.ui` (`ExtensionCommandContext`, pi-aware) to the pi-free
+ *  `MemCommandUiLike` J8's review/expired handlers take. No-UI sessions get
+ *  no-op `notify`/`confirm`/`select` — the handlers themselves already
+ *  early-return on `deps.dir === undefined`/child-session before ever
+ *  reaching a `ui.*` call in that case, matching every other `/mem`
+ *  subcommand's "silent without a UI" convention. */
+function toMemCommandUi(ctx: ExtensionCommandContext): MemCommandUiLike {
+  const base: MemCommandUiLike = {
+    notify: (text: string) => {
+      if (ctx.hasUI) ctx.ui.notify(text, "info");
+    },
+    confirm: async (title, body, opts) => (ctx.hasUI ? ctx.ui.confirm(title, body, opts) : false),
+    select: async (title, options) => {
+      if (!ctx.hasUI) return undefined;
+      const picked = await ctx.ui.select(
+        title,
+        options.map((o) => o.label),
+      );
+      return options.find((o) => o.label === picked)?.value;
+    },
+  };
+  return ctx.hasUI ? { ...base, setEditorText: (text: string) => ctx.ui.setEditorText(text) } : base;
+}
+
+/** `/mem review`'s default interactive loop and `/mem expired`'s per-entry
+ *  loop both need a real `ui.select` — a non-tui or web-claimed invocation
+ *  (hygiene-flow Q35) degrades to the same text a `--list` would show. */
+function isInteractive(ctx: ExtensionCommandContext): boolean {
+  return ctx.hasUI && ctx.mode === "tui" && !isWebInvocation(ctx);
+}
+
+/** Sidecar `at` for a hash (jev-plan §4 J8's "duplicate" older-side pick) —
+ *  a plain read, no lock; `undefined` dir or untagged hash ⇒ undefined. */
+function updatedAtOfFor(dir: string | undefined): (hash: EntryHash) => string | undefined {
+  if (dir === undefined) return () => undefined;
+  return (hash: EntryHash) => readIndex(dir).index.entries[hash]?.at;
 }
 
 /** `/mem jev [probe | retag [--all] | reset-index]`. Write-ish operations

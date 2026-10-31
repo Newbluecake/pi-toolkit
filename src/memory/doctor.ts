@@ -24,7 +24,9 @@
 import { parseFrontmatter } from "./frontmatter.js";
 import { formatSize } from "./render.js";
 import { findSecrets } from "./secret-patterns.js";
+import { expiredEntries, untilEntries } from "./jev/entries.js";
 import type { DoctorFinding, DoctorId, DoctorSeverity, MemoryMeta, TieredRenderResult } from "./contracts.js";
+import type { MemEntry } from "./jev/contracts.js";
 
 export interface DoctorSnapshotFile {
   name: string;
@@ -42,6 +44,11 @@ export interface DoctorSnapshotFile {
   /** Hard-link count (D14 "nlink > 1"). `undefined` = unknown/unsupported
    *  by the caller's fs layer — see the module doc comment above. */
   nlink?: number;
+  /** jev-plan §4 J8: per-file entry split (jev/entries.ts's `splitEntries`),
+   *  used ONLY when `runDoctor`'s `jev` parameter is present (D17/D18).
+   *  Omitted ⇒ those two rules are skipped for the file — same "optional
+   *  add-on, never guessed" convention as every other field here. */
+  entries?: readonly MemEntry[];
 }
 
 export type DoctorSkippedKind = "symlink" | "dangling" | "not-file" | "bad-name";
@@ -103,6 +110,9 @@ const ID_ORDER: readonly DoctorId[] = [
   "D11",
   "D13",
   "D14",
+  "D17",
+  "D18",
+  "D19",
 ];
 
 // ───────────────────────────── primary-core selection (§2.1) ─────────────────────────────
@@ -191,7 +201,11 @@ function sortFindings(findings: readonly DoctorFinding[]): DoctorFinding[] {
 
 // ───────────────────────────── main entry ─────────────────────────────
 
-export function runDoctor(snapshot: DoctorSnapshot, settings: DoctorSettings): DoctorFinding[] {
+export function runDoctor(
+  snapshot: DoctorSnapshot,
+  settings: DoctorSettings,
+  jev?: { today: string },
+): DoctorFinding[] {
   const findings: DoctorFinding[] = [];
   const files = snapshot.files;
   const primary = selectPrimaryCore(files);
@@ -479,6 +493,61 @@ export function runDoctor(snapshot: DoctorSnapshot, settings: DoctorSettings): D
       severity: "error",
       message: "The memory dir path resolves to something that is not a directory.",
     });
+  }
+
+  // D17–D19 (jev-plan §4 J8, jev-arch §6.3.5/§1.4): only when `jev` is
+  // supplied — absent, this whole block never runs and the report is
+  // byte-identical to before these codes existed (I9).
+  if (jev) {
+    const allEntries = files.flatMap((f) => f.entries ?? []);
+    for (const e of expiredEntries(allEntries, jev.today)) {
+      findings.push({
+        id: "D17",
+        severity: "warn",
+        file: e.file,
+        line: e.lineStart,
+        message: `entry expired on ${e.inline.expires ?? "?"} — delete it, extend it, or clear the expiry with /mem expired.`,
+        fix: "/mem expired",
+      });
+    }
+    for (const e of untilEntries(allEntries)) {
+      findings.push({
+        id: "D17",
+        severity: "info",
+        file: e.file,
+        line: e.lineStart,
+        message: `entry has an until condition (${JSON.stringify(e.inline.until ?? "")}) — confirm it with /mem expired.`,
+      });
+    }
+    for (const f of files) {
+      for (const e of f.entries ?? []) {
+        for (const err of e.inlineErrors) {
+          findings.push({
+            id: "D18",
+            severity: "error",
+            file: e.file,
+            line: e.lineStart,
+            message: `inline authority comment error: ${err}`,
+          });
+        }
+      }
+    }
+    if (primary !== undefined && settings.coreBytes > 0) {
+      const alreadyFlagged = findings.some((f) => (f.id === "D02" || f.id === "D03") && f.file === primary);
+      const primaryFile = files.find((f) => f.name === primary);
+      if (!alreadyFlagged && primaryFile) {
+        const ratio = primaryFile.size / settings.coreBytes;
+        if (ratio >= 0.8) {
+          findings.push({
+            id: "D19",
+            severity: "warn",
+            file: primary,
+            message: `${primary} is at ${String(Math.round(ratio * 100))}% of coreBytes (${formatSize(settings.coreBytes)}) — getting close to the hard budget.`,
+            fix: "Trim it, or split topics out with /mem tidy.",
+          });
+        }
+      }
+    }
   }
 
   return sortFindings(findings);

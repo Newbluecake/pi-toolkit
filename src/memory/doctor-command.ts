@@ -26,6 +26,9 @@ import {
   type DoctorSnapshot,
   type DoctorSnapshotFile,
 } from "./doctor.js";
+import { frontmatterSource } from "./frontmatter.js";
+import { splitEntries } from "./jev/entries.js";
+import type { JevDoctorPort } from "./jev/contracts.js";
 import { parseMemoryMeta } from "./meta.js";
 import { memoryDirFor, type MemoryPaths } from "./paths.js";
 import { canonicalDirState, listRegular, readRegular } from "./safe-fs.js";
@@ -37,6 +40,11 @@ export type RenderTieredPort = (input: TieredRenderInput) => TieredRenderResult;
  * best-effort degradation by the command/reminder callers. */
 const DEFAULT_RENDER_PORT: RenderTieredPort = (input) => renderTiered(input);
 
+/** `YYYY-MM-DD` for `runDoctor`'s `jev.today` (D17’s expiry comparison). */
+function isoDate(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
 export interface DoctorCommandDeps {
   paths?: MemoryPaths;
   /** Production callers thread the activate-time settings snapshot. */
@@ -44,6 +52,9 @@ export interface DoctorCommandDeps {
   renderTieredPort?: RenderTieredPort;
   /** Clock for D08's staleDays comparison. Defaults to `Date.now`. */
   now?: () => number;
+  /** jev-plan §4 J8: presence alone (regardless of what it returns here)
+   *  gates `runDoctor`'s D17–D19 — absent ⇒ byte-identical report (I9). */
+  jev?: JevDoctorPort;
 }
 
 function toDoctorSettings(settings: MemorySettings): DoctorSettings {
@@ -67,6 +78,7 @@ function buildSnapshot(
   settings: MemorySettings,
   renderPort: RenderTieredPort,
   now: () => number,
+  jevToday?: string,
 ): DoctorSnapshot {
   const display = memoryDirFor(cwd, paths);
   const state = canonicalDirState(display);
@@ -83,7 +95,25 @@ function buildSnapshot(
     }
     const fallbackTopic = rf.name.replace(/\.md$/, "");
     const { meta, errors } = parseMemoryMeta(content, fallbackTopic);
-    return { name: rf.name, size: rf.size, meta, metaErrors: errors, content, nlink: rf.nlink };
+    // jev-plan §4 J8: only split entries when D17/D18 are actually going to
+    // run (`jevToday` present) and the file is live (archived files inject
+    // nothing and carry no entries, same convention as EntryIndex).
+    const entries =
+      jevToday !== undefined && meta.status !== "archived"
+        ? splitEntries(rf.name, content, {
+            status: meta.status === "stale" ? "stale" : "active",
+            handWritten: frontmatterSource(content) !== "agent",
+          })
+        : undefined;
+    return {
+      name: rf.name,
+      size: rf.size,
+      meta,
+      metaErrors: errors,
+      content,
+      nlink: rf.nlink,
+      ...(entries === undefined ? {} : { entries }),
+    };
   });
 
   let render: TieredRenderResult | undefined;
@@ -119,9 +149,10 @@ function runDoctorFor(
   settings: MemorySettings,
   renderPort: RenderTieredPort,
   now: () => number,
+  jev?: JevDoctorPort,
 ): DoctorFinding[] {
-  const snapshot = buildSnapshot(cwd, paths, settings, renderPort, now);
-  return runDoctor(snapshot, toDoctorSettings(settings));
+  const snapshot = buildSnapshot(cwd, paths, settings, renderPort, now, jev === undefined ? undefined : isoDate(now()));
+  return runDoctor(snapshot, toDoctorSettings(settings), jev === undefined ? undefined : { today: isoDate(now()) });
 }
 
 /** P5 shared health port for the v2 directory view and tidy integration. */
@@ -131,8 +162,9 @@ export function collectDoctorFindings(
   settings: MemorySettings,
   renderPort: RenderTieredPort = DEFAULT_RENDER_PORT,
   now: () => number = () => Date.now(),
+  jev?: JevDoctorPort,
 ): DoctorFinding[] {
-  return runDoctorFor(cwd, paths, settings, renderPort, now);
+  return runDoctorFor(cwd, paths, settings, renderPort, now, jev);
 }
 
 /**
@@ -152,7 +184,7 @@ export async function handleMemDoctorCommand(
   const settings = deps.settings;
   const now = deps.now ?? (() => Date.now());
   const renderPort = deps.renderTieredPort ?? DEFAULT_RENDER_PORT;
-  const findings = runDoctorFor(cwd, deps.paths, settings, renderPort, now);
+  const findings = runDoctorFor(cwd, deps.paths, settings, renderPort, now, deps.jev);
   const report = formatDoctorReport(findings);
   if (findings.length > 20) {
     await ctx.ui.editor("memory doctor", report);
@@ -194,6 +226,15 @@ export interface CreateStartupReminderDeps {
   settings: MemorySettings;
   renderTieredPort?: RenderTieredPort;
   now?: () => number;
+  /** jev-plan §4 J8: expired count / core usage / open suggestions / jev
+   *  status, appended as extra lines (jev-arch §1.4/§6.3.4/§6.3.5). Also
+   *  gates D17–D19 in the reminder's own `runDoctor` call, same as
+   *  `DoctorCommandDeps.jev`. */
+  jev?: JevDoctorPort;
+  /** jev-plan §4 J8 / Q34: a non-empty `memory.jev.classifiers` that parsed
+   *  to zero valid entries gets one plain-English line here — independent
+   *  of `jev` (jev is off in exactly this case) and of any doctor findings. */
+  settingsWarnings?: readonly string[];
 }
 
 export interface StartupReminder {
@@ -252,14 +293,24 @@ export function createStartupReminder(deps: CreateStartupReminderDeps): StartupR
       const cwd = resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd;
       let findings: DoctorFinding[];
       try {
-        findings = runDoctorFor(cwd, deps.paths, settings, renderPort, now);
+        findings = runDoctorFor(cwd, deps.paths, settings, renderPort, now, deps.jev);
       } catch {
         return; // never throw out of a session_start hook
       }
       const relevant = findings.filter((f) => f.severity === "error" || f.id === "D01");
-      if (relevant.length === 0) return;
+      const extraLines = deps.jev?.extraReminder(cwd) ?? [];
+      const warnLines = deps.settingsWarnings ?? [];
+      // I9: with neither a jev port nor settings warnings, this is the exact
+      // original early-return/fingerprint/notify sequence — byte-identical.
+      if (relevant.length === 0 && extraLines.length === 0 && warnLines.length === 0) return;
 
-      const fingerprint = fingerprintFindings(relevant);
+      const extraFingerprint =
+        extraLines.length === 0 && warnLines.length === 0
+          ? ""
+          : `|${createHash("sha1")
+              .update([...extraLines, ...warnLines].join("\n"))
+              .digest("hex")}`;
+      const fingerprint = fingerprintFindings(relevant) + extraFingerprint;
       const recent = lastNotified();
       if (recent.get(cwd) === fingerprint) return;
 
@@ -267,7 +318,9 @@ export function createStartupReminder(deps: CreateStartupReminderDeps): StartupR
       recent.delete(cwd);
       recent.set(cwd, fingerprint);
       if (recent.size > REMINDER_CAPACITY) recent.delete(recent.keys().next().value!);
-      ctx.ui.notify(startupReminderText(relevant), "warning");
+      const lines = relevant.length > 0 ? [startupReminderText(relevant)] : [];
+      lines.push(...extraLines, ...warnLines);
+      ctx.ui.notify(lines.join("\n"), "warning");
     },
   };
 }

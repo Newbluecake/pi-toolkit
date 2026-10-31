@@ -56,9 +56,13 @@ export interface TidyCommandDeps {
   runDoctor?: typeof runDoctorReal;
   now?: () => Date;
   /** Called once after a successful apply/restore with >=1 entry (§7.3
-   *  step 7's "调用一次 onAfterWrite" — the memory-block re-render hook).
+   *  step 7's “调用一次 onAfterWrite” — the memory-block re-render hook).
    *  Production wiring passes `wireMemory`'s invalidation callback. */
   onAfterWrite?: (cwd: string) => void;
+  /** jev-plan §4 J8: threaded verbatim into `buildTidyPrompt`'s
+   *  `preserveInlineMeta` (both the single-run and batch-run prompts).
+   *  Production wiring passes `jev !== undefined` from `command.ts`. */
+  preserveInlineMeta?: boolean;
 }
 
 function parseTidyArgs(args: string): { dryRun: boolean; frontmatter: boolean; files: string[] } {
@@ -110,7 +114,8 @@ export async function handleMemTidyCommand(
     }
     await handleBatchTidyCommand(args, ctx, {
       ...(port ? { port } : {}),
-      settings,
+      settings:
+        deps.preserveInlineMeta === undefined ? settings : { ...settings, preserveInlineMeta: deps.preserveInlineMeta },
       ...(deps.paths ? { paths: deps.paths } : {}),
       ...(deps.onAfterWrite === undefined ? {} : { onAfterWrite: deps.onAfterWrite }),
     });
@@ -153,6 +158,7 @@ export async function handleMemTidyCommand(
     runDoctorFn: deps.runDoctor ?? runDoctorReal,
     now: deps.now ?? (() => new Date()),
     onAfterWrite: deps.onAfterWrite ?? (() => undefined),
+    ...(deps.preserveInlineMeta === undefined ? {} : { preserveInlineMeta: deps.preserveInlineMeta }),
   });
 }
 
@@ -166,6 +172,7 @@ interface TidyCtx {
   runDoctorFn: typeof runDoctorReal;
   now: () => Date;
   onAfterWrite: (cwd: string) => void;
+  preserveInlineMeta?: boolean;
 }
 
 function coreMdExists(cwd: string, paths: MemoryPaths | undefined): boolean {
@@ -313,6 +320,7 @@ async function handleTidyCommand(args: string, ctx: ExtensionCommandContext, tct
     topicMaxBytes: settings.topicMaxBytes,
     topicWarnBytes: settings.topicWarnBytes,
     oversized,
+    ...(tctx.preserveInlineMeta === undefined ? {} : { preserveInlineMeta: tctx.preserveInlineMeta }),
   });
   const promptBytes = Buffer.byteLength(prompt, "utf8");
 
