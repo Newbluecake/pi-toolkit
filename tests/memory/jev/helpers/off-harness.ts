@@ -251,7 +251,7 @@ export function fakeHub(log: RecordingLog): {
 
 // ───────────────────────────── masking ─────────────────────────────
 
-const TRASH_ID_RE = /\d{8}T\d{6}Z-\d+-[a-z0-9]{4,12}/g;
+const TRASH_ID_RE = /\d{8}T\d{6}(?:\d{3})?Z-\d+-[a-z0-9]{4,12}/g;
 const UPDATED_ISO_RE = /updated: \d{4}-\d{2}-\d{2}T[0-9:.]+Z/g;
 
 /** 掩码：tmp 根 → `${MEMROOT}`；`updated:` ISO → `<DATE>`；trash id → `<TRASHID>`。 */

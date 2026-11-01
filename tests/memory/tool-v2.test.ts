@@ -361,6 +361,17 @@ describe("I5: delete / rename", () => {
     expect(trashFiles.some((f: string) => f.endsWith("-a.md"))).toBe(true);
   });
 
+  test("a tool delete is listed by /mem restore --trash (trash id matches listTrashEntries / TRASH_NAME_RE)", async () => {
+    const fx = fixture();
+    writeFile(fx.memDir, "a.md", "---\nsource: agent\n---\ncontent");
+    const { tool } = makeTool(fx);
+    await exec(tool, { command: "delete", path: "a.md" }, fakeCtx(fx.cwd));
+    const { listTrashEntries } = await import("../../src/memory/tidy/manifest.js");
+    const listed = listTrashEntries(fx.memDir);
+    expect(listed.map((e) => e.name)).toEqual(["a.md"]);
+    expect(listed[0]!.fileName).toMatch(/^\d{8}T\d{9}Z-\d+-[0-9a-f]{6}-a\.md$/);
+  });
+
   test("deleting two files of the same name produces two different trash ids", async () => {
     const fx = fixture();
     writeFile(fx.memDir, "a.md", "---\nsource: agent\n---\nv1");

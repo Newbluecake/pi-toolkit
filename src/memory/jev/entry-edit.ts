@@ -30,7 +30,9 @@
 // No direct `node:fs` import (tests/memory/fs-guard.test.ts): every touch
 // goes through `../safe-fs.js`. Pi-free root; no module-scope state (I4).
 
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
+import { newTidyId } from "../tidy/manifest.js";
 import { frontmatterSource } from "../frontmatter.js";
 import { MemoryError } from "../paths.js";
 import { withMemoryDirLock } from "../lock.js";
@@ -51,12 +53,12 @@ export type EntryEditResult = "ok" | "stale" | "busy";
 const TRASH_DIR_NAME = ".trash";
 const TRASH_KEEP = 20;
 
+/** `.trash` id in the exact shape `safe-fs` TRASH_NAME_RE and
+ *  `tidy/manifest` listTrashEntries accept (ms-precision stamp + 6 hex) —
+ *  the previous local stamp dropped the milliseconds and used base36, so
+ *  `/mem restore --trash` never listed tool/review deletions. */
 function trashId(): string {
-  const iso = new Date()
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\.\d+Z$/, "Z");
-  return `${iso}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  return newTidyId(new Date(), process.pid, randomBytes(3).toString("hex"));
 }
 
 function isLockBusy(err: unknown): boolean {
