@@ -77,6 +77,7 @@ function readHttpResponse(
     let chunked = false;
     let bodyStart = 0;
     let settled = false;
+    const respHeaders: [string, string][] = [];
 
     const abortListener = (): void => {
       finishError(proxyError("aborted"));
@@ -88,7 +89,16 @@ function readHttpResponse(
       settled = true;
       opts.signal?.removeEventListener("abort", abortListener);
       socket.destroy();
-      resolve({ status, text: async () => body.toString("utf8") });
+      // A real WHATWG Response: pi-ai's classifier transport checks `ok`, calls
+      // `json()`/`text()` and reads `headers` (classifier-shared.js). A bare
+      // { status, text } made every 200 look like an error (real-machine
+      // acceptance, 2026-11-01).
+      if (status < 200 || status > 599) {
+        reject(proxyError(`unexpected HTTP status ${String(status)}`));
+        return;
+      }
+      const nullBody = status === 204 || status === 205 || status === 304;
+      resolve(new Response(nullBody ? null : body, { status, headers: respHeaders }));
     };
     const finishError = (err: Error): void => {
       if (settled) return;
@@ -116,6 +126,8 @@ function readHttpResponse(
         const value = line.slice(sep + 1).trim();
         if (key === "content-length") contentLength = Number(value);
         if (key === "transfer-encoding" && /chunked/i.test(value)) chunked = true;
+        // body is handed over already de-framed ⇒ drop the framing headers
+        if (key !== "content-length" && key !== "transfer-encoding") respHeaders.push([key, value]);
       }
       return true;
     };
@@ -199,7 +211,7 @@ export function createProxyFetch(proxy: string, opts: ProxyFetchOptions = {}): F
   if (parsed === undefined) return undefined;
   const timeoutMs = clampSpanMs(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS;
 
-  return async function proxyFetch(input: string, init: FetchInitLike = {}): Promise<FetchResponseLike> {
+  return async function proxyFetch(input: string | URL, init: FetchInitLike = {}): Promise<FetchResponseLike> {
     const target = new URL(input);
     if (target.protocol !== "https:") throw proxyError("target must be https:");
 

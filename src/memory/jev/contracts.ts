@@ -247,7 +247,11 @@ export type JevAnswer =
 
 export interface FetchResponseLike {
   readonly status: number;
+  /** pi-ai's classifier transport rejects any response whose `ok` is falsy. */
+  readonly ok: boolean;
+  readonly headers: { get(name: string): string | null; forEach(cb: (value: string, key: string) => void): void };
   text(): Promise<string>;
+  json(): Promise<unknown>;
 }
 
 export interface FetchInitLike {
@@ -260,7 +264,7 @@ export interface FetchInitLike {
 /** Structural subset of `fetch` — the native fetch satisfies it; J2's
  *  proxy-fetch produces it. */
 export interface FetchLike {
-  (input: string, init?: FetchInitLike): Promise<FetchResponseLike>;
+  (input: string | URL, init?: FetchInitLike): Promise<FetchResponseLike>;
 }
 
 /** JSON-serializable state object sent to the classifier (already redacted

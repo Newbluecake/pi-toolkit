@@ -72,6 +72,26 @@ describe.skipIf(!CAN_TLS)("createProxyFetch — tunnelled requests (local fake p
     expect(JSON.parse(await res.text())).toEqual({ ok: true });
   });
 
+  it("① returns a real Response: pi-ai's classifier transport sequence (ok ⇒ json(), headers) works, URL input accepted", async () => {
+    proxy = await startFakeProxy("tunnel");
+    upstream = await startFakeTlsUpstream({ cert, jsonBody: { answers: { q1: { type: "noul", noul: 0.9 } } } });
+    const fetchFn = createProxyFetch(`http://127.0.0.1:${proxy.port}`, { ca: cert.certPem, timeoutMs: 2000 })!;
+    // pi-ai passes a URL object (transport.url(model)) and checks `ok` before json() — a bare
+    // { status, text } made every 200 an "API error (200)" in real-machine acceptance.
+    const res = await fetchFn(new URL(`https://127.0.0.1:${upstream.port}/systemone`), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(res).toBeInstanceOf(Response);
+    expect(res.ok).toBe(true);
+    expect(await res.json()).toEqual({ answers: { q1: { type: "noul", noul: 0.9 } } });
+    let headerCount = 0;
+    res.headers.forEach(() => (headerCount += 1));
+    expect(res.headers.get("content-length")).toBeNull(); // body is de-framed ⇒ framing headers dropped
+    expect(headerCount).toBeGreaterThanOrEqual(0);
+  });
+
   it("② chunked response body is reassembled", async () => {
     proxy = await startFakeProxy("tunnel");
     upstream = await startFakeTlsUpstream({
@@ -82,7 +102,9 @@ describe.skipIf(!CAN_TLS)("createProxyFetch — tunnelled requests (local fake p
     const fetchFn = createProxyFetch(`http://127.0.0.1:${proxy.port}`, { ca: cert.certPem, timeoutMs: 2000 })!;
     const res = await fetchFn(`https://127.0.0.1:${upstream.port}/x`, { method: "GET" });
     expect(res.status).toBe(200);
-    expect(JSON.parse(await res.text())).toMatchObject({ chunked: "yes" });
+    expect(res.ok).toBe(true);
+    expect(res.headers.get("transfer-encoding")).toBeNull();
+    expect(await res.json()).toMatchObject({ chunked: "yes" });
   });
 
   it("③ an unreachable proxy port fails as `proxy error:` (classified transient)", async () => {
@@ -116,6 +138,7 @@ describe.skipIf(!CAN_TLS)("createProxyFetch — tunnelled requests (local fake p
     const fetchFn = createProxyFetch(`http://127.0.0.1:${proxy.port}`, { ca: cert.certPem, timeoutMs: 2000 })!;
     const res = await fetchFn(`https://127.0.0.1:${upstream.port}/x`);
     expect(res.status).toBe(402);
+    expect(res.ok).toBe(false);
   });
 
   it("⑧ signal.abort() during transfer destroys the socket with no hang", async () => {
