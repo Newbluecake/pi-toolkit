@@ -16,8 +16,10 @@
  *    注意投影形状：LLM 上下文里 custom 消息以 `role:"user"` 出现（convertToLlm）。
  *  - C-J6：streaming 中 `sendMessage(triggerTurn:true)` 走 agent.steer 队列，同样在
  *    本 run 内下一次请求可见（与 triggerTurn:false 的差别只在排队通道，不在可见时机）；
- *    空闲 + triggerTurn:false 才是纯 append（message_start/message_end）路径。arch
- *    表述「streaming → message_start」不准：steer 分支不发 message_start。
+ *    空闲 + triggerTurn:false 才是纯 append（message_start/message_end）路径。J7 实测
+ *    更正（jev-arch.md §19 row 21）： steer 分支 pi-agent-core 排空
+ *    getSteeringMessages 后也会 emit message_start，现有 message_start 钩子已覆盖
+ *    这条 E 层路径，不需要另开轮询 bashJobs 端口。
  */
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";

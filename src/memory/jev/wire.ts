@@ -27,7 +27,12 @@
 //   C-J6  idle + triggerTurn bash-job notices start a run whose
 //         before_agent_start has messageType "custom" (E wake turn); idle +
 //         no trigger is a plain append (message_start). The streaming steer
-//         path exposes no hook — E does not see those (reported residual).
+//         path (sendMessage while a run is in flight) ALSO emits
+//         message_start for that notice once pi-agent-core drains
+//         getSteeringMessages — J7 confirmed this against a real
+//         AgentSession, so the existing message_start handler already
+//         covers E there too (jev-arch.md §19 row 21; no separate hook
+//         needed).
 //   C-J9  `/skill:<name>` expands to a `<skill …>…</skill>` block in
 //         event.prompt — stripped from both user and previous user messages.
 //   C-J10 compaction entries + turn_end checkpoints (child switch_context).

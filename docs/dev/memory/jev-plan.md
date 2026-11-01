@@ -4,6 +4,7 @@
 > 输入：架构定稿 `jev-arch.md` v2（下称「架构稿」，坐标写 `arch §x`）、需求与拍板 `hygiene-flow.md`（Q1–Q35，第七至九轮优先；**Q33**：partial 下证据档生效；**Q34**：`classifiers` 为空列表 = off，非空但全部非法要提示；**Q35**：web 端改状态的 `/mem` 子命令需确认）、现状 `jev-current-state.md`、评审 `jev-arch-review-r1.md` / `-r2.md`、`AGENTS.md`、`docs/dev/memory/README.md`、`skills/dev-flow/`。
 > 本方案只细化 arch §15 的 J0–J9，不改任何架构决策；实施层面落不了地或需要架构稿补字的地方集中在 §10「需回架构稿处理」（9 条，已由架构师在架构稿 v2.1 勘误）。
 > 读者：主会话（调度）、各包 dev、verifier。每包一节，verifier 按「验收标准」出矩阵。
+> **实施状态**（J9，2026-11-01）：J0–J9 全部合入 dev（HEAD `e59b272d`），全量测试绿。
 
 ## 0. 结论速览
 
@@ -471,6 +472,7 @@ git diff --stat origin/dev -- tests/fixtures/   # 必须为空
    - `tagging.ts`：`tagOne({ client, registry, entry, taxonomy, compare, mode }): Promise<{ tags?: EntryTags; outcome: JevOutcome }>`；`tagBulk({ client, registry, entries, taxonomy, onlyTag?, signal }): Promise<BulkResult>`（标签为主每标签一次 + 条目为主只问 5 个 `m_*`，后台并发 4，partial 时停、余下保持 pending）。
    - `review.ts`：`buildPairs(entries, index, dismissed, cap = 600)`；`staleCandidates(entries, index)`；`runReviewPass({ client, registry, entries, index, today }): Promise<ReviewState | JevOutcome>`；`suggestionsFrom(answers, pairs)`；`isDismissed(pair, dismissed)`（hashKey 或 anchorKey 任一相同）；`anchorOf(entry)`；`markStale(suggestions, liveHashes)`。
    - `command-port.ts`：`createJevCommandPort(deps: { client: JevClient; entryIndex: EntryIndex; dirFor: (cwd) => string | undefined; now; isChildSession; triggerBulk: (cwd) => void; platform: NodeJS.Platform }): JevCommandPort`。
+   - **实施时契约补充**（root 批准，均可选、向后兼容，J9 已回写架构稿 §19 #13）：`tagBulk` 增 `onEntryTags?: (tags: EntryTags) => void` / `base?`；`runReviewPass` 增 `project?` / `signal?`（返回型收窄为 `ReviewPassResult = ReviewState | Extract<JevOutcome, { ok: false }>`）；`createJevCommandPort` 的 deps 增 `config?` / `usage?` / `segment?` / `health?`。
    - `command.ts` 分支语法：`/mem jev [probe | retag [--all] | reset-index]`、`/mem tags [list | add <id> --label … --desc "…" [--risk high] [--commands a,b] [--paths a,b] [--tools a,b] | rm <id> | disable <id> | enable <id>]`；`add/rm/disable/enable/retag/reset-index` 仅主会话且 `ctx.hasUI`。
 5. **验收标准**：
    - [ ] 坏 JSON ⇒ 空索引 + `rebuilt`，`/mem jev` 显示 `index rebuilt`；锁忙 ⇒ `busy`、不抛；同一 hash 合并不丢其它条目；GC 先清不在语料里的 hash。

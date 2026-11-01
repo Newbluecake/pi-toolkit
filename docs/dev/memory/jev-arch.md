@@ -6,6 +6,7 @@
 > 事实底图：`jev-current-state.md` 的 §1–9（代码现状）与 §10（Jev 实测）。
 > 引用约定：对现有代码的断言标 `文件:行号`；对 pi 行为的断言标文档或 d.ts 位置；未经实测的标「需 P0 验证」，由 J0 的 conformance 测试钉住。
 > 读者：§1–§15 写给下游的方案和开发，§16 写给不读代码的用户。
+> **实施状态**（J9，2026-11-01）：J0–J9 全部合入 dev（HEAD `e59b272d`），全量测试绿；§19 追加 12 条 v2.1 补充勘误，来源为各包交付报告与 E0 基线。
 
 ## 0. 结论速览
 
@@ -515,7 +516,8 @@ export interface JevClient {
 - **分批**：
   - 每个问题估算 `est(q) = ceil(utf8(instructions + criteria) / 3) + 40` 个 token，再加上 `est(state)`；每批不超过 12,000 token。
   - 各批并行发出，总延迟约等于最慢的那一批。
-- **上下文超限**：错误文本里出现 `context`、`too many tokens`、`maximum context` 时（实际措辞需 P0 验证），归为 `context` 类。这类错误不隔离模型，而是把这一批对半拆开，重试一次。
+  - **例外**（J4，`TAG_MAJOR_BATCH_TOKENS = 20_000`，root 已批，§19 行 14）：标签为主的批量打标题（约 150 条 × 22 标签，每标签一次，约 172 次调用）放宽到每批 ≤20,000 token——opencode 上下文约 32k，这个口径偏保守估算、留有余量；真超限时仍按下面「上下文超限」对半拆批兜底。其余题型（条目为主、召回、门禁、整理）仍是 ≤12,000 token。
+- **上下文超限**：实测（E0 C-J8，§19 行 16）两个 opencode 分类器一致返回 `System One API error (400): {"detail":{"error_type":"max_tokens_exceeded"}}`；`health.ts` 的 `CONTEXT_RE` 已据此补上关键词 `max_tokens_exceeded`（连同原有的 `context`、`too many tokens`、`maximum context`），命中归为 `context` 类。超限主要由 state 体积（约 340KB 触发）而非问题数量驱动。这类错误不隔离模型，而是把这一批对半拆开，重试一次。
 - **漏答**：返回的 `answers` 里缺了某个问题 id，记进 `missing`，调用方按「无信号」处理。
 
 ### 5.2 故障转移与错误分级（照搬 v4.1 §2.4.1；变化写在末尾）
@@ -526,7 +528,7 @@ export interface JevClient {
 - **候选与超时**：
   - 可用集 = 列表 ∩ `getAvailableOfType("classifier")` − 已被隔离的模型；
   - `getAvailableOfType` 的结果缓存 10 分钟，`probe()` 和 `/reload` 会强制刷新；
-  - 每一档的超时为 `min(剩余总预算, max(1000, ⌈budget/2⌉))`，任一档失败立即转下一档。
+  - 每一档的超时为 `min(剩余总预算, max(1000, ⌈budget/2⌉))`，命中则转下一档。**这一档超时算该档的一次瞬态失败**（计入它的熔断），不是 `aborted`，也不终止整次 ask；只有调用方自己的 `signal` 被 abort 才返回 `aborted`（§19 行 17，`510a0678`）。
 - **从错误文本中取状态码**：
   - 用字面量定位 `errorMessage` 里的 `API error (`，取其后的三位数字；
   - 取不到时，按关键词 `FreeTierError`、`Insufficient`、`unavailable`、`rate limit` 兜底归类；
@@ -703,11 +705,11 @@ unavailable / transient ──到达 until──► unknown（下一次真实调
 
 #### 6.1.4 失败结果召回（层 `E`，需要 Jev）
 
-- **钩子**：`tool_result` 只观察，**永远返回 `undefined`**；外加 `bash-job:notification`，处理时机照搬 v4.1 §2.7.2。
+- **钩子**：`tool_result` 只观察，**永远返回 `undefined`**；外加 `bash-job:notification`，处理时机照搬 v4.1 §2.7.2。**实测补充**（§19 行 21，J7 实测）：流式中经 steer 送进来的 bash-job 通知会触发 `message_start`（带 customType，位于 toolResult 之后、同一 run 内），现有的 `message_start` 钩子已覆盖这条 E 层路径，不需要另开轮询 bashJobs 端口（且该端口按冻结契约也没有 exitCode 和输出可用）。
 - **失败判定**：`isError` 为真，或者退出码 ≠ 0。退出码来源依次为：`structuredContent.exit_code`、输出尾部向上找到的第一个 `Command exited with code ` 前缀行、通知里的 `details.exitCode`。
 - **限流**：同一个错误签名本段只问一次；每段最多问 10 次。
 - **候选**：
-  - 范围：`type ∈ {pitfall, procedure}`，或者带有与本次调用相同的命中标签；
+  - 范围：`type ∈ {pitfall, procedure}`，或者带有与本次调用相同的命中标签；**还包含尚未打标的 pending 条目**（§19 行 20，评审 r2 裁定）——否则尚未打标的语料永远不会有 E 层召回；
   - 排除：本段已注入、private、secret；
   - 超过 150 条时，用错误文本做词面预筛。
 - **问题**：`state = {tool, command ≤500, exit_code, error_excerpt ≤1500}`，每个候选一个 bool，问「这一条能否解释 state 中的失败，或说明如何修复、规避」。
@@ -817,7 +819,7 @@ unavailable / transient ──到达 until──► unknown（下一次真实调
 - **标签部分**：每个标签发一次调用。`state = {tag:"<id>: <description>"}`，每个条目一个 bool 问题，按 token 分批。现有语料共 22 次调用。
 - **条目部分**：每个条目发一次调用，只含 5 个 `m_*` 问题，后台并发 4，共 150 次。
 - **合计**（Q28，评审 #4）：172 次调用，约 $0.02，40–60 秒。
-- **新增或修改单个标签**时，只跑这一个标签的标签部分。
+- **新增或修改单个标签**时，只跑这一个标签的标签部分。**例外**（§19 行 20）：`tagBulk` 的 `"all"` 范围（由 `/mem tags add`/`/mem tags enable` 触发）每次都会重问全部标签，约 22 次调用：端口不传标签 id，没法只补问单个标签。
 
 #### 6.2.4 回显
 
@@ -842,6 +844,9 @@ similar: core.md L5 (complementary 0.72)
 - 写后回显锚点。
 - 用户令守卫：两阶段确认，按 `guardHash` 配对（照搬 v4.1 §3.2）。
 - 如果本次写入新引入了行内注释错误，拒绝写入。
+- **守卫域与打标触发域不是同一个集合**（§19 行 22）：
+  - 用户令守卫（本节上述两阶段确认）覆盖 `str_replace`/`insert`/`write`/`append`/`create` 覆写 **另加 `delete`**（`tool-v2.ts` 的 `prepareJevDeleteGuard`：`after = ""` 使该文件全部用户令条目计为 touched，手写文件跳过弹框因为 provenance 拒写已先挡下）；判定条件除「触及用户令」外，还包「手写 → 非手写的 provenance 翻转」与「未归档 → `status: archived` 归档」两条；`rename` 不守卫（不改内容，hygiene-plan §3.2）。
+  - 打标触发域（J5 `JevWritePort`）只是本节开头列的五个写操作（`str_replace`/`insert`/`write`/`append`/`create` 成功提交后），不包 `delete`/`rename`。
 
 ### 6.3 ③ 整理（运行需要 Jev；查看并执行已有建议是零调用）
 
@@ -938,7 +943,7 @@ similar: core.md L5 (complementary 0.72)
 
   通用程序 `git`、`npm`、`npx`、`node`、`bash`、`sh`、`zsh`、`pi`、`gh`、`ls`、`cd`、`cat`、`echo`、`timeout` 被剔除，所以 `release.sh` 会被提取，`git` 不会。
 
-- **`running`**（Q30）：只收录程序身份属于候选条目点名程序的进程。程序身份的取法照搬 v4.1 §2.7.3：取 argv0 的 basename；如果 argv0 是解释器，取它执行的脚本名。数据来源两个：
+- **`running`**（Q30）：只收录程序身份属于候选条目点名程序的进程。程序身份的取法照搬 v4.1 §2.7.3：取 argv0 的 basename；如果 argv0 是解释器，取它执行的脚本名。**解释器短旗标识别**（`jev/shell-parse.ts`，§19 行 23，`31e845ce`）：含 `c` 的短旗标集群（`-lc`/`-ic`/`-xec` 等）视为 `-c`，命令字符串取选项后的第一个操作数（`-o` 消耗自己的参数）；程序身份同样按这个操作数规则取，所以 `bash -o pipefail x.sh` 的身份是 `x.sh`，脚本操作数之后的 `-c` 仍算脚本参数。数据来源两个：
   - 主会话的 BashJobManager 中运行中的任务（晚绑定端口）；
   - **仅 Linux**：扫描 `/proc`。只看当前 uid 的进程，最多 4096 个 pid，结果缓存 2 秒；扫描永不抛错；收到 `bash-job:notification` 时清缓存。
 
@@ -980,7 +985,7 @@ similar: core.md L5 (complementary 0.72)
 
 #### 6.4.4 Jev 判定档（状态为 `full` 或 `probing`）
 
-记 `a = P(applies)`，`v = P(violates_now)`，阈值为 `memory.jev.gate.threshold`（默认 0.6）。按下表自上而下取第一条成立的：
+记 `a = P(applies)`，`v = P(violates_now)`，阈值为 `memory.jev.gate.threshold`（默认 0.6）。**E0 阶段二实测结论**（§19 行 18，jev-1.13 最终动作判对 34/38、零漏拦）：阈值维持 0.6（降到 0.5 只能救回 1 例，会增加误拦）；已知误拦形态——发版进行中 `echo`/`grep` 打印含 `git commit`/`git tag` 字样的文本——在生产路径上会被 §6.4.1 的 shell-parse + 标签粗筛挡下（程序身份是 `echo`/`grep`，不是 `git`，根本不会问 Jev，见 §16.4 例 7），评测集里的误拦只是构造文本直接交给 Jev 的人工构造案例。按下表自上而下取第一条成立的：
 
 | 条件                        | 判定                                                               |
 | --------------------------- | ------------------------------------------------------------------ |
@@ -1141,7 +1146,7 @@ similar: core.md L5 (complementary 0.72)
   - tidy prompt。
 
   之后分别以 `jev.enabled=false`、legacy（jev=true）、模拟 secure（jev=true）三种配置重放，结果必须逐字节相等。
-  v2.1 增补：重放配置扩为五种——再加 `classifiers=[]`（必须与 disabled 逐字节相等），以及「设置开 + 无 modelRegistry」（`off(pi-api)`，除 `registrations` 外逐字段等于 disabled，`registrations` 差集恰为 jev 集合；§5.3）。
+  v2.1 增补：重放配置扩为五种——再加 `classifiers=[]`（必须与 disabled 逐字节相等），以及「设置开 + 无 modelRegistry」（`off(pi-api)`，除 `registrations` 外逐字段等于 disabled，`registrations` 差集恰为 jev 集合；§5.3）。**`PI_API_ALLOWED_DIFF` 登记完整性**（§19 行 15）：`/mem` 描述追加 ` · /mem jev · /mem tags`（J4 commandPort 接线后）已登记；J8 接线 review/expired 后追加 ` · /mem review · /mem expired`与两个补全项 `completion:review`/`completion:expired`，同样登记在该清单（`tests/memory/jev/off-golden.test.ts`）。
 
 - **on，状态为 `partial` 或 `inactive`**：这种状态不在 byte-identical 的承诺之内，因为零调用部分仍会工作（Q26）。行为边界由单测钉住：
   1. **覆盖率为 0、没有任何行内 `gate*`/`tags=`**（`inactive`）：零 `sendMessage`，零 block；除了 `/mem` 多出的一行状态、工具描述变体和新注册的钩子以外，功能上与今天一致。
@@ -1216,7 +1221,7 @@ review   last 2026-10-28 · 2 open → /mem review
   - C-J1：before_agent_start 的等待与 message 落点；
   - C-J2：tool_call 的 block 与抛错后果；
   - C-J3：并行调用的派发顺序；
-  - C-J4：sendMessage 的落点；
+  - C-J4：sendMessage 的落点（**J0 实测结论**，§19 行 19：`sendMessage(triggerTurn:false)` 在本 turn 的 turn_end 即 flush，工具结果之后、本 run 内下一次 LLM 调用可见、不起额外一轮；§6.1.3 原假设成立；LLM 侧投影 `role:"user"`，会话树为 `custom_message`）；
   - C-J5：tool_result 的字段；
   - C-J6：bash-job 通知；
   - C-J7：classify 在各类 ctx 中的可用性、`fetch` 透传、abort；
@@ -1541,17 +1546,29 @@ Jev 是一种「分类器」模型：它不会写字，只会做选择题、打�
 
 只修正表述与实施之间的落差，不改设计意图。来源：`jev-plan.md` §10（下表记作「方案 §10 #n」）、`jev-plan-review-r1.md`（「评审 #n」）、`hygiene-flow.md` 第九轮拍板。
 
-| #   | 来源                            | 勘误                                                                                                                                                                                                                                                                                   | 落点                                         |
-| --- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| 1   | 方案 §10 #1                     | 金样本表补 `tests/config/__corpus__/settings-corpus.json`（新增键须重 pin，先例 `4758bae5`）                                                                                                                                                                                           | §4.5                                         |
-| 2   | 方案 §10 #2、评审 #5            | `off(pi-api)` 改为「注册但钩子空转」，写明它不在 I9 settings-off 字面承诺内；设置期四条 off 路径仍零注册；off-harness 增加第 5 个重放配置作证明                                                                                                                                        | §0、§5.3、§9.2                               |
-| 3   | 方案 §10 #3、评审 #3            | 模块清单补 7 个 pi-free 文件（config/tagging/command-port/write-port/review-command/expired-command/entry-edit）；`expiredEntries` 归 J1；文件域补 `command-policy.ts`（J4→J8）、J7 改 `src/memory/index.ts`、`tidy/command.ts` 与 `tidy/batch-command.ts` 归 J8；依赖图与方案批次对齐 | §3.1、§15                                    |
-| 4   | 方案 §10 #4                     | C-J1–C-J15 进 AGENTS.md peer bump 清单，由 J9 负责                                                                                                                                                                                                                                     | §13、§15                                     |
-| 5   | 方案 §10 #5、评审 #1            | 召回 0.7、门禁 0.6 标注「J0 基线评测后可能调整，调整需回本稿并问用户」                                                                                                                                                                                                                 | §9.1                                         |
-| 6   | 方案 §10 #6                     | `memory.jev.confirmTimeoutS` 登记 `TIME_SETTING_MS_PATHS`（J3）                                                                                                                                                                                                                        | §9.1                                         |
-| 7   | 方案 §10 #7、Q33                | N1 改为已拍板（适用）                                                                                                                                                                                                                                                                  | §0、§6.4.5、§14.2                            |
-| 8   | 方案 §10 #8、评审 #6、Q34       | `classifiers` 为空列表 = off（零调用部分也不生效）；非空但全部非法时同样 off 并给 warn；§3.3 确定性部件改为「只受总开关与接线判定控制」；empty-list 留在 off 行                                                                                                                        | §3.3、§5.3、§6.2.5、§9.1、§9.2、§14.3、§16.2 |
-| 9   | 评审 #2、Q35                    | web 端：改动状态的子命令改为需要确认，只有纯终端交互、无文本回退的才拒绝；`tags` 裸形式允许                                                                                                                                                                                            | §6.3.4、§9.4、§14.3、§16.2                   |
-| 补  | 实施方案复审 r2 B1/B2（主会话） | §6.3.4、§9.4：web 端 `review`/`expired` 改为确认后降级为只读清单，本期无 deny 行；§5.3：pi-api 证明改为逐字段比对 + `PI_API_ALLOWED_DIFF`，消除同段矛盾                                                                                                                                |
-| E1  | E0 评测基线、Q36（主会话）      | §6.1.1 召回题措辞改为「现在提醒这条是否有助于正确处理请求或避免已知错误」；召回阈值 0.7 → 0.6（§6.1.1、§9.1）                                                                                                                                                                          |
-| Q37 | hygiene-flow 第十一轮（主会话） | 召回同步等待改为整数秒键 `memory.jev.recall.waitS`（0–3 秒，默认 2，0 = 纯异步）；内部仍 `recall.waitMs`（默认 2000）经 `TIME_SETTING_MS_PATHS` 换算（J3 登记先例）                                                                                                                    | §9.1                                         |
+| #   | 来源                            | 勘误                                                                                                                                                                                                                                                                                              | 落点                                         |
+| --- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| 1   | 方案 §10 #1                     | 金样本表补 `tests/config/__corpus__/settings-corpus.json`（新增键须重 pin，先例 `4758bae5`）                                                                                                                                                                                                      | §4.5                                         |
+| 2   | 方案 §10 #2、评审 #5            | `off(pi-api)` 改为「注册但钩子空转」，写明它不在 I9 settings-off 字面承诺内；设置期四条 off 路径仍零注册；off-harness 增加第 5 个重放配置作证明                                                                                                                                                   | §0、§5.3、§9.2                               |
+| 3   | 方案 §10 #3、评审 #3            | 模块清单补 7 个 pi-free 文件（config/tagging/command-port/write-port/review-command/expired-command/entry-edit）；`expiredEntries` 归 J1；文件域补 `command-policy.ts`（J4→J8）、J7 改 `src/memory/index.ts`、`tidy/command.ts` 与 `tidy/batch-command.ts` 归 J8；依赖图与方案批次对齐            | §3.1、§15                                    |
+| 4   | 方案 §10 #4                     | C-J1–C-J15 进 AGENTS.md peer bump 清单，由 J9 负责                                                                                                                                                                                                                                                | §13、§15                                     |
+| 5   | 方案 §10 #5、评审 #1            | 召回 0.7、门禁 0.6 标注「J0 基线评测后可能调整，调整需回本稿并问用户」                                                                                                                                                                                                                            | §9.1                                         |
+| 6   | 方案 §10 #6                     | `memory.jev.confirmTimeoutS` 登记 `TIME_SETTING_MS_PATHS`（J3）                                                                                                                                                                                                                                   | §9.1                                         |
+| 7   | 方案 §10 #7、Q33                | N1 改为已拍板（适用）                                                                                                                                                                                                                                                                             | §0、§6.4.5、§14.2                            |
+| 8   | 方案 §10 #8、评审 #6、Q34       | `classifiers` 为空列表 = off（零调用部分也不生效）；非空但全部非法时同样 off 并给 warn；§3.3 确定性部件改为「只受总开关与接线判定控制」；empty-list 留在 off 行                                                                                                                                   | §3.3、§5.3、§6.2.5、§9.1、§9.2、§14.3、§16.2 |
+| 9   | 评审 #2、Q35                    | web 端：改动状态的子命令改为需要确认，只有纯终端交互、无文本回退的才拒绝；`tags` 裸形式允许                                                                                                                                                                                                       | §6.3.4、§9.4、§14.3、§16.2                   |
+| 补  | 实施方案复审 r2 B1/B2（主会话） | §6.3.4、§9.4：web 端 `review`/`expired` 改为确认后降级为只读清单，本期无 deny 行；§5.3：pi-api 证明改为逐字段比对 + `PI_API_ALLOWED_DIFF`，消除同段矛盾                                                                                                                                           |
+| E1  | E0 评测基线、Q36（主会话）      | §6.1.1 召回题措辞改为「现在提醒这条是否有助于正确处理请求或避免已知错误」；召回阈值 0.7 → 0.6（§6.1.1、§9.1）                                                                                                                                                                                     |
+| Q37 | hygiene-flow 第十一轮（主会话） | 召回同步等待改为整数秒键 `memory.jev.recall.waitS`（0–3 秒，默认 2，0 = 纯异步）；内部仍 `recall.waitMs`（默认 2000）经 `TIME_SETTING_MS_PATHS` 换算（J3 登记先例）                                                                                                                               | §9.1                                         |
+| 13  | J4 报告（root 批准）            | 契约补充（均可选、向后兼容，定义在 `jev-plan.md` §4 J4）：`tagBulk` 增 `onEntryTags?`/`base?`；`runReviewPass` 增 `project?`/`signal?`（返回型收窄为 `ReviewPassResult = ReviewState \| Extract<JevOutcome,{ok:false}>`）；`createJevCommandPort` deps 增 `config?`/`usage?`/`segment?`/`health?` | jev-plan §4 J4                               |
+| 14  | J4 报告（root 批准）            | `TAG_MAJOR_BATCH_TOKENS = 20_000`：§5.2「每批 ≤12,000 token」的例外，仅用于标签为主的批量题，保障约 150 条 + 22 标签 = 172 次（opencode 上下文 32k，估算偏保守，超限有拆半兜底）                                                                                                                  | §5.2                                         |
+| 15  | J0 报告、evaluated              | `/mem` 描述在有 jev 端口时追加 ` · /mem jev · /mem tags`；补全追加 review/expired；off-golden `PI_API_ALLOWED_DIFF` 已登记全部四项                                                                                                                                                                | §5.3、§9.2                                   |
+| 16  | eval/jev-baseline.md C-J8       | §5.2 上下文超限关键词补 `max_tokens_exceeded`（E0 实测：HTTP 400 `{"detail":{"error_type":"max_tokens_exceeded"}}`），去掉「实际措辞需 P0 验证」                                                                                                                                                  | §5.2                                         |
+| 17  | J2 报告、`510a0678`             | 单档超时 = 该模型瞬态失败 ⇒ 换下一档；只有调用方 abort 才是 `aborted`                                                                                                                                                                                                                             | §5.2                                         |
+| 18  | eval/jev-baseline.md 阶段二     | 门禁阈值 0.6 维持（jev-1.13 动作 34/38、零漏拦）；已知误拦形态（发版中 echo/grep 文本含 git commit）在生产路径被 shell-parse + 标签粗筛挡住，不询问 Jev                                                                                                                                           | §6.4.4                                       |
+| 19  | J0 报告                         | C-J4 结论：`sendMessage(triggerTurn:false)` 在 turn_end flush，本 run 下一次 LLM 调用可见（§6.1.3 原假设成立）                                                                                                                                                                                    | §10                                          |
+| 20  | J6 报告                         | E 层把 pending（未打标）条目也当候选；`/mem tags add\|enable` 触发的批量打标重问全部标签（约 22 次）                                                                                                                                                                                              | §6.1.4、§6.2.3                               |
+| 21  | J6/J7 报告                      | J6 报告的前提不成立：流式中经 steer 送进来的 bash-job 通知会触发 `message_start`，现有钩子已覆盖，无需轮询 bashJobs 端口                                                                                                                                                                          | §6.1.4                                       |
+| 22  | J5 报告                         | 用户令守卫域 = str_replace/insert/write/append/create 覆写/**delete**，另加「手写→非手写 provenance 翻转」与「未归档→归档」两条判定；rename 不守卫；与打标触发域（五个写操作）区分开                                                                                                              | §6.2.5                                       |
+| 23  | J1 报告、`31e845ce`             | shell-parse 把含 `c` 的解释器短旗标集群（`-lc`/`-ic`/`-xec`）视为 `-c`                                                                                                                                                                                                                            | §6.4.2                                       |
+| 24  | J9 自检                         | 以上 1–23 均已核对代码/报告一致；未发现与实施冲突的额外条目                                                                                                                                                                                                                                       | §19                                          |

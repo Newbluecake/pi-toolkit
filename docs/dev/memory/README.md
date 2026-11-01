@@ -1,9 +1,33 @@
 # 项目记忆 · 开发者要点
 
-> 何时读：改动 `src/memory/**`、`memory.*` 设置键、`/mem` 命令、tidy/restore 事务之前。
+> 何时读：改动 `src/memory/**`、`memory.*` 设置键、`/mem` 命令、tidy/restore 事务之前；涉及 `src/memory/jev/**`、`memory.jev.*` 时另读下方「Jev」一节。
 > 来源：AGENTS.md@fcbf71dc 的对应条目，原文搬运，未改写（仅路径按目录移动更新）。新的实现细节直接写在这里，不要再写回 AGENTS.md。
-> 相关：`memory-plan.md`、`tidy-batch-plan.md`
+> 相关：`memory-plan.md`、`tidy-batch-plan.md`、`jev-arch.md`（v2.1）、`jev-plan.md`（v2）。
 
 ## src/memory/
 
 `src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`, with default `layout:tiered` injection and `toolSurface:v2` official-field tool surface; explicit `legacy` settings remain the byte-compatible opt-out. The tiered renderer enforces whole-file/whole-section admission and a UTF-8 byte budget; topic index lines carry `description`/`read_when` metadata, while `/mem doctor` reports D01-D14 health and its summary is surfaced by `/mem` and `memory.view`. Slug directories are canonicalized once and may be user-trusted symlinks; file-level symlinks and non-regular files are rejected. All v2 writes, imports, tidy, and restore operations serialize under the directory lock; batch tidy calls the post-write invalidation once. Registers a `pi_project_memory` section into the shared prompt-section hub (`src/sysprompt/hub.ts`, pre-guard, created before `wireMemory` runs so fold order stays memory → agent types → models) instead of owning its own `before_agent_start` hook (sysprompt-stable M3); the hub decides snapshot vs. tail update, `src/memory/inject.ts`'s `memorySection` provider only renders the current live block (pin frontmatter, agent-source fence, tail sentinel, fingerprint-keyed render cache). The `memory` tool lists/writes/appends (child sessions read-only by default, writes carry `source: agent` provenance); `/mem` covers list/path/init/import/doctor/tidy/restore (`init` creates an agent-source `core.md` skeleton stamped `source: agent` — deleting that line locks it as user-authored — and refuses an existing, archived or pin-stand-in primary). Tidy and restore are journaled transactions (`src/memory/tidy/{txn,manifest,journal}.ts`, design `docs/dev/memory/tidy-batch-plan.md` v3.2): the run event records the full planned op list before any intent, every MOVE/CREATE/REPLACE is CAS- and owner-epoch-checked and its result carries a mandatory final observation, an interrupted run stays resumable and is recovered before new work, and manifests are strict v2 (v1 backups restore only with `--legacy`, also through the txn layer). Hard-link-less filesystems refuse txn tidy (fail closed). Directory locks follow M-T4: a lock whose holder cannot be proven dead (old-format, cross-host) is never broken by age — writers get an actionable busy error and only the TUI-only `/mem tidy --break-lock` (epoch bump BEFORE lockBreak) clears it. `/mem tidy --batch` (P3a, `batch-command.ts`) archives stale entries into `archive/` (+ `ARCHIVE.md`, index pruning) and rewrites the rest in model batches sized by the dispatch-time `SpawnRequest.inputBudget` measurement (re-splitting on `input-budget` failures), holding one run lease for the whole command, bounded by `memory.tidy.batch.*` (bounded cost cap, max model runs, activity clock excluding dialog time); `--dry-run`/`--status` are read-only and web-allowed, `--triage` (P3b) is not implemented. `paths|frontmatter|store|render` are pi-free; `index.ts` (`wireMemory`) is the only pi-facing assembly and holds all mutable state in its closure; registered pre-guard. Design: `docs/dev/memory/memory-plan.md`.
+
+## Jev（`src/memory/jev/`）
+
+Jev 是一个分类器驱动的核心 memory 子系统，职责四项：召回（U/A/E/B 四层注入）、写入时自动打标、周期整理（建议制，不自动执行）、高危动作拦截。设计全文见 `jev-arch.md`（架构，v2.1）与 `jev-plan.md`（实施方案，v2，J0–J9 分包）；下面只列不变式与门禁，细节以代码为准，与架构稿冲突时以代码为准并在交付报告列出。
+
+**不变式**：
+
+1. Markdown 记忆文件是唯一权威数据源；`.jev/` 是可丢弃的派生侧车，以条目内容哈希为键，Jev 从不写行内注释。
+2. `jevWired` 判定（plan §1.1）为假时，`wireMemory` 与 Jev 之前逐字节相同——由 `tests/fixtures/memory/jev-off-golden.json`（A′，永不重生）证明；唯一例外是 Q34「classifiers 全部非法」的启动提醒一行。`off(pi-api)`（设置开、运行时无 `ctx.modelRegistry`）由同一 golden 的 `pi-api` 配置逐字段比对加 `PI_API_ALLOWED_DIFF`（只许追加）证明。
+3. 全仓只有 `jev/client.ts` 调用模型 `ctx.modelRegistry.classify()`（`src/fabric/xs/receiver.ts:318` 有同名 `classify` 方法，但那是 XS 回执账本的分类，与模型无关）；`ctx.modelRegistry` 每次从 ctx 取，不跨 activation 缓存。
+4. `jev/*` 除 `wire.ts`、`segment.ts` 外 pi-free（`tests/boundary/pi-free.test.ts`）；`settings.ts` 不新增 import。
+5. 进程级共享只有健康表（32 项）与令牌桶；其余缓存属于 `wireJev` 闭包。
+6. `tool_call` handler 整体 try/catch，粗筛在第一个 await 前完成；异常放行。`before_agent_start` 只返回 `message`；`tool_result` 恒返回 `undefined`。
+7. 侧车合并只在 `withMemoryDirLock` 内同步完成，Jev 调用绝不进锁。
+8. 外发先截断后脱敏；文件正文、成功工具结果、system prompt、助手消息与推理永不外发；`private`/`secret` 条目整条剔除；进程证据只收录被点名程序且仅 Linux（非 Linux 退化为只看本会话 bashJobs）。
+9. secure/locked 域双重关闭（D8 + 不接线：强制关闭在 `src/config/settings.ts:430`（`applySecureDomainOverrides` 把 `memory.jev.enabled` 打 false），接线判定在 `src/memory/index.ts:126` 的 `resolveJevWiring(opts.settings, opts.secureDomainKind)`；`src/index.ts` 只负责把 `secureDomain.kind` 传给 `wireMemory` 的 `secureDomainKind` 形参，不自己判定。行号会漂，以函数名为准）。
+10. 注入只走消息通道、只追加；customType `subagent:memory-inject` 的 details 只追加字段（I10）。
+11. 用户令守卫域（`str_replace`/`insert`/`write`/`append`/`create` 覆写 + `delete`，外加手写→非手写 provenance 翻转、未归档→归档两条判定；`rename` 不守卫）与打标触发域（`JevWritePort` 覆盖的五个写操作，不含 `delete`/`rename`）是两个不同的集合，详见 `jev-arch.md` §6.2.5。
+
+**门禁**：`tests/memory/jev/**`、`tests/memory/{tool-v2-jev,command-jev,doctor-jev,inject-jev}.test.ts`、`tests/integration/memory-jev-*.test.ts`、`tests/conformance/memory-jev-channels.test.ts`（C-J1–C-J15；C-J7/C-J8/C-J15 由 `PI_TOOLKIT_JEV_CONFORMANCE=1` 门控）、`tests/boundary/pi-free.test.ts`、`tests/governance`；评测 `node scripts/dev/jev-eval.mjs`（Tier 3，基线见 `docs/dev/memory/eval/jev-baseline.md`）。
+
+**残留风险**：非 Linux 无跨终端进程证据（只看本会话 bashJobs）；Jev 判断质量依赖评测，已知误拦形态是发版进行中含 `git commit`/`git tag` 字样的 `echo`/`grep`，在生产路径被粗筛挡住不会实际触发；默认开启使工具描述一次性变化、前缀缓存失效一次；dismissed 改写条目开头会重新提示整理建议。
+
+**默认值、分类器列表、阈值以代码为准**：`src/memory/settings.ts`、`src/memory/setting-specs.ts`（14 个 `memory.jev.*` 键）。各包交付报告见 `docs/dev/memory/reports/J*-report.md`。
