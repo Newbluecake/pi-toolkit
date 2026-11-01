@@ -1185,6 +1185,7 @@ review   last 2026-10-28 · 2 open → /mem review
   - `/mem tags [list|add|rm|disable|enable]`；
   - `/mem review [--run|--list]`；
   - `/mem expired`。
+- **代理行**（真机验收后补，7584097c）：`memory.jev.proxy` 非空时，在 `evidence` 与 `usage` 之间多一行 `proxy    http://***@host:port`（凭证一律打码）；不可解析或非 `http://` 的代理以 `— ignored (only http:// proxies are supported)` 结尾，客户端按未配置代理处理。上面的示例没有配置代理，所以没有这一行。
 - **web 端**（Q35，经 `src/web-hub/agent/command-policy.ts` 的 `mem()`）：只读的 `jev`、`tags`（裸形式）、`tags list`、`review --list` 允许执行；改动状态的子命令（`jev probe`、`jev retag`、`jev reset-index`、`tags add|rm|disable|enable`）需要确认，与 `/mem` 现有的 confirm 惯例一致；`review`（逐条选择）与 `expired` 在 web 端需要确认，确认后降级为只读文本清单并提示回终端处理，不做写入（它们有文本回退，所以不属于拒绝条件）。Q35 的拒绝条件是「纯终端交互、没有文本回退」，本期没有命中该条件的子命令，即**本期无 deny 行**。`command-usage.ts` 不改。
 - **skill**：新增 `skills/memory-jev/SKILL.md`，承载使用策略（I12）。
 

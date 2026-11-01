@@ -249,7 +249,12 @@ export interface FetchResponseLike {
   readonly status: number;
   /** pi-ai's classifier transport rejects any response whose `ok` is falsy. */
   readonly ok: boolean;
-  readonly headers: { get(name: string): string | null; forEach(cb: (value: string, key: string) => void): void };
+  /** pi-ai's `headersToRecord` iterates `entries()` (onResponse hook). */
+  readonly headers: {
+    get(name: string): string | null;
+    forEach(cb: (value: string, key: string) => void): void;
+    entries(): IterableIterator<[string, string]>;
+  };
   text(): Promise<string>;
   json(): Promise<unknown>;
 }
