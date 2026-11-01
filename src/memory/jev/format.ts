@@ -343,6 +343,7 @@ export function formatJevReport(view: JevReportView): string {
   tagParts.push(`taxonomy ${view.tags.taxonomyRev}`);
   lines.push(`tags     ${tagParts.join(" · ")}`);
   lines.push(`evidence ${view.evidence}`);
+  if (view.proxy !== undefined) lines.push(`proxy    ${view.proxy}`);
   lines.push(
     `usage    ${view.usage.calls} calls · $${view.usage.costUsd.toFixed(4)} / $${view.usage.maxCostUsd.toFixed(2)} · per activation (/reload resets)`,
   );

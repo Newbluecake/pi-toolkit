@@ -129,7 +129,7 @@ function makePort(dir: string, cwd: string, client: JevClient, over: Partial<Jev
     health: getHealthTable(),
     ...over,
   };
-  return { port: createJevCommandPort(deps), bulk };
+  return { port: createJevCommandPort(deps), bulk, deps };
 }
 
 describe("statusLine", () => {
@@ -159,6 +159,22 @@ describe("statusLine", () => {
 });
 
 describe("report (§9.4 structure)", () => {
+  test("proxy line: absent without a proxy, credentials masked, unsupported scheme shown as ignored", async () => {
+    const { dir, cwd } = fixture();
+    writeCorpus(dir, ["- rule alpha about releases"]);
+    const base = makePort(dir, cwd, fakeClient()).deps.config!;
+    const lineOf = async (proxy: string) => {
+      const { port } = makePort(dir, cwd, fakeClient(), { config: { ...base, proxy } });
+      return (await port.report(cwd, registry)).split("\n").find((l) => l.startsWith("proxy"));
+    };
+    expect(await lineOf("")).toBeUndefined();
+    expect(await lineOf("http://user:pass@127.0.0.1:7890")).toBe("proxy    http://***@127.0.0.1:7890");
+    const socks = await lineOf("socks5://u:p@127.0.0.1:1080");
+    expect(socks).toContain("socks5://***@127.0.0.1:1080");
+    expect(socks).toContain("ignored (only http:// proxies are supported)");
+    expect(socks).not.toContain("u:p");
+  });
+
   test("full status on Linux: all rows present with expected shapes", async () => {
     const { dir, cwd } = fixture();
     writeCorpus(dir, ["- rule alpha about releases"]);

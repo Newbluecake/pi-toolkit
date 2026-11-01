@@ -30,6 +30,7 @@ import { runReviewPass, anchorOf, markStale } from "./review.js";
 import { tagBulk, taggableEntries } from "./tagging.js";
 import { mergeTaxonomy, validateTagDef, PRESET_TAGS } from "./taxonomy.js";
 import { formatJevReport, formatStatusLine } from "./format.js";
+import { parseProxyUrl, redactProxyUrl } from "./proxy-fetch.js";
 import { EntryIndex } from "./entries.js";
 import type {
   ClassifierRegistryLike,
@@ -262,6 +263,7 @@ export function createJevCommandPort(deps: JevCommandPortDeps): JevCommandPort {
         deps.platform.startsWith("linux") === true
           ? "process: bash jobs + /proc (Linux)"
           : "process: bash jobs only (non-Linux)",
+      ...proxyView(deps.config?.proxy ?? ""),
       usage: { calls: usage.calls, costUsd: usage.costUsd, maxCostUsd: deps.config?.maxCostUsd ?? 0 },
       segment: deps.segment?.() ?? ZERO_SEGMENT,
       review: {
@@ -623,5 +625,16 @@ export function parseTagsAddArgs(tokens: readonly string[]): ParseTagsAddResult 
       ...(paths === undefined ? {} : { paths }),
       ...(tools === undefined ? {} : { tools }),
     },
+  };
+}
+
+/** `/mem jev` proxy line: credentials always masked (`http://***@host:port`);
+ *  an unparsable/unsupported proxy is shown as ignored (the client treats it
+ *  as "not configured"). Empty ⇒ no line. */
+function proxyView(proxy: string): { proxy?: string } {
+  if (proxy === "") return {};
+  const shown = redactProxyUrl(proxy);
+  return {
+    proxy: parseProxyUrl(proxy) === undefined ? `${shown} — ignored (only http:// proxies are supported)` : shown,
   };
 }

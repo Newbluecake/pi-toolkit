@@ -564,6 +564,8 @@ export interface JevReportView {
   };
   /** e.g. "process: bash jobs + /proc (Linux)". */
   readonly evidence: string;
+  /** Text after the `proxy` label (credentials masked); absent ⇒ no proxy line. */
+  readonly proxy?: string;
   readonly usage: { readonly calls: number; readonly costUsd: number; readonly maxCostUsd: number };
   readonly segment: {
     readonly injectedByLayer: Readonly<Partial<Record<InjectLayer, number>>>;

@@ -49,13 +49,22 @@ export function parseProxyUrl(raw: string): ParsedProxyUrl | undefined {
 export function redactProxyUrl(raw: string): string {
   try {
     const url = new URL(raw);
-    if (url.username === "" && url.password === "") return raw;
+    // no URL userinfo, but "user:pass@host" can still parse (scheme "user:") — mask anyway
+    if (url.username === "" && url.password === "") return maskBeforeAt(raw);
     url.username = "***";
     url.password = "";
-    return url.toString().replace("***:@", "***@");
+    const out = url.toString().replace("***:@", "***@");
+    // URL serialisation appends "/" to a bare origin; keep the user's shape
+    return out.endsWith("/") && !raw.endsWith("/") ? out.slice(0, -1) : out;
   } catch {
-    return raw;
+    // not a URL: still never show userinfo
+    return maskBeforeAt(raw);
   }
+}
+
+function maskBeforeAt(raw: string): string {
+  const at = raw.lastIndexOf("@");
+  return at === -1 ? raw : `***${raw.slice(at)}`;
 }
 
 function proxyError(detail: string): Error {

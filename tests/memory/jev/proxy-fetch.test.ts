@@ -30,8 +30,13 @@ describe("parseProxyUrl", () => {
 });
 
 describe("redactProxyUrl", () => {
+  it("keeps the user's shape (no trailing slash added) and masks userinfo even in non-URL strings", () => {
+    expect(redactProxyUrl("http://user:pass@127.0.0.1:7890")).toBe("http://***@127.0.0.1:7890");
+    expect(redactProxyUrl("user:pass@127.0.0.1:7890")).toBe("***@127.0.0.1:7890");
+    expect(redactProxyUrl("socks5://u:p@h:1080")).toBe("socks5://***@h:1080");
+  });
   it("masks userinfo, leaves plain URLs untouched", () => {
-    expect(redactProxyUrl("http://user:pass@127.0.0.1:8080")).toBe("http://***@127.0.0.1:8080/");
+    expect(redactProxyUrl("http://user:pass@127.0.0.1:8080")).toBe("http://***@127.0.0.1:8080");
     expect(redactProxyUrl("http://127.0.0.1:8080")).toBe("http://127.0.0.1:8080");
     expect(redactProxyUrl("not a url")).toBe("not a url");
   });
