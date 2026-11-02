@@ -51,7 +51,9 @@ import { searchMemory } from "./search.js";
 import { computeBudgetReport, findExactDuplicates, type BudgetLimits } from "./budget.js";
 import { assertAllowWrite, resolveMemoryFile } from "./store.js";
 import { MEMORY_TOOL_V2_TEXT, MEMORY_TOOL_V2_TEXT_JEV, MemoryToolParamsV2 } from "./tool-surface.js";
-import type { ClassifierRegistryLike, JevWritePort } from "./jev/contracts.js";
+import type { ClassifierRegistryLike, JevWritePort, MemEntry } from "./jev/contracts.js";
+import { createDialogRace } from "../ask-user/remote.js";
+import type { AskUserRemotePort, AskUserRemoteSession, RemoteOutcome } from "../ask-user/remote.js";
 
 export interface MemoryToolV2Deps {
   settings: MemorySettings;
@@ -67,6 +69,20 @@ export interface MemoryToolV2Deps {
    *  behavior below is compiled out and the output stays byte-identical
    *  (I9, pinned by tests/memory/jev/off-golden.test.ts). */
   jev?: JevWritePort;
+  /** headless-confirm plan (docs/dev/memory/headless-confirm/plan.md):
+   *  the ask_user remote port, late-bound — the getter runs at EACH guard
+   *  invocation (the hub wiring can land after wireMemory returned), so no
+   * unassigned port is ever snapshotted. `undefined` (no dep) or a getter
+   * returning `undefined` ⇒ the guard's local-confirm path is byte-identical
+   * to the pre-plan behavior (I9-style off guarantee). */
+  remote?: () => AskUserRemotePort | undefined;
+  /** headless-confirm plan: the session lifecycle signal (a fresh
+   *  AbortController per session_start, aborted on session_shutdown/reload —
+   * managed in wireMemory's closure). The tool captures it per call and
+   * concatenates it with the tool signal; guards abort on it and confirmed
+   * commits re-check it inside the directory lock. Never carried across
+   * sessions. */
+  sessionSignal?: () => AbortSignal | undefined;
 }
 
 type ToolTextResult = {
@@ -182,6 +198,11 @@ interface JevGuardPlan {
   readonly baseline: RegularStat | undefined;
   /** `voided user rule: <anchor>` lines appended to the confirmed write. */
   readonly voided: readonly string[];
+  /** headless-confirm plan: when a confirm actually happened (local OR
+   *  remote), the concatenated guard signal the in-lock phase re-checks
+   *  right before touching disk — "已取消操作绝不落盘" (plan Major #2/#3).
+   *  Absent on skip plans ⇒ legacy behavior for unconfirmed writes. */
+  readonly commitSignal?: AbortSignal;
 }
 
 function guardAnchor(entry: {
@@ -196,6 +217,258 @@ function guardAnchor(entry: {
       ? `${entry.file} › ${entry.heading} #${entry.ordinal}`
       : `${entry.file} #${entry.ordinal}`;
   return `${where} (L${entry.lineStart}-${entry.lineEnd})`;
+}
+
+// ───────── headless-confirm plan (docs/dev/memory/headless-confirm/plan.md) ─────────
+
+/** Remote card header (also the answers key on web replies). */
+const GUARD_REMOTE_HEADER = "用户令确认";
+/** Only this exact affirmative label ever approves a remote card; decline,
+ *  skip, cancel and any unknown value all refuse (plan Major #4). */
+const GUARD_APPROVE_LABEL = "确认执行";
+const GUARD_DECLINE_LABEL = "取消";
+
+/** Sensitive-content protection (plan Blocker #1): the remote card carries
+ *  ONLY the file name, the touched count and bodyless anchors (ordinal +
+ *  line range). Entry bodies — and headings, which are content too — never
+ *  reach the wire/Feishu card, no matter the entry's private/secret flags;
+ *  sensitive entries are NOT dropped from the touched set to dodge the
+ *  guard. The local TUI dialog keeps its legacy body (own terminal). */
+function remoteGuardQuestion(
+  kind: "edit" | "delete",
+  name: string,
+  touched: readonly MemEntry[],
+  timeoutMs: number,
+): string {
+  const head =
+    kind === "delete"
+      ? `${name} 将被删除，其中 ${touched.length} 条用户令会一并消失：`
+      : `${name} 中 ${touched.length} 条用户令将被删改：`;
+  const limit = Math.max(1, Math.round(timeoutMs / 1000));
+  return [
+    head,
+    ...touched.map((e) => `- 条目 #${e.ordinal}（L${e.lineStart}-L${e.lineEnd}）`),
+    `条目正文不在此显示。请在约 ${limit} 秒内选择；取消、超时或会话关闭都会拒绝本次${kind === "delete" ? "删除" : "写入"}。`,
+  ].join("\n");
+}
+
+/** In-lock cancel checkpoint (plan Major #2/#3): a confirmed write must not
+ *  touch disk once its guard signal fired while waiting for the lock. */
+function assertCommitNotAborted(signal: AbortSignal | undefined): void {
+  if (signal !== undefined && signal.aborted) throw new MemoryError(REFUSE_USER_ORDER);
+}
+
+/** Concatenate the tool signal with the session lifecycle signal (plan
+ *  Major #2/#3). `AbortSignal.any` needs ≥Node 20 (engines pin ≥22). */
+function concatGuardSignals(tool: AbortSignal | undefined, session: AbortSignal | undefined): AbortSignal | undefined {
+  if (tool === undefined) return session;
+  if (session === undefined) return tool;
+  if (tool.aborted || session.aborted) return AbortSignal.abort();
+  try {
+    return AbortSignal.any([tool, session]);
+  } catch {
+    return tool;
+  }
+}
+
+interface GuardConfirmInput {
+  ui: Pick<ExtensionContext["ui"], "confirm">;
+  mode: string | undefined;
+  /** Legacy local card text (entry first lines included — own terminal). */
+  localBody: string;
+  kind: "edit" | "delete";
+  name: string;
+  touched: readonly MemEntry[];
+  confirmTimeoutMs: number;
+  /** Concatenated tool+session signal; `undefined` when the caller has none. */
+  signal: AbortSignal | undefined;
+  toolCallId: string;
+}
+
+/** The guard's confirm with the optional remote card (the port is fetched
+ *  by the CALLER from the late-bound `deps.remote` getter — this stays a
+ *  module-level pure-ish helper). Off path (no port) is the legacy
+ *  `ui.confirm` call verbatim; with a port the TUI dialog and the web card
+ *  race on `createDialogRace()` (synchronous claim — the first callback in
+ *  the event loop wins; the loser is closed/aborted and every late callback
+ *  is a no-op), while rpc keeps the web channel only (its native confirm is
+ *  auto-cancelled by the hub, plan §问题机制). Port present but `open()`
+ *  failing degrades per plan #4/#7: TUI falls back to the local dialog, rpc
+ *  refuses outright. Never rejects and never hangs: a self-managed unref'd
+ *  timer bounds the wait at `confirmTimeoutMs`. */
+async function guardConfirm(o: GuardConfirmInput & { remote: AskUserRemotePort | undefined }): Promise<boolean> {
+  if (o.signal !== undefined && o.signal.aborted) return false;
+  const remotePort = o.remote;
+  if (remotePort === undefined) {
+    // Off path — byte-identical legacy call (including rpc's instant
+    // cancelled:false ⇒ refuse; that status quo is intentional, plan #7).
+    return await o.ui.confirm(GUARD_CONFIRM_TITLE, o.localBody, { timeout: o.confirmTimeoutMs });
+  }
+  let session: AskUserRemoteSession | undefined;
+  try {
+    session = remotePort.open({
+      // Unique per tool call: the bridge keys records as `ask:${toolCallId}`
+      // and a repeat would overwrite (plan Minor #8).
+      toolCallId: `memory:${o.toolCallId}`,
+      questions: [
+        {
+          question: remoteGuardQuestion(o.kind, o.name, o.touched, o.confirmTimeoutMs),
+          header: GUARD_REMOTE_HEADER,
+          options: [{ label: GUARD_APPROVE_LABEL }, { label: GUARD_DECLINE_LABEL }],
+          allowOther: false,
+        },
+      ],
+      allowCancel: true,
+    });
+  } catch {
+    session = undefined;
+  }
+  if (session === undefined) {
+    // Port present but open failed — "已尝试远程且失败": TUI falls back to
+    // the local dialog, rpc refuses (plan #4/#7; outside the byte-compat
+    // promise by design).
+    if (o.mode === "rpc") return false;
+    try {
+      return await o.ui.confirm(GUARD_CONFIRM_TITLE, o.localBody, { timeout: o.confirmTimeoutMs });
+    } catch {
+      return false;
+    }
+  }
+  return raceGuardConfirm(session, o);
+}
+
+/** The two-channel race, modeled on `src/topic-switch/confirm.ts` (claim()
+ *  settles synchronously; the web-win close is done by the bridge itself;
+ *  every other win path closes the session here). */
+function raceGuardConfirm(sessionIn: AskUserRemoteSession, o: GuardConfirmInput): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let session: AskUserRemoteSession | undefined = sessionIn;
+    const race = createDialogRace();
+    const localAbort = new AbortController();
+    let settled = false;
+    let sessionClosed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    /** Our one and only close call per invocation; the bridge's own web-win
+     *  close never passes here. */
+    const closeSession = (by: "tui" | "abort" | "error", outcome: "answered" | "cancelled" | "aborted"): void => {
+      if (sessionClosed || session === undefined) return;
+      sessionClosed = true;
+      try {
+        session.close(by, outcome);
+      } catch {
+        /* best-effort: never break settlement */
+      }
+    };
+
+    const settle = (confirmed: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) {
+        try {
+          clearTimeout(timer);
+        } catch {
+          /* best-effort */
+        }
+        timer = undefined;
+      }
+      try {
+        o.signal?.removeEventListener("abort", onAbort);
+      } catch {
+        /* idempotent */
+      }
+      // Firing the local dialog's dismiss after its own answer is a no-op.
+      localAbort.abort();
+      resolve(confirmed);
+    };
+
+    const onAbort = (): void => {
+      if (settled || !race.claim("abort")) return;
+      closeSession("abort", "aborted");
+      settle(false);
+    };
+
+    const onTimeout = (): void => {
+      timer = undefined;
+      if (settled) return;
+      // Freeze arbitration so a web answer racing the deadline is rejected.
+      race.claim("abort");
+      closeSession("abort", "aborted");
+      settle(false);
+    };
+
+    const onLocal = (confirmed: boolean): void => {
+      if (settled || !race.claim("tui")) return;
+      closeSession("tui", confirmed ? "answered" : "cancelled");
+      settle(confirmed);
+    };
+
+    const onLocalError = (): void => {
+      if (settled || !race.claim("error")) return;
+      closeSession("error", "aborted");
+      settle(false);
+    };
+
+    const onWeb = (outcome: RemoteOutcome): boolean => {
+      if (settled || !race.claim("web")) return false;
+      const confirmed = outcome.kind === "answer" && Object.values(outcome.answers).includes(GUARD_APPROVE_LABEL);
+      // The bridge finishes the record itself on a web win (dialogs.ts), so
+      // our own close must stay silent on this path.
+      sessionClosed = true;
+      settle(confirmed);
+      return true;
+    };
+
+    try {
+      session.setOnRemote(onWeb);
+    } catch {
+      // A port that cannot take the callback cannot deliver answers: kill
+      // the session and degrade to local-only below.
+      sessionClosed = true;
+      try {
+        session.close("error", "aborted");
+      } catch {
+        /* best-effort */
+      }
+      session = undefined;
+    }
+
+    // rpc keeps a single channel (web when attached) so `ctx.ui.confirm` is
+    // never invoked there (plan Major #6: rpc confirm-call count is 0).
+    const useWeb = session !== undefined;
+    const useTui = !(o.mode === "rpc" && useWeb);
+    if (!useTui && !useWeb) {
+      settle(false);
+      return;
+    }
+
+    try {
+      o.signal?.addEventListener("abort", onAbort, { once: true });
+    } catch {
+      /* a signal that cannot take listeners cannot abort; the timer bounds us */
+    }
+    try {
+      timer = setTimeout(onTimeout, o.confirmTimeoutMs);
+      // I5: a ref'd timer would wedge `pi -p`.
+      (timer as { unref?: () => void }).unref?.();
+    } catch {
+      closeSession("error", "aborted");
+      settle(false);
+      return;
+    }
+
+    if (useTui) {
+      try {
+        const pending = o.ui.confirm(GUARD_CONFIRM_TITLE, o.localBody, {
+          timeout: o.confirmTimeoutMs,
+          signal: localAbort.signal,
+        });
+        void pending.then(onLocal, onLocalError);
+      } catch {
+        onLocalError();
+      }
+    }
+  });
 }
 
 function firstLineOf(body: string): string {
@@ -637,6 +910,16 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     }
   }
 
+  /** Late-bound remote port fetch for the guard confirms (never snapshots:
+   *  evaluated per invocation; a throwing getter degrades to "no port"). */
+  function guardRemotePort(): AskUserRemotePort | undefined {
+    try {
+      return deps.remote?.();
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Guard phases 1–2 (v4.1 §3.2): compute touched user entries outside the
    *  lock, confirm, and hand the in-lock phase a baseline stat. Throws
    *  (refusing the write) on child sessions, UI-less contexts, declines and
@@ -647,6 +930,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     op: MemoryOp,
     normalized: NormalizedCall,
     ctx: ExtensionContext | undefined,
+    call: { signal: AbortSignal | undefined; toolCallId: string } = { signal: undefined, toolCallId: "" },
   ): Promise<JevGuardPlan | undefined> {
     const jev = deps.jev;
     if (jev === undefined) return undefined;
@@ -703,11 +987,26 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       ...touched.map((e) => `- ${guardAnchor(e)}: ${firstLineOf(e.body)}`),
       "确认后本次写入才会提交；取消则本次写入被拒绝。",
     ].join("\n");
-    const confirmed = await ui.confirm(GUARD_CONFIRM_TITLE, body, { timeout: jev.confirmTimeoutMs });
+    const confirmed = await guardConfirm({
+      ui,
+      mode: ctx?.mode,
+      remote: guardRemotePort(),
+      localBody: body,
+      kind: "edit",
+      name,
+      touched,
+      confirmTimeoutMs: jev.confirmTimeoutMs,
+      signal: call.signal,
+      toolCallId: call.toolCallId,
+    });
+    // Cancel checkpoint 1 (plan Major #2/#3): an answer that raced a tool/
+    // session abort must not authorize a commit even if it read "approve".
+    if (call.signal !== undefined && call.signal.aborted) throw new MemoryError(REFUSE_USER_ORDER);
     if (!confirmed) throw new MemoryError(REFUSE_USER_ORDER);
     return {
       baseline: preRead?.stat,
       voided: touched.map((e) => `voided user rule: ${guardAnchor(e)}`),
+      ...(call.signal === undefined ? {} : { commitSignal: call.signal }),
     };
   }
 
@@ -722,6 +1021,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     real: string,
     name: string,
     ctx: ExtensionContext | undefined,
+    call: { signal: AbortSignal | undefined; toolCallId: string } = { signal: undefined, toolCallId: "" },
   ): Promise<JevGuardPlan | undefined> {
     const jev = deps.jev;
     if (jev === undefined) return undefined;
@@ -743,11 +1043,24 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       ...touched.map((e) => `- ${guardAnchor(e)}: ${firstLineOf(e.body)}`),
       "确认后本次删除才会执行；取消则删除被拒绝。",
     ].join("\n");
-    const confirmed = await ui.confirm(GUARD_CONFIRM_TITLE, body, { timeout: jev.confirmTimeoutMs });
+    const confirmed = await guardConfirm({
+      ui,
+      mode: ctx?.mode,
+      remote: guardRemotePort(),
+      localBody: body,
+      kind: "delete",
+      name,
+      touched,
+      confirmTimeoutMs: jev.confirmTimeoutMs,
+      signal: call.signal,
+      toolCallId: call.toolCallId,
+    });
+    if (call.signal !== undefined && call.signal.aborted) throw new MemoryError(REFUSE_USER_ORDER);
     if (!confirmed) throw new MemoryError(REFUSE_USER_ORDER);
     return {
       baseline: preRead.stat,
       voided: touched.map((e) => `voided user rule: ${guardAnchor(e)}`),
+      ...(call.signal === undefined ? {} : { commitSignal: call.signal }),
     };
   }
 
@@ -819,6 +1132,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     name: string,
     fileText: string,
     guardBaseline?: RegularStat,
+    commitSignal?: AbortSignal,
   ): Promise<WriteOutcome> {
     assertWithinWriteLimit(fileText, settings.maxWriteBytes);
     return withMemoryDirLock(real, () => {
@@ -833,6 +1147,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       assertValidFrontmatter(name, finalContent);
       assertWithinHardLimit(name, isCoreFile(name, readAllV2(real)), finalContent, 0, limits);
       assertGuardBaseline(name, existing, guardBaseline);
+      assertCommitNotAborted(commitSignal);
       assertInlineOk(name, undefined, finalContent);
       const tmp = writeTempRegular(real, name, Buffer.from(finalContent, "utf8"), 0o600);
       createExclusive(real, tmp, name);
@@ -853,6 +1168,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     oldStr: string | undefined,
     newStr: string | undefined,
     guardBaseline?: RegularStat,
+    commitSignal?: AbortSignal,
   ): Promise<WriteOutcome> {
     if (oldStr === undefined) throw new Error("str_replace requires old_str");
     assertWithinWriteLimit(newStr ?? "", settings.maxWriteBytes);
@@ -884,6 +1200,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       const isCore = isCoreFile(name, readAllV2(real));
       assertWithinHardLimit(name, isCore, finalContent, existing.stat.size, limits);
       assertGuardBaseline(name, existing.stat, guardBaseline);
+      assertCommitNotAborted(commitSignal);
       assertInlineOk(name, existing.text, finalContent);
       commitReplace(real, name, existing.stat, Buffer.from(finalContent, "utf8"), existing.stat.mode & 0o777);
       const snippet = renderSnippet(finalContent, matchLineOf(finalContent, matchIndex));
@@ -907,6 +1224,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     section: string | undefined,
     insertText: string | undefined,
     guardBaseline?: RegularStat,
+    commitSignal?: AbortSignal,
   ): Promise<WriteOutcome> {
     if (insertText === undefined) throw new Error("insert requires insert_text (or content)");
     assertWithinWriteLimit(insertText, settings.maxWriteBytes);
@@ -931,6 +1249,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       const isCore = isCoreFile(name, readAllV2(real));
       assertWithinHardLimit(name, isCore, finalContent, existing.stat.size, limits);
       assertGuardBaseline(name, existing.stat, guardBaseline);
+      assertCommitNotAborted(commitSignal);
       assertInlineOk(name, existing.text, finalContent);
       commitReplace(real, name, existing.stat, Buffer.from(finalContent, "utf8"), existing.stat.mode & 0o777);
       const snippet = renderSnippet(finalContent, target.afterLine + 1);
@@ -952,6 +1271,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     name: string,
     body: string,
     guardBaseline?: RegularStat,
+    commitSignal?: AbortSignal,
   ): Promise<WriteOutcome> {
     assertWithinWriteLimit(body, settings.maxWriteBytes);
     return withMemoryDirLock(real, () => {
@@ -968,6 +1288,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       const isCore = isCoreFile(name, readAllV2(real));
       assertWithinHardLimit(name, isCore, finalContent, existing?.stat.size ?? 0, limits);
       assertGuardBaseline(name, existing?.stat, guardBaseline);
+      assertCommitNotAborted(commitSignal);
       assertInlineOk(name, existing?.text, finalContent);
       const mode = existing ? existing.stat.mode & 0o777 : 0o600;
       commitReplace(real, name, existing?.stat, Buffer.from(finalContent, "utf8"), mode);
@@ -987,6 +1308,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     name: string,
     content: string,
     guardBaseline?: RegularStat,
+    commitSignal?: AbortSignal,
   ): Promise<WriteOutcome> {
     assertWithinWriteLimit(content, settings.maxWriteBytes);
     return withMemoryDirLock(real, () => {
@@ -1008,6 +1330,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       const isCore = isCoreFile(name, readAllV2(real));
       assertWithinHardLimit(name, isCore, finalContent, existing?.stat.size ?? 0, limits);
       assertGuardBaseline(name, existing?.stat, guardBaseline);
+      assertCommitNotAborted(commitSignal);
       assertInlineOk(name, existing?.text, finalContent);
       const mode = existing ? existing.stat.mode & 0o777 : 0o600;
       commitReplace(real, name, existing?.stat, Buffer.from(finalContent, "utf8"), mode);
@@ -1022,13 +1345,19 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     });
   }
 
-  async function doDelete(real: string, name: string, guardBaseline?: RegularStat): Promise<string> {
+  async function doDelete(
+    real: string,
+    name: string,
+    guardBaseline?: RegularStat,
+    commitSignal?: AbortSignal,
+  ): Promise<string> {
     return withMemoryDirLock(real, () => {
       const existing = statRegularIfExists(real, name);
       if (!existing) throw new MemoryError(`the path ${name} does not exist`);
       // Guard phase 3 (v4.1 §3.2 — delete guards too): the file must still
       // match the stat the confirmed deletion was approved against.
       assertGuardBaseline(name, existing, guardBaseline);
+      assertCommitNotAborted(commitSignal);
       // §4.3's decision table: delete is a covering rejection for hand-written
       // files (same class as write-overwrite/rename) — read the content INSIDE
       // the lock (matches doRename) so a concurrent write can't race provenance.
@@ -1098,8 +1427,14 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     promptSnippet: MEMORY_TOOL_V2_TEXT.promptSnippet,
     promptGuidelines: [...MEMORY_TOOL_V2_TEXT.promptGuidelines],
     parameters: MemoryToolParamsV2,
-    async execute(_toolCallId, rawParams: MemoryToolParamsV2, signal, _onUpdate, ctx): Promise<ToolTextResult> {
+    async execute(toolCallId, rawParams: MemoryToolParamsV2, signal, _onUpdate, ctx): Promise<ToolTextResult> {
       const cwd = resolveCwd(ctx);
+      // headless-confirm plan: the guard signal concatenates the tool signal
+      // with the session lifecycle signal (captured per call — the session
+      // controller is swapped on session_start and aborted on
+      // shutdown/reload, never carried across sessions).
+      const guardSignal = concatGuardSignals(signal, deps.sessionSignal?.());
+      const call = { signal: guardSignal, toolCallId };
       const normalized: NormalizedCall = normalizeMemoryCall(rawParams);
       const op = normalized.op;
       assertWritable(op);
@@ -1140,21 +1475,29 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
         case "create": {
           const name = nameFor(normalized.target, real);
           if (normalized.body === undefined) throw new Error("create requires file_text (or content)");
-          const plan = await prepareJevGuard(real, name, op, normalized, ctx);
-          const out = await doCreate(cwd, real, name, normalized.body, plan?.baseline);
+          const plan = await prepareJevGuard(real, name, op, normalized, ctx, call);
+          const out = await doCreate(cwd, real, name, normalized.body, plan?.baseline, plan?.commitSignal);
           deps.onAfterWrite(cwd);
           return finishJevWrite(cwd, name, out, plan, signal, ctx);
         }
         case "str_replace": {
           const name = nameFor(normalized.target, real);
-          const plan = await prepareJevGuard(real, name, op, normalized, ctx);
-          const out = await doStrReplace(cwd, real, name, normalized.oldStr, normalized.newStr, plan?.baseline);
+          const plan = await prepareJevGuard(real, name, op, normalized, ctx, call);
+          const out = await doStrReplace(
+            cwd,
+            real,
+            name,
+            normalized.oldStr,
+            normalized.newStr,
+            plan?.baseline,
+            plan?.commitSignal,
+          );
           deps.onAfterWrite(cwd);
           return finishJevWrite(cwd, name, out, plan, signal, ctx);
         }
         case "insert": {
           const name = nameFor(normalized.target, real);
-          const plan = await prepareJevGuard(real, name, op, normalized, ctx);
+          const plan = await prepareJevGuard(real, name, op, normalized, ctx, call);
           const out = await doInsert(
             cwd,
             real,
@@ -1163,14 +1506,15 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
             normalized.section,
             normalized.body,
             plan?.baseline,
+            plan?.commitSignal,
           );
           deps.onAfterWrite(cwd);
           return finishJevWrite(cwd, name, out, plan, signal, ctx);
         }
         case "delete": {
           const name = nameFor(normalized.target, real);
-          const plan = await prepareJevDeleteGuard(real, name, ctx);
-          const out = await doDelete(real, name, plan?.baseline);
+          const plan = await prepareJevDeleteGuard(real, name, ctx, call);
+          const out = await doDelete(real, name, plan?.baseline, plan?.commitSignal);
           deps.onAfterWrite(cwd);
           const voided = plan?.voided ?? [];
           return text(voided.length === 0 ? out : `${out}\n${voided.join("\n")}`);
@@ -1186,16 +1530,16 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
         case "write": {
           const name = nameFor(normalized.target, real);
           if (normalized.body === undefined) throw new Error('action:"write" requires file_text (or content)');
-          const plan = await prepareJevGuard(real, name, op, normalized, ctx);
-          const out = await doOverwrite(cwd, real, name, normalized.body, plan?.baseline);
+          const plan = await prepareJevGuard(real, name, op, normalized, ctx, call);
+          const out = await doOverwrite(cwd, real, name, normalized.body, plan?.baseline, plan?.commitSignal);
           deps.onAfterWrite(cwd);
           return finishJevWrite(cwd, name, out, plan, signal, ctx);
         }
         case "append": {
           const name = nameFor(normalized.target, real);
           if (normalized.body === undefined) throw new Error('action:"append" requires content (or insert_text)');
-          const plan = await prepareJevGuard(real, name, op, normalized, ctx);
-          const out = await doAppend(cwd, real, name, normalized.body, plan?.baseline);
+          const plan = await prepareJevGuard(real, name, op, normalized, ctx, call);
+          const out = await doAppend(cwd, real, name, normalized.body, plan?.baseline, plan?.commitSignal);
           deps.onAfterWrite(cwd);
           return finishJevWrite(cwd, name, out, plan, signal, ctx);
         }
