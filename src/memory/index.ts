@@ -63,6 +63,11 @@ export interface WireMemoryOpts {
   /** jev-plan J6 / I11: the secure-domain verdict (`secureDomain.kind`).
    *  Anything but "plain" keeps Jev unwired. Absent ⇒ "plain". */
   secureDomainKind?: JevDomainKind;
+  /** Test seam: /proc root for Jev's running-program evidence probe.
+   *  Production leaves it unset (real `/proc`); integration tests point it
+   *  at an empty dir so host processes (e.g. the very release.sh running
+   *  the suite) never leak into gate evidence. */
+  jevProcRoot?: string;
 }
 
 export interface WireMemoryResult {
@@ -206,6 +211,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         getRenderInfo: (cwd) => renderInfos.get(cwd),
         onAfterWriteHook: (fn) => afterWriteHooks.push(fn),
         createWritePort: createJevWritePort,
+        ...(opts.jevProcRoot === undefined ? {} : { procRoot: opts.jevProcRoot }),
         // J8 acceptance #3 "core usage": doctor's D19 (≥80% of coreBytes, not
         // when D02/D03 already flag the primary) as one reminder line.
         coreUsageLine: (cwd) => {

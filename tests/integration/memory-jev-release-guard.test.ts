@@ -109,6 +109,8 @@ function production(mode: "ok" | "hang") {
     isChildSession: false,
     sections: hub,
     secureDomainKind: "plain",
+    // Empty /proc: host processes (e.g. a release.sh running this suite) must not leak into evidence.
+    jevProcRoot: join(envTmp, "empty-proc"),
   });
   const jobs: BashJobRecordLike[] = [];
   // Exactly the src/index.ts post-guard call shape.

@@ -126,6 +126,8 @@ function harness(opts: { partial?: boolean } = {}) {
     isChildSession: false,
     sections: hub,
     secureDomainKind: "plain",
+    // Empty /proc: host processes (e.g. a release.sh running this suite) must not leak into evidence.
+    jevProcRoot: join(envTmp, "empty-proc"),
   });
   const jobs: BashJobRecordLike[] = [];
   wiring.attachJevBashJobs(jevBashJobsFrom(() => jobs));

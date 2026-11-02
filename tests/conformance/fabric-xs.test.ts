@@ -107,6 +107,9 @@ async function host(
   // wake-unknown-optimistic (C-X12): every LLM call's context event is forwarded to the real
   // controller guard (registration order: this factory runs FIRST, the guard returns undefined).
   const ctxKinds: string[] = [];
+  // Ledger record snapshot taken AT the first `authorized` context sight — under full-suite load
+  // the run can settle (and release the record) before a post-hoc `ledger.get` runs.
+  let authorizedRecord: unknown;
   const errors: unknown[] = [];
   let pi!: ExtensionAPI, ctx!: ExtensionContext, controller!: RootWakeController;
   const loader = new DefaultResourceLoader({
@@ -125,7 +128,13 @@ async function host(
           if (!options.noBasForward) controller.beforeAgentStart(event);
         });
         api.on("context", (event) => {
-          ctxKinds.push(controller.context(event).kind);
+          const kind = controller.context(event).kind;
+          ctxKinds.push(kind);
+          if (kind === "authorized" && authorizedRecord === undefined) {
+            const token = controller.activeToken;
+            const rec = token === undefined ? undefined : ledger.get(token);
+            authorizedRecord = rec === undefined ? undefined : { ...rec };
+          }
         });
         api.on("input", (event) => {
           controller.input(event);
@@ -232,6 +241,9 @@ async function host(
     audit,
     triggers,
     ctxKinds,
+    get authorizedRecord() {
+      return authorizedRecord;
+    },
     settled,
     errors,
     pi,
@@ -1033,7 +1045,7 @@ describe("fabric phase-2 real pi contracts", () => {
     await until(() => h.ctxKinds.includes("authorized"), "first LLM call saw the authorized marker");
     expect(h.triggers.at(-1)).toMatchObject({ messageType: "custom" });
     expect(h.cap.state).toBe("verified");
-    expect(h.ledger.get(token)).toMatchObject({ optimistic: true, authorizedAt: expect.any(Number) });
+    expect(h.authorizedRecord).toMatchObject({ optimistic: true, authorizedAt: expect.any(Number) });
     await until(() => h.settled.length === 1, "optimistic run settled");
     expect(h.stub.requests).toHaveLength(before + 1); // exactly one provider request
     expect(h.ctxKinds.every((kind) => kind === "authorized" || kind === "other")).toBe(true);

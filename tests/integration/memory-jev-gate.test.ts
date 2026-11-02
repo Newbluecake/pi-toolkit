@@ -113,6 +113,8 @@ function production(opts: { mode: "ok" | "451" | "no-auth"; child?: boolean }) {
     isChildSession: opts.child === true,
     sections: hub,
     secureDomainKind: "plain",
+    // Empty /proc: host processes (e.g. a release.sh running this suite) must not leak into evidence.
+    jevProcRoot: join(envTmp, "empty-proc"),
   });
   const jobs: BashJobRecordLike[] = [];
   wiring.attachJevBashJobs(jevBashJobsFrom(() => jobs));
