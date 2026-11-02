@@ -27,6 +27,7 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责四项：召回�
 9. secure/locked 域双重关闭（D8 + 不接线：强制关闭在 `src/config/settings.ts:430`（`applySecureDomainOverrides` 把 `memory.jev.enabled` 打 false），接线判定在 `src/memory/index.ts:126` 的 `resolveJevWiring(opts.settings, opts.secureDomainKind)`；`src/index.ts` 只负责把 `secureDomain.kind` 传给 `wireMemory` 的 `secureDomainKind` 形参，不自己判定。行号会漂，以函数名为准）。
 10. 注入只走消息通道、只追加；customType `subagent:memory-inject` 的 details 只追加字段（I10）。
 11. 用户令守卫域（`str_replace`/`insert`/`write`/`append`/`create` 覆写 + `delete`，外加手写→非手写 provenance 翻转、未归档→归档两条判定；`rename` 不守卫）与打标触发域（`JevWritePort` 覆盖的五个写操作，不含 `delete`/`rename`）是两个不同的集合，详见 `jev-arch.md` §6.2.5。
+12. 诊断日志不破坏 TUI：`wire.ts` 的唯一 `log` 闭包（分类器 failover 失败 + 全部 handler catch）在 `session_start` 探测到 `ctx.hasUI` 时只进闭包内环形缓冲（50 行，带 `HH:MM`），不写 stderr、不 notify（状态变化另有 notify）；`/mem jev` 末尾 `errors` 段展示最近 5 条，无错误时报告逐字节不变。无 UI（print/rpc/子会话）仍 `console.warn`，逐字节不变。由 `tests/memory/jev/wire-error-log.test.ts` 钉住。
 
 **门禁**：`tests/memory/jev/**`、`tests/memory/{tool-v2-jev,command-jev,doctor-jev,inject-jev}.test.ts`、`tests/integration/memory-jev-*.test.ts`、`tests/conformance/memory-jev-channels.test.ts`（C-J1–C-J15；C-J7/C-J8/C-J15 由 `PI_TOOLKIT_JEV_CONFORMANCE=1` 门控）、`tests/boundary/pi-free.test.ts`、`tests/governance`；评测 `node scripts/dev/jev-eval.mjs`（Tier 3，基线见 `docs/dev/memory/eval/jev-baseline.md`）。
 

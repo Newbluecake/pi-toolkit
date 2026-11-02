@@ -153,6 +153,11 @@ const PARSED_CACHE_MAX = 64;
 const MIN_PROMPT_CODEPOINTS = 8;
 const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
 const DAY_MS = 86_400_000;
+/** Diagnostic ring-buffer capacity (failover + handler-exception lines held
+ *  for `/mem jev` while a UI is attached); `/mem jev` shows only the most
+ *  recent `JEV_ERROR_LOG_SHOWN` of these. */
+const JEV_ERROR_LOG_MAX = 50;
+const JEV_ERROR_LOG_SHOWN = 5;
 /** Gate sync wait cap for a coarse-filter survivor without a cached verdict
  *  (jev-arch §6.4.6: typical 0.8–1.1s, hard cap 2.5s). */
 export const GATE_WAIT_MS = 2_500;
@@ -486,7 +491,31 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       },
       clear: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
     });
-  const log = deps.log ?? ((line: string): void => console.warn(`[pi-subagent] jev: ${line}`));
+  // Diagnostic log sink (failover failures from client.ts + every handler's
+  // catch-and-log here). Interactive TUI sessions must never write stdout/
+  // stderr directly (it breaks the TUI layout) — those lines go into a
+  // bounded ring buffer instead, surfaced by `/mem jev`'s report (`errors`
+  // section below); status-level changes already reach the user via
+  // `notify()`/`ui.notify` (TUI-safe), so this is pure diagnostic noise.
+  // Non-UI sessions (print mode, rpc, child) keep the pre-existing
+  // byte-identical console.warn behavior (I9-style: no UI ⇒ unchanged).
+  // `ui` is set by the session_start handler below once `ctx.hasUI` is
+  // known; `ui !== undefined` is reused as the hasUI signal here so there is
+  // no separate piece of state to keep in sync (I4).
+  const errorLog: { readonly at: number; readonly line: string }[] = [];
+  const pushErrorLog = (line: string): void => {
+    errorLog.push({ at: now(), line });
+    if (errorLog.length > JEV_ERROR_LOG_MAX) errorLog.shift();
+  };
+  const log =
+    deps.log ??
+    ((line: string): void => {
+      if (ui !== undefined) {
+        pushErrorLog(line);
+        return;
+      }
+      console.warn(`[pi-subagent] jev: ${line}`);
+    });
   const isChild = deps.isChildSession;
   const config = deps.config;
   const client: JevClientHandle =
@@ -1902,11 +1931,25 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     },
     health: getHealthTable(),
   });
+  const recentErrorsText = (): string | undefined => {
+    if (errorLog.length === 0) return undefined;
+    const fmt = (ms: number): string => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    return errorLog
+      .slice(-JEV_ERROR_LOG_SHOWN)
+      .map((e, i) => `${i === 0 ? "errors   " : "         "}${fmt(e.at)} ${e.line}`)
+      .join("\n");
+  };
   const commandPort: JevCommandPort = {
     ...basePort,
     report: async (cwd, reg) => {
       const text = await basePort.report(cwd, reg);
-      return truncated === undefined ? text : `${text}\nrecall   recall truncated ${truncated.from}→${truncated.to}`;
+      const withTrunc =
+        truncated === undefined ? text : `${text}\nrecall   recall truncated ${truncated.from}→${truncated.to}`;
+      const errors = recentErrorsText();
+      return errors === undefined ? withTrunc : `${withTrunc}\n${errors}`;
     },
   };
 
