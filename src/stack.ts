@@ -1074,6 +1074,14 @@ export function buildSessionStack(
       const c = threadInput?.conn();
       return c !== undefined && c.status().state === "live" && c.caps.includes(THREAD_CAP);
     };
+    /** P4 §5.5 #5/§6.7：`subagent:thread` display 行（只展示、不进上下文、不唤醒）——engine 的
+     *  display 回调与 REVOKED 分支（显式 handback / 自动回流）共用一个发送口。 */
+    const threadDisplay = (line: string): void => {
+      pi.sendMessage(
+        { customType: "subagent:thread", content: line, display: true, details: { source: "thread" } },
+        { triggerTurn: false },
+      );
+    };
     const engine = new ThreadEngine({
       clock: systemClock,
       settings: {
@@ -1134,6 +1142,10 @@ export function buildSessionStack(
             }
             if (outcome.error === "E_THR_REVOKED") {
               engine.markHandback(eventId, "done"); // §5.5 #5：撤权 ⇒ 不发 finding
+              // P4：补一行 display（不进上下文），主会话可审计「该事件因撤权被终结」。
+              threadDisplay(
+                `[thread] 事件 ${eventId} 自动回流被拒（E_THR_REVOKED，发送者已撤权）— 事件不再传播，已终结`,
+              );
               return;
             }
           }
@@ -1141,10 +1153,7 @@ export function buildSessionStack(
         })();
       },
       display: (line) => {
-        pi.sendMessage(
-          { customType: "subagent:thread", content: line, display: true, details: { source: "thread" } },
-          { triggerTurn: false },
-        );
+        threadDisplay(line);
       },
       hint: (line) => {
         pi.sendMessage(
@@ -1263,7 +1272,9 @@ export function buildSessionStack(
       },
       statusLine() {
         const s = engine.stats();
-        return `thread subs ${s.activeSubs} · routed ${s.routed} · slow ${s.slow} · handback ${s.handback} · unknown ${s.unknown}`;
+        // P4 §8.2 ③：窗口参数被 clamp 过 ⇒ 行尾追加 ` · cfg clamped`（原值→新值已在解析时 WARN）。
+        const base = `thread subs ${s.activeSubs} · routed ${s.routed} · slow ${s.slow} · handback ${s.handback} · unknown ${s.unknown}`;
+        return thr.windowClamped ? `${base} · cfg clamped` : base;
       },
       list() {
         const stats = engine.stats();
@@ -1327,6 +1338,10 @@ export function buildSessionStack(
           },
           requestHandback: ({ eventId }: { eventId: string }) => engine.requestHandback({ runId, eventId }),
           markHandback: (eventId: string, state: "done" | "gone" | "unknown") => engine.markHandback(eventId, state),
+          noteRevokedHandback: (eventId: string) => {
+            // P4 §5.5 #5：显式 handback 的 REVOKED 分支 — 一条 display 行（不进上下文、不唤醒）。
+            threadDisplay(`[thread] 事件 ${eventId} 交回被拒（E_THR_REVOKED，发送者已撤权）— 事件不再传播，订阅已结束`);
+          },
           sendHandbackFinding: (eventId: string, code: string, reason: string) =>
             sendFinding(eventId, `交回失败（${code}，原因：${reason}）：回复无法自动回到飞书话题`),
           recordReply: (subId: string) => engine.recordReply(subId),

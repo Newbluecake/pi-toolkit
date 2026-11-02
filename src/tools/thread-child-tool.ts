@@ -138,6 +138,10 @@ export interface ThreadChildOps {
   /** §5.5 the THREE local rules (engine.requestHandback): delivered-to-this-run, inside H, ACTIVE ∧ cap. */
   requestHandback(input: { eventId: string }): { ok: true } | { ok: false; reason: string };
   markHandback(eventId: string, state: "done" | "gone" | "unknown"): { degrade: "finding" | "none" };
+  /** P4 §5.5 #5: a `subagent:thread` DISPLAY entry (context-free, no wake) for an E_THR_REVOKED
+   *  handback — the revoked sender's content is not propagated further, so the main session only
+   *  gets this audit line instead of a finding. Emitted by the HOST (stack), never the child. */
+  noteRevokedHandback(eventId: string): void;
   /** §5.5 #5 degrade channel — the surface composes and sends the finding to the main session. */
   sendHandbackFinding(eventId: string, code: string, reason: string): void;
   recordReply(subId: string): void;
@@ -278,6 +282,7 @@ export function createThreadChildTool(deps: ThreadChildToolDeps): ToolDefinition
             }
             if (outcome.error === "E_THR_REVOKED") {
               deps.ops.markHandback(eventId, "done");
+              deps.ops.noteRevokedHandback(eventId);
               return reply("E_THR_REVOKED: the sender was revoked — the event is not propagated further.");
             }
             deps.ops.markHandback(eventId, "unknown");

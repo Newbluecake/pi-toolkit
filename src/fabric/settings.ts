@@ -89,6 +89,10 @@ export interface FabricThreadSettings {
   replyPerThreadPerHour: number;
   /** §8.1 receipt policy — phase-1 vocabulary: "first". */
   receipt: FabricThreadReceiptMode;
+  /** P4 §8.2 ③ (parse artifact, NOT a settings key): true ⇔ the shared window clamp changed at
+   *  least one leaf — `stack.ts`'s `statusLine()` appends the ` · cfg clamped` suffix for
+   *  `/agent status`. Never serialized (setting-specs knows nothing of it). */
+  windowClamped: boolean;
 }
 
 /**
@@ -138,6 +142,7 @@ export function parseFabricThreadSettings(input: unknown): FabricThreadSettings 
       ...FABRIC_THREADS_REPLY_PER_HOUR_BOUNDS,
     ),
     receipt: value.receipt === "first" ? "first" : defaults.receipt,
+    windowClamped: window.changes.length > 0,
   };
 }
 
@@ -722,5 +727,6 @@ export const DEFAULT_FABRIC_SETTINGS: FabricSettings = {
     replyPerThreadPerMin: 6,
     replyPerThreadPerHour: 60,
     receipt: "first",
+    windowClamped: false,
   },
 };

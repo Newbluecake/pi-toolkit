@@ -145,6 +145,7 @@ const baseOps = (over: Partial<ThreadChildOps> = {}): ThreadChildOps => ({
   unsubscribe: () => ({ ok: false as const, reason: "no_subscription" }),
   requestHandback: () => ({ ok: false as const, reason: "window_expired" }),
   markHandback: () => ({ degrade: "none" as const }),
+  noteRevokedHandback: () => undefined,
   sendHandbackFinding: () => undefined,
   recordReply: () => undefined,
   hubCapable: () => true,
@@ -238,9 +239,11 @@ describe("thread child tool (§5.5/§6.8 surface)", () => {
 
   it("handback REVOKED: subscription ends, NO finding", async () => {
     const finding = vi.fn();
+    const revoked = vi.fn();
     const ops = baseOps({
       requestHandback: () => ({ ok: true as const }),
       sendHandbackFinding: finding,
+      noteRevokedHandback: revoked,
       lastEventOf: () => "fsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       conn: () => fakeConn(() => Promise.resolve(err("E_THR_REVOKED", "none"))),
     });
@@ -248,6 +251,9 @@ describe("thread child tool (§5.5/§6.8 surface)", () => {
     const text = await runTool(tool, { action: "handback", h: "fs:AAAAAAAAAAAA", reason: "x" });
     expect(text).toContain("E_THR_REVOKED");
     expect(finding).not.toHaveBeenCalled();
+    // P4 §5.5 #5: exactly ONE host-side display entry (context-free audit line), no finding.
+    expect(revoked).toHaveBeenCalledOnce();
+    expect(revoked).toHaveBeenCalledWith("fsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
   });
 });
 

@@ -99,6 +99,7 @@ Format: entry — one-line role | README to read first and when. `src/*` rows wi
 | `src/context-switch/` — model-authored handoff (`switch_context`), pending store, `session_before_compact` hook, child-session capability state machine. | `docs/dev/context-switch/README.md` · 动 handoff/子会话 switch 前 |
 | `src/cache-ttl/` — prompt-cache TTL modes, keepalive pings + breakers, provider evidence, `/cache-ttl`, child keepalive, warmth. | `docs/dev/cache-ttl-keepalive/README.md` · 动 keepalive/断路器/TTL 前 |
 | `src/fabric/` — inter-agent message fabric: tree routing, wake phase 1, cross-session xs (reply, channels, broadcast, unread inbox, aliases). | `docs/dev/fabric-cross-session/README.md` · 动 message_agent/message_session/xs 协议前（三个 off golden 勿重生） |
+| ↳ `src/fabric/thread/` — Thread 订阅直通（飞书群话题 → 直派 run 直投，跳过主会话回合）：ThreadEngine、lane/缓冲/handback，宿主接线在 `src/stack.ts` + `src/web-hub/agent/commands.ts`。 | `docs/dev/fabric-thread/README.md` · 动 thread 订阅/直投/handback/thr_* 帧前（thread-off golden 勿重生） |
 | `src/todo/` — Claude Code-style task tools + aboveEditor widget + web projection. | `docs/dev/todo-web/README.md` · 动 todo 前 |
 | `src/memory/` — cwd-keyed project memory (tiered injection, `memory` tool, `/mem`, journaled tidy/restore). | `docs/dev/memory/README.md` · 动 memory/tidy 前（memory golden 勿重生） |
 | `src/sysprompt/` + `src/prompt-sections/` — frozen-snapshot system-prompt sections with tail updates; pi-free half in `prompt-sections`. | `docs/dev/sysprompt-stable/README.md` · 动任何 system prompt 动态段前 |

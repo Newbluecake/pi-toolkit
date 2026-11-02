@@ -123,6 +123,13 @@ export interface StatusCommandDeps {
   xs?: () => { stack: StackXs; capability: string; outCap: number } | undefined;
   /** Omitted when external agents are disabled; live unified prompt/admission availability. */
   external?: () => { readonly droidUnavailableReason: string | undefined } | undefined;
+  /**
+   * fabric-thread P4 (arch §6.7): the stack's live thread line (`ThreadStackSurface.statusLine()`, —
+   * `thread subs n · routed a · slow b · handback c · unknown d[ · cfg clamped]`). Absent /
+   * `undefined` when `fabric.enabled ∧ fabric.threads.enabled` is false ⇒ no line, byte-identical
+   * to the pre-feature `/agent status` output (G2a). Same degrade pattern as `wake` above.
+   */
+  threads?: () => string | undefined;
 }
 
 /**
@@ -688,6 +695,9 @@ export function renderStatus(deps: StatusCommandDeps, contextWindow?: number): s
         ? "droid: available"
         : `droid: unavailable (${external.droidUnavailableReason})`,
     );
+  // fabric-thread P4 (§6.7): `/agent status` thread 行 — 功能关闭时 deps.threads 缺席 ⇒ 无此行。
+  const threadLine = deps.threads?.();
+  if (threadLine !== undefined) lines.push(threadLine);
   // quota droid 凭据缺失披露（2026-10-19 拍板）：池读数缺失期间不编造数字，闸门面
   // 对 droid 池保持 fail-open（spawn 不拦截）；droid CLI 自身（OAuth）不受影响。
   const quota = deps.quota?.();

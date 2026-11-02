@@ -1219,6 +1219,18 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     steer(runId, text) {
       return runtime.steerRun(runId, text);
     },
+    // fabric-thread P4 fix (found by tests/integration/fabric-thread-e2e.test.ts): honest
+    // passthroughs for the thread channel. stack.ts casts the Runner to `ThreadRunnerLike`
+    // (ports.ts's Runner interface was deliberately untouched in P3), but the ADAPTER is the
+    // object that actually lands in `runnerRef` — without these two methods the cast calls
+    // `undefined` at subscribe/steer time. Synchronous registry read + bounded steer, exactly
+    // the runner's own §6.4 semantics (names match ThreadRunnerLike: steerThreadRun/hasActiveSession).
+    steerThreadRun(runId: string, text: string, capMs: number) {
+      return runtime.steerThreadRun(runId, text, capMs);
+    },
+    hasActiveSession(runId: string) {
+      return runtime.hasActiveSession(runId);
+    },
     // fleet-drawer plan §4.1: pure synchronous passthroughs to the runner's
     // observeRun/peekRunBranch read port — the runner is the single source
     // of truth for the four-state verdict and the branch snapshot (no

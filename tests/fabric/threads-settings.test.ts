@@ -69,6 +69,7 @@ describe("fabric.threads settings (P0 §11.1)", () => {
       replyPerThreadPerMin: 6,
       replyPerThreadPerHour: 60,
       receipt: "first",
+      windowClamped: false,
     } satisfies FabricThreadSettings);
   });
 
@@ -94,11 +95,21 @@ describe("fabric.threads settings (P0 §11.1)", () => {
     expect(parsed.enabled).toBe(true);
     expect(parsed.maxSubsPerRun).toBe(2);
     expect(parsed.steerTimeoutMs).toBe(2_000);
-    // window keys untouched (valid) → defaults stay
+    // window keys untouched (valid) → defaults stay, and NO cfg-clamped marker (§8.2 ③)
     expect(windowOf(parsed)).toEqual([10, 8, 15]);
+    expect(parsed.windowClamped).toBe(false);
     for (const bad of [undefined, null, 3, "x", [], true]) {
       expect(parseFabricThreadSettings(bad)).toEqual(DEFAULT_FABRIC_SETTINGS.threads);
     }
+  });
+
+  it("P4 §8.2 ③: a window clamp marks windowClamped (the ` · cfg clamped` suffix source)", () => {
+    expect(parseFabricThreadSettings({ retainMin: 5 }).windowClamped).toBe(true);
+    expect(parseFabricThreadSettings({ handbackWindowMin: 0, startTimeoutMin: 40, retainMin: 15 }).windowClamped).toBe(
+      true,
+    );
+    // non-window clamps (config-accident containment) are NOT the window clamp — no suffix
+    expect(parseFabricThreadSettings({ maxSubsPerRun: 99 }).windowClamped).toBe(false);
   });
 
   it("per-field tolerance: wrong types keep defaults, out-of-range clamps, non-integers floor", () => {
