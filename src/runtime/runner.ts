@@ -508,6 +508,27 @@ export class RuntimeRunner implements Runner {
     if (!entry) throw new Error(`no active session for run ${runId}`);
     await entry.handle.steer(text);
   }
+  /** fabric-thread arch r3 §6.4 (P3): the thread-steer channel — disposition-preserving and
+   *  BOUNDED by `capMs` (unlike steerRun above, whose unboundedness is a known defect this path
+   *  deliberately does not repeat — it is the §6.4 TODO landing as a thread-dedicated channel so
+   *  the existing steer/steer tool semantics stay byte-identical). Resolves with pi's disposition
+   * STRING; rejects on timeout (the engine maps any rejection to Outcome `unknown`, §6.4 post-call)
+   * or when no active session exists. */
+  async steerThreadRun(runId: string, text: string, capMs: number): Promise<string> {
+    const entry = this.activeHandles.get(runId);
+    if (!entry) throw new Error(`no active session for run ${runId}`);
+    const handle = entry.handle;
+    const call =
+      handle.steerDisposition !== undefined ? handle.steerDisposition(text) : handle.steer(text).then(() => "queued");
+    const result = await withDeadline(call, Math.max(1, Math.floor(capMs)), this.d.clock, "steer_thread");
+    if (!result.ok) throw new Error(`steer_thread ${result.reason}`);
+    return result.value;
+  }
+  /** fabric-thread §6.4/§5.1 (P3): whether the run currently holds a live, steerable session
+   *  handle — the `ThreadRunFacts.steerable` source. Synchronous registry read. */
+  hasActiveSession(runId: string): boolean {
+    return this.activeHandles.has(runId);
+  }
   /** set_model: switch an active run's model. Bounded (SET_MODEL_TIMEOUT_MS) —
    *  session.setModel awaits a provider auth check, and no anti-hang path may
    *  await an unbounded pi call. (steerRun itself is unbounded — steerMs only

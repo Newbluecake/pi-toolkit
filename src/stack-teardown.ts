@@ -102,6 +102,9 @@ export interface TeardownParts {
   /** bash-timeout-grace P5: aborts whichever recovery/cleanup phase is still outstanding. */
   bashJobRecovery?: { dispose(): void } | undefined;
   fabricMailbox?: ReturnType<typeof createFabricMailbox> | undefined;
+  /** fabric-thread P3 (§9.4): the stack's thread surface (engine). Path A disposes it BEFORE
+   *  `fabricMailbox`; paths B/C4 read the Stack member (before `fabric` / `runDrain`). */
+  threads?: { dispose(): void } | undefined;
   /** cache-ttl keepalive (plan §2.2); `isCurrent` reads this slot, so clearing it supersedes the old service. */
   keepalive?: CacheKeepaliveService | undefined;
   /** quota-plan §4.1: `QuotaService.dispose` is the single idempotent owner. */
@@ -166,6 +169,8 @@ const REBUILD_STEPS: readonly RebuildStep[] = [
   },
   rebuildDispose("archive", "archive"),
   rebuildDispose("bashJobRecovery", "bashJobRecovery"),
+  // fabric-thread §9.4 A：排在 fabricMailbox 之前 — 订阅/lane 先关，晚到结果由代际令牌丢弃。
+  rebuildDispose("threads", "threads"),
   rebuildDispose("fabricMailbox", "fabricMailbox"),
   rebuildDispose("keepalive", "keepalive"),
   rebuildDispose("quota", "quota"),
@@ -223,6 +228,9 @@ const DEFENSIVE_STEPS: readonly StackStep<void>[] = [
   { id: "schedule", run: (stack) => void stack.schedule?.dispose() },
   { id: "scheduleBackground", run: (stack) => void stack.scheduleBackground?.dispose() },
   { id: "rpc", run: (stack) => void stack.rpc.close() },
+  // fabric-thread §9.4 B：排在 fabric 之前 — dispose 结束全部订阅（stack_disposed）、关闭 lane、
+  // 推进代际令牌；未回复且未调用的订阅者事件由 engine 回 E_STALE_CTX（§6.5 代际检查）。
+  { id: "threads", run: (stack) => void stack.threads?.dispose() },
   { id: "fabric", run: (stack) => void stack.fabric?.dispose() },
   // stop orphaned background workflows; their notices are dropped
   { id: "workflowRuns", run: (stack) => void stack.workflow.runs.abandon() },
@@ -272,6 +280,9 @@ const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
   { id: "bashJobs", run: (stack) => void stack.bashJobs?.dispose() },
   // Fabric must freeze before run shutdown so late verdicts from the old stack cannot write into the shared outbox; the
   // next stack owns pending records. (Also disposes the wake service through the mailbox — closes G12.)
+  // fabric-thread §9.4 C4：threads 先于 fabric（也即先于 runDrain）— drain 期间终结的 run 不再
+  // 触发自动回流或 handback，lane 已关，晚到结果因代际令牌失效而丢弃（§9.4）。
+  { id: "threads", run: (stack) => void stack.threads?.dispose() },
   { id: "fabric", run: (stack) => void stack.fabric?.dispose() },
   {
     // C4-14…18, one unit because `pending`/`drainMs` flow through it:

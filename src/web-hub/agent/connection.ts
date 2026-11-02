@@ -52,6 +52,7 @@ import type { RunTxReqFrame, RunWatchFrame } from "../protocol/run-transcript.js
 import type { CompleteReqFrame } from "../protocol/command-args.js";
 import type { XsAliasEvtFrame, XsDeliverFrame, XsReqFrame, XsResFrame } from "../protocol/xs.js";
 import type { SchedDecideFrame, SchedReceiptsFrame, SchedRunFrame } from "../protocol/schedule.js";
+import type { ThrClosedFrame, ThrReqFrame, ThrResFrame } from "../protocol/thread.js";
 import { XS_HUB_CAP, XS_SLOT_KIND, xsReqDeadlineMs } from "../protocol/xs.js";
 import { P1_CAPS, PROTO, SLOT_REQUIRED_CAP, compareVersions, protoCompatible } from "../protocol/version.js";
 import { readStopMarkerSync } from "../protocol/stop-marker.js";
@@ -133,6 +134,10 @@ export interface BindingPort {
    *  `sched_decide_ack` (`schedule/agent/coordinator.ts`). Live-link-only; a binding without it
    *  (schedule off) silently ignores the frame — the hub's own ack wait settles it. */
   onSchedDecide?(frame: SchedDecideFrame): void;
+  /** fabric-thread arch r3 §5.4 (P3): hub→agent best-effort thread-close notice (no reply).
+   *  The handler ends the related subscriptions and steers each subscriber a 解绑 notice.
+   *  Live-link-only; a binding without it (threads off) silently ignores the frame. */
+  onThrClosed?(frame: ThrClosedFrame): void;
   /** web-hub-slash-args plan r1 评审 #1 ③ (P1): fired once per `hello_ack` after the slot
    *  replay, with the hub's freshly-advertised caps — the wiring republishes cap-sensitive
    *  slots (`commands`), covering late caps, reconnects and hub downgrades. */
@@ -182,6 +187,10 @@ export interface HubConnection {
    *  (`list|resolve|info` 3s, `send` 8s = hub admission + 5s deliver + headroom), NOT the
    *  generic 3s admin timeout. Same cap precheck / reject-pending-on-teardown contract. */
   request(frame: XsReqFrame, requiredCap: "xs.v1"): Promise<XsResFrame>;
+  /** fabric-thread arch r3 §7.3 (P3): the `thr_req` overload — 5s deadline (the §7.3 agent-side
+   *  wait; the caller owns the ONE same-postId retry, `thread-child-tool.ts`). Same cap precheck
+   *  (`thr.v1`) / reject-pending-on-teardown contract. */
+  request(frame: ThrReqFrame, requiredCap: "thr.v1"): Promise<ThrResFrame>;
   /** Capabilities from the current live link's `hello_ack.caps` (empty until live, or if the hub omitted it). */
   readonly caps: readonly string[];
 }
@@ -312,7 +321,7 @@ class Connection implements HubConnection {
   private readonly pending = new Map<
     string,
     {
-      resolve: (f: LanResFrame | HubCtlAckFrame | FsbResFrame | TfaResFrame | XsResFrame) => void;
+      resolve: (f: LanResFrame | HubCtlAckFrame | FsbResFrame | TfaResFrame | XsResFrame | ThrResFrame) => void;
       reject: (err: Error) => void;
       timer: NodeJS.Timeout;
     }
@@ -461,10 +470,11 @@ class Connection implements HubConnection {
   request(frame: FsbReqFrame, requiredCap: string): Promise<FsbResFrame>;
   request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame>;
   request(frame: XsReqFrame, requiredCap: "xs.v1"): Promise<XsResFrame>;
+  request(frame: ThrReqFrame, requiredCap: "thr.v1"): Promise<ThrResFrame>;
   request(
-    frame: LanReqFrame | HubCtlFrame | FsbReqFrame | TfaReqFrame | XsReqFrame,
+    frame: LanReqFrame | HubCtlFrame | FsbReqFrame | TfaReqFrame | XsReqFrame | ThrReqFrame,
     requiredCap: string,
-  ): Promise<LanResFrame | HubCtlAckFrame | FsbResFrame | TfaResFrame | XsResFrame> {
+  ): Promise<LanResFrame | HubCtlAckFrame | FsbResFrame | TfaResFrame | XsResFrame | ThrResFrame> {
     return new Promise((resolve, reject) => {
       if (this.link !== "live" || !this.helloCaps.includes(requiredCap)) {
         reject(new Error(`E_NO_CAP: ${requiredCap}`));
@@ -472,7 +482,13 @@ class Connection implements HubConnection {
       }
       const rid = frame.rid;
       const deadlineMs =
-        frame.t === "fsb_req" ? 12_000 : frame.t === "xs_req" ? xsReqDeadlineMs(frame.op) : ADMIN_REQUEST_TIMEOUT_MS;
+        frame.t === "fsb_req"
+          ? 12_000
+          : frame.t === "xs_req"
+            ? xsReqDeadlineMs(frame.op)
+            : frame.t === "thr_req"
+              ? 5_000
+              : ADMIN_REQUEST_TIMEOUT_MS;
       const timer = unrefTimer(deadlineMs, () => {
         this.pending.delete(rid);
         reject(new Error("E_TIMEOUT: admin request timed out"));
@@ -678,6 +694,7 @@ class Connection implements HubConnection {
       case "fsb_res":
       case "lan_res":
       case "xs_res":
+      case "thr_res":
       case "hub_ctl_ack": {
         const p = this.pending.get(frame.rid);
         if (p !== undefined) {
@@ -748,6 +765,10 @@ class Connection implements HubConnection {
       case "sched_decide":
         // #61 C2: live-link-only, same shape as sched_run; no hook ⇒ the hub's ack wait settles it.
         if (this.link === "live") this.callBinding((b) => b.onSchedDecide?.(frame));
+        return;
+      case "thr_closed":
+        // fabric-thread §5.4: live-link-only, best effort, no reply; no hook (threads off) ⇒ ignored.
+        if (this.link === "live") this.callBinding((b) => b.onThrClosed?.(frame));
         return;
     }
   }

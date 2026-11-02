@@ -36,6 +36,9 @@ import type { JobRecord } from "../../bash/types.js";
 import { projectBashJobsDetail } from "./bash-jobs.js";
 import { parseMention, routeMention, type MentionRouteDeps } from "../../mention/mention.js";
 import { safeParseSessionMention } from "../../mention/session.js";
+import { splitRequestText } from "../protocol/feishu.js";
+import type { ThreadMeta } from "../protocol/thread.js";
+import type { ThreadEventInput, HandleEventResult } from "../../fabric/thread/engine.js";
 import type { MentionResultData } from "../protocol/messages.js";
 import type {
   CmdArgs,
@@ -109,7 +112,33 @@ export interface CommandHandlerDeps {
    *  (the web half of the `session_before_switch` window). Absent ⇒ the check never runs
    *  (byte-identical to the pre-feature path). */
   switchInFlight?: () => boolean;
+  /** fabric-thread arch r3 §6.1 (P3): the stack's thread routing surface, late-bound — `undefined`
+   *  ⇔ threads off / no live stack, and then this handler's prompt path is byte-identical to the
+   *  pre-feature form (the §6.1 step never runs: it is gated on `cmd.thread`, which only a
+   *  thr.v1-capable hub ever attaches, plus this port existing). */
+  threads?: () => ThreadPromptPort | undefined;
 }
+
+/** fabric-thread arch r3 §6.1/§9.1 (P3): what the §6.1 routing step needs from the stack's thread
+ *  surface — the engine decision, the §6.2 addressing-guard subscriber set, the §9.1 wrapper and
+ *  the §4.3 origin bookkeeping. Implemented by stack.ts's thread surface; consumed here only for
+ *  prompt routing. */
+export interface ThreadPromptPort {
+  handleEvent(input: ThreadEventInput): HandleEventResult;
+  /** Live ACTIVE subscribers of `h` (creation order) — the §6.2 guard + §9.1 wrapper source. */
+  subscribersOf(h: string): ReadonlyArray<{ runId: string; label: string; scope: string }>;
+  /** §9.1 encapsulated wrapper text (header/footer included; body verbatim). */
+  wrapEvent(args: { h: string; label: string; sender: string; sentAt: number; body: string }): string;
+  /** §4.3: record a feishu thread whose event just took the native path (subscribe "origin" source). */
+  noteNativeOrigin(h: string, label: string): void;
+  /** §4.3 candidates: feishu-thread events delivered to the main session, most recent last. */
+  origins(): ReadonlyArray<{ h: string; label: string; at: number }>;
+}
+
+/** fabric-thread arch r3 §6.7 (P3): the engine's first-reply outcomes, forwarded by the agent
+ *  wiring's sink onto the handler that holds the pending frame. */
+export type ThreadSettleOutcome =
+  { kind: "routed"; runs: ReadonlyArray<{ runId: string; label: string }> } | { kind: "native" } | { kind: "stale" };
 
 export interface InputEventLike {
   text: string;
@@ -143,6 +172,12 @@ export interface CommandHandler {
   handleBridgeLate(frame: CmdFrame, result: LedgerResult): void;
   /** §4.4 row 4: session_start/session_shutdown boundary. */
   onSessionBoundary(): void;
+  /** fabric-thread arch r3 §6.7 (P3): settle one pending thread-claimed prompt — the engine's
+   *  first reply, executed against the ORIGINAL cmd frame (ledger + cmd_result / native release /
+   *  E_STALE_CTX). `native` returns whether the re-check-and-re-dispatch succeeded (`false` ⇒ the
+   *  engine owes the hub E_STALE_CTX via its own stale channel). Unknown eventId ⇒ no-op (and a
+   *  native release counts as refused). */
+  threadSettle(eventId: string, outcome: ThreadSettleOutcome): boolean;
   /** web-hub-steer-recall plan §4.3 A2 / §5.3: the hold driver's `dispatchToPi` — P2-P5 only
    * (precondition check, ledger write, origin entry, the actual `sendUserMessage` call). Never
    * touches the hold buffer and never calls `onReturned` (D5: the driver owns both). Exposed on
@@ -202,6 +237,13 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
   const idleWatch = new Map<string, string>();
   /** runId -> cmdId of the in-flight (or late/hung) web steer holding that run's D15 slot. */
   const pendingSteerByRun = new Map<string, string>();
+  /** fabric-thread §6.1/§6.7 (P3): eventId -> the thread-claimed prompt awaiting the engine's
+   *  first reply (routed / native release / E_STALE_CTX), with the claim-time facts the release
+   *  path needs (full text + session + deliver — dispatchItem's structural subset). */
+  const pendingThreadFrames = new Map<
+    string,
+    { frame: CmdFrame; deliver: "steer" | "followUp"; sessionId: string; text: string }
+  >();
   /** Shared D15 bound: web steer/stop calls whose underlying promise timed out but is still pending. */
   let lateCount = 0;
 
@@ -368,6 +410,95 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
             });
           });
         return;
+      }
+    }
+    // fabric-thread arch r3 §6.1 (P3): the Thread routing step — mention 之后、topic-switch 之前,
+    // 只插入这一步. Whether the fast path is taken is decided SYNCHRONOUSLY: only a lane entry
+    // (R7) claims the frame; every native outcome falls through byte-for-byte (R0–R6), keeping
+    // the native path's sync semantics. `cmd.thread` rides ONLY on a thr.v1-capable hub's frames
+    // (P2) and `deps.threads` exists ONLY while the feature is on with a live stack — both off ⇒
+    // this block is unreachable and prompt handling stays byte-identical (G2a/G2b).
+    const threadMeta = (cmd as { thread?: ThreadMeta }).thread;
+    if (threadMeta !== undefined && isFeishuCmdOrigin(frame.origin)) {
+      let threadPort: ThreadPromptPort | undefined;
+      try {
+        threadPort = deps.threads?.();
+      } catch {
+        threadPort = undefined;
+      }
+      if (threadPort !== undefined) {
+        // §6.2: the first line must STRICTLY match the hub header (read-only — the body below is
+        // the payload, the header is never stripped). headerOk=false ⇒ R0 native.
+        const split = splitRequestText(cmd.text);
+        const headerOk = split !== undefined;
+        const body = split?.body ?? "";
+        let addressedOther = false;
+        if (headerOk) {
+          // §6.2 addressing guard (只让不改投): `@x` at the body start resolving via the mention
+          // registry to a run that is NOT a subscriber of this thread ⇒ the human named someone
+          // else — the event goes slow-path (R3).
+          const addressed = /^@([^\s]+)/.exec(body);
+          const target = addressed?.[1] !== undefined ? mentionDeps?.registry.resolve(addressed[1]) : undefined;
+          if (
+            target !== undefined &&
+            !threadPort.subscribersOf(threadMeta.h).some((s) => s.runId === (target as { runId: string }).runId)
+          )
+            addressedOther = true;
+        }
+        const result = threadPort.handleEvent({
+          eventId: frame.id,
+          h: threadMeta.h,
+          label: threadMeta.label,
+          sentAt: threadMeta.sentAt,
+          trustedOrigin: true,
+          hasThreadMeta: true,
+          // decode already enforced ThreadMetaSchema (closed schema) — an invalid field would
+          // have dropped the whole frame, so a present meta is valid by construction.
+          threadMetaValid: true,
+          headerOk,
+          bypass: threadMeta.bypass === true,
+          addressedOther,
+          frameDeadlineMs: frame.deadlineMs,
+          text: threadPort.wrapEvent({
+            h: threadMeta.h,
+            label: threadMeta.label,
+            sender: split?.header.sender ?? "",
+            sentAt: threadMeta.sentAt,
+            body,
+          }),
+        });
+        if (result.action === "lane") {
+          deps.ledger.updatePrompt(frame.id, { promptState: "observed", behavior: cmd.deliver }, deps.now());
+          pendingThreadFrames.set(frame.id, {
+            frame,
+            deliver: cmd.deliver,
+            sessionId: deps.getSessionId(),
+            text: cmd.text,
+          });
+          deps.onChanged();
+          return; // the reply comes later — engine §6.7 first reply via threadSettle
+        }
+        if (result.action === "deduped") {
+          if (result.replied) {
+            // §6.5 dedup: the original event already took its first reply — NEVER re-fan-out.
+            // Retryable stale lets the hub re-prompt the human (a resend mints a NEW event id).
+            return settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
+          }
+          // the original's reply is still pending — claim this frame so the single engine reply
+          // settles the newest registration; the ledger's dup path normally catches this first.
+          deps.ledger.updatePrompt(frame.id, { promptState: "observed", behavior: cmd.deliver }, deps.now());
+          pendingThreadFrames.set(frame.id, {
+            frame,
+            deliver: cmd.deliver,
+            sessionId: deps.getSessionId(),
+            text: cmd.text,
+          });
+          deps.onChanged();
+          return;
+        }
+        // R0–R6 native: the event IS being delivered to the main session — §4.3 origin bookkeeping
+        // (bypass frames included: /main events reach the main session too).
+        threadPort.noteNativeOrigin(threadMeta.h, threadMeta.label);
       }
     }
     // topic-switch plan P4 (D2, #5; arch §15 r2 row 1): the gate is optional/late-bound and only
@@ -1129,6 +1260,50 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     dispatchHeld(item) {
       return dispatchHeld(item);
     },
+    threadSettle(eventId, outcome) {
+      const pending = pendingThreadFrames.get(eventId);
+      if (pending === undefined) return false; // no live registration: a native release is a refusal
+      pendingThreadFrames.delete(eventId);
+      const { frame, deliver, sessionId, text } = pending;
+      if (outcome.kind === "routed") {
+        // §6.7 首次回复 routed 分支: consumed releases the retained text immediately (the
+        // elsewhere() precedent — it can never mis-attribute a later same-text input).
+        deps.ledger.updatePrompt(frame.id, { promptState: "consumed" }, deps.now());
+        settleAndReply(frame, {
+          ok: true,
+          data: {
+            op: "prompt",
+            delivery: "observed",
+            behavior: deliver,
+            thread: { outcome: "routed", runs: outcome.runs.map((r) => ({ runId: r.runId, label: r.label })) },
+          },
+        });
+        return true;
+      }
+      if (outcome.kind === "native") {
+        // §6.7 all-none: the SAME re-check-then-re-dispatch path as createPromptRelease().current()
+        // — preconditions re-read FRESH (a release landing after the session moved on is refused,
+        // and the engine then owes the hub E_STALE_CTX). The observation reply machinery mirrors
+        // the native path exactly (register BEFORE send — the input event can fire synchronously).
+        try {
+          const ctx2 = deps.getCtx();
+          if (
+            ctx2 === undefined ||
+            deps.getSessionId() !== sessionId ||
+            deps.compactionState.manualCompacting ||
+            deps.switchInFlight?.() === true
+          )
+            return false;
+        } catch {
+          return false;
+        }
+        registerObservation(frame, deliver);
+        return dispatchItem({ cmdId: frame.id, sessionId, text, deliver, origin: frame.origin }) === "sent";
+      }
+      // stale — E_STALE_CTX{retryable:true, effect:"none"} (§6.5 dispose / §6.7 复检失败)
+      settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
+      return true;
+    },
     dispose() {
       for (const p of pendingObservation.values()) {
         try {
@@ -1140,6 +1315,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       pendingObservation.clear();
       idleWatch.clear();
       pendingSteerByRun.clear();
+      pendingThreadFrames.clear();
     },
   };
 }

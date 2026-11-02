@@ -131,4 +131,21 @@ describe("activation call-trace golden", () => {
     expect(e.calls).toContain("registerTool(Agent)");
     expect(e.calls.some((c) => c === "registerCommand(agent)")).toBe(false);
   });
+
+  it("fabric-thread arch §9.3 (P3): thread-main registers `thread` right after the fabric tool group; thread-child gains no registration", async () => {
+    const main = await record("thread-main");
+    const child = await record("thread-child");
+    // 主会话：post-guard 的 thread 工具 + /thread 命令都存在，且 registerTool(thread) 紧跟
+    // message_channel（无则应跟在 fabric 工具组末尾——thread-main 恒开 channel，取前一分支）。
+    expect(main.calls).toContain("registerTool(thread)");
+    expect(main.calls).toContain("registerCommand(thread)");
+    const mc = main.calls.findIndex((c) => c === "registerTool(message_channel)");
+    expect(mc).toBeGreaterThanOrEqual(0);
+    const thread = main.calls.findIndex((c) => c === "registerTool(thread)");
+    expect(thread).toBeGreaterThan(mc);
+    expect(main.calls.slice(mc + 1, thread).filter((c) => c.startsWith("registerTool("))).toEqual([]);
+    // 子会话：thread 工具走 customTools 注入（runtime-adapter），不经 registerTool ——
+    // activation 零新增注册（§9.2；thread-child 的完整 trace 由上面的 golden 比对钉住）。
+    expect(child.calls.some((c) => c === "registerTool(thread)" || c === "registerCommand(thread)")).toBe(false);
+  });
 });

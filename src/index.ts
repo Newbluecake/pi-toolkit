@@ -62,6 +62,8 @@ import type { ScheduleConfirm } from "./schedule/agent/confirm.js";
 import { wireScheduleSurface } from "./schedule/agent/surface.js";
 import { createScheduleCommand } from "./commands/schedule.js";
 import { createScheduleTool } from "./tools/schedule-tool.js";
+import { createThreadTool } from "./tools/thread-tool.js";
+import { createThreadCommand } from "./commands/thread.js";
 import { scheduleSection } from "./sysprompt/schedule-section.js";
 import { renderXsMessage } from "./fabric/xs/render.js";
 import { renderToolkitMessage, TOOLKIT_LABELLED_CUSTOM_TYPES } from "./ui/toolkit-message-renderer.js";
@@ -530,6 +532,10 @@ export default function activate(rawPi: ExtensionAPI): void {
     return;
   }
 
+  // fabric-thread P3（arch §11.1）：唯一门控（secure 域的 D8 强制关闭已在设置层完成）。
+  // 决定：栈面构造、主会话 thread 工具、/thread 命令、hello cap、HubConfig 键。
+  const threadsOn = settings.fabric.enabled && settings.fabric.threads.enabled;
+
   // scheduled-reports A0 (plan r3 §3/§12): post-guard, after the compat gate; default off ⇒ never
   // wired (no hook, no disk, no cap, no HubConfig key). Per-session agents are built by
   // buildSessionStack; the old global cron engine is retired.
@@ -603,6 +609,22 @@ export default function activate(rawPi: ExtensionAPI): void {
   }
 
   xs.registerSurface(pi);
+  // fabric-thread arch r3 §9.2/§9.3（P3）：主会话 `thread` 工具 — post-guard，紧跟 fabric 工具组
+  // （message_channel 之后；trace 断言钉住该顺序）。threads 关 ⇒ 不注册，工具表逐字节不变（G2a）。
+  if (threadsOn)
+    pi.registerTool(
+      createThreadTool({
+        current: () => holder.current?.threads,
+      }),
+    );
+  // fabric-thread P3：/thread 本地人命令（status/drop/sub），同一 threadsOn 门控。
+  if (threadsOn)
+    pi.registerCommand(
+      "thread",
+      createThreadCommand({
+        current: () => holder.current?.threads,
+      }),
+    );
   if (caps.canRenderEntries) {
     // Renderer lives in adapters/fabric-entry-renderer.ts and renders ONLY
     // delivered records: the fabric outbox store appends one entry per state
@@ -888,6 +910,9 @@ export default function activate(rawPi: ExtensionAPI): void {
       memoryWiring !== undefined ? { memoryBlock: (cwd: string) => memoryWiring?.renderForExternal(cwd) } : undefined,
       xs.stackInput(),
       scheduleWiring,
+      // fabric-thread P3（§11.1）：threads 开启时才传跨接线（replySink → web-hub 命令处理器；
+      // conn → 激活级 hub 连接）。关闭 ⇒ buildSessionStack 收到 undefined ⇒ 栈面缺席（G2a）。
+      threadsOn ? { replySink: () => webHubRef.current?.threadSink, conn: currentConnection } : undefined,
       settingsFile,
     );
     holder.current = stack;
@@ -992,6 +1017,21 @@ export default function activate(rawPi: ExtensionAPI): void {
       settings: settings.webHub,
       ...xs.webHubDeps(),
       feishuBot: settings.feishuBot,
+      // fabric-thread P3（§6.1/§7.1/§8.2）：栈面晚绑定、cap 门控、HubConfig 键。threads 关 ⇒
+      // 三者全部缺席，hello caps / status / spawn config 逐字节不变（G2a，A 类 golden 钉住）。
+      ...(threadsOn
+        ? {
+            threads: () => holder.current?.threads,
+            threadsCapOn: () => settings.fabric.enabled && settings.fabric.threads.enabled,
+            threadsHubConfig: () => ({
+              handbackWindowMin: settings.fabric.threads.handbackWindowMin,
+              startTimeoutMin: settings.fabric.threads.startTimeoutMin,
+              retainMin: settings.fabric.threads.retainMin,
+              replyPerThreadPerMin: settings.fabric.threads.replyPerThreadPerMin,
+              replyPerThreadPerHour: settings.fabric.threads.replyPerThreadPerHour,
+            }),
+          }
+        : {}),
       // scheduled-reports A0: present ⇔ schedule.enabled ∧ plain domain (router exists).
       ...(scheduleWiring?.webHubPort !== undefined ? { schedule: scheduleWiring.webHubPort } : {}),
       proxyWarnings: () => proxyWarnings,

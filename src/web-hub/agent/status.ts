@@ -19,6 +19,7 @@ import type {
   QuotaWire,
   CacheKeepaliveWire,
   StatusInfo,
+  ThreadStatusSlotWire,
   WorktreesWire,
 } from "../protocol/messages.js";
 import { STATUS_FEATURES_MAX_CHARS, STATUS_FEATURES_MAX_ITEMS } from "../protocol/messages.js";
@@ -49,6 +50,7 @@ export function readStatus(
   cacheKeepalive?: () => CacheKeepaliveWire | undefined,
   features?: () => string[] | undefined,
   archived?: () => ArchiveWire | undefined,
+  threads?: () => ThreadStatusSlotWire[] | undefined,
 ): StatusInfo {
   const status: StatusInfo = {
     leafId: safe(() => ctx.sessionManager.getLeafId(), null),
@@ -161,6 +163,14 @@ export function readStatus(
   if (archived !== undefined) {
     const wire = archived();
     if (wire !== undefined && wire.entries.length > 0) status.archived = wire;
+  }
+  // fabric-thread arch r3 §7.3 (P3): `status.threads` — the session's live thread subscriptions
+  // for `/cur` display. The caller threads the getter ONLY while threads are on, and the getter
+  // itself checks the LIVE link's `thr.v1` cap (§7.3 只在 hub cap 存在时发送) — either way off,
+  // the field stays absent, byte-equal to the pre-feature shape (G2a/G2b).
+  if (threads !== undefined) {
+    const slots = threads();
+    if (slots !== undefined && slots.length > 0) status.threads = slots;
   }
   return status;
 }

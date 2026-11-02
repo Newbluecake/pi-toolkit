@@ -482,15 +482,15 @@ describe("§7 wire contract (protocol/thread.ts + messages.ts)", () => {
   });
 });
 
-describe("governance trace: the thread profiles' P0 baseline (§9.3)", () => {
-  it("thread-main registers NO thread tool yet (it arrives in P3 — then this pin flips with the refreshed trace)", () => {
+describe("governance trace: the thread profiles' P3 baseline (§9.3)", () => {
+  it("thread-main registers the thread tool post-guard — P3 landed; this pin flipped together with the refreshed trace", () => {
     const main = TRACE["thread-main"]!;
-    const tools = main.calls.filter((c) => c.startsWith("registerTool("));
-    expect(tools.some((c) => c.includes("thread"))).toBe(false);
-    // P0-inert means the thread-main profile is byte-identical to `max` (threads.enabled flips
-    // nothing until P3 wires the tool / cap): a drift here means something jumped the gun.
-    expect(main.calls).toEqual(TRACE["max"]!.calls);
-    expect(main.phase2).toEqual(TRACE["max"]!.phase2);
+    expect(main.calls).toContain("registerTool(thread)");
+    expect(main.calls).toContain("registerCommand(thread)");
+    // P3: threads.enabled flips EXACTLY these two registrations vs `max` (tool + /thread command) —
+    // anything else drifting here means a surface jumped the gun (G2a).
+    const diff = main.calls.filter((c) => !TRACE["max"]!.calls.includes(c));
+    expect(diff).toEqual(["registerTool(thread)", "registerCommand(thread)"]);
   });
 
   it("thread-child gains NO thread registration (§9.2 customTools injection, never registerTool)", () => {

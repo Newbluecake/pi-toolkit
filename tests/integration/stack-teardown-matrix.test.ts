@@ -558,7 +558,6 @@ describe("teardown matrix: ordered calls per entry (FULL profile)", () => {
       HELD,
     ]);
   }, 60_000);
-
   it("path A alone (a rebuild with neither B nor C before it) also disposes the wake service through the mailbox", async () => {
     expect(await rebuildOnly()).toEqual([
       "build:g1:begin",
@@ -566,6 +565,58 @@ describe("teardown matrix: ordered calls per entry (FULL profile)", () => {
       "build:g2:begin",
       ...pathA("g1", "full"),
       "build:g2:end",
+    ]);
+  }, 60_000);
+});
+
+// fabric-thread arch r3 §9.4 (P3)：threads 三路都在 fabric（mailbox）之前 dispose。
+const THREADS = {
+  ...FULL,
+  fabric: { ...(FULL.fabric as Record<string, unknown>), threads: { enabled: true } },
+};
+/** 在 fabric.mailbox.dispose 前插入 threads.dispose（§9.4 A/B/C4 三列同一位）。 */
+const withThreads = (rows: readonly string[]): string[] =>
+  rows.flatMap((row) =>
+    row.endsWith(".fabric.mailbox.dispose") ? [row.replace(".fabric.mailbox.dispose", ".threads.dispose"), row] : [row],
+  );
+
+describe("teardown matrix: fabric-thread (arch r3 §9.4) — threads precede fabric on every path", () => {
+  it.each(["new", "resume", "fork"])(
+    "same-cwd %s: path C then A, threads.dispose before fabric.mailbox.dispose",
+    async (reason) => {
+      expect(await sameModuleSwitch(reason, THREADS)).toEqual([
+        ...startupLog(),
+        `-- session_shutdown(${reason})`,
+        ...withThreads(pathC("g1", reason)),
+        FREE,
+        `-- session_start(${reason})`,
+        "build:g2:begin",
+        ...withThreads(pathA("g1", "full", { fabricAlreadyDisposed: true })),
+        "build:g2:end",
+        HELD,
+      ]);
+    },
+    60_000,
+  );
+
+  it("path B (defensive): threads.dispose before fabric.mailbox.dispose", async () => {
+    expect(await defensive(THREADS)).toEqual([
+      ...startupLog(),
+      "-- session_start(new)",
+      ...withThreads(pathB("g1")),
+      "build:g2:begin",
+      ...withThreads(pathA("g1", "full", { fabricAlreadyDisposed: true })),
+      "build:g2:end",
+      HELD,
+    ]);
+  }, 60_000);
+
+  it("quit: path C with threads before fabric (no kill)", async () => {
+    expect(await quit(THREADS)).toEqual([
+      ...startupLog(),
+      "-- session_shutdown(quit)",
+      ...withThreads(pathC("g1", "quit")),
+      FREE,
     ]);
   }, 60_000);
 });

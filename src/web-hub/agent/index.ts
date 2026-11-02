@@ -28,6 +28,7 @@ import type {
   WebHubProxySettings,
   WebHubProxyWarning,
 } from "../../config/settings.js";
+import type { FeishuThreadsHubConfig } from "../protocol/feishu.js";
 import type { ObserveRunResult, RunObserverListener, RunSnapshot, RunStatus } from "../../core/types.js";
 import { isTerminalStatus } from "../../core/status.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
@@ -127,6 +128,9 @@ import { createCommandCapture, type CommandCapturePort } from "../../commands/ca
 import { createCommandRecorder, type CommandRecorder, type CommandRecorderDeps } from "./command-record.js";
 import { cmdHistoryStatusLevel, formatCmdHistoryStatusLines } from "./cmd-history-status.js";
 import { createCommandHandler, type InputEventLike, type MessageStartLike } from "./commands.js";
+import type { ThreadPromptPort } from "./commands.js";
+import type { ThreadCloseReason, ThreadStatusSlotWire } from "../protocol/thread.js";
+import { THREAD_CAP } from "../protocol/version.js";
 import { createCommandLedger } from "./ledger.js";
 import { createQueueMirror } from "./queue-mirror.js";
 import { createCompactionState } from "./compaction-state.js";
@@ -299,6 +303,15 @@ export interface QueryControlPort {
    * `QueryService.observe`'s synchronous four-state verdict. */
   observe?(runId: string, l: RunObserverListener): ObserveRunResult;
 }
+/** fabric-thread arch r3 §11.1 P3: the agent-wiring face of the stack's thread surface — prompt
+ *  routing (ThreadPromptPort, commands.ts) + the status slot + thr_closed. `ThreadStackSurface`
+ *  (stack.ts) satisfies this structurally; the agent wiring never imports the stack type. */
+export interface ThreadAgentPort extends ThreadPromptPort {
+  /** §7.3 `status.threads` 槽数据（hub cap 由本模块的 getter 检查）。 */
+  statusSlots(): ThreadStatusSlotWire[];
+  /** §5.4 `thr_closed`：结束订阅 + 给订阅者 steer 解绑通知。 */
+  threadClosed(h: string, reason: ThreadCloseReason): void;
+}
 export interface WebHubDeps {
   /** Top-level, non-live settings; only buildHubConfig consumes it. */
   feishuBot?: FeishuBotSettings;
@@ -372,6 +385,18 @@ export interface WebHubDeps {
    *  assigns the ref. Unset (topic-switch off, or not wired yet) ⇒ `commands.ts` never calls
    *  `tryClaim` at all — byte-identical to the pre-feature native/hold dispatch path. */
   promptGate?: () => PromptGatePort | undefined;
+  /** fabric-thread arch r3 §11.1 P3: the stack's thread surface, late-bound (`holder.current?.threads`).
+   *  Unset (threads off) ⇒ no §6.1 prompt step, no `status.threads`, no thr_closed handling —
+   *  byte-identical prompt handling (G2a). Structural: `ThreadStackSurface` (stack.ts) satisfies
+   *  this without importing it. */
+  threads?: () => ThreadAgentPort | undefined;
+  /** §7.1 agent cap gate: `fabric.enabled ∧ fabric.threads.enabled ∧ 非 secure` — computed at
+   *  ACTIVATE level by src/index.ts (settings + secure guards; NOT stack-dependent, so the cap
+   *  is stable across session rebuilds). Unset ⇒ `thr.v1` never advertised. */
+  threadsCapOn?: () => boolean;
+  /** §8.2 buildHubConfig's `feishuBot.threads` value (ALREADY-clamped window/reply params);
+   *  unset ⇒ the key stays absent (hub threads off, byte-identical). */
+  threadsHubConfig?: () => FeishuThreadsHubConfig | undefined;
   /** fabric phase-2 X2 (§11.1): the cross-session agent port. UNSET (xs off — the only state
    *  before XW threads it) ⇒ no `xs.v1` cap, no `xs_member` slot, no `HubConfig.crossSession`,
    *  no `StatusInfo.xs`, no deliver/ack path: the agent stays byte-identical to the pre-xs
@@ -435,6 +460,14 @@ export type LanAdminResult<T> =
 
 export interface WebHubControl {
   readonly capture?: CommandCapturePort;
+  /** fabric-thread arch r3 §6.7 (P3): the engine-reply sink — forwards the engine's first-reply
+   *  outcomes onto the live command handler (which holds the pending cmd frames). Threaded by
+   *  src/index.ts into buildSessionStack's StackThreadInput. Present iff deps.threads is set. */
+  readonly threadSink?: {
+    replyRouted(eventId: string, runs: ReadonlyArray<{ runId: string; label: string }>): void;
+    releaseToNative(eventId: string): boolean;
+    replyStaleCtx(eventId: string): void;
+  };
   /** web-hub-cmd-history plan §4.3 (A1): the command recorder — present iff
    *  `webHub.cmdHistory !== false` (the feature's agent-side switch). `src/index.ts` assigns it
    *  into its own `commandRecorderRef` exactly like `capture`. */
@@ -964,6 +997,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       deps.cacheKeepalive !== undefined ? cacheKeepaliveProjection : undefined,
       resumeFeatures,
       deps.archive !== undefined ? archiveProjection : undefined,
+      // fabric-thread §7.3 (P3): status.threads — the getter itself checks the LIVE link's
+      // `thr.v1` cap; absent getter (threads off) or absent hub cap ⇒ field absent, byte-equal.
+      threadsStatusProjection,
     );
     lastLeaf = s.leafId;
     // fabric phase-2 X2 (§4.4, P3): the display-only xs projection — absent while deps.xs is
@@ -1203,8 +1239,25 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // web-resume plan §2.5 step c: web prompts are refused (E_STALE_CTX, effect none) while a
     // resume switch is between its execution-point checks and its post-switch verification.
     switchInFlight: () => resumeExec.switchInFlight(),
+    // fabric-thread P3 §6.1: the stack's thread surface for the prompt-routing step — unset
+    // (threads off) keeps handlePrompt byte-identical.
+    ...(deps.threads !== undefined ? { threads: () => deps.threads?.() } : {}),
   });
   bridgeLate.current = (frame, result) => commandHandler.handleBridgeLate(frame, result);
+  // fabric-thread arch r3 §6.7 (P3): the engine-reply sink — the engine's first-reply outcomes
+  // land on the handler that holds the pending cmd frames. Exposed on the control object for
+  // src/index.ts to thread into buildSessionStack (StackThreadInput.replySink).
+  const threadSink =
+    deps.threads !== undefined
+      ? {
+          replyRouted: (eventId: string, runs: ReadonlyArray<{ runId: string; label: string }>) =>
+            commandHandler.threadSettle(eventId, { kind: "routed", runs }),
+          releaseToNative: (eventId: string) => commandHandler.threadSettle(eventId, { kind: "native" }),
+          replyStaleCtx: (eventId: string) => {
+            commandHandler.threadSettle(eventId, { kind: "stale" });
+          },
+        }
+      : undefined;
 
   // §4.7 step 4 (A6): the hold driver — `undefined` while `holdWired(settings)` is false (no
   // handlers registered below, no cap advertised, prompts take the native path unconditionally).
@@ -1313,6 +1366,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           onSchedDecide: (frame: SchedDecideFrame) => schedulePort.onSchedDecide(frame),
         }
       : {}),
+    // fabric-thread P3 §5.4: thr_closed → end subscriptions + 解绑 notices. No hook (threads
+    // off) ⇒ ignored (the hub never sends it to an agent without thr.v1 anyway).
+    ...(deps.threads !== undefined
+      ? {
+          onThrClosed: (frame: import("../protocol/thread.js").ThrClosedFrame) =>
+            deps.threads?.()?.threadClosed(frame.h, frame.reason),
+        }
+      : {}),
     onCmd: (frame) => {
       // dialog_answer/dialog_cancel are routed straight to the dialog bridge (C2's `dialogs.ts`) —
       // never through `commandHandler`, which would otherwise have to special-case them right back
@@ -1367,6 +1428,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             deps.cacheKeepalive !== undefined ? cacheKeepaliveProjection : undefined,
             resumeFeatures,
             deps.archive !== undefined ? archiveProjection : undefined,
+            threadsStatusProjection,
           ),
           fleet: projectFleet(snaps, now(), deps.fleetTypeOf),
         }),
@@ -1565,6 +1627,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         staleMessageS: bot.staleMessageS,
         files: { ...bot.files },
       };
+      // fabric-thread arch r3 §4.2/§8.2 (P3)：`feishuBot.threads` 键的存在即 hub 侧开关。只写
+      // clamp 后的窗口/回帖参数（同一 HubConfig 喂给本 agent 拉起的 hub ⇒ 残余同 R11）；
+      // threads 关闭 ⇒ 键缺席 ⇒ hub 字节一致（G2a），P2 休眠唤醒点即在此处接通。
+      const thrCfg = deps.threadsHubConfig?.();
+      if (thrCfg !== undefined) config.feishuBot.threads = thrCfg;
     }
     return config;
   };
@@ -1609,6 +1676,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // scheduled-reports A0 (§10.1) + #61 C2 (sched.confirm.v1): tail-appended, only while the
     // schedule router exists.
     if (schedulePort !== undefined) caps.push(...SCHED_AGENT_CAPS, SCHED_CONFIRM_CAP);
+    // fabric-thread arch r3 §7.1 (P3): the agent-side `thr.v1` cap — `fabric.enabled ∧
+    // fabric.threads.enabled ∧ 非 secure`, computed at ACTIVATE level by src/index.ts
+    // (secure domains force threads off in the settings parser already, D8/I11). Tail-appended
+    // like xs/sched. Off ⇒ absent ⇒ the hub never attaches `cmd.thread` (G2a/G2b).
+    if (deps.threadsCapOn?.() === true) caps.push(THREAD_CAP);
     return caps;
   };
 
@@ -2126,6 +2198,18 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     });
 
   const admin = createAdminCommands();
+  const threadsStatusProjection =
+    deps.threads !== undefined
+      ? (): ThreadStatusSlotWire[] | undefined => {
+          const c = conn;
+          if (c === undefined || c.status().state !== "live" || !c.caps.includes(THREAD_CAP)) return undefined;
+          try {
+            return deps.threads?.()?.statusSlots();
+          } catch {
+            return undefined;
+          }
+        }
+      : undefined;
   return {
     // todo #32 P0 fix: without this, `src/index.ts`'s `if (webHubRef.current.capture !== undefined)
     // commandCaptureRef.current = webHubRef.current.capture;` line never fires, so the web call
@@ -2135,6 +2219,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // byte-identically once the ref is actually populated.
     capture: commandCapture,
     ...(commandRecorder !== undefined ? { recorder: commandRecorder } : {}),
+    // fabric-thread P3: exposed for src/index.ts → buildSessionStack (StackThreadInput.replySink).
+    ...(threadSink !== undefined ? { threadSink } : {}),
     internalExec: async (args, ctx) => {
       const parts = args
         .trim()

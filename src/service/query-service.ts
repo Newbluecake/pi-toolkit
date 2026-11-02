@@ -40,6 +40,15 @@ export interface QueryService {
     origin?: { level: number },
   ): Promise<{ ok: true } | { ok: false; reason: "not_running" | "steer_timeout" | "steer_rejected"; detail?: string }>;
   /**
+   * fabric-thread arch r3 §6.4 (P3): the thread-dedicated steer — disposition-preserving and
+   * bounded by `capMs` (the caller derives it from the event's remaining budget). Resolves with
+   * pi's QueuedInputDisposition STRING (`"queued"`/`"handled"` — engine §6.4 mapping); rejects on
+   * timeout / no active session / registry miss. Existing `steer()` semantics untouched.
+   * OPTIONAL so every pre-existing fake/forwarder stays a valid QueryService (holder.ts, tests);
+   * the implementation always provides it, and only the thread engine calls it.
+   */
+  steerThread?(runId: RunId, text: string, capMs: number): Promise<string>;
+  /**
    * fleet-drawer plan §4.1: read-only peek at a running run's current
    * persisted branch, for live-run transcript snapshots. `undefined` when
    * the runner cannot serve it (unknown/terminal/handle-less run, or the
@@ -79,6 +88,14 @@ export interface QueryServiceDeps {
    * caller-supplied origin level or `undefined` (= the root's level, resolved by the wiring). Absent ⇒ wake off.
    */
   onSteered?: (runId: RunId, originLevel: number | undefined) => void;
+  /**
+   * fabric-thread arch r3 §6.4 (P3): the bounded, disposition-preserving thread-steer channel —
+   * stack.ts wires this to `RuntimeRunner.steerThreadRun` (the Runner port itself stays untouched:
+   * `src/service/ports.ts` is outside P3's file domain, and the seam here keeps fakes/tests valid).
+   * Absent ⇒ `steerThread` rejects with `steer_unsupported` (never called in practice — the
+   * engine only exists while the stack wired it).
+   */
+  steerThread?: (runId: RunId, text: string, capMs: number) => Promise<string>;
 }
 const terminal = (status: RunStatus) =>
   status === "completed" || status === "failed" || status === "timed_out" || status === "aborted";
@@ -168,6 +185,15 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
       } catch (error) {
         return { ok: false, reason: "steer_rejected", detail: error instanceof Error ? error.message : String(error) };
       }
+    },
+    async steerThread(id, text, capMs) {
+      if (deps.steerThread === undefined) throw new Error("steer_thread unsupported (threads off)");
+      // §6.4 调用后： once the runner is invoked every failure (timeout included) is post-call —
+      // the ENGINE maps the rejection to Outcome `unknown`; only the registry miss below is
+      // pre-call-shaped, and the engine's facts check (steerable) has already gated that.
+      const snapshot = deps.registry.get(id);
+      if (!snapshot) throw new Error(`no run ${id}`);
+      return deps.steerThread(id, text, capMs);
     },
     // fleet-drawer plan §4.1: pure passthroughs — the runner is the single
     // source of truth for both (four-state verdict / branch availability);

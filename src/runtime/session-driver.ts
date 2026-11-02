@@ -82,6 +82,13 @@ export interface SessionHandle {
   /** Stage-1 input-budget preflight using pi's current effective prompt/tool definitions. */
   measureInputBudget?(prompt: string): { preBytes: number; preTokens: number };
   steer(text: string): Promise<void>;
+  /**
+   * fabric-thread arch r3 §6.4 (P3): the disposition-preserving steer variant. Resolves with
+   * pi's `QueuedInputDisposition` STRING (`"handled" | "queued"` — the engine maps it to an
+   * Outcome; an unknown future value degrades to `unknown`, never throws on its own). Absent on
+   * fakes/older handles ⇒ the caller falls back to `steer()` and reports `"queued"`.
+   */
+  steerDisposition?(text: string): Promise<string>;
   requestAbort(): Promise<void>;
   dispose(): DisposeReport;
   readonly killableHandles: ReadonlySet<KillableHandle>;
@@ -452,6 +459,16 @@ class PiSessionHandle implements SessionHandle {
    */
   steer(text: string): Promise<void> {
     return this.session.steer(text).then(() => undefined);
+  }
+  /** fabric-thread §6.4 (P3): pi 1.0+ `AgentSession.steer()` resolves to the per-input
+   *  `QueuedInputDisposition`; thread routing NEEDS the raw value (`queued` ⇒ Outcome `queued`,
+   *  `handled` ⇒ `unknown` — never a safe-fallback proof, r3-3). Coerce through `String()` so an
+   *  unknown future disposition degrades instead of throwing; never rejects on its own. */
+  steerDisposition(text: string): Promise<string> {
+    return this.session.steer(text).then(
+      (disposition: unknown) => (typeof disposition === "string" ? disposition : String(disposition ?? "unknown")),
+      (error: unknown) => Promise.reject(error),
+    );
   }
   requestAbort() {
     this.session.abort();

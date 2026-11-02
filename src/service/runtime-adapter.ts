@@ -57,6 +57,7 @@ import { createAgentTool, type NestedSpawnPort } from "../tools/agent-tool.js";
 import { createStructuredOutputTool } from "../tools/structured-output-tool.js";
 import { createMessageAgentTool } from "../tools/message-agent-tool.js";
 import { createSetModelTool } from "../tools/set-model-tool.js";
+import { createThreadChildTool } from "../tools/thread-child-tool.js";
 import type { NodeRef } from "../core/message.js";
 import type { FabricRouter } from "../fabric/router.js";
 import { createMentionChannel } from "../fabric/mention.js";
@@ -136,6 +137,14 @@ export interface RuntimeAdapterDeps {
       query: () => QueryService | undefined;
       spawn: () => SpawnService | undefined;
     };
+  };
+  /** fabric-thread arch r3 §5.3/§9.2 (P3): the stack's thread surface — present ⇔ threads on.
+   * Carries the child-closure tool factory inputs (engine ops + hub link) and the §5.1
+   * direct-run fact recorder; absence keeps this adapter's injections and the tool-scope
+   * policy byte-identical (no `extraReserved`, no `thread` grant — G2a). */
+  threads?: {
+    childOps(runId: string, label: string): import("../tools/thread-child-tool.js").ThreadChildOps;
+    noteRunSpec(runId: string, facts: { callerOwned: boolean; external: boolean }): void;
   };
   /**
    * Forwarded to RunnerDeps.onReaped (runner calls it after physical reap / late disposal).
@@ -792,6 +801,34 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         if (!readonlyDomain && !isExternal && (deps.childSwitchContextGrant?.() ?? false)) {
           grantedReserved.push("switch_context");
         }
+        // fabric-thread arch r3 §5.3/§9.2/§5.1 (P3): the child `thread` closure — injected into
+        // every DIRECT-dispatch run (非 readonly、非 external、非 callerOwned、非嵌套)；readonly
+        // 直派 run 只 reserve 不 grant 不注入（下方 extraReserved）；workflow/嵌套/external 不
+        // reserve（同名 MCP 工具不受影响）。宿主闭包 + 代际检查，不依赖子会话 session_shutdown。
+        const threadsDeps = deps.threads;
+        const threadDirect =
+          threadsDeps !== undefined &&
+          !isExternal &&
+          spec.request.callerOwned !== true &&
+          spec.request.parentRunId === undefined;
+        if (threadsDeps !== undefined) {
+          // §5.1 direct 判定源：非直派（callerOwned/嵌套/external）记录在案；直派显式写 false
+          // （等价于无记录，但让终态清理的 delete 恒有目标）。
+          threadsDeps.noteRunSpec(spec.runId, {
+            callerOwned: spec.request.callerOwned === true || spec.request.parentRunId !== undefined,
+            external: isExternal,
+          });
+        }
+        if (threadDirect && !readonlyDomain) {
+          customTools.push(
+            createThreadChildTool({
+              runId: spec.runId,
+              label: spec.request.label ?? spec.runId,
+              ops: threadsDeps.childOps(spec.runId, spec.request.label ?? spec.runId),
+            }),
+          );
+          grantedReserved.push("thread");
+        }
         if (customTools.length)
           sessionSpec = { ...sessionSpec, customTools: [...(sessionSpec.customTools ?? []), ...customTools] };
         // M1 (set_model review): pi filters customTools against the session's
@@ -929,11 +966,16 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                 ? buildToolScopePolicy({
                     tools: READONLY_DOMAIN_TOOLS,
                     granted: readonlyHasSchema ? ["StructuredOutput"] : [],
+                    // fabric-thread §9.2（P3）：readonly 直派 run 只 reserve、不 grant、不注入。
+                    ...(threadDirect ? { extraReserved: ["thread"] } : {}),
                     ...(readonlyProvenance ? { provenance: readonlyProvenance } : {}),
                   })
                 : buildToolScopePolicy({
                     ...(spec.type.tools ? { tools: spec.type.tools } : {}),
                     granted: grantedReserved,
+                    // fabric-thread §9.2（P3）：直派 run reserve `thread`（granted 的除外照样剥离
+                    // 未授权同名工具；非直派不 reserve，同名 MCP 工具不受影响）。
+                    ...(threadDirect ? { extraReserved: ["thread"] } : {}),
                   }),
               enforcer: createToolScopeEnforcer({
                 // TS4: never silent. Note: §7.5's literal "WARN + diag.degraded"

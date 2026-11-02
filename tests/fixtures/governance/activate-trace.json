@@ -887,6 +887,8 @@
       "registerTool(message_session)",
       "registerTool(message_channel)",
       "registerCommand(fabric)",
+      "registerTool(thread)",
+      "registerCommand(thread)",
       "registerEntryRenderer(subagent:fabric)",
       "registerTool(Agent)",
       "registerTool(get_run_result)",
@@ -1005,7 +1007,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 246,
+    "count": 248,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",

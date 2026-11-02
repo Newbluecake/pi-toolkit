@@ -65,6 +65,7 @@ export function instrumentStack(probe: TeardownProbe, stack: any, gen: number): 
   on("keepalive", stack.keepalive, "dispose");
   on("quota", stack.quota, "dispose");
   on("dynamic", stack.dynamic, "dispose");
+  on("threads", stack.threads, "dispose"); // fabric-thread P3 (arch §9.4)
   on("load", stack.load, "dispose");
   on("rpc", stack.rpc, "close");
   on("external", stack.external, "dispose");
