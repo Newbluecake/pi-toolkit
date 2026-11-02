@@ -42,6 +42,52 @@ child session inherit the parent's `-e` extension list).
 
 **Legacy consult data (#40)**: the consult subsystem was removed. Old run entries may still carry `diag.experts/consults/consultOf/consultCache/consultThread/consultIdentityPrediction` and `dispatchMeta.abArm`; these are ignored on read (never projected into new journals), and `displayAgentType` folds the `consult:main-snapshot` sentinel to `main`. Retained assets: `src/runtime/cap-watcher.ts` (the cap watcher tidy uses) and `src/runtime/legacy-consult-forks.ts` (sweeps the old `<state>/cache/consult-sessions` fork dir; never creates it). Compat test: `tests/integration/consult-legacy-entries.test.ts`.
 
+**Structured-output repair turn** (`docs/dev/subagent-core/structured-output-repair-plan.md`): when a pi-path schema run's first
+`handle.prompt()` settles **completed** with nothing captured, `RuntimeRunner.run()` sends ONE extra prompt
+(`STRUCTURED_REPAIR_PROMPT`, `src/core/structured-repair.ts`) on the same `SessionHandle` — same runId, same generation,
+no watchdog disarm — between the first prompt's settle and `sealBeforeTerminal`/`prompt_settled`. Eligibility is decided
+SYNCHRONOUSLY by `planStructuredRepair` (order: cancelled/stopping/terminal → silent skip; already captured → silent skip;
+phase ≠ `model_turn` → `skipped_phase`; tool not in `getActiveTools()` → `skipped_tool`; window → `skipped_grace`/
+`skipped_budget`), so every skip path keeps pre-feature timing byte-identical. The adapter builds the runtime-only
+`ResolvedSpawnRequest.structuredRepair` spec (never sent to pi, never a `SpawnRequest` field — Gate A/B/C untouched) only for
+`!isExternal` schema runs; workflow children (`agent()` rejects `schema`, spawner-adapter never sets it), droid runs and
+caller-capable runs are therefore structurally outside the feature.
+
+Clock semantics (I1 — no free lifetime refill): the repair does NOT reset any sub-phase clock and dispatches no
+`phase_entered`; repair events only refresh `lastEventAt`. The repair's bounds are the EARLIER of the per-run budget and
+the WATCHDOG budget (`Watchdog.budget` — settings.budget, not the run budget): `phaseDueAt` in core folds both through
+`dueAtFor`. The window needs `min(effective deadline, sub-phase due) − tailMs(5s) − now ≥ 15s`, else it is skipped
+(`skipped_budget`); inside a grace window it is always skipped (`skipped_grace`). `windowDueAt = now + min(120s, available)`;
+the local CLOSE point is `min(windowDueAt, effectiveDeadline − tailMs, phaseDue − tailMs)` and is re-derived on every
+repair-phase event (a `tool_start`/`compaction_start` with a short budget pulls it in dynamically), always ≥ `tailMs` before
+anything the watchdog or the prompt guard could fire. The close timer reuses the Clock port (unref'd, bounded; cleared in
+`close()`/finally); the watchdog itself stays armed as the outer net.
+
+Settlement priority (re-checked synchronously right before the final dispatch): cancel/timeout/input-budget > context-switch
+self-check (`repairRan`-gated second `selfcheckErrorFor` pass) > completed → host schema policy. A repair prompt rejection,
+repair-turn error, local close or turn-cap hit is IGNORED — the run settles on the first prompt's completed outcome and
+`finalText`. The capture window (`captureOpen` in `runtime-adapter.ts`) is closed synchronously at (a) the local time close,
+(b) the 3-`turn_end` cap, (c) the settle dispatch, and (d) CANCELLATION — a signal listener registered before the repair
+prompt closes it the instant `abort()`/parent-abort/reaper runs, so a submission in the same synchronous stack is already
+rejected; values accepted before the close are kept (a submit-then-close tick still succeeds). An aborted repair run stays
+`aborted` even with a captured valid payload (user abort always wins). The tool set is NOT narrowed for the repair turn
+(cache invalidation outweighs the constraint); enforcement is the prompt + the 3-turn cap + the dynamic time window.
+
+Sub-session consumers under the "first settle → repair → run-terminal" sequence (plan §1g): child keepalive disposes itself
+on the FIRST `agent_settled` and never recovers during/after the repair (R7 — accepted; the repair is an active turn under
+120s); context-switch child still self-checks (a switch inside the repair turn fails the run — see above); sysprompt hub
+folds the repair prompt as a new user request; traffic child drops per-prompt tickets; bash settle-hold is sealed after the
+repair (sealBeforeTerminal); jev does one extra reinject/recall (R6); date may inject per its own rules. Caller caps still
+count the repair turn: `createCapWatcher` sees its `turn_start` and a capped run aborts as usual (R3).
+
+Observability: the failure suffix (`(after one repair turn)` / `skipped:*` variants, `structuredRepairSuffix`) only affects
+the `captured === undefined` branch of `applyStructuredOutputPolicy`'s 5th optional param; `RunDiagnostics.structuredRepair`
+(`"succeeded" | "failed"`) is written ONLY by the adapter's post-policy `store.put` (never journaled, never in StatusInfo or
+`get_run_result` — R8) and only when a repair turn actually ran. Tests: `tests/core/structured-repair.test.ts` (pure
+arithmetic), `tests/service/runtime-adapter-structured-repair.test.ts` (23 cases over a fake handle with a REAL late-bound
+watchdog), `tests/workflow/structured-repair-not-applied.test.ts` + spawner/agent-opts assertions, and
+`tests/integration/structured-repair-real-session.test.ts` (real AgentSession + real `wireChildSession`).
+
 ## src/service/
 
 `src/service/` — spawn/query services, run registry, target resolution (exact → prefix → label), and the global background-status provider shared with feishu-notify.
