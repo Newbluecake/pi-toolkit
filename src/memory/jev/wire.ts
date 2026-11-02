@@ -129,9 +129,10 @@ import {
   type ProbeFs,
 } from "./probes.js";
 import { redactForJev } from "./redact.js";
+import { isPureReadonlyShell } from "./readonly.js";
 import { markStale, runReviewPass } from "./review.js";
 import { createSegmentState, recallRecord, type BranchEntryLike, type SegmentState } from "./segment.js";
-import { parseShell } from "./shell-parse.js";
+import { parseShell, type ParseShellResult } from "./shell-parse.js";
 import { tagBulk, taggableEntries, tagOne } from "./tagging.js";
 import { mergeTaxonomy } from "./taxonomy.js";
 
@@ -552,7 +553,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   let truncated: { from: number; to: number } | undefined;
   let errorSignatures = new Set<string>();
   let errorAsks = 0;
-  const parsedCache = new Map<string, readonly SimpleCommand[]>();
+  const parsedCache = new Map<string, ParseShellResult>();
   const dataCache = new Map<string, { at: number; corpus: Corpus }>();
   const anchors = new Map<EntryHash, { file: string; section: string; heading?: string; ordinal: number }>();
   // J7 gate state (all closure-owned, I4): verdict cache (64 / 10min /
@@ -1247,17 +1248,19 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     readonly info: JevRenderInfo | undefined;
   }
 
-  const parsedFor = (event: ToolCallEvent): readonly SimpleCommand[] | undefined => {
+  const parseResultFor = (event: ToolCallEvent): ParseShellResult | undefined => {
     const input = event.input as Record<string, unknown>;
     if (typeof input["command"] !== "string" || event.toolName === "memory") return undefined;
-    let parsed = parsedCache.get(event.toolCallId);
-    if (parsed === undefined) {
-      parsed = parseShell(input["command"]).commands;
+    let res = parsedCache.get(event.toolCallId);
+    if (res === undefined) {
+      res = parseShell(input["command"]);
       if (parsedCache.size >= PARSED_CACHE_MAX) parsedCache.clear();
-      parsedCache.set(event.toolCallId, parsed);
+      parsedCache.set(event.toolCallId, res);
     }
-    return parsed;
+    return res;
   };
+
+  const parsedFor = (event: ToolCallEvent): readonly SimpleCommand[] | undefined => parseResultFor(event)?.commands;
 
   const isReadOnlyTool = (tool: string, input: Record<string, unknown>): boolean => {
     if (GATE_READ_ONLY_TOOLS.has(tool) || /^todo/i.test(tool)) return true;
@@ -1283,6 +1286,13 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     // 2. read-only tools.
     const input = event.input as Record<string, unknown>;
     if (isReadOnlyTool(event.toolName, input)) return undefined;
+    // 2b. purely read-only bash chains — the top gate false-positive shape
+    //     (`git status`/`log`/`reflog`/`stash list` tripping git-index-race
+    //     rules). Deterministic whitelist over every parsed segment (command
+    //     substitutions included), zero awaits; a failed parse, any redirect
+    //     or any write-ish segment keeps the normal gate path.
+    const readonlyRes = parseResultFor(event);
+    if (readonlyRes !== undefined && isPureReadonlyShell(readonlyRes)) return undefined;
     const c = corpusFor(cwd);
     if (c === undefined) return undefined;
     // 3. at least one HIGH-risk tag matcher hits (shell-parse based:
@@ -1757,7 +1767,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
               {
                 tool: event.toolName,
                 input: event.input,
-                ...(parsedCache.has(event.toolCallId) ? { parsed: parsedCache.get(event.toolCallId)! } : {}),
+                ...(parsedCache.has(event.toolCallId) ? { parsed: parsedCache.get(event.toolCallId)!.commands } : {}),
               },
               c.taxonomy,
             );

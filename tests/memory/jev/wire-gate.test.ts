@@ -320,6 +320,100 @@ describe("coarse filter — five steps, all synchronous (zero await)", () => {
   });
 });
 
+// ───────────── coarse filter step 2b — purely read-only bash chains ─────────────
+
+describe("coarse filter step 2b — purely read-only bash chains ⇒ sync pass; write paths unchanged", () => {
+  /** User high-risk tag whose matchers catch read-only git queries — the
+   *  real-world false-positive shape (git-index-race rules). */
+  const raceTaxonomy = (): void => {
+    mkdirSync(join(memDir, ".jev"), { recursive: true });
+    writeFileSync(
+      join(memDir, ".jev", "taxonomy.json"),
+      JSON.stringify({
+        v: 1,
+        disabledPresets: [],
+        tags: [
+          {
+            id: "git-index-race",
+            label: "git index race",
+            description: "release in progress: no command may touch the git index.",
+            risk: "high",
+            source: "user",
+            rev: 1,
+            match: {
+              commands: [
+                "git status",
+                "git log",
+                "git reflog",
+                "git diff",
+                "git show",
+                "git stash",
+                "git branch",
+                "git tag",
+              ],
+            },
+          },
+        ],
+      }),
+    );
+  };
+
+  test("screenshot case and friends ⇒ sync pass (no Promise, no Jev call, no git probe)", () => {
+    raceTaxonomy();
+    const h = harness({ proc: procRelease() });
+    expect(
+      h.callRaw("cd x && git status --short; git stash list; git log --oneline -1; git reflog -3"),
+    ).toBeUndefined();
+    for (const cmd of [
+      "git status",
+      "git diff HEAD~1",
+      "git show HEAD:package.json",
+      "git branch -a",
+      "git tag -l",
+      "cat a | grep b | head -5",
+      "echo $(git status)",
+      "ls -la",
+    ]) {
+      expect(h.callRaw(cmd), cmd).toBeUndefined();
+    }
+    expect(h.fake.calls).toHaveLength(0);
+    expect(h.gitCalls).toHaveLength(0);
+  });
+
+  test("control: the same tag DOES gate these shapes once the exemption cannot apply", async () => {
+    raceTaxonomy();
+    const h = harness({ proc: procRelease() });
+    // redirect ⇒ argv alone proves nothing ⇒ no exemption ⇒ gated (and the
+    // matcher still sees `git status` after the redirect is dropped).
+    // (ok=false shapes are covered in readonly.test.ts: the wire matcher
+    // itself never hits them — degraded substring mode needs an absent
+    // parse cache — so they pass exactly as before this change.)
+    const r = await h.call("git status > /tmp/jev-ctl");
+    expect(r?.block).toBe(true);
+    expect(h.gateCalls()).toHaveLength(1);
+  });
+
+  test("mixed chains and write substitutions keep the full gate path", async () => {
+    raceTaxonomy();
+    const h = harness({ proc: procRelease() });
+    const mixed = await h.call("git status && git commit -m x");
+    expect(mixed?.block).toBe(true);
+    const subst = await h.call("echo $(git commit -m x)");
+    expect(subst?.block).toBe(true);
+    const stash = await h.call("git stash push -m x");
+    expect(stash?.block).toBe(true);
+    // blocker r_E4YT0QF5: double-quoted substitution is invisible to the
+    // parser ⇒ residue ⇒ no read-only exemption ⇒ gated like any write
+    const quoted = await h.call('git status "$(git commit -m x)"');
+    expect(quoted?.block).toBe(true);
+    expect(h.gateCalls()).toHaveLength(4);
+    const programs = h.gateCalls().map((c) => (c.state as Record<string, unknown>)["programs"]);
+    expect(programs[0]).toEqual(["git commit", "git status"]); // both segments judged (sorted shape)
+    expect(programs[1]).toEqual(["echo", "git commit"]); // inner substitution runs for real
+    expect(programs[2]).toEqual(["git stash"]); // `git stash` ≠ `git stash list`
+  });
+});
+
 // ───────────────────────────── Jev judgment tier (§6.4.4) ─────────────────────────────
 
 describe("Jev judgment tier", () => {

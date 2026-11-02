@@ -23,6 +23,12 @@ export interface ParseShellResult {
   /** false ⇒ quotes/parens were unbalanced etc.; `commands` is best-effort. */
   readonly ok: boolean;
   readonly commands: readonly SimpleCommand[];
+  /** A `<`/`>` redirect (incl. `>>`, heredocs, `2>&1`; process substitution
+   *  `<( … )` is not one) was seen anywhere — top level or nested. Redirects
+   *  are dropped together with their target, so an argv-only view of a
+   *  redirect-bearing command is incomplete: read-only whitelists must not
+   *  exempt it. */
+  readonly hasRedirect: boolean;
 }
 
 const MAX_INPUT_UNITS = 8_192; // 8KB window (UTF-16 units — cheap, total)
@@ -34,6 +40,11 @@ const DURATION_RE = /^[0-9]+(?:\.[0-9]+)?[smhd]?$/;
 
 class ShellParseError extends Error {}
 
+/** Cross-recursion flag holder: set when the tokenizer drops a redirect. */
+interface ParseFlags {
+  redirect: boolean;
+}
+
 // ───────────────────────────── tokenizer ─────────────────────────────
 
 type Token = { kind: "word"; text: string } | { kind: "op"; text: string };
@@ -44,7 +55,7 @@ type Token = { kind: "word"; text: string } | { kind: "op"; text: string };
  *  word and any glued fd digit. Command substitutions `$( … )`, backticks
  *  and `<( … )` recurse via `parseInto` (their inner commands go straight
  *  into the shared sink) and leave an empty placeholder word. */
-function tokenize(src: string, depth: number, sink: SimpleCommand[]): Token[] {
+function tokenize(src: string, depth: number, sink: SimpleCommand[], flags: ParseFlags): Token[] {
   const tokens: Token[] = [];
   const pushWord = (text: string): void => {
     if (text !== "") tokens.push({ kind: "word", text });
@@ -60,7 +71,7 @@ function tokenize(src: string, depth: number, sink: SimpleCommand[]): Token[] {
     if (ch === "'") {
       const close = src.indexOf("'", i + 1);
       if (close === -1) throw new ShellParseError("unterminated single quote");
-      const [next, word] = slurpWord(src, close + 1, src.slice(i + 1, close), depth, sink);
+      const [next, word] = slurpWord(src, close + 1, src.slice(i + 1, close), depth, sink, flags);
       pushWord(word);
       i = next;
       continue;
@@ -80,14 +91,14 @@ function tokenize(src: string, depth: number, sink: SimpleCommand[]): Token[] {
       }
       if (i >= n) throw new ShellParseError("unterminated double quote");
       i++;
-      const [next, joined] = slurpWord(src, i, word, depth, sink);
+      const [next, joined] = slurpWord(src, i, word, depth, sink, flags);
       pushWord(joined);
       i = next;
       continue;
     }
     if (ch === "\\") {
       if (i + 1 >= n) throw new ShellParseError("trailing backslash");
-      const [next, word] = slurpWord(src, i + 2, src[i + 1]!, depth, sink);
+      const [next, word] = slurpWord(src, i + 2, src[i + 1]!, depth, sink, flags);
       pushWord(word);
       i = next;
       continue;
@@ -95,8 +106,8 @@ function tokenize(src: string, depth: number, sink: SimpleCommand[]): Token[] {
     if (ch === "`") {
       const close = src.indexOf("`", i + 1);
       if (close === -1) throw new ShellParseError("unterminated backtick");
-      parseInto(src.slice(i + 1, close).replace(/\\`/g, "`"), depth + 1, sink);
-      const [next, word] = slurpWord(src, close + 1, "", depth, sink);
+      parseInto(src.slice(i + 1, close).replace(/\\`/g, "`"), depth + 1, sink, flags);
+      const [next, word] = slurpWord(src, close + 1, "", depth, sink, flags);
       pushWord(word);
       i = next;
       continue;
@@ -104,8 +115,8 @@ function tokenize(src: string, depth: number, sink: SimpleCommand[]): Token[] {
     if (ch === "$" && src[i + 1] === "(") {
       const close = findCloseParen(src, i + 1);
       if (close === -1) throw new ShellParseError("unterminated $()");
-      parseInto(src.slice(i + 2, close), depth + 1, sink);
-      const [next, word] = slurpWord(src, close + 1, "", depth, sink);
+      parseInto(src.slice(i + 2, close), depth + 1, sink, flags);
+      const [next, word] = slurpWord(src, close + 1, "", depth, sink, flags);
       pushWord(word);
       i = next;
       continue;
@@ -143,11 +154,12 @@ function tokenize(src: string, depth: number, sink: SimpleCommand[]): Token[] {
       if (ch === "<" && src[i + 1] === "(") {
         const close = findCloseParen(src, i + 1);
         if (close === -1) throw new ShellParseError("unterminated <()");
-        parseInto(src.slice(i + 2, close), depth + 1, sink);
+        parseInto(src.slice(i + 2, close), depth + 1, sink, flags);
         i = close + 1;
         continue;
       }
       dropTrailingFd(); // `2>` — the fd digit is not an argument
+      flags.redirect = true; // dropped below ⇒ argv alone is not the whole story
       while (i < n && src[i] === ch) i++; // > >> < << <<<
       while (i < n && (src[i] === " " || src[i] === "\t")) i++;
       if (src[i] === "&") {
@@ -173,7 +185,7 @@ function tokenize(src: string, depth: number, sink: SimpleCommand[]): Token[] {
       i++;
       continue;
     }
-    const [next, word] = slurpWord(src, i, "", depth, sink);
+    const [next, word] = slurpWord(src, i, "", depth, sink, flags);
     pushWord(word);
     i = next;
   }
@@ -182,7 +194,14 @@ function tokenize(src: string, depth: number, sink: SimpleCommand[]): Token[] {
 
 /** Slurp the unquoted tail of a word that began as a quoted/escaped
  *  fragment, until a shell delimiter. */
-function slurpWord(src: string, i: number, prefix: string, depth: number, sink: SimpleCommand[]): [number, string] {
+function slurpWord(
+  src: string,
+  i: number,
+  prefix: string,
+  depth: number,
+  sink: SimpleCommand[],
+  flags: ParseFlags,
+): [number, string] {
   let word = prefix;
   const n = src.length;
   while (i < n) {
@@ -197,7 +216,7 @@ function slurpWord(src: string, i: number, prefix: string, depth: number, sink: 
     if (c === "$" && src[i + 1] === "(") {
       const close = findCloseParen(src, i + 1);
       if (close === -1) throw new ShellParseError("unterminated $()");
-      parseInto(src.slice(i + 2, close), depth + 1, sink);
+      parseInto(src.slice(i + 2, close), depth + 1, sink, flags);
       i = close + 1;
       continue;
     }
@@ -277,13 +296,18 @@ interface CwdBox {
 /** Group a token stream into simple commands. `(` `)` subshell groups
  *  recurse (their cwd changes stay local — a fresh box is passed down);
  *  every other operator flushes the current argv. */
-function tokensToCommands(tokens: readonly Token[], depth: number, sink: SimpleCommand[]): SimpleCommand[] {
+function tokensToCommands(
+  tokens: readonly Token[],
+  depth: number,
+  sink: SimpleCommand[],
+  flags: ParseFlags,
+): SimpleCommand[] {
   const commands: SimpleCommand[] = [];
   const cwdBox: CwdBox = { value: undefined };
   let argv: string[] = [];
   const flush = (): void => {
     if (argv.length === 0) return;
-    const built = buildCommand(argv, cwdBox, depth, sink);
+    const built = buildCommand(argv, cwdBox, depth, sink, flags);
     argv = [];
     if (built !== undefined) commands.push(built);
   };
@@ -306,7 +330,7 @@ function tokensToCommands(tokens: readonly Token[], depth: number, sink: SimpleC
           idx++;
         }
         // Fresh cwd box: `cd` inside the group does not leak out.
-        commands.push(...tokensToCommands(group, depth, sink));
+        commands.push(...tokensToCommands(group, depth, sink, flags));
         continue;
       }
       flush(); // ; && || | & newline all separate commands
@@ -328,6 +352,7 @@ function buildCommand(
   cwdBox: CwdBox,
   depth: number,
   sink: SimpleCommand[],
+  flags: ParseFlags,
 ): SimpleCommand | undefined {
   let argv = [...rawArgv];
   while (argv.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0]!)) argv.shift();
@@ -405,7 +430,7 @@ function buildCommand(
   const base0 = basename(argv[0]!);
   if (INTERPRETERS.has(base0)) {
     const script = interpreterScript(argv);
-    if (script !== undefined && depth < MAX_DEPTH) parseInto(script, depth + 1, sink);
+    if (script !== undefined && depth < MAX_DEPTH) parseInto(script, depth + 1, sink, flags);
   }
 
   const program = programIdentity(argv);
@@ -481,7 +506,7 @@ export function programIdentity(argv: readonly string[]): string {
 
 /** Parse one (possibly nested) command string; commands land in `sink`
  *  (inner-substitution commands first, then the outer list). */
-function parseInto(src: string, depth: number, sink: SimpleCommand[]): boolean {
+function parseInto(src: string, depth: number, sink: SimpleCommand[], flags: ParseFlags): boolean {
   if (depth > MAX_DEPTH) return true;
   let ok = true;
   let text = src;
@@ -492,14 +517,14 @@ function parseInto(src: string, depth: number, sink: SimpleCommand[]): boolean {
   }
   let tokens: Token[];
   try {
-    tokens = tokenize(text, depth, sink);
+    tokens = tokenize(text, depth, sink, flags);
   } catch {
     ok = false;
     tokens = [];
   }
   let commands: SimpleCommand[] = [];
   try {
-    commands = tokensToCommands(tokens, depth, sink);
+    commands = tokensToCommands(tokens, depth, sink, flags);
   } catch {
     ok = false;
   }
@@ -510,6 +535,7 @@ function parseInto(src: string, depth: number, sink: SimpleCommand[]): boolean {
 /** Parse a bash command line. Never throws. */
 export function parseShell(cmd: string): ParseShellResult {
   const sink: SimpleCommand[] = [];
-  const ok = parseInto(cmd.slice(0, MAX_INPUT_UNITS), 0, sink);
-  return { ok, commands: sink };
+  const flags: ParseFlags = { redirect: false };
+  const ok = parseInto(cmd.slice(0, MAX_INPUT_UNITS), 0, sink, flags);
+  return { ok, commands: sink, hasRedirect: flags.redirect };
 }
