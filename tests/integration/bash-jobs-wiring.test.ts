@@ -93,7 +93,9 @@ function seedRecord(dir: string, record: Partial<JobRecord> & { jobId: string })
   const full: JobRecord = {
     v: 1,
     command: "sleep 30",
-    cwd: "/repo",
+    // cwd-strict adoption: seeded orphans must belong to this session's cwd
+    // (the shared test ctx uses process.cwd()) or recover() skips them.
+    cwd: process.cwd(),
     sessionId: "previous-session",
     hostPid: process.pid,
     status: "running",
