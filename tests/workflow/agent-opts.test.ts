@@ -206,6 +206,20 @@ describe("validateAgentOpts: unknown keys (D5/D7)", () => {
     }
   });
 
+  /**
+   * Structured-output repair turn (plan §3.3): `agent({ schema })` stays
+   * rejected with the exact hint — the repair turn is a pi Agent-tool
+   * feature and must never leak into workflow `agent()` children.
+   */
+  it("agent({ schema }) is rejected with the structured-output hint verbatim", () => {
+    const r = validateAgentOpts({ ...empty, unknownKeys: ["schema"] });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected failure");
+    expect(r.message).toContain(
+      "structured output is not supported here — ask for JSON in the prompt and JSON.parse the result",
+    );
+  });
+
   it("a case-different spelling of a real key gets a 'did you mean' suggestion", () => {
     const r = validateAgentOpts({ ...empty, unknownKeys: ["AgentType"] });
     expect(r.ok).toBe(false);
