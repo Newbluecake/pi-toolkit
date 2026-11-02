@@ -140,6 +140,10 @@ async function recoverInProcess(dir: string, maxLogBytes?: number) {
     processPort: createProcessPort(),
     clock: systemClock,
     sessionId: "recovering-session",
+    // cwd-strict adoption: this process runs in the repo root — the same cwd
+    // the crashed driver stamped on its records (`create({ cwd: process.cwd() })`
+    // under `spawn({ cwd: ROOT })`), so the real filter path runs end to end.
+    sessionCwd: process.cwd(),
     ...(maxLogBytes !== undefined ? { maxLogBytes } : {}),
   });
   const summary = await manager.recover();
@@ -281,6 +285,73 @@ describe.skipIf(!posix)("issue #73: a background job survives the pi process (re
       expect(record?.exitCode).toBeNull();
       // The output produced *after* the crash is still there (property (a)).
       expect(readFileSync(handoff.logPath, "utf8")).toContain("late-line");
+    } finally {
+      manager.dispose();
+    }
+  }, 120_000);
+
+  it("cwd-strict adoption: a foreign-cwd orphan in the same directory is skipped, not settled, not notified", async () => {
+    // Same crash shape as the first case; the extra record below is the test.
+    const { handoff } = await startAndCrash("sleep 2; echo done-after-crash; exit 5", { settleMs: 3_000 });
+
+    // A second, non-terminal record in the SAME directory but a FOREIGN cwd
+    // and a long-dead host pid / pid — exactly what a different project's
+    // session left behind. It must hit neither entries nor the disk writer.
+    const foreignId = "b_F0REGN01";
+    writeFileSync(join(handoff.dir, `${foreignId}.log`), "foreign cwd orphan output\n", { mode: 0o600 });
+    const now = Date.now();
+    writeFileSync(
+      join(handoff.dir, `${foreignId}.json`),
+      `${JSON.stringify(
+        {
+          v: 1,
+          jobId: foreignId,
+          command: "echo foreign-cwd",
+          cwd: "/definitely/not/this/repo",
+          sessionId: "crashing-session",
+          hostPid: 2 ** 22 + 12345, // never a live pid (same trick rpc-bash-jobs uses)
+          status: "running",
+          pid: 2 ** 22 + 12346,
+          pgid: 2 ** 22 + 12346,
+          createdAt: now - 60_000,
+          spawnedAt: now - 60_000,
+          backgroundedAt: now - 59_000,
+          endedAt: undefined,
+          notifiedAt: undefined,
+          exitCode: null,
+          logPath: join(handoff.dir, `${foreignId}.log`),
+          logBytes: 26,
+          outputTruncated: false,
+          readCursor: 0,
+        },
+        null,
+        2,
+      )}\n`,
+      { mode: 0o600 },
+    );
+
+    const { manager, summary } = await recoverInProcess(handoff.dir);
+    try {
+      // The same-cwd job recovers normally alongside the skipped one.
+      expect(await until(() => manager.get(handoff.jobId)?.status !== "running")).toBe(true);
+      expect(manager.get(handoff.jobId)?.status).toBe("failed");
+
+      // The foreign-cwd orphan: reported skipped, invisible, untouched.
+      expect(summary.cwdSkipped).toContain(foreignId);
+      expect(manager.get(foreignId)).toBeUndefined();
+      expect(manager.list().some((record) => record.jobId === foreignId)).toBe(false);
+
+      // Nothing ever settles it: give any would-be poll/settle a wide window,
+      // then read the record back from disk — still `running`, unnotified.
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_500));
+      const onDisk = JSON.parse(readFileSync(join(handoff.dir, `${foreignId}.json`), "utf8")) as {
+        status: string;
+        notifiedAt?: number;
+      };
+      expect(onDisk.status).toBe("running");
+      // `notifiedAt` was never stamped (JSON.stringify drops undefined — a
+      // wrong-session notify would have left a number here).
+      expect(onDisk.notifiedAt).toBeUndefined();
     } finally {
       manager.dispose();
     }

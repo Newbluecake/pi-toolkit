@@ -43,6 +43,14 @@ deadline/extension budget plus outstanding job grace, §3.5's `R_wait`/`G0`). De
 - 另：终态记录的 `logBytes` 过期（pi 在「持久化状态」与「持久化日志统计」之间死掉）时，`recover()` 以文件为准对账，并在封顶但缺提示的日志末尾补上提示。
 - exit 文件候选路径：live handle 用 spawn 时烘进包装脚本的路径；恢复时依次试 `record.logPath` 同目录、`store.exitPath`。
 
+**cwd 严格认领**（2026-11-02 用户拍板：跨会话认领不再全局先到先得，严格按 cwd）：
+
+- 两层过滤，均以 `path.resolve` 后字符串精确相等为准：
+  1. `adoptOrphans`（`src/bash/session-dirs.ts`）：`SessionDirOptions.sessionCwd` 设置时，异 cwd 的非终态记录**不搬**，留在原目录等任意同 cwd 会话认领（hostPid 仍活的不搬逻辑不变）。host 侧接线在 `src/stack.ts` 的 `dirOptions`（`ctx.cwd`）。
+  2. `recover()`（`src/bash/manager.ts`）：`BashJobManagerOptions.sessionCwd` 设置时，异 cwd 记录进 `cwdSkipped`——**不认领、不通知、不 kill、不改状态**。门槛插在 staged / foreign（hostPid 仍活）/ subagent（§3.9 照杀）三分支之后、pid 身份裁决之前，盖住 dead（会 settle+通知）与 unsafe（会改写 orphaned）两种裁决；这些记录不进 entries（不进即对 `bash_job list/status/kill/extend` 不可见、不被轮询、关机清理不误杀、hub 面板不可见），磁盘非终态记录永不被 prune，等同 cwd 会话以后恢复。host 侧接线在 `src/bash/host.ts` 的 `buildBashJobManager`（`ctx.cwd`，构造时快照；pi 会话 cwd 运行中不变）。
+- 不变：pid 身份校验与 kill 安全语义；`owner:"subagent"` 孤儿照杀（§3.9，不受 cwd 过滤影响）；foreign 分支优先于 cwd 门槛；staged 分支优先于 cwd 门槛；/reload 的 `adoptLocalJobs`/`handoffInProcess` 不过滤（同进程交接）；两处选项缺省（不传 `sessionCwd`）= 不过滤，保留旧行为。
+- `RecoverSummary.cwdSkipped`：本轮被 cwd 门槛跳过的 jobId 列表（消费方仅测试）。测试：`tests/bash/manager.test.ts`（cwd 严格认领 describe）、`tests/bash/session-dirs.test.ts`、`tests/integration/bash-crash-recovery.test.ts`（真实验证过滤路径 + 异 cwd 保持 running 不通知）；conformance `tests/conformance/rpc-bash-jobs.test.ts` 的 seed 需用子会话 cwd（`workdir`）。
+
 **已知且接受的语义变化**：
 
 - 外部 `kill -TERM <shell>` 现在是 `failed (exit 143)`，不再是 `killed`：内层 shell 的信号死亡被折算为 `$?=128+n` 并记录，外层 `sh` 正常退出。manager 自己发起的 kill/timeout 走 `handle.termination`，不受影响；`bash_job kill` 杀整个进程组，外层 `sh` 一起死、不留 exit 文件，仍是 `killed`。

@@ -165,6 +165,61 @@ describe("session bash job directories", () => {
   });
 });
 
+// ── cwd-strict adoption (user-ruled 2026-11-02): adoptOrphans must not move
+// a foreign-cwd record into this session's directory — it stays in its
+// original directory for a same-cwd session to claim. ──
+
+describe("session bash job directories: cwd-strict adoption (adoptOrphans sessionCwd filter)", () => {
+  async function seedSibling(root: string, cwd: string): Promise<string> {
+    const from = join(root, "old-session-abcdef12");
+    await (await import("node:fs/promises")).mkdir(from, { recursive: true });
+    const rec = { ...record(from), cwd, logPath: join(from, "b_TEST0001.log") };
+    await writeFile(join(from, "b_TEST0001.json"), JSON.stringify(rec));
+    await writeFile(join(from, "b_TEST0001.log"), "live\n");
+    return from;
+  }
+  async function exists(path: string): Promise<boolean> {
+    return stat(path).then(
+      () => true,
+      () => false,
+    );
+  }
+
+  it("with sessionCwd: a foreign-cwd orphan stays in its original directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-subagent-session-dirs-"));
+    dirs.push(root);
+    const from = await seedSibling(root, "/elsewhere");
+
+    await adoptOrphans({ ...options(root), sessionCwd: "/this-repo" });
+
+    // Original directory keeps both files; the session directory got nothing.
+    expect(await exists(join(from, "b_TEST0001.json"))).toBe(true);
+    expect(await exists(join(from, "b_TEST0001.log"))).toBe(true);
+    expect(await exists(join(root, sanitizeSessionDirName("session-a"), "b_TEST0001.json"))).toBe(false);
+  });
+
+  it("with sessionCwd: a same-cwd orphan (resolved equality) is adopted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-subagent-session-dirs-"));
+    dirs.push(root);
+    const from = await seedSibling(root, "/this-repo");
+
+    await adoptOrphans({ ...options(root), sessionCwd: "/this-repo" });
+
+    expect(await exists(join(root, sanitizeSessionDirName("session-a"), "b_TEST0001.json"))).toBe(true);
+    expect(await exists(join(from, "b_TEST0001.json"))).toBe(false);
+  });
+
+  it("without sessionCwd: a foreign-cwd orphan is adopted as before (legacy default)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-subagent-session-dirs-"));
+    dirs.push(root);
+    await seedSibling(root, "/elsewhere");
+
+    await adoptOrphans(options(root));
+
+    expect(await exists(join(root, sanitizeSessionDirName("session-a"), "b_TEST0001.json"))).toBe(true);
+  });
+});
+
 // ── bash-timeout-grace plan §2.5 step 4 (T31): abort checkpoints ────────────
 
 describe("session bash job directories: recovery cancellation (§2.5 step 4)", () => {

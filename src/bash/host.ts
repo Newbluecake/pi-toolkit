@@ -123,6 +123,10 @@ export function buildBashJobManager(
     clock: systemClock,
     sessionId,
     hostPid: process.pid,
+    // cwd-strict adoption: `ctx.cwd` is exactly where this session's bash
+    // tool calls run (the source of every `record.cwd` this session creates),
+    // so recovery only adopts orphans from that same directory.
+    sessionCwd: typeof ctx.cwd === "string" && ctx.cwd !== "" ? ctx.cwd : undefined,
     maxLogBytes: config.maxLogBytes,
     maxBackgroundJobs: config.maxBackgroundJobs,
     drainTimeoutMs: config.drainTimeoutMs,

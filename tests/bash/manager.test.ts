@@ -1182,6 +1182,123 @@ describe("bash job manager: recover (§3.6)", () => {
 });
 
 /**
+ * cwd-strict adoption (user-ruled 2026-11-02): with `sessionCwd` set, recover()
+ * refuses to adopt non-terminal records whose resolved `record.cwd` differs —
+ * no entries (invisible to bash_job list/status/kill/extend), no polling, no
+ * notice, no kill, no status change. staged / foreign-live-host / §3.9
+ * subagent branches all sit BEFORE the gate and keep their semantics.
+ */
+describe("bash job manager: cwd-strict adoption (recover sessionCwd filter)", () => {
+  it("a matching cwd is adopted exactly as without the filter", async () => {
+    const h = await harness({ sessionCwd: "/repo" });
+    await seed(h.store, "b_CWD00001", { status: "running", pid: 9111, spawnedAt: 600, command: "npm run build" });
+    h.port.ownership.set(9111, "alive");
+
+    const summary = await h.manager.recover();
+    expect(summary).toMatchObject({
+      adopted: ["b_CWD00001"],
+      cwdSkipped: [],
+      exitedUnknown: [],
+      orphaned: [],
+      foreign: [],
+    });
+    expect(h.manager.get("b_CWD00001")?.backgroundedAt).toBe(1_000);
+  });
+
+  it("omitting sessionCwd keeps the legacy adopt-any-cwd behaviour", async () => {
+    const h = await harness();
+    await seed(h.store, "b_CWD1GY01", { status: "running", pid: 9112, spawnedAt: 600, cwd: "/elsewhere" });
+    h.port.ownership.set(9112, "alive");
+
+    const summary = await h.manager.recover();
+    expect(summary.adopted).toEqual(["b_CWD1GY01"]);
+    expect(summary.cwdSkipped).toEqual([]);
+  });
+
+  it("a foreign-cwd orphan is cwdSkipped: invisible, never settled, never notified", async () => {
+    const h = await harness({ sessionCwd: "/repo" });
+    await seed(h.store, "b_CWD00001", {
+      status: "running",
+      pid: 9110,
+      spawnedAt: 600,
+      backgroundedAt: 650,
+      cwd: "/elsewhere",
+    });
+    // Even a certainly-dead pid must not be adjudicated: dead would settle+
+    // notify from the wrong session.
+    h.port.ownership.set(9110, "dead");
+
+    const summary = await h.manager.recover();
+    expect(summary.cwdSkipped).toEqual(["b_CWD00001"]);
+    expect(summary.adopted).toEqual([]);
+    expect(summary.exitedUnknown).toEqual([]);
+    expect(summary.orphaned).toEqual([]);
+    // Not in entries ⇒ invisible to every bash_job surface.
+    expect(h.manager.get("b_CWD00001")).toBeUndefined();
+    expect(h.manager.list().some((r) => r.jobId === "b_CWD00001")).toBe(false);
+    expect(h.port.killCalls).toEqual([]);
+
+    // Clock advances + polls + settles: nothing ever touches it.
+    h.clock.advance(2_000);
+    await settle();
+    h.clock.advance(2_000);
+    await settle();
+    const skipped = await h.store.load("b_CWD00001");
+    expect(skipped).toMatchObject({ status: "running" });
+    // Never notified: the key was never stamped (undefined ⇒ absent on disk).
+    expect(skipped?.notifiedAt).toBeUndefined();
+    expect(h.notified).toEqual([]);
+    expect(h.manager.get("b_CWD00001")).toBeUndefined();
+  });
+
+  it("§3.9 subagent orphans are killed regardless of cwd (the filter never shields them)", async () => {
+    const h = await harness({ sessionCwd: "/repo" });
+    await seed(h.store, "b_CWDSKB01", {
+      status: "running",
+      pid: 9113,
+      spawnedAt: 600,
+      owner: "subagent",
+      cwd: "/elsewhere",
+    });
+    h.port.ownership.set(9113, "alive");
+
+    const summary = await h.manager.recover();
+    expect(summary.subagentKilled).toEqual(["b_CWDSKB01"]);
+    expect(summary.cwdSkipped).toEqual([]);
+    expect(h.port.killCalls).toHaveLength(1);
+    expect(h.port.killCalls[0]?.pid).toBe(9113);
+  });
+
+  it("a foreign live-host job stays foreign even with a mismatching cwd", async () => {
+    const h = await harness({ sessionCwd: "/repo" });
+    await seed(h.store, "b_CWDFRG01", {
+      status: "running",
+      pid: 9114,
+      spawnedAt: 600,
+      hostPid: 7901,
+      cwd: "/elsewhere",
+    });
+    h.port.alivePids.add(7901);
+    h.port.ownership.set(9114, "alive");
+
+    const summary = await h.manager.recover();
+    expect(summary.foreign).toEqual(["b_CWDFRG01"]);
+    expect(summary.cwdSkipped).toEqual([]);
+    expect(h.manager.get("b_CWDFRG01")?.status).toBe("running");
+  });
+
+  it("a staged job still fails with its spawn outcome lost, regardless of cwd", async () => {
+    const h = await harness({ sessionCwd: "/repo" });
+    await seed(h.store, "b_CWDSTG01", { status: "staged", cwd: "/elsewhere" });
+
+    const summary = await h.manager.recover();
+    expect(summary.lostStaged).toEqual(["b_CWDSTG01"]);
+    expect(summary.cwdSkipped).toEqual([]);
+    expect(await h.store.load("b_CWDSTG01")).toMatchObject({ status: "failed" });
+  });
+});
+
+/**
  * 2026-10-19 live bug: a backgrounded job (`sleep 1260 && echo …`) whose
  * process exited while unmanaged stayed "running" in `bash_job list` for
  * hours after an in-process /reload (same store, same host pid) until a

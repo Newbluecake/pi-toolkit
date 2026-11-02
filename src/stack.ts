@@ -1644,6 +1644,10 @@ export function buildSessionStack(
       sessionId: currentSessionId(ctx),
       skipDirNames: [selfDirName],
       warn: (message: string) => hostWarn(ctx, message),
+      // cwd-strict adoption: `adoptOrphans` only moves records whose cwd
+      // matches this session's — foreign-cwd orphans stay in their original
+      // directory for a same-cwd session to claim.
+      sessionCwd: typeof ctx.cwd === "string" && ctx.cwd !== "" ? ctx.cwd : undefined,
     } as const;
     bashJobRecovery = scheduleBashJobRecovery({
       runRecovery: async (signal) => {

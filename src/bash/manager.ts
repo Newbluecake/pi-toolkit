@@ -1,6 +1,6 @@
 import { createWriteStream, type WriteStream } from "node:fs";
 import { appendFile, mkdir, open, stat } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import type { Clock, TimerHandle } from "../core/clock.js";
 import type { Millis } from "../core/types.js";
 import {
@@ -160,6 +160,15 @@ export interface BashJobManagerOptions {
    * package) owns actually notifying anyone; the manager only decides *when*.
    */
   onDeadline?: (record: JobRecord, kind: "grace" | "extended") => void;
+  /**
+   * Cross-session claim filter (cwd-strict adoption): when set, `recover()`
+   * refuses to adopt non-terminal records whose `record.cwd` (after
+   * `path.resolve`) does not equal this session's cwd — they are neither
+   * polled, notified, killed nor status-changed; the same-cwd session (or a
+   * future session without the filter) still finds them on disk. Omitted =
+   * no filtering (legacy/test behaviour). Host wiring passes `ctx.cwd`.
+   */
+  sessionCwd?: string | undefined;
 }
 
 export interface CreateJobInit {
@@ -253,6 +262,13 @@ export interface RecoverSummary {
    * identity was verified and were actively killed (not merely adopted).
    */
   readonly subagentKilled: readonly JobId[];
+  /**
+   * cwd-strict adoption: non-terminal records this manager refused to adopt
+   * because their resolved `record.cwd` did not equal `sessionCwd` (filtered
+   * before any adjudication — no putRecord, no probe verdict, no notice, no
+   * kill). They stay untouched on disk for the matching-cwd session.
+   */
+  readonly cwdSkipped: readonly JobId[];
   /**
    * §2.5 step 4: `true` when the scan stopped early because `signal` fired
    * (or the manager was disposed) before every record was adjudicated —
@@ -511,6 +527,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       ? Math.trunc(options.discardGraceMs)
       : DEFAULT_DISCARD_GRACE_MS;
   const deadlinePolicy = options.deadlinePolicy ?? DEFAULT_JOB_DEADLINE_POLICY;
+  const sessionCwd = options.sessionCwd;
   const myToken = {};
 
   const entries = new Map<JobId, Entry>();
@@ -1937,6 +1954,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       pruned: [],
       prunedFiles: [],
       subagentKilled: [],
+      cwdSkipped: [],
       partial: true,
     });
     if (aborted()) return emptySummary();
@@ -1954,6 +1972,9 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     // actively (identity-checked) killed rather than merely adopted — there
     // is no subagent left alive to manage them.
     const subagentKilled: JobId[] = [];
+    // cwd-strict adoption: non-terminal records left on disk because their
+    // resolved `record.cwd` does not match this session's cwd.
+    const cwdSkipped: JobId[] = [];
     let subagentTotal = 0;
     let subagentOrphanedCount = 0;
     let partial = false;
@@ -2006,8 +2027,8 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         }
         continue;
       }
-      putRecord(record);
       if (record.status === "staged") {
+        putRecord(record);
         // The spawn outcome died with the previous process; there is no pid to
         // probe, so `failed` is the only honest label (§3.9 row 1: same for
         // both owner kinds).
@@ -2031,10 +2052,12 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       // Another *live* pi process still owns this job: hands off entirely
       // (regardless of owner — a safety floor, not a §3.9 concern).
       if (record.hostPid > 0 && record.hostPid !== hostPid && processPort.probePid(record.hostPid)) {
+        putRecord(record);
         foreign.push(record.jobId);
         continue;
       }
       if (record.owner === "subagent") {
+        putRecord(record);
         // §3.9: `kill()`'s no-local-handle branch already does the identity
         // check (unsafe/dead/alive) and produces exactly the four outcomes
         // this table wants — alive+signalled → killed, alive+refused →
@@ -2063,6 +2086,17 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         } else if (finalStatus === "exited_unknown") exitedUnknown.push(record.jobId);
         continue;
       }
+      // cwd-strict adoption (user-ruled 2026-11-02): an orphan whose resolved
+      // `record.cwd` does not equal this session's `sessionCwd` belongs to
+      // another directory — this session must NOT adopt it (no putRecord, so
+      // it is invisible to bash_job list/status/kill/extend and never polled;
+      // no notice, no kill, no status change). It stays on disk untouched for
+      // a session actually running in that cwd.
+      if (sessionCwd !== undefined && resolvePath(record.cwd) !== resolvePath(sessionCwd)) {
+        cwdSkipped.push(record.jobId);
+        continue;
+      }
+      putRecord(record);
       const ownership = processPort.checkPidOwnership(record);
       if (ownership === "alive") {
         // An adopted job is ownerless by definition — nobody is waiting on its
@@ -2147,6 +2181,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       pruned: pruned.jobs,
       prunedFiles: pruned.files,
       subagentKilled,
+      cwdSkipped,
       partial,
     };
   }
