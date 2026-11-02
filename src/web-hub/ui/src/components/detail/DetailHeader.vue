@@ -233,18 +233,23 @@ function onStopKeydown(ev: KeyboardEvent): void {
 }
 
 // ---------------------------------------------------------------------------
-// 「删除会话」 (2026-10-28 user ruling: the cards' corner × is gone, deletion lives here): a
-// removable session (managed record or offline card — `removalTargetForAgent`, the same
-// target the old card button used) gets a permanent entry in the 「⋯」 menu. Same two-step
-// grammar as the stop button: the menu item arms, an in-bar ✓/✕ pill confirms (4s auto-cancel,
-// Esc cancels, focus follows), then `hub.removeAgent(target)`. No optimistic removal — the
-// pane goes away only when the hub's broadcast lands; a failure shows the classified reason.
+// 「删除会话」 (2026-10-28 user ruling: the cards' corner × is gone, deletion lives here;
+// 2026-11-02 user ruling: no longer a PERMANENT ⋯ entry — it is a normal in-bar icon button
+// on wide bars and joins the issue-#41 fold set as the FIRST button to fold into 「⋯」 on
+// narrow bars; on touch screens it stays in the menu like the idle stop button, 防误触).
+// A removable session (managed record or offline card — `removalTargetForAgent`, the same
+// target the old card button used) gets the button/entry. Same two-step grammar as the stop
+// button from EITHER entrance: the button/menu item arms, an in-bar ✓/✕ pill confirms (4s
+// auto-cancel, Esc cancels, focus follows), then `hub.removeAgent(target)`. No optimistic
+// removal — the pane goes away only when the hub's broadcast lands; a failure shows the
+// classified reason.
 // ---------------------------------------------------------------------------
 const removeTarget = computed(() => removalTargetForAgent(props.agent, hub?.state.value.spawns ?? null));
 const delArmed = ref(false);
 const delBusy = ref(false);
 const delError = ref<string | null>(null);
 let delArmTimer: ReturnType<typeof setTimeout> | undefined;
+const delIdleBtn = ref<HTMLButtonElement | null>(null);
 const delOkBtn = ref<HTMLButtonElement | null>(null);
 const delPill = ref<HTMLElement | null>(null);
 /** in-flight = our own RPC OR the hub-confirmed pending delete (another tab / 202 state). */
@@ -260,15 +265,31 @@ function disarmDelete(): void {
   }
 }
 
+/** Arm from EITHER entrance (inline button / ⋯ item): expand the confirm pill and hand focus
+ * to its ✓ control (the control that received the click is about to unmount/close). */
 function armDelete(): void {
   if (removeTarget.value === null || delRemoving.value) return;
   delError.value = null;
   delArmed.value = true;
-  delArmTimer = setTimeout(() => {
-    delArmTimer = undefined;
-    disarmDelete();
-  }, STOP_ARM_MS);
+  delArmTimer = setTimeout(autoDisarmDelete, STOP_ARM_MS);
   void nextTick(() => delOkBtn.value?.focus());
+}
+
+/** ✕ — explicit cancel: disarm and give focus back to the idle icon button when it is in the
+ * bar (touch screens keep deletion menu-only — nothing to refocus there). */
+function cancelDelete(): void {
+  disarmDelete();
+  void nextTick(() => delIdleBtn.value?.focus());
+}
+
+/** 4s window elapsed: disarm, and if keyboard focus was inside the pill (which is about to
+ * unmount) hand it back to the idle button instead of dropping it to <body>. */
+function autoDisarmDelete(): void {
+  delArmTimer = undefined;
+  const active = typeof document === "undefined" ? null : document.activeElement;
+  const hadFocus = active !== null && delPill.value?.contains(active) === true;
+  disarmDelete();
+  if (hadFocus) void nextTick(() => delIdleBtn.value?.focus());
 }
 
 async function onDeleteSession(): Promise<void> {
@@ -295,7 +316,7 @@ async function onDeleteSession(): Promise<void> {
 function onDeleteKeydown(ev: KeyboardEvent): void {
   if (ev.key === "Escape" && delArmed.value) {
     ev.stopPropagation();
-    disarmDelete();
+    cancelDelete();
   }
 }
 
@@ -513,8 +534,9 @@ function onToggleHeadInfo(): void {
 // `.detail-titlebar`, fired per frame at most — RO callbacks are already frame-aligned, no
 // extra rAF) and let logic/headerFold.ts's pure `foldTitlebar` decide which right-side
 // buttons fold into the 「⋯」 menu, so the title never drops below its 96px clickable floor.
-// Fold priority: privacy → schedule → resume → channels → stop → clear. No measurement (SSR
-// first paint / RO unavailable / zero-layout) ⇒ empty fold state ⇒ the pre-feature DOM.
+// Fold priority: delete → privacy → schedule → resume → channels → stop → clear (「删除会话」
+// lowest-frequency, added 2026-11-02). No measurement (SSR first paint / RO unavailable /
+// zero-layout) ⇒ empty fold state ⇒ the pre-feature DOM.
 // ---------------------------------------------------------------------------
 const titlebarEl = ref<HTMLElement | null>(null);
 const foldState = ref<TitlebarFoldState>({ folded: [], aliasGlyph: false, pillDot: false });
@@ -525,10 +547,10 @@ let aliasFullCache = 0;
 let pillFullCache = 0;
 
 function isFolded(id: TitlebarFoldId): boolean {
-  // Touch screens: the IDLE stop icon is always folded into the 「⋯」 menu (a swipe / tap on
-  // the title area too easily hits a bare destructive icon). The armed/busy pills never go
-  // through this (their own v-ifs), so confirm/busy stay in the bar.
-  if (id === "stop" && coarsePointer.value) return true;
+  // Touch screens: the IDLE stop icon and 「删除会话」 are always folded into the 「⋯」 menu
+  // (a swipe / tap on the title area too easily hits a bare destructive icon — 防误触). The
+  // armed/busy pills never go through this (their own v-ifs), so confirm/busy stay in the bar.
+  if ((id === "stop" || id === "delete") && coarsePointer.value) return true;
   return foldState.value.folded.includes(id);
 }
 
@@ -543,6 +565,10 @@ function presentFoldIds(): TitlebarFoldId[] {
   if (managed.value !== undefined && !stopArmed.value && !stopStopping.value && !coarsePointer.value)
     present.add("stop"); // coarse: always folded, nothing to measure
   if (clearUsable.value) present.add("clear");
+  // 「删除会话」 (2026-11-02): a normal foldable button now — measured like the rest, folded
+  // first (TITLEBAR_FOLD_ORDER). Coarse pointers keep it menu-only, exactly like idle stop.
+  if (removeTarget.value !== null && !delArmed.value && !delRemoving.value && !coarsePointer.value)
+    present.add("delete"); // coarse: always folded, nothing to measure
   return TITLEBAR_FOLD_ORDER.filter((id) => present.has(id));
 }
 
@@ -682,8 +708,9 @@ const overflowItems = computed<HeaderOverflowItem[]>(() => {
       danger: true,
       separatorBefore: out.length > 0,
     });
-  // Permanent for removable sessions (the only case that mounts ⋯ with nothing folded).
-  if (removeTarget.value !== null && !delArmed.value) {
+  // 「删除会话」 (2026-11-02): in the menu only while FOLDED (narrow bar / touch) — a wide bar
+  // shows the inline icon button instead and mounts no ⋯ at all when nothing else folded.
+  if (removeTarget.value !== null && !delArmed.value && isFolded("delete")) {
     const busy = delRemoving.value;
     out.push({
       id: "delete",
@@ -933,8 +960,25 @@ function onOverflowRun(id: string): void {
           </button>
         </span>
       </template>
-      <!-- 「删除会话」: armed ✓/✕ pill (reuses the stop pill's look) + in-flight status; the idle
-           entry itself lives in the ⋯ menu only. -->
+      <!-- 「删除会话」 (2026-11-02): the idle entry is a normal in-bar icon button on wide bars
+           (same spawn-stop-btn grammar — 危险 hover tint, ✓/✕ arm pill identical from either
+           entrance); it folds FIRST into 「⋯」 on narrow bars and is menu-only on touch. The
+           armed ✓/✕ pill (reuses the stop pill's look) + in-flight status live IN THE BAR and
+           never fold. -->
+      <button
+        v-if="removeTarget !== null && !delArmed && !delRemoving && !isFolded('delete')"
+        ref="delIdleBtn"
+        class="spawn-stop-btn detail-del-btn"
+        type="button"
+        data-fold="delete"
+        :title="t('detail.deleteSessionLabel')"
+        :aria-label="t('detail.deleteSessionLabel')"
+        @click="armDelete"
+        @keydown="onDeleteKeydown"
+      >
+        <AppIcon name="x" class="icon" />
+        <span class="head-btn-label" aria-hidden="true">{{ t("detail.deleteSessionLabel") }}</span>
+      </button>
       <span
         v-if="delArmed"
         ref="delPill"
@@ -960,7 +1004,7 @@ function onOverflowRun(id: string): void {
           class="spawn-stop-armed-no"
           type="button"
           :aria-label="t('spawn.stopSessionCancelAria')"
-          @click="disarmDelete"
+          @click="cancelDelete"
         >
           <AppIcon name="x" class="icon-sm" />
         </button>

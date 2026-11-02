@@ -9,11 +9,11 @@
  * degrade to their minimal forms — while guaranteeing the title keeps `titleMin` px of
  * clickable width.
  *
- * Fold priority (lowest frequency first, user-confirmed in the preview
- * /tmp/detail-header-overflow-preview.html): privacy → schedule → resume → channels → stop →
- * clear. Note the FIRST fold nets zero or negative (the ⋯ trigger takes a slot of its own) —
- * the greedy loop simply continues until the row fits or everything is folded, so a
- * one-button deficit folds two.
+ * Fold priority (lowest frequency first; delete prepended 2026-11-02 per user ruling —
+ * 「删除会话」 left the permanent-⋯-only spot and joined the fold set as the FIRST to fold):
+ * delete → privacy → schedule → resume → channels → stop → clear. Note the FIRST fold nets
+ * zero or negative (the ⋯ trigger takes a slot of its own) — the greedy loop simply
+ * continues until the row fits or everything is folded, so a one-button deficit folds two.
  *
  * Degradation ladder after all buttons are folded: ① alias chip → bare 「@」 button, ② status
  * pill → bare dot. Neither ever enters the menu (they are state displays, not actions); the
@@ -25,10 +25,11 @@
  * resurrected — the fresh computation wins.
  */
 
-export type TitlebarFoldId = "privacy" | "schedule" | "resume" | "channels" | "stop" | "clear";
+export type TitlebarFoldId = "delete" | "privacy" | "schedule" | "resume" | "channels" | "stop" | "clear";
 
-/** Fold order: the FIRST entry folds first (lowest-frequency action). Frozen by tests. */
+/** Fold order: the FIRST entry folds first (lowest-frequency action — 「删除会话」, 2026-11-02). Frozen by tests. */
 export const TITLEBAR_FOLD_ORDER: readonly TitlebarFoldId[] = [
+  "delete",
   "privacy",
   "schedule",
   "resume",

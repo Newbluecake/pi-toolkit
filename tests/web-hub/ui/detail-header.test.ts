@@ -171,14 +171,14 @@ function hubWithSpawn(opts: {
 describe("DetailHeader.vue — managed session stop (SP12)", () => {
   it("no managed record (or no HUB_CTX) ⇒ no stop button", () => {
     const plain = mount(DetailHeader, { props: { agent: agent(), narrow: false } });
-    expect(plain.find(".spawn-stop-btn").exists()).toBe(false);
+    expect(plain.find('.spawn-stop-btn[data-fold="stop"]').exists()).toBe(false);
 
     const hub = hubWithSpawn({ spawns: { items: [spawnRec({ state: "exited" })], active: 0, max: 4 } });
     const terminal = mount(DetailHeader, {
       props: { agent: agent(), narrow: false },
       global: { provide: { [HUB_CTX as symbol]: hub } },
     });
-    expect(terminal.find(".spawn-stop-btn").exists()).toBe(false);
+    expect(terminal.find('.spawn-stop-btn[data-fold="stop"]').exists()).toBe(false);
   });
 
   it("managed live record ⇒ idle button is icon + label with title + aria-label, two-step arm, ✓ confirms and calls stop(spawnId)", async () => {
@@ -194,7 +194,7 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
       props: { agent: agent(), narrow: false },
       global: { provide: { [HUB_CTX as symbol]: hub } },
     });
-    const btn = wrapper.get(".spawn-stop-btn");
+    const btn = wrapper.get('.spawn-stop-btn[data-fold="stop"]');
     // icon-only idle: the SVG carries no text, the affordance is title + aria-label
     expect(btn.attributes("aria-label")).toBe("Stop this web-started session");
     expect(btn.attributes("title")).toBe("Stop session");
@@ -224,7 +224,7 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
       props: { agent: agent(), narrow: false },
       global: { provide: { [HUB_CTX as symbol]: hub } },
     });
-    await wrapper.get(".spawn-stop-btn").trigger("click"); // arm
+    await wrapper.get('.spawn-stop-btn[data-fold="stop"]').trigger("click"); // arm
     await wrapper.get(".spawn-stop-armed-confirm").trigger("click"); // pill text = second click
     await wrapper.vm.$nextTick();
     expect(stopped).toEqual(["sp9"]);
@@ -243,12 +243,12 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
       props: { agent: agent(), narrow: false },
       global: { provide: { [HUB_CTX as symbol]: hub } },
     });
-    await wrapper.get(".spawn-stop-btn").trigger("click"); // arm
+    await wrapper.get('.spawn-stop-btn[data-fold="stop"]').trigger("click"); // arm
     await wrapper.get(".spawn-stop-armed-no").trigger("click"); // ✕ cancel
     expect(wrapper.find(".spawn-stop-armed").exists()).toBe(false);
-    expect(wrapper.find(".spawn-stop-btn").exists()).toBe(true); // back to idle
+    expect(wrapper.find('.spawn-stop-btn[data-fold="stop"]').exists()).toBe(true); // back to idle
 
-    await wrapper.get(".spawn-stop-btn").trigger("click"); // arm again
+    await wrapper.get('.spawn-stop-btn[data-fold="stop"]').trigger("click"); // arm again
     await wrapper.get(".spawn-stop-armed").trigger("keydown", { key: "Escape" });
     expect(wrapper.find(".spawn-stop-armed").exists()).toBe(false);
     expect(stopped).toHaveLength(0); // nothing was stopped along the way
@@ -262,12 +262,12 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
         props: { agent: agent(), narrow: false },
         global: { provide: { [HUB_CTX as symbol]: hub } },
       });
-      await wrapper.get(".spawn-stop-btn").trigger("click"); // arm
+      await wrapper.get('.spawn-stop-btn[data-fold="stop"]').trigger("click"); // arm
       expect(wrapper.find(".spawn-stop-armed").exists()).toBe(true);
       vi.advanceTimersByTime(4000);
       await wrapper.vm.$nextTick();
       expect(wrapper.find(".spawn-stop-armed").exists()).toBe(false);
-      expect(wrapper.find(".spawn-stop-btn").exists()).toBe(true);
+      expect(wrapper.find('.spawn-stop-btn[data-fold="stop"]').exists()).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -281,15 +281,15 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
       attachTo: document.body,
     });
     try {
-      await wrapper.get(".spawn-stop-btn").trigger("click"); // arm
+      await wrapper.get('.spawn-stop-btn[data-fold="stop"]').trigger("click"); // arm
       expect(document.activeElement).toBe(wrapper.get(".spawn-stop-armed-ok").element);
       await wrapper.get(".spawn-stop-armed-no").trigger("click"); // ✕ cancel
-      expect(document.activeElement).toBe(wrapper.get(".spawn-stop-btn").element);
+      expect(document.activeElement).toBe(wrapper.get('.spawn-stop-btn[data-fold="stop"]').element);
       // Esc returns focus too (verifier 2026-10: it used to drop to <body>)
-      await wrapper.get(".spawn-stop-btn").trigger("click"); // arm again
+      await wrapper.get('.spawn-stop-btn[data-fold="stop"]').trigger("click"); // arm again
       await wrapper.get(".spawn-stop-armed").trigger("keydown", { key: "Escape" });
       await wrapper.vm.$nextTick();
-      expect(document.activeElement).toBe(wrapper.get(".spawn-stop-btn").element);
+      expect(document.activeElement).toBe(wrapper.get('.spawn-stop-btn[data-fold="stop"]').element);
     } finally {
       wrapper.unmount();
     }
@@ -304,13 +304,13 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
       attachTo: document.body,
     });
     try {
-      await wrapper.get(".spawn-stop-btn").trigger("click"); // arm → focus on ✓
+      await wrapper.get('.spawn-stop-btn[data-fold="stop"]').trigger("click"); // arm → focus on ✓
       await wrapper.vm.$nextTick();
       expect(document.activeElement).toBe(wrapper.get(".spawn-stop-armed-ok").element);
       vi.advanceTimersByTime(4000);
       await wrapper.vm.$nextTick();
       await wrapper.vm.$nextTick();
-      expect(document.activeElement).toBe(wrapper.get(".spawn-stop-btn").element);
+      expect(document.activeElement).toBe(wrapper.get('.spawn-stop-btn[data-fold="stop"]').element);
     } finally {
       wrapper.unmount();
       vi.useRealTimers();
@@ -326,11 +326,11 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
       props: { agent: agent(), narrow: false },
       global: { provide: { [HUB_CTX as symbol]: hub } },
     });
-    await wrapper.get(".spawn-stop-btn").trigger("click");
+    await wrapper.get('.spawn-stop-btn[data-fold="stop"]').trigger("click");
     await wrapper.get(".spawn-stop-armed-ok").trigger("click");
     await flushPromises();
     expect(wrapper.get(".spawn-stop-note").text()).toContain("E_GONE");
-    expect(wrapper.find(".spawn-stop-btn").exists()).toBe(true);
+    expect(wrapper.find('.spawn-stop-btn[data-fold="stop"]').exists()).toBe(true);
     expect(wrapper.find(".spawn-stop-busy").exists()).toBe(false);
   });
 
@@ -343,7 +343,7 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
     const busy = wrapper.get(".spawn-stop-busy");
     expect(busy.attributes("role")).toBe("status");
     expect(busy.text()).toContain("stopping…");
-    expect(wrapper.find(".spawn-stop-btn").exists()).toBe(false);
+    expect(wrapper.find('.spawn-stop-btn[data-fold="stop"]').exists()).toBe(false);
     expect(wrapper.find(".spawn-stop-armed").exists()).toBe(false);
     expect(wrapper.find(".spawn-stop-busy button").exists()).toBe(false);
   });
