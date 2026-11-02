@@ -15,10 +15,15 @@ export type FeishuCommand =
   | { op: "new"; cwd: string; firstPrompt: string }
   | { op: "file"; path: string }
   | { op: "schedule" }
-  | { op: "schedule-run"; n: number };
+  | { op: "schedule-run"; n: number }
+  /** fabric-thread §6.2: `/main <text>` — force the slow path (bypass). Threads off ⇒ the
+   *  token stays an unknown command, byte-identical. */
+  | { op: "main"; text: string };
 /** `schedule` (F1, #32): recognise `/schedule` + `/schedule run <n>`; absent/false ⇒ unknown command, byte-identical. */
 export interface FeishuParseOptions {
   schedule?: boolean;
+  /** fabric-thread §6.2: recognise `/main`; absent ⇒ unknown command, byte-identical. */
+  threads?: boolean;
 }
 export function parseFeishuCommand(text: string, opts: FeishuParseOptions = {}): FeishuCommand {
   if (text.startsWith("//")) return { op: "prompt", text: text.slice(1) };
@@ -62,6 +67,11 @@ export function parseFeishuCommand(text: string, opts: FeishuParseOptions = {}):
     if (cwd && Buffer.byteLength(cwd) <= 4_096 && !/[\p{Cc}\p{Cf}]/u.test(cwd))
       return { op: "new", cwd, firstPrompt: [rest, tail].filter(Boolean).join("\n") };
   }
+  if (opts.threads === true && first.startsWith("/main")) {
+    const text = [first.slice(5).trim(), tail].filter(Boolean).join("\n");
+    if (first === "/main" || text.trim() === "") return { op: "help", unknown: "/main" };
+    return { op: "main", text };
+  }
   return ["/list", "/use", "/cur", "/new", "/unbind", "/file", "/help"].includes(token)
     ? { op: "help" }
     : { op: "help", unknown: token.slice(0, 64) }; // Unknown commands NEVER reach pi.
@@ -94,6 +104,8 @@ export interface FeishuRouterDeps {
   schedule?: boolean;
   /** F8 must return committed+pinned upload ids, and stage >16KiB text as .txt. No silent truncation. */
   preparePayload?(message: FeishuMessage, text: string, identity: FeishuIdentityContext): Promise<RequestPayload>;
+  /** fabric-thread §6.2: `/main` is recognised (HubConfig.feishuBot.threads present). Absent ⇒ legacy behavior. */
+  threads?: boolean;
   emit(intent: FeishuRouterIntent): void;
   onHealth?(event: { degraded: true; reason: "background-failed"; operation: "flush" }): void;
 }
@@ -109,7 +121,15 @@ export function createFeishuRouter(deps: FeishuRouterDeps) {
       const intents: FeishuRouterIntent[] = [];
       let readyId: string | undefined;
       const key = feishuBindingKey(message.chatType, message.chatId, message.threadId);
-      const command = parseFeishuCommand(message.text, deps.schedule === true ? { schedule: true } : {});
+      const command = parseFeishuCommand(
+        message.text,
+        deps.schedule === true || deps.threads === true
+          ? {
+              ...(deps.schedule === true ? { schedule: true } : {}),
+              ...(deps.threads === true ? { threads: true } : {}),
+            }
+          : {},
+      );
       const notice = (code: string, unknownCommand?: string) => {
         intents.push({ type: "notice", message, code, ...(unknownCommand ? { unknownCommand } : {}) });
       };
@@ -163,7 +183,32 @@ export function createFeishuRouter(deps: FeishuRouterDeps) {
         const binding = state.bindings.get(key);
         if (!binding?.sessionId || binding.offline !== undefined) notice("no-session-bound");
         else if (command.op === "file") intents.push({ type: "file", message, identity, path: command.path, binding });
-        else if (command.op === "prompt") {
+        else if (command.op === "main") {
+          // §6.2: pure text only (attachments ride their own message), synthetic `main:` member
+          // ⇒ deterministic NEW cmdId; `triggerMessageId` keeps the REAL message id.
+          if (message.messageType !== "text") notice("main-text-only");
+          else {
+            const received = deps.requests.receive({
+              sessionId: binding.sessionId,
+              bindingKey: key,
+              bindingRev: binding.rev,
+              senderOpenId: message.senderOpenId,
+              senderDisplay: sanitizeHeaderField(message.senderDisplay),
+              chatLabel: sanitizeHeaderField(message.chatLabel),
+              chatId: message.chatId,
+              chatType: message.chatType,
+              ...(message.threadId ? { threadId: message.threadId } : {}),
+              triggerMessageId: message.messageId,
+              payload: { body: command.text, messageIds: [`main:${message.messageId}`], uploadIds: [] },
+              ...(message.createdAt !== undefined ? { sourceCreatedAt: message.createdAt } : {}),
+              installGen: identity.installGen,
+              tenantKey: identity.tenantKey,
+            });
+            if (!received.ok && received.refused === "unavailable") return { drop: true };
+            if (!received.ok) notice("queue-full");
+            else readyId = received.value.id;
+          }
+        } else if (command.op === "prompt") {
           let payload: RequestPayload;
           if (deps.preparePayload !== undefined) payload = await deps.preparePayload(message, command.text, identity);
           else payload = { body: command.text, messageIds: [message.messageId], uploadIds: [] };

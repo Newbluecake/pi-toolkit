@@ -21,6 +21,7 @@ import {
   SPAWN_HUB_CAP,
   SPAWN_MODEL_HUB_CAP,
   SPAWN_RELAUNCH_HUB_CAP,
+  THREAD_CAP,
   VERSION_HUB_CAP,
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
@@ -179,6 +180,10 @@ export function assembleHubCaps(ctx: HubAssembly): readonly string[] {
     // Link-preview D1: additive, after the existing proxy caps on both surfaces.
     ...(config.proxy === undefined ? [] : [PROXY_FRAME_HUB_CAP]),
     ...(config.feishuBot === undefined ? [] : [FSB_HUB_CAP]),
+    // fabric-thread P2 (arch §7.1): `thr.v1` iff the hub config carries the `feishuBot.threads`
+    // key (only a threads-on agent ever builds such a config — P3's buildHubConfig). Same
+    // two-surface tail-append rule; absent ⇒ caps byte-identical (G2a).
+    ...(config.feishuBot?.threads === undefined ? [] : [THREAD_CAP]),
     // fabric phase-2 X1: `xs.v1` iff `config.crossSession` (tail-appended, same two-surface rule;
     // absent ⇒ caps byte-identical). Reply cap shares the same gate plus reply !== false.
     // Channel-plan §3.1 (CH1): `xs.channel.v1` iff `config.crossSession` — a hub protocol
