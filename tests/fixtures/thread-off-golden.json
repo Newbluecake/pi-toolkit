@@ -1,0 +1,106 @@
+{
+  "note": "threads-off golden captured from dev before P0 (fabric-thread arch §9.3; fabric.enabled=true, threads off). Never regenerate to fix a diff.",
+  "mainSessionTools": [
+    "web_search",
+    "TaskCreate",
+    "TaskList",
+    "TaskGet",
+    "TaskUpdate",
+    "TaskDelete",
+    "memory",
+    "ask_user",
+    "Agent",
+    "get_run_result",
+    "list_subagents",
+    "steer_subagent",
+    "set_model",
+    "abort_subagent",
+    "extend_subagent_timeout",
+    "switch_context",
+    "set_compact_threshold",
+    "bash",
+    "bash_job",
+    "SubagentWorkflow"
+  ],
+  "reservedToolNames": [
+    "Agent",
+    "get_subagent_result",
+    "steer_subagent",
+    "StructuredOutput",
+    "message_agent",
+    "set_model",
+    "extend_subagent_timeout",
+    "consult",
+    "bash_job",
+    "list_subagents",
+    "switch_context",
+    "get_run_result"
+  ],
+  "grantDeny": [
+    "StructuredOutput",
+    "bash_job",
+    "consult",
+    "extend_subagent_timeout",
+    "get_subagent_result",
+    "list_subagents",
+    "set_model",
+    "steer_subagent",
+    "switch_context"
+  ],
+  "wiring": {
+    "hello": {
+      "t": "hello",
+      "proto": {
+        "major": 1,
+        "minor": 2
+      },
+      "pluginVersion": "0.0.0-golden",
+      "buildId": "golden-build",
+      "agentId": "<agentId>",
+      "epoch": "<uuid>",
+      "kind": "tui",
+      "launcher": ["<node>", "/nonexistent/pi"],
+      "cwd": "<tmp>",
+      "caps": [
+        "ev.v1",
+        "fleet.v1",
+        "snapshot.v1",
+        "branch.v1",
+        "runtx.v1",
+        "runtx.lan.v1",
+        "cmd.v1",
+        "dialog.v1",
+        "command.v1",
+        "cmd.args.v1",
+        "upload.v1",
+        "upload.lan.v1",
+        "hold.v1"
+      ]
+    },
+    "slotSequence": ["session", "status", "fleet", "dialogs", "ctl", "commands", "status", "ctl", "commands"],
+    "statusFrame": {
+      "t": "status",
+      "leafId": "e1",
+      "busy": false,
+      "pending": false,
+      "contextUsage": {
+        "tokens": 1000,
+        "contextWindow": 200000,
+        "percent": 0.5
+      },
+      "costUsd": 0,
+      "features": ["resume.v1"]
+    },
+    "hubConfig": {
+      "v": 1,
+      "home": "<tmp>",
+      "port": 0,
+      "idleExitMinutes": 10,
+      "pluginVersion": "0.0.0-golden",
+      "buildId": "golden-build",
+      "launcher": ["<node>", "/nonexistent/pi"],
+      "preview": "on",
+      "cmdArgs": "all"
+    }
+  }
+}

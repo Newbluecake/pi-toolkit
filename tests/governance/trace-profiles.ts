@@ -11,7 +11,7 @@
  */
 import { BASELINE } from "../integration/helpers/schedule-activate.js";
 
-export type ProfileName = "default" | "minimal" | "max" | "child" | "compat-failure";
+export type ProfileName = "default" | "minimal" | "max" | "child" | "compat-failure" | "thread-main" | "thread-child";
 
 export const PROFILES: Record<
   ProfileName,
@@ -55,4 +55,83 @@ export const PROFILES: Record<
   },
   child: { settings: BASELINE, child: true, phase2: false },
   "compat-failure": { settings: BASELINE, omit: ["appendEntry"], phase2: false },
+  // fabric-thread arch §9.3 (P0): the two thread profiles. `thread-main` turns on every switch
+  // `max` can run offline PLUS fabric.threads (still inert in P0 — the main-session `thread` tool
+  // and the hello cap arrive in P3, so today's trace must be IDENTICAL to `max`'s; when P3 wires
+  // the tool the thread-main entry is refreshed once more, with the post-guard order assertion
+  // — `thread` right after `message_channel` / the fabric tool group). `thread-child` is the same
+  // settings on a child session (child:true keeps the host-claim guard active): child-session
+  // activation must gain NO new registration (the child `thread` tool rides customTools
+  // injection, never registerTool — §9.2), so its trace must stay identical to `child`'s.
+  "thread-main": {
+    settings: {
+      fabric: {
+        enabled: true,
+        wake: { enabled: true },
+        crossSession: {
+          enabled: true,
+          autoJoin: true,
+          reply: { enabled: true },
+          channels: { enabled: true },
+          alias: { enabled: true },
+        },
+        threads: { enabled: true },
+      },
+      compact: { enabled: true, switchTool: true, keepCompactTool: true },
+      bashJobs: { enabled: true },
+      extend: { enabled: true },
+      workflow: { enabled: true },
+      load: { enabled: true },
+      quota: { enabled: true },
+      cacheTtl: { keepalive: true },
+      schedule: { enabled: true },
+      topicSwitch: { enabled: true },
+      askUser: { enabled: true },
+      todo: { enabled: true, nudge: { enabled: true } },
+      memory: { enabled: true },
+      webSearch: { enabled: true },
+      title: { enabled: true },
+      hud: { enabled: true },
+      sessionNav: { enabled: true },
+      feishuNotify: { enabled: false },
+      webHub: { enabled: true, autoStart: false },
+    },
+    phase2: true,
+  },
+  "thread-child": {
+    settings: {
+      fabric: {
+        enabled: true,
+        wake: { enabled: true },
+        crossSession: {
+          enabled: true,
+          autoJoin: true,
+          reply: { enabled: true },
+          channels: { enabled: true },
+          alias: { enabled: true },
+        },
+        threads: { enabled: true },
+      },
+      compact: { enabled: true, switchTool: true, keepCompactTool: true },
+      bashJobs: { enabled: true },
+      extend: { enabled: true },
+      workflow: { enabled: true },
+      load: { enabled: true },
+      quota: { enabled: true },
+      cacheTtl: { keepalive: true },
+      schedule: { enabled: true },
+      topicSwitch: { enabled: true },
+      askUser: { enabled: true },
+      todo: { enabled: true, nudge: { enabled: true } },
+      memory: { enabled: true },
+      webSearch: { enabled: true },
+      title: { enabled: true },
+      hud: { enabled: true },
+      sessionNav: { enabled: true },
+      feishuNotify: { enabled: false },
+      webHub: { enabled: true, autoStart: false },
+    },
+    child: true,
+    phase2: false,
+  },
 };

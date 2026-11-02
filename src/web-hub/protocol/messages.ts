@@ -97,6 +97,38 @@ export type { TfaReqFrame, TfaResFrame } from "./lan-2fa.js";
 // protocol/cmd-record.ts (its own frozen module); only the type is folded in here —
 // TYPE-only in both directions, so no runtime import cycle with keys.ts's projection.
 import type { CmdRecordWire } from "./cmd-record.js";
+// fabric-thread P0 (arch §7): `thr_req`/`thr_res`/`thr_closed` schemas + the `cmd.thread` /
+// `status.threads` / `data.thread` shapes live in protocol/thread.ts; only folded in here
+// (cap-gated on `thr.v1`, no PROTO bump — 只加帧不改, schedule.ts precedent).
+import {
+  THREAD_AGENT_FRAME_SCHEMAS,
+  THREAD_HUB_FRAME_SCHEMAS,
+  type ThreadMeta,
+  ThreadMetaSchema,
+  type ThreadRoutedResult,
+  ThreadsStatusWireSchema,
+  type ThreadStatusSlotWire,
+  type ThrClosedFrame,
+  type ThrReqFrame,
+  type ThrResFrame,
+  thrFrameOk,
+} from "./thread.js";
+export type {
+  ThreadCloseReason,
+  ThreadErrorCode,
+  ThreadMeta,
+  ThreadRoutedResult,
+  ThreadRunRef,
+  ThreadStatusSlotWire,
+  ThreadWindowChange,
+  ThreadWindowKey,
+  ThreadWindowParams,
+  ThrClosedFrame,
+  ThrHandbackReqFrame,
+  ThrPostReqFrame,
+  ThrReqFrame,
+  ThrResFrame,
+} from "./thread.js";
 
 // ---------------------------------------------------------------------------
 // data types
@@ -692,6 +724,10 @@ export interface StatusInfo {
    *  byte-equal to the pre-feature shape; the open StatusInfoSchema forwards it through old hubs
    *  untouched and old UIs ignore it. */
   archived?: ArchiveWire;
+  /** fabric-thread P0 (arch §7.3): this session's live thread subscriptions, for `/cur` display.
+   *  Sent only while the live link's hello_ack.caps ∋ `thr.v1`; absent ⇔ threads off / no active
+   *  subscription — byte-equal to the pre-feature shape. Wire-only (never a provider payload). */
+  threads?: ThreadStatusSlotWire[];
 }
 
 export interface FleetRowWire {
@@ -975,7 +1011,17 @@ export type RecallResultData =
   | { op: "recall"; outcome: "recalled"; from: "held" | "returned"; deliver: "steer" | "followUp"; text: string }
   | { op: "recall"; outcome: "too_late" };
 export type CmdData =
-  | { op: "prompt"; delivery: PromptDelivery; behavior?: "idle" | "steer" | "followUp"; mention?: MentionResultData }
+  | {
+      op: "prompt";
+      delivery: PromptDelivery;
+      behavior?: "idle" | "steer" | "followUp";
+      mention?: MentionResultData;
+      /** fabric-thread P0 (arch §7.3): present iff the events were routed to thread subscribers
+       *  (`data = {op:"prompt", delivery:"observed", behavior, thread:{outcome:"routed", runs}}`).
+       *  Wire-only — never enters any provider payload (G2c); the hub re-validates with
+       *  ThreadRoutedResultSchema (§8.1 step 1) and treats a malformed value as a plain ok. */
+      thread?: ThreadRoutedResult;
+    }
   | { op: "abort"; wasBusy: boolean }
   | { op: "steer_subagent" }
   | { op: "abort_subagent"; escalatedTo?: "L2" | "L3" | "L4"; alreadyTerminal?: boolean }
@@ -1166,6 +1212,9 @@ export type AgentFrame =
   | HubCtlFrame
   | FsbReqFrame
   | TfaReqFrame
+  // fabric-thread P0 (arch §7.3): agent→hub thread request (post / handback), sent only under
+  // `thr.v1`; decoding wired from day one (inert — nothing routes it until P2/P3).
+  | ThrReqFrame
   // fabric phase-2 XS0 (phase2-plan §8.1/§8.2): cross-session frames. Decoding is wired from
   // day one (inert — nothing routes them until X1/X2); every xs_* frame additionally passes
   // the stricter XS_MAX_FRAME_BYTES byte cap in decodeWith.
@@ -1257,7 +1306,11 @@ export type HubFrame =
   // scheduled-reports S0 (§10.1): inert until A0/H1 route them; sent only under `sched.v1`.
   | SchedRunFrame
   | SchedReceiptsFrame
-  | SchedDecideFrame;
+  | SchedDecideFrame
+  // fabric-thread P0 (arch §7.2): hub→agent thread reply + best-effort close notice, sent only
+  // under `thr.v1`; inert until P2/P3 route them.
+  | ThrResFrame
+  | ThrClosedFrame;
 
 export const TIMING = {
   connectMs: 1_000,
@@ -1722,6 +1775,9 @@ const StatusInfoSchema = Type.Object({
   xs: Type.Optional(XsStatusSchema),
   // channel-plan §12.6 (IBP): open top-level slot, only written while unread > 0.
   xsInbox: Type.Optional(Type.Object({ unread: Type.Integer({ minimum: 1, maximum: 9999 }) })),
+  // fabric-thread P0 (arch §7.3): open slot, only written under the thr.v1 cap while any
+  // subscription is live — absent ⇒ byte-equal to the pre-feature status frame.
+  threads: Type.Optional(ThreadsStatusWireSchema),
 });
 
 const FleetRowSchema = Type.Object({
@@ -2001,6 +2057,10 @@ const PromptArgsSchema = Type.Object(
     text: Type.String(),
     deliver: Type.Union([Type.Literal("steer"), Type.Literal("followUp")]),
     expect: Type.Optional(CmdExpectSchema),
+    // fabric-thread P0 (arch §7.2): optional Thread metadata — the hub attaches it ONLY when the
+    // target agent's hello caps ∋ thr.v1 (a hub must never send it to an old agent: this is a
+    // CLOSED schema, an unknown field would drop the whole cmd frame). absent ⇒ byte-identical.
+    thread: Type.Optional(ThreadMetaSchema),
   },
   { additionalProperties: false },
 );
@@ -2383,6 +2443,8 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   ...XS_AGENT_FRAME_SCHEMAS,
   // scheduled-reports S0 (§10.1): schemas from protocol/schedule.ts
   ...SCHED_AGENT_FRAME_SCHEMAS,
+  // fabric-thread P0 (arch §7.3): schemas from protocol/thread.ts
+  ...THREAD_AGENT_FRAME_SCHEMAS,
 };
 
 const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
@@ -2406,6 +2468,8 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   ...XS_HUB_FRAME_SCHEMAS,
   // scheduled-reports S0 (§10.1): schemas from protocol/schedule.ts
   ...SCHED_HUB_FRAME_SCHEMAS,
+  // fabric-thread P0 (arch §7.2): schemas from protocol/thread.ts
+  ...THREAD_HUB_FRAME_SCHEMAS,
 };
 
 // ---------------------------------------------------------------------------
@@ -2430,6 +2494,10 @@ function decodeWith(schemas: Readonly<Record<string, TSchema>>, raw: unknown): o
   // fabric phase-2 (protocol/xs.ts §8.2): xs_* frames carry a STRICTER 16 KiB byte cap than the
   // global ndjson budget — an oversize xs frame is invalid exactly like an unknown one.
   if (t.startsWith("xs_") && !xsFrameBytesOk(raw)) return undefined;
+  // fabric-thread P0 (arch §7.3): every thr_* frame (thr_req AND thr_res/thr_closed) passes the
+  // STRICTER 12 KiB serialized-JSON budget, and thr_req{op:"post"} the byte-precise 8 KiB text
+  // cap — same posture as xs_*; inert until P2/P3 route the frames.
+  if (t.startsWith("thr_") && !thrFrameOk(raw)) return undefined;
   const schema = schemas[t];
   if (schema === undefined) return undefined; // unknown t + RESERVED_FRAME_TYPES
   return Value.Check(schema, raw) ? (raw as object) : undefined;

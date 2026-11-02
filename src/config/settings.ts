@@ -16,6 +16,8 @@ export type {
   FabricCrossSessionLimitsSettings,
   FabricCrossSessionSettings,
   FabricSettings,
+  FabricThreadReceiptMode,
+  FabricThreadSettings,
   FabricWakeSettings,
   FabricXsAliasSettings,
   FabricXsBroadcastSettings,
@@ -349,6 +351,8 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "fabric.minIntervalMs",
   "fabric.progressTtlMs",
   "fabric.rootMinIntervalMs",
+  // fabric-thread P0 (arch §11.1): single-steer budget stored as fabric.threads.steerTimeoutS.
+  "fabric.threads.steerTimeoutMs",
   "goal.evalTimeoutMs",
   "goal.untilCmdTimeoutMs",
   "goal.deliveryWatchdogMs",
@@ -421,7 +425,13 @@ function applySecureDomainOverrides(settings: AgentSettings): AgentSettings {
   if (domain === undefined || domain.kind === "plain") return settings;
   const out: AgentSettings = {
     ...settings,
-    fabric: { ...settings.fabric, crossSession: { ...settings.fabric.crossSession, enabled: false } },
+    fabric: {
+      ...settings.fabric,
+      crossSession: { ...settings.fabric.crossSession, enabled: false },
+      // fabric-thread arch §10/I11 (D8): thread subscription is an outbound push surface (worker
+      // replies / handback re-injection) — secure/locked domains force it off, whatever the file says.
+      threads: { ...settings.fabric.threads, enabled: false },
+    },
     externalAgents: { ...settings.externalAgents, droid: { ...settings.externalAgents.droid, enabled: false } },
     feishuNotify: { ...settings.feishuNotify, enabled: false },
     // traffic-merge plan §6：加密/锁定域禁止流量落库（唯一落库闸口 persist 另有每次复查）。

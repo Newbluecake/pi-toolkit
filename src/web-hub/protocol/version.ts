@@ -322,6 +322,24 @@ export const PROXY_LAN_HUB_CAP = "proxy.lan.v1";
 export const FSB_HUB_CAP = "fsb.v1";
 
 /**
+ * fabric-thread arch §7.1 (P0 frozen surface, r3): the `thr.v1` cap — BOTH faces declare the
+ * same string. AGENT side: advertised in `hello.caps` iff `fabric.enabled ∧ fabric.threads.enabled
+ * ∧ 非 secure` (P3 wires `capsExtra`; the agent sends `thr_req` ONLY while the live link's
+ * `hello_ack.caps ∋ thr.v1`). HUB side: advertised on BOTH hub cap surfaces (`HubInfo.caps` /
+ * `hello_ack.caps`, kept byte-identical) iff the hub config has the `feishuBot.threads` key (only a
+ * hub launched by an agent with the feature on ever gets that key) — the hub attaches
+ * `cmd.thread`, sends `thr_closed`/`thr_res` and reads `status.threads` only under the cap. A
+ * missing cap on either side degrades silently: no field, no frame, `hub_unsupported` from the
+ * subscribe tool (§7.1 table). New optional frames are cap-gated, so there is no PROTO bump (the
+ * same 只加帧不改 rule as fsb_req / xs_* / sched_*). In P0 the constants alone are INERT — nothing folds
+ * them into any caps array yet (P2 hub / P3 agent own the folding). The frame schemas + the
+ * shared window clamp live in protocol/thread.ts.
+ */
+export const THREAD_CAP = "thr.v1";
+export const THREAD_HUB_CAPS = [THREAD_CAP] as const;
+export const THREAD_AGENT_CAPS = [THREAD_CAP] as const;
+
+/**
  * web-hub-slash-args plan §4.1 (P0 frozen surface): the cap advertising the `/` command
  * argument hint/completion channel — `CommandInfoWire.args` (§3.1) + the `complete_req` /
  * `complete_reply` frame pair (§4.1) + `POST /api/command/complete` (§4.2). r1 评审 #2

@@ -154,7 +154,10 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/config/model-hint.ts": [],
   "src/fabric/xs/channel.ts": ["../../web-hub/protocol/xs.js"],
   // #56 ⑧: fabric block settings — channel-plan CH0 pure channel-name rules + the pure receive/session-id rules.
-  "src/fabric/settings.ts": ["./xs/channel.js", "./xs/receive.js"],
+  // fabric-thread P0 (arch §11.1): + the SHARED window clamp from web-hub/protocol/thread.js (typebox-only,
+  // pi-free — the same reach-out precedent as fabric/xs/channel.ts → protocol/xs.js; the hub re-clamps
+  // HubConfig with the very same function, §8.2 "agent 与 hub 用同一个纯函数").
+  "src/fabric/settings.ts": ["./xs/channel.js", "./xs/receive.js", "../web-hub/protocol/thread.js"],
   "src/fabric/xs/receive.ts": [],
   "src/cache-ttl/settings.ts": ["./keepalive-state.js"],
   // #56 ⑧: quota block settings — `./types.js` is type-only (erased), so no value import at all.

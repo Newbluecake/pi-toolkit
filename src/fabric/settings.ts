@@ -6,6 +6,7 @@
  */
 import { XS_DEFAULT_CHANNEL, XS_MAX_CHANNELS, checkChannelName, channelSet } from "./xs/channel.js";
 import { isValidXsSessionId } from "./xs/receive.js";
+import { clampThreadWindowParams } from "../web-hub/protocol/thread.js";
 
 export interface FabricSettings {
   enabled: boolean;
@@ -24,6 +25,120 @@ export interface FabricSettings {
   /** fabric phase-2 (phase2-plan §4.1): cross-session root↔root messaging; `xsOn` additionally
    * requires `fabric.enabled` ∧ `webHub.enabled` ∧ `webHub.control !== false` (frozen at activate). */
   crossSession: FabricCrossSessionSettings;
+  /** fabric-thread (arch r3 §8.2/§11.1 P0): Thread 订阅直通. Only effective while `fabric.enabled`
+   * is also on; read once at stack build (non-live, like `wake`). Window fields (H/S/R) go through
+   * the agent/hub SHARED clamp (protocol/thread.ts `clampThreadWindowParams`). */
+  threads: FabricThreadSettings;
+}
+
+/** Parse-time bounds for the non-window `fabric.threads.*` leaves (§11.1 P0 defaults; the three
+ *  window leaves own-range in protocol/thread.ts). Config-accident containment, same posture as
+ *  every other clamped leaf. */
+export const FABRIC_THREADS_SUBS_PER_RUN_BOUNDS = [1, 8] as const;
+export const FABRIC_THREADS_SUBS_PER_THREAD_BOUNDS = [1, 8] as const;
+export const FABRIC_THREADS_SUBS_BOUNDS = [1, 64] as const;
+/** 0 = every thread event takes the slow path (R4 always). */
+export const FABRIC_THREADS_ROUTED_PER_HOUR_BOUNDS = [0, 600] as const;
+export const FABRIC_THREADS_LANE_WAIT_BOUNDS = [0, 64] as const;
+/** R6 (§6.3): a steer budget under 500 ms is unusable, so the floor matches it. */
+export const FABRIC_THREADS_STEER_TIMEOUT_MS_BOUNDS = [500, 60_000] as const;
+export const FABRIC_THREADS_REPLY_PER_MIN_BOUNDS = [0, 60] as const;
+export const FABRIC_THREADS_REPLY_PER_HOUR_BOUNDS = [0, 600] as const;
+
+/** `fabric.threads.receipt` (§8.1): phase-1 vocabulary is exactly `"first"` — the first event per
+ *  subscription gets a text receipt (「已转交 @label（run_id: …)」), later ones only a reaction. */
+export type FabricThreadReceiptMode = "first";
+export const FABRIC_THREADS_RECEIPT_MODES = ["first"] as const;
+
+/**
+ * `fabric.threads.*` (fabric-thread arch r3 §8.2/§11.1 P0): field-by-field tolerant, never throws.
+ * The three WINDOW leaves (handbackWindowMin H / startTimeoutMin S / retainMin R) parse through the
+ * shared `clampThreadWindowParams` (own bounds + R ≥ max(H,S)+2) and every recorded change WARNs
+ * one line — clamp-and-warn, never reject startup. Non-live: read once at stack build, only
+ * effective while `fabric.enabled` is on; secure domains force `enabled:false` (I11, D8).
+ */
+export interface FabricThreadSettings {
+  /** Default off — G2a: off ⇒ tools, prompts, hooks, hello caps, hub config, frames, persistent
+   *  state all byte-identical (A-tier golden tests/fixtures/thread-off-golden.json). */
+  enabled: boolean;
+  /** §5.1 admission: per-run subscription ceiling (default 4). */
+  maxSubsPerRun: number;
+  /** §5.1 admission: per-thread subscriber ceiling (default 4). */
+  maxSubsPerThread: number;
+  /** §5.1 admission: per-session (main-session stack) subscription ceiling (default 32). */
+  maxSubs: number;
+  /** §6.3 R4: per-thread direct-routing events per hour before falling back to the slow path. */
+  routedPerThreadPerHour: number;
+  /** §6.5: per-thread lane wait-queue length (in-flight is always 1). */
+  laneWait: number;
+  /** §6.5: single-steer budget source — effective span is `min(steerTimeoutMs, frameDeadlineMs −
+   *  1500)` through `clampSpanMs`; stored as `fabric.threads.steerTimeoutS` in the file. */
+  steerTimeoutMs: number;
+  /** §6.5 buffer TTL (S): minutes from a buffered event's own `deliveredAt` before the
+   *  subscription ends `start_timeout`. Range 1–30. */
+  startTimeoutMin: number;
+  /** §8.2 payload retention (R): minutes an `accepted{thr:routed}` request keeps its payload at
+   *  the hub (handback window). Range 5–60, ≥ max(H,S)+2. */
+  retainMin: number;
+  /** §5.5 handback window (H): minutes from `deliveredAt` within which a Worker may hand an event
+   *  back. Range 1–30. */
+  handbackWindowMin: number;
+  /** §6.8: Worker replies per thread per minute. */
+  replyPerThreadPerMin: number;
+  /** §6.8: Worker replies per thread per hour. */
+  replyPerThreadPerHour: number;
+  /** §8.1 receipt policy — phase-1 vocabulary: "first". */
+  receipt: FabricThreadReceiptMode;
+}
+
+/**
+ * `fabric.threads.*` parser: never throws; every change the shared window clamp records becomes
+ * exactly one `[pi-subagent] fabric.threads.<key> <from> → <to> (<reason>)` WARN (§8.2 ③). A
+ * non-object block falls back to the defaults (silent — an absent block IS the default state).
+ */
+export function parseFabricThreadSettings(input: unknown): FabricThreadSettings {
+  const defaults = DEFAULT_FABRIC_SETTINGS.threads;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  const clamp = (raw: unknown, fallback: number, min: number, max: number): number =>
+    typeof raw !== "number" || !Number.isFinite(raw) ? fallback : Math.min(max, Math.max(min, Math.floor(raw)));
+  const window = clampThreadWindowParams({
+    handbackWindowMin: value.handbackWindowMin,
+    startTimeoutMin: value.startTimeoutMin,
+    retainMin: value.retainMin,
+  });
+  for (const change of window.changes) {
+    console.warn(`[pi-subagent] fabric.threads.${change.key} ${change.from} → ${change.to} (${change.reason})`);
+  }
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
+    maxSubsPerRun: clamp(value.maxSubsPerRun, defaults.maxSubsPerRun, ...FABRIC_THREADS_SUBS_PER_RUN_BOUNDS),
+    maxSubsPerThread: clamp(
+      value.maxSubsPerThread,
+      defaults.maxSubsPerThread,
+      ...FABRIC_THREADS_SUBS_PER_THREAD_BOUNDS,
+    ),
+    maxSubs: clamp(value.maxSubs, defaults.maxSubs, ...FABRIC_THREADS_SUBS_BOUNDS),
+    routedPerThreadPerHour: clamp(
+      value.routedPerThreadPerHour,
+      defaults.routedPerThreadPerHour,
+      ...FABRIC_THREADS_ROUTED_PER_HOUR_BOUNDS,
+    ),
+    laneWait: clamp(value.laneWait, defaults.laneWait, ...FABRIC_THREADS_LANE_WAIT_BOUNDS),
+    steerTimeoutMs: clamp(value.steerTimeoutMs, defaults.steerTimeoutMs, ...FABRIC_THREADS_STEER_TIMEOUT_MS_BOUNDS),
+    ...window.value,
+    replyPerThreadPerMin: clamp(
+      value.replyPerThreadPerMin,
+      defaults.replyPerThreadPerMin,
+      ...FABRIC_THREADS_REPLY_PER_MIN_BOUNDS,
+    ),
+    replyPerThreadPerHour: clamp(
+      value.replyPerThreadPerHour,
+      defaults.replyPerThreadPerHour,
+      ...FABRIC_THREADS_REPLY_PER_HOUR_BOUNDS,
+    ),
+    receipt: value.receipt === "first" ? "first" : defaults.receipt,
+  };
 }
 
 /**
@@ -229,7 +344,12 @@ export interface FabricCrossSessionSettings {
 export function parseFabricSettings(input: unknown): FabricSettings {
   const defaults = DEFAULT_FABRIC_SETTINGS;
   if (!input || typeof input !== "object" || Array.isArray(input))
-    return { ...defaults, wake: { ...defaults.wake }, crossSession: cloneFabricCrossSession(defaults.crossSession) };
+    return {
+      ...defaults,
+      wake: { ...defaults.wake },
+      crossSession: cloneFabricCrossSession(defaults.crossSession),
+      threads: { ...defaults.threads },
+    };
   const value = input as Record<string, unknown>;
   const count = (key: keyof FabricSettings): number => {
     const raw = value[key];
@@ -252,6 +372,7 @@ export function parseFabricSettings(input: unknown): FabricSettings {
     rootInboxCap: count("rootInboxCap"),
     wake: parseFabricWakeSettings(value.wake),
     crossSession: parseFabricCrossSessionSettings(value.crossSession),
+    threads: parseFabricThreadSettings(value.threads),
   };
 }
 
@@ -582,5 +703,24 @@ export const DEFAULT_FABRIC_SETTINGS: FabricSettings = {
     },
     // alias-plan §3.6 (AL0b): Q9 on by default, Q2 7 d lease, Q4 10 min cooling, NQ1 10 min take floor.
     alias: { enabled: true, offlineLeaseH: 168, coolMin: 10, takeMinOfflineMin: 10, autoFromCwd: true },
+  },
+  // fabric-thread arch r3 §11.1 P0 (threads default OFF — G2a): frozen defaults in the arch's
+  // listing order; the window trio (startTimeoutMin S=8, retainMin R=15, handbackWindowMin H=10)
+  // mirrors protocol/thread.ts's THREAD_WINDOW_DEFAULTS (15 ≥ max(10,8)+2 ✓). Parity is pinned by
+  // tests/fabric/threads-settings.test.ts.
+  threads: {
+    enabled: false,
+    maxSubsPerRun: 4,
+    maxSubsPerThread: 4,
+    maxSubs: 32,
+    routedPerThreadPerHour: 60,
+    laneWait: 8,
+    steerTimeoutMs: 4_000,
+    startTimeoutMin: 8,
+    retainMin: 15,
+    handbackWindowMin: 10,
+    replyPerThreadPerMin: 6,
+    replyPerThreadPerHour: 60,
+    receipt: "first",
   },
 };
