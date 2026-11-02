@@ -419,6 +419,7 @@
       "registerTool(memory)",
       "registerCommand(mem)",
       "on(before_agent_start)",
+      "on(context)",
       "on(turn_start)",
       "on(turn_end)",
       "on(agent_end)",
@@ -622,7 +623,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 245,
+    "count": 246,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",

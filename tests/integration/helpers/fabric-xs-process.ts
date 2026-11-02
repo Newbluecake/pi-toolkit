@@ -293,6 +293,11 @@ if (process.argv[2] === "hub") {
   let idle = true,
     deferred = false,
     aborts = 0;
+  // wake-unknown-optimistic (L1–L4 harness): XW_LEGACY=1 ⇒ a pi 1.0/1.1-shaped host — a
+  // triggerTurn run fires `context` (never before_agent_start) AFTER sendMessage returned
+  // (F1/F3/F4), and "provider calls" are counted only when the run survived every context handler.
+  const legacy = process.env.XW_LEGACY === "1";
+  let providerCalls = 0;
   let holdResolve = false;
   // AF7: hold bare alias `get`s (the reconcile) so a test can freeze the agent's alias cache while the hub moves on.
   let holdAliasGets = false;
@@ -384,7 +389,29 @@ if (process.argv[2] === "hub") {
       else queued.push(m);
       if (options?.triggerTurn && !deferred) {
         idle = false;
-        void fire("before_agent_start", { messageType: "custom", message: m, systemPrompt: "host" });
+        if (legacy) {
+          const before = aborts;
+          const timer = setTimeout(() => {
+            void fire("context", {
+              type: "context",
+              messages: [
+                { role: "user", content: "history", timestamp: Date.now() },
+                {
+                  role: "custom",
+                  customType: m.customType,
+                  content: m.content,
+                  details: m.details,
+                  timestamp: Date.now(),
+                },
+              ],
+            }).then(() => {
+              if (aborts === before) providerCalls++; // the run survived every context handler
+            });
+          }, 0);
+          timer.unref?.();
+        } else {
+          void fire("before_agent_start", { messageType: "custom", message: m, systemPrompt: "host" });
+        }
       }
     },
     sendUserMessage(text: string) {
@@ -609,6 +636,7 @@ if (process.argv[2] === "hub") {
         ledger: getXsWakeLedger().entries(),
         owned: getXsWakeLedger().hasOwner(sm.getSessionId()),
         capability: getXsHostCapability().state,
+        providerCalls,
         toolNames: [...tools.keys()],
         level: readRootLevel(sm.getBranch()),
         aborts,

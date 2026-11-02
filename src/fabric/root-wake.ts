@@ -1,4 +1,4 @@
-import { readBeforeAgentStartTrigger } from "../adapters/pi-compat.js";
+import { readBeforeAgentStartTrigger, readContextTrailingCustom } from "../adapters/pi-compat.js";
 import { systemClock, type Clock, type TimerHandle } from "../core/clock.js";
 import { clampSpanMs } from "../core/deadline.js";
 import { newRunId } from "../core/ids.js";
@@ -21,11 +21,19 @@ export type RootWakeAudit =
   | "wake_end_unobserved"
   | "wake_late_aborted"
   | "wake_orphan_aborted"
+  | "wake_optimistic_dispatch"
+  | "wake_shape_absent_aborted"
+  | "wake_shape_absent_handed"
   | "abortStuck"
   | "wake_abort_error";
 export type RootWakeAuditPort = (event: RootWakeAudit, token: string | undefined) => void;
 type LevelPort = Pick<CausalLevel, "raise" | "hopAllowed">;
 type AbortPort = () => void | Promise<void>;
+/**
+ * wake-unknown-optimistic §1.4: one abort attempt for a (possibly unknown) trigger. Returns whether
+ * THIS call actually issued the abort (false ⇒ already issued this run; do not audit twice).
+ */
+export type OrphanAbortPort = (token: string | undefined) => boolean;
 
 function note(audit: RootWakeAuditPort | undefined, event: RootWakeAudit, token?: string): void {
   try {
@@ -61,6 +69,9 @@ export interface RootWakeTriggerDeps {
   clock?: Clock;
   level?: LevelPort;
   audit?: RootWakeAuditPort;
+  /** wake-unknown-optimistic: supervised orphan/late abort (activation-level watch). Default: raw abort + true. */
+  orphan?: OrphanAbortPort;
+  warn?: (message: string) => void;
 }
 
 export type RootWakeTriggerResult =
@@ -84,10 +95,17 @@ export function observeRootWakeTrigger(event: unknown, deps: RootWakeTriggerDeps
   const token = typeof details.wakeToken === "string" ? details.wakeToken : undefined;
   const record = token === undefined ? undefined : ledger.get(token);
   const now = (deps.clock ?? systemClock).now();
+  const orphan = deps.orphan ?? ((t: string | undefined) => (abortNow(deps.abort, deps.audit, t), true));
   if (record === undefined || record.sessionId !== deps.sessionId) {
-    note(deps.audit, "wake_orphan_aborted", token);
-    abortNow(deps.abort, deps.audit, token);
+    if (orphan(token)) note(deps.audit, "wake_orphan_aborted", token);
     return token === undefined ? { kind: "aborted" } : { kind: "aborted", token };
+  }
+  if (record.handed && record.state !== "live") {
+    // wake-unknown-optimistic §1.2/§6.2 (handedOver row): a handed-over token is NEVER aborted on
+    // sight — the run belongs to the human. Recover's idle-revoke can tombstone a handed record;
+    // sighting it again only marks the first gate sight (linearization) and stays silent.
+    ledger.update(record.token, { gateSightAt: record.gateSightAt ?? now });
+    return { kind: "other" };
   }
   if (
     record.state === "tombstone" ||
@@ -96,7 +114,8 @@ export function observeRootWakeTrigger(event: unknown, deps: RootWakeTriggerDeps
   ) {
     ledger.tombstone(record.token);
     // Seeing the trigger proves it is now executing, not that abort has physically completed.
-    ledger.update(record.token, { started: true, executionPending: true });
+    // gateSightAt (write-once) linearizes which guard saw this trigger first (§1.3).
+    ledger.update(record.token, { started: true, executionPending: true, gateSightAt: record.gateSightAt ?? now });
     // An earlier watchdog abort of a PRESUMED foreign run is not proof this delayed action
     // was aborted. Its first actual sight still needs a synchronous abort (B1).
     if (record.abortIssuedAt === undefined || !record.started) {
@@ -107,10 +126,170 @@ export function observeRootWakeTrigger(event: unknown, deps: RootWakeTriggerDeps
     return { kind: "aborted", token: record.token };
   }
   // handed is only set AFTER started, never for deferred human input (r3 B1).
-  ledger.update(record.token, { started: true, executionPending: true, boundAt: record.boundAt ?? now });
+  ledger.update(record.token, {
+    started: true,
+    executionPending: true,
+    boundAt: record.boundAt ?? now,
+    authorizedAt: now,
+  });
   capability.verify();
   commitLevel(ledger, record, deps.level);
   return { kind: "authorized", token: record.token };
+}
+
+/**
+ * wake-unknown-optimistic §1.1 observation point 2: the `context` hook — fired before EVERY LLM
+ * call on ALL hosts (legacy included). O(1): reads only the trailing message. A marked tail whose
+ * token is not authorized for THIS session aborts fail-closed before the provider request;
+ * an authorized live token is a no-op. Never returns a payload: messages and the provider cache
+ * prefix stay byte-identical. Counting/linearization rules are §1.3, written once via gateSightAt.
+ */
+export function guardRootWakeContext(event: unknown, deps: RootWakeTriggerDeps): RootWakeTriggerResult {
+  const ledger = deps.ledger ?? getXsWakeLedger();
+  const capability = deps.capability ?? getXsHostCapability();
+  const tail = readContextTrailingCustom(event);
+  if (tail?.customType !== XS_WAKE_CUSTOM_TYPE) return { kind: "other" };
+  const d = tail.details as { xsWake?: unknown; wakeToken?: unknown; xid?: unknown } | null | undefined;
+  if (d === null || typeof d !== "object" || d.xsWake !== true) return { kind: "other" };
+  const token = typeof d.wakeToken === "string" ? d.wakeToken : undefined;
+  const orphan = deps.orphan ?? ((t: string | undefined) => (abortNow(deps.abort, deps.audit, t), true));
+  const record = token === undefined ? undefined : ledger.get(token);
+  if (record === undefined || record.sessionId !== deps.sessionId || record.xid !== d.xid) {
+    if (orphan(token)) note(deps.audit, "wake_orphan_aborted", token);
+    return token === undefined ? { kind: "aborted" } : { kind: "aborted", token };
+  }
+  if (record.state === "live" && record.authorizedAt !== undefined && record.abortIssuedAt === undefined)
+    return { kind: "authorized", token: record.token };
+  if (record.gateSightAt !== undefined)
+    return record.handed ? { kind: "other" } : { kind: "aborted", token: record.token };
+  const now = (deps.clock ?? systemClock).now();
+  const basNeverSaw = record.authorizedAt === undefined; // gateSightAt is still undefined here
+  if (basNeverSaw) capability.triggerSkipped(deps.warn);
+  if (record.handed) {
+    // Human already owns this run: the hop is void, never abort (§1.2 row "handedOver").
+    ledger.update(record.token, { gateSightAt: now, levelCommitted: true });
+    note(deps.audit, "wake_shape_absent_handed", record.token);
+    return { kind: "other" };
+  }
+  const issue = record.abortIssuedAt === undefined || !record.started;
+  ledger.tombstone(record.token);
+  ledger.update(record.token, {
+    started: true,
+    executionPending: true,
+    levelCommitted: true,
+    gateSightAt: now,
+    ...(issue ? { abortIssuedAt: now } : {}),
+  });
+  if (issue) {
+    note(deps.audit, basNeverSaw ? "wake_shape_absent_aborted" : "wake_late_aborted", record.token);
+    abortNow(deps.abort, deps.audit, record.token);
+  }
+  return { kind: "aborted", token: record.token };
+}
+
+/**
+ * wake-unknown-optimistic §1.4: activation-level supervision for every abort issued where no
+ * RootWakeController is reachable — the pre-stack window, after session_shutdown, and ALL orphan
+ * aborts (controller-path ones too, injected via `StackXsInput.abortOrphan`). Mirrors the
+ * controller's aborting/stuck pair: `issue` dedups per run (latch), arms the ROOT_WAKE_ABORT_GRACE_MS
+ * grace timer plus the 2s two-idle observation; grace expiry only audits `abortStuck` + warns once
+ * (NEVER a second abort); `settled`/`runStarted` (a new run's BAS hook entry) or two consecutive
+ * idle observations release the latch; `dispose` (session_shutdown) clears the timers. Held in the
+ * activation closure, never module state (I4). All timers through Clock (systemClock: segmented +
+ * unref), durations clamped via clampSpanMs (I1, I5).
+ */
+export interface RootWakeOrphanWatchDeps {
+  clock?: Clock;
+  audit?: RootWakeAuditPort;
+  warn?: (message: string) => void;
+}
+
+export class RootWakeOrphanWatch {
+  private readonly clock: Clock;
+  private latched = false;
+  private idleObservations = 0;
+  private graceTimer: TimerHandle | undefined;
+  private idleTimer: TimerHandle | undefined;
+  private idlePort: { isIdle: () => boolean } | undefined;
+
+  constructor(private readonly deps: RootWakeOrphanWatchDeps = {}) {
+    this.clock = deps.clock ?? systemClock;
+  }
+
+  get pending(): boolean {
+    return this.latched;
+  }
+
+  /** Returns false when an abort was already issued for this run (per-run dedup, §1.3). */
+  issue(port: { abort: AbortPort; isIdle: () => boolean }, token?: string): boolean {
+    if (this.latched) return false;
+    this.latched = true;
+    this.idleObservations = 0;
+    abortNow(port.abort, this.deps.audit, token);
+    this.idlePort = port;
+    const grace = clampSpanMs(ROOT_WAKE_ABORT_GRACE_MS);
+    if (grace !== undefined)
+      this.graceTimer = this.clock.setTimer(grace, () => {
+        this.graceTimer = undefined;
+        if (!this.latched) return;
+        note(this.deps.audit, "abortStuck", token);
+        try {
+          (this.deps.warn ?? console.warn)("[pi-subagent] xs wake orphan abort stuck; further wakes are deliver-only");
+        } catch {
+          /* diagnostic only */
+        }
+        // No second abort: keep only the idle observation.
+      });
+    this.pollIdle();
+    return true;
+  }
+
+  /** A new run started (BAS hook entry): release the latch so its orphans abort again. */
+  runStarted(): void {
+    this.release();
+  }
+
+  settled(): void {
+    this.release();
+  }
+
+  dispose(): void {
+    this.release();
+  }
+
+  private pollIdle(): void {
+    const poll = clampSpanMs(ROOT_WAKE_IDLE_POLL_MS);
+    const port = this.idlePort;
+    if (poll === undefined || port === undefined) return;
+    const tick = (): void => {
+      this.idleTimer = undefined;
+      if (!this.latched) return;
+      let idle = false;
+      try {
+        idle = port.isIdle();
+      } catch {
+        idle = false; // a throwing port must not wedge the watch
+      }
+      this.idleObservations = idle ? this.idleObservations + 1 : 0;
+      if (this.idleObservations >= 2) this.release();
+      else this.idleTimer = this.clock.setTimer(poll, tick);
+    };
+    this.idleTimer = this.clock.setTimer(poll, tick);
+  }
+
+  private release(): void {
+    this.clearTimers();
+    this.latched = false;
+    this.idleObservations = 0;
+    this.idlePort = undefined;
+  }
+
+  private clearTimers(): void {
+    for (const timer of [this.graceTimer, this.idleTimer]) {
+      if (timer !== undefined) this.clock.clearTimer(timer);
+    }
+    this.graceTimer = this.idleTimer = undefined;
+  }
 }
 
 export interface RootWakeMessage {
@@ -170,6 +349,8 @@ export interface RootWakeDeps {
   newToken?: () => string;
   audit?: RootWakeAuditPort;
   warn?: (message: string) => void;
+  /** wake-unknown-optimistic: supervised orphan/late aborts inside the guards (activation watch). */
+  abortOrphan?: OrphanAbortPort;
 }
 
 export type RootWakeDispatchResult =
@@ -243,7 +424,12 @@ export class RootWakeController {
             : record.started || (record.executionPending && record.boundAt !== undefined)
               ? "bound"
               : "deferred";
-      if (record.started && record.abortIssuedAt === undefined) commitLevel(this.ledger, record, this.deps.level);
+      if (
+        record.started &&
+        record.abortIssuedAt === undefined &&
+        (!record.optimistic || record.authorizedAt !== undefined)
+      )
+        commitLevel(this.ledger, record, this.deps.level);
       this.arm();
       break;
     }
@@ -283,6 +469,9 @@ export class RootWakeController {
       return downgrade("level_limit");
     if (this.deps.inboundWakeAvailable?.() === false) return downgrade("inbound_wake_rate");
     const dispatchLevel = request.solicited ? request.returnLevel : request.level;
+    // wake-unknown-optimistic: `unknown` dispatches optimistically; the first run is verified
+    // (BAS authorizes → bound, +1) or aborted before its first provider request (context guard).
+    const optimistic = this.capability.optimistic;
     const token = this.deps.newToken?.() ?? newRunId((id) => this.ledger.get(id) !== undefined);
     const now = this.clock.now();
     if (
@@ -292,6 +481,7 @@ export class RootWakeController {
         xid: request.xid,
         dispatchedAt: now,
         deadlineAt: now + this.budgetMs,
+        ...(optimistic ? { optimistic: true as const } : {}),
         ...(dispatchLevel === undefined ? {} : { level: dispatchLevel }),
         ...(request.solicited ? { levelMode: "return" as const } : {}),
       })
@@ -330,12 +520,17 @@ export class RootWakeController {
       this.ledger.update(token, { started: true, executionPending: true });
       if (this.current === "deferred") this.current = "starting";
       this.arm();
-      if (record !== undefined) commitLevel(this.ledger, record, this.deps.level);
+      // Optimistic dispatch only carries the sender's level; the hop commits when BAS
+      // authorizes the token (observeRootWakeTrigger → commitLevel), never at dispatch.
+      if (record !== undefined && !record.optimistic) commitLevel(this.ledger, record, this.deps.level);
+      else if (dispatchLevel !== undefined && !record?.levelCommitted) this.deps.level?.raise("root", dispatchLevel);
+      if (optimistic) note(this.deps.audit, "wake_optimistic_dispatch", token);
       this.deps.chargeInboundWake?.();
       return { dispatched: true, effect: "applied", woke: true, token };
     }
     // S1: queued trigger carries the sender's level, but no autonomous hop yet.
     if (dispatchLevel !== undefined && !record?.levelCommitted) this.deps.level?.raise("root", dispatchLevel);
+    if (optimistic) note(this.deps.audit, "wake_optimistic_dispatch", token);
     this.deps.chargeInboundWake?.();
     return { dispatched: true, effect: "unknown", reason: "start_deferred", woke: true, token };
   }
@@ -350,6 +545,8 @@ export class RootWakeController {
       clock: this.clock,
       ...(this.deps.level === undefined ? {} : { level: this.deps.level }),
       ...(this.deps.audit === undefined ? {} : { audit: this.deps.audit }),
+      ...(this.deps.abortOrphan === undefined ? {} : { orphan: this.deps.abortOrphan }),
+      ...(this.deps.warn === undefined ? {} : { warn: this.deps.warn }),
     });
     if (this.disposed) return result;
     if (result.kind !== "other") {
@@ -365,17 +562,40 @@ export class RootWakeController {
           this.current = "aborting";
           this.arm();
         }
-      } else if (result.kind === "authorized" && result.token === this.token) {
+      } else if (result.kind === "authorized" && result.token !== undefined && result.token === this.token) {
         if (this.current === "starting" || this.current === "deferred") this.current = "bound";
         this.arm();
-      } else if (result.kind === "aborted" && result.token === this.token) {
+      } else if (result.kind === "aborted" && result.token !== undefined && result.token === this.token) {
+        // token-guarded: a TOKEN-LESS orphan abort (undefined === undefined) must never move an
+        // idle controller into a token-less "aborting" with no timers (property test finding).
         this.current = "aborting";
         this.arm();
       } else if (this.current === "starting") note(this.deps.audit, "wake_foreign_start", this.token);
       return result;
     }
     const trigger = readBeforeAgentStartTrigger(event);
-    if (
+    const shapeLost =
+      trigger.kind === "custom" &&
+      (trigger.customType === undefined || trigger.details === null || typeof trigger.details !== "object");
+    const tokenRecord = this.token !== undefined ? this.ledger.get(this.token) : undefined;
+    if (shapeLost && tokenRecord?.optimistic === true && (this.current === "starting" || this.current === "deferred")) {
+      // wake-unknown-optimistic: the host cannot have authorized an unreadable trigger — mark
+      // absent, abort exactly once (before any provider request) and supervise to settlement.
+      this.capability.missingCustomShape(this.deps.warn);
+      this.ledger.tombstone(tokenRecord.token);
+      const now = this.clock.now();
+      this.ledger.update(tokenRecord.token, {
+        started: true,
+        executionPending: true,
+        levelCommitted: true,
+        gateSightAt: now,
+        abortIssuedAt: now,
+      });
+      note(this.deps.audit, "wake_shape_absent_aborted", tokenRecord.token);
+      this.current = "aborting";
+      this.arm(); // arm grace BEFORE invoking abort (settled can be synchronous)
+      abortNow(this.deps.host.abort, this.deps.audit, tokenRecord.token);
+    } else if (
       this.current === "deferred" &&
       trigger.kind === "custom" &&
       (trigger.customType === undefined || trigger.details === null || typeof trigger.details !== "object")
@@ -392,12 +612,58 @@ export class RootWakeController {
     return result;
   }
 
+  /**
+   * wake-unknown-optimistic §1.1 observation point 2: forward a `context` event (before every
+   * LLM call) through the ledger-authorized guard. Our own token aborted at first sight (or a
+   * claimable late tombstone while idle) enters `aborting` and stays supervised; `authorized`
+   * and `other` change nothing.
+   */
+  context(event: unknown): RootWakeTriggerResult {
+    const result = guardRootWakeContext(event, {
+      sessionId: this.deps.sessionId,
+      abort: this.deps.host.abort,
+      ledger: this.ledger,
+      capability: this.capability,
+      clock: this.clock,
+      ...(this.deps.audit === undefined ? {} : { audit: this.deps.audit }),
+      ...(this.deps.abortOrphan === undefined ? {} : { orphan: this.deps.abortOrphan }),
+      ...(this.deps.warn === undefined ? {} : { warn: this.deps.warn }),
+    });
+    if (this.disposed || result.kind !== "aborted" || result.token === undefined) return result;
+    if (result.token === this.token) {
+      if (this.current === "starting" || this.current === "deferred" || this.current === "bound") {
+        this.current = "aborting";
+        this.arm();
+      }
+      return result;
+    }
+    if (!this.busy) {
+      // A late tombstone can start while idle; supervise its abort (same claim as beforeAgentStart).
+      const record = this.ledger.get(result.token);
+      if (
+        record?.sessionId === this.deps.sessionId &&
+        record.abortIssuedAt !== undefined &&
+        this.ledger.claim(record.token, this.owner)
+      ) {
+        this.token = record.token;
+        this.current = "aborting";
+        this.arm();
+      }
+    }
+    return result;
+  }
+
   input(event: WakeInputEvent, attributeInput?: (text: string) => "web_prompt" | undefined): void {
     // B1 supersedes the original table: human input in somebody else's deferred predecessor
     // is NOT handover. Only proven own-run start can surrender the watchdog to the human.
     if (this.disposed || (this.current !== "starting" && this.current !== "bound")) return;
-    if (!this.ledger.get(this.token!)?.started || !classifyHumanInput(event, attributeInput)) return;
-    this.ledger.update(this.token!, { handed: true });
+    const record = this.ledger.get(this.token!);
+    if (!record?.started || !classifyHumanInput(event, attributeInput)) return;
+    this.ledger.update(this.token!, {
+      handed: true,
+      // Human takeover voids a still-uncommitted optimistic hop in the same write.
+      ...(record.optimistic && !record.levelCommitted ? { levelCommitted: true } : {}),
+    });
     this.current = "handedOver";
     this.arm();
   }

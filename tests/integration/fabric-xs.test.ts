@@ -13,8 +13,14 @@ describe("XW real hub child × two activate-built stacks × real sockets", () =>
     expect((await list(a)).rows).toEqual([expect.objectContaining({ ref: bid.slice(0, 12), receive: "wake" })]);
     expect(await a.rpc("cmd", { name: "agent", args: "status" })).toContain("xs joined · recv wake · cap unknown");
     expect(await send(a, bid, "deliver-only")).toMatchObject({ effect: "applied" });
-    // Different direction avoids pairMinInterval; a fresh host is still unverified (N1).
-    expect(await send(b, aid, "N1", true)).toMatchObject({ effect: "applied", wakeDowngraded: "host_unverified" });
+    // wake-unknown-optimistic: a fresh host (a) dispatches OPTIMISTICALLY on its first wake; the
+    // host's BAS authorizes the token ⇒ verified, and the controller stays occupied until settle.
+    expect(await send(b, aid, "N1", true)).toMatchObject({ effect: "applied", woke: true });
+    const woken = await a.rpc("inspect");
+    expect(woken.capability).toBe("verified");
+    expect(woken.messages.at(-1)).toMatchObject({ triggerTurn: true, details: { xsWake: true } });
+    expect(woken.owned).toBe(true);
+    await a.rpc("settle");
     await b.rpc("prime");
     // New hub quota window without sleeps (also exercises member replay).
     const reset = await a.rpc("replace");

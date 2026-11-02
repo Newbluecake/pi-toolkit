@@ -67,6 +67,9 @@ async function host(
     autoCompact?: boolean;
     /** C-X11: register the alias-description instances (`alias:true`, activate-frozen in production). */
     aliasTools?: boolean;
+    /** C-X12b: record the BAS event but do NOT forward it to the controller (a host that never
+     *  emits before_agent_start for custom runs — the `context` guard is the only line left). */
+    noBasForward?: boolean;
   } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "fabric-xs-conformance-"));
@@ -101,6 +104,9 @@ async function host(
   const audit: RootWakeAudit[] = [];
   const triggers: unknown[] = [];
   const settled: boolean[] = [];
+  // wake-unknown-optimistic (C-X12): every LLM call's context event is forwarded to the real
+  // controller guard (registration order: this factory runs FIRST, the guard returns undefined).
+  const ctxKinds: string[] = [];
   const errors: unknown[] = [];
   let pi!: ExtensionAPI, ctx!: ExtensionContext, controller!: RootWakeController;
   const loader = new DefaultResourceLoader({
@@ -116,7 +122,10 @@ async function host(
         });
         api.on("before_agent_start", (event) => {
           triggers.push(event);
-          controller.beforeAgentStart(event);
+          if (!options.noBasForward) controller.beforeAgentStart(event);
+        });
+        api.on("context", (event) => {
+          ctxKinds.push(controller.context(event).kind);
         });
         api.on("input", (event) => {
           controller.input(event);
@@ -222,6 +231,7 @@ async function host(
     fence,
     audit,
     triggers,
+    ctxKinds,
     settled,
     errors,
     pi,
@@ -1005,6 +1015,66 @@ describe("fabric phase-2 real pi contracts", () => {
       expect(all.includes(secret) ? secret : "").toBe("");
     expect(h.errors).toEqual([]);
   }, 30_000);
+
+  /**
+   * C-X12 (wake-unknown-optimistic §5.2): capability `unknown` dispatches OPTIMISTICALLY on the
+   * current peer — no priming prompt. The run's BAS carries the custom token (authorization ⇒
+   * verified + authorizedAt), the context guard returns `authorized` on the wake run's first LLM
+   * call, exactly ONE provider request happens, and the details/token stay out of the payload.
+   */
+  it("C-X12: unknown ⇒ optimistic dispatch; BAS authorizes (verified/authorizedAt); context guard authorized; 1 provider request; no details in payload", async () => {
+    const h = await host();
+    expect(h.cap.state).toBe("unknown"); // no prime(): the optimistic path itself
+    const before = h.stub.requests.length;
+    const result = h.wake();
+    expect(result).toMatchObject({ dispatched: true, effect: "applied", woke: true });
+    const token = h.controller.activeToken!;
+    // BAS authorized the token before its first LLM call (Fpi3) — read the record before settlement releases it.
+    await until(() => h.ctxKinds.includes("authorized"), "first LLM call saw the authorized marker");
+    expect(h.triggers.at(-1)).toMatchObject({ messageType: "custom" });
+    expect(h.cap.state).toBe("verified");
+    expect(h.ledger.get(token)).toMatchObject({ optimistic: true, authorizedAt: expect.any(Number) });
+    await until(() => h.settled.length === 1, "optimistic run settled");
+    expect(h.stub.requests).toHaveLength(before + 1); // exactly one provider request
+    expect(h.ctxKinds.every((kind) => kind === "authorized" || kind === "other")).toBe(true);
+    const bodies = h.stub.requests
+      .slice(before)
+      .map((r) => r.body)
+      .join("\n");
+    for (const secret of [token, "wakeToken", "xsWake"]) expect(bodies.includes(secret) ? secret : "").toBe("");
+    expect(bodies).toContain("untrusted xs body");
+    expect(h.errors).toEqual([]);
+  }, 20_000);
+
+  /**
+   * C-X12b: a host that fires before_agent_start for the wake run NEVER (harness drops the
+   * forwarding) — the context guard is the only line left, and it aborts the run BEFORE the first
+   * provider request; the capability lands absent and the controller supervises the abort.
+   */
+  it("C-X12b: no BAS at all ⇒ first context sight aborts with ZERO provider requests; absent + supervised", async () => {
+    const h = await host({ noBasForward: true });
+    const before = h.stub.requests.length;
+    const result = h.wake();
+    expect(result).toMatchObject({ dispatched: true, effect: "applied", woke: true }); // woke = accepted dispatch
+    await until(() => h.settled.length === 1, "aborted run settled");
+    expect(h.settled.at(-1)).toBe(true);
+    expect(h.stub.requests).toHaveLength(before); // ZERO provider requests
+    expect(h.cap.state).toBe("absent");
+    expect(h.audit).toContain("wake_shape_absent_aborted");
+    // the abort was supervised through settlement: the settled handler already released the token
+    expect(h.controller.state).toBe("idle");
+    expect(h.ledger.entries()).toEqual([]);
+    expect(h.ctxKinds).toContain("aborted");
+    const bodies = h.stub.requests
+      .slice(before)
+      .map((r) => r.body)
+      .join("\n");
+    expect(bodies).toBe("");
+    expect(h.errors).toEqual([]);
+    // absent is sticky: the next wake is deliver-only
+    h.controller.settled();
+    expect(h.wake()).toEqual({ dispatched: false, wakeDowngraded: "host_unsupported" });
+  }, 20_000);
 
   /**
    * C-X10 (channel-plan §12.7): ONLY pi's ordering facts that the unread counter relies on. The real

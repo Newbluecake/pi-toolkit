@@ -88,11 +88,18 @@ sessionId, so `/reload` keeps it) and it suppresses autoJoin exactly like a rest
 leave therefore survives `/new` too. A pristine (never-touched) membership stashes nothing, so autoJoin
 behaviour for fresh sessions is unchanged. **Aliases follow `/new` too (#72 AF7, section 「Force takeover…」 below) — only `/new`; fork never inherits an alias.** `message_session` omits wake = deliver-only; `wake:true` alone may
 start a turn through `RootWakeController` (no steer), gated by `fabric.wake.enabled`, causal level,
-capability, goal and quotas. Unknown host capability downgrades to deliver-only until real runtime
-shape evidence; root deadline `fabric.wake.rootRunMaxS` (default 900s) starts at dispatch, including
+capability (`absent` ⇒ `host_unsupported` deliver-only; `unknown` ⇒ **optimistic dispatch** since
+wake-unknown-optimistic 2026-11: the first run is authorized by BAS or aborted at its first
+`context` sight before any provider request on verified-shape hosts 1.0.4/1.1.0/1.4.0 — legacy
+conformance + C-X12 gates; other shapes degrade to a bounded supervised run; `woke:true` means
+"dispatch accepted", same as `start_deferred`, not a provider-request guarantee), goal and quotas.
+root deadline `fabric.wake.rootRunMaxS` (default 900s) starts at dispatch, including
 pre-start compaction. Token authorization and dedup survive /reload; marked unauthorized/expired
 triggers abort before their first provider request (B1); human handover only after proven own-run
-start. Mutation fences (compaction/tree/switch/web_exec/topic_switch) reject ALL ingress; goal
+start. Peer-upgrade gates: C-X1…C-X12 with real pi, **plus** the self-gated legacy conformance
+(`PI_TOOLKIT_LEGACY_PI_DIR=… npx vitest run tests/conformance/fabric-xs-legacy.test.ts` against
+unpacked pi 1.0.4 and 1.1.0 — local only, never in CI) — run both before any pi peer bump.
+Mutation fences (compaction/tree/switch/web_exec/topic_switch) reject ALL ingress; goal
 only downgrades wake. A 30s stuck warning never opens a fence; input/run-start is NOT completion
 evidence (r3 M1); local `/fabric fence reset` is the manual escape. M2 effects: before-send
 cancellation/origin change = `none`; after-send no verdict = `unknown`, received remote evidence

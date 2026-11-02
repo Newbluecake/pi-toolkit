@@ -94,6 +94,7 @@ describe("IBW unread inbox (real stacks)", () => {
   it("exit 2 (NoticeGate quiet host): a timeout notice counts without an xid", async () => {
     h = new XsHarness();
     const { a, bid } = await joinedPair(h);
+    await a.rpc("event", { type: "before_agent_start", extra: { prompt: "legacy host" } }); // cap absent ⇒ quiet (wake-unknown-optimistic)
     await a.rpc("tool", { name: "message_session", params: { to: bid, text: "q", expectReply: { timeoutS: 60 } } });
     await a.rpc("skew", { ms: 61_000 });
     await a.rpc("settle");

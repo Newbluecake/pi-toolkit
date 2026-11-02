@@ -282,7 +282,7 @@ export type XsUnknownReason =
 export type XsWakeDowngraded =
   | "wake_disabled" // receiver's fabric.wake.enabled false
   | "controller_disabled" // rootRunMaxS === 0
-  | "host_unverified" // capability unknown (N1: first prompt not yet seen)
+  | "host_unverified" // legacy only: emitted by agents before wake-unknown-optimistic; kept append-only (I10)
   | "host_unsupported" // capability absent (pi 1.0/1.1 shape)
   | "receiver_policy" // session receive is "deliver" (or off ⇒ none{rejected} instead)
   | "busy" // receiver not idle / Controller slot occupied

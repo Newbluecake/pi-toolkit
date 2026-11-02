@@ -44,8 +44,9 @@ import type { XsWakeDowngraded } from "../../web-hub/protocol/xs.js";
  * its in-memory flush queue, Fpi7) — the tool text tells the model not to blindly resend.
  *
  * The Controller is injected (R1's `RootWakeController`); its `dispatch` owns every wake-path
- * truth-table row (wake_disabled / controller_disabled / host_unverified / host_unsupported /
- * receiver_policy / busy / goal / level_limit / inbound_wake_rate / ledger_full) and its own
+ * truth-table row (wake_disabled / controller_disabled / host_unsupported / receiver_policy /
+ * busy / goal / level_limit / inbound_wake_rate / ledger_full; `unknown` capability dispatches
+ * optimistically and is verified on the first run — wake-unknown-optimistic) and its own
  * level commits (S1). The receiver owns
  * the deliver-only rows and the carry (`raise(root, L_s)`) for deliver-only and downgraded
  * wakes. `fence.beginDispatch()/verifyDispatch()` (T1) wraps the actual send in both paths;

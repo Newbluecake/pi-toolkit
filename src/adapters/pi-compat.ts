@@ -272,6 +272,26 @@ export function readTriggerShape(event: unknown): "union" | "legacy" | "unknown"
   return e.messageType === undefined && typeof e.prompt === "string" ? "legacy" : "unknown";
 }
 
+/**
+ * wake-unknown-optimistic §2.1: structural read of the TRAILING message of a `context` event
+ * (fired before every LLM call, all hosts). Returns the last message's custom shape only when it
+ * is `role:"custom"`; the guard compares token/xid against the ledger in O(1). Never throws, never
+ * reads `content`. A shape probe, not a version gate (I14) — the same reading style as
+ * {@link readBeforeAgentStartTrigger}.
+ */
+export function readContextTrailingCustom(event: unknown): { customType?: string; details?: unknown } | undefined {
+  if (event === null || typeof event !== "object") return undefined;
+  const messages = (event as { messages?: unknown }).messages;
+  if (!Array.isArray(messages) || messages.length === 0) return undefined;
+  const last: unknown = messages[messages.length - 1];
+  if (last === null || typeof last !== "object" || (last as { role?: unknown }).role !== "custom") return undefined;
+  const m = last as { customType?: unknown; details?: unknown };
+  return {
+    ...(typeof m.customType === "string" ? { customType: m.customType } : {}),
+    ...(m.details !== undefined ? { details: m.details } : {}),
+  };
+}
+
 export function readBeforeAgentStartTrigger(event: unknown): BeforeAgentStartTrigger {
   if (event === null || typeof event !== "object") return { kind: "unknown" };
   const e = event as { messageType?: unknown; prompt?: unknown; message?: unknown };

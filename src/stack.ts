@@ -1839,6 +1839,7 @@ export function buildSessionStack(
         },
       },
       ...(fabric?.level ? { level: fabric.level } : {}),
+      ...(xsInput.abortOrphan ? { abortOrphan: xsInput.abortOrphan } : {}),
       audit: (event) => console.warn(`[pi-subagent] fabric xs ${event}`),
     });
     rootWakeRecovery.recover();

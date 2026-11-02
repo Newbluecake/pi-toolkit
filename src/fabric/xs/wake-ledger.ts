@@ -24,12 +24,19 @@ export interface XsWakeRecord {
   readonly levelCommitted: boolean;
   readonly boundAt?: number;
   readonly abortIssuedAt?: number;
+  /** wake-unknown-optimistic: dispatched while capability was `unknown` (first run is verified/aborted). */
+  readonly optimistic?: true;
+  /** Set when the BAS guard AUTHORIZED this token (before its run's first LLM call). */
+  readonly authorizedAt?: number;
+  /** Write-once: the first guard (BAS or context) that actually saw this trigger. Linearization (§1.3). */
+  readonly gateSightAt?: number;
 }
 
 export type XsWakeReleaseProof = "host_rejected" | "settled" | "idle_observed" | "aborted" | "teardown";
 export type NewXsWakeRecord = Pick<XsWakeRecord, "token" | "sessionId" | "xid" | "dispatchedAt" | "deadlineAt"> & {
   level?: number;
   levelMode?: "hop" | "return";
+  optimistic?: true;
 };
 type MutableFields = Partial<Omit<XsWakeRecord, "token" | "sessionId" | "xid" | "dispatchedAt" | "deadlineAt">>;
 

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { readBeforeAgentStartTrigger, readTriggerShape } from "../../src/adapters/pi-compat.js";
+import {
+  readBeforeAgentStartTrigger,
+  readContextTrailingCustom,
+  readTriggerShape,
+} from "../../src/adapters/pi-compat.js";
 
 describe("R1 before_agent_start structural probe", () => {
   it.each([
@@ -50,5 +54,51 @@ describe("R1 before_agent_start structural probe", () => {
       prompt: "new",
     });
     expect(readBeforeAgentStartTrigger({ messageType: "future", prompt: "not human" })).toEqual({ kind: "unknown" });
+  });
+});
+
+describe("wake-unknown-optimistic: readContextTrailingCustom (context event tail probe)", () => {
+  const custom = (over: Record<string, unknown> = {}) => ({
+    role: "custom",
+    customType: "subagent:xs",
+    details: { xsWake: true },
+    ...over,
+  });
+  it("reads ONLY the trailing custom message's shape, never its content", () => {
+    const message = {
+      role: "custom",
+      customType: "subagent:xs",
+      details: { xsWake: true },
+      get content(): never {
+        throw new Error("must not inspect text");
+      },
+    };
+    expect(readContextTrailingCustom({ messages: [{ role: "user", content: "u" }, message] })).toEqual({
+      customType: "subagent:xs",
+      details: { xsWake: true },
+    });
+  });
+  it.each([
+    [undefined, undefined],
+    [null, undefined],
+    ["str", undefined],
+    [{}, undefined],
+    [{ messages: "no" }, undefined],
+    [{ messages: [] }, undefined],
+    [{ messages: [{ role: "user", content: "u" }] }, undefined],
+    [{ messages: [{ role: "assistant", content: "a" }] }, undefined],
+    [{ messages: [{ role: "custom", customType: 7, details: undefined }] }, {}],
+    [{ messages: [{ role: "custom" }] }, {}],
+    [{ messages: [{ role: "custom", details: { x: 1 } }] }, { details: { x: 1 } }],
+    [{ messages: [{ role: "custom", customType: "subagent:xs" }] }, { customType: "subagent:xs" }],
+  ])("shape of %j ⇒ %j", (event, expected) => {
+    expect(readContextTrailingCustom(event)).toEqual(expected);
+  });
+  it("a non-custom trailing message after the marker means other (only the tail is read)", () => {
+    expect(
+      readContextTrailingCustom({
+        messages: [custom(), { role: "user", content: "follow-up" }],
+      }),
+    ).toBeUndefined();
   });
 });

@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import {
+  guardRootWakeContext,
   observeRootWakeTrigger,
   RootWakeController,
+  RootWakeOrphanWatch,
   XS_WAKE_CUSTOM_TYPE,
   type RootWakeDeps,
   type RootWakeMessage,
@@ -21,6 +23,20 @@ const trigger = (token: string, extra: object = {}) => ({
     customType: XS_WAKE_CUSTOM_TYPE,
     details: { xsWake: true, wakeToken: token, ...extra },
   },
+});
+/** wake-unknown-optimistic: a `context` event whose trailing message is an xs wake marker (F4). */
+const ctxEvent = (token: string | undefined, xid = "xid", trailing: unknown = undefined) => ({
+  type: "context",
+  messages: [
+    { role: "user", content: "earlier" },
+    trailing ?? {
+      role: "custom",
+      customType: XS_WAKE_CUSTOM_TYPE,
+      content: "fenced content",
+      timestamp: 0,
+      details: { ...(token === undefined ? {} : { wakeToken: token }), xsWake: true, xid },
+    },
+  ],
 });
 const human = { source: "interactive", text: "human" } as const;
 const userStart = { messageType: "user", prompt: "human" };
@@ -671,16 +687,11 @@ describe("dispatch guard/downgrade seam (§4.5, X4 handles only-delivery)", () =
     expect(h.clock.pendingTimers).toBe(0);
   });
 
-  it("unknown is only delivery until observed; absent is permanently only delivery (N1)", () => {
-    const h = harness({ unknown: true });
-    expect(h.dispatch()).toEqual({ dispatched: false, wakeDowngraded: "host_unverified" });
-    expect(h.messages).toHaveLength(0);
-    h.controller.beforeAgentStart(userStart);
-    expect(h.dispatch()).toMatchObject({ dispatched: true });
-    h.controller.settled();
-    h.hostState.idle = true;
+  it("absent (legacy prompt shape) is permanently deliver-only (wake-unknown-optimistic keeps this half)", () => {
+    const h = harness();
     h.controller.beforeAgentStart({ prompt: "old peer" });
     expect(h.dispatch()).toEqual({ dispatched: false, wakeDowngraded: "host_unsupported" });
+    expect(h.messages).toHaveLength(0);
   });
 
   it("idle with pending, non-idle, chain depth and full ledger downgrade without sending", () => {
@@ -843,5 +854,305 @@ describe("channel-plan §5.3 (CH3): RootWakeRequest.bc is threaded into details 
     plain.dispatch(0);
     expect("bc" in plain.messages[0]!.details).toBe(false);
     expect(Object.keys(plain.messages[0]!.details)).toEqual(["xsWake", "xid", "from", "wakeToken", "level"]);
+  });
+});
+
+/**
+ * wake-unknown-optimistic (docs/dev/fabric-cross-session/wake-unknown-optimistic-plan.md §1/§5.4):
+ * capability `unknown` dispatches optimistically; the first run is authorized by BAS (union hosts)
+ * or aborted at its first `context` sight before any provider request (legacy hosts, F1). Every
+ * case below drives the real guard pair over the real ledger.
+ */
+describe("wake-unknown-optimistic: dispatch + first-run verification", () => {
+  it("1. unknown + union BAS ⇒ verified, bound, +1 at authorization, record carries authorizedAt", () => {
+    const h = harness({ unknown: true });
+    expect(h.dispatch(1)).toEqual({ dispatched: true, effect: "applied", woke: true, token: "token-1" });
+    expect(h.controller.state).toBe("starting");
+    expect(h.level.root).toBe(1); // optimistic dispatch only carries
+    expect(h.audit).toHaveBeenCalledWith("wake_optimistic_dispatch", "token-1");
+    h.bind(); // the run's BAS carries our custom token
+    expect(h.controller.state).toBe("bound");
+    expect(h.capability.state).toBe("verified");
+    expect(h.capability.optimistic).toBe(false);
+    expect(h.level.root).toBe(2); // the hop commits exactly when BAS authorizes
+    expect(h.ledger.get("token-1")).toMatchObject({
+      optimistic: true,
+      authorizedAt: 0,
+      started: true,
+      levelCommitted: true,
+    });
+    h.controller.settled();
+    h.hostState.idle = true;
+    expect(h.controller.dispatch({ ...request(), expiresAt: 9_999_999 })).toMatchObject({
+      dispatched: true,
+    }); // verified hosts keep dispatching (non-optimistic now)
+    expect(h.ledger.get(h.controller.activeToken!)).toMatchObject({ levelCommitted: true });
+    expect(h.level.root).toBe(2); // level-less dispatch tracks nothing
+  });
+
+  it("2. legacy starting: the run's first context sight aborts once, absent, second wake host_unsupported", () => {
+    const h = harness({ unknown: true });
+    expect(h.dispatch()).toMatchObject({ effect: "applied", woke: true });
+    const token = h.controller.activeToken!;
+    expect(h.controller.context(ctxEvent(token))).toEqual({ kind: "aborted", token });
+    expect(h.abort).toHaveBeenCalledTimes(1);
+    expect(h.controller.state).toBe("aborting");
+    expect(h.capability.state).toBe("absent");
+    expect(h.audit).toHaveBeenCalledWith("wake_shape_absent_aborted", token);
+    expect(h.ledger.get(token)).toMatchObject({
+      state: "tombstone",
+      started: true,
+      executionPending: true,
+      levelCommitted: true,
+      gateSightAt: 0,
+      abortIssuedAt: 0,
+    });
+    h.controller.settled();
+    expect(h.controller.dispatch({ ...request(), expiresAt: 9_999_999 })).toEqual({
+      dispatched: false,
+      wakeDowngraded: "host_unsupported",
+    });
+  });
+
+  it("3a. legacy deferred: the human prompt's legacy BAS never aborts; the queued run's context aborts once", () => {
+    const h = harness({ unknown: true, deferred: true });
+    expect(h.dispatch()).toMatchObject({ effect: "unknown", reason: "start_deferred", woke: true });
+    const token = h.controller.activeToken!;
+    h.hostState.idle = false; // the human prompt's run starts first (F2 settle delay)
+    expect(h.controller.beforeAgentStart({ prompt: "human" })).toEqual({ kind: "other" }); // a user trigger is not a wake marker
+    expect(h.controller.state).toBe("deferred"); // not our run: no handover, no abort
+    expect(h.abort).not.toHaveBeenCalled();
+    expect(h.capability.state).toBe("absent"); // {prompt} with no messageType = legacy shape
+    expect(h.controller.context(ctxEvent(token))).toEqual({ kind: "aborted", token }); // queued run reaches context
+    expect(h.abort).toHaveBeenCalledTimes(1);
+    expect(h.controller.state).toBe("aborting");
+    expect(h.audit.mock.calls.filter(([e]) => e === "wake_shape_absent_aborted")).toHaveLength(1);
+  });
+
+  it("3b. legacy deferred past its deadline: the tombstoned queued run still aborts exactly once at context", () => {
+    const h = harness({ unknown: true, deferred: true });
+    h.dispatch();
+    const token = h.controller.activeToken!;
+    h.clock.advance(60_000); // deferred deadline: tombstone + release, NO abort yet
+    expect(h.controller.state).toBe("idle");
+    expect(h.abort).not.toHaveBeenCalled();
+    h.hostState.idle = false; // the queued run finally executes
+    expect(h.controller.context(ctxEvent(token))).toEqual({ kind: "aborted", token });
+    expect(h.controller.state).toBe("aborting"); // claimed while idle (late-tombstone claim)
+    h.controller.context(ctxEvent(token));
+    expect(h.abort).toHaveBeenCalledTimes(1);
+    expect(h.audit.mock.calls.filter(([e]) => e === "wake_shape_absent_aborted")).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    "4. optimistic dispatch + BAS custom without readable details (deferred=%s): absent, abort once, later context silent",
+    (deferred) => {
+      const h = harness({ unknown: true, deferred });
+      h.dispatch(1);
+      const token = h.controller.activeToken!;
+      expect(h.controller.beforeAgentStart({ messageType: "custom" })).toEqual({ kind: "other" }); // no customType ⇒ not our marker
+      expect(h.capability.state).toBe("absent");
+      expect(h.controller.state).toBe("aborting");
+      expect(h.abort).toHaveBeenCalledTimes(1);
+      expect(h.audit).toHaveBeenCalledWith("wake_shape_absent_aborted", token);
+      expect(h.ledger.get(token)).toMatchObject({
+        state: "tombstone",
+        started: true,
+        levelCommitted: true,
+        gateSightAt: 0,
+        abortIssuedAt: 0,
+      });
+      expect(h.level.root).toBe(1); // the optimistic hop stays a carry forever
+      expect(h.controller.context(ctxEvent(token))).toEqual({ kind: "aborted", token }); // gateSightAt set ⇒ silent
+      expect(h.abort).toHaveBeenCalledTimes(1);
+      expect(h.audit.mock.calls.filter(([e]) => e === "wake_shape_absent_aborted")).toHaveLength(1);
+    },
+  );
+
+  it("5. handed-over optimistic token: context never aborts, audits once, later authorization raises nothing", () => {
+    const h = harness({ unknown: true });
+    h.dispatch(1);
+    h.controller.input(human); // starting + started ⇒ handedOver
+    const token = h.controller.activeToken!;
+    expect(h.controller.context(ctxEvent(token))).toEqual({ kind: "other" });
+    expect(h.abort).not.toHaveBeenCalled();
+    expect(h.audit).toHaveBeenCalledWith("wake_shape_absent_handed", token);
+    expect(h.capability.state).toBe("absent");
+    expect(h.ledger.get(token)).toMatchObject({ handed: true, gateSightAt: 0, levelCommitted: true });
+    expect(h.controller.state).toBe("handedOver");
+    h.controller.beforeAgentStart(trigger(token)); // a late authorization cannot raise the voided hop
+    expect(h.level.root).toBe(1);
+    expect(h.controller.state).toBe("handedOver");
+    h.controller.context(ctxEvent(token)); // gateSightAt set ⇒ other
+    expect(h.audit.mock.calls.filter(([e]) => e === "wake_shape_absent_handed")).toHaveLength(1);
+  });
+
+  it("6. repeated context sights of one token: exactly one abort and one audit entry", () => {
+    const h = harness({ unknown: true, deferred: true });
+    h.dispatch();
+    const token = h.controller.activeToken!;
+    for (let i = 0; i < 3; i++) expect(h.controller.context(ctxEvent(token))).toEqual({ kind: "aborted", token });
+    expect(h.abort).toHaveBeenCalledTimes(1);
+    expect(h.audit.mock.calls.filter(([e]) => e === "wake_shape_absent_aborted")).toHaveLength(1);
+  });
+
+  it("7. after a BAS tombstone abort, a context sight of the same run is 0/0", () => {
+    const h = harness({ unknown: true, deferred: true });
+    h.dispatch();
+    const token = h.controller.activeToken!;
+    h.clock.advance(60_000); // deferred deadline: tombstone, released
+    h.hostState.idle = false;
+    expect(h.controller.beforeAgentStart(trigger(token)).kind).toBe("aborted");
+    expect(h.abort).toHaveBeenCalledTimes(1);
+    expect(h.audit).toHaveBeenCalledWith("wake_late_aborted", token);
+    expect(h.controller.state).toBe("aborting");
+    expect(h.controller.context(ctxEvent(token))).toEqual({ kind: "aborted", token }); // gateSightAt set by the BAS sight
+    expect(h.abort).toHaveBeenCalledTimes(1);
+    expect(h.audit.mock.calls.filter(([e]) => e === "wake_late_aborted")).toHaveLength(1);
+  });
+
+  it("8. after the deadline abort (started, abortIssuedAt set), a context sight adds no abort/audit", () => {
+    const h = harness({ unknown: true });
+    h.dispatch();
+    const token = h.controller.activeToken!;
+    h.clock.advance(60_000); // deadline: aborting, abort once
+    expect(h.abort).toHaveBeenCalledTimes(1);
+    expect(h.controller.state).toBe("aborting");
+    expect(h.controller.context(ctxEvent(token))).toEqual({ kind: "aborted", token });
+    expect(h.abort).toHaveBeenCalledTimes(1);
+    expect(h.audit.mock.calls.filter(([e]) => e === "wake_shape_absent_aborted")).toHaveLength(0);
+    expect(h.audit.mock.calls.filter(([e]) => e === "wake_late_aborted")).toHaveLength(0);
+    expect(h.ledger.get(token)).toMatchObject({ gateSightAt: 60_000, abortIssuedAt: 60_000 });
+  });
+
+  it("9. context-guard orphans (no token / not in ledger / xid mismatch): one abort per run via the watch, a new run aborts again", () => {
+    const h = harness({ unknown: true });
+    h.dispatch(); // a known record for xid "xid" (token-1)
+    const known = h.controller.activeToken!;
+    const watch = new RootWakeOrphanWatch({ clock: h.clock, audit: h.audit, warn: h.warn });
+    const port = { abort: h.abort, isIdle: () => false };
+    const deps = {
+      sessionId: "session",
+      abort: h.abort,
+      ledger: h.ledger,
+      capability: h.capability,
+      clock: h.clock,
+      audit: h.audit,
+      warn: h.warn,
+      orphan: (t: string | undefined) => watch.issue(port, t),
+    };
+    expect(guardRootWakeContext(ctxEvent(undefined), deps)).toEqual({ kind: "aborted" });
+    expect(guardRootWakeContext(ctxEvent("not-in-ledger"), deps)).toEqual({ kind: "aborted", token: "not-in-ledger" });
+    expect(guardRootWakeContext(ctxEvent(known, "WRONG"), deps)).toEqual({ kind: "aborted", token: known }); // xid mismatch
+    expect(h.abort).toHaveBeenCalledTimes(1); // ONE abort for the whole run (latch)
+    expect(h.audit.mock.calls.filter(([e]) => e === "wake_orphan_aborted")).toHaveLength(1);
+    watch.settled(); // the run ends
+    expect(guardRootWakeContext(ctxEvent("not-in-ledger"), deps)).toEqual({ kind: "aborted", token: "not-in-ledger" });
+    expect(h.abort).toHaveBeenCalledTimes(2);
+    expect(h.audit.mock.calls.filter(([e]) => e === "wake_orphan_aborted")).toHaveLength(2);
+    watch.dispose();
+    expect(h.clock.pendingTimers).toBeGreaterThanOrEqual(1); // the controller's own timers remain
+  });
+
+  it("10. an authorized live token stays authorized across repeated context sights (retries)", () => {
+    const h = harness();
+    h.dispatch();
+    const token = h.controller.activeToken!;
+    h.bind(); // BAS authorization
+    for (let i = 0; i < 3; i++) expect(h.controller.context(ctxEvent(token))).toEqual({ kind: "authorized", token });
+    expect(h.abort).not.toHaveBeenCalled();
+    expect(h.capability.state).toBe("verified");
+    expect(h.controller.state).toBe("bound");
+  });
+
+  it("11. /reload of an optimistic deferred record: recover commits no optimistic hop; context claims and aborts once", () => {
+    const h = harness({ unknown: true, deferred: true });
+    h.dispatch(1);
+    const token = h.controller.activeToken!;
+    h.clock.advance(60_000); // deferred deadline: tombstone, released
+    h.controller.dispose();
+    const next = new RootWakeController(h.deps);
+    next.recover();
+    expect(next.state).toBe("idle"); // idle recovery revokes but claims nothing
+    expect(h.level.root).toBe(1); // recover never commits an optimistic hop
+    h.hostState.idle = false; // the queued run finally executes on the legacy host
+    expect(next.context(ctxEvent(token))).toEqual({ kind: "aborted", token });
+    expect(next.state).toBe("aborting");
+    expect(h.abort).toHaveBeenCalledTimes(1);
+    expect(h.level.root).toBe(1); // still carry only
+    next.settled();
+    expect(h.ledger.size).toBe(0);
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("union-host non-marker tails and post-marker tails are `other` (O(1), no scans)", () => {
+    const h = harness({ unknown: true });
+    h.dispatch();
+    expect(h.controller.context({ type: "context", messages: [] })).toEqual({ kind: "other" });
+    expect(h.controller.context({ type: "context", messages: [{ role: "assistant", content: "a" }] })).toEqual({
+      kind: "other",
+    });
+    expect(
+      h.controller.context({
+        type: "context",
+        messages: [
+          { role: "user", content: "u" },
+          { role: "custom", customType: "other:custom", details: { xsWake: true } },
+        ],
+      }),
+    ).toEqual({ kind: "other" });
+    expect(
+      h.controller.context(
+        ctxEvent(h.controller.activeToken!, "xid", { role: "custom", customType: XS_WAKE_CUSTOM_TYPE, details: null }),
+      ),
+    ).toEqual({ kind: "other" }); // marker type but details not an object with xsWake
+    expect(h.abort).not.toHaveBeenCalled();
+    expect(h.controller.state).toBe("starting");
+  });
+});
+
+describe("RootWakeOrphanWatch (wake-unknown-optimistic §1.4)", () => {
+  it("issue dedups per run; a never-settling abort goes stuck after the grace, never aborts twice; two idles release", () => {
+    const clock = new FakeClock();
+    const audit = vi.fn(),
+      warn = vi.fn(),
+      abort = vi.fn();
+    const watch = new RootWakeOrphanWatch({ clock, audit, warn });
+    expect(watch.issue({ abort, isIdle: () => false }, "tok")).toBe(true);
+    expect(watch.issue({ abort, isIdle: () => false }, "tok")).toBe(false);
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(clock.pendingTimers).toBe(2); // grace + idle poll
+    clock.advance(9_999);
+    expect(audit).not.toHaveBeenCalledWith("abortStuck", "tok");
+    clock.advance(1);
+    expect(audit).toHaveBeenCalledWith("abortStuck", "tok");
+    expect(warn).toHaveBeenCalledTimes(1);
+    clock.advance(120_000);
+    expect(abort).toHaveBeenCalledTimes(1); // stuck never aborts a second time
+    watch.dispose(); // stop the stuck watch's perpetual idle observation
+    // release path: two consecutive idle observations clear latch AND timers
+    const watch2 = new RootWakeOrphanWatch({ clock, audit, warn });
+    let idle = false;
+    expect(watch2.issue({ abort, isIdle: () => idle }, "t2")).toBe(true);
+    idle = true;
+    clock.advance(4_000);
+    expect(watch2.pending).toBe(false);
+    expect(watch2.issue({ abort, isIdle: () => false }, "t3")).toBe(true); // re-armed after release
+    watch2.dispose();
+    expect(clock.pendingTimers).toBe(0);
+  });
+
+  it("a busy host never releases via idle; settled / runStarted / dispose each clear every timer and the latch", () => {
+    for (const release of ["settled", "runStarted", "dispose"] as const) {
+      const clock = new FakeClock();
+      const watch = new RootWakeOrphanWatch({ clock, audit: vi.fn(), warn: vi.fn() });
+      expect(watch.issue({ abort: vi.fn(), isIdle: () => false }, "t")).toBe(true);
+      expect(clock.pendingTimers).toBe(2);
+      clock.advance(6_000); // three busy observations: still latched
+      expect(watch.pending).toBe(true);
+      watch[release]();
+      expect(clock.pendingTimers).toBe(0);
+      expect(watch.pending).toBe(false);
+    }
   });
 });

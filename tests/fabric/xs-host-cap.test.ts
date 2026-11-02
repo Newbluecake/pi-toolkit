@@ -6,25 +6,30 @@ afterEach(() => {
 });
 
 describe("xs host capability: unknown → observed → verified, sticky absent", () => {
-  it("first startup/managed restore unknown means ONLY delivery, no probing run (N1)", () => {
+  it("wake-unknown-optimistic: unknown means OPTIMISTIC dispatch (undefined downgrade), never a probe run", () => {
     const cap = new XsHostCapability();
     expect(cap.state).toBe("unknown");
-    expect(cap.wakeDowngraded).toBe("host_unverified");
+    expect(cap.wakeDowngraded).toBeUndefined();
+    expect(cap.optimistic).toBe(true);
     cap.observe({});
     cap.observe(null);
     expect(cap.state).toBe("unknown");
   });
 
-  it.each(["user", "custom"])("any %s union event proves observed; owned-token proof verifies", (messageType) => {
-    const cap = new XsHostCapability();
-    cap.observe({ messageType, prompt: "human" });
-    expect(cap.state).toBe("observed");
-    expect(cap.wakeDowngraded).toBeUndefined();
-    cap.verify();
-    expect(cap.state).toBe("verified");
-    cap.observe({ messageType: "user" });
-    expect(cap.state).toBe("verified");
-  });
+  it.each(["user", "custom"])(
+    "any %s union event proves observed (no longer optimistic); owned-token proof verifies",
+    (messageType) => {
+      const cap = new XsHostCapability();
+      cap.observe({ messageType, prompt: "human" });
+      expect(cap.state).toBe("observed");
+      expect(cap.wakeDowngraded).toBeUndefined();
+      expect(cap.optimistic).toBe(false);
+      cap.verify();
+      expect(cap.state).toBe("verified");
+      cap.observe({ messageType: "user" });
+      expect(cap.state).toBe("verified");
+    },
+  );
 
   it("old peer prompt without messageType makes absent permanently", () => {
     const cap = new XsHostCapability();
@@ -48,6 +53,32 @@ describe("xs host capability: unknown → observed → verified, sticky absent",
     expect(cap.state).toBe("absent");
     expect(warn).toHaveBeenCalledTimes(1);
     expect(cap.wakeDowngraded).toBe("host_unsupported");
+  });
+
+  it("wake-unknown-optimistic: triggerSkipped is unconditionally absent (even from verified), sticky, one warn shared with missingCustomShape", () => {
+    const cap = new XsHostCapability(),
+      warn = vi.fn();
+    cap.observe({ messageType: "user", prompt: "hi" });
+    cap.verify();
+    cap.triggerSkipped(warn);
+    cap.triggerSkipped(warn);
+    cap.observe({ messageType: "custom" });
+    cap.verify();
+    expect(cap.state).toBe("absent");
+    expect(cap.wakeDowngraded).toBe("host_unsupported");
+    expect(cap.optimistic).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]![0]).toBe(
+      "[pi-subagent] xs wake: host ran the wake trigger without before_agent_start; future wakes are deliver-only",
+    );
+    // the shared `warned` flag: a later missingCustomShape on the same instance stays silent
+    cap.missingCustomShape(warn);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const fresh = new XsHostCapability(),
+      warn2 = vi.fn();
+    fresh.triggerSkipped(warn2);
+    fresh.missingCustomShape(warn2);
+    expect(warn2).toHaveBeenCalledTimes(1); // still one per PROCESS-like instance
   });
 
   it("a fresh module (reload) preserves observed/verified/absent evidence", async () => {

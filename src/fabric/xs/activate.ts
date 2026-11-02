@@ -12,7 +12,7 @@ import { createFabricXsCommand } from "../../commands/fabric-xs.js";
 import { createListSessionsTool, listSessionsParamsFor } from "../../tools/list-sessions-tool.js";
 import { createMessageChannelTool, MessageChannelParams } from "../../tools/message-channel-tool.js";
 import { createMessageSessionTool, messageSessionParamsFor } from "../../tools/message-session-tool.js";
-import { observeRootWakeTrigger } from "../root-wake.js";
+import { observeRootWakeTrigger, guardRootWakeContext, RootWakeOrphanWatch } from "../root-wake.js";
 import { aliasSuggestions } from "./alias-suggest.js";
 import type { XsAliasMarkDecided } from "./alias-decided.js";
 import { getXsHostCapability } from "./host-cap.js";
@@ -132,6 +132,13 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
   let xsSessionId: string | undefined;
   let xsCollisions: string[] = [];
   let xsHubLimits: XsHubLimitsWire | undefined;
+  // wake-unknown-optimistic §1.4: the activation-level orphan watch (supervised aborts wherever
+  // no controller is reachable: pre-stack window, after session_shutdown, all orphans) and the
+  // latest session ctx its abort/isIdle port reads. Activation closure state, never module state (I4).
+  const orphanWatch = new RootWakeOrphanWatch({
+    audit: (e) => console.warn(`[pi-subagent] fabric xs ${e}`),
+  });
+  const xsEventCtx: { current?: ExtensionContext } = {};
   // /new membership handoff (new-session-channels-fix): the snapshot taken at
   // `session_shutdown{new}`, consumed by the immediately following `stackInput()`.
   let pendingHandoff: XsMembershipEntryData | undefined;
@@ -174,6 +181,9 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
         (trigger.details as { xsWake?: unknown } | undefined)?.xsWake === true;
       // Off means zero new context reads, except B1's mandatory orphan/old-authorization guard.
       if (!xsEnabled && xsLedger.size === 0 && !marked) return;
+      // wake-unknown-optimistic §1.3: a BAS event proves a NEW run started — release the
+      // per-run orphan latch so this run's own orphan sight aborts again.
+      orphanWatch.runStarted();
       const xs = xsAttached ? holder.current?.xs : undefined;
       if (xs?.controller) xs.beforeAgentStart(event);
       else if (xsAttached && holder.current?.rootWakeRecovery) {
@@ -188,9 +198,13 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
           if (sessionId !== undefined && record.sessionId === sessionId && record.state === "live")
             xsLedger.tombstone(record.token);
         }
+        const port = { abort: () => ctx.abort(), isIdle: () => ctx.isIdle?.() ?? true };
         observeRootWakeTrigger(event, {
           sessionId: sessionId ?? "",
-          abort: () => ctx.abort(),
+          abort: () => {
+            void orphanWatch.issue(port, undefined);
+          },
+          orphan: (t) => orphanWatch.issue(port, t),
           ledger: xsLedger,
           capability: xsCapability,
           ...(holder.current?.wake ? { level: holder.current.wake.level } : {}),
@@ -199,6 +213,28 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
       }
     });
     if (xsEnabled) {
+      // wake-unknown-optimistic §1.1 observation point 2: the `context` hook fires before EVERY
+      // LLM call on ALL hosts (legacy included). Registered only while xs is on (I9 / R5);
+      // synchronously executed, always returns undefined — messages and the provider cache
+      // prefix stay byte-identical. BEFORE turn_start: the activation trace pins this order.
+      pi.on("context", (event, ctx) => {
+        const xs = xsAttached ? holder.current?.xs : undefined;
+        if (xs?.controller) xs.context(event);
+        else if (xsAttached && holder.current?.rootWakeRecovery) holder.current.rootWakeRecovery.context(event);
+        else {
+          const port = { abort: () => ctx.abort(), isIdle: () => ctx.isIdle?.() ?? true };
+          guardRootWakeContext(event, {
+            sessionId: xsSessionOf(ctx) ?? "",
+            ledger: xsLedger,
+            capability: xsCapability,
+            abort: () => {
+              void orphanWatch.issue(port, undefined);
+            },
+            orphan: (t) => orphanWatch.issue(port, t),
+            audit: (e) => console.warn(`[pi-subagent] fabric xs ${e}`),
+          });
+        }
+      });
       // Channel-plan §12.3 (IBW): unread inbox clearing rides the extension turn events (message_end is
       // unusable: pi runs extension handlers BEFORE persisting). Forwarders only; counting lives in unread.ts.
       pi.on("turn_start", () => holder.current?.xs?.unreadTurnStart());
@@ -238,6 +274,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     pi.on("agent_settled", () => {
       holder.current?.xs?.settled();
       holder.current?.rootWakeRecovery?.settled();
+      orphanWatch.settled();
     });
     // Same synchronous phase as session destruction, not the later (awaiting) fleet drain.
     // Fpi10: replacement first aborts the outgoing AgentSession; reload does NOT, so preserve
@@ -245,6 +282,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     pi.on("session_shutdown", (event, ctx) => {
       xsAttached = false;
       holder.current?.disposeXsSync(); // fence session_shutdown event, xs.dispose, rootWakeRecovery.dispose (Stack-owned)
+      orphanWatch.dispose(); // wake-unknown-optimistic: clear the watch's timers/latch; the next session re-arms on demand
       if (event.reason !== "reload") {
         const sessionId = xsSessionId ?? (xsEnabled || xsLedger.size > 0 ? xsSessionOf(ctx) : undefined);
         if (sessionId !== undefined) xsLedger.teardown(sessionId);
@@ -522,12 +560,21 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
             const reply = await webHubRef.current?.xs?.hubPort().list({ origin });
             return reply?.kind === "res" && reply.res.ok ? (reply.res.rows ?? []) : undefined;
           },
+          // wake-unknown-optimistic §1.4/§1.3: controller/recovery-path orphan aborts go through the SAME
+          // activation-level watch as the bare paths (run-level dedup + bounded grace). The ctx is read at
+          // call time (attach() sets it right after this stack is built); none yet ⇒ nothing to abort.
+          abortOrphan: (token) => {
+            const c = xsEventCtx.current;
+            if (c === undefined) return false;
+            return orphanWatch.issue({ abort: () => c.abort(), isIdle: () => c.isIdle?.() ?? true }, token);
+          },
         }
       : undefined;
   }
 
   function attach(stack: Stack, ctx: ExtensionContext, pi: ExtensionAPI, nextXsSessionId: string | undefined): void {
     xsSessionId = nextXsSessionId;
+    xsEventCtx.current = ctx;
     if (xsEnabled) {
       xsInboxCtx.current = ctx;
       xsInboxPublished = -1;

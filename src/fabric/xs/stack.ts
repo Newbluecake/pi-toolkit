@@ -7,7 +7,7 @@ import {
   turnStart as unreadTurnStart,
 } from "./unread.js";
 import { type CausalLevel } from "../wake-level.js";
-import { RootWakeController, type RootWakeAudit } from "../root-wake.js";
+import { RootWakeController, type OrphanAbortPort, type RootWakeAudit } from "../root-wake.js";
 import { createSessionFence, type FencePorts, type SessionFence } from "./fence.js";
 import {
   XsMembership,
@@ -68,6 +68,10 @@ export interface StackXsInput {
   /** AF7: a HUMAN alias decision (`set`/`clear`/`take`/`force`, never `inherit`) was just marked on this session — the
    *  pending `/new` handoff must not undo it. Never throws into the marker. */
   aliasHumanDecided?: () => void;
+  /** wake-unknown-optimistic §1.4: the activation-level RootWakeOrphanWatch port — every orphan
+   *  abort this controller's guards issue (BAS or context) goes through it, so even a controller
+   * path never leaves an unsupervised abort behind. Absent ⇒ raw aborts (tests, recovery stacks). */
+  abortOrphan?: OrphanAbortPort;
 }
 
 export interface StackXs extends XsStackPort {
@@ -86,6 +90,8 @@ export interface StackXs extends XsStackPort {
   aliasDecided?: XsAliasDecidedPort;
   audit: Partial<Record<RootWakeAudit, number>>;
   beforeAgentStart(event: unknown): void;
+  /** wake-unknown-optimistic: forward the host `context` event (before every LLM call). */
+  context(event: unknown): void;
   settled(): void;
   /** Channel-plan §12.3 (IBW): extension turn events, forwarded by `src/index.ts`. Never throw. */
   unreadTurnStart(): void;
@@ -354,6 +360,7 @@ export function buildStackXs(
         audit: (event) => {
           audit[event] = (audit[event] ?? 0) + 1;
         },
+        ...(input.abortOrphan ? { abortOrphan: input.abortOrphan } : {}),
       })
     : undefined;
   if (controller) {
@@ -557,6 +564,9 @@ export function buildStackXs(
       controller?.beforeAgentStart(event);
       releaseTrigger();
       reply?.flush();
+    },
+    context: (event) => {
+      controller?.context(event);
     },
     settled: () => {
       controller?.settled();
