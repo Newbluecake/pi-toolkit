@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-11-02
+
+### Added
+
+- **runtime**: one structured-output repair turn before settling a schema run (`94e7a472`)
+- **core**: structured-output repair window, close point and failure suffix (`88167520`)
+- **web-hub**: show the delete-session button inline on wide desktop headers (`0c63e575`)
+- **memory**: [J9] jev wrap-up — user guide, developer README, AGENTS.md registration, e2e (`64af0452`)
+- **memory**: [J7] jev tool-call gate and production wiring (`2e0ec520`)
+- **memory**: [J5] jev write path — tag after write, echo, user-rule guard (`9245e476`)
+- **memory**: [J8] jev review and expiry — /mem review, /mem expired, doctor D17–D19 (`f175fa4d`)
+- **memory**: [J6] jev recall runtime — wire and segment record (`49e3267b`)
+- **memory**: [J4] jev sidecar index, tagging orchestration, /mem jev and /mem tags (`b6b3fed0`)
+- **memory**: [E0] jev eval stage 2 — rule-based gate set, relation review set, measured context-overflow wording (`487e45db`)
+- **memory**: [J2] jev engine — client, failover, health table, budgets, proxy fetch, questions, decisions (`199f4897`)
+- **memory**: [J1] jev pure domain — contracts, entry splitting, taxonomy, redaction, shell parsing (`4c8fd7f0`)
+- **memory**: [J3] jev settings and secure-domain force-off (`2d6082ff`)
+
+### Fixed
+
+- **fabric**: wake a cross-session recipient that has not run a prompt yet (`fe615cf9`)
+- **memory**: keep jev diagnostics off the terminal while the TUI is up (`9444adcd`)
+- **runtime**: stop finished subagent sessions from leaking via the input-budget registry (`c373b531`)
+- **memory**: trash ids match what /mem restore --trash lists (`9bc556b8`)
+- **memory**: show the jev proxy (credentials masked) in /mem jev (`7584097c`)
+- **memory**: [J2] jev proxy fetch returns a real Response so pi-ai accepts classifier answers (`f30b52b5`)
+- **memory**: jev recall sync wait becomes the integer-seconds key memory.jev.recall.waitS (default 2s) (`e59b272d`)
+- **memory**: [J1] treat interpreter short-flag clusters containing c as -c (`31e845ce`)
+- **memory**: [J2] per-tier jev timeout fails over instead of aborting the ask (`510a0678`)
+- **memory**: [J1] route jev entry index reads through safe-fs (`f89e1fea`)
+- **secure**: judge unreadable same-uid processes by ppid lineage (#99) (`042f24ba`)
+- **archive**: monotonic settlement horizon — auto-archive never stalls at a full cap (#91) (`c53c2e77`)
+
+### Changed
+
+- **todo**: persist archived tasks as incremental claude-code-todo-archive entries (#92) (`f0df4a6d`)
+- **todo**: stop embedding full state in tool results, dedup live snapshot writes (`f86e327d`)
+
+### Documentation
+
+- **subagent-core**: document the structured-output repair turn (`bd41ccf2`)
+- **memory**: Jev real-machine acceptance report (`022a6599`)
+- **memory**: tidy only reads .trash (`0da5bc76`)
+- **memory**: record the /mem jev proxy line; FetchResponseLike declares headers.entries() (`2d77dae6`)
+- **memory**: E0 stage-1 baseline — recall wording B + threshold 0.6 (Q36), hard negatives, jev-eval proxy/tag fixes (`6d9923f0`)
+- **memory**: Jev implementation plan review r2 + main-session closure check (`9e7218ae`)
+- **memory**: Jev architecture v2.1 fix-up (web review/expired confirm+degrade, pi-api allowed-diff proof) (`a870071b`)
+- **memory**: Jev implementation plan v2 (review r1 disposition) (`bd7f3d0a`)
+- **memory**: Jev architecture v2.1 errata (9 items from plan review; Q34/Q35) (`747b1304`)
+- **memory**: round-9 decisions (empty classifier list = off, web confirm) (`5ac3627c`)
+- **memory**: Jev implementation plan review r1 (verbatim) (`23f4335f`)
+- **memory**: Jev memory implementation plan draft (jev-plan.md, J0-J9) (`223df995`)
+- **memory**: Jev architecture review r2 (pass) + N1 decision (`573812fe`)
+- **memory**: Jev architecture v2 (partial mode, gate evidence tier, scope trims, r1 disposition) (`05e7066b`)
+- **memory**: round-8 decisions D2/D6/D7 + scope trims for Jev architecture (`893a6d3d`)
+- **memory**: Jev architecture review r1 (verbatim) (`d3816838`)
+- **memory**: round-8 decisions on Jev architecture (D1/D3/D4/D5) (`f79edb74`)
+- **memory**: Jev-centric memory architecture draft (jev-arch.md) (`ccb103d0`)
+- **memory**: current-state inventory + Jev scale measurements for the Jev-centric redesign; decisions Q22-Q24 (`15fbee7f`)
+- **memory**: hygiene plan v4.1 (classifier proxy) archived as superseded; round-6/7 decisions (Jev-centric redesign) (`a9dd9291`)
+- **memory**: hygiene plan v4 (classifier failover list + error classes) + reviews r3/r4 + live classifier test (`678da127`)
+- **memory**: hygiene plan v3 (A/B/C/E action triggers, classifier judge) + round-5 decisions (`2da3d363`)
+- **memory**: hygiene flow round-4 decisions (action-trigger extensions A/B/C/E, classifier judge) (`72cbf3cd`)
+- **memory**: hygiene technical plan v2 (review r1 applied, O1-O11 decided) (`052796b4`)
+- **memory**: proactive-injection capability exploration report (`8cd44ab3`)
+- restore the AGENTS.md anchors the guard test pins (fixes red CI since v0.10.3) (`f13d1b09`)
+- **memory**: hygiene flow round-3 decisions (visibility, child sessions, core trim) (`87bf3ffe`)
+- **memory**: proactive injection trigger design (T1-T3, gate, cooldown) from discussion (`bd7d826e`)
+- **memory**: hygiene flow — user-confirmed five-stage memory lifecycle design (`962625b1`)
+- prettier-format the archive-full forensics report (`2731b5eb`)
+- apply reviewer amendments to the secure scan-poison plan (#99) (`fb807dea`)
+- apply reviewer amendments to the #91/#92 plans (`b42c87c5`)
+- forensics + plans for archive-full (#91) and todo archive split (#92) (`cd0abb34`)
+
+### Tests
+
+- **memory-jev,fabric**: isolate gate evidence from host /proc; snapshot C-X12 ledger at authorization (`3e6be927`)
+- **integration**: real-session structured-output repair turn with child wiring (`08251c90`)
+- **workflow**: workflow children never get a structured-output repair turn (`39cfde2e`)
+- **memory**: pin trash restore end to end; document the .trash id invariant (`c5faade9`)
+- **memory**: account for jev's by-design hooks in child-inertness and teardown counts (`18bf99e0`)
+- **memory**: pin tool-written mtimes in the jev off harness (`98b279e4`)
+- **memory**: fix misleading C-J4 conformance test name (`318759b7`)
+- **memory**: [J0] jev baseline — off golden, conformance C-J1–C-J15, eval sets (`6bd3f92f`)
+
+Stats: 13 feat, 12 fix, 2 refactor/perf, 33 docs, 8 test
+
 ## [0.10.3] - 2026-10-29
 
 ### Added
@@ -1478,7 +1565,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.3...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.4...HEAD
+[0.10.4]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.3...v0.10.4
 [0.10.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.0...v0.10.1
