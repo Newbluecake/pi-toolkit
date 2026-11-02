@@ -355,6 +355,32 @@ describe("ThreadEngine · handback admission (§5.5)", () => {
   });
 });
 
+describe("ThreadEngine · all-none release refusal (§6.7 复检失败)", () => {
+  it("releaseToNative refused ⇒ the ENGINE replies E_STALE_CTX (nothing was re-dispatched)", () => {
+    const h = makeHarness();
+    h.engine.noteThread(H1, "topic");
+    h.facts.set(RUN_A, { direct: true, status: "running", steerable: false }); // pre-call none
+    h.engine.subscribe({ runId: RUN_A, h: H1, label: "a", scope: "s", createdBy: "root" });
+    h.nativeOk.value = false;
+    const e = h.event();
+    h.engine.handleEvent(e); // all-none judged ⇒ early fallback ⇒ release refused
+    expect(h.nativeAttempts).toEqual([e.eventId]);
+    expect(h.native).toEqual([]); // refused — NOT delivered to the slow path
+    expect(h.staleCtx).toEqual([e.eventId]); // §6.7: the engine owes and pays the reply
+    expect(h.audits.some((a) => a.kind === "native-release-refused")).toBe(true);
+    // exactly one reply for the event in total (no routed, no second stale)
+    expect(h.routed).toEqual([]);
+  });
+
+  it("buffered entries carry the event's sentAt (§3.1 ThreadEvent.sentAt)", () => {
+    const h = makeHarness();
+    primeWorld(h, { runStatus: "queued" });
+    h.engine.handleEvent(h.event({ sentAt: 1_700_000_000 }));
+    const sub = h.engine.inspectSubscriptions()[0]!;
+    expect(sub.bufferedSentAt).toEqual([1_700_000_000]);
+  });
+});
+
 describe("ThreadEngine · lifecycle hooks (§5.3)", () => {
   it("run terminal: subs ended (run_terminal), summary frozen and read ONCE", async () => {
     const h = makeHarness();
@@ -422,6 +448,28 @@ describe("ThreadEngine · dispose (§5.3/§6.5/§9.4 C4)", () => {
     // post-dispose: everything is a native no-op
     expect(h.engine.handleEvent(h.event())).toMatchObject({ action: "native", decision: { rule: "R0" } });
     expect(h.engine.subscribe({ runId: RUN_A, h: H1, label: "a", scope: "s", createdBy: "root" }).ok).toBe(false);
+  });
+
+  it("dispose: a MIXED event (called steer + still-buffered subscriber) replies per the aggregate (§6.5)", async () => {
+    const h = makeHarness();
+    h.engine.noteThread(H1, "topic");
+    h.facts.set(RUN_A, { direct: true, status: "running", steerable: true });
+    h.facts.set(RUN_B, { direct: true, status: "queued", steerable: false });
+    h.engine.subscribe({ runId: RUN_A, h: H1, label: "live", scope: "s", createdBy: "root" });
+    h.engine.subscribe({ runId: RUN_B, h: H1, label: "buf", scope: "s", createdBy: "root" });
+    const e = h.event();
+    h.engine.handleEvent(e);
+    expect(h.steers.length).toBe(1); // RUN_A called (hangs); RUN_B buffered
+    const rec = h.engine.inspectRecord(e.eventId)!;
+    expect(rec.perSub.get("t2")).toBe("buffered");
+    h.engine.dispose(); // BEFORE the deadline ⇒ the event is still unreplied here
+    // aggregate at dispose: t1=unknown (called), t2=none (buffer swept) ⇒ ROUTED, not silence
+    expect(h.routed.map((r) => r.eventId)).toEqual([e.eventId]);
+    expect(h.routed[0]!.runs).toEqual([{ runId: RUN_A, label: "live" }]);
+    expect(h.staleCtx).toEqual([]);
+    expect(rec.perSub.get("t1")).toBe("unknown");
+    expect(rec.perSub.get("t2")).toBe("none");
+    expect(h.autoReturns).toEqual([]); // C4: never during drain
   });
 
   it("dispose suppresses the system auto-return even when all-none completes (C4: no auto flow-back in drain)", async () => {

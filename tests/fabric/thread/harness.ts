@@ -27,7 +27,12 @@ export interface Harness {
   hubOnline: { value: boolean };
   steers: PendingSteer[];
   routed: Array<{ eventId: string; runs: Array<{ runId: string; label: string }> }>;
+  /** successful native releases (the event went back to the slow path). */
   native: string[];
+  /** every releaseToNative ATTEMPT, successful or refused. */
+  nativeAttempts: string[];
+  /** set false to make releaseToNative refuse (§6.7 复检失败 ⇒ engine replies E_STALE_CTX). */
+  nativeOk: { value: boolean };
   autoReturns: Array<{ eventId: string; outcomesSnapshot: string[] }>;
   staleCtx: string[];
   display: string[];
@@ -53,6 +58,8 @@ export function makeHarness(settings?: Partial<ThreadEngineSettings>): Harness {
   const steers: PendingSteer[] = [];
   const routed: Harness["routed"] = [];
   const native: string[] = [];
+  const nativeAttempts: string[] = [];
+  const nativeOk = { value: true };
   const autoReturns: Harness["autoReturns"] = [];
   const staleCtx: string[] = [];
   const display: string[] = [];
@@ -69,6 +76,8 @@ export function makeHarness(settings?: Partial<ThreadEngineSettings>): Harness {
       }),
     replyRouted: (eventId, runs) => routed.push({ eventId, runs: [...runs] }),
     releaseToNative: (eventId) => {
+      nativeAttempts.push(eventId);
+      if (!nativeOk.value) return false;
       native.push(eventId);
       return true;
     },
@@ -91,6 +100,8 @@ export function makeHarness(settings?: Partial<ThreadEngineSettings>): Harness {
     steers,
     routed,
     native,
+    nativeAttempts,
+    nativeOk,
     autoReturns,
     staleCtx,
     display,

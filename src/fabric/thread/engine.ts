@@ -50,11 +50,15 @@ export interface ThreadEngineDeps {
   /** §6.7 routed first reply — the source of `cmd_result.data.thread`. */
   replyRouted(eventId: ThreadEventId, runs: ReadonlyArray<{ runId: string; label: string }>): void;
   /** §6.7 all-none first reply: re-dispatch through the prompt-release path
-   *  (`createPromptRelease().current()`); `false` ⇒ the caller replies `E_STALE_CTX`. */
+   *  (`createPromptRelease().current()`) — the caller RE-CHECKS and re-dispatches on the spot;
+   *  `false` = the re-check refused (session moved on) and NOTHING was dispatched: the engine
+   *  then owes the hub an `E_STALE_CTX{effect:"none"}` reply via {@link ThreadEngineDeps.replyStaleCtx}. */
   releaseToNative(eventId: ThreadEventId): boolean;
   /** §6.7 system auto-return (`thr_req{op:"handback", by:"system"}`) — at most once per event. */
   requestAutoReturn(eventId: ThreadEventId): void;
-  /** §6.5 dispose: an event that was never replied and whose subscribers were never called. */
+  /** `E_STALE_CTX{retryable:true, effect:"none"}` reply channel: used at dispose for events
+   *  that were never replied and never called a subscriber, AND whenever a native release is
+   *  refused (§6.7 复检失败) — the engine owns the decision, the adapter only sends the frame. */
   replyStaleCtx(eventId: ThreadEventId): void;
   /** display-only line (§6.7 主会话可见性 — appendEntry("subagent:thread") source). */
   display(line: string): void;
@@ -132,6 +136,8 @@ interface SteerRuntime {
 interface ActiveEvent {
   readonly record: EventRecord;
   readonly h: ThreadHandle;
+  /** §3.1 ThreadEvent.sentAt (= the request's sourceCreatedAt) — rides along for the buffer. */
+  readonly sentAt: number;
   /** §9.1 wrapper text — the payload every lane-phase steer of this event uses. */
   readonly text: string;
   phase: "lane_wait" | "fanout";
@@ -314,6 +320,7 @@ export class ThreadEngine {
       const event: ActiveEvent = {
         record,
         h: input.h,
+        sentAt: input.sentAt,
         text: input.text,
         phase: "lane_wait",
         dispatchDone: false,
@@ -381,21 +388,20 @@ export class ThreadEngine {
     this.statsValue.disposed = true;
     this.generation++;
     const now = this.deps.clock.now();
-    for (const event of [...this.active.values()]) {
+    const events = [...this.active.values()];
+    // ① deadline timers off; lane-phase steers settle NOW — uncalled ⇒ none (safe fallback),
+    //    called-but-unsettled ⇒ unknown (§6.5). A settle with every OTHER outcome determined
+    //    fires firstReply right here (routed ⇔ some observed, or fallback ⇒ E_STALE_CTX below).
+    //    Flush steers are left to the generation bump (audit-only discard).
+    for (const event of events) {
       if (event.deadlineTimer !== undefined) this.deps.clock.clearTimer(event.deadlineTimer);
-      // §6.5 代际检查: uncalled ⇒ none; called-but-unsettled ⇒ unknown; then reply per aggregate.
-      let anyCalled = false;
       for (const steer of [...this.steers.values()]) {
         if (steer.task.eventId !== event.record.eventId || steer.flushed) continue;
-        if (steer.called) anyCalled = true;
         this.finishSteer(steer, steer.called ? "unknown" : "none", "disposed");
       }
-      if (!event.record.replied && !anyCalled) {
-        event.record.judged = true;
-        this.deps.replyStaleCtx(event.record.eventId); // E_STALE_CTX{retryable:true, effect:"none"}
-      }
     }
-    this.active.clear();
+    // ② end every subscription (stack_disposed) and sweep its buffer — buffered ⇒ none. This is
+    //    what makes a MIXED event (called steer + still-buffered subscriber) judgeable below.
     for (const handle of this.bufferTimers.values()) this.deps.clock.clearTimer(handle);
     this.bufferTimers.clear();
     for (const sub of this.registry.all()) {
@@ -403,6 +409,14 @@ export class ThreadEngine {
       const ended = this.registry.end(sub.subId, "stack_disposed", now);
       if (ended) this.drainBufferAsNone(ended, "disposed");
     }
+    // ③ §6.5 “已有调用的事件按当时的聚合结果回复”： every still-unreplied event replies per
+    //    its CURRENT aggregate — a called steer (unknown) ⇒ routed; all-none (nobody was ever
+    //    called) ⇒ firstReply's disposed fallback replies E_STALE_CTX. Auto-return stays
+    //    suppressed (§9.4 C4).
+    for (const event of events) {
+      if (!event.record.replied) this.firstReply(event, now);
+    }
+    this.active.clear();
     this.statsValue.activeSubs = 0;
   }
 
@@ -478,6 +492,7 @@ export class ThreadEngine {
       replies: s.replies,
       handbacks: s.handbacks,
       buffered: s.buffer.length,
+      bufferedSentAt: s.buffer.list().map((e) => e.sentAt),
     }));
   }
 
@@ -551,7 +566,7 @@ export class ThreadEngine {
         continue;
       }
       if (mode === "buffer") {
-        const push = sub.buffer.push(event.record.eventId, event.h, 0, event.text);
+        const push = sub.buffer.push(event.record.eventId, event.h, event.sentAt, event.text);
         if (push.ok) {
           this.applyOutcome(event.record, sub.subId, "buffered", "run queued/starting");
           this.armBufferTimer(sub.subId);
@@ -788,7 +803,11 @@ export class ThreadEngine {
       if (this.disposedFlag) {
         // §6.5 dispose: no subscriber was called ⇒ E_STALE_CTX, never a native re-dispatch
         this.deps.replyStaleCtx(event.record.eventId);
-      } else if (!this.deps.releaseToNative(event.record.eventId)) {
+      } else if (this.deps.releaseToNative(event.record.eventId)) {
+        // re-check passed, the prompt-release path re-dispatched the event — done
+      } else {
+        // §6.7 复检失败： nothing was re-dispatched, so the ENGINE owes the hub the reply
+        this.deps.replyStaleCtx(event.record.eventId);
         this.deps.audit({ kind: "native-release-refused", eventId: event.record.eventId });
       }
     }

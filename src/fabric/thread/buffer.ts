@@ -75,6 +75,11 @@ export class ThreadBuffer {
     return earliest;
   }
 
+  /** Read-only snapshot (inspection/tests). */
+  list(): readonly BufferedThreadEvent[] {
+    return this.queue;
+  }
+
   /** The engine's per-sub TTL timer target (earliest anchor + S); `undefined` while any entry
    * still lacks its anchor (its reply has not fired yet — the reply arms the timer). */
   expiryAt(startTimeoutMs: number): number | undefined {
