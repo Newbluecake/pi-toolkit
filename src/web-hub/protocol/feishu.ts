@@ -701,10 +701,50 @@ export interface FeishuBotHubConfig {
     inbound: boolean;
     maxInboundMiB: number;
   };
+  /**
+   * fabric-thread arch r3 §4.2/§8.2 (P2): the KEY'S PRESENCE is the hub-side `thr.v1` gate —
+   * only an agent that built this config with threads on ever writes it (P3's buildHubConfig),
+   * so absence = off (no cap, no `cmd.thread`, no thr_* routing — byte-identical, G2a). Carries
+   * the ALREADY-AGENT-CLAMPED window/reply params; the bot re-clamps defensively with the same
+   * pure function and only logs. Malformed ⇒ ONLY this key is dropped (root ruling A: the bot's
+   * other surfaces must not go down with a corrupt optional sub-object; fail-closed for threads).
+   */
+  threads?: FeishuThreadsHubConfig;
+}
+
+/** The `feishuBot.threads` leaves (§8.2: H/S/R minutes + the §6.8 reply limits). */
+export interface FeishuThreadsHubConfig {
+  handbackWindowMin: number;
+  startTimeoutMin: number;
+  retainMin: number;
+  replyPerThreadPerMin: number;
+  replyPerThreadPerHour: number;
 }
 
 function isInt(raw: unknown, min: number, max: number): raw is number {
   return typeof raw === "number" && Number.isInteger(raw) && raw >= min && raw <= max;
+}
+
+/** fabric-thread §8.2: hub-side leaves are strict ints (the agent parser already clamped;
+ * anything out of shape here is corruption ⇒ the threads key alone is dropped). */
+function normalizeFeishuThreadsHubConfig(raw: unknown): FeishuThreadsHubConfig | undefined {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const t = raw as Record<string, unknown>;
+  if (
+    !isInt(t["handbackWindowMin"], 1, 30) ||
+    !isInt(t["startTimeoutMin"], 1, 30) ||
+    !isInt(t["retainMin"], 5, 60) ||
+    !isInt(t["replyPerThreadPerMin"], 1, 1_000) ||
+    !isInt(t["replyPerThreadPerHour"], 1, 10_000)
+  )
+    return undefined;
+  return {
+    handbackWindowMin: t["handbackWindowMin"],
+    startTimeoutMin: t["startTimeoutMin"],
+    retainMin: t["retainMin"],
+    replyPerThreadPerMin: t["replyPerThreadPerMin"],
+    replyPerThreadPerHour: t["replyPerThreadPerHour"],
+  };
 }
 
 function oneOf<T extends string>(raw: unknown, allowed: readonly T[]): raw is T {
@@ -725,6 +765,7 @@ export function normalizeFeishuBotHubConfig(input: unknown): FeishuBotHubConfig 
   if (files === null || typeof files !== "object" || Array.isArray(files)) return undefined;
   const f = files as Record<string, unknown>;
   const rg = FEISHU_BOT_RANGES;
+  const threads = r["threads"] === undefined ? undefined : normalizeFeishuThreadsHubConfig(r["threads"]);
   if (r["securityAlerts"] !== undefined && typeof r["securityAlerts"] !== "boolean") return undefined;
   if (r["xsMirror"] !== undefined && typeof r["xsMirror"] !== "boolean") return undefined;
   if (typeof r["allowGroups"] !== "boolean" || typeof r["groupRootTopics"] !== "boolean") return undefined;
@@ -743,6 +784,7 @@ export function normalizeFeishuBotHubConfig(input: unknown): FeishuBotHubConfig 
     debounceMs: r["debounceMs"],
     staleMessageS: r["staleMessageS"],
     files: { outbound: f["outbound"], inbound: f["inbound"], maxInboundMiB: f["maxInboundMiB"] },
+    ...(threads === undefined ? {} : { threads }),
   };
 }
 

@@ -47,6 +47,7 @@ import {
   UPLOAD_HUB_CAPS,
 } from "../protocol/version.js";
 import type { XsAliasHubStatus } from "../protocol/xs-alias.js";
+import type { ThrReqFrame, ThrResFrame } from "../protocol/thread.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentRemoveService } from "./agent-remove.js";
 import { createAgentServer } from "./agent-server.js";
@@ -471,6 +472,18 @@ export async function startHub(
       extraHubCaps,
       // scheduled-reports H1: `sched_*` frame routing (never the registry).
       ...(scheduleHub === undefined ? {} : { schedule: scheduleHub }),
+      // fabric-thread P2 (arch §7.3): `thr_req` routing (never the registry) — the bot owns the
+      // `thr_res` reply. Lazy `ctx.bot` closure: the bot service is assembled later (feishuAdmin
+      // precedent); a not-yet-started bot is answered by the service itself with E_THR_STATE.
+      ...(config.feishuBot?.threads === undefined
+        ? {}
+        : {
+            threads: {
+              onAgentFrame: (agentKey: string, frame: ThrReqFrame, write: (reply: ThrResFrame) => void) => {
+                ctx.bot?.thrReq(agentKey, frame, write);
+              },
+            },
+          }),
       ...(xsRelay === undefined ? {} : { xs: xsRelay.router }),
       ...(config.feishuBot === undefined
         ? {}
@@ -632,6 +645,23 @@ export async function startHub(
     const uploadMetrics = assembleUploads(ctx);
     if (config.preview !== undefined) await assemblePreview(ctx);
     if (config.feishuBot !== undefined) await assembleFeishu(ctx);
+    // fabric-thread P2 (arch §8.1/§5.4): the bot's thread surface needs the registry's caps/send
+    // (dual-end `thr.v1` checks, best-effort `thr_closed` push) and the bus's `cmd_late` events
+    // (late routed results of requests already `uncertain`). Injected post-construction so the
+    // bot deps stay assembly-free; key-gated so a threads-off hub never subscribes (G2a).
+    if (config.feishuBot?.threads !== undefined && ctx.bot !== undefined) {
+      const bot = ctx.bot;
+      bot.setThreadTransport({
+        getCaps: (agentKey) => registry.getCaps(agentKey),
+        send: (agentKey, frame) => registry.send(agentKey, frame),
+      });
+      const offLate = registry.bus.subscribe((e) => {
+        if (e.type === "cmd_late") bot.onCmdLate(e.agentKey, e.id, e.ok, e.data);
+      });
+      cleanup.push(async () => {
+        offLate();
+      });
+    }
     // web-hub-delete-session plan v2 §2.9: the removal route frontend is wired UNCONDITIONALLY
     // (unlike spawn/preview/upload) — deleting an offline/stale TUI card never depended on
     // managed spawn being enabled at all; `managed` is simply absent when it isn't, and
