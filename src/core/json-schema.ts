@@ -1,4 +1,5 @@
 import type { JsonSchema, RunOutcome } from "./types.js";
+import { structuredRepairSuffix, type StructuredRepairNote } from "./structured-repair.js";
 
 export type { JsonSchema } from "./types.js";
 
@@ -178,6 +179,7 @@ export function applyStructuredOutputPolicy(
   schema: JsonSchema,
   captured: unknown,
   semanticValidator?: (value: unknown) => ValidationResult,
+  repair?: StructuredRepairNote,
 ): RunOutcome {
   if (outcome.status !== "completed") return outcome;
   if (captured === undefined) {
@@ -186,7 +188,9 @@ export function applyStructuredOutputPolicy(
       status: "failed",
       error: {
         kind: "schema",
-        message: "subagent reached a terminal state without submitting a StructuredOutput result",
+        message:
+          "subagent reached a terminal state without submitting a StructuredOutput result" +
+          structuredRepairSuffix(repair),
         retryable: false,
       },
     };

@@ -92,6 +92,55 @@ describe("core/json-schema: applyStructuredOutputPolicy (X10 host-side / second 
     expect(result.error?.message).toMatch(/without submitting/);
   });
 
+  /**
+   * Structured-output repair turn (plan §2.2/§3.1): without the 5th param the
+   * failure message is byte-identical to the pre-feature text — every
+   * existing caller (and any frozen expectation) must keep seeing exactly
+   * this string.
+   */
+  it("without the repair note the failure message is byte-identical to the pre-repair text", () => {
+    const outcome = completedOutcome();
+    const result = applyStructuredOutputPolicy(outcome, objSchema, undefined);
+    expect(result.error?.message).toBe(
+      "subagent reached a terminal state without submitting a StructuredOutput result",
+    );
+  });
+
+  it("the repair note only suffixes the captured-undefined branch, never the others", () => {
+    const attempted = applyStructuredOutputPolicy(completedOutcome(), objSchema, undefined, undefined, "attempted");
+    expect(attempted.error?.message).toBe(
+      "subagent reached a terminal state without submitting a StructuredOutput result (after one repair turn)",
+    );
+    const skippedBudget = applyStructuredOutputPolicy(
+      completedOutcome(),
+      objSchema,
+      undefined,
+      undefined,
+      "skipped_budget",
+    );
+    expect(skippedBudget.error?.message).toContain("(repair turn skipped: not enough time left before a deadline)");
+    // a genuinely captured value ignores the note entirely
+    const captured = applyStructuredOutputPolicy(
+      completedOutcome(),
+      objSchema,
+      { name: "ada", age: 30 },
+      undefined,
+      "attempted",
+    );
+    expect(captured.status).toBe("completed");
+    expect(captured.structuredResult).toEqual({ name: "ada", age: 30 });
+    // and so does an invalid capture (its own message, no suffix)
+    const invalid = applyStructuredOutputPolicy(
+      completedOutcome(),
+      objSchema,
+      { name: "", age: -1 },
+      undefined,
+      "attempted",
+    );
+    expect(invalid.error?.message).toMatch(/host-side re-validation/);
+    expect(invalid.error?.message).not.toContain("repair turn");
+  });
+
   it("attaches structuredResult when the captured payload is genuinely valid", () => {
     const outcome = completedOutcome();
     const result = applyStructuredOutputPolicy(outcome, objSchema, { name: "ada", age: 30 });

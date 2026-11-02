@@ -1170,6 +1170,17 @@ export interface RunDiagnostics {
    */
   childExtensionMissing?: true;
   /**
+   * Structured-output repair turn (structured-output-repair-plan.md §1j):
+   * present only when a repair turn was actually sent (repairNote ===
+   * "attempted"), written by the adapter's post-policy store.put (H3
+   * work-back precedent). Store-only by design — never journaled, never in
+   * StatusInfo, never rendered by get_run_result (R8), so no golden is
+   * affected. "succeeded" = the run ended with a schema-valid submission
+   * (outcome.structuredResult set); "failed" otherwise (including a run
+   * aborted after a late capture — user abort always wins, R9).
+   */
+  structuredRepair?: "succeeded" | "failed";
+  /**
    * 外部 agent（external-agent plan §2.1）：本 run 的外部 provider 运行时元数据
    * （ExternalRunMeta），由 `external_meta` session_event 经 mergeExternalMeta 折入。
    * best-effort 家族（同 contextUsage）：终态后只改 diag 不改已封存的 outcome；
