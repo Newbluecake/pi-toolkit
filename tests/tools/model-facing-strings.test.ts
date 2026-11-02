@@ -16,6 +16,7 @@ import {
 import { createBashJobTool, formatGraceLine } from "../../src/bash/job-tool.js";
 import { createSetModelTool } from "../../src/tools/set-model-tool.js";
 import { createExtendTimeoutTool } from "../../src/tools/extend-timeout-tool.js";
+import { STRUCTURED_REPAIR_PROMPT } from "../../src/core/structured-repair.js";
 
 function collectDescriptions(schema: unknown, out: string[] = []): string[] {
   if (!schema || typeof schema !== "object") return out;
@@ -64,6 +65,16 @@ describe("model-facing tool strings", () => {
       const strings = [tool.description, tool.promptSnippet, ...collectDescriptions(tool.parameters)];
       for (const value of strings) expect(value).not.toMatch(/[§]|architecture/);
     }
+  });
+
+  /**
+   * Structured-output repair turn (plan §3.5): the repair prompt is the one
+   * model-facing string this feature adds — same no-internal-vocabulary bar
+   * as the tool descriptions above (and pure ASCII, matching §3.1).
+   */
+  it("the structured-output repair prompt is model-facing clean (ASCII, no internal vocabulary)", () => {
+    expect(STRUCTURED_REPAIR_PROMPT).toMatch(/^[\x00-\x7F]*$/);
+    expect(STRUCTURED_REPAIR_PROMPT).not.toMatch(/[§]|architecture|watchdog|reducer|adapter|runner/);
   });
 
   it("documents Agent label acceptance for run_id parameters", () => {

@@ -1,6 +1,11 @@
 import type { Clock } from "../core/clock.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { applyStructuredOutputPolicy, isPersistableSchema, validateAgainstSchema } from "../core/json-schema.js";
+import {
+  STRUCTURED_REPAIR_DEFAULTS,
+  STRUCTURED_REPAIR_PROMPT,
+  type StructuredRepairNote,
+} from "../core/structured-repair.js";
 import { validateVerdictV1Semantics } from "../core/verdict-schema.js";
 import type { SnapshotStore } from "../core/store.js";
 import type {
@@ -194,6 +199,14 @@ export interface RuntimeAdapterDeps {
    * persist 的 droid run 因此不写 transcript。
    */
   externalPersistDefault?: boolean;
+  /**
+   * Structured-output repair turn (plan §2.6.1): `false` disables the repair
+   * turn entirely for runs through THIS adapter; a partial object overrides
+   * individual limits. Test seam + future settings hook — stack.ts passes
+   * nothing, so the feature is always on with STRUCTURED_REPAIR_DEFAULTS
+   * (plan §5 定案 1: no settings switch).
+   */
+  structuredRepair?: false | Partial<import("../core/structured-repair.js").StructuredRepairLimits>;
 }
 
 /**
@@ -642,6 +655,15 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // further extend — the full customTools list).
         const grantedReserved: string[] = [];
         const customTools: unknown[] = [];
+        // Structured-output repair turn (plan §1f/§2.6.2): one capture-open
+        // flag shared by the tool's onSubmit, the runner's spec and every
+        // close point. Declared at this scope because the StructuredRepairSpec
+        // assembled further down (in the req literal) closes over it too.
+        // Once closed (local repair close / turn cap / settle dispatch /
+        // cancellation), every late submission is REJECTED and never touches
+        // `structured.value`; values accepted before the close are kept (the
+        // policy reads the capture exactly once, after close).
+        let captureOpen = true;
         // A readonly-domain run (toolDomain:"readonly", e.g. /mem tidy) gets NONE of the injected
         // tools (message_agent / set_model / nested Agent) — every injection branch below is
         // explicitly !readonlyDomain-guarded (P0-r §7.0 point 1). StructuredOutput below is the one
@@ -728,6 +750,11 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             schema,
             ...(spec.request.schemaPreset === undefined ? {} : { schemaPreset: spec.request.schemaPreset }),
             onSubmit: (value) => {
+              if (!captureOpen)
+                return {
+                  ok: false,
+                  errors: ["the result window for this run has closed; this submission was not accepted"],
+                };
               const result = validateAgainstSchema(schema, value);
               if (result.ok) structured.value = value;
               return result;
@@ -942,6 +969,28 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // (the `prompt` field on SessionSpec itself is always overridden by
         // the request's own prompt on the next line regardless).
         const { promptNotes, ...sessionFields } = sessionSpec;
+        // Structured-output repair turn (plan §2.6.3): runtime-only spec for
+        // the runner. Gated on the injection actually having happened
+        // (grantedReserved), the pi path (!isExternal — droid keeps its
+        // ```json extraction, U6) and the test seam. repairNote is written by
+        // the runner's synchronous report() callback and consumed by the
+        // post-settle policy call below.
+        let repairNote: StructuredRepairNote | undefined;
+        const structuredRepair =
+          !isExternal && grantedReserved.includes("StructuredOutput") && deps.structuredRepair !== false
+            ? {
+                toolName: "StructuredOutput",
+                prompt: STRUCTURED_REPAIR_PROMPT,
+                limits: { ...STRUCTURED_REPAIR_DEFAULTS, ...(deps.structuredRepair || {}) },
+                pending: () => captureOpen && structured.value === undefined,
+                closeCapture: () => {
+                  captureOpen = false;
+                },
+                report: (n: StructuredRepairNote) => {
+                  repairNote = n;
+                },
+              }
+            : undefined;
         const req: ResolvedSpawnRequest = {
           runId: spec.runId,
           ...sessionFields,
@@ -949,6 +998,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           // F3/F4: includes inputBudget as a runtime-only field; it is
           // consumed by RuntimeRunner and never copied into SessionSpec/pi.
           ...threadThroughRequestFields(spec.request), // F3/F4 (CC4 — also carries deadlineAt)
+          ...(structuredRepair === undefined ? {} : { structuredRepair }),
           ...(toolScope === undefined ? {} : { toolScope }),
           // M-A: display-only metadata for the presentation layer (diag.model/
           // label/agentType). spec.model is already the merged
@@ -1025,11 +1075,37 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             spec.request.schema,
             structured.value,
             spec.request.schemaPreset === "verdict/v1" ? validateVerdictV1Semantics : undefined,
+            repairNote,
           );
+          // Structured-output repair turn (plan §2.6.4): stamp
+          // diag.structuredRepair only when a repair turn was actually sent,
+          // on both the outcome and the persisted terminal snapshot (H3
+          // work-back precedent) — every other run keeps bytes unchanged.
+          if (repairNote === "attempted") {
+            const structuredRepair =
+              outcome.structuredResult === undefined ? ("failed" as const) : ("succeeded" as const);
+            outcome = { ...outcome, diag: { ...outcome.diag, structuredRepair } };
+          }
           settled = outcome;
           try {
             const snapshot = deps.store.get(spec.runId);
-            if (snapshot) deps.store.put({ ...snapshot, outcome, status: outcome.status, updatedAt: deps.clock.now() });
+            if (snapshot) {
+              deps.store.put({
+                ...snapshot,
+                ...(repairNote === "attempted"
+                  ? {
+                      diag: {
+                        ...snapshot.diag,
+                        structuredRepair:
+                          outcome.structuredResult === undefined ? ("failed" as const) : ("succeeded" as const),
+                      },
+                    }
+                  : {}),
+                outcome,
+                status: outcome.status,
+                updatedAt: deps.clock.now(),
+              });
+            }
           } catch (err) {
             console.warn(
               `[pi-subagent] post-policy snapshot persist failed for ${spec.runId}: ${err instanceof Error ? err.message : String(err)}`,
