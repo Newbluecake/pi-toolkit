@@ -47,6 +47,7 @@ import { createFeishuRuns, type FeishuRunEvent, type FeishuRunResult } from "./r
 import {
   createFeishuThreads,
   THREAD_RECEIPT_EMOJI,
+  threadFinishGuarded,
   threadRetainedRequests,
   type FeishuThreadTransport,
   type FeishuThreads,
@@ -1123,7 +1124,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       // §8.1 finishRun 守卫: a retained `thr:` record is never overwritten with unattributed —
       // second line of defence behind the pre-commit detach. Threads-UNDEFINED (feature off /
       // old-hub rollback) keeps the legacy sweep: nothing else would ever finalize the record.
-      if (threads !== undefined && r.state === "accepted" && r.code !== undefined && r.code.startsWith("thr:")) return;
+      if (threadFinishGuarded(r.state, r.code, threads !== undefined)) return;
       if (result.kind === "unattributed" || result.kind === "rejected" || result.kind === "expired") {
         if (r.state === "dispatching") state.requests.transition(r.id, "uncertain");
         state.requests.transition(r.id, result.kind, { code: result.kind });

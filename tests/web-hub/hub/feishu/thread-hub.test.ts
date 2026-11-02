@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   feishuHandbackBody,
+  threadFinishGuarded,
   feishuHandbackNote,
   feishuThreadHandle,
   feishuThreadMetaFor,
@@ -37,6 +38,17 @@ const RECORD = (over: Partial<FeishuRequestRecord> = {}): FeishuRequestRecord =>
   textDigest: "d".repeat(64),
   sourceCreatedAt: 1_790_000_000_123,
   ...over,
+});
+
+describe("finishRun guard predicate (§8.1, pure)", () => {
+  it("guards ONLY accepted{thr:} while threads are on", () => {
+    expect(threadFinishGuarded("accepted", "thr:routed", true)).toBe(true);
+    expect(threadFinishGuarded("accepted", "thr:routed", false)).toBe(false); // old-hub rollback keeps the sweep
+    expect(threadFinishGuarded("dispatching", "thr:routed", true)).toBe(false);
+    expect(threadFinishGuarded("accepted", "spawn:xyz", true)).toBe(false);
+    expect(threadFinishGuarded("accepted", undefined, true)).toBe(false);
+    expect(threadFinishGuarded("uncertain", "thr:routed", true)).toBe(false);
+  });
 });
 
 describe("thread handle mint (§3.1 D2)", () => {
@@ -192,6 +204,8 @@ describe("retention ledger (§8.1 step 4 / §8.2 restart)", () => {
     await state.load();
     await state.adoptInstall({ appId: "cli_test", ownerOpenId: OWNER });
     state.tenant.pin("tenant");
+    const notices: string[] = [];
+    const receiptCtl = { denied: false, addOk: true };
     const threads = createFeishuThreads({
       clock,
       config: CONFIG,
@@ -200,10 +214,12 @@ describe("retention ledger (§8.1 step 4 / §8.2 restart)", () => {
       transport: () => ({ getCaps: () => ["thr.v1"], send: () => true }),
       agentForSession: () => "agent-1",
       sessionOf: () => "session-1",
-      notice: async () => {},
+      notice: async (_t, text) => {
+        notices.push(text);
+      },
       enqueueNotice: async () => ({ ok: true, sendIds: [], durable: true, duplicate: false }),
-      addReceiptReaction: async () => true,
-      reactionsDenied: () => false,
+      addReceiptReaction: async () => receiptCtl.addOk,
+      reactionsDenied: () => receiptCtl.denied,
       deleteTypingReaction: async () => {},
       run: (task) => void task(),
       label: (sid) => sid,
@@ -236,7 +252,7 @@ describe("retention ledger (§8.1 step 4 / §8.2 restart)", () => {
       state.requests.patch(id, {}); // stateAt already `now`
       void stateAt;
     };
-    return { clock, state, threads, seed };
+    return { clock, state, threads, seed, notices, receiptCtl };
   }
   it("onRestartRetained re-arms fresh records and finalizes already-expired ones", async () => {
     const r = await rig();
@@ -265,6 +281,27 @@ describe("retention ledger (§8.1 step 4 / §8.2 restart)", () => {
     r.clock.advance(16 * 60_000);
     expect(r.state.requests.get("fs" + "e".repeat(30))?.code).toBe("thread-handback");
   });
+  it("receipts: first event text, later emoji; emoji denied or failed ⇒ back to text (§8.1 step 3)", async () => {
+    const r = await rig();
+    await r.seed("fs" + "a".repeat(30), r.clock.now());
+    const record = r.state.requests.get("fs" + "a".repeat(30))!;
+    const runs = [{ runId: "r_23456789", label: "w" }];
+    r.threads.onRouted({ request: record, runs, retained: false, recovered: false });
+    expect(r.notices).toEqual([`已转交 @w（run_id: r_23456789）`]); // first ⇒ text
+    r.threads.onRouted({ request: record, runs, retained: false, recovered: false });
+    expect(r.notices.length).toBe(1); // emoji path, no new text
+    // Capability denied ⇒ later events degrade back to text with the full subscriber list.
+    r.receiptCtl.denied = true;
+    r.threads.onRouted({ request: record, runs, retained: false, recovered: false });
+    expect(r.notices[1]).toBe(`已转交 @w（run_id: r_23456789）`);
+    // The emoji POST failing (not denied) ⇒ same text fallback (resolved past its await).
+    r.receiptCtl.denied = false;
+    r.receiptCtl.addOk = false;
+    r.threads.onRouted({ request: record, runs, retained: false, recovered: false });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(r.notices[2]).toBe(`已转交 @w（run_id: r_23456789）`);
+  });
+
   it("the retention timer finalizes a still-retained record", async () => {
     const r = await rig();
     await r.seed("fs" + "f".repeat(30), r.clock.now());

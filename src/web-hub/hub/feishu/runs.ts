@@ -171,8 +171,9 @@ export function createFeishuRuns(deps: FeishuRunsDeps) {
         }
         // §8.1: a plain-ok result AFTER a real stream break means the stream already broke —
         // same unattributed as today (the routed case never reaches here: detach removed the
-        // tracker first; a consumed-before-result postponement is NOT a break).
-        if (r.streamBroken && !r.anchor) {
+        // tracker first; a consumed-before-result postponement is NOT a break). An anchor set
+        // BEFORE the break does not help: it belongs to the replaced stream.
+        if (r.streamBroken) {
           finish(r, "unattributed");
           return;
         }
@@ -210,8 +211,12 @@ export function createFeishuRuns(deps: FeishuRunsDeps) {
       if (event.type === "session") {
         stream.sessionId = event.session.sessionId;
         for (const r of [...runs.values()])
-          if (r.request.agentKey === key && r.anchor && r.sessionId !== event.session.sessionId)
-            finish(r, "unattributed");
+          if (r.request.agentKey === key && r.anchor && r.sessionId !== event.session.sessionId) {
+            // §8.1 (r3-5): a session change before the result defers for thread candidates —
+            // the routed outcome still detaches cleanly; a plain ok finalizes unattributed.
+            if (r.threadCandidate && !r.accepted) postpone(r, true);
+            else finish(r, "unattributed");
+          }
       } else if (event.type === "ctl") {
         if (stream.epoch !== undefined && stream.epoch !== event.epoch) {
           disconnect(key);

@@ -46,7 +46,7 @@ import {
   type FeishuThreadsHubConfig,
 } from "../../protocol/feishu.js";
 import type { FeishuClock } from "./http.js";
-import type { FeishuRequestRecord, FeishuState, FeishuBinding } from "./state.js";
+import type { FeishuRequestRecord, FeishuState, FeishuBinding, RequestState } from "./state.js";
 import type { FeishuInstallation } from "./admission.js";
 import type { EnqueueNoticeInput, EnqueueResult, OutboxTarget } from "./outbox.js";
 import { renderNotice } from "./render.js";
@@ -117,6 +117,14 @@ export function feishuThreadMetaFor(input: {
 
 export const THREAD_RETAIN_MAX_REQUESTS = 32;
 export const THREAD_RETAIN_MAX_BYTES = 512 * 1024;
+
+/** §8.1 finishRun 守卫 (pure, second line of defence behind the pre-commit detach): a retained
+ *  `accepted{thr:}` record is never overwritten with unattributed by a lingering tracker or a
+ *  late finish. Threads-UNDEFINED (feature off / old-hub rollback) keeps the legacy sweep —
+ *  nothing else would ever finalize the record (§8.4③). */
+export function threadFinishGuarded(state: RequestState, code: string | undefined, threadsOn: boolean): boolean {
+  return threadsOn && state === "accepted" && code !== undefined && code.startsWith("thr:");
+}
 /** §8.1 step 3 receipt emoji for non-first routed events (「之后只加回执表情」). */
 export const THREAD_RECEIPT_EMOJI = "DONE";
 /** §7.3 postId dedup window (10 minutes, in-memory). */

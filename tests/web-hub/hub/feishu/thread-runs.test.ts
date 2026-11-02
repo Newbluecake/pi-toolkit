@@ -44,6 +44,8 @@ function rig() {
       sessionId: sid,
       items: withItem ? [{ cmdId: request.id, op: "prompt", state, at: NOW, updatedAt: NOW }] : [],
     });
+  const anchor = (value = text) =>
+    ev({ type: "message_start", message: { role: "user", content: [{ type: "text", text: value }] } });
   const start = (thread = true) =>
     runs.request({ type: "dispatching", request, text, ...(thread ? { thread: true } : {}) });
   const accept = () =>
@@ -54,7 +56,7 @@ function rig() {
       reactionEligible: false,
       recovered: false,
     });
-  return { runs, clock, finish, reaction, request, start, accept, ctl, ev };
+  return { runs, clock, finish, reaction, request, start, accept, ctl, ev, anchor };
 }
 
 describe("thread candidate gap competition (S9)", () => {
@@ -121,6 +123,35 @@ describe("thread candidate gap competition (S9)", () => {
     expect(r.finish).not.toHaveBeenCalled();
     r.clock.advance(60_000);
     expect(r.finish).toHaveBeenCalledWith(expect.objectContaining({ kind: "unattributed" }));
+  });
+});
+
+describe("session change before the result (S9 variant, §8.1 r3-5)", () => {
+  it("an ANCHORED candidate does not finish early; a late routed detach migrates cleanly", () => {
+    const r = rig();
+    r.start();
+    r.anchor(); // the slow-path anchor landed before the session was replaced
+    r.runs.event({ type: "session", agentKey: "a1", session: { sessionId: "s2" } });
+    expect(r.finish).not.toHaveBeenCalled();
+    // The routed outcome: detach removes the tracker — no finish ever fires.
+    r.runs.detach(r.request.id);
+    r.clock.advance(60_000);
+    expect(r.finish).not.toHaveBeenCalled();
+  });
+  it("an anchored candidate + session change + plain-ok ⇒ unattributed (stream already broke)", () => {
+    const r = rig();
+    r.start();
+    r.anchor();
+    r.runs.event({ type: "session", agentKey: "a1", session: { sessionId: "s2" } });
+    r.accept(); // plain ok after the break — anchor or not, attribution is gone
+    expect(r.finish).toHaveBeenCalledWith(expect.objectContaining({ kind: "unattributed" }));
+  });
+  it("an anchored NON-candidate still finishes immediately on session change (unchanged legacy)", () => {
+    const r = rig();
+    r.start(false);
+    r.anchor();
+    r.runs.event({ type: "session", agentKey: "a1", session: { sessionId: "s2" } });
+    expect(r.finish).toHaveBeenCalledTimes(1);
   });
 });
 
