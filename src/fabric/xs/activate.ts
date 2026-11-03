@@ -348,7 +348,17 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
       xsSender = sender;
       // Alias-plan §6 (ALW): instances/descriptions frozen at activate by the LOCAL alias setting (see `aliasOn`).
       pi.registerTool(createListSessionsTool({ sender, channels: channelsOn, ...(aliasOn ? { alias: true } : {}) }));
-      pi.registerTool(createMessageSessionTool({ sender, reply: replyEnabled, ...(aliasOn ? { alias: true } : {}) }));
+      // rebind-plan r3 §3.2 step 6/7 (agent package): the topic-handover dispatch convention
+      // rides the description ONLY while threads ∧ rebind are both on (off ⇒ never appended, A16).
+      const threadRebindOn = settings.fabric.threads.enabled && settings.fabric.threads.rebind === true;
+      pi.registerTool(
+        createMessageSessionTool({
+          sender,
+          reply: replyEnabled,
+          ...(aliasOn ? { alias: true } : {}),
+          ...(threadRebindOn ? { threadRebind: true } : {}),
+        }),
+      );
       // Channel-plan §6.1 (CHW): main session only (this whole block is post-guard), xsOn ∧ channels.enabled.
       if (channelsOn) pi.registerTool(createMessageChannelTool({ sender }));
       const command = createFabricXsCommand({

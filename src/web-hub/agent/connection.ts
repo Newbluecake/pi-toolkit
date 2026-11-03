@@ -189,8 +189,9 @@ export interface HubConnection {
   request(frame: XsReqFrame, requiredCap: "xs.v1"): Promise<XsResFrame>;
   /** fabric-thread arch r3 §7.3 (P3): the `thr_req` overload — 5s deadline (the §7.3 agent-side
    *  wait; the caller owns the ONE same-postId retry, `thread-child-tool.ts`). Same cap precheck
-   *  (`thr.v1`) / reject-pending-on-teardown contract. */
-  request(frame: ThrReqFrame, requiredCap: "thr.v1"): Promise<ThrResFrame>;
+   *  / reject-pending-on-teardown contract. rebind-plan r3 (agent package): the rebind/acquire
+   *  ops ride the same frame type under the `thr.rebind.v1` precheck. */
+  request(frame: ThrReqFrame, requiredCap: "thr.v1" | "thr.rebind.v1"): Promise<ThrResFrame>;
   /** Capabilities from the current live link's `hello_ack.caps` (empty until live, or if the hub omitted it). */
   readonly caps: readonly string[];
 }
@@ -470,7 +471,8 @@ class Connection implements HubConnection {
   request(frame: FsbReqFrame, requiredCap: string): Promise<FsbResFrame>;
   request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame>;
   request(frame: XsReqFrame, requiredCap: "xs.v1"): Promise<XsResFrame>;
-  request(frame: ThrReqFrame, requiredCap: "thr.v1"): Promise<ThrResFrame>;
+  /** rebind-plan r3 (agent 包)：rebind/acquire 帧也走 thr_req，cap 预检放宽到 thr.rebind.v1。 */
+  request(frame: ThrReqFrame, requiredCap: "thr.v1" | "thr.rebind.v1"): Promise<ThrResFrame>;
   request(
     frame: LanReqFrame | HubCtlFrame | FsbReqFrame | TfaReqFrame | XsReqFrame | ThrReqFrame,
     requiredCap: string,

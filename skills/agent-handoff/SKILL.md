@@ -149,6 +149,20 @@ metadata:
 
 3. 如果不提供请教渠道，就**别在 prompt 里暗示存在它拿不到的信息**。
 
+## 可选：派发时把飞书话题一起交给下游（fabric.threads.rebind）
+
+跨会话派发（`message_session`）且希望该飞书群话题的后续消息**直达下游主会话**（本会话零参与）时：
+
+1. 先 `thread(action:"rebind", h, to)` 换绑（你是现持有者才能转）；用回执里的**完整 sessionId** 作为
+   `message_session` 的 `to`，不要自己再猜/截短 sid；
+2. 派发文本里带上话题句柄 `h`，并明确要求 worker **先 `thread(action:"acquire", h)` 再处理正文**
+   （acquire 是唯一的目录登记入口；worker 跳过它则 subscribe 报 `thread_unknown`，话题消息仍回本会话——
+   安全降级，不是错误）；
+3. 失败处置：`E_THR_UNSUPPORTED`（对端不支持）**别重试**；effect `none` 是确定没生效，修正后重试；
+   effect `unknown` 可能已生效，**不要盲重**——先 `thread(action:"acquire", h)` 探归属再决定。
+
+该能力默认关闭（`fabric.threads.rebind`）；未开启时工具没有 `rebind`/`acquire` action，本节不适用。
+
 ## 反模式
 
 - 只转一段结论文字 ⇒ 下游不知道去哪看，只能重新摸索；

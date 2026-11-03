@@ -9,6 +9,10 @@
  * `/thread drop <subId>` — end one subscription (any creator)
  * `/thread sub <run> <h> [scope…]` — subscribe (createdBy:"human"); `run` accepts a run id,
  *                       a unique id prefix or an @label; `h` accepts `origin` (§4.3).
+ *
+ * rebind-plan r3 §4.8 (agent package): TWO USAGE texts — the legacy one is byte-identical while
+ * `fabric.threads.rebind` is off (A16); rebind on adds `/thread rebind <h|origin> <to>` and
+ * `/thread acquire <h|origin>` (same hub round trips as the tool actions).
  */
 
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
@@ -17,6 +21,9 @@ import type { ThreadMainOps } from "../tools/thread-tool.js";
 export interface ThreadCommandDeps {
   /** The live stack surface (holder-forwarded; undefined ⇒ feature off / no stack). */
   current(): ThreadMainOps | undefined;
+  /** rebind-plan r3 §4.8: `fabric.threads.rebind` frozen at activate — selects USAGE and the
+   *  rebind/acquire subcommands. Omitted/false ⇒ byte-identical legacy surface (A16). */
+  rebind?: boolean;
 }
 
 function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
@@ -30,6 +37,11 @@ function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "
 export function createThreadCommand(deps: ThreadCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   const USAGE =
     "用法：/thread status · /thread drop <subId> · /thread sub <run> <h|origin> [职责说明]（h 形如 fs:xxxxxxxxxxxx）";
+  /** rebind-plan r3 §4.8: rebind-on help text（usage 是人读散文 ⇒ 中文，沿用 legacy 语言）。 */
+  const USAGE_REBIND =
+    "用法：/thread status · /thread drop <subId> · /thread sub <run> <h|origin> [职责说明] · " +
+    "/thread rebind <h|origin> <to> · /thread acquire <h|origin>（h 形如 fs:xxxxxxxxxxxx；to 为完整 session id / 唯一前缀 / 精确别名 / 精确名字）";
+  const usage = deps.rebind === true ? USAGE_REBIND : USAGE;
   return {
     description: "Thread 订阅直通：查看/建立/解除「飞书群话题 → 直派 subagent」的事件订阅（fabric.threads）。",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
@@ -44,7 +56,7 @@ export function createThreadCommand(deps: ThreadCommandDeps): Omit<RegisteredCom
         return;
       }
       if (trimmed === "help") {
-        notify(ctx, USAGE);
+        notify(ctx, usage);
         return;
       }
       const dropMatch = /^drop\s+(\S+)\s*$/.exec(trimmed);
@@ -77,7 +89,50 @@ export function createThreadCommand(deps: ThreadCommandDeps): Omit<RegisteredCom
         }
         return;
       }
-      notify(ctx, USAGE, "warning");
+      // ------------------------------------------------ rebind-plan r3 §4.8（rebind-on 门控）
+      const rebindMatch = /^rebind\s+(\S+)\s+(\S+)\s*$/.exec(trimmed);
+      if (rebindMatch !== null) {
+        if (deps.rebind !== true || ops.rebind === undefined) {
+          notify(ctx, "话题换绑未开启（fabric.threads.rebind=false）。", "warning");
+          return;
+        }
+        const result = await ops.rebind({
+          h: rebindMatch[1]!,
+          to: rebindMatch[2]!,
+          origin: rebindMatch[1] === "origin",
+        });
+        if (result.ok) {
+          notify(
+            ctx,
+            result.changed
+              ? `已换绑：${result.h}「${result.label}」→ session ${result.sessionId}（rev ${result.rev}）。`
+              : `无需换绑：${result.h} 本就绑定 session ${result.sessionId}（rev ${result.rev} 未变）。`,
+          );
+        } else {
+          notify(ctx, `换绑失败：${result.code}（effect ${result.effect}）`, "warning");
+        }
+        return;
+      }
+      const acquireMatch = /^acquire\s+(\S+)\s*$/.exec(trimmed);
+      if (acquireMatch !== null) {
+        if (deps.rebind !== true || ops.acquire === undefined) {
+          notify(ctx, "话题换绑未开启（fabric.threads.rebind=false）。", "warning");
+          return;
+        }
+        const result = await ops.acquire({ h: acquireMatch[1]!, origin: acquireMatch[1] === "origin" });
+        if (result.ok) {
+          notify(
+            ctx,
+            result.already
+              ? `已在目录中（快路径，未刷新 rev）：${acquireMatch[1]!}「${result.label ?? ""}」。`
+              : `已登记：${acquireMatch[1]!}「${result.label ?? ""}」（rev ${result.rev ?? "?"}），现在可以 subscribe。`,
+          );
+        } else {
+          notify(ctx, `登记失败：${result.code}（effect ${result.effect}）`, "warning");
+        }
+        return;
+      }
+      notify(ctx, usage, "warning");
     },
   };
 }

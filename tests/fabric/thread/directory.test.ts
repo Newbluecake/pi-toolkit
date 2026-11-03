@@ -61,4 +61,56 @@ describe("ThreadDirectory (§3.1 LRU 32)", () => {
     dir.note(H(3), "c", 4);
     expect(dir.list().map((e) => e.h)).toEqual([H(2), H(1), H(3)]);
   });
+
+  // ------------------------------------------------ rebind-plan r3 §4.7 (rev tracking)
+
+  it("note carries rev as a MONOTONIC MAX (out-of-order frames never roll it back)", () => {
+    const dir = new ThreadDirectory();
+    dir.note(H(1), "topic", 1, 41);
+    expect(dir.get(H(1))?.rev).toBe(41);
+    dir.note(H(1), "topic", 2, 40); // stale frame — must not regress
+    expect(dir.get(H(1))?.rev).toBe(41);
+    dir.note(H(1), "topic", 3, 42);
+    expect(dir.get(H(1))?.rev).toBe(42);
+    dir.note(H(1), "topic", 4); // no rev on the frame — kept, not cleared
+    expect(dir.get(H(1))?.rev).toBe(42);
+  });
+
+  it("note without rev leaves an absent rev absent; noteRev is monotonic and never creates entries", () => {
+    const dir = new ThreadDirectory();
+    dir.note(H(1), "topic", 1);
+    expect(dir.get(H(1))?.rev).toBeUndefined();
+    dir.noteRev(H(1), 7);
+    expect(dir.get(H(1))?.rev).toBe(7);
+    dir.noteRev(H(1), 6);
+    expect(dir.get(H(1))?.rev).toBe(7);
+    dir.noteRev(H(2), 9); // unknown handle — no entry minted
+    expect(dir.get(H(2))).toBeUndefined();
+  });
+
+  it("close() CLEARS rev (no longer fresh once the binding moved); a later note does not restore it", () => {
+    const dir = new ThreadDirectory();
+    dir.note(H(1), "topic", 1, 41);
+    expect(dir.close(H(1))).toBe(true);
+    expect(dir.get(H(1))?.rev).toBeUndefined();
+    dir.note(H(1), "topic", 2, 50); // closed entry: label updates, still closed (never resurrected)
+    expect(dir.isOpen(H(1))).toBe(false);
+    expect(dir.get(H(1))?.rev).toBe(50); // monotonic max still applies (fresh frame, fresh rev)
+  });
+
+  it("reopen resurrects a closed entry ONLY via the trusted acquire path, carrying the hub's current rev", () => {
+    const dir = new ThreadDirectory();
+    dir.note(H(1), "topic", 1, 41);
+    dir.close(H(1));
+    dir.reopen(H(1), "topic", 2, 43);
+    expect(dir.isOpen(H(1))).toBe(true);
+    expect(dir.get(H(1))?.rev).toBe(43);
+    // reopen on an unknown handle mints an open entry (same as note)
+    dir.reopen(H(2), "other", 3, 5);
+    expect(dir.isOpen(H(2))).toBe(true);
+    expect(dir.get(H(2))?.rev).toBe(5);
+    // reopen is monotonic on rev too, and refreshes recency
+    dir.reopen(H(1), "topic", 4, 42);
+    expect(dir.get(H(1))?.rev).toBe(43);
+  });
 });

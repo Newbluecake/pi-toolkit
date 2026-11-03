@@ -23,7 +23,7 @@
 import type { Clock, TimerHandle } from "../../core/clock.js";
 import { isTerminalStatus } from "../../core/status.js";
 import type { RunStatus } from "../../core/types.js";
-import { THREAD_SUBS_MAX, type ThreadCloseReason } from "../../web-hub/protocol/thread.js";
+import { THREAD_SUBS_MAX, type ThreadCloseReason, type ThrResFrame } from "../../web-hub/protocol/thread.js";
 import type { Outcome, ThreadEngineSettings, ThreadEventId, ThreadHandle, ThreadRunId, ThreadStats } from "./types.js";
 import { DEFAULT_THREAD_ENGINE_SETTINGS, THREAD_ROUTED_WINDOW_MS } from "./types.js";
 import { ThreadDirectory } from "./directory.js";
@@ -66,6 +66,17 @@ export interface ThreadEngineDeps {
   hint(line: string): void;
   /** §6.5 晚到结果 / anomaly sink — audit only, never changes a sent reply. */
   audit(entry: Record<string, unknown>): void;
+  /** rebind-plan r3 §3.2/§4.7 (agent package): the two rebind round trips, wired by the stack.
+   *  The engine pre-checks `hubRebindCapable()` before EVERY send — no `thr.rebind.v1` ⇒
+   *  E_THR_UNSUPPORTED with ZERO frames (A9). Absent ⇒ acquire/rebind answer E_THR_UNSUPPORTED. */
+  rebind?: {
+    /** hub online ∧ hello_ack.caps ∋ thr.rebind.v1 (sampled per call, like `hubCapable`). */
+    hubRebindCapable(): boolean;
+    /** `thr_req{op:"acquire"}` — one bounded round trip (the connection enforces 5s). */
+    acquire(h: ThreadHandle): Promise<ThrResFrame>;
+    /** `thr_req{op:"rebind"}` — `fromRev` is the caller's last TRUSTED observation (§4.7). */
+    rebind(h: ThreadHandle, to: string, fromRev: number): Promise<ThrResFrame>;
+  };
 }
 
 /** Re-exported shape so P3 can import one type from the engine module. */
@@ -89,6 +100,9 @@ export interface ThreadEventInput {
   frameDeadlineMs: number;
   /** §9.1 encapsulated wrapper text (P3 builds it) — buffer bytes + steer payload. */
   text: string;
+  /** rebind-plan r3 §4.7: the trusted binding rev riding `cmd.thread` (attached by the hub only
+   *  when BOTH ends carry `thr.rebind.v1`) — one of the directory's three trusted rev sources. */
+  rev?: number;
 }
 
 export type HandleEventResult =
@@ -104,6 +118,26 @@ export type HandleEventResult =
 export type HandbackAdmission =
   | { ok: true; subId: string }
   | { ok: false; reason: "event_unknown" | "not_delivered" | "window_expired" | "sub_ended" | "hub_unsupported" };
+
+/** rebind-plan r3 §3.2 step 7 / §4.7: `acquireThread` outcome. `already:true` = the open fast
+ *  path (NO hub round trip, NO rev refresh — rebind must never treat it as a rev source). */
+export type ThreadAcquireResult =
+  | { ok: true; already: boolean; label?: string; rev?: number }
+  | { ok: false; code: string; effect: "none" | "unknown" };
+
+/** rebind-plan r3 §4.8: `rebindThread` outcome. `sessionId` is the RESOLVED full sid — dispatch
+ *  with it directly. `changed:false` is ONLY the same-target no-op (§4.9 P1). */
+export type ThreadRebindResult =
+  | { ok: true; h: ThreadHandle; sessionId: string; rev: number; changed: boolean; label: string }
+  | { ok: false; code: string; effect: "none" | "unknown" };
+
+/** connection.request rejects with `E_NO_CAP` (cap lost between the pre-check and the send —
+ *  still zero frames) or `E_TIMEOUT` (§4.9 P2: possibly applied — never blind-retry). */
+function mapThrThrow(error: unknown): { ok: false; code: string; effect: "none" | "unknown" } {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("E_NO_CAP")) return { ok: false, code: "E_THR_UNSUPPORTED", effect: "none" };
+  return { ok: false, code: "E_TIMEOUT", effect: "unknown" };
+}
 
 /** §5.3 ① frozen terminal summary — read ONCE by the notifier, then deleted. */
 export interface FrozenThreadSummary {
@@ -192,10 +226,11 @@ export class ThreadEngine {
 
   // ------------------------------------------------------------------ §3.1 directory
 
-  /** P3 calls this on every valid thread-bearing frame (hub-driven recency). */
-  noteThread(h: ThreadHandle, label: string): void {
+  /** P3 calls this on every valid thread-bearing frame (hub-driven recency). `rev` is the
+   *  trusted binding rev riding `cmd.thread` (§4.7 — monotonic max inside the directory). */
+  noteThread(h: ThreadHandle, label: string, rev?: number): void {
     if (this.disposedFlag) return;
-    this.directory.note(h, label, this.deps.clock.now());
+    this.directory.note(h, label, this.deps.clock.now(), rev);
   }
 
   // ------------------------------------------------------------------ §5.1 admission
@@ -465,6 +500,82 @@ export class ThreadEngine {
     if (!record) return { degrade: "none" };
     record.handback = state;
     return { degrade: state === "gone" ? "finding" : "none" };
+  }
+
+  // ------------------------------------------------------------------ rebind-plan §3.2 acquire/rebind
+
+  /** §3.2 step 7 / §4.7: the ONLY trusted directory (re)entry. The open fast path
+   *  (`force` absent/false ∧ the entry is open) answers locally WITHOUT a hub round trip and
+   *  WITHOUT refreshing rev; `force:true` always asks the hub (the rebind CAS pre-observation
+   *  and the post-close re-takeover both need the hub's CURRENT rev). */
+  async acquireThread(h: ThreadHandle, opts?: { force?: boolean }): Promise<ThreadAcquireResult> {
+    if (this.disposedFlag) return { ok: false, code: "E_THREAD_DISPOSED", effect: "none" };
+    const rebind = this.deps.rebind;
+    if (rebind === undefined) return { ok: false, code: "E_THR_UNSUPPORTED", effect: "none" };
+    if (opts?.force !== true) {
+      const known = this.directory.get(h);
+      if (known !== undefined && !known.closed) {
+        return { ok: true, already: true, label: known.label, ...(known.rev === undefined ? {} : { rev: known.rev }) };
+      }
+    }
+    if (!rebind.hubRebindCapable()) {
+      // A9: the peer lacks thr.rebind.v1 — LOCAL verdict, ZERO frames (an old hub would
+      // silently drop the unknown op and look exactly like a timeout, D3).
+      return { ok: false, code: "E_THR_UNSUPPORTED", effect: "none" };
+    }
+    let res: ThrResFrame;
+    try {
+      res = await rebind.acquire(h);
+    } catch (error) {
+      return mapThrThrow(error);
+    }
+    // §6 实施要点 7: an in-flight round trip MUST NOT write the directory after dispose.
+    if (this.disposedFlag) return { ok: false, code: "E_THREAD_DISPOSED", effect: "none" };
+    if (!res.ok) return { ok: false, code: res.code, effect: res.effect };
+    const data = res.data;
+    if (!("owned" in data)) return { ok: false, code: "E_THR_STATE", effect: "unknown" }; // wrong branch — never trust
+    this.directory.reopen(h, data.label, this.deps.clock.now(), data.rev);
+    return { ok: true, already: false, label: data.label, rev: data.rev };
+  }
+
+  /** §3.2 steps 1–6 / §4.7: transfer the binding behind `h` to `to`. `fromRev` is the
+   *  directory's last trusted observation ONLY — missing ⇒ ONE forced acquire round trip
+   *  (never guess; fetching at send time would degenerate the CAS into always-match, D6).
+   *  E_THR_STALE ⇒ re-acquire the current rev and retry ONCE (never hard-retry the stale value). */
+  async rebindThread(h: ThreadHandle, to: string): Promise<ThreadRebindResult> {
+    if (this.disposedFlag) return { ok: false, code: "E_THREAD_DISPOSED", effect: "none" };
+    const rebind = this.deps.rebind;
+    if (rebind === undefined || !rebind.hubRebindCapable()) {
+      return { ok: false, code: "E_THR_UNSUPPORTED", effect: "none" }; // A9: zero frames
+    }
+    let fromRev = this.directory.get(h)?.rev;
+    if (fromRev === undefined) {
+      const probe = await this.acquireThread(h, { force: true });
+      if (!probe.ok) return probe;
+      if (probe.rev === undefined) return { ok: false, code: "E_THR_STATE", effect: "unknown" };
+      fromRev = probe.rev;
+    }
+    const attempt = async (rev: number): Promise<ThreadRebindResult> => {
+      let res: ThrResFrame;
+      try {
+        res = await rebind.rebind(h, to, rev);
+      } catch (error) {
+        return mapThrThrow(error);
+      }
+      if (!res.ok) return { ok: false, code: res.code, effect: res.effect };
+      const data = res.data;
+      if (!("rebound" in data)) return { ok: false, code: "E_THR_STATE", effect: "unknown" }; // wrong branch — never trust
+      // §4.7: a success receipt is a trusted rev source (monotonic; the trailing
+      // thr_closed{rebound} will close + clear shortly afterwards — that is intended).
+      if (!this.disposedFlag) this.directory.noteRev(h, data.rev);
+      return { ok: true, h, sessionId: data.sessionId, rev: data.rev, changed: data.changed, label: data.label };
+    };
+    const first = await attempt(fromRev);
+    if (first.ok || first.code !== "E_THR_STALE") return first;
+    const probe = await this.acquireThread(h, { force: true });
+    if (!probe.ok) return probe;
+    if (probe.rev === undefined) return { ok: false, code: "E_THR_STATE", effect: "unknown" };
+    return attempt(probe.rev);
   }
 
   // ------------------------------------------------------------------ introspection

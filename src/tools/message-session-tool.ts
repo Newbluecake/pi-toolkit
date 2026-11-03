@@ -104,12 +104,25 @@ export interface MessageSessionToolDeps {
   /** `alias.enabled` ∧ hub cap frozen at activate (alias-plan §6): selects the alias description (schema
    *  identical to the same reply-mode instance; `to` already accepts any ≤128-char string). Omitted/false ⇒ byte-identical. */
   alias?: boolean;
+  /** rebind-plan r3 §3.2 step 7 (agent package): `fabric.threads.enabled ∧ rebind` frozen at
+   *  activate ⇒ appends the topic-handover dispatch convention. Omitted/false ⇒ NEVER appended
+   *  (threads-on × rebind-off stays byte-identical, A16). */
+  threadRebind?: boolean;
 }
 
 const ALIAS_TO_SUFFIX =
   ' When the user refers to a session by a short word (e.g. "给前端发消息"), pass that word verbatim as `to`: aliases are ' +
   "unique on this hub and matched before names. If the result is no_target or ambiguous, call list_sessions and ask " +
   "the user — never guess or pick the closest one.";
+
+/** rebind-plan r3 §3.2 steps 6–7: the topic-handover dispatch convention — appended ONLY while
+ *  `fabric.threads.rebind` is on (off ⇒ never appended, A16 byte-parity). */
+const THREAD_REBIND_SUFFIX =
+  " Feishu topic handover: to make a group topic follow your dispatch, first call " +
+  'thread(action:"rebind", h, to) and send with `to` set to the FULL sessionId its result returns; put the ' +
+  'thread handle in your text and require the worker to run thread(action:"acquire", h) BEFORE subscribing or ' +
+  "replying (acquire is the only trusted directory entry — skipping it degrades safely: subscribe answers " +
+  "thread_unknown and the events keep going to the main session).";
 
 /** alias-plan §6 prose for `E_XS_ALIAS_UNAVAILABLE` (advice block ⇒ Chinese). */
 export const XS_ALIAS_UNAVAILABLE_HINT = "hub 别名服务暂不可用，请用 list_sessions 给出的 ref";
@@ -137,7 +150,10 @@ export function createMessageSessionTool(
   return {
     name: "message_session",
     label: "message_session",
-    description: (replyOn ? REPLY_DESCRIPTION : LEGACY_DESCRIPTION) + (deps.alias === true ? ALIAS_TO_SUFFIX : ""),
+    description:
+      (replyOn ? REPLY_DESCRIPTION : LEGACY_DESCRIPTION) +
+      (deps.alias === true ? ALIAS_TO_SUFFIX : "") +
+      (deps.threadRebind === true ? THREAD_REBIND_SUFFIX : ""),
     parameters: (replyOn ? MessageSessionParamsReply : MessageSessionParamsLegacy) as typeof MessageSessionParamsLegacy,
     async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as MessageSessionParams;

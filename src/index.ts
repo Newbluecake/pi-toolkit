@@ -615,6 +615,8 @@ export default function activate(rawPi: ExtensionAPI): void {
     pi.registerTool(
       createThreadTool({
         current: () => holder.current?.threads,
+        // rebind-plan r3 §4.8：schema 实例/描述二选一，activate 时冻结（off ⇒ Legacy 逐字节）。
+        ...(settings.fabric.threads.rebind === true ? { rebind: true } : {}),
       }),
     );
   // fabric-thread P3：/thread 本地人命令（status/drop/sub），同一 threadsOn 门控。
@@ -623,6 +625,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       "thread",
       createThreadCommand({
         current: () => holder.current?.threads,
+        ...(settings.fabric.threads.rebind === true ? { rebind: true } : {}),
       }),
     );
   if (caps.canRenderEntries) {

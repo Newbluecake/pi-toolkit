@@ -459,6 +459,9 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
           bypass: threadMeta.bypass === true,
           addressedOther,
           frameDeadlineMs: frame.deadlineMs,
+          // rebind-plan r3 §4.7: the trusted binding rev rides cmd.thread only when BOTH ends
+          // carry thr.rebind.v1 (P0b gate) — one of the directory's three trusted rev sources.
+          ...(threadMeta.rev !== undefined ? { rev: threadMeta.rev } : {}),
           text: threadPort.wrapEvent({
             h: threadMeta.h,
             label: threadMeta.label,

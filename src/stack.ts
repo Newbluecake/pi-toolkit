@@ -8,9 +8,11 @@ import {
 } from "./bash/host.js";
 import { buildFabric } from "./fabric/stack.js";
 import { ThreadEngine, type ThreadEventInput, type HandleEventResult } from "./fabric/thread/engine.js";
+import type { ThreadAcquireResult, ThreadRebindResult } from "./fabric/thread/engine.js";
 import type { ThreadCloseReason, ThreadStatusSlotWire } from "./web-hub/protocol/thread.js";
-import { THREAD_CAP } from "./web-hub/protocol/version.js";
+import { THREAD_CAP, THREAD_REBIND_CAP } from "./web-hub/protocol/version.js";
 import type { HubConnection } from "./web-hub/agent/connection.js";
+import { newAdminRid } from "./web-hub/agent/connection.js";
 import type { ThreadPromptPort } from "./web-hub/agent/commands.js";
 import { thrHandbackWithRetry } from "./tools/thread-child-tool.js";
 import { buildStackXs, type StackXs, type StackXsInput } from "./fabric/xs/stack.js";
@@ -513,6 +515,11 @@ export interface ThreadStackSurface extends ThreadPromptPort {
     | { ok: true; subId: string; created: boolean; h: string; label: string }
     | { ok: false; reason: string; detail?: string };
   unsubscribe(subId: string): { ok: true } | { ok: false; reason: string };
+  /** rebind-plan r3 §3.2（agent 包）：acquire 往返——origin 解析后委托 engine（isOpen 快路径
+   *  与 force 语义在 engine 内）；工具与 /thread 共用此口。 */
+  acquire(input: { h: string; origin: boolean; force?: boolean }): Promise<ThreadAcquireResult>;
+  /** rebind-plan r3 §3.2：rebind 往返——fromRev 由 engine 按 §4.7 注入，调用方永远不传。 */
+  rebind(input: { h: string; to: string; origin: boolean }): Promise<ThreadRebindResult>;
   /** 子会话闭包工具的宿主操作面（runtime-adapter 注入用）。 */
   childOps(runId: string, label: string): ThreadChildHostOps;
   /** runtime-adapter 的 spawn 事实记录（§5.1 direct 判定源）。 */
@@ -1074,6 +1081,11 @@ export function buildSessionStack(
       const c = threadInput?.conn();
       return c !== undefined && c.status().state === "live" && c.caps.includes(THREAD_CAP);
     };
+    /** rebind-plan r3 §4.2/§4.8：双端 `thr.rebind.v1` 判定（与 liveHubCapable 同法，每次调用采样）。 */
+    const liveHubRebindCapable = (): boolean => {
+      const c = threadInput?.conn();
+      return c !== undefined && c.status().state === "live" && c.caps.includes(THREAD_REBIND_CAP);
+    };
     /** P4 §5.5 #5/§6.7：`subagent:thread` display 行（只展示、不进上下文、不唤醒）——engine 的
      *  display 回调与 REVOKED 分支（显式 handback / 自动回流）共用一个发送口。 */
     const threadDisplay = (line: string): void => {
@@ -1165,6 +1177,27 @@ export function buildSessionStack(
         /* §6.5 晚到结果/异常审计汇 — P3 只保留 display 升级语义（engine 内部已记账）；
            送 run log 的接线留给 P4（遥测面不在本包范围）。 */
       },
+      // rebind-plan r3 §3.2/§4.7（agent 包）：两个 thr_req 往返。cap 预检在 engine 内
+      //（A9 零帧）；这里只负责帧构造（rid/sessionId）与 5s 有界 request（connection 强制）。
+      rebind: {
+        hubRebindCapable: () => liveHubRebindCapable(),
+        acquire: (h) => {
+          const c = threadInput?.conn();
+          if (c === undefined) return Promise.reject(new Error("E_NO_CAP: no hub link"));
+          return c.request(
+            { t: "thr_req", rid: newAdminRid(), op: "acquire", h, sessionId: currentSessionId(ctx) },
+            THREAD_REBIND_CAP,
+          );
+        },
+        rebind: (h, to, fromRev) => {
+          const c = threadInput?.conn();
+          if (c === undefined) return Promise.reject(new Error("E_NO_CAP: no hub link"));
+          return c.request(
+            { t: "thr_req", rid: newAdminRid(), op: "rebind", h, sessionId: currentSessionId(ctx), to, fromRev },
+            THREAD_REBIND_CAP,
+          );
+        },
+      },
     });
     const activeSubs = (): SubRow[] => asRows(engine.inspectSubscriptions()).filter((s) => s.state === "active");
     const resolveRun = (run: string): { runId: string; label: string } | undefined => {
@@ -1191,7 +1224,7 @@ export function buildSessionStack(
     const surface: ThreadStackSurface = {
       featureOn: true,
       handleEvent(input: ThreadEventInput): HandleEventResult {
-        engine.noteThread(input.h, input.label);
+        engine.noteThread(input.h, input.label, input.rev);
         const result = engine.handleEvent(input);
         if (result.action === "lane") {
           for (const s of activeSubs().filter((s) => s.h === input.h)) lastEventBySub.set(s.subId, input.eventId);
@@ -1311,6 +1344,34 @@ export function buildSessionStack(
       },
       unsubscribe(subId) {
         return engine.unsubscribe(subId);
+      },
+      async acquire(input) {
+        let h = input.h;
+        if (input.origin) {
+          const o = resolveOrigin();
+          if (!o.ok)
+            return {
+              ok: false,
+              code: o.reason === "no_origin" ? "E_NO_ORIGIN" : "E_AMBIGUOUS_ORIGIN",
+              effect: "none" as const,
+            };
+          h = o.h;
+        }
+        return engine.acquireThread(h, input.force === undefined ? {} : { force: input.force });
+      },
+      async rebind(input) {
+        let h = input.h;
+        if (input.origin) {
+          const o = resolveOrigin();
+          if (!o.ok)
+            return {
+              ok: false,
+              code: o.reason === "no_origin" ? "E_NO_ORIGIN" : "E_AMBIGUOUS_ORIGIN",
+              effect: "none" as const,
+            };
+          h = o.h;
+        }
+        return engine.rebindThread(h, input.to);
       },
       noteRunSpec(runId, facts) {
         runSpecFacts.set(runId, facts);
