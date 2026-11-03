@@ -277,6 +277,17 @@ describe("retention ledger (§8.1 step 4 / §8.2 restart)", () => {
     await state.load();
     await state.adoptInstall({ appId: "cli_test", ownerOpenId: OWNER });
     state.tenant.pin("tenant");
+    // The seed records carry bindingRev 1 for grp:c1:t1 — the binding must EXIST at rev 1 so
+    // the §4.10 retention-expiry generation recheck (rebind-plan r3 P1) sees an unmoved
+    // generation (the first store write lands at rev 1).
+    state.bindings.set("grp:c1:t1", {
+      chatId: "c1",
+      chatType: "group",
+      threadId: "t1",
+      sessionId: "session-1",
+      offline: null,
+    });
+    await state.commit();
     const notices: string[] = [];
     const receiptCtl = { denied: false, addOk: true };
     const threads = createFeishuThreads({

@@ -16,6 +16,12 @@
  *     capability-denied ⇒ back to text) and Typing cleanup;
  *   - the §6.8 Worker replies (`thr_req{op:"post"}`): per-thread rate limits, `postId` dedup,
  *     `<会话名> · @label（run_id）` header, thread-topic targeting;
+ *   - the rebind-plan r3 ops (P1): `thr_req{op:"rebind"}` (holder-only ownership + fromRev CAS +
+ *     §4.6 selector ladder + per-h 3/min+20/h rate limit + dedupKey replay, writing through the
+ *     shared `bindings-transfer` op with `notifyLifecycle:true`) and `thr_req{op:"acquire"}`
+ *     (`{owned:true,label,rev}` iff the caller still holds the binding) — both self-gate on
+ *     `feishuBot.threads.rebind`; a rebind-off hub owes E_THR_STATE (§4.1); the §4.10
+ *     retention-expiry generation recheck routes to `requests.closedByRebind`;
  *   - the `/cur` projection of the agent-side `status.threads` slot (cached per agentKey;
  *     a hub without `thr.v1` never populates it — §7.1).
  *
@@ -39,13 +45,22 @@ import {
   type ThreadStatusSlotWire,
   type ThreadWindowParams,
 } from "../../protocol/thread.js";
-import type { ThrClosedFrame, ThrReqFrame, ThrResFrame } from "../../protocol/thread.js";
+import type {
+  ThrAcquireReqFrame,
+  ThrClosedFrame,
+  ThrRebindReqFrame,
+  ThrReqFrame,
+  ThrResFrame,
+} from "../../protocol/thread.js";
 import {
   FEISHU_RECEIVED_BODY_MAX_BYTES,
   sanitizeHeaderField,
   type FeishuThreadsHubConfig,
 } from "../../protocol/feishu.js";
 import type { FeishuClock } from "./http.js";
+import type { BindingTransfer } from "./bindings-transfer.js";
+import { selectSession } from "./session-selector.js";
+import type { FeishuSessionView } from "./sessions.js";
 import type { FeishuRequestRecord, FeishuState, FeishuBinding, RequestState } from "./state.js";
 import type { FeishuInstallation } from "./admission.js";
 import type { EnqueueNoticeInput, EnqueueResult, OutboxTarget } from "./outbox.js";
@@ -136,6 +151,14 @@ export function threadFinishGuarded(state: RequestState, code: string | undefine
 export const THREAD_RECEIPT_EMOJI = "DONE";
 /** §7.3 postId dedup window (10 minutes, in-memory). */
 export const THREAD_POST_DEDUP_MS = 10 * 60_000;
+/** rebind-plan r3 §4.5 (D8): per-thread rebind rate limit — hub CONSTANTS, deliberately NOT in
+ *  `FeishuThreadsHubConfig` (its whitelist rebuild would give one key two generations of
+ *  semantics). Successes AND post-validation failures both count; the bucket Map is LRU-64 and
+ *  fully independent from the `post` `replyPerThread*` buckets. */
+export const THREAD_REBIND_RATE_PER_MIN = 3;
+export const THREAD_REBIND_RATE_PER_HOUR = 20;
+/** §4.4 request dedup: `rebindSeen` capacity (LRU). */
+export const THREAD_REBIND_SEEN_MAX = 128;
 
 /** All currently retained `accepted{thr:routed}` records (payload still present). */
 export function threadRetainedRequests(state: FeishuState): FeishuRequestRecord[] {
@@ -206,6 +229,17 @@ export interface FeishuThreadsDeps {
   agentForSession(sessionId: string): string | undefined;
   /** §7.3: the given agent's CURRENT live session (thr_req sessionId recheck). */
   sessionOf(agentKey: string): string | undefined;
+  /** rebind-plan r3 §4.6 (P1): the live session views the `to` selector ladder resolves over.
+   *  Absent ⇒ rebind answers E_THR_STATE even with `config.rebind` on (miswired host). */
+  sessionViews?(): readonly FeishuSessionView[];
+  /** §4.6: hub-held cross-session alias lookup (xs relay store; absent when xs/alias is off). */
+  aliasOf?(sessionId: string): string | undefined;
+  /** §4.4 D1: the shared binding write op. A GETTER because the transfer is built after this
+   *  module (it takes `threads` for the `notifyLifecycle:true` path) — late-bound by the host. */
+  transfer?(): BindingTransfer | undefined;
+  /** §4.10 (P1): retention-expiry generation recheck routes to `requests.closedByRebind`
+   *  (late-bound — requests is built after this module). */
+  closedByRebind?(id: string): void;
   /** service notice plumbing (receipts / posts). */
   notice(target: OutboxTarget, text: string, lane: string): Promise<void>;
   enqueueNotice(input: EnqueueNoticeInput): Promise<EnqueueResult>;
@@ -247,6 +281,11 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
   const threadsCapSeen = new Set<string>();
   const postSeen = new Map<string, number>();
   const postBuckets = new Map<string, { min: number[]; hour: number[] }>();
+  /** §4.5: per-h rebind buckets (3/min + 20/h) — a SEPARATE Map from postBuckets. */
+  const rebindBuckets = new Map<string, { min: number[]; hour: number[] }>();
+  /** §4.4 rebind request dedup: dedupKey = `h\0sessionId\0to\0fromRev`; `pending` ⇒ a duplicate
+   *  gets E_THR_PENDING/unknown, `done` replays the stored receipt (P2 recovery, §4.9). */
+  const rebindSeen = new Map<string, { state: "pending" | "done"; res?: ThrResFrame }>();
   /** rebind-plan r3 §4.4 R7 / D2: exactly-once close notification per `(key, before.rev)` — the
    *  `/use` inbound durable hook and the shared transfer op (`notifyLifecycle:true`, rebind
    *  package) may BOTH fire for the same write; the second hit is a no-op. The store-wide rev
@@ -275,6 +314,14 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
         retainTimers.delete(record.id);
         const current = deps.state.requests.get(record.id);
         if (current === undefined || current.state !== "accepted" || current.code !== "thr:routed") return;
+        // rebind-plan r3 §4.10 (P1): a binding-generation mismatch at expiry means the thread
+        // was rebound out from under this retained request — finalize via closedByRebind
+        // (terminal `replied{thread-closed}`), NEVER `thread-routed`.
+        const binding = deps.state.bindings.get(current.bindingKey);
+        if (binding?.rev !== current.bindingRev || binding.sessionId !== current.sessionId) {
+          deps.closedByRebind?.(current.id);
+          return;
+        }
         if (deps.state.requests.transition(record.id, "replied", { code: "thread-routed" }).ok)
           deps.run(async () => {
             await deps.state.commit();
@@ -481,6 +528,137 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
     return { ok: true, data: { queued: true } };
   }
 
+  // --------------------------------------------------------------- thr_req{op:"rebind"/"acquire"} (rebind-plan r3 §4.4–§4.6, P1)
+
+  function rebindRateLimited(h: string): boolean {
+    const now = clock.now();
+    const bucket = rebindBuckets.get(h) ?? { min: [], hour: [] };
+    bucket.min = bucket.min.filter((t) => now - t < 60_000);
+    bucket.hour = bucket.hour.filter((t) => now - t < 3_600_000);
+    const limited =
+      bucket.min.length >= THREAD_REBIND_RATE_PER_MIN || bucket.hour.length >= THREAD_REBIND_RATE_PER_HOUR;
+    if (!limited) {
+      bucket.min.push(now);
+      bucket.hour.push(now);
+    }
+    if (rebindBuckets.size >= 64 && !rebindBuckets.has(h)) rebindBuckets.delete(rebindBuckets.keys().next().value!);
+    rebindBuckets.delete(h); // LRU touch: re-insert so the existing key moves to the end (§4.5)
+    rebindBuckets.set(h, bucket);
+    return limited;
+  }
+
+  /** §5.4/§4.5: the thread-bearing binding behind `h` (same handle mint as `post`). */
+  function bindingForHandle(secret: string, h: string): FeishuBinding | undefined {
+    const binding = deps.state.bindings.list().find((b) => feishuThreadHandle(secret, b.key) === h);
+    return binding?.threadId === undefined ? undefined : binding;
+  }
+
+  /** §3.2 step 3 / §4.5: ownership (holder-only) → freshness CAS → target resolution → rate
+   *  limit → `transfer(..., notifyLifecycle:true)`. The dedup table is consulted FIRST (a P2
+   *  retry must replay the original receipt, not trip E_THR_NO_OWNER on the moved binding). */
+  async function rebind(agentKey: string, frame: ThrRebindReqFrame, reply: (res: ThrResFrame) => void): Promise<void> {
+    const fail = (code: string, effect: "none" | "unknown"): void => {
+      reply({ t: "thr_res", rid: frame.rid, ok: false, code, effect });
+    };
+    // §4.1: a rebind-off hub does not recognize the op.
+    if (deps.config.rebind !== true) return fail("E_THR_STATE", "none");
+    const dedupKey = `${frame.h}\u0000${frame.sessionId}\u0000${frame.to}\u0000${String(frame.fromRev)}`;
+    const seen = rebindSeen.get(dedupKey);
+    if (seen !== undefined) {
+      // LRU touch.
+      rebindSeen.delete(dedupKey);
+      rebindSeen.set(dedupKey, seen);
+      if (seen.state === "done" && seen.res !== undefined) {
+        // §4.9 P2: replay the ORIGINAL receipt — re-stamped with the CURRENT rid so a retry
+        // that minted a fresh rid still correlates (the dedup key deliberately excludes rid).
+        reply({ ...seen.res, rid: frame.rid });
+        return;
+      }
+      return fail("E_THR_PENDING", "unknown");
+    }
+    if (rebindSeen.size >= THREAD_REBIND_SEEN_MAX) rebindSeen.delete(rebindSeen.keys().next().value!);
+    const entry: { state: "pending" | "done"; res?: ThrResFrame } = { state: "pending" };
+    rebindSeen.set(dedupKey, entry);
+    const finish = (res: ThrResFrame): void => {
+      entry.state = "done";
+      entry.res = res;
+      reply(res);
+    };
+    const secret = deps.installation()?.installSecret;
+    const binding = secret === undefined ? undefined : bindingForHandle(secret, frame.h);
+    if (secret === undefined)
+      return finish({ t: "thr_res", rid: frame.rid, ok: false, code: "E_THR_STATE", effect: "none" });
+    if (binding === undefined)
+      return finish({ t: "thr_res", rid: frame.rid, ok: false, code: "E_THR_NOT_BOUND", effect: "none" });
+    // §4.5 #2: only the CURRENT holder may transfer this binding.
+    if (binding.sessionId !== frame.sessionId)
+      return finish({ t: "thr_res", rid: frame.rid, ok: false, code: "E_THR_NO_OWNER", effect: "none" });
+    // §4.5 #3 / §4.4 R3: the caller's trusted observation must still be fresh.
+    if (frame.fromRev !== binding.rev)
+      return finish({ t: "thr_res", rid: frame.rid, ok: false, code: "E_THR_STALE", effect: "none" });
+    const views = deps.sessionViews?.();
+    const transfer = deps.transfer?.();
+    if (views === undefined || transfer === undefined)
+      return finish({ t: "thr_res", rid: frame.rid, ok: false, code: "E_THR_STATE", effect: "none" });
+    // §4.5 #4 / §4.6: the `to` selector resolves through the ONE ladder.
+    const target = selectSession(frame.to, views, (sid) => deps.aliasOf?.(sid));
+    if (!target.ok) return finish({ t: "thr_res", rid: frame.rid, ok: false, code: target.code, effect: "none" });
+    // §4.5 限速 (D8/D10): per-h 3/min + 20/h, AFTER validation — every attempt that reaches the
+    // write op counts, success or failure. A rate-limited request never executed, so it is NOT
+    // cached as `done` (a post-window retry with the same key must be free to run).
+    if (rebindRateLimited(frame.h)) {
+      rebindSeen.delete(dedupKey);
+      return fail("E_THR_RATE", "none");
+    }
+    const result = await transfer.transfer({
+      key: binding.key,
+      target: { sessionId: target.sessionId, label: target.label, agentKey: target.agentKey },
+      expect: { sessionId: frame.sessionId, rev: frame.fromRev },
+      reason: "rebound",
+      notifyLifecycle: true,
+    });
+    if (!result.ok)
+      return finish({ t: "thr_res", rid: frame.rid, ok: false, code: result.code, effect: result.effect });
+    finish({
+      t: "thr_res",
+      rid: frame.rid,
+      ok: true,
+      data: {
+        rebound: true,
+        h: frame.h,
+        sessionId: result.binding.sessionId ?? target.sessionId,
+        rev: result.binding.rev,
+        changed: result.changed,
+        label: sanitizeHeaderField(result.binding.label ?? target.label),
+      },
+    });
+  }
+
+  /** §3.2 step 7 / §4.7: the ONLY trusted directory (re)entry — `{owned:true, label, rev}` iff
+   *  the caller's CURRENT session holds the binding; anything else (missing binding included)
+   *  is E_THR_NO_OWNER, so a former holder can never reopen its closed directory entry. */
+  function acquire(frame: ThrAcquireReqFrame, reply: (res: ThrResFrame) => void): void {
+    const fail = (code: string, effect: "none" | "unknown"): void => {
+      reply({ t: "thr_res", rid: frame.rid, ok: false, code, effect });
+    };
+    if (deps.config.rebind !== true) return fail("E_THR_STATE", "none");
+    const secret = deps.installation()?.installSecret;
+    if (secret === undefined) return fail("E_THR_STATE", "none");
+    const binding = bindingForHandle(secret, frame.h);
+    if (binding === undefined || binding.sessionId !== frame.sessionId) return fail("E_THR_NO_OWNER", "none");
+    reply({
+      t: "thr_res",
+      rid: frame.rid,
+      ok: true,
+      data: {
+        owned: true,
+        h: frame.h,
+        label: sanitizeHeaderField(binding.label ?? deps.label(frame.sessionId)),
+        rev: binding.rev,
+      },
+    });
+  }
+
   // --------------------------------------------------------------- agent frame entry (§7.3)
 
   /** The agent-server interception target. Session/install rechecks happen here (§7.3 note);
@@ -519,10 +697,18 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
       );
       return;
     }
+    // rebind-plan r3 §3.1/§4.4 (P1): the two rebind ops land here via the service op routing
+    // (§6 实施要点 2). Both self-gate on `config.rebind` — a rebind-off hub answers E_THR_STATE.
+    if (frame.op === "rebind") {
+      await rebind(agentKey, frame, reply);
+      return;
+    }
+    if (frame.op === "acquire") {
+      acquire(frame, reply);
+      return;
+    }
     // §8.3 handback is routed by the service to requests.handback (state-machine ownership), so
-    // it never lands here. rebind/acquire DO land here (service op routing, rebind-plan r3 §6
-    // 实施要点 2) — P0b ships no business logic for them, so they get the same E_THR_STATE a
-    // rebind-off hub owes (§4.1); the rebind packages replace this fallthrough with real branches.
+    // it never lands here.
     reply({
       t: "thr_res",
       rid: frame.rid,
@@ -572,6 +758,8 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
       statusThreads.clear();
       postSeen.clear();
       postBuckets.clear();
+      rebindBuckets.clear();
+      rebindSeen.clear();
     },
     get retainedCount(): number {
       return retainTimers.size;

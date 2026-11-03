@@ -101,6 +101,28 @@
   prompt（未定因，疑似机器级共享 seam）；S7 因此拆成 S7a/S7b/S7c 三个单 hub 测试。
 - 真机（token/完成时长）对比是 live-acceptance 项，不在 CI E2E 内。
 
+## 话题换绑（rebind，rebind-plan r3）
+
+> 设计全文：`docs/dev/fabric-thread/rebind-plan.md`（r3）。分期：P0a/P0b = 地基（共享写操作
+> `bindings-transfer.ts`、wire/cap/设置门、off golden，3ef29397）；P1 = hub 侧业务逻辑（本行）；
+> P2 = agent 侧工具/目录（未做）。
+
+P1 落点与不变式：
+
+- `thread-hub.ts` 的 `thr_req{op:"rebind"/"acquire"}` 两支自门控于 `feishuBot.threads.rebind`
+  （off ⇒ `E_THR_STATE`，逐字节不变由 `thread-rebind-off-golden.json` 钉住）。rebind 顺序：
+  dedup（`h\0sessionId\0to\0fromRev`，LRU 128；pending⇒`E_THR_PENDING`，done⇒回放原回执并
+  重盖当前 rid）→ 权益（`binding.sessionId===frame.sessionId`）→ CAS（`fromRev===binding.rev`）→
+  §4.6 阶梯（`session-selector.ts`，唯一解析口径）→ 限速（按 h 3/min+20/h，独立桶 LRU64，
+  仅过校验的尝试计数；被限流的尝试**不**入 done 缓存）→ `transfer(notifyLifecycle:true)`。
+  acquire 是只读探针： holder 回 `{owned:true,label,rev}`，其余一律 `E_THR_NO_OWNER`，不限速不去重。
+- `requests.closedByRebind(id)`（§4.10）：代际失配的合法终结链 `dispatching/uncertain→accepted→
+replied{thread-closed}`（`accepted{thr:routed}` 从第 3 步进），detachRun 先行、不 emit、
+  commit 失败走既有 park 重试。三个调用点：dispatch 的 routed 分支复核、lateRouted 复核、
+  armRetention 到期复核（经 service.ts 的迟绑定 seam）。
+- 验收：`tests/web-hub/hub/feishu/thread-rebind.test.ts`（A1/A2/A4/A5/A6/A7/A7b/A8/A11c/A14/A15/A19
+  - off 门）、`session-selector.test.ts`、`thread-requests.test.ts` 的 A11/A11b。
+
 ## 残余风险 / 第二期入口
 
 - 飞书 `@label` 显式寻址、`run:` Thread、休眠订阅、自动订阅策略（arch §11.2）。

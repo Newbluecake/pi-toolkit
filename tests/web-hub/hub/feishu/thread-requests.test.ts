@@ -216,6 +216,74 @@ describe("§8.1 routed branch", () => {
   });
 });
 
+describe("§4.10 generation recheck (rebind-plan r3, P1): A11/A11b", () => {
+  const REBOUND = {
+    chatId: "chat",
+    chatType: "group" as const,
+    threadId: "t1",
+    sessionId: "session-2",
+    offline: null,
+  };
+  it("A11: a routed result arriving after a rebind finalizes via the LEGAL dispatching→accepted→replied chain", async () => {
+    const r = await threadRig();
+    const id = await r.receive("m1", "hello");
+    // The rebind lands BETWEEN the forward and the routed result.
+    r.request.mockImplementationOnce(async (frame: CmdFrame) => {
+      r.state.bindings.set("grp:chat:t1", REBOUND);
+      return routedResult(frame.id);
+    });
+    const transitionLog: Array<{ to: unknown; ok: boolean }> = [];
+    const rawTransition = r.state.requests.transition.bind(r.state.requests);
+    const spy = vi
+      .spyOn(r.state.requests, "transition")
+      .mockImplementation((...args: Parameters<typeof rawTransition>) => {
+        const result = rawTransition(...args);
+        transitionLog.push({ to: args[1], ok: result.ok });
+        return result;
+      });
+    const commitSpy = vi.spyOn(r.state, "commit");
+    await r.requests.flushChat("chat");
+    spy.mockRestore();
+    const record = r.state.requests.get(id)!;
+    expect(record).toMatchObject({ state: "replied", code: "thread-closed" });
+    expect(record.payload).toBeUndefined(); // terminal drops the payload
+    // The full chain was legal — dispatching→accepted (silent waypoint) →replied, every step ok.
+    expect(transitionLog).toEqual([
+      { to: "dispatching", ok: true },
+      { to: "accepted", ok: true },
+      { to: "replied", ok: true },
+    ]);
+    // No routed/accepted event ever emitted, no retention armed; detachRun ran FIRST.
+    expect(r.events.find((e) => e.type === "routed")).toBeUndefined();
+    expect(r.events.find((e) => e.type === "accepted")).toBeUndefined();
+    expect(r.detachRun).toHaveBeenCalledTimes(1);
+    expect(r.order[0]).toBe(`detach:${id}`);
+    // Exactly two commits over the flush: the dispatching barrier + the closedByRebind barrier.
+    expect(commitSpy).toHaveBeenCalledTimes(2);
+  });
+  it("A11: a matched generation still takes the routed branch (control)", async () => {
+    const r = await threadRig();
+    const id = await r.receive("m1", "hello");
+    await r.dispatchRouted(id);
+    expect(r.state.requests.get(id)).toMatchObject({ state: "accepted", code: "thr:routed" });
+    expect(r.events.find((e) => e.type === "routed")).toBeDefined();
+  });
+  it("A11b: uncertain + a generation-mismatched late routed ⇒ closedByRebind (uncertain→accepted→replied, no emit)", async () => {
+    const r = await threadRig();
+    const id = await r.receive("m1", "hello");
+    r.state.requests.transition(id, "dispatching");
+    r.state.requests.transition(id, "uncertain", { code: "router-threw" });
+    await r.state.commit();
+    // The rebind lands while the request sits uncertain.
+    r.state.bindings.set("grp:chat:t1", REBOUND);
+    await r.state.commit();
+    await r.requests.lateRouted(id, ROUTED_DATA, "agent-1");
+    expect(r.state.requests.get(id)).toMatchObject({ state: "replied", code: "thread-closed" });
+    expect(r.events.find((e) => e.type === "routed")).toBeUndefined();
+    expect(r.detachRun).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("§8.3 handback (S4b–S4d)", () => {
   const note = { note: "超范围", by: RUN, sessionId: "session-1", ctx: { installGen: 1, tenantKey: "tenant" } };
   it("S4b① first delivery then an identical retry ⇒ same requestId, dup, ONE successor", async () => {

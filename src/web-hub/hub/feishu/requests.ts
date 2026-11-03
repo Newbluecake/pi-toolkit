@@ -309,6 +309,16 @@ export function createFeishuRequests(deps: FeishuRequestsDeps) {
         const routed =
           deps.threads === undefined ? undefined : deps.threads.routedResultOk(outcome.result.data, outcome.agentKey);
         if (routed !== undefined) {
+          // rebind-plan r3 §4.10 段 C (P1): the binding generation may have moved BETWEEN the
+          // forward and this result (a rebind landed in between) — a routed outcome must never
+          // resurrect retention for a thread the session no longer holds. Mismatch ⇒ the legal
+          // finalization chain via closedByRebind instead of routedOutcome.
+          const fresh = deps.state.requests.get(id);
+          const binding = fresh === undefined ? undefined : deps.state.bindings.get(fresh.bindingKey);
+          if (fresh === undefined || binding?.rev !== fresh.bindingRev || binding.sessionId !== fresh.sessionId) {
+            await closedByRebind(id);
+            return;
+          }
           await routedOutcome(id, routed, outcome.agentKey, queryOnly);
           return;
         }
@@ -370,6 +380,36 @@ export function createFeishuRequests(deps: FeishuRequestsDeps) {
       deps.emit({ type: "routed", request: current, runs: routed.runs, retained, recovered });
     });
   }
+  /** rebind-plan r3 §4.10 段 C (P1): the legal finalization chain for a request whose binding
+   *  generation moved out from under it (a rebind landed while it was `dispatching`/`uncertain`,
+   *  or while it sat retained as `accepted{thr:routed}`). ALL synchronous, one tick:
+   *    1. `detachRun` FIRST (same order as routedOutcome — no tracker spans the commit);
+   *    2. dispatching/uncertain → `accepted` (a SILENT waypoint — never emitted; if that illegal
+   *       transition is ever refused, `rejected` is legal from both states and is the fallback);
+   *    3. → `replied{thread-closed}` (accepted→replied and uncertain→replied are both legal);
+   *    4. the persistence barrier via the shared `committed()` — a commit failure parks and
+   *       retries (R5: never swallowed); NOTHING is emitted and no retention is armed either way.
+   *  `dispatching` → `replied` directly is an ILLEGAL migration (state.ts REQUEST_TRANSITIONS)
+   *  and is never attempted. */
+  async function closedByRebind(id: string): Promise<void> {
+    if (disposed) return;
+    const record = deps.state.requests.get(id);
+    if (record === undefined) return;
+    const retained = record.state === "accepted" && record.code === "thr:routed";
+    if (record.state !== "dispatching" && record.state !== "uncertain" && !retained) return;
+    deps.detachRun?.(id);
+    if (!retained) {
+      if (!deps.state.requests.transition(id, "accepted", { code: "thr:routed" }).ok) {
+        // Defensive fallback: `rejected` is legal from both dispatching and uncertain and is
+        // already terminal — commit it directly (step 3 would be illegal FROM rejected).
+        if (!deps.state.requests.transition(id, "rejected", { code: "thread-closed" }).ok) return;
+        await committed(id, "closed-by-rebind", async () => {});
+        return;
+      }
+    }
+    if (!deps.state.requests.transition(id, "replied", { code: "thread-closed" }).ok) return;
+    await committed(id, "closed-by-rebind", async () => {});
+  }
   /** §8.1 晚到 cmd_late: `uncertain` + a routed late result ⇒ the same routed branch; anything
    *  else stays untouched (the existing resend card already covers it). */
   async function lateRouted(id: string, data: unknown, agentKey: string): Promise<void> {
@@ -380,6 +420,13 @@ export function createFeishuRequests(deps: FeishuRequestsDeps) {
     if (routed === undefined) return;
     inflight.add(id);
     try {
+      // rebind-plan r3 §4.10 (P1): a generation-mismatched late routed goes to closedByRebind —
+      // it must not resurrect retention for a rebound thread.
+      const binding = deps.state.bindings.get(current.bindingKey);
+      if (binding?.rev !== current.bindingRev || binding.sessionId !== current.sessionId) {
+        await closedByRebind(id);
+        return;
+      }
       await routedOutcome(id, routed, agentKey, true);
     } finally {
       inflight.delete(id);
@@ -660,6 +707,9 @@ export function createFeishuRequests(deps: FeishuRequestsDeps) {
     release,
     /** §8.1 晚到 cmd_late routed 恢复（service 在 bus cmd_late 事件上调用）。 */
     lateRouted,
+    /** rebind-plan r3 §4.10 (P1): legal finalization for a generation-mismatched in-flight or
+     *  retained request — `replied{thread-closed}`, no emit, no retention, commit park/retry. */
+    closedByRebind,
     /** §8.3 专用接口：确定性后继 + 持久化屏障；与 resend() 同级的复核链。 */
     handback,
     /** Also callable by F8 when the shared persistence health signal heals. */

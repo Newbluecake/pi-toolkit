@@ -40,7 +40,7 @@ import {
 } from "./admission.js";
 import { createFeishuRequests, feishuBatchIdentity, feishuDigest, type FeishuRequestEvent } from "./requests.js";
 import { createFeishuRouter, type FeishuRouterIntent } from "./router.js";
-import { createBindingTransfer } from "./bindings-transfer.js";
+import { createBindingTransfer, type BindingTransfer } from "./bindings-transfer.js";
 import { createFeishuInbound, type FeishuMessage, type FeishuInboundIntent } from "./inbound.js";
 import { createFeishuOutbox, type OutboxTarget, type OutboxMessage, type SettledGroup } from "./outbox.js";
 import { renderReply, renderNotice, neutralizeMarkdown } from "./render.js";
@@ -809,6 +809,11 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         }
       },
     });
+    // rebind-plan r3 §4.5/§4.10 (P1): late-bound seams for the thread module — the shared
+    // binding transfer is built AFTER threads (it takes `threads` for the notifyLifecycle:true
+    // path) and requests after both (its closedByRebind serves the retention-expiry recheck).
+    let bindingTransferRef: BindingTransfer | undefined;
+    let closedByRebindRef: ((id: string) => void) | undefined;
     // fabric-thread §8: exists iff `feishuBot.threads` exists — retention, receipts, posts,
     // status cache, thr_closed push. Absent ⇒ every surface below is byte-identical (G2a).
     const threads =
@@ -822,6 +827,12 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
             transport: () => threadTransport,
             agentForSession: (sid) => deps.sessions.views().find((v) => v.sessionId === sid && v.live)?.agentKey,
             sessionOf: (key) => deps.sessions.views().find((v) => v.agentKey === key && v.live)?.sessionId,
+            // rebind-plan r3 §4.6 (P1): the rebind `to` ladder resolves over the live session
+            // views + the hub-held alias store; inert unless `threads.rebind` is on (I9).
+            sessionViews: () => deps.sessions.views(),
+            aliasOf: (sid) => deps.sessions.alias?.(sid),
+            transfer: () => bindingTransferRef,
+            closedByRebind: (id) => closedByRebindRef?.(id),
             notice: (target, text, lane) => notice(target, text, lane),
             enqueueNotice: (input) => outbox.enqueueNotice(input),
             addReceiptReaction: async (messageId) => {
@@ -861,6 +872,11 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       ...(threads === undefined ? {} : { threads }),
       ...(threads === undefined ? {} : { detachRun: (id: string) => runs.detach(id) }),
     });
+    closedByRebindRef = (id) => {
+      void requests.closedByRebind(id).catch(() => {
+        /* state ops are guarded; a rebind finalization must never take the runtime down */
+      });
+    };
     const dialogs = createFeishuDialogs({
       state,
       admission,
@@ -932,6 +948,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       ...(scheduleConfirm === undefined ? {} : { scheduleConfirm }),
       log: (event, reason) => log(event, reason),
     });
+    bindingTransferRef = bindingTransfer;
     const router = createFeishuRouter({
       state,
       sessions,
@@ -1938,9 +1955,8 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
           return;
         }
         if (frame.op === "post" || frame.op === "rebind" || frame.op === "acquire") {
-          // rebind-plan r3 §6 实施要点 2 (P0b): rebind/acquire route to the thread module like
-          // post. P0b ships no business logic for them — `thrReq` answers `E_THR_STATE`
-          // (rebind off ⇔ hub 不认这两个 op，§4.1); the rebind packages add the real branches.
+          // rebind-plan r3 §6 实施要点 2: rebind/acquire route to the thread module like post.
+          // thrReq rebind/acquire self-gate on config.rebind (E_THR_STATE when off, §4.1).
           await threads.thrReq(agentKey, frame, write);
           return;
         }
