@@ -54,7 +54,7 @@ import TxDate from "./TxDate.vue";
 import TxDivider from "./TxDivider.vue";
 import TxHiddenGap from "./TxHiddenGap.vue";
 import TxUser from "./TxUser.vue";
-import { buildTxEntries } from "./entries.js";
+import { buildTxEntries, type TxEntry } from "./entries.js";
 import { CMD_SEEN_GRACE_MS, cmdRunningOf, type CmdCardView } from "../../logic/cmdRecord.js";
 import { useCmdHistory } from "../../composables/useCmdHistory.js";
 
@@ -81,7 +81,8 @@ function diagScroll(rec: Record<string, unknown>): void {
 
 const props = withDefaults(defineProps<TranscriptProps>(), { anchorId: "transcript" });
 const emit = defineEmits<TranscriptEmits>();
-const { t } = useI18n();
+const i18n = useI18n();
+const { t } = i18n;
 
 // ---------------------------------------------------------------------------
 // command history (web-hub-cmd-history plan §4.7): the per-agentKey shared store feeds
@@ -222,6 +223,33 @@ const windowedEntries = computed(() => build.value.entries.slice(view.value.star
 
 /** Join byte for the `data-anchor-ids` attribute (never appears in an entry id/messageKey). */
 const ANCHOR_JOIN = "\u001f";
+
+/**
+ * v-memo cache key for one windowed entry (2026-11-03 全量重渲染修复 — the other half of the
+ * detail-page freeze: every runTx frame rebuilt `build` and re-rendered ALL ~300 mounted
+ * entries, ToolCards included). `build.renderKeys` is the per-entry content digest prepared
+ * for exactly this (`entries.ts` TxBuild.renderKeys: history items key on their immutable
+ * item id; assistant entries fold in their toolCall live/result states; command cards carry
+ * the foldSig). A frame that leaves an entry's digest unchanged now skips its whole subtree.
+ *
+ * Key shape: `[entry.type, renderKey, i18n.lang]` — the locale is part of the memo because
+ * branch labels (`t("transcript.compacted")` etc.) are evaluated in THIS template, so a
+ * runtime language switch must bust every entry's cache. `entry.type` is cheap insurance
+ * against a key collision across branches. The entry's own subtree components keep their own
+ * reactivity (their internal `t()` calls re-render them regardless) — the memo only gates
+ * PROP-driven re-renders from this list.
+ *
+ * The streaming tail entry is exempt: its renderKey is the constant `"streaming"`
+ * (entries.ts — it has no history counterpart), so it gets a fresh per-render token and
+ * always re-renders, exactly its pre-memo behavior.
+ *
+ * `data-anchor-ids` needs no seat in the memo: anchor ids are per-ITEM identity
+ * (`anchorIdsOf`), stable across rebuilds for a surviving entry.
+ */
+function memoKeyOf(entryIndex: number, entry: TxEntry): unknown[] {
+  if (entry.key === "streaming") return [entry.type, entry.key, {}]; // always miss — live tail
+  return [entry.type, build.value.renderKeys[entryIndex] ?? entry.key, i18n.lang];
+}
 
 /** `data-anchor-ids` value for the entry at `entryIndex` (undefined ⇒ the attribute is omitted —
  * streaming/live-tool/no-identity rows never anchor). Read back with `getAttribute` + split,
@@ -640,7 +668,7 @@ function saveScrollMemory(): void {
         </button>
       </template>
 
-      <template v-for="(entry, i) in windowedEntries" :key="entry.key">
+      <template v-for="(entry, i) in windowedEntries" :key="entry.key" v-memo="memoKeyOf(view.start + i, entry)">
         <TxUser
           v-if="entry.type === 'user'"
           :text="entry.text"
