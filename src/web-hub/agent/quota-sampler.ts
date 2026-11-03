@@ -26,6 +26,7 @@
  * `problems` list. Anything else — `pools` unset/false — keeps P7's filtered output
  * byte-identical (old hubs decode closed unions and would drop the WHOLE status frame).
  */
+import { quotaWindowCost, type QuotaCostView } from "../../quota/cost-scan.js";
 import type { ProviderVerdict, WindowVerdict } from "../../quota/ladder.js";
 import type { QuotaProblem } from "../../quota/types.js";
 import type {
@@ -42,6 +43,10 @@ export interface QuotaProjectionOptions {
   readonly pools?: boolean;
   /** `QuotaService.problems()` 的当前值；pools !== true 时忽略。 */
   readonly problems?: readonly QuotaProblem[];
+  /** 2026-11-03 费用折算（形态 B，无设置门）：cost-scan 视图的同步快照。两路（legacy/pools）
+   *  都放行——QuotaWindowSchema 是 open schema，旧 hub 忽略未知键不丢帧；缺省 ⇒ 窗口不带
+   *  costUsd（字节不变，legacy golden 钉死）。 */
+  readonly cost?: QuotaCostView | undefined;
 }
 
 /**
@@ -80,7 +85,7 @@ export function projectQuota(
     // open enum). P7 默认（pools !== true）: droid pool ids are dropped here (see module doc).
     const known = pools ? isPoolsWebQuotaProviderId(v.provider) : isLegacyWebQuotaProviderId(v.provider);
     if (!known) continue;
-    providers.push(projectProvider(v, pools));
+    providers.push(projectProvider(v, pools, opts?.cost));
   }
   if (!pools) {
     if (providers.length === 0) return undefined;
@@ -94,7 +99,7 @@ export function projectQuota(
   return wire;
 }
 
-function projectProvider(v: ProviderVerdict, pools: boolean): QuotaProviderWire {
+function projectProvider(v: ProviderVerdict, pools: boolean, cost: QuotaCostView | undefined): QuotaProviderWire {
   const id = v.provider as QuotaProviderWire["id"]; // guarded by is{Legacy,Pools}WebQuotaProviderId
   const wire: QuotaProviderWire = {
     id,
@@ -103,7 +108,7 @@ function projectProvider(v: ProviderVerdict, pools: boolean): QuotaProviderWire 
     fetchedAt: v.fetchedAt,
     // pools !== true：month 窗口在封闭枚举之外 ⇒ 丢掉（防御；kimi/zai 适配器本就不产出 month）。
     // pools === true：`month` 来自 droid 快照，wire 已放宽（quota.pools.v1 门控，§9A.4）。
-    windows: (pools ? v.windows : v.windows.filter(isLegacyWireWindow)).map(projectWindow),
+    windows: (pools ? v.windows : v.windows.filter(isLegacyWireWindow)).map((w) => projectWindow(w, id, cost)),
   };
   if (v.plan !== undefined) wire.plan = v.plan;
   if (v.demoted && v.demotedUntil !== undefined) wire.demotedUntil = v.demotedUntil;
@@ -140,10 +145,20 @@ function isLegacyWireWindow(w: WindowVerdict): w is WindowVerdict & { scope: Quo
   return w.scope !== "month";
 }
 
-function projectWindow(w: WindowVerdict & { scope: QuotaWindowWire["scope"] }): QuotaWindowWire {
+function projectWindow(
+  w: WindowVerdict & { scope: QuotaWindowWire["scope"] },
+  provider: QuotaProviderWire["id"],
+  cost: QuotaCostView | undefined,
+): QuotaWindowWire {
   const wire: QuotaWindowWire = { scope: w.scope, usedPct: w.usedPct, level: w.displayLevel ?? w.level };
   if (w.resetAt !== undefined) wire.resetAt = w.resetAt;
   if (w.etaMs !== undefined) wire.etaMs = w.etaMs;
+  // 费用折算（形态 B）：按 resetAt−时长 区间从 cost 视图求和；无数据/无 resetAt ⇒ 键缺席。
+  const c = quotaWindowCost(cost, provider, w.scope, w.resetAt);
+  if (c !== undefined) {
+    wire.costUsd = c.usd;
+    if (c.unpriced) wire.costUnpriced = true;
+  }
   return wire;
 }
 
@@ -174,6 +189,10 @@ export function quotaFingerprint(wire: QuotaWire | undefined): string {
         usedPct: Math.round(w.usedPct),
         resetAt: w.resetAt === undefined ? undefined : Math.floor(w.resetAt / 60_000),
         etaMs: w.etaMs === undefined ? undefined : Math.floor(w.etaMs / 60_000),
+        // 费用折算进闸：按分四舍五入（子分抖动不值得发帧）；undefined 被 JSON.stringify 省略
+        // ⇒ 无 cost 数据时指纹逐字节不变（legacy golden 钉死）。
+        costUsd: w.costUsd === undefined ? undefined : Math.round(w.costUsd * 100) / 100,
+        costUnpriced: w.costUnpriced,
       })),
     })),
   );

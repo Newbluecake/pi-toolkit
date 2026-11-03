@@ -14,6 +14,9 @@ const quota = {
   scope5h: "5h",
   scopeWeek: "周",
   resetSuffix: "{clock} 重置",
+  // 费用折算：纯符号 token（见 en 侧注释），不本地化。
+  costSuffix: "≈{amount}",
+  costSuffixUnpriced: "≈{amount}+",
   pillAriaBase: "订阅额度：{provider} {scope} {pct}%",
   pillAriaReset: "订阅额度：{provider} {scope} {pct}%，{clock} 重置",
   "provider.zai-coding-cn": "GLM",

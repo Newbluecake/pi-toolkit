@@ -31,3 +31,24 @@ confirmed as a reset by repetition (only reset evidence or a non-all-zero read a
 `usage.{rolling,weekly,monthly}` ⇒ `5h`/`week`/`month` 三窗格独立解析（一格坏只丢一格，全坏 ⇒ undefined），percent=已用
 百分比（clamp 0..100）、resetsAt ISO ⇒ resetAt。默认在 `quota.providers` 白名单里（无 key 时零请求）；web 行走既有
 `quota.pools.v1` cap 门控白名单（legacy 路径字节不变），i18n 标签「OpenCode Go」。
+
+**费用折算（`src/quota/cost-scan.ts`，2026-11-03 用户拍板，形态 B）**：quota 面板各窗口重置文案旁显示
+按 API 目录价折算的费用（`22:06 重置 · ≈$12.30`，不新增行；HUD 不加；推翻 quota-web D8——LAN 也显示、
+无设置门）。数据源 = pi 会话 JSONL 增量扫描：`<agentDir>/sessions/<编码cwd>/*.jsonl` 的 assistant 条目
+自带 provider/timestamp/usage.cost.total（pi 已算好）；主/子会话文件同目录全计入（子用量只在子文件里，
+无双算）；**只扫当前 cwd 的会话目录**（拍板的数据源边界，跨 cwd 用量不并入）。有界增量范式抄
+provenance.ts（per-file byte 游标、两车道、单 pass ≤250ms/≤16MiB、nofollow open、≤1fd）；关键差异：
+hour bucket **按文件归属**——文件身份变化/收缩 ⇒ 该文件 bucket 连游标一起丢弃重扫，严格无双算。游标 +
+buckets 以 `costScan` 顶层组读改写进 quota-state.json（同 demotion/baseline 纪律：flush 前重读保留其它组、
+tmp+rename、0600；bucket 保鲜 40d，状态上限 8MiB 最旧 mtime 淘汰）。计价：`cost.total` 有限 ⇒ 权威（含 0）；
+缺失 ⇒ token×目录价兜底（`ctx.modelRegistry.find` 注入，per-Mtok，仿 pricing.ts 的 priceUsage 无 tier）；
+目录价全零 ⇒ 计 $0 不标（「零价」）；目录价缺失 ⇒ 该小时记 unpriced（「无价」），窗口和是上界下界 ⇒
+wire `costUnpriced:true` ⇒ UI `≈$X.XX+`。窗口对齐：起点 = resetAt − 时长（5h→5h、week→7d、month→30d，
+`COST_WINDOW_SPAN_MS`），hour bucket 相交即计入（边缘 ±1h 误差，`≈` 前缀声明近似）；resetAt 缺失 ⇒
+不出折算。wire：`QuotaWindowWire.costUsd?/costUnpriced?`（open schema 免 PROTO bump，legacy/pools 两路
+都放行——旧 hub 忽略未知键不丢帧；无 cost 数据时投影/指纹逐字节不变，quota-legacy golden 与
+kimi-zai golden 钉死）；`quotaFingerprint`按分四舍五入纳入。驱动：扫描器无 timer（I5），
+stack 随 quota 构造（惰性加载、资源零持有 ⇒ 不进 stack-teardown 步骤表），web-hub agent 1Hz tick 经`deps.quotaCostTick` 推进（内部节流 incomplete 2s / complete 15s + single-flight）；webHub 关 ⇒
+零 I/O（I9）。droid-standard/droid-core 是外部 provider，JSONL 无数据 ⇒ 不出折算。GLM 合并行
+（`glmPair` worst-of 按引用挑窗）⇒ 折算跟随供窗一侧。残留：初始回填期间（本机 1.4GB/1163 文件约数分钟）
+折算是下界但不带标记；`costUsd` 不含跨 cwd 会话用量。

@@ -1105,6 +1105,15 @@ export default function activate(rawPi: ExtensionAPI): void {
       // absent `deps.quota` as "feature off", so the sampler never runs and the wire field never
       // appears — byte-equal to the pre-feature shape).
       ...(settings.webHub.quota !== false ? { quota: () => holder.current?.quota?.verdicts() ?? [] } : {}),
+      // 费用折算（2026-11-03 形态 B，推翻 quota-web D8：直接显示、无设置门）：与 quota 同一
+      // `webHub.quota` 门——getter 随 stack 重建晚绑定；stack 未建 / quota 关 ⇒ undefined ⇒
+      // 窗口不带 costUsd（wire 字节不变）。tick 驱动扫描推进（scanner 内部节流 + single-flight）。
+      ...(settings.webHub.quota !== false
+        ? {
+            quotaCost: () => holder.current?.quotaCost?.view(),
+            quotaCostTick: () => holder.current?.quotaCost?.maybeAdvance(),
+          }
+        : {}),
       // external-agent quota-plan r2 §9A.4 (P7wa): auth-class problems (401/402/403) ride the
       // same gate — `holder.current.quota` is the QuotaService itself (K9); problems() is a
       // synchronous, family-deduped in-memory read.

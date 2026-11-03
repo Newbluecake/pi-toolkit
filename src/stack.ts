@@ -117,6 +117,7 @@ import {
   type QuotaStack,
 } from "./quota/index.js";
 import { readQuotaStatusTheme } from "./quota/render.js";
+import { createCostScanner, type CostScanner } from "./quota/cost-scan.js";
 import { evaluateQuotaGate, parseSubscriptionProviders, quotaAnnotation, toLadderLevel } from "./quota/gate.js";
 import { formatOutcomeSummary } from "./tools/agent-tool.js";
 import { createMentionRegistry, type MentionRegistry } from "./mention/registry.js";
@@ -340,6 +341,10 @@ export interface Stack {
   keepalive?: CacheKeepaliveService;
   /** 额度感知派单（docs/dev/quota/quota-plan.md）：同步缓存判定面。settings.quota.enabled=false 时缺席（R11）。 */
   quota?: QuotaService;
+  /** 费用折算（2026-11-03 形态 B，docs/dev/quota/README.md）：quota 开启时随构造的 JSONL 增量
+   *  扫描器。无 timer、无 fd 持有，惰性加载——webHub 关闭 ⇒ web tick 永不调 maybeAdvance ⇒
+   *  零 I/O（I9）。资源零持有 ⇒ 不进 stack-teardown 步骤表（dispose 仅翻转标志位）。 */
+  quotaCost?: CostScanner;
   /**
    * 外部 agent 端口（external-agent plan §5.5，P5）：externalAgents.droid.enabled 时
    * 存在；index.ts 的 session_shutdown 经它 dispose（停目录探测；不杀运行中的 run）。
@@ -1982,6 +1987,50 @@ export function buildSessionStack(
     : undefined;
   parts.quota = quota;
   quotaRef.current = quota;
+  // 费用折算（形态 B）：随 quota 构造的会话 JSONL 增量扫描器。sessionManager/modelRegistry
+  // 探针失败 ⇒ 降级不构造（G5a 姿态：WARN 而不让 session_start 炸掉）。
+  const quotaCost =
+    quota === undefined
+      ? undefined
+      : ((): CostScanner | undefined => {
+          try {
+            const sm = ctx.sessionManager as { getSessionDir?: () => string } | undefined;
+            const sessionDir = sm?.getSessionDir?.();
+            if (typeof sessionDir !== "string" || sessionDir === "") return undefined;
+            const registry = ctx.modelRegistry as
+              { find?: (provider: string, id: string) => { cost?: unknown } | undefined } | undefined;
+            return createCostScanner({
+              sessionDir,
+              statePath: join(getAgentDir(), "quota-state.json"),
+              now: () => systemClock.now(),
+              priceLookup: (provider, model) => {
+                try {
+                  const m = registry?.find?.(provider, model);
+                  const c = m?.cost;
+                  if (!c || typeof c !== "object") return undefined;
+                  const r = c as { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown };
+                  if (
+                    typeof r.input !== "number" ||
+                    typeof r.output !== "number" ||
+                    typeof r.cacheRead !== "number" ||
+                    typeof r.cacheWrite !== "number"
+                  )
+                    return undefined;
+                  return { input: r.input, output: r.output, cacheRead: r.cacheRead, cacheWrite: r.cacheWrite };
+                } catch {
+                  return undefined;
+                }
+              },
+              warn: (message) => hostWarn(ctx, message),
+            });
+          } catch (error) {
+            hostWarn(
+              ctx,
+              `[quota] cost scanner unavailable: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return undefined;
+          }
+        })();
   // 预热：fire-and-forget，绝不 await（session_start 必须保持同步快）；
   // refreshIfStale 永不返回被拒 Promise，失败静默降级（R1）。
   quota?.service.refreshIfStale();
@@ -2402,6 +2451,7 @@ export function buildSessionStack(
     ...(bashJobRecovery ? { bashJobRecovery } : {}),
     ...(keepalive ? { keepalive } : {}),
     ...(quota ? { quota: quota.service, quotaHint: quota.hintState } : {}),
+    ...(quotaCost !== undefined ? { quotaCost } : {}),
     ...(externalPort !== undefined ? { external: externalPort.port } : {}),
     ...(fabric ? { fabric: { dispose: () => fabric.mailbox.dispose(), pump: () => fabric.mailbox.pump() } } : {}),
     ...(threadsSurface ? { threads: threadsSurface } : {}),

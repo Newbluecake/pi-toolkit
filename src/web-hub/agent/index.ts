@@ -122,6 +122,7 @@ import type { TodoState } from "../../todo/state.js";
 import { quotaFingerprint } from "./quota-sampler.js";
 import { cacheKeepaliveFingerprint, type CacheKeepaliveInput } from "./cache-keepalive.js";
 import { createStatusSlotProjections } from "./status-slots.js";
+import type { QuotaCostView } from "../../quota/cost-scan.js";
 import type { ProviderVerdict } from "../../quota/ladder.js";
 import type { QuotaProblem } from "../../quota/types.js";
 import { createCommandCapture, type CommandCapturePort } from "../../commands/capture.js";
@@ -365,6 +366,12 @@ export interface WebHubDeps {
    *  a throwing getter is downgraded to "no problems" at projection time (a broken getter
    *  must never take the status frame down — see the wiring test). */
   quotaProblems?: () => readonly QuotaProblem[];
+  /** 2026-11-03 费用折算（形态 B，无设置门）：cost-scan 视图的 late-bound 同步读（投影用）。
+   *  Unset ⇒ 窗口不带 costUsd（wire 字节不变）。 */
+  quotaCost?: () => QuotaCostView | undefined;
+  /** 费用折算的推进驱动：1Hz tick 每拍调用，scanner 内部节流（incomplete 2s / complete 15s）
+   *  + single-flight，fire-and-forget 永不抛。Unset ⇒ 永不推进 ⇒ 扫描器零 I/O。 */
+  quotaCostTick?: () => void;
   /** cache-keepalive-web plan §3.3: late-bound getter of the main session's keepalive report + cache
    *  mode (`src/index.ts` threads it only when `cacheTtl.keepalive` is on). Unset ⇒ the
    *  `StatusInfo.cacheKeepalive` field is never set (byte-equal to the pre-feature shape). */
@@ -1100,6 +1107,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // quota-web plan §2 (D3): `QuotaService` has no events either — same 1Hz tick fingerprint
     // gate (quotaFingerprint excludes the ever-moving `at` field, see its own docstring).
     if (deps.quota !== undefined) {
+      deps.quotaCostTick?.(); // 费用折算：节流 + single-flight 在 scanner 内部
       const quotaFp = quotaFingerprint(quotaProjection());
       if (quotaFp !== lastQuotaFp) {
         lastQuotaFp = quotaFp;

@@ -15,6 +15,10 @@ const quota = {
   scope5h: "5h",
   scopeWeek: "week",
   resetSuffix: "{clock} reset",
+  // 2026-11-03 费用折算（形态 B：挂在重置文案旁）：纯符号 token，两语言同形；
+  // Unpriced 变体的 `+` = 区间内有目录价缺失的用量，和是下界。
+  costSuffix: "≈{amount}",
+  costSuffixUnpriced: "≈{amount}+",
   pillAriaBase: "Subscription quota: {provider} {scope} {pct}%",
   pillAriaReset: "Subscription quota: {provider} {scope} {pct}%, resets {clock}",
   "provider.zai-coding-cn": "GLM",

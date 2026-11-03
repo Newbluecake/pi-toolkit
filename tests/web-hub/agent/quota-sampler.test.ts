@@ -414,3 +414,50 @@ describe("quotaFingerprint — pools additions (P7wa, §9A.4)", () => {
     expect(quotaFingerprint(mk(1_000))).toBe(quotaFingerprint(mk(61_000)));
   });
 });
+
+// 2026-11-03 费用折算（形态 B）：opts.cost 视图 ⇒ QuotaWindowWire.costUsd/costUnpriced，
+// fingerprint 按分四舍五入纳入；无 cost 视图 ⇒ 窗口键缺席（上方既有断言逐字节钉死）。
+describe("projectQuota 费用折算（costUsd）", () => {
+  const costView = (entries: Record<string, { usd: number; unpriced: boolean } | undefined>) => ({
+    complete: true,
+    costInWindow: (provider: string, _s: number, _e: number) => entries[provider],
+  });
+
+  it("cost 视图命中 ⇒ 窗口带 costUsd；无 resetAt / 无数据 ⇒ 键缺席（legacy/pools 两路同规）", () => {
+    const v = verdict({
+      windows: [
+        window({ scope: "5h", resetAt: 5_000_000 }),
+        window({ scope: "week" }), // 无 resetAt
+      ],
+    });
+    const cost = costView({ "zai-coding-cn": { usd: 12.3, unpriced: true } });
+    // quotaWindowCost 对同一 provider 的所有窗口都返回同一值（mock 不区分区间）——5h 窗带钱、
+    // week 窗无 resetAt 不带。
+    const legacy = projectQuota([v], 1_000, { cost })!;
+    expect(legacy.providers[0]?.windows[0]?.costUsd).toBe(12.3);
+    expect(legacy.providers[0]?.windows[0]?.costUnpriced).toBe(true);
+    expect(legacy.providers[0]?.windows[1]?.costUsd).toBeUndefined();
+    const pools = projectQuota([v], 1_000, { pools: true, cost })!;
+    expect(pools.providers[0]?.windows[0]?.costUsd).toBe(12.3);
+    // 无 cost 视图 ⇒ 两个键都缺席
+    const bare = projectQuota([v], 1_000)!;
+    expect(bare.providers[0]?.windows[0]).not.toHaveProperty("costUsd");
+    expect(bare.providers[0]?.windows[0]).not.toHaveProperty("costUnpriced");
+  });
+
+  it("带 costUsd 的 legacy 投影仍通过旧 hub schema（open schema，不丢帧）", () => {
+    const v = verdict({ windows: [window({ resetAt: 5_000_000 })] });
+    const wire = projectQuota([v], 1_000, { cost: costView({ "zai-coding-cn": { usd: 1, unpriced: false } }) })!;
+    expect(Value.Check(LEGACY_QUOTA_WIRE_SCHEMA, wire)).toBe(true);
+  });
+
+  it("fingerprint：跨分位变化 ⇒ 变；分内抖动 ⇒ 不变；unpriced 翻转 ⇒ 变", () => {
+    const v = verdict({ windows: [window({ resetAt: 5_000_000 })] });
+    const fp = (usd: number, unpriced = false) =>
+      quotaFingerprint(projectQuota([v], 1_000, { cost: costView({ "zai-coding-cn": { usd, unpriced } }) }));
+    expect(fp(12.3001)).toBe(fp(12.3049)); // 都四舍五入到 12.3
+    expect(fp(12.3)).not.toBe(fp(12.31)); // 跨分
+    expect(fp(12.3)).not.toBe(fp(12.3, true)); // unpriced 翻转
+    expect(fp(12.3)).not.toBe(quotaFingerprint(projectQuota([v], 1_000))); // 出现/消失
+  });
+});

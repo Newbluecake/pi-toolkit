@@ -238,6 +238,24 @@ function resetText(w: QuotaWindowWire): string | undefined {
   const clock = fmtResetAt(w.resetAt, props.now);
   return clock === undefined ? undefined : t("quota.resetSuffix", { clock });
 }
+
+/** 2026-11-03 费用折算（形态 B：挂在重置文案旁，不新增行）：`≈$12.30`；区间内有目录价缺失
+ *  的用量（costUnpriced）⇒ `≈$12.30+`（和是下界）。零价模型 ⇒ `≈$0.00`（不带 +）。
+ *  costUsd 缺省 ⇒ undefined（无数据 / resetAt 未知——不编造）。 */
+function costText(w: QuotaWindowWire): string | undefined {
+  if (w.costUsd === undefined || !Number.isFinite(w.costUsd)) return undefined;
+  const amount = `$${w.costUsd.toFixed(2)}`;
+  return t(w.costUnpriced === true ? "quota.costSuffixUnpriced" : "quota.costSuffix", { amount });
+}
+
+/** 重置 + 折算的合并文案（形态 B：`22:06 重置 · ≈$12.30`，不新增行）。costUsd 缺席时逐字节
+ *  等于 resetText ⇒ 模板结构不变（quota-legacy golden 钉死）。 */
+function resetCostText(w: QuotaWindowWire): string | undefined {
+  const reset = resetText(w);
+  const cost = costText(w);
+  if (cost === undefined) return reset;
+  return reset === undefined ? cost : `${reset} · ${cost}`;
+}
 </script>
 
 <template>
@@ -258,9 +276,9 @@ function resetText(w: QuotaWindowWire): string | undefined {
         <span class="q-scope">{{ scopeText(w.scope) }}</span>
         <span class="q-bar" :data-lv="w.level"><i :style="{ width: barWidth(w.usedPct) }"></i></span>
         <span class="q-val">{{ pctText(w.usedPct) }}</span>
-        <span v-if="etaWarn(w) || resetText(w)" class="q-sub" :class="{ 'q-warn': etaWarn(w) }">
-          <template v-if="etaWarn(w)">{{ etaWarnText(w) }}<template v-if="resetText(w)"> · </template></template
-          >{{ resetText(w) }}
+        <span v-if="etaWarn(w) || resetCostText(w)" class="q-sub" :class="{ 'q-warn': etaWarn(w) }">
+          <template v-if="etaWarn(w)">{{ etaWarnText(w) }}<template v-if="resetCostText(w)"> · </template></template
+          >{{ resetCostText(w) }}
         </span>
       </div>
     </div>

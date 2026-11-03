@@ -9,6 +9,7 @@
  * semantics are unchanged. No module-scope mutable state (I4), no timers at all (I5 trivially).
  */
 import type { ArchiveControl } from "../../archive/control.js";
+import type { QuotaCostView } from "../../quota/cost-scan.js";
 import type { ProviderVerdict } from "../../quota/ladder.js";
 import type { QuotaProblem } from "../../quota/types.js";
 import type { TodoState } from "../../todo/state.js";
@@ -30,6 +31,9 @@ export interface StatusSlotSources {
   };
   quota?: () => readonly ProviderVerdict[];
   quotaProblems?: () => readonly QuotaProblem[];
+  /** 2026-11-03 费用折算（形态 B）：cost-scan 视图的 late-bound 同步读；缺省 ⇒ 窗口不带
+   *  costUsd（字节不变）。推进驱动在 tick 侧（`quotaCostTick`），本闭包保持纯读。 */
+  quotaCost?: () => QuotaCostView | undefined;
   cacheKeepalive?: () => CacheKeepaliveInput | undefined;
   archive?: () => ArchiveControl | undefined;
 }
@@ -130,6 +134,7 @@ export function createStatusSlotProjections(args: StatusSlotProjectionDeps): Sta
     return projectQuota(d(), now(), {
       pools,
       problems: pools ? quotaProblemsSafe() : [], // ignored by projectQuota when pools !== true
+      cost: sources.quotaCost?.(),
     });
   };
   /** 端口契约永不抛；兜注入桩（§11 wiring 行：quotaProblems 抛错 ⇒ 视为无 problems）。 */

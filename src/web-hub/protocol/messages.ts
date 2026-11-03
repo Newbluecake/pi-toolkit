@@ -390,6 +390,12 @@ export interface QuotaWindowWire {
   level: 0 | 1 | 2 | 3;
   resetAt?: number; // epoch ms
   etaMs?: number; // 预测耗尽还剩多久；不燃烧/样本不足时缺省
+  /** 2026-11-03 费用折算（形态 B，append-only；schema open ⇒ 免 PROTO bump，legacy/pools 两路都放行）：
+   *  窗口区间 [resetAt−时长, resetAt) 内 pi 会话 JSONL 的 API 目录价折算（src/quota/cost-scan.ts）。
+   *  缺省 ⇒ 无数据 / resetAt 未知 / 扫描器未接线 —— UI 不得自行编造。 */
+  costUsd?: number;
+  /** 区间内有目录价缺失的用量 ⇒ costUsd 是下界，UI 渲染 `≈$X.XX+`。 */
+  costUnpriced?: true;
 }
 
 /**
@@ -1556,6 +1562,9 @@ const QuotaWindowSchema = Type.Object(
     level: Type.Union([Type.Literal(0), Type.Literal(1), Type.Literal(2), Type.Literal(3)]),
     resetAt: Type.Optional(Type.Number()),
     etaMs: Type.Optional(Type.Number()),
+    // 2026-11-03 费用折算：append-only optional on an OPEN schema — 旧 peer 转发/忽略，免 PROTO bump。
+    costUsd: Type.Optional(Type.Number({ minimum: 0 })),
+    costUnpriced: Type.Optional(Type.Literal(true)),
   },
   { additionalProperties: true },
 );
