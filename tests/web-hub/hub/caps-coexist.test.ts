@@ -548,6 +548,44 @@ it.each([undefined, "all", "toolkit"] as const)(
   },
 );
 
+describe("fabric-thread rebind P0b: thr.rebind.v1 hub caps (rebind-plan r3 §4.2)", () => {
+  it.each([undefined, false, true] as const)(
+    "threads.rebind=%s: thr.rebind.v1 on BOTH surfaces iff true; thr.v1 always rides a threads config",
+    async (rebind) => {
+      const { normalizeFeishuBotHubConfig, FEISHU_BOT_DEFAULTS } =
+        await import("../../../src/web-hub/protocol/feishu.js");
+      const { THREAD_CAP, THREAD_REBIND_CAP } = await import("../../../src/web-hub/protocol/version.js");
+      const bot = normalizeFeishuBotHubConfig(FEISHU_BOT_DEFAULTS)!;
+      const threads = {
+        handbackWindowMin: 10,
+        startTimeoutMin: 8,
+        retainMin: 15,
+        replyPerThreadPerMin: 6,
+        replyPerThreadPerHour: 60,
+        ...(rebind === undefined ? {} : { rebind }),
+      };
+      const result = await startHub(
+        config({ home: tmp.make("wh-thr-rebind-"), feishuBot: { ...bot, threads } }),
+        fakeFrontend().factory,
+      );
+      if ("exists" in result) throw new Error("hub unavailable");
+      hubs.push(result);
+      const client = await connectClient(result.paths.socketPath);
+      client.send(hello());
+      const ack = await client.waitFrame((f) => f.t === "hello_ack");
+      client.sock.destroy();
+      expect(ack.caps).toEqual(result.info.caps); // two surfaces, same source
+      expect(result.info.caps).toContain(THREAD_CAP);
+      expect(result.info.caps.includes(THREAD_REBIND_CAP)).toBe(rebind === true);
+      // tail-appended IMMEDIATELY after thr.v1 when on (§4.2)
+      if (rebind === true) {
+        const i = result.info.caps.indexOf(THREAD_CAP);
+        expect(result.info.caps[i + 1]).toBe(THREAD_REBIND_CAP);
+      }
+    },
+  );
+});
+
 describe("fabric phase-2 X1: xs.v1 cap coexists with the optional hub features", () => {
   it.each([0, 1, 2, 3, 4, 5, 6, 7])(
     "optional feature mask %i: both cap surfaces differ ONLY by xs.v1 + xs.channel.v1 (tail-appended, set-equal)",

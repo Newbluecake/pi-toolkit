@@ -9,7 +9,10 @@
  *   - the §7 wire contract: cap constants, RE parity with the mirrored sources, decode
  *     accept/reject for thr_req/thr_res/thr_closed, `cmd.thread` on the prompt variant (closed
  *     schema!), `cmd_result.data.thread`, the `status.threads` open slot and the 12 KiB byte gate;
- *   - I11/D8: secure and locked domains force `fabric.threads.enabled:false`.
+ *   - the rebind P0b surface (rebind-plan r3 §4.1/§4.2/§4.3): the `fabric.threads.rebind` gate
+ *     (absent = off, corpus byte-parity), the `thr.rebind.v1` cap constants, the rebind/acquire
+ *     `thr_req` ops, the per-op unique `thr_res` ok branches and `ThreadMeta.rev?`;
+ *   - I11/D8: secure and locked domains force `fabric.threads.enabled:false` AND `rebind:false` (A17).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadSettings } from "../../src/config/settings.js";
@@ -24,10 +27,12 @@ import { isRunId } from "../../src/core/ids.js";
 import { decodeAgentFrame, decodeHubFrame, type CmdFrame } from "../../src/web-hub/protocol/messages.js";
 import { FEISHU_CMD_ID_RE } from "../../src/web-hub/protocol/feishu.js";
 import {
+  THREAD_ERROR_CODES,
   THREAD_EVENT_ID_RE,
   THREAD_LABEL_MAX_CP,
   THREAD_POST_ID_RE,
   THREAD_POST_TEXT_MAX_BYTES,
+  THREAD_REBIND_TO_MAX,
   THREAD_REQ_MAX_BYTES,
   THREAD_RUN_ID_RE,
   THREAD_WINDOW_DEFAULTS,
@@ -38,6 +43,9 @@ import {
   THREAD_AGENT_CAPS as V_AGENT,
   THREAD_CAP,
   THREAD_HUB_CAPS as V_HUB,
+  THREAD_REBIND_AGENT_CAPS as V_REBIND_AGENT,
+  THREAD_REBIND_CAP,
+  THREAD_REBIND_HUB_CAPS as V_REBIND_HUB,
 } from "../../src/web-hub/protocol/version.js";
 import { freezeDomain, makeFakeVault, type FakeVault } from "../secure/helpers.js";
 import { readFileSync } from "node:fs";
@@ -150,6 +158,31 @@ describe("fabric.threads settings (P0 §11.1)", () => {
   it("the file stores steerTimeoutS and loadSettings converts it (TIME_SETTING_MS_PATHS boundary)", () => {
     const s = loadSettings({ fabric: { threads: { steerTimeoutS: 6 } } });
     expect(s.fabric.threads.steerTimeoutMs).toBe(6_000);
+  });
+});
+
+describe("fabric.threads.rebind settings (rebind-plan r3 §4.1, P0b)", () => {
+  it("absent stays absent: a rebind-off parse is byte-identical to the pre-feature shape (corpus)", () => {
+    // §4.1: DEFAULT_SETTINGS must not move under rebind=false ⇒ the leaf is OPTIONAL and the
+    // parser omits it unless the user wrote a real boolean (read sites use `rebind === true`).
+    expect(DEFAULT_FABRIC_SETTINGS.threads).not.toHaveProperty("rebind");
+    for (const input of [undefined, {}, { enabled: true }, { rebind: 1 }, { rebind: "yes" }, { rebind: null }]) {
+      const parsed = parseFabricThreadSettings(input);
+      expect(parsed.rebind).toBeUndefined();
+      expect("rebind" in parsed).toBe(false);
+    }
+    expect(parseFabricSettings({}).threads).not.toHaveProperty("rebind");
+    expect(loadSettings({}).fabric.threads).not.toHaveProperty("rebind");
+  });
+
+  it("parses an explicit boolean; it rides the threads block (non-live, fabric.gating preserved)", () => {
+    expect(parseFabricThreadSettings({ rebind: true }).rebind).toBe(true);
+    expect(parseFabricThreadSettings({ rebind: false }).rebind).toBe(false);
+    const on = parseFabricSettings({ enabled: true, threads: { enabled: true, rebind: true } });
+    expect(on.threads.rebind).toBe(true);
+    const off = parseFabricSettings({ enabled: false, threads: { enabled: true, rebind: true } });
+    expect(off.threads.rebind).toBe(true); // parsed like the other leaves; fabric.enabled gates use
+    expect(loadSettings({ fabric: { threads: { rebind: true } } }).fabric.threads.rebind).toBe(true);
   });
 });
 
@@ -632,6 +665,130 @@ describe("unit semantics: code points vs UTF-16 units vs UTF-8 bytes (review fol
   });
 });
 
+describe("rebind wire contract (rebind-plan r3 §4.2/§4.3, P0b)", () => {
+  const H = "fs:AbCdEf0123_-";
+
+  it("cap constants: thr.rebind.v1, two faces, version.ts is the canonical home", () => {
+    expect(THREAD_REBIND_CAP).toBe("thr.rebind.v1");
+    expect(V_REBIND_HUB).toEqual(["thr.rebind.v1"]);
+    expect(V_REBIND_AGENT).toEqual(["thr.rebind.v1"]);
+  });
+
+  it("THREAD_ERROR_CODES gained the rebind vocabulary (append-only; old codes untouched)", () => {
+    expect(THREAD_ERROR_CODES.slice(0, 7)).toEqual([
+      "E_THR_REBOUND",
+      "E_THR_UNKNOWN",
+      "E_THR_RATE",
+      "E_THR_TOO_LARGE",
+      "E_THR_HANDBACK_GONE",
+      "E_THR_REVOKED",
+      "E_THR_STATE",
+    ]);
+    for (const code of [
+      "E_THR_UNSUPPORTED",
+      "E_THR_NO_OWNER",
+      "E_THR_STALE",
+      "E_THR_TARGET_UNKNOWN",
+      "E_THR_TARGET_AMBIGUOUS",
+      "E_THR_TARGET_OFFLINE",
+      "E_THR_TARGET_READONLY",
+      "E_THR_NOT_BOUND",
+      "E_THR_COMMIT",
+      "E_THR_PENDING",
+    ]) {
+      expect(THREAD_ERROR_CODES).toContain(code);
+      const err = { t: "thr_res", rid: "r1", ok: false, code, effect: "none" };
+      expect(decodeHubFrame(err), code).toEqual(err);
+    }
+  });
+
+  it("decodeAgentFrame accepts thr_req{rebind} and rejects every mutation (incl. the to≤128 gate)", () => {
+    const good = {
+      t: "thr_req",
+      rid: "rid-r1",
+      op: "rebind",
+      h: H,
+      sessionId: "sess-1",
+      to: "worker-sid",
+      fromRev: 41,
+    };
+    expect(decodeAgentFrame(good)).toEqual(good);
+    expect(decodeAgentFrame({ ...good, fromRev: 0 })).toBeDefined(); // ≥0 is inclusive
+    expect(decodeAgentFrame({ ...good, to: "x".repeat(THREAD_REBIND_TO_MAX) })).toBeDefined();
+    for (const bad of [
+      { ...good, to: "x".repeat(THREAD_REBIND_TO_MAX + 1) }, // thrFrameOk gate + schema envelope
+      { ...good, to: "" },
+      { ...good, fromRev: -1 },
+      { ...good, fromRev: 1.5 },
+      { ...good, h: "fs:short" },
+      { ...good, extra: 1 }, // closed branch
+      omitKey(good, "to"),
+      omitKey(good, "fromRev"),
+    ]) {
+      expect(decodeAgentFrame(bad), JSON.stringify(bad)).toBeUndefined();
+    }
+  });
+
+  it("decodeAgentFrame accepts thr_req{acquire} exactly (no extra fields — force stays agent-local)", () => {
+    const good = { t: "thr_req", rid: "rid-a1", op: "acquire", h: H, sessionId: "sess-1" };
+    expect(decodeAgentFrame(good)).toEqual(good);
+    // §4.7: `force` is an agent-local acquire flag and must NEVER reach the wire
+    expect(decodeAgentFrame({ ...good, force: true })).toBeUndefined();
+    expect(decodeAgentFrame({ ...good, fromRev: 0 })).toBeUndefined();
+    expect(decodeAgentFrame({ ...good, h: "nope" })).toBeUndefined();
+  });
+
+  it("decodeHubFrame accepts the per-op UNIQUE thr_res ok branches and rejects cross-mixing (D4)", () => {
+    const rebound = {
+      t: "thr_res",
+      rid: "r1",
+      ok: true,
+      data: { rebound: true, h: H, sessionId: "sess-worker", rev: 42, changed: true, label: "proj" },
+    };
+    expect(decodeHubFrame(rebound)).toEqual(rebound);
+    expect(decodeHubFrame({ ...rebound, data: { ...rebound.data, changed: false } })).toBeDefined();
+    const owned = { t: "thr_res", rid: "r2", ok: true, data: { owned: true, h: H, label: "proj", rev: 42 } };
+    expect(decodeHubFrame(owned)).toEqual(owned);
+    const badRevs = [
+      { ...rebound, data: { ...rebound.data, rev: -1 } },
+      { ...rebound, data: { ...rebound.data, rev: 1.5 } },
+      { ...owned, data: { ...owned.data, rev: -1 } },
+      // branch mixing: owned shape + a rebound-only field fails BOTH strict branches
+      { ...owned, data: { ...owned.data, sessionId: "sess-worker" } },
+      { ...rebound, data: { ...rebound.data, owned: true } },
+      // a label over the 32-cp cap fails
+      { ...owned, data: { ...owned.data, label: "a".repeat(33) } },
+    ];
+    for (const bad of badRevs) expect(decodeHubFrame(bad), JSON.stringify(bad)).toBeUndefined();
+  });
+
+  it("cmd.thread rev?: optional int ≥0 — accepted on the closed schema, bad revs drop the frame", () => {
+    const origin = { listener: "loopback", ip: "127.0.0.1", reqId: "abcdef0123456789" };
+    const withThread = (thread: unknown): unknown =>
+      decodeHubFrame({
+        t: "cmd",
+        rid: "r1",
+        id: "fs".padEnd(32, "Y"),
+        deadlineMs: 8_000,
+        origin,
+        cmd: { op: "prompt", text: "hi", deliver: "steer", thread },
+      });
+    const meta = { h: H, label: "proj", sentAt: 0 };
+    expect(withThread({ ...meta, rev: 0 })).toBeDefined();
+    expect(withThread({ ...meta, rev: 41 })).toBeDefined();
+    expect(withThread({ ...meta, rev: -1 })).toBeUndefined();
+    expect(withThread({ ...meta, rev: 1.5 })).toBeUndefined();
+    // no rev ⇒ the pre-P0b shape, byte-identical (G2b / A16)
+    expect(withThread(meta)).toBeDefined();
+  });
+});
+
+/** Deletion helper for closed-schema rejection cases (JSON has no `undefined` field value). */
+function omitKey<T extends Record<string, unknown>>(obj: T, key: keyof T): Record<string, unknown> {
+  const { [key]: _dropped, ...rest } = obj;
+  return rest;
+}
+
 describe("I11/D8: secure and locked domains force fabric.threads off", () => {
   let v: FakeVault | undefined;
   afterEach(() => {
@@ -649,16 +806,27 @@ describe("I11/D8: secure and locked domains force fabric.threads off", () => {
     expect(s.fabric.enabled).toBe(true); // tree fabric is not a D8 push
   });
 
-  it("locked ⇒ threads.enabled false too", () => {
+  it("secure ⇒ rebind forced false whatever the file says (rebind-plan r3 §4.1, A17)", () => {
+    v = makeFakeVault();
+    freezeDomain(v);
+    const s = loadSettings({ fabric: { enabled: true, threads: { enabled: true, rebind: true } } });
+    expect(s.fabric.threads.enabled).toBe(false);
+    expect(s.fabric.threads.rebind).toBe(false);
+  });
+
+  it("locked ⇒ threads.enabled AND rebind false too", () => {
     v = makeFakeVault();
     freezeDomain(v, { mountinfo: v.unmounted });
-    const s = loadSettings({ fabric: { threads: { enabled: true } } });
+    const s = loadSettings({ fabric: { threads: { enabled: true, rebind: true } } });
     expect(s.fabric.threads.enabled).toBe(false);
+    expect(s.fabric.threads.rebind).toBe(false);
   });
 
   it("plain domain ⇒ the user's value survives", () => {
     v = makeFakeVault();
     freezeDomain(v, { cwd: v.outside });
-    expect(loadSettings({ fabric: { threads: { enabled: true } } }).fabric.threads.enabled).toBe(true);
+    const s = loadSettings({ fabric: { threads: { enabled: true, rebind: true } } });
+    expect(s.fabric.threads.enabled).toBe(true);
+    expect(s.fabric.threads.rebind).toBe(true);
   });
 });

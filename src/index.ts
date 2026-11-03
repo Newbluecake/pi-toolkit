@@ -1025,12 +1025,19 @@ export default function activate(rawPi: ExtensionAPI): void {
         ? {
             threads: () => holder.current?.threads,
             threadsCapOn: () => settings.fabric.enabled && settings.fabric.threads.enabled,
+            // rebind-plan r3 §4.2 (P0b): the rebind cap is advertised only when BOTH gates hold
+            // (secure domains already forced `rebind:false` in the settings parser, A17).
+            threadsRebindCapOn: () =>
+              settings.fabric.enabled && settings.fabric.threads.enabled && settings.fabric.threads.rebind === true,
             threadsHubConfig: () => ({
               handbackWindowMin: settings.fabric.threads.handbackWindowMin,
               startTimeoutMin: settings.fabric.threads.startTimeoutMin,
               retainMin: settings.fabric.threads.retainMin,
               replyPerThreadPerMin: settings.fabric.threads.replyPerThreadPerMin,
               replyPerThreadPerHour: settings.fabric.threads.replyPerThreadPerHour,
+              // rebind-plan r3 §4.2 (P0b): the hub-side rebind switch — written ONLY when on, so
+              // a rebind-off HubConfig stays byte-identical (A16).
+              ...(settings.fabric.threads.rebind === true ? { rebind: true } : {}),
             }),
           }
         : {}),

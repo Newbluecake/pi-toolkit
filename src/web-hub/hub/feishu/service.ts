@@ -40,6 +40,7 @@ import {
 } from "./admission.js";
 import { createFeishuRequests, feishuBatchIdentity, feishuDigest, type FeishuRequestEvent } from "./requests.js";
 import { createFeishuRouter, type FeishuRouterIntent } from "./router.js";
+import { createBindingTransfer } from "./bindings-transfer.js";
 import { createFeishuInbound, type FeishuMessage, type FeishuInboundIntent } from "./inbound.js";
 import { createFeishuOutbox, type OutboxTarget, type OutboxMessage, type SettledGroup } from "./outbox.js";
 import { renderReply, renderNotice, neutralizeMarkdown } from "./render.js";
@@ -922,10 +923,20 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       },
       log,
     });
+    // rebind-plan r3 §4.4 D1 (P0a): the ONE shared binding write op — `/use` goes through it
+    // with notifyLifecycle:false (the inbound durable hook stays its lifecycle source); the
+    // rebind op (later package) shares the same instance with notifyLifecycle:true.
+    const bindingTransfer = createBindingTransfer({
+      state,
+      ...(threads === undefined ? {} : { threads }),
+      ...(scheduleConfirm === undefined ? {} : { scheduleConfirm }),
+      log: (event, reason) => log(event, reason),
+    });
     const router = createFeishuRouter({
       state,
       sessions,
       requests,
+      bindingTransfer,
       groupRootTopics: deps.config.groupRootTopics,
       spawnScope: deps.config.spawnScope,
       ...(deps.schedule !== undefined ? { schedule: true } : {}),
@@ -1926,7 +1937,10 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
           reply({ t: "thr_res", rid: frame.rid, ok: false, code: "E_THR_STATE", effect: "none" });
           return;
         }
-        if (frame.op === "post") {
+        if (frame.op === "post" || frame.op === "rebind" || frame.op === "acquire") {
+          // rebind-plan r3 §6 实施要点 2 (P0b): rebind/acquire route to the thread module like
+          // post. P0b ships no business logic for them — `thrReq` answers `E_THR_STATE`
+          // (rebind off ⇔ hub 不认这两个 op，§4.1); the rebind packages add the real branches.
           await threads.thrReq(agentKey, frame, write);
           return;
         }

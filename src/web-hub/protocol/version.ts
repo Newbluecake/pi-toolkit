@@ -340,6 +340,24 @@ export const THREAD_HUB_CAPS = [THREAD_CAP] as const;
 export const THREAD_AGENT_CAPS = [THREAD_CAP] as const;
 
 /**
+ * fabric-thread rebind plan r3 §4.2 (P0b frozen surface): the `thr.rebind.v1` cap — BOTH faces
+ * declare the same string. AGENT side: advertised in `hello.caps` iff `threadsCapOn() ∧
+ * fabric.threads.rebind` (src/index.ts computes both at ACTIVATE level; secure domains force
+ * rebind off in the settings parser — D8/I11/A17), TAIL-appended right after `thr.v1`. HUB side:
+ * advertised on BOTH hub cap surfaces (`HubInfo.caps` / `hello_ack.caps`, kept byte-identical)
+ * iff the hub config carries `feishuBot.threads.rebind === true` (only an agent with the gate on
+ * ever writes that key). Either side missing the cap degrades silently: the agent answers
+ * `E_THR_UNSUPPORTED` LOCALLY with ZERO frames (D3 — an old hub silently drops unknown ops), the
+ * hub never attaches `ThreadMeta.rev` (§6 实施要点 4 — a closed-schema old agent would drop the
+ * whole cmd frame otherwise), and rebind/acquire ops stay unrouted. New optional ops ride the
+ * existing `thr_req`/`thr_res` frames, so there is NO PROTO bump (same 只加帧不改 rule as every
+ * cap above). Gate off ⇒ both caps arrays stay byte-identical (A16).
+ */
+export const THREAD_REBIND_CAP = "thr.rebind.v1";
+export const THREAD_REBIND_HUB_CAPS = [THREAD_REBIND_CAP] as const;
+export const THREAD_REBIND_AGENT_CAPS = [THREAD_REBIND_CAP] as const;
+
+/**
  * web-hub-slash-args plan §4.1 (P0 frozen surface): the cap advertising the `/` command
  * argument hint/completion channel — `CommandInfoWire.args` (§3.1) + the `complete_req` /
  * `complete_reply` frame pair (§4.1) + `POST /api/command/complete` (§4.2). r1 评审 #2

@@ -6,6 +6,7 @@ import {
   feishuNewDirectoryDecision,
   parseFeishuCommand,
 } from "../../../../src/web-hub/hub/feishu/router.js";
+import { createBindingTransfer } from "../../../../src/web-hub/hub/feishu/bindings-transfer.js";
 
 afterEach(cleanupF6);
 describe("F6 command grammar", () => {
@@ -52,7 +53,9 @@ describe("F6 routing intents and bindings", () => {
       prepared.durable?.();
     }
     expect(r.intents.map((i) => i.type)).toEqual(["list", "bound", "current"]);
-    expect(r.state.bindings.get("p2p:chat")!.rev).toBeGreaterThan(original);
+    // R2 (rebind-plan r3 §4.4): /use to the ALREADY-bound session is a true no-op — the intent
+    // is still emitted, but rev does not move.
+    expect(r.state.bindings.get("p2p:chat")!.rev).toBe(original);
     const unbind = await r.router.prepare(normalizedMessage("d", "/unbind"), r.identity);
     await r.state.commit();
     unbind.durable?.();
@@ -60,7 +63,8 @@ describe("F6 routing intents and bindings", () => {
     const rebound = await r.router.prepare(normalizedMessage("e", "/use One"), r.identity);
     await r.state.commit();
     rebound.durable?.();
-    expect(r.state.bindings.get("p2p:chat")!.rev).toBeGreaterThan(original + 1);
+    // R1/A3b: re-binding after an unbind is a normal create and the store-wide rev keeps climbing.
+    expect(r.state.bindings.get("p2p:chat")!.rev).toBeGreaterThan(original);
     expect(r.request).not.toHaveBeenCalled();
   });
   it("unbound plain messages are not held; unknown slash commands never forward", async () => {
@@ -133,6 +137,7 @@ describe("F6 routing intents and bindings", () => {
       state: r.state,
       sessions: r.sessions,
       requests: r.requests,
+      bindingTransfer: createBindingTransfer({ state: r.state, log: () => {} }),
       groupRootTopics: false,
       spawnScope: "known",
       preparePayload: async (m, _text, identity) => {
@@ -186,6 +191,7 @@ describe("F6 routing intents and bindings", () => {
       state: r.state,
       sessions: r.sessions,
       requests: r.requests,
+      bindingTransfer: createBindingTransfer({ state: r.state, log: () => {} }),
       groupRootTopics: false,
       spawnScope: "known",
       emit: (intent) => r.intents.push(intent),
@@ -239,6 +245,7 @@ describe("F6 routing intents and bindings", () => {
       state: r.state,
       sessions: r.sessions,
       requests: r.requests,
+      bindingTransfer: createBindingTransfer({ state: r.state, log: () => {} }),
       groupRootTopics: false,
       spawnScope: "known",
       preparePayload: async (m) => ({ body: "  ", messageIds: [m.messageId], uploadIds: [] }),

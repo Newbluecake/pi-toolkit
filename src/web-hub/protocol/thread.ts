@@ -86,6 +86,10 @@ export const THREAD_SUBS_MAX = 4;
 /** Max `status.threads` slots per status frame (§7.3). */
 export const THREAD_STATUS_SLOTS_MAX = 8;
 
+/** rebind-plan r3 §4.3: `thr_req{op:"rebind"}.to` selector cap (UTF-16 units — enforced by BOTH the
+ *  schema envelope and the `thrFrameOk` gate, which runs BEFORE the schema check). */
+export const THREAD_REBIND_TO_MAX = 128;
+
 // ----------------------------------------------------------------- cmd.thread (§7.2)
 
 /**
@@ -101,6 +105,11 @@ export interface ThreadMeta {
   label: string;
   sentAt: number;
   bypass?: true;
+  /** rebind-plan r3 §4.7 (P0b): the binding rev the hub observed for this prompt — one of the
+   *  agent directory's three TRUSTED rev sources. Attached ONLY when BOTH ends carry
+   *  `thr.rebind.v1` (§6 实施要点 4: the closed schema would make an OLD agent drop the whole
+   *  cmd frame otherwise); absent ⇒ byte-identical `cmd.thread` (G2b / A16). */
+  rev?: number;
 }
 export const ThreadMetaSchema = Type.Object(
   {
@@ -108,6 +117,7 @@ export const ThreadMetaSchema = Type.Object(
     label: Type.String({ pattern: THREAD_LABEL_CP_RE.source }),
     sentAt: Type.Integer({ minimum: 0 }),
     bypass: Type.Optional(Type.Literal(true)),
+    rev: Type.Optional(Type.Integer({ minimum: 0 })),
   },
   { additionalProperties: false },
 );
@@ -212,6 +222,28 @@ export const THREAD_ERROR_CODES = [
   /** session/install/generation mismatch or commit failure; effect none when pre-commit, unknown
    *  when the successor may already exist in memory (§8.3 persistence barrier). */
   "E_THR_STATE",
+  /** rebind-plan r3 §4.3 (P0b): the peer lacks `thr.rebind.v1` (agent-side LOCAL verdict — no
+   *  frame is ever sent). effect none. */
+  "E_THR_UNSUPPORTED",
+  /** rebind/acquire: the caller is not the thread's current binding holder. effect none. */
+  "E_THR_NO_OWNER",
+  /** rebind: `fromRev` does not match the current `binding.rev` (the caller's trusted
+   *  observation is outdated — re-acquire before retrying). effect none. */
+  "E_THR_STALE",
+  /** rebind: the `to` selector resolved to nothing / more than one / an offline / a read-only
+   *  session. effect none. */
+  "E_THR_TARGET_UNKNOWN",
+  "E_THR_TARGET_AMBIGUOUS",
+  "E_THR_TARGET_OFFLINE",
+  "E_THR_TARGET_READONLY",
+  /** rebind: the binding behind `h` no longer exists. effect none. */
+  "E_THR_NOT_BOUND",
+  /** rebind: the in-memory write succeeded but the `commit()` barrier failed. effect UNKNOWN —
+   *  the memory may already point at the target (§4.9 P3: do NOT blind-retry). */
+  "E_THR_COMMIT",
+  /** rebind: an identical `(h,to)` transfer is already in flight (dedup hit, §4.4). effect
+   *  UNKNOWN — the in-flight one may land. */
+  "E_THR_PENDING",
 ] as const;
 export type ThreadErrorCode = (typeof THREAD_ERROR_CODES)[number];
 
@@ -245,7 +277,30 @@ export interface ThrHandbackReqFrame {
   by: ThreadRunRef | "system";
   note: string;
 }
-export type ThrReqFrame = ThrPostReqFrame | ThrHandbackReqFrame;
+/** rebind-plan r3 §4.3 (P0b): agent→hub `thr_req{op:"rebind"}` — transfer the topic binding
+ *  behind `h` to the session `to` resolves to. Only ever SENT under the peer's `thr.rebind.v1`
+ *  cap (D3: an old hub silently drops unknown ops, so the agent pre-checks locally and answers
+ *  `E_THR_UNSUPPORTED` with ZERO frames). */
+export interface ThrRebindReqFrame {
+  t: "thr_req";
+  rid: string;
+  op: "rebind";
+  h: string;
+  sessionId: string;
+  to: string; // target selector (≤128)
+  fromRev: number; // the caller's last trusted binding-rev observation (§4.7), ≥0
+}
+/** rebind-plan r3 §4.3 (P0b): agent→hub `thr_req{op:"acquire"}` — the ONLY trusted directory
+ *  (re)entry: hub answers `{owned:true, label, rev}` iff the caller's CURRENT session holds the
+ *  binding; the agent then `reopen`s its directory entry (§3.2 step 7, §4.7). */
+export interface ThrAcquireReqFrame {
+  t: "thr_req";
+  rid: string;
+  op: "acquire";
+  h: string;
+  sessionId: string;
+}
+export type ThrReqFrame = ThrPostReqFrame | ThrHandbackReqFrame | ThrRebindReqFrame | ThrAcquireReqFrame;
 export const ThrReqSchema = Type.Union([
   Type.Object(
     {
@@ -273,6 +328,35 @@ export const ThrReqSchema = Type.Union([
     },
     strict,
   ),
+  // rebind-plan r3 §4.3 (P0b): the two rebind ops ride the SAME `thr_req` channel (no new frame
+  // type ⇒ no PROTO bump). An old hub's closed union rejects both ops — exactly why the agent
+  // pre-checks the peer's `thr.rebind.v1` cap and never sends them uncapped (D3).
+  Type.Object(
+    {
+      t: Type.Literal("thr_req"),
+      rid: RidSchema,
+      op: Type.Literal("rebind"),
+      h: HandleSchema,
+      sessionId: SessionIdSchema,
+      // 目标 selector（完整 sid / ≥6 唯一前缀 / 精确别名 / 精确 name）— the ≤128 gate is ALSO
+      // enforced by thrFrameOk, which runs BEFORE the schema check.
+      to: Type.String({ minLength: 1, maxLength: THREAD_REBIND_TO_MAX }),
+      // the caller's last TRUSTED binding-rev observation (§4.7), injected by the agent itself
+      // — never a model-supplied parameter.
+      fromRev: Type.Integer({ minimum: 0 }),
+    },
+    strict,
+  ),
+  Type.Object(
+    {
+      t: Type.Literal("thr_req"),
+      rid: RidSchema,
+      op: Type.Literal("acquire"),
+      h: HandleSchema,
+      sessionId: SessionIdSchema,
+    },
+    strict,
+  ),
 ]);
 
 /** hub→agent reply to `thr_req`, correlated by rid (fsb_res precedent; sent only under `thr.v1`).
@@ -281,7 +365,15 @@ export const ThrReqSchema = Type.Union([
 export type ThrResFrame =
   | { t: "thr_res"; rid: string; ok: true; data: ThrResOkData }
   | { t: "thr_res"; rid: string; ok: false; code: string; effect: "none" | "unknown" };
-export type ThrResOkData = { queued: true } | { requestId: string; dup?: true };
+export type ThrResOkData =
+  | { queued: true }
+  | { requestId: string; dup?: true }
+  // rebind-plan r3 §4.3 (P0b): per-op UNIQUE ok branches (D4) — `rebound` answers op:"rebind"
+  // (`sessionId` is the RESOLVED full sid, ready for the dispatch; `changed:false` is ONLY the
+  // same-target no-op, never a success-after-retry shape), `owned` answers op:"acquire" (`rev`
+  // is the hub's CURRENT binding rev — the directory's freshness source).
+  | { rebound: true; h: string; sessionId: string; rev: number; changed: boolean; label: string }
+  | { owned: true; h: string; label: string; rev: number };
 export const ThrResSchema = Type.Union([
   Type.Object(
     {
@@ -292,6 +384,26 @@ export const ThrResSchema = Type.Union([
         Type.Object({ queued: Type.Literal(true) }, strict),
         Type.Object(
           { requestId: Type.String({ pattern: THREAD_EVENT_ID_RE.source }), dup: Type.Optional(Type.Literal(true)) },
+          strict,
+        ),
+        Type.Object(
+          {
+            rebound: Type.Literal(true),
+            h: HandleSchema,
+            sessionId: SessionIdSchema,
+            rev: Type.Integer({ minimum: 0 }),
+            changed: Type.Boolean(),
+            label: Type.String({ pattern: THREAD_LABEL_CP_RE.source }),
+          },
+          strict,
+        ),
+        Type.Object(
+          {
+            owned: Type.Literal(true),
+            h: HandleSchema,
+            label: Type.String({ pattern: THREAD_LABEL_CP_RE.source }),
+            rev: Type.Integer({ minimum: 0 }),
+          },
           strict,
         ),
       ]),
@@ -352,9 +464,11 @@ export function utf8ByteLength(s: string): number {
  *       measure as XS_MAX_FRAME_BYTES / MAX_FRAME_BYTES, repo-wide convention);
  *   (b) `op:"post"` text: ≤ THREAD_POST_TEXT_MAX_BYTES UTF-8 BYTES — the §7.3 field budget a
  *       unit count would miss (3000 × "€" is 3000 units but 9000 bytes).
+ *   (c) `op:"rebind"` to: ≤ THREAD_REBIND_TO_MAX UTF-16 units (rebind-plan r3 §4.3).
  * Code-point-exact label/note caps need no runtime pass here — their surrogate-pair-aware
  * patterns already count code points. Called by messages.ts decodeWith for every thr_ frame,
- * BEFORE the schema check; inert until P2/P3 route the frames.
+ * BEFORE the schema check. The rebind/acquire ops are inert until the rebind packages route them
+ * (and an agent only ever SENDS them under the peer's `thr.rebind.v1` cap).
  */
 export function thrFrameOk(raw: unknown): boolean {
   try {
@@ -368,6 +482,16 @@ export function thrFrameOk(raw: unknown): boolean {
     (raw as Record<string, unknown>)["op"] === "post" &&
     typeof (raw as Record<string, unknown>)["text"] === "string" &&
     utf8ByteLength((raw as Record<string, unknown>)["text"] as string) > THREAD_POST_TEXT_MAX_BYTES
+  )
+    return false;
+  // rebind-plan r3 §4.3 (P0b): the rebind `to` selector cap, enforced HERE too because this gate
+  // runs BEFORE the schema check.
+  if (
+    raw !== null &&
+    typeof raw === "object" &&
+    (raw as Record<string, unknown>)["op"] === "rebind" &&
+    typeof (raw as Record<string, unknown>)["to"] === "string" &&
+    ((raw as Record<string, unknown>)["to"] as string).length > THREAD_REBIND_TO_MAX
   )
     return false;
   return true;

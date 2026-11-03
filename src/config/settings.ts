@@ -430,7 +430,8 @@ function applySecureDomainOverrides(settings: AgentSettings): AgentSettings {
       crossSession: { ...settings.fabric.crossSession, enabled: false },
       // fabric-thread arch §10/I11 (D8): thread subscription is an outbound push surface (worker
       // replies / handback re-injection) — secure/locked domains force it off, whatever the file says.
-      threads: { ...settings.fabric.threads, enabled: false },
+      // rebind-plan r3 §4.1 (A17): rebind inherits the same force-off (it rides the threads surface).
+      threads: { ...settings.fabric.threads, enabled: false, rebind: false },
     },
     externalAgents: { ...settings.externalAgents, droid: { ...settings.externalAgents.droid, enabled: false } },
     feishuNotify: { ...settings.feishuNotify, enabled: false },

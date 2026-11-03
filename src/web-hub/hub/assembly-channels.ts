@@ -22,6 +22,7 @@ import {
   SPAWN_MODEL_HUB_CAP,
   SPAWN_RELAUNCH_HUB_CAP,
   THREAD_CAP,
+  THREAD_REBIND_CAP,
   VERSION_HUB_CAP,
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
@@ -183,7 +184,11 @@ export function assembleHubCaps(ctx: HubAssembly): readonly string[] {
     // fabric-thread P2 (arch §7.1): `thr.v1` iff the hub config carries the `feishuBot.threads`
     // key (only a threads-on agent ever builds such a config — P3's buildHubConfig). Same
     // two-surface tail-append rule; absent ⇒ caps byte-identical (G2a).
-    ...(config.feishuBot?.threads === undefined ? [] : [THREAD_CAP]),
+    // rebind-plan r3 §4.2 (P0b): `thr.rebind.v1` rides IMMEDIATELY after `thr.v1`, iff
+    // `feishuBot.threads.rebind === true` (absent/false ⇒ tail byte-identical, A16).
+    ...(config.feishuBot?.threads === undefined
+      ? []
+      : [THREAD_CAP, ...(config.feishuBot.threads.rebind === true ? [THREAD_REBIND_CAP] : [])]),
     // fabric phase-2 X1: `xs.v1` iff `config.crossSession` (tail-appended, same two-surface rule;
     // absent ⇒ caps byte-identical). Reply cap shares the same gate plus reply !== false.
     // Channel-plan §3.1 (CH1): `xs.channel.v1` iff `config.crossSession` — a hub protocol

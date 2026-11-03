@@ -26,7 +26,7 @@
  * mutable state (I4): everything is per-instance, rebuilt with each runtime.
  */
 import { createHmac } from "node:crypto";
-import { THREAD_CAP } from "../../protocol/version.js";
+import { THREAD_CAP, THREAD_REBIND_CAP } from "../../protocol/version.js";
 import {
   THREAD_LABEL_CP_RE,
   THREAD_RUN_ID_RE,
@@ -99,6 +99,11 @@ export function feishuThreadMetaFor(input: {
   agentKey: string | undefined;
   installSecret: string | undefined;
   agentCaps: readonly string[] | undefined;
+  /** rebind-plan r3 §6 实施要点 4 (P0b): the HUB-side rebind gate (`feishuBot.threads.rebind
+   *  === true`). `rev` rides the meta ONLY when this AND the agent's `thr.rebind.v1` cap both
+   *  hold — an old agent's closed schema would drop the whole cmd frame otherwise (R4).
+   *  Unset/false ⇒ byte-identical `cmd.thread` (A16). */
+  rebind?: boolean;
 }): ThreadMeta | undefined {
   const { record } = input;
   if (record.chatType !== "group" || record.threadId === undefined) return undefined;
@@ -110,6 +115,8 @@ export function feishuThreadMetaFor(input: {
     label: sanitizeHeaderField(record.chatLabel),
     sentAt: Math.max(0, record.sourceCreatedAt ?? record.createdAt),
     ...(bypass ? { bypass: true as const } : {}),
+    // §4.7 trusted-source #1: the binding rev observed for this prompt (dual-end cap gate).
+    ...(input.rebind === true && input.agentCaps.includes(THREAD_REBIND_CAP) ? { rev: record.bindingRev } : {}),
   };
 }
 
@@ -240,6 +247,12 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
   const threadsCapSeen = new Set<string>();
   const postSeen = new Map<string, number>();
   const postBuckets = new Map<string, { min: number[]; hour: number[] }>();
+  /** rebind-plan r3 §4.4 R7 / D2: exactly-once close notification per `(key, before.rev)` — the
+   *  `/use` inbound durable hook and the shared transfer op (`notifyLifecycle:true`, rebind
+   *  package) may BOTH fire for the same write; the second hit is a no-op. The store-wide rev
+   *  counter strictly increases on every change, so distinct writes never collide. Instance-level
+   *  (I4), FIFO at 64. */
+  const closedSeen = new Set<string>();
 
   const RETAIN_MS = params.retainMin * 60_000;
 
@@ -293,7 +306,11 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
   /** §5.4: binding removed/rebound — finalize its retained requests and push `thr_closed`. */
   function onBindingClosed(key: string, before: FeishuBinding, reason: "unbound" | "rebound"): void {
     const secret = deps.installation()?.installSecret;
-    if (secret === undefined) return;
+    if (secret === undefined) return; // a no-secret invocation is a no-op; it consumes nothing
+    const dedupKey = `${key}\u0000${before.rev}`;
+    if (closedSeen.has(dedupKey)) return;
+    if (closedSeen.size >= 64) closedSeen.delete(closedSeen.keys().next().value!);
+    closedSeen.add(dedupKey);
     const h = feishuThreadHandle(secret, key);
     finalizeRetained((r) => r.bindingKey === key, "thread-closed");
     if (before.sessionId !== undefined) {
@@ -502,8 +519,10 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
       );
       return;
     }
-    // §8.3 handback is routed by the service to requests.handback (state-machine ownership);
-    // this module's thrReq only handles post. (Reached only by direct unit tests.)
+    // §8.3 handback is routed by the service to requests.handback (state-machine ownership), so
+    // it never lands here. rebind/acquire DO land here (service op routing, rebind-plan r3 §6
+    // 实施要点 2) — P0b ships no business logic for them, so they get the same E_THR_STATE a
+    // rebind-off hub owes (§4.1); the rebind packages replace this fallthrough with real branches.
     reply({
       t: "thr_res",
       rid: frame.rid,
@@ -521,6 +540,8 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
         agentKey,
         installSecret: deps.installation()?.installSecret,
         agentCaps: agentKey === undefined ? undefined : (deps.transport()?.getCaps(agentKey) ?? undefined),
+        // rebind-plan r3 §6 实施要点 4 (P0b): the hub-side half of the rev gate.
+        rebind: deps.config.rebind === true,
       });
     },
     routedResultOk(data: unknown, agentKey: string | undefined): ThreadRoutedResult | undefined {
@@ -546,6 +567,7 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
       disposed = true;
       for (const t of retainTimers.values()) clock.clearTimeout(t);
       retainTimers.clear();
+      closedSeen.clear();
       receiptSeen.clear();
       statusThreads.clear();
       postSeen.clear();

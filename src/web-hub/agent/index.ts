@@ -130,7 +130,7 @@ import { cmdHistoryStatusLevel, formatCmdHistoryStatusLines } from "./cmd-histor
 import { createCommandHandler, type InputEventLike, type MessageStartLike } from "./commands.js";
 import type { ThreadPromptPort } from "./commands.js";
 import type { ThreadCloseReason, ThreadStatusSlotWire } from "../protocol/thread.js";
-import { THREAD_CAP } from "../protocol/version.js";
+import { THREAD_CAP, THREAD_REBIND_AGENT_CAPS } from "../protocol/version.js";
 import { createCommandLedger } from "./ledger.js";
 import { createQueueMirror } from "./queue-mirror.js";
 import { createCompactionState } from "./compaction-state.js";
@@ -394,6 +394,10 @@ export interface WebHubDeps {
    *  ACTIVATE level by src/index.ts (settings + secure guards; NOT stack-dependent, so the cap
    *  is stable across session rebuilds). Unset ⇒ `thr.v1` never advertised. */
   threadsCapOn?: () => boolean;
+  /** rebind-plan r3 §4.2 (P0b): `threadsCapOn() ∧ fabric.threads.rebind` — same activate-level
+   *  stability rule. Unset/false ⇒ `thr.rebind.v1` never advertised (tail byte-identical, A16);
+   *  the rebind/acquire ops are only ever SENT under this cap on both ends (D3). */
+  threadsRebindCapOn?: () => boolean;
   /** §8.2 buildHubConfig's `feishuBot.threads` value (ALREADY-clamped window/reply params);
    *  unset ⇒ the key stays absent (hub threads off, byte-identical). */
   threadsHubConfig?: () => FeishuThreadsHubConfig | undefined;
@@ -1680,7 +1684,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // fabric.threads.enabled ∧ 非 secure`, computed at ACTIVATE level by src/index.ts
     // (secure domains force threads off in the settings parser already, D8/I11). Tail-appended
     // like xs/sched. Off ⇒ absent ⇒ the hub never attaches `cmd.thread` (G2a/G2b).
-    if (deps.threadsCapOn?.() === true) caps.push(THREAD_CAP);
+    // rebind-plan r3 §4.2 (P0b): `thr.rebind.v1` rides IMMEDIATELY after `thr.v1`, iff
+    // `threadsRebindCapOn()` (§4.2: `threadsCapOn() && rebindOn()` — the outer check already
+    // covers threadsCapOn).
+    if (deps.threadsCapOn?.() === true) {
+      caps.push(THREAD_CAP);
+      if (deps.threadsRebindCapOn?.() === true) caps.push(...THREAD_REBIND_AGENT_CAPS);
+    }
     return caps;
   };
 

@@ -579,6 +579,33 @@ describe("HubConfig.feishuBot normalizer", () => {
     expect(normalizeFeishuBotHubConfig({ ...good, staleMessageS: 3_600 })?.staleMessageS).toBe(3_600);
     expect(normalizeFeishuBotHubConfig({ ...good, files: { ...good.files, maxInboundMiB: 100 } })).toBeDefined();
   });
+
+  it("rebind-plan r3 §4.2 (P0b): threads.rebind rides the whitelist ONLY as a real boolean", () => {
+    const threads = {
+      handbackWindowMin: 10,
+      startTimeoutMin: 8,
+      retainMin: 15,
+      replyPerThreadPerMin: 6,
+      replyPerThreadPerHour: 60,
+    };
+    // absent ⇒ absent (byte-identical off state, A16)
+    expect(normalizeFeishuBotHubConfig({ ...good, threads })?.threads).toEqual(threads);
+    expect(normalizeFeishuBotHubConfig({ ...good, threads })?.threads).not.toHaveProperty("rebind");
+    // real booleans pass through verbatim
+    expect(normalizeFeishuBotHubConfig({ ...good, threads: { ...threads, rebind: true } })?.threads).toEqual({
+      ...threads,
+      rebind: true,
+    });
+    expect(normalizeFeishuBotHubConfig({ ...good, threads: { ...threads, rebind: false } })?.threads).toEqual({
+      ...threads,
+      rebind: false,
+    });
+    // wrong types are dropped (the threads block itself survives)
+    for (const bad of [1, "yes", null]) {
+      const out = normalizeFeishuBotHubConfig({ ...good, threads: { ...threads, rebind: bad } });
+      expect(out?.threads).toEqual(threads);
+    }
+  });
 });
 
 describe("settings ⇄ protocol parity (settings.ts cannot import protocol/feishu.ts)", () => {

@@ -719,6 +719,13 @@ export interface FeishuThreadsHubConfig {
   retainMin: number;
   replyPerThreadPerMin: number;
   replyPerThreadPerHour: number;
+  /** rebind-plan r3 §4.2 (P0b): present (and true) ⇔ the launching agent had
+   *  `fabric.threads.rebind` on — this is what lets the hub advertise `thr.rebind.v1` and
+   *  (in later packages) route the rebind/acquire ops. OPTIONAL: absent ⇔ off, so a
+   *  rebind-off config stays byte-identical (A16); an old hub's whitelist drops the key,
+   *  which is semantically correct (it never advertised the cap anyway).
+   */
+  rebind?: boolean;
 }
 
 function isInt(raw: unknown, min: number, max: number): raw is number {
@@ -744,6 +751,9 @@ function normalizeFeishuThreadsHubConfig(raw: unknown): FeishuThreadsHubConfig |
     retainMin: t["retainMin"],
     replyPerThreadPerMin: t["replyPerThreadPerMin"],
     replyPerThreadPerHour: t["replyPerThreadPerHour"],
+    // rebind-plan r3 §4.2 (P0b): whitelist passthrough — carried only when a real boolean,
+    // otherwise the key stays absent (absent = off; never invented).
+    ...(typeof t["rebind"] === "boolean" ? { rebind: t["rebind"] } : {}),
   };
 }
 

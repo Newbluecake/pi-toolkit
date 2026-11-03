@@ -123,6 +123,79 @@ describe("cmd.thread attach gate (§4.2)", () => {
   });
 });
 
+describe("cmd.thread rev attach gate (rebind-plan r3 §6 实施要点 4 / §4.7, P0b)", () => {
+  const caps = ["cmd.v1", "thr.v1"];
+  it("pure: rev rides ONLY when the hub gate AND the agent's thr.rebind.v1 both hold", () => {
+    const rec = RECORD({ bindingRev: 41 });
+    const both = [...caps, "thr.rebind.v1"];
+    const meta = feishuThreadMetaFor({ record: rec, agentKey: "a", installSecret: "s", agentCaps: both, rebind: true });
+    expect(meta).toEqual({
+      h: feishuThreadHandle("s", "grp:chat:t1"),
+      label: "ProjTopic",
+      sentAt: 1_790_000_000_123,
+      rev: 41,
+    });
+    // hub gate off/absent ⇒ no rev even for a rebind-capable agent (A16 byte-parity)
+    for (const rebind of [undefined, false] as const) {
+      const m = feishuThreadMetaFor({ record: rec, agentKey: "a", installSecret: "s", agentCaps: both, rebind });
+      expect(m).toBeDefined();
+      expect(m).not.toHaveProperty("rev");
+    }
+    // old agent (no thr.rebind.v1) ⇒ no rev even with the hub gate on — the closed schema would
+    // drop the whole cmd frame otherwise (R4)
+    const old = feishuThreadMetaFor({ record: rec, agentKey: "a", installSecret: "s", agentCaps: caps, rebind: true });
+    expect(old).toBeDefined();
+    expect(old).not.toHaveProperty("rev");
+  });
+
+  it("module: metaFor sources the hub gate from feishuBot.threads.rebind", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "feishu-thr-rev-"));
+    const clock = createFakeClock(1_790_000_000_000);
+    try {
+      const state = createFeishuState({ dir, clock: { ...systemFeishuClock, now: clock.now } });
+      await state.load();
+      const make = (rebind: boolean | undefined, agentCaps: string[]) =>
+        createFeishuThreads({
+          clock,
+          config: {
+            handbackWindowMin: 10,
+            startTimeoutMin: 8,
+            retainMin: 15,
+            replyPerThreadPerMin: 6,
+            replyPerThreadPerHour: 60,
+            ...(rebind === undefined ? {} : { rebind }),
+          },
+          state,
+          installation: () => ({ appId: "cli_test", gen: 1, ownerOpenId: OWNER, installSecret: "s", active: true }),
+          transport: () => ({ getCaps: () => agentCaps, send: () => true }),
+          agentForSession: () => "agent-1",
+          sessionOf: () => "session-1",
+          notice: async () => {},
+          enqueueNotice: async () => ({ ok: true, sendIds: [], durable: true, duplicate: false }),
+          addReceiptReaction: async () => true,
+          reactionsDenied: () => false,
+          deleteTypingReaction: async () => {},
+          run: (task) => void task(),
+          label: (sid) => sid,
+          targetFor: (r) => ({ scope: "topic", messageId: r.triggerMessageId }),
+          log: () => {},
+        });
+      const rec = RECORD({ bindingRev: 7 });
+      const on = make(true, ["thr.v1", "thr.rebind.v1"]);
+      expect(on.metaFor(rec, "agent-1")).toMatchObject({ rev: 7 });
+      on.dispose();
+      const off = make(undefined, ["thr.v1", "thr.rebind.v1"]);
+      expect(off.metaFor(rec, "agent-1")).not.toHaveProperty("rev");
+      off.dispose();
+      const oldAgent = make(true, ["thr.v1"]);
+      expect(oldAgent.metaFor(rec, "agent-1")).not.toHaveProperty("rev");
+      oldAgent.dispose();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("routed result validation (§8.1 step 1)", () => {
   const ok = (thread: unknown) => ({ op: "prompt", delivery: "observed", thread });
   it("accepts a well-formed routed payload", () => {

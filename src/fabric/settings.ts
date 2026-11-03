@@ -89,6 +89,12 @@ export interface FabricThreadSettings {
   replyPerThreadPerHour: number;
   /** §8.1 receipt policy — phase-1 vocabulary: "first". */
   receipt: FabricThreadReceiptMode;
+  /** rebind-plan r3 §4.1 (P0b): Feishu topic REBIND (`thr.rebind.v1` — the rebind/acquire ops,
+   *  the dual-end cap, the hub config leaf). Default false. OPTIONAL + omitted from the frozen
+   *  defaults on purpose: an absent key IS off, and `DEFAULT_SETTINGS` must stay byte-identical
+   *  under rebind=false (the settings corpus pins it; §4.1). Read as `rebind === true`.
+   *  Secure/locked domains force it false (I11/D8, A17). */
+  rebind?: boolean;
   /** P4 §8.2 ③ (parse artifact, NOT a settings key): true ⇔ the shared window clamp changed at
    *  least one leaf — `stack.ts`'s `statusLine()` appends the ` · cfg clamped` suffix for
    *  `/agent status`. Never serialized (setting-specs knows nothing of it). */
@@ -142,6 +148,9 @@ export function parseFabricThreadSettings(input: unknown): FabricThreadSettings 
       ...FABRIC_THREADS_REPLY_PER_HOUR_BOUNDS,
     ),
     receipt: value.receipt === "first" ? "first" : defaults.receipt,
+    // rebind-plan r3 §4.1 (P0b): omitted unless the user wrote a real boolean — absent = off,
+    // keeping every parsed rebind-off block byte-identical to the pre-feature shape (corpus).
+    ...(typeof value.rebind === "boolean" ? { rebind: value.rebind } : {}),
     windowClamped: window.changes.length > 0,
   };
 }

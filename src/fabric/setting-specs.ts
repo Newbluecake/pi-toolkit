@@ -29,6 +29,13 @@ export const FABRIC_SETTING_SPECS: Record<string, SettingSpec> = {
     "fabric.threads.enabled",
     "Thread subscription fast-path for Feishu group topics (needs fabric.enabled)",
   ),
+  // rebind-plan r3 §4.1 (P0b): topic rebind hand-off (thr.rebind.v1). Non-live, read once at
+  // stack build like `enabled`; default off and omitted-from-defaults (corpus byte-parity,
+  // A16); D8 secure/locked domains force it off.
+  "fabric.threads.rebind": bool(
+    "fabric.threads.rebind",
+    "Feishu topic rebind/acquire hand-off between main sessions (needs fabric.threads.enabled)",
+  ),
   "fabric.threads.maxSubsPerRun": count("fabric.threads.maxSubsPerRun", 0, "Thread subscriptions per run"),
   "fabric.threads.maxSubsPerThread": count("fabric.threads.maxSubsPerThread", 0, "Subscribers per thread"),
   "fabric.threads.maxSubs": count("fabric.threads.maxSubs", 0, "Thread subscriptions per session"),

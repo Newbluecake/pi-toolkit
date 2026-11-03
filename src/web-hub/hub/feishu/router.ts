@@ -1,6 +1,7 @@
 /** F6: first-line command grammar, durable binding pointers and typed F8 work intents. */
 import { FEISHU_RECEIVED_BODY_MAX_BYTES, sanitizeHeaderField } from "../../protocol/feishu.js";
 import type { FeishuIdentityContext } from "./admission.js";
+import type { BindingTransfer } from "./bindings-transfer.js";
 import type { FeishuMessage, FeishuPreparedInbound } from "./inbound.js";
 import type { FeishuRequests } from "./requests.js";
 import { feishuBatchIdentity } from "./requests.js";
@@ -98,6 +99,9 @@ export interface FeishuRouterDeps {
   state: FeishuState;
   sessions: FeishuSessions;
   requests: FeishuRequests;
+  /** rebind-plan r3 §4.4 D1: `/use` writes bindings ONLY through the shared transfer op
+   *  (`notifyLifecycle:false` — the inbound durable hook stays its lifecycle source). */
+  bindingTransfer: BindingTransfer;
   groupRootTopics: boolean;
   spawnScope: "known" | "roots";
   /** F1: `/schedule` is recognised (HubConfig.schedule present). Absent ⇒ legacy behavior. */
@@ -153,16 +157,21 @@ export function createFeishuRouter(deps: FeishuRouterDeps) {
         const selected = deps.sessions.select(message.chatId, message.senderOpenId, command.selector);
         if (!selected.ok) notice(selected.code);
         else {
-          const bound = state.bindings.set(key, {
-            chatId: message.chatId,
-            chatType: message.chatType,
-            ...(message.threadId ? { threadId: message.threadId } : {}),
-            sessionId: selected.row.sessionId,
-            label: sanitizeHeaderField(selected.row.name),
-            offline: null,
+          // D1/R1/R4: the shared write op keeps first binds and offline selections legal and
+          // preserves the identity fields; R2 makes a same-target /use a true no-op.
+          const result = await deps.bindingTransfer.transfer({
+            key,
+            target: { sessionId: selected.row.sessionId, label: selected.row.name },
+            identity: {
+              chatId: message.chatId,
+              chatType: message.chatType,
+              ...(message.threadId ? { threadId: message.threadId } : {}),
+            },
+            reason: "rebound",
+            notifyLifecycle: false,
           });
-          if (!bound.ok) notice("bindings-full");
-          else intents.push({ type: "bound", message, binding: bound.value });
+          if (!result.ok) notice("bindings-full");
+          else intents.push({ type: "bound", message, binding: result.binding });
         }
       } else if (command.op === "cur")
         intents.push({ type: "current", message, binding: state.bindings.get(key), rows: deps.sessions.rows() });

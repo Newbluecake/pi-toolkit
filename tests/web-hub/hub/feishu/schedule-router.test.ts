@@ -5,6 +5,7 @@ import {
   parseFeishuCommand,
   type FeishuRouterIntent,
 } from "../../../../src/web-hub/hub/feishu/router.js";
+import { createBindingTransfer } from "../../../../src/web-hub/hub/feishu/bindings-transfer.js";
 import { cleanupF6, f6Rig, normalizedMessage, OTHER } from "../../../fixtures/feishu/f6.js";
 
 afterEach(cleanupF6);
@@ -39,6 +40,7 @@ async function scheduleRouter() {
     state: r.state,
     sessions: r.sessions,
     requests: r.requests,
+    bindingTransfer: createBindingTransfer({ state: r.state, log: () => {} }),
     groupRootTopics: false,
     spawnScope: "known",
     schedule: true,
@@ -103,6 +105,7 @@ async function scheduleRouterRaw() {
     state: r.state,
     sessions: r.sessions,
     requests: r.requests,
+    bindingTransfer: createBindingTransfer({ state: r.state, log: () => {} }),
     groupRootTopics: false,
     spawnScope: "known",
     schedule: true,
