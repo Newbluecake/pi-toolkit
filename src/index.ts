@@ -72,7 +72,7 @@ import { createGoalCommand } from "./goal/command.js";
 import { createGoalLoopHook } from "./goal/hook.js";
 import { persistGoalRecord } from "./goal/store.js";
 import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/workflow-tool.js";
-import { registerWebSearchTool } from "./web-search/index.js";
+import { registerWebSearchTool } from "./web-tools/index.js";
 import { wireDate } from "./date/index.js";
 import { wireTodo } from "./todo/index.js";
 import { jevBashJobsFrom, wireMemory } from "./memory/index.js";

@@ -1,26 +1,27 @@
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import type { SearchResponse } from "../../src/web-search/config.js";
-import { formatResponse, providerLabel, providerOrder, truncateField } from "../../src/web-search/format.js";
-import { codexSearchEndpoint } from "../../src/web-search/providers.js";
+import type { SearchResponse } from "../../src/web-tools/config.js";
+import { formatResponse, providerLabel, providerOrder, truncateField } from "../../src/web-tools/format.js";
+import { codexSearchEndpoint } from "../../src/web-tools/providers.js";
 
 describe("providerLabel", () => {
-  it("labels all four providers", () => {
+  it("labels all five providers", () => {
     expect(providerLabel("codex")).toBe("Codex (claude2api)");
     expect(providerLabel("serpapi")).toBe("SerpAPI");
+    expect(providerLabel("deepseek")).toBe("DeepSeek");
     expect(providerLabel("bocha")).toBe("Bocha");
     expect(providerLabel("tavily")).toBe("Tavily");
   });
 });
 
 describe("providerOrder", () => {
-  it("returns the default order for auto", () => {
-    expect(providerOrder("auto")).toEqual(["codex", "serpapi", "bocha", "tavily"]);
+  it("returns the default order for auto (deepseek after serpapi, before bocha)", () => {
+    expect(providerOrder("auto")).toEqual(["codex", "serpapi", "deepseek", "bocha", "tavily"]);
   });
 
   it("pins the preferred provider first and keeps the rest as fallback", () => {
-    expect(providerOrder("tavily")).toEqual(["tavily", "codex", "serpapi", "bocha"]);
-    expect(providerOrder("bocha")).toEqual(["bocha", "codex", "serpapi", "tavily"]);
+    expect(providerOrder("tavily")).toEqual(["tavily", "codex", "serpapi", "deepseek", "bocha"]);
+    expect(providerOrder("deepseek")).toEqual(["deepseek", "codex", "serpapi", "bocha", "tavily"]);
   });
 });
 

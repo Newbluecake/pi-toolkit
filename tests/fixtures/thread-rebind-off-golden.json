@@ -2,6 +2,7 @@
   "note": "threads-on × rebind-off golden (rebind-plan r3 §7 A16), captured before the rebind wire/settings/cap changes. Never regenerate to fix a diff.",
   "mainSessionTools": [
     "web_search",
+    "web_fetch",
     "TaskCreate",
     "TaskList",
     "TaskGet",

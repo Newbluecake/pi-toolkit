@@ -6,7 +6,7 @@ import {
   isRetryableError,
   sleep,
   withRequestTimeout,
-} from "../../src/web-search/resilience.js";
+} from "../../src/web-tools/resilience.js";
 import { redactSecrets } from "../../src/core/redact.js";
 
 describe("isRetryableError", () => {

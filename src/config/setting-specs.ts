@@ -121,7 +121,10 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "extend.enabled": bool("extend.enabled", "Timeout grace + extend_subagent_timeout tool"),
   "hud.enabled": bool("hud.enabled", "Merged HUD: take over the footer (off restores pi's built-in footer)"),
   ...WEBHUB_SETTING_SPECS,
-  "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),
+  "webSearch.enabled": bool(
+    "webSearch.enabled",
+    "Merged web_search + web_fetch tools (Codex/SerpAPI/DeepSeek/Bocha/Tavily failover)",
+  ),
   "date.enabled": bool(
     "date.enabled",
     "Inject the current date and time ([date] YYYY-MM-DD Ddd HH:MM (TZ) marker) on a session's first turn, when the day rolls over, and on a new turn after 1h without an injection (main + child sessions)",

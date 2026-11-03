@@ -1,23 +1,28 @@
 /**
- * web_search tool: Codex + SerpAPI + Bocha + Tavily with automatic failover.
+ * web-tools module: the web_search tool (Codex + SerpAPI + DeepSeek + Bocha +
+ * Tavily with automatic failover) and the web_fetch tool (DeepSeek fetch API,
+ * URL ⇒ Markdown).
  *
  * Merged from the standalone web-search extension
- * (~/.pi/agent/extensions/web-search.ts); behavior, tool description,
+ * (~/.pi/agent/extensions/web-search.ts); web_search behavior, tool name,
  * promptSnippet/promptGuidelines and the credentials file path
  * (~/.config/pi/web-search.env, overridable via PI_WEB_SEARCH_ENV_FILE)
- * are preserved verbatim.
+ * are preserved verbatim. The module directory was renamed web-search →
+ * web-tools when DeepSeek + web_fetch were added; the settings key stays
+ * `webSearch.*` and the credentials file keeps its old name on purpose
+ * (I7-style: user-facing/runtime identifiers never move).
  *
- * Entry contract (merge-plan D6, package A): `registerWebSearchTool(pi)`.
- * Settings gating happens on the caller side (assembly package) — this
- * module reads no settings.
+ * Entry contract (merge-plan D6, package A): `registerWebSearchTool(pi)`
+ * registers BOTH tools; settings gating happens on the caller side
+ * (assembly package) — this module reads no settings.
  */
 
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import { getSearchConfig, type ProviderPreference, type SearchProvider, type SearchResponse } from "./config.js";
 import { providerLabel, providerOrder, formatResponse } from "./format.js";
-import { searchBocha, searchCodex, searchSerpApi, searchTavily } from "./providers.js";
+import { deepseekFetch, searchBocha, searchCodex, searchDeepseek, searchSerpApi, searchTavily } from "./providers.js";
 import { HttpError, MAX_ATTEMPTS, backoffDelay, errorMessage, isRetryableError, sleep } from "./resilience.js";
 
 const webSearchParameters = Type.Object({
@@ -35,6 +40,7 @@ const webSearchParameters = Type.Object({
         Type.Literal("auto"),
         Type.Literal("codex"),
         Type.Literal("serpapi"),
+        Type.Literal("deepseek"),
         Type.Literal("bocha"),
         Type.Literal("tavily"),
       ],
@@ -45,7 +51,7 @@ const webSearchParameters = Type.Object({
   ),
   engine: Type.Optional(
     Type.Union([Type.Literal("google"), Type.Literal("bing"), Type.Literal("duckduckgo"), Type.Literal("baidu")], {
-      description: "SerpAPI search engine (default google; ignored by Codex, Tavily, and Bocha).",
+      description: "SerpAPI search engine (default google; ignored by Codex, DeepSeek, Tavily, and Bocha).",
     }),
   ),
   hl: Type.Optional(Type.String({ description: "SerpAPI UI language code, e.g. 'en', 'zh-cn'." })),
@@ -59,7 +65,7 @@ export function createWebSearchTool(): ToolDefinition<typeof webSearchParameters
     name: "web_search",
     label: "Web Search",
     description:
-      "Search the web through Codex, SerpAPI, Bocha, or Tavily with automatic provider failover. " +
+      "Search the web through Codex, SerpAPI, DeepSeek, Bocha, or Tavily with automatic provider failover. " +
       "The preferred provider is attempted first; retryable failures (network, timeout, 429, 5xx) " +
       "are retried with exponential backoff, then fall back to the other configured providers. " +
       `Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
@@ -67,7 +73,7 @@ export function createWebSearchTool(): ToolDefinition<typeof webSearchParameters
     promptGuidelines: [
       "Use web_search when the user needs current, external, or up-to-date information that may be beyond training data (news, versions, docs, prices, etc.).",
       "Prefer specific, keyword-rich queries with web_search; cite the returned URLs in your answer.",
-      "Use web_search provider=auto unless the user explicitly requests a specific provider; auto tries Codex, then SerpAPI, Bocha, and Tavily.",
+      "Use web_search provider=auto unless the user explicitly requests a specific provider; auto tries Codex, then SerpAPI, DeepSeek, Bocha, and Tavily.",
     ],
     parameters: webSearchParameters,
 
@@ -81,7 +87,7 @@ export function createWebSearchTool(): ToolDefinition<typeof webSearchParameters
 
       if (configuredProviders.length === 0) {
         throw new Error(
-          "No web search provider is configured. Set CODEX_SEARCH_API_KEY + CODEX_SEARCH_BASE_URL, SERPAPI_API_KEY, BOCHA_API_KEY and/or TAVILY_API_KEY in the environment or ~/.config/pi/web-search.env.",
+          "No web search provider is configured. Set CODEX_SEARCH_API_KEY + CODEX_SEARCH_BASE_URL, SERPAPI_API_KEY, DEEPSEEK_API_KEY, BOCHA_API_KEY and/or TAVILY_API_KEY in the environment or ~/.config/pi/web-search.env.",
         );
       }
 
@@ -107,6 +113,8 @@ export function createWebSearchTool(): ToolDefinition<typeof webSearchParameters
               keys.serpapi,
               dispatchSignal,
             );
+          case "deepseek":
+            return searchDeepseek(dispatchParams.query, num, keys.deepseek, dispatchSignal);
           case "bocha":
             return searchBocha(dispatchParams.query, num, keys.bocha, dispatchSignal);
           case "tavily":
@@ -202,6 +210,92 @@ export function createWebSearchTool(): ToolDefinition<typeof webSearchParameters
   };
 }
 
+const webFetchParameters = Type.Object({
+  url: Type.String({ description: "The http(s) URL to fetch." }),
+});
+
+export function createWebFetchTool(): ToolDefinition<typeof webFetchParameters> {
+  return {
+    name: "web_fetch",
+    label: "Web Fetch",
+    description:
+      "Fetch a web page through the DeepSeek fetch API and return its title and content as Markdown. " +
+      "Requires DEEPSEEK_API_KEY (environment or ~/.config/pi/web-search.env). " +
+      `Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
+    promptSnippet: "Fetch a URL and read its content as Markdown",
+    promptGuidelines: [
+      "Use web_fetch to read the full content of a specific URL (e.g. a promising result from web_search); it returns the page as Markdown.",
+      "web_fetch is backed by the DeepSeek fetch API; if it reports DEEPSEEK_API_KEY is missing, work from web_search summaries instead.",
+    ],
+    parameters: webFetchParameters,
+
+    async execute(_toolCallId, params, signal, onUpdate, _ctx) {
+      let parsed: URL;
+      try {
+        parsed = new URL(params.url);
+      } catch {
+        throw new Error(`Invalid URL: ${params.url}`);
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error(`Only http(s) URLs can be fetched: ${params.url}`);
+      }
+
+      const { keys } = getSearchConfig();
+      const apiKey = keys.deepseek;
+      if (!apiKey) {
+        throw new Error(
+          "web_fetch needs a DeepSeek API key. Set DEEPSEEK_API_KEY in the environment or ~/.config/pi/web-search.env.",
+        );
+      }
+
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        try {
+          const result = await deepseekFetch(params.url, apiKey, signal);
+          const output = result.title ? `# ${result.title}\n\n${result.content}` : result.content;
+          const truncation = truncateHead(output, {
+            maxLines: DEFAULT_MAX_LINES,
+            maxBytes: DEFAULT_MAX_BYTES,
+          });
+          const text = truncation.truncated
+            ? `${truncation.content}\n\n[Output truncated to ${truncation.outputLines} lines or ${formatSize(truncation.outputBytes)}.]`
+            : truncation.content;
+          return {
+            content: [{ type: "text", text }],
+            details: {
+              url: params.url,
+              title: result.title,
+              truncated: truncation.truncated,
+            },
+          };
+        } catch (error) {
+          if (signal?.aborted) throw new Error("Web fetch cancelled.");
+          lastError = error;
+          const status = error instanceof HttpError ? error.status : undefined;
+          const body = error instanceof HttpError ? error.responseBody : undefined;
+          if (attempt < MAX_ATTEMPTS && isRetryableError(error, status, body)) {
+            const delay = Math.round(backoffDelay(attempt));
+            onUpdate?.({
+              content: [
+                {
+                  type: "text",
+                  text: `DeepSeek fetch attempt ${attempt} failed (${errorMessage(error, [apiKey])}); retrying in ${delay}ms...`,
+                },
+              ],
+              details: {},
+            });
+            await sleep(delay, signal);
+            continue;
+          }
+          break;
+        }
+      }
+      throw new Error(`Web fetch failed: ${errorMessage(lastError, [apiKey])}`);
+    },
+  };
+}
+
 export function registerWebSearchTool(pi: ExtensionAPI): void {
   pi.registerTool(createWebSearchTool());
+  pi.registerTool(createWebFetchTool());
 }

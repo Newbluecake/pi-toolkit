@@ -2,6 +2,7 @@
   "note": "xs-off golden captured from dev before XS0 (fabric-cross-session phase2-plan §2.8 H3). Never regenerate to fix a diff.",
   "mainSessionTools": [
     "web_search",
+    "web_fetch",
     "TaskCreate",
     "TaskList",
     "TaskGet",

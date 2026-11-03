@@ -2,6 +2,7 @@
   "default": {
     "calls": [
       "registerTool(web_search)",
+      "registerTool(web_fetch)",
       "registerMessageRenderer(subagent:date)",
       "on(session_start)",
       "on(before_agent_start)",
@@ -193,7 +194,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 191,
+    "count": 192,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",
@@ -377,6 +378,7 @@
   "max": {
     "calls": [
       "registerTool(web_search)",
+      "registerTool(web_fetch)",
       "registerMessageRenderer(subagent:date)",
       "on(session_start)",
       "on(before_agent_start)",
@@ -623,7 +625,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 246,
+    "count": 247,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",
@@ -759,6 +761,7 @@
   "thread-main": {
     "calls": [
       "registerTool(web_search)",
+      "registerTool(web_fetch)",
       "registerMessageRenderer(subagent:date)",
       "on(session_start)",
       "on(before_agent_start)",
@@ -1007,7 +1010,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 248,
+    "count": 249,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",
@@ -1047,6 +1050,7 @@
   "thread-child": {
     "calls": [
       "registerTool(web_search)",
+      "registerTool(web_fetch)",
       "registerMessageRenderer(subagent:date)",
       "on(session_start)",
       "on(before_agent_start)",
@@ -1102,7 +1106,7 @@
       "on(agent_end)",
       "on(session_compact)"
     ],
-    "count": 55,
+    "count": 56,
     "phase2": [],
     "phase2Count": 0
   }

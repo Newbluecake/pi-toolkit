@@ -45,9 +45,12 @@
 - 后台任务完成时会在你空闲的间隙才中断提问（`askUser.backgroundInterrupt.*`，默认开）。
 - 开着 Web hub 时 TUI 与网页竞速作答，见 [Web Hub](web-hub.md)。
 
-## `web_search`
+## `web_search` / `web_fetch`
 
-`webSearch.enabled` 默认 `true`。Codex / SerpAPI / Bocha / Tavily 四供应商自动 failover（网络错误 / 超时 / 429 / 5xx 指数退避后切换），主会话与子会话均可用。凭证放环境变量或 `~/.config/pi/web-search.env`（建议 0600）：`CODEX_SEARCH_API_KEY` + `CODEX_SEARCH_BASE_URL`（可选 `CODEX_SEARCH_MODEL`、`CODEX_SEARCH_TLS_INSECURE`）、`SERPAPI_API_KEY`、`BOCHA_API_KEY`、`TAVILY_API_KEY`，至少配一家；`PI_WEB_SEARCH_ENV_FILE` 可覆盖该路径。
+`webSearch.enabled` 默认 `true`，两个工具同开关注册，主会话与子会话均可用。凭证放环境变量或 `~/.config/pi/web-search.env`（建议 0600）：`CODEX_SEARCH_API_KEY` + `CODEX_SEARCH_BASE_URL`（可选 `CODEX_SEARCH_MODEL`、`CODEX_SEARCH_TLS_INSECURE`）、`SERPAPI_API_KEY`、`DEEPSEEK_API_KEY`、`BOCHA_API_KEY`、`TAVILY_API_KEY`，至少配一家；`PI_WEB_SEARCH_ENV_FILE` 可覆盖该路径。
+
+- `web_search`：Codex / SerpAPI / DeepSeek / Bocha / Tavily 五供应商自动 failover（auto 顺序即此序，网络错误 / 超时 / 429 / 5xx 指数退避后切换；只派有 key 的供应商）。DeepSeek 结果给模型看的是官方响应里 600-800 字的 `summary` 字段（比 UI 用 snippet 信息量大）。
+- `web_fetch`：抓单个 http(s) URL，经 DeepSeek Fetch API 返回标题 + Markdown 正文；需要 `DEEPSEEK_API_KEY`（缺 key 直接报错，不发请求）。
 
 ## HUD footer
 

@@ -2,6 +2,7 @@
   "note": "threads-off golden captured from dev before P0 (fabric-thread arch §9.3; fabric.enabled=true, threads off). Never regenerate to fix a diff.",
   "mainSessionTools": [
     "web_search",
+    "web_fetch",
     "TaskCreate",
     "TaskList",
     "TaskGet",

@@ -12,6 +12,8 @@ export function providerLabel(provider: SearchProvider): string {
       return "Codex (claude2api)";
     case "serpapi":
       return "SerpAPI";
+    case "deepseek":
+      return "DeepSeek";
     case "bocha":
       return "Bocha";
     case "tavily":
@@ -19,7 +21,7 @@ export function providerLabel(provider: SearchProvider): string {
   }
 }
 
-const DEFAULT_PROVIDER_ORDER: SearchProvider[] = ["codex", "serpapi", "bocha", "tavily"];
+const DEFAULT_PROVIDER_ORDER: SearchProvider[] = ["codex", "serpapi", "deepseek", "bocha", "tavily"];
 
 export function providerOrder(preference: ProviderPreference): SearchProvider[] {
   if (preference === "auto") return DEFAULT_PROVIDER_ORDER;

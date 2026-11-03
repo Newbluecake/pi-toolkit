@@ -1,6 +1,7 @@
 /**
- * Web search configuration: provider credentials from the process environment
- * or a fallback env file (default ~/.config/pi/web-search.env).
+ * Web tools configuration: provider credentials from the process environment
+ * or a fallback env file (default ~/.config/pi/web-search.env — the file keeps
+ * its pre-rename name on purpose; the module is now web-tools).
  *
  * Merged from the standalone web-search extension
  * (~/.pi/agent/extensions/web-search.ts); behavior preserved verbatim.
@@ -10,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
-export type SearchProvider = "codex" | "serpapi" | "bocha" | "tavily";
+export type SearchProvider = "codex" | "serpapi" | "deepseek" | "bocha" | "tavily";
 export type ProviderPreference = "auto" | SearchProvider;
 
 export interface SearchResult {
@@ -94,6 +95,7 @@ export function getSearchConfig(): WebSearchConfig {
     keys: {
       codex: value("CODEX_SEARCH_API_KEY"),
       serpapi: value("SERPAPI_API_KEY"),
+      deepseek: value("DEEPSEEK_API_KEY"),
       bocha: value("BOCHA_API_KEY"),
       tavily: value("TAVILY_API_KEY"),
     },

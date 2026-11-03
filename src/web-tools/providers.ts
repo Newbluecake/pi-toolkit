@@ -1,5 +1,6 @@
 /**
- * Search provider implementations: Codex (claude2api), SerpAPI, Tavily, Bocha.
+ * Search provider implementations: Codex (claude2api), SerpAPI, DeepSeek, Tavily, Bocha.
+ * Also the DeepSeek fetch endpoint behind the web_fetch tool.
  * Each returns a normalized SearchResponse or throws (HttpError for HTTP
  * failures so the caller can decide whether to retry/fail over).
  */
@@ -62,6 +63,28 @@ interface CodexSearchResponse {
   results?: CodexSearchResult[];
   error?: { message?: string } | string;
   // encrypted_output is intentionally neither parsed nor returned to the model.
+}
+
+interface DeepSeekSearchResult {
+  rerank_score?: number;
+  title?: string;
+  url?: string;
+  snippet?: string;
+  summary?: string;
+  content?: string;
+  site_name?: string;
+  site_icon?: string;
+  date?: string | null;
+  authority?: string;
+}
+
+interface DeepSeekSearchResponse {
+  results?: DeepSeekSearchResult[];
+}
+
+interface DeepSeekFetchResponse {
+  title?: string;
+  content?: string;
 }
 
 interface BochaWebPage {
@@ -352,6 +375,112 @@ export async function searchTavily(
       };
     }),
   };
+}
+
+export async function searchDeepseek(
+  query: string,
+  num: number,
+  apiKey: string,
+  signal: AbortSignal | undefined,
+): Promise<SearchResponse> {
+  const response = await withRequestTimeout(signal, (attemptSignal) =>
+    fetch("https://api.deepseek.com/v1/tools/search", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query,
+        count: num,
+        // need_content stays false: the 600-800 char `summary` field is the
+        // model-facing payload; full content is what web_fetch is for.
+        need_content: false,
+      }),
+      signal: attemptSignal,
+    }),
+  ).catch((error) => {
+    throw new Error(`network request failed: ${errorMessage(error, [apiKey])}`);
+  });
+
+  if (!response.ok) {
+    const body = await readErrorBody(response, apiKey);
+    throw new HttpError(
+      `request failed: ${response.status} ${response.statusText}${body ? ` — ${body}` : ""}`,
+      response.status,
+      body,
+    );
+  }
+
+  let payload: DeepSeekSearchResponse;
+  try {
+    payload = (await response.json()) as DeepSeekSearchResponse;
+  } catch {
+    throw new Error("returned invalid JSON");
+  }
+  if (!Array.isArray(payload.results)) throw new Error("returned an invalid results payload");
+
+  return {
+    provider: "deepseek" satisfies SearchProvider,
+    results: payload.results.slice(0, num).map((result) => ({
+      title: result.title ?? "(untitled)",
+      url: result.url,
+      // summary (600-800 chars, written for model consumption) carries more
+      // information than the 100-200 char UI snippet; fall back when absent.
+      snippet: truncateField(result.summary ?? result.snippet, 2_000),
+      source: result.site_name,
+      date: result.date ?? undefined,
+      score: result.rerank_score,
+    })),
+  };
+}
+
+export interface WebFetchResult {
+  title?: string | undefined;
+  content: string;
+}
+
+/**
+ * DeepSeek fetch endpoint: POST /v1/tools/fetch {url} ⇒ {title, content} where
+ * content is Markdown. Backs the web_fetch tool.
+ */
+export async function deepseekFetch(
+  url: string,
+  apiKey: string,
+  signal: AbortSignal | undefined,
+): Promise<WebFetchResult> {
+  const response = await withRequestTimeout(signal, (attemptSignal) =>
+    fetch("https://api.deepseek.com/v1/tools/fetch", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ url }),
+      signal: attemptSignal,
+    }),
+  ).catch((error) => {
+    throw new Error(`network request failed: ${errorMessage(error, [apiKey])}`);
+  });
+
+  if (!response.ok) {
+    const body = await readErrorBody(response, apiKey);
+    throw new HttpError(
+      `request failed: ${response.status} ${response.statusText}${body ? ` — ${body}` : ""}`,
+      response.status,
+      body,
+    );
+  }
+
+  let payload: DeepSeekFetchResponse;
+  try {
+    payload = (await response.json()) as DeepSeekFetchResponse;
+  } catch {
+    throw new Error("returned invalid JSON");
+  }
+  if (typeof payload.content !== "string") throw new Error("returned an invalid content payload");
+
+  return { title: payload.title, content: payload.content };
 }
 
 export async function searchBocha(
