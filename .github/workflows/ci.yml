@@ -33,6 +33,12 @@ jobs:
       - name: Build web UI
         run: npm run build:web && npm run check:web
 
+      # startup-bundle plan r3 §6.3: the bundle gates run BEFORE the test suite (the dispatcher
+      # suite asserts the on-disk artifact matches a fresh build), and they enforce reproducibility,
+      # the 6 MB budget, src-only inputs and zero dynamic imports.
+      - name: Build bundle (gated)
+        run: npm run build:bundle
+
       - name: Test
         run: npm test
         env:
