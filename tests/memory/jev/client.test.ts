@@ -5,7 +5,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createJevClient } from "../../../src/memory/jev/client.js";
 import { clearHealthTable } from "../../../src/memory/jev/health.js";
-import type { HealthTable, JevConfig, JevRequest, TokenBucket } from "../../../src/memory/jev/contracts.js";
+import {
+  DEFAULT_JEV_FAST_PATH,
+  type HealthTable,
+  type JevConfig,
+  type JevRequest,
+  type TokenBucket,
+} from "../../../src/memory/jev/contracts.js";
 import { createFakeRegistry } from "./helpers/fake-registry.js";
 
 afterEach(() => clearHealthTable());
@@ -47,6 +53,7 @@ function cfg(overrides: Partial<JevConfig> = {}): JevConfig {
     maxCostUsd: 0.5,
     maxCalls: 800,
     confirmTimeoutMs: 60_000,
+    fastPath: DEFAULT_JEV_FAST_PATH,
     ...overrides,
   };
 }

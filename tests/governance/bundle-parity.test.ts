@@ -311,7 +311,7 @@ describe("§7.1 three-path activation parity × 7 profiles", () => {
   });
 
   it("dispatcher resolves the bundle and NEVER the source entry (recorded resolutions, not timing)", () => {
-    const urls = dispatcher.resolvedUrls.map((u) => u.replace("file://", ""));
+    const urls = dispatcher.resolvedUrls.map((u) => u.replace("file://", "").replace(/\?v=\d+$/, ""));
     expect(urls).toContain(BUNDLE);
     expect(
       urls.some((u) => u.endsWith("/src/index.ts") || u.endsWith("/src/index.js")),

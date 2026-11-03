@@ -23,6 +23,7 @@ import { MemoryError } from "../paths.js";
 import { withMemoryDirLock } from "../lock.js";
 import { ensurePrivateDir, readRegular, replaceAtomic, unlinkRegular, writeTempRegular } from "../safe-fs.js";
 import {
+  A_INJECTED_AT_MAX,
   SIDECAR_MAX_BYTES,
   SIDECAR_MAX_ENTRIES,
   type DismissedPair,
@@ -158,6 +159,17 @@ function sanitizeReview(v: unknown): ReviewState | undefined {
   return { lastRunAt: v["lastRunAt"], corpusFp: v["corpusFp"], suggestions, dismissed };
 }
 
+/** Sanitize the A-layer cooldown map: string values with a parseable date
+ *  survive, anything else is dropped per key (read tolerance). */
+function sanitizeAInjectedAt(v: unknown): Record<EntryHash, string> | undefined {
+  if (!isPlainObject(v)) return undefined;
+  const out: Record<EntryHash, string> = {};
+  for (const [hash, at] of Object.entries(v)) {
+    if (typeof at === "string" && Number.isFinite(Date.parse(at))) out[hash] = at;
+  }
+  return out;
+}
+
 /** Bad/foreign JSON ⇒ `{index: empty, rebuilt: true}`; missing ⇒ empty, NOT
  *  rebuilt (a fresh project has not lost anything). Structurally-invalid
  *  entry values are dropped individually (the rest of the index survives). */
@@ -184,12 +196,14 @@ export function readIndex(dir: string): { index: JevIndexV1; rebuilt: boolean } 
     if (tags !== undefined) entries[hash] = tags;
   }
   const review = sanitizeReview(parsed["review"]);
+  const aInjectedAt = sanitizeAInjectedAt(parsed["aInjectedAt"]);
   return {
     index: {
       v: 1,
       entries,
       ...(typeof parsed["lastTaggedAt"] === "string" ? { lastTaggedAt: parsed["lastTaggedAt"] } : {}),
       ...(review === undefined ? {} : { review }),
+      ...(aInjectedAt === undefined || Object.keys(aInjectedAt).length === 0 ? {} : { aInjectedAt }),
     },
     rebuilt: false,
   };
@@ -206,6 +220,7 @@ export function mergeIndex(index: JevIndexV1, patch: IndexPatch): JevIndexV1 {
     entries[hash] = tags;
   }
   for (const hash of patch.remove ?? []) delete entries[hash];
+  const aInjectedAt: Record<EntryHash, string> = { ...index.aInjectedAt, ...patch.aInjectedAt };
   return {
     v: 1,
     entries,
@@ -217,7 +232,23 @@ export function mergeIndex(index: JevIndexV1, patch: IndexPatch): JevIndexV1 {
       : index.review !== undefined
         ? { review: index.review }
         : {}),
+    ...(Object.keys(aInjectedAt).length > 0 ? { aInjectedAt } : {}),
   };
+}
+
+/** Keep the newest `keep` stamps (ISO 8601 UTC sorts lexicographically). */
+function trimAInjectedAt(map: Readonly<Record<EntryHash, string>>, keep: number): Record<EntryHash, string> {
+  const keys = Object.keys(map);
+  if (keys.length <= keep) return { ...map };
+  const ordered = [...keys].sort((a, b) => {
+    const atA = map[a]!;
+    const atB = map[b]!;
+    if (atA !== atB) return atA < atB ? -1 : 1; // oldest first
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  const out: Record<EntryHash, string> = {};
+  for (const key of ordered.slice(ordered.length - keep)) out[key] = map[key]!;
+  return out;
 }
 
 function serializedBytes(entries: Readonly<Record<EntryHash, EntryTags>>): number {
@@ -244,7 +275,13 @@ function capBlind(index: JevIndexV1): JevIndexV1 {
   while (Object.keys(entries).length > 1 && serializedBytes(entries) > SIDECAR_MAX_BYTES) {
     entries = dropOldest(entries, Object.keys(entries).length - 1);
   }
-  return { ...index, entries };
+  const aInjectedAt =
+    index.aInjectedAt === undefined ? undefined : trimAInjectedAt(index.aInjectedAt, A_INJECTED_AT_MAX);
+  return {
+    ...index,
+    entries,
+    ...(aInjectedAt !== undefined && Object.keys(aInjectedAt).length > 0 ? { aInjectedAt } : {}),
+  };
 }
 
 /** Corpus-aware GC (jev-arch §4.4): only acts when a cap is exceeded, and
@@ -255,12 +292,22 @@ function capBlind(index: JevIndexV1): JevIndexV1 {
  *  — keep their tags). */
 export function gcIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHash>): JevIndexV1 {
   const count = Object.keys(index.entries).length;
-  if (count <= SIDECAR_MAX_ENTRIES && serializedBytes(index.entries) <= SIDECAR_MAX_BYTES) return index;
+  const stampCount = Object.keys(index.aInjectedAt ?? {}).length;
+  if (
+    count <= SIDECAR_MAX_ENTRIES &&
+    serializedBytes(index.entries) <= SIDECAR_MAX_BYTES &&
+    stampCount <= A_INJECTED_AT_MAX
+  )
+    return index;
   const entries: Record<EntryHash, EntryTags> = {};
   for (const [hash, tags] of Object.entries(index.entries)) {
     if (liveHashes.has(hash)) entries[hash] = tags;
   }
-  return capBlind({ ...index, entries });
+  const stamps: Record<EntryHash, string> = {};
+  for (const [hash, at] of Object.entries(index.aInjectedAt ?? {})) {
+    if (liveHashes.has(hash)) stamps[hash] = at;
+  }
+  return capBlind({ ...index, entries, ...(Object.keys(stamps).length > 0 ? { aInjectedAt: stamps } : {}) });
 }
 
 /** Deterministic serialization: entry keys sorted so two runs tagging the
@@ -268,7 +315,16 @@ export function gcIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHash>): 
 function serializeIndex(index: JevIndexV1): Buffer {
   const entries: Record<EntryHash, EntryTags> = {};
   for (const hash of Object.keys(index.entries).sort()) entries[hash] = index.entries[hash]!;
-  return Buffer.from(JSON.stringify({ ...index, entries }), "utf8");
+  const aInjectedAt: Record<EntryHash, string> = {};
+  for (const hash of Object.keys(index.aInjectedAt ?? {}).sort()) aInjectedAt[hash] = index.aInjectedAt![hash]!;
+  return Buffer.from(
+    JSON.stringify({
+      ...index,
+      entries,
+      ...(Object.keys(aInjectedAt).length > 0 ? { aInjectedAt } : {}),
+    }),
+    "utf8",
+  );
 }
 
 // ───────────────────────────── writes ─────────────────────────────

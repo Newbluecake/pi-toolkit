@@ -151,7 +151,8 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     max: 500,
     description: "Expected model output rate for batched tidy budgeting, tokens per second",
   },
-  // jev-plan v2 §4 J3 (jev-arch §9.1): 14 keys, non-live (change → /reload). `classifiersRejected`
+  // jev-plan v2 §4 J3 (jev-arch §9.1): 17 keys (14 + fastPath×3 of the 2026-11-03 noise fix),
+  // non-live (change → /reload). `classifiersRejected`
   // is NOT a setting key (parse-time derived, doctor/startup-reminder display only).
   "memory.jev.enabled": bool(
     "memory.jev.enabled",
@@ -217,4 +218,20 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     hint: "write-path confirm timeout",
     description: "Jev write-guard confirm timeout",
   }),
+  "memory.jev.fastPathAllowTags": csvString(
+    "memory.jev.fastPathAllowTags",
+    "Extra tag ids allowed to trigger the A-layer fast path (default: risk:high tags only)",
+  ),
+  "memory.jev.fastPathDenyTags": csvString(
+    "memory.jev.fastPathDenyTags",
+    "Tag ids never allowed to trigger the A-layer fast path (wins over risk/allow)",
+  ),
+  "memory.jev.fastPathCooldownH": {
+    ...count(
+      "memory.jev.fastPathCooldownH",
+      0,
+      "Per-entry cross-session A-layer cooldown, hours; 0 = off (U layer unaffected)",
+    ),
+    max: 720,
+  } as SettingSpec,
 };

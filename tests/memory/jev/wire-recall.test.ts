@@ -12,7 +12,7 @@ import { jevConfigOf } from "../../../src/memory/jev/config.js";
 import type { EntryTags, JevConfig, JevRenderInfo, JevQuestion, MemEntry } from "../../../src/memory/jev/contracts.js";
 import { EntryIndex } from "../../../src/memory/jev/entries.js";
 import { clearHealthTable } from "../../../src/memory/jev/health.js";
-import { writeIndexPatch } from "../../../src/memory/jev/index-store.js";
+import { readIndex, writeIndexPatch } from "../../../src/memory/jev/index-store.js";
 import {
   entryAnchor,
   failureExitCode,
@@ -490,6 +490,78 @@ describe("A layer (tool_call fast path, zero calls)", () => {
     expect(h.wire.client.status()).toMatchObject({ kind: "partial", inactive: true });
     await h.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: "git push" } });
     expect(h.sent).toHaveLength(0);
+  });
+
+  test("generic tags (testing) alone no longer trigger A; high-risk tags still do (2026-11-03 noise fix)", async () => {
+    await tagEntry(entryWith("proxy configured"), { testing: 0.99 });
+    await tagEntry(entryWith("node 18"), { "git-push": 0.9 });
+    const h = harness();
+    await h.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: "npm test" } });
+    expect(h.sent).toHaveLength(0);
+    await h.emit("tool_call", { toolName: "bash", toolCallId: "t2", input: { command: "git push" } });
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]!.message.content).toContain("node 18");
+    expect(h.sent[0]!.message.content).not.toContain("proxy configured");
+  });
+
+  test("mixed tags: the eligible high tag carries the entry; its generic tag alone does not", async () => {
+    await tagEntry(entryWith("proxy configured"), { testing: 0.99, release: 0.7 });
+    const h = harness();
+    await h.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: "npm test" } });
+    expect(h.sent).toHaveLength(0);
+    await h.emit("tool_call", { toolName: "bash", toolCallId: "t2", input: { command: "git tag v1.2.3" } });
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]!.message.content).toContain("proxy configured");
+  });
+
+  test("memory.jev.fastPathAllowTags re-enables a generic tag; fastPathDenyTags blocks a high-risk one", async () => {
+    await tagEntry(entryWith("proxy configured"), { testing: 0.9 });
+    const allow = harness({ config: { fastPath: { allowTags: ["testing"], denyTags: [], cooldownMs: 0 } } });
+    await allow.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: "npm test" } });
+    expect(allow.sent).toHaveLength(1);
+
+    await tagEntry(entryWith("node 18"), { "git-push": 0.9 });
+    const deny = harness({ config: { fastPath: { allowTags: [], denyTags: ["git-push"], cooldownMs: 0 } } });
+    await deny.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: "git push" } });
+    expect(deny.sent).toHaveLength(0);
+  });
+
+  test("cross-session cooldown: a second session within 24h skips the entry (U still judges), expiry re-admits", async () => {
+    const tagged = entryWith("proxy configured");
+    await tagEntry(tagged, { "git-push": 0.9 });
+    const first = harness();
+    await first.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: "git push" } });
+    expect(first.sent).toHaveLength(1);
+    await settleBackground(); // the cooldown stamp write is fire-and-forget
+    expect(readIndex(memDir).index.aInjectedAt?.[tagged.hash]).toBeDefined();
+
+    // New session (a fresh wireJev over the same dir): A skips the entry…
+    const second = harness();
+    await second.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: "git push" } });
+    expect(second.sent).toHaveLength(0);
+    // …but the U layer (classifier-judged) still injects it — cooldown is A-only.
+    const u = harness({ rules: [["proxy configured", 0.9]] });
+    const r = await u.prompt("push the dev branch to github");
+    expect(r?.message?.content).toContain("proxy configured");
+
+    // Expired stamp ⇒ admitted again.
+    const old = new Date(Date.now() - 25 * 3_600_000).toISOString();
+    expect(await writeIndexPatch(memDir, { aInjectedAt: { [tagged.hash]: old } })).toBe("ok");
+    const third = harness();
+    await third.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: "git push" } });
+    expect(third.sent).toHaveLength(1);
+  });
+
+  test("cooldown 0 disables the cross-session skip", async () => {
+    const tagged = entryWith("proxy configured");
+    await tagEntry(tagged, { "git-push": 0.9 });
+    const first = harness();
+    await first.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: "git push" } });
+    expect(first.sent).toHaveLength(1);
+    await settleBackground();
+    const second = harness({ config: { fastPath: { allowTags: [], denyTags: [], cooldownMs: 0 } } });
+    await second.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: "git push" } });
+    expect(second.sent).toHaveLength(1);
   });
 });
 

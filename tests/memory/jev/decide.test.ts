@@ -16,6 +16,7 @@ import {
   verdictKey,
 } from "../../../src/memory/jev/decide.js";
 import { mergeTaxonomy } from "../../../src/memory/jev/taxonomy.js";
+import { DEFAULT_JEV_FAST_PATH } from "../../../src/memory/jev/contracts.js";
 import type { EntryTags, GateCandidate, JevAnswer, JevConfig, MemEntry } from "../../../src/memory/jev/contracts.js";
 
 function taxonomy() {
@@ -72,6 +73,7 @@ const CFG: JevConfig = {
   maxCostUsd: 0.5,
   maxCalls: 800,
   confirmTimeoutMs: 60_000,
+  fastPath: DEFAULT_JEV_FAST_PATH,
 };
 
 describe("effectiveMeta (§4.4)", () => {

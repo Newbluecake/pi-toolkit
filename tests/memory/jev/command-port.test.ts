@@ -9,6 +9,7 @@ import { createJevCommandPort, type JevCommandPortDeps } from "../../../src/memo
 import { readIndex, readTaxonomyFile, writeIndexPatch } from "../../../src/memory/jev/index-store.js";
 import { EntryIndex } from "../../../src/memory/jev/entries.js";
 import { getHealthTable } from "../../../src/memory/jev/health.js";
+import { DEFAULT_JEV_FAST_PATH } from "../../../src/memory/jev/contracts.js";
 import type {
   ClassifierRegistryLike,
   EntryTags,
@@ -117,6 +118,7 @@ function makePort(dir: string, cwd: string, client: JevClient, over: Partial<Jev
       maxCostUsd: 0.5,
       maxCalls: 800,
       confirmTimeoutMs: 60_000,
+      fastPath: DEFAULT_JEV_FAST_PATH,
     },
     usage: () => ({ costUsd: 0.0061, calls: 37 }),
     segment: () => ({

@@ -1622,6 +1622,56 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
 
   // ───────── A layer ─────────
 
+  /** A-layer admission (2026-11-03 noise fix, run r_YE7XM20Q: generic tags
+   *  — testing/ci/docs/workflow/shell-env/build/background-jobs — hit nearly
+   *  every session and fired ~71% of all injections with zero judgment).
+   *  Only risk:"high" tags (plus the allow list, minus the deny list) may
+   *  trigger a zero-judgment injection. The GATE coarse filter is NOT
+   *  narrowed — blocking stays as sensitive as before. */
+  const fastPathEligibleTags = (tax: Taxonomy): ReadonlySet<string> => {
+    const allow = new Set(config.fastPath.allowTags);
+    const deny = new Set(config.fastPath.denyTags);
+    const out = new Set<string>();
+    for (const t of tax.tags) {
+      if ((t.risk === "high" || allow.has(t.id)) && !deny.has(t.id)) out.add(t.id);
+    }
+    return out;
+  };
+
+  /** Session-local overlay of A-injection stamps (the on-disk
+   *  `index.aInjectedAt` lags by the async write + the 2s data cache). */
+  const aStamps = new Map<EntryHash, string>();
+
+  /** Cross-session cooldown verdict: true ⇒ the entry was A-injected
+   *  recently enough to skip. U-layer judgment never consults this. */
+  const aCoolingDown = (c: Corpus, hash: EntryHash): boolean => {
+    const cooldownMs = config.fastPath.cooldownMs;
+    if (cooldownMs <= 0) return false;
+    const stamp = aStamps.get(hash) ?? c.index.aInjectedAt?.[hash];
+    if (stamp === undefined) return false;
+    const at = Date.parse(stamp);
+    return Number.isFinite(at) && now() - at < cooldownMs;
+  };
+
+  /** Persist the A-injection stamps of a sent message (fire-and-forget;
+   *  lock-busy drops the patch — the next tagging run or injection rewrites
+   *  it, and a lost stamp merely costs one extra injection). */
+  const recordAInjection = (c: Corpus, m: InjectMessage): void => {
+    const details = m.details as MemoryInjectDetailsV1 | undefined;
+    if (details === undefined || details.items.length === 0) return;
+    const at = new Date(now()).toISOString();
+    const upsert: Record<EntryHash, string> = {};
+    for (const item of details.items) {
+      aStamps.set(item.hash, at);
+      upsert[item.hash] = at;
+    }
+    void writeIndexPatch(c.dir, { aInjectedAt: upsert })
+      .then((out) => {
+        if (out === "busy") log("sidecar busy — A-injection cooldown stamps not saved");
+      })
+      .catch((err: unknown) => log(`A-injection stamp write failed: ${String((err as Error)?.message ?? err)}`));
+  };
+
   const fastPath = (event: ToolCallEvent, cwd: string): void => {
     const allowed = zeroCallAllowed();
     if (!allowed.ok || segment.full()) return;
@@ -1631,7 +1681,9 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const parsed = parsedFor(event);
     const hits = matchTags({ tool: event.toolName, input, ...(parsed === undefined ? {} : { parsed }) }, c.taxonomy);
     if (hits.length === 0) return;
-    const hit = new Set(hits);
+    const eligible = fastPathEligibleTags(c.taxonomy);
+    const hit = new Set(hits.filter((t) => eligible.has(t)));
+    if (hit.size === 0) return;
     const info = deps.getRenderInfo(cwd);
     const scored: { pick: Pick; score: number }[] = [];
     for (const e of c.entries) {
@@ -1640,6 +1692,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       const meta = effectiveMeta(e, record, c.taxonomy);
       const shared = meta.tags.filter((t) => hit.has(t));
       if (shared.length === 0) continue;
+      if (aCoolingDown(c, e.hash)) continue;
       const manualOnly = meta.pending;
       if (!manualOnly) {
         if ((meta.importance ?? 0) < 2) continue;
@@ -1665,7 +1718,10 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         ...(allowed.partial ? { partial: true } : {}),
       },
     );
-    if (m !== undefined) send(m);
+    if (m !== undefined) {
+      send(m);
+      recordAInjection(c, m);
+    }
   };
 
   // ───────── hooks ─────────

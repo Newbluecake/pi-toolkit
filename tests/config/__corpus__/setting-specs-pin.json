@@ -88,7 +88,7 @@
     ["webHub.proxy.enabled", "9c4c947ddb3a52a208b9aeb5d87e698c2c3f6517b3625e30a07ff21c57e91c6f"],
     ["webHub.proxy.portRange", "4af80f5dbdfb35dfbc79ccef589566327f7559f51dadba6bfb355f4964f6ef41"],
     ["webHub.proxy.maxProxies", "55f5b4df96c3cbb5c418e1a2e36f6479e5f8899e59e18790be857b3bf0c1957d"],
-    ["webSearch.enabled", "c77a7d9332978740ed9b71e9467a9320ebbd9ddfbb6c9e1b74affbf27032df14"],
+    ["webSearch.enabled", "54d152d5b1d106826db877404cbffc5ce9ea2e5f0e1dedd5a290b32316394174"],
     ["date.enabled", "868bc4116d4244125e8ae000d1110e314fb29bfa6cff584bd8e40b844bc0a9c5"],
     ["todo.enabled", "fa9378d372db6c7f3d771e42bb600b9932dee90e2f7d40babf1ccf64dd3d740c"],
     ["todo.nudge.enabled", "b1e3baa7cf38187a3f7e6f232d2b7e0fcad190cd5b333a8d657650878af709a7"],
@@ -158,6 +158,9 @@
     ["memory.jev.maxCostUsd", "f838faa70c599d733c387a8dc3df0a52697f9844a76585d13d9f358ae4a463fd"],
     ["memory.jev.maxCalls", "e36ceffaab3fb713770fb6e5b88ba450cafcf472cf8e4c4f3724b4ecfcb8e0df"],
     ["memory.jev.confirmTimeoutS", "453a77d90a759f4aab3c72f052b89b1a27b1c518bb68ee129bd46dfe9c7d5b6c"],
+    ["memory.jev.fastPathAllowTags", "73e3d8778ff59fe498aa61755d9648201a2bfdca6ed17f840f1a1bee2cb56394"],
+    ["memory.jev.fastPathDenyTags", "47b725621fb8cd58e5ad076c80c8d471e5fe45a5aefae27f7b4448dd9cc37534"],
+    ["memory.jev.fastPathCooldownH", "07736734920df08766e7966cb984d66f27dbd82e9b749131a1848df5848a59dd"],
     ["extend.notify", "d554ffb3b6fec9d4f045958cfd14957b1ae1b686fe7771b6a01f876cc219e77a"],
     ["fleetDeadlineWarnS", "121f3850524eaed3f47e9581c450367f46746f2f206321e553e5159fbbf34d84"],
     ["fleetWidgetMaxRows", "0eb0067a65571f4d26df4f686e4017d42be9038a4cac86bb91d4fdab39bd9735"],
@@ -321,5 +324,5 @@
     ["schedule.defaultTimeoutS", "0c0a7cec1b640196d1236428b689372d961cbced729c6999200c31e29e442b30"],
     ["schedule.maxTimeoutS", "6c538e3100c646f3a64116ead976a485bc27e4fdb9e550349c75e420ec30fce3"]
   ],
-  "all": "3a58fd0367026d21edbd207e5974911a0e0f6590ac1d7d94a221f407ecce1560"
+  "all": "b5d496b345bb72b413ba06a328934c14b9d53fab6428323b5788bd90dfe3d6f3"
 }

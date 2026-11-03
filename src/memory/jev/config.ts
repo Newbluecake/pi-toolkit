@@ -48,6 +48,11 @@ export function jevConfigOf(memory: MemorySettings): JevConfig {
     maxCostUsd: jev.maxCostUsd,
     maxCalls: jev.maxCalls,
     confirmTimeoutMs: jev.confirmTimeoutMs,
+    fastPath: {
+      allowTags: jev.fastPathAllowTags,
+      denyTags: jev.fastPathDenyTags,
+      cooldownMs: jev.fastPathCooldownH * 3_600_000,
+    },
   };
 }
 

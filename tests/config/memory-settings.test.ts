@@ -52,6 +52,9 @@ describe("memory settings", () => {
         maxCostUsd: 0.5,
         maxCalls: 800,
         confirmTimeoutMs: 60_000,
+        fastPathAllowTags: [],
+        fastPathDenyTags: [],
+        fastPathCooldownH: 24,
       },
     });
   });
@@ -432,6 +435,9 @@ describe("memory settings", () => {
         maxCostUsd: 1.25,
         maxCalls: 100,
         confirmTimeoutMs: 30_000,
+        fastPathAllowTags: "testing, ci,testing",
+        fastPathDenyTags: ["git-push", "nope id", "release"],
+        fastPathCooldownH: 0,
       },
     }).jev;
     expect(parsed).toEqual({
@@ -446,7 +452,22 @@ describe("memory settings", () => {
       maxCostUsd: 1.25,
       maxCalls: 100,
       confirmTimeoutMs: 30_000,
+      fastPathAllowTags: ["testing", "ci"],
+      fastPathDenyTags: ["git-push", "release"],
+      fastPathCooldownH: 0,
     });
+  });
+
+  it("jev fastPath keys: tag-id lists drop invalid ids; cooldown enforces 0-720", () => {
+    expect(parseMemorySettings({ jev: { fastPathAllowTags: 42 } }).jev.fastPathAllowTags).toEqual([]);
+    expect(parseMemorySettings({ jev: { fastPathDenyTags: "Git-Push,,xy" } }).jev.fastPathDenyTags).toEqual(["xy"]);
+    expect(parseMemorySettings({ jev: { fastPathCooldownH: -1 } }).jev.fastPathCooldownH).toBe(
+      defaults.jev.fastPathCooldownH,
+    );
+    expect(parseMemorySettings({ jev: { fastPathCooldownH: 721 } }).jev.fastPathCooldownH).toBe(
+      defaults.jev.fastPathCooldownH,
+    );
+    expect(parseMemorySettings({ jev: { fastPathCooldownH: 720 } }).jev.fastPathCooldownH).toBe(720);
   });
 
   it("jev block: enforces documented ranges, falling back per field", () => {

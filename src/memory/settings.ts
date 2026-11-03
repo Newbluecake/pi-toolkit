@@ -68,7 +68,7 @@ export interface MemorySettings {
   jev: MemoryJevSettings;
 }
 
-/** 14 个 `memory.jev.*` 设置键（jev-arch §9.1；`classifiersRejected` 不是设置键，只是解析结果）。 */
+/** 17 个 `memory.jev.*` 设置键（jev-arch §9.1 原 14 + 2026-11-03 噪音修复的 fastPath×3；`classifiersRejected` 不是设置键，只是解析结果）。 */
 export interface MemoryJevSettings {
   /** 总开关。false ⇒ 不接线 Jev（零注册）。Default true（Q27：有可用凭证即启用）；legacy/secure 域强制视为 false。 */
   enabled: boolean;
@@ -108,6 +108,12 @@ export interface MemoryJevSettings {
   maxCalls: number;
   /** 写路径确认超时（ms）；文件键按秒存 `confirmTimeoutS`（TIME_SETTING_MS_PATHS）。Default 60_000；10_000–600_000。 */
   confirmTimeoutMs: number;
+  /** A 层快速通道加白标签（默认只有 risk:"high" 标签能触发 A 注入；2026-11-03 噪音修复）。CSV 或数组，非法 id 静默丢弃。Default []。 */
+  fastPathAllowTags: string[];
+  /** A 层快速通道黑名单标签（优先于高危/加白判定）。Default []。 */
+  fastPathDenyTags: string[];
+  /** A 层同条目跨会话冷却（小时），0 = 关闭（U 层判定不受限）。Default 24；0–720。 */
+  fastPathCooldownH: number;
 }
 
 export type MemoryLayout = "tiered" | "legacy";
@@ -163,6 +169,17 @@ const JEV_CLASSIFIERS_REJECTED_ITEM_MAX_CODEPOINTS = 80;
 function truncateCodepoints(s: string, max: number): string {
   const codepoints = Array.from(s);
   return codepoints.length <= max ? s : codepoints.slice(0, max).join("");
+}
+
+const JEV_TAG_ID_RE = /^[a-z][a-z0-9-]{1,31}$/;
+
+/** CSV/数组 ⇒ 合法 tag id 列表（去重保序；非法 id 静默丢弃——标签名单不是凭证，拼错不值得启动提醒）。 */
+function parseJevTagIdList(raw: unknown): string[] {
+  const out: string[] = [];
+  for (const token of splitJevClassifiersCsv(raw)) {
+    if (JEV_TAG_ID_RE.test(token) && !out.includes(token)) out.push(token);
+  }
+  return out;
 }
 
 /** 逗号串或字符串数组 ⇒ 逐项 trim 后的非空 token 列表（webHub.lan 同款 CSV 解析风格）。 */
@@ -301,6 +318,9 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     maxCostUsd: numFloat(jevObj.maxCostUsd, defaults.jev.maxCostUsd, 0.01, 5),
     maxCalls: num(jevObj.maxCalls, defaults.jev.maxCalls, 0, 5000),
     confirmTimeoutMs: num(jevObj.confirmTimeoutMs, defaults.jev.confirmTimeoutMs, 10_000, 600_000),
+    fastPathAllowTags: parseJevTagIdList(jevObj.fastPathAllowTags),
+    fastPathDenyTags: parseJevTagIdList(jevObj.fastPathDenyTags),
+    fastPathCooldownH: num(jevObj.fastPathCooldownH, defaults.jev.fastPathCooldownH, 0, 720),
   };
 
   return {
@@ -366,5 +386,8 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     maxCostUsd: 0.5,
     maxCalls: 800,
     confirmTimeoutMs: 60_000,
+    fastPathAllowTags: [],
+    fastPathDenyTags: [],
+    fastPathCooldownH: 24,
   },
 };

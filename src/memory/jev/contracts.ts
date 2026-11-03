@@ -207,6 +207,10 @@ export interface JevIndexV1 {
   /** Last successful tagging time — shown by the partial status line. */
   readonly lastTaggedAt?: string;
   readonly review?: ReviewState;
+  /** A-layer cross-session cooldown stamps: hash → ISO time of the last A
+   *  injection (2026-11-03 noise fix). Independent of tagging upserts — the
+   *  map survives re-tagging and applies to pending (untagged) entries too. */
+  readonly aInjectedAt?: Record<EntryHash, string>;
 }
 
 /** `/mem review --list` row: the stored suggestion plus its stale flag
@@ -223,6 +227,8 @@ export interface IndexPatch {
   readonly remove?: readonly EntryHash[];
   readonly lastTaggedAt?: string;
   readonly review?: ReviewState;
+  /** Upserted into the A-layer cooldown map (per-key replace). */
+  readonly aInjectedAt?: Readonly<Record<EntryHash, string>>;
 }
 
 /** Result of J4's `tagBulk` (migration / re-tagging runs). */
@@ -379,8 +385,28 @@ export interface TokenBucket {
 /** `notifyFor(prev, next, ctx)` verdicts (J2 health.ts). */
 export type NotifyKind = "first-full" | "degraded" | "recovered" | "startup-partial";
 
+/** A-layer (tool_call fast path) admission + cooldown knobs (2026-11-03
+ *  noise fix, run r_YE7XM20Q data: generic tags like testing/ci/workflow
+ *  fired ~71% of injections). Eligibility: `risk:"high"` tags plus
+ *  `allowTags`, minus `denyTags`. */
+export interface JevFastPathConfig {
+  /** Extra tag ids allowed to trigger the A layer (on top of risk:"high"). */
+  readonly allowTags: readonly string[];
+  /** Tag ids never allowed to trigger the A layer (wins over risk/allow). */
+  readonly denyTags: readonly string[];
+  /** Per-entry cross-session A-injection cooldown; 0 disables. */
+  readonly cooldownMs: number;
+}
+
+export const DEFAULT_JEV_FAST_PATH: JevFastPathConfig = {
+  allowTags: [],
+  denyTags: [],
+  cooldownMs: 86_400_000, // 24h
+};
+
 /** `JevConfig` — the pure config J6 maps out of `MemorySettings.jev` (J3).
- *  Frozen verbatim from jev-plan §2. */
+ *  Frozen verbatim from jev-plan §2 (+ the fastPath block added by the
+ *  2026-11-03 noise fix). */
 export interface JevConfig {
   readonly classifiers: readonly string[]; // provider/id, deduped in order
   readonly proxy: string; // "" ⇒ do not pass a fetch
@@ -391,6 +417,7 @@ export interface JevConfig {
   readonly maxCostUsd: number;
   readonly maxCalls: number;
   readonly confirmTimeoutMs: number;
+  readonly fastPath: JevFastPathConfig;
 }
 
 // ───────────────────────────── injection wire shapes (jev-arch §6.1.6) ─────────────────────────────
@@ -619,6 +646,8 @@ export const TOKEN_BUCKET_WINDOW_MS = 60_000;
 /** Sidecar index: max entries / max file bytes before GC. */
 export const SIDECAR_MAX_ENTRIES = 2000;
 export const SIDECAR_MAX_BYTES = 1_000_000;
+/** A-layer cooldown map cap (oldest stamps evicted first). */
+export const A_INJECTED_AT_MAX = 512;
 /** Max enabled tags (presets + user). */
 export const MAX_ENABLED_TAGS = 64;
 /** /proc scan: max pids / result cache TTL (Linux only, Q30). */

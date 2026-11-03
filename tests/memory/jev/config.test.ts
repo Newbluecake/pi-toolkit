@@ -61,6 +61,9 @@ describe("resolveJevWiring", () => {
         review: { intervalDays: 0 },
         maxCostUsd: 1,
         maxCalls: 10,
+        fastPathAllowTags: "testing, ci",
+        fastPathDenyTags: ["git-push"],
+        fastPathCooldownH: 12,
       },
     });
     const c = jevConfigOf(s);
@@ -74,6 +77,7 @@ describe("resolveJevWiring", () => {
       maxCostUsd: 1,
       maxCalls: 10,
       confirmTimeoutMs: s.jev.confirmTimeoutMs,
+      fastPath: { allowTags: ["testing", "ci"], denyTags: ["git-push"], cooldownMs: 12 * 3_600_000 },
     });
     const dup = jevConfigOf({ ...s, jev: { ...s.jev, classifiers: ["a/b", "a/b", "c/d"] } });
     expect(dup.classifiers).toEqual(["a/b", "c/d"]);
