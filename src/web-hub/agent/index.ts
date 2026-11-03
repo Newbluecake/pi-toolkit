@@ -19,7 +19,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { LoadPort } from "../../sysload/types.js";
 import type {
@@ -31,6 +30,7 @@ import type {
 import type { FeishuThreadsHubConfig } from "../protocol/feishu.js";
 import type { ObserveRunResult, RunObserverListener, RunSnapshot, RunStatus } from "../../core/types.js";
 import { isTerminalStatus } from "../../core/status.js";
+import { packageRoot } from "../../core/package-root.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
 import type { HubConfig, HubLanConfig } from "../hub/ports.js";
 import type { ScheduleWebHubPort } from "../../schedule/agent/coordinator.js";
@@ -416,7 +416,7 @@ export interface WebHubDeps {
    *  off — the default — or a non-plain domain) ⇒ no `sched.v1` cap, no `HubConfig.schedule`, no
    *  sched frame hooks: byte-identical to the pre-feature shape. */
   schedule?: ScheduleWebHubPort;
-  hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
+  hubMainPath?: string; // 默认 join(packageRoot(), "src/web-hub/hub/main.ts")
   env?: NodeJS.ProcessEnv;
   now?: () => number;
   // ---- test seams (optional; production leaves them unset) ----
@@ -582,7 +582,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       uid: process.getuid?.() ?? 0,
       xdgRuntimeDir: env.XDG_RUNTIME_DIR !== undefined && env.XDG_RUNTIME_DIR !== "" ? env.XDG_RUNTIME_DIR : undefined,
     });
-  const hubMainPath = deps.hubMainPath ?? fileURLToPath(new URL("../hub/main.ts", import.meta.url));
+  // The hub always runs from source (`src/`) through jiti, even when the parent runs a bundle:
+  // `dist/` has no `hub/main.ts`. Anchoring on the package root keeps it correct in all layouts.
+  const hubMainPath = deps.hubMainPath ?? join(packageRoot(), "src", "web-hub", "hub", "main.ts");
   const argv1 = deps.argv1 ?? process.argv[1];
 
   // private-plan §4.1 / security review N3 #1: the gate verdict is re-judged FRESH on every use
