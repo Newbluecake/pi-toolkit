@@ -67,7 +67,9 @@ describe("bundle availability", () => {
 
   it("bundlePath() and bundleUrl() point at dist/bundle/index.js under the package root", () => {
     expect(bundlePath()).toMatch(/\/dist\/bundle\/index\.js$/);
-    expect(bundleUrl()).toMatch(/^file:\/\/.*\/dist\/bundle\/index\.js$/);
+    // The ?v= query is the cache buster (see bundleUrl's docstring): without it a /reload after
+    // rebuilding would keep the stale module from Node's ESM cache.
+    expect(bundleUrl()).toMatch(/^file:\/\/.*\/dist\/bundle\/index\.js(\?v=\d+)?$/);
   });
 
   it("PI_TOOLKIT_ENTRY=src (case/space tolerant) forces the source path; anything else does not", () => {

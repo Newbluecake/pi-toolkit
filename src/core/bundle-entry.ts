@@ -36,9 +36,23 @@ export function bundlePath(): string {
   return fileURLToPath(new URL("../../dist/bundle/index.js", import.meta.url));
 }
 
-/** Absolute `file://` URL of the bundle — the computed specifier the dispatcher imports. */
+/** Absolute `file://` URL of the bundle — the computed specifier the dispatcher imports.
+ *
+ * The `?v=<mtime>` query is a CACHE BUSTER, not decoration: `.js` goes through Node's native ESM
+ * loader (jiti only transforms what native can't load), whose module cache is keyed by the full
+ * URL and never evicted. Without the query a `/reload` after `npm run build:bundle` would import
+ * the modules already in the cache — i.e. keep running the OLD bundle for the whole process
+ * lifetime, which is exactly the silent staleness the build step is supposed to avoid. */
 export function bundleUrl(deps: BundleEntryDeps = {}): string {
-  return pathToFileURL(deps.bundleFile ?? bundlePath()).href;
+  const file = deps.bundleFile ?? bundlePath();
+  const href = pathToFileURL(file).href;
+  let stamp: number;
+  try {
+    stamp = statSync(file).mtimeMs;
+  } catch {
+    return href; // missing ⇒ the caller's existsSync gate handles it
+  }
+  return `${href}?v=${Math.floor(stamp)}`;
 }
 
 /** Package root, derived from the same anchor. Used for the staleness scan only. */
