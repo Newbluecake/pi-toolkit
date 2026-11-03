@@ -13,12 +13,22 @@ import { BASELINE } from "../integration/helpers/schedule-activate.js";
 
 export type ProfileName = "default" | "minimal" | "max" | "child" | "compat-failure" | "thread-main" | "thread-child";
 
+/**
+ * Pinned `quota.providers` for the phase-2 profiles (see the header note). The trace HOME carries no `auth.json`,
+ * so every whitelisted static provider without a key emits one `[quota] no usable credential` warning per
+ * `session_start`; that count is part of the golden's `ui.notify(warning)` run. Provider defaults therefore must
+ * not leak into this contract — a new default-enabled provider (`3fbdb017` added `opencode-go`) would otherwise
+ * force a golden refresh for something this test does not own. Provider defaults are pinned by
+ * `tests/quota/` + `tests/config/quota-settings.test.ts`; keep this list in sync with the recorded warning count.
+ */
+const QUOTA_PIN = { providers: "zai-coding-cn,zai,kimi-coding,droid" } as const;
+
 export const PROFILES: Record<
   ProfileName,
   { settings: unknown; child?: true; omit?: readonly string[]; phase2: boolean }
 > = {
-  default: { settings: {}, phase2: true },
-  minimal: { settings: BASELINE, phase2: true },
+  default: { settings: { quota: { ...QUOTA_PIN } }, phase2: true },
+  minimal: { settings: { ...BASELINE, quota: { ...QUOTA_PIN } }, phase2: true },
   max: {
     settings: {
       fabric: {
@@ -37,7 +47,7 @@ export const PROFILES: Record<
       extend: { enabled: true },
       workflow: { enabled: true },
       load: { enabled: true },
-      quota: { enabled: true },
+      quota: { enabled: true, ...QUOTA_PIN },
       cacheTtl: { keepalive: true },
       schedule: { enabled: true },
       topicSwitch: { enabled: true },
@@ -82,7 +92,7 @@ export const PROFILES: Record<
       extend: { enabled: true },
       workflow: { enabled: true },
       load: { enabled: true },
-      quota: { enabled: true },
+      quota: { enabled: true, ...QUOTA_PIN },
       cacheTtl: { keepalive: true },
       schedule: { enabled: true },
       topicSwitch: { enabled: true },
@@ -117,7 +127,7 @@ export const PROFILES: Record<
       extend: { enabled: true },
       workflow: { enabled: true },
       load: { enabled: true },
-      quota: { enabled: true },
+      quota: { enabled: true, ...QUOTA_PIN },
       cacheTtl: { keepalive: true },
       schedule: { enabled: true },
       topicSwitch: { enabled: true },

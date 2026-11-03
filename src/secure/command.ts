@@ -7,10 +7,10 @@
 import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SecureVault } from "./config.js";
 import { resolveAgentDir } from "../core/agent-dir.js";
+import { packageRoot } from "../core/package-root.js";
 import { judgeVaultMount, readProcMountinfo, statePathsOf, type SecureDomain } from "./domain.js";
 import { PI_SECURE_SESSION } from "./env.js";
 import { resolveSettingsLocation, SETTINGS_FILE_NAME, type SettingsLocation } from "./settings-lock.js";
@@ -256,7 +256,9 @@ export function registerSecureCommand(
   pi: SecureCommandPi,
   deps: { domain: SecureDomain; runtimeLock: () => string | undefined },
 ): void {
-  const packageRoot = fileURLToPath(new URL("../..", import.meta.url));
+  // No try/catch here on purpose (startup-bundle plan r3 §3.4): a /secure status that cannot
+  // locate the package root is a broken install, and the warning line it feeds is a repointing hint.
+  const root = packageRoot();
   pi.registerCommand("secure", {
     description: "Encrypted vault session: /secure status",
     handler: async (args, rawCtx) => {
@@ -278,13 +280,13 @@ export function registerSecureCommand(
       } catch {
         settings = undefined;
       }
-      const launcherWarning = staleLauncherWarning({ packageRoot, location: settings });
+      const launcherWarning = staleLauncherWarning({ packageRoot: root, location: settings });
       ctx.ui?.notify?.(
         renderSecureStatus({
           domain: deps.domain,
           runtimeLock: deps.runtimeLock(),
           agentDir,
-          packageRoot,
+          packageRoot: root,
           env: process.env,
           ...(settings === undefined ? {} : { settings }),
           ...(launcherWarning === undefined ? {} : { launcherWarning }),

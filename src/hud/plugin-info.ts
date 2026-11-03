@@ -1,7 +1,8 @@
 /**
  * HUD 插件自身信息：包版本（package.json）+ 所在 git 检出的 HEAD commit / 提交时间 / 脏标记。
  *
- * - 包根由 import.meta.url 推出（<root>/src/hud 或 <root>/dist/hud → <root>/）。
+ * - 包根由 packageRoot() 按内容定位（最近的 name === "pi-toolkit" 的 package.json），
+ *   不再依赖 import.meta.url 的相对层级（bundle 后层级信息不存在）。
  * - 只有当包根本身就是 git 顶层目录时才读 git 信息：npm 安装到某项目的 node_modules
  *   里时，`git -C <root>` 会上溯到宿主项目，报出的是别人的 commit，必须排除。
  * - 不走 pi.exec：每次 activate 只读一次，用独立的 execFile，避免与 refresh 的
@@ -9,8 +10,9 @@
  */
 import { execFile } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, sep } from "node:path";
+
+import { packageRoot } from "../core/package-root.js";
 
 export interface PluginInfo {
   version?: string | undefined;
@@ -34,7 +36,7 @@ const GIT_TIMEOUT_MS = 3_000;
 
 export function pluginRoot(): string | undefined {
   try {
-    return fileURLToPath(new URL("../..", import.meta.url));
+    return `${packageRoot()}${sep}`;
   } catch {
     return undefined;
   }

@@ -55,7 +55,7 @@ export interface HudOptions {
   autoFetchMinutes?: number;
   /**
    * 插件自身版本/commit 的读取依赖（测试注入）；`null` = 不读取。
-   * 省略时用 import.meta.url 推出的包根 + package.json + git。
+   * 省略时用 packageRoot() 定位的包根 + package.json + git。
    */
   pluginInfoDeps?: PluginInfoDeps | null;
 }

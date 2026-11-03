@@ -40,11 +40,13 @@ describe("packageUiDistDir", () => {
   it("resolves to <packageRoot>/dist/web-hub-ui/", () => {
     const dir = packageUiDistDir();
     expect(dir.endsWith("/dist/web-hub-ui/")).toBe(true);
-    // paths.ts lives at src/web-hub/protocol/paths.ts — three levels up is the package root.
+    // startup-bundle plan r3 §3.4: the anchor is `name === "pi-toolkit"` in package.json, not
+    // import.meta.url depth, so src/ · tsc dist/ · a single bundle all agree.
     expect(dir).not.toContain("src/web-hub");
+    expect(dir).toMatch(/\/dist\/web-hub-ui\/$/);
   });
 
-  it("is stable across calls (pure, no fs access)", () => {
+  it("is stable across calls (deterministic; the anchor walk is cold-path fs, never memoized)", () => {
     expect(packageUiDistDir()).toBe(packageUiDistDir());
   });
 });

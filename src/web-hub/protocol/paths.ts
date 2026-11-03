@@ -49,7 +49,9 @@
 import { Buffer } from "node:buffer";
 import { constants as fsConstants } from "node:fs";
 import { chmod, lstat, mkdir, realpath, stat } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { join, sep } from "node:path";
+
+import { packageRoot } from "./package-root.js";
 
 export const SOCKET_PATH_MAX_BYTES = 100;
 
@@ -170,24 +172,27 @@ export function webHubTotpKeyFile(home: string): string {
 
 /**
  * The Vue UI build shipped inside the package itself (vue-plan.md §2.1 candidate 1,
- * P5a). Resolved relative to this module's own file URL so it stays correct
- * regardless of the process cwd or whether this package is consumed via `jiti`
- * (pi's git-install path) or from `dist/` (npm). `paths.ts` lives at
- * `src/web-hub/protocol/paths.ts`; three levels up is the package root, so
- * `../../../dist/web-hub-ui/` resolves to `<packageRoot>/dist/web-hub-ui/`.
+ * P5a). Anchored on the package root by *content* (`protocol/package-root.ts`, the I8
+ * mirror of `core/package-root.ts`) so it stays correct regardless of the process cwd and
+ * of how this module is loaded (`jiti` from `src/`, `dist/`, or a single esbuild bundle
+ * where `import.meta.url` carries no depth at all).
+ *
+ * **Contract: the trailing separator is part of the return value.** Callers and
+ * `tests/web-hub/protocol/paths-trusted.test.ts` assert `…/dist/web-hub-ui/`;
+ * `join(packageRoot(), "dist", "web-hub-ui")` would strip it, so it is appended explicitly.
+ * The trailing-separator form is deliberately NOT merged with `packageRootDir()`'s stripped form.
  */
 export function packageUiDistDir(): string {
-  return fileURLToPath(new URL("../../../dist/web-hub-ui/", import.meta.url));
+  return `${join(packageRoot(), "dist", "web-hub-ui")}${sep}`;
 }
 
 /**
- * web-hub-version plan §3.1: the package root (`<packageRoot>/`, with a trailing slash stripped
- * by `fileURLToPath`'s normal form). Same derivation as `packageUiDistDir` — three levels up from
- * this file; `hub/version-info.ts` reads CHANGELOG.md / package.json / git from here.
+ * web-hub-version plan §3.1: the package root, **without** a trailing separator.
+ * Same anchor as `packageUiDistDir` (by content, not by depth); `hub/version-info.ts` reads
+ * CHANGELOG.md / package.json / git from here.
  */
 export function packageRootDir(): string {
-  const p = fileURLToPath(new URL("../../../", import.meta.url));
-  return p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p;
+  return packageRoot();
 }
 
 /**

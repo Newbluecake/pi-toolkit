@@ -8,9 +8,9 @@
  * the launcher resolved. That mismatch is what made `ui-root.ts` reject the freshly built UI root
  * (`info.version !== expect.version` ⇒ `version-mismatch`) after every release.
  *
- * The hub's own package root is `packageRootDir()` (same derivation as `packageUiDistDir`, from
- * THIS module's `import.meta.url`), i.e. exactly the package the running code was loaded from, so
- * the value describes the code actually executing.
+ * The hub's own package root is `packageRootDir()` (same content anchor as `packageUiDistDir`: the
+ * nearest `package.json` named `pi-toolkit`, not this module's `import.meta.url` depth), i.e. the
+ * package the running code was loaded from, so the value describes the code actually executing.
  *
  * Precedence: the package version wins whenever it reads and is semver-shaped; the launcher's
  * values are used verbatim only as a fallback (missing/unreadable/malformed package.json, or a
