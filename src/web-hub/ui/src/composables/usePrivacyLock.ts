@@ -14,7 +14,8 @@
  *   timeout — interaction = keydown/pointerdown/touchstart/scroll,计时只在 viewing 该会话时
  *   (timer armed only while the unlocked session is the selected one), length from the
  *   `pwh_privacy_timeout` browser pref (`@logic/privacy.ts`, 1–60min, default 10, re-read on
- *   every arm); ③ manual `relock()` (the header's 「立即锁定」); ④ `visibilitychange: hidden`.
+ *   every arm); ③ manual `relock("manual")` (API-only since the 2026-11 header redesign — the
+ *   header button became the mark-state toggle and no longer relocks); ④ `visibilitychange: hidden`.
  * - **回锁/标记瞬间的浮层清理**: a watcher on the selected session's locked transition fires
  *   `onRelock` (DashboardView wires it to close the App-level preview dialog; the wtdiff/graph
  *   dialogs, AskUserForm, FleetDrawer, DetailDock's cmdResult all live INSIDE `AgentDetail`
@@ -92,8 +93,10 @@ export interface UsePrivacyLockHandle {
   /** Unlock the VIEW of `agentKey` — token mode: click-confirm (no request); password mode:
    *  `privacy.verify(password)`. No-op when the agent has no session or is not marked. */
   unlock(agentKey: string, password: string | null): Promise<void>;
-  /** ③ manual 「立即锁定」 — clears the view unlock; the locked-transition watcher fires
-   *  `onRelock`. No-op when nothing is unlocked. */
+  /** ③ manual — clears the view unlock; the locked-transition watcher fires
+   *  `onRelock`. API-only since the 2026-11 header redesign (the header button is the
+   *  mark-state toggle now — no UI entry calls this with "manual"). No-op when nothing
+   *  is unlocked. */
   relock(reason: PrivacyRelockReason): void;
   /** 「隐私标记」: `privacy.lock({locked:true})` — no password (marking is not sensitive).
    *  Failures surface via `actionError` (auto-clears after a few seconds). */

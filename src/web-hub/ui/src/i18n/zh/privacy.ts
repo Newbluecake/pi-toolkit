@@ -1,7 +1,10 @@
 /**
  * `privacy` i18n namespace, Chinese (web-hub-privacy plan v2.1, package P2). 「隐私标记」（持久，
- * `mark*`/`unmark*`）与「立即锁定」（视图回锁，`lockNow`）两套词汇严格分离；紧凑标记
- * （徽标、单位）保持英文 token，散文块翻译（AGENTS.md UI-text split）。
+ * `mark*`/`unmark*`）与锁屏的视图解锁（`unlockSubmit`/`confirmView`）两套词汇严格分离。头部按钮
+ * 自 2026-11-03 用户拍板改为标记状态反转开关：未标记 ⇒「锁定」（`markLabel`，动作=标记），已标记
+ * ⇒「解锁」（`unlockLabel`，动作=取消标记，走 `unmark*` 文案）；原「立即锁定」视图回锁按钮入口
+ * 移除（`relock("manual")` 仅存 API）。紧凑标记（徽标、单位）保持英文 token，散文块翻译
+ * （AGENTS.md UI-text split）。
  */
 import en from "../en/privacy.js";
 
@@ -11,10 +14,9 @@ const privacy = {
   badgeMarked: "Private",
   mark: "隐私标记",
   markAria: "将此会话标记为隐私会话",
-  lockNow: "立即锁定",
-  lockNowAria: "立即回锁此会话的视图",
-  markLabel: "隐私",
-  lockLabel: "锁定",
+  unlockAria: "解锁此会话（取消隐私标记）",
+  markLabel: "锁定",
+  unlockLabel: "解锁",
   screenTitle: "此会话已设为隐私",
   screenBody:
     "解锁查看前，其会话内容与各面板保持隐藏。解锁仅对本次查看有效：切走、长时间无操作或标签页隐藏时都会立即回锁。",

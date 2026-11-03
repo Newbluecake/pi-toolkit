@@ -123,12 +123,15 @@ const drawer = inject(SIDEBAR_DRAWER, null);
 const showBack = computed(() => props.narrow || drawer?.active.value === true);
 
 // ---------------------------------------------------------------------------
-// web-hub-privacy plan v2.1 (P2): the header lock button — the keyboard/备用 entrance next to
-// the card's hover affordance (v2.1 N1). 命名分离 (a pinned distinction): an UNMARKED session
-// gets 「隐私标记」 (persistent, calls `privacy.lock({locked:true})` — no password); a MARKED
+// web-hub-privacy plan v2.1 (P2), 2026-11-03 user decision: the header button is the
+// mark-STATE toggle (the card hover affordance's keyboard/备用 twin). An UNMARKED session
+// gets 「锁定」 (`privacy.lock({locked:true})` — persistent mark, no password); a MARKED
 // session being viewed (necessarily view-unlocked — otherwise the lock screen owns the pane
-// and this header isn't mounted) gets 「立即锁定」 (pure client-side view relock, no request).
-// Desktop band + `privacy.v1` cap only; no provider / no cap / phone band ⇒ no button at all.
+// and this header isn't mounted) gets 「解锁」, which opens the 取消标记 flow (`requestUnmark`:
+// LAN password dialog / loopback confirm — the same entry the card uses). The former
+// 「立即锁定」 manual view-relock entry is gone from the UI (`relock("manual")` stays
+// API-only in `usePrivacyLock`; route/idle/tab-hidden still relock). Desktop band +
+// `privacy.v1` cap only; no provider / no cap / phone band ⇒ no button at all.
 // ---------------------------------------------------------------------------
 const privacy = inject(PRIVACY_LOCK_CTX, null);
 const privacyMarked = computed(() => privacy?.isMarked(props.agent.key) ?? false);
@@ -142,7 +145,7 @@ const privacyError = computed(() => {
 
 function onPrivacyClick(): void {
   if (privacy === null) return;
-  if (privacyMarked.value) privacy.relock("manual");
+  if (privacyMarked.value) privacy.requestUnmark(props.agent.key);
   else void privacy.mark(props.agent.key);
 }
 
@@ -696,8 +699,8 @@ const overflowItems = computed<HeaderOverflowItem[]>(() => {
   if (privacyButton.value && isFolded("privacy"))
     out.push({
       id: "privacy",
-      icon: "lock",
-      label: privacyMarked.value ? t("privacy.lockLabel") : t("privacy.markLabel"),
+      icon: privacyMarked.value ? "unlock" : "lock",
+      label: privacyMarked.value ? t("privacy.unlockLabel") : t("privacy.markLabel"),
       checked: privacyMarked.value,
     });
   if (managed.value !== undefined && !stopArmed.value && !stopStopping.value && isFolded("stop"))
@@ -883,21 +886,22 @@ function onOverflowRun(id: string): void {
         <AppIcon name="clock" class="icon" />
         <span class="head-btn-label" aria-hidden="true">{{ t("resume.openLabel") }}</span>
       </button>
-      <!-- web-hub-privacy P2: 隐私标记 (unmarked → persistent mark) vs 立即锁定 (marked +
-           viewing → view relock) — the two names never mix (plan v2.1 N1 命名分离). -->
+      <!-- web-hub-privacy P2, 2026-11-03: the mark-STATE toggle — 「锁定」 (unmarked →
+           persistent mark) vs 「解锁」 (marked + viewing → 取消标记 flow, the card affordance's
+           twin); icons follow the ACTION (lock/unlock — the AgentCard pair). -->
       <button
         v-if="privacyButton && !isFolded('privacy')"
         class="btn btn-ghost privacy-head-btn"
         data-fold="privacy"
         :class="{ 'is-marked': privacyMarked }"
         type="button"
-        :title="privacyMarked ? t('privacy.lockNow') : t('privacy.mark')"
-        :aria-label="privacyMarked ? t('privacy.lockNowAria') : t('privacy.markAria')"
+        :title="privacyMarked ? t('privacy.unmarkTitle') : t('privacy.mark')"
+        :aria-label="privacyMarked ? t('privacy.unlockAria') : t('privacy.markAria')"
         @click="onPrivacyClick"
       >
-        <AppIcon name="lock" class="icon" />
+        <AppIcon :name="privacyMarked ? 'unlock' : 'lock'" class="icon" />
         <span class="head-btn-label" aria-hidden="true">{{
-          privacyMarked ? t("privacy.lockLabel") : t("privacy.markLabel")
+          privacyMarked ? t("privacy.unlockLabel") : t("privacy.markLabel")
         }}</span>
       </button>
       <!-- web-hub-spawn SP12 (arch §9.1) — 2026-10 variant-A redesign (user-picked mockup

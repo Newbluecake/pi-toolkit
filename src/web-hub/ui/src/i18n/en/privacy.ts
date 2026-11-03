@@ -1,9 +1,12 @@
 /**
  * `privacy` i18n namespace (web-hub-privacy plan v2.1, package P2): the per-session privacy
  * lock. 命名分离 (plan v2.1 N1, a pinned distinction): 「隐私标记」 is the PERSISTENT mark
- * (card lock icon / header button → `POST /api/privacy/lock`) — keys `mark*`/`unmark*`;
- * 「立即锁定」 is the VIEW relock (pure client-side, no request) — key `lockNow`. The two
- * vocabularies never mix. Error copy itself stays in `errors.*` (the lock screen and the
+ * (card lock icon / header button → `POST /api/privacy/lock`) — keys `mark*`/`unmark*`; the
+ * lock screen's VIEW unlock keeps its own keys (`unlockSubmit`/`confirmView`). Since the
+ * 2026-11-03 user decision the header button is the mark-STATE toggle: unmarked ⇒ 「锁定」
+ * (`markLabel` → mark), marked ⇒ 「解锁」 (`unlockLabel` → the 取消标记 flow, `unmark*` copy) —
+ * the former 「立即锁定」 view-relock button is gone (`relock("manual")` stays API-only).
+ * The vocabularies never mix. Error copy itself stays in `errors.*` (the lock screen and the
  * unmark dialog reuse the sign-in verdict/throttle lines verbatim, plan「解锁」).
  *
  * UI-text split (AGENTS.md): compact inline fragments (badge, unit) stay English tokens in
@@ -15,12 +18,14 @@ const privacy = {
   /** Card/header button while the session is NOT marked: create the persistent mark. */
   mark: "Mark private",
   markAria: "Mark this session as private",
-  /** Header button while viewing an unlocked marked session: relock the VIEW (no request). */
-  lockNow: "Lock now",
-  lockNowAria: "Relock this session's view immediately",
-  /** Visible short labels on the header button (unmarked / marked). */
-  markLabel: "Private",
-  lockLabel: "Lock",
+  /** Header button while the session IS marked (necessarily view-unlocked): open the
+   *  取消标记 flow (LAN password dialog / loopback confirm — the card affordance's twin).
+   *  The aria CONTAINS the visible 「Unlock」 label (WCAG label-in-name). */
+  unlockAria: "Unlock this session by removing its privacy mark",
+  /** Visible short labels on the header button — the mark-STATE toggle (2026-11-03 user
+   *  decision): unmarked ⇒ 「锁定」 (create the mark), marked ⇒ 「解锁」 (remove it). */
+  markLabel: "Lock",
+  unlockLabel: "Unlock",
   /** Lock screen (replaces the whole AgentDetail subtree while locked). */
   screenTitle: "This session is private",
   screenBody:

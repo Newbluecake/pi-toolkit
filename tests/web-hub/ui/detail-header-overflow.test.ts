@@ -176,6 +176,7 @@ function fakePrivacy(opts: { marked?: boolean } = {}) {
     sessionIdOf: () => "01a0d892-5c1e-7a40-9e2b-4f6d0c8a1b37",
     mark: vi.fn(() => Promise.resolve(true)),
     unmark: vi.fn(() => Promise.resolve(true)),
+    requestUnmark: vi.fn(),
     verify: vi.fn(() => Promise.resolve(true)),
     relock: vi.fn(),
     actionError: ref(null),
@@ -189,6 +190,7 @@ interface Harness {
   removes: unknown[];
   resume: { opens: number };
   remarks: unknown[];
+  privacy: ReturnType<typeof fakePrivacy>;
 }
 
 function mountHeader(
@@ -219,7 +221,7 @@ function mountHeader(
     },
   });
   mounted.push(wrapper);
-  return { wrapper, runs, stops, removes, resume, remarks: privacy.mark.mock.calls };
+  return { wrapper, runs, stops, removes, resume, remarks: privacy.mark.mock.calls, privacy };
 }
 
 /** Stub layout widths (happy-dom is all-zero) and fire the RO callback once. */
@@ -319,7 +321,7 @@ describe("DetailHeader overflow (issue #41)", () => {
       "Channels @小艾",
       "Schedules",
       "Resume",
-      "Private",
+      "Lock",
       "Stop",
       "Delete session",
     ]);
@@ -327,8 +329,8 @@ describe("DetailHeader overflow (issue #41)", () => {
     // a checkbox reflecting the (un)marked state, the danger stop row is set off by a separator
     const byText = (s: string) => items.find((i) => i.text().includes(s))!;
     for (const s of ["Channels", "Schedules", "Resume"]) expect(byText(s).attributes("aria-haspopup")).toBe("dialog");
-    expect(byText("Private").attributes("role")).toBe("menuitemcheckbox");
-    expect(byText("Private").attributes("aria-checked")).toBe("false");
+    expect(byText("Lock").attributes("role")).toBe("menuitemcheckbox");
+    expect(byText("Lock").attributes("aria-checked")).toBe("false");
     expect(byText("Stop").attributes("aria-haspopup")).toBeUndefined();
     const seps = h.wrapper.findAll(".detail-head-menu-sep");
     expect(seps.length).toBe(2); // before Stop, and before the permanent Delete row
@@ -406,14 +408,19 @@ describe("DetailHeader overflow (issue #41)", () => {
     expect(h.stops).toEqual(["sp-1"]);
   });
 
-  it("privacy already marked ⇒ the menu item is a checked menuitemcheckbox", async () => {
+  it("privacy already marked ⇒ the menu item is a checked 「解锁」 entry opening the 取消标记 flow", async () => {
     const h = mountHeader({ managed: true, narrow: true, privacyMarked: true });
     await layOut(h.wrapper, 420);
     await h.wrapper.get(".detail-more-btn").trigger("click");
     await flushPromises();
-    const item = h.wrapper.findAll(".detail-head-menu .detail-head-menu-item").find((i) => i.text().includes("Lock"));
+    const item = h.wrapper.findAll(".detail-head-menu .detail-head-menu-item").find((i) => i.text().includes("Unlock"));
+    expect(item).toBeDefined();
     expect(item!.attributes("role")).toBe("menuitemcheckbox");
     expect(item!.attributes("aria-checked")).toBe("true");
+    await item!.trigger("click");
+    await flushPromises();
+    expect(h.privacy.requestUnmark).toHaveBeenCalledWith("agent-1");
+    expect(h.wrapper.find(".detail-head-menu").exists()).toBe(false); // running it closes the menu
   });
 
   it("clearing in flight ⇒ the folded 「清空」 item is disabled + aria-busy with the busy label", async () => {

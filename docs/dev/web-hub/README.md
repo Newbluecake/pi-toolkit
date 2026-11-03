@@ -299,7 +299,10 @@ re-verification against shoulder-surfing — marks live in `<stateDir>/privacy.j
 loopback it degrades honestly to click-to-confirm), the `privacy` SSE frame is direct-send only (never in
 the replay ring, ordered before `agents`), and hub-initiated forks inherit the mark BEFORE spawn. The UI
 locks only on the desktop band (≥768px; the mobile band ignores the frames entirely), relocks four ways
-(route change / idle timeout / manual / tab hidden), and an old hub without `privacy.v1` leaves the UI
+(route change / idle timeout / `relock("manual")` / tab hidden — the manual path is API-only since the
+2026-11-03 header redesign: the header button is now the mark-state toggle, unmarked 「锁定」 marks and
+marked 「解锁」 opens the 取消标记 flow, the card affordance's twin), and an old hub without `privacy.v1`
+leaves the UI
 byte-identical. `/webhub status` renders the on/off + degraded + loopback-difference lines off
 `hub.json.privacy` (`agent/privacy-status.ts`). Design: `docs/dev/web-hub-privacy/plan.md`.
 
