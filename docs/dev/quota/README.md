@@ -25,3 +25,9 @@ detection survives restarts: `baseline.ts` persists each provider's last ACCEPTE
 (`baselines` key; both stores read-modify-write so neither flush clobbers the other's group) and seeds `classifyDrop` after a
 restart — display/verdicts still need a fresh accepted snapshot; an all-zero reading against a non-elapsed >0 baseline is never
 confirmed as a reset by repetition (only reset evidence or a non-all-zero read accepts).
+
+**opencode-go**（`src/quota/adapters/opencode.ts`，2026-11-03）：OpenCode Go 套餐，`GET {quota.opencodeGoBaseUrl}/zen/go/v1/usage`
+（默认 https://opencode.ai，实测 HTTP 200），`Authorization: Bearer <key>`（auth.json `opencode-go` / env `OPENCODE_API_KEY`）；
+`usage.{rolling,weekly,monthly}` ⇒ `5h`/`week`/`month` 三窗格独立解析（一格坏只丢一格，全坏 ⇒ undefined），percent=已用
+百分比（clamp 0..100）、resetsAt ISO ⇒ resetAt。默认在 `quota.providers` 白名单里（无 key 时零请求）；web 行走既有
+`quota.pools.v1` cap 门控白名单（legacy 路径字节不变），i18n 标签「OpenCode Go」。

@@ -28,6 +28,7 @@ describe("ENV_FALLBACK", () => {
       "zai-coding-cn": "ZAI_API_KEY",
       zai: "ZAI_API_KEY",
       "kimi-coding": "KIMI_CODING_API_KEY",
+      "opencode-go": "OPENCODE_API_KEY",
       // P7（D3 拍板）：droid 两池只用 FACTORY_API_KEY（与 droid 子进程同一把 key）。
       "droid-standard": "FACTORY_API_KEY",
       "droid-core": "FACTORY_API_KEY",

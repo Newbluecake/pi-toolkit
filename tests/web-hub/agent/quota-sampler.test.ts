@@ -236,6 +236,24 @@ describe("projectQuota — pools mode (P7wa, §9A.4)", () => {
     expect(Value.Check(QuotaWireSchema, wire)).toBe(true);
   });
 
+  it("opencode-go follows the same cap gate: kept in pools mode (month window intact), dropped in legacy mode", () => {
+    const opencode = verdict({
+      provider: "opencode-go",
+      level: 1,
+      windows: [
+        window({ scope: "5h", usedPct: 12, level: 0 }),
+        window({ scope: "week", usedPct: 56, level: 1 }),
+        window({ scope: "month", usedPct: 3, level: 0, resetAt: 9_000 }),
+      ],
+    });
+    const pooled = projectQuota([opencode, kimi], 5_000, { pools: true })!;
+    expect(pooled.providers.map((p) => p.id)).toEqual(["opencode-go", "kimi-coding"]);
+    expect(pooled.providers[0]!.windows.map((w) => w.scope)).toEqual(["5h", "week", "month"]);
+    expect(Value.Check(QuotaWireSchema, pooled)).toBe(true);
+    const legacy = projectQuota([opencode, kimi], 5_000)!;
+    expect(legacy.providers.map((p) => p.id)).toEqual(["kimi-coding"]);
+  });
+
   it("billing carries exactly D20's fields: overage + cents, gateOpen only when true", () => {
     const closed = droidVerdict({ billing: billing({ gateOpen: false }) });
     const wClosed = projectQuota([closed], 0, { pools: true })!;

@@ -15,7 +15,7 @@ export const QUOTA_SETTING_SPECS: Record<string, SettingSpec> = {
   "quota.providers": {
     kind: "string",
     path: "quota.providers",
-    description: "Comma-separated quota providers (zai-coding-cn,zai,kimi-coding,droid); empty = none",
+    description: "Comma-separated quota providers (zai-coding-cn,zai,kimi-coding,droid,opencode-go); empty = none",
   },
   "quota.subscriptionProviders": {
     kind: "string",

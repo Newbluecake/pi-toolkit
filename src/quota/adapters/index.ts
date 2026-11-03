@@ -8,18 +8,20 @@ import type { QuotaProviderId, StaticQuotaProviderId } from "../types.js";
 import { QUOTA_PROVIDER_IDS, isDroidQuotaId } from "../types.js";
 import type { DroidAdapterPair } from "./droid.js";
 import { kimiAdapter } from "./kimi.js";
+import { opencodeGoAdapter } from "./opencode.js";
 import type { ProviderAdapter } from "./types.js";
 import { zaiAdapter, zaiOverseasAdapter } from "./zai.js";
 
 /**
- * 静态三池（kimi/zai）注册表。droid 两个池不在此列——它们由 `createDroidAdapters`
+ * 静态池（kimi/zai/opencode-go）注册表。droid 两个池不在此列——它们由 `createDroidAdapters`
  * 按 stack 构造（pair 闭包共享在途请求），经 `selectAdapters` 的第二个参数注入。
- * `tests/quota/adapters-zai.test.ts` 钉死本表的三键形状。
+ * `tests/quota/adapters-zai.test.ts` 钉死本表的键形状。
  */
 export const ADAPTERS: Readonly<Record<StaticQuotaProviderId, ProviderAdapter>> = {
   "zai-coding-cn": zaiAdapter,
   zai: zaiOverseasAdapter,
   "kimi-coding": kimiAdapter,
+  "opencode-go": opencodeGoAdapter,
 };
 
 /**
@@ -43,4 +45,4 @@ export function selectAdapters(
   return out;
 }
 
-export { kimiAdapter, zaiAdapter, zaiOverseasAdapter };
+export { kimiAdapter, opencodeGoAdapter, zaiAdapter, zaiOverseasAdapter };

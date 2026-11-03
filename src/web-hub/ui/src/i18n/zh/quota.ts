@@ -38,6 +38,7 @@ const quota = {
   // id（droid-standard、droid/glm-… 等）保持小写不变。
   "provider.droid-standard": "Droid Std",
   "provider.droid-core": "Droid Core",
+  "provider.opencode-go": "OpenCode Go",
   scopeMonth: "月",
   overageCore: "超额策略：Std 用尽转 Core",
   overageCoreExhausted: "超额策略：Std 用尽转 Core（Core 已用尽）",

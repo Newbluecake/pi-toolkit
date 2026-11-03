@@ -50,8 +50,9 @@ describe("quota settings", () => {
   it("pins the defaults (quota-plan §8.2)", () => {
     expect(defaults).toEqual({
       enabled: true,
-      // P7（D2）：默认白名单新增 droid token（展开成 droid-standard / droid-core 两个池）。
-      providers: "zai-coding-cn,zai,kimi-coding,droid",
+      // P7（D2）：默认白名单含 droid token（展开成 droid-standard / droid-core 两个池）；
+      // opencode-go 默认启用（无 key 时适配器零请求）。
+      providers: "zai-coding-cn,zai,kimi-coding,droid,opencode-go",
       subscriptionProviders: "",
       refreshMs: 600_000,
       refreshHotMs: 120_000,
@@ -78,6 +79,7 @@ describe("quota settings", () => {
       zaiBaseUrl: "https://open.bigmodel.cn",
       zaiOverseasBaseUrl: "https://api.z.ai",
       kimiBaseUrl: "https://api.kimi.com",
+      opencodeGoBaseUrl: "https://opencode.ai",
       // P7：droid 池（D17 JSON-only 逃生阀 / D6 默认拦截 / R1 覆盖表）。
       factoryBaseUrl: "https://api.factory.ai",
       droidAllowExtraUsage: false,
@@ -115,6 +117,7 @@ describe("quota settings", () => {
         zaiBaseUrl: "ftp://example.com",
         zaiOverseasBaseUrl: 7,
         kimiBaseUrl: {},
+        opencodeGoBaseUrl: "ftp://opencode.internal",
         factoryBaseUrl: "ftp://factory.internal",
         droidAllowExtraUsage: "yes",
         droidPools: ["not-a-record"],
@@ -141,6 +144,10 @@ describe("quota settings", () => {
   it("validates base URLs: non-http(s) falls back, trailing slashes are trimmed", () => {
     expect(parseQuotaSettings({ zaiBaseUrl: "ftp://example.com" }).zaiBaseUrl).toBe(defaults.zaiBaseUrl);
     expect(parseQuotaSettings({ kimiBaseUrl: "example.com" }).kimiBaseUrl).toBe(defaults.kimiBaseUrl);
+    expect(parseQuotaSettings({ opencodeGoBaseUrl: "example.com" }).opencodeGoBaseUrl).toBe(defaults.opencodeGoBaseUrl);
+    expect(parseQuotaSettings({ opencodeGoBaseUrl: "https://opencode.internal:8443/" }).opencodeGoBaseUrl).toBe(
+      "https://opencode.internal:8443",
+    );
     expect(parseQuotaSettings({ zaiBaseUrl: "  " }).zaiBaseUrl).toBe(defaults.zaiBaseUrl);
     expect(parseQuotaSettings({ zaiBaseUrl: "https://proxy.internal:8443///" }).zaiBaseUrl).toBe(
       "https://proxy.internal:8443",
@@ -197,14 +204,16 @@ describe("quota settings", () => {
       "quota.zaiBaseUrl",
       "quota.zaiOverseasBaseUrl",
       "quota.kimiBaseUrl",
+      "quota.opencodeGoBaseUrl",
       "quota.userAgent",
       "quota.factoryBaseUrl",
       "quota.droidPools",
     ]) {
       expect(isKnownSettingKey(absent), absent).toBe(false);
     }
-    // P7（D16）：quota.providers 的描述含 droid token。
+    // P7（D16）：quota.providers 的描述含 droid token；opencode-go 同款。
     expect(SETTING_SPECS["quota.providers"]?.description).toContain("droid");
+    expect(SETTING_SPECS["quota.providers"]?.description).toContain("opencode-go");
   });
 
   it("converts the file's *S seconds to internal milliseconds via loadSettings", () => {

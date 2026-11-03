@@ -51,7 +51,9 @@ export interface QuotaProjectionOptions {
  * 上加 cap 门控的 pools 模式（看到 `quota.pools.v1` 才放行，§9A.4）。
  */
 const LEGACY_WEB_QUOTA_IDS: readonly string[] = ["zai-coding-cn", "zai", "kimi-coding"];
-const POOLS_WEB_QUOTA_IDS: readonly string[] = [...LEGACY_WEB_QUOTA_IDS, "droid-standard", "droid-core"];
+// pools 白名单（cap `quota.pools.v1` 门控）：droid 池之后追加 opencode-go——legacy 路径依旧
+// 只出三池（字节不变，quota-legacy golden 钉死）。
+const POOLS_WEB_QUOTA_IDS: readonly string[] = [...LEGACY_WEB_QUOTA_IDS, "droid-standard", "droid-core", "opencode-go"];
 
 function isLegacyWebQuotaProviderId(value: string): value is QuotaProviderWire["id"] {
   return LEGACY_WEB_QUOTA_IDS.includes(value);

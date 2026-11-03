@@ -227,6 +227,8 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
         return settings.zaiOverseasBaseUrl;
       case "kimi-coding":
         return settings.kimiBaseUrl;
+      case "opencode-go":
+        return settings.opencodeGoBaseUrl;
       case "droid-standard":
       case "droid-core":
         return settings.factoryBaseUrl;

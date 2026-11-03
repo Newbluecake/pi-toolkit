@@ -77,6 +77,8 @@ export interface QuotaSettings {
   zaiBaseUrl: string;
   zaiOverseasBaseUrl: string;
   kimiBaseUrl: string;
+  /** OpenCode Go 用量接口（JSON-file-only 逃生阀，与 kimiBaseUrl 同款）。 */
+  opencodeGoBaseUrl: string;
   /** Factory 计费接口（droid 池，D17）；私有部署逃生阀，JSON-file-only。 */
   factoryBaseUrl: string;
   /** D6 拍板：standard 池耗尽且超额策略为 extraUsage 时是否放行（默认不放行——不代用户花真钱）。 */
@@ -142,6 +144,7 @@ export function parseQuotaSettings(input: unknown): QuotaSettings {
     zaiBaseUrl: url(value.zaiBaseUrl, defaults.zaiBaseUrl),
     zaiOverseasBaseUrl: url(value.zaiOverseasBaseUrl, defaults.zaiOverseasBaseUrl),
     kimiBaseUrl: url(value.kimiBaseUrl, defaults.kimiBaseUrl),
+    opencodeGoBaseUrl: url(value.opencodeGoBaseUrl, defaults.opencodeGoBaseUrl),
     factoryBaseUrl: url(value.factoryBaseUrl, defaults.factoryBaseUrl),
     droidAllowExtraUsage: bool(value.droidAllowExtraUsage, defaults.droidAllowExtraUsage),
     droidPools: parseDroidPools(value.droidPools),
@@ -204,7 +207,7 @@ function parseQuotaWindowThresholds(
 
 export const DEFAULT_QUOTA_SETTINGS: QuotaSettings = {
   enabled: true,
-  providers: "zai-coding-cn,zai,kimi-coding,droid",
+  providers: "zai-coding-cn,zai,kimi-coding,droid,opencode-go",
   subscriptionProviders: "",
   refreshMs: 600_000, // 10min（简报的 refreshMinutes: 10）
   refreshHotMs: 120_000, // 2min（L1/近耗尽 provider）
@@ -230,6 +233,7 @@ export const DEFAULT_QUOTA_SETTINGS: QuotaSettings = {
   zaiBaseUrl: "https://open.bigmodel.cn",
   zaiOverseasBaseUrl: "https://api.z.ai",
   kimiBaseUrl: "https://api.kimi.com",
+  opencodeGoBaseUrl: "https://opencode.ai",
   factoryBaseUrl: "https://api.factory.ai",
   droidAllowExtraUsage: false,
   droidPools: {},

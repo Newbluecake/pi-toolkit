@@ -374,8 +374,9 @@ export interface BashJobsWire {
 
 /** P7w (quota-plan §9A.1): `month` only comes from an agent that saw hello_ack.caps ∋ `quota.pools.v1`. */
 export type QuotaScopeWire = "5h" | "week" | "month";
-/** P7w: `droid-*` ids only come from an agent that saw `quota.pools.v1`. */
-export type QuotaProviderIdWire = "zai-coding-cn" | "zai" | "kimi-coding" | "droid-standard" | "droid-core";
+/** P7w: `droid-*` ids only come from an agent that saw `quota.pools.v1`; same cap gates `opencode-go`. */
+export type QuotaProviderIdWire =
+  "zai-coding-cn" | "zai" | "kimi-coding" | "droid-standard" | "droid-core" | "opencode-go";
 
 /**
  * quota-web plan §1 (D1-D9): one window (`5h`/`week`, displayed as `7d`) of a provider's
@@ -1574,6 +1575,7 @@ const QuotaProviderSchema = Type.Object(
       Type.Literal("kimi-coding"),
       Type.Literal("droid-standard"),
       Type.Literal("droid-core"),
+      Type.Literal("opencode-go"),
     ]),
     plan: Type.Optional(Type.String({ maxLength: 64 })),
     level: Type.Union([Type.Literal(0), Type.Literal(1), Type.Literal(2), Type.Literal(3)]),

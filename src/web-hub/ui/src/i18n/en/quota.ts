@@ -40,6 +40,7 @@ const quota = {
   // symmetric pair; protocol/model ids (droid-standard, droid/glm-…) stay lowercase everywhere.
   "provider.droid-standard": "Droid Std",
   "provider.droid-core": "Droid Core",
+  "provider.opencode-go": "OpenCode Go",
   scopeMonth: "month",
   overageCore: "Overage policy: Std → Core",
   overageCoreExhausted: "Overage policy: Std → Core (Core exhausted)",
