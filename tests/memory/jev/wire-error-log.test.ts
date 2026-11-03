@@ -66,10 +66,12 @@ function answersFor(questions: Record<string, JevQuestion>, rules: Rules): Recor
 /** No `log` dep override on purpose — exercises the real default sink. */
 function harness(opts: {
   hasUI: boolean;
+  isChild?: boolean;
   fail?: string; // force every classify() call to error with this message (failover path)
   rules?: Rules; // bool-question answers, for a successful U-layer recall (handler-exception path)
   delayMs?: number; // delay classify() answers past recall.waitMs so the U result sends async via send()
   sendMessageThrows?: boolean;
+  settings?: typeof DEFAULT_MEMORY_SETTINGS;
   config?: Partial<JevConfig>;
 }) {
   const handlers = new Map<string, Handler[]>();
@@ -115,8 +117,8 @@ function harness(opts: {
   const writeHooks: ((cwd: string) => void)[] = [];
   const wire = wireJev(pi, {
     config,
-    settings: DEFAULT_MEMORY_SETTINGS,
-    isChildSession: false,
+    settings: opts.settings ?? DEFAULT_MEMORY_SETTINGS,
+    isChildSession: opts.isChild ?? false,
     dirFor: () => memDir,
     getRenderInfo: () => undefined,
     onAfterWriteHook: (fn) => writeHooks.push(fn),
@@ -228,6 +230,27 @@ describe("jev diagnostic log sink — no UI", () => {
       expect(lines.some((l) => l.startsWith("[pi-subagent] jev: ") && l.includes("failed (unavailable)"))).toBe(true);
       const report = await h.wire.commandPort.report(tmp, undefined);
       expect(report).not.toContain("errors");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("child sessions share the host process's stdout: diagnostics go to the ring buffer, never console.warn", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = harness({
+        hasUI: false,
+        isChild: true,
+        fail: "System One API error (451): nope",
+        settings: { ...DEFAULT_MEMORY_SETTINGS, injectInChildSessions: true },
+        config: { childSessions: true },
+      });
+      await h.emit("session_start", { type: "session_start", reason: "startup" });
+      await h.prompt("please remember this child-session command");
+      await settle(150);
+      // Not a tautology: the classifier path must actually have run.
+      expect(h.fake.calls.length).toBeGreaterThan(0);
+      expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
     }

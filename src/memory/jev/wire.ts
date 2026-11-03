@@ -498,8 +498,11 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   // bounded ring buffer instead, surfaced by `/mem jev`'s report (`errors`
   // section below); status-level changes already reach the user via
   // `notify()`/`ui.notify` (TUI-safe), so this is pure diagnostic noise.
-  // Non-UI sessions (print mode, rpc, child) keep the pre-existing
+  // Non-UI **main** sessions (print mode, rpc) keep the pre-existing
   // byte-identical console.warn behavior (I9-style: no UI ⇒ unchanged).
+  // Child sessions are the exception: they run IN-PROCESS, so their stdout
+  // IS the host TUI's stdout — a child writing console.warn breaks the main
+  // session's layout. Child diagnostics go into the ring buffer too.
   // `ui` is set by the session_start handler below once `ctx.hasUI` is
   // known; `ui !== undefined` is reused as the hasUI signal here so there is
   // no separate piece of state to keep in sync (I4).
@@ -511,7 +514,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   const log =
     deps.log ??
     ((line: string): void => {
-      if (ui !== undefined) {
+      if (ui !== undefined || isChild) {
         pushErrorLog(line);
         return;
       }
