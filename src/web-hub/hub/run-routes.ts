@@ -25,6 +25,11 @@
  * object-identity discard kills that race exactly the way the plan kills the re-subscribe one.
  * The fresh object carries `resync:true` (served by the round, no own snapshot started).
  *
+ * Observability (2026-11 defensive package): every HTTP request and every async snapshot
+ * settle writes ONE `audit:"run"` line (audit.ts's `auditRun` — identifiers + status/code +
+ * ms, never content, runId only as a sha256 tag), so a "run_tx_req timeout vs slow file"
+ * triage is decidable from hub.log alone.
+ *
  * Contract pins (F4 acceptance): replay drops `seq <= watermark` frames strictly; a hole
  * (first replayable seq beyond watermark+1 — generalized to any non-contiguous replayed seq)
  * is treated like `overflow` and triggers exactly ONE re-snapshot; a TERMINAL history is the
@@ -32,6 +37,7 @@
  * no-op (the SSE layer already destroyed the connection; its `close` event runs
  * `onClientClose`, which is the single place client teardown unwatches).
  */
+import { createHash } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
   RUN_ID_PATTERN,
@@ -41,6 +47,7 @@ import {
   type RunHistoryPayload,
   type RunTxReason,
 } from "../protocol/run-transcript.js";
+import { auditRun, type RunAuditRecord } from "./audit.js";
 import type { HubLog, ListenerKind, RegistryView, RunSink, RunTranscriptService } from "./ports.js";
 import { deadlineRace } from "./req-deadline.js";
 import { sendJsonNegotiated } from "./gzip.js";
@@ -194,6 +201,31 @@ export function createRunRoutes(
 
   const refOf = (sub: RunSub): string => `${listener}:${sub.clientId}`;
 
+  // ------------------------------------------------------------ audit (U7)
+
+  /** sha256(runId)[0:12] — the audit channel's correlation tag (never the raw id). */
+  const runTag = (runId: string): string => createHash("sha256").update(runId).digest("hex").slice(0, 12);
+
+  const errOutcome = (err: unknown): { status: number; code: string } =>
+    err instanceof HubError ? { status: runStatusFor(err.code), code: err.code } : { status: 500, code: "E_INTERNAL" };
+
+  /** One audit line per request / async snapshot settle (audit.ts's RunAuditRecord):
+   * identifiers + outcome + ms, never content — the hub.log evidence for the next
+   *  "run_tx_req timeout vs slow file" triage. */
+  const audit = (
+    op: RunAuditRecord["op"],
+    ok: boolean,
+    t0: number,
+    extra: { status?: number; code?: string; agentKey?: string; runId?: string } = {},
+  ): void => {
+    const rec: RunAuditRecord = { op, listener, ok, ms: Math.max(0, Math.round(now() - t0)) };
+    if (extra.status !== undefined) rec.status = extra.status;
+    if (extra.code !== undefined) rec.code = extra.code;
+    if (extra.agentKey !== undefined) rec.agentKey = extra.agentKey;
+    if (extra.runId !== undefined) rec.runTag = runTag(extra.runId);
+    auditRun(log, rec);
+  };
+
   function getSub(clientId: string, key: string): RunSub | undefined {
     return subs.get(clientId)?.get(key);
   }
@@ -280,10 +312,22 @@ export function createRunRoutes(
   async function runSnapshot(client: SseClient, sub: RunSub, isRetry: boolean): Promise<void> {
     let payload: RunHistoryPayload | undefined;
     let err: unknown;
+    const t0 = now();
     try {
       payload = await withDeadline(runTx.snapshot(sub.agentKey, sub.runId, listener), RUN_GUARD_MS);
     } catch (e) {
       err = e;
+    }
+    // Settle audit BEFORE the identity checks: a discarded late snapshot is exactly the
+    // evidence a hang triage needs (its ms/code still say WHY it was late).
+    if (payload !== undefined) {
+      audit("snapshot", true, t0, { agentKey: sub.agentKey, runId: sub.runId });
+    } else {
+      audit("snapshot", false, t0, {
+        code: err instanceof HubError ? err.code : "E_DEADLINE",
+        agentKey: sub.agentKey,
+        runId: sub.runId,
+      });
     }
     const key = runKeyOf(sub.agentKey, sub.runId);
     if (getSub(sub.clientId, key) !== sub) return; // replaced/unsubscribed/cleaned: discard
@@ -302,20 +346,24 @@ export function createRunRoutes(
   // ------------------------------------------------------------- HTTP surface
 
   function subscribe(body: unknown, res: ServerResponse): void {
+    const t0 = now();
     const clientId = field(body, "clientId");
     const agentKey = field(body, "agentKey");
     const runId = field(body, "runId");
     if (clientId === undefined || agentKey === undefined || runId === undefined || !isRunId(runId)) {
       sendJson(res, 400, { error: "E_BAD_REQUEST", message: "bad fields" });
+      audit("subscribe", false, t0, { status: 400, code: "E_BAD_REQUEST" }); // fields untrusted: no ids
       return;
     }
     const client = sse.get(clientId);
     if (client === undefined) {
       sendJson(res, 404, { error: "E_NOT_FOUND", message: "unknown clientId" });
+      audit("subscribe", false, t0, { status: 404, code: "E_NOT_FOUND", agentKey, runId });
       return;
     }
     if (registry.get(agentKey) === undefined) {
       sendJson(res, 404, { error: "E_NOT_FOUND", message: "unknown agentKey" });
+      audit("subscribe", false, t0, { status: 404, code: "E_NOT_FOUND", agentKey, runId });
       return;
     }
     const key = runKeyOf(agentKey, runId);
@@ -338,11 +386,13 @@ export function createRunRoutes(
         runTx.watch(agentKey, runId, ref);
       } catch (err) {
         sendHttpError(res, err, log);
+        audit("subscribe", false, t0, { ...errOutcome(err), agentKey, runId });
         return;
       }
       if ((subs.get(clientId)?.size ?? 0) >= RUN_TX.subsPerClient) {
         runTx.unwatch(agentKey, runId, ref);
         sendJson(res, 503, { error: "E_BUSY", message: "busy" });
+        audit("subscribe", false, t0, { status: 503, code: "E_BUSY", agentKey, runId });
         return;
       }
     }
@@ -360,48 +410,58 @@ export function createRunRoutes(
     if (m === undefined) subs.set(clientId, (m = new Map()));
     m.set(key, sub); // same-run re-subscribe: fresh object; the old one's snapshot self-discards
     sendJson(res, 202, { ok: true });
+    audit("subscribe", true, t0, { status: 202, agentKey, runId });
     void runSnapshot(client, sub, false);
   }
 
   function unsubscribe(body: unknown, res: ServerResponse): void {
+    const t0 = now();
     const clientId = field(body, "clientId");
     const agentKey = field(body, "agentKey");
     const runId = field(body, "runId");
     if (clientId === undefined || agentKey === undefined || runId === undefined || !isRunId(runId)) {
       sendJson(res, 400, { error: "E_BAD_REQUEST", message: "bad fields" });
+      audit("unsubscribe", false, t0, { status: 400, code: "E_BAD_REQUEST" }); // fields untrusted: no ids
       return;
     }
     const sub = getSub(clientId, runKeyOf(agentKey, runId));
     if (sub !== undefined) removeSub(sub, true);
     sendJson(res, 200, { ok: true }); // idempotent: unknown runs also 200
+    audit("unsubscribe", true, t0, { status: 200, agentKey, runId });
   }
 
   async function historyPage(query: URLSearchParams, res: ServerResponse): Promise<void> {
+    const t0 = now();
     const agentKey = query.get("agent") ?? "";
     const runId = query.get("run") ?? "";
     const before = query.get("before") ?? "";
     const limitRaw = query.get("limit");
     if (agentKey.length === 0 || runId.length === 0 || !isRunId(runId) || before.length === 0) {
       sendJson(res, 400, { error: "E_BAD_REQUEST", message: "bad fields" });
+      audit("history", false, t0, { status: 400, code: "E_BAD_REQUEST" }); // fields untrusted: no ids
       return;
     }
     let limit: number = RUN_TX.pageMax;
     if (limitRaw !== null) {
       if (!/^\d{1,9}$/.test(limitRaw)) {
         sendJson(res, 400, { error: "E_BAD_REQUEST", message: "bad limit" });
+        audit("history", false, t0, { status: 400, code: "E_BAD_REQUEST", agentKey, runId });
         return;
       }
       limit = Math.min(RUN_TX.pageMax, Math.max(1, Number(limitRaw)));
     }
     if (registry.get(agentKey) === undefined) {
       sendJson(res, 404, { error: "E_NOT_FOUND", message: "unknown agentKey" });
+      audit("history", false, t0, { status: 404, code: "E_NOT_FOUND", agentKey, runId });
       return;
     }
     try {
       const payload = await withDeadline(runTx.page(agentKey, runId, before, limit, listener), RUN_GUARD_MS);
       sendJson(res, 200, payload);
+      audit("history", true, t0, { status: 200, agentKey, runId });
     } catch (err) {
       sendHttpError(res, err, log); // {error, message: reason} per §3.4/§3.6
+      audit("history", false, t0, { ...errOutcome(err), agentKey, runId });
     }
   }
 
@@ -503,6 +563,5 @@ export function createRunRoutes(
     },
   };
 
-  void now; // reserved for future log/deadline fields (frozen §5.4 signature)
   return { subscribe, unsubscribe, historyPage, onClientClose, sink };
 }

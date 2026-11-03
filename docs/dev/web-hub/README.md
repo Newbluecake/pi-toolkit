@@ -465,6 +465,26 @@ Diagnosing a stalled hub: `/proc/<pid>/task/<pid>/stat` utime sampling shows bus
 thread; a short `SIGUSR1` inspector CPU profile (close it again with
 `process.getBuiltinModule('node:inspector').close()`) names the function.
 
+## Run-transcript chain hardening (2026-11 defensive package)
+
+Same main-thread rule as above, agent side: `agent/run-transcript.ts`'s `onReq` live answer used
+to `projectSessionEntry` the WHOLE in-memory branch and only then trim to `limit`/`maxBytes` —
+an unbounded synchronous CPU burst on long-lived runs. It now walks the RAW branch newest-first
+and projects lazily: only the kept tail window plus at most one budget-overflow probe and one
+`hasMore` probe are ever projected (`before` is located by id compare; only an id match pays one
+projection to confirm projectability). Output stays byte-identical to "project all, then trim
+the head" (same +1-per-line accounting as `snapshot.ts`'s `buildBranchReply`; `truncated` exactly
+on budget overflow; `hasMore` ⇔ a projectable entry exists below the window) — pinned by
+`tests/web-hub/agent/run-transcript-tail.test.ts` (projection-count asserts + a seeded matrix
+against an inline reference of the old algorithm).
+
+Observability: `hub/run-routes.ts` writes ONE `audit:"run"` line (audit.ts's `auditRun`, U7
+whitelist — identifiers/status/code/ms only, runId as a sha256[0:12] `runTag`, never content)
+per `/api/run/*` request AND per async `runTx.snapshot` settle (logged before the object-identity
+discard, so a late discarded snapshot still leaves its ms/code). Triage: `op:"snapshot"` with
+`ms` ≈ `RUN_TX.reqDeadlineMs` + `code:"E_DEADLINE"` ⇒ the agent `run_tx_req` round timed out; a
+fast `ok:true` ⇒ the file/agent path answered. Format asserts: `tests/web-hub/hub/run-routes-audit.test.ts`.
+
 ## Peer-bump conformance premises (cmd-history)
 
 **Also run `tests/conformance/cmd-history.test.ts`** (web-hub-cmd-history I1):

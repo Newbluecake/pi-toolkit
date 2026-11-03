@@ -9,10 +9,12 @@ import {
   auditWorktreeGraph,
   WTGRAPH_AUDIT_KEYS,
   auditRemove,
+  auditRun,
   auditSpawn,
   auditUpload,
   createUploadHttpMetrics,
   PREVIEW_AUDIT_KEYS,
+  RUN_AUDIT_KEYS,
   WTDIFF_AUDIT_KEYS,
   REMOVE_AUDIT_KEYS,
   SPAWN_AUDIT_KEYS,
@@ -484,6 +486,41 @@ describe("auditPreview (web-hub-preview plan v3 §4.5, PV3)", () => {
     // the routes only ever feed pathTag (HMAC-12) / ext into the audit accumulator
     expect(src).toMatch(/acc\.pathTag = pathTagOf\(path\)/);
     expect(src).not.toMatch(/acc\.(path|name|content)\b/);
+  });
+});
+
+describe("auditRun (2026-11 run-chain observability)", () => {
+  it('writes the whitelisted key set under audit:"run" and drops unknown keys', () => {
+    const log = memLog();
+    auditRun(log, {
+      op: "snapshot",
+      listener: "lan",
+      agentKey: "a1",
+      runTag: "abc123def456",
+      ok: false,
+      code: "E_DEADLINE",
+      ms: 5_001,
+      // deliberately smuggled extras — must be dropped by the whitelist
+      ...({ runId: "r_RAWID", entries: [{ id: "e1" }], content: "raw" } as unknown as Record<string, never>),
+    } as never);
+    expect(log.lines).toHaveLength(1);
+    const line = log.lines[0]!;
+    expect(line.msg).toBe("run");
+    const data = line.data as Record<string, unknown>;
+    expect(data["audit"]).toBe("run");
+    expect(Object.keys(data).sort()).toEqual(
+      ["audit", "op", "listener", "agentKey", "runTag", "ok", "code", "ms"].sort(),
+    );
+    expect(JSON.stringify(data)).not.toContain("r_RAWID");
+    expect(JSON.stringify(data)).not.toContain("raw");
+  });
+
+  it("RUN_AUDIT_KEYS carries no runId/entry/content-bearing key (U7)", () => {
+    expect(RUN_AUDIT_KEYS).not.toContain("runId");
+    expect(RUN_AUDIT_KEYS).not.toContain("entries");
+    expect(RUN_AUDIT_KEYS).not.toContain("content");
+    expect(RUN_AUDIT_KEYS).not.toContain("payload");
+    expect(RUN_AUDIT_KEYS).not.toContain("before");
   });
 });
 

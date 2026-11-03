@@ -396,6 +396,50 @@ export function auditPreview(log: { info(msg: string, data?: object): void }, re
 }
 
 // ---------------------------------------------------------------------------
+// run-chain observability (2026-11 defensive package): run audit channel
+// ---------------------------------------------------------------------------
+
+/**
+ * Run-route audit record (2026-11 defensive observability package). ONE line per
+ * subscribe/unsubscribe/history HTTP request, plus ONE per async `runTx.snapshot` settle
+ * (the hub→agent `run_tx_req` round or the terminal file read behind it), so the next
+ * "run_tx_req timeout vs slow file" question is decidable from hub.log alone
+ * (`op:"snapshot"` with `ms` ≈ `RUN_TX.reqDeadlineMs` + `code:"E_DEADLINE"` ⇒ the agent
+ * round-trip timed out; a fast `ok:true` line ⇒ the file/agent path answered). Same U7
+ * discipline as every channel here: NEVER entry content, never the raw runId — `runTag` is
+ * sha256(runId)[0:12] purely for correlating one run's lines across processes.
+ */
+export interface RunAuditRecord {
+  /** `subscribe`/`unsubscribe`/`history` = an HTTP request line (carries `status`);
+   * `snapshot` = the async subscribe-time (or overflow/hole retry) snapshot settle. */
+  op: "subscribe" | "unsubscribe" | "snapshot" | "history";
+  listener?: "loopback" | "lan";
+  agentKey?: string;
+  /** sha256(runId)[0:12] hex — correlation tag, never the raw id. */
+  runTag?: string;
+  ok: boolean;
+  /** Failure code (HubError code, e.g. E_DEADLINE / E_NOT_FOUND / E_BAD_REQUEST). */
+  code?: string;
+  /** HTTP status on the request lines (202/200/4xx/5xx); absent on `snapshot`. */
+  status?: number;
+  ms?: number;
+}
+
+/** Runtime whitelist for `auditRun` — anything not listed here is dropped, even if passed. */
+export const RUN_AUDIT_KEYS = ["op", "listener", "agentKey", "runTag", "ok", "code", "status", "ms"] as const;
+
+/** `log.info("run", { audit: "run", ...pick(record, RUN_AUDIT_KEYS) })`. */
+export function auditRun(log: { info(msg: string, data?: object): void }, record: RunAuditRecord): void {
+  const out: Record<string, unknown> = { audit: "run" };
+  const raw = record as unknown as Record<string, unknown>;
+  for (const key of RUN_AUDIT_KEYS) {
+    const v = raw[key];
+    if (v !== undefined) out[key] = v;
+  }
+  log.info("run", out);
+}
+
+// ---------------------------------------------------------------------------
 // web-hub-delete-session plan v2 §4.2: remove audit channel
 // ---------------------------------------------------------------------------
 
