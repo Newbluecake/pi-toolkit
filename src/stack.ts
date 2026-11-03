@@ -1180,7 +1180,7 @@ export function buildSessionStack(
       // rebind-plan r3 §3.2/§4.7（agent 包）：两个 thr_req 往返。cap 预检在 engine 内
       //（A9 零帧）；这里只负责帧构造（rid/sessionId）与 5s 有界 request（connection 强制）。
       rebind: {
-        hubRebindCapable: () => liveHubRebindCapable(),
+        hubRebindCapable: () => thr.rebind === true && liveHubRebindCapable(), // 本端 off ⇒ 零帧（E2E 缺口修复）
         acquire: (h) => {
           const c = threadInput?.conn();
           if (c === undefined) return Promise.reject(new Error("E_NO_CAP: no hub link"));
