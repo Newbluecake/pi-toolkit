@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-11-04
+
+### Added
+
+- **web-hub-ui**: marked sessions show an Unlock header button (`6189922e`)
+- **quota**: scan all projects' sessions for the cost estimate (`61253b5a`)
+- **quota**: API-price cost estimate per subscription window (`993b4988`)
+- **web-tools**: DeepSeek Search & Fetch API + module rename (`75872cae`)
+- **ui**: running rows without a deadline keep showing elapsed time (`1fbcabe4`)
+- **build**: single-file bundle entry — 10.3s to 0.9s startup (`ac60f407`)
+- **quota**: OpenCode Go subscription support (`3fbdb017`)
+- **fabric**: hub-side rebind/acquire — ownership, CAS, dedup, in-flight closing (`86b51d8b`)
+- **fabric**: agent-side rebind/acquire — thread tool, directory rev, reopen (`d5a2caa5`)
+- **fabric**: rebind foundation — shared binding transfer + wire/cap/settings gate (`3ef29397`)
+- **ui**: drop the pi-subagent prefix from user-facing notices (`5fd4f461`)
+- **schedule**: auto-dismiss the TUI confirm box when approved elsewhere (`d8032fb8`)
+- **fabric**: thread subscription integration and acceptance (P4) (`7817c374`)
+- **fabric**: wire thread subscription fast path (P3) (`ac340986`)
+- **feishu**: thread subscription hub side (fabric-thread P2, arch §8) (`96501405`)
+- **web-hub**: thread hub wiring points (fabric-thread P2, root ruling A) (`18dfdf4c`)
+- **fabric**: thread subscription pure-logic engine (P1) (`10ef5c0d`)
+- **fabric**: thread subscription MVP contracts (P0) (`2007d494`)
+- **memory**: web confirmation card for the user-order guard in headless sessions (`0d28994b`)
+
+### Fixed
+
+- **memory**: cut jev injection noise — fast-path whitelist + cross-session cooldown (`ec659c2e`)
+- **build**: cache-bust the bundle import so /reload picks up a rebuild (`4301dfbe`)
+- **web-hub**: hubMainPath anchors on the package root (bundle layout) (`729cd96c`)
+- **web-hub-ui**: stop highlight flood from wedging the renderer (`41bc2a1d`)
+- **memory**: keep child-session jev diagnostics out of the host TUI (`f0ca2b70`)
+- **feishu**: thread P2 verifier fixes F1-F3 (r_21YKEYEQ) (`55fe42f8`)
+- **memory**: exempt pure-readonly shell commands from the jev gate (`c981b961`)
+- **fabric**: thread engine P1 review findings (r_1AJQ6AC7) (`cdc0cb5c`)
+- **bash**: adopt orphaned jobs only from the session's own cwd (`5f8c0596`)
+
+### Changed
+
+- **core**: locate the package root by content anchor, not url depth (`228631bc`)
+- **web-hub**: tail-window lazy projection for live run transcripts + run-chain audit (`3f5ba340`)
+
+### Documentation
+
+- **fabric**: thread subscription fast-path architecture (r3) (`8d40b873`)
+
+### Tests
+
+- **governance**: bundle parity across src/bundle/dispatcher paths (`7737946d`)
+- **fabric**: end-to-end rebind chain + local-off zero-frame gate (`2c7a60a5`)
+- **config**: regenerate settings corpus for the declared windowClamped marker (`8193ca81`)
+- **fabric**: thread engine unit + seeded property suites (P1) (`63be3c3b`)
+- **boundary**: pin legacy result-tool name occurrences in thread-off golden (`b7f4ff55`)
+- **integration**: seed bash-jobs-wiring orphans in the session's cwd (`da4a04d7`)
+
+### Chores
+
+- **ui**: drop pi-subagent from user/model-facing strings outside the subagent surface (`ed85e284`)
+
+Stats: 19 feat, 9 fix, 2 refactor/perf, 1 docs, 6 test, 1 chore
+
 ## [0.10.4] - 2026-11-02
 
 ### Added
@@ -1565,7 +1625,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.4...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.5...HEAD
+[0.10.5]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.4...v0.10.5
 [0.10.4]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.3...v0.10.4
 [0.10.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.1...v0.10.2
