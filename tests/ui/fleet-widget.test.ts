@@ -129,7 +129,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const model = buildFleetViewModel([run], { ...OPTS, typeOf: () => "architect" });
     expect(buildFleetWidgetLines(model)).toEqual([
       "● 1 active Agents · $1.05",
-      "  aaaaaaaa architect 🤔 8m32s $1.05 Σ8m32s",
+      "  aaaaaaaa architect 🤔 8m32s ⏱8m32s $1.05 Σ8m32s",
     ]);
   });
 
@@ -144,7 +144,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     const lines = buildFleetWidgetLines(buildFleetViewModel([run], OPTS))!;
-    expect(lines[1]).toBe("  重构用户模块 architect copilot-completion/kimi-k3 🤔 1s Σ1s");
+    expect(lines[1]).toBe("  重构用户模块 architect copilot-completion/kimi-k3 🤔 1s ⏱1s Σ1s");
   });
 
   it("M-B2: a known thinking level rides the model token as `·<level>`; unknown renders nothing", () => {
@@ -161,12 +161,14 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const model = buildFleetViewModel([run], OPTS);
     expect(model.rows[0]!.thinking).toBe("high");
     const lines = buildFleetWidgetLines(model)!;
-    expect(lines[1]).toBe("  重构用户模块 architect zai/glm-5.3·high 🤔 1s Σ1s");
-    // the shortened (basename) tier keeps the suffix too — at width 40 the
-    // `zai/` provider prefix is dropped but `·high` stays on the basename.
+    expect(lines[1]).toBe("  重构用户模块 architect zai/glm-5.3·high 🤔 1s ⏱1s Σ1s");
+    // the shortened (basename) tier keeps the suffix too — at width 44 the
+    // `zai/` provider prefix is dropped but `·high` stays on the basename
+    // (the ⏱elapsed field took the 4 columns that used to make width 40 the
+    // basename tier).
     // (toContain("zai/glm-5.3") would be vacuous here: `glm-5.3·high` contains
     // neither, so the negative form asserts the provider was really dropped.)
-    const medium = buildFleetWidgetLines(model, { width: 40 })![1]!;
+    const medium = buildFleetWidgetLines(model, { width: 44 })![1]!;
     expect(medium).toContain("glm-5.3·high");
     expect(medium.split(/\s+/)).not.toContain("zai/glm-5.3·high");
     // unknown level → byte-identical to the pre-feature row (no dangling `·`)
@@ -180,7 +182,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     const plainLines = buildFleetWidgetLines(buildFleetViewModel([plain], OPTS))!;
-    expect(plainLines[1]).toBe("  重构用户模块 architect zai/glm-5.3 🤔 1s Σ1s");
+    expect(plainLines[1]).toBe("  重构用户模块 architect zai/glm-5.3 🤔 1s ⏱1s Σ1s");
   });
 
   it("consult §16.5: a main-session consult run's row shows `main`, never the sentinel type", () => {
@@ -356,10 +358,21 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       expect(line).toContain("⏳grace 58s");
     });
 
-    it("no deadline (and terminal rows) render no deadline field", () => {
+    it("no deadline: running rows show ⏱elapsed, terminal rows show nothing", () => {
       const run = snapshot({ diag: liveDiag() });
       const line = buildFleetWidgetLines(buildFleetViewModel([run], OPTS), { width: 120 })![1]!;
+      expect(line).toContain("⏱1s"); // ⏱elapsed mirrors the Σ total (same elapsedMs)
       expect(line).not.toContain("⏳");
+      // terminal rows carry no timer field at all
+      const done = snapshot({
+        status: "completed",
+        phase: "settled",
+        updatedAt: NOW,
+        diag: diag({ createdAt: 0 }),
+      });
+      const doneLines = buildFleetWidgetLines(buildFleetViewModel([done], { ...OPTS, recentTerminal: 1 }))!;
+      expect(doneLines.join("\n")).not.toContain("⏱");
+      expect(doneLines.join("\n")).not.toContain("⏳");
     });
 
     it("drops fields by priority: deadline goes LAST (after Σ total)", () => {
@@ -430,7 +443,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withHistory], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🤔 1s Σ1s",
+      "  aaaaaaaa · 🤔 1s ⏱1s Σ1s",
       "  ╰ ✓ bash ×2 | ▸edit · 9s",
     ]);
     const withTool = snapshot({
@@ -441,7 +454,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withTool], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🤔 1s Σ1s",
+      "  aaaaaaaa · 🤔 1s ⏱1s Σ1s",
       "  ╰ ▸bash · 100ms",
     ]);
   });
@@ -497,7 +510,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([thinking], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🤔 1s Σ1s",
+      "  aaaaaaaa · 🤔 1s ⏱1s Σ1s",
       "  ╰ » 然后看一下代码结构，重点关注调度模块",
     ]);
     // a long line is truncated with an ellipsis
@@ -517,7 +530,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([tooling], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🔧 1s Σ1s",
+      "  aaaaaaaa · 🔧 1s ⏱1s Σ1s",
       "  ╰ ▸bash · 100ms",
     ]);
     // terminal rows never stream
@@ -536,7 +549,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       diag: diag({ createdAt: 0, phaseEnteredAt: 9_000, lastEventAt: 9_900 }),
     });
     const lines = buildFleetWidgetLines(buildFleetViewModel([run], OPTS))!;
-    expect(lines[1]).toBe("  aaaaaaaa · 🤔 1s Σ10s"); // 1s in this model turn, Σ10s total run age
+    expect(lines[1]).toBe("  aaaaaaaa · 🤔 1s ⏱10s Σ10s"); // 1s in this model turn, ⏱10s elapsed, Σ10s total run age
   });
 
   it("tool trail: in-flight edit shows which file is being edited (path preview)", () => {
@@ -561,7 +574,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withPreview], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🤔 1s Σ1s",
+      "  aaaaaaaa · 🤔 1s ⏱1s Σ1s",
       "  ╰ ▸bash npm test -- --runInBand · 100ms",
     ]);
     const longPreview = snapshot({
@@ -632,16 +645,16 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const lines = buildFleetWidgetLines(buildFleetViewModel([parent, child, other], OPTS))!;
     expect(lines).toEqual([
       "● 3 active Agents",
-      "  parent-0 · 🤔 9s Σ9s",
-      "  ↳ child-00 · 🤔 5s Σ5s",
-      "  other-00 · 🤔 8s Σ8s",
+      "  parent-0 · 🤔 9s ⏱9s Σ9s",
+      "  ↳ child-00 · 🤔 5s ⏱5s Σ5s",
+      "  other-00 · 🤔 8s ⏱8s Σ8s",
     ]);
   });
 
   it("nested run whose parent is NOT shown still gets the ↳ marker at top level", () => {
     const nested = snapshot({ parentRunId: "p", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) });
     const lines = buildFleetWidgetLines(buildFleetViewModel([nested], OPTS))!;
-    expect(lines[1]).toBe("  ↳ aaaaaaaa · 🤔 1s Σ1s");
+    expect(lines[1]).toBe("  ↳ aaaaaaaa · 🤔 1s ⏱1s Σ1s");
   });
 
   it("highlight-priority: crit run's row is first among roots and the bullet takes the worst tone", () => {
@@ -1167,7 +1180,7 @@ describe("FleetWidgetController (fake ui)", () => {
     expect(ui.calls[0]!.options?.placement).toBe("aboveEditor");
     expect(typeof ui.calls[0]!.content).toBe("function"); // component factory, not a string[]
     expect(ui.mountCount).toBe(1);
-    expect(ui.renderedLines()).toEqual([" ● 1 active Agents", "   live-000 · 🤔 1s Σ1s"]);
+    expect(ui.renderedLines()).toEqual([" ● 1 active Agents", "   live-000 · 🤔 1s ⏱1s Σ1s"]);
     expect(clock.pendingTimers).toBe(1); // 1s tick armed
   });
 
@@ -1202,7 +1215,7 @@ describe("FleetWidgetController (fake ui)", () => {
 
     query.runs.push(snapshot({ runId: "live-0000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) }));
     widget.lifecycle.onLifecycle!(lifecycleEvent("live-0000"));
-    expect(ui.renderedLines()).toEqual([" ● 1 active Agents", "   live-000 · 🤔 1s Σ1s"]);
+    expect(ui.renderedLines()).toEqual([" ● 1 active Agents", "   live-000 · 🤔 1s ⏱1s Σ1s"]);
     expect(ui.mountCount).toBe(1); // first activation after starting idle
 
     query.runs.length = 0;
@@ -1274,7 +1287,7 @@ describe("FleetWidgetController (fake ui)", () => {
       expect(ui.calls[ui.calls.length - 1]!.key).toBe(FLEET_WIDGET_KEY);
       expect(typeof ui.calls[ui.calls.length - 1]!.content).toBe("function");
       // The tree content itself is unaffected by the resort.
-      expect(ui.renderedLines()).toEqual([" ● 1 active Agents", "   live-000 · 🤔 1s Σ1s"]);
+      expect(ui.renderedLines()).toEqual([" ● 1 active Agents", "   live-000 · 🤔 1s ⏱1s Σ1s"]);
     });
 
     it("is a no-op while the fleet widget is hidden (no runs active)", () => {
