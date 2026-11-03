@@ -523,7 +523,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     pi.registerTool({
       name: "Agent",
       label: "Agent (unavailable)",
-      description: `pi-subagent is disabled: ${compat.reason}`,
+      description: `pi-toolkit is disabled: ${compat.reason}`,
       parameters: { type: "object", properties: {}, required: [] } as never,
       async execute() {
         throw new Error(compat.reason);

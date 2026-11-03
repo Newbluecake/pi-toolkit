@@ -240,7 +240,7 @@ export function assertCompatible(caps: PiCapabilities): CompatResult {
   return outsideTestedRange
     ? {
         ok: true,
-        warning: `pi-subagent has not been validated against pi ${caps.version} (tested range ${TESTED_PI_RANGE}); all required capabilities were detected, proceeding.`,
+        warning: `pi-toolkit has not been validated against pi ${caps.version} (tested range ${TESTED_PI_RANGE}); all required capabilities were detected, proceeding.`,
       }
     : { ok: true };
 }

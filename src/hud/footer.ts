@@ -329,7 +329,7 @@ export function installFooter(session: HudSession, ctx: ExtensionContext): void 
         for (const entry of ctx.sessionManager.getEntries()) {
           if (entry.type !== "message") continue;
           // 子代理/嵌套 LLM 调用的花费：pi 的 usage accounting 把它们
-          // 挂在 toolResult 消息上（如 pi-subagent 的 Agent /
+          // 挂在 toolResult 消息上（如 pi-toolkit 的 Agent /
           // get_run_result）。计入 total，不计入 req（req 语义为
           // 主会话最近一次 LLM 请求）。
           if (entry.message.role === "toolResult") {

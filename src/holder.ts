@@ -19,7 +19,7 @@ import type { Stack } from "./stack.js";
 export type StackHolder = { current?: Stack };
 
 export function requireStack(holder: StackHolder): Stack {
-  if (!holder.current) throw new Error("pi-subagent: no active session yet");
+  if (!holder.current) throw new Error("pi-toolkit: no active session yet");
   return holder.current;
 }
 /** todo #22 optimize-plan §7.0 (P0-b): projects the memory module's narrow
@@ -64,7 +64,7 @@ export function forwardSpawn(holder: StackHolder): SpawnService {
 export function forwardResolveRun(holder: StackHolder) {
   return (handle: string) => {
     const result = requireStack(holder).spawn.resolveRun?.(handle);
-    if (!result) throw new Error("pi-subagent: run resolver unavailable");
+    if (!result) throw new Error("pi-toolkit: run resolver unavailable");
     return result;
   };
 }

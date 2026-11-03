@@ -16,7 +16,7 @@ const request = {
 
 describe("holder after shutdown (G8)", () => {
   it("requireStack throws the stable 'no active session yet' error", () => {
-    expect(() => requireStack({})).toThrow("pi-subagent: no active session yet");
+    expect(() => requireStack({})).toThrow("pi-toolkit: no active session yet");
   });
 
   it("tidy port: routes to the live stack while there is one", async () => {

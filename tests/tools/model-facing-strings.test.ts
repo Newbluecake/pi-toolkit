@@ -16,6 +16,7 @@ import {
 import { createBashJobTool, formatGraceLine } from "../../src/bash/job-tool.js";
 import { createSetModelTool } from "../../src/tools/set-model-tool.js";
 import { createExtendTimeoutTool } from "../../src/tools/extend-timeout-tool.js";
+import { createSetCompactThresholdTool } from "../../src/compact-hint/threshold-tool.js";
 import { STRUCTURED_REPAIR_PROMPT } from "../../src/core/structured-repair.js";
 
 function collectDescriptions(schema: unknown, out: string[] = []): string[] {
@@ -48,6 +49,9 @@ function tools() {
     createBashJobTool({ manager: () => undefined }),
     createSetModelTool({}),
     createExtendTimeoutTool({ query: {} as never }),
+    // compact-hint's threshold tool is model-facing too; held to the same
+    // no-internal-vocabulary bar (see its dedicated rename-hygiene gate below).
+    createSetCompactThresholdTool({ getState: () => undefined, compactToolEnabled: () => true }),
   ];
 }
 
@@ -303,6 +307,27 @@ describe("bash deadline strings (bash-timeout-grace T17)", () => {
     expect(descriptions).toContain("max 200 chars");
     expect(descriptions).not.toContain("applyJobExtension");
     expect(descriptions).not.toContain("hardAt");
+  });
+});
+
+/**
+ * Rename hygiene: set_compact_threshold is a model-facing surface too
+ * (description + promptSnippet + guidelines + parameter docs). After the
+ * pi-subagent → pi-toolkit package rename its strings must carry the new
+ * name only — same forbidden-word gate as the bash deadline strings above.
+ */
+describe("compact threshold tool strings (rename hygiene)", () => {
+  const tool = () => createSetCompactThresholdTool({ getState: () => undefined, compactToolEnabled: () => true });
+
+  it("carries no internal vocabulary or the pre-rename package name", () => {
+    const strings = [tool().description, tool().promptSnippet, ...(tool().promptGuidelines ?? [])].filter(
+      (value): value is string => typeof value === "string",
+    );
+    strings.push(...collectDescriptions(tool().parameters));
+    for (const value of strings) {
+      expect(value).not.toMatch(/[§]|architecture/);
+      expect(value).not.toMatch(/pi-subagent|plan\.md|child-registry/);
+    }
   });
 });
 
