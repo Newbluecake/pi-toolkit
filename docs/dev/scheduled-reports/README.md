@@ -23,7 +23,7 @@
 - **web**：hub 把 `sched_offers` 投影成任务的 `offer`（仅在线且唯一视图、hash 一致、未过期）；`DetailHeader` 自动打开 `SchedulePanel` 并定位，`ScheduleReview` 多一个「拒绝」按钮（`/schedule reject <id> <hash>`）。
 - **飞书**：owner 的 p2p 绑定收到审批卡片（`F2`，owner 证明 fail-closed，见 `docs/dev/feishu-bot/README.md`），按钮经 `port.decide → sched_decide → confirm.decide`，每帧恰好一个 `sched_decide_ack`。
 
-**三渠道竞速**：唯一裁判是账本 CAS——`approveTask` 在锁内先查 `isApproved`（`already-approved`，三渠道 / `--all` 的唯一落实点）再比 hash；同一 offer 的 `decide` 复用同一个 in-flight promise（一条 notice、一个 `closed.by`）。赢家之外的渠道由 agent 权威全量 `sched_offers{open,closed}`（每次变化 + 每次 hello_ack，空列表也发）收回：TUI 框只 `notify`、不 abort；web offer 消失（review 里显示「已在其他端批准 / 任务已删除」）；飞书卡 `closed.by==="feishu"` ⇒ 保留并 PATCH「已通过飞书批准」，其余 ⇒ 先落盘认领再 DELETE，失败只做一次中性 PATCH。账本被他进程（`--all`）改动由 15 s 轮询兜底。web 命令批准不经 `decide`，由 `revalidate` 发现账本已批准后关成 `approved/elsewhere`。
+**三渠道竞速**：唯一裁判是账本 CAS——`approveTask` 在锁内先查 `isApproved`（`already-approved`，三渠道 / `--all` 的唯一落实点）再比 hash；同一 offer 的 `decide` 复用同一个 in-flight promise（一条 notice、一个 `closed.by`）。赢家之外的渠道由 agent 权威全量 `sched_offers{open,closed}`（每次变化 + 每次 hello_ack，空列表也发）收回：TUI 框随 `close()` 自动关闭——每次展示各带一个 presentation 级 AbortController 传给 `ui.select` 的 `signal`（只能关自己那个框，不会误关后续新框/外来对话框），abort 后的迟到选择被丢弃（幂等，账本 CAS 是唯一裁判），另发一条 `notify`（「…已自动关闭」）；`dispose()` 例外：弃置不关框不通知（离框迟到作答无效）；web offer 消失（review 里显示「已在其他端批准 / 任务已删除」）；飞书卡 `closed.by==="feishu"` ⇒ 保留并 PATCH「已通过飞书批准」，其余 ⇒ 先落盘认领再 DELETE，失败只做一次中性 PATCH。账本被他进程（`--all`）改动由 15 s 轮询兜底。web 命令批准不经 `decide`，由 `revalidate` 发现账本已批准后关成 `approved/elsewhere`。
 
 **拒绝语义**：拒绝 = 撤销 AI 这次未确认的改动。create 链 ⇒ `removeTask`（同事务，并 `dropQueuedRuns` / revoke）；update 链 ⇒ 恢复改动前的 `form/when/prompt/feishu/bg`（原批准按 hash 自动重新生效；**不回滚 `name`**，它不在 `defHash` 里）。飞书批准记 `approval.via:"web"`（`via` 联合类型被 reader 严格校验）。「稍后」/Esc/关框 ⇒ 保持待确认，不再自动重开。
 

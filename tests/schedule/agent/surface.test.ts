@@ -57,7 +57,7 @@ function setup(over: { hasUI?: boolean; mode?: string } = {}) {
 }
 
 describe("schedule surface × confirm", () => {
-  it("start() builds a confirm for an interactive session; it opens the select with 2 args, publishes through the coordinator, and shutdown withdraws", async () => {
+  it("start() builds a confirm for an interactive session; it opens the select with (title, options, { signal }), publishes through the coordinator, and shutdown withdraws", async () => {
     const s = setup();
     expect(s.surface.confirm()).toBeUndefined();
     await s.surface.start(s.ctx, env.agent);
@@ -67,7 +67,7 @@ describe("schedule surface × confirm", () => {
     if (!created.ok) throw new Error(created.detail);
     expect(confirm.offer(created.value, { kind: "create" })).toBe("offered");
     expect(s.selects).toHaveLength(1);
-    expect(s.selects[0]!.argc).toBe(2);
+    expect(s.selects[0]!.argc).toBe(3); // (title, options, { signal }) — forwarded verbatim to pi
     expect(s.frames.at(-1)).toMatchObject({ sessionId: env.agent.sessionId, open: [{ taskId: created.value.id }] });
     s.surface.shutdown();
     expect(s.surface.confirm()).toBeUndefined();

@@ -8,9 +8,13 @@
  *  - the offer registry (≤ 8 open, TTL 2 h, one `deciding` promise per offer ⇒ one decision, one notice);
  *  - `decide()` — the single entry for TUI select, `/schedule reject` and the hub's `sched_decide`;
  *  - `revalidate()` — closes offers whose task vanished / was approved elsewhere / changed / expired;
- *  - the TUI presenter: FIFO, opens a box ONLY when nothing else can be on screen, and NEVER takes the
- *    box down itself (no pi `timeout`, no abort signal — pi's nested dialogs share one editor slot, so
- *    ownership of "the box on screen" is unprovable; closing the wrong one is worse than a leaked promise).
+ *  - the TUI presenter: FIFO, opens a box ONLY when nothing else can be on screen. Each presentation
+ *    hands `ui.select` its own AbortController as the dismissal `signal`; `close()` fires it exactly when
+ *    it retracts THAT offer while its box is the one we opened (decided / superseded / expired / recalled
+ *    elsewhere). The controller is presentation-scoped, so it can never dismiss a later or a foreign
+ *    dialog (pi's nested dialogs share one editor slot — closing the wrong one is worse than a leaked
+ *    promise), and a select that resolves after its abort is dropped: the ledger CAS is the arbiter, not
+ *    the stale click. `dispose()` stays the exception: its box is simply abandoned, never aborted.
  * Pure of pi: the UI, clock, publishing and model notice are injected ports. Nothing at module scope
  * (I4); every timer goes through the injected clock (production: `systemClock`, unref'd — I5).
  */
@@ -65,8 +69,12 @@ export type DecideResult =
 export interface ConfirmUi {
   mode: string;
   hasUI: boolean;
-  /** Called with exactly (title, options): never an options bag (no timeout, no signal — module header). */
-  select(title: string, options: string[]): Promise<string | undefined>;
+  /**
+   * Called as (title, options, { signal }): the signal is this presentation's own dismissal, fired only
+   * by `close()` retracting the very offer whose box is on screen. Never a pi `timeout` — the offer TTL
+   * closes the offer through revalidate → close, which is also the only path that fires the signal.
+   */
+  select(title: string, options: string[], opts?: { signal?: AbortSignal }): Promise<string | undefined>;
   notify(text: string, level: "info" | "warning"): void;
   isIdle(): boolean;
 }
@@ -128,6 +136,8 @@ interface Offer {
   origin: OfferOrigin;
   expiresAt: number;
   deciding?: Promise<DecideResult>;
+  /** Dismissal controller of THIS offer's on-screen select (presentation-scoped; deleted once it settles). */
+  dismiss?: AbortController;
   /** Local presentation: waiting in the FIFO, on screen, or done with (answered / dismissed / not ours). */
   tui: "queued" | "showing" | "settled";
 }
@@ -223,14 +233,23 @@ export function createScheduleConfirm(deps: ScheduleConfirmDeps): ScheduleConfir
       while (chains.size > SCHED_CONFIRM_OFFERS_MAX) chains.delete(chains.keys().next().value as string);
     } else chains.delete(offer.taskId);
     const label = by !== undefined ? BY_LABEL[by] : undefined;
-    if (offer.tui === "showing" && outcome !== "withdrawn") {
-      // The box stays (never aborted): tell the user what a click there would now do.
+    if (offer.tui === "showing" && !disposed) {
+      // Decided / recalled elsewhere while OUR box is the one on screen: take it down through its own
+      // presentation-scoped signal (generation-safe — it belongs to exactly this offer's select call).
+      // dispose() deliberately does not: its box is simply abandoned (a late answer changes nothing).
+      try {
+        offer.dismiss?.abort();
+      } catch {
+        /* stale controller */
+      }
       say(
         outcome === "approved"
-          ? `任务 ${offer.taskId} 已在${label ?? "其他入口"}批准（终端里的确认框可直接关闭）`
+          ? `任务 ${offer.taskId} 已在${label ?? "其他入口"}批准（终端确认框已自动关闭）`
           : outcome === "superseded"
-            ? `任务 ${offer.taskId} 的定义已变更，稍后会再问你（当前确认框已过期，请选「稍后」）`
-            : `任务 ${offer.taskId} 的确认请求已作废（当前确认框可直接关闭）`,
+            ? `任务 ${offer.taskId} 的定义已变更，稍后会再问你（当前确认框已自动关闭）`
+            : outcome === "withdrawn"
+              ? `任务 ${offer.taskId} 的确认请求已收回（终端确认框已自动关闭）`
+              : `任务 ${offer.taskId} 的确认请求已作废（终端确认框已自动关闭）`,
         "warning",
       );
     }
@@ -475,14 +494,21 @@ export function createScheduleConfirm(deps: ScheduleConfirmDeps): ScheduleConfir
     showing = o.offerId;
     ownTitles.push(title);
     while (ownTitles.length > OWN_TITLES_MAX) ownTitles.shift();
+    const dismiss = new AbortController();
+    o.dismiss = dismiss;
     let choice: string | undefined;
     try {
-      choice = await ui.select(title, [CONFIRM_OPT_APPROVE, reject, CONFIRM_OPT_LATER]);
+      choice = await ui.select(title, [CONFIRM_OPT_APPROVE, reject, CONFIRM_OPT_LATER], { signal: dismiss.signal });
     } catch {
       choice = undefined;
     }
+    // close() already retracted this offer and took the box down (its notify spoke); whatever the
+    // select resolves with now is a stale click — drop it, never let it decide or override.
+    const recalled = dismiss.signal.aborted;
+    delete o.dismiss;
     showing = undefined;
     if (o.tui === "showing") o.tui = "settled";
+    if (recalled) return void pump();
     if (disposed) {
       say(`任务 ${o.taskId} 仍待确认：/schedule approve ${o.taskId}`);
       return;

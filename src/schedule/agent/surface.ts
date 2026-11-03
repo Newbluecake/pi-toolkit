@@ -153,7 +153,7 @@ export function wireScheduleSurface(pi: ExtensionAPI, deps: ScheduleSurfaceDeps)
               ui: {
                 mode: (ctx as { mode?: string }).mode ?? "print",
                 hasUI: true,
-                select: (title, options) => ctx.ui.select(title, options),
+                select: (title, options, opts) => ctx.ui.select(title, options, opts),
                 notify: (text, level) => ctx.ui.notify(text, level),
                 isIdle: () => ctx.isIdle(),
               },

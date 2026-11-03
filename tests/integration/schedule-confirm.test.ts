@@ -219,7 +219,13 @@ async function agentStack(h: Hub, E: Env, o: { idle?: boolean; withRouter?: bool
   };
   const ui = {
     idle: o.idle ?? true,
-    selects: [] as Array<{ title: string; options: string[]; argc: number; resolve: (v: string | undefined) => void }>,
+    selects: [] as Array<{
+      title: string;
+      options: string[];
+      argc: number;
+      signal: AbortSignal | undefined;
+      resolve: (v: string | undefined) => void;
+    }>,
     notes: [] as Array<{ text: string; level?: string }>,
   };
   const ctx = {
@@ -235,10 +241,16 @@ async function agentStack(h: Hub, E: Env, o: { idle?: boolean; withRouter?: bool
     modelRegistry: { find: () => undefined },
     ui: {
       setStatus: () => undefined,
-      select: (...args: [string, string[]]) =>
-        new Promise<string | undefined>((resolve) =>
-          ui.selects.push({ title: args[0], options: args[1], argc: args.length, resolve }),
-        ),
+      select: (...args: [string, string[], ({ signal?: AbortSignal } | undefined)?]) =>
+        new Promise<string | undefined>((resolve) => {
+          const signal = args[2]?.signal;
+          ui.selects.push({ title: args[0], options: args[1], argc: args.length, signal, resolve });
+          // real pi resolves the select with undefined when its dismissal signal fires
+          if (signal !== undefined) {
+            if (signal.aborted) resolve(undefined);
+            else signal.addEventListener("abort", () => resolve(undefined), { once: true });
+          }
+        }),
       notify: (text: string, level?: string) => void ui.notes.push({ text, ...(level ? { level } : {}) }),
     },
   };
@@ -479,14 +491,16 @@ describe("#61 I2 — AI-created scheduled task confirmed on the spot (real hub �
     expect(created.details).toMatchObject({ ok: true, pending: true, confirm: "offered" });
     expect(created.text).toContain("has been asked to confirm it now");
 
-    // TUI: one three-option box, no timeout/abort handle (select takes exactly (title, options))
+    // TUI: one three-option box with its own dismissal signal (never a pi timeout)
     await until(
       () => a.ui.selects.length,
       (n) => n === 1,
       "tui select",
     );
     expect(a.ui.selects[0]!.options).toHaveLength(3);
-    expect(a.ui.selects[0]!.argc).toBe(2); // no pi timeout / abort signal — D12: the box is never ours to close
+    expect(a.ui.selects[0]!.argc).toBe(3); // (title, options, { signal }) — dismissible only by close()
+    expect(a.ui.selects[0]!.signal).toBeInstanceOf(AbortSignal);
+    expect(a.ui.selects[0]!.signal!.aborted).toBe(false);
     expect(a.ui.selects[0]!.title).toContain(id);
     // web: the projection carries the offer for exactly this definition
     const task = (await h.web(SID)).find((t) => t.task.id === id);
@@ -591,7 +605,7 @@ describe("#61 I2 — AI-created scheduled task confirmed on the spot (real hub �
     );
   }, 90_000);
 
-  it("the TUI box is never aborted: Feishu approves while it is open ⇒ only a notification; answering 批准 afterwards changes nothing", async () => {
+  it("Feishu approves while the TUI box is open ⇒ the box aborts itself + one notification; answering 批准 afterwards changes nothing", async () => {
     const { h, a, id, card } = await scenario();
     await until(
       () => a.ui.selects.length,
@@ -605,12 +619,17 @@ describe("#61 I2 — AI-created scheduled task confirmed on the spot (real hub �
       "approved",
     );
     await until(
-      () => a.ui.notes.find((n) => n.text.includes(id) && /已在飞书批准.*可直接关闭/.test(n.text)),
+      () => a.ui.notes.find((n) => n.text.includes(id) && /已在飞书批准.*已自动关闭/.test(n.text)),
       (v) => v !== undefined,
-      "notification instead of abort",
+      "notification on recall",
+    );
+    await until(
+      () => a.ui.selects[0]!.signal?.aborted,
+      (v) => v === true,
+      "box aborted",
     );
     const hashBefore = a.task(id).approval.hash;
-    a.ui.selects[0]!.resolve(a.ui.selects[0]!.options[0]);
+    a.ui.selects[0]!.resolve(a.ui.selects[0]!.options[0]); // stale click after the abort: a no-op
     await quiet();
     expect(a.task(id).approval.hash).toBe(hashBefore);
     expect(a.notices()).toHaveLength(1);

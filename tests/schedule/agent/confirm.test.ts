@@ -14,7 +14,7 @@ import {
   type OfferOrigin,
   type ScheduleConfirm,
 } from "../../../src/schedule/agent/confirm.js";
-import { createTask, updateTask } from "../../../src/schedule/agent/ops.js";
+import { createTask, deleteTask, updateTask } from "../../../src/schedule/agent/ops.js";
 import { approveTask } from "../../../src/schedule/core/claim.js";
 import { defHash, isApproved, type ScheduleTask } from "../../../src/schedule/core/spec.js";
 import { SCHED_CONFIRM_OFFERS_MAX, SCHED_CONFIRM_TTL_MS } from "../../../src/web-hub/protocol/schedule.js";
@@ -35,14 +35,16 @@ interface Harness {
   published: Array<{ sessionId: string; open: Array<{ offerId: string; taskId: string }>; closed: any[] }>;
   notices: Array<{ text: string; details: any }>;
   notes: Array<{ text: string; level: string }>;
-  selects: Array<{ title: string; options: string[]; argc: number }>;
+  selects: Array<{ title: string; options: string[]; argc: number; signal: AbortSignal | undefined }>;
   answer(i: number, choice: string | undefined): void;
   revoked: string[];
   ui: { idle: boolean; hasUI: boolean; mode: string };
   hub: { ready: boolean };
 }
 
-function harness(opts: { ui?: boolean; mode?: string; hub?: boolean; e?: A3Env } = {}): Harness {
+function harness(
+  opts: { ui?: boolean; mode?: string; hub?: boolean; e?: A3Env; manualAbortResolve?: boolean } = {},
+): Harness {
   env = opts.e ?? env ?? a3Env();
   const published: Harness["published"] = [];
   const notices: Harness["notices"] = [];
@@ -65,8 +67,26 @@ function harness(opts: { ui?: boolean; mode?: string; hub?: boolean; e?: A3Env }
               return ui.hasUI;
             },
             select: (...args: unknown[]) => {
-              selects.push({ title: args[0] as string, options: args[1] as string[], argc: args.length });
-              return new Promise<string | undefined>((res) => resolvers.push(res));
+              const bag = args[2] as { signal?: AbortSignal; timeout?: number } | undefined;
+              selects.push({
+                title: args[0] as string,
+                options: args[1] as string[],
+                argc: args.length,
+                signal: bag?.signal,
+              });
+              return new Promise<string | undefined>((res) => {
+                resolvers.push(res);
+                const sig = bag?.signal;
+                if (sig === undefined) return;
+                // real pi resolves the select with undefined when its dismissal signal fires;
+                // manualAbortResolve keeps the promise pending so a test can deliver the
+                // ADVERSARIAL late click after the abort.
+                const onAbort = (): void => {
+                  if (opts.manualAbortResolve !== true) res(undefined);
+                };
+                if (sig.aborted) onAbort();
+                else sig.addEventListener("abort", onAbort, { once: true });
+              });
             },
             notify: (text: string, level: string) => void notes.push({ text, level }),
             isIdle: () => ui.idle,
@@ -457,17 +477,19 @@ describe("TUI presenter", () => {
     return t;
   }
 
-  it("opens a three-option select with exactly (title, options) — never a timeout or signal", async () => {
+  it("opens a three-option select with (title, options, { signal }) — the offer's own dismissal, never a timeout", async () => {
     env = a3Env();
     const h = harness({ e: env });
     const t = await queued(h);
     expect(h.selects).toHaveLength(1);
     const s = h.selects[0]!;
-    expect(s.argc).toBe(2);
+    expect(s.argc).toBe(3);
     expect(s.options).toEqual([CONFIRM_OPT_APPROVE, CONFIRM_OPT_REJECT_DELETE, CONFIRM_OPT_LATER]);
     expect(s.title).toContain(`AI 新建了定时任务 ${t.id}`);
     expect(s.title).toContain(t.prompt);
     expect(s.title).toContain(defHash(t).slice(0, 8));
+    expect(s.signal).toBeInstanceOf(AbortSignal);
+    expect(s.signal!.aborted).toBe(false); // armed, not fired: the box is ours until close() retracts it
   });
 
   it("an AI edit of an approved task offers 'restore' and mentions the invalidated approval", async () => {
@@ -499,11 +521,20 @@ describe("TUI presenter", () => {
     expect(h.confirm.liveOffer(t.id)).toBeUndefined();
   });
 
-  it("choosing 批准 after the definition changed ⇒ E_REV warning, nothing approved", async () => {
+  it("foreign ledger edit (no changed event) + 本地点击批准 ⇒ E_REV warning, nothing approved", async () => {
     env = a3Env();
     const h = harness({ e: env });
     const t = await queued(h);
-    await updateTask(env.ports, t.id, { prompt: "edit while the box is open" }, AI);
+    // a foreign process (`--all`) rewrites the definition with NO changed event: revalidate cannot
+    // have retracted the offer yet (the 15 s poll is the backstop), so the box is still live —
+    // the local APPROVE click must hit the ledger CAS and surface E_REV.
+    await env.agent.store()!.transact((draft) => {
+      const task = draft.tasks.find((tk) => tk.id === t.id);
+      if (task === undefined) throw new Error("task missing");
+      task.prompt = "foreign edit without an event";
+      return { value: undefined, write: true };
+    });
+    expect(h.selects[0]!.signal!.aborted).toBe(false); // nothing retracted us: the box is still ours
     h.answer(0, CONFIRM_OPT_APPROVE);
     await vi.waitFor(() => expect(h.notes.some((n) => n.text.startsWith("E_REV"))).toBe(true));
     expect(isApproved(readTasks()[0]!)).toBe(false);
@@ -614,22 +645,98 @@ describe("TUI presenter", () => {
     expect(h3.selects).toHaveLength(1);
   });
 
-  it("closing the offer elsewhere while the box is showing only notifies — the box is never aborted", async () => {
+  it("approved elsewhere while showing ⇒ the box is aborted and auto-closed, one notify; a late answer changes nothing", async () => {
     env = a3Env();
     const h = harness({ e: env });
     const t = await queued(h);
     await approveTask(env.agent.store()!, t.id, defHash(t), "web");
     env.agent.changed();
     expect(h.confirm.liveOffer(t.id)).toBeUndefined();
-    expect(h.notes.some((n) => n.text.includes("已在") && n.text.includes("批准"))).toBe(true);
-    expect(h.selects[0]!.argc).toBe(2); // still no signal/timeout bag
-    // a later click on the stale box ⇒ already-approved, no side effect
+    expect(h.selects[0]!.signal!.aborted).toBe(true); // the box was taken down, not left dangling
+    await vi.waitFor(() =>
+      expect(
+        h.notes.some((n) => n.text.includes("已在") && n.text.includes("批准") && n.text.includes("已自动关闭")),
+      ).toBe(true),
+    );
+    // the abort already settled the select promise: a click on the stale box resolves nothing new
     h.answer(0, CONFIRM_OPT_APPROVE);
-    await vi.waitFor(() => expect(h.notes.some((n) => n.text.includes("已在其他入口批准"))).toBe(true));
+    await tick();
     expect(readTasks()[0]!.approval).toMatchObject({ via: "web" });
+    expect(h.notices).toHaveLength(1); // one model notice from close(), none from a local decide
   });
 
-  it("superseded while showing ⇒ notify; the replacement offer is asked after the stale box is dismissed", async () => {
+  it("adversarial late click: the select resolves 批准 AFTER the abort ⇒ dropped, the web decision stands", async () => {
+    env = a3Env();
+    const h = harness({ e: env, manualAbortResolve: true });
+    const t = await queued(h);
+    const live = h.confirm.liveOffer(t.id)!;
+    await h.confirm.decide({
+      taskId: t.id,
+      defHash: live.defHash,
+      decision: "approve",
+      via: "web",
+      offerId: live.offerId,
+    });
+    expect(h.selects[0]!.signal!.aborted).toBe(true);
+    h.answer(0, CONFIRM_OPT_APPROVE); // the stale click arrives after the box was dismissed
+    await tick();
+    expect(readTasks()[0]!.approval).toMatchObject({ via: "web" });
+    expect(h.notes.some((n) => n.text.startsWith("已批准"))).toBe(false); // no local decide ran
+    expect(h.notes.some((n) => n.text.includes("已在web批准"))).toBe(true);
+    expect(h.notices).toHaveLength(1);
+  });
+
+  it("two offers interleaved: each box has its own signal — aborting the showing one opens the next, still answerable", async () => {
+    env = a3Env();
+    const h = harness({ e: env });
+    const t1 = await queued(h, { name: "one", prompt: "one" });
+    await queued(h, { name: "two", prompt: "two" });
+    expect(h.selects).toHaveLength(1);
+    const live1 = h.confirm.liveOffer(t1.id)!;
+    await h.confirm.decide({
+      taskId: t1.id,
+      defHash: live1.defHash,
+      decision: "approve",
+      via: "web",
+      offerId: live1.offerId,
+    });
+    // box 1 dismissed itself; the FIFO immediately presents the second offer's own fresh box
+    await vi.waitFor(() => expect(h.selects).toHaveLength(2));
+    expect(h.selects[0]!.signal!.aborted).toBe(true);
+    expect(h.selects[1]!.signal).not.toBe(h.selects[0]!.signal);
+    expect(h.selects[1]!.signal!.aborted).toBe(false);
+    expect(h.selects[1]!.title).toContain("two");
+    h.answer(1, CONFIRM_OPT_APPROVE); // the second box is untouched and fully live
+    await vi.waitFor(() => {
+      const two = readTasks().find((tk) => tk.name === "two")!;
+      expect(isApproved(two)).toBe(true);
+      expect(two.approval).toMatchObject({ via: "tui" });
+    });
+  });
+
+  it("expired while showing ⇒ abort + 作废 notify; the periodic revalidate is enough to close it", async () => {
+    env = a3Env();
+    const h = harness({ e: env });
+    const t = await queued(h);
+    env.fake.advance(SCHED_CONFIRM_TTL_MS + CONFIRM_REVALIDATE_MS + 1);
+    expect(h.selects[0]!.signal!.aborted).toBe(true);
+    expect(
+      h.notes.some((n) => n.text.includes(t.id) && n.text.includes("已作废") && n.text.includes("已自动关闭")),
+    ).toBe(true);
+    expect(h.confirm.liveOffer(t.id)).toBeUndefined();
+  });
+
+  it("withdrawn while showing (task deleted elsewhere) ⇒ abort + 已收回 notify", async () => {
+    env = a3Env();
+    const h = harness({ e: env });
+    const t = await queued(h);
+    await deleteTask(env.agent.store()!, t.id);
+    h.confirm.revalidate();
+    expect(h.selects[0]!.signal!.aborted).toBe(true);
+    expect(h.notes.some((n) => n.text.includes(t.id) && n.text.includes("已收回"))).toBe(true);
+  });
+
+  it("superseded while showing ⇒ abort + notify; the replacement offer is asked once the stale box is dismissed", async () => {
     env = a3Env();
     const h = harness({ e: env });
     const t = await queued(h);
@@ -640,10 +747,10 @@ describe("TUI presenter", () => {
       base: { form: t.form, when: t.when, prompt: t.prompt, feishu: t.feishu },
     });
     expect(h.notes.some((n) => n.text.includes("定义已变更"))).toBe(true);
-    expect(h.selects).toHaveLength(1);
-    h.answer(0, CONFIRM_OPT_LATER);
-    await vi.waitFor(() => expect(h.selects).toHaveLength(2));
+    expect(h.selects[0]!.signal!.aborted).toBe(true); // the stale box dismissed itself
+    await vi.waitFor(() => expect(h.selects).toHaveLength(2)); // no manual answer needed any more
     expect(h.selects[1]!.title).toContain("v2");
+    expect(h.selects[1]!.signal!.aborted).toBe(false);
   });
 
   it("dispose() withdraws everything, publishes it, and does not touch a box already on screen", async () => {
@@ -657,6 +764,8 @@ describe("TUI presenter", () => {
     });
     expect(h.notices).toHaveLength(0);
     expect(h.notes).toHaveLength(0); // no "closed elsewhere" notify for our own teardown
+    // teardown never dismisses a box it no longer owns: the signal stays un-fired
+    expect(h.selects[0]!.signal!.aborted).toBe(false);
     // the pending select is simply abandoned: answering it later does not approve anything
     h.answer(0, CONFIRM_OPT_APPROVE);
     await tick();
