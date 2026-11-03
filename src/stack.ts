@@ -1987,20 +1987,18 @@ export function buildSessionStack(
     : undefined;
   parts.quota = quota;
   quotaRef.current = quota;
-  // 费用折算（形态 B）：随 quota 构造的会话 JSONL 增量扫描器。sessionManager/modelRegistry
-  // 探针失败 ⇒ 降级不构造（G5a 姿态：WARN 而不让 session_start 炸掉）。
+  // 费用折算（形态 B）：随 quota 构造的会话 JSONL 增量扫描器（2026-11-03 拍板：全项目扫描，
+  // root = <agentDir>/sessions/）。构造探针失败 ⇒ 降级不构造（G5a 姿态：WARN 而不让
+  // session_start 炸掉）。
   const quotaCost =
     quota === undefined
       ? undefined
       : ((): CostScanner | undefined => {
           try {
-            const sm = ctx.sessionManager as { getSessionDir?: () => string } | undefined;
-            const sessionDir = sm?.getSessionDir?.();
-            if (typeof sessionDir !== "string" || sessionDir === "") return undefined;
             const registry = ctx.modelRegistry as
               { find?: (provider: string, id: string) => { cost?: unknown } | undefined } | undefined;
             return createCostScanner({
-              sessionDir,
+              sessionsRoot: join(getAgentDir(), "sessions"),
               statePath: join(getAgentDir(), "quota-state.json"),
               now: () => systemClock.now(),
               priceLookup: (provider, model) => {

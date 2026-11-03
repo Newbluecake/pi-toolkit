@@ -1,9 +1,10 @@
 /**
- * `src/quota/cost-scan.ts`（quota 面板费用折算，2026-11-03 形态 B）：增量扫描器的定向测试 —
+ * `src/quota/cost-scan.ts`（quota 面板费用折算，2026-11-03 形态 B；同日拍板改全项目扫描）的定向测试 —
  * 基本窗口求和 / 增量无双算 / 游标恢复 / 文件身份变化 / 兜底计价（零价 vs 无价）/ 有界 pass /
- * quota-state.json 读改写共存 / quotaWindowCost 窗口对齐。
+ * quota-state.json 读改写共存 / quotaWindowCost 窗口对齐 / 多目录枚举分帧 / 跨目录公平轮转 /
+ * 稳态轻量探测（目录 mtime + 活跃文件 + 滚动补枚举）/ 淘汰优先级与「无重复扫描」防抖动。
  */
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -12,6 +13,7 @@ import {
   quotaWindowCost,
   type CostScanRates,
   type CostScanner,
+  type CostScannerOptions,
   type QuotaCostView,
 } from "../../src/quota/cost-scan.js";
 
@@ -19,6 +21,7 @@ const H = 3_600_000;
 const NOW = Date.UTC(2026, 10, 3, 10, 0, 0); // 2026-11-03T10:00:00Z
 
 let workDir: string;
+let sessionsRoot: string;
 let sessionDir: string;
 let statePath: string;
 let now = NOW;
@@ -26,7 +29,8 @@ const scanners: CostScanner[] = [];
 
 beforeEach(() => {
   workDir = mkdtempSync(join(tmpdir(), "cost-scan-"));
-  sessionDir = join(workDir, "sessions", "--cwd--");
+  sessionsRoot = join(workDir, "sessions");
+  sessionDir = join(sessionsRoot, "--cwd--");
   mkdirSync(sessionDir, { recursive: true });
   statePath = join(workDir, "quota-state.json");
   now = NOW;
@@ -60,18 +64,24 @@ function assistantLine(
   })}\n`;
 }
 
+function userLine(tsMs: number): string {
+  return `${JSON.stringify({ type: "message", timestamp: new Date(tsMs).toISOString(), message: { role: "user", content: [] } })}\n`;
+}
+
 function makeScanner(
   priceLookup: (provider: string, model: string) => CostScanRates | undefined = () => undefined,
   budget: { ms: number; bytes: number } = { ms: 5_000, bytes: 64 * 1024 * 1024 },
+  extra: Partial<CostScannerOptions> = {},
 ): CostScanner {
   const s = createCostScanner({
-    sessionDir,
+    sessionsRoot,
     statePath,
     priceLookup,
     now: () => now,
     budget,
     busyIntervalMs: 0,
     idleIntervalMs: 0,
+    ...extra,
   });
   scanners.push(s);
   return s;
@@ -87,6 +97,13 @@ async function scanToComplete(s: CostScanner): Promise<QuotaCostView> {
   throw new Error("scanner did not converge");
 }
 
+/** 建一个项目目录（sessionsRoot 下一层）。 */
+function projectDir(name: string): string {
+  const dir = join(sessionsRoot, name);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 describe("cost-scan: 基本扫描与窗口求和", () => {
   it("assistant 行的 cost.total 按 provider+hour 聚合；窗口区间外不计", async () => {
     writeFileSync(
@@ -94,7 +111,7 @@ describe("cost-scan: 基本扫描与窗口求和", () => {
       assistantLine("kimi-coding", "k3", NOW - 1 * H, 1.5) +
         assistantLine("kimi-coding", "k3", NOW - 2 * H, 2.5) +
         assistantLine("zai", "glm-5.3", NOW - 1 * H, 0.25) +
-        `${JSON.stringify({ type: "message", timestamp: new Date(NOW).toISOString(), message: { role: "user", content: [] } })}\n`,
+        userLine(NOW),
     );
     const s = makeScanner();
     const view = await scanToComplete(s);
@@ -161,6 +178,103 @@ describe("cost-scan: 基本扫描与窗口求和", () => {
   });
 });
 
+describe("cost-scan: 全项目多目录扫描", () => {
+  it("多个项目目录的用量都计入；sessions root 直属文件忽略", async () => {
+    const projB = projectDir("--other--");
+    writeFileSync(join(sessionDir, "a.jsonl"), assistantLine("kimi-coding", "k3", NOW - H, 1));
+    writeFileSync(join(projB, "b.jsonl"), assistantLine("kimi-coding", "k3", NOW - H, 2));
+    writeFileSync(join(sessionsRoot, "stray.jsonl"), assistantLine("kimi-coding", "k3", NOW - H, 100)); // root 直属 ⇒ 忽略
+    const view = await scanToComplete(makeScanner());
+    expect(view.complete).toBe(true);
+    expect(view.totalFiles).toBe(2);
+    expect(view.scannedFiles).toBe(2);
+    expect(view.costInWindow("kimi-coding", NOW - 3 * H, NOW)?.usd).toBe(3); // 1+2，不含 stray 的 100
+  });
+
+  it("旧版单目录状态（dir=项目目录）⇒ root 不匹配视为空态全量重扫", async () => {
+    writeFileSync(join(sessionDir, "l.jsonl"), assistantLine("zai", "g", NOW - H, 3));
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({ version: 1, costScan: { version: 1, dir: sessionDir, cursor: "", files: {} } })}\n`,
+    );
+    const view = await scanToComplete(makeScanner());
+    expect(view.complete).toBe(true);
+    expect(view.costInWindow("zai", NOW - 3 * H, NOW)?.usd).toBe(3);
+  });
+
+  it("目录枚举分帧：enumStatsPerPass 极小 ⇒ 多 pass 推进，totalFiles 先是下界，最终收敛", async () => {
+    for (let d = 0; d < 3; d++) {
+      const dir = projectDir(`--p${d}--`);
+      for (let f = 0; f < 2; f++) {
+        writeFileSync(join(dir, `f${f}.jsonl`), assistantLine("zai", "g", NOW - H, 1));
+      }
+    }
+    const s = makeScanner(() => undefined, { ms: 5_000, bytes: 64 * 1024 * 1024 }, { enumStatsPerPass: 2 });
+    await s.advance();
+    expect(s.view().complete).toBe(false);
+    expect(s.view().totalFiles).toBeLessThan(6); // 枚举未扫完 ⇒ 下界
+    const view = await scanToComplete(s);
+    expect(view.totalFiles).toBe(6);
+    expect(view.costInWindow("zai", NOW - 3 * H, NOW)?.usd).toBe(6);
+  });
+
+  it("lane② 跨目录轮转：单 pass 字节预算只够一个文件 ⇒ 每 pass 恰好推进一个文件（不饿死）", async () => {
+    // 3 目录 × 1 文件，mtime 全部置旧 ⇒ lane① 跳过，全靠 lane② 轮转。
+    const content = assistantLine("zai", "g", NOW - 100 * H, 1);
+    const bytes = Buffer.byteLength(content, "utf8");
+    for (let d = 0; d < 3; d++) {
+      const dir = projectDir(`--rr${d}--`);
+      const f = join(dir, "x.jsonl");
+      writeFileSync(f, content);
+      const old = new Date(Date.now() - 100 * H);
+      utimesSync(f, old, old);
+    }
+    const s = makeScanner(() => undefined, { ms: 5_000, bytes });
+    await s.advance();
+    expect(s.view().scannedFiles).toBe(1); // 每 pass 恰好一个文件 ⇒ 轮转推进
+    await s.advance();
+    expect(s.view().scannedFiles).toBe(2);
+    await s.advance();
+    expect(s.view().scannedFiles).toBe(3);
+    const view = await scanToComplete(s);
+    expect(view.costInWindow("zai", NOW - 101 * H, NOW)?.usd).toBe(3);
+  });
+
+  it("稳态轻量探测：新增文件经目录 mtime 探测同 pass 发现（不靠滚动补枚举）", async () => {
+    // 5 个目录 ⇒ 滚动补枚举单 pass 只覆盖 3 个，够不着 --d2--；能发现只能靠 dir mtime 探测。
+    for (let d = 0; d < 4; d++) {
+      writeFileSync(join(projectDir(`--d${d}--`), "x.jsonl"), assistantLine("zai", "g", NOW - H, 1));
+    }
+    const s = makeScanner();
+    await scanToComplete(s);
+    writeFileSync(join(sessionsRoot, "--d2--", "new.jsonl"), assistantLine("zai", "g", NOW - H, 4));
+    // dir mtime 粒度可能只有秒级/同毫秒 ⇒ 显式 bump 到确定不同的值。
+    const bump = new Date(Date.now() + 60_000);
+    utimesSync(join(sessionsRoot, "--d2--"), bump, bump);
+    await s.advance();
+    expect(s.view().costInWindow("zai", NOW - 3 * H, NOW)?.usd).toBe(8); // 4×1 + 4
+    expect(s.view().totalFiles).toBe(5);
+  });
+
+  it("稳态自愈：沉睡文件（缓存 mtime 旧）被 append ⇒ 滚动补枚举发现（探测/近期通道都够不着）", async () => {
+    // --d3-- 在排序后的第 5 位（idx4），滚动每 pass 3 个 ⇒ 第 1 个稳态 pass 够不着，第 2 个才发现。
+    for (let d = 0; d < 4; d++) {
+      writeFileSync(join(projectDir(`--d${d}--`), "x.jsonl"), assistantLine("zai", "g", NOW - H, 1));
+    }
+    const dormant = join(sessionsRoot, "--d3--", "x.jsonl");
+    const old = new Date(Date.now() - 10 * 24 * H); // 缓存 mtime 旧 ⇒ 不在 48h 活跃抽 stat 范围
+    utimesSync(dormant, old, old);
+    const s = makeScanner();
+    await scanToComplete(s);
+    expect(s.view().costInWindow("zai", NOW - 3 * H, NOW)?.usd).toBe(4);
+    appendFileSync(dormant, assistantLine("zai", "g", NOW - 30 * 60_000, 10)); // append 不动目录 mtime
+    await s.advance(); // roll idx0-2：够不着 --d3--
+    expect(s.view().costInWindow("zai", NOW - 3 * H, NOW)?.usd).toBe(4);
+    await scanToComplete(s); // roll idx3-4：重新枚举 --d3-- ⇒ 发现增长 ⇒ 同 pass lane① 扫增量
+    expect(s.view().costInWindow("zai", NOW - 3 * H, NOW)?.usd).toBe(14);
+  });
+});
+
 describe("cost-scan: 兜底计价（零价 vs 无价）", () => {
   it("cost.total 缺失 ⇒ token×目录价；目录价全零 ⇒ priced 0；无价 ⇒ unpriced 标记", async () => {
     writeFileSync(
@@ -224,5 +338,62 @@ describe("cost-scan: 有界 pass 与 quotaWindowCost 窗口对齐", () => {
     expect(quotaWindowCost(view, "kimi-coding", "5h", undefined)).toBeUndefined();
     expect(quotaWindowCost(undefined, "kimi-coding", "5h", resetAt)).toBeUndefined();
     expect(quotaWindowCost(view, "droid-standard", "month", resetAt)).toBeUndefined(); // 外部 provider 无 JSONL 数据
+  });
+});
+
+describe("cost-scan: 无重复扫描与淘汰防抖动（硬要求）", () => {
+  it("收敛后重复 pass 零重读；append 只读增量字节（readBytes 证据）", async () => {
+    const file = join(sessionDir, "m.jsonl");
+    const c1 = assistantLine("zai", "g", NOW - H, 1);
+    writeFileSync(file, c1);
+    const s = makeScanner();
+    const view = await scanToComplete(s);
+    const total = Buffer.byteLength(c1, "utf8");
+    expect(view.readBytes).toBe(total); // 全量恰好读一遍
+    await s.advance();
+    await s.advance();
+    expect(s.view().readBytes).toBe(total); // 稳态 pass 零重读（无反复扫描）
+    const c2 = assistantLine("zai", "g", NOW - 30 * 60_000, 2);
+    appendFileSync(file, c2);
+    await s.advance();
+    expect(s.view().readBytes).toBe(total + Buffer.byteLength(c2, "utf8")); // 只读追加部分
+    expect(s.view().costInWindow("zai", NOW - 3 * H, NOW)?.usd).toBe(3);
+  });
+
+  it("状态超限：先淘汰桶空最旧条目（费用历史优先保留）；被淘汰文件本进程不再重扫", async () => {
+    // 桶空旧文件（只有 user 行 ⇒ 无 bucket）+ 新费用文件。
+    const emptyFile = join(sessionDir, "empty.jsonl");
+    const emptyContent = userLine(NOW - H) + userLine(NOW - H);
+    writeFileSync(emptyFile, emptyContent);
+    const oldDate = new Date(Date.now() - 30 * 24 * H);
+    utimesSync(emptyFile, oldDate, oldDate);
+    const costFile = join(sessionDir, "cost.jsonl");
+    const costContent = assistantLine("zai", "g", NOW - H, 7);
+    writeFileSync(costFile, costContent);
+
+    // 先用宽松上限落盘，实测两条目总大小 S2 ⇒ 第二个 scanner 用 S2−10 作上限：
+    // 放得下任意单条目、放不下两条目（与绝对路径长度/数字位宽无关，不脆弱）。
+    await scanToComplete(makeScanner());
+    const s2 = Buffer.byteLength(readFileSync(statePath, "utf8"), "utf8");
+
+    const s = makeScanner(() => undefined, { ms: 5_000, bytes: 64 * 1024 * 1024 }, { stateMaxBytes: s2 - 10 });
+    appendFileSync(costFile, assistantLine("zai", "g", NOW - 30 * 60_000, 0)); // 触发 dirty flush（淘汰只发生在落盘）
+    await s.advance();
+    const readAfterEvict = s.view().readBytes; // 只读了 append 的增量
+    // 淘汰顺序：桶空最旧（empty.jsonl）先走 ⇒ 落盘只剩 cost.jsonl 的条目（费用历史保留）。
+    const persisted = JSON.parse(readFileSync(statePath, "utf8")) as {
+      costScan: { files: Record<string, unknown> };
+    };
+    expect(Object.keys(persisted.costScan.files)).toEqual([costFile]);
+    expect(Buffer.byteLength(readFileSync(statePath, "utf8"), "utf8")).toBeLessThanOrEqual(s2 - 10);
+    await s.advance(); // complete 在 flush 前计算 ⇒ 下一个 pass 才反映 evictedPaths
+    expect(s.view().complete).toBe(false); // 容量紧急 ⇒ complete:false（与 TRACKED_FILES_MAX 语义一致）
+    expect(s.view().costInWindow("zai", NOW - 3 * H, NOW)?.usd).toBe(7); // 费用数据不因淘汰丢失
+    // 防抖动：被淘汰的 empty.jsonl 本进程不再重扫——多 pass 后 readBytes 不回头涨，
+    // 即使它继续被 append（=「淘汰→重扫→再淘汰」环路被切断）。
+    appendFileSync(emptyFile, userLine(NOW - 10 * 60_000));
+    await s.advance();
+    await s.advance();
+    expect(s.view().readBytes).toBe(readAfterEvict);
   });
 });

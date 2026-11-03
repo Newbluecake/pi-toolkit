@@ -2,16 +2,29 @@
  * quota 面板「按 API 价格折算费用」（2026-11-03 用户拍板，形态 B：折算挂在窗口重置文案旁
  * `22:06 重置 · ≈$12.30`，不新增行、HUD 不加、无设置门）的增量扫描器。pi-free。
  *
- * 主源 = pi 会话 JSONL 增量扫描：`<agentDir>/sessions/<编码cwd>/*.jsonl` 的 assistant
+ * 数据源边界（2026-11-03 用户拍板，全项目扫描）：root = `<agentDir>/sessions/`，其下每个
+ * 子目录是一个项目的会话目录（`<编码cwd>/*.jsonl`），**全部项目**都计入折算。assistant
  * 条目自带 provider/model/timestamp + usage.cost.total（pi 已按目录价算好）。主会话与
  * 子会话文件同目录，全部计入——子用量只写在子文件里，天然无双算。
  *
  * 增量游标（有界范式抄 `src/session-nav/provenance.ts`）：按文件 byte offset 推进
- * （append-only 安全），单 pass ≤ budget.ms / budget.bytes（默认 250ms / 16MiB），文件
- * 打开走 `openSessionNoFollowAsync`（O_NOFOLLOW；顺序扫 ⇒ ≤1 fd）。与 provenance 的关键
- * 差异：bucket 按**文件**归属（cursor 里每文件存自己的 hour→[cost,unpriced]）——文件身份
- * 变化（dev/ino 变或 shrink）⇒ 丢弃该文件的 bucket 并从 0 重扫，永不双算；代价是序列化
- * 体积略大（有 8 MiB 状态上限 + 最旧 mtime 淘汰兜底）。
+ * （append-only 安全），单 pass ≤ budget.ms / budget.bytes（默认 500ms / 32MiB——全项目
+ * 1.4GB/1166 文件量级下首回填需几分钟收敛，250ms/16MiB 会把回填拖到过久；500ms 仍远小于
+ * 驱动它的 1Hz tick 间隔，不阻塞 web-hub agent）。文件打开走 `openSessionNoFollowAsync`
+ * （O_NOFOLLOW；顺序扫 ⇒ ≤1 fd）。与 provenance 的关键差异：bucket 按**文件**归属
+ * （cursor 里每文件存自己的 hour→[cost,unpriced]）——文件身份变化（dev/ino 变或 shrink）
+ * ⇒ 丢弃该文件的 bucket 并从 0 重扫，永不双算。
+ *
+ * 目录枚举（有界 + 公平 + 稳态轻量）：
+ * - root 每 pass readdir 一层（目录数 ~几十，廉价）；子目录内容**分帧**枚举——每 pass
+ *   lstat 上限 `enumStatsPerPass`（默认 1024）+ 枚举时间片 ≤ min(budget.ms/3, 120ms)，
+ *   目录内可断点续枚举（pendingNames），绝不一次 stat 全部 ~1166 文件。
+ * - 枚举顺序：断点目录 → 热目录（已知最新 mtime 文件所属项目）→ 轮转游标，避免早期
+ *   目录饿死。
+ * - 首轮全量枚举完成（sweep complete）后转**轻量探测**：每 pass lstat 各项目目录
+ *   （mtime 变化 ⇒ 有文件增删 ⇒ 重枚举该目录）+ 抽 stat 48h 内活跃的已跟踪文件
+ *   （append 只动文件 mtime 不动目录 mtime）+ 每 pass 滚动补枚举 3 个目录（自愈：
+ *   唤醒沉睡会话等漏网场景最迟 ~目录数/3 个 idle pass 被发现）。
  *
  * 计价：`usage.cost.total` 有限数 ⇒ 权威值（含 0——pi 已裁决）。缺失 ⇒ token×目录价兜底
  * （priceLookup 注入，费率 per-Mtok，公式仿 `src/external-agent/pricing.ts` 的 priceUsage）：
@@ -24,7 +37,15 @@
  *
  * 持久化：游标 + buckets 以 `costScan` 顶层组读改写进 quota-state.json（与 demotion /
  * baseline store 同文件同纪律：flush 前重读、保留其它顶层键、tmp+rename 原子写、0600）。
- * 文件损坏 / dir 不匹配 ⇒ 视为空态重扫。
+ * 本组紧凑序列化（无 pretty——条目多一个数量级后 pretty 的缩进开销不可接受；同文件其它
+ * store flush 时会重新 pretty，格式随最后写入者，解析侧不受影响）。文件损坏 / dir 不匹配
+ * ⇒ 视为空态重扫（dir 语义 2026-11-03 从单项目目录变为 sessions root，旧状态自然作废重扫）。
+ *
+ * 状态体量与防抖动（硬要求）：条目淘汰只在序列化超 `COST_SCAN_STATE_MAX_BYTES` 时发生，
+ * 顺序 = 先「桶空且最旧 mtime」（重扫只费字节、不丢费用历史），不够再「任意桶最旧 mtime」。
+ * 被淘汰路径记入进程内 evictedPaths ⇒ **本进程不再重扫该文件**（切断「淘汰→重扫→再淘汰」
+ * 抖动环；complete 保持 false，与 TRACKED_FILES_MAX 容量语义一致）。hour bucket 保鲜 40d
+ * （最长窗口 month=30d + 余量），落盘时丢弃更旧 bucket。上限取值有实测背书（见 README）。
  *
  * 驱动：无 timer（I5 平凡满足）——`maybeAdvance()` 由 web-hub agent 的 1Hz tick 调用，
  * 内部节流（incomplete 2s / complete 15s）+ single-flight；webHub 关闭 ⇒ 无人调用 ⇒ 零 I/O
@@ -32,7 +53,8 @@
  */
 
 import { lstat, mkdir, open as openAsync, readFile, readdir, rename, unlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
+import type { Dirent } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import type { Millis } from "../core/types.js";
 import { openSessionNoFollowAsync } from "../session-nav/session-head.js";
@@ -60,10 +82,16 @@ export interface QuotaCostWindow {
   readonly unpriced: boolean;
 }
 
-/** 扫描器的同步只读视图（projection / fingerprint 用）。 */
+/** 扫描器的同步只读视图（projection / fingerprint / 进度展示用）。 */
 export interface QuotaCostView {
-  /** 所有 tracked 文件游标均已推进到当前 size（且未触发容量上限）。 */
+  /** 首轮全量枚举完成，且所有 tracked 文件游标均已推进到当前 size（未触发容量上限）。 */
   readonly complete: boolean;
+  /** 游标已到位（scannedTo === size 且身份一致）的 tracked 文件数。 */
+  readonly scannedFiles: number;
+  /** 已知 tracked 文件数（首轮枚举未扫完时是下界）。 */
+  readonly totalFiles: number;
+  /** 本进程累计从会话文件读出的字节数（「无重复扫描」可观测性：收敛后应 ≈ 文件总量）。 */
+  readonly readBytes: number;
   /** provider 在 [startMs, endMs) 内的折算；该 provider 无任何数据 ⇒ undefined。 */
   costInWindow(provider: string, startMs: Millis, endMs: Millis): QuotaCostWindow | undefined;
 }
@@ -80,18 +108,22 @@ export interface CostScanner {
 }
 
 export interface CostScannerOptions {
-  /** `<agentDir>/sessions/<编码cwd>`（生产侧 = ctx.sessionManager.getSessionDir()）。 */
-  readonly sessionDir: string;
+  /** `<agentDir>/sessions`（全项目扫描 root；其下每个子目录是一个项目的会话目录）。 */
+  readonly sessionsRoot: string;
   /** quota-state.json（与 demotion/baseline store 同文件，读改写保留其它组）。 */
   readonly statePath: string;
   readonly priceLookup: CostScanPriceLookup;
   readonly now: () => Millis;
-  /** 单 pass 上限；默认 250ms / 16 MiB。 */
+  /** 单 pass 上限；默认 500ms / 32 MiB（取值理由见文件头）。 */
   readonly budget?: { ms: number; bytes: number };
   /** 扫描未收敛时的最小 pass 间隔（默认 2s）。 */
   readonly busyIntervalMs?: number;
   /** 已收敛后的最小 pass 间隔（默认 15s）。 */
   readonly idleIntervalMs?: number;
+  /** 每 pass 目录枚举 lstat 上限（默认 1024；测试旋钮）。 */
+  readonly enumStatsPerPass?: number;
+  /** 状态序列化上限（默认 COST_SCAN_STATE_MAX_BYTES；测试旋钮）。 */
+  readonly stateMaxBytes?: number;
   readonly warn?: ((message: string) => void) | undefined;
 }
 
@@ -106,11 +138,22 @@ export const COST_WINDOW_SPAN_MS: Readonly<Record<WindowScope, number>> = {
 export const COST_SCAN_CHUNK_BYTES = 8 * 1024 * 1024;
 /** tracked 文件上限（最新 mtime 优先；超出 ⇒ complete:false）。 */
 export const COST_SCAN_TRACKED_FILES_MAX = 20_000;
-/** 状态文件序列化上限；超出 ⇒ 淘汰最旧 mtime 的文件条目直到放下。 */
-export const COST_SCAN_STATE_MAX_BYTES = 8 * 1024 * 1024;
+/**
+ * 状态文件序列化上限；超出 ⇒ 淘汰（先桶空最旧、再任意最旧；被淘汰路径本进程不再重扫）。
+ * 取值：全项目实测状态约数百 KiB 量级（紧凑序列化），32MiB 给出数十倍余量。
+ */
+export const COST_SCAN_STATE_MAX_BYTES = 32 * 1024 * 1024;
 /** hour bucket 保鲜：比最长窗口（month=30d）+ 余量更旧的 bucket 在落盘时丢弃。 */
 export const COST_BUCKET_RETENTION_MS = 40 * 24 * 3_600_000;
-export const DEFAULT_COST_SCAN_BUDGET = { ms: 250, bytes: 16 * 1024 * 1024 };
+export const DEFAULT_COST_SCAN_BUDGET = { ms: 500, bytes: 32 * 1024 * 1024 };
+/** 每 pass 目录枚举 lstat 上限（分帧推进；实测 1166 文件全量 lstat ≈ 数十 ms，一帧可容）。 */
+export const COST_SCAN_ENUM_STATS_PER_PASS = 1_024;
+/** 枚举时间片硬顶（ms）：即使 budget.ms 很大，枚举也不许吃掉整个 pass。 */
+export const COST_SCAN_ENUM_MS_CAP = 120;
+/** 稳态每 pass 滚动补枚举的目录数（自愈漏网；78 目录 ⇒ 全量刷新周期 ≈ 26 个 idle pass ≈ 6.5min）。 */
+export const COST_SCAN_ENUM_ROLL_DIRS = 3;
+/** 稳态每 pass 抽 stat 的 48h 活跃文件上限（append 不动目录 mtime，靠它发现增长）。 */
+export const COST_SCAN_ENUM_RECENT_FILES = 128;
 
 const HOUR_MS = 3_600_000;
 const STATE_GROUP = "costScan";
@@ -148,7 +191,7 @@ interface CostFileState {
 
 interface CostScanState {
   version: 1;
-  /** 游标按目录归属；dir 变化 ⇒ 整组作废重扫。 */
+  /** 游标按 root 归属；root 变化（含 2026-11-03 从单项目目录升级）⇒ 整组作废重扫。 */
   dir: string;
   /** lane ② round-robin 游标（最后一个访问的 path）。 */
   cursor: string;
@@ -213,9 +256,12 @@ function parseState(raw: unknown, dir: string): CostScanState {
   return { version: 1, dir, cursor, files };
 }
 
-/** 读改写纪律：flush 前重读文件，保留同文件其它 store 的顶层键（version/demotions/baselines…）。 */
-async function flushState(statePath: string, state: CostScanState, now: Millis): Promise<void> {
-  // bucket 保鲜 + 状态体积上限（淘汰最旧 mtime）。
+/**
+ * 读改写纪律：flush 前重读文件，保留同文件其它 store 的顶层键（version/demotions/baselines…）。
+ * 返回被淘汰的文件 path（调用方据此把路径拉入 evictedPaths，本进程不再重扫——防抖动硬要求）。
+ */
+async function flushState(statePath: string, state: CostScanState, now: Millis, maxBytes: number): Promise<string[]> {
+  // bucket 保鲜（>40d 的 hour bucket 对任何窗口都无贡献，落盘时丢弃）。
   const oldestHour = Math.floor((now - COST_BUCKET_RETENTION_MS) / HOUR_MS);
   for (const entry of Object.values(state.files)) {
     for (const [provider, hours] of Object.entries(entry.buckets)) {
@@ -237,19 +283,33 @@ async function flushState(statePath: string, state: CostScanState, now: Millis):
   } catch {
     // 不存在 / 损坏 ⇒ 只写自己的组。
   }
-  let payload = `${JSON.stringify({ ...extras, [STATE_GROUP]: state }, null, 2)}\n`;
-  while (Buffer.byteLength(payload, "utf8") > COST_SCAN_STATE_MAX_BYTES) {
-    let oldest: string | undefined;
-    let oldestMtime = Infinity;
+  // 紧凑序列化：全项目后条目多一个数量级，pretty 缩进是不可接受的固定开销。
+  let payload = `${JSON.stringify({ ...extras, [STATE_GROUP]: state })}\n`;
+  const evicted: string[] = [];
+  while (Buffer.byteLength(payload, "utf8") > maxBytes) {
+    // 淘汰顺序（防抖动硬要求）：先「桶空且最旧 mtime」（重扫只费字节、不丢费用历史），
+    // 不够再「任意桶最旧 mtime」。被淘汰路径由调用方记入 evictedPaths，本进程不再重扫。
+    let victim: string | undefined;
+    let victimMtime = Infinity;
     for (const [path, entry] of Object.entries(state.files)) {
-      if (entry.mtimeMs < oldestMtime) {
-        oldestMtime = entry.mtimeMs;
-        oldest = path;
+      if (Object.keys(entry.buckets).length > 0) continue;
+      if (entry.mtimeMs < victimMtime) {
+        victimMtime = entry.mtimeMs;
+        victim = path;
       }
     }
-    if (oldest === undefined) return;
-    delete state.files[oldest];
-    payload = `${JSON.stringify({ ...extras, [STATE_GROUP]: state }, null, 2)}\n`;
+    if (victim === undefined) {
+      for (const [path, entry] of Object.entries(state.files)) {
+        if (entry.mtimeMs < victimMtime) {
+          victimMtime = entry.mtimeMs;
+          victim = path;
+        }
+      }
+    }
+    if (victim === undefined) return evicted; // 空文件表都放不下 ⇒ 放弃本次落盘
+    delete state.files[victim];
+    evicted.push(victim);
+    payload = `${JSON.stringify({ ...extras, [STATE_GROUP]: state })}\n`;
   }
   await mkdir(dirname(statePath), { recursive: true });
   // Unique tmp name: demotion.ts/baseline.ts flush the SAME state file synchronously;
@@ -267,6 +327,7 @@ async function flushState(statePath: string, state: CostScanState, now: Millis):
     await unlink(tmp).catch(() => {});
     throw error;
   }
+  return evicted;
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +336,8 @@ async function flushState(statePath: string, state: CostScanState, now: Millis):
 
 interface FileFact {
   path: string;
+  /** 所属项目目录名（root 下一层；热目录判定用）。 */
+  dirName: string;
   dev: number;
   ino: number;
   size: number;
@@ -306,21 +369,45 @@ function fallbackUsd(usage: Record<string, unknown> | undefined, rates: CostScan
 }
 
 export function createCostScanner(options: CostScannerOptions): CostScanner {
-  const dir = resolve(options.sessionDir);
+  const root = resolve(options.sessionsRoot);
   const budget = options.budget ?? DEFAULT_COST_SCAN_BUDGET;
   const busyMs = options.busyIntervalMs ?? 2_000;
   const idleMs = options.idleIntervalMs ?? 15_000;
+  const enumStatsCap = options.enumStatsPerPass ?? COST_SCAN_ENUM_STATS_PER_PASS;
+  const stateMaxBytes = options.stateMaxBytes ?? COST_SCAN_STATE_MAX_BYTES;
 
   let loaded = false;
-  let state = emptyState(dir);
+  let state = emptyState(root);
   let disposed = false;
   let inflight = false;
   let nextAt = 0;
   let lastComplete = false;
+  let lastScannedFiles = 0;
+  let lastTotalFiles = 0;
+  let readBytesTotal = 0;
   let warnedFail = false;
   /** 聚合缓存（view 热路径）：任何 bucket/文件变动 ⇒ dirty。 */
   let aggDirty = true;
   let agg = new Map<string, Map<number, [number, number]>>();
+
+  // ---- 目录枚举的内存态（不落盘；重启后重新轮转，代价只是重新枚举） ----
+  /** root 下一层项目目录名（排序）。 */
+  let dirNames: string[] = [];
+  let dirSet = new Set<string>();
+  /** 尚未完整枚举过的目录（undefined = 首 pass 前未初始化）。 */
+  let enumPending: Set<string> | undefined;
+  /** 轮转游标（dirNames 下标）。 */
+  let dirCursor = 0;
+  /** 稳态滚动补枚举游标（dirNames 下标）。 */
+  let rollCursor = 0;
+  /** 目录内断点续枚举（一个目录的 lstat 超帧时下一 pass 续）。 */
+  let pendingNames: { dir: string; names: string[]; next: number } | undefined;
+  /** 已枚举到的文件事实（path → 最近一次 lstat）。 */
+  const factMap = new Map<string, FileFact>();
+  /** 各项目目录最近一次枚举/探测到的 mtime（稳态轻量探测：变了才重枚举）。 */
+  const dirMtimes = new Map<string, number>();
+  /** flush 淘汰过的 path：本进程不再重扫（切断「淘汰→重扫→再淘汰」抖动环）。 */
+  const evictedPaths = new Set<string>();
 
   const safeWarn = (message: string): void => {
     if (warnedFail) return;
@@ -450,6 +537,7 @@ export function createCostScanner(options: CostScannerOptions): CostScanner {
       if (scratch === undefined) scratch = Buffer.allocUnsafeSlow(COST_SCAN_CHUNK_BYTES);
       const n = await readAt(handle, scratch, want, startAt);
       if (n <= 0) return 0;
+      readBytesTotal += n;
       const window = scratch.subarray(0, n);
       const lastNl = window.lastIndexOf(0x0a);
       if (lastNl < 0) return n; // 本块无完整行——下轮从 scannedTo 重读（有界空转）
@@ -468,28 +556,227 @@ export function createCostScanner(options: CostScannerOptions): CostScanner {
     }
   };
 
-  const enumerateFacts = async (): Promise<FileFact[] | undefined> => {
-    let dirents;
-    try {
-      dirents = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return undefined;
+  // -------------------------------------------------------------------------
+  // 目录枚举（有界分帧；稳态轻量探测）
+  // -------------------------------------------------------------------------
+
+  /** 同步 root 一层目录列表：新目录入 enumPending，消失目录清 facts/pending。 */
+  const refreshDirs = (dirents: Dirent[]): void => {
+    const found: string[] = [];
+    for (const d of dirents) {
+      if (d.isDirectory()) found.push(d.name);
     }
-    const facts: FileFact[] = [];
-    for (const dirent of dirents) {
-      if (!dirent.name.endsWith(".jsonl") || !dirent.isFile()) continue;
-      const path = resolve(join(dir, dirent.name));
-      try {
-        const st = await lstat(path);
-        if (st.isFile()) facts.push({ path, dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs });
-      } catch {
-        /* 竞态消失——不 track */
+    found.sort();
+    const foundSet = new Set(found);
+    if (enumPending === undefined) {
+      enumPending = new Set(found);
+    } else {
+      for (const name of [...enumPending]) {
+        if (!foundSet.has(name)) enumPending.delete(name);
+      }
+      for (const name of found) {
+        if (!dirSet.has(name)) enumPending.add(name);
       }
     }
-    return facts;
+    for (const old of dirNames) {
+      if (foundSet.has(old)) continue;
+      const prefix = join(root, old) + sep;
+      for (const p of [...factMap.keys()]) {
+        if (p.startsWith(prefix)) factMap.delete(p);
+      }
+      dirMtimes.delete(old);
+    }
+    if (pendingNames !== undefined && !foundSet.has(pendingNames.dir)) pendingNames = undefined;
+    dirNames = found;
+    dirSet = foundSet;
+    if (dirCursor >= dirNames.length) dirCursor = 0;
+    if (rollCursor >= dirNames.length) rollCursor = 0;
+  };
+
+  /** 已知最新 mtime 文件所属的项目目录（活跃项目优先枚举/探测）。 */
+  const hottestDirName = (): string | undefined => {
+    let best: string | undefined;
+    let bestMtime = -1;
+    for (const fact of factMap.values()) {
+      if (fact.mtimeMs > bestMtime) {
+        bestMtime = fact.mtimeMs;
+        best = fact.dirName;
+      }
+    }
+    return best;
+  };
+
+  /**
+   * 枚举一个项目目录的 *.jsonl（分帧：lstat 超预算 ⇒ pendingNames 断点，下一 pass 续）。
+   * 完成 ⇒ 清掉该目录已消失文件的 fact、记录目录 mtime、从 enumPending 移除。
+   */
+  const enumDir = async (name: string, budgetLeft: { stats: number }, timeUp: () => boolean): Promise<boolean> => {
+    const dirPath = join(root, name);
+    let names: string[];
+    let next = 0;
+    if (pendingNames !== undefined && pendingNames.dir === name) {
+      names = pendingNames.names;
+      next = pendingNames.next;
+    } else {
+      let dirents: Dirent[];
+      try {
+        dirents = await readdir(dirPath, { withFileTypes: true });
+      } catch {
+        // 目录竞态消失/不可读 ⇒ 视为已处理（无事实可枚举）。
+        enumPending?.delete(name);
+        if (pendingNames?.dir === name) pendingNames = undefined;
+        return true;
+      }
+      names = [];
+      for (const d of dirents) {
+        if (d.isFile() && d.name.endsWith(".jsonl")) names.push(d.name);
+      }
+    }
+    while (next < names.length) {
+      if (budgetLeft.stats <= 0 || timeUp()) {
+        pendingNames = { dir: name, names, next };
+        return false;
+      }
+      budgetLeft.stats--;
+      const fn = names[next];
+      next++;
+      if (fn === undefined) continue;
+      const path = join(dirPath, fn);
+      try {
+        const st = await lstat(path);
+        if (st.isFile()) {
+          factMap.set(path, { path, dirName: name, dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs });
+        } else {
+          factMap.delete(path);
+        }
+      } catch {
+        factMap.delete(path); // 竞态消失——不 track
+      }
+    }
+    pendingNames = undefined;
+    enumPending?.delete(name);
+    // 清掉该目录下已消失文件的 fact（state.files 里已删文件的条目保留——费用历史不丢，
+    // 与单目录时代语义一致；complete 判定只看 facts，不受残留条目影响）。
+    const keep = new Set(names);
+    const prefix = dirPath + sep;
+    for (const p of [...factMap.keys()]) {
+      if (p.startsWith(prefix) && !keep.has(basename(p))) factMap.delete(p);
+    }
+    try {
+      const st = await lstat(dirPath);
+      dirMtimes.set(name, st.mtimeMs);
+    } catch {
+      dirMtimes.delete(name);
+    }
+    return true;
+  };
+
+  /**
+   * 枚举相位。未收敛（有 pending 目录）⇒ 全量分帧推进（断点目录 → 热目录 → 轮转）；
+   * 已收敛 ⇒ 轻量探测（目录 mtime 变化才重枚举 + 48h 活跃文件抽 stat + 滚动补枚举）。
+   */
+  const enumerateSome = async (passDeadline: number): Promise<void> => {
+    const budgetLeft = { stats: enumStatsCap };
+    // 时间片下限 10ms：ms=0 的 pass（如只靠持久化游标的零预算场景）也要能推进枚举，
+    // 否则 timeUp 立即为真 ⇒ pendingNames 永远断点 ⇒ 永不收敛。
+    const enumDeadline = Math.max(Math.min(passDeadline, Date.now() + COST_SCAN_ENUM_MS_CAP), Date.now() + 10);
+    const timeUp = () => Date.now() >= enumDeadline;
+    const sweepDone = enumPending !== undefined && enumPending.size === 0 && pendingNames === undefined;
+
+    if (!sweepDone) {
+      // ---- 全量分帧（首回填 / 新目录出现）：只推进未枚举过的目录（已 swept 目录的
+      // 刷新是稳态相位的职责，避免热目录每 pass 重复全量 lstat 饿死轮转）。
+      const order: string[] = [];
+      if (pendingNames !== undefined && dirSet.has(pendingNames.dir)) order.push(pendingNames.dir);
+      const hot = hottestDirName();
+      if (hot !== undefined && enumPending?.has(hot) === true && !order.includes(hot)) order.push(hot);
+      for (let i = 0; i < dirNames.length; i++) {
+        const name = dirNames[(dirCursor + i) % dirNames.length];
+        if (name !== undefined && enumPending?.has(name) === true && !order.includes(name)) order.push(name);
+      }
+      let rrFinished = 0;
+      for (const name of order) {
+        if (budgetLeft.stats <= 0 || timeUp()) break;
+        const isRr = name !== pendingNames?.dir && name !== hot;
+        const finished = await enumDir(name, budgetLeft, timeUp);
+        if (!finished) break; // 预算耗尽在该目录内断点
+        if (isRr) rrFinished++;
+      }
+      if (rrFinished > 0 && dirNames.length > 0) dirCursor = (dirCursor + rrFinished) % dirNames.length;
+      return;
+    }
+
+    // ---- 稳态轻量探测 ----
+    // (a) 目录 mtime 探测：文件增删 ⇒ 目录 mtime 变 ⇒ 重枚举该目录（append 不动目录 mtime，
+    //     由 (b) 覆盖）。预算内逐个 lstat。
+    const changed: string[] = [];
+    for (const name of dirNames) {
+      if (budgetLeft.stats <= 0 || timeUp()) break;
+      budgetLeft.stats--;
+      try {
+        const st = await lstat(join(root, name));
+        if (dirMtimes.get(name) !== st.mtimeMs) {
+          dirMtimes.set(name, st.mtimeMs);
+          changed.push(name);
+        }
+      } catch {
+        dirMtimes.delete(name);
+      }
+    }
+    // (b) 48h 内活跃的已跟踪文件抽 stat（最新优先）：发现 append 增长/身份变化。
+    const recentCutoff = Date.now() - 48 * 3_600_000;
+    const recent: FileFact[] = [];
+    for (const fact of factMap.values()) {
+      if (fact.mtimeMs >= recentCutoff) recent.push(fact);
+    }
+    recent.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    let recentStat = 0;
+    for (const fact of recent) {
+      if (recentStat >= COST_SCAN_ENUM_RECENT_FILES || budgetLeft.stats <= 0 || timeUp()) break;
+      recentStat++;
+      budgetLeft.stats--;
+      try {
+        const st = await lstat(fact.path);
+        if (st.isFile()) {
+          factMap.set(fact.path, {
+            path: fact.path,
+            dirName: fact.dirName,
+            dev: st.dev,
+            ino: st.ino,
+            size: st.size,
+            mtimeMs: st.mtimeMs,
+          });
+        } else {
+          factMap.delete(fact.path);
+        }
+      } catch {
+        factMap.delete(fact.path);
+      }
+    }
+    // (c) 变化目录 + 滚动补枚举（自愈漏网：如唤醒沉睡会话——其缓存 mtime 太旧不在 (b)，
+    //     目录 mtime 也不动 ⇒ 最迟 目录数/ROLL 个 idle pass 后被重新枚举）。
+    const order = [...changed];
+    for (let i = 0; i < Math.min(COST_SCAN_ENUM_ROLL_DIRS, dirNames.length); i++) {
+      const name = dirNames[(rollCursor + i) % dirNames.length];
+      if (name !== undefined && !order.includes(name)) order.push(name);
+    }
+    let rolled = 0;
+    for (const name of order) {
+      if (budgetLeft.stats <= 0 || timeUp()) break;
+      const isRoll = !changed.includes(name);
+      const finished = await enumDir(name, budgetLeft, timeUp);
+      if (!finished) {
+        // 滚动/变化目录内断点 ⇒ 视为重新进入未收敛（pendingNames 续扫；enumPending 不动，
+        // 下一 pass 走全量分支的断点续枚举路径——sweepDone 因 pendingNames !== undefined 翻 false）。
+        break;
+      }
+      if (isRoll) rolled++;
+    }
+    if (rolled > 0 && dirNames.length > 0) rollCursor = (rollCursor + rolled) % dirNames.length;
   };
 
   const isPending = (fact: FileFact): boolean => {
+    if (evictedPaths.has(fact.path)) return false; // 被淘汰 ⇒ 本进程不再重扫（防抖动）
     const entry = state.files[fact.path];
     if (entry === undefined) return true;
     if (entry.dev !== fact.dev || entry.ino !== fact.ino) return true;
@@ -502,7 +789,7 @@ export function createCostScanner(options: CostScannerOptions): CostScanner {
       loaded = true;
       try {
         const parsed: unknown = JSON.parse(await readFile(options.statePath, "utf8"));
-        if (isRecord(parsed)) state = parseState(parsed[STATE_GROUP], dir);
+        if (isRecord(parsed)) state = parseState(parsed[STATE_GROUP], root);
         markDirty();
       } catch {
         // 不存在 / 损坏 ⇒ 空态重扫。
@@ -514,13 +801,21 @@ export function createCostScanner(options: CostScannerOptions): CostScanner {
     const bytesLeft = { n: totalBytes };
     const timeUp = () => Date.now() >= deadline;
 
-    const facts = await enumerateFacts();
-    if (facts === undefined) {
+    let rootDirents: Dirent[];
+    try {
+      rootDirents = await readdir(root, { withFileTypes: true });
+    } catch {
       lastComplete = false;
+      lastScannedFiles = 0;
+      lastTotalFiles = 0;
       return;
     }
+    refreshDirs(rootDirents);
+    await enumerateSome(deadline);
+
+    const facts = [...factMap.values()];
     facts.sort((a, b) => b.mtimeMs - a.mtimeMs); // 最新优先
-    let capacity = false;
+    let capacity = evictedPaths.size > 0;
     let tracked = facts;
     if (facts.length > COST_SCAN_TRACKED_FILES_MAX) {
       tracked = facts.slice(0, COST_SCAN_TRACKED_FILES_MAX);
@@ -548,7 +843,7 @@ export function createCostScanner(options: CostScannerOptions): CostScanner {
       bytesLeft.n -= n;
     }
 
-    // Lane ② — round-robin 游标扫全量（path 排序，游标后起步，wrap 一次）。
+    // Lane ② — round-robin 游标扫全量（path 排序跨目录字典序 ⇒ 轮转天然公平，游标后起步，wrap 一次）。
     if (tracked.length > 0) {
       const sorted = tracked.map((f) => f.path).sort();
       const factByPath = new Map(tracked.map((f) => [f.path, f] as const));
@@ -573,22 +868,36 @@ export function createCostScanner(options: CostScannerOptions): CostScanner {
       }
     }
 
-    // 完成度：所有 tracked 文件游标到位且身份一致、未触发容量上限。
-    let complete = !capacity;
-    if (complete) {
-      for (const fact of tracked) {
-        const entry = state.files[fact.path];
-        if (entry === undefined || entry.dev !== fact.dev || entry.ino !== fact.ino || entry.scannedTo !== fact.size) {
-          complete = false;
-          break;
-        }
+    // 完成度与进度：首轮枚举完成，且所有 tracked 文件游标到位且身份一致、未触发容量上限。
+    const sweepDone = enumPending !== undefined && enumPending.size === 0 && pendingNames === undefined;
+    let complete = sweepDone && !capacity;
+    let scanned = 0;
+    for (const fact of tracked) {
+      const entry = state.files[fact.path];
+      if (
+        entry !== undefined &&
+        !evictedPaths.has(fact.path) &&
+        entry.dev === fact.dev &&
+        entry.ino === fact.ino &&
+        entry.scannedTo === fact.size
+      ) {
+        scanned++;
+      } else {
+        complete = false;
       }
     }
     lastComplete = complete;
+    lastScannedFiles = scanned;
+    lastTotalFiles = tracked.length;
 
     if (dirty && !disposed) {
       try {
-        await flushState(options.statePath, state, options.now());
+        const evicted = await flushState(options.statePath, state, options.now(), stateMaxBytes);
+        if (evicted.length > 0) {
+          for (const p of evicted) evictedPaths.add(p);
+          markDirty(); // 淘汰动了 buckets ⇒ 聚合缓存作废
+          safeWarn(`[quota] cost-scan state over ${stateMaxBytes} bytes; evicted ${evicted.length} file entr(ies)`);
+        }
       } catch (error) {
         safeWarn(
           `[quota] failed to persist cost-scan state to ${options.statePath}: ${
@@ -610,8 +919,15 @@ export function createCostScanner(options: CostScannerOptions): CostScanner {
     },
     view() {
       const buckets = aggregate();
+      const scannedFiles = lastScannedFiles;
+      const totalFiles = lastTotalFiles;
+      const complete = lastComplete;
+      const readBytes = readBytesTotal;
       return {
-        complete: lastComplete,
+        complete,
+        scannedFiles,
+        totalFiles,
+        readBytes,
         costInWindow(provider, startMs, endMs) {
           const hours = buckets.get(provider);
           if (hours === undefined || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
