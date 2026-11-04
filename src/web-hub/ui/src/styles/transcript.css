@@ -181,8 +181,10 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 .avatar {
   display: none;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  /* 24px chip since 2026-11-04 (was 28px): with the 6px column gap this puts the desktop
+   * assistant left indent at 30px (was 40px). Hidden below 481px, so mobile is unaffected. */
+  width: 24px;
+  height: 24px;
   border-radius: 8px;
   background: var(--c-primary-soft);
   color: var(--c-on-primary-soft);
@@ -1031,12 +1033,14 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
     padding: var(--sp-4) var(--col-gutter) var(--sp-8);
   }
 
-  /* 2026-10-09: user avatar column mirrors the assistant's (bubble | 28px avatar); the
-   * extra 28px + gap is added on top of the old bubble cap so the bubble keeps its width. */
+  /* 2026-10-09: user avatar column mirrors the assistant's (bubble | avatar chip); the
+   * extra chip + gap is added on top of the old bubble cap so the bubble keeps its width.
+   * 2026-11-04: chip 28px→24px and gap sp-3→6px together with .msg-assistant below
+   * (「缩进太突兀」— desktop assistant left indent 40px→30px). */
   .msg-user {
-    max-width: calc(min(78%, 640px) + 28px + var(--sp-3));
-    grid-template-columns: minmax(0, auto) 28px;
-    column-gap: var(--sp-3);
+    max-width: calc(min(78%, 640px) + 24px + 6px);
+    grid-template-columns: minmax(0, auto) 24px;
+    column-gap: 6px;
   }
 
   .msg-user > * {
@@ -1049,9 +1053,19 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
     align-self: start;
   }
 
+  /* 2026-11-04 「这个缩进感觉太突兀了」: avatar chip 28→24px + gap sp-3→6px narrows the
+   * desktop left indent of the assistant column 40px→30px (mobile keeps the single-column
+   * base rules below untouched — the avatar is display:none there). */
   .msg-assistant,
   .msg-custom {
-    grid-template-columns: 28px minmax(0, 1fr);
+    grid-template-columns: 24px minmax(0, 1fr);
+    column-gap: 6px;
+  }
+
+  /* identity row follows the 24px chip so both centre lines stay matched (base 28px
+   * matched the old 28px chip; mobile keeps the 28px base rule). */
+  .msg-head {
+    min-height: 24px;
   }
 
   .avatar {
@@ -1254,9 +1268,12 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   text-decoration: underline;
 }
 
+/* Avatar chip shrank 28→24px with .msg-assistant (2026-11-04); the column-gap override
+ * must match the 6px used there or the cmd card's left edge drifts off the column. */
 @media (min-width: 481px) {
   .msg-cmd {
-    grid-template-columns: 28px minmax(0, 1fr);
+    grid-template-columns: 24px minmax(0, 1fr);
+    column-gap: 6px;
   }
 }
 

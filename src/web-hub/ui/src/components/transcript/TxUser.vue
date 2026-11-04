@@ -10,7 +10,8 @@
   absolute paths a user pastes become clickable previews whenever a preview scope is live; with
   no ctx/scope the rendered DOM is byte-identical to the bare text node it replaces.
   2026-10-09 「输入框输入的内容也需要像 pi 一样增加一个头像」: a decorative user avatar mirrors
-  the assistant's — right column, same 28px chip, only ≥481px (same breakpoint as `.avatar`).
+  the assistant's — right column, same 24px chip (2026-11-04, was 28px), only ≥481px (same
+  breakpoint as `.avatar`).
   Same day 「web 和时间放在同一行」: badges + time share one `.msg-foot` row under the bubble.
 -->
 <script setup lang="ts">
