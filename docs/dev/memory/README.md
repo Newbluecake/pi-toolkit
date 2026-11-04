@@ -48,6 +48,12 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
     - **不迟到 send**：P 永不调用 `sendMessage`；窗口外完成的模型结果只写一轮缓存（§7.2），等待窗口 = max(`waitMs`, U 实际完成时刻)，上限 `recall.waitMs`，不增加额外等待（§8.3）。
     - 评测脚本模型部分（`--fetch-replies`）的真实调用由 `PI_TOOLKIT_PREDICT_EVAL_LIVE=1` + `DEEPSEEK_API_KEY` 显式门控，缺一即拒（零网络）；失败行如实记 `ok:false`，缺数据时 M9 等模型指标恒 NOT-EVALUATED，不生成假标注、不伪称达标。由 `tests/memory/jev/predict/{flight,ledger}.test.ts` 与 `tests/memory/jev/predict-eval.test.ts` 钉住。
 
+17. **写入打标可靠性四件套（2026-11-04 用户批准，修复偶发 all-failed）**：
+    - **预算**：写入打标总预算与单条同步预算 3s→6s（`write-port.ts` `WRITE_TAG_TOTAL_BUDGET_MS`、`tagging.ts` `TAG_ONE_SYNC_BUDGET_MS`）；client 每 try 上限 = ceil(total/2)（§5.2 规则不变）⇒ 每档 ~3000ms，付费兜底档不再被免费档挤到 1500ms。外层 abort timer 加 +500ms 纯僵尸兜底 slack（`WRITE_TAG_OUTER_SLACK_MS`），末档超时先由 client 自身期限结算（transient + detail），不被外层 abort 抢先变 `aborted`；I1/I5 不变（clampSpanMs + unref）。
+    - **尝试顺序**（`client.ts` `usableIds` 的 `tierRank`）：lastModel（本次激活最近成功档）→ 健康 `ok` → 干净 unknown → 带未清 transientFails 的档垫底；同秩按配置顺序稳定 tie-break（全部同秩时输出与配置序完全一致）。未达 3 连败隔离阈值的免费档在下一 ask 即被降位，不再每次先吃预算。
+    - **失败回显**：`all-failed` 的 `JevOutcome.detail` 携带逐档错误（`id: msg` 以 `·` 拼接，≤300 chars；`client.ts askInner`）；`write-port` 仅对 `all-failed` 追加 ` — detail`（经 `redactForJev("error")` + 200 cp 截断，`format.ts` `WriteEchoNotTagged.detail`）。off/pi-api/partial/aborted 等无 detail 路径字节不变（jev-off-golden 不重生）。
+    - **诊断持久化**：`diag-log.ts` 把环形日志同步落到 `<memDir>/.jev/diag.jsonl`（≤200 行 JSONL，`{at,line}`；lock 内 read-merge-原子替换，busy/错误一律丢弃，fail-soft；落盘前过 `redactForJev` + 300 cp 截断 + 换行压平，不落记忆正文/凭证）。wire 的 log sink（UI/子会话环形路径）fire-and-forget 追加；无 UI 主会话仍只 console.warn，不读不写。`/mem jev` errors 段在内存环为空且（有 UI 或子会话）时回落读文件（重启/`/reload` 后可见最近错误）。
+
 **门禁**：`tests/memory/jev/**`、`tests/memory/{tool-v2-jev,command-jev,doctor-jev,inject-jev}.test.ts`、`tests/integration/memory-jev-*.test.ts`、`tests/conformance/memory-jev-channels.test.ts`（C-J1–C-J15；C-J7/C-J8/C-J15 由 `PI_TOOLKIT_JEV_CONFORMANCE=1` 门控）、`tests/boundary/pi-free.test.ts`、`tests/governance`；评测 `node scripts/dev/jev-eval.mjs`（Tier 3，基线见 `docs/dev/memory/eval/jev-baseline.md`）。
 
 **残留风险**：gate 拦截已移除（2026-11），不再有误拦形态，也不再有进程/git 证据收集（`probes.ts` 已删）；Jev 判断质量依赖评测；默认开启使工具描述一次性变化、前缀缓存失效一次；dismissed 改写条目开头会重新提示整理建议；P 层的 W 信号端口（bashJobs/fleet）只在主会话 post-guard 挂载（`src/index.ts`，plan §11.1），子会话虽按 `predict.childSessions` 跑规则与 S，但 bashJobs 恒为空 ⇒ **S（发版进行中）在子会话永不触发**（R12/R13 的 git branch/dirty 部分照常）。

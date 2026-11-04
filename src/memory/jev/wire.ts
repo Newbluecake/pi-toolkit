@@ -96,6 +96,7 @@ import {
   type Taxonomy,
 } from "./contracts.js";
 import { decideErrorRecall, decideRecall, effectiveMeta } from "./decide.js";
+import { appendDiagLine, readDiagLines } from "./diag-log.js";
 import { EntryIndex, expiredEntries } from "./entries.js";
 import {
   formatInjectMarker,
@@ -725,9 +726,24 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   // known; `ui !== undefined` is reused as the hasUI signal here so there is
   // no separate piece of state to keep in sync (I4).
   const errorLog: { readonly at: number; readonly line: string }[] = [];
+  /** Session memory dir for the diagnostic sidecar — `undefined` until
+   *  session_start (or when this cwd has no memory dir); lines logged before
+   *  then stay ring-only. */
+  const diagDirFor = (): string | undefined => {
+    if (sessionCwd === undefined) return undefined;
+    try {
+      return deps.dirFor(resolveWorktreeOrigin(sessionCwd) ?? sessionCwd);
+    } catch {
+      return undefined;
+    }
+  };
   const pushErrorLog = (line: string): void => {
     errorLog.push({ at: now(), line });
     if (errorLog.length > JEV_ERROR_LOG_MAX) errorLog.shift();
+    // Persist the same (already ring-bound) line to the on-disk diag ring —
+    // fire-and-forget, fail-soft (diag-log.ts swallows lock/fs errors).
+    const dir = diagDirFor();
+    if (dir !== undefined) appendDiagLine(dir, now(), line);
   };
   const log =
     deps.log ??
@@ -2501,15 +2517,32 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     health: getHealthTable(),
   });
   const recentErrorsText = (): string | undefined => {
-    if (errorLog.length === 0) return undefined;
     const fmt = (ms: number): string => {
       const d = new Date(ms);
       return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
     };
-    return errorLog
-      .slice(-JEV_ERROR_LOG_SHOWN)
-      .map((e, i) => `${i === 0 ? "errors   " : "         "}${fmt(e.at)} ${e.line}`)
-      .join("\n");
+    let shown: readonly { at: number; line: string }[] = errorLog.slice(-JEV_ERROR_LOG_SHOWN);
+    if (shown.length === 0 && (ui !== undefined || isChild)) {
+      // Fresh activation (restart or /reload) with the in-memory ring empty:
+      // fall back to the persisted diag ring so `/mem jev` still shows the
+      // most recent errors. No-UI main sessions never used the ring and keep
+      // their byte-identical ring-less report.
+      const dir = diagDirFor();
+      if (dir !== undefined) {
+        try {
+          shown = readDiagLines(dir, JEV_ERROR_LOG_SHOWN)
+            .map((r) => {
+              const at = Date.parse(r.at);
+              return Number.isFinite(at) ? { at, line: r.line } : undefined;
+            })
+            .filter((r): r is { at: number; line: string } => r !== undefined);
+        } catch {
+          /* fail-soft — no errors section on read trouble */
+        }
+      }
+    }
+    if (shown.length === 0) return undefined;
+    return shown.map((e, i) => `${i === 0 ? "errors   " : "         "}${fmt(e.at)} ${e.line}`).join("\n");
   };
   const commandPort: JevCommandPort = {
     ...basePort,

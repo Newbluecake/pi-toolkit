@@ -502,6 +502,114 @@ describe("afterWrite: degraded states", () => {
   });
 });
 
+describe("afterWrite: failure-echo detail (2026-11-04 all-failed fix)", () => {
+  /** Outcomes consumed in ask order, last repeats. */
+  function failClient(status: JevStatus, outcomes: JevOutcome[]): JevClient {
+    let i = 0;
+    return {
+      status: () => status,
+      async ask() {
+        return outcomes[Math.min(i++, outcomes.length - 1)]!;
+      },
+      async probe() {
+        return status;
+      },
+    };
+  }
+  const write = (fx: Fixture, client: JevClient, file: string) =>
+    makePort(fx, client).afterWrite({
+      cwd: fx.cwd,
+      file,
+      before: undefined,
+      after: `${AGENT_FM}## S\n\n- failed entry\n`,
+      registry: REGISTRY,
+    });
+
+  it("all-failed carries the per-tier detail: `jev: not tagged (all-failed — …)`", async () => {
+    const fx = fixture();
+    const { echo } = await write(
+      fx,
+      failClient({ kind: "full", model: "opencode/jev-1.13" }, [
+        {
+          ok: false,
+          reason: "all-failed",
+          detail: "opencode/jev-1.13-free: timeout after 3000ms · opencode/jev-1.13: proxy error: connect reset",
+        },
+      ]),
+      "f.md",
+    );
+    expect(echo).toEqual([
+      "jev: not tagged (all-failed — opencode/jev-1.13-free: timeout after 3000ms · opencode/jev-1.13: proxy error: connect reset)",
+    ]);
+  });
+
+  it("detail is redacted and truncated to 200 code points", async () => {
+    const fx = fixture();
+    const longSecret = "sk-abcdefghijabcdefghijabcdefghijabcdefghij";
+    // Chinese filler: the redactor's base64/hex runs mask [A-Za-z0-9]{32,}
+    // spans — we want length that SURVIVES redaction so the 200-cp echo
+    // truncation itself is what's exercised.
+    const detail = `opencode/jev-1.13-free: token=${longSecret} and ${"长".repeat(260)} tail`;
+    const { echo } = await write(
+      fx,
+      failClient({ kind: "full", model: "opencode/jev-1.13" }, [{ ok: false, reason: "all-failed", detail }]),
+      "f2.md",
+    );
+    expect(echo).toHaveLength(1);
+    const m = /^jev: not tagged \(all-failed — (.+)\)$/.exec(echo[0]!);
+    expect(m).not.toBeNull();
+    const shown = m![1]!;
+    expect(shown).toContain("token=[REDACTED]");
+    expect(shown).not.toContain(longSecret);
+    expect(Array.from(shown).length).toBeLessThanOrEqual(201); // 200 cp + optional ellipsis
+    expect(shown.endsWith("…")).toBe(true);
+  });
+
+  it("non-all-failed reasons keep their detail-less bytes (aborted)", async () => {
+    const fx = fixture();
+    const { echo } = await write(
+      fx,
+      failClient({ kind: "full", model: "opencode/jev-1.13" }, [{ ok: false, reason: "aborted", detail: "deadline" }]),
+      "f3.md",
+    );
+    expect(echo).toEqual(["jev: not tagged (aborted)"]);
+  });
+
+  it("verifier #1: the FIRST failure gates the echo — aborted before a later all-failed keeps the aborted bytes", async () => {
+    const fx = fixture();
+    const port = makePort(
+      fx,
+      failClient({ kind: "full", model: "opencode/jev-1.13" }, [
+        { ok: false, reason: "aborted", detail: "deadline" },
+        { ok: false, reason: "all-failed", detail: "opencode/jev-1.13-free: timeout after 3000ms" },
+      ]),
+    );
+    const { echo } = await port.afterWrite({
+      cwd: fx.cwd,
+      file: "f4.md",
+      before: undefined,
+      after: `${AGENT_FM}## S\n\n- first entry\n- second entry\n`,
+      registry: REGISTRY,
+    });
+    expect(echo).toEqual(["jev: not tagged (aborted)"]);
+  });
+
+  it("verifier #2: detail is flattened to one line (newlines/tabs/controls → single space) before truncation", async () => {
+    const fx = fixture();
+    const detail = `opencode/jev-1.13-free: line one\n\tline two\u0007bell`;
+    const { echo } = await write(
+      fx,
+      failClient({ kind: "full", model: "opencode/jev-1.13" }, [{ ok: false, reason: "all-failed", detail }]),
+      "f5.md",
+    );
+    expect(echo).toHaveLength(1);
+    expect(echo[0]).not.toMatch(/[\n\t\u0007]/);
+    // redactForJev strips C0 controls (except \n/\t) — the BEL vanishes
+    // there; the \n\t run is flattened to one space by the echo path.
+    expect(echo[0]).toContain("line one line twobell");
+  });
+});
+
 describe("afterWrite: usage + budget", () => {
   it("usage aggregates cost and counts calls", async () => {
     const fx = fixture();
@@ -518,7 +626,7 @@ describe("afterWrite: usage + budget", () => {
     expect(usage).toEqual({ costUsd: 0.0002, calls: 2 });
   });
 
-  it("total budget 3000ms aborts hanging asks (fake clock), sidecar untouched", async () => {
+  it("total budget 6000ms (+500ms backstop slack) aborts hanging asks (fake clock), sidecar untouched", async () => {
     vi.useFakeTimers();
     const fx = fixture();
     const { client, asks } = fakeClient({ hang: true });
@@ -530,7 +638,15 @@ describe("afterWrite: usage + budget", () => {
       after: `${AGENT_FM}## S\n\n- slow entry\n`,
       registry: REGISTRY,
     });
-    const { echo } = await vi.advanceTimersByTimeAsync(3000);
+    // 2026-11-04 fix: the write-tag total budget is 6s — at the old 3s the
+    // abort fired at 3000; now nothing may abort before 6000.
+    let settled = false;
+    void done.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(6100);
+    expect(settled).toBe(false);
+    const { echo } = await vi.advanceTimersByTimeAsync(400);
     void echo;
     const result = await done;
     expect(asks).toHaveLength(1);

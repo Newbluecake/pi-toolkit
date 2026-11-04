@@ -12,7 +12,7 @@ import {
   type JevRequest,
   type TokenBucket,
 } from "../../../src/memory/jev/contracts.js";
-import { createFakeRegistry } from "./helpers/fake-registry.js";
+import { createFakeRegistry, type ClassifyCallRecord, type ClassifyResult } from "./helpers/fake-registry.js";
 
 afterEach(() => clearHealthTable());
 
@@ -714,5 +714,179 @@ describe("createJevClient — proxy fetch wiring (§5.4)", () => {
     });
     await proxyClient.ask(req({}, registry));
     expect(fetchSeen).toBe(fakeFetch);
+  });
+});
+
+describe("createJevClient — attempt ordering + per-tier budget (2026-11-04 all-failed fix)", () => {
+  it("equal health ⇒ config order stays the stable tie-break", async () => {
+    const { registry, calls } = createFakeRegistry({
+      available: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
+      responses: {
+        "opencode/jev-1.13-free": [{ stopReason: "error", errorMessage: "proxy error: boom" }],
+        "opencode/jev-1.13": [{ stopReason: "stop", answers: { e1: { type: "bool", probability: 0.9 } } }],
+      },
+    });
+    const client = createJevClient({
+      config: cfg({ classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"] }),
+      isChild: false,
+      now: () => Date.now(),
+      health: freshHealth(),
+      bucket: freshBucket(),
+    });
+    const outcome = await client.ask(req({}, registry));
+    expect(outcome.ok).toBe(true);
+    expect(calls.map((c) => c.id)).toEqual(["opencode/jev-1.13-free", "opencode/jev-1.13"]);
+  });
+
+  it("a transient-failing tier is demoted on the next ask even below the 3-strike isolation", async () => {
+    const { registry, calls } = createFakeRegistry({
+      available: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
+      responses: {
+        // ask #1: free fails transiently (1st consecutive failure — no isolation
+        // yet), paid succeeds. ask #2: both succeed; paid must be tried FIRST.
+        "opencode/jev-1.13-free": [
+          { stopReason: "error", errorMessage: "proxy error: connect reset" },
+          { stopReason: "stop", answers: { e1: { type: "bool", probability: 0.9 } } },
+        ],
+        "opencode/jev-1.13": [
+          { stopReason: "stop", answers: { e1: { type: "bool", probability: 0.9 } } },
+          { stopReason: "stop", answers: { e1: { type: "bool", probability: 0.9 } } },
+        ],
+      },
+    });
+    const client = createJevClient({
+      config: cfg({ classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"] }),
+      isChild: false,
+      now: () => Date.now(),
+      health: freshHealth(),
+      bucket: freshBucket(),
+    });
+    const first = await client.ask(req({}, registry));
+    expect(first.ok).toBe(true);
+    const second = await client.ask(req({}, registry));
+    expect(second.ok).toBe(true);
+    // ask #2 order: paid (ok + lastModel) before free (1 transient fail).
+    expect(calls[2]!.id).toBe("opencode/jev-1.13");
+  });
+
+  it("a health-ok tier outranks a config-first tier with unresolved transient failures", async () => {
+    const health = freshHealth();
+    // Preset shared-table state: free carries 2 unresolved transient failures,
+    // paid is ok — no lastModel in this client (fresh activation, no success).
+    health.set("opencode/jev-1.13-free", { state: "unknown", transientFails: 2 });
+    health.set("opencode/jev-1.13", { state: "ok", transientFails: 0 });
+    const { registry, calls } = createFakeRegistry({
+      available: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
+      responses: {
+        "opencode/jev-1.13-free": [{ stopReason: "stop", answers: { e1: { type: "bool", probability: 0.9 } } }],
+        "opencode/jev-1.13": [{ stopReason: "stop", answers: { e1: { type: "bool", probability: 0.9 } } }],
+      },
+    });
+    const client = createJevClient({
+      config: cfg({ classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"] }),
+      isChild: false,
+      now: () => Date.now(),
+      health,
+      bucket: freshBucket(),
+    });
+    const outcome = await client.ask(req({}, registry));
+    expect(outcome.ok).toBe(true);
+    expect(calls[0]!.id).toBe("opencode/jev-1.13");
+  });
+
+  it("6000ms budget ⇒ per-try cap 3000ms per tier: first tier times out, paid tier still gets its full slice", async () => {
+    vi.useFakeTimers();
+    try {
+      const hangUntilAbort = (call: ClassifyCallRecord) =>
+        new Promise<ClassifyResult>((resolve) => {
+          if (call.signal === undefined) {
+            resolve({ stopReason: "stop", answers: { e1: { type: "bool", probability: 0.9 } } });
+            return;
+          }
+          call.signal.addEventListener("abort", () => resolve({ stopReason: "aborted" }), { once: true });
+        });
+      const { registry, calls } = createFakeRegistry({
+        available: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
+        responses: {
+          "opencode/jev-1.13-free": [hangUntilAbort],
+          "opencode/jev-1.13": [{ stopReason: "stop", answers: { e1: { type: "bool", probability: 0.9 } } }],
+        },
+      });
+      const client = createJevClient({
+        config: cfg({ classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"] }),
+        isChild: false,
+        now: () => Date.now(),
+        health: freshHealth(),
+        bucket: freshBucket(),
+      });
+      const askPromise = client.ask(req({ budgetMs: 6000, mode: "sync" }, registry));
+      // Before the old 1500ms per-try slice elapses the free tier is still
+      // the only call — the per-tier timeout is now ceil(6000/2) = 3000.
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(calls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1500); // 3000 total: free tier cut, failover
+      expect(calls).toHaveLength(2);
+      expect(calls[1]!.id).toBe("opencode/jev-1.13");
+      const outcome = await askPromise;
+      expect(outcome.ok).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("all-failed detail lists each tier's error (id + message), joined and capped", async () => {
+    const { registry } = createFakeRegistry({
+      available: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
+      responses: {
+        "opencode/jev-1.13-free": [{ stopReason: "error", errorMessage: "proxy error: connect timeout" }],
+        "opencode/jev-1.13": [{ stopReason: "error", errorMessage: "System One API error (429): rate limited" }],
+      },
+    });
+    const client = createJevClient({
+      config: cfg({ classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"] }),
+      isChild: false,
+      now: () => Date.now(),
+      health: freshHealth(),
+      bucket: freshBucket(),
+    });
+    const outcome = await client.ask(req({}, registry));
+    expect(outcome).toMatchObject({ ok: false, reason: "all-failed" });
+    if (!outcome.ok) {
+      expect(outcome.detail).toContain("opencode/jev-1.13-free: proxy error: connect timeout");
+      expect(outcome.detail).toContain("opencode/jev-1.13: System One API error (429): rate limited");
+      expect(outcome.detail).toContain(" · ");
+      expect(outcome.detail.length).toBeLessThanOrEqual(300);
+    }
+  });
+});
+
+describe("createJevClient — code-point-safe detail truncation (2026-11-04 verifier #3)", () => {
+  it("per-tier note and joined detail never split surrogate pairs (emoji error bodies)", async () => {
+    const emoji = "😀"; // U+1F600, one code point / two UTF-16 units
+    const { registry } = createFakeRegistry({
+      available: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
+      responses: {
+        "opencode/jev-1.13-free": [{ stopReason: "error", errorMessage: emoji.repeat(125) }],
+        "opencode/jev-1.13": [{ stopReason: "error", errorMessage: emoji.repeat(125) }],
+      },
+    });
+    const client = createJevClient({
+      config: cfg({ classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"] }),
+      isChild: false,
+      now: () => Date.now(),
+      health: freshHealth(),
+      bucket: freshBucket(),
+    });
+    const outcome = await client.ask(req({}, registry));
+    expect(outcome).toMatchObject({ ok: false, reason: "all-failed" });
+    if (!outcome.ok) {
+      const detail = outcome.detail;
+      // joined cap holds at the code-point level…
+      expect(Array.from(detail).length).toBeLessThanOrEqual(300);
+      // …and no lone surrogates anywhere (a split pair would surface as a
+      // single UTF-16 unit in the D800–DFFF range after Array.from)
+      const loneSurrogate = Array.from(detail).some((cp) => /[\uD800-\uDFFF]/u.test(cp));
+      expect(loneSurrogate).toBe(false);
+    }
   });
 });

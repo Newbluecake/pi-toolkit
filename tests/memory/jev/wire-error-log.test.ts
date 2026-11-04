@@ -6,7 +6,7 @@
 //   - `/mem jev` report surfaces the most recent entries
 //   - no UI ⇒ console.warn behavior is byte-identical to before this change
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -251,6 +251,82 @@ describe("jev diagnostic log sink — no UI", () => {
       // Not a tautology: the classifier path must actually have run.
       expect(h.fake.calls.length).toBeGreaterThan(0);
       expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe("jev diagnostic persistence — `.jev/diag.jsonl` (2026-11-04 fix)", () => {
+  test("ring-bound lines are also persisted to the memory dir's diag ring (redacted, jsonl)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = harness({ hasUI: true, fail: "System One API error (451): nope" });
+      await h.emit("session_start", { type: "session_start", reason: "startup" });
+      await settle(300); // fire-and-forget append runs on its own tick
+      const diagPath = join(memDir, ".jev", "diag.jsonl");
+      expect(existsSync(diagPath)).toBe(true);
+      const text = readFileSync(diagPath, "utf8");
+      for (const line of text.trim().split("\n")) {
+        const rec = JSON.parse(line) as { at: string; line: string };
+        expect(typeof rec.at).toBe("string");
+        expect(rec.line).toMatch(/opencode\/jev-1\.13(-free)? failed \(unavailable\)/);
+      }
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("restart: a fresh activation with an empty in-memory ring surfaces the persisted errors in `/mem jev`", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // session 1: errors land on disk
+      const h1 = harness({ hasUI: true, fail: "System One API error (451): nope" });
+      await h1.emit("session_start", { type: "session_start", reason: "startup" });
+      await settle(300);
+      expect(existsSync(join(memDir, ".jev", "diag.jsonl"))).toBe(true);
+
+      // session 2 (same project): healthy registry, no new failures — the
+      // report must fall back to the persisted diag ring.
+      const h2 = harness({ hasUI: true });
+      await h2.emit("session_start", { type: "session_start", reason: "startup" });
+      await settle(200);
+      const report = await h2.wire.commandPort.report(tmp, undefined);
+      expect(report).toContain("errors");
+      expect(report).toMatch(/errors\s+\d\d:\d\d .*failed \(unavailable\)/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("in-memory ring wins while non-empty (no duplicated/stale errors section)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = harness({ hasUI: true, fail: "System One API error (451): nope" });
+      await h.emit("session_start", { type: "session_start", reason: "startup" });
+      await settle(300);
+      const report = await h.wire.commandPort.report(tmp, undefined);
+      const errorLines = report.split("\n").filter((l) => l.includes("failed (unavailable)"));
+      expect(errorLines.length).toBeGreaterThan(0);
+      expect(errorLines.length).toBeLessThanOrEqual(5);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("no-UI main sessions never read the persisted ring: report stays ring-less even with diag.jsonl present", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // seed the diag file via a UI session
+      const h1 = harness({ hasUI: true, fail: "System One API error (451): nope" });
+      await h1.emit("session_start", { type: "session_start", reason: "startup" });
+      await settle(300);
+      // a no-UI session must keep its byte-identical console.warn + ring-less report
+      const h2 = harness({ hasUI: false });
+      await h2.emit("session_start", { type: "session_start", reason: "startup" });
+      await settle(200);
+      const report = await h2.wire.commandPort.report(tmp, undefined);
+      expect(report).not.toContain("errors");
     } finally {
       warn.mockRestore();
     }

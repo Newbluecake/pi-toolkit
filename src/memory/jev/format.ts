@@ -131,6 +131,11 @@ export interface WriteEchoNotTagged {
   /** e.g. "partial: 451" (long form) or "off: pi-api" (short form). */
   readonly reason: string;
   readonly long: boolean;
+  /** Optional per-tier failure detail for `all-failed`-class reasons
+   *  (2026-11-04 fix): already redacted + truncated by the caller; absent on
+   *  every pre-existing path (off/pi-api/partial/aborted-without-detail) so
+   *  their bytes never change. */
+  readonly detail?: string;
 }
 
 export type WriteEchoInput = WriteEchoTagged | WriteEchoNotTagged;
@@ -146,10 +151,11 @@ export function formatWriteEcho(input: WriteEchoInput): string {
   if (input.kind === "not-tagged") {
     const lines: string[] = [];
     if (input.anchor !== undefined) lines.push(anchorLine(input.anchor));
+    const detail = input.detail === undefined || input.detail === "" ? "" : ` — ${input.detail}`;
     lines.push(
       input.long
-        ? `jev: not tagged (${input.reason}) — fast path will not see this entry until tagged; inline tags=+… works now`
-        : `jev: not tagged (${input.reason})`,
+        ? `jev: not tagged (${input.reason}${detail}) — fast path will not see this entry until tagged; inline tags=+… works now`
+        : `jev: not tagged (${input.reason}${detail})`,
     );
     return lines.join("\n");
   }

@@ -32,15 +32,38 @@ import { redactForJev } from "./redact.js";
 import { tagOne } from "./tagging.js";
 import type { ClassifierRegistryLike, EntryHash, EntryTags, JevClient, JevWritePort, Taxonomy } from "./contracts.js";
 
-/** §6.2.1: "多条并行，总时限 3000ms" — one unref'd abort timer caps the whole
- *  afterWrite tagging pass (each `tagOne` still gets its own 3000ms sync
- *  budget and the client clamps to whichever fires first). */
-export const WRITE_TAG_TOTAL_BUDGET_MS = 3_000;
+/** §6.2.1 total cap, raised 3000 → 6000 with the per-tier budget (2026-11-04
+ *  all-failed fix — see tagging.ts). One unref'd abort timer caps the whole
+ *  afterWrite tagging pass; each `tagOne` still gets its own 6000ms sync
+ *  budget and the client clamps to whichever fires first. */
+export const WRITE_TAG_TOTAL_BUDGET_MS = 6_000;
+/** Backstop-only slack on the outer abort timer: the client's own per-tier
+ *  deadlines (2 × ~3000ms) expire at ~6000ms, and without slack the outer
+ *  abort would win that race by scheduling jitter — turning the last tier's
+ *  timeout into `aborted` and hiding the real failure detail. The outer
+ *  timer is a zombie reaper, not the budget itself. */
+const WRITE_TAG_OUTER_SLACK_MS = 500;
 
 /** Compare-question pool: lexically closest 12 corpus entries plus the same
  *  file's entries, §6.2.2 ("比较对象取词面最相似的前 12 条，加上同一文件里的条目"). */
 const COMPARE_TOP_N = 12;
 const COMPARE_MAX = 20;
+
+/** Echo detail cap (code points) — short enough for a tool echo, long enough
+ *  to carry both tiers' one-line errors. */
+const ECHO_DETAIL_MAX_CP = 200;
+
+/** Flatten the detail to one line before truncation: `redactForJev` keeps
+ *  `\n`/`\t`, and a tool echo is a single line — collapse every run of
+ *  control chars (C0 + DEL) to a single space. */
+function flattenDetail(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f]+/g, " ");
+}
+
+function truncateDetail(text: string): string {
+  const chars = Array.from(text);
+  return chars.length <= ECHO_DETAIL_MAX_CP ? text : `${chars.slice(0, ECHO_DETAIL_MAX_CP).join("")}…`;
+}
 
 export interface JevWritePortDeps {
   readonly client: JevClient;
@@ -201,7 +224,7 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
     // I1: every computed deadline goes through clampSpanMs.
     const budgetMs = clampSpanMs(WRITE_TAG_TOTAL_BUDGET_MS) ?? WRITE_TAG_TOTAL_BUDGET_MS;
     const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), budgetMs);
+    const timer = setTimeout(() => abort.abort(), budgetMs + WRITE_TAG_OUTER_SLACK_MS);
     timer.unref?.();
     const signal = input.signal === undefined ? abort.signal : AbortSignal.any([abort.signal, input.signal]);
     try {
@@ -225,6 +248,7 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
       const upserts: Record<EntryHash, EntryTags> = {};
       let costUsd = 0;
       const failures: string[] = [];
+      let firstFailureDetail: string | undefined;
       for (const r of results) {
         const outcome = r.result.outcome;
         if (r.result.tags !== undefined && outcome.ok) {
@@ -275,6 +299,14 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
           echo.push(formatWriteEcho(input2));
         } else if (!outcome.ok) {
           failures.push(outcome.reason);
+          // 2026-11-04 fix: `all-failed` carries per-tier failure notes in
+          // its detail — surface a redacted, flattened, truncated copy in
+          // the echo. Verifier condition: only the FIRST failure decides —
+          // when `failures[0]` is e.g. `aborted`, the echo keeps its exact
+          // detail-less bytes even if a LATER entry failed all-failed.
+          if (failures.length === 1 && outcome.reason === "all-failed" && outcome.detail !== "") {
+            firstFailureDetail = outcome.detail;
+          }
         }
       }
       if (failures.length > 0) {
@@ -284,7 +316,13 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
             kind: "not-tagged",
             ...(now2.kind === "partial"
               ? { reason: `partial: ${now2.reason}`, long: true }
-              : { reason: failures[0]!, long: false }),
+              : {
+                  reason: failures[0]!,
+                  long: false,
+                  ...(firstFailureDetail === undefined
+                    ? {}
+                    : { detail: truncateDetail(flattenDetail(redactForJev(firstFailureDetail, "error"))) }),
+                }),
           }),
         );
       }

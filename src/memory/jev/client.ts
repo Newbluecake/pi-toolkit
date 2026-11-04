@@ -125,6 +125,13 @@ function statusEquals(a: JevStatus, b: JevStatus): boolean {
 
 // ───────────────────────────── client ─────────────────────────────
 
+/** Code-point-safe substring (no splitting of surrogate pairs — classifier
+ *  error messages can carry CJK emoji etc. from provider bodies). */
+function capCp(text: string, max: number): string {
+  const chars = Array.from(text);
+  return chars.length <= max ? text : chars.slice(0, max).join("");
+}
+
 export interface CreateJevClientDeps {
   readonly config: JevConfig;
   readonly isChild: boolean;
@@ -219,6 +226,21 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     emitStatusChangeIfAny();
   }
 
+  /** Attempt order (2026-11-04 all-failed fix): prefer the classifier the
+   *  session last succeeded on (`lastModel`), then any health-"ok" tier, then
+   *  clean-unknown tiers, with tiers carrying unresolved consecutive
+   *  transient failures demoted last — a free tier that transient-fails every
+   *  call must not keep eating the first per-try slice of the budget ahead of
+   * a healthy paid tier. Config order is the stable tie-break at equal rank
+   * (identical output when all ranks are equal — pure config order). */
+  function tierRank(id: string): number {
+    if (id === lastModel) return 0;
+    const h = health.get(id);
+    if (h === undefined) return 2;
+    if (h.state === "ok") return 1;
+    return (h.transientFails ?? 0) > 0 ? 3 : 2;
+  }
+
   function usableIds(): readonly string[] {
     const now = deps.now();
     const out: string[] = [];
@@ -231,7 +253,8 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
       }
       out.push(id);
     }
-    return out;
+    const configIndex = new Map(deps.config.classifiers.map((id, i) => [id, i] as const));
+    return out.sort((a, b) => tierRank(a) - tierRank(b) || (configIndex.get(a) ?? 0) - (configIndex.get(b) ?? 0));
   }
 
   function recordFailure(id: string, errorMessage: string): "unavailable" | "transient" | "context" {
@@ -360,6 +383,10 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     const startedAt = deps.now();
     const ids = usableIds();
     if (ids.length === 0) return fail("all-failed", "every configured classifier is isolated, unavailable, or unknown");
+    // Per-tier failure notes for the final all-failed detail (2026-11-04
+    // fix: the old generic detail hid WHICH tier failed and why — the write
+    // echo and diag log now carry it, redacted/truncated by the caller).
+    const tierErrors: string[] = [];
 
     for (const id of ids) {
       const elapsed = deps.now() - startedAt;
@@ -410,10 +437,15 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
         continue;
       }
       recordFailure(id, attempt.errorMessage);
+      const note = `${id}: ${capCp(attempt.errorMessage, 120)}`;
+      if (!tierErrors.includes(note)) tierErrors.push(note);
       log(`[pi-subagent] jev: ${id} failed (${attempt.grade}): ${attempt.errorMessage.slice(0, 200)}`);
       emitStatusChangeIfAny();
     }
-    return fail("all-failed", "all configured classifiers failed for this call");
+    return fail(
+      "all-failed",
+      tierErrors.length > 0 ? capCp(tierErrors.join(" · "), 300) : "all configured classifiers failed for this call",
+    );
   }
 
   return {

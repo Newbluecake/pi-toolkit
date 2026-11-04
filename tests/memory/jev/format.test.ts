@@ -152,6 +152,25 @@ describe("write echo (§6.2.4) — verbatim main block + conditional lines", () 
       }),
     ).toBe("section: a.md #1 (L3-3)\njev: not tagged (off: pi-api)");
   });
+
+  it("not-tagged detail (2026-11-04 fix): `reason — detail`; absent/empty detail keeps the old bytes", () => {
+    expect(
+      formatWriteEcho({
+        kind: "not-tagged",
+        reason: "all-failed",
+        long: false,
+        detail: "opencode/jev-1.13-free: timeout after 3000ms",
+      }),
+    ).toBe("jev: not tagged (all-failed — opencode/jev-1.13-free: timeout after 3000ms)");
+    // empty string ≙ absent (no stray " — ")
+    expect(formatWriteEcho({ kind: "not-tagged", reason: "all-failed", long: false, detail: "" })).toBe(
+      "jev: not tagged (all-failed)",
+    );
+    // long form composes the same way
+    expect(formatWriteEcho({ kind: "not-tagged", reason: "partial: 451", long: true, detail: "x" })).toBe(
+      "jev: not tagged (partial: 451 — x) — fast path will not see this entry until tagged; inline tags=+… works now",
+    );
+  });
 });
 
 describe("status line (§5.3)", () => {

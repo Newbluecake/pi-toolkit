@@ -31,9 +31,13 @@ import type {
   Taxonomy,
 } from "./contracts.js";
 
-/** Per-write tagging budget (J5's orchestration caps the WHOLE write at
- *  3000ms; a single call gets the same figure and lets the client clamp). */
-const TAG_ONE_SYNC_BUDGET_MS = 3_000;
+/** Per-write tagging budget (J5's orchestration caps the WHOLE write at the
+ *  same figure; a single call gets it and lets the client clamp). Raised
+ *  3000 → 6000 (2026-11-04 all-failed fix): the client's §5.2 per-try cap is
+ *  ceil(total/2), so at 3000 the paid fallback tier only ever saw ~1500ms
+ *  while healthy proxy requests take 1.2–1.5s — zero margin. At 6000 each
+ *  tier gets its full ~3000ms. */
+const TAG_ONE_SYNC_BUDGET_MS = 6_000;
 /** Background (bulk) calls get more headroom — no user is waiting sync. */
 const TAG_ONE_BACKGROUND_BUDGET_MS = 6_000;
 /**
