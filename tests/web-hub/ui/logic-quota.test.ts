@@ -6,6 +6,7 @@ import {
   etaDurationKey,
   fmtResetAt,
   freshestQuota,
+  glmPair,
   pillDisplay,
   pillGroups,
   pillView,
@@ -346,6 +347,28 @@ describe("pillGroups — GLM merge (2026-10-14 ruling: ALWAYS one GLM group, wor
     expect(groups).toHaveLength(2);
     expect(groups[0]).toMatchObject({ ids: ["kimi-coding"], labelId: "kimi-coding" });
     expect(groups[1]).toMatchObject({ ids: ["zai-coding-cn", "zai"], labelId: "zai-coding-cn", usedPct: 42 });
+  });
+});
+
+// 2026-11-04 GLM 账号费用：agent 投影层把账号费用（两 provider bucket 之和）写在双侧
+// wire 行上 ⇒ merged 窗口对象无论挑到哪一侧，costUsd/costUnpriced 都在（UI 不再相加）。
+// 独立 describe：上面 GLM merge describe 里有个同名局部 helper `glmPair`，会遮蔽导入。
+describe("glmPair — cost 字段保留（2026-11-04 账号费用）", () => {
+  it("merged windows keep the chosen side's costUsd/costUnpriced — worst-of pick never loses the account cost", () => {
+    const pair = glmPair([
+      provider("zai-coding-cn", [window("5h", 42, 0, { resetAt: 1_000, costUsd: 4.6, costUnpriced: true })]),
+      provider("zai", [window("5h", 42, 1, { resetAt: 2_000, costUsd: 4.6, costUnpriced: true })]),
+    ]);
+    // intl 的 L1 赢了 worst-of ⇒ merged 窗口是 intl 侧的对象，cost 字段随对象保留
+    expect(pair.source.windows).toEqual([
+      { scope: "5h", usedPct: 42, level: 1, resetAt: 2_000, costUsd: 4.6, costUnpriced: true },
+    ]);
+    // 完全打平 ⇒ 保留 cn 侧的窗口对象（cn 先比）——cost 字段同样随对象保留，不多不少
+    const tie = glmPair([
+      provider("zai-coding-cn", [window("week", 41, 0, { costUsd: 4.6 })]),
+      provider("zai", [window("week", 41, 0, { costUsd: 4.6, costUnpriced: true })]),
+    ]);
+    expect(tie.source.windows).toEqual([{ scope: "week", usedPct: 41, level: 0, costUsd: 4.6 }]);
   });
 });
 

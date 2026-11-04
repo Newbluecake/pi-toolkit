@@ -26,7 +26,7 @@
  * `problems` list. Anything else — `pools` unset/false — keeps P7's filtered output
  * byte-identical (old hubs decode closed unions and would drop the WHOLE status frame).
  */
-import { quotaWindowCost, type QuotaCostView } from "../../quota/cost-scan.js";
+import { quotaWindowCost, type QuotaCostView, type QuotaCostWindow } from "../../quota/cost-scan.js";
 import type { ProviderVerdict, WindowVerdict } from "../../quota/ladder.js";
 import type { QuotaProblem } from "../../quota/types.js";
 import type {
@@ -145,6 +145,39 @@ function isLegacyWireWindow(w: WindowVerdict): w is WindowVerdict & { scope: Quo
   return w.scope !== "month";
 }
 
+/** GLM 账号费用别名（2026-11-04）：`zai`/`zai-coding-cn` 是同一 GLM 订阅账号的两个端点
+ * provider（quota 百分比恒等），但 cost bucket 按 JSONL 里实际调用的 provider 归属——近期
+ * 真实调用都记在 `zai` ⇒ cn 当前窗口可能无 bucket，而 UI 的 GLM worst-of 合并恒挑 cn 侧
+ * ⇒ costUsd 缺失。折算因此在投影层按**账号集合**聚合（`accountWindowCost`）：对集合内各
+ * provider 分别求 `quotaWindowCost`，usd 相加、unpriced 取 OR；全部 undefined 才 undefined。
+ * 两条 GLM wire 行带同一账号费用（UI 合并挑哪侧、单侧出行都有折算），UI 不做二次相加
+ * ⇒ 无双计。非 GLM provider 的集合只有自身，行为逐字节不变。 */
+const GLM_ACCOUNT_COST_IDS: Readonly<Record<string, readonly string[]>> = {
+  "zai-coding-cn": ["zai-coding-cn", "zai"],
+  zai: ["zai-coding-cn", "zai"],
+};
+
+/** 账号窗口费用：GLM 双端点求和（见 `GLM_ACCOUNT_COST_IDS`），其余 provider 退化为单值。 */
+function accountWindowCost(
+  cost: QuotaCostView | undefined,
+  provider: QuotaProviderWire["id"],
+  scope: QuotaWindowWire["scope"],
+  resetAt: number | undefined,
+): QuotaCostWindow | undefined {
+  const ids = GLM_ACCOUNT_COST_IDS[provider] ?? [provider];
+  let usd = 0;
+  let unpriced = false;
+  let any = false;
+  for (const id of ids) {
+    const c = quotaWindowCost(cost, id, scope, resetAt);
+    if (c === undefined) continue;
+    usd += c.usd;
+    unpriced = unpriced || c.unpriced;
+    any = true;
+  }
+  return any ? { usd, unpriced } : undefined;
+}
+
 function projectWindow(
   w: WindowVerdict & { scope: QuotaWindowWire["scope"] },
   provider: QuotaProviderWire["id"],
@@ -154,7 +187,8 @@ function projectWindow(
   if (w.resetAt !== undefined) wire.resetAt = w.resetAt;
   if (w.etaMs !== undefined) wire.etaMs = w.etaMs;
   // 费用折算（形态 B）：按 resetAt−时长 区间从 cost 视图求和；无数据/无 resetAt ⇒ 键缺席。
-  const c = quotaWindowCost(cost, provider, w.scope, w.resetAt);
+  // GLM 双端点按账号聚合（accountWindowCost，见其头注释）。
+  const c = accountWindowCost(cost, provider, w.scope, w.resetAt);
   if (c !== undefined) {
     wire.costUsd = c.usd;
     if (c.unpriced) wire.costUnpriced = true;

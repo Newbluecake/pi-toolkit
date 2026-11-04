@@ -66,5 +66,10 @@ web-hub agent 1Hz tick 经`deps.quotaCostTick` 推进（内部节流 incomplete 
 single-flight）；webHub 关 ⇒ 零 I/O（I9）。进度可见：`view()`暴露`complete`+`scannedFiles`/
 `totalFiles`（首轮枚举未扫完时 totalFiles 是下界）+ `readBytes`，供 `/agent status` 或后续 UI
 使用（当前未接线）。droid-standard/droid-core 是外部 provider，JSONL 无数据 ⇒ 不出折算。GLM 合并行
-（`glmPair`worst-of 按引用挑窗）⇒ 折算跟随供窗一侧。残留：初始回填期间（实测 ≈1.5–2 分钟）
+（`glmPair`worst-of 按引用挑窗）：zai/zai-coding-cn 是同一 GLM 账号的两个端点（百分比恒等），
+cost bucket 却按 JSONL 实际调用的 provider 归属——单侧窗口可能无 bucket，故折算是**账号窗口
+费用**而非端点归因：投影层（quota-sampler`accountWindowCost`）对两 provider 分别求窗口费用后
+usd 相加、unpriced 取 OR（全 undefined 才 undefined），两条 GLM wire 行带同一账号费用 ⇒
+worst-of 挑哪侧、单侧出行都有折算，UI 不再相加（无双计）；非 GLM provider 行为逐字节不变。
+残留：初始回填期间（实测 ≈1.5–2 分钟）
 折算是下界但不带标记（可用`view().complete` 区分，UI 未接）。

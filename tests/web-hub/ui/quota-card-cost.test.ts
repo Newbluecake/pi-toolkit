@@ -72,3 +72,64 @@ describe("QuotaCard 费用折算", () => {
     w.unmount();
   });
 });
+
+// 2026-11-04 GLM 账号费用：agent 投影层把账号费用（zai+cn bucket 之和）写在双侧 wire 行上；
+// 卡片的 GLM 合并（glmPair worst-of 挑一侧的窗口对象）后折算仍在，且不重复出现（无双计）。
+describe("QuotaCard 费用折算 — GLM 合并行", () => {
+  const glmWindow = (costUsd: number | undefined, costUnpriced: true | undefined, level = 0) => ({
+    scope: "5h",
+    usedPct: 62,
+    level,
+    resetAt: NOW + 2 * H,
+    ...(costUsd === undefined ? {} : { costUsd }),
+    ...(costUnpriced === true ? { costUnpriced } : {}),
+  });
+  const glmWire = (cnW: ReturnType<typeof glmWindow>, intlW: ReturnType<typeof glmWindow>): QuotaWire => ({
+    v: 1,
+    at: NOW - 30_000,
+    providers: [
+      {
+        id: "zai-coding-cn",
+        level: Math.max(cnW.level, intlW.level),
+        stale: false,
+        fetchedAt: NOW - 60_000,
+        windows: [cnW],
+      },
+      { id: "zai", level: Math.max(cnW.level, intlW.level), stale: false, fetchedAt: NOW - 60_000, windows: [intlW] },
+    ],
+  });
+
+  it("双侧同值（账号费用）⇒ 合并成一条 GLM 行，折算恰好出现一次", () => {
+    setLangOverride("zh", null);
+    const w = mount(QuotaCard, {
+      props: { quota: glmWire(glmWindow(12.3), glmWindow(12.3)), now: NOW, anchorEl: null },
+      attachTo: document.body,
+    });
+    const subs = w.findAll(".q-sub");
+    expect(subs).toHaveLength(1); // 两窗合一（worst-of）⇒ 只一条窗口行
+    expect(subs[0].text()).toContain("≈$12.30");
+    expect(w.text().match(/≈\$12\.30/g)).toHaveLength(1); // 不双计
+    w.unmount();
+  });
+
+  it("worst-of 挑到另一侧（intl L1 赢）⇒ 该侧窗口对象的费用随行显示", () => {
+    setLangOverride("zh", null);
+    const w = mount(QuotaCard, {
+      props: { quota: glmWire(glmWindow(undefined, undefined, 0), glmWindow(3.5, true, 1)), now: NOW, anchorEl: null },
+      attachTo: document.body,
+    });
+    expect(w.get(".q-sub").text()).toContain("≈$3.50+"); // unpriced 下界标记随对象保留
+    w.unmount();
+  });
+
+  it("双侧都无 costUsd ⇒ 合并行只有重置文案，无 ≈", () => {
+    setLangOverride("zh", null);
+    const w = mount(QuotaCard, {
+      props: { quota: glmWire(glmWindow(undefined), glmWindow(undefined)), now: NOW, anchorEl: null },
+      attachTo: document.body,
+    });
+    expect(w.findAll(".q-sub")).toHaveLength(1);
+    expect(w.get(".q-sub").text()).not.toContain("≈");
+    w.unmount();
+  });
+});
