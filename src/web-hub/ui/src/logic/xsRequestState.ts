@@ -33,17 +33,16 @@
  * every request), the control handle must offer the (optional) transport surface, the card
  * must be online, and the row must be delivered-not-started with a live key inside its
  * window. No session-side status field is consulted (`XsStatus` is a closed schema — the UI
- * must not invent a producer for it). Until P3b wires the HTTP adapter the surface is absent,
- * so the button fail-closes and never renders against a live tree; tests fake the surface to
- * verify the enabled state. Nothing here ever auto-executes: no lifecycle event (status
+ * must not invent a producer for it). P3b adapters reuse the existing authenticated command
+ * transport; old/off agents and hubs still fail closed at the server gate. Nothing here ever auto-executes: no lifecycle event (status
  * frame, SSE reconnect, reply timeout, quota expiry) calls the action surface — only a user
  * click does.
  */
 
 /** UI mirror of `XS_STATE_HUB_CAP` (protocol/xs-activation.ts) — the hub frame's cap token. */
 export const XS_STATE_CAP = "xs.state.v1";
-/** UI mirror of `XS_ACTIVATE_HUB_CAP` — no agent-side declaration is visible to the browser,
- *  so the button additionally demands the session-side announcement (`status.xs.activate`). */
+/** UI mirror of `XS_ACTIVATE_HUB_CAP`; actual agent capability is server-validated,
+ * never inferred from a fabricated status.xs activation field. */
 export const XS_ACTIVATE_CAP = "xs.activate.v1";
 
 /** UI mirror of `XS_REQUESTS_MAX_ROWS` (the wire row cap) — the display list never exceeds the
@@ -95,6 +94,8 @@ export interface XsRowView {
   readonly reason?: string;
   readonly wake: XsWakeViewWire;
   readonly activationKey?: string;
+  /** Local CONTROL-attempt outcome, distinct from original body/wake evidence; never authorization. */
+  readonly activationStatus?: "accepted" | "already_active" | "unknown" | "refused" | "unsupported";
   readonly activationUntil?: number;
   /** The receiver branch entry a real xid match found (display-only; attaches a card badge). */
   readonly entryId?: string;
@@ -107,6 +108,9 @@ const EVIDENCE_ORDER: Readonly<Record<XsEvidence, number>> = { none: 0, unknown:
 
 function record(v: unknown): Record<string, unknown> {
   return v !== null && typeof v === "object" ? (v as Record<string, unknown>) : {};
+}
+function obj(v: unknown): Record<string, unknown> | undefined {
+  return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 }
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v !== "" ? v : undefined;
@@ -326,6 +330,7 @@ function mergeWakeFields(stored: XsWakeViewWire, incoming: XsWakeViewWire, local
 export function mergeXsRow(prev: XsRowView | undefined, next: XsRowView, nextRemote: boolean): XsRowView {
   if (prev === undefined) return next;
   let out = adoptIdentity(prev, next);
+  if (!nextRemote && next.activationStatus !== undefined) out = { ...out, activationStatus: next.activationStatus };
   const stale = next.revision < prev.revision;
   if (stale || !nextRemote) {
     // The seed path (local): wake facts a local observation may claim, nothing else moves.
@@ -454,6 +459,7 @@ export function xsEntryIndex(rows: readonly XsRowView[]): ReadonlyMap<string, Xs
 export function xsActivateEligible(row: XsRowView, now: number): boolean {
   return (
     row.activationKey !== undefined &&
+    !["accepted", "already_active", "unknown", "unsupported"].includes(row.activationStatus ?? "") &&
     (row.activationUntil === undefined || row.activationUntil > now) &&
     row.phase === "delivered" &&
     row.startedAt === undefined &&
@@ -498,7 +504,10 @@ export function xsActivateGate(args: XsActivateGateArgs): XsActivateGateView {
  *  activate — "unknown 只 query"). */
 export function xsQueryGate(hubCaps: unknown, hasSurface: boolean, row: XsRowView): boolean {
   if (!Array.isArray(hubCaps) || !hubCaps.includes(XS_STATE_CAP) || !hasSurface) return false;
-  return row.deliveryEffect === "unknown";
+  return (
+    row.deliveryEffect === "unknown" ||
+    ["unknown", "accepted", "already_active", "unsupported"].includes(row.activationStatus ?? "")
+  );
 }
 
 // ----------------------------------------------------------------- the mention seed store
@@ -551,6 +560,56 @@ export function seedXsMention(agentKey: string, sessionId: string, seed: XsMenti
     if (oldest === undefined) break;
     store.rows.delete(oldest);
   }
+}
+
+/** P3b a manual action's SERVER outcome. Preserve original body/revision/first wake
+ * stop; unknown/accepted claims never become delivered/started evidence. Bounded by
+ * the existing seed store (64 rows/32 agents), session+exact-key scoped, no persistence.
+ */
+export function seedXsActivationOutcome(
+  agentKey: string,
+  sessionId: string,
+  request: { action: "activate" | "query"; messageId: string; activationKey?: string },
+  outcome: unknown,
+  now: number,
+): void {
+  const raw = obj(outcome);
+  const data = obj(raw?.["data"]);
+  const result = obj(data?.["xsActivation"]);
+  const existing =
+    xsMentionSeeds(agentKey, sessionId).get(request.messageId) ??
+    xsRemoteRows(agentKey, sessionId).get(request.messageId);
+  if (!existing || request.activationKey !== existing.activationKey) return;
+  if (result && result["messageId"] !== request.messageId) return;
+  const effect = str(raw?.["effect"]);
+  let status = request.action === "activate" ? str(result?.["status"]) : undefined;
+  // Only a host response marks the attempt; browser/network speculation is not evidence.
+  if (
+    raw?.["ok"] === false &&
+    effect === "unknown" &&
+    raw["message"] === "xs:query-only" &&
+    request.action === "activate"
+  )
+    status = "unknown";
+  if (!["accepted", "already_active", "unknown", "refused", "unsupported"].includes(status ?? "")) return;
+  const retryAfterAt = num(result?.["retryAfterAt"]);
+  const current = existing.activationStatus;
+  const sticky = current === "unknown" || current === "accepted" || current === "already_active";
+  const row: XsRowView = {
+    ...existing,
+    activationStatus: sticky ? current : (status as NonNullable<XsRowView["activationStatus"]>),
+    wake: { ...existing.wake, ...(retryAfterAt !== undefined ? { retryAfterAt } : {}) },
+  };
+  seedXsMention(
+    agentKey,
+    sessionId,
+    {
+      messageId: request.messageId,
+      ...(request.activationKey !== undefined ? { activationKey: request.activationKey } : {}),
+      row,
+    },
+    now,
+  );
 }
 
 const EMPTY_SEEDS: ReadonlyMap<string, XsRowView> = new Map();

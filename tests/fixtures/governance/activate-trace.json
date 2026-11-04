@@ -505,6 +505,7 @@
       "registerCommand(schedule)",
       "registerTool(list_sessions)",
       "registerTool(message_session)",
+      "registerTool(wake_session)",
       "registerTool(message_channel)",
       "registerCommand(fabric)",
       "registerEntryRenderer(subagent:fabric)",
@@ -625,7 +626,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 247,
+    "count": 248,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",
@@ -888,6 +889,7 @@
       "registerCommand(schedule)",
       "registerTool(list_sessions)",
       "registerTool(message_session)",
+      "registerTool(wake_session)",
       "registerTool(message_channel)",
       "registerCommand(fabric)",
       "registerTool(thread)",
@@ -1010,7 +1012,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 249,
+    "count": 250,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",

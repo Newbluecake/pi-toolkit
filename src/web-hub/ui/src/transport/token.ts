@@ -1,3 +1,4 @@
+import { xsWebCommandArgs } from "@protocol/xs-web-command.js";
 /**
  * Token-mode `HubTransport` adapter (vue-plan.md v2.1 §3.4, §5.2 — P1). A thin wrapper around
  * `@logic/token-client.js`'s `createClient` (extracted from `app.js` in P0) — never
@@ -146,6 +147,18 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       // means the stored token itself is dead — flip to the login view (same rule as
       // subscribe/page above).
       const r = (await client.command(req)) as CmdOutcome;
+      if (isFinalAuthFailure(r)) deps.onConn("auth");
+      return r;
+    },
+    xsActivate: async (req) => {
+      const r = (await client.command({
+        agentKey: req.agentKey,
+        id: req.id,
+        op: "command",
+        name: "fabric",
+        args: xsWebCommandArgs(req),
+        ...(req.expect ? { expect: req.expect } : {}),
+      })) as CmdOutcome;
       if (isFinalAuthFailure(r)) deps.onConn("auth");
       return r;
     },

@@ -1,3 +1,5 @@
+import { createXsActivation } from "../../../src/fabric/xs/activate.js";
+import { DEFAULT_SETTINGS } from "../../../src/config/settings.js";
 import { describe, expect, it, vi } from "vitest";
 import { createXsAgentBridge, type XsAgentPort } from "../../../src/web-hub/agent/xs.js";
 import type { HubConnection } from "../../../src/web-hub/agent/connection.js";
@@ -95,4 +97,32 @@ describe("xs bridge activation (P3)", () => {
     const disabled = createXsAgentBridge({ conn: () => old.c, port: basePort({ activationEnabled: () => true }) });
     expect(await disabled.hubPort().activate!(args)).toEqual({ kind: "not_sent" });
   });
+});
+
+it.each([false, true])("P3b activation owner wires activateEnabled from frozen wake=%s", (wake) => {
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.fabric.enabled = true;
+  settings.fabric.crossSession.enabled = true;
+  settings.fabric.crossSession.activation.enabled = true;
+  settings.fabric.wake.enabled = wake;
+  settings.webHub.enabled = true;
+  const activation = createXsActivation({
+    settings,
+    holder: {},
+    webHubRef: {},
+    fencePorts: {},
+    notifyCtx: {},
+    scheduleMessage: () => undefined,
+  });
+  const deps = activation.webHubDeps();
+  expect(deps.xsActivation).toBeDefined();
+  expect(deps.xs!.activationEnabled!()).toBe(true);
+  expect(deps.xs!.activateEnabled!()).toBe(wake);
+  expect(
+    createXsAgentBridge({ conn: () => undefined, port: deps.xs! })
+      .caps()
+      .includes("xs.activate.v1"),
+  ).toBe(wake);
+  settings.fabric.wake.enabled = !wake;
+  expect(deps.xs!.activateEnabled!()).toBe(wake); // non-live, requires reload
 });

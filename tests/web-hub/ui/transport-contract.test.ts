@@ -196,6 +196,37 @@ describe.each([
     expect(typeof h.transport.page).toBe("function");
   });
 
+  it.each(["activate", "query"] as const)(
+    "xsActivate(%s) reuses POST /api/cmd, same id/expect and X-PWH, no new HTTP surface",
+    async (action) => {
+      const h = make();
+      const out = await h.transport.xsActivate!({
+        agentKey: "agent-A",
+        id: "stable-command-id",
+        action,
+        messageId: "original-message",
+        activationKey: "original-key",
+        expect: { sessionId: "current-session" },
+      });
+      expect(out.ok).toBe(true);
+      const calls = h.fetchCalls.filter((c) => c.url === "/api/cmd");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.init.method).toBe("POST");
+      expect(calls[0]!.init.headers?.["X-PWH"]).toBe("1");
+      const body = JSON.parse(calls[0]!.init.body as string);
+      expect(body).toEqual({
+        agentKey: "agent-A",
+        id: "stable-command-id",
+        op: "command",
+        name: "fabric",
+        args: `__xs ${JSON.stringify({ action, messageId: "original-message", activationKey: "original-key" })}`,
+        expect: { sessionId: "current-session" },
+      });
+      expect(body.text).toBeUndefined();
+      expect(h.fetchCalls.every((c) => c.url !== "/api/xs/activate")).toBe(true);
+    },
+  );
+
   it('subscribe(): POST /api/subscribe with X-PWH:"1" and a JSON {clientId, agentKey} body', async () => {
     const h = make();
     const r = await h.transport.subscribe("c1", "agent-A");

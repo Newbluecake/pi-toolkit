@@ -1,3 +1,4 @@
+import type { XsActivationPort, XsActivationHubPort } from "../../fabric/xs/session-activation.js";
 /**
  * web-hub agent client wiring (plan §包 D — index.ts; arch §3.2).
  *
@@ -414,6 +415,8 @@ export interface WebHubDeps {
    *  shape (pinned by `tests/integration/fabric-xs-off-golden.test.ts`). Presence IS `xsOn`
    *  (XW computes XS0's switch at activate and only threads the port when it holds). */
   xs?: XsAgentPort;
+  /** P3b host-only web command path; absent/off preserves legacy command dispatch. */
+  xsActivation?: () => XsActivationPort | undefined;
   /** web-hub archive plan: the session's archive control (late-bound like `query` — `undefined`
    *  ⇔ web-hub off / no live stack, e.g. the detach grace window). Feeds the `StatusInfo.archived`
    *  projection and the `archive` cmd op. Unset ⇒ the wire field never appears and the op settles
@@ -546,7 +549,7 @@ export interface WebHubControl {
     publishMember(): void;
     /** channel-plan §12 (IBP): the unread count changed ⇒ republish status (IBW calls this). */
     notifyUnreadChanged(): void;
-    hubPort(): XsHubPort;
+    hubPort(): XsHubPort & XsActivationHubPort;
     resolveBlock(query: string): Promise<XsBlockResolve>;
     hubInfo(): Promise<XsHubLimitsWire | undefined>;
     /** alias-plan §4/§7 (ALW): AL3's `op:"alias"` bridge and per-activate alias cache for `/fabric alias`. */
@@ -920,6 +923,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // B2 (verify 2026-10-24): the second parameter IS the web frame's cmdId — without it
     // `consumeNew` hands internalExec `cmdId: undefined` and the /new card never lands.
     armExec: (op, cmdId) => (op === "new" ? execGate.armNew(cmdId) : undefined),
+    ...(deps.xsActivation ? { xsActivation: deps.xsActivation } : {}),
     resume: (frame, cmd, bridgeCtx) => {
       const first = cmd.args.trim().split(/\s+/)[0];
       return first === "__list" ? resumeList.list(frame, cmd) : resumeExec.pick(frame, cmd, bridgeCtx);

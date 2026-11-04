@@ -10,6 +10,7 @@ import {
   narrowXsRequests,
   narrowXsRow,
   seedXsMention,
+  seedXsActivationOutcome,
   xsActivateEligible,
   xsActivateGate,
   xsEntryIndex,
@@ -511,5 +512,108 @@ describe("narrowMentionSession (P2's frozen two-branch port shape)", () => {
     expect(narrowMentionSession({ mention: { action: "session", label: "x" } })).toBeUndefined(); // no track/progress
     expect(narrowMentionSession({})).toBeUndefined();
     expect(narrowMentionSession(undefined)).toBeUndefined();
+  });
+});
+
+describe("P3b server control outcomes do not rewrite original body evidence", () => {
+  it.each(["accepted", "already_active", "unknown", "unsupported"] as const)(
+    "%s after a delivered body offers query only",
+    (status) => {
+      forgetXsSeeds("p3b");
+      forgetXsRemote("p3b");
+      const original = row({
+        messageId: "m",
+        phase: "delivered",
+        deliveryEffect: "applied",
+        activationKey: "k",
+        entryId: "entry-original",
+      });
+      acceptXsStatus("p3b", "s", snapshot([original], "s"));
+      seedXsActivationOutcome(
+        "p3b",
+        "s",
+        { action: "activate", messageId: "m", activationKey: "k" },
+        {
+          ok: true,
+          data: { xsActivation: { status, messageId: "m", effect: status === "unknown" ? "unknown" : "none" } },
+        },
+        10,
+      );
+      const current = xsRequestRows(xsMentionSeeds("p3b", "s"), xsRemoteRows("p3b", "s"))[0]!;
+      expect(current).toMatchObject({
+        deliveryEffect: "applied",
+        phase: "delivered",
+        revision: 1,
+        entryId: "entry-original",
+        activationStatus: status,
+      });
+      expect(xsActivateEligible(current, 20)).toBe(false);
+      expect(xsQueryGate(CAPS, true, current)).toBe(true);
+      expect(current.wake.authorizedAt).toBeUndefined(); // no fabricated authorization proof
+    },
+  );
+  it("quota retryAfterAt is server-derived, no auto activation, and later accepted supersedes refused", () => {
+    forgetXsSeeds("quota-p3b");
+    forgetXsRemote("quota-p3b");
+    const original = row({
+      messageId: "m",
+      phase: "delivered",
+      deliveryEffect: "applied",
+      activationKey: "k",
+      wake: { requested: true, decision: "downgraded", stage: "hub", reason: "pair_wake_rate" },
+    });
+    acceptXsStatus("quota-p3b", "s", snapshot([original], "s"));
+    const req = { action: "activate" as const, messageId: "m", activationKey: "k" };
+    seedXsActivationOutcome(
+      "quota-p3b",
+      "s",
+      req,
+      { ok: true, data: { xsActivation: { status: "refused", messageId: "m", retryAfterAt: 100 } } },
+      10,
+    );
+    const current = () => xsRequestRows(xsMentionSeeds("quota-p3b", "s"), xsRemoteRows("quota-p3b", "s"))[0]!;
+    expect(xsActivateGate({ hubCaps: CAPS, row: current(), now: 50, hasSurface: true, online: true })).toEqual({
+      visible: true,
+      retryAfterAt: 100,
+    });
+    seedXsActivationOutcome(
+      "quota-p3b",
+      "s",
+      req,
+      { ok: true, data: { xsActivation: { status: "accepted", messageId: "m" } } },
+      110,
+    );
+    expect(current().activationStatus).toBe("accepted");
+    expect(current().wake.reason).toBe("pair_wake_rate");
+    expect(xsActivateEligible(current(), 110)).toBe(false);
+  });
+  it("host deadline unknown is query-only; browser speculation and wrong scope cannot poison rows", () => {
+    forgetXsSeeds("scope-p3b");
+    forgetXsRemote("scope-p3b");
+    const original = row({ messageId: "m", phase: "delivered", deliveryEffect: "applied", activationKey: "k" });
+    acceptXsStatus("scope-p3b", "s", snapshot([original], "s"));
+    const req = { action: "activate" as const, messageId: "m", activationKey: "k" };
+    seedXsActivationOutcome("scope-p3b", "s", { ...req, activationKey: "bad" }, { ok: false, effect: "unknown" }, 1);
+    seedXsActivationOutcome("scope-p3b", "other-session", req, { ok: false, effect: "unknown" }, 1);
+    seedXsActivationOutcome(
+      "scope-p3b",
+      "s",
+      req,
+      { ok: true, data: { xsActivation: { status: "unknown", messageId: "wrong" } } },
+      1,
+    );
+    expect(xsMentionSeeds("scope-p3b", "s").size).toBe(0);
+    seedXsActivationOutcome("scope-p3b", "s", req, { ok: false, effect: "unknown", error: "E_NETWORK" }, 1);
+    expect(xsMentionSeeds("scope-p3b", "s").size).toBe(0); // no synthetic server outcome from browser speculation
+    seedXsActivationOutcome("scope-p3b", "s", req, { ok: false, effect: "unknown", message: "xs:query-only" }, 1);
+    expect(xsMentionSeeds("scope-p3b", "s").get("m")!.activationStatus).toBe("unknown");
+    seedXsActivationOutcome(
+      "scope-p3b",
+      "s",
+      { ...req, action: "query" },
+      { ok: true, data: { xsActivation: { status: "known", messageId: "m" } } },
+      2,
+    );
+    expect(xsMentionSeeds("scope-p3b", "s").get("m")!.activationStatus).toBe("unknown"); // delivered receipt alone cannot prove unknown activation failed
   });
 });

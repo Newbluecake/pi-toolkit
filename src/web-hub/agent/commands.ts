@@ -1,3 +1,5 @@
+import { clampSpanMs } from "../../core/deadline.js";
+import { isXsWebCommand, parseXsWebAction } from "../protocol/xs-web-command.js";
 import { randomUUID } from "node:crypto";
 import { noteHumanWebDispatch, revokeHumanWebDispatch } from "../../fabric/xs/human-grant.js";
 import type { SessionMentionRouteResult } from "../../mention/session.js";
@@ -209,7 +211,7 @@ const PROMPT_IDLE_STARTED_MS = 10_000;
 const PROMPT_QUEUED_TIMEOUT_MS = 10 * 60_000;
 const PROMPT_MAX_BYTES = 48 * 1024;
 const STEER_TEXT_MAX_BYTES = 16 * 1024;
-/** web-resume plan §2.4: the thenable-read race for the ONE async builtin (`resume __list`). */
+/** Read-only command race; P3b activate has a separate 9s ceiling and unknown timeout. */
 const RESUME_LIST_RACE_MS = 6_000;
 
 function byteLen(s: string): number {
@@ -1070,17 +1072,26 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       return;
     }
     if (typeof (result as { then?: unknown }).then === "function" && (result as { then?: unknown }).then !== null) {
-      // web-resume plan §2.4 — reads only: race the thenable against the frame deadline
-      // (unref'd via the caller's setTimer seam), settle exactly once. A timeout is
-      // `E_DEADLINE` retryable effect none (`resume:scanning`) — no side effect exists, so the
-      // F9 same-id re-execution is harmless; a late completion after the timeout is dropped
-      // (the retryable/none ledger entry was deleted, the UI retries with a new id).
-      const ms = Math.min(RESUME_LIST_RACE_MS, opTotal(frame));
+      // Bounded thenables: resume/query are pure reads; P3b activate MAY have left
+      // the host, so timeout/rejection is unknown (cached, query-only, no replay).
+      // Race the thenable against the frame deadline
+      // (unref'd via the caller's setTimer seam), settle exactly once. Read timeouts
+      // remain retryable none; activate timeouts are cached unknown. Late results
+      // are dropped here — the hub's original-key tombstone remains authoritative.
+      const xsAction = isXsWebCommand(cmd.name, cmd.args) ? parseXsWebAction(cmd.args) : undefined;
+      const mayActivate = xsAction?.action === "activate";
+      const rawMs = Math.min(mayActivate ? 9_000 : RESUME_LIST_RACE_MS, opTotal(frame));
+      const ms = xsAction ? clampSpanMs(rawMs)! : rawMs;
       let settled = false;
       const timer = deps.setTimer(ms, () => {
         if (settled) return;
         settled = true;
-        settleAndReply(frame, errResult("E_DEADLINE", true, "none", "resume:scanning"));
+        settleAndReply(
+          frame,
+          mayActivate
+            ? errResult("E_DEADLINE", false, "unknown", "xs:query-only")
+            : errResult("E_DEADLINE", true, "none", xsAction ? "xs:unavailable" : "resume:scanning"),
+        );
       });
       void Promise.resolve(result).then(
         (body) => {
@@ -1094,7 +1105,15 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
           if (settled) return;
           settled = true;
           timer.cancel();
-          settleAndReply(frame, errResult("E_UNSUPPORTED", false, "none"));
+          settleAndReply(
+            frame,
+            errResult(
+              "E_UNSUPPORTED",
+              false,
+              mayActivate ? "unknown" : "none",
+              mayActivate ? "xs:query-only" : undefined,
+            ),
+          );
         },
       );
       return;

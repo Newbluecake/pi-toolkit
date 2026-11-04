@@ -1,3 +1,4 @@
+import { seedXsActivationOutcome } from "../logic/xsRequestState.js";
 /**
  * Control-plane handle (control-plan v2.1 §7.1/§7.3/§7.7, package C4 — takes over C0's stub).
  *
@@ -145,7 +146,7 @@ export function createControl(
 
   // fabric-xs-activation plan §3 P4: the activate/query action surface. Mounted ONLY when
   // the transport offers it (frozen-transport convention). SINGLEFLIGHT per business key
-  // `${agentKey}|${messageId}|${activationKey ?? ""}` — a double-click (or a re-render racing
+  // `${agentKey}|${action}|${messageId}|${activationKey ?? ""}` — a double-click (or a re-render racing
   // the click) returns the SAME in-flight promise, so one business key never issues two wire
   // frames ("双击/刷新/新 cmdId 不重复计费" — the server revalidates and dedupes regardless).
   // No optimistic ctl item (the `setArchived` precedent): the outcome surfaces through the
@@ -156,9 +157,14 @@ export function createControl(
     xsActivateTransport === undefined
       ? undefined
       : (agentKey: string, args: { action: "activate" | "query"; messageId: string; activationKey?: string }) => {
-          const bizKey = `${agentKey}|${args.messageId}|${args.activationKey ?? ""}`;
+          const bizKey = `${agentKey}|${args.action}|${args.messageId}|${args.activationKey ?? ""}`;
           const running = xsInFlight.get(bizKey);
           if (running !== undefined) return running;
+          const sessionId = opts.getSessionId?.(agentKey) ?? "";
+          const record = (outcome: unknown) => {
+            if ((opts.getSessionId?.(agentKey) ?? "") === sessionId)
+              seedXsActivationOutcome(agentKey, sessionId, args, outcome, now());
+          };
           const attempt = xsActivateTransport({
             agentKey,
             id: newCmdId(),
@@ -166,9 +172,14 @@ export function createControl(
             messageId: args.messageId,
             ...(args.activationKey !== undefined ? { activationKey: args.activationKey } : {}),
             ...expectFor(agentKey),
-          }).finally(() => {
-            if (xsInFlight.get(bizKey) === attempt) xsInFlight.delete(bizKey);
-          });
+          })
+            .then((outcome) => {
+              record(outcome);
+              return outcome;
+            })
+            .finally(() => {
+              if (xsInFlight.get(bizKey) === attempt) xsInFlight.delete(bizKey);
+            });
           xsInFlight.set(bizKey, attempt);
           return attempt;
         };

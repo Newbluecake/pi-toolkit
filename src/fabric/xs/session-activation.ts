@@ -241,7 +241,7 @@ export interface XsActivationHubPort {
   activateCapable?(): boolean;
   activate?(args: {
     origin: XsOriginSnapshot;
-    to: string;
+    to?: string;
     messageId: string;
     activationKey: string;
     level?: number;
@@ -253,7 +253,9 @@ export interface XsActivationHubPort {
 }
 
 export interface WakeSessionParams {
-  to: string;
+  /** Model tool requires original target. Web may omit it: hub uses the pinned relation,
+   * never a browser-supplied inferred target. */
+  to?: string;
   messageId: string;
   activationKey: string;
   action?: "activate" | "query";
@@ -317,6 +319,7 @@ export function createXsActivationPort(deps: XsActivationPortDeps): XsActivation
         reason,
         retryable: false,
       });
+      if (args.signal?.aborted) return none("refused", "aborted");
       const hub = deps.hub();
       if (hub === undefined || hub.activate === undefined || hub.activateCapable?.() !== true)
         return none("unsupported", "activation_unavailable");
@@ -332,7 +335,7 @@ export function createXsActivationPort(deps: XsActivationPortDeps): XsActivation
       try {
         reply = await hub.activate({
           origin,
-          to: args.to,
+          ...(args.to !== undefined ? { to: args.to } : {}),
           messageId: args.messageId,
           activationKey: args.activationKey,
           ...(level !== undefined ? { level } : {}),

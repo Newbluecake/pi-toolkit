@@ -122,6 +122,8 @@ import {
   XsActivateSchema,
   type XsActivateAckFrame,
   type XsActivateFrame,
+  type XsActivateResWire,
+  type XsProgress,
   XsRequestsStatusSchema,
   type XsRequestsStatusWire,
   XsStateSchema,
@@ -1073,6 +1075,10 @@ export type CmdData =
        *  the page of the session list (never paths/cwd/message text). Not retained in the
        *  agent's command ledger (stripped at settle) nor in any origin notify. */
       sessions?: ResumeSessionsWire;
+      /** P3b typed result over existing command.v1; only the internal fabric action supplies it. */
+      xsActivation?:
+        | XsActivateResWire
+        | { status: "known" | "unavailable" | "unsupported"; messageId: string; progress?: XsProgress };
       /** web-hub-cmd-history plan §4.6 (P0): whether a history card will appear for this call
        *  ("recorded") or not ("none"). Written on the sync reply AND both late channels alike
        *  (the extension `sendLate` payload and the builtin late payload — one CmdData shape

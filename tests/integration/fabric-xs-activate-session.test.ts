@@ -1,3 +1,11 @@
+import { createCommandHandler } from "../../src/web-hub/agent/commands.js";
+import { createBuiltinBridge } from "../../src/web-hub/agent/builtin-bridge.js";
+import { createCommandLedger } from "../../src/web-hub/agent/ledger.js";
+import { createQueueMirror } from "../../src/web-hub/agent/queue-mirror.js";
+import { createCommandRouter } from "../../src/web-hub/hub/commands.js";
+import { createTokenTransport } from "../../src/web-hub/ui/src/transport/token.js";
+import { createPasswordTransport } from "../../src/web-hub/ui/src/transport/password.js";
+import type { CmdFrame } from "../../src/web-hub/protocol/messages.js";
 /** P3 activation end to end (wake_session activation, NOT the tool-surface registration suite
  * `fabric-xs-activation.test.ts`): REAL hub router/relation bag/quota + REAL source & target
  * bridges + two REAL xs stacks + the REAL wake_session tool. Only the pi host is a deterministic
@@ -22,7 +30,7 @@ import { rig } from "../web-hub/hub/xs-fixtures.js";
 
 const A = "sess-aaaaaaaaaaaa",
   B = "sess-bbbbbbbbbbbb";
-const CAPS = ["ev.v1", "xs.v1", "xs.reply.v1", "xs.state.v1", "xs.activate.v1"];
+const CAPS = ["cmd.v1", "command.v1", "ev.v1", "xs.v1", "xs.reply.v1", "xs.state.v1", "xs.activate.v1"];
 const cleanup: Array<() => void> = [];
 beforeEach(() => {
   vi.useFakeTimers();
@@ -39,6 +47,7 @@ afterEach(() => {
     "xs-activation-park",
   ])
     delete (globalThis as Record<symbol, unknown>)[Symbol.for(`pi-subagent:${name}`)];
+  delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:web-hub:cmd-ledger")];
   vi.useRealTimers();
 });
 
@@ -182,7 +191,7 @@ function build() {
     await vi.advanceTimersByTimeAsync(0);
     return out;
   };
-  return { source, target, r, requests, send, call, sourceBridge };
+  return { source, target, r, requests, send, call, sourceBridge, a };
 }
 
 const markers = (h: ReturnType<typeof build>) =>
@@ -289,3 +298,156 @@ describe("P3 wake_session activation — real hub + bridges + stacks", () => {
     expect(markers(h)).toHaveLength(1);
   });
 });
+
+describe.each(["token", "password"] as const)(
+  "P3b %s browser adapter → existing command router → host activation → real xs relay",
+  (mode) => {
+    it("query is pure; manual activate uses the original relation/key once, quota is server-checked", async () => {
+      const h = build();
+      const gate = createCommandRouter({ registry: h.r.registry, log: h.r.log, now: () => Date.now() });
+      const port = createXsActivationPort({
+        hub: () => h.sourceBridge.hubPort(),
+        origin: { current: () => ({ sessionId: A, epoch: h.source.xs.membership.epoch }) },
+        level: { levelOfRoot: () => h.source.level.root },
+      });
+      const native = vi.fn();
+      const pi = {
+        getCommands: () => [{ name: "fabric", source: "extension" }],
+        sendUserMessage: native,
+      } as unknown as ExtensionAPI;
+      const ctx = { isIdle: () => true } as ExtensionContext;
+      const bridge = createBuiltinBridge({ pi, getCtx: () => ctx, getSessionId: () => A, xsActivation: () => port });
+      const handler = createCommandHandler({
+        pi,
+        getCtx: () => ctx,
+        getSessionId: () => A,
+        ledger: createCommandLedger(),
+        queueMirror: createQueueMirror(),
+        compactionState: { manualCompacting: false, dispose() {} },
+        originEntry: { appendOrigin() {}, notify: native, dispose() {} } as never,
+        builtinBridge: bridge,
+        controlEnabled: () => true,
+        now: Date.now,
+        onChanged() {},
+        send: (frame) => h.r.registry.onFrame(h.a.key, frame),
+        setTimer: (ms, fn) => {
+          const timer = setTimeout(fn, ms);
+          timer.unref();
+          return { cancel: () => clearTimeout(timer) };
+        },
+      });
+      cleanup.push(() => handler.dispose());
+      const oldSend = h.a.conn.send;
+      h.a.conn.send = (frame) => {
+        oldSend(frame);
+        if (frame.t === "cmd") handler.handle(frame);
+      };
+      let cmdSeq = 0;
+      const posts: unknown[] = [];
+      // HTTP auth admission is controlled here; the existing real command gateway
+      // stamps origin, checks command caps and idempotency before forwarding.
+      const fetch = async (url: string, init?: { body?: string; headers?: Record<string, string> }) => {
+        expect(url).toBe("/api/cmd");
+        expect(init?.headers?.["X-PWH"]).toBe("1");
+        const body = JSON.parse(init!.body!);
+        posts.push(body);
+        const cmd: CmdFrame = {
+          t: "cmd",
+          rid: `web-${++cmdSeq}`,
+          id: body.id,
+          deadlineMs: 12_000,
+          origin: {
+            listener: mode === "token" ? "loopback" : "lan",
+            ip: "127.0.0.1",
+            reqId: "http-admitted",
+            ...(mode === "password" ? { user: "logged-in-user" } : {}),
+          },
+          cmd: { op: "command", name: body.name, args: body.args, expect: body.expect },
+        };
+        const result = await gate.request(cmd, h.a.key);
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => result };
+      };
+      const deps = {
+        fetch,
+        EventSource: class {},
+        location: { hash: "", pathname: "/", search: "" },
+        history: { replaceState() {} },
+        storage: { getItem: () => null, setItem() {}, removeItem() {} },
+        setTimeout,
+        clearTimeout,
+        now: Date.now,
+        onMessage() {},
+        onConn() {},
+        onAuthEvent() {},
+        onUnauthenticated() {},
+        onSessionInfo() {},
+        onLoginRetry() {},
+      };
+      const transport = mode === "token" ? createTokenTransport(deps as never) : createPasswordTransport(deps as never);
+      const sent = await h.send("original browser body");
+      const request = {
+        agentKey: h.a.key,
+        messageId: sent.track!.messageId,
+        activationKey: sent.track!.activationKey!,
+        expect: { sessionId: A },
+      };
+      const query = await transport.xsActivate!({ ...request, id: "q".repeat(16), action: "query" });
+      expect(query).toMatchObject({
+        ok: true,
+        data: { xsActivation: { status: "known", progress: { phase: "delivered" } } },
+      });
+      expect(markers(h)).toHaveLength(0);
+      const [first, duplicate] = await Promise.all([
+        transport.xsActivate!({ ...request, id: "a".repeat(16), action: "activate" }),
+        transport.xsActivate!({ ...request, id: "b".repeat(16), action: "activate" }),
+      ]);
+      expect(first).toMatchObject({ ok: true, data: { xsActivation: { status: "accepted" } } });
+      expect(duplicate).toMatchObject({ ok: true, data: { xsActivation: { status: "already_active" } } });
+      expect(markers(h)).toHaveLength(1);
+      expect(bodies(h)).toHaveLength(1);
+      expect(
+        h.requests.filter((f) => f.op === "activate").every((f) => f.to === undefined && f.text === undefined),
+      ).toBe(true);
+      const wrong = await transport.xsActivate!({
+        ...request,
+        activationKey: "forged-key",
+        id: "c".repeat(16),
+        action: "activate",
+      });
+      expect(wrong).toMatchObject({ ok: true, data: { xsActivation: { status: "refused", reason: "stale_key" } } });
+      expect(markers(h)).toHaveLength(1);
+      expect(posts).toHaveLength(4);
+      expect(native).not.toHaveBeenCalled();
+      h.target.context();
+      h.target.settle();
+      h.r.clock.t += 60_000;
+      const secondBody = await h.send("fresh second quota probe");
+      const second = await transport.xsActivate!({
+        ...request,
+        messageId: secondBody.track!.messageId,
+        activationKey: secondBody.track!.activationKey!,
+        id: "d".repeat(16),
+        action: "activate",
+      });
+      expect(second).toMatchObject({ ok: true, data: { xsActivation: { status: "accepted" } } });
+      h.target.context();
+      h.target.settle();
+      h.r.clock.t += 60_000;
+      const thirdBody = await h.send("fresh third quota probe");
+      const limited = await transport.xsActivate!({
+        ...request,
+        messageId: thirdBody.track!.messageId,
+        activationKey: thirdBody.track!.activationKey!,
+        id: "e".repeat(16),
+        action: "activate",
+      });
+      expect(limited).toMatchObject({
+        ok: true,
+        data: { xsActivation: { status: "refused", wakeDowngraded: "pair_wake_rate", retryAfterAt: 4_600_000 } },
+      });
+      expect(markers(h)).toHaveLength(2);
+      expect(bodies(h)).toHaveLength(3); // three NEW bodies, never a resend
+      expect(h.requests.filter((f) => f.op === "send")).toHaveLength(3);
+    });
+  },
+);

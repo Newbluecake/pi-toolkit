@@ -128,7 +128,7 @@ export interface XsReplyHubPort extends XsHubPort {
    *  left is NOT `none` (the caller maps it to unknown). */
   activate?(args: {
     origin: XsOriginSnapshot;
-    to: string;
+    to?: string;
     messageId: string;
     activationKey: string;
     level?: number;
@@ -672,7 +672,7 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
    *  left, a deadline/link loss is reported as such — the caller maps it to unknown. */
   const activateRoundTrip = async (args: {
     origin: XsOriginSnapshot;
-    to: string;
+    to?: string;
     messageId: string;
     activationKey: string;
     level?: number;
@@ -688,7 +688,7 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
           rid: newAdminRid(),
           op: "activate",
           origin: { sessionId: args.origin.sessionId, epoch: args.origin.epoch },
-          to: args.to,
+          ...(args.to !== undefined ? { to: args.to } : {}),
           messageId: args.messageId,
           activationKey: args.activationKey,
           ...(args.level !== undefined ? { level: args.level } : {}),
@@ -1183,8 +1183,8 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         // alias-force-default §3.1 (AF3): v2 immediately after v1, declared under the SAME condition.
         ...(al ? [XS_ALIAS_AGENT_CAP, XS_ALIAS_V2_AGENT_CAP] : []),
         // fabric-xs-activation P1: `xs.state.v1` — declared even while local wake is off (the
-        // phase/reason axis explains a downgrade without waking anyone, arch §3.2). The
-        // `xs.activate.v1` half is P3's (wake_session) — never declared here.
+        // phase/reason axis explains a downgrade without waking anyone, arch §3.2).
+        // The separate activate gate below additionally requires local wake enabled.
         ...(act ? [XS_STATE_AGENT_CAP] : []),
         // fabric-xs-activation P3: `xs.activate.v1` — effective ∧ local wake on (the hub may still
         // refuse at policy time; the cap is the schema gate, never authorization).

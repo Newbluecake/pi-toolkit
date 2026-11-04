@@ -361,8 +361,9 @@ end-to-end web path is `tests/integration/fabric-xs-alias-v2.test.ts` ⑤.
 
 The frozen gate is `xsOn ∧ fabric.crossSession.activation.enabled` (default true).
 `fabric/xs/activate.ts` now supplies P1's `activationEnabled` bridge port: main agents
-advertise `xs.state.v1` and emit the hub `activation:true` config key; `xs.activate.v1`
-and `wake_session` registration remain P3's. `/fabric status` consumes both receiver
+advertise `xs.state.v1` and emit the hub `activation:true` config key. P3b registers
+`wake_session` under activationOn; its separate `xs.activate.v1` cap requires frozen
+local wake enabled. Query survives wake-off; activate fails closed on missing caps. `/fabric status` consumes both receiver
 progress and the source mirror; no rows means no added line. B1 runs before the P1
 context observer, including controller-less natural turns.
 
@@ -434,3 +435,39 @@ unchanged default-on fabric/reply/mention/inbox/wake wiring regression suites;
 and actual SDK child/blocking+background nested consumption.
 P2 adds input/message_start/tool_call/tool_result registrations before the existing
 B1 hook; P5 must refresh the declared B-tier governance trace, never A-tier goldens.
+
+## P3b manual activation wiring
+
+`createXsActivationPort` shares the sender's exact live source/epoch and current root
+causal level. `XS_ACTIVATION_TOOL_NAMES` is a separate opt-in collision set; legacy
+`XS_MAIN_TOOL_NAMES` stays unchanged. `/fabric status` adds an activation ready/off
+line only while activation is on. Children/secure/off do not get a new tool.
+
+Both browser transports implement `xsActivate` over the EXISTING authenticated
+`/api/cmd` command.v1 path: `fabric __xs {action,messageId,activationKey?}`. No new
+HTTP endpoint/op/CSRF exception. The internal handler validates bounded exact JSON,
+checks current session and fabric allow/confirm/deny policy before looking up the
+port, refuses Feishu, and directly calls the host port — never sends model input,
+resends body, signs a human grant or records raw key args in command history.
+Web omits target: the hub's already pinned relation selects it and revalidates
+source/caps/key/current policy/delivery/claim/quotas. The model tool still requires
+the original target in its unchanged schema. Query is strictly receipt-only; a miss
+never activates. New activate thenables are bounded and timeout/rejection is cached
+unknown/query-only, never retryable none; resume/read semantics remain unchanged.
+
+P3b also makes the formerly dormant UI action surface safe: query/activate have
+separate action-aware singleflights; server control-attempt outcomes are retained
+in the existing bounded session/key-scoped seed store, separately from body phase,
+revision and first wake-stop evidence. Unknown/accepted/already_active only offer
+query, quota backoff comes only from the server, and stale/wrong-session/key results
+are ignored. These local hints are non-persistent and NEVER authorization; refresh
+still relies on the hub's message-level tombstone to prevent another charge/wake.
+No lifecycle/status/reconnect event executes an action.
+
+Receipt/activate audit uses the existing key whitelist/order, with no body/key/
+controller token. The inherited pending audit op union is retained because P3 router
+calls already require it. The declared B-tier trace update is only wake_session in
+main-all-on and thread-main, counts +1; child/off/secure and phase2 traces unchanged.
+Tests: `tests/web-hub/agent/xs-web-command.test.ts`, bridge/transport/UI xs suites,
+`tests/integration/fabric-xs-activate-session.test.ts` (real command router + xs
+relay/bridges/stacks, controlled HTTP-auth admission, both token/password adapters).

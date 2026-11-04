@@ -1,3 +1,4 @@
+import { xsWebCommandArgs } from "@protocol/xs-web-command.js";
 /**
  * Password-mode (LAN) `HubTransport`/`PasswordTransport` adapter (vue-plan.md v2.1 §3.4, §5.2 —
  * P1). A thin wrapper around `@logic/password-client.js`'s `createPasswordClient` — never
@@ -166,6 +167,15 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
     runPage: <T = unknown>(agentKey: string, runId: string, before: string, limit?: number) =>
       client.runPage(agentKey, runId, before, limit) as Promise<RunPageResult<T>>,
     command: (req) => client.command(req) as Promise<CmdOutcome>,
+    xsActivate: (req) =>
+      client.command({
+        agentKey: req.agentKey,
+        id: req.id,
+        op: "command",
+        name: "fabric",
+        args: xsWebCommandArgs(req),
+        ...(req.expect ? { expect: req.expect } : {}),
+      }) as Promise<CmdOutcome>,
     dialog: (req) => client.dialog(req) as Promise<CmdOutcome>,
     login: (username, password) => client.login(username, password),
     submitSecondFactor: (body) => client.submitSecondFactor(body),

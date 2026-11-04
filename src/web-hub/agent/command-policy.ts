@@ -124,6 +124,7 @@ type SubPolicyFn = (tokens: readonly string[]) => PolicyDecision;
 const FABRIC_KNOWN_SUBS: ReadonlySet<string> = new Set([
   "replies",
   "status",
+  "__xs", // P3b internal key-only activate/query; the fabric override still governs it.
   "channels", // channel-plan §6.3 (CH3): read-only listing; baseline allow, subject to the `fabric` whole-name override
   "blocks",
   "join",

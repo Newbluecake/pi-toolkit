@@ -1,3 +1,5 @@
+import type { XsActivationPort } from "../../fabric/xs/session-activation.js";
+import { isXsWebCommand, parseXsWebAction } from "../protocol/xs-web-command.js";
 /**
  * §4.6 web slash-command execution pipeline (plan control-plan.md §4.6/§4.9, package C11).
  *
@@ -36,12 +38,12 @@ import type { CmdRecordNotice, CmdRecordState } from "../protocol/cmd-record.js"
 import { isFeishuCmdOrigin, type CmdOrigin } from "../protocol/messages.js";
 
 export interface BuiltinBridge {
-  /** web-resume plan §2.4: may return a Promise ONLY for the `resume __list` read path — every
+  /** web-resume plan §2.4: may return a Promise for `resume __list` or the bounded P3b internal xs action — every
    *  other op stays a plain synchronous result (pinned by commands.test.ts; R4). The caller
    *  (`commands.ts handleCommand`) races a thenable against the frame deadline. */
   execute(frame: CmdFrame): CmdResultBody | Promise<CmdResultBody>;
-  /** web-resume plan §2.4: `true` for the `resume __list` read — the caller stores the ledger
-   *  result with `data.sessions` stripped and writes NO origin notify for it. */
+  /** Quiet for resume __list and internal xs actions: no origin notify/model input.
+   * Resume lists additionally have data.sessions stripped from the ledger. */
   isQuiet(frame: CmdFrame): boolean;
 }
 
@@ -85,6 +87,8 @@ export interface BuiltinBridgeDeps {
   /** web-hub-cmd-history §5.2: `/new` threads the frame's cmdId so internalExec can write the
    *  card at the real execution point (`consumeNew` hands it back). */
   armExec?(op: string, cmdId?: string): string | undefined;
+  /** P3b internal action, policy-gated before lookup; no prompt/tool-model execution. */
+  xsActivation?(): XsActivationPort | undefined;
   /** web-resume plan §2.4/§2.5: the `resume` builtin's two web subcommand forms. Called only
    *  after policy already allowed `__list`/`__pick` (everything else about `resume` is deny,
    * §2.7). `__list` may settle as a Promise (bounded read); `__pick` is fully synchronous. */
@@ -651,6 +655,27 @@ export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge
         const kind = classified.kind === "skill" ? "template" : classified.kind;
         return errResult("E_CONFIRM_REQUIRED", false, "none", confirmMessage(cmd.name, cmd.args, kind));
       }
+      if (classified.kind === "extension" && isXsWebCommand(cmd.name, cmd.args)) {
+        if (isFeishuCmdOrigin(frame.origin)) return errResult("E_COMMAND_DENIED", false, "none");
+        const action = parseXsWebAction(cmd.args);
+        if (!action) return errResult("E_BAD_REQUEST", false, "none", "invalid xs action");
+        if (frame.deadlineMs <= 300) return errResult("E_DEADLINE", true, "none");
+        const port = deps.xsActivation?.();
+        if (!port) return errResult("E_UNSUPPORTED", false, "none");
+        try {
+          const result =
+            action.action === "query"
+              ? port.query(action)
+              : port.activate({ ...action, activationKey: action.activationKey! });
+          return Promise.resolve(result).then((xsActivation) => ({
+            ok: true as const,
+            data: { op: "command" as const, kind: "builtin" as const, completion: "sync" as const, xsActivation },
+          }));
+        } catch (error) {
+          // A synchronous post-call throw is just as uncertain as a rejected promise.
+          return Promise.reject(error);
+        }
+      }
       switch (classified.kind) {
         case "template":
         case "skill":
@@ -663,7 +688,7 @@ export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge
     },
     isQuiet(frame: CmdFrame): boolean {
       const cmd = commandArgs(frame);
-      return cmd !== undefined && isResumeListArgs(cmd);
+      return cmd !== undefined && (isResumeListArgs(cmd) || isXsWebCommand(cmd.name, cmd.args));
     },
   };
 }

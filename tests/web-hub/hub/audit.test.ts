@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   auditAdmin,
+  auditXs,
+  XS_AUDIT_KEYS,
   auditControl,
   auditPreview,
   auditWorktreeDiff,
@@ -732,5 +734,33 @@ describe("auditWorktreeGraph (merged-plan §3.7: append-only count keys)", () =>
     const log = memLog();
     auditWorktreeGraph(log, { phase: "graph", ok: true, commits: 3 });
     expect(log.lines[0]!.data).toEqual({ audit: "wtgraph", phase: "graph", ok: true, commits: 3 });
+  });
+});
+
+describe("P3 receipt/activate audit uses existing sanitized key whitelist", () => {
+  it.each(["receipt", "activate"] as const)("op=%s emits no body/key/token even when smuggled", (op) => {
+    const log = memLog();
+    auditXs(log, {
+      op,
+      xid: "original-id",
+      fromSession: "session-source",
+      toSession: "session-target",
+      outcome: "none",
+      reason: "refused",
+      activationKey: "secret-key",
+      wakeToken: "secret-token",
+      text: "secret-body",
+    } as never);
+    expect(log.lines[0]!.data).toEqual({
+      audit: "xs",
+      op,
+      xid: "original-id",
+      fromSession: "session-",
+      toSession: "session-",
+      outcome: "none",
+      reason: "refused",
+    });
+    expect(XS_AUDIT_KEYS).not.toContain("activationKey");
+    expect(JSON.stringify(log.lines)).not.toContain("secret");
   });
 });

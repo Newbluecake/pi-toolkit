@@ -83,10 +83,9 @@ export interface CmdRequest {
 /** fabric-xs-activation plan §3 P4: the browser's activate/query action frame. `activate`
  *  NEVER carries text (U6) — it targets an already-delivered messageId bound to its original
  *  activationKey; `query` is strictly read-only. Optional per the frozen-transport
- *  convention (test fakes / future transports may omit it): NO real adapter implements it
- *  yet (the hub-side HTTP surface lands with the wake_session package), so the UI's activate
- *  button — which also gates on this surface — can never render against a live tree until
- *  then. Tests fake it to verify the enabled state; nothing ever auto-fires it. */
+ *  convention (test fakes / future transports may omit it). Both real adapters reuse
+ *  command.v1 /api/cmd with the internal fabric action; server policy/caps/key/eligibility
+ *  are rechecked, and no body is resent. Nothing ever auto-fires it. */
 export interface XsActivateRequest {
   agentKey: string;
   id: string;

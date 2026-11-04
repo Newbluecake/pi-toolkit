@@ -1,3 +1,5 @@
+import { createXsActivationPort, type XsActivationPort } from "./session-activation.js";
+import { createWakeSessionTool, WakeSessionParams } from "../../tools/wake-session-tool.js";
 import { createHumanRuntime, type HumanRuntime } from "../../runtime/human-runtime.js";
 import { createHumanGrantHost, getHumanGrantPort } from "./human-grant.js";
 import { XS_STATE_HUB_CAP } from "../../web-hub/protocol/xs-activation.js";
@@ -78,7 +80,7 @@ export interface XsActivation {
   /** session_start after `holder.current = stack`: id, inbox re-render, attached flag, tool-collision scan. */
   attach(stack: Stack, ctx: ExtensionContext, pi: ExtensionAPI, nextSessionId: string | undefined): void;
   /** `{ xs }` slot of the wireWebHub deps (empty object when xs is off). */
-  webHubDeps(): Pick<WebHubDeps, "xs">;
+  webHubDeps(): Pick<WebHubDeps, "xs" | "xsActivation">;
 }
 
 /**
@@ -94,6 +96,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     webHub: { enabled: settings.webHub.enabled, control: settings.webHub.control !== false },
   }); // frozen per activate: tools/caps/stack all share this gate
   const activationOn = xsEnabled && settings.fabric.crossSession.activation.enabled;
+  const activateOn = activationOn && settings.fabric.wake.enabled;
   const humanGrants = activationOn ? getHumanGrantPort() : undefined;
   let humanRuntime: HumanRuntime | undefined;
   const humanHost = activationOn
@@ -161,6 +164,19 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
 
   // Reply-plan §9 (MW): the @session port reuses the SAME sender instance as the tools.
   let xsSender: XsSender | undefined;
+  const xsOrigin = {
+    current: () => {
+      const xs = xsAttached ? holder.current?.xs : undefined;
+      return xs ? { sessionId: xs.sessionId(), epoch: xs.membership.epoch } : undefined;
+    },
+  };
+  const xsActivation: XsActivationPort | undefined = activationOn
+    ? createXsActivationPort({
+        hub: () => webHubRef.current?.xs?.hubPort(),
+        origin: xsOrigin,
+        level: { levelOfRoot: () => holder.current?.wake?.level.root ?? 0 },
+      })
+    : undefined;
   // Channel-plan §2.3 (CHW): live probe — local channels on ∧ live link ∧ the hub declared xs.channel.v1.
   const xsHubChannelCap = (): boolean => webHubRef.current?.xs?.hubPort().hubChannelCap?.() === true;
   // Alias-plan §3.6 (ALW): live probe — local alias on ∧ live link ∧ the hub declared xs.alias.v1 (AL3's state).
@@ -353,12 +369,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
               }
             : {}),
         },
-        origin: {
-          current: () => {
-            const xs = xsAttached ? holder.current?.xs : undefined;
-            return xs ? { sessionId: xs.sessionId(), epoch: xs.membership.epoch } : undefined;
-          },
-        },
+        origin: xsOrigin,
         maxChars: settings.fabric.maxChars,
         ...(humanGrants ? { activation: true, humanGrants } : {}),
         ...(replyEnabled
@@ -405,6 +416,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
           ...(threadRebindOn ? { threadRebind: true } : {}),
         }),
       );
+      if (xsActivation) pi.registerTool(createWakeSessionTool({ port: xsActivation }));
       // Channel-plan §6.1 (CHW): main session only (this whole block is post-guard), xsOn ∧ channels.enabled.
       if (channelsOn) pi.registerTool(createMessageChannelTool({ sender }));
       const command = createFabricXsCommand({
@@ -510,6 +522,9 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
           return {
             capability: xsCapability.state,
             lines: [
+              ...(activationOn
+                ? [`activation ${webHubRef.current?.xs?.hubPort().activateCapable?.() === true ? "ready" : "off"}`]
+                : []),
               ...(quota
                 ? [`in ${quota.recvUsed}/${quota.recvCap} h · wakes ${quota.wakesUsed}/${quota.wakesCap} h`]
                 : []),
@@ -682,6 +697,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
           ["list_sessions", listSessionsParamsFor(channelsOn)],
           ["message_session", messageSessionParamsFor(replyEnabled)],
           ...(channelsOn ? ([["message_channel", MessageChannelParams]] as const) : []),
+          ...(activationOn ? ([["wake_session", WakeSessionParams]] as const) : []),
         ]);
         xsCollisions = detectXsToolCollisions(
           pi
@@ -690,7 +706,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
               (tool) => !own.has(tool.name) || JSON.stringify(tool.parameters) !== JSON.stringify(own.get(tool.name)),
             )
             .map((tool) => tool.name),
-          { channels: channelsOn },
+          { channels: channelsOn, activation: activationOn },
         );
         if (xsCollisions.length) console.warn(`[pi-subagent] fabric xs tool collisions: ${xsCollisions.join(", ")}`);
       } catch {
@@ -699,9 +715,10 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     }
   }
 
-  function webHubDeps(): Pick<WebHubDeps, "xs"> {
+  function webHubDeps(): Pick<WebHubDeps, "xs" | "xsActivation"> {
     return xsEnabled
       ? {
+          ...(xsActivation ? { xsActivation: () => xsActivation } : {}),
           xs: {
             stack: () => (xsAttached ? holder.current?.xs : undefined),
             // Channel-plan §3.2/§6.4 (CHW): the three broadcast keys ride along only when channels are on;
@@ -718,7 +735,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
             hubSendsPerMin: () => settings.fabric.crossSession.limits.hubSendsPerMin,
             // Reply-plan §5.1: frozen per activate (non-live, §8.1); unset ⇒ pre-reply byte shape.
             replyEnabled: () => replyEnabled,
-            ...(activationOn ? { activationEnabled: () => true } : {}),
+            ...(activationOn ? { activationEnabled: () => true, activateEnabled: () => activateOn } : {}),
             // Channel-plan §3.1 (CHW): agent cap `xs.channel.v1` + hub-global broadcast params.
             channelsEnabled: () => channelsOn,
             channelsHubConfig: () => ({

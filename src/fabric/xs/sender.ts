@@ -324,6 +324,8 @@ export const XS_MAIN_TOOL_NAMES = ["list_sessions", "message_session"] as const;
 /** Channel-plan §6.1: the third main-session tool, registered by CHW only when `xsOn ∧ channels.enabled`.
  *  Kept separate from `XS_MAIN_TOOL_NAMES` so the channels-off collision set is unchanged. */
 export const XS_CHANNEL_TOOL_NAME = "message_channel";
+/** P3: separate activation surface; the legacy main collision set is frozen. */
+export const XS_ACTIVATION_TOOL_NAMES = ["wake_session"] as const;
 
 /**
  * §4.3/#12: detect another source already registering a same-named tool at `session_start`.
@@ -333,13 +335,13 @@ export const XS_CHANNEL_TOOL_NAME = "message_channel";
  */
 export function detectXsToolCollisions(
   existing: readonly string[] | undefined,
-  opts?: { channels?: boolean },
+  opts?: { channels?: boolean; activation?: boolean },
 ): string[] {
   if (!existing) return [];
   const have = new Set(existing);
   const names: readonly string[] =
     opts?.channels === true ? [...XS_MAIN_TOOL_NAMES, XS_CHANNEL_TOOL_NAME] : XS_MAIN_TOOL_NAMES;
-  return names.filter((n) => have.has(n));
+  return [...names, ...(opts?.activation === true ? XS_ACTIVATION_TOOL_NAMES : [])].filter((n) => have.has(n));
 }
 
 // ----------------------------------------------------------------- sender

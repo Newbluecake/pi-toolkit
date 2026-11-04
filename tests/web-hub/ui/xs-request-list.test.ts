@@ -197,24 +197,26 @@ describe("createControl.xsActivate (singleflight per business key)", () => {
     await Promise.all([p1, p2]);
   });
 
-  it("query/activate share the business-key singleflight (one op per key at a time)", async () => {
+  it("query/activate have distinct singleflights, so a query never gets an activate outcome", async () => {
     const frames: Req[] = [];
-    let release: ((o: CmdOutcome) => void) | undefined;
+    const release: Array<(o: CmdOutcome) => void> = [];
     const handle = createControl(
       fakeTransport(
         (req) =>
           new Promise<CmdOutcome>((resolve) => {
             frames.push(req);
-            release = resolve;
+            release.push(resolve);
           }),
       ) as never,
       () => {},
     );
     const a = handle.xsActivate!("a1", { action: "activate", messageId: "m1", activationKey: "k1" });
     const q = handle.xsActivate!("a1", { action: "query", messageId: "m1", activationKey: "k1" });
-    expect(q).toBe(a);
-    expect(frames.length).toBe(1);
-    release!({ ok: true });
-    await a;
+    expect(q).not.toBe(a);
+    expect(frames.map((f) => f.action)).toEqual(["activate", "query"]);
+    release[0]!({ ok: true, data: { status: "accepted" } });
+    release[1]!({ ok: true, data: { status: "known" } });
+    await expect(a).resolves.toMatchObject({ data: { status: "accepted" } });
+    await expect(q).resolves.toMatchObject({ data: { status: "known" } });
   });
 });
