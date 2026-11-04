@@ -36,7 +36,6 @@ import type { HubConfig, HubLanConfig } from "../hub/ports.js";
 import type { ScheduleWebHubPort } from "../../schedule/agent/coordinator.js";
 import {
   SCHED_AGENT_CAPS,
-  SCHED_CONFIRM_CAP,
   SCHED_HUB_CAP,
   type SchedDecideFrame,
   type SchedReceiptsFrame,
@@ -1370,14 +1369,6 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const schedulePort = deps.schedule;
   schedulePort?.bindLink({
     ready: () => conn?.status().state === "live" && (conn?.caps.includes(SCHED_HUB_CAP) ?? false),
-    // #61 C2: the confirm channel needs the hub's sched.confirm.v1 on top of sched.v1 (the hub
-    // advertises it iff HubConfig.schedule exists); absent ⇒ the coordinator drops sched_offers
-    // and confirm falls back to TUI-only, zero new frames on the wire.
-    confirmReady: () => {
-      const c = conn;
-      if (c === undefined || c.status().state !== "live") return false;
-      return c.caps.includes(SCHED_HUB_CAP) && c.caps.includes(SCHED_CONFIRM_CAP);
-    },
     send: (frame) => conn?.send(frame),
   });
   const binding: BindingPort = {
@@ -1706,7 +1697,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     if (xsBridge !== undefined) caps.push(...xsBridge.caps());
     // scheduled-reports A0 (§10.1) + #61 C2 (sched.confirm.v1): tail-appended, only while the
     // schedule router exists.
-    if (schedulePort !== undefined) caps.push(...SCHED_AGENT_CAPS, SCHED_CONFIRM_CAP);
+    if (schedulePort !== undefined) caps.push(...SCHED_AGENT_CAPS);
     // fabric-thread arch r3 §7.1 (P3): the agent-side `thr.v1` cap — `fabric.enabled ∧
     // fabric.threads.enabled ∧ 非 secure`, computed at ACTIVATE level by src/index.ts
     // (secure domains force threads off in the settings parser already, D8/I11). Tail-appended

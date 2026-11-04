@@ -386,19 +386,6 @@ export function defHash(task: ScheduleTask): string {
 }
 
 /**
- * @deprecated approval was removed (schedule-auto-approve r2); no agent-side caller remains. The hub still
- * imports it until package H lands; package F deletes it. Legacy ledger `approval` fields are tolerated, never read for decisions.
- */
-export function isApproved(task: ScheduleTask): boolean {
-  return task.approval !== undefined && task.approval.hash === defHash(task);
-}
-
-/** @deprecated see {@link isApproved}. */
-export function isPendingApproval(task: ScheduleTask): boolean {
-  return !isApproved(task);
-}
-
-/**
  * Executable ⇔ `enabled`. Approval was removed (schedule-auto-approve r2): a legacy ledger's `approval`
  * field is tolerated and ignored (never read here, never written, never stripped).
  */

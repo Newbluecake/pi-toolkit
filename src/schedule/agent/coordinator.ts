@@ -32,9 +32,6 @@ import type {
 export interface SchedHubLink {
   /** Live link AND the hub advertised `sched.v1` in its latest hello_ack. */
   ready(): boolean;
-  /** @deprecated schedule-auto-approve r2: nothing reads it any more (package F deletes it with its
-   *  `web-hub/agent/index.ts` implementation). */
-  confirmReady?(): boolean;
   send(frame: SchedAgentFrame): void;
 }
 
