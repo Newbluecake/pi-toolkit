@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -193,38 +193,54 @@ describe("schedule surface — OFF (default)", () => {
 
 describe("schedule surface — ON", () => {
   it("tool creates a task (active at once) → section line in the system prompt, status bar token, cleared on shutdown", async () => {
-    writeSettings({ ...baseline, schedule: { enabled: true, dir: join(fakeHome, "sched-live") } });
-    const h = fakePi();
-    activate(h.pi);
-    const statuses: Array<[string, string | undefined]> = [];
-    const ctx = ctxOf(statuses);
-    await emit(h, "session_start", { type: "session_start", reason: "startup" }, ctx);
-    const empty = await systemPromptFor(h, ctx);
-    expect(empty).not.toContain("Scheduled tasks");
+    // The next-run label is wall-clock dependent (status.ts nextLabel: same calendar day in the
+    // task's tz ⇒ "HH:mm", otherwise "MM-DD HH:mm"), so pin the clock or the assertion only holds
+    // outside 00:00–07:59 Asia/Shanghai. Only Date is faked — systemClock.now() is Date.now(), and
+    // every real timer (status refresh, executors) keeps working, so nothing can hang on a mock.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // 2026-01-01T00:30Z = 08:30 in Asia/Shanghai ⇒ the daily 08:00 occurrence is tomorrow.
+      vi.setSystemTime(Date.UTC(2026, 0, 1, 0, 30, 0));
+      writeSettings({ ...baseline, schedule: { enabled: true, dir: join(fakeHome, "sched-live") } });
+      const h = fakePi();
+      activate(h.pi);
+      const statuses: Array<[string, string | undefined]> = [];
+      const ctx = ctxOf(statuses);
+      await emit(h, "session_start", { type: "session_start", reason: "startup" }, ctx);
+      const empty = await systemPromptFor(h, ctx);
+      expect(empty).not.toContain("Scheduled tasks");
 
-    const tool = h.tools.get("schedule");
-    const r = await tool.execute(
-      "c1",
-      { action: "create", name: "daily", cron: "0 8 * * *", tz: "Asia/Shanghai", prompt: "summarize" },
-      undefined,
-      undefined,
-      ctx,
-    );
-    expect(r.details).toEqual({ ok: true, id: r.details.id });
+      const tool = h.tools.get("schedule");
+      const r = await tool.execute(
+        "c1",
+        { action: "create", name: "daily", cron: "0 8 * * *", tz: "Asia/Shanghai", prompt: "summarize" },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(r.details).toEqual({ ok: true, id: r.details.id });
 
-    // status bar refreshes on the next turn_start
-    await emit(h, "turn_start", { type: "turn_start", turnIndex: 0, timestamp: 0 }, ctx);
-    const sched = () => statuses.filter(([k]) => k === "pi-subagent:schedule");
-    expect(sched().at(-1)?.[0]).toBe("pi-subagent:schedule");
-    expect(sched().at(-1)?.[1]).toMatch(/^sched 1 · next \S+ \S+$/); // armed at once; never a `pending` segment
-    expect(sched().at(-1)?.[1]).not.toMatch(/pending/);
+      // status bar refreshes on the next turn_start
+      await emit(h, "turn_start", { type: "turn_start", turnIndex: 0, timestamp: 0 }, ctx);
+      const sched = () => statuses.filter(([k]) => k === "pi-subagent:schedule");
+      expect(sched().at(-1)?.[0]).toBe("pi-subagent:schedule");
+      expect(sched().at(-1)?.[1]).toBe("sched 1 · next 01-02 08:00"); // armed at once; never a `pending` segment
+      expect(sched().at(-1)?.[1]).not.toMatch(/pending/);
 
-    // the frozen system prompt does not change mid-session; the definition arrives as a tail message
-    const same = await systemPromptFor(h, ctx);
-    expect(same).toBe(empty);
+      // same-day branch: 2026-01-01T22:30Z = 06:30 Jan 2 in Asia/Shanghai ⇒ today's 08:00, time only
+      vi.setSystemTime(Date.UTC(2026, 0, 1, 22, 30, 0));
+      await emit(h, "turn_start", { type: "turn_start", turnIndex: 1, timestamp: 1 }, ctx);
+      expect(sched().at(-1)?.[1]).toBe("sched 1 · next 08:00");
 
-    await emit(h, "session_shutdown", { type: "session_shutdown" }, ctx);
-    expect(sched().at(-1)).toEqual(["pi-subagent:schedule", undefined]);
+      // the frozen system prompt does not change mid-session; the definition arrives as a tail message
+      const same = await systemPromptFor(h, ctx);
+      expect(same).toBe(empty);
+
+      await emit(h, "session_shutdown", { type: "session_shutdown" }, ctx);
+      expect(sched().at(-1)).toEqual(["pi-subagent:schedule", undefined]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a NEW session (cold start) with a task on disk shows it in the system prompt; a different session id does not", async () => {
