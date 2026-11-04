@@ -51,7 +51,7 @@
 
 `webHub.spawn.enabled`（默认 `false`；仅 Linux，不满足平台探测时失败即关闭）：由 hub 自己在你选定的目录里拉起 `pi --mode rpc` 子进程，网页上就能新建会话。
 
-- 准入范围：已知目录 ∪ `webHub.spawn.roots`；默认只允许本机回环访问（`spawn.lan`：`off` / `known` / `roots`）。限额：`maxProcesses` 4、`maxPerPrincipal` 2、`ratePerMinute` 3、`maxLifetimeMinutes` 720。
+- 准入范围：已知目录 ∪ `webHub.spawn.roots`；默认只允许本机回环访问（`spawn.lan`：`off` / `known` / `roots`）。限额：`maxProcesses` 10、`maxPerPrincipal` 10、`ratePerMinute` 3、`maxLifetimeMinutes` 720（两个进程上限都需通过；回环访问同属一个 principal，故实际按两者较小值生效）。
 - **跨 hub 重启恢复**（`spawn.restore`，默认 `true`）：hub 优雅重启或崩溃后，把可恢复的托管会话在新 hub 下重新拉起（同一 spawnId，`--session` 指向原会话文件）。`/webhub stop` 会留下一次性否决，重启时清除。
 - **重新启动离线会话**：点击已离线、属于托管记录的会话卡片，通过同一套恢复流程重新拉起；死亡未被确认时拒绝（409），不会出现两份进程。
 - **会话历史**（`spawn.history`，默认 `true`）：浏览 agent 目录下所有历史会话，原地续接或从快照 fork；占用检查是尽力而为，UI 底部披露了已知窗口。

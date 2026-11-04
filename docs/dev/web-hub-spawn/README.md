@@ -21,7 +21,8 @@ session-open fork confirm is a real decision and never skipped); the waiting sta
 on the sidebar SpawnRow (the picker closes on `awaiting`). SP13's
 `tests/integration/web-hub-headless.test.ts` (H1–H8 hard gates, real hub
 child processes + `fixtures/fake-rpc-pi.mjs`) and `tests/conformance/rpc-spawn.test.ts` (real pi) are the
-S1 merge gates — design: `docs/dev/web-hub-spawn/{arch,plan,acceptance}.md`.
+S1 merge gates — design: `docs/dev/web-hub-spawn/{arch,plan,acceptance}.md`. 出厂默认 2026-11-04 起
+`maxProcesses=10, maxPerPrincipal=10`（原 4/2，见 arch §6.2 表）。
 
 ## Created dirs
 

@@ -57,8 +57,8 @@ describe("web-hub settings", () => {
       spawn: {
         enabled: false,
         roots: [],
-        maxProcesses: 4,
-        maxPerPrincipal: 2,
+        maxProcesses: 10,
+        maxPerPrincipal: 10,
         ratePerMinute: 3,
         maxLifetimeMinutes: 720,
         registerTimeoutS: 30,
@@ -622,8 +622,8 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
     expect(spawnDefaults).toEqual({
       enabled: false,
       roots: [],
-      maxProcesses: 4,
-      maxPerPrincipal: 2,
+      maxProcesses: 10,
+      maxPerPrincipal: 10,
       ratePerMinute: 3,
       maxLifetimeMinutes: 720,
       registerTimeoutS: 30,
@@ -828,7 +828,7 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
     });
     // defaults surfaced in the editor (csv array → joined string)
     expect(defaultOf(SETTING_SPECS["webHub.spawn.roots"]!)).toBe("");
-    expect(defaultOf(SETTING_SPECS["webHub.spawn.maxProcesses"]!)).toBe(4);
+    expect(defaultOf(SETTING_SPECS["webHub.spawn.maxProcesses"]!)).toBe(10);
     expect(defaultOf(SETTING_SPECS["webHub.spawn.lan"]!)).toBe("off");
     // every description notes the /reload + /webhub restart dance (plan §SP2)
     for (const key of keys) {

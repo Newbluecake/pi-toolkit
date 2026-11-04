@@ -244,6 +244,7 @@
     ["fabric.wake.resumesPerTargetPerHour", "4a16b7ab6dfe8bbfd9b377bd12cdc593c46c71f0db406ddfda5bf774cf103801"],
     ["fabric.wake.parkCapPerTarget", "3e33617194d0cc155146c56be98411ea4c40fda7eece1070e54ea0246d71bf2a"],
     ["fabric.crossSession.alias.autoFromCwd", "df7505be55bc5f56fb23952f4fa61c73d61f17f4ef852e500f9977e885b5316c"],
+    ["fabric.crossSession.activation.enabled", "47a31d1a3fef95a9dbd60a5a8c48580ff3c36fac4d628966f2eb9412aec62a75"],
     ["goal.enabled", "303485501709fe6021f6b7e7cb430a853aee960ce84563096da8033af77e0900"],
     ["goal.maxTurns", "f7942010579fd27776a0122c4ea1e77108e741ff17de823a68e4ac5fa9936081"],
     ["goal.maxMinutes", "d96f497eb393ef36b05196803c6a29d9292cd49cf2f339849b1538a6a659b844"],
@@ -337,5 +338,5 @@
     ["schedule.defaultTimeoutS", "0c0a7cec1b640196d1236428b689372d961cbced729c6999200c31e29e442b30"],
     ["schedule.maxTimeoutS", "6c538e3100c646f3a64116ead976a485bc27e4fdb9e550349c75e420ec30fce3"]
   ],
-  "all": "11c439d0334afe370bc9681b327f85c7393a415b82d1fe5661561a7a6050ab91"
+  "all": "178fc6b3c388bee8b06c67b8f9896c195d0769b2c983bf4917012b0b1912be5b"
 }

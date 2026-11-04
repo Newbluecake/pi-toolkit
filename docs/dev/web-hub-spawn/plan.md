@@ -43,7 +43,7 @@
 | 编排     | 意图落盘 → cwd 钉住 → fork → pid+身份落盘 → reaper track → `spawn` 事件（5s）→ hello（pid ∧ cwd 匹配）→ session → `live` → 首条消息；`registerTimeoutS` 统一约束到 live                            |
 | 孤儿     | L1 意图先落盘；L2 reaper 看守；L3 hub 任意死亡后 ≤12s 消失（含 hub 永不重启）；L4 双重失效下次启动兜底；L5 发信号前核验身份                                                                        |
 | 类型     | supervisor / first-prompt / routes 只依赖 `hub/spawn/ports.ts` 的 `Pick<…>` 端口，零 `as`                                                                                                          |
-| 设置     | `webHub.spawn.{enabled=false, roots=[], maxProcesses=4, maxPerPrincipal=2, ratePerMinute=3, maxLifetimeMinutes=720, registerTimeoutS=30, lan="off"}`                                               |
+| 设置     | `webHub.spawn.{enabled=false, roots=[], maxProcesses=10, maxPerPrincipal=10, ratePerMinute=3, maxLifetimeMinutes=720, registerTimeoutS=30, lan="off"}`                                             |
 | 合入顺序 | upload → spawn → fleet（§2.3）                                                                                                                                                                     |
 
 ## 1. 文件域总表（S1）

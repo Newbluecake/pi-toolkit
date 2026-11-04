@@ -105,8 +105,8 @@ export const DEFAULT_FEISHU_BOT_SETTINGS: FeishuBotSettings = {
 export const DEFAULT_WEBHUB_SPAWN_SETTINGS: WebHubSpawnSettings = {
   enabled: false,
   roots: [],
-  maxProcesses: 4,
-  maxPerPrincipal: 2,
+  maxProcesses: 10,
+  maxPerPrincipal: 10,
   ratePerMinute: 3,
   maxLifetimeMinutes: 720,
   registerTimeoutS: 30,
