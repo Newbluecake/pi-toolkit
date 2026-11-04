@@ -618,6 +618,12 @@
       "on(agent_settled)",
       "registerCommand(webhub)",
       "on(input)",
+      "on(agent_settled)",
+      "on(session_start)",
+      "on(session_shutdown)",
+      "registerMessageRenderer(subagent:reflex)",
+      "registerCommand(reflex)",
+      "on(input)",
       "on(agent_start)",
       "on(session_before_compact)",
       "on(session_compact)",
@@ -626,7 +632,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 248,
+    "count": 254,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",

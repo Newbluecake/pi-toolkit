@@ -4,7 +4,7 @@
  *
  * `max` turns on every switch that can run offline: fabric + wake + xs (reply / channels / alias),
  * compact (switchTool + keepCompactTool), bashJobs, extend, workflow, load, quota, cacheTtl keepalive,
- * schedule, topicSwitch, askUser, todo (nudge), memory, webSearch, title, hud, sessionNav and
+ * schedule, topicSwitch, reflex, askUser, todo (nudge), memory, webSearch, title, hud, sessionNav and
  * `webHub.enabled` with `autoStart:false`. Left out on purpose: feishuNotify / feishuBot / traffic /
  * externalAgents.droid (need credentials, a database or a droid binary; secure-domain D8 forces several of
  * them off anyway). tests/setup/sandbox-home.ts turns any real socket / child-process attempt into a test failure.
@@ -60,6 +60,7 @@ export const PROFILES: Record<
       sessionNav: { enabled: true },
       feishuNotify: { enabled: false },
       webHub: { enabled: true, autoStart: false },
+      reflex: { enabled: true },
     },
     phase2: true,
   },

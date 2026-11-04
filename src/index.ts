@@ -97,6 +97,8 @@ import { createReloadCommandPort } from "./reload/command-port.js";
 import { countActiveRuns, type DeferredReloadController } from "./reload/defer.js";
 import type { AskUserRemotePort } from "./ask-user/remote.js";
 import { wireTopicSwitch } from "./topic-switch/wire.js";
+import { wireReflex } from "./reflex/wire.js";
+import { createGitRunner } from "./git/run.js";
 import type { PromptGatePort } from "./web-hub/agent/prompt-gate.js";
 import { createLoadHintHook, createLoadHintState } from "./sysload/hook.js";
 
@@ -1163,6 +1165,31 @@ export default function activate(rawPi: ExtensionAPI): void {
     );
   }
 
+  // jev-reflex arch §4.2/§4.9 (D2): the R layer registers after web-hub and before topic-switch — it only answers
+  // zero-cost introspection questions, and its fallback is always `continue` (the original text reaches
+  // topic-switch untouched); while topic-switch holds/releases, the R layer yields via the fence below.
+  // post-guard (a child's prompt also reports source:"interactive", F §2.7 / C-R5). off ⇒ not called (I9).
+  const reflexFence: { topicSwitch?: () => boolean } = {};
+  if (settings.reflex.enabled) {
+    wireReflex(pi, {
+      settings: () => settings.reflex,
+      secureDomainKind: secureDomain.kind,
+      ports: {
+        bashJobs: () => holder.current?.bashJobs,
+        fleet: () => holder.current?.query,
+        quota: () => holder.current?.quota,
+        git: createGitRunner(),
+      },
+      fences: {
+        topicSwitchActive: () => reflexFence.topicSwitch?.() ?? false,
+        goalBusy: () => {
+          const s = holder.current?.goal.record?.state;
+          return s === "active" || s === "paused";
+        },
+      },
+    });
+  }
+
   // topic-switch (docs/dev/topic-switch/plan.md): registered LAST in activate() — later than
   // mention/feishu/session-nav/web-hub's own `input` registration — so none of those handlers ever
   // see a message we ourselves re-injected as already "handled" by someone else first (arch §10's
@@ -1186,6 +1213,8 @@ export default function activate(rawPi: ExtensionAPI): void {
       remote: () => askUserRemoteRef.current?.(),
     });
     xsFencePorts.topicSwitch = () => topicSwitch.fenceActive();
+    // Late-bound like xsFencePorts above: the R layer is wired BEFORE topic-switch (jev-reflex arch D2).
+    reflexFence.topicSwitch = () => topicSwitch.fenceActive();
     promptGateRef.current = topicSwitch.webGate; // D2 flip point
   }
 

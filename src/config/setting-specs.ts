@@ -19,6 +19,7 @@ import { TOPIC_SWITCH_SETTING_SPECS } from "../topic-switch/setting-specs.js";
 import { EXTERNAL_AGENTS_SETTING_SPECS } from "../external-agent/setting-specs.js";
 import { TRAFFIC_SETTING_SPECS } from "../traffic/setting-specs.js";
 import { SCHEDULE_SETTING_SPECS } from "../schedule/setting-specs.js";
+import { REFLEX_SETTING_SPECS } from "../reflex/setting-specs.js";
 import { DEFAULT_SETTINGS, isTimeSettingKey, type AgentSettings } from "./settings.js";
 
 import type { DeadlineBudget } from "../core/types.js";
@@ -166,6 +167,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   ...FEISHU_BOT_SETTING_SPECS,
   ...TRAFFIC_SETTING_SPECS,
   ...SCHEDULE_SETTING_SPECS,
+  ...REFLEX_SETTING_SPECS,
 };
 
 /** Live settings object + persistence port, shared by the command and the editor. */

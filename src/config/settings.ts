@@ -166,6 +166,10 @@ import {
 } from "../topic-switch/settings.js";
 export type { TopicSwitchSettings };
 
+// jev-reflex plan R0: same shape — `src/reflex/core/settings.ts` owns the interface, defaults and parser.
+import { DEFAULT_REFLEX_SETTINGS, parseReflexSettings, type ReflexSettings } from "../reflex/core/settings.js";
+export type { ReflexSettings };
+
 export interface AgentSettings {
   concurrencyLimit: number;
   /** L1 (agent-tool pool-full plan §2): Agent tool pool-full dispatch policy. */
@@ -240,6 +244,8 @@ export interface AgentSettings {
    *  only（post-guard 装配）。类型/默认值/解析器归 `src/topic-switch/settings.ts`（P1），这里只接入
    *  `*S ⇄ *Ms` 边界（见 TIME_SETTING_MS_PATHS）。 */
   topicSwitch: TopicSwitchSettings;
+  /** jev-reflex: deterministic read-only answers at the input stage (default off; shadow first). Post-guard, main session only. */
+  reflex: ReflexSettings;
   /** 外部 agent（external-agent plan §2.8）：droid 执行后端。默认关闭 ⇒ 零接线、零行为变化。 */
   externalAgents: ExternalAgentsSettings;
   /** 飞书机器人（feishu-bot plan v2 §9）：hub 侧长连接 bot。默认关闭 ⇒ 零接线、零行为变化。 */
@@ -293,6 +299,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   systemPrompt: DEFAULT_SYSTEM_PROMPT_SETTINGS,
   title: DEFAULT_TITLE_SETTINGS,
   topicSwitch: { ...DEFAULT_TOPIC_SWITCH_SETTINGS },
+  reflex: { ...DEFAULT_REFLEX_SETTINGS, autoResolve: [] },
   externalAgents: { droid: { ...DEFAULT_EXTERNAL_AGENTS_SETTINGS.droid } },
   feishuBot: { ...DEFAULT_FEISHU_BOT_SETTINGS, files: { ...DEFAULT_FEISHU_BOT_SETTINGS.files } },
   traffic: { ...DEFAULT_TRAFFIC_SETTINGS, web: { ...DEFAULT_TRAFFIC_SETTINGS.web } },
@@ -443,6 +450,8 @@ function applySecureDomainOverrides(settings: AgentSettings): AgentSettings {
     traffic: { ...settings.traffic, enabled: false },
     // jev-plan v2 §4 J3 / jev-arch §7.3（I11）：加密/锁定域强制关闭 Jev，无论用户文件怎么写。
     memory: { ...settings.memory, jev: { ...settings.memory.jev, enabled: false } },
+    // jev-reflex arch §4.1（I11/D8）：加密/锁定域强制关闭 R 层（wireReflex 另有 secureDomainKind 守卫）。
+    reflex: { ...settings.reflex, enabled: false },
   };
   if (domain.kind === "secure") {
     const paths = statePathsOf(domain.vault);
@@ -566,6 +575,7 @@ function parseSettingsSource(source: unknown): AgentSettings {
     systemPrompt: parseSystemPromptSettings(value.systemPrompt),
     title: parseTitleSettings(value.title),
     topicSwitch: parseTopicSwitchSettings(value.topicSwitch),
+    reflex: parseReflexSettings(value.reflex),
     externalAgents: parseExternalAgentsSettings(value.externalAgents),
     feishuBot: parseFeishuBotBlock(value.feishuBot).feishuBot,
     traffic: parseTrafficSettings(value.traffic),

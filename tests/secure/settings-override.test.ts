@@ -24,6 +24,7 @@ const USER = {
   externalAgents: { droid: { enabled: true } },
   feishuNotify: { enabled: true },
   memory: { jev: { enabled: true } },
+  reflex: { enabled: true },
 };
 
 describe("loadSettings secure override (plan §2.4 step 2)", () => {
@@ -47,6 +48,8 @@ describe("loadSettings secure override (plan §2.4 step 2)", () => {
     expect(s.feishuNotify.enabled).toBe(false);
     // jev-plan v2 §4 J3 (I11): secure/locked 域强制关闭 Jev，无论用户文件怎么写
     expect(s.memory.jev.enabled).toBe(false);
+    // jev-reflex arch §4.1 (I11/D8): the R layer is forced off in secure/locked domains too
+    expect(s.reflex.enabled).toBe(false);
     // non-overridden siblings keep the user's / default values
     expect(s.bashJobs.retentionMs).toBe(loadSettings({}).bashJobs.retentionMs);
   });
@@ -59,6 +62,7 @@ describe("loadSettings secure override (plan §2.4 step 2)", () => {
     expect(s.fabric.crossSession.enabled).toBe(false);
     expect(s.feishuNotify.enabled).toBe(false);
     expect(s.memory.jev.enabled).toBe(false);
+    expect(s.reflex.enabled).toBe(false);
   });
 
   it("never mutates DEFAULT_SETTINGS (overrides clone every nested object)", () => {

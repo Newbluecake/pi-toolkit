@@ -173,6 +173,22 @@ describe("pi-free boundaries", () => {
     expect(offenders, offenders.join("; ")).toEqual([]);
   });
 
+  // jev-reflex plan R0 (PD3/PD4): reflex core/ports are checked by value closure (they import
+  // topic-switch/memory/core helpers from outside their directory, so the directory loop above does not fit).
+  it("reflex core/** value closure stays pi-free", () => {
+    const roots = globSync("src/reflex/core/**/*.ts", { cwd: ROOT }).map((file) => resolve(ROOT, file));
+    expect(roots.length, "reflex core roots must be discovered").toBeGreaterThanOrEqual(2);
+    const offenders = memoryOffenders(roots);
+    expect(offenders, offenders.join("; ")).toEqual([]);
+  });
+
+  it("reflex ports/** value closure stays pi-free", () => {
+    const roots = globSync("src/reflex/ports/*.ts", { cwd: ROOT }).map((file) => resolve(ROOT, file));
+    expect(roots.length, "reflex ports roots must be discovered").toBeGreaterThanOrEqual(1);
+    const offenders = memoryOffenders(roots);
+    expect(offenders, offenders.join("; ")).toEqual([]);
+  });
+
   // J1 (jev-plan §4 J1 / arch §3.2): everything under src/memory/jev/ except
   // wire.ts + segment.ts (the only pi-facing modules), plus the shared
   // secret-patterns root. Later jev packages' new files are constrained

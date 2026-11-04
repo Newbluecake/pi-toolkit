@@ -336,7 +336,9 @@
     ["traffic.web.port", "6bca14216167e45f2667829cad6a18a59fd27416f5c8e2904c17e779afe86ad4"],
     ["schedule.enabled", "94e0bb26875e8d5e7bd7d88f8b4483bf83008bcc95b88b0c1542bd3928ef7705"],
     ["schedule.defaultTimeoutS", "0c0a7cec1b640196d1236428b689372d961cbced729c6999200c31e29e442b30"],
-    ["schedule.maxTimeoutS", "6c538e3100c646f3a64116ead976a485bc27e4fdb9e550349c75e420ec30fce3"]
+    ["schedule.maxTimeoutS", "6c538e3100c646f3a64116ead976a485bc27e4fdb9e550349c75e420ec30fce3"],
+    ["reflex.enabled", "8123789ea148c0c0c6a9ccfa7da3a803d427223a04da5d709219e010255c96b0"],
+    ["reflex.autoResolve", "fa7252fca5b9d9612274c53c53b4ac0d2b8440a9574f7ddc36a4edb81bd9a726"]
   ],
-  "all": "178fc6b3c388bee8b06c67b8f9896c195d0769b2c983bf4917012b0b1912be5b"
+  "all": "cddb8a8b92458b6ae8bbe7192d3e514476367ab2957636c0670e6d56f9b55a04"
 }

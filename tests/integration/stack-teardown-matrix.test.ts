@@ -476,12 +476,13 @@ describe("teardown matrix: ordered calls per entry (FULL profile)", () => {
 
   it("pins the session_shutdown / session_start handler counts (order anchors for the other modules' handlers)", async () => {
     const a = await boot();
-    // FULL: C1/C2/C3/C4 above are four of the 15 shutdown handlers (the rest: merged plugins, cache-ttl, schedule
+    // FULL: C1/C2/C3/C4 above are four of the 16 shutdown handlers (the rest: merged plugins, cache-ttl, schedule
     // message scheduler, web-hub, topic-switch, memory jev background abort, …). pi awaits them one after another
     // in this registration order. memory jev (on by default) aborts its background tagging/review calls on
     // shutdown (I1); it is independent of the other handlers' order.
-    expect(a.h.handlers.get("session_shutdown")?.length).toBe(15);
-    expect(a.h.handlers.get("session_start")?.length).toBe(17); // +1 memory jev (main-session availability probe)
+    // jev-reflex R0 (PD11): +1 each — reflex shutdown abort / session_start re-arm (HEAD baseline before R0: 15 / 17).
+    expect(a.h.handlers.get("session_shutdown")?.length).toBe(16);
+    expect(a.h.handlers.get("session_start")?.length).toBe(18); // +1 memory jev (main-session availability probe), +1 reflex re-arm
     freshModules();
     resetGlobals();
     const minimal = await boot(BASELINE);
