@@ -90,7 +90,7 @@ describe("wireReflex skeleton", () => {
     expect(r.calls).toEqual([]);
   });
 
-  it("input handler: always `continue`, returns a non-thenable, never touches send/append APIs", () => {
+  it("input handler on a bare ctx (R2b fail-open): always `continue`, returns a non-thenable, never touches send/append APIs", () => {
     const r = recPi();
     wireReflex(r.pi, deps());
     const input = r.handlers.get("input")![0]!;
@@ -104,13 +104,11 @@ describe("wireReflex skeleton", () => {
     expect(r.calls.filter((c) => /send|append/i.test(c))).toEqual([]);
   });
 
-  it("the command skeleton confirms it is armed and never throws without a UI", async () => {
+  it("the command never throws without a UI (R2b: status/explain/reset live in command.test.ts)", async () => {
     const r = recPi();
     wireReflex(r.pi, deps());
-    const messages: string[] = [];
-    await r.commands.get("reflex").handler("", { ui: { notify: (m: string) => messages.push(m) } });
-    expect(messages).toEqual(["reflex: enabled (skeleton)"]);
     await expect(r.commands.get("reflex").handler("", {})).resolves.toBeUndefined();
+    await expect(r.commands.get("reflex").handler("status", { ui: {} })).resolves.toBeUndefined();
   });
 
   it("PD11 re-arm: shutdown bumps generation and marks disposed; session_start re-arms the same closure", () => {
@@ -150,7 +148,8 @@ describe("wireReflex skeleton", () => {
     }
     fire("session_start");
     expect(wiring.generation()).toBe(5);
-    expect(wiring.snapshot()).toMatchObject({ disposed: false, inFlight: false, counters: {}, scripts: [] });
+    expect(wiring.snapshot()).toMatchObject({ disposed: false, inFlight: false });
+    expect(wiring.snapshot().counters).toMatchObject({ candidates: 0, answered: 0, corrected: 0 });
     expect(r.calls.filter((c) => c.startsWith("on(")).length).toBe(4); // no re-registration
     expect(wiring.isStale(5)).toBe(false);
     expect(wiring.isStale(4)).toBe(true);
