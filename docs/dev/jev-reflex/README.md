@@ -1,7 +1,7 @@
 # jev-reflex · 开发者要点
 
 > 何时读：改动 `src/reflex/**`、`reflex.*` 设置键、`/reflex`、`subagent:reflex*` customType、主会话 input handler 的注册顺序之前。
-> 设计：`arch.md`（类型/语义以它为准）、`plan.md`（PD1–PD12 覆盖 arch）、`feasibility.md`。交付报告：`R0-report.md`…`R2b-report.md`。
+> 设计：`arch.md`（类型/语义以它为准）、`plan.md`（PD1–PD12 覆盖 arch）、`feasibility.md`。交付报告：`R0-report.md`…`R3b-report.md`。
 > 新的实现细节写在这里，不要写回 AGENTS.md。
 
 ## 是什么
@@ -10,12 +10,12 @@ R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subag
 不起模型 run。**只读 MVP**：`reflex.enabled` 默认 `false`；先 shadow（只记账不作答），晋升只能由用户改 `reflex.autoResolve`。
 本文件随包增长。
 
-## 当前状态（R2b：shadow 可上线）
+## 当前状态（R3b：AUTO 分支与跨会话报告已就绪，默认仍 shadow）
 
 - R0：契约冻结（`core/{types,settings}.ts`、`setting-specs.ts`、`ports/index.ts` 接口）+ 注册清单固定 6 项（顺序由 `activate-trace.json` `max` 档钉住）：`input` → `agent_settled` → `session_start` → `session_shutdown` → `registerMessageRenderer("subagent:reflex")`（API 存在时）→ `registerCommand("reflex")`。
-- R1：`core/**` 纯函数核心（gate/match/state/render/agreement/promotion…）。R2a/R2a′：四个只读 port + 单一预算竞速（`executePort` → `core/budget.ts` `raceBudget`）。R2b：shadow 接线 + `/reflex status|explain|reset`。
+- R1：`core/**` 纯函数核心（gate/match/state/render/agreement/promotion…）。R2a/R2a′：四个只读 port + 单一预算竞速（`executePort` → `core/budget.ts` `raceBudget`）。R2b：shadow 接线 + `/reflex status|explain|reset`。R3a：AUTO 全链路（命中即作答、`subagent:reflex` 命中消息、TUI 紧凑卡片、repeat/correction 即时降级）+ `render-tui.ts`。R3b：跨会话离线报告（`scripts/dev/reflex-shadow.mjs` + `core/shadow-scan.ts`），脚本不自动晋升。
 - `src/index.ts` 装配位置：web-hub 块之后、topic-switch 之前；`reflexFence.topicSwitch` 在 topic-switch 之后晚绑定（同 `xsFencePorts`）。`ReflexWireDeps` 追加了三个**可选**字段（`clock`/`monoNow`/`scripts`，默认 `systemClock`/`performance.now`/内置目录；生产装配不传）。
-- R3a+ 只填 AUTO 分支：**不得再改注册清单 / 设置键 / `core/types.ts`（只许追加）**。
+- R3a/R3b 之后冻结面：**注册清单 / 设置键 / `core/types.ts`（只许追加）/ `src/index.ts`（X2）一律不再动**。
 
 ### R1/R2a 落地时相对 arch/plan 的偏差（均经 root 批准，详见各 Rn-report）
 
@@ -26,22 +26,27 @@ R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subag
 - port 输出约定：`git.status` 始终先输出一行分支摘要（`branch · upstream X|none · ahead a/behind b`，detached 写 `HEAD (detached)`），干净时第二行 `working tree clean`（**不返回 `lines:[]`**），脏时第二行是 `staged n/modified n/untracked n/unmerged n`，之后最多 15 个路径；`jobs.list`/`fleet.status` 0 条 ⇒ `ok/lines:[]`（渲染走 `emptyText`），jobs 每组 ≤8 行、fleet 非终态 ≤8 行，超出置 `truncated`；`quota.summary` 无可信快照 ⇒ `uncertain`；manager 缺席 ⇒ `unavailable`；`git` 超时/溢出/中止 ⇒ `error`（timeout/overflow/aborted），128/spawn 失败 ⇒ `unavailable`，其余非零 ⇒ `error("exit")`，格式非法 ⇒ `error("parse")`。facts 只放计数，不放路径/命令。
 - fleet hit 例句用「现在有几个 agent 在跑」（「运行」是祈使否决词）。
 
-## R2b shadow 语义（`wire.ts`）
+## shadow / AUTO 语义（`wire.ts`，R2b → R3a）
 
-- **input（同步、非 async）**：入口先做 pending 超龄检查（`PENDING_MAX_AGE_MS`，无定时器）→ correction 检测（仅 `interactive ∧ tui`，命中**当场** `appendEntry("subagent:reflex-correction")`，与随后 veto/miss 无关，每目标一次）→ `evaluateGate` → `match`。veto/miss 不记录；ambiguous ⇒ 单槽 pending(`ambiguous`)；high ⇒ pending(`shadow`) 并在 `queueMicrotask` 内 `executePort`，**无论 state 是 shadow/demoted/auto 都按 shadow 处理**（`record.state` 如实写有效状态）。所有路径同步返回 `{action:"continue"}`；整个 handler try/catch fail-open（与 pi 文档 fail-closed 建议相反，理由：R 层纯建议性，bug 只能退化为「模型照常作答」）。
+- **input（普通同步函数，非 async）**：入口先做 pending 超龄检查（`PENDING_MAX_AGE_MS`，无定时器）→ correction 检测（仅 `interactive ∧ tui`，命中**当场** `appendEntry("subagent:reflex-correction")`，与随后 veto/miss 无关，每目标一次）→ `evaluateGate` → `match`。整个 handler try/catch fail-open（与 pi 文档 fail-closed 建议相反，理由：R 层纯建议性，bug 只能退化为「模型照常作答」）。veto/miss 不记录；ambiguous ⇒ 单槽 pending(`ambiguous`)；high ⇒ 单槽 pending，`state` 在每次 input **现读**（`autoResolve` 经 `/agent settings` 改动下一问即生效，I8 live）：
+  - `state==="auto"` 且同一 `id@ver\0digest` 在 `REPEAT_WINDOW_MS` 内**已被作答**过 ⇒ 交回模型、`onRepeat`（3 参）立即降级 + `ui.notify` 一次、槽 `kind:"repeat"`（`reasked:false`，避免 promotion 双计），**同步** continue。
+  - 其余 `state==="auto"` ⇒ 置 `inFlight`（单飞：await 期间的输入被 S0 in-flight 否决）后返回 `runAuto(...)` 的 Promise —— **唯一的 thenable 分支**（`.catch` 兜底，永不 reject）：预算内 `ok` ⇒ `renderAnswer` → `pi.sendMessage({customType:"subagent:reflex",content,display:true,details})`（单实参、无 options，C-R3）⇒ `answered` 计数 + 答案窗口记账 + `memo{kind:"answer"}` ⇒ `{action:"handled"}`（**作答不产 record**）；非 ok（`uncertain`/`unavailable`/`error`/`timeout`，含 `sendMessage` 异常）⇒ strike + `fallback.<kind>` + 槽改 `kind:"fallback"` ⇒ continue。
+  - `shadow` / `demoted` ⇒ 旧 R2b 路径：`queueMicrotask` 内 `executePort`，**同步** continue，`record.state` 如实写有效状态。
 - **单槽**：新候选到来时旧 pending 未结算 ⇒ 立即以 `model:{agree:"unknown",tools:[]}` 落一条 record（port 若还没回来则不带 `port`），再替换。
-- **agent_settled**：超龄检查 → `collectToolShapes(getBranch)`（pi 的 `message` 条目经 `toBranchLike` 适配成 core 的结构类型）→ `judgeAgreement` → 恰好一条 `subagent:reflex-record` → 清槽，并以结算时刻 `now` 建 `CorrectionMemo`。digest 不一致 / getBranch 不可用 ⇒ `unknown`。ambiguous 槽没有单一脚本可比对 ⇒ 恒 `unknown`（tools 只留审计）。若 agent 跑得比 port 还快（port 尚未回来）⇒ record 不带 `port`（晚到结果丢弃）。
+- **agent_settled**：超龄检查 → `collectToolShapes(getBranch)`（pi 的 `message` 条目经 `toBranchLike` 适配成 core 的结构类型）→ `judgeAgreement` → 恰好一条 `subagent:reflex-record` → 清槽，并以结算时刻 `now` 建 `CorrectionMemo`。digest 不一致 / getBranch 不可用 ⇒ `unknown`。ambiguous 槽没有单一脚本可比对 ⇒ 恒 `unknown`（tools 只留审计）；R3a 起 `shadow`/`fallback`/`repeat` 槽都指向单一脚本，均参与 `judgeAgreement`（`kind:"answer"` 不产 record）。若 agent 跑得比 port 还快（port 尚未回来）⇒ record 不带 `port`（晚到结果丢弃）。
 - **PD11**：`session_shutdown` abort + 丢 pending（**不落盘**）+ `generation++`；`session_start` re-arm 并清 pending/memo/re-ask 窗口；port 续体捕获 `gen`，写回前检查 `isStale(gen) || pending !== p`，迟到结果（含 strike 计账）一律丢弃。脚本降级覆盖层（strikes/demoted）跨会话保留。
-- **strike**：port 结果在未过期时喂 `onExecOutcome`（shadow 态也计，连续 2 次 error/timeout ⇒ `demoted` 覆盖层，静默；仅 auto→demoted 时 `ui.notify`）。`onRepeat` / AUTO `onCorrected` 留给 R3a（R2b 从不作答，re-ask/纠正不是降级证据）。
+- **strike**：port 结果在未过期时喂 `onExecOutcome`（shadow / fallback 路径都计，连续 2 次 error/timeout ⇒ `demoted` 覆盖层；仅 auto→demoted 时 `ui.notify`）。repeat / correction 的降级在 input 同步段由 `onRepeat` / `onCorrected` 直接触发（见下节）。
 - **counters**：`candidates/answered/ambiguous/repeat/reasked/corrected`（+ R3a 的 `fallback.<reason>`）为本激活闭包计数；`/reflex status` 另汇总本会话 `getBranch()` 的 record/answer/correction（`core/promotion.accumulate`），晋升判定恒显示「本会话样本不足以判定，跨会话请跑 `node scripts/dev/reflex-shadow.mjs`（R3b）」。
-- **`/reflex`**：`status`（默认）| `explain <text>`（理想 TUI 空闲事实跑 S0+S1，输出 veto 码或 band+脚本+命中模板 `strong#i|weak#i`，不执行 port）| `reset [id]`（清 strikes 与降级覆盖层，纯内存）。
+- **`/reflex`**：`status`（默认）| `explain <text>`（理想 TUI 空闲事实跑 S0+S1，输出 veto 码或 band+脚本+命中模板 `strong#i|weak#i`，不执行 port）| `reset [id]`（清 strikes 与降级覆盖层，纯内存，未知 id 报错不静默）。
+- **TUI 卡片**（`render-tui.ts`，R3a）：命中消息对人眼折叠为 `reflex · <scriptId> · <ms>ms` + `Q:` + port 正文，剥掉 `<reflex …>` 外壳与末尾中文提示（正则锚定 §5.1 形状）；header 数字取自 `details`（权威审计），不重解析外壳。`details` 缺失/畸形、content 非字符串或外壳不匹配 ⇒ 返回 `undefined`，pi 回退默认渲染（用户仍看到原文）。
+- **`/reflex status`**：每个脚本一行 `<id> <state> strikes=n [demote=<reason>]`，`demote=` 即降级原因（`strikes|repeat|corrected`）；另打印本激活计数（含 `fallback.<kind>`）与本会话 record/answer/correction 汇总。`/reflex reset [id]` 清 strikes 与降级覆盖层（纯内存），reset 后该脚本下一条 input 即恢复 `auto`；`/reload` 同样清空覆盖层。
 - **手动冒烟（本机）**：`reflex.enabled=true`（pi-toolkit.json）→ `/reload` → 问「后台还有几个 job」→ 模型照常作答 → `/reflex status` 应显示 `candidates=1`、会话记录 `jobs.list@1 cand=1`；`/reflex explain 工作区干净吗` 应给出 `band=high script=git.status`。若 `agree` 长期全是 `unknown`，说明会话里用户消息文本与 input 文本不一致（被前序 handler 改写），需查 digest 口径。
 
 ## 不变式（R-I1…R-I12）
 
 - **R-I1** 关闭 / secure / locked / 子会话 ⇒ 零注册（`wireReflex` 不被调用，或守卫直接返回 undefined）。由 `reflex-off-golden.json` + trace 钉住。
 - **R-I2** 只受理 `source==="interactive" ∧ mode==="tui" ∧ 空闲 ∧ 无图`。
-- **R-I3** 从不 `sendUserMessage`、从不 `triggerTurn`、从不 `transform`；回退 = `continue`（`tests/reflex/governance.test.ts` G2/G3/G4 扫描；R2b 的 wire 连 `sendMessage` 都不调）。
+- **R-I3** 从不 `sendUserMessage`、从不 `triggerTurn`、从不 `transform`；回退 = `continue`（`tests/reflex/governance.test.ts` G2/G3/G4 扫描）。AUTO 命中的唯一外发是 `pi.sendMessage({customType:"subagent:reflex"})`：全 reflex 树仅 `wire.ts` 允许出现 `.sendMessage(`，调用点必须单对象实参、无 `triggerTurn`/`deliverAs`。
 - **R-I4** 只有 AUTO 脚本的 port 在预算内返回 `ok` 时才返回 `handled`；其他一切情况（含异常）返回 `continue`。
 - **R-I5** shadow 不改变可观察流程：任何 await 之前同步返回 `continue`；副作用只有只读 port 执行和 `agent_settled` 时写一条 custom entry。
 - **R-I6** port 只读：不联网、不写盘、不改 manager；git argv 冻结且带 `--no-optional-locks`。
@@ -55,9 +60,9 @@ R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subag
 ## 降级 / 计数语义（plan PD5、PD6、PD12）
 
 - 脚本状态：`shadow` / `auto` / `demoted`；`demoted` 行为同 shadow，覆盖层跨会话保留到 `/reload` 或 `/reflex reset`。
-- 降级触发：连续 2 次 `error|timeout`（`demoteReason:"strikes"`）；**AUTO 态下出现 repeat 或 correction 立即降级**（`"repeat"` / `"corrected"`，PD5），并 `ui.notify` 一次。`uncertain` / `unavailable` 不计 strike。
+- 降级触发：连续 2 次 `error|timeout`（`demoteReason:"strikes"`）；**AUTO 态下出现 repeat 或 correction 立即降级**（`"repeat"` / `"corrected"`，PD5），并 `ui.notify` 一次（中文散文，点名 `/reflex reset` 或 `/reload` 可恢复）。`uncertain` / `unavailable` 不计 strike。降级后行为同 shadow（只记账不作答），下一条 input 现读生效。
 - 重复提问（PD6）：shadow 期用 `ReflexRecordV1.reasked:true` 计——同一 `requestDigest` 在 10min 内再次成为同一脚本候选。
-- 纠正（PD12）：命中纠正词表时在 input 同步段**立即**写 `subagent:reflex-correction`（`ReflexCorrectionV1`，不存原文，每个目标至多一次），与该输入随后 veto / miss / 命中无关。
+- 纠正（PD12）：命中纠正词表时在 input 同步段**立即**写 `subagent:reflex-correction`（`ReflexCorrectionV1`，不存原文，每个目标至多一次），与该输入随后 veto / miss / 命中无关。若纠正目标是 AUTO 的 `kind:"answer"` ⇒ `onCorrected` 立即降级 + notify 一次；`memo.corrected` **只在 `appendEntry` 成功时翻转**（落盘失败则窗口保留、后续纠正可重试补账；降级以「检测到」为准照常发生）。
 - 晋升门槛（U5，唯一实现 `core/promotion.ts`，R1）：同一 `scriptId@scriptVer` ≥50 条候选、port 成功率 ≥99%、分歧 ≤5%、重复提问 / 纠正 = 0。晋升只能人工改设置；只自动降级不自动升级。
 
 ## 门禁
@@ -76,9 +81,28 @@ R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subag
 
 1. R0 → (R1 ∥ R2a) → R2a′ → R2b 合入 ⇒ 用户本机 `reflex.enabled=true` + `/reload`（`autoResolve` 为空 ⇒ 全部 shadow）。
 2. R3a ∥ R3b 合入（不改变 shadow 行为）。
-3. shadow 约 2 周 ⇒ `npm run build && node scripts/dev/reflex-shadow.mjs --days 14`（R3b）。
+3. shadow 约 2 周 ⇒ `npm run build && node scripts/dev/reflex-shadow.mjs --days 14`（R3b，详见下节）。
 4. 对 `eligible` 的脚本人工抽查 diverge 样本，**由用户**把 id 加进 `reflex.autoResolve`（live）。建议顺序：`quota.summary`、`jobs.list` → `fleet.status` → `git.status`。
 5. 晋升后任一 error/timeout×2、repeat、correction ⇒ 自动降回 shadow；`scriptVer` 变更 ⇒ 统计重新从 0 计。
+
+### 跨会话离线报告（R3b）
+
+`npm run build && node scripts/dev/reflex-shadow.mjs --days 14`：只读、离线、逐行扫描
+`$PI_CODING_AGENT_DIR/sessions`（未设置时 `~/.pi/agent/sessions`）；`--cwd <path>` 仅扫描该工作区会话目录，
+`--json` 输出机器可读统计。记录/纠正按 `at`、AUTO answer 按会话 entry 的 `timestamp` 进入时间窗口。
+每个 `scriptId@scriptVer` 单独汇总；shadow 候选与 AUTO answer 都参与跨会话重复判定，
+纠正从独立 `subagent:reflex-correction` 条目累计，不依赖下一条候选。
+
+报告包含 `reasked / crossSessionRepeats / corrected`、成功率、分歧率、p50/p95 与晋升原因；
+缺少重复判定证据显示 `undetermined`（JSON 为 `null`），不能晋升。
+`diverge` 样本仅列 session 文件与 entry id，不输出正文；`eligible` 仅表示统计门槛通过，
+仍须用户人工抽查，再由用户把脚本 id 加入 `reflex.autoResolve`（live）。脚本不会修改设置或自动晋升。
+缺 dist 时提示“先 npm run build”并退出 2；真实目录没有 reflex 条目时输出空结果，不虚构晋升依据。
+
+使用注意：`--cwd` 的值经 `path.resolve` 直接使用，**不做 `~` 展开**——必须传绝对路径
+（写 `--cwd ~/x` 会被当成 cwd 下的字面量 `~` 目录）。脚本是 **Tier 3 手动工具**（不进 CI，也不属
+`npm test`），且从 `dist/reflex/core/{shadow-scan,promotion}.js` 加载冻结的 promotion API，
+因此每次改完 `src/reflex/**` 都要先 `npm run build` 再跑，否则 exit 2。
 
 ## 残留风险（arch §7 R1–R9 + plan §9）
 
