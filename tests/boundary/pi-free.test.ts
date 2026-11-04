@@ -182,6 +182,8 @@ describe("pi-free boundaries", () => {
       ...globSync("src/memory/jev/*.ts", { cwd: ROOT })
         .filter((file) => !file.endsWith("wire.ts") && !file.endsWith("segment.ts"))
         .map((file) => resolve(ROOT, file)),
+      // predict/ (plan.md v3.2 §11.1): the whole P layer is pi-free, no exceptions.
+      ...globSync("src/memory/jev/predict/*.ts", { cwd: ROOT }).map((file) => resolve(ROOT, file)),
       resolve(ROOT, "src/memory/secret-patterns.ts"),
     ];
     expect(roots.length, "jev roots must be discovered").toBeGreaterThanOrEqual(8);
