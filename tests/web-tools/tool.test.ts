@@ -259,11 +259,13 @@ async function executeFetchTool(params: Record<string, unknown>, onUpdate?: (upd
 }
 
 describe("web_fetch execute", () => {
-  it("fails fast without DEEPSEEK_API_KEY and never issues a request", async () => {
+  it("fails fast without any fetch key and never issues a request", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(executeFetchTool({ url: "https://example.com" })).rejects.toThrow("DEEPSEEK_API_KEY");
+    await expect(executeFetchTool({ url: "https://example.com" })).rejects.toThrow(
+      "DEEPSEEK_API_KEY and/or TAVILY_API_KEY",
+    );
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -308,7 +310,9 @@ describe("web_fetch execute", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const pending = executeFetchTool({ url: "https://example.com" });
-    const assertion = expect(pending).rejects.toThrow("Web fetch failed: request failed: 401");
+    const assertion = expect(pending).rejects.toThrow(
+      "Web fetch failed with all configured providers. DeepSeek: request failed: 401",
+    );
     await assertion;
     await pending.catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -317,5 +321,73 @@ describe("web_fetch execute", () => {
     });
     // 401 is not retryable: exactly one attempt.
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses Tavily directly when only TAVILY_API_KEY is set", async () => {
+    process.env.TAVILY_API_KEY = "tavily-key";
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ results: [{ url: "https://example.com", raw_content: "# Hi\n\nBody." }] }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await executeFetchTool({ url: "https://example.com" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://api.tavily.com/extract");
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer tavily-key");
+    expect(JSON.parse(String(init.body))).toEqual({ urls: ["https://example.com"], format: "markdown" });
+    expect(result.content[0]?.text).toBe("# Hi\n\nBody.");
+    expect(result.details).toMatchObject({ provider: "tavily", failover: false });
+  });
+
+  it("falls back to Tavily when DeepSeek returns a non-retryable 404", async () => {
+    process.env.DEEPSEEK_API_KEY = "deepseek-key";
+    process.env.TAVILY_API_KEY = "tavily-key";
+    const fetchMock = vi.fn<typeof fetch>(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("api.deepseek.com")) {
+        return jsonResponse({ error: { message: "failed to fetch URL" } }, 404);
+      }
+      if (url.includes("api.tavily.com")) {
+        return jsonResponse({
+          results: [{ url: "https://example.com/wiki/X", raw_content: "# X\n\nTavily body." }],
+        });
+      }
+      throw new Error(`unexpected fetch target: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await executeFetchTool({ url: "https://example.com/wiki/X" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.content[0]?.text).toBe("# X\n\nTavily body.");
+    expect(result.details).toMatchObject({
+      provider: "tavily",
+      failover: true,
+      failures: [{ provider: "deepseek" }],
+    });
+  });
+
+  it("surfaces Tavily failed_results as a non-retryable error and reports both providers", async () => {
+    process.env.DEEPSEEK_API_KEY = "deepseek-key";
+    process.env.TAVILY_API_KEY = "tavily-key";
+    const fetchMock = vi.fn<typeof fetch>(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("api.deepseek.com")) {
+        return jsonResponse({ error: { message: "failed to fetch URL" } }, 404);
+      }
+      return jsonResponse({
+        results: [],
+        failed_results: [{ url: "https://example.com/x", error: "upstream timeout" }],
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(executeFetchTool({ url: "https://example.com/x" })).rejects.toThrow(
+      /DeepSeek: request failed: 404.*Tavily: extract failed: upstream timeout/s,
+    );
+    // 404 deepseek + 422 tavily: both non-retryable, one attempt each.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

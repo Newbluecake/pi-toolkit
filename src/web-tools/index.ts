@@ -22,7 +22,16 @@ import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-age
 import { Type, type Static } from "@sinclair/typebox";
 import { getSearchConfig, type ProviderPreference, type SearchProvider, type SearchResponse } from "./config.js";
 import { providerLabel, providerOrder, formatResponse } from "./format.js";
-import { deepseekFetch, searchBocha, searchCodex, searchDeepseek, searchSerpApi, searchTavily } from "./providers.js";
+import {
+  deepseekFetch,
+  searchBocha,
+  searchCodex,
+  searchDeepseek,
+  searchSerpApi,
+  searchTavily,
+  tavilyExtract,
+  type WebFetchResult,
+} from "./providers.js";
 import { HttpError, MAX_ATTEMPTS, backoffDelay, errorMessage, isRetryableError, sleep } from "./resilience.js";
 
 const webSearchParameters = Type.Object({
@@ -214,18 +223,27 @@ const webFetchParameters = Type.Object({
   url: Type.String({ description: "The http(s) URL to fetch." }),
 });
 
+type WebFetchProvider = "deepseek" | "tavily";
+
+const WEB_FETCH_PROVIDER_ORDER: readonly WebFetchProvider[] = ["deepseek", "tavily"];
+
+const WEB_FETCH_PROVIDER_LABEL: Record<WebFetchProvider, string> = {
+  deepseek: "DeepSeek",
+  tavily: "Tavily",
+};
+
 export function createWebFetchTool(): ToolDefinition<typeof webFetchParameters> {
   return {
     name: "web_fetch",
     label: "Web Fetch",
     description:
-      "Fetch a web page through the DeepSeek fetch API and return its title and content as Markdown. " +
-      "Requires DEEPSEEK_API_KEY (environment or ~/.config/pi/web-search.env). " +
+      "Fetch a web page through DeepSeek or Tavily (with automatic failover) and return its content as Markdown. " +
+      "Requires DEEPSEEK_API_KEY and/or TAVILY_API_KEY (environment or ~/.config/pi/web-search.env). " +
       `Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
     promptSnippet: "Fetch a URL and read its content as Markdown",
     promptGuidelines: [
       "Use web_fetch to read the full content of a specific URL (e.g. a promising result from web_search); it returns the page as Markdown.",
-      "web_fetch is backed by the DeepSeek fetch API; if it reports DEEPSEEK_API_KEY is missing, work from web_search summaries instead.",
+      "web_fetch tries DeepSeek first and falls back to Tavily when DeepSeek fails or has no key; if both providers reject the URL, work from web_search summaries instead.",
     ],
     parameters: webFetchParameters,
 
@@ -241,56 +259,100 @@ export function createWebFetchTool(): ToolDefinition<typeof webFetchParameters> 
       }
 
       const { keys } = getSearchConfig();
-      const apiKey = keys.deepseek;
-      if (!apiKey) {
+      const allKeys = Object.values(keys);
+      const providers = WEB_FETCH_PROVIDER_ORDER.filter((provider) => Boolean(keys[provider]));
+      if (providers.length === 0) {
         throw new Error(
-          "web_fetch needs a DeepSeek API key. Set DEEPSEEK_API_KEY in the environment or ~/.config/pi/web-search.env.",
+          "web_fetch needs a DeepSeek or Tavily API key. Set DEEPSEEK_API_KEY and/or TAVILY_API_KEY in the environment or ~/.config/pi/web-search.env.",
         );
       }
 
-      let lastError: unknown;
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        try {
-          const result = await deepseekFetch(params.url, apiKey, signal);
-          const output = result.title ? `# ${result.title}\n\n${result.content}` : result.content;
-          const truncation = truncateHead(output, {
-            maxLines: DEFAULT_MAX_LINES,
-            maxBytes: DEFAULT_MAX_BYTES,
-          });
-          const text = truncation.truncated
-            ? `${truncation.content}\n\n[Output truncated to ${truncation.outputLines} lines or ${formatSize(truncation.outputBytes)}.]`
-            : truncation.content;
-          return {
-            content: [{ type: "text", text }],
-            details: {
-              url: params.url,
-              title: result.title,
-              truncated: truncation.truncated,
-            },
-          };
-        } catch (error) {
-          if (signal?.aborted) throw new Error("Web fetch cancelled.");
-          lastError = error;
-          const status = error instanceof HttpError ? error.status : undefined;
-          const body = error instanceof HttpError ? error.responseBody : undefined;
-          if (attempt < MAX_ATTEMPTS && isRetryableError(error, status, body)) {
-            const delay = Math.round(backoffDelay(attempt));
+      const dispatch = (
+        provider: WebFetchProvider,
+        dispatchSignal: AbortSignal | undefined,
+      ): Promise<WebFetchResult> =>
+        provider === "deepseek"
+          ? deepseekFetch(params.url, keys.deepseek, dispatchSignal)
+          : tavilyExtract(params.url, keys.tavily, dispatchSignal);
+
+      const failures: Array<{ provider: WebFetchProvider; error: string }> = [];
+      for (const provider of providers) {
+        const label = WEB_FETCH_PROVIDER_LABEL[provider];
+        const providerKeys = [keys[provider]];
+        onUpdate?.({
+          content: [{ type: "text", text: `Fetching via ${label}: ${params.url}` }],
+          details: {},
+        });
+
+        let lastError: unknown;
+        let providerFailed = false;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          try {
+            const result = await dispatch(provider, signal);
+            const output = result.title ? `# ${result.title}\n\n${result.content}` : result.content;
+            const truncation = truncateHead(output, {
+              maxLines: DEFAULT_MAX_LINES,
+              maxBytes: DEFAULT_MAX_BYTES,
+            });
+            const text = truncation.truncated
+              ? `${truncation.content}\n\n[Output truncated to ${truncation.outputLines} lines or ${formatSize(truncation.outputBytes)}.]`
+              : truncation.content;
+            return {
+              content: [{ type: "text", text }],
+              details: {
+                url: params.url,
+                title: result.title,
+                provider,
+                failover: failures.length > 0,
+                failures,
+                truncated: truncation.truncated,
+              },
+            };
+          } catch (error) {
+            if (signal?.aborted) throw new Error("Web fetch cancelled.");
+            lastError = error;
+            const status = error instanceof HttpError ? error.status : undefined;
+            const body = error instanceof HttpError ? error.responseBody : undefined;
+            if (attempt < MAX_ATTEMPTS && isRetryableError(error, status, body)) {
+              const delay = Math.round(backoffDelay(attempt));
+              onUpdate?.({
+                content: [
+                  {
+                    type: "text",
+                    text: `${label} fetch attempt ${attempt} failed (${errorMessage(error, providerKeys)}); retrying in ${delay}ms...`,
+                  },
+                ],
+                details: {},
+              });
+              await sleep(delay, signal);
+              continue;
+            }
+            providerFailed = true;
+            break;
+          }
+        }
+
+        if (providerFailed) {
+          failures.push({ provider, error: errorMessage(lastError, allKeys) });
+          const next = providers[failures.length];
+          if (next) {
             onUpdate?.({
               content: [
                 {
                   type: "text",
-                  text: `DeepSeek fetch attempt ${attempt} failed (${errorMessage(error, [apiKey])}); retrying in ${delay}ms...`,
+                  text: `${label} failed; switching to ${WEB_FETCH_PROVIDER_LABEL[next]}.`,
                 },
               ],
               details: {},
             });
-            await sleep(delay, signal);
-            continue;
           }
-          break;
         }
       }
-      throw new Error(`Web fetch failed: ${errorMessage(lastError, [apiKey])}`);
+
+      const summary = failures
+        .map((failure) => `${WEB_FETCH_PROVIDER_LABEL[failure.provider]}: ${failure.error}`)
+        .join("; ");
+      throw new Error(`Web fetch failed with all configured providers. ${summary}`);
     },
   };
 }

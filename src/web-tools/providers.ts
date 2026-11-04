@@ -87,6 +87,21 @@ interface DeepSeekFetchResponse {
   content?: string;
 }
 
+interface TavilyExtractResult {
+  url?: string;
+  raw_content?: string;
+}
+
+interface TavilyExtractFailed {
+  url?: string;
+  error?: string;
+}
+
+interface TavilyExtractResponse {
+  results?: TavilyExtractResult[];
+  failed_results?: TavilyExtractFailed[];
+}
+
 interface BochaWebPage {
   name?: string;
   url?: string;
@@ -438,6 +453,60 @@ export async function searchDeepseek(
 export interface WebFetchResult {
   title?: string | undefined;
   content: string;
+}
+
+/**
+ * Tavily Extract endpoint: POST /extract {urls:[url], format:"markdown"} ⇒
+ * {results:[{url, raw_content}], failed_results:[{url, error}]}. The endpoint
+ * takes up to 20 URLs but web_fetch always sends exactly one. Empty results
+ * with a failed_results entry is surfaced as a non-retryable HttpError so the
+ * caller fails over to the next provider.
+ */
+export async function tavilyExtract(
+  url: string,
+  apiKey: string,
+  signal: AbortSignal | undefined,
+): Promise<WebFetchResult> {
+  const response = await withRequestTimeout(signal, (attemptSignal) =>
+    fetch("https://api.tavily.com/extract", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ urls: [url], format: "markdown" }),
+      signal: attemptSignal,
+    }),
+  ).catch((error) => {
+    throw new Error(`network request failed: ${errorMessage(error, [apiKey])}`);
+  });
+
+  if (!response.ok) {
+    const body = await readErrorBody(response, apiKey);
+    throw new HttpError(
+      `request failed: ${response.status} ${response.statusText}${body ? ` — ${body}` : ""}`,
+      response.status,
+      body,
+    );
+  }
+
+  let payload: TavilyExtractResponse;
+  try {
+    payload = (await response.json()) as TavilyExtractResponse;
+  } catch {
+    throw new Error("returned invalid JSON");
+  }
+
+  const first = payload.results?.[0];
+  if (first && typeof first.raw_content === "string") {
+    return { title: undefined, content: first.raw_content };
+  }
+
+  const failed = payload.failed_results?.[0];
+  const reason = failed?.error ?? "empty results";
+  // Treat a per-URL extraction failure as non-retryable: retrying the same URL
+  // will not help, but the caller's next provider might still succeed.
+  throw new HttpError(`extract failed: ${reason}`, 422, reason);
 }
 
 /**
