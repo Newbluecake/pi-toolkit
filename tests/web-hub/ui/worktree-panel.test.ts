@@ -55,7 +55,7 @@ describe("worktreesOf (worktree-web plan §5, W4)", () => {
     expect(worktreesOf(agent)).toBeUndefined();
   });
 
-  it("returns undefined for malformed or empty-row wires (same空态 ruling as TodoPanel)", () => {
+  it("returns undefined for malformed or empty-row wires (same空态 ruling as the TasksPanel todo section)", () => {
     const bad = { status: { worktrees: "nope" } } as unknown as Pick<AgentState, "status">;
     expect(worktreesOf(bad)).toBeUndefined();
     const empty = { status: { worktrees: wire({ rows: [] }) } } as unknown as Pick<AgentState, "status">;

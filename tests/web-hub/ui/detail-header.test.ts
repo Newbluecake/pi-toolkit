@@ -527,7 +527,7 @@ describe("DetailHeader.vue — mid-band drawer toggle (todo #7)", () => {
 /**
  * worktree-web plan §5 (package W4): the header mounts `WorktreePanel` straight from
  * `status.worktrees` (no state.js mirror — the status reducer replaces `agent.status`
- * wholesale), after the TodoPanel slot; no wire (or zero rows) ⇒ no panel.
+ * wholesale), after the TasksPanel slot; no wire (or zero rows) ⇒ no panel.
  */
 describe("DetailHeader.vue — worktree panel mount (worktree-web W4)", () => {
   const wt = {

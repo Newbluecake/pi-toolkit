@@ -9,7 +9,7 @@ const detail = {
   notConnectedBody: "It may have exited, or the link is stale.",
   sessionDetailsAria: "Session details",
   // 2026-10 「红框部分支持收起，点击标题展开」: the detail-title disclosure toggle (aria-label —
-  // combined expand/collapse wording, same grammar as todoToggleAria; state rides aria-expanded).
+  // combined expand/collapse wording, same grammar as tasksToggleAria; state rides aria-expanded).
   headToggleAria: "Expand or collapse session info",
   kvCwd: "cwd",
   kvSession: "session",
@@ -70,21 +70,19 @@ const detail = {
   bashJobsTailAge: "tail {n}s old",
   bashJobsUnavailable: "unavailable",
   bashJobsMore: "(+{n} more)",
-  todoTitle: "Tasks {total} · {done} done · {active} active",
-  todoToggleAria: "Toggle the task list",
   todoStatusPending: "Pending",
   todoStatusInProgress: "In progress",
   todoStatusCompleted: "Completed",
   todoBlockedBy: "blocked by {ids}",
   todoMore: "(+{n} more)",
   // web-hub-delete-session plan v2 §5.4: DashboardView's 「已删除」 empty state (appended at
-  // the file's end — another package inserts before `todoTitle`, never here).
+  // the file's end — another package inserts before `removedTitle`, never here).
   removedTitle: "Session removed from the list",
   removedBody: "The session file is kept; resume it from a terminal with pi.",
   // Deep-link refresh flicker fix: pre-first-`agents`-snapshot loading state (DashboardView).
   loadingTitle: "Connecting…",
   loadingBody: "Waiting for the hub's first snapshot.",
-  // todo-archive plan v2.1 §2 (package B, D4/D5): TodoPanel's fold tail rows. zh translates both
+  // todo-archive plan v2.1 §2 (package B, D4/D5): the todo section's fold tail rows. zh translates both
   // lines as prose (「已完成 {n} 项」/「已归档 {n} 项」, D4 拍板 — web walks i18n, unlike the TUI's
   // English-token fold line). Appended at the file's end — another package inserts before
   // `todoCompletedHidden`, never here.
@@ -122,11 +120,13 @@ const detail = {
   bashJobsArchiveOmitted: "Archive {n} Older Finished Jobs",
   // 2026-10-28: running rows pushed out of the wire by the 20-row cap / byte budget (not archivable).
   bashJobsRunningOverflow: "{n} more running job(s) not shown",
-  // Composer todo chip (2026-11 user request): the always-visible open-tasks chip in the
-  // composer's bottom row + its read-only open-only panel (Composer.vue, styles/composer-todo.css).
-  // Status labels / blockedBy reuse the existing todoStatus*/todoBlockedBy keys above.
-  composerTodoAria: "Show open tasks",
-  composerTodoTitle: "Open tasks",
+  // Composer tasks chip (2026-11 user request + schedule-auto-approve r2 W3): the always-visible
+  // aggregated chip in the composer's bottom row + its read-only panel (Composer.vue,
+  // styles/composer-todo.css). Status labels / blockedBy reuse the todoStatus*/todoBlockedBy
+  // keys above; the sched section header reuses tasksSchedSec.
+  composerTasksAria: "Show tasks",
+  composerTasksTitle: "Tasks",
+  composerSchedReadonly: "Scheduled tasks are read-only here — pause or delete them from the detail panel.",
   composerTodoDone: "{n} done",
   composerTodoMore: "(+{n} more)",
   // schedule-auto-approve r2 W2: the aggregated TasksPanel (detail header — todo section +

@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 /**
- * Composer todo chip (2026-11 user request): the always-visible `✓ N` open-tasks chip
+ * Composer tasks chip (2026-11 user request + schedule-auto-approve r2 W3): the always-visible
+ * aggregated chip
  * (`.composer-todo-external`, absolutely positioned at the composer card's top-left — a
  * `.composer-chips` SIBLING in the DOM, so the typing-time `.chips-off` fade never applies)
  * + its read-only open-only panel. Covers: the empty-state ruling (no todo wire / openCount
@@ -10,7 +11,7 @@
  * tap pins directly — verifier major, 2026-11-04), click pin/unpin with `aria-expanded`,
  * outside-pointerdown close, open-only row filtering (completed surface only as the header's
  * `X done` summary), the `+N more` tail (`omitted` minus the `completedHidden` fold,
- * TodoPanel's formula), the steer/held ruling (2026-11-04): while queue rows render
+ * TasksPanel's formula), the steer/held ruling (2026-11-04): while queue rows render
  * above the composer the chip AND panel never render — an expanded panel drops immediately
  * and never restores a stale expanded state when the queue drains — and a static contract
  * for the CSS-only expanded-badge hiding.
@@ -21,9 +22,15 @@ import { resolve } from "node:path";
 import { computed, nextTick, ref, type Ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Composer from "../../../src/web-hub/ui/src/components/control/Composer.vue";
-import { CONTROL_VIEW, type ControlView } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
+import {
+  CONTROL_VIEW,
+  HUB_CTX,
+  type ControlView,
+} from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import { resetLangForTests } from "../../../src/web-hub/ui/src/composables/useI18n.js";
-import type { AgentState, TodoWire } from "../../../src/web-hub/ui/src/types.js";
+import type { AgentState, CmdOutcome, ControlHandle, HubHandle, TodoWire } from "../../../src/web-hub/ui/src/types.js";
+import type { SchedulesPayloadWire } from "../../../src/web-hub/protocol/schedule.js";
+import { makePayload, makeSession, makeTask } from "./fixtures/schedule.js";
 
 /** Desktop default: ONLY the composer's real-hover gate matches; every other query
  * (max-width, pointer: coarse, …) answers false, exactly like the old blanket stub. */
@@ -61,8 +68,10 @@ const todoFixture = (over: Partial<TodoWire> = {}): TodoWire => ({
   ...over,
 });
 
+const SCHED_SID = "01a0d892-5c1e-7a40-9e2b-4f6d0c8a1b37";
+
 function todoView(todo: TodoWire | undefined, queue: Ref<readonly unknown[]> = ref([])): ControlView {
-  const agent = ref({ pendingCtl: [], todo } as unknown as AgentState);
+  const agent = ref({ pendingCtl: [], todo, session: { sessionId: SCHED_SID } } as unknown as AgentState);
   return {
     agentKey: "agent-a",
     control: null,
@@ -78,12 +87,29 @@ function todoView(todo: TodoWire | undefined, queue: Ref<readonly unknown[]> = r
   };
 }
 
-function mountComposer(view?: ControlView) {
+function hubOf(over: { caps?: unknown; schedules?: SchedulesPayloadWire; selectRuns?: string[][] } = {}) {
+  const state = ref({
+    agents: new Map(),
+    hub: { caps: over.caps ?? ["sched.v1"] },
+    conn: "open",
+    schedules: over.schedules,
+  });
+  const hub = {
+    state,
+    selectRun: (agentKey: string, runId: string) => {
+      over.selectRuns?.push([agentKey, runId]);
+    },
+  } as unknown as HubHandle;
+  return hub;
+}
+
+function mountComposer(view?: ControlView, hub?: HubHandle) {
   const wrapper = mount(Composer, {
     props: { enabled: true, busy: false },
     global: {
       provide: {
         ...(view ? { [CONTROL_VIEW as symbol]: view } : {}),
+        ...(hub ? { [HUB_CTX as symbol]: hub } : {}),
       },
     },
   });
@@ -114,7 +140,7 @@ describe("Composer todo chip (2026-11 user request)", () => {
     const btn = w.find(".composer-todo-btn");
     expect(btn.exists()).toBe(true);
     expect(btn.find(".composer-todo-badge").text()).toBe("2"); // open 1 + inProgress 1
-    expect(btn.attributes("aria-label")).toBe("Show open tasks");
+    expect(btn.attributes("aria-label")).toBe("Show tasks");
     expect(btn.attributes("aria-expanded")).toBe("false");
     // Positioned OUTSIDE the composer card (absolute, top-left), not inside .composer-chips.
     expect(w.find(".composer-chips .composer-todo-external").exists()).toBe(false);
@@ -162,7 +188,7 @@ describe("Composer todo chip (2026-11 user request)", () => {
     expect(w.find(".composer-todo-panel").exists()).toBe(false);
   });
 
-  it("+N more tail = omitted minus the completedHidden fold (TodoPanel's formula)", async () => {
+  it("+N more tail = omitted minus the completedHidden fold (TasksPanel's formula)", async () => {
     const w = mountComposer(todoView(todoFixture({ omitted: 5, completedHidden: 2 })));
     await w.find(".composer-todo-btn").trigger("click");
     expect(w.find(".composer-todo-more").text()).toBe("(+3 more)");
@@ -253,5 +279,85 @@ describe("Composer todo chip (2026-11 user request)", () => {
     await nextTick();
     expect(w.find(".composer-todo-external").exists()).toBe(false);
     expect(w.find(".composer-todo-panel").exists()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// schedule-auto-approve r2 §6-W3: the chip's ⏰ segment + the panel's read-only sched section.
+// ---------------------------------------------------------------------------
+
+describe("Composer tasks chip ⏰ segment (r2 W3)", () => {
+  it("sched-only session (no todo wire): the chip renders with ONLY the ⏰ segment; badge = sched count", () => {
+    const w = mountComposer(todoView(undefined), hubOf({ schedules: makePayload() }));
+    const btn = w.find(".composer-todo-btn");
+    expect(btn.exists()).toBe(true);
+    expect(btn.find(".seg").text()).toBe("2"); // clock seg count (fixture: 2 tasks)
+    expect(btn.attributes("aria-label")).toBe("Show tasks");
+    expect(btn.find(".composer-todo-badge").text()).toBe("2");
+    // no ✓ segment without a todo wire
+    expect(btn.findAll(".seg")).toHaveLength(1);
+  });
+
+  it("both sides: ✓ seg + ⏰ seg, badge = open + sched; live run spins the clock icon", () => {
+    const running = makePayload(); // fixture session carries a `running` run ⇒ live
+    const w = mountComposer(todoView(todoFixture()), hubOf({ schedules: running }));
+    const btn = w.find(".composer-todo-btn");
+    expect(btn.findAll(".seg")).toHaveLength(2);
+    expect(btn.find(".composer-todo-badge").text()).toBe("4"); // 2 open + 2 sched
+    const clockSeg = btn.findAll(".seg")[1]!;
+    expect(clockSeg.classes()).toContain("live");
+    expect(clockSeg.find(".spin").exists()).toBe(true); // spinning clock while a run is live
+    const quiet = makePayload([
+      makeSession({ tasks: [makeTask()], runs: [] }), // no live run
+    ]);
+    const w2 = mountComposer(todoView(todoFixture()), hubOf({ schedules: quiet }));
+    const seg = w2.find(".composer-todo-btn").findAll(".seg")[1]!;
+    expect(seg.classes()).not.toContain("live");
+    expect(seg.find(".spin").exists()).toBe(false);
+  });
+
+  it("gate: no todo AND no sched projection ⇒ no chip; no sched.v1 cap ⇒ no ⏰ segment", () => {
+    expect(mountComposer(todoView(undefined)).find(".composer-todo-external").exists()).toBe(false);
+    const noCap = mountComposer(todoView(undefined), hubOf({ caps: [], schedules: makePayload() }));
+    expect(noCap.find(".composer-todo-external").exists()).toBe(false);
+    // todo-only stays exactly as before W3
+    const todoOnly = mountComposer(todoView(todoFixture()));
+    expect(todoOnly.find(".composer-todo-btn").findAll(".seg")).toHaveLength(1);
+    expect(todoOnly.find(".composer-todo-badge").text()).toBe("2");
+  });
+
+  it("steer/held (queueAbove) hides the chip even sched-only", () => {
+    const queue: Ref<readonly unknown[]> = ref([{ cmdId: "c1", text: "held steer", state: "held" }]);
+    const w = mountComposer(todoView(undefined, queue), hubOf({ schedules: makePayload() }));
+    expect(w.find(".composer-todo-external").exists()).toBe(false);
+    expect(w.find(".composer-todo-panel").exists()).toBe(false);
+  });
+
+  it("panel: sched section renders compact rows READ-ONLY (no action buttons, inert names) + the note; run link jumps", async () => {
+    const selectRuns: string[][] = [];
+    const withRunId = makePayload([
+      makeSession({
+        tasks: [makeTask()],
+        runs: [{ ...makeSession().runs[1]!, runId: "run-w3a" }],
+      }),
+    ]);
+    const w = mountComposer(todoView(undefined), hubOf({ schedules: withRunId, selectRuns }));
+    await w.find(".composer-todo-btn").trigger("click");
+    const panel = w.find(".composer-todo-panel");
+    expect(panel.exists()).toBe(true);
+    expect(panel.find(".composer-tasks-sec").exists()).toBe(true);
+    expect(panel.findAll(".sched-row")).toHaveLength(1);
+    expect(panel.find(".sched-row-acts").exists()).toBe(false); // read-only: no action column
+    expect(panel.find(".composer-sched-readonly").exists()).toBe(true);
+    await panel.find(".sched-run-link").trigger("click");
+    expect(selectRuns).toEqual([["agent-a", "run-w3a"]]);
+  });
+
+  it("panel: both sections render side by side; the todo list keeps its open-only ruling", async () => {
+    const w = mountComposer(todoView(todoFixture()), hubOf({ schedules: makePayload() }));
+    await w.find(".composer-todo-btn").trigger("click");
+    expect(w.find(".composer-todo-list").exists()).toBe(true);
+    expect(w.find(".composer-tasks-sec").exists()).toBe(true);
+    expect(w.find(".composer-todo-head .composer-todo-title").text()).toBe("Tasks");
   });
 });

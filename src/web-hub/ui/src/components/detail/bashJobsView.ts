@@ -9,7 +9,7 @@
  *
  * Render rules the component consumes from here:
  * - a wire with no `rows` array (or an empty one) renders NO panel at all — same empty-state
- *   ruling as `TodoPanel`/`WorktreePanel` (absent ⇒ no background jobs / bash-jobs disabled /
+ *   ruling as the TasksPanel/WorktreePanel sections (absent ⇒ no background jobs / bash-jobs disabled /
  *   web-hub disabled / source missing, D5);
  * - `status` is an OPEN string on the wire (plan §2: a future status value must not be dropped
  *   by an older peer): `statusToken` maps the known lifecycle literals (`src/bash/types.ts`'s
@@ -63,7 +63,7 @@ export interface BashJobStatusToken {
 }
 
 /** Known lifecycle literals (`src/bash/types.ts`'s `JOB_STATUSES`). Display tokens are
- * English-only inline markers; the icon grammar follows TodoPanel (loader/clock/check). */
+ * English-only inline markers; the icon grammar follows the todo rows (loader/clock/check). */
 const KNOWN_STATUS: Readonly<Record<string, BashJobStatusToken>> = {
   staged: { text: "staged", kind: "muted", icon: "clock", spin: false, live: true },
   running: { text: "running", kind: "running", icon: "loader", spin: true, live: true },

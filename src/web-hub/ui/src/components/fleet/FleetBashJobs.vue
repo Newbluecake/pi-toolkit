@@ -18,7 +18,7 @@
   变化(新帧)时把 `at` 重置为共享 now,显示值 = baseline + max(0, now − at);终态行直接
   显示 wire 冻结的 `elapsedMs`。行集合收缩时 pruning,展开中的行消失时收起。
 
-  折叠状态是普通局部 ref —— 不跨 reload 持久化(同 TodoPanel/WorktreePanel 先例;
+  折叠状态是普通局部 ref —— 不跨 reload 持久化(同 TasksPanel/WorktreePanel 先例;
   source-scan 的持久化白名单不覆盖本组件)。有运行中的任务时分组默认展开,全终态时默认
   收起(终态计数已在组标题里一目了然)。样式沿用 `styles/bash-jobs.css`(`.bj-*` 类不变,
   overscroll-guard.test.ts 按类名钉),分组包装与状态底色也在该文件。

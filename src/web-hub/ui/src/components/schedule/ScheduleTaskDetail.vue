@@ -5,8 +5,9 @@
 
   Shows the full definition verbatim: the complete prompt (plain text nodes only, never
   v-html), schedule expr + tz, form, model/thinking/timeout/handoff/isolation, and the feishu
-  flag. The parent passes the task looked up from the live `schedules` snapshot, so a change
-  elsewhere re-renders the view.
+  flag. The wire's legacy approval fields (`pendingApproval` / `executable` / `offer` /
+  `task.approval`) are ignored — never read. The parent passes the task looked up from the
+  live `schedules` snapshot, so a change elsewhere re-renders the view.
 -->
 <script setup lang="ts">
 import { computed } from "vue";

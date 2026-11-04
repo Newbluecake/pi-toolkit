@@ -38,9 +38,9 @@
  * `needsResync`. The entry/message cores (`historyCore`/`pageCore`/`eventCore`) are shared with the
  * main session — same code path, main-session behavior pinned unchanged by logic-state.test.ts.
  *
- * Todo panel (todo-web plan §4, package T4): the optional `StatusInfo.todo` task-list summary
+ * Tasks panel (todo-web plan §4, package T4): the optional `StatusInfo.todo` task-list summary
  * is mirrored off the status slot onto `AgentState.todo` (absent-means-cleared, same semantics
- * as the `queue` mirror) for the detail header's read-only TodoPanel.
+ * as the `queue` mirror) for the detail header's TasksPanel todo section and the composer chip.
  *
  * Load gate / host-load (sysload plan §7.1/§7.4/§10, package P4): the optional `StatusInfo.
  * loadGate` is mirrored off the status slot onto `AgentState.loadGate` + `loadGateReceivedAt`
@@ -741,7 +741,7 @@ function reduceInner(s, event, d, at) {
         /** @type {AgentState} */
         const next = { ...a, status: d.status, card: { ...a.card, status: d.status } };
         // todo-web §4 (T4): mirror the optional task-list summary off the status slot for the
-        // detail header's TodoPanel. Same absent-means-cleared semantics as the queue mirror
+        // detail header's TasksPanel / the composer chip. Same absent-means-cleared semantics as the queue mirror
         // below — the wire omits `todo` entirely once the last task is cleared (the agent-side
         // projection returns `undefined`), and the whole-slot replace above alone would leave
         // no single field the panel can read without re-narrowing `status` itself.

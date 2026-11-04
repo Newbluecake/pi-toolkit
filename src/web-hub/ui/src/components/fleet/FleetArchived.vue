@@ -9,7 +9,7 @@
   Row shape mirrors the tree's terminal rows, dimmed: icon / optional type badge / title +
   @label / cost / time range. No per-row fold, no transcript open button (the run-open entry
   stays on the tree; an archived row is intentionally read-only display). Expand state is a
-  plain local ref (TodoPanel/WorktreePanel precedent — never persisted).
+  plain local ref (TasksPanel/WorktreePanel precedent — never persisted).
 -->
 <script setup lang="ts">
 import { computed, inject, ref, watch } from "vue";

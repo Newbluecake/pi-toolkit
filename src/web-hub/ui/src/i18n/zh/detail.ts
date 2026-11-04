@@ -12,7 +12,7 @@ const detail = {
   notConnectedBody: "它可能已退出，或链接已过期。",
   sessionDetailsAria: "会话详情",
   // 2026-10 「红框部分支持收起，点击标题展开」：标题行的展开/收起开关（aria-label，展开+收起
-  // 合一描述，同 todoToggleAria 语法；状态由 aria-expanded 承载）。
+  // 合一描述，同 tasksToggleAria 语法；状态由 aria-expanded 承载）。
   headToggleAria: "展开/收起会话信息",
   kvCwd: "cwd",
   kvSession: "会话",
@@ -73,8 +73,6 @@ const detail = {
   bashJobsTailAge: "tail {n}s old",
   bashJobsUnavailable: "unavailable",
   bashJobsMore: "(+{n} more)",
-  todoTitle: "任务 {total} · {done} 已完成 · {active} 进行中",
-  todoToggleAria: "展开或收起任务列表",
   todoStatusPending: "待办",
   todoStatusInProgress: "进行中",
   todoStatusCompleted: "已完成",
@@ -84,7 +82,7 @@ const detail = {
   removedBody: "会话文件仍保留，可在终端用 pi 恢复。",
   loadingTitle: "正在连接…",
   loadingBody: "正在等待 hub 的首个快照。",
-  // todo-archive plan v2.1 §2（包 B，D4/D5）：TodoPanel 折叠尾行。zh 按散文翻译（D4 拍板：web 走
+  // todo-archive plan v2.1 §2（包 B，D4/D5）：todo 分区折叠尾行。zh 按散文翻译（D4 拍板：web 走
   // i18n，不同于 TUI 折叠行的英文 token）。追加在文件末尾——其它包插在 `todoCompletedHidden`
   // 之前，永不动这里。
   todoCompletedHidden: "已完成 {n} 项",
@@ -116,10 +114,12 @@ const detail = {
   bashJobsArchiveOmitted: "归档 {n} 条更早的已完成任务",
   // 2026-10-28: running rows pushed out of the wire by the 20-row cap / byte budget (not archivable).
   bashJobsRunningOverflow: "另有 {n} 条运行中的任务未显示",
-  // Composer todo 按钮（2026-11 用户需求）：输入框底行常驻的未完成任务按钮 + 只读面板
-  //（Composer.vue，styles/composer-todo.css）。状态/阻塞文案复用上方 todoStatus*/todoBlockedBy。
-  composerTodoAria: "查看未完成任务",
-  composerTodoTitle: "未完成任务",
+  // Composer 任务按钮（2026-11 用户需求 + schedule-auto-approve r2 W3）：输入框底行常驻的聚合
+  // 按钮 + 只读面板（Composer.vue，styles/composer-todo.css）。状态/阻塞文案复用上方
+  // todoStatus*/todoBlockedBy；定时分区标题复用 tasksSchedSec。
+  composerTasksAria: "查看任务",
+  composerTasksTitle: "任务",
+  composerSchedReadonly: "定时任务在此只读——暂停或删除请到详情面板操作。",
   composerTodoDone: "已完成 {n} 项",
   composerTodoMore: "（+{n} 更多）",
   // schedule-auto-approve r2 W2：聚合 TasksPanel（详情头部——待办分区 + 定时任务分区，

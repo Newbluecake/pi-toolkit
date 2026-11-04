@@ -51,7 +51,7 @@ export type { LoadTopOutcome };
 // default-model plan F1: the prefs outcome/wire shapes (SpawnRow/SettingsView consume them
 // through this single re-export, same no-second-import-path rule as above).
 export type { SpawnPrefsOutcome, SpawnPrefsWire };
-// todo-web §4 (T4): the detail TodoPanel's prop type. `import type` only — the protocol
+// todo-web §4 (T4): the detail TasksPanel's todo-section prop type. `import type` only — the protocol
 // module never becomes a runtime dependency of the UI bundle through this file.
 export type { TodoTaskWire, TodoWire };
 
@@ -144,8 +144,8 @@ export interface AgentState {
    * when nothing was omitted) — drives the “另有 N 个未列出” rows in `FleetTree`. */
   readonly fleetOmitted?: FleetOmittedWire;
   /** todo-web §4 (T4): the status reducer's mirror of `StatusInfo.todo` (the main session's
-   * task-list summary). Absent = no tasks / todo disabled / web-hub off — the detail header's
-   * TodoPanel renders nothing then. Optional per the frozen-types convention. */
+   * task-list summary). Absent = no tasks / todo disabled / web-hub off — the detail
+   * TasksPanel's todo section renders nothing then. Optional per the frozen-types convention. */
   readonly todo?: TodoWire;
   /** steer-recall plan §7 (P-ui): the ACCEPTED `status.held` snapshot rows (Y2 scope-gated,
    * U-MERGE tombstone-filtered, same-scope union — a row the newest snapshot dropped but no

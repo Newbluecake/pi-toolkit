@@ -87,23 +87,28 @@
   and keep their usePopoverClamp viewport fitting — opening one moves focus into the panel,
   which the chips' hidden state can never interrupt (hidden ⇒ not clickable).
 
-  Todo chip (todo-web follow-up, 2026-11 user request): an ALWAYS-VISIBLE open-tasks chip
-  (`.composer-todo-external`) — absolutely positioned at the composer card's top-left,
-  OUTSIDE the border but still a SIBLING of `.composer-chips` in the bottom row's DOM, so the
-  typing-time `.chips-off` fade never applies. It reads `AgentState.todo` (the status
-  reducer's mirror of `StatusInfo.todo`) straight off the injected CONTROL_VIEW — no
-  prop/contracts change — and hides itself when the wire is absent or the open count is 0, OR
-  while QueueList renders queue/held rows above the composer (2026-11-04 screenshot ruling:
-  the chip's top:-24px seat would cover the held steer card's bottom-left text — hidden by a
-  render condition, `queueAbove`, never by z-index). On `(hover: hover) and (pointer: fine)`
+  Tasks chip (todo-web follow-up 2026-11 + schedule-auto-approve r2 W3): an ALWAYS-VISIBLE
+  aggregated chip (`.composer-todo-external`) — absolutely positioned at the composer card's
+  top-left, OUTSIDE the border but still a SIBLING of `.composer-chips` in the bottom row's
+  DOM, so the typing-time `.chips-off` fade never applies. One pill, two segments: `✓ N`
+  (open todo: pending + in_progress, off `AgentState.todo` — the status reducer's mirror of
+  `StatusInfo.todo`, straight off the injected CONTROL_VIEW) and `⏰ N` (scheduled tasks off
+  the injected HUB_CTX's `schedules` slot + `sched.v1` cap, clock icon spinning while a run
+  is live). It hides itself when BOTH sides are empty, OR while QueueList renders queue/held
+  rows above the composer (2026-11-04 screenshot ruling: the chip's top:-24px seat would
+  cover the held steer card's bottom-left text — hidden by a render condition, `queueAbove`,
+  never by z-index). On `(hover: hover) and (pointer: fine)`
   pointers, hovering the chip/panel auto-expands a read-only OPEN-ONLY task panel (pending +
   in_progress rows; completed tasks surface only as the header's grey `X done` summary) in
   the mention panel's slot above the input card — hover is IGNORED on coarse/touch pointers
   (the browser's synthetic pre-click mouseenter would otherwise eat the first tap), where a
-  click pins/unpins directly; an outside pointerdown closes it.
+  click pins/unpins directly; an outside pointerdown closes it. The expanded panel carries
+  the open-only todo section plus a READ-ONLY sched section (`ScheduleRows` compact — no
+  action buttons, run links still jump to the fleet drawer).
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue";
+import { useTicker } from "../../composables/useTicker.js";
 import {
   commandPolicyFor,
   composerKeyAction,
@@ -135,6 +140,7 @@ import {
   parseCompleteResponse,
 } from "@logic/cmdArgs.js";
 import { API } from "@logic/contract.js";
+import { schedSummaryOf, sessionProjectionOf, taskRowsOf } from "@logic/schedule.js";
 import { useI18n } from "../../composables/useI18n.js";
 import type { ComposerEmits, ComposerProps } from "../../contracts.js";
 import type { ControlHandle } from "../../types.js";
@@ -152,6 +158,9 @@ import { CONTROL_ENV, CONTROL_VIEW, HUB_CTX } from "./controlContext.js";
 import { useDeliverDefault } from "../../composables/useDeliverDefault.js";
 import { browserLocalStorage } from "../shell/themeStorage.js";
 import "../../styles/composer-todo.css";
+import "../../styles/schedule.css";
+import ScheduleRows from "../schedule/ScheduleRows.vue";
+import type { TaskRow } from "../schedule/taskRow.js";
 import "../../styles/upload.css";
 
 const props = defineProps<ComposerProps>();
@@ -454,9 +463,12 @@ const todoOpenCount = computed(() => {
  * tried and ruled out). A plain main-session composer (empty queue) keeps the chip
  * untouched. Same `queueItems` slot the ContextRing already reads — no new prop. */
 const queueAbove = computed(() => (view?.queueItems.value.length ?? 0) > 0);
-const todoChipOn = computed(() => !queueAbove.value && todoWire.value !== undefined && todoOpenCount.value > 0);
+/** Either chip segment has content (todo open tasks / a schedule projection) — the chip
+ *  renders for EITHER, still never while queue/held rows sit above the composer. */
+const todoSegOn = computed(() => todoWire.value !== undefined && todoOpenCount.value > 0);
+const chipOn = computed(() => !queueAbove.value && (todoSegOn.value || schedWire.value !== undefined));
 /** Panel visibility — a plain local ref, NOT persisted (source-scan's persistence allowlist
- * doesn't cover this component; same precedent as TodoPanel's own fold state). */
+ * doesn't cover this component; same precedent as TasksPanel's own fold state). */
 const todoOpen = ref(false);
 /** Hover state: hovering the chip or the panel auto-expands (no click needed). */
 const todoHover = ref(false);
@@ -475,7 +487,7 @@ const todoRows = computed<readonly TodoTaskWire[]>(() =>
   (todoWire.value?.tasks ?? []).filter((task) => task.status !== "completed"),
 );
 /** `+N more` tail = wire-capped rows minus the completed fold the `X done` line already
- * accounts for (TodoPanel's moreCount formula — degrades to the raw `omitted` on an old wire
+ * accounts for (TasksPanel's moreCount formula — degrades to the raw `omitted` on an old wire
  * without `completedHidden`). */
 const todoMoreCount = computed(() => {
   const w = todoWire.value;
@@ -483,7 +495,40 @@ const todoMoreCount = computed(() => {
   return Math.max(0, (w.omitted ?? 0) - (w.completedHidden ?? 0));
 });
 
-/** Status-icon semantics沿用 TodoPanel: pending=clock, in_progress=loader (spinning). */
+// schedule-auto-approve r2 W3: the chip's ⏰ segment + the panel's read-only sched section.
+// Same inputs as DetailHeader's TasksPanel (hub caps + the hub-global `schedules` slot + the
+// view agent's sessionId, straight off the injected HUB_CTX/CONTROL_VIEW) — no new props or
+// contracts; without a hub both stay undefined and the chip is exactly the todo-only one.
+const schedSessionId = computed(() => {
+  const s = view?.agent.value.session as { sessionId?: unknown } | undefined;
+  return typeof s?.sessionId === "string" && s.sessionId !== "" ? s.sessionId : undefined;
+});
+const schedWire = computed(() =>
+  schedSummaryOf(hub?.state.value.hub?.["caps"], hub?.state.value.schedules, schedSessionId.value),
+);
+const schedProj = computed(() => sessionProjectionOf(hub?.state.value.schedules, schedSessionId.value));
+/** 30s ticker for the rows' relative tokens (TasksPanel/SchedulePanel precedent). */
+const schedTicker = useTicker({
+  doc: typeof document === "undefined" ? { hidden: false, addEventListener() {}, removeEventListener() {} } : document,
+  win: typeof window === "undefined" ? { addEventListener() {}, removeEventListener() {} } : window,
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (h) => clearTimeout(h),
+  now: () => Date.now(),
+  intervalMs: 30_000,
+});
+onUnmounted(() => schedTicker.dispose());
+const schedRows = computed<readonly TaskRow[]>(() =>
+  schedWire.value === undefined ? [] : (taskRowsOf(schedProj.value, schedTicker.now.value) as TaskRow[]),
+);
+/** The chip's badge = ✓ open + ⏰ count (preview B1); zero-sum never renders the badge. */
+const badgeCount = computed(() => todoOpenCount.value + (schedWire.value?.count ?? 0));
+/** The panel's run link ⇒ the fleet drawer's run view (FleetDrawer's selectRun precedent). */
+function onSchedOpenRun(runId: string): void {
+  if (view === null) return;
+  hub?.selectRun?.(view.agentKey, runId);
+}
+
+/** Status-icon semantics沿用 detail 头部任务面板: pending=clock, in_progress=loader (spinning). */
 const TODO_STATUS_ICON: Readonly<Record<TodoTaskWire["status"], IconName>> = {
   pending: "clock",
   in_progress: "loader",
@@ -1355,30 +1400,33 @@ watch(
       </button>
       <p v-if="panelRows.length === 0" class="mention-empty">{{ t("control.mentionEmpty") }}</p>
     </div>
-    <!-- Composer todo panel (2026-11 user request): the todo chip's read-only OPEN-ONLY task
-         list, mounted in the mention panel's slot (in-flow above the input card, so it opens
-         upward from the bottom-pinned composer). Hover expands it, click pins/unpins, and an
-         outside pointerdown closes it. Hidden together with the chip while queue/held rows
-         render above the composer (`todoChipOn`, see `queueAbove`).
-         Rows mirror TodoPanel's structure (status icon + #id subject + optional truncated
-         description + open-blocker label) minus completed tasks — those are the header's
-         grey `X done` summary. Strictly read-only: no checkboxes, no write path. -->
+    <!-- Composer tasks chip (2026-11 user request + schedule-auto-approve r2 W3): the todo
+         chip's read-only OPEN-ONLY task list PLUS the read-only sched section, mounted in the
+         mention panel's slot (in-flow above the input card, so it opens upward from the
+         bottom-pinned composer). Hover expands it, click pins/unpins, and an outside
+         pointerdown closes it. Hidden together with the chip while queue/held rows render
+         above the composer (`chipOn`, see `queueAbove`).
+         Todo rows mirror the detail TasksPanel's structure (status icon + #id subject +
+         optional truncated description + open-blocker label) minus completed tasks — those
+         are the header's grey `X done` summary. The sched section renders `ScheduleRows`
+         compact WITHOUT `canWrite` — strictly read-only (no action buttons, the row names are
+         pointer-inert here via composer-todo.css), only the run links are live. -->
     <div
-      v-if="todoChipOn && todoExpanded && todoWire"
+      v-if="chipOn && todoExpanded"
       class="composer-todo-panel"
       role="region"
-      :aria-label="t('detail.composerTodoTitle')"
+      :aria-label="t('detail.composerTasksTitle')"
       aria-readonly="true"
       @mouseenter="onTodoMouseEnter"
       @mouseleave="onTodoMouseLeave"
     >
       <p class="composer-todo-head">
-        <span class="composer-todo-title">{{ t("detail.composerTodoTitle") }}</span>
-        <span v-if="todoWire.counts.completed > 0" class="composer-todo-done">{{
+        <span class="composer-todo-title">{{ t("detail.composerTasksTitle") }}</span>
+        <span v-if="todoWire !== undefined && todoWire.counts.completed > 0" class="composer-todo-done">{{
           t("detail.composerTodoDone", { n: todoWire.counts.completed })
         }}</span>
       </p>
-      <ul class="composer-todo-list">
+      <ul v-if="todoSegOn" class="composer-todo-list">
         <li v-for="task in todoRows" :key="task.id" class="composer-todo-item" :data-status="task.status">
           <AppIcon
             :name="TODO_STATUS_ICON[task.status]"
@@ -1398,6 +1446,11 @@ watch(
           {{ t("detail.composerTodoMore", { n: todoMoreCount }) }}
         </li>
       </ul>
+      <div v-if="schedWire !== undefined" class="composer-tasks-sec">
+        <p class="composer-tasks-sec-title">{{ t("detail.tasksSchedSec", { n: schedWire.count }) }}</p>
+        <ScheduleRows :rows="schedRows" :now="schedTicker.now.value" compact @open-run="onSchedOpenRun" />
+        <p class="composer-sched-readonly">{{ t("detail.composerSchedReadonly") }}</p>
+      </div>
     </div>
     <AttachmentTray
       v-if="trayItems.length > 0"
@@ -1454,17 +1507,19 @@ watch(
           <div class="composer-chips" :class="{ 'chips-off': text !== '' }">
             <ModelSwitcher />
           </div>
-          <!-- Todo chip (2026-11 user request): positioned OUTSIDE the composer card,
-               top-left corner (absolute, top:-24px). Green pill with a ✓ icon and a
-               numeric badge in the top-right. Hover auto-expands the open-tasks-only panel
-               on `(hover: hover) and (pointer: fine)` pointers ONLY (touch's synthetic
+          <!-- Tasks chip (2026-11 user request + schedule-auto-approve r2 W3): positioned
+               OUTSIDE the composer card, top-left corner (absolute, top:-24px). One pill with
+               up to two segments — `✓ N` (open todo: pending + in_progress) and `⏰ N`
+               (scheduled tasks, the clock icon spins while a run is live) — plus the numeric
+               badge (open + sched, hidden while expanded). Hover auto-expands the read-only
+               panel on `(hover: hover) and (pointer: fine)` pointers ONLY (touch's synthetic
                pre-click mouseenter is ignored — the first tap pins directly); click
-               pins/unpins. Always visible while open tasks exist (not affected by
+               pins/unpins. Always visible while either side has content (not affected by
                chips-off) — EXCEPT while queue/held rows render above the composer (the
                steer/held scenario, `queueAbove`): not rendered at all then, so it can never
                cover the held card's bottom-left text. -->
           <div
-            v-if="todoChipOn"
+            v-if="chipOn"
             class="composer-todo-external"
             @mouseenter="onTodoMouseEnter"
             @mouseleave="onTodoMouseLeave"
@@ -1473,11 +1528,18 @@ watch(
               type="button"
               class="composer-todo-btn"
               :aria-expanded="todoExpanded"
-              :aria-label="t('detail.composerTodoAria')"
+              :aria-label="t('detail.composerTasksAria')"
               @click="onTodoChipClick"
             >
-              <AppIcon name="check" class="icon-sm" />
-              <span class="composer-todo-badge">{{ todoOpenCount }}</span>
+              <span v-if="todoSegOn" class="seg">
+                <AppIcon name="check" class="icon-sm" /><span class="n">{{ todoOpenCount }}</span>
+              </span>
+              <span v-if="schedWire !== undefined" class="seg" :class="{ live: schedWire.live }">
+                <AppIcon name="clock" class="icon-sm" :class="{ spin: schedWire.live }" /><span class="n">{{
+                  schedWire.count
+                }}</span>
+              </span>
+              <span v-if="badgeCount > 0" class="composer-todo-badge">{{ badgeCount }}</span>
             </button>
           </div>
           <div class="composer-end">

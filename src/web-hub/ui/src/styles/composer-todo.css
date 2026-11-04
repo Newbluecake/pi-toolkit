@@ -1,20 +1,23 @@
 /*
- * Composer todo chip + panel (todo-web follow-up, 2026-11 user request): an ALWAYS-VISIBLE
- * open-tasks chip, absolutely positioned at the composer card's top-left OUTSIDE the border
- * (`.composer-todo-external`) but still a SIBLING of `.composer-chips` in the DOM, so the
- * typing-time `.chips-off` fade (control.css) never touches it. On `(hover: hover) and
- * (pointer: fine)` pointers, hovering the chip/panel auto-expands a read-only,
- * open-tasks-only panel above the input card (mention-panel-style in-flow block) — the gate
- * lives in Composer.vue's `onTodoMouseEnter` (touch's synthetic pre-click mouseenter is
- * ignored, so the first tap pins directly); a click pins/unpins it and an outside
- * pointerdown closes it. While
- * queue/held rows render above the composer (the steer/held scenario) the chip and panel
- * are not rendered at all — Composer.vue's `queueAbove` render condition, after a z-index
- * fix was tried and ruled out — so nothing here can cover the held card.
+ * Composer tasks chip + panel (todo-web follow-up 2026-11 + schedule-auto-approve r2 W3):
+ * an ALWAYS-VISIBLE aggregated chip (`.composer-todo-external`), absolutely positioned at
+ * the composer card's top-left OUTSIDE the border but still a SIBLING of `.composer-chips`
+ * in the DOM, so the typing-time `.chips-off` fade (control.css) never touches it. Two
+ * segments — `✓ N` (open todo) and `⏰ N` (scheduled tasks, spinning clock while a run is
+ * live) — plus the numeric badge (hidden while expanded). On `(hover: hover) and
+ * (pointer: fine)` pointers, hovering the chip/panel auto-expands the read-only panel above
+ * the input card (mention-panel-style in-flow block) — the gate lives in Composer.vue's
+ * `onTodoMouseEnter` (touch's synthetic pre-click mouseenter is ignored, so the first tap
+ * pins directly); a click pins/unpins it and an outside pointerdown closes it. The panel's
+ * todo section reuses this file's row styles; the sched section rides schedule.css's
+ * `.sched-row` grammar (imported by Composer.vue) in the compact variant, strictly
+ * read-only — the row names are pointer-inert here (`.composer-tasks-sec`), only the run
+ * links are live. While queue/held rows render above the composer (the steer/held scenario)
+ * the chip and panel are not rendered at all — Composer.vue's `queueAbove` render condition.
  *
  * Own file per the source-scan ban on scoped <style> blocks and the frozen
  * `styles/todo.css` (todo-web T4) / `styles/detail.css` (fleet-drawer F6). Token-only.
- * No todo chip rendered ⇒ no selector here matches ⇒ byte-identical pre-feature layout.
+ * No chip rendered ⇒ no selector here matches ⇒ byte-identical pre-feature layout.
  */
 
 /* Row keeper: with a todo chip present the bottom row stays expanded at EVERY width (the
@@ -68,7 +71,7 @@
 .composer-todo-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   min-height: 15px;
   padding: 0 6px;
   border: 1px solid var(--c-border);
@@ -83,6 +86,22 @@
   white-space: nowrap;
   position: relative; /* anchor for the absolutely-positioned badge */
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* r2 W3 (preview B1): the chip's two segments — `✓ N` and `⏰ N`; the ⏰ segment's clock
+ * spins + tints while any run is live (`.seg.live`). */
+.composer-todo-btn .seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.composer-todo-btn .seg .n {
+  font-variant-numeric: tabular-nums;
+}
+
+.composer-todo-btn .seg.live {
+  color: var(--st-running);
 }
 
 .composer-todo-btn:hover {
@@ -105,16 +124,51 @@
 }
 
 /* Panel: same surface grammar as `.mention-panel` (control.css) — an in-flow block above
- * the input card so it opens upward from the bottom-pinned composer. */
+ * the input card so it opens upward from the bottom-pinned composer. W2 verifier nit: the
+ * bottom padding gets extra room so the chip (seated at the card's top:-24px, which the
+ * panel's bottom edge reaches) never presses against the last row's text. */
 .composer-todo-panel {
   display: flex;
   flex-direction: column;
   margin-bottom: var(--sp-1);
-  padding: var(--sp-1) var(--sp-2);
+  padding: var(--sp-1) var(--sp-2) calc(var(--sp-1) + 6px);
   border: 1px solid var(--c-border);
   border-radius: var(--r-md);
   background: var(--c-surface);
   box-shadow: var(--shadow-1);
+}
+
+/* r2 W3: the panel's read-only sched section (schedule.css `.sched-row` grammar, compact). */
+.composer-tasks-sec {
+  margin-top: var(--sp-2);
+  border-top: 1px solid var(--c-border);
+  padding-top: var(--sp-1);
+}
+
+.composer-tasks-sec-title {
+  margin: 0 0 2px;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--c-text-3);
+}
+
+/* Strictly read-only: no action buttons ever (ScheduleRows gets no canWrite), and the row
+ * names are pointer-INERT here — unlike TasksPanel they open nothing in the composer. */
+.composer-tasks-sec .sched-row-name {
+  cursor: default;
+  pointer-events: none;
+}
+
+.composer-tasks-sec .sched-row-name:hover {
+  color: var(--c-text);
+}
+
+.composer-sched-readonly {
+  margin: 4px 0 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
 }
 
 .composer-todo-head {
@@ -149,7 +203,7 @@
   overflow-y: auto;
 }
 
-/* Row structure mirrors TodoPanel's task rows (todo.css): status icon + subject column. */
+/* Row structure mirrors the TasksPanel todo rows (todo.css): status icon + subject column. */
 .composer-todo-item {
   display: flex;
   align-items: flex-start;
