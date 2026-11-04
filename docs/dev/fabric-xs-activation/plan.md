@@ -1,6 +1,7 @@
 # 跨会话请求状态、可信人类代发与幂等激活 — 实施计划
 
 > 2026-11-04 · L3 plan · 基线：`docs/dev/fabric-xs-activation/arch.md`（架构契约，用户六项裁定 U1–U6 已闭合）。
+> 2026-11-05 P5 收口：门禁与 acceptance 见 fabric-cross-session README「P5 gates and acceptance」；集成测试实际命名为 `fabric-xs-activate-session`（端到端）与 `fabric-xs-activation-compat`（混合版本）。
 > 本文件只做分包与验收安排；架构问题的答案一律以 arch 为准，本计划不重开任何产品问题。
 > 前置：误报修复 `58f850a0` 已合入，不回退、不纳入本任务范围。
 > 2026-11-04 修订：闭合 reviewer r_15CPHMYB 两个 major（§2 文件唯一 owner 裁决、§2/§3 默认 on 回归基线）与一个建议级（§3-P5 测试命名区分）；arch 与范围不变。

@@ -31,21 +31,31 @@ const reply = (id: number, value: unknown) => process.send?.({ id, value });
  * Test fixture only — production has no such hook. The peers keep running the current code; what changes is
  * exactly what the other side can see, which is what the v2 gates key on.
  */
-function stripAliasV2OnWire(frameType: "hello" | "hello_ack"): void {
+function stripAliasV2OnWire(frameType: "hello" | "hello_ack", drop: readonly string[] = ["xs.alias.v2"]): void {
   const original = Socket.prototype.write;
   const prefix = `{"t":"${frameType}"`;
   Socket.prototype.write = function (this: Socket, chunk: unknown, ...rest: unknown[]) {
     if (typeof chunk === "string" && chunk.startsWith(prefix)) {
       const frame = JSON.parse(chunk) as { caps?: string[] };
-      frame.caps = (frame.caps ?? []).filter((c) => c !== "xs.alias.v2");
+      frame.caps = (frame.caps ?? []).filter((c) => !drop.includes(c));
       chunk = `${JSON.stringify(frame)}\n`;
     }
     return (original as (...a: unknown[]) => boolean).call(this, chunk, ...rest);
   } as typeof Socket.prototype.write;
 }
+/**
+ * fabric-xs-activation P5 (plan §3 P5 / §2 默认 on 回归基线). Test-only debugging knobs; the committed
+ * default is activation ON on both sides, so every pre-existing suite runs against the new build unchanged:
+ *   XW_ACTIVATION_OFF=1       agent: `fabric.crossSession.activation.enabled=false` (≡ pre-feature agent)
+ *   XW_HUB_ACTIVATION_OFF=1   hub: `crossSession.activation` key absent (≡ pre-feature hub, key-absence-is-off)
+ *   XW_STRIP_STATE=1          agent: drop `xs.state.v1`/`xs.activate.v1` from its outgoing `hello` (wire-only)
+ *   XW_HUB_STRIP_STATE=1      hub: drop them from its outgoing `hello_ack` (wire-only)
+ */
+const STATE_CAPS = ["xs.state.v1", "xs.activate.v1"] as const;
 let handle: (m: any) => Promise<unknown>;
 if (process.argv[2] === "hub") {
   if (process.env.XW_HUB_STRIP_V2 === "1") stripAliasV2OnWire("hello_ack");
+  if (process.env.XW_HUB_STRIP_STATE === "1") stripAliasV2OnWire("hello_ack", STATE_CAPS);
   let registry!: Registry;
   const slotFrames: Array<{ key: string; t: string; sessionId?: string; joined?: boolean }> = [];
   // 2026-11-04 mention-handled fix: every agent `ctl` slot frame (prompt ledger projection),
@@ -76,6 +86,7 @@ if (process.argv[2] === "hub") {
         : {
             crossSession: {
               limits: { hubSendsPerMin: 600 },
+              ...(process.env.XW_HUB_ACTIVATION_OFF === "1" ? {} : { activation: true as const }),
               ...(process.env.XW_HUB_REPLY_OFF === "1" ? { reply: false } : {}),
               // channel-plan §3.1 (CHW): hub-global broadcast params (absent ⇒ hub defaults 16/4).
               ...(process.env.XW_HUB_CHANNELS_JSON ? { channels: JSON.parse(process.env.XW_HUB_CHANNELS_JSON) } : {}),
@@ -227,6 +238,7 @@ if (process.argv[2] === "hub") {
   };
 } else {
   if (process.env.XW_STRIP_V2 === "1") stripAliasV2OnWire("hello");
+  if (process.env.XW_STRIP_STATE === "1") stripAliasV2OnWire("hello", STATE_CAPS);
   // alias-force-default AF6: per-peer working directory (the cwd basename is what auto-claim derives the alias from).
   const peerCwd = process.env.XW_CWD ?? process.cwd();
   const agentDir = join(process.env.HOME!, ".pi/agent");
@@ -282,6 +294,7 @@ if (process.argv[2] === "hub") {
         ...(process.env.XW_CHANNELS_JSON ? { channels: JSON.parse(process.env.XW_CHANNELS_JSON) } : {}),
         // alias-plan AL6: `fabric.crossSession.alias` overrides (e.g. {"enabled":false} = a pre-alias agent).
         ...(process.env.XW_ALIAS_JSON ? { alias: JSON.parse(process.env.XW_ALIAS_JSON) } : {}),
+        ...(process.env.XW_ACTIVATION_OFF === "1" ? { activation: { enabled: false } } : {}),
         limits: { listPerMin: 60, pairMinIntervalMs: 5000, pairWakesPerHour: 20, wakesOutPerHour: 60 },
       },
     },

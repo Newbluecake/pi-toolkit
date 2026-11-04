@@ -2,6 +2,7 @@
 
 > 2026-11-04 · L3 architect · 最终架构契约，非实现完成报告。
 > 基线：前置误报修复 `58f850a0` 已提交，本任务独立，不回退该修复。
+> 2026-11-05：**已实现**（P0–P5 完成；验收记录见 `docs/dev/fabric-cross-session/README.md` 「P5 gates and acceptance」）。
 > 调研：完整读取 `AGENTS.md`、`docs/dev/fabric-cross-session/README.md`、`docs/dev/web-hub/README.md`；核验 protocol、sender、receiver、RootWakeController、reply/wake/command ledger、mention 两条入口、调用链接线及 UI。旧计划仅作历史说明，冲突时以现行 README、代码和本次用户裁定为准。
 > 本次仅写本文件，未改实现，未运行构建、测试、安装或运行探针。工作区其他任务改动不纳入设计。
 

@@ -528,3 +528,13 @@ is displayed, and query/activate cannot share the wrong outcome through singlefl
 Hints are session/key-scoped, bounded and non-persistent; server dedup/policy is still
 the authority after refresh. See `docs/dev/fabric-xs-activation/P3b-report.md` for
 changed-file list, gate logs, the narrow UI integration correction and audit verdict.
+
+## xs activation: hub facts and gates (#14 P5)
+
+The hub assembles the progress/activate services only when `HubConfig.crossSession.activation` is literal `true` (the
+agent writes it when `xsOn ∧ fabric.crossSession.activation.enabled`; key absent ≡ pre-feature hub, byte-identical).
+Caps `xs.state.v1` / `xs.activate.v1` ride `HubInfo.caps` and `hello_ack.caps`; an unsupported peer on any of the three
+legs ⇒ no track fields, no `xs_state`, local `unsupported` for activate. Activation quota reuses the send/hub/pair/inbound
+limits (pair 2/h, 30 s control spacing); audit adds only whitelisted token keys (no body/key/token). Gates:
+`tests/integration/fabric-xs-activation-compat.test.ts` (mixed versions), `tests/conformance/fabric-xs.test.ts`
+C-X13/C-X14, `tests/web-hub/boundary.test.ts`. Design: `docs/dev/fabric-xs-activation/{arch,plan}.md`.

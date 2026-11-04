@@ -30,6 +30,9 @@ import { createListSessionsTool } from "../../src/tools/list-sessions-tool.js";
 import { createMessageSessionTool } from "../../src/tools/message-session-tool.js";
 import * as unread from "../../src/fabric/xs/unread.js";
 import { createXsSender } from "../../src/fabric/xs/sender.js";
+import { XsProgressBag } from "../../src/fabric/xs/progress.js";
+import { XS_ACTIVATE_MARKER_CONTENT } from "../../src/fabric/root-wake.js";
+import { createXsActivationReceiver } from "../../src/fabric/xs/session-activation.js";
 import { createBackgroundCompletionHub } from "../../src/service/background-completions.js";
 import wireAskUser from "../../src/ask-user/index.js";
 import { mockTui, stubTheme } from "../ask-user/fixtures.js";
@@ -1087,6 +1090,221 @@ describe("fabric phase-2 real pi contracts", () => {
     h.controller.settled();
     expect(h.wake()).toEqual({ dispatched: false, wakeDowngraded: "host_unsupported" });
   }, 20_000);
+
+  /**
+   * C-X13 / C-X14 (fabric-xs-activation plan §3 P5): the pi facts the cross-session progress axis and
+   * the manual activation rely on, on a real pi runner + real provider adapter (loopback stub):
+   *  - the `context` event of a later model turn carries the delivered custom message WITH `details.xid`
+   *    (the only `started` evidence; marker / BAS alone never are);
+   *  - details / token / xid / activation key / control-marker internals never enter provider payloads;
+   *  - progress rows carry only token-shaped reasons and never body text.
+   */
+  function progressStack(h: Env, contextXids: string[][]) {
+    const sessionId = h.manager.getSessionId();
+    const membership = new XsMembership({
+      sessionId,
+      persist: (data) => h.pi.appendEntry(XS_MEMBERSHIP_CUSTOM_TYPE, data),
+      replyEnabled: true,
+    });
+    membership.attach();
+    membership.join();
+    membership.setReceive("wake");
+    const bag = new XsProgressBag(256, h.clock);
+    const origin = new Map<string, string>();
+    const r = new XsReceiver({
+      sessionId,
+      membership,
+      fence: h.fence,
+      inbox: new XsInbox(8),
+      controller: h.controller,
+      recvPerHour: 100,
+      wakesInPerHour: 100,
+      clock: h.clock,
+      progress: {
+        observe: (id, fields) => void bag.observe(id, fields, h.clock.now()),
+        replyWritten: () => {},
+      },
+      host: {
+        isIdle: () => h.session.isIdle,
+        hasPendingMessages: () => h.session.pendingMessageCount > 0,
+        sendMessage: (m, o) => h.pi.sendMessage(m, o),
+        getLeafEntry: () => h.manager.getLeafEntry() ?? undefined,
+      },
+    });
+    let n = 0;
+    const deliver = (over: Record<string, unknown> = {}) => {
+      const xid = `cx13-xid-${++n}`;
+      origin.set(xid, "SOURCE-SESSION-ID");
+      const verdict = r.deliver({
+        xid,
+        to: { sessionId, epoch: membership.epoch },
+        from: { sessionId: "SOURCE-SESSION-ID", ref: "source00001", cwdLabel: "/tmp", agentId: "src-agent" },
+        text: "PROGRESS-BODY",
+        wake: false,
+        expiresAt: h.clock.now() + 5000,
+        ...over,
+      } as never);
+      return { xid, verdict };
+    };
+    const activation = (confirmed: "present" | "absent" | "over_budget" = "present") =>
+      createXsActivationReceiver({
+        sessionId: () => sessionId,
+        epoch: () => membership.epoch,
+        disposed: () => false,
+        now: () => h.clock.now(),
+        membership: {
+          get receive() {
+            return membership.receive;
+          },
+          senderAllowed: () => true,
+        },
+        fence: { check: () => ({ ok: true }) },
+        bag,
+        originOf: (id) => origin.get(id),
+        confirmed: () => confirmed,
+        flushBranch: () => {},
+        hasLiveWake: (id) =>
+          h.ledger
+            .entries()
+            .some((x) => (x.xid === id || x.activateFor === id) && (x.state === "live" || x.executionPending)),
+        controller: () => h.controller,
+        observe: (id, fields) => void bag.observe(id, fields, h.clock.now()),
+      });
+    const frame = (xid: string, over: Record<string, unknown> = {}) => ({
+      t: "xs_activate" as const,
+      rid: `cx14-rid-${++n}`,
+      to: { sessionId, epoch: membership.epoch },
+      from: { sessionId: "SOURCE-SESSION-ID", ref: "source00001", cwdLabel: "/tmp", agentId: "src-agent" },
+      messageId: xid,
+      activationKey: "CX14-SECRET-KEY",
+      expiresAt: h.clock.now() + 5000,
+      level: 0,
+      ...over,
+    });
+    return { r, bag, deliver, activation, frame, contextXids };
+  }
+  const contextProbe = () => {
+    const seen: string[][] = [];
+    return {
+      seen,
+      extension: (pi: ExtensionAPI) => {
+        pi.on("context", (event) => {
+          const ids: string[] = [];
+          for (const m of (event as { messages: Array<Record<string, any>> }).messages)
+            if (m.role === "custom" && m.customType === "subagent:xs" && typeof m.details?.xid === "string")
+              ids.push(m.details.xid as string);
+          seen.push(ids);
+        });
+      },
+    };
+  };
+
+  it("C-X13: delivered ⇒ started only at a later model turn's context carrying the xid; progress rows are token-only; details/token/xid never reach the provider", async () => {
+    const probe = contextProbe();
+    const h = await host({ extensions: [probe.extension] });
+    await prime(h);
+    const s = progressStack(h, probe.seen);
+    const { xid, verdict } = s.deliver();
+    expect(verdict).toMatchObject({ effect: "applied", woke: false });
+    // delivered is proven by the leaf entry written synchronously (Fpi7), NOT by any model turn
+    const row = () => s.bag.rows(h.clock.now()).find((x) => x.messageId === xid)!;
+    expect(row()).toMatchObject({ phase: "delivered", deliveryEffect: "applied" });
+    expect(row().startedAt).toBeUndefined();
+    expect(probe.seen.flat()).not.toContain(xid);
+    const before = h.stub.requests.length;
+    await h.session.prompt("a later human turn");
+    // pi fact: the next turn's context event DOES expose the delivered custom message with details.xid
+    expect(probe.seen.at(-1)).toContain(xid);
+    expect(h.stub.requests.length).toBe(before + 1);
+    // hygiene: the row (a wire-bound projection) never contains body text or the sender's full session id
+    const blob = JSON.stringify(s.bag.rows(h.clock.now()));
+    expect(blob).not.toContain("PROGRESS-BODY");
+    // a wake downgrade surfaces as a bounded token (reason enumerations are English tokens ≤48)
+    const busy = s.deliver({ wake: true, level: 0 });
+    const w = s.bag.rows(h.clock.now()).find((x) => x.messageId === busy.xid)!.wake;
+    if (w?.reason !== undefined) expect(w.reason).toMatch(/^[a-z0-9_:]{1,48}$/);
+    await until(() => h.settled.length >= 2 || h.controller.state === "idle", "wake run quiesced", 8000);
+    // provider payload: body visible as model text, but no host-only details / token / xid / sender session id
+    const bodies = h.stub.requests.map((x) => x.body).join("\n");
+    expect(bodies).toContain("PROGRESS-BODY");
+    for (const secret of ["wakeToken", "xsWake", "activateFor", xid, busy.xid, "SOURCE-SESSION-ID"])
+      expect(bodies.includes(secret) ? secret : "").toBe("");
+    expect(h.errors).toEqual([]);
+  }, 40_000);
+
+  it("C-X14: activation is at-most-once with ONE fixed body-free marker; B1 verifies it; the body is never copied; expired/unconfirmed refuse with zero provider work", async () => {
+    const probe = contextProbe();
+    const h = await host({ extensions: [probe.extension] });
+    await prime(h);
+    const s = progressStack(h, probe.seen);
+    const { xid } = s.deliver();
+    s.bag.observe(xid, { activationKey: "CX14-SECRET-KEY", activationUntil: h.clock.now() + 600_000 }, h.clock.now());
+    const bodyEntries = () =>
+      h.manager
+        .getBranch()
+        .filter((e: any) => e.type === "custom_message" && e.customType === "subagent:xs" && e.details?.xid === xid)
+        .length;
+    expect(bodyEntries()).toBe(1);
+    const before = h.stub.requests.length;
+    const act = s.activation();
+    // expired / unconfirmed ⇒ refused before any trigger
+    expect(act.handle(s.frame(xid, { expiresAt: h.clock.now() }) as never)).toMatchObject({
+      status: "refused",
+      reason: "expired",
+    });
+    expect(s.activation("absent").handle(s.frame(xid) as never)).toMatchObject({
+      status: "refused",
+      reason: "not_delivered",
+    });
+    expect(h.stub.requests).toHaveLength(before);
+    expect(h.controller.state).toBe("idle");
+    // the real activation: one marker, B1 authorizes it, exactly one provider request
+    const ack = act.handle(s.frame(xid) as never);
+    expect(ack).toMatchObject({ status: "accepted", effect: "applied" });
+    const token = h.controller.activeToken!;
+    await until(() => h.ctxKinds.includes("authorized"), "B1 authorized the control marker");
+    expect(h.triggers.at(-1)).toMatchObject({ messageType: "custom" });
+    await until(() => h.settled.length >= 2 && h.controller.state === "idle", "control run settled", 8000);
+    expect(h.stub.requests).toHaveLength(before + 1);
+    // idempotent: the same message activates no second turn, original body still ONE entry
+    const again = act.handle(s.frame(xid) as never);
+    expect(again).toMatchObject({ status: "already_active", effect: "none" });
+    await sleep(50);
+    expect(h.stub.requests).toHaveLength(before + 1);
+    expect(bodyEntries()).toBe(1);
+    // marker entries: fixed content, control xid ≠ message id, no body/key
+    const markers = h.manager
+      .getBranch()
+      .filter((e: any) => e.type === "custom_message" && e.details?.activateFor === xid) as any[];
+    expect(markers).toHaveLength(1);
+    expect(markers[0].content).toBe(XS_ACTIVATE_MARKER_CONTENT);
+    expect(markers[0].details.xid).not.toBe(xid);
+    const last = h.stub.requests.at(-1)!.body;
+    for (const secret of [token, "wakeToken", "xsWake", "activateFor", "CX14-SECRET-KEY", "SOURCE-SESSION-ID"])
+      expect(last.includes(secret) ? secret : "").toBe("");
+    expect(h.errors).toEqual([]);
+  }, 40_000);
+
+  it("C-X14b: a host that loses the custom shape (no BAS) aborts the marker before the provider; the body is not re-sent as a fallback", async () => {
+    const h = await host({ noBasForward: true });
+    h.cap.observe({ messageType: "user", prompt: "p" } as never); // sticky-absent would otherwise be deliver-only
+    const s = progressStack(h, []);
+    const { xid } = s.deliver();
+    s.bag.observe(xid, { activationKey: "CX14-SECRET-KEY", activationUntil: h.clock.now() + 600_000 }, h.clock.now());
+    const before = h.stub.requests.length;
+    expect(s.activation().handle(s.frame(xid) as never)).toMatchObject({ status: "accepted" });
+    await until(() => h.settled.length === 1, "aborted control run settled");
+    expect(h.settled.at(-1)).toBe(true);
+    expect(h.stub.requests).toHaveLength(before); // zero provider requests
+    const entries = h.manager
+      .getBranch()
+      .filter((e: any) => e.type === "custom_message" && e.customType === "subagent:xs") as any[];
+    expect(entries.filter((e) => e.details?.xid === xid)).toHaveLength(1); // original body still once
+    expect(
+      entries.filter((e) => e.content !== XS_ACTIVATE_MARKER_CONTENT && e.details?.activateFor === xid),
+    ).toHaveLength(0);
+    expect(JSON.stringify(entries.filter((e) => e.details?.activateFor === xid))).not.toContain("PROGRESS-BODY");
+  }, 30_000);
 
   /**
    * C-X10 (channel-plan §12.7): ONLY pi's ordering facts that the unread counter relies on. The real

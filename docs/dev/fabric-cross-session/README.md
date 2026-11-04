@@ -471,3 +471,34 @@ main-all-on and thread-main, counts +1; child/off/secure and phase2 traces uncha
 Tests: `tests/web-hub/agent/xs-web-command.test.ts`, bridge/transport/UI xs suites,
 `tests/integration/fabric-xs-activate-session.test.ts` (real command router + xs
 relay/bridges/stacks, controlled HTTP-auth admission, both token/password adapters).
+
+## P5 gates and acceptance (#14 closure)
+
+Implementation state: P0–P4 are in; P5 adds **no feature**, only gates. Test knobs live in
+`tests/integration/helpers/fabric-xs-process.ts` (debug only; the committed default is activation
+ON on both sides — the helper hub now carries `crossSession.activation: true`, so the nine XsHarness
+suites run against the new hub unchanged): `XW_ACTIVATION_OFF` (agent config off), `XW_HUB_ACTIVATION_OFF`
+(hub key absent), `XW_STRIP_STATE` / `XW_HUB_STRIP_STATE` (wire-only removal of `xs.state.v1` and `xs.activate.v1`
+from `hello` / `hello_ack`). Never commit a suite that pins them to dodge a failure.
+
+- **C-X13** (`tests/conformance/fabric-xs.test.ts`): `delivered` comes from the synchronous leaf write, `started`
+  only from a later model turn's `context` that exposes the delivered custom message with `details.xid` (pi fact the
+  observer relies on); rows never carry body/sender session id; wake reasons are `[a-z0-9_:]{1,48}` tokens;
+  details/token/xid/`activateFor` never reach the provider payload.
+- **C-X14 / C-X14b**: real pi + Controller + progress bag + activation receiver: expired / unconfirmed ⇒ refused with
+  zero provider work; one accepted activation ⇒ exactly one fixed body-free marker, B1 `authorized`, one provider
+  request, the original body entry stays ONE; repeat ⇒ `already_active`, no second turn; key/token/session id absent
+  from the payload; a host that loses the custom shape (no BAS) aborts the marker before the provider and the body is
+  not re-sent as fallback.
+- **Mixed versions** (`tests/integration/fabric-xs-activation-compat.test.ts`, real hub × 2 stacks): six old/new
+  combinations (old/old, old hub×new agent, new hub×old agent, wire-hidden caps on either side, new/new). Old-side
+  combinations keep the pre-feature `xs_deliver` key set/order and never invent `track`/`progress`; new/new exposes
+  `track.messageId` and only appends keys.
+- Registry/trace/corpus: `tests/fixtures/governance/activate-trace.json` and the setting-specs pin were refreshed by
+  the packages that changed them (wake_session registration, input/tool_call wiring, the `activation.enabled` spec);
+  P5 changes none. A-tier fixtures are untouched.
+
+Accepted residuals: no cross-process exactly-once; hub/pi restart or a full relation bag ⇒ tracking `unavailable`
+(never reconstructed from disk); activate never auto-runs and is quota-bound (`pair_wake_rate` ⇒ retryAfter, original
+key only); the C-X conformance suites run on the current pi only — legacy pi 1.0.4/1.1.0 reruns need
+`PI_TOOLKIT_LEGACY_PI_DIR` and were not run in this package.

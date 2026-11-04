@@ -1,3 +1,4 @@
+// Scope: extension activate() tool-surface registration (message_session/list_sessions/wake_session). Not the wake_session end-to-end suite (fabric-xs-activate-session) nor the mixed-version suite (fabric-xs-activation-compat).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
