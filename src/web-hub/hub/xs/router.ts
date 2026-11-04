@@ -708,8 +708,16 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
           res({ ok: true, candidates: r.candidates });
           audit({ op: "resolve", fromSession: self.sessionId, outcome: "ok", reason: "ambiguous" });
           return;
-        case "one":
-          res({ ok: true, target: targetOf(r.member) });
+        case "one": {
+          // P2b: TARGET capability is read from its actual hello, never a status/card.
+          // Missing service or either legacy peer leaves resolve byte-identical.
+          const target = {
+            ...targetOf(r.member),
+            ...(deps.activation !== undefined && stateCapable(agentKey) && stateCapable(r.member.agentKey)
+              ? { xsState: true }
+              : {}),
+          };
+          res({ ok: true, target });
           audit({
             op: "resolve",
             fromSession: self.sessionId,
@@ -717,6 +725,7 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
             outcome: "ok",
           });
           return;
+        }
       }
     }
 

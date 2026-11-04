@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { clampSpanMs } from "../../core/deadline.js";
 
 /** Host-only provenance. No reference enters parameters, prompts, diagnostics or wire.
@@ -264,7 +264,21 @@ export function createHumanGrantHost(port = getHumanGrantPort(), owner = randomU
   let contextSeq = 0;
   let active: HumanGrantRef | undefined;
   const pending: Array<{ sessionId: string; text: string; ref: HumanGrantRef; expiresAt: number }> = [];
-  const accepted: Array<{ sessionId: string; message: unknown; ref: HumanGrantRef }> = [];
+  const accepted: Array<{ sessionId: string; message: unknown; ref: HumanGrantRef; fingerprint?: string }> = [];
+  // pi emitContext structured-clones the raw messages. Correlate that clone only with
+  // the exact host-observed snapshot (including host timestamp), never text/source/meta.
+  // The digest is local evidence, not a credential; it never enters tool/wire/prompt.
+  const fingerprint = (raw: unknown): string | undefined => {
+    try {
+      const m = raw as { role?: unknown; timestamp?: unknown } | undefined;
+      if (m?.role !== "user" || !Number.isSafeInteger(m.timestamp) || (m.timestamp as number) < 0) return undefined;
+      const encoded = JSON.stringify(raw);
+      if (encoded === undefined || encoded.length > 65_536) return undefined;
+      return createHash("sha256").update(encoded).digest("hex");
+    } catch {
+      return undefined;
+    }
+  };
   const calls = new Map<string, InvocationRef>();
   const userText = (raw: unknown): string | undefined => {
     const m = raw as { role?: unknown; content?: unknown } | undefined;
@@ -300,8 +314,15 @@ export function createHumanGrantHost(port = getHumanGrantPort(), owner = randomU
       if (text === undefined) return;
       const matches = pending.filter((p) => p.sessionId === sessionId && p.text === text);
       for (const p of matches) pending.splice(pending.indexOf(p), 1);
-      if (matches.length === 1 && accepted.length < HUMAN_GRANT_CAP)
-        accepted.push({ sessionId, message, ref: matches[0]!.ref });
+      if (matches.length === 1 && accepted.length < HUMAN_GRANT_CAP) {
+        const digest = fingerprint(message);
+        accepted.push({
+          sessionId,
+          message,
+          ref: matches[0]!.ref,
+          ...(digest === undefined ? {} : { fingerprint: digest }),
+        });
+      }
     },
     context(event: unknown, sessionId: string) {
       const messages = (event as { messages?: unknown[] } | undefined)?.messages;
@@ -309,12 +330,40 @@ export function createHumanGrantHost(port = getHumanGrantPort(), owner = randomU
         active = undefined;
         return;
       }
-      // Identity, not a model-reported source/text match. pi currently passes raw messages.
-      const proven = accepted.filter((a) => a.sessionId === sessionId && messages.includes(a.message));
+      const relevant = accepted.filter((a) => a.sessionId === sessionId);
+      const indices = new Map<unknown, number[]>();
+      const byFingerprint = new Map<string, number[]>();
+      if (relevant.length > 0) {
+        for (let i = Math.max(0, messages.length - 2_000); i < messages.length; i++) {
+          const message = messages[i];
+          const positions = indices.get(message) ?? [];
+          positions.push(i);
+          indices.set(message, positions);
+          const digest = fingerprint(message);
+          if (digest !== undefined) {
+            const positions = byFingerprint.get(digest) ?? [];
+            positions.push(i);
+            byFingerprint.set(digest, positions);
+          }
+        }
+      }
+      const proven: Array<{ input: (typeof accepted)[number]; index: number }> = [];
+      for (const input of relevant) {
+        const matches =
+          input.fingerprint === undefined
+            ? (indices.get(input.message) ?? [])
+            : (byFingerprint.get(input.fingerprint) ?? []);
+        const uniqueInput =
+          input.fingerprint === undefined || relevant.filter((a) => a.fingerprint === input.fingerprint).length === 1;
+        if (matches.length > 1 || !uniqueInput) {
+          port.discardInput(input.ref);
+          accepted.splice(accepted.indexOf(input), 1); // ambiguity never becomes proof on retry
+        } else if (matches.length === 1) proven.push({ input, index: matches[0]! });
+      }
       if (proven.length > 0) {
-        const latest = proven.reduce((a, b) => (messages.indexOf(a.message) > messages.indexOf(b.message) ? a : b));
-        active = latest.ref;
-        for (const a of proven) accepted.splice(accepted.indexOf(a), 1);
+        const latest = proven.reduce((a, b) => (a.index > b.index ? a : b));
+        active = latest.input.ref;
+        for (const p of proven) accepted.splice(accepted.indexOf(p.input), 1);
       }
       contextSeq++;
       if (active && !port.bindContext(active, runKey, contextSeq)) active = undefined;

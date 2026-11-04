@@ -1,79 +1,97 @@
-# #14 P2 — staged implementation / blocked acceptance
+# #14 P2a / P2b implementation report
 
-2026-11-05 00:04 Asia/Shanghai. No commit, stash, checkout, reset, fixture regeneration, or index.ts write.
+Updated 2026-11-05. P2a is committed as `a8d431c3` (including its declared trace refresh). This report describes the P2b delta against that baseline. P2b performed no git writes or fixture refreshes.
 
-## Status
+## Verdict and scope
 
-**Partial implementation, not a completed U5 end-to-end package.** The permitted sender/activation/mention surfaces and two authorized bridge/stack consumption windows are implemented and the directed regressions are green. Additional frozen-owner windows are still required; the implementation deliberately falls back to agent deliver-only rather than inventing authorization or target capability. Full project typecheck now passes following the parallel schedule package's fix; P2 did not edit that package.
+**P2b is partial: main-session U5 default wake is operational and tested; real child/nested execution consumption remains blocked by a missing permitted dependency-injection window. Do not mark full U5 accepted.**
 
-## Implemented
+The router/host-context changes and directed regressions pass. No `src/runtime/**` production file was edited: the child portion was stopped at the file boundary rather than implemented via an unsafe global closure, metadata grant, or a new child membership/bridge.
 
-- `human-grant.ts`: host-only opaque refs, invocation registration, shared-call-tree CAS, pre-send commit, same-call/target none release, cap64/30min lazy expiry, pure process park, owner/session/run checks. Real user-message object must be observed in context before a call can resolve. Queued input does not upgrade old calls. Handled mentions discard unbound root proofs rather than exhausting the park or authorizing later same-text input.
-- TUI/RPC input signing and policy-admitted web dispatch signing. Web proof cap64/5min, unique session/text/owner, once-only; Feishu/native automatic notifications do not sign. Raw model source/meta/grantId never enters the provenance port. Advisory failures never block the actual host send.
-- Exact host toolCallId captured before execute; `message_session` receives only an injected InvocationRef. New/fork/switch revoke; new reload owner cannot take over an old invocation. One qualified omitted-wake expectReply defaults only after full state negotiation and successful grant reserve. Explicit true/false and replyTo win; causal/quota policy remains unchanged.
-- Stack `onSpawnEdge` records only an actual admitted edge. The exact host Agent tool result then associates its captured parent call with the returned real childRunId. Pure nested shared-ref propagation is tested; see runtime blocker below.
-- Bridge send tracks only live original send rids (cap256), not text/latest row. An initial or subsequent matching xs_state yields messageId/key/progress, including after transport timeout/link loss. Missing correlation/off/old cap never fabricates a track. A tracked off-after-send result is unknown, not provable none.
-- Source-private wake marks do not bump receiver revisions. Sender/hub downgrades remain visible in tool JSON/hint, source status, and mention metadata. `woke` remains dispatch acceptance, never started evidence. No body retry/second wake is added.
-- `activationEnabled` is wired: effective main agent advertises xs.state.v1 and writes HubConfig.crossSession.activation=true. xs.activate.v1 is intentionally not advertised. `/fabric status` reads receiver progress and the source mirror; B1 precedes context observation through the existing P1 observer port.
-- Mention port subscription provides session/owner-unique onSessionRouted reporting through the existing shared dependency (no index change). Synchronous web route consumes its exact cmdId and projects track/progress/wake; local command progress and remote body progress remain independent. Existing onHandled(rawText) is still called once. Enhanced send throws conservatively produce unknown; legacy behavior remains unchanged.
+Untouched forbidden files/subsystems: web-hub agent/index.ts, assembly-channels.ts, schedule, web UI, audit.ts, jev-reflex, A-tier fixtures. No change to hook/tool registration in P2b; no B-tier trace refresh is needed.
 
-## Frozen-owner blockers / missing behavior
+## P2b completed
 
-1. **Hub target-capability proof**: current `src/web-hub/hub/xs/router.ts` resolve does not emit authoritative `target.xsState`. The bridge now consumes this optional open-target field only with local+live-hub state support, and sender additionally requires that proof. The real omitted-wake delegation path therefore currently defaults false even for new peers. Needed follow-up: router owner stamps `xsState:true` only for state-capable requester/hub/actual resolved target, omits it for legacy/off, and verifies byte-identical mixed-version resolve frames. No capability inference from a prior send, text, or cached latest status is permitted.
-2. **Real child execution context**: only the authorized stack edge window was changed. Child-driver/runner tool/context/lifecycle hooks do not yet consume the shared ref. Pure nested ledger behavior is not proof of real nested runtime propagation. The runtime owner must register actual child-run InvocationRefs and terminate their live references, with exact parent-call provenance and no prompt/meta/diagnostic inheritance or added child xs tools. Early execution before the host Agent result is correlated currently fails closed.
-3. **Tracked wire intent / audit / receiver UI**: sender wake intent is an internal bridge argument, not a new serialized field. Protocol/router owners must add the cap-gated requestedWake/senderDowngrade track fields for receiver-side reason continuity. audit.ts was explicitly forbidden and untouched; web UI remains P4's. This package does not claim the complete U3 receiver/audit/UI chain.
-4. **Reload source-private marks**: source wake overlays are per bridge activation, not a durable authorization or receiver revision. P1/P3 integration must preserve source-private default facts when rebuilding a source mirror; this report does not claim cross-reload continuity of those overlays.
-5. **Direct-mention origin attribution**: the existing mention sender still uses its explicit `wake:true`, `origin:"human"`, `levelOverride:0` convention. This package does not add an event/source-bearing route call through mention.ts; automatic extension-origin mention text therefore does not get a grant, but its old explicit mention wake convention is not reclassified here. A host-source-bearing mention invocation port is required to fully close arch §4.3.A, without trusting raw model options.
+### Authoritative target state capability
 
-## P3 consumption / registration specification
+`hub/xs/router.ts` appends `target.xsState:true` only in a successful **resolve** when the hub activation service exists and both the requesting socket and the actual resolved target socket advertise `xs.state.v1`. It reads the registry's hello capabilities, never card/status data or caller fields. Missing hub service/source cap/target cap means the key is absent, not false. Send response shape and unrelated ops are not widened.
 
-- Sender outcome is `track?: { messageId: string; activationKey?: string }`, plus `progress?: XsProgress` and `wake?: XsWakeView`. Use that original hub xid/key, including an unknown send with a confirmed relation. Never derive them from q requestId, text, logs, wakeToken, runId or command id.
-- New internal `XsHubPort` ports: `stateCapable?(): boolean` (local+live hub only), `requestProgress?(): readonly XsProgress[]`; resolve `XsPortReply.targetState?: true` is the authoritative target half. `XsPortReply.progress?` may accompany res/deadline/link_lost/off and is only populated by exact live-send rid correlation.
-- `wakeView` on XsPortSendArgs is source-private and never serialized. `sourceRid` remains internal; no tool parameter exposes it. No track means no invented activation key; use the existing read-only receipt query if a real messageId is already known.
-- Mention cmd_result remains `data.mention.action:"session"`, with optional `track`, `progress`, `wake`, `wakeDowngraded`, `woke`; the closed ctl states are not extended. The local ledger can be consumed while the remote body remains unknown/queued/none.
-- `createMentionSessionPort` exposes cap-gated `enhanced`, `subscribeSessionRouted`/`reportSessionRouted`; commands subscribes through the existing shared dependency and disposes the subscription. Legacy/off output is unchanged.
-- P3 owns wake-session-tool/session-activation/Controller/relay implementation. Deliver tool-construction dependencies and collision-name requirements back to P2 owner for `activate.ts` registration. Do not independently edit activate.ts/sender/mention/commands. xs.activate.v1 should only be declared after those execution/ack paths are installed and effective wake is on.
-- No receipt/query path signs a grant, reserves a wake, sends a body, or auto-activates on a miss.
+The existing P2a bridge consumes that field as `XsPortReply.targetState`; the existing sender combines it with the local/live-hub gate before reserving a precise invocation grant. This closes the target-cap proof gap for the main-session delegated send path.
 
-## Governance
+Tests cover all eight hub/source/target combinations, byte-identical old/off resolve results, and a target reconnecting with legacy capabilities. The actual router, source bridge, sender and two actual xs stacks are used together in the integration test: an omitted-wake expectReply with a verified human grant starts one dispatch; the next call shares the consumed grant and delivers only. Explicit false preserves the grant. Missing caps or missing context proof fail closed. There is no body retry, quota change or extra activation.
 
-P2 adds `input`, `message_start`, `tool_call`, `tool_result` hooks before the existing B1 registration in createXsActivation.registerTriggerGuard, only while effective. The existing context/agent_end hooks compose provenance. P5 must refresh the B-tier registration trace once; P2 did not touch `tests/fixtures/governance/activate-trace.json` (the existing worktree difference is schedule's).
+### Actual pi context identity risk
 
-Default-on alias-wiring regression originally compared a pre-activation tool description. Its expected tool factory now uses `activation:true` (no settings JSON was pinned off), while still asserting exact description/schema equality and absence of alias cap/config/frames. Frozen schemas and A-tier goldens were not changed.
+The new real-pi conformance probe found that the current extension runner's public `emitContext` path uses `structuredClone(messages)`. The P2a `messages.includes` assumption therefore refused even an unmodified legitimate input on current pi. This was a real functional gap, not a hypothetical flake.
+
+`human-grant.ts` now correlates a context copy only with a unique **already signed input's actual host-observed user-message snapshot**, including the host timestamp. The bounded snapshot digest is local evidence, not a grant/bearer/source claim, and never enters tools, wire, prompt, diagnostics or logs. It is not minted from body semantics, source strings, level0, expectReply or model metadata. No signed input/host message means no authority.
+
+An unchanged pi structured clone is accepted. Changed timestamp/body/additional source field, duplicate context matches, missing timestamp on a copied object, or unsigned extension input fail closed. Ambiguous proof is discarded so removing a duplicate later cannot revive it. The object-identity path remains a conservative fallback for hosts/test doubles without a usable timestamp; copied timestamp-less objects are never authorized. Context scans are limited to the last 2000 messages; pending input/accepted record caps remain 64; snapshots above 65536 JSON characters are not fingerprinted.
+
+Conformance uses a real AgentSession/DefaultResourceLoader and scripted provider. It proves normal public-API cloning, a successful exact host invocation, altered-copy refusal, exactly two provider calls, and absence of host/grant metadata in provider messages. The in-process router/stack/sender integration is complementary, not claimed as child runtime integration.
+
+### mirrorRevision clarification (P2a minor)
+
+There are two revision axes:
+
+- `XsProgress.revision` is the receiver reporter's per-message evidence revision. Source-private wake overlays do **not** increment it or rewrite receiver evidence.
+- The bridge's `mirrorRevision` is the local aggregate `xsRequests` projection revision. P2a intentionally increments it for adopted remote mirror writes and for a local sender-result wake overlay before publishing status.
+
+Thus “does not bump receiver revisions” does **not** mean “does not increment mirrorRevision”. Local overlay publication can advance the aggregate status revision while keeping the original row evidence revision unchanged. No P2b mirror state-machine rewrite was made.
+
+## Child/nested runtime blocker — not implemented
+
+`PiSessionDriver` is constructed in **`src/stack.ts:1532`**, not in the allowed `src/runtime/**` files. Its existing constructor receives only rememberAgents and a model resolver; it has no main-session sender, origin/epoch, reply receivability, or current caller-level façade. The child itself intentionally has no main xs membership/bridge.
+
+A runtime-only implementation would need either to invent a new child xs bridge/membership or to store the main sender/ctx closure in a process-global grant registry. Both would violate the existing authority/lifecycle and pure-data grant boundaries. Inferring authority from prompt/model meta/diagnostics is also forbidden. The proposed minimal explicit dependency window was reported; a `message_agent(to:"root")` request returned `message not authorized`, and the caller directed that additional out-of-domain work must be reported, not edited.
+
+Needed follow-up window: the stack's `new PiSessionDriver(...)` construction must pass an optional, per-activation main-session **human-runtime façade** assembled by `fabric/xs/activate.ts` (through the existing xs input/dependency structure). Runtime can then consume the already verified real childRunId/parent InvocationRef edge, register exact child context/toolCallId/driver ownership, and call the shared main sender/reply port. It must retain current child/root causal limits, honor readonly/external/tool-scope exclusions, terminate child references on actual disposal/settlement, and keep normal child xs extensions inert. No metadata or turn-wide human bool can substitute for that port.
+
+P2a's actual spawn-edge recording and exact host Agent-result linking remain available, but without the above dependency they do not make a child tool execution authorized. Pure nested ledger tests are not reported as real runtime consumption. P2b did not add a dormant or fake child-tool stub.
+
+## P2a surface still available to P3
+
+- Sender outcome: `track?: { messageId, activationKey? }`, `progress?`, `wake?`, `wakeDowngraded?`. Tracking can survive an unknown transport result after the hub relation was proven. Never derive the original key from q requestId, text, logs, wakeToken, runId or command id.
+- Bridge: `stateCapable()` for local+live hub state, authoritative resolve `targetState`, `requestProgress()` for the local source projection. Internal `wakeView` and `sourceRid` never become model parameters.
+- Mention cmd_result: `data.mention.action:"session"` with optional track/progress/wake metadata. Local consumed and remote queued/delivered/started remain separate axes.
+- `xs.state.v1` is connected. `xs.activate.v1` and wake_session execution/registration remain P3. Registration requirements must be handed to the activate.ts owner; no competing writer is authorized.
+- Remaining non-P2b gaps are unchanged: cap-gated tracked wire intent/receiver-side downgrade continuity, audit and web UI ownership, source-private overlay continuity across reload, and complete source-bearing direct-mention attribution. These are not claimed complete by this package.
+
+## Changed P2b files (absolute)
+
+```text
+/home/bluecake/ai/pi-toolkit/src/web-hub/hub/xs/router.ts
+/home/bluecake/ai/pi-toolkit/src/fabric/xs/human-grant.ts
+/home/bluecake/ai/pi-toolkit/tests/web-hub/hub/xs-resolve-state.test.ts
+/home/bluecake/ai/pi-toolkit/tests/fabric/xs-human-grant.test.ts
+/home/bluecake/ai/pi-toolkit/tests/integration/fabric-xs-human-default-wake.test.ts
+/home/bluecake/ai/pi-toolkit/tests/conformance/fabric-human-grant-context.test.ts
+/home/bluecake/ai/pi-toolkit/docs/dev/fabric-xs-activation/P2-report.md
+```
 
 ## Verification
 
-Latest directed command (not the full repository suite):
+New/focused tests: **4 files / 37 tests passed**. Log: `/tmp/pi-toolkit-p2b-new-tests.log`.
+
+Directed regression (not full repository test):
 
 ```sh
-timeout 360 env PI_TOOLKIT_TEST_WORKERS=2 npx vitest run \
-  tests/fabric tests/mention tests/web-hub/agent tests/tools/message-session-tool.test.ts \
+timeout 480 env PI_TOOLKIT_TEST_WORKERS=2 npx vitest run \
+  tests/fabric tests/runtime tests/web-hub/hub/xs*.test.ts tests/web-hub/agent \
+  tests/conformance/fabric-human-grant-context.test.ts \
+  tests/integration/fabric-xs-human-default-wake.test.ts \
   tests/integration/fabric-xs.test.ts tests/integration/fabric-xs-reply.test.ts \
   tests/integration/fabric-xs-mention.test.ts tests/integration/fabric-xs-inbox.test.ts \
   tests/integration/fabric-xs-activation.test.ts tests/integration/fabric-wiring.test.ts \
-  tests/integration/mention-autocomplete-wiring.test.ts \
-  tests/integration/fabric-wake.test.ts tests/integration/fabric-wake-level.test.ts \
-  tests/integration/fabric-wake-quiet.test.ts tests/integration/fabric-wake-revive.test.ts \
-  tests/integration/fabric-wake-subscribers.test.ts tests/integration/fabric-wake-off-golden.test.ts \
-  tests/integration/fabric-xs-channel-compat.test.ts tests/integration/fabric-xs-reply-off-golden.test.ts \
-  tests/integration/fabric-xs-off-golden.test.ts tests/integration/fabric-xs-alias-wiring.test.ts \
-  tests/integration/fabric-xs-child-scope.test.ts
+  tests/integration/mention-autocomplete-wiring.test.ts tests/integration/fabric-wake*.test.ts \
+  tests/integration/fabric-xs-channel-compat.test.ts \
+  tests/integration/fabric-xs-reply-off-golden.test.ts \
+  tests/integration/fabric-xs-child-scope.test.ts tests/governance
 ```
 
-Actual output: **183 files passed, 2947 tests passed; 189.94s; exit 0**. Log: `/tmp/pi-toolkit-p2-regression-final.log`.
+Actual output: **222 files passed / 3547 tests passed**, 280.06s, exit 0. This includes the requested default-on regression subset, runtime tests, xs hub tests, and governance (including activate-trace without refreshing it). Log: `/tmp/pi-toolkit-p2b-regression.log`.
 
-The new grant/CAS/source matrix and bridge/web-projection tests are behavior assertions, not no-throw stubs. They cover all grant×expect×wake combinations, parallel CAS, pre-none/post-unknown consumption, explicit false/replyTo, model spoofing, busy queued input, wrong owner/context, live caps, parallel same-body send-rid correlation, transport timeout with tracking, source-private receiver revision hygiene, once-only web proof, handled-input cleanup and metadata/hints. Positive target/nested tests use the injected authoritative port; they do not conceal the integration blockers above.
-
-`timeout 120 npm run typecheck`: **latest rerun exit 0**, both TS7 checks and vue-tsc passed. Earlier runs exited 2 after both TS7 passes succeeded, due only to the parallel package:
-
-```text
-src/web-hub/ui/src/components/schedule/SchedulePanel.vue(339,27): TS2339 PanelRun.runId
-src/web-hub/ui/src/components/schedule/SchedulePanel.vue(343,66): TS2339 PanelRun.runId
-src/web-hub/ui/src/components/schedule/SchedulePanel.vue(344,37): TS2339 PanelRun.runId
-```
-
-Latest passing log: `/tmp/pi-toolkit-p2-typecheck-final.log`. Schedule UI is forbidden to this package and was not modified by P2; the parallel owner resolved the above failures before final delivery.
-
-`timeout 180 npm run build`: **exit 0**; `build:bundle ok`, dist bundle 4.59 MB, inputs=666. Log: `/tmp/pi-toolkit-p2-build-final.log`.
-
-Exact changed-file `npx prettier --write` and `npx prettier --check`: exit 0, all matched files use Prettier style. `git diff --check` for P2 paths: exit 0. Final fixture comparison against origin/dev: only the pre-existing schedule B-tier governance/activate-trace.json differs; A-tier changes are empty. No full npm test/build:web/check:web, release, or git write operation was run.
+- `timeout 180 npm run typecheck`: latest exit 0, both TS7 passes and vue-tsc succeeded. Log: `/tmp/pi-toolkit-p2b-typecheck-final.log`.
+- `timeout 180 npm run build`: latest exit 0, `build:bundle ok`, 4.59 MB, inputs=666. Log: `/tmp/pi-toolkit-p2b-build-final.log`.
+- Final focused rerun: 4 files / 37 tests passed. Log: `/tmp/pi-toolkit-p2b-new-tests-final.log`.
+- Exact changed-file Prettier write/check and `git diff --check`: exit 0. Worktree fixture diff: exit 0. Against origin/dev only the already committed B-tier governance/activate-trace.json differs; A-tier changes are empty. No full npm test, release, git write, or B-tier regeneration was run.

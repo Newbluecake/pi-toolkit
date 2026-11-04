@@ -215,3 +215,47 @@ describe("P2 handled input does not leave a reusable root authorization", () => 
     expect(port.resolve(host.invocation("proven", "message_session")!)).toBeDefined();
   });
 });
+
+describe("P2b host snapshot correlation across pi structuredClone", () => {
+  function prepared() {
+    const port = createHumanGrantPort();
+    const host = createHumanGrantHost(port, "snapshot-host");
+    const message = { role: "user", content: [{ type: "text", text: "human request" }], timestamp: Date.now() };
+    host.input({ source: "rpc", text: "human request" }, "s1");
+    host.message(message, "s1");
+    return { port, host, message };
+  }
+  it("a unique byte-equivalent host snapshot survives the public API's structuredClone", () => {
+    const { port, host, message } = prepared();
+    host.context({ messages: [structuredClone(message)] }, "s1");
+    host.toolCall("clone", "message_session", "s1");
+    expect(port.resolve(host.invocation("clone", "message_session")!)).toBeDefined();
+  });
+  it.each(["timestamp", "body", "source"])("altered %s is not the observed input", (field) => {
+    const { port, host, message } = prepared();
+    const copy: Record<string, unknown> = structuredClone(message);
+    if (field === "timestamp") copy.timestamp = Date.now() + 1;
+    else if (field === "body") copy.content = [{ type: "text", text: "autonomous notification" }];
+    else copy.source = "human";
+    host.context({ messages: [copy] }, "s1");
+    host.toolCall("spoof", "message_session", "s1");
+    expect(port.resolve(host.invocation("spoof", "message_session")!)).toBeUndefined();
+  });
+  it("duplicate context matches fail closed, and removing one later cannot revive proof", () => {
+    const { port, host, message } = prepared();
+    host.context({ messages: [structuredClone(message), structuredClone(message)] }, "s1");
+    host.context({ messages: [structuredClone(message)] }, "s1");
+    host.toolCall("dup", "message_session", "s1");
+    expect(port.resolve(host.invocation("dup", "message_session")!)).toBeUndefined();
+  });
+  it("without a signed input, copied text/timestamp creates no authority", () => {
+    const { message } = prepared();
+    const port = createHumanGrantPort();
+    const host = createHumanGrantHost(port, "unsigned-host");
+    host.input({ source: "extension", text: "human request" }, "s1");
+    host.message(message, "s1");
+    host.context({ messages: [structuredClone(message)] }, "s1");
+    host.toolCall("unsigned", "message_session", "s1");
+    expect(port.resolve(host.invocation("unsigned", "message_session")!)).toBeUndefined();
+  });
+});
