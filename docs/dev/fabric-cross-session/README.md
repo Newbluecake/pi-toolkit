@@ -356,3 +356,62 @@ gate). `webCommandPolicy.fabric=confirm` ⇒ the generic confirm appears once fo
 `deriveAliasFromDirName` (only when v2), so the chip equals what auto-claim would pick (`My Project` → `my-project`; reserved/id-like ⇒ no chip). Two
 i18n keys (`alias.force`, `alias.forceAria`) live in the lazy `i18n/alias-extra.ts`, not `detail.ts`. Gate: `tests/web-hub/ui/alias-ui.test.ts`; the
 end-to-end web path is `tests/integration/fabric-xs-alias-v2.test.ts` ⑤.
+
+## Request progress / host human delegation (#14 P2, staged)
+
+The frozen gate is `xsOn ∧ fabric.crossSession.activation.enabled` (default true).
+`fabric/xs/activate.ts` now supplies P1's `activationEnabled` bridge port: main agents
+advertise `xs.state.v1` and emit the hub `activation:true` config key; `xs.activate.v1`
+and `wake_session` registration remain P3's. `/fabric status` consumes both receiver
+progress and the source mirror; no rows means no added line. B1 runs before the P1
+context observer, including controller-less natural turns.
+
+P2's host-only `human-grant.ts` stores pure provenance under
+`Symbol.for("pi-subagent:xs-human-grants")`: 64 live inputs, lazy <=30 min expiry,
+256 invocation/context references per grant, no live capacity eviction. Input is not
+a turn-wide boolean: a signed TUI/RPC input, or a once-only policy-admitted web
+cmd/owner proof, must enter context as the actual host-observed user message before
+an exact toolCallId can resolve it. Queued input never upgrades the old assistant's
+calls. Extension notifications, topic-switch replay, Feishu and model `source`/meta
+are not signing paths. Missing/copy-transformed context identity fails closed.
+Same-sid reload does not let a new owner take over old calls; new/fork/switch revoke.
+The web proof park is pure data, cap64, 5 min, scoped/ambiguity-safe and consumed
+once; command disposal/boundary clears that owner's unused proofs.
+
+One qualified `expectReply` with omitted wake reserves the grant after address,
+receivability and size checks. Commit is **before** send/re-entry; unknown or throw
+keeps it consumed, proven none allows only the same call/target retry. Explicit
+true/false and replyTo take precedence, no grant crosses xs, no quota or causal
+level reset is added. The same ref can follow real spawn edges: stack's admission
+hook records the edge; the host Agent tool result connects the exact invocation
+and returned childRunId. Neither result text nor prompt/model metadata grants an
+edge. No new child xs tools are installed.
+
+The bridge's send port correlates progress only by the **original send rid** while
+that send is live; sourceRid is never a tool parameter or model payload. A confirmed
+relation exposes `XsSendOutcome.track{messageId,activationKey?}` and `progress`;
+no matching state/off/old-cap/capacity fallback means no invented track. Local wake
+marks overlay the source view without incrementing receiver revisions. The source
+res, tool JSON/hint and new-cap mention result retain the first stop reason
+(`pair_wake_rate` explains the existing default 2/h pair quota). `woke` is dispatch
+acceptance, not `started`; unknown never causes a second body send. The synchronous
+web mention branch marks its exact cmdId consumed; the shared mention subscription
+uses session/owner-unique dispatched input matching and preserves onHandled once.
+Legacy/off command results and notice text retain their old shape.
+
+**Staged integration blockers (not completed U5):** the current hub resolve path
+does not yet stamp `target.xsState`; P2 consumes this authoritative optional proof,
+but never substitutes local+hub caps for the target's cap. Therefore real delegated
+omitted-wake calls currently fail closed to deliver-only (direct human mentions
+already explicitly request wake). Actual child-driver context/invocation/lifecycle
+consumers are also not wired in this package's narrow stack-only window: pure
+nested shared-ref behavior is tested, not claimed as full runtime propagation.
+These need the hub/router and runtime execution owners' follow-up windows.
+Sender requested-wake downgrade metadata is source-local until the tracked wire
+fields are added by their protocol/router owners; audit/UI remain separate owners.
+
+Tests: `tests/fabric/xs-{human-grant,sender-human-grant}.test.ts`,
+`tests/web-hub/agent/{xs-state-bridge,commands-mention-session}.test.ts` plus the
+unchanged default-on fabric/reply/mention/inbox/wake wiring regression suites.
+P2 adds input/message_start/tool_call/tool_result registrations before the existing
+B1 hook; P5 must refresh the declared B-tier governance trace, never A-tier goldens.

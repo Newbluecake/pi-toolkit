@@ -422,7 +422,8 @@ describe("alias-plan ALW: activate assembly", () => {
     expect(r.config.crossSession.alias).toBeUndefined();
     expect(r.reqs("alias")).toHaveLength(0);
     const legacyList = createListSessionsTool({ sender: stubSender, channels: true });
-    const legacyMsg = createMessageSessionTool({ sender: stubSender, reply: true });
+    // Activation is default-on: compare the same declared description variant, WITHOUT pinning off.
+    const legacyMsg = createMessageSessionTool({ sender: stubSender, reply: true, activation: true });
     expect(r.tools.get("list_sessions").description).toBe(legacyList.description);
     expect(r.tools.get("list_sessions").parameters).toBe(legacyList.parameters);
     expect(r.tools.get("message_session").description).toBe(legacyMsg.description);

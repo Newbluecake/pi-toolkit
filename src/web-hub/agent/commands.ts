@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { noteHumanWebDispatch, revokeHumanWebDispatch } from "../../fabric/xs/human-grant.js";
+import type { SessionMentionRouteResult } from "../../mention/session.js";
 /**
  * agent-side command dispatcher (plan §4.1–§4.6, D1/D5–D8/D13/D15–D18/D21/D26).
  *
@@ -243,6 +246,7 @@ function opTotal(frame: CmdFrame): number {
 }
 
 export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
+  const humanOwner = deps.owner ?? randomUUID();
   /** cmdId -> the still-open HTTP-reply wait for a dispatched-but-unobserved prompt (§4.3 step 2). */
   const pendingObservation = new Map<string, { frame: CmdFrame; deliver: "steer" | "followUp"; timer: Timer }>();
   /** cmdId -> exact text an idle prompt is waiting to see in the next `message_start` (§4.3 step 3). */
@@ -280,7 +284,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     const outcome = deps.ledger.begin(frame.id, frame.cmd.op, frame.cmd, deps.now(), {
       ...extra,
       sessionId: deps.getSessionId(),
-      ...(deps.owner !== undefined ? { owner: deps.owner } : {}),
+      ...(deps.owner !== undefined ? { owner: deps.owner } : humanEnhancementOn() ? { owner: humanOwner } : {}),
     });
     switch (outcome.kind) {
       case "new":
@@ -401,7 +405,13 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
                       ...(routed.requestId !== undefined ? { requestId: routed.requestId } : {}),
                     }
                   : { action: routed.action, label, runId: routed.runId };
-            deps.ledger.updatePrompt(frame.id, { promptState: "observed", behavior: cmd.deliver }, deps.now());
+            const enhanced = routed.action === "session" && mentionDeps?.sessions?.enhanced?.() === true;
+            if (enhanced && routed.action === "session") Object.assign(mention, sessionMetadata(routed));
+            deps.ledger.updatePrompt(
+              frame.id,
+              { promptState: enhanced ? "consumed" : "observed", behavior: cmd.deliver },
+              deps.now(),
+            );
             settleAndReply(frame, {
               ok: true,
               data: { op: "prompt", delivery: "observed", behavior: cmd.deliver, mention },
@@ -567,6 +577,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     // to the 3s timeout and wrongly reports `unobserved` even though it *was* observed.
     const pending = registerObservation(frame, cmd.deliver);
     try {
+      noteWebProof(frame.id, cmd.text, frame.origin);
       deps.pi.sendUserMessage(cmd.text, { deliverAs: cmd.deliver, expandPromptTemplates: false });
     } catch {
       if (pendingObservation.delete(frame.id)) pending.timer.cancel();
@@ -658,6 +669,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     // 30s timer (already armed above) if no observation ever lands — exactly the "possibly-delivered"
     // semantics called for, with no new state needed.
     try {
+      noteWebProof(item.cmdId, item.text, item.origin);
       deps.pi.sendUserMessage(item.text, { deliverAs: item.deliver, expandPromptTemplates: false });
     } catch {
       /* side-effect-then-throw: still reported as "sent" above/below — see comment. */
@@ -1141,6 +1153,59 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     }
   }
 
+  function humanEnhancementOn(): boolean {
+    try {
+      return deps.mention?.()?.sessions?.enhanced?.() === true;
+    } catch {
+      return false;
+    }
+  }
+  function noteWebProof(inputId: string, text: string, origin: CmdOrigin): void {
+    try {
+      if (isFeishuCmdOrigin(origin) || deps.mention?.()?.sessions?.enhanced?.() !== true) return;
+      noteHumanWebDispatch({ inputId, text, sessionId: deps.getSessionId(), owner: humanOwner, at: Date.now() });
+    } catch {
+      /* advisory provenance must NEVER prevent the actual host send */
+    }
+  }
+  function sessionMetadata(r: Extract<SessionMentionRouteResult, { handled: true }>) {
+    return {
+      ...(r.wakeDowngraded !== undefined ? { wakeDowngraded: r.wakeDowngraded } : {}),
+      ...(r.woke !== undefined ? { woke: r.woke } : {}),
+      ...(r.wake ? { wake: r.wake } : {}),
+      ...(r.track ? { track: r.track } : {}),
+      ...(r.progress ? { progress: r.progress } : {}),
+    };
+  }
+  // Subscribe through the EXISTING shared mention dependency, no index.ts or global closure.
+  let unsubscribeSessionRouted: (() => void) | undefined;
+  try {
+    unsubscribeSessionRouted = deps.mention?.()?.sessions?.subscribeSessionRouted?.((text, result) => {
+      const match = deps.ledger.findDispatchedByText(text, {
+        sessionId: deps.getSessionId(),
+        owner: humanOwner,
+      });
+      if (!match) return; // miss/ambiguity/wrong owner is not proof
+      deps.ledger.updatePrompt(match.id, { promptState: "consumed" }, deps.now());
+      const pending = pendingObservation.get(match.id);
+      if (pending) {
+        pending.timer.cancel();
+        pendingObservation.delete(match.id);
+        const mention = {
+          action: "session" as const,
+          label: result.target,
+          effect: result.effect,
+          ...(result.requestId ? { requestId: result.requestId } : {}),
+          ...sessionMetadata(result),
+        };
+        settleAndReply(pending.frame, okResult({ op: "prompt", delivery: "observed", behavior: "idle", mention }));
+      }
+      deps.onChanged();
+    });
+  } catch {
+    /* missing/throwing display port is not authorization and cannot break activation */
+  }
+
   return {
     handle(frame) {
       if (!deps.controlEnabled()) {
@@ -1270,6 +1335,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       settleLate(frame, result);
     },
     onSessionBoundary() {
+      revokeHumanWebDispatch(humanOwner);
       const cleared = deps.queueMirror.clearAll();
       let changed = false;
       for (const item of cleared) {
@@ -1332,6 +1398,8 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       return true;
     },
     dispose() {
+      unsubscribeSessionRouted?.();
+      revokeHumanWebDispatch(humanOwner);
       for (const p of pendingObservation.values()) {
         try {
           p.timer.cancel();

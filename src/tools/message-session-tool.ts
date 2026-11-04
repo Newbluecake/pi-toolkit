@@ -1,3 +1,4 @@
+import type { InvocationRef } from "../fabric/xs/human-grant.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import type { XsSendOutcome, XsSender } from "../fabric/xs/sender.js";
@@ -98,6 +99,8 @@ export const XS_REPLY_TO_REJECTED_HINT = "对方未接收（已收到过回复�
 
 export interface MessageSessionToolDeps {
   sender: XsSender;
+  activation?: boolean;
+  invocation?(toolCallId: string): InvocationRef | undefined;
   /** `fabric.crossSession.reply.enabled` frozen at activate: selects the schema instance and the
    *  description. Omitted/false ⇒ the legacy tool, byte-identical to pre-reply. */
   reply?: boolean;
@@ -153,14 +156,19 @@ export function createMessageSessionTool(
     description:
       (replyOn ? REPLY_DESCRIPTION : LEGACY_DESCRIPTION) +
       (deps.alias === true ? ALIAS_TO_SUFFIX : "") +
-      (deps.threadRebind === true ? THREAD_REBIND_SUFFIX : ""),
+      (deps.threadRebind === true ? THREAD_REBIND_SUFFIX : "") +
+      (deps.activation === true
+        ? " With expectReply and omitted wake, a verified one-use host human delegation requests wake only when all three peers support xs.state.v1; ordinary agent messages default to deliver-only. Explicit false always wins. One human input shares one allowance across its real call tree; parallel or additional targets need explicit true. wake is quota/policy limited; woke means dispatch accepted, not started. Keep the returned track.messageId/activationKey for read-only query or eligible activation; never resend unknown body delivery."
+        : ""),
     parameters: (replyOn ? MessageSessionParamsReply : MessageSessionParamsLegacy) as typeof MessageSessionParamsLegacy,
-    async execute(_toolCallId, rawParams, signal) {
+    async execute(toolCallId, rawParams, signal) {
       const params = rawParams as MessageSessionParams;
       // legacy instance: the new fields can never legitimately arrive, and are never forwarded
       const expectReply = replyOn ? params.expectReply : undefined;
       const replyTo = replyOn ? params.replyTo : undefined;
+      const invocation = deps.activation === true ? deps.invocation?.(toolCallId) : undefined;
       const outcome: XsSendOutcome = await deps.sender.message({
+        ...(invocation ? { invocation } : {}),
         ...(signal !== undefined ? { signal } : {}),
         to: params.to,
         text: params.text,
@@ -178,7 +186,14 @@ export function createMessageSessionTool(
         } else if (outcome.effect === "unknown") hint += `\n${XS_UNKNOWN_HINT}`;
       } else if (outcome.effect === "unknown") hint = `\n${XS_UNKNOWN_HINT}`;
       if (deps.alias === true && outcome.status === "alias_unavailable") hint += `\n${XS_ALIAS_UNAVAILABLE_HINT}`;
+      if (deps.activation === true && outcome.wakeDowngraded)
+        hint += `\n${xsWakeDowngradedHint(outcome.wakeDowngraded, outcome.effect)}`;
       return { content: [{ type: "text", text: JSON.stringify(outcome) + hint }], details: outcome };
     },
   };
+}
+
+export function xsWakeDowngradedHint(reason: string, effect: string): string {
+  const quota = reason === "pair_wake_rate" ? "（hub，每会话对默认 2 次/小时）" : "";
+  return `唤醒因 ${reason} 降级${quota}；${effect === "none" ? "正文未送达" : effect === "applied" ? "正文投递已确认，非 started 证明" : "正文可能已进入队列"}，不要重发。仅已确认送达且未开始的有效原 receipt 可人工 activate；配额降级须等待配额，unknown 只查询。`;
 }

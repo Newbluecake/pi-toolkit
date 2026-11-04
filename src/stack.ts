@@ -1,3 +1,4 @@
+import { getHumanGrantPort } from "./fabric/xs/human-grant.js";
 import { readBashJobTail } from "./bash/notify.js";
 import {
   BASH_JOB_SEAL_GRACE_MS,
@@ -1683,7 +1684,23 @@ export function buildSessionStack(
     },
     onLabel: (label, target, info) =>
       info.resumed ? mentionRef.current?.reassign(label, target) : mentionRef.current?.register(label, target),
-    ...(fabric ? { onSpawnEdge: (parent, child) => fabric.tree.appendEdge(parent, child) } : {}),
+    ...(fabric
+      ? {
+          onSpawnEdge: (parent, child) => {
+            fabric.tree.appendEdge(parent, child);
+            // P2: record ONLY the real admitted edge. The exact host Agent tool result later
+            // correlates childRunId with its captured InvocationRef (never prompt/meta guessing).
+            if (
+              xsOn({
+                fabric: settings.fabric,
+                webHub: { enabled: settings.webHub.enabled, control: settings.webHub.control !== false },
+              }) &&
+              settings.fabric.crossSession.activation.enabled
+            )
+              getHumanGrantPort().observeSpawnEdge(currentSessionId(ctx), parent, child);
+          },
+        }
+      : {}),
     ...(fabric?.wake ? { inbox: fabric.wake } : {}),
     // fabric-cross-session plan §3.3 L4 (W1): spawn admission reads causal levels only with wake on.
     ...(fabric?.level

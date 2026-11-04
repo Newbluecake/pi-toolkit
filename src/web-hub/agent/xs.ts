@@ -48,6 +48,7 @@ import { channelsFieldToWrite, linkJoined as channelLinkJoined, XS_DEFAULT_CHANN
 import type { XsChannelView } from "../../fabric/xs/types-channel.js";
 import type {
   XsHubPort,
+  XsOriginSnapshot,
   XsPortBroadcastArgs,
   XsPortChannelsArgs,
   XsPortListArgs,
@@ -95,6 +96,7 @@ import {
   XS_STATE_AGENT_CAP,
   XS_STATE_HUB_CAP,
   type XsProgress,
+  type XsWakeView,
   type XsRequestsStatusWire,
   type XsStateFrame,
 } from "../protocol/xs-activation.js";
@@ -490,7 +492,7 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
 
   /** The SOURCE-side mirror bag (per bridge = per activate): merged from `xs_state` pushes and
    *  the receiver-stack subscriptions. `defaulted` is source-private — remote merges never set
-   *  it (progress.ts guarantees); local marks (P2's U2 default) go through `observe`. Replaced
+   *  it (progress.ts guarantees); local marks (P2's U2 default) overlay without changing receiver revision. Replaced
    *  (not cleared) on a session switch — a new session's tracking epoch inherits nothing. */
   let mirror = new XsProgressBag(XS_PROGRESS_CAP);
   /** The sessionId the mirror currently speaks for (a switch replaces the bag, arch §4.2
@@ -499,6 +501,31 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
   /** Monotone projection revision — one per publishing process (arch §4.7). */
   let mirrorRevision = 0;
   /** One-shot receipt waiters by messageId (the hub's answer push correlates on it). */
+  // Only live sends, keyed by the EXACT original rid; no text/latest-row correlation.
+  const sourceWakeMarks = new Map<string, { sessionId: string; wake: XsWakeView }>();
+  const withSourceWake = (row: XsProgress): XsProgress => {
+    const mark = sourceWakeMarks.get(row.messageId);
+    if (!mark || mark.sessionId !== deps.port.stack()?.sessionId()) return row;
+    const stop = mark.wake.reason !== undefined;
+    return {
+      ...row,
+      wake: {
+        ...row.wake,
+        requested: mark.wake.requested,
+        ...(mark.wake.defaulted ? { defaulted: true } : {}),
+        ...(stop
+          ? {
+              ...(mark.wake.reason ? { reason: mark.wake.reason } : {}),
+              ...(mark.wake.stage ? { stage: mark.wake.stage } : {}),
+              decision: "downgraded" as const,
+            }
+          : mark.wake.decision === "dispatch_accepted" && row.wake.reason === undefined
+            ? { decision: "dispatch_accepted" as const }
+            : {}),
+      },
+    };
+  };
+  const sendProgress = new Map<string, { origin: XsOriginSnapshot; wake?: XsWakeView; progress?: XsProgress }>();
   const receiptWaiters = new Map<string, (progress: XsProgress) => void>();
   /** The stack whose progress subscriptions are currently wired (re-subscribe on stack swap). */
   let wiredProgressStack: XsStackProgressPort | undefined;
@@ -548,7 +575,11 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       // A session SWITCH starts a FRESH tracking epoch — old rows never relabel onto the new
       // sid. The FIRST wiring (no previous sid) adopts without dropping: states may legitimately
       // arrive before the first deliver/attach hook (the hub pushes on its own initiative).
-      if (mirrorSessionId !== undefined) mirror = new XsProgressBag(XS_PROGRESS_CAP);
+      if (mirrorSessionId !== undefined) {
+        mirror = new XsProgressBag(XS_PROGRESS_CAP);
+        sourceWakeMarks.clear();
+        sendProgress.clear();
+      }
       mirrorSessionId = sid;
     }
   };
@@ -1218,8 +1249,65 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     hubPort(): XsReplyHubPort {
       return {
         list: (args) => roundTrip(reqOfList(args)),
-        resolve: (args) => roundTrip(reqOfResolve(args)),
-        send: (args) => roundTrip(reqOfSend(args)),
+        resolve: async (args) => {
+          const out = await roundTrip(reqOfResolve(args));
+          // The hub must vouch for the TARGET's cap; local/hub caps alone are insufficient.
+          if (out.kind === "res" && activationEnabled() && hubHasState()) {
+            const target = out.res.target as typeof out.res.target & { xsState?: boolean };
+            if (target?.xsState === true) return { ...out, targetState: true };
+          }
+          return out;
+        },
+        send: async (args) => {
+          const frame = reqOfSend(args);
+          if (!activationEnabled() || !hubHasState()) return roundTrip(frame);
+          if (sendProgress.size >= XS_PROGRESS_CAP) return roundTrip(frame);
+          const pending: { origin: XsOriginSnapshot; wake?: XsWakeView; progress?: XsProgress } = {
+            origin: { ...args.origin },
+            ...(args.wakeView ? { wake: { ...args.wakeView } } : {}),
+          };
+          sendProgress.set(frame.rid, pending);
+          try {
+            const out = await roundTrip(frame);
+            if (pending.progress === undefined) return out;
+            if (out.kind !== "res") return { ...out, progress: withSourceWake(pending.progress) };
+            if (
+              pending.wake &&
+              (sourceWakeMarks.has(pending.progress.messageId) || sourceWakeMarks.size < XS_PROGRESS_CAP)
+            ) {
+              const reason = pending.wake.reason ?? out.res.wakeDowngraded;
+              const marked: XsWakeView = {
+                ...pending.wake,
+                ...(reason
+                  ? {
+                      reason,
+                      decision: "downgraded",
+                      stage: pending.wake.reason
+                        ? "sender"
+                        : ["pair_wake_rate", "outbound_wake_rate"].includes(reason)
+                          ? "hub"
+                          : "receiver",
+                    }
+                  : args.wake === true && out.res.effect === "applied"
+                    ? { decision: "dispatch_accepted" }
+                    : {}),
+              };
+              sourceWakeMarks.set(pending.progress.messageId, { sessionId: pending.origin.sessionId, wake: marked });
+              mirrorRevision++;
+              try {
+                deps.publishStatus?.();
+              } catch {
+                /* keep the received delivery verdict */
+              }
+            }
+            return { ...out, progress: withSourceWake(pending.progress) };
+          } finally {
+            sendProgress.delete(frame.rid);
+          }
+        },
+        requestProgress: () =>
+          activationEnabled() && hubHasState() ? mirror.rows(Date.now()).map(withSourceWake) : [],
+        stateCapable: () => activationEnabled() && deps.conn()?.status().state === "live" && hubHasState(),
         replyCapable: () => replyEnabled() && deps.conn()?.status().state === "live" && hubHasReply(),
         channelCapable: () => channelsEnabled() && deps.conn()?.status().state === "live" && hubHasChannel(),
         // channel-plan §5.5 (CHW): CH4's sender reads the same probe under the name `hubChannelCap`.
@@ -1317,12 +1405,25 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         if (!activationEnabled()) return;
         const { sourceRid: _hubOnly, ...snapshot } = frame;
         const write = mirror.merge(snapshot);
+        if (frame.sourceRid !== undefined) {
+          const pending = sendProgress.get(frame.sourceRid);
+          const origin = originOf();
+          if (pending && origin?.sessionId === pending.origin.sessionId && origin.epoch === pending.origin.epoch) {
+            if (pending.progress === undefined || pending.progress.messageId === snapshot.messageId) {
+              if (pending.wake && sourceWakeMarks.size < XS_PROGRESS_CAP)
+                sourceWakeMarks.set(snapshot.messageId, { sessionId: pending.origin.sessionId, wake: pending.wake });
+              pending.progress = withSourceWake(mirror.snapshot(snapshot.messageId, Date.now()) ?? snapshot);
+            }
+          }
+        }
         if (write.kind === "created" || write.kind === "merged") mirrorRevision++;
         const waiter = receiptWaiters.get(frame.messageId);
         if (waiter !== undefined) {
           receiptWaiters.delete(frame.messageId);
           waiter(
-            write.kind === "created" || write.kind === "merged" || write.kind === "stale" ? write.progress : snapshot,
+            withSourceWake(
+              write.kind === "created" || write.kind === "merged" || write.kind === "stale" ? write.progress : snapshot,
+            ),
           );
         }
         deps.publishStatus?.();
@@ -1337,7 +1438,7 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       if (!activationEnabled()) return undefined;
       const sid = deps.port.stack()?.sessionId();
       if (sid === undefined) return undefined;
-      const rows = mirror.rows(Date.now());
+      const rows = mirror.rows(Date.now()).map(withSourceWake);
       if (rows.length === 0) return undefined;
       const capped = rows.slice(0, XS_REQUESTS_MAX_ROWS);
       return {

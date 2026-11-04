@@ -1,3 +1,5 @@
+import type { XsProgress, XsWakeView } from "../../web-hub/protocol/xs-activation.js";
+import type { HumanGrantClaim, HumanGrantPort, InvocationRef } from "./human-grant.js";
 import { XS_MAX_FRAME_BYTES, xsFrameBytesOk } from "../../web-hub/protocol/xs.js";
 import { checkChannelName, normalizeChannel, XS_DEFAULT_CHANNEL } from "./channel.js";
 import type { XsReplyIssueInput, XsReplyIssueResult } from "./reply-ledger.js";
@@ -67,8 +69,12 @@ export interface XsSenderLevelPort {
  *  agent-side `connection.request` deadline fired (§8.2 table: list/resolve/info 3s, send 8s);
  *  `link_lost` ⇔ the agent socket tore down with the request pending; `off` ⇔ no `xs.v1` cap
  *  (nothing was sent). The port NEVER retries and never fabricates an `xs_res`. */
-export type XsPortReply =
-  { kind: "res"; res: XsResFrame } | { kind: "deadline" } | { kind: "link_lost" } | { kind: "off" };
+export type XsPortReply = (
+  | { kind: "res"; res: XsResFrame; targetState?: boolean }
+  | { kind: "deadline" }
+  | { kind: "link_lost" }
+  | { kind: "off" }
+) & { progress?: XsProgress };
 
 export interface XsPortListArgs {
   origin: XsOriginSnapshot;
@@ -105,6 +111,8 @@ export interface XsPortSendArgs {
   expect?: { requestId: string; timeoutMs: number };
   /** Reply-plan §4.2 (RX4): answer a request; `to` is then the verified FULL sessionId. */
   replyTo?: string;
+  /** Source-private wake intent, consumed locally by the bridge, NEVER serialized. */
+  wakeView?: XsWakeView;
 }
 
 /** X3's whole view of the hub connection. X2's adapter builds the `xs_req` frame (adding `t`,
@@ -117,6 +125,9 @@ export interface XsHubPort {
   /** Reply-plan §4.2 (RX4): true iff local reply is enabled AND the live hub declared
    *  `xs.reply.v1` (RX3's `hubPort().replyCapable()`). Absent ⇒ not capable (fail closed). */
   replyCapable?(): boolean;
+  /** Live local+hub state negotiation; target additionally proven by resolve.targetState. */
+  stateCapable?(): boolean;
+  requestProgress?(): readonly XsProgress[];
   /** Channel-plan §5.5/§3.4: true iff the LIVE hub declared `xs.channel.v1` (and the local agent
    *  declared it too). Absent ⇒ no cap (fail closed: broadcast/channels unsupported, channel
    *  gates behave as on an old hub). */
@@ -160,6 +171,9 @@ export type XsSendStatus =
 export interface XsSendOutcome {
   status: XsSendStatus;
   effect: XsEffect;
+  track?: { messageId: string; activationKey?: string };
+  progress?: XsProgress;
+  wake?: XsWakeView;
   reason?: string;
   code?: string;
   to?: { ref: string; name?: string; alias?: string };
@@ -174,7 +188,7 @@ export interface XsSendOutcome {
   /** Sub-reason for `reply_unreceivable` (`receive_off|blocked|not_joined`). */
   unreceivable?: "receive_off" | "blocked" | "not_joined";
   /** Derived (XS0-report §3: `xs_res` carries no `woke`): a wake was requested, not downgraded,
-   *  and the hub's evidence is `applied` — i.e. a run provably started (Fpi2). */
+   *  and the hub's evidence is `applied` — dispatch accepted, NOT a started observation. */
   woke?: boolean;
 }
 
@@ -369,6 +383,8 @@ export interface XsSenderDeps {
   /** Channel-plan §2.3/§4/§5.5 (CH4): the local channel view, wired iff `channels.enabled`.
    *  Absent ⇒ every channel gate is skipped and behavior is the pre-channel sender, byte for byte. */
   channels?: XsChannelView;
+  activation?: boolean;
+  humanGrants?: HumanGrantPort;
 }
 
 export interface XsSenderMessageArgs {
@@ -385,6 +401,8 @@ export interface XsSenderMessageArgs {
   origin?: "model" | "human";
   /** `0` for human-origin sends (causal level of human input, §9). */
   levelOverride?: 0;
+  /** Captured at the host tool execute boundary, never from raw parameters. */
+  invocation?: InvocationRef;
 }
 
 export interface XsSender {
@@ -593,7 +611,28 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
       // replyTo carries neither wake nor level (reply-plan §4.2): the requester decides wake.
       let wake: true | undefined;
       let localDowngrade: XsWakeDowngraded | undefined;
-      const wantWake = replyToId === undefined && args.wake === true;
+      const stateNegotiated =
+        deps.activation === true && deps.port.stateCapable?.() === true && resolveReply.targetState === true;
+      let grantClaim: HumanGrantClaim | undefined;
+      const defaultCandidate =
+        stateNegotiated && replyToId === undefined && expectReq !== undefined && args.wake === undefined;
+      const grantRef = defaultCandidate && args.invocation ? deps.humanGrants?.resolve(args.invocation) : undefined;
+      // Check size for the possible default wake BEFORE claiming (quota/guard/receivability above).
+      if (
+        grantRef &&
+        !sendFrameBytesOk(
+          snapshot,
+          sendTo,
+          truncate(args.text ?? "", maxChars),
+          true,
+          deps.wakeOn ? deps.level?.levelOfRoot() : undefined,
+          { expect: true },
+        )
+      )
+        return { status: "too_large", effect: "none", reason: "too_large" };
+      if (grantRef && args.invocation) grantClaim = deps.humanGrants?.reserve(grantRef, args.invocation, sendTo);
+      const defaulted = defaultCandidate && (isHuman || grantClaim !== undefined);
+      const wantWake = replyToId === undefined && (args.wake === true || defaulted);
       const wakeUsable = deps.wakeOn === true && deps.level !== undefined;
       const levelBase =
         args.levelOverride !== undefined ? args.levelOverride : wakeUsable ? deps.level!.levelOfRoot() : undefined;
@@ -613,6 +652,7 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
           replyTo: replyToId !== undefined,
         })
       ) {
+        if (grantClaim) deps.humanGrants?.releaseNone(grantClaim);
         return { status: "too_large", effect: "none", reason: "too_large", ...(truncated ? { truncated: true } : {}) };
       }
 
@@ -636,6 +676,7 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
           maxPendingPerTarget: replyDeps.maxPendingPerTarget,
         });
         if (!issued.ok) {
+          if (grantClaim) deps.humanGrants?.releaseNone(grantClaim);
           return {
             status: issued.code,
             effect: "none",
@@ -651,7 +692,48 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
         replyDeps?.ledger.recordSend(issuedRequestId, effect);
         return { state: effect === "none" ? "send_failed" : "pending" };
       };
+      const wakeView: XsWakeView | undefined =
+        deps.activation === true && deps.port.stateCapable?.() === true
+          ? {
+              requested: wantWake,
+              ...(defaulted ? { defaulted: true } : {}),
+              decision: localDowngrade ? "downgraded" : wantWake ? "unknown" : "deliver_only",
+              ...(localDowngrade ? { stage: "sender", reason: localDowngrade } : {}),
+            }
+          : undefined;
+      let trackedProgress: XsProgress | undefined;
       const withReply = (o: XsSendOutcome): XsSendOutcome => {
+        if (deps.activation === true && trackedProgress) {
+          o.track = {
+            messageId: trackedProgress.messageId,
+            ...(trackedProgress.activationKey ? { activationKey: trackedProgress.activationKey } : {}),
+          };
+          o.progress = trackedProgress;
+        }
+        if (grantClaim && o.effect === "none") deps.humanGrants?.releaseNone(grantClaim);
+        if (wakeView) {
+          const stop = localDowngrade ?? o.wakeDowngraded;
+          if (stop) o.wakeDowngraded = stop;
+          o.wake = {
+            ...wakeView,
+            ...(o.progress?.wake ?? {}),
+            requested: wakeView.requested,
+            ...(wakeView.defaulted ? { defaulted: true } : {}),
+            ...(stop
+              ? {
+                  decision: "downgraded",
+                  reason: stop,
+                  stage: localDowngrade
+                    ? "sender"
+                    : ["pair_wake_rate", "outbound_wake_rate"].includes(stop)
+                      ? "hub"
+                      : "receiver",
+                }
+              : o.woke
+                ? { decision: "dispatch_accepted" }
+                : {}),
+          };
+        }
         // ticket settle first (exactly once), then decorate
         const t = settleTicket(o.effect);
         if (t !== undefined && issuedRequestId !== undefined && issuedDueAt !== undefined) {
@@ -666,6 +748,7 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
       // ---- exactly one send; no resend path (§3, NQ3) ----
       let sendReply: XsPortReply;
       try {
+        if (grantClaim) deps.humanGrants?.commit(grantClaim); // BEFORE any host side effect / re-entry
         sendReply = await deps.port.send({
           origin: snapshot,
           to: sendTo,
@@ -674,7 +757,9 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
           ...(level !== undefined ? { level } : {}),
           ...(expectWire !== undefined ? { expect: expectWire } : {}),
           ...(replyToId !== undefined ? { replyTo: replyToId } : {}),
+          ...(wakeView ? { wakeView } : {}),
         });
+        trackedProgress = sendReply.progress;
       } catch {
         // a port that throws cannot prove non-delivery ⇒ unknown (never none), ticket stays pending
         return withReply({ status: "unanswered", effect: "unknown", reason: "link_lost" });
@@ -689,7 +774,12 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
       // Any received verdict (ok or provable rejection) survives the identity change; `off`
       // proves nothing was sent. Map below, then return as-is.
 
-      if (sendReply.kind === "off") return withReply({ status: "off", effect: "none", code: "E_XS_OFF" });
+      if (sendReply.kind === "off")
+        return withReply(
+          trackedProgress
+            ? { status: "unanswered", effect: "unknown", reason: "link_lost" }
+            : { status: "off", effect: "none", code: "E_XS_OFF" },
+        );
       if (sendReply.kind === "deadline") {
         return withReply({ status: "unanswered", effect: "unknown", reason: "client_deadline" });
       }
@@ -700,7 +790,7 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
       const target = publicTarget(res.target ?? resolvedTarget);
       if (res.ok) {
         const effect: XsEffect = res.effect ?? "unknown"; // XI11: no evidence field ⇒ unknown
-        const wakeDowngraded = res.wakeDowngraded ?? localDowngrade;
+        const wakeDowngraded = localDowngrade ?? res.wakeDowngraded;
         const woke = wantWake && wakeDowngraded === undefined && effect === "applied";
         const reason = resReason(res);
         return withReply({

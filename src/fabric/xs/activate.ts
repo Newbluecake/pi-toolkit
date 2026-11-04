@@ -1,3 +1,5 @@
+import { createHumanGrantHost, getHumanGrantPort } from "./human-grant.js";
+import { XS_STATE_HUB_CAP } from "../../web-hub/protocol/xs-activation.js";
 import { homedir, tmpdir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readBeforeAgentStartTrigger } from "../../adapters/pi-compat.js";
@@ -54,6 +56,8 @@ export interface XsActivation {
   aliasUsable(): boolean;
   /** The sender, present only after `registerSurface` ran with xs on. */
   sender(): XsSender | undefined;
+  /** A handled mention never enters the root context: discard its unbound input proof. */
+  inputHandled?(text: string): void;
   capabilityState(): ReturnType<typeof getXsHostCapability>["state"];
   /** Phase a: B1 trigger guard + unread turn-event forwarders. */
   registerTriggerGuard(pi: ExtensionAPI): void;
@@ -88,6 +92,9 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     fabric: settings.fabric,
     webHub: { enabled: settings.webHub.enabled, control: settings.webHub.control !== false },
   }); // frozen per activate: tools/caps/stack all share this gate
+  const activationOn = xsEnabled && settings.fabric.crossSession.activation.enabled;
+  const humanGrants = activationOn ? getHumanGrantPort() : undefined;
+  const humanHost = activationOn ? createHumanGrantHost(humanGrants) : undefined;
   const replyEnabled = xsEnabled && settings.fabric.crossSession.reply.enabled; // frozen per activate
   // Channel-plan §3.1/§6 (CHW): frozen per activate (non-live). Off ⇒ old-agent shape: no
   // `xs.channel.v1` cap, no `message_channel`, the legacy `list_sessions` instance, named channels suspended.
@@ -171,6 +178,20 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     linkJoined: (hubCap) => (xsAttached ? holder.current?.xs?.membership.linkJoined(hubCap) === true : false),
   };
   function registerTriggerGuard(pi: ExtensionAPI): void {
+    if (humanHost) {
+      pi.on("input", (event, ctx) => {
+        humanHost.input(event, xsSessionOf(ctx) ?? "");
+      });
+      pi.on("message_start", (event, ctx) => {
+        humanHost.message(event.message, xsSessionOf(ctx) ?? "");
+      });
+      pi.on("tool_call", (event, ctx) => {
+        humanHost.toolCall(event.toolCallId, event.toolName, xsSessionOf(ctx) ?? "", event.parentToolCallId);
+      });
+      pi.on("tool_result", (event) => {
+        humanHost.toolResult(event.toolCallId, event.toolName, event.details, event.isError);
+      });
+    }
     // B1 stays installed even after an xs-off reload: old queued marked triggers still need
     // authorization. Never return the library TriggerResult as a pi hook result.
     pi.on("before_agent_start", (event, ctx) => {
@@ -219,27 +240,37 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
       // prefix stay byte-identical. BEFORE turn_start: the activation trace pins this order.
       pi.on("context", (event, ctx) => {
         const xs = xsAttached ? holder.current?.xs : undefined;
-        if (xs?.controller) xs.context(event);
-        else if (xsAttached && holder.current?.rootWakeRecovery) holder.current.rootWakeRecovery.context(event);
-        else {
+        let contextAllowed = false;
+        if (xs?.controller) contextAllowed = xs.controller.context(event).kind !== "aborted";
+        else if (xsAttached && holder.current?.rootWakeRecovery) {
+          contextAllowed = holder.current.rootWakeRecovery.context(event).kind !== "aborted";
+        } else {
           const port = { abort: () => ctx.abort(), isIdle: () => ctx.isIdle?.() ?? true };
-          guardRootWakeContext(event, {
-            sessionId: xsSessionOf(ctx) ?? "",
-            ledger: xsLedger,
-            capability: xsCapability,
-            abort: () => {
-              void orphanWatch.issue(port, undefined);
-            },
-            orphan: (t) => orphanWatch.issue(port, t),
-            audit: (e) => console.warn(`[pi-subagent] fabric xs ${e}`),
-          });
+          contextAllowed =
+            guardRootWakeContext(event, {
+              sessionId: xsSessionOf(ctx) ?? "",
+              ledger: xsLedger,
+              capability: xsCapability,
+              abort: () => {
+                void orphanWatch.issue(port, undefined);
+              },
+              orphan: (t) => orphanWatch.issue(port, t),
+              audit: (e) => console.warn(`[pi-subagent] fabric xs ${e}`),
+            }).kind !== "aborted";
+        }
+        if (contextAllowed) {
+          xs?.progress?.observeContext(event); // Existing P1 port, AFTER the mandatory B1 guard.
+          humanHost?.context(event, xsSessionOf(ctx) ?? "");
         }
       });
       // Channel-plan §12.3 (IBW): unread inbox clearing rides the extension turn events (message_end is
       // unusable: pi runs extension handlers BEFORE persisting). Forwarders only; counting lives in unread.ts.
       pi.on("turn_start", () => holder.current?.xs?.unreadTurnStart());
       pi.on("turn_end", () => holder.current?.xs?.unreadTurnEnd());
-      pi.on("agent_end", () => holder.current?.xs?.unreadAgentEnd()); // fallback when turn_end never fired
+      pi.on("agent_end", (_event, ctx) => {
+        holder.current?.xs?.unreadAgentEnd();
+        humanHost?.end(xsSessionOf(ctx) ?? "");
+      }); // fallback when turn_end never fired
     }
   }
 
@@ -265,9 +296,11 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
         holder.current?.xs?.reply?.flush(); // §7.2: fence close evidence ⇒ retry owed notices
       });
       pi.on("session_before_switch", () => {
+        if (xsSessionId) humanHost?.revoke(xsSessionId);
         holder.current?.xs?.fence.onEvent({ type: "session_before_switch" });
       });
       pi.on("session_before_fork", () => {
+        if (xsSessionId) humanHost?.revoke(xsSessionId);
         holder.current?.xs?.fence.onEvent({ type: "session_before_fork" });
       });
     }
@@ -280,6 +313,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     // Fpi10: replacement first aborts the outgoing AgentSession; reload does NOT, so preserve
     // its authorizations/leases for explicit recovery. No time-based ledger cleanup.
     pi.on("session_shutdown", (event, ctx) => {
+      if (event.reason !== "reload" && xsSessionId) humanHost?.revoke(xsSessionId);
       xsAttached = false;
       holder.current?.disposeXsSync(); // fence session_shutdown event, xs.dispose, rootWakeRecovery.dispose (Stack-owned)
       orphanWatch.dispose(); // wake-unknown-optimistic: clear the watch's timers/latch; the next session re-arms on demand
@@ -296,6 +330,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
         port: {
           list: (args) => webHubRef.current?.xs?.hubPort().list(args) ?? Promise.resolve({ kind: "off" }),
           resolve: (args) => webHubRef.current?.xs?.hubPort().resolve(args) ?? Promise.resolve({ kind: "off" }),
+          ...(activationOn ? { stateCapable: () => webHubRef.current?.xs?.hubPort().stateCapable?.() === true } : {}),
           send: (args) => webHubRef.current?.xs?.hubPort().send(args) ?? Promise.resolve({ kind: "off" }),
           ...(replyEnabled ? { replyCapable: () => webHubRef.current?.xs?.hubPort().replyCapable?.() === true } : {}),
           // Alias-plan §5.2 (ALW): alias mode ⇒ send pins the resolved full sessionId; off ⇒ key absent (legacy sender).
@@ -318,6 +353,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
           },
         },
         maxChars: settings.fabric.maxChars,
+        ...(humanGrants ? { activation: true, humanGrants } : {}),
         ...(replyEnabled
           ? {
               reply: {
@@ -355,6 +391,9 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
         createMessageSessionTool({
           sender,
           reply: replyEnabled,
+          ...(activationOn
+            ? { activation: true, invocation: (id: string) => humanHost?.invocation(id, "message_session") }
+            : {}),
           ...(aliasOn ? { alias: true } : {}),
           ...(threadRebindOn ? { threadRebind: true } : {}),
         }),
@@ -441,6 +480,23 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
         },
         autoJoinInvalid: () =>
           settings.fabric.crossSession.autoJoin && settings.fabric.crossSession.channels.autoJoinInvalid,
+        ...(activationOn
+          ? {
+              progress: () => {
+                const conn = currentConnection();
+                const receiver = holder.current?.xs?.progress?.rows() ?? [];
+                const source = webHubRef.current?.xs?.hubPort().requestProgress?.() ?? [];
+                const rows = new Map([...receiver, ...source].map((row) => [row.messageId, row]));
+                return {
+                  rows: [...rows.values()].map((row) => ({
+                    ...(row.phase ? { phase: row.phase } : {}),
+                    ...(row.wake.reason ? { wakeReason: row.wake.reason } : {}),
+                  })),
+                  hubStateCap: conn?.status().state === "live" ? conn.caps.includes(XS_STATE_HUB_CAP) : undefined,
+                };
+              },
+            }
+          : {}),
         statusView: () => {
           const xs = holder.current?.xs;
           const quota = xs?.receiver.wakeQuota();
@@ -637,6 +693,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
             hubSendsPerMin: () => settings.fabric.crossSession.limits.hubSendsPerMin,
             // Reply-plan §5.1: frozen per activate (non-live, §8.1); unset ⇒ pre-reply byte shape.
             replyEnabled: () => replyEnabled,
+            ...(activationOn ? { activationEnabled: () => true } : {}),
             // Channel-plan §3.1 (CHW): agent cap `xs.channel.v1` + hub-global broadcast params.
             channelsEnabled: () => channelsOn,
             channelsHubConfig: () => ({
@@ -731,6 +788,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     hubChannelCap: xsHubChannelCap,
     aliasUsable: xsAliasUsable,
     sender: () => xsSender,
+    ...(humanHost ? { inputHandled: (text: string) => humanHost.handled(text, xsSessionId ?? "") } : {}),
     capabilityState: () => xsCapability.state,
     registerTriggerGuard,
     registerFenceHooks,

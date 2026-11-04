@@ -294,4 +294,136 @@ describe("xs agent bridge: receipt round trip (read-only, 3s)", () => {
     expect(await offBridge.hubPort().receipt!({ messageId: "x" })).toMatchObject({ status: "unsupported" });
     noCap.conn.close("test");
   });
+  it("P2 associates parallel sends ONLY by original sourceRid, not latest state/body", async () => {
+    const { port } = makePort({ activation: true });
+    const { conn, sock } = liveConn(STATE_CAPS);
+    const bridge = createXsAgentBridge({ port, conn: () => conn });
+    conn.attach({ ...BINDING, onXsState: (frame) => bridge.onState(frame) }, SESSION as never);
+    const args = { origin: { sessionId: SESSION.sessionId, epoch: 3 }, to: "target", text: "same text" };
+    const first = bridge.hubPort().send(args);
+    const second = bridge.hubPort().send(args);
+    await vi.advanceTimersByTimeAsync(0);
+    const frames = sock.frames().filter((f) => f.t === "xs_req" && f.op === "send") as Array<{ rid: string }>;
+    expect(frames).toHaveLength(2);
+    for (const [i, req] of [...frames].reverse().entries()) {
+      sock.hub({
+        t: "xs_state",
+        sourceRid: req.rid,
+        messageId: `x${i}`,
+        activationKey: `k${i}`,
+        revision: 0,
+        observation: "live",
+        deliveryEffect: "unknown",
+        wake: { requested: false, decision: "deliver_only" },
+      });
+      sock.hub({ t: "xs_res", rid: req.rid, ok: true, effect: "applied" });
+    }
+    expect(await first).toMatchObject({ progress: { messageId: "x1", activationKey: "k1" } });
+    expect(await second).toMatchObject({ progress: { messageId: "x0", activationKey: "k0" } });
+    conn.close("test");
+  });
+
+  it("P2 unmatched/late state cannot create send.track; intent is internal, revisions unchanged", async () => {
+    const { port } = makePort({ activation: true });
+    const { conn, sock } = liveConn(STATE_CAPS);
+    const bridge = createXsAgentBridge({ port, conn: () => conn });
+    conn.attach({ ...BINDING, onXsState: (frame) => bridge.onState(frame) }, SESSION as never);
+    const pending = bridge.hubPort().send({
+      origin: { sessionId: SESSION.sessionId, epoch: 3 },
+      to: "target",
+      text: "body",
+      wakeView: { requested: true, defaulted: true, decision: "downgraded", stage: "sender", reason: "level_limit" },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const req = sock.frames().find((f) => f.t === "xs_req" && f.op === "send") as { rid: string };
+    expect(req).not.toHaveProperty("wakeView");
+    expect(req).not.toHaveProperty("defaulted");
+    sock.hub({
+      t: "xs_state",
+      sourceRid: req.rid,
+      messageId: "original",
+      revision: 0,
+      observation: "live",
+      deliveryEffect: "unknown",
+      wake: { requested: false, decision: "deliver_only" },
+    });
+    // Receiver revision 0 is a new evidence point; source-private default must NOT bump it.
+    sock.hub({
+      t: "xs_state",
+      sourceRid: req.rid,
+      messageId: "original",
+      revision: 0,
+      observation: "live",
+      deliveryEffect: "applied",
+      phase: "delivered",
+      wake: { requested: false, decision: "deliver_only" },
+    });
+    sock.hub({ t: "xs_res", rid: req.rid, ok: true, effect: "applied" });
+    expect(await pending).toMatchObject({
+      progress: { revision: 0, phase: "delivered", wake: { requested: true, defaulted: true, reason: "level_limit" } },
+    });
+    const withoutState = bridge
+      .hubPort()
+      .send({ origin: { sessionId: SESSION.sessionId, epoch: 3 }, to: "target", text: "body" });
+    await vi.advanceTimersByTimeAsync(0);
+    const req2 = sock
+      .frames()
+      .filter((f) => f.t === "xs_req" && f.op === "send")
+      .at(-1) as { rid: string };
+    sock.hub({ t: "xs_res", rid: req2.rid, ok: true, effect: "unknown" });
+    expect(await withoutState).not.toHaveProperty("progress");
+    sock.hub({
+      t: "xs_state",
+      sourceRid: req2.rid,
+      messageId: "late",
+      revision: 0,
+      observation: "live",
+      deliveryEffect: "unknown",
+      wake: { requested: false, decision: "deliver_only" },
+    });
+    expect(bridge.requestsProjection()!.rows.some((r) => r.messageId === "late")).toBe(true);
+    conn.close("test");
+  });
+
+  it("P2 target-state proof requires both live hub negotiation and authoritative resolve field", async () => {
+    const { port } = makePort({ activation: true });
+    const { conn, sock } = liveConn(STATE_CAPS);
+    const bridge = createXsAgentBridge({ port, conn: () => conn });
+    conn.attach(BINDING, SESSION as never);
+    const pending = bridge.hubPort().resolve({ origin: { sessionId: SESSION.sessionId, epoch: 3 }, query: "target" });
+    await vi.advanceTimersByTimeAsync(0);
+    const req = sock.frames().find((f) => f.t === "xs_req" && f.op === "resolve") as { rid: string };
+    sock.hub({ t: "xs_res", rid: req.rid, ok: true, target: { ref: "bbbb", sessionId: "target", xsState: true } });
+    expect(await pending).toMatchObject({ targetState: true });
+    expect(bridge.hubPort().stateCapable!()).toBe(true);
+    conn.close("test");
+  });
+  it("P2 a transport timeout AFTER registration still exposes the original relation", async () => {
+    const { port } = makePort({ activation: true });
+    const { conn, sock } = liveConn(STATE_CAPS);
+    const bridge = createXsAgentBridge({ port, conn: () => conn });
+    conn.attach({ ...BINDING, onXsState: (frame) => bridge.onState(frame) }, SESSION as never);
+    const pending = bridge
+      .hubPort()
+      .send({ origin: { sessionId: SESSION.sessionId, epoch: 3 }, to: "target", text: "body" });
+    await vi.advanceTimersByTimeAsync(0);
+    const req = sock.frames().find((f) => f.t === "xs_req" && f.op === "send") as { rid: string };
+    sock.hub({
+      t: "xs_state",
+      sourceRid: req.rid,
+      messageId: "registered",
+      activationKey: "key",
+      revision: 0,
+      observation: "live",
+      deliveryEffect: "unknown",
+      wake: { requested: false, decision: "deliver_only" },
+    });
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(await pending).toMatchObject({
+      kind: "deadline",
+      progress: { messageId: "registered", activationKey: "key" },
+    });
+    expect(sock.frames().filter((f) => f.t === "xs_req" && f.op === "send")).toHaveLength(1);
+    conn.close("test");
+  });
 });

@@ -98,6 +98,9 @@ export function createMentionWiring(deps: MentionWiringDeps): MentionWiring {
   const mentionSessions: MentionSessionPort | undefined = xs.sender()
     ? createMentionSessionPort({
         ...sessionParseDeps(),
+        ...(settings.fabric.crossSession.activation.enabled
+          ? { enhanced: () => xs.sender() !== undefined && webHubRef.current?.xs?.hubPort().stateCapable?.() === true }
+          : {}),
         // Channel-plan §2.3 (CHW): the LINK set — a named-channel-only session on an old hub passes `@` through.
         joined: () =>
           xs.attached() &&
@@ -135,7 +138,10 @@ export function createMentionWiring(deps: MentionWiringDeps): MentionWiring {
     // `dispatched` entry flips to `consumed` instead of decaying to "sent · unconfirmed".
     // Late-bound through webHubRef exactly like `joined` above (web-hub off / pre-feature
     // control ⇒ optional-chaining no-op, byte-identical legacy behavior).
-    onHandled: (text) => webHubRef.current?.noteInputHandled?.(text),
+    onHandled: (text) => {
+      xs.inputHandled?.(text);
+      webHubRef.current?.noteInputHandled?.(text);
+    },
   });
   return {
     routeDeps: mentionRouteDeps,
@@ -201,11 +207,19 @@ export function mentionAutocompleteEntries(holder: StackHolder): readonly Mentio
 /** Reply-plan §9.3/§9.6 (MW): project the fabric sender's outcome onto the mention layer's port
  *  shape. Anything the notices do not name (stale/changed origin, unreceivable, bad args, …) is an
  *  `error` carrying the sender's reason, with the sender's own effect (none ⇒ safe to retry). */
-function mapMentionSendOutcome(
+export function mapMentionSendOutcome(
   out: Awaited<ReturnType<XsSender["message"]>>,
   maxPending: number,
 ): MentionSessionSendOutcome {
-  const base = { effect: out.effect, ...(out.to !== undefined ? { to: out.to } : {}) };
+  const base = {
+    effect: out.effect,
+    ...(out.to !== undefined ? { to: out.to } : {}),
+    ...(out.wake && out.wakeDowngraded !== undefined ? { wakeDowngraded: out.wakeDowngraded } : {}),
+    ...(out.wake && out.woke !== undefined ? { woke: out.woke } : {}),
+    ...(out.wake ? { wake: out.wake } : {}),
+    ...(out.track ? { track: out.track } : {}),
+    ...(out.progress ? { progress: out.progress } : {}),
+  };
   switch (out.status) {
     case "sent": {
       const dueAt = out.reply ? Date.parse(out.reply.dueAt) : Number.NaN;

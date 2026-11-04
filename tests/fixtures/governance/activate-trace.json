@@ -420,6 +420,10 @@
       "registerMessageRenderer(subagent:memory-inject)",
       "registerTool(memory)",
       "registerCommand(mem)",
+      "on(input)",
+      "on(message_start)",
+      "on(tool_call)",
+      "on(tool_result)",
       "on(before_agent_start)",
       "on(context)",
       "on(turn_start)",
@@ -621,7 +625,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 243,
+    "count": 247,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",
@@ -799,6 +803,10 @@
       "registerMessageRenderer(subagent:memory-inject)",
       "registerTool(memory)",
       "registerCommand(mem)",
+      "on(input)",
+      "on(message_start)",
+      "on(tool_call)",
+      "on(tool_result)",
       "on(before_agent_start)",
       "on(context)",
       "on(turn_start)",
@@ -1002,7 +1010,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 245,
+    "count": 249,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",
