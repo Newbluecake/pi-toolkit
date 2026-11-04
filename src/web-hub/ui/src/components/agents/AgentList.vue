@@ -77,7 +77,9 @@ const emit = defineEmits<AgentListEmits>();
 const { t } = useI18n();
 
 // channel-plan §7 (CHU): sidebar channel filter — component memory only (never persisted). The chip
-// row appears only while a non-default channel exists on the hub (cap xs.channel.v1).
+// row appears only while a non-default channel exists on the hub (cap xs.channel.v1) AND the sidebar
+// is expanded — collapsed (user decision 2026-11-04) removes the whole row from the DOM: the 56px
+// rail has no room for chips and CSS-only hiding left them visibly overflowing.
 const hub = inject(HUB_CTX, null);
 const channelPick = ref<string | null>(null);
 const channelRows = computed(() => {
@@ -531,7 +533,7 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
         />
       </div>
       <div
-        v-if="channelRows.length > 0"
+        v-if="channelRows.length > 0 && !collapsed"
         class="channel-filter"
         role="group"
         :aria-label="t('agents.channelFilterAria')"
