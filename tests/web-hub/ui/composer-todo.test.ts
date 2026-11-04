@@ -1,24 +1,35 @@
 // @vitest-environment happy-dom
 /**
- * Composer todo chip (2026-11 user request): the always-visible `✓ N` open-tasks chip in the
- * composer's bottom row (a `.composer-chips` SIBLING — the typing-time `.chips-off` fade never
- * applies) + its read-only open-only panel. Covers: the empty-state ruling (no todo wire /
- * openCount 0 ⇒ chip not rendered), the count口径 (wire `counts.open` is pending-only, so the
- * chip shows open + inProgress), click toggle with `aria-expanded`, outside-pointerdown close,
- * open-only row filtering (completed surface only as the header's `X done` summary), and the
- * `+N more` tail (`omitted` minus the `completedHidden` fold, TodoPanel's formula).
+ * Composer todo chip (2026-11 user request): the always-visible `✓ N` open-tasks chip
+ * (`.composer-todo-external`, absolutely positioned at the composer card's top-left — a
+ * `.composer-chips` SIBLING in the DOM, so the typing-time `.chips-off` fade never applies)
+ * + its read-only open-only panel. Covers: the empty-state ruling (no todo wire / openCount
+ * 0 ⇒ chip not rendered), the count口径 (wire `counts.open` is pending-only, so the chip
+ * shows open + inProgress), hover auto-expand GATED to `(hover: hover) and (pointer: fine)`
+ * (coarse/touch pointers ignore the browser's synthetic pre-click mouseenter, so the first
+ * tap pins directly — verifier major, 2026-11-04), click pin/unpin with `aria-expanded`,
+ * outside-pointerdown close, open-only row filtering (completed surface only as the header's
+ * `X done` summary), the `+N more` tail (`omitted` minus the `completedHidden` fold,
+ * TodoPanel's formula), the steer/held ruling (2026-11-04): while queue rows render
+ * above the composer the chip AND panel never render — an expanded panel drops immediately
+ * and never restores a stale expanded state when the queue drains — and a static contract
+ * for the CSS-only expanded-badge hiding.
  */
 import { mount } from "@vue/test-utils";
-import { computed, nextTick, ref } from "vue";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { computed, nextTick, ref, type Ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Composer from "../../../src/web-hub/ui/src/components/control/Composer.vue";
 import { CONTROL_VIEW, type ControlView } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import { resetLangForTests } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import type { AgentState, TodoWire } from "../../../src/web-hub/ui/src/types.js";
 
-function stubMatchMedia(): void {
+/** Desktop default: ONLY the composer's real-hover gate matches; every other query
+ * (max-width, pointer: coarse, …) answers false, exactly like the old blanket stub. */
+function stubMatchMedia(matches: (query: string) => boolean = (q) => q === "(hover: hover) and (pointer: fine)"): void {
   vi.stubGlobal("matchMedia", (query: string) => ({
-    matches: false,
+    matches: matches(query),
     media: query,
     addEventListener: () => {},
     removeEventListener: () => {},
@@ -50,7 +61,7 @@ const todoFixture = (over: Partial<TodoWire> = {}): TodoWire => ({
   ...over,
 });
 
-function todoView(todo: TodoWire | undefined): ControlView {
+function todoView(todo: TodoWire | undefined, queue: Ref<readonly unknown[]> = ref([])): ControlView {
   const agent = ref({ pendingCtl: [], todo } as unknown as AgentState);
   return {
     agentKey: "agent-a",
@@ -62,7 +73,7 @@ function todoView(todo: TodoWire | undefined): ControlView {
     commands: computed(() => []),
     commandsEnabled: computed(() => false),
     sending: computed(() => false),
-    queueItems: computed(() => []),
+    queueItems: computed(() => queue.value),
     isWebMessage: () => false,
   };
 }
@@ -163,5 +174,84 @@ describe("Composer todo chip (2026-11 user request)", () => {
     const none = mountComposer(todoView(todoFixture()));
     await none.find(".composer-todo-btn").trigger("click");
     expect(none.find(".composer-todo-more").exists()).toBe(false);
+  });
+
+  it("hover auto-expands the panel; mouseleave collapses it (no click needed)", async () => {
+    const w = mountComposer(todoView(todoFixture())); // default stub: fine hover pointer
+    const host = w.find(".composer-todo-external");
+    const btn = w.find(".composer-todo-btn");
+    await host.trigger("mouseenter");
+    expect(btn.attributes("aria-expanded")).toBe("true");
+    expect(w.find(".composer-todo-panel").exists()).toBe(true);
+    await host.trigger("mouseleave");
+    expect(btn.attributes("aria-expanded")).toBe("false");
+    expect(w.find(".composer-todo-panel").exists()).toBe(false);
+  });
+
+  it("coarse/touch pointer: the synthetic pre-click mouseenter is ignored — the FIRST tap pins the panel open", async () => {
+    stubMatchMedia(() => false); // no `(hover: hover) and (pointer: fine)` — touch device
+    const w = mountComposer(todoView(todoFixture()));
+    const host = w.find(".composer-todo-external");
+    const btn = w.find(".composer-todo-btn");
+    // Mobile browsers fire mouseenter right before the first click on a touch target.
+    await host.trigger("mouseenter");
+    expect(w.find(".composer-todo-panel").exists()).toBe(false); // hover never arms on touch
+    await btn.trigger("click"); // …then the real click — it must OPEN, not toggle shut
+    expect(w.find(".composer-todo-panel").exists()).toBe(true);
+    expect(btn.attributes("aria-expanded")).toBe("true");
+    await btn.trigger("click"); // second tap closes
+    expect(w.find(".composer-todo-panel").exists()).toBe(false);
+    expect(btn.attributes("aria-expanded")).toBe("false");
+  });
+
+  it("static contract: the expanded chip hides its badge via CSS (happy-dom has no layout)", () => {
+    // vitest runs from the repo root; import.meta.url is not a file: URL under happy-dom.
+    const css = readFileSync(resolve("src/web-hub/ui/src/styles/composer-todo.css"), "utf8");
+    expect(css).toMatch(/\.composer-todo-btn\[aria-expanded="true"\]\s+\.composer-todo-badge\s*\{[^}]*display:\s*none/);
+  });
+
+  it("click pins the panel (survives mouseleave); a click while expanded always closes", async () => {
+    const w = mountComposer(todoView(todoFixture()));
+    const host = w.find(".composer-todo-external");
+    const btn = w.find(".composer-todo-btn");
+    // click without hover ⇒ pinned open
+    await btn.trigger("click");
+    expect(w.find(".composer-todo-panel").exists()).toBe(true);
+    // hover in/out must not close a pinned panel
+    await host.trigger("mouseenter");
+    await host.trigger("mouseleave");
+    expect(w.find(".composer-todo-panel").exists()).toBe(true);
+    expect(btn.attributes("aria-expanded")).toBe("true");
+    // click while hover-expanded toggles CLOSED (never a dead second click)
+    await host.trigger("mouseenter");
+    await btn.trigger("click");
+    expect(w.find(".composer-todo-panel").exists()).toBe(false);
+    expect(btn.attributes("aria-expanded")).toBe("false");
+  });
+
+  it("steer/held scenario: queue rows above the composer ⇒ chip AND panel never render; the chip returns collapsed when the queue drains", async () => {
+    const queue: Ref<readonly unknown[]> = ref([{ cmdId: "c1", text: "held steer", state: "held" }]);
+    const w = mountComposer(todoView(todoFixture(), queue));
+    expect(w.find(".composer-todo-external").exists()).toBe(false);
+    expect(w.find(".composer-todo-panel").exists()).toBe(false);
+    // queue drains ⇒ the chip comes back COLLAPSED (no stale expanded state)
+    queue.value = [];
+    await nextTick();
+    const btn = w.find(".composer-todo-btn");
+    expect(btn.exists()).toBe(true);
+    expect(btn.attributes("aria-expanded")).toBe("false");
+    expect(w.find(".composer-todo-panel").exists()).toBe(false);
+  });
+
+  it("an expanded panel drops immediately when the steer/held scenario starts", async () => {
+    const queue: Ref<readonly unknown[]> = ref([]);
+    const w = mountComposer(todoView(todoFixture(), queue));
+    await w.find(".composer-todo-btn").trigger("click"); // pin open
+    expect(w.find(".composer-todo-panel").exists()).toBe(true);
+    // a held steer card lands above the composer
+    queue.value = [{ cmdId: "c1", text: "held steer", state: "held" }];
+    await nextTick();
+    expect(w.find(".composer-todo-external").exists()).toBe(false);
+    expect(w.find(".composer-todo-panel").exists()).toBe(false);
   });
 });

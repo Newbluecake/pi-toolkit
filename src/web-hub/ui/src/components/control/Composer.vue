@@ -87,15 +87,20 @@
   and keep their usePopoverClamp viewport fitting — opening one moves focus into the panel,
   which the chips' hidden state can never interrupt (hidden ⇒ not clickable).
 
-  Todo chip (todo-web follow-up, 2026-11 user request): an ALWAYS-VISIBLE open-tasks chip in
-  the bottom row — a SIBLING of `.composer-chips` (`.composer-todo`), so the typing-time
-  `.chips-off` fade never applies, and composer-todo.css's `:has(.composer-todo)` row keeper
-  stops the row's max-height collapse while the chip exists. It reads `AgentState.todo` (the
-  status reducer's mirror of `StatusInfo.todo`) straight off the injected CONTROL_VIEW — no
-  prop/contracts change — and hides itself when the wire is absent or the open count is 0.
-  The click toggles a read-only OPEN-ONLY task panel (pending + in_progress rows; completed
-  tasks surface only as the header's grey `X done` summary) in the mention panel's slot above
-  the input card; a re-click or an outside pointerdown closes it.
+  Todo chip (todo-web follow-up, 2026-11 user request): an ALWAYS-VISIBLE open-tasks chip
+  (`.composer-todo-external`) — absolutely positioned at the composer card's top-left,
+  OUTSIDE the border but still a SIBLING of `.composer-chips` in the bottom row's DOM, so the
+  typing-time `.chips-off` fade never applies. It reads `AgentState.todo` (the status
+  reducer's mirror of `StatusInfo.todo`) straight off the injected CONTROL_VIEW — no
+  prop/contracts change — and hides itself when the wire is absent or the open count is 0, OR
+  while QueueList renders queue/held rows above the composer (2026-11-04 screenshot ruling:
+  the chip's top:-24px seat would cover the held steer card's bottom-left text — hidden by a
+  render condition, `queueAbove`, never by z-index). On `(hover: hover) and (pointer: fine)`
+  pointers, hovering the chip/panel auto-expands a read-only OPEN-ONLY task panel (pending +
+  in_progress rows; completed tasks surface only as the header's grey `X done` summary) in
+  the mention panel's slot above the input card — hover is IGNORED on coarse/touch pointers
+  (the browser's synthetic pre-click mouseenter would otherwise eat the first tap), where a
+  click pins/unpins directly; an outside pointerdown closes it.
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue";
@@ -397,6 +402,7 @@ function onDocPointerDown(ev: Event): void {
   if (inside) return;
   if (mentionOpen.value) mentionDismissed.value = true;
   if (todoOpen.value) todoOpen.value = false; // outside click closes the todo panel too
+  if (todoHover.value) todoHover.value = false; // outside click also clears hover state
 }
 onMounted(() => document.addEventListener("pointerdown", onDocPointerDown, true));
 
@@ -441,10 +447,28 @@ const todoOpenCount = computed(() => {
   const w = todoWire.value;
   return w === undefined ? 0 : w.counts.open + w.counts.inProgress;
 });
-const todoChipOn = computed(() => todoWire.value !== undefined && todoOpenCount.value > 0);
+/** steer/held 场景 (2026-11-04 screenshot ruling): QueueList renders the mergeQueue rows
+ * (held steer cards, queued/sending rows) directly ABOVE the composer whenever the control
+ * queue is non-empty, and the chip's absolute top:-24px seat then covers the card's
+ * bottom-left text — hide chip + panel ENTIRELY by render condition (z-index tuning was
+ * tried and ruled out). A plain main-session composer (empty queue) keeps the chip
+ * untouched. Same `queueItems` slot the ContextRing already reads — no new prop. */
+const queueAbove = computed(() => (view?.queueItems.value.length ?? 0) > 0);
+const todoChipOn = computed(() => !queueAbove.value && todoWire.value !== undefined && todoOpenCount.value > 0);
 /** Panel visibility — a plain local ref, NOT persisted (source-scan's persistence allowlist
  * doesn't cover this component; same precedent as TodoPanel's own fold state). */
 const todoOpen = ref(false);
+/** Hover state: hovering the chip or the panel auto-expands (no click needed). */
+const todoHover = ref(false);
+/** Effective visibility: click-toggle OR hover. */
+const todoExpanded = computed(() => todoOpen.value || todoHover.value);
+// Entering the steer/held scenario with the panel up must drop it immediately AND must not
+// restore a stale expanded state when the queue drains — reset both sources on entry.
+watch(queueAbove, (up) => {
+  if (!up) return;
+  todoOpen.value = false;
+  todoHover.value = false;
+});
 /** Open-only rows: completed tasks never list here — they surface as the header's grey
  * `X done` summary instead. */
 const todoRows = computed<readonly TodoTaskWire[]>(() =>
@@ -482,7 +506,32 @@ function todoBlockedLabel(task: TodoTaskWire): string {
 }
 
 function onTodoChipClick(): void {
-  todoOpen.value = !todoOpen.value;
+  // Pin/unpin semantics: click always toggles the panel, regardless of hover state.
+  // This avoids the "second click looks broken" issue when hover already expanded the panel.
+  todoOpen.value = !todoExpanded.value;
+  todoHover.value = false;
+}
+
+/** Coarse/touch pointers synthesize `mouseenter` immediately before the first click — if it
+ * set `todoHover`, the click's `!todoExpanded` toggle would close the panel it never saw open
+ * (first tap = no-op; verifier major, 2026-11-04). Hover expansion is therefore gated to
+ * `(hover: hover) and (pointer: fine)` — real hover pointers only; touch clicks pin/unpin
+ * directly. Evaluated per event so a pointer change never leaves stale state. */
+function supportsRealHover(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(hover: hover) and (pointer: fine)").matches
+  );
+}
+
+function onTodoMouseEnter(): void {
+  if (!supportsRealHover()) return; // touch/coarse: the browser's pre-click synthetic hover
+  todoHover.value = true;
+}
+
+function onTodoMouseLeave(): void {
+  todoHover.value = false;
 }
 
 const policy = computed(() =>
@@ -1308,16 +1357,20 @@ watch(
     </div>
     <!-- Composer todo panel (2026-11 user request): the todo chip's read-only OPEN-ONLY task
          list, mounted in the mention panel's slot (in-flow above the input card, so it opens
-         upward from the bottom-pinned composer). Re-click / outside-pointerdown closes it.
+         upward from the bottom-pinned composer). Hover expands it, click pins/unpins, and an
+         outside pointerdown closes it. Hidden together with the chip while queue/held rows
+         render above the composer (`todoChipOn`, see `queueAbove`).
          Rows mirror TodoPanel's structure (status icon + #id subject + optional truncated
          description + open-blocker label) minus completed tasks — those are the header's
          grey `X done` summary. Strictly read-only: no checkboxes, no write path. -->
     <div
-      v-if="todoChipOn && todoOpen && todoWire"
+      v-if="todoChipOn && todoExpanded && todoWire"
       class="composer-todo-panel"
       role="region"
       :aria-label="t('detail.composerTodoTitle')"
       aria-readonly="true"
+      @mouseenter="onTodoMouseEnter"
+      @mouseleave="onTodoMouseLeave"
     >
       <p class="composer-todo-head">
         <span class="composer-todo-title">{{ t("detail.composerTodoTitle") }}</span>
@@ -1402,14 +1455,24 @@ watch(
             <ModelSwitcher />
           </div>
           <!-- Todo chip (2026-11 user request): positioned OUTSIDE the composer card,
-               top-left corner (absolute, -8px offset). Green pill with a ✓ icon and a
-               numeric badge in the top-right. Click toggles an open-tasks-only panel.
-               Always visible while open tasks exist (not affected by chips-off). -->
-          <div v-if="todoChipOn" class="composer-todo-external">
+               top-left corner (absolute, top:-24px). Green pill with a ✓ icon and a
+               numeric badge in the top-right. Hover auto-expands the open-tasks-only panel
+               on `(hover: hover) and (pointer: fine)` pointers ONLY (touch's synthetic
+               pre-click mouseenter is ignored — the first tap pins directly); click
+               pins/unpins. Always visible while open tasks exist (not affected by
+               chips-off) — EXCEPT while queue/held rows render above the composer (the
+               steer/held scenario, `queueAbove`): not rendered at all then, so it can never
+               cover the held card's bottom-left text. -->
+          <div
+            v-if="todoChipOn"
+            class="composer-todo-external"
+            @mouseenter="onTodoMouseEnter"
+            @mouseleave="onTodoMouseLeave"
+          >
             <button
               type="button"
               class="composer-todo-btn"
-              :aria-expanded="todoOpen"
+              :aria-expanded="todoExpanded"
               :aria-label="t('detail.composerTodoAria')"
               @click="onTodoChipClick"
             >
