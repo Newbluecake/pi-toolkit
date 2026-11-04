@@ -1,9 +1,9 @@
 /**
- * J0 conformance（jev-plan §4 J0 测试清单；arch §10「P0 conformance」）：C-J1–C-J15。
+ * J0 conformance（jev-plan §4 J0 测试清单；arch §10「P0 conformance」）：C-J1–C-J16。
  *
  * 全部用真实 `AgentSession`（复用 ./agent-session-harness.ts 的 fakeModel /
  * fakeModelRuntime / withSession 三件套）+ 脚本模型，钉住 jev 依赖的 pi 行为前提。
- * 离线项（C-J1–C-J6、C-J7 类型级、C-J9–C-J14、C-J15 目录级）必须全绿；依赖凭证/
+ * 离线项（C-J1–C-J6、C-J7 类型级、C-J9–C-J14、C-J15 目录级、C-J16 通道证明）必须全绿；依赖凭证/
  * 网络的项（C-J7 真实调用、C-J8、C-J15 可用性+真实调用）在未设
  * `PI_TOOLKIT_JEV_CONFORMANCE=1` 时整体 skip 并写明原因（照 droid-protocol.test.ts
  * 的自门控写法；凭证测试由主会话在 E0 中执行）。
@@ -22,13 +22,14 @@
  *    这条 E 层路径，不需要另开轮询 bashJobs 端口。
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Type } from "@sinclair/typebox";
 import { OPENCODE_CLASSIFIER_MODELS } from "@earendil-works/pi-ai/providers/opencode.models";
 import { OPENROUTER_CLASSIFIER_MODELS } from "@earendil-works/pi-ai/providers/openrouter.models";
+import { Text } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   DefaultResourceLoader,
@@ -36,6 +37,11 @@ import {
   SettingsManager,
   createAgentSession,
 } from "@earendil-works/pi-coding-agent";
+
+import { createPromptSectionHub } from "../../src/sysprompt/hub.js";
+import { createSegmentState } from "../../src/memory/jev/segment.js";
+import { MEMORY_INJECT_CUSTOM_TYPE, MEMORY_RECALL_CUSTOM_TYPE } from "../../src/memory/jev/contracts.js";
+import { formatInjectMarkerParts, type MarkerPart } from "../../src/memory/jev/format.js";
 
 import {
   assistantTextMsg,
@@ -919,5 +925,243 @@ describe("C-J15 (offline catalog part): jev classifier ids exist in pi-ai's mode
     expect(opencode).toContain("opencode/jev-1.13-free");
     expect(openrouter).toContain("openrouter/typesafe/jev-1.13");
     expect(openrouter).toContain("openrouter/typesafe/jev-1.14");
+  });
+});
+
+// ───────────────────────── C-J16 (memory-predict P1 gate) ─────────────────────────
+
+/** C-J16 只证明轮首合并返回通道（plan §11.1 前置门禁）：handler 返回的含
+ *  `details.parts` 的合并消息位于用户消息之后、首次 LLM 请求之前，与
+ *  prompt-section hub 的 before_agent_start 并存不互相覆盖；落盘后
+ *  details 原样回读，resume 后 segment 去重种子仍正确；渲染器渲染 parts
+ *  不报错。details.parts 是**合成**形状（plan §5.3/§6.1 字段表）——不实现
+ *  P1 选择逻辑。证伪 ⇒ P1 停止（R2-3），不设回退。 */
+
+const CJ16_H_P = "cj16-seed-hash-p";
+const CJ16_H_U = "cj16-seed-hash-u";
+const CJ16_P_ITEMS = [
+  { file: "core.md", anchor: "core.md › 发版 #1", hash: CJ16_H_P, authority: "agent" as const, p: 0.8 },
+];
+const CJ16_U_ITEMS = [
+  { file: "pitfalls-git.md", anchor: "pitfalls-git.md #2", hash: CJ16_H_U, authority: "user" as const },
+];
+/** 合并消息 details：顶层 layer "P"（有 P 部分时，plan §5.3），`parts` 按层
+ *  记账，`predict` 随行。字段形状来自 plan §6.1 的 MemoryInjectDetailsV1
+ *  扩展（v1 基础上追加可选 parts/predict）。 */
+const CJ16_MERGED_DETAILS = {
+  v: 1,
+  layer: "P",
+  trigger: "dispatch",
+  items: CJ16_P_ITEMS,
+  parts: [
+    { layer: "P", trigger: "dispatch", items: CJ16_P_ITEMS },
+    { layer: "U", trigger: "hello cj16", model: "fake-model", items: CJ16_U_ITEMS },
+  ],
+  predict: { tags: ["git-commit"], state: ["release-running"], origin: "rules" },
+};
+const CJ16_MERGED_MESSAGE = {
+  customType: MEMORY_INJECT_CUSTOM_TYPE,
+  content: "[memory · P jev] CJ16-P-BODY dispatch 提醒\n\n[memory · U jev] CJ16-U-BODY 相关记忆",
+  display: true,
+  details: CJ16_MERGED_DETAILS,
+};
+
+/** Jev 侧 handler 形状（照 wire.ts commit 顺序）：先 appendEntry 记忆
+ *  recall 种子（segment 去重源），再返回合并消息。 */
+function cj16JevFactory(): (pi: ExtensionAPI) => void {
+  return (pi: ExtensionAPI) => {
+    pi.on("before_agent_start", (async () => {
+      pi.appendEntry(MEMORY_RECALL_CUSTOM_TYPE, { v: 1, layer: "P", keys: [CJ16_H_P] });
+      pi.appendEntry(MEMORY_RECALL_CUSTOM_TYPE, { v: 1, layer: "U", keys: [CJ16_H_U] });
+      return { message: CJ16_MERGED_MESSAGE };
+    }) as never);
+  };
+}
+
+const cj16TextIdx = (messages: unknown[], text: string): number =>
+  messages.findIndex(
+    (m) =>
+      Array.isArray((m as { content?: unknown }).content) &&
+      JSON.stringify((m as { content?: unknown }).content).includes(text),
+  );
+
+describe("C-J16: merged-message return channel (memory-predict P1 gate, plan §11.1)", () => {
+  it("merged message (details.parts) lands after the user message inside the FIRST request, coexisting with the prompt-section hub", async () => {
+    const model = fakeModel();
+    await withSession(
+      {
+        scripted: [textTurn(model, "done")],
+        extensionFactories: [
+          // 真实 hub（live 模式：首轮必折叠 section 进 systemPrompt 并返回
+          // systemPrompt 覆盖），注册在 jev 之前 —— 照 src/index.ts pre-guard 顺序。
+          (pi: ExtensionAPI) => {
+            const hub = createPromptSectionHub(pi, {
+              mode: () => "live",
+              wakeReplay: false,
+              adoptForeignForcedPrompt: false,
+            });
+            hub.register("pi_project_memory", {
+              provider: () => "CJ16-HUB-SECTION-BYTES memory section body",
+              title: "Project memory",
+            });
+          },
+          // hub 风格的消息返回（section-update 形状）：证明多个 before_agent_start
+          // 消息累加而不覆盖 —— pi 的 emitBeforeAgentStart 收集全部 result.message。
+          (pi: ExtensionAPI) => {
+            pi.on("before_agent_start", (async () => ({
+              message: {
+                customType: "subagent:prompt-section-update",
+                content: "CJ16-SECTION-UPDATE replaced section text",
+                display: false,
+                details: { v: 1, updates: [{ section: "pi_project_memory", kind: "update" }] },
+              },
+            })) as never);
+          },
+          cj16JevFactory(),
+        ],
+      },
+      async ({ session, modelRuntime }) => {
+        await session.prompt("hello cj16");
+        // 注入发生在首次请求内（不需要额外一轮）。
+        expect(modelRuntime.callCount()).toBe(1);
+        const first = modelRuntime.requestMessages[0]!;
+        const firstText = JSON.stringify(first);
+        // hub 折叠生效：强制 system 头携带 section 字节，且未泄入消息通道。
+        const sysIdx = first.findIndex((m: { role?: string }) => m.role === "system");
+        expect(sysIdx).toBe(0);
+        expect(JSON.stringify(first[sysIdx])).toContain("CJ16-HUB-SECTION-BYTES");
+        // 顺序：system 头 → 用户消息 → hub 更新消息 → jev 合并消息（后者以
+        // role:"user" 投影，C-J1 同例）。互不覆盖：三条都在。
+        const userIdx = first.findIndex(
+          (m: { role?: string; content?: unknown }) =>
+            m.role === "user" && JSON.stringify(m.content).includes("hello cj16"),
+        );
+        const updateIdx = cj16TextIdx(first, "CJ16-SECTION-UPDATE");
+        const mergedIdx = cj16TextIdx(first, "CJ16-P-BODY");
+        expect(userIdx).toBeGreaterThan(sysIdx);
+        expect(updateIdx).toBeGreaterThan(userIdx);
+        expect(mergedIdx).toBeGreaterThan(updateIdx);
+        expect(first[mergedIdx]!.role).toBe("user");
+        // details 与 recall 条目不进 LLM 上下文（CustomEntry 是 state-only）。
+        expect(firstText).not.toContain(CJ16_H_P);
+        expect(firstText).not.toContain(MEMORY_RECALL_CUSTOM_TYPE);
+      },
+    );
+  });
+
+  it("persists as a custom entry with details verbatim; after resume the segment dedup seed stays correct; the parts renderer does not throw (headless)", async () => {
+    const model = fakeModel();
+    let seeded: { pInjected: boolean; uInjected: boolean; byLayer: Record<string, number> } | undefined;
+    let renderer:
+      | ((
+          message: { details?: { parts?: MarkerPart[] } },
+          options: { outputPad: number },
+          theme: { fg: (style: string, text: string) => string },
+        ) => unknown)
+      | undefined;
+    await withSession(
+      { scripted: [textTurn(model, "done")], persist: true, extensionFactories: [cj16JevFactory()] },
+      async ({ session, cwd, modelRuntime }) => {
+        await session.prompt("hello cj16");
+        // (a) 会话树：custom_message 条目携带原样 details，另有两条 recall 条目。
+        const branch = session.sessionManager.getBranch() as Array<Record<string, unknown>>;
+        const injectEntry = branch.find(
+          (e) => e.type === "custom_message" && e.customType === MEMORY_INJECT_CUSTOM_TYPE,
+        );
+        expect(injectEntry).toBeDefined();
+        expect(injectEntry!.details).toEqual(CJ16_MERGED_DETAILS);
+        expect(branch.filter((e) => e.type === "custom" && e.customType === MEMORY_RECALL_CUSTOM_TYPE).length).toBe(2);
+        // (b) 磁盘往返：原始 JSONL 行里的 details 与发送时深度相等。
+        const file = session.sessionFile!;
+        expect(existsSync(file)).toBe(true);
+        const injectLine = readFileSync(file, "utf8")
+          .split("\n")
+          .filter((l) => l.includes(MEMORY_INJECT_CUSTOM_TYPE))
+          .pop()!;
+        expect(JSON.parse(injectLine).details).toEqual(CJ16_MERGED_DETAILS);
+
+        // (c) resume（SessionManager.open + 新 loader/闭包 —— 含磁盘往返，比
+        // /reload 的同进程分支更严；两者 seed 都走同一条 branch 扫描）。
+        const resumedModel = fakeModel();
+        const resumedRuntime = fakeModelRuntime(resumedModel, [textTurn(resumedModel, "resumed-done")]);
+        const agentDir = join(cwd, ".pi-agent");
+        const settingsManager2 = SettingsManager.create(cwd, agentDir);
+        const loader2 = new DefaultResourceLoader({
+          cwd,
+          agentDir,
+          settingsManager: settingsManager2,
+          extensionFactories: [
+            (pi: ExtensionAPI) => {
+              pi.on("before_agent_start", (async (_event: unknown, ctx: unknown) => {
+                const sm = (ctx as { sessionManager?: { getBranch?: () => unknown } }).sessionManager;
+                const resumedBranch = Array.isArray(sm?.getBranch?.())
+                  ? (sm!.getBranch!() as Array<Record<string, unknown>>)
+                  : [];
+                const seg = createSegmentState();
+                seg.seed(resumedBranch as never);
+                seeded = {
+                  pInjected: seg.isInjected(CJ16_H_P),
+                  uInjected: seg.isInjected(CJ16_H_U),
+                  byLayer: seg.stats().byLayer as Record<string, number>,
+                };
+                // 证伪探针：种子若失效（哈希未被识别为已注入）就会重注入并携带
+                // 此哨兵 —— 断言它不得出现。
+                if (!seeded.pInjected || !seeded.uInjected) {
+                  return { message: { ...CJ16_MERGED_MESSAGE, content: "CJ16-REINJECT-MUST-NOT-APPEAR" } };
+                }
+                return undefined;
+              }) as never);
+              renderer = (
+                message: { details?: { parts?: MarkerPart[] } },
+                options: { outputPad: number },
+                theme: { fg: (style: string, text: string) => string },
+              ) => {
+                const d = message.details;
+                if (d === undefined || !Array.isArray(d.parts)) return undefined;
+                return new Text(theme.fg("dim", formatInjectMarkerParts(d.parts)), Math.max(options.outputPad, 0), 0);
+              };
+              pi.registerMessageRenderer(MEMORY_INJECT_CUSTOM_TYPE, renderer as never);
+            },
+          ] as never,
+        });
+        await loader2.reload();
+        const sm2 = SessionManager.open(file);
+        const { session: resumed } = await createAgentSession({
+          cwd,
+          model: resumedModel as never,
+          modelRuntime: resumedRuntime as never,
+          sessionManager: sm2,
+          settingsManager: settingsManager2,
+          resourceLoader: loader2,
+          tools: ["bash"],
+        });
+        try {
+          await resumed.prompt("cj16 resumed turn");
+          // 种子正确：两个哈希均已注入，按层计数完整（P:1、U:1）。
+          expect(seeded).toEqual({ pInjected: true, uInjected: true, byLayer: { P: 1, U: 1 } });
+          const first = resumedRuntime.requestMessages[0]!;
+          const firstText = JSON.stringify(first);
+          // 无新鲜注入（证伪探针未触发）……
+          expect(firstText).not.toContain("CJ16-REINJECT-MUST-NOT-APPEAR");
+          // ……而历史里合并消息恰好一份（上下文完好，无重复注入）。
+          expect(firstText.split("CJ16-P-BODY").length - 1).toBe(1);
+          expect(firstText).not.toContain(MEMORY_RECALL_CUSTOM_TYPE);
+          // (d) 渲染器：headless 下 pi 不自动调用（C-J13），故用磁盘读回的
+          // details 直接调用已注册渲染器 —— 渲染 parts 不报错且产出 Text。
+          const readBack = JSON.parse(injectLine) as { details: { parts?: MarkerPart[] } };
+          const out = renderer!(
+            { details: readBack.details },
+            { outputPad: 1 },
+            {
+              fg: (_style: string, text: string) => text,
+            },
+          );
+          expect(out).toBeInstanceOf(Text);
+        } finally {
+          resumed.dispose();
+        }
+        void modelRuntime;
+      },
+    );
   });
 });

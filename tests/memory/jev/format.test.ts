@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   formatInjectMarker,
+  formatInjectMarkerParts,
   formatInjectMessage,
   formatJevReport,
   formatNotify,
@@ -37,6 +38,23 @@ describe("inject message & marker (§6.1.6 / §5.3)", () => {
     expect(formatInjectMarker("A", [{ anchor: "pitfalls-git › #3" }], { partial: true })).toBe(
       "── mem A·partial: pitfalls-git › #3 ──",
     );
+  });
+
+  it("parts marker joins one segment per layer with │ (plan §5.3, C-J16 gate)", () => {
+    expect(
+      formatInjectMarkerParts([
+        { layer: "P", items: [{ anchor: "core.md › 发版 #1" }] },
+        { layer: "U", items: [{ anchor: "pitfalls-git › #3", p: 0.81 }] },
+      ]),
+    ).toBe("── mem P: core.md › 发版 #1 │ U: pitfalls-git › #3 (0.81) ──");
+    // ·partial attaches per part, not to the whole marker.
+    expect(
+      formatInjectMarkerParts([
+        { layer: "U", items: [{ anchor: "a #1" }], partial: true },
+        { layer: "B", items: [{ anchor: "b #2" }] },
+      ]),
+    ).toBe("── mem U·partial: a #1 │ B: b #2 ──");
+    expect(formatInjectMarkerParts([])).toBe("── mem  ──");
   });
 });
 

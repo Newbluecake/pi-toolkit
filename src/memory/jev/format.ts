@@ -58,10 +58,32 @@ export function formatInjectMarker(
   items: readonly { anchor: string; p?: number }[],
   opts?: { partial?: boolean },
 ): string {
-  const inner = items
-    .map((item) => `${item.anchor}${item.p === undefined ? "" : ` (${item.p.toFixed(2)})`}`)
-    .join(", ");
-  return `── mem ${layer}${opts?.partial === true ? "·partial" : ""}: ${inner} ──`;
+  return `── mem ${layer}${opts?.partial === true ? "·partial" : ""}: ${markerInner(items)} ──`;
+}
+
+function markerInner(items: readonly { anchor: string; p?: number }[]): string {
+  return items.map((item) => `${item.anchor}${item.p === undefined ? "" : ` (${item.p.toFixed(2)})`}`).join(", ");
+}
+
+// ───────── merged-message marker (memory-predict plan §5.3; C-J16 gate) ─────────
+
+export interface MarkerPart {
+  /** String, not `InjectLayer`: a merged message may carry the future "P"
+   *  layer before contracts.ts declares it (C-J16 proves the channel with a
+   *  synthetic shape; P1 types it properly). */
+  readonly layer: string;
+  readonly items: readonly { anchor: string; p?: number }[];
+  readonly partial?: boolean;
+}
+
+/** The merged-message marker, plan §5.3: `── mem P: … │ U: … ──` — one
+ *  segment per `details.parts` layer, joined with ` │ `; item formatting
+ *  identical to formatInjectMarker. Empty parts ⇒ the bare frame. */
+export function formatInjectMarkerParts(parts: readonly MarkerPart[]): string {
+  const segments = parts.map(
+    (part) => `${part.layer}${part.partial === true ? "·partial" : ""}: ${markerInner(part.items)}`,
+  );
+  return `── mem ${segments.join(" │ ")} ──`;
 }
 
 // ───────────────────────────── write echo (§6.2.4) ─────────────────────────────
