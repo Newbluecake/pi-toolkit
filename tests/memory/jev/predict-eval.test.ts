@@ -7,6 +7,9 @@
 // The synthetic labels/runs below are TEST FIXTURES exercising the validator
 // and the arithmetic only; the eval script itself never generates eval data.
 
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as evalScript from "../../../scripts/dev/predict-eval.mjs";
 
@@ -528,10 +531,153 @@ describe("predict-eval: §12.3 latency and §12.4 cost aggregation", () => {
   });
 });
 
+// ───────────────────── P2 模型部分：门控 + 真实调用（注入 fetch） ─────────────────────
+
+describe("predict-eval: live model gate and real-call path (§11.2)", () => {
+  const req = (overrides = {}) => ({
+    id: "r0001",
+    system: "You predict which kinds of project rules…",
+    user: JSON.stringify({ v: 1, request: "fix it" }),
+    ...overrides,
+  });
+
+  it("liveModelGate requires BOTH the explicit opt-in env and the API key", () => {
+    expect(evalScript.liveModelGate({}).ok).toBe(false);
+    expect(evalScript.liveModelGate({ [evalScript.LIVE_GATE_ENV]: "1" }).ok).toBe(false);
+    expect(evalScript.liveModelGate({ [evalScript.LIVE_KEY_ENV]: "sk-x" }).ok).toBe(false);
+    expect(evalScript.liveModelGate({ [evalScript.LIVE_GATE_ENV]: "true", [evalScript.LIVE_KEY_ENV]: "sk-x" }).ok).toBe(
+      false, // 只认 "1"
+    );
+    const ok = evalScript.liveModelGate({ [evalScript.LIVE_GATE_ENV]: "1", [evalScript.LIVE_KEY_ENV]: "sk-x" });
+    expect(ok.ok).toBe(true);
+    expect(ok.missing).toEqual([]);
+    const no = evalScript.liveModelGate({});
+    expect(no.missing.join(" ")).toContain(evalScript.LIVE_GATE_ENV);
+    expect(no.missing.join(" ")).toContain(evalScript.LIVE_KEY_ENV);
+  });
+
+  it("validateRequestRow only accepts wire-recorded system + serialized PredictOutboundV1", () => {
+    expect(evalScript.validateRequestRow(req())).toEqual([]);
+    expect(evalScript.validateRequestRow(null)[0]).toContain("must be a JSON object");
+    expect(evalScript.validateRequestRow(req({ id: "" })).join(" ")).toContain("id: required");
+    expect(evalScript.validateRequestRow(req({ system: "" })).join(" ")).toContain("system: required");
+    expect(evalScript.validateRequestRow(req({ user: "not json" })).join(" ")).toContain("valid JSON");
+    expect(evalScript.validateRequestRow(req({ user: JSON.stringify({ v: 2 }) })).join(" ")).toContain("v:1");
+    expect(evalScript.validateRequestRow(req({ user: JSON.stringify([1]) })).join(" ")).toContain("v:1");
+    expect(
+      evalScript.validateRequestRow(req({ user: JSON.stringify({ v: 1, pad: "x".repeat(40_000) }) })).join(" "),
+    ).toContain("exceeds");
+  });
+
+  it("validateRequests pins ids to the labelled set (no fabricated rounds)", () => {
+    const labels = [label({ id: "r0001" })];
+    expect(evalScript.validateRequests([req()], labels).ok).toBe(true);
+    const bad = evalScript.validateRequests([req(), req(), req({ id: "ghost" })], labels);
+    expect(bad.ok).toBe(false);
+    expect(bad.errors.join(" ")).toContain("duplicate request");
+    expect(bad.errors.join(" ")).toContain("no label with this id");
+  });
+
+  it("fetchOneReply maps a real OpenAI-compatible response (text + usage)", async () => {
+    const fetchImpl = vi.fn(async (url, init) => {
+      expect(url).toBe("https://api.deepseek.com/chat/completions");
+      expect(init.headers.authorization).toBe("Bearer sk-test");
+      const body = JSON.parse(init.body);
+      expect(body.model).toBe("deepseek-flash");
+      expect(body.messages).toEqual([
+        { role: "system", content: req().system },
+        { role: "user", content: req().user },
+      ]);
+      return {
+        ok: true,
+        text: async () =>
+          JSON.stringify({
+            choices: [{ message: { content: '{"tags":[{"id":"git-commit","p":0.8}]}' } }],
+            usage: { prompt_tokens: 800, completion_tokens: 20 },
+          }),
+      };
+    });
+    const reply = await evalScript.fetchOneReply(req(), {
+      apiKey: "sk-test",
+      baseUrl: "https://api.deepseek.com",
+      model: "deepseek-flash",
+      timeoutMs: 1000,
+      fetchImpl,
+    });
+    expect(reply.ok).toBe(true);
+    expect(reply.text).toContain("git-commit");
+    expect(reply.usage.prompt_tokens).toBe(800);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("fetchOneReply records failures honestly (HTTP error / bad shape / timeout), never fabricating text", async () => {
+    const httpErr = await evalScript.fetchOneReply(req(), {
+      apiKey: "k",
+      baseUrl: "https://x",
+      model: "m",
+      timeoutMs: 1000,
+      fetchImpl: async () => ({ ok: false, status: 429, text: async () => "rate limited" }),
+    });
+    expect(httpErr).toMatchObject({ ok: false, error: "HTTP 429" });
+    expect(httpErr.text).toBeUndefined();
+
+    const badShape = await evalScript.fetchOneReply(req(), {
+      apiKey: "k",
+      baseUrl: "https://x",
+      model: "m",
+      timeoutMs: 1000,
+      fetchImpl: async () => ({ ok: true, text: async () => JSON.stringify({ choices: [] }) }),
+    });
+    expect(badShape).toMatchObject({ ok: false, error: "missing choices[0].message.content" });
+
+    const hanging = (_url, init) =>
+      new Promise((_, reject) => {
+        init.signal.addEventListener(
+          "abort",
+          () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          { once: true },
+        );
+      });
+    const timed = await evalScript.fetchOneReply(req(), {
+      apiKey: "k",
+      baseUrl: "https://x",
+      model: "m",
+      timeoutMs: 5,
+      fetchImpl: hanging,
+    });
+    expect(timed.ok).toBe(false);
+    expect(timed.error).toContain("timeout after 5ms");
+  });
+
+  it("fetchReplies is sequential and reports each row via onRow", async () => {
+    const order = [];
+    const fetchImpl = async () => {
+      order.push("call");
+      return { ok: true, text: async () => JSON.stringify({ choices: [{ message: { content: "{}" } }] }) };
+    };
+    const seen = [];
+    const rows = [req({ id: "a" }), req({ id: "b" })];
+    const out = await evalScript.fetchReplies(rows, {
+      apiKey: "k",
+      baseUrl: "https://x",
+      model: "m",
+      timeoutMs: 1000,
+      fetchImpl,
+      onRow: (r) => seen.push(r.id),
+    });
+    expect(out.map((r) => r.id)).toEqual(["a", "b"]);
+    expect(seen).toEqual(["a", "b"]);
+  });
+});
+
 // ───────────────────── CLI honesty paths ─────────────────────
 
 describe("predict-eval: CLI (help / missing data never claims a pass)", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
 
   it("--help exits 0 and prints the usage", async () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -556,5 +702,139 @@ describe("predict-eval: CLI (help / missing data never claims a pass)", () => {
     const out = spy.mock.calls.flat().join("\n");
     expect(out).toContain("metrics: NOT-EVALUATED");
     expect(out).not.toContain("GATE: PASS");
+  });
+
+  it("--fetch-replies without the env gate exits 1 and never touches the network", async () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    delete process.env[evalScript.LIVE_GATE_ENV];
+    delete process.env[evalScript.LIVE_KEY_ENV];
+    const code = await evalScript.main(["--fetch-replies"]);
+    expect(code).toBe(1);
+    const out = spy.mock.calls.flat().join("\n");
+    expect(out).toContain("refused");
+    expect(out).toContain(evalScript.LIVE_GATE_ENV);
+    expect(out).toContain(evalScript.LIVE_KEY_ENV);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("--fetch-replies gated but with missing requests exits 1 without any call", async () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    vi.stubEnv(evalScript.LIVE_GATE_ENV, "1");
+    vi.stubEnv(evalScript.LIVE_KEY_ENV, "sk-test");
+    const dir = mkdtempSync(join(tmpdir(), "predict-eval-"));
+    try {
+      const code = await evalScript.main([
+        "--fetch-replies",
+        "--labels",
+        join(dir, "missing-labels.jsonl"),
+        "--requests",
+        join(dir, "missing-requests.jsonl"),
+        "--replies-out",
+        join(dir, "replies.jsonl"),
+      ]);
+      expect(code).toBe(1);
+      const out = spy.mock.calls.flat().join("\n");
+      expect(out).toContain("MISSING/BAD INPUT");
+      expect(out).toContain("never fabricates");
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("--fetch-replies happy path: real (stubbed) calls append reply rows and resume skips ok ids", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.stubEnv(evalScript.LIVE_GATE_ENV, "1");
+    vi.stubEnv(evalScript.LIVE_KEY_ENV, "sk-test");
+    const dir = mkdtempSync(join(tmpdir(), "predict-eval-"));
+    const labelsPath = join(dir, "labels.jsonl");
+    const requestsPath = join(dir, "requests.jsonl");
+    const repliesPath = join(dir, "replies.jsonl");
+    try {
+      writeFileSync(labelsPath, [label({ id: "a" }), label({ id: "b" })].map((l) => JSON.stringify(l)).join("\n"));
+      const reqRow = (id) => ({
+        id,
+        system: "sys",
+        user: JSON.stringify({ v: 1, request: `do ${id}` }),
+      });
+      writeFileSync(requestsPath, [reqRow("a"), reqRow("b")].map((r) => JSON.stringify(r)).join("\n"));
+
+      const fetchSpy = vi.fn(async (_url, init) => {
+        const body = JSON.parse(init.body);
+        const id = body.messages[1].content.includes("do a") ? "a" : "b";
+        if (id === "b") return { ok: false, status: 500, text: async () => "boom" };
+        return { ok: true, text: async () => JSON.stringify({ choices: [{ message: { content: '{"tags":[]}' } }] }) };
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      const argv = [
+        "--fetch-replies",
+        "--labels",
+        labelsPath,
+        "--requests",
+        requestsPath,
+        "--replies-out",
+        repliesPath,
+      ];
+      const code1 = await evalScript.main(argv);
+      expect(code1).toBe(0);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      const rows1 = readFileSync(repliesPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l));
+      expect(rows1).toHaveLength(2);
+      expect(rows1.find((r) => r.id === "a").ok).toBe(true);
+      expect(rows1.find((r) => r.id === "a").text).toBe('{"tags":[]}');
+      expect(rows1.find((r) => r.id === "b")).toMatchObject({ ok: false, error: "HTTP 500" });
+
+      // 断点续跑：ok:true 的 a 跳过，ok:false 的 b 重试。
+      fetchSpy.mockClear();
+      const code2 = await evalScript.main(argv);
+      expect(code2).toBe(0);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const rows2 = readFileSync(repliesPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l));
+      expect(rows2).toHaveLength(3); // a、 b(500)、b（重试）
+      expect(rows2.filter((r) => r.id === "b")).toHaveLength(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("--metrics rejects a schema-bad --runs-model instead of feeding it to M9", async () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), "predict-eval-"));
+    try {
+      const labelsPath = join(dir, "labels.jsonl");
+      const runsPath = join(dir, "runs.jsonl");
+      const runsModelPath = join(dir, "runs-model.jsonl");
+      writeFileSync(labelsPath, JSON.stringify(label({ id: "h1", subset: "holdout" })));
+      writeFileSync(runsPath, JSON.stringify(run({ id: "h1" })));
+      writeFileSync(runsModelPath, JSON.stringify(run({ id: "ghost" }))); // 不在标注集
+      const code = await evalScript.main([
+        "--metrics",
+        "--labels",
+        labelsPath,
+        "--runs",
+        runsPath,
+        "--runs-model",
+        runsModelPath,
+        "--calls",
+        join(dir, "missing-calls.jsonl"),
+      ]);
+      expect(code).toBe(1);
+      const out = spy.mock.calls.flat().join("\n");
+      expect(out).toContain("runs-model: id=ghost: no label with this id");
+      expect(out).not.toContain("GATE: PASS");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

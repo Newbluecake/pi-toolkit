@@ -102,6 +102,7 @@ import {
   formatInjectMarkerParts,
   formatInjectMessage,
   formatNotify,
+  formatPredictStatsLine,
   formatStatusLine,
 } from "./format.js";
 import { clearHealthTable, coverage, getHealthTable, notifyFor } from "./health.js";
@@ -117,9 +118,36 @@ import {
   buildFinalRecord,
   type FinalRecord,
 } from "./predict/carry.js";
-import type { CarryState, Evidence, PathClass, ScoredHit, ToolLite } from "./predict/contracts.js";
+import type {
+  CarryState,
+  Evidence,
+  Modifier,
+  PathClass,
+  PredictInput,
+  PredictResult,
+  ScoredHit,
+  TagScore,
+  ToolLite,
+} from "./predict/contracts.js";
+import { PredictCache, turnKey } from "./predict/cache.js";
 import { readGitBranch, type GitHeadIo } from "./predict/git-head.js";
 import { runPredict } from "./predict/index.js";
+import {
+  createPredictFlight,
+  type PredictFlight,
+  type PredictFlightInput,
+  type PredictFlightModel,
+  type PredictFlightOutcome,
+  type PredictFlightPort,
+} from "./predict/flight.js";
+import {
+  createPredictLedger,
+  type PredictLedgerTable,
+  type PredictPrice,
+  type PredictUsage,
+} from "./predict/ledger.js";
+import { buildPredictSystemPrompt, parsePredictReply } from "./predict/llm.js";
+import { buildPredictOutbound, serializePredictOutbound, type PredictOutboundV1 } from "./predict/outbound.js";
 import { runRules } from "./predict/rules.js";
 import {
   prioritizeCandidates,
@@ -131,6 +159,7 @@ import {
 } from "./predict/select.js";
 import { shapeOf } from "./predict/shape.js";
 import { buildPredictInput, classifyPathClass } from "./predict/signals.js";
+import { tally, type ModelHit } from "./predict/vote.js";
 import {
   buildErrorQuestions,
   buildRecallQuestions,
@@ -517,6 +546,146 @@ export function mergeInjectMessages(
   };
 }
 
+// ───────────────────────────── P2 model wiring helpers (memory-predict plan §6.2/§9.2; wire.ts, non-pi-free) ─────────────────────────────
+
+/** §9.2: the day-ledger table is the ONE process-level shared table beyond
+ *  the two health tables (an I4 exception, deliberately) — cap 8 days is
+ *  enforced by the ledger itself; it survives `/reload` and is shared by
+ *  every wireJev closure in this process (per-process day caps, §9.3). */
+const PREDICT_LEDGER_SYMBOL = Symbol.for("pi-subagent:memory-predict-ledger");
+
+function globalPredictLedgerTable(): PredictLedgerTable {
+  const g = globalThis as unknown as Record<symbol, PredictLedgerTable | undefined>;
+  let table = g[PREDICT_LEDGER_SYMBOL];
+  if (table === undefined) {
+    table = new Map();
+    g[PREDICT_LEDGER_SYMBOL] = table;
+  }
+  return table;
+}
+
+/** Tests only: wipe the process-level predict ledger table between cases
+ *  (production never resets it — §9.2 explicitly survives `/reload`). */
+export function clearPredictLedgerTable(): void {
+  (globalThis as unknown as Record<symbol, PredictLedgerTable | undefined>)[PREDICT_LEDGER_SYMBOL] = undefined;
+}
+
+/** Minimal structural mirror of pi's ModelRegistry for the P2 predict call
+ *  (§6.2): `find` is required; `streamSimple`/`complete` follow topic-switch's
+ *  `runJudge` binding. Read fresh from ctx every turn (never cached across
+ *  activations), mirroring the classifier-registry discipline. */
+interface PredictModelRegistryLike {
+  find(provider: string, id: string): unknown;
+  streamSimple?(
+    model: unknown,
+    context: unknown,
+    options?: { signal?: AbortSignal; maxTokens?: number; reasoning?: string },
+  ): { result(): Promise<PredictReplyMessage> };
+  complete?(
+    model: unknown,
+    context: unknown,
+    options?: { signal?: AbortSignal; maxTokens?: number },
+  ): Promise<PredictReplyMessage>;
+}
+
+interface PredictReplyMessage {
+  readonly content?: unknown;
+  readonly usage?: unknown;
+  readonly errorMessage?: string;
+}
+
+function predictRegistryOf(ctx: unknown): PredictModelRegistryLike | undefined {
+  try {
+    const r = (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry;
+    if (r === undefined || r === null || typeof r !== "object") return undefined;
+    if (typeof (r as Record<string, unknown>)["find"] !== "function") return undefined;
+    return r as PredictModelRegistryLike;
+  } catch {
+    return undefined;
+  }
+}
+
+function finiteNonNeg(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/** pi-ai `Usage` ({input, cacheRead, output, …}) → ledger `PredictUsage`
+ *  (§9.2 usage passthrough); any missing/invalid component ⇒ undefined (the
+ *  flight then settles that attempt at the reserved amount). */
+function predictUsageOf(message: PredictReplyMessage): PredictUsage | undefined {
+  const u = message.usage as Record<string, unknown> | undefined;
+  if (u === undefined || u === null || typeof u !== "object") return undefined;
+  const input = finiteNonNeg(u["input"]);
+  const cacheRead = finiteNonNeg(u["cacheRead"]);
+  const output = finiteNonNeg(u["output"]);
+  if (input === undefined || cacheRead === undefined || output === undefined) return undefined;
+  return { inputTokens: input, cacheReadTokens: cacheRead, outputTokens: output };
+}
+
+/** Catalog price off the bound model object (`cost.{input,cacheRead,output}`
+ *  $/1M — §9.2 "usage × registry 价目"); missing/invalid ⇒ undefined (the
+ *  settlement stays at the reserved amount). */
+function predictPriceOf(model: unknown): PredictPrice | undefined {
+  const cost = (model as { cost?: Record<string, unknown> } | undefined)?.cost;
+  if (cost === undefined || cost === null || typeof cost !== "object") return undefined;
+  const input = finiteNonNeg(cost["input"]);
+  const cacheRead = finiteNonNeg(cost["cacheRead"]);
+  const output = finiteNonNeg(cost["output"]);
+  if (input === undefined || cacheRead === undefined || output === undefined) return undefined;
+  return { inputPerM: input, cacheReadPerM: cacheRead, outputPerM: output };
+}
+
+/** Text blocks of an assistant message; throws on errorMessage/empty reply so
+ *  the flight records a failed attempt and fails over (the same semantics as
+ *  topic-switch's `assistantMessageText`). */
+function predictTextOf(message: PredictReplyMessage): string {
+  if (typeof message.errorMessage === "string" && message.errorMessage !== "") {
+    throw new Error(message.errorMessage);
+  }
+  const blocks = Array.isArray(message.content) ? message.content : [];
+  const text = blocks
+    .map((b) =>
+      b !== null && typeof b === "object" && (b as { type?: unknown }).type === "text"
+        ? String((b as { text?: unknown }).text ?? "")
+        : "",
+    )
+    .join(" ");
+  if (text.trim() === "") throw new Error("predict model: empty reply");
+  return text;
+}
+
+/** §6.2 model binding (topic-switch `runJudge` style): `streamSimple` with
+ *  `reasoning:"minimal"` when the registry has it, else plain `complete`;
+ *  `maxTokens: 384` both ways; usage passed through for §9.2 settlement. */
+function bindPredictModel(raw: PredictModelRegistryLike, provider: string, id: string): PredictFlightModel | undefined {
+  let found: unknown;
+  try {
+    found = raw.find(provider, id);
+  } catch {
+    return undefined;
+  }
+  if (found === undefined || found === null) return undefined;
+  if (typeof raw.streamSimple !== "function" && typeof raw.complete !== "function") return undefined;
+  const price = predictPriceOf(found);
+  const port: PredictFlightPort = {
+    complete: async (system, user, signal) => {
+      const context = {
+        systemPrompt: system,
+        messages: [{ role: "user" as const, content: user, timestamp: Date.now() }],
+      };
+      let message: PredictReplyMessage;
+      if (typeof raw.streamSimple === "function") {
+        message = await raw.streamSimple(found, context, { signal, maxTokens: 384, reasoning: "minimal" }).result();
+      } else {
+        message = await raw.complete!(found, context, { signal, maxTokens: 384 });
+      }
+      const usage = predictUsageOf(message);
+      return { text: predictTextOf(message), ...(usage === undefined ? {} : { usage }) };
+    },
+  };
+  return { provider, id, ...(price === undefined ? {} : { price }), port };
+}
+
 // ───────────────────────────── wireJev ─────────────────────────────
 
 interface Corpus {
@@ -617,6 +786,26 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   let predictBashJobs: JevBashJobsLitePort | undefined;
   let predictFleet: JevFleetPort | undefined;
   let rulesFired = 0;
+  // memory-predict plan §2.2/§9.2/§11.2 P2 model state (I4: closure-owned;
+  // the Symbol-keyed ledger table above is the only cross-activation share).
+  // `predictTurnSeq` is a dedicated per-P-turn counter — the shared `turnSeq`
+  // also advances on turn_end, so it cannot express the §7.2 adjacency check.
+  const predictLedger = createPredictLedger(globalPredictLedgerTable(), {
+    maxCallsPerDay: config.predict.model.maxCallsPerDay,
+    maxUsdPerDay: config.predict.model.maxUsdPerDay,
+  });
+  const predictCache = new PredictCache({ ttlMs: config.predict.cacheTtlMin * 60_000, clock: () => now() });
+  const predictFlight: PredictFlight = createPredictFlight(predictLedger, {
+    requestBudgetMs: config.predict.model.requestBudgetMs,
+    maxCallsPerDay: config.predict.model.maxCallsPerDay,
+    maxUsdPerDay: config.predict.model.maxUsdPerDay,
+    clock,
+  });
+  let predictDisposed = false;
+  let modelCalls = 0;
+  let modelTimely = 0;
+  let modelCached = 0;
+  let predictTurnSeq = 0;
   const pStamps = new Map<EntryHash, string>();
   const parsedCache = new Map<string, ParseShellResult>();
   const dataCache = new Map<string, { at: number; corpus: Corpus }>();
@@ -1149,13 +1338,17 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   };
 
   /** Settle a judged layer: inside `waitMs` ⇒ returned for the
-   *  before_agent_start message; later ⇒ sendMessage if still current. */
+   *  before_agent_start message; later ⇒ sendMessage if still current.
+   *  `deferCommit` (§8.3 model branch only) hands the FINALIZE back instead
+   *  of invoking it, so P can claim shared entries before U's commit — the
+   *  late path below is unchanged either way. */
   const settle = async (
     work: Promise<(() => InjectMessage | undefined) | undefined>,
     gen: number,
     controller: AbortController,
     waitMs: number,
-  ): Promise<InjectMessage | undefined> => {
+    deferCommit = false,
+  ): Promise<InjectMessage | (() => InjectMessage | undefined) | undefined> => {
     const late = (finalize: (() => InjectMessage | undefined) | undefined): void => {
       if (finalize === undefined || gen !== generation || controller.signal.aborted) return;
       const m = finalize();
@@ -1163,7 +1356,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     };
     if (waitMs > 0) {
       const r = await withTimeout(work, waitMs);
-      if (r !== TIMEOUT) return r?.();
+      if (r !== TIMEOUT) return deferCommit ? r : r?.();
     }
     work.then(late).catch((err: unknown) => log(`late recall failed: ${String((err as Error)?.message ?? err)}`));
     return undefined;
@@ -1175,7 +1368,8 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     cwd: string,
     reg: ClassifierRegistryLike,
     predicted?: ReadonlyMap<string, number>,
-  ): Promise<InjectMessage | undefined> => {
+    opts: { deferCommit?: boolean } = {},
+  ): Promise<InjectMessage | (() => InjectMessage | undefined) | undefined> => {
     if (!judgedAllowed() || segment.full()) return undefined;
     const stripped = stripSkillBlocks(prompt).trim();
     if (!passesPromptGate(stripped)) return undefined;
@@ -1200,7 +1394,13 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     });
     recallAbort?.abort();
     const controller = new AbortController();
-    recallAbort = controller;
+    // §8.3 model branch (deferCommit): this U work is awaited by the
+    // in-flight before_agent_start handler itself, so it must NOT be
+    // reachable through `recallAbort` — session_shutdown aborts that slot
+    // (§8.2 disposes only the P flight) and would otherwise abort U's
+    // in-flight classify, dragging U down with a mid-flight shutdown. The
+    // work stays bounded either way: askAll's budget + settle's waitMs (I1).
+    if (opts.deferCommit !== true) recallAbort = controller;
     const gen = ++generation;
     const work = (async (): Promise<(() => InjectMessage | undefined) | undefined> => {
       const res = await askAll("recall", reg, state, questions, RECALL_BUDGET_MS, controller.signal);
@@ -1214,7 +1414,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       if (picks.length === 0) return undefined;
       return () => commit("U", picks, config.recall.maxEntries, config.recall.maxBytes, "user", { model: res.model });
     })();
-    return settle(work, gen, controller, config.recall.waitMs);
+    return settle(work, gen, controller, config.recall.waitMs, opts.deferCommit === true);
   };
 
   // ───────── E layer ─────────
@@ -1597,22 +1797,124 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     return { pCands, sCands, byHash };
   };
 
-  /** §8.3 P1b orchestration (no model branch): rules + S + carry, zero-call,
-   *  fully synchronous. Returns `undefined` when P did not even attempt to
-   *  run this turn (off/partial-inactive/segment-full/no corpus/predict
-   *  disabled) — distinct from "ran but produced nothing to inject". */
-  const runPredictTurn = (
-    prompt: string,
-    ctx: ExtensionContext,
-    cwd: string,
-  ):
-    | { message: InjectMessage | undefined; predictSummary: PredictSummary; predicted: ReadonlyMap<string, number> }
-    | undefined => {
+  /** Shared r0 bundle (§8.3): everything both the sync path and the model
+   *  branch need — computed once per P turn, before any model work. */
+  interface PredictR0 {
+    readonly c: Corpus;
+    readonly cwd: string;
+    readonly partial: boolean;
+    readonly input: PredictInput;
+    readonly result: PredictResult;
+    readonly hits: readonly ScoredHit[];
+    readonly modifiers: readonly Modifier[];
+    readonly cancelled: boolean;
+    readonly todoReplaced: boolean;
+    readonly hadCarryBefore: boolean;
+    readonly revalidatedCarry: CarryState | undefined;
+  }
+
+  type PredictCommit = {
+    message: InjectMessage | undefined;
+    predictSummary: PredictSummary;
+    predicted: ReadonlyMap<string, number>;
+  };
+
+  /** §5.1/§5.3/§3.3 P commit: final record + select + commit — the exact P1
+   *  body, parameterized over the (possibly model-merged) tag list. Selection
+   *  runs off `tags`/`result.state` regardless of `clearedReason` — that flag
+   *  only governs what gets WRITTEN to the final record (carry housekeeping
+   *  for the NEXT turn), not whether THIS turn injects. Negated/readonly tags
+   *  are already scored to 0 and dropped by `tally()`, so there is nothing
+   *  left to over-inject here; the S constraint in particular must survive
+   *  even when the turn's carry resolves to "empty". */
+  const commitPredictParts = (r0: PredictR0, tags: readonly TagScore[], origin: string): PredictCommit => {
+    const { c, cwd, partial, result, hits, cancelled, todoReplaced, hadCarryBefore, revalidatedCarry } = r0;
+    const tagsWithEvidence = tags.map((t) => ({ ...t, evidence: evidenceForTag(hits, t.tag) }));
+    const clearedReason = detectCarryClear({
+      cancelled,
+      compacted: false,
+      todoReplaced,
+      finalTagsEmpty: tagsWithEvidence.length === 0,
+    });
+    const newCarries = clearedReason !== undefined ? 0 : (revalidatedCarry?.carries ?? 0);
+    if (tagsWithEvidence.length > 0 || hadCarryBefore) {
+      appendPredict(
+        buildFinalRecord(turnSeq, clearedReason === undefined ? tagsWithEvidence : [], newCarries, clearedReason),
+      );
+    }
+    let message: InjectMessage | undefined;
+    {
+      const eligible = fastPathEligibleTags(c.taxonomy);
+      const { pCands, sCands, byHash } = predictCandidatesFor(c, cwd);
+      const selected = selectPEntries({
+        tags,
+        eligibleTags: eligible,
+        candidates: pCands,
+        maxEntries: config.predict.maxEntries,
+        maxBytes: config.predict.maxBytes,
+      });
+      const usedBytes = selected.reduce((sum, s) => sum + s.byteLength, 0);
+      const sSelected = selectSEntry(result.state, sCands, Math.max(0, config.predict.maxBytes - usedBytes));
+      const picks: Pick[] = [];
+      for (const s of selected) {
+        const e = byHash.get(s.hash);
+        if (e !== undefined) picks.push({ entry: e });
+      }
+      if (sSelected !== undefined) {
+        const e = byHash.get(sSelected.hash);
+        if (e !== undefined) picks.push({ entry: e, releaseInProgress: true });
+      }
+      if (picks.length > 0) {
+        message = commit("P", picks, picks.length, config.predict.maxBytes, "predict", {
+          ...(partial ? { partial: true } : {}),
+        });
+        if (message !== undefined) recordPInjection(c, message);
+      }
+    }
+    return {
+      message,
+      predictSummary: {
+        tags: tags.map((t) => t.tag),
+        state: result.state.map((s) => s.kind),
+        origin,
+      },
+      // §5.4 优先入池原料：本轮预测 tag → finalScore（≥0.5 的由
+      // recallCandidates 筛）。predict.enabled=false / P 未跑时本对象不存在。
+      predicted: new Map(tags.map((t) => [t.tag, t.score] as const)),
+    };
+  };
+
+  type BegunPredictTurn =
+    | { readonly kind: "sync"; readonly result: PredictCommit }
+    | {
+        readonly kind: "model";
+        readonly r0: PredictR0;
+        readonly mergedTags: readonly TagScore[];
+        readonly modelExtras: readonly ModelHit[];
+        readonly origin: string;
+        readonly key: string;
+        readonly knownTags: ReadonlySet<string>;
+        readonly threshold: number;
+        readonly waitMs: number;
+        readonly turnSeqAtStart: number;
+        readonly chain: readonly string[];
+        readonly flightPromise: Promise<PredictFlightOutcome>;
+        readonly predicted: ReadonlyMap<string, number>;
+      };
+
+  /** §8.3 r0 (rules + carry + pendingModel redemption + turnKey cache) plus
+   *  §4.4 flight admission. The sync kinds commit immediately (P1 byte
+   *  behavior); the model kind defers the commit to the wait-window merge.
+   *  Returns `undefined` when P did not even attempt to run this turn
+   *  (off/partial-inactive/segment-full/no corpus/predict disabled) —
+   *  distinct from "ran but produced nothing to inject". */
+  const beginPredictTurn = (prompt: string, ctx: ExtensionContext, cwd: string): BegunPredictTurn | undefined => {
     const allowed = zeroCallAllowed();
     if (!allowed.ok || segment.full()) return undefined;
     const c = corpusFor(cwd);
     if (c === undefined) return undefined;
     rulesFired += 1;
+    predictTurnSeq += 1;
     const branch = branchOf(ctx) ?? [];
     // §3.3 触发门：carry 每轮都从分支恢复（清空簿记——cancel/todo-replaced/
     // empty 在非承接轮同样生效，承接状态随之失效），但只有承接短语当轮才把
@@ -1639,71 +1941,232 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const { hits: ruleHits, modifiers } = runRules(input, c.taxonomy);
     const revalidatedCarry = input.carry === undefined ? undefined : revalidateCarry(input.carry, input);
     const hits = [...ruleHits, ...carryHits(revalidatedCarry)];
-    const tagsWithEvidence = result.tags.map((t) => ({ ...t, evidence: evidenceForTag(hits, t.tag) }));
     const cancelled = modifiers.some((m) => m.kind === "cancel");
     const prevTodoIds = (carryIn?.tags ?? []).flatMap((t) => t.evidence.todoIds);
     const currentInProgressIds = input.todo.filter((t) => t.status === "in_progress").map((t) => t.id);
     const todoReplaced = isTodoReplaced(prevTodoIds, currentInProgressIds);
-    const clearedReason = detectCarryClear({
+    const r0: PredictR0 = {
+      c,
+      cwd,
+      partial: allowed.partial,
+      input,
+      result,
+      hits,
+      modifiers,
       cancelled,
-      compacted: false,
       todoReplaced,
-      finalTagsEmpty: tagsWithEvidence.length === 0,
+      hadCarryBefore: carryIn !== undefined,
+      revalidatedCarry,
+    };
+    // §7.2 pendingModel redemption — synchronous, before any new call; the
+    // redeemed tags ride into this turn's tally as source M at their §7.2
+    // weight (full on carry phrases, capped at 0.6 otherwise).
+    const redeemed = predictCache.redeemPending({
+      turnSeq: predictTurnSeq,
+      prompt: stripped,
+      currentTags: result.tags,
+      modifiers,
+      ...(result.state.length > 0 ? { stateSupportedTags: new Set(["release"]) } : {}),
     });
-    const newCarries = clearedReason !== undefined ? 0 : (revalidatedCarry?.carries ?? 0);
-    const hadCarryBefore = carryIn !== undefined;
-    if (tagsWithEvidence.length > 0 || hadCarryBefore) {
-      appendPredict(
-        buildFinalRecord(turnSeq, clearedReason === undefined ? tagsWithEvidence : [], newCarries, clearedReason),
+    const pendingHits: readonly ModelHit[] =
+      redeemed.kind === "full" || redeemed.kind === "capped" ? redeemed.tags : [];
+    let modelExtras: ModelHit[] = [...pendingHits];
+    let mergedTags = result.tags;
+    let origin = result.origin;
+    if (pendingHits.length > 0) {
+      mergedTags = tally({ hits, modifiers, modelHits: pendingHits });
+      origin = "rules+model";
+    }
+    // §6.2/§7.1 model path gates: predict.model.enabled, main session, prompt
+    // gate, and a bindable model chain (predict.model.models only — never the
+    // session model; unbindable chains degrade silently to the sync path).
+    const modelCfg = config.predict.model;
+    const raw = predictRegistryOf(ctx);
+    const modelWanted = modelCfg.enabled && !isChild && raw !== undefined && passesPromptGate(stripped);
+    let dto: PredictOutboundV1 | undefined;
+    let key: string | undefined;
+    let boundModels: PredictFlightModel[] = [];
+    let chain: string[] = [];
+    let cacheHit = false;
+    if (modelWanted) {
+      for (const spec of modelCfg.models) {
+        const slash = spec.indexOf("/");
+        if (slash <= 0 || slash >= spec.length - 1) continue;
+        const bound = bindPredictModel(raw, spec.slice(0, slash), spec.slice(slash + 1));
+        if (bound !== undefined) {
+          boundModels.push(bound);
+          chain.push(spec);
+        }
+      }
+      if (boundModels.length > 0) {
+        dto = buildPredictOutbound(input, {
+          ruleGuess: mergedTags.map((t) => ({ tag: t.tag, score: t.score })),
+        });
+        key = turnKey({ dto, models: chain, taxonomyRev: c.taxonomy.rev, threshold: modelCfg.threshold });
+        const cachedTags = predictCache.get(key);
+        if (cachedTags !== undefined) {
+          cacheHit = true;
+          modelCached += 1;
+          if (cachedTags.length > 0) {
+            modelExtras = [...modelExtras, ...cachedTags];
+            mergedTags = tally({ hits, modifiers, modelHits: modelExtras });
+            origin = "rules+cache";
+          }
+        }
+      }
+    }
+    // §4.4 flight gates — uncertain is evaluated over the MERGED r0 tags
+    // (§8.3 r0 already includes pendingModel/cache; mirrors runPredict's
+    // §4.4 conditions 3–5), then admit() covers the day caps/breaker/zombies.
+    const uncertain =
+      modelExtras.length > 0
+        ? !mergedTags.some((t) => t.score >= 0.85) &&
+          (!mergedTags.some((t) => t.score >= 0.5) || Array.from(input.prompt).length >= 40) &&
+          !cancelled
+        : result.uncertain;
+    if (!(modelWanted && dto !== undefined && key !== undefined && boundModels.length > 0 && !cacheHit && uncertain)) {
+      return { kind: "sync", result: commitPredictParts(r0, mergedTags, origin) };
+    }
+    const system = buildPredictSystemPrompt(c.taxonomy.tags);
+    const user = serializePredictOutbound(dto);
+    const flightInput: PredictFlightInput = { system, user, models: boundModels };
+    if (predictDisposed || !predictFlight.admit(flightInput)) {
+      return { kind: "sync", result: commitPredictParts(r0, mergedTags, origin) };
+    }
+    modelCalls += 1;
+    return {
+      kind: "model",
+      r0,
+      mergedTags,
+      modelExtras,
+      origin,
+      key,
+      knownTags: new Set(c.taxonomy.tags.map((t) => t.id)),
+      threshold: modelCfg.threshold,
+      waitMs: Math.max(0, Math.min(1500, modelCfg.waitMs)),
+      turnSeqAtStart: predictTurnSeq,
+      chain,
+      flightPromise: predictFlight.start(flightInput),
+      predicted: new Map(mergedTags.map((t) => [t.tag, t.score] as const)),
+    };
+  };
+
+  /** §8.3 wait window: the flight wins the race only while BOTH the `waitMs`
+   *  timer is still pending AND U has not settled — i.e. window =
+   *  max(waitMs, U's actual settle moment), with U itself already capped by
+   *  `recall.waitMs` inside recallU's settle. `waitMs <= 0` has no timer at
+   *  all: the window is exactly U's settle moment, so when U runs the flight
+   * can still merge inside it, and when U is already settled (or never
+   * ran) the race settles on the uDone microtask — zero real waiting added
+   * (§12.3). The timer rides the injected clock (I1/I5: unref'd in prod). */
+  const racePredictWindow = (
+    flightPromise: Promise<PredictFlightOutcome>,
+    uDone: Promise<unknown>,
+    waitMs: number,
+  ): Promise<{ timely: true; outcome: PredictFlightOutcome } | { timely: false }> =>
+    new Promise((resolve) => {
+      let settled = false;
+      let timer: TimerHandle | undefined;
+      let uSettled = false;
+      let timerFired = waitMs <= 0;
+      const finish = (r: { timely: true; outcome: PredictFlightOutcome } | { timely: false }): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) clock.clearTimer(timer);
+        resolve(r);
+      };
+      // waitMs <= 0 ⇒ the clock side of the window is already elapsed; only
+      // U's settle can extend it (§8.3 max(waitMs, U settle)).
+      const onU = (): void => {
+        uSettled = true;
+        if (timerFired) finish({ timely: false });
+      };
+      uDone.then(onU, onU);
+      if (waitMs > 0) {
+        timer = clock.setTimer(waitMs, () => {
+          timerFired = true;
+          timer = undefined;
+          if (uSettled) finish({ timely: false });
+        });
+      }
+      flightPromise.then(
+        (outcome) => finish({ timely: true, outcome }),
+        () => finish({ timely: false }),
+      );
+    });
+
+  /** §9.4 `kind:"call"` ledger entry — one per STARTED flight (denied
+   *  admissions never reserved and never record). */
+  const appendPredictCall = (chain: readonly string[], outcome: PredictFlightOutcome, timely: boolean): void => {
+    const reason = outcome.kind === "ok" ? undefined : outcome.kind;
+    appendPredict({
+      v: 1,
+      kind: "call",
+      at: new Date(now()).toISOString(),
+      model: outcome.kind === "ok" ? outcome.model : chain.join(","),
+      ms: outcome.ms,
+      ok: outcome.kind === "ok",
+      ...(reason === undefined ? {} : { reason }),
+      reserveUsd: outcome.cost.reserveUsd,
+      costUsd: outcome.cost.costUsd,
+      costSource: outcome.cost.costSource,
+      timely,
+    });
+  };
+
+  /** §7.2 late path: the flight settled only after the window closed — the
+   *  parsed result seeds the exact-key cache + pendingModel and NOTHING is
+   *  delivered (P never calls sendMessage), plus the §9.4 call record. */
+  const latePredictOutcome = (b: Extract<BegunPredictTurn, { kind: "model" }>, outcome: PredictFlightOutcome): void => {
+    if (predictDisposed) return;
+    if (outcome.kind === "ok") {
+      const parsed = parsePredictReply(outcome.text, b.knownTags);
+      if (parsed.ok) {
+        predictCache.set(b.key, parsed.tags);
+        predictCache.setPending(parsed.tags, undefined, b.turnSeqAtStart);
+      }
+    }
+    appendPredictCall(b.chain, outcome, false);
+  };
+
+  /** §8.3 finish: merge a timely M into r0, write the final record, then
+   *  select and commit — P claims shared entries BEFORE U's deferred commit
+   *  (§5.3 P-first dedup; the caller invokes uFin after this). */
+  const finishPredictModelTurn = (
+    b: Extract<BegunPredictTurn, { kind: "model" }>,
+    raced: Awaited<ReturnType<typeof racePredictWindow>>,
+  ): PredictCommit => {
+    let tags = b.mergedTags;
+    let origin = b.origin;
+    if (raced.timely) {
+      if (raced.outcome.kind === "ok") {
+        const parsed = parsePredictReply(raced.outcome.text, b.knownTags);
+        if (parsed.ok) {
+          modelTimely += 1;
+          const passing = parsed.tags.filter((t) => t.p >= b.threshold);
+          if (passing.length > 0) {
+            tags = tally({ hits: b.r0.hits, modifiers: b.r0.modifiers, modelHits: [...b.modelExtras, ...passing] });
+            origin = "rules+model";
+          }
+        }
+        if (!predictDisposed) appendPredictCall(b.chain, raced.outcome, parsed.ok);
+      } else if (!predictDisposed) {
+        // fast failure/abort/timeout inside the window — no merge, still a call
+        appendPredictCall(b.chain, raced.outcome, false);
+      }
+    } else {
+      void b.flightPromise.then(
+        (outcome) => latePredictOutcome(b, outcome),
+        () =>
+          latePredictOutcome(b, {
+            kind: "failed",
+            ms: 0,
+            cost: { reserveUsd: 0, costUsd: 0, costSource: "reserve" },
+            attempts: [],
+          }),
       );
     }
-    // Selection runs off `result.tags`/`result.state` regardless of
-    // `clearedReason` — that flag only governs what gets WRITTEN to the
-    // final record (carry housekeeping for the NEXT turn), not whether THIS
-    // turn injects. Negated/readonly tags are already scored to 0 and
-    // dropped by `tally()`, so there is nothing left to over-inject here;
-    // the S constraint in particular must survive even when the turn's
-    // carry resolves to "empty" (no tag-level carry to keep).
-    let message: InjectMessage | undefined;
-    {
-      const eligible = fastPathEligibleTags(c.taxonomy);
-      const { pCands, sCands, byHash } = predictCandidatesFor(c, cwd);
-      const selected = selectPEntries({
-        tags: result.tags,
-        eligibleTags: eligible,
-        candidates: pCands,
-        maxEntries: config.predict.maxEntries,
-        maxBytes: config.predict.maxBytes,
-      });
-      const usedBytes = selected.reduce((sum, s) => sum + s.byteLength, 0);
-      const sSelected = selectSEntry(result.state, sCands, Math.max(0, config.predict.maxBytes - usedBytes));
-      const picks: Pick[] = [];
-      for (const s of selected) {
-        const e = byHash.get(s.hash);
-        if (e !== undefined) picks.push({ entry: e });
-      }
-      if (sSelected !== undefined) {
-        const e = byHash.get(sSelected.hash);
-        if (e !== undefined) picks.push({ entry: e, releaseInProgress: true });
-      }
-      if (picks.length > 0) {
-        message = commit("P", picks, picks.length, config.predict.maxBytes, "predict", {
-          ...(allowed.partial ? { partial: true } : {}),
-        });
-        if (message !== undefined) recordPInjection(c, message);
-      }
-    }
-    return {
-      message,
-      predictSummary: {
-        tags: result.tags.map((t) => t.tag),
-        state: result.state.map((s) => s.kind),
-        origin: result.origin,
-      },
-      // §5.4 优先入池原料：本轮预测 tag → finalScore（≥0.5 的由
-      // recallCandidates 筛）。predict.enabled=false / P 未跑时本对象不存在。
-      predicted: new Map(result.tags.map((t) => [t.tag, t.score] as const)),
-    };
+    return commitPredictParts(b.r0, tags, origin);
   };
 
   // ───────── hooks ─────────
@@ -1743,21 +2206,49 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         recallAbort = controller;
         const gen = ++generation;
         const m = await settle(work, gen, controller, config.recall.waitMs);
-        return m === undefined ? undefined : { message: m };
+        return m === undefined || typeof m === "function" ? undefined : { message: m };
       }
       if (!isChild && judgedAllowed() && client.status().kind === "full") backfillPending(cwd);
       // §5.3/§8.3: P 与 U 互不拖累——P 抛异常只放弃 P（记诊断日志），U 仍按
-      // 原路径返回/合并；U 的异常仍由外层 catch 兕底（原行为不变）。
-      let pMessage: ReturnType<typeof runPredictTurn>;
+      // 原路径返回/合并；U 的异常仍由外层 catch 兜底（原行为不变）。
+      let begun: BegunPredictTurn | undefined;
       if (config.predict.enabled && (!isChild || config.predict.childSessions)) {
         try {
-          pMessage = runPredictTurn(event.prompt, ctx, cwd);
+          begun = beginPredictTurn(event.prompt, ctx, cwd);
         } catch (err) {
           log(`predict turn failed: ${String((err as Error)?.message ?? err)}`);
-          pMessage = undefined;
+          begun = undefined;
         }
       }
-      const uMessage = await recallU(event.prompt, ctx, cwd, reg, pMessage?.predicted);
+      if (begun !== undefined && begun.kind === "model") {
+        // §8.3 model branch: U settles with its own semantics (recall.waitMs
+        // cap + the unchanged late sendMessage path), but its COMMIT is
+        // deferred until P has claimed shared entries (§5.3 P-first dedup).
+        // P never breaks U: any failure here degrades to U's message alone.
+        const uDone = recallU(event.prompt, ctx, cwd, reg, begun.predicted, { deferCommit: true });
+        try {
+          const raced = await racePredictWindow(begun.flightPromise, uDone, begun.waitMs);
+          const uFin = await uDone;
+          let pRes: PredictCommit | undefined;
+          try {
+            pRes = finishPredictModelTurn(begun, raced);
+          } catch (err) {
+            log(`predict model finish failed: ${String((err as Error)?.message ?? err)}`);
+          }
+          const uMessage = typeof uFin === "function" ? uFin() : uFin;
+          const merged =
+            pRes === undefined ? uMessage : mergeInjectMessages(pRes.message, uMessage, pRes.predictSummary);
+          return merged === undefined ? undefined : { message: merged };
+        } catch (err) {
+          log(`predict model turn failed: ${String((err as Error)?.message ?? err)}`);
+          const uFin = await uDone;
+          const uMessage = typeof uFin === "function" ? uFin() : uFin;
+          return uMessage === undefined ? undefined : { message: uMessage };
+        }
+      }
+      const pMessage = begun?.kind === "sync" ? begun.result : undefined;
+      const uRaw = await recallU(event.prompt, ctx, cwd, reg, pMessage?.predicted);
+      const uMessage = typeof uRaw === "function" ? uRaw() : uRaw;
       const merged = mergeInjectMessages(pMessage?.message, uMessage, pMessage?.predictSummary);
       return merged === undefined ? undefined : { message: merged };
     } catch (err) {
@@ -1934,6 +2425,11 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       recallAbort?.abort();
       bgAbort.abort();
       client.abortBackground();
+      // memory-predict plan §8.2: abort the in-flight predict request, clear
+      // its timers, and mark the P2 model state disposed — late settles then
+      // produce no side effects (no cache writes, no call records).
+      predictDisposed = true;
+      predictFlight.shutdown();
       if (recoveryTimer !== undefined) {
         clock.clearTimer(recoveryTimer.handle);
         recoveryTimer = undefined;
@@ -2023,10 +2519,21 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         truncated === undefined ? text : `${text}\nrecall   recall truncated ${truncated.from}→${truncated.to}`;
       const errors = recentErrorsText();
       const withErrors = errors === undefined ? withTrunc : `${withTrunc}\n${errors}`;
-      // memory-predict plan §9.4 P1b slice: rule-fire count only (no model/
-      // cost columns yet — those land with P2, §11.2); absent entirely when
-      // predict.enabled=false (I9).
-      return config.predict.enabled ? `${withErrors}\npredict  rules ${rulesFired}` : withErrors;
+      // memory-predict plan §9.4: the predict line grows the P2 model slice
+      // (calls/timely/cached/day estimate/breaker) only while model.enabled —
+      // `predict.model.enabled=false` keeps the exact P1 rules-only line, and
+      // `predict.enabled=false` drops the line entirely (I9).
+      if (!config.predict.enabled) return withErrors;
+      if (!config.predict.model.enabled) return `${withErrors}\npredict  rules ${rulesFired}`;
+      return `${withErrors}\n${formatPredictStatsLine({
+        rules: rulesFired,
+        model: modelCalls,
+        timely: modelTimely,
+        cached: modelCached,
+        spentUsd: predictLedger.snapshot(now()).spent,
+        maxUsdPerDay: config.predict.model.maxUsdPerDay,
+        breakerOpen: predictFlight.isBreakerOpen(),
+      })}`;
     },
   };
 

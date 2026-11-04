@@ -339,3 +339,27 @@ export function formatJevReport(view: JevReportView): string {
   if (view.predict !== undefined) lines.push(`predict  rules ${view.predict.rules}`);
   return lines.join("\n");
 }
+
+// ───────────────────────────── predict stats line (memory-predict plan §9.4 P2) ─────────────────────────────
+
+/** Inputs of the extended `/mem jev` predict line (wire.ts's report override
+ *  builds this from its closure counters + the process-level day ledger).
+ *  `formatJevReport`'s own `view.predict` stays the P1 rules-only shape —
+ *  `JevReportView` is a contracts.ts type and the view path is pinned
+ *  byte-for-byte; the P2 slice lives only on the live report path. */
+export interface PredictStatsLineInput {
+  readonly rules: number;
+  readonly model: number;
+  readonly timely: number;
+  readonly cached: number;
+  readonly spentUsd: number;
+  readonly maxUsdPerDay: number;
+  readonly breakerOpen: boolean;
+}
+
+/** §9.4 example, verbatim shape:
+ *  `predict  rules 412 · model 23 (timely 2, cached 15) · $0.0180/0.14 est today · breaker closed`. */
+export function formatPredictStatsLine(input: PredictStatsLineInput): string {
+  const breaker = input.breakerOpen ? "open" : "closed";
+  return `predict  rules ${input.rules} · model ${input.model} (timely ${input.timely}, cached ${input.cached}) · $${input.spentUsd.toFixed(4)}/${input.maxUsdPerDay} est today · breaker ${breaker}`;
+}

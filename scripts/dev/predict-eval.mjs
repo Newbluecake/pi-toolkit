@@ -2,13 +2,21 @@
 /**
  * predict-eval — memory-predict（P 层）的 Tier 3 手工评测入口（plan.md v3.2 §12.2/§12.3/§12.4）。
  *
- * 本脚本只做三件事，全部基于**真实数据**，零网络、零模型调用：
+ * 本脚本只做四件事，全部基于**真实数据**：
  *   1. `--check-labels` 校验人工标注集 `docs/dev/memory-predict/eval/labelled.jsonl`
  *      （结构 + §12.2 分层配额 + 按会话 60/40 划分一致性）；
  *   2. `--metrics` 读取人工录制的逐轮 P 输出（runs.jsonl，可选 runs-model.jsonl）与
  *      P2 记账（calls.jsonl），在**保留集**上计算 §12.2 指标、§12.3 延迟分位、§12.4 费用日账；
- *   3. 数据缺口 ⇒ 该指标记 `NOT-EVALUATED` 并给出明确提示；绝不生成合成标注
+ *   3. `--fetch-replies`（P2 模型部分，§11.2）：对**录制到的真实请求**（requests.jsonl，
+ *      wire 侧实录的 system+user）逐条做真实 deepseek 调用，把回复逐行追加到
+ *      replies.jsonl，供 wire 回放录制第二遍 runs-model.jsonl。真实调用被显式环境
+ *      变量门控：必须同时设 `PI_TOOLKIT_PREDICT_EVAL_LIVE=1` 与 `DEEPSEEK_API_KEY`，
+ *      缺一即拒绝（退出码 1、零网络）；失败行记 `ok:false`（可重跑续补），绝不伪造回复；
+ *   4. 数据缺口 ⇒ 该指标记 `NOT-EVALUATED` 并给出明确提示；绝不生成合成标注
  *      （伪造 160 轮是明令禁止的），也绝不在数据不全时声称达标。
+ *
+ * 除 `--fetch-replies` 外的模式零网络、零模型调用。`--fetch-replies` 只产生**回复
+ * 记录**，不产生任何指标——指标只由 `--metrics` 在真实录制的 runs/runs-model 上算。
  *
  * §12.2 的流程要求（标注由不看 P 输出的独立 agent 起草、用户逐条确认、保留集冻结）
  * 无法从数据本身验证，只在报告中作为 checklist 提示，本脚本不代替它们。
@@ -20,12 +28,14 @@
  *   node scripts/dev/predict-eval.mjs --metrics                    # 默认路径，缺文件会明确提示
  *   node scripts/dev/predict-eval.mjs --metrics --no-model         # P1b 规则版：跳过 deepseek 增量项
  *   node scripts/dev/predict-eval.mjs --metrics --runs-model eval/runs-model.jsonl --out eval/report.md
+ *   PI_TOOLKIT_PREDICT_EVAL_LIVE=1 DEEPSEEK_API_KEY=… \
+ *     node scripts/dev/predict-eval.mjs --fetch-replies            # P2 真实调用（显式门控）
  *
  * 退出码：0 = 校验通过 / 指标已算（含 INCOMPLETE）；1 = 用法或数据 schema 错误；
  * 2 = 指标判 FAIL。INCOMPLETE 不是错误——它就是"缺数据"的诚实结论。
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -83,6 +93,24 @@ export const LATENCY_BUDGET_MS = Object.freeze({
 /** §12.4 默认上限（可用 --max-usd/--max-calls 覆盖，仅为报告对照）。 */
 export const DEFAULT_MAX_USD_PER_DAY = 0.14;
 export const DEFAULT_MAX_CALLS_PER_DAY = 60;
+
+// ───────────────────── P2 模型部分：真实调用的显式门控（§11.2） ─────────────────────
+
+/** 真实调用的显式开关：必须 `PI_TOOLKIT_PREDICT_EVAL_LIVE=1`，缺一即拒。 */
+export const LIVE_GATE_ENV = "PI_TOOLKIT_PREDICT_EVAL_LIVE";
+/** API 凭证环境变量（脚本不读任何 pi 配置文件）。 */
+export const LIVE_KEY_ENV = "DEEPSEEK_API_KEY";
+/** 可选覆盖：OpenAI 兼容 chat/completions 端点与模型名。 */
+export const LIVE_BASE_URL_ENV = "PI_TOOLKIT_PREDICT_EVAL_BASE_URL";
+export const LIVE_MODEL_ENV = "PI_TOOLKIT_PREDICT_EVAL_MODEL";
+export const DEFAULT_LIVE_BASE_URL = "https://api.deepseek.com";
+export const DEFAULT_LIVE_MODEL = "deepseek-flash";
+/** 单次调用硬超时（不依赖 provider 响应 abort 之外无任何宽限）。 */
+export const LIVE_TIMEOUT_MS = 20_000;
+/** 响应体上限（对齐 jev-eval 的 1MB）。 */
+export const LIVE_MAX_REPLY_BYTES = 1_048_576;
+/** 单条请求 user（序列化 DTO）上限——§6.1 总量限额 6144B 的宽裕上界，只防误传大文件。 */
+export const REQUEST_MAX_USER_BYTES = 32_768;
 
 // ───────────────────── JSONL 解析与 schema 校验 ─────────────────────
 
@@ -700,6 +728,146 @@ export function costStats(calls, maxUsdPerDay = DEFAULT_MAX_USD_PER_DAY, maxCall
   return { days, maxUsdPerDay, maxCallsPerDay, hasData: days.length > 0 };
 }
 
+// ───────────────────── P2 真实调用（--fetch-replies；显式环境变量门控） ─────────────────────
+
+/**
+ * 真实调用门控（§11.2「真实调用由环境变量门控」）：必须同时满足
+ * `PI_TOOLKIT_PREDICT_EVAL_LIVE=1`（显式 opt-in）与 `DEEPSEEK_API_KEY`（凭证）。
+ * 返回 `{ ok, missing }`；调用方在 ok=false 时拒绝并退出码 1，零网络。
+ */
+export function liveModelGate(env = process.env) {
+  const missing = [];
+  if (env[LIVE_GATE_ENV] !== "1") missing.push(`${LIVE_GATE_ENV}=1 (explicit opt-in for real model calls)`);
+  if (typeof env[LIVE_KEY_ENV] !== "string" || env[LIVE_KEY_ENV].trim() === "")
+    missing.push(`${LIVE_KEY_ENV} (API credential)`);
+  return { ok: missing.length === 0, missing };
+}
+
+/**
+ * 校验一条真实请求记录（requests.jsonl）：wire 侧实录的 system + user（序列化
+ * PredictOutboundV1）。本脚本**不构造**请求——只发送录制到的内容，user 必须能
+ * JSON.parse 且 v===1，防止误传任意文本当 prompt。
+ */
+export function validateRequestRow(row) {
+  const errors = [];
+  if (row === null || typeof row !== "object" || Array.isArray(row)) return ["request row must be a JSON object"];
+  if (!isNonEmptyString(row.id)) errors.push("id: required non-empty string (must match a label id)");
+  if (typeof row.system !== "string" || row.system === "")
+    errors.push("system: required string (the recorded predict system prompt)");
+  if (typeof row.user !== "string" || row.user === "") {
+    errors.push("user: required string (the recorded serialized PredictOutboundV1)");
+  } else {
+    if (Buffer.byteLength(row.user, "utf8") > REQUEST_MAX_USER_BYTES)
+      errors.push(`user: exceeds ${REQUEST_MAX_USER_BYTES}B (not a recorded DTO?)`);
+    try {
+      const dto = JSON.parse(row.user);
+      if (dto === null || typeof dto !== "object" || Array.isArray(dto) || dto.v !== 1)
+        errors.push("user: must be a serialized PredictOutboundV1 (JSON object with v:1)");
+    } catch {
+      errors.push("user: must be valid JSON (serialized PredictOutboundV1)");
+    }
+  }
+  return errors;
+}
+
+/** 校验整份 requests：结构 + id 唯一 + id 存在于标注集（与 validateRuns 同约）。 */
+export function validateRequests(requests, labels) {
+  const errors = [];
+  const labelIds = new Set(labels.filter((l) => isNonEmptyString(l?.id)).map((l) => l.id));
+  const seen = new Set();
+  requests.forEach((row, idx) => {
+    const where = row && typeof row === "object" && isNonEmptyString(row.id) ? `id=${row.id}` : `line #${idx + 1}`;
+    if (row?.__parseError) {
+      errors.push(`${where}: JSON parse error: ${row.__parseError}`);
+      return;
+    }
+    for (const e of validateRequestRow(row)) errors.push(`${where}: ${e}`);
+    if (isNonEmptyString(row?.id)) {
+      if (seen.has(row.id)) errors.push(`${where}: duplicate request for the same label id`);
+      seen.add(row.id);
+      if (!labelIds.has(row.id)) errors.push(`${where}: no label with this id`);
+    }
+  });
+  return { ok: errors.length === 0, errors };
+}
+
+/**
+ * 单条真实调用（OpenAI 兼容 chat/completions）：硬超时 `timeoutMs`（AbortController，
+ * 计时器 unref），响应体上限 LIVE_MAX_REPLY_BYTES。返回回复行（ok:true 带 text/usage；
+ * 任何失败 ⇒ ok:false + error，绝不伪造 text）。`fetchImpl` 可注入（测试）。
+ */
+export async function fetchOneReply(row, opts) {
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+  timer.unref?.();
+  try {
+    const res = await opts.fetchImpl(`${opts.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` },
+      body: JSON.stringify({
+        model: opts.model,
+        max_tokens: 384,
+        messages: [
+          { role: "system", content: row.system },
+          { role: "user", content: row.user },
+        ],
+      }),
+      signal: controller.signal,
+    });
+    const raw = await res.text();
+    const ms = Date.now() - started;
+    if (Buffer.byteLength(raw, "utf8") > LIVE_MAX_REPLY_BYTES)
+      return { v: 1, id: row.id, ok: false, ms, error: `response exceeds ${LIVE_MAX_REPLY_BYTES}B` };
+    if (!res.ok) return { v: 1, id: row.id, ok: false, ms, error: `HTTP ${res.status}` };
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { v: 1, id: row.id, ok: false, ms, error: "non-JSON response body" };
+    }
+    const content = parsed?.choices?.[0]?.message?.content;
+    if (typeof content !== "string")
+      return { v: 1, id: row.id, ok: false, ms, error: "missing choices[0].message.content" };
+    const usage = parsed?.usage;
+    return {
+      v: 1,
+      id: row.id,
+      ok: true,
+      model: opts.model,
+      ms,
+      text: content,
+      ...(usage !== null && typeof usage === "object" ? { usage } : {}),
+    };
+  } catch (err) {
+    const ms = Date.now() - started;
+    const aborted = err?.name === "AbortError";
+    return {
+      v: 1,
+      id: row.id,
+      ok: false,
+      ms,
+      error: aborted ? `timeout after ${opts.timeoutMs}ms` : String(err?.message ?? err),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 逐条真实调用（顺序、无并发——这是人工评测不是压测）。返回回复行数组；
+ * `opts.onRow` 每行回调（CLI 用它逐行追加落盘，中断后已取的不丢）。
+ */
+export async function fetchReplies(rows, opts) {
+  const out = [];
+  for (const row of rows) {
+    const reply = await fetchOneReply(row, opts);
+    out.push(reply);
+    if (opts.onRow !== undefined) opts.onRow(reply);
+  }
+  return out;
+}
+
 // ───────────────────── 报告渲染 ─────────────────────
 
 function renderLabelReport(result, path) {
@@ -793,17 +961,34 @@ claims the §12.2 gate is met while any metric lacks data.
   node scripts/dev/predict-eval.mjs --help
   node scripts/dev/predict-eval.mjs --check-labels [--labels <file>]
   node scripts/dev/predict-eval.mjs --metrics [options]
+  PI_TOOLKIT_PREDICT_EVAL_LIVE=1 DEEPSEEK_API_KEY=… \\
+    node scripts/dev/predict-eval.mjs --fetch-replies [--requests <file>] [--replies-out <file>]
 
 默认路径（可用旗标覆盖）：
   --labels <file>     标注集，默认 ${join(EVAL_DIR, "labelled.jsonl")}
   --runs <file>       P-on 逐轮录制，默认 ${join(EVAL_DIR, "runs.jsonl")}
-  --runs-model <file> P2 模型通路的第二遍录制（M9 deepseek 增量）
+  --runs-model <file> P2 模型通路的第二遍录制（M9 deepseek 增量；提供时按 runs schema 校验）
   --calls <file>      P2 \`kind:"call"\` 记账行，默认 ${join(EVAL_DIR, "calls.jsonl")}
   --no-model          本遍不含 deepseek（P1b 规则版）：M9 明确记 NOT-EVALUATED
   --max-usd <n>       费用日额对照（默认 ${DEFAULT_MAX_USD_PER_DAY}）
   --max-calls <n>     次数日额对照（默认 ${DEFAULT_MAX_CALLS_PER_DAY}）
   --out <file>        报告同时写入该文件（如 docs/dev/memory-predict/eval/report.md）
-  --schema            打印两份输入 schema（标注行 / 运行行）
+  --schema            打印输入 schema（标注行 / 运行行 / 请求行 / 回复行）
+
+--fetch-replies（P2 模型部分，§11.2；唯一含真实网络调用的模式）：
+  对 requests.jsonl 里 wire 实录的逐条请求做真实 deepseek 调用，回复逐行追加到
+  replies.jsonl（随后由 wire 回放这些回复录制 runs-model.jsonl，再跑 --metrics）。
+  门控（缺一即拒，退出码 1、零网络）：
+    PI_TOOLKIT_PREDICT_EVAL_LIVE=1     显式 opt-in（本脚本不做任何隐式真实调用）
+    DEEPSEEK_API_KEY=<key>             API 凭证（脚本不读 pi 配置文件）
+  可选覆盖：
+    PI_TOOLKIT_PREDICT_EVAL_BASE_URL   默认 ${DEFAULT_LIVE_BASE_URL}（OpenAI 兼容端点）
+    PI_TOOLKIT_PREDICT_EVAL_MODEL      默认 ${DEFAULT_LIVE_MODEL}
+  --requests <file>    录制请求，默认 ${join(EVAL_DIR, "requests.jsonl")}
+  --replies-out <file> 回复输出，默认 ${join(EVAL_DIR, "replies.jsonl")}
+  断点续跑：已有 ok:true 回复的 id 自动跳过；ok:false（失败/超时）行会重试，
+  同一 id 以文件中最后一行为准。单次调用硬超时 ${LIVE_TIMEOUT_MS / 1000}s，响应上限 1MB。
+  失败行如实记录 ok:false + error——绝不伪造回复，也不产生任何指标。
 
 标注行 schema（labelled.jsonl，每行一个 JSON 对象；分层配额见 --check-labels）：
   {
@@ -845,7 +1030,17 @@ claims the §12.2 gate is met while any metric lacks data.
 calls 行 schema（calls.jsonl，P2 记账转录）：{ "at": "ISO", "ok": true,
   "reserveUsd": 0.0003, "costUsd": 0.00028, "costSource": "usage" | "reserve" }
 
-退出码：0 通过/已算（含 INCOMPLETE）；1 用法或 schema 错误；2 指标 FAIL。`;
+请求行 schema（requests.jsonl，wire 侧实录；本脚本从不构造请求）：
+  { "id": "r0001",                    // 必须存在于标注集
+    "system": "<predict system prompt>",      // 实录的 system
+    "user": "{\"v\":1,\"request\":\"…\"}" }      // 实录的序列化 PredictOutboundV1（须可解析且 v=1）
+
+回复行 schema（replies.jsonl，--fetch-replies 追加写入；喂给 wire 回放，不是指标输入）：
+  成功：{ "v": 1, "id": "r0001", "ok": true, "model": "deepseek-flash", "ms": 812,
+         "text": "{\"tags\":[]}", "usage": { … } }
+  失败：{ "v": 1, "id": "r0001", "ok": false, "ms": 20001, "error": "timeout after 20000ms" }
+
+退出码：0 通过/已算（含 INCOMPLETE）；1 用法或 schema 错误 / 门控拒绝；2 指标 FAIL。`;
 
 function parseArgs(argv) {
   const args = {
@@ -853,10 +1048,13 @@ function parseArgs(argv) {
     schema: false,
     checkLabels: false,
     metrics: false,
+    fetchReplies: false,
     labels: join(EVAL_DIR, "labelled.jsonl"),
     runs: join(EVAL_DIR, "runs.jsonl"),
     runsModel: undefined,
     calls: join(EVAL_DIR, "calls.jsonl"),
+    requests: join(EVAL_DIR, "requests.jsonl"),
+    repliesOut: join(EVAL_DIR, "replies.jsonl"),
     noModel: false,
     maxUsd: DEFAULT_MAX_USD_PER_DAY,
     maxCalls: DEFAULT_MAX_CALLS_PER_DAY,
@@ -868,10 +1066,13 @@ function parseArgs(argv) {
     else if (a === "--schema") args.schema = true;
     else if (a === "--check-labels") args.checkLabels = true;
     else if (a === "--metrics") args.metrics = true;
+    else if (a === "--fetch-replies") args.fetchReplies = true;
     else if (a === "--labels") args.labels = argv[++i];
     else if (a === "--runs") args.runs = argv[++i];
     else if (a === "--runs-model") args.runsModel = argv[++i];
     else if (a === "--calls") args.calls = argv[++i];
+    else if (a === "--requests") args.requests = argv[++i];
+    else if (a === "--replies-out") args.repliesOut = argv[++i];
     else if (a === "--no-model") args.noModel = true;
     else if (a === "--max-usd") args.maxUsd = Number(argv[++i]);
     else if (a === "--max-calls") args.maxCalls = Number(argv[++i]);
@@ -881,7 +1082,7 @@ function parseArgs(argv) {
   if ([args.maxUsd, args.maxCalls].some((n) => !Number.isFinite(n) || n < 0))
     throw new Error("--max-usd/--max-calls must be non-negative numbers");
   if (args.help) return args;
-  if (!args.checkLabels && !args.metrics && !args.schema) args.checkLabels = true; // 空参 ⇒ 默认先看标注集
+  if (!args.checkLabels && !args.metrics && !args.schema && !args.fetchReplies) args.checkLabels = true; // 空参 ⇒ 默认先看标注集
   return args;
 }
 
@@ -902,6 +1103,65 @@ export async function main(argv = process.argv.slice(2)) {
     // HELP 已含两份 schema；--schema 单独打印方便粘贴给标注 agent。
     const schemaStart = HELP.indexOf("标注行 schema");
     console.log(HELP.slice(schemaStart));
+    return 0;
+  }
+
+  // --fetch-replies：P2 模型部分的真实调用（§11.2）。门控先行：未显式开启 ⇒ 拒绝，零网络。
+  if (args.fetchReplies) {
+    const gate = liveModelGate(process.env);
+    if (!gate.ok) {
+      console.log(`refused: --fetch-replies performs real model calls and is explicitly gated; missing:`);
+      for (const m of gate.missing) console.log(`  ${m}`);
+      console.log("no network request was made. Without real replies the model increment stays NOT-EVALUATED.");
+      return 1;
+    }
+    const labelsFileForGate = loadJsonlOrMissing(args.labels, "labelled set");
+    const reqFile = loadJsonlOrMissing(args.requests, "requests file");
+    const problems = [];
+    if (labelsFileForGate.missing) problems.push(labelsFileForGate.why);
+    if (reqFile.missing) problems.push(reqFile.why);
+    if (problems.length === 0) {
+      const check = validateRequests(reqFile.rows, labelsFileForGate.rows);
+      for (const e of check.errors.slice(0, 20)) problems.push(`requests: ${e}`);
+    }
+    if (problems.length > 0) {
+      for (const p of problems) console.log(`MISSING/BAD INPUT: ${p}`);
+      console.log(
+        "fetch-replies: NOT DONE — requests must be real wire-recorded rows (see --help for the schema); this script never fabricates them.",
+      );
+      return 1;
+    }
+    // 断点续跑：ok:true 的 id 跳过；ok:false 行重试（同一 id 以文件最后一行为准）。
+    const existing = existsSync(args.repliesOut) ? parseJsonl(readFileSync(args.repliesOut, "utf8")) : [];
+    const doneOk = new Set(existing.filter((r) => r?.ok === true && isNonEmptyString(r?.id)).map((r) => r.id));
+    const todo = reqFile.rows.filter((r) => !doneOk.has(r.id));
+    if (todo.length === 0) {
+      console.log(
+        `all ${reqFile.rows.length} request(s) already have ok replies in ${args.repliesOut} — nothing to do`,
+      );
+      return 0;
+    }
+    const baseUrl = (process.env[LIVE_BASE_URL_ENV] ?? DEFAULT_LIVE_BASE_URL).replace(/\/+$/, "");
+    const model = process.env[LIVE_MODEL_ENV] ?? DEFAULT_LIVE_MODEL;
+    console.log(
+      `fetch-replies: ${todo.length} real call(s) to ${baseUrl} model=${model} (${doneOk.size} already recorded) — this spends real API quota`,
+    );
+    mkdirSync(dirname(args.repliesOut), { recursive: true });
+    const replies = await fetchReplies(todo, {
+      apiKey: process.env[LIVE_KEY_ENV],
+      baseUrl,
+      model,
+      timeoutMs: LIVE_TIMEOUT_MS,
+      fetchImpl: globalThis.fetch,
+      onRow: (r) => appendFileSync(args.repliesOut, JSON.stringify(r) + "\n", "utf8"),
+    });
+    const okCount = replies.filter((r) => r.ok === true).length;
+    console.log(
+      `done: ${okCount}/${replies.length} ok → ${args.repliesOut}. Failures are recorded as ok:false rows (retry by re-running; last row per id wins).`,
+    );
+    console.log(
+      "next: replay these replies through the wire harness to record runs-model.jsonl, then run --metrics --runs-model … — until then the model increment stays NOT-EVALUATED.",
+    );
     return 0;
   }
 
@@ -943,7 +1203,17 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const runsModelFile =
     args.runsModel === undefined ? { missing: true, rows: [] } : loadJsonlOrMissing(args.runsModel, "model-pass runs");
-  if (args.runsModel !== undefined && runsModelFile.missing) problems.push(runsModelFile.why);
+  let runsModelRows = [];
+  if (args.runsModel !== undefined) {
+    if (runsModelFile.missing) {
+      problems.push(runsModelFile.why);
+    } else {
+      runsModelRows = runsModelFile.rows;
+      // 第二遍录制与第一遍同 schema（含 id 对标注集的存在性），防脏数据进 M9。
+      const modelCheck = validateRuns(runsModelRows, labels);
+      if (!modelCheck.ok) for (const e of modelCheck.errors.slice(0, 20)) problems.push(`runs-model: ${e}`);
+    }
+  }
   const callsFile = loadJsonlOrMissing(args.calls, "calls file");
 
   if (problems.length > 0) {
@@ -955,7 +1225,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   const metricsResult = computeMetrics(labels, runs, {
-    runsModel: runsModelFile.rows,
+    runsModel: runsModelRows,
     noModel: args.noModel,
   });
   const latency = latencyStats(runs);
