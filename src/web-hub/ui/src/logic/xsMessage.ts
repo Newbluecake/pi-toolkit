@@ -98,3 +98,52 @@ export function parseXsMessage(content: string): XsView | undefined {
     body: (f[2] ?? "").replaceAll("<<<fab_", "<<<fab-"),
   };
 }
+
+// ---------------------------------------------------------------------------
+// fabric-xs-activation plan §3 P4 (arch §4.8): the received-card status/host metadata badge.
+// Pure token + i18n-KEY construction — the component resolves the translated prose. The badge
+// rides the entryId-matched progress row ONLY (`真实 xid→entryId 才附着卡片，不按正文/hash/
+// 时间猜`); `parseXsMessage`'s first-line-only contract above is untouched, so a body line
+// writing `wake=`/`reason=` can never forge or pollute this state.
+// ---------------------------------------------------------------------------
+
+import type { XsRowView } from "./xsRequestState.js";
+
+/** The compact badge a received cross-session message card may carry. */
+export interface XsMetaBadge {
+  /** English tokens, e.g. `started · wake↓ pair_wake_rate` (UI-text split). */
+  readonly token: string;
+  /** i18n key of the translated detail (title). */
+  readonly titleKey: string;
+  readonly params?: Readonly<Record<string, string>>;
+}
+
+/** Build the badge for a row; `undefined` when the row adds nothing over the header's own
+ *  kind chip (a plain deliver with no wake story stays badge-free — byte-identical). */
+export function xsMetaBadge(row: XsRowView): XsMetaBadge | undefined {
+  const wakeToken =
+    row.wake.reason !== undefined
+      ? `wake↓ ${row.wake.reason}`
+      : row.wake.decision === "dispatch_accepted"
+        ? "wake·dispatch"
+        : row.wake.ended !== undefined
+          ? `wake·${row.wake.ended}`
+          : row.wake.decision === "unknown" && row.wake.requested
+            ? "wake?"
+            : undefined;
+  const phaseBeyond = row.phase === "started" || row.phase === "replied" ? row.phase : undefined;
+  if (wakeToken === undefined && phaseBeyond === undefined) return undefined;
+  const token = [phaseBeyond, wakeToken].filter((x): x is string => x !== undefined).join(" · ");
+  const w = row.wake;
+  if (w.reason !== undefined) {
+    return {
+      token,
+      titleKey: "xs.cardTitleDowngraded",
+      params: { stage: w.stage ?? "?", reason: w.reason },
+    };
+  }
+  if (w.decision === "dispatch_accepted") return { token, titleKey: "xs.cardTitleDispatch" };
+  if (w.ended !== undefined) return { token, titleKey: "xs.cardTitleEnded", params: { ended: w.ended } };
+  if (w.decision === "unknown" && w.requested) return { token, titleKey: "xs.cardTitleUnknown" };
+  return { token, titleKey: "xs.cardTitlePhase", params: { phase: token } };
+}

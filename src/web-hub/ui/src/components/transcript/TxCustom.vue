@@ -11,13 +11,25 @@
   `tests/web-hub/ui/source-scan.test.ts`).
 -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, inject } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
-import { XS_CUSTOM_TYPE, parseXsMessage } from "../../logic/xsMessage.js";
+import { XS_CUSTOM_TYPE, parseXsMessage, xsMetaBadge } from "../../logic/xsMessage.js";
+import { XS_RX_PROGRESS } from "../../logic/xsRequestState.js";
+import { registerXsExtra } from "../../i18n/xs-extra.js";
 import MarkdownView from "./MarkdownView.vue";
 
-const props = defineProps<{ readonly customType: string; readonly text: string; readonly truncated: boolean }>();
+registerXsExtra(); // lazy "xs" namespace — the badge title's translated evidence detail
+
+const props = defineProps<{
+  readonly customType: string;
+  readonly text: string;
+  readonly truncated: boolean;
+  /** fabric-xs-activation P4: the backing entry's id — the ONLY key a progress row may attach
+   *  by. Absent (legacy items / message-path customs) ⇒ no badge, byte-identical. `undefined`
+   *  explicitly allowed (exactOptionalPropertyTypes — the entry binding may be undefined). */
+  readonly entryId?: string | undefined;
+}>();
 const { t } = useI18n();
 
 /** `subagent:` is the toolkit's legacy NAMESPACE (renamed pi-subagent → pi-toolkit; runtime ids keep
@@ -68,6 +80,24 @@ const xsChip = computed(() => {
   if (v.kind === "broadcast") return `#${v.channel ?? "?"} · 广播`;
   return v.kind;
 });
+/** fabric-xs-activation P4: the status/host metadata badge — attaches ONLY via a real
+ *  entryId→row match (never body/hash/time); no provider / no entryId / no match / nothing
+ *  new to say ⇒ NO badge DOM at all (byte-identical pre-feature card). The title is the
+ *  translated evidence detail; a body line can never reach this state (xsMessage.js's
+ *  first-line-only parse feeds the kind chip, not the badge). */
+const xsRx = inject(XS_RX_PROGRESS, null);
+const xsBadge = computed(() => {
+  const id = props.entryId;
+  if (id === undefined || xsRx === null) return undefined;
+  const row = xsRx.rows.value.get(id);
+  if (row === undefined) return undefined;
+  const badge = xsMetaBadge(row);
+  if (badge === undefined) return undefined;
+  return {
+    token: badge.token,
+    title: badge.params === undefined ? t(badge.titleKey) : t(badge.titleKey, badge.params as Record<string, string>),
+  };
+});
 </script>
 
 <template>
@@ -80,6 +110,9 @@ const xsChip = computed(() => {
         >
         <span v-if="xs.cwdLabel" class="kind-chip" translate="no">{{ xs.cwdLabel }}</span>
         <span class="kind-chip" translate="no" :title="customType">{{ xsChip }}</span>
+        <span v-if="xsBadge !== undefined" class="kind-chip chip-xs-meta" translate="no" :title="xsBadge.title">{{
+          xsBadge.token
+        }}</span>
       </div>
       <MarkdownView :text="xs.body" />
       <span v-if="truncated" class="badge badge-trunc">{{ t("transcript.truncated") }}</span>

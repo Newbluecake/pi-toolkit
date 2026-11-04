@@ -79,6 +79,22 @@ export interface CmdRequest {
   expect?: { sessionId?: string };
   queryOnly?: true;
 }
+
+/** fabric-xs-activation plan §3 P4: the browser's activate/query action frame. `activate`
+ *  NEVER carries text (U6) — it targets an already-delivered messageId bound to its original
+ *  activationKey; `query` is strictly read-only. Optional per the frozen-transport
+ *  convention (test fakes / future transports may omit it): NO real adapter implements it
+ *  yet (the hub-side HTTP surface lands with the wake_session package), so the UI's activate
+ *  button — which also gates on this surface — can never render against a live tree until
+ *  then. Tests fake it to verify the enabled state; nothing ever auto-fires it. */
+export interface XsActivateRequest {
+  agentKey: string;
+  id: string;
+  action: "activate" | "query";
+  messageId: string;
+  activationKey?: string;
+  expect?: { sessionId?: string };
+}
 export interface DialogRequest {
   agentKey: string;
   id: string;
@@ -117,6 +133,10 @@ export interface HubTransport {
   runPage?<T = unknown>(agentKey: string, runId: string, before: string, limit?: number): Promise<RunPageResult<T>>;
   command(req: CmdRequest): Promise<CmdOutcome>;
   dialog(req: DialogRequest): Promise<CmdOutcome>;
+  /** fabric-xs-activation plan §3 P4 (arch §4.4): the activate/query call surface — see
+   *  {@link XsActivateRequest}. Optional (frozen-transport convention); absent ⇒ the request
+   *  area's action buttons never render. */
+  xsActivate?(req: XsActivateRequest): Promise<CmdOutcome>;
   /** web-hub-upload plan §1.2/§4.3 (package U4b): the chunked-upload endpoints. Optional so
    * test fakes / future transports can omit it — `useControl` only mounts the tray driver
    * (`ControlHandle.uploads`) when a transport provides one; both real adapters always do. */

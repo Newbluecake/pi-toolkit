@@ -431,6 +431,18 @@ export interface ControlHandle {
    * Identify-only: never carries `expect`. Optional per the frozen-types convention (an older
    * handle/test fake without it renders the queue copy-only). */
   recall?(agentKey: string, target: string): Promise<CmdOutcome>;
+  /** fabric-xs-activation plan §3 P4 (arch §4.4): the cross-session activate/query action —
+   *  `activate` targets an already-delivered messageId with its ORIGINAL activationKey
+   *  (never text, U6); `query` is strictly read-only. SINGLEFLIGHT per business key
+   *  (`messageId|activationKey`) — a double-click returns the in-flight promise, so one
+   *  business key never bills twice; a NEW attempt after settle mints a fresh cmd id.
+   *  No optimistic ctl item (the `setArchived` precedent — the result arrives via the next
+   *  status frame). Optional per the frozen-handle convention: the method exists iff the
+   *  transport offers `xsActivate` — without it the request area's buttons never render. */
+  xsActivate?(
+    agentKey: string,
+    args: { action: "activate" | "query"; messageId: string; activationKey?: string },
+  ): Promise<CmdOutcome>;
   /** steer-recall §7: this tab's full original text for a sent/held cmdId (session-scoped,
    * per-agent capped); `undefined` when not retained (page reloaded / evicted / other tab's). */
   originalText?(agentKey: string, sessionId: string, cmdId: string): string | undefined;

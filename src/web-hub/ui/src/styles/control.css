@@ -687,6 +687,54 @@
   border-style: dashed;
 }
 
+/* --- cross-session request area (fabric-xs-activation plan §3 P4, arch §4.9) ---
+ * A LIGHT list beside QueueList (never a whole-machine task panel): same row anatomy as the
+ * queue (badges / id / actions / notes), muted by default — it is evidence, not work. */
+.xs-request-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.xs-request-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+  font-size: var(--fs-xs);
+}
+
+.xs-request-item[data-phase="not delivered"] {
+  border-style: dashed;
+}
+
+.xs-request-item .chip-wake {
+  color: var(--c-warn, inherit);
+}
+
+.xs-request-id {
+  font-family: var(--font-mono, monospace);
+  color: var(--c-text-3);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xs-request-more {
+  padding: 0 var(--sp-2);
+}
+
 /* --- steer-recall hold rows (web-hub-steer-recall plan §7, P-ui) ---
  * `held` — recallable, accented border to stand out from the mirror rows.
  * `returned` / `unavailable` — dashed (nothing is in flight for this row).

@@ -704,6 +704,7 @@ function saveScrollMemory(): void {
           :custom-type="entry.customType"
           :text="entry.text"
           :truncated="entry.truncated"
+          :entry-id="entry.entryId === undefined ? undefined : entry.entryId"
           :data-anchor-ids="anchorAttr(view.start + i)"
         />
         <TxDivider

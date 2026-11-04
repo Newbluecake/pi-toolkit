@@ -276,6 +276,17 @@ export function aliasChipText(alias: string): string {
   return `@${t.text}${t.truncated ? "\u2026" : ""}`;
 }
 
+// ---------------------------------------------------------------------------
+// fabric-xs-activation plan §3 P4: cross-session request-progress caps. The canonical UI
+// mirror constants live in `logic/xsRequestState.ts` (the merge/gate logic imports them);
+// re-exported here so any card-side consumer keeps the usual mirror-constants home (the
+// `XS_CHANNEL_CAP`/`XS_ALIAS_CAP` precedent above). No card chrome renders from them today —
+// the request area lives beside QueueList in the dock; "无 cap 不渲染" is enforced by
+// xsRequestState's narrow/gate functions, never by trusting the card.
+// ---------------------------------------------------------------------------
+
+export { XS_STATE_CAP, XS_ACTIVATE_CAP } from "@logic/xsRequestState.js";
+
 export interface AliasSuggestion {
   readonly alias: string;
   /** Another online session currently reports this alias (hint only — the hub decides). */

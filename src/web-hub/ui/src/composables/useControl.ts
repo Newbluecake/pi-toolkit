@@ -143,6 +143,36 @@ export function createControl(
   const uploadTransport = transport.upload;
   const uploads = uploadTransport !== undefined ? createUploads({ upload: uploadTransport }) : undefined;
 
+  // fabric-xs-activation plan §3 P4: the activate/query action surface. Mounted ONLY when
+  // the transport offers it (frozen-transport convention). SINGLEFLIGHT per business key
+  // `${agentKey}|${messageId}|${activationKey ?? ""}` — a double-click (or a re-render racing
+  // the click) returns the SAME in-flight promise, so one business key never issues two wire
+  // frames ("双击/刷新/新 cmdId 不重复计费" — the server revalidates and dedupes regardless).
+  // No optimistic ctl item (the `setArchived` precedent): the outcome surfaces through the
+  // request area's own in-flight state and the next `status.xsRequests` frame.
+  const xsActivateTransport = transport.xsActivate;
+  const xsInFlight = new Map<string, Promise<CmdOutcome>>();
+  const xsActivate =
+    xsActivateTransport === undefined
+      ? undefined
+      : (agentKey: string, args: { action: "activate" | "query"; messageId: string; activationKey?: string }) => {
+          const bizKey = `${agentKey}|${args.messageId}|${args.activationKey ?? ""}`;
+          const running = xsInFlight.get(bizKey);
+          if (running !== undefined) return running;
+          const attempt = xsActivateTransport({
+            agentKey,
+            id: newCmdId(),
+            action: args.action,
+            messageId: args.messageId,
+            ...(args.activationKey !== undefined ? { activationKey: args.activationKey } : {}),
+            ...expectFor(agentKey),
+          }).finally(() => {
+            if (xsInFlight.get(bizKey) === attempt) xsInFlight.delete(bizKey);
+          });
+          xsInFlight.set(bizKey, attempt);
+          return attempt;
+        };
+
   return {
     sendPrompt: (agentKey, text, deliver, original) => {
       const id = newCmdId();
@@ -212,6 +242,7 @@ export function createControl(
     // drawer's own 4s undo toast is the feedback). Agent-side terminality is re-checked anyway.
     setArchived: (agentKey, kind, target, set) =>
       transport.command({ agentKey, id: newCmdId(), op: "archive", target, kind, set }),
+    ...(xsActivate !== undefined ? { xsActivate } : {}),
     // 2026-10-28 (fleet bash 「(+N more)」): bulk-archive the omitted tail. Kind-only — the agent
     // owns the id set. Same no-optimistic-item posture as `setArchived` above.
     archiveOmitted: (agentKey, kind) => transport.command({ agentKey, id: newCmdId(), op: "archive_omitted", kind }),

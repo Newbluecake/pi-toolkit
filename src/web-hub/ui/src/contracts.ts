@@ -217,6 +217,47 @@ export interface QueueListEmits {
   discardHeld: [id: string];
   copyHeld: [id: string];
 }
+
+// ---------------------------------------------------------------------------
+// control/XsRequestList.vue — fabric-xs-activation plan §3 P4 (arch §4.9): the LIGHT
+// cross-session request area beside QueueList (never a whole-machine task panel). Pure
+// presentation over `logic/xsRequestState.ts`'s merged rows; every action is hard-gated on
+// the caps/announcement/surface inputs the dock folds into the props.
+// ---------------------------------------------------------------------------
+
+/** A pre-merged request row view (see `logic/xsRequestState.ts`'s `XsRowView`). */
+export interface XsRequestRowView {
+  readonly messageId: string;
+  readonly phaseToken: string;
+  readonly wakeToken: string | null;
+  readonly replyToken: string | null;
+  readonly noteKey: string;
+  readonly seeded: boolean;
+  readonly activationKey?: string;
+  readonly expired: boolean;
+}
+
+export interface XsRequestListProps {
+  /** `logic/xsRequestState.ts`'s merged rows for the CURRENT session (already cap-gated —
+   *  an empty array renders nothing, not even a container: byte-identical off/legacy DOM). */
+  readonly rows: readonly XsRequestRowView[];
+  /** Rows dropped for the visible cap (display hint only). `undefined` explicitly allowed
+   *  (exactOptionalPropertyTypes — the dock's snapshot binding may be undefined). */
+  readonly omitted?: number | undefined;
+  /** The full activate gate (caps ∧ session announcement ∧ surface ∧ online) already
+   *  evaluated per row by the dock; absent/empty ⇒ no activate button renders at all. */
+  readonly activatable?: ReadonlyMap<string, { retryAfterAt?: number }>;
+  /** The read-only query surface on unknown rows (state cap ∧ surface). */
+  readonly queryable?: ReadonlySet<string>;
+  /** messageIds with an action in flight (singleflight bookkeeping lives in the dock). */
+  readonly inFlight?: ReadonlySet<string>;
+  readonly now?: number;
+}
+export interface XsRequestListEmits {
+  /** User click ONLY — no lifecycle path ever emits these (plan §3 P4: 不自动执行). */
+  activate: [messageId: string, activationKey: string];
+  query: [messageId: string, activationKey: string | null];
+}
 export interface ControlNoticeProps {
   readonly plaintext?: boolean;
   readonly mode?: "token" | "password";
@@ -258,6 +299,9 @@ export interface DetailDockProps {
    * recall is never sent; the row stays copy-only). */
   readonly holdEnabled?: boolean;
   readonly holdLink?: "live" | "unavailable";
+  /** fabric-xs-activation plan §3 P4: the shared clock for the request area's expiry/backoff
+   *  math (AgentDetail's ticker). Absent ⇒ Date.now() per render (standalone mounts/tests). */
+  readonly now?: number;
 }
 export interface DetailDockEmits {
   "update:following": [value: boolean];

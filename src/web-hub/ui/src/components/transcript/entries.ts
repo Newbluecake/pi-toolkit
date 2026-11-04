@@ -43,6 +43,10 @@ export type TxEntry =
       readonly customType: string;
       readonly text: string;
       readonly truncated: boolean;
+      /** fabric-xs-activation P4: the backing entry's id when the item carries one — the ONLY
+       *  key a received cross-session message's progress row may attach by (never body/
+       *  hash/time). Absent on legacy items ⇒ no badge, byte-identical. */
+      readonly entryId?: string;
     }
   | {
       readonly type: "date";
@@ -153,6 +157,7 @@ function itemEntry(it: Item, idx: ToolIndex): TxEntry | undefined {
         customType: typeof customType === "string" ? customType : "custom",
         text,
         truncated,
+        ...(typeof it.entryId === "string" && it.entryId !== "" ? { entryId: it.entryId } : {}),
       };
     }
     default:

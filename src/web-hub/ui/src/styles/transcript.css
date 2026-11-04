@@ -878,6 +878,13 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   color: var(--c-text-3);
 }
 
+/* fabric-xs-activation P4: the received xs card's status/host metadata badge (English tokens,
+ * translated evidence detail in the title) — same chip anatomy, mono to read as telemetry. */
+.chip-xs-meta {
+  font-family: var(--font-mono, monospace);
+  color: var(--c-text-3);
+}
+
 .msg-custom .kind-chip {
   color: var(--c-text-3);
   font-family: var(--font-mono);

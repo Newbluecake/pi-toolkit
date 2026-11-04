@@ -36,6 +36,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, inject, onBeforeUnmount, provide, ref, watch } from "vue";
 import { holdAvailable, heldRowMode, isWebSentMessage, mergeQueue, newCmdId } from "@logic/control.js";
+import { forgetXsRemote, forgetXsSeeds } from "@logic/xsRequestState.js";
 import { RESUME_DIALOG, type ResumeScope } from "@logic/resume.js";
 import { restoringKeys } from "../../logic/spawn.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -185,7 +186,13 @@ const queueItems = computed<readonly unknown[]>(() =>
 watch(
   () => hub?.state.value.removed?.has(props.agent.key) ?? false,
   (gone) => {
-    if (gone) control.value?.forgetAgent?.(props.agent.key);
+    if (gone) {
+      control.value?.forgetAgent?.(props.agent.key);
+      // fabric-xs-activation P4: the card's mention seeds AND remote-merge rows go with its
+      // original-text partition.
+      forgetXsSeeds(props.agent.key);
+      forgetXsRemote(props.agent.key);
+    }
   },
   { flush: "sync" },
 );
@@ -511,6 +518,8 @@ const dockCtlProps = computed(() => ({
   // steer-recall §7: the dock's hold gating (see the row-mode inputs above).
   holdEnabled: holdOn.value,
   holdLink: holdRowModeOf.value === "recallable" ? ("live" as const) : ("unavailable" as const),
+  // fabric-xs-activation P4: the request area's shared clock (expiry/backoff math).
+  now: props.now,
 }));
 
 // --- fleet drawer (fleet-drawer plan v2 §6.1/§6.2 — F6) --------------------------------------
