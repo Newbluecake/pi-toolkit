@@ -7,9 +7,6 @@ import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { wrapCommandApi, type CommandCapturePort } from "../../../src/commands/capture.js";
 import type { CommandRecorder, RecordHandle } from "../../../src/web-hub/agent/command-record.js";
-import { createScheduleCommand } from "../../../src/commands/schedule.js";
-import { createTask } from "../../../src/schedule/agent/ops.js";
-import { a3Env, basicRaw } from "../../schedule/agent/a3-helpers.js";
 import type { CmdRecordData } from "../../../src/web-hub/protocol/cmd-record.js";
 
 // ------------------------------------------------------------------ fakes
@@ -301,55 +298,41 @@ describe("wrapCommandApi — observe mode (TUI), five contracts (freeze F2)", ()
     expect(JSON.stringify(sinks)).not.toMatch(/SECRET|opt-a/);
   });
 
-  it("D1 regression: `/schedule approve` through the observed ui still delivers the confirm MESSAGE (definition) to the real ui", async () => {
-    const env = a3Env();
-    try {
-      const ai = await createTask(env.ports, basicRaw({ prompt: "review me: do X then Y" }), {
-        by: "agent",
-        via: "tool",
-      });
-      if (!ai.ok) throw new Error(ai.detail);
-      const cmd = createScheduleCommand({
-        enabled: () => true,
-        agent: () => env.agent,
-        ports: () => env.ports,
-        inVault: () => false,
-        now: () => env.fake.now(),
-      });
-      const { api, registerSpy } = spyApiClean();
-      const fake = fakeRecorder();
-      const pi = wrapCommandApi(
-        api,
-        () => noCapture,
-        undefined,
-        undefined,
-        () => fake.recorder,
-      );
-      pi.registerCommand("schedule", cmd);
-      const handler = (registerSpy as unknown as { mock: { calls: Array<[string, { handler: unknown }]> } }).mock
-        .calls[0]![1].handler as (args: string, ctx: ExtensionCommandContext) => Promise<unknown>;
-      const confirmCalls: unknown[][] = [];
-      const ctx = {
-        mode: "tui",
-        ui: {
-          notify: () => undefined,
-          confirm: async (...a: unknown[]) => {
-            confirmCalls.push(a);
-            return true;
-          },
+  it("D1 regression: an observed command's `ctx.ui.confirm(title, message)` still delivers the MESSAGE (2nd arg) to the real ui", async () => {
+    const { api, registerSpy } = spyApiClean();
+    const fake = fakeRecorder();
+    const pi = wrapCommandApi(
+      api,
+      () => noCapture,
+      undefined,
+      undefined,
+      () => fake.recorder,
+    );
+    // a synthetic command: formerly `/schedule approve` was the in-tree caller of the (title, message) form
+    pi.registerCommand("synthetic", {
+      description: "x",
+      handler: async (_args: string, ctx: ExtensionCommandContext) => {
+        await ctx.ui.confirm("Confirm synthetic", "full definition: do X then Y");
+      },
+    });
+    const handler = (registerSpy as unknown as { mock: { calls: Array<[string, { handler: unknown }]> } }).mock
+      .calls[0]![1].handler as (args: string, ctx: ExtensionCommandContext) => Promise<unknown>;
+    const confirmCalls: unknown[][] = [];
+    const ctx = {
+      mode: "tui",
+      ui: {
+        notify: () => undefined,
+        confirm: async (...a: unknown[]) => {
+          confirmCalls.push(a);
+          return true;
         },
-      } as unknown as ExtensionCommandContext;
-      await handler(`approve ${ai.value.id}`, ctx);
-      expect(confirmCalls).toHaveLength(1);
-      expect(confirmCalls[0]![0]).toContain(ai.value.id);
-      expect(typeof confirmCalls[0]![1]).toBe("string");
-      expect(confirmCalls[0]![1]).toContain("review me: do X then Y");
-      expect(fake.handles[0]!.sinks.filter((e) => e.kind === "interactive")).toEqual([
-        expect.objectContaining({ title: confirmCalls[0]![0], text: "confirm" }),
-      ]);
-    } finally {
-      env.cleanup();
-    }
+      },
+    } as unknown as ExtensionCommandContext;
+    await handler("", ctx);
+    expect(confirmCalls).toEqual([["Confirm synthetic", "full definition: do X then Y"]]);
+    expect(fake.handles[0]!.sinks.filter((e) => e.kind === "interactive")).toEqual([
+      expect.objectContaining({ title: "Confirm synthetic", text: "confirm" }),
+    ]);
   });
 
   it("contract 3: no webInvocation/feishuInvocation synthesized; plain ctx fields delegate", async () => {

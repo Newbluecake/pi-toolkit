@@ -58,7 +58,6 @@ import { createWebHubCommand } from "./commands/webhub.js";
 import { wireWebHub, type WebHubControl } from "./web-hub/agent/index.js";
 import { vaultPredicateOf, wireSchedule } from "./schedule/agent/wire.js";
 import { installMessageScheduler, installScheduleOrphanGuard } from "./schedule/agent/message.js";
-import type { ScheduleConfirm } from "./schedule/agent/confirm.js";
 import { wireScheduleSurface } from "./schedule/agent/surface.js";
 import { createScheduleCommand } from "./commands/schedule.js";
 import { createScheduleTool } from "./tools/schedule-tool.js";
@@ -572,9 +571,6 @@ export default function activate(rawPi: ExtensionAPI): void {
           lockedReason: () => secureGuards?.lockedReason(),
           webHub: settings.webHub.enabled && settings.webHub.control !== false,
           current: () => holder.current?.schedule,
-          // #61 C2: the confirm module lives on the surface (declared just below; this closure only
-          // runs at sched_decide / hello_ack time, long after both are initialized).
-          confirm: (): ScheduleConfirm | undefined => scheduleSurface?.confirm(),
         }),
         ...(scheduleMessage !== undefined ? { message: scheduleMessage } : {}),
       }
@@ -597,7 +593,6 @@ export default function activate(rawPi: ExtensionAPI): void {
       createScheduleTool({
         agent: () => holder.current?.schedule,
         ports: (agent, ctx) => scheduleSurface.opsPorts(agent, ctx),
-        confirm: () => scheduleSurface.confirm(),
       }),
     );
     pi.registerCommand(
@@ -606,7 +601,6 @@ export default function activate(rawPi: ExtensionAPI): void {
         enabled: () => settings.schedule.enabled,
         agent: () => holder.current?.schedule,
         ports: (agent, ctx) => scheduleSurface.opsPorts(agent, ctx),
-        confirm: () => scheduleSurface.confirm(),
         inVault: vaultPredicateOf(secureDomain),
         // `/schedule repair` is the local-only escape for a stuck dispatcher when fabric/xs (and its
         // `/fabric fence reset`) is not enabled; web policy keeps `repair` denied (frozen S0 table).

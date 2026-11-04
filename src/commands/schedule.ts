@@ -4,10 +4,7 @@ import { isFeishuInvocation, isWebInvocation } from "./capture.js";
 import { actionRefusal } from "../schedule/agent/mode.js";
 import {
   createTask,
-  defOf,
   deleteTask,
-  previewHash,
-  resolveDef,
   setTaskEnabled,
   updateTask,
   type OpFail,
@@ -18,86 +15,53 @@ import {
 } from "../schedule/agent/ops.js";
 import { runLine, taskDetail, taskLine } from "../schedule/agent/view.js";
 import type { ScheduleAgent } from "../schedule/agent/wire.js";
-import type { ScheduleConfirm } from "../schedule/agent/confirm.js";
-import { approveTask } from "../schedule/core/claim.js";
 import { nextOccurrence } from "../schedule/core/cron.js";
 import { compileTask } from "../schedule/core/occurrence.js";
 import { resolveStoreRoot, SchedFsError, type InVaultPredicate, type StoreRoot } from "../schedule/core/paths.js";
 import { listSessionDirs, readSessionState } from "../schedule/core/reader.js";
-import { defHash, isApproved, isExecutable, type ScheduleStateFile, type ScheduleTask } from "../schedule/core/spec.js";
+import { defHash, isExecutable, type ScheduleStateFile, type ScheduleTask } from "../schedule/core/spec.js";
 import { openSessionStore, type SessionStore } from "../schedule/core/writer.js";
-import { SCHED_HASH_RE, SCHED_TASK_ID_RE } from "../web-hub/protocol/schedule.js";
+import { SCHED_TASK_ID_RE } from "../web-hub/protocol/schedule.js";
 
 /**
  * `/schedule` — the user's surface for scheduled tasks (scheduled-reports plan r3 §5.2).
  *
  *   /schedule [list] [--all]            list (this session / every session)
- *   /schedule add <name> --cron "<expr>"|--at <YYYY-MM-DDTHH:mm> [flags] -- <prompt>   create (= approved)
- *   /schedule edit <id> [flags] [-- <prompt>]                    edit (never approves a pending task)
+ *   /schedule add <name> --cron "<expr>"|--at <YYYY-MM-DDTHH:mm> [flags] -- <prompt>   create (takes effect at once)
+ *   /schedule edit <id> [flags] [-- <prompt>]                    edit (takes effect at once)
  *   /schedule show <id> [--all] · log [<id>] [--all]            definition + hash · run history
- *   /schedule approve <id> [<hash>] [--all]   review (full definition + hash) → confirm → CAS on that hash
- *   /schedule reject <id> [<hash>]            undo the AI's unconfirmed change (new task ⇒ delete; edit ⇒ restore the old definition); only while a confirm offer is live
- *   /schedule pause|resume|rm <id> [--all]    (resume never approves)
+ *   /schedule pause|resume|rm <id> [--all]
  *   /schedule run <id>                         immediate run (this session only)
  *   /schedule repair                           quarantine a corrupt ledger; local-only: also resets the dispatcher blockers
- *   /schedule __put <json> <hash>              web review form (frozen contract below)
  *
  * Flags: --name --cron --at --tz --form background|message --feishu/--no-feishu --type --model
  * --thinking --timeout <s> --handoff/--no-handoff --worktree/--no-worktree.
  * (`--consult` was removed with the consult feature: it errors; `--no-consult` is accepted and ignored.)
  *
  * `--all` (any local TUI session manages other sessions' tasks under their ledger lock): list/show/log/
- * pause/resume/rm/approve allowed; edit and run are refused (changes belong in the owning session,
+ * pause/resume/rm allowed; edit and run are refused (changes belong in the owning session,
  * execution only ever happens there). Feishu-marked invocations may not mutate (defence in depth —
  * the hub's Feishu admission never forwards command ops). Web policy lives in
  * `src/web-hub/agent/command-policy.ts` (`schedulePolicy`).
- *
- * `__put` contract (frozen here; the review UI binds to it):
- *   /schedule __put <json> <64-hex hash>
- *   json = { id?, baseHash?, name, form, when:{kind:"cron",expr,tz}|{kind:"once",at,tz}, prompt, feishu?, bg? }
- *   id absent ⇒ create; id present ⇒ edit and `baseHash` (the defHash the form was loaded from) is REQUIRED
- *   — a mismatch with the current definition is E_REV. The trailing hash is the defHash of the definition
- *   that will be stored (for a create the cwd is this session's). An all-zero hash is a PREVIEW (nothing is
- *   written; the reply's first line is `PREVIEW defHash=<hash>`), which is how a browser without sha256
- *   obtains the hash to bind. A non-zero hash that does not match ⇒ E_REV, nothing written. A successful
- *   `__put` is a REVIEWED write: create is approved and an edit approves the stored definition.
- *   Replies: `OK <id> defHash=<hash>` | `PREVIEW …` | `E_CODE: detail`.
  */
 
 export const SCHEDULE_COMMAND_DESCRIPTION =
-  "定时任务：/schedule [list] · add · edit · show · log · approve · pause|resume|rm · run · repair（--all 管理其他会话）";
+  "定时任务：/schedule [list] · add · edit · show · log · pause|resume|rm · run · repair（--all 管理其他会话）";
 
-const SUBS = [
-  "list",
-  "add",
-  "edit",
-  "show",
-  "log",
-  "approve",
-  "reject",
-  "pause",
-  "resume",
-  "rm",
-  "run",
-  "repair",
-] as const;
+const SUBS = ["list", "add", "edit", "show", "log", "pause", "resume", "rm", "run", "repair"] as const;
 const READ_SUBS = new Set(["list", "show", "log"]);
-const FEISHU_REFUSED = new Set(["add", "edit", "approve", "reject", "pause", "resume", "rm", "run", "repair", "__put"]);
+const FEISHU_REFUSED = new Set(["add", "edit", "pause", "resume", "rm", "run", "repair"]);
 const FEISHU_REFUSAL = "飞书入口不能修改定时任务，请在终端或 web 执行";
-const ZERO_HASH = "0".repeat(64);
-const PUT_KEYS = new Set(["id", "baseHash", "name", "form", "when", "prompt", "feishu", "bg"]);
 const ONCE_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 
 const USAGE = [
   "/schedule [list] [--all] — 列出任务",
   '/schedule add <名称> --cron "0 8 * * *" | --at 2026-12-01T09:00 [--tz Asia/Shanghai] [--form background|message] [--feishu|--no-feishu] [--type T] [--model p/id] [--thinking low] [--timeout 1800] [--handoff] [--worktree] -- <prompt>',
-  "/schedule edit <id> [同上参数] [-- <prompt>] — 修改（待确认的任务不会因编辑而被批准）",
+  "/schedule edit <id> [同上参数] [-- <prompt>] — 修改（立即生效）",
   "/schedule show <id> · log [<id>] — 完整定义与 hash · 运行历史（可加 --all）",
-  "/schedule approve <id> [<hash>] — 审阅完整定义后批准（绑定 hash）",
-  "/schedule reject <id> [<hash>] — 撤销 AI 未确认的改动（新建 ⇒ 删除；修改 ⇒ 恢复修改前的定义）；仅在有待确认请求时可用",
-  "/schedule pause|resume|rm <id> — 暂停 / 恢复（恢复不等于批准）/ 删除",
+  "/schedule pause|resume|rm <id> — 暂停 / 恢复 / 删除",
   "/schedule run <id> — 立即运行（仅本会话）；/schedule repair — 修复损坏的账本，并重置调度器栅栏阻塞（仅本地）",
-  "--all：管理其他会话的任务（list/show/log/pause/resume/rm/approve；edit、run 不可用）",
+  "--all：管理其他会话的任务（list/show/log/pause/resume/rm；edit、run 不可用）",
 ].join("\n");
 
 export interface ScheduleCommandDeps {
@@ -105,8 +69,6 @@ export interface ScheduleCommandDeps {
   enabled(): boolean;
   agent(): ScheduleAgent | undefined;
   ports(agent: ScheduleAgent, ctx: ExtensionCommandContext): OpsPorts;
-  /** The current session's confirm module (#61); undefined ⇒ `reject` has nothing to undo. */
-  confirm?(): ScheduleConfirm | undefined;
   /** Vault predicate (literal + canonical) for opening other sessions' ledgers. */
   inVault: InVaultPredicate;
   /** I1: local human reset of the message dispatcher's fence windows / ui-prompt balance (`/schedule repair`). */
@@ -323,66 +285,6 @@ function locateAll(agent: ScheduleAgent, deps: ScheduleCommandDeps, id: string):
   };
 }
 
-// ----------------------------------------------------------------- review → approve
-
-async function approveFlow(
-  ctx: ExtensionCommandContext,
-  store: SessionStore,
-  id: string,
-  given: string | undefined,
-  via: "tui" | "web",
-): Promise<{ text: string; level: "info" | "warning" | "error"; changed: boolean }> {
-  const snap = store.read();
-  if (snap.kind !== "ok")
-    return { text: "E_DEGRADED: 账本不可读，请先 /schedule repair", level: "error", changed: false };
-  const task = snap.state.tasks.find((t) => t.id === id);
-  if (task === undefined) return { text: `E_INVALID: 没有任务 ${id}`, level: "error", changed: false };
-  if (isApproved(task)) return { text: `任务 ${id} 已是批准状态。`, level: "info", changed: false };
-  // Sample the hash BEFORE any dialog: the CAS below binds exactly what the reviewer saw (§4.3).
-  const hash = defHash(task);
-  if (given !== undefined) {
-    if (given !== hash)
-      return {
-        text: "E_REV: 任务定义已变更，hash 不符；请重新审阅（/schedule show）",
-        level: "warning",
-        changed: false,
-      };
-  } else {
-    let ok = false;
-    try {
-      ok =
-        (await ctx.ui.confirm(
-          `批准定时任务 ${id}？`,
-          [...taskDetail(task, snap.state.occ[id]), "", "批准后它将按上述定义自动运行（仅在归属会话打开时）。"].join(
-            "\n",
-          ),
-        )) === true;
-    } catch {
-      ok = false;
-    }
-    if (!ok) return { text: "已取消，任务保持待确认。", level: "info", changed: false };
-  }
-  const res = await approveTask(store, id, hash, via);
-  if (res.kind === "changed")
-    return {
-      text: `已批准 ${id}（hash ${hash.slice(0, 8)}）${res.task.enabled ? "" : "；任务处于暂停状态，/schedule resume 后生效"}。`,
-      level: "info",
-      changed: true,
-    };
-  if (res.kind === "refused")
-    return {
-      text:
-        res.code === "E_REV"
-          ? "E_REV: 审阅期间任务定义已变更，未批准；请重新审阅"
-          : res.detail === "already-approved"
-            ? `任务 ${id} 已是批准状态（可能刚在其他入口批准）。`
-            : `${res.code}: ${res.detail ?? ""}`,
-      level: "warning",
-      changed: false,
-    };
-  return { text: `${res.code}: ${res.detail}`, level: "error", changed: false };
-}
-
 // ----------------------------------------------------------------- command
 
 export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
@@ -416,7 +318,6 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
         return;
       }
       try {
-        if (sub === "__put") return void (await put(ctx, agent, text.slice("__put".length).trim()));
         const { head, prompt } = splitPrompt(rest);
         const tokens = tokenizeScheduleArgs(head);
         const parsed = parseFlags(tokens);
@@ -450,10 +351,6 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
             return void (await add(ctx, agent, pos, parsed, prompt));
           case "edit":
             return void (await edit(ctx, agent, pos, parsed, prompt));
-          case "approve":
-            return void (await approve(ctx, agent, pos, all));
-          case "reject":
-            return void (await reject(ctx, agent, pos, all));
           case "pause":
           case "resume":
           case "rm":
@@ -598,7 +495,7 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
     if (!res.ok) return void notify(ctx, failText(res), "error");
     notify(
       ctx,
-      `已创建并批准 ${res.value.id} "${res.value.name}"（hash ${defHash(res.value).slice(0, 8)}）。仅在本会话打开时运行。`,
+      `已创建并启用 ${res.value.id} "${res.value.name}"（hash ${defHash(res.value).slice(0, 8)}）。仅在本会话打开时运行。`,
     );
   }
 
@@ -614,108 +511,9 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
     const built = flagsToRaw(parsed, prompt, undefined);
     if ("error" in built) return void notify(ctx, `${built.error}\n${USAGE}`, "warning");
     if (Object.keys(built).length === 0) return void notify(ctx, "没有要修改的内容。", "warning");
-    const res = await updateTask(deps.ports(agent, ctx), id, built, originOf(ctx));
+    const res = await updateTask(deps.ports(agent, ctx), id, built);
     if (!res.ok) return void notify(ctx, failText(res), "error");
-    notify(
-      ctx,
-      isApproved(res.value)
-        ? `已修改 ${id}（已重新批准，hash ${defHash(res.value).slice(0, 8)}）。`
-        : `已修改 ${id}，但任务仍待确认：审阅后执行 /schedule approve ${id}。`,
-      isApproved(res.value) ? "info" : "warning",
-    );
-  }
-
-  async function approve(
-    ctx: ExtensionCommandContext,
-    agent: ScheduleAgent,
-    pos: string[],
-    all: boolean,
-  ): Promise<void> {
-    const id = pos[0];
-    const given = pos[1];
-    if (id === undefined || pos.length > 2)
-      return void notify(ctx, "用法：/schedule approve <id> [<hash>] [--all]", "warning");
-    if (given !== undefined && !SCHED_HASH_RE.test(given))
-      return void notify(ctx, "E_INVALID: hash 应为 64 位十六进制（来自审阅界面）", "warning");
-    let store: SessionStore;
-    let own = true;
-    if (all) {
-      const l = locateAll(agent, deps, id);
-      if (!l.ok) return void notify(ctx, l.text, "error");
-      store = l.store;
-      own = l.sessionId === agent.sessionId; // a foreign process's in-memory queue is out of reach (ledger half only)
-    } else {
-      const g = agent.gate();
-      if (g !== undefined) return void notify(ctx, `${g.code}: ${g.detail}`, "error");
-      const s = agent.store();
-      if (s === undefined) return void notify(ctx, `E_INVALID: 本会话没有任务 ${id}`, "error");
-      store = s;
-    }
-    const r = await approveFlow(ctx, store, id, given, isWebInvocation(ctx) ? "web" : "tui");
-    if (r.changed) agent.changed();
-    notify(ctx, r.text, r.level);
-  }
-
-  /** #61: undo the AI's unconfirmed change — only while a confirm offer is live (it carries the rollback baseline). */
-  async function reject(
-    ctx: ExtensionCommandContext,
-    agent: ScheduleAgent,
-    pos: string[],
-    all: boolean,
-  ): Promise<void> {
-    const id = pos[0];
-    const given = pos[1];
-    if (all) return void notify(ctx, "reject 不支持 --all：请在归属会话里操作。", "warning");
-    if (id === undefined || pos.length > 2) return void notify(ctx, "用法：/schedule reject <id> [<hash>]", "warning");
-    if (given !== undefined && !SCHED_HASH_RE.test(given))
-      return void notify(ctx, "E_INVALID: hash 应为 64 位十六进制（来自审阅界面）", "warning");
-    const g = agent.gate();
-    if (g !== undefined) return void notify(ctx, `${g.code}: ${g.detail}`, "error");
-    const confirm = deps.confirm?.();
-    // Sample BEFORE any dialog: the decision binds exactly what the reviewer saw (§4.3).
-    const live = confirm?.liveOffer(id);
-    if (confirm === undefined || live === undefined)
-      return void notify(ctx, "E_INVALID: 没有待确认的 AI 改动（可用 /schedule rm 删除）", "warning");
-    if (given !== undefined && given !== live.defHash)
-      return void notify(ctx, "E_REV: 任务定义已变更，hash 不符；请重新审阅（/schedule show）", "warning");
-    const hash = live.defHash;
-    if (given === undefined) {
-      let ok = false;
-      try {
-        const task = ownState(agent).state?.tasks.find((t) => t.id === id);
-        ok =
-          (await ctx.ui.confirm(
-            `拒绝定时任务 ${id}？`,
-            [
-              ...(task === undefined ? [] : taskDetail(task)),
-              "",
-              live.kind === "create" ? "拒绝将删除该任务。" : "拒绝将恢复到 AI 修改之前的定义。",
-            ].join("\n"),
-          )) === true;
-      } catch {
-        ok = false;
-      }
-      if (!ok) return void notify(ctx, "已取消，任务保持待确认。", "info");
-    }
-    const res = await confirm.decide({
-      taskId: id,
-      defHash: hash,
-      decision: "reject",
-      via: isWebInvocation(ctx) ? "web" : "tui",
-      offerId: live.offerId,
-    });
-    if (res.kind === "rejected")
-      return void notify(ctx, res.removed ? `已拒绝并删除 ${id}。` : `已拒绝：${id} 已恢复到修改前的定义。`);
-    if (res.kind === "approved") return void notify(ctx, `已批准 ${id}。`);
-    notify(
-      ctx,
-      res.code === "E_REV"
-        ? "E_REV: 审阅期间任务定义已变更，未拒绝；请重新审阅"
-        : res.code === "already-approved"
-          ? `任务 ${id} 已是批准状态，无需拒绝（可用 /schedule rm 删除）。`
-          : `${res.code}: ${res.detail}`,
-      "warning",
-    );
+    notify(ctx, `已修改 ${id}（hash ${defHash(res.value).slice(0, 8)}），立即生效。`);
   }
 
   function revokeOpts(agent: ScheduleAgent, ctx: ExtensionCommandContext, own: boolean): RevokeOpts {
@@ -755,27 +553,14 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
     const r = await setTaskEnabled(store, id, sub === "resume", revokeOpts(agent, ctx, own));
     if (!r.ok) return void notify(ctx, failText(r), "error");
     agent.changed();
-    notify(
-      ctx,
-      sub === "pause"
-        ? `已暂停 ${id}。`
-        : isApproved(r.value)
-          ? `已恢复 ${id}。`
-          : `已恢复 ${id}，但任务仍待确认（恢复不等于批准）：/schedule approve ${id}。`,
-      sub === "resume" && !isApproved(r.value) ? "warning" : "info",
-    );
+    notify(ctx, sub === "pause" ? `已暂停 ${id}。` : `已恢复 ${id}。`);
   }
 
   async function run(ctx: ExtensionCommandContext, agent: ScheduleAgent, id: string | undefined): Promise<void> {
     if (id === undefined || !SCHED_TASK_ID_RE.test(id)) return void notify(ctx, "用法：/schedule run <id>", "warning");
     const r = await agent.runNow({ taskId: id, reqId: randomBytes(12).toString("base64url") });
     if (r.kind === "refused") {
-      const hint =
-        r.code === "E_UNAPPROVED"
-          ? "（任务待确认：/schedule approve " + id + "）"
-          : r.code === "E_OVERLAP"
-            ? "（该任务已有运行在进行）"
-            : "";
+      const hint = r.code === "E_OVERLAP" ? "（该任务已有运行在进行）" : "";
       return void notify(ctx, `${r.code}: ${r.detail ?? "已拒绝"}${hint}`, "warning");
     }
     notify(ctx, `已开始运行 ${r.runKey}；结果会作为消息出现在本会话。`);
@@ -809,72 +594,5 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
         : "没有需要隔离的内容。",
       "warning",
     );
-  }
-
-  // ------------------------------------------------------------- __put (web review form)
-
-  async function put(ctx: ExtensionCommandContext, agent: ScheduleAgent, rest: string): Promise<void> {
-    const m = /^([\s\S]*\S)\s+([0-9a-f]{64})$/.exec(rest);
-    if (m === null) return void notify(ctx, "E_INVALID: 用法 /schedule __put <json> <64位hash>", "error");
-    let body: unknown;
-    try {
-      body = JSON.parse(m[1]!);
-    } catch {
-      return void notify(ctx, "E_INVALID: json 无法解析", "error");
-    }
-    if (typeof body !== "object" || body === null || Array.isArray(body))
-      return void notify(ctx, "E_INVALID: json 须是对象", "error");
-    const rec = body as Record<string, unknown>;
-    const badKey = Object.keys(rec).find((k) => !PUT_KEYS.has(k));
-    if (badKey !== undefined) return void notify(ctx, `E_INVALID: 未知字段 ${badKey}`, "error");
-    const hash = m[2]!;
-    const refusal = actionRefusal(agent.mode, "create");
-    if (refusal !== undefined) return void notify(ctx, `${refusal.code}: ${refusal.detail}`, "error");
-    const ports = deps.ports(agent, ctx);
-    const raw: RawFields = {
-      ...(rec.name !== undefined ? { name: rec.name } : {}),
-      ...(rec.form !== undefined ? { form: rec.form } : {}),
-      ...(rec.when !== undefined ? { when: rec.when } : {}),
-      ...(rec.prompt !== undefined ? { prompt: rec.prompt } : {}),
-      ...(rec.feishu !== undefined ? { feishu: rec.feishu } : {}),
-      ...(rec.bg !== undefined ? { bg: rec.bg } : {}),
-    };
-    const origin = originOf(ctx);
-    const id = rec.id;
-    if (id !== undefined) {
-      if (typeof id !== "string" || !SCHED_TASK_ID_RE.test(id)) return void notify(ctx, "E_INVALID: id 无效", "error");
-      if (typeof rec.baseHash !== "string" || !SCHED_HASH_RE.test(rec.baseHash))
-        return void notify(ctx, "E_INVALID: 编辑必须带 baseHash（表单加载时的定义 hash）", "error");
-    } else if (rec.baseHash !== undefined) return void notify(ctx, "E_INVALID: 创建不能带 baseHash", "error");
-
-    if (hash === ZERO_HASH) {
-      // PREVIEW: compute the hash the dialog must bind; nothing is written.
-      let ownerCwd = ports.ownerCwd();
-      let base;
-      if (id !== undefined) {
-        const t = ownState(agent).state?.tasks.find((x) => x.id === id);
-        if (t === undefined) return void notify(ctx, `E_INVALID: 没有任务 ${id}`, "error");
-        if (defHash(t) !== rec.baseHash) return void notify(ctx, "E_REV: 任务已变更，请重新载入后再审阅", "warning");
-        ownerCwd = t.ownerCwd;
-        base = defOf(t);
-      }
-      const def = resolveDef(raw, base, ports);
-      if (!def.ok) return void notify(ctx, failText(def), "error");
-      const h = previewHash(def.value, ownerCwd);
-      return void notify(
-        ctx,
-        [`PREVIEW defHash=${h}`, `${def.value.name} · ${def.value.form}`, `prompt: ${def.value.prompt}`].join("\n"),
-      );
-    }
-    const res =
-      id === undefined
-        ? await createTask(ports, raw, origin, { expectHash: hash })
-        : await updateTask(ports, id, raw, origin, {
-            baseHash: rec.baseHash as string,
-            expectHash: hash,
-            approveReviewed: true,
-          });
-    if (!res.ok) return void notify(ctx, failText(res), res.code === "E_REV" ? "warning" : "error");
-    notify(ctx, `OK ${res.value.id} defHash=${defHash(res.value)}`);
   }
 }

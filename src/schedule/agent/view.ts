@@ -8,7 +8,6 @@ import { compileWhen, formatLocal } from "../core/cron.js";
 import { absoluteReportPath, type ReportLocation } from "./result-reference.js";
 import {
   defHash,
-  isApproved,
   isTerminalRunState,
   type OccState,
   type RunRecord,
@@ -26,10 +25,9 @@ export function localTime(when: ScheduleWhen, t: number): string {
   return c.ok ? `${formatLocal(c.when, t)} ${when.tz}` : new Date(t).toISOString();
 }
 
-/** UI-derived flags: pending approval and paused are independent (§4.3). */
+/** UI-derived flags: only `paused` (approval was removed — schedule-auto-approve r2). */
 export function taskFlags(task: ScheduleTask): string[] {
   const out: string[] = [];
-  if (!isApproved(task)) out.push("pending");
   if (!task.enabled) out.push("paused");
   return out;
 }
@@ -65,9 +63,6 @@ export function taskDetail(task: ScheduleTask, occ?: OccState, manual?: number):
     );
   }
   lines.push(
-    `approval: ${
-      isApproved(task) ? `approved (${task.approval?.via ?? "?"})` : "PENDING — needs the user's /schedule approve"
-    }`,
     `defHash: ${hash}`,
     `created: ${task.createdBy} via ${task.createdVia}`,
     "prompt:",

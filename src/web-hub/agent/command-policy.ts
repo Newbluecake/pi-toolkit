@@ -135,29 +135,18 @@ const FABRIC_KNOWN_SUBS: ReadonlySet<string> = new Set([
   "alias", // alias-plan §3.5/§7 (AL4): get/set/clear/take preview+exec; baseline allow, governed by `webCommandPolicy.fabric`
 ]);
 
-/** scheduled-reports plan r3 §5.2: sha256 full-hex shape of a defHash (mirror of protocol/schedule.ts's
- * SCHED_HASH_RE — parity pinned by tests/web-hub/protocol/schedule-policy.test.ts). */
-const SCHEDULE_HASH_RE = /^[0-9a-f]{64}$/;
-
 /**
  * `/schedule` web sub-command table (scheduled-reports plan r3 §5.2 「web」 column). Exported for
  * tests only — callers go through `resolveCommandPolicy`. The whole-name override
  * `webHub.webCommandPolicy.schedule` still wins outright (resolveCommandPolicy).
  *   - list / show / log (bare = list; `--all` read forms too) → allow
  *   - pause / resume / rm / run → confirm (generic confirm = anti-misclick only); any `--all` → deny
- *   - approve <id> <64-hex hash> → allow (the hash only comes from the review dialog); bare
- *     approve, wrong arity, non-hash or `--all` → deny
- *   - __put <json…> <64-hex hash> → allow (the panel review form; the JSON may contain spaces, so
- *     only the LAST token is checked as the hash); without a trailing hash → deny
- *   - reject <id> <64-hex hash> → same shape/rule as approve (#61: discards the AI's unconfirmed change)
+ *   - approve / reject / __put were removed with the approval concept (schedule-auto-approve r2): they
+ *     fall to `default: deny`, so a stale browser tab's old calls never execute
  *   - add / edit / repair / anything else → deny
  */
 export function schedulePolicy(tokens: readonly string[]): PolicyDecision {
   const sub = tokens[0] ?? "list";
-  if (sub === "__put") {
-    const hash = tokens.length >= 3 ? tokens[tokens.length - 1] : undefined;
-    return { policy: hash !== undefined && SCHEDULE_HASH_RE.test(hash) ? "allow" : "deny" };
-  }
   const all = tokens.includes("--all");
   switch (sub) {
     case "list":
@@ -169,13 +158,6 @@ export function schedulePolicy(tokens: readonly string[]): PolicyDecision {
     case "rm":
     case "run":
       return { policy: all ? "deny" : "confirm" };
-    case "approve":
-    case "reject": {
-      const hash = tokens[2];
-      return {
-        policy: !all && tokens.length === 3 && hash !== undefined && SCHEDULE_HASH_RE.test(hash) ? "allow" : "deny",
-      };
-    }
     default:
       return { policy: "deny" };
   }

@@ -47,7 +47,6 @@ import {
   autoRunKey,
   defHash,
   isExecutable,
-  isApproved,
   manualRunKey,
   SCHED_COUNT_CAP,
   SCHED_FIRE_TOLERANCE_MS,
@@ -61,15 +60,7 @@ import {
   type ScheduleTask,
 } from "./spec.js";
 import { SCHED_REQ_ID_RE } from "../../web-hub/protocol/schedule.js";
-import {
-  finishRun,
-  findRun,
-  liveManualReqCount,
-  nonTerminalRuns,
-  removeTask,
-  type SessionStore,
-  type TxResult,
-} from "./writer.js";
+import { finishRun, findRun, liveManualReqCount, nonTerminalRuns, type SessionStore, type TxResult } from "./writer.js";
 
 /** In-lock execution gate (`assertExecutable`, §7.6): mode matrix, owner sid, secure domain, epoch alive. */
 export type ClaimGate = () => { code: ScheduleErrorCode; detail?: string } | undefined;
@@ -242,7 +233,7 @@ export interface ManualClaimInput {
   taskId: string;
   /** Web cmdId / Feishu deterministic cmdId / local random id (SCHED_REQ_ID_RE). */
   reqId: string;
-  /** Required from web / Feishu callers: must equal the current definition AND approval hash. */
+  /** Required from web / Feishu callers: must equal the current definition hash. */
   defHash?: string;
   holder: Holder;
   gate?: ClaimGate;
@@ -278,7 +269,6 @@ export async function manualClaim(store: SessionStore, input: ManualClaimInput):
     };
     const task = draft.tasks.find((t) => t.id === input.taskId);
     if (task === undefined) return refuse("E_INVALID");
-    if (!isApproved(task)) return refuse("E_UNAPPROVED");
     if (!task.enabled) return refuse("E_INVALID");
     const hash = defHash(task);
     if (input.defHash !== undefined && input.defHash !== hash) return refuse("E_REV");
@@ -366,10 +356,8 @@ export type TaskChange =
 
 /**
  * Mutate one task under §4.4's rule: FIRST sweep the OLD definition (cut = now − tol), THEN apply
- * `mutate`; if the definition hash changed — or the task just became executable (resume /
- * approval) — the watermark jumps to `now` (`voidUntil`): the old definition's future occurrences
- * and anything owed while paused/unapproved are void, never missed. `mutate` may refuse.
- * Approval is NEVER touched here: an execution-field edit invalidates it by construction (S2).
+ * `mutate`; if the definition hash changed — or the task just became executable (resume) — the watermark jumps to `now` (`voidUntil`): the old definition's future occurrences
+ * and anything owed while paused are void, never missed. `mutate` may refuse.
  */
 export async function changeTask(
   store: SessionStore,
@@ -425,69 +413,3 @@ export async function changeTask(
 
 /** Sweep rounds `changeTask` may spend settling the old definition (each ≤ 64 × 10 000). */
 export const CHANGE_BACKLOG_ROUNDS = 4;
-
-/**
- * `/schedule approve <id>` / web review / confirm decide (§4.3): CAS on the hash the reviewer SAW
- * (sampled before the confirm dialog). Mismatch ⇒ `E_REV` (re-review). Only user surfaces call this.
- * Idempotent (#61 r2): an already-approved task refuses `E_INVALID "already-approved"` INSIDE the
- * lock, so concurrent approvals of the same hash (TUI / web / Feishu / `--all`) produce exactly one
- * `changed`; the losers learn they lost.
- */
-export function approveTask(
-  store: SessionStore,
-  taskId: string,
-  reviewedHash: string,
-  via: "tui" | "web",
-): Promise<TaskChange> {
-  return changeTask(store, taskId, (task, now) => {
-    if (isApproved(task)) return { refuse: "E_INVALID", detail: "already-approved" };
-    if (defHash(task) !== reviewedHash) return { refuse: "E_REV", detail: "definition changed since review" };
-    task.approval = { hash: reviewedHash, by: "user", via, at: now };
-    return undefined;
-  });
-}
-
-/** The execution fields a rejection restores (never `name`: it is outside `defHash`, so rolling it back would only undo the user's manual rename). */
-export type RejectRevertTo = Pick<ScheduleTask, "form" | "when" | "prompt" | "feishu" | "bg">;
-
-/**
- * Reject = undo the AI's unconfirmed change (#61). `revertTo` absent ⇒ the task was AI-created: delete it
- * (one transaction; the caller revokes queued runs afterwards); present ⇒ restore the pre-change
- * execution definition — `approval` is untouched, so a previously approved definition is approved again
- * by construction (defHash equality) and a pending one stays pending. Same CAS as `approveTask`:
- * missing ⇒ `no-task`, approved ⇒ `already-approved`, hash differs ⇒ `E_REV`.
- */
-export async function rejectTask(
-  store: SessionStore,
-  taskId: string,
-  reviewedHash: string,
-  revertTo?: RejectRevertTo,
-): Promise<TaskChange | { kind: "removed" }> {
-  if (revertTo === undefined) {
-    const r = await store.transact<TaskChange | { kind: "removed" }>((draft) => {
-      const task = draft.tasks.find((t) => t.id === taskId);
-      if (task === undefined) return { value: { kind: "refused", code: "E_INVALID", detail: "no-task" }, write: false };
-      if (isApproved(task))
-        return { value: { kind: "refused", code: "E_INVALID", detail: "already-approved" }, write: false };
-      if (defHash(task) !== reviewedHash)
-        return {
-          value: { kind: "refused", code: "E_REV", detail: "definition changed since review" },
-          write: false,
-        };
-      removeTask(draft, taskId);
-      return { value: { kind: "removed" }, write: true };
-    });
-    return toError(r);
-  }
-  return changeTask(store, taskId, (task) => {
-    if (isApproved(task)) return { refuse: "E_INVALID", detail: "already-approved" };
-    if (defHash(task) !== reviewedHash) return { refuse: "E_REV", detail: "definition changed since review" };
-    task.form = revertTo.form;
-    task.when = structuredClone(revertTo.when);
-    task.prompt = revertTo.prompt;
-    task.feishu = revertTo.feishu;
-    if (revertTo.bg === undefined) delete task.bg;
-    else task.bg = structuredClone(revertTo.bg);
-    return undefined;
-  });
-}

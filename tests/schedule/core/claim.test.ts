@@ -3,17 +3,10 @@
  * overlap / ineligible), D13 coalescing, cross-process pause, rev-conflict retry, manual claim
  * (non-cron minute, watermark untouched, idempotent reqId, stale defHash, mutual exclusion with
  * auto), sweep with the tolerance cut-off (R2-3 races, supplemental sweep, once), missedLog with
- * exact numbers (R2-2), chunking and truncation, and approval semantics (S2).
+ * exact numbers (R2-2), chunking and truncation, and execution gate (executable ⇔ enabled; no approval).
  */
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  approveTask,
-  autoClaim,
-  changeTask,
-  manualClaim,
-  rejectTask,
-  sweep,
-} from "../../../src/schedule/core/claim.js";
+import { autoClaim, changeTask, manualClaim, sweep } from "../../../src/schedule/core/claim.js";
 import { applySweep, planSweep, voidUntil } from "../../../src/schedule/core/occurrence.js";
 import {
   defHash,
@@ -135,7 +128,7 @@ describe("auto claim — four outcomes", () => {
     expect(s.occ[t.id]).toMatchObject({ firedTotal: 2, skippedTotal: 1 });
   });
 
-  it("ineligible cases write nothing: armed after T, not an occurrence, paused, unapproved, gate", async () => {
+  it("ineligible cases write nothing: armed after T, not an occurrence, paused, gate", async () => {
     const t = approve(makeTask());
     const store = await setup(t);
     E.clock.t = T8 + 1_000;
@@ -233,7 +226,7 @@ describe("manual claim (§4.5b)", () => {
     expect(readOk(store).manualTotal[t.id]).toBe(1);
   });
 
-  it("stale defHash ⇒ E_REV; unapproved ⇒ E_UNAPPROVED; gate ⇒ its code", async () => {
+  it("stale defHash ⇒ E_REV; gate ⇒ its code; a task that never had an approval just runs", async () => {
     const t = approve(makeTask());
     const store = await setup(t);
     const stale = "0".repeat(64);
@@ -250,10 +243,16 @@ describe("manual claim (§4.5b)", () => {
         gate: () => ({ code: "E_NOT_OWNER" }),
       }),
     ).toMatchObject({ code: "E_NOT_OWNER" });
-    const u = makeTask(); // never approved
+    const u = makeTask(); // never approved — approval no longer exists, so it runs
     await addTask(store, u, E.clock.t);
     expect(await manualClaim(store, { taskId: u.id, reqId: "req-ffffffffffffffff", holder: holder() })).toMatchObject({
-      code: "E_UNAPPROVED",
+      kind: "started",
+    });
+    // a paused task is refused (the only gate left)
+    const p = makeTask({ enabled: false });
+    await addTask(store, p, E.clock.t);
+    expect(await manualClaim(store, { taskId: p.id, reqId: "req-pppppppppppppppp", holder: holder() })).toMatchObject({
+      code: "E_INVALID",
     });
   });
 
@@ -275,41 +274,72 @@ describe("manual claim (§4.5b)", () => {
   });
 });
 
-describe("approval semantics (S2, §4.3)", () => {
-  it("an AI-created task (no approval) can neither run_now nor fire after resume", async () => {
+describe("no approval (schedule-auto-approve r2)", () => {
+  it("an AI-created task (no approval) can run_now and fires on schedule", async () => {
     const t = makeTask({ createdBy: "agent", createdVia: "tool" });
     const store = await setup(t);
-    expect(await manualClaim(store, { taskId: t.id, reqId: "req-iiiiiiiiiiiiiiii", holder: holder() })).toMatchObject({
-      code: "E_UNAPPROVED",
-    });
+    expect(t.approval).toBeUndefined();
     E.clock.t = T8 + 1_000;
-    expect(await autoClaim(store, { taskId: t.id, t: T8, armedSince: 0, holder: holder() })).toMatchObject({
-      reason: "not-executable",
-    });
+    expect((await autoClaim(store, { taskId: t.id, t: T8, armedSince: 0, holder: holder() })).kind).toBe("fired");
   });
 
-  it("pause → AI edits the prompt → resume: the approval no longer binds, the task stays inert", async () => {
+  it("a legacy stale approval (hash no longer binds) does not block run_now or the timer", async () => {
+    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
+    t.approval = { hash: "0".repeat(64), by: "user", via: "tui", at: 1 };
+    const store = await setup(t);
+    expect(await manualClaim(store, { taskId: t.id, reqId: "req-iiiiiiiiiiiiiiii", holder: holder() })).toMatchObject({
+      kind: "started",
+    });
+    expect(readOk(store).tasks[0]!.approval).toEqual({ hash: "0".repeat(64), by: "user", via: "tui", at: 1 });
+  });
+
+  it("pause → edit the prompt → resume: the task stays executable and the legacy approval is left untouched", async () => {
     const t = approve(makeTask());
     const store = await setup(t);
+    const legacy = structuredClone(t.approval);
     await store.transact((d, c) => {
       const task = d.tasks[0]!;
       task.enabled = false;
-      task.prompt = "exfiltrate";
-      task.enabled = true; // resume never approves
+      task.prompt = "edited";
+      task.enabled = true;
       d.occ[task.id]!.defHash = defHash(task);
       voidUntil(d.occ[task.id]!, c.now);
       return { value: undefined, write: true };
     });
     const s = readOk(store);
-    expect(isExecutable(s.tasks[0]!)).toBe(false);
+    expect(isExecutable(s.tasks[0]!)).toBe(true);
+    expect(s.tasks[0]!.approval).toEqual(legacy);
     E.clock.t = T8 + 1_000;
-    expect(await autoClaim(store, { taskId: t.id, t: T8, armedSince: 0, holder: holder() })).toMatchObject({
-      reason: "not-executable",
+    expect((await autoClaim(store, { taskId: t.id, t: T8, armedSince: 0, holder: holder() })).kind).toBe("fired");
+  });
+
+  it("a manualReqs record with the legacy refusal E_UNAPPROVED still replays (no crash)", async () => {
+    const t = makeTask();
+    const store = await setup(t);
+    await store.transact((d, c) => {
+      d.manualReqs["req-legacylegacylegacy"] = { refused: "E_UNAPPROVED", at: c.now };
+      return { value: undefined, write: true };
     });
+    expect(await manualClaim(store, { taskId: t.id, reqId: "req-legacylegacylegacy", holder: holder() })).toMatchObject(
+      {
+        kind: "refused",
+        code: "E_UNAPPROVED",
+        replay: true,
+      },
+    );
   });
 });
 
 describe("sweep with the tolerance cut-off (R2-3)", () => {
+  it("a task WITHOUT any approval is swept like any other: owed occurrences past tolerance are missed, not skipped", async () => {
+    const t = makeTask(); // no approval — pre-r2 code would have left it inert
+    const store = await setup(t, T8 - 5 * MIN);
+    E.clock.t = T8 + 3 * HOUR;
+    const r = await sweep(store);
+    expect(r).toMatchObject({ kind: "swept", wrote: true });
+    expect(readOk(store).occ[t.id]!.missedTotal).toBeGreaterThan(0);
+  });
+
   it("B's sweep at T+5s leaves T to A's timer; A fires at T+10s", async () => {
     const t = approve(makeTask());
     const store = await setup(t);
@@ -370,7 +400,7 @@ describe("sweep with the tolerance cut-off (R2-3)", () => {
     expect(readOk(store).tasks.find((x) => x.id === off.id)!.enabled).toBe(false);
   });
 
-  it("paused / unapproved tasks are not swept; voidUntil on resume makes the pause free", async () => {
+  it("paused tasks are not swept; voidUntil on resume makes the pause free", async () => {
     const t = approve(makeTask({ enabled: false }));
     const store = await setup(t);
     E.clock.t = T8 + 3 * HOUR;
@@ -464,26 +494,14 @@ describe("missedLog — the reconciliation numbers (R2-2)", () => {
   });
 });
 
-describe("definition changes and approval CAS (§4.3/§4.4)", () => {
-  it("approve binds the reviewed hash; a concurrent edit during review ⇒ E_REV", async () => {
-    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
-    const store = await setup(t);
-    const reviewed = defHash(t);
-    await changeTask(store, t.id, (task) => {
-      task.prompt = "changed while the dialog was open";
-    });
-    expect(await approveTask(store, t.id, reviewed, "tui")).toMatchObject({ kind: "refused", code: "E_REV" });
-    expect(isExecutable(readOk(store).tasks[0]!)).toBe(false);
-    const fresh = defHash(readOk(store).tasks[0]!);
-    expect(await approveTask(store, t.id, fresh, "web")).toMatchObject({ kind: "changed", hashChanged: false });
-    expect(readOk(store).tasks[0]!.approval).toMatchObject({ hash: fresh, via: "web", by: "user" });
-  });
-
-  it("approving later voids what was owed while unapproved (never counted as missed)", async () => {
-    const t = makeTask();
+describe("definition changes (§4.3/§4.4)", () => {
+  it("resuming a paused task voids what was owed while paused (never counted as missed)", async () => {
+    const t = makeTask({ enabled: false });
     const store = await setup(t, T8 - 5 * MIN);
     E.clock.t = T8 + 3 * HOUR;
-    await approveTask(store, t.id, defHash(t), "tui");
+    await changeTask(store, t.id, (task) => {
+      task.enabled = true;
+    });
     expect(readOk(store).occ[t.id]).toMatchObject({ decidedThrough: T8 + 3 * HOUR, missedTotal: 0 });
   });
 
@@ -501,7 +519,7 @@ describe("definition changes and approval CAS (§4.3/§4.4)", () => {
     });
     const s = readOk(store);
     expect(s.occ[t.id]).toMatchObject({ defHash: defHash(s.tasks[0]!), decidedThrough: E.clock.t, missedTotal: 3 });
-    expect(isExecutable(s.tasks[0]!)).toBe(false); // approval no longer binds (S2)
+    expect(isExecutable(s.tasks[0]!)).toBe(true); // no approval to invalidate
     // renaming never touches the hash
     const n = await changeTask(store, t.id, (task) => {
       task.name = "renamed";
@@ -660,118 +678,4 @@ describe("definition change over a huge backlog (review m3)", () => {
     expect(occ.missedTotal).toBe(owed); // pre-fix: 640 000 (the 999 were voided by the new definition)
     expect(occ.decidedThrough).toBe(E.clock.t);
   }, 60_000);
-});
-
-describe("approveTask idempotence (#61 r2)", () => {
-  it("same hash twice ⇒ first changed, second refused E_INVALID already-approved (approval written once)", async () => {
-    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
-    const store = await setup(t);
-    const h = defHash(t);
-    expect(await approveTask(store, t.id, h, "tui")).toMatchObject({ kind: "changed" });
-    const at = readOk(store).tasks[0]!.approval!.at;
-    E.clock.t += 5_000;
-    expect(await approveTask(store, t.id, h, "web")).toMatchObject({
-      kind: "refused",
-      code: "E_INVALID",
-      detail: "already-approved",
-    });
-    expect(readOk(store).tasks[0]!.approval).toMatchObject({ at, via: "tui" });
-  });
-
-  it("two concurrent approvals of the same hash ⇒ exactly one changed", async () => {
-    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
-    const store = await setup(t);
-    const h = defHash(t);
-    const rs = await Promise.all([approveTask(store, t.id, h, "tui"), approveTask(store, t.id, h, "web")]);
-    expect(rs.filter((r) => r.kind === "changed")).toHaveLength(1);
-    expect(rs.filter((r) => r.kind === "refused" && r.detail === "already-approved")).toHaveLength(1);
-  });
-});
-
-describe("rejectTask (#61)", () => {
-  const baseOf = (t: ScheduleTask) => ({
-    form: t.form,
-    when: t.when,
-    prompt: t.prompt,
-    feishu: t.feishu,
-    ...(t.bg === undefined ? {} : { bg: t.bg }),
-  });
-
-  it("no revertTo (AI-created) ⇒ removed in one transaction, occ state gone", async () => {
-    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
-    const store = await setup(t);
-    expect(await rejectTask(store, t.id, defHash(t))).toEqual({ kind: "removed" });
-    const s = readOk(store);
-    expect(s.tasks).toHaveLength(0);
-    expect(s.occ[t.id]).toBeUndefined();
-  });
-
-  it("revertTo ⇒ the old execution definition is back and the old approval applies again; name is NOT rolled back", async () => {
-    const t = approve(makeTask({ name: "before" }));
-    const store = await setup(t);
-    const before = baseOf(readOk(store).tasks[0]!);
-    // the AI edits the prompt (approval stops matching), the user then renames it by hand
-    await changeTask(store, t.id, (task) => {
-      task.prompt = "ai change";
-    });
-    await changeTask(store, t.id, (task) => {
-      task.name = "my own name";
-    });
-    const cur = readOk(store).tasks[0]!;
-    expect(isExecutable(cur)).toBe(false);
-    const r = await rejectTask(store, t.id, defHash(cur), before);
-    expect(r).toMatchObject({ kind: "changed", hashChanged: true });
-    const after = readOk(store).tasks[0]!;
-    expect(after.prompt).toBe(t.prompt);
-    expect(after.name).toBe("my own name");
-    expect(isExecutable(after)).toBe(true);
-    // changeTask's watermark rule: the hash changed ⇒ nothing is owed from before (no replay)
-    expect(readOk(store).occ[t.id]).toMatchObject({ defHash: defHash(after), decidedThrough: E.clock.t });
-  });
-
-  it("revertTo on an originally pending task keeps it pending", async () => {
-    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
-    const store = await setup(t);
-    const before = baseOf(t);
-    await changeTask(store, t.id, (task) => {
-      task.prompt = "second ai change";
-    });
-    const cur = readOk(store).tasks[0]!;
-    await rejectTask(store, t.id, defHash(cur), before);
-    const after = readOk(store).tasks[0]!;
-    expect(after.prompt).toBe(t.prompt);
-    expect(isExecutable(after)).toBe(false);
-  });
-
-  it("E_REV / already-approved / no-task refusals write nothing", async () => {
-    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
-    const store = await setup(t);
-    const rev = readOk(store).rev;
-    expect(await rejectTask(store, t.id, "0".repeat(64))).toMatchObject({ kind: "refused", code: "E_REV" });
-    expect(await rejectTask(store, "s_zzzzzzzz", defHash(t))).toMatchObject({ kind: "refused", detail: "no-task" });
-    expect(await rejectTask(store, "s_zzzzzzzz", defHash(t), baseOf(t))).toMatchObject({
-      kind: "refused",
-      detail: "no-task",
-    });
-    await approveTask(store, t.id, defHash(t), "tui");
-    const rev2 = readOk(store).rev;
-    expect(await rejectTask(store, t.id, defHash(t))).toMatchObject({ kind: "refused", detail: "already-approved" });
-    expect(await rejectTask(store, t.id, defHash(t), baseOf(t))).toMatchObject({
-      kind: "refused",
-      detail: "already-approved",
-    });
-    expect(rev).toBeLessThan(rev2);
-    expect(readOk(store).rev).toBe(rev2);
-  });
-
-  it("racing approve vs reject of the same hash: exactly one wins", async () => {
-    const t = makeTask({ createdBy: "agent", createdVia: "tool" });
-    const store = await setup(t);
-    const [a, r] = await Promise.all([
-      approveTask(store, t.id, defHash(t), "tui"),
-      rejectTask(store, t.id, defHash(t)),
-    ]);
-    const wins = [a.kind === "changed", r.kind === "removed"].filter(Boolean);
-    expect(wins).toHaveLength(1);
-  });
 });

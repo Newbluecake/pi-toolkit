@@ -2,7 +2,7 @@ import { statSync } from "node:fs";
 import { join } from "node:path";
 import { SKIP } from "../prompt-sections/stable-section.js";
 import { sessionDirName } from "../schedule/core/paths.js";
-import { isApproved, SCHED_STATE_FILE, type ScheduleStateFile } from "../schedule/core/spec.js";
+import { SCHED_STATE_FILE, type ScheduleStateFile } from "../schedule/core/spec.js";
 import { whenText } from "../schedule/agent/view.js";
 import type { ScheduleAgent } from "../schedule/agent/wire.js";
 import type { SectionRegistration } from "./hub.js";
@@ -10,7 +10,7 @@ import type { SectionRegistration } from "./hub.js";
 /**
  * `pi_schedules` — the AI's passive awareness of this session's scheduled tasks (plan r3 §5.3).
  *
- * Definitions ONLY (id, name, time + tz, form, feishu, pending): next-run times and run state change
+ * Definitions ONLY (id, name, time + tz, form, feishu): next-run times and run state change
  * every minute and would churn the prompt cache, so they stay behind the `schedule` tool. Registered
  * session-scoped and last in the fold order; no tasks ⇒ "" (the fold skips empty sections, so a
  * session without tasks keeps byte-identical system prompt bytes).
@@ -20,18 +20,12 @@ export const SCHEDULES_TITLE = "## Scheduled tasks (pi-subagent)";
 export function renderSchedulesSection(state: ScheduleStateFile): string {
   if (state.tasks.length === 0) return "";
   const lines = state.tasks.map((t) =>
-    [
-      `- ${t.id} "${t.name}"`,
-      whenText(t.when),
-      t.form,
-      ...(t.feishu ? ["feishu"] : []),
-      ...(isApproved(t) ? [] : ["pending"]),
-    ].join(" · "),
+    [`- ${t.id} "${t.name}"`, whenText(t.when), t.form, ...(t.feishu ? ["feishu"] : [])].join(" · "),
   );
   return [
     SCHEDULES_TITLE,
     "This session owns the scheduled tasks below (definitions only — use the `schedule` tool for status, runs and changes). " +
-      "They run only while this session is open. Tasks you create or change stay `pending` until the user approves them.",
+      "They run only while this session is open. Tasks you create or change take effect immediately; the user can pause or delete them at any time.",
     ...lines,
   ].join("\n");
 }

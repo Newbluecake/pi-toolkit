@@ -7,10 +7,9 @@
  *   - pushes `sched_bound{agentKey, runKey}` for the message dispatcher (A2, §7.5);
  *   - answers every `sched_run` with EXACTLY ONE `sched_run_ack` (manual claim §4.5b);
  *   - applies `sched_receipts` by removing the acknowledged `pendingReports` entries under the lock;
- *   - #61 C2 (sched.confirm.v1): publishes the confirm module's authoritative `sched_offers` snapshot
- *     (dropped unless the live link also carries `sched.confirm.v1` — the next publish / hello_ack
- *     resends the full list), and answers every `sched_decide` with EXACTLY ONE `sched_decide_ack`
- *     by forwarding to the confirm module's `decide()` (the ledger CAS in claim.ts is the arbiter).
+ *   - schedule-auto-approve r2: the #61 confirm module is gone. A `sched_decide` (an old hub's Feishu card
+ *     decision; cap-gated, so normally unreachable) is still answered with EXACTLY ONE `sched_decide_ack`
+ *     — `refused:"unsupported"` (expired / foreign-session frames keep their old refusals).
  *
  * Two layers:
  *   - `createScheduleHubRouter()` — ONE per activate (the web-hub connection is process-level and
@@ -25,18 +24,16 @@ import type {
   HubScheduleConfig,
   SchedAgentFrame,
   SchedDecideFrame,
-  SchedOffersFrame,
   SchedReceiptsFrame,
   SchedRunFrame,
 } from "../../web-hub/protocol/schedule.js";
-import type { DecideResult, ScheduleConfirm } from "./confirm.js";
 
 /** Late-bound view of the process-level web-hub connection. */
 export interface SchedHubLink {
   /** Live link AND the hub advertised `sched.v1` in its latest hello_ack. */
   ready(): boolean;
-  /** #61 C2: ready() ∧ hello_ack.caps ∋ `sched.confirm.v1` — the offers/decide channel. Optional so
-   *  a pre-C2 link (or a hub without the cap) degrades to TUI-only with zero new frames. */
+  /** @deprecated schedule-auto-approve r2: nothing reads it any more (package F deletes it with its
+   *  `web-hub/agent/index.ts` implementation). */
   confirmReady?(): boolean;
   send(frame: SchedAgentFrame): void;
 }
@@ -53,12 +50,7 @@ export interface ScheduleCoordinator {
   onHubCaps(): void;
   onRun(frame: SchedRunFrame): void;
   onReceipts(frame: SchedReceiptsFrame): void;
-  /** #61 C2: publish the confirm module's authoritative offers snapshot. Dropped unless the confirm
-   *  channel is live (`confirmReady()`); no queue — the next publish / hello_ack resends everything. */
-  offers(frame: Omit<SchedOffersFrame, "t">): void;
-  /** #61 C2: the hub confirm channel is usable right now. */
-  confirmReady(): boolean;
-  /** #61 C2: hub→agent `sched_decide` — exactly one `sched_decide_ack` per received frame. */
+  /** An old hub's `sched_decide`: exactly one `sched_decide_ack` per received frame (always a refusal). */
   onDecide(frame: SchedDecideFrame): void;
   dispose(): void;
 }
@@ -70,8 +62,6 @@ export const NULL_SCHEDULE_COORDINATOR: ScheduleCoordinator = Object.freeze({
   onHubCaps: () => undefined,
   onRun: () => undefined,
   onReceipts: () => undefined,
-  offers: () => undefined,
-  confirmReady: () => false,
   onDecide: () => undefined,
   dispose: () => undefined,
 });
@@ -86,9 +76,6 @@ export interface HubCoordinatorDeps {
   removeReports: (reportIds: readonly string[]) => Promise<boolean>;
   /** One-shot retry timer for a transient receipt failure (unref'd in production). */
   retryLater?: (fn: () => void) => void;
-  /** #61 C2: the surface's confirm module, late-bound (the surface creates it AFTER the session
-   *  coordinator; unset ⇒ `sched_decide` is refused `offer-gone`). */
-  confirm?: () => ScheduleConfirm | undefined;
   warn?: (message: string) => void;
 }
 
@@ -99,7 +86,6 @@ export function createHubCoordinator(deps: HubCoordinatorDeps): ScheduleCoordina
   let disposed = false;
   let changePending = false;
   const inflight = new Map<string, Promise<SchedRunVerdict>>();
-  const decideInflight = new Map<string, Promise<DecideResult>>();
 
   const send = (frame: SchedAgentFrame): void => {
     if (disposed) return;
@@ -126,22 +112,17 @@ export function createHubCoordinator(deps: HubCoordinatorDeps): ScheduleCoordina
     }
   };
 
-  const refuseDecide = (code: Extract<DecideResult, { kind: "refused" }>["code"]): DecideResult => ({
-    kind: "refused",
-    code,
-    detail: code,
-  });
-
   /** Exactly one `sched_decide_ack` per received frame, sent under the same readiness as run acks. */
-  const decideAck = (reqId: string, r: DecideResult): void => {
+  const decideAck = (reqId: string, reason: string): void => {
     const link = deps.link();
     if (link === undefined || !link.ready()) return;
     try {
-      link.send(
-        r.kind === "refused"
-          ? { t: "sched_decide_ack", reqId, result: "refused", reason: r.code.slice(0, REASON_MAX) || "E_INVALID" }
-          : { t: "sched_decide_ack", reqId, result: r.kind },
-      );
+      link.send({
+        t: "sched_decide_ack",
+        reqId,
+        result: "refused",
+        reason: reason.slice(0, REASON_MAX) || "E_INVALID",
+      });
     } catch {
       /* ignore */
     }
@@ -162,50 +143,12 @@ export function createHubCoordinator(deps: HubCoordinatorDeps): ScheduleCoordina
     },
     onHubCaps() {
       send({ t: "sched_changed", sessionId: deps.sessionId });
-      // #61 C2: fresh caps — the confirm module resends its authoritative offers list (empty too).
-      if (disposed) return;
-      try {
-        deps.confirm?.()?.onHubCaps();
-      } catch {
-        /* a confirm failure must not break the link hook */
-      }
-    },
-    offers(frame) {
-      if (disposed) return;
-      const link = deps.link();
-      if (link?.confirmReady?.() !== true) return; // no cap ⇒ drop; the next publish resends the full list
-      try {
-        link.send({ t: "sched_offers", ...frame });
-      } catch {
-        /* the connection owns its own failure accounting */
-      }
-    },
-    confirmReady() {
-      return !disposed && deps.link()?.confirmReady?.() === true;
     },
     onDecide(frame) {
-      // Exactly one ack per received frame (a hub re-send of the same reqId gets the same result).
-      if (disposed || frame.sessionId !== deps.sessionId) return decideAck(frame.reqId, refuseDecide("E_NOT_OWNER"));
-      if (frame.expiresAt <= now()) return decideAck(frame.reqId, refuseDecide("expired"));
-      let p = decideInflight.get(frame.reqId);
-      if (p === undefined) {
-        const confirm = deps.confirm?.();
-        p = (
-          confirm === undefined
-            ? Promise.resolve(refuseDecide("offer-gone"))
-            : confirm.decide({
-                taskId: frame.taskId,
-                defHash: frame.defHash,
-                decision: frame.decision,
-                via: "feishu",
-                offerId: frame.offerId,
-              })
-        )
-          .catch(() => refuseDecide("E_BUSY"))
-          .finally(() => decideInflight.delete(frame.reqId));
-        decideInflight.set(frame.reqId, p);
-      }
-      void p.then((r) => decideAck(frame.reqId, r));
+      // Exactly one ack per received frame (confirm/approval no longer exist ⇒ always refused).
+      if (disposed || frame.sessionId !== deps.sessionId) return decideAck(frame.reqId, "E_NOT_OWNER");
+      if (frame.expiresAt <= now()) return decideAck(frame.reqId, "expired");
+      decideAck(frame.reqId, "unsupported");
     },
     onRun(frame) {
       // Exactly one ack per received frame (a hub re-send of the same reqId gets the same verdict).
@@ -249,7 +192,7 @@ export interface ScheduleWebHubPort {
   bindLink(link: SchedHubLink): void;
   onSchedRun(frame: SchedRunFrame): void;
   onSchedReceipts(frame: SchedReceiptsFrame): void;
-  /** #61 C2: hub→agent Feishu-card decision; the port answers EXACTLY ONE `sched_decide_ack`. */
+  /** Legacy hub→agent Feishu-card decision (stub since r2); the port answers EXACTLY ONE `sched_decide_ack`. */
   onSchedDecide(frame: SchedDecideFrame): void;
   onHubCaps(): void;
 }

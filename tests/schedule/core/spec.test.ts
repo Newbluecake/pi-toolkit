@@ -13,10 +13,8 @@ import {
   emptyStateFile,
   executionDefinition,
   hash8,
-  isApproved,
   isExecutable,
   isHash,
-  isPendingApproval,
   isTerminalRunState,
   manualRunKey,
   parseRunKey,
@@ -204,40 +202,41 @@ describe("canonicalJson", () => {
   });
 });
 
-describe("approval derivation (§4.3, S2)", () => {
-  const approved = (t: ScheduleTask): ScheduleTask => ({
+describe("execution gate (schedule-auto-approve r2: executable ⇔ enabled)", () => {
+  const withApproval = (t: ScheduleTask, hash: string): ScheduleTask => ({
     ...t,
-    approval: { hash: defHash(t), by: "user", via: "tui", at: 1 },
+    approval: { hash, by: "user", via: "tui", at: 1 },
   });
 
-  it("no approval ⇒ pending, never executable (even enabled)", () => {
-    expect(isApproved(BG_TASK)).toBe(false);
-    expect(isPendingApproval(BG_TASK)).toBe(true);
-    expect(isExecutable(BG_TASK)).toBe(false);
+  it("no approval ⇒ executable iff enabled", () => {
+    expect(isExecutable(BG_TASK)).toBe(true);
+    expect(isExecutable({ ...BG_TASK, enabled: false })).toBe(false);
   });
 
-  it("approval binding the current hash ⇒ executable iff enabled", () => {
-    const t = approved(BG_TASK);
-    expect(isExecutable(t)).toBe(true);
-    expect(isExecutable({ ...t, enabled: false })).toBe(false);
-    expect(isPendingApproval({ ...t, enabled: false })).toBe(false); // pause is not 待确认
+  it("a legacy approval is ignored: matching, stale and garbage hashes all execute alike", () => {
+    for (const hash of [defHash(BG_TASK), "0".repeat(64), "not-a-hash"]) {
+      const t = withApproval(BG_TASK, hash);
+      expect(isExecutable(t)).toBe(true);
+      expect(isExecutable({ ...t, enabled: false })).toBe(false);
+    }
   });
 
-  it("editing an execution field invalidates the approval; renaming does not", () => {
-    const t = approved(BG_TASK);
-    expect(isExecutable({ ...t, prompt: "changed" })).toBe(false);
-    expect(isPendingApproval({ ...t, prompt: "changed" })).toBe(true);
+  it("editing an execution field or renaming never changes executability (defHash still moves)", () => {
+    const t = withApproval(BG_TASK, defHash(BG_TASK));
+    expect(isExecutable({ ...t, prompt: "changed" })).toBe(true);
+    expect(defHash({ ...t, prompt: "changed" })).not.toBe(defHash(t));
     expect(isExecutable({ ...t, name: "renamed" })).toBe(true);
   });
 
-  it("#40: a legacy task with bg.consultMain:true keeps its pre-removal defHash and stays approved/executable", () => {
+  it("#40: a legacy task with bg.consultMain:true keeps its pre-removal defHash", () => {
     // 903e09… is the frozen hash of FULL_BG_TASK (consultMain:true) from before consult was removed.
     const legacyHash = "903e09819b62a8a998043f26eb9ddc52b736e783a207b767c6a1da07c9051c32";
     expect(defHash(FULL_BG_TASK)).toBe(legacyHash);
-    const stored: ScheduleTask = { ...FULL_BG_TASK, approval: { hash: legacyHash, by: "user", via: "web", at: 1 } };
-    expect(isApproved(stored)).toBe(true);
-    expect(isPendingApproval(stored)).toBe(false);
-    expect(isExecutable(stored)).toBe(true);
+    expect(isExecutable(withApproval(FULL_BG_TASK, legacyHash))).toBe(true);
+  });
+
+  it("E_UNAPPROVED stays in the error vocabulary (legacy manualReqs replay)", () => {
+    expect(SCHEDULE_ERROR_CODES).toContain("E_UNAPPROVED");
   });
 });
 

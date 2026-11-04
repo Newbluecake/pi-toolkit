@@ -166,13 +166,12 @@ describe("schedule surface — OFF (default)", () => {
     }
     // A3: +2 turn_start (A0 clock poke, status bar), +1 agent_settled (status/digest). I1: the A2 message scheduler's
     // fence/ui-prompt/input/run-lifecycle hooks and the A1 notes `agent_settled` hook (before_agent_start/context
-    // are present OFF already — the guard — so they do not diff). #61: the confirm presenter's own forwarders on the
-    // surface: +1 input, +1 before_agent_start, +1 ui_prompt_start, +1 ui_prompt_end.
+    // are present OFF already — the guard — so they do not diff). schedule-auto-approve r2 removed the #61 confirm
+    // presenter's forwarders (the ON-vs-OFF diff lost its +1 input, +1 before_agent_start, +1 ui_prompt_start, +1 ui_prompt_end).
     expect(diff).toEqual({
       agent_settled: 2,
       agent_start: 1,
-      before_agent_start: 1,
-      input: 2,
+      input: 1,
       message_end: 1,
       message_start: 1,
       session_before_compact: 1,
@@ -185,15 +184,15 @@ describe("schedule surface — OFF (default)", () => {
       session_start: 1,
       session_tree: 1,
       turn_start: 2,
-      ui_prompt_end: 2,
-      ui_prompt_start: 2,
+      ui_prompt_end: 1,
+      ui_prompt_start: 1,
     });
     expect([...on.tools.keys()].filter((k) => !off.tools.has(k))).toEqual(["schedule"]);
   });
 });
 
 describe("schedule surface — ON", () => {
-  it("tool creates a pending task → section line in the system prompt, status bar token, cleared on shutdown", async () => {
+  it("tool creates a task (active at once) → section line in the system prompt, status bar token, cleared on shutdown", async () => {
     writeSettings({ ...baseline, schedule: { enabled: true, dir: join(fakeHome, "sched-live") } });
     const h = fakePi();
     activate(h.pi);
@@ -211,12 +210,14 @@ describe("schedule surface — ON", () => {
       undefined,
       ctx,
     );
-    expect(r.details).toMatchObject({ ok: true, pending: true });
+    expect(r.details).toEqual({ ok: true, id: r.details.id });
 
     // status bar refreshes on the next turn_start
     await emit(h, "turn_start", { type: "turn_start", turnIndex: 0, timestamp: 0 }, ctx);
     const sched = () => statuses.filter(([k]) => k === "pi-subagent:schedule");
-    expect(sched().at(-1)).toEqual(["pi-subagent:schedule", "sched 1 · pending 1"]);
+    expect(sched().at(-1)?.[0]).toBe("pi-subagent:schedule");
+    expect(sched().at(-1)?.[1]).toMatch(/^sched 1 · next \S+ \S+$/); // armed at once; never a `pending` segment
+    expect(sched().at(-1)?.[1]).not.toMatch(/pending/);
 
     // the frozen system prompt does not change mid-session; the definition arrives as a tail message
     const same = await systemPromptFor(h, ctx);
@@ -252,7 +253,7 @@ describe("schedule surface — ON", () => {
     await emit(second, "session_start", { type: "session_start", reason: "startup" }, ctx2);
     const prompt = await systemPromptFor(second, ctx2);
     expect(prompt).toMatch(
-      /## Scheduled tasks \(pi-subagent\)\n.*\n- s_[a-z2-7]{8} "daily" · cron "0 8 \* \* \*" UTC · background · feishu · pending$/s,
+      /## Scheduled tasks \(pi-subagent\)\n.*\n- s_[a-z2-7]{8} "daily" · cron "0 8 \* \* \*" UTC · background · feishu$/m,
     );
     await emit(second, "session_shutdown", { type: "session_shutdown" }, ctx2);
 

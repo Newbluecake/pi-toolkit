@@ -5,8 +5,7 @@ import { addTask, approve, makeTask, readOk } from "../schedule/core/fixtures.js
 import { afterEach, describe, expect, it } from "vitest";
 import { createScheduleTool, SCHEDULE_TOOL_DESCRIPTION } from "../../src/tools/schedule-tool.js";
 import { createScheduleAgent } from "../../src/schedule/agent/wire.js";
-import { defHash, isApproved } from "../../src/schedule/core/spec.js";
-import { a3Env, type A3Env } from "../schedule/agent/a3-helpers.js";
+import { a3Env, stripApproval, type A3Env } from "../schedule/agent/a3-helpers.js";
 
 let env: A3Env;
 afterEach(() => env?.cleanup());
@@ -14,8 +13,8 @@ afterEach(() => env?.cleanup());
 function tool(e: A3Env) {
   return createScheduleTool({ agent: () => e.agent, ports: () => e.ports, now: () => e.fake.now() });
 }
-async function call(e: A3Env, params: Record<string, unknown>) {
-  const r = await tool(e).execute("id", params as never, undefined, undefined, {} as never);
+async function call(e: A3Env, params: Record<string, unknown>, ctx: unknown = {}) {
+  const r = await tool(e).execute("id", params as never, undefined, undefined, ctx as never);
   const text = (r.content[0] as { text: string }).text;
   return { text, details: r.details as Record<string, unknown> };
 }
@@ -28,7 +27,12 @@ describe("schedule tool — definition", () => {
     expect(t.description).toBe(SCHEDULE_TOOL_DESCRIPTION);
     for (const s of [t.description, t.promptSnippet ?? "", ...(t.promptGuidelines ?? [])])
       expect(s).not.toMatch(/[§]|architecture|r3 plan/);
-    expect(t.description).toContain("approved by the USER");
+    expect(t.description).toContain("tasks you create or change take effect immediately");
+    expect(t.description).toContain("Only create or change a scheduled task when the user asked for it");
+    for (const s of [t.description, t.promptSnippet ?? "", ...(t.promptGuidelines ?? [])])
+      expect(s).not.toMatch(/approv|pending|\/schedule approve/i);
+    expect(t.promptSnippet).toContain("takes effect immediately");
+    expect((t.promptGuidelines ?? []).join("\n")).toContain("tell the user the task id and its next run");
     // two instances describe identically (the registered schema never depends on runtime state)
     expect(JSON.stringify(tool(a3Env()).parameters)).toBe(JSON.stringify(t.parameters));
     expect(JSON.stringify(t.parameters)).not.toContain("approval");
@@ -37,56 +41,83 @@ describe("schedule tool — definition", () => {
 });
 
 describe("schedule tool — create / approval semantics", () => {
-  it("create ⇒ pending, and the result says the three things the model must know", async () => {
+  it("create ⇒ active immediately; result names the id, next run and the two facts the model must know; no approval is written", async () => {
     env = a3Env();
     const r = await call(env, { action: "create", ...DAILY });
-    expect(r.details).toMatchObject({ ok: true, pending: true });
-    expect(r.text).toMatch(/PENDING USER APPROVAL/);
-    expect(r.text).toContain("/schedule approve");
+    expect(r.details).toEqual({ ok: true, id: r.details.id });
+    expect(r.text).toMatch(/active immediately\./);
+    expect(r.text).toMatch(/Next run: 2026-01-02 08:00 Asia\/Shanghai\./);
+    expect(r.text).not.toMatch(/PENDING|approv|\/schedule/i);
     expect(r.text).toMatch(/only runs while this session is open/);
     expect(r.text).toMatch(/result appears as a message in this session/);
     const st = env.agent.readState();
     if (st.kind !== "ok") throw new Error("state");
-    expect(isApproved(st.state.tasks[0]!)).toBe(false);
+    expect(st.state.tasks[0]).not.toHaveProperty("approval");
   });
 
-  it("run_now on a pending task ⇒ E_UNAPPROVED with a hint; nothing is claimed", async () => {
+  it("create/update notify the TUI with the next run; no UI or a throwing UI is silent", async () => {
     env = a3Env();
-    env.agent.setExecutor("background", { dispatch: () => undefined });
-    const c = await call(env, { action: "create", ...DAILY });
-    const id = c.details.id as string;
-    const r = await call(env, { action: "run_now", id });
-    expect(r.details).toMatchObject({ ok: false, code: "E_UNAPPROVED" });
-    expect(r.text).toContain("pending the user's approval");
+    const msgs: Array<[string, unknown]> = [];
+    const ctx = { ui: { notify: (m: string, k: unknown) => void msgs.push([m, k]) } };
+    const c = await call(env, { action: "create", ...DAILY }, ctx);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]![0]).toContain(c.details.id as string);
+    expect(msgs[0]![0]).toMatch(/已创建并启用，next run /);
+    expect(msgs[0]![1]).toBe("info");
+    await call(env, { action: "update", id: c.details.id, prompt: "changed" }, ctx);
+    expect(msgs).toHaveLength(2);
+    expect(msgs[1]![0]).toMatch(/已更新并启用/);
+    const boom = {
+      ui: {
+        notify: () => {
+          throw new Error("x");
+        },
+      },
+    };
+    expect((await call(env, { action: "update", id: c.details.id, prompt: "again" }, boom)).details.ok).toBe(true);
+    expect((await call(env, { action: "update", id: c.details.id, prompt: "again2" }, {})).details.ok).toBe(true);
+    // failures never notify
+    msgs.length = 0;
+    await call(env, { action: "update", id: "s_zzzzzzzz", prompt: "x" }, ctx);
+    expect(msgs).toHaveLength(0);
   });
 
-  it("run_now on an approved task starts a run through the executor", async () => {
+  it("an old-ledger task with no approval: list shows no pending flag, run_now runs, resume/update never mention approval", async () => {
     env = a3Env();
     const seen: string[] = [];
     env.agent.setExecutor("background", { dispatch: (run) => void seen.push(run.runKey) });
     const c = await call(env, { action: "create", ...DAILY });
     const id = c.details.id as string;
-    // the USER approves (the tool has no such action)
-    const store = env.agent.ensureStore();
-    const { approveTask } = await import("../../src/schedule/core/claim.js");
-    const snap = store.read();
-    if (snap.kind !== "ok") throw new Error("state");
-    await approveTask(store, id, defHash(snap.state.tasks[0]!), "tui");
-    const r = await call(env, { action: "run_now", id });
+    await stripApproval(env, id);
+    expect((await call(env, { action: "list" })).text).not.toMatch(/pending/);
+    expect((await call(env, { action: "run_now", id })).details.ok).toBe(true);
+    expect(seen).toHaveLength(1);
+    expect((await call(env, { action: "resume", id })).text).toBe(`Resumed task ${id}. Task is scheduled.`);
+    const u = await call(env, { action: "update", id, prompt: "touched" });
+    expect(u.details).toEqual({ ok: true, id });
+    expect(u.text).not.toMatch(/approv|pending/i);
+  });
+
+  it("run_now on a freshly created task starts a run at once (no user approval step)", async () => {
+    env = a3Env();
+    const seen: string[] = [];
+    env.agent.setExecutor("background", { dispatch: (run) => void seen.push(run.runKey) });
+    const c = await call(env, { action: "create", ...DAILY });
+    const r = await call(env, { action: "run_now", id: c.details.id });
     expect(r.details.ok).toBe(true);
     expect(seen).toHaveLength(1);
   });
 
-  it("update of an execution field returns the pending note; pause/resume never approve", async () => {
+  it("update of an execution field stays active; pause/resume work", async () => {
     env = a3Env();
     const c = await call(env, { action: "create", ...DAILY });
     const id = c.details.id as string;
     const u = await call(env, { action: "update", id, prompt: "changed" });
-    expect(u.details).toMatchObject({ ok: true, pending: true });
-    const r = await call(env, { action: "resume", id });
-    expect(r.text).toMatch(/PENDING USER APPROVAL/);
+    expect(u.details).toEqual({ ok: true, id });
+    expect(u.text).toMatch(/active immediately/);
     const p = await call(env, { action: "pause", id });
     expect(p.text).toMatch(/Paused task/);
+    expect((await call(env, { action: "resume", id })).text).toMatch(/Task is scheduled\./);
   });
 
   it.each(["approval", "createdBy", "createdVia", "createdAt", "ownerCwd"])(
@@ -119,7 +150,7 @@ describe("schedule tool — create / approval semantics", () => {
     const id = c.details.id as string;
     const l = await call(env, { action: "list" });
     expect(l.text).toContain(id);
-    expect(l.text).toContain("pending");
+    expect(l.text).not.toContain("pending");
     const g = await call(env, { action: "get", id });
     expect(g.text).toContain("defHash:");
     expect(g.text).toContain("prompt:");
@@ -211,93 +242,4 @@ describe("schedule report path rendering", () => {
       expect(readOk(store).runs[0]!.reportFile).toBe(reportFile);
     },
   );
-});
-
-describe("schedule tool — confirm on the spot (#61)", () => {
-  function withConfirm(e: A3Env, verdict: "offered" | "unavailable") {
-    const offers: Array<{ task: any; origin: any }> = [];
-    const confirm = { offer: (task: any, origin: any) => (offers.push({ task, origin }), verdict) };
-    const t = createScheduleTool({
-      agent: () => e.agent,
-      ports: () => e.ports,
-      confirm: () => confirm as never,
-      now: () => e.fake.now(),
-    });
-    return {
-      offers,
-      async call(params: Record<string, unknown>) {
-        const r = await t.execute("id", params as never, undefined, undefined, {} as never);
-        return { text: (r.content[0] as { text: string }).text, details: r.details as Record<string, unknown> };
-      },
-    };
-  }
-
-  it("create ⇒ offer(create); an offered task's text tells the model the user is being asked and not to send them to /schedule approve", async () => {
-    env = a3Env();
-    const w = withConfirm(env, "offered");
-    const r = await w.call({ action: "create", ...DAILY });
-    expect(w.offers).toHaveLength(1);
-    expect(w.offers[0]!.origin).toEqual({ kind: "create" });
-    expect(w.offers[0]!.task.id).toBe(r.details.id);
-    expect(r.details).toMatchObject({ ok: true, pending: true, confirm: "offered" });
-    expect(r.text).toMatch(/PENDING USER APPROVAL/);
-    expect(r.text).toMatch(/asked to confirm it now/);
-    expect(r.text).toMatch(/Do not ask them to run \/schedule approve unless they say they dismissed it/);
-    expect(r.text).toMatch(/only runs while this session is open/);
-  });
-
-  it("unavailable ⇒ the original pending note (terminal /schedule approve) and details.confirm=unavailable", async () => {
-    env = a3Env();
-    const w = withConfirm(env, "unavailable");
-    const r = await w.call({ action: "create", ...DAILY });
-    expect(r.details).toMatchObject({ pending: true, confirm: "unavailable" });
-    expect(r.text).toContain("/schedule approve");
-    expect(r.text).not.toMatch(/asked to confirm/);
-  });
-
-  it("no confirm dep ⇒ byte-identical to the pre-#61 result (no `confirm` key)", async () => {
-    env = a3Env();
-    const r = await call(env, { action: "create", ...DAILY });
-    expect(r.details).toEqual({ ok: true, id: r.details.id, pending: true });
-  });
-
-  it("update of an approved task ⇒ offer(update) carrying the PRE-change definition as the rollback base", async () => {
-    env = a3Env();
-    const w = withConfirm(env, "offered");
-    const c = await w.call({ action: "create", ...DAILY });
-    const id = c.details.id as string;
-    const store = env.agent.ensureStore();
-    const { approveTask } = await import("../../src/schedule/core/claim.js");
-    const snap = store.read();
-    if (snap.kind !== "ok") throw new Error("state");
-    await approveTask(store, id, defHash(snap.state.tasks[0]!), "tui");
-    w.offers.length = 0;
-    const u = await w.call({ action: "update", id, prompt: "a different instruction" });
-    expect(u.details).toMatchObject({ pending: true, confirm: "offered" });
-    expect(u.text).toMatch(/asked to confirm it now/);
-    expect(w.offers).toHaveLength(1);
-    const o = w.offers[0]!.origin;
-    expect(o.kind).toBe("update");
-    expect(o.wasApproved).toBe(true);
-    expect(o.base.prompt).toBe(DAILY.prompt);
-    expect(o.base.when).toMatchObject({ kind: "cron", expr: "0 8 * * *" });
-    expect(o).not.toHaveProperty("base.name");
-  });
-
-  it("a rename (hash unchanged, still approved) asks nobody", async () => {
-    env = a3Env();
-    const w = withConfirm(env, "offered");
-    const c = await w.call({ action: "create", ...DAILY });
-    const id = c.details.id as string;
-    const store = env.agent.ensureStore();
-    const { approveTask } = await import("../../src/schedule/core/claim.js");
-    const snap = store.read();
-    if (snap.kind !== "ok") throw new Error("state");
-    await approveTask(store, id, defHash(snap.state.tasks[0]!), "tui");
-    w.offers.length = 0;
-    const u = await w.call({ action: "update", id, name: "renamed" });
-    expect(u.details).toMatchObject({ pending: false });
-    expect(u.details).not.toHaveProperty("confirm");
-    expect(w.offers).toHaveLength(0);
-  });
 });

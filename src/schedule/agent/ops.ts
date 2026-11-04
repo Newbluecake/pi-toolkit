@@ -3,14 +3,10 @@
  * (A3; plan r3 §4.1, §4.3, §5.1, §5.2). Every mutation is one S1 transaction on a `SessionStore`;
  * nothing here touches pi.
  *
- * Approval rules (S2 — approval = definition hash), enforced HERE so both surfaces agree:
- *  - an AI-origin write NEVER writes `approval`; changing an execution field changes `defHash`, so
- *    the old approval simply stops matching (no code path "revokes" anything);
- *  - a user create writes `approval = defHash`; a user edit re-approves ONLY a task that was
- *    approved before the edit (a pending task — typically AI-authored, never reviewed — stays
- *    pending: approval needs the review flow, `/schedule approve`);
- *  - `resume` flips `enabled` only; `__put`'s trailing hash must equal the hash of the definition
- *    that will be stored, otherwise `E_REV` (the web review dialog bound that hash).
+ * No approval (schedule-auto-approve r2): every create/update takes effect immediately, whoever wrote it.
+ * `approval` is never written here and never stripped (a legacy ledger's field is tolerated and ignored);
+ * `defHash` only binds runs / `occ` (a changed execution definition voids the old one's future occurrences).
+ * `resume` flips `enabled` only.
  */
 import { randomBytes } from "node:crypto";
 import { changeTask, type TaskChange } from "../core/claim.js";
@@ -18,8 +14,6 @@ import { compileWhen, validateWhen } from "../core/cron.js";
 import { initOcc } from "../core/occurrence.js";
 import { SchedFsError } from "../core/paths.js";
 import {
-  defHash,
-  isApproved,
   SCHED_BG_DEFAULT_TYPE,
   SCHED_BG_TIMEOUT_MIN_S,
   SCHED_MAX_TASKS_PER_SESSION,
@@ -111,7 +105,7 @@ function unknownKeys(rec: Record<string, unknown>, allowed: ReadonlySet<string>)
   return Object.keys(rec).find((k) => !allowed.has(k));
 }
 
-/** Raw (external) field bag: the tool's flat params, `/schedule` flags and `__put` JSON all map onto it. */
+/** Raw (external) field bag: the tool's flat params and `/schedule` flags all map onto it. */
 export interface RawFields {
   name?: unknown;
   form?: unknown;
@@ -317,11 +311,6 @@ function taskOf(id: string, def: TaskDef, ownerCwd: string, origin: OpOrigin, no
   };
 }
 
-/** `defHash` the stored task would have — what the web review dialog binds (create: this cwd). */
-export function previewHash(def: TaskDef, ownerCwd: string): string {
-  return defHash(taskOf("s_aaaaaaaa", def, ownerCwd, { by: "user", via: "tui" }, 0));
-}
-
 // ----------------------------------------------------------------- store resolution
 
 function storeFailure(err: unknown): OpFail {
@@ -347,24 +336,12 @@ function fromChange(c: TaskChange): OpResult<ScheduleTask> {
 
 // ----------------------------------------------------------------- create
 
-export interface CreateOpts {
-  /** `__put`: the hash the review dialog bound; must equal the hash of what will be stored (E_REV). */
-  expectHash?: string;
-}
-
-export async function createTask(
-  ports: OpsPorts,
-  raw: RawFields,
-  origin: OpOrigin,
-  opts: CreateOpts = {},
-): Promise<OpResult<ScheduleTask>> {
+export async function createTask(ports: OpsPorts, raw: RawFields, origin: OpOrigin): Promise<OpResult<ScheduleTask>> {
   const refusal = ports.agent.gate();
   if (refusal !== undefined) return refusalOf(refusal);
   const def = resolveDef(raw, undefined, ports);
   if (!def.ok) return def;
   const ownerCwd = ports.ownerCwd();
-  if (opts.expectHash !== undefined && previewHash(def.value, ownerCwd) !== opts.expectHash)
-    return fail("E_REV", "the submitted content differs from the reviewed content; review again");
   let store: SessionStore;
   try {
     store = ports.agent.ensureStore();
@@ -376,8 +353,6 @@ export async function createTask(
     let id = newTaskId();
     while (draft.tasks.some((t) => t.id === id)) id = newTaskId();
     const task = taskOf(id, def.value, ownerCwd, origin, ctx.now);
-    if (origin.by === "user")
-      task.approval = { hash: defHash(task), by: "user", via: origin.via === "web" ? "web" : "tui", at: ctx.now };
     draft.tasks.push(task);
     draft.occ[id] = initOcc(task, ctx.now);
     return { value: structuredClone(task), write: true };
@@ -390,39 +365,13 @@ export async function createTask(
 
 // ----------------------------------------------------------------- update
 
-export interface UpdateOpts {
-  /** Edit form: the defHash the form was loaded from — CAS against the current definition (E_REV). */
-  baseHash?: string;
-  /** `__put`: hash bound by the review dialog (see CreateOpts). */
-  expectHash?: string;
-  /**
-   * The caller proved the user reviewed the COMPLETE new definition (`__put`: the dialog showed it and
-   * `expectHash` binds it): a user edit then approves it even when the task was pending before.
-   */
-  approveReviewed?: boolean;
-  /**
-   * Called once INSIDE the lock, after validation and before the fields are rewritten, with a structured
-   * clone of the task as it was (#61: `confirm` records the rollback baseline for "reject = undo the AI's
-   * change"). Read-only; a throw is swallowed.
-   */
-  onBase?: (before: ScheduleTask) => void;
-}
-
-/** Edit any of name / when / prompt / feishu / bg / form. `origin` decides re-approval (module header). */
-export async function updateTask(
-  ports: OpsPorts,
-  id: string,
-  raw: RawFields,
-  origin: OpOrigin,
-  opts: UpdateOpts = {},
-): Promise<OpResult<ScheduleTask>> {
+/** Edit any of name / when / prompt / feishu / bg / form. */
+export async function updateTask(ports: OpsPorts, id: string, raw: RawFields): Promise<OpResult<ScheduleTask>> {
   const refusal = ports.agent.gate();
   if (refusal !== undefined) return refusalOf(refusal);
   const store = ports.agent.store();
   if (store === undefined || !SCHED_TASK_ID_RE.test(id)) return fail("E_INVALID", `no such task ${id}`);
-  const change = await changeTask(store, id, (task, now) => {
-    if (opts.baseHash !== undefined && defHash(task) !== opts.baseHash)
-      return { refuse: "E_REV", detail: "the task changed since it was loaded; review again" };
+  const change = await changeTask(store, id, (task) => {
     const def = resolveDef(raw, defOf(task), ports);
     if (!def.ok) return { refuse: def.code, detail: def.detail };
     const next = taskOf(
@@ -432,18 +381,6 @@ export async function updateTask(
       { by: task.createdBy, via: task.createdVia },
       task.createdAt,
     );
-    const nextHash = defHash(next);
-    if (opts.expectHash !== undefined && nextHash !== opts.expectHash)
-      return { refuse: "E_REV", detail: "the submitted content differs from the reviewed content; review again" };
-    if (opts.onBase !== undefined) {
-      try {
-        opts.onBase(structuredClone(task));
-      } catch {
-        /* a baseline observer must never break the write */
-      }
-    }
-    const wasApproved = isApproved(task);
-    const hashChanged = nextHash !== defHash(task);
     task.name = next.name;
     task.form = next.form;
     task.when = next.when;
@@ -451,9 +388,6 @@ export async function updateTask(
     task.feishu = next.feishu;
     if (next.bg === undefined) delete task.bg;
     else task.bg = next.bg;
-    // User edit keeps an already-approved task approved; a pending task is NEVER approved by an edit.
-    if (origin.by === "user" && ((wasApproved && hashChanged) || (opts.approveReviewed === true && opts.expectHash)))
-      task.approval = { hash: nextHash, by: "user", via: origin.via === "web" ? "web" : "tui", at: now };
     return undefined;
   });
   const out = fromChange(change);
@@ -475,7 +409,7 @@ export interface RevokeOpts {
   revoke?: (taskId: string) => void;
 }
 
-/** Ledger half of the I1 revocation (queued message runs of `taskId` → `dropped(task-changed)`); shared with confirm's reject-delete. */
+/** Ledger half of the I1 revocation (queued message runs of `taskId` → `dropped(task-changed)`); . */
 export async function dropQueuedRuns(store: SessionStore, taskId: string): Promise<void> {
   // Best effort: a failed write leaves the runs to the dispatcher's own CAS (task-changed / E_REV paths).
   await store.transact<number>((draft, ctx) => {
@@ -497,7 +431,7 @@ export async function setTaskEnabled(
   if (!SCHED_TASK_ID_RE.test(id)) return fail("E_INVALID", `no such task ${id}`);
   const out = fromChange(
     await changeTask(store, id, (task) => {
-      task.enabled = enabled; // resume NEVER approves (§4.3)
+      task.enabled = enabled;
       return undefined;
     }),
   );

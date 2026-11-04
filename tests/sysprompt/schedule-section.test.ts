@@ -22,16 +22,18 @@ describe("pi_schedules section", () => {
     expect(foldSections("BASE", [reg.provider(input) as string])).toBe("BASE");
   });
 
-  it("lists DEFINITIONS only: no next-run time, no run state; pending marker present until approved", async () => {
+  it("lists DEFINITIONS only: no next-run time, no run state; never a pending marker; immediate-effect wording", async () => {
     env = a3Env();
     const reg = scheduleSection({ agent: () => env.agent });
     await createTask(env.ports, basicRaw(), { by: "agent", via: "tool" });
     await createTask(env.ports, basicRaw({ name: "mine", form: "message" }), { by: "user", via: "tui" });
     const text = reg.provider(input) as string;
     expect(text.startsWith(SCHEDULES_TITLE)).toBe(true);
-    expect(text).toMatch(
-      /- s_[a-z2-7]{8} "daily" · cron "0 8 \* \* \*" Asia\/Shanghai · background · feishu · pending/,
+    expect(text).toMatch(/- s_[a-z2-7]{8} "daily" · cron "0 8 \* \* \*" Asia\/Shanghai · background · feishu$/m);
+    expect(text).toContain(
+      "Tasks you create or change take effect immediately; the user can pause or delete them at any time.",
     );
+    expect(text).not.toMatch(/pending|approv/i);
     expect(text).toMatch(/- s_[a-z2-7]{8} "mine" · cron "0 8 \* \* \*" Asia\/Shanghai · message$/m);
     expect(text).not.toMatch(/next|running|fired|missed|paused/i);
     // the text does not depend on time passing
