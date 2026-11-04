@@ -1,6 +1,10 @@
-# #14 P2a / P2b implementation report
+# #14 P2a / P2b / P2c implementation report
 
 Updated 2026-11-05. P2a is committed as `a8d431c3` (including its declared trace refresh). This report describes the P2b delta against that baseline. P2b performed no git writes or fixture refreshes.
+
+**P2c follow-up:** the runtime injection window was subsequently authorized. The
+P2b blocker below is historical; the P2c section at the end supersedes it for real
+child/nested consumption. P3 activation/audit/UI are still separate packages.
 
 ## Verdict and scope
 
@@ -95,3 +99,147 @@ Actual output: **222 files passed / 3547 tests passed**, 280.06s, exit 0. This i
 - `timeout 180 npm run build`: latest exit 0, `build:bundle ok`, 4.59 MB, inputs=666. Log: `/tmp/pi-toolkit-p2b-build-final.log`.
 - Final focused rerun: 4 files / 37 tests passed. Log: `/tmp/pi-toolkit-p2b-new-tests-final.log`.
 - Exact changed-file Prettier write/check and `git diff --check`: exit 0. Worktree fixture diff: exit 0. Against origin/dev only the already committed B-tier governance/activate-trace.json differs; A-tier changes are empty. No full npm test, release, git write, or B-tier regeneration was run.
+
+## P2c — real child/nested InvocationRef consumer
+
+### Completed runtime path
+
+The only `src/stack.ts` edit is the PiSessionDriver constructor passing the optional
+activation-local façade from the existing xs input object. `StackXsInput` itself,
+`fabric/xs/{receiver,stack}.ts`, hub xs, web-hub agent/index/connection, tool parameter
+schemas and fixtures were not edited by P2c. Other packages have concurrent changes
+in this worktree; they are not P2c's delivery.
+
+`activate.ts` builds `HumanRuntime` only under the frozen activation gate. It supplies
+live source membership/epoch/state-capability, main sender/reply port and the real
+runner-backed child causal level. The global grant park gains only capped pure-data
+child owner bindings. A child driver consumes a real host runId, the previously
+verified admitted edge and precise parent call; an exclusive random driver owner
+binds its bounded context sequence and exact SDK toolCallId. No metadata, prompt,
+whole-turn human flag, guessed unique parent or new child membership is used.
+
+Root background Agent can start driver creation before its result returns. The
+façade waits at most one clamped 1s unref timer, only for a real edge and signed
+potential Agent parent (cap64). The actual Agent result, not the potential match,
+links authority. No proof means no wait or tool. Expiry/capacity/owner ambiguity
+fail closed.
+
+Blocking nested Agent returns its childRunId only after the child finishes. The
+approved activation-local AsyncLocalStorage carries **only pure InvocationRef
+DATA**, only around an already authorized child's SDK Agent.execute(toolCallId).
+Nested create still verifies the actual host admitted parent/child edge; it cannot
+use model parameters or a different parent's async store. Missing store/result,
+mismatched edges and duplicate driver ownership fail closed.
+
+Authorized SDK sessions append only `message_session`, with the normal schema,
+shared main sender/reply and host-owned invocation. Per-run allowlists append just
+this name; readonly provenance, explicit exclude/deny, noTools/all, external,
+secure and off remain uninjected. Public DefaultResourceLoader extensionFactories
+supply observers while preserving caller resources and original extension runtime;
+no private SDK APIs or inherited -e path are used.
+
+The child source/lifetime is rechecked after address resolution (even explicit
+wake:true cannot send after disposal). Its causal level is read **after resolve**,
+maxed with current root, and never reset to zero for delegation. The normal sender
+performs one grant CAS and one original body send/receipt. Parallel/nested calls
+share their input's allowance, not additional grants.
+
+Actual SDK agent_end, branch/compaction hooks, committed switch_context boundary
+entries, PiSessionHandle abort/dispose and host source invalidation clear authority.
+Host switch/fork/start/shutdown calls detach synchronously: local binding closures
+and waiter timers are removed, ALS is disabled, and a generation guard refuses
+old waiter continuations. Ended parents' own calls cannot revive; already linked
+live descendants remain until their own end. No child session_shutdown assumption.
+
+### Evidence and limits
+
+The new integration suite uses production Agent tools (root background, nested
+blocking default and nested background), actual PiSessionDriver/create/bind and
+real SDK sessions with scripted provider results. Admission and hub transport are
+controlled ports that record the real test host edge; this is **not** claimed as a
+full production SpawnService-to-network end-to-end run. The complementary existing
+real hub/stack regressions remain required.
+
+Assertions cover exact child context/call and original track, source metadata not
+leaking into provider messages, default nested blocking, background nesting,
+concurrent nested calls from different proven inputs retaining separate grants
+across interleaved awaits, wrong-parent refusal, simultaneous children sharing one
+CAS, live level raised during resolve, disposal during resolve, reload/switch,
+actual SDK boundary-draft revocation before the next provider call, secure and
+ordinary/readonly/noTools/excluded/off/forged-meta child absence. Pure runtime tests
+pin unref/one-shot wait bounds, missing-edge no wait, duplicate owner refusal,
+context/owner exactness, descendant preservation and synchronous detach cleanup.
+
+### P2c changed files (absolute)
+
+```text
+/home/bluecake/ai/pi-toolkit/src/fabric/xs/activate.ts
+/home/bluecake/ai/pi-toolkit/src/fabric/xs/human-grant.ts
+/home/bluecake/ai/pi-toolkit/src/fabric/xs/sender.ts
+/home/bluecake/ai/pi-toolkit/src/runtime/human-runtime.ts
+/home/bluecake/ai/pi-toolkit/src/runtime/session-driver.ts
+/home/bluecake/ai/pi-toolkit/src/stack.ts
+/home/bluecake/ai/pi-toolkit/tests/runtime/human-runtime.test.ts
+/home/bluecake/ai/pi-toolkit/tests/integration/fabric-xs-human-child-runtime.test.ts
+/home/bluecake/ai/pi-toolkit/docs/dev/fabric-cross-session/README.md
+/home/bluecake/ai/pi-toolkit/docs/dev/subagent-core/README.md
+/home/bluecake/ai/pi-toolkit/docs/dev/fabric-xs-activation/P2-report.md
+```
+
+### Verification
+
+Initial directed regression (before the explicit host detach/concurrent-nested
+follow-up): **228 files / 3607 tests passed**, 278.84s, exit 0.
+`/tmp/pi-toolkit-p2c-regression.log` contains the full command output. It includes
+runtime/fabric, real hub xs and agent tests, the specified default-on/reply-off/
+child-scope/wiring/mention/wake suites and governance. No trace refresh was used.
+
+Final verification after the explicit detach/generation guards and concurrent
+nested/mismatch/resume tests and waiter-resume capacity recheck:
+
+- Directed command below: **228 files / 3612 tests passed**, 269.61s, exit 0.
+  Full output: `/tmp/pi-toolkit-p2c-regression-cap-final.log`.
+- Focused six-file rerun: **84 tests passed** (31 new P2c tests), 3.91s, exit 0.
+  `/tmp/pi-toolkit-p2c-focused-final.log`.
+- `timeout 180 npm run typecheck`: exit 0, both TS7 passes and vue-tsc succeeded.
+  `/tmp/pi-toolkit-p2c-typecheck-final.log`.
+- `timeout 180 npm run build`: exit 0; `build:bundle ok`, 4.62 MB, inputs=668.
+  `/tmp/pi-toolkit-p2c-build-final.log` (shared worktree build, not P2c-only input count).
+- A concurrent UI edit briefly caused readonly assignment errors in
+  `ui/src/logic/xsRequestState.ts`; P2c did not edit that forbidden file. The owner
+  corrected it and the final typecheck rerun above is green. Failure evidence is
+  retained in `/tmp/pi-toolkit-p2c-typecheck-ui-concurrent-failure.log`.
+- Exact eleven-file Prettier check: exit 0; `git diff --check`: exit 0.
+  `/tmp/pi-toolkit-p2c-format-final.log`.
+- `git diff --quiet -- tests/fixtures/`: exit 0. Against origin/dev, only the
+  already committed B-tier `governance/activate-trace.json` differs; A-tier changes
+  are empty. No fixture refresh or git writes were performed by P2c.
+
+```sh
+timeout 480 env PI_TOOLKIT_TEST_WORKERS=2 npx vitest run \
+  tests/fabric tests/runtime tests/web-hub/hub/xs*.test.ts tests/web-hub/agent \
+  tests/conformance/fabric-human-grant-context.test.ts \
+  tests/integration/fabric-xs-human-default-wake.test.ts \
+  tests/integration/fabric-xs-human-child-runtime.test.ts \
+  tests/integration/fabric-xs.test.ts tests/integration/fabric-xs-reply.test.ts \
+  tests/integration/fabric-xs-mention.test.ts tests/integration/fabric-xs-inbox.test.ts \
+  tests/integration/fabric-xs-activation.test.ts tests/integration/fabric-wiring.test.ts \
+  tests/integration/mention-autocomplete-wiring.test.ts tests/integration/fabric-wake*.test.ts \
+  tests/integration/fabric-xs-channel-compat.test.ts \
+  tests/integration/fabric-xs-reply-off-golden.test.ts \
+  tests/integration/fabric-xs-child-scope.test.ts tests/governance
+```
+
+No full-repository npm test was requested/run. The requested directed gates all
+passed; there is no unresolved P2c test/build failure. Full production spawn/network
+E2E, P3 activation/audit/UI and other packages' concurrent diffs are not claimed as
+P2c acceptance.
+
+### P3 handoff
+
+P2c adds no wake_session/activate tool or capability. P3 should consume the same
+original `track.messageId/activationKey`, progress and source wake overlay already
+returned by the main sender; nested tools retain the same original receipt. Never
+infer a key from runId/toolCallId/request id/body. No new child xs connection is
+needed or permitted. P3 registration belongs to the activation owner, with any
+declared B-tier trace change handled separately; P2c has no registration change.

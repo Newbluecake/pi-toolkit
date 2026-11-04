@@ -48,6 +48,7 @@ interface Grant {
   contexts: Array<{ runKey: string; contextSeq: number; owner: string }>;
   calls: InvocationRef[];
   children: string[];
+  childOwners?: Array<{ runKey: string; owner: string }>;
   claim?: HumanGrantClaim;
   state: "available" | "reserved" | "consumed";
 }
@@ -84,6 +85,9 @@ export function createHumanGrantPort(
   discardInput(ref: HumanGrantRef): void;
   endRun(sessionId: string, runKey: string): void;
   observeSpawnEdge(sessionId: string, parent: string, child: string): void;
+  childPending(sessionId: string, rootOwner: string, runKey: string): boolean;
+  openChild(sessionId: string, rootOwner: string, runKey: string, owner: string): HumanGrantRef | undefined;
+  bindChildContext(ref: HumanGrantRef, runKey: string, owner: string, contextSeq: number): boolean;
 } {
   const sweep = () => {
     data.grants = data.grants.filter((g) => now() < g.expiresAt);
@@ -152,6 +156,50 @@ export function createHumanGrantPort(
         if (bound && !g.calls.some((c) => sameCall(c, call))) g.calls.push({ ...call });
       }
     },
+    childPending(sessionId, rootOwner, runKey) {
+      sweep();
+      const edge = data.edges.find((e) => e.sessionId === sessionId && e.child === runKey);
+      return (
+        !!edge &&
+        data.grants.some(
+          (g) =>
+            g.sessionId === sessionId &&
+            g.owner === rootOwner &&
+            (g.children.includes(runKey) ||
+              g.calls.some(
+                (c) => c.toolName === "Agent" && (g.rootRunKey === c.runKey ? "root" : c.runKey) === edge.parent,
+              )),
+        )
+      );
+    },
+    openChild(sessionId, rootOwner, runKey, owner) {
+      sweep();
+      const matches = data.grants.filter(
+        (g) => g.sessionId === sessionId && g.owner === rootOwner && g.children.includes(runKey),
+      );
+      if (matches.length !== 1 || !owner) return undefined;
+      const g = matches[0]!;
+      const owners = g.childOwners ?? (g.childOwners = []);
+      const existing = owners.find((c) => c.runKey === runKey);
+      if ((existing && existing.owner !== owner) || (owners.length >= 64 && !existing)) return undefined;
+      if (!existing) owners.push({ runKey, owner });
+      return { id: g.id };
+    },
+    bindChildContext(ref, runKey, owner, contextSeq) {
+      const g = find(ref);
+      if (
+        !g ||
+        !g.children.includes(runKey) ||
+        !g.childOwners?.some((c) => c.runKey === runKey && c.owner === owner) ||
+        !Number.isSafeInteger(contextSeq) ||
+        contextSeq < 1 ||
+        g.contexts.length >= 256
+      )
+        return false;
+      if (!g.contexts.some((c) => c.runKey === runKey && c.contextSeq === contextSeq && c.owner === owner))
+        g.contexts.push({ runKey, owner, contextSeq });
+      return true;
+    },
     observeSpawnEdge(sessionId, parent, child) {
       sweep();
       if (data.edges.length < 256 && !data.edges.some((e) => e.child === child))
@@ -201,11 +249,13 @@ export function createHumanGrantPort(
     },
     endRun(sessionId, runKey) {
       sweep();
+      data.edges = data.edges.filter((e) => e.sessionId !== sessionId || e.child !== runKey);
       data.grants = data.grants.filter((g) => {
         if (g.sessionId !== sessionId) return true;
         g.contexts = g.contexts.filter((c) => c.runKey !== runKey);
         g.calls = g.calls.filter((c) => c.runKey !== runKey);
         g.children = g.children.filter((c) => c !== runKey);
+        g.childOwners = g.childOwners?.filter((c) => c.runKey !== runKey) ?? [];
         return g.contexts.length > 0 || g.children.length > 0;
       });
     },
@@ -259,7 +309,11 @@ export function revokeHumanWebDispatch(owner: string): void {
  * Only host-observed user messages subsequently present in context bind an input.
  * This adapter never reads model input.source/meta/grantId.
  */
-export function createHumanGrantHost(port = getHumanGrantPort(), owner = randomUUID()) {
+export function createHumanGrantHost(
+  port = getHumanGrantPort(),
+  owner = randomUUID(),
+  onChildLinked?: (runId: string) => void,
+) {
   let runKey = randomUUID();
   let contextSeq = 0;
   let active: HumanGrantRef | undefined;
@@ -291,6 +345,7 @@ export function createHumanGrantHost(port = getHumanGrantPort(), owner = randomU
       .join("\n");
   };
   return {
+    owner,
     input(event: { source: string; text: string }, sessionId: string) {
       for (let i = pending.length - 1; i >= 0; i--) if (Date.now() >= pending[i]!.expiresAt) pending.splice(i, 1);
       if (pending.length >= HUMAN_GRANT_CAP) return;
@@ -383,7 +438,10 @@ export function createHumanGrantHost(port = getHumanGrantPort(), owner = randomU
     toolResult(toolCallId: string, toolName: string, details: unknown, isError: boolean) {
       const call = calls.get(toolCallId);
       const child = (details as { runId?: unknown } | undefined)?.runId;
-      if (!isError && toolName === "Agent" && call && typeof child === "string") port.linkInvocation(call, child);
+      if (!isError && toolName === "Agent" && call && typeof child === "string") {
+        port.linkInvocation(call, child);
+        onChildLinked?.(child);
+      }
     },
     end(sessionId: string) {
       port.endRun(sessionId, runKey);

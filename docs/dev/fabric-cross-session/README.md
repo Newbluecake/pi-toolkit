@@ -385,7 +385,9 @@ true/false and replyTo take precedence, no grant crosses xs, no quota or causal
 level reset is added. The same ref can follow real spawn edges: stack's admission
 hook records the edge; the host Agent tool result connects the exact invocation
 and returned childRunId. Neither result text nor prompt/model metadata grants an
-edge. No new child xs tools are installed.
+edge. P2c injects only a host-owned `message_session` SDK tool into an authorized
+child; ordinary/readonly/excluded/noTools/secure/external/off children remain inert.
+Children acquire no xs membership, connection, caps or bridge of their own.
 
 The bridge's send port correlates progress only by the **original send rid** while
 that send is live; sourceRid is never a tool parameter or model payload. A confirmed
@@ -399,19 +401,36 @@ web mention branch marks its exact cmdId consumed; the shared mention subscripti
 uses session/owner-unique dispatched input matching and preserves onHandled once.
 Legacy/off command results and notice text retain their old shape.
 
-**Staged integration blockers (not completed U5):** the current hub resolve path
-does not yet stamp `target.xsState`; P2 consumes this authoritative optional proof,
-but never substitutes local+hub caps for the target's cap. Therefore real delegated
-omitted-wake calls currently fail closed to deliver-only (direct human mentions
-already explicitly request wake). Actual child-driver context/invocation/lifecycle
-consumers are also not wired in this package's narrow stack-only window: pure
-nested shared-ref behavior is tested, not claimed as full runtime propagation.
-These need the hub/router and runtime execution owners' follow-up windows.
-Sender requested-wake downgrade metadata is source-local until the tracked wire
-fields are added by their protocol/router owners; audit/UI remain separate owners.
+P2b's hub resolve stamps `target.xsState` only for the actual target socket when
+hub/source/target all support state; missing proof never defaults a delegated wake.
+P2c's activation-local human-runtime façade is passed only at the PiSessionDriver
+constructor. It binds a real admitted childRunId to a unique driver owner, observes
+exact SDK context/tool_call/tool_result events, and proxies the shared main sender.
+Root Agent result races get one unref'd, clamped 1s wait (cap64), only after an
+already proven potential parent and real spawn edge. No proof means no wait/tool.
+For blocking nested Agent, a per-activation AsyncLocalStorage carries only the
+exact captured SDK execute InvocationRef to nested driver creation; the recorded
+admission edge still must agree. No model argument or guessed parent is authority.
+The source session/epoch and child lifetime are checked after address resolve;
+child causal level is read live at the wake decision and maxed with root, never
+reset. Per-run allowlists gain only this host SDK tool, never readonly provenance.
+Dispose/abort/agent_end/branch changes and committed child switch boundary entries
+end that run's references while preserving already live descendants. New owners
+cannot take over old child bindings. Switch/fork/start/shutdown detach synchronously
+clears local binding closures and waiters and disables ALS; a generation guard
+refuses a waiter resumed across detach. No callbacks/senders/SDK sessions enter the
+global grant park (child owners are bounded pure data).
+
+**Remaining staged work:** tracked wire downgrade continuity, activation tools,
+audit/UI and their gates belong to the protocol/router/P3 owners, not P2c. The new
+SDK tests use real Agent tools and PiSessionDriver sessions with scripted providers;
+only admission/transport ports are controlled, not a full SpawnService/network test.
 
 Tests: `tests/fabric/xs-{human-grant,sender-human-grant}.test.ts`,
 `tests/web-hub/agent/{xs-state-bridge,commands-mention-session}.test.ts` plus the
-unchanged default-on fabric/reply/mention/inbox/wake wiring regression suites.
+unchanged default-on fabric/reply/mention/inbox/wake wiring regression suites;
+`tests/runtime/human-runtime.test.ts` and
+`tests/integration/fabric-xs-human-child-runtime.test.ts` pin P2c owner/lifecycle
+and actual SDK child/blocking+background nested consumption.
 P2 adds input/message_start/tool_call/tool_result registrations before the existing
 B1 hook; P5 must refresh the declared B-tier governance trace, never A-tier goldens.

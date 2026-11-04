@@ -170,3 +170,30 @@ schedule at all). Rules that are easy to break:
   G8: `session_shutdown` ends by `delete holder.current` (identity-checked, in `finally`), so a late holder-routed call fails with
   `no active session yet` instead of being answered by the torn-down stack; `createTidyPort` degrades instead of throwing.
   **Still open:** G5/G6 only (missing from the unreachable path B — deliberately not fixed).
+
+## Host human delegation in child sessions (#14 P2c)
+
+`PiSessionDriver` accepts an optional activation-local `HumanRuntime` façade from
+its stack constructor. Missing façade/proof, readonly provenance, explicit exclusion,
+noTools/all, external and secure sessions follow the existing loader/tool path.
+Authorized children append only the host SDK `message_session`, plus a public
+DefaultResourceLoader inline observer (caller resources/runtime are retained).
+Exact driver owner/context/toolCallId references derive from a real admitted edge
+and precise parent invocation, never prompt/model metadata. Blocking nested Agent
+execute uses activation-local AsyncLocalStorage of pure InvocationRef data so its
+child can bind before the late blocking tool_result. The admission edge remains
+mandatory. Root background result races wait once for <=1s with an unref timer,
+only for a verified potential parent (64 waiters); absent proof fails closed.
+
+The tool calls the main sender/reply port; children acquire no xs membership/caps.
+Current child causal level is read after resolve and cannot lower root level.
+SDK agent_end, compaction/branch boundaries, actual switch_context boundary entries,
+PiSessionHandle abort/dispose and source epoch/lifetime invalidation revoke that
+run's calls/context/owner while retaining already live descendants. Cleanup does
+not rely on child session_shutdown. The global grant park contains bounded DATA
+only; all SDK/resource/sender/waiter closures stay activation/handle-local.
+
+Tests: `tests/runtime/human-runtime.test.ts`,
+`tests/integration/fabric-xs-human-child-runtime.test.ts`. The latter exercises
+real SDK sessions and production Agent tools (blocking and background nesting),
+using controlled admitted-edge and transport ports, not a full network runner.

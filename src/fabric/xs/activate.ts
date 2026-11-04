@@ -1,3 +1,4 @@
+import { createHumanRuntime, type HumanRuntime } from "../../runtime/human-runtime.js";
 import { createHumanGrantHost, getHumanGrantPort } from "./human-grant.js";
 import { XS_STATE_HUB_CAP } from "../../web-hub/protocol/xs-activation.js";
 import { homedir, tmpdir } from "node:os";
@@ -73,7 +74,7 @@ export interface XsActivation {
   /** session_start with a live previous stack: a NEW session identity proves the old one ended. */
   defensiveTeardown(nextSessionId: string | undefined): void;
   /** `buildSessionStack`'s xs argument (undefined when xs is off). */
-  stackInput(): StackXsInput | undefined;
+  stackInput(): (StackXsInput & { humanRuntime?: HumanRuntime }) | undefined;
   /** session_start after `holder.current = stack`: id, inbox re-render, attached flag, tool-collision scan. */
   attach(stack: Stack, ctx: ExtensionContext, pi: ExtensionAPI, nextSessionId: string | undefined): void;
   /** `{ xs }` slot of the wireWebHub deps (empty object when xs is off). */
@@ -94,7 +95,10 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
   }); // frozen per activate: tools/caps/stack all share this gate
   const activationOn = xsEnabled && settings.fabric.crossSession.activation.enabled;
   const humanGrants = activationOn ? getHumanGrantPort() : undefined;
-  const humanHost = activationOn ? createHumanGrantHost(humanGrants) : undefined;
+  let humanRuntime: HumanRuntime | undefined;
+  const humanHost = activationOn
+    ? createHumanGrantHost(humanGrants, undefined, (id) => humanRuntime?.childLinked(id))
+    : undefined;
   const replyEnabled = xsEnabled && settings.fabric.crossSession.reply.enabled; // frozen per activate
   // Channel-plan §3.1/§6 (CHW): frozen per activate (non-live). Off ⇒ old-agent shape: no
   // `xs.channel.v1` cap, no `message_channel`, the legacy `list_sessions` instance, named channels suspended.
@@ -297,10 +301,12 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
       });
       pi.on("session_before_switch", () => {
         if (xsSessionId) humanHost?.revoke(xsSessionId);
+        humanRuntime?.detach();
         holder.current?.xs?.fence.onEvent({ type: "session_before_switch" });
       });
       pi.on("session_before_fork", () => {
         if (xsSessionId) humanHost?.revoke(xsSessionId);
+        humanRuntime?.detach();
         holder.current?.xs?.fence.onEvent({ type: "session_before_fork" });
       });
     }
@@ -315,6 +321,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     pi.on("session_shutdown", (event, ctx) => {
       if (event.reason !== "reload" && xsSessionId) humanHost?.revoke(xsSessionId);
       xsAttached = false;
+      humanRuntime?.detach();
       holder.current?.disposeXsSync(); // fence session_shutdown event, xs.dispose, rootWakeRecovery.dispose (Stack-owned)
       orphanWatch.dispose(); // wake-unknown-optimistic: clear the watch's timers/latch; the next session re-arms on demand
       if (event.reason !== "reload") {
@@ -569,6 +576,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
 
   function beginSessionStart(ctx: ExtensionContext, reason?: string): string | undefined {
     xsAttached = false;
+    humanRuntime?.detach();
     // Consume-once (any reason clears the slot): only a `/new` start adopts the handoff.
     const shot = takeXsMembershipHandoff();
     pendingHandoff = reason === "new" ? shot : undefined;
@@ -595,13 +603,30 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     if (xsSessionId && nextXsSessionId !== undefined && xsSessionId !== nextXsSessionId) xsLedger.teardown(xsSessionId);
   }
 
-  function stackInput(): StackXsInput | undefined {
+  if (humanHost && humanGrants)
+    humanRuntime = createHumanRuntime({
+      grants: humanGrants,
+      rootOwner: humanHost.owner,
+      reply: replyEnabled,
+      alias: aliasOn,
+      source: () => {
+        const xs = xsAttached ? holder.current?.xs : undefined;
+        return xs && webHubRef.current?.xs?.hubPort().stateCapable?.() === true
+          ? { sessionId: xs.sessionId(), epoch: xs.membership.epoch }
+          : undefined;
+      },
+      sender: () => xsSender,
+      runLevel: (id) => holder.current?.wake?.level.levelOf(id) ?? 0,
+    });
+
+  function stackInput(): (StackXsInput & { humanRuntime?: HumanRuntime }) | undefined {
     const handoff = pendingHandoff;
     pendingHandoff = undefined;
     const inheritDecided = aliasInherit;
     aliasInherit = false;
     return xsEnabled
       ? {
+          ...(humanRuntime ? { humanRuntime } : {}),
           ...(handoff !== undefined ? { membershipHandoff: handoff } : {}),
           ports: {
             webExec: () => webHubRef.current?.webExecBusy?.() === true,

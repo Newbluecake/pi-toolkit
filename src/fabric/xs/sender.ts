@@ -403,6 +403,10 @@ export interface XsSenderMessageArgs {
   levelOverride?: 0;
   /** Captured at the host tool execute boundary, never from raw parameters. */
   invocation?: InvocationRef;
+  /** Host driver CURRENT causal level; never a tool/model parameter. */
+  invocationLevel?: () => number;
+  /** Driver lifetime proof rechecked after resolve; no new root/off hook. */
+  invocationLive?: () => boolean;
 }
 
 export interface XsSender {
@@ -506,7 +510,8 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
         return { status: "bad_target", effect: "none", reason: "bad_target" };
       }
       const snapshot = deps.origin.current();
-      if (!snapshot || !guardOk(snapshot, args.signal)) {
+      const invocationLive = () => args.invocationLive?.() !== false;
+      if (!snapshot || !guardOk(snapshot, args.signal) || !invocationLive()) {
         return { status: "origin_changed", effect: "none", reason: "origin_changed" };
       }
       if (deps.channels && !deps.channels.linkJoined(deps.port.hubChannelCap?.() === true)) {
@@ -526,7 +531,7 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
       const resolveReply = await deps.port.resolve({ origin: snapshot, query: to });
       // r3 M2 + §11.2 X3 anchor: `/new` (or leave, or abort) DURING the resolve round trip ⇒ the
       // send frame is never issued and the verdict is a provable `none`.
-      if (!guardOk(snapshot, args.signal)) {
+      if (!guardOk(snapshot, args.signal) || !invocationLive()) {
         return { status: "origin_changed", effect: "none", reason: "origin_changed" };
       }
       let resolvedTarget: { ref: string; name?: string; sessionId?: string; alias?: string } | undefined;
@@ -617,25 +622,26 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
       const defaultCandidate =
         stateNegotiated && replyToId === undefined && expectReq !== undefined && args.wake === undefined;
       const grantRef = defaultCandidate && args.invocation ? deps.humanGrants?.resolve(args.invocation) : undefined;
+      const wakeUsable = deps.wakeOn === true && deps.level !== undefined;
+      const currentChildLevel =
+        args.invocation && deps.humanGrants?.resolve(args.invocation) ? args.invocationLevel?.() : undefined;
+      const childLevel = Number.isSafeInteger(currentChildLevel) && currentChildLevel! >= 0 ? currentChildLevel! : 0;
+      const levelBase =
+        args.levelOverride !== undefined
+          ? args.levelOverride
+          : wakeUsable
+            ? Math.max(deps.level!.levelOfRoot(), childLevel)
+            : undefined;
       // Check size for the possible default wake BEFORE claiming (quota/guard/receivability above).
       if (
         grantRef &&
-        !sendFrameBytesOk(
-          snapshot,
-          sendTo,
-          truncate(args.text ?? "", maxChars),
-          true,
-          deps.wakeOn ? deps.level?.levelOfRoot() : undefined,
-          { expect: true },
-        )
+        !sendFrameBytesOk(snapshot, sendTo, truncate(args.text ?? "", maxChars), true, levelBase, { expect: true })
       )
         return { status: "too_large", effect: "none", reason: "too_large" };
       if (grantRef && args.invocation) grantClaim = deps.humanGrants?.reserve(grantRef, args.invocation, sendTo);
       const defaulted = defaultCandidate && (isHuman || grantClaim !== undefined);
       const wantWake = replyToId === undefined && (args.wake === true || defaulted);
-      const wakeUsable = deps.wakeOn === true && deps.level !== undefined;
-      const levelBase =
-        args.levelOverride !== undefined ? args.levelOverride : wakeUsable ? deps.level!.levelOfRoot() : undefined;
+
       if (wantWake) {
         if (!wakeUsable) localDowngrade = "sender_wake_disabled";
         else if (!deps.level!.hopAllowed(levelBase ?? 0)) localDowngrade = "level_limit";

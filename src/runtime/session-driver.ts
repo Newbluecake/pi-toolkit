@@ -1,3 +1,10 @@
+import {
+  humanRunId,
+  grantHumanScope,
+  withHumanBinding,
+  type HumanRuntime,
+  type ChildHumanBinding,
+} from "./human-runtime.js";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { assertSessionFileInDomain, secureChildSessionDir } from "../secure/domain.js";
 import { DefaultResourceLoader, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -420,9 +427,16 @@ class PiSessionHandle implements SessionHandle {
   constructor(
     public readonly session: AgentSession,
     readonly childExtensionMissing: boolean = false,
+    private readonly humanCleanup?: () => void,
   ) {
     this.sessionId = session.sessionId;
     this.sessionFile = session.sessionFile;
+    if (humanCleanup)
+      session.subscribe((event: unknown) => {
+        // Child switch_context commits a boundary draft, not session_compact.
+        // Invalidate on its actual persisted entry, even before bind() runs.
+        if (mapEvent(event)?.t === "context_switch") humanCleanup();
+      });
   }
   measureInputBudget(prompt: string): { preBytes: number; preTokens: number } {
     const byteLength = (value: string) => Buffer.byteLength(value, "utf8");
@@ -471,11 +485,13 @@ class PiSessionHandle implements SessionHandle {
     );
   }
   requestAbort() {
+    this.humanCleanup?.();
     this.session.abort();
     return Promise.resolve();
   }
   dispose(): DisposeReport {
     try {
+      this.humanCleanup?.();
       this.session.dispose();
       return { returned: true, killed: 0, unkillable: [] };
     } catch (e) {
@@ -706,6 +722,7 @@ export class PiSessionDriver implements SessionDriver {
   constructor(
     private readonly rememberAgents = true,
     private readonly resolveModel?: ModelResolver,
+    private readonly humanRuntime?: HumanRuntime,
   ) {}
 
   /** SessionSpec.model arrives as a {provider, id} pair; createAgentSession
@@ -758,15 +775,34 @@ export class PiSessionDriver implements SessionDriver {
     // src/child/activation-signal.ts for why "did the counter advance at all" (not "by exactly
     // one") is the correct check here.
     const activationBefore = childActivationSnapshot();
-    return toCreateOptions(resolved, cwd)
-      .then((options) =>
-        createAgentSession({
-          ...options,
-          sessionManager,
-          ...(persist ? {} : { persist: false }),
-        } as Parameters<typeof createAgentSession>[0]),
-      )
-      .then(({ session }) => new PiSessionHandle(session, computeChildExtensionMissing(activationBefore)));
+    return this.createWithHuman(resolved, spec, cwd, secureDir !== undefined, activationBefore, {
+      sessionManager,
+      ...(persist ? {} : { persist: false }),
+    });
+  }
+  private async createWithHuman(
+    resolved: SessionSpec,
+    request: SessionSpec,
+    cwd: string,
+    secure: boolean,
+    activationBefore: number,
+    extra: Record<string, unknown>,
+  ) {
+    let binding: ChildHumanBinding | undefined;
+    try {
+      const runId = !secure && this.humanRuntime ? humanRunId(request) : undefined;
+      binding = runId ? await this.humanRuntime!.prepare(runId) : undefined;
+      let options = await toCreateOptions(resolved, cwd);
+      if (binding) options = await withHumanBinding(options, cwd, binding);
+      const { session } = await createAgentSession({ ...options, ...extra } as Parameters<
+        typeof createAgentSession
+      >[0]);
+      if (binding) grantHumanScope(request);
+      return new PiSessionHandle(session, computeChildExtensionMissing(activationBefore), binding?.dispose);
+    } catch (error) {
+      binding?.dispose();
+      throw error;
+    }
   }
   resume(sessionFile: string, spec: SessionSpec) {
     // data-encryption §2.5: cross-domain resume (vault file from a plain process, or a file outside
@@ -779,9 +815,14 @@ export class PiSessionDriver implements SessionDriver {
     const resolved = this.withResolvedModel(spec);
     const sessionManager = SessionManager.open(sessionFile, undefined, resolved.cwd);
     const activationBefore = childActivationSnapshot();
-    return toCreateOptions(resolved, resolved.cwd ?? sessionManager.getCwd())
-      .then((options) => createAgentSession({ ...options, sessionManager } as Parameters<typeof createAgentSession>[0]))
-      .then(({ session }) => new PiSessionHandle(session, computeChildExtensionMissing(activationBefore)));
+    return this.createWithHuman(
+      resolved,
+      spec,
+      resolved.cwd ?? sessionManager.getCwd(),
+      secureChildSessionDir() !== undefined,
+      activationBefore,
+      { sessionManager },
+    );
   }
   bind(h: SessionHandle, onEvent: (e: DriverEvent) => void) {
     const session = (h as PiSessionHandle)["session"];

@@ -1529,7 +1529,11 @@ export function buildSessionStack(
     // external-agent plan §5.5 (P5)：端口存在 ⇒ RoutingSessionDriver 按 spec.external 分派
     // 外部 run，其余原样委托 pi driver；缺席 ⇒ 纯 PiSessionDriver（与改动前一致）。
     driver: (() => {
-      const piDriver = new PiSessionDriver(settings.rememberAgents, (p, id) => ctx.modelRegistry.find(p, id));
+      const piDriver = new PiSessionDriver(
+        settings.rememberAgents,
+        (p, id) => ctx.modelRegistry.find(p, id),
+        (xsInput as StackXsInput & { humanRuntime?: import("./runtime/human-runtime.js").HumanRuntime }).humanRuntime,
+      );
       return externalPort !== undefined ? new RoutingSessionDriver(piDriver, externalPort.providers) : piDriver;
     })(),
     ...(externalPort !== undefined
