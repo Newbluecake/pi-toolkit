@@ -116,6 +116,12 @@ const detail = {
   bashJobsArchiveOmitted: "归档 {n} 条更早的已完成任务",
   // 2026-10-28: running rows pushed out of the wire by the 20-row cap / byte budget (not archivable).
   bashJobsRunningOverflow: "另有 {n} 条运行中的任务未显示",
+  // Composer todo 按钮（2026-11 用户需求）：输入框底行常驻的未完成任务按钮 + 只读面板
+  //（Composer.vue，styles/composer-todo.css）。状态/阻塞文案复用上方 todoStatus*/todoBlockedBy。
+  composerTodoAria: "查看未完成任务",
+  composerTodoTitle: "未完成任务",
+  composerTodoDone: "已完成 {n} 项",
+  composerTodoMore: "（+{n} 更多）",
 } satisfies Messages<typeof en>;
 
 export default detail;

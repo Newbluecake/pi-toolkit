@@ -1,0 +1,219 @@
+/*
+ * Composer todo chip + panel (todo-web follow-up, 2026-11 user request): an ALWAYS-VISIBLE
+ * open-tasks chip in the composer's bottom row. The chip is a SIBLING of `.composer-chips`
+ * (not a child), so the typing-time `.chips-off` fade (control.css) never touches it, and
+ * the `:has(.composer-todo)` row keeper below stops the bottom row's max-height collapse
+ * whenever the chip exists. Clicking the chip toggles a read-only, open-tasks-only panel
+ * above the input card (mention-panel-style in-flow block).
+ *
+ * Own file per the source-scan ban on scoped <style> blocks and the frozen
+ * `styles/todo.css` (todo-web T4) / `styles/detail.css` (fleet-drawer F6). Token-only.
+ * No todo chip rendered ⇒ no selector here matches ⇒ byte-identical pre-feature layout.
+ */
+
+/* Row keeper: with a todo chip present the bottom row stays expanded at EVERY width (the
+ * always-visible ruling; the ≥1025px desktop tier in control.css already never collapses —
+ * this extends the same behaviour to phones/mid-band, where typing would otherwise collapse
+ * the row and hide the chip). Same 24px chip-high tier as control.css's expanded state. */
+.composer-input:has(.composer-todo) .composer-bottom {
+  max-height: 24px;
+}
+
+/* External todo chip: positioned OUTSIDE the composer card, top-left corner.
+ * Green pill with ✓ icon + numeric badge. Always visible (not affected by chips-off). */
+.composer-todo-external {
+  position: absolute;
+  top: -24px;
+  left: 0;
+  z-index: 10;
+}
+
+.composer-todo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 15px;
+  padding: 0 6px;
+  border: 1px solid #2d5a3a;
+  border-radius: var(--r-pill);
+  background: #1a3a2a;
+  color: #6ee7b7;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+  white-space: nowrap;
+  position: relative;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.composer-todo-btn:hover {
+  border-color: #3d6a4a;
+  background: #234a32;
+}
+
+.composer-todo-btn:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
+.composer-todo-btn[aria-expanded="true"] {
+  border-color: #3d6a4a;
+  background: #234a32;
+}
+
+.composer-todo-btn .icon-sm {
+  flex: none;
+}
+
+/* Numeric badge in the top-right corner of the chip. */
+.composer-todo-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #6ee7b7;
+  color: #1a3a2a;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+/* Chip grammar mirrors `.model-chip` (models.css): 15px slim pill, tabular count. */
+.composer-todo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 15px;
+  padding: 0 6px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-pill);
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--lh-tight);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.composer-todo-btn:hover {
+  border-color: var(--c-border-strong);
+  background: var(--c-sunken);
+}
+
+.composer-todo-btn:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
+.composer-todo-btn[aria-expanded="true"] {
+  border-color: var(--c-border-strong);
+  background: var(--c-sunken);
+}
+
+.composer-todo-btn .icon-sm {
+  flex: none;
+}
+
+/* Panel: same surface grammar as `.mention-panel` (control.css) — an in-flow block above
+ * the input card so it opens upward from the bottom-pinned composer. */
+.composer-todo-panel {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-1);
+}
+
+.composer-todo-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 2px 0;
+}
+
+.composer-todo-title {
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+}
+
+/* The grey "X done" summary (completed tasks are never listed here — open-only panel). */
+.composer-todo-done {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.composer-todo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  /* Same ruling as `.todo-list` (todo.css): cap + inner scroll, NO overscroll-behavior
+   * containment (the scroll-latching freeze fix — let the wheel/touch chain pass through). */
+  max-height: min(40vh, 320px);
+  overflow-y: auto;
+}
+
+/* Row structure mirrors TodoPanel's task rows (todo.css): status icon + subject column. */
+.composer-todo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: 3px 0;
+}
+
+.composer-todo-ico {
+  flex: none;
+  margin-top: 2px;
+  color: var(--c-text-3);
+}
+
+.composer-todo-item[data-status="in_progress"] .composer-todo-ico {
+  color: var(--st-running);
+}
+
+.composer-todo-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.composer-todo-subject {
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.composer-todo-desc {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.composer-todo-blocked {
+  color: var(--c-warning-text);
+  font-size: var(--fs-xs);
+}
+
+/* "+N more" tail — aligns with the subject column (icon + gap), same as `.todo-more`. */
+.composer-todo-more {
+  padding: 3px 0 3px calc(14px + var(--sp-2));
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+/* (No coarse-pointer hit-box bump: the sibling `.model-chip` deliberately retired it — the
+ * 15px slim chip is the row's grammar on every viewport, models.css.) */

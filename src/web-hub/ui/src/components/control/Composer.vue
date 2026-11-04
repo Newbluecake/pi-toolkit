@@ -86,6 +86,16 @@
   ring overlays mid-right exactly as before 5cc081d. Pickers still open upward from the chips
   and keep their usePopoverClamp viewport fitting — opening one moves focus into the panel,
   which the chips' hidden state can never interrupt (hidden ⇒ not clickable).
+
+  Todo chip (todo-web follow-up, 2026-11 user request): an ALWAYS-VISIBLE open-tasks chip in
+  the bottom row — a SIBLING of `.composer-chips` (`.composer-todo`), so the typing-time
+  `.chips-off` fade never applies, and composer-todo.css's `:has(.composer-todo)` row keeper
+  stops the row's max-height collapse while the chip exists. It reads `AgentState.todo` (the
+  status reducer's mirror of `StatusInfo.todo`) straight off the injected CONTROL_VIEW — no
+  prop/contracts change — and hides itself when the wire is absent or the open count is 0.
+  The click toggles a read-only OPEN-ONLY task panel (pending + in_progress rows; completed
+  tasks surface only as the header's grey `X done` summary) in the mention panel's slot above
+  the input card; a re-click or an outside pointerdown closes it.
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue";
@@ -125,6 +135,8 @@ import type { ComposerEmits, ComposerProps } from "../../contracts.js";
 import type { ControlHandle } from "../../types.js";
 import { CONTROL_CTX } from "../../composables/useControl.js";
 import AppIcon from "../../icons/AppIcon.vue";
+import type { IconName } from "../../icons/names.js";
+import type { TodoTaskWire, TodoWire } from "../../types.js";
 import { addAttachments } from "./attachmentAdd.js";
 import AttachmentTray from "./AttachmentTray.vue";
 import CommandPalette from "./CommandPalette.vue";
@@ -134,6 +146,7 @@ import ModelSwitcher from "./ModelSwitcher.vue";
 import { CONTROL_ENV, CONTROL_VIEW, HUB_CTX } from "./controlContext.js";
 import { useDeliverDefault } from "../../composables/useDeliverDefault.js";
 import { browserLocalStorage } from "../shell/themeStorage.js";
+import "../../styles/composer-todo.css";
 import "../../styles/upload.css";
 
 const props = defineProps<ComposerProps>();
@@ -379,10 +392,11 @@ function pickPanelRow(row: PanelRow): void {
 }
 
 function onDocPointerDown(ev: Event): void {
-  if (!mentionOpen.value) return;
   const root = rootEl.value;
-  if (root !== null && ev.target instanceof Node && root.contains(ev.target)) return;
-  mentionDismissed.value = true;
+  const inside = root !== null && ev.target instanceof Node && root.contains(ev.target);
+  if (inside) return;
+  if (mentionOpen.value) mentionDismissed.value = true;
+  if (todoOpen.value) todoOpen.value = false; // outside click closes the todo panel too
 }
 onMounted(() => document.addEventListener("pointerdown", onDocPointerDown, true));
 
@@ -411,6 +425,66 @@ function mentionKeydown(ev: KeyboardEvent): boolean {
   }
   return false;
 }
+// ---------------------------------------------------------------------------
+// composer todo chip (2026-11 user request — see the file header)
+// ---------------------------------------------------------------------------
+// Read-only open-tasks chip + panel. Data comes straight off the injected CONTROL_VIEW's
+// reactive agent: `@logic/state.js`'s status reducer already mirrors `StatusInfo.todo` onto
+// `AgentState.todo` (absent-means-cleared), so no prop / contracts / AgentDetail change is
+// needed. The chip renders ONLY while a wire exists AND the open count is > 0 (空态拍板).
+/** The main session's todo wire, if the status slot currently carries one. */
+const todoWire = computed<TodoWire | undefined>(() => view?.agent.value.todo);
+/** Wire semantics (`src/web-hub/agent/todo.ts` countsOf): `counts.open` = PENDING ONLY and
+ * `inProgress` is counted separately — the chip's "open" headline is pending + inProgress
+ * (completed never counted). */
+const todoOpenCount = computed(() => {
+  const w = todoWire.value;
+  return w === undefined ? 0 : w.counts.open + w.counts.inProgress;
+});
+const todoChipOn = computed(() => todoWire.value !== undefined && todoOpenCount.value > 0);
+/** Panel visibility — a plain local ref, NOT persisted (source-scan's persistence allowlist
+ * doesn't cover this component; same precedent as TodoPanel's own fold state). */
+const todoOpen = ref(false);
+/** Open-only rows: completed tasks never list here — they surface as the header's grey
+ * `X done` summary instead. */
+const todoRows = computed<readonly TodoTaskWire[]>(() =>
+  (todoWire.value?.tasks ?? []).filter((task) => task.status !== "completed"),
+);
+/** `+N more` tail = wire-capped rows minus the completed fold the `X done` line already
+ * accounts for (TodoPanel's moreCount formula — degrades to the raw `omitted` on an old wire
+ * without `completedHidden`). */
+const todoMoreCount = computed(() => {
+  const w = todoWire.value;
+  if (w === undefined) return 0;
+  return Math.max(0, (w.omitted ?? 0) - (w.completedHidden ?? 0));
+});
+
+/** Status-icon semantics沿用 TodoPanel: pending=clock, in_progress=loader (spinning). */
+const TODO_STATUS_ICON: Readonly<Record<TodoTaskWire["status"], IconName>> = {
+  pending: "clock",
+  in_progress: "loader",
+  completed: "check",
+};
+
+function todoStatusLabel(status: TodoTaskWire["status"]): string {
+  switch (status) {
+    case "pending":
+      return t("detail.todoStatusPending");
+    case "in_progress":
+      return t("detail.todoStatusInProgress");
+    case "completed":
+      return t("detail.todoStatusCompleted");
+  }
+}
+
+function todoBlockedLabel(task: TodoTaskWire): string {
+  return t("detail.todoBlockedBy", { ids: task.blockedBy.map((id) => `#${id}`).join(", ") });
+}
+
+function onTodoChipClick(): void {
+  todoOpen.value = !todoOpen.value;
+}
+
 const policy = computed(() =>
   commandMode.value && slash.value ? commandPolicyFor([...commands.value], slash.value.name, busy.value) : null,
 );
@@ -1232,6 +1306,46 @@ watch(
       </button>
       <p v-if="panelRows.length === 0" class="mention-empty">{{ t("control.mentionEmpty") }}</p>
     </div>
+    <!-- Composer todo panel (2026-11 user request): the todo chip's read-only OPEN-ONLY task
+         list, mounted in the mention panel's slot (in-flow above the input card, so it opens
+         upward from the bottom-pinned composer). Re-click / outside-pointerdown closes it.
+         Rows mirror TodoPanel's structure (status icon + #id subject + optional truncated
+         description + open-blocker label) minus completed tasks — those are the header's
+         grey `X done` summary. Strictly read-only: no checkboxes, no write path. -->
+    <div
+      v-if="todoChipOn && todoOpen && todoWire"
+      class="composer-todo-panel"
+      role="region"
+      :aria-label="t('detail.composerTodoTitle')"
+      aria-readonly="true"
+    >
+      <p class="composer-todo-head">
+        <span class="composer-todo-title">{{ t("detail.composerTodoTitle") }}</span>
+        <span v-if="todoWire.counts.completed > 0" class="composer-todo-done">{{
+          t("detail.composerTodoDone", { n: todoWire.counts.completed })
+        }}</span>
+      </p>
+      <ul class="composer-todo-list">
+        <li v-for="task in todoRows" :key="task.id" class="composer-todo-item" :data-status="task.status">
+          <AppIcon
+            :name="TODO_STATUS_ICON[task.status]"
+            class="icon-sm composer-todo-ico"
+            :class="{ spin: task.status === 'in_progress' }"
+          />
+          <span class="sr-only">{{ todoStatusLabel(task.status) }}</span>
+          <span class="composer-todo-body">
+            <span class="composer-todo-subject">#{{ task.id }} {{ task.subject }}</span>
+            <span v-if="task.description" class="composer-todo-desc"
+              >{{ task.description }}{{ task.descTruncated ? "…" : "" }}</span
+            >
+            <span v-if="task.blockedBy.length > 0" class="composer-todo-blocked">{{ todoBlockedLabel(task) }}</span>
+          </span>
+        </li>
+        <li v-if="todoMoreCount > 0" class="composer-todo-more">
+          {{ t("detail.composerTodoMore", { n: todoMoreCount }) }}
+        </li>
+      </ul>
+    </div>
     <AttachmentTray
       v-if="trayItems.length > 0"
       :items="trayItems"
@@ -1286,6 +1400,22 @@ watch(
                state is `:has(.model-switcher)`-gated, so an empty composer pays nothing then. -->
           <div class="composer-chips" :class="{ 'chips-off': text !== '' }">
             <ModelSwitcher />
+          </div>
+          <!-- Todo chip (2026-11 user request): positioned OUTSIDE the composer card,
+               top-left corner (absolute, -8px offset). Green pill with a ✓ icon and a
+               numeric badge in the top-right. Click toggles an open-tasks-only panel.
+               Always visible while open tasks exist (not affected by chips-off). -->
+          <div v-if="todoChipOn" class="composer-todo-external">
+            <button
+              type="button"
+              class="composer-todo-btn"
+              :aria-expanded="todoOpen"
+              :aria-label="t('detail.composerTodoAria')"
+              @click="onTodoChipClick"
+            >
+              <AppIcon name="check" class="icon-sm" />
+              <span class="composer-todo-badge">{{ todoOpenCount }}</span>
+            </button>
           </div>
           <div class="composer-end">
             <!-- Attach (2026-10-07 user request 「附件按钮放到上下文进度的左侧」): moved INSIDE

@@ -122,6 +122,13 @@ const detail = {
   bashJobsArchiveOmitted: "Archive {n} Older Finished Jobs",
   // 2026-10-28: running rows pushed out of the wire by the 20-row cap / byte budget (not archivable).
   bashJobsRunningOverflow: "{n} more running job(s) not shown",
+  // Composer todo chip (2026-11 user request): the always-visible open-tasks chip in the
+  // composer's bottom row + its read-only open-only panel (Composer.vue, styles/composer-todo.css).
+  // Status labels / blockedBy reuse the existing todoStatus*/todoBlockedBy keys above.
+  composerTodoAria: "Show open tasks",
+  composerTodoTitle: "Open tasks",
+  composerTodoDone: "{n} done",
+  composerTodoMore: "(+{n} more)",
 } satisfies Record<string, string>;
 
 export default detail;
