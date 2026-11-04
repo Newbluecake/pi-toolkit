@@ -129,6 +129,23 @@ const detail = {
   composerTodoTitle: "Open tasks",
   composerTodoDone: "{n} done",
   composerTodoMore: "(+{n} more)",
+  // schedule-auto-approve r2 W2: the aggregated TasksPanel (detail header — todo section +
+  // scheduled-tasks section behind one summary line). Compact inline markers (⏰ count,
+  // running/paused chips, run-state tokens) are English in BOTH locales per the UI-text rule.
+  tasksToggleAria: "Toggle the tasks panel",
+  tasksSummary: "Tasks {done}/{total} · {active} active",
+  tasksTodoSec: "Todos {n}",
+  tasksSchedSec: "Scheduled {n}",
+  tasksFoot: "Details »",
+  tasksSchedUnreadable: "Task store unreadable ({reason}) — repair from a terminal (/schedule repair).",
+  tasksActionFailed: "Action failed: {reason}",
+  schedPause: "Pause",
+  schedPauseAria: "Pause scheduled task {name}",
+  schedResume: "Resume",
+  schedResumeAria: "Resume scheduled task {name}",
+  schedRemove: "Delete",
+  schedRemoveAria: "Delete scheduled task {name}",
+  schedOpenDetailAria: "Open scheduled task {name}",
 } satisfies Record<string, string>;
 
 export default detail;

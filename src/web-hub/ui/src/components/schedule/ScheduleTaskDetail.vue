@@ -1,14 +1,12 @@
 <!--
-  ScheduleTaskDetail (schedule-auto-approve r2, plan §6-W1 — renamed from ScheduleReview):
-  the read-only full-definition view of ONE scheduled task. Rendered INSIDE SchedulePanel
-  (same lazy chunk, same PickerSheet — the panel swaps its body), never a second stacked sheet.
+  ScheduleTaskDetail (scheduled-reports W1, plan r3 §5.6): the read-only full-definition
+  view of ONE scheduled task. Rendered INSIDE SchedulePanel (same lazy chunk, same PickerSheet
+  — the panel swaps its body), never a second stacked sheet.
 
-  The approval concept is REMOVED (r2): no approve/reject buttons, no hash note, no offer
-  handling — the wire's legacy `pendingApproval` / `executable` / `offer` / `task.approval`
-  fields are simply never read. What stays is the full definition rendered verbatim: the
-  complete prompt (plain text nodes only, never v-html), schedule expr + tz, form,
-  model/thinking/timeout/handoff/isolation, and the feishu flag. The parent passes the task
-  looked up from the live `schedules` snapshot, so an edit elsewhere re-renders the view.
+  Shows the full definition verbatim: the complete prompt (plain text nodes only, never
+  v-html), schedule expr + tz, form, model/thinking/timeout/handoff/isolation, and the feishu
+  flag. The parent passes the task looked up from the live `schedules` snapshot, so a change
+  elsewhere re-renders the view.
 -->
 <script setup lang="ts">
 import { computed } from "vue";

@@ -27,7 +27,7 @@
   the `.metrics-summary` toggle and `detail.metricsToggleAria` went with it.
 
   2026-10 (user request 「红框部分支持收起，点击标题展开」): the info block under the titlebar
-  (SessionInfo / TodoPanel / WorktreePanel / CacheKeepalivePanel) collapses behind the title itself —
+  (SessionInfo / TasksPanel / WorktreePanel / CacheKeepalivePanel) collapses behind the title itself —
   the title text is wrapped in a disclosure <button> (h2 keeps `id="detail-title"`), the state
   is the browser-local `pwh_detail_head_collapsed` pref (global, fail-open to EXPANDED; see
   `composables/useDetailHeadCollapse.ts`), and the transient `<p>` notices stay outside the
@@ -73,12 +73,12 @@ import { resumeAvailable, RESUME_DIALOG } from "@logic/resume.js";
 import SessionInfo from "./SessionInfo.vue";
 import StatusPill from "./StatusPill.vue";
 import HeaderOverflowMenu, { type HeaderOverflowItem } from "./HeaderOverflowMenu.vue";
-import TodoPanel from "./TodoPanel.vue";
+import TasksPanel from "./TasksPanel.vue";
 import WorktreePanel from "./WorktreePanel.vue";
 import GraphPanel from "./GraphPanel.vue";
 import { cacheKeepaliveOf } from "./cacheKeepaliveView.js";
 import { XS_CHANNEL_CAP, xsAliasOf, xsUnreadLabel, xsUnreadOf } from "../agents/agentCardModel.js";
-import { schedCapOn } from "../../logic/schedule.js";
+import { schedCapOn, schedSummaryOf, sessionProjectionOf } from "../../logic/schedule.js";
 import { worktreesOf } from "./worktreesView.js";
 
 const props = defineProps<DetailHeaderProps>();
@@ -382,12 +382,11 @@ const channelsUsable = computed(() => {
 });
 
 // ---------------------------------------------------------------------------
-// scheduled-reports W1 (plan r3 §5.6): the 「定时」 button → lazy SchedulePanel. Gated ONLY on
-// the hub's sched.v1 cap + this card having a sessionId — deliberately NOT on the control
-// gate: the panel is read-only (approval UI removed, schedule-auto-approve r2 §6-W1), and
-// offline sessions stay readable (E3). Mounted inside AgentDetail's tree, so a privacy
-// relock unmounts it with everything else (ResumeDialog precedent). The #61 offer auto-open
-// (popping the panel into a review) is gone with the approval concept.
+// scheduled-reports W1 (plan r3 §5.6) + schedule-auto-approve r2 W2: the 「定时」 button →
+// lazy SchedulePanel, and the aggregated TasksPanel section below. Gated ONLY on the hub's
+// sched.v1 cap + this card having a sessionId — NOT on the control gate: the surfaces are
+// read-only by default (write buttons hide when offline, E3). Mounted inside AgentDetail's
+// tree, so a privacy relock unmounts them with everything else (ResumeDialog precedent).
 // ---------------------------------------------------------------------------
 const SchedulePanel = defineAsyncComponent(() => import("../schedule/SchedulePanel.vue"));
 const schedOpen = ref(false);
@@ -396,6 +395,25 @@ const schedSessionId = computed(() => {
   return typeof sid === "string" && sid !== "" ? sid : undefined;
 });
 const schedUsable = computed(() => schedCapOn(hub?.state.value.hub?.["caps"]) && schedSessionId.value !== undefined);
+
+// schedule-auto-approve r2 W2: the TasksPanel's sched inputs — the summary gates the panel
+// (undefined ⇒ no ⏰ segment, no sched section) and the raw projection carries the rows.
+const schedSummary = computed(() =>
+  schedSummaryOf(hub?.state.value.hub?.["caps"], hub?.state.value.schedules, schedSessionId.value),
+);
+const schedProj = computed(() =>
+  schedUsable.value ? sessionProjectionOf(hub?.state.value.schedules, schedSessionId.value) : undefined,
+);
+/** Write gate for the panel's pause/resume/rm (same gate as SchedulePanel's canWrite):
+ *  control surface on + commands on + the agent online. */
+const schedCanWrite = computed(
+  () =>
+    controlView !== null && controlView.enabled.value && controlView.commandsEnabled.value && props.agent.down !== true,
+);
+/** TasksPanel `open-run` ⇒ the fleet drawer's run view (FleetDrawer's selectRun precedent). */
+function onSchedOpenRun(runId: string): void {
+  hub?.selectRun?.(props.agent.key, runId);
+}
 
 // alias-plan r4 §7.2 (ALU): the held alias renders as a small `@alias` right after the title;
 // clicking it opens the same (lazily loaded) 「频道与别名」 dialog. Drawn only when the hub
@@ -444,7 +462,7 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
 
 // ---------------------------------------------------------------------------
 // 2026-10 (user request 「红框部分支持收起，点击标题展开」): the whole info block under the
-// titlebar — SessionInfo / TodoPanel / WorktreePanel / CacheKeepalivePanel — collapses behind the
+// titlebar — SessionInfo / TasksPanel / WorktreePanel / CacheKeepalivePanel — collapses behind the
 // title itself. The preference is browser-local (`pwh_detail_head_collapsed`, "1" = collapsed),
 // global (not per session) and fails open to EXPANDED, so the header stays byte-identical for
 // anyone who never toggles. The transient `<p>` notices above the block (stop error, first-
@@ -995,9 +1013,20 @@ function onOverflowRun(id: string): void {
         :subagent-cost-usd="status?.subagentCostUsd"
       />
 
-      <!-- todo-web T4: the main session's task list, mirrored onto `agent.todo` by the status
-           reducer; the panel renders nothing when the wire is absent or empty. -->
-      <TodoPanel v-if="agent.todo" :todo="agent.todo" />
+      <!-- todo-web T4 + schedule-auto-approve r2 W2: the aggregated tasks panel — the todo
+           section (status-reducer mirror on `agent.todo`) plus the sched section when
+           `schedSummaryOf` finds this session's schedule projection. Renders when EITHER
+           side has content; each section additionally hides itself when its own input is
+           empty. -->
+      <TasksPanel
+        v-if="(agent.todo?.tasks.length ?? 0) > 0 || schedSummary !== undefined"
+        :todo="agent.todo"
+        :sched-summary="schedSummary"
+        :sched-proj="schedProj"
+        :can-write="schedCanWrite"
+        @open-run="onSchedOpenRun"
+        @open-schedule="schedOpen = true"
+      />
 
       <!-- worktree-web W4: git worktrees of the session cwd's repo, straight from
            `status.worktrees`; renders nothing when the wire is absent or has zero rows.

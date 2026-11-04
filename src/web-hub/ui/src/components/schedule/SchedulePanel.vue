@@ -5,12 +5,12 @@
   desktop-centered variant (channels-sheet grammar).
 
   Data: the hub-global `schedules` SSE slot (`HubState.schedules`, cap `sched.v1`), narrowed
-  to THIS session by `sessionId` via `@logic/schedule.js`'s `panelView`. Read-only since
-  schedule-auto-approve r2 (docs/dev/schedule-auto-approve/plan.md §6-W1): the approval
-  write path (approve/reject via the old ScheduleReview) is removed — task rows keep only the
-  「详情」 swap into `ScheduleTaskDetail.vue`; the wire's legacy `pendingApproval` /
-  `executable` / `offer` fields are ignored (old-hub compat, I10). Pause/resume/delete
-  controls land with the W2 TasksPanel aggregation.
+  to THIS session by `sessionId` via `@logic/schedule.js`'s `panelView`. Task rows offer
+  pause/resume/delete (schedule-auto-approve r2 §6-W2: `/schedule pause|resume|rm <id>` via
+  the control view's tracked-command + policy-confirm bar, hidden while offline per E3) and
+  the「详情」 swap into `ScheduleTaskDetail.vue`; run rows link into the fleet drawer when the
+  wire carries a `runId`. The wire's legacy `pendingApproval` / `executable` / `offer` fields
+  are never read (old-hub compat, I10).
 
   Offline sessions (E3): read-only + a hint pointing at `/schedule … --all` in a local
   terminal. Stale (hub connection down): the last snapshot stays, a warn banner shows and
@@ -24,9 +24,11 @@ import { computed, inject, onUnmounted, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useTicker } from "../../composables/useTicker.js";
+import { useTrackedCommand } from "../../composables/useTrackedCommand.js";
 import { registerScheduleExtra } from "../../i18n/schedule-extra.js";
 import { fmtTs, panelView, relIn, runReasonKey, runStateKey } from "../../logic/schedule.js";
 import { CONTROL_VIEW, HUB_CTX } from "../control/controlContext.js";
+import CommandConfirm from "../control/CommandConfirm.vue";
 import PickerSheet from "../control/PickerSheet.vue";
 import ScheduleTaskDetail from "./ScheduleTaskDetail.vue";
 import "../../styles/schedule.css";
@@ -40,6 +42,43 @@ const { t } = useI18n();
 
 const hub = inject(HUB_CTX, null);
 const view = inject(CONTROL_VIEW, null);
+
+// --- write path (schedule-auto-approve r2 §6-W2): pause/resume/rm through the policy confirm ---
+
+const tracked = useTrackedCommand({
+  view: () => {
+    if (view === null) return null;
+    return { control: view.control, agentKey: view.agentKey, pendingCtl: view.agent.value.pendingCtl };
+  },
+});
+// Top-level bindings so the template auto-unwraps them (nested refs on the plain `tracked`
+// object are NOT unwrapped by the template compiler — ChannelsDialog precedent).
+const trackedConfirm = tracked.confirmReq;
+/** Task id with a pause/resume/rm in flight — every action button disables while non-null
+ *  (one logical command at a time on the tracked channel). */
+const busyTaskId = ref<string | null>(null);
+const actionNote = ref<{ kind: "err"; text: string } | null>(null);
+
+async function onTaskAction(action: "pause" | "resume" | "rm", id: string): Promise<void> {
+  if (busyTaskId.value !== null) return;
+  busyTaskId.value = id;
+  actionNote.value = null;
+  try {
+    const r = await tracked.run("schedule", `${action} ${id}`);
+    if (!r.ok && !("cancelled" in r)) {
+      actionNote.value = { kind: "err", text: t("schedule.actionFailed", { reason: r.message ?? r.error }) };
+    }
+  } finally {
+    busyTaskId.value = null;
+  }
+}
+
+/** Run-row fleet jump (§6-W2): the wire's runId → the drawer's run transcript
+ *  (FleetDrawer's `hub.selectRun` precedent). */
+function openRun(runId: string): void {
+  if (view === null) return;
+  hub?.selectRun?.(view.agentKey, runId);
+}
 
 /** The typed mirror of `@logic/schedule.js`'s `panelView` return (the .js module is checkJs-off;
  *  this local union is what vue-tsc narrows the template against). Field shapes follow the
@@ -69,6 +108,7 @@ interface PanelRun {
   startedAt: number | undefined;
   endedAt: number | undefined;
   reportFile: string | undefined;
+  runId: string | undefined;
   feishu: string;
 }
 type PanelModel =
@@ -190,6 +230,14 @@ function closeDetail(): void {
       </template>
 
       <template v-else-if="model.kind === 'ready'">
+        <CommandConfirm
+          v-if="trackedConfirm"
+          :name="trackedConfirm.name"
+          :args="trackedConfirm.args"
+          @confirm="tracked.confirm()"
+          @cancel="tracked.cancel()"
+        />
+        <p v-if="actionNote !== null" class="sched-note" data-kind="warn" role="alert">{{ actionNote.text }}</p>
         <p v-if="model.droppedReports > 0" class="sched-note" data-kind="warn" role="status">
           {{ t("schedule.droppedReports", { n: model.droppedReports }) }}
         </p>
@@ -206,6 +254,40 @@ function closeDetail(): void {
                   t("schedule.missedNote", { n: task.totals.missed })
                 }}</span>
                 <span class="sched-task-act">
+                  <template v-if="model.canWrite">
+                    <button
+                      v-if="task.enabled"
+                      class="icon-btn"
+                      type="button"
+                      :title="t('schedule.taskPause')"
+                      :aria-label="t('schedule.taskPauseAria', { name: task.name })"
+                      :disabled="busyTaskId !== null"
+                      @click="void onTaskAction('pause', task.id)"
+                    >
+                      <AppIcon name="pause" class="icon-sm" />
+                    </button>
+                    <button
+                      v-else
+                      class="icon-btn"
+                      type="button"
+                      :title="t('schedule.taskResume')"
+                      :aria-label="t('schedule.taskResumeAria', { name: task.name })"
+                      :disabled="busyTaskId !== null"
+                      @click="void onTaskAction('resume', task.id)"
+                    >
+                      <AppIcon name="play" class="icon-sm" />
+                    </button>
+                    <button
+                      class="icon-btn danger"
+                      type="button"
+                      :title="t('schedule.taskRemove')"
+                      :aria-label="t('schedule.taskRemoveAria', { name: task.name })"
+                      :disabled="busyTaskId !== null"
+                      @click="void onTaskAction('rm', task.id)"
+                    >
+                      <AppIcon name="trash" class="icon-sm" />
+                    </button>
+                  </template>
                   <button class="btn btn-ghost btn-xs" type="button" @click="openDetail(task.id)">
                     {{ t("schedule.details") }}
                   </button>
@@ -254,6 +336,16 @@ function closeDetail(): void {
                 {{ t("schedule.runFeishu", { state: t(`schedule.feishu.${run.feishu}`) })
                 }}<template v-if="run.reportFile"> · {{ t("schedule.runReport", { file: run.reportFile }) }}</template>
               </span>
+              <button
+                v-if="run.runId !== undefined"
+                class="icon-btn sched-run-open"
+                type="button"
+                :title="t('schedule.runOpen')"
+                :aria-label="t('schedule.runOpenAria', { id: run.runId })"
+                @click="openRun(run.runId!)"
+              >
+                <AppIcon name="chev-right" class="icon-sm" />
+              </button>
             </li>
           </ul>
         </section>

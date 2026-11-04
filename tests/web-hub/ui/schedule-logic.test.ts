@@ -14,9 +14,11 @@ import {
   isRunLive,
   isSchedulesPayloadLike,
   panelView,
+  relAgo,
   relIn,
   runReasonKey,
   runStateKey,
+  runToneOf,
   scheduleBadgeOf,
   scheduleBadgeText,
   schedSummaryOf,
@@ -100,6 +102,29 @@ describe("display helpers", () => {
     expect(relIn(now + 3 * 86_400_000, now)).toBe("3d");
     expect(relIn(now - 1, now)).toBe("due");
     expect(relIn(undefined, now)).toBe("");
+  });
+  it("relAgo (r2 W2): minute/hour/day grains, <1m ⇒ now, non-finite ⇒ empty", () => {
+    const now = 1_700_000_000_000;
+    expect(relAgo(now - 45 * 60_000, now)).toBe("45m");
+    expect(relAgo(now - 12 * 3_600_000, now)).toBe("12h");
+    expect(relAgo(now - 3 * 86_400_000, now)).toBe("3d");
+    expect(relAgo(now - 5_000, now)).toBe("now");
+    expect(relAgo(now, now)).toBe("now");
+    expect(relAgo(undefined, now)).toBe("");
+    expect(relAgo(Number.NaN, now)).toBe("");
+  });
+  it("runToneOf (r2 W2): ok for success states, fail for failure states, undefined neutral", () => {
+    expect(runToneOf("completed")).toBe("ok");
+    expect(runToneOf("settled")).toBe("ok");
+    expect(runToneOf("continued")).toBe("ok");
+    expect(runToneOf("failed")).toBe("fail");
+    expect(runToneOf("timed_out")).toBe("fail");
+    expect(runToneOf("aborted")).toBe("fail");
+    expect(runToneOf("refused")).toBe("fail");
+    expect(runToneOf("dropped")).toBe("fail");
+    expect(runToneOf("running")).toBeUndefined();
+    expect(runToneOf("unknown")).toBeUndefined();
+    expect(runToneOf(undefined)).toBeUndefined();
   });
   it("whenParts: cron/once/invalid", () => {
     expect(whenParts({ kind: "cron", expr: "0 8 * * *", tz: "Asia/Shanghai" })).toEqual({

@@ -24,7 +24,7 @@ import {
 import { SCHEDULE_EXTRA } from "../../../src/web-hub/ui/src/i18n/schedule-extra.js";
 import type { AgentState, CmdOutcome, ControlHandle, HubHandle } from "../../../src/web-hub/ui/src/types.js";
 import type { SchedulesPayloadWire } from "../../../src/web-hub/protocol/schedule.js";
-import { makePayload, makePendingTask, makeSession, makeTask, SCHED_SID } from "./fixtures/schedule.js";
+import { makePayload, makePendingTask, makeRun, makeSession, makeTask, SCHED_SID } from "./fixtures/schedule.js";
 import { setDetailedListForTests } from "./helpers/list-density.js";
 
 const SCHED_CAP = "sched.v1";
@@ -79,23 +79,34 @@ interface FakeHub {
   hub: HubHandle;
   state: { value: Record<string, unknown> };
 }
-function hubOf(agent: AgentState, over: HubOver = {}): FakeHub {
+function hubOf(agent: AgentState, over: HubOver & { selectRuns?: string[][] } = {}): FakeHub {
   const state = ref({
     agents: new Map([[agent.key, agent]]),
     hub: { caps: over.caps ?? [SCHED_CAP] },
     conn: over.conn ?? "open",
     schedules: over.schedules,
   });
-  return { hub: { state } as unknown as HubHandle, state };
+  const hub = {
+    state,
+    selectRun: (agentKey: string, runId: string) => {
+      over.selectRuns?.push([agentKey, runId]);
+    },
+  } as unknown as HubHandle;
+  return { hub, state };
 }
 
 interface ViewOver {
   enabled?: boolean;
   commandsEnabled?: boolean;
+  runCommand?: (name: string, args: string, opts?: { confirm?: true; id?: string }) => Promise<CmdOutcome>;
 }
 function viewOf(agent: AgentState, over: ViewOver = {}) {
+  const runs: Array<[string, string, string, { confirm?: true; id?: string } | undefined]> = [];
   const control = {
-    runCommand: () => Promise.resolve({ ok: true } as CmdOutcome),
+    runCommand: (k: string, n: string, a: string, opts?: { confirm?: true; id?: string }) => {
+      runs.push([k, n, a, opts]);
+      return over.runCommand !== undefined ? over.runCommand(n, a, opts) : Promise.resolve({ ok: true } as CmdOutcome);
+    },
     query: () => Promise.resolve({ ok: true } as CmdOutcome),
   } as unknown as ControlHandle;
   const view: ControlView = {
@@ -111,20 +122,20 @@ function viewOf(agent: AgentState, over: ViewOver = {}) {
     queueItems: computed(() => []),
     isWebMessage: () => false,
   };
-  return { view };
+  return { view, runs };
 }
 
-function mountPanel(over: HubOver & ViewOver = {}) {
+function mountPanel(over: HubOver & ViewOver & { selectRuns?: string[][] } = {}) {
   const agent = agentOf(over);
   const { hub, state } = hubOf(agent, over);
-  const { view } = viewOf(agent, over);
+  const { view, runs } = viewOf(agent, over);
   const w = mount(SchedulePanel, {
     props: { sessionId: SCHED_SID },
     global: { provide: { [HUB_CTX as symbol]: hub, [CONTROL_VIEW as symbol]: view } },
     attachTo: document.body,
   });
   mounted.push(w);
-  return { w: new DOMWrapper(document.body), state };
+  return { w: new DOMWrapper(document.body), state, runs, selectRuns: over.selectRuns ?? [] };
 }
 
 // --- tests --------------------------------------------------------------------
@@ -233,6 +244,70 @@ describe("SchedulePanel", () => {
     expect(w.find(".review-kv").exists()).toBe(false);
     expect(w.find(".sched-empty").exists()).toBe(true);
     expect(w.find(".sched-note[data-kind='info']").exists()).toBe(false);
+  });
+});
+
+describe("SchedulePanel task actions + run jump (r2 §6-W2)", () => {
+  it("online + canWrite: task rows carry pause/resume/delete icon buttons", () => {
+    const { w } = mountPanel({ schedules: makePayload() });
+    // fixture: both tasks enabled ⇒ pause + delete per row
+    expect(w.findAll(".sched-task-act .icon-btn")).toHaveLength(4);
+    expect(w.findAll(".sched-task-act .icon-btn.danger")).toHaveLength(2);
+  });
+
+  it("pause goes through the policy confirm: bare send → E_CONFIRM_REQUIRED → bar → confirm:true re-send", async () => {
+    const { w, runs } = mountPanel({
+      schedules: makePayload(),
+      runCommand: (_n, _a, opts) =>
+        opts?.confirm === true
+          ? Promise.resolve({ ok: true } as CmdOutcome)
+          : Promise.resolve({ ok: false, error: "E_CONFIRM_REQUIRED" } as CmdOutcome),
+    });
+    await w.findAll(".sched-task-act .icon-btn")[0]!.trigger("click"); // pause s_abcd2345
+    await flushPromises();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]![2]).toBe("pause s_abcd2345");
+    expect(runs[0]![3]).toEqual({ id: expect.any(String) }); // first send carries NO confirm
+    expect(w.find(".command-confirm").exists()).toBe(true);
+    await w.find(".command-confirm-run").trigger("click");
+    await flushPromises();
+    expect(runs).toHaveLength(2);
+    expect(runs[1]![2]).toBe("pause s_abcd2345");
+    expect(runs[1]![3]).toEqual({ id: expect.any(String), confirm: true });
+  });
+
+  it("a failed action surfaces the warn note", async () => {
+    const { w } = mountPanel({
+      schedules: makePayload(),
+      runCommand: () => Promise.resolve({ ok: false, error: "E_FAILED", message: "boom" } as CmdOutcome),
+    });
+    await w.findAll(".sched-task-act .icon-btn.danger")[0]!.trigger("click");
+    await flushPromises();
+    const note = w.find(".sched-note[data-kind='warn'][role='alert']");
+    expect(note.exists()).toBe(true);
+    expect(note.text()).toContain("boom");
+  });
+
+  it("offline (E3): no action buttons — the read-only 详情 stays", () => {
+    const { w } = mountPanel({ schedules: makePayload(), down: true });
+    expect(w.findAll(".sched-task-act .icon-btn")).toHaveLength(0);
+    expect(w.findAll(".sched-task-act .btn-ghost")).toHaveLength(2);
+  });
+
+  it("run rows with a runId jump to the fleet (hub.selectRun); legacy runs without one render no button", async () => {
+    const p = makePayload([
+      makeSession({
+        runs: [
+          makeRun({ runKey: "s_abcd2345@new", runId: "run-jmp1" }),
+          makeRun(), // legacy wire: no runId
+        ],
+      }),
+    ]);
+    const selectRuns: string[][] = [];
+    const { w, selectRuns: recorder } = mountPanel({ schedules: p, selectRuns });
+    expect(w.findAll(".sched-run-open")).toHaveLength(1);
+    await w.find(".sched-run-open").trigger("click");
+    expect(recorder).toEqual([["agent-1", "run-jmp1"]]);
   });
 });
 

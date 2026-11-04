@@ -30,6 +30,16 @@ const en = {
 
   taskEnabled: "enabled",
   taskPaused: "paused",
+  /** r2 §6-W2: task-row action buttons (policy-confirm write path). */
+  taskPause: "Pause",
+  taskPauseAria: "Pause scheduled task {name}",
+  taskResume: "Resume",
+  taskResumeAria: "Resume scheduled task {name}",
+  taskRemove: "Delete",
+  taskRemoveAria: "Delete scheduled task {name}",
+  actionFailed: "Action failed: {reason}",
+  runOpen: "Open run in fleet",
+  runOpenAria: "Open run {id} in fleet",
   taskStats: "fired {fired} · missed {missed} · skipped {skipped} · manual {manual}",
   taskFeishuOn: "feishu",
   taskNext: "next {t}",
@@ -119,6 +129,16 @@ const zh: Record<keyof typeof en, string> = {
 
   taskEnabled: "已启用",
   taskPaused: "已暂停",
+  /** r2 §6-W2：任务行操作按钮（走 policy confirm 的写路径）。 */
+  taskPause: "暂停",
+  taskPauseAria: "暂停定时任务 {name}",
+  taskResume: "继续",
+  taskResumeAria: "继续定时任务 {name}",
+  taskRemove: "删除",
+  taskRemoveAria: "删除定时任务 {name}",
+  actionFailed: "操作失败：{reason}",
+  runOpen: "在 fleet 中打开 run",
+  runOpenAria: "在 fleet 中打开 run {id}",
   taskStats: "已执行 {fired} · 错过 {missed} · 跳过 {skipped} · 手动 {manual}",
   taskFeishuOn: "推飞书",
   taskNext: "下次 {t}",

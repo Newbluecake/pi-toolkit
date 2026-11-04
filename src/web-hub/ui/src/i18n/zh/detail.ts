@@ -122,6 +122,23 @@ const detail = {
   composerTodoTitle: "未完成任务",
   composerTodoDone: "已完成 {n} 项",
   composerTodoMore: "（+{n} 更多）",
+  // schedule-auto-approve r2 W2：聚合 TasksPanel（详情头部——待办分区 + 定时任务分区，
+  // 一条合并 summary）。紧凑行内标记（⏰ 计数、running/paused chip、run 状态 token）两种
+  // 语言均用英文 token（UI 文本规则）；其余为 prose 可中文。
+  tasksToggleAria: "展开/收起任务面板",
+  tasksSummary: "任务 {done}/{total} · {active} 进行中",
+  tasksTodoSec: "待办 {n}",
+  tasksSchedSec: "定时任务 {n}",
+  tasksFoot: "详情 »",
+  tasksSchedUnreadable: "任务数据不可读（{reason}）——请到终端执行 /schedule repair。",
+  tasksActionFailed: "操作失败：{reason}",
+  schedPause: "暂停",
+  schedPauseAria: "暂停定时任务 {name}",
+  schedResume: "继续",
+  schedResumeAria: "继续定时任务 {name}",
+  schedRemove: "删除",
+  schedRemoveAria: "删除定时任务 {name}",
+  schedOpenDetailAria: "打开定时任务 {name}",
 } satisfies Messages<typeof en>;
 
 export default detail;

@@ -208,6 +208,36 @@ export function relIn(at, now) {
 }
 
 /**
+ * Past-side relative token for a row's `lastRun` line (schedule-auto-approve r2 W2):
+ * `45m`/`12h`/`3d`, under a minute ⇒ "now", non-finite ⇒ "" (English tokens, relIn grammar).
+ * @param {number | undefined} at @param {number} now @returns {string}
+ */
+export function relAgo(at, now) {
+  if (typeof at !== "number" || !Number.isFinite(at)) return "";
+  const ms = now - at;
+  if (ms < 60_000) return "now";
+  const m = Math.round(ms / 60_000);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
+
+/** `lastRun` tone class (r2 W2): success states ⇒ "ok", failure states ⇒ "fail", else
+ *  undefined (neutral — live/unknown-ish states render uncolored). */
+const RUN_TONE_OK = new Set(["completed", "continued", "settled"]);
+const RUN_TONE_FAIL = new Set(["failed", "timed_out", "aborted", "refused", "dropped"]);
+
+/**
+ * @param {string | undefined} state @returns {"ok" | "fail" | undefined}
+ */
+export function runToneOf(state) {
+  if (RUN_TONE_OK.has(state)) return "ok";
+  if (RUN_TONE_FAIL.has(state)) return "fail";
+  return undefined;
+}
+
+/**
  * Human-readable summary of `task.when` WITHOUT a cron parser (首期: the expression renders
  * verbatim + tz; the hub-computed `nextAt` carries the authoritative next occurrence).
  * Returns i18n params, never a formatted string — locale lives in the component's t().

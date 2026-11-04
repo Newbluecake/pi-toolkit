@@ -260,6 +260,239 @@
   overflow-y: auto;
 }
 
+/* --- TasksPanel + ScheduleRows (schedule-auto-approve r2 §6-W2, preview.html A 语法) --- */
+/* The aggregated detail-header panel: reuses todo.css's `.todo-sum` summary-row grammar and
+ * `.todo-*` row styles (imported by TasksPanel); this file owns the panel chrome, the two
+ * section headers and the scheduled-task rows. */
+
+.tasks-panel {
+  margin-top: var(--sp-1);
+}
+
+.tasks-panel[data-open="true"] .todo-sum .chev {
+  transform: rotate(90deg);
+}
+
+.tasks-body {
+  padding: var(--sp-1) 6px 0;
+}
+
+.tasks-sec + .tasks-sec {
+  margin-top: var(--sp-2);
+}
+
+.tasks-sec-title {
+  margin: 0 0 2px;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--c-text-3);
+}
+
+.tasks-sec-title .n {
+  font-variant-numeric: tabular-nums;
+}
+
+.tasks-sched-note {
+  margin: 2px 0 0;
+  color: var(--c-warning-text);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.tasks-foot {
+  margin-top: 2px;
+  padding: 3px 0 0;
+  text-align: right;
+}
+
+.tasks-foot-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--c-text-3);
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.tasks-foot-link:hover {
+  color: var(--c-text-2);
+  text-decoration: underline;
+}
+
+/* Scheduled-task rows (ScheduleRows — TasksPanel's sched section + the panel's run jump). */
+
+.sched-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sched-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: 5px 0;
+  border-top: 1px solid var(--c-border);
+}
+
+.sched-row:first-child {
+  border-top: 0;
+}
+
+.sched-rows[data-compact="true"] .sched-row {
+  padding: 4px 0;
+}
+
+.sched-row-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.sched-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sched-row-name {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--c-text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sched-row-name:hover {
+  color: var(--c-primary-hover);
+}
+
+.sched-row[data-enabled="false"] .sched-row-name {
+  color: var(--c-text-3);
+}
+
+.sched-row-meta {
+  margin: 1px 0 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.sched-row-meta .sep,
+.sched-row-run .sep {
+  color: var(--c-border-strong);
+  margin: 0 2px;
+}
+
+.sched-row-run {
+  margin: 1px 0 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.sched-row-run .ok {
+  color: var(--st-done);
+  font-weight: var(--fw-semibold);
+}
+
+.sched-row-run .fail {
+  color: var(--st-failed);
+  font-weight: var(--fw-semibold);
+}
+
+.sched-run-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--c-info);
+  font-family: var(--font-sans);
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.sched-run-link:hover {
+  text-decoration: underline;
+}
+
+/* status chips: running / paused */
+.chip[data-st="running"] {
+  background: var(--st-running-soft);
+  color: var(--st-running);
+  border-color: transparent;
+}
+
+.chip[data-st="paused"] {
+  background: var(--st-idle-soft);
+  color: var(--st-idle);
+  border-color: transparent;
+}
+
+.sched-row-acts {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-3);
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+}
+
+.icon-btn.danger:hover {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+}
+
+.icon-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* SchedulePanel's run-row fleet jump rides the same icon-btn grammar, tucked at the row end. */
+.sched-run-open {
+  flex: none;
+  margin-left: 2px;
+}
+
+/* coarse pointers: the row action buttons keep a ≥36px hit box (channels.css grammar) */
+@media (pointer: coarse) {
+  .sched-row-acts .icon-btn,
+  .sched-run-open {
+    width: 36px;
+    height: 36px;
+  }
+}
+
 /* --- entry points (header button + card badge) --- */
 
 /* The 「定时」 header button mirrors .detail-clear-btn / .detail-channels-btn (detail.css):

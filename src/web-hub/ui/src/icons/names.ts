@@ -53,7 +53,10 @@ export type IconName =
   | "unplug"
   | "user"
   | "wrench"
-  | "x";
+  | "x"
+  | "pause"
+  | "play"
+  | "trash";
 
 export const ICON_NAMES: readonly IconName[] = [
   "alert",
@@ -104,4 +107,7 @@ export const ICON_NAMES: readonly IconName[] = [
   "user",
   "wrench",
   "x",
+  "pause",
+  "play",
+  "trash",
 ];
