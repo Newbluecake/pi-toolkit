@@ -128,6 +128,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../service/dispatch-settings.js",
     "../sysload/settings.js",
     "../topic-switch/settings.js",
+    // jev-reflex R0: the `reflex` block lives in reflex/core/settings.ts (pinned below; no imports at all).
+    "../reflex/core/settings.js",
     // #56 ⑧: the `webHub` / `feishuBot` blocks live in web-hub/agent/settings.ts (pinned below).
     "../web-hub/agent/settings.js",
     // external-agent plan §2.8: droid pricing refs validated with parseStrictModelRef (pure, zero imports).
@@ -192,6 +194,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/external-agent/settings.ts": ["../config/model-hint.js"],
   // #56 ⑧: schedule block settings — self-contained (no imports at all).
   "src/schedule/settings.ts": [],
+  // jev-reflex R0: reflex block settings — self-contained (no imports at all; same precedent as schedule, 82c66a84).
+  "src/reflex/core/settings.ts": [],
   // #56 ⑧: traffic block settings — self-contained (no imports at all).
   "src/traffic/settings.ts": [],
   // #56 ⑧: workflow block settings — self-contained (type-only core/types import).
