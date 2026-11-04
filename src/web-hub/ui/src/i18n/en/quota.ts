@@ -35,7 +35,7 @@ const quota = {
   etaMinutes: "{n} min",
   etaHours: "{h} h",
   etaHoursMinutes: "{h}h {m}m",
-  etaWarn: "At current rate, exhausts in about {duration}",
+  etaWarn: "Exhausts in ~{duration}",
   footerSampledBy: "Sampled by the main session",
   footerUpdatedAt: "Updated {clock}",
   emptyNote: "No subscription quota data yet",
