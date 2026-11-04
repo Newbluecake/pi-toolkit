@@ -1,7 +1,9 @@
 /**
  * Scheduled-reports W1 (docs/dev/scheduled-reports/plan.md r3 §5.6, §12 W1 行): pure, DOM-free
  * logic behind `SchedulePanel.vue` / `ScheduleReview.vue`, the detail-header 「定时」 entry and
- * the AgentCard ⏰ badge. Mirrors `logic/load.js`'s posture: components only render, every
+ * the AgentCard ⏰ badge — plus the schedule-auto-approve (docs/dev/schedule-auto-approve/plan.md
+ * §3-P3) aggregated surfaces: `taskRowsOf` feeds the TasksPanel / composer schedule section,
+ * `schedSummaryOf` gates their chip/summary. Mirrors `logic/load.js`'s posture: components only render, every
  * decision lives here and is unit-tested in `tests/web-hub/ui/schedule-logic.test.ts`.
  *
  * Wire source: the hub-global SSE `schedules` event + `GET /api/schedules` payload —
@@ -318,6 +320,7 @@ export function panelView(in_) {
       startedAt: num(r.startedAt),
       endedAt: num(r.endedAt),
       reportFile: str(r.reportFile),
+      runId: str(r.runId), // schedule-auto-approve P3: fleet jump target (append-only; absent on old wire)
       feishu: feishuKey(r.feishu, in_.stale),
     };
   });
@@ -333,5 +336,101 @@ export function panelView(in_) {
     pendingCount: tasks.filter((task) => task.pendingApproval).length,
     missedTotal: tasks.reduce((acc, task) => acc + task.totals.missed, 0),
     droppedReports,
+  };
+}
+
+/**
+ * Display text for `task.when` without a cron parser (panel row's 「when 文本」 slot):
+ * the expression verbatim + ` (tz)` when a tz is present. Invalid ⇒ "".
+ * @param {ScheduleWhen | undefined} when @returns {string}
+ */
+export function whenTextOf(when) {
+  const p = whenParts(when);
+  if (p.kind === "invalid" || p.expr === "") return "";
+  return p.tz !== "" ? `${p.expr} (${p.tz})` : p.expr;
+}
+
+/** @typedef {{ state: string, at: number | undefined, runId: string | undefined }} TaskLastRun */
+/**
+ * @typedef {object} TaskRow
+ * @property {string} id
+ * @property {string} name
+ * @property {string} whenText
+ * @property {number | undefined} nextAt
+ * @property {string} nextIn   compact relative token (relIn) for nextAt
+ * @property {boolean} enabled
+ * @property {boolean} pendingApproval
+ * @property {boolean} live    any non-terminal run of this task
+ * @property {TaskLastRun | undefined} lastRun  newest run (proj.runs is most-recent-first)
+ */
+/**
+ * Aggregated task rows for the TasksPanel / composer schedule section (schedule-auto-approve
+ * plan §3-P3): one row per task with its live flag and newest run precomputed. Loose reads on
+ * untrusted JSON (offerOf posture) — a malformed projection yields [], never a throw. Old wire
+ * without `runId` simply yields `lastRun.runId === undefined` (row renders without the link).
+ * @param {ScheduleSessionProjectionWire | unknown} proj @param {number} now
+ * @returns {TaskRow[]}
+ */
+export function taskRowsOf(proj, now) {
+  const p = record(proj);
+  const tasks = Array.isArray(p.tasks) ? p.tasks : [];
+  const runs = Array.isArray(p.runs) ? p.runs : [];
+  const rows = [];
+  for (const task of tasks) {
+    const t = record(task);
+    const def = record(t.task);
+    const id = str(def.id) ?? "";
+    let live = false;
+    let lastRun = undefined;
+    for (const run of runs) {
+      const r = record(run);
+      if (str(r.taskId) !== id) continue;
+      const stateRaw = str(r.state);
+      const state = stateRaw !== undefined && RUN_STATES.has(stateRaw) ? stateRaw : "unknown";
+      if (NON_TERMINAL.has(state)) live = true;
+      if (lastRun === undefined) {
+        lastRun = {
+          state,
+          at: num(r.endedAt) ?? num(r.startedAt) ?? num(r.scheduledAt),
+          runId: str(r.runId),
+        };
+      }
+    }
+    const nextAt = num(t.nextAt);
+    rows.push({
+      id,
+      name: str(def.name) ?? "",
+      whenText: whenTextOf(/** @type {ScheduleWhen | undefined} */ (def.when)),
+      nextAt,
+      nextIn: relIn(nextAt, now),
+      enabled: bool(def.enabled) === true,
+      pendingApproval: t.pendingApproval === true,
+      live,
+      lastRun,
+    });
+  }
+  return rows;
+}
+
+/** @typedef {{ count: number, live: boolean, pending: number }} SchedSummary */
+/**
+ * Aggregated chip/panel gate + counters (schedule-auto-approve plan §3-P3, D6): the composer
+ * ⏰ chip and TasksPanel summary render iff this returns a value. Same gate semantics as
+ * `scheduleBadgeOf` (no cap / no projection / zero tasks without degraded ⇒ undefined).
+ * `live` ⇒ any non-terminal run in the session (chip icon spins); `pending` counts the
+ * legacy pendingApproval tasks (D2 存量).
+ * @param {unknown} hubCaps @param {SchedulesPayloadWire | undefined} payload @param {string | undefined} sessionId
+ * @returns {SchedSummary | undefined}
+ */
+export function schedSummaryOf(hubCaps, payload, sessionId) {
+  if (!schedCapOn(hubCaps)) return undefined;
+  const proj = sessionProjectionOf(payload, sessionId);
+  if (proj === undefined) return undefined;
+  const count = proj.tasks.length;
+  if (count === 0 && proj.degraded === undefined) return undefined;
+  return {
+    count,
+    live: proj.runs.some((run) => isRunLive(run.state)),
+    pending: proj.tasks.filter((task) => task.pendingApproval === true).length,
   };
 }

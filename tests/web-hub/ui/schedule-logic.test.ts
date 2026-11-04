@@ -22,9 +22,12 @@ import {
   runStateKey,
   scheduleBadgeOf,
   scheduleBadgeText,
+  schedSummaryOf,
   sessionProjectionOf,
   shortHash,
+  taskRowsOf,
   whenParts,
+  whenTextOf,
 } from "../../../src/web-hub/ui/src/logic/schedule.js";
 import { SCHED_HUB_CAP, SCHED_SSE_EVENT } from "../../../src/web-hub/protocol/schedule.js";
 import { makePayload, makeRun, makeSession, makeTask, SCHED_SID } from "./fixtures/schedule.js";
@@ -140,6 +143,13 @@ describe("display helpers", () => {
     expect(feishuKey("sent", true)).toBe("q"); // stale overrides everything
     expect(feishuKey("bogus", false)).toBe("q");
   });
+  it("whenTextOf: expression verbatim + tz suffix; invalid/empty ⇒ empty", () => {
+    expect(whenTextOf({ kind: "cron", expr: "0 8 * * *", tz: "Asia/Shanghai" })).toBe("0 8 * * * (Asia/Shanghai)");
+    expect(whenTextOf({ kind: "cron", expr: "0 8 * * *" })).toBe("0 8 * * *");
+    expect(whenTextOf({ kind: "once", at: "2026-11-01T09:00", tz: "UTC" })).toBe("2026-11-01T09:00 (UTC)");
+    expect(whenTextOf(undefined)).toBe("");
+    expect(whenTextOf({ kind: "cron", expr: "" } as never)).toBe("");
+  });
   it("approveArgs / rejectArgs / shortHash", () => {
     expect(approveArgs("s_abcd2345", "fd9fcbba".repeat(8))).toBe(`approve s_abcd2345 ${"fd9fcbba".repeat(8)}`);
     expect(rejectArgs("s_abcd2345", "fd9fcbba".repeat(8))).toBe(`reject s_abcd2345 ${"fd9fcbba".repeat(8)}`);
@@ -238,5 +248,106 @@ describe("panelView", () => {
     expect(v.runs[0]?.state).toBe("unknown");
     expect(v.runs[0]?.kind).toBe("auto");
     expect(v.runs[0]?.reason).toBeUndefined();
+  });
+  it("runs carry runId through; old wire without runId degrades to undefined (P3)", () => {
+    const p = makePayload([
+      makeSession({
+        tasks: [],
+        runs: [makeRun({ runId: "run-abc123" }), makeRun({ runKey: "s_abcd2345@older" })],
+      }),
+    ]);
+    const v = panelView({ ...base, payload: p });
+    if (v.kind !== "ready") throw new Error("expected ready");
+    expect(v.runs[0]?.runId).toBe("run-abc123");
+    expect(v.runs[1]?.runId).toBeUndefined(); // legacy wire: no link rendered
+  });
+});
+
+describe("taskRowsOf (schedule-auto-approve §3-P3)", () => {
+  const now = 1_761_350_400_000; // T0
+  it("one row per task: identity/when/next/enabled/pending fields", () => {
+    const rows = taskRowsOf(makeSession(), now);
+    expect(rows).toHaveLength(2);
+    const first = rows[0];
+    expect(first).toMatchObject({
+      id: "s_abcd2345",
+      name: "每日晨报",
+      whenText: "0 8 * * * (Asia/Shanghai)",
+      enabled: true,
+      pendingApproval: false,
+    });
+    expect(first?.nextIn).toBe("12h"); // nextAt = T0 + 12h
+    const pending = rows[1];
+    expect(pending).toMatchObject({ id: "s_efgh6789", pendingApproval: true, enabled: true });
+    expect(pending?.nextIn).toBe("3d");
+  });
+  it("live flag + lastRun is the newest matching run (runs arrive most-recent-first)", () => {
+    const rows = taskRowsOf(makeSession(), now);
+    // s_abcd2345: first run is `running` (non-terminal) ⇒ live; it is also the newest ⇒ lastRun
+    expect(rows[0]?.live).toBe(true);
+    expect(rows[0]?.lastRun?.state).toBe("running");
+    // s_efgh6789: only a timed_out run ⇒ not live; lastRun falls back to scheduledAt-less chain
+    expect(rows[1]?.live).toBe(false);
+    expect(rows[1]?.lastRun?.state).toBe("timed_out");
+    expect(rows[1]?.lastRun?.at).toBeTypeOf("number");
+  });
+  it("lastRun carries runId; old wire without runId ⇒ undefined (no-link degradation)", () => {
+    const withId = makeSession({
+      tasks: [makeTask()],
+      runs: [makeRun({ runId: "run-xyz789" })],
+    });
+    expect(taskRowsOf(withId, now)[0]?.lastRun?.runId).toBe("run-xyz789");
+    const legacy = makeSession({ tasks: [makeTask()], runs: [makeRun()] });
+    const row = taskRowsOf(legacy, now)[0];
+    expect(row?.lastRun?.state).toBe("completed");
+    expect(row?.lastRun?.runId).toBeUndefined();
+  });
+  it("no runs / unknown wire state degrade safely; malformed projections ⇒ []", () => {
+    const noRuns = taskRowsOf(makeSession({ tasks: [makeTask()], runs: [] }), now);
+    expect(noRuns[0]?.live).toBe(false);
+    expect(noRuns[0]?.lastRun).toBeUndefined();
+    const bogus = makeSession({
+      tasks: [makeTask()],
+      runs: [makeRun({ state: "bogus" as never })],
+    });
+    expect(taskRowsOf(bogus, now)[0]?.lastRun?.state).toBe("unknown");
+    expect(taskRowsOf(undefined, now)).toEqual([]);
+    expect(taskRowsOf(null, now)).toEqual([]);
+    expect(taskRowsOf({ tasks: "x", runs: [] }, now)).toEqual([]);
+    expect(taskRowsOf({ tasks: [{}], runs: [{}] }, now)).toEqual([
+      {
+        id: "",
+        name: "",
+        whenText: "",
+        nextAt: undefined,
+        nextIn: "",
+        enabled: false,
+        pendingApproval: false,
+        live: false,
+        lastRun: undefined,
+      },
+    ]);
+  });
+});
+
+describe("schedSummaryOf (schedule-auto-approve §3-P3)", () => {
+  const payload = makePayload();
+  it("gate: no cap / unknown session / zero tasks without degraded ⇒ undefined", () => {
+    expect(schedSummaryOf([], payload, SCHED_SID)).toBeUndefined();
+    expect(schedSummaryOf([SCHED_CAP], undefined, SCHED_SID)).toBeUndefined();
+    expect(schedSummaryOf([SCHED_CAP], payload, "nope")).toBeUndefined();
+    const empty = makePayload([makeSession({ tasks: [], runs: [] })]);
+    expect(schedSummaryOf([SCHED_CAP], empty, SCHED_SID)).toBeUndefined();
+  });
+  it("count / live / pending derived from the session projection", () => {
+    // fixture: 2 tasks (one pendingApproval), one `running` run ⇒ live
+    expect(schedSummaryOf([SCHED_CAP], payload, SCHED_SID)).toEqual({ count: 2, live: true, pending: 1 });
+    const quiet = makePayload([
+      makeSession({ tasks: [makeTask()], runs: [makeRun()] }), // completed run only, no pending task
+    ]);
+    expect(schedSummaryOf([SCHED_CAP], quiet, SCHED_SID)).toEqual({ count: 1, live: false, pending: 0 });
+    // degraded store with zero tasks still surfaces (repair hint), live false
+    const degraded = makePayload([makeSession({ tasks: [], runs: [], degraded: "invalid-json" })]);
+    expect(schedSummaryOf([SCHED_CAP], degraded, SCHED_SID)).toEqual({ count: 0, live: false, pending: 0 });
   });
 });
