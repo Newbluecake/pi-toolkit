@@ -212,6 +212,9 @@ export interface JevIndexV1 {
    *  injection (2026-11-03 noise fix). Independent of tagging upserts — the
    *  map survives re-tagging and applies to pending (untagged) entries too. */
   readonly aInjectedAt?: Record<EntryHash, string>;
+  /** P-layer cross-session cooldown stamps (memory-predict plan §2.1/§5.3) —
+   *  same shape and cap as `aInjectedAt`, independent map. */
+  readonly pInjectedAt?: Record<EntryHash, string>;
 }
 
 /** `/mem review --list` row: the stored suggestion plus its stale flag
@@ -230,6 +233,8 @@ export interface IndexPatch {
   readonly review?: ReviewState;
   /** Upserted into the A-layer cooldown map (per-key replace). */
   readonly aInjectedAt?: Readonly<Record<EntryHash, string>>;
+  /** Upserted into the P-layer cooldown map (per-key replace). */
+  readonly pInjectedAt?: Readonly<Record<EntryHash, string>>;
 }
 
 /** Result of J4's `tagBulk` (migration / re-tagging runs). */
@@ -405,6 +410,32 @@ export const DEFAULT_JEV_FAST_PATH: JevFastPathConfig = {
   cooldownMs: 86_400_000, // 24h
 };
 
+/** `memory.jev.predict.model.*` (memory-predict plan §10) — parsed in P1b,
+ *  consumed only in P2 (§11.2); nothing in `src/memory/jev/predict/*` or
+ *  `wire.ts`'s P1b orchestration reads this block yet. */
+export interface PredictModelConfig {
+  readonly enabled: boolean;
+  readonly models: readonly string[];
+  readonly threshold: number;
+  readonly waitMs: number;
+  readonly requestBudgetMs: number;
+  readonly maxCallsPerDay: number;
+  readonly maxUsdPerDay: number;
+}
+
+/** `memory.jev.predict.*` (memory-predict plan §10/§11.1) — the pure config
+ *  J6-style `jevConfigOf` maps out of `MemorySettings.jev.predict`. */
+export interface PredictJevConfig {
+  readonly enabled: boolean;
+  readonly childSessions: boolean;
+  readonly maxEntries: number;
+  readonly maxBytes: number;
+  readonly cooldownMs: number;
+  readonly hintU: boolean;
+  readonly model: PredictModelConfig;
+  readonly cacheTtlMin: number;
+}
+
 /** `JevConfig` — the pure config J6 maps out of `MemorySettings.jev` (J3).
  *  Frozen verbatim from jev-plan §2 (+ the fastPath block added by the
  *  2026-11-03 noise fix). */
@@ -418,15 +449,22 @@ export interface JevConfig {
   readonly maxCalls: number;
   readonly confirmTimeoutMs: number;
   readonly fastPath: JevFastPathConfig;
+  /** memory-predict plan §10 — P1b wires rules/state/carry/select off this;
+   *  `predict.model` is parsed but not consumed until P2 (§11.2). */
+  readonly predict: PredictJevConfig;
 }
 
 // ───────────────────────────── injection wire shapes (jev-arch §6.1.6) ─────────────────────────────
 
-export type InjectLayer = "U" | "A" | "E" | "B";
+export type InjectLayer = "U" | "A" | "E" | "B" | "P";
 
 /** I7: runtime names never move — `subagent:` prefix stays. */
 export const MEMORY_INJECT_CUSTOM_TYPE = "subagent:memory-inject";
 export const MEMORY_RECALL_CUSTOM_TYPE = "subagent:memory-recall";
+/** memory-predict plan §3.3/§9.4: per-turn carry/call ledger entries
+ *  (`kind: "final" | "call"`); only `wire.ts` + `predict/carry.ts` interpret
+ *  the payload — this file just reserves the customType string (I7). */
+export const MEMORY_PREDICT_CUSTOM_TYPE = "subagent:memory-predict";
 
 export interface MemoryRecallItemV1 {
   readonly file: string;
@@ -437,7 +475,21 @@ export interface MemoryRecallItemV1 {
   readonly p?: number;
 }
 
-/** `subagent:memory-inject` message details — append-only fields (v1 base). */
+/** One layer's worth of injected items inside a merged `before_agent_start`
+ *  return (memory-predict plan §5.3/§6.1 field table; C-J16 proved the
+ *  channel with this exact shape). */
+export interface MemoryInjectPartV1 {
+  readonly layer: InjectLayer;
+  readonly trigger: string;
+  readonly model?: string;
+  readonly partial?: true;
+  readonly items: readonly MemoryRecallItemV1[];
+}
+
+/** `subagent:memory-inject` message details — append-only fields (v1 base).
+ *  `parts`/`predict` are memory-predict plan §5.3 additions: present only on
+ *  a merged P+U message (P1b, §11.1) — a U-only message stays byte-identical
+ *  to pre-P1 (no `parts`, no `predict`). */
 export interface MemoryInjectDetailsV1 {
   readonly v: 1;
   readonly layer: InjectLayer;
@@ -445,6 +497,11 @@ export interface MemoryInjectDetailsV1 {
   readonly model?: string;
   readonly partial?: true;
   readonly items: readonly MemoryRecallItemV1[];
+  /** Present only when this message merges more than one layer (plan §5.3). */
+  readonly parts?: readonly MemoryInjectPartV1[];
+  /** Predict summary riding along the merged message (plan §5.3/§6.1):
+   *  informational only, never consumed by the model logic itself. */
+  readonly predict?: { readonly tags: readonly string[]; readonly state?: readonly string[]; readonly origin: string };
 }
 
 /** `subagent:memory-recall` appendEntry record — segment dedup seeding.
@@ -528,6 +585,28 @@ export interface JevRenderInfo {
   readonly coreInlined: boolean;
 }
 
+// ───────────────────────────── predict ports (memory-predict plan §2.1/§11.1) ─────────────────────────────
+
+/** Todo snapshot port wire.ts reads for signal T (plan §1/§2.1). Structural
+ *  mirror of the todo module's own snapshot shape so `src/memory/jev` never
+ *  imports `src/todo`. */
+export interface JevTodoPort {
+  list(): readonly { id: number; subject: string; status: string }[];
+}
+
+/** Active-subagent-run count for signal W (plan §2.1 `activeSubagents`). */
+export interface JevFleetPort {
+  activeRuns(): number;
+}
+
+/** Minimal bash-job view for signal W (plan §2.1 `bashJobs`) — a narrower
+ *  structural port than the full bashJobs module surface (status/command
+ *  only; this is what `src/index.ts` already exposes via `holder.current
+ *  ?.bashJobs?.list()`). */
+export interface JevBashJobsLitePort {
+  list(): readonly { status: string; command: string }[];
+}
+
 /** Structured UI port for pi-free command handlers (review/expired flows).
  *  `setEditorText` is optional — C-J14 verifies availability (P0 risk). */
 export interface MemCommandUiLike {
@@ -567,13 +646,29 @@ export interface JevReportView {
     readonly injectedTotal: number;
   };
   readonly review: { readonly lastRunAt?: string; readonly open: number };
+  /** memory-predict plan §9.4 P1b slice: rule-engine fire count only (no
+   *  model/cache/cost columns yet — those land with P2, §11.2). Absent
+   *  ⇒ `predict.enabled=false` (I9: the report line disappears entirely). */
+  readonly predict?: { readonly rules: number };
 }
 
 // ───────────────────────────── misc unnamed-type registrations ─────────────────────────────
 
 /** jev/redact.ts field selector — each field has its own truncation budget
- *  (jev-arch §7.1 table). */
-export type RedactField = "user" | "previousUser" | "command" | "error" | "entry";
+ *  (jev-arch §7.1 table). The P2 fields (predictRequest/predictPrev/todo/
+ *  branch/tagDesc, memory-predict plan §11.2) are reserved here now so
+ *  `RedactField` stays append-only; P1b never passes them to `redactForJev`. */
+export type RedactField =
+  | "user"
+  | "previousUser"
+  | "command"
+  | "error"
+  | "entry"
+  | "predictRequest"
+  | "predictPrev"
+  | "todo"
+  | "branch"
+  | "tagDesc";
 
 /** v4.1 §2.7.1 shell-parse output unit. */
 export interface SimpleCommand {
@@ -604,6 +699,9 @@ export const SIDECAR_MAX_ENTRIES = 2000;
 export const SIDECAR_MAX_BYTES = 1_000_000;
 /** A-layer cooldown map cap (oldest stamps evicted first). */
 export const A_INJECTED_AT_MAX = 512;
+/** P-layer cooldown map cap — same size as the A-layer table (memory-predict
+ *  plan §2.1). */
+export const P_INJECTED_AT_MAX = A_INJECTED_AT_MAX;
 /** Max enabled tags (presets + user). */
 export const MAX_ENABLED_TAGS = 64;
 /** Inline authority comment byte budget (§4.2: ≤200B). */

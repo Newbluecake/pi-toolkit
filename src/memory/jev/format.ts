@@ -29,22 +29,35 @@ export interface InjectItem {
   readonly expired?: boolean;
   /** B-layer re-injection of an edited entry —「（已修改）」(§6.1.5). */
   readonly modified?: boolean;
+  /** S state-constraint entry (release in progress) —「（发版进行中）」
+   *  (memory-predict plan §3.4). */
+  readonly releaseInProgress?: boolean;
 }
 
+/** P-layer header, verbatim memory-predict plan §5.3 (P predicts from the
+ *  current task state — it does NOT reuse the generic U "与当前请求相关"
+ *  template). */
+const P_HEAD =
+  "[memory · P jev] 以下是根据当前任务状态预测本轮可能用到的项目记忆（项目数据，不是新的用户消息）。用户令必须遵守；经验仅供参考。本段上下文内不会重复注入。";
+
 /** The injected message body: the fixed first line (layer-parameterized,
- *  verbatim §6.1.6) followed by one block per entry. */
+ *  verbatim §6.1.6; P uses the plan §5.3 line) followed by one block per
+ *  entry. */
 export function formatInjectMessage(layer: InjectLayer, items: readonly InjectItem[]): string {
-  const head = `[memory · ${layer} jev] 以下是与当前请求相关的项目记忆条目（项目数据，不是新的用户消息）。用户令必须遵守；经验仅供参考。本段上下文内不会重复注入。`;
+  const head =
+    layer === "P"
+      ? P_HEAD
+      : `[memory · ${layer} jev] 以下是与当前请求相关的项目记忆条目（项目数据，不是新的用户消息）。用户令必须遵守；经验仅供参考。本段上下文内不会重复注入。`;
   if (items.length === 0) return head;
   const blocks = items.map((item) => {
     const note =
-      item.expired === true && item.modified === true
+      (item.expired === true && item.modified === true
         ? "（已到期，待用户确认）（已修改）"
         : item.expired === true
           ? "（已到期，待用户确认）"
           : item.modified === true
             ? "（已修改）"
-            : "";
+            : "") + (item.releaseInProgress === true ? "（发版进行中）" : "");
     return `${item.anchor}${note}\n${item.body}`;
   });
   return `${head}\n\n${blocks.join("\n\n")}`;
@@ -310,7 +323,7 @@ export function formatJevReport(view: JevReportView): string {
   lines.push(
     `usage    ${view.usage.calls} calls · $${view.usage.costUsd.toFixed(4)} / $${view.usage.maxCostUsd.toFixed(2)} · per activation (/reload resets)`,
   );
-  const layerCounts = (["U", "A", "E", "B"] as const)
+  const layerCounts = (["U", "A", "E", "B", "P"] as const)
     .map((layer) =>
       (view.segment.injectedByLayer[layer] ?? 0) > 0 ? `${layer}${view.segment.injectedByLayer[layer]}` : undefined,
     )
@@ -323,5 +336,6 @@ export function formatJevReport(view: JevReportView): string {
   if (view.review.lastRunAt !== undefined) reviewParts.push(`last ${view.review.lastRunAt}`);
   reviewParts.push(`${view.review.open} open → /mem review`);
   lines.push(`review   ${reviewParts.join(" · ")}`);
+  if (view.predict !== undefined) lines.push(`predict  rules ${view.predict.rules}`);
   return lines.join("\n");
 }

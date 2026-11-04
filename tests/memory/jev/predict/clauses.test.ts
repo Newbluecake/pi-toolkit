@@ -38,13 +38,15 @@ describe("splitClauses", () => {
     }
   });
 
-  it("does not catastrophically backtrack on a 10k-codepoint prompt (<5ms warm)", () => {
+  it("does not catastrophically backtrack on a 10k-codepoint prompt (<50ms, plan §12.3 CI 口径)", () => {
     const prompt = "提交一下，".repeat(2000) + "为什么挂了？".repeat(2000);
     expect(Array.from(prompt).length).toBeGreaterThanOrEqual(10000);
     splitClauses(prompt); // JIT warmup
     const start = performance.now();
     splitClauses(prompt);
-    expect(performance.now() - start).toBeLessThan(5);
+    // 本地 p99 <2ms；断言按 plan §12.3 CI 口径取 <50ms，防的是灾难性指数
+    // 回溯（无界 regex 回溯会到秒级），不是精确性能基准。
+    expect(performance.now() - start).toBeLessThan(50);
   });
 });
 

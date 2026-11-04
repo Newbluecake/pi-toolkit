@@ -226,4 +226,76 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     ),
     max: 720,
   } as SettingSpec,
+  // memory-predict plan.md §10/§11.1: 14 `memory.jev.predict.*` keys (P1b wires
+  // rules/state/carry/select off these; `model.*` is parsed here but only
+  // consumed starting P2, §11.2). `model.waitS`/`model.requestBudgetS` follow
+  // the shared duration convention (tui-settings requirement 2): the file and
+  // both settings surfaces see integer seconds under the `*S` key, `spec.path`
+  // points at the internal millisecond field, and the `*S⇄*Ms` conversion is
+  // registered in TIME_SETTING_MS_PATHS (src/config/settings.ts).
+  "memory.jev.predict.enabled": bool(
+    "memory.jev.predict.enabled",
+    "Predictive pre-injection (rule engine + deepseek backfill, P layer)",
+  ),
+  "memory.jev.predict.childSessions": bool(
+    "memory.jev.predict.childSessions",
+    "Run the P-layer rule engine (and S state constraint) in child subagent sessions too",
+  ),
+  "memory.jev.predict.maxEntries": {
+    ...count("memory.jev.predict.maxEntries", 1, "Max P-layer entries injected per turn (S counted separately)"),
+    max: 5,
+  } as SettingSpec,
+  "memory.jev.predict.maxBytes": {
+    ...count("memory.jev.predict.maxBytes", 512, "Byte budget for P-layer entries plus the S state entry"),
+    max: 8192,
+  } as SettingSpec,
+  "memory.jev.predict.cooldownH": {
+    ...count("memory.jev.predict.cooldownH", 0, "Per-entry cross-session P-layer cooldown, hours; 0 = off"),
+    max: 168,
+  } as SettingSpec,
+  "memory.jev.predict.hintU": bool(
+    "memory.jev.predict.hintU",
+    "P1b: feed predicted tags as a U-layer recall hint (default off, needs recall eval support first)",
+  ),
+  "memory.jev.predict.model.enabled": bool(
+    "memory.jev.predict.model.enabled",
+    "deepseek-flash backfill for uncertain predictions (parsed in P1b, used starting P2)",
+  ),
+  "memory.jev.predict.model.models": csvString(
+    "memory.jev.predict.model.models",
+    "Ordered provider/id model chain for the predict backfill call (P2)",
+  ),
+  "memory.jev.predict.model.threshold": {
+    kind: "number",
+    path: "memory.jev.predict.model.threshold",
+    min: 0.5,
+    max: 0.95,
+    description: "Predict model tag acceptance probability threshold (P2)",
+  },
+  "memory.jev.predict.model.waitS": seconds("memory.jev.predict.model.waitMs", {
+    max: 1.5,
+    hint: "base wait for the predict model call before falling back (P2)",
+    description: "Base wait (seconds) for the predict model call before falling back (P2)",
+  }),
+  "memory.jev.predict.model.requestBudgetS": seconds("memory.jev.predict.model.requestBudgetMs", {
+    min: 1,
+    max: 6,
+    hint: "hard deadline for the predict model request chain, covering all failover (P2)",
+    description: "Hard deadline (seconds) for the predict model request chain, covering all failover (P2)",
+  }),
+  "memory.jev.predict.model.maxCallsPerDay": {
+    ...count("memory.jev.predict.model.maxCallsPerDay", 0, "Predict model calls per day cap; 0 = never call (P2)"),
+    max: 500,
+  } as SettingSpec,
+  "memory.jev.predict.model.maxUsdPerDay": {
+    kind: "number",
+    path: "memory.jev.predict.model.maxUsdPerDay",
+    min: 0,
+    max: 1,
+    description: "Predict model estimated daily spend cap, USD (conditional estimate, P2)",
+  },
+  "memory.jev.predict.cacheTtlMin": {
+    ...count("memory.jev.predict.cacheTtlMin", 1, "Session-local predict cache TTL, minutes (P2)"),
+    max: 240,
+  } as SettingSpec,
 };

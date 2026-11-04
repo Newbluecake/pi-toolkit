@@ -24,6 +24,7 @@ import { withMemoryDirLock } from "../lock.js";
 import { ensurePrivateDir, readRegular, replaceAtomic, unlinkRegular, writeTempRegular } from "../safe-fs.js";
 import {
   A_INJECTED_AT_MAX,
+  P_INJECTED_AT_MAX,
   SIDECAR_MAX_BYTES,
   SIDECAR_MAX_ENTRIES,
   type DismissedPair,
@@ -159,9 +160,9 @@ function sanitizeReview(v: unknown): ReviewState | undefined {
   return { lastRunAt: v["lastRunAt"], corpusFp: v["corpusFp"], suggestions, dismissed };
 }
 
-/** Sanitize the A-layer cooldown map: string values with a parseable date
+/** Sanitize an A/P-layer cooldown map: string values with a parseable date
  *  survive, anything else is dropped per key (read tolerance). */
-function sanitizeAInjectedAt(v: unknown): Record<EntryHash, string> | undefined {
+function sanitizeCooldownMap(v: unknown): Record<EntryHash, string> | undefined {
   if (!isPlainObject(v)) return undefined;
   const out: Record<EntryHash, string> = {};
   for (const [hash, at] of Object.entries(v)) {
@@ -196,7 +197,8 @@ export function readIndex(dir: string): { index: JevIndexV1; rebuilt: boolean } 
     if (tags !== undefined) entries[hash] = tags;
   }
   const review = sanitizeReview(parsed["review"]);
-  const aInjectedAt = sanitizeAInjectedAt(parsed["aInjectedAt"]);
+  const aInjectedAt = sanitizeCooldownMap(parsed["aInjectedAt"]);
+  const pInjectedAt = sanitizeCooldownMap(parsed["pInjectedAt"]);
   return {
     index: {
       v: 1,
@@ -204,6 +206,7 @@ export function readIndex(dir: string): { index: JevIndexV1; rebuilt: boolean } 
       ...(typeof parsed["lastTaggedAt"] === "string" ? { lastTaggedAt: parsed["lastTaggedAt"] } : {}),
       ...(review === undefined ? {} : { review }),
       ...(aInjectedAt === undefined || Object.keys(aInjectedAt).length === 0 ? {} : { aInjectedAt }),
+      ...(pInjectedAt === undefined || Object.keys(pInjectedAt).length === 0 ? {} : { pInjectedAt }),
     },
     rebuilt: false,
   };
@@ -221,6 +224,7 @@ export function mergeIndex(index: JevIndexV1, patch: IndexPatch): JevIndexV1 {
   }
   for (const hash of patch.remove ?? []) delete entries[hash];
   const aInjectedAt: Record<EntryHash, string> = { ...index.aInjectedAt, ...patch.aInjectedAt };
+  const pInjectedAt: Record<EntryHash, string> = { ...index.pInjectedAt, ...patch.pInjectedAt };
   return {
     v: 1,
     entries,
@@ -233,11 +237,12 @@ export function mergeIndex(index: JevIndexV1, patch: IndexPatch): JevIndexV1 {
         ? { review: index.review }
         : {}),
     ...(Object.keys(aInjectedAt).length > 0 ? { aInjectedAt } : {}),
+    ...(Object.keys(pInjectedAt).length > 0 ? { pInjectedAt } : {}),
   };
 }
 
 /** Keep the newest `keep` stamps (ISO 8601 UTC sorts lexicographically). */
-function trimAInjectedAt(map: Readonly<Record<EntryHash, string>>, keep: number): Record<EntryHash, string> {
+function trimCooldownMap(map: Readonly<Record<EntryHash, string>>, keep: number): Record<EntryHash, string> {
   const keys = Object.keys(map);
   if (keys.length <= keep) return { ...map };
   const ordered = [...keys].sort((a, b) => {
@@ -276,11 +281,14 @@ function capBlind(index: JevIndexV1): JevIndexV1 {
     entries = dropOldest(entries, Object.keys(entries).length - 1);
   }
   const aInjectedAt =
-    index.aInjectedAt === undefined ? undefined : trimAInjectedAt(index.aInjectedAt, A_INJECTED_AT_MAX);
+    index.aInjectedAt === undefined ? undefined : trimCooldownMap(index.aInjectedAt, A_INJECTED_AT_MAX);
+  const pInjectedAt =
+    index.pInjectedAt === undefined ? undefined : trimCooldownMap(index.pInjectedAt, P_INJECTED_AT_MAX);
   return {
     ...index,
     entries,
     ...(aInjectedAt !== undefined && Object.keys(aInjectedAt).length > 0 ? { aInjectedAt } : {}),
+    ...(pInjectedAt !== undefined && Object.keys(pInjectedAt).length > 0 ? { pInjectedAt } : {}),
   };
 }
 
@@ -292,22 +300,33 @@ function capBlind(index: JevIndexV1): JevIndexV1 {
  *  — keep their tags). */
 export function gcIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHash>): JevIndexV1 {
   const count = Object.keys(index.entries).length;
-  const stampCount = Object.keys(index.aInjectedAt ?? {}).length;
+  const aStampCount = Object.keys(index.aInjectedAt ?? {}).length;
+  const pStampCount = Object.keys(index.pInjectedAt ?? {}).length;
   if (
     count <= SIDECAR_MAX_ENTRIES &&
     serializedBytes(index.entries) <= SIDECAR_MAX_BYTES &&
-    stampCount <= A_INJECTED_AT_MAX
+    aStampCount <= A_INJECTED_AT_MAX &&
+    pStampCount <= P_INJECTED_AT_MAX
   )
     return index;
   const entries: Record<EntryHash, EntryTags> = {};
   for (const [hash, tags] of Object.entries(index.entries)) {
     if (liveHashes.has(hash)) entries[hash] = tags;
   }
-  const stamps: Record<EntryHash, string> = {};
+  const aStamps: Record<EntryHash, string> = {};
   for (const [hash, at] of Object.entries(index.aInjectedAt ?? {})) {
-    if (liveHashes.has(hash)) stamps[hash] = at;
+    if (liveHashes.has(hash)) aStamps[hash] = at;
   }
-  return capBlind({ ...index, entries, ...(Object.keys(stamps).length > 0 ? { aInjectedAt: stamps } : {}) });
+  const pStamps: Record<EntryHash, string> = {};
+  for (const [hash, at] of Object.entries(index.pInjectedAt ?? {})) {
+    if (liveHashes.has(hash)) pStamps[hash] = at;
+  }
+  return capBlind({
+    ...index,
+    entries,
+    ...(Object.keys(aStamps).length > 0 ? { aInjectedAt: aStamps } : {}),
+    ...(Object.keys(pStamps).length > 0 ? { pInjectedAt: pStamps } : {}),
+  });
 }
 
 /** Deterministic serialization: entry keys sorted so two runs tagging the
@@ -317,11 +336,14 @@ function serializeIndex(index: JevIndexV1): Buffer {
   for (const hash of Object.keys(index.entries).sort()) entries[hash] = index.entries[hash]!;
   const aInjectedAt: Record<EntryHash, string> = {};
   for (const hash of Object.keys(index.aInjectedAt ?? {}).sort()) aInjectedAt[hash] = index.aInjectedAt![hash]!;
+  const pInjectedAt: Record<EntryHash, string> = {};
+  for (const hash of Object.keys(index.pInjectedAt ?? {}).sort()) pInjectedAt[hash] = index.pInjectedAt![hash]!;
   return Buffer.from(
     JSON.stringify({
       ...index,
       entries,
       ...(Object.keys(aInjectedAt).length > 0 ? { aInjectedAt } : {}),
+      ...(Object.keys(pInjectedAt).length > 0 ? { pInjectedAt } : {}),
     }),
     "utf8",
   );

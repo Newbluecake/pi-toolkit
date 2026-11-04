@@ -18,6 +18,7 @@ import { lockBreak, lockCreate, listRegular } from "../../../src/memory/safe-fs.
 import { PRESET_TAGS } from "../../../src/memory/jev/taxonomy.js";
 import {
   A_INJECTED_AT_MAX,
+  P_INJECTED_AT_MAX,
   SIDECAR_MAX_BYTES,
   SIDECAR_MAX_ENTRIES,
   type EntryHash,
@@ -222,6 +223,73 @@ describe("aInjectedAt (A-layer cross-session cooldown stamps)", () => {
     expect(keys).toHaveLength(A_INJECTED_AT_MAX);
     expect(keys).not.toContain("h0000");
     expect(keys).toContain(`h${String(A_INJECTED_AT_MAX + 9).padStart(4, "0")}`);
+  });
+});
+
+describe("pInjectedAt (P-layer cross-session cooldown stamps, plan §2.1/§5.3)", () => {
+  test("patch round-trips; later patches merge per key without losing older stamps", async () => {
+    const dir = fixture();
+    await writeIndexPatch(dir, { pInjectedAt: { h1: "2026-11-04T00:00:00.000Z" } });
+    await writeIndexPatch(dir, { pInjectedAt: { h2: "2026-11-04T01:00:00.000Z" } });
+    await writeIndexPatch(dir, { pInjectedAt: { h1: "2026-11-04T02:00:00.000Z" } });
+    const { index } = readIndex(dir);
+    expect(index.pInjectedAt).toEqual({ h1: "2026-11-04T02:00:00.000Z", h2: "2026-11-04T01:00:00.000Z" });
+  });
+
+  test("tagging upserts never clobber the stamps (and vice versa)", async () => {
+    const dir = fixture();
+    await writeIndexPatch(dir, { pInjectedAt: { h1: "2026-11-04T00:00:00.000Z" } });
+    await writeIndexPatch(dir, { upsert: { h1: sampleTags() } });
+    const { index } = readIndex(dir);
+    expect(index.pInjectedAt).toEqual({ h1: "2026-11-04T00:00:00.000Z" });
+    expect(index.entries["h1" as EntryHash]?.file).toBe("core.md");
+  });
+
+  test("bad shapes are dropped per key on read; non-object ⇒ absent", async () => {
+    const dir = fixture();
+    mkdirSync(jevPath(dir), { recursive: true });
+    writeFileSync(
+      join(jevPath(dir), "index.json"),
+      JSON.stringify({
+        v: 1,
+        entries: {},
+        pInjectedAt: { good: "2026-11-04T00:00:00.000Z", num: 42, garbage: "not a date" },
+      }),
+    );
+    expect(readIndex(dir).index.pInjectedAt).toEqual({ good: "2026-11-04T00:00:00.000Z" });
+    writeFileSync(join(jevPath(dir), "index.json"), JSON.stringify({ v: 1, entries: {}, pInjectedAt: [1, 2] }));
+    expect(readIndex(dir).index.pInjectedAt).toBeUndefined();
+  });
+
+  test(`cap: stamps collapse to the newest ${P_INJECTED_AT_MAX} (oldest evicted)`, async () => {
+    const dir = fixture();
+    const stamps: Record<string, string> = {};
+    for (let i = 0; i < P_INJECTED_AT_MAX + 10; i++) {
+      stamps[`h${String(i).padStart(4, "0")}`] = new Date(
+        Date.parse("2026-11-04T00:00:00.000Z") + i * 1000,
+      ).toISOString();
+    }
+    await writeIndexPatch(dir, { pInjectedAt: stamps });
+    const { index } = readIndex(dir);
+    const keys = Object.keys(index.pInjectedAt ?? {});
+    expect(keys).toHaveLength(P_INJECTED_AT_MAX);
+    expect(keys).not.toContain("h0000");
+    expect(keys).toContain(`h${String(P_INJECTED_AT_MAX + 9).padStart(4, "0")}`);
+  });
+
+  test("gc prunes p-stamps of corpus-absent hashes once a cap is exceeded", () => {
+    const entries: Record<EntryHash, EntryTags> = {};
+    for (let i = 0; i <= SIDECAR_MAX_ENTRIES; i++) entries[`h${i}` as EntryHash] = sampleTags();
+    const live = new Set<EntryHash>([...Object.keys(entries), "live"] as EntryHash[]);
+    const gc = gcIndex(
+      {
+        v: 1,
+        entries,
+        pInjectedAt: { live: "2026-11-04T00:00:00.000Z", dead: "2026-11-04T00:00:00.000Z" },
+      },
+      live,
+    );
+    expect(gc.pInjectedAt).toEqual({ live: "2026-11-04T00:00:00.000Z" });
   });
 });
 

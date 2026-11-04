@@ -68,7 +68,7 @@ export interface MemorySettings {
   jev: MemoryJevSettings;
 }
 
-/** 15 个 `memory.jev.*` 设置键（jev-arch §9.1 原 14 + 2026-11-03 噪音修复的 fastPath×3，减去 2026-11 移除的 gate×2；`classifiersRejected` 不是设置键，只是解析结果）。 */
+/** 15 个 `memory.jev.*` 设置键（jev-arch §9.1 原 14 + 2026-11-03 噪音修复的 fastPath×3，减去 2026-11 移除的 gate×2），加上 memory-predict P1b 的 14 个 `jev.predict.*`（plan.md §10），共 29 个；`classifiersRejected` 不是设置键，只是解析结果。 */
 export interface MemoryJevSettings {
   /** 总开关。false ⇒ 不接线 Jev（零注册）。Default true（Q27：有可用凭证即启用）；legacy/secure 域强制视为 false。 */
   enabled: boolean;
@@ -108,6 +108,41 @@ export interface MemoryJevSettings {
   fastPathDenyTags: string[];
   /** A 层同条目跨会话冷却（小时），0 = 关闭（U 层判定不受限）。Default 24；0–720。 */
   fastPathCooldownH: number;
+  /** 记忆预测性预注入（memory-predict plan.md §10）— P 层规则引擎接线设置；`model.*` 本包（P1b）只解析不使用，P2 （§11.2）用它。 */
+  predict: MemoryJevPredictSettings;
+}
+
+export interface MemoryJevPredictSettings {
+  /** 总开关（D3）。Default true。 */
+  enabled: boolean;
+  /** 子会话是否只跑规则与 S。Default true。 */
+  childSessions: boolean;
+  /** P 条目上限（不含 S）。Default 2；1–5。 */
+  maxEntries: number;
+  /** P 加 S 的字节上限。Default 2048；512–8192。 */
+  maxBytes: number;
+  /** `pInjectedAt` 冷却（小时），0 = 关闭。Default 24；0–168。 */
+  cooldownH: number;
+  /** P1b，默认关（需 recall 评测支撑，§5.4）。Default false。 */
+  hintU: boolean;
+  model: {
+    /** deepseek 補位总开关（D3）。Default true；本包（P1b）只解析不调用。 */
+    enabled: boolean;
+    /** 模型链（provider/id）。CSV 或数组，非法项静默丢弃。Default ["deepseek/deepseek-flash"]。 */
+    models: string[];
+    /** 模型 tag 的入选概率。Default 0.6；0.5–0.95。 */
+    threshold: number;
+    /** 基础等待（ms）；文件键按秒存 `model.waitS`（TIME_SETTING_MS_PATHS）。Default 500；0–1500。 */
+    waitMs: number;
+    /** 请求链硬期限（ms），覆盖全部 failover；文件键按秒存 `model.requestBudgetS`（TIME_SETTING_MS_PATHS）。Default 3000；1000–6000。 */
+    requestBudgetMs: number;
+    /** 每日调用次数上限，0 = 不调用。Default 60；0–500。 */
+    maxCallsPerDay: number;
+    /** 每日估算美元额。Default 0.14；0–1。 */
+    maxUsdPerDay: number;
+  };
+  /** 会话内缓存 TTL（分钟）。Default 30；1–240。 */
+  cacheTtlMin: number;
 }
 
 export type MemoryLayout = "tiered" | "legacy";
@@ -212,6 +247,48 @@ function parseJevClassifiers(
   return { classifiers, classifiersRejected };
 }
 
+/** 模型链 csv/数组 → 去重保序的 `provider/id` 列表（memory-predict plan §10）；非合法项静默丢弃，输入未提供/非字符串数组时回落默认。 */
+function parseModelList(raw: unknown, fallback: readonly string[]): string[] {
+  if (raw === undefined || (typeof raw !== "string" && !Array.isArray(raw))) return [...fallback];
+  const out: string[] = [];
+  for (const token of splitJevClassifiersCsv(raw)) {
+    if (JEV_CLASSIFIER_RE.test(token) && !out.includes(token)) out.push(token);
+  }
+  return out;
+}
+
+/** `memory.jev.predict.*`（memory-predict plan §10）—字段级容错，从不抛出。`model.*` 本包（P1b）只解析不使用。 */
+function parseJevPredict(raw: unknown, fallback: MemoryJevPredictSettings): MemoryJevPredictSettings {
+  const obj: Record<string, unknown> =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const modelRaw = obj.model;
+  const modelObj: Record<string, unknown> =
+    modelRaw && typeof modelRaw === "object" && !Array.isArray(modelRaw) ? (modelRaw as Record<string, unknown>) : {};
+  const bool = (v: unknown, fb: boolean): boolean => (typeof v === "boolean" ? v : fb);
+  const num = (v: unknown, fb: number, min: number, max: number): number =>
+    typeof v === "number" && Number.isFinite(v) && v >= min && v <= max ? Math.floor(v) : fb;
+  const numFloat = (v: unknown, fb: number, min: number, max: number): number =>
+    typeof v === "number" && Number.isFinite(v) && v >= min && v <= max ? v : fb;
+  return {
+    enabled: bool(obj.enabled, fallback.enabled),
+    childSessions: bool(obj.childSessions, fallback.childSessions),
+    maxEntries: num(obj.maxEntries, fallback.maxEntries, 1, 5),
+    maxBytes: num(obj.maxBytes, fallback.maxBytes, 512, 8192),
+    cooldownH: num(obj.cooldownH, fallback.cooldownH, 0, 168),
+    hintU: bool(obj.hintU, fallback.hintU),
+    model: {
+      enabled: bool(modelObj.enabled, fallback.model.enabled),
+      models: parseModelList(modelObj.models, fallback.model.models),
+      threshold: numFloat(modelObj.threshold, fallback.model.threshold, 0.5, 0.95),
+      waitMs: num(modelObj.waitMs, fallback.model.waitMs, 0, 1500),
+      requestBudgetMs: num(modelObj.requestBudgetMs, fallback.model.requestBudgetMs, 1000, 6000),
+      maxCallsPerDay: num(modelObj.maxCallsPerDay, fallback.model.maxCallsPerDay, 0, 500),
+      maxUsdPerDay: numFloat(modelObj.maxUsdPerDay, fallback.model.maxUsdPerDay, 0, 1),
+    },
+    cacheTtlMin: num(obj.cacheTtlMin, fallback.cacheTtlMin, 1, 240),
+  };
+}
+
 /**
  * Parse the optional `memory` settings block (memory-plan §3.2). Malformed or
  * missing input falls back field-by-field to DEFAULT_MEMORY_SETTINGS; never
@@ -306,6 +383,7 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     fastPathAllowTags: parseJevTagIdList(jevObj.fastPathAllowTags),
     fastPathDenyTags: parseJevTagIdList(jevObj.fastPathDenyTags),
     fastPathCooldownH: num(jevObj.fastPathCooldownH, defaults.jev.fastPathCooldownH, 0, 720),
+    predict: parseJevPredict(jevObj.predict, defaults.jev.predict),
   };
 
   return {
@@ -373,5 +451,23 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     fastPathAllowTags: [],
     fastPathDenyTags: [],
     fastPathCooldownH: 24,
+    predict: {
+      enabled: true,
+      childSessions: true,
+      maxEntries: 2,
+      maxBytes: 2048,
+      cooldownH: 24,
+      hintU: false,
+      model: {
+        enabled: true,
+        models: ["deepseek/deepseek-flash"],
+        threshold: 0.6,
+        waitMs: 500,
+        requestBudgetMs: 3000,
+        maxCallsPerDay: 60,
+        maxUsdPerDay: 0.14,
+      },
+      cacheTtlMin: 30,
+    },
   },
 };

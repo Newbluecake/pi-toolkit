@@ -54,6 +54,24 @@ describe("memory settings", () => {
         fastPathAllowTags: [],
         fastPathDenyTags: [],
         fastPathCooldownH: 24,
+        predict: {
+          enabled: true,
+          childSessions: true,
+          maxEntries: 2,
+          maxBytes: 2048,
+          cooldownH: 24,
+          hintU: false,
+          model: {
+            enabled: true,
+            models: ["deepseek/deepseek-flash"],
+            threshold: 0.6,
+            waitMs: 500,
+            requestBudgetMs: 3000,
+            maxCallsPerDay: 60,
+            maxUsdPerDay: 0.14,
+          },
+          cacheTtlMin: 30,
+        },
       },
     });
   });
@@ -451,6 +469,7 @@ describe("memory settings", () => {
       fastPathAllowTags: ["testing", "ci"],
       fastPathDenyTags: ["git-push", "release"],
       fastPathCooldownH: 0,
+      predict: defaults.jev.predict,
     });
   });
 
@@ -578,6 +597,24 @@ describe("memory settings", () => {
     expect(loadSettings({ memory: { jev: { recall: { waitS: 2 } } } }).memory.jev.recall.waitMs).toBe(2000);
   });
 
+  it("predict model durations round-trip through the file's waitS/requestBudgetS seconds keys (TIME_SETTING_MS_PATHS, plan §10)", () => {
+    expect(TIME_SETTING_MS_PATHS).toContain("memory.jev.predict.model.waitMs");
+    expect(TIME_SETTING_MS_PATHS).toContain("memory.jev.predict.model.requestBudgetMs");
+    const loaded = loadSettings({
+      memory: { jev: { predict: { model: { waitS: 1, requestBudgetS: 5 } } } },
+    }).memory.jev.predict.model;
+    expect(loaded.waitMs).toBe(1000);
+    expect(loaded.requestBudgetMs).toBe(5000);
+    // fractional seconds survive the file boundary (the 0.5s default is not whole-second);
+    // out-of-range after conversion falls back to the default.
+    expect(
+      loadSettings({ memory: { jev: { predict: { model: { waitS: 0.5 } } } } }).memory.jev.predict.model.waitMs,
+    ).toBe(500);
+    expect(
+      loadSettings({ memory: { jev: { predict: { model: { waitS: 2 } } } } }).memory.jev.predict.model.waitMs,
+    ).toBe(defaults.jev.predict.model.waitMs);
+  });
+
   it("jev is wired into loadSettings", () => {
     expect(loadSettings({ memory: { jev: { enabled: false } } }).memory.jev.enabled).toBe(false);
   });
@@ -625,5 +662,149 @@ describe("memory settings", () => {
     });
     expect(defaultOf(SETTING_SPECS["memory.jev.enabled"]!)).toBe(true);
     expect(defaultOf(SETTING_SPECS["memory.jev.classifiers"]!)).toBe("opencode/jev-1.13-free,opencode/jev-1.13");
+  });
+
+  // memory-predict plan.md §10: 14 `memory.jev.predict.*` keys (P1b wires
+  // rules/state/carry/select off these; `model.*` is parsed here but only
+  // consumed starting P2, §11.2).
+  it("jev.predict block: accepts in-range overrides", () => {
+    const parsed = parseMemorySettings({
+      jev: {
+        predict: {
+          enabled: false,
+          childSessions: false,
+          maxEntries: 5,
+          maxBytes: 8192,
+          cooldownH: 0,
+          hintU: true,
+          model: {
+            enabled: false,
+            models: "deepseek/deepseek-flash, foo/bar",
+            threshold: 0.8,
+            waitMs: 1200,
+            requestBudgetMs: 5000,
+            maxCallsPerDay: 10,
+            maxUsdPerDay: 0.5,
+          },
+          cacheTtlMin: 120,
+        },
+      },
+    }).jev.predict;
+    expect(parsed).toEqual({
+      enabled: false,
+      childSessions: false,
+      maxEntries: 5,
+      maxBytes: 8192,
+      cooldownH: 0,
+      hintU: true,
+      model: {
+        enabled: false,
+        models: ["deepseek/deepseek-flash", "foo/bar"],
+        threshold: 0.8,
+        waitMs: 1200,
+        requestBudgetMs: 5000,
+        maxCallsPerDay: 10,
+        maxUsdPerDay: 0.5,
+      },
+      cacheTtlMin: 120,
+    });
+  });
+
+  it("jev.predict block: enforces documented ranges and malformed-input fallback", () => {
+    const d = defaults.jev.predict;
+    expect(parseMemorySettings({ jev: { predict: { maxEntries: 0 } } }).jev.predict.maxEntries).toBe(d.maxEntries);
+    expect(parseMemorySettings({ jev: { predict: { maxEntries: 6 } } }).jev.predict.maxEntries).toBe(d.maxEntries);
+    expect(parseMemorySettings({ jev: { predict: { maxBytes: 511 } } }).jev.predict.maxBytes).toBe(d.maxBytes);
+    expect(parseMemorySettings({ jev: { predict: { cooldownH: -1 } } }).jev.predict.cooldownH).toBe(d.cooldownH);
+    expect(parseMemorySettings({ jev: { predict: { cooldownH: 169 } } }).jev.predict.cooldownH).toBe(d.cooldownH);
+    expect(parseMemorySettings({ jev: { predict: { cooldownH: 0 } } }).jev.predict.cooldownH).toBe(0);
+    expect(parseMemorySettings({ jev: { predict: { cacheTtlMin: 0 } } }).jev.predict.cacheTtlMin).toBe(d.cacheTtlMin);
+    expect(parseMemorySettings({ jev: { predict: { cacheTtlMin: 241 } } }).jev.predict.cacheTtlMin).toBe(d.cacheTtlMin);
+    expect(parseMemorySettings({ jev: { predict: { model: { threshold: 0.49 } } } }).jev.predict.model.threshold).toBe(
+      d.model.threshold,
+    );
+    expect(parseMemorySettings({ jev: { predict: { model: { threshold: 0.96 } } } }).jev.predict.model.threshold).toBe(
+      d.model.threshold,
+    );
+    expect(parseMemorySettings({ jev: { predict: { model: { waitMs: -1 } } } }).jev.predict.model.waitMs).toBe(
+      d.model.waitMs,
+    );
+    expect(parseMemorySettings({ jev: { predict: { model: { waitMs: 1501 } } } }).jev.predict.model.waitMs).toBe(
+      d.model.waitMs,
+    );
+    expect(parseMemorySettings({ jev: { predict: { model: { waitMs: 0 } } } }).jev.predict.model.waitMs).toBe(0);
+    expect(
+      parseMemorySettings({ jev: { predict: { model: { requestBudgetMs: 999 } } } }).jev.predict.model.requestBudgetMs,
+    ).toBe(d.model.requestBudgetMs);
+    expect(
+      parseMemorySettings({ jev: { predict: { model: { requestBudgetMs: 6001 } } } }).jev.predict.model.requestBudgetMs,
+    ).toBe(d.model.requestBudgetMs);
+    expect(
+      parseMemorySettings({ jev: { predict: { model: { maxCallsPerDay: -1 } } } }).jev.predict.model.maxCallsPerDay,
+    ).toBe(d.model.maxCallsPerDay);
+    expect(
+      parseMemorySettings({ jev: { predict: { model: { maxCallsPerDay: 501 } } } }).jev.predict.model.maxCallsPerDay,
+    ).toBe(d.model.maxCallsPerDay);
+    expect(
+      parseMemorySettings({ jev: { predict: { model: { maxUsdPerDay: -0.1 } } } }).jev.predict.model.maxUsdPerDay,
+    ).toBe(d.model.maxUsdPerDay);
+    expect(
+      parseMemorySettings({ jev: { predict: { model: { maxUsdPerDay: 1.01 } } } }).jev.predict.model.maxUsdPerDay,
+    ).toBe(d.model.maxUsdPerDay);
+    expect(parseMemorySettings({ jev: { predict: { model: { models: 42 } } } }).jev.predict.model.models).toEqual(
+      d.model.models,
+    );
+    expect(
+      parseMemorySettings({ jev: { predict: { model: { models: "not/ok ok, deepseek/deepseek-flash" } } } }).jev.predict
+        .model.models,
+    ).toEqual(["deepseek/deepseek-flash"]);
+    // malformed top-level predict/model blocks fall back wholesale, never throw.
+    for (const bad of [undefined, null, 0, "nope", true, [], [1, 2]]) {
+      expect(parseMemorySettings({ jev: { predict: bad } }).jev.predict).toEqual(d);
+      expect(parseMemorySettings({ jev: { predict: { model: bad } } }).jev.predict.model).toEqual(d.model);
+    }
+  });
+
+  it("memory.jev.predict.* setting specs (14 keys) are registered with the documented ranges", () => {
+    expect(SETTING_SPECS["memory.jev.predict.enabled"]).toMatchObject({ kind: "boolean" });
+    expect(SETTING_SPECS["memory.jev.predict.childSessions"]).toMatchObject({ kind: "boolean" });
+    expect(SETTING_SPECS["memory.jev.predict.maxEntries"]).toMatchObject({ kind: "number", min: 1, max: 5 });
+    expect(SETTING_SPECS["memory.jev.predict.maxBytes"]).toMatchObject({ kind: "number", min: 512, max: 8192 });
+    expect(SETTING_SPECS["memory.jev.predict.cooldownH"]).toMatchObject({ kind: "number", min: 0, max: 168 });
+    expect(SETTING_SPECS["memory.jev.predict.hintU"]).toMatchObject({ kind: "boolean" });
+    expect(SETTING_SPECS["memory.jev.predict.model.enabled"]).toMatchObject({ kind: "boolean" });
+    expect(SETTING_SPECS["memory.jev.predict.model.models"]).toMatchObject({ kind: "string", csv: true });
+    expect(SETTING_SPECS["memory.jev.predict.model.threshold"]).toMatchObject({
+      kind: "number",
+      min: 0.5,
+      max: 0.95,
+    });
+    expect(SETTING_SPECS["memory.jev.predict.model.waitS"]).toMatchObject({
+      kind: "number",
+      path: "memory.jev.predict.model.waitMs",
+      time: true,
+      integer: true,
+      min: 0,
+      max: 1.5,
+    });
+    expect(SETTING_SPECS["memory.jev.predict.model.requestBudgetS"]).toMatchObject({
+      kind: "number",
+      path: "memory.jev.predict.model.requestBudgetMs",
+      time: true,
+      integer: true,
+      min: 1,
+      max: 6,
+    });
+    expect(isKnownSettingKey("memory.jev.predict.model.waitMs")).toBe(false);
+    expect(isKnownSettingKey("memory.jev.predict.model.requestBudgetMs")).toBe(false);
+    expect(SETTING_SPECS["memory.jev.predict.model.maxCallsPerDay"]).toMatchObject({
+      kind: "number",
+      min: 0,
+      max: 500,
+    });
+    expect(SETTING_SPECS["memory.jev.predict.model.maxUsdPerDay"]).toMatchObject({ kind: "number", min: 0, max: 1 });
+    expect(SETTING_SPECS["memory.jev.predict.cacheTtlMin"]).toMatchObject({ kind: "number", min: 1, max: 240 });
+    expect(defaultOf(SETTING_SPECS["memory.jev.predict.enabled"]!)).toBe(true);
+    expect(defaultOf(SETTING_SPECS["memory.jev.predict.model.models"]!)).toBe("deepseek/deepseek-flash");
   });
 });

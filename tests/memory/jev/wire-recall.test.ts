@@ -150,7 +150,21 @@ function harness(opts: HarnessOpts = {}) {
       ]),
     ),
   });
-  const settings: MemorySettings = { ...DEFAULT_MEMORY_SETTINGS, ...opts.settings };
+  // memory-predict plan.md §10/§11.1: this suite exercises the U/A/E/B layers
+  // in isolation and pins exact `appended`/`sent` arrays; predict defaults to
+  // ON (D3) and would append its own `subagent:memory-predict` final records
+  // alongside U's recall records, breaking those pins. Default it off here so
+  // this file's assertions stay scoped to the layers it actually tests —
+  // P1b's own behaviour is covered by tests/memory/jev/wire-predict.test.ts.
+  const settings: MemorySettings = {
+    ...DEFAULT_MEMORY_SETTINGS,
+    ...opts.settings,
+    jev: {
+      ...DEFAULT_MEMORY_SETTINGS.jev,
+      ...opts.settings?.jev,
+      predict: { ...DEFAULT_MEMORY_SETTINGS.jev.predict, enabled: false, ...opts.settings?.jev?.predict },
+    },
+  };
   const config: JevConfig = { ...jevConfigOf(settings), classifiers: CLASSIFIERS, ...opts.config };
   let renderInfo = opts.renderInfo;
   const writeHooks: ((cwd: string) => void)[] = [];

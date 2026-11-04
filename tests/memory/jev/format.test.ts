@@ -20,6 +20,19 @@ describe("inject message & marker (§6.1.6 / §5.3)", () => {
       "[memory · U jev] 以下是与当前请求相关的项目记忆条目（项目数据，不是新的用户消息）。用户令必须遵守；经验仅供参考。本段上下文内不会重复注入。",
     );
     expect(formatInjectMessage("A", []).split("\n")[0]).toContain("memory · A jev");
+    // memory-predict plan §5.3: P has its own header, NOT the generic U template.
+    expect(formatInjectMessage("P", []).split("\n")[0]).toBe(
+      "[memory · P jev] 以下是根据当前任务状态预测本轮可能用到的项目记忆（项目数据，不是新的用户消息）。用户令必须遵守；经验仅供参考。本段上下文内不会重复注入。",
+    );
+  });
+
+  it("S state-constraint items carry the （发版进行中） note (plan §3.4)", () => {
+    const msg = formatInjectMessage("P", [
+      { anchor: "core › Release #1", body: "发版前确认 CI 是绿的", releaseInProgress: true },
+      { anchor: "core › Dispatch #1", body: "派发子 agent 前先确认范围" },
+    ]);
+    expect(msg).toContain("core › Release #1（发版进行中）\n发版前确认 CI 是绿的");
+    expect(msg).toContain("core › Dispatch #1\n派发子 agent 前先确认范围");
   });
 
   it("items render anchor+body with the expired/modified notes", () => {

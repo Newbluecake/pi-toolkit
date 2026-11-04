@@ -52,6 +52,30 @@ export function jevConfigOf(memory: MemorySettings): JevConfig {
       denyTags: jev.fastPathDenyTags,
       cooldownMs: jev.fastPathCooldownH * 3_600_000,
     },
+    predict: predictConfigOf(memory),
+  };
+}
+
+/** `memory.jev.predict.*` → `PredictJevConfig` (memory-predict plan §10). */
+export function predictConfigOf(memory: MemorySettings): JevConfig["predict"] {
+  const p = memory.jev.predict;
+  return {
+    enabled: p.enabled,
+    childSessions: p.childSessions,
+    maxEntries: p.maxEntries,
+    maxBytes: p.maxBytes,
+    cooldownMs: p.cooldownH * 3_600_000,
+    hintU: p.hintU,
+    model: {
+      enabled: p.model.enabled,
+      models: p.model.models,
+      threshold: p.model.threshold,
+      waitMs: p.model.waitMs,
+      requestBudgetMs: p.model.requestBudgetMs,
+      maxCallsPerDay: p.model.maxCallsPerDay,
+      maxUsdPerDay: p.model.maxUsdPerDay,
+    },
+    cacheTtlMin: p.cacheTtlMin,
   };
 }
 

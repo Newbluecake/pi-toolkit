@@ -76,6 +76,16 @@ describe("resolveJevWiring", () => {
       maxCalls: 10,
       confirmTimeoutMs: s.jev.confirmTimeoutMs,
       fastPath: { allowTags: ["testing", "ci"], denyTags: ["git-push"], cooldownMs: 12 * 3_600_000 },
+      predict: {
+        enabled: s.jev.predict.enabled,
+        childSessions: s.jev.predict.childSessions,
+        maxEntries: s.jev.predict.maxEntries,
+        maxBytes: s.jev.predict.maxBytes,
+        cooldownMs: s.jev.predict.cooldownH * 3_600_000,
+        hintU: s.jev.predict.hintU,
+        model: { ...s.jev.predict.model },
+        cacheTtlMin: s.jev.predict.cacheTtlMin,
+      },
     });
     const dup = jevConfigOf({ ...s, jev: { ...s.jev, classifiers: ["a/b", "a/b", "c/d"] } });
     expect(dup.classifiers).toEqual(["a/b", "c/d"]);

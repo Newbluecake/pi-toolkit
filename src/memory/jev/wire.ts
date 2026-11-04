@@ -60,39 +60,77 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { createHash } from "node:crypto";
+import { basename, dirname } from "node:path";
 import { createSegmentedClock, type Clock, type TimerHandle } from "../../core/clock.js";
 import { clampSpanMs } from "../../core/deadline.js";
 import { resolveWorktreeOrigin } from "../../core/worktree-origin.js";
+import { createGitRunner, type GitRunner } from "../../git/run.js";
+import { readRegular } from "../safe-fs.js";
 import type { MemorySettings } from "../settings.js";
 import { createJevClient, type JevClientHandle } from "./client.js";
 import { createJevCommandPort } from "./command-port.js";
 import {
   MEMORY_INJECT_CUSTOM_TYPE,
+  MEMORY_PREDICT_CUSTOM_TYPE,
   RECALL_MAX_CANDIDATES,
   type ClassifierRegistryLike,
   type EntryHash,
   type EntryTags,
   type InjectLayer,
   type JevAnswer,
+  type JevBashJobsLitePort,
   type JevClient,
   type JevCommandPort,
   type JevConfig,
   type JevDoctorPort,
+  type JevFleetPort,
   type JevIndexV1,
   type JevRenderInfo,
   type JevStatus,
+  type JevTodoPort,
   type JevWritePort,
   type MemEntry,
   type MemoryInjectDetailsV1,
+  type MemoryInjectPartV1,
   type SimpleCommand,
   type Taxonomy,
 } from "./contracts.js";
 import { decideErrorRecall, decideRecall, effectiveMeta } from "./decide.js";
 import { EntryIndex, expiredEntries } from "./entries.js";
-import { formatInjectMarker, formatInjectMessage, formatNotify, formatStatusLine } from "./format.js";
+import {
+  formatInjectMarker,
+  formatInjectMarkerParts,
+  formatInjectMessage,
+  formatNotify,
+  formatStatusLine,
+} from "./format.js";
 import { clearHealthTable, coverage, getHealthTable, notifyFor } from "./health.js";
 import { readIndex, readTaxonomyFile, writeIndexPatch } from "./index-store.js";
 import { matchTags, prefilter } from "./match.js";
+import {
+  carryFromFinal,
+  carryHits,
+  detectCarryClear,
+  isCarryPhrase,
+  isTodoReplaced,
+  revalidateCarry,
+  buildFinalRecord,
+  type FinalRecord,
+} from "./predict/carry.js";
+import type { CarryState, Evidence, PathClass, ScoredHit, ToolLite } from "./predict/contracts.js";
+import { readGitBranch, type GitHeadIo } from "./predict/git-head.js";
+import { runPredict } from "./predict/index.js";
+import { runRules } from "./predict/rules.js";
+import {
+  prioritizeCandidates,
+  selectPEntries,
+  selectSEntry,
+  type Candidate as PredictCandidate,
+  type PriorityCandidate,
+  type SCandidate,
+} from "./predict/select.js";
+import { shapeOf } from "./predict/shape.js";
+import { buildPredictInput, classifyPathClass } from "./predict/signals.js";
 import {
   buildErrorQuestions,
   buildRecallQuestions,
@@ -189,6 +227,9 @@ export interface WireJevDeps {
   readonly dirFor: (cwd: string) => string | undefined;
   readonly getRenderInfo: (cwd: string) => JevRenderInfo | undefined;
   readonly onAfterWriteHook: (fn: (cwd: string) => void) => void;
+  /** memory-predict plan §2.1 signal T — absent ⇒ todo treated as empty
+   *  (P1b degrades gracefully when `todo.enabled` is off). */
+  readonly todo?: JevTodoPort;
   // ── seams (tests; production uses the defaults) ──
   readonly now?: () => number;
   readonly clock?: Clock;
@@ -207,6 +248,10 @@ export interface WireJevResult {
   makeWritePort(): JevWritePort;
   readonly doctorPort: JevDoctorPort;
   readonly client: JevClient;
+  /** memory-predict plan §11.1: late-bound W-signal ports (bashJobs/fleet) —
+   *  `src/index.ts` attaches these post-guard, after `activeSubagentRunCount`
+   *  exists; unattached ⇒ P1b sees empty bashJobs / 0 activeSubagents. */
+  attachPredictPorts(ports: { bashJobs: JevBashJobsLitePort; fleet: JevFleetPort }): void;
 }
 
 // ───────────────────────────── small pure helpers (exported for tests) ─────────────────────────────
@@ -367,6 +412,8 @@ interface Pick {
   readonly entry: MemEntry;
   readonly p?: number;
   readonly modified?: boolean;
+  /** S state-constraint pick (§3.4) — rendered with the「（发版进行中）」note. */
+  readonly releaseInProgress?: boolean;
 }
 
 /** Cap by count and cumulative body bytes; the first pick always survives
@@ -390,6 +437,84 @@ function fitPicks(picks: readonly Pick[], maxEntries: number, maxBytes: number):
     out.push({ pick, body });
   }
   return out;
+}
+
+// ───────────────────────────── predict helpers (memory-predict plan §3.3/§5.3/§7.3; wire.ts, non-pi-free) ─────────────────────────────
+
+/** Union per-tag evidence across every `ScoredHit` that produced it (plan
+ *  §3.3 final-record evidence; hits with no `tag` match or no evidence are
+ *  skipped). */
+export function evidenceForTag(hits: readonly ScoredHit[], tag: string): Evidence {
+  const todoIds = new Set<number>();
+  const jobShapes = new Set<string>();
+  let branch: string | undefined;
+  for (const h of hits) {
+    if (h.tag !== tag || h.evidence === undefined) continue;
+    for (const id of h.evidence.todoIds) todoIds.add(id);
+    for (const s of h.evidence.jobShapes) jobShapes.add(s);
+    if (h.evidence.branch !== undefined) branch = h.evidence.branch;
+  }
+  return { todoIds: [...todoIds], jobShapes: [...jobShapes], ...(branch === undefined ? {} : { branch }) };
+}
+
+/** §3.3 R2-5: restore carry **only from the newest `kind:"final"`** predict
+ *  record on the branch — a `kind:"call"` record (P2) never participates,
+ *  and scanning stops at the first final record found (a `cleared:"compaction"`
+ *  empty final correctly caps carry at the compaction boundary). */
+export function restoreCarryFromBranch(branch: readonly BranchEntryLike[]): CarryState | undefined {
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const e = branch[i] as { type?: string; customType?: string; data?: unknown } | undefined;
+    if (e?.type !== "custom" || e.customType !== MEMORY_PREDICT_CUSTOM_TYPE) continue;
+    const d = e.data as Partial<FinalRecord> | undefined;
+    if (d === undefined || d === null || typeof d !== "object" || d.v !== 1 || d.kind !== "final") continue;
+    return carryFromFinal(d as FinalRecord);
+  }
+  return undefined;
+}
+
+export interface PredictSummary {
+  readonly tags: readonly string[];
+  readonly state: readonly string[];
+  readonly origin: string;
+}
+
+/** §5.3 commitParts: U-only stays byte-identical to pre-P1 (returned
+ *  unchanged, no `parts`/`predict`); P-only gets an optional `predict`
+ *  summary attached; both present ⇒ one merged message, top layer "P",
+ *  content = P body + blank line + U body, `parts` = [P, U] (C-J16 shape). */
+export function mergeInjectMessages(
+  p: InjectMessage | undefined,
+  u: InjectMessage | undefined,
+  predictSummary: PredictSummary | undefined,
+): InjectMessage | undefined {
+  if (p === undefined) return u;
+  const pd = p.details as MemoryInjectDetailsV1;
+  if (u === undefined) {
+    if (predictSummary === undefined) return p;
+    return { ...p, details: { ...pd, predict: predictSummary } };
+  }
+  const ud = u.details as MemoryInjectDetailsV1;
+  const partOf = (d: MemoryInjectDetailsV1): MemoryInjectPartV1 => ({
+    layer: d.layer,
+    trigger: d.trigger,
+    ...(d.model === undefined ? {} : { model: d.model }),
+    ...(d.partial === true ? { partial: true as const } : {}),
+    items: d.items,
+  });
+  const merged: MemoryInjectDetailsV1 = {
+    v: 1,
+    layer: "P",
+    trigger: pd.trigger,
+    items: pd.items,
+    parts: [partOf(pd), partOf(ud)],
+    ...(predictSummary === undefined ? {} : { predict: predictSummary }),
+  };
+  return {
+    customType: MEMORY_INJECT_CUSTOM_TYPE,
+    content: `${p.content}\n\n${u.content}`,
+    display: true,
+    details: merged,
+  };
 }
 
 // ───────────────────────────── wireJev ─────────────────────────────
@@ -479,6 +604,20 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   let truncated: { from: number; to: number } | undefined;
   let errorSignatures = new Set<string>();
   let errorAsks = 0;
+  // memory-predict plan §2.1/§11.1: P-layer closure state (I4). `recentTools`
+  // rotates on every before_agent_start (prev run → current PredictInput,
+  // current run resets to empty). `dirtyCache` is an async-refreshed 20s TTL
+  // cell — the git subprocess runs in the background; the turn that kicked
+  // the refresh uses whatever was cached before (old value or "unknown").
+  let prevRunTools: ToolLite[] = [];
+  let curRunTools: { tool: string; shape?: string; pathClass?: PathClass; isError?: boolean }[] = [];
+  const curRunToolIndex = new Map<string, number>();
+  let dirtyCache: { value: boolean | undefined; at: number } = { value: undefined, at: -Infinity };
+  let dirtyGitRunner: GitRunner | undefined;
+  let predictBashJobs: JevBashJobsLitePort | undefined;
+  let predictFleet: JevFleetPort | undefined;
+  let rulesFired = 0;
+  const pStamps = new Map<EntryHash, string>();
   const parsedCache = new Map<string, ParseShellResult>();
   const dataCache = new Map<string, { at: number; corpus: Corpus }>();
   const anchors = new Map<EntryHash, { file: string; section: string; heading?: string; ordinal: number }>();
@@ -494,6 +633,13 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       if (typeof pi.appendEntry === "function") pi.appendEntry("subagent:memory-recall", data);
     } catch (err) {
       log(`appendEntry failed: ${String((err as Error)?.message ?? err)}`);
+    }
+  };
+  const appendPredict = (data: unknown): void => {
+    try {
+      if (typeof pi.appendEntry === "function") pi.appendEntry(MEMORY_PREDICT_CUSTOM_TYPE, data);
+    } catch (err) {
+      log(`appendEntry predict failed: ${String((err as Error)?.message ?? err)}`);
     }
   };
 
@@ -810,6 +956,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       ...(pick.p === undefined ? {} : { p: pick.p }),
       ...(expiredEntries([pick.entry], today).length > 0 ? { expired: true } : {}),
       ...(pick.modified === true ? { modified: true } : {}),
+      ...(pick.releaseInProgress === true ? { releaseInProgress: true } : {}),
     }));
     const details: MemoryInjectDetailsV1 = {
       v: 1,
@@ -891,6 +1038,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     c: Corpus,
     cwd: string,
     query: string,
+    predicted?: ReadonlyMap<string, number>,
   ): { cands: RecallCandidate[]; entries: Map<string, MemEntry> } => {
     const info = deps.getRenderInfo(cwd);
     const eligible = c.entries.filter(
@@ -898,13 +1046,53 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     );
     let pool = eligible;
     if (eligible.length > RECALL_MAX_CANDIDATES) {
-      pool = prefilter(
-        eligible,
+      // §5.4 优先入池：带预测 tag（score ≥0.5）的条目最多保留 40 槽（排序
+      // 用户令 → max p × importance → file），其余 320 槽交给现有 prefilter
+      // （tieBreak 仍是 user-first），两段合并后按 hash 去重。
+      let priorityEntries: MemEntry[] = [];
+      if (predicted !== undefined && predicted.size > 0) {
+        const prio: { entry: MemEntry; cand: PriorityCandidate }[] = [];
+        for (const e of eligible) {
+          const record = c.index.entries[e.hash];
+          const meta = effectiveMeta(e, record, c.taxonomy);
+          let p = 0;
+          for (const t of meta.tags) {
+            const s = predicted.get(t);
+            if (s === undefined || s < 0.5) continue;
+            const tp = record?.tags[t]?.p ?? (e.inline.tagsAdd?.includes(t) === true ? 1 : 0);
+            p = Math.max(p, tp);
+          }
+          if (p <= 0) continue;
+          prio.push({
+            entry: e,
+            cand: {
+              hash: e.hash,
+              file: e.file,
+              p,
+              importance: meta.pending ? 2 : (meta.importance ?? 0),
+              isUserAuthority: e.authority === "user",
+            },
+          });
+        }
+        const byHash = new Map(prio.map((x) => [x.cand.hash, x.entry] as const));
+        priorityEntries = prioritizeCandidates(prio.map((x) => x.cand)).map((k) => byHash.get(k.hash)!);
+      }
+      const priorityHashes = new Set(priorityEntries.map((e) => e.hash));
+      const rest = prefilter(
+        eligible.filter((e) => !priorityHashes.has(e.hash)),
         (e) => e.body,
         query,
-        RECALL_MAX_CANDIDATES,
+        RECALL_MAX_CANDIDATES - priorityEntries.length,
         (a, b) => (a.authority === b.authority ? 0 : a.authority === "user" ? -1 : 1),
       );
+      const seen = new Set<string>();
+      const merged: MemEntry[] = [];
+      for (const e of [...priorityEntries, ...rest]) {
+        if (seen.has(e.hash)) continue;
+        seen.add(e.hash);
+        merged.push(e);
+      }
+      pool = merged;
       truncated = { from: eligible.length, to: pool.length };
     } else {
       truncated = undefined;
@@ -986,6 +1174,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     ctx: ExtensionContext,
     cwd: string,
     reg: ClassifierRegistryLike,
+    predicted?: ReadonlyMap<string, number>,
   ): Promise<InjectMessage | undefined> => {
     if (!judgedAllowed() || segment.full()) return undefined;
     const stripped = stripSkillBlocks(prompt).trim();
@@ -1000,7 +1189,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       const prevStripped = prevRaw === undefined ? "" : stripSkillBlocks(prevRaw).trim();
       if (prevStripped !== "") previous = redactForJev(prevStripped, "previousUser");
     }
-    const { cands, entries: byId } = recallCandidates(c, cwd, `${userMessage}\n${previous ?? ""}`);
+    const { cands, entries: byId } = recallCandidates(c, cwd, `${userMessage}\n${previous ?? ""}`, predicted);
     if (cands.length === 0) return undefined;
     const { state, questions } = buildRecallQuestions({
       userMessage,
@@ -1137,6 +1326,11 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     errorSignatures = new Set();
     errorAsks = 0;
     parsedCache.clear();
+    // memory-predict plan §3.3: compaction always clears carry — write an
+    // empty `cleared:"compaction"` final record so the next branch scan
+    // (restoreCarryFromBranch) stops here instead of reviving pre-compaction
+    // carry state.
+    if (config.predict.enabled) appendPredict(buildFinalRecord(turnSeq, [], 0, "compaction"));
     const m = reinject(cwd);
     if (m !== undefined) send(m);
   };
@@ -1267,6 +1461,251 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     }
   };
 
+  // ───────── P layer (memory-predict plan §1/§5/§7/§8.3, P1b: no model) ─────────
+
+  const predictGitIo: GitHeadIo = {
+    readTextFile(path) {
+      try {
+        return readRegular(dirname(path), basename(path)).text;
+      } catch {
+        return undefined;
+      }
+    },
+  };
+
+  const DIRTY_TTL_MS = 20_000;
+  const invalidateDirty = (): void => {
+    dirtyCache = { value: undefined, at: -Infinity };
+  };
+  const refreshDirtyAsync = (cwd: string): void => {
+    if (now() - dirtyCache.at < DIRTY_TTL_MS) return;
+    dirtyCache = { value: dirtyCache.value, at: now() }; // debounce concurrent kicks
+    const runner = dirtyGitRunner ?? (dirtyGitRunner = createGitRunner());
+    void runner(["status", "--porcelain", "-uno"], { cwd, timeoutMs: 150, maxStdoutBytes: 4_096 })
+      .then((r) => {
+        if (r.spawnError !== undefined || r.killed !== undefined) return;
+        dirtyCache = { value: r.stdout.trim().length > 0, at: now() };
+      })
+      .catch(() => {
+        /* leave the old/unknown value */
+      });
+  };
+  /** §7.3: kicks an async refresh when stale, returns whatever is cached NOW
+   *  (old value or "unknown" — never blocks the turn). */
+  const dirtyValue = (cwd: string): boolean | undefined => {
+    refreshDirtyAsync(cwd);
+    return dirtyCache.value;
+  };
+
+  const PATH_INPUT_KEYS = ["path", "file_path", "filePath"] as const;
+  const pathOfToolInput = (input: Record<string, unknown>): string | undefined => {
+    for (const k of PATH_INPUT_KEYS) {
+      const v = input[k];
+      if (typeof v === "string") return v;
+    }
+    return undefined;
+  };
+
+  /** §2.1 H signal: 20-slot ring per run, rotated at the start of the NEXT
+   *  run (`rotateRecentTools`, called from before_agent_start). */
+  const rotateRecentTools = (): void => {
+    prevRunTools = curRunTools.map((t) => ({
+      tool: t.tool,
+      ...(t.shape === undefined ? {} : { shape: t.shape }),
+      ...(t.pathClass === undefined ? {} : { pathClass: t.pathClass }),
+      ...(t.isError === undefined ? {} : { isError: t.isError }),
+    }));
+    curRunTools = [];
+    curRunToolIndex.clear();
+  };
+
+  /** Cross-session P-injection cooldown (mirrors `aCoolingDown`/`recordAInjection`
+   *  above, independent map — plan §2.1/§5.3). */
+  const pCoolingDown = (c: Corpus, hash: EntryHash): boolean => {
+    const cooldownMs = config.predict.cooldownMs;
+    if (cooldownMs <= 0) return false;
+    const stamp = pStamps.get(hash) ?? c.index.pInjectedAt?.[hash];
+    if (stamp === undefined) return false;
+    const at = Date.parse(stamp);
+    return Number.isFinite(at) && now() - at < cooldownMs;
+  };
+  const recordPInjection = (c: Corpus, m: InjectMessage): void => {
+    const details = m.details as MemoryInjectDetailsV1 | undefined;
+    if (details === undefined || details.items.length === 0) return;
+    const at = new Date(now()).toISOString();
+    const upsert: Record<EntryHash, string> = {};
+    for (const item of details.items) {
+      pStamps.set(item.hash, at);
+      upsert[item.hash] = at;
+    }
+    void writeIndexPatch(c.dir, { pInjectedAt: upsert })
+      .then((out) => {
+        if (out === "busy") log("sidecar busy — P-injection cooldown stamps not saved");
+      })
+      .catch((err: unknown) => log(`P-injection stamp write failed: ${String((err as Error)?.message ?? err)}`));
+  };
+
+  /** §5.1 candidate materialization: same exclusion/meta pipeline as the A
+   *  layer (`fastPath` above), reshaped into `predict/select.ts`'s pure
+   *  `Candidate`/`SCandidate` input shapes. */
+  const predictCandidatesFor = (
+    c: Corpus,
+    cwd: string,
+  ): { pCands: PredictCandidate[]; sCands: SCandidate[]; byHash: Map<EntryHash, MemEntry> } => {
+    const info = deps.getRenderInfo(cwd);
+    const byHash = new Map<EntryHash, MemEntry>();
+    const pCands: PredictCandidate[] = [];
+    const sCands: SCandidate[] = [];
+    for (const e of c.entries) {
+      if (e.inline.isPrivate === true || e.secret || segment.isInjected(e.hash) || isStaticCore(e, info)) continue;
+      byHash.set(e.hash, e);
+      const record = c.index.entries[e.hash];
+      const meta = effectiveMeta(e, record, c.taxonomy);
+      const tagP: Record<string, number> = {};
+      for (const t of meta.tags) {
+        const p = record?.tags[t]?.p ?? (e.inline.tagsAdd?.includes(t) === true ? 1 : 0);
+        if (p > 0) tagP[t] = p;
+      }
+      const byteLength = Buffer.byteLength(e.body, "utf8");
+      // select.ts's Candidate.authority is "user"|"model"|"none" (only "user"
+      // affects scoring, §5.1); map the entry's "user"|"agent" authority.
+      const selectAuthority: "user" | "model" = meta.authority === "user" ? "user" : "model";
+      pCands.push({
+        hash: e.hash,
+        isPrivate: false,
+        isSecret: false,
+        isInjected: false,
+        isStaticCore: false,
+        coolingDown: pCoolingDown(c, e.hash),
+        pending: meta.pending,
+        ...(meta.importance === undefined ? {} : { importance: meta.importance }),
+        ...(meta.type === undefined ? {} : { type: meta.type }),
+        authority: selectAuthority,
+        tagP,
+        byteLength,
+      });
+      sCands.push({
+        hash: e.hash,
+        isPrivate: false,
+        isSecret: false,
+        authority: selectAuthority,
+        ...(meta.type === undefined ? {} : { type: meta.type }),
+        hasReleaseTag: meta.tags.includes("release"),
+        byteLength,
+      });
+    }
+    return { pCands, sCands, byHash };
+  };
+
+  /** §8.3 P1b orchestration (no model branch): rules + S + carry, zero-call,
+   *  fully synchronous. Returns `undefined` when P did not even attempt to
+   *  run this turn (off/partial-inactive/segment-full/no corpus/predict
+   *  disabled) — distinct from "ran but produced nothing to inject". */
+  const runPredictTurn = (
+    prompt: string,
+    ctx: ExtensionContext,
+    cwd: string,
+  ):
+    | { message: InjectMessage | undefined; predictSummary: PredictSummary; predicted: ReadonlyMap<string, number> }
+    | undefined => {
+    const allowed = zeroCallAllowed();
+    if (!allowed.ok || segment.full()) return undefined;
+    const c = corpusFor(cwd);
+    if (c === undefined) return undefined;
+    rulesFired += 1;
+    const branch = branchOf(ctx) ?? [];
+    // §3.3 触发门：carry 每轮都从分支恢复（清空簿记——cancel/todo-replaced/
+    // empty 在非承接轮同样生效，承接状态随之失效），但只有承接短语当轮才把
+    // carry 传入 PredictInput 参与投票/注入；无关新指令不承接。
+    const carryIn = restoreCarryFromBranch(branch);
+    const stripped = stripSkillBlocks(prompt).trim();
+    const carryActive = carryIn !== undefined && isCarryPhrase(stripped) ? carryIn : undefined;
+    const prevRaw = previousUserMessage(branch, prompt);
+    const prevStripped = prevRaw === undefined ? "" : stripSkillBlocks(prevRaw).trim();
+    const gitBranch = readGitBranch(cwd, predictGitIo);
+    const dirty = dirtyValue(cwd);
+    const input = buildPredictInput({
+      prompt: stripped,
+      ...(prevStripped === "" ? {} : { previousPrompt: prevStripped }),
+      todo: deps.todo?.list() ?? [],
+      recentTools: prevRunTools,
+      git: { ...(gitBranch === undefined ? {} : { branch: gitBranch }), ...(dirty === undefined ? {} : { dirty }) },
+      bashJobs: predictBashJobs?.list() ?? [],
+      activeSubagents: predictFleet?.activeRuns() ?? 0,
+      session: isChild ? "child" : "main",
+      ...(carryActive === undefined ? {} : { carry: carryActive }),
+    });
+    const result = runPredict(input, c.taxonomy);
+    const { hits: ruleHits, modifiers } = runRules(input, c.taxonomy);
+    const revalidatedCarry = input.carry === undefined ? undefined : revalidateCarry(input.carry, input);
+    const hits = [...ruleHits, ...carryHits(revalidatedCarry)];
+    const tagsWithEvidence = result.tags.map((t) => ({ ...t, evidence: evidenceForTag(hits, t.tag) }));
+    const cancelled = modifiers.some((m) => m.kind === "cancel");
+    const prevTodoIds = (carryIn?.tags ?? []).flatMap((t) => t.evidence.todoIds);
+    const currentInProgressIds = input.todo.filter((t) => t.status === "in_progress").map((t) => t.id);
+    const todoReplaced = isTodoReplaced(prevTodoIds, currentInProgressIds);
+    const clearedReason = detectCarryClear({
+      cancelled,
+      compacted: false,
+      todoReplaced,
+      finalTagsEmpty: tagsWithEvidence.length === 0,
+    });
+    const newCarries = clearedReason !== undefined ? 0 : (revalidatedCarry?.carries ?? 0);
+    const hadCarryBefore = carryIn !== undefined;
+    if (tagsWithEvidence.length > 0 || hadCarryBefore) {
+      appendPredict(
+        buildFinalRecord(turnSeq, clearedReason === undefined ? tagsWithEvidence : [], newCarries, clearedReason),
+      );
+    }
+    // Selection runs off `result.tags`/`result.state` regardless of
+    // `clearedReason` — that flag only governs what gets WRITTEN to the
+    // final record (carry housekeeping for the NEXT turn), not whether THIS
+    // turn injects. Negated/readonly tags are already scored to 0 and
+    // dropped by `tally()`, so there is nothing left to over-inject here;
+    // the S constraint in particular must survive even when the turn's
+    // carry resolves to "empty" (no tag-level carry to keep).
+    let message: InjectMessage | undefined;
+    {
+      const eligible = fastPathEligibleTags(c.taxonomy);
+      const { pCands, sCands, byHash } = predictCandidatesFor(c, cwd);
+      const selected = selectPEntries({
+        tags: result.tags,
+        eligibleTags: eligible,
+        candidates: pCands,
+        maxEntries: config.predict.maxEntries,
+        maxBytes: config.predict.maxBytes,
+      });
+      const usedBytes = selected.reduce((sum, s) => sum + s.byteLength, 0);
+      const sSelected = selectSEntry(result.state, sCands, Math.max(0, config.predict.maxBytes - usedBytes));
+      const picks: Pick[] = [];
+      for (const s of selected) {
+        const e = byHash.get(s.hash);
+        if (e !== undefined) picks.push({ entry: e });
+      }
+      if (sSelected !== undefined) {
+        const e = byHash.get(sSelected.hash);
+        if (e !== undefined) picks.push({ entry: e, releaseInProgress: true });
+      }
+      if (picks.length > 0) {
+        message = commit("P", picks, picks.length, config.predict.maxBytes, "predict", {
+          ...(allowed.partial ? { partial: true } : {}),
+        });
+        if (message !== undefined) recordPInjection(c, message);
+      }
+    }
+    return {
+      message,
+      predictSummary: {
+        tags: result.tags.map((t) => t.tag),
+        state: result.state.map((s) => s.kind),
+        origin: result.origin,
+      },
+      // §5.4 优先入池原料：本轮预测 tag → finalScore（≥0.5 的由
+      // recallCandidates 筛）。predict.enabled=false / P 未跑时本对象不存在。
+      predicted: new Map(result.tags.map((t) => [t.tag, t.score] as const)),
+    };
+  };
+
   // ───────── hooks ─────────
 
   const seedFrom = (ctx: unknown): void => {
@@ -1283,6 +1722,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       if (!isChild) sessionCwd = cwd;
       turnSeq += 1;
       recallAbort?.abort();
+      if (config.predict.enabled) rotateRecentTools();
       seedFrom(ctx);
       const b = reinject(cwd);
       if (b !== undefined) send(b);
@@ -1306,8 +1746,20 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         return m === undefined ? undefined : { message: m };
       }
       if (!isChild && judgedAllowed() && client.status().kind === "full") backfillPending(cwd);
-      const m = await recallU(event.prompt, ctx, cwd, reg);
-      return m === undefined ? undefined : { message: m };
+      // §5.3/§8.3: P 与 U 互不拖累——P 抛异常只放弃 P（记诊断日志），U 仍按
+      // 原路径返回/合并；U 的异常仍由外层 catch 兕底（原行为不变）。
+      let pMessage: ReturnType<typeof runPredictTurn>;
+      if (config.predict.enabled && (!isChild || config.predict.childSessions)) {
+        try {
+          pMessage = runPredictTurn(event.prompt, ctx, cwd);
+        } catch (err) {
+          log(`predict turn failed: ${String((err as Error)?.message ?? err)}`);
+          pMessage = undefined;
+        }
+      }
+      const uMessage = await recallU(event.prompt, ctx, cwd, reg, pMessage?.predicted);
+      const merged = mergeInjectMessages(pMessage?.message, uMessage, pMessage?.predictSummary);
+      return merged === undefined ? undefined : { message: merged };
     } catch (err) {
       log(`before_agent_start failed: ${String((err as Error)?.message ?? err)}`);
       return undefined;
@@ -1323,6 +1775,25 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     try {
       if (observe(ctx) === undefined) return undefined;
       fastPath(event, cwdOf(ctx));
+      if (config.predict.enabled) {
+        try {
+          const input = event.input as Record<string, unknown>;
+          const entry: { tool: string; shape?: string; pathClass?: PathClass; isError?: boolean } = {
+            tool: event.toolName,
+          };
+          if (event.toolName === "bash" && typeof input["command"] === "string") {
+            entry.shape = shapeOf(input["command"]);
+          }
+          const path = pathOfToolInput(input);
+          if (path !== undefined) entry.pathClass = classifyPathClass(path);
+          if (curRunTools.length < 20) {
+            curRunToolIndex.set(event.toolCallId, curRunTools.length);
+            curRunTools.push(entry);
+          }
+        } catch {
+          /* H signal is best-effort — never block the tool */
+        }
+      }
     } catch (err) {
       log(`tool_call failed: ${String((err as Error)?.message ?? err)}`);
     }
@@ -1333,6 +1804,13 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     if (!runs) return undefined;
     try {
       if (observe(ctx) === undefined) return undefined;
+      if (config.predict.enabled) {
+        if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "bash") invalidateDirty();
+        if (event.isError === true) {
+          const idx = curRunToolIndex.get(event.toolCallId);
+          if (idx !== undefined && curRunTools[idx] !== undefined) curRunTools[idx]!.isError = true;
+        }
+      }
       const text = textOfContent(event.content);
       const exitCode = failureExitCode({ structuredContent: event.structuredContent, text });
       if (!event.isError && (exitCode === undefined || exitCode === 0)) return undefined;
@@ -1470,12 +1948,28 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const renderer: MessageRenderer<MemoryInjectDetailsV1> = (message, options, theme) => {
       const d = message.details;
       if (d === undefined || d === null || typeof d !== "object" || !Array.isArray(d.items)) return undefined;
-      const line = formatInjectMarker(
-        d.layer,
-        d.items.map((i) => ({ anchor: i.anchor, ...(i.p === undefined ? {} : { p: i.p }) })),
-        { partial: d.partial === true },
-      );
       const padX = typeof options?.outputPad === "number" && options.outputPad >= 0 ? options.outputPad : 1;
+      // memory-predict plan §5.3: a merged P+U message carries `details.parts`
+      // — render the combined marker (one segment per part) instead of the
+      // single-layer line; a plain (pre-P1) message has no `parts` and keeps
+      // the original rendering byte-identical.
+      const parts = d.parts;
+      const line = Array.isArray(parts)
+        ? formatInjectMarkerParts(
+            parts.map((part: MemoryInjectPartV1) => ({
+              layer: part.layer,
+              items: part.items.map((i: { anchor: string; p?: number }) => ({
+                anchor: i.anchor,
+                ...(i.p === undefined ? {} : { p: i.p }),
+              })),
+              ...(part.partial === true ? { partial: true } : {}),
+            })),
+          )
+        : formatInjectMarker(
+            d.layer,
+            d.items.map((i) => ({ anchor: i.anchor, ...(i.p === undefined ? {} : { p: i.p }) })),
+            { partial: d.partial === true },
+          );
       return new Text(theme.fg("dim", line), padX, 0);
     };
     pi.registerMessageRenderer(MEMORY_INJECT_CUSTOM_TYPE, renderer);
@@ -1528,7 +2022,11 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       const withTrunc =
         truncated === undefined ? text : `${text}\nrecall   recall truncated ${truncated.from}→${truncated.to}`;
       const errors = recentErrorsText();
-      return errors === undefined ? withTrunc : `${withTrunc}\n${errors}`;
+      const withErrors = errors === undefined ? withTrunc : `${withTrunc}\n${errors}`;
+      // memory-predict plan §9.4 P1b slice: rule-fire count only (no model/
+      // cost columns yet — those land with P2, §11.2); absent entirely when
+      // predict.enabled=false (I9).
+      return config.predict.enabled ? `${withErrors}\npredict  rules ${rulesFired}` : withErrors;
     },
   };
 
@@ -1616,5 +2114,9 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     },
     doctorPort,
     client,
+    attachPredictPorts(ports) {
+      predictBashJobs = ports.bashJobs;
+      predictFleet = ports.fleet;
+    },
   };
 }

@@ -3,8 +3,8 @@
 //
 // §5.1 的真实实现依赖 `MemEntry`/`effectiveMeta`/`segment` 等 jev 内部状态
 // （wire.ts，非 pi-free，I8 不能在此 import）。本文件提供其纯函数内核：
-// 调用方（P1b wire 接线，不在本包范围）把条目摊平成下面的 `Candidate` 形状
-// 后再调用。排除 private/secret/injected/staticCore/冷却、pending 默认
+// 调用方（P1b 已落地的 wire 接线，wire.ts `predictCandidatesFor`/`commitParts`）
+// 把条目摊平成下面的 `Candidate` 形状后再调用。排除 private/secret/injected/staticCore/冷却、pending 默认
 // importance=2 跳过 type 检查、`authority=user` 加成、`fitPicks` 字节/条目
 // 预算，均按 §5.1 公式逐字实现。
 

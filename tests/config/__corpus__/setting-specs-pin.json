@@ -159,6 +159,20 @@
     ["memory.jev.fastPathAllowTags", "73e3d8778ff59fe498aa61755d9648201a2bfdca6ed17f840f1a1bee2cb56394"],
     ["memory.jev.fastPathDenyTags", "47b725621fb8cd58e5ad076c80c8d471e5fe45a5aefae27f7b4448dd9cc37534"],
     ["memory.jev.fastPathCooldownH", "07736734920df08766e7966cb984d66f27dbd82e9b749131a1848df5848a59dd"],
+    ["memory.jev.predict.enabled", "b151749010e51b39dbbf804b238e6c6d1922218ca77a0080fc86461572930acf"],
+    ["memory.jev.predict.childSessions", "6d92739e7797ba99f165cbec59be3028d90ff27c20d5f47eca79346b59bceaa8"],
+    ["memory.jev.predict.maxEntries", "1ae707c7a335363d6b26464bbc66a5c8b06af1dcf9ad0fddc7c7b84d3666eac6"],
+    ["memory.jev.predict.maxBytes", "6859a4a6743b4a2051d2a2ba90895821b4c7df385f224aa589312f66f4bf025b"],
+    ["memory.jev.predict.cooldownH", "700cf2cb084e0f9952c8e1bf863edad82dbedb27d28212eefac0b25a8873cbe6"],
+    ["memory.jev.predict.hintU", "076ce51b218d209158443678d581ac67a5a70111bd881cc94342259d3d1cb588"],
+    ["memory.jev.predict.model.enabled", "f4dba48c927c314caa53de936de744a59ce6aa21879863b41d41ce18c2bf772a"],
+    ["memory.jev.predict.model.models", "60ee6e0e75cb949e2f4da4ab958a7a61149f4735e8a3d97e0a5130fe80ea1809"],
+    ["memory.jev.predict.model.threshold", "4fd655248e7d0c1bad541d8ad47d84908336e466e878b8f661bff2560e1ff81f"],
+    ["memory.jev.predict.model.waitS", "14373c24d7f36f9a66694f1066d8ff650aa23fb6644a86a198bf27cc3f6a67f1"],
+    ["memory.jev.predict.model.requestBudgetS", "8e2c7716636faa657eae5cb8f24804294b28b09a831316375ff7584bc8ca72a4"],
+    ["memory.jev.predict.model.maxCallsPerDay", "3e35f2df579256dd24f2a9570d2fc3a06d2d6e3802ae0bd78bcb3f5fe4bb404b"],
+    ["memory.jev.predict.model.maxUsdPerDay", "3e27dbf1616f912cf81f3169187ccc037aac2242b9f3ffbd52429dc9e9fa5e56"],
+    ["memory.jev.predict.cacheTtlMin", "778410dba337cc14b7320bb4a0a5b89113a54cb0b53c0cf41dfaafb910c74c22"],
     ["extend.notify", "d554ffb3b6fec9d4f045958cfd14957b1ae1b686fe7771b6a01f876cc219e77a"],
     ["fleetDeadlineWarnS", "121f3850524eaed3f47e9581c450367f46746f2f206321e553e5159fbbf34d84"],
     ["fleetWidgetMaxRows", "0eb0067a65571f4d26df4f686e4017d42be9038a4cac86bb91d4fdab39bd9735"],
@@ -322,5 +336,5 @@
     ["schedule.defaultTimeoutS", "0c0a7cec1b640196d1236428b689372d961cbced729c6999200c31e29e442b30"],
     ["schedule.maxTimeoutS", "6c538e3100c646f3a64116ead976a485bc27e4fdb9e550349c75e420ec30fce3"]
   ],
-  "all": "099acd2f978040e9f20a02625ab87d5c47ce817da5b68e5ba24378515a5ec620"
+  "all": "8083f164d8d0335992a17001eee0253370ad04970e99d2b59261b9d3396cc24a"
 }

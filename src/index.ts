@@ -239,6 +239,16 @@ export default function activate(rawPi: ExtensionAPI): void {
       // block below, long after wireMemory returned).
       remote: () => askUserRemoteRef.current?.(),
       ...(isChildSession ? {} : { sessionSignal: () => sessionAbort?.signal }),
+      // memory-predict plan §11.1 signal T: forward the todo snapshot (todo
+      // module disabled ⇒ undefined ⇒ P1b sees an empty todo list).
+      ...(todoWiring
+        ? {
+            todo: () => ({
+              list: () =>
+                todoWiring.getTodoSnapshot().tasks.map((t) => ({ id: t.id, subject: t.subject, status: t.status })),
+            }),
+          }
+        : {}),
     });
 
   // bash-timeout-grace plan §3.4 (P5): the child (subagent) session half of
@@ -733,6 +743,16 @@ export default function activate(rawPi: ExtensionAPI): void {
     if (!stack) return 0;
     return countActiveRuns(stack.query.list(), stack.spawn.runningIds()) + stack.workflow.activity.list().length;
   };
+  // memory-predict plan §11.1: late-bound W-signal ports (bashJobs/fleet) —
+  // a plain function call, not a registration (governance's activate-trace
+  // golden is unaffected). `memoryWiring` is undefined when `memory.enabled`
+  // is false; `attachJevPredictPorts` itself no-ops when Jev is unwired.
+  memoryWiring?.attachJevPredictPorts({
+    bashJobs: {
+      list: () => (holder.current?.bashJobs?.list() ?? []).map((r) => ({ status: r.status, command: r.command })),
+    },
+    fleet: { activeRuns: () => activeSubagentRunCount() },
+  });
   pi.registerCommand(
     "agent",
     createStatusCommand({

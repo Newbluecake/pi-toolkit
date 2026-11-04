@@ -48,7 +48,7 @@ import { memoryDirFor } from "./paths.js";
 import { resolveJevWiring, type JevDomainKind } from "./jev/config.js";
 import { wireJev } from "./jev/wire.js";
 import { createJevWritePort } from "./jev/write-port.js";
-import type { JevDoctorPort, JevRenderInfo } from "./jev/contracts.js";
+import type { JevBashJobsLitePort, JevDoctorPort, JevFleetPort, JevRenderInfo, JevTodoPort } from "./jev/contracts.js";
 
 export interface WireMemoryOpts {
   settings: MemorySettings;
@@ -78,6 +78,9 @@ export interface WireMemoryOpts {
    *  child sessions hard-refuse guards before any confirm and never need
    *  it). Guards concatenate it with the tool signal per call. */
   sessionSignal?: () => AbortSignal | undefined;
+  /** memory-predict plan §11.1 signal T — forwarded verbatim to `wireJev`'s
+   *  `todo` dep (undefined ⇒ P1b sees an empty todo list). */
+  todo?: () => JevTodoPort | undefined;
 }
 
 export interface WireMemoryResult {
@@ -90,6 +93,10 @@ export interface WireMemoryResult {
    *  P5 经 holder 晚绑定给 `ExternalAgentsPort` 的 `memoryBlock` 端口；
    *  `externalAgents.droid.injectMemory=false` 时 P5 干脆不传该端口。 */
   renderForExternal(cwd: string): string | undefined;
+  /** memory-predict plan §11.1: `src/index.ts` (post-guard, main session only)
+   *  calls this once `activeSubagentRunCount`/bashJobs exist — a no-op when
+   *  Jev is unwired (off/child-gated) since there's nothing to attach to. */
+  attachJevPredictPorts(ports: { bashJobs: JevBashJobsLitePort; fleet: JevFleetPort }): void;
 }
 
 /** Q34 (jev-plan J7): a non-empty classifiers list that parsed to zero valid
@@ -190,6 +197,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   );
   // jev-plan J6: Jev hooks register after the hub (src/index.ts creates the
   // hub first) and before the tool/command so the command port exists.
+  const jevTodo = opts.todo?.();
   const jev = jevVerdict.on
     ? wireJev(pi, {
         config: jevVerdict.config,
@@ -199,6 +207,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         getRenderInfo: (cwd) => renderInfos.get(cwd),
         onAfterWriteHook: (fn) => afterWriteHooks.push(fn),
         createWritePort: createJevWritePort,
+        ...(jevTodo === undefined ? {} : { todo: jevTodo }),
         // J8 acceptance #3 "core usage": doctor's D19 (≥80% of coreBytes, not
         // when D02/D03 already flag the primary) as one reminder line.
         coreUsageLine: (cwd) => {
@@ -248,6 +257,9 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     },
     renderForExternal(cwd: string): string | undefined {
       return renderExternalMemoryBlock({ settings: opts.settings, cache }, cwd);
+    },
+    attachJevPredictPorts(ports) {
+      jev?.attachPredictPorts(ports);
     },
   };
 }

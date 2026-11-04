@@ -34,13 +34,21 @@ const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
 const ANSI_RE = /\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\)|[@-Z\\-_])/g;
 const FIRST_ERROR_LINE_RE = /(?:^|\W)(?:error|errno|failed|fatal|panic|exception|traceback)(?:\W|$)/i;
 
-/** §7.1 truncation budgets (code points). */
+/** §7.1 truncation budgets (code points). The P2 fields (predictRequest/
+ *  predictPrev/todo/branch/tagDesc, memory-predict plan §6.1) are populated
+ *  now so `RedactField` stays total; P1b never calls `redactForJev` with
+ *  them — limits match plan §6.1's outbound DTO caps. */
 const TRUNCATION: Record<RedactField, { limit: number; mode: "head" | "tail" }> = {
   user: { limit: 2_000, mode: "head" }, // user message / dispatch prompt
   previousUser: { limit: 600, mode: "head" },
   command: { limit: 500, mode: "head" },
   error: { limit: 1_500, mode: "tail" },
   entry: { limit: 400, mode: "head" },
+  predictRequest: { limit: 1_000, mode: "head" },
+  predictPrev: { limit: 300, mode: "head" },
+  todo: { limit: 80, mode: "head" },
+  branch: { limit: 40, mode: "head" },
+  tagDesc: { limit: 160, mode: "head" },
 };
 
 /** Mask secret-shaped spans. Never throws; every pass is total. */

@@ -60,6 +60,8 @@ export interface SegmentState {
   count(): number;
   /** True once the cap is reached — injections stop for the segment. */
   full(): boolean;
+  /** Slots left before `full()` (memory-predict plan §2.1 segment.ts addition). */
+  remaining(): number;
   compactionId(): string | undefined;
   stats(): SegmentStats;
 }
@@ -161,6 +163,7 @@ export function createSegmentState(): SegmentState {
     lastInjected: (n) => uniqueRecent(order, n),
     count: () => injected.size,
     full: () => injected.size >= SEGMENT_MAX_INJECTED,
+    remaining: () => Math.max(0, SEGMENT_MAX_INJECTED - injected.size),
     compactionId: () => currentCompaction,
     stats: () => ({ byLayer: { ...byLayer }, total: injected.size }),
   };

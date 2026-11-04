@@ -1,8 +1,9 @@
 // 承接（plan.md v3.2 §3.3）：触发短语判定、重新验证、清空条件、
 // 只从 final 恢复的持久化记录形状。pi-free；无模块级可变状态（I4）。
 //
-// 实际的 `subagent:memory-predict` 读写、session_start 恢复属于 wire.ts 接线
-// （P1b，不在本包范围），本文件只提供其纯函数内核。
+// `subagent:memory-predict` 读写与分支恢复的接线已在 wire.ts（P1b）落地：
+// 每轮 before_agent_start 从 getBranch() 恢复 carry（restoreCarryFromBranch）。
+// 本文件只提供其纯函数内核（pi-free；无模块级可变状态 I4）。
 
 import type { CarryState, Evidence, PredictInput, ScoredHit, TagScore } from "./contracts.js";
 
