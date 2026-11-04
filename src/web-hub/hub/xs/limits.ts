@@ -380,6 +380,11 @@ export interface HubCrossSessionConfig {
   /** Channel-plan §3.1: hub-global broadcast params ONLY — absence means the defaults
    *  (16 / 4), NEVER "channels off" (the `xs.channel.v1` cap rides `crossSession` itself). */
   channels?: HubXsChannelsConfig;
+  /** fabric-xs-activation plan §3 P0 (arch §3.2): KEY-ABSENCE-IS-OFF — the hub assembles the
+   *  activation services (state/activate relay, the relation bag) ONLY when this key exists.
+   *  The agent writes it (as `true`) only while effective, so a missing key means an old agent
+   *  or activation off ⇒ the hub is byte-identical to the pre-feature build. */
+  activation?: true;
 }
 
 export interface HubXsChannelsConfig {
@@ -423,8 +428,9 @@ function normalizeChannelsConfig(raw: unknown): HubXsChannelsConfig | undefined 
  * yields `undefined` ⇒ the caller DROPS the whole key ⇒ xs off (no relay, no cap, no frame
  * handling). Optional `reply` is retained only as a boolean (malformed ⇒ false); absent stays
  * absent, meaning on. Optional `channels` (channel-plan §3.1) is kept iff both params are integers
- * in `XS_HUB_CHANNELS_BOUNDS`, else that sub-key alone is dropped (defaults). All other extra keys
- * are ignored. Never throws.
+ * in `XS_HUB_CHANNELS_BOUNDS`, else that sub-key alone is dropped (defaults). Optional `activation`
+ * (fabric-xs-activation plan §3 P0) survives only as literal `true` — anything else drops the
+ * key (⇒ off; key-absence-is-off). All other extra keys are ignored. Never throws.
  */
 export function normalizeHubCrossSessionConfig(raw: unknown): HubCrossSessionConfig | undefined {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
@@ -436,10 +442,15 @@ export function normalizeHubCrossSessionConfig(raw: unknown): HubCrossSessionCon
   const reply = (raw as Record<string, unknown>)["reply"];
   // Channel-plan §3.1: a malformed `channels` drops only that sub-key (defaults apply).
   const channels = normalizeChannelsConfig((raw as Record<string, unknown>)["channels"]);
+  // fabric-xs-activation plan §3 P0: only literal `true` survives (the agent's effective-on
+  // write); false/malformed ⇒ the key is dropped ⇒ activation off — key-absence-is-off, fail
+  // closed, and the normalized output for every pre-activation config stays byte-identical.
+  const activation = (raw as Record<string, unknown>)["activation"];
   // Fail closed for a malformed reply knob, without disabling the legacy relay.
   return {
     limits: { hubSendsPerMin: v },
     ...(reply === undefined ? {} : { reply: reply === true }),
     ...(channels === undefined ? {} : { channels }),
+    ...(activation === true ? { activation: true } : {}),
   };
 }

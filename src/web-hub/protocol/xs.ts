@@ -1,5 +1,12 @@
 import { Type, type TSchema } from "@sinclair/typebox";
 import { XS_ALIAS_MAX_BYTES } from "./xs-alias.js";
+import type { XsActivationReqOp } from "./xs-activation.js";
+import {
+  XS_ACTIVATE_REQ_DEADLINE_MS,
+  XS_RECEIPT_DEADLINE_MS,
+  XsReqActivationKeySchema,
+  XsReqMessageIdSchema,
+} from "./xs-activation.js";
 
 /**
  * fabric phase-2 XS0 (phase2-plan §4.2/§8.1/§8.2): the FROZEN cross-session frame contract —
@@ -93,6 +100,11 @@ export const XS_REQ_DEADLINE_MS = {
   channels: 3_000,
   // alias-plan §3.3 (AL0b): hub-side transaction budget is 4s (queue wait included); client deadline 5s.
   alias: 5_000,
+  // fabric-xs-activation plan §3 P0 (arch §4.4/§4.7): receipt is a pure read (list-tier 3s);
+  // activate = hub admission + the 5s target relay + headroom (send's 8s derivation). Constants
+  // live in xs-activation.ts (the module owns the new ops' shapes and deadlines).
+  receipt: XS_RECEIPT_DEADLINE_MS,
+  activate: XS_ACTIVATE_REQ_DEADLINE_MS,
 } as const;
 
 /** Per-frame hard byte cap for every `xs_*` frame (§5.2): the hub REJECTS oversize sends with
@@ -114,7 +126,9 @@ export type XsChannelReqOp = "broadcast" | "channels";
 /** Alias-plan §3.4 (AL0b): the `alias` op (get/set/clear/take). Sent only to a hub advertising `xs.alias.v1`
  *  by an agent that declared it. */
 export type XsAliasReqOp = "alias";
-export type XsAnyReqOp = XsReqOp | XsChannelReqOp | XsAliasReqOp;
+/** fabric-xs-activation plan §3 P0: the receipt/activate ops. Sent only to a hub advertising
+ *  `xs.state.v1`/`xs.activate.v1` (the shapes and deadline constants live in xs-activation.ts). */
+export type XsAnyReqOp = XsReqOp | XsChannelReqOp | XsAliasReqOp | XsActivationReqOp;
 
 // ----------------------------------------------------------------- aliases (alias-plan §3.4/§3.5, AL0b)
 
@@ -439,6 +453,11 @@ export const XsReqSchema = Type.Object(
       Type.Literal("broadcast"), // channel-plan §3.3 (CH0): only sent to a hub advertising `xs.channel.v1`
       Type.Literal("channels"),
       Type.Literal("alias"), // alias-plan §3.4 (AL0b): only sent to a hub advertising `xs.alias.v1`
+      // fabric-xs-activation plan §3 P0 (arch §4.7): only sent to a hub advertising
+      // `xs.state.v1` (receipt) / `xs.activate.v1` (activate); an old hub's strict schema
+      // silently drops such a frame — exactly why the ops are cap-gated.
+      Type.Literal("receipt"),
+      Type.Literal("activate"),
     ]),
     origin: OriginSchema,
     query: Type.Optional(Type.String({ maxLength: 128 })),
@@ -459,6 +478,12 @@ export const XsReqSchema = Type.Object(
     // strict schema would silently drop the whole frame). Combination rules (intent × alias/take/clear/prevSessionId) are the router's.
     intent: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("force"), Type.Literal("handoff")])),
     prevSessionId: Type.Optional(SessionIdSchema), // only with intent:"handoff"
+    // fabric-xs-activation plan §3 P0 (arch §4.4/§4.7): `op:"receipt"`/`op:"activate"` only —
+    // the original body's hub xid and the receipt-issued key. Trailing optional props (alias-op
+    // precedent, AL0b): old ops never carry them, old frames decode byte-identically, and the
+    // schemas themselves are declared in xs-activation.ts (the module owning the new-op shapes).
+    messageId: Type.Optional(XsReqMessageIdSchema),
+    activationKey: Type.Optional(XsReqActivationKeySchema),
   },
   { additionalProperties: false },
 );
@@ -490,6 +515,12 @@ export interface XsReqFrame {
   intent?: XsAliasIntent;
   /** Alias-force-default plan §3.2 (AF0): the previous sessionId of a `/new` handoff (`intent:"handoff"` only). */
   prevSessionId?: string;
+  /** fabric-xs-activation plan §3 P0: the ORIGINAL body's hub xid — `op:"receipt"`/`op:"activate"`
+   *  only (never a q-id/rid/wakeToken/runId; arch §4.1). */
+  messageId?: string;
+  /** fabric-xs-activation plan §3 P0: the receipt-issued activation key (not a bearer token —
+   *  the hub re-validates source/target/channel against the relation). */
+  activationKey?: string;
 }
 
 /** One `xs_res{rows}` row (§4.3 list projection — no agentKey, pid, tools or model). */

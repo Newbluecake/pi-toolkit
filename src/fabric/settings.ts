@@ -302,6 +302,21 @@ export interface FabricXsAliasSettings {
   autoFromCwd: boolean;
 }
 
+/**
+ * `fabric.crossSession.activation.*` (fabric-xs-activation plan §3 P0, arch §3.2, non-live): the
+ * ONE engineering rollback switch for the whole request-progress + idempotent-activation group
+ * (`xs.state.v1`/`xs.activate.v1`, xs_state/xs_activate/xs_activate_ack frames, the new xs_req
+ * ops, StatusInfo.xsRequests). Default TRUE; effective = `xsOn ∧ activation.enabled` (secure
+ * domains stay fail-closed through xsOn's existing D8 override — no separate D8 branch). The
+ * agent freezes it at stack build and writes `HubConfig.crossSession.activation` ONLY while
+ * effective; hub-side key-absence-is-off (limits.ts normalize keeps exactly `true`). off ⇒ every
+ * surface byte-identical (off goldens; the corpus append is P5's declared refresh).
+ */
+export interface FabricXsActivationSettings {
+  /** Default true. false ≡ the pre-feature agent: no state/activate caps, no new ops/frames. */
+  enabled: boolean;
+}
+
 /** `fabric.crossSession.limits.*` (phase2 §5.2, P8 defaults; every leaf parse-time clamped to its bounds). */
 export interface FabricCrossSessionLimitsSettings {
   /** Per-session outbound sends per minute (sender + hub). */
@@ -353,6 +368,8 @@ export interface FabricCrossSessionSettings {
   channels: FabricXsChannelSettings;
   /** Alias-plan §3.6 (AL0b): session alias settings (present in every parsed block). */
   alias: FabricXsAliasSettings;
+  /** fabric-xs-activation plan §3 P0: the activation group switch (present in every parsed block). */
+  activation: FabricXsActivationSettings;
 }
 
 export function parseFabricSettings(input: unknown): FabricSettings {
@@ -399,6 +416,7 @@ function cloneFabricCrossSession(cs: FabricCrossSessionSettings): FabricCrossSes
     reply: { ...cs.reply },
     channels: { ...cs.channels, autoJoin: [...cs.channels.autoJoin], broadcast: { ...cs.channels.broadcast } },
     alias: { ...cs.alias },
+    activation: { ...cs.activation },
   };
 }
 
@@ -578,6 +596,18 @@ export function parseFabricWakeSettings(input: unknown): FabricWakeSettings {
 }
 
 /**
+ * `fabric.crossSession.activation.*` (fabric-xs-activation plan §3 P0): field-by-field tolerant,
+ * never throws. A non-object block falls back to the default (ON — key absence IS on here, the
+ * off-isolation tests write it explicitly false).
+ */
+export function parseFabricXsActivationSettings(input: unknown): FabricXsActivationSettings {
+  const defaults = DEFAULT_FABRIC_SETTINGS.crossSession.activation;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  return { enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled };
+}
+
+/**
  * `fabric.crossSession.*` (phase2 §4.1): field-by-field tolerant, never throws. Limits clamp to
  * their §5.2 bounds (config-accident containment, same posture as every other clamped leaf);
  * `allowFrom` entries must be FULL session ids (#14) — invalid ones are dropped with one warn,
@@ -645,6 +675,7 @@ export function parseFabricCrossSessionSettings(input: unknown): FabricCrossSess
     reply,
     channels: parseFabricXsChannelSettings(value.channels),
     alias: parseFabricXsAliasSettings(value.alias),
+    activation: parseFabricXsActivationSettings(value.activation),
   };
 }
 
@@ -717,6 +748,10 @@ export const DEFAULT_FABRIC_SETTINGS: FabricSettings = {
     },
     // alias-plan §3.6 (AL0b): Q9 on by default, Q2 7 d lease, Q4 10 min cooling, NQ1 10 min take floor.
     alias: { enabled: true, offlineLeaseH: 168, coolMin: 10, takeMinOfflineMin: 10, autoFromCwd: true },
+    // fabric-xs-activation plan §3 P0 (arch §3.2): default ON — effective = xsOn ∧ this flag;
+    // off ⇒ every surface byte-identical. (The settings-corpus append this causes is P5's
+    // declared refresh; do not regenerate it from a dev package.)
+    activation: { enabled: true },
   },
   // fabric-thread arch r3 §11.1 P0 (threads default OFF — G2a): frozen defaults in the arch's
   // listing order; the window trio (startTimeoutMin S=8, retainMin R=15, handbackWindowMin H=10)

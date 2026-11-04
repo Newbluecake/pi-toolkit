@@ -194,6 +194,8 @@ describe("xs frame decoding (XS0 §8.2)", () => {
       broadcast: 8_000, // channel-plan §3.3 (CH0) — additive
       channels: 3_000,
       alias: 5_000, // alias-plan §3.3 (AL0b) — additive
+      receipt: 3_000, // fabric-xs-activation plan §3 P0 (arch §4.4) — additive, pure read
+      activate: 8_000, // fabric-xs-activation plan §3 P0 (arch §4.4) — additive
     });
     expect(xsReqDeadlineMs("send")).toBe(8_000);
     expect(xsReqDeadlineMs("list")).toBe(3_000);

@@ -78,11 +78,14 @@ describe("fabric.crossSession.alias.autoFromCwd setting spec (alias-force-defaul
     expect(defaultOf(spec)).toBe(true);
     expect(currentOf(DEFAULT_SETTINGS, spec)).toBe(true);
   });
-  it("is the LAST fabric shard entry (appended after fabric.wake.parkCapPerTarget) and the only crossSession key on the surface", () => {
+  it("is second-to-last in the fabric shard (append-only: activation.enabled last) and the crossSession surface is exactly the two keys", () => {
     const keys = Object.keys(FABRIC_SETTING_SPECS);
-    expect(keys[keys.length - 1]).toBe(key);
-    expect(keys[keys.length - 2]).toBe("fabric.wake.parkCapPerTarget");
-    expect(Object.keys(SETTING_SPECS).filter((k) => k.startsWith("fabric.crossSession."))).toEqual([key]);
+    expect(keys[keys.length - 2]).toBe(key);
+    expect(keys[keys.length - 1]).toBe("fabric.crossSession.activation.enabled");
+    expect(Object.keys(SETTING_SPECS).filter((k) => k.startsWith("fabric.crossSession."))).toEqual([
+      key,
+      "fabric.crossSession.activation.enabled",
+    ]);
   });
   it("round-trips a write: parse → live object → persisted stored value, and reloads through loadSettings", () => {
     const spec = SETTING_SPECS[key]!;

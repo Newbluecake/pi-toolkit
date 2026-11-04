@@ -45,6 +45,8 @@ describe("fabric.crossSession settings (phase2 §4.1)", () => {
       },
       // alias-plan §3.6 (AL0b)
       alias: { enabled: true, offlineLeaseH: 168, coolMin: 10, takeMinOfflineMin: 10, autoFromCwd: true },
+      // fabric-xs-activation plan §3 P0 — key presence IS the hub-side gate
+      activation: { enabled: true },
     });
   });
 

@@ -106,4 +106,11 @@ export const FABRIC_SETTING_SPECS: Record<string, SettingSpec> = {
     "fabric.crossSession.alias.autoFromCwd",
     "Auto-claim the cwd basename as this session's alias when free (needs crossSession + alias)",
   ),
+  // fabric-xs-activation plan §3 P0: the activation group switch. Non-live (activate/stack build
+  // + hub start, needs /reload); only effective while xs is on — the agent writes
+  // HubConfig.crossSession.activation only while effective (key-absence-is-off on the hub).
+  "fabric.crossSession.activation.enabled": bool(
+    "fabric.crossSession.activation.enabled",
+    "Cross-session request progress tracking + idempotent wake_session activation (needs crossSession)",
+  ),
 };

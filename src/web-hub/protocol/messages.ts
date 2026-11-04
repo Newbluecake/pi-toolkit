@@ -113,6 +113,29 @@ import {
   type ThrResFrame,
   thrFrameOk,
 } from "./thread.js";
+// fabric-xs-activation plan §3 P0 (arch §4.7): the `xs_state`/`xs_activate`/`xs_activate_ack`
+// schemas + the `StatusInfo.xsRequests` slot shape live in protocol/xs-activation.ts; only folded
+// in here (cap-gated on `xs.state.v1`/`xs.activate.v1`, no PROTO bump — 只加帧不改, thread.ts
+// precedent). Decoding is inert: nothing routes these frames until P1 (xs_state) / P3 (activate).
+import {
+  XsActivateAckSchema,
+  XsActivateSchema,
+  type XsActivateAckFrame,
+  type XsActivateFrame,
+  XsRequestsStatusSchema,
+  type XsRequestsStatusWire,
+  XsStateSchema,
+  type XsStateFrame,
+} from "./xs-activation.js";
+export type {
+  XsActivateAckFrame,
+  XsActivateFrame,
+  XsPhase,
+  XsProgress,
+  XsRequestsStatusWire,
+  XsStateFrame,
+  XsWakeView,
+} from "./xs-activation.js";
 export type {
   ThreadCloseReason,
   ThreadErrorCode,
@@ -735,6 +758,13 @@ export interface StatusInfo {
    *  Sent only while the live link's hello_ack.caps ∋ `thr.v1`; absent ⇔ threads off / no active
    *  subscription — byte-equal to the pre-feature shape. Wire-only (never a provider payload). */
   threads?: ThreadStatusSlotWire[];
+  /** fabric-xs-activation plan §3 P0 (arch §4.7/§4.9): this session's tracked cross-session
+   *  request rows (progress axis), merged by session/process/messageId/revision. Written ONLY by
+   *  a `xs.state.v1`-capable live link while this session has records; absent ⇔ activation off /
+   *  no records — byte-equal to the pre-feature status frame. The open StatusInfoSchema forwards
+   *  it through old hubs untouched (xsInbox/threads precedent); old UIs ignore it. No body/hash/
+   *  token ever rides it. */
+  xsRequests?: XsRequestsStatusWire;
 }
 
 export interface FleetRowWire {
@@ -1228,6 +1258,10 @@ export type AgentFrame =
   | XsMemberFrame
   | XsReqFrame
   | XsAckFrame
+  // fabric-xs-activation plan §3 P0 (arch §4.7): receiver→hub progress evidence + activate
+  // settlement, sent only under `xs.state.v1`/`xs.activate.v1`; inert until P1/P3 route them.
+  | XsStateFrame
+  | XsActivateAckFrame
   // scheduled-reports S0 (§10.1): inert until A0/H1 route them; sent only under `sched.v1`.
   | SchedChangedFrame
   | SchedBoundFrame
@@ -1310,6 +1344,10 @@ export type HubFrame =
   | XsResFrame
   | XsDeliverFrame
   | XsAliasEvtFrame // alias-force-default plan §3.2 (AF0): inert until AF2/AF3 route it; v2 members only
+  // fabric-xs-activation plan §3 P0 (arch §4.7): hub→source progress mirror (with sourceRid)
+  // and the text-free control relay to the receiver; inert until P1/P3 route them.
+  | XsStateFrame
+  | XsActivateFrame
   // scheduled-reports S0 (§10.1): inert until A0/H1 route them; sent only under `sched.v1`.
   | SchedRunFrame
   | SchedReceiptsFrame
@@ -1789,6 +1827,10 @@ const StatusInfoSchema = Type.Object({
   // fabric-thread P0 (arch §7.3): open slot, only written under the thr.v1 cap while any
   // subscription is live — absent ⇒ byte-equal to the pre-feature status frame.
   threads: Type.Optional(ThreadsStatusWireSchema),
+  // fabric-xs-activation plan §3 P0 (arch §4.7): open top-level slot, bounded (rows ≤ 256);
+  // only written under the xs.state.v1 cap while this session has tracked requests —
+  // absent ⇒ byte-equal to the pre-feature status frame.
+  xsRequests: Type.Optional(XsRequestsStatusSchema),
 });
 
 const FleetRowSchema = Type.Object({
@@ -2452,6 +2494,11 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   run_gap: RunGapSchema,
   run_end: RunEndSchema,
   ...XS_AGENT_FRAME_SCHEMAS,
+  // fabric-xs-activation plan §3 P0 (arch §4.7): receiver→hub frames — `xs_state` (progress
+  // evidence; also hub→source, see hubFrameSchemas) and `xs_activate_ack` (one settlement per
+  // `xs_activate` relay). Inert until P1/P3 route them.
+  xs_state: XsStateSchema,
+  xs_activate_ack: XsActivateAckSchema,
   // scheduled-reports S0 (§10.1): schemas from protocol/schedule.ts
   ...SCHED_AGENT_FRAME_SCHEMAS,
   // fabric-thread P0 (arch §7.3): schemas from protocol/thread.ts
@@ -2477,6 +2524,11 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   fsb_res: FsbResSchema,
   tfa_res: TfaResSchema,
   ...XS_HUB_FRAME_SCHEMAS,
+  // fabric-xs-activation plan §3 P0 (arch §4.7): hub→agent frames — `xs_state` mirrored to the
+  // original source (with `sourceRid`) and `xs_activate` (the text-free control relay). Inert
+  // until P1/P3 route them.
+  xs_state: XsStateSchema,
+  xs_activate: XsActivateSchema,
   // scheduled-reports S0 (§10.1): schemas from protocol/schedule.ts
   ...SCHED_HUB_FRAME_SCHEMAS,
   // fabric-thread P0 (arch §7.2): schemas from protocol/thread.ts

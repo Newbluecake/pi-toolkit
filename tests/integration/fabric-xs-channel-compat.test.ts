@@ -194,6 +194,12 @@ async function capture(config: Config): Promise<Capture> {
           reply: { enabled: config.reply },
           channels: { enabled: config.channels },
           alias: { enabled: config.alias === true },
+          // fabric-xs-activation plan §3 P0 (off isolation, arch §6.2 cmdHistory 先例): the
+          // activation group defaults ON, so this compat anchor pins it OFF explicitly — the
+          // four channel configs + the alias probe keep anchoring byte-for-byte on the frozen
+          // reply-off golden while P1+ threads the caps/config behind the flag. Default-on
+          // behaviour is pinned elsewhere (P1's wiring tests); this line only isolates the anchor.
+          activation: { enabled: false },
           limits: {
             sendsOutPerMin: 10,
             sendsOutPerHour: 60,
