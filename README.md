@@ -110,6 +110,8 @@ pi install .
 
 ## 配置
 
+> 新环境从零配置的单一入口：前置要求、配置文件位置与迁移、开关总表、凭证、生效矩阵——见 [集中配置指南](docs/guide/configuration.md)。
+
 用户配置文件：`<agentDir>/pi-toolkit.json`（`<agentDir>` 默认为 `~/.pi/agent`，跟随 `PI_CODING_AGENT_DIR`，见下文「PI_CODING_AGENT_DIR 与本插件」；缺失或格式错误一律用默认值，不抛错）。
 
 - 旧文件名 `pi-subagent.json` 在升级后由主会话自动迁移：内容发布为 `pi-toolkit.json`，旧名保留为指向它的兼容符号链接，旧版插件 / pi-secure 经链接照常读写。两份同时存在且内容分叉时（例如 `sed -i` 把链接改回普通文件）以 `pi-toolkit.json` 为准并给出可见告警——**请编辑 `pi-toolkit.json`**。没有 `flock` 的主机（常见于 macOS）不自动迁移，继续读写旧名，功能完整。
