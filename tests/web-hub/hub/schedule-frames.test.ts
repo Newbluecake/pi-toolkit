@@ -76,7 +76,7 @@ describe("agent-server: sched_* frame routing", () => {
     expect(last.reason).toBe("E_OVERLAP");
   });
 
-  it("#61 sched_offers / sched_decide_ack reach the coordinator too; malformed ones are decoded away", async () => {
+  it("deprecated sched_offers / sched_decide_ack still reach the coordinator for discard; malformed ones are decoded away", async () => {
     const c = await client();
     c.send({
       t: "sched_offers",

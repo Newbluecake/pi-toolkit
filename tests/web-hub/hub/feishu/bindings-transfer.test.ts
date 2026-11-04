@@ -50,7 +50,6 @@ interface Rig {
   transfer: BindingTransfer;
   threads: FeishuThreads | undefined;
   fakeClosed: ReturnType<typeof vi.fn>;
-  reconcile: ReturnType<typeof vi.fn>;
   logs: Array<{ event: string; reason?: string }>;
   sent: Array<{ agentKey: string; frame: unknown }>;
 }
@@ -92,15 +91,13 @@ async function rig(options: { realThreads?: boolean } = {}): Promise<Rig> {
         log: () => {},
       })
     : undefined;
-  const reconcile = vi.fn();
   const logs: Rig["logs"] = [];
   const transfer = createBindingTransfer({
     state,
     threads: (threads ?? ({ onBindingClosed: fakeClosed } as unknown as FeishuThreads)) as FeishuThreads,
-    scheduleConfirm: { reconcile: (sid: string) => reconcile(sid) },
     log: (event, reason) => logs.push(reason === undefined ? { event } : { event, reason }),
   });
-  return { state, transfer, threads, fakeClosed, reconcile, logs, sent };
+  return { state, transfer, threads, fakeClosed, logs, sent };
 }
 
 const input = (over: Partial<TransferInput> = {}): TransferInput => ({
@@ -149,7 +146,6 @@ describe("binding transfer (rebind-plan r3 §4.4)", () => {
       threadId: "t1",
       label: "Two",
     });
-    expect(r.reconcile.mock.calls.flat()).toEqual(["session-2"]);
   });
 
   it("R1: E_THR_NOT_BOUND exists ONLY on the CAS path (expect set, binding missing)", async () => {
@@ -183,20 +179,18 @@ describe("binding transfer (rebind-plan r3 §4.4)", () => {
     expect(b.offline).toBeUndefined();
   });
 
-  it("R2: same-target no-op — no set, no rev bump, no commit, no notify, no reconcile", async () => {
+  it("R2: same-target no-op — no set, no rev bump, no commit, no notify", async () => {
     const r = await rig();
     await r.transfer.transfer(input());
     const before = r.state.bindings.get(KEY)!;
     const commitSpy = vi.spyOn(r.state, "commit");
     r.fakeClosed.mockClear();
-    r.reconcile.mockClear();
     const res = await r.transfer.transfer(input({ notifyLifecycle: true }));
     expect(res).toMatchObject({ ok: true, created: false, changed: false });
     expect(res.ok && res.binding.rev).toBe(before.rev);
     expect(r.state.bindings.get(KEY)!.rev).toBe(before.rev);
     expect(commitSpy).not.toHaveBeenCalled();
     expect(r.fakeClosed).not.toHaveBeenCalled();
-    expect(r.reconcile).not.toHaveBeenCalled();
   });
 
   it("R2: an OFFLINE binding to the same session is not a no-op (offline gets cleared)", async () => {
@@ -282,47 +276,41 @@ describe("binding transfer (rebind-plan r3 §4.4)", () => {
     expect(r.fakeClosed).not.toHaveBeenCalled();
   });
 
-  it("R6: commit failure ⇒ E_THR_COMMIT/unknown; memory moved; NO lifecycle notify, NO reconcile", async () => {
+  it("R6: commit failure ⇒ E_THR_COMMIT/unknown; memory moved; NO lifecycle notify", async () => {
     const r = await rig();
     await r.transfer.transfer(input());
     vi.spyOn(r.state, "commit").mockResolvedValueOnce(false);
     r.fakeClosed.mockClear();
-    r.reconcile.mockClear();
     const res = await r.transfer.transfer(
       input({ target: { sessionId: "session-3", label: "T" }, notifyLifecycle: true }),
     );
     expect(res).toEqual({ ok: false, code: "E_THR_COMMIT", effect: "unknown" });
     expect(r.state.bindings.get(KEY)!.sessionId).toBe("session-3"); // memory already moved
     expect(r.fakeClosed).not.toHaveBeenCalled();
-    expect(r.reconcile).not.toHaveBeenCalled();
   });
 
-  it("R6: notifyLifecycle:true fires onBindingClosed AFTER the commit barrier + reconciles both sides", async () => {
+  it("R6: notifyLifecycle:true fires onBindingClosed AFTER the commit barrier", async () => {
     const r = await rig();
     await r.transfer.transfer(input());
     const before = r.state.bindings.get(KEY)!;
     r.fakeClosed.mockClear();
-    r.reconcile.mockClear();
     const res = await r.transfer.transfer(
       input({ target: { sessionId: "session-3", label: "T" }, notifyLifecycle: true }),
     );
     expect(res).toMatchObject({ ok: true, created: false, changed: true });
     expect(r.fakeClosed).toHaveBeenCalledTimes(1);
     expect(r.fakeClosed).toHaveBeenCalledWith(KEY, before, "rebound");
-    expect(r.reconcile.mock.calls.flat()).toEqual(["session-2", "session-3"]);
   });
 
-  it("R6/R7: notifyLifecycle:false never fires onBindingClosed (the durable hook owns it); reconcile still runs", async () => {
+  it("R6/R7: notifyLifecycle:false never fires onBindingClosed (the durable hook owns it)", async () => {
     const r = await rig();
     await r.transfer.transfer(input());
     r.fakeClosed.mockClear();
-    r.reconcile.mockClear();
     const res = await r.transfer.transfer(
       input({ target: { sessionId: "session-3", label: "T" }, notifyLifecycle: false }),
     );
     expect(res).toMatchObject({ ok: true, changed: true });
     expect(r.fakeClosed).not.toHaveBeenCalled();
-    expect(r.reconcile.mock.calls.flat()).toEqual(["session-2", "session-3"]);
   });
 
   it("R8: a throwing store is not swallowed — E_THR_STATE/unknown + a binding-transfer log line", async () => {

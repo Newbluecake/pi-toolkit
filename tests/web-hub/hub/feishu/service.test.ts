@@ -25,6 +25,45 @@ const prompt = (r: Awaited<ReturnType<typeof f8Rig>>) =>
   r.request.mock.calls.find(([f]) => f.cmd.op === "prompt" && !f.queryOnly)?.[0];
 
 describe("F8 in-process service composition", () => {
+  it("a persisted legacy sched-ok nonce is redeemed but silently ignored", async () => {
+    const r = await rig();
+    r.send(messageEnvelope("legacy-list", "/list"));
+    await eventually(async () =>
+      expect(Object.values((await r.disk())["nonces"]).some((n: any) => n.action === "session-pick")).toBe(true),
+    );
+    await r.service.dispose();
+    const file = join(r.stateDir, "feishu-bot", "state.json");
+    const doc = JSON.parse(await readFile(file, "utf8"));
+    const nonce = Object.values<any>(doc.nonces).find((n) => n.action === "session-pick")!;
+    nonce.action = "sched-ok";
+    await writeFile(file, JSON.stringify(doc), { mode: 0o600 });
+    const restarted = await f8Rig({
+      stateDir: r.stateDir,
+      schedule: {
+        list: () => [],
+        run: vi.fn(async () => ({ kind: "started" as const })),
+        receiptsChanged: () => {},
+      },
+    });
+    cleanups.push(() => restarted.service.dispose());
+    await restarted.ready();
+    const before = await restarted.disk();
+    const sent = restarted.fake.sent.length;
+    const acks = restarted.ackCount();
+    restarted.send(
+      callbackEnvelope(nonce.nonce, { id: "legacy-click", chatId: nonce.chatId, messageId: nonce.messageId }),
+    );
+    await eventually(async () => {
+      expect(restarted.ackCount()).toBe(acks + 1);
+      expect((await restarted.disk())["nonces"][nonce.nonce]).toBeUndefined();
+    });
+    expect(restarted.request).not.toHaveBeenCalled();
+    expect(restarted.deps.schedule!.run).not.toHaveBeenCalled();
+    expect(restarted.fake.sent).toHaveLength(sent);
+    expect((await restarted.disk())["bindings"]).toEqual(before.bindings);
+    expect((await restarted.disk())["requests"]).toEqual(before.requests);
+  });
+
   it("durable DM admission → frozen session route → token run → final chunks/outbox → ACK, Typing removed", async () => {
     const r = await rig();
     await r.bind();

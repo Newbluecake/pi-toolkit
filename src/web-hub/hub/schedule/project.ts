@@ -10,7 +10,6 @@ import { nextOccurrence } from "../../../schedule/core/cron.js";
 import {
   defHash,
   isExecutable,
-  isPendingApproval,
   reportIdOf,
   SCHED_REPORT_MAX_AGE_MS,
   type RunRecord,
@@ -42,11 +41,6 @@ export interface ProjectDeps {
   now: number;
   receipts: ReadonlyMap<string, ReceiptView>;
   bot: BotStatus;
-  /**
-   * #61: the live confirm offer for (session, task, defHash), or undefined. The caller (service)
-   * enforces online ∧ hash-match ∧ unexpired; project only gates on `pendingApproval`.
-   */
-  offerOf?: (sessionId: string, taskId: string, defHash: string) => { offerId: string; expiresAt: number } | undefined;
   /** Test seam / horizon override (defaults to the spec's 400-day horizon). */
   nextHorizonMs?: number;
 }
@@ -91,13 +85,11 @@ function taskProjection(task: ScheduleTask, state: ScheduleStateFile, deps: Proj
   } else if (task.enabled && compiled === undefined) {
     degraded = "never";
   }
-  const pendingApproval = isPendingApproval(task);
-  const offer = pendingApproval ? deps.offerOf?.(state.sessionId, task.id, hash) : undefined;
   return {
     task,
     defHash: hash,
     executable: isExecutable(task),
-    pendingApproval,
+    pendingApproval: false,
     ...(nextAt === undefined ? {} : { nextAt }),
     ...(degraded === undefined ? {} : { degraded }),
     totals: {
@@ -106,7 +98,6 @@ function taskProjection(task: ScheduleTask, state: ScheduleStateFile, deps: Proj
       skipped: occ?.skippedTotal ?? 0,
       manual: state.manualTotal[task.id] ?? 0,
     },
-    ...(offer === undefined ? {} : { offer: { offerId: offer.offerId, expiresAt: offer.expiresAt } }),
   };
 }
 

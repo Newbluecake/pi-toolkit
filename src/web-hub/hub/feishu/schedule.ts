@@ -17,7 +17,6 @@
  */
 import { createHash } from "node:crypto";
 import { FEISHU_CAPS } from "../../protocol/feishu.js";
-import type { ScheduleTaskDef, SchedOfferOutcome } from "../../protocol/schedule.js";
 import type { EnqueueFinalInput, EnqueueNoticeInput, EnqueueResult, OutboxMessage } from "./outbox.js";
 import { renderNotice, renderReply, sanitizeLabel } from "./render.js";
 import type { NoticeBudget } from "./security.js";
@@ -119,8 +118,6 @@ export interface FeishuScheduleRow {
   /** human-readable schedule (e.g. `cron 0 9 * * 1-5 @ Asia/Shanghai`) */
   when: string;
   enabled: boolean;
-  /** approved ∧ executable (pending-approval tasks are listed but cannot run) */
-  approved: boolean;
   defHash: string;
   nextAt?: number;
   lastStatus?: string;
@@ -140,39 +137,6 @@ export type ScheduleRunResult =
   | { kind: "timeout" }
   | { kind: "unavailable" };
 
-/** #61: one open confirm offer of an online session, rendered for a Feishu card. */
-export interface FeishuScheduleOfferRow {
-  sessionId: string;
-  sessionLabel: string;
-  online: boolean;
-  offerId: string;
-  expiresAt: number;
-  task: ScheduleTaskDef;
-  defHash: string;
-}
-export interface FeishuScheduleOfferClosed {
-  sessionId: string;
-  offerId: string;
-  outcome: SchedOfferOutcome;
-  by?: string;
-}
-export interface ScheduleDecideRequest {
-  reqId: string;
-  sessionId: string;
-  offerId: string;
-  taskId: string;
-  defHash: string;
-  decision: "approve" | "reject";
-}
-export type ScheduleDecideResult =
-  | { kind: "approved" }
-  | { kind: "rejected" }
-  | { kind: "refused"; reason: string }
-  | { kind: "offline" }
-  | { kind: "multi" }
-  | { kind: "timeout" }
-  | { kind: "unavailable" };
-
 /** H1 → F1 (`FeishuBotServiceDeps.schedule`). Absent ⇒ every schedule surface is inert (byte-identical). */
 export interface FeishuSchedulePort {
   list(): readonly FeishuScheduleRow[];
@@ -180,10 +144,6 @@ export interface FeishuSchedulePort {
   run(req: ScheduleRunRequest): Promise<ScheduleRunResult>;
   /** F1 → hub: receipts of `sessionId` changed (hub pushes `sched_receipts`). Best-effort, never throws into F1. */
   receiptsChanged(sessionId: string, receipts: readonly ScheduleReceiptView[]): void;
-  /** #61 (optional ⇒ older implementations still compile): open confirm offers whose ledger hash still matches. */
-  offers?(): readonly FeishuScheduleOfferRow[];
-  closedOffers?(sessionId: string): readonly FeishuScheduleOfferClosed[];
-  decide?(req: ScheduleDecideRequest): Promise<ScheduleDecideResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -598,11 +558,11 @@ export function scheduleListText(rows: readonly FeishuScheduleRow[]): { text: st
   if (shown.length === 0) return { text: "暂无定时任务。", frozen };
   const lines = shown.map((r, i) => {
     const flags = [
-      r.approved ? (r.enabled ? "启用" : "已暂停") : "待批准",
+      r.enabled ? "启用" : "已暂停",
       r.online ? "会话在线" : "会话离线",
       r.form === "background" ? "后台" : "消息",
     ];
-    const next = r.nextAt !== undefined && r.enabled && r.approved ? ` · 下次 ${isoMinute(r.nextAt)}` : "";
+    const next = r.nextAt !== undefined && r.enabled ? ` · 下次 ${isoMinute(r.nextAt)}` : "";
     const last = r.lastStatus ? ` · 上次 ${r.lastStatus}` : "";
     return `${i + 1}. ${sanitizeLabel(r.name, 40)} [${sanitizeLabel(r.sessionLabel, 40)}] ${r.when} · ${flags.join(" · ")}${next}${last}`;
   });
@@ -629,7 +589,6 @@ export function scheduleRunReply(row: FrozenScheduleRow, result: ScheduleRunResu
     case "refused": {
       const r = result.reason;
       if (r === "defhash" || r === "task-changed") return "任务已修改，请重新 /schedule";
-      if (r === "not-approved" || r === "pending-approval") return `任务尚未批准：${who}`;
       if (r === "overlap" || r === "E_OVERLAP") return `任务正在运行：${who}`;
       return `拒绝运行：${/^[A-Za-z0-9_.:()-]{1,64}$/.test(r) ? r : "refused"}`;
     }

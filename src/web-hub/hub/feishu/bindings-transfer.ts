@@ -8,13 +8,13 @@
  *
  *   before snapshot → (optional CAS) → same-target no-op check → set (identity fields
  *   preserved) → `await commit()` barrier → (optional, ONLY after a successful commit)
- *   `threads.onBindingClosed` → `scheduleConfirm.reconcile` on both sides.
+ *   `threads.onBindingClosed`.
  *
  * Rules (each asserted in tests/web-hub/hub/feishu/bindings-transfer.test.ts):
  *   R1  first bind (`before === undefined`) is a NORMAL path — `E_THR_NOT_BOUND` exists only on
  *       the CAS path (`expect !== undefined`); `/use` never passes `expect`.
  *   R2  same-target no-op (`before.sessionId === target.sessionId && before.offline ===
- *       undefined`): no set, no rev bump, no commit, no notification, no reconcile.
+ *       undefined`): no set, no rev bump, no commit, no notification.
  *   R3  CAS: `expect.rev` mismatch ⇒ `E_THR_STALE`; `expect.sessionId` mismatch ⇒
  *       `E_THR_NO_OWNER`; both effect "none".
  *   R4  the write preserves the identity fields (chatId/chatType/threadId from `before`; for a
@@ -22,7 +22,7 @@
  *       `offline`. `target.agentKey` stays OPTIONAL — `/use` may pick an offline session (§2.1).
  *   R5  a refused `Admit` ⇒ `E_THR_STATE` / "none" (memory untouched).
  *   R6  `await state.commit()` is the persistence barrier: failure ⇒ `E_THR_COMMIT` / "unknown"
- *       (memory already moved; NO lifecycle notification, NO reconcile). Lifecycle notification
+ *       (memory already moved; NO lifecycle notification). Lifecycle notification
  *       fires ONLY after a successful commit and ONLY when `notifyLifecycle === true` — `/use`
  *       keeps it false because the inbound durable hook is still its notification source (R7).
  *   R7  exactly-once between the two notification sources is enforced inside
@@ -52,7 +52,7 @@ export interface TransferInput {
   reason: "rebound";
   /** true ⇒ THIS call owns the lifecycle notification (retained finalize + thr_closed, after
    *  the commit barrier). false ⇒ the caller already has an equivalent hook (the `/use`
-   *  inbound durable wrapper) and this function only writes + commits + reconciles. */
+   *  inbound durable wrapper) and this function only writes + commits. */
   notifyLifecycle: boolean;
 }
 
@@ -63,7 +63,6 @@ export type TransferResult =
 export function createBindingTransfer(deps: {
   state: FeishuState;
   threads?: FeishuThreads;
-  scheduleConfirm?: { reconcile(sessionId: string): void };
   log(event: string, reason?: string): void;
 }) {
   async function transfer(input: TransferInput): Promise<TransferResult> {
@@ -104,8 +103,6 @@ export function createBindingTransfer(deps: {
       // is "unknown" and must NOT notify (the old subscribers keep working, §6 risk R3).
       if (!(await deps.state.commit())) return { ok: false, code: "E_THR_COMMIT", effect: "unknown" };
       if (input.notifyLifecycle && before !== undefined) deps.threads?.onBindingClosed(input.key, before, input.reason);
-      if (before?.sessionId !== undefined) deps.scheduleConfirm?.reconcile(before.sessionId);
-      deps.scheduleConfirm?.reconcile(input.target.sessionId);
       return { ok: true, created: before === undefined, changed: true, binding: admitted.value };
     } catch (err) {
       // R8: never swallow — log and report "unknown" (the write may or may not have landed).

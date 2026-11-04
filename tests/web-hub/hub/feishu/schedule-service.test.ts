@@ -31,7 +31,6 @@ const ROWS: FeishuScheduleRow[] = [
     form: "background",
     when: "cron 0 9 * * *",
     enabled: true,
-    approved: true,
     defHash: H("def"),
     lastStatus: "completed",
   },
@@ -43,8 +42,7 @@ const ROWS: FeishuScheduleRow[] = [
     name: "周报",
     form: "message",
     when: "cron 0 9 * * 1",
-    enabled: true,
-    approved: false,
+    enabled: false,
     defHash: H("def2"),
   },
 ];
@@ -112,7 +110,9 @@ describe("/schedule", () => {
     r.send(messageEnvelope("l2", "/schedule"));
     await eventually(() => expect(sentContent(r)).toContain("日报"));
     expect(sentContent(r)).toContain("周报");
-    expect(sentContent(r)).toContain("待批准");
+    expect(sentContent(r)).not.toContain("待批准");
+    expect(sentContent(r)).toContain("启用");
+    expect(sentContent(r)).toContain("已暂停");
     r.send(messageEnvelope("r1", "/schedule run 1"));
     await eventually(() => expect(run).toHaveBeenCalledTimes(1));
     await eventually(() => expect(sentContent(r)).toContain("已开始"));
@@ -135,6 +135,9 @@ describe("/schedule", () => {
     await eventually(() => expect(sentContent(r)).toContain("周报"));
     r.send(messageEnvelope("e2", "/schedule run 9"));
     await eventually(() => expect(sentContent(r)).toContain("序号无效"));
+    run.mockResolvedValueOnce({ kind: "refused", reason: "E_UNAPPROVED" });
+    r.send(messageEnvelope("legacy-refusal", "/schedule run 1"));
+    await eventually(() => expect(sentContent(r)).toContain("拒绝运行：E_UNAPPROVED"));
     run.mockResolvedValueOnce({ kind: "offline" });
     r.send(messageEnvelope("e3", "/schedule run 2"));
     await eventually(() => expect(sentContent(r)).toContain("归属会话不在线（Two）"));

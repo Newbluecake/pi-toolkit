@@ -65,7 +65,6 @@ interface Rig {
   views: FeishuSessionView[];
   aliases: Map<string, string>;
   sent: Array<{ agentKey: string; frame: unknown }>;
-  reconcile: ReturnType<typeof vi.fn>;
   events: FeishuRequestEvent[];
   call(agentKey: string, frame: ThrReqFrame): Promise<ThrResFrame[]>;
   rebindFrame(over?: Partial<ThrRebindReqFrame>): ThrRebindReqFrame;
@@ -104,7 +103,6 @@ async function rig(options: { rebind?: boolean; withRequests?: boolean } = {}): 
   ];
   const aliases = new Map<string, string>();
   const sent: Rig["sent"] = [];
-  const reconcile = vi.fn();
   const events: FeishuRequestEvent[] = [];
   const installation: FeishuInstallation = {
     appId: "cli_test",
@@ -149,7 +147,6 @@ async function rig(options: { rebind?: boolean; withRequests?: boolean } = {}): 
   transfer = createBindingTransfer({
     state,
     threads,
-    scheduleConfirm: { reconcile: (sid: string) => reconcile(sid) },
     log: () => {},
   });
   if (options.withRequests === true) {
@@ -190,7 +187,6 @@ async function rig(options: { rebind?: boolean; withRequests?: boolean } = {}): 
     views,
     aliases,
     sent,
-    reconcile,
     events,
     async call(agentKey, frame) {
       const before = replies.length;
@@ -264,7 +260,6 @@ describe('thr_req{op:"rebind"} (rebind-plan r3 §4.4–§4.6, P1)', () => {
     });
     expect(after.offline).toBeUndefined();
     expect(r.sent).toEqual([{ agentKey: "agent-1", frame: { t: "thr_closed", h: H(), reason: "rebound" } }]);
-    expect(r.reconcile.mock.calls.flat()).toEqual(["session-1", "session-2"]);
   });
 
   it("A1/§4.6: the `to` ladder accepts a unique prefix, an exact alias and an exact name", async () => {
@@ -325,7 +320,6 @@ describe('thr_req{op:"rebind"} (rebind-plan r3 §4.4–§4.6, P1)', () => {
     expect(r.state.bindings.get(KEY)!.rev).toBe(before.rev);
     expect(commitSpy).not.toHaveBeenCalled();
     expect(r.sent).toEqual([]);
-    expect(r.reconcile).not.toHaveBeenCalled();
   });
 
   it("A6: the four target-resolution failures map to the four codes; the binding is untouched", async () => {

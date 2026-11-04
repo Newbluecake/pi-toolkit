@@ -83,8 +83,9 @@ export interface ScheduleBg {
   isolation?: "worktree";
 }
 
+/** @deprecated Legacy ledger data: ignored, never written by new code. */
 export interface ScheduleApproval {
-  /** Equals `defHash(task)` at approval time; executable ⇔ still equal (S2). */
+  /** Historical definition hash, ignored for execution. */
   hash: string;
   by: "user";
   via: "tui" | "web";
@@ -102,6 +103,7 @@ export interface ScheduleTaskDef {
   /** Present iff `form === "background"` (validation rule, S1/A3). */
   bg?: ScheduleBg;
   enabled: boolean;
+  /** @deprecated Legacy ledger data: ignored, never written by new code. */
   approval?: ScheduleApproval;
   createdBy: "user" | "agent";
   createdVia: "tui" | "web" | "tool";
@@ -181,8 +183,8 @@ export interface SchedRunAckFrame {
   reason?: string;
 }
 /** hub→agent: Feishu `/schedule run <n>` (§7.4). The agent refuses on sessionId mismatch or
- *  `now > expiresAt`, dedups by `reqId` in `manualReqs`, and requires `defHash` to equal both the
- *  current definition hash and the approval hash. */
+ *  `now > expiresAt`, dedups by `reqId` in `manualReqs`, and requires `defHash` to equal the
+ *  current definition hash. */
 export interface SchedRunFrame {
   t: "sched_run";
   reqId: string;
@@ -201,29 +203,41 @@ export interface SchedReceiptsFrame {
 
 // ----------------------------------------------------------------- confirm offers (#61, sched.confirm.v1)
 
-/** Both sides use this cap string; hub advertises it when HubConfig.schedule exists, agent when a schedule port exists. */
+/** Legacy capability string; no longer advertised after r2 rollout. */
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export const SCHED_CONFIRM_CAP = "sched.confirm.v1";
 /** Open offers per session (agent evicts the oldest). */
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export const SCHED_CONFIRM_OFFERS_MAX = 8;
 /** Closed echo entries per `sched_offers` frame. */
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export const SCHED_CONFIRM_CLOSED_MAX = 8;
 /** Offer lifetime (constant, not a setting). */
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export const SCHED_CONFIRM_TTL_MS = 2 * 3_600_000;
 /** `sched_decide.expiresAt = now + 30 s`. */
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export const SCHED_DECIDE_TTL_MS = 30_000;
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export const SCHED_DECIDE_ACK_WAIT_MS = 10_000;
 
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export const SCHED_OFFER_OUTCOMES = ["approved", "rejected", "superseded", "expired", "withdrawn"] as const;
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export type SchedOfferOutcome = (typeof SCHED_OFFER_OUTCOMES)[number];
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export const SCHED_OFFER_BYS = ["tui", "web", "feishu", "elsewhere"] as const;
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export type SchedOfferBy = (typeof SCHED_OFFER_BYS)[number];
 
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export interface SchedOfferWire {
   offerId: string;
   taskId: string;
   defHash: string;
   expiresAt: number;
 }
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export interface SchedOfferClosedWire {
   offerId: string;
   taskId: string;
@@ -233,6 +247,7 @@ export interface SchedOfferClosedWire {
   by?: SchedOfferBy;
 }
 /** agent→hub: authoritative full list of this session's offers (every change + every hello_ack; empty list too). */
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export interface SchedOffersFrame {
   t: "sched_offers";
   sessionId: string;
@@ -240,6 +255,7 @@ export interface SchedOffersFrame {
   closed: SchedOfferClosedWire[];
 }
 /** hub→agent: the Feishu card's decision. */
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export interface SchedDecideFrame {
   t: "sched_decide";
   reqId: string;
@@ -251,6 +267,7 @@ export interface SchedDecideFrame {
   expiresAt: number;
 }
 /** agent→hub: exactly one per unexpired `sched_decide`. */
+/** @deprecated No longer produced; retained for tolerant decoding of old peers. */
 export interface SchedDecideAckFrame {
   t: "sched_decide_ack";
   reqId: string;
@@ -310,10 +327,12 @@ const OfferIdSchema = ReqIdSchema;
 const TaskIdSchema = Type.String({ pattern: SCHED_TASK_ID_RE.source });
 const OfferOutcomeSchema = Type.Union(SCHED_OFFER_OUTCOMES.map((o) => Type.Literal(o)));
 const OfferBySchema = Type.Union(SCHED_OFFER_BYS.map((o) => Type.Literal(o)));
+/** @deprecated Retained for tolerant decoding of old peers; no new decision flow. */
 export const SchedOfferSchema = Type.Object(
   { offerId: OfferIdSchema, taskId: TaskIdSchema, defHash: HashSchema, expiresAt: Type.Integer({ minimum: 0 }) },
   strict,
 );
+/** @deprecated Retained for tolerant decoding of old peers; no new decision flow. */
 export const SchedOfferClosedSchema = Type.Object(
   {
     offerId: OfferIdSchema,
@@ -324,6 +343,7 @@ export const SchedOfferClosedSchema = Type.Object(
   },
   strict,
 );
+/** @deprecated Retained for tolerant decoding of old peers; no new decision flow. */
 export const SchedOffersSchema = Type.Object(
   {
     t: Type.Literal("sched_offers"),
@@ -333,6 +353,7 @@ export const SchedOffersSchema = Type.Object(
   },
   strict,
 );
+/** @deprecated Retained for tolerant decoding of old peers; no new decision flow. */
 export const SchedDecideSchema = Type.Object(
   {
     t: Type.Literal("sched_decide"),
@@ -346,6 +367,7 @@ export const SchedDecideSchema = Type.Object(
   },
   strict,
 );
+/** @deprecated Retained for tolerant decoding of old peers; no new decision flow. */
 export const SchedDecideAckSchema = Type.Object(
   {
     t: Type.Literal("sched_decide_ack"),
@@ -418,19 +440,19 @@ export const SCHED_SSE_EVENT = "schedules";
 export const SCHED_API_PATH = "/api/schedules";
 
 export interface ScheduleTaskProjectionWire {
-  /** Full definition incl. the whole prompt (the review dialog renders it verbatim). */
+  /** Full definition including the whole prompt (rendered verbatim). */
   task: ScheduleTaskDef;
   defHash: string;
-  /** `enabled && approval?.hash === defHash`. */
+  /** Equals `task.enabled` since schedule-auto-approve r2. */
   executable: boolean;
-  /** `approval` missing or `approval.hash !== defHash` (UI 「待确认」). */
+  /** @deprecated Always false since r2; kept required for old UIs. */
   pendingApproval: boolean;
   /** Hub-computed with the shared cron core in `task.when.tz`; absent when disabled/never. */
   nextAt?: number;
   /** `"never"` = no occurrence within the 400-day horizon / budget. */
   degraded?: "never";
   totals: { fired: number; missed: number; skipped: number; manual: number };
-  /** #61: open confirm offer for this exact definition (append-only; absent unless one live, matching, unexpired offer). */
+  /** @deprecated No longer produced; retained for old peers and UIs. */
   offer?: { offerId: string; expiresAt: number };
 }
 
