@@ -91,6 +91,7 @@ import type {
   XsAliasCachePort,
 } from "../../fabric/xs/types-alias.js";
 import type { XsHubLimitsWire } from "../protocol/xs.js";
+import type { XsStateFrame } from "../protocol/xs-activation.js";
 import { createRunTranscripts, type RunTxRunInfo, type RunTranscriptPort } from "./run-transcript.js";
 import { createEventTap } from "./event-tap.js";
 import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
@@ -1032,6 +1033,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (xsView !== undefined) s.xs = xsView;
       const inbox = xsBridge.inboxProjection();
       if (inbox !== undefined) s.xsInbox = inbox;
+      // fabric-xs-activation plan §3 P1 (arch §4.7): the tracked-request slot — only while the
+      // mirror holds rows for the current session (absent ⇒ the status frame is byte-equal to
+      // the pre-feature shape; StatusInfoSchema is open, an old hub forwards verbatim).
+      const xsRequests = xsBridge.requestsProjection();
+      if (xsRequests !== undefined) s.xsRequests = xsRequests;
     }
     // web-hub-cmd-history plan §4.6 (A1): open command records, ≤16 newest first — present only
     // while non-empty (StatusInfoSchema is open; an old hub forwards, an old UI ignores).
@@ -1380,6 +1386,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           onXsDeliver: (frame) => xsBridge.onDeliver(frame),
           // alias-force-default §5.4 (AF3): the hub's alias-force nudge → the bridge's reconcile.
           onXsAliasEvt: (frame) => xsBridge.onAliasEvt(frame),
+          // fabric-xs-activation P1: the hub's mirrored progress push → the source-side mirror.
+          onXsState: (frame: XsStateFrame) => xsBridge.onState(frame),
         }
       : {}),
     ...(schedulePort !== undefined

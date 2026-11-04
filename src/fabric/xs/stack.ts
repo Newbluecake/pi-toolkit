@@ -31,9 +31,12 @@ import {
   type XsReplyLedger,
 } from "./reply-ledger.js";
 import { XsReplyNoticeGate, buildInvalidationNoticeContent } from "./reply-notice.js";
-import type { XsStackPort } from "../../web-hub/agent/xs.js";
+import type { XsStackPort, XsStackProgressPort } from "../../web-hub/agent/xs.js";
 import type { AgentSettings } from "../../config/settings.js";
 import type { GoalSessionStartReason } from "../../goal/state.js";
+import { XsProgressBag, XS_PROGRESS_CAP, type XsProgressFields, type XsProgressWrite } from "./progress.js";
+import type { XsProgress } from "../../web-hub/protocol/xs-activation.js";
+import { XS_TRACK_DEFAULT_MS } from "../../web-hub/protocol/xs-activation.js";
 
 /** Late-bound main-session ports; neither the web bridge nor goal/topic-switch owns a stack. */
 export interface StackXsInput {
@@ -80,6 +83,10 @@ export interface StackXs extends XsStackPort {
   inbox: XsInbox;
   receiver: XsReceiver;
   controller?: RootWakeController;
+  /** fabric-xs-activation P1: receiver-side progress evidence (present iff
+   *  `fabric.crossSession.activation.enabled` — frozen at stack build; off ⇒ absent ⇒ the
+   *  receiver gets no evidence port and nothing is recorded or pushed). */
+  progress?: StackXsProgress;
   /** Reply-plan RXW: present iff `fabric.crossSession.reply.enabled` (frozen at stack build). */
   reply?: StackXsReply;
   /** Reply-plan §9.2 (MW): @mention session directory cache (closure-owned per stack). */
@@ -117,6 +124,61 @@ export interface StackXsReply {
 }
 
 const XS_REPLY_INBOUND_SCAN_CAP = 2000;
+/** fabric-xs-activation P1 (arch §4.2): backwards message scan cap of the started observation. */
+const XS_PROGRESS_CONTEXT_SCAN_CAP = 2000;
+
+/** fabric-xs-activation P1: the receiver-side progress surface on {@link StackXs} (the
+ *  web-hub bridge consumes the `XsStackProgressPort` subset through `XsStackPort.progress`). */
+export interface StackXsProgress extends XsStackProgressPort {
+  /** The context observation point (arch §4.2 `started`): a legal model-turn context whose raw
+   *  messages contain the original body's xid. Bounded (≤2000 backwards, ≤256 tracked ids);
+   *  never throws, never mutates the event. */
+  observeContext(event: unknown): void;
+  /** queued→delivered confirmation: ONE bounded branch scan at an existing flush point
+   *  (beforeAgentStart/settled); over budget ⇒ stays `unknown` (never fabricated). */
+  flushBranch(): void;
+}
+
+/** I4: same-session `/reload` hands the bag's PURE rows to the next stack through a
+ *  `Symbol.for("pi-subagent:xs-progress")` park — cap 8 sessions FIFO, TTL the plain tracking
+ *  window (30 min). New/fork/switch sids never adopt (keyed by sessionId). */
+const XS_PROGRESS_PARK_KEY = Symbol.for("pi-subagent:xs-progress");
+const XS_PROGRESS_PARK_SESSIONS = 8;
+interface XsProgressParkSlot {
+  rows: XsProgress[];
+  at: number;
+}
+
+function parkedProgressSlots(): Map<string, XsProgressParkSlot> {
+  const g = globalThis as unknown as Record<symbol, Map<string, XsProgressParkSlot> | undefined>;
+  let slots = g[XS_PROGRESS_PARK_KEY];
+  if (slots === undefined) {
+    slots = new Map<string, XsProgressParkSlot>();
+    g[XS_PROGRESS_PARK_KEY] = slots;
+  }
+  return slots;
+}
+
+function takeParkedXsProgress(sessionId: string, ttlMs: number, now: number): XsProgress[] {
+  const slots = parkedProgressSlots();
+  const slot = slots.get(sessionId);
+  if (slot === undefined) return [];
+  slots.delete(sessionId);
+  return now - slot.at <= ttlMs ? slot.rows : [];
+}
+
+function parkXsProgress(sessionId: string, rows: XsProgress[], now: number): void {
+  const slots = parkedProgressSlots();
+  if (rows.length === 0) {
+    slots.delete(sessionId);
+    return;
+  }
+  if (!slots.has(sessionId) && slots.size >= XS_PROGRESS_PARK_SESSIONS) {
+    const first = slots.keys().next().value;
+    if (first !== undefined) slots.delete(first);
+  }
+  slots.set(sessionId, { rows, at: now });
+}
 
 /**
  * Alias-force-default §5.3 (AFW): the decided marker is read from ALL session entries (`getEntries`, never
@@ -287,7 +349,18 @@ export function buildStackXs(
       pi.sendMessage(message, options);
       tapWritten(message);
     },
-    getLeafEntry: () => ctx.sessionManager.getLeafEntry() ?? undefined,
+    getLeafEntry: () => {
+      const entry = ctx.sessionManager.getLeafEntry();
+      if (entry === null) return undefined;
+      // fabric-xs-activation P1: carry the entry id for the progress row's `entryId`.
+      const e = entry as { type: string; customType?: string; details?: unknown; id?: unknown };
+      return {
+        type: e.type,
+        ...(e.customType !== undefined ? { customType: e.customType } : {}),
+        ...(e.details !== undefined ? { details: e.details } : {}),
+        ...(typeof e.id === "string" ? { id: e.id } : {}),
+      };
+    },
     abort: () => {
       if (typeof ctx.abort === "function") ctx.abort();
     },
@@ -301,6 +374,44 @@ export function buildStackXs(
             (entry.details as { xid?: unknown } | undefined)?.xid === xid,
         ),
   };
+  // ---- fabric-xs-activation P1: the receiver-side progress bag + observation ports ----
+  // Frozen at stack build (`fabric.crossSession.activation.enabled`, non-live): off ⇒ no bag,
+  // no receiver evidence port, no observer — byte-identical to the pre-feature stack.
+  const activationOn = config.activation.enabled;
+  const progressBag = activationOn ? new XsProgressBag(XS_PROGRESS_CAP) : undefined;
+  if (progressBag !== undefined) {
+    // Same-session /reload: pure-data recovery (revision adopted as-is); the park's TTL equals
+    // the plain tracking window — a stale park hands over nothing.
+    for (const row of takeParkedXsProgress(sessionId, XS_TRACK_DEFAULT_MS, Date.now())) progressBag.merge(row);
+  }
+  const progressSubs = new Set<(progress: XsProgress) => void>();
+  const replySubs = new Set<(requestId: string, at: number) => void>();
+  const notifyProgressWrite = (write: XsProgressWrite): void => {
+    if (write.kind !== "created" && write.kind !== "merged") return; // stale/full are invisible
+    for (const cb of progressSubs) {
+      try {
+        cb(write.progress);
+      } catch {
+        /* a subscriber must never break evidence collection */
+      }
+    }
+  };
+  const receiverProgress =
+    progressBag !== undefined
+      ? {
+          observe: (messageId: string, fields: XsProgressFields) =>
+            notifyProgressWrite(progressBag.observe(messageId, fields, Date.now())),
+          replyWritten: (requestId: string, at: number) => {
+            for (const cb of replySubs) {
+              try {
+                cb(requestId, at);
+              } catch {
+                /* mirror-side display only */
+              }
+            }
+          },
+        }
+      : undefined;
   const replyEnabled = config.reply.enabled;
   const replyLedger = replyEnabled ? getXsReplyLedger() : undefined;
   const replyInbox = replyEnabled ? new XsInbox(config.reply.maxPending) : undefined;
@@ -335,6 +446,7 @@ export function buildStackXs(
     recvPerHour: config.limits.recvPerHour,
     wakesInPerHour: config.limits.wakesInPerHour,
     hubChannelCap,
+    ...(receiverProgress ? { progress: receiverProgress } : {}),
     ...(level ? { level } : {}),
   });
   const audit: Partial<Record<RootWakeAudit, number>> = {};
@@ -499,6 +611,100 @@ export function buildStackXs(
     },
     now: () => Date.now(),
   });
+  // fabric-xs-activation P1: the started observation (arch §4.2) — a legal model-turn context
+  // whose raw messages contain a tracked xid. Bounded: ≤2000 messages scanned BACKWARDS, ≤256
+  // tracked ids (bag cap), set match (never a per-id rescan). Marker / BAS / !isIdle alone are
+  // NOT started evidence (arch §4.1) — only this context sight is.
+  const progressObserveContext = (event: unknown): void => {
+    if (progressBag === undefined || progressBag.size === 0) return;
+    try {
+      const pending = new Set<string>();
+      for (const row of progressBag.rows(Date.now())) {
+        if (row.startedAt !== undefined || row.phase === "started" || row.phase === "replied") continue;
+        pending.add(row.messageId);
+      }
+      if (pending.size === 0) return;
+      const messages = (event as { messages?: unknown }).messages;
+      if (!Array.isArray(messages) || messages.length === 0) return;
+      const marked = new Set<string>();
+      const floor = Math.max(0, messages.length - XS_PROGRESS_CONTEXT_SCAN_CAP);
+      for (let i = messages.length - 1; i >= floor; i--) {
+        const m = messages[i] as { role?: unknown; customType?: unknown; details?: unknown } | null;
+        if (m === null || typeof m !== "object" || m.role !== "custom" || m.customType !== "subagent:xs") continue;
+        const xid = (m.details as { xid?: unknown } | null | undefined)?.xid;
+        if (typeof xid !== "string" || !pending.has(xid) || marked.has(xid)) continue;
+        marked.add(xid);
+        notifyProgressWrite(progressBag.observe(xid, { phase: "started", startedAt: Date.now() }, Date.now()));
+        if (marked.size >= pending.size) return;
+      }
+    } catch {
+      /* observation only — never breaks the host event */
+    }
+  };
+  // queued→delivered confirmation (arch §4.2 "queued 后 branch 确认"): ONE bounded branch scan at
+  // an existing flush point. Over budget ⇒ stays unknown; not a per-message poll.
+  const progressFlushBranch = (): void => {
+    if (progressBag === undefined || progressBag.size === 0) return;
+    try {
+      const pending = new Set<string>();
+      for (const row of progressBag.rows(Date.now())) {
+        if (
+          row.deliveredAt !== undefined ||
+          row.phase === "delivered" ||
+          row.phase === "started" ||
+          row.phase === "replied"
+        )
+          continue;
+        if (row.queuedAt !== undefined || row.phase === "queued") pending.add(row.messageId);
+      }
+      if (pending.size === 0) return;
+      const branch = ctx.sessionManager.getBranch() as unknown as ReadonlyArray<Record<string, unknown>>;
+      const floor = Math.max(0, branch.length - XS_REPLY_INBOUND_SCAN_CAP);
+      for (let i = branch.length - 1; i >= floor; i--) {
+        const entry = branch[i]!;
+        if (entry.type !== "custom_message" || entry.customType !== "subagent:xs") continue;
+        const xid = (entry.details as { xid?: unknown } | undefined)?.xid;
+        if (typeof xid !== "string" || !pending.has(xid)) continue;
+        pending.delete(xid);
+        notifyProgressWrite(
+          progressBag.observe(
+            xid,
+            {
+              deliveryEffect: "applied",
+              phase: "delivered",
+              deliveredAt: Date.now(),
+              ...(typeof entry.id === "string" && entry.id !== "" ? { entryId: entry.id } : {}),
+            },
+            Date.now(),
+          ),
+        );
+        if (pending.size === 0) return;
+      }
+    } catch {
+      /* observation only */
+    }
+  };
+  const progress: StackXsProgress | undefined =
+    progressBag === undefined
+      ? undefined
+      : {
+          subscribe: (cb) => {
+            progressSubs.add(cb);
+            return () => {
+              progressSubs.delete(cb);
+            };
+          },
+          subscribeReplyWritten: (cb) => {
+            replySubs.add(cb);
+            return () => {
+              replySubs.delete(cb);
+            };
+          },
+          rows: () => progressBag.rows(Date.now()),
+          snapshot: (messageId) => progressBag.snapshot(messageId, Date.now()),
+          observeContext: progressObserveContext,
+          flushBranch: progressFlushBranch,
+        };
   return {
     sessionId: () => sessionId,
     directory,
@@ -530,6 +736,7 @@ export function buildStackXs(
     fence,
     inbox,
     receiver,
+    ...(progress !== undefined ? { progress } : {}),
     audit,
     unread: () => unreadCount(sessionId),
     unreadTurnStart: () => {
@@ -564,9 +771,11 @@ export function buildStackXs(
       controller?.beforeAgentStart(event);
       releaseTrigger();
       reply?.flush();
+      progress?.flushBranch(); // P1: queued→delivered confirmation at an existing flush point
     },
     context: (event) => {
       controller?.context(event);
+      progress?.observeContext(event); // P1 started observation (also runs on controller-less stacks via the P2 wiring)
     },
     settled: () => {
       controller?.settled();
@@ -574,10 +783,17 @@ export function buildStackXs(
       replyInbox?.onRunSettled();
       releaseTrigger();
       reply?.flush();
+      progress?.flushBranch(); // P1: queued→delivered confirmation at an existing flush point
     },
     dispose: () => {
       if (disposed) return;
       disposed = true;
+      // fabric-xs-activation P1: same-session /reload parks the PURE rows (I4 global, stated
+      // cap/TTL); a different sid (new/fork/switch) never adopts them. Subscribers drop with the
+      // stack — the bridge re-subscribes to the next stack it sees.
+      progressSubs.clear();
+      replySubs.clear();
+      if (progressBag !== undefined) parkXsProgress(sessionId, progressBag.rows(Date.now()), Date.now());
       directory.dispose();
       replyScheduler.current?.dispose();
       reply?.gate.dispose();

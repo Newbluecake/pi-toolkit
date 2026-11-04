@@ -89,6 +89,16 @@ import type {
   XsResFrame,
   XsStatusWire,
 } from "../protocol/xs.js";
+import {
+  XS_RECEIPT_DEADLINE_MS,
+  XS_REQUESTS_MAX_ROWS,
+  XS_STATE_AGENT_CAP,
+  XS_STATE_HUB_CAP,
+  type XsProgress,
+  type XsRequestsStatusWire,
+  type XsStateFrame,
+} from "../protocol/xs-activation.js";
+import { XsProgressBag, XS_PROGRESS_CAP } from "../../fabric/xs/progress.js";
 import { newAdminRid, type HubConnection, type SlotFlush } from "./connection.js";
 
 /** `XsHubPort` + the reply capability probe the sender consults before issuing `expectReply`. */
@@ -98,9 +108,35 @@ export interface XsReplyHubPort extends XsHubPort {
   replyCapable(): boolean;
   /** True iff local channels are enabled AND the live hub link declared `xs.channel.v1`. */
   channelCapable?(): boolean;
+  /** fabric-xs-activation P1 (arch §4.4): the strictly read-only progress query — one
+   *  `xs_req{op:"receipt"}` (3s list-tier deadline, cap-prechecked by `connection.request`);
+   *  the hub answers `xs_res` and pushes the snapshot as an `xs_state` frame the waiter here
+   *  correlates by messageId. Zero side effects; absent ⇒ the op does not exist yet. */
+  receipt?(args: { messageId: string; activationKey?: string }): Promise<XsPortReceipt>;
+}
+
+/** fabric-xs-activation P1: the receipt result (arch §4.4's `{status, messageId, progress?}` —
+ *  `unsupported` = the capability chain is off (local or hub); `unavailable` = not tracked /
+ *  expired / link trouble; NEVER a fabricated snapshot). */
+export interface XsPortReceipt {
+  status: "known" | "unavailable" | "unsupported";
+  messageId: string;
+  progress?: XsProgress;
 }
 
 // --------------------------------------------------------------------- ports (XW threads these)
+
+/** fabric-xs-activation P1: the receiver-side progress surface the bridge consumes through
+ *  `XsStackPort.progress` (StackXs implements it in `fabric/xs/stack.ts`; presence IS
+ *  `fabric.crossSession.activation.enabled`, frozen at stack build). */
+export interface XsStackProgressPort {
+  /** Every evidence change (created/merged writes only — stale/full are invisible). */
+  subscribe(cb: (progress: XsProgress) => void): () => void;
+  /** A solicited reply was confirmed written in this session (requester-side `replied`). */
+  subscribeReplyWritten(cb: (requestId: string, at: number) => void): () => void;
+  rows(): XsProgress[];
+  snapshot(messageId: string): XsProgress | undefined;
+}
 
 /** The per-stack view XW owns: X4's membership + receiver, re-read on EVERY call (the stack
  *  swaps on every session boundary; a captured instance would answer for a dead session). */
@@ -115,6 +151,9 @@ export interface XsStackPort {
   deliver(frame: XsDeliverFrame): XsAckVerdict;
   /** `StatusInfo.xs` projection body (display only, §4.4). */
   status(): XsStatusWire;
+  /** fabric-xs-activation P1: receiver-side progress evidence (absent ⇒ activation off /
+   *  pre-feature stack — the bridge pushes and mirrors nothing). */
+  progress?: XsStackProgressPort;
   /** channel-plan §12 (IBP): unread inbox events of the stack's CURRENT session (IB1 `count`).
    *  Optional: absent ⇒ `StatusInfo.xsInbox` is never written. */
   unread?(): number;
@@ -148,6 +187,11 @@ export interface XsAgentPort {
   /** Alias-plan §3.6: hub-global alias params for `HubConfig.crossSession.alias`; only consulted while
    *  `aliasEnabled()`. Absent ⇒ the key is not written (hub defaults, never "off"). */
   aliasHubConfig?(): { offlineLeaseH: number; coolMin: number; takeMinOfflineMin: number } | undefined;
+  /** fabric-xs-activation plan §3 P1 (arch §3.2): effective = `xsOn ∧
+   *  fabric.crossSession.activation.enabled`, frozen per activate (non-live). ABSENT ⇒ false:
+   *  no `xs.state.v1` cap, no `HubConfig.crossSession.activation` key, no state frames — the
+   *  agent stays byte-identical to the pre-feature build (key-absence-is-off on the hub). */
+  activationEnabled?(): boolean;
   /** Alias-plan §4 (Q3): display-only one-shot notice text (the bridge already de-duplicated it process-wide
    *  by `(sessionId, lost.at)`). ALW wires it to `ctx.ui.notify`. Never throws into the bridge. */
   notifyAliasLost?(text: string): void;
@@ -206,6 +250,9 @@ export interface XsAgentBridge {
     limits: { hubSendsPerMin: number };
     channels?: { maxRecipients: number; wakeMaxRecipients: number };
     alias?: { offlineLeaseH: number; coolMin: number; takeMinOfflineMin: number };
+    /** fabric-xs-activation P1: written ONLY while effective — key-absence-is-off on the hub
+     *  (no relation bag, no activation caps, byte-identical hub). */
+    activation?: true;
   };
   /** Connection `BindingPort.onXsDeliver` — answers EXACTLY ONE `xs_ack`, never throws. */
   onDeliver(frame: XsDeliverFrame): void;
@@ -250,6 +297,13 @@ export interface XsAgentBridge {
   aliasCache(): XsAliasCachePort;
   /** `onHubCaps` hook (every hello_ack): reconcile the cache against the hub. Fire-and-forget, never throws. */
   onHubCapsAlias(): void;
+  /** fabric-xs-activation P1: hub→source `xs_state` — merge the snapshot into the source-side
+   *  mirror, resolve a pending receipt waiter (by messageId) and republish the status slot.
+   *  Never throws; a `defaulted` field is never adopted (source-private). */
+  onState(frame: XsStateFrame): void;
+  /** fabric-xs-activation P1: the `StatusInfo.xsRequests` body — ONLY while effective AND the
+   *  mirror holds rows for the CURRENT session (absent ⇒ the status frame stays byte-equal). */
+  requestsProjection(): XsRequestsStatusWire | undefined;
 }
 
 // ------------------------------------------------------------- member-limit clamping (defensive)
@@ -420,6 +474,130 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
   const hubHasAlias = (): boolean => deps.conn()?.caps.includes(XS_ALIAS_HUB_CAP) === true;
   /** AF3: the live hub declared `xs.alias.v2` (understands `intent`, pushes `xs_alias_evt`). */
   const hubHasAliasV2 = (): boolean => deps.conn()?.caps.includes(XS_ALIAS_V2_HUB_CAP) === true;
+  /** fabric-xs-activation P1: effective (frozen per activate — the port is XW/P2 wiring; absent
+   *  ⇒ false ⇒ no cap, no hub key, no state frames, byte-identical agent). */
+  const activationEnabled = (): boolean => {
+    try {
+      return deps.port.activationEnabled?.() === true;
+    } catch {
+      return false;
+    }
+  };
+  /** P1: the live hub link declared `xs.state.v1`. */
+  const hubHasState = (): boolean => deps.conn()?.caps.includes(XS_STATE_HUB_CAP) === true;
+
+  // -------------------------------------------- source-side progress mirror (fabric-xs-activation P1)
+
+  /** The SOURCE-side mirror bag (per bridge = per activate): merged from `xs_state` pushes and
+   *  the receiver-stack subscriptions. `defaulted` is source-private — remote merges never set
+   *  it (progress.ts guarantees); local marks (P2's U2 default) go through `observe`. Replaced
+   *  (not cleared) on a session switch — a new session's tracking epoch inherits nothing. */
+  let mirror = new XsProgressBag(XS_PROGRESS_CAP);
+  /** The sessionId the mirror currently speaks for (a switch replaces the bag, arch §4.2
+   *  "new/fork/switch ⇒ not inherited"). */
+  let mirrorSessionId: string | undefined;
+  /** Monotone projection revision — one per publishing process (arch §4.7). */
+  let mirrorRevision = 0;
+  /** One-shot receipt waiters by messageId (the hub's answer push correlates on it). */
+  const receiptWaiters = new Map<string, (progress: XsProgress) => void>();
+  /** The stack whose progress subscriptions are currently wired (re-subscribe on stack swap). */
+  let wiredProgressStack: XsStackProgressPort | undefined;
+  let unwireProgress: (() => void) | undefined;
+  let unwireReplyWritten: (() => void) | undefined;
+
+  /** Push one receiver-side evidence snapshot to the hub (`xs_state`, receiver→hub). Cap-gated
+   *  both ways; fire-and-forget — a missed push costs a later re-sync (receipt), never truth. */
+  const pushState = (progress: XsProgress): void => {
+    const conn = deps.conn();
+    if (conn === undefined || !activationEnabled() || !hubHasState()) return;
+    const { sourceRid: _never, ...snapshot } = progress as XsProgress & { sourceRid?: string };
+    try {
+      conn.send({ t: "xs_state", ...snapshot });
+    } catch {
+      /* link gone — the hub's receipt re-syncs on demand */
+    }
+  };
+
+  /** Requester-side `replied` (arch §4.1): the stack's reply pipeline confirmed a solicited
+   *  reply written HERE — mark every mirror row bound to that requestId. Local observation
+   *  (may set source-private facts); never pushed upstream (the hub verifies the sender side
+   *  of a relation, and the source socket is not it). */
+  const markReplyWritten = (requestId: string, at: number): void => {
+    if (!activationEnabled()) return;
+    for (const row of mirror.rows(Date.now())) {
+      if (row.requestId !== requestId || row.phase === "replied") continue;
+      const write = mirror.observe(row.messageId, { phase: "replied", repliedAt: at }, at);
+      if (write.kind === "created" || write.kind === "merged") mirrorRevision++;
+    }
+  };
+
+  /** (Re)wire the stack subscriptions whenever a (possibly new) stack is in view — driven from
+   *  `onDeliver`/`publishMember` (both fire per stack attach); idempotent per port instance. */
+  const wireProgress = (): void => {
+    if (!activationEnabled()) return;
+    const stack = deps.port.stack();
+    const port = stack?.progress;
+    if (port === undefined || port === wiredProgressStack) return;
+    unwireProgress?.();
+    unwireReplyWritten?.();
+    wiredProgressStack = port;
+    unwireProgress = port.subscribe(pushState);
+    unwireReplyWritten = port.subscribeReplyWritten(markReplyWritten);
+    const sid = stack?.sessionId();
+    if (sid !== undefined && sid !== mirrorSessionId) {
+      // A session SWITCH starts a FRESH tracking epoch — old rows never relabel onto the new
+      // sid. The FIRST wiring (no previous sid) adopts without dropping: states may legitimately
+      // arrive before the first deliver/attach hook (the hub pushes on its own initiative).
+      if (mirrorSessionId !== undefined) mirror = new XsProgressBag(XS_PROGRESS_CAP);
+      mirrorSessionId = sid;
+    }
+  };
+
+  /** fabric-xs-activation P1 (arch §4.4): one read-only receipt round trip. The waiter is
+   *  registered BEFORE the request (the hub's `xs_state` answer push cannot race past it) and
+   *  the total wait stays inside the 3s list-tier deadline; the timer is unref'd (I5). */
+  const receiptRoundTrip = async (args: { messageId: string; activationKey?: string }): Promise<XsPortReceipt> => {
+    const unsupported: XsPortReceipt = { status: "unsupported", messageId: args.messageId };
+    const unavailable: XsPortReceipt = { status: "unavailable", messageId: args.messageId };
+    if (!activationEnabled()) return unsupported;
+    const conn = deps.conn();
+    if (conn === undefined) return unavailable;
+    if (!hubHasState()) return conn.status().state === "live" ? unsupported : unavailable;
+    const origin = originOf();
+    if (origin === undefined) return unavailable;
+    const startedAt = Date.now();
+    const pushed = new Promise<XsProgress | undefined>((resolve) => {
+      receiptWaiters.set(args.messageId, resolve);
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const res: XsResFrame = await conn.request(
+        {
+          t: "xs_req",
+          rid: newAdminRid(),
+          op: "receipt",
+          origin,
+          messageId: args.messageId,
+          ...(args.activationKey !== undefined ? { activationKey: args.activationKey } : {}),
+        },
+        XS_STATE_HUB_CAP,
+      );
+      if (!res.ok) return unavailable; // not tracked / expired / stale key — never fabricated
+      const remaining = Math.max(0, XS_RECEIPT_DEADLINE_MS - (Date.now() - startedAt));
+      const giveUp = new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), remaining);
+        timer.unref(); // I5: a ref'd timer wedges `pi -p`
+      });
+      const progress = await Promise.race([pushed, giveUp]);
+      return progress === undefined ? unavailable : { status: "known", messageId: args.messageId, progress };
+    } catch {
+      return unavailable; // deadline / link lost / cap lost mid-flight
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      receiptWaiters.delete(args.messageId);
+    }
+  };
+
   /** alias on ∧ the live hub declared the cap (symmetric with the hub's `aliasUsable`). */
   const aliasUsable = (): boolean => aliasEnabled() && deps.conn()?.status().state === "live" && hubHasAlias();
 
@@ -890,13 +1068,18 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       const reply = replyEnabled();
       const ch = channelsEnabled();
       const al = aliasEnabled();
-      if (!reply && !ch && !al) return XS_AGENT_CAPS;
+      const act = activationEnabled();
+      if (!reply && !ch && !al && !act) return XS_AGENT_CAPS;
       return [
         ...XS_AGENT_CAPS,
         ...(reply ? [XS_REPLY_AGENT_CAP] : []),
         ...(ch ? [XS_CHANNEL_AGENT_CAP] : []),
         // alias-force-default §3.1 (AF3): v2 immediately after v1, declared under the SAME condition.
         ...(al ? [XS_ALIAS_AGENT_CAP, XS_ALIAS_V2_AGENT_CAP] : []),
+        // fabric-xs-activation P1: `xs.state.v1` — declared even while local wake is off (the
+        // phase/reason axis explains a downgrade without waking anyone, arch §3.2). The
+        // `xs.activate.v1` half is P3's (wake_session) — never declared here.
+        ...(act ? [XS_STATE_AGENT_CAP] : []),
       ];
     },
 
@@ -934,12 +1117,16 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
           };
         }
       }
+      // fabric-xs-activation P1: the key rides the config ONLY while effective — key-absence-is-off
+      // builds no hub relation bag and appends no caps (byte-identical hub).
+      if (activationEnabled()) base.activation = true;
       return base;
     },
 
     onDeliver(frame) {
       // Learn the one full-id mapping the wire ever shows us (used by resolveBlock below).
       learnRef(frame.from.ref, frame.from.sessionId);
+      wireProgress(); // P1: the receiver stack may be new in view (subscribe its evidence)
       let verdict: XsAckVerdict;
       const stack = deps.port.stack();
       try {
@@ -969,6 +1156,7 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       const conn = deps.conn();
       const stack = deps.port.stack();
       if (conn === undefined || stack === undefined) return;
+      wireProgress(); // P1: per-attach hook — (re)subscribe the receiver stack's evidence port
       const m = stack.member();
       // §3.2: the STORED frame carries the effective set whenever it is not default-only (the
       // per-write flush trims it for an old hub); default-only/empty ⇒ no `channels`, no broadcast keys.
@@ -1040,6 +1228,9 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         aliasUsable: () => aliasUsable(),
         broadcast: (args) => roundTrip(reqOfBroadcast(args)),
         channels: (args) => roundTrip(reqOfChannels(args)),
+        // fabric-xs-activation P1: the read-only progress query (3s, cap-prechecked). Consumers:
+        // wake_session (P3) and the sender's track re-sync (P2).
+        receipt: receiptRoundTrip,
       };
     },
 
@@ -1116,6 +1307,45 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       const sid = deps.port.stack()?.sessionId();
       if (sid === undefined) return undefined;
       return autoSkipBySid.get(sid);
+    },
+
+    onState(frame) {
+      // fabric-xs-activation P1: hub→source `xs_state` — mirror, resolve a receipt waiter,
+      // republish the status slot. Never throws; nothing here can loop (frames come from the
+      // hub, the status slot is not a frame source).
+      try {
+        if (!activationEnabled()) return;
+        const { sourceRid: _hubOnly, ...snapshot } = frame;
+        const write = mirror.merge(snapshot);
+        if (write.kind === "created" || write.kind === "merged") mirrorRevision++;
+        const waiter = receiptWaiters.get(frame.messageId);
+        if (waiter !== undefined) {
+          receiptWaiters.delete(frame.messageId);
+          waiter(
+            write.kind === "created" || write.kind === "merged" || write.kind === "stale" ? write.progress : snapshot,
+          );
+        }
+        deps.publishStatus?.();
+      } catch {
+        /* never throws into the connection machinery */
+      }
+    },
+
+    requestsProjection() {
+      // Only while effective AND rows exist — absent ⇒ the status frame stays byte-equal to the
+      // pre-feature shape (StatusInfoSchema is open: an old hub forwards, an old UI ignores).
+      if (!activationEnabled()) return undefined;
+      const sid = deps.port.stack()?.sessionId();
+      if (sid === undefined) return undefined;
+      const rows = mirror.rows(Date.now());
+      if (rows.length === 0) return undefined;
+      const capped = rows.slice(0, XS_REQUESTS_MAX_ROWS);
+      return {
+        sessionId: sid,
+        revision: mirrorRevision,
+        rows: capped,
+        ...(rows.length > capped.length ? { omitted: rows.length - capped.length } : {}),
+      };
     },
 
     async hubInfo() {

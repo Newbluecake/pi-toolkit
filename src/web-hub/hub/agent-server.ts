@@ -265,6 +265,14 @@ export function createAgentServer(
         deps.xs.handle(agentKey, frame, write);
         return;
       }
+      // fabric-xs-activation plan §3 P1: state/activation PUSH frames never enter the registry
+      // either — the xs router owns them (`xs_state`: verify + forward to the source;
+      // `xs_activate_ack`: P3's pending match, P1 diagnostic-only). No reply semantics; a
+      // service-less hub (activation off / xs off) ignores them exactly like before.
+      if ((frame.t === "xs_state" || frame.t === "xs_activate_ack") && deps.xs !== undefined) {
+        deps.xs.onAgentFrame(agentKey, frame);
+        return;
+      }
       // scheduled-reports H1 (§10.1): sched_* frames never enter the registry/bus — they go to
       // the coordinator (targeted rescan for `sched_changed`; `sched_bound` is tapped into the
       // bot's event stream and `sched_run_ack` resolves a run() waiter). The frames exist only

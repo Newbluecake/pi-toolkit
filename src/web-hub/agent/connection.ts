@@ -51,6 +51,7 @@ import type { HubPaths } from "../protocol/paths.js";
 import type { RunTxReqFrame, RunWatchFrame } from "../protocol/run-transcript.js";
 import type { CompleteReqFrame } from "../protocol/command-args.js";
 import type { XsAliasEvtFrame, XsDeliverFrame, XsReqFrame, XsResFrame } from "../protocol/xs.js";
+import type { XsActivateFrame, XsStateFrame } from "../protocol/xs-activation.js";
 import type { SchedDecideFrame, SchedReceiptsFrame, SchedRunFrame } from "../protocol/schedule.js";
 import type { ThrClosedFrame, ThrReqFrame, ThrResFrame } from "../protocol/thread.js";
 import { XS_HUB_CAP, XS_SLOT_KIND, xsReqDeadlineMs } from "../protocol/xs.js";
@@ -123,6 +124,15 @@ export interface BindingPort {
    *  Live-link-only; a binding without it silently ignores the frame (a v2 hub only sends it to
    *  effective members whose hello declared `xs.alias.v2`, so this is purely defensive). */
   onXsAliasEvt?(frame: XsAliasEvtFrame): void;
+  /** fabric-xs-activation plan §3 P1 (arch §4.7): hub→source `xs_state` — the mirrored progress
+   *  snapshot of a tracked original send. No reply; live-link-only; a binding without it (or
+   *  activation off) silently ignores the frame. */
+  onXsState?(frame: XsStateFrame): void;
+  /** fabric-xs-activation plan §3 P3 wiring point: hub→receiver `xs_activate` (the text-free
+   *  control relay). P1 builds the routing case only — no handler exists yet (no agent declares
+   *  `xs.activate.v1`), so the frame is silently ignored; P3's handler answers EXACTLY ONE
+   *  `xs_activate_ack`. */
+  onXsActivate?(frame: XsActivateFrame): void;
   /** scheduled-reports A0 (§7.4/§10.1): hub→agent manual-run request. The handler answers
    *  EXACTLY ONE `sched_run_ack` (`schedule/agent/coordinator.ts`). Live-link-only; a binding
    *  without it (schedule off) silently ignores the frame — the hub's own ack wait settles it. */
@@ -185,8 +195,10 @@ export interface HubConnection {
   request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame>;
   /** fabric phase-2 X2 (§8.2): the `xs_req` overload — deadline comes from the per-op table
    *  (`list|resolve|info` 3s, `send` 8s = hub admission + 5s deliver + headroom), NOT the
-   *  generic 3s admin timeout. Same cap precheck / reject-pending-on-teardown contract. */
-  request(frame: XsReqFrame, requiredCap: "xs.v1"): Promise<XsResFrame>;
+   *  generic 3s admin timeout. Same cap precheck / reject-pending-on-teardown contract.
+   *  fabric-xs-activation P1: `xs_req{op:"receipt"}` rides the same overload under the
+   *  `xs.state.v1` required cap (the precheck rejects E_NO_CAP on a cap-less link). */
+  request(frame: XsReqFrame, requiredCap: "xs.v1" | "xs.state.v1"): Promise<XsResFrame>;
   /** fabric-thread arch r3 §7.3 (P3): the `thr_req` overload — 5s deadline (the §7.3 agent-side
    *  wait; the caller owns the ONE same-postId retry, `thread-child-tool.ts`). Same cap precheck
    *  / reject-pending-on-teardown contract. rebind-plan r3 (agent package): the rebind/acquire
@@ -470,7 +482,7 @@ class Connection implements HubConnection {
   request(frame: TfaReqFrame, requiredCap: string): Promise<TfaResFrame>;
   request(frame: FsbReqFrame, requiredCap: string): Promise<FsbResFrame>;
   request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame>;
-  request(frame: XsReqFrame, requiredCap: "xs.v1"): Promise<XsResFrame>;
+  request(frame: XsReqFrame, requiredCap: "xs.v1" | "xs.state.v1"): Promise<XsResFrame>;
   /** rebind-plan r3 (agent 包)：rebind/acquire 帧也走 thr_req，cap 预检放宽到 thr.rebind.v1。 */
   request(frame: ThrReqFrame, requiredCap: "thr.v1" | "thr.rebind.v1"): Promise<ThrResFrame>;
   request(
@@ -753,6 +765,16 @@ class Connection implements HubConnection {
       case "xs_alias_evt":
         // alias-force-default §3.2 (AF3): live-link-only, no reply; no hook ⇒ ignored.
         if (this.link === "live") this.callBinding((b) => b.onXsAliasEvt?.(frame));
+        return;
+      case "xs_state":
+        // fabric-xs-activation P1: hub→source progress push — no reply, live-link-only; no hook
+        // (activation off) ⇒ ignored.
+        if (this.link === "live") this.callBinding((b) => b.onXsState?.(frame));
+        return;
+      case "xs_activate":
+        // fabric-xs-activation P3 wiring point: no P1 handler exists (no agent declares
+        // `xs.activate.v1`) — silently ignored; P3 answers EXACTLY ONE `xs_activate_ack`.
+        if (this.link === "live") this.callBinding((b) => b.onXsActivate?.(frame));
         return;
       case "run_watch":
         if (this.link === "live") this.callBinding((b) => b.onRunWatch?.(frame));

@@ -146,6 +146,25 @@ export interface FabricXsCommandDeps {
    * `/fabric alias` reports "not enabled"). `bridge.supported`/`cache.usable` false ⇒ local refusal, nothing sent.
    */
   alias?(): FabricXsAliasPort | undefined;
+  /**
+   * fabric-xs-activation plan §3 P1: the progress-bag read port (`/fabric status`'s new line).
+   * `undefined` ⇒ not wired (no line — pre-feature / activation off bytes). The P2 owner wires
+   * it to the live stack's `progress.rows()`; this module only renders English tokens and never
+   * fabricates counts (an absent hub cap renders `unavailable`, never a zero).
+   */
+  progress?(): FabricXsProgressView | undefined;
+}
+
+/** fabric-xs-activation P1: what `/fabric status`'s requests line renders. */
+export interface FabricXsProgressView {
+  rows: ReadonlyArray<{
+    phase?: "queued" | "delivered" | "started" | "replied";
+    /** The wake view's stop reason (`wake↓ <reason>`), English token. */
+    wakeReason?: string;
+  }>;
+  /** `xs.state.v1` on the LIVE hub link: `false` ⇒ `unavailable` (legacy hub);
+   *  `undefined` ⇒ unknown (n/a) — counts still render, they are local facts. */
+  hubStateCap?: boolean | undefined;
 }
 
 /** Alias-plan §4/§7: what `/fabric alias` needs. Hub IO goes ONLY through `bridge` (never the connection directly). */
@@ -412,6 +431,10 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
               `replies pending ${s.pending}/${replies.maxPending} · inbox ${s.inbox} · timedOut ${s.timedOut} · late ${s.late} · rejected ${s.rejected} · owed ${s.owed} · dropped ${s.dropped} · ledger ${s.ledger.size}/${s.ledger.capacity}`,
             );
           }
+          // fabric-xs-activation P1: the requests line — only when the port is wired AND carries
+          // information (an empty bag adds nothing; unknown usage is n/a, never a fake 0).
+          const progress = safe(deps.progress);
+          if (progress !== undefined && progress.rows.length > 0) lines.push(renderXsProgress(progress));
           notify(ctx, lines.join("\n"));
           return;
         }
@@ -542,6 +565,29 @@ function currentSetText(membership: XsMembership): string {
 function mixHint(membership: XsMembership): string[] {
   const eff = membership.effective();
   return eff.includes(XS_DEFAULT_CHANNEL) && eff.length > 1 ? [DEFAULT_MIX_HINT] : [];
+}
+
+/** fabric-xs-activation P1 (plan §3): the `/fabric status` requests line — English tokens only
+ *  (`requests q0 d1 s0 r0 · wake↓ pair_wake_rate`); no rows ⇒ no line at all; a hub without
+ *  `xs.state.v1` renders `unavailable`, never a fabricated zero. */
+function renderXsProgress(view: FabricXsProgressView): string {
+  if (view.hubStateCap === false) return "requests unavailable (hub-cap off)";
+  const counts = { queued: 0, delivered: 0, started: 0, replied: 0 } as Record<string, number>;
+  let unknown = 0;
+  const wakeReasons = new Map<string, number>();
+  for (const row of view.rows) {
+    if (row.phase !== undefined && row.phase in counts) counts[row.phase]!++;
+    else unknown++;
+    if (row.wakeReason !== undefined) wakeReasons.set(row.wakeReason, (wakeReasons.get(row.wakeReason) ?? 0) + 1);
+  }
+  const phases = `q${counts["queued"]} d${counts["delivered"]} s${counts["started"]} r${counts["replied"]}${
+    unknown > 0 ? ` u${unknown}` : ""
+  }`;
+  const wake =
+    wakeReasons.size > 0
+      ? ` · wake↓ ${[...wakeReasons].map(([reason, n]) => (n > 1 ? `${reason}×${n}` : reason)).join(" ")}`
+      : "";
+  return `requests ${phases}${wake}`;
 }
 
 /**

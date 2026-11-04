@@ -36,6 +36,7 @@ import {
   XS_HUB_CAP,
   XS_REPLY_HUB_CAP,
 } from "../protocol/xs.js";
+import { XS_ACTIVATE_HUB_CAP, XS_STATE_HUB_CAP } from "../protocol/xs-activation.js";
 import type { HubAssembly } from "./assembly.js";
 import { hubLoadProbe, LOAD_HUB_CAP, normalizeHubLoadConfig } from "./load.js";
 import { previewProcFdAvailable } from "./preview/fs.js";
@@ -202,6 +203,11 @@ export function assembleHubCaps(ctx: HubAssembly): readonly string[] {
           // Alias-plan §3.6 (AL2): tail-appended, only for a table that loaded `ready`.
           // Alias-force-default (#72): `xs.alias.v2` follows v1 under the SAME condition (intent / force / xs_alias_evt).
           ...(xsAlias?.store.advertised === true ? [XS_ALIAS_HUB_CAP, XS_ALIAS_V2_HUB_CAP] : []),
+          // fabric-xs-activation plan §3 P1: both activation caps ride the SAME two surfaces iff
+          // `crossSession.activation` exists (key-absence-is-off ⇒ caps byte-identical). The
+          // AGENT declares the activate half only in P3 (wake_session) — a cap on the hub is a
+          // schema gate, never authorization.
+          ...(config.crossSession.activation === true ? [XS_STATE_HUB_CAP, XS_ACTIVATE_HUB_CAP] : []),
         ]),
     // scheduled-reports plan r3 §10.1 (H1): `sched.v1` iff `config.schedule` exists (same
     // two-surface tail-append rule; absent ⇒ caps byte-identical). Declared even when the

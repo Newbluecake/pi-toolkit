@@ -11,6 +11,7 @@ import { getXsDedup, type XsAckVerdict, type XsDedup } from "./dedup.js";
 import { shares, viaOrDefault } from "./channel.js";
 import type { XsBroadcastMark } from "./types-channel.js";
 import type { XsWakeDowngraded } from "../../web-hub/protocol/xs.js";
+import type { XsProgressFields } from "./progress.js";
 
 /**
  * fabric phase-2 X4 (phase2-plan §8.4 + §6.3 evidence table + §6.6 level table + §4.5 truth
@@ -77,8 +78,21 @@ export interface XsDeliverHost {
   isIdle(): boolean;
   hasPendingMessages(): boolean;
   sendMessage(message: XsDeliverHostMessage, options: { triggerTurn: boolean }): void;
-  /** Leaf-entry evidence for §6.3 deliver-only applied (Fpi7 sync append). */
-  getLeafEntry(): { type: string; customType?: string; details?: unknown } | undefined;
+  /** Leaf-entry evidence for §6.3 deliver-only applied (Fpi7 sync append). `id` feeds the
+   *  progress row's `entryId` (fabric-xs-activation P1: present only on a REAL xid match). */
+  getLeafEntry(): { type: string; customType?: string; details?: unknown; id?: string } | undefined;
+}
+
+/**
+ * fabric-xs-activation P1 (arch §4.1/§4.2): receiver-pipeline EVIDENCE writes. Absent ⇒ no
+ * progress rows at all (activation off / tests). `observe` receives one statement per settled
+ * verdict — the monotone lattice in `./progress.ts` keeps facts forward-only; `replyWritten`
+ * fires only for a solicited reply whose write was confirmed applied in THIS session (the
+ * requester-side mirror marks its original row `replied`). Never throws into the pipeline.
+ */
+export interface XsReceiverProgressPort {
+  observe(messageId: string, fields: XsProgressFields): void;
+  replyWritten(requestId: string, at: number): void;
 }
 
 /** The `xs_deliver` payload minus the wire frame's own `t`/`rid` (XS0 shapes). */
@@ -128,6 +142,8 @@ export interface XsReceiverDeps {
    */
   hubChannelCap?: () => boolean;
   dedup?: XsDedup;
+  /** fabric-xs-activation P1: evidence writes (see {@link XsReceiverProgressPort}). */
+  progress?: XsReceiverProgressPort;
   clock?: Clock;
   warn?: (message: string) => void;
 }
@@ -249,9 +265,15 @@ export class XsReceiver {
    */
   deliver(input: XsDeliverInput): XsAckVerdict {
     const transaction: { requestId?: string; mode: XsInboxMode } = { mode: "appended" };
+    const evidence = {
+      wantWake: false,
+      wakeDowngrade: undefined as XsWakeDowngraded | undefined,
+      entryLeafId: undefined as string | undefined,
+      replayed: false,
+    };
     let dispatched = false; // r3 M2 boundary — flips just before the host/Controller send
     try {
-      return this.pipeline(input, (value) => (dispatched = value), transaction);
+      return this.pipeline(input, (value) => (dispatched = value), transaction, evidence);
     } catch (error) {
       this.counters.receiverError++;
       this.warnError("receiver_error", error);
@@ -262,6 +284,7 @@ export class XsReceiver {
       };
       this.settleReply(transaction, verdict.effect !== "none");
       this.dedup.settle(input.xid, verdict);
+      this.observeEvidence(input, verdict, { ...evidence, repliedId: transaction.requestId, now: this.clock.now() });
       return verdict;
     }
   }
@@ -275,19 +298,71 @@ export class XsReceiver {
     else this.deps.replyLedger!.release(requestId);
   }
 
+  /** One settled verdict's evidence (fabric-xs-activation P1). Cheap and total — never throws. */
+  private observeEvidence(
+    input: XsDeliverInput,
+    verdict: XsAckVerdict,
+    ctx: {
+      wantWake: boolean;
+      wakeDowngrade: XsWakeDowngraded | undefined;
+      repliedId: string | undefined;
+      entryLeafId: string | undefined;
+      replayed: boolean;
+      now: number;
+    },
+  ): void {
+    const port = this.deps.progress;
+    if (port === undefined || ctx.replayed) return; // the first settle already recorded the row
+    const wake: XsProgressFields["wake"] =
+      verdict.woke === true
+        ? { requested: ctx.wantWake, decision: "dispatch_accepted" }
+        : ctx.wakeDowngrade !== undefined
+          ? { requested: ctx.wantWake, stage: "receiver", decision: "downgraded", reason: ctx.wakeDowngrade }
+          : ctx.wantWake
+            ? { requested: true, stage: "receiver", decision: "unknown" }
+            : { requested: false, decision: "deliver_only" };
+    const fields: XsProgressFields = {
+      ...(verdict.effect === "none"
+        ? { deliveryEffect: "none" as const, ...(verdict.reason !== undefined ? { reason: verdict.reason } : {}) }
+        : verdict.effect === "applied"
+          ? { deliveryEffect: "applied" as const, phase: "delivered" as const, deliveredAt: ctx.now }
+          : {
+              deliveryEffect: "unknown" as const,
+              ...(verdict.reason !== undefined ? { reason: verdict.reason } : {}),
+              ...(verdict.reason === "queued" ? { phase: "queued" as const, queuedAt: ctx.now } : {}),
+            }),
+      ...(input.reply !== undefined ? { requestId: input.reply.requestId, replyState: "pending" as const } : {}),
+      ...(input.inReplyTo !== undefined ? { requestId: input.inReplyTo } : {}),
+      ...(ctx.entryLeafId !== undefined ? { entryId: ctx.entryLeafId } : {}),
+      wake,
+    };
+    port.observe(input.xid, fields);
+    // replied = the solicited reply was confirmed WRITTEN here (applied only — M2 unknown never
+    // fabricates replied, arch §4.1).
+    if (ctx.repliedId !== undefined && verdict.effect === "applied") port.replyWritten(ctx.repliedId, ctx.now);
+  }
+
   private pipeline(
     input: XsDeliverInput,
     setDispatched: (value: boolean) => void,
     transaction: { requestId?: string; mode: XsInboxMode },
+    evidence: {
+      wantWake: boolean;
+      wakeDowngrade: XsWakeDowngraded | undefined;
+      entryLeafId: string | undefined;
+      replayed: boolean;
+    },
   ): XsAckVerdict {
+    const now = this.clock.now();
     const finish = (verdict: XsAckVerdict): XsAckVerdict => {
+      const repliedId = transaction.requestId; // settleReply consumes it below
       this.settleReply(transaction, verdict.effect !== "none");
       this.dedup.settle(input.xid, verdict);
+      this.observeEvidence(input, verdict, { ...evidence, repliedId, now });
       return verdict;
     };
 
     // ---- stage 1: expiry (§8.4.1) ----
-    const now = this.clock.now();
     if (!Number.isFinite(input.expiresAt) || now >= input.expiresAt) {
       this.counters.expired++;
       return finish({ effect: "none", reason: "expired", woke: false });
@@ -297,6 +372,7 @@ export class XsReceiver {
     const admit = this.dedup.admit(input.xid, input.expiresAt);
     if (admit.kind === "replay") {
       this.counters.dedupReplay++;
+      evidence.replayed = true; // the first settle already recorded the evidence row
       return finish(admit.verdict);
     }
     if (admit.kind === "full") {
@@ -357,12 +433,11 @@ export class XsReceiver {
 
     // ---- stage 5: fence (§7) — goal only downgrades a wake (wakeOnly) ----
     const fenceCheck = this.deps.fence.check();
-    let wakeDowngrade: XsWakeDowngraded | undefined;
     if (!fenceCheck.ok && !fenceCheck.wakeOnly) {
       this.counters.fenced++;
       return finish({ effect: "none", reason: fenceCheck.reason, woke: false });
     }
-    if (!fenceCheck.ok && fenceCheck.wakeOnly) wakeDowngrade = "goal";
+    if (!fenceCheck.ok && fenceCheck.wakeOnly) evidence.wakeDowngrade = "goal";
 
     // ---- stage 6: inbound rate + inbox (§8.4.6) — rate charged on passage ----
     if (ticket === undefined) {
@@ -388,15 +463,16 @@ export class XsReceiver {
 
     // ---- stages 7+8: dispatch + evidence (§4.5 / §6.3 / §6.6) ----
     const wantWake = ticket === undefined ? input.wake === true : !late && ticket.wakeOnReply;
+    evidence.wantWake = wantWake;
     if (ticket !== undefined && wantWake && this.deps.membership.receive === "deliver")
-      wakeDowngrade = "receiver_policy";
+      evidence.wakeDowngrade = "receiver_policy";
     const carry = (): void => {
       // §6.6 deliver-only / downgraded rows: raise(root, L_s) — carry without counting.
       const carryLevel = ticket?.requesterLevel ?? input.level;
       if (carryLevel !== undefined && this.deps.level !== undefined) this.deps.level.raise("root", carryLevel);
     };
 
-    if (wantWake && wakeDowngrade === undefined && this.controller !== undefined) {
+    if (wantWake && evidence.wakeDowngrade === undefined && this.controller !== undefined) {
       // Controller path — R1's dispatch owns every wake truth-table row and the level commit.
       const guard = this.deps.fence.beginDispatch();
       if (!guard.ok) {
@@ -404,7 +480,7 @@ export class XsReceiver {
           this.counters.fenced++;
           return finish({ effect: "none", reason: guard.reason, woke: false });
         }
-        wakeDowngrade = "goal"; // goal active at the dispatch point ⇒ wake-only downgrade
+        evidence.wakeDowngrade = "goal"; // goal active at the dispatch point ⇒ wake-only downgrade
       } else {
         transaction.mode = "trigger";
         const request = {
@@ -443,14 +519,14 @@ export class XsReceiver {
         if ("effect" in result && result.effect === "none") {
           return finish({ effect: "none", reason: result.reason, woke: false });
         }
-        wakeDowngrade = result.wakeDowngraded; // fall through: deliver-only with the downgrade
+        evidence.wakeDowngrade = result.wakeDowngraded; // fall through: deliver-only with the downgrade
       }
-    } else if (wantWake && wakeDowngrade === undefined && this.controller === undefined) {
+    } else if (wantWake && evidence.wakeDowngrade === undefined && this.controller === undefined) {
       // §4.5 row: receiver's fabric.wake.enabled=false ⇒ no Controller, no CausalLevel.
-      wakeDowngrade = "wake_disabled";
+      evidence.wakeDowngrade = "wake_disabled";
     }
 
-    if (wantWake && wakeDowngrade !== undefined) this.counters.wakeDowngraded++;
+    if (wantWake && evidence.wakeDowngrade !== undefined) this.counters.wakeDowngraded++;
     carry(); // §6.6: every path reaching here is a deliver-only (plain or downgraded wake) ⇒ carry L_s
 
     // ---- deliver-only (§6.3 rows 2–5) ----
@@ -494,7 +570,8 @@ export class XsReceiver {
       return finish({ effect: "unknown", reason: "accept_unverified", woke: false });
     }
     // A requested wake that degraded rides EVERY deliver-only verdict (`xs_ack.wakeDowngraded`, XS0).
-    const downgradeField = wantWake && wakeDowngrade !== undefined ? { wakeDowngraded: wakeDowngrade } : {};
+    const downgradeField =
+      wantWake && evidence.wakeDowngrade !== undefined ? { wakeDowngraded: evidence.wakeDowngrade } : {};
     if (!idleBefore) {
       // N2/Fpi7: streaming — pi keeps the message in its in-memory queue; not provably applied.
       this.counters.queued++;
@@ -508,6 +585,8 @@ export class XsReceiver {
       leaf.customType === XS_RECEIVE_CUSTOM_TYPE &&
       this.leafHasXid(leaf.details, input.xid)
     ) {
+      // fabric-xs-activation P1: `entryId` only on a REAL xid match (arch §4.1) — never guessed.
+      if (typeof leaf.id === "string" && leaf.id !== "") evidence.entryLeafId = leaf.id;
       this.counters.applied++;
       accept("appended");
       // Evidence reasons (queued/unverified/error) take precedence over the late classification.
@@ -553,7 +632,7 @@ export class XsReceiver {
     }
   }
 
-  private safeLeaf(): { type: string; customType?: string; details?: unknown } | undefined {
+  private safeLeaf(): { type: string; customType?: string; details?: unknown; id?: string } | undefined {
     try {
       return this.deps.host.getLeafEntry();
     } catch {

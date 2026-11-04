@@ -66,7 +66,11 @@ export const BCAST_LIMITS: Partial<XsMemberLimitsWire> = {
   broadcastWakesOutPerHour: 2,
 };
 
-export function rig(hubSendsPerMin = 60, channels?: { maxRecipients: number; wakeMaxRecipients: number }): Rig {
+export function rig(
+  hubSendsPerMin = 60,
+  channels?: { maxRecipients: number; wakeMaxRecipients: number },
+  activation?: true,
+): Rig {
   const clock = { t: 1_000_000 };
   const log = memLog();
   const registry = createRegistry({ now: () => clock.t, log, pidAlive: () => true });
@@ -74,7 +78,11 @@ export function rig(hubSendsPerMin = 60, channels?: { maxRecipients: number; wak
     registry,
     config: {
       home: "/home/u",
-      crossSession: { limits: { hubSendsPerMin }, ...(channels === undefined ? {} : { channels }) },
+      crossSession: {
+        limits: { hubSendsPerMin },
+        ...(channels === undefined ? {} : { channels }),
+        ...(activation === undefined ? {} : { activation }),
+      },
     },
     log,
     now: () => clock.t,

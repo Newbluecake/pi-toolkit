@@ -67,6 +67,8 @@ import {
   type XsWakeDowngraded,
 } from "../../protocol/xs.js";
 import { XS_ALIAS_TAKE_TOKEN_RE } from "../../protocol/xs-alias.js";
+import { XS_STATE_AGENT_CAP, type XsActivateAckFrame, type XsStateFrame } from "../../protocol/xs-activation.js";
+import { createXsActivationService, type XsActivationService } from "./activation.js";
 import { auditXs, type XsAuditRecord } from "../audit.js";
 import type { HubLog } from "../ports.js";
 import type { Registry } from "../registry.js";
@@ -116,6 +118,10 @@ const RESERVED_PREFIXES = ["r_", "@", "wf_"] as const;
 export interface XsRouter {
   /** Never throws. `reply` is called at most once per request (and may be called after an await). */
   handle(agentKey: string, frame: XsReqFrame, reply: (res: XsResFrame) => void): void;
+  /** fabric-xs-activation P1: agent→hub push frames that never enter the registry — `xs_state`
+   *  (receiver evidence; verified + forwarded to the source) and `xs_activate_ack` (P3 pending
+   *  match; P1 issues none, diagnostic only). No reply semantics on either. */
+  onAgentFrame(agentKey: string, frame: XsStateFrame | XsActivateAckFrame): void;
   /** An oversize (>16 KiB) xs_req the decoder refused: answer `E_XS_TOO_LARGE` iff `rid` is sane. */
   rejectTooLarge(agentKey: string, raw: unknown, reply: (res: XsResFrame) => void): void;
   /** `xs_late_ack` counter (acks that arrived after the hub already settled/timed out). */
@@ -143,6 +149,9 @@ export interface XsRouterDeps {
   /** feishu-xs-mirror P2: advisory observer of quiet (not-woken) deliveries; called on a microtask
    *  AFTER the sender's reply + audit + limits settle. Absent ⇒ behaviour/bytes unchanged. */
   onQuietDelivered?: XsQuietObserver;
+  /** fabric-xs-activation P1: the relation bag, built iff `HubConfig.crossSession.activation`
+   *  exists (key-absence-is-off ⇒ no relations, no receipt op, no state forwarding). */
+  activation?: XsActivationService;
 }
 
 function trimSlash(p: string): string {
@@ -192,6 +201,14 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
   let lateAckCount = 0;
 
   const refOf = (sessionId: string): string => sessionId.slice(0, REF_LEN);
+  /** fabric-xs-activation P1: the socket's hello caps ∋ `xs.state.v1` (three-end negotiation leg). */
+  const stateCapable = (key: string): boolean => {
+    try {
+      return registry.xsView(key)?.caps.includes(XS_STATE_AGENT_CAP) === true;
+    } catch {
+      return false;
+    }
+  };
   const aliasStore = deps.aliases;
   /** §3.6: `aliasUsable(m) = aliasAdvertised ∧ m.aliasCapable` (ready/wedged/disabled alike). */
   const aliasUsable = (m: XsEffectiveMember): boolean =>
@@ -527,6 +544,42 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       return;
     }
 
+    // fabric-xs-activation plan §3 P1: the read-only progress query. Requires the relation bag
+    // (built iff the hub config carries `crossSession.activation`); a service-less hub answers
+    // E_XS_OFF — only a state-capable agent ever sends the op, so this is purely defensive.
+    if (frame.op === "receipt") {
+      if (deps.activation === undefined || typeof frame.messageId !== "string" || frame.messageId === "") {
+        refuse("E_XS_OFF", {}, self.sessionId);
+        return;
+      }
+      deps.activation.receipt(
+        agentKey,
+        self,
+        {
+          messageId: frame.messageId,
+          ...(frame.activationKey !== undefined ? { activationKey: frame.activationKey } : {}),
+        },
+        (body) => {
+          if (body.ok) res({ ok: true });
+          else res({ ok: false, code: body.code ?? "E_XS_NOT_TRACKED", effect: "none" });
+          audit({
+            op: "receipt",
+            fromSession: self.sessionId,
+            ...(body.ok
+              ? { outcome: "ok" as const }
+              : { outcome: "error" as const, ...(body.code !== undefined ? { code: body.code } : {}) }),
+          });
+        },
+      );
+      return;
+    }
+    // fabric-xs-activation P3 owns `op:"activate"` (relay/quota/marker). P1 refuses it
+    // explicitly — the hub declares `xs.activate.v1`, the agent does not (no frame is ever sent).
+    if (frame.op === "activate") {
+      refuse("E_XS_OFF", {}, self.sessionId);
+      return;
+    }
+
     if (frame.op === "broadcast") {
       runXsBroadcast(
         {
@@ -766,6 +819,24 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     }
     // ⑤⑥ stamp + deliver (from here on NOTHING is `none` unless the receiver says so — r3 M2)
     const ticket = admit.ticket;
+    // fabric-xs-activation P1: relation registration (three-end `xs.state.v1` negotiation — the
+    // hub key is present (deps.activation) ∧ BOTH sockets declared the agent cap). Bag full or
+    // any leg absent ⇒ the OLD path (no key, no tracking) — never a send failure (arch §4.5).
+    if (deps.activation !== undefined && stateCapable(agentKey) && stateCapable(target.agentKey)) {
+      const registered = deps.activation.registerSend({
+        messageId: xid,
+        sourceAgentKey: agentKey,
+        sourceSessionId: self.sessionId,
+        sourceRid: frame.rid,
+        targetAgentKey: target.agentKey,
+        targetSessionId: target.sessionId,
+        ...(frame.expect !== undefined
+          ? { expect: { requestId: frame.expect.requestId, timeoutMs: frame.expect.timeoutMs } }
+          : {}),
+        wakeRequested: !isReply && frame.wake === true,
+      });
+      if (registered.ok) deps.activation.pushInitial(registered.relation);
+    }
     const deliver = build(admit.wake, "pending");
     const settleOut = (
       effect: "applied" | "none" | "unknown",
@@ -874,6 +945,18 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
         } catch {
           /* socket gone */
         }
+      }
+    },
+
+    onAgentFrame(agentKey, frame) {
+      // fabric-xs-activation P1: agent-server routes the push frames here; a service-less hub
+      // (activation off) keeps the old registry-ignore behaviour — nothing happens at all.
+      if (closed || deps.activation === undefined) return;
+      try {
+        if (frame.t === "xs_state") deps.activation.onState(agentKey, frame);
+        else deps.activation.onActivateAck(agentKey, frame);
+      } catch {
+        log.warn("xs activation agent frame failed", { code: "E_XS_INTERNAL", t: frame.t });
       }
     },
 
@@ -1096,6 +1179,12 @@ export function createXsRelay(deps: {
   const limits = createXsLimits({ now: deps.now, hubSendsPerMin });
   const aliasStore = deps.aliases?.store;
   deps.aliases?.attach(members, deps.registry);
+  // fabric-xs-activation P1: the relation bag exists iff `HubConfig.crossSession.activation`
+  // (key-absence-is-off — no relations, no receipt op, no state forwarding; hub byte-identical).
+  const activation =
+    deps.config.crossSession.activation === true
+      ? createXsActivationService({ registry: deps.registry, members, log: deps.log, now: deps.now })
+      : undefined;
   router = createXsRouter({
     registry: deps.registry,
     members,
@@ -1108,6 +1197,7 @@ export function createXsRelay(deps: {
     ...(deps.config.crossSession.channels === undefined ? {} : { channels: deps.config.crossSession.channels }),
     ...(aliasStore === undefined ? {} : { aliases: aliasStore }),
     ...(deps.onQuietDelivered === undefined ? {} : { onQuietDelivered: deps.onQuietDelivered }),
+    ...(activation === undefined ? {} : { activation }),
   });
   deps.registry.setXsObserver(aliasStore === undefined ? members.observer : withPresenceFeed(members, aliasStore));
   const r = router;
@@ -1118,6 +1208,7 @@ export function createXsRelay(deps: {
     ...(aliasStore === undefined ? {} : { aliases: aliasStore }),
     dispose() {
       r.dispose();
+      activation?.dispose();
       deps.registry.setXsObserver(undefined);
       aliasStore?.close();
     },
