@@ -48,6 +48,9 @@ if (process.argv[2] === "hub") {
   if (process.env.XW_HUB_STRIP_V2 === "1") stripAliasV2OnWire("hello_ack");
   let registry!: Registry;
   const slotFrames: Array<{ key: string; t: string; sessionId?: string; joined?: boolean }> = [];
+  // 2026-11-04 mention-handled fix: every agent `ctl` slot frame (prompt ledger projection),
+  // captured raw so tests can assert a cmdId's state trajectory (consumed vs unconfirmed).
+  const ctlFrames: Array<{ key: string; items: Array<{ cmdId: string; state: string }> }> = [];
   // channel-plan §12 (IBW): every agent status frame's `xsInbox` (undefined ⇒ key absent).
   const statusInbox: Array<{ key: string; xsInbox: unknown }> = [];
   const deliveries: Array<{ key: string; frame: XsDeliverFrame }> = [];
@@ -94,6 +97,7 @@ if (process.argv[2] === "hub") {
           });
         if (frame.t === "cmd_late") lates.set((frame as any).id, frame);
         if (frame.t === "status") statusInbox.push({ key, xsInbox: (frame as any).xsInbox });
+        if (frame.t === "ctl") ctlFrames.push({ key, items: (frame as any).items ?? [] });
         return onFrame(key, frame);
       };
       request = registry.request.bind(registry);
@@ -125,7 +129,7 @@ if (process.argv[2] === "hub") {
   );
   if ("exists" in hub) throw new Error("hub unexpectedly already exists");
   handle = async (m) => {
-    if (m.op === "inspect") return { deliveries, slotFrames, statusInbox, agents: registry.list() };
+    if (m.op === "inspect") return { deliveries, slotFrames, statusInbox, ctlFrames, agents: registry.list() };
     if (m.op === "hold") {
       hold = m.mode;
       barrier = new Promise<void>((r) => {
@@ -197,13 +201,16 @@ if (process.argv[2] === "hub") {
     }
     if (m.op === "webPrompt") {
       // MW: a web composer prompt (op:prompt) addressed to one agent — exercises the web mention path.
+      // 2026-11-04 mention-handled fix: an optional explicit cmdId (like webCmd) so a test can
+      // correlate the ledger entry across the agent's ctl slot frames.
       const agent = registry.list().find((a) => a.session?.sessionId === m.sessionId)!;
+      const id = m.cmdId ?? `web-prompt-${Date.now()}`;
       return request(
         agent.agentKey,
         {
           t: "cmd",
-          rid: `wp-${Date.now()}`,
-          id: `web-prompt-${Date.now()}`,
+          rid: `wp-${id}`,
+          id,
           deadlineMs: 4000,
           origin: { listener: "loopback", ip: "127.0.0.1", reqId: "xs-web-prompt" },
           cmd: { op: "prompt", text: m.text, deliver: "steer" },

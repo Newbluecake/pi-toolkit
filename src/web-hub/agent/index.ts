@@ -492,6 +492,15 @@ export interface WebHubControl {
    * ledger does not vouch for (topic-switch re-injection, goal loop, `/agent reload fire`, other extensions) is `undefined`.
    */
   attributeInput(text: string): "web_prompt" | undefined;
+  /** 2026-11-04 mention-handled fix: the mention input interceptor's consumption report —
+   *  `installMentionInput` answers pi `{action:"handled"}` for an @label/@session input, which
+   *  short-circuits the input chain before this control's own `input` observer can attribute
+   *  it. The mention wiring (`src/mention/wire.ts`) calls this with the RAW event text; the
+   *  command handler flips the matching still-`dispatched` web prompt to `consumed` (miss /
+   *  ambiguity ⇒ no-op) so the browser row never decays to "sent · unconfirmed". Optional like
+   *  `capture` so pre-feature `WebHubControl` doubles keep compiling; absent on the mention
+   *  side ⇔ web-hub off / pre-feature control ⇒ the call is an optional-chaining no-op. */
+  noteInputHandled?(text: string): void;
   readonly admin: AdminCommands;
   status(): WebHubStatusView;
   /** http://127.0.0.1:<port>/#t=<token>; port from hello_ack (live) or hub.json (pid alive); else a hint. */
@@ -2321,6 +2330,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             : undefined,
         undefined,
       ),
+    // 2026-11-04 mention-handled fix: late-bound to the handler above (same closure discipline
+    // as `attributeInput` — never throws, a stale/broken report is swallowed and ignored).
+    noteInputHandled: (text) => safe(() => commandHandler.onInputHandled(text), undefined),
     admin,
     status: () => conn?.status() ?? { state: "off", attached: false },
     url: () => hubUrl(paths, conn),

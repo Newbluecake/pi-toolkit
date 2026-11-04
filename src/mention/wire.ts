@@ -130,6 +130,12 @@ export function createMentionWiring(deps: MentionWiringDeps): MentionWiring {
     fabricEnabled: () => holder.current?.fabric != null,
     // X6b: surface the user's raw @ message in the fleet widget under the target run
     noteMention: (runId, message, pendingSince) => holder.current?.mentionNotes.set(runId, message, pendingSince),
+    // 2026-11-04 mention-handled fix: a handled mention input short-circuits pi's input chain,
+    // so the web-hub observer never attributes it — report it here so the command ledger's
+    // `dispatched` entry flips to `consumed` instead of decaying to "sent · unconfirmed".
+    // Late-bound through webHubRef exactly like `joined` above (web-hub off / pre-feature
+    // control ⇒ optional-chaining no-op, byte-identical legacy behavior).
+    onHandled: (text) => webHubRef.current?.noteInputHandled?.(text),
   });
   return {
     routeDeps: mentionRouteDeps,

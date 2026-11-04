@@ -153,6 +153,18 @@ export interface CommandHandler {
   handle(frame: CmdFrame): void;
   /** §4.3 step 2 + §4.4 row 1. */
   onInputEvent(ev: InputEventLike): void;
+  /** 2026-11-04 mention-handled fix: the mention input interceptor's `onHandled` report — the
+   *  RAW input text it consumed by answering pi `{action:"handled"}`. A handled answer
+   *  short-circuits pi's input chain, so `onInputEvent` above never observes that dispatch and
+   *  the entry would decay `dispatched` → (3s `unobserved` reply) → (30s `unconfirmed`), i.e.
+   *  "sent · unconfirmed", even though the mention router really applied the message. Here the
+   *  SAME scoped + ambiguity-safe lookup as `onInputEvent`'s observe-time match attributes the
+   *  text to exactly ONE `dispatched`/`unconfirmed` prompt of THIS session/owner and flips it to
+   *  `consumed`; miss/ambiguity/wrong session ⇒ no-op (a cmdId is never guessed). The 30s
+   *  unobserved finalize's `promptState === "dispatched"` guard keeps it from overwriting the
+   *  terminal state, and the already-armed 3s HTTP reply is left alone (ctl is authoritative
+   *  for progression — the browser's pendingCtl drops a stale receipt via `ctlAt`). */
+  onInputHandled(text: string): void;
   /** §4.3 step 3 (idle path) + §4.4 row 2. */
   onMessageStart(ev: MessageStartLike): void;
   /** §4.4 row 3: the 1 Hz `hasPendingMessages()` sample. */
@@ -1195,6 +1207,18 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         deps.queueMirror.enqueue({ text: ev.text, deliver: behavior, source: "web", cmdId: match.id });
         scheduleQueuedTimeout(match.id);
       }
+      deps.onChanged();
+    },
+    onInputHandled(text) {
+      // 2026-11-04 mention-handled fix — see the interface doc. The scope mirrors the hold-on
+      // branch of `onInputEvent` (session + owner); `findDispatchedByText` itself is
+      // ambiguity-safe (two same-text candidates ⇒ undefined ⇒ no-op, never a guessed cmdId).
+      const match = deps.ledger.findDispatchedByText(text, {
+        sessionId: deps.getSessionId(),
+        ...(deps.owner !== undefined ? { owner: deps.owner } : {}),
+      });
+      if (match === undefined) return;
+      deps.ledger.updatePrompt(match.id, { promptState: "consumed" }, deps.now());
       deps.onChanged();
     },
     onMessageStart(ev) {

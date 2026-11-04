@@ -138,7 +138,15 @@ retried on event-driven flush points + 30 s fallback, dropped at `lateUntil` and
 re-owed). **@session mention** (`src/mention/session.ts`, `fabric/xs/directory.ts`): `@session:<ref|name>` explicit form and
 a bare `@name` (R6 priority: subagent/real file path win; path-shaped never; a bare-name cache miss triggers one throttled
 directory refresh); not joined / xs off ⇒ passes through untouched; a human-origin reply wakes per receive mode and
-cross-session messages are user-visible (RX7 — do not hard-code the old R4 "display only"). Settings
+cross-session messages are user-visible (RX7 — do not hard-code the old R4 "display only"). **Handled-input
+report (2026-11-04 fix)**: `installMentionInput` answers pi `{action:"handled"}` only after calling the optional
+`MentionRouteDeps.onHandled` once with the raw `event.text` (`wire.ts` injects
+`webHubRef.current?.noteInputHandled`) — a handled answer short-circuits pi's input chain, so without the report the
+web-hub prompt ledger's `dispatched` entry would decay to `unconfirmed(unobserved)` ("sent · unconfirmed") although the
+mention router really applied the message; `CommandHandler.onInputHandled` flips the session/owner-scoped
+`findDispatchedByText` match to `consumed` (miss/ambiguity ⇒ no-op, never a guessed cmdId). Gates:
+`tests/web-hub/agent/commands-input-handled.test.ts`, `tests/mention/mention.test.ts` (onHandled block),
+`tests/integration/fabric-xs-mention.test.ts` (31 s ctl check). Settings
 `fabric.crossSession.reply.{enabled,defaultTimeoutS,maxTimeoutS,maxPending,maxPendingPerTarget,lateGraceS}` (frozen at
 stack build; `timeoutS` above the max is clamped). Visibility: `/agent status` adds
 `xs replies p<pending>/<max> i<inbox> to<timedOut> late<n> rej<n> owed<n> drop<n> · ledger n/64` (absent when reply is
