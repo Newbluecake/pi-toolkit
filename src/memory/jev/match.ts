@@ -1,7 +1,8 @@
 // Tag matchers, globs, lexical prefilter and named-program extraction
-// (jev-arch §6.1.3 / §6.4.1–§6.4.2, jev-plan J1). Zero-call fast paths: a
-// matcher is attached to a TAG (never to an entry — Q24), and matchers only
-// feed the fast path and the gate coarse filter.
+// (jev-arch §6.1.3, jev-plan J1). Zero-call fast path: a
+// matcher is attached to a TAG (never to an entry — Q24), and matchers
+// only feed the fast path. (The gate coarse-filter consumer was removed
+// with the gate feature, 2026-11.)
 //
 // Pi-free root; no module-scope state (I4).
 

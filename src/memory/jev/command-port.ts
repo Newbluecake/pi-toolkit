@@ -4,8 +4,8 @@
 // resolve surface J8's `/mem review` builds on.
 //
 // All fs access goes through index-store.ts (safe-fs primitives); the port
-// itself never imports node:fs. The optional `config` / `usage` / `segment` /
-// `health` deps fill the `/mem jev` report's model rows, usage line and
+// itself never imports node:fs. The optional `config` / `usage` / `segment`
+// / `health` deps fill the `/mem jev` report's model rows, usage line and
 // segment counters — those live in J6's wire closure and the plain
 // `JevClient` interface does not expose them (root-approved additions); each
 // has a safe default so the port works standalone.
@@ -63,13 +63,12 @@ export interface JevCommandPortDeps {
   /** Fire-and-forget background bulk-tagging kick (migration / tag backfill),
    *  provided by the wire layer. */
   readonly triggerBulk: (cwd: string) => void;
-  readonly platform: NodeJS.Platform;
   // ── root-approved optional report providers (J6 wires; safe defaults) ──
   /** Classifier list + maxCostUsd for the models/usage rows. */
   readonly config?: JevConfig;
   /** Per-activation usage counters (JevClientHandle.usage). */
   readonly usage?: () => JevUsage;
-  /** Segment injection/gate counters from the wire closure. */
+  /** Segment injection counters from the wire closure. */
   readonly segment?: () => JevReportView["segment"];
   /** Health table for per-model notes (defaults to the shared table). */
   readonly health?: HealthTable;
@@ -77,10 +76,7 @@ export interface JevCommandPortDeps {
 
 const ZERO_SEGMENT: JevReportView["segment"] = {
   injectedByLayer: {},
-  gates: 0,
-  holdGates: 0,
   injectedTotal: 0,
-  verdictCache: 0,
 };
 
 // ───────────────────────────── report text helpers ─────────────────────────────
@@ -90,19 +86,8 @@ function hhmm(ms: number): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-const STOPPED_WHEN_JUDGED_DOWN: readonly string[] = [
-  "recall U",
-  "error recall E",
-  "write tagging",
-  "review run",
-  "gate judgment",
-];
-const ZERO_CALL_RUNNING: readonly string[] = [
-  "action fast path A",
-  "re-inject after compaction B",
-  "gate evidence tier",
-  "review list",
-];
+const STOPPED_WHEN_JUDGED_DOWN: readonly string[] = ["recall U", "error recall E", "write tagging", "review run"];
+const ZERO_CALL_RUNNING: readonly string[] = ["action fast path A", "re-inject after compaction B", "review list"];
 
 function statusText(status: JevStatus): string {
   switch (status.kind) {
@@ -259,10 +244,6 @@ export function createJevCommandPort(deps: JevCommandPortDeps): JevCommandPort {
         ...(index.lastTaggedAt === undefined ? {} : { lastTaggedAt: index.lastTaggedAt }),
         taxonomyRev: tax.rev,
       },
-      evidence:
-        deps.platform.startsWith("linux") === true
-          ? "process: bash jobs + /proc (Linux)"
-          : "process: bash jobs only (non-Linux)",
       ...proxyView(deps.config?.proxy ?? ""),
       usage: { calls: usage.calls, costUsd: usage.costUsd, maxCostUsd: deps.config?.maxCostUsd ?? 0 },
       segment: deps.segment?.() ?? ZERO_SEGMENT,

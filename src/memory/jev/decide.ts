@@ -1,26 +1,20 @@
-// Pure decision functions: effective metadata, recall/error/gate/review/tag
-// verdicts, and the gate verdict cache (jev-arch §4.4/§6.1.1/§6.1.4/§6.2.2–
-// §6.2.3/§6.3.4/§6.4.4–§6.4.5, jev-plan J2).
+// Pure decision functions: effective metadata and recall/error/tag/review
+// verdicts (jev-arch §4.4/§6.1.1/§6.1.4/§6.2.2–§6.2.3/§6.3.4, jev-plan J2).
+// The gate decision table and verdict cache were removed with the gate
+// feature (2026-11).
 //
-// Pi-free root; no module-scope state — `createVerdictCache` returns an
-// instance the wire closure holds (I4).
+// Pi-free root; no module-scope state (I4).
 
 import {
-  VERDICT_CACHE_MAX,
-  VERDICT_CACHE_TTL_MS,
   type EffectiveMeta,
   type EntryHash,
   type EntryTags,
   type EntryType,
-  type GateAction,
-  type GateCandidate,
-  type GateDecision,
   type JevAnswer,
   type JevConfig,
   type MemEntry,
   type ReviewSuggestion,
   type Taxonomy,
-  type VerdictKey,
 } from "./contracts.js";
 import type { ErrorCandidate, RecallCandidate } from "./questions.js";
 
@@ -43,19 +37,8 @@ export function effectiveMeta(entry: MemEntry, tags: EntryTags | undefined, _tax
   for (const id of entry.inline.tagsAdd ?? []) tagIds.add(id);
   for (const id of entry.inline.tagsRemove ?? []) tagIds.delete(id);
 
-  const inlineGate = entry.inline.gate;
-  const guard = tags?.guard ?? 0;
-  const guarded =
-    inlineGate === "gate" || inlineGate === "hold"
-      ? true
-      : inlineGate === "nogate"
-        ? false
-        : guard >= 0.7 && (tags?.type === "rule" || tags?.type === "procedure");
-
   return {
     tags: [...tagIds].sort(),
-    guarded,
-    hold: inlineGate === "hold",
     authority: entry.authority,
     importance: pending ? undefined : tags.importance,
     type: pending ? undefined : tags.type,
@@ -229,118 +212,4 @@ export function decideReview(
     out.push({ id: stale.id, kind: "obsolete", a: { hash: stale.hash, anchor: stale.anchor }, p, at: now });
   }
   return out;
-}
-
-// ───────────────────────────── gate (§6.4.4/§6.4.5) ─────────────────────────────
-
-export interface DecideGateInput {
-  readonly entryHash: EntryHash;
-  readonly anchor: string;
-  readonly authority: "user" | "agent";
-  readonly a: number;
-  readonly v: number;
-  readonly hold: boolean;
-  /** This segment already latched a non-hold block for this entry. */
-  readonly latched: boolean;
-  readonly threshold: number;
-}
-
-/** jev-arch §6.4.4 decision table, taken top-to-bottom. */
-export function decideGate(input: DecideGateInput): GateDecision {
-  const action: GateAction =
-    input.a + input.v < input.threshold
-      ? "pass"
-      : input.hold && input.v >= input.threshold
-        ? "hold"
-        : !input.latched
-          ? "once"
-          : "pass";
-  return {
-    entryHash: input.entryHash,
-    anchor: input.anchor,
-    authority: input.authority,
-    action,
-    a: input.a,
-    v: input.v,
-  };
-}
-
-function entryAnchor(entry: MemEntry): string {
-  return entry.heading === undefined ? `${entry.file} #${entry.ordinal}` : `${entry.file} › ${entry.heading}`;
-}
-
-/** jev-arch §6.4.5: when Jev could not judge (timeout/error/missing/partial),
- *  only a `gate=hold` entry whose named program is confirmed running blocks
- *  (`hold`); everything else passes (the caller injects its body as
- *  "unjudged", a separate formatting concern — jev/format.ts
- *  `formatUnjudged`). */
-export function evidenceTier(
-  cands: readonly GateCandidate[],
-  runningPrograms: ReadonlySet<string>,
-): readonly GateDecision[] {
-  return cands.map((c) => {
-    const hit = c.meta.hold && c.entry.namedPrograms.some((p) => runningPrograms.has(p));
-    return {
-      entryHash: c.entry.hash,
-      anchor: entryAnchor(c.entry),
-      authority: c.meta.authority,
-      action: hit ? "hold" : "pass",
-      a: 0,
-      v: 0,
-    } satisfies GateDecision;
-  });
-}
-
-const GATE_SEVERITY: Record<GateAction, number> = { pass: 0, once: 1, hold: 2 };
-
-/** Multiple guarding entries hitting the same call ⇒ take the strictest
- *  (hold > once > pass, jev-arch §6.4.4). `undefined` for an empty input. */
-export function strictest(decisions: readonly GateDecision[]): GateDecision | undefined {
-  if (decisions.length === 0) return undefined;
-  return decisions.reduce((best, d) => (GATE_SEVERITY[d.action] > GATE_SEVERITY[best.action] ? d : best));
-}
-
-/** Verdict-cache key: entryHash + evidence fingerprint + command shape
- *  (jev-arch §6.4.4) — the fingerprint/shape strings are the caller's job
- *  (`sha1` of sorted running programs + branch + sorted staged, and sorted
- *  "program subcommand" pairs respectively). */
-export function verdictKey(entryHash: EntryHash, evidenceFp: string, shape: string): VerdictKey {
-  return `${entryHash}:${evidenceFp}:${shape}`;
-}
-
-export interface VerdictCache {
-  get(key: VerdictKey): GateDecision | undefined;
-  set(key: VerdictKey, decision: GateDecision): void;
-  readonly size: number;
-  clear(): void;
-}
-
-/** Per-session gate verdict cache (jev-arch §6.4.4): ≤64 entries, 10-minute
- *  TTL, LRU eviction. Held by the wire closure (I4), never at module scope. */
-export function createVerdictCache(now: () => number): VerdictCache {
-  const map = new Map<VerdictKey, { decision: GateDecision; at: number }>();
-  return {
-    get(key) {
-      const entry = map.get(key);
-      if (entry === undefined) return undefined;
-      if (now() - entry.at > VERDICT_CACHE_TTL_MS) {
-        map.delete(key);
-        return undefined;
-      }
-      return entry.decision;
-    },
-    set(key, decision) {
-      map.delete(key); // move-to-end (LRU)
-      map.set(key, { decision, at: now() });
-      while (map.size > VERDICT_CACHE_MAX) {
-        const oldest = map.keys().next();
-        if (oldest.done === true) break;
-        map.delete(oldest.value);
-      }
-    },
-    get size() {
-      return map.size;
-    },
-    clear: () => map.clear(),
-  };
 }

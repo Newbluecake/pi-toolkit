@@ -48,7 +48,7 @@ import { memoryDirFor } from "./paths.js";
 import { resolveJevWiring, type JevDomainKind } from "./jev/config.js";
 import { wireJev } from "./jev/wire.js";
 import { createJevWritePort } from "./jev/write-port.js";
-import type { JevBashJobsPort, JevDoctorPort, JevRenderInfo } from "./jev/contracts.js";
+import type { JevDoctorPort, JevRenderInfo } from "./jev/contracts.js";
 
 export interface WireMemoryOpts {
   settings: MemorySettings;
@@ -64,11 +64,6 @@ export interface WireMemoryOpts {
   /** jev-plan J6 / I11: the secure-domain verdict (`secureDomain.kind`).
    *  Anything but "plain" keeps Jev unwired. Absent ⇒ "plain". */
   secureDomainKind?: JevDomainKind;
-  /** Test seam: /proc root for Jev's running-program evidence probe.
-   *  Production leaves it unset (real `/proc`); integration tests point it
-   *  at an empty dir so host processes (e.g. the very release.sh running
-   *  the suite) never leak into gate evidence. */
-  jevProcRoot?: string;
   /** headless-confirm plan (docs/dev/memory/headless-confirm/plan.md): the
    *  late-bound ask_user remote port getter (`src/index.ts` passes
    *  `() => askUserRemoteRef.current?.()` — the hub wiring may land after
@@ -95,28 +90,6 @@ export interface WireMemoryResult {
    *  P5 经 holder 晚绑定给 `ExternalAgentsPort` 的 `memoryBlock` 端口；
    *  `externalAgents.droid.injectMemory=false` 时 P5 干脆不传该端口。 */
   renderForExternal(cwd: string): string | undefined;
-  /** jev-plan J6/J7: post-guard bashJobs port for the gate's evidence. No-op
-   *  when Jev is not wired (and in J6 only recorded — J7 consumes it). */
-  attachJevBashJobs(port: JevBashJobsPort | undefined): void;
-}
-
-/** Structural subset of `JobRecord` (src/bash/types.ts) the gate needs —
- *  kept local so memory never imports the bash module. */
-export interface BashJobRecordLike {
-  readonly jobId: string;
-  readonly status: string;
-  readonly command: string;
-  readonly createdAt: number;
-  readonly spawnedAt?: number;
-}
-
-/** jev-plan J7: adapts the session's BashJobManager listing to the frozen
- *  `JevBashJobsPort` shape (`src/index.ts` passes a late-bound getter). */
-export function jevBashJobsFrom(list: () => readonly BashJobRecordLike[]): JevBashJobsPort {
-  return {
-    list: () =>
-      list().map((r) => ({ id: r.jobId, status: r.status, command: r.command, startedAt: r.spawnedAt ?? r.createdAt })),
-  };
 }
 
 /** Q34 (jev-plan J7): a non-empty classifiers list that parsed to zero valid
@@ -226,7 +199,6 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         getRenderInfo: (cwd) => renderInfos.get(cwd),
         onAfterWriteHook: (fn) => afterWriteHooks.push(fn),
         createWritePort: createJevWritePort,
-        ...(opts.jevProcRoot === undefined ? {} : { procRoot: opts.jevProcRoot }),
         // J8 acceptance #3 "core usage": doctor's D19 (≥80% of coreBytes, not
         // when D02/D03 already flag the primary) as one reminder line.
         coreUsageLine: (cwd) => {
@@ -276,9 +248,6 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     },
     renderForExternal(cwd: string): string | undefined {
       return renderExternalMemoryBlock({ settings: opts.settings, cache }, cwd);
-    },
-    attachJevBashJobs(port) {
-      jev?.attachBashJobs(port);
     },
   };
 }

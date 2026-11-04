@@ -1,11 +1,12 @@
-// Classifier question construction for all six Jev duties (jev-arch
-// §6.1.1/§6.1.4/§6.2.2/§6.2.3/§6.3.3/§6.4.3, jev-plan J2).
+// Classifier question construction for the five Jev duties (jev-arch
+// §6.1.1/§6.1.4/§6.2.2/§6.2.3/§6.3.3, jev-plan J2; the gate duty was removed
+// with the gate feature, 2026-11).
 //
 // Convention (not individually frozen — J2's own choice, documented for
 // J4/J6/J7 callers): every `build*Questions` function returns
 // `{ state, questions }`, ready to hand straight to `splitBatches` and then
 // `JevClient.ask`. Question ids follow the plan's id scheme (`e<n>`, `m_*`,
-// `t_<id>`, `c<n>`, `p<n>`, `o<n>`, `g<n>`).
+// `t_<id>`, `c<n>`, `p<n>`, `o<n>`).
 //
 // `scripts/dev/jev-eval.mjs` keeps a literal copy of the STATIC templates
 // (the parts that don't depend on project-specific taxonomy/compare input) —
@@ -336,40 +337,6 @@ export function buildReviewQuestions(
         "Given today's date in state, is this temporary entry likely obsolete now? " +
         `Entry (updated ${o.updatedAt}, temporal: ${o.temporal}): 「${o.excerpt}」`,
       criteria: { true: "Likely obsolete; ask the user to confirm removal", false: "Still likely valid" },
-    };
-  }
-  return { state, questions };
-}
-
-// ───────────────────────────── gate (§6.4.3) ─────────────────────────────
-
-export interface GateQuestionEntry {
-  readonly id: string; // `g<n>`
-  readonly file: string;
-  readonly heading?: string;
-  readonly authority: "user" | "agent";
-  readonly excerpt: string;
-}
-
-/** One choice question per guarding entry (jev-arch §6.4.3). `state` is the
- *  caller's evidence bundle (`{tool, command, programs, running, branch,
- *  session}`, already redacted). */
-export function buildGateQuestions(state: JsonObject, guardEntries: readonly GateQuestionEntry[]): QuestionBatch {
-  const questions: Record<string, JevQuestion> = {};
-  for (const e of guardEntries) {
-    const anchor = e.heading === undefined || e.heading === "" ? e.file : `${e.file} › ${e.heading}`;
-    const authorityLabel = e.authority === "user" ? "user rule" : "assistant lesson";
-    questions[e.id] = {
-      type: "choice",
-      instructions:
-        `Project rule (${authorityLabel}) from ${anchor}: 「${e.excerpt}」 ` +
-        "How does this rule relate to the pending tool call described in state?",
-      criteria: {
-        unrelated: "The rule does not cover this tool call",
-        applies: "The rule covers this kind of action; the assistant must review the rule before running it",
-        violates_now:
-          "The rule covers this action AND its condition holds right now according to state, so running it now would break the rule",
-      },
     };
   }
   return { state, questions };

@@ -295,7 +295,8 @@ describe("afterWrite: §6.2.4 echo", () => {
     const text = echo.join("\n");
     expect(text).toContain("jev: looks like a user order (0.86) — if the user said it, append <!-- mem user -->");
     expect(text).toContain('jev: looks temporary — add expires=YYYY-MM-DD or until="…"');
-    expect(text).toContain("jev: guards a risky action (0.82) — pre-action review enabled;");
+    // The gate advice line was removed with the gate feature; guard p stays in the jev: line.
+    expect(text).not.toContain("guards a risky action");
     expect(text).toMatch(/conflict: core\.md L\d+ \(user rule, conflict 0\.84\) — 用户令只有用户能作废/);
   });
 

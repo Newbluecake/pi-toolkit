@@ -1,23 +1,18 @@
-// jev/decide.test.ts — effectiveMeta, recall/error/tagging/review/gate
-// decisions, verdict cache (jev-plan J2).
+// jev/decide.test.ts — effectiveMeta, recall/error/tagging/review
+// decisions (jev-plan J2).
 
 import { describe, expect, it } from "vitest";
 import {
-  createVerdictCache,
   decideErrorRecall,
-  decideGate,
   decideRecall,
   decideReview,
   decideTagging,
   decideUserLikeSuggestion,
   effectiveMeta,
-  evidenceTier,
-  strictest,
-  verdictKey,
 } from "../../../src/memory/jev/decide.js";
 import { mergeTaxonomy } from "../../../src/memory/jev/taxonomy.js";
 import { DEFAULT_JEV_FAST_PATH } from "../../../src/memory/jev/contracts.js";
-import type { EntryTags, GateCandidate, JevAnswer, JevConfig, MemEntry } from "../../../src/memory/jev/contracts.js";
+import type { EntryTags, JevAnswer, JevConfig, MemEntry } from "../../../src/memory/jev/contracts.js";
 
 function taxonomy() {
   const r = mergeTaxonomy();
@@ -68,7 +63,6 @@ const CFG: JevConfig = {
   proxy: "",
   childSessions: true,
   recall: { threshold: 0.6, maxEntries: 3, maxBytes: 4096, waitMs: 2000 },
-  gate: { enabled: true, threshold: 0.6 },
   reviewIntervalDays: 7,
   maxCostUsd: 0.5,
   maxCalls: 800,
@@ -95,22 +89,12 @@ describe("effectiveMeta (§4.4)", () => {
     expect(meta.importance).toBe(2);
   });
 
-  it("guarded: inline gate always wins", () => {
-    expect(effectiveMeta(entry({ inline: { present: true, gate: "gate" } }), undefined, taxonomy()).guarded).toBe(true);
-    expect(effectiveMeta(entry({ inline: { present: true, gate: "nogate" } }), entryTags(), taxonomy()).guarded).toBe(
-      false,
-    );
-  });
-
-  it("guarded by derivation: guard>=0.7 and type in {rule,procedure}, no nogate", () => {
-    expect(effectiveMeta(entry(), entryTags({ guard: 0.9, type: "rule" }), taxonomy()).guarded).toBe(true);
-    expect(effectiveMeta(entry(), entryTags({ guard: 0.9, type: "fact" }), taxonomy()).guarded).toBe(false);
-    expect(effectiveMeta(entry(), entryTags({ guard: 0.5, type: "rule" }), taxonomy()).guarded).toBe(false);
-  });
-
-  it("hold only ever comes from inline gate=hold", () => {
-    expect(effectiveMeta(entry({ inline: { present: true, gate: "hold" } }), undefined, taxonomy()).hold).toBe(true);
-    expect(effectiveMeta(entry(), entryTags({ guard: 0.99 }), taxonomy()).hold).toBe(false);
+  it("inline gate markers are parsed but carry no derived flag (gate removed 2026-11)", () => {
+    // The gate feature is gone; parsing stays for old files. effectiveMeta no
+    // longer derives guarded/hold — assert the marker round-trips inertly.
+    const meta = effectiveMeta(entry({ inline: { present: true, gate: "hold" } }), entryTags(), taxonomy());
+    expect(meta.authority).toBe("agent");
+    expect(meta.tags).toEqual(["git-push"]);
   });
 });
 
@@ -269,123 +253,5 @@ describe("decideReview (§6.3.4)", () => {
       "2026-10-30",
     );
     expect(out).toEqual([{ id: "o1", kind: "obsolete", a: { hash: "ho1", anchor: "O1" }, p: 0.85, at: "2026-10-30" }]);
-  });
-});
-
-describe("decideGate (§6.4.4 table)", () => {
-  const base = { entryHash: "h1", anchor: "a.md #1", authority: "user" as const, threshold: 0.6 };
-
-  it("a+v below threshold -> pass", () => {
-    expect(decideGate({ ...base, a: 0.2, v: 0.1, hold: false, latched: false }).action).toBe("pass");
-  });
-
-  it("hold entry with v>=threshold -> hold", () => {
-    expect(decideGate({ ...base, a: 0.9, v: 0.8, hold: true, latched: false }).action).toBe("hold");
-  });
-
-  it("hold entry but v<threshold and not latched -> once (applies, not violating now)", () => {
-    expect(decideGate({ ...base, a: 0.9, v: 0.1, hold: true, latched: false }).action).toBe("once");
-  });
-
-  it("segment not yet latched -> once", () => {
-    expect(decideGate({ ...base, a: 0.9, v: 0.1, hold: false, latched: false }).action).toBe("once");
-  });
-
-  it("already latched, not hold -> pass (don't re-block every retry)", () => {
-    expect(decideGate({ ...base, a: 0.9, v: 0.1, hold: false, latched: true }).action).toBe("pass");
-  });
-});
-
-describe("evidenceTier (§6.4.5)", () => {
-  function gateCandidate(hold: boolean, namedPrograms: readonly string[]): GateCandidate {
-    return {
-      entry: entry({ namedPrograms }),
-      meta: { tags: [], guarded: true, hold, authority: "user", importance: 3, type: "rule", pending: false },
-    };
-  }
-
-  it("hold entry with a running named program -> hold; otherwise pass", () => {
-    const cands = [
-      gateCandidate(true, ["release.sh"]),
-      gateCandidate(true, ["other.sh"]),
-      gateCandidate(false, ["release.sh"]),
-    ];
-    const out = evidenceTier(cands, new Set(["release.sh"]));
-    expect(out.map((d) => d.action)).toEqual(["hold", "pass", "pass"]);
-  });
-});
-
-describe("strictest", () => {
-  it("hold > once > pass; empty -> undefined", () => {
-    const pass = decideGate({
-      entryHash: "h",
-      anchor: "a",
-      authority: "user",
-      a: 0,
-      v: 0,
-      hold: false,
-      latched: false,
-      threshold: 0.6,
-    });
-    const once = decideGate({
-      entryHash: "h2",
-      anchor: "a2",
-      authority: "user",
-      a: 0.9,
-      v: 0.1,
-      hold: false,
-      latched: false,
-      threshold: 0.6,
-    });
-    const hold = decideGate({
-      entryHash: "h3",
-      anchor: "a3",
-      authority: "user",
-      a: 0.9,
-      v: 0.9,
-      hold: true,
-      latched: false,
-      threshold: 0.6,
-    });
-    expect(strictest([pass, once, hold])?.action).toBe("hold");
-    expect(strictest([pass, once])?.action).toBe("once");
-    expect(strictest([])).toBeUndefined();
-  });
-});
-
-describe("verdict cache (§6.4.4)", () => {
-  it("hits on the same key, expires after 10 minutes, evicts oldest past 64, clear() wipes", () => {
-    let now = 0;
-    const cache = createVerdictCache(() => now);
-    const decision = decideGate({
-      entryHash: "h",
-      anchor: "a",
-      authority: "user",
-      a: 0.9,
-      v: 0.9,
-      hold: true,
-      latched: false,
-      threshold: 0.6,
-    });
-    const key = verdictKey("h", "fp1", "git commit");
-    cache.set(key, decision);
-    expect(cache.get(key)).toEqual(decision);
-    now += 10 * 60_000 + 1;
-    expect(cache.get(key)).toBeUndefined();
-
-    now = 0;
-    for (let i = 0; i < 65; i++) cache.set(verdictKey(`h${i}`, "fp", "shape"), decision);
-    expect(cache.size).toBe(64);
-    expect(cache.get(verdictKey("h0", "fp", "shape"))).toBeUndefined();
-    expect(cache.get(verdictKey("h64", "fp", "shape"))).toEqual(decision);
-
-    cache.clear();
-    expect(cache.size).toBe(0);
-  });
-
-  it("different evidence fingerprints produce different keys (no false hit)", () => {
-    const k1 = verdictKey("h", "fpA", "git commit");
-    const k2 = verdictKey("h", "fpB", "git commit");
-    expect(k1).not.toBe(k2);
   });
 });

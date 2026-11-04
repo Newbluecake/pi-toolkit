@@ -68,7 +68,7 @@ export interface MemorySettings {
   jev: MemoryJevSettings;
 }
 
-/** 17 个 `memory.jev.*` 设置键（jev-arch §9.1 原 14 + 2026-11-03 噪音修复的 fastPath×3；`classifiersRejected` 不是设置键，只是解析结果）。 */
+/** 15 个 `memory.jev.*` 设置键（jev-arch §9.1 原 14 + 2026-11-03 噪音修复的 fastPath×3，减去 2026-11 移除的 gate×2；`classifiersRejected` 不是设置键，只是解析结果）。 */
 export interface MemoryJevSettings {
   /** 总开关。false ⇒ 不接线 Jev（零注册）。Default true（Q27：有可用凭证即启用）；legacy/secure 域强制视为 false。 */
   enabled: boolean;
@@ -80,10 +80,10 @@ export interface MemoryJevSettings {
   classifiersRejected: string[];
   /** 专用代理地址，"" = 不传 fetch。Default ""。 */
   proxy: string;
-  /** 子会话是否接线 Jev（召回 + 门禁）。Default true。 */
+  /** 子会话是否接线 Jev（召回）。Default true。 */
   childSessions: boolean;
   recall: {
-    /** 召回判定阈值。Default 0.6（主会话按 E0 基线评测拍板改自原架构稿 0.7；门禁阈值仍 0.6 不变）；0.5–0.99。 */
+    /** 召回判定阈值。Default 0.6（主会话按 E0 基线评测拍板改自原架构稿 0.7）；0.5–0.99。 */
     threshold: number;
     /** 单次注入条目数上限。Default 3；1–10（E 层固定为 2，arch §9.1）。 */
     maxEntries: number;
@@ -91,12 +91,6 @@ export interface MemoryJevSettings {
     maxBytes: number;
     /** 同步等待上限（ms）；文件键按秒存 `recall.waitS`（TIME_SETTING_MS_PATHS）。Default 2000（Q37，原 1500）；0–3000（0 = 纯异步，Q25）。 */
     waitMs: number;
-  };
-  gate: {
-    /** 门禁总开关。Default true。 */
-    enabled: boolean;
-    /** 门禁判定阈值。Default 0.6；0.5–0.95。 */
-    threshold: number;
   };
   review: {
     /** 整理复审间隔天数，0 = 只能手动。Default 7（Q31）；0–90。 */
@@ -286,11 +280,6 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     jevRecallRaw && typeof jevRecallRaw === "object" && !Array.isArray(jevRecallRaw)
       ? (jevRecallRaw as Record<string, unknown>)
       : {};
-  const jevGateRaw = jevObj.gate;
-  const jevGateObj: Record<string, unknown> =
-    jevGateRaw && typeof jevGateRaw === "object" && !Array.isArray(jevGateRaw)
-      ? (jevGateRaw as Record<string, unknown>)
-      : {};
   const jevReviewRaw = jevObj.review;
   const jevReviewObj: Record<string, unknown> =
     jevReviewRaw && typeof jevReviewRaw === "object" && !Array.isArray(jevReviewRaw)
@@ -307,10 +296,6 @@ export function parseMemorySettings(input: unknown): MemorySettings {
       maxEntries: num(jevRecallObj.maxEntries, defaults.jev.recall.maxEntries, 1, 10),
       maxBytes: num(jevRecallObj.maxBytes, defaults.jev.recall.maxBytes, 512, 16384),
       waitMs: num(jevRecallObj.waitMs, defaults.jev.recall.waitMs, 0, 3000),
-    },
-    gate: {
-      enabled: bool(jevGateObj.enabled, defaults.jev.gate.enabled),
-      threshold: numFloat(jevGateObj.threshold, defaults.jev.gate.threshold, 0.5, 0.95),
     },
     review: {
       intervalDays: num(jevReviewObj.intervalDays, defaults.jev.review.intervalDays, 0, 90),
@@ -381,7 +366,6 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     proxy: "",
     childSessions: true,
     recall: { threshold: 0.6, maxEntries: 3, maxBytes: 4096, waitMs: 2000 },
-    gate: { enabled: true, threshold: 0.6 },
     review: { intervalDays: 7 },
     maxCostUsd: 0.5,
     maxCalls: 800,

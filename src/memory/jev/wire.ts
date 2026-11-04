@@ -15,7 +15,10 @@
 //                                E (tool_result / bash-job notices), B (after
 //                                compaction), segment seeding, renderer
 //   · ports                    — command port (J4) wiring, doctor port,
-//                                write-port factory hook (J7), bashJobs (J7)
+//                                write-port factory hook (J7)
+//
+// The tool_call gate (jev-arch §6.4) was removed entirely (2026-11); the
+// handler now only runs the A-layer fast path.
 //
 // Landing points follow tests/conformance/memory-jev-channels.test.ts:
 //   C-J1  a `before_agent_start` message lands after the user message and
@@ -60,7 +63,6 @@ import { createHash } from "node:crypto";
 import { createSegmentedClock, type Clock, type TimerHandle } from "../../core/clock.js";
 import { clampSpanMs } from "../../core/deadline.js";
 import { resolveWorktreeOrigin } from "../../core/worktree-origin.js";
-import { createGitRunner, type GitRunner } from "../../git/run.js";
 import type { MemorySettings } from "../settings.js";
 import { createJevClient, type JevClientHandle } from "./client.js";
 import { createJevCommandPort } from "./command-port.js";
@@ -70,12 +72,8 @@ import {
   type ClassifierRegistryLike,
   type EntryHash,
   type EntryTags,
-  type GateCandidate,
-  type GateDecision,
-  type GateEvidence,
   type InjectLayer,
   type JevAnswer,
-  type JevBashJobsPort,
   type JevClient,
   type JevCommandPort,
   type JevConfig,
@@ -89,47 +87,20 @@ import {
   type SimpleCommand,
   type Taxonomy,
 } from "./contracts.js";
-import {
-  createVerdictCache,
-  decideErrorRecall,
-  decideGate,
-  decideRecall,
-  effectiveMeta,
-  evidenceTier,
-  strictest,
-  verdictKey,
-} from "./decide.js";
+import { decideErrorRecall, decideRecall, effectiveMeta } from "./decide.js";
 import { EntryIndex, expiredEntries } from "./entries.js";
-import {
-  formatGateReason,
-  formatInjectMarker,
-  formatInjectMessage,
-  formatNotify,
-  formatStatusLine,
-  formatUnjudged,
-} from "./format.js";
+import { formatInjectMarker, formatInjectMessage, formatNotify, formatStatusLine } from "./format.js";
 import { clearHealthTable, coverage, getHealthTable, notifyFor } from "./health.js";
 import { readIndex, readTaxonomyFile, writeIndexPatch } from "./index-store.js";
 import { matchTags, prefilter } from "./match.js";
 import {
   buildErrorQuestions,
-  buildGateQuestions,
   buildRecallQuestions,
   splitBatches,
   type ErrorCandidate,
   type RecallCandidate,
 } from "./questions.js";
-import {
-  clearProcCache,
-  collectEvidence,
-  commandShape,
-  createProcCache,
-  evidenceFingerprint,
-  EVIDENCE_BUDGET_MS,
-  type ProbeFs,
-} from "./probes.js";
 import { redactForJev } from "./redact.js";
-import { isPureReadonlyShell } from "./readonly.js";
 import { markStale, runReviewPass } from "./review.js";
 import { createSegmentState, recallRecord, type BranchEntryLike, type SegmentState } from "./segment.js";
 import { parseShell, type ParseShellResult } from "./shell-parse.js";
@@ -159,26 +130,6 @@ const DAY_MS = 86_400_000;
  *  recent `JEV_ERROR_LOG_SHOWN` of these. */
 const JEV_ERROR_LOG_MAX = 50;
 const JEV_ERROR_LOG_SHOWN = 5;
-/** Gate sync wait cap for a coarse-filter survivor without a cached verdict
- *  (jev-arch §6.4.6: typical 0.8–1.1s, hard cap 2.5s). */
-export const GATE_WAIT_MS = 2_500;
-/** Guarding entries per gated call (jev-arch §6.4.1 step 4). */
-const GATE_MAX_CANDIDATES = 8;
-/** Read-only tools never gate (jev-arch §6.4.1 step 2); `todo*` covers this
- *  repo's Task* tools too, memory view/search is checked by op. */
-const GATE_READ_ONLY_TOOLS = new Set([
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "web_search",
-  "get_run_result",
-  "TaskCreate",
-  "TaskList",
-  "TaskGet",
-  "TaskUpdate",
-  "TaskDelete",
-]);
 
 /** Ack-only prompts never trigger U recall (§6.1.1 gate 3) — compared after
  *  lowercasing and dropping whitespace/punctuation. */
@@ -246,13 +197,6 @@ export interface WireJevDeps {
   readonly platform?: NodeJS.Platform;
   readonly log?: (line: string) => void;
   readonly createWritePort?: (deps: JevWritePortFactoryDeps) => JevWritePort;
-  // ── J7 (gate evidence + doctor reminder; production defaults below) ──
-  /** Bounded git runner for the staged probe (default `createGitRunner()`). */
-  readonly git?: GitRunner;
-  /** /proc root (tests point it at a fake tree). */
-  readonly procRoot?: string;
-  readonly probeFs?: ProbeFs;
-  readonly uid?: number;
   /** Startup-reminder "core usage" line (jev-plan J8 acceptance #3) —
    *  supplied by `wireMemory` from doctor's D19 verdict. */
   readonly coreUsageLine?: (cwd: string) => string | undefined;
@@ -262,7 +206,6 @@ export interface WireJevResult {
   readonly commandPort: JevCommandPort;
   makeWritePort(): JevWritePort;
   readonly doctorPort: JevDoctorPort;
-  attachBashJobs(port: JevBashJobsPort | undefined): void;
   readonly client: JevClient;
 }
 
@@ -390,25 +333,6 @@ function cwdOf(ctx: unknown): string {
   }
   const cwd = typeof raw === "string" && raw !== "" ? raw : process.cwd();
   return resolveWorktreeOrigin(cwd) ?? cwd;
-}
-
-/** The session's real cwd (NOT worktree-origin-resolved): git evidence
- *  must look at the worktree the tool actually runs in. */
-function rawCwdOf(ctx: unknown): string {
-  try {
-    const raw = (ctx as { cwd?: string } | undefined)?.cwd;
-    return typeof raw === "string" && raw !== "" ? raw : process.cwd();
-  } catch {
-    return process.cwd();
-  }
-}
-
-/** Gate anchor — same shape as decide.ts `evidenceTier` (file › heading,
- *  else file #ordinal) so Jev-judged and evidence reasons read alike. */
-function gateAnchor(entry: MemEntry): string {
-  return entry.heading === undefined || entry.heading === ""
-    ? `${entry.file} #${entry.ordinal}`
-    : `${entry.file} › ${entry.heading}`;
 }
 
 function branchOf(ctx: unknown): readonly BranchEntryLike[] | undefined {
@@ -552,22 +476,12 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   let reviewChecked = false;
   let lastBackfillAt = -Infinity;
   let recoveryTimer: { handle: TimerHandle; at: number } | undefined;
-  let bashJobs: JevBashJobsPort | undefined;
   let truncated: { from: number; to: number } | undefined;
   let errorSignatures = new Set<string>();
   let errorAsks = 0;
   const parsedCache = new Map<string, ParseShellResult>();
   const dataCache = new Map<string, { at: number; corpus: Corpus }>();
   const anchors = new Map<EntryHash, { file: string; section: string; heading?: string; ordinal: number }>();
-  // J7 gate state (all closure-owned, I4): verdict cache (64 / 10min /
-  // segment), /proc 2s cache, per-entry Promise-chain locks (C-J3: calls of
-  // one assistant message are dispatched concurrently — a sync flag would
-  // race), lazily created bounded git runner.
-  const verdicts = createVerdictCache(now);
-  const procCache = createProcCache();
-  const gateLocks = new Map<EntryHash, Promise<void>>();
-  let gitRunner: GitRunner | undefined = deps.git;
-
   const send = (message: InjectMessage): void => {
     try {
       if (typeof pi.sendMessage === "function") pi.sendMessage(message, { triggerTurn: false });
@@ -632,7 +546,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     return c === undefined ? { tagged: 0, total: 0 } : coverage(c.entries, c.index);
   };
 
-  /** `inactive` (§5.3): nothing to show (coverage 0, no inline gate or tags= marks)
+  /** `inactive` (§5.3): nothing to show (coverage 0, no tags= marks)
    * AND no classifier credentials at all (every model no-auth/not-found —
    * the notify table's "inactive" case). A user WITH credentials whose calls
    * fail (451/402) is a real partial, not inactive, even at coverage 0. */
@@ -643,11 +557,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     if (c !== undefined) {
       const cov = coverage(c.entries, c.index);
       const inline = c.entries.some(
-        (e) =>
-          e.inline.gate === "gate" ||
-          e.inline.gate === "hold" ||
-          (e.inline.tagsAdd?.length ?? 0) > 0 ||
-          (e.inline.tagsRemove?.length ?? 0) > 0,
+        (e) => (e.inline.tagsAdd?.length ?? 0) > 0 || (e.inline.tagsRemove?.length ?? 0) > 0,
       );
       nothingToShow = cov.tagged === 0 && !inline;
     }
@@ -1224,7 +1134,6 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
 
   const onCompaction = (compactionId: string, cwd: string): void => {
     segment.resetOnCompaction(compactionId);
-    verdicts.clear();
     errorSignatures = new Set();
     errorAsks = 0;
     parsedCache.clear();
@@ -1239,18 +1148,8 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     return undefined;
   };
 
-  // ───────── gate (④, jev-arch §6.4) ─────────
-
-  interface GatePlan {
-    readonly tool: string;
-    readonly command: string;
-    readonly parsed: readonly SimpleCommand[];
-    readonly cands: readonly GateCandidate[];
-    readonly shape: string;
-    readonly gitCwd: string;
-    readonly info: JevRenderInfo | undefined;
-  }
-
+  /** Parsed-shell cache for tool_call/tool_result tag matching (bounded,
+   *  cleared on compaction/session_start). */
   const parseResultFor = (event: ToolCallEvent): ParseShellResult | undefined => {
     const input = event.input as Record<string, unknown>;
     if (typeof input["command"] !== "string" || event.toolName === "memory") return undefined;
@@ -1265,369 +1164,13 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
 
   const parsedFor = (event: ToolCallEvent): readonly SimpleCommand[] | undefined => parseResultFor(event)?.commands;
 
-  const isReadOnlyTool = (tool: string, input: Record<string, unknown>): boolean => {
-    if (GATE_READ_ONLY_TOOLS.has(tool) || /^todo/i.test(tool)) return true;
-    if (tool === "memory") {
-      const op = input["command"] ?? input["action"];
-      return op === "view" || op === "search";
-    }
-    return false;
-  };
-
-  /** §6.4.1 coarse filter — synchronous, never awaits; `undefined` ⇒ pass
-   *  (the tool_call handler then returns without a single await). */
-  const gateCoarse = (
-    event: ToolCallEvent,
-    cwd: string,
-    rawCwd: string,
-    parsed: readonly SimpleCommand[] | undefined,
-  ): GatePlan | undefined => {
-    // 1. state not off (partial continues — evidence tier only), gate on.
-    if (!config.gate.enabled) return undefined;
-    const st = effectiveStatus();
-    if (st.kind === "off" || (st.kind === "partial" && st.inactive)) return undefined;
-    // 2. read-only tools.
-    const input = event.input as Record<string, unknown>;
-    if (isReadOnlyTool(event.toolName, input)) return undefined;
-    // 2b. purely read-only bash chains — the top gate false-positive shape
-    //     (`git status`/`log`/`reflog`/`stash list` tripping git-index-race
-    //     rules). Deterministic whitelist over every parsed segment (command
-    //     substitutions included), zero awaits; a failed parse, any redirect
-    //     or any write-ish segment keeps the normal gate path.
-    const readonlyRes = parseResultFor(event);
-    if (readonlyRes !== undefined && isPureReadonlyShell(readonlyRes)) return undefined;
-    const c = corpusFor(cwd);
-    if (c === undefined) return undefined;
-    // 3. at least one HIGH-risk tag matcher hits (shell-parse based:
-    //    `echo "git commit"` runs echo, not git).
-    const high = new Set(c.taxonomy.tags.filter((t) => t.risk === "high").map((t) => t.id));
-    const hits = matchTags(
-      { tool: event.toolName, input, ...(parsed === undefined ? {} : { parsed }) },
-      c.taxonomy,
-    ).filter((t) => high.has(t));
-    if (hits.length === 0) return undefined;
-    const hitSet = new Set(hits);
-    // 4. guarding entries: guarded ∧ (shares a hit tag ∨ inline gate*);
-    // 5. minus this segment's latched non-hold entries.
-    const scored: { cand: GateCandidate; importance: number }[] = [];
-    for (const e of c.entries) {
-      if (e.inline.isPrivate === true || e.secret) continue;
-      const meta = effectiveMeta(e, c.index.entries[e.hash], c.taxonomy);
-      if (!meta.guarded) continue; // nogate ⇒ never guarded
-      const inlineGate = e.inline.gate === "gate" || e.inline.gate === "hold";
-      if (!inlineGate && !meta.tags.some((t) => hitSet.has(t))) continue;
-      if (!meta.hold && segment.isLatched(e.hash, turnSeq)) continue;
-      scored.push({ cand: { entry: e, meta }, importance: meta.importance ?? 2 });
-    }
-    if (scored.length === 0) return undefined;
-    scored.sort(
-      (a, b) =>
-        b.importance - a.importance ||
-        (a.cand.meta.authority === b.cand.meta.authority ? 0 : a.cand.meta.authority === "user" ? -1 : 1) ||
-        (a.cand.entry.file < b.cand.entry.file ? -1 : a.cand.entry.file > b.cand.entry.file ? 1 : 0) ||
-        a.cand.entry.lineStart - b.cand.entry.lineStart,
-    );
-    const command = typeof input["command"] === "string" && parsed !== undefined ? input["command"] : "";
-    const shape = parsed !== undefined ? commandShape(parsed).join("|") : `${event.toolName}#${hits.join(",")}`;
-    return {
-      tool: event.toolName,
-      command,
-      parsed: parsed ?? [],
-      cands: scored.slice(0, GATE_MAX_CANDIDATES).map((s) => s.cand),
-      shape: shape === "" ? event.toolName : shape,
-      gitCwd: rawCwd,
-      info: deps.getRenderInfo(cwd),
-    };
-  };
-
-  /** Per-entry serialization (Promise chain, §6.4.4 "判定按条目 hash 串行").
-   *  The lock is registered synchronously, so dispatch order == judge order. */
-  const acquire = (hashes: readonly EntryHash[]): Promise<() => void> => {
-    const prev = hashes.map((h) => gateLocks.get(h) ?? Promise.resolve());
-    let release: () => void = () => {};
-    const mine = new Promise<void>((r) => {
-      release = r;
-    });
-    for (const h of hashes) gateLocks.set(h, mine);
-    const done = (): void => {
-      release();
-      for (const h of hashes) if (gateLocks.get(h) === mine) gateLocks.delete(h);
-    };
-    return Promise.all(prev).then(() => done);
-  };
-
-  type GateAsk = { ok: true; answers: Record<string, JevAnswer> } | { ok: false; why: string };
-
-  const askGate = async (
-    reg: ClassifierRegistryLike,
-    plan: GatePlan,
-    cands: readonly GateCandidate[],
-    ev: GateEvidence,
-    budgetMs: number,
-  ): Promise<GateAsk> => {
-    if (budgetMs <= 0) return { ok: false, why: "timeout" };
-    const state = {
-      tool: plan.tool,
-      ...(plan.command === "" ? {} : { command: redactForJev(plan.command, "command") }),
-      programs: commandShape(plan.parsed),
-      running: ev.running.map((r) => r.label),
-      ...(ev.branch === undefined ? {} : { branch: ev.branch }),
-      ...(ev.staged.length === 0 ? {} : { staged: [...ev.staged] }),
-      session: isChild ? "child" : "main",
-    };
-    const { questions } = buildGateQuestions(
-      state,
-      cands.map((c, i) => ({
-        id: `g${i + 1}`,
-        file: c.entry.file,
-        ...(c.entry.heading === undefined ? {} : { heading: c.entry.heading }),
-        authority: c.meta.authority,
-        excerpt: redactForJev(c.entry.body, "entry"),
-      })),
-    );
-    const controller = new AbortController();
-    const all = Promise.all(
-      splitBatches(state, questions).map((b) =>
-        client.ask({
-          duty: "gate",
-          registry: reg,
-          state: b.state,
-          questions: b.questions,
-          budgetMs,
-          mode: "sync",
-          signal: controller.signal,
-        }),
-      ),
-    );
-    const outcomes = await withTimeout(all, budgetMs);
-    if (outcomes === TIMEOUT) {
-      controller.abort();
-      return { ok: false, why: "timeout" };
-    }
-    const answers: Record<string, JevAnswer> = {};
-    let any = false;
-    let why = "error";
-    for (const o of outcomes) {
-      if (o.ok) {
-        any = true;
-        Object.assign(answers, o.answers);
-      } else {
-        // The client grades its own per-try timeout as "aborted"; only our
-        // controller aborting is a real abort here.
-        why = o.reason === "timeout" || (o.reason === "aborted" && !controller.signal.aborted) ? "timeout" : o.reason;
-      }
-    }
-    return any ? { ok: true, answers } : { ok: false, why };
-  };
-
-  /** Inject gate bodies (G layer) once per segment; static-core entries are
-   *  already in the system prompt and never re-injected. */
-  const injectGate = (
-    cands: readonly GateCandidate[],
-    plan: GatePlan,
-    kind: "gate" | "unjudged",
-    gates: readonly EntryHash[],
-  ): void => {
-    const fresh = cands
-      .filter((c) => !segment.isInjected(c.entry.hash) && !isStaticCore(c.entry, plan.info))
-      .map((c): Pick => ({ entry: c.entry }));
-    const fitted = fitPicks(fresh, GATE_MAX_CANDIDATES, Math.max(A_MAX_BYTES, config.recall.maxBytes));
-    const accepted = new Set(
-      fitted.length === 0
-        ? []
-        : segment.markInjected(
-            "G",
-            fitted.map((f) => f.pick.entry.hash),
-          ),
-    );
-    const kept = fitted.filter((f) => accepted.has(f.pick.entry.hash));
-    if (kept.length === 0) return;
-    append(
-      recallRecord(
-        "G",
-        kept.map((k) => k.pick.entry.hash),
-        gates.length === 0 ? {} : { gates },
-      ),
-    );
-    for (const k of kept) {
-      const e = k.pick.entry;
-      anchors.set(e.hash, {
-        file: e.file,
-        section: e.section,
-        ...(e.heading === undefined ? {} : { heading: e.heading }),
-        ordinal: e.ordinal,
-      });
-    }
-    const partial = effectiveStatus().kind === "partial";
-    const m = buildMessage("G", kept, plan.tool, partial ? { partial: true } : {});
-    if (kind === "unjudged") {
-      send({
-        ...m,
-        content: formatUnjudged(kept.map((k) => ({ anchor: entryAnchor(k.pick.entry), body: k.body }))),
-      });
-    } else {
-      send(m);
-    }
-  };
-
-  /** §6.4.2–§6.4.5 after the coarse filter: evidence → cache / Jev judgment
-   *  tier → evidence tier → strictest verdict → latch + inject + reason.
-   *  Never rejects (any throw ⇒ pass + log; C-J2: a throwing handler would
-   *  block the tool). */
-  const runGate = async (plan: GatePlan): Promise<ToolCallEventResult | undefined> => {
-    const hashes = [...new Set(plan.cands.map((c) => c.entry.hash))].sort();
-    const release = await acquire(hashes);
-    try {
-      const deadline = now() + GATE_WAIT_MS;
-      if (gitRunner === undefined) gitRunner = createGitRunner();
-      const evR = await withTimeout(
-        collectEvidence({
-          cands: plan.cands,
-          command: plan.command,
-          parsed: plan.parsed,
-          platform,
-          bashJobs: isChild ? undefined : bashJobs,
-          isChild,
-          git: gitRunner,
-          cwd: plan.gitCwd,
-          ...(deps.procRoot === undefined ? {} : { procRoot: deps.procRoot }),
-          now,
-          procCache,
-          ...(deps.uid === undefined ? {} : { uid: deps.uid }),
-          ...(deps.probeFs === undefined ? {} : { fs: deps.probeFs }),
-        }),
-        EVIDENCE_BUDGET_MS,
-      );
-      const ev: GateEvidence = evR === TIMEOUT ? { running: [], staged: [] } : evR;
-      const fp = evidenceFingerprint(ev);
-      const threshold = config.gate.threshold;
-      const judge = (c: GateCandidate, a: number, v: number): GateDecision =>
-        decideGate({
-          entryHash: c.entry.hash,
-          anchor: gateAnchor(c.entry),
-          authority: c.meta.authority,
-          a,
-          v,
-          hold: c.meta.hold,
-          latched: segment.isLatched(c.entry.hash, turnSeq),
-          threshold,
-        });
-      const judged: { cand: GateCandidate; d: GateDecision }[] = [];
-      const toAsk: GateCandidate[] = [];
-      for (const c of plan.cands) {
-        const hit = verdicts.get(verdictKey(c.entry.hash, fp, plan.shape));
-        if (hit !== undefined) judged.push({ cand: c, d: judge(c, hit.a, hit.v) });
-        else toAsk.push(c);
-      }
-      let unjudged: GateCandidate[] = [];
-      let why = "partial";
-      const reg = registry;
-      if (toAsk.length > 0) {
-        if (!judgedAllowed() || reg === undefined) {
-          unjudged = toAsk;
-        } else {
-          const res = await askGate(reg, plan, toAsk, ev, deadline - now());
-          if (!res.ok) {
-            unjudged = toAsk;
-            why = res.why;
-          } else {
-            toAsk.forEach((c, i) => {
-              const ans = res.answers[`g${i + 1}`];
-              if (ans?.type !== "choice") {
-                unjudged.push(c);
-                why = "missing";
-                return;
-              }
-              const a = ans.probabilities["applies"] ?? (ans.choice === "applies" ? ans.confidence : 0);
-              const v = ans.probabilities["violates_now"] ?? (ans.choice === "violates_now" ? ans.confidence : 0);
-              const d = judge(c, a, v);
-              verdicts.set(verdictKey(c.entry.hash, fp, plan.shape), d);
-              judged.push({ cand: c, d });
-            });
-          }
-        }
-      }
-      // §6.4.5 evidence tier for everything Jev did not judge (Q29/Q33).
-      const runningPrograms = new Set(ev.running.map((r) => r.program));
-      const evDecisions = evidenceTier(unjudged, runningPrograms);
-      const evidenceHolds: GateCandidate[] = [];
-      const evidencePasses: GateCandidate[] = [];
-      unjudged.forEach((c, i) => (evDecisions[i]?.action === "hold" ? evidenceHolds : evidencePasses).push(c));
-      if (evidencePasses.length > 0) injectGate(evidencePasses, plan, "unjudged", []);
-
-      const blocking = [
-        ...judged.filter((j) => j.d.action !== "pass"),
-        ...unjudged.map((c, i) => ({ cand: c, d: evDecisions[i]! })).filter((j) => j.d.action === "hold"),
-      ];
-      const top = strictest(blocking.map((b) => b.d));
-      if (top === undefined || top.action === "pass") return undefined;
-
-      const blockedHashes = blocking.map((b) => b.cand.entry.hash);
-      for (const h of blockedHashes) segment.latch(h, turnSeq);
-      const holdBlocks = blocking.filter((b) => b.d.action === "hold");
-      segment.markGate(blockedHashes, holdBlocks.length > 0);
-      injectGate(
-        blocking.map((b) => b.cand),
-        plan,
-        "gate",
-        blockedHashes,
-      );
-
-      const evidenceFor = (c: GateCandidate): string[] => {
-        const named = new Set(c.entry.namedPrograms);
-        const lines = ev.running.filter((r) => named.has(r.program)).map((r) => r.label);
-        if (lines.length > 0) return lines;
-        if (ev.running.length > 0) return ev.running.map((r) => r.label);
-        return ev.branch === undefined ? ["Jev 判定"] : [`branch ${ev.branch}`];
-      };
-      const entryOf = (b: { cand: GateCandidate; d: GateDecision }) => ({
-        anchor: b.d.anchor,
-        authority: b.d.authority,
-        a: b.d.a,
-        v: b.d.v,
-      });
-      let reason: string;
-      let shown: readonly { cand: GateCandidate; d: GateDecision }[];
-      const jevHolds = judged.filter((j) => j.d.action === "hold");
-      if (jevHolds.length > 0) {
-        shown = [jevHolds[0]!];
-        reason = formatGateReason("hold", {
-          tool: plan.tool,
-          entries: shown.map(entryOf),
-          evidence: evidenceFor(jevHolds[0]!.cand),
-        });
-      } else if (evidenceHolds.length > 0) {
-        const first = blocking.find((b) => b.cand === evidenceHolds[0])!;
-        shown = [first];
-        reason = formatGateReason("hold-evidence", {
-          tool: plan.tool,
-          entries: [entryOf(first)],
-          evidence: evidenceFor(first.cand),
-          why,
-        });
-      } else {
-        shown = blocking;
-        reason = formatGateReason("once", { tool: plan.tool, entries: blocking.map(entryOf) });
-      }
-      const others = blocking.filter((b) => !shown.includes(b));
-      if (others.length > 0) reason += `\n（同时命中：${others.map((b) => `「${b.d.anchor}」`).join("、")}）`;
-      return { block: true, reason };
-    } catch (err) {
-      log(`gate failed (allowed): ${String((err as Error)?.message ?? err)}`);
-      return undefined;
-    } finally {
-      release();
-    }
-  };
-
   // ───────── A layer ─────────
 
   /** A-layer admission (2026-11-03 noise fix, run r_YE7XM20Q: generic tags
    *  — testing/ci/docs/workflow/shell-env/build/background-jobs — hit nearly
    *  every session and fired ~71% of all injections with zero judgment).
    *  Only risk:"high" tags (plus the allow list, minus the deny list) may
-   *  trigger a zero-judgment injection. The GATE coarse filter is NOT
-   *  narrowed — blocking stays as sensitive as before. */
+   *  trigger a zero-judgment injection. */
   const fastPathEligibleTags = (tax: Taxonomy): ReadonlySet<string> => {
     const allow = new Set(config.fastPath.allowTags);
     const deny = new Set(config.fastPath.denyTags);
@@ -1745,7 +1288,6 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       if (b !== undefined) send(b);
       if (event.messageType === "custom") {
         const customType = (event.message as { customType?: unknown } | undefined)?.customType;
-        if (customType === BASH_JOB_NOTIFICATION_TYPE) clearProcCache(procCache);
         const notice = bashNotice(event.message as { customType?: unknown; content?: unknown; details?: unknown });
         if (notice === undefined) return undefined;
         const work = recallE({
@@ -1772,37 +1314,15 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     }
   });
 
-  // tool_call: gate (④) first, then the A layer. The coarse filter is fully
-  // synchronous — a call that fails it returns `undefined` with ZERO awaits
-  // (no Promise is even created); only survivors get the async judgment.
-  // Everything is wrapped: an exception always ALLOWS the call (C-J2 — a
-  // throwing handler would block the tool).
+  // tool_call: the A layer only (the interception gate was removed with the
+  // gate feature, 2026-11). Fully synchronous — returns `undefined` with ZERO
+  // awaits. Everything is wrapped: an exception never blocks the call (C-J2 —
+  // a throwing handler would block the tool).
   pi.on("tool_call", (event: ToolCallEvent, ctx: ExtensionContext) => {
     if (!runs) return undefined;
     try {
       if (observe(ctx) === undefined) return undefined;
-      const cwd = cwdOf(ctx);
-      const plan = gateCoarse(event, cwd, rawCwdOf(ctx), parsedFor(event));
-      if (plan === undefined) {
-        fastPath(event, cwd);
-        return undefined;
-      }
-      return runGate(plan).then(
-        (result) => {
-          if (result === undefined) {
-            try {
-              fastPath(event, cwd);
-            } catch (err) {
-              log(`tool_call fast path failed: ${String((err as Error)?.message ?? err)}`);
-            }
-          }
-          return result;
-        },
-        (err: unknown) => {
-          log(`gate failed (allowed): ${String((err as Error)?.message ?? err)}`);
-          return undefined;
-        },
-      );
+      fastPath(event, cwdOf(ctx));
     } catch (err) {
       log(`tool_call failed: ${String((err as Error)?.message ?? err)}`);
     }
@@ -1852,7 +1372,6 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     try {
       const msg = event.message as { role?: string; customType?: unknown; content?: unknown; details?: unknown };
       if (msg.customType !== BASH_JOB_NOTIFICATION_TYPE) return;
-      clearProcCache(procCache); // a job ended — /proc evidence must be re-read
       if (observe(ctx) === undefined) return;
       const notice = bashNotice(msg);
       if (notice === undefined) return;
@@ -1887,8 +1406,6 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         errorAsks = 0;
         parsedCache.clear();
         dataCache.clear();
-        verdicts.clear();
-        clearProcCache(procCache);
         bgAbort = new AbortController();
         seedFrom(ctx);
         if (reg === undefined) return; // off(pi-api)
@@ -1985,18 +1502,11 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     now,
     isChildSession: isChild,
     triggerBulk: (cwd) => runBulk(resolveWorktreeOrigin(cwd) ?? cwd, "all"),
-    platform,
     config,
     usage: () => client.usage(),
     segment: () => {
       const s = segment.stats();
-      return {
-        injectedByLayer: s.byLayer,
-        gates: s.gates,
-        holdGates: s.holdGates,
-        injectedTotal: s.total,
-        verdictCache: verdicts.size,
-      };
+      return { injectedByLayer: s.byLayer, injectedTotal: s.total };
     },
     health: getHealthTable(),
   });
@@ -2084,7 +1594,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       // this file's three-method check, so a registry the hooks treat as
       // off(pi-api) never gets a tagging call through the write path either.
       // After tagging, drop the 2s corpus cache so the new sidecar tags are
-      // visible to the very next A-layer / gate lookup.
+      // visible to the very next A-layer lookup.
       return {
         ...port,
         checkInline: (file, before, after) => port.checkInline(file, before, after),
@@ -2105,11 +1615,6 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       };
     },
     doctorPort,
-    attachBashJobs(port) {
-      // Main session only (jev-arch §8: child sessions take /proc evidence
-      // only). Consumed by the gate's `collectEvidence` (probes.ts).
-      bashJobs = isChild ? undefined : port;
-    },
     client,
   };
 }

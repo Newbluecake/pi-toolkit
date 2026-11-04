@@ -47,7 +47,6 @@ describe("memory settings", () => {
         proxy: "",
         childSessions: true,
         recall: { threshold: 0.6, maxEntries: 3, maxBytes: 4096, waitMs: 2000 },
-        gate: { enabled: true, threshold: 0.6 },
         review: { intervalDays: 7 },
         maxCostUsd: 0.5,
         maxCalls: 800,
@@ -412,7 +411,6 @@ describe("memory settings", () => {
           proxy: 7,
           childSessions: "true",
           recall: "nope",
-          gate: "nope",
           review: "nope",
           maxCostUsd: "lots",
           maxCalls: "many",
@@ -430,7 +428,6 @@ describe("memory settings", () => {
         proxy: "http://127.0.0.1:8080",
         childSessions: false,
         recall: { threshold: 0.8, maxEntries: 5, maxBytes: 8192, waitMs: 500 },
-        gate: { enabled: false, threshold: 0.75 },
         review: { intervalDays: 14 },
         maxCostUsd: 1.25,
         maxCalls: 100,
@@ -447,7 +444,6 @@ describe("memory settings", () => {
       proxy: "http://127.0.0.1:8080",
       childSessions: false,
       recall: { threshold: 0.8, maxEntries: 5, maxBytes: 8192, waitMs: 500 },
-      gate: { enabled: false, threshold: 0.75 },
       review: { intervalDays: 14 },
       maxCostUsd: 1.25,
       maxCalls: 100,
@@ -492,12 +488,9 @@ describe("memory settings", () => {
     expect(parseMemorySettings({ jev: { recall: { waitMs: 3001 } } }).jev.recall.waitMs).toBe(
       defaults.jev.recall.waitMs,
     );
-    expect(parseMemorySettings({ jev: { gate: { threshold: 0.49 } } }).jev.gate.threshold).toBe(
-      defaults.jev.gate.threshold,
-    );
-    expect(parseMemorySettings({ jev: { gate: { threshold: 0.96 } } }).jev.gate.threshold).toBe(
-      defaults.jev.gate.threshold,
-    );
+    // The gate block was removed (2026-11); a stale `gate` key in the
+    // settings file is silently ignored by the field-by-field parser.
+    expect(parseMemorySettings({ jev: { gate: { threshold: 0.49 } } }).jev.review).toEqual(defaults.jev.review);
     expect(parseMemorySettings({ jev: { review: { intervalDays: -1 } } }).jev.review.intervalDays).toBe(
       defaults.jev.review.intervalDays,
     );
@@ -589,7 +582,7 @@ describe("memory settings", () => {
     expect(loadSettings({ memory: { jev: { enabled: false } } }).memory.jev.enabled).toBe(false);
   });
 
-  it("exposes the 14 memory.jev.* keys in SETTING_SPECS, all non-live", () => {
+  it("exposes the 12 memory.jev.* keys in SETTING_SPECS, all non-live (gate keys removed 2026-11)", () => {
     const keys = [
       "memory.jev.enabled",
       "memory.jev.classifiers",
@@ -599,14 +592,14 @@ describe("memory settings", () => {
       "memory.jev.recall.maxEntries",
       "memory.jev.recall.maxBytes",
       "memory.jev.recall.waitS",
-      "memory.jev.gate.enabled",
-      "memory.jev.gate.threshold",
       "memory.jev.review.intervalDays",
       "memory.jev.maxCostUsd",
       "memory.jev.maxCalls",
       "memory.jev.confirmTimeoutS",
     ];
-    expect(keys).toHaveLength(14);
+    expect(keys).toHaveLength(12);
+    expect(isKnownSettingKey("memory.jev.gate.enabled")).toBe(false);
+    expect(isKnownSettingKey("memory.jev.gate.threshold")).toBe(false);
     for (const key of keys) {
       expect(isKnownSettingKey(key), key).toBe(true);
       const spec = SETTING_SPECS[key]!;
@@ -624,7 +617,6 @@ describe("memory settings", () => {
       min: 0,
       max: 3,
     });
-    expect(SETTING_SPECS["memory.jev.gate.threshold"]).toMatchObject({ kind: "number", min: 0.5, max: 0.95 });
     expect(SETTING_SPECS["memory.jev.confirmTimeoutS"]).toMatchObject({
       path: "memory.jev.confirmTimeoutMs",
       time: true,

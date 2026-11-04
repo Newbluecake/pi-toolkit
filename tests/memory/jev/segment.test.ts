@@ -1,5 +1,5 @@
-// jev-plan §4 J6: segment record — seeding, dedup, latches by turnSeq,
-// compaction reset, cap 30.
+// jev-plan §4 J6: segment record — seeding, dedup, compaction reset, cap 30
+// (gate latches were removed with the gate feature, 2026-11).
 
 import { describe, expect, test } from "vitest";
 import { MEMORY_RECALL_CUSTOM_TYPE, SEGMENT_MAX_INJECTED } from "../../../src/memory/jev/contracts.js";
@@ -54,25 +54,13 @@ describe("createSegmentState", () => {
     expect(s.isInjected("a")).toBe(true);
   });
 
-  test("latches take effect only once turnSeq advances, and survive a same-segment reseed", () => {
-    const s = createSegmentState();
-    s.latch("g1", 5);
-    expect(s.isLatched("g1", 5)).toBe(false);
-    expect(s.isLatched("g1", 6)).toBe(true);
-    expect(s.isLatched("other", 6)).toBe(false);
-    s.seed([]);
-    expect(s.isLatched("g1", 6)).toBe(true);
-  });
-
-  test("resetOnCompaction: dedup/latches/cap reset, previous ≤3 most recent returned for B", () => {
+  test("resetOnCompaction: dedup/cap reset, previous ≤3 most recent returned for B", () => {
     const s = createSegmentState();
     s.markInjected("U", ["a", "b"]);
     s.markInjected("A", ["c", "d"]);
-    s.latch("a", 1);
     const pending = s.resetOnCompaction("c9");
     expect(pending).toEqual({ compactionId: "c9", hashes: ["d", "c", "b"] });
     expect(s.isInjected("a")).toBe(false);
-    expect(s.isLatched("a", 99)).toBe(false); // latches never carry into the new segment
     expect(s.count()).toBe(0);
     expect(s.pendingReinject()?.compactionId).toBe("c9");
     s.markReinjected("c9");
@@ -84,19 +72,15 @@ describe("createSegmentState", () => {
     expect(s2.resetOnCompaction("k")).toBe(p1);
   });
 
-  test("seeding with a NEW compaction id drops latches", () => {
+  test("seeding with a NEW compaction id clears the previous segment", () => {
     const s = createSegmentState();
     s.seed([compaction("c1")]);
-    s.latch("g", 1);
+    s.markInjected("U", ["g"]);
     s.seed([compaction("c1"), compaction("c2")]);
-    expect(s.isLatched("g", 5)).toBe(false);
+    expect(s.isInjected("g")).toBe(false);
   });
 
-  test("markGate counts gates and holds; recallRecord shape is v1 append-only", () => {
-    const s = createSegmentState();
-    s.markGate(["a"], false);
-    s.markGate(["b", "c"], true);
-    expect(s.stats()).toMatchObject({ gates: 3, holdGates: 2 });
+  test("recallRecord shape is v1 append-only", () => {
     expect(recallRecord("B", ["a"], { bFor: "c1" })).toEqual({ v: 1, layer: "B", keys: ["a"], bFor: "c1" });
     expect(recallRecord("U", ["a"])).toEqual({ v: 1, layer: "U", keys: ["a"] });
   });

@@ -48,7 +48,6 @@ function cfg(overrides: Partial<JevConfig> = {}): JevConfig {
     proxy: "",
     childSessions: true,
     recall: { threshold: 0.6, maxEntries: 3, maxBytes: 4096, waitMs: 2000 },
-    gate: { enabled: true, threshold: 0.6 },
     reviewIntervalDays: 7,
     maxCostUsd: 0.5,
     maxCalls: 800,

@@ -1,12 +1,13 @@
 // Segment record for Jev injections (jev-arch §6.1.5–§6.1.6, jev-plan J6).
 //
 // A "segment" is the stretch of context between two compactions. Inside one
-// segment every entry is injected at most once (dedup), the total is capped
-// at SEGMENT_MAX_INJECTED, and gate latches live only for the segment. The
-// durable source of truth is the session branch: every injection appends a
-// `subagent:memory-recall` custom entry (`MemoryRecallEntryV1`), and `seed`
-// rebuilds this state by scanning the branch — so `/reload` and resume never
-// re-inject what the model already saw.
+// segment every entry is injected at most once (dedup) and the total is
+// capped at SEGMENT_MAX_INJECTED. (The gate latch bookkeeping was removed
+// with the gate feature, 2026-11.) The durable source of truth is the
+// session branch: every injection appends a `subagent:memory-recall` custom
+// entry (`MemoryRecallEntryV1`), and `seed` rebuilds this state by scanning
+// the branch — so `/reload` and resume never re-inject what the model
+// already saw.
 //
 // The instance lives in the `wireJev` closure (I4). This file deliberately
 // stays pi-free even though the boundary test exempts it: the branch is read
@@ -31,8 +32,6 @@ export interface BranchEntryLike {
 export interface SegmentStats {
   readonly byLayer: Readonly<Partial<Record<InjectLayer, number>>>;
   readonly total: number;
-  readonly gates: number;
-  readonly holdGates: number;
 }
 
 /** B-layer work left over after a compaction (§6.1.5). */
@@ -43,22 +42,14 @@ export interface PendingReinject {
 }
 
 export interface SegmentState {
-  /** Rebuild injected/gate state from the branch (idempotent). Latches are
-   *  in-memory only and survive a reseed unless the segment changed. */
+  /** Rebuild injected state from the branch (idempotent). */
   seed(branch: readonly BranchEntryLike[]): void;
   /** Record an injection; returns the hashes actually accepted (not yet
    *  injected, within the cap) — callers inject exactly those. */
   markInjected(layer: InjectLayer, hashes: readonly EntryHash[]): readonly EntryHash[];
-  /** Record gate hits (J7); `hold` counts toward holdGates. */
-  markGate(hashes: readonly EntryHash[], hold: boolean): void;
   isInjected(hash: EntryHash): boolean;
-  /** Latch an entry at the turn its gate fired. */
-  latch(hash: EntryHash, turnSeq: number): void;
-  /** True once the turn sequence advanced past the latching turn (§6.4.4:
-   *  "拦一次后 turnSeq 前进才放行"). */
-  isLatched(hash: EntryHash, turnSeq: number): boolean;
-  /** A compaction happened: the current segment becomes "previous", dedup,
-   *  latches and the cap reset. Returns the B-layer work (may be empty). */
+  /** A compaction happened: the current segment becomes "previous", dedup
+   *  and the cap reset. Returns the B-layer work (may be empty). */
   resetOnCompaction(compactionId: string): PendingReinject;
   /** B-layer work not yet done for the latest compaction, if any. */
   pendingReinject(): PendingReinject | undefined;
@@ -96,9 +87,6 @@ export function createSegmentState(): SegmentState {
   let injected = new Set<EntryHash>();
   let order: EntryHash[] = [];
   let byLayer: Partial<Record<InjectLayer, number>> = {};
-  let gates = 0;
-  let holdGates = 0;
-  let latches = new Map<EntryHash, number>();
   let currentCompaction: string | undefined;
   let pending: PendingReinject | undefined;
 
@@ -106,8 +94,6 @@ export function createSegmentState(): SegmentState {
     injected = new Set();
     order = [];
     byLayer = {};
-    gates = 0;
-    holdGates = 0;
   };
 
   const accept = (layer: InjectLayer, hashes: readonly EntryHash[]): EntryHash[] => {
@@ -136,7 +122,6 @@ export function createSegmentState(): SegmentState {
         }
       }
       const lastId = lastIdx === -1 ? undefined : (branch[lastIdx]?.id ?? `idx:${lastIdx}`);
-      if (lastId !== currentCompaction) latches = new Map();
       clearSegment();
       currentCompaction = lastId;
       let bDone = false;
@@ -145,7 +130,6 @@ export function createSegmentState(): SegmentState {
         if (rec === undefined) continue;
         if (rec.bFor !== undefined && rec.bFor === lastId) bDone = true;
         accept(rec.layer, rec.keys);
-        if (rec.gates !== undefined && rec.gates.length > 0) gates += rec.gates.length;
       }
       pending = undefined;
       if (lastId !== undefined && !bDone) {
@@ -161,23 +145,11 @@ export function createSegmentState(): SegmentState {
     markInjected(layer, hashes) {
       return accept(layer, hashes);
     },
-    markGate(hashes, hold) {
-      gates += hashes.length;
-      if (hold) holdGates += hashes.length;
-    },
     isInjected: (hash) => injected.has(hash),
-    latch(hash, turnSeq) {
-      latches.set(hash, turnSeq);
-    },
-    isLatched(hash, turnSeq) {
-      const at = latches.get(hash);
-      return at !== undefined && turnSeq > at;
-    },
     resetOnCompaction(compactionId) {
       if (compactionId === currentCompaction && pending?.compactionId === compactionId) return pending;
       const hashes = uniqueRecent(order, B_LAYER_MAX);
       clearSegment();
-      latches = new Map();
       currentCompaction = compactionId;
       pending = { compactionId, hashes };
       return pending;
@@ -190,7 +162,7 @@ export function createSegmentState(): SegmentState {
     count: () => injected.size,
     full: () => injected.size >= SEGMENT_MAX_INJECTED,
     compactionId: () => currentCompaction,
-    stats: () => ({ byLayer: { ...byLayer }, total: injected.size, gates, holdGates }),
+    stats: () => ({ byLayer: { ...byLayer }, total: injected.size }),
   };
 }
 
@@ -198,13 +170,12 @@ export function createSegmentState(): SegmentState {
 export function recallRecord(
   layer: InjectLayer,
   keys: readonly EntryHash[],
-  opts: { gates?: readonly EntryHash[]; bFor?: string } = {},
+  opts: { bFor?: string } = {},
 ): MemoryRecallEntryV1 {
   return {
     v: 1,
     layer,
     keys: [...keys],
-    ...(opts.gates === undefined ? {} : { gates: [...opts.gates] }),
     ...(opts.bFor === undefined ? {} : { bFor: opts.bFor }),
   };
 }

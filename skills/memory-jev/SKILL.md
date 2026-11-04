@@ -1,6 +1,6 @@
 ---
 name: memory-jev
-description: 项目记忆（memory 工具 + Jev 自动打标）的写入与使用策略：先查后写、用户令当场写、经验收尾写、写后回显转述给用户、行内权威注释（user/expires/until/gate/tags/private）什么时候写、partial/不可用时的降级做法、被 gate=hold 拦住时不要反复重试。当用户提到项目记忆、memory 工具、写记忆、记忆条目、用户令、gate 拦截、/mem，或你在准备写 memory 工具调用时使用。
+description: 项目记忆（memory 工具 + Jev 自动打标）的写入与使用策略：先查后写、用户令当场写、经验收尾写、写后回显转述给用户、行内权威注释（user/expires/until/tags/private）什么时候写、partial/不可用时的降级做法。当用户提到项目记忆、memory 工具、写记忆、记忆条目、用户令、/mem，或你在准备写 memory 工具调用时使用。
 metadata:
   scope: project
 ---
@@ -24,12 +24,11 @@ metadata:
 - `<!-- mem lesson -->`：明确标注"这是我自己的经验（非用户指令）"时用；默认不用写。
 - `expires=YYYY-MM-DD`：用户令/临时规则带明确期限时写（如"临时禁用到 10-21"）。到期后系统只提示，由用户确认后才删。
 - `until="事件"`：条件型失效（如"直到 v0.9 发布"）。
-- `gate` / `gate=hold` / `nogate`：只有当一条规则**必须在某动作前核对**时才写 `gate`；条件成立期间必须持续拦截的（如"release.sh 运行期间禁止 commit"）写 `gate=hold`；明确不想被拦的写 `nogate`。不要给普通经验加 gate。
 - `private`：条目绝不能外发给分类器时写。
 - 示例（一条完整条目）：
 
 ```md
-- 发版前确认 GitHub CI 绿，红着发过事故（v0.8.1） <!-- mem user gate -->
+- 发版前确认 GitHub CI 绿，红着发过事故（v0.8.1） <!-- mem user -->
 ```
 
 ## 写完之后
@@ -37,8 +36,8 @@ metadata:
 - **把回显转述给用户**：写入结果里的 `section:`/`jev:`/`similar:`/`conflict:` 行是给你的判断材料。看到 `looks like a user order` 而这条确实出自用户 ⇒ 补 `<!-- mem user -->`；看到 `looks temporary` ⇒ 补 `expires=` 或 `until=`；看到 `conflict:` ⇒ 按提示合并旧条目，或在回复里向用户提议改法（用户令只能提议）。
 - `voided user rule:` 行说明你刚刚（经用户确认）作废了一条用户令——在回复里原样向用户点明。
 
-## 降级与拦截
+## 降级
 
-- 回显 `jev: not tagged (partial: …)` 或 `(off: …)`：写入已成功，只是没打上派生标签。**这条条目此刻不会进入快速通道**；若它需要立即生效（尤其涉及高危动作），给条目加 `<!-- mem tags=+标签名 -->` 手工标注，无需等待、也不要反复重写。
+- 回显 `jev: not tagged (partial: …)` 或 `(off: …)`：写入已成功，只是没打上派生标签。**这条条目此刻不会进入快速通道**；若它需要立即生效，给条目加 `<!-- mem tags=+标签名 -->` 手工标注，无需等待、也不要反复重写。
 - `memory` 写入或**删除含用户令的文件**被「用户令只有用户能作废」拒绝：不要换路径绕过；在回复里向用户提议具体改法，用户确认后再操作。
-- 高危调用被 `[memory gate]`/`[memory gate·hold]` 拦下：规则正文已随消息给出。逐条核对——全部满足就原样重试（重试不会再拦）；`gate·hold` 说明条件仍在（如发版脚本还在跑）：**等待条件消失，不要反复重试**，可用 `bash_job list` 看进度；确需越过先问用户。
+- 旧记忆文件里的 `gate`/`gate=hold`/`nogate` 行内注释：解析兼容保留、无任何行为（gate 拦截功能 2026-11 已移除），新写入不要再加这些键。

@@ -8,8 +8,6 @@ import {
   MEMORY_RECALL_CUSTOM_TYPE,
   MAX_ENABLED_TAGS,
   HEALTH_TABLE_MAX,
-  PROC_CACHE_MS,
-  PROC_MAX_PIDS,
   QUESTION_BATCH_TOKENS,
   RECALL_MAX_CANDIDATES,
   SEGMENT_MAX_INJECTED,
@@ -17,16 +15,12 @@ import {
   SIDECAR_MAX_ENTRIES,
   TOKEN_BUCKET_CAPACITY,
   TOKEN_BUCKET_WINDOW_MS,
-  VERDICT_CACHE_MAX,
-  VERDICT_CACHE_TTL_MS,
 } from "../../../src/memory/jev/contracts.js";
 
 describe("frozen constants (jev-plan §2)", () => {
   it("carry the architecture's numeric values", () => {
     expect(RECALL_MAX_CANDIDATES).toBe(360);
     expect(QUESTION_BATCH_TOKENS).toBe(12_000);
-    expect(VERDICT_CACHE_MAX).toBe(64);
-    expect(VERDICT_CACHE_TTL_MS).toBe(10 * 60_000);
     expect(SEGMENT_MAX_INJECTED).toBe(30);
     expect(HEALTH_TABLE_MAX).toBe(32);
     expect(TOKEN_BUCKET_CAPACITY).toBe(30);
@@ -34,8 +28,6 @@ describe("frozen constants (jev-plan §2)", () => {
     expect(SIDECAR_MAX_ENTRIES).toBe(2000);
     expect(SIDECAR_MAX_BYTES).toBe(1_000_000);
     expect(MAX_ENABLED_TAGS).toBe(64);
-    expect(PROC_MAX_PIDS).toBe(4096);
-    expect(PROC_CACHE_MS).toBe(2_000);
     expect(INLINE_META_MAX_BYTES).toBe(200);
   });
 
@@ -61,7 +53,7 @@ describe("frozen wire shapes compile and discriminate", () => {
     const bad: mod.JevOutcome = { ok: false, reason: "all-failed", detail: "d" };
     expect([ok.ok, bad.ok]).toEqual([true, false]);
     const req: mod.JevRequest = {
-      duty: "gate",
+      duty: "recall",
       registry: {},
       state: {},
       questions: {},

@@ -98,14 +98,15 @@ export interface InlineMeta {
   readonly expires?: string;
   /** `until="event"` — event-type expiry; listed for confirmation only. */
   readonly until?: string;
-  /** `gate` (guard once) / `gate=hold` (block while the condition holds — the
-   *  ONLY source of hold, Q32) / `nogate` (never gate). */
+  /** `gate` (guard once) / `gate=hold` / `nogate` — parsed for backward
+   *  compatibility with memory files written before the gate feature was
+   *  removed (2026-11); carrying one has no effect anymore. */
   readonly gate?: "gate" | "hold" | "nogate";
   /** `tags=+a,-b` — manual tag add/remove; wins over Jev's judgment and works
    *  while Jev is unavailable. */
   readonly tagsAdd?: readonly string[];
   readonly tagsRemove?: readonly string[];
-  /** `private` — never sent to Jev (no tagging/recall/review/gate), static
+  /** `private` — never sent to Jev (no tagging/recall/review), static
    *  block only. */
   readonly isPrivate?: boolean;
 }
@@ -303,7 +304,7 @@ export interface ClassifierRegistryLike {
 
 // ───────────────────────────── client / status (jev-arch §5.1–§5.3) ─────────────────────────────
 
-export type JevDuty = "probe" | "recall" | "error" | "tag" | "tag-major" | "review" | "gate";
+export type JevDuty = "probe" | "recall" | "error" | "tag" | "tag-major" | "review";
 
 export interface JevRequest {
   readonly duty: JevDuty;
@@ -412,7 +413,6 @@ export interface JevConfig {
   readonly proxy: string; // "" ⇒ do not pass a fetch
   readonly childSessions: boolean;
   readonly recall: { threshold: number; maxEntries: number; maxBytes: number; waitMs: number };
-  readonly gate: { enabled: boolean; threshold: number };
   readonly reviewIntervalDays: number;
   readonly maxCostUsd: number;
   readonly maxCalls: number;
@@ -422,7 +422,7 @@ export interface JevConfig {
 
 // ───────────────────────────── injection wire shapes (jev-arch §6.1.6) ─────────────────────────────
 
-export type InjectLayer = "U" | "A" | "E" | "B" | "G";
+export type InjectLayer = "U" | "A" | "E" | "B";
 
 /** I7: runtime names never move — `subagent:` prefix stays. */
 export const MEMORY_INJECT_CUSTOM_TYPE = "subagent:memory-inject";
@@ -447,26 +447,24 @@ export interface MemoryInjectDetailsV1 {
   readonly items: readonly MemoryRecallItemV1[];
 }
 
-/** `subagent:memory-recall` appendEntry record — segment dedup seeding. */
+/** `subagent:memory-recall` appendEntry record — segment dedup seeding.
+ *  (Historic records may still carry a `gates` array from the removed gate
+ *  feature; the seeder ignores unknown keys.) */
 export interface MemoryRecallEntryV1 {
   readonly v: 1;
   readonly layer: InjectLayer;
   readonly keys: readonly EntryHash[];
-  readonly gates?: readonly EntryHash[];
   /** compaction id, B-layer re-injection only. */
   readonly bFor?: string;
 }
 
-// ───────────────────────────── gate (jev-arch §6.4) ─────────────────────────────
+// ───────────────────────────── effective metadata (jev-arch §4.4) ─────────────────────────────
 
 /** Inline authority ⊕ sidecar derived ⊕ defaults (jev-arch §4.4) — J2's
  *  `effectiveMeta` output. */
 export interface EffectiveMeta {
   /** Sidecar tags with p ≥ 0.6 ∪ inline `+` − inline `-`. */
   readonly tags: readonly string[];
-  readonly guarded: boolean;
-  /** Only ever set by an inline `gate=hold`. */
-  readonly hold: boolean;
   readonly authority: "user" | "agent";
   /** Undefined for pending entries without inline data (fast path then treats
    *  manual-tag entries as important rules, §6.1.3). */
@@ -475,35 +473,6 @@ export interface EffectiveMeta {
   /** No sidecar tags under the current hash (edited since last tagging). */
   readonly pending: boolean;
 }
-
-/** Coarse-filter survivor: a guarding entry plus its effective metadata. */
-export interface GateCandidate {
-  readonly entry: MemEntry;
-  readonly meta: EffectiveMeta;
-}
-
-/** Live evidence collected for a gated call (J7 probes.ts). */
-export interface GateEvidence {
-  readonly running: readonly { label: string; program: string; command: string }[];
-  readonly branch?: string;
-  readonly staged: readonly string[];
-}
-
-export type GateAction = "pass" | "once" | "hold";
-
-export interface GateDecision {
-  readonly entryHash: EntryHash;
-  readonly anchor: string;
-  readonly authority: "user" | "agent";
-  readonly action: GateAction;
-  /** P(applies). */
-  readonly a: number;
-  /** P(violates_now). */
-  readonly v: number;
-}
-
-/** Verdict-cache key: entryHash + evidence fingerprint + command shape. */
-export type VerdictKey = string;
 
 // ───────────────────────────── ports (consumed by J4–J8) ─────────────────────────────
 
@@ -553,10 +522,6 @@ export interface JevDoctorPort {
   extraReminder(cwd: string): readonly string[];
 }
 
-export interface JevBashJobsPort {
-  list(): readonly { id: string; status: string; command: string; startedAt: number }[];
-}
-
 export interface JevRenderInfo {
   readonly primary?: string; // primary core file name
   readonly omittedSections: readonly string[]; // from TieredRenderResult.omittedSections
@@ -594,17 +559,12 @@ export interface JevReportView {
     readonly lastTaggedAt?: string;
     readonly taxonomyRev: string;
   };
-  /** e.g. "process: bash jobs + /proc (Linux)". */
-  readonly evidence: string;
   /** Text after the `proxy` label (credentials masked); absent ⇒ no proxy line. */
   readonly proxy?: string;
   readonly usage: { readonly calls: number; readonly costUsd: number; readonly maxCostUsd: number };
   readonly segment: {
     readonly injectedByLayer: Readonly<Partial<Record<InjectLayer, number>>>;
-    readonly gates: number;
-    readonly holdGates: number;
     readonly injectedTotal: number;
-    readonly verdictCache: number;
   };
   readonly review: { readonly lastRunAt?: string; readonly open: number };
 }
@@ -613,7 +573,7 @@ export interface JevReportView {
 
 /** jev/redact.ts field selector — each field has its own truncation budget
  *  (jev-arch §7.1 table). */
-export type RedactField = "user" | "previousUser" | "command" | "error" | "entry" | "running" | "staged";
+export type RedactField = "user" | "previousUser" | "command" | "error" | "entry";
 
 /** v4.1 §2.7.1 shell-parse output unit. */
 export interface SimpleCommand {
@@ -632,10 +592,6 @@ export type ExpiredKind = "expired" | "until";
 export const RECALL_MAX_CANDIDATES = 360;
 /** Token cap per question batch (estimateTokens accounting, J2). */
 export const QUESTION_BATCH_TOKENS = 12_000;
-/** Gate verdict cache: max entries per session. */
-export const VERDICT_CACHE_MAX = 64;
-/** Gate verdict cache TTL (this segment at most). */
-export const VERDICT_CACHE_TTL_MS = 10 * 60_000;
 /** Segment injection cap (this-segment dedup bound, §6.1.6). */
 export const SEGMENT_MAX_INJECTED = 30;
 /** Process-level health table capacity. */
@@ -650,8 +606,5 @@ export const SIDECAR_MAX_BYTES = 1_000_000;
 export const A_INJECTED_AT_MAX = 512;
 /** Max enabled tags (presets + user). */
 export const MAX_ENABLED_TAGS = 64;
-/** /proc scan: max pids / result cache TTL (Linux only, Q30). */
-export const PROC_MAX_PIDS = 4096;
-export const PROC_CACHE_MS = 2_000;
 /** Inline authority comment byte budget (§4.2: ≤200B). */
 export const INLINE_META_MAX_BYTES = 200;

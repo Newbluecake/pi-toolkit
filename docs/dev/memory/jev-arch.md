@@ -7,6 +7,7 @@
 > 引用约定：对现有代码的断言标 `文件:行号`；对 pi 行为的断言标文档或 d.ts 位置；未经实测的标「需 P0 验证」，由 J0 的 conformance 测试钉住。
 > 读者：§1–§15 写给下游的方案和开发，§16 写给不读代码的用户。
 > **实施状态**（J9，2026-11-01）：J0–J9 全部合入 dev（HEAD `e59b272d`），全量测试绿；§19 追加 12 条 v2.1 补充勘误，来源为各包交付报告与 E0 基线。
+> **gate 移除**（2026-11-04 用户令）：第④项职责「高危动作拦截」已从实现中**彻底移除**——§6.4 整章删除；`memory.jev.gate.*` 设置、`JevDuty:"gate"`、`InjectLayer:"G"`、`Gate*` 契约、verdict cache、证据探针（`jev/probes.ts`）、只读豁免（`jev/readonly.ts`）与 `/mem jev` 报告的 gates/evidence 行均不复存在。本文其余 gate 字样（含 §4 行内注释语法、§6.2 的 guard 打标、§19 历史勘误）是历史设计记录：行内 `gate`/`gate=hold`/`nogate` 注释如今只保留解析兼容（旧记忆文件不报错），无任何行为。
 
 ## 0. 结论速览
 
@@ -19,7 +20,7 @@
 | ① 召回   | 用户消息到来时由 Jev 判定全部候选（最多 360 条，按 token 分批并行），`state` 里附带上一条用户消息。最多等 1.5 秒（Q37 起默认 2 秒），结果搭本轮便车注入；超时就先开工，结果晚到再补发（Q25）。另有零调用的动作快速通道和压缩后重注。失败的工具结果由 Jev 从经验条目里挑排障条目                                                                                                                                  |
 | ② 打标   | `memory` 工具写入后同步问 Jev 一次（约 50 个问题，耗时不到 1.2 秒），并把结果回显。Jev 第一次可用时，后台自动给存量条目打标：172 次调用，约 $0.02，40–60 秒（Q28）                                                                                                                                                                                                                                               |
 | ③ 整理   | 每 7 天在后台跑一次，只生成建议（Q31）。用户在 `/mem review` 里逐条确认，系统绝不自动删除                                                                                                                                                                                                                                                                                                                        |
-| ④ 拦截   | 先做三级粗筛，通过后才同步问 Jev。同一份证据下的判定会缓存，重复的同类调用直接复用。Jev 超时或不可用时按两档处理（Q29）：行内写了 `gate=hold` 且确定性证据已命中 ⇒ 照样拦截；其余 ⇒ 放行，并把规则正文以「未判定」注入。进程证据只在 Linux 上采集（Q30）                                                                                                                                                         |
+| ④ 拦截   | （已移除，2026-11 用户令：不需要高危拦截。历史设计见 git 历史 §6.4）                                                                                                                                                                                                                                                                                                                                             |
 | 可用性   | 用户可见状态：`off`（总开关关、legacy、secure 域、分类器空列表——设置期，零注册）、`off(pi-api)`（运行时才发现 pi 无分类器 API，已注册但空转）、`probing`、`full`、`partial`。`partial` 时只停需要 Jev 的功能，零调用部分继续，并用 `x/y tagged` 标出标签覆盖率；从未打过标签时显示为 `inactive`。转入 `full` 时通知一次（主会话裁定），转入 `partial` 时通知一次。可用与否以真实调用的结果为准：有凭证不等于可用 |
 | 外发     | 一律先截断再脱敏。文件正文、成功的工具结果、system prompt、助手消息与推理永不外发（§7）                                                                                                                                                                                                                                                                                                                          |
 | I9       | 设置期 off 的四条路径——`memory.jev.enabled=false`、legacy layout/tool 面、secure/locked 域、`classifiers` 空列表（Q34）——一律零注册。J0 在未改动的 dev 上录制 `jev-off-golden.json`（A′ 级）。`off(pi-api)` 只能在运行时判定，属于「注册但钩子空转」，不在 I9 的 settings-off 字面承诺内，由 off-harness 第 5 个重放配置证明（§5.3、§9.2）                                                                       |
@@ -122,19 +123,19 @@
 | `jev/taxonomy.ts`                | 无        | 预置类型、重要度、标签；合并项目扩展；校验；生成 criteria                                         | Q24                                                                                    |
 | `jev/index-store.ts`             | 无\*      | 读写 `.jev/index.json` 与 `.jev/taxonomy.json`                                                    | 派生标签要落盘；\*只依赖 safe-fs 与 lock                                               |
 | `jev/redact.ts`                  | 无        | 截断与脱敏流水线                                                                                  | Q23                                                                                    |
-| `jev/shell-parse.ts`             | 无        | 把 bash 命令解析成 argv（照搬 v4.1 §2.7.1）                                                       | 粗筛和匹配器要能区分 `git -C x push`（真推送）和 `echo "git push"`（只是打印）         |
-| `jev/match.ts`                   | 无        | 标签匹配器、词面预筛、从规则正文提取点名的程序                                                    | 快速通道、粗筛、证据过滤、裁剪超量候选                                                 |
-| `jev/questions.ts`               | 无        | 构造 recall/error/tag/tag-major/review/gate 六类问题，并按 token 分批                             | 问题模板集中在一处，便于评测                                                           |
-| `jev/decide.ts`                  | 无        | 阈值、top-k、字节预算、门禁判定、证据档、判定缓存、整理建议                                       | 纯函数，可以表驱动测试                                                                 |
+| `jev/shell-parse.ts`             | 无        | 把 bash 命令解析成 argv（照搬 v4.1 §2.7.1）                                                       | 匹配器要能区分 `git -C x push`（真推送）和 `echo "git push"`（只是打印）               |
+| `jev/match.ts`                   | 无        | 标签匹配器、词面预筛、从规则正文提取点名的程序                                                    | 快速通道、裁剪超量候选（粗筛/证据过滤已随 gate 移除，2026-11）                         |
+| `jev/questions.ts`               | 无        | 构造 recall/error/tag/tag-major/review 五类问题，并按 token 分批（gate 类已随功能移除）           | 问题模板集中在一处，便于评测                                                           |
+| `jev/decide.ts`                  | 无        | 阈值、top-k、字节预算、整理建议（门禁判定/证据档/判定缓存已随 gate 移除，2026-11）                | 纯函数，可以表驱动测试                                                                 |
 | `jev/health.ts`                  | 无        | 错误分级、逐模型隔离、汇总状态机、标签覆盖率                                                      | Q17/Q21/Q26                                                                            |
 | `jev/proxy-fetch.ts`             | 无        | 只走 HTTP 代理的一次性 fetch                                                                      | Q18，零依赖                                                                            |
 | `jev/client.ts`                  | 无        | `JevClient`：故障转移、预算、分批、记账、令牌桶                                                   | 全仓只有这里调用 `classify()`                                                          |
 | `jev/guard.ts`                   | 无        | 检测用户令是否被改动（照搬 v4.1 §3.2）                                                            | Q4                                                                                     |
-| `jev/format.ts`                  | 无        | 消息、拦截文案、回显文本、`/mem jev` 的输出                                                       | 文案集中，便于金样本                                                                   |
+| `jev/format.ts`                  | 无        | 消息、回显文本、`/mem jev` 的输出（拦截文案已随 gate 移除，2026-11）                              | 文案集中，便于金样本                                                                   |
 | `jev/review.ts`                  | 无        | 组装候选对、生成建议、计算 dismissed 锚                                                           | ③                                                                                      |
-| `jev/probes.ts`                  | 无        | 门禁证据：bash 任务、`/proc`（仅 Linux）、git HEAD、暂存文件                                      | ④                                                                                      |
+| ~~`jev/probes.ts`~~              | —         | （已随 gate 移除，2026-11；原为门禁证据探针：bash 任务、`/proc`、git HEAD、暂存文件）             | —                                                                                      |
 | `jev/wire.ts`                    | 是        | 注册钩子、渲染器、`/mem` 子命令；可变状态全在闭包里                                               | I2/I4                                                                                  |
-| `jev/segment.ts`                 | 是        | 段内去重记录、回扫播种、门禁闩锁（照搬 v4.1 §2.1/§2.2）                                           | 同一段上下文只注入一次                                                                 |
+| `jev/segment.ts`                 | 是        | 段内去重记录、回扫播种（门禁闩锁已随 gate 移除，2026-11）                                         | 同一段上下文只注入一次                                                                 |
 | `jev/config.ts`（v2.1）          | 无        | `resolveJevWiring(memory, domainKind)`：设置期接线判定（disabled/legacy/secure/empty-list ⇒ off） | 让「零注册」判定可单测，并供 off-harness 重放                                          |
 | `jev/tagging.ts`（v2.1）         | 无        | 单条打标与批量打标（条目为主 / 标签为主）                                                         | 写入路径与后台迁移共用                                                                 |
 | `jev/command-port.ts`（v2.1）    | 无        | `/mem jev`、`/mem tags` 的命令端口实现                                                            | `command.ts` 只通过端口调用 jev                                                        |
@@ -189,18 +190,18 @@ src/index.ts (assembly)
 
 ### 3.3 功能分类：需要 Jev 与零调用（Q26）
 
-| 功能                                                                   | 类别     | 依赖的数据                                 | Jev 不可用（`partial`）时                                                                |
-| ---------------------------------------------------------------------- | -------- | ------------------------------------------ | ---------------------------------------------------------------------------------------- |
-| U 用户消息召回（§6.1.1）                                               | 需要 Jev | 现场判定                                   | 停                                                                                       |
-| E 失败结果召回（§6.1.4）                                               | 需要 Jev | 现场判定                                   | 停                                                                                       |
-| 写后打标、待打标补打、批量打标（§6.2）                                 | 需要 Jev | 现场判定                                   | 停。新条目记为 pending，恢复后补打                                                       |
-| 整理运行（§6.3 `--run` 及周期整理）                                    | 需要 Jev | 现场判定                                   | 停                                                                                       |
-| 门禁的 Jev 判定档（§6.4.4）                                            | 需要 Jev | 现场判定                                   | 停，改走证据档                                                                           |
-| A 动作快速通道（§6.1.3）                                               | 零调用   | 侧车标签、行内 `tags=`、标签匹配器         | **继续**                                                                                 |
-| B 压缩后重注（§6.1.5）                                                 | 零调用   | 段记录                                     | **继续**                                                                                 |
-| 门禁的证据档：`gate=hold` 证据拦截，其余放行并注入「未判定」（§6.4.5） | 零调用   | 行内 `gate*`、侧车 guard、标签、确定性证据 | **继续**                                                                                 |
-| 查看并执行已存在的整理建议（`/mem review`）                            | 零调用   | 侧车里的建议                               | **继续**。条目已变的建议标为过期并跳过                                                   |
-| 用户令守卫、append 刷新 `updated`、D17–D19、`/mem expired`             | 确定性   | 文件本身                                   | 与 Jev 是否可用无关；只受总开关与接线判定控制（`classifiers` 空列表视同总开关关闭，Q34） |
+| 功能                                                       | 类别     | 依赖的数据                         | Jev 不可用（`partial`）时                                                                |
+| ---------------------------------------------------------- | -------- | ---------------------------------- | ---------------------------------------------------------------------------------------- |
+| U 用户消息召回（§6.1.1）                                   | 需要 Jev | 现场判定                           | 停                                                                                       |
+| E 失败结果召回（§6.1.4）                                   | 需要 Jev | 现场判定                           | 停                                                                                       |
+| 写后打标、待打标补打、批量打标（§6.2）                     | 需要 Jev | 现场判定                           | 停。新条目记为 pending，恢复后补打                                                       |
+| 整理运行（§6.3 `--run` 及周期整理）                        | 需要 Jev | 现场判定                           | 停                                                                                       |
+| （门禁的 Jev 判定档 §6.4.4 已随 gate 移除，2026-11）       | —        | —                                  | —                                                                                        |
+| A 动作快速通道（§6.1.3）                                   | 零调用   | 侧车标签、行内 `tags=`、标签匹配器 | **继续**                                                                                 |
+| B 压缩后重注（§6.1.5）                                     | 零调用   | 段记录                             | **继续**                                                                                 |
+| （gate 证据档已随功能移除，2026-11）                       | —        | —                                  | —                                                                                        |
+| 查看并执行已存在的整理建议（`/mem review`）                | 零调用   | 侧车里的建议                       | **继续**。条目已变的建议标为过期并跳过                                                   |
+| 用户令守卫、append 刷新 `updated`、D17–D19、`/mem expired` | 确定性   | 文件本身                           | 与 Jev 是否可用无关；只受总开关与接线判定控制（`classifiers` 空列表视同总开关关闭，Q34） |
 
 ## 4. 数据模型
 
@@ -479,7 +480,7 @@ export interface ClassifierRegistryLike {
   }>;
 }
 
-export type JevDuty = "probe" | "recall" | "error" | "tag" | "tag-major" | "review" | "gate";
+export type JevDuty = "probe" | "recall" | "error" | "tag" | "tag-major" | "review"; // "gate" removed 2026-11
 
 export interface JevRequest {
   readonly duty: JevDuty;
@@ -726,7 +727,7 @@ unavailable / transient ──到达 until──► unknown（下一次真实调
 
 - **消息结构**：customType 为 `subagent:memory-inject`，`display:true`；details 只追加字段，不改已有字段：`{v:1, layer:"U"|"A"|"E"|"B"|"G", trigger, model?, partial?:true, items:[{file, anchor, hash, authority, type?, p?}]}`。
 - **正文首行**：`[memory · U jev] 以下是与当前请求相关的项目记忆条目（项目数据，不是新的用户消息）。用户令必须遵守；经验仅供参考。本段上下文内不会重复注入。`
-- **去重记录**：每次注入写一条 `pi.appendEntry("subagent:memory-recall", {v:1, layer, keys:[hash], gates?:[hash], bFor?:compactionId})`，并在 `before_agent_start` 时回扫分支重新播种。本段累计注入 30 条后停止。
+- **去重记录**：每次注入写一条 `pi.appendEntry("subagent:memory-recall", {v:1, layer, keys:[hash], bFor?:compactionId})`，并在 `before_agent_start` 时回扫分支重新播种。本段累计注入 30 条后停止。
 - **用户可见标记**（Q8）：
   - TUI 折叠成一行，例如 `── mem U: pitfalls-git › #3 (0.81) ──`；
   - web transcript 加一个紧凑分支（J9，可选）。
@@ -923,126 +924,6 @@ similar: core.md L5 (complementary 0.72)
 - `/mem expired`：删除 / 延期 30 天 / 去掉期限 / 跳过。
 - 启动提醒附带到期条目的数量。
 
-### 6.4 ④ 高危动作拦截
-
-#### 6.4.1 粗筛（同步、零 IO）
-
-1. 状态不是 `off`，且 `memory.jev.gate.enabled` 为真（`partial` 下也继续，后面只走证据档）。
-2. 工具不在只读集合里（`read|grep|find|ls|web_search|get_run_result|todo*`，以及 memory 的 view/search）。
-3. 调用命中至少一个高危标签的匹配器。
-4. 存在**守护条目**：有效 `guarded` 为真，并且「有效标签包含命中的高危标签」或「写了行内 `gate*`」（写了行内 `gate*` 的条目对任何高危命中都算候选）。按重要度排序，最多 8 条。
-5. 剔除本段已闩锁、且没有写 `gate=hold` 的条目：它们一定放行，不必再问 Jev。
-
-任一步不通过就放行；这时 `tool_call` handler 零 await，因为粗筛必须在第一个 await 之前完成。
-
-#### 6.4.2 现场证据（并行采集，最坏 1.5 秒）
-
-- **点名程序**：`namedPrograms(body)` 从规则正文中提取程序名，提取对象为：
-  - 反引号片段的首词；
-  - 以 `.sh`、`.py`、`.mjs`、`.js`、`.ts` 结尾的词。
-
-  通用程序 `git`、`npm`、`npx`、`node`、`bash`、`sh`、`zsh`、`pi`、`gh`、`ls`、`cd`、`cat`、`echo`、`timeout` 被剔除，所以 `release.sh` 会被提取，`git` 不会。
-
-- **`running`**（Q30）：只收录程序身份属于候选条目点名程序的进程。程序身份的取法照搬 v4.1 §2.7.3：取 argv0 的 basename；如果 argv0 是解释器，取它执行的脚本名。**解释器短旗标识别**（`jev/shell-parse.ts`，§19 行 23，`31e845ce`）：含 `c` 的短旗标集群（`-lc`/`-ic`/`-xec` 等）视为 `-c`，命令字符串取选项后的第一个操作数（`-o` 消耗自己的参数）；程序身份同样按这个操作数规则取，所以 `bash -o pipefail x.sh` 的身份是 `x.sh`，脚本操作数之后的 `-c` 仍算脚本参数。数据来源两个：
-  - 主会话的 BashJobManager 中运行中的任务（晚绑定端口）；
-  - **仅 Linux**：扫描 `/proc`。只看当前 uid 的进程，最多 4096 个 pid，结果缓存 2 秒；扫描永不抛错；收到 `bash-job:notification` 时清缓存。
-
-  收录到的命令行先过 §7 的脱敏流水线，每项不超过 120 码点，最多 10 项。
-
-- **非 Linux 的退化**（Q30，评审 #3）：macOS 等平台不扫描进程，也不用 `ps` 兜底。结果是：
-  - 主会话只能看到自己的 bash 后台任务；子会话完全没有进程证据；
-  - **在另一个终端、或另一个 pi 会话里运行的 release.sh 检测不到**。依赖这类条件的 hold 规则只对本会话的后台任务生效。
-  - `/mem jev` 显示 `process evidence: bash jobs only (non-Linux)`，`docs/guide/memory.md` 写明这一点。
-- **`branch`**：读 `.git/HEAD`，支持 worktree。
-- **`staged`**：仅当命令是 git commit，且候选正文里含有路径样式的词时，才通过有界的 git 执行器取暂存文件列表（照搬 v4.1 §2.7.4），最多 50 项。
-- 任何一项采集失败都直接省略，不阻塞后续。
-
-#### 6.4.3 问题（每个守护条目一个 choice）
-
-```json
-{
-  "state": {
-    "tool": "bash",
-    "command": "git add -A && git commit -m 'fix: hud width'",
-    "programs": ["git add", "git commit"],
-    "running": ["job_42 (3m) bash scripts/release/release.sh 0.10.3"],
-    "branch": "dev",
-    "session": "main"
-  },
-  "questions": {
-    "g1": {
-      "type": "choice",
-      "instructions": "Project rule (user rule) from pitfalls.md › 发版进行中禁止动 git 状态: 「release.sh 运行期间（含后台任务、其它终端）禁止 commit/tag/切分支……」 How does this rule relate to the pending tool call described in state?",
-      "criteria": {
-        "unrelated": "The rule does not cover this tool call",
-        "applies": "The rule covers this kind of action; the assistant must review the rule before running it",
-        "violates_now": "The rule covers this action AND its condition holds right now according to state, so running it now would break the rule"
-      }
-    }
-  }
-}
-```
-
-#### 6.4.4 Jev 判定档（状态为 `full` 或 `probing`）
-
-记 `a = P(applies)`，`v = P(violates_now)`，阈值为 `memory.jev.gate.threshold`（默认 0.6）。**E0 阶段二实测结论**（§19 行 18，jev-1.13 最终动作判对 34/38、零漏拦）：阈值维持 0.6（降到 0.5 只能救回 1 例，会增加误拦）；已知误拦形态——发版进行中 `echo`/`grep` 打印含 `git commit`/`git tag` 字样的文本——在生产路径上会被 §6.4.1 的 shell-parse + 标签粗筛挡下（程序身份是 `echo`/`grep`，不是 `git`，根本不会问 Jev，见 §16.4 例 7），评测集里的误拦只是构造文本直接交给 Jev 的人工构造案例。按下表自上而下取第一条成立的：
-
-| 条件                        | 判定                                                               |
-| --------------------------- | ------------------------------------------------------------------ |
-| `a + v < 阈值`              | 放行                                                               |
-| 条目为 `hold` 且 `v ≥ 阈值` | **hold 拦截**：正文只注入一次，之后每次只返回 reason               |
-| 本段未闩锁                  | **拦一次**：正文立即注入；闩锁在 `turnSeq` 前进后生效（v4.1 §2.2） |
-| 其它                        | 放行                                                               |
-
-- **判定缓存**（评审 #5、#11）：
-  - 键 = `entryHash` + `evidenceFp` + `shape`。其中 `evidenceFp` = sha1（排序后的 running 程序身份 + branch + 排序后的 staged），`shape` = 排序后的「程序 子命令」集合，例如 `git commit`。
-  - 命中缓存时直接套用上表，不调用 Jev。因此 hold 场景下，agent 在证据不变时反复重试，会立刻被再次拦下，既不付费也不等待；`git checkout -b` 这类同形命令在本段内只问一次 Jev。
-  - 证据一变（例如 release.sh 结束后，指纹随之改变），下一次调用就会重新判定。
-  - 每会话最多 64 项，本段内有效，最长 10 分钟；compaction 时清空。
-- **多条同时命中**：取最严的判定（hold > 拦一次 > 放行），reason 列出全部命中的条目。
-- **同批相同调用**：判定按条目 hash 串行；同一批里对同一条目只问一次，结果共享。并行调用的派发顺序需 P0 验证（C-J3）。
-- **静态 core 中的条目**：正文已在 system prompt 里，不重复注入，reason 里引用它的标题。
-- **文案**：
-
-```text
-[memory gate] 本次 <tool> 调用未执行：Jev 判定它属于记忆规则「core.md L4」（用户令，applies 0.83）的管辖范围。规则正文紧随其后以 [memory] 消息给出（已在系统提示中的规则不再重复）。请逐条核对：全部满足就在下一步原样重试（看过正文后的重试不会再拦；同一批里并发的相同调用也已一并拦下）；有不满足的，调整方案或先问用户。
-```
-
-```text
-[memory gate·hold] 本次 <tool> 调用未执行：规则「pitfalls.md › 发版进行中禁止动 git 状态」（用户令）的条件仍成立（violates_now 0.86；证据：job_42 bash scripts/release/release.sh 0.10.3）。本次及后续重试都会被拦，直到条件消失。请等待（如用 bash_job list 查看进度），不要反复重试；确需继续请先问用户。
-```
-
-#### 6.4.5 证据档（Q29：Jev 本次超时、出错、漏答，或状态为 `partial`）
-
-在 Jev 无法给出判定时，对粗筛留下的每个候选条目按下表处理：
-
-| 候选条目                                                                                                        | 处理                                                                                                       |
-| --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| 写了行内 `gate=hold`，且 **确定性证据已命中**：`running` 中至少有一个进程的程序身份属于该条目的 `namedPrograms` | **拦截**。reason 注明「Jev 未判定，按证据拦截」。正文本段只注入一次                                        |
-| 其它                                                                                                            | **放行**，同时把正文以「未判定」注入（本段一次）：`[memory · G unjudged] Jev 未能判定，以下规则请自行核对` |
-
-```text
-[memory gate·hold] 本次 <tool> 调用未执行：Jev 未判定（timeout），按证据拦截——规则「pitfalls.md › 发版进行中禁止动 git 状态」（用户令，gate=hold）点名的程序正在运行：job_42 bash scripts/release/release.sh 0.10.3。本次及后续重试都会被拦，直到该程序结束。请等待，不要反复重试；确需继续请先问用户。
-```
-
-- **为什么这样分档**：
-  - hold 规则是用户显式标注的，而「点名程序正在运行」这件事本身就不需要 Jev 判断，所以由证据兜底拦截，这正是 release.sh 事故的场景（评审 #1）；
-  - 其它情况如果因为外部分类器抖动就一律拦截，会卡死全部 git 操作，所以选择放行，并把规则正文给到模型。
-- **与 pi 文档的关系**：对 hold 规则 fail closed 符合 `docs/extensions.md:214` 的建议；其余情况的放行是有意偏离。
-- **适用范围**（N1，Q33 已拍板为适用）：证据档同样用于 `partial` 状态（整个 Jev 不可用），而不只是单次超时。这是把 Q26（零调用部分继续）与 Q29 合起来推出的结论。
-- **非 Linux**：证据只有本会话的 bashJobs，见 §6.4.2。
-- **handler 异常**：一律放行，并记日志。handler 必须永不抛错（`runner.js:957-970`）。
-
-#### 6.4.6 其它约束
-
-- **延迟**：只有通过粗筛、且没有命中判定缓存的调用，才需要同步等待，典型 0.8–1.1 秒，上限 2.5 秒。证据档本身不需要等待，`/proc` 扫描另计，最坏 1.5 秒。
-- **逃生路径**（用户）：
-  - 修改或删除规则；
-  - 给规则加 `nogate`；
-  - 终止仍在运行的任务；
-  - 关闭 `memory.jev.gate.enabled` 后 `/reload`。
-- **覆盖范围**：被拦下的调用不会产生 `tool_result`；嵌套的 `ctx.executeTool` 也会经过这道门禁（`docs/extensions.md:261`）。
-
 ## 7. 隐私：截断、脱敏与不外发清单
 
 ### 7.1 流水线（`jev/redact.ts`，先匹配后截断）
@@ -1123,14 +1004,12 @@ similar: core.md L5 (complementary 0.72)
 | `memory.jev.recall.maxEntries`   | 1–10        | `3`                                        | E 层固定为 2                                                                                                                                                   |
 | `memory.jev.recall.maxBytes`     | 512–16384   | `4096`                                     |                                                                                                                                                                |
 | `memory.jev.recall.waitS`        | 0–3         | `2`（Q37）                                 | 0 = 纯异步；内部 waitMs（TIME_SETTING_MS_PATHS）                                                                                                               |
-| `memory.jev.gate.enabled`        | bool        | `true`                                     |                                                                                                                                                                |
-| `memory.jev.gate.threshold`      | 0.5–0.95    | `0.6`                                      | 同上：J0 基线评测后可能调整，调整需回本稿并问用户                                                                                                              |
 | `memory.jev.review.intervalDays` | 0–90        | `7`（Q31）                                 | 0 = 只能手动                                                                                                                                                   |
 | `memory.jev.maxCostUsd`          | 0.01–5      | `0.5`                                      |                                                                                                                                                                |
 | `memory.jev.maxCalls`            | 0–5000      | `800`                                      |                                                                                                                                                                |
 | `memory.jev.confirmTimeoutS`     | 10–600      | `60`                                       | 秒键：J3 登记进 `TIME_SETTING_MS_PATHS`（`src/config/settings.ts:329`），内部字段为 `confirmTimeoutMs`                                                         |
 
-共 14 个键。其余参数（缓存规模、`/proc` 上限、批大小）都是常量。
+共 12 个键（`gate.enabled`/`gate.threshold` 两键已随 gate 移除，2026-11）。其余参数（缓存规模、批大小）都是常量。
 
 ### 9.2 I9 论证（按 Q26 更新）
 
@@ -1149,8 +1028,8 @@ similar: core.md L5 (complementary 0.72)
   v2.1 增补：重放配置扩为五种——再加 `classifiers=[]`（必须与 disabled 逐字节相等），以及「设置开 + 无 modelRegistry」（`off(pi-api)`，除 `registrations` 外逐字段等于 disabled，`registrations` 差集恰为 jev 集合；§5.3）。**`PI_API_ALLOWED_DIFF` 登记完整性**（§19 行 15）：`/mem` 描述追加 ` · /mem jev · /mem tags`（J4 commandPort 接线后）已登记；J8 接线 review/expired 后追加 ` · /mem review · /mem expired`与两个补全项 `completion:review`/`completion:expired`，同样登记在该清单（`tests/memory/jev/off-golden.test.ts`）。
 
 - **on，状态为 `partial` 或 `inactive`**：这种状态不在 byte-identical 的承诺之内，因为零调用部分仍会工作（Q26）。行为边界由单测钉住：
-  1. **覆盖率为 0、没有任何行内 `gate*`/`tags=`**（`inactive`）：零 `sendMessage`，零 block；除了 `/mem` 多出的一行状态、工具描述变体和新注册的钩子以外，功能上与今天一致。
-  2. **有侧车标签或行内元数据**：A 层只注入有标签的条目，B 层只重注上一段注入过的条目；门禁只走证据档，只有「`gate=hold` + 点名程序正在运行」才会拦截。
+  1. **覆盖率为 0、没有任何行内 `tags=`**（`inactive`；原判定还看 `gate*`，已随 gate 移除）：零 `sendMessage`；除了 `/mem` 多出的一行状态、工具描述变体和新注册的钩子以外，功能上与今天一致。
+  2. **有侧车标签或行内元数据**：A 层只注入有标签的条目，B 层只重注上一段注入过的条目（原「门禁只走证据档」分句已随 gate 移除，2026-11）。
   3. 任何情况下都不发起 Jev 调用，到达 `until` 的探测除外。
 
 ### 9.3 工具面变体（jev 开启时只换描述）
@@ -1158,8 +1037,10 @@ similar: core.md L5 (complementary 0.72)
 - `MEMORY_TOOL_V2_TEXT_JEV` = 原描述 + 约 250B：
 
   ```text
-  Entries are tagged automatically after writes. Inline authority (end of the entry's first line): <!-- mem user|lesson expires=YYYY-MM-DD until="…" gate|gate=hold|nogate tags=+a,-b private -->.
+  Entries are tagged automatically after writes. Inline authority (end of the entry's first line): <!-- mem user|lesson expires=YYYY-MM-DD until="…" tags=+a,-b private -->.
   ```
+
+  （2026-11 gate 移除后不再宣传 `gate|gate=hold|nogate` 标记；旧文件中的标记仅保留解析兼容。）
 
 - schema 与原版**完全相同**（Q32 把 `tag_add` 推迟到二期）。
 - `memory-tool-surface.json` 新增一个描述 key，`toolSurfaceBytes` 的预算由同一个包核对。
@@ -1170,14 +1051,15 @@ similar: core.md L5 (complementary 0.72)
 jev      enabled · partial (classifier unavailable since 11:40) · next probe 12:40
 models   1 opencode/jev-1.13-free   unavailable (451) until 12:40 — 451 多为地区拦截，可设 memory.jev.proxy
          2 opencode/jev-1.13        unavailable (402 Insufficient funds) until 12:41
-stopped  recall U · error recall E · write tagging · review run · gate judgment
-running  action fast path A · re-inject after compaction B · gate evidence tier · review list
+stopped  recall U · error recall E · write tagging · review run
+running  action fast path A · re-inject after compaction B · review list
 tags     142/150 tagged · 8 pending (edited since last tagging) · last tagged 10-29 18:55 · taxonomy 4f2a91c0
-evidence process: bash jobs + /proc (Linux)
 usage    37 calls · $0.0061 / $0.50 · per activation (/reload resets)
-segment  injected 5 (U3 A1 E1) · gates 1 (hold 0) · cap 5/30 · verdict cache 3
+segment  injected 5 (U3 A1 E1) · cap 5/30
 review   last 2026-10-28 · 2 open → /mem review
 ```
+
+（2026-11 gate 移除后：`stopped`/`running` 不再有 gate judgment/gate evidence tier 两项，`evidence` 行与 `gates`/`verdict cache` 统计已删除。）
 
 - **子命令**：
   - `/mem jev probe`：强制刷新可用集；
@@ -1185,7 +1067,7 @@ review   last 2026-10-28 · 2 open → /mem review
   - `/mem tags [list|add|rm|disable|enable]`；
   - `/mem review [--run|--list]`；
   - `/mem expired`。
-- **代理行**（真机验收后补，7584097c）：`memory.jev.proxy` 非空时，在 `evidence` 与 `usage` 之间多一行 `proxy    http://***@host:port`（凭证一律打码）；不可解析或非 `http://` 的代理以 `— ignored (only http:// proxies are supported)` 结尾，客户端按未配置代理处理。上面的示例没有配置代理，所以没有这一行。
+- **代理行**（真机验收后补，7584097c）：`memory.jev.proxy` 非空时，在 `tags` 与 `usage` 之间多一行 `proxy    http://***@host:port`（凭证一律打码；原参照的 `evidence` 行已随 gate 移除）；不可解析或非 `http://` 的代理以 `— ignored (only http:// proxies are supported)` 结尾，客户端按未配置代理处理。上面的示例没有配置代理，所以没有这一行。
 - **web 端**（Q35，经 `src/web-hub/agent/command-policy.ts` 的 `mem()`）：只读的 `jev`、`tags`（裸形式）、`tags list`、`review --list` 允许执行；改动状态的子命令（`jev probe`、`jev retag`、`jev reset-index`、`tags add|rm|disable|enable`）需要确认，与 `/mem` 现有的 confirm 惯例一致；`review`（逐条选择）与 `expired` 在 web 端需要确认，确认后降级为只读文本清单并提示回终端处理，不做写入（它们有文本回退，所以不属于拒绝条件）。Q35 的拒绝条件是「纯终端交互、没有文本回退」，本期没有命中该条件的子命令，即**本期无 deny 行**。`command-usage.ts` 不改。
 - **skill**：新增 `skills/memory-jev/SKILL.md`，承载使用策略（I12）。
 

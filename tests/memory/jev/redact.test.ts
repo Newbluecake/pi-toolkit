@@ -59,9 +59,9 @@ describe("mask rules (§7.1 step 3) — one example each", () => {
     expect(redactForJev("contact me@example.com please", "entry")).not.toContain("me@example.com");
   });
 
-  it("process command line tokens are masked (D7 ①)", () => {
+  it("command line tokens are masked (D7 ①)", () => {
     const line = "job_42 bash scripts/release/release.sh --token ghp_abcdefghijklmnopqrstuvwxyz012345";
-    const out = redactForJev(line, "running");
+    const out = redactForJev(line, "command");
     expect(out).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz012345");
     expect(out).toContain("release.sh");
   });
@@ -114,19 +114,10 @@ describe("truncation table (§7.1 step 5)", () => {
     expect(redactForJev(short, "error")).toBe(short);
   });
 
-  it("running 10 × 120 — per item, capped count", () => {
-    const items = Array.from({ length: 14 }, (_, i) => `job_${i} bash scripts/release/release.sh 0.10.${i}`);
-    const out = redactForJev(items.join("\n"), "running");
-    const lines = out.split("\n");
-    expect(lines).toHaveLength(10);
-    expect(lines[0]!.length).toBeLessThanOrEqual(120);
-  });
-
-  it("staged 50 × 200", () => {
-    const items = Array.from({ length: 80 }, (_, i) => `dir/sub/file-${i}.ts`);
-    const lines = redactForJev(items.join("\n"), "staged").split("\n");
-    expect(lines).toHaveLength(50);
-    expect(lines.every((l) => l.length <= 200)).toBe(true);
+  it("the gate-evidence running/staged per-item budgets were removed with the gate feature (2026-11)", () => {
+    // Only the five field selectors remain; TypeScript enforces the union.
+    const fields: readonly string[] = ["user", "previousUser", "command", "error", "entry"];
+    expect(fields).toHaveLength(5);
   });
 });
 

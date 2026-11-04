@@ -59,7 +59,7 @@ export const MEMORY_TOOL_V2_TEXT = {
  *  (the `jev` key) in the same change. */
 const MEMORY_TOOL_V2_JEV_SUFFIX =
   "Entries are tagged automatically after writes. Inline authority (end of the entry's first line): " +
-  '<!-- mem user|lesson expires=YYYY-MM-DD until="…" gate|gate=hold|nogate tags=+a,-b private -->.';
+  '<!-- mem user|lesson expires=YYYY-MM-DD until="…" tags=+a,-b private -->.';
 
 export const MEMORY_TOOL_V2_TEXT_JEV: {
   readonly description: string;

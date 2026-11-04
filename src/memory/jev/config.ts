@@ -43,7 +43,6 @@ export function jevConfigOf(memory: MemorySettings): JevConfig {
       maxBytes: jev.recall.maxBytes,
       waitMs: jev.recall.waitMs,
     },
-    gate: { enabled: jev.gate.enabled, threshold: jev.gate.threshold },
     reviewIntervalDays: jev.review.intervalDays,
     maxCostUsd: jev.maxCostUsd,
     maxCalls: jev.maxCalls,

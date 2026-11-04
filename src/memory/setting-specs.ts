@@ -151,12 +151,12 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     max: 500,
     description: "Expected model output rate for batched tidy budgeting, tokens per second",
   },
-  // jev-plan v2 §4 J3 (jev-arch §9.1): 17 keys (14 + fastPath×3 of the 2026-11-03 noise fix),
-  // non-live (change → /reload). `classifiersRejected`
+  // jev-plan v2 §4 J3 (jev-arch §9.1): 15 keys (14 − gate×2 removed 2026-11 + fastPath×3 of
+  // the 2026-11-03 noise fix), non-live (change → /reload). `classifiersRejected`
   // is NOT a setting key (parse-time derived, doctor/startup-reminder display only).
   "memory.jev.enabled": bool(
     "memory.jev.enabled",
-    "Jev-assisted memory: classifier-backed recall, gate, tagging, review (Q27 default on)",
+    "Jev-assisted memory: classifier-backed recall, tagging, review (Q27 default on)",
   ),
   "memory.jev.classifiers": csvString(
     "memory.jev.classifiers",
@@ -167,7 +167,7 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     path: "memory.jev.proxy",
     description: "Dedicated proxy URL for Jev classify calls; empty = no proxy fetch",
   },
-  "memory.jev.childSessions": bool("memory.jev.childSessions", "Wire Jev recall + gate in child subagent sessions too"),
+  "memory.jev.childSessions": bool("memory.jev.childSessions", "Wire Jev recall in child subagent sessions too"),
   "memory.jev.recall.threshold": {
     kind: "number",
     path: "memory.jev.recall.threshold",
@@ -189,14 +189,6 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     hint: "synchronous wait budget before async recall fallback",
     description: "Synchronous wait budget before falling back to async recall; 0 = pure async (Q37)",
   }),
-  "memory.jev.gate.enabled": bool("memory.jev.gate.enabled", "Enable the dangerous-command gate"),
-  "memory.jev.gate.threshold": {
-    kind: "number",
-    path: "memory.jev.gate.threshold",
-    min: 0.5,
-    max: 0.95,
-    description: "Gate verdict probability threshold",
-  },
   "memory.jev.review.intervalDays": {
     ...count("memory.jev.review.intervalDays", 0, "Tag review interval in days; 0 = manual only"),
     max: 90,

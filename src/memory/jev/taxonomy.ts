@@ -84,9 +84,10 @@ export const PRESET_TAGS: readonly TagDef[] = (
       description: "Deleting files or data, or commands that destroy work (rm, git rm, trash, find -delete).",
       // NO tools:["memory"] — main-session ruling on J1 report item 3: matching
       // the tool name would make EVERY memory write (create/str_replace/
-      // insert/append) hit a high-risk tag and pay a synchronous Jev gate
-      // call (≤2.5s) whenever a guarding entry exists; memory's own delete is
-      // already covered by the user-order two-phase guard.
+      // insert/append) hit a high-risk tag; memory's own delete is already
+      // covered by the user-order two-phase guard. (Historically this also
+      // skipped a synchronous gate call; the gate was removed 2026-11, the
+      // risk:"high" classification still feeds the A-layer fast path.)
       risk: "high",
       match: { commands: ["rm", "git rm", "git clean", "find -delete", "trash"] },
     },

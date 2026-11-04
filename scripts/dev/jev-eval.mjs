@@ -2,14 +2,12 @@
 /**
  * jev-eval — J0 交付的质量评测脚本（jev-plan §4 J0 第 5 条；arch §10「质量评测」，Tier 3）。
  *
- * 四个数据集（docs/dev/memory/eval/*.json，已人工脱敏）：
- *   recall 40 例（含指代型消息、core 重复注入反例）· gate 38 例（每条真实守护规则 ×
- *   一次待执行工具调用 × 现场证据）· tag 30 例 · review 30 对（六种关系 choice）。
+ * 三个数据集（docs/dev/memory/eval/*.json，已人工脱敏）：
+ *   recall 40 例（含指代型消息、core 重复注入反例）· tag 30 例 · review 30 对（六种
+ *   关系 choice）。gate 数据集随 gate 功能一并移除（2026-11）。
  *
- * gate/review 的期望值与架构稿一致（§6.4.3 / §6.3.3）：gate 期望是分类器给出的关系
- * choice（unrelated / applies / violates_now，评分按 §6.4.4 判定表），review 期望是
- * p<n> 的关系 choice。因此数据集自带规则正文/证据（gate）与 a/b 日期（review），
- * 不再需要合成通用规则，也不再合并 hold / hold-evidence 两档。
+ * review 的期望值与架构稿一致（§6.3.3）：review 期望是 p<n> 的关系 choice，因此
+ * 数据集自带 a/b 日期（review），不再需要合成通用规则。
  *
  * 用法：
  *   node scripts/dev/jev-eval.mjs --help
@@ -60,60 +58,6 @@ export function buildRecallState(message, previousMessage, session = "main") {
     session,
     today: new Date().toISOString().slice(0, 10),
   };
-}
-
-/** 门禁问题（arch §6.4.3：每个守护条目一个 choice，字面与
- * src/memory/jev/questions.ts 的 buildGateQuestions 逐字一致——parity 测试钉住）。
- * `state` 是评测样例的现场证据（tool / command / programs / running / branch /
- * staged / session），`guardEntries` 是该样例那一条真实守护规则（id = 样例 id）。
- */
-export function buildGateQuestions(state, guardEntries) {
-  const questions = {};
-  for (const e of guardEntries) {
-    const anchor = e.heading ? `${e.file} › ${e.heading}` : e.file;
-    const authorityLabel = e.authority === "user" ? "user rule" : "assistant lesson";
-    questions[e.id] = {
-      type: "choice",
-      instructions:
-        `Project rule (${authorityLabel}) from ${anchor}: 「${e.excerpt}」 ` +
-        "How does this rule relate to the pending tool call described in state?",
-      criteria: {
-        unrelated: "The rule does not cover this tool call",
-        applies: "The rule covers this kind of action; the assistant must review the rule before running it",
-        violates_now:
-          "The rule covers this action AND its condition holds right now according to state, so running it now would break the rule",
-      },
-    };
-  }
-  return questions;
-}
-
-export function buildGateState(command, toolName = "bash") {
-  return { tool: toolName, command, programs: [], running: [], session: "main" };
-}
-
-/** 从命令文本推「程序 子命令」形状（arch §6.4.4 的 `shape`，如 `["git commit"]`）：
- * 跳过前导 `VAR=value` / `env` / `sudo` / `timeout <dur>`，取程序 basename，紧邻的
- * 非选项 token 当作子命令。只用于 state 展示，不参与评分。 */
-export function commandShape(command) {
-  const tokens = String(command).trim().split(/\s+/u).filter(Boolean);
-  let i = 0;
-  while (i < tokens.length) {
-    const t = tokens[i];
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(t) || t === "env" || t === "sudo" || t === "command") {
-      i += 1;
-    } else if (t === "timeout") {
-      i += 2;
-    } else {
-      break;
-    }
-  }
-  const program = tokens[i];
-  if (program === undefined) return [];
-  const name = program.split("/").pop();
-  const next = tokens[i + 1];
-  const isPlain = next !== undefined && !next.startsWith("-") && !/^["']/u.test(next);
-  return isPlain ? [`${name} ${next}`] : [name];
 }
 
 /** 打标核心 5 题（arch §6.2.2 m_*，字面与 questions.ts 的 buildTagCoreQuestions
@@ -222,34 +166,17 @@ export function buildReviewState(project, today) {
 
 // ───────────────────── 数据集 ─────────────────────
 
-const SETS = ["recall", "gate", "tag", "review"];
+const SETS = ["recall", "tag", "review"];
 
-/** 门禁关系（arch §6.4.3 的 choice 选项）与整理关系（arch §6.3.3 的 p<n> 选项）。
- * 数据集里写错选项名时在构造阶段就报错，而不是跑完才变成“全错”。 */
-const GATE_RELATIONS = ["unrelated", "applies", "violates_now"];
+/** 整理关系（arch §6.3.3 的 p<n> 选项）。数据集里写错选项名时在构造
+ * 阶段就报错，而不是跑完才变成“全错”。 */
 const REVIEW_RELATIONS = ["unrelated", "duplicate", "conflict", "a_supersedes_b", "b_supersedes_a", "complementary"];
-/** 门禁阈值（arch §6.4.4 `memory.jev.gate.threshold` 默认值）。 */
-const GATE_THRESHOLD = 0.6;
 
 function assertRelation(setName, c) {
-  const allowed = setName === "gate" ? GATE_RELATIONS : REVIEW_RELATIONS;
+  const allowed = REVIEW_RELATIONS;
   if (!allowed.includes(c.expected)) {
     throw new Error(`${setName} case ${c.id}: expected must be one of ${allowed.join("|")}, got ${c.expected}`);
   }
-}
-
-/** jev-gate.json 样例 → arch §6.4.3 的 state：命令形状（programs）+ 现场证据
- * （running / branch / staged；staged 仅在有值时带上，同 arch §6.4.2）。 */
-function buildGateCaseState(c) {
-  const evidence = c.evidence ?? {};
-  const staged = evidence.staged ?? [];
-  return {
-    ...buildGateState(c.command, c.tool ?? "bash"),
-    programs: commandShape(c.command),
-    running: evidence.running ?? [],
-    ...(evidence.branch === undefined ? {} : { branch: evidence.branch }),
-    ...(staged.length === 0 ? {} : { staged }),
-  };
 }
 
 function loadSet(name) {
@@ -271,38 +198,6 @@ export function buildCaseRequest(setName, c) {
         check: (answers) => {
           const p = answers[id]?.probability;
           return { p, pass: p !== undefined && p >= 0.6 === c.expected }; // Q36
-        },
-      };
-    }
-    case "gate": {
-      assertRelation("gate", c);
-      const id = c.id;
-      const guardEntries = [
-        {
-          id,
-          file: c.rule.file,
-          heading: c.rule.heading,
-          authority: c.rule.authority,
-          excerpt: c.rule.excerpt,
-        },
-      ];
-      const state = buildGateCaseState(c);
-      return {
-        id,
-        state,
-        questions: buildGateQuestions(state, guardEntries),
-        // 评分只看关系（arch §6.4.4）：a=P(applies)、v=P(violates_now)，阈值 0.6。
-        // 期望 unrelated ⇒ a+v<0.6；applies ⇒ a+v≥0.6 且 v<0.6；violates_now ⇒ v≥0.6。
-        check: (answers) => {
-          const a = answers[id]?.probabilities?.applies ?? 0;
-          const v = answers[id]?.probabilities?.violates_now ?? 0;
-          const pass =
-            c.expected === "unrelated"
-              ? a + v < GATE_THRESHOLD
-              : c.expected === "applies"
-                ? a + v >= GATE_THRESHOLD && v < GATE_THRESHOLD
-                : v >= GATE_THRESHOLD;
-          return { a, v, choice: answers[id]?.choice, pass };
         },
       };
     }
@@ -467,10 +362,9 @@ const HELP = `jev-eval — jev 记忆分类器质量评测（jev-plan J0；数�
 用法:
   node scripts/dev/jev-eval.mjs --dry-run --set recall      # 零网络，打印第一批问题 JSON
   node scripts/dev/jev-eval.mjs --set all                   # 真实调用（需 OPENCODE_API_KEY / OPENROUTER_API_KEY）
-  node scripts/dev/jev-eval.mjs --set gate --model openrouter/typesafe/jev-1.13
 
 选项:
-  --set <recall|gate|tag|review|all>   要跑的数据集（默认 all；--dry-run 默认 recall）
+  --set <recall|tag|review|all>        要跑的数据集（默认 all；--dry-run 默认 recall）
   --dry-run                            不联网：构造问题并打印每集第一批 JSON 后退出
   --model <provider/id>                分类器（默认 opencode/jev-1.13-free）
   --limit <n>                          每集只跑前 n 条（冒烟）

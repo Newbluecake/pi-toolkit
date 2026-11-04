@@ -52,31 +52,28 @@ cwd 为键的被动项目记忆：记忆文件放在 `~/.pi/agent/memory/<cwd-sl
 
 **状态**（`/mem`、`/mem jev` 显示）：
 
-| 状态            | 含义                                                                                                                                |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `full`          | 全部正常，现场问 Jev                                                                                                                |
-| `partial(原因)` | 现场判定停了（没额度/被限制/分类器全不可用），但快通道、压缩重注、`gate=hold` 证据拦截照常；注入标记带 `·partial`                   |
-| `inactive`      | 从未配过分类器凭证，行为与升级前完全一致                                                                                            |
-| `off`           | 总开关关、`layout: legacy`、secure 域、`classifiers` 为空列表或全部非法时                                                           |
-| `off (pi-api)`  | 设置开着，但宿主没给分类器 API（缺 `classify`/`getAvailableOfType`/`getModelOfType`）：钩子已注册但全部空转，零注入、零拦截、零调用 |
-
-**非 Linux 退化**：只有 Linux 会扫 `/proc` 收集其它终端/进程的证据；macOS 等平台只看得见本会话的后台任务，其它终端里手动跑的 `release.sh` 检测不到，`/mem jev` 会显示 `process evidence: bash jobs only (non-Linux)`。
+| 状态            | 含义                                                                                                                        |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `full`          | 全部正常，现场问 Jev                                                                                                        |
+| `partial(原因)` | 现场判定停了（没额度/被限制/分类器全不可用），但快通道、压缩重注照常；注入标记带 `·partial`                                 |
+| `inactive`      | 从未配过分类器凭证，行为与升级前完全一致                                                                                    |
+| `off`           | 总开关关、`layout: legacy`、secure 域、`classifiers` 为空列表或全部非法时                                                   |
+| `off (pi-api)`  | 设置开着，但宿主没给分类器 API（缺 `classify`/`getAvailableOfType`/`getModelOfType`）：钩子已注册但全部空转，零注入、零调用 |
 
 **行内权威注释语法**（写在条目首行行尾）：
 
 ```md
 - GPT 系模型临时禁用 <!-- mem user expires=2026-11-30 -->
-- release.sh 运行期间禁止 commit/tag/切分支 <!-- mem user gate=hold -->
 ```
 
-| 键                              | 含义                                                                                   |
-| ------------------------------- | -------------------------------------------------------------------------------------- |
-| `user` / `lesson`               | 覆盖默认归属。`user` = 用户令，只有用户能作废                                          |
-| `expires=YYYY-MM-DD`            | 到期进 `/mem expired` 和启动提醒，只提示不自动删                                       |
-| `until="事件"`                  | 事件型失效条件，只列为待确认，不进启动提醒                                             |
-| `gate` / `gate=hold` / `nogate` | `gate` 强制成为守护条目（拦一次）；`gate=hold` 条件成立期间持续拦截；`nogate` 永不拦截 |
-| `tags=+a,-b`                    | 手工增删标签，优先级高于 Jev 的判定，Jev 不可用时同样生效                              |
-| `private`                       | 永远不发给 Jev（不打标、不召回、不整理、不参与门禁判定）                               |
+| 键                              | 含义                                                                                      |
+| ------------------------------- | ----------------------------------------------------------------------------------------- |
+| `user` / `lesson`               | 覆盖默认归属。`user` = 用户令，只有用户能作废                                             |
+| `expires=YYYY-MM-DD`            | 到期进 `/mem expired` 和启动提醒，只提示不自动删                                          |
+| `until="事件"`                  | 事件型失效条件，只列为待确认，不进启动提醒                                                |
+| `gate` / `gate=hold` / `nogate` | **已无行为**（高危拦截功能 2026-11 移除）；旧文件里的这些键仅保留解析兼容，新写入不要再加 |
+| `tags=+a,-b`                    | 手工增删标签，优先级高于 Jev 的判定，Jev 不可用时同样生效                                 |
+| `private`                       | 永远不发给 Jev（不打标、不召回、不整理）                                                  |
 
 手写文件里没写 `source: agent` 的条目默认算 `user`；agent 建的文件里默认算 `agent`（**`memory` 工具 `append` 新建的文件归属 agent**）。用户令只能由用户作废——agent 改写带 `user` 标记的条目会弹确认框，拒绝后文件不变；这条守卫覆盖 `str_replace`/`insert`/`write`/`append`/`create` 覆写与 `delete`，`rename` 不改内容、不触发确认。除了直接改写用户令，下面两类写入也同样弹确认（`src/memory/tool-v2.ts:663-674`）：
 
@@ -122,8 +119,6 @@ cwd 为键的被动项目记忆：记忆文件放在 `~/.pi/agent/memory/<cwd-sl
 | `memory.jev.recall.maxEntries`   | `3`                                        | 单次注入条目上限（1–10）                      |
 | `memory.jev.recall.maxBytes`     | `4096`                                     | 单次注入字节预算                              |
 | `memory.jev.recall.waitS`        | `2`                                        | 同步等待上限秒数（0–3，0 = 纯异步）           |
-| `memory.jev.gate.enabled`        | `true`                                     | 门禁总开关                                    |
-| `memory.jev.gate.threshold`      | `0.6`                                      | 门禁判定阈值（0.5–0.95）                      |
 | `memory.jev.review.intervalDays` | `7`                                        | 整理周期天数（0 = 只能手动）                  |
 | `memory.jev.maxCostUsd`          | `0.5`                                      | 单 activation 的 Jev 总美元预算（0.01–5）     |
 | `memory.jev.maxCalls`            | `800`                                      | 单 activation 的 Jev 总调用次数上限（0–5000） |

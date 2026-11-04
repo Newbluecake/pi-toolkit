@@ -75,7 +75,7 @@ import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/work
 import { registerWebSearchTool } from "./web-tools/index.js";
 import { wireDate } from "./date/index.js";
 import { wireTodo } from "./todo/index.js";
-import { jevBashJobsFrom, wireMemory } from "./memory/index.js";
+import { wireMemory } from "./memory/index.js";
 import { wireChildBashJobs } from "./bash/child.js";
 import { wireChildSession } from "./child/wire.js";
 import { markChildExtensionActivated } from "./child/activation-signal.js";
@@ -352,9 +352,6 @@ export default function activate(rawPi: ExtensionAPI): void {
   // Only reached for the main session — structurally guaranteed by the
   // HOST_KEY early-return above, so this never runs for a child session.
   memoryWiring?.attachTidy(createTidyPort(holder));
-  // jev-plan J7: gate evidence reads the CURRENT session's bash jobs (main
-  // session only, same late-bound holder pattern; no-op when jev is unwired).
-  memoryWiring?.attachJevBashJobs(jevBashJobsFrom(() => holder.current?.bashJobs?.list() ?? []));
   const releaseBackgroundStatus = publishBackgroundStatus(() => {
     const stack = holder.current;
     // Background workflows count as running subagent work (between child runs they have no live run).

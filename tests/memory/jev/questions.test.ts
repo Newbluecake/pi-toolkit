@@ -5,7 +5,6 @@ import { describe, expect, it } from "vitest";
 import { mergeTaxonomy } from "../../../src/memory/jev/taxonomy.js";
 import {
   buildErrorQuestions,
-  buildGateQuestions,
   buildRecallQuestion,
   buildRecallQuestions,
   buildReviewQuestions,
@@ -243,32 +242,5 @@ describe("buildReviewQuestions (§6.3.3)", () => {
       ["a_supersedes_b", "b_supersedes_a", "complementary", "conflict", "duplicate", "unrelated"].sort(),
     );
     expect(batch.questions.o7?.type).toBe("bool");
-  });
-});
-
-describe("buildGateQuestions (§6.4.3)", () => {
-  it("builds one choice question per guarding entry, state passed through unchanged", () => {
-    const state = { tool: "bash", command: "git commit -m x" };
-    const batch = buildGateQuestions(state, [
-      {
-        id: "g1",
-        file: "pitfalls.md",
-        heading: "发版进行中禁止动 git 状态",
-        authority: "user",
-        excerpt: "release.sh 运行期间禁止 commit",
-      },
-    ]);
-    expect(batch.state).toBe(state);
-    expect(batch.questions.g1).toEqual({
-      type: "choice",
-      instructions:
-        "Project rule (user rule) from pitfalls.md › 发版进行中禁止动 git 状态: 「release.sh 运行期间禁止 commit」 How does this rule relate to the pending tool call described in state?",
-      criteria: {
-        unrelated: "The rule does not cover this tool call",
-        applies: "The rule covers this kind of action; the assistant must review the rule before running it",
-        violates_now:
-          "The rule covers this action AND its condition holds right now according to state, so running it now would break the rule",
-      },
-    });
   });
 });

@@ -167,29 +167,29 @@ describe("v2 tool surface (§4.5 frozen text)", () => {
   // description — the schema's canonical JSON is byte-identical to v2 and
   // promptSnippet/promptGuidelines are shared. Budget updated in this same
   // test per the plan ("字节预算断言更新在同一测试").
-  it("jev variant: description = v2 text + §9.3 sentence, schema/snippet/guidelines unchanged, budget 1638B (≤1700B ceiling)", async () => {
+  it("jev variant: description = v2 text + §9.3 sentence, schema/snippet/guidelines unchanged, budget 1616B (≤1700B ceiling)", async () => {
     const RuntimeType = await resolveRuntimeType();
     // description: original + " " + the §9.3 sentence, verbatim.
     expect(MEMORY_TOOL_V2_TEXT_JEV.description.startsWith(MEMORY_TOOL_V2_TEXT.description)).toBe(true);
     expect(MEMORY_TOOL_V2_TEXT.description.endsWith("Never store secrets.")).toBe(true);
     expect(MEMORY_TOOL_V2_TEXT_JEV.description).toContain(
       "Entries are tagged automatically after writes. Inline authority (end of the entry's first line): " +
-        '<!-- mem user|lesson expires=YYYY-MM-DD until="…" gate|gate=hold|nogate tags=+a,-b private -->.',
+        '<!-- mem user|lesson expires=YYYY-MM-DD until="…" tags=+a,-b private -->.',
     );
     // ~250B suffix per §9.3 (194B + the joining space, pinned exactly).
     expect(
       Buffer.byteLength(MEMORY_TOOL_V2_TEXT_JEV.description, "utf8") -
         Buffer.byteLength(MEMORY_TOOL_V2_TEXT.description, "utf8"),
-    ).toBe(195);
+    ).toBe(173);
     // shared fields — NOT part of the variant.
     expect(MEMORY_TOOL_V2_TEXT_JEV.promptSnippet).toBe(MEMORY_TOOL_V2_TEXT.promptSnippet);
     expect(MEMORY_TOOL_V2_TEXT_JEV.promptGuidelines).toStrictEqual([...MEMORY_TOOL_V2_TEXT.promptGuidelines]);
     // schema byte-identical under canonicalJson, on BOTH typebox builds.
     const runtimeV2Params = buildV2Params(RuntimeType);
-    expect(toolSurfaceBytes({ ...MEMORY_TOOL_V2_TEXT_JEV, parameters: MemoryToolParamsV2 })).toBe(1638);
-    expect(toolSurfaceBytes({ ...MEMORY_TOOL_V2_TEXT_JEV, parameters: runtimeV2Params })).toBe(1638);
+    expect(toolSurfaceBytes({ ...MEMORY_TOOL_V2_TEXT_JEV, parameters: MemoryToolParamsV2 })).toBe(1616);
+    expect(toolSurfaceBytes({ ...MEMORY_TOOL_V2_TEXT_JEV, parameters: runtimeV2Params })).toBe(1616);
     expect(toolSurfaceBytes({ ...MEMORY_TOOL_V2_TEXT_JEV, parameters: MemoryToolParamsV2 })).toBeLessThanOrEqual(1700);
-    expect(fixture.jev.bytes).toBe(1638);
+    expect(fixture.jev.bytes).toBe(1616);
     // fixture: the new key matches the constant (canonical form).
     expect(canonicalJson(MEMORY_TOOL_V2_TEXT_JEV.description)).toBe(fixture.jev.description);
     expect(fixture.jev.description.startsWith(fixture.v2.description.slice(0, -1))).toBe(true);

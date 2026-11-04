@@ -107,13 +107,11 @@ function makePort(dir: string, cwd: string, client: JevClient, over: Partial<Jev
     now: () => Date.parse("2026-10-30T12:00:00.000Z"),
     isChildSession: false,
     triggerBulk: (c) => bulk.push(c),
-    platform: "linux",
     config: {
       classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
       proxy: "",
       childSessions: true,
       recall: { threshold: 0.6, maxEntries: 3, maxBytes: 4096, waitMs: 2000 },
-      gate: { enabled: true, threshold: 0.6 },
       reviewIntervalDays: 7,
       maxCostUsd: 0.5,
       maxCalls: 800,
@@ -121,13 +119,7 @@ function makePort(dir: string, cwd: string, client: JevClient, over: Partial<Jev
       fastPath: DEFAULT_JEV_FAST_PATH,
     },
     usage: () => ({ costUsd: 0.0061, calls: 37 }),
-    segment: () => ({
-      injectedByLayer: { U: 3, A: 1, E: 1 },
-      gates: 1,
-      holdGates: 0,
-      injectedTotal: 5,
-      verdictCache: 3,
-    }),
+    segment: () => ({ injectedByLayer: { U: 3, A: 1, E: 1 }, injectedTotal: 5 }),
     health: getHealthTable(),
     ...over,
   };
@@ -188,9 +180,9 @@ describe("report (§9.4 structure)", () => {
     expect(text).toContain("2 opencode/jev-1.13");
     expect(lines.find((l) => l.startsWith("stopped"))).toBeUndefined();
     expect(lines.find((l) => l.startsWith("running"))).toContain("recall U");
-    expect(lines.find((l) => l.startsWith("running"))).toContain("gate judgment");
+    expect(lines.find((l) => l.startsWith("running"))).toContain("review list");
     expect(lines.find((l) => l.startsWith("tags"))).toContain("0/1 tagged");
-    expect(lines.find((l) => l.startsWith("evidence"))).toBe("evidence process: bash jobs + /proc (Linux)");
+    expect(lines.find((l) => l.startsWith("evidence"))).toBeUndefined();
     expect(lines.find((l) => l.startsWith("usage"))).toBe(
       "usage    37 calls · $0.0061 / $0.50 · per activation (/reload resets)",
     );
@@ -218,23 +210,13 @@ describe("report (§9.4 structure)", () => {
     expect(text).not.toMatch(/review {3}last \d{4}-\d{2}-\d{2}T/);
   });
 
-  test("non-Linux platform shows the bash-jobs-only evidence line", async () => {
-    const { dir, cwd } = fixture();
-    writeCorpus(dir, ["- rule alpha"]);
-    const { port } = makePort(dir, cwd, fakeClient(), { platform: "darwin" });
-    const text = await port.report(cwd, registry);
-    expect(text).toContain("evidence process: bash jobs only (non-Linux)");
-  });
-
   test("partial status lists stopped judged duties and running zero-call duties", async () => {
     const { dir, cwd } = fixture();
     writeCorpus(dir, ["- rule alpha"]);
     const { port } = makePort(dir, cwd, fakeClient({ status: { kind: "partial", reason: "451", inactive: false } }));
     const text = await port.report(cwd, registry);
-    expect(text).toContain("stopped  recall U · error recall E · write tagging · review run · gate judgment");
-    expect(text).toContain(
-      "running  action fast path A · re-inject after compaction B · gate evidence tier · review list",
-    );
+    expect(text).toContain("stopped  recall U · error recall E · write tagging · review run");
+    expect(text).toContain("running  action fast path A · re-inject after compaction B · review list");
   });
 
   test("bad sidecar JSON ⇒ status line appends `index rebuilt`", async () => {

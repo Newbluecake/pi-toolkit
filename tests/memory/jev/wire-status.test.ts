@@ -120,7 +120,7 @@ function harness(
 
 const settle = (ms = 60) => new Promise((r) => setTimeout(r, ms));
 const FIRST_FULL =
-  "jev on · opencode/jev-1.13-free — 记忆召回、打标、整理、高危拦截已启用；你的消息与记忆摘录会脱敏后发给该分类器。/mem jev 查看，memory.jev.enabled=false 关闭";
+  "jev on · opencode/jev-1.13-free — 记忆召回、打标、整理已启用；你的消息与记忆摘录会脱敏后发给该分类器。/mem jev 查看，memory.jev.enabled=false 关闭";
 
 describe("off(pi-api) — runtime-only off", () => {
   test("no modelRegistry on ctx ⇒ status line `jev: off (pi-api)`, zero calls / sends / notifications / timers", async () => {

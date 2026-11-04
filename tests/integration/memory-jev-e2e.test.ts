@@ -1,10 +1,12 @@
 // jev-plan §4 J9 e2e: one full lifecycle through the PRODUCTION assembly
 // (`wireMemory` + the real PromptSectionHub + `wireJev`), starting from an
 // EMPTY memory directory, all the way through `/mem init` → write (tagged) →
-// U/A injection → a gate interception → `/mem review` → `/mem jev`. A second
-// test repeats the shape with a `partial` classifier (jev-arch §5.3) to prove
-// the zero-call fast paths (A layer, `gate=hold` evidence) still work when
-// Jev itself cannot be asked.
+// U/A injection → `/mem review` → `/mem jev`. A second test repeats the
+// shape with a `partial` classifier (jev-arch §5.3) to prove the zero-call
+// fast path (A layer) still works when Jev itself cannot be asked. The gate
+// interception step was removed with the gate feature (2026-11); the
+// `gate=hold` writes below stay to pin that the inline marker parses but
+// never blocks anymore.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -16,7 +18,7 @@ import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import type { JevQuestion } from "../../src/memory/jev/contracts.js";
 import { clearHealthTable } from "../../src/memory/jev/health.js";
 import { readIndex } from "../../src/memory/jev/index-store.js";
-import { jevBashJobsFrom, wireMemory, type BashJobRecordLike } from "../../src/memory/index.js";
+import { wireMemory } from "../../src/memory/index.js";
 import { memoryDirFor } from "../../src/memory/paths.js";
 import { createPromptSectionHub } from "../../src/sysprompt/hub.js";
 import { createFakeRegistry, type ClassifyCallRecord } from "../memory/jev/helpers/fake-registry.js";
@@ -126,18 +128,12 @@ function harness(opts: { partial?: boolean } = {}) {
     isChildSession: false,
     sections: hub,
     secureDomainKind: "plain",
-    // Empty /proc: host processes (e.g. a release.sh running this suite) must not leak into evidence.
-    jevProcRoot: join(envTmp, "empty-proc"),
   });
-  const jobs: BashJobRecordLike[] = [];
-  wiring.attachJevBashJobs(jevBashJobsFrom(() => jobs));
   const classifiers = DEFAULT_SETTINGS.memory.jev.classifiers;
   const fake = createFakeRegistry({
     // `partial` (NOT `inactive`): classifiers ARE in the catalog but every
-    // call fails with a region-block (451, jev-arch §5.2's "不可用类") —
-    // matches memory-jev-gate.test.ts's "451" mode, which is what actually
-    // exercises the evidence-dossier gate path (an empty `available` list
-    // instead yields `inactive`, where the gate never runs at all).
+    // call fails with a region-block (451, jev-arch §5.2's "不可用类"); an
+    // empty `available` list would instead yield `inactive`.
     available: classifiers,
     responses: Object.fromEntries(
       classifiers.map((id) => [
@@ -186,14 +182,14 @@ function harness(opts: { partial?: boolean } = {}) {
   const toolCall = (command: string, toolCallId = `call_${++n}`): unknown =>
     handlers.get("tool_call")?.[0]?.({ type: "tool_call", toolName: "bash", toolCallId, input: { command } }, ctx());
   const mem = (args: string, c: unknown = ctx()) => commands.get("mem")!.handler(args, c);
-  return { handlers, tools, commands, sent, notes, fake, jobs, ctx, emit, prompt, toolCall, mem };
+  return { handlers, tools, commands, sent, notes, fake, ctx, emit, prompt, toolCall, mem };
 }
 
 const settle = (ms = 300) => new Promise((r) => setTimeout(r, ms));
 const text = (r: any): string => r.content.map((c: any) => c.text).join("\n");
 
 describe("memory jev e2e (full)", () => {
-  test("empty dir → /mem init → write (tagged) → U/A → gate once → /mem review → /mem jev", async () => {
+  test("empty dir → /mem init → write (tagged) → U/A → /mem review → /mem jev", async () => {
     const h = harness();
 
     // `/mem init` on a directory that doesn't exist yet.
@@ -235,9 +231,7 @@ describe("memory jev e2e (full)", () => {
     expect(u?.details?.layer).toBe("U");
     expect(u?.content).toContain("node 18");
 
-    // A layer: a bash push hits the git-push tag, zero Jev calls (no
-    // `gate`/`gate=hold` entry exists yet, so the gate coarse filter has
-    // nothing to add as a candidate).
+    // A layer: a bash push hits the git-push tag, zero Jev calls.
     const callsBefore = h.fake.calls.length;
     await h.emit("tool_call", {
       type: "tool_call",
@@ -249,8 +243,8 @@ describe("memory jev e2e (full)", () => {
     const a = h.sent.find((m) => m.details?.layer === "A");
     expect(a?.content).toContain("corp proxy");
 
-    // Now add the `gate=hold` user rule and exercise the gate: a running
-    // release.sh job + the hold rule ⇒ blocked once.
+    // Gate removed (2026-11): a `gate=hold` rule in memory parses but never
+    // blocks — `git commit` proceeds unblocked.
     await h.tools.get("memory").execute(
       "w2",
       {
@@ -262,20 +256,6 @@ describe("memory jev e2e (full)", () => {
       undefined,
       h.ctx(),
     );
-    await settle();
-
-    h.jobs.push({
-      jobId: "job_1",
-      command: "bash scripts/release/release.sh 0.1.0",
-      status: "running",
-      createdAt: Date.now(),
-    });
-    const blocked = (await h.toolCall("git commit -m wip")) as any;
-    expect(blocked?.block).toBe(true);
-    expect(blocked.reason).toContain("gate");
-
-    // Job finished ⇒ evidence gone ⇒ next commit passes.
-    h.jobs.length = 0;
     await settle(2_100); // corpus cache window (2s)
     const passed = await h.toolCall("git commit -m wip2");
     expect(passed).toBeUndefined();
@@ -295,7 +275,7 @@ describe("memory jev e2e (full)", () => {
 });
 
 describe("memory jev e2e (partial)", () => {
-  test("same shape with a classifier-unavailable registry: write/U/A/gate degrade to zero-call paths", async () => {
+  test("same shape with a classifier-unavailable registry: write/U/A degrade to zero-call paths", async () => {
     const h = harness({ partial: true });
 
     await h.mem("init");
@@ -337,19 +317,12 @@ describe("memory jev e2e (partial)", () => {
     expect(uResults.find((r) => r?.message !== undefined)).toBeUndefined();
     expect(h.fake.calls.length).toBe(callsBefore0);
 
-    // Gate: `gate=hold` + named-program evidence still blocks without
-    // calling Jev at all (jev-arch §6.4.5 evidence dossier applies to
-    // `partial` per Q33/N1).
-    h.jobs.push({
-      jobId: "job_2",
-      command: "bash scripts/release/release.sh 0.1.0",
-      status: "running",
-      createdAt: Date.now(),
-    });
-    const blocked = (await h.toolCall("git commit -m wip")) as any;
-    expect(blocked?.block).toBe(true);
-    expect(blocked.reason).toMatch(/partial|未判定/);
-    expect(h.fake.calls.length).toBe(afterProbe); // no fresh Jev call beyond the probe
+    // Gate removed (2026-11): a tool call is never blocked, and no fresh
+    // Jev call happens beyond the probe.
+    const callsBefore1 = h.fake.calls.length;
+    const blocked = await h.toolCall("git commit -m wip");
+    expect(blocked).toBeUndefined();
+    expect(h.fake.calls.length).toBe(callsBefore1);
 
     // `/mem jev` must still render without throwing, reporting the partial
     // state and the two-column stopped/running view.

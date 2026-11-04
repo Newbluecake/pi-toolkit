@@ -6,7 +6,6 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  buildGateQuestions as realBuildGateQuestions,
   buildRecallQuestion as realBuildRecallQuestion,
   buildReviewQuestions as realBuildReviewQuestions,
   buildTagCoreQuestions as realBuildTagCoreQuestions,
@@ -32,19 +31,6 @@ describe("questions-eval-parity: recall (e<n> bool template)", () => {
 describe("questions-eval-parity: tag core m_* questions", () => {
   it("buildTagCoreQuestions() (no-arg eval script) matches buildTagCoreQuestions(taxonomy) (real)", () => {
     expect(evalScript.buildTagCoreQuestions()).toEqual(realBuildTagCoreQuestions(taxonomy()));
-  });
-});
-
-describe("questions-eval-parity: gate g<n> choice questions", () => {
-  it("buildGateQuestions(state, guardEntries) matches for the same inputs", () => {
-    const state = { tool: "bash", command: "git push --force", programs: [], running: [], session: "main" };
-    const guardEntries = [
-      { id: "g1", file: "pitfalls.md", heading: "发版规则", authority: "user", excerpt: "禁止强推 dev" },
-      { id: "g2", file: "core.md", authority: "agent", excerpt: "发版脚本运行期间不要动 git 状态" },
-    ];
-    expect(evalScript.buildGateQuestions(state, guardEntries)).toEqual(
-      realBuildGateQuestions(state, guardEntries).questions,
-    );
   });
 });
 

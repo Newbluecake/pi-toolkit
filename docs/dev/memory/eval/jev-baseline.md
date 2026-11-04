@@ -1,6 +1,7 @@
 # Jev 评测基线（E0，阶段一）
 
-> 主会话，2026-10-30。脚本 `scripts/dev/jev-eval.mjs`，数据集 `docs/dev/memory/eval/`。调用：OpenCode Zen（`opencode/jev-1.13` 付费档、`opencode/jev-1.13-free` 免费档），经 HTTP 代理（本机直连出口被按地区拦截，返回 451）。
+> 主会话，2026-10-30。脚本 `scripts/dev/jev-eval.mjs`，数据集 `docs/dev/memory/eval/`。
+> （2026-11-04 注：gate 拦截功能已整体移除，`jev-gate.json` 数据集与脚本 gate 集随之删除；本文中拦截相关的基线数字仅作历史记录。）调用：OpenCode Zen（`opencode/jev-1.13` 付费档、`opencode/jev-1.13-free` 免费档），经 HTTP 代理（本机直连出口被按地区拦截，返回 451）。
 > 阶段一只跑召回与打标：拦截、整理两套评测的出题模板与架构稿 §6.4.3 / §6.3.3 不一致（脚本用两道 bool，架构稿是 choice），等 J2 落地 `questions.ts` 并加一致性测试后再跑（阶段二）。
 
 ## 1. 召回（U 层）
