@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock, systemClock } from "../../../src/core/clock.js";
+import * as budget from "../../../src/reflex/core/budget.js";
 import { executePort } from "../../../src/reflex/ports/index.js";
 import type { ReflexPort } from "../../../src/reflex/ports/index.js";
 import type { PortOutcome } from "../../../src/reflex/core/types.js";
@@ -125,7 +126,7 @@ describe("executePort", () => {
     await p;
     expect(remove).toHaveBeenCalledTimes(2);
   });
-  it("contains broken clock setup/cleanup and still removes abort listeners", async () => {
+  it("uses unified clock-failure semantics and still removes abort listeners", async () => {
     for (const stage of ["setup", "cleanup"]) {
       const e = env();
       const remove = vi.spyOn(e.signal, "removeEventListener");
@@ -144,9 +145,51 @@ describe("executePort", () => {
           e,
           clock,
         ),
-      ).toEqual({ kind: "error", reason: "exception" });
+      ).toEqual(stage === "setup" ? { kind: "timeout", reason: "budget" } : ok);
       expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
     }
+  });
+  it("delegates to the unified race with the original budget, clock and signal", async () => {
+    const race = vi.spyOn(budget, "raceBudget");
+    try {
+      const clock = new FakeClock();
+      const e = env({ budgetMs: Infinity });
+      expect(
+        await executePort(
+          port(() => ok),
+          e,
+          clock,
+        ),
+      ).toEqual(ok);
+      expect(race).toHaveBeenCalledTimes(1);
+      expect(race).toHaveBeenCalledWith(expect.any(Promise), Infinity, clock, e.signal);
+    } finally {
+      race.mockRestore();
+    }
+  });
+  it.each(["timeout", "abort"])("ignores late success after %s", async (kind) => {
+    const controller = new AbortController();
+    const clock = new FakeClock();
+    let resolve!: (outcome: PortOutcome) => void;
+    const result = executePort(
+      port(
+        () =>
+          new Promise((r) => {
+            resolve = r;
+          }),
+      ),
+      env({ signal: controller.signal }),
+      clock,
+    );
+    await Promise.resolve();
+    if (kind === "timeout") clock.advance(budget.REFLEX_BUDGET_MS);
+    else controller.abort();
+    const expected = kind === "timeout" ? { kind: "timeout", reason: "budget" } : { kind: "error", reason: "aborted" };
+    expect(await result).toEqual(expected);
+    resolve(ok);
+    await Promise.resolve();
+    expect(await result).toEqual(expected);
+    expect(clock.pendingTimers).toBe(0);
   });
   it("production budget timer is unref'd", async () => {
     const unref = vi.spyOn(globalThis, "setTimeout");

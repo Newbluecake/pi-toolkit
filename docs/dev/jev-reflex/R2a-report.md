@@ -202,3 +202,88 @@ All matched files use Prettier code style!
 3. **README 由 root 更新**：本包独占文件域未含 README，已 message_agent 说明；此报告承载 R2a 实现细节，避免并行包写冲突。
 4. **R2a′ 必须做**：原 owner resume，将 index.ts 临时竞速收敛到 R1 raceBudget；保留 execute-port 同组测试验证行为不变，不在本包提前 import R1。
 5. **无全量测试声明**：按并行资源禁令只跑指定定向命令；全量由 root 在集成验收时单份执行。本包 ports 总计 54 个测试全部通过（86 减去 pi-free 30/off golden 2）。
+
+## R2a′ · 预算竞速收敛（2026-11-05）
+
+基线：R2a `18aad043` + R1 `645050a4`。本节不改写上面的 R2a 历史验收结果。
+
+### 改动文件与重复代码删除量
+
+- `/home/bluecake/ai/pi-toolkit/src/reflex/ports/index.ts`：executePort 改用 `core/budget.ts` 的 raceBudget，移除 ports 自建 timer/finish/abort-listener/deadline race。
+- `/home/bluecake/ai/pi-toolkit/tests/reflex/ports/execute-port.test.ts`：针对统一实现的调用验证；补充 timeout/abort 后迟到成功不能覆盖最终结果的回归测试。
+- `/home/bluecake/ai/pi-toolkit/docs/dev/jev-reflex/R2a-report.md`：仅追加本节。
+
+index.ts 的真实 `git diff --numstat`：新增 16 行、删除 47 行，净减少 31 行。删除行中 41 行是临时预算竞速主体（从 clamp/span 判定到自建 Promise race），另 6 行为被替换的 imports/注释。没有第二套计时器或 deadline 算术。registry/四个 port 输出没有改动。
+
+### 适配语义
+
+1. raceBudget 统一负责 REFLEX_BUDGET_MS 上限、clampSpanMs、Clock timer、清理和 abort listener。executePort 不再管理 TimerHandle。
+2. 预先 abort 仍不执行 port，返回 error/aborted。非法 budget 的启动守卫只检查 `budgetMs > 0`，避免启动读操作；实际 deadline 钳位在 raceBudget 内。
+3. 先把同步 throw / rejected promise 转成 PortOutcome error/exception，再交给 raceBudget；避免统一 race 把原始 rejected promise 当 timeout，保留真实失败分类。
+4. 统一 race 的 timeout 加回 ExecOutcome `reason:"budget"`；signal 已 aborted 的 timeout 映射 error/aborted。其他 PortOutcome 原样返回。
+5. 生产 Clock 继续 unref；成功、超时、abort 均清理 timer/listener；迟到成功和 rejection 不覆盖已结算结果，新增显式 timeout/abort 迟到成功断言。
+6. **故障注入边缘差异已上报 root**：旧临时竞速对注入 clock.setTimer / clearTimer 抛错均返回 error/exception；统一 raceBudget 对 setup 抛错返回 timeout，对 cleanup 抛错保留已产生 outcome。当前测试按统一契约明确断言 setup→timeout/budget、cleanup→ok，两者仍 fail-open、不抛、不悬挂且移除 abort listener。未改冻结的 budget.ts。若 root 要求这个故障注入场景也保持旧 outcome，可在 ports 增薄 Clock 错误捕获适配器，而不能恢复第二套预算竞速。
+
+### 自验命令与真实输出
+
+```sh
+set -o pipefail
+timeout 180 env PI_TOOLKIT_TEST_WORKERS=2 npx vitest run tests/reflex tests/boundary/pi-free.test.ts tests/integration/reflex-off-golden.test.ts 2>&1 | tee /tmp/reflex-R2aprime-tests.log
+```
+
+```text
+ RUN  v2.1.9 /home/bluecake/ai/pi-toolkit
+ ✓ tests/reflex/core/promotion.test.ts (25 tests) 12ms
+ ✓ tests/reflex/core/gate.test.ts (37 tests) 25ms
+ ✓ tests/reflex/ports/registry.test.ts (6 tests) 17ms
+ ✓ tests/reflex/ports/execute-port.test.ts (16 tests) 14ms
+ ✓ tests/reflex/wire-skeleton.test.ts (9 tests) 9ms
+ ✓ tests/boundary/pi-free.test.ts (30 tests) 579ms
+ ✓ tests/reflex/core/match.test.ts (11 tests) 12ms
+ ✓ tests/reflex/core/state.test.ts (15 tests) 8ms
+ ✓ tests/reflex/core/render.test.ts (9 tests) 12ms
+ ✓ tests/reflex/core/budget.test.ts (12 tests) 10ms
+ ✓ tests/reflex/core/catalog.test.ts (13 tests) 43ms
+ ✓ tests/reflex/core/agreement.test.ts (11 tests) 8ms
+ ✓ tests/reflex/core/schema.test.ts (18 tests) 14ms
+ ✓ tests/reflex/ports/git.test.ts (16 tests) 12ms
+ ✓ tests/reflex/ports/git-real.test.ts (2 tests) 23ms
+ ✓ tests/reflex/core/gate.property.test.ts (2 tests) 58ms
+[reflex perf] n=10000 p50=0.0109ms p99=0.0337ms max=0.8518ms
+ ✓ tests/reflex/core/perf.test.ts (1 test) 154ms
+ ✓ tests/reflex/ports/git-status-parse.test.ts (17 tests) 10ms
+ ✓ tests/integration/reflex-off-golden.test.ts (2 tests) 182ms
+ ✓ tests/reflex/core/normalize.test.ts (7 tests) 4ms
+ Test Files  20 passed (20)
+      Tests  259 passed (259)
+   Start at  06:01:52
+   Duration  7.78s (transform 4.52s, setup 409ms, collect 7.67s, tests 1.21s, environment 3ms, prepare 1.04s)
+```
+
+退出 0。包含统一 core/budget、全部 reflex core/ports、pi-free 闭包与 off golden。off golden 既有缺 credential/settings migration 提示保留在全文日志，没有失败。
+
+```sh
+timeout 180 npm run typecheck 2>&1 | tee /tmp/reflex-R2aprime-typecheck.log
+```
+
+```text
+> pi-toolkit@0.10.5 typecheck
+> node node_modules/typescript-7/bin/tsc --noEmit -p tsconfig.json && node node_modules/typescript-7/bin/tsc --noEmit -p tsconfig.typecheck.json && vue-tsc --noEmit -p src/web-hub/ui/tsconfig.json
+```
+
+退出 0，无诊断。
+
+```sh
+timeout 120 npx prettier --check src/reflex/ports/index.ts tests/reflex/ports/execute-port.test.ts docs/dev/jev-reflex/R2a-report.md 2>&1 | tee /tmp/reflex-R2aprime-format.log
+git diff --quiet HEAD -- tests/fixtures/ src/reflex/core/
+git diff --check
+```
+
+格式检查退出 0（全文 `/tmp/reflex-R2aprime-format.log`）：
+
+```text
+Checking formatting...
+All matched files use Prettier code style!
+```
+
+冻结面检查真实输出 `frozen diff exit=0`，`git diff --check` 退出 0；所有 core 文件及 fixtures 相对 HEAD 不变。未执行 git 写操作，未运行全量 npm test。
