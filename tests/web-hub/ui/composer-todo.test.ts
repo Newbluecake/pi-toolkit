@@ -139,8 +139,11 @@ describe("Composer todo chip (2026-11 user request)", () => {
     const w = mountComposer(todoView(todoFixture()));
     const btn = w.find(".composer-todo-btn");
     expect(btn.exists()).toBe(true);
+    // single-segment mode (todo-only): icon WITHOUT the inline number; the count is the badge
+    expect(btn.find(".seg .n").exists()).toBe(false);
     expect(btn.find(".composer-todo-badge").text()).toBe("2"); // open 1 + inProgress 1
-    expect(btn.attributes("aria-label")).toBe("Show tasks");
+    expect(btn.attributes("aria-label")).toContain("✓ 2"); // the aria always carries the count
+    expect(btn.attributes("aria-label")).toBe("Show tasks · ✓ 2");
     expect(btn.attributes("aria-expanded")).toBe("false");
     // Positioned OUTSIDE the composer card (absolute, top-left), not inside .composer-chips.
     expect(w.find(".composer-chips .composer-todo-external").exists()).toBe(false);
@@ -287,23 +290,24 @@ describe("Composer todo chip (2026-11 user request)", () => {
 // ---------------------------------------------------------------------------
 
 describe("Composer tasks chip ⏰ segment (r2 W3)", () => {
-  it("sched-only session (no todo wire): the chip renders with ONLY the ⏰ segment; badge = sched count", () => {
+  it("sched-only session (no todo wire): the chip shows ONLY a ⏰ icon (no inline number) + the count badge", () => {
     const w = mountComposer(todoView(undefined), hubOf({ schedules: makePayload() }));
     const btn = w.find(".composer-todo-btn");
     expect(btn.exists()).toBe(true);
-    expect(btn.find(".seg").text()).toBe("2"); // clock seg count (fixture: 2 tasks)
-    expect(btn.attributes("aria-label")).toBe("Show tasks");
-    expect(btn.find(".composer-todo-badge").text()).toBe("2");
-    // no ✓ segment without a todo wire
-    expect(btn.findAll(".seg")).toHaveLength(1);
+    expect(btn.findAll(".seg")).toHaveLength(1); // no ✓ segment without a todo wire
+    expect(btn.find(".seg .n").exists()).toBe(false); // single-segment mode: no inline number
+    expect(btn.find(".composer-todo-badge").text()).toBe("2"); // fixture: 2 tasks
+    expect(btn.attributes("aria-label")).toBe("Show tasks · ⏰ 2"); // aria carries the real count
   });
 
-  it("both sides: ✓ seg + ⏰ seg, badge = open + sched; live run spins the clock icon", () => {
+  it("both sides: inline `✓ N`/`⏰ M` numbers, NO badge; live run spins the clock icon", () => {
     const running = makePayload(); // fixture session carries a `running` run ⇒ live
     const w = mountComposer(todoView(todoFixture()), hubOf({ schedules: running }));
     const btn = w.find(".composer-todo-btn");
     expect(btn.findAll(".seg")).toHaveLength(2);
-    expect(btn.find(".composer-todo-badge").text()).toBe("4"); // 2 open + 2 sched
+    expect(btn.find(".composer-todo-badge").exists()).toBe(false); // both-segments mode: no badge
+    expect(btn.findAll(".seg .n").map((n) => n.text())).toEqual(["2", "2"]);
+    expect(btn.attributes("aria-label")).toBe("Show tasks · ✓ 2 · ⏰ 2");
     const clockSeg = btn.findAll(".seg")[1]!;
     expect(clockSeg.classes()).toContain("live");
     expect(clockSeg.find(".spin").exists()).toBe(true); // spinning clock while a run is live
@@ -320,7 +324,7 @@ describe("Composer tasks chip ⏰ segment (r2 W3)", () => {
     expect(mountComposer(todoView(undefined)).find(".composer-todo-external").exists()).toBe(false);
     const noCap = mountComposer(todoView(undefined), hubOf({ caps: [], schedules: makePayload() }));
     expect(noCap.find(".composer-todo-external").exists()).toBe(false);
-    // todo-only stays exactly as before W3
+    // todo-only: single ✓ segment, count as the badge
     const todoOnly = mountComposer(todoView(todoFixture()));
     expect(todoOnly.find(".composer-todo-btn").findAll(".seg")).toHaveLength(1);
     expect(todoOnly.find(".composer-todo-badge").text()).toBe("2");
@@ -348,9 +352,33 @@ describe("Composer tasks chip ⏰ segment (r2 W3)", () => {
     expect(panel.find(".composer-tasks-sec").exists()).toBe(true);
     expect(panel.findAll(".sched-row")).toHaveLength(1);
     expect(panel.find(".sched-row-acts").exists()).toBe(false); // read-only: no action column
+    // a11y (2026-11-05 fix): plainNames — the row name is a plain SPAN, not a focusable button
+    const name = panel.find(".sched-row-name");
+    expect(name.element.tagName).toBe("SPAN");
+    expect(panel.findAll(".composer-tasks-sec button.sched-row-name")).toHaveLength(0);
     expect(panel.find(".composer-sched-readonly").exists()).toBe(true);
     await panel.find(".sched-run-link").trigger("click");
     expect(selectRuns).toEqual([["agent-a", "run-w3a"]]);
+  });
+
+  it("badge rulings (2026-11-05 round 2): single segment ⇒ badge carries its count; both ⇒ inline numbers, no badge; expanded ⇒ badge hidden", async () => {
+    // todo-only: ✓ icon + the open count as the badge
+    const todoOnly = mountComposer(todoView(todoFixture()));
+    expect(todoOnly.find(".composer-todo-btn .seg .n").exists()).toBe(false);
+    expect(todoOnly.find(".composer-todo-btn .composer-todo-badge").text()).toBe("2");
+    // sched-only: ⏰ icon + the sched count as the badge
+    const schedOnly = mountComposer(todoView(undefined), hubOf({ schedules: makePayload() }));
+    expect(schedOnly.find(".composer-todo-btn .seg .n").exists()).toBe(false);
+    expect(schedOnly.find(".composer-todo-btn .composer-todo-badge").text()).toBe("2");
+    // both ⇒ inline numbers, NO badge
+    const both = mountComposer(todoView(todoFixture()), hubOf({ schedules: makePayload() }));
+    expect(both.find(".composer-todo-btn .composer-todo-badge").exists()).toBe(false);
+    expect(both.find(".composer-todo-btn").attributes("aria-label")).toBe("Show tasks · ✓ 2 · ⏰ 2");
+    // expanded ⇒ badge hidden (existing CSS contract, still applies)
+    await both.find(".composer-todo-btn").trigger("click");
+    expect(both.find(".composer-todo-btn").attributes("aria-expanded")).toBe("true");
+    const css = readFileSync(resolve("src/web-hub/ui/src/styles/composer-todo.css"), "utf8");
+    expect(css).toMatch(/\.composer-todo-btn\[aria-expanded="true"\]\s+\.composer-todo-badge\s*\{[^}]*display:\s*none/);
   });
 
   it("panel: both sections render side by side; the todo list keeps its open-only ruling", async () => {

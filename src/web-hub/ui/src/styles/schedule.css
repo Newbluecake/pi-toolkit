@@ -362,21 +362,26 @@
 
 .sched-row-name {
   min-width: 0;
-  padding: 0;
-  border: 0;
-  background: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--c-text);
   font-family: var(--font-sans);
   font-size: var(--fs-sm);
   font-weight: var(--fw-semibold);
-  text-align: left;
-  cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.sched-row-name:hover {
+/* The clickable (TasksPanel) form — `plainNames` renders a bare span with the shared layout
+ * above and none of the affordances below. */
+button.sched-row-name {
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.sched-row-name:hover {
   color: var(--c-primary-hover);
 }
 

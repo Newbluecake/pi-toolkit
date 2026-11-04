@@ -32,6 +32,7 @@ import { CONTROL_VIEW } from "../control/controlContext.js";
 import ScheduleRows from "../schedule/ScheduleRows.vue";
 import type { SchedSummary, TaskRow } from "../schedule/taskRow.js";
 import "../../styles/todo.css";
+import "../../styles/schedule.css"; // the panel chrome (.tasks-panel/.tasks-sec/…) + rows (via ScheduleRows)
 
 const props = defineProps<{
   /** Absent/empty ⇒ the todo section doesn't render (the old TodoPanel ruling). */

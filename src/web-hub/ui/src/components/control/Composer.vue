@@ -103,11 +103,11 @@
   the mention panel's slot above the input card — hover is IGNORED on coarse/touch pointers
   (the browser's synthetic pre-click mouseenter would otherwise eat the first tap), where a
   click pins/unpins directly; an outside pointerdown closes it. The expanded panel carries
-  the open-only todo section plus a READ-ONLY sched section (`ScheduleRows` compact — no
-  action buttons, run links still jump to the fleet drawer).
+  the open-only todo section plus a READ-ONLY sched section (`ScheduleRows` compact with
+  `plain-names` — no action buttons, run links still jump to the fleet drawer).
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue";
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, shallowRef, useId, watch } from "vue";
 import { useTicker } from "../../composables/useTicker.js";
 import {
   commandPolicyFor,
@@ -158,7 +158,6 @@ import { CONTROL_ENV, CONTROL_VIEW, HUB_CTX } from "./controlContext.js";
 import { useDeliverDefault } from "../../composables/useDeliverDefault.js";
 import { browserLocalStorage } from "../shell/themeStorage.js";
 import "../../styles/composer-todo.css";
-import "../../styles/schedule.css";
 import ScheduleRows from "../schedule/ScheduleRows.vue";
 import type { TaskRow } from "../schedule/taskRow.js";
 import "../../styles/upload.css";
@@ -507,21 +506,60 @@ const schedWire = computed(() =>
   schedSummaryOf(hub?.state.value.hub?.["caps"], hub?.state.value.schedules, schedSessionId.value),
 );
 const schedProj = computed(() => sessionProjectionOf(hub?.state.value.schedules, schedSessionId.value));
-/** 30s ticker for the rows' relative tokens (TasksPanel/SchedulePanel precedent). */
-const schedTicker = useTicker({
-  doc: typeof document === "undefined" ? { hidden: false, addEventListener() {}, removeEventListener() {} } : document,
-  win: typeof window === "undefined" ? { addEventListener() {}, removeEventListener() {} } : window,
-  setTimeout: (fn, ms) => setTimeout(fn, ms),
-  clearTimeout: (h) => clearTimeout(h),
-  now: () => Date.now(),
-  intervalMs: 30_000,
-});
-onUnmounted(() => schedTicker.dispose());
-const schedRows = computed<readonly TaskRow[]>(() =>
-  schedWire.value === undefined ? [] : (taskRowsOf(schedProj.value, schedTicker.now.value) as TaskRow[]),
+/** 30s ticker for the rows' relative tokens (TasksPanel/SchedulePanel precedent) — MANAGED:
+ * created only while a sched projection exists and disposed the moment it goes away (no
+ * cap / no sessionId / no payload ⇒ no resident interval at all; useTicker has no lifecycle
+ * registration of its own, so creating it from a watcher is safe). The handle's `now` ref is
+ * re-exposed through a shallowRef so swapping it stays reactive. */
+function makeSchedTicker() {
+  return useTicker({
+    doc:
+      typeof document === "undefined" ? { hidden: false, addEventListener() {}, removeEventListener() {} } : document,
+    win: typeof window === "undefined" ? { addEventListener() {}, removeEventListener() {} } : window,
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (h) => clearTimeout(h),
+    now: () => Date.now(),
+    intervalMs: 30_000,
+  });
+}
+const schedNowSrc = shallowRef<ReturnType<typeof makeSchedTicker> | null>(null);
+const schedNow = computed(() => schedNowSrc.value?.now.value ?? 0);
+watch(
+  schedWire,
+  (w) => {
+    if (w === undefined) {
+      schedNowSrc.value?.dispose();
+      schedNowSrc.value = null;
+    } else if (schedNowSrc.value === null) {
+      schedNowSrc.value = makeSchedTicker();
+    }
+  },
+  { immediate: true },
 );
-/** The chip's badge = ✓ open + ⏰ count (preview B1); zero-sum never renders the badge. */
+onUnmounted(() => {
+  schedNowSrc.value?.dispose();
+  schedNowSrc.value = null;
+});
+const schedRows = computed<readonly TaskRow[]>(() =>
+  schedWire.value === undefined ? [] : (taskRowsOf(schedProj.value, schedNow.value) as TaskRow[]),
+);
+/** Both chip segments showing — the inline-numbers mode (each seg carries its own count);
+ *  a SINGLE-segment chip drops the inline number and surfaces it as the badge instead
+ *  (2026-11-05 user rulings, screenshot feedback round 2). */
+const bothSegs = computed(() => todoSegOn.value && schedWire.value !== undefined);
 const badgeCount = computed(() => todoOpenCount.value + (schedWire.value?.count ?? 0));
+/** Badge = single-segment mode only (it then carries that one segment's count — the sum
+ *  equals it); both-segments mode shows the numbers inline and NO badge. Hidden while
+ *  expanded (composer-todo.css, unchanged). */
+const badgeOn = computed(() => todoSegOn.value !== (schedWire.value !== undefined) && badgeCount.value > 0);
+/** The aria label always carries the REAL counts (compact English tokens in both locales —
+ *  the i18n copy stays count-free), even where the visuals drop the inline number. */
+const chipAria = computed(() => {
+  const parts = [t("detail.composerTasksAria")];
+  if (todoSegOn.value) parts.push(`✓ ${todoOpenCount.value}`);
+  if (schedWire.value !== undefined) parts.push(`⏰ ${schedWire.value.count}`);
+  return parts.join(" · ");
+});
 /** The panel's run link ⇒ the fleet drawer's run view (FleetDrawer's selectRun precedent). */
 function onSchedOpenRun(runId: string): void {
   if (view === null) return;
@@ -1409,8 +1447,8 @@ watch(
          Todo rows mirror the detail TasksPanel's structure (status icon + #id subject +
          optional truncated description + open-blocker label) minus completed tasks — those
          are the header's grey `X done` summary. The sched section renders `ScheduleRows`
-         compact WITHOUT `canWrite` — strictly read-only (no action buttons, the row names are
-         pointer-inert here via composer-todo.css), only the run links are live. -->
+         compact with `plain-names` and WITHOUT `canWrite` — strictly read-only (no action
+         buttons, no focusable name affordances), only the run links are live. -->
     <div
       v-if="chipOn && todoExpanded"
       class="composer-todo-panel"
@@ -1448,7 +1486,7 @@ watch(
       </ul>
       <div v-if="schedWire !== undefined" class="composer-tasks-sec">
         <p class="composer-tasks-sec-title">{{ t("detail.tasksSchedSec", { n: schedWire.count }) }}</p>
-        <ScheduleRows :rows="schedRows" :now="schedTicker.now.value" compact @open-run="onSchedOpenRun" />
+        <ScheduleRows :rows="schedRows" :now="schedNow" compact plain-names @open-run="onSchedOpenRun" />
         <p class="composer-sched-readonly">{{ t("detail.composerSchedReadonly") }}</p>
       </div>
     </div>
@@ -1509,9 +1547,11 @@ watch(
           </div>
           <!-- Tasks chip (2026-11 user request + schedule-auto-approve r2 W3): positioned
                OUTSIDE the composer card, top-left corner (absolute, top:-24px). One pill with
-               up to two segments — `✓ N` (open todo: pending + in_progress) and `⏰ N`
-               (scheduled tasks, the clock icon spins while a run is live) — plus the numeric
-               badge (open + sched, hidden while expanded). Hover auto-expands the read-only
+               up to two segments — ✓ (open todo: pending + in_progress) and ⏰ (scheduled
+               tasks, the clock icon spins while a run is live). BOTH segments present ⇒ the
+               inline `✓ N`/`⏰ M` numbers, NO badge; a SINGLE segment ⇒ icon only with that
+               count as the corner badge (the aria-label always carries the real counts). The
+               badge hides while expanded. Hover auto-expands the read-only
                panel on `(hover: hover) and (pointer: fine)` pointers ONLY (touch's synthetic
                pre-click mouseenter is ignored — the first tap pins directly); click
                pins/unpins. Always visible while either side has content (not affected by
@@ -1528,18 +1568,20 @@ watch(
               type="button"
               class="composer-todo-btn"
               :aria-expanded="todoExpanded"
-              :aria-label="t('detail.composerTasksAria')"
+              :aria-label="chipAria"
               @click="onTodoChipClick"
             >
               <span v-if="todoSegOn" class="seg">
-                <AppIcon name="check" class="icon-sm" /><span class="n">{{ todoOpenCount }}</span>
+                <AppIcon name="check" class="icon-sm" /><span v-if="bothSegs" class="n">{{ todoOpenCount }}</span>
               </span>
               <span v-if="schedWire !== undefined" class="seg" :class="{ live: schedWire.live }">
-                <AppIcon name="clock" class="icon-sm" :class="{ spin: schedWire.live }" /><span class="n">{{
-                  schedWire.count
-                }}</span>
+                <AppIcon name="clock" class="icon-sm" :class="{ spin: schedWire.live }" /><span
+                  v-if="bothSegs"
+                  class="n"
+                  >{{ schedWire.count }}</span
+                >
               </span>
-              <span v-if="badgeCount > 0" class="composer-todo-badge">{{ badgeCount }}</span>
+              <span v-if="badgeOn" class="composer-todo-badge">{{ badgeCount }}</span>
             </button>
           </div>
           <div class="composer-end">

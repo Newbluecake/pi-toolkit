@@ -11,7 +11,7 @@
  * pins directly); a click pins/unpins it and an outside pointerdown closes it. The panel's
  * todo section reuses this file's row styles; the sched section rides schedule.css's
  * `.sched-row` grammar (imported by Composer.vue) in the compact variant, strictly
- * read-only — the row names are pointer-inert here (`.composer-tasks-sec`), only the run
+ * read-only — the names render as plain spans there (`plain-names`), only the run
  * links are live. While queue/held rows render above the composer (the steer/held scenario)
  * the chip and panel are not rendered at all — Composer.vue's `queueAbove` render condition.
  *
@@ -154,16 +154,8 @@
   color: var(--c-text-3);
 }
 
-/* Strictly read-only: no action buttons ever (ScheduleRows gets no canWrite), and the row
- * names are pointer-INERT here — unlike TasksPanel they open nothing in the composer. */
-.composer-tasks-sec .sched-row-name {
-  cursor: default;
-  pointer-events: none;
-}
-
-.composer-tasks-sec .sched-row-name:hover {
-  color: var(--c-text);
-}
+/* Strictly read-only: no action buttons ever (ScheduleRows gets no canWrite) and the names
+ * render as plain spans there (`plain-names`) — nothing focusable but the run links. */
 
 .composer-sched-readonly {
   margin: 4px 0 0;

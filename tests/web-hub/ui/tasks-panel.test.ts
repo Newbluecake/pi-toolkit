@@ -10,6 +10,8 @@
  * with confirm:true), plus `@logic/state.js`'s AgentState.todo mirror lifecycle.
  */
 import { DOMWrapper, flushPromises, mount, type VueWrapper } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { computed, nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
@@ -376,7 +378,9 @@ describe("TasksPanel.vue — sched section (r2 W2)", () => {
     await expand(w);
     await w.find(".tasks-foot-link").trigger("click");
     expect(w.emitted("openSchedule")).toHaveLength(1);
-    await w.find(".sched-row-name").trigger("click");
+    // default mode: the name is a clickable BUTTON (the composer's plainNames is opt-in)
+    expect(w.find(".sched-row-name").element.tagName).toBe("BUTTON");
+    await w.find("button.sched-row-name").trigger("click");
     expect(w.emitted("openSchedule")).toHaveLength(2);
   });
 
@@ -404,13 +408,30 @@ describe("TasksPanel.vue — render gate (either side has content)", () => {
     expect(w.find(".sched-row").exists()).toBe(false);
   });
 
-  it("ScheduleRows standalone: canWrite=false hides the whole action column", () => {
-    const w = mount(ScheduleRows, {
-      props: { rows: [], now: 0, canWrite: false },
-    });
-    mounted.push(w);
-    expect(w.find(".sched-rows").exists()).toBe(true);
-    expect(w.find(".sched-row-acts").exists()).toBe(false);
+  it("ScheduleRows standalone: canWrite=false hides the whole action column; plainNames degrades the name to a span", () => {
+    const row = {
+      id: "s_x",
+      name: "t",
+      whenText: "cron x",
+      nextAt: undefined,
+      nextIn: "1h",
+      enabled: true,
+      live: false,
+      lastRun: undefined,
+    };
+    const clickable = mount(ScheduleRows, { props: { rows: [row], now: 0, canWrite: false } });
+    mounted.push(clickable);
+    expect(clickable.find(".sched-row-acts").exists()).toBe(false);
+    expect(clickable.find(".sched-row-name").element.tagName).toBe("BUTTON");
+    const plain = mount(ScheduleRows, { props: { rows: [row], now: 0, canWrite: false, plainNames: true } });
+    mounted.push(plain);
+    expect(plain.find(".sched-row-name").element.tagName).toBe("SPAN");
+    expect(plain.findAll("button")).toHaveLength(0); // nothing focusable at all in this mode
+    // css contract: the hover/pointer affordance is scoped to the button form (schedule.css)
+    const css = readFileSync(resolve("src/web-hub/ui/src/styles/schedule.css"), "utf8");
+    expect(css).toMatch(/button\.sched-row-name:hover/);
+    // no bare (non-button) `.sched-row-name:hover` selector — the span form never tints
+    expect(css).not.toMatch(/(^|[^.\w])\.sched-row-name:hover/);
   });
 });
 
