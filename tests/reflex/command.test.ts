@@ -123,7 +123,7 @@ describe("/reflex status", () => {
     expect(statusText(deps(), [])).toBe(
       [
         "reflex: enabled · autoResolve=- · gen 2",
-        "脚本状态（shadow 只记账不作答；R2b 中 auto 也按 shadow 处理）：",
+        "脚本状态（shadow 只记账不作答；auto 命中时直接作答，失败两次/重复/被纠正自动降回 shadow）：",
         "  jobs.list shadow strikes=0",
         "  fleet.status shadow strikes=0",
         "  quota.summary shadow strikes=0",
@@ -183,7 +183,7 @@ describe("/reflex status", () => {
     expect(statusText(d, branch)).toBe(
       [
         "reflex: enabled · autoResolve=jobs.list,nope.x · gen 2",
-        "脚本状态（shadow 只记账不作答；R2b 中 auto 也按 shadow 处理）：",
+        "脚本状态（shadow 只记账不作答；auto 命中时直接作答，失败两次/重复/被纠正自动降回 shadow）：",
         "  jobs.list demoted strikes=2 demote=strikes",
         "  git.status shadow strikes=0",
         "本激活计数：candidates=3 answered=0 ambiguous=0 repeat=0 reasked=0 corrected=1 fallback=fallback.timeout=2",

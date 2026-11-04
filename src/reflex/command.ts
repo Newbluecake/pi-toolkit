@@ -115,7 +115,7 @@ export function statusText(deps: ReflexCommandDeps, branch: readonly unknown[]):
   lines.push(
     `reflex: ${snap.enabled ? "enabled" : "disabled"} · autoResolve=${auto.length === 0 ? "-" : auto.join(",")} · gen ${snap.generation}`,
   );
-  lines.push("脚本状态（shadow 只记账不作答；R2b 中 auto 也按 shadow 处理）：");
+  lines.push("脚本状态（shadow 只记账不作答；auto 命中时直接作答，失败两次/重复/被纠正自动降回 shadow）：");
   for (const s of snap.scripts) {
     lines.push(
       `  ${s.id} ${s.state} strikes=${s.strikes}${s.demoteReason !== undefined ? ` demote=${s.demoteReason}` : ""}`,

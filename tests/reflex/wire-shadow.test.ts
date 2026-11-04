@@ -169,22 +169,34 @@ describe("R-I5 synchronous shadow", () => {
     expect(h.appended.length).toBe(1);
   });
 
-  it("no tool calls ⇒ no-tool; unrelated tool ⇒ diverge; high ∧ auto is recorded (state:auto) but never answered", async () => {
-    const h = harness({ autoResolve: ["jobs.list"] });
+  it("R3a: auto answers (handled, one sendMessage) while autoResolve holds the id; live removal returns to shadow-only records (no-tool / diverge)", async () => {
+    const autoResolve = ["jobs.list"]; // the harness re-reads opts.autoResolve on every input (live)
+    const h = harness({ autoResolve });
+    const first = h.input(JOBS_Q);
+    expect(typeof (first as { then?: unknown }).then).toBe("function"); // AUTO: the only thenable branch
+    await expect(first).resolves.toEqual({ action: "handled" });
+    expect(h.forbidden).toEqual(["sendMessage"]);
+    h.settled(); // an ANSWERED question leaves no reflex-record (deep assertions: wire-auto.test.ts)
+    expect(h.records()).toEqual([]);
+
+    autoResolve.length = 0; // live removal (/agent settings): effective on the very next input
+    const second = h.input(JOBS_Q2);
+    expect(second).toEqual({ action: "continue" });
+    expect(typeof (second as { then?: unknown }).then).not.toBe("function");
+    await flush();
+    h.state.branch = [userMsg(JOBS_Q2)];
+    h.settled();
     h.input(JOBS_Q);
     await flush();
-    h.state.branch = [userMsg(JOBS_Q)];
-    h.settled();
-    h.input(JOBS_Q2);
-    await flush();
-    h.state.branch = [userMsg(JOBS_Q2), assistantTools({ name: "read", arguments: {} })];
+    h.state.branch = [userMsg(JOBS_Q), assistantTools({ name: "read", arguments: {} })];
     h.settled();
     const recs = h.records();
     expect(recs.map((r) => [r.state, r.model.agree])).toEqual([
-      ["auto", "no-tool"],
-      ["auto", "diverge"],
+      ["shadow", "no-tool"],
+      ["shadow", "diverge"],
     ]);
-    expect(h.forbidden).toEqual([]);
+    expect(recs.every((r) => r.kind === "shadow")).toBe(true);
+    expect(h.forbidden).toEqual(["sendMessage"]); // shadow never answers
   });
 
   it("single slot: a new candidate flushes the unsettled one as unknown", async () => {

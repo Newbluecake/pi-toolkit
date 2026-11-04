@@ -1,15 +1,20 @@
 /**
- * jev-reflex · pi-facing assembly (plan R0 step 8 + R2b; arch §4.2). The six registrations and their
- * order are frozen by R0 (activate-trace `max` pins it). R2b fills the SHADOW behaviour: candidates are
- * recorded (read-only port run + one `subagent:reflex-record` at agent_settled), nothing is ever answered
- * (high ∧ auto is treated as shadow until R3a).
+ * jev-reflex · pi-facing assembly (plan R0 step 8 + R2b + R3a; arch §4.2). The six registrations and
+ * their order are frozen by R0 (activate-trace `max` pins it). R2b filled the SHADOW behaviour; R3a adds
+ * the AUTO branch (plan R3a steps 0–2): high ∧ effective state "auto" answers in-band — the ONLY path
+ * that awaits and the ONLY sender of `subagent:reflex` custom messages (§5.1); everything else still
+ * behaves as shadow.
  *
- * Invariants kept here: R-I1 (secure/locked ⇒ zero registration), R-I3 (never sendUserMessage / sendMessage /
- * triggerTurn / transform — the input handler's only results are `continue`), R-I5 (sync input handler; ports run
- * in a microtask), R-I7 (generation/disposed protocol, PD11), R-I8 (all mutable state in this closure, no
- * `Symbol.for`; timers only via the injected Clock).
+ * Invariants kept here: R-I1 (secure/locked ⇒ zero registration), R-I3 (never sendUserMessage /
+ * triggerTurn / transform; the single sanctioned outbound message is the AUTO answer's
+ * `sendMessage({customType:"subagent:reflex", …})` with NO options — idle append, no run), R-I4 (only an
+ * in-budget `ok` AUTO port result returns `handled`; every other outcome — including exceptions —
+ * returns `continue`), R-I5 (the input handler stays a plain non-async function; every branch except
+ * AUTO returns synchronously, shadow ports run in a microtask), R-I7 (generation/disposed protocol,
+ * PD11; the AUTO continuation captures its generation and drops itself when stale), R-I8 (all mutable
+ * state in this closure, no `Symbol.for`; timers only via the injected Clock).
  */
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, InputEvent, InputEventResult } from "@earendil-works/pi-coding-agent";
 import { systemClock, type Clock } from "../core/clock.js";
 import { createReflexCommand } from "./command.js";
 import { collectToolShapes, judgeAgreement, type BranchEntryLike } from "./core/agreement.js";
@@ -19,8 +24,17 @@ import { requestDigest } from "./core/digest.js";
 import { evaluateGate } from "./core/gate.js";
 import { compileCatalog } from "./core/match.js";
 import { normalizeInput } from "./core/normalize.js";
+import { renderAnswer } from "./core/render.js";
 import type { ReflexSettings } from "./core/settings.js";
-import { detectCorrection, effectiveState, onExecOutcome, reset, type CorrectionMemo } from "./core/state.js";
+import {
+  detectCorrection,
+  effectiveState,
+  onCorrected,
+  onExecOutcome,
+  onRepeat,
+  reset,
+  type CorrectionMemo,
+} from "./core/state.js";
 import type {
   Agreement,
   Band,
@@ -60,9 +74,9 @@ export interface ReflexWiring {
   generation(): number;
 }
 
-/** One un-settled shadow/ambiguous candidate (single slot). */
+/** One un-settled candidate (single slot): shadow / ambiguous (R2b), fallback / repeat (R3a AUTO). */
 interface Pending {
-  kind: "shadow" | "ambiguous";
+  kind: "shadow" | "ambiguous" | "fallback" | "repeat";
   at: number;
   scriptId: string;
   scriptVer: number;
@@ -130,12 +144,14 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
   // ---- closure state (I4/R-I8) ----
   let disposed = false;
   let generation = 0;
-  const inFlight = false; // R3a's AUTO await sets this; shadow never awaits inside the handler
+  let inFlight = false; // R3a: true only while an AUTO answer awaits in-band (single-flight, arch R3/C-R7)
   let abort = new AbortController();
   let pending: Pending | undefined;
   let memo: CorrectionMemo | undefined;
   /** `${id}@${ver}\0${digest}` → time it last became a candidate (PD6 window; per session). */
   const recent = new Map<string, number>();
+  /** `${id}@${ver}\0${digest}` → time reflex last ANSWERED it (AUTO repeat window, PD5; per session). */
+  const answers = new Map<string, number>();
   /** Script demote overlay: survives sessions until `/reflex reset` or `/reload` (PD11). */
   const runtimes = new Map<string, ScriptRuntime>();
   const counters: Record<string, number> = {
@@ -153,12 +169,16 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
   const isStale = (gen: number): boolean => disposed || gen !== generation;
   const rtOf = (id: string): ScriptRuntime => runtimes.get(id) ?? { strikes: 0, demoted: false };
   const stateOf = (id: string): ScriptState => effectiveState(id, deps.settings().autoResolve, rtOf(id));
+  const CONTINUE: InputEventResult = { action: "continue" };
 
-  const safeAppend = (customType: string, data: unknown): void => {
+  /** Best-effort audit append; `true` iff the entry was actually persisted. */
+  const safeAppend = (customType: string, data: unknown): boolean => {
     try {
       pi.appendEntry(customType, data);
+      return true;
     } catch {
       /* best-effort audit: a failed append never affects the session */
+      return false;
     }
   };
 
@@ -181,7 +201,9 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
       ...(p.reasked ? { reasked: true as const } : {}),
     };
     safeAppend("subagent:reflex-record", rec);
-    if (p.kind === "shadow") {
+    // Any model-answered outcome (shadow / fallback / repeat) can be corrected next; an ambiguous
+    // slot has no single script to attribute a correction to (R2b semantics, kept by R3a).
+    if (p.kind !== "ambiguous") {
       memo = {
         kind: "shadow",
         scriptId: p.scriptId,
@@ -199,13 +221,14 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
     if (p !== undefined && now - p.at > PENDING_MAX_AGE_MS) settlePending(p, { agree: "unknown", tools: [] });
   };
 
-  const rememberCandidate = (key: string, now: number): void => {
-    recent.delete(key);
-    recent.set(key, now);
-    while (recent.size > REASK_MAP_CAP) {
-      const oldest = recent.keys().next().value;
+  /** Insert-order LRU touch shared by the candidate and answer windows (cap REASK_MAP_CAP). */
+  const remember = (map: Map<string, number>, key: string, now: number): void => {
+    map.delete(key);
+    map.set(key, now);
+    while (map.size > REASK_MAP_CAP) {
+      const oldest = map.keys().next().value;
       if (oldest === undefined) break;
-      recent.delete(oldest);
+      map.delete(oldest);
     }
   };
 
@@ -252,8 +275,102 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
     });
   };
 
+  /**
+   * R3a AUTO branch (plan R3a step 1) — the only awaited path, strictly in-band (≤ REFLEX_BUDGET_MS
+   * via raceBudget inside executePort). `gen` is captured at dispatch: every side effect after the
+   * await re-checks `isStale(gen)`, so an await that crossed a shutdown / session switch leaves zero
+   * traces (PD11). A non-ok outcome never answers: it falls back to the model and the slot settles
+   * into a `kind:"fallback"` record at agent_settled (R-I4).
+   */
+  const runAuto = async (
+    script: RScriptV1,
+    p: Pending,
+    key: string,
+    event: InputEvent,
+    ctx: ExtensionContext,
+    gen: number,
+  ): Promise<InputEventResult> => {
+    try {
+      ctx.ui?.setStatus?.("reflex", "reflex…");
+      const port = registry.get(script.port.id);
+      const t0 = monoNow();
+      const outcome: ExecOutcome =
+        port === undefined
+          ? { kind: "unavailable", reason: "no port" }
+          : await executePort(
+              port,
+              {
+                cwd: ctx.cwd,
+                now: clock.now(),
+                signal: abort.signal,
+                budgetMs: script.budgetMs ?? REFLEX_BUDGET_MS,
+              },
+              clock,
+            );
+      const ms = Math.max(0, Math.round(monoNow() - t0));
+      // PD11: the await crossed a shutdown / session switch — drop everything (no send, no
+      // append, no strike) and let the re-armed closure serve the new session.
+      if (isStale(gen)) return CONTINUE;
+      if (outcome.kind === "ok") {
+        const rendered = renderAnswer({ script, outcome, question: event.text, ms, portVer: port?.version ?? 0 });
+        pi.sendMessage({
+          customType: "subagent:reflex",
+          content: rendered.content,
+          display: true,
+          details: rendered.details,
+        });
+        bump("answered");
+        remember(answers, key, clock.now()); // repeat-window anchor (PD5/PD6)
+        if (pending === p) pending = undefined; // answered ⇒ no reflex-record at agent_settled (§5.1)
+        memo = {
+          kind: "answer",
+          scriptId: script.id,
+          scriptVer: script.version,
+          digest: p.digest,
+          settledAt: clock.now(),
+          corrected: false,
+        }; // a later correction of THIS answer demotes the script (PD12/PD5)
+        return { action: "handled" };
+      }
+      const before = stateOf(script.id);
+      const r = onExecOutcome(rtOf(script.id), outcome, clock.now());
+      runtimes.set(script.id, r.rt);
+      if (r.demotedNow && before === "auto") {
+        try {
+          ctx.ui?.notify?.(`reflex：${script.id} 连续失败，已降回 shadow（/reflex reset 或 /reload 恢复）`, "warning");
+        } catch {
+          /* ui best-effort */
+        }
+      }
+      bump(`fallback.${outcome.kind}`);
+      p.kind = "fallback";
+      p.port = {
+        outcome: outcome.kind,
+        ms,
+        ...("reason" in outcome ? { reason: outcome.reason.slice(0, 80) } : {}),
+        portVer: port?.version ?? 0,
+      };
+      return CONTINUE;
+    } catch {
+      return CONTINUE; // fail-open (R-I4): anything unexpected degrades to "the model answers as usual"
+    } finally {
+      // Only the CURRENT session's continuation may clear the single-flight guard and the status
+      // line — a shut-down / replaced session's re-arm has already reset them (PD11).
+      if (!isStale(gen)) {
+        inFlight = false;
+        try {
+          ctx.ui?.setStatus?.("reflex", undefined);
+        } catch {
+          /* ui best-effort */
+        }
+      }
+    }
+  };
+
   // ① input — plain (non-async) function. fail-open on purpose: pi's docs suggest fail-closed for guards, but this
   // layer is purely advisory — any bug must degrade to "the model answers as usual", never to a dropped input.
+  // R3a step 0: every branch returns a synchronous `InputEventResult` EXCEPT the AUTO branch, which
+  // returns runAuto(…)'s promise (`ExtensionHandler` allows `R | Promise<R>`).
   pi.on("input", (event, ctx) => {
     try {
       const now = clock.now();
@@ -263,10 +380,30 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
       if (event.source === "interactive" && ctx.mode === "tui") {
         const c = detectCorrection(normalizeInput(event.text).norm, memo, now);
         if (c !== undefined && memo !== undefined) {
-          safeAppend("subagent:reflex-correction", c);
-          memo = { ...memo, corrected: true };
-          bump("corrected");
-          // A target of kind "answer" (AUTO) is demoted by R3a's onCorrected; R2b never answers.
+          const target = memo;
+          const written = safeAppend("subagent:reflex-correction", c);
+          // Flip the one-shot ONLY when the entry was actually persisted (root nit b): a failed
+          // append leaves the window open so a later correction can retry it.
+          if (written) {
+            memo = { ...target, corrected: true };
+            bump("corrected");
+          }
+          // A corrected AUTO answer demotes immediately (PD5) + one notify. The persisted entry
+          // above is the audit record; the demote is behaviour and happens either way.
+          if (target.kind === "answer") {
+            const r = onCorrected(rtOf(target.scriptId), clock.now(), stateOf(target.scriptId));
+            runtimes.set(target.scriptId, r.rt);
+            if (r.demotedNow) {
+              try {
+                ctx.ui?.notify?.(
+                  `reflex：${target.scriptId} 作答被纠正，已降回 shadow（/reflex reset 或 /reload 恢复）`,
+                  "warning",
+                );
+              } catch {
+                /* ui best-effort */
+              }
+            }
+          }
         }
       }
 
@@ -282,12 +419,12 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
         goalBusy: deps.fences.goalBusy(),
         inFlight,
       });
-      if (!gate.pass) return { action: "continue" as const };
+      if (!gate.pass) return CONTINUE;
 
       const m = matcher.match(gate.norm.norm, registry.capabilities());
-      if (m.kind === "miss") return { action: "continue" as const };
+      if (m.kind === "miss") return CONTINUE;
       const script = scriptById.get(m.scriptId);
-      if (script === undefined) return { action: "continue" as const };
+      if (script === undefined) return CONTINUE;
 
       const digest = requestDigest(gate.norm.norm);
       const old = pending;
@@ -307,14 +444,16 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
           chars: gate.norm.chars,
           reasked: false,
         };
-        return { action: "continue" as const };
+        return CONTINUE;
       }
 
-      // band high, state shadow | demoted | auto — R2b treats all of them as shadow (R3a adds the AUTO branch).
+      // band high — AUTO (R3a) or shadow (R2b path). The effective state is read LIVE here: an
+      // autoResolve edit via /agent settings takes effect on the very next input (I8 live setting).
+      const state = stateOf(script.id);
       const key = `${script.id}@${script.version}\u0000${digest}`;
       const prev = recent.get(key);
       const reasked = prev !== undefined && now - prev <= REPEAT_WINDOW_MS;
-      rememberCandidate(key, now);
+      remember(recent, key, now);
       bump("candidates");
       if (reasked) bump("reasked");
       const p: Pending = {
@@ -322,18 +461,48 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
         at: now,
         scriptId: script.id,
         scriptVer: script.version,
-        state: stateOf(script.id),
+        state,
         band: "high",
         digest,
         chars: gate.norm.chars,
         reasked,
       };
       pending = p;
+
+      if (state === "auto") {
+        // Repeat escape hatch (PD5/PD6): this exact question was ANSWERED within the window ⇒ hand
+        // it to the model, demote immediately, notify once. Synchronous `continue` (no await).
+        const ansAt = answers.get(key);
+        if (ansAt !== undefined && now - ansAt <= REPEAT_WINDOW_MS) {
+          const r = onRepeat(rtOf(script.id), clock.now(), state);
+          runtimes.set(script.id, r.rt);
+          if (r.demotedNow) {
+            try {
+              ctx.ui?.notify?.(
+                `reflex：${script.id} 检测到同一问题重复提问，已降回 shadow（/reflex reset 或 /reload 恢复）`,
+                "warning",
+              );
+            } catch {
+              /* ui best-effort */
+            }
+          }
+          bump("repeat");
+          // A repeat record already counts as a re-ask (promotion 口径: `state:"auto"` +
+          // `kind:"repeat"`); reasked stays false so it is not counted twice.
+          pending = { ...p, kind: "repeat", reasked: false };
+          return CONTINUE;
+        }
+        inFlight = true; // single-flight: inputs arriving during the await are vetoed in-flight (S0)
+        const gen = generation;
+        return runAuto(script, p, key, event, ctx, gen).catch(() => CONTINUE);
+      }
+
+      // shadow / demoted — sync continue; the read-only port runs off the input path (R-I5).
       const ui = ctx.ui;
       scheduleShadowPort(p, script, ctx.cwd, (msg) => ui.notify(msg, "warning"));
-      return { action: "continue" as const };
+      return CONTINUE;
     } catch {
-      return { action: "continue" as const };
+      return CONTINUE;
     }
   });
 
@@ -349,9 +518,10 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
         const collected = collectToolShapes(toBranchLike(branch as readonly unknown[]), p.digest);
         const script = scriptById.get(p.scriptId);
         if (collected.status === "ok") {
-          // An ambiguous slot has no single script to judge against ⇒ unknown, shapes kept for audit.
+          // An ambiguous slot has no single script to judge against ⇒ unknown, shapes kept for
+          // audit; shadow / fallback / repeat slots all name one script and ARE judged (R3a).
           model =
-            p.kind === "shadow" && script !== undefined
+            p.kind !== "ambiguous" && script !== undefined
               ? { agree: judgeAgreement(script, collected.shapes), tools: collected.shapes }
               : { agree: "unknown", tools: collected.shapes };
         }
@@ -371,6 +541,8 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
     pending = undefined;
     memo = undefined;
     recent.clear();
+    answers.clear(); // the repeat/correction windows bind to THIS session's transcript (PD11)
+    inFlight = false;
   });
 
   // ④ session_shutdown — abort in-flight work, drop pending (NOT persisted), bump generation.

@@ -27,6 +27,26 @@ function offenders(re: RegExp): string[] {
   return files.filter(({ src }) => re.test(src)).map(({ f }) => f);
 }
 
+/**
+ * From the index JUST AFTER a call's `(`, scan the call's argument list and report how many TOP-LEVEL commas it
+ * has and its first non-whitespace character (a single object-literal argument ⇒ 0 and "{").
+ */
+function callArguments(src: string, afterOpen: number): { topLevelCommas: number; firstChar: string } {
+  let depth = 1; // already inside the call's argument list
+  let topLevelCommas = 0;
+  let firstChar = "";
+  for (let i = afterOpen; i < src.length; i++) {
+    const ch = src[i]!;
+    if (firstChar === "" && !/\s/.test(ch)) firstChar = ch;
+    if (ch === "(" || ch === "{" || ch === "[") depth += 1;
+    else if (ch === ")" || ch === "}" || ch === "]") {
+      depth -= 1;
+      if (depth === 0) return { topLevelCommas, firstChar };
+    } else if (ch === "," && depth === 1) topLevelCommas += 1;
+  }
+  return { topLevelCommas, firstChar }; // unterminated: fail via mismatched expectations
+}
+
 describe("src/reflex governance scans", () => {
   it("sees the reflex tree (guards against a vacuous scan)", () => {
     const names = files.map((x) => x.f);
@@ -41,10 +61,24 @@ describe("src/reflex governance scans", () => {
     expect(offenders(/\b(?:setTimeout|setInterval|setImmediate)\s*\(/)).toEqual([]);
   });
 
-  it("G4: never sendUserMessage / triggerTurn / transform (R-I3); R2b sends no message at all", () => {
+  it("G4: never sendUserMessage / triggerTurn / transform (R-I3); sendMessage is the wire's subagent:reflex AUTO answer only", () => {
     expect(offenders(/sendUserMessage|triggerTurn|["']transform["']|action\s*:\s*["']transform["']/)).toEqual([]);
-    // R2b is shadow-only: sendMessage belongs to R3a (AUTO answer) — wire.ts must not call it yet.
-    expect(files.find((x) => x.f === "wire.ts")!.src).not.toMatch(/\bsendMessage\b/);
+    // R3a (root ruling 2026-11-05): the AUTO answer is the single sanctioned sendMessage. Only wire.ts
+    // may call it; every call site must be the `subagent:reflex` custom message (R-I9), carry NO
+    // second `options` argument (idle append, no run — C-R3), and at least one call site must exist.
+    expect(offenders(/\.sendMessage\s*\(/)).toEqual(["wire.ts"]);
+    const wire = files.find((x) => x.f === "wire.ts")!.src;
+    const sites = [...wire.matchAll(/\.sendMessage\s*\(/g)];
+    expect(sites.length).toBeGreaterThan(0);
+    for (const m of sites) {
+      const near = wire.slice(m.index!, m.index! + 240);
+      expect(near, `call site at ${m.index}`).toMatch(/customType:\s*"subagent:reflex"/);
+      expect(near).not.toMatch(/triggerTurn|deliverAs/);
+      // exactly ONE top-level argument, and it is an object literal (paren/brace balance scan)
+      const call = callArguments(wire, m.index! + m[0].length);
+      expect(call.topLevelCommas).toBe(0);
+      expect(call.firstChar).toBe("{");
+    }
   });
 
   it("the scan itself detects violations (self-test of the stripping + patterns)", () => {
@@ -53,5 +87,12 @@ describe("src/reflex governance scans", () => {
     expect(/\b(?:setTimeout|setInterval|setImmediate)\s*\(/.test(bad)).toBe(true);
     expect(/sendUserMessage/.test(bad)).toBe(true);
     expect(/Symbol\s*\.\s*for/.test(code("// Symbol.for(\n/* setTimeout( */"))).toBe(false);
+    // callArguments: one object literal ⇒ 0 commas / "{"; two arguments / leading non-object ⇒ detected
+    expect(callArguments('pi.sendMessage({ customType: "subagent:reflex", details: { a: 1 } })', 15)).toEqual({
+      topLevelCommas: 0,
+      firstChar: "{",
+    });
+    expect(callArguments("pi.sendMessage({ a: 1 }, { triggerTurn: true })", 15).topLevelCommas).toBe(1);
+    expect(callArguments('pi.sendMessage("x", {})', 15).firstChar).toBe('"');
   });
 });
