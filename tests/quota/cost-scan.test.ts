@@ -5,9 +5,21 @@
  * 稳态轻量探测（目录 mtime + 活跃文件 + 滚动补枚举）/ 淘汰优先级与「无重复扫描」防抖动。
  */
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { join, resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// fs/promises 走 vi.mock 整体替换 + 透传原实现（同 demotion.test.ts 的纪律：node:* 的 ESM
+// 命名空间属性不可 configure，vi.spyOn 会抛 "Cannot redefine property"）。仅包一层 readFile，
+// 供 loadState 重试语义测试注入一次性读取失败；其余导出（lstat/readdir/rename…）原样透传。
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readFile: vi.fn(actual.readFile),
+  };
+});
 import {
   createCostScanner,
   quotaWindowCost,
@@ -34,6 +46,7 @@ beforeEach(() => {
   mkdirSync(sessionDir, { recursive: true });
   statePath = join(workDir, "quota-state.json");
   now = NOW;
+  vi.mocked(readFile).mockClear();
 });
 
 afterEach(() => {
@@ -395,5 +408,55 @@ describe("cost-scan: 无重复扫描与淘汰防抖动（硬要求）", () => {
     await s.advance();
     await s.advance();
     expect(s.view().readBytes).toBe(readAfterEvict);
+  });
+});
+
+describe("cost-scan: loadState 重试语义（EACCES 恢复、ENOENT 空态）", () => {
+  it("首次 advance 读失败（EACCES）不置 loaded；第二次读成功恢复持久化 costInWindow", async () => {
+    // 预写一个带 bucket 的 costScan 组，指向磁盘上已不存在的文件：只有加载持久化状态
+    // 才能恢复费用历史（重扫无从发现该文件）。首次加载注入一次性 EACCES，验证下个 pass 重试。
+    const goneFile = join(sessionDir, "gone.jsonl");
+    const hour = String(Math.floor((NOW - H) / H));
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        costScan: {
+          version: 1,
+          dir: resolve(sessionsRoot),
+          cursor: "",
+          files: {
+            [goneFile]: {
+              dev: 1,
+              ino: 2,
+              size: 10,
+              mtimeMs: NOW,
+              scannedTo: 10,
+              buckets: { zai: { [hour]: [5, 0] } },
+            },
+          },
+        },
+      })}\n`,
+    );
+    const s = makeScanner();
+    vi.mocked(readFile).mockRejectedValueOnce(
+      Object.assign(new Error("EACCES: permission denied, open 'quota-state.json'"), { code: "EACCES" }),
+    );
+    await s.advance(); // 首次读失败 ⇒ 空态（gone.jsonl 不在磁盘 ⇒ 重扫也拿不到费用）
+    expect(s.view().costInWindow("zai", NOW - 3 * H, NOW)).toBeUndefined();
+    await s.advance(); // 读恢复 ⇒ 加载持久化 bucket
+    expect(s.view().costInWindow("zai", NOW - 3 * H, NOW)).toEqual({ usd: 5, unpriced: false });
+  });
+
+  it("首次读 ENOENT ⇒ 空态即 loaded，稳态 pass 不再重读状态文件", async () => {
+    writeFileSync(join(sessionDir, "e.jsonl"), assistantLine("zai", "g", NOW - H, 1));
+    const s = makeScanner();
+    await scanToComplete(s);
+    expect(s.view().costInWindow("zai", NOW - 3 * H, NOW)?.usd).toBe(1);
+    const callsAfterComplete = vi.mocked(readFile).mock.calls.length;
+    await s.advance();
+    await s.advance();
+    // ENOENT 后 loaded=true：后续 pass 不再为加载重读状态文件（稳态 dirty=false 也不 flush）。
+    expect(vi.mocked(readFile).mock.calls.length).toBe(callsAfterComplete);
   });
 });

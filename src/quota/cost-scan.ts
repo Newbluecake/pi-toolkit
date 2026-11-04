@@ -202,6 +202,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+function isErrno(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === code;
+}
+
 function finiteNumber(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
@@ -786,13 +790,15 @@ export function createCostScanner(options: CostScannerOptions): CostScanner {
 
   const advance = async (): Promise<void> => {
     if (!loaded) {
-      loaded = true;
       try {
         const parsed: unknown = JSON.parse(await readFile(options.statePath, "utf8"));
         if (isRecord(parsed)) state = parseState(parsed[STATE_GROUP], root);
+        loaded = true; // 读成功才标记 loaded
         markDirty();
-      } catch {
-        // 不存在 / 损坏 ⇒ 空态重扫。
+      } catch (error) {
+        // ENOENT ⇒ 明确不存在 ⇒ 空态且不再重试读；其它读取/解析失败（EACCES/EIO/损坏）⇒
+        // 保持 loaded=false，下个 pass 重试（状态文件由同文件其它 store 或后续 flush 修复/创建）。
+        if (isErrno(error, "ENOENT")) loaded = true;
       }
     }
     const ms = Number.isFinite(budget.ms) ? Math.max(0, Math.floor(budget.ms)) : 0;

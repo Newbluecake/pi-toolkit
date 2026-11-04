@@ -76,11 +76,16 @@ describe("QuotaCard 费用折算", () => {
 // 2026-11-04 GLM 账号费用：agent 投影层把账号费用（zai+cn bucket 之和）写在双侧 wire 行上；
 // 卡片的 GLM 合并（glmPair worst-of 挑一侧的窗口对象）后折算仍在，且不重复出现（无双计）。
 describe("QuotaCard 费用折算 — GLM 合并行", () => {
-  const glmWindow = (costUsd: number | undefined, costUnpriced: true | undefined, level = 0) => ({
+  const glmWindow = (
+    costUsd: number | undefined,
+    costUnpriced: true | undefined,
+    level = 0,
+    resetAt = NOW + 2 * H,
+  ) => ({
     scope: "5h",
     usedPct: 62,
     level,
-    resetAt: NOW + 2 * H,
+    resetAt,
     ...(costUsd === undefined ? {} : { costUsd }),
     ...(costUnpriced === true ? { costUnpriced } : {}),
   });
@@ -130,6 +135,49 @@ describe("QuotaCard 费用折算 — GLM 合并行", () => {
     });
     expect(w.findAll(".q-sub")).toHaveLength(1);
     expect(w.get(".q-sub").text()).not.toContain("≈");
+    w.unmount();
+  });
+
+  // 2026-11-04 F1（GLM 合并丢费用）：旧 peer 帧只在 zai 侧写 costUsd，打平保 cn 先项会丢费；
+  // 修复后打平优先有费用侧、选中侧缺费仅补 costUsd/costUnpriced，时钟保持选中侧同源。
+  it("旧 peer 帧打平：cn 无 costUsd、intl 有 ⇒ 合并行仍显示折算（费用不丢、恰好一次）", () => {
+    setLangOverride("zh", null);
+    const w = mount(QuotaCard, {
+      props: { quota: glmWire(glmWindow(undefined), glmWindow(4.6)), now: NOW, anchorEl: null },
+      attachTo: document.body,
+    });
+    const subs = w.findAll(".q-sub");
+    expect(subs).toHaveLength(1);
+    expect(subs[0].text()).toContain("≈$4.60");
+    expect(w.text().match(/≈\$4\.60/g)).toHaveLength(1); // 不双计
+    w.unmount();
+  });
+
+  it("反向打平：cn 有费用、intl 无 ⇒ 费用随 cn 先项保留，恰好一次", () => {
+    setLangOverride("zh", null);
+    const w = mount(QuotaCard, {
+      props: { quota: glmWire(glmWindow(4.6), glmWindow(undefined)), now: NOW, anchorEl: null },
+      attachTo: document.body,
+    });
+    expect(w.get(".q-sub").text()).toContain("≈$4.60");
+    expect(w.text().match(/≈\$4\.60/g)).toHaveLength(1);
+    w.unmount();
+  });
+
+  it("非打平选中侧缺费（cn L1 赢、费用在 intl）⇒ 补值后随行显示，重置时钟仍是选中侧的", () => {
+    setLangOverride("zh", null);
+    const w = mount(QuotaCard, {
+      props: {
+        quota: glmWire(glmWindow(undefined, undefined, 1, NOW + 2 * H), glmWindow(4.6, undefined, 0, NOW + 3 * H)),
+        now: NOW,
+        anchorEl: null,
+      },
+      attachTo: document.body,
+    });
+    const sub = w.get(".q-sub").text();
+    expect(sub).toContain("≈$4.60"); // 费用从 intl 侧补来
+    expect(sub).toContain("14:00"); // NOW+2H（12:00 上海 +2h）＝cn 选中侧自己的重置时钟
+    expect(sub).not.toContain("15:00"); // 不是 intl 侧的 NOW+3H
     w.unmount();
   });
 });
