@@ -67,8 +67,9 @@ const needsAnswer = computed(() => {
 
 // scheduled-reports W1 (plan r3 §5.6): the ⏰ badge — hub cap sched.v1 ∧ the hub-global
 // `schedules` slot carries this sessionId's projection with ≥1 task (or a degraded store).
-// `⏰<n>` normally; `⏰!` while any task is pendingApproval. Count-only — like the needsAnswer
-// badge it is NOT gated on the privacy lock (plan: 卡片保留 needsAnswer 徽标,内容解锁后才可见 —
+// `⏰<n>` count-only (approval/pending variant removed, schedule-auto-approve r2 §6-W1 —
+// legacy pendingApproval tasks count like any other). Like the needsAnswer badge it is NOT
+// gated on the privacy lock (plan: 卡片保留 needsAnswer 徽标,内容解锁后才可见 —
 // the count is metadata, the task content stays behind the lock/panel).
 const schedBadge = computed(() => {
   const agent = hub?.state.value.agents.get(props.card.key);
@@ -262,22 +263,17 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             >
               <AppIcon name="inbox" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span>
             </span>
-            <!-- scheduled-reports W1 (§5.6): ⏰ badge (count-only; `!` = 待确认). -->
+            <!-- scheduled-reports W1 (§5.6): ⏰ badge (count-only). -->
             <span
               v-if="schedBadge !== undefined"
               class="chip chip-sched"
               data-compact="sched"
-              :data-pending="schedBadge.pending ? 'true' : undefined"
               role="img"
               translate="no"
-              :title="t(schedBadge.pending ? 'agents.schedBadgePending' : 'agents.schedBadge', { n: schedBadge.count })"
-              :aria-label="
-                t(schedBadge.pending ? 'agents.schedBadgePending' : 'agents.schedBadge', { n: schedBadge.count })
-              "
+              :title="t('agents.schedBadge', { n: schedBadge.count })"
+              :aria-label="t('agents.schedBadge', { n: schedBadge.count })"
             >
-              <AppIcon name="clock" class="icon-sm" /><span class="num">{{
-                schedBadge.pending ? "!" : scheduleBadgeText(schedBadge.count)
-              }}</span>
+              <AppIcon name="clock" class="icon-sm" /><span class="num">{{ scheduleBadgeText(schedBadge.count) }}</span>
             </span>
           </span>
         </span>
@@ -365,23 +361,16 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
               >
                 <AppIcon name="inbox" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span>
               </span>
-              <!-- scheduled-reports W1 (§5.6): ⏰ badge (count-only; `!` = 待确认). -->
+              <!-- scheduled-reports W1 (§5.6): ⏰ badge (count-only). -->
               <span
                 v-if="schedBadge !== undefined"
                 class="chip chip-sched"
-                :data-pending="schedBadge.pending ? 'true' : undefined"
                 role="img"
                 translate="no"
-                :title="
-                  t(schedBadge.pending ? 'agents.schedBadgePending' : 'agents.schedBadge', { n: schedBadge.count })
-                "
-                :aria-label="
-                  t(schedBadge.pending ? 'agents.schedBadgePending' : 'agents.schedBadge', { n: schedBadge.count })
-                "
+                :title="t('agents.schedBadge', { n: schedBadge.count })"
+                :aria-label="t('agents.schedBadge', { n: schedBadge.count })"
               >
-                <AppIcon name="clock" /><span class="num">{{
-                  schedBadge.pending ? "!" : scheduleBadgeText(schedBadge.count)
-                }}</span>
+                <AppIcon name="clock" /><span class="num">{{ scheduleBadgeText(schedBadge.count) }}</span>
               </span>
             </span>
           </Teleport>

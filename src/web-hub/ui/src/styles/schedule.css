@@ -1,5 +1,5 @@
 /*
- * Scheduled-reports W1 (plan r3 §5.6): `SchedulePanel.vue` / `ScheduleReview.vue` + the
+ * Scheduled-reports W1 (plan r3 §5.6): `SchedulePanel.vue` / `ScheduleTaskDetail.vue` + the
  * detail-header 「定时」 button and the AgentCard ⏰ badge. Own file (never detail.css /
  * agents.css) for the same file-domain disjointness todo.css documents; source-scan bans
  * scoped <style> blocks outright. Reuses the PickerSheet chrome + the channels-sheet cap
@@ -215,7 +215,8 @@
   font-size: var(--fs-xs);
 }
 
-/* --- ScheduleReview --- */
+/* --- ScheduleTaskDetail (read-only full-definition view; review/approve styles removed
+   with the approval concept, schedule-auto-approve r2 §6-W1) --- */
 
 .review-kv {
   margin: 0 12px;
@@ -259,33 +260,6 @@
   overflow-y: auto;
 }
 
-.review-hash {
-  margin: 0 12px;
-  color: var(--c-text-3);
-  font-size: var(--fs-2xs);
-  overflow-wrap: anywhere;
-}
-
-.review-status {
-  margin: 0 12px;
-  font-size: var(--fs-xs);
-}
-
-.review-status[data-kind="err"] {
-  color: var(--c-danger);
-}
-
-.review-status[data-kind="ok"] {
-  color: var(--c-success);
-}
-
-.review-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--sp-2);
-  padding: var(--sp-2) 12px 0;
-}
-
 /* --- entry points (header button + card badge) --- */
 
 /* The 「定时」 header button mirrors .detail-clear-btn / .detail-channels-btn (detail.css):
@@ -301,30 +275,9 @@
   font-variant-numeric: tabular-nums;
 }
 
-.chip-sched[data-pending="true"] {
-  background: var(--c-warning-soft);
-  color: var(--c-warning-text);
-  border-color: var(--c-warning-border);
-}
-
-/* coarse pointers: the review/approve buttons keep a ≥36px hit box (channels.css grammar) */
+/* coarse pointers: the task-row 「详情」 buttons keep a ≥36px hit box (channels.css grammar) */
 @media (pointer: coarse) {
-  .sched-task-act .btn,
-  .review-actions .btn {
+  .sched-task-act .btn {
     min-height: 36px;
-  }
-}
-
-/* Narrow phones (≤480px, verifier fix #3): with the #61 W2 reject button the row is
- * Cancel / Reject / Approve — the en copy overflows horizontally at 360–390px. Wrap and let
- * each button fill its row with the 44px touch height (spawn.css's ≤480px action grammar). */
-@media (max-width: 480px) {
-  .review-actions {
-    flex-wrap: wrap;
-  }
-  .review-actions .btn {
-    flex: 1 1 100%;
-    justify-content: center;
-    min-height: 44px;
   }
 }

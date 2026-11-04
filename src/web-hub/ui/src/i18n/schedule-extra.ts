@@ -1,12 +1,12 @@
 /**
- * `schedule` namespace — the LAZY i18n for `SchedulePanel.vue` / `ScheduleReview.vue`
+ * `schedule` namespace — the LAZY i18n for `SchedulePanel.vue` / `ScheduleTaskDetail.vue`
  * (scheduled-reports W1, plan r3 §5.6). Same posture as `channels-extra.ts`: NOT under
  * `en/`/`zh/` (the eager glob would fold it into the first-screen bundle); the lazy dialog
  * chunk calls `registerScheduleExtra()` once on setup. Parity: zh
  * `satisfies Record<keyof typeof en, string>` + `tests/web-hub/ui/schedule-panel.test.ts`.
  *
  * UI-text rule (AGENTS.md): compact inline markers (badges, state tokens) stay English in BOTH
- * locales; prose (hints, notices, review copy) is translated.
+ * locales; prose (hints, notices, detail copy) is translated.
  */
 import { MESSAGES } from "./index.js";
 
@@ -30,8 +30,6 @@ const en = {
 
   taskEnabled: "enabled",
   taskPaused: "paused",
-  taskPending: "review pending",
-  taskExecutable: "approved",
   taskStats: "fired {fired} · missed {missed} · skipped {skipped} · manual {manual}",
   taskFeishuOn: "feishu",
   taskNext: "next {t}",
@@ -43,7 +41,6 @@ const en = {
   formBackground: "background",
   formMessage: "message",
   details: "Details",
-  review: "Review",
 
   runAuto: "auto",
   runManual: "manual",
@@ -86,10 +83,9 @@ const en = {
   "feishu.expired": "expired",
   "feishu.q": "?",
 
-  /** ScheduleReview — the approval dialog (§5.6). Read-only definition + approve. */
-  reviewTitle: "Review scheduled task — {name}",
+  /** ScheduleTaskDetail — the read-only full-definition view (schedule-auto-approve r2 §6-W1). */
+  detailTitle: "Scheduled task — {name}",
   reviewPromptLabel: "Full prompt",
-  reviewHashNote: "defHash {hash}… — approval binds this exact hash; any change requires a new review.",
   kvWhen: "Schedule",
   kvForm: "Form",
   kvFeishu: "Feishu push",
@@ -105,25 +101,6 @@ const en = {
   kvOff: "no",
   createdByUser: "user · {at}",
   createdByAgent: "AI tool · {at}",
-  approve: "Approve",
-  approveAria: "Approve this exact definition",
-  approving: "Approving…",
-  approveOk: "Approved — the task is now executable.",
-  /** E_REV (§4.3): the definition changed under the dialog — re-review. */
-  approveRev: "The definition changed meanwhile — review the refreshed content and approve again.",
-  approveFailed: "Approve failed: {reason}",
-  /** #61 W2 (confirm-plan r2 §4.6) — the offer-driven 「拒绝」 path and the elsewhere-handled notes. */
-  rejectDelete: "Reject (delete task)",
-  rejectRestore: "Reject (restore previous definition)",
-  rejecting: "Rejecting…",
-  rejectAria: "Reject the AI's unconfirmed change",
-  rejectOkDelete: "Rejected — the task has been deleted.",
-  rejectOkRestore: "Rejected — restored to the pre-change definition; its original approval is back in effect.",
-  rejectFailed: "Reject failed: {reason}",
-  /** Offer-opened review: the offer vanished and the task sits approved ⇒ another channel won. */
-  offerApprovedElsewhere: "Already approved elsewhere — another channel (terminal or Feishu) confirmed this task.",
-  /** Panel list fallback: the offer-opened review's task vanished mid-review. */
-  offerTaskGone: "Task deleted.",
   cancel: "Cancel",
 } satisfies Record<string, string>;
 
@@ -142,8 +119,6 @@ const zh: Record<keyof typeof en, string> = {
 
   taskEnabled: "已启用",
   taskPaused: "已暂停",
-  taskPending: "待确认",
-  taskExecutable: "已批准",
   taskStats: "已执行 {fired} · 错过 {missed} · 跳过 {skipped} · 手动 {manual}",
   taskFeishuOn: "推飞书",
   taskNext: "下次 {t}",
@@ -155,7 +130,6 @@ const zh: Record<keyof typeof en, string> = {
   formBackground: "后台运行",
   formMessage: "定时消息",
   details: "详情",
-  review: "审阅",
 
   runAuto: "自动",
   runManual: "手动",
@@ -196,9 +170,8 @@ const zh: Record<keyof typeof en, string> = {
   "feishu.expired": "expired",
   "feishu.q": "?",
 
-  reviewTitle: "审阅定时任务 — {name}",
+  detailTitle: "定时任务详情 — {name}",
   reviewPromptLabel: "Prompt 全文",
-  reviewHashNote: "defHash {hash}…——批准将绑定此哈希；内容有任何改动都需要重新审阅。",
   kvWhen: "触发",
   kvForm: "形式",
   kvFeishu: "推飞书",
@@ -214,22 +187,6 @@ const zh: Record<keyof typeof en, string> = {
   kvOff: "否",
   createdByUser: "用户 · {at}",
   createdByAgent: "AI 工具 · {at}",
-  approve: "批准",
-  approveAria: "批准当前展示的这份定义",
-  approving: "批准中…",
-  approveOk: "已批准——任务现在可以执行。",
-  approveRev: "内容已变更，请重新审阅——任务在审阅期间被修改，已刷新为最新版本。",
-  approveFailed: "批准失败：{reason}",
-  /** #61 W2（confirm-plan r2 §4.6）——由 offer 驱动的「拒绝」路径与「已在其他端处理」提示。 */
-  rejectDelete: "拒绝（删除该任务）",
-  rejectRestore: "拒绝（恢复修改前定义）",
-  rejecting: "拒绝中…",
-  rejectAria: "拒绝 AI 的这次未确认改动",
-  rejectOkDelete: "已拒绝——任务已删除。",
-  rejectOkRestore: "已拒绝——已恢复到修改前的定义，原批准重新生效。",
-  rejectFailed: "拒绝失败：{reason}",
-  offerApprovedElsewhere: "已在其他端批准——该任务已在其他渠道（终端或飞书）确认。",
-  offerTaskGone: "任务已删除。",
   cancel: "取消",
 };
 

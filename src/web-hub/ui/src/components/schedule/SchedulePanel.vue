@@ -5,11 +5,12 @@
   desktop-centered variant (channels-sheet grammar).
 
   Data: the hub-global `schedules` SSE slot (`HubState.schedules`, cap `sched.v1`), narrowed
-  to THIS session by `sessionId` via `@logic/schedule.js`'s `panelView`. Read-only by default;
-  the ONE write path is approval through `ScheduleReview.vue` (approve is policy-allow with
-  the dialog-bound hash, §5.2 web 表). Create/edit (`__put`) is deliberately NOT in W1: the
-  hash-of-rendered cannot be computed in the browser on plaintext LAN (no crypto.subtle) and
-  the `__put` json shape is frozen by A3 — see W1-report.
+  to THIS session by `sessionId` via `@logic/schedule.js`'s `panelView`. Read-only since
+  schedule-auto-approve r2 (docs/dev/schedule-auto-approve/plan.md §6-W1): the approval
+  write path (approve/reject via the old ScheduleReview) is removed — task rows keep only the
+  「详情」 swap into `ScheduleTaskDetail.vue`; the wire's legacy `pendingApproval` /
+  `executable` / `offer` fields are ignored (old-hub compat, I10). Pause/resume/delete
+  controls land with the W2 TasksPanel aggregation.
 
   Offline sessions (E3): read-only + a hint pointing at `/schedule … --all` in a local
   terminal. Stale (hub connection down): the last snapshot stays, a warn banner shows and
@@ -27,15 +28,11 @@ import { registerScheduleExtra } from "../../i18n/schedule-extra.js";
 import { fmtTs, panelView, relIn, runReasonKey, runStateKey } from "../../logic/schedule.js";
 import { CONTROL_VIEW, HUB_CTX } from "../control/controlContext.js";
 import PickerSheet from "../control/PickerSheet.vue";
-import ScheduleReview from "./ScheduleReview.vue";
+import ScheduleTaskDetail from "./ScheduleTaskDetail.vue";
 import "../../styles/schedule.css";
 
 const props = defineProps<{
   readonly sessionId: string | undefined;
-  /** #61 W2 (confirm-plan r2 §4.6): DetailHeader may mount the panel already aimed at one
-   *  task — the live confirm offer's auto-open. The panel starts on that task's review view.
-   *  (`| undefined` explicit: exactOptionalPropertyTypes — the header passes a maybe-undefined.) */
-  readonly initialReviewTaskId?: string | undefined;
 }>();
 const emit = defineEmits<{ close: [] }>();
 registerScheduleExtra(); // before any t() this dialog renders
@@ -53,13 +50,10 @@ interface PanelTask {
   form: "background" | "message";
   when: { kind: "cron" | "once" | "invalid"; expr: string; tz: string };
   enabled: boolean;
-  executable: boolean;
-  pendingApproval: boolean;
   createdBy: string;
   feishu: boolean;
   nextAt: number | undefined;
   degraded: boolean;
-  defHash: string;
   totals: { fired: number; missed: number; skipped: number; manual: number };
 }
 interface PanelRun {
@@ -88,7 +82,6 @@ type PanelModel =
       rev: number;
       tasks: PanelTask[];
       runs: PanelRun[];
-      pendingCount: number;
       missedTotal: number;
       droppedReports: number;
     };
@@ -134,73 +127,37 @@ function nextLabel(nextAt: number | undefined, degraded: boolean): string {
   return t("schedule.taskNext", { t: `${fmtTs(nextAt)} (${relIn(nextAt, ticker.now.value)})` });
 }
 
-// --- review view (in-dialog swap; ONE PickerSheet — stacked sheets would double the scroll lock) ---
+// --- detail view (in-dialog swap; ONE PickerSheet — stacked sheets would double the scroll lock) ---
 
-const reviewTaskId = ref<string | null>(props.initialReviewTaskId ?? null);
-/** #61 W2: WHICH review view was offer-opened (vs a manually picked one — cleared on 返回).
- *  Drives ScheduleReview's `fromOffer` note and the「任务已删除」fallback note below. */
-const offerOpenedId = ref<string | null>(props.initialReviewTaskId ?? null);
-/** Transient list-view note after an offer-opened review's task vanished mid-review — or the
- *  SAME conclusion copy when the vanish was our own reject-delete (verifier nit #4). */
-const listNote = ref<"gone" | "rejectDeleted" | null>(null);
-/** Task id of the review's locally settled reject-delete (ScheduleReview's `decided` event). */
-const decidedDeleteId = ref<string | null>(null);
-/** The raw projection task under review — read live off the hub slot so an E_REV refresh (the
- *  next SSE snapshot) automatically re-renders the dialog with the changed definition. */
-const reviewTask = computed(() => {
-  if (reviewTaskId.value === null || model.value.kind !== "ready") return null;
+const detailTaskId = ref<string | null>(null);
+/** The raw projection task under detail — read live off the hub slot so a change elsewhere
+ *  re-renders the view with the refreshed definition; a task that vanishes from the snapshot
+ *  falls back to the list view silently. */
+const detailTask = computed(() => {
+  if (detailTaskId.value === null || model.value.kind !== "ready") return null;
   const proj = hub?.state.value.schedules?.sessions.find((s) => s.sessionId === props.sessionId);
-  return proj?.tasks.find((task) => task.task.id === reviewTaskId.value) ?? null;
+  return proj?.tasks.find((task) => task.task.id === detailTaskId.value) ?? null;
 });
 
-// #61 W2 (confirm-plan r2 §4.6): an offer-opened review whose task VANISHED mid-review (the
-// own reject-delete, or a delete/reject elsewhere) falls back to the list WITH the「任务已删
-// 除」note instead of vanishing silently. Manual reviews keep the pre-feature silent fallback.
-watch(reviewTask, (task) => {
-  if (task !== null || reviewTaskId.value === null) return;
+watch(detailTask, (task) => {
+  if (task !== null || detailTaskId.value === null) return;
   if (model.value.kind !== "ready") return; // a degraded/unscanned store is not「任务已删除」
-  // verifier nit #4: our own reject-delete vanished the task — keep the conclusion copy
-  // (「已拒绝——任务已删除。」) instead of the generic「任务已删除」across the SSE snapshot.
-  if (decidedDeleteId.value === reviewTaskId.value) {
-    listNote.value = "rejectDeleted";
-    decidedDeleteId.value = null;
-  } else {
-    if (offerOpenedId.value === null) return; // manual reviews keep the silent fallback
-    listNote.value = "gone";
-  }
-  reviewTaskId.value = null;
-  offerOpenedId.value = null;
+  detailTaskId.value = null;
 });
 
-function onReviewDecided(kind: "approved" | "reject-delete" | "reject-restore"): void {
-  if (kind === "reject-delete") decidedDeleteId.value = reviewTaskId.value;
+function openDetail(taskId: string): void {
+  detailTaskId.value = taskId;
 }
-
-function openReview(taskId: string): void {
-  listNote.value = null;
-  decidedDeleteId.value = null;
-  reviewTaskId.value = taskId;
-}
-function closeReview(): void {
-  reviewTaskId.value = null;
-  offerOpenedId.value = null;
-  decidedDeleteId.value = null;
+function closeDetail(): void {
+  detailTaskId.value = null;
 }
 </script>
 
 <template>
   <PickerSheet :label="t('schedule.panelTitle')" class="sched-scrim" @close="emit('close')">
-    <!-- review view (swaps the whole dialog body; the task can vanish mid-review — a removed
+    <!-- detail view (swaps the whole dialog body; the task can vanish mid-view — a removed
          task falls back to the list view). -->
-    <ScheduleReview
-      v-if="reviewTask !== null"
-      :task="reviewTask"
-      :can-write="canWrite"
-      :from-offer="offerOpenedId !== null && offerOpenedId === reviewTaskId"
-      @back="closeReview"
-      @close="emit('close')"
-      @decided="onReviewDecided"
-    />
+    <ScheduleTaskDetail v-if="detailTask !== null" :task="detailTask" @back="closeDetail" @close="emit('close')" />
     <div v-else class="sched-dialog">
       <header class="sched-head">
         <h3 class="sched-title">
@@ -225,11 +182,6 @@ function closeReview(): void {
       <p v-if="model.kind !== 'none' && model.offline" class="sched-note" data-kind="info" role="status">
         {{ t("schedule.offlineNote") }}
       </p>
-      <!-- #61 W2: the offer-opened review's task vanished mid-review (deleted here or
-           elsewhere) — a local reject-delete keeps its own conclusion copy (verifier nit #4). -->
-      <p v-if="listNote !== null" class="sched-note" data-kind="info" role="status">
-        {{ t(listNote === "rejectDeleted" ? "schedule.rejectOkDelete" : "schedule.offerTaskGone") }}
-      </p>
 
       <template v-if="model.kind === 'degraded'">
         <p class="sched-note" data-kind="warn" role="alert">
@@ -248,24 +200,13 @@ function closeReview(): void {
             <li v-for="task in model.tasks" :key="task.id" class="sched-task" :data-enabled="task.enabled">
               <div class="sched-task-head">
                 <span class="sched-task-name" translate="no">{{ task.name }}</span>
-                <span v-if="task.pendingApproval" class="chip sched-chip-missed">
-                  <AppIcon name="alert" class="icon-sm" />{{ t("schedule.taskPending") }}
-                </span>
-                <span v-else-if="task.enabled" class="chip">{{ t("schedule.taskEnabled") }}</span>
+                <span v-if="task.enabled" class="chip">{{ t("schedule.taskEnabled") }}</span>
                 <span v-else class="chip">{{ t("schedule.taskPaused") }}</span>
                 <span v-if="task.totals.missed > 0" class="chip sched-chip-missed">{{
                   t("schedule.missedNote", { n: task.totals.missed })
                 }}</span>
                 <span class="sched-task-act">
-                  <button
-                    v-if="task.pendingApproval && model.canWrite"
-                    class="btn btn-primary btn-xs"
-                    type="button"
-                    @click="openReview(task.id)"
-                  >
-                    {{ t("schedule.review") }}
-                  </button>
-                  <button v-else class="btn btn-ghost btn-xs" type="button" @click="openReview(task.id)">
+                  <button class="btn btn-ghost btn-xs" type="button" @click="openDetail(task.id)">
                     {{ t("schedule.details") }}
                   </button>
                 </span>

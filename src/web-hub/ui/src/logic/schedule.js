@@ -1,10 +1,15 @@
 /**
  * Scheduled-reports W1 (docs/dev/scheduled-reports/plan.md r3 §5.6, §12 W1 行): pure, DOM-free
- * logic behind `SchedulePanel.vue` / `ScheduleReview.vue`, the detail-header 「定时」 entry and
- * the AgentCard ⏰ badge — plus the schedule-auto-approve (docs/dev/schedule-auto-approve/plan.md
- * §3-P3) aggregated surfaces: `taskRowsOf` feeds the TasksPanel / composer schedule section,
- * `schedSummaryOf` gates their chip/summary. Mirrors `logic/load.js`'s posture: components only render, every
- * decision lives here and is unit-tested in `tests/web-hub/ui/schedule-logic.test.ts`.
+ * logic behind `SchedulePanel.vue` / `ScheduleTaskDetail.vue`, the detail-header 「定时」 entry and
+ * the AgentCard ⏰ badge — plus the schedule-auto-approve r2 (docs/dev/schedule-auto-approve/
+ * plan.md §6-W1) aggregated surfaces: `taskRowsOf` feeds the TasksPanel / composer schedule
+ * section, `schedSummaryOf` gates their chip/summary. Mirrors `logic/load.js`'s posture:
+ * components only render, every decision lives here and is unit-tested in
+ * `tests/web-hub/ui/schedule-logic.test.ts`.
+ *
+ * The approval concept is REMOVED (schedule-auto-approve r2): nothing here reads the legacy
+ * wire fields `pendingApproval`, `executable`, `offer` or `task.approval` — old hubs still
+ * send them, and this module must keep ignoring them (I10 tolerant decode).
  *
  * Wire source: the hub-global SSE `schedules` event + `GET /api/schedules` payload —
  * `SchedulesPayloadWire` (protocol/schedule.ts, S0 frozen). W1 MUST ignore unknown keys
@@ -113,35 +118,11 @@ export function sessionProjectionOf(payload, sessionId) {
   return undefined;
 }
 
+/** @typedef {{ count: number }} ScheduleBadge */
 /**
- * The ONE confirm offer a session projection currently carries (#61 confirm-plan r2 §4.6, W2):
- * the earliest-expiring structurally valid `offer` across the projection's tasks. Loose reads
- * only (untrusted JSON, same posture as `isSchedulesPayloadLike`): a task whose offer/taskId/
- * expiresAt is malformed is skipped, never fatal. undefined ⇒ no live offer (nothing to pop).
- * @param {ScheduleSessionProjectionWire | unknown} proj
- * @returns {{ taskId: string, offerId: string, expiresAt: number } | undefined}
- */
-export function offerOf(proj) {
-  if (proj === null || typeof proj !== "object" || Array.isArray(proj)) return undefined;
-  const tasks = /** @type {Record<string, unknown>} */ (proj).tasks;
-  if (!Array.isArray(tasks)) return undefined;
-  let best = undefined;
-  for (const task of tasks) {
-    const t = record(task);
-    const offer = record(t.offer);
-    const offerId = str(offer.offerId);
-    const expiresAt = num(offer.expiresAt);
-    const taskId = str(record(t.task).id);
-    if (offerId === undefined || expiresAt === undefined || taskId === undefined) continue;
-    if (best === undefined || expiresAt < best.expiresAt) best = { taskId, offerId, expiresAt };
-  }
-  return best;
-}
-
-/** @typedef {{ count: number, pending: boolean }} ScheduleBadge */
-/**
- * AgentCard badge: `⏰<n>` while the session has tasks, `⏰!` when any task is pendingApproval.
- * undefined ⇒ nothing renders (no cap / no sessionId / no projection / zero tasks).
+ * AgentCard badge: `⏰<n>` while the session has tasks. undefined ⇒ nothing renders
+ * (no cap / no sessionId / no projection / zero tasks). Legacy `pendingApproval` tasks are
+ * counted like any other task (approval removed, r2).
  * @param {unknown} hubCaps @param {SchedulesPayloadWire | undefined} payload @param {string | undefined} sessionId
  * @returns {ScheduleBadge | undefined}
  */
@@ -151,7 +132,7 @@ export function scheduleBadgeOf(hubCaps, payload, sessionId) {
   if (proj === undefined) return undefined;
   const count = proj.tasks.length;
   if (count === 0 && proj.degraded === undefined) return undefined;
-  return { count, pending: proj.tasks.some((task) => task.pendingApproval === true) };
+  return { count };
 }
 
 /** Badge text: `99+` saturation (xsUnreadLabel precedent). */
@@ -242,26 +223,10 @@ export function whenParts(when) {
   return { kind: "invalid", expr: "", tz };
 }
 
-/** `/schedule approve <id> <fullHash>` args (§5.6: the hash comes ONLY from the review dialog's
- *  projection; the agent does the lock-internal CAS). Callers pass the wire values through. */
-export function approveArgs(taskId, defHash) {
-  return `approve ${taskId} ${defHash}`;
-}
-
-/** `/schedule reject <id> <fullHash>` args (#61 confirm-plan r2 §4.6): the web 「拒绝」 path —
- *  same hash-binding discipline as approveArgs (the hash comes ONLY from the review dialog's
- *  projection); the agent's live-offer check + lock-internal CAS are the arbiters. */
-export function rejectArgs(taskId, defHash) {
-  return `reject ${taskId} ${defHash}`;
-}
-
-/** First 8 hex chars of a defHash for display (§5.6「hash 前 8 位」). */
-export function shortHash(defHash) {
-  return typeof defHash === "string" ? defHash.slice(0, 8) : "";
-}
-
 /**
  * Panel view-model: everything `SchedulePanel.vue` renders, derived in one place.
+ * Legacy approval fields (`executable` / `pendingApproval` / `offer`) on the wire are
+ * deliberately NOT projected (r2: approval removed; old hubs still send them).
  * @param {object} in_
  * @param {unknown} in_.hubCaps
  * @param {SchedulesPayloadWire | undefined} in_.payload
@@ -287,13 +252,10 @@ export function panelView(in_) {
       form: str(def.form) === "message" ? "message" : "background",
       when: whenParts(/** @type {ScheduleWhen | undefined} */ (def.when)),
       enabled: bool(def.enabled) === true,
-      executable: t.executable === true,
-      pendingApproval: t.pendingApproval === true,
       createdBy: str(def.createdBy) ?? "user",
       feishu: bool(def.feishu) === true,
       nextAt: num(t.nextAt),
       degraded: t.degraded === "never",
-      defHash: str(t.defHash) ?? "",
       totals: {
         fired: num(totals.fired) ?? 0,
         missed: num(totals.missed) ?? 0,
@@ -333,7 +295,6 @@ export function panelView(in_) {
     rev: num(record(proj).rev) ?? 0,
     tasks,
     runs,
-    pendingCount: tasks.filter((task) => task.pendingApproval).length,
     missedTotal: tasks.reduce((acc, task) => acc + task.totals.missed, 0),
     droppedReports,
   };
@@ -359,15 +320,15 @@ export function whenTextOf(when) {
  * @property {number | undefined} nextAt
  * @property {string} nextIn   compact relative token (relIn) for nextAt
  * @property {boolean} enabled
- * @property {boolean} pendingApproval
  * @property {boolean} live    any non-terminal run of this task
  * @property {TaskLastRun | undefined} lastRun  newest run (proj.runs is most-recent-first)
  */
 /**
  * Aggregated task rows for the TasksPanel / composer schedule section (schedule-auto-approve
- * plan §3-P3): one row per task with its live flag and newest run precomputed. Loose reads on
- * untrusted JSON (offerOf posture) — a malformed projection yields [], never a throw. Old wire
- * without `runId` simply yields `lastRun.runId === undefined` (row renders without the link).
+ * plan §6-W1): one row per task with its live flag and newest run precomputed. Loose reads on
+ * untrusted JSON — a malformed projection yields [], never a throw. Old wire without `runId`
+ * simply yields `lastRun.runId === undefined` (row renders without the link); legacy
+ * `pendingApproval` is ignored (approval removed, r2).
  * @param {ScheduleSessionProjectionWire | unknown} proj @param {number} now
  * @returns {TaskRow[]}
  */
@@ -404,7 +365,6 @@ export function taskRowsOf(proj, now) {
       nextAt,
       nextIn: relIn(nextAt, now),
       enabled: bool(def.enabled) === true,
-      pendingApproval: t.pendingApproval === true,
       live,
       lastRun,
     });
@@ -412,13 +372,12 @@ export function taskRowsOf(proj, now) {
   return rows;
 }
 
-/** @typedef {{ count: number, live: boolean, pending: number }} SchedSummary */
+/** @typedef {{ count: number, live: boolean }} SchedSummary */
 /**
- * Aggregated chip/panel gate + counters (schedule-auto-approve plan §3-P3, D6): the composer
+ * Aggregated chip/panel gate + counters (schedule-auto-approve plan §6-W1, D6): the composer
  * ⏰ chip and TasksPanel summary render iff this returns a value. Same gate semantics as
  * `scheduleBadgeOf` (no cap / no projection / zero tasks without degraded ⇒ undefined).
- * `live` ⇒ any non-terminal run in the session (chip icon spins); `pending` counts the
- * legacy pendingApproval tasks (D2 存量).
+ * `live` ⇒ any non-terminal run in the session (chip icon spins).
  * @param {unknown} hubCaps @param {SchedulesPayloadWire | undefined} payload @param {string | undefined} sessionId
  * @returns {SchedSummary | undefined}
  */
@@ -431,6 +390,5 @@ export function schedSummaryOf(hubCaps, payload, sessionId) {
   return {
     count,
     live: proj.runs.some((run) => isRunLive(run.state)),
-    pending: proj.tasks.filter((task) => task.pendingApproval === true).length,
   };
 }

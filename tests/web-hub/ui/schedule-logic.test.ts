@@ -9,22 +9,18 @@ import { describe, expect, it } from "vitest";
 import {
   SCHED_CAP,
   SCHED_EVENT,
-  approveArgs,
   feishuKey,
   fmtTs,
   isRunLive,
   isSchedulesPayloadLike,
-  offerOf,
   panelView,
   relIn,
-  rejectArgs,
   runReasonKey,
   runStateKey,
   scheduleBadgeOf,
   scheduleBadgeText,
   schedSummaryOf,
   sessionProjectionOf,
-  shortHash,
   taskRowsOf,
   whenParts,
   whenTextOf,
@@ -68,18 +64,19 @@ describe("sessionProjectionOf / scheduleBadgeOf", () => {
     expect(sessionProjectionOf(payload, "nope")).toBeUndefined();
     expect(sessionProjectionOf(undefined, SCHED_SID)).toBeUndefined();
   });
-  it("badge: count + pending flag; cap off / no projection / zero tasks ⇒ undefined", () => {
-    expect(scheduleBadgeOf([SCHED_CAP], payload, SCHED_SID)).toEqual({ count: 2, pending: true });
+  it("badge: count-only; legacy pendingApproval/offer tasks count like any other; cap off / no projection / zero tasks ⇒ undefined", () => {
+    // makePayload() includes makePendingTask() (pendingApproval: true + an offer, old-hub wire)
+    // — the badge no longer carries a pending variant and counts it like any other task.
+    expect(scheduleBadgeOf([SCHED_CAP], payload, SCHED_SID)).toEqual({ count: 2 });
     expect(scheduleBadgeOf([], payload, SCHED_SID)).toBeUndefined();
     expect(scheduleBadgeOf([SCHED_CAP], payload, "nope")).toBeUndefined();
     const empty = makePayload([makeSession({ tasks: [] })]);
     expect(scheduleBadgeOf([SCHED_CAP], empty, SCHED_SID)).toBeUndefined();
     // degraded store with zero tasks still badges (the user should see the repair hint exists)
     const degraded = makePayload([makeSession({ tasks: [], runs: [], degraded: "invalid-json" })]);
-    expect(scheduleBadgeOf([SCHED_CAP], degraded, SCHED_SID)).toEqual({ count: 0, pending: false });
-    // no pending task ⇒ pending:false
+    expect(scheduleBadgeOf([SCHED_CAP], degraded, SCHED_SID)).toEqual({ count: 0 });
     const plain = makePayload([makeSession({ tasks: [makeTask()] })]);
-    expect(scheduleBadgeOf([SCHED_CAP], plain, SCHED_SID)).toEqual({ count: 1, pending: false });
+    expect(scheduleBadgeOf([SCHED_CAP], plain, SCHED_SID)).toEqual({ count: 1 });
   });
   it("badge text saturates at 99+", () => {
     expect(scheduleBadgeText(2)).toBe("2");
@@ -150,50 +147,22 @@ describe("display helpers", () => {
     expect(whenTextOf(undefined)).toBe("");
     expect(whenTextOf({ kind: "cron", expr: "" } as never)).toBe("");
   });
-  it("approveArgs / rejectArgs / shortHash", () => {
-    expect(approveArgs("s_abcd2345", "fd9fcbba".repeat(8))).toBe(`approve s_abcd2345 ${"fd9fcbba".repeat(8)}`);
-    expect(rejectArgs("s_abcd2345", "fd9fcbba".repeat(8))).toBe(`reject s_abcd2345 ${"fd9fcbba".repeat(8)}`);
-    expect(shortHash("1b4611e2ff4f7bc06a36a751b84306214878c05506d49e70aec1d8394ec06655")).toBe("1b4611e2");
-  });
 });
 
-describe("offerOf (#61 W2, confirm-plan r2 §4.6)", () => {
-  it("picks the earliest-expiring structurally valid offer across the session's tasks", () => {
-    const later = makeTask({
-      task: { id: "s_aaaa2345" },
-      offer: { offerId: "offer-aaaa1111bbbb2222", expiresAt: 9_000 },
-    });
-    const sooner = makeTask({
-      task: { id: "s_bbbb2345" },
-      pendingApproval: true,
-      executable: false,
-      offer: { offerId: "offer-bbbb3333cccc4444", expiresAt: 3_000 },
-    });
-    expect(offerOf(makeSession({ tasks: [later, sooner] }))).toEqual({
-      taskId: "s_bbbb2345",
-      offerId: "offer-bbbb3333cccc4444",
-      expiresAt: 3_000,
-    });
-  });
-  it("undefined without offers, on malformed projections; malformed entries are skipped", () => {
-    expect(offerOf(makeSession())).toBeUndefined();
-    expect(offerOf(undefined)).toBeUndefined();
-    expect(offerOf(null)).toBeUndefined();
-    expect(offerOf({ tasks: "x" })).toBeUndefined();
-    // malformed offer entries are skipped, a later valid one still wins
-    const badOffer = makeTask({
-      task: { id: "s_aaaa2345" },
-      offer: { offerId: "", expiresAt: 1 },
-    });
-    expect(offerOf(makeSession({ tasks: [badOffer] }))).toBeUndefined();
-    const good = makeTask({
-      task: { id: "s_bbbb2345" },
-      offer: { offerId: "offer-dddd5555eeee6666", expiresAt: 7_000 },
-    });
-    expect(offerOf(makeSession({ tasks: [badOffer, good] }))?.offerId).toBe("offer-dddd5555eeee6666");
-    // expiresAt non-finite ⇒ skipped
-    const nanOffer = makeTask({ task: { id: "s_cccc2345" }, offer: { offerId: "offer-x", expiresAt: Number.NaN } });
-    expect(offerOf(makeSession({ tasks: [nanOffer] }))).toBeUndefined();
+describe("legacy approval fields are ignored (r2 §6-W1, old-hub compat)", () => {
+  it("a projection carrying pendingApproval/executable/offer/approval yields plain views (no approval surface at all)", () => {
+    // the fixture session already carries the legacy shape (makePendingTask); every derived
+    // view must come back approval-free — and the logic module no longer exports any
+    // approval/offer helper (the import list of this file pins that).
+    const payload = makePayload();
+    const badge = scheduleBadgeOf([SCHED_CAP], payload, SCHED_SID);
+    expect(badge).toEqual({ count: 2 });
+    expect("pending" in (badge ?? {})).toBe(false);
+    const summary = schedSummaryOf([SCHED_CAP], payload, SCHED_SID);
+    expect(summary).toEqual({ count: 2, live: true });
+    expect("pending" in (summary ?? {})).toBe(false);
+    const rows = taskRowsOf(payload.sessions[0]!, 1_761_350_400_000);
+    expect(rows.every((row) => !("pendingApproval" in row))).toBe(true);
   });
 });
 
@@ -218,14 +187,19 @@ describe("panelView", () => {
     const v = panelView({ ...base, payload: p });
     expect(v).toMatchObject({ kind: "degraded", reason: "invalid-json" });
   });
-  it("ready: tasks + runs normalized, pendingCount / missedTotal derived", () => {
+  it("ready: tasks + runs normalized, missedTotal derived; legacy approval fields not projected", () => {
     const v = panelView(base);
     if (v.kind !== "ready") throw new Error("expected ready");
     expect(v.tasks).toHaveLength(2);
     expect(v.runs).toHaveLength(3);
-    expect(v.pendingCount).toBe(1);
+    expect(v.missedTotal).toBe(0);
     expect(v.canWrite).toBe(true);
     expect(v.runs[1]?.taskName).toBe("每日晨报"); // joined from the task list
+    // the fixture's legacy pending task yields a PLAIN task row (r2: approval removed)
+    expect(
+      v.tasks.every((task) => !("pendingApproval" in task) && !("executable" in task) && !("defHash" in task)),
+    ).toBe(true);
+    expect("pendingCount" in v).toBe(false);
   });
   it("offline ⇒ canWrite false (E3 read-only); stale ⇒ feishu q", () => {
     const off = panelView({ ...base, offline: true });
@@ -265,7 +239,7 @@ describe("panelView", () => {
 
 describe("taskRowsOf (schedule-auto-approve §3-P3)", () => {
   const now = 1_761_350_400_000; // T0
-  it("one row per task: identity/when/next/enabled/pending fields", () => {
+  it("one row per task: identity/when/next/enabled fields (legacy pendingApproval ignored)", () => {
     const rows = taskRowsOf(makeSession(), now);
     expect(rows).toHaveLength(2);
     const first = rows[0];
@@ -274,12 +248,11 @@ describe("taskRowsOf (schedule-auto-approve §3-P3)", () => {
       name: "每日晨报",
       whenText: "0 8 * * * (Asia/Shanghai)",
       enabled: true,
-      pendingApproval: false,
     });
     expect(first?.nextIn).toBe("12h"); // nextAt = T0 + 12h
-    const pending = rows[1];
-    expect(pending).toMatchObject({ id: "s_efgh6789", pendingApproval: true, enabled: true });
-    expect(pending?.nextIn).toBe("3d");
+    const legacyPending = rows[1];
+    expect(legacyPending).toMatchObject({ id: "s_efgh6789", enabled: true });
+    expect(legacyPending?.nextIn).toBe("3d");
   });
   it("live flag + lastRun is the newest matching run (runs arrive most-recent-first)", () => {
     const rows = taskRowsOf(makeSession(), now);
@@ -322,7 +295,6 @@ describe("taskRowsOf (schedule-auto-approve §3-P3)", () => {
         nextAt: undefined,
         nextIn: "",
         enabled: false,
-        pendingApproval: false,
         live: false,
         lastRun: undefined,
       },
@@ -339,15 +311,15 @@ describe("schedSummaryOf (schedule-auto-approve §3-P3)", () => {
     const empty = makePayload([makeSession({ tasks: [], runs: [] })]);
     expect(schedSummaryOf([SCHED_CAP], empty, SCHED_SID)).toBeUndefined();
   });
-  it("count / live / pending derived from the session projection", () => {
-    // fixture: 2 tasks (one pendingApproval), one `running` run ⇒ live
-    expect(schedSummaryOf([SCHED_CAP], payload, SCHED_SID)).toEqual({ count: 2, live: true, pending: 1 });
+  it("count / live derived from the session projection (legacy pendingApproval ignored)", () => {
+    // fixture: 2 tasks (one legacy-pendingApproval + offer), one `running` run ⇒ live
+    expect(schedSummaryOf([SCHED_CAP], payload, SCHED_SID)).toEqual({ count: 2, live: true });
     const quiet = makePayload([
-      makeSession({ tasks: [makeTask()], runs: [makeRun()] }), // completed run only, no pending task
+      makeSession({ tasks: [makeTask()], runs: [makeRun()] }), // completed run only
     ]);
-    expect(schedSummaryOf([SCHED_CAP], quiet, SCHED_SID)).toEqual({ count: 1, live: false, pending: 0 });
+    expect(schedSummaryOf([SCHED_CAP], quiet, SCHED_SID)).toEqual({ count: 1, live: false });
     // degraded store with zero tasks still surfaces (repair hint), live false
     const degraded = makePayload([makeSession({ tasks: [], runs: [], degraded: "invalid-json" })]);
-    expect(schedSummaryOf([SCHED_CAP], degraded, SCHED_SID)).toEqual({ count: 0, live: false, pending: 0 });
+    expect(schedSummaryOf([SCHED_CAP], degraded, SCHED_SID)).toEqual({ count: 0, live: false });
   });
 });
