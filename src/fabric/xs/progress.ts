@@ -496,6 +496,34 @@ export class XsProgressBag {
     return { ok: true, view: claimViewOf(claim) };
   }
 
+  /** Pure-data export of every BOUND claim (same-sid `/reload` park, arch §4.5 "claim 不重置"). */
+  claimSnapshots(): Array<{ messageId: string; view: XsActivationClaimView }> {
+    const out: Array<{ messageId: string; view: XsActivationClaimView }> = [];
+    for (const [messageId, slot] of this.entries) {
+      if (slot.claim !== undefined) out.push({ messageId, view: claimViewOf(slot.claim) });
+    }
+    return out;
+  }
+
+  /** Re-adopt a parked claim onto an EXISTING row that has none yet (a fresh stack carries no
+   *  claim, so a restored `dispatched`/`unknown` becomes the terminal tombstone it must be). */
+  claimRestore(messageId: string, view: XsActivationClaimView): boolean {
+    const slot = this.entries.get(messageId);
+    if (slot === undefined || slot.claim !== undefined) return false;
+    const state: XsActivationClaimState =
+      view.state === "reserved" || view.state === "dispatched" || view.state === "unknown" ? "unknown" : view.state;
+    slot.claim = {
+      state,
+      activationKey: view.activationKey,
+      notBefore: view.notBefore,
+      attempts: view.attempts,
+      reservedAt: view.reservedAt,
+      dispatchedAt: view.dispatchedAt,
+      settledAt: view.settledAt,
+    };
+    return true;
+  }
+
   // ----------------------------------------------------------------- internals
 
   private claim(messageId: string): XsClaimSlot | undefined {

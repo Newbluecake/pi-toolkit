@@ -1,6 +1,6 @@
 import { Type, type TSchema } from "@sinclair/typebox";
 import { XS_ALIAS_MAX_BYTES } from "./xs-alias.js";
-import type { XsActivationReqOp } from "./xs-activation.js";
+import type { XsActivateResWire, XsActivationReqOp } from "./xs-activation.js";
 import {
   XS_ACTIVATE_REQ_DEADLINE_MS,
   XS_RECEIPT_DEADLINE_MS,
@@ -582,6 +582,10 @@ export const XsResSchema = Type.Object(
     ),
     // alias-plan §3.4 (AL0b): `op:"alias"` reply body (`XsAliasResWire`), written only to a requester that declared `xs.alias.v1`.
     alias: Type.Optional(Type.Object({}, { additionalProperties: true })),
+    // fabric-xs-activation P3 (arch §4.4/§4.7): `op:"activate"` outcome body (`XsActivateResWire`),
+    // written ONLY to a requester that declared `xs.activate.v1` (a trailing optional prop —
+    // old ops never carry it, old frames decode byte-identically).
+    activation: Type.Optional(Type.Object({}, { additionalProperties: true })),
   },
   { additionalProperties: false },
 );
@@ -606,6 +610,8 @@ export interface XsResFrame {
   channels?: XsChannelInfoWire[];
   /** Alias-plan §3.4: `op:"alias"` reply body. */
   alias?: XsAliasResWire;
+  /** fabric-xs-activation P3: `op:"activate"` outcome (status/effect/retry/progress; never text). */
+  activation?: XsActivateResWire;
 }
 
 /**

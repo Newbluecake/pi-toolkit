@@ -198,7 +198,7 @@ export interface HubConnection {
    *  generic 3s admin timeout. Same cap precheck / reject-pending-on-teardown contract.
    *  fabric-xs-activation P1: `xs_req{op:"receipt"}` rides the same overload under the
    *  `xs.state.v1` required cap (the precheck rejects E_NO_CAP on a cap-less link). */
-  request(frame: XsReqFrame, requiredCap: "xs.v1" | "xs.state.v1"): Promise<XsResFrame>;
+  request(frame: XsReqFrame, requiredCap: "xs.v1" | "xs.state.v1" | "xs.activate.v1"): Promise<XsResFrame>;
   /** fabric-thread arch r3 §7.3 (P3): the `thr_req` overload — 5s deadline (the §7.3 agent-side
    *  wait; the caller owns the ONE same-postId retry, `thread-child-tool.ts`). Same cap precheck
    *  / reject-pending-on-teardown contract. rebind-plan r3 (agent package): the rebind/acquire
@@ -482,7 +482,7 @@ class Connection implements HubConnection {
   request(frame: TfaReqFrame, requiredCap: string): Promise<TfaResFrame>;
   request(frame: FsbReqFrame, requiredCap: string): Promise<FsbResFrame>;
   request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame>;
-  request(frame: XsReqFrame, requiredCap: "xs.v1" | "xs.state.v1"): Promise<XsResFrame>;
+  request(frame: XsReqFrame, requiredCap: "xs.v1" | "xs.state.v1" | "xs.activate.v1"): Promise<XsResFrame>;
   /** rebind-plan r3 (agent 包)：rebind/acquire 帧也走 thr_req，cap 预检放宽到 thr.rebind.v1。 */
   request(frame: ThrReqFrame, requiredCap: "thr.v1" | "thr.rebind.v1"): Promise<ThrResFrame>;
   request(

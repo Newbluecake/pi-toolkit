@@ -306,8 +306,18 @@ export interface RootWakeMessage {
     inReplyTo?: string;
     /** Channel-plan §5.3 (评审 #14): broadcast marker — details only, never the provider payload (C-X9). */
     bc?: XsBroadcastMark;
+    /** fabric-xs-activation P3: set ONLY on a host control marker — the original messageId it activates. */
+    activateFor?: string;
   };
 }
+
+/** fabric-xs-activation P3 (arch §4.5): the FIXED, body-free content of an activation marker. It
+ *  names no caller, header, request id, alias, key or token — only that the host asks the model
+ *  to process an already-delivered, still-unprocessed cross-session request. */
+export const XS_ACTIVATE_MARKER_CONTENT =
+  "Host activation: process the cross-session request that was already delivered to this session and has not been handled yet. Its content is already in the conversation; do not repeat anything that was already handled.";
+
+export type RootWakeEnded = "settled" | "aborted" | "deadline" | "stuck";
 
 export interface RootWakeRequest {
   reply?: { requestId: string; dueAt: number };
@@ -321,6 +331,9 @@ export interface RootWakeRequest {
   level?: number;
   /** Channel-plan §5.3: threaded verbatim into `details.bc` (absent ⇒ details byte-identical). */
   bc?: XsBroadcastMark;
+  /** fabric-xs-activation P3: ledger-bound control marker for this original messageId (`xid` is
+   *  then the control action's own id). Absent ⇒ every byte of the body-wake path is unchanged. */
+  activateFor?: string;
 }
 
 export interface RootWakeDeps {
@@ -379,6 +392,9 @@ export class RootWakeController {
   private slowTimer: TimerHandle | undefined;
   private idleTimer: TimerHandle | undefined;
   private graceTimer: TimerHandle | undefined;
+  /** fabric-xs-activation P3: per-token end callbacks of control markers (pure data, pruned on end). */
+  private readonly endHooks = new Map<string, (ended: RootWakeEnded) => void>();
+  private readonly deadlineHit = new Set<string>();
 
   constructor(private readonly deps: RootWakeDeps) {
     this.clock = deps.clock ?? systemClock;
@@ -395,6 +411,13 @@ export class RootWakeController {
   }
   get busy(): boolean {
     return this.current !== "idle";
+  }
+  /** fabric-xs-activation P3: the original messageId the current supervised run concerns — a body
+   *  wake's own xid, or a control marker's `activateFor`. Undefined while idle. */
+  get activeMessageId(): string | undefined {
+    if (this.token === undefined) return undefined;
+    const record = this.ledger.get(this.token);
+    return record === undefined ? undefined : (record.activateFor ?? record.xid);
   }
 
   /** Explicit for XW: recover only AFTER old stack.dispose(), before accepting inbound messages. */
@@ -484,6 +507,7 @@ export class RootWakeController {
         ...(optimistic ? { optimistic: true as const } : {}),
         ...(dispatchLevel === undefined ? {} : { level: dispatchLevel }),
         ...(request.solicited ? { levelMode: "return" as const } : {}),
+        ...(request.activateFor === undefined ? {} : { activateFor: request.activateFor }),
       })
     )
       return downgrade("ledger_full");
@@ -507,6 +531,7 @@ export class RootWakeController {
             ...(request.inReplyTo === undefined ? {} : { inReplyTo: request.inReplyTo }),
             ...(dispatchLevel === undefined ? {} : { level: dispatchLevel }),
             ...(request.bc === undefined ? {} : { bc: { channel: request.bc.channel } }),
+            ...(request.activateFor === undefined ? {} : { activateFor: request.activateFor }),
           },
         },
         { triggerTurn: true },
@@ -533,6 +558,32 @@ export class RootWakeController {
     if (optimistic) note(this.deps.audit, "wake_optimistic_dispatch", token);
     this.deps.chargeInboundWake?.();
     return { dispatched: true, effect: "unknown", reason: "start_deferred", woke: true, token };
+  }
+
+  /**
+   * fabric-xs-activation P3 (arch §4.5): activate ONE already-delivered original message by
+   * sending the fixed body-free control marker through the SAME dispatch gates (guard / policy /
+   * busy / goal / level / inbound quota / ledger / B1 / owner / deadline). It never creates a
+   * reply credential, never re-delivers the body and is never a second runner. `onEnded` fires
+   * once when the supervised control run ends (pure observation).
+   */
+  activateExisting(args: {
+    messageId: string;
+    from: unknown;
+    expiresAt: number;
+    level?: number;
+    onEnded?: (ended: RootWakeEnded) => void;
+  }): RootWakeDispatchResult {
+    const result = this.dispatch({
+      xid: newRunId((id) => this.ledger.get(id) !== undefined),
+      from: args.from,
+      content: XS_ACTIVATE_MARKER_CONTENT,
+      expiresAt: args.expiresAt,
+      ...(args.level === undefined ? {} : { level: args.level }),
+      activateFor: args.messageId,
+    });
+    if (result.dispatched && args.onEnded !== undefined) this.endHooks.set(result.token, args.onEnded);
+    return result;
   }
 
   /** The process B1 hook may already have run: authorized / abort bits make this idempotent for ledger tokens. */
@@ -686,6 +737,8 @@ export class RootWakeController {
   dispose(): void {
     this.disposed = true;
     this.clearTimers();
+    this.endHooks.clear();
+    this.deadlineHit.clear();
     if (this.token !== undefined) this.ledger.unclaim(this.token, this.owner);
   }
 
@@ -729,6 +782,7 @@ export class RootWakeController {
     this.deadlineTimer = undefined;
     if (this.current === "deferred") {
       this.ledger.tombstone(this.token);
+      this.endNote(this.token, "deadline");
       this.releaseOwnership(); // NOT capacity: the unexecuted action is still possible.
       return;
     }
@@ -736,6 +790,7 @@ export class RootWakeController {
     const token = this.token;
     const record = this.ledger.get(token);
     if (record === undefined || record.handed) return;
+    this.deadlineHit.add(token);
     this.ledger.update(token, { abortIssuedAt: this.clock.now() });
     this.current = "aborting";
     this.arm(); // arm grace BEFORE invoking abort (settled can be synchronous).
@@ -746,6 +801,7 @@ export class RootWakeController {
     if (this.disposed || this.current !== "aborting") return;
     this.graceTimer = undefined;
     this.current = "stuck";
+    this.endNote(this.token, "stuck");
     note(this.deps.audit, "abortStuck", this.token);
     try {
       (this.deps.warn ?? console.warn)("[pi-subagent] xs wake abort stuck; further wakes are deliver-only");
@@ -766,9 +822,30 @@ export class RootWakeController {
     });
   }
 
+  private endNote(token: string | undefined, ended: RootWakeEnded): void {
+    if (token === undefined) return;
+    this.deadlineHit.delete(token);
+    const hook = this.endHooks.get(token);
+    if (hook === undefined) return;
+    this.endHooks.delete(token);
+    try {
+      hook(ended);
+    } catch {
+      /* observation only */
+    }
+  }
+
   private finish(proof: "settled" | "idle_observed" | "host_rejected"): void {
     if (this.token !== undefined) {
       const record = this.ledger.get(this.token);
+      this.endNote(
+        this.token,
+        this.deadlineHit.has(this.token)
+          ? "deadline"
+          : record?.abortIssuedAt !== undefined || proof === "host_rejected"
+            ? "aborted"
+            : "settled",
+      );
       if (proof !== "host_rejected" && record !== undefined && !record.started) {
         // The ended run was only presumed ours. The real delayed action is still possible.
         this.ledger.tombstone(this.token);

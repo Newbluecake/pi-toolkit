@@ -347,6 +347,10 @@ export interface XsActivateAckFrame {
   progress?: XsProgress;
 }
 
+/** `xs_res.activation` — the hub's answer to `xs_req{op:"activate"}`: the receiver's ack body
+ *  (or the hub's own refusal/no-op/dup verdict), without the frame envelope. Never carries text. */
+export type XsActivateResWire = Omit<XsActivateAckFrame, "t" | "rid">;
+
 // ----------------------------------------------------------------- StatusInfo.xsRequests (arch §4.7/§4.9)
 
 /** Row cap of the status slot = the per-side progress-bag cap (receiver/source cap256, arch

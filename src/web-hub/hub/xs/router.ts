@@ -67,7 +67,12 @@ import {
   type XsWakeDowngraded,
 } from "../../protocol/xs.js";
 import { XS_ALIAS_TAKE_TOKEN_RE } from "../../protocol/xs-alias.js";
-import { XS_STATE_AGENT_CAP, type XsActivateAckFrame, type XsStateFrame } from "../../protocol/xs-activation.js";
+import {
+  XS_ACTIVATE_AGENT_CAP,
+  XS_STATE_AGENT_CAP,
+  type XsActivateAckFrame,
+  type XsStateFrame,
+} from "../../protocol/xs-activation.js";
 import { createXsActivationService, type XsActivationService } from "./activation.js";
 import { auditXs, type XsAuditRecord } from "../audit.js";
 import type { HubLog } from "../ports.js";
@@ -552,6 +557,11 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
         refuse("E_XS_OFF", {}, self.sessionId);
         return;
       }
+      // arch §4.6: a query is a pure read — it only spends the `listPerMin` read budget.
+      if (!limits.admitList(agentKey, self.limits)) {
+        refuse("E_XS_RATE_LIMITED", {}, self.sessionId);
+        return;
+      }
       deps.activation.receipt(
         agentKey,
         self,
@@ -573,10 +583,63 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       );
       return;
     }
-    // fabric-xs-activation P3 owns `op:"activate"` (relay/quota/marker). P1 refuses it
-    // explicitly — the hub declares `xs.activate.v1`, the agent does not (no frame is ever sent).
+    // fabric-xs-activation P3 (arch §4.4–§4.6): idempotent relation-level activation. Requires
+    // the relation bag (hub `crossSession.activation` key) AND a requester that is itself
+    // activate-capable (the agent only sends the op to a hub advertising `xs.activate.v1`;
+    // a cap-less requester is refused like a service-less hub).
     if (frame.op === "activate") {
-      refuse("E_XS_OFF", {}, self.sessionId);
+      const requesterCaps = (() => {
+        try {
+          return registry.xsView(agentKey)?.caps ?? [];
+        } catch {
+          return [] as readonly string[];
+        }
+      })();
+      if (
+        deps.activation === undefined ||
+        !requesterCaps.includes(XS_ACTIVATE_AGENT_CAP) ||
+        typeof frame.messageId !== "string" ||
+        frame.messageId === "" ||
+        typeof frame.activationKey !== "string" ||
+        frame.activationKey === "" ||
+        frame.text !== undefined
+      ) {
+        refuse("E_XS_OFF", {}, self.sessionId);
+        return;
+      }
+      deps.activation.activate(
+        agentKey,
+        self,
+        {
+          ...(frame.to !== undefined ? { to: frame.to } : {}),
+          messageId: frame.messageId,
+          activationKey: frame.activationKey,
+          ...(frame.level !== undefined ? { level: frame.level } : {}),
+        },
+        (body) => {
+          if (!body.ok) {
+            res({ ok: false, code: body.code, effect: "none" });
+            audit({ op: "activate", fromSession: self.sessionId, outcome: "error", code: body.code });
+            return;
+          }
+          const a = body.activation;
+          res({
+            ok: true,
+            effect: a.effect,
+            ...(a.reason !== undefined ? { reason: a.reason } : {}),
+            ...(a.wakeDowngraded !== undefined ? { wakeDowngraded: a.wakeDowngraded as XsWakeDowngraded } : {}),
+            activation: a,
+          });
+          audit({
+            op: "activate",
+            xid: a.messageId,
+            fromSession: self.sessionId,
+            outcome: a.effect,
+            reason: a.status,
+            ms: now() - started,
+          });
+        },
+      );
       return;
     }
 
@@ -1192,7 +1255,7 @@ export function createXsRelay(deps: {
   // (key-absence-is-off — no relations, no receipt op, no state forwarding; hub byte-identical).
   const activation =
     deps.config.crossSession.activation === true
-      ? createXsActivationService({ registry: deps.registry, members, log: deps.log, now: deps.now })
+      ? createXsActivationService({ registry: deps.registry, members, limits, log: deps.log, now: deps.now })
       : undefined;
   router = createXsRouter({
     registry: deps.registry,

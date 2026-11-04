@@ -1379,6 +1379,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           onXsAliasEvt: (frame) => xsBridge.onAliasEvt(frame),
           // fabric-xs-activation P1: the hub's mirrored progress push → the source-side mirror.
           onXsState: (frame: XsStateFrame) => xsBridge.onState(frame),
+          // fabric-xs-activation P3: the hub's text-free control relay → the receiver half.
+          onXsActivate: (frame) => xsBridge.onActivate(frame),
         }
       : {}),
     ...(schedulePort !== undefined

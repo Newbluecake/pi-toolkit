@@ -90,13 +90,18 @@ import type {
   XsResFrame,
   XsStatusWire,
 } from "../protocol/xs.js";
+import type { XsPortActivateReply } from "../../fabric/xs/session-activation.js";
 import {
+  XS_ACTIVATE_AGENT_CAP,
+  XS_ACTIVATE_HUB_CAP,
   XS_RECEIPT_DEADLINE_MS,
   XS_REQUESTS_MAX_ROWS,
   XS_STATE_AGENT_CAP,
   XS_STATE_HUB_CAP,
   type XsProgress,
   type XsWakeView,
+  type XsActivateAckFrame,
+  type XsActivateFrame,
   type XsRequestsStatusWire,
   type XsStateFrame,
 } from "../protocol/xs-activation.js";
@@ -115,6 +120,19 @@ export interface XsReplyHubPort extends XsHubPort {
    *  the hub answers `xs_res` and pushes the snapshot as an `xs_state` frame the waiter here
    *  correlates by messageId. Zero side effects; absent ⇒ the op does not exist yet. */
   receipt?(args: { messageId: string; activationKey?: string }): Promise<XsPortReceipt>;
+  /** fabric-xs-activation P3: true iff local activation is effective ∧ local wake on
+   *  (`XsAgentPort.activateEnabled`) ∧ the LIVE hub declared `xs.activate.v1`. */
+  activateCapable?(): boolean;
+  /** fabric-xs-activation P3 (arch §4.4): ONE `xs_req{op:"activate"}` (8s) — never carries text.
+   *  `not_sent` ⇒ provably never left (no link / no cap); a deadline/link loss after the frame
+   *  left is NOT `none` (the caller maps it to unknown). */
+  activate?(args: {
+    origin: XsOriginSnapshot;
+    to: string;
+    messageId: string;
+    activationKey: string;
+    level?: number;
+  }): Promise<XsPortActivateReply>;
 }
 
 /** fabric-xs-activation P1: the receipt result (arch §4.4's `{status, messageId, progress?}` —
@@ -156,6 +174,9 @@ export interface XsStackPort {
   /** fabric-xs-activation P1: receiver-side progress evidence (absent ⇒ activation off /
    *  pre-feature stack — the bridge pushes and mirrors nothing). */
   progress?: XsStackProgressPort;
+  /** fabric-xs-activation P3: the receiver half of `xs_activate` (synchronous, never throws,
+   *  exactly one ack). Absent ⇒ activation is not effective on this stack. */
+  activation?: { handle(frame: XsActivateFrame): XsActivateAckFrame };
   /** channel-plan §12 (IBP): unread inbox events of the stack's CURRENT session (IB1 `count`).
    *  Optional: absent ⇒ `StatusInfo.xsInbox` is never written. */
   unread?(): number;
@@ -194,6 +215,10 @@ export interface XsAgentPort {
    *  no `xs.state.v1` cap, no `HubConfig.crossSession.activation` key, no state frames — the
    *  agent stays byte-identical to the pre-feature build (key-absence-is-off on the hub). */
   activationEnabled?(): boolean;
+  /** fabric-xs-activation P3 (arch §3.2): `activation effective ∧ fabric.wake.enabled`, frozen per
+   *  activate (non-live). ABSENT ⇒ false: no `xs.activate.v1` cap is declared and no activate
+   *  op/frame is ever sent or answered (byte-identical to the P1/P2 agent). */
+  activateEnabled?(): boolean;
   /** Alias-plan §4 (Q3): display-only one-shot notice text (the bridge already de-duplicated it process-wide
    *  by `(sessionId, lost.at)`). ALW wires it to `ctx.ui.notify`. Never throws into the bridge. */
   notifyAliasLost?(text: string): void;
@@ -258,6 +283,9 @@ export interface XsAgentBridge {
   };
   /** Connection `BindingPort.onXsDeliver` — answers EXACTLY ONE `xs_ack`, never throws. */
   onDeliver(frame: XsDeliverFrame): void;
+  /** Connection `BindingPort.onXsActivate` — answers EXACTLY ONE `xs_activate_ack`, never throws.
+   *  Inert (no answer, no side effect) unless activation is effective ∧ wake on. */
+  onActivate(frame: XsActivateFrame): void;
   /** (Re)publish the `xs_member` slot for the CURRENT stack (attach, join/leave/receive
    *  changes, and the `onHubCaps` fresh-caps hook). No-op without a live connection object or
    *  a stack — the next attach/hello_ack republishes from fresh state. */
@@ -485,6 +513,16 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       return false;
     }
   };
+  /** P3: `activation effective ∧ wake on` (frozen per activate; absent ⇒ false ⇒ no cap/op/frame). */
+  const activateEnabled = (): boolean => {
+    try {
+      return activationEnabled() && deps.port.activateEnabled?.() === true;
+    } catch {
+      return false;
+    }
+  };
+  /** P3: the live hub link declared `xs.activate.v1`. */
+  const hubHasActivate = (): boolean => deps.conn()?.caps.includes(XS_ACTIVATE_HUB_CAP) === true;
   /** P1: the live hub link declared `xs.state.v1`. */
   const hubHasState = (): boolean => deps.conn()?.caps.includes(XS_STATE_HUB_CAP) === true;
 
@@ -626,6 +664,43 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       receiptWaiters.delete(args.messageId);
+    }
+  };
+
+  /** fabric-xs-activation P3 (arch §4.4): one `xs_req{op:"activate"}` round trip (8s, cap-prechecked
+   *  by `connection.request`). Pre-send failures are `not_sent` (provably none); after the frame
+   *  left, a deadline/link loss is reported as such — the caller maps it to unknown. */
+  const activateRoundTrip = async (args: {
+    origin: XsOriginSnapshot;
+    to: string;
+    messageId: string;
+    activationKey: string;
+    level?: number;
+  }): Promise<XsPortActivateReply> => {
+    const conn = deps.conn();
+    if (conn === undefined || !activateEnabled()) return { kind: "not_sent" };
+    if (!hubHasActivate() || !hubHasState())
+      return conn.status().state === "live" ? { kind: "off" } : { kind: "not_sent" };
+    try {
+      const res: XsResFrame = await conn.request(
+        {
+          t: "xs_req",
+          rid: newAdminRid(),
+          op: "activate",
+          origin: { sessionId: args.origin.sessionId, epoch: args.origin.epoch },
+          to: args.to,
+          messageId: args.messageId,
+          activationKey: args.activationKey,
+          ...(args.level !== undefined ? { level: args.level } : {}),
+        },
+        XS_ACTIVATE_HUB_CAP,
+      );
+      return { kind: "res", res };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.startsWith("E_NO_CAP")) return conn.status().state === "live" ? { kind: "off" } : { kind: "not_sent" };
+      if (msg.startsWith("E_TIMEOUT")) return { kind: "deadline" };
+      return { kind: "link_lost" };
     }
   };
 
@@ -1111,6 +1186,9 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         // phase/reason axis explains a downgrade without waking anyone, arch §3.2). The
         // `xs.activate.v1` half is P3's (wake_session) — never declared here.
         ...(act ? [XS_STATE_AGENT_CAP] : []),
+        // fabric-xs-activation P3: `xs.activate.v1` — effective ∧ local wake on (the hub may still
+        // refuse at policy time; the cap is the schema gate, never authorization).
+        ...(act && activateEnabled() ? [XS_ACTIVATE_AGENT_CAP] : []),
       ];
     },
 
@@ -1180,6 +1258,46 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         });
       } catch {
         /* the hub's own 5s registry deadline settles the in-flight deliver as unknown */
+      }
+    },
+
+    onActivate(frame) {
+      // Inert unless effective ∧ wake on: no handler decision, no ack (the hub's own 5s relay
+      // deadline settles it as unknown) — an agent that did not declare the cap is never sent one.
+      if (!activateEnabled()) return;
+      let ack: XsActivateAckFrame;
+      try {
+        wireProgress();
+        const stack = deps.port.stack();
+        ack =
+          stack?.activation !== undefined
+            ? stack.activation.handle(frame)
+            : {
+                t: "xs_activate_ack",
+                rid: frame.rid,
+                messageId: frame.messageId,
+                activationKey: frame.activationKey,
+                status: "refused",
+                effect: "none",
+                reason: "session_changed",
+                retryable: false,
+              };
+      } catch {
+        ack = {
+          t: "xs_activate_ack",
+          rid: frame.rid,
+          messageId: frame.messageId,
+          activationKey: frame.activationKey,
+          status: "refused",
+          effect: "none",
+          reason: "receiver_error",
+          retryable: false,
+        };
+      }
+      try {
+        deps.conn()?.send(ack);
+      } catch {
+        /* the hub's relay deadline settles the attempt as unknown */
       }
     },
 
@@ -1319,6 +1437,9 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         // fabric-xs-activation P1: the read-only progress query (3s, cap-prechecked). Consumers:
         // wake_session (P3) and the sender's track re-sync (P2).
         receipt: receiptRoundTrip,
+        activateCapable: () =>
+          activateEnabled() && deps.conn()?.status().state === "live" && hubHasState() && hubHasActivate(),
+        activate: activateRoundTrip,
       };
     },
 

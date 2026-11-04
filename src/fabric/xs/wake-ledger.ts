@@ -30,6 +30,9 @@ export interface XsWakeRecord {
   readonly authorizedAt?: number;
   /** Write-once: the first guard (BAS or context) that actually saw this trigger. Linearization (§1.3). */
   readonly gateSightAt?: number;
+  /** fabric-xs-activation P3: a host CONTROL marker's record — the original delivered messageId
+   *  it activates (`xid` is the control action's own id). Absent on every body wake. */
+  readonly activateFor?: string;
 }
 
 export type XsWakeReleaseProof = "host_rejected" | "settled" | "idle_observed" | "aborted" | "teardown";
@@ -37,6 +40,7 @@ export type NewXsWakeRecord = Pick<XsWakeRecord, "token" | "sessionId" | "xid" |
   level?: number;
   levelMode?: "hop" | "return";
   optimistic?: true;
+  activateFor?: string;
 };
 type MutableFields = Partial<Omit<XsWakeRecord, "token" | "sessionId" | "xid" | "dispatchedAt" | "deadlineAt">>;
 

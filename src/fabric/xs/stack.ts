@@ -20,6 +20,8 @@ import { createXsAliasDecided, XS_ALIAS_DECIDED_CUSTOM_TYPE, type XsAliasDecided
 import { XsInbox } from "./inbox.js";
 import { createXsDirectoryCache, type XsDirectoryCache, type XsDirectoryRow } from "./directory.js";
 import { XsReceiver } from "./receiver.js";
+import { createXsActivationReceiver, type XsActivationReceiver } from "./session-activation.js";
+import { getXsWakeLedger } from "./wake-ledger.js";
 import {
   XS_REPLY_ENTRY_TYPE,
   XsReplyDueScheduler,
@@ -34,7 +36,13 @@ import { XsReplyNoticeGate, buildInvalidationNoticeContent } from "./reply-notic
 import type { XsStackPort, XsStackProgressPort } from "../../web-hub/agent/xs.js";
 import type { AgentSettings } from "../../config/settings.js";
 import type { GoalSessionStartReason } from "../../goal/state.js";
-import { XsProgressBag, XS_PROGRESS_CAP, type XsProgressFields, type XsProgressWrite } from "./progress.js";
+import {
+  XsProgressBag,
+  XS_PROGRESS_CAP,
+  type XsActivationClaimView,
+  type XsProgressFields,
+  type XsProgressWrite,
+} from "./progress.js";
 import type { XsProgress } from "../../web-hub/protocol/xs-activation.js";
 import { XS_TRACK_DEFAULT_MS } from "../../web-hub/protocol/xs-activation.js";
 
@@ -95,6 +103,9 @@ export interface StackXs extends XsStackPort {
    *  `StackXsInput.aliasDecided`). `decided()` feeds the auto-claim gate; `markDecided` is the `/fabric alias`
    *  write hook (memory first, then a best-effort `appendEntry`). */
   aliasDecided?: XsAliasDecidedPort;
+  /** fabric-xs-activation P3: the receiver half of `xs_activate` (present iff activation is
+   *  effective at stack build — frozen, non-live; the bridge still gates the frame on the cap). */
+  activation?: XsActivationReceiver;
   audit: Partial<Record<RootWakeAudit, number>>;
   beforeAgentStart(event: unknown): void;
   /** wake-unknown-optimistic: forward the host `context` event (before every LLM call). */
@@ -178,6 +189,46 @@ function parkXsProgress(sessionId: string, rows: XsProgress[], now: number): voi
     if (first !== undefined) slots.delete(first);
   }
   slots.set(sessionId, { rows, at: now });
+}
+
+/** fabric-xs-activation P3 (I4): the activation state that must survive a same-session `/reload`
+ *  — the original-source map (source authenticity) and the BOUND claims (at-most-once control
+ *  trigger: a reload must not reopen a consumed claim). `Symbol.for("pi-subagent:xs-activation-park")`,
+ *  pure data, cap 8 sessions FIFO × 256 entries, TTL the plain tracking window. New/fork/switch
+ *  sids never adopt (keyed by sessionId). */
+const XS_ACTIVATION_PARK_KEY = Symbol.for("pi-subagent:xs-activation-park");
+interface XsActivationParkSlot {
+  origins: Array<[string, string]>;
+  claims: Array<{ messageId: string; view: XsActivationClaimView }>;
+  at: number;
+}
+function parkedActivationSlots(): Map<string, XsActivationParkSlot> {
+  const g = globalThis as unknown as Record<symbol, Map<string, XsActivationParkSlot> | undefined>;
+  let slots = g[XS_ACTIVATION_PARK_KEY];
+  if (slots === undefined) {
+    slots = new Map<string, XsActivationParkSlot>();
+    g[XS_ACTIVATION_PARK_KEY] = slots;
+  }
+  return slots;
+}
+function takeParkedActivation(sessionId: string, ttlMs: number, now: number): XsActivationParkSlot | undefined {
+  const slots = parkedActivationSlots();
+  const slot = slots.get(sessionId);
+  if (slot === undefined) return undefined;
+  slots.delete(sessionId);
+  return now - slot.at <= ttlMs ? slot : undefined;
+}
+function parkActivation(sessionId: string, slot: Omit<XsActivationParkSlot, "at">, now: number): void {
+  const slots = parkedActivationSlots();
+  if (slot.origins.length === 0 && slot.claims.length === 0) {
+    slots.delete(sessionId);
+    return;
+  }
+  if (!slots.has(sessionId) && slots.size >= XS_PROGRESS_PARK_SESSIONS) {
+    const first = slots.keys().next().value;
+    if (first !== undefined) slots.delete(first);
+  }
+  slots.set(sessionId, { ...slot, at: now });
 }
 
 /**
@@ -333,8 +384,10 @@ export function buildStackXs(
   };
   const tapWritten = (message: unknown) => {
     try {
-      const xid = (message as { details?: { xid?: unknown } } | undefined)?.details?.xid;
-      unreadTap.written(typeof xid === "string" ? xid : undefined);
+      const details = (message as { details?: { xid?: unknown; activateFor?: unknown } } | undefined)?.details;
+      // P3: a host activation control marker is NOT a message body — never an unread event.
+      if (details?.activateFor === undefined)
+        unreadTap.written(typeof details?.xid === "string" ? details.xid : undefined);
     } catch {
       /* observation only */
     }
@@ -383,6 +436,13 @@ export function buildStackXs(
     // Same-session /reload: pure-data recovery (revision adopted as-is); the park's TTL equals
     // the plain tracking window — a stale park hands over nothing.
     for (const row of takeParkedXsProgress(sessionId, XS_TRACK_DEFAULT_MS, Date.now())) progressBag.merge(row);
+  }
+  // P3: the original-source map of delivered bodies (source authenticity of a later activate).
+  const originOfMessage = new Map<string, string>();
+  if (progressBag !== undefined) {
+    const parked = takeParkedActivation(sessionId, XS_TRACK_DEFAULT_MS, Date.now());
+    for (const [id, from] of parked?.origins ?? []) originOfMessage.set(id, from);
+    for (const c of parked?.claims ?? []) progressBag.claimRestore(c.messageId, c.view);
   }
   const progressSubs = new Set<(progress: XsProgress) => void>();
   const replySubs = new Set<(requestId: string, at: number) => void>();
@@ -684,6 +744,47 @@ export function buildStackXs(
       /* observation only */
     }
   };
+  // ---- fabric-xs-activation P3: the receiver half of `xs_activate` (arch §4.5) ----
+  const activation: XsActivationReceiver | undefined =
+    progressBag === undefined
+      ? undefined
+      : createXsActivationReceiver({
+          sessionId: () => sessionId,
+          epoch: () => membership.epoch,
+          disposed: () => disposed || ctx.sessionManager.getSessionId() !== sessionId,
+          now: () => Date.now(),
+          membership,
+          fence,
+          bag: progressBag,
+          originOf: (id) => originOfMessage.get(id),
+          confirmed: (id) => {
+            try {
+              const branch = ctx.sessionManager.getBranch() as unknown as ReadonlyArray<Record<string, unknown>>;
+              const floor = Math.max(0, branch.length - XS_REPLY_INBOUND_SCAN_CAP);
+              for (let i = branch.length - 1; i >= floor; i--) {
+                const entry = branch[i]!;
+                if (entry.type !== "custom_message" || entry.customType !== "subagent:xs") continue;
+                const d = entry.details as { xid?: unknown; activateFor?: unknown } | undefined;
+                if (d?.xid === id && d.activateFor === undefined) return "present";
+              }
+              return floor > 0 ? "over_budget" : "absent";
+            } catch {
+              return "over_budget"; // unreadable branch ⇒ fail closed
+            }
+          },
+          flushBranch: () => progressFlushBranch(),
+          hasLiveWake: (id) =>
+            getXsWakeLedger()
+              .entries()
+              .some(
+                (r) =>
+                  r.sessionId === sessionId &&
+                  (r.xid === id || r.activateFor === id) &&
+                  (r.state === "live" || r.executionPending),
+              ),
+          controller: () => controller,
+          observe: (id, fields) => notifyProgressWrite(progressBag.observe(id, fields, Date.now())),
+        });
   const progress: StackXsProgress | undefined =
     progressBag === undefined
       ? undefined
@@ -726,17 +827,29 @@ export function buildStackXs(
       if (disposed) return { effect: "none", reason: "session_changed", woke: false };
       // Also reconcile idle-poll/deferred-deadline transitions before the next capacity check.
       releaseTrigger();
-      if (frame.from.alias !== undefined && !aliasUsable()) {
-        const { alias: _dropped, ...from } = frame.from;
-        return receiver.deliver({ ...frame, from });
+      const verdict =
+        frame.from.alias !== undefined && !aliasUsable()
+          ? (() => {
+              const { alias: _dropped, ...from } = frame.from;
+              return receiver.deliver({ ...frame, from });
+            })()
+          : receiver.deliver(frame);
+      // P3: remember the hub-stamped source of a body that was (maybe) delivered — bounded FIFO.
+      if (activation !== undefined && verdict.effect !== "none" && !originOfMessage.has(frame.xid)) {
+        if (originOfMessage.size >= XS_PROGRESS_CAP) {
+          const first = originOfMessage.keys().next().value;
+          if (first !== undefined) originOfMessage.delete(first);
+        }
+        originOfMessage.set(frame.xid, frame.from.sessionId);
       }
-      return receiver.deliver(frame);
+      return verdict;
     },
     membership,
     fence,
     inbox,
     receiver,
     ...(progress !== undefined ? { progress } : {}),
+    ...(activation !== undefined ? { activation } : {}),
     audit,
     unread: () => unreadCount(sessionId),
     unreadTurnStart: () => {
@@ -793,7 +906,10 @@ export function buildStackXs(
       // stack — the bridge re-subscribes to the next stack it sees.
       progressSubs.clear();
       replySubs.clear();
-      if (progressBag !== undefined) parkXsProgress(sessionId, progressBag.rows(Date.now()), Date.now());
+      if (progressBag !== undefined) {
+        parkXsProgress(sessionId, progressBag.rows(Date.now()), Date.now());
+        parkActivation(sessionId, { origins: [...originOfMessage], claims: progressBag.claimSnapshots() }, Date.now());
+      }
       directory.dispose();
       replyScheduler.current?.dispose();
       reply?.gate.dispose();

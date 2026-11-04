@@ -42,10 +42,16 @@
 import { randomBytes } from "node:crypto";
 import type { HubLog } from "../ports.js";
 import type { Registry } from "../registry.js";
-import type { XsEffectiveMember, XsMembers } from "./members.js";
+import { hubIntersect, type XsEffectiveMember, type XsMembers } from "./members.js";
+import type { XsLimits, XsActivateTicket } from "./limits.js";
 import {
+  XS_ACTIVATE_AGENT_CAP,
+  XS_ACTIVATE_RELAY_EXPIRY_MS,
   XS_TRACK_DEFAULT_MS,
   xsTrackUntilMs,
+  type XsActivateAckFrame,
+  type XsActivateFrame,
+  type XsActivateResWire,
   type XsProgress,
   type XsStateFrame,
 } from "../../protocol/xs-activation.js";
@@ -74,7 +80,28 @@ export interface XsRelationRecord {
   requestId: string | undefined;
   wakeRequested: boolean;
   lastProgress: XsProgress | undefined;
+  /** fabric-xs-activation P3: this relation's activation attempt machine (no body, no timers
+   *  except the unref'd relay deadline while an attempt is pending). */
+  act: XsActivationAttempt;
 }
+
+/** `available → pending → consumed | unknown`; a proven-none ack returns to `available` with a
+ *  retry floor (`notBefore`). `consumed`/`unknown` never reopen (at-most-once control trigger). */
+export interface XsActivationAttempt {
+  state: "available" | "pending" | "consumed" | "unknown";
+  notBefore: number;
+  /** The reason/quota token that set `notBefore` (re-served while the floor holds). */
+  floorReason?: { reason?: string; wakeDowngraded?: string };
+  rid?: string;
+  ticket?: XsActivateTicket;
+  timer?: ReturnType<typeof setTimeout>;
+  respond?: (body: XsActivateHubReply) => void;
+}
+
+/** What the hub answers an `activate` request with (the router maps it onto `xs_res`). */
+export type XsActivateHubReply =
+  | { ok: false; code: "E_XS_NOT_TRACKED" | "E_XS_STALE_KEY" | "E_XS_BAD_TARGET" }
+  | { ok: true; activation: XsActivateResWire };
 
 export type XsRegisterSendResult = { ok: true; relation: XsRelationRecord } | { ok: false; reason: "full" };
 
@@ -95,8 +122,22 @@ export interface XsActivationService {
   pushInitial(relation: XsRelationRecord): void;
   /** receiver→hub `xs_state`: verify socket/xid/sid/revision, merge, forward to the source. */
   onState(agentKey: string, frame: XsStateFrame): void;
-  /** `xs_activate_ack` (P3): no pending activate is ever issued by P1 — diagnostic only. */
-  onActivateAck(agentKey: string, frame: { rid: string; messageId?: string }): void;
+  /** `xs_activate_ack`: settle the pending attempt matched by rid + socket (late/unmatched ack
+   *  only moves `unknown → consumed` on proof of an applied control action — never refunds). */
+  onActivateAck(agentKey: string, frame: XsActivateAckFrame): void;
+  /**
+   * `xs_req{op:"activate"}` (arch §4.4–§4.6): idempotent relation-level activation. Order:
+   * relation/key/target pin → known facts (started/replied no-op, pending/consumed/unknown dup,
+   * not-yet-delivered refusal) → target eligibility (member/channel/cap) → retry floor →
+   * quota reservation (a NEW control cost; dup/query/no-op never reach it) → ONE relay.
+   * `res` is called exactly once. Carries no text ever.
+   */
+  activate(
+    agentKey: string,
+    self: XsEffectiveMember,
+    args: { to?: string; messageId: string; activationKey: string; level?: number },
+    res: (body: XsActivateHubReply) => void,
+  ): void;
   /** `xs_req{op:"receipt"}` — read-only; `res` answers on the requesting socket. */
   receipt(
     agentKey: string,
@@ -111,6 +152,8 @@ export interface XsActivationService {
 
 export interface XsActivationDeps {
   registry: Pick<Registry, "send" | "xsView">;
+  /** fabric-xs-activation P3: the shared quota windows (attempt admission). */
+  limits?: Pick<XsLimits, "admitActivate" | "settleActivate">;
   members: Pick<XsMembers, "effective">;
   log: HubLog;
   now: () => number;
@@ -159,6 +202,53 @@ export function createXsActivationService(deps: XsActivationDeps): XsActivationS
     }
   };
 
+  /** Settle the PENDING attempt of `rel` from the receiver's ack (exactly once). */
+  const settleAttempt = (rel: XsRelationRecord, ack: XsActivateAckFrame): void => {
+    const act = rel.act;
+    const now = deps.now();
+    if (act.timer !== undefined) clearTimeout(act.timer);
+    const ticket = act.ticket;
+    const respond = act.respond;
+    delete act.timer;
+    delete act.ticket;
+    delete act.respond;
+    // The receiver's snapshot is evidence: merge it (monotone revision) like an xs_state.
+    if (ack.progress !== undefined && ack.progress.messageId === rel.messageId) {
+      if ((rel.lastProgress?.revision ?? 0) <= ack.progress.revision) {
+        rel.lastProgress = {
+          ...ack.progress,
+          ...(rel.requestId !== undefined && ack.progress.requestId === undefined ? { requestId: rel.requestId } : {}),
+          activationKey: rel.activationKey,
+          activationUntil: rel.trackUntil,
+        };
+        pushTo(rel.sourceAgentKey, rel.lastProgress, rel.sourceRid);
+      }
+    }
+    const applied = ack.status === "accepted";
+    const noop = ack.status === "already_started" || ack.status === "already_replied";
+    if (applied) {
+      if (ticket !== undefined) deps.limits?.settleActivate(ticket, { none: false });
+      act.state = "consumed";
+    } else if (ack.status === "unknown") {
+      if (ticket !== undefined) deps.limits?.settleActivate(ticket, { none: false });
+      act.state = "unknown";
+    } else {
+      // none-effect outcomes (refused / already_active / no-op / unsupported): this attempt
+      // changed nothing ⇒ release ITS wake reservation only (never the send/hub counts).
+      if (ticket !== undefined) deps.limits?.settleActivate(ticket, { none: true });
+      act.state = noop ? "consumed" : "available";
+      if (!noop) {
+        act.notBefore = ack.retryAfterAt ?? now;
+        const floor: { reason?: string; wakeDowngraded?: string } = {};
+        if (ack.reason !== undefined) floor.reason = ack.reason;
+        if (ack.wakeDowngraded !== undefined) floor.wakeDowngraded = ack.wakeDowngraded;
+        act.floorReason = floor;
+      }
+    }
+    const { t: _t, rid: _rid, ...body } = ack;
+    respond?.({ ok: true, activation: body });
+  };
+
   return {
     registerSend(args) {
       const now = deps.now();
@@ -188,6 +278,7 @@ export function createXsActivationService(deps: XsActivationDeps): XsActivationS
         requestId: args.expect?.requestId,
         wakeRequested: args.wakeRequested,
         lastProgress: undefined,
+        act: { state: "available", notBefore: 0 },
       };
       relations.set(args.messageId, relation);
       return { ok: true, relation };
@@ -234,8 +325,186 @@ export function createXsActivationService(deps: XsActivationDeps): XsActivationS
     },
 
     onActivateAck(agentKey, frame) {
-      // P3 owns the pending-activate matching; P1 never issues one — count a diagnostic only.
-      diag("activate ack without pending", { rid: frame.rid, agentKey });
+      const rel = relations.get(frame.messageId);
+      const act = rel?.act;
+      if (
+        rel === undefined ||
+        act === undefined ||
+        act.rid !== frame.rid ||
+        rel.targetAgentKey !== agentKey ||
+        frame.activationKey !== rel.activationKey
+      ) {
+        diag("activate ack without pending", { rid: frame.rid, agentKey });
+        return;
+      }
+      if (act.state === "pending") {
+        settleAttempt(rel, frame);
+        return;
+      }
+      // Late ack after the hub already settled the attempt as unknown: it may only prove the
+      // control action DID land (unknown → consumed); never a refund, never a reopen.
+      if (act.state === "unknown" && frame.status === "accepted" && frame.effect === "applied") act.state = "consumed";
+      else diag("late activate ack ignored", { rid: frame.rid });
+    },
+
+    activate(agentKey, self, args, res) {
+      const now = deps.now();
+      prune(now);
+      const rel = relations.get(args.messageId);
+      if (
+        rel === undefined ||
+        now >= rel.trackUntil ||
+        rel.sourceAgentKey !== agentKey ||
+        rel.sourceSessionId !== self.sessionId
+      ) {
+        res({ ok: false, code: "E_XS_NOT_TRACKED" }); // unknown/expired/foreign: indistinguishable (XI5)
+        return;
+      }
+      if (args.activationKey !== rel.activationKey) {
+        res({ ok: false, code: "E_XS_STALE_KEY" });
+        return;
+      }
+      if (
+        args.to !== undefined &&
+        args.to !== rel.targetSessionId &&
+        !(args.to.length >= 8 && rel.targetSessionId.startsWith(args.to))
+      ) {
+        res({ ok: false, code: "E_XS_BAD_TARGET" });
+        return;
+      }
+      const reply = (
+        status: XsActivateResWire["status"],
+        effect: XsActivateResWire["effect"],
+        extra: Partial<XsActivateResWire> = {},
+      ): void => {
+        const progress = rel.lastProgress;
+        res({
+          ok: true,
+          activation: {
+            messageId: rel.messageId,
+            activationKey: rel.activationKey,
+            status,
+            effect,
+            retryable: false,
+            ...extra,
+            ...(progress !== undefined && extra.progress === undefined ? { progress } : {}),
+          },
+        });
+      };
+      const lp = rel.lastProgress;
+      // Known facts first — no quota, no relay (started/replied are none no-ops).
+      if (lp?.phase === "replied") return reply("already_replied", "none");
+      if (lp?.phase === "started") return reply("already_started", "none");
+      const act = rel.act;
+      if (act.state === "pending") return reply("already_active", "none", { dup: true });
+      if (act.state === "consumed") return reply("already_active", "none", { dup: true });
+      if (act.state === "unknown") return reply("unknown", "unknown", { reason: "activate_unknown", dup: true });
+      if (lp === undefined || lp.deliveryEffect === "none" || lp.phase !== "delivered") {
+        // U6: only an already-delivered original body can be activated.
+        return reply("refused", "none", {
+          reason: "not_delivered",
+          retryable: lp?.deliveryEffect !== "none" && lp?.observation !== "unavailable",
+        });
+      }
+      if (lp.observation !== "live") return reply("refused", "none", { reason: lp.observation });
+      const target = deps.members.effective(rel.targetAgentKey);
+      if (
+        target === undefined ||
+        target.sessionId !== rel.targetSessionId ||
+        !target.joined ||
+        target.receive === "off" ||
+        !self.joined ||
+        hubIntersect(self.channels, target.channels).length === 0
+      ) {
+        return reply("refused", "none", { reason: "receiver_policy" });
+      }
+      let activateCapable = false;
+      try {
+        activateCapable = deps.registry.xsView(rel.targetAgentKey)?.caps.includes(XS_ACTIVATE_AGENT_CAP) === true;
+      } catch {
+        activateCapable = false;
+      }
+      if (!activateCapable || deps.limits === undefined) return reply("unsupported", "none");
+      if (now < act.notBefore) {
+        return reply("refused", "none", {
+          ...(act.floorReason ?? {}),
+          retryable: true,
+          retryAfterAt: act.notBefore,
+        });
+      }
+      const admit = deps.limits.admitActivate({
+        agentKey,
+        pairKey: `${self.sessionId}>${rel.targetSessionId}`,
+        limits: self.limits,
+      });
+      if (!admit.ok) {
+        const quotaWake = admit.reason === "outbound_wake_rate" || admit.reason === "pair_wake_rate";
+        return reply("refused", "none", {
+          ...(quotaWake ? { wakeDowngraded: admit.reason } : { reason: admit.reason }),
+          retryable: true,
+          ...(admit.retryAfterAt !== undefined ? { retryAfterAt: admit.retryAfterAt } : {}),
+        });
+      }
+      const rid = `a${randomHex(9)}`;
+      const frame: XsActivateFrame = {
+        t: "xs_activate",
+        rid,
+        to: { sessionId: target.sessionId, epoch: target.epoch },
+        from: {
+          sessionId: self.sessionId,
+          ref: self.sessionId.slice(0, 12),
+          ...(self.name !== undefined ? { name: self.name.slice(0, 120) } : {}),
+          cwdLabel: self.cwd.slice(0, 120),
+          agentId: agentKey.slice(0, 128),
+        },
+        messageId: rel.messageId,
+        activationKey: rel.activationKey,
+        expiresAt: now + XS_ACTIVATE_RELAY_EXPIRY_MS,
+        ...(args.level !== undefined ? { level: args.level } : {}),
+      };
+      act.state = "pending";
+      act.rid = rid;
+      act.ticket = admit.ticket;
+      act.respond = res;
+      let sent = false;
+      try {
+        sent = deps.registry.send(rel.targetAgentKey, frame);
+      } catch {
+        sent = false;
+      }
+      if (!sent) {
+        // Provably never left the hub: release this attempt's wake reservation, stay available.
+        deps.limits.settleActivate(admit.ticket, { none: true });
+        act.state = "available";
+        delete act.rid;
+        delete act.ticket;
+        delete act.respond;
+        return reply("refused", "none", { reason: "link_lost", retryable: true });
+      }
+      const timer = setTimeout(() => {
+        // The relay deadline passed with no ack: the control action may or may not have landed.
+        if (act.state !== "pending" || act.rid !== rid) return;
+        deps.limits?.settleActivate(admit.ticket, { none: false });
+        act.state = "unknown";
+        const respond = act.respond;
+        delete act.respond;
+        delete act.ticket;
+        delete act.timer;
+        respond?.({
+          ok: true,
+          activation: {
+            messageId: rel.messageId,
+            activationKey: rel.activationKey,
+            status: "unknown",
+            effect: "unknown",
+            reason: "activate_deadline",
+            retryable: false,
+            ...(rel.lastProgress !== undefined ? { progress: rel.lastProgress } : {}),
+          },
+        });
+      }, XS_ACTIVATE_RELAY_EXPIRY_MS);
+      timer.unref(); // I5: a ref'd timer wedges `pi -p`
+      act.timer = timer;
     },
 
     receipt(agentKey, self, args, res) {
@@ -266,6 +535,9 @@ export function createXsActivationService(deps: XsActivationDeps): XsActivationS
     size: () => relations.size,
 
     dispose() {
+      for (const rel of relations.values()) {
+        if (rel.act.timer !== undefined) clearTimeout(rel.act.timer);
+      }
       relations.clear();
     },
   };
