@@ -127,6 +127,8 @@ export function buildBashJobManager(
     // tool calls run (the source of every `record.cwd` this session creates),
     // so recovery only adopts orphans from that same directory.
     sessionCwd: typeof ctx.cwd === "string" && ctx.cwd !== "" ? ctx.cwd : undefined,
+    // stripAnsi 包（B 点）：readOutput 返回值清洗（磁盘字节不变）。
+    stripAnsi: config.stripAnsi,
     maxLogBytes: config.maxLogBytes,
     maxBackgroundJobs: config.maxBackgroundJobs,
     drainTimeoutMs: config.drainTimeoutMs,
@@ -290,6 +292,8 @@ export function registerBashTools(pi: ExtensionAPI, deps: { holder: StackHolder;
         maxExtensions: settings.bashJobs.maxExtensions,
         maxTimeoutFactor: settings.bashJobs.maxTimeoutFactor,
       }),
+      // stripAnsi 包（A 点）：本次栈的设置快照（非 live，随 /reload 重建生效）。
+      stripAnsi: () => settings.bashJobs.stripAnsi,
     }),
   );
   pi.registerTool(

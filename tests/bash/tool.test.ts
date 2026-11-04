@@ -1311,3 +1311,153 @@ describe("bash override tool — T15 two-layer race (§3.6)", () => {
     expect(harness.returns[0]).toEqual({ toolCallId: "call-1", at: FAKE_NOW });
   });
 });
+
+// ── stripAnsi 包（A 点）：模型可见输出清洗 ───────────────────────────────────
+
+describe("bash override tool — stripAnsi (A point)", () => {
+  const RAW = "\x1b[1;32mgreen\x1b[0m plain \x1b]0;title\x07after 中文 🎉\n";
+  const CLEAN = "green plain after 中文 🎉\n";
+
+  function textOf(result: unknown): string {
+    const content = (result as { content: { type: string; text?: string }[] }).content;
+    return content.map((part) => (part.type === "text" ? (part.text ?? "") : "")).join("");
+  }
+
+  /** Foreground run with a scripted process; resolves with the result text. */
+  async function runForeground(
+    harness: Harness,
+    tool: ReturnType<typeof createBashTool>,
+    chunks: string[],
+  ): Promise<string> {
+    harness.port.script = (proc) => {
+      for (const chunk of chunks) proc.write(chunk);
+      proc.exit({ exitCode: 0, signal: null });
+    };
+    const result = await tool.execute("call-ansi", { command: "run-it" }, undefined, undefined, harness.ctx);
+    return textOf(result);
+  }
+
+  it("is on by default (absent dep ⇒ the shipped default): ANSI never reaches the model", async () => {
+    const harness = await makeHarness();
+    const tool = toolFor(harness, HUGE_THRESHOLD_MS);
+    expect(await runForeground(harness, tool, [RAW])).toBe(CLEAN);
+  });
+
+  it("no manager ⇒ raw ANSI reaches the model untouched (no stripper in the path)", async () => {
+    const harness = await makeHarness();
+    // passthrough 走 pi 的真 bash（不经 fake port）：printf 亲手吐 ANSI，断言原样到达。
+    const tool = createBashTool({
+      manager: () => undefined,
+      autoBackgroundMs: () => HUGE_THRESHOLD_MS,
+      // stripAnsi 缺省 = 开也不该作用：passthrough 不经过 stripper。
+      stripAnsi: () => true,
+      warn: (message) => harness.warnings.push(message),
+    });
+    const result = await tool.execute(
+      "call-ansi-off",
+      { command: "printf '\\033[1;32mgreen\\033[0m plain\\n'" },
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+    expect(textOf(result)).toBe("\x1b[1;32mgreen\x1b[0m plain\n");
+    expect(harness.port.spawns).toHaveLength(0);
+  });
+
+  it("autoBackgroundMs threshold 0 ⇒ raw ANSI reaches the model untouched", async () => {
+    const harness = await makeHarness();
+    const tool = toolFor(harness, 0);
+    const result = await tool.execute(
+      "call-ansi-zero",
+      { command: "printf '\\033[1;32mgreen\\033[0m plain\\n'" },
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+    expect(textOf(result)).toBe("\x1b[1;32mgreen\x1b[0m plain\n");
+    // Nothing was routed through the manager (and no job was created).
+    expect(harness.port.spawns).toHaveLength(0);
+    expect([...harness.manager.list()]).toHaveLength(0);
+  });
+
+  it("explicit () => true behaves the same", async () => {
+    const harness = await makeHarness();
+    const tool = createBashTool({
+      manager: () => harness.manager,
+      autoBackgroundMs: () => HUGE_THRESHOLD_MS,
+      stripAnsi: () => true,
+      warn: (message) => harness.warnings.push(message),
+    });
+    expect(await runForeground(harness, tool, [RAW])).toBe(CLEAN);
+  });
+
+  it("() => false is byte-identical passthrough: the raw bytes reach the model", async () => {
+    const harness = await makeHarness();
+    const tool = createBashTool({
+      manager: () => harness.manager,
+      autoBackgroundMs: () => HUGE_THRESHOLD_MS,
+      stripAnsi: () => false,
+      warn: (message) => harness.warnings.push(message),
+    });
+    expect(await runForeground(harness, tool, [RAW])).toBe(RAW);
+  });
+
+  it("a dangling CSI split across chunks leaves no residue (carry is per exec)", async () => {
+    const harness = await makeHarness();
+    const tool = toolFor(harness, HUGE_THRESHOLD_MS);
+    const text = await runForeground(harness, tool, ["out\x1b[3", "1mred\x1b[0m\n"]);
+    expect(text).toBe("outred\n");
+  });
+
+  it("a getter that throws falls back to on", async () => {
+    const harness = await makeHarness();
+    const tool = createBashTool({
+      manager: () => harness.manager,
+      autoBackgroundMs: () => HUGE_THRESHOLD_MS,
+      stripAnsi: () => {
+        throw new Error("boom");
+      },
+      warn: (message) => harness.warnings.push(message),
+    });
+    expect(await runForeground(harness, tool, [RAW])).toBe(CLEAN);
+  });
+
+  it("onUpdate relays pi's cleaned accumulator (auto-background stream)", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const harness = await makeHarness();
+    harness.port.script = (proc) => proc.write(RAW);
+    const updates: unknown[] = [];
+    const tool = toolFor(harness, 120_000);
+    const run = tool.execute("call-ansi", { command: "npm run build" }, undefined, (u) => updates.push(u), harness.ctx);
+    await waitFor(() => harness.port.spawns.length === 1, "the job to spawn");
+    await settle();
+    await vi.advanceTimersByTimeAsync(120_000);
+    await settle();
+    const result = await run;
+    // 背景回执文本（我们的 formatAutoBackgroundText）不含 ANSI。
+    expect(textOf(result)).not.toContain("\x1b");
+    // pi 累加器驱动的 onUpdate 流同样干净。
+    expect(updates.length).toBeGreaterThan(0);
+    expect(JSON.stringify(updates)).not.toContain("\x1b");
+    harness.manager.dispose();
+  });
+
+  it("the backgrounded job's finalText is the cleaned built-in result (adoptInnerPromise seam)", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const harness = await makeHarness();
+    harness.port.script = (proc) => {
+      proc.write(RAW);
+      proc.exit({ exitCode: 0, signal: null });
+    };
+    const tool = toolFor(harness, 120_000);
+    const run = tool.execute("call-ansi", { command: "npm run build" }, undefined, undefined, harness.ctx);
+    await waitFor(() => harness.port.spawns.length === 1, "the job to spawn");
+    await vi.advanceTimersByTimeAsync(120_000);
+    const result = (await run) as { details?: { jobId?: string } };
+    const jobId = result.details?.jobId;
+    expect(jobId).toBeTruthy();
+    await waitFor(() => harness.manager.get(jobId!)?.finalText !== undefined, "finalText to be recorded");
+    const finalText = harness.manager.get(jobId!)?.finalText;
+    expect(finalText).toBe(CLEAN);
+  });
+});

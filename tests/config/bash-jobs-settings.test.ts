@@ -19,6 +19,7 @@ describe("bashJobs settings block (§6)", () => {
       timeoutGraceMs: 60_000,
       maxExtensions: 3,
       maxTimeoutFactor: 3,
+      stripAnsi: true,
     });
     // optional fields are absent, not `undefined` (exactOptionalPropertyTypes)
     expect("dir" in defaults).toBe(false);
@@ -65,7 +66,18 @@ describe("bashJobs settings block (§6)", () => {
       timeoutGraceMs: defaults.timeoutGraceMs,
       maxExtensions: defaults.maxExtensions,
       maxTimeoutFactor: defaults.maxTimeoutFactor,
+      stripAnsi: defaults.stripAnsi,
     });
+  });
+
+  it("stripAnsi: boolean, default true, non-boolean falls back (stripAnsi 包)", () => {
+    expect(parseBashJobsSettings({ stripAnsi: false }).stripAnsi).toBe(false);
+    expect(parseBashJobsSettings({ stripAnsi: true }).stripAnsi).toBe(true);
+    for (const bad of [undefined, null, 0, 1, "true", "off", [], {}]) {
+      expect(parseBashJobsSettings({ stripAnsi: bad }).stripAnsi).toBe(true);
+    }
+    expect(loadSettings({ bashJobs: { stripAnsi: false } }).bashJobs.stripAnsi).toBe(false);
+    expect(loadSettings({}).bashJobs.stripAnsi).toBe(true);
   });
 
   it("rejects NaN / Infinity / negative / non-number per numeric field", () => {
@@ -132,6 +144,7 @@ describe("bashJobs settings block (§6)", () => {
       timeoutGraceMs: defaults.timeoutGraceMs,
       maxExtensions: defaults.maxExtensions,
       maxTimeoutFactor: defaults.maxTimeoutFactor,
+      stripAnsi: defaults.stripAnsi,
     });
   });
 

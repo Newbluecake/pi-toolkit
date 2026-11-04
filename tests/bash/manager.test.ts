@@ -33,6 +33,8 @@ import {
 } from "../../src/bash/types.js";
 import { FakeClock } from "../../src/core/clock.js";
 import { handoffInProcess } from "../../src/bash/session-dirs.js";
+import { readBashJobTail } from "../../src/bash/notify.js";
+import { createBashJobTool } from "../../src/bash/job-tool.js";
 
 /**
  * §3 manager suite. The process boundary is faked (`tests/bash/process.test.ts`
@@ -2546,5 +2548,115 @@ describe("bash job manager: file-fd stdio handles (issue #73)", () => {
     await writeFile(h.store.exitPath(job.jobId), "143\n", "utf8");
     h.port.last().exit({ exitCode: 143, signal: null });
     expect((await job.exit).status).toBe("killed");
+  });
+});
+
+// ── stripAnsi 包（B 点）：readOutput 返回值清洗 ─────────────────────────────
+
+describe("bash job manager: readOutput stripAnsi (B point)", () => {
+  it("strips the returned content while offsets/cursor/disk bytes stay raw (default on)", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    const proc = h.port.last();
+    const raw = "\x1b[1;32mgreen\x1b[0m plain \x1b]0;title\x07after\n";
+    proc.stdout.write(raw);
+    await settle();
+
+    const read = await h.manager.readOutput(job.jobId);
+    expect(read.content).toBe("green plain after\n");
+    // 偏移量与 cursor 是原始日志的字节数（清洗只作用于返回值）。
+    expect(read.startOffset).toBe(0);
+    expect(read.nextOffset).toBe(Buffer.byteLength(raw, "utf8"));
+    expect((await h.store.load(job.jobId))?.readCursor).toBe(Buffer.byteLength(raw, "utf8"));
+    // 磁盘日志逐字节保留原始输出。
+    expect(await readFile(job.logPath, "utf8")).toBe(raw);
+  });
+
+  it("replays from offset 0 cleaned, and the raw cursor never rewinds", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    h.port.last().stdout.write("done\x1b[31m\n");
+    await settle();
+    await h.manager.readOutput(job.jobId);
+    const replay = await h.manager.readOutput(job.jobId, { offset: 0 });
+    expect(replay.content).toBe("done\n");
+    expect((await h.store.load(job.jobId))?.readCursor).toBe(Buffer.byteLength("done\x1b[31m\n", "utf8"));
+  });
+
+  it("drops a trailing half sequence at the end of the read (one-shot semantics)", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    h.port.last().stdout.write("ok\x1b[38;5;");
+    await settle();
+    const read = await h.manager.readOutput(job.jobId);
+    expect(read.content).toBe("ok");
+  });
+
+  it("a non-zero offset landing mid-CSI cleans the leading fragment via the ≤256B lookback", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    const prefix = "A".repeat(40);
+    const seq = "\x1b[38;5;196m";
+    const raw = `${prefix}${seq}RED\n`;
+    h.port.last().stdout.write(raw);
+    await settle();
+    // offset 落在参数区中间（指向 '8'）：lookback 框住 `\x1b[`，content 不漏 `196m` 残片。
+    const offset = prefix.length + 2;
+    const read = await h.manager.readOutput(job.jobId, { offset, advanceCursor: false });
+    expect(read.content).toBe("RED\n");
+    expect(read.startOffset).toBe(offset);
+    expect(read.nextOffset).toBe(Buffer.byteLength(raw, "utf8"));
+  });
+
+  it("an offset past a param run longer than the old 16B window still cleans (introducer now in the 256B window)", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    const raw = `${"A".repeat(8)}\x1b[${"1;".repeat(12)}mTAIL\n`;
+    h.port.last().stdout.write(raw);
+    await settle();
+    // 引导符在旧 16B 窗口之外、但在 256B 窗口内 ⇒ 看到明确 ESC 证据，按参数序列续扫。
+    const offset = 8 + 2 + 24;
+    const read = await h.manager.readOutput(job.jobId, { offset, advanceCursor: false });
+    expect(read.content).toBe("TAIL\n");
+  });
+
+  it("stripAnsi:false returns the raw bytes untouched", async () => {
+    const h = await harness({ stripAnsi: false });
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    const raw = "\x1b[31mred\x1b[0m\n";
+    h.port.last().stdout.write(raw);
+    await settle();
+    const read = await h.manager.readOutput(job.jobId);
+    expect(read.content).toBe(raw);
+    expect(await readFile(job.logPath, "utf8")).toBe(raw);
+  });
+
+  it("readBashJobTail (completion notice) sees the same cleaned content and keeps coversWholeLog same-source", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    const raw = "start\n\x1b[31mtail line\x1b[0m\n";
+    h.port.last().stdout.write(raw);
+    await settle();
+    const record = h.manager.get(job.jobId)!;
+    const tail = await readBashJobTail(h.manager, { ...record, status: "completed", endedAt: 2_000 });
+    // 通知尾巴与 readOutput 同源：同为清洗后文本，整日志判据不受影响。
+    expect(tail?.text).toBe("start\ntail line");
+    expect(tail?.coversWholeLog).toBe(true);
+  });
+
+  it("bash_job status (real manager seam) shows the cleaned tail with no ESC", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    h.port.last().stdout.write("\x1b[32mall good\x1b[0m\n");
+    await settle();
+    h.manager.markBackgrounded(job.jobId);
+    const tool = createBashJobTool({ manager: () => h.manager });
+    const result = (await tool.execute("call-s", { action: "status", job_id: job.jobId }, undefined, undefined, {
+      cwd: "/repo",
+      sessionManager: { getSessionId: () => "s1" },
+    } as unknown as Parameters<typeof tool.execute>[4])) as { content: { type: "text"; text: string }[] };
+    const text = result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+    expect(text).toContain("all good");
+    expect(text).not.toContain("\x1b");
   });
 });

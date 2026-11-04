@@ -66,3 +66,45 @@ deadline/extension budget plus outstanding job grace, §3.5's `R_wait`/`G0`). De
 - `recover()` 的 `adopted` 路径此前几乎无法在生产里被触发，现在会成为常态路径，需要真机冒烟（adopt 后的完成通知、`bash_job kill`、再次退出）。
 
 测试：`tests/integration/bash-crash-recovery.test.ts`（子 node 进程里跑真实 manager → `SIGKILL` → 新 manager `recover()`；覆盖「静默到结束才输出」「外部写者」「输出封顶」「崩溃后仍在跑 + 无 exit 文件」）；`tests/bash/process.test.ts`（file-fd 模式、tail、包装脚本、封顶、SIGTERM 语义）；`tests/bash/manager.test.ts`（exit 文件恢复各分支）；`tests/bash/job-store.test.ts`（`.exit` 清理）。
+
+## stripAnsi 包（ANSI 清洗，A/B 两点）
+
+**需求口径**：`bashJobs.stripAnsi`（默认 `true`，`false` 关闭，非 live——设置随栈重建生效，需
+`/reload`）。只清洗**模型/用户可见输出**；磁盘原始日志一字节不动。`false` 时既有输出逐字节一致
+（恒等透传，含原始 ESC 字节）。passthrough（无 manager / 阈值 0 / win32）与覆盖未激活时本功能
+**不存在**——`pi.install` 的内置 bash 路径不走这里，设置也不会作用于它。
+
+**两个清洗点，一条职责边界**：
+
+- **A 点（流式，`src/bash/ansi.ts` 的 `createAnsiStripper` + `src/bash/tool.ts`）**：`execViaReserve`
+  的 `reserve({ onData })` 中继处包上**每次 exec 独立**的 stripper——pi 自己的 accumulator 收到的
+  即清洗后文本，因此前台结果、自动后台 onUpdate 流、`finalText`（`adoptInnerPromise`）、溢出的
+  temp file 全部同源清洗，无需各自再处理。exit 结算后立即 `finish()`：未完结序列丢弃，不泄裸
+  ESC、不补发控制字节。跨 chunk carry 是 O(1) 状态机 + run 计数（I4：闭包内，无模块级状态；
+  `ANSI_STATE_RUN_CAP` 4096 封顶——超长未终结字符串判垃圾回 ground，损失有界）。
+- **B 点（one-shot 切片，`stripAnsiSlice` + `src/bash/manager.ts` 的 `readOutput`）**：返回前清洗
+  `content`。磁盘字节、`startOffset`/`nextOffset`/`logBytes`/`readCursor`、封顶计数、footer/截断
+  提示的写入顺序**全部不变**（byteRead 先按原始字节算好）；`bash_job status` 的尾巴、完成通知的
+  尾巴（`readBashJobTail`）都经 `readOutput`，`wholeLogShown`/`coversWholeLog` 判据两侧同用清洗后
+  文本，天然同源。非零 `startOffset` 落在序列中间时，前看 ≤256B（`ANSI_LOOKBACK_BYTES`）原始日志
+  推导入态：窗口内有明确 ESC/0x9b 引导证据才续扫——`31m` 这类残片不会漏；纯数字/分号前缀不触发
+  任何启发式（曾有的整窗参数字节启发式会误删 `"789;111 other text"` 这类普通文本，已移除：漏检的
+  长参数序列只是残片上限，误删可见文本不可接受）。
+
+**为何不全用 `node:util stripVTControlCharacters`**：它的 regex 不认识跨 chunk 悬空序列（实测
+`"pre\x1b]0;tit"` 会输出 `"preit"`），且对冒号子参数（`\x1b[38:5;196m` 泄 `:5:196m`）、`\x1b[>c`、
+带中间字节的 CSI、PM/APC，以及带参数/中间字节的 DCS（简单 DCS `\x1bPq\x1b\` node 可剥）仍有缺口。因此切分与删除以 `src/bash/ansi.ts` 的扫描器为准
+（CSI/OSC/DCS/SOS/PM/APC/ESC 派发/C1 CSI/ST 全覆盖；ESC+可打印也整段丢弃，测试钉死），
+`stripVTControlCharacters` 只作输出侧兜底（扫描器输出按构造不含 ESC/0x9b，正常是 no-op 的纵深
+防御）。UTF-8 多字节字符跨 chunk 被上游逐 chunk decode 产生的 U+FFFD 是既有行为，不在本包修。
+
+**接线**：`src/bash/host.ts`（`buildBashJobManager` 的 manager option + `registerBashTools` 的
+`createBashTool` deps getter）与 `src/bash/child.ts`（`ensureManager` + `createBashTool`）各两处，
+同读一次栈/wire 的设置快照。`BashToolDeps.stripAnsi` 缺省/getter 抛异常 ⇒ 开（接线遗漏不会静默
+关掉用户默认）。spec 位于 `setting-specs.ts` 块末；corpus 两个 golden 按声明新键重采（见
+`tests/config/__corpus__/` 的逐叶证明）。
+
+**测试**：`tests/bash/ansi.test.ts`（序列电池/逐字节切分等价/有界 carry/off 恒等/finish/B 切片）；
+`tests/bash/tool.test.ts` A 点（默认开/显式/关/跨 chunk/onUpdate/finalText）；`tests/bash/manager.test.ts`
+B 点（原始 offset/cursor/磁盘、中截与末尾半序列、`readBashJobTail` 同源、`bash_job status` 真
+manager 断面）；`tests/integration/child-bash-jobs.test.ts` child 接线（真实进程 on/off）。

@@ -10,6 +10,7 @@ import type { Millis } from "../core/types.js";
 import type { HostRunView } from "./child-registry.js";
 import type { BashJobManager, CreatedJob, ReservedJob } from "./manager.js";
 import type { JobDeadlinePolicy, JobId } from "./types.js";
+import { createAnsiStripper, type AnsiStripper } from "./ansi.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 
 /**
@@ -163,6 +164,19 @@ export interface BashToolDeps {
    * the description is byte-identical to today's (golden fixture).
    */
   deadline?: () => BashDeadlineSurface | undefined;
+  /**
+   * stripAnsi 包（A 点）：模型/用户可见输出是否剥 ANSI 控制序列
+   * （`bashJobs.stripAnsi`，默认 true；非 live，随栈重建生效）。Getter —— 主/子会话
+   * 各自从当前设置快照接线。缺省 ⇒ 开（与设置默认一致：接线遗漏不会静默关掉
+   * 用户拍板的默认行为）；getter 抛异常也回落开。`false` ⇒ 恒等透传，输出与
+   * 未开清洗时逐字节一致。
+   *
+   * 作用面：本文件 reserve 的 onData 中继 —— pi 自己的 accumulator 收到的就是
+   * 清洗后的文本，因此前台结果、自动后台 onUpdate 流、finalText、溢出的 temp
+   * file 全部同源清洗；磁盘日志由 job 树自己写，从不经过这里（原始字节）。
+   * passthrough 路径（无 manager / 阈值 0）不走本清洗 —— 覆盖未激活时功能不存在。
+   */
+  stripAnsi?: () => boolean | undefined;
   /** Injectable clock (R/elapsed math); defaults to `Date.now`. */
   now?: () => Millis;
   /** Diagnostics sink (defaults to `console.warn`, like the rest of the plugin). */
@@ -364,6 +378,9 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
       const manager = deps.manager();
       const thresholdMs = safeThreshold(deps, warn);
       const commandPrefix = safeCommandPrefix(deps);
+      // stripAnsi 包：每次 exec（每条流）独立的 stripper —— 跨 chunk carry 只在
+      // 本次调用闭包内（I4），流结束（exit 结算）时 finish 丢弃未完结序列。
+      const stripper = createAnsiStripper({ enabled: safeStripAnsi(deps) });
       const innerParams: InnerParams = {
         command: params.command,
         ...(params.timeout !== undefined ? { timeout: params.timeout } : {}),
@@ -461,7 +478,7 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
       };
 
       const operations: BashOperations = {
-        exec: (command, cwd, options) => execViaManager(manager, state, command, cwd, options),
+        exec: (command, cwd, options) => execViaManager(manager, state, stripper, command, cwd, options),
       };
       const inner = createBashToolDefinition(
         ctx.cwd,
@@ -786,10 +803,15 @@ function errorText(error: unknown): string {
  * once the process actually dies), so output already in flight when the
  * signal is sent is still delivered through the tee before the exit
  * settles — no extra deferral is needed for that to work.
+ *
+ * stripAnsi 包（A 点）：onData 在这里包上本次 exec 独立的 ANSI stripper —— pi 的
+ * accumulator 收到的即清洗后文本（前台/后台 onUpdate/finalText/temp file 同源）；
+ * exit 结算后立即 finish（丢弃未完结序列，不补发控制字节）。磁盘日志不经过这里。
  */
 async function execViaManager(
   manager: BashJobManager,
   state: CallState,
+  stripper: AnsiStripper,
   command: string,
   cwd: string,
   options: {
@@ -805,13 +827,14 @@ async function execViaManager(
     throw new Error("aborted");
   }
 
-  return execViaReserve(manager, state, command, cwd, options, timeoutMs);
+  return execViaReserve(manager, state, stripper, command, cwd, options, timeoutMs);
 }
 
 /** §3.6 inner layer over `reserve()` / `started` / `job.exit`. */
 async function execViaReserve(
   manager: BashJobManager,
   state: CallState,
+  stripper: AnsiStripper,
   command: string,
   cwd: string,
   options: {
@@ -828,7 +851,7 @@ async function execViaReserve(
       command,
       cwd,
       ...(options.env !== undefined ? { env: options.env } : {}),
-      onData: (chunk) => options.onData(Buffer.from(chunk, "utf8")),
+      onData: (chunk) => options.onData(Buffer.from(stripper.push(chunk), "utf8")),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     });
   } catch (error) {
@@ -884,6 +907,8 @@ async function execViaReserve(
     // process's remaining output through `onData` before the rejection, so
     // the foreground error text stays byte-identical to the built-in tool.
     const record = await started.job.exit;
+    // stripAnsi 包：流结束（exit 结算、尾部排空完成）⇒ 丢弃未完结序列并释放状态。
+    stripper.finish();
     if (options.signal?.aborted) throw new Error("aborted");
     if (record.status === "timed_out") throw new Error(`timeout:${options.timeout}`);
     return { exitCode: record.exitCode };
@@ -918,6 +943,17 @@ function safeDeadlineSurface(deps: BashToolDeps, warn: (message: string) => void
   } catch (error) {
     warn(`bash deadline settings unavailable (surface suffix omitted): ${String(error)}`);
     return undefined;
+  }
+}
+
+/** stripAnsi 包：缺省/类型不对/getter 抛异常 ⇒ 开（与设置默认一致）。 */
+function safeStripAnsi(deps: BashToolDeps): boolean {
+  if (deps.stripAnsi === undefined) return true;
+  try {
+    const value = deps.stripAnsi();
+    return typeof value === "boolean" ? value : true;
+  } catch {
+    return true;
   }
 }
 

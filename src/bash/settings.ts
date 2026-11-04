@@ -39,6 +39,8 @@ export interface BashJobsSettings {
   maxExtensions: number;
   /** bash-timeout-grace §5.1 (U4): hard lifetime ceiling as a multiple of the job's original `timeout` (`hardAt = spawnedAt + ceil(timeoutMs × maxTimeoutFactor)`). Default 3; not finite or `< 1` → 3; `1` = zero headroom ⇒ no extend, no grace. */
   maxTimeoutFactor: number;
+  /** ANSI 清洗（stripAnsi 包）：从模型/用户可见输出里剥掉 ANSI 控制序列；磁盘日志保持原始字节。Default true; `false` = 逐字节透传（与既有输出完全一致）。仅 bash 覆盖生效时存在（`autoBackgroundS > 0` 且非 win32）；非 live，改后需 /reload。 */
+  stripAnsi: boolean;
 }
 
 /**
@@ -95,6 +97,8 @@ export function parseBashJobsSettings(input: unknown): BashJobsSettings {
       value.maxTimeoutFactor >= 1
         ? value.maxTimeoutFactor
         : defaults.maxTimeoutFactor,
+    // stripAnsi 包：非 boolean 回落默认（true），同 childSessions/childSettleHold 的字段级回落。
+    stripAnsi: typeof value.stripAnsi === "boolean" ? value.stripAnsi : defaults.stripAnsi,
   };
 }
 
@@ -111,4 +115,5 @@ export const DEFAULT_BASH_JOBS_SETTINGS: BashJobsSettings = {
   timeoutGraceMs: 60_000,
   maxExtensions: 3,
   maxTimeoutFactor: 3,
+  stripAnsi: true,
 };

@@ -37,6 +37,7 @@ import {
   type JobTransitionPatch,
 } from "./types.js";
 import { formatDuration } from "../core/format.js";
+import { ANSI_LOOKBACK_BYTES, stripAnsiSlice } from "./ansi.js";
 
 /**
  * bash auto-background §3 — `BashJobManager`, the owner of a backgrounded
@@ -169,6 +170,15 @@ export interface BashJobManagerOptions {
    * no filtering (legacy/test behaviour). Host wiring passes `ctx.cwd`.
    */
   sessionCwd?: string | undefined;
+  /**
+   * stripAnsi 包（B 点）：`readOutput` 返回前是否对 `content` 做 ANSI 清洗
+   * （`bashJobs.stripAnsi`，默认 true）。只作用于返回值 —— 磁盘日志字节、
+   * `startOffset`/`nextOffset`/`logBytes`/`readCursor`、封顶计数全部保持原始；
+   * `status`/完成通知的尾巴都经由 `readOutput`，与判据同源。one-shot：切片末尾
+   * 未完结序列丢弃；非零 startOffset 落在序列中间时用 ≤16B 前看窗口推导入态
+   * （不漏 `31m` 残片）。
+   */
+  stripAnsi?: boolean;
 }
 
 export interface CreateJobInit {
@@ -528,6 +538,8 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       : DEFAULT_DISCARD_GRACE_MS;
   const deadlinePolicy = options.deadlinePolicy ?? DEFAULT_JOB_DEADLINE_POLICY;
   const sessionCwd = options.sessionCwd;
+  // stripAnsi 包（B 点）：缺省 = 开（与 bashJobs.stripAnsi 默认一致）。
+  const stripAnsi = options.stripAnsi !== false;
   const myToken = {};
 
   const entries = new Map<JobId, Entry>();
@@ -1744,6 +1756,20 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         const result = await file.read(buffer, 0, length, startOffset);
         bytesRead = result.bytesRead;
         content = buffer.subarray(0, bytesRead).toString("utf8");
+        // stripAnsi 包（B 点）：只清洗返回值。byteRead/offsets 先算好（原始字节），
+        // 磁盘、cursor、封顶计数不经此分支。非零 startOffset 落在序列中间时，前看
+        // ≤256B 原始日志推导入态（跨多字节字符切出的 U+FFFD 对 ASCII 状态机无害；
+        // 窗口内必须有明确 ESC/0x9b 引导证据才续扫，纯参数字节不触发启发式）。
+        if (stripAnsi) {
+          let lookback = "";
+          if (startOffset > 0) {
+            const lbLen = Math.min(ANSI_LOOKBACK_BYTES, startOffset);
+            const lb = Buffer.alloc(lbLen);
+            const lbRead = await file.read(lb, 0, lbLen, startOffset - lbLen);
+            lookback = lb.subarray(0, lbRead.bytesRead).toString("utf8");
+          }
+          content = stripAnsiSlice(content, lookback);
+        }
       } finally {
         await file.close();
       }

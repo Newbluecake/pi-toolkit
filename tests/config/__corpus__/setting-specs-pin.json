@@ -210,6 +210,7 @@
     ["bashJobs.timeoutGraceS", "638636602a926d894682ad30ea233ff0a1f45d1b9e03b8983628db3d46b101c1"],
     ["bashJobs.maxExtensions", "c0d9d86c1d3c4fbef6186f1531965bb9c5f1e515f451fd108178cf589084eb47"],
     ["bashJobs.maxTimeoutFactor", "cb0ce57defdbd30d473e3e70f0bf18db69256e1af7d0bb0a600b5c24e748ad4c"],
+    ["bashJobs.stripAnsi", "2498b88651e45405100e06bb307f59964042acc9985442971f3b0feb1b2afc65"],
     ["fabric.enabled", "24a665ea98bbabc925f2ee0f95972348d79d84f6db5f114914ee81d63c68ccde"],
     ["fabric.minIntervalS", "2b8dd14d31f9b1f3128c0b088dcb659dfd8fa87c5507dd20a996dbf00d100a34"],
     ["fabric.maxPerRun", "11d99f9ef17e872cd7d1709605dc47830913b4c4d4027ea51ea9c3174b1ec5ad"],
@@ -336,5 +337,5 @@
     ["schedule.defaultTimeoutS", "0c0a7cec1b640196d1236428b689372d961cbced729c6999200c31e29e442b30"],
     ["schedule.maxTimeoutS", "6c538e3100c646f3a64116ead976a485bc27e4fdb9e550349c75e420ec30fce3"]
   ],
-  "all": "8083f164d8d0335992a17001eee0253370ad04970e99d2b59261b9d3396cc24a"
+  "all": "11c439d0334afe370bc9681b327f85c7393a415b82d1fe5661561a7a6050ab91"
 }

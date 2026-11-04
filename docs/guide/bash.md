@@ -16,26 +16,28 @@
 
 ## 设置
 
-| 键                                  | 默认                     | 含义                                                                        |
-| ----------------------------------- | ------------------------ | --------------------------------------------------------------------------- |
-| `bashJobs.autoBackgroundS`          | `290`                    | 前台 bash 超过该时长转后台；`0` = 整个功能关闭（内置 bash 零变化）          |
-| `bashJobs.maxLogBytes`              | `10485760`               | 单 job 日志上限；写满停写并标记截断，**进程继续跑**                         |
-| `bashJobs.maxBackgroundJobs`        | `8`                      | 并发后台 job 上限                                                           |
-| `bashJobs.retentionS`               | `86400`                  | 终态 job 的 JSON/日志保留时长；`<=0` 关闭清理                               |
-| `bashJobs.shutdownPolicy`           | `"keep"`                 | pi 真退出时对仍在跑的 job：`keep` / `kill`；reload/new/resume/fork 一律保留 |
-| `bashJobs.dir`                      | `~/.pi/agent/bash-jobs`  | job 状态与日志根目录（按 `<sessionId>/` 分层）                              |
-| `bashJobs.shellPath`                | `$SHELL`(白名单)→ `bash` | 执行命令的 shell（`$SHELL` 仅 basename ∈ {bash, zsh, sh} 时采用）           |
-| `bashJobs.timeoutGraceS`            | `60`                     | 已转后台的 job 到达显式 `timeout` 时的宽限时长；`0` = 关宽限                |
-| `bashJobs.maxExtensions`            | `3`                      | `bash_job(action:"extend")` 最大续期次数；`0` = 禁 extend                   |
-| `bashJobs.maxTimeoutFactor`         | `3`                      | 宽限 + 续期的硬上限 = 原 `timeout` 的几倍；`1` = 不可续、无宽限             |
-| `bashJobs.childSessions`            | `true`                   | 子（subagent）会话是否注册自己的 `bash` / `bash_job`                        |
-| `bashJobs.childSettleHold`          | `true`                   | 子会话收尾时若仍有非终态后台 job，是否提醒并推迟结束                        |
-| `bashJobs.childSettleHoldMaxRounds` | `0`                      | 收尾提醒轮数上限；`0` = 按 run 自己的截止/续期预算自动推导                  |
+| 键                                  | 默认                     | 含义                                                                          |
+| ----------------------------------- | ------------------------ | ----------------------------------------------------------------------------- |
+| `bashJobs.autoBackgroundS`          | `290`                    | 前台 bash 超过该时长转后台；`0` = 整个功能关闭（内置 bash 零变化）            |
+| `bashJobs.maxLogBytes`              | `10485760`               | 单 job 日志上限；写满停写并标记截断，**进程继续跑**                           |
+| `bashJobs.maxBackgroundJobs`        | `8`                      | 并发后台 job 上限                                                             |
+| `bashJobs.retentionS`               | `86400`                  | 终态 job 的 JSON/日志保留时长；`<=0` 关闭清理                                 |
+| `bashJobs.shutdownPolicy`           | `"keep"`                 | pi 真退出时对仍在跑的 job：`keep` / `kill`；reload/new/resume/fork 一律保留   |
+| `bashJobs.dir`                      | `~/.pi/agent/bash-jobs`  | job 状态与日志根目录（按 `<sessionId>/` 分层）                                |
+| `bashJobs.shellPath`                | `$SHELL`(白名单)→ `bash` | 执行命令的 shell（`$SHELL` 仅 basename ∈ {bash, zsh, sh} 时采用）             |
+| `bashJobs.timeoutGraceS`            | `60`                     | 已转后台的 job 到达显式 `timeout` 时的宽限时长；`0` = 关宽限                  |
+| `bashJobs.maxExtensions`            | `3`                      | `bash_job(action:"extend")` 最大续期次数；`0` = 禁 extend                     |
+| `bashJobs.maxTimeoutFactor`         | `3`                      | 宽限 + 续期的硬上限 = 原 `timeout` 的几倍；`1` = 不可续、无宽限               |
+| `bashJobs.childSessions`            | `true`                   | 子（subagent）会话是否注册自己的 `bash` / `bash_job`                          |
+| `bashJobs.childSettleHold`          | `true`                   | 子会话收尾时若仍有非终态后台 job，是否提醒并推迟结束                          |
+| `bashJobs.childSettleHoldMaxRounds` | `0`                      | 收尾提醒轮数上限；`0` = 按 run 自己的截止/续期预算自动推导                    |
+| `bashJobs.stripAnsi`                | `true`                   | 剥掉模型/用户可见输出里的 ANSI 控制序列；磁盘日志保持原始字节；改后需 /reload |
 
 ## 行为要点
 
 - **目录清理**：session 启动时扫一次，之后每次新建 job 时最多每 10 分钟再扫一次（不新增定时器）。只碰 `.json` / `.log` / `.tmp`，非终态 job 永不删。
 - **敏感输出会落盘**（0600/0700，与 session 文件同威胁模型），直到 `retentionS` 过期——敏感输出仍应重定向。
+- **ANSI 清洗**（`bashJobs.stripAnsi`，默认开，仅覆盖激活时生效，非 live）：彩色工具输出里的 CSI/OSC/DCS 等控制序列在进入模型/用户可见面（前台结果、后台 onUpdate 流、`bash_job status`/完成通知尾巴、finalText）之前被剥掉；磁盘日志保持原始字节（offset/cursor/截断计数均按原始字节），关掉后既有输出逐字节一致。跨 chunk 的悬空序列由有界状态机 carry，流/读取结束时未完结序列直接丢弃。
 - **重启 / reload 后收养**：仍在跑的 job 在下一个 session 被重新接管并继续通知；pid 归属无法确认的 job 只标记不杀。
 - **job 级到期宽限 + 续期**（仅已转后台且带显式 `timeout` 的 job）：到期先进入 `timeoutGraceS` 宽限并提醒（主会话 `bash-job:timeout` 消息 + TUI），由调用方用 `bash_job(action:"extend", job_id, extend_s)` 续命。
 - **子会话收尾**：若轮到结束时仍有非终态后台 job，会被有界轮数地提醒而非立即结束；run 结束时强制封存并杀掉全部未结束的 job，终态通知里会带上它们。

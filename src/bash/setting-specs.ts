@@ -65,4 +65,10 @@ export const BASH_JOBS_SETTING_SPECS: Record<string, SettingSpec> = {
     min: 1,
     description: "Hard lifetime ceiling as a multiple of the job's original timeout; 1 = zero headroom",
   },
+  // stripAnsi 包：模型/用户可见输出剥 ANSI 控制序列；磁盘日志保持原始字节。只在 bash
+  // 覆盖激活（autoBackgroundS > 0 且非 win32）时生效；非 live，改后需 /reload。
+  "bashJobs.stripAnsi": bool(
+    "bashJobs.stripAnsi",
+    "Strip ANSI escapes from model-visible bash output (raw log files untouched; needs the bash override active)",
+  ),
 };
