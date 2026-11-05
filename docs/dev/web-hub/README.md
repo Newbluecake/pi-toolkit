@@ -23,6 +23,8 @@
 - Slash-arg completion
 - Command history
 - Peer-bump conformance premises (cmd-history)
+- Registry epoch 刷新与 epoch.up.v1（#23）
+- Outdated reload 状态机（#23）
 
 ## 概述与 P2 control-plane
 
@@ -538,3 +540,69 @@ legs ⇒ no track fields, no `xs_state`, local `unsupported` for activate. Activ
 limits (pair 2/h, 30 s control spacing); audit adds only whitelisted token keys (no body/key/token). Gates:
 `tests/integration/fabric-xs-activation-compat.test.ts` (mixed versions), `tests/conformance/fabric-xs.test.ts`
 C-X13/C-X14, `tests/web-hub/boundary.test.ts`. Design: `docs/dev/fabric-xs-activation/{arch,plan}.md`.
+
+## Registry epoch 刷新与 `epoch.up.v1`（#23 P-B）
+
+`hub/registry.ts` 的 `register()` 在 reclaim（同 agentId 重连）时，epoch 刷新条件为
+`epochChanged && prevPhase !== "stale" && (caps ∋ hold.v1 ∨ caps ∋ epoch.up.v1)`：命中则先发
+`agent_up`（携带新 epoch 与新版本）后发 `gap`，顺序与 Y7.2/stale 路径一致；stale 分支仍只发一次
+`agent_up`（永不双发），同 epoch 重连保持静默。两个 cap 互补：`hold.v1` 随默认配置（`holdWired =
+control ∧ steerRecall`）声明；`epoch.up.v1` 只在 hold 缺席的配置（`control:false` 或
+`steerRecall:false`）下由 agent **尾部唯一追加**（`agent/index.ts` 的 `capsExtra`），agent 面
+专属 —— hub 不在任何 cap 面（`HubInfo.caps` / `hello_ack.caps`）广播它。**默认 hello 不得出现
+`epoch.up.v1`**：五份 A 级 golden（thread-off / thread-rebind-off / fabric-xs-off /
+fabric-xs-reply-off / schedule-off）逐字钉住默认 `hello.caps`，禁止重生。
+
+兼容存证：`tests/fixtures/web-hub/epoch-up-compat-golden.json`（#23 P-B 在**未修改的实现**上
+录制，唯一允许的新 fixture；`PI_TOOLKIT_EPOCH_UP_GOLDEN_CAPTURE=1` 且文件已存在时拒绝覆盖）。
+s1（老 caps 无 hold：只有 `gap`）与 s2（有 hold：`agent_up` 先于 `gap`）在新实现上必须与
+golden 逐字节相等（总线事件 + SSE 原文，clientId/端口归一化）；s3（老 hub × 新 agent：
+`gap` + hub 内部 `caps` 事件）是老 hub 的存证，不与当前实现比对。老 hub 只把未知 cap 存下不
+读取，`card()` 只派生布尔值，可观察输出不受影响。门禁：
+`tests/web-hub/hub/{epoch-up-compat,registry,caps-coexist}.test.ts`、
+`tests/web-hub/agent/wiring-hold.test.ts`（D13 describe）、`tests/web-hub/protocol/version.test.ts`。
+设计：`docs/dev/web-update-stuck/plan.md`（r3）。
+
+## Outdated reload 状态机（#23 P-A/P-C）
+
+Web 上点击插件更新/重新加载后的每次请求都在**有限时间内结算**（done 或 failed 可重试）。
+协调器在 `ui/src/logic/outdatedReload.ts`（框架无关纯逻辑），相：`idle → queued/sending →
+awaiting/parked → done / failed`；entry 按 agentKey 保留，不随卡片消失清除。要点（决策号见
+`docs/dev/web-update-stuck/plan.md` §2.1）：
+
+- **总预算（D1）**：`request()` 起算绝对截止 `OR_QUEUE_TIMEOUT_MS`（30min），阶段切换不清除；
+  到点按当前相结算（queued ⇒ `E_QUEUE_TIMEOUT`；parked ⇒ 先送 `reload cancel` 再
+  `E_QUEUE_TIMEOUT`；awaiting ⇒ `E_TIMEOUT`；sending ⇒ `E_SEND_UNKNOWN`）；进入
+  send/awaiting/parked 前也查截止（后台标签页计时器延迟兑底）；awaiting 的 90s 生效计时取
+  `min(90s, 剩余预算)`，只是等待期内更早的失败，不是总上限。
+- **send 上界（D2）**：`OR_SEND_TIMEOUT_MS`（60s，> 2×`CMD_REQUEST_TIMEOUT_MS`）⇒
+  `E_SEND_UNKNOWN`（结果未知，**不自动重发**；命令若其实送达，版本到位后自动收敛 done）。
+  #25 残留：transport 的 deadline 只盖响应头，`await r.json()` 的 body 无上界，彻底修复另立
+  #25；本地兑底修好后保留。
+- **attempt token（D3）**：每次 send 发单调 token，成功/失败/超时回调双核对 token+phase，
+  修迟到 Promise 的 ABA。
+- **下线判据（D4/D5）**：`agentOffline`（不在 agents ∨ `down` ∨ `card.state==="stale"`，
+  precheck 与协调器共用同一函数）；`notifyTick` 先判版本到位（done 优先，failed 也收敛）
+  再判下线（`E_OFFLINE`，只作用四个在飞相；parked 下线不发 `reload cancel`）。
+- **`E_OFFLINE` 语义**：目标进程退出/正在重启，重新加载未完成；若会话已重启，请在新卡片
+  上查看或重试。**`E_SEND_UNKNOWN` 语义**：命令结果未知（网络响应未完成）；若重新加载已
+  生效，版本到位后会自动显示成功。
+- **不跨 key 追认（D6/D8）**：failed → done 只在**同一个 key** 且版本到位时成立。断线后
+  10–60s 内同 key reclaim ⇒ done（慢 reload 会先短暂 E_OFFLINE 再自动 done）；超过 reap 窗口
+  后按 `register()` 实际返回的 key 结算：同进程同 identity ⇒ 同 key（`reclaimed:false`）⇒
+  版本到位即 done；新进程新 identity ⇒ 新 key ⇒ 旧请求保持 `E_OFFLINE`，新卡片是独立实体。
+  restore 导航（`useHub.ts` 的 `successorOf`）照常把旧 key 的查看者带到 successor，本方案不
+  改导航语义。**不自动重试（D7）**；down 卡上的 chip 点了必然失败，隐藏并入 #24。
+- **结果展示（D9/D10）**：`orFailReason(entry)` 是失败原因文案的唯一来源（wire message ⇒
+  raw；本地错误码 ⇒ i18n），四个入口共用：详情横幅、AgentCard chip 失败态（danger 配色、
+  title 含原因与「点击重试」，点击仍 `request`）、汇总失败行（人读原因 + 错误码进 title）、
+  目标消失后的空态结果行（`OutdatedReloadResult.vue`，挂「已删除」「未连接」四种空态）。
+  zh/en 键集合一致（i18n-parity 钉住）。
+- RC3（跨版本 reload 后进程退出、新进程顶上）的完整处理另开 #24；本方案如实报告失败，不
+  把「新进程顶上」当成成功。
+
+门禁：`tests/web-hub/ui/{outdated-reload,outdated-reload-loop,outdated-reload-surfaces,dashboard-view}.test.ts`
+（协调器/loop/DOM 级）；跨层闭环（真实 wiring hello → registry → HTTP/SSE → reduce → 协调器，
+含正反对照、时间窗、reap 后两组、原始 bug 复现）在
+`tests/integration/web-hub-outdated-reload-loop.test.ts`。设计：`docs/dev/web-update-stuck/plan.md`
+（r3），交付记录见同目录 `PA-report.md` / `PB-report.md` / `PC-report.md`。
