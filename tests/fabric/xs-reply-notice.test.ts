@@ -422,3 +422,109 @@ describe("xs reply notice copy (§3.3/§3.4/§7.2)", () => {
     expect(buildDroppedSummaryContent(5)).toContain("5 个跨会话请求超时并已过期");
   });
 });
+
+// Fixed pre-#20 text, deliberately independent of the production renderer.
+const PRE20_SINGLE =
+  "[fabric xs reply-timeout] 你发往 B 的跨会话请求 q000000000000000001 已超时未收到回复（截止 1970-01-01T00:01:00.000Z）。\n" +
+  "- q000000000000000001 → B（截止 1970-01-01T00:01:00.000Z）\n" +
+  "宽限期（默认 10 分钟）内到达的回复仍会送达（不唤醒，无需轮询）；宽限期过后凭证失效，对方的补发将被拒收。";
+const DELIVERED_COPY =
+  '标 last seen delivered 的请求：最后观测为已送达，尚无对方开始处理（started）的证明——观测可能滞后或漏记，不代表对方此刻一定没在处理。需要的话可在宽限期内用 wake_session（action "activate"，原发送结果的 track.messageId/activationKey）尝试激活（对方若已开始处理会返回 no-op），不要重发正文。';
+const STARTED_COPY =
+  "标 started seen 的请求：已观测到对方回合上下文包含该请求，但尚未收到回复；不要重发，宽限期内的回复仍会送达。";
+
+describe("#20 timeout observation copy and synchronous gate", () => {
+  it("missing/unknown/replied phase preserves fixed old bytes", () => {
+    const ticket = oweTicket(harness());
+    expect(buildTimeoutNoticeContent([ticket])).toBe(PRE20_SINGLE);
+    for (const phase of [undefined, "replied"] as const)
+      expect(buildTimeoutNoticeContent([ticket], () => phase)).toBe(PRE20_SINGLE);
+  });
+
+  it.each(["queued", "delivered", "started"] as const)(
+    "%s adds only its exact marker and conditional copy",
+    (phase) => {
+      const ticket = oweTicket(harness());
+      const marker = phase === "started" ? " · started seen" : ` · last seen ${phase}`;
+      const expected =
+        PRE20_SINGLE.replace("）\n宽限期", `）${marker}\n宽限期`) +
+        (phase === "delivered" ? `\n${DELIVERED_COPY}` : phase === "started" ? `\n${STARTED_COPY}` : "");
+      const content = buildTimeoutNoticeContent([ticket], () => phase);
+      expect(content).toBe(expected);
+      expect(content).not.toContain("尚未开始处理");
+      expect(content).not.toContain("没处理");
+    },
+  );
+
+  it("mixed tickets sort by dueAt, match phases by id, and append delivered before started exactly once", () => {
+    const ticket = oweTicket(harness());
+    const tickets = [
+      { ...ticket, requestId: "started", dueAt: 90_000 },
+      { ...ticket, requestId: "queued", dueAt: 30_000 },
+      { ...ticket, requestId: "delivered2", dueAt: 80_000 },
+      { ...ticket, requestId: "delivered", dueAt: 60_000 },
+    ];
+    const content = buildTimeoutNoticeContent(tickets, (id) =>
+      id.startsWith("delivered") ? "delivered" : (id as "queued" | "started"),
+    );
+    expect(content.split("\n").slice(1, 5)).toEqual([
+      "- queued → B（截止 1970-01-01T00:00:30.000Z） · last seen queued",
+      "- delivered → B（截止 1970-01-01T00:01:00.000Z） · last seen delivered",
+      "- delivered2 → B（截止 1970-01-01T00:01:20.000Z） · last seen delivered",
+      "- started → B（截止 1970-01-01T00:01:30.000Z） · started seen",
+    ]);
+    expect(content.split("\n").slice(-2)).toEqual([DELIVERED_COPY, STARTED_COPY]);
+  });
+
+  it("progress lookup and both write paths run inside the same flush call; throwing port is unknown", () => {
+    const contents: string[] = [];
+    for (const path of ["wake", "quiet", "throw", "missing"] as const) {
+      const h = harness();
+      oweTicket(h);
+      let inFlush = false;
+      const calls: string[] = [];
+      const capture = (content: string) => {
+        expect(inFlush).toBe(true);
+        calls.push("write");
+        contents.push(content);
+      };
+      const gate = new XsReplyNoticeGate({
+        ledger: h.ledger,
+        sessionId: "A",
+        getSessionId: () => "A",
+        disposed: () => false,
+        joined: () => true,
+        receive: () => (path === "wake" ? "wake" : "deliver"),
+        fence: { beginDispatch: () => ({ ok: true, gen: 1 }), verifyDispatch: (gen) => ({ ok: true, gen }) },
+        ...(path === "missing"
+          ? {}
+          : {
+              progressOf: (id: string) => {
+                expect(inFlush).toBe(true);
+                expect(id).toBe("q000000000000000001");
+                calls.push("progress");
+                if (path === "throw") throw new Error("unavailable");
+                return "delivered" as const;
+              },
+            }),
+        controller: {
+          dispatch: (r) => {
+            capture(r.content);
+            return { dispatched: true };
+          },
+        },
+        host: { sendMessage: (w) => capture(w.content) },
+        clock: h.clock,
+      });
+      inFlush = true;
+      expect(gate.flush()).toMatchObject({ written: path === "wake" ? "wake" : "quiet" });
+      inFlush = false;
+      expect(calls).toEqual(path === "missing" ? ["write"] : ["progress", "write"]);
+      expect(h.ledger.owedNotices("A")).toHaveLength(0);
+    }
+    expect(contents[0]).toBe(contents[1]);
+    expect(contents[0]).toContain(DELIVERED_COPY);
+    expect(contents[2]).toBe(PRE20_SINGLE);
+    expect(contents[3]).toBe(PRE20_SINGLE);
+  });
+});

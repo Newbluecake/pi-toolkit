@@ -17,11 +17,12 @@ import type { CmdFrame } from "../../src/web-hub/protocol/messages.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
-import { buildStackXs, type StackXs } from "../../src/fabric/xs/stack.js";
+import { buildStackXs, type StackXs, type StackXsInput } from "../../src/fabric/xs/stack.js";
 import { createXsSender } from "../../src/fabric/xs/sender.js";
 import { createCausalLevel } from "../../src/fabric/wake-level.js";
 import { createXsActivationPort } from "../../src/fabric/xs/session-activation.js";
 import { XS_ACTIVATE_MARKER_CONTENT } from "../../src/fabric/root-wake.js";
+import { buildTimeoutNoticeContent } from "../../src/fabric/xs/reply-notice.js";
 import { createMessageSessionTool, XS_IDLE_NO_WAKE_HINT } from "../../src/tools/message-session-tool.js";
 import { createWakeSessionTool } from "../../src/tools/wake-session-tool.js";
 import { createXsAgentBridge } from "../../src/web-hub/agent/xs.js";
@@ -52,7 +53,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function makeStack(sid: string) {
+function makeStack(sid: string, input: StackXsInput = {}, activation = true) {
   const branch: Array<Record<string, unknown>> = [];
   const messages: Array<{ message: Record<string, unknown>; triggerTurn: boolean }> = [];
   let idle = true;
@@ -91,12 +92,13 @@ function makeStack(sid: string) {
         ...DEFAULT_SETTINGS.fabric.crossSession,
         enabled: true,
         autoJoin: true,
+        activation: { ...DEFAULT_SETTINGS.fabric.crossSession.activation, enabled: activation },
         channels: { ...DEFAULT_SETTINGS.fabric.crossSession.channels, enabled: false },
         alias: { ...DEFAULT_SETTINGS.fabric.crossSession.alias, enabled: false },
       },
     },
   };
-  xs = buildStackXs(pi, ctx, settings, "startup", level, {});
+  xs = buildStackXs(pi, ctx, settings, "startup", level, input);
   cleanup.push(() => xs.dispose());
   return {
     xs,
@@ -121,26 +123,44 @@ function makeStack(sid: string) {
   };
 }
 
-function build() {
-  const source = makeStack(A),
-    target = makeStack(B);
+function build(activation = true) {
+  let sourceBridge: ReturnType<typeof createXsAgentBridge> | undefined;
+  const source = makeStack(
+      A,
+      activation ? { progressPhaseOf: (sid, rid) => sourceBridge?.progressPhaseOf?.(sid, rid) } : {},
+      activation,
+    ),
+    target = makeStack(B, {}, activation);
+  let dropStarted = false;
   const r = rig(600, undefined, true);
   r.clock.t = Date.now();
   cleanup.push(() => r.relay.dispose());
   const limits = { pairMinIntervalMs: 0, wakesOutPerHour: 20 };
-  const a = r.agent({ pid: 1, sessionId: A, caps: CAPS, epoch: source.xs.membership.epoch, limits });
-  const b = r.agent({ pid: 2, sessionId: B, caps: CAPS, epoch: target.xs.membership.epoch });
+  const a = r.agent({
+    pid: 1,
+    sessionId: A,
+    caps: activation ? CAPS : CAPS.filter((c) => c !== "xs.state.v1" && c !== "xs.activate.v1"),
+    epoch: source.xs.membership.epoch,
+    limits,
+  });
+  const b = r.agent({
+    pid: 2,
+    sessionId: B,
+    caps: activation ? CAPS : CAPS.filter((c) => c !== "xs.state.v1" && c !== "xs.activate.v1"),
+    epoch: target.xs.membership.epoch,
+  });
   const requests: XsReqFrame[] = [];
   const port = (stack: StackXs) => ({
     stack: () => stack,
     memberLimits: () => DEFAULT_SETTINGS.fabric.crossSession.limits,
     hubSendsPerMin: () => 600,
     replyEnabled: () => true,
-    activationEnabled: () => true,
-    activateEnabled: () => true,
+    activationEnabled: () => activation,
+    activateEnabled: () => activation,
   });
   const srcConn = {
     caps: CAPS,
+    setSlot: () => {},
     status: () => ({ state: "live", attached: true }),
     request: (frame: XsReqFrame) =>
       new Promise((resolve) => {
@@ -148,7 +168,8 @@ function build() {
         r.relay.router.handle(a.key, frame, resolve);
       }),
   } as unknown as HubConnection;
-  const sourceBridge = createXsAgentBridge({ conn: () => srcConn, port: port(source.xs) });
+  sourceBridge = createXsAgentBridge({ conn: () => srcConn, port: port(source.xs) });
+  sourceBridge.publishMember();
   const tgtConn = {
     caps: CAPS,
     status: () => ({ state: "live", attached: true }),
@@ -164,7 +185,7 @@ function build() {
   const aSend = a.conn.send;
   a.conn.send = (frame) => {
     aSend(frame);
-    if (frame.t === "xs_state") sourceBridge.onState(frame);
+    if (frame.t === "xs_state" && !(dropStarted && frame.phase === "started")) sourceBridge!.onState(frame);
   };
   const bSend = b.conn.send;
   b.conn.send = (frame) => {
@@ -206,7 +227,20 @@ function build() {
     return out;
   };
   const messageTool = createMessageSessionTool({ sender, reply: true, activation: true, idleWakeAdvice: true });
-  return { source, target, r, requests, send, call, sourceBridge, a, messageTool };
+  return {
+    source,
+    target,
+    r,
+    requests,
+    send,
+    call,
+    sourceBridge,
+    a,
+    messageTool,
+    dropStarted: () => {
+      dropStarted = true;
+    },
+  };
 }
 
 const markers = (h: ReturnType<typeof build>) =>
@@ -496,3 +530,79 @@ describe.each(["token", "password"] as const)(
     });
   },
 );
+
+describe("#20 timeout phase with real stacks / mirror / relay", () => {
+  async function ask(h: ReturnType<typeof build>) {
+    // Exercise the quiet stack path. This deterministic host calls BAS synchronously from
+    // sendMessage (real pi defers it), so timeout wakes are covered by C-X15's real pi host.
+    h.source.xs.membership.setReceive("deliver");
+    const result = await h.messageTool.execute(
+      "timeout-call",
+      {
+        to: B,
+        text: "TIMEOUT-PHASE-BODY",
+        wake: false,
+        expectReply: { timeoutS: 60 },
+      } as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const out = result.details as { reply: { requestId: string } };
+    expect(out).toMatchObject({ status: "sent", effect: "applied", reply: { state: "pending" } });
+    return h.source.xs.reply!.ledger.entries().find((t) => t.requestId === out.reply.requestId)!;
+  }
+  function notices(h: ReturnType<typeof build>) {
+    return h.source.messages.filter((m) => String(m.message.content).startsWith("[fabric xs reply-timeout]"));
+  }
+  async function due(h: ReturnType<typeof build>) {
+    await vi.advanceTimersByTimeAsync(60_001);
+    h.source.xs.reply!.flush();
+    expect(notices(h)).toHaveLength(1);
+    return String(notices(h)[0]!.message.content);
+  }
+  function observedDelivered(content: string) {
+    expect(content).toContain(" · last seen delivered");
+    expect(content).toContain("尚无对方开始处理（started）的证明——观测可能滞后或漏记，不代表对方此刻一定没在处理");
+    expect(content).not.toContain(" · started seen");
+    expect(content).not.toContain("尚未开始处理");
+  }
+
+  it("idle deliver-only times out with live delivered; activation off retains pre20 bytes", async () => {
+    const h = build();
+    const ticket = await ask(h);
+    expect(h.sourceBridge.progressPhaseOf!(A, ticket.requestId)).toBe("delivered");
+    observedDelivered(await due(h));
+    const off = build(false);
+    const oldTicket = await ask(off);
+    expect(off.sourceBridge.progressPhaseOf!(A, oldTicket.requestId)).toBeUndefined();
+    expect(await due(off)).toBe(buildTimeoutNoticeContent([oldTicket]));
+  });
+
+  it("context scan over 2000 skips the old xid, so a live delivered notice describes only last observation", async () => {
+    const h = build();
+    const ticket = await ask(h);
+    const original = bodies(h)[0]!.message;
+    h.target.xs.context({
+      messages: [
+        { role: "custom", customType: original.customType, content: original.content, details: original.details },
+        ...Array.from({ length: 2000 }, () => ({ role: "user", content: "later context" })),
+      ],
+    });
+    expect(h.target.xs.progress!.rows()[0]).toMatchObject({ phase: "delivered", observation: "live" });
+    expect(h.sourceBridge.progressPhaseOf!(A, ticket.requestId)).toBe("delivered");
+    observedDelivered(await due(h));
+  });
+
+  it("started push not delivered to source leaves live delivered, never invents current state", async () => {
+    const h = build();
+    const ticket = await ask(h);
+    h.dropStarted();
+    h.target.context();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.target.xs.progress!.rows()[0]).toMatchObject({ phase: "started", observation: "live" });
+    expect(h.sourceBridge.progressPhaseOf!(A, ticket.requestId)).toBe("delivered");
+    observedDelivered(await due(h));
+  });
+});

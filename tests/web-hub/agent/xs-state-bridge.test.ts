@@ -427,3 +427,104 @@ describe("xs agent bridge: receipt round trip (read-only, 3s)", () => {
     conn.close("test");
   });
 });
+
+describe("#20 progressPhaseOf: synchronous read-only source mirror", () => {
+  function setup(activation = true, stateCap = true) {
+    const { port } = makePort({ activation });
+    let sid = SESSION.sessionId as string;
+    const stack = port.stack()!;
+    stack.sessionId = () => sid;
+    const publishStatus = vi.fn();
+    const conn = {
+      caps: stateCap ? [XS_STATE_HUB_CAP] : [],
+      setSlot: vi.fn(),
+      send: vi.fn(),
+      status: () => ({ state: "live" }),
+    } as unknown as HubConnection;
+    const bridge = createXsAgentBridge({ port, conn: () => conn, publishStatus });
+    bridge.publishMember(); // adopts the mirror identity; queries themselves may not do this
+    const put = (over: Partial<XsProgress> = {}) =>
+      bridge.onState({
+        t: "xs_state",
+        messageId: "x-phase",
+        requestId: "q-phase",
+        revision: 0,
+        observation: "live",
+        deliveryEffect: "applied",
+        phase: "delivered",
+        wake: { requested: false, decision: "deliver_only" },
+        activationUntil: Date.now() + 600_000,
+        ...over,
+      });
+    return {
+      bridge,
+      put,
+      publishStatus,
+      conn,
+      switchSession: () => {
+        sid = "different-session";
+      },
+    };
+  }
+
+  it.each(["queued", "delivered", "started", "replied"] as const)(
+    "live %s is returned without changing revision, publishing, or sending",
+    (phase) => {
+      const h = setup();
+      h.put({ phase });
+      const before = h.bridge.requestsProjection();
+      const publishes = h.publishStatus.mock.calls.length;
+      const sends = vi.mocked(h.conn.send).mock.calls.length;
+      expect(h.bridge.progressPhaseOf!(SESSION.sessionId, "q-phase")).toBe(phase);
+      expect(h.bridge.requestsProjection()).toEqual(before);
+      expect(h.publishStatus).toHaveBeenCalledTimes(publishes);
+      expect(h.conn.send).toHaveBeenCalledTimes(sends);
+    },
+  );
+
+  it.each(["offline", "expired", "unavailable"] as const)(
+    "observation %s is unknown, even with a retained started phase",
+    (observation) => {
+      const h = setup();
+      h.put({ phase: "started", observation });
+      expect(h.bridge.progressPhaseOf!(SESSION.sessionId, "q-phase")).toBeUndefined();
+    },
+  );
+
+  it("read-time deadline overlay is expired, not a current delivered observation", () => {
+    const h = setup();
+    h.put();
+    vi.advanceTimersByTime(600_001);
+    expect(h.bridge.requestsProjection()!.rows[0]).toMatchObject({ phase: "delivered", observation: "expired" });
+    expect(h.bridge.progressPhaseOf!(SESSION.sessionId, "q-phase")).toBeUndefined();
+  });
+
+  it("off, missing cap/row, wrong mirror sid, and switched current session are unknown", () => {
+    for (const [on, cap] of [
+      [false, true],
+      [true, false],
+    ]) {
+      const h = setup(on, cap);
+      h.put();
+      expect(h.bridge.progressPhaseOf!(SESSION.sessionId, "q-phase")).toBeUndefined();
+    }
+    const h = setup();
+    h.put();
+    expect(h.bridge.progressPhaseOf!(SESSION.sessionId, "missing")).toBeUndefined();
+    expect(h.bridge.progressPhaseOf!("wrong-sid", "q-phase")).toBeUndefined();
+    h.switchSession();
+    expect(h.bridge.progressPhaseOf!(SESSION.sessionId, "q-phase")).toBeUndefined();
+    expect(h.bridge.progressPhaseOf!("different-session", "q-phase")).toBeUndefined();
+  });
+
+  it("duplicate requestIds agree or fail closed on conflicting phase/non-live row", () => {
+    const h = setup();
+    h.put();
+    h.put({ messageId: "x2" });
+    expect(h.bridge.progressPhaseOf!(SESSION.sessionId, "q-phase")).toBe("delivered");
+    h.put({ messageId: "x2", revision: 1, phase: "started" });
+    expect(h.bridge.progressPhaseOf!(SESSION.sessionId, "q-phase")).toBeUndefined();
+    h.put({ messageId: "x-phase", revision: 1, phase: "started", observation: "offline" });
+    expect(h.bridge.progressPhaseOf!(SESSION.sessionId, "q-phase")).toBeUndefined();
+  });
+});

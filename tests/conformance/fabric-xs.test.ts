@@ -25,6 +25,7 @@ import { createSessionFence } from "../../src/fabric/xs/fence.js";
 import { XsMembership, readXsMembershipEntry, XS_MEMBERSHIP_CUSTOM_TYPE } from "../../src/fabric/xs/membership.js";
 import { XsReceiver } from "../../src/fabric/xs/receiver.js";
 import { XsReplyLedger, createXsReplyInboxPort } from "../../src/fabric/xs/reply-ledger.js";
+import { XsReplyNoticeGate } from "../../src/fabric/xs/reply-notice.js";
 import { XsInbox } from "../../src/fabric/xs/inbox.js";
 import { createListSessionsTool } from "../../src/tools/list-sessions-tool.js";
 import { createMessageSessionTool } from "../../src/tools/message-session-tool.js";
@@ -1452,4 +1453,107 @@ describe("fabric phase-2 real pi contracts", () => {
       expect(p.count()).toBe(0);
     });
   });
+});
+
+describe("#20 C-X15 timeout phase provider hygiene", () => {
+  it.each(["wake", "quiet"] as const)(
+    "C-X15 %s: exact observation copy visible, host credentials absent (quiet waits for a natural turn)",
+    async (path) => {
+      const h = await host();
+      await prime(h);
+      const secrets = {
+        sid: "SID_SENTINEL_x9",
+        xid: "XID_SENTINEL_x9",
+        messageId: "MESSAGEID_SENTINEL_x9",
+        activationKey: "ACTIVATIONKEY_SENTINEL_x9",
+      };
+      let n = 0;
+      const ledger = new XsReplyLedger({ clock: h.clock, newRequestId: () => `q${String(++n).padStart(18, "0")}` });
+      ledger.bindSession({ sessionId: secrets.sid, inbox: createXsReplyInboxPort(new XsInbox(8)) });
+      const rows = new Map<
+        string,
+        { phase: "delivered" | "started"; sid: string; xid: string; messageId: string; activationKey: string }
+      >();
+      for (const phase of ["delivered", "started"] as const) {
+        const issued = ledger.issue({
+          requesterSessionId: secrets.sid,
+          replierSessionId: secrets.sid,
+          replierRef: "cx15-peer",
+          origin: "model",
+          wakeOnReply: path === "wake",
+          requesterLevel: 0,
+          timeoutMs: 60_000,
+          lateGraceMs: 600_000,
+          maxPending: 8,
+          maxPendingPerTarget: 3,
+        });
+        expect(issued.ok).toBe(true);
+        if (!issued.ok) throw new Error("ticket issue failed");
+        // Host-only fields on tickets and mirror rows are deliberately dangerous sentinels.
+        Object.assign(issued.ticket, secrets);
+        rows.set(issued.ticket.requestId, { phase, ...secrets });
+      }
+      let notice = "";
+      const gate = new XsReplyNoticeGate({
+        ledger,
+        sessionId: secrets.sid,
+        getSessionId: () => secrets.sid,
+        disposed: () => false,
+        joined: () => true,
+        receive: () => "wake",
+        fence: h.fence,
+        clock: h.clock,
+        progressOf: (id) => rows.get(id)?.phase,
+        controller: {
+          dispatch: (r) => {
+            notice = r.content;
+            return h.controller.dispatch(r);
+          },
+        },
+        host: {
+          sendMessage: (write) => {
+            notice = write.content;
+            h.pi.sendMessage(write, { triggerTurn: false });
+          },
+        },
+      });
+      const before = h.stub.requests.length;
+      h.clock.advance(60_000);
+      expect(gate.flush()).toMatchObject({ written: path });
+      expect(notice).toContain(" · last seen delivered");
+      expect(notice).toContain(" · started seen");
+      const copy = [
+        '标 last seen delivered 的请求：最后观测为已送达，尚无对方开始处理（started）的证明——观测可能滞后或漏记，不代表对方此刻一定没在处理。需要的话可在宽限期内用 wake_session（action "activate"，原发送结果的 track.messageId/activationKey）尝试激活（对方若已开始处理会返回 no-op），不要重发正文。',
+        "标 started seen 的请求：已观测到对方回合上下文包含该请求，但尚未收到回复；不要重发，宽限期内的回复仍会送达。",
+      ];
+      expect(notice.split("\n").slice(-2)).toEqual(copy);
+      for (const value of Object.values(secrets)) expect(notice).not.toContain(value);
+      if (path === "quiet") {
+        expect(h.stub.requests).toHaveLength(before);
+        await h.session.prompt("A subsequent natural human turn reads the quiet notice");
+      } else {
+        await until(() => h.stub.requests.length > before, "timeout wake reaches provider");
+        await until(() => h.session.isIdle && h.controller.state === "idle", "timeout wake settles");
+      }
+      expect(h.stub.requests).toHaveLength(before + 1);
+      const payload = JSON.stringify(h.stub.requests.slice(before));
+      expect(payload).toContain(" · last seen delivered");
+      expect(payload).toContain(" · started seen");
+      // JSON escapes action quotes; assert decoded HTTP bodies for exact prose.
+      const bodies = h.stub.requests.slice(before).map((request) => JSON.parse(request.body));
+      const text = bodies
+        .flatMap((body) => body.messages)
+        .flatMap((m: { content: unknown }) =>
+          typeof m.content === "string"
+            ? [m.content]
+            : (m.content as Array<{ text?: string }>).map((c) => c.text ?? ""),
+        )
+        .join("\n");
+      for (const sentence of copy) expect(text).toContain(sentence);
+      for (const value of Object.values(secrets)) expect(payload).not.toContain(value);
+      expect(h.errors).toEqual([]);
+      gate.dispose();
+    },
+    40_000,
+  );
 });

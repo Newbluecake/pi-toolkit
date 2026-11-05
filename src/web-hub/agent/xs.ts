@@ -99,6 +99,7 @@ import {
   XS_STATE_AGENT_CAP,
   XS_STATE_HUB_CAP,
   type XsProgress,
+  type XsPhase,
   type XsWakeView,
   type XsActivateAckFrame,
   type XsActivateFrame,
@@ -334,6 +335,8 @@ export interface XsAgentBridge {
   /** fabric-xs-activation P1: the `StatusInfo.xsRequests` body — ONLY while effective AND the
    *  mirror holds rows for the CURRENT session (absent ⇒ the status frame stays byte-equal). */
   requestsProjection(): XsRequestsStatusWire | undefined;
+  /** #20: read-only synchronous source mirror query; no receipt/publish/revision mutation. */
+  progressPhaseOf?(sessionId: string, requestId: string): XsPhase | undefined;
 }
 
 // ------------------------------------------------------------- member-limit clamping (defensive)
@@ -1551,6 +1554,20 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       } catch {
         /* never throws into the connection machinery */
       }
+    },
+
+    progressPhaseOf(sessionId, requestId) {
+      if (
+        !activationEnabled() ||
+        !hubHasState() ||
+        mirrorSessionId !== sessionId ||
+        deps.port.stack()?.sessionId() !== sessionId
+      )
+        return undefined;
+      const rows = mirror.rows(Date.now()).filter((row) => row.requestId === requestId);
+      if (rows.length === 0 || rows.some((row) => row.observation !== "live")) return undefined;
+      const phase = rows[0]!.phase;
+      return rows.every((row) => row.phase === phase) ? phase : undefined;
     },
 
     requestsProjection() {

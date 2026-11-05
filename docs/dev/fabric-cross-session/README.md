@@ -502,3 +502,56 @@ Accepted residuals: no cross-process exactly-once; hub/pi restart or a full rela
 (never reconstructed from disk); activate never auto-runs and is quota-bound (`pair_wake_rate` ⇒ retryAfter, original
 key only); the C-X conformance suites run on the current pi only — legacy pi 1.0.4/1.1.0 reruns need
 `PI_TOOLKIT_LEGACY_PI_DIR` and were not run in this package.
+
+## Idle deliver-only warning & timeout phase (#20)
+
+Design: `../xs-idle-wake-warning/plan.md` r3 D1–D6; package reports `A-report.md` / `B-report.md`.
+The main-session `message_session` tool appends the fixed Chinese advice only when the activate-frozen
+`idleWakeAdvice` gate is true (xs + activation + local wake) and the final outcome is a new non-reply,
+`sent/applied`, pending expectReply, `wake.requested:false`, no downgrade, not woken, with track/key,
+and phase absent or delivered. Sender/outcome/details/schema/tool descriptions do not change.
+In the current receiver implementation, a first new non-reply deliver-only `applied` verdict proves
+idle **at the receiver's pre-write sample**, a matching leaf and successful fence verification;
+`unknown` does NOT prove busy (leaf mismatch/fence failure may happen while idle). Dedup can replay
+historical applied; new hub sends use new xids. There is no hub busy field or additional round trip.
+Advice says not to resend a delivered body; use the original receipt with `wake_session` action
+`activate` instead (only proven none permits a new body send). Human default-wake upgrades and existing
+downgrade hints do not duplicate this warning; children/wake-off/missing track intentionally omit it.
+
+Visibility is deliberately limited: warning is tool **text** (model + transcript ToolCard), not details
+or `StatusInfo.xsRequests`; mention/details-only control-plane consumers do not see it. Timeout notices
+are session custom messages, visible in the transcript and on the next provider request.
+
+NoticeGate reads source mirror progress **synchronously and read-only by requester sid + requestId**.
+No receipt request, hub round trip, await, publish, revision mutation or new timer occurs in lookup;
+flush keeps its single synchronous admission/write/verify block and shares one content across wake and
+quiet paths. `progressPhaseOf` fails closed on activation off, missing hub state cap, wrong/currently
+switched mirror sid, missing row, non-live observation (offline/expired/unavailable) or conflicting
+phases for duplicate requestIds. Unknown/replied/absent/throwing ports preserve pre-#20 notice bytes;
+invalidation and dropped-summary copy is untouched. Existing off golden fixtures remain frozen and
+wire fields/caps/PROTO are unchanged (I9/I10).
+
+Only live observations add these exact English line suffixes: ` · last seen queued`,
+` · last seen delivered`, ` · started seen`. These are **last observed facts**, NOT assertions about
+what the recipient is doing now. Only delivered/started rows append their fixed Chinese explanation
+(delivered first); queued-only notices add no advice. Delivered explains that started evidence may be
+late/missing and offers original-track activation in grace (already started ⇒ no-op), never body resend.
+Started explains context inclusion was observed but a reply has not arrived; grace replies still land.
+Notices name `track.messageId/activationKey` but never include sid/xid/messageId/activationKey **values**.
+
+Gates: notice fixed-old-byte/exact-copy/synchronous-call-stack tests; bridge live/non-live/read-only/
+conflicting-row tests; real stack + relay tests for the 2000-message context scan limit and dropped
+started pushes; real activate-built timeout and old-target/old-hub expectReply timeout byte differentials.
+**C-X15** (`tests/conformance/fabric-xs.test.ts`, real pi + AnthropicStub) covers delivered AND started
+in wake requests and quiet notices in a later natural turn, asserting exact prose/markers and absence
+of injected sid/xid/messageId/activationKey sentinels. Run alongside C-X1…C-X14, bridge legacy gates,
+stack teardown, nine XsHarness suites, governance/mention and all three untouched off goldens.
+
+Accepted residuals: receiver sample/write re-entry or later human/goal/schedule activity can make idle
+advice a false positive (non-blocking, “大概率” only). The 2000-message scan or a lost started push may
+leave a **live** mirror on delivered; read-only lookup cannot detect that omission, hence observation
+wording and activation's started no-op. Expiry retains the farthest phase but overrides observation,
+so expired rows are unknown. A stuck target/active wake/quota can refuse activation. Child/wake-off/
+legacy/capacity fallback advice is intentionally absent. With local wake disabled but activation still
+on, delivered timeout advice may offer activate which returns an explicit refusal; this is accepted,
+not a new wake gate. No cross-process exactly-once or reconstructed tracking promise is added.

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { buildTimeoutNoticeContent } from "../../src/fabric/xs/reply-notice.js";
+import type { XsReplyTicket } from "../../src/fabric/xs/reply-ledger.js";
 import type { XsSendOutcome } from "../../src/fabric/xs/sender.js";
 import { XS_IDLE_NO_WAKE_HINT, xsIdleNoWakeRisk } from "../../src/tools/message-session-tool.js";
 import { XsHarness, list, until } from "./helpers/fabric-xs-harness.js";
@@ -60,7 +62,7 @@ describe("#20 expectReply mixed-version content byte differential", () => {
         "toolContent",
         {
           name: "message_session",
-          params: { to: bid, text: "PRE20-COMPAT-REQUEST", wake: false, expectReply: {} },
+          params: { to: bid, text: "PRE20-COMPAT-REQUEST", wake: false, expectReply: { timeoutS: 60 } },
         },
       );
       expect(result.details).toMatchObject({ status: "sent", effect: "applied", reply: { state: "pending" } });
@@ -73,6 +75,19 @@ describe("#20 expectReply mixed-version content byte differential", () => {
           m.content.includes("PRE20-COMPAT-REQUEST"),
         ),
       ).toHaveLength(1);
+      const ticket = (await a.rpc("inspect")).replyTickets.find(
+        (t: XsReplyTicket) => t.requestId === result.details.reply!.requestId,
+      ) as XsReplyTicket;
+      await a.rpc("skew", { ms: 61_000 });
+      await a.rpc("settle");
+      const state = await a.rpc("inspect");
+      const notices = [...state.messages, ...state.replyNotices].filter((m: { content: string }) =>
+        m.content.startsWith("[fabric xs reply-timeout]"),
+      );
+      expect(notices).toHaveLength(1);
+      expect(notices[0].content).toBe(buildTimeoutNoticeContent([ticket]));
+      expect(notices[0].content).not.toContain("last seen");
+      expect(notices[0].content).not.toContain("started seen");
     },
     60_000,
   );
@@ -127,3 +142,46 @@ it("#20 real activate() freezes advice on wake setting: wake-off retains qualify
   expect(xsIdleNoWakeRisk(off.details)).toBe(true);
   expect(off.content).toEqual([{ type: "text", text: renderPre20(off.details) }]);
 }, 60_000);
+
+it.each([false, true])(
+  "#20 real activate timeout wiring: activationOff=%s",
+  async (activationOff) => {
+    h = new XsHarness();
+    await h.boot("hub");
+    const a = await h.boot("agent", "alpha", undefined, true, false, activationOff ? { XW_ACTIVATION_OFF: "1" } : {});
+    const b = await h.boot("agent", "beta");
+    await Promise.all([a.rpc("cmd", { args: "join" }), b.rpc("cmd", { args: "join" })]);
+    const bid = (await b.rpc("inspect")).sessionId as string;
+    await until(
+      () => list(a),
+      (l) => l.rows?.some((r: { ref: string }) => bid.startsWith(r.ref)),
+      "member visible",
+    );
+    const out = await a.rpc("tool", {
+      name: "message_session",
+      params: {
+        to: bid,
+        text: "IDLE-TIMEOUT-WIRING",
+        wake: false,
+        expectReply: { timeoutS: 60 },
+      },
+    });
+    expect(out).toMatchObject({ status: "sent", effect: "applied", reply: { state: "pending" } });
+    const ticket = (await a.rpc("inspect")).replyTickets.find(
+      (t: XsReplyTicket) => t.requestId === out.reply.requestId,
+    );
+    await a.rpc("skew", { ms: 61_000 });
+    await a.rpc("settle");
+    const state = await a.rpc("inspect");
+    const notices = [...state.messages, ...state.replyNotices].filter((m: { content: string }) =>
+      m.content.startsWith("[fabric xs reply-timeout]"),
+    );
+    expect(notices).toHaveLength(1);
+    if (activationOff) expect(notices[0].content).toBe(buildTimeoutNoticeContent([ticket]));
+    else expect(notices[0].content).toBe(buildTimeoutNoticeContent([ticket], () => "delivered"));
+    expect(
+      (await b.rpc("inspect")).messages.filter((m: { content: string }) => m.content.includes("IDLE-TIMEOUT-WIRING")),
+    ).toHaveLength(1);
+  },
+  60_000,
+);

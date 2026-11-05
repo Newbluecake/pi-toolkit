@@ -663,6 +663,9 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
                 },
               }
             : {}),
+          ...(activationOn
+            ? { progressPhaseOf: (sid: string, rid: string) => webHubRef.current?.xs?.progressPhaseOf?.(sid, rid) }
+            : {}),
           listRows: async (origin) => {
             const reply = await webHubRef.current?.xs?.hubPort().list({ origin });
             return reply?.kind === "res" && reply.res.ok ? (reply.res.rows ?? []) : undefined;

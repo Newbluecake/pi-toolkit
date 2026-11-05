@@ -43,11 +43,13 @@ import {
   type XsProgressFields,
   type XsProgressWrite,
 } from "./progress.js";
-import type { XsProgress } from "../../web-hub/protocol/xs-activation.js";
+import type { XsPhase, XsProgress } from "../../web-hub/protocol/xs-activation.js";
 import { XS_TRACK_DEFAULT_MS } from "../../web-hub/protocol/xs-activation.js";
 
 /** Late-bound main-session ports; neither the web bridge nor goal/topic-switch owns a stack. */
 export interface StackXsInput {
+  /** #20: late-bound synchronous read-only source mirror (never a hub round trip). */
+  progressPhaseOf?: (sessionId: string, requestId: string) => XsPhase | undefined;
   ports?: FencePorts;
   memberChanged?: () => void;
   /** Reply-plan §9.2 (MW): the directory cache's data source — one hub `list` round trip for the
@@ -566,6 +568,7 @@ export function buildStackXs(
       joined: () => membership.joined,
       receive: () => membership.receive,
       fence: gateFence,
+      ...(input.progressPhaseOf ? { progressOf: (id: string) => input.progressPhaseOf?.(sessionId, id) } : {}),
       ...(controller ? { controller } : {}),
       host: {
         sendMessage: (write) => {

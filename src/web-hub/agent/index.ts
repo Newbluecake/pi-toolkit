@@ -93,7 +93,7 @@ import type {
   XsAliasCachePort,
 } from "../../fabric/xs/types-alias.js";
 import type { XsHubLimitsWire } from "../protocol/xs.js";
-import type { XsStateFrame } from "../protocol/xs-activation.js";
+import type { XsPhase, XsStateFrame } from "../protocol/xs-activation.js";
 import { createRunTranscripts, type RunTxRunInfo, type RunTranscriptPort } from "./run-transcript.js";
 import { createEventTap } from "./event-tap.js";
 import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
@@ -552,6 +552,8 @@ export interface WebHubControl {
     /** channel-plan §12 (IBP): the unread count changed ⇒ republish status (IBW calls this). */
     notifyUnreadChanged(): void;
     hubPort(): XsHubPort & XsActivationHubPort;
+    /** #20: synchronous read-only source mirror; absent on older bridge facades. */
+    progressPhaseOf?(sessionId: string, requestId: string): XsPhase | undefined;
     resolveBlock(query: string): Promise<XsBlockResolve>;
     hubInfo(): Promise<XsHubLimitsWire | undefined>;
     /** alias-plan §4/§7 (ALW): AL3's `op:"alias"` bridge and per-activate alias cache for `/fabric alias`. */
@@ -2387,6 +2389,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             publishMember: () => xsBridge.publishMember(),
             notifyUnreadChanged: () => xsBridge.notifyUnreadChanged(),
             hubPort: () => xsBridge.hubPort(),
+            progressPhaseOf: (sid: string, rid: string) => xsBridge.progressPhaseOf?.(sid, rid),
             resolveBlock: (query: string) => xsBridge.resolveBlock(query),
             hubInfo: () => xsBridge.hubInfo(),
             aliasBridge: () => xsBridge.aliasBridge(),
