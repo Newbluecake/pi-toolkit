@@ -1,12 +1,13 @@
 /**
- * hub.log writer (plan §包 B): append-only JSON lines, 0600, single-generation
- * rotation (`hub.log` → `hub.log.1`) once the file would exceed `maxBytes`.
+ * hub.log writer (plan §包 B): append-only JSON lines, 0600, three-generation
+ * rotation (`hub.log` → `hub.log.1` → `hub.log.2` → `hub.log.3`, oldest dropped) once
+ * the file would exceed `maxBytes`.
  *
  * Writes are synchronous and tiny (the hub logs lifecycle events, not traffic)
  * and never throw — a broken log must never take the hub down.
  */
 import { Buffer } from "node:buffer";
-import { appendFileSync, chmodSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, chmodSync, renameSync, rmSync, statSync } from "node:fs";
 import type { HubLog } from "./ports.js";
 
 export const DEFAULT_LOG_MAX_BYTES = 1 << 20;
@@ -27,6 +28,23 @@ export function createHubLog(file: string, opts?: { maxBytes?: number }): HubLog
     const bytes = Buffer.byteLength(line, "utf8");
     try {
       if (size > 0 && size + bytes > maxBytes) {
+        // Three backups: shift .2→.3 (dropping the old .3), .1→.2, hub.log→.1.
+        // Each shift is best-effort on its own so a stuck one cannot block the rest.
+        try {
+          rmSync(`${file}.3`, { force: true });
+        } catch {
+          // ignore
+        }
+        try {
+          renameSync(`${file}.2`, `${file}.3`);
+        } catch {
+          // ignore
+        }
+        try {
+          renameSync(`${file}.1`, `${file}.2`);
+        } catch {
+          // ignore
+        }
         renameSync(file, `${file}.1`);
         size = 0;
       }
