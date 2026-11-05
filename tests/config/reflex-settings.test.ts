@@ -11,21 +11,27 @@ import { DEFAULT_REFLEX_SETTINGS, parseReflexSettings } from "../../src/reflex/c
 
 describe("parseReflexSettings (never throws, field-by-field fallback)", () => {
   it("defaults are off with an empty autoResolve and are frozen", () => {
-    expect(DEFAULT_REFLEX_SETTINGS).toEqual({ enabled: false, autoResolve: [] });
+    expect(DEFAULT_REFLEX_SETTINGS).toEqual({ enabled: false, autoResolve: [], drafts: { enabled: false } });
     expect(Object.isFrozen(DEFAULT_REFLEX_SETTINGS)).toBe(true);
     expect(Object.isFrozen(DEFAULT_REFLEX_SETTINGS.autoResolve)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_REFLEX_SETTINGS.drafts)).toBe(true);
   });
 
   it.each([undefined, null, "x", 3, [], true])("garbage block %j ⇒ defaults", (input) => {
-    expect(parseReflexSettings(input)).toEqual({ enabled: false, autoResolve: [] });
+    expect(parseReflexSettings(input)).toEqual({ enabled: false, autoResolve: [], drafts: { enabled: false } });
   });
 
   it("wrong-typed fields fall back independently", () => {
     expect(parseReflexSettings({ enabled: "yes", autoResolve: "quota.summary" })).toEqual({
       enabled: false,
       autoResolve: ["quota.summary"],
+      drafts: { enabled: false },
     });
-    expect(parseReflexSettings({ enabled: true, autoResolve: 5 })).toEqual({ enabled: true, autoResolve: [] });
+    expect(parseReflexSettings({ enabled: true, autoResolve: 5 })).toEqual({
+      enabled: true,
+      autoResolve: [],
+      drafts: { enabled: false },
+    });
   });
 
   it("autoResolve accepts csv or array: trimmed, empties dropped, deduped, order kept", () => {
@@ -47,30 +53,57 @@ describe("parseReflexSettings (never throws, field-by-field fallback)", () => {
     expect(a.autoResolve).not.toBe(b.autoResolve);
     expect(a.autoResolve).not.toBe(DEFAULT_REFLEX_SETTINGS.autoResolve);
   });
+
+  it("#25 drafts parses independently of the rest of the block (fresh object, alias isolation)", () => {
+    expect(parseReflexSettings({ drafts: { enabled: true } }).drafts).toEqual({ enabled: true });
+    expect(parseReflexSettings({ enabled: true }).drafts).toEqual({ enabled: false });
+    // wrong-typed drafts (or drafts.enabled) ⇒ default, without touching siblings
+    expect(parseReflexSettings({ drafts: true, enabled: true }).drafts).toEqual({ enabled: false });
+    expect(parseReflexSettings({ drafts: { enabled: "yes" } }).drafts).toEqual({ enabled: false });
+    expect(parseReflexSettings({ drafts: [] }).drafts).toEqual({ enabled: false });
+    // fresh object every parse — the frozen default is never handed out as a mutable alias
+    const a = parseReflexSettings({ drafts: { enabled: true } });
+    expect(a.drafts).not.toBe(parseReflexSettings({ drafts: { enabled: true } }).drafts);
+    expect(a.drafts).not.toBe(DEFAULT_REFLEX_SETTINGS.drafts);
+  });
 });
 
 describe("AgentSettings.reflex wiring", () => {
   it("default equals the module default and is not an alias of it", () => {
-    expect(DEFAULT_SETTINGS.reflex).toEqual({ enabled: false, autoResolve: [] });
+    expect(DEFAULT_SETTINGS.reflex).toEqual({ enabled: false, autoResolve: [], drafts: { enabled: false } });
     expect(DEFAULT_SETTINGS.reflex.autoResolve).not.toBe(DEFAULT_REFLEX_SETTINGS.autoResolve);
+    expect(DEFAULT_SETTINGS.reflex.drafts).not.toBe(DEFAULT_REFLEX_SETTINGS.drafts);
   });
 
   it("loadSettings parses the block; missing / invalid block ⇒ default", () => {
     expect(loadSettings({ reflex: { enabled: true, autoResolve: "jobs.list" } }).reflex).toEqual({
       enabled: true,
       autoResolve: ["jobs.list"],
+      drafts: { enabled: false },
     });
-    expect(loadSettings({}).reflex).toEqual({ enabled: false, autoResolve: [] });
-    expect(loadSettings({ reflex: "nope" }).reflex).toEqual({ enabled: false, autoResolve: [] });
+    expect(loadSettings({ reflex: { enabled: true, drafts: { enabled: true } } }).reflex.drafts).toEqual({
+      enabled: true,
+    });
+    expect(loadSettings({}).reflex).toEqual({ enabled: false, autoResolve: [], drafts: { enabled: false } });
+    expect(loadSettings({ reflex: "nope" }).reflex).toEqual({
+      enabled: false,
+      autoResolve: [],
+      drafts: { enabled: false },
+    });
   });
 });
 
 describe("reflex setting specs", () => {
-  it("exposes exactly the two keys, appended at the END of the table", () => {
+  it("exposes exactly the three keys, appended at the END of the table", () => {
     const keys = settingKeys();
-    expect(keys.filter((k) => k.startsWith("reflex."))).toEqual(["reflex.enabled", "reflex.autoResolve"]);
-    expect(keys.slice(-2)).toEqual(["reflex.enabled", "reflex.autoResolve"]);
+    expect(keys.filter((k) => k.startsWith("reflex."))).toEqual([
+      "reflex.enabled",
+      "reflex.autoResolve",
+      "reflex.drafts.enabled",
+    ]);
+    expect(keys.slice(-3)).toEqual(["reflex.enabled", "reflex.autoResolve", "reflex.drafts.enabled"]);
     expect(isKnownSettingKey("reflex.enabled")).toBe(true);
+    expect(isKnownSettingKey("reflex.drafts.enabled")).toBe(true);
   });
 
   it("enabled is a non-live boolean; autoResolve is a live csv string over the string[] field", () => {
@@ -86,6 +119,15 @@ describe("reflex setting specs", () => {
       stored: "quota.summary,jobs.list",
       live: ["quota.summary", "jobs.list"],
     });
+  });
+
+  it("#25 drafts.enabled is a non-live boolean defaulting to false", () => {
+    const drafts = SETTING_SPECS["reflex.drafts.enabled"]!;
+    expect(drafts.kind).toBe("boolean");
+    expect(drafts.live).toBeUndefined();
+    expect(parseSettingValue(drafts, "true")).toEqual({ ok: true, stored: true, live: true });
+    expect(currentOf(loadSettings({}), drafts)).toBe(false);
+    expect(currentOf(loadSettings({ reflex: { drafts: { enabled: true } } }), drafts)).toBe(true);
   });
 
   it("currentOf reads the live value in the stored (csv) domain", () => {

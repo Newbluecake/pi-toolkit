@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractReflexRows } from "../../../src/reflex/core/shadow-scan.js";
+import { extractReflexRows, scanReflexLine } from "../../../src/reflex/core/shadow-scan.js";
 import {
   accumulate,
   countCrossSessionRepeats,
@@ -238,5 +238,92 @@ describe("R3b promotion acceptance (JSONL across sessions)", () => {
     expect(s.candidates).toBe(61);
     expect(s.crossSessionRepeats).toBe(0);
     expect(evaluatePromotion(s)).toEqual({ eligible: false, reasons: ["存在重复提问（1）"] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #25 B0 (BD2): draft-era optional fields are accepted leniently; scanReflexLine surfaces the
+// entry id for fork dedup. extractReflexRows itself keeps its exact R3b behaviour.
+// ---------------------------------------------------------------------------
+
+function correctionData(at: number): Record<string, unknown> {
+  return {
+    v: 1,
+    at,
+    targetKind: "shadow",
+    targetScriptId: "jobs.list",
+    targetScriptVer: 1,
+    targetDigest: "digest-0",
+    deltaMs: 1,
+    correctionDigest: `correction-${at}`,
+  };
+}
+describe("#25 scanReflexLine + draft-era lenient fields", () => {
+  const recordLineWith = (over: Record<string, unknown>): string =>
+    JSON.stringify({ type: "custom", customType: "subagent:reflex-record", data: { ...record(1, 1_000), ...over } });
+
+  it("accepts draft-era record fields: origin/draftHash/templateHash/port.portId", () => {
+    const line = recordLineWith({
+      origin: "draft",
+      draftHash: "abc",
+      templateHash: "def",
+      port: { outcome: "ok", ms: 1, portVer: 1, portId: "jobs.list" },
+    });
+    const row = extractReflexRows(line);
+    expect(row).toMatchObject({ kind: "record" });
+    if (row?.kind === "record") {
+      expect(row.rec.origin).toBe("draft");
+      expect(row.rec.templateHash).toBe("def");
+      expect(row.rec.port?.portId).toBe("jobs.list");
+    }
+  });
+
+  it("skips wrong-typed draft-era fields", () => {
+    expect(extractReflexRows(recordLineWith({ origin: "builtin" }))).toBeUndefined();
+    expect(extractReflexRows(recordLineWith({ templateHash: 5 }))).toBeUndefined();
+    expect(
+      extractReflexRows(recordLineWith({ port: { outcome: "ok", ms: 1, portVer: 1, portId: "nope" } })),
+    ).toBeUndefined();
+  });
+
+  it("accepts draft-targeted corrections with targetOrigin/targetTemplateHash; skips wrong shapes", () => {
+    const ok = JSON.stringify({
+      type: "custom",
+      customType: "subagent:reflex-correction",
+      data: { ...correctionData(1_500), targetOrigin: "draft", targetTemplateHash: "beef" },
+    });
+    const row = extractReflexRows(ok);
+    expect(row).toMatchObject({ kind: "correction" });
+    if (row?.kind === "correction") expect(row.c.targetTemplateHash).toBe("beef");
+    expect(
+      extractReflexRows(
+        JSON.stringify({
+          type: "custom",
+          customType: "subagent:reflex-correction",
+          data: { ...correctionData(1_500), targetOrigin: "builtin" },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("scanReflexLine surfaces entryId and delegates rows; non-reflex and malformed lines", () => {
+    const line = JSON.stringify({
+      type: "custom",
+      customType: "subagent:reflex-record",
+      data: record(1, 1_000),
+      id: "0f07645b",
+      timestamp: "2026-11-05T00:00:00.000Z",
+    });
+    const scanned = scanReflexLine(line);
+    expect(scanned.entryId).toBe("0f07645b");
+    expect(scanned.row).toEqual(extractReflexRows(line));
+    // non-reflex custom entries: entryId still surfaces, row undefined
+    const other = JSON.stringify({ type: "custom", customType: "subagent:child", data: { v: 1 }, id: "aaaa" });
+    expect(scanReflexLine(other)).toEqual({ entryId: "aaaa" });
+    // no id, not reflex
+    expect(scanReflexLine(JSON.stringify({ type: "message", message: { role: "user", content: "x" } }))).toEqual({});
+    // malformed JSON / non-object
+    expect(scanReflexLine("not json")).toEqual({});
+    expect(scanReflexLine("42")).toEqual({});
   });
 });

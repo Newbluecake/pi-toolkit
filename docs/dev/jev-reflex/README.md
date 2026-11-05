@@ -1,17 +1,20 @@
 # jev-reflex · 开发者要点
 
 > 何时读：改动 `src/reflex/**`、`reflex.*` 设置键、`/reflex`、`subagent:reflex*` customType、主会话 input handler 的注册顺序之前。
-> 设计：`arch.md`（类型/语义以它为准）、`plan.md`（PD1–PD12 覆盖 arch）、`feasibility.md`。交付报告：`R0-report.md`…`R3b-report.md`。
+> 设计：`arch.md`（类型/语义以它为准）、`plan.md`（PD1–PD12 覆盖 arch）、`feasibility.md`；#25 回测/草案：`backtest-arch.md`（BA）+ `backtest-plan.md`（B0–B3′ 分包）。交付报告：`R0-report.md`…`R3b-report.md`、`B0-report.md`…。
 > 新的实现细节写在这里，不要写回 AGENTS.md。
 
 ## 是什么
 
 R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subagent 状态 / 额度 / git 状态）用确定性 port 直接作答，
 不起模型 run。**只读 MVP**：`reflex.enabled` 默认 `false`；先 shadow（只记账不作答），晋升只能由用户改 `reflex.autoResolve`。
+#25 起增加离线回测与运行时草案加载：`reflex.drafts.enabled`（默认关、非 live）从 `<agentDir>/reflex/drafts/` 加载
+离线生成的草案脚本（恒 shadow，永不 autoResolve）；回测/生成/晋升全链见下文「离线回测与草案（#25）」。
 本文件随包增长。
 
 ## 当前状态（R3b：AUTO 分支与跨会话报告已就绪，默认仍 shadow）
 
+- #25 B0：跨包契约冻结——`core/types.ts` 追加回测/草案类型；`core/{branch-like,port-defaults,draft-regex,draft-schema,identity}.ts`、`drafts/load.ts` 骨架（恒空）；`shadow-scan.ts` 宽进草案字段 + `scanReflexLine`；`wire.ts` 仅改 `toBranchLike` 的 import；A 级新金身 `reflex-drafts-off-parity.json`（改 wire 前捕获）。B1–B5/B3 按 `backtest-plan.md` 落实现。
 - R0：契约冻结（`core/{types,settings}.ts`、`setting-specs.ts`、`ports/index.ts` 接口）+ 注册清单固定 6 项（顺序由 `activate-trace.json` `max` 档钉住）：`input` → `agent_settled` → `session_start` → `session_shutdown` → `registerMessageRenderer("subagent:reflex")`（API 存在时）→ `registerCommand("reflex")`。
 - R1：`core/**` 纯函数核心（gate/match/state/render/agreement/promotion…）。R2a/R2a′：四个只读 port + 单一预算竞速（`executePort` → `core/budget.ts` `raceBudget`）。R2b：shadow 接线 + `/reflex status|explain|reset`。R3a：AUTO 全链路（命中即作答、`subagent:reflex` 命中消息、TUI 紧凑卡片、repeat/correction 即时降级）+ `render-tui.ts`。R3b：跨会话离线报告（`scripts/dev/reflex-shadow.mjs` + `core/shadow-scan.ts`），脚本不自动晋升。
 - `src/index.ts` 装配位置：web-hub 块之后、topic-switch 之前；`reflexFence.topicSwitch` 在 topic-switch 之后晚绑定（同 `xsFencePorts`）。`ReflexWireDeps` 追加了三个**可选**字段（`clock`/`monoNow`/`scripts`，默认 `systemClock`/`performance.now`/内置目录；生产装配不传）。
@@ -42,7 +45,35 @@ R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subag
 - **`/reflex status`**：每个脚本一行 `<id> <state> strikes=n [demote=<reason>]`，`demote=` 即降级原因（`strikes|repeat|corrected`）；另打印本激活计数（含 `fallback.<kind>`）与本会话 record/answer/correction 汇总。`/reflex reset [id]` 清 strikes 与降级覆盖层（纯内存），reset 后该脚本下一条 input 即恢复 `auto`；`/reload` 同样清空覆盖层。
 - **手动冒烟（本机）**：`reflex.enabled=true`（pi-toolkit.json）→ `/reload` → 问「后台还有几个 job」→ 模型照常作答 → `/reflex status` 应显示 `candidates=1`、会话记录 `jobs.list@1 cand=1`；`/reflex explain 工作区干净吗` 应给出 `band=high script=git.status`。若 `agree` 长期全是 `unknown`，说明会话里用户消息文本与 input 文本不一致（被前序 handler 改写），需查 digest 口径。
 
-## 不变式（R-I1…R-I12）
+## 威胁模型（#25，R-I14 的依据）
+
+同 UID 的 agent（pi 的 bash 工具、子 agent）可以执行任意 shell，能读写 `<agentDir>` 下所有文件、改 `pi-toolkit.json`、伪造任何评审 / 暴露 / 批次 / manifest / 修订记录。因此：
+
+1. `0700`/`0600` 与 uid 检查只防**其他 UID** 与误共享，不防同 UID；
+2. `reviews/*.json`、`exposure.jsonl`、`manifests/`、`batches/`、`revisions.jsonl` 都是**未认证记录**：脚本照常读取用于统计（豁免、misfire 计数），但输出处标注「unverified」，任何本地机制（TTY、文件权限、hash）都**不能**证明「人看过」；
+3. **唯一的人工认证点**是用户批准把草案改写进 `catalog.ts` 的 PR（或用户在对话中明确确认），PR 描述须引用 `--promote` 输出的身份元组（`{lineage, templateHash, portId@portVer, batchId, manifestHash}`）；
+4. 运行时安全性不依赖任何离线记录：草案恒 shadow，port 只读，`reflex.drafts.enabled` 不改变任何作答行为。
+
+## 离线回测与草案（#25）
+
+设计 `backtest-arch.md`（BA），分包 `backtest-plan.md`（B0 契约 → B1 回测核心 ∥ B2 草案生成 ∥ B4 运行时加载 ∥ B5 晋升 V2 → B3 编排/账本/`scripts/dev/reflex-backtest.mjs`）。要点：
+
+- **语料与家族**：第一遍全量 session header 建 `byPath`/`byId` 双索引（`parentSession` 是**文件路径**，按规范化路径解析，失败再从文件名抽 id 兜底；环 / 重复 id / 缺失 ⇒ unresolved ⇒ `split:"unscored"` 只进回归报告）；家族根 `sha256` 前 4 字节 mod 100 < 60 ⇒ train，否则 holdout。
+- **受理确证度（confirmed/lenient）**：每个 Turn 计算 `unknownFacts`（idle/pendingMessages/topicSwitchActive/goalBusy/inFlight/sourceMode）；`sourceMode` 只认**本轮区间内原生**（去重后归属本文件）的 `pi-hud-llm-time`（≥ `HUD_TUI_GATE_SINCE`）或同 digest 的 reflex 记录——fork 复制品、会话级证据一律不算。`unknownFacts` 空 ⇔ confirmed；**晋升率只用 confirmed**，lenient 只进覆盖率统计（K11）。
+- **DRX（K4）**：草案 intent 正则受 `core/draft-regex.ts` 有限语法约束（纯字面量 + 单个 `\d{1,4}` + 固定尾缀 + ≤12 alternation；解析器拒绝一切其余形状——`(a|a)+`、相邻 `+`、字符类、反向引用、lookaround 等在语法层即拒）。安全性 = 每起点 ≤12·4·3 条路径的语法论证，不依赖运行时计时器。
+- **身份（K8）**：证据身份 = `lineage + templateHash`（只覆盖 port.id 与 strong/weak/exclude）；`draft.x` 改写进 catalog 时保留 `lineage:"draft.x"`，改 id 不抹掉此前的重复/纠正；改模板不升版也会分开证据。旧版本 builtin 落 `id@ver#legacy` 身份，永不与新身份合并。
+- **草案文件**：`<agentDir>/reflex/drafts/*.json`，单个 `RScriptV1`（`origin:"extracted"`、id `^draft\.[a-z0-9-]+$`、requires/agreement/render 逐字段等于 `PORT_DEFAULTS[port]`、无 budgetMs、条目数 caps、正则过 DRX、例句自检 hit 全 high）；加载见 R-I13。builtin 记录**一个新字段都不写**（`portId` 由 `scriptId` 经 `portOfScript` 反查，BD11）。
+- **晋升 V2（BA §4.7）**：门槛 = 回测侧（`batchValid.ok ∧ confirmed.judged ≥50 ∧ 分歧 ≤5% ∧ 评审覆盖 suspect ∧ misfire=0`）或实时侧（`live.judged ≥50 ∧ 分歧 ≤5%`）；port 可靠性按 `(portId, portVer)`，`runs ≥10 ∧ ok===runs ∧ missing===0`，`missing>0` ⇒ undetermined；零容忍（重复/纠正/跨会话重复 = 0）按身份汇总；`scanComplete:false` ⇒ 否。结论只是建议，最终认证 = catalog PR（见威胁模型）。
+- **批次 / manifest / 暴露账本（K9）**：`batch freeze` 写不可变 `manifests/<hash>.json` 与 `batches/<batchId>.json`（`wx`，永不覆盖，只含 holdout 轮次的 `sha256(entryId\0at)` 键与 digest）；**展示任何留出失败明细**（suspect 行 / review / show）时自动追加 `exposure.jsonl`（只展示聚合计数不算暴露）；`batchValidity`：本批次在**其它 hash** 下被暴露过 ⇒ `exposed-then-modified` 作废，manifest 缺失 ⇒ `manifest-missing`；被拒批次转回归集。新批次须过 `admitBatch`（每个轮次晚于 `lastRevisedAt(lineage)`、digest 不在任何已暴露批次）。模板修订时间来自追加型 `revisions.jsonl`（first-seen + catalog git 提交时间取 max）。
+- **上线流程（摘要）**：B3 合入后本机 `npm run build && node scripts/dev/reflex-backtest.mjs` → `generate`（无工具 port 候选用 `--assign` 人工指定，`TOOLLESS_PORTS` 不自动标注）→ 人工挑选 `drafts-out/` → `reflex.drafts.enabled=true` + `/reload` 攒 shadow 证据 → `batch freeze` → `review`（未认证记录，展示即暴露）→（若据失败修改模板 ⇒ 该批次对新 hash 作废，等新批次或实时证据）→ 人把草案改写进 `catalog.ts`（builtin id、`lineage`、升 version）→ `--promote <id> --batch <batchId>` 出身份元组 → PR → 用户批准即认证 → 用户把 id 加进 `reflex.autoResolve`。
+
+## 性能手动测法（Tier 3，不进 CI）
+
+- **草案失败匹配（B4）**：`tests/reflex/drafts/perf.test.ts`——S0 通过且 builtin miss 的输入 × 16 份满额草案（strong 12 / weak 8 / exclude 32）的失败匹配，1 万次记录 p99 与 max（断言 p99 ≤1 ms ×5 宽容），另含对抗输入集；**不能替代 DRX 语法证明**。
+- **DRX 隔离验证（B0）**：`tests/reflex/core/draft-regex-redos.test.ts`——拒绝集只解析不执行；危险演示（`"a+"×20+"b"` × 120 个 `a`）在独立子进程硬截止下断言「被截止或 >1 s」；接受集 1,000 个 DRX 源 × 120cp 对抗输入在独立子进程断言干净退出且 <2 s。
+- **回测脚本冷/热（B3）**：删 `<agentDir>/reflex/cache/` 后 `/usr/bin/time -v node scripts/dev/reflex-backtest.mjs --days 30` 记「应用缓存冷」（手动目标 ≤90 s，不保证）；随后连跑 3 次取中位数记「热」（≤3 s）；记录 manifestHash、扫描字节数、各过滤阶段计数、峰值 RSS、`uptime`。不达标只记录交主会话，不算门禁失败。
+
+## 不变式（R-I1…R-I14）
 
 - **R-I1** 关闭 / secure / locked / 子会话 ⇒ 零注册（`wireReflex` 不被调用，或守卫直接返回 undefined）。由 `reflex-off-golden.json` + trace 钉住。
 - **R-I2** 只受理 `source==="interactive" ∧ mode==="tui" ∧ 空闲 ∧ 无图`。
@@ -55,7 +86,9 @@ R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subag
 - **R-I9** 输出只有 `subagent:reflex`（custom message）、`subagent:reflex-record` 与 `subagent:reflex-correction`（custom entry）三种；details 只追加字段；不写 system prompt。customType 一律 `subagent:reflex*`（I7，不用 `pi-toolkit:*`）。
 - **R-I10** `src/reflex/core/**` pi-free（`tests/boundary/pi-free.test.ts` 值闭包门禁，PD3；`ports/*.ts` 同款，PD4）。
 - **R-I11** 注册位置：web-hub 块之后、topic-switch 之前；topic-switch hold 或 goal 活跃时退让（S0 veto `fence-topic` / `fence-goal`）。
-- **R-I12** 只有内置脚本；`origin:"extracted"` 不可加载；rscript/1 没有 argv 种类。
+- **R-I12**（#25 BA §6 改写）：auto 只可能来自内置 catalog（`origin:"builtin"`）；`validateCatalog` 拒绝 `extracted` 与 `draft.*` id。草案只能在 `reflex.drafts.enabled` 下经 `validateDraft` 加载，恒为 shadow；AUTO 准入只认 `scriptById` 中的 builtin id，草案不调用状态机。rscript/1 没有 argv 种类，草案正则受 DRX 语法约束（`core/draft-regex.ts`，拒绝 = 解析器拒绝而非黑名单）。
+- **R-I13**（#25 新增）：草案加载有界、no-follow、fail-closed（受信目录 0700/属主校验 → `opendir` 流式 ≤64 → 名字白名单 → no-follow fd 同 fd stat → 读 cap+1 → dev/ino 复核 → `clampSpanMs(500)` 预算），不影响内置脚本；secure/locked/子会话不可达（D8 + HOST_KEY + `secureDomainKind` 三重门）。
+- **R-I14**（#25 新增）：离线评审 / 暴露 / 批次 / manifest / 修订记录都是**未认证记录**（同 UID agent 可读写任意文件）；人工认证只发生在用户批准把草案改写进 `catalog.ts` 的 PR（或用户在对话中明确确认）。运行时安全不依赖任何离线记录：草案恒 shadow，port 只读。
 
 ## 降级 / 计数语义（plan PD5、PD6、PD12）
 
@@ -67,15 +100,16 @@ R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subag
 
 ## 门禁
 
-| 门禁                                              | 说明                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `tests/fixtures/reflex-off-golden.json`（A 级）   | R0 在 dev 上**未改代码前**捕获（`PI_TOOLKIT_REFLEX_GOLDEN_CAPTURE=1`，文件存在则拒绝覆盖）；`default` / `explicit-off` / `secure` / `child` 四场景：工具表、命令表、逐事件 handler 计数、renderer 列表、system prompt、input 链结果、`subagent:reflex*` 写入数（必须 0）。永不重生                                                                                                                                                                     |
-| `activate-trace.json`（B 级）                     | 只改 `max` 档（`trace-profiles.ts` 的 `max` 加 `reflex:{enabled:true}`），共 6 行；其余档逐字节不变。刷新：`PI_TOOLKIT_UPDATE_TRACE=1 npx vitest run tests/governance/activate-trace.test.ts`                                                                                                                                                                                                                                                          |
-| `stack-teardown-matrix`                           | FULL 档 `session_shutdown` 15→16、`session_start` 17→18（reflex shutdown abort / re-arm）；BASELINE 档不变                                                                                                                                                                                                                                                                                                                                             |
-| `setting-specs-pin.json` / `settings-corpus.json` | 仅因新增 `reflex.enabled` / `reflex.autoResolve`（追加在末尾）/ `.reflex` 模板子树而重 pin；先 `captured[i].input` 取自 `origin/dev` 再生成并程序化比对                                                                                                                                                                                                                                                                                                |
-| pi-free 闭包                                      | `src/reflex/core/**`、`src/reflex/ports/*.ts`                                                                                                                                                                                                                                                                                                                                                                                                          |
-| D8                                                | `applySecureDomainOverrides` 强制 `reflex.enabled=false`（`tests/secure/settings-override.test.ts`）+ `wireReflex` 内 `secureDomainKind !== "plain"` 守卫（`tests/reflex/wire-skeleton.test.ts`）                                                                                                                                                                                                                                                      |
-| conformance                                       | `tests/conformance/reflex.test.ts` C-R1…C-R8（pi peer bump 必跑）：C-R1 handled 无 run；C-R2 async await / 短路 / continue 原文；C-R3 idle `sendMessage` 为 user 角色上下文；C-R4 `appendEntry` 不进上下文；C-R5 无 source 的 `prompt()` 报 interactive；C-R6 引用 `topic-switch-hop.test.ts` S5（`it.todo` + 存在性断言）；C-R7 TUI 主循环串行（`mode.run()` 在 init 之上启主循环，真实 `InteractiveMode`）；C-R8 `ctx.mode` TUI 为 `"tui"`、SDK 不是 |
+| 门禁                                                        | 说明                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/fixtures/reflex-off-golden.json`（A 级）             | R0 在 dev 上**未改代码前**捕获（`PI_TOOLKIT_REFLEX_GOLDEN_CAPTURE=1`，文件存在则拒绝覆盖）；`default` / `explicit-off` / `secure` / `child` 四场景：工具表、命令表、逐事件 handler 计数、renderer 列表、system prompt、input 链结果、`subagent:reflex*` 写入数（必须 0）。永不重生                                                                                                                                                                                                                                                                   |
+| `tests/fixtures/reflex-drafts-off-parity.json`（A 级，#25） | B0 在**改 `wire.ts` 之前**于 dev 上捕获（`PI_TOOLKIT_REFLEX_PARITY_CAPTURE=1`，存在即拒绝覆盖）；真 `activate()` + `reflex.enabled=true ∧ drafts 关`，冻结时钟（Date+performance）下的固定输入序列（shadow / AUTO / miss / ambiguous / 单槽替换 / correction / repeat / `/reflex status`），只记录 reflex 自身可观察面（`subagent:reflex*` entry/message、`setStatus("reflex")`、reflex notify、status 全文；序列只用同步内存 port，git 子进程的时延进不了金身）。B4 起 drafts 关闭时必须逐字节相等；基线是 B0 的固定提交（FX 门禁第二段）。永不重生 |
+| `activate-trace.json`（B 级）                               | 只改 `max` 档（`trace-profiles.ts` 的 `max` 加 `reflex:{enabled:true}`），共 6 行；其余档逐字节不变。刷新：`PI_TOOLKIT_UPDATE_TRACE=1 npx vitest run tests/governance/activate-trace.test.ts`                                                                                                                                                                                                                                                                                                                                                        |
+| `stack-teardown-matrix`                                     | FULL 档 `session_shutdown` 15→16、`session_start` 17→18（reflex shutdown abort / re-arm）；BASELINE 档不变                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `setting-specs-pin.json` / `settings-corpus.json`           | 仅因新增 `reflex.enabled` / `reflex.autoResolve`（追加在末尾）/ `.reflex` 模板子树 / `reflex.drafts.enabled` / `.reflex.drafts`（#25）而重 pin；先 `captured[i].input` 取自 `origin/dev` 再生成并程序化比对                                                                                                                                                                                                                                                                                                                                          |
+| pi-free 闭包                                                | `src/reflex/core/**`、`src/reflex/ports/*.ts`、`src/reflex/drafts/*.ts`（#25 新增）                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| D8                                                          | `applySecureDomainOverrides` 强制 `reflex.enabled=false` 与 `reflex.drafts.enabled=false`（`tests/secure/settings-override.test.ts`）+ `wireReflex` 内 `secureDomainKind !== "plain"` 守卫（`tests/reflex/wire-skeleton.test.ts`）                                                                                                                                                                                                                                                                                                                   |
+| conformance                                                 | `tests/conformance/reflex.test.ts` C-R1…C-R8（pi peer bump 必跑）：C-R1 handled 无 run；C-R2 async await / 短路 / continue 原文；C-R3 idle `sendMessage` 为 user 角色上下文；C-R4 `appendEntry` 不进上下文；C-R5 无 source 的 `prompt()` 报 interactive；C-R6 引用 `topic-switch-hop.test.ts` S5（`it.todo` + 存在性断言）；C-R7 TUI 主循环串行（`mode.run()` 在 init 之上启主循环，真实 `InteractiveMode`）；C-R8 `ctx.mode` TUI 为 `"tui"`、SDK 不是                                                                                               |
 
 ## 晋升流程（plan §7）
 

@@ -21,6 +21,9 @@ export const RScriptV1Schema = Type.Object({
   version: Type.Integer({ minimum: 1 }),
   origin: Type.Union([Type.Literal("builtin"), Type.Literal("extracted")]),
   risk: Type.Literal("readonly"),
+  // #25 BA §4.5: evidence lineage — promoted drafts keep `lineage:"draft.x"` so their repeat /
+  //  correction evidence survives the rename into the catalog.
+  lineage: Type.Optional(Type.String({ pattern: "^[a-z0-9.-]+$" })),
   intent: Type.Object({
     strong: Type.Array(Type.String(), { minItems: 1 }),
     weak: Type.Array(Type.String()),
@@ -91,6 +94,10 @@ export function validateCatalog(scripts: readonly unknown[]): readonly RScriptV1
     const script = validateScript(raw);
     const label = script.id || "<no id>";
     if (script.origin !== "builtin") throw new Error(`catalog refuses origin "${script.origin}" (${label}) — R-I12`);
+    // #25 B0 (R-I12/BA §4.5): `draft.*` ids belong to runtime-loaded draft files only — a builtin
+    // catalog id must never claim the namespace (AUTO admission only ever sees builtin ids).
+    if (script.id.startsWith("draft."))
+      throw new Error(`catalog refuses draft-namespace id "${script.id}" — R-I12 (#25)`);
     if (!PORT_IDS.includes(script.port.id)) throw new Error(`unknown port id "${script.port.id}" (${label})`);
     for (const cap of script.requires) {
       if (!CAPABILITIES.includes(cap)) throw new Error(`unknown capability "${cap}" (${label})`);

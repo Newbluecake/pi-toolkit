@@ -299,7 +299,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   systemPrompt: DEFAULT_SYSTEM_PROMPT_SETTINGS,
   title: DEFAULT_TITLE_SETTINGS,
   topicSwitch: { ...DEFAULT_TOPIC_SWITCH_SETTINGS },
-  reflex: { ...DEFAULT_REFLEX_SETTINGS, autoResolve: [] },
+  reflex: { ...DEFAULT_REFLEX_SETTINGS, autoResolve: [], drafts: { enabled: false } },
   externalAgents: { droid: { ...DEFAULT_EXTERNAL_AGENTS_SETTINGS.droid } },
   feishuBot: { ...DEFAULT_FEISHU_BOT_SETTINGS, files: { ...DEFAULT_FEISHU_BOT_SETTINGS.files } },
   traffic: { ...DEFAULT_TRAFFIC_SETTINGS, web: { ...DEFAULT_TRAFFIC_SETTINGS.web } },
@@ -449,8 +449,9 @@ function applySecureDomainOverrides(settings: AgentSettings): AgentSettings {
     traffic: { ...settings.traffic, enabled: false },
     // jev-plan v2 §4 J3 / jev-arch §7.3（I11）：加密/锁定域强制关闭 Jev，无论用户文件怎么写。
     memory: { ...settings.memory, jev: { ...settings.memory.jev, enabled: false } },
-    // jev-reflex arch §4.1（I11/D8）：加密/锁定域强制关闭 R 层（wireReflex 另有 secureDomainKind 守卫）。
-    reflex: { ...settings.reflex, enabled: false },
+    // jev-reflex arch §4.1（I11/D8）：加密/锁定域强制关闭 R 层（wireReflex 另有 secureDomainKind 守卫）；
+    // #25 BA §4.6：drafts 同属 D8 强制关闭面（离线脚本永不进入加密域）。
+    reflex: { ...settings.reflex, enabled: false, drafts: { enabled: false } },
   };
   if (domain.kind === "secure") {
     const paths = statePathsOf(domain.vault);

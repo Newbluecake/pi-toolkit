@@ -189,6 +189,15 @@ describe("pi-free boundaries", () => {
     expect(offenders, offenders.join("; ")).toEqual([]);
   });
 
+  // #25 B0 (BA §4.6, X2): the runtime draft loader lives outside core/ but is pure Node — its
+  // value closure must stay pi-free just like core/** and ports/*.
+  it("reflex drafts/** value closure stays pi-free", () => {
+    const roots = globSync("src/reflex/drafts/*.ts", { cwd: ROOT }).map((file) => resolve(ROOT, file));
+    expect(roots.length, "reflex drafts roots must be discovered").toBeGreaterThanOrEqual(1);
+    const offenders = memoryOffenders(roots);
+    expect(offenders, offenders.join("; ")).toEqual([]);
+  });
+
   // J1 (jev-plan §4 J1 / arch §3.2): everything under src/memory/jev/ except
   // wire.ts + segment.ts (the only pi-facing modules), plus the shared
   // secret-patterns root. Later jev packages' new files are constrained

@@ -103,3 +103,23 @@ describe("regexSourceProblems (unit)", () => {
     expect(regexSourceProblems("[a+]+z")).toEqual([]); // class-internal quantifier is flat
   });
 });
+
+// ---------------------------------------------------------------------------
+// #25 B0 (BA §4.5): optional `lineage` on rscript/1 + the catalog's draft-namespace refusal.
+// ---------------------------------------------------------------------------
+describe("#25 lineage + draft namespace (validateCatalog)", () => {
+  const withLineage = (lineage: string | undefined): unknown =>
+    lineage === undefined
+      ? JSON.parse(JSON.stringify(BUILTIN_SCRIPTS))
+      : BUILTIN_SCRIPTS.map((s) => ({ ...s, ...(s.id === "jobs.list" ? { lineage } : {}) }));
+
+  it("accepts a builtin script with a valid lineage; rejects invalid lineage shapes", () => {
+    expect(() => validateCatalog(withLineage("draft.jobs"))).not.toThrow();
+    expect(() => validateCatalog(withLineage("Draft!"))).toThrow(/validation failed/);
+  });
+
+  it("refuses a draft-namespace id in the builtin catalog (R-I12, #25)", () => {
+    const withDraft = BUILTIN_SCRIPTS.map((s) => ({ ...s, ...(s.id === "jobs.list" ? { id: "draft.jobs" } : {}) }));
+    expect(() => validateCatalog(withDraft)).toThrow(/draft-namespace/);
+  });
+});

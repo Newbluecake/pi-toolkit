@@ -20,6 +20,9 @@ tests/fixtures/memory/current-5-migrated/
 # golden fixtures are byte-exact pins — prettier must never reformat them
 tests/fixtures/quota/
 tests/fixtures/version/
+# #25 B0: the drafts-off parity golden is compared byte-for-byte against
+# `JSON.stringify(capture, null, 2) + "\n"` produced by the test itself.
+tests/fixtures/reflex-drafts-off-parity.json
 
 # F5: immutable pre-extraction HTTP/audit byte snapshots
 tests/fixtures/feishu-spawn-http-golden.json

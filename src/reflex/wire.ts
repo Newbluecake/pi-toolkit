@@ -17,7 +17,8 @@
 import type { ExtensionAPI, ExtensionContext, InputEvent, InputEventResult } from "@earendil-works/pi-coding-agent";
 import { systemClock, type Clock } from "../core/clock.js";
 import { createReflexCommand } from "./command.js";
-import { collectToolShapes, judgeAgreement, type BranchEntryLike } from "./core/agreement.js";
+import { collectToolShapes, judgeAgreement } from "./core/agreement.js";
+import { toBranchLike } from "./core/branch-like.js";
 import { PENDING_MAX_AGE_MS, REFLEX_BUDGET_MS, REPEAT_WINDOW_MS } from "./core/budget.js";
 import { BUILTIN_SCRIPTS } from "./core/catalog.js";
 import { requestDigest } from "./core/digest.js";
@@ -91,44 +92,8 @@ interface Pending {
 
 const REASK_MAP_CAP = 64;
 
-/** pi branch entries → the structural look-alike `core/agreement.ts` reads (no pi import in core). */
-function toBranchLike(entries: readonly unknown[]): BranchEntryLike[] {
-  const out: BranchEntryLike[] = [];
-  for (const raw of entries) {
-    const e = raw as { type?: unknown; message?: { role?: unknown; content?: unknown } } | null;
-    if (e === null || typeof e !== "object" || e.type !== "message" || e.message === undefined) {
-      out.push({ role: "other" });
-      continue;
-    }
-    const role = typeof e.message.role === "string" ? e.message.role : "other";
-    const content = e.message.content;
-    if (role === "user") {
-      const text =
-        typeof content === "string"
-          ? content
-          : Array.isArray(content)
-            ? content
-                .map((p: unknown) => {
-                  const part = p as { type?: unknown; text?: unknown };
-                  return part?.type === "text" && typeof part.text === "string" ? part.text : "";
-                })
-                .join("")
-            : "";
-      out.push({ role, text });
-    } else if (role === "assistant" && Array.isArray(content)) {
-      const toolCalls = content
-        .filter((p: unknown) => (p as { type?: unknown })?.type === "toolCall")
-        .map((p: unknown) => {
-          const c = p as { name?: unknown; arguments?: unknown };
-          return { name: typeof c.name === "string" ? c.name : "", arguments: c.arguments };
-        });
-      out.push({ role, toolCalls });
-    } else {
-      out.push({ role });
-    }
-  }
-  return out;
-}
+// #25 B0 (BA §4.1): `toBranchLike` moved VERBATIM to `core/branch-like.ts` (shared with the
+// offline backtest); this import swap is the ONLY wire.ts change B0 makes.
 
 /** Double lock: `secureDomainKind !== "plain"` ⇒ return undefined, zero registrations. */
 export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring | undefined {

@@ -107,6 +107,7 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/memory/safe-fs.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/memory/tidy.test.ts": { kind: "timing", why: "wait:setTimeout(…, 1100)" },
   "tests/quota/credentials.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/reflex/core/draft-regex-redos.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/reflex/ports/git-real.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/release/hub-restart-step.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/release/release-script.test.ts": { kind: "proc", why: "proc:node:child_process" },

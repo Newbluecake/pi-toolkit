@@ -18,4 +18,8 @@ export const REFLEX_SETTING_SPECS: Record<string, SettingSpec> = {
     ),
     live: true,
   },
+  "reflex.drafts.enabled": bool(
+    "reflex.drafts.enabled",
+    "Load offline-generated draft scripts (shadow-only, never autoResolve; default off)",
+  ),
 };

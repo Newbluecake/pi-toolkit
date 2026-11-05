@@ -1,4 +1,6 @@
-/** Offline transcript extraction (plan R3b). Pure, pi-free, no retained state or text output. */
+/** Offline transcript extraction (plan R3b). Pure, pi-free, no retained state or text output.
+ *  #25 B0 (BD2): draft-era optional fields are accepted leniently (append-only compatibility);
+ *  `scanReflexLine` additionally surfaces the entry id for fork deduplication. */
 import type { PromotionRow } from "./promotion.js";
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -56,7 +58,16 @@ export function extractReflexRows(line: string): PromotionRow | undefined {
         !oneOf(rec.port.outcome, ["ok", "uncertain", "unavailable", "error", "timeout"]) ||
         !number(rec.port.ms) ||
         !version(rec.port.portVer) ||
-        (rec.port.reason !== undefined && typeof rec.port.reason !== "string"))
+        (rec.port.reason !== undefined && typeof rec.port.reason !== "string") ||
+        // #25: draft rows name the port directly (BD11 — builtin rows never write it)
+        (rec.port.portId !== undefined && !oneOf(rec.port.portId, PORT_ID_SET)))
+    )
+      return undefined;
+    // #25 draft-era optional fields (BD11): only these shapes are accepted; absent on builtin rows.
+    if (
+      (rec.origin !== undefined && rec.origin !== "draft") ||
+      (rec.draftHash !== undefined && typeof rec.draftHash !== "string") ||
+      (rec.templateHash !== undefined && typeof rec.templateHash !== "string")
     )
       return undefined;
     if (
@@ -79,7 +90,10 @@ export function extractReflexRows(line: string): PromotionRow | undefined {
       !version(c.targetScriptVer) ||
       !text(c.targetDigest) ||
       !number(c.deltaMs) ||
-      !text(c.correctionDigest)
+      !text(c.correctionDigest) ||
+      // #25 draft-targeted corrections (BA §4.5 写入面)
+      (c.targetOrigin !== undefined && c.targetOrigin !== "draft") ||
+      (c.targetTemplateHash !== undefined && typeof c.targetTemplateHash !== "string")
     )
       return undefined;
     return { kind: "correction", c: c as unknown as Extract<PromotionRow, { kind: "correction" }>["c"] };
@@ -109,4 +123,28 @@ export function extractReflexRows(line: string): PromotionRow | undefined {
     return { kind: "answer", details: details as unknown as Extract<PromotionRow, { kind: "answer" }>["details"] };
   }
   return undefined;
+}
+
+const PORT_ID_SET: readonly string[] = ["jobs.list", "fleet.status", "quota.summary", "git.status", "sessions.recent"];
+
+export interface ScannedLine {
+  /** The session entry's envelope `id` (fork copies carry the SAME id — B5 dedupes on it). */
+  readonly entryId?: string;
+  readonly row?: PromotionRow;
+}
+
+/** #25 B0 (BD2): parse one jsonl line into `{entryId?, row}` — `extractReflexRows` unchanged and
+ *  delegated to; reflex-shadow.mjs / the backtest scan use this for fork deduplication. */
+export function scanReflexLine(line: string): ScannedLine {
+  let entry: unknown;
+  try {
+    entry = JSON.parse(line);
+  } catch {
+    return {};
+  }
+  if (!object(entry)) return {};
+  const id = (entry as Record<string, unknown>).id;
+  const entryId = typeof id === "string" && id.length > 0 ? id : undefined;
+  const row = extractReflexRows(line);
+  return { ...(entryId !== undefined ? { entryId } : {}), ...(row !== undefined ? { row } : {}) };
 }
