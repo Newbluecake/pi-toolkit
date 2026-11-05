@@ -409,6 +409,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
         createMessageSessionTool({
           sender,
           reply: replyEnabled,
+          ...(activateOn ? { idleWakeAdvice: true } : {}),
           ...(activationOn
             ? { activation: true, invocation: (id: string) => humanHost?.invocation(id, "message_session") }
             : {}),

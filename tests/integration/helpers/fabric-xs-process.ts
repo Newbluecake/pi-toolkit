@@ -459,6 +459,8 @@ if (process.argv[2] === "hub") {
   handle = async (m) => {
     if (m.op === "tool")
       return (await tools.get(m.name).execute("xw-call", m.params ?? {}, undefined, undefined, ctx)).details;
+    if (m.op === "toolContent")
+      return await tools.get(m.name).execute("xw-call", m.params ?? {}, undefined, undefined, ctx);
     if (m.op === "cmd") {
       await commands.get(m.name ?? "fabric").handler(m.args ?? "status", ctx);
       return notifications.at(-1);

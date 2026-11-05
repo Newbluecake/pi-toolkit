@@ -22,6 +22,7 @@ import { createXsSender } from "../../src/fabric/xs/sender.js";
 import { createCausalLevel } from "../../src/fabric/wake-level.js";
 import { createXsActivationPort } from "../../src/fabric/xs/session-activation.js";
 import { XS_ACTIVATE_MARKER_CONTENT } from "../../src/fabric/root-wake.js";
+import { createMessageSessionTool, XS_IDLE_NO_WAKE_HINT } from "../../src/tools/message-session-tool.js";
 import { createWakeSessionTool } from "../../src/tools/wake-session-tool.js";
 import { createXsAgentBridge } from "../../src/web-hub/agent/xs.js";
 import type { HubConnection } from "../../src/web-hub/agent/connection.js";
@@ -102,6 +103,9 @@ function makeStack(sid: string) {
     messages,
     level,
     branch,
+    setIdle: (value: boolean) => {
+      idle = value;
+    },
     settle: () => {
       idle = true;
       xs.settled();
@@ -172,6 +176,16 @@ function build() {
     port: sourceBridge.hubPort(),
     origin: { current: () => ({ sessionId: A, epoch: source.xs.membership.epoch }) },
     activation: true,
+    reply: {
+      ledger: source.xs.reply!.ledger,
+      defaultTimeoutS: 1800,
+      maxTimeoutS: 86400,
+      lateGraceS: 600,
+      maxPending: 8,
+      maxPendingPerTarget: 3,
+      receivable: (sid) => source.xs.reply!.receivable(sid),
+      inbound: () => undefined,
+    },
     wakeOn: true,
     level: { levelOfRoot: () => source.level.root, hopAllowed: (level) => source.level.hopAllowed(level) },
   });
@@ -191,7 +205,8 @@ function build() {
     await vi.advanceTimersByTimeAsync(0);
     return out;
   };
-  return { source, target, r, requests, send, call, sourceBridge, a };
+  const messageTool = createMessageSessionTool({ sender, reply: true, activation: true, idleWakeAdvice: true });
+  return { source, target, r, requests, send, call, sourceBridge, a, messageTool };
 }
 
 const markers = (h: ReturnType<typeof build>) =>
@@ -296,6 +311,36 @@ describe("P3 wake_session activation — real hub + bridges + stacks", () => {
     const retry = await h.call({ to: B, messageId: sent.track!.messageId, activationKey: sent.track!.activationKey });
     expect(retry).toMatchObject({ status: "accepted" });
     expect(markers(h)).toHaveLength(1);
+  });
+});
+
+describe("#20 message_session — real hub + two state-capable stacks", () => {
+  it.each(["idle-false", "idle-true", "busy-false"] as const)("%s", async (mode) => {
+    const h = build();
+    if (mode === "busy-false") h.target.setIdle(false);
+    const result = await h.messageTool.execute("tc", {
+      to: B,
+      text: "request-body",
+      wake: mode === "idle-true",
+      expectReply: {},
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const details = result.details as import("../../src/fabric/xs/sender.js").XsSendOutcome;
+    expect(details.reply?.state).toBe("pending");
+    expect(details.track?.activationKey).toBeDefined();
+    expect(details.effect).toBe(mode === "busy-false" ? "unknown" : "applied");
+    if (mode === "busy-false") expect(details.reason).toBe("queued");
+    expect((result.content[0] as { text: string }).text.includes(XS_IDLE_NO_WAKE_HINT)).toBe(mode === "idle-false");
+    // warning is text-only: JSON prefix/details remain the sender's pre-#20 key set.
+    expect(
+      Object.keys(details).every((key) =>
+        ["status", "effect", "to", "reason", "woke", "track", "progress", "wake", "reply", "wakeDowngraded"].includes(
+          key,
+        ),
+      ),
+    ).toBe(true);
+    expect((result.content[0] as { text: string }).text.startsWith(JSON.stringify(details) + "\n")).toBe(true);
+    expect(bodies(h)).toHaveLength(1);
   });
 });
 

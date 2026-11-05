@@ -100,6 +100,8 @@ export const XS_REPLY_TO_REJECTED_HINT = "对方未接收（已收到过回复�
 export interface MessageSessionToolDeps {
   sender: XsSender;
   activation?: boolean;
+  /** Main-session activation ∧ wake gate, frozen at activate; children never receive it. */
+  idleWakeAdvice?: boolean;
   invocation?(toolCallId: string): InvocationRef | undefined;
   /** `fabric.crossSession.reply.enabled` frozen at activate: selects the schema instance and the
    *  description. Omitted/false ⇒ the legacy tool, byte-identical to pre-reply. */
@@ -188,9 +190,31 @@ export function createMessageSessionTool(
       if (deps.alias === true && outcome.status === "alias_unavailable") hint += `\n${XS_ALIAS_UNAVAILABLE_HINT}`;
       if (deps.activation === true && outcome.wakeDowngraded)
         hint += `\n${xsWakeDowngradedHint(outcome.wakeDowngraded, outcome.effect)}`;
+      if (deps.idleWakeAdvice === true && xsIdleNoWakeRisk(outcome)) hint += `\n${XS_IDLE_NO_WAKE_HINT}`;
       return { content: [{ type: "text", text: JSON.stringify(outcome) + hint }], details: outcome };
     },
   };
+}
+
+/** #20 D1–D4: applied is evidence of idle at the receiver's pre-write sample, not current idleness. */
+export const XS_IDLE_NO_WAKE_HINT =
+  '注意：本次 expectReply 未请求唤醒，且投递时（接收端采样）对方会话空闲——这次写入不会触发对方处理，大概率等到超时也收不到回复。正文已送达，不要重发；需要对方处理请调用 wake_session（action "activate"，to 用本结果 to.ref，messageId/activationKey 取本结果 track）激活这条请求。只有正文未送达（effect none）时才改用 wake:true 重发。';
+
+/** C1–C11. C11 also excludes contradictory applied+queued evidence (defense D-q). */
+export function xsIdleNoWakeRisk(outcome: XsSendOutcome): boolean {
+  return (
+    outcome.status === "sent" &&
+    outcome.effect === "applied" &&
+    outcome.reply?.state === "pending" &&
+    outcome.replyTo === undefined &&
+    outcome.wake !== undefined &&
+    outcome.wake.requested === false &&
+    outcome.wakeDowngraded === undefined &&
+    outcome.woke !== true &&
+    outcome.track !== undefined &&
+    outcome.track.activationKey !== undefined &&
+    (outcome.progress?.phase === undefined || outcome.progress.phase === "delivered")
+  );
 }
 
 export function xsWakeDowngradedHint(reason: string, effect: string): string {

@@ -7,6 +7,7 @@ import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { createHumanGrantHost, createHumanGrantPort, type InvocationRef } from "../../src/fabric/xs/human-grant.js";
 import { createXsSender, type XsPortSendArgs } from "../../src/fabric/xs/sender.js";
+import { xsIdleNoWakeRisk, XS_IDLE_NO_WAKE_HINT } from "../../src/tools/message-session-tool.js";
 import { XsReplyLedger } from "../../src/fabric/xs/reply-ledger.js";
 import { createHumanRuntime } from "../../src/runtime/human-runtime.js";
 import { PiSessionDriver, PiSessionHandle, CHILD_SWITCH_CONTEXT_SOURCE } from "../../src/runtime/session-driver.js";
@@ -215,6 +216,24 @@ describe("P2c real PiSessionDriver / SDK child invocation consumption", () => {
     expect(JSON.stringify(child.modelRuntime.requestMessages)).not.toContain("contextSeq");
     // SDK agent_end is the actual authority boundary, not session_shutdown.
     expect(await h.runtime.prepare("real-child")).toBeUndefined();
+  });
+
+  it("#20 authorized child explicit false satisfies risk predicate but never receives host-only advice", async () => {
+    const h = harness();
+    h.authorize("quiet-child");
+    let outcome: unknown;
+    const child = await h.child("quiet-child", sendTurns("quiet-send", { ...SEND, wake: false }), {}, (pi) => {
+      pi.on("tool_result", (event) => {
+        if (event.toolName === "message_session") outcome = event.details;
+      });
+    });
+    await child.handle.prompt("work");
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]!.wake).not.toBe(true); // sender omits false on the wire
+    expect(xsIdleNoWakeRisk(outcome as import("../../src/fabric/xs/sender.js").XsSendOutcome)).toBe(true);
+    const result = child.handle.session.messages.find((m) => m.role === "toolResult");
+    expect(JSON.stringify(result)).toContain("original-key");
+    expect(JSON.stringify(result)).not.toContain(XS_IDLE_NO_WAKE_HINT);
   });
 
   it("authorized resume consumes the NEW real runId rather than historical child metadata", async () => {
