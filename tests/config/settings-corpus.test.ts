@@ -42,6 +42,12 @@ interface Corpus {
   template: unknown;
   /** every `*Ms` path that the file stores as `*S` seconds (TIME_SETTING_MS_PATHS on the baseline). */
   timePaths: string[];
+  /** Internal `*Ms` paths whose settings field was later REMOVED (#26 dropped
+   *  `memory.jev.confirmTimeoutMs`). The frozen `template` above still carries
+   *  them, so generated inputs keep feeding the retired key to `loadSettings`
+   *  (proving stale keys are tolerated); only the defaults comparison strips
+   *  them. */
+  retiredPaths?: string[];
   defaultsSha: string;
   captured: { input: unknown; sha: string }[];
   randomShas: string[];
@@ -244,6 +250,25 @@ function dump(name: string, text: string): void {
   if (dumpDir) writeFileSync(join(dumpDir, `${name}.txt`), `${text}\n`);
 }
 
+/** Remove every retired path's leaf from a DEEP CLONE of the template —
+ *  accepts either spelling (`confirmTimeoutMs` or its stored-seconds twin
+ *  `confirmTimeoutS`) because the template only ever carries the `*Ms` form. */
+function stripRetired(template: unknown, retiredPaths: readonly string[]): unknown {
+  const out = JSON.parse(JSON.stringify(template, tagReplacer), untag) as unknown;
+  let node: unknown = out;
+  const paths = retiredPaths.map((p) => p.split("."));
+  for (const segs of paths) {
+    let cur = node as Record<string, unknown> | undefined;
+    for (const seg of segs.slice(0, -1)) cur = cur?.[seg] as Record<string, unknown> | undefined;
+    const leaf = segs[segs.length - 1]!;
+    if (cur !== undefined) {
+      delete cur[leaf];
+      delete cur[`${leaf.slice(0, -2)}S`];
+    }
+  }
+  return node;
+}
+
 const generateFrom = process.env.GOV_CORPUS_GENERATE;
 if (generateFrom) {
   describe("settings corpus generation (baseline only)", () => {
@@ -283,8 +308,11 @@ if (generateFrom) {
       const text = stringify(DEFAULT_SETTINGS);
       dump("defaults", text);
       expect(sha(text)).toBe(corpus.defaultsSha);
-      // the frozen template is the same document, so the generator below is independent of live code
-      expect(stringify(corpus.template)).toBe(text);
+      // the frozen template is the same document MINUS retired paths (#26:
+      //  confirmTimeoutMs left the live settings), so the generator below
+      //  stays independent of live code AND generated inputs still cover
+      //  the retired key as a tolerated stale input.
+      expect(stringify(stripRetired(corpus.template, corpus.retiredPaths ?? []))).toBe(text);
     });
 
     it("captured tests/config inputs", () => {

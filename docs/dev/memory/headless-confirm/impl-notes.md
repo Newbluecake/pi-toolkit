@@ -1,5 +1,7 @@
 # 实现备注（headless-confirm plan v2）
 
+> **已作废（2026-11 #26）**：memory 用户令守卫的人工确认（本方案的 web 弹卡，及其替代的 TUI 确认框）已整体移除——agent 改动/删除用户令现在直接写入，主会话 TUI 发一条 warning 通知。见 `../no-user-guard-confirm/plan.md`。本文仅作历史记录保留。
+
 方案：`plan.md`（v2，不动）。本文件记录实现与方案的出入与遗留，按方案评审编号对应。
 
 ## 与方案的出入

@@ -14,10 +14,11 @@ import {
  * `~/.pi/agent/memory/<slug>/` — auto-injection, the `memory` tool, `/mem`.
  * Field-by-field tolerant parsing in `parseMemorySettings` (never throws,
  * parseBashJobsSettings 同款风格）。Duration fields (file stores integer
- * seconds, converted at the `*S ⇄ *Ms` boundary): `jev.confirmTimeoutMs`
- * (seconds key `memory.jev.confirmTimeoutS`) and `jev.recall.waitMs`
- * (seconds key `memory.jev.recall.waitS`, Q37), both registered in
- * TIME_SETTING_MS_PATHS.
+ * seconds, converted at the `*S ⇄ *Ms` boundary): `jev.recall.waitMs`
+ * (seconds key `memory.jev.recall.waitS`, Q37), registered in
+ * TIME_SETTING_MS_PATHS. (The removed `jev.confirmTimeoutMs` /
+ * `memory.jev.confirmTimeoutS` went with the #26 guard removal; a stale
+ * file key is silently ignored — field-by-field tolerant parsing.)
  */
 export interface MemorySettings {
   /** 总开关。false = 不注册注入 hook、memory 工具、/mem 命令。Default true（融合后原插件被卸载，默认关=升级即功能消失，merge-plan D2 哲学）。 */
@@ -68,7 +69,7 @@ export interface MemorySettings {
   jev: MemoryJevSettings;
 }
 
-/** 15 个 `memory.jev.*` 设置键（jev-arch §9.1 原 14 + 2026-11-03 噪音修复的 fastPath×3，减去 2026-11 移除的 gate×2），加上 memory-predict P1b 的 14 个 `jev.predict.*`（plan.md §10），共 29 个；`classifiersRejected` 不是设置键，只是解析结果。 */
+/** 14 个 `memory.jev.*` 设置键（jev-arch §9.1 原 14 + 2026-11-03 噪音修复的 fastPath×3，减去 2026-11 移除的 gate×2 与 #26 移除的 confirmTimeoutS），加上 memory-predict P1b 的 14 个 `jev.predict.*`（plan.md §10），共 28 个；`classifiersRejected` 不是设置键，只是解析结果。 */
 export interface MemoryJevSettings {
   /** 总开关。false ⇒ 不接线 Jev（零注册）。Default true（Q27：有可用凭证即启用）；legacy/secure 域强制视为 false。 */
   enabled: boolean;
@@ -100,8 +101,6 @@ export interface MemoryJevSettings {
   maxCostUsd: number;
   /** 单次 activation 的 Jev 调用总次数上限。Default 800；0–5000。 */
   maxCalls: number;
-  /** 写路径确认超时（ms）；文件键按秒存 `confirmTimeoutS`（TIME_SETTING_MS_PATHS）。Default 60_000；10_000–600_000。 */
-  confirmTimeoutMs: number;
   /** A 层快速通道加白标签（默认只有 risk:"high" 标签能触发 A 注入；2026-11-03 噪音修复）。CSV 或数组，非法 id 静默丢弃。Default []。 */
   fastPathAllowTags: string[];
   /** A 层快速通道黑名单标签（优先于高危/加白判定）。Default []。 */
@@ -379,7 +378,6 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     },
     maxCostUsd: numFloat(jevObj.maxCostUsd, defaults.jev.maxCostUsd, 0.01, 5),
     maxCalls: num(jevObj.maxCalls, defaults.jev.maxCalls, 0, 5000),
-    confirmTimeoutMs: num(jevObj.confirmTimeoutMs, defaults.jev.confirmTimeoutMs, 10_000, 600_000),
     fastPathAllowTags: parseJevTagIdList(jevObj.fastPathAllowTags),
     fastPathDenyTags: parseJevTagIdList(jevObj.fastPathDenyTags),
     fastPathCooldownH: num(jevObj.fastPathCooldownH, defaults.jev.fastPathCooldownH, 0, 720),
@@ -447,7 +445,6 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     review: { intervalDays: 7 },
     maxCostUsd: 0.5,
     maxCalls: 800,
-    confirmTimeoutMs: 60_000,
     fastPathAllowTags: [],
     fastPathDenyTags: [],
     fastPathCooldownH: 24,

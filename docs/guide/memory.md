@@ -75,14 +75,14 @@ cwd 为键的被动项目记忆：记忆文件放在 `~/.pi/agent/memory/<cwd-sl
 | `tags=+a,-b`                    | 手工增删标签，优先级高于 Jev 的判定，Jev 不可用时同样生效                                 |
 | `private`                       | 永远不发给 Jev（不打标、不召回、不整理）                                                  |
 
-手写文件里没写 `source: agent` 的条目默认算 `user`；agent 建的文件里默认算 `agent`（**`memory` 工具 `append` 新建的文件归属 agent**）。用户令只能由用户作废——agent 改写带 `user` 标记的条目会弹确认框，拒绝后文件不变；这条守卫覆盖 `str_replace`/`insert`/`write`/`append`/`create` 覆写与 `delete`，`rename` 不改内容、不触发确认。除了直接改写用户令，下面两类写入也同样弹确认（`src/memory/tool-v2.ts:663-674`）：
+手写文件里没写 `source: agent` 的条目默认算 `user`；agent 建的文件里默认算 `agent`（**`memory` 工具 `append` 新建的文件归属 agent**）。agent 改写/删除带 `user` 标记的条目**不再弹确认框，直接写入**（2026-11 #26，此前的确认框、Web 弹卡与超时拒绝均已移除）；覆盖 `str_replace`/`insert`/`write`/`append`/`create` 覆写与 `delete`，`rename` 不改内容、不触发。写入成功后：主会话 TUI 弹一条 warning 通知（只含条目序号与行号，不含标题/正文），工具结果里带 `voided user rule:` 回显；**Web/headless/print 会话没有通知**，只有工具结果回显。除了直接改写用户令，下面两类写入也同样直写并通知：
 
 - 把一个手写文件的 `source` 改成 `source: agent`（provenance 翻转，默认权威从 `user` 变成 `agent`，等于绕过了上面的守卫）；
 - 把一个未归档文件写成 `status: archived`（归档会让该文件的条目退出索引与注入，等于悄悄作废了里面的用户令）。
 
 **已知残留**（R1/R2）：
 
-- **R1**：`rename` 本身不弹确认（不改文件内容）；但如果被改名的是**没有 `pin: true`** 的核心文件 `core.md`（例如 memory 工具 `create` 出来、含 `<!-- mem user -->` 条目的那种），改名会让它退出常驻静态块——静态核心块先找名为 `core.md` 的文件，找不到再取带 `pin: true` 的文件（`src/memory/tiered.ts:706-709`）。`/mem init` 生成的 `core.md` 自带 `pin: true`，改名后仍常驻。退出静态块的条目仍在索引里、仍可被召回、仍受门禁，只是不再每轮必定出现；恢复方式是改回 `core.md`，或给该文件加 `pin: true`。
+- **R1**：`rename` 本身不弹确认（不改文件内容）；但如果被改名的是**没有 `pin: true`** 的核心文件 `core.md`（例如 memory 工具 `create` 出来、含 `<!-- mem user -->` 条目的那种），改名会让它退出常驻静态块——静态核心块先找名为 `core.md` 的文件，找不到再取带 `pin: true` 的文件（`src/memory/tiered.ts:706-709`）。`/mem init` 生成的 `core.md` 自带 `pin: true`，改名后仍常驻。退出静态块的条目仍在索引里、仍可被召回，只是不再每轮必定出现；恢复方式是改回 `core.md`，或给该文件加 `pin: true`。
 - **R2**：`delete` 只是软删，移进 `.trash`，`/mem restore --trash` 可以找回，但只保留最近 20 份删除快照（`src/memory/tool-v2.ts:477,1048-1052`）；超出的旧快照会被自动清理、无法再还原。
 
 **命令**：
@@ -122,6 +122,5 @@ cwd 为键的被动项目记忆：记忆文件放在 `~/.pi/agent/memory/<cwd-sl
 | `memory.jev.review.intervalDays` | `7`                                        | 整理周期天数（0 = 只能手动）                  |
 | `memory.jev.maxCostUsd`          | `0.5`                                      | 单 activation 的 Jev 总美元预算（0.01–5）     |
 | `memory.jev.maxCalls`            | `800`                                      | 单 activation 的 Jev 总调用次数上限（0–5000） |
-| `memory.jev.confirmTimeoutS`     | `60`                                       | 用户令守卫确认超时秒数（10–600）              |
 
 设计：[memory-plan](../dev/memory/memory-plan.md)、[optimize-plan](../dev/memory/optimize-plan.md)、[tidy-batch-plan](../dev/memory/tidy-batch-plan.md)、[jev-arch](../dev/memory/jev-arch.md)、[jev-plan](../dev/memory/jev-plan.md)。

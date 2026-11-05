@@ -365,7 +365,6 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "goal.deliveryWatchdogMs",
   "memory.tidy.timeoutMs",
   "memory.tidy.batch.totalTimeoutMs",
-  "memory.jev.confirmTimeoutMs",
   "memory.jev.recall.waitMs",
   // memory-predict plan §10: file keys `memory.jev.predict.model.waitS` /
   // `requestBudgetS` (integer seconds), internal millisecond fields below.

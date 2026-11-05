@@ -447,7 +447,6 @@ export interface JevConfig {
   readonly reviewIntervalDays: number;
   readonly maxCostUsd: number;
   readonly maxCalls: number;
-  readonly confirmTimeoutMs: number;
   readonly fastPath: JevFastPathConfig;
   /** memory-predict plan §10 — P1b wires rules/state/carry/select off this;
    *  `predict.model` is parsed but not consumed until P2 (§11.2). */
@@ -548,7 +547,6 @@ export interface JevWritePort {
   checkInline(file: string, before: string | undefined, after: string): string | undefined;
   /** 用户令守卫：返回被删改的 user 条目（guardHash 配对，arch §6.2.5 / v4.1 §3.2）。 */
   touchedUserEntries(file: string, before: string, after: string, handWritten: boolean): readonly MemEntry[];
-  readonly confirmTimeoutMs: number;
 }
 
 /** `JevCommandPort` — frozen verbatim from jev-plan §2. */

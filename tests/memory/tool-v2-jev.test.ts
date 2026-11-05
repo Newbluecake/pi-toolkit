@@ -1,11 +1,12 @@
 // J5 (jev-plan §4): the v2 `memory` tool with a JevWritePort wired — write
 // echo composition (jev lines BEFORE the budget line), the v4.1 §3.2 user-order
-// guard's six paths, inline-comment rejection, append's deterministic
+// guard's #26 direct-write form (voided echo + one TUI notify, zero confirms),
+// inline-comment rejection, append's deterministic
 // `updated`/`source: agent` changes, the C-J12 usage landing, and — via the
 // description selection — the §9.3 variant. Without a port the behavior is
 // pinned byte-for-byte by tests/memory/jev/off-golden.test.ts + tool-v2.test.ts.
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -52,14 +53,24 @@ function writeFile(dir: string, name: string, body: string): void {
 
 type ConfirmFn = (title: string, message: string, opts?: { timeout?: number }) => Promise<boolean>;
 
-function fakeCtx(cwd: string, opts: { hasUI?: boolean; confirm?: ConfirmFn; registry?: unknown } = {}) {
+interface NotifyCall {
+  message: string;
+  level?: string;
+}
+
+function fakeCtx(
+  cwd: string,
+  opts: { hasUI?: boolean; confirm?: ConfirmFn; registry?: unknown; notifyRec?: NotifyCall[] } = {},
+) {
   const hasUI = opts.hasUI !== false;
   const ctx = {
     mode: hasUI ? "tui" : "rpc",
     hasUI,
     cwd,
     ui: {
-      notify: () => {},
+      notify: (message: string, level?: string) => {
+        opts.notifyRec?.push({ message, ...(level === undefined ? {} : { level }) });
+      },
       confirm:
         opts.confirm ??
         (async () => {
@@ -289,48 +300,53 @@ describe("jev calls happen outside the directory lock", () => {
   });
 });
 
-// ───────────────────────────── user-order guard (v4.1 §3.2 six paths) ─────────────────────────────
-
-const REFUSE = "用户未确认：用户令条目只有用户能作废。请在回复里向用户提议具体改法";
+// ───────────────────────────── user-order guard (#26: direct write + notify) ─────────────────────────────
 
 describe("user-order guard", () => {
-  test("pure top insertion pairs by hash — no confirm (case 1)", async () => {
+  test("pure top insertion pairs by hash — no guard hit (case 1)", async () => {
     const fx = fixture();
     writeFile(fx.memDir, "core.md", "## Rules\n\n- 发版前确认 GitHub CI 绿\n- 第二条用户令\n");
     const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, { jev: realPort(fx) });
-    const ctx = fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY });
+    const ctx = fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify });
     await exec(
       tool,
       { command: "str_replace", path: "core.md", old_str: "## Rules", new_str: "## Rules\n\n- 顶部新经验一条" },
       ctx,
     );
     expect(confirm).not.toHaveBeenCalled();
+    expect(notify).toHaveLength(0);
     expect(readFileSync(join(fx.memDir, "core.md"), "utf8")).toContain("顶部新经验一条");
   });
 
-  test("editing a user entry confirms, and a confirmed write voids the rule (case 2)", async () => {
+  test("editing a user entry writes through: voided echo (original bytes) + exactly one verbatim notify + zero confirms (case 2)", async () => {
     const fx = fixture();
     writeFile(fx.memDir, "core.md", "## Rules\n\n- 发版前确认 GitHub CI 绿\n");
     const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, { jev: realPort(fx) });
     const out = textOf(
       await exec(
         tool,
         { command: "str_replace", path: "core.md", old_str: "确认 GitHub CI 绿", new_str: "确认 CI 全绿" },
-        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }),
+        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
       ),
     );
-    expect(confirm).toHaveBeenCalledTimes(1);
-    expect(confirm.mock.calls[0]![0]).toBe("agent 请求修改用户令");
-    expect(confirm.mock.calls[0]![1]).toContain("core.md");
-    expect(out).toContain("voided user rule: core.md › Rules #1");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(out).toContain("voided user rule: core.md › Rules #1 (L3-3)");
     expect(readFileSync(join(fx.memDir, "core.md"), "utf8")).toContain("CI 全绿");
     // partial client ⇒ not-tagged echo still present
     expect(out).toContain("jev: not tagged (partial: 451)");
+    // exactly one warning notify, verbatim (#26 §3), bodyless ids only
+    expect(notify).toHaveLength(1);
+    expect(notify[0]).toEqual({
+      message: "agent 改动了 core.md 中的 1 条用户令（已直接写入，未经确认）：\n- 条目 #1 (L3-3)",
+      level: "warning",
+    });
   });
 
-  test("deleting one of two identical user entries confirms (case 3)", async () => {
+  test("deleting one of two identical user entries writes through with one notify (case 3)", async () => {
     const fx = fixture();
     writeFile(
       fx.memDir,
@@ -338,6 +354,7 @@ describe("user-order guard", () => {
       `${AGENT_FM}## S\n\n- 相同的用户令 <!-- mem user -->\n- 相同的用户令 <!-- mem user -->\n`,
     );
     const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, { jev: realPort(fx) });
     await exec(
       tool,
@@ -346,213 +363,163 @@ describe("user-order guard", () => {
         path: "dup.md",
         file_text: "## S\n\n- 相同的用户令 <!-- mem user -->\n",
       },
-      fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }),
+      fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
     );
-    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(notify).toHaveLength(1);
+    expect(notify[0]!.message).toContain("dup.md 中的 1 条用户令");
   });
 
-  test("child session refuses outright", async () => {
+  test("child session (write-enabled) writes through: echo yes, notify no", async () => {
     const fx = fixture();
     writeFile(fx.memDir, "core.md", "## Rules\n\n- 用户令一条\n");
     const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, {
       isChildSession: true,
       settings: { allowWriteInChildSessions: true },
       jev: realPort(fx),
     });
-    await expect(
-      exec(
+    const out = textOf(
+      await exec(
         tool,
         { command: "str_replace", path: "core.md", old_str: "用户令", new_str: "改掉" },
-        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }),
+        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
       ),
-    ).rejects.toThrow(REFUSE);
+    );
     expect(confirm).not.toHaveBeenCalled();
-    expect(readFileSync(join(fx.memDir, "core.md"), "utf8")).toContain("用户令");
+    expect(notify).toHaveLength(0);
+    expect(out).toContain("voided user rule: core.md › Rules #1");
+    expect(readFileSync(join(fx.memDir, "core.md"), "utf8")).toContain("改掉");
   });
 
-  test("UI-less context refuses outright", async () => {
+  test("UI-less context writes through: echo yes, notify no", async () => {
     const fx = fixture();
     writeFile(fx.memDir, "core.md", "## Rules\n\n- 用户令一条\n");
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, { jev: realPort(fx) });
-    await expect(
-      exec(
+    const out = textOf(
+      await exec(
         tool,
         { command: "str_replace", path: "core.md", old_str: "用户令", new_str: "改掉" },
-        fakeCtx(fx.cwd, { hasUI: false, registry: FAKE_REGISTRY }),
+        fakeCtx(fx.cwd, { hasUI: false, registry: FAKE_REGISTRY, notifyRec: notify }),
       ),
-    ).rejects.toThrow(REFUSE);
+    );
+    expect(notify).toHaveLength(0);
+    expect(out).toContain("voided user rule: core.md › Rules #1");
+    expect(readFileSync(join(fx.memDir, "core.md"), "utf8")).toContain("改掉");
   });
 
-  test("declined confirm refuses", async () => {
+  test("provenance flip via insert at line 0 writes through (whole user set voided, one notify)", async () => {
     const fx = fixture();
-    writeFile(fx.memDir, "core.md", "## Rules\n\n- 用户令一条\n");
+    writeFile(fx.memDir, "core.md", "## Rules\n\n- 用户令一条\n- 第二条用户令\n");
+    const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, { jev: realPort(fx) });
-    await expect(
-      exec(
-        tool,
-        { command: "str_replace", path: "core.md", old_str: "用户令", new_str: "改掉" },
-        fakeCtx(fx.cwd, { confirm: async () => false, registry: FAKE_REGISTRY }),
-      ),
-    ).rejects.toThrow(REFUSE);
-    expect(readFileSync(join(fx.memDir, "core.md"), "utf8")).toContain("用户令");
-  });
-
-  test("confirm timeout refuses (confirmTimeoutMs honored)", async () => {
-    const fx = fixture();
-    writeFile(fx.memDir, "core.md", "## Rules\n\n- 用户令一条\n");
-    const seenTimeout: number[] = [];
-    const confirm: ConfirmFn = (_t, _m, opts) =>
-      new Promise<boolean>((resolve) => {
-        seenTimeout.push(opts?.timeout ?? -1);
-        const timer = setTimeout(() => resolve(false), opts?.timeout ?? 60_000);
-        timer.unref?.();
-      });
-    const port = createJevWritePort({
-      client: {
-        status: () => ({ kind: "partial", reason: "451", inactive: false }),
-        async ask() {
-          return { ok: false, reason: "unavailable", detail: "" };
-        },
-        async probe() {
-          return PARTIAL;
-        },
-      },
-      entryIndex: new EntryIndex(),
-      dirFor: (cwd) => memoryDirFor(cwd, fx.paths),
-      taxonomyFor: () => mergeTaxonomy().taxonomy,
-      confirmTimeoutMs: 20,
-      now: () => Date.parse("2026-10-31T00:00:00Z"),
-    });
-    const { tool } = makeTool(fx, { jev: port });
-    await expect(
-      exec(
-        tool,
-        { command: "str_replace", path: "core.md", old_str: "用户令", new_str: "改掉" },
-        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }),
-      ),
-    ).rejects.toThrow(REFUSE);
-    expect(seenTimeout).toEqual([20]);
-  });
-
-  test("concurrent modification between confirm and lock ⇒ changed-concurrently error", async () => {
-    const fx = fixture();
-    writeFile(fx.memDir, "core.md", "## Rules\n\n- 用户令一条\n");
-    const confirm: ConfirmFn = async () => {
-      // the file changes WHILE the user stares at the dialog
-      writeFileSync(join(fx.memDir, "core.md"), "## Rules\n\n- 用户令一条（别处已改）\n");
-      return true;
-    };
-    const { tool } = makeTool(fx, { jev: realPort(fx) });
-    await expect(
-      exec(
-        tool,
-        { command: "str_replace", path: "core.md", old_str: "用户令一条", new_str: "改掉" },
-        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }),
-      ),
-    ).rejects.toThrow(/changed concurrently/);
-  });
-
-  test("insert at line 0 adding a source:agent frontmatter block confirms; declined keeps the file byte-identical", async () => {
-    const fx = fixture();
-    const original = "## Rules\n\n- 用户令一条\n- 第二条用户令\n";
-    writeFile(fx.memDir, "core.md", original);
-    const confirm = vi.fn(async () => false);
-    const { tool } = makeTool(fx, { jev: realPort(fx) });
-    await expect(
-      exec(
+    const out = textOf(
+      await exec(
         tool,
         { command: "insert", path: "core.md", insert_line: 0, insert_text: "---\nsource: agent\n---\n" },
-        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }),
+        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
       ),
-    ).rejects.toThrow(REFUSE);
-    expect(confirm).toHaveBeenCalledTimes(1); // provenance flip ⇒ whole user set touched
-    expect(readFileSync(join(fx.memDir, "core.md"), "utf8")).toBe(original);
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(out).toContain("voided user rule: core.md › Rules #1");
+    expect(out).toContain("voided user rule: core.md › Rules #2");
+    expect(readFileSync(join(fx.memDir, "core.md"), "utf8")).toContain("source: agent");
+    expect(notify).toHaveLength(1);
+    expect(notify[0]!.message).toContain("core.md 中的 2 条用户令");
   });
 
-  test("str_replace prepending the same block at offset 0 confirms too", async () => {
-    const fx = fixture();
-    const original = "## Rules\n\n- 用户令一条\n";
-    writeFile(fx.memDir, "core.md", original);
-    const confirm = vi.fn(async () => false);
-    const { tool } = makeTool(fx, { jev: realPort(fx) });
-    await expect(
-      exec(
-        tool,
-        {
-          command: "str_replace",
-          path: "core.md",
-          old_str: "## Rules",
-          new_str: "---\nsource: agent\n---\n\n## Rules",
-        },
-        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }),
-      ),
-    ).rejects.toThrow(REFUSE);
-    expect(confirm).toHaveBeenCalledTimes(1);
-    expect(readFileSync(join(fx.memDir, "core.md"), "utf8")).toBe(original);
-  });
-
-  test("two-step pin: confirmed provenance flip voids the user set; a follow-up delete needs no second dialog", async () => {
+  test("str_replace prepending the same block at offset 0 writes through too", async () => {
     const fx = fixture();
     writeFile(fx.memDir, "core.md", "## Rules\n\n- 用户令一条\n");
     const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, { jev: realPort(fx) });
-    // step 1: the flip goes through BECAUSE the user confirmed it once
+    await exec(
+      tool,
+      {
+        command: "str_replace",
+        path: "core.md",
+        old_str: "## Rules",
+        new_str: "---\nsource: agent\n---\n\n## Rules",
+      },
+      fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(readFileSync(join(fx.memDir, "core.md"), "utf8")).toContain("source: agent");
+    expect(notify).toHaveLength(1);
+  });
+
+  test("two-step: flip writes through with one notify; the follow-up delete needs no second notify", async () => {
+    const fx = fixture();
+    writeFile(fx.memDir, "core.md", "## Rules\n\n- 用户令一条\n");
+    const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
+    const { tool } = makeTool(fx, { jev: realPort(fx) });
+    // step 1: the flip writes through and voids the user set
     const flipOut = textOf(
       await exec(
         tool,
         { command: "insert", path: "core.md", insert_line: 0, insert_text: "---\nsource: agent\n---\n" },
-        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }),
+        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
       ),
     );
     expect(flipOut).toContain("voided user rule: core.md › Rules #1");
     expect(readFileSync(join(fx.memDir, "core.md"), "utf8")).toContain("source: agent");
-    // step 2: delete after the confirmed flip — the entries are agent-default
-    // now, so no second dialog (the user already approved the demotion)
-    const callsBefore = confirm.mock.calls.length;
+    expect(notify).toHaveLength(1);
+    // step 2: delete after the flip — the entries are agent-default now, so
+    // no guard hit at all (the user was already notified of the demotion)
     const delOut = textOf(
-      await exec(tool, { command: "delete", path: "core.md" }, fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY })),
+      await exec(
+        tool,
+        { command: "delete", path: "core.md" },
+        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
+      ),
     );
-    expect(confirm.mock.calls.length).toBe(callsBefore);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(notify).toHaveLength(1); // unchanged — no second notify
     expect(delOut).toContain("deleted core.md (recoverable");
     expect(existsSync(join(fx.memDir, "core.md"))).toBe(false);
   });
 
-  test("archiving a file with user entries confirms; declined keeps the bytes identical", async () => {
+  test("archiving a file with user entries writes through with one notify", async () => {
     const fx = fixture();
-    const original = `${AGENT_FM}## S\n\n- 用户令一条 <!-- mem user -->\n`;
-    writeFile(fx.memDir, "n.md", original);
-    const confirm = vi.fn(async () => false);
+    writeFile(fx.memDir, "n.md", `${AGENT_FM}## S\n\n- 用户令一条 <!-- mem user -->\n`);
+    const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, { jev: realPort(fx) });
-    await expect(
-      exec(
-        tool,
-        { command: "str_replace", path: "n.md", old_str: "source: agent", new_str: "source: agent\nstatus: archived" },
-        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }),
-      ),
-    ).rejects.toThrow(REFUSE);
-    expect(confirm).toHaveBeenCalledTimes(1);
-    expect(readFileSync(join(fx.memDir, "n.md"), "utf8")).toBe(original);
+    await exec(
+      tool,
+      { command: "str_replace", path: "n.md", old_str: "source: agent", new_str: "source: agent\nstatus: archived" },
+      fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(readFileSync(join(fx.memDir, "n.md"), "utf8")).toContain("status: archived");
+    expect(notify).toHaveLength(1);
   });
 
-  test("archiving a file without user entries never confirms", async () => {
+  test("archiving a file without user entries never notifies", async () => {
     const fx = fixture();
     writeFile(fx.memDir, "n.md", `${AGENT_FM}## S\n\n- 普通经验\n`);
     const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, { jev: realPort(fx) });
     const out = textOf(
       await exec(
         tool,
         { command: "str_replace", path: "n.md", old_str: "source: agent", new_str: "source: agent\nstatus: archived" },
-        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }),
+        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
       ),
     );
     expect(confirm).not.toHaveBeenCalled();
+    expect(notify).toHaveLength(0);
     expect(out).toContain("edited n.md");
     expect(readFileSync(join(fx.memDir, "n.md"), "utf8")).toContain("status: archived");
   });
 
-  test("un-archiving never confirms (visibility restored, reverse direction)", async () => {
+  test("un-archiving never notifies (visibility restored, reverse direction)", async () => {
     const fx = fixture();
     writeFile(
       fx.memDir,
@@ -560,15 +527,17 @@ describe("user-order guard", () => {
       `---\nsource: agent\nstatus: archived\nupdated: 2026-10-01T00:00:00.000Z\n---\n\n## S\n\n- 用户令一条 <!-- mem user -->\n`,
     );
     const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, { jev: realPort(fx) });
     const out = textOf(
       await exec(
         tool,
         { command: "str_replace", path: "n.md", old_str: "source: agent\nstatus: archived", new_str: "source: agent" },
-        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }),
+        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
       ),
     );
     expect(confirm).not.toHaveBeenCalled();
+    expect(notify).toHaveLength(0);
     expect(out).toContain("edited n.md");
     expect(readFileSync(join(fx.memDir, "n.md"), "utf8")).not.toContain("archived");
   });
@@ -577,70 +546,98 @@ describe("user-order guard", () => {
     const fx = fixture();
     writeFile(fx.memDir, "old.md", `${AGENT_FM}## S\n\n- 用户令 <!-- mem user -->\n`);
     const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, { jev: realPort(fx) });
     const out = textOf(
       await exec(
         tool,
         { command: "rename", old_path: "old.md", new_path: "new.md" },
-        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }),
+        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
       ),
     );
     expect(confirm).not.toHaveBeenCalled();
+    expect(notify).toHaveLength(0);
     expect(out).toContain("renamed old.md -> new.md");
   });
 
-  test("deleting an agent file that carries user entries confirms; confirmed delete proceeds + voids", async () => {
+  test("deleting an agent file that carries user entries: direct delete + voided echo + one delete-notify", async () => {
     const fx = fixture();
     writeFile(fx.memDir, "agent.md", `${AGENT_FM}## S\n\n- 用户令一条 <!-- mem user -->\n- 普通经验\n`);
     const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
+    const { tool } = makeTool(fx, { jev: realPort(fx) });
+    const out = textOf(
+      await exec(
+        tool,
+        { command: "delete", path: "agent.md" },
+        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
+      ),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(out).toContain("deleted agent.md (recoverable");
+    expect(out).toContain("voided user rule: agent.md › S #1");
+    expect(notify).toHaveLength(1);
+    expect(notify[0]).toEqual({
+      message:
+        "agent 删除了 agent.md，其中 1 条用户令随之作废（文件已移入 .trash，可用 /mem restore --trash 找回）：\n- 条目 #1 (L8-8)",
+      level: "warning",
+    });
+    expect(existsSync(join(fx.memDir, "agent.md"))).toBe(false);
+  });
+
+  test("a delete that voids user orders lands in .trash and stays recoverable", async () => {
+    const fx = fixture();
+    writeFile(fx.memDir, "agent.md", `${AGENT_FM}## S\n\n- 用户令一条 <!-- mem user -->\n`);
+    const confirm = vi.fn(async () => false); // a "declined" answer — must be ignored entirely
     const { tool } = makeTool(fx, { jev: realPort(fx) });
     const out = textOf(
       await exec(tool, { command: "delete", path: "agent.md" }, fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY })),
     );
-    expect(confirm).toHaveBeenCalledTimes(1);
-    expect(confirm.mock.calls[0]![1]).toContain("用户令");
+    expect(confirm).not.toHaveBeenCalled();
     expect(out).toContain("deleted agent.md (recoverable");
-    expect(out).toContain("voided user rule: agent.md › S #1");
+    const trash = readdirSync(join(fx.memDir, ".trash"));
+    expect(trash).toHaveLength(1);
+    expect(trash[0]).toMatch(/\.md$/);
+    expect(readFileSync(join(fx.memDir, ".trash", trash[0]!), "utf8")).toContain("用户令一条");
     expect(existsSync(join(fx.memDir, "agent.md"))).toBe(false);
   });
 
-  test("declined confirm refuses the delete — file still there", async () => {
-    const fx = fixture();
-    writeFile(fx.memDir, "agent.md", `${AGENT_FM}## S\n\n- 用户令一条 <!-- mem user -->\n`);
-    const { tool } = makeTool(fx, { jev: realPort(fx) });
-    await expect(
-      exec(
-        tool,
-        { command: "delete", path: "agent.md" },
-        fakeCtx(fx.cwd, { confirm: async () => false, registry: FAKE_REGISTRY }),
-      ),
-    ).rejects.toThrow(REFUSE);
-    expect(existsSync(join(fx.memDir, "agent.md"))).toBe(true);
-  });
-
-  test("child session refuses the delete outright", async () => {
+  test("child session (write-enabled) deletes through with no notify", async () => {
     const fx = fixture();
     writeFile(fx.memDir, "agent.md", `${AGENT_FM}## S\n\n- 用户令一条 <!-- mem user -->\n`);
     const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, {
       isChildSession: true,
       settings: { allowWriteInChildSessions: true },
       jev: realPort(fx),
     });
-    await expect(
-      exec(tool, { command: "delete", path: "agent.md" }, fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY })),
-    ).rejects.toThrow(REFUSE);
+    const out = textOf(
+      await exec(
+        tool,
+        { command: "delete", path: "agent.md" },
+        fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
+      ),
+    );
     expect(confirm).not.toHaveBeenCalled();
-    expect(existsSync(join(fx.memDir, "agent.md"))).toBe(true);
+    expect(notify).toHaveLength(0);
+    expect(out).toContain("voided user rule: agent.md › S #1");
+    expect(existsSync(join(fx.memDir, "agent.md"))).toBe(false);
   });
 
-  test("deleting an agent file without user entries never confirms", async () => {
+  test("deleting an agent file without user entries never notifies", async () => {
     const fx = fixture();
     writeFile(fx.memDir, "plain.md", `${AGENT_FM}## S\n\n- 普通经验一条\n`);
     const confirm = vi.fn(async () => true);
+    const notify: NotifyCall[] = [];
     const { tool } = makeTool(fx, { jev: realPort(fx) });
-    await exec(tool, { command: "delete", path: "plain.md" }, fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY }));
+    await exec(
+      tool,
+      { command: "delete", path: "plain.md" },
+      fakeCtx(fx.cwd, { confirm, registry: FAKE_REGISTRY, notifyRec: notify }),
+    );
     expect(confirm).not.toHaveBeenCalled();
+    expect(notify).toHaveLength(0);
     expect(existsSync(join(fx.memDir, "plain.md"))).toBe(false);
   });
 
@@ -662,7 +659,6 @@ describe("user-order guard", () => {
       entryIndex: new EntryIndex(),
       dirFor: (cwd) => memoryDirFor(cwd, fx.paths),
       taxonomyFor: () => mergeTaxonomy().taxonomy,
-      confirmTimeoutMs: 60_000,
       now: () => Date.parse("2026-10-31T00:00:00Z"),
     });
     const { tool } = makeTool(fx, { jev: port });

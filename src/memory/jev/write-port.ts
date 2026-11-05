@@ -71,7 +71,6 @@ export interface JevWritePortDeps {
   /** Canonical memory slug dir for a cwd; `undefined` ⇒ no memory here. */
   readonly dirFor: (cwd: string) => string | undefined;
   readonly taxonomyFor: (dir: string) => Taxonomy;
-  readonly confirmTimeoutMs: number;
   readonly now: () => number;
 }
 
@@ -342,7 +341,6 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
   };
 
   return {
-    confirmTimeoutMs: deps.confirmTimeoutMs,
     async afterWrite(input) {
       try {
         return await runAfterWrite(input);

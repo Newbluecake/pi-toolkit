@@ -30,7 +30,6 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { AskUserRemotePort } from "../ask-user/remote.js";
 import type { MemorySettings } from "../config/settings.js";
 import type { PromptSectionHub } from "../sysprompt/hub.js";
 import type { TidyPort } from "./contracts.js";
@@ -64,19 +63,12 @@ export interface WireMemoryOpts {
   /** jev-plan J6 / I11: the secure-domain verdict (`secureDomain.kind`).
    *  Anything but "plain" keeps Jev unwired. Absent ⇒ "plain". */
   secureDomainKind?: JevDomainKind;
-  /** headless-confirm plan (docs/dev/memory/headless-confirm/plan.md): the
-   *  late-bound ask_user remote port getter (`src/index.ts` passes
-   *  `() => askUserRemoteRef.current?.()` — the hub wiring may land after
-   *  wireMemory returned, so the getter MUST be evaluated at each guard
-   *  invocation, never snapshotted). `undefined` ⇒ every guard confirm
-   *  keeps the legacy local path byte-identical. */
-  remote?: () => AskUserRemotePort | undefined;
-  /** headless-confirm plan: the session lifecycle signal getter, owned by
-   *  `src/index.ts` (fresh controller per session_start, aborted on
+  /** #26 (no-user-guard-confirm plan): the session lifecycle signal getter,
+   *  owned by `src/index.ts` (fresh controller per session_start, aborted on
    *  session_shutdown/reload — merged into the MAIN session's existing hook
    *  registrations there, so wiring memory never adds a hook registration;
-   *  child sessions hard-refuse guards before any confirm and never need
-   *  it). Guards concatenate it with the tool signal per call. */
+   *  child sessions are never handed one). The tool concatenates it with the
+   *  tool signal per call as the touched>0 commit checkpoint. */
   sessionSignal?: () => AbortSignal | undefined;
   /** memory-predict plan §11.1 signal T — forwarded verbatim to `wireJev`'s
    *  `todo` dep (undefined ⇒ P1b sees an empty todo list). */
@@ -234,7 +226,6 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
           ...(opts.settings.layout === "tiered" ? { renderBlock: tieredRender } : {}),
           doctorSummary,
           ...(jev === undefined ? {} : { jev: jev.makeWritePort() }),
-          ...(opts.remote === undefined ? {} : { remote: opts.remote }),
           ...(opts.sessionSignal === undefined ? {} : { sessionSignal: opts.sessionSignal }),
         })
       : createMemoryTool({ settings: opts.settings, isChildSession: opts.isChildSession, onAfterWrite }),

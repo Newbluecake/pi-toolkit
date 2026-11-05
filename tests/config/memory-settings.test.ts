@@ -50,7 +50,6 @@ describe("memory settings", () => {
         review: { intervalDays: 7 },
         maxCostUsd: 0.5,
         maxCalls: 800,
-        confirmTimeoutMs: 60_000,
         fastPathAllowTags: [],
         fastPathDenyTags: [],
         fastPathCooldownH: 24,
@@ -432,7 +431,6 @@ describe("memory settings", () => {
           review: "nope",
           maxCostUsd: "lots",
           maxCalls: "many",
-          confirmTimeoutMs: "never",
         },
       }).jev,
     ).toEqual(defaults.jev);
@@ -449,7 +447,6 @@ describe("memory settings", () => {
         review: { intervalDays: 14 },
         maxCostUsd: 1.25,
         maxCalls: 100,
-        confirmTimeoutMs: 30_000,
         fastPathAllowTags: "testing, ci,testing",
         fastPathDenyTags: ["git-push", "nope id", "release"],
         fastPathCooldownH: 0,
@@ -465,7 +462,6 @@ describe("memory settings", () => {
       review: { intervalDays: 14 },
       maxCostUsd: 1.25,
       maxCalls: 100,
-      confirmTimeoutMs: 30_000,
       fastPathAllowTags: ["testing", "ci"],
       fastPathDenyTags: ["git-push", "release"],
       fastPathCooldownH: 0,
@@ -522,14 +518,10 @@ describe("memory settings", () => {
     expect(parseMemorySettings({ jev: { maxCalls: -1 } }).jev.maxCalls).toBe(defaults.jev.maxCalls);
     expect(parseMemorySettings({ jev: { maxCalls: 0 } }).jev.maxCalls).toBe(0);
     expect(parseMemorySettings({ jev: { maxCalls: 5001 } }).jev.maxCalls).toBe(defaults.jev.maxCalls);
-    expect(parseMemorySettings({ jev: { confirmTimeoutMs: 9999 } }).jev.confirmTimeoutMs).toBe(
-      defaults.jev.confirmTimeoutMs,
-    );
-    expect(parseMemorySettings({ jev: { confirmTimeoutMs: 600_001 } }).jev.confirmTimeoutMs).toBe(
-      defaults.jev.confirmTimeoutMs,
-    );
-    expect(parseMemorySettings({ jev: { confirmTimeoutMs: 10_000 } }).jev.confirmTimeoutMs).toBe(10_000);
-    expect(parseMemorySettings({ jev: { confirmTimeoutMs: 600_000 } }).jev.confirmTimeoutMs).toBe(600_000);
+    // confirmTimeoutMs was removed with the #26 guard removal; stale keys
+    // (either unit) are silently ignored — no resurrection by any spelling.
+    expect(parseMemorySettings({ jev: { confirmTimeoutMs: 30_000 } }).jev).not.toHaveProperty("confirmTimeoutMs");
+    expect(parseMemorySettings({ jev: { confirmTimeoutS: 30 } }).jev).not.toHaveProperty("confirmTimeoutMs");
   });
 
   it("jev.classifiers (Q34): empty string/array ⇒ off (empty list), non-empty garbage falls back to default list", () => {
@@ -587,9 +579,12 @@ describe("memory settings", () => {
     expect(isKnownSettingKey("memory.jev.classifiersRejected")).toBe(false);
   });
 
-  it("confirmTimeoutMs round-trips through the file's confirmTimeoutS seconds key (TIME_SETTING_MS_PATHS)", () => {
-    expect(TIME_SETTING_MS_PATHS).toContain("memory.jev.confirmTimeoutMs");
-    expect(loadSettings({ memory: { jev: { confirmTimeoutS: 30 } } }).memory.jev.confirmTimeoutMs).toBe(30_000);
+  it("confirmTimeoutS is a retired key (#26): not in TIME_SETTING_MS_PATHS, stale file keys ignored", () => {
+    expect(TIME_SETTING_MS_PATHS).not.toContain("memory.jev.confirmTimeoutMs");
+    // like the stale `gate` key: the field-by-field parser never throws on it
+    const loaded = loadSettings({ memory: { jev: { confirmTimeoutS: 30, confirmTimeoutMs: 30_000 } } });
+    expect(loaded.memory.jev).not.toHaveProperty("confirmTimeoutMs");
+    expect(loaded.memory.jev.maxCalls).toBe(DEFAULT_SETTINGS.memory.jev.maxCalls);
   });
 
   it("recall.waitMs round-trips through the file's recall.waitS seconds key (TIME_SETTING_MS_PATHS, Q37)", () => {
@@ -619,7 +614,7 @@ describe("memory settings", () => {
     expect(loadSettings({ memory: { jev: { enabled: false } } }).memory.jev.enabled).toBe(false);
   });
 
-  it("exposes the 12 memory.jev.* keys in SETTING_SPECS, all non-live (gate keys removed 2026-11)", () => {
+  it("exposes the 11 memory.jev.* keys in SETTING_SPECS, all non-live (gate keys removed 2026-11, confirmTimeoutS removed #26)", () => {
     const keys = [
       "memory.jev.enabled",
       "memory.jev.classifiers",
@@ -632,11 +627,11 @@ describe("memory settings", () => {
       "memory.jev.review.intervalDays",
       "memory.jev.maxCostUsd",
       "memory.jev.maxCalls",
-      "memory.jev.confirmTimeoutS",
     ];
-    expect(keys).toHaveLength(12);
+    expect(keys).toHaveLength(11);
     expect(isKnownSettingKey("memory.jev.gate.enabled")).toBe(false);
     expect(isKnownSettingKey("memory.jev.gate.threshold")).toBe(false);
+    expect(isKnownSettingKey("memory.jev.confirmTimeoutS")).toBe(false);
     for (const key of keys) {
       expect(isKnownSettingKey(key), key).toBe(true);
       const spec = SETTING_SPECS[key]!;
@@ -653,12 +648,6 @@ describe("memory settings", () => {
       time: true,
       min: 0,
       max: 3,
-    });
-    expect(SETTING_SPECS["memory.jev.confirmTimeoutS"]).toMatchObject({
-      path: "memory.jev.confirmTimeoutMs",
-      time: true,
-      min: 10,
-      max: 600,
     });
     expect(defaultOf(SETTING_SPECS["memory.jev.enabled"]!)).toBe(true);
     expect(defaultOf(SETTING_SPECS["memory.jev.classifiers"]!)).toBe("opencode/jev-1.13-free,opencode/jev-1.13");

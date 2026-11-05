@@ -220,14 +220,13 @@ export default function activate(rawPi: ExtensionAPI): void {
   // session returns before that code ever runs) can attach a real
   // `TidyPort` for `/mem tidy`/`/mem restore`.
   let memoryWiring: ReturnType<typeof wireMemory> | undefined;
-  // headless-confirm plan (docs/dev/memory/headless-confirm/plan.md, Major
-  // #2/#3): the memory guards' session lifecycle controller — a FRESH
-  // controller on every session_start, aborted on session_shutdown (incl.
-  // /reload, which fires shutdown before re-activating). Swapped/aborted
-  // inside the MAIN session's existing session_start/session_shutdown
-  // registrations below (no new hook registration — jev off-golden pins
-  // wireMemory's registration list byte-for-byte); child sessions hard-refuse
-  // guards before any confirm and never read this.
+  // #26 (no-user-guard-confirm plan): the memory touched>0 commits' session
+  // lifecycle controller — a FRESH controller on every session_start,
+  // aborted on session_shutdown (incl. /reload, which fires shutdown before
+  // re-activating). Swapped/aborted inside the MAIN session's existing
+  // session_start/session_shutdown registrations below (no new hook
+  // registration — jev off-golden pins wireMemory's registration list
+  // byte-for-byte); child sessions are never handed this signal.
   let sessionAbort: AbortController | undefined;
   if (preGuardSettings.memory.enabled)
     memoryWiring = wireMemory(pi, {
@@ -235,10 +234,6 @@ export default function activate(rawPi: ExtensionAPI): void {
       isChildSession,
       sections: promptHub,
       secureDomainKind: secureDomain.kind,
-      // headless-confirm plan: late-bound getter — evaluated at each guard
-      // invocation (askUserRemoteRef is only assigned in the post-guard web-hub
-      // block below, long after wireMemory returned).
-      remote: () => askUserRemoteRef.current?.(),
       ...(isChildSession ? {} : { sessionSignal: () => sessionAbort?.signal }),
       // memory-predict plan §11.1 signal T: forward the todo snapshot (todo
       // module disabled ⇒ undefined ⇒ P1b sees an empty todo list).
@@ -904,8 +899,8 @@ export default function activate(rawPi: ExtensionAPI): void {
     notifyCapabilityCtx.current = ctx;
     subscribeCapabilityAlert();
     if (compat.warning) console.warn(`[pi-subagent] ${compat.warning}`);
-    // headless-confirm plan: swap the memory guards' session controller — a
-    // stale signal must never authorize a commit in the new session.
+    // #26: swap the memory commits' session controller — a stale signal
+    // must never authorize a commit in the new session.
     sessionAbort?.abort();
     sessionAbort = new AbortController();
     // Defensive: if pi ever fires session_start without a paired shutdown, stop the previous stack's timer/RPC
@@ -950,8 +945,8 @@ export default function activate(rawPi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
-    // headless-confirm plan: abort any in-flight memory guard confirm — it
-    // settles REFUSE instead of leaking past the session boundary.
+    // #26: abort any in-flight memory touched>0 commit — it must refuse
+    // instead of leaking past the session boundary.
     sessionAbort?.abort();
     sessionAbort = undefined;
     const stack = holder.current;

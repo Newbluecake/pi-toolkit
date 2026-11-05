@@ -115,7 +115,6 @@ function makePort(dir: string, cwd: string, client: JevClient, over: Partial<Jev
       reviewIntervalDays: 7,
       maxCostUsd: 0.5,
       maxCalls: 800,
-      confirmTimeoutMs: 60_000,
       fastPath: DEFAULT_JEV_FAST_PATH,
     },
     usage: () => ({ costUsd: 0.0061, calls: 37 }),

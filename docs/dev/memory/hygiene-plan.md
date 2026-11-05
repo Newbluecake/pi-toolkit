@@ -131,7 +131,7 @@ core.md 这类文件是 bullet 列表、没有 `## `，「GPT 临时禁用」这
 - 跨 run 和 /reload：从分支播种出的 `gates` 记录一律视为「已放行」。gate 记录只会在 run 内写入，而 pi 在 run 结束（`finally`）前一定会刷出待发消息，所以记录所在 run 的注入正文必然已经落地。
 - run 被中止：同样由 `finally` 刷出，下一次 run 的 `before_agent_start` 重新播种，视为已放行。
 
-gate 拦截文案协议（`format.ts` 常量，中文一句话 + 后续动作，参照 `secure/guards.ts` 的写法）：
+gate 拦截文案协议（`format.ts` 常量，中文一句话 + 后续动作，参照 `secure/guards.ts` 的写法）（gate 已于 2026-11 移除，以下为历史）：
 
 ```text
 [memory gate] 本次 <tool> 调用未执行：它命中了记忆中标为 gate 的规则「core.md › 发版规则」（用户令）。规则正文紧随其后以 [memory] 消息给出。请逐条核对：全部满足就在下一步原样重试（看过正文之后的重试不会再拦；同一批里并发的相同调用也已一并拦下）；有不满足的，调整方案或先问用户。
@@ -262,7 +262,7 @@ pi 1.4.0 在扩展侧提供 `ctx.modelRegistry.classify(model, {state, questions
 
 `release.sh` 作为后台任务在跑时，`git add -A && git commit -m …` 被拦，**重试也被拦**（hold）；`git -C . commit`、`FOO=1 git commit` 同样被拦；`echo "git commit"` 不拦；release.sh 结束后不拦；在另一个终端手动跑的 `bash scripts/release/release.sh` 经 /proc 同样被识别；`vim scripts/release/release.sh` 不算在跑。
 
-**`gate=hold`（O16/Q15 已拍板）**：普通 `gate` 看过正文后就放行，模型若无视规则仍可能在 release.sh 结束前重试成功。所以带 `if-*` 的规则可以写 `gate=hold`：
+**`gate=hold`（O16/Q15 已拍板）**（gate 已于 2026-11 移除，以下为历史）：普通 `gate` 看过正文后就放行，模型若无视规则仍可能在 release.sh 结束前重试成功。所以带 `if-*` 的规则可以写 `gate=hold`：
 
 - 每次命中都**重新求值条件**（不走 §2.2 的闩锁），条件成立就拦，条件消失立即放行。条件查不到 ⇒ 不成立 ⇒ 放行（fail-open），所以 /proc 不可读时不会永久卡死 git commit。
 - **只拦不重复注入正文**：正文沿用段内去重，本段第一次拦截时随注入消息落地一次，之后的拦截只返回 reason，避免每次重试多出一条最多 4KB 的消息。
@@ -643,7 +643,7 @@ similar: core.md › 发版规则 (L9)
 - 派单指定模型须按 dev-flow 路由表……
 ```
 
-`pitfalls-git.md › GitHub 走代理` 带 `kw=push cmd="git push"`；`pitfalls-runtime.md › 长命令一律 timeout` 没有写触发规则（旧条目）。
+（gate 已于 2026-11 移除，以下为历史）`pitfalls-git.md › GitHub 走代理` 带 `kw=push cmd="git push"`；`pitfalls-runtime.md › 长命令一律 timeout` 没有写触发规则（旧条目）。
 
 1. 主会话模型调用 `Agent({subagent_type:"general-purpose", model:"…", description:"修预览卡死", prompt:"修复 web-hub 预览里 mermaid 渲染卡死的问题，改完跑相关测试并提交"})`。
 2. 主会话的 `tool_call` hook 把参数拼成规范串，里面有一行 `model:…`（显式传了 model 参数）⇒ 命中 gate 条目，且尚未放行。如果没传 model，规范串里没有 `model:` 这一行，就不会命中。

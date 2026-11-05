@@ -843,7 +843,7 @@ similar: core.md L5 (complementary 0.72)
 
 - v2 的 `doAppend` 在锁内 upsert `updated`；append 新建文件时带上 `source: agent`（照搬 v4.1 §3.1）。
 - 写后回显锚点。
-- 用户令守卫：两阶段确认，按 `guardHash` 配对（照搬 v4.1 §3.2）。
+- 用户令守卫：按 `guardHash` 配对（照搬 v4.1 §3.2；两阶段确认已于 2026-11 #26 移除——命中后直写 + voided 回显 + 主会话 TUI warning 通知，见 `no-user-guard-confirm/plan.md`）。
 - 如果本次写入新引入了行内注释错误，拒绝写入。
 - **守卫域与打标触发域不是同一个集合**（§19 行 22）：
   - 用户令守卫（本节上述两阶段确认）覆盖 `str_replace`/`insert`/`write`/`append`/`create` 覆写 **另加 `delete`**（`tool-v2.ts` 的 `prepareJevDeleteGuard`：`after = ""` 使该文件全部用户令条目计为 touched，手写文件跳过弹框因为 provenance 拒写已先挡下）；判定条件除「触及用户令」外，还包「手写 → 非手写的 provenance 翻转」与「未归档 → `status: archived` 归档」两条；`rename` 不守卫（不改内容，hygiene-plan §3.2）。
@@ -1321,7 +1321,7 @@ Jev 是一种「分类器」模型：它不会写字，只会做选择题、打�
 
 **第一次启用时**，pi 会提示一次：Jev 已启用，用的是哪个模型，你的消息和记忆摘录会脱敏后发给它，以及怎么查看和关闭。在加密（secure）环境里，Jev 永远关闭。
 
-### 16.3 例 1：你说「帮我推到 GitHub」
+### 16.3 例 1：你说「帮我推到 GitHub」（gate 已于 2026-11 移除，以下为历史）
 
 1. Jev 收到你的消息和约 140 个是非题（每条记忆一题，例如「`push 前 export https_proxy=…` 这条必须知道吗？」），约 0.9 秒后回答：「push 走代理」0.81，其它都 ≤0.5。于是这一条随你的消息进入模型视野，你会看到 `mem U: pitfalls-git › #3`。
 2. 模型执行 `git push`。粗筛命中「推送」场景，core.md 里有一条你写的「push 需用户确认」。系统问 Jev：「这条规则和 `git push origin dev` 是什么关系？」Jev 答 applies 0.83。

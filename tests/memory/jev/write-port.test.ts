@@ -98,13 +98,12 @@ function fakeClient(opts: {
   return { client, asks };
 }
 
-function makePort(fx: Fixture, client: JevClient, over: { confirmTimeoutMs?: number } = {}) {
+function makePort(fx: Fixture, client: JevClient) {
   return createJevWritePort({
     client,
     entryIndex: new EntryIndex(),
     dirFor: (cwd) => memoryDirFor(cwd, fx.paths),
     taxonomyFor: () => mergeTaxonomy().taxonomy,
-    confirmTimeoutMs: over.confirmTimeoutMs ?? 60_000,
     now: () => FIX_NOW,
   });
 }
@@ -665,7 +664,6 @@ describe("afterWrite: usage + budget", () => {
         throw new Error("boom");
       },
       taxonomyFor: () => mergeTaxonomy().taxonomy,
-      confirmTimeoutMs: 60_000,
       now: () => FIX_NOW,
     });
     await expect(

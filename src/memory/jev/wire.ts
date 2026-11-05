@@ -246,7 +246,6 @@ export interface JevWritePortFactoryDeps {
   readonly entryIndex: EntryIndex;
   readonly dirFor: (cwd: string) => string | undefined;
   readonly taxonomyFor: (dir: string) => Taxonomy;
-  readonly confirmTimeoutMs: number;
   readonly now: () => number;
 }
 
@@ -2624,7 +2623,6 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
           const merged = mergeTaxonomy(readTaxonomyFile(dir));
           return merged.ok ? merged.taxonomy : (mergeTaxonomy() as { ok: true; taxonomy: Taxonomy }).taxonomy;
         },
-        confirmTimeoutMs: config.confirmTimeoutMs,
         now,
       });
       // J7: one off(pi-api) verdict for the whole runtime — tool-v2's own

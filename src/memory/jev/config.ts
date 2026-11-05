@@ -46,7 +46,6 @@ export function jevConfigOf(memory: MemorySettings): JevConfig {
     reviewIntervalDays: jev.review.intervalDays,
     maxCostUsd: jev.maxCostUsd,
     maxCalls: jev.maxCalls,
-    confirmTimeoutMs: jev.confirmTimeoutMs,
     fastPath: {
       allowTags: jev.fastPathAllowTags,
       denyTags: jev.fastPathDenyTags,

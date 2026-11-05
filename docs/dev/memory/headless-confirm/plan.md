@@ -1,5 +1,7 @@
 # headless 弹卡确认（memory 用户令守卫 → web 弹卡）方案 v2
 
+> **已作废（2026-11 #26）**：memory 用户令守卫的人工确认（本方案的 web 弹卡，及其替代的 TUI 确认框）已整体移除——agent 改动/删除用户令现在直接写入，主会话 TUI 发一条 warning 通知。见 `../no-user-guard-confirm/plan.md`。本文仅作历史记录保留。
+
 > 状态：v2 修订（评审 r_C5QVZCQ7 打回后修订，逐条闭合 1 Blocker + 5 Major + 2 Minor）。
 > 需求：web-hub spawn 的 headless 会话中，memory 用户令守卫的确认从「永远拒绝」变为「web 弹卡，用户点确认/拒绝」。
 

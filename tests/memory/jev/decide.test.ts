@@ -66,7 +66,6 @@ const CFG: JevConfig = {
   reviewIntervalDays: 7,
   maxCostUsd: 0.5,
   maxCalls: 800,
-  confirmTimeoutMs: 60_000,
   fastPath: DEFAULT_JEV_FAST_PATH,
 };
 

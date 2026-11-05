@@ -74,7 +74,6 @@ describe("resolveJevWiring", () => {
       reviewIntervalDays: 0,
       maxCostUsd: 1,
       maxCalls: 10,
-      confirmTimeoutMs: s.jev.confirmTimeoutMs,
       fastPath: { allowTags: ["testing", "ci"], denyTags: ["git-push"], cooldownMs: 12 * 3_600_000 },
       predict: {
         enabled: s.jev.predict.enabled,

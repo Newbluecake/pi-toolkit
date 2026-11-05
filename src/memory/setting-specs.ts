@@ -204,12 +204,6 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     ...count("memory.jev.maxCalls", 0, "Per-activation Jev call count cap"),
     max: 5000,
   } as SettingSpec,
-  "memory.jev.confirmTimeoutS": seconds("memory.jev.confirmTimeoutMs", {
-    min: 10,
-    max: 600,
-    hint: "write-path confirm timeout",
-    description: "Jev write-guard confirm timeout",
-  }),
   "memory.jev.fastPathAllowTags": csvString(
     "memory.jev.fastPathAllowTags",
     "Extra tag ids allowed to trigger the A-layer fast path (default: risk:high tags only)",
