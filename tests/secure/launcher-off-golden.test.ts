@@ -28,6 +28,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -76,7 +77,7 @@ interface GoldenFile {
 const produced: { fake: GoldenCase[]; real: GoldenCase[] } = { fake: [], real: [] };
 const scratch: string[] = [];
 function tmp(prefix: string): string {
-  const d = mkdtempSync(join(tmpdir(), prefix));
+  const d = realpathSync(mkdtempSync(join(tmpdir(), prefix))); // #28: physical root
   chmodSync(d, 0o700);
   scratch.push(d);
   return d;

@@ -1212,3 +1212,146 @@ describe("settings-rename P1: launcher settings location (default legacy name, a
     expect(r.cfg.vaults.map((v: { name: string }) => v.name)).toEqual(["acme"]);
   });
 });
+
+// ── #28: symlinked ancestors of <dir> (docs/dev/secure-symlink/plan.md §3.1) ──
+describe("#28 physical mount spelling under symlinked ancestors", () => {
+  /** L1: home/.local/share → data/share (a physical root; dir lives under the link). */
+  function l1(opts: { linkShare?: boolean } = {}) {
+    const root = realpathSync(tmp("ps-sym-"));
+    const home = join(root, "home");
+    mkdirSync(join(home, ".local"), { recursive: true, mode: 0o700 });
+    mkdirSync(join(root, "data", "share"), { recursive: true, mode: 0o700 });
+    if (opts.linkShare !== false) symlinkSync(join(root, "data", "share"), join(home, ".local", "share"));
+    const dir = join(home, ".local", "share", "pi-toolkit-secure", "acme");
+    const v = H.deriveVault("acme", dir, join(home, "secure", "acme"));
+    H.createLayout(v, { home });
+    writeFileSync(join(v.cipher, "gocryptfs.conf"), "{}");
+    return { root, home, v };
+  }
+  const mi = (mnt: string, src: string, fsType = "fuse.gocryptfs") =>
+    `40 25 0:40 / ${mnt} rw,nosuid,nodev shared:40 - ${fsType} ${src} rw\n`;
+
+  it("physicalPaths matrix: L0 plain / L1 symlinked ancestor / L2 dir via link prefix", () => {
+    const l0 = l1({ linkShare: false });
+    expect(H.physicalPaths(l0.v).realCipher).toBe(l0.v.cipher);
+    const { v } = l1();
+    const pp = H.physicalPaths(v);
+    expect(pp.realCipher).not.toBe(v.cipher);
+    expect(pp.realCipher).toBe(join(realpathSync(v.dir), "cipher"));
+    expect(pp.realMnt).toBe(v.mnt);
+    // L2: dir spelled through a symlinked prefix of the temp root itself
+    const root = realpathSync(tmp("ps-sym2-"));
+    mkdirSync(join(root, "real", "vault", "cipher"), { recursive: true, mode: 0o700 });
+    symlinkSync(join(root, "real"), join(root, "alias"));
+    const v2 = H.deriveVault("acme", join(root, "alias", "vault"), join(root, "secure", "acme"));
+    expect(H.physicalPaths(v2).realCipher).toBe(join(root, "real", "vault", "cipher"));
+    expect(H.physicalPaths(v2).realCipher).not.toBe(v2.cipher);
+  });
+  it("L3 <dir> itself a symlink ⇒ checkLayout refuses; L4 <mnt> parent a symlink ⇒ ancestor problems", () => {
+    const { root, home, v } = l1({ linkShare: false });
+    const moved = join(root, "moved");
+    renameSync(v.dir, moved);
+    symlinkSync(moved, v.dir);
+    expect(H.checkLayout(v, { home }).problems.join()).toMatch(/不得是符号链接/);
+    const root4 = realpathSync(tmp("ps-sym4-"));
+    mkdirSync(join(root4, "home", "elsewhere"), { recursive: true, mode: 0o700 });
+    symlinkSync(join(root4, "home", "elsewhere"), join(root4, "home", "secure"));
+    const v4 = H.deriveVault("acme", join(root4, "v"), join(root4, "home", "secure", "acme"));
+    expect(H.mntAncestorProblems(v4).length).toBeGreaterThan(0);
+  });
+  it("plainMountSpawnTail is the exact argv; leaseChainArgs ends with it", () => {
+    const tail = H.plainMountSpawnTail("/c", "/m");
+    expect(tail[0]).toBe(`gocryptfs`); // (template literal: not a D4 mount-marker hit)
+    expect(tail.slice(1)).toEqual(["-nonempty", "--", "/c", "/m"]);
+    expect(tail).toHaveLength(5);
+    expect(H.leaseChainArgs("/l", tail).slice(-tail.length)).toEqual(tail);
+  });
+  it("verdict: lexical source ⇒ foreign, physical ⇒ mounted, other vault's physical cipher ⇒ foreign; parity with config.ts", async () => {
+    const { v } = l1();
+    const { realMnt, realCipher } = H.physicalPaths(v);
+    const { vaultMountState } = await import("../../src/secure/config.js");
+    const other = join(realpathSync(tmp("ps-sym-o-")), "cipher");
+    for (const [src, want] of [
+      [v.cipher, "foreign"],
+      [realCipher, "mounted"],
+      [other, "foreign"],
+    ] as const) {
+      const text = mi(realMnt, src);
+      expect(H.vaultMountState(text, realMnt, realCipher)).toBe(want);
+      expect(vaultMountState(text, realMnt, realCipher)).toBe(want);
+    }
+  });
+
+  describe("race boundary (plan §1.2): what is and is not detectable", () => {
+    function probeSide(v: unknown, text: string): string {
+      const pp = H.physicalPaths(v);
+      return H.vaultMountState(text, pp.realMnt, pp.realCipher);
+    }
+    function verifySide(v: { mnt: string }, text: string): "ok" | "throws" {
+      const parent = statSync(dirname(v.mnt));
+      const pin = {
+        fd: 3,
+        dev: 0,
+        ino: 0,
+        path: v.mnt,
+        parent: { dev: parent.dev, ino: parent.ino },
+        closed: true, // finally must not close a real fd
+      };
+      try {
+        H.verifyMountPointIdentity(v, pin, {
+          readMountinfo: () => text,
+          readlink: () => v.mnt,
+          stat: (p: string) => (p === v.mnt ? { dev: H.devFromMajMin(0, 40) } : statSync(p)),
+        });
+        return "ok";
+      } catch {
+        return "throws";
+      }
+    }
+    function retarget(home: string, to: string) {
+      rmSync(join(home, ".local", "share"));
+      symlinkSync(to, join(home, ".local", "share"));
+    }
+    function sibling(root: string) {
+      mkdirSync(join(root, "data2", "share", "pi-toolkit-secure", "acme", "cipher"), { recursive: true, mode: 0o700 });
+      return join(root, "data2", "share");
+    }
+
+    it("R1: a lexical-chain symlink retargeted after the physical path was computed ⇒ foreign / refused", () => {
+      const { root, home, v } = l1();
+      const p0 = H.physicalPaths(v).realCipher;
+      const text = mi(v.mnt, p0);
+      expect(probeSide(v, text)).toBe("mounted");
+      expect(verifySide(v, text)).toBe("ok");
+      retarget(home, sibling(root));
+      expect(H.physicalPaths(v).realCipher).not.toBe(p0);
+      expect(probeSide(v, text)).toBe("foreign");
+      expect(verifySide(v, text)).toBe("throws");
+    });
+    it("R2 (known gap, README residual): swapping the physical cipher dir keeps the string ⇒ NOT detected", () => {
+      const { v } = l1();
+      const p0 = H.physicalPaths(v).realCipher;
+      const text = mi(v.mnt, p0);
+      const before = statSync(p0);
+      renameSync(p0, `${p0}.orig`);
+      mkdirSync(p0, { mode: 0o700 });
+      const after = statSync(p0);
+      expect([after.dev, after.ino]).not.toEqual([before.dev, before.ino]);
+      expect(H.physicalPaths(v).realCipher).toBe(p0);
+      expect(probeSide(v, text)).toBe("mounted");
+      expect(verifySide(v, text)).toBe("ok");
+      // When cipher identity proof is added, flip these two expectations together with the README.
+    });
+    it("R3: retarget then restore before the re-check ⇒ mounted again", () => {
+      const { root, home, v } = l1();
+      const original = join(root, "data", "share");
+      const p0 = H.physicalPaths(v).realCipher;
+      const text = mi(v.mnt, p0);
+      retarget(home, sibling(root));
+      expect(probeSide(v, text)).toBe("foreign");
+      retarget(home, original);
+      expect(probeSide(v, text)).toBe("mounted");
+      expect(verifySide(v, text)).toBe("ok");
+    });
+  });
+});

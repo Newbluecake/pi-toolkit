@@ -46,7 +46,7 @@ export const TIER2_FILES: readonly string[] = [
   "tests/release/package-zip.test.ts",
 ];
 
-/** The 16 files with REAL gocryptfs mount blocks (plan D2a: each was read; judged by content,
+/** The 17 files with REAL gocryptfs mount blocks (plan D2a: each was read; judged by content,
  * not name) → the dedicated `secure` project, so P2 can hang the preflight setup on it. */
 export const SECURE_MOUNT_FILES: readonly string[] = [
   "tests/secure/archive.test.ts",
@@ -59,6 +59,7 @@ export const SECURE_MOUNT_FILES: readonly string[] = [
   "tests/secure/launcher-private-cmd.test.ts",
   "tests/secure/launcher-private-unit.test.ts",
   "tests/secure/launcher-private.test.ts",
+  "tests/secure/launcher-symlink.test.ts",
   "tests/secure/launcher-v6-wiring.test.ts",
   "tests/conformance/secure-convert.test.ts",
   "tests/conformance/secure-convert-xc2.test.ts",

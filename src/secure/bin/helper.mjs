@@ -3069,17 +3069,22 @@ async function cmdInnerMount(args) {
     throw new CliError(EXIT.CONFIG, `布局校验失败，拒绝挂载：\n  - ${lay.problems.join("\n  - ")}`);
   requireTty("解锁");
   const pin = pinMountPoint(v); // security review L0 #2: identity fixed right before mounting
+  // #28: gocryptfs writes its argv cipher verbatim as the mountinfo source, while every verdict
+  // (vaultMountState here / config.ts / the plugin) compares it with the PHYSICAL cipher. So mount with
+  // the physical spelling (symlinked ancestors of <dir> otherwise ⇒ self-mount judged foreign).
+  // Boundary (plan §1.2): fsname is only a label the mounter sets — this proves argv ≡ verdict spelling,
+  // NOT which inode gocryptfs opened; a physical-ancestor swap after realpath stays undetectable.
+  const { realCipher, realMnt } = physicalPaths(v);
+  if (realMnt !== pin.path) throw new CliError(EXIT.FAIL, "挂载点物理路径与固定时不一致，拒绝挂载");
   try {
     for (let attempt = 1; attempt <= PASSWORD_TRIES; attempt++) {
       mountPointPinStillValid(v, pin); // re-checked before EVERY attempt (incl. password retries)
       // Password: typed into gocryptfs directly (stdio inherited); we never see it.
       // §3.1: EVERY gocryptfs start runs under the lease — the shell opens + flocks fd 9 itself
       // (no CLOEXEC) and execs gocryptfs, whose daemon keeps holding it until unmount (NC2c).
-      const code = await runInherited(
-        "/bin/sh",
-        leaseChainArgs(v.lease, ["gocryptfs", "-nonempty", "--", v.cipher, v.mnt]),
-        { timeoutMs: MOUNT_ATTEMPT_TIMEOUT_MS },
-      );
+      const code = await runInherited("/bin/sh", leaseChainArgs(v.lease, plainMountSpawnTail(realCipher, realMnt)), {
+        timeoutMs: MOUNT_ATTEMPT_TIMEOUT_MS,
+      });
       if (code === LEASE_BUSY_CODE)
         throw new CliError(
           EXIT.BUSY,
@@ -4919,6 +4924,11 @@ export function lastJsonLine(text) {
 /** §2.2-6 / §3.1: the shell lease chain. `tail` = argv exec'd after the lease is locked. */
 export function leaseChainArgs(lease, tail) {
   return ["-c", `exec 9<>"$1" && flock -n 9 || exit ${LEASE_BUSY_CODE}; shift; exec "$@"`, "sh", lease, ...tail];
+}
+
+/** #28: plain (non-private) mount argv tail — physical cipher/mnt, same spelling the verdicts compare. */
+export function plainMountSpawnTail(realCipher, realMnt) {
+  return ["gocryptfs", "-nonempty", "--", realCipher, realMnt];
 }
 
 export function nsRootTail(nodeBin = process.execPath, helper = selfPath()) {
