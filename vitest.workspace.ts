@@ -10,7 +10,7 @@
  *   testTimeout). The root config still provides maxWorkers/minWorkers for the whole run.
  * - `secure` is a Tier 2 project split out only so P2 can append its preflight
  *   globalSetup/setupFiles (`tests/setup/secure-preflight.*`) to the base arrays — appended,
- *   never replacing the base entries. P1 ships it with the base setup only.
+ *   never replacing the base entries. #27 P2 wired them in.
  * - Only a project whose files were selected this run executes its globalSetup (vitest 2.1.9
  *   cli-api), so `--project tier1` never touches secure/tier2 hooks.
  */
@@ -44,6 +44,11 @@ export default defineWorkspace([
       name: "secure",
       include: secureInclude(),
       exclude: [...configDefaults.exclude],
+      // P2 (#27, plan r3 D3/D9): APPEND the secure preflight to the base hooks — global-tz
+      // and sandbox-home stay first. Workers inject "secureEnv" (provided by the global
+      // setup on every exit) and fail closed when the environment verdict is dirty.
+      globalSetup: [...(baseProject.test?.globalSetup ?? []), "./tests/setup/secure-preflight.global.ts"],
+      setupFiles: [...(baseProject.test?.setupFiles ?? []), "./tests/setup/secure-preflight.setup.ts"],
     },
   },
 ]);
