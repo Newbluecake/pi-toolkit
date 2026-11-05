@@ -173,10 +173,10 @@ export function reviveRig(
     level,
     inbox: wake,
   });
-  const send = (over: { wake?: boolean; text?: string; kind?: "finding" | "directive"; from?: string } = {}) =>
+  const send = (over: { wake?: boolean; text?: string; kind?: "report" | "directive"; from?: string } = {}) =>
     router.admit(over.from ?? sender, {
       to: target,
-      kind: over.kind ?? "finding",
+      kind: over.kind ?? "report",
       text: over.text ?? "wake up please",
       generation: 1,
       canMessage: ["sibling", "parent"],
@@ -188,7 +188,7 @@ export function reviveRig(
       key: `${sender}:${target}:1:${n}` as never,
       from: sender,
       to: target,
-      kind: "finding",
+      kind: "report",
       seq: n,
       generation: 1,
       payload: { text: "raw wake" },

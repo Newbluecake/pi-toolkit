@@ -12,7 +12,8 @@ import { FabricThrottle } from "../../src/fabric/throttle.js";
 import { FabricRouter } from "../../src/fabric/router.js";
 
 const generation = () => 3;
-const params = { to: "r_PARENT01", kind: "finding" as const, text: "status" };
+const LEGACY_KIND: string = "finding"; // #34 legacy input
+const params = { to: "r_PARENT01", kind: "report" as const, text: "status" };
 
 describe("tools/message-agent", () => {
   it("passes the host-owned sender and generation to the router", async () => {
@@ -37,8 +38,8 @@ describe("tools/message-agent", () => {
       from: "r_CHILD001",
       generation,
     });
-    const result = await tool.execute("call", { to: "@builder", kind: "finding", text: "status" });
-    expect(send).toHaveBeenCalledWith("builder", "finding", "status");
+    const result = await tool.execute("call", { to: "@builder", kind: "report", text: "status" });
+    expect(send).toHaveBeenCalledWith("builder", "report", "status");
     expect(admit).not.toHaveBeenCalled();
     expect(result.details).toEqual({ ok: false, status: "unknown_label", label: "builder" });
   });
@@ -52,8 +53,8 @@ describe("tools/message-agent", () => {
       from: "r_CHILD001",
       generation,
     });
-    await tool.execute("call", { to: "root", kind: "finding", text: "status" });
-    await tool.execute("call", { to: "r_PARENT01", kind: "finding", text: "status" });
+    await tool.execute("call", { to: "root", kind: "report", text: "status" });
+    await tool.execute("call", { to: "r_PARENT01", kind: "report", text: "status" });
     expect(send).not.toHaveBeenCalled();
     expect(admit).toHaveBeenCalledTimes(2);
   });
@@ -146,19 +147,19 @@ describe("tools/message-agent kind guidance (#33)", () => {
   it("documents the four kind semantics in the tool description", () => {
     const tool = createMessageAgentTool({ router: {} as never, from: "r_CHILD001", generation });
     const description = tool.description;
-    expect(description).toContain('"finding" is injected into the target');
+    expect(description).toContain('"report" is injected into the target');
     expect(description).toContain('"progress" only renders in the TUI display');
     expect(description).toContain('"directive" may only be sent by a parent to its own child run');
     expect(description).toContain('the "result" channel');
   });
 
-  it("passes a direct child's finding to root through the real router", async () => {
+  it("passes a direct child's report to root through the real router", async () => {
     const tool = createMessageAgentTool({
       router: makeFabric([["root", "r_ABCD0001"]]),
       from: "r_ABCD0001",
       generation,
     });
-    const result = await tool.execute("call", { to: "root", kind: "finding", text: "question?" });
+    const result = await tool.execute("call", { to: "root", kind: "report", text: "question?" });
     expect(result.details).toMatchObject({ ok: true });
   });
 
@@ -171,11 +172,11 @@ describe("tools/message-agent kind guidance (#33)", () => {
     const message = await errorMessage(tool.execute("call", { to: "root", kind: "directive", text: "do x" }));
     expect(message.startsWith("message not authorized")).toBe(true);
     expect(message).toContain('kind "directive" may only be sent by a parent');
-    expect(message).toContain('use kind:"finding" instead');
+    expect(message).toContain('use kind:"report" instead');
     expect(message).toContain("the model never sees it");
   });
 
-  it("rejects a grandchild's finding→root and points at the direct parent / result channel", async () => {
+  it("rejects a grandchild's report→root and points at the direct parent / result channel", async () => {
     const tool = createMessageAgentTool({
       router: makeFabric([
         ["root", "r_M1DD9E01"],
@@ -184,12 +185,12 @@ describe("tools/message-agent kind guidance (#33)", () => {
       from: "r_9RAND922",
       generation,
     });
-    const message = await errorMessage(tool.execute("call", { to: "root", kind: "finding", text: "question?" }));
+    const message = await errorMessage(tool.execute("call", { to: "root", kind: "report", text: "question?" }));
     expect(message.startsWith("message not authorized")).toBe(true);
     expect(message).toContain("direct parent");
     expect(message).toContain('the "result" channel');
     // The very same grandchild CAN reach its direct parent — that is the correction the hint suggests.
-    const up = await tool.execute("call", { to: "r_M1DD9E01", kind: "finding", text: "question?" });
+    const up = await tool.execute("call", { to: "r_M1DD9E01", kind: "report", text: "question?" });
     expect(up.details).toMatchObject({ ok: true });
   });
 
@@ -199,8 +200,43 @@ describe("tools/message-agent kind guidance (#33)", () => {
     expect(hint).toContain('kind "directive" is parent-to-child only');
   });
 
-  it("lists the sender's effective can_message set in the finding/progress hint", () => {
-    const hint = messageAgentKindHint({ to: "root", kind: "finding" });
+  it("lists the sender's effective can_message set in the report/progress hint", () => {
+    const hint = messageAgentKindHint({ to: "root", kind: "report" });
     expect(hint).toContain("(parent; default: direct parent only)");
+  });
+  it("#34 T-U3: execute rejects a pre-#34 kind before router/mention, listing the valid kinds", async () => {
+    const admit = vi.fn(() => ({ ok: true as const, status: "accepted" as const, key: "k", seq: 1 }));
+    const send = vi.fn(async () => ({
+      ok: true as const,
+      status: "resumed" as const,
+      label: "l",
+      runId: "r_RUNRUN01",
+    }));
+    for (const to of ["root", "@lbl"]) {
+      const tool = createMessageAgentTool({
+        router: { admit } as never,
+        mention: { send } as never,
+        from: "r_CHILD001",
+        generation,
+      });
+      const message = await errorMessage(tool.execute("call", { to, kind: LEGACY_KIND as never, text: "x" }));
+      expect(message.startsWith(`message_agent: unknown kind "${LEGACY_KIND}"`)).toBe(true);
+      expect(message).not.toContain("message not authorized");
+      for (const kind of ['"report"', '"progress"', '"directive"']) expect(message).toContain(kind);
+    }
+    expect(admit).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    // The guard precedes the wake handling too: a wake-on tool answers the same way before any wake logic.
+    const wakeTool = createMessageAgentTool({
+      router: { admit } as never,
+      from: "r_CHILD001",
+      generation,
+      wakeOn: true,
+    });
+    const wakeMessage = await errorMessage(
+      wakeTool.execute("call", { to: "root", kind: LEGACY_KIND as never, text: "x", wake: true } as never),
+    );
+    expect(wakeMessage.startsWith(`message_agent: unknown kind "${LEGACY_KIND}"`)).toBe(true);
+    expect(admit).not.toHaveBeenCalled();
   });
 });

@@ -53,9 +53,9 @@ describe("message_agent wake execution", () => {
   it("wake on: forwards an explicit wake to the router; omitted wake adds NO key (legacy admission input)", async () => {
     const admit = vi.fn(admitOk);
     const tool = createMessageAgentTool({ router: { admit } as never, from: "r_CHILD001", generation, wakeOn: true });
-    await tool.execute("c", { to: "root", kind: "finding", text: "x", wake: true } as never);
-    await tool.execute("c", { to: "root", kind: "finding", text: "x", wake: false } as never);
-    await tool.execute("c", { to: "root", kind: "finding", text: "x" });
+    await tool.execute("c", { to: "root", kind: "report", text: "x", wake: true } as never);
+    await tool.execute("c", { to: "root", kind: "report", text: "x", wake: false } as never);
+    await tool.execute("c", { to: "root", kind: "report", text: "x" });
     const inputs = admit.mock.calls.map((c) => (c as unknown as [string, Record<string, unknown>])[1]);
     expect(inputs[0]).toMatchObject({ wake: true });
     expect(inputs[1]).toMatchObject({ wake: false });
@@ -89,10 +89,10 @@ describe("message_agent wake execution", () => {
       generation,
       wakeOn: true,
     });
-    await tool.execute("c", { to: "@b", kind: "finding", text: "x", wake: false } as never);
-    await tool.execute("c", { to: "@b", kind: "finding", text: "x" });
-    expect(send.mock.calls[0]).toEqual(["b", "finding", "x", false]);
-    expect(send.mock.calls[1]).toEqual(["b", "finding", "x"]);
+    await tool.execute("c", { to: "@b", kind: "report", text: "x", wake: false } as never);
+    await tool.execute("c", { to: "@b", kind: "report", text: "x" });
+    expect(send.mock.calls[0]).toEqual(["b", "report", "x", false]);
+    expect(send.mock.calls[1]).toEqual(["b", "report", "x"]);
   });
 
   it("wake OFF: a stray `wake` argument is dropped — router input and invalid_wake behave exactly as before", async () => {
@@ -113,7 +113,7 @@ describe("message_agent wake execution", () => {
       wakeDowngraded: "level_limit" as const,
     }));
     const tool = createMessageAgentTool({ router: { admit } as never, from: "r_CHILD001", generation, wakeOn: true });
-    const result = await tool.execute("c", { to: "root", kind: "finding", text: "x", wake: true } as never);
+    const result = await tool.execute("c", { to: "root", kind: "report", text: "x", wake: true } as never);
     expect(JSON.parse((result.content[0] as { text: string }).text)).toMatchObject({
       wake: false,
       wakeDowngraded: "level_limit",

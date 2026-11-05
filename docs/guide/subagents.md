@@ -80,7 +80,7 @@ queue_wait → resolve_config → session_create → extension_bind
 
 subagent 之间的可选 fire-and-forget 消息：`"fabric": { "enabled": true }`（默认 `false`）+ `/reload`。
 
-- `message_agent` 的 `kind`：`progress` / `finding` / `directive`；返回值只表示消息进入投递队列，不代表对方已收到。
+- `message_agent` 的 `kind`：`report`（进入对方模型上下文，用于请教或汇报）/ `progress`（发给 root 时只在 TUI 展示，模型看不到）/ `directive`（只能父→子）；返回值只表示消息进入投递队列，不代表对方已收到。旧名 `finding` 已更名为 `report` 且不再接受：旧会话里尚未投递的旧 kind 消息在加载时丢弃、不再投递。
 - 消息沿 agent tree 的边路由；关系由发送方类型的 `can_message` frontmatter 门控（`parent` / `child` / `ancestor` / `descendant` / `sibling` / `self`，默认仅 `parent`）。
 - 平级消息是不可信输入，接收方应当作外部建议重新验证。
 - 配额、TTL、死信、root 背压等设置见 [subagent-push 方案](../dev/subagent-push/subagent-push-plan.md)；交接与实验见 [fabric-v2](../dev/fabric-v2/plan.md)。

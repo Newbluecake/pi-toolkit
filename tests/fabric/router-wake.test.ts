@@ -63,7 +63,7 @@ function setup(
   return { router, engine, stored, levels };
 }
 const send = (router: FabricRouter, over: Partial<Parameters<FabricRouter["admit"]>[1]> = {}) =>
-  router.admit(S, { to: "root", kind: "finding", text: "t", generation: 1, canMessage: ["parent"], ...over });
+  router.admit(S, { to: "root", kind: "report", text: "t", generation: 1, canMessage: ["parent"], ...over });
 
 describe("router wake policy — root matrix (plan §3.1)", () => {
   it("omitted wake: legacy record shape + the sender's level stamped (no `wake` field)", () => {
@@ -136,7 +136,7 @@ describe("router wake policy — root matrix (plan §3.1)", () => {
     const { router, stored } = setup({ level: 2, maxLevel: 2, perRunQuota: 0 });
     const r = router.admit(S, {
       to: T,
-      kind: "finding",
+      kind: "report",
       text: "t",
       generation: 1,
       canMessage: ["sibling"],
@@ -150,7 +150,7 @@ describe("router wake policy — root matrix (plan §3.1)", () => {
 
   it("hydrate restores the wake:true-to-root count (a /reload cannot reset the quota)", () => {
     const a = setup({ level: 0, perRunQuota: 1 });
-    a.router.admit(S, { to: "root", kind: "finding", text: "t", generation: 1, canMessage: ["parent"], wake: true });
+    a.router.admit(S, { to: "root", kind: "report", text: "t", generation: 1, canMessage: ["parent"], wake: true });
     const b = setup({ level: 0, perRunQuota: 1 });
     b.router.hydrate([...a.engine.select(() => true)]);
     expect(b.router.wakeUsed(S)).toBe(1);

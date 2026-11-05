@@ -462,7 +462,7 @@ interface AgentHarness {
   mainTurns(): number;
   mainBytes(): number;
   displays(): SentMessage[];
-  findings(): SentMessage[];
+  reports(): SentMessage[];
   spawnWorker(label?: string, handle?: ScriptedHandle): Promise<{ runId: string; handle: ScriptedHandle }>;
   /** S2/S5: gate the driver so spawned runs stay `starting` (the buffering window). */
   holdSpawns(): void;
@@ -627,7 +627,7 @@ async function bootAgent(
     mainTurns: () => mainTexts().length,
     mainBytes: () => mainTexts().reduce((n, m) => n + Buffer.byteLength(m.text, "utf8"), 0),
     displays: () => piState.sentMessages.filter((m) => m.display === true && m.customType === "subagent:thread"),
-    findings: () => piState.sentMessages.filter((m) => m.display !== true && m.customType === "subagent:thread"),
+    reports: () => piState.sentMessages.filter((m) => m.display !== true && m.customType === "subagent:thread"),
     holdSpawns() {
       if (spawnGate.current === undefined) spawnGate.current = new Promise<void>((r) => (spawnGate.open = r));
     },
@@ -960,7 +960,7 @@ describe("fabric-thread P4 E2E (arch §9.5)", () => {
       expect(handle.steered.length).toBe(1);
       expect(agent.mainTurns()).toBe(turns0);
       expect(agent.stack.threads!.statusLine()).toMatch(/unknown 1/);
-      expect(agent.findings()).toHaveLength(0);
+      expect(agent.reports()).toHaveLength(0);
       expect(agent.displays().length).toBe(0);
       const routed = Object.values(hub.disk().requests).filter((r) => r.code === "thr:routed");
       expect(routed).toHaveLength(1);
@@ -986,7 +986,7 @@ describe("fabric-thread P4 E2E (arch §9.5)", () => {
       expect(handle.steered.length).toBe(1);
       expect(agent.mainTurns()).toBe(turns0); // no fallback, no re-delivery
       expect(agent.stack.threads!.statusLine()).toMatch(/unknown 1/);
-      expect(agent.findings()).toHaveLength(0);
+      expect(agent.reports()).toHaveLength(0);
       await hub.stop();
       agent.dispose();
     },
@@ -1143,7 +1143,7 @@ describe("fabric-thread P4 E2E (arch §9.5)", () => {
       await new Promise((r) => setTimeout(r, 2_000));
       // A holds a queued outcome ⇒ §6.7 forbids the auto-return; only a display line
       expect(agent.mainTurns()).toBe(turns0);
-      expect(agent.findings()).toHaveLength(0);
+      expect(agent.reports()).toHaveLength(0);
       const lines = agent.displays().filter((m) => m.content.includes("shared event") || m.content.includes("wb"));
       expect(lines.length).toBeGreaterThanOrEqual(1);
       expect(Object.values(hub.disk().requests).filter((r) => r.code === "thread-handback")).toHaveLength(0);

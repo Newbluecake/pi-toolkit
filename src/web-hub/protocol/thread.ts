@@ -215,9 +215,9 @@ export const THREAD_ERROR_CODES = [
   "E_THR_RATE",
   /** post: body over THREAD_POST_TEXT_MAX_BYTES. effect none. */
   "E_THR_TOO_LARGE",
-  /** handback: source no longer retained and not re-deliverable (§5.5 degrade-to-finding). none. */
+  /** handback: source no longer retained and not re-deliverable (§5.5 degrade-to-report). none. */
   "E_THR_HANDBACK_GONE",
-  /** handback: the sender was revoked (/webhub feishu deny) — propagate no further, no finding. */
+  /** handback: the sender was revoked (/webhub feishu deny) — propagate no further, no report. */
   "E_THR_REVOKED",
   /** session/install/generation mismatch or commit failure; effect none when pre-commit, unknown
    *  when the successor may already exist in memory (§8.3 persistence barrier). */

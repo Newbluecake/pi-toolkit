@@ -7,7 +7,7 @@ const base = (state: FabricRecord["state"] = "pending"): FabricRecord => ({
   key: "r_ABCDEFGH:root:1:1" as FabricRecord["key"],
   from: "r_ABCDEFGH",
   to: "root",
-  kind: "finding",
+  kind: "report",
   seq: 1,
   generation: 1,
   payload: { text: "hello" },

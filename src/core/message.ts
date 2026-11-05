@@ -2,7 +2,7 @@ import type { Generation, Millis, RunId } from "./types.js";
 import { isRunId } from "./ids.js";
 
 export type NodeRef = RunId | "root" | "system";
-export type MessageKind = "progress" | "finding" | "directive" | "result" | "dead_letter";
+export type MessageKind = "progress" | "report" | "directive" | "result" | "dead_letter";
 export type MessageChannel = "context" | "display";
 
 export type MessageKey = string & { readonly __messageKey: unique symbol };
@@ -103,7 +103,13 @@ export interface FabricRecord extends MessageEnvelope {
   storageKey?: string;
 }
 
-const MESSAGE_KINDS: readonly MessageKind[] = ["progress", "finding", "directive", "result", "dead_letter"];
+const MESSAGE_KINDS: readonly MessageKind[] = ["progress", "report", "directive", "result", "dead_letter"];
+
+/** #34: the kind set is closed; a kind persisted before the rename is no longer a kind. Every entry point
+ *  (authorize, router, mailbox, wake) rejects such a value via this predicate instead of listing literals. */
+export function isMessageKind(value: unknown): value is MessageKind {
+  return typeof value === "string" && (MESSAGE_KINDS as readonly string[]).includes(value);
+}
 
 function validNode(node: string): boolean {
   return node === "root" || node === "system" || isRunId(node);
@@ -171,7 +177,7 @@ export interface AuthorizationInput {
 }
 
 export function authorize({ kind, relation, canMessage, from, mention, route }: AuthorizationInput): boolean {
-  if (!MESSAGE_KINDS.includes(kind)) return false;
+  if (!isMessageKind(kind)) return false;
   // plan §4.1: a wake_result is system → waker only, and only as a `result`; it never rides a relation/can_message rule.
   if (route?.kind === "wake_result") return mention === undefined && kind === "result" && from === "system";
   if (kind === "dead_letter") return mention === undefined && from === "system";

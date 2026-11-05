@@ -54,7 +54,7 @@ function treeRouter(rootInboxCap: number): FabricRouter {
 }
 
 function treeDeliver(router: FabricRouter, text: string) {
-  return router.admit("r_ABCDEFGH", { to: "root", kind: "finding", text, generation: 1 });
+  return router.admit("r_ABCDEFGH", { to: "root", kind: "report", text, generation: 1 });
 }
 
 describe("xs-inbox: release rules (§8.4)", () => {

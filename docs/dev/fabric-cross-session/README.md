@@ -22,6 +22,8 @@ mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents
 `src/runtime/tool-scope.ts`; routing relations come from the agent type's `can_message`
 frontmatter (default: parent only).
 
+**消息 kind（#34 起）**：`report`（子→父/祖先，注入对方模型上下文；请教、汇报、steer 的 ack/report 回复都用它）、`progress`（发给 root 时仅 TUI 展示）、`directive`（仅父→子）、`result`（子任务结果）、`dead_letter`（内部）。#34 把旧名 `finding` 彻底改为 `report`，这是 I10 的用户批准例外（2026-11-05），范围仅限：`message_agent` schema 的 kind 常量、持久化 `FabricRecord.kind`、context-message 正文首行 `[fabric <kind> …]`（随通用 `custom_message.content` 上 wire）、设置键、`steer_subagent` 两处 description 的词汇；PROTO/caps/`StatusInfo`/`xs_*`/`thr_*` 帧、WireEntry 字段与 `subagent:fabric` customType 均不变。不兼容：不做读侧归一化；stack 重建时，未投递的持久化记录如果 kind 不在当前集合（主要是旧值 `finding`），即置 `dropped`（`terminalReason:"unknown_kind"`），不发 dead letter，告警一行；pump、resume 候选与 trigger、WakeService 调度、`parkRetryAt` 都排除未知 kind：永不投递、永不注入、永不排定时器。冻结物：`fabric-wake-off-golden.json`、`fabric-xs-off-golden.json`、`message-agent-wake-schema-golden.json` 各改一行（kind anyOf const），手工申报式更新，未再生。
+
 ## Wake phase 1
 
 **Wake phase 1 (in-tree only; `docs/dev/fabric-cross-session/plan.md` v3, packages S0/F0/W1–W6/G, reports

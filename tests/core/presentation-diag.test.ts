@@ -329,7 +329,7 @@ describe("M-A: previewToolArgs", () => {
   });
   it("renders addressed tools (consult / message_agent) as → target: body", () => {
     expect(previewToolArgs({ expert: "plan:auth", question: "why \n JWT?" })).toBe("→ plan:auth: why JWT?");
-    expect(previewToolArgs({ to: "root", kind: "finding", text: "done" })).toBe("→ root: done");
+    expect(previewToolArgs({ to: "root", kind: "report", text: "done" })).toBe("→ root: done");
     // Only one half present ⇒ no arrow form.
     expect(previewToolArgs({ expert: "main" })).toBe("expert=main");
   });

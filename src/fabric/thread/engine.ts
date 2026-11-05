@@ -494,12 +494,12 @@ export class ThreadEngine {
     return { ok: true, subId: sub.subId };
   }
 
-  /** `thr_res` lands (explicit or system): records the state; `gone` ⇒ P3 degrades to a finding. */
-  markHandback(eventId: ThreadEventId, state: "done" | "gone" | "unknown"): { degrade: "finding" | "none" } {
+  /** `thr_res` lands (explicit or system): records the state; `gone` ⇒ P3 degrades to a report. */
+  markHandback(eventId: ThreadEventId, state: "done" | "gone" | "unknown"): { degrade: "report" | "none" } {
     const record = this.records.get(eventId);
     if (!record) return { degrade: "none" };
     record.handback = state;
-    return { degrade: state === "gone" ? "finding" : "none" };
+    return { degrade: state === "gone" ? "report" : "none" };
   }
 
   // ------------------------------------------------------------------ rebind-plan §3.2 acquire/rebind

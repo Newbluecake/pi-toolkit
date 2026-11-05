@@ -9,7 +9,7 @@ export const MessageAgentParams = Type.Object({
     description:
       'Target run id, "root" for the root session, or @label for a registered top-level agent (requires can_message: mention)',
   }),
-  kind: Type.Union([Type.Literal("progress"), Type.Literal("finding"), Type.Literal("directive")]),
+  kind: Type.Union([Type.Literal("progress"), Type.Literal("report"), Type.Literal("directive")]),
   text: Type.String({ description: "Message body" }),
 });
 export type MessageAgentParams = Static<typeof MessageAgentParams>;
@@ -60,21 +60,21 @@ export interface MessageAgentToolDeps {
 /**
  * Self-correction guidance appended (after the verbatim router text) when admission fails with `message not authorized`.
  * Mirrors `authorize()` in `src/core/message.ts` by kind — directive needs the sender to be the target's parent,
- * progress/finding need the target's relation to the sender inside her `can_message` set. The router's tree is not
+ * progress/report need the target's relation to the sender inside her `can_message` set. The router's tree is not
  * visible here, so the branches are kind-driven (that is exactly what the model got wrong in #33: `directive` up,
- * `progress` to root, or a grandchild's `finding` straight to root).
+ * `progress` to root, or a grandchild's `report` straight to root).
  */
 export function messageAgentKindHint(input: { to: string; kind: string; canMessage?: readonly CanMessage[] }): string {
   if (input.to.startsWith("@")) {
     return (
-      'the @label route requires can_message: mention and only carries kind "finding" (or "progress"); ' +
+      'the @label route requires can_message: mention and only carries kind "report" (or "progress"); ' +
       'kind "directive" is parent-to-child only.'
     );
   }
   if (input.kind === "directive") {
     return (
       'kind "directive" may only be sent by a parent to its own child run. To make the target session\'s model ' +
-      'actually see your message, use kind:"finding" instead; kind:"progress" only renders in the TUI display and ' +
+      'actually see your message, use kind:"report" instead; kind:"progress" only renders in the TUI display and ' +
       "the model never sees it; task results are reported via run completion, not this tool."
     );
   }
@@ -87,13 +87,16 @@ export function messageAgentKindHint(input: { to: string; kind: string; canMessa
   );
 }
 
+/** The kinds a caller may send (#34 E1; schema order). A retired kind is not sendable any more. */
+const SENDABLE_KINDS: readonly string[] = ["progress", "report", "directive"];
+
 export function createMessageAgentTool(deps: MessageAgentToolDeps): ToolDefinition<typeof MessageAgentParams> {
   const wakeOn = deps.wakeOn === true;
   return {
     name: "message_agent",
     label: "message_agent",
     description:
-      'Send a message to another agent or the root session. Kind semantics: "finding" is injected into the target ' +
+      'Send a message to another agent or the root session. Kind semantics: "report" is injected into the target ' +
       "session's model context — use it to ask questions of, or report findings to, the parent/root session; " +
       '"progress" only renders in the TUI display when to:"root" — the model NEVER sees it (never use it to ask a ' +
       'question); "directive" may only be sent by a parent to its own child run (a child sending it upward is rejected). ' +
@@ -101,6 +104,15 @@ export function createMessageAgentTool(deps: MessageAgentToolDeps): ToolDefiniti
     // The wake-on schema is a strict superset (one extra optional field), so the declared tool type stays the legacy one.
     parameters: messageAgentParams({ wake: wakeOn }) as typeof MessageAgentParams,
     async execute(_toolCallId, params) {
+      // #34 (E1): guard before anything else — pi's schema validation normally rejects an unknown kind upstream, but a
+      // direct caller bypassing it must not reach the router/mention (which would answer "message not authorized",
+      // misleading for a retired kind). Synchronous throw: no seq, no quota, no record.
+      if (!SENDABLE_KINDS.includes(params.kind))
+        throw new Error(
+          `message_agent: unknown kind "${params.kind}" — valid kinds: "report" (enters the target session's model ` +
+            'context; use it to ask or report back), "progress" (to:"root" only renders in the TUI display), ' +
+            '"directive" (parent to its own child run only)',
+        );
       const wake = wakeOn ? (params as { wake?: unknown }).wake : undefined;
       if (wake !== undefined && typeof wake !== "boolean") throw new Error("message_agent: wake must be a boolean");
       try {

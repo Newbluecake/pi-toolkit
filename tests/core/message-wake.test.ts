@@ -6,7 +6,7 @@ import { authorize, type MessageKind, type MessageRelation } from "../../src/cor
  * "system"`; every legacy call (no route) authorizes exactly as before.
  */
 const route = { kind: "wake_result", runId: "r_SUCC0001" } as const;
-const KINDS: MessageKind[] = ["progress", "finding", "directive", "result", "dead_letter"];
+const KINDS: MessageKind[] = ["progress", "report", "directive", "result", "dead_letter"];
 const RELATIONS: MessageRelation[] = ["self", "parent", "child", "ancestor", "descendant", "sibling", "unrelated"];
 
 describe("authorize() with a wake_result route", () => {
@@ -46,6 +46,6 @@ describe("authorize() with a wake_result route", () => {
     expect(authorize({ kind: "result", relation: "unrelated", from: "system" })).toBe(false);
     expect(authorize({ kind: "result", relation: "parent", from: "system" })).toBe(false);
     expect(authorize({ kind: "dead_letter", relation: "unrelated", from: "system" })).toBe(true);
-    expect(authorize({ kind: "finding", relation: "parent", canMessage: ["parent"] })).toBe(true);
+    expect(authorize({ kind: "report", relation: "parent", canMessage: ["parent"] })).toBe(true);
   });
 });

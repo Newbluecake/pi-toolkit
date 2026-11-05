@@ -13,7 +13,7 @@
  * The §7.3 retry laws live HERE (shared with the stack's system auto-return): post — 5s deadline
  * (the connection enforces it), then ONE retry with the SAME postId; still pending ⇒ `unknown`
  * ("possibly sent — do not repeat"). handback — timeout or `effect:"unknown"` ⇒ 2s later ONE
- * retry with identical parameters; still unclear ⇒ `handback=unknown` (no finding — a successor
+ * retry with identical parameters; still unclear ⇒ `handback=unknown` (no report — a successor
  * may already exist, §5.5 #5).
  */
 import { Type, type Static } from "@sinclair/typebox";
@@ -63,7 +63,7 @@ export async function thrPostWithRetry(
 
 /**
  * `thr_req{op:"handback"}` — §5.5 #5/§7.3: a timeout OR an `effect:"unknown"` reply retries ONCE
- * with identical parameters after 2s; still unclear ⇒ `handback=unknown` (no finding). `by`
+ * with identical parameters after 2s; still unclear ⇒ `handback=unknown` (no report). `by`
  * carries the explicit `{runId,label}` or `"system"` (the auto-return).
  */
 export async function thrHandbackWithRetry(
@@ -137,13 +137,13 @@ export interface ThreadChildOps {
   unsubscribe(h: string): { ok: true } | { ok: false; reason: string };
   /** §5.5 the THREE local rules (engine.requestHandback): delivered-to-this-run, inside H, ACTIVE ∧ cap. */
   requestHandback(input: { eventId: string }): { ok: true } | { ok: false; reason: string };
-  markHandback(eventId: string, state: "done" | "gone" | "unknown"): { degrade: "finding" | "none" };
+  markHandback(eventId: string, state: "done" | "gone" | "unknown"): { degrade: "report" | "none" };
   /** P4 §5.5 #5: a `subagent:thread` DISPLAY entry (context-free, no wake) for an E_THR_REVOKED
    *  handback — the revoked sender's content is not propagated further, so the main session only
-   *  gets this audit line instead of a finding. Emitted by the HOST (stack), never the child. */
+   *  gets this audit line instead of a report. Emitted by the HOST (stack), never the child. */
   noteRevokedHandback(eventId: string): void;
-  /** §5.5 #5 degrade channel — the surface composes and sends the finding to the main session. */
-  sendHandbackFinding(eventId: string, code: string, reason: string): void;
+  /** §5.5 #5 degrade channel — the surface composes and sends the report to the main session. */
+  sendHandbackReport(eventId: string, code: string, reason: string): void;
   recordReply(subId: string): void;
   hubCapable(): boolean;
   /** This main session's pi session id — the §7.3 hub-side ownership check input. */
@@ -272,12 +272,12 @@ export function createThreadChildTool(deps: ThreadChildToolDeps): ToolDefinition
             );
           }
           if ("error" in outcome) {
-            // §5.5 #5 degrade table: GONE/REBOUND ⇒ finding; REVOKED ⇒ no finding, display only.
+            // §5.5 #5 degrade table: GONE/REBOUND ⇒ report; REVOKED ⇒ no report, display only.
             if (outcome.error === "E_THR_HANDBACK_GONE" || outcome.error === "E_THR_REBOUND") {
               deps.ops.markHandback(eventId, "gone");
-              deps.ops.sendHandbackFinding(eventId, outcome.error, reason);
+              deps.ops.sendHandbackReport(eventId, outcome.error, reason);
               return reply(
-                `${outcome.error}: the hub can no longer re-deliver the original. A finding was sent to the main session — the reply cannot automatically return to the thread.`,
+                `${outcome.error}: the hub can no longer re-deliver the original. A report was sent to the main session — the reply cannot automatically return to the thread.`,
               );
             }
             if (outcome.error === "E_THR_REVOKED") {

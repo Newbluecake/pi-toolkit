@@ -1074,8 +1074,8 @@ export function buildSessionStack(
     /** §4.3 origin 候选（最近 10 分钟，cap 8）。 */
     const origins: Array<{ h: string; label: string; at: number }> = [];
     const ORIGIN_WINDOW_MS = 10 * 60_000;
-    /** §5.5 #5 degrade finding —进上下文、唤醒主会话。 */
-    const sendFinding = (eventId: string, text: string): void => {
+    /** §5.5 #5 degrade report —进上下文、唤醒主会话。 */
+    const sendReport = (eventId: string, text: string): void => {
       pi.sendMessage(
         {
           customType: "subagent:thread",
@@ -1158,11 +1158,11 @@ export function buildSessionStack(
           if ("error" in outcome) {
             if (outcome.error === "E_THR_HANDBACK_GONE" || outcome.error === "E_THR_REBOUND") {
               engine.markHandback(eventId, "gone");
-              sendFinding(eventId, `自动回流失败（${outcome.error}）：回复无法自动回到飞书话题`);
+              sendReport(eventId, `自动回流失败（${outcome.error}）：回复无法自动回到飞书话题`);
               return;
             }
             if (outcome.error === "E_THR_REVOKED") {
-              engine.markHandback(eventId, "done"); // §5.5 #5：撤权 ⇒ 不发 finding
+              engine.markHandback(eventId, "done"); // §5.5 #5：撤权 ⇒ 不发 report
               // P4：补一行 display（不进上下文），主会话可审计「该事件因撤权被终结」。
               threadDisplay(
                 `[thread] 事件 ${eventId} 自动回流被拒（E_THR_REVOKED，发送者已撤权）— 事件不再传播，已终结`,
@@ -1412,8 +1412,8 @@ export function buildSessionStack(
             // P4 §5.5 #5：显式 handback 的 REVOKED 分支 — 一条 display 行（不进上下文、不唤醒）。
             threadDisplay(`[thread] 事件 ${eventId} 交回被拒（E_THR_REVOKED，发送者已撤权）— 事件不再传播，订阅已结束`);
           },
-          sendHandbackFinding: (eventId: string, code: string, reason: string) =>
-            sendFinding(eventId, `交回失败（${code}，原因：${reason}）：回复无法自动回到飞书话题`),
+          sendHandbackReport: (eventId: string, code: string, reason: string) =>
+            sendReport(eventId, `交回失败（${code}，原因：${reason}）：回复无法自动回到飞书话题`),
           recordReply: (subId: string) => engine.recordReply(subId),
           hubCapable: () => liveHubCapable(),
           sessionId: () => currentSessionId(ctx),

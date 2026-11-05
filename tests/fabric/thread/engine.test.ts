@@ -307,7 +307,7 @@ describe("ThreadEngine · handback admission (§5.5)", () => {
     expect(h.engine.inspectSubscriptions()[0]!.endReason).toBe("handback");
     expect(h.engine.inspectRecord(e.eventId)?.handback).toBe("pending");
     expect(h.engine.stats().handback).toBe(1);
-    expect(h.engine.markHandback(e.eventId, "gone")).toEqual({ degrade: "finding" });
+    expect(h.engine.markHandback(e.eventId, "gone")).toEqual({ degrade: "report" });
     expect(h.engine.markHandback(e.eventId, "done")).toEqual({ degrade: "none" });
   });
 

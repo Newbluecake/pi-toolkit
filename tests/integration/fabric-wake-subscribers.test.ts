@@ -160,7 +160,7 @@ describe("W6 subscribers end to end (real stack, real message_agent tools)", () 
     // A wakes the finished run through its real tool ⇒ revive
     const first = await wakerTools[0]!.execute("t1", {
       to: target,
-      kind: "finding",
+      kind: "report",
       text: "wake: please redo",
       wake: true,
     });
@@ -170,7 +170,7 @@ describe("W6 subscribers end to end (real stack, real message_agent tools)", () 
     await until(() => stack.query.get(revived.runId)?.status === "running");
 
     // B coalesces into the now-running revived run (redirect steer) and subscribes
-    const second = await wakerTools[1]!.execute("t2", { to: target, kind: "finding", text: "me too", wake: true });
+    const second = await wakerTools[1]!.execute("t2", { to: target, kind: "report", text: "me too", wake: true });
     expect(second.details).toMatchObject({ ok: true, status: "accepted", wake: true });
     await until(() => reviveSteers.some((t) => t.includes("me too")));
     expect(stack.query.list().filter((s) => s.diag.wakeOrigin !== undefined)).toHaveLength(1); // one resume only

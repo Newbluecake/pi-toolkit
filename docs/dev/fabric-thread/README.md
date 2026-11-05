@@ -57,8 +57,8 @@
    fabric（mailbox）之前 dispose（§9.4；`tests/integration/stack-teardown-matrix.test.ts`）。
    dispose 期间终结的 run 不触发自动回流；晚到 steer 结果因代际令牌失效而丢弃。
 10. **显示面**：routed 事件 / 未送达通知 / REVOKED 交回各写一条 `subagent:thread` **display**
-    entry（不进上下文）；handback 降级（GONE/REBOUND）发 finding（进上下文、唤醒）；
-    REVOKED **不发** finding（撤权内容不再传播）。
+    entry（不进上下文）；handback 降级（GONE/REBOUND）发 report（进上下文、唤醒）；
+    REVOKED **不发** report（撤权内容不再传播）。
 11. **Runner 透传**：`runtime-adapter` 必须暴露 `steerThreadRun`/`hasActiveSession`
     （`service/ports.ts` Runner 可选成员；P4 E2E 抓到过缺失导致 cast 调 undefined 的真 bug）。
 12. **I4/I5**：订阅表/lane/EventRecord 归 stack 实例（无模块级可变状态）；所有 timer unref。

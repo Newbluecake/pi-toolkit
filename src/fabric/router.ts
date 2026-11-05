@@ -3,6 +3,7 @@ import type { RunId } from "../core/types.js";
 import {
   authorize,
   effectiveChannel,
+  isMessageKind,
   makeMessageKey,
   type FabricRecord,
   type MentionRoute,
@@ -16,6 +17,7 @@ import {
 import type { FabricTree, TreeTargetState } from "./tree.js";
 import type { FabricThrottle } from "./throttle.js";
 import type { InboxDurability } from "./wake.js";
+import { retireUnknownKind } from "./unknown-kind.js";
 
 export interface FabricRouterConfig {
   maxPerRun: number;
@@ -51,7 +53,7 @@ export interface WakePolicy {
   /** Effective `wake:true` sends allowed per sender run (`fabric.wake.perRunQuota`). */
   perRunQuota: number;
   /**
-   * W5: synchronous admission-time gate for a `wake:true` finding/directive to a FINISHED non-root target (the revive
+   * W5: synchronous admission-time gate for a `wake:true` report/directive to a FINISHED non-root target (the revive
    * path). `refuse` ⇒ the message is not admitted at all (`not_wakeable`); `downgrade` ⇒ it is admitted deliver-only
    * (parked) with the reason reported. `rootWakes` is the sender's effective wake:true sends to the root so far — they
    * share the one per-run expensive-class quota with revives. Absent ⇒ no revive gate (wake off).
@@ -107,7 +109,7 @@ const truncate = (text: string, max: number): string =>
     : [...text].slice(0, Math.ceil(max * 0.75)).join("") + [...text].slice(-Math.floor(max * 0.25)).join("");
 
 export class FabricRouter {
-  private readonly used = new Map<NodeRef, Record<"progress" | "finding" | "directive", number>>();
+  private readonly used = new Map<NodeRef, Record<"progress" | "report" | "directive", number>>();
   private readonly deadLetterUsed = new Map<NodeRef, number>();
   private readonly dlRefs = new Map<MessageKey, DeadLetterOutcome>();
   private readonly dlPlaceholders = new Set<MessageKey>();
@@ -127,7 +129,7 @@ export class FabricRouter {
   hydrate(records: readonly FabricRecord[]): void {
     for (const r of records) {
       this.seq.set(this.link(r.from, r.to), Math.max(this.seq.get(this.link(r.from, r.to)) ?? 0, r.seq));
-      if (r.rejected === undefined && (r.kind === "progress" || r.kind === "finding" || r.kind === "directive"))
+      if (r.rejected === undefined && (r.kind === "progress" || r.kind === "report" || r.kind === "directive"))
         this.count(r.from, r.kind);
       // plan §3.1: an effective wake:true to the root (records to the root store the post-downgrade value)
       if (r.rejected === undefined && r.to === "root" && r.wake === true)
@@ -144,6 +146,21 @@ export class FabricRouter {
             : { status: r.deadLetter.status },
         );
     }
+  }
+
+  /**
+   * #34 (E3): drop every persisted non-terminal record whose kind is no longer a MessageKind (written by an older
+   * version). One synchronous bounded pass at stack build; idempotent (terminal records never match again). Frozen
+   * engine ⇒ nothing to do. No dead letter, no `onChanged()`, no logging — the caller reports the count.
+   */
+  retireUnknownKinds(): { dropped: number } {
+    if (this.frozen) return { dropped: 0 };
+    let dropped = 0;
+    for (const r of this.engine.select(
+      (r) => !isMessageKind(r.kind) && (r.state === "pending" || r.state === "claimed"),
+    ))
+      if (retireUnknownKind(this.engine, r)) dropped++;
+    return { dropped };
   }
 
   /** Display-only sender label lookup (config.senderLabel); sanitized to a non-empty string or undefined. */
@@ -165,10 +182,10 @@ export class FabricRouter {
     )
       throw new Error("mention target is gone");
     // canMessage describes the target relationship as seen by the sender.
-    // Only configurable progress/finding messages use that inverse relation;
+    // Only configurable progress/report messages use that inverse relation;
     // result/directive keep their protocol-defined direction checks.
     const relation =
-      input.kind === "progress" || input.kind === "finding"
+      input.kind === "progress" || input.kind === "report"
         ? this.tree.relation(input.to, from, this.now())
         : this.tree.relation(from, input.to, this.now());
     const authorization = mention
@@ -235,7 +252,7 @@ export class FabricRouter {
       wake === false &&
       input.to !== "root" &&
       this.targetState(input.to) === "gone" &&
-      (input.kind === "finding" || input.kind === "directive");
+      (input.kind === "report" || input.kind === "directive");
     const canPark = parkRequested && this.config.inbox!.durability !== "stack-memory";
     if (
       !rejection &&
@@ -285,7 +302,7 @@ export class FabricRouter {
       if (old) this.engine.transition(old.key, "pending", "consumed", { terminalReason: "superseded" });
     }
     this.engine.put(record);
-    if (!rejection && (input.kind === "progress" || input.kind === "finding" || input.kind === "directive"))
+    if (!rejection && (input.kind === "progress" || input.kind === "report" || input.kind === "directive"))
       this.count(from, input.kind);
     if (!rejection && wake === true && input.to === "root") this.wakeSent.set(from, (this.wakeSent.get(from) ?? 0) + 1);
     this.onChanged();
@@ -319,7 +336,7 @@ export class FabricRouter {
     if (
       !this.config.inbox ||
       this.config.inbox.durability === "stack-memory" ||
-      (record.kind !== "finding" && record.kind !== "directive")
+      (record.kind !== "report" && record.kind !== "directive")
     )
       return "unavailable";
     if (record.parked) return "parked";
@@ -567,18 +584,18 @@ export class FabricRouter {
   freeze(): void {
     this.frozen = true;
   }
-  private count(from: NodeRef, kind: "progress" | "finding" | "directive"): void {
-    const value = this.used.get(from) ?? { progress: 0, finding: 0, directive: 0 };
+  private count(from: NodeRef, kind: "progress" | "report" | "directive"): void {
+    const value = this.used.get(from) ?? { progress: 0, report: 0, directive: 0 };
     value[kind]++;
     this.used.set(from, value);
   }
   private getUsed(from: NodeRef, kind: MessageKind): number {
-    return kind === "progress" || kind === "finding" || kind === "directive" ? (this.used.get(from)?.[kind] ?? 0) : 0;
+    return kind === "progress" || kind === "report" || kind === "directive" ? (this.used.get(from)?.[kind] ?? 0) : 0;
   }
   private quota(kind: MessageKind): number | undefined {
     return kind === "progress"
       ? this.config.maxPerRun
-      : kind === "finding"
+      : kind === "report"
         ? this.config.findingQuota
         : kind === "directive"
           ? this.config.directiveQuota

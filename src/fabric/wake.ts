@@ -3,6 +3,7 @@ import type { Clock, TimerHandle } from "../core/clock.js";
 import { clampSpanMs } from "../core/deadline.js";
 import { newRunId } from "../core/ids.js";
 import type { FabricRecord, MessageKey, NodeRef, WakeDowngrade, WakeExclusion } from "../core/message.js";
+import { isMessageKind } from "../core/message.js";
 import {
   THINKING_LEVELS,
   type AdmissionReason,
@@ -17,6 +18,7 @@ import type { QueryService } from "../service/query-service.js";
 import type { SpawnService } from "../service/spawn-service.js";
 import type { Tombstone } from "../service/tombstone.js";
 import type { FabricRouter, ReviveGate } from "./router.js";
+import { retireUnknownKind } from "./unknown-kind.js";
 import type { CausalLevel } from "./wake-level.js";
 
 export type InboxDurability = "disk" | "session-memory" | "stack-memory";
@@ -115,7 +117,7 @@ export interface WakeServiceDeps {
 const terminal = (s: RunSnapshot): boolean =>
   ["completed", "failed", "timed_out", "aborted"].includes(s.status) && s.diag.restartInterrupted === undefined;
 const active = (r: FabricRecord): boolean =>
-  r.state === "pending" && (r.reserved !== undefined || r.quarantined === true);
+  r.state === "pending" && isMessageKind(r.kind) && (r.reserved !== undefined || r.quarantined === true);
 const clearReservation = { reserved: undefined } as unknown as Partial<FabricRecord>;
 const HOUR = 3_600_000;
 const RECHECK_MS = 60_000;
@@ -228,7 +230,7 @@ export class WakeService implements InboxPort {
     this.fold(deps.entries);
     for (const r of deps.engine.select(active)) this.recovered.add(r.key);
     for (const r of deps.engine.select(
-      (r) => r.state === "pending" && r.steerAttempt !== undefined && r.reserved === undefined,
+      (r) => r.state === "pending" && isMessageKind(r.kind) && r.steerAttempt !== undefined && r.reserved === undefined,
     ))
       this.steerRecovered.add(r.key);
     this.unverified = deps.engine.select((r) =>
@@ -245,6 +247,7 @@ export class WakeService implements InboxPort {
       .select(
         (r) =>
           r.state === "pending" &&
+          isMessageKind(r.kind) &&
           r.parked !== undefined &&
           !r.reserved &&
           !r.quarantined &&
@@ -254,6 +257,12 @@ export class WakeService implements InboxPort {
       )
       .sort((x, y) => x.createdAt - y.createdAt || x.seq - y.seq);
     const trigger = a.trigger ? this.deps.engine.get(a.trigger.key) : undefined;
+    // #34 (E8②): a trigger whose kind is no longer a MessageKind is retired and treated exactly like a missing
+    // trigger — no block, nothing reserved; the spawn side then sees a retryable config error, never a wake loop.
+    if (a.trigger && trigger !== undefined && !isMessageKind(trigger.kind)) {
+      retireUnknownKind(this.deps.engine, trigger);
+      return { trackInput: false, persistFailed: true };
+    }
     const candidates = [...(trigger ? [trigger] : []), ...parked].slice(0, 8);
     const bound: FabricRecord[] = [];
     const rollback = () => {

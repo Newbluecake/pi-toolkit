@@ -327,7 +327,7 @@ describe("C-P4: message_agent schema golden through real pi tool registration", 
 
 /**
  * C-P5 (G, plan §3.8/§8): a REAL in-memory pi session (`SessionManager.inMemory`, no session file) — a real stack's
- * inbox durability is `session-memory`; a `wake:false` finding to a finished run PARKS (via the real `message_agent`
+ * inbox durability is `session-memory`; a `wake:false` report to a finished run PARKS (via the real `message_agent`
  * tool, which reports `inboxDurability`) and the parked record is still pending, with the same hint in the status view,
  * after the stack is rebuilt on the same SessionManager (the /reload path).
  */
@@ -441,7 +441,7 @@ describe("C-P5: real in-memory session — park survives a stack rebuild and car
 
     const sent = await tools[0]!.execute("t1", {
       to: target,
-      kind: "finding",
+      kind: "report",
       text: "keep this for later",
       wake: false,
     });

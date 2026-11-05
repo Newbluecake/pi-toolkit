@@ -24,7 +24,7 @@ const rec = (patch: Partial<FabricRecord>): FabricRecord => ({
   key: `${A}:root:1:1` as MessageKey,
   from: A,
   to: "root",
-  kind: "finding",
+  kind: "report",
   seq: 1,
   generation: 1 as never,
   payload: { text: "x" },

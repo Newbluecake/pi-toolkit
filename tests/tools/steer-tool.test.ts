@@ -79,14 +79,14 @@ describe("tools/steer-tool: reply framing (fabric on)", () => {
     return { tool, sent: () => sent };
   };
 
-  it("ack wraps the text with a kind-finding reply instruction", async () => {
+  it("ack wraps the text with a kind-report reply instruction", async () => {
     const { tool, sent } = captured();
     const out = await tool.execute("t1", { run_id: "r9", text: "pivot to the parser first", reply: "ack" });
     const framed = sent();
     expect(framed).toBeDefined();
     expect(framed!.startsWith("[主会话 steer · 需回复]")).toBe(true);
     expect(framed).toContain("message_agent");
-    expect(framed).toContain('to: "root", kind: "finding"');
+    expect(framed).toContain('to: "root", kind: "report"');
     expect(framed).toContain("已收到 + 你将如何调整");
     expect(framed).toContain("回复后继续当前任务");
     expect(framed).toContain("主会话指令：\npivot to the parser first");
@@ -101,13 +101,13 @@ describe("tools/steer-tool: reply framing (fabric on)", () => {
     await tool.execute("t1", { run_id: "r9", text: "status?", reply: "report" });
     const framed = sent()!;
     expect(framed.startsWith("[主会话 steer · 需进度报告]")).toBe(true);
-    expect(framed).toContain('to: "root", kind: "finding"');
+    expect(framed).toContain('to: "root", kind: "report"');
     expect(framed).toContain("不超过 10 行");
     for (const field of ["已完成", "正在进行", "阻塞项", "ETA"]) expect(framed).toContain(field);
     expect(framed).toContain("主会话指令：\nstatus?");
   });
 
-  it("both framings mention the per-run finding quota (replies can be dropped)", () => {
+  it("both framings mention the per-run report quota (replies can be dropped)", () => {
     for (const reply of ["ack", "report"] as const) {
       const framed = frameSteerReply("x", reply);
       expect(framed).toContain("配额");

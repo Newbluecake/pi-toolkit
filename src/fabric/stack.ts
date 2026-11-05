@@ -156,6 +156,15 @@ export function buildFabric(
     () => mailbox.pump(),
   );
   router.hydrate([...engine.select(() => true)]);
+  // #34 (E3): persisted records written by an older version can carry a kind that no longer exists. Retire every
+  // non-terminal one here — before the WakeService and mailbox are built — with one warning line (no body, no key,
+  // no kind value) and no dead letter. Idempotent: terminal records never match again.
+  const retiredUnknown = router.retireUnknownKinds();
+  if (retiredUnknown.dropped > 0)
+    console.warn(
+      `[pi-subagent] fabric: dropped ${retiredUnknown.dropped} persisted message(s) with an unknown kind ` +
+        `(written by an older version); not delivered`,
+    );
   const ports: FabricPorts = {
     inject: async (record, opts) => {
       const steer = runnerRef.current?.steer;

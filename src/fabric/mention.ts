@@ -35,7 +35,7 @@ export function createMentionChannel(deps: MentionChannelDeps) {
   return {
     async send(
       label: string,
-      kind: Extract<MessageKind, "progress" | "finding" | "directive">,
+      kind: Extract<MessageKind, "progress" | "report" | "directive">,
       text: string,
       wake?: boolean,
     ): Promise<MentionSendResult> {

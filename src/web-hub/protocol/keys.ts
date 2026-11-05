@@ -209,7 +209,7 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
           ...(cmd !== undefined ? { cmd } : {}),
         };
       }
-      // message_agent → root 的 display 面（progress/finding 等，progressChannel:"display"）：
+      // message_agent → root 的 display 面（progress/report 等，progressChannel:"display"）：
       // TUI 靠 fabric-entry-renderer 渲染 record，web 端若走默认墓碑投影则正文永不可见
       // （2026-10-07 用户报告：@mention 后收不到 subagent 的 message_agent 回复）。
       // 终态 delivered 且带正文的记录投影为可渲染 custom_message（header 与 TUI 一致）；
@@ -225,7 +225,7 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
             ? (payload as Record<string, unknown>).text
             : undefined;
         if (d?.state === "delivered" && typeof text === "string" && text.trim() !== "") {
-          // 2026-10-24 user report: 「fabric finding」 said nothing about WHO sent the message. The header now
+          // 2026-10-24 user report: the 「[fabric <kind> …]」 header said nothing about WHO sent the message. The header now
           // shows only the sender — `@<label>` (record.fromLabel, stamped at admit() time), falling back to
           // `@<runId>` for unlabeled/old records and `@root`/`@system` for host senders. No 「fabric」/kind wording.
           const from = typeof d.from === "string" ? d.from : "";

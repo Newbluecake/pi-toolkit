@@ -5,7 +5,7 @@ import type { XsSendOutcome, XsSender } from "../fabric/xs/sender.js";
 
 /**
  * fabric phase-2 X3 (phase2-plan §4.3 + r3 M2/S3): `message_session` — the send half of the
- * main-session cross-session tool pair. Finding semantics only (P5: no `kind` parameter); the
+ * main-session cross-session tool pair. Report semantics only (P5: no `kind` parameter); the
  * recipient reads the body as UNTRUSTED input (fenced header, §8.8 — receiver side). The sender
  * identity is never a parameter: the hub stamps `from` after the four-way bind (§8.1).
  *

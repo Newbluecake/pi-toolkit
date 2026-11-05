@@ -111,7 +111,7 @@ describe("thrHandbackWithRetry (§5.5 #5: effect:unknown or timeout retries once
     expect(strip(frames[0])).toEqual(strip(frames[1]));
   });
 
-  it("both attempts unclear ⇒ unknown (no finding — a successor may exist)", async () => {
+  it("both attempts unclear ⇒ unknown (no report — a successor may exist)", async () => {
     const conn = fakeConn(() => Promise.resolve(err("E_THR_STATE", "unknown")));
     const out = await thrHandbackWithRetry(
       () => conn,
@@ -146,7 +146,7 @@ const baseOps = (over: Partial<ThreadChildOps> = {}): ThreadChildOps => ({
   requestHandback: () => ({ ok: false as const, reason: "window_expired" }),
   markHandback: () => ({ degrade: "none" as const }),
   noteRevokedHandback: () => undefined,
-  sendHandbackFinding: () => undefined,
+  sendHandbackReport: () => undefined,
   recordReply: () => undefined,
   hubCapable: () => true,
   sessionId: () => "s1",
@@ -217,8 +217,8 @@ describe("thread child tool (§5.5/§6.8 surface)", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
-  it("handback GONE degrades to a finding (§5.5 #5)", async () => {
-    const finding = vi.fn();
+  it("handback GONE degrades to a report (§5.5 #5)", async () => {
+    const report = vi.fn();
     const marked: Array<string> = [];
     const ops = baseOps({
       requestHandback: () => ({ ok: true as const }),
@@ -226,23 +226,26 @@ describe("thread child tool (§5.5/§6.8 surface)", () => {
         marked.push(state);
         return { degrade: "none" as const };
       },
-      sendHandbackFinding: finding,
+      sendHandbackReport: report,
       lastEventOf: () => "fsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       conn: () => fakeConn(() => Promise.resolve(err("E_THR_HANDBACK_GONE", "none"))),
     });
     const tool = createThreadChildTool({ runId: "r_0123456Q", label: "w1", ops });
     const text = await runTool(tool, { action: "handback", h: "fs:AAAAAAAAAAAA", reason: "not mine" });
     expect(text).toContain("E_THR_HANDBACK_GONE");
-    expect(finding).toHaveBeenCalledOnce();
+    // #34 T-U8: the GONE reply tells the child a report (not the old kind name) reached the main session —
+    // reverts to red if the wording ever falls back to the old kind name.
+    expect(text).toContain("A report was sent to the main session");
+    expect(report).toHaveBeenCalledOnce();
     expect(marked).toContain("gone");
   });
 
-  it("handback REVOKED: subscription ends, NO finding", async () => {
-    const finding = vi.fn();
+  it("handback REVOKED: subscription ends, NO report", async () => {
+    const report = vi.fn();
     const revoked = vi.fn();
     const ops = baseOps({
       requestHandback: () => ({ ok: true as const }),
-      sendHandbackFinding: finding,
+      sendHandbackReport: report,
       noteRevokedHandback: revoked,
       lastEventOf: () => "fsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       conn: () => fakeConn(() => Promise.resolve(err("E_THR_REVOKED", "none"))),
@@ -250,8 +253,8 @@ describe("thread child tool (§5.5/§6.8 surface)", () => {
     const tool = createThreadChildTool({ runId: "r_0123456Q", label: "w1", ops });
     const text = await runTool(tool, { action: "handback", h: "fs:AAAAAAAAAAAA", reason: "x" });
     expect(text).toContain("E_THR_REVOKED");
-    expect(finding).not.toHaveBeenCalled();
-    // P4 §5.5 #5: exactly ONE host-side display entry (context-free audit line), no finding.
+    expect(report).not.toHaveBeenCalled();
+    // P4 §5.5 #5: exactly ONE host-side display entry (context-free audit line), no report.
     expect(revoked).toHaveBeenCalledOnce();
     expect(revoked).toHaveBeenCalledWith("fsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
   });
