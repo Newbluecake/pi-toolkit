@@ -59,13 +59,36 @@ R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subag
 设计 `backtest-arch.md`（BA），分包 `backtest-plan.md`（B0 契约 → B1 回测核心 ∥ B2 草案生成 ∥ B4 运行时加载 ∥ B5 晋升 V2 → B3 编排/账本/`scripts/dev/reflex-backtest.mjs`）。要点：
 
 - **语料与家族**：第一遍全量 session header 建 `byPath`/`byId` 双索引（`parentSession` 是**文件路径**，按规范化路径解析，失败再从文件名抽 id 兜底；环 / 重复 id / 缺失 ⇒ unresolved ⇒ `split:"unscored"` 只进回归报告）；家族根 `sha256` 前 4 字节 mod 100 < 60 ⇒ train，否则 holdout。
-- **受理确证度（confirmed/lenient）**：每个 Turn 计算 `unknownFacts`（idle/pendingMessages/topicSwitchActive/goalBusy/inFlight/sourceMode）；`sourceMode` 只认**本轮区间内原生**（去重后归属本文件）的 `pi-hud-llm-time`（≥ `HUD_TUI_GATE_SINCE`）或同 digest 的 reflex 记录——fork 复制品、会话级证据一律不算。`unknownFacts` 空 ⇔ confirmed；**晋升率只用 confirmed**，lenient 只进覆盖率统计（K11）。
+- **受理确证度（confirmed/lenient）**：每个 Turn 计算 `unknownFacts`（idle/pendingMessages/topicSwitchActive/goalBusy/inFlight/sourceMode）；`sourceMode` 只认**本轮区间内原生**（去重后归属本文件）的 `pi-hud-llm-time`（≥ `HUD_TUI_GATE_SINCE`）或同 digest 的 reflex 记录——fork 复制品、会话级证据一律不算。`unknownFacts` 空 ⇔ confirmed；**晋升率只用 confirmed**，lenient 只进覆盖率统计（K11）。注：离线回测中 `inFlight` 恒可推导、从不产生（`corpus.ts`），该事实仅存在于运行时语义。
 - **DRX（K4）**：草案 intent 正则受 `core/draft-regex.ts` 有限语法约束（纯字面量 + 单个 `\d{1,4}` + 固定尾缀 + ≤12 alternation；解析器拒绝一切其余形状——`(a|a)+`、相邻 `+`、字符类、反向引用、lookaround 等在语法层即拒）。安全性 = 每起点 ≤12·4·3 条路径的语法论证，不依赖运行时计时器。
 - **身份（K8）**：证据身份 = `lineage + templateHash`（只覆盖 port.id 与 strong/weak/exclude）；`draft.x` 改写进 catalog 时保留 `lineage:"draft.x"`，改 id 不抹掉此前的重复/纠正；改模板不升版也会分开证据。旧版本 builtin 落 `id@ver#legacy` 身份，永不与新身份合并。
 - **草案文件**：`<agentDir>/reflex/drafts/*.json`，单个 `RScriptV1`（`origin:"extracted"`、id `^draft\.[a-z0-9-]+$`、requires/agreement/render 逐字段等于 `PORT_DEFAULTS[port]`、无 budgetMs、条目数 caps、正则过 DRX、例句自检 hit 全 high）；加载见 R-I13。builtin 记录**一个新字段都不写**（`portId` 由 `scriptId` 经 `portOfScript` 反查，BD11）。
 - **晋升 V2（BA §4.7）**：门槛 = 回测侧（`batchValid.ok ∧ confirmed.judged ≥50 ∧ 分歧 ≤5% ∧ 评审覆盖 suspect ∧ misfire=0`）或实时侧（`live.judged ≥50 ∧ 分歧 ≤5%`）；port 可靠性按 `(portId, portVer)`，`runs ≥10 ∧ ok===runs ∧ missing===0`，`missing>0` ⇒ undetermined；零容忍（重复/纠正/跨会话重复 = 0）按身份汇总；`scanComplete:false` ⇒ 否。结论只是建议，最终认证 = catalog PR（见威胁模型）。
 - **批次 / manifest / 暴露账本（K9）**：`batch freeze` 写不可变 `manifests/<hash>.json` 与 `batches/<batchId>.json`（`wx`，永不覆盖，只含 holdout 轮次的 `sha256(entryId\0at)` 键与 digest）；**展示任何留出失败明细**（suspect 行 / review / show）时自动追加 `exposure.jsonl`（只展示聚合计数不算暴露）；`batchValidity`：本批次在**其它 hash** 下被暴露过 ⇒ `exposed-then-modified` 作废，manifest 缺失 ⇒ `manifest-missing`；被拒批次转回归集。新批次须过 `admitBatch`（每个轮次晚于 `lastRevisedAt(lineage)`、digest 不在任何已暴露批次）。模板修订时间来自追加型 `revisions.jsonl`（first-seen + catalog git 提交时间取 max）。
 - **上线流程（摘要）**：B3 合入后本机 `npm run build && node scripts/dev/reflex-backtest.mjs` → `generate`（无工具 port 候选用 `--assign` 人工指定，`TOOLLESS_PORTS` 不自动标注）→ 人工挑选 `drafts-out/` → `reflex.drafts.enabled=true` + `/reload` 攒 shadow 证据 → `batch freeze` → `review`（未认证记录，展示即暴露）→（若据失败修改模板 ⇒ 该批次对新 hash 作废，等新批次或实时证据）→ 人把草案改写进 `catalog.ts`（builtin id、`lineage`、升 version）→ `--promote <id> --batch <batchId>` 出身份元组 → PR → 用户批准即认证 → 用户把 id 加进 `reflex.autoResolve`。
+
+### 回测实现口径（B1–B5 交付报告中被 root 接受的裁定，B3′ 同步）
+
+接受方式分两种：B1 的 D1–D4 由 root 通过 steer 明确裁定接受；B2 §3、B3 §2、B5 的默认做法由 root 审阅子 agent 的 finding 后接受（未逐条书面回复，但已记入任务并据此派发下游）。各条「是什么、为什么」；详细论证见对应报告。不改变 R-I12/R-I13/R-I14 与威胁模型的含义。
+
+- **B1 · fence active ⇒ lenient**（B1 §3 D1）：topic-switch hold / goal 活跃（导出为 active）时该事实计入 `unknownFacts`，轮次归 lenient。为什么：active fence 在运行时必被 `fence-topic`/`fence-goal` 否决，若计入 confirmed 会稀释分歧率语义（宁少算不虚算，K11 同向）。
+- **B1 · fence 状态轮开启时快照**（B1 §3 其余实现口径，`corpus.ts`）：fence（topic-switch/goal）状态在**轮开启时**快照，区间内被 outcome 解除不改写历史（与运行时 input 时读一致）；fence 的 malformed 条目使后续轮计为 lenient，直到下一条合法条目重新定格状态。为什么：回测只能重放已落盘事实，不能反推「若 fence 未激活会怎样」。
+- **B1 · replay 用理想 TUI 事实**（D2）：回测对**所有**轮次（含 steer/replay 来源）用与 `/reflex explain` 同口径的理想 TUI 空闲事实；来源分类只服务语料筛选（web/injected 排除）与聚类，不影响 gate。为什么：回测的问题是「若在 TUI 空闲敲出会否命中」（BA §4.3 counterfactual 语义）。
+- **B1 · CorrectionFact 只受 since 下界**（D3）：纠正证据不受 `until` 上界截断，晚于窗口结束的纠正仍可指向窗口内轮次。为什么：截断只会少计纠正，违反「离线只会多计纠正（保守）」原则；运行时 90s memo 窗天然兜底。
+- **B1 §3.1 / B3 · 升序喂入约定**（D4）：编排层把会话文件按 header `timestamp` 升序（同刻按文件名稳定排序）喂给 `createCorpusBuilder`（祖先先于 fork），并仍消费 `takeRevoked()`。为什么：钉住 BD5 的次序无关语义并保证 cold/warm 逐字节一致；builder 本身 turn 级 steal+revoke 自愈，乱序时结果仍自洽但 confirmed/lenient 划分可能偏松（保守方向）。
+- **B2 · 聚类 token 化与阈值可注入**（B2 §3 D1/D12）：CJK token = 单字 + 相邻 bigram（ascii 整词、占位符单 token），leader 贪心 Jaccard ≥0.6；`ClusterOptions.jaccard` 已可注入，真实语料簇太碎时在 B3′/后续微调，不动 B2 冻结面。为什么：纯 bigram 会拆开换前缀的同义句；阈值注入让调参不侵入生成器。
+- **B2 · 无工具簇需人工 `--assign`**（§1 步骤 3）：簇的众数（modal）toolCount 为 0 且与 TOOLLESS builtin weak 词法相交的簇归 `needsPort`，不自动标注 port；B3 `generate --assign <cluster>:<port>` 人工指定后才生成。为什么：`TOOLLESS_PORTS` 无工具签名，自动猜测 port 意图不可靠。
+- **B3 · 缓存失效 = 整体重扫**（B3 §2）：任一缓存文件的 size/mtime/dev/ino、增删或父链变化 ⇒ 全量重解析 + 家族索引重建（warm 则完整复用）。为什么：单文件重解析无法重建跨文件 claims / sourceMode / child provenance，整体重扫比 BA 的文件级重解析保守。
+- **B3 · normalizeVersion 口径与 cacheV 维护义务**（B3 §2 / §6.3）：normalizeVersion = `sha256(normalizeInput.toString())`（MARKERS_VERSION、CORRECTION_RE hash 各自独立）。**normalize 依赖的外部常量变化而函数体未变时，须手动升本包 cacheV**——源码 hash 捕捉不到外部依赖。为什么：上游冻结面禁补 `normalizeVersion` 导出，此口径保证可演进且失效可发现。
+- **B3 · 过期批次只走实时证据**（B3 §2 / B5 §3）：manifestHash 与本次扫描不一致、或当前窗口未覆盖该批次全部 turnKeys（任一 turnKey 缺失即视为过期）⇒ 视为过期回归批次，不作为 backtest 证据传入晋升判定，只走实时分支。为什么：不可变 manifest 变化后不能把本次新语料冒充旧批次（保守放弃不完整批次）。
+- **B3 · 未冻结批次的留出失败明细**（B3 §2，`reflex-backtest.mjs`）：`show` 对未冻结批次的留出失败报错并提示先 `batch freeze`；`review` 与 `report` 静默过滤掉这些明细，但 report 的聚合计数中 suspect 仍计入。为什么：无 batchId 的失败无法登记 `exposure.jsonl`，展示明细后可重新打包规避暴露记账，故宁可拒展示/过滤。
+- **B3 · 首次 revision 用真实 now**（B3 §2）：`revisions.jsonl` 首次登记的 firstSeenAt 取运行时真实时间，不回填历史。因此**首次运行之前的历史语料只能用于训练与回归，不能组成可晋升批次**（freeze 只选 `at > lastRevisedAt` 且未暴露的 holdout）。为什么：不伪造过去的 first-seen，防把旧语料冒充新批次。
+- **B3 · 回测脚本的环境与扫描完整性门**（`reflex-backtest.mjs`）：secure 环境下任何 I/O 前 exit 3；`generate` 要求 `scanComplete`（扫描有失败则拒绝生成草案）。为什么：回测工具不得在 secure 域产生落盘产物；残缺语料生成的草案不可信。
+- **B4 · 目录不存在返回空**（B4 §2.1）：`<agentDir>/reflex/drafts` ENOENT ⇒ 空结果（loaded 0），不算 `dir-untrusted` failure。为什么：「开关已开、还没生成草案」是正常态；仍是 fail-closed（什么都不加载）。0755 / symlink / 他人属主仍是 `dir-untrusted`。
+- **B4 · 目录权限契约**（B4 §2.2）：B3 脚本把 `<agentDir>/reflex`、`drafts`（及 cache 等全部子目录）建成 **0700**、文件 0600；`reflex/` 若 0755 会使草案加载整体 `dir-untrusted`。为什么：受信目录两层校验（R-I13），B3 对既有目录只拒绝不自动修复。
+- **B5 · `LiveEvidenceRow` 扩展**（B5 §3）：在 promotion.ts 本地交叉类型 `PromotionRow & { entryId?; session?; at? }`，不改 B0 `types.ts`。为什么：实时统计需要 envelope 元数据（fork 去重、跨会话重复），冻结面禁补类型。
+- **B5 · `port@0 missing` 只能 undetermined**（B5 §3）：缺 port 结果没有版本，记入 `port@0 missing` 并保守投影到目标版本的每个已观察 bucket；**绝不借用旧版本成功**填新版的 runs/ok；`missing>0` ⇒ undetermined。为什么：port 升版后旧可靠性不可迁移。
+- **B5 · 回测证据缺陷即使实时足够也拒绝**（B5 §3 / B3 §1 调用约定 2）：传入的有效批次若 review 不全或有 misfire ⇒ B5 直接拒绝晋升，**即使实时证据独立充分**；无效/作废批次则根本不作为 backtest 传入（走 live-only）。为什么：OR 门只对「完整有效的回测证据」开放，缺陷证据不能被实时侧稀释。
 
 ## 性能手动测法（Tier 3，不进 CI）
 
