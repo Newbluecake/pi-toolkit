@@ -78,13 +78,15 @@ describe("fabric.crossSession.alias.autoFromCwd setting spec (alias-force-defaul
     expect(defaultOf(spec)).toBe(true);
     expect(currentOf(DEFAULT_SETTINGS, spec)).toBe(true);
   });
-  it("is second-to-last in the fabric shard (append-only: activation.enabled last) and the crossSession surface is exactly the two keys", () => {
+  it("is in the fabric shard (append-only; askRedirect.enabled now trails, #21) and the crossSession surface is exactly the three keys", () => {
     const keys = Object.keys(FABRIC_SETTING_SPECS);
-    expect(keys[keys.length - 2]).toBe(key);
-    expect(keys[keys.length - 1]).toBe("fabric.crossSession.activation.enabled");
+    expect(keys[keys.length - 3]).toBe(key);
+    expect(keys[keys.length - 2]).toBe("fabric.crossSession.activation.enabled");
+    expect(keys[keys.length - 1]).toBe("fabric.crossSession.askRedirect.enabled");
     expect(Object.keys(SETTING_SPECS).filter((k) => k.startsWith("fabric.crossSession."))).toEqual([
       key,
       "fabric.crossSession.activation.enabled",
+      "fabric.crossSession.askRedirect.enabled",
     ]);
   });
   it("round-trips a write: parse → live object → persisted stored value, and reloads through loadSettings", () => {

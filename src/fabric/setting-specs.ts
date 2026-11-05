@@ -113,4 +113,10 @@ export const FABRIC_SETTING_SPECS: Record<string, SettingSpec> = {
     "fabric.crossSession.activation.enabled",
     "Cross-session request progress tracking + idempotent wake_session activation (needs crossSession)",
   ),
+  // #21 ask-redirect (plan §1 D9): the group's only settable leaf. Non-live (activate/stack build,
+  // needs /reload); effective = xs ∧ reply ∧ wake ∧ this flag; agent-side only (never HubConfig).
+  "fabric.crossSession.askRedirect.enabled": bool(
+    "fabric.crossSession.askRedirect.enabled",
+    "Redirect ask_user to the delegation requester inside trusted delegated runs (needs crossSession + reply + wake)",
+  ),
 };

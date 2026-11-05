@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { systemClock } from "../../core/clock.js";
 import {
   agentEnd as unreadAgentEnd,
   count as unreadCount,
@@ -22,6 +23,7 @@ import { createXsDirectoryCache, type XsDirectoryCache, type XsDirectoryRow } fr
 import { XsReceiver } from "./receiver.js";
 import { createXsActivationReceiver, type XsActivationReceiver } from "./session-activation.js";
 import { getXsWakeLedger } from "./wake-ledger.js";
+import { createXsAskRedirect, type XsAskRedirect, type XsAskRedirectSendArgs } from "./ask-redirect.js";
 import {
   XS_REPLY_ENTRY_TYPE,
   XsReplyDueScheduler,
@@ -85,6 +87,17 @@ export interface StackXsInput {
    *  abort this controller's guards issue (BAS or context) goes through it, so even a controller
    * path never leaves an unsupervised abort behind. Absent ⇒ raw aborts (tests, recovery stacks). */
   abortOrphan?: OrphanAbortPort;
+  /** #21 ask-redirect §2 (B1): the redirect's late-bound ports, injected by `createXsActivation`
+   *  only while `askRedirectOn` (xs ∧ reply ∧ wake ∧ askRedirect.enabled). Absent ⇒ no
+   *  `StackXs.askRedirect` and the stack is byte-identical to the pre-#21 build (I9). */
+  askRedirect?: {
+    /** `(a) => xsSender?.message(a)` — the sender may not exist yet (late-bound). */
+    send(args: XsAskRedirectSendArgs): Promise<import("./sender.js").XsSendOutcome> | undefined;
+    /** Local `hopAllowed(levelOfRoot())` pre-check (U level_limit). */
+    wakeHopAllowed(): boolean;
+    /** Live attach probe (U detached). */
+    attached(): boolean;
+  };
 }
 
 export interface StackXs extends XsStackPort {
@@ -109,6 +122,9 @@ export interface StackXs extends XsStackPort {
    *  effective at stack build — frozen, non-live; the bridge still gates the frame on the cap). */
   activation?: XsActivationReceiver;
   audit: Partial<Record<RootWakeAudit, number>>;
+  /** #21 ask-redirect (B1): present iff controller ∧ replyLedger ∧ `askRedirect.enabled` ∧
+   *  `input.askRedirect` — the ask_user host-redirect port for this stack. */
+  askRedirect?: XsAskRedirect;
   beforeAgentStart(event: unknown): void;
   /** wake-unknown-optimistic: forward the host `context` event (before every LLM call). */
   context(event: unknown): void;
@@ -403,6 +419,13 @@ export function buildStackXs(
     sendMessage: (message: Parameters<ExtensionAPI["sendMessage"]>[0], options: { triggerTurn: boolean }) => {
       pi.sendMessage(message, options);
       tapWritten(message);
+      // #21 ask-redirect D3/D6: the ONE host write exit observation tap (Controller dispatch +
+      // receiver deliver) — strictly after the write, observation only, never breaks the exit.
+      try {
+        askRedirect?.observeWrite(message);
+      } catch {
+        /* observation only */
+      }
     },
     getLeafEntry: () => {
       const entry = ctx.sessionManager.getLeafEntry();
@@ -541,6 +564,28 @@ export function buildStackXs(
     receiver.setController(controller);
     controller.recover(); // the caller has already disposed the old owner
   }
+  // ---- #21 ask-redirect (B1): created only when the whole gate holds (controller from
+  // fabric.wake.enabled, replyLedger from reply.enabled, the settings leaf default-on, and the
+  // activation-level wiring) — off/absent ⇒ no port, no tap effect, byte-identical stack (I9).
+  const askRedirect =
+    controller !== undefined &&
+    replyLedger !== undefined &&
+    config.askRedirect.enabled &&
+    input.askRedirect !== undefined
+      ? createXsAskRedirect({
+          sessionId,
+          clock: systemClock,
+          ledger: getXsWakeLedger(),
+          controller: () => controller,
+          attached: input.askRedirect.attached,
+          wakeHopAllowed: input.askRedirect.wakeHopAllowed,
+          maxChars: settings.fabric.maxChars,
+          pairMinIntervalMs: config.limits.pairMinIntervalMs,
+          timeoutS: config.askRedirect.timeoutS,
+          maxPerRun: config.askRedirect.maxPerRun,
+          send: input.askRedirect.send,
+        })
+      : undefined;
   const releaseTrigger = () => {
     if (!controller?.busy) {
       inbox.releaseTrigger();
@@ -881,6 +926,7 @@ export function buildStackXs(
     },
     ...(controller ? { controller } : {}),
     ...(reply ? { reply } : {}),
+    ...(askRedirect !== undefined ? { askRedirect } : {}),
     beforeAgentStart: (event) => {
       inbox.onRunStart();
       replyInbox?.onRunStart();
@@ -917,6 +963,9 @@ export function buildStackXs(
       replyScheduler.current?.dispose();
       reply?.gate.dispose();
       replyLedger?.unbindSession(sessionId);
+      // #21 ask-redirect: settle in-flight calls as `disposed` BEFORE the controller goes —
+      // billed, never refunded (D4); the ledger's askOrigin/askUsed stay with the record.
+      askRedirect?.dispose();
       controller?.dispose();
       fence.dispose();
       inbox.clear();

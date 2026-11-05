@@ -56,8 +56,9 @@ describe("fabric.crossSession.activation settings (fabric-xs-activation plan §3
       expect(effectOf(spec)).toBe("takes effect after /reload"); // non-live (arch §3.2)
       expect((spec as { live?: boolean }).live).toBeFalsy();
     }
-    // listed after alias.autoFromCwd — the fabric shard's listing order only gains the trailing key
+    // listed after alias.autoFromCwd — the fabric shard's listing order only gains trailing keys
+    // (#21 appended askRedirect.enabled after this one)
     const keys = Object.keys(SETTING_SPECS).filter((k) => k.startsWith("fabric."));
-    expect(keys.indexOf("fabric.crossSession.activation.enabled")).toBe(keys.length - 1);
+    expect(keys.indexOf("fabric.crossSession.activation.enabled")).toBe(keys.length - 2);
   });
 });

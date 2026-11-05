@@ -36,6 +36,8 @@ describe("fabric.crossSession settings (phase2 §4.1)", () => {
         maxPendingPerTarget: 3,
         lateGraceS: 600,
       },
+      // #21 plan §1 D9 (user ruling): default on — effective only while xs ∧ reply ∧ wake
+      askRedirect: { enabled: true, timeoutS: 600, maxPerRun: 2 },
       // channel-plan §6.4 (CH0)
       channels: {
         enabled: true,

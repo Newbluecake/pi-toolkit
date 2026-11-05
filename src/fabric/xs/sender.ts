@@ -409,6 +409,11 @@ export interface XsSenderMessageArgs {
   invocationLevel?: () => number;
   /** Driver lifetime proof rechecked after resolve; no new root/off hook. */
   invocationLive?: () => boolean;
+  /** #21 ask-redirect D6 (M6): fired synchronously after the reply ticket was issued and
+   *  BEFORE the send frame leaves (no await between issue, this call and `port.send`). Never a
+   *  wire field — the message_session tool never passes it; the stack's ask redirect uses it to
+   *  register the precise q2 → call mapping without a reply echo. Exceptions are swallowed. */
+  onIssued?: (t: { requestId: string; dueAt: number }) => void;
 }
 
 export interface XsSender {
@@ -694,6 +699,15 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
         issuedRequestId = issued.ticket.requestId;
         issuedDueAt = issued.ticket.dueAt;
         expectWire = { requestId: issued.ticket.requestId, timeoutMs: timeoutS * 1000 };
+        // #21 ask-redirect D6 (M6): precise ticket registration, same synchronous block, before
+        // the frame — observation only, never fails the send.
+        if (args.onIssued !== undefined) {
+          try {
+            args.onIssued({ requestId: issued.ticket.requestId, dueAt: issued.ticket.dueAt });
+          } catch {
+            /* observation only */
+          }
+        }
       }
       const settleTicket = (effect: XsEffect): { state: "pending" | "send_failed" } | undefined => {
         if (issuedRequestId === undefined) return undefined;

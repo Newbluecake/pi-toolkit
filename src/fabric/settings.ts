@@ -231,6 +231,34 @@ export interface FabricXsReplySettings {
   lateGraceS: number;
 }
 
+/** Parse-time bounds for `fabric.crossSession.askRedirect.*` (#21 plan §1 D9). */
+export const FABRIC_XS_ASK_REDIRECT_TIMEOUT_MIN_S = 60;
+
+export const FABRIC_XS_ASK_REDIRECT_TIMEOUT_MAX_S = 3_600;
+
+/** r3 root ruling: 1..2 — the hard ceiling 2 cannot be loosened by settings. */
+export const FABRIC_XS_ASK_REDIRECT_MAX_PER_RUN_MIN = 1;
+
+export const FABRIC_XS_ASK_REDIRECT_MAX_PER_RUN_MAX = 2;
+
+/**
+ * `fabric.crossSession.askRedirect.*` (#21 plan §1 D9): host-side redirection of ask_user to the
+ * delegation requester inside a trusted delegated run. Field-by-field tolerant, never throws;
+ * `timeoutS` clamps to 60..3600 and `maxPerRun` to 1..2 (`createXsAskRedirect` additionally takes
+ * min(·, 2) — no injection path can loosen the ceiling). Non-live (frozen at activate/stack
+ * build); effective = `xsOn ∧ reply.enabled ∧ wake.enabled ∧ askRedirect.enabled` (secure keeps
+ * xsOn false ⇒ automatically off, I11/D8). Agent-side only — NEVER written into HubConfig.
+ * Default ON per the user ruling (2026-11-05).
+ */
+export interface FabricXsAskRedirectSettings {
+  /** Default true; off ⇒ the O class everywhere, surfaces byte-identical (I9). */
+  enabled: boolean;
+  /** Host-side wait budget per question (seconds), also clamped by the run and origin windows. */
+  timeoutS: number;
+  /** Billed redirects per run (parse-clamped 1..2; the module hard-caps at 2). */
+  maxPerRun: number;
+}
+
 /** Parse-time bounds for `fabric.crossSession.channels.broadcast.*` (channel-plan §6.4). The two
  *  wake leaves' maxima are HARD ceilings (Q5): settings can only tighten them. */
 export const FABRIC_XS_BROADCAST_OUT_PER_HOUR_MAX = 60;
@@ -364,6 +392,9 @@ export interface FabricCrossSessionSettings {
    *  block — `receive:"replies"` availability is judged against `reply.enabled` only through
    *  `effectiveReceive`, never by rewriting the stored preference). */
   reply: FabricXsReplySettings;
+  /** #21 plan §1 D9: ask_user host-redirect settings (present in every parsed block; agent-side
+   *  only — never rides HubConfig). */
+  askRedirect: FabricXsAskRedirectSettings;
   /** Channel-plan §6.4 (CH0): channels + broadcast settings (present in every parsed block). */
   channels: FabricXsChannelSettings;
   /** Alias-plan §3.6 (AL0b): session alias settings (present in every parsed block). */
@@ -414,6 +445,7 @@ function cloneFabricCrossSession(cs: FabricCrossSessionSettings): FabricCrossSes
     allowFrom: [...cs.allowFrom],
     limits: { ...cs.limits },
     reply: { ...cs.reply },
+    askRedirect: { ...cs.askRedirect },
     channels: { ...cs.channels, autoJoin: [...cs.channels.autoJoin], broadcast: { ...cs.channels.broadcast } },
     alias: { ...cs.alias },
     activation: { ...cs.activation },
@@ -562,6 +594,30 @@ export function parseFabricXsReplySettings(input: unknown): FabricXsReplySetting
   };
 }
 
+/** `fabric.crossSession.askRedirect.*` (#21 plan §1 D9): field-by-field tolerant, never throws. */
+export function parseFabricXsAskRedirectSettings(input: unknown): FabricXsAskRedirectSettings {
+  const defaults = DEFAULT_FABRIC_SETTINGS.crossSession.askRedirect;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  const clamp = (raw: unknown, fallback: number, min: number, max: number): number =>
+    typeof raw !== "number" || !Number.isFinite(raw) ? fallback : Math.min(max, Math.max(min, Math.floor(raw)));
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
+    timeoutS: clamp(
+      value.timeoutS,
+      defaults.timeoutS,
+      FABRIC_XS_ASK_REDIRECT_TIMEOUT_MIN_S,
+      FABRIC_XS_ASK_REDIRECT_TIMEOUT_MAX_S,
+    ),
+    maxPerRun: clamp(
+      value.maxPerRun,
+      defaults.maxPerRun,
+      FABRIC_XS_ASK_REDIRECT_MAX_PER_RUN_MIN,
+      FABRIC_XS_ASK_REDIRECT_MAX_PER_RUN_MAX,
+    ),
+  };
+}
+
 /** `fabric.wake.*` (plan v3 §4.8 + phase2 §4.1): field-by-field tolerant, never throws; unknown keys are ignored. */
 export function parseFabricWakeSettings(input: unknown): FabricWakeSettings {
   const defaults = DEFAULT_FABRIC_SETTINGS.wake;
@@ -673,6 +729,7 @@ export function parseFabricCrossSessionSettings(input: unknown): FabricCrossSess
       listPerMin: limit("listPerMin", 1, 60),
     },
     reply,
+    askRedirect: parseFabricXsAskRedirectSettings(value.askRedirect),
     channels: parseFabricXsChannelSettings(value.channels),
     alias: parseFabricXsAliasSettings(value.alias),
     activation: parseFabricXsActivationSettings(value.activation),
@@ -733,6 +790,9 @@ export const DEFAULT_FABRIC_SETTINGS: FabricSettings = {
       maxPendingPerTarget: 3,
       lateGraceS: 600,
     },
+    // #21 plan §1 D9 (user ruling 2026-11-05): default ON — effective only while
+    // xs ∧ reply ∧ wake are all on; secure keeps xs off ⇒ automatically off (I11/D8).
+    askRedirect: { enabled: true, timeoutS: 600, maxPerRun: 2 },
     // channel-plan §6.4 (CH0): Q6 channels on by default; broadcast wake ceilings are the Q5 hard maxima.
     channels: {
       enabled: true,

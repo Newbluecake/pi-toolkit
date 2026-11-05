@@ -31,6 +31,7 @@ import {
   type XsAliasHandoffShot,
 } from "./alias-handoff.js";
 import type { StackXsInput } from "./stack.js";
+import type { XsAskRedirectSendArgs } from "./ask-redirect.js";
 import { xsOn } from "./switch.js";
 import type { XsChannelView } from "./types-channel.js";
 import { display as unreadDisplay, XS_INBOX_STATUS_KEY } from "./unread.js";
@@ -53,6 +54,9 @@ export interface XsActivation {
   readonly replyEnabled: boolean;
   readonly channelsOn: boolean;
   readonly aliasOn: boolean;
+  /** #21 plan §1 D9: ask_user host-redirect gate, frozen per activate — xs ∧ reply ∧ wake ∧
+   *  `fabric.crossSession.askRedirect.enabled` (secure keeps xsOn false ⇒ automatically off). */
+  readonly askRedirectOn: boolean;
   /** Live read of the attach state — never snapshot it. */
   attached(): boolean;
   hubChannelCap(): boolean;
@@ -110,6 +114,10 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
   // `xs.alias.v1` and the hub config key. Deliberately NOT the hub cap: a late/missing hub cap must never swap a
   // registered tool's description (provider cache prefix) — without it the runtime falls back to legacy addressing.
   const aliasOn = xsEnabled && settings.fabric.crossSession.alias.enabled;
+  // #21 plan §1 D9 (frozen per activate, non-live): the ask_user host redirect rides the whole
+  // xs stack — controller (wake) + reply ledger (reply) + the settings leaf (default on).
+  const askRedirectOn =
+    xsEnabled && replyEnabled && settings.fabric.wake.enabled && settings.fabric.crossSession.askRedirect.enabled;
   const xsLedger = getXsWakeLedger();
   const xsCapability = getXsHostCapability();
   const xsSessionOf = (ctx: { sessionManager?: { getSessionId(): string } }): string | undefined => {
@@ -678,6 +686,19 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
             if (c === undefined) return false;
             return orphanWatch.issue({ abort: () => c.abort(), isIdle: () => c.isIdle?.() ?? true }, token);
           },
+          // #21 ask-redirect §2 (B1): the redirect ports — only while the frozen gate holds.
+          ...(askRedirectOn
+            ? {
+                askRedirect: {
+                  send: (a: XsAskRedirectSendArgs) => xsSender?.message(a),
+                  wakeHopAllowed: () => {
+                    const lv = holder.current?.wake?.level;
+                    return lv ? lv.hopAllowed(lv.root) : false;
+                  },
+                  attached: () => xsAttached,
+                },
+              }
+            : {}),
         }
       : undefined;
   }
@@ -830,6 +851,7 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
     replyEnabled,
     channelsOn,
     aliasOn,
+    askRedirectOn,
     attached: () => xsAttached,
     hubChannelCap: xsHubChannelCap,
     aliasUsable: xsAliasUsable,
