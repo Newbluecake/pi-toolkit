@@ -23,6 +23,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { acquireGocryptfsTestLock } from "./gocryptfs-test-lock.js";
+import { awaitNoForeignGocryptfs } from "./private-real-harness.js";
 
 const REPO = join(import.meta.dirname, "..", "..");
 const HELPER = join(REPO, "src", "secure", "bin", "helper.mjs");
@@ -902,20 +903,6 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
       }
       if (Date.now() > end) throw new Error(`phase ${phase} never reached`);
       await sleep(50);
-    }
-  }
-  async function awaitNoForeignGocryptfs(ctx: { skip: () => void }, mine: string): Promise<void> {
-    const end = Date.now() + 60_000;
-    for (;;) {
-      const foreign = readFileSync("/proc/self/mountinfo", "utf8")
-        .split("\n")
-        .filter((l) => l.includes(" - fuse.gocryptfs ") && !l.split(" ")[4]!.startsWith(mine + "/"));
-      if (!foreign.length) return;
-      if (Date.now() >= end) {
-        ctx.skip();
-        return;
-      }
-      await sleep(500);
     }
   }
 

@@ -25,6 +25,7 @@ import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { acquireGocryptfsTestLock } from "./gocryptfs-test-lock.js";
+import { awaitNoForeignGocryptfs } from "./private-real-harness.js";
 
 const require = createRequire(import.meta.url);
 
@@ -1788,24 +1789,6 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
     });
   }
   const globalMounted = (mnt: string) => readFileSync("/proc/self/mountinfo", "utf8").includes(` ${mnt} `);
-  /**
-   * Review N1 #3 refuses `run --private` while ANY fuse.gocryptfs mount exists globally. Other
-   * suites (or other sessions) may hold short-lived test mounts; wait for a clean table, else skip.
-   */
-  async function awaitNoForeignGocryptfs(ctx: { skip: () => void }, mine: string): Promise<void> {
-    const end = Date.now() + 60_000;
-    for (;;) {
-      const foreign = readFileSync("/proc/self/mountinfo", "utf8")
-        .split("\n")
-        .filter((l) => l.includes(" - fuse.gocryptfs ") && !l.split(" ")[4]!.startsWith(mine + "/"));
-      if (!foreign.length) return;
-      if (Date.now() >= end) {
-        ctx.skip();
-        return;
-      }
-      await sleep(500);
-    }
-  }
 
   it("normal exit: invisible outside, real uid / CapEff 0 / fd 9 in pi, exit code passes, record + lease released", async (ctx) => {
     const e = setup();

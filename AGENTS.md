@@ -26,18 +26,24 @@ and their pre/post-guard registration are covered by I3; full text: `docs/dev/pl
 ## Commands
 
 ```sh
-npm install          # dev setup (Node >= 22, enforced by engines + CI)
-npm run build        # TS 7 (native tsc, `typescript-7` alias) -p tsconfig.build.json → dist/
-npm run build:web    # web-hub UI (vite) → dist/web-hub-ui/ — toolchain needs Node ≥22.12 (mermaid's engines; CI has a 22.12.0 job)
-npm run check:web    # UI bundle gates (CSP/size/provenance/licences) · npm run probe:mermaid = real-browser mermaid gate (Chromium+Firefox, not in CI)
-npm test             # vitest run — 17,000+ tests; must stay green (PI_TOOLKIT_TEST_WORKERS=N caps workers; CI uses 2, release.sh 4)
-npm run typecheck    # TS 7 tsc --noEmit ×2 (strict; see tsconfig flags) + vue-tsc on TS 6; toolchain: docs/dev/toolchain/ts7-report.md
-npm run format       # prettier --write .
-npm run format:check # CI gate
+npm install            # dev setup (Node >= 22, enforced by engines + CI)
+npm run build          # TS 7 (native tsc, `typescript-7` alias) -p tsconfig.build.json → dist/
+npm run build:web      # web-hub UI (vite) → dist/web-hub-ui/ — toolchain needs Node ≥22.12 (mermaid's engines; CI has a 22.12.0 job)
+npm run check:web      # UI bundle gates (CSP/size/provenance/licences) · npm run probe:mermaid = real-browser mermaid gate (Chromium+Firefox, not in CI)
+npm test               # vitest run — ALL three projects (tier1+tier2+secure), 17,000+ tests; release-grade, not the daily gate
+npm run test:tier1     # tier1 project only — the DAILY dev gate (PI_TOOLKIT_TEST_WORKERS=N caps workers; CI uses 2, release.sh 4)
+npm run test:tier2     # tier2 + secure projects — env-sensitive; run before pushing integration/conformance/secure changes
+npm run test:secure    # secure project alone (real mounts; needs a clean mount table + an exclusive machine)
+npm run typecheck      # TS 7 tsc --noEmit ×2 (strict; see tsconfig flags) + vue-tsc on TS 6; toolchain: docs/dev/toolchain/ts7-report.md
+npm run format         # prettier --write .
+npm run format:check   # CI gate
 ```
 
-CI (`.github/workflows/ci.yml`) runs format:check → typecheck → test → build on Node 22.
-Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsupported.
+CI (`.github/workflows/ci.yml`) runs format:check → typecheck → test:tier1 → test:tier2 → build on
+Node 22 (tier 2 only once tier 1 actually ran). Daily loop: `test:tier1` + the specific tier2/secure
+files you touched; full `npm test` before pushing. Tier ownership lives in `tests/tiers.ts`
+(docs/dev/test-speed/README.md). Run all four gates locally before pushing.
+`fs.globSync` is used, so Node < 22 is unsupported.
 
 ## Global invariants
 
@@ -175,23 +181,34 @@ update the matrix/property tests in lockstep. Integration tests live in `tests/i
 
 ### Test tiers and flake triage (release gate policy)
 
-- **Tier 1 — hard gate, local AND CI must both be green; a failure is always a real bug.**
-  Deterministic, no clock/process/network dependence: `tests/core`, `tests/{delivery,fabric,
-archive,quota,config,boundary,governance}`, every `tests/fixtures/**` golden comparison, and
-  the bulk of `tests/<module>/` unit tests (fake clock / fake port driven), plus format:check /
-  typecheck / build. There is no "flake" at this tier.
+Ownership = the vitest workspace driven by `tests/tiers.ts` (single source): `tests/integration/**`,
+`tests/conformance/**` and the listed files are **tier2**, the 16 real-mount files are **secure**,
+everything else is **tier1**. Partitioning reads explicit lists only — never names/markers. A new
+test that hits a lexical marker (child_process, socket, ≥1 s sleep, mount helpers) must be
+registered in `TIER1_DECLARED` / `TIER2_FILES` / `SECURE_MOUNT_FILES` (gate:
+`tests/governance/test-tiers.test.ts` + the `vitest list` cross-check). The gate is lexical and
+misses hidden waits — review slow / env-sensitive additions by hand (docs/dev/test-speed/README.md).
+
+- **Tier 1 — hard gate, local AND CI must both be green; a failure is a real bug** — except files
+  declared `kind:"timing"` in `TIER1_DECLARED`, which are triaged like Tier 2. Plus format:check /
+  typecheck / build. `npm run test:tier1` is the daily gate.
 - **Tier 2 — environment-sensitive; a CI red means rerun, not block.** Real child processes
-  (`tests/integration/web-hub-spawn`, `external-droid-chain`, `web-hub-headless`,
-  `bash-crash-recovery`), real mounts (`tests/secure/**` gocryptfs — contends on locks under
-  parallel workers; `PI_TOOLKIT_TEST_WORKERS=2` avoids it), real network/timing (`web-hub-lan`,
-  `cache-keepalive`, `schedule-fault-matrix`), and the self-gating conformance suites. Triage:
-  CI red ⇒ `gh run rerun --failed`; rerun green ⇒ flake, closed. Still red ⇒ run the failing
-  file alone locally: green ⇒ record as flake and the release may proceed; red ⇒ real bug.
+  (`tests/integration/**` — web-hub-spawn, external-droid-chain, web-hub-headless,
+  bash-crash-recovery), real mounts, real network/timing (`web-hub-lan`, `cache-keepalive`,
+  `schedule-fault-matrix`), and the self-gating conformance suites. Triage: CI red ⇒ `gh run rerun
+--failed`; rerun green ⇒ flake, closed. Still red ⇒ run the failing file alone locally: green ⇒
+  record as flake and the release may proceed; red ⇒ real bug.
+- **secure — real gocryptfs mounts** (`npm run test:secure`; part of tier2). A `[secure-preflight]`
+  failure (leftover mounts incl. your OWN vault, concurrent secure run, symlinked TMPDIR) is an
+  environment problem: fix the machine and re-run — it is never triaged as flake. Unmount your own
+  vaults before a release or a secure run (`pi-secure lock <name>` / `fusermount3 -u <mnt>`).
+  Contends on locks under parallel workers — `PI_TOOLKIT_TEST_WORKERS=1` for a real local run.
 - **Tier 3 — probes, never in CI** (`npm run probe:mermaid` and friends): run by hand.
 
-A release requires Tier 1 green on the release commit (the release.sh local full-suite run plus CI)
-and every Tier 2 failure resolved by the triage above (rerun-green or local-standalone-green) —
-never by skipping.
+A release requires Tier 1 green on the release commit (release.sh runs `test:tier1` then
+`test:tier2`; either failing aborts before commit/tag — triage may reclassify a red as flake but
+never bypasses the abort) and every Tier 2 failure resolved by the triage above (rerun-green or
+local-standalone-green) — never by skipping.
 
 ## Releasing
 
@@ -211,7 +228,7 @@ The script enforces the mechanics; the rules it cannot enforce:
 - **CHANGELOG is generated, never hand-edited** — commit subjects/bodies ARE the changelog; write them
   for users. To change the output, change the script.
 - **Flow** (all in the script): clean tree, up to date with `origin/<branch>` ⇒ version sync ⇒ CHANGELOG ⇒
-  `format:check` → `typecheck` → `build` → `build:web` + `check:web` → `test` (failure aborts before
-  commit/tag) ⇒ release commit ⇒ annotated tag ⇒ push branch + tag ⇒ `scripts/release/package.sh` ⇒
-  `gh release create`. Flags: `--dry-run`, `--changelog`, `--skip-tests` (emergency only), `--skip-push`,
-  `--skip-publish`.
+  `format:check` → `typecheck` → `build` → `build:web` + `check:web` → `test:tier1` → `test:tier2`
+  (either failing aborts before commit/tag, with the triage hint printed) ⇒ release commit ⇒ annotated
+  tag ⇒ push branch + tag ⇒ `scripts/release/package.sh` ⇒ `gh release create`. Flags: `--dry-run`,
+  `--changelog`, `--skip-tests` (emergency only), `--skip-push`, `--skip-publish`.

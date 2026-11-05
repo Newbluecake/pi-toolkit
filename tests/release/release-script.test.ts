@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,8 +9,9 @@ import { afterEach, describe, expect, it } from "vitest";
 // or remote: every repo under test lives under a mkdtemp() directory, has no
 // `origin` remote configured (so the "up to date with origin/<branch>" check warns
 // and continues instead of hitting the network), and every test uses --dry-run or
-// --changelog / --skip-push so no `git push` or `gh` call is ever reached — there is
-// nothing to stub.
+// --changelog / --skip-push / --skip-publish so no `git push` or `gh` call is ever
+// reached. The tiered-gate tests additionally prepend a stub `npm` to PATH (see
+// makeStubNpm) so step 5's real gate path can run inside the fixture.
 
 const REAL_ROOT = process.cwd();
 const RELEASE_SCRIPT = join(REAL_ROOT, "scripts/release/release.sh");
@@ -107,12 +108,13 @@ function writeChangelog(dir: string, content: string): void {
   git(dir, "commit", "-q", "-m", "chore: rewrite fixture CHANGELOG for this test");
 }
 
-function run(dir: string, args: string[]): { stdout: string; status: number } {
+function run(dir: string, args: string[], env: NodeJS.ProcessEnv = {}): { stdout: string; status: number } {
   try {
     const stdout = execFileSync("bash", [join(dir, "scripts/release/release.sh"), ...args], {
       cwd: dir,
       encoding: "utf8",
       stdio: "pipe",
+      env: { ...process.env, ...env },
     });
     return { stdout, status: 0 };
   } catch (e) {
@@ -120,6 +122,34 @@ function run(dir: string, args: string[]): { stdout: string; status: number } {
     const stdout = String(err.stdout ?? "") + String(err.stderr ?? "");
     return { stdout, status: err.status ?? 1 };
   }
+}
+
+/**
+ * Stub `npm` for the tiered-gate tests: lives OUTSIDE the fixture repo (the script's
+ * clean-tree guard would otherwise see it), records every invocation's args to
+ * $STUB_NPM_LOG, and exits 1 only when the invoked script equals $STUB_NPM_FAIL
+ * ("test:tier1" / "test:tier2"; empty = everything green). This lets the fixture
+ * walk step 5's REAL gate path — format:check → typecheck → build → build:web →
+ * check:web → test:tier1 → test:tier2 — without executing the real toolchain.
+ */
+function makeStubNpm(fail: string): { binDir: string; logPath: string } {
+  const dir = mkdtempSync(join(tmpdir(), "pi-toolkit-release-stub-"));
+  tmpDirs.push(dir);
+  const logPath = join(dir, "npm-calls.log");
+  writeFileSync(
+    join(dir, "npm"),
+    [
+      "#!/usr/bin/env bash",
+      'printf \'%s\\n\' "$*" >> "${STUB_NPM_LOG:?stub npm log unset}"',
+      'if [[ -n "${STUB_NPM_FAIL:-}" && "${1:-}" == "run" && "${2:-}" == "$STUB_NPM_FAIL" ]]; then',
+      "  exit 1",
+      "fi",
+      "exit 0",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(join(dir, "npm"), 0o755);
+  return { binDir: dir, logPath };
 }
 
 describe("scripts/release/release.sh", () => {
@@ -402,6 +432,81 @@ describe("scripts/release/release.sh", () => {
       git(dir, "checkout", "-q", "-b", "dev");
       const { stdout } = run(dir, ["0.1.1", "--dry-run", "--skip-tests"]);
       expect(stdout).toMatch(/No origin\/dev remote-tracking ref found/);
+    });
+  });
+
+  describe("tiered test gate (stub npm, real step-5 path)", () => {
+    /** Runs a real (non-dry-run, non-skip-tests) release through the stub npm. */
+    function runWithStubNpm(dir: string, fail: string): { stdout: string; status: number; calls: string[] } {
+      const stub = makeStubNpm(fail);
+      const { stdout, status } = run(dir, ["0.1.1", "--skip-push", "--skip-publish"], {
+        PATH: `${stub.binDir}:${process.env.PATH}`,
+        STUB_NPM_LOG: stub.logPath,
+        STUB_NPM_FAIL: fail,
+      });
+      const calls = existsSync(stub.logPath)
+        ? readFileSync(stub.logPath, "utf8")
+            .split("\n")
+            .filter((l) => l.length > 0)
+        : [];
+      return { stdout, status, calls };
+    }
+
+    it("tier1 failure: exits non-zero immediately, tier2 is never invoked, no tag", () => {
+      const dir = makeFixture();
+      commitEmpty(dir, "fix(widgets): fix widget overflow");
+      const { status, stdout, calls } = runWithStubNpm(dir, "test:tier1");
+      expect(status).not.toBe(0);
+      // The gate path really ran up to tier1 — then stopped before tier2.
+      expect(calls.slice(0, 5)).toEqual([
+        "run format:check",
+        "run typecheck",
+        "run build",
+        "run build:web",
+        "run check:web",
+      ]);
+      expect(calls).toContain("run test:tier1");
+      expect(calls).not.toContain("run test:tier2");
+      expect(stdout).toMatch(/test:tier1 failed/);
+      expect(stdout).toMatch(/kind:"timing"/);
+      expect(git(dir, "log", "-1", "--format=%s")).not.toMatch(/chore\(release\)/);
+      expect(git(dir, "tag")).not.toMatch(/v0\.1\.1/);
+    });
+
+    it("tier2 failure: tier1 ran first, exits non-zero with the triage hint, no tag", () => {
+      const dir = makeFixture();
+      commitEmpty(dir, "fix(widgets): fix widget overflow");
+      const { status, stdout, calls } = runWithStubNpm(dir, "test:tier2");
+      expect(status).not.toBe(0);
+      expect(calls).toContain("run test:tier1");
+      expect(calls).toContain("run test:tier2");
+      expect(stdout).toMatch(/test:tier2 failed/);
+      // The failure prints the AGENTS triage recipe, incl. the secure-preflight carve-out.
+      expect(stdout).toMatch(/Triage/);
+      expect(stdout).toMatch(/rerun the failing file\(s\) alone/);
+      expect(stdout).toMatch(/environment problem, never a flake/);
+      expect(git(dir, "log", "-1", "--format=%s")).not.toMatch(/chore\(release\)/);
+      expect(git(dir, "tag")).not.toMatch(/v0\.1\.1/);
+    });
+
+    it("both tiers green: the full gate runs in order, then the release commit + tag appear", () => {
+      const dir = makeFixture();
+      commitEmpty(dir, "feat(widgets): add a widget");
+      const { status, stdout, calls } = runWithStubNpm(dir, "");
+      expect(status).toBe(0);
+      expect(calls).toEqual([
+        "run format:check",
+        "run typecheck",
+        "run build",
+        "run build:web",
+        "run check:web",
+        "run test:tier1",
+        "run test:tier2",
+      ]);
+      expect(stdout).toMatch(/Pre-release checks passed/);
+      expect(git(dir, "log", "-1", "--format=%s").trim()).toBe("chore(release): bump version to v0.1.1");
+      expect(git(dir, "tag")).toMatch(/v0\.1\.1/);
+      expect(stdout).toMatch(/Skipped push \(--skip-push\)/);
     });
   });
 
