@@ -1,197 +1,232 @@
 # Jev Reflex · #25 历史回测、草案生成与运行时草案加载 · 架构设计
 
-> 状态：架构设计（无代码）· 2026-11-05 · 上游：`arch.md`（A）、`plan.md`（P）、`feasibility.md`（F）、`README.md`（R-I1…R-I12）。
+> 状态：架构设计（无代码）· **r3**（2026-11-05：r2 闭合 GPT 评审第 1 轮 15 条；r3 按 root 裁定闭合复审未闭合的 #1/#4/#8/#10/#12，处置表见 `backtest-plan.md` §10「r3」栏）
+> 上游：`arch.md`（A）、`plan.md`（P）、`feasibility.md`（F）、`README.md`（R-I1…R-I12）。
 > 冲突时以本文为准；本文**只**改写 R-I12，另外覆盖 U5（P §0）。其余不变式原样有效。
 
-## 0. 用户拍板（2026-11-05，不再讨论）
+## 0. 用户拍板（2026-11-05，不再讨论；r2 含评审后重新拍板）
 
-1. **离线生成 + 回测**：从历史会话聚类意图并生成草案。草案只能映射到已有 4 个 port（`jobs.list` / `fleet.status` / `quota.summary` / `git.status`）。内置脚本加草案一起回放历史问句，输出命中 / 模糊 / 否决 / 未命中，以及疑似误命中清单；agree / diverge 用模型**当轮**工具形状计算。改模板后几秒内能重测。
-2. **运行时加载草案**（实验开关，默认关）：草案只跑 shadow，任何情况下都不自动作答（id 写进 `autoResolve` 也不行）。允许打破 R-I12，但要加额外校验和安全门禁。
-3. **晋升口径（覆盖 U5）**：问法与分歧的证据可以用回测样本（≥50 条、分歧 ≤5%、误命中经人工看过）；port 可靠性只需实时 shadow ≥10 次且全部成功；纠正和重复提问仍须为 0。草案要自动作答，仍须由人改写进 `catalog.ts`（`origin:"builtin"`、升版本），走 PR。
+1. **离线生成 + 回测**：从历史会话聚类意图并生成草案。草案只能映射到已有 4 个 port（`jobs.list` / `fleet.status` / `quota.summary` / `git.status`）。内置脚本加草案一起回放历史问句，输出命中 / 模糊 / 否决 / 未命中与疑似误命中清单；agree / diverge 用模型**当轮**工具形状计算。改模板后能快速重测。
+2. **运行时加载草案**（`reflex.drafts.enabled`，默认关）：草案只跑 shadow，任何情况下都不自动作答（id 写进 `autoResolve` 也不行）。
+3. **晋升口径（覆盖 U5）**：问法证据 = 回测**留出集**样本 ≥50、分歧 ≤5%、误命中有评审记录；port 可靠性 = 实时 shadow **按 port（同 `portVer`）** ≥10 次且全部成功（`uncertain` 算不成功，`ok===runs`）；纠正与重复提问 = 0（历史侧只计命中轮次，可在评审记录里豁免）。
+4. **留出集**：按 fork 家族根会话哈希 60/40；草案只用训练集生成；晋升只计留出集。
+5. **人工评审（r2 重新拍板）**：`reviews/*.json` 只是**未认证**的统计建议 / 记录。同 UID 的 agent 能执行任意 shell，TTY、0600、`listHash` 都**不能**证明是人看过的。真正的人工把关 = 用户批准把草案改写进 `catalog.ts` 的 PR，或用户明确确认。
+6. **留出集污染（r2 重新拍板）**：草案一旦在看过某留出批次的失败之后被修改，该批次对修改后的模板**作废**，不再作为晋升证据，改用之后新产生、未暴露的批次（新历史或实时 shadow）；旧样本保留为回归集。证据绑定不可变的 corpus manifest、模板 hash 与评估批次。
+7. 草案放全局 `<agentDir>/reflex/drafts/`（目录 0700、文件 0600——用于隐私与跨 UID 防护，不用于认证）。
 
 ## 1. 背景与目标
 
-- **问题**：R3b 的晋升证据只能来自实时 shadow。≥50 条候选要攒约 2 周，而且每次改模板（升 `scriptVer`）都会清零。内置 4 个脚本的问法是人写的，覆盖面没有数据依据。
-- **目标**：①把历史会话变成可反复回放的问句语料，几秒内给出「模板 × 历史」的命中 / 误命中结果；②从语料机器起草新问法，产出草案（`origin:"extracted"`）；③草案可以在本机以 shadow 方式加载，积累实时证据；④晋升判定合并回测证据和实时证据，结论仍只是建议，由人落 PR。
-- **约束**：I4（无模块态）、I8（`core/**` 与 `ports/*.ts` pi-free 值闭包）、I9（关 ⇒ 字节不变）、I11/D8（secure / locked 强制关）、I1/I5（加载有界、计时器 unref）、PD10（pi 进程内不扫目录）、R-I3（草案路径同样不 `sendUserMessage` / transform）。
+- **问题**：R3b 的晋升证据只能来自实时 shadow，≥50 条要攒约 2 周，且每次改模板（升 `scriptVer`）清零；内置 4 个脚本的问法是人写的，覆盖面没有数据依据。
+- **目标**：①历史会话 → 可反复回放的问句语料，快速给出「模板 × 历史」命中 / 误命中；②从训练集机器起草问法草案（`origin:"extracted"`）；③草案在本机以 shadow 加载，积累实时 port 证据；④合并判定只出**建议**，由人落 PR。
+- **约束**：I4、I8（`core/**`、`ports/*`、`drafts/*` pi-free 值闭包）、I9（drafts 关 ⇒ 字节不变，§6）、I11/D8、I1/I5、PD10（pi 进程内不扫语料目录）、R-I3。
 
 ## 2. 现状摘要
 
-| 能力               | 坐标                                                                                           | 本设计如何用                                                       |
-| ------------------ | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| 归一化 / 摘要      | `src/reflex/core/{normalize,digest}.ts`                                                        | 原样复用：回测 digest 与实时 record 同口径                         |
-| S0 否决            | `core/gate.ts` `evaluateGate(GateFacts)`                                                       | 原样复用，事实由离线近似填入（§4.2）                               |
-| S1 匹配            | `core/match.ts` `compileCatalog`                                                               | 原样复用；草案另编译一个 matcher                                   |
-| 一致性             | `core/agreement.ts` `collectToolShapes`/`judgeAgreement`                                       | 原样复用；`BranchEntryLike` 适配器从 `wire.ts` 下沉到 core（§4.1） |
-| 纠正 / 重复        | `core/state.ts` `detectCorrection`；`core/promotion.ts` `countCrossSessionRepeats`             | 原样复用                                                           |
-| 校验               | `core/schema.ts` `validateScript`/`validateCatalog`/`regexSourceProblems`                      | 复用，并新增 `validateDraft`（更严）                               |
-| 晋升               | `core/promotion.ts`（U5 唯一实现）、`scripts/dev/reflex-shadow.mjs`、`core/shadow-scan.ts`     | 新增合并判定，旧函数保留                                           |
-| 形状 / 脱敏 / 子句 | `src/memory/jev/predict/{shape,clauses}.ts`、`src/memory/jev/redact.ts`（均 pi-free）          | 聚类签名、报告首行脱敏                                             |
-| agentDir           | `src/core/agent-dir.ts` `resolveAgentDir`（pi-free）                                           | 草案 / 缓存 / 评审文件根                                           |
-| 运行时             | `src/reflex/wire.ts`（`scriptById`、`stateOf`、`scheduleShadowPort`、`runAuto`）、`command.ts` | 新增草案 shadow 分支与 `/reflex drafts`                            |
-| D8                 | `src/config/settings.ts:453` `applySecureDomainOverrides`                                      | 追加一行                                                           |
+| 能力                    | 坐标                                                                                                                                                                                          | 本设计如何用                                                                      |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| 归一化 / 摘要 / S0 / S1 | `src/reflex/core/{normalize,digest,gate,match}.ts`                                                                                                                                            | 原样复用；草案另编译一个 matcher                                                  |
+| 一致性                  | `core/agreement.ts`（`judgeAgreement`：零工具 ⇒ `no-tool`）                                                                                                                                   | 复用；`toBranchLike` 从 `wire.ts:95` 下沉到 core                                  |
+| 纠正 / 重复             | `core/state.ts` `detectCorrection`、`effectiveState(id,…)`（接受任意 id）；`core/promotion.ts`                                                                                                | 复用；AUTO 准入另加 builtin 白名单（§4.6）                                        |
+| 晋升                    | `core/promotion.ts`（`accumulate`/`evaluatePromotion`，按 `scriptId@scriptVer`）、`core/shadow-scan.ts`、`scripts/dev/reflex-shadow.mjs`                                                      | 旧 API 不变；V2 用独立汇总器（§4.7）                                              |
+| 运行时                  | `wire.ts`：`scheduleShadowPort`（`:236-275`，port 执行后**无条件** `stateOf`/`onExecOutcome`/写 `runtimes`）；`agent_settled`（`:509-531`，只从 `scriptById` 取脚本）                         | 拆成「port 执行 + 挂接」与「builtin 状态记账」（§4.6）                            |
+| 安全打开                | `src/session-nav/session-head.ts:119-139` `openSessionNoFollowAsync`（`O_RDONLY\|O_NOFOLLOW\|O_NONBLOCK\|O_NOCTTY` + 同 fd `stat`）                                                           | 草案加载照此模式（镜像常量，不 import：该文件值导入 `web-hub/protocol/spawn.js`） |
+| 脱敏 / 形状             | `src/memory/jev/{redact,predict/shape}.ts`（pi-free）                                                                                                                                         | 报告首行、examples                                                                |
+| agentDir                | `src/core/agent-dir.ts` `resolveAgentDir(env, home).dir`                                                                                                                                      | 草案 / 缓存 / 账本根                                                              |
+| fork 头                 | pi `session-manager.js:1242-1248,1398-1404`：fork 头 `parentSession` = **父会话文件路径**（`resolvedSourcePath` / `previousSessionFile`），新文件名 `<ts>_<newId>.jsonl`，header `id` 为新 id | 家族根解析（§4.2）                                                                |
 
-**本次实读得到的语料事实**（`~/.pi/agent/sessions`：95 个 cwd 目录、1385 个文件、1.6 GB；F §3.2 的统计口径可以复用）：
-
-- user 消息**没有 source 字段**（只有 `role/content/timestamp`），来源只能从结构上推断。
-- user 条目的 `parentId` 通常指向 `pi-hud-llm-time` 这类 custom 条目，而不是 assistant。web / 飞书输入的直接父条目是 `custom:subagent:web-origin`（大会话里约 20%）。topic-switch 重放的父条目是 `custom:subagent:topic-switch`，wake 注入的父条目是 `custom:subagent:wake-level`。
-- **fork 会话（header 带 `parentSession`）会整段复制祖先条目，`id` 和 `message.timestamp` 都不变。** 不去重的话，同一问句会重复计数。现有 `reflex-shadow.mjs` 也受影响：fork 出来的 record 会被当成「跨会话重复」（delta=0），导致永远判不合格。这是既有缺陷，B5 顺手修掉。
-- 单行且 ≤120cp 的 user 消息约占 75%，多行约 19%（多行会被 S0 #10 直接否决）。
+**语料事实**（`~/.pi/agent/sessions`：95 个 cwd 目录、1385 文件、1.6 GB）：user 消息无 source 字段；web/飞书输入父条目为 `custom:subagent:web-origin`，topic-switch 重放为 `custom:subagent:topic-switch`，wake 注入为 `custom:subagent:wake-level`；fork 会话整段复制祖先条目（`id`、`timestamp` 不变），现有 `reflex-shadow.mjs` 会把 fork 副本算成跨会话重复（既有缺陷，B5 修）；单行 ≤120cp 约 75%。`quota.summary` 的 `agreement.tools` 与 `bashShapes` **都为空**：模型对额度问题通常不调工具，签名无法自动标注它（§4.4）。
 
 ## 3. 总体设计
 
 ```
-离线（Tier 3，pi 进程外）                                    运行时（pi 进程内，reflex.drafts.enabled）
-scripts/dev/reflex-backtest.mjs                             src/reflex/wire.ts
-  │ import dist/reflex/core/backtest/*.js                     ├─ builtin matcher（不变）── miss ──► draft matcher
-  ▼                                                           │                                     │ high/ambiguous
-core/backtest/corpus.ts   jsonl 行 → Turn（去重/来源/形状）     │                                     ▼
-core/backtest/replay.ts   Turn × Matcher → ReplayRow          │                   pending{state:"shadow",origin:"draft"}
-core/backtest/cluster.ts  Turn[] → Cluster[]                  │                   → scheduleShadowPort（不进 runAuto）
-core/backtest/draft-gen.ts Cluster → RScriptV1(extracted)     └─ src/reflex/drafts/load.ts（异步一次性、有界、fail-closed）
-core/backtest/evidence.ts 回测统计 + 实时统计 + 评审 → 合并输入        ▲ 读 <agentDir>/reflex/drafts/*.json
-core/promotion.ts         evaluateMergedPromotion（唯一判定）         │
-        │ 写                                                         │ 人工复制或由脚本 --emit 写入
-        ▼                                                            │
-<agentDir>/reflex/{cache/corpus-v1.jsonl, drafts/*.json, reviews/*.json, reports/*.md}  (0700 目录 / 0600 文件)
+离线（Tier 3，pi 进程外）                                   运行时（pi 进程内，reflex.drafts.enabled）
+scripts/dev/reflex-backtest.mjs ──► core/backtest/orchestrate.ts（I/O 注入，可确定性测试）
+  core/backtest/corpus.ts    行 → Turn + CorrectionFact（双索引家族根、去重、来源、受理确证度）
+  core/backtest/split.ts     家族根 → train | holdout | unscored
+  core/backtest/replay.ts    Turn × Matcher → ReplayRow（confirmed / lenient 分账）
+  core/backtest/cluster.ts / draft-gen.ts / regex-safe.ts（只吃 train）
+  core/backtest/evidence.ts  批次内 holdout → BacktestEvidence
+  core/promotion.ts          accumulateV2 / portReliabilityV2 / evaluateMergedPromotion（V2 唯一判定）
+scripts/dev/reflex-shadow.mjs ──► 同一 V2 判定（backtest 缺省）
+        │ 写（0700/0600，未认证记录）                         src/reflex/wire.ts
+        ▼                                                     ├ builtin matcher（不变）─ miss ─► draft matcher（shadow only）
+<agentDir>/reflex/{cache/, manifests/, batches/, exposure.jsonl, │      runPortAttach（共用）· accountBuiltin（仅 builtin）
+                   reviews/, drafts-out/, drafts/, reports/}    └ src/reflex/drafts/load.ts（no-follow fd、有界、fail-closed）
 ```
 
-- **依赖方向**：`scripts → dist/reflex/core/**`（pi-free），`wire.ts → drafts/load.ts → core/draft-schema`。`core/backtest/**` 位于 `src/reflex/core/**` 之下，**自动**纳入现有值闭包 pi-free 门禁（`tests/boundary/pi-free.test.ts:178` 的 glob），不需要改门禁。`src/reflex/drafts/load.ts` 只用 `node:fs`，为它新增一条同款值闭包门禁。
-- **为什么不在 pi 内做 `/reflex backtest`**：语料扫描 1.6 GB，I/O 不可控（PD10），而且会话文本不该被加载进 pi 进程。pi 内只提供 `/reflex drafts`（列出已加载 / 被拒的草案），不扫描语料。
+- 依赖方向：`scripts → dist/reflex/core/**`；`wire.ts → drafts/load.ts → core/{draft-schema,draft-regex,identity}`。`core/backtest/**` 自动进入现有 `src/reflex/core/**` pi-free 门禁；`drafts/*.ts` 新增同款门禁。
+- 不在 pi 内做 `/reflex backtest`：1.6 GB I/O 不可控（PD10），会话文本不进 pi 进程。pi 内只有 `/reflex drafts`。
 
 ## 4. 接口契约
 
-### 4.1 共享适配器下沉（消除复制）
+### 4.1 共享适配器下沉
 
-`wire.ts` 里的 `toBranchLike(entries)` 原样移到 `src/reflex/core/branch-like.ts`，导出 `toBranchLike(entries: readonly unknown[]): BranchEntryLike[]`。`wire.ts` 改为 import，行为逐字节不变（现有 `wire-shadow` 测试兜底）。离线 corpus 与实时 `agent_settled` 从此共用一份「条目 → 工具形状」逻辑。
+`wire.ts` 的 `toBranchLike(entries)` 逐字移到 `core/branch-like.ts`；`wire.ts` 改 import，行为逐字节不变。
 
 ### 4.2 语料：`core/backtest/corpus.ts`
 
 ```ts
 export type TurnOrigin = "tui" | "web" | "replay" | "injected" | "steer";
+export type Split = "train" | "holdout" | "unscored";
+export type GateFactName = "idle" | "pendingMessages" | "topicSwitchActive" | "goalBusy" | "inFlight" | "sourceMode";
 export interface Turn {
-  session: string; // 会话 id（header.id），不放文件路径
+  session: string;
+  familyRoot?: string;
+  split: Split; // familyRoot 缺省 ⇔ unresolved ⇔ split="unscored"
   entryId: string;
   at: number;
-  settledAt: number; // settledAt = 本轮最后一个 assistant 条目的时间
-  cwd: string; // 只用于 --cwd 过滤，报告里不输出
-  text: string; // 原文（仅在内存和 0600 缓存里），报告永不输出
-  digest: string; // requestDigest(normalizeInput(text).norm)
+  settledAt: number;
+  cwd: string;
+  text: string;
+  digest: string; // text 只在内存与 0600 缓存
   imageCount: number;
   origin: TurnOrigin;
-  shapes: readonly string[]; // collectToolShapes(toBranchLike([user, ...本轮 assistant]))
+  shapes: readonly string[];
   toolCount: number;
-  hasWrite: boolean; // edit/write/Agent/ask_user
+  hasWrite: boolean;
+  unknownFacts: readonly GateFactName[]; // 离线推不出、按宽松假设填入的 gate 事实；空 ⇔ 可确证受理
 }
-export interface CorpusFilter {
-  since: number;
-  until: number;
-  cwd?: string;
+export interface CorrectionFact {
+  // 所有 user 条目都产（任意 origin / 长度 / 行数），不存原文
+  session: string;
+  entryId: string;
+  at: number;
+  origin: TurnOrigin;
+  corrHit: boolean;
 }
-/** 逐文件喂行，内部按 parentId 归属轮次；跨文件按 `${entryId}\0${message.timestamp}` 去重（先到先得）。 */
-export function createCorpusBuilder(f: CorpusFilter): {
-  beginFile(session: string, header: unknown): "skip-child" | "ok";
+export interface SessionHeaderFact {
+  file: string;
+  id: string;
+  parentSession?: string;
+  timestamp: number;
+  cwd: string;
+}
+export function buildFamilyIndex(headers: readonly SessionHeaderFact[]): FamilyIndex; // 第一遍
+export function createCorpusBuilder(
+  f: CorpusFilter,
+  families: FamilyIndex,
+): {
+  beginFile(file: string, header: unknown): "skip-child" | "ok";
   line(raw: string): void;
-  endFile(): readonly Turn[];
+  endFile(): { turns: readonly Turn[]; corrections: readonly CorrectionFact[] };
 };
 ```
 
-**轮次归属**：每个条目继承父条目的 turnId；遇到 user 条目开新轮。分叉和 compaction 天然正确，复杂度 O(n)。
+**家族根（第一遍只读每个文件的 header 行，扫描范围 = 全部 cwd 目录，不受 `--cwd` 过滤）**：建立双索引——`byPath`：`path.resolve(file)` → header；`byId`：header `id` → header（同一 id 出现在 ≥2 个文件 ⇒ 该 id 标记 `duplicate`）。`parentSession` 解析顺序：① `byPath.get(path.resolve(parentSession))`；② 移位兜底：取 `basename(parentSession)` 按 `^.+_(<uuid>)\.jsonl$` 抽 id，查 `byId`（`duplicate` 不采用）；③ 都失败 ⇒ unresolved。沿父链上溯至无 `parentSession` 的根；访问集合检测环（环 ⇒ 链上全部 unresolved）；链上任一节点 unresolved / duplicate ⇒ 本文件 unresolved。**unresolved 文件的 Turn 记 `split:"unscored"`**：只进回归报告，不进训练集也不进留出集（防止它其实是留出会话的 fork 而泄漏）。报告页眉打印 unresolved 文件数与原因分布（`missing-parent`/`cycle`/`duplicate-id`）。
 
-**来源判定**（冻结常量表 `ORIGIN_MARKERS`，每一项配一个 fixture 测试；另加一条治理测试：每个 marker 字面量必须仍出现在 `src/**` 里，防止改名后静默失效）：
+**轮次归属 / 来源 / 子会话排除 / 时间 cwd 过滤**：同 r1（继承父 turnId；来源表 `ORIGIN_MARKERS`——web⇒排除、wake/注入前缀⇒排除、topic-switch⇒`replay` 保留、父为 `toolUse` assistant 或 `toolResult` ⇒ `steer`、其余 `tui`；子会话由自标记或主会话 `subagent:run` 引用判定，口径镜像 `session-nav/provenance.ts`）。marker 字面量有存活治理测试。
 
-| 条件（沿 parentId 向上，跳过非 `message` 条目，直到遇到第一个 `message`）                                                                                | origin     | 回测处理                                                                              |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------- |
-| 途经 `custom:subagent:web-origin`（web / 飞书 / 托管 spawn）                                                                                             | `web`      | 排除（等价 S0 #1）                                                                    |
-| 途经 `custom:subagent:wake-level`；或文本命中 `INJECTED_PREFIXES`（goal / compact-hint / reload / context-switch 的固定文案，从源码常量 import，不复制） | `injected` | 排除                                                                                  |
-| 途经 `custom:subagent:topic-switch`                                                                                                                      | `replay`   | **保留**：原句是人在 TUI 输入的，实时链路里 reflex 排在 topic-switch 之前，能看到原句 |
-| 第一个 `message` 是 assistant 且 `stopReason==="toolUse"`，或是 `toolResult`                                                                             | `steer`    | 填 `streamingBehavior:"steer"` ⇒ S0 #3 否决                                           |
-| 其余                                                                                                                                                     | `tui`      | 进入回放                                                                              |
+**去重**：跨文件按 `${entryId}\0${timestamp}`；冲突保留 header `timestamp` 最早的文件（与遍历顺序无关）。同一家族内去重后 split 一致（split 按家族根）。
 
-**文件级排除**：header 后约 64 行内出现 `subagent:child` 自标记，或文件名出现在任一主会话 `subagent:run` 条目的 session 引用里（两遍扫描，复用 `session-nav/provenance.ts` 的判定口径，实现时先确认值闭包 pi-free，不满足就镜像一份），即子会话，整文件跳过。`/命令` 不产 user 消息；skill / 模板展开后是多行，由 S0 #10 / #11 否决。带图输入取 `imageCount`，交给 S0 #5。
+**受理确证度（Major 8）**：每个 Turn 计算 `unknownFacts`：
 
-**时间 / cwd**：`--days`（默认 30）按 `message.timestamp` 过滤；`--cwd <abs>` 按 header `cwd` 精确匹配（同 R3b，不做 `~` 展开）。
+- `idle` 可确证 ⇔ 第一条祖先 `message` 是 assistant 且 `stopReason ∉ {toolUse}`（agent 已停），或为会话首条；`idle` 可确证时 `pendingMessages=false` 一并可确证（pi 空闲前排空队列）；
+- `topicSwitchActive` / `goalBusy` 可确证 ⇔ 本会话内能从 `subagent:topic-switch*` / goal 条目推出当时状态（推不出 ⇒ unknown）；
+- `inFlight` 可确证 ⇔ 本会话内该时刻前无未结算的 `subagent:reflex` AUTO 作答（离线恒可推）；
+- `sourceMode`（r3）：marker 只能排除已知注入，排除不了 print/json/rpc 模式；**会话级**证据（如「会话里有任意 reflex-record」）不成立——fork 会复制祖先条目，一次 TUI 受理也证明不了其他运行阶段。确证必须绑定**目标轮次本身**（从该 user 条目到下一条 user 条目之前的本轮条目区间），且证据条目必须是**本文件原生**的（按 `${entryId}\0${timestamp}` 去重后归属本文件，即不是 fork 复制品）。可接受的轮次证据只有两种：①本轮区间内的原生 `pi-hud-llm-time` 条目（HUD 只在 `mode==="tui"` 的 live 会话写计时条目，见 `src/hud/index.ts:10-16` 的「非 tui 会话不再产生 HUD 计时条目」；仅对 `turn.at ≥ HUD_TUI_GATE_SINCE` 的轮次有效，该常量 = 引入 tui 门的 commit 时间，B1 用 `git log` 定值并写进 `markers.ts`，早于它一律不采信）；②本轮区间内的原生 `subagent:reflex-record` / `subagent:reflex` 作答，且其 `requestDigest === turn.digest`。两者都没有 ⇒ `sourceMode` unknown ⇒ lenient。逐轮判定天然覆盖「同一会话中途换运行模式」：哪一轮有证据哪一轮才确证。
+- `unknownFacts` 为空 ⇒ **confirmed**；否则 **lenient**（按宽松假设放行）。晋升率**只用 confirmed**；lenient 只进覆盖率统计（§4.3）。
 
-**缓存**：`<agentDir>/reflex/cache/corpus-v1.jsonl`（0600）。只缓存「origin∈{tui,replay,steer} ∧ 单行 ∧ ≤120cp」的 Turn，另附 `{file, size, mtimeMs}` 清单；文件 size 或 mtime 变化才重新解析。缓存与会话文件同属本机明文域，不扩大暴露面；`--no-cache` 可以跳过。缓存格式带 `v` 和 `normalizeVersion`（normalize / shape 改动时手动 bump ⇒ 全量重建）。
+**纠正时间线（Major 9）**：`CorrectionFact` 对**所有** user 条目产生（含长句、多行、web、注入），`corrHit = CORRECTION_RE.test(normalizeInput(text).norm)`；缓存里单独存这条时间线（不受「单行 ≤120cp」过滤）。
+
+**缓存**：`<agentDir>/reflex/cache/corpus-v2.jsonl`（0600）：Turn 行（origin∈{tui,replay,steer} ∧ 单行 ∧ ≤120cp）+ 全量 CorrectionFact 行 + header 索引；失效键 = `{cacheV, normalizeVersion, markersVersion, CORRECTION_RE.source 的 hash}` 任一变化 ⇒ 全量重建；文件级 `{size, mtimeMs, dev, ino}` 变化 ⇒ 该文件重解析，且**家族索引整体重建**（父链可能跨文件变化）。cold 与 warm 产出必须逐行相等（测试钉住）。
 
 ### 4.3 回放：`core/backtest/replay.ts`
 
 ```ts
+export type Acceptance = "confirmed" | "lenient";
 export type ReplayClass =
-  | { k: "veto"; code: VetoCode; wouldHit?: string } // wouldHit：跳过 S0 直接匹配时的命中脚本（用于调模板）
+  | { k: "veto"; code: VetoCode; wouldHit?: string }
   | { k: "miss" }
   | { k: "ambiguous"; candidates: readonly string[] }
   | { k: "high"; scriptId: string; layer: "builtin" | "draft"; agree: Agreement };
 export interface ReplayRow {
   turn: Turn;
   cls: ReplayClass;
+  acceptance: Acceptance;
   reasked: boolean;
   corrected: boolean;
   suspect?: SuspectCode;
 }
-export type SuspectCode = "diverge" | "write-turn" | "other-port" | "reviewed-misfire";
-export function replay(
-  turns: readonly Turn[],
-  cat: { builtin: Matcher; drafts?: Matcher; byId: ReadonlyMap<string, RScriptV1> },
-  caps: ReadonlySet<Capability>,
-): readonly ReplayRow[];
+export type SuspectCode = "diverge" | "write-turn" | "other-port" | "reviewed-misfire" | "reasked" | "corrected";
+export function replay(turns, corrections: readonly CorrectionFact[], cat, caps): readonly ReplayRow[];
 ```
 
-- **两层语义与运行时一致**：先跑 builtin，miss 时才跑 drafts（§4.6）。一致性用 `judgeAgreement(script, turn.shapes)`。
-- **离线无法还原的 gate 事实**（报告页眉逐项列出「按宽松假设填入」）：`idle`（取 `origin!=="steer"`）、`pendingMessages=false`、`topicSwitchActive=false`、`goalBusy=false`、`inFlight=false`。`source/mode` 由 origin 推出。这些近似只会**高估**命中，不会低估误命中，方向保守。
-- **reasked**：同会话内、同 `scriptKey + digest`，在 `REPEAT_WINDOW_MS` 内再次成为 high 候选，口径同 PD6。**跨会话**用 `countCrossSessionRepeats`（输入已去重，fork 不再误计）。
-- **corrected**：用下一条 user Turn（不论 origin）跑 `detectCorrection(norm, memo{settledAt}, at)`，口径同 PD12。注意它衡量的是「模型答错被纠正」，作为问法不贴切的代理信号（见 §8 Q2）。
-- **suspect（疑似误命中）**：high 命中且满足任一条件：`agree==="diverge"`；本轮 `hasWrite`；本轮签名映射到**另一个** port（§4.4 签名表）；或评审文件已把这条标为 misfire。
-- **耗时**：缓存热时，2 万条 Turn × (gate + match) ≈ 0.2 s（A 的目标 p99 ≤ 1 ms/条，实测远低于此）。
+- 两层语义同运行时（builtin 先、miss 才跑草案）；`acceptance = unknownFacts.length === 0 ? "confirmed" : "lenient"`。
+- **reasked**：同会话、同脚本身份（§4.7 identityKey）+ digest，在 `REPEAT_WINDOW_MS` 内再次成为 high；跨会话用去重后的 `countCrossSessionRepeats`。
+- **corrected（按实时 memo 语义重放）**：每个会话按 append 顺序推进一个 memo——high 候选在其 `settledAt` 设置 memo（覆盖旧 memo，同实时单槽）；之后**任何** `CorrectionFact`（不只下一条），只要 `origin ∈ {tui, replay}`（实时只受理 interactive+tui；`web`/`injected`/`steer` 不计）∧ `corrHit` ∧ `at - memo.settledAt ≤ CORRECTION_WINDOW_MS` ∧ `!memo.corrected` ⇒ 记该 memo 目标 corrected，置 `memo.corrected`。不命中的中间输入不清 memo。已知偏差：实时在进程重启（`session_start`）时清 memo，离线看不到重启 ⇒ 离线只会**多计**纠正（保守）。
+- `reasked`/`corrected` 只在 high 命中轮次计（用户拍板）；命中轮次上的 reasked/corrected 同时以 `suspect:"reasked"|"corrected"` 进清单，供评审记录豁免。
 
 ### 4.4 草案生成：`core/backtest/{cluster,draft-gen,regex-safe}.ts`
 
-- **port 签名表**（`PORT_SIGNATURES`，从 `BUILTIN_SCRIPTS` 按 port 汇总 `agreement.tools ∪ bashShapes` **派生**，不手写）。一条 Turn 的 `portLabel` 定义为：签名与恰好一个 port 相交、`!hasWrite`、`toolCount ≤ 3`；否则为 `unmapped`。
-- **候选集**：replay 结果为 miss / ambiguous（**内置未覆盖**）的 `tui|replay` Turn，并且 S0 通过。
-- **聚类**（确定性，不调模型）：骨架 = `norm` 依次做路径 → `<path>`、数字 → `<n>`、引号内容 → `<q>`；token = CJK 二元组加拉丁词。按频次降序做 leader 贪心聚类，Jaccard ≥ 0.6。簇大小 < `--min-group`（默认 3）丢弃。
-- **出草案门槛**：簇内众数 `portLabel` 占比 ≥ 80%（签名同构率），且众数不是 `unmapped`。不达标的簇只在报告里列意图（digest 加截断首行），不出草案。
-- **模板生成**（全部由 `regex-safe.ts` 的 `literal()` 转义生成，结构上就能保证合法）：
-  - `strong` = 簇内**不同骨架**的全句字面量 alternation。`<n>` → `\d+`，句尾 `(吗|呢)?`。每簇最多 12 条，每条 ≤ 120 字符。
-  - `weak` = 簇内覆盖率 ≥ 60%、且在全语料其余部分出现率 ≤ 2% 的 1–3 个 n-gram 字面量。
-  - `exclude` = 负样本回灌（见下）。
-  - `examples.hit` = 簇成员经 `redactForJev(…,"user")` 加骨架化后的文本，≥ 5 条。`examples.miss` = 负样本文本，不足 5 条时用「`帮我` + hit[0]」这类必被 S0 否决的合成句补齐。
-- **负样本回灌**：用草案对全语料做 replay。所有 suspect 行，以及评审文件中 `verdict:"misfire"` 的 digest（通过缓存找回原句）都会生成 `exclude` 字面量（整句转义，作为子串锚点），然后迭代至多 3 轮，直到 suspect 中不再有新出现的。回灌只会**收紧**模板，不会放宽。
-- **其余字段**：`port.id`、`requires`、`agreement`、`render` 全部取该 port 的规范值（`PORT_DEFAULTS`，从 builtin 派生）；不写 `budgetMs`；`version: 1`；`id = "draft." + slug(port, 簇序号)`。**永不输出 argv**：rscript/1 根本没有这个字段，`validateDraft` 也会拒绝未知字段。
-- **安全子集 `draftRegexProblems(src)`**（`validateDraft` 在 `regexSourceProblems` 之上追加）：长度 ≤ 160；禁止 `*`、`{`、反向引用 `\1-9`、lookaround `(?=` `(?!` `(?<`；`+` 只允许紧跟单原子（`\d`、`\s`、字符类、单个字面字符）；每条源最多 8 个 `?`。这样就没有可回溯的重复组，单条匹配的路径数 ≤ 2⁸，加上 S0 #9 的 120cp 上限，ReDoS 有界。生成器只产出这个子集，手改草案时由校验兜底。
+- **只吃训练集**：候选 = `split==="train"` ∧ origin∈{tui,replay} ∧ S0 通过 ∧ builtin miss/ambiguous。负样本回灌也只用训练集 suspect（BD7）。
+- **port 标注**：`PORT_SIGNATURES`（从 builtin 派生）只对**有工具签名**的 port（`jobs.list`/`fleet.status`/`git.status`）有效：签名恰交一个 ∧ `!hasWrite` ∧ `toolCount ≤ 3` ⇒ 该 port。**无工具 port（`quota.summary`，签名为空）不做自动标注**：簇众数 `toolCount===0` 且与任一无工具 port 的 builtin `weak` 词表词法相交 ⇒ 输出 `needs-port` 候选（簇 id、规模、脱敏骨架样本、建议 port），**不出草案**；人用 `generate --assign <clusterId>=quota.summary` 指定后才生成。不声称 4 个 port 都能全自动生成。
+- **聚类**：骨架 = `norm` 依次做路径 → `<path>`、数字串 → `<n>`、引号内容 → `<q>`；含 `<path>`/`<q>` 的骨架不进 strong（无法用安全语法表达），只参与 weak 统计。leader 贪心、Jaccard ≥0.6、`minGroup` 默认 3，稳定排序保证确定性。
+- **模板**（全部由 `regex-safe.ts` 按 §4.5 语法生成）：strong = 不同骨架的全句字面量 alternation，`<n>` → `\d{1,4}`（每条至多 1 个，且两侧必须是非数字字面字符或边界），可选尾缀只允许 `(?:吗|呢)?`；每簇 ≤12 条。weak = 覆盖率 ≥60% 且全语料出现率 ≤2% 的 1–3 个纯字面量 n-gram。exclude = 训练集负样本的整句纯字面量。
+- **examples（Major 11）**：`examples.hit` 用**代表值实例化**的骨架：`<n>` 依次替换为 `2`、`3`、`10`…（保证匹配 `\d{1,4}`，脱敏不会改写这些数字），再过 `redactForJev(…,"user")`，**生成后逐条用该草案自身 matcher 复核必须 high**，不 high 即丢弃。去重按实例化后的 norm。小簇补全：同一 strong 条目可用不同代表值实例化补足到 5 条（`<n>` 骨架）；纯字面量小簇（无 `<n>`）不足 5 个不同 hit ⇒ 加句尾尾缀变体（`吗`/`呢`，仍需复核 high）；仍不足 ⇒ `skip:"examples"`。`examples.miss` = 训练集负样本 + 必被 S0 否决的合成句，补足到 ≥5。
+- 生成结果是 `{ drafts, needsPort, skips: Record<SkipReason, number> }`，`SkipReason = "small" | "low-purity" | "unmapped" | "examples" | "regex" | "exclude-cap" | "validate"`；报告打印 skip 分布。
+- 其余字段取 `PORT_DEFAULTS`；不写 `budgetMs`；`version:1`；`id = "draft." + slug`；`lineage` 缺省（= id）；**永不输出 argv**。
 
-### 4.5 草案文件与校验：`core/draft-schema.ts`
+### 4.5 草案文件、正则语法与校验：`core/{draft-regex,draft-schema,identity}.ts`
 
-- **位置**：`<agentDir>/reflex/drafts/*.json`（`resolveAgentDir(process.env, homedir())`）。目录 0700，文件 0600。脚本 `--emit` 写入时用 tmp + rename；`--emit` 默认关闭，默认只写到 `reports/` 旁边的 `drafts-out/` 供人挑选后复制。
-- **格式**：单个 JSON 对象，就是一个 `RScriptV1`，`origin:"extracted"`。不加信封，元数据（簇统计、生成时间）写进报告。
-- **`validateDraft(raw, builtinIds) → RScriptV1 | DraftReject`**（纯函数，不抛异常）的规则：
-  1. `validateScript` 通过，且对象**没有** schema 之外的键（白名单逐层比对，防止夹带 argv / env 等字段）；
-  2. `origin==="extracted"`，`risk==="readonly"`；
-  3. `id` 匹配 `^draft\.[a-z0-9-]+$`，不在 `builtinIds` 里，草案之间不重复；
-  4. `port.id` ∈ 4 个 MVP port（排除 `sessions.recent`）；`requires`、`agreement`、`render` 与 `PORT_DEFAULTS[port]` **逐字段相等**，杜绝通过改 agreement 刷出 agree；
-  5. 没有 `budgetMs`；条目数 strong ≤ 12、weak ≤ 8、exclude ≤ 32、hit / miss 各 5–20 条；
-  6. 每条正则源通过 `regexSourceProblems` 和 `draftRegexProblems`；
-  7. **例句自检**：单独编译这一份草案，`examples.hit` 必须全部为 `high`，`examples.miss` 必须全部被 `evaluateGate`（理想 TUI 事实）否决或匹配为非 high。耗时 < 1 ms，加载时必跑。
-- **配套**：`validateCatalog` 追加一条规则：builtin 的 id 不得以 `draft.` 开头（命名空间双向隔离；人把草案改写进 catalog 时必须换 id 或并入现有脚本，并升 version）。
-- **文件级上限**：最多 16 个文件，单文件 ≤ 16 KiB。必须是普通文件（`lstat`，拒绝 symlink），`uid === process.getuid()`，`mode & 0o077 === 0`。超出上限的按文件名排序截断，并计 `rejected:"cap"`。
-- **`draftHash`**：对规范化 JSON（键排序）做 sha256，取前 16 hex。离线证据按 `id@ver#hash` 分组：手改草案却忘了升 version 时，证据不会混在一起。
+**草案正则语法 DRX（Blocker 1，解析器校验，不再黑名单扫描）**：
+
+```
+strong  := seq ('|' seq){0,11}            匹配时包成 ^(?:…)$
+seq     := unit+ tail?
+unit    := LIT | DIGITS
+LIT     := 非元字符 | '\' 元字符           元字符 = \ ^ $ . | ? * + ( ) [ ] { }
+DIGITS  := '\d{1,4}'                       每个 seq 至多 1 个；前后相邻 unit 必须是非数字 LIT 或 seq 边界
+tail    := '(?:吗|呢)?'                    固定字面量集合，只能在 seq 末尾，每 seq 至多 1 个
+weak / exclude := LIT{1,40}                纯字面量，子串匹配
+```
+
+- `parseDrx(src, role) → { ok: true; ast } | { ok: false; problem }`：递归下降，接受 = 能完整解析，**不在语法内的一切拒绝**（`+`、`*`、`?`（尾缀外）、`{`（`\d{1,4}` 外）、字符类、分组（尾缀外）、反向引用、lookaround、`.`）。长度 ≤160。
+- **安全性论证**：每个 seq 至多一个有界量词 `\d{1,4}`，其字符集与相邻字面字符不相交 ⇒ 每个起点的分配方式 ≤4 种；尾缀是两选一的定长字面量 ⇒ ×3；alternation ≤12 ⇒ 每个起点最多 12×4×3 条路径，总工作量 O(12·12·n)，n ≤120cp（S0 #9）。weak/exclude 为纯字面量，线性。**不存在依赖输入长度的指数回溯**，因此不需要（也无法）用计时器打断主线程上的同步匹配——500 ms 加载预算只约束 I/O，不约束匹配。
+- 反例（必须被拒，B0 测试）：`"a+".repeat(20)+"b"`、`(a|a)+`、`\d+\d+`、`\d{1,4}\d{1,4}`、`x?x?x?…`、`[a-z]+`、`.*`、`(?=a)`、`\1`。测试编排（r3，三类彼此独立）：
+  1. **拒绝集**：主测试进程内只断言 `parseDrx` 拒绝，**不执行**这些正则。
+  2. **危险演示**（可选、仅作说明）：单独起一个子进程（`spawnSync(process.execPath, ["-e", …], { timeout: 2000 })`）用原生 RegExp 跑 `"a+".repeat(20)+"b"` × 120 个 `a`；允许它被截止，断言只有「被截止或耗时 >1 s」二选一（证明该反例真的危险），失败不影响其他两类。
+  3. **接受集**：另起一个独立子进程（硬截止 5 s），经 stdin 传入 1,000 个 DRX 接受的随机源与对抗失败输入（`2`×120、`吗`×120、交替串、strong 前缀 + 噪声），断言子进程**正常退出**（`status===0`、未被信号终止）且子进程自报总耗时 < 2 s。
+
+**草案文件**：`<agentDir>/reflex/drafts/*.json`，单个 `RScriptV1`（`origin:"extracted"`）。`validateDraft(raw, builtinIds) → RScriptV1 | DraftReject`（纯函数、不抛）：①`validateScript` 通过且逐层无白名单外键；②`origin==="extracted"`、`risk==="readonly"`；③`id` 匹配 `^draft\.[a-z0-9-]+$`、不在 builtinIds、草案间不重复；`lineage`（可选）匹配 `^[a-z0-9.-]+$`；④`port.id` ∈ `MVP_PORTS`，`requires/agreement/render` 逐字段等于 `PORT_DEFAULTS[port]`；⑤无 `budgetMs`，条目数 strong ≤12、weak ≤8、exclude ≤32、hit/miss 各 5–20；⑥每条正则源 `parseDrx` 通过（并仍过 `regexSourceProblems`）；⑦例句自检：单独编译，hit 全 high，miss 全被理想 TUI 事实的 S0 否决或非 high。`validateCatalog` 追加：builtin id 不得以 `draft.` 开头。
+
+**身份与谱系（Major 7）**：`core/identity.ts`
+
+```ts
+/** 匹配语义 hash：只覆盖 {port.id, match.strong/weak/exclude}（键排序 JSON → sha256 前 16 hex）。改 id/version 不变；改任何模板必变。 */
+export function templateHash(s: RScriptV1): string;
+/** 文件 hash：整份规范化 JSON；仅用于审计（手改未升版本可见）。 */
+export function draftHash(s: RScriptV1): string;
+export interface EvidenceIdentity {
+  lineage: string;
+  templateHash: string;
+  portId: PortId;
+  portVer: number;
+}
+export const identityKey = (i: EvidenceIdentity): string => `${i.lineage}#${i.templateHash}`;
+/** 由 (scriptId, scriptVer, 可选 templateHash) 解析身份：draft 行自带 hash；builtin 行按「当前 catalog 中 id@ver 一致 ⇒ 取其 hash 与 lineage」，否则 legacy 身份 `${id}@${ver}#legacy`（不与任何新身份合并）。 */
+export function resolveIdentity(
+  row: { scriptId: string; scriptVer: number; templateHash?: string },
+  catalog: readonly RScriptV1[],
+  drafts: readonly RScriptV1[],
+): EvidenceIdentity | undefined;
+```
+
+- `RScriptV1` 追加可选 `lineage?: string`（缺省 = id）。人把 `draft.x` 改写进 catalog 时写 `lineage: "draft.x"`（PR 可见）；之后 `foo@2`（lineage `draft.x`）与 `draft.x` 只要 templateHash 相同即同一身份——**改 id 不抹掉此前的重复与纠正**；改了模板但没升版本 ⇒ hash 不同 ⇒ 证据分开。
+- 写入面（仅 drafts 开启且目标为草案时；builtin 记录逐字节不变，§6）：`ReflexRecordV1` 追加 `origin?:"draft"`、`draftHash?`、`templateHash?`、`port.portId?`；`ReflexCorrectionV1` 追加 `targetOrigin?:"draft"`、`targetTemplateHash?`。
 
 ### 4.6 运行时加载
 
-**设置**：`ReflexSettings` 追加 `drafts: { enabled: boolean }`，默认 `{enabled:false}`，键 `reflex.drafts.enabled`，`bool(...)`，**非 live**（`/reload` 生效），追加在 `REFLEX_SETTING_SPECS` 末尾。`applySecureDomainOverrides` 追加 `reflex: { ...settings.reflex, enabled:false, drafts:{enabled:false} }`（D8 双保险，并加入 `tests/secure/settings-override.test.ts`）。子会话本来就是 post-guard，不可达。
+**设置**：`ReflexSettings.drafts: { enabled: boolean }`，默认关，键 `reflex.drafts.enabled`，`bool`，非 live，追加在 `REFLEX_SETTING_SPECS` 末尾；`applySecureDomainOverrides` 加 `drafts:{enabled:false}`。
 
-**加载**（`src/reflex/drafts/load.ts`）：
+**加载（`src/reflex/drafts/load.ts`，Major 5）**：
 
 ```ts
-export interface DraftLoadResult {
-  drafts: readonly LoadedDraft[];
-  rejected: readonly { file: string; code: DraftRejectCode }[];
-}
-export interface LoadedDraft {
-  script: RScriptV1;
-  hash: string;
-}
 export type DraftRejectCode =
+  | "dir-untrusted"
+  | "dir-cap"
+  | "dir-changed"
   | "cap"
+  | "name"
   | "not-regular"
   | "perm"
   | "size"
@@ -202,140 +237,158 @@ export type DraftRejectCode =
   | "regex"
   | "examples"
   | "duplicate"
-  | "timeout";
-/** 永不抛、永不 reject；总预算 DRAFT_LOAD_BUDGET_MS=500，经 clampSpanMs + 注入 Clock（unref）；超时 ⇒ 全部丢弃（rejected:"timeout"）。 */
+  | "timeout"
+  | "aborted";
+export interface DraftFs {
+  lstat;
+  opendir;
+  open;
+} // node:fs/promises 子集，可注入
 export function loadDrafts(
   dir: string,
   builtinIds: ReadonlySet<string>,
   clock: Clock,
   signal: AbortSignal,
+  fs?: DraftFs,
 ): Promise<DraftLoadResult>;
 ```
 
-- **时机**：在 `wireReflex` 里，`deps.settings().drafts.enabled ∧ secureDomainKind==="plain"` 时启动**一次**（不 await）。结果写进闭包里的 `drafts` 变量（I4 / R-I8）。加载完成前 `draftMatcher` 为 `undefined`，相当于没有草案。不提供进程内重扫：要改草案就 `/reload`，模板迭代在离线脚本里完成（§4.8）。
-- **fail-closed**：单个草案被拒只影响它自己，计入 `rejected` 并记 `counters["drafts.rejected"]`，内置脚本不受任何影响。整体异常或超时等同于零草案。被拒的草案在 `/reflex drafts` 和 `/reflex status` 里各报一次，不 notify 刷屏。
-- **wire 分支**（插在 `if (m.kind === "miss") return CONTINUE;` 处）：
+1. **受信目录**：`lstat(<agentDir>/reflex)` 与 `lstat(drafts)` 都必须是真目录（非 symlink）、`uid === getuid()`、`mode & 0o077 === 0`；否则整体 `dir-untrusted`。记下 drafts 的 `{dev, ino}`。
+2. **有界枚举**：`opendir` 流式读取，最多读 `DIR_SCAN_CAP = 64` 个 dirent；读到第 65 个 ⇒ 整体 `dir-cap` 并立即 `close`（不全量 readdir）。名字须匹配 `^[a-z0-9.-]{1,64}\.json$`（否则 `name`）；排序后取前 16 个，余者 `cap`。
+3. **逐文件 no-follow fd**：`open(join(dir,name), O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY)`（常量镜像 `SESSION_READ_FLAGS`，测试断言二者相等）；**同一 fd** `stat`：非普通文件 ⇒ `not-regular`（FIFO/设备/被换成 symlink 的 ELOOP 都落这里）；`uid`/`mode & 0o077` ⇒ `perm`；`size > 16 KiB` ⇒ `size`；随后从该 fd 最多读 `16 KiB + 1` 字节，读满 cap+1 ⇒ `size`（防止 stat 后增长）。`finally` 关闭 fd。
+4. **结束复核**：再 `lstat(drafts)`，`{dev, ino}` 变化 ⇒ 全部丢弃 `dir-changed`（防目录被整体替换）。
+5. **预算**：`clampSpanMs(DRAFT_LOAD_BUDGET_MS=500)` 经注入 Clock（unref）；超时或 abort ⇒ 停止后续文件、关闭当前 fd、`clearTimer`、结果全部丢弃（`timeout`/`aborted`）。永不抛、永不 reject。
+6. **时机**（BD8）：`drafts.enabled ∧ plain` 时，每次 `session_start` 若无结果且无在飞加载 ⇒ 启动；`session_shutdown` abort 在飞加载；完成结果跨 re-arm 保留到 `/reload`。被拒只在 `/reflex drafts|status` 显示，不 notify、不 setStatus（trace phase2 不变，§6）。
 
-```ts
-if (m.kind === "miss") {
-  const dm = draftMatcher?.match(gate.norm.norm, registry.capabilities());
-  if (dm === undefined || dm.kind === "miss") return CONTINUE;
-  // 草案路径：state 恒为字面量 "shadow"；不查 stateOf/autoResolve；不进 runAuto；不计 strike。
-  return enterDraftShadow(dm, gate.norm, now, ctx); // 同步 CONTINUE；high ⇒ scheduleShadowPort；ambiguous ⇒ 只建 pending
-}
-```
+**wire 拆分（Major 6）**：
 
-- **shadow-only 硬保证**（分层）：①草案只存在于 `draftById` / `draftMatcher`，**永不**进入 `scriptById` / `catalog`。`runAuto`、`stateOf`、`runtimes` 的输入只来自这两者，因此类型上不可达。②`enterDraftShadow` 内 `state` 是字面量 `"shadow"`。③id 命名空间：`autoResolve` 里的 `draft.*` 会落进 `unknownAutoResolve`，status 显示「草案不可自动作答」。④测试：`autoResolve=["draft.x"]` 且草案 high 命中时，必须同步 `continue`、零 `sendMessage`、record 的 `state:"shadow"`；另加治理扫描：`runAuto(` 只能有一个调用点，且参数来自 `scriptById`。
-- **记录区分**（`ReflexRecordV1` 只追加可选字段，旧读者照常工作）：`origin?: "draft"`（builtin 不写，保持旧形状逐字节不变）、`draftHash?: string`，以及 `port.portId?: PortId`（**所有**新 record 都写，供按 port 统计；旧 record 的 portId 由离线侧经 `BUILTIN_SCRIPTS` 反查）。纠正条目 `ReflexCorrectionV1` 不改，target 是 `draft.*` id 时就能区分。`shadow-scan.ts` 追加对这三个字段的类型校验（宽进：缺省合法）。
-- **`/reflex drafts`**：列出 `loaded <id>@<ver>#<hash8> port=<p>` 与 `rejected <file> <code>`。在现有 `registerCommand("reflex")` 内解析子命令，**不改**命令描述、不新增注册。
+- `runPortAttach(p, script, cwd) → void`：现 `scheduleShadowPort` 的 port 执行 + `isStale/pending!==p` 检查 + 写 `p.port`（含 `portVer`）；**不碰状态**。返回结果给可选回调。
+- `accountBuiltin(script, outcome, notify)`：`stateOf`/`onExecOutcome`/`runtimes.set`/降级 notify——只在 `p.origin === "builtin"` 时调用；内部断言 `scriptById.has(script.id)`。
+- `Pending` 追加 `origin: "builtin" | "draft"`。`agent_settled` 取脚本：`p.origin === "draft" ? draftById.get(id) : scriptById.get(id)`，草案同样参与 `judgeAgreement`（否则 agreement 恒 unknown）。
+- **AUTO 准入**：`admitAuto(id) = scriptById.has(id) && stateOf(id) === "auto"`；草案分支从不调用 `stateOf`/`effectiveState`。`autoResolve` 中的 `draft.*` 计入 `unknownAutoResolve`。status 里所有草案相关增量（草案计数、「`draft.*` 不可自动作答」提示）**只在 drafts 开启时**输出；drafts 关闭时 `/reflex status` 与改动前逐字节相同（r3，由 parity 钉住）。
+- 纠正：memo 追加 `origin`；目标为草案时照写 `subagent:reflex-correction`（带 `targetOrigin/targetTemplateHash`），**不**调 `onCorrected`。`/reflex reset draft.x` ⇒ 报错「草案没有降级状态」。
+- 草案与 builtin 共用单槽：替换时按被替换槽自己的 origin 落记录。
+- **保证方式**：草案与 builtin 同为 `RScriptV1`，**类型上无法区分**；shadow-only 由「准入白名单 + 状态隔离测试 + 治理扫描（`runAuto(` 单调用点、`accountBuiltin(` 只在 origin 判断之后）」共同保证，不宣称类型不可达。
 
-### 4.7 晋升改造
+**`/reflex drafts`**：列 `loaded <id>@<ver>#<templateHash8> port=<p>` 与 `rejected <file> <code>`；关闭时 `drafts: disabled`。
 
-`core/promotion.ts` 保留 `evaluatePromotion`（`/reflex status` 的本会话视图继续用它），新增唯一的合并判定：
+### 4.7 晋升 V2
 
 ```ts
 export const PROMOTION_GATE_V2 = Object.freeze({ minIntentSamples: 50, maxDivergeRate: 0.05, minPortRuns: 10 });
 export interface PortReliability {
   portId: PortId;
+  portVer: number;
   runs: number;
   ok: number;
-} // 按 port 汇总所有 shadow record（builtin + draft）
-export interface ReviewCoverage {
+  missing: number;
+  unavailable: number;
+}
+export interface StatsV2 {
+  identity: EvidenceIdentity;
+  judged: number;
+  diverge: number;
+  reasked: number;
+  crossSessionRepeats?: number;
+  corrected: number;
+}
+export interface BacktestEvidence {
+  batchId: string;
+  manifestHash: string;
+  identity: EvidenceIdentity;
+  confirmed: { judged: number; diverge: number };
+  lenient: { judged: number; diverge: number; unknownFacts: Record<GateFactName, number> };
+  reasked: number;
+  crossSessionRepeats: number;
+  corrected: number;
+  waived: number;
   suspects: number;
   reviewed: number;
   misfires: number;
-  listHash: string;
-  stale: boolean;
+  unscored: number; // reviewed/misfires 来自未认证评审记录
 }
 export interface MergedEvidence {
-  key: string; // 待晋升的 scriptId@ver（builtin 新版本）
-  backtest?: {
-    judged: number;
-    diverge: number;
-    reasked: number;
-    crossSessionRepeats: number;
-    corrected: number;
-    review: ReviewCoverage;
-  };
-  live?: ScriptStats; // 来自 accumulate（可缺）
-  port: PortReliability;
+  identity: EvidenceIdentity;
+  backtest?: BacktestEvidence;
+  batchValid?: BatchValidity;
+  live?: StatsV2;
+  port?: PortReliability;
+  scanComplete: boolean;
 }
-export function evaluateMergedPromotion(e: MergedEvidence): PromotionVerdict;
+export function accumulateV2(rows, resolve: (row) => EvidenceIdentity | undefined): Map<string, StatsV2>; // 独立于旧 accumulate
+export function portReliabilityV2(rows): Map<`${PortId}@${number}`, PortReliability>;
+export function evaluateMergedPromotion(e: MergedEvidence): PromotionVerdictV2;
 ```
 
-- **问法证据**：满足以下任一即可。(a) 回测 `judged ≥ 50 ∧ diverge/judged ≤ 5% ∧ review 完整（reviewed===suspects ∧ !stale）∧ misfires===0`（有 misfire 必须先回灌 exclude、升版本、重测）；(b) 实时口径 `live.judged ≥ 50 ∧ divergeRate ≤ 5%`（即旧 U5 的问法部分）。
-- **port 可靠性**：**按 port 统计**（推荐、采用）。同一 port 被多个脚本共享时执行的是同一段代码，按 port 统计才能让新版本或新脚本复用已有证据。条件：`runs ≥ 10 ∧ ok === runs`。`runs` 口径沿用 `ok|uncertain|error|timeout`，`unavailable` 不计入（与 P R1-11 一致）。注意 `uncertain` 算「不成功」（§7 风险 3）。
-- **零容忍项**：`live.reasked + live.corrected + live.crossSessionRepeats(必须已判定) + backtest.reasked + backtest.crossSessionRepeats + backtest.corrected === 0`（回测侧是否计入见 §8 Q2）。
-- **「误命中已人工看过」怎么落地**：评审文件 `<agentDir>/reflex/reviews/<portId>.json`（0600），内容为 `{v:1, entries:[{digest, portId, verdict:"ok"|"misfire", at}], listHash}`。**按 (portId, digest) 记录**，与脚本 id 无关：草案改写成 builtin 后，同一批问句的评审可以沿用。合并判定要求：当前回测的 suspect 集合 ⊆ 已评审集合（`stale` = 有 suspect 不在评审里）。**防伪造**：评审文件只能由 `reflex-backtest.mjs review` 写入；该子命令要求 `process.stdin.isTTY && process.stdout.isTTY`（pi 的 bash 工具和子 agent 都不是 TTY，因此无法代答）；逐条显示截断首行，等人按 y/n；其他模式和任何代码路径都不写这个文件。手改 JSON 属于人的主动行为，不在防护范围内（残留，§7）。
-- **脚本分工**：`reflex-backtest.mjs --promote <scriptId>` 一次扫描同时提取 Turn 与 reflex record（复用 `extractReflexRows`），组装 `MergedEvidence` 并调用 `evaluateMergedPromotion`。`reflex-shadow.mjs` 改为：①按 `(entry.id, at, digest)` 去重（修 fork 缺陷）；②新增按 port 的可靠性小节；③结论改用 `evaluateMergedPromotion`（`backtest` 缺省，问法证据只能来自实时口径），JSON 字段只追加。两个脚本调用同一判定，结论不会分叉。
-- **流程**：草案（shadow 加回测）→ 人把它改写进 `catalog.ts`（builtin id、升 version）→ `npm run build` → `reflex-backtest.mjs --promote <id>`（对新 builtin 版本重放历史即得问法证据；port 证据按 port 取；评审按 digest 沿用）→ PR → 用户把 id 加进 `autoResolve`。**脚本从不改设置，也不写 catalog。**
+- **问法**：(a) 回测 `batchValid.ok ∧ confirmed.judged ≥50 ∧ confirmed.diverge/confirmed.judged ≤5% ∧ reviewed===suspects（否则 review-incomplete）∧ misfires===0`（lenient 不进分子分母，Major 8）；或 (b) 实时 `live.judged ≥50 ∧ 分歧 ≤5%`。
+- **port**：按 `(portId, portVer)`，只复用**当前** portVer 的证据；`runs` 计 ok|uncertain|error|timeout；`ok` 只计 ok；`missing` = 有 port 却无结果的候选记录（模型先 settled、槽被替换、迟到结果被丢）；合格 ⇔ `runs ≥10 ∧ ok===runs ∧ missing===0`；`missing>0` ⇒ **undetermined**（Major 13：迟到的失败可能藏在缺失里）。
+- **零容忍**：`live.reasked + live.corrected + live.crossSessionRepeats（必须已判定）+ backtest.reasked + backtest.crossSessionRepeats + backtest.corrected === 0`，均按**身份**（lineage+templateHash）汇总，跨 id/版本改名延续；回测侧已扣除评审记录的豁免。
+- `scanComplete=false`（任一文件读失败 / 解析中断）⇒ 不合格（Minor 14）。
+- 结论只是**建议**，附完整身份元组 `{lineage, templateHash, portId@portVer, batchId, manifestHash}`，供 PR 描述引用、由人核对。
 
-### 4.8 迭代体验
+**批次、manifest 与暴露账本（Blocker 4）**：
 
-```
-node scripts/dev/reflex-backtest.mjs [--days 30] [--cwd <abs>] [--drafts <dir>] [--only <id>] [--json] [--no-cache]
-node scripts/dev/reflex-backtest.mjs generate [--min-group 3] [--emit]     # 聚类 → drafts-out/（--emit 才写 drafts/）
-node scripts/dev/reflex-backtest.mjs review <portId>                        # TTY 专用，写 reviews/
-node scripts/dev/reflex-backtest.mjs --promote <scriptId>                   # 合并判定（需先 build）
-```
+- `CorpusManifestV1 { v:1; normalizeVersion; files: {sessionId; pathHash; size; mtimeMs; lines; lastEntryId}[]; manifestHash }`：`batch freeze` 时写 `manifests/<manifestHash>.json`（`wx`，永不覆盖）。
+- `EvalBatchV1 { v:1; batchId; lineage; manifestHash; cutoffAt; since; until; turnKeys: string[] /* sha256(entryId\0at) */; turnDigests: string[] /* requestDigest */; createdAt }`，`batchId = sha256(lineage + sorted turnKeys)`；只含 `split==="holdout"` 的 Turn；`batches/<batchId>.json`（`wx`）。
+- `exposure.jsonl`（追加）：`{ lineage, templateHash, batchId, at, via: "report" | "review" | "show" }`——**展示任何留出失败明细**（suspect 行、diverge、misfire、命中轮次的 reasked/corrected）时由脚本自动追加；只展示聚合计数不算暴露（残留风险）。
+- **模板修订时间**（r3，可核查来源）：本地追加账本 `revisions.jsonl`：`RevisionRecordV1 { v:1; lineage; templateHash; firstSeenAt; gitCommitAt?; source: "draft-file" | "drafts-out" | "catalog" }`。脚本在**任何**命令解析身份时，若 `(lineage, templateHash)` 尚无记录就先追加一条（first-seen 胜出，永不改写）；catalog 来源另记 `git log -1 --format=%ct -- src/reflex/core/catalog.ts`。`revisedAt(rec) = max(firstSeenAt, gitCommitAt ?? 0)`；`lastRevisedAt(lineage) = max(revisedAt)`（取最晚 ⇒ 只会让新批次准入更严）。不在草案文件里放 `revisedAt`：草案可被随意手改，账本至少是追加写（同样未认证，U6）。
+- `batchValidity(batch, identity, exposures) → { ok, reason? }`（r3）：**只看 `exposure.batchId === batch.batchId` 的暴露记录**——其中存在同 lineage 且 `templateHash ≠ identity.templateHash` 的 ⇒ 作废（`exposed-then-modified`）；批次 manifest 缺失 ⇒ `manifest-missing`。别的批次的暴露**不影响**本批次；从未暴露过的批次即使早于修订也仍有效。作废批次转为**回归集**：报告照常回放但不计证据。
+- `admitBatch(candidate, lineage, revisions, batches, exposures) → { ok, reason? }`（r3，`batch freeze` 时调用，冻结前必须通过）：①每个轮次 `at > lastRevisedAt(lineage)`（否则 `before-revision`）；②每个轮次的 `requestDigest` 都**不在任何已暴露批次**（有任一暴露记录的批次，不分 lineage）的 `turnDigests` 中（否则 `reused-exposed-turns`）——只换 batchId、重新打包旧样本、或旧问句原文在新会话里重现都会被拒；③`cutoffAt` 记为 `lastRevisedAt(lineage)`。新证据只能来自通过 `admitBatch` 的新批次，或实时 shadow。
 
-- `--drafts` 默认取 `<agentDir>/reflex/drafts`，草案 JSON 在**运行时读取**，不需要 build。改模板 → 重跑，热缓存 ≤ 3 s（目标）；冷启动全量解析 1.6 GB ≤ 90 s，只需一次。改了 `src/reflex/core/**` 才要 `npm run build`，缺 dist 时 exit 2（同 R3b）。
-- **输出**（stdout；`--report` 写 `<agentDir>/reflex/reports/<date>.md`，0600，永不进仓库）：每个脚本一行 `id@ver[#hash] high=… ambiguous=… veto{code:n…} wouldHitButVetoed=… agree/noTool/diverge reasked xs corrected`；再列 suspect 清单，每行 `digest · sessionId8 · entryId · "<首行 ≤24cp，redactForJev+骨架化>" · shapes`。**不输出**路径、命令参数或 session 文件路径（`--locate <digest>` 只在本机打印定位）。
-- 拒绝条件：`PI_SECURE_SESSION=1` 或 `PI_SECURE_VAULT` 已设置时 exit 3「secure 域禁用」（D8 精神）。扫描根固定为明文 agentDir 的 `sessions/`，不跟随 symlink（同 R3b）。不联网。
+### 4.8 评审记录、本机查看与迭代体验
+
+**威胁模型**：同 UID 的 agent（pi 的 bash 工具、子 agent）可以执行任意 shell，能读写 `<agentDir>` 下所有文件、改 `pi-toolkit.json`、伪造任何评审 / 暴露 / 批次记录。因此：①0700/0600 与 uid 检查只防**其他 UID** 与误共享，不防同 UID；②`reviews/*.json` 是**未认证记录**，脚本照常读取用于统计（豁免、misfire 计数）但输出处标注「unverified」；③**唯一的人工认证点**是用户批准把草案改写进 `catalog.ts` 的 PR（或用户在对话中明确确认），PR 描述须引用 `--promote` 输出的身份元组；④运行时安全性不依赖任何离线记录：草案恒 shadow，port 只读。
+
+- `review <portId>`：交互式便利工具（不再声称 TTY 认证）；逐条显示留出 suspect（digest + 脱敏首行 + suspect 码），写 `reviews/<portId>.json` `{v:1, entries:[{digest, portId, verdict:"ok"|"misfire", at}], unverified:true}`，并追加暴露记录。
+- `show <digest>`：**仅本机**的完整轮次查看：打印该轮 user 原文（脱敏）、本轮工具形状序列（**无 argv**）、来源、split、unknownFacts；拒绝与 `--report`/`--json` 组合；追加暴露记录。
+- **可导出报告** `--report`（`reports/<date>.md`）：只含聚合计数、digest、≤24cp 脱敏首行、身份元组；永不含路径、argv、session 文件名。
+- 命令：`reflex-backtest.mjs [--days N] [--cwd <abs>] [--drafts <dir>] [--only <id>] [--json] [--no-cache]` · `generate [--min-group 3] [--assign <cluster>=<port>] [--emit]` · `batch freeze --lineage <L>`（自动按 `admitBatch` 选轮次） · `review <portId>` · `show <digest>` · `--promote <scriptId> --batch <batchId>`。secure env ⇒ exit 3；缺 dist ⇒ exit 2；不联网。
+- **性能目标（手动，不保证）**：应用缓存冷（删 `cache/`）全量 ≤90 s、应用缓存热 ≤3 s；OS 页缓存不受控，报告标注；测量记录 manifestHash、扫描字节数、各过滤阶段计数。
 
 ## 5. 关键决策
 
-| #   | 决策                                                      | 否决的备选                             | 理由                                                                                                                                          |
-| --- | --------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| K1  | 回测逻辑全在 `core/backtest/**`，脚本只做 I/O 编排        | 在 `.mjs` 里重写 gate / match          | 单一实现；自动进入 pi-free 门禁；可做单元测试                                                                                                 |
-| K2  | 草案层**只在 builtin miss 时**参与匹配                    | 两层并行、统一定 band                  | builtin 的 pending、agreement、晋升数据与今天逐字节相同；草案和 builtin 重叠部分由离线回测衡量；按 port 统计后，port 证据不依赖草案自己的命中 |
-| K3  | 草案的 agreement / render / requires 强制等于 port 规范值 | 允许草案自定义                         | 防止草案通过改 agreement 刷出 agree；草案唯一可调的只有问法                                                                                   |
-| K4  | 正则安全子集（无重复组），比 builtin 更严                 | 只用现有嵌套量词扫描                   | 草案来源是机器加手改，可信度低于 builtin；生成器本来也只需要字面量 alternation                                                                |
-| K5  | 异步、一次性、有界加载；不做热重载                        | 设置 live 加 `/reflex drafts reload`   | I1 有界；PD10；迭代闭环在离线完成，没必要承担进程内 I/O                                                                                       |
-| K6  | port 可靠性按 port 统计                                   | 按脚本统计                             | 同一 port 是同一段代码；按脚本统计会让每个新草案或新版本从 0 攒                                                                               |
-| K7  | 评审按 (portId, digest) 记录，靠 TTY 门禁写入             | 按 scriptId 记录 / 允许 `--accept-all` | 改写成 builtin 后评审可沿用；非 TTY 的 agent 无法伪造                                                                                         |
-| K8  | 草案文件就是纯 `RScriptV1`                                | 加 `rdraft/1` 信封                     | 与 catalog 同构，人工晋升时直接粘贴改写；元数据放报告                                                                                         |
-| K9  | 语料缓存只存单行 ≤120cp 的问句                            | 不缓存，每次全扫                       | 「几秒重测」做不到；缓存内容与会话文件同权限同域                                                                                              |
+| #   | 决策                                                         | 否决的备选                     | 理由                                                                             |
+| --- | ------------------------------------------------------------ | ------------------------------ | -------------------------------------------------------------------------------- |
+| K1  | 回测逻辑全在 `core/backtest/**`，编排也是可注入 I/O 的纯模块 | 在 `.mjs` 里重写               | 单一实现；pi-free 门禁；编排可确定性测试                                         |
+| K2  | 草案只在 builtin miss 时参与                                 | 两层统一定 band                | builtin 行为与数据逐字节不变                                                     |
+| K3  | 草案 agreement/render/requires 强制等于 port 规范值          | 允许自定义                     | 防刷 agree                                                                       |
+| K4  | 正则用 DRX 有限语法 + 解析器                                 | 黑名单扫描（r1）               | 黑名单放过相邻重叠 `+`（41 字符 >2 s）；同步匹配无法用计时器打断，只能靠语法证明 |
+| K5  | 加载 no-follow fd、有界枚举、一次性                          | 热重载 / lstat→readFile        | TOCTOU；I1 有界                                                                  |
+| K6  | port 可靠性按 `(port, portVer)`，缺失结果 ⇒ 未判定           | 按脚本 / 缺失视为无证据        | 同 port 同代码；缺失可能藏迟到失败                                               |
+| K7  | 评审 = 未认证记录，人工认证 = PR                             | TTY/0600/listHash 防伪造（r1） | 同 UID agent 能执行任意 shell，任何本地机制都可伪造                              |
+| K8  | 身份 = lineage + templateHash                                | `id@ver#draftHash`（r1）       | 改 id 不抹证据；改模板不升版也能分开                                             |
+| K9  | 暴露账本 + 批次作废                                          | 留出集长期复用                 | 看过失败再改模板 ⇒ 该批次已被「用答案出题」                                      |
+| K10 | 无工具 port 走 `needs-port` 人工指定                         | 词法自动标注 quota             | 签名为空无法安全区分；误标会产出错误 port 的草案                                 |
+| K11 | 晋升率只用 confirmed 受理                                    | 宽松事实全部计入（r1）         | 宽松放进的 agree/no-tool 稀释分歧率（3/50=6% → 3/100=3%）                        |
 
 ## 6. 对现有面的影响
 
-- **R-I12 改写为**：「auto 只可能来自内置 catalog（`origin:"builtin"`）；`validateCatalog` 拒绝 `extracted` 和 `draft.*` id。草案（`origin:"extracted"`、`draft.*`）只能在 `reflex.drafts.enabled` 下经 `validateDraft` 加载，**恒为 shadow**，结构上不可达 `runAuto` / `autoResolve`。rscript/1 没有 argv 种类。」README 同步新增 R-I13：「草案加载有界、fail-closed，不影响内置脚本；secure / locked / 子会话不可达。」
-- **A 级 `reflex-off-golden.json`**：**不变**。`reflex.enabled=false` 时 `wireReflex` 不被调用；golden 不记录设置对象（已核实：不含 `autoResolve`）。`git diff --quiet origin/dev -- tests/fixtures/` 必须为空。
-- **`activate-trace.json`（B）**：**不变**。没有新增注册，`max` 档的 drafts 默认关，trace 只记录注册名。
-- **`setting-specs-pin.json` / `settings-corpus.json`**：因追加 `reflex.drafts.enabled` 重 pin。按 README 的规矩：`captured[i].input` 取自 `origin/dev`，生成后程序化比对，只接受新增这一项。
-- **`stack-teardown-matrix`**：不变（不新增 shutdown / start 步骤；加载 promise 由 `abort` 联动，迟到结果按 `isStale` 丢弃）。
-- **pi-free**：`core/backtest/**`、`core/branch-like.ts`、`core/draft-schema.ts` 自动受门禁约束；`drafts/load.ts` 新增一条值闭包门禁。
-- **governance G2 / G3 / G4**：全部仍然适用。G3 要求 `load.ts` 的超时走注入的 Clock；G4 要求草案路径不出现 `sendMessage`（扫描范围扩展到 `drafts/`）。新增 G5：`runAuto(` 只有一个调用点；`draft.` 字面量不出现在 `catalog.ts`。
-- **D8**：`applySecureDomainOverrides` 加一行；`wireReflex` 的 `secureDomainKind` 守卫已有；脚本侧做 secure env 拒绝。数据加密 README 的 D8 清单补「reflex.drafts」。
-- **types.ts**：只追加 `ReflexRecordV1.origin?` / `draftHash?` / `port.portId?`，以及 `ReflexSettings.drafts`（settings.ts）。
+- **R-I12 改写为**：「auto 只可能来自内置 catalog（`origin:"builtin"`）；`validateCatalog` 拒绝 `extracted` 与 `draft.*` id。草案只能在 `reflex.drafts.enabled` 下经 `validateDraft` 加载，恒为 shadow；AUTO 准入只认 `scriptById` 中的 builtin id，草案不调用状态机。rscript/1 没有 argv 种类，草案正则受 DRX 语法约束。」新增 **R-I13**：「草案加载有界、no-follow、fail-closed，不影响内置脚本；secure/locked/子会话不可达。」新增 **R-I14**：「离线评审 / 暴露 / 批次记录都是未认证记录；人工认证只发生在 catalog PR。」
+- **`reflex-off-golden.json`（A）**：不变（`reflex.enabled=false` 时 `wireReflex` 不被调用）。
+- **`activate-trace.json`（B）**：不变。trace 记录的是 phase 1 的有序注册调用，**以及** phase 2 在 `session_start → shutdown → start → shutdown` 中的可观察调用（`sendMessage`/`appendEntry`/`setStatus`/`setWidget`/`notify`/`addAutocompleteProvider`，见 `tests/governance/activate-trace.test.ts:9-12,83-93`）。`max` 档 drafts 默认关 ⇒ session_start 不启动加载；即使开启，加载也不产生这 6 类调用；无新增注册。
+- **drafts-off 字节（Major 12）**：`reflex-off-golden` 覆盖不了 `reflex.enabled=true ∧ drafts.enabled=false`。新增 `tests/reflex/drafts-off-parity.test.ts` + 冻结 fixture `tests/fixtures/reflex-drafts-off-parity.json`（B0 在**改 wire 之前**于 dev 上捕获，同 reflex-off 先例：环境变量闸、存在即拒绝覆盖）：固定输入序列（builtin high/shadow、AUTO、miss、correction、ambiguous、单槽替换，以及 `/reflex status`）下 reflex 自身的 `appendEntry`/`sendMessage`/`setStatus`/`notify` 全序列逐字节记录（含 `/reflex status` 的完整输出文本）。B4 之后 drafts 关闭时必须逐字节相等；基线：该 fixture 不在 `origin/dev` 上（整个任务最后才 push 一次），B0 提交后以 **B0 的固定提交**为基线校验（`git diff --quiet <B0_COMMIT> -- tests/fixtures/reflex-drafts-off-parity.json`），其余既有冻结文件继续对 `origin/dev` 校验：builtin 记录**不写** `port.portId` 等任何新字段（portId 由 `scriptId` 经 catalog 反查）。
+- **pin/corpus**：仅因追加 `reflex.drafts.enabled` 重 pin（程序化比对）。
+- **web-hub boundary**：`core/settings.ts` 仍零 import，现有 pin `[]` 不变。
+- **pi-free**：`core/backtest/**`、`core/{branch-like,draft-regex,draft-schema,identity,port-defaults}.ts` 自动受约束；`drafts/*.ts` 新增门禁。
+- **governance**：G2–G4 照旧；新增 G5（`runAuto(` 单调用点、`catalog.ts` 无 `draft.` 字面量、`accountBuiltin(` 调用点前必有 origin 判断）。
+- **D8**：`applySecureDomainOverrides` 一行；脚本 secure env 拒绝；data-encryption README 的 D8 清单补 `reflex`（含 drafts）。
 
 ## 7. 实施要点
 
 ### 7.1 分包
 
-| 包                | 文件域（独占）                                                                                                                                                                                                                                                                                | 依赖                        | 验收要点                                                                                                                            |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| **B0 契约**       | `core/types.ts`（追加）、`core/settings.ts`、`setting-specs.ts`、`config/settings.ts`（D8 一行）、`core/branch-like.ts`（从 wire 下沉）、`wire.ts`（只改 import）、`core/schema.ts`（builtin 禁 `draft.`）、spec pin / corpus、`tests/secure/settings-override.test.ts`、README R-I12 / R-I13 | —                           | 现有 reflex 测试全绿；golden / trace 不变；pin 只多一项                                                                             |
-| **B1 回测核心**   | `core/backtest/{corpus,replay,evidence}.ts` + 测试                                                                                                                                                                                                                                            | B0                          | fork 去重、来源表每行 fixture、steer 判定、轮次归属（含分叉）、宽松事实标注、reasked / corrected / 跨会话口径与实时同函数           |
-| **B2 草案生成**   | `core/backtest/{cluster,draft-gen,regex-safe}.ts`、`core/draft-schema.ts` + 测试                                                                                                                                                                                                              | B0                          | 生成物 100% 通过 `validateDraft`；性质测试：随机簇 → 正则恒属安全子集；永无 argv / 未知键；负样本回灌单调收紧                       |
-| **B3 脚本**       | `scripts/dev/reflex-backtest.mjs`（含缓存、generate、review、promote）                                                                                                                                                                                                                        | B1、B2、B5 的 evidence 类型 | Tier 3 手动：冷 / 热耗时记入报告；secure env 时 exit 3；`review` 在非 TTY 下拒绝；报告 grep 不到 `/`、`~/` 路径                     |
-| **B4 运行时加载** | `src/reflex/drafts/load.ts`、`wire.ts`（草案分支）、`command.ts`（`drafts` 子命令）、`core/shadow-scan.ts`（追加字段校验）、测试 + governance G5                                                                                                                                              | B0、B2（`validateDraft`）   | shadow-only 矩阵（含 autoResolve 写 draft id）；单个坏文件只拒它自己；超时 → 零草案；perm / symlink / 超 cap 拒绝；关闭时零 fs 访问 |
-| **B5 晋升合并**   | `core/promotion.ts`（追加 V2）、`scripts/dev/reflex-shadow.mjs`（去重 + 按 port + V2）、README 晋升流程                                                                                                                                                                                       | B0                          | 构造证据矩阵：回测达标但评审 stale ⇒ 不合格；port 9 次 / 有一次 uncertain ⇒ 不合格；fork 副本不产生跨会话重复                       |
-
-可并行：B0 完成后，B1 ∥ B2 ∥ B4 ∥ B5 可同时进行（B4 只依赖 `draft-schema.ts`，建议 B2 先单独提交这一个文件，或者把它前移到 B0）。B3 最后做。
+分包、文件域、冲突预检与验收见 `backtest-plan.md`（r3）。要点：B0 一次性落全部跨包契约（类型、`draft-regex`/`draft-schema`/`identity`/`port-defaults`、`shadow-scan` 扩展、`drafts/load.ts` 骨架、drafts-off parity fixture）；B1 ∥ B2 ∥ B4 ∥ B5 并行；B3 收尾。
 
 ### 7.2 风险
 
-1. **来源推断不完备**：print 模式和未打 marker 的注入会混进 `tui`。缓解：S0 的长度、多行、前缀规则会挡掉大部分注入文案；marker 有治理测试；报告页眉给出各 origin 计数，异常一眼可见。
-2. **回测过拟合**：模板从同一批历史生成，再在同一批历史上回测，命中率天然偏高（§8 Q1）。
-3. **`uncertain` 算不成功**：`quota.summary` 在没有可信快照时返回 uncertain，可能长期达不到「全部成功」。这是有意的保守取舍。若用户希望 uncertain 不计入，需要显式改口径。
-4. **语料缓存含原句**：与会话文件同等暴露面，0600。secure 域会话不在扫描根下，脚本对 secure env 直接拒绝。
-5. **评审伪造只防非 TTY agent**：人或 agent 直接手改 `reviews/*.json` 防不住，记为残留。评审文件带 `listHash`，内容不完整时 stale。
-6. **gate 宽松近似高估命中**：只影响问法覆盖率的估计，不影响误命中方向；最终仍由实时 shadow 和 0 纠正 / 0 重复兜底。
-7. **草案过多拖慢 S1**：上限 16 个文件 × 12 条 strong；草案只在 builtin miss 时才跑，正则走安全子集；`perf.test` 追加一个带满额草案的用例（p99 ≤ 1 ms）。
+1. 来源推断不完备：`sourceMode` 只认本轮原生 HUD 计时条目或 reflex 记录；HUD 关闭、早于 `HUD_TUI_GATE_SINCE` 的轮次一律 lenient——回测问法证据可能主要来自较新的会话；这是 K11 的有意代价。
+2. 暴露只追踪「展示失败明细」，聚合计数不算；同 UID agent 可伪造或删除账本（K7，残留）。
+3. `uncertain` 算不成功、`missing` 算未判定：`quota.summary` 与快模型场景可能长期达不到 port 门槛（有意保守）。
+4. 缓存含原句：与会话文件同域同权限；secure env 拒绝。
+5. 离线 memo 看不到进程重启 ⇒ 纠正只会多计（保守）。
+6. 家族根 unresolved 的会话不计分：报告给 unresolved 数，比例过高时先修索引再谈晋升。
+7. DRX 表达力低：含路径 / 引号内容的问法无法进 strong（只能 weak），覆盖面让位于可证明安全。
 
-## 8. 开放问题（需用户拍板）
+## 8. 开放问题
 
-1. **回测证据是否要求留出集？**（Recommended）按会话 id 哈希 60/40 切分：草案只用训练集生成，晋升的回测样本只计留出集，防止「用答案出题」。备选：全语料都算（样本多，但命中率和分歧率偏乐观）。
-2. **历史轮次里的 reasked / corrected 是否计入「=0」？**（Recommended）计入，但只算 high 命中轮次；同时在 suspect 清单里列出，人看过后在评审文件里标 `ok` 即可放行（标 ok 视同人工判定为与问法无关）。备选 A：严格计入、不可豁免（历史上模型答错导致的追问也会卡住晋升）。备选 B：只看实时（回测只提供问法和分歧证据）。
-3. **草案默认存放位置？**（Recommended）全局 `<agentDir>/reflex/drafts/`（port 是全局能力，与 cwd 无关，`--cwd` 只影响回测语料）。备选：按项目放 `<cwd>/.pi/reflex/drafts/`（可以进版本库共享，但多了一个仓库内注入面，secure 域路径也要另行审计）。
+r1 的三个开放问题已由用户拍板（§0）。r2 新增的待拍板项见 `backtest-plan.md` §9；r3 为 root 裁定，不新增待拍板项。
