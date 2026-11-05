@@ -29,7 +29,18 @@ describe("sysload render", () => {
     expect(buildLoadEscalationText(verdict("crit", true), { top })).toContain("已暂停派发");
     expect(buildLoadEscalationText(verdict("crit", false), { top })).toContain("仅提示");
     expect(buildLoadRecoveryText(verdict("ok", false), false)).toContain("闸门已关闭");
-    expect(buildLoadRecoveryText(verdict("ok", true), true)).toContain("可以继续派发");
+    const gateOn = buildLoadRecoveryText(verdict("ok", true), true);
+    expect(gateOn).toContain("可以继续派发");
+    expect(gateOn.startsWith("[load 恢复]")).toBe(true);
+    expect(gateOn).not.toMatch(/\b(warn|crit)\b/);
+    // 负断言用 warn/crit 级别的 verdict：旧实现（`[load] warn · …`）会命中，新实现不命中。
+    for (const level of ["warn", "crit"] as const) {
+      for (const gate of [true, false]) {
+        const text = buildLoadRecoveryText(verdict(level, gate), gate);
+        expect(text.startsWith("[load 恢复]")).toBe(true);
+        expect(text).not.toMatch(/\b(warn|crit)\b/);
+      }
+    }
   });
 
   it("renders labels, empty top rows, and unavailable units without NaN", () => {
