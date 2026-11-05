@@ -56,6 +56,14 @@ import { AskUserComponent } from "./component.js";
 import { answerValueText } from "./submit-view.js";
 import { validateInput } from "./validate.js";
 import { createDialogRace, type AskUserRemotePort, type AskUserRemoteSession, type RemoteOutcome } from "./remote.js";
+import {
+  redirectDetails,
+  redirectRenderMarker,
+  redirectResultText,
+  renderRedirectBody,
+  type AskUserRedirectPort,
+  type AskUserRedirectResult,
+} from "./redirect.js";
 
 /**
  * execute returns the SDK's normal tool result. Errors are thrown so Pi can
@@ -499,6 +507,11 @@ export interface AskUserWireOptions {
   /** P2 wiring point (§6.1): raw `askUser.backgroundInterrupt` settings record, normalized
    *  per call (field-wise fallback). Absent = defaults. */
   interrupt?: () => unknown;
+  /** #21 B2 wiring point: the xs ask-redirect port. Late-bound like `remote`/`background`;
+   *  when this option itself is absent, or the port's ask() returns undefined (feature off /
+   *  not a delegated turn — O-class), ask_user is byte-for-byte identical to the pre-feature
+   *  behavior (I9). */
+  redirect?: () => AskUserRedirectPort | undefined;
   /** Testing seam: clock override (fake clocks in tests; production uses the unref'd real one). */
   clock?: Clock;
 }
@@ -646,6 +659,32 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
       }
 
       if (signal?.aborted) return cancelledResult(questions, AGENT_ABORTED_TEXT);
+
+      // #21 B2: trusted delegated turn (tui/rpc only — the HEADLESS throw and the pre-aborted
+      // early return above are unchanged, so print mode never reaches here). ask() is
+      // synchronous: undefined ⇔ O-class, the original local path below runs byte-identically.
+      // A redirect outcome is final — it returns directly, never entering the queue, the
+      // background/parked machinery, or the remote race. render(budget) returning undefined
+      // makes the port settle `unavailable(too_large)` on its side; no local dialog is shown.
+      const redirectPort = opts?.redirect?.();
+      if (redirectPort !== undefined) {
+        const redirectedAsk = redirectPort.ask({
+          render: (budgetChars) => renderRedirectBody(questions, budgetChars),
+          ...(signal !== undefined ? { signal } : {}),
+        });
+        if (redirectedAsk !== undefined) {
+          const outcome: AskUserRedirectResult = await redirectedAsk;
+          return {
+            content: [{ type: "text", text: redirectResultText(outcome) }],
+            details: {
+              questions,
+              answers: {},
+              cancelled: outcome.kind !== "answered",
+              redirected: redirectDetails(outcome),
+            } satisfies AskUserDetails,
+          };
+        }
+      }
 
       const isTui = ctx.mode === "tui";
       if (bgWired && isTui) currentUI = ctx.ui;
@@ -800,6 +839,15 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
       if (details?.interrupted !== undefined) return new Text(theme.fg("warning", INTERRUPTED_RENDER_TEXT), 0, 0);
       if (details?.dismissed !== undefined)
         return new Text(theme.fg("success", `✓ dismissed ${details.dismissed} parked`), 0, 0);
+      if (details?.redirected !== undefined)
+        return new Text(
+          theme.fg(
+            details.redirected.state === "answered" ? "success" : "warning",
+            redirectRenderMarker(details.redirected),
+          ),
+          0,
+          0,
+        );
       if (!details || details.cancelled) return new Text(theme.fg("warning", "Cancelled"), 0, 0);
 
       const box = new Box(0, 0);

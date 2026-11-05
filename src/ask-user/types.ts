@@ -121,7 +121,23 @@ export interface InterruptInfo {
   draftSaved: boolean;
 }
 
-export type AskUserDetails = Result & { interrupted?: InterruptInfo; dismissed?: number };
+/** #21 D8: set when ask_user was settled by host redirection to the delegating requester
+ *  (trusted delegated turns) instead of a local dialog. `state` mirrors
+ *  AskUserRedirectResult["kind"] (src/ask-user/redirect.ts §2.0); answered.requestId there
+ *  carries the ORIGINAL replyTo id. */
+export interface AskRedirectDetails {
+  state: "answered" | "timeout" | "not_woken" | "unavailable" | "aborted" | "disposed";
+  attempt?: number;
+  limit?: number;
+  requestId?: string;
+  reason?: string;
+}
+
+export type AskUserDetails = Result & {
+  interrupted?: InterruptInfo;
+  dismissed?: number;
+  redirected?: AskRedirectDetails;
+};
 
 /** JSON-safe per-question component state for draft restore (§4, §6.3). `optionCount` is the
  *  fingerprint's runtime double-check: a restored draft whose option count no longer matches

@@ -86,7 +86,15 @@ export type AskRedirectReason =
   | "no_ticket"
   | `send_none:${string}`;
 export type AskUserRedirectResult =
-  | { kind: "answered"; answerText: string; requestId: string; attempt: number; limit: number }
+  // root 裁定 2026-11-05：answered 变体新增必填 originRequestId（原 replyTo 的 origin 请求 id，供 D8 文案的 <origin> 槽位）；所有变体的 requestId 一律表示本次提问的 q2 票据。
+  | {
+      kind: "answered";
+      answerText: string;
+      originRequestId: string;
+      requestId: string;
+      attempt: number;
+      limit: number;
+    }
   | { kind: "timeout"; requestId: string; attempt: number; limit: number; waitedS: number }
   | { kind: "not_woken"; requestId: string; downgrade: string; attempt: number; limit: number }
   | { kind: "unavailable"; reason: AskRedirectReason; limit: number; attempt?: number; requestId?: string }
