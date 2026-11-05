@@ -555,3 +555,31 @@ so expired rows are unknown. A stuck target/active wake/quota can refuse activat
 legacy/capacity fallback advice is intentionally absent. With local wake disabled but activation still
 on, delivered timeout advice may offer activate which returns an explicit refusal; this is accepted,
 not a new wake gate. No cross-process exactly-once or reconstructed tracking promise is added.
+
+## Ask redirect (#21)
+
+**Ask redirect (#21)** (`docs/dev/xs-ask-redirect/`, packages A/B1/B2/B3): in a trusted delegated turn (a
+`message_session`+`expectReply`+`wake` dispatch that captured `askOrigin` on the wake ledger, BAS-bound),
+the host redirects `ask_user` to the requester: the ask becomes a NEW expectReply+wake message (q2) through
+the real sender; the answer arrives mid-run as a deliver-only write, the stack's host-write tap resolves the
+blocked tool, and `ask_user` returns the D8 answered text naming the ORIGINAL replyTo for the final result.
+Gate (frozen per activate): `xsOn ∧ reply.enabled ∧ wake.enabled ∧ fabric.crossSession.askRedirect.enabled`
+(default **on**; `timeoutS` 60..3600, `maxPerRun` 1..2, hard ceiling 2); secure keeps `xsOn` false ⇒ off
+(I11). The wiring is ONE line in `src/index.ts` (`redirect: () => holder.current?.xs?.askRedirect`, only
+while `xs.askRedirectOn`) — off/absent ⇒ ask_user is byte-identical (I9); print mode still HEADLESS.
+**Invariants**: origin trust comes only from the dispatch-time host-write tap (D3 — pi custom messages carry
+no writer auth; a reply-revived run can never masquerade as a fresh delegation); admission is billed on the
+wake-ledger record (`askUsed` = billed+in-flight, refund only for provably-unsent `none`; per-token FIFO
+with `pairMinIntervalMs`); the caller waits under `min(t0+timeoutS, runDeadline−60s, originDueAt−60s)`;
+send outcomes classify through the ordered D7 rules (`unknown` ⇒ wait, never resend; `applied ∧
+wakeDowngraded` ⇒ `not_woken` immediate return). **Gates**: T11 (`tests/integration/fabric-xs-ask-redirect-
+session.test.ts`, real AgentSessions — THE launch gate), wiring (`fabric-xs-ask-redirect-wiring.test.ts`),
+hub subprocess harness (`fabric-xs-ask-redirect.test.ts`)（T12，后续项，尚未建立；上线门禁是 T11）, C-X16
+(answer-write ordering premise), plus B1/B2 unit suites. **Residual risks**: the answer body appears TWICE (tool result + the standalone xs message —
+the text says "do not answer it again", R1); the wait counts against the delegating run's `rootRunMaxS`
+(default 900s — raise it for heavy delegation, R2); `handed:true` (human takeover) ⇒ O-class local dialog;
+an ask whose q2 meets a BUSY requester is deferred deliver-only (the wake may be lost — the D7 `queued`
+wait then runs to its deadline; the deterministic tests gate the ask on requester idleness). **Harness
+notes**: the T11 rig clock must be live (`Object.defineProperty(r.clock, "t", …)` — a frozen rig clock
+expires every frame after 5s), and the rig-vs-bridge member limits must match (the bridge republishes
+`xs_member`; a default 30s pair interval silently overrides the rig's).

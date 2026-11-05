@@ -208,7 +208,6 @@ interface TokenQueue {
   /** FIFO: head is the next (or in-flight) call. */
   calls: AskCall[];
   inFlight?: AskCall | undefined;
-  lastSentAt?: number;
 }
 
 export function createXsAskRedirect(deps: XsAskRedirectDeps): XsAskRedirect {
@@ -219,6 +218,15 @@ export function createXsAskRedirect(deps: XsAskRedirectDeps): XsAskRedirect {
       ? Math.min(Math.floor(deps.maxPerRun), XS_ASK_HARD_LIMIT)
       : 0;
   const queues = new Map<string, TokenQueue>();
+  /**
+   * token → last time the hub stamped this pair (our q2 send, or the requester's answer: a reply
+   * skips the interval CHECK but still stamps `pair.lastAt`). Survives queue deletion — a later
+   * ask in the same run must still wait out the interval. Entries are dropped once elapsed.
+   */
+  // Deliberately NOT wired into the wake-ledger's release hook: residues left behind after a token is
+  // released are bounded — 64-entry soft cap (pruned by the interval check in the queue pump), elapsed
+  // entries dropped there, and everything cleared on dispose — so no extra release path is worth it.
+  const pairStamp = new Map<string, number>();
   /** q2 (ticket requestId) → the pending call awaiting that answer (registered at `onIssued`). */
   const byRequest = new Map<string, AskCall>();
   let disposed = false;
@@ -313,6 +321,7 @@ export function createXsAskRedirect(deps: XsAskRedirectDeps): XsAskRedirect {
     }
     call.state = kind;
     call.result = result;
+    if (kind === "answered") pairStamp.set(call.token, clock.now());
     if (call.q2 !== undefined && byRequest.get(call.q2) === call) byRequest.delete(call.q2);
     const q = queues.get(call.token);
     if (q !== undefined) {
@@ -337,7 +346,12 @@ export function createXsAskRedirect(deps: XsAskRedirectDeps): XsAskRedirect {
     }
     if (q.inFlight !== undefined) return; // serial per token: wait for the previous TERMINAL
     const next = q.calls[0]!;
-    const earliest = q.lastSentAt === undefined ? 0 : q.lastSentAt + deps.pairMinIntervalMs;
+    if (pairStamp.size > 64) {
+      const t = clock.now();
+      for (const [k, v] of pairStamp) if (t - v >= deps.pairMinIntervalMs) pairStamp.delete(k);
+    }
+    const stamp = pairStamp.get(token);
+    const earliest = stamp === undefined ? 0 : stamp + deps.pairMinIntervalMs;
     const wait = earliest - clock.now();
     if (next.queueTimer !== undefined) {
       clock.clearTimer(next.queueTimer);
@@ -378,8 +392,7 @@ export function createXsAskRedirect(deps: XsAskRedirectDeps): XsAskRedirect {
         invocationLive: () => call.state === "pending" && !disposed,
         onIssued: (t) => {
           // same sync block as the frame (sender contract) — register the precise q2 → call
-          const q = queues.get(call.token);
-          if (q !== undefined) q.lastSentAt = clock.now();
+          pairStamp.set(call.token, clock.now());
           if (call.state === "pending") {
             call.q2 = t.requestId;
             call.q2DueAt = t.dueAt;
@@ -602,6 +615,7 @@ export function createXsAskRedirect(deps: XsAskRedirectDeps): XsAskRedirect {
       for (const call of [...q.calls]) if (call.state === "pending") claim(call, "disposed");
     }
     queues.clear();
+    pairStamp.clear();
     byRequest.clear();
   };
 

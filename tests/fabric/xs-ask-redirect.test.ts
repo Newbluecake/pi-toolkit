@@ -282,19 +282,38 @@ describe("xs ask redirect — D4/D5 admission, serialisation and deadlines", () 
     r.redirect.observeWrite(answerWrite(lastQ2(r)));
     await expect(a).resolves.toMatchObject({ kind: "answered", requestId: lastQ2(r) });
     await tick();
-    expect(r.sends).toHaveLength(1); // #1's terminal at +10s; the pair interval (30s from issue) still blocks
-    r.clock.advance(19_000); // t = +29s — still inside the interval
+    // #1's terminal at +10s. The hub stamps the pair at the requester's REPLY too (replies skip
+    // the interval check, not the stamp), so the interval runs from the answer: earliest +40s.
+    expect(r.sends).toHaveLength(1);
+    r.clock.advance(29_000); // t = +39s — still inside the interval
     await tick();
     expect(r.sends).toHaveLength(1);
-    r.clock.advance(1_001); // the queue timer fires at +30s ⇒ #2 leaves
+    r.clock.advance(1_001); // the queue timer fires at +40s ⇒ #2 leaves
     await tick();
     expect(r.sends).toHaveLength(2);
     expect(r.sends[1]!.text.startsWith(xsAskRedirectHeader(2, 2, ORIGIN_REQ))).toBe(true);
     expect(r.sends[1]!.text).toContain(XS_ASK_REDIRECT_INSTRUCTIONS);
   });
 
+  it("a LATER ask after the queue emptied still waits out the pair interval (stamp outlives the queue)", async () => {
+    const r = makeRig();
+    const a = r.redirect.ask(askInput("Q1").input)!;
+    await tick();
+    r.clock.advance(1_000);
+    r.redirect.observeWrite(answerWrite(lastQ2(r))); // answered ⇒ queue emptied and deleted
+    await expect(a).resolves.toMatchObject({ kind: "answered" });
+    await tick();
+    r.clock.advance(5_000); // the model's next turn asks again, inside the interval (answer at +1s)
+    void r.redirect.ask(askInput("Q2").input)!;
+    await tick();
+    expect(r.sends).toHaveLength(1); // not sent: hub would answer rate_pair_interval
+    r.clock.advance(25_001); // +31.001s … answer stamp at +1s + 30s
+    await tick();
+    expect(r.sends).toHaveLength(2);
+  });
+
   it("queue_window: #2 queued past its own absolute window ⇒ refunded unavailable", async () => {
-    // origin dueAt ⇒ waitUntil = t0+80s; #2 may only leave at +30s (pair), leaving 50s < 60s
+    // origin dueAt ⇒ waitUntil = t0+80s; #2 may only leave at +40s (pair interval from the answer at +10s), leaving 40s < 60s
     const r = makeRig({ origin: { dueAt: T0 + 80_000 + XS_ASK_MARGIN_MS } });
     const a = r.redirect.ask(askInput("Q1").input)!;
     const b = r.redirect.ask(askInput("Q2").input)!;
@@ -303,7 +322,7 @@ describe("xs ask redirect — D4/D5 admission, serialisation and deadlines", () 
     r.redirect.observeWrite(answerWrite(lastQ2(r)));
     await expect(a).resolves.toMatchObject({ kind: "answered" });
     expect(r.ledger.get(TOKEN)?.askUsed).toBe(2); // #1 answered stays billed + #2 reserved while queued
-    r.clock.advance(20_001); // pair interval elapses ⇒ queue timer ⇒ head recompute fails (<60s)
+    r.clock.advance(30_001); // pair interval elapses ⇒ queue timer ⇒ head recompute fails (<60s)
     await expect(b).resolves.toMatchObject({ kind: "unavailable", reason: "queue_window", attempt: 2 });
     expect(r.sends).toHaveLength(1);
     expect(r.ledger.get(TOKEN)?.askUsed).toBe(1); // #2 never sent ⇒ refunded; #1's billing stays

@@ -1557,3 +1557,93 @@ describe("#20 C-X15 timeout phase provider hygiene", () => {
     40_000,
   );
 });
+
+/** #21 C-X16 (plan §3 T13): the pi fact D1's blocking wait rests on — an xs answer write
+ * (`sendMessage(triggerTurn:false)`) issued while a tool EXECUTES is persisted after that
+ * tool's result and appears in the SAME run's next provider request (so the model sees ask_user's
+ * answer + the standalone reply copy together); the write's details/token never enter the
+ * provider payload. Only the remote provider is a stub; the session, tool execution and the
+ * message pipeline are real. */
+describe("#21 C-X16 answer-write ordering under tool execution", () => {
+  const SENTINELS = { token: "WAKETOKEN_SENTINEL_cx16", requestId: "Q2_SENTINEL_cx16" };
+  it("mid-execute triggerTurn:false lands after the toolResult, joins the same run's next request, stays out of the payload", async () => {
+    const stub = await AnthropicStub.start({
+      reply: (_r, i) =>
+        i === 0
+          ? { kind: "tool", calls: [{ name: "cx16_probe", input: {} }] }
+          : { kind: "text", text: "probe acknowledged" },
+    });
+    const contexts: Array<Array<{ role?: string; content?: unknown }>> = [];
+    const h = await host({
+      stub,
+      extensions: [
+        (pi) => {
+          pi.on("context", (event) => {
+            const messages = (event as { messages?: Array<{ role?: string; content?: unknown }> }).messages;
+            if (messages !== undefined) contexts.push(messages);
+          });
+          pi.registerTool({
+            name: "cx16_probe",
+            label: "CX16 Probe",
+            description: "C-X16: mid-execute quiet xs answer write.",
+            parameters: Type.Object({}),
+            execute: async () => {
+              // the redirect's answer write: quiet (triggerTurn:false), sent DURING execution
+              pi.sendMessage(
+                {
+                  customType: "subagent:xs",
+                  content: "1: ship it",
+                  display: true,
+                  details: {
+                    inReplyTo: SENTINELS.requestId,
+                    from: { sessionId: "peer-cx16" },
+                    wakeToken: SENTINELS.token,
+                    xsWake: true,
+                  },
+                },
+                { triggerTurn: false },
+              );
+              return { content: [{ type: "text", text: "probe done" }] };
+            },
+          } as never);
+        },
+      ],
+    });
+    await h.session.prompt("run the cx16 probe");
+    expect(contexts.length).toBe(2); // ONE run, two provider calls — the quiet write started no second run
+
+    // (a) branch order: the custom_message entry sits AFTER the toolResult entry
+    const branch = h.manager.getBranch();
+    const toolResultIdx = branch.findIndex(
+      (e) => (e as { type?: string; message?: { role?: string } }).message?.role === "toolResult",
+    );
+    const customIdx = branch.findIndex(
+      (e) =>
+        (e as { type?: string }).type === "custom_message" && (e as { content?: unknown }).content === "1: ship it",
+    );
+    expect(toolResultIdx).toBeGreaterThan(-1);
+    expect(customIdx).toBeGreaterThan(toolResultIdx);
+
+    // (b) the SAME run's next provider request carries it, positioned after the toolResult
+    const second = contexts[1]!;
+    const reqToolResult = second.map((m) => m.role).lastIndexOf("toolResult");
+    expect(reqToolResult).toBeGreaterThan(-1);
+    const reqCustom = second.findIndex((m, i) => {
+      // a custom entry projects with role "custom" and its content as the text
+      if (m.role !== "custom" || i < reqToolResult) return false;
+      const text = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+      return text.includes("1: ship it");
+    });
+    expect(reqCustom).toBeGreaterThan(reqToolResult);
+
+    // (c) details/token never reach the provider payload — asserted on the RECORDED HTTP bodies
+    // (the context EVENT legitimately still carries details pre-projection; C-X5/C-X9 pin the
+    // projection itself). The stub's parse-guard skips non-object bodies, so len is 1-2.
+    expect(h.stub.requests.length).toBeGreaterThanOrEqual(1);
+    for (const request of h.stub.requests) {
+      for (const value of Object.values(SENTINELS)) expect(request.body).not.toContain(value);
+      expect(request.body).not.toContain("xsWake");
+    }
+    expect(h.errors).toEqual([]);
+  });
+});

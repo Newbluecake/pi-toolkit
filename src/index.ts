@@ -423,6 +423,12 @@ export default function activate(rawPi: ExtensionAPI): void {
       // ask_user 与今天逐字节一致。interrupt 设置逐字段回落默认（§6.1）。
       background: () => holder.current?.backgroundCompletions,
       interrupt: () => settings.askUser.backgroundInterrupt,
+      // #21 B3 wiring (plan §2 包 B3): the xs ask-redirect port, late-bound through the
+      // holder exactly like `background` — /reload 后自然指向新 stack 的端口；非委派回合 /
+      // askRedirect off / 未建 stack ⇒ 端口缺席或 ask() 同步返回 undefined ⇒ ask_user 原路径
+      // 字节不变（I9）。Option only while the activation-frozen gate holds (xs ∧ reply ∧ wake ∧
+      // leaf; secure keeps xsOn false ⇒ 自动关闭, D9/I11) — absent option is itself the I9 off shape.
+      ...(xs.askRedirectOn ? { redirect: () => holder.current?.xs?.askRedirect } : {}),
     });
 
   const cacheTtl = wireCacheTtl(pi, settings, {
