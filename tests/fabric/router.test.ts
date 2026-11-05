@@ -323,6 +323,45 @@ describe("fabric router", () => {
     expect(a.ok && engine.get(a.key)?.state).toBe("consumed");
     expect(b.ok).toBe(true);
   });
+
+  it("keeps a resumed run's authorization intact once its old run id is tombstoned (#33 resume shape)", () => {
+    // The resume of a settled session gets a NEW run id registered under root; the old id is tombstoned.
+    // Pin that the fresh id authorizes exactly like any root child: directive up is refused, finding up is admitted.
+    const engine = createDeliveryEngine<FabricRecord, FabricRecord["state"]>({
+      store: new MemoryOutboxStore<FabricRecord>(),
+      allowed: {
+        pending: ["claimed", "consumed", "dropped", "abandoned"],
+        claimed: ["pending", "delivered", "consumed", "dropped"],
+        delivered: [],
+        consumed: [],
+        dropped: [],
+        abandoned: [],
+      },
+      memoryOnly: new Set(["claimed"]),
+      memoryOnlyFields: ["claimToken"],
+      now: () => 1,
+    });
+    const tree = new FabricTree();
+    tree.append("root", "r_0DD9ER01");
+    tree.markRunning("r_0DD9ER01");
+    tree.tombstone("r_0DD9ER01", 1, 100);
+    tree.append("root", "r_NEW9ER02");
+    tree.markRunning("r_NEW9ER02");
+    const router = new FabricRouter(
+      engine,
+      tree,
+      new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
+      config,
+      () => 1,
+    );
+
+    expect(router.targetState("r_NEW9ER02")).toBe("running");
+    expect(() => router.admit("r_NEW9ER02", { to: "root", kind: "directive", text: "x", generation: 1 })).toThrow(
+      "message not authorized",
+    );
+    const finding = router.admit("r_NEW9ER02", { to: "root", kind: "finding", text: "x", generation: 1 });
+    expect(finding.ok).toBe(true);
+  });
 });
 
 describe("fabric router mention admission", () => {

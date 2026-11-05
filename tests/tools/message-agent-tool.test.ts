@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
-import { createMessageAgentTool, MessageAgentParams } from "../../src/tools/message-agent-tool.js";
+import {
+  createMessageAgentTool,
+  MessageAgentParams,
+  messageAgentKindHint,
+} from "../../src/tools/message-agent-tool.js";
+import type { FabricRecord, NodeRef } from "../../src/core/message.js";
+import { MemoryOutboxStore } from "../../src/core/store.js";
+import { createDeliveryEngine } from "../../src/delivery/engine.js";
+import { FabricTree } from "../../src/fabric/tree.js";
+import { FabricThrottle } from "../../src/fabric/throttle.js";
+import { FabricRouter } from "../../src/fabric/router.js";
 
 const generation = () => 3;
 const params = { to: "r_PARENT01", kind: "finding" as const, text: "status" };
@@ -65,5 +75,132 @@ describe("tools/message-agent", () => {
       generation,
     });
     await expect(tool.execute("call", params)).rejects.toThrow("message not authorized");
+  });
+
+  it("still rejects with the router text when the sender is not running (no kind guidance appended)", async () => {
+    const tool = createMessageAgentTool({
+      router: {
+        admit: () => {
+          throw new Error("sender is not running");
+        },
+      } as never,
+      from: "r_CHILD001",
+      generation,
+    });
+    await expect(tool.execute("call", params)).rejects.toThrow("sender is not running");
+  });
+});
+
+/** Real in-memory fabric (engine+tree+router), so the authorization shapes below are the shipped ones, not mocks. */
+function makeFabric(edges: readonly (readonly [NodeRef, NodeRef])[]) {
+  const engine = createDeliveryEngine<FabricRecord, FabricRecord["state"]>({
+    store: new MemoryOutboxStore<FabricRecord>(),
+    allowed: {
+      pending: ["claimed", "consumed", "dropped", "abandoned"],
+      claimed: ["pending", "delivered", "consumed", "dropped"],
+      delivered: [],
+      consumed: [],
+      dropped: [],
+      abandoned: [],
+    },
+    memoryOnly: new Set(["claimed"]),
+    memoryOnlyFields: ["claimToken"],
+    now: () => 1,
+  });
+  const tree = new FabricTree();
+  for (const [parent, child] of edges) tree.append(parent, child);
+  const nodes = new Set<NodeRef>(edges.flat());
+  for (const node of nodes) if (node !== "root") tree.markRunning(node);
+  const router = new FabricRouter(
+    engine,
+    tree,
+    new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
+    {
+      maxPerRun: 2,
+      findingQuota: 2,
+      directiveQuota: 2,
+      deadLetterQuota: 1,
+      maxChars: 100,
+      progressTtlMs: 100,
+      reconcileTtlMs: 100,
+      rootInboxCap: 4,
+      progressChannel: "display" as const,
+    },
+    () => 1,
+  );
+  return router;
+}
+
+async function errorMessage(promise: Promise<unknown>): Promise<string> {
+  const error = await promise.then(
+    () => {
+      throw new Error("expected the tool call to fail");
+    },
+    (cause: unknown) => cause,
+  );
+  expect(error).toBeInstanceOf(Error);
+  return (error as Error).message;
+}
+
+describe("tools/message-agent kind guidance (#33)", () => {
+  it("documents the four kind semantics in the tool description", () => {
+    const tool = createMessageAgentTool({ router: {} as never, from: "r_CHILD001", generation });
+    const description = tool.description;
+    expect(description).toContain('"finding" is injected into the target');
+    expect(description).toContain('"progress" only renders in the TUI display');
+    expect(description).toContain('"directive" may only be sent by a parent to its own child run');
+    expect(description).toContain('the "result" channel');
+  });
+
+  it("passes a direct child's finding to root through the real router", async () => {
+    const tool = createMessageAgentTool({
+      router: makeFabric([["root", "r_ABCD0001"]]),
+      from: "r_ABCD0001",
+      generation,
+    });
+    const result = await tool.execute("call", { to: "root", kind: "finding", text: "question?" });
+    expect(result.details).toMatchObject({ ok: true });
+  });
+
+  it("rejects directive→root and appends self-correction guidance after the router text", async () => {
+    const tool = createMessageAgentTool({
+      router: makeFabric([["root", "r_ABCD0001"]]),
+      from: "r_ABCD0001",
+      generation,
+    });
+    const message = await errorMessage(tool.execute("call", { to: "root", kind: "directive", text: "do x" }));
+    expect(message.startsWith("message not authorized")).toBe(true);
+    expect(message).toContain('kind "directive" may only be sent by a parent');
+    expect(message).toContain('use kind:"finding" instead');
+    expect(message).toContain("the model never sees it");
+  });
+
+  it("rejects a grandchild's finding→root and points at the direct parent / result channel", async () => {
+    const tool = createMessageAgentTool({
+      router: makeFabric([
+        ["root", "r_M1DD9E01"],
+        ["r_M1DD9E01", "r_9RAND922"],
+      ]),
+      from: "r_9RAND922",
+      generation,
+    });
+    const message = await errorMessage(tool.execute("call", { to: "root", kind: "finding", text: "question?" }));
+    expect(message.startsWith("message not authorized")).toBe(true);
+    expect(message).toContain("direct parent");
+    expect(message).toContain('the "result" channel');
+    // The very same grandchild CAN reach its direct parent — that is the correction the hint suggests.
+    const up = await tool.execute("call", { to: "r_M1DD9E01", kind: "finding", text: "question?" });
+    expect(up.details).toMatchObject({ ok: true });
+  });
+
+  it("hints at the mention route limits for @label denials", () => {
+    const hint = messageAgentKindHint({ to: "@builder", kind: "directive" });
+    expect(hint).toContain("can_message: mention");
+    expect(hint).toContain('kind "directive" is parent-to-child only');
+  });
+
+  it("lists the sender's effective can_message set in the finding/progress hint", () => {
+    const hint = messageAgentKindHint({ to: "root", kind: "finding" });
+    expect(hint).toContain("(parent; default: direct parent only)");
   });
 });
