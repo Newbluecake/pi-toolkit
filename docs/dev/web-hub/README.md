@@ -25,6 +25,7 @@
 - Peer-bump conformance premises (cmd-history)
 - Registry epoch 刷新与 epoch.up.v1（#23）
 - Outdated reload 状态机（#23）
+- Reload 结果回传 `status.reload`（#30）
 
 ## 概述与 P2 control-plane
 
@@ -606,6 +607,53 @@ awaiting/parked → done / failed`；entry 按 agentKey 保留，不随卡片消
 含正反对照、时间窗、reap 后两组、原始 bug 复现）在
 `tests/integration/web-hub-outdated-reload-loop.test.ts`。设计：`docs/dev/web-update-stuck/plan.md`
 （r3），交付记录见同目录 `PA-report.md` / `PB-report.md` / `PC-report.md`。
+
+## Reload 结果回传 `status.reload`（#30）
+
+Web 发起的 outdated reload 由 agent 回传**它能确认的**结局，#23 的状态机据此更早、更准地结算。
+设计/决策（Q1–Q4、D1–D9）在 `docs/dev/reload-result/plan.md`（r3）；本节只记录开发者要点。
+
+- **wire**：`StatusInfo.reload?: ReloadStatusWire`（`protocol/messages.ts`）——开放槽，无新帧、无
+  cap、无 PROTO bump。字段：`v:1`、`life`（reload 生命周期 id）、`cmdIds`（归属该 life 的 web
+  命令帧 id，1..4 FIFO）、`rev`（life 内单调，UI 去重）、`execId`（当前执行 token，旧执行的事实
+  被 tracker 丢弃）、`state`、`open`、`at`；可选 `waitingFor`/`activeRuns`（deferred）、
+  `code`/`message`（failed/cancelled；message 仅 `E_RELOAD_THREW`，≤256 B UTF-8 边界截断）、
+  `version`/`epoch`（仅 completed，版本不可信/`0.0.0` 时不写）。**`state` 是最近一个事实，
+  `open` 才表示请求是否结束**：`failed E_RELOAD_IDLE_WAIT` 带 `open:true`，后继的
+  started/completed/cancelled 照常记录。`state ∈ deferred|started|cancelled|failed|completed`；
+  `code ∈ E_RELOAD_{IDLE_WAIT,UNAVAILABLE,SETTLE,REFUSED,THREW}|user|superseded|session|quit`。
+- **采集**：`src/reload/command-port.ts` 的采集点（arm/deferFire/idleWait/cancel/unavailable/
+  settle/started/returned/threw）→ `web-hub/agent/reload-track.ts`（归属、投影、接管标记）→
+  `publishStatus` 只在投影变化时发一帧。**TUI 发起的 reload 不回传**（Q1）：无 `by`（webCmdId）
+  的事实只允许记入**已跟踪的** life（TUI 对已跟踪请求的 cancel/now 照常归属）；无记录则忽略。
+  接管验证（D4）只信**下一个 activation**：只有真实发过 `started` 的 life 才写标记，新
+  activation 的 `session_start{reload}` 逐项验证（sessionId/file、`originEpoch≠当前`、`shutdownAt`、
+  120s 窗）后才写 `completed{version, epoch}`；任何一条不满足 ⇒ 记录保持 started，UI 走生效计时/
+  版本推断。TUI 在 shutdown 后的加载失败不可采集——UI 据 started + 下线判 `E_RELOAD_LOST`。
+- **存放与 TTL**：`Symbol.for("pi-subagent:web-hub:reload-track")` 纯数据（容量 1 记录 + 1 标记；
+  未知 `v`/损坏/未来时间戳 ⇒ 按空处理并清除），存活于进程内、跨 in-process /reload。TTL 只约束
+  读取（open 40min / closed 10min / 标记 120s），过期撤销借现有 1s `onTick` 只补发一帧无
+  `reload` 字段的 status。hub 零改动、不持久化：槽是电平式的，重连/重订阅读到 registry 保留的
+  最近一帧（#88 定向补发）；过期后的重新订阅不会看到残影。
+- **UI 吸收**（`ui/src/logic/outdatedReload.ts` 的 `absorb`）：每次 send 用 `newCmdId()` 生成命令
+  id，事实按 `cmdIds.includes(cmdId)` + `rev` 去重；completed 且 version===hub 版本 ⇒ done，不等
+  ⇒ `E_RELOAD_NO_UPGRADE`，缺 version/epoch ⇒ 按未知（等版本/生效计时）；failed ⇒ 用其 code；
+  cancelled ⇒ `E_RELOAD_CANCELLED`；deferred ⇒ parked（此后不再按 fleet 启发式迁移）；started ⇒
+  awaiting（同一请求只建一次 90s 生效计时）。failed 相不复活（Q4）：只接受同请求迟到的
+  completed，及 `E_OFFLINE|E_SEND_UNKNOWN|E_TIMEOUT`/`E_QUEUE_TIMEOUT→E_RELOAD_IDLE_WAIT` 的
+  有限细化。IDLE_WAIT 立即判失败不 cancel，但绝对截止照常恰好 cancel 一次。
+- **老 agent / 老 hub 兼容**：没有 `status.reload` ⇒ UI 走 #23 原推断路径，行为与
+  `web-hub-outdated-reload-loop.test.ts` 钉住的一致；老 hub × 新 agent：开放槽原样转发（
+  `decodeAgentFrame` 的开放 StatusInfoSchema 不解析未知字段）；旧 UI 忽略未知字段，
+  composable 的 watch 签名对无 reload 的 agent 不变。off（webHub 关）/TUI/无跟踪场景帧序列
+  逐字节不变（`tests/fixtures/web-hub/reload-result-compat-golden.json`，A 级勿重生）。
+- 门禁：agent 侧 `tests/web-hub/agent/{reload-track,wiring-reload-status,reload-result-compat}.test.ts`；
+  hub 直通 `tests/web-hub/hub/reload-status-passthrough.test.ts`（真实 agent-server socket →
+  registry → SSE + #88 补发）；闭环 `tests/integration/web-hub-reload-result-loop.test.ts`（真实
+  wiring × 两个真实 activation：`vi.resetModules` 重演 /reload 的模块重求值 ⇒ 新 MODULE_INSTANCE ⇒
+  epoch 变化走 reclaim；正例 done 只能来自 completed 事实，对照组去掉字段后与 #23 结果一致）。
+  设计：`docs/dev/reload-result/plan.md`（r3），交付记录见同目录 `PA-report.md` / `PU-report.md` /
+  `PC-report.md`。
 
 ## Agent 下线原因区分表（#24 结案）
 

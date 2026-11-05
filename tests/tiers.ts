@@ -214,6 +214,10 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/web-hub/hub/proxy/agent-queue.test.ts": { kind: "proc", why: 'sock:"createServer("' },
   "tests/web-hub/hub/proxy/forward.test.ts": { kind: "proc", why: 'sock:"createServer("' },
   "tests/web-hub/hub/proxy/listener-allowlist.test.ts": { kind: "timing", why: "wait:setTimeout(…, 3000)" },
+  "tests/web-hub/hub/reload-status-passthrough.test.ts": {
+    kind: "proc",
+    why: 'sock:".listen("; sock:"createServer("',
+  },
   "tests/web-hub/hub/schedule-frames.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   "tests/web-hub/hub/schedule-http.test.ts": { kind: "proc", why: 'sock:".listen("' },
   "tests/web-hub/hub/schedule-service.test.ts": { kind: "proc", why: "proc:node:child_process" },
