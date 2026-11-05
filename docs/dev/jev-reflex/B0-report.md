@@ -2,7 +2,7 @@
 
 > 包：#25 jev-reflex B0（`docs/dev/jev-reflex/backtest-plan.md` §「B0 · 契约冻结」13 步）
 > 依赖文档：`backtest-arch.md`（BA，r3）、`backtest-plan.md`（r3）、`README.md`（R-I1…R-I14）
-> **B0_COMMIT: `<TODO — 由 root 在提交后填入>`**
+> **B0_COMMIT: `cd1d6c4a`**（由 root 在 B0 验收提交后填入）
 > 分支 dev，开工基线 `6c41c123`（`git log origin/dev..HEAD` 当时为空）
 
 ## 1. 实现范围（13 步逐条对照）
@@ -254,7 +254,14 @@ captured sha churn: 368 / 368
 2. **`tests/tiers.ts` 不在 B0 globs**（见 §4.2），已按 D4 门禁要求登记。
 3. **corpus `retiredPaths` 的人工维护**（见 §3.3 第 1 点）：未来若再动 `DEFAULT_SETTINGS` 结构，`GOV_CORPUS_GENERATE` 的朴素用法会丢该字段，建议 B3 或后续包把 head 的 `retiredPaths` 也纳入生成器输入。
 4. **`loadDrafts` 目前恒返回空**（骨架，符合 B0 定义）：B4 必须保留 `DRAFT_READ_FLAGS === SESSION_READ_FLAGS` 的断言（已由 `draft-schema.test.ts` 钉住）。
-5. **B0_COMMIT 待 root 补**：parity fixture 的 FX 门禁第二段 `git diff --quiet "$B0_COMMIT" -- tests/fixtures/reflex-drafts-off-parity.json` 需要在提交后由后续包执行。
+5. **B0_COMMIT 已补记（`cd1d6c4a`）**：parity fixture 的 FX 门禁第二段可直接复制执行——
+
+   ```sh
+   git diff --quiet cd1d6c4a -- tests/fixtures/reflex-drafts-off-parity.json && echo "FX-2 PASS"
+   ```
+
+   B1/B2/B4/B5/B3 每个包都须跑第一段（既有冻结文件对 `origin/dev`）与本段；两段皆绿才算通过。
+
 6. **给 root 的 message 发送失败**（两次 `message not authorized`）：内容已完整写入 §4.1 与 §4.2 —— 即①`tests/tiers.ts` 的写权限归属、②parity fixture 的重捕获时序。
 
 ## 7. 附：文件清单（绝对路径）
