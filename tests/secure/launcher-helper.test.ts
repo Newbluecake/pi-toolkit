@@ -27,12 +27,28 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
-const REPO = join(import.meta.dirname, "..", "..");
-const HELPER = join(REPO, "src", "secure", "bin", "helper.mjs");
+/** SRC = where this checkout's product source and fixtures physically are. */
+const SRC = join(import.meta.dirname, "..", "..");
+/**
+ * REPO = the physical package layout root. When SRC/node_modules is a symlink into another checkout's
+ * node_modules (worktrees), the pi package really lives under that checkout, so REPO is its parent.
+ */
+function layoutRoot(src: string): string {
+  const nm = join(src, "node_modules");
+  const real = realpathSync(nm);
+  const root = nm !== real && basename(real) === "node_modules" ? dirname(real) : src;
+  const pkg = join(root, "node_modules", "@earendil-works", "pi-coding-agent");
+  if (realpathSync(pkg) !== pkg) {
+    throw new Error(`unsupported node_modules layout: ${pkg} resolves to ${realpathSync(pkg)} (e.g. npm link)`);
+  }
+  return root;
+}
+const REPO = layoutRoot(SRC);
+const HELPER = join(SRC, "src", "secure", "bin", "helper.mjs");
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- plain-JS module, no typings by design
 const H: any = await import(pathToFileURL(HELPER).href);
 const PI_PKG = join(REPO, "node_modules", "@earendil-works", "pi-coding-agent");
@@ -63,7 +79,7 @@ interface ParityFixture {
   mountinfo: { name: string; mountinfo: string; realMnt: string; realCipher: string; expect: string }[];
 }
 const PARITY: ParityFixture = JSON.parse(
-  readFileSync(join(REPO, "tests", "fixtures", "secure-contract-parity.json"), "utf8"),
+  readFileSync(join(SRC, "tests", "fixtures", "secure-contract-parity.json"), "utf8"),
 ) as ParityFixture;
 
 describe("contract parity (shared fixture with src/secure/config.ts)", () => {

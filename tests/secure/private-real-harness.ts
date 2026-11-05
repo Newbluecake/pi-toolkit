@@ -519,18 +519,41 @@ export function lookInside<T>(e: Env, fn: (root: string) => T): T {
   }
 }
 
-/** Wait (≤60 s) until no foreign fuse.gocryptfs mount exists, else skip (run --private refuses then). */
-export async function awaitNoForeignGocryptfs(ctx: { skip: () => void }, mine: string): Promise<void> {
-  const end = Date.now() + 60_000;
+export interface AwaitForeignDeps {
+  readMountinfo?: () => string;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  /** Per-file memory (defaults to the module-level one: vitest gives every test file its own module instance). */
+  memo?: { timedOut?: string };
+  windowMs?: number;
+}
+const foreignMemo: { timedOut?: string } = {};
+
+/**
+ * Wait (≤60 s) until no foreign fuse.gocryptfs mount exists (run --private refuses then). D14: a window
+ * that ends with foreign mounts still present THROWS (listing them) instead of silently skipping; the
+ * first timeout is remembered, so every later call in the same file throws at once (each file waits once).
+ * `ctx` is kept only for call-site compatibility.
+ */
+export async function awaitNoForeignGocryptfs(_ctx: unknown, mine: string, deps: AwaitForeignDeps = {}): Promise<void> {
+  const readMountinfo = deps.readMountinfo ?? (() => readFileSync("/proc/self/mountinfo", "utf8"));
+  const now = deps.now ?? Date.now;
+  const nap = deps.sleep ?? sleep;
+  const memo = deps.memo ?? foreignMemo;
+  if (memo.timedOut !== undefined) throw new Error(memo.timedOut);
+  const end = now() + (deps.windowMs ?? 60_000);
   for (;;) {
-    const foreign = readFileSync("/proc/self/mountinfo", "utf8")
+    const foreign = readMountinfo()
       .split("\n")
       .filter((l) => l.includes(" - fuse.gocryptfs ") && !l.split(" ")[4]!.startsWith(mine + "/"));
     if (!foreign.length) return;
-    if (Date.now() >= end) {
-      ctx.skip();
-      return;
+    if (now() >= end) {
+      memo.timedOut =
+        `foreign fuse.gocryptfs mount(s) still present after ${(deps.windowMs ?? 60_000) / 1000}s ` +
+        `(run --private refuses while any exists; unmount them with an exact \`fusermount3 -u <path>\`):\n` +
+        foreign.join("\n");
+      throw new Error(memo.timedOut);
     }
-    await sleep(500);
+    await nap(500);
   }
 }

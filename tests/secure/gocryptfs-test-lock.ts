@@ -27,7 +27,7 @@
  * worker's death, but NOT on the death of vitest's main process — see above).
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { closeSync, openSync } from "node:fs";
+import { closeSync, openSync, readSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -52,6 +52,52 @@ const HOLDER_SH = [
   "echo locked",
   'while alive "$2" 2>/dev/null && alive "$3" 2>/dev/null; do sleep 0.05 3>&-; done',
 ].join("\n");
+
+/** `/proc/<pid>/stat` field 22 (starttime), or undefined when the process is gone/unreadable. */
+export function procStartTime(pid: number): string | undefined {
+  try {
+    const fd = openSync(`/proc/${pid}/stat`, "r");
+    try {
+      const buf = Buffer.alloc(4096);
+      const n = readSync(fd, buf, 0, 4096, 0);
+      const st = buf.toString("utf8", 0, n);
+      // comm may contain spaces/parens: fields after the LAST ")" start at field 3 (state).
+      const f = st.slice(st.lastIndexOf(")") + 2).split(" ");
+      return f[0] === "Z" || f[0] === "X" ? undefined : f[19]; // a zombie holds nothing
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/** D13 sidecar next to the lock file; `pid`/`starttime` are the shell holder's (not the vitest worker's). */
+export const holderFile = (lockFile: string): string => `${lockFile}.holder.json`;
+
+/**
+ * Best-effort one-line description of the current holder for a timeout message. Never throws, one
+ * sync ≤4 KiB read; "holder unknown" when the sidecar is missing/corrupt or its process is gone or
+ * its starttime does not match (pid reuse).
+ */
+export function describeLockHolder(lockFile: string): string {
+  try {
+    const fd = openSync(holderFile(lockFile), "r");
+    let raw: string;
+    try {
+      const buf = Buffer.alloc(4096);
+      raw = buf.toString("utf8", 0, readSync(fd, buf, 0, 4096, 0));
+    } finally {
+      closeSync(fd);
+    }
+    const m = JSON.parse(raw) as { pid?: unknown; starttime?: unknown; vitestPid?: unknown; file?: unknown };
+    if (typeof m.pid !== "number" || typeof m.starttime !== "string") return "holder unknown";
+    if (procStartTime(m.pid) !== m.starttime) return "holder unknown";
+    return `holder pid ${m.pid} (vitest pid ${String(m.vitestPid)}, file ${String(m.file)})`;
+  } catch {
+    return "holder unknown";
+  }
+}
 
 let setprivOk: boolean | undefined;
 function haveSetpriv(): boolean {
@@ -91,6 +137,23 @@ export function acquireGocryptfsTestLock(timeoutMs = 240_000, lockFile = GOCRYPT
       out += b.toString();
       if (!settled && out.includes("locked")) {
         settled = true;
+        try {
+          const starttime = holder.pid === undefined ? undefined : procStartTime(holder.pid);
+          if (holder.pid !== undefined && starttime !== undefined) {
+            writeFileSync(
+              holderFile(lockFile),
+              JSON.stringify({
+                pid: holder.pid,
+                starttime,
+                vitestPid: process.pid,
+                file: process.env.VITEST_POOL_ID ?? null, // pool id only: best-effort hint
+              }),
+              { mode: 0o600 },
+            );
+          }
+        } catch {
+          /* diagnostics only */
+        }
         resolve(release);
       }
     });
@@ -103,7 +166,11 @@ export function acquireGocryptfsTestLock(timeoutMs = 240_000, lockFile = GOCRYPT
     holder.on("close", (code, signal) => {
       if (!settled) {
         settled = true;
-        reject(new Error(`gocryptfs test lock not acquired (holder exit ${code ?? signal})`));
+        reject(
+          new Error(
+            `gocryptfs test lock not acquired (holder exit ${code ?? signal}); ${describeLockHolder(lockFile)}`,
+          ),
+        );
       }
     });
   });

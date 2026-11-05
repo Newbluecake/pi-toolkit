@@ -38,6 +38,7 @@ import {
   statSync,
   symlinkSync,
   writeFileSync,
+  realpathSync,
 } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -78,7 +79,7 @@ const SKIP = realSkipReason();
  *    is put with `--path` into a mktemp dir under /tmp (root-owned, sticky).
  * Never the user's real ~/secure or ~/.pi; same token-scoped cleanup as every RealHarness dir.
  */
-const E2E_ROOT = join(REPO, "node_modules", ".cache", "v7");
+const E2E_ROOT = join(realpathSync(join(REPO, "node_modules")), ".cache", "v7");
 /** (Re)create the shared root right before use: a concurrent run's afterAll may rmdir it when empty. */
 function e2eSetup(T: RealHarness): Env {
   for (let i = 0; ; i++) {
