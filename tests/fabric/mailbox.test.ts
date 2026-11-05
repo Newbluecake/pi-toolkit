@@ -57,7 +57,7 @@ function setup(
     throttle,
     {
       maxPerRun: 5,
-      findingQuota: 5,
+      reportQuota: 5,
       directiveQuota: 5,
       deadLetterQuota: 5,
       maxChars: 100,
@@ -349,7 +349,7 @@ describe("fabric mailbox", () => {
       throttle,
       {
         maxPerRun: 5,
-        findingQuota: 5,
+        reportQuota: 5,
         directiveQuota: 5,
         deadLetterQuota: 5,
         maxChars: 100,

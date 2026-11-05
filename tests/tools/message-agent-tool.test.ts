@@ -118,7 +118,7 @@ function makeFabric(edges: readonly (readonly [NodeRef, NodeRef])[]) {
     new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
     {
       maxPerRun: 2,
-      findingQuota: 2,
+      reportQuota: 2,
       directiveQuota: 2,
       deadLetterQuota: 1,
       maxChars: 100,

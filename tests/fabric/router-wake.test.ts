@@ -11,7 +11,7 @@ const S = "r_ABCDEFGH"; // sender, direct child of root
 const T = "r_12345678"; // sibling target
 const base: FabricRouterConfig = {
   maxPerRun: 5,
-  findingQuota: 10,
+  reportQuota: 10,
   directiveQuota: 10,
   deadLetterQuota: 1,
   maxChars: 100,
@@ -115,7 +115,7 @@ describe("router wake policy — root matrix (plan §3.1)", () => {
   });
 
   it("a rejected (quota_exhausted / backpressure) wake:true is not counted against the wake class", () => {
-    const { router } = setup({ level: 0, perRunQuota: 5 }, { findingQuota: 1 });
+    const { router } = setup({ level: 0, perRunQuota: 5 }, { reportQuota: 1 });
     expect(send(router, { wake: true })).toMatchObject({ ok: true, wake: true });
     expect(send(router, { wake: true })).toMatchObject({ ok: false, status: "quota_exhausted" });
     expect(router.wakeUsed(S)).toBe(1);

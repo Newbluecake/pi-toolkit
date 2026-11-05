@@ -43,7 +43,7 @@ describe("fabric seeded properties", () => {
         new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
         {
           maxPerRun: 100,
-          findingQuota: 100,
+          reportQuota: 100,
           directiveQuota: 100,
           deadLetterQuota: 100,
           maxChars: 100,
@@ -128,7 +128,7 @@ describe("fabric seeded properties", () => {
         new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
         {
           maxPerRun: 3,
-          findingQuota: 3,
+          reportQuota: 3,
           directiveQuota: 3,
           deadLetterQuota: 3,
           maxChars: 100,

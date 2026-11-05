@@ -134,7 +134,7 @@ export function reviveRig(
     throttle,
     {
       maxPerRun: 20,
-      findingQuota: 20,
+      reportQuota: 20,
       directiveQuota: 20,
       deadLetterQuota: 20,
       maxChars: 1000,

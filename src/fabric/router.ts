@@ -21,7 +21,7 @@ import { retireUnknownKind } from "./unknown-kind.js";
 
 export interface FabricRouterConfig {
   maxPerRun: number;
-  findingQuota: number;
+  reportQuota: number;
   directiveQuota: number;
   deadLetterQuota: number;
   maxChars: number;
@@ -596,7 +596,7 @@ export class FabricRouter {
     return kind === "progress"
       ? this.config.maxPerRun
       : kind === "report"
-        ? this.config.findingQuota
+        ? this.config.reportQuota
         : kind === "directive"
           ? this.config.directiveQuota
           : undefined;

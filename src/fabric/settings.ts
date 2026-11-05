@@ -12,7 +12,7 @@ export interface FabricSettings {
   enabled: boolean;
   minIntervalMs: number;
   maxPerRun: number;
-  findingQuota: number;
+  reportQuota: number;
   directiveQuota: number;
   deadLetterQuota: number;
   maxChars: number;
@@ -421,7 +421,7 @@ export function parseFabricSettings(input: unknown): FabricSettings {
     enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
     minIntervalMs: count("minIntervalMs"),
     maxPerRun: count("maxPerRun"),
-    findingQuota: count("findingQuota"),
+    reportQuota: count("reportQuota"),
     directiveQuota: count("directiveQuota"),
     deadLetterQuota: count("deadLetterQuota"),
     maxChars: count("maxChars"),
@@ -740,7 +740,7 @@ export const DEFAULT_FABRIC_SETTINGS: FabricSettings = {
   enabled: false,
   minIntervalMs: 30_000,
   maxPerRun: 20,
-  findingQuota: 10,
+  reportQuota: 10,
   directiveQuota: 5,
   deadLetterQuota: 5,
   maxChars: 2_000,

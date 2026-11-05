@@ -213,7 +213,7 @@
     ["fabric.enabled", "24a665ea98bbabc925f2ee0f95972348d79d84f6db5f114914ee81d63c68ccde"],
     ["fabric.minIntervalS", "2b8dd14d31f9b1f3128c0b088dcb659dfd8fa87c5507dd20a996dbf00d100a34"],
     ["fabric.maxPerRun", "11d99f9ef17e872cd7d1709605dc47830913b4c4d4027ea51ea9c3174b1ec5ad"],
-    ["fabric.findingQuota", "515bc97062f66635a47ea9e70f18e5f63f1d70e086b02e62a279b0b8ad02eb49"],
+    ["fabric.reportQuota", "6fd4109b29ae5a83c3c6834ba76e9c4c963b8f4f31eb36d91cd06e11f296c6da"],
     ["fabric.directiveQuota", "e02bb7b77f8c1f6f1305616ab6c00c3d26e961505d2e4380fed48e23ef195d59"],
     ["fabric.deadLetterQuota", "37aec980fc8017f67f162e4a14d7f2beafd0b9078322f656fcb815087c00e05f"],
     ["fabric.maxChars", "0be7b436772f731b9269a352a5e5524cae15301f0c16d1c9411577c3cf464c01"],
@@ -341,5 +341,5 @@
     ["reflex.autoResolve", "fa7252fca5b9d9612274c53c53b4ac0d2b8440a9574f7ddc36a4edb81bd9a726"],
     ["reflex.drafts.enabled", "424d403597834a370e6e25a0f89c9b2409242400cba7fde08de293bb5f820729"]
   ],
-  "all": "a8f4646dfdb0bbbc22d690afcc45deeb7d64471a85cb1e81b9df34404b01eb7f"
+  "all": "0b021d2e3294f35486fd35ce70a58b9af51c8c2c8782bd4dd6ebcd3fee77fa03"
 }

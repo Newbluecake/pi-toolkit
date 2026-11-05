@@ -2,8 +2,8 @@
 // The PRE34_* constants were captured verbatim on T0 = bf7173890da800f9c53a48a7c0da2d875b4bad36 BEFORE any
 // #34 source change (a one-off dump of createSteerTool({ query, fabricEnabled: () => false });
 // dump sha256 16bde59f470e86bb8918faf07fe0a9c0e62d3c70b4baa43d3d58fd63a8efd18e). Only DECLARED_SUBS may
-// differ; P2 will append the third entry (the setting-key rename, derived below) and relax the residual
-// assertion — nothing else in this file changes.
+// differ; P2 appended the third entry (the setting-key rename) and rewrote the residual assertion —
+// nothing else differs from the P1 capture.
 import { describe, expect, it } from "vitest";
 import { createSteerTool } from "../../src/tools/steer-tool.js";
 import type { QueryService } from "../../src/service/query-service.js";
@@ -90,19 +90,21 @@ const PRE34_OFF_RESULTS = {
   },
 } as Record<string, unknown>;
 
-/** P1 stage (plan §7.4 table): only these two replacements are declared so far. */
+/** Task-complete (P2) stage (plan §7.4 table): the three declared replacements, in order. */
 const DECLARED_SUBS: readonly (readonly [string, string])[] = [
   ['kind "finding"', 'kind "report"'],
   ["Findings are", "Reports are"],
+  ["fabric.findingQuota", "fabric.reportQuota"],
 ];
 
 const applySubs = (text: string, subs: readonly (readonly [string, string])[]): string =>
   subs.reduce((t, [from, to]) => t.split(from).join(to), text);
 const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
-/** The one P2-pending wording, derived from PRE34 (never written out as a literal here). */
-const P2_PENDING_KEY = /fabric\.\w+Quota/.exec(PRE34_REPLY_DESCRIPTION)![0]!;
-/** The bare old kind word, likewise derived — used only as a needle for the zero-residual assertions. */
+/** The bare old kind word, derived from DECLARED_SUBS — used only as a needle for the zero-residual assertions. */
 const OLD_KIND_WORD = /kind "(.+?)"/.exec(DECLARED_SUBS[0]![0])![1]!;
+/** The old setting key and its renamed replacement, likewise derived from DECLARED_SUBS. */
+const OLD_QUOTA_KEY = DECLARED_SUBS[2]![0];
+const NEW_QUOTA_KEY = DECLARED_SUBS[2]![1];
 
 const query = (steer: QueryService["steer"]): QueryService => ({
   get: () => undefined,
@@ -125,7 +127,7 @@ function skeleton(value: unknown): unknown {
   return value;
 }
 
-describe("#34 T-S1: steer_subagent fabric-off surface changes only by DECLARED_SUBS (P1 stage)", () => {
+describe("#34 T-S1: steer_subagent fabric-off surface changes only by DECLARED_SUBS (P2 stage)", () => {
   const tool = createSteerTool({ query: query(async () => ({ ok: true })), fabricEnabled: () => false });
   const props = (tool.parameters as unknown as Record<string, { description?: string }>).properties ?? {};
 
@@ -144,22 +146,21 @@ describe("#34 T-S1: steer_subagent fabric-off surface changes only by DECLARED_S
   });
 
   it("description and reply.description equal PRE34 + DECLARED_SUBS, with the pinned replacement counts", () => {
-    // P1 replacement counts, pinned on the PRE34 originals (plan §7.4 table row "P1").
+    // P2 replacement counts, pinned on the PRE34 originals (plan §7.4 table row "P2").
     expect(occurrences(PRE34_DESCRIPTION, DECLARED_SUBS[0]![0])).toBe(1);
     expect(occurrences(PRE34_DESCRIPTION, DECLARED_SUBS[1]![0])).toBe(0);
+    expect(occurrences(PRE34_DESCRIPTION, DECLARED_SUBS[2]![0])).toBe(0);
     expect(occurrences(PRE34_REPLY_DESCRIPTION, DECLARED_SUBS[0]![0])).toBe(1);
     expect(occurrences(PRE34_REPLY_DESCRIPTION, DECLARED_SUBS[1]![0])).toBe(1);
+    expect(occurrences(PRE34_REPLY_DESCRIPTION, DECLARED_SUBS[2]![0])).toBe(1);
     expect(tool.description).toBe(applySubs(PRE34_DESCRIPTION, DECLARED_SUBS));
     expect(props.reply?.description).toBe(applySubs(PRE34_REPLY_DESCRIPTION, DECLARED_SUBS));
   });
 
-  it("residuals: no old kind wording anywhere except the one P2-pending setting key in reply.description", () => {
-    expect(tool.description.toLowerCase().includes(OLD_KIND_WORD)).toBe(false);
-    const replyDesc = props.reply?.description ?? "";
-    expect(occurrences(replyDesc, P2_PENDING_KEY)).toBe(1); // P2 renames this last one
-    expect(occurrences(replyDesc, DECLARED_SUBS[0]![0])).toBe(0);
-    expect(replyDesc.includes(DECLARED_SUBS[1]![0])).toBe(false);
-    const others = [
+  it("residuals: no old kind wording and no old setting key anywhere; the new key appears exactly once", () => {
+    const surfaces = [
+      tool.description,
+      props.reply?.description ?? "",
       tool.name,
       tool.label,
       tool.promptSnippet,
@@ -168,6 +169,10 @@ describe("#34 T-S1: steer_subagent fabric-off surface changes only by DECLARED_S
       JSON.stringify(skeleton(tool.parameters)),
       JSON.stringify(PRE34_OFF_RESULTS),
     ];
-    for (const text of others) expect(text.toLowerCase().includes(OLD_KIND_WORD)).toBe(false);
+    for (const text of surfaces) {
+      expect(text.toLowerCase().includes(OLD_KIND_WORD)).toBe(false);
+      expect(text.includes(OLD_QUOTA_KEY)).toBe(false);
+    }
+    expect(occurrences(props.reply?.description ?? "", NEW_QUOTA_KEY)).toBe(1);
   });
 });

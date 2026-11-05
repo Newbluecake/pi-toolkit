@@ -40,7 +40,7 @@ function treeRouter(rootInboxCap: number): FabricRouter {
     new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
     {
       maxPerRun: 20,
-      findingQuota: 10,
+      reportQuota: 10,
       directiveQuota: 5,
       deadLetterQuota: 5,
       maxChars: 2000,
