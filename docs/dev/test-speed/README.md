@@ -6,7 +6,7 @@
 ## 归属与门（D1–D4）
 
 - **唯一来源是 `tests/tiers.ts`**（纯数据 + 纯函数，无 pi import）：`TIER2_DIRS`（`tests/integration/`、
-  `tests/conformance/`）、`TIER2_FILES`（4 个目录外文件）、`SECURE_MOUNT_FILES`（16 个真实挂载文件）、
+  `tests/conformance/`）、`TIER2_FILES`（4 个目录外文件）、`SECURE_MOUNT_FILES`（17 个真实挂载文件，以 `tests/tiers.ts` 实际长度为准）、
   `TIER1_DECLARED`（带标记的 tier1 文件登记表）。`vitest.workspace.ts` 的三个 project（tier1 / tier2 /
   secure）的 include/exclude 全部由这些常量生成——**不要在 workspace 里手写 glob**，也不要在别处复制清单。
 - **分区只认显式元数据**，绝不按类名（`RealHarness` 之类）或标记推断归属；标记只用来强制登记。
@@ -46,10 +46,7 @@ outcome == 'failure')` —— 只有 tier1 确实执行过才跑；npm ci / 构�
 
 - **过渡期不受锁保护**：升级前（#27 之前）的测试代码不拿运行锁。旧进程 × 新进程并发时，
   跨轮互斥不生效——直到所有跑测试的机器/检出都升到新代码。期间避免新旧两轮 secure 并发。
-- **#28 产品侧符号链接 bug**：`node_modules` 是符号链接的布局（npm-link 式 worktree）下，
-  `launcher-convert` 的 scratch 根挂在词法路径、校验走 realpath ⇒ 自有挂载全判 foreign。测试侧已缓解
-  （D15/D16：E2E_ROOT 取 realpath、REPO 用 layoutRoot），但产品缺陷归 #28；`TMPDIR` 指向符号链接时
-  预检判 `symlinked-tmpdir`（故意的，指向 #28）——把 TMPDIR 设成物理路径再跑。
+- **#28 产品侧符号链接 bug（已修）**：`<dir>` 词法链含符号链接时，普通挂载以词法 cipher 传给 gocryptfs，判定却用物理路径 ⇒ 自有挂载全判 foreign、unlock/lock 卡死。修复与边界（检测能力 R1/R2/R3、cipher 物理祖先链裁定 (ii)）：`docs/dev/secure-symlink/plan.md`（r3）；测试侧缓解（D15/D16：E2E_ROOT 取 realpath、REPO 用 layoutRoot）保留；`TMPDIR` 指向符号链接时预检仍判 `symlinked-tmpdir`（预检判定的现状保留）——把 TMPDIR 设成物理路径再跑。
 - **词法登记门会漏判**：D4 只认字面标记（`node:child_process` import、`.listen(`、≥1 s 的
   `setTimeout` 字面量、mount 关键字）。时长写在变量里、经 helper 间接 sleep/spawn、真实 I/O 慢
   （例：`tests/workflow/m34-script-api.test.ts` 曾负载超时但无任何标记）都会漏。**新增测试的分类

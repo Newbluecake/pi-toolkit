@@ -182,7 +182,7 @@ update the matrix/property tests in lockstep. Integration tests live in `tests/i
 ### Test tiers and flake triage (release gate policy)
 
 Ownership = the vitest workspace driven by `tests/tiers.ts` (single source): `tests/integration/**`,
-`tests/conformance/**` and the listed files are **tier2**, the 16 real-mount files are **secure**,
+`tests/conformance/**` and the listed files are **tier2**, the 17 real-mount files are **secure**,
 everything else is **tier1**. Partitioning reads explicit lists only — never names/markers. A new
 test that hits a lexical marker (child_process, socket, ≥1 s sleep, mount helpers) must be
 registered in `TIER1_DECLARED` / `TIER2_FILES` / `SECURE_MOUNT_FILES` (gate:
