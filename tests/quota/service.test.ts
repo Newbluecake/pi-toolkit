@@ -328,6 +328,35 @@ describe("createQuotaService", () => {
     expect(f.service.verdictFor("zai-coding-cn")).toBeUndefined();
     expect(f.demotions.list(f.clock.now())).toHaveLength(0);
   });
+
+  // 2026-11-05 拍板：5h 窗口默认关闭规则 3b（forecast-before-reset）；week 仍开启，3a 保留。
+  it("5h windows no longer raise forecast-before-reset through the service (2026-11-05); week still does", async () => {
+    const f = makeFixture();
+    const reset = f.clock.now() + 2 * 3_600_000;
+    const snap = (five: number, week: number) =>
+      windowsSnapshot(
+        "zai-coding-cn",
+        [
+          { scope: "5h", usedPct: five, resetAt: reset },
+          { scope: "week", usedPct: week, resetAt: reset },
+        ],
+        f.clock.now(),
+      );
+    f.zai.set(() => snap(40, 40));
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    f.clock.advance(DEFAULT_SETTINGS.quota.refreshMs); // 10min
+    f.zai.set(() => snap(50, 50));
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    // 10%/10min ⇒ 1%/min 斜率，eta = 50min（≥ l3EtaMs 30min，且早于 reset 2h）：
+    // 旧规则 3b 会把两窗口都抬 L2；5h 默认关闭 ⇒ 不抬（50% ≥ L1 但按窗口进度
+    // 静默 ⇒ under-pace L0），week 仍抬 L2。
+    const v = f.service.verdictFor("zai-coding-cn");
+    expect(v?.windows[0]).toMatchObject({ scope: "5h", level: 0, reason: "under-pace" });
+    expect(v?.windows[1]).toMatchObject({ scope: "week", level: 2, reason: "forecast-before-reset" });
+    expect(v?.level).toBe(2);
+  });
 });
 
 // 2026-09-24 kimi 现场：上游 502 风暴期间 /usages 短暂返回归零、无 resetAt 的窗口；
@@ -1876,7 +1905,7 @@ describe("droid: per-virtual-id isolation (rings, demotion, dispose)", () => {
     f.std.set(() => droidSnapshot("droid-standard", [{ scope: "month", usedPct: 65, resetAt: reset }], f.clock.now()));
     f.service.refreshIfStale();
     await f.service.whenIdle();
-    // 5%/10min slope (ETA ~70min, well before reset) would exhaust long before `reset` — a 5h/week window would be raised to L2.
+    // 5%/10min slope (ETA ~70min, well before reset) would exhaust long before `reset` — a week window would be raised to L2.
     expect(f.service.verdictFor("droid-standard")?.windows[0]).toMatchObject({
       scope: "month",
       level: 0,

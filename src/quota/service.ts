@@ -33,6 +33,7 @@ import type { DemotionStore } from "./demotion.js";
 import { toLadderLevel } from "./gate.js";
 import { forecast, pushSample, type BurnSample } from "./forecast.js";
 import {
+  DEFAULT_THRESHOLDS_BY_WINDOW,
   providerVerdict,
   triggerWindow,
   QUOTA_HYSTERESIS_PCT,
@@ -207,13 +208,15 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
 
   const thresholds = (scope: WindowScope): LadderThresholds => {
     const w = settings.windows[scope];
-    // D10：month 窗口关闭规则 3b（forecast-before-reset）——月窗口斜率外推必误报；3a 保留。
+    // 规则 3b（forecast-before-reset）的开关跟随 ladder 的按窗口默认
+    // （DEFAULT_THRESHOLDS_BY_WINDOW，唯一开关源）：month（D10）与 5h（2026-11-05
+    // 拍板）默认关闭，week 仍开启；settings 层只覆盖百分比/l3EtaMs，不会重开。3a 保留。
     return {
       l1: w.l1Percent,
       l2: w.l2Percent,
       l3: w.l3Percent,
       l3EtaMs: settings.l3EtaMs,
-      ...(scope === "month" ? { forecastBeforeReset: false } : {}),
+      ...(DEFAULT_THRESHOLDS_BY_WINDOW[scope].forecastBeforeReset === false ? { forecastBeforeReset: false } : {}),
     };
   };
 

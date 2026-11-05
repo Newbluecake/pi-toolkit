@@ -166,14 +166,14 @@ describe("L1 tick block", () => {
 });
 
 describe("L2 warn block", () => {
-  it("matches the plan §5.5 template (pct + eta before reset)", () => {
+  it("matches the plan §5.5 template (pct + reset; 2026-11-05 起 eta 子句删除)", () => {
     const v = verdict({
       level: 2,
       windows: [w("5h", 78, 2, "pct", { resetAt: RESET, etaMs: 41 * 60_000 }), w("week", 21, 0, "none")],
     });
     expect(buildQuotaWarnText(v, NOW)).toBe(
       [
-        "[quota 预警] zai-coding-cn 5h 已用 78%（阈值 75%），按当前速率约 41 分钟后耗尽，早于窗口重置（02:11）。",
+        "[quota 预警] zai-coding-cn 5h 已用 78%（阈值 75%）（窗口 02:11 重置）。",
         "订阅额度照常优先使用，派单不变；到 L3（≥90% 或即将耗尽）才会切换。",
       ].join("\n"),
     );
@@ -187,8 +187,10 @@ describe("L2 warn block", () => {
     const text = buildQuotaWarnText(v, NOW);
     expect(text).toContain("zai-coding-cn 7d 已用 62%");
     expect(text).not.toContain("阈值"); // forecast-raised: no pct tier crossed
-    expect(text).toContain("按当前速率约 3 小时后耗尽");
-    expect(text).not.toContain("早于窗口重置"); // resetAt unknown
+    // 2026-11-05 拍板：预测耗尽时间不进注入文案（etaMs 在 verdict 里也只字不提）。
+    expect(text).not.toContain("按当前速率");
+    expect(text).not.toContain("早于窗口重置"); // resetAt unknown ⇒ 无重置子句
+    expect(text).not.toContain("重置");
   });
 
   it("is advisory only: never redirects to other models nor announces a demotion", () => {
@@ -217,7 +219,7 @@ describe("L3 block", () => {
     });
     expect(buildQuotaBlockText(v, alternatives, NOW)).toBe(
       [
-        "[quota 严重] zai-coding-cn 5h 已用 93%，预计 18 分钟内耗尽（窗口 02:11 重置）。",
+        "[quota 严重] zai-coding-cn 5h 已用 93%（窗口 02:11 重置）。",
         "本轮不要把新任务派给 zai-coding-cn（继续派给它会在 spawn 阶段被快速失败拦下，不会消耗 run）。",
         "替代候选（订阅优先）：kimi-coding/kimi-k3、cloudrouter-anthropic/claude-opus-5。",
         "按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。",
@@ -239,6 +241,43 @@ describe("L3 block", () => {
 function blocks(text: string): string[] {
   return text.split(/\n(?=\[quota)/);
 }
+
+// 2026-11-05 拍板：注入给模型的 quota 文案（预警/提示/严重）一律不写预测耗尽时间
+// ——「按当前速率…后耗尽」「早于窗口重置（…）」「预计…内耗尽」全部删除，只留
+// 用量与（resetAt 已知时的）窗口重置时刻；软化正文的「可能在窗口重置前用完」不是
+// 具体时间，保留。etaMs 仍进判定与 Web/HUD，只是不进散文。
+describe("injected copy carries no burn-rate exhaustion time (2026-11-05)", () => {
+  it("warn / soft / block heads omit every eta clause regardless of etaMs in the verdict", () => {
+    const soft = verdict({
+      level: 2,
+      windows: [
+        w("5h", 3, 0, "none"),
+        w("week", 24, 2, "forecast-before-reset", { resetAt: RESET, etaMs: 13 * 3_600_000 }),
+      ],
+    });
+    const warn = verdict({ level: 2, windows: [w("5h", 78, 2, "pct", { resetAt: RESET, etaMs: 41 * 60_000 })] });
+    const block = verdict({ level: 3, windows: [w("5h", 93, 3, "pct", { resetAt: RESET, etaMs: 18 * 60_000 })] });
+    const text = buildQuotaMessage(
+      [
+        { verdict: warn, alternatives: [] },
+        { verdict: soft, alternatives: [] },
+        { verdict: block, alternatives: [] },
+      ],
+      NOW,
+    );
+    for (const line of text.split("\n")) {
+      expect(line).not.toContain("后耗尽");
+      expect(line).not.toContain("早于窗口重置");
+      expect(line).not.toContain("内耗尽");
+      expect(line).not.toContain("按当前速率约");
+    }
+    expect(text).toContain("[quota 预警] zai-coding-cn 5h 已用 78%（阈值 75%）（窗口 02:11 重置）");
+    expect(text).toContain("[quota 提示] zai-coding-cn 7d 已用 24%（窗口 02:11 重置）");
+    expect(text).toContain("[quota 严重] zai-coding-cn 5h 已用 93%（窗口 02:11 重置）");
+    // 软化正文的具体措辞不是具体时间，保留。
+    expect(text).toContain("当前用量不高，订阅仍应优先使用；按当前速率可能在窗口重置前用完，留意即可");
+  });
+});
 
 describe("buildQuotaMessage", () => {
   it("assembles one merged message: L1 tick first, then L2/L3 blocks", () => {
@@ -342,7 +381,7 @@ describe("buildQuotaMessage", () => {
     );
     const lines = text.split("\n");
     expect(lines).toHaveLength(5);
-    expect(lines[0]).toMatch(/^\[quota 严重\] zai-coding-cn \/ zai 7d 已用 98%，预计 37 分钟内耗尽（窗口 .+ 重置）。$/);
+    expect(lines[0]).toMatch(/^\[quota 严重\] zai-coding-cn \/ zai 7d 已用 98%（窗口 .+ 重置）。$/);
     expect(lines[1]).toMatch(/^\[quota 严重\] kimi-coding 7d 已用 100%（窗口 .+ 重置）。$/);
     expect(lines[2]).toBe(
       "本轮不要把新任务派给 zai-coding-cn / zai、kimi-coding（继续派给它们会在 spawn 阶段被快速失败拦下，不会消耗 run）。",

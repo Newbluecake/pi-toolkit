@@ -9,7 +9,12 @@
 `src/quota/` — quota-aware dispatch: provider adapters + TTL cache, laddered turn_end warnings, and a spawn fast-fail gate
 (design: `docs/dev/quota/`). A window whose `resetAt` has elapsed levels to 0 (`reason:"reset-elapsed"`, HUD `7d 100%·reset`) and bypasses
 the refresh TTL only while the snapshot predates the reset; `quota.repeatS` re-sends at L3 only. Ladder thresholds are per-window
-(repo defaults: 5h 50/75/90, week/7d 50/95/98 — `ladder.ts`'s `DEFAULT_THRESHOLDS_BY_WINDOW`; `l3EtaMs` stays global). `quota.windows.{5h,week}.{l1,l2,l3}Percent`
+(repo defaults: 5h 50/75/90, week/7d 50/95/98 — `ladder.ts`'s `DEFAULT_THRESHOLDS_BY_WINDOW`; `l3EtaMs` stays global).
+Rule 3b (forecast-before-reset) is default-off for **5h as well as month** (2026-11-05 拍板；`DEFAULT_THRESHOLDS_BY_WINDOW` 是唯一开关源，
+`service.thresholds()` 跟随它，settings 层只覆盖百分比/l3EtaMs ⇒ 用户改阈值不会重开；week 仍开，3a ETA 硬线保留)。注入给模型的
+`[quota 预警/提示/严重]` 文案不再携带预测耗尽时间（2026-11-05 拍板：「按当前速率…后耗尽」「早于窗口重置（…）」「预计…内耗尽」
+子句删除，只留用量 + `（窗口 … 重置）`；软化正文「可能在窗口重置前用完」非具体时间，保留；Web/HUD 的耗尽预估显示不变）。
+`quota.windows.{5h,week}.{l1,l2,l3}Percent`
 override a single window; the legacy flat `quota.l1Percent/l2Percent/l3Percent` still work and, when set, override BOTH windows
 (back-compat) — window-level fields win over the flat override, which wins over the per-window default. Each window's l1<=l2<=l3
 is clamped independently.

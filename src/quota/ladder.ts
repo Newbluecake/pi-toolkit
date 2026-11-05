@@ -84,12 +84,18 @@ export const DEFAULT_THRESHOLDS: LadderThresholds = { l1: 50, l2: 75, l3: 90, l3
  * 按窗口区分的仓库默认阈值（quota-plan「阶梯阈值按窗口区分」）：5h 窗口保留旧的
  * 50/75/90（快速反应——一次会话烧穿的可能性高）；week（HUD 显示 7d）窗口拉高到
  * 50/95/98——7 天窗口天然摊薄，旧的 75/90 在多 agent 场景下太容易被日常波动
- * 触发误报。l3EtaMs（速率预测硬线）两窗口相同、不随窗口区分。`DEFAULT_THRESHOLDS`
- * 等价于 `DEFAULT_THRESHOLDS_BY_WINDOW["5h"]`，保留供只关心单窗口的调用方
- * （现有 windowLevel 直调测试）沿用。
+ * 触发误报。l3EtaMs（速率预测硬线）两窗口相同、不随窗口区分。规则 3b
+ * （forecast-before-reset）的开关也住在这里：month（D10）与 5h（2026-11-05 拍板，
+ * 短窗斜率外推误报多）默认关闭，week 仍开启；service.thresholds() 跟随本表，
+ * settings 只覆盖百分比/l3EtaMs——用户改阈值不会重新打开它。
+ * `DEFAULT_THRESHOLDS` 的阈值数字与 5h 条目相同，但**不携带** forecastBeforeReset:
+ * false（开关缺省 = 规则开启），保留供只关心单窗口/直调 windowLevel 测规则 3b 的
+ * 调用方沿用；运行时开关以本表为准。
  */
 export const DEFAULT_THRESHOLDS_BY_WINDOW: Readonly<Record<WindowScope, LadderThresholds>> = {
-  "5h": { l1: 50, l2: 75, l3: 90, l3EtaMs: 1_800_000 },
+  // 5h：2026-11-05 拍板关闭规则 3b（forecast-before-reset）——与 month 同理，短窗
+  // 斜率外推误报多；3a（ETA < l3EtaMs ⇒ L3）保留，百分比阈值 50/75/90 不变。
+  "5h": { l1: 50, l2: 75, l3: 90, l3EtaMs: 1_800_000, forecastBeforeReset: false },
   week: { l1: 50, l2: 95, l3: 98, l3EtaMs: 1_800_000 },
   // month（D9/D10 拍板）：默认阈值同 week（50/95/98）；月窗口斜率外推必误报，
   // 关闭规则 3b（forecast-before-reset），保留 3a（ETA 硬线）。
@@ -186,7 +192,8 @@ export function windowLevel(
       level < 2
     ) {
       // 3b) 预测在窗口重置**之前**耗尽 ⇒ 至少 L2。resetAt 未知时不做此判定。
-      // thresholds.forecastBeforeReset === false（month 窗口，D10）时整条规则关闭。
+      // thresholds.forecastBeforeReset === false（month/5h 窗口，见
+      // DEFAULT_THRESHOLDS_BY_WINDOW）时整条规则关闭。
       level = 2;
       reason = "forecast-before-reset";
     }
