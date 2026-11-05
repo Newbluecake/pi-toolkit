@@ -68,7 +68,9 @@ import {
 import {
   UPLOAD_AGENT_CAPS,
   RUNTX_AGENT_CAPS,
+  EPOCH_UP_AGENT_CAPS,
   HOLD_AGENT_CAPS,
+  HOLD_CAP,
   CMD_ARGS_AGENT_CAPS,
   CMD_ARGS_HUB_CAP,
 } from "../protocol/version.js";
@@ -1664,7 +1666,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     return config;
   };
 
-  const capsExtra = (): readonly string[] => {
+  // #23 web-update-stuck plan §2.2 (D13): the caps the agent ADVERTISES are `baseCapsExtra()`
+  // plus — only when hold is NOT wired into this config — the tail-appended `epoch.up.v1`.
+  // holdWired = control ∧ steerRecall; every config that leaves hold out (control:false or
+  // steerRecall:false) would otherwise publish NO epoch-refresh signal on /reload-style epoch
+  // changes (the hub's D14 gate answers hold.v1 OR epoch.up.v1). Appending only when
+  // `HOLD_CAP` is absent keeps every DEFAULT hello byte-identical — the five A-tier goldens
+  // (thread-off / thread-rebind-off / fabric-xs-off / fabric-xs-reply-off / schedule-off) all
+  // carry hold.v1 and must never regenerate (AGENTS.md Frozen artifacts) — and every other
+  // config differs from its pre-#23 hello by exactly one trailing entry (compat golden s3).
+  const baseCapsExtra = (): readonly string[] => {
     const caps: string[] = [];
     // fleet-drawer §4.4 (F2): runtx is the READ plane — advertised independently of `control`
     // ("all" ⇒ runtx.v1 + runtx.lan.v1, "loopback" ⇒ runtx.v1 only, "off" ⇒ neither).
@@ -1715,6 +1726,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       caps.push(THREAD_CAP);
       if (deps.threadsRebindCapOn?.() === true) caps.push(...THREAD_REBIND_AGENT_CAPS);
     }
+    return caps;
+  };
+
+  const capsExtra = (): readonly string[] => {
+    const caps = [...baseCapsExtra()];
+    if (!caps.includes(HOLD_CAP)) caps.push(...EPOCH_UP_AGENT_CAPS);
     return caps;
   };
 

@@ -179,6 +179,20 @@ export const HOLD_CAP = "hold.v1";
 export const HOLD_AGENT_CAPS = ["hold.v1"] as const;
 export const HOLD_HUB_CAPS = ["hold.v1"] as const;
 
+/** #23 web-update-stuck plan §2.2 (D12): the epoch-refresh complement to `hold.v1` — an agent
+ *  advertising it asks the hub to publish `agent_up` on an epoch-changing reclaim (D14) even
+ *  though its config keeps hold unwired (`holdWired = control ∧ steerRecall`; the default has
+ *  both on ⇒ `hold.v1` present ⇒ this cap never joins a default hello). AGENT face ONLY: the
+ *  agent appends it TAIL-ONLY when the computed caps lack `HOLD_CAP` (D13), so every default
+ *  hello stays byte-identical — pinned by the five A-tier goldens (thread-off/thread-rebind-off/
+ *  fabric-xs-off/fabric-xs-reply-off/schedule-off), which all carry `hold.v1` and must never
+ *  regenerate. The hub NEVER broadcasts it on any cap surface (`HubInfo.caps` / `hello_ack.caps`;
+ *  pinned by caps-coexist) — it is an agent→hub REQUEST about event policy, not a hub feature;
+ *  an old hub ignores the unknown string exactly like any other future cap (compat golden
+ *  `tests/fixtures/web-hub/epoch-up-compat-golden.json` s3). No new frames ⇒ no PROTO bump. */
+export const EPOCH_UP_CAP = "epoch.up.v1";
+export const EPOCH_UP_AGENT_CAPS = ["epoch.up.v1"] as const;
+
 /** web-hub-avatar plan §4.2: the single hub capability for the avatar surface. */
 export const AVATAR_HUB_CAP = "avatar.v1";
 

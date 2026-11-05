@@ -1,0 +1,127 @@
+{
+  "note": "#23 P-B compat golden — captured on UNMODIFIED dev (pre epoch.up.v1). Never regenerate to fix a diff.",
+  "scenarios": {
+    "s1-old-caps-no-hold": {
+      "firstCaps": ["ev.v1", "cmd.v1"],
+      "secondCaps": ["ev.v1", "cmd.v1"],
+      "busEvents": [
+        {
+          "type": "agent_up",
+          "agent": {
+            "agentKey": "a4242-nonceA",
+            "kind": "tui",
+            "pid": 4242,
+            "cwd": "/tmp/work",
+            "state": "live",
+            "pluginVersion": "1.2.3",
+            "outdated": false,
+            "buildId": "1.2.3@abc",
+            "prompts": [],
+            "control": true,
+            "epoch": "e-old",
+            "upload": false,
+            "uploadLan": false,
+            "runTranscript": false,
+            "runTranscriptLan": false
+          }
+        },
+        {
+          "type": "gap",
+          "agentKey": "a4242-nonceA",
+          "fromSeq": 0
+        }
+      ],
+      "sse": "event: hello\ndata: {\"clientId\":\"<client>\"}\n\nevent: hub\ndata: {\"version\":\"9.9.9\",\"buildId\":\"b1\",\"pid\":1,\"startedAt\":1,\"proto\":{\"major\":1,\"minor\":2},\"port\":<port>}\n\nevent: agents\ndata: {\"agents\":[]}\n\nid: 1700000000001\nevent: agent_up\ndata: {\"agentKey\":\"a4242-nonceA\",\"agent\":{\"agentKey\":\"a4242-nonceA\",\"kind\":\"tui\",\"pid\":4242,\"cwd\":\"/tmp/work\",\"state\":\"live\",\"pluginVersion\":\"1.2.3\",\"outdated\":false,\"buildId\":\"1.2.3@abc\",\"prompts\":[],\"control\":true,\"epoch\":\"e-old\",\"upload\":false,\"uploadLan\":false,\"runTranscript\":false,\"runTranscriptLan\":false}}\n\nevent: history\ndata: {\"agentKey\":\"a4242-nonceA\",\"entries\":[],\"tailMessages\":[],\"fromSeq\":1,\"hasMore\":false,\"source\":\"file\"}\n\nid: 1700000000002\nevent: gap\ndata: {\"agentKey\":\"a4242-nonceA\",\"fromSeq\":0}\n\n"
+    },
+    "s2-old-caps-with-hold": {
+      "firstCaps": ["ev.v1", "cmd.v1", "hold.v1"],
+      "secondCaps": ["ev.v1", "cmd.v1", "hold.v1"],
+      "busEvents": [
+        {
+          "type": "agent_up",
+          "agent": {
+            "agentKey": "a4242-nonceA",
+            "kind": "tui",
+            "pid": 4242,
+            "cwd": "/tmp/work",
+            "state": "live",
+            "pluginVersion": "1.2.3",
+            "outdated": false,
+            "buildId": "1.2.3@abc",
+            "prompts": [],
+            "control": true,
+            "epoch": "e-old",
+            "upload": false,
+            "uploadLan": false,
+            "runTranscript": false,
+            "runTranscriptLan": false,
+            "hold": true
+          }
+        },
+        {
+          "type": "agent_up",
+          "agent": {
+            "agentKey": "a4242-nonceA",
+            "kind": "tui",
+            "pid": 4242,
+            "cwd": "/tmp/work",
+            "state": "live",
+            "pluginVersion": "1.2.3",
+            "outdated": false,
+            "buildId": "1.2.3@abc",
+            "prompts": [],
+            "control": true,
+            "epoch": "e-new",
+            "upload": false,
+            "uploadLan": false,
+            "runTranscript": false,
+            "runTranscriptLan": false,
+            "hold": true
+          }
+        },
+        {
+          "type": "gap",
+          "agentKey": "a4242-nonceA",
+          "fromSeq": 0
+        }
+      ],
+      "sse": "event: hello\ndata: {\"clientId\":\"<client>\"}\n\nevent: hub\ndata: {\"version\":\"9.9.9\",\"buildId\":\"b1\",\"pid\":1,\"startedAt\":1,\"proto\":{\"major\":1,\"minor\":2},\"port\":<port>}\n\nevent: agents\ndata: {\"agents\":[]}\n\nid: 1700000000001\nevent: agent_up\ndata: {\"agentKey\":\"a4242-nonceA\",\"agent\":{\"agentKey\":\"a4242-nonceA\",\"kind\":\"tui\",\"pid\":4242,\"cwd\":\"/tmp/work\",\"state\":\"live\",\"pluginVersion\":\"1.2.3\",\"outdated\":false,\"buildId\":\"1.2.3@abc\",\"prompts\":[],\"control\":true,\"epoch\":\"e-old\",\"upload\":false,\"uploadLan\":false,\"runTranscript\":false,\"runTranscriptLan\":false,\"hold\":true}}\n\nevent: history\ndata: {\"agentKey\":\"a4242-nonceA\",\"entries\":[],\"tailMessages\":[],\"fromSeq\":1,\"hasMore\":false,\"source\":\"file\"}\n\nid: 1700000000002\nevent: agent_up\ndata: {\"agentKey\":\"a4242-nonceA\",\"agent\":{\"agentKey\":\"a4242-nonceA\",\"kind\":\"tui\",\"pid\":4242,\"cwd\":\"/tmp/work\",\"state\":\"live\",\"pluginVersion\":\"1.2.3\",\"outdated\":false,\"buildId\":\"1.2.3@abc\",\"prompts\":[],\"control\":true,\"epoch\":\"e-new\",\"upload\":false,\"uploadLan\":false,\"runTranscript\":false,\"runTranscriptLan\":false,\"hold\":true}}\n\nid: 1700000000003\nevent: gap\ndata: {\"agentKey\":\"a4242-nonceA\",\"fromSeq\":0}\n\n"
+    },
+    "s3-old-hub-new-agent": {
+      "firstCaps": ["ev.v1", "cmd.v1"],
+      "secondCaps": ["ev.v1", "cmd.v1", "epoch.up.v1"],
+      "busEvents": [
+        {
+          "type": "agent_up",
+          "agent": {
+            "agentKey": "a4242-nonceA",
+            "kind": "tui",
+            "pid": 4242,
+            "cwd": "/tmp/work",
+            "state": "live",
+            "pluginVersion": "1.2.3",
+            "outdated": false,
+            "buildId": "1.2.3@abc",
+            "prompts": [],
+            "control": true,
+            "epoch": "e-old",
+            "upload": false,
+            "uploadLan": false,
+            "runTranscript": false,
+            "runTranscriptLan": false
+          }
+        },
+        {
+          "type": "gap",
+          "agentKey": "a4242-nonceA",
+          "fromSeq": 0
+        },
+        {
+          "type": "caps",
+          "agentKey": "a4242-nonceA"
+        }
+      ],
+      "sse": "event: hello\ndata: {\"clientId\":\"<client>\"}\n\nevent: hub\ndata: {\"version\":\"9.9.9\",\"buildId\":\"b1\",\"pid\":1,\"startedAt\":1,\"proto\":{\"major\":1,\"minor\":2},\"port\":<port>}\n\nevent: agents\ndata: {\"agents\":[]}\n\nid: 1700000000001\nevent: agent_up\ndata: {\"agentKey\":\"a4242-nonceA\",\"agent\":{\"agentKey\":\"a4242-nonceA\",\"kind\":\"tui\",\"pid\":4242,\"cwd\":\"/tmp/work\",\"state\":\"live\",\"pluginVersion\":\"1.2.3\",\"outdated\":false,\"buildId\":\"1.2.3@abc\",\"prompts\":[],\"control\":true,\"epoch\":\"e-old\",\"upload\":false,\"uploadLan\":false,\"runTranscript\":false,\"runTranscriptLan\":false}}\n\nevent: history\ndata: {\"agentKey\":\"a4242-nonceA\",\"entries\":[],\"tailMessages\":[],\"fromSeq\":1,\"hasMore\":false,\"source\":\"file\"}\n\nid: 1700000000002\nevent: gap\ndata: {\"agentKey\":\"a4242-nonceA\",\"fromSeq\":0}\n\n"
+    }
+  }
+}

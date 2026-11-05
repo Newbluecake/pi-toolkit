@@ -518,6 +518,10 @@ describe("wireWebHub — runtx caps matrix (§8.4 #2: control × uploads × suba
       // exactly (holdWired = control ∧ steerRecall, and control=false returned early above).
       expected.push("hold.v1");
     }
+    // #23 web-update-stuck plan §2.2 (D13): every hold-less caps set TAIL-appends epoch.up.v1
+    // (the hub's D14 epoch-refresh gate answers hold.v1 ∨ epoch.up.v1). In this matrix that is
+    // exactly the control=false rows — the declarative update of this matrix, nothing else moved.
+    if (!hello.caps.includes("hold.v1")) expected.push("epoch.up.v1");
     expect([...hello.caps].sort()).toEqual([...expected].sort());
     await hub.close();
     hub = undefined;
