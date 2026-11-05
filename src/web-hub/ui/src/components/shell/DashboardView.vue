@@ -53,6 +53,7 @@ import PrivacyLockScreen from "../privacy/PrivacyLockScreen.vue";
 import PrivacyUnmarkDialog from "../privacy/PrivacyUnmarkDialog.vue";
 import { PRIVACY_LOCK_CTX } from "../privacy/privacyContext.js";
 import EmptyState from "./EmptyState.vue";
+import OutdatedReloadResult from "../detail/OutdatedReloadResult.vue";
 import { SIDEBAR_DRAWER } from "./sidebarDrawer.js";
 import { browserLocalStorage } from "./themeStorage.js";
 
@@ -266,12 +267,14 @@ function onKeydown(ev: KeyboardEvent): void {
 }
 
 // #65 outdated-reload：唯一的 per-dashboard 管理器（详情页提示条 + 列表汇总条共用）。
-// 状态页面级（切会话不丢、刷新即丢——报告残留风险 §R1）；定时器与 storage 全部注入。
+// 状态页面级（切会话不丢、刷新即丢——报告残留风险 §R1）；定时器、storage、时钟全部注入
+// （#23 D1：now 注入 Date.now，协调器用它记绝对截止时间）。
 const outdatedReload = useOutdatedReload({
   hub: props.hub,
   storage: browserLocalStorage(),
   setTimeout: (fn, ms) => window.setTimeout(fn, ms),
   clearTimeout: (h) => window.clearTimeout(h as number),
+  now: () => Date.now(),
 });
 provide(OUTDATED_RELOAD_CTX, outdatedReload);
 onUnmounted(() => outdatedReload.dispose());
@@ -366,6 +369,8 @@ function onLoadOlder(agentKey: string): void {
       <div v-else-if="selectedRemoved" class="detail">
         <EmptyState icon="inbox" :title="t('detail.removedTitle')" :body="t('detail.removedBody')">
           <template #actions>
+            <!-- #23 P-A（D9）：旧 key 的重新加载结果行（entry 按 key 保留，不随卡片消失） -->
+            <OutdatedReloadResult :agent-key="selectedKey ?? ''" />
             <a class="btn" href="#/">{{ t("common.backToAgents") }}</a>
           </template>
         </EmptyState>
@@ -376,6 +381,8 @@ function onLoadOlder(agentKey: string): void {
       <div v-else-if="route.name === 'agent'" class="detail">
         <EmptyState icon="inbox" :title="t('detail.notConnectedTitle')" :body="t('detail.notConnectedBody')">
           <template #actions>
+            <!-- #23 P-A（D9）：同上——「未连接」（无 removed 旗标，如快照换代）也保留结果 -->
+            <OutdatedReloadResult :agent-key="selectedKey ?? ''" />
             <a class="btn" href="#/">{{ t("common.backToAgents") }}</a>
           </template>
         </EmptyState>
@@ -418,6 +425,8 @@ function onLoadOlder(agentKey: string): void {
       <div v-else-if="selectedRemoved" class="detail">
         <EmptyState icon="inbox" :title="t('detail.removedTitle')" :body="t('detail.removedBody')">
           <template #actions>
+            <!-- #23 P-A（D9）：窄屏分支同款结果行 -->
+            <OutdatedReloadResult :agent-key="selectedKey ?? ''" />
             <a class="btn" href="#/">{{ t("common.backToAgents") }}</a>
           </template>
         </EmptyState>
@@ -428,6 +437,8 @@ function onLoadOlder(agentKey: string): void {
       <div v-else class="detail">
         <EmptyState icon="inbox" :title="t('detail.notConnectedTitle')" :body="t('detail.notConnectedBody')">
           <template #actions>
+            <!-- #23 P-A（D9）：窄屏「未连接」分支同款结果行 -->
+            <OutdatedReloadResult :agent-key="selectedKey ?? ''" />
             <a class="btn" href="#/">{{ t("common.backToAgents") }}</a>
           </template>
         </EmptyState>

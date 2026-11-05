@@ -2,7 +2,8 @@
  * `outdated` i18n namespace（#65 outdated-reload，预览 outdated-reload-preview.html §1–§7）。
  * 散文文案在此；mono 版本号由组件拼接（`bannerPre` + pv + `bannerMid` + hv + `bannerSuffix`
  * 的语序在中英两种语言下都成立）。失败原因的人读文案优先用 wire message，本地合成失败
- * （离线/无控制面/超时）用 `errOffline`/`errUnsupported`/`errTimeout`/`errQueueTimeout`。
+ * （离线/无控制面/超时/结果未知）统一经 `orFailReason`（#23 D9）映射到
+ * `errOffline`/`errUnsupported`/`errTimeout`/`errQueueTimeout`/`errSendUnknown`。
  */
 export default {
   bannerPre: "This session's plugin version",
@@ -20,14 +21,20 @@ export default {
   retry: "Retry",
   close: "Close",
   donePre: "Reloaded to ",
-  errOffline: "the session process is gone — /reload cannot be delivered",
+  errOffline:
+    "the session is offline (its process exited or is restarting); the reload did not finish — if it restarted, check or retry on the new card",
   errUnsupported: "this session has no web control plane",
   errTimeout: "command delivered, but the reload did not take effect in time",
   errQueueTimeout: "timed out waiting for the session to go idle",
+  errSendUnknown:
+    "command outcome unknown (the network response never completed); if the reload did take effect, it turns successful once the version lands",
   chipNeedsUpdate: "Update",
   chipTitle: "Plugin older than hub — click to reload (/agent reload)",
   chipQueued: "Queued",
   chipQueuedTitle: "Reload queued — fires once the session goes idle; click to cancel",
+  chipFailed: "Update failed",
+  chipFailedTitle: "{reason} — click to retry",
+  resultPre: "Reload result: ",
   summaryPre: "",
   summaryMid: " sessions run a plugin version older than hub ",
   summarySuffix: ".",

@@ -14,9 +14,9 @@ import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { injectOutdatedReload } from "../../composables/useOutdatedReload.js";
+import { orFailReason, type OrEntry } from "@logic/outdatedReload.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import { homeFromAgents, toAgentCardView } from "./agentCardModel.js";
-import type { OrEntry } from "@logic/outdatedReload.js";
 
 const { t } = useI18n();
 const manager = injectOutdatedReload();
@@ -33,6 +33,12 @@ let toastTimer: number | undefined;
 
 function entryOf(key: string): OrEntry {
   return manager?.entryOf(key) ?? { phase: "idle" };
+}
+
+/** #23 D9：失败行人读原因（orFailReason 唯一来源：wire message 直出，本地码映射 i18n）。 */
+function failTextOf(key: string): string {
+  const r = orFailReason(entryOf(key));
+  return "key" in r ? t(r.key) : r.raw;
 }
 
 const running = computed(() =>
@@ -118,8 +124,8 @@ watch(running, (isRunning, wasRunning) => {
         <span v-else-if="entryOf(key).phase === 'sending'">{{ t("outdated.rowSending") }}</span>
         <span v-else-if="entryOf(key).phase === 'awaiting'">{{ t("outdated.rowAwaiting") }}</span>
         <span v-else-if="entryOf(key).phase === 'done'" class="or-ok">{{ t("outdated.rowDone") }}</span>
-        <span v-else-if="entryOf(key).phase === 'failed'" class="or-bad">
-          {{ t("outdated.rowFailedPre") }}<span class="mono">{{ entryOf(key).error }}</span>
+        <span v-else-if="entryOf(key).phase === 'failed'" class="or-bad" :title="entryOf(key).error">
+          {{ t("outdated.rowFailedPre") }}{{ failTextOf(key) }}
         </span>
         <span v-else class="or-wait">…</span>
       </li>

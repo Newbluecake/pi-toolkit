@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
-import { ref } from "vue";
+import { nextTick, ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
 import DashboardView from "../../../src/web-hub/ui/src/components/shell/DashboardView.vue";
@@ -442,5 +442,112 @@ describe("DashboardView.vue — sidebar collapse arbitration (blank-panel bug)",
     localStorage.setItem("webhub.agentList.collapsed", "1");
     const wrapper = mountDashboard({ name: "list" }, hubWithOneAgent());
     expect(wrapper.get(".layout").attributes("style") ?? "").not.toContain("--sidebar-w");
+  });
+});
+
+/**
+ * #23 P-A（plan §3 P-A 第 6 条，D9）：目标消失后的空态结果行。真实 DashboardView（内部
+ * 自建 useOutdatedReload 并 provide）——点击侧边栏「需更新」chip 送出 /agent reload，目标
+ * 在等待中消失（agent_removed ⇒ 「已删除」；快照换代 ⇒ 「未连接」），空态里除「返回列表」
+ * 外还要显示该 key 的重新加载结果行（entry 按 key 保留）。DOM 级断言，不看 entryOf()。
+ */
+function outdatedCardForReload(key: string): Record<string, unknown> {
+  return {
+    agentKey: key,
+    kind: "tui",
+    pid: 1,
+    cwd: "/tmp/p",
+    state: "live",
+    pluginVersion: "0.9.0",
+    outdated: true,
+    control: true,
+    commands: [],
+    prompts: [],
+  };
+}
+
+function hubWithOutdatedTarget(target: string): HubHandle & { control: unknown } {
+  const s = run([
+    { event: "hello", data: { clientId: "c1" } },
+    { event: "hub", data: { version: "0.10.6", caps: ["cmd.v1"] } },
+    { event: "agents", data: [outdatedCardForReload(target), card("other-agent")] },
+  ]);
+  const hub = {
+    state: ref(s as unknown as HubState),
+    dispatch: () => {},
+    control: {
+      runCommand: () => Promise.resolve({ ok: true }),
+    },
+  } as unknown as HubHandle & { control: unknown };
+  return hub;
+}
+
+/** 让 chip 点击后的 send promise 链走完（sending → awaiting）。 */
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 6; i++) await Promise.resolve();
+}
+
+async function pushFrame(hub: HubHandle, msg: Msg): Promise<void> {
+  (hub.state as { value: ReturnType<typeof initialState> }).value = reduce(
+    (hub.state as { value: ReturnType<typeof initialState> }).value,
+    msg,
+  );
+  await flushMicrotasks();
+  await nextTick();
+  await nextTick();
+}
+
+describe("DashboardView.vue — outdated-reload result line in vanished-agent empty states (#23 D9)", () => {
+  it.each([
+    ["wide removed", false, "removed"],
+    ["narrow removed", true, "removed"],
+  ] as const)(
+    "%s: reload in flight + agent_removed ⇒ 「已删除」空态显示结果行 + 返回列表",
+    async (_label, narrow, kind) => {
+      stubMatchMedia(narrow);
+      const hub = hubWithOutdatedTarget("gone-key");
+      const wrapper = mountDashboard({ name: "list" }, hub); // list 路由下两种带宽都能点到卡片 chip
+      await wrapper.get(".chip-outdated").trigger("click");
+      await flushMicrotasks();
+      await nextTick();
+      await pushFrame(hub, { event: "agent_removed", data: { agentKey: "gone-key" } });
+      await wrapper.setProps({ route: { name: "agent", key: "gone-key" } }); // 窄屏从 list 导入 detail；宽屏直接切路由
+      const empty = wrapper.get(".detail .empty");
+      expect(empty.find("h2").text()).toBe("Session removed from the list");
+      const result = empty.get(".or-result");
+      expect(result.attributes("data-or")).toBe("failed");
+      expect(result.attributes("role")).toBe("alert");
+      expect(result.text()).toContain("the session is offline"); // errOffline（orFailReason → i18n）
+      expect(empty.find('a[href="#/"]').exists()).toBe(true); // 「返回列表」仍在
+    },
+  );
+
+  it.each([
+    ["wide not-connected", false],
+    ["narrow not-connected", true],
+  ] as const)("%s: reload in flight + snapshot drops the target ⇒ 「未连接」空态显示结果行", async (_label, narrow) => {
+    stubMatchMedia(narrow);
+    const hub = hubWithOutdatedTarget("dropped-key");
+    const wrapper = mountDashboard({ name: "list" }, hub);
+    await wrapper.get(".chip-outdated").trigger("click");
+    await flushMicrotasks();
+    await nextTick();
+    // 快照换代（新 key 顶上，无 agent_removed ⇒ 无 removed 旗标 ⇒ 「未连接」）
+    await pushFrame(hub, {
+      event: "agents",
+      data: [{ ...card("other-agent"), pluginVersion: "0.10.6", outdated: false }],
+    });
+    await wrapper.setProps({ route: { name: "agent", key: "dropped-key" } });
+    const empty = wrapper.get(".detail .empty");
+    expect(empty.find("h2").text()).toBe("This session is not connected");
+    expect(empty.get(".or-result").text()).toContain("the session is offline");
+    expect(empty.find('a[href="#/"]').exists()).toBe(true);
+  });
+
+  it("无结果 entry 的空态不渲染结果行（回归：普通深链不受影响）", () => {
+    stubMatchMedia(false);
+    const wrapper = mountDashboard({ name: "agent", key: "does-not-exist" }, hubWithOneAgent());
+    expect(wrapper.get(".detail .empty h2").text()).toBe("This session is not connected");
+    expect(wrapper.find(".detail .empty .or-result").exists()).toBe(false);
   });
 });

@@ -2,6 +2,8 @@
  * #65 outdated-reload（预览 outdated-reload-preview.html §1–§6）— `@logic/outdatedReload.ts`
  * 的纯逻辑门：落后判定（证据等级与 version-match §4 一致）、snooze 记忆键、OrCoordinator
  * 排队/送达/超时状态机、仪表盘汇总列表与批量进度。协调器用注入的假定时器驱动，不碰 Vue。
+ * #23 P-A 新增：总预算（D1 绝对截止时间 + 反复忙闲跨过截止）、sending 上界（D2）、attempt
+ * token 的 ABA 乱序（D3）、下线判定（D4/D5）与 orFailReason（D9）。
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -10,8 +12,10 @@ import {
   isSnoozed,
   OR_EFFECT_TIMEOUT_MS,
   OR_QUEUE_TIMEOUT_MS,
+  OR_SEND_TIMEOUT_MS,
   OR_TOAST_MS,
   orBannerView,
+  orFailReason,
   outdatedSessions,
   readSnoozeMap,
   sessionOutdatedInfo,
@@ -23,6 +27,7 @@ import {
   type OrSendResult,
   type SnoozeStorage,
 } from "../../../src/web-hub/ui/src/logic/outdatedReload.js";
+import { CMD_REQUEST_TIMEOUT_MS } from "../../../src/web-hub/ui/src/logic/token-client.js";
 
 // ---------------------------------------------------------------------------
 // 落后判定 / 成功判据
@@ -109,8 +114,11 @@ interface FakeWorld {
   main: Set<string>;
   fleet: Map<string, number>;
   settled: Set<string>;
+  offline: Set<string>;
   precheck: Map<string, "ok" | "offline" | "unsupported">;
   sendResults: Map<string, OrSendResult>;
+  /** 可控 send：置顶时优先于 sendResults（永不 settle / 逐次 resolve/reject 都靠它）。 */
+  sendImpl?: (key: string) => Promise<OrSendResult>;
   sent: string[];
   cancels: string[];
 }
@@ -120,6 +128,7 @@ function makeWorld(): FakeWorld {
     main: new Set(),
     fleet: new Map(),
     settled: new Set(),
+    offline: new Set(),
     precheck: new Map(),
     sendResults: new Map(),
     sent: [],
@@ -135,8 +144,11 @@ function makeCoordinator(world: FakeWorld) {
     fleetActive: (k) => world.fleet.get(k) ?? 0,
     precheck: (k) => world.precheck.get(k) ?? "ok",
     isSettled: (k) => world.settled.has(k),
+    offline: (k) => world.offline.has(k),
+    now: () => 0, // 固定时钟：deadline 恒为 +30min，armTimer 拿到的 ms 即各常量原值
     send: (k) => {
       world.sent.push(k);
+      if (world.sendImpl !== undefined) return world.sendImpl(k);
       return Promise.resolve(world.sendResults.get(k) ?? { ok: true });
     },
     sendCancel: (k) => {
@@ -160,6 +172,63 @@ function makeCoordinator(world: FakeWorld) {
     }
   }
   return { coord, fire, timers };
+}
+
+/**
+ * #23 D1：带假时钟的协调器——`advance` 按到期顺序触发定时器并把时钟推到目标刻；
+ * `warp` 只推时钟不触发（模拟后台标签页计时器延迟）。 */
+function makeClockCoordinator(world: FakeWorld, startNow = 1_000_000) {
+  let now = startNow;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  let nextTimer = 1;
+  const coord = createOrCoordinator({
+    mainBusy: (k) => world.main.has(k),
+    fleetActive: (k) => world.fleet.get(k) ?? 0,
+    precheck: (k) => world.precheck.get(k) ?? "ok",
+    isSettled: (k) => world.settled.has(k),
+    offline: (k) => world.offline.has(k),
+    now: () => now,
+    send: (k) => {
+      world.sent.push(k);
+      if (world.sendImpl !== undefined) return world.sendImpl(k);
+      return Promise.resolve(world.sendResults.get(k) ?? { ok: true });
+    },
+    sendCancel: (k) => {
+      world.cancels.push(k);
+      return Promise.resolve(true);
+    },
+    setTimeout: (fn, ms) => {
+      const id = nextTimer++;
+      timers.set(id, { at: now + ms, fn });
+      return id;
+    },
+    clearTimeout: (h) => void timers.delete(h as number),
+  });
+  function advance(ms: number): void {
+    const target = now + ms;
+    for (;;) {
+      let bestId: number | undefined;
+      let bestAt = Number.POSITIVE_INFINITY;
+      for (const [id, t] of timers) {
+        if (t.at <= target && t.at < bestAt) {
+          bestAt = t.at;
+          bestId = id;
+        }
+      }
+      if (bestId === undefined) break;
+      const t = timers.get(bestId);
+      if (t === undefined) break;
+      timers.delete(bestId);
+      now = t.at;
+      t.fn();
+    }
+    now = target;
+  }
+  /** 只推时钟不触发定时器（后台标签页节流：timer 还挂着，now 已过成）。 */
+  function warp(ms: number): void {
+    now += ms;
+  }
+  return { coord, advance, warp, timers, nowOf: () => now };
 }
 
 /** 让 send 的 promise 链 settle（ coordinator 内部两个 then）。 */
@@ -372,6 +441,294 @@ describe("OrCoordinator", () => {
     w.settled.add("c");
     coord.notifyTick();
     for (const k of ["a", "busy1", "c"]) expect(coord.entryOf(k).phase).toBe("done");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #23 P-A：总预算（D1 绝对截止时间，假时钟）
+// ---------------------------------------------------------------------------
+
+describe("OrCoordinator 总预算（#23 D1）", () => {
+  it("fleet 反复忙闲（每段不足 90s）永不永久等待；30min 时处于 awaiting ⇒ E_TIMEOUT", async () => {
+    const w = makeWorld();
+    const { coord, advance } = makeClockCoordinator(w);
+    w.fleet.set("a", 1);
+    coord.request("a");
+    expect(coord.entryOf("a").phase).toBe("queued");
+    // 14 轮「awaiting 60s → parked 60s」：每段 < 90s，永不提前 E_TIMEOUT
+    for (let i = 0; i < 14; i++) {
+      w.fleet.set("a", 0);
+      coord.notifyTick(); // queued → sending →（microtask）awaiting
+      await flush();
+      expect(coord.entryOf("a").phase).toBe("awaiting");
+      advance(60_000);
+      expect(coord.entryOf("a").phase).toBe("awaiting"); // 60s < 90s
+      w.fleet.set("a", 1);
+      coord.notifyTick(); // awaiting → parked
+      expect(coord.entryOf("a").phase).toBe("parked");
+      advance(60_000);
+      expect(coord.entryOf("a").phase).toBe("parked");
+    }
+    // 28min 已过；最后一次 fleet 清空 ⇒ 回 awaiting（effect 计时被剩余预算 2min 收紧）
+    w.fleet.set("a", 0);
+    coord.notifyTick();
+    expect(coord.entryOf("a").phase).toBe("awaiting");
+    advance(2 * 60_000); // 到 30min 总预算
+    expect(coord.entryOf("a")).toMatchObject({ phase: "failed", error: "E_TIMEOUT" });
+    expect(w.cancels).toEqual([]); // awaiting 超预算不发 cancel（未 park）
+  });
+
+  it("跨过截止后才进入 parked ⇒ 立即 E_QUEUE_TIMEOUT 并先 sendCancel（计时器延迟兑底）", async () => {
+    const w = makeWorld();
+    const { coord, warp } = makeClockCoordinator(w);
+    coord.request("a");
+    w.fleet.set("a", 1); // send settle 前变忙 ⇒ parked
+    await flush();
+    expect(coord.entryOf("a").phase).toBe("parked");
+    warp(OR_QUEUE_TIMEOUT_MS + 5_000); // 后台标签页：timer 还挂着，now 已过成
+    w.fleet.set("a", 0);
+    coord.notifyTick(); // parked →（enterAwaiting 入口截止检查）按当前相结算
+    expect(coord.entryOf("a")).toMatchObject({ phase: "failed", error: "E_QUEUE_TIMEOUT" });
+    expect(w.cancels).toEqual(["a"]);
+  });
+
+  it("计时器延迟：now 已过截止但 timer 未触发，进入 parked 前也结算（awaiting ⇒ E_TIMEOUT）", async () => {
+    const w = makeWorld();
+    const { coord, warp } = makeClockCoordinator(w);
+    coord.request("a");
+    await flush();
+    expect(coord.entryOf("a").phase).toBe("awaiting");
+    warp(OR_QUEUE_TIMEOUT_MS + 1_000);
+    w.fleet.set("a", 1);
+    coord.notifyTick(); // awaiting →（enterParked 入口截止检查）按当前相 awaiting 结算
+    expect(coord.entryOf("a")).toMatchObject({ phase: "failed", error: "E_TIMEOUT" });
+  });
+
+  it("计时器延迟：now 已过截止，queued 放行送帧前结算（queued ⇒ E_QUEUE_TIMEOUT，不发 cancel）", () => {
+    const w = makeWorld();
+    const { coord, warp } = makeClockCoordinator(w);
+    w.fleet.set("a", 1);
+    coord.request("a");
+    expect(coord.entryOf("a").phase).toBe("queued");
+    warp(OR_QUEUE_TIMEOUT_MS + 1);
+    w.fleet.set("a", 0);
+    coord.notifyTick(); // toSend → send() 入口截止检查
+    expect(coord.entryOf("a")).toMatchObject({ phase: "failed", error: "E_QUEUE_TIMEOUT" });
+    expect(w.sent).toEqual([]);
+    expect(w.cancels).toEqual([]);
+  });
+
+  it("计时器延迟：send 迟到 settle 且已过截止 ⇒ 进入 awaiting 前按当前相（sending）结算 E_SEND_UNKNOWN", async () => {
+    const w = makeWorld();
+    const deferreds: Array<(r: OrSendResult) => void> = [];
+    w.sendImpl = () =>
+      new Promise<OrSendResult>((resolve) => {
+        deferreds.push(resolve);
+      });
+    const { coord, warp } = makeClockCoordinator(w);
+    coord.request("a");
+    expect(coord.entryOf("a").phase).toBe("sending");
+    warp(OR_QUEUE_TIMEOUT_MS + 1); // 后台标签页：timer 还挂着，now 已过成
+    deferreds[0]!({ ok: true }); // 迟到成功：enterAwaiting 入口截止检查，按 sending 相结算
+    await flush();
+    expect(coord.entryOf("a")).toMatchObject({ phase: "failed", error: "E_SEND_UNKNOWN" });
+    expect(w.cancels).toEqual([]); // 未 park，不发 cancel
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #23 P-A：sending 上界（D2）
+// ---------------------------------------------------------------------------
+
+describe("OrCoordinator sending 上界（#23 D2）", () => {
+  it(`OR_SEND_TIMEOUT_MS > 2×CMD_REQUEST_TIMEOUT_MS（${OR_SEND_TIMEOUT_MS}ms vs 2×${CMD_REQUEST_TIMEOUT_MS}ms，relogin 余量）`, () => {
+    expect(OR_SEND_TIMEOUT_MS).toBeGreaterThan(2 * CMD_REQUEST_TIMEOUT_MS);
+  });
+
+  it("send 永不 settle ⇒ 60s 后 E_SEND_UNKNOWN；不自动重发；之后版本到位仍收敛 done", async () => {
+    const w = makeWorld();
+    w.sendImpl = () => new Promise<OrSendResult>(() => {}); // body 永不结束（#25 场景）
+    const { coord, fire } = makeCoordinator(w);
+    coord.request("a");
+    expect(coord.entryOf("a").phase).toBe("sending");
+    fire(OR_SEND_TIMEOUT_MS);
+    expect(coord.entryOf("a")).toMatchObject({ phase: "failed", error: "E_SEND_UNKNOWN" });
+    expect(w.sent).toEqual(["a"]); // 只送过一次，不自动重发（D7）
+    // 命令其实已送达：版本到位 ⇒ failed 收敛 done（D6）
+    w.settled.add("a");
+    coord.notifyTick();
+    expect(coord.entryOf("a").phase).toBe("done");
+    fire(OR_TOAST_MS);
+    expect(coord.entryOf("a").phase).toBe("idle");
+  });
+
+  it("sending 剩余预算更小则收紧 send 上界（min 生效，不超总预算）", async () => {
+    const w = makeWorld();
+    const { coord, advance } = makeClockCoordinator(w);
+    // 重试场景：先让一个请求在截止前 10s 重新送帧
+    w.sendImpl = () => new Promise<OrSendResult>(() => {});
+    w.fleet.set("a", 1);
+    coord.request("a"); // queued
+    advance(OR_QUEUE_TIMEOUT_MS - 10_000); // 还剩 10s
+    w.fleet.set("a", 0);
+    coord.notifyTick(); // queued → send：send 上界 = min(60s, 10s) = 10s
+    expect(coord.entryOf("a").phase).toBe("sending");
+    advance(10_000); // 到总预算，不是 60s
+    expect(coord.entryOf("a")).toMatchObject({ phase: "failed", error: "E_SEND_UNKNOWN" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #23 P-A：attempt token（D3，ABA 乱序）
+// ---------------------------------------------------------------------------
+
+describe("OrCoordinator attempt token（#23 D3）", () => {
+  type Deferred = { resolve: (r: OrSendResult) => void; reject: (e: unknown) => void };
+
+  function deferredSend(world: FakeWorld): Deferred[] {
+    const deferreds: Deferred[] = [];
+    world.sendImpl = () =>
+      new Promise<OrSendResult>((resolve, reject) => {
+        deferreds.push({ resolve, reject });
+      });
+    return deferreds;
+  }
+
+  it("attempt1 因下线失败后重试进 attempt2：attempt1 迟到 resolve 不影响 attempt2；attempt2 resolve ⇒ awaiting", async () => {
+    const w = makeWorld();
+    const deferreds = deferredSend(w);
+    const { coord } = makeCoordinator(w);
+    // attempt1：sending 中目标下线 ⇒ E_OFFLINE
+    coord.request("a");
+    expect(coord.entryOf("a").phase).toBe("sending");
+    w.offline.add("a");
+    coord.notifyTick();
+    expect(coord.entryOf("a")).toMatchObject({ phase: "failed", error: "E_OFFLINE" });
+    // key 恢复但版本仍旧 ⇒ 重试（attempt2）
+    w.offline.delete("a");
+    coord.request("a");
+    expect(coord.entryOf("a").phase).toBe("sending");
+    expect(w.sent).toEqual(["a", "a"]);
+    // attempt1 迟到 resolve ok：token 已失效，不得把 attempt2 顶进 awaiting/parked
+    deferreds[0]!.resolve({ ok: true });
+    await flush();
+    expect(coord.entryOf("a").phase).toBe("sending");
+    // attempt2 正常 settle ⇒ awaiting
+    deferreds[1]!.resolve({ ok: true });
+    await flush();
+    expect(coord.entryOf("a").phase).toBe("awaiting");
+  });
+
+  it("attempt1 迟到 reject 同样被 token 挡掉（不得把 attempt2 改成 failed）", async () => {
+    const w = makeWorld();
+    const deferreds = deferredSend(w);
+    const { coord } = makeCoordinator(w);
+    coord.request("a");
+    w.offline.add("a");
+    coord.notifyTick();
+    w.offline.delete("a");
+    coord.request("a"); // attempt2
+    deferreds[0]!.reject(new Error("late"));
+    await flush();
+    expect(coord.entryOf("a").phase).toBe("sending"); // 未被旧 attempt 破坏
+    deferreds[1]!.resolve({ ok: true });
+    await flush();
+    expect(coord.entryOf("a").phase).toBe("awaiting");
+  });
+
+  it("reset/cancelQueue 清场也使 token 失效：迟到的 resolve 不复活任何相", async () => {
+    const w = makeWorld();
+    const deferreds = deferredSend(w);
+    const { coord } = makeCoordinator(w);
+    coord.request("a");
+    coord.reset("a"); // 清场（token 失效）
+    deferreds[0]!.resolve({ ok: true });
+    await flush();
+    expect(coord.entryOf("a").phase).toBe("idle");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #23 P-A：下线判定（D4/D5）
+// ---------------------------------------------------------------------------
+
+describe("OrCoordinator 下线判定（#23 D4/D5）", () => {
+  it("四个在飞阶段遇到 offline 都进 E_OFFLINE，计时器全部清空；failed 不重复处理", async () => {
+    const w = makeWorld();
+    const { coord, timers } = makeCoordinator(w);
+    // queued
+    w.fleet.set("q", 1);
+    coord.request("q");
+    expect(coord.entryOf("q").phase).toBe("queued");
+    // sending（永不 settle，保持住相）
+    w.sendImpl = () => new Promise<OrSendResult>(() => {});
+    coord.request("s");
+    // awaiting
+    w.sendImpl = undefined;
+    coord.request("aw");
+    await flush();
+    expect(coord.entryOf("aw").phase).toBe("awaiting");
+    // parked（送帧时闲，settle 前变忙）
+    coord.request("p");
+    w.fleet.set("p", 1);
+    await flush();
+    expect(coord.entryOf("p").phase).toBe("parked");
+    // 全部下线
+    for (const k of ["q", "s", "aw", "p"]) w.offline.add(k);
+    coord.notifyTick();
+    for (const k of ["q", "s", "aw", "p"])
+      expect(coord.entryOf(k)).toMatchObject({ phase: "failed", error: "E_OFFLINE" });
+    expect(timers.size).toBe(0); // 计时器全部清空
+    expect(w.cancels).toEqual([]); // parked 下线不发 reload cancel（D5）
+    // 再 tick：failed 相不重复处理，也不自动重发
+    coord.notifyTick();
+    expect(w.sent).toEqual(["s", "aw", "p"]);
+    for (const k of ["q", "s", "aw", "p"])
+      expect(coord.entryOf(k)).toMatchObject({ phase: "failed", error: "E_OFFLINE" });
+  });
+
+  it("settled 与 offline 同时为真 ⇒ 先判版本到位（done）", async () => {
+    const w = makeWorld();
+    const { coord } = makeCoordinator(w);
+    coord.request("a");
+    await flush();
+    expect(coord.entryOf("a").phase).toBe("awaiting");
+    w.settled.add("a");
+    w.offline.add("a"); // 下线与到位同时
+    coord.notifyTick();
+    expect(coord.entryOf("a").phase).toBe("done");
+  });
+
+  it("queued 遇 offline（precheck 同源判据）⇒ E_OFFLINE 而非无限排队", () => {
+    const w = makeWorld();
+    const { coord } = makeCoordinator(w);
+    w.fleet.set("a", 1);
+    coord.request("a");
+    w.offline.add("a");
+    coord.notifyTick();
+    expect(coord.entryOf("a")).toMatchObject({ phase: "failed", error: "E_OFFLINE" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// orFailReason（#23 D9 唯一文案来源）
+// ---------------------------------------------------------------------------
+
+describe("orFailReason（#23 D9）", () => {
+  it("wire message 优先直出 raw", () => {
+    expect(orFailReason({ phase: "failed", error: "E_AGENT_GONE", message: "agent not connected" })).toEqual({
+      raw: "agent not connected",
+    });
+  });
+
+  it("本地错误码映射 i18n key；未知/缺失错误码退 raw 错误码/空串", () => {
+    expect(orFailReason({ phase: "failed", error: "E_OFFLINE" })).toEqual({ key: "outdated.errOffline" });
+    expect(orFailReason({ phase: "failed", error: "E_UNSUPPORTED" })).toEqual({ key: "outdated.errUnsupported" });
+    expect(orFailReason({ phase: "failed", error: "E_TIMEOUT" })).toEqual({ key: "outdated.errTimeout" });
+    expect(orFailReason({ phase: "failed", error: "E_QUEUE_TIMEOUT" })).toEqual({ key: "outdated.errQueueTimeout" });
+    expect(orFailReason({ phase: "failed", error: "E_SEND_UNKNOWN" })).toEqual({ key: "outdated.errSendUnknown" });
+    expect(orFailReason({ phase: "failed", error: "E_AGENT_GONE" })).toEqual({ raw: "E_AGENT_GONE" });
+    expect(orFailReason({ phase: "idle" })).toEqual({ raw: "" });
   });
 });
 

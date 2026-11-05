@@ -17,7 +17,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
-import { orBannerView } from "@logic/outdatedReload.js";
+import { orBannerView, orFailReason } from "@logic/outdatedReload.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { injectOutdatedReload } from "../../composables/useOutdatedReload.js";
 
@@ -46,22 +46,11 @@ const spinning = computed(() => view.value.spinning);
 const mainBusy = computed(() => manager?.mainBusyOf(props.agentKey) ?? false);
 const fleetN = computed(() => manager?.fleetActiveOf(props.agentKey) ?? 0);
 
-/** 本地合成失败的人读原因（wire 失败直接用其 message；本地 precheck/超时的在这里）。 */
+/** #23 D9：人读原因统一经 orFailReason（wire message 直出；本地码映射 i18n）——
+ * 与 chip、汇总失败行、空态结果行同一来源。 */
 const failReason = computed(() => {
-  const e = entry.value;
-  if (e.message !== undefined) return e.message;
-  switch (e.error) {
-    case "E_OFFLINE":
-      return t("outdated.errOffline");
-    case "E_UNSUPPORTED":
-      return t("outdated.errUnsupported");
-    case "E_TIMEOUT":
-      return t("outdated.errTimeout");
-    case "E_QUEUE_TIMEOUT":
-      return t("outdated.errQueueTimeout");
-    default:
-      return e.error ?? "";
-  }
+  const r = orFailReason(entry.value);
+  return "key" in r ? t(r.key) : r.raw;
 });
 
 function onReload(): void {

@@ -27,6 +27,7 @@ import { scheduleBadgeOf, scheduleBadgeText } from "../../logic/schedule.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import { PRIVACY_LOCK_CTX } from "../privacy/privacyContext.js";
 import { injectOutdatedReload } from "../../composables/useOutdatedReload.js";
+import { orFailReason } from "@logic/outdatedReload.js";
 
 const props = defineProps<AgentCardProps>();
 const i18n = useI18n();
@@ -89,6 +90,34 @@ const orBusy = computed(() => {
   const p = orPhase.value;
   return p === "queued" || p === "sending" || p === "awaiting" || p === "parked";
 });
+// #23 P-A（D9）：failed 相的 chip 失败态——danger 配色、alert 图标、chipFailed 文案；
+// title/aria-label 为「{reason} — 点击重试」，点击行为不变（仍 request）。原因统一经
+// orFailReason（与横幅/汇总行/空态结果行同一来源）。
+const orFailed = computed(() => orPhase.value === "failed");
+const orFailText = computed(() => {
+  if (!orFailed.value || outdatedReload === undefined) return "";
+  const r = orFailReason(outdatedReload.entryOf(props.card.key));
+  return "key" in r ? t(r.key) : r.raw;
+});
+const orChipText = computed(() =>
+  orBusy.value ? t("outdated.chipQueued") : orFailed.value ? t("outdated.chipFailed") : t("outdated.chipNeedsUpdate"),
+);
+const orChipTitle = computed(() =>
+  orBusy.value
+    ? t("outdated.chipQueuedTitle")
+    : orFailed.value
+      ? t("outdated.chipFailedTitle", { reason: orFailText.value })
+      : t("outdated.chipTitle"),
+);
+/** #23 D9：失败态 danger 配色。SFC 内联 style 块被 source-scan 禁止、
+ * styles/outdated-reload.css 不在 #23 P-A 文件域——对象式 `:style`（`{` 起头，白名单形状；
+ * CSSOM 写入不受 CSP `style-src 'self'` 限制，与 DashboardView 的 layoutStyle 同款），颜色引
+ * tokens 变量；P-C 收口时可迁回 CSS。 */
+const CHIP_FAILED_STYLE = {
+  borderColor: "var(--c-danger-border)",
+  background: "var(--c-danger-soft)",
+  color: "var(--c-danger)",
+} as const;
 function onOutdatedClick(): void {
   if (outdatedReload === undefined) return;
   const p = outdatedReload.entryOf(props.card.key).phase;
@@ -221,18 +250,24 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             <!-- #65 outdated-reload（预览 §5）+ 2026-10-27 chip 收敛：落后会话唯一的
                  outdated 表达——紧凑「需更新」chip（warning 配色），tooltip 带完整说明；
                  点击触发该会话 /agent reload（复用 OrCoordinator，运行中自动排队，
-                 排队中再点取消）。状态 pill 恢复真实状态，不再被 outdated 文案顶替。 -->
+                 排队中再点取消）。状态 pill 恢复真实状态，不再被 outdated 文案顶替。
+                 #23 D9：failed 相另 danger 配色 + alert 图标 + chipFailed 文案。 -->
             <button
               v-if="card.outdated"
               type="button"
               class="chip chip-outdated"
+              :class="{ 'chip-outdated-failed': orFailed }"
+              :style="orFailed ? CHIP_FAILED_STYLE : undefined"
               data-compact="outdated"
-              :title="orBusy ? t('outdated.chipQueuedTitle') : t('outdated.chipTitle')"
+              :title="orChipTitle"
+              :aria-label="orFailed ? orChipTitle : undefined"
               @click.prevent.stop="onOutdatedClick"
             >
-              <AppIcon :name="orBusy ? 'loader' : 'info'" class="icon-sm" :class="{ spin: orBusy }" />{{
-                orBusy ? t("outdated.chipQueued") : t("outdated.chipNeedsUpdate")
-              }}
+              <AppIcon
+                :name="orBusy ? 'loader' : orFailed ? 'alert' : 'info'"
+                class="icon-sm"
+                :class="{ spin: orBusy }"
+              />{{ orChipText }}
             </button>
             <span
               v-if="card.runningSubCount > 0"
@@ -299,17 +334,23 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             <span ref="chipsEl" class="agent-chips">
               <span class="chip" translate="no">{{ kindLabel }}</span>
               <!-- #65 outdated-reload（预览 §5）+ 2026-10-27 chip 收敛：「需更新」chip
-                   （warning 配色），状态类位置；点击触发单会话 /agent reload。 -->
+                   （warning 配色），状态类位置；点击触发单会话 /agent reload。
+                   #23 D9：failed 相另 danger 配色 + alert 图标 + chipFailed 文案。 -->
               <button
                 v-if="card.outdated"
                 type="button"
                 class="chip chip-outdated"
-                :title="orBusy ? t('outdated.chipQueuedTitle') : t('outdated.chipTitle')"
+                :class="{ 'chip-outdated-failed': orFailed }"
+                :style="orFailed ? CHIP_FAILED_STYLE : undefined"
+                :title="orChipTitle"
+                :aria-label="orFailed ? orChipTitle : undefined"
                 @click.prevent.stop="onOutdatedClick"
               >
-                <AppIcon :name="orBusy ? 'loader' : 'info'" class="icon-sm" :class="{ spin: orBusy }" />{{
-                  orBusy ? t("outdated.chipQueued") : t("outdated.chipNeedsUpdate")
-                }}
+                <AppIcon
+                  :name="orBusy ? 'loader' : orFailed ? 'alert' : 'info'"
+                  class="icon-sm"
+                  :class="{ spin: orBusy }"
+                />{{ orChipText }}
               </button>
               <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
                 {{ t("agents.stopped") }}
