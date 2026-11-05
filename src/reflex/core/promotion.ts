@@ -193,3 +193,290 @@ export function evaluatePromotion(s: ScriptStats): PromotionVerdict {
   if (s.corrected > g.maxCorrected) reasons.push(`存在纠正（${s.corrected}）`);
   return { eligible: reasons.length === 0, reasons };
 }
+
+// #25 B5: append-only V2 API. The R1/R3b exports above remain frozen.
+import { identityKey, resolveIdentity, type IdentityRow } from "./identity.js";
+import { portOfScript } from "./port-defaults.js";
+import { createRowDeduper } from "./shadow-dedupe.js";
+import type {
+  BatchValidity,
+  CorpusManifestV1,
+  EvalBatchV1,
+  EvidenceIdentity,
+  ExposureRecordV1,
+  MergedEvidence,
+  PortId,
+  PortReliability,
+  PromotionVerdictV2,
+  RevisionRecordV1,
+  RScriptV1,
+  StatsV2,
+  Turn,
+} from "./types.js";
+
+export const PROMOTION_GATE_V2 = Object.freeze({
+  minIntentSamples: 50,
+  maxDivergeRate: 0.05,
+  minPortRuns: 10,
+});
+
+/** Optional transcript envelope; AUTO answers require `at` to establish repeat evidence. */
+export type LiveEvidenceRow = PromotionRow & { entryId?: string; session?: string; at?: number };
+
+function identityRowV2(row: PromotionRow): IdentityRow {
+  if (row.kind === "correction")
+    return {
+      scriptId: row.c.targetScriptId,
+      scriptVer: row.c.targetScriptVer,
+      ...(row.c.targetTemplateHash !== undefined ? { templateHash: row.c.targetTemplateHash } : {}),
+    };
+  if (row.kind === "answer") return row.details;
+  return {
+    scriptId: row.rec.scriptId,
+    scriptVer: row.rec.scriptVer,
+    ...(row.rec.templateHash !== undefined ? { templateHash: row.rec.templateHash } : {}),
+    ...(row.rec.port?.portId !== undefined ? { portId: row.rec.port.portId } : {}),
+    ...(row.rec.port !== undefined ? { portVer: row.rec.port.portVer } : {}),
+  };
+}
+
+/** Fold identity-level intent and zero-tolerance evidence; unknown agreement never counts. */
+export function accumulateV2(
+  rows: readonly PromotionRow[],
+  resolve: (row: IdentityRow) => EvidenceIdentity | undefined,
+): Map<string, StatsV2> {
+  const stats = new Map<string, StatsV2>();
+  for (const row of rows) {
+    if (row.kind === "record" && row.rec.kind === "ambiguous") continue;
+    const identity = resolve(identityRowV2(row));
+    if (identity === undefined) continue;
+    const key = identityKey(identity);
+    const s = stats.get(key) ?? { identity, judged: 0, diverge: 0, reasked: 0, corrected: 0 };
+    // Identity excludes port version, but keep the latest observed version for audit output.
+    if (identity.portVer > s.identity.portVer) s.identity = identity;
+    stats.set(key, s);
+    if (row.kind === "correction") s.corrected++;
+    else if (row.kind === "record") {
+      const r = row.rec;
+      if (r.model !== undefined && r.model.agree !== "unknown") {
+        s.judged++;
+        if (r.model.agree === "diverge") s.diverge++;
+      }
+      if (r.reasked === true || (r.kind === "repeat" && r.state === "auto")) s.reasked++;
+    }
+  }
+  return stats;
+}
+
+/** Recover a draft's port from other rows of the same recorded template, even if its file
+ * was removed. Conflicting hints stay unresolved instead of guessing a port. */
+function recordedPortsV2(rows: readonly PromotionRow[]): (r: IdentityRow) => PortId | undefined {
+  const hints = new Map<string, PortId | null>();
+  const key = (r: IdentityRow): string => `${r.scriptId}@${r.scriptVer}#${r.templateHash ?? ""}`;
+  for (const row of rows) {
+    const r = identityRowV2(row);
+    if (r.portId === undefined) continue;
+    const k = key(r);
+    if (!hints.has(k)) hints.set(k, r.portId);
+    else if (hints.get(k) !== r.portId) hints.set(k, null);
+  }
+  return (r) => hints.get(key(r)) ?? undefined;
+}
+
+/** Version 0 is UNKNOWN, never a success pool. Missing results taint every observed version
+ * of that port; callers also check the @0 bucket when the target version has no observations. */
+export function portReliabilityV2(rows: readonly PromotionRow[]): Map<`${PortId}@${number}`, PortReliability> {
+  const recorded = recordedPortsV2(rows);
+  return foldPortsV2(rows, (r) => r.portId ?? portOfScript(r.scriptId) ?? recorded(r));
+}
+
+function foldPortsV2(
+  rows: readonly PromotionRow[],
+  resolvePort: (r: IdentityRow) => PortId | undefined,
+): Map<`${PortId}@${number}`, PortReliability> {
+  const ports = new Map<`${PortId}@${number}`, PortReliability>();
+  const get = (portId: PortId, portVer: number): PortReliability => {
+    const key = `${portId}@${portVer}` as const;
+    let p = ports.get(key);
+    if (p === undefined) {
+      p = { portId, portVer, runs: 0, ok: 0, missing: 0, unavailable: 0 };
+      ports.set(key, p);
+    }
+    return p;
+  };
+  for (const row of rows) {
+    if (row.kind === "correction") continue;
+    if (row.kind === "answer") {
+      const p = get(row.details.portId, row.details.portVer);
+      p.runs++;
+      p.ok++;
+      continue;
+    }
+    const r = row.rec;
+    // A repeat did not execute a port; ambiguous candidates have no selected port.
+    if (r.kind !== "shadow" && r.kind !== "fallback") continue;
+    const portId = resolvePort(identityRowV2(row));
+    if (portId === undefined) continue;
+    const p = get(portId, r.port?.portVer ?? 0);
+    if (r.port === undefined) p.missing++;
+    else if (r.port.outcome === "unavailable") p.unavailable++;
+    else {
+      p.runs++;
+      if (r.port.outcome === "ok") p.ok++;
+    }
+  }
+  for (const p of ports.values()) if (p.portVer !== 0) p.missing += ports.get(`${p.portId}@0`)?.missing ?? 0;
+  return ports;
+}
+
+export function batchValidity(
+  batch: EvalBatchV1,
+  identity: EvidenceIdentity,
+  exposures: readonly ExposureRecordV1[],
+  manifests: readonly CorpusManifestV1[],
+): BatchValidity {
+  if (!manifests.some((m) => m.manifestHash === batch.manifestHash)) return { ok: false, reason: "manifest-missing" };
+  if (
+    exposures.some(
+      (e) => e.batchId === batch.batchId && e.lineage === identity.lineage && e.templateHash !== identity.templateHash,
+    )
+  )
+    return { ok: false, reason: "exposed-then-modified" };
+  return { ok: true };
+}
+
+/** First-seen for a hash cannot be overwritten by later appended copies; git evidence can
+ * only tighten the cutoff. Revision records are unverified, not human authentication. */
+export function lastRevisedAt(lineage: string, revisions: readonly RevisionRecordV1[]): number {
+  const first = new Map<string, number>();
+  let latest = 0;
+  for (const r of revisions) {
+    if (r.lineage !== lineage) continue;
+    if (!first.has(r.templateHash)) first.set(r.templateHash, r.firstSeenAt);
+    latest = Math.max(latest, first.get(r.templateHash)!, r.gitCommitAt ?? 0);
+  }
+  return latest;
+}
+
+export function admitBatch(
+  candidate: readonly Pick<Turn, "at" | "digest">[],
+  lineage: string,
+  revisions: readonly RevisionRecordV1[],
+  batches: readonly EvalBatchV1[],
+  exposures: readonly ExposureRecordV1[],
+): { ok: boolean; reason?: "before-revision" | "reused-exposed-turns"; cutoffAt: number } {
+  const cutoffAt = lastRevisedAt(lineage, revisions);
+  if (candidate.some((t) => t.at <= cutoffAt)) return { ok: false, reason: "before-revision", cutoffAt };
+  const exposed = new Set(exposures.map((e) => e.batchId));
+  const digests = new Set(batches.filter((b) => exposed.has(b.batchId)).flatMap((b) => [...b.turnDigests]));
+  if (candidate.some((t) => digests.has(t.digest))) return { ok: false, reason: "reused-exposed-turns", cutoffAt };
+  return { ok: true, cutoffAt };
+}
+
+/** Both offline CLIs use this ONE entry point. Dedup happens before any rate or repeat fold.
+ * Draft corrections can outlive the draft file: a promoted builtin's lineage supplies its port. */
+export function buildLiveEvidence(
+  rows: readonly LiveEvidenceRow[],
+  catalog: readonly RScriptV1[],
+  drafts: readonly RScriptV1[],
+): { stats: Map<string, StatsV2>; ports: Map<`${PortId}@${number}`, PortReliability> } {
+  const recorded = recordedPortsV2(rows);
+  const resolve = (r: IdentityRow): EvidenceIdentity | undefined => {
+    const renamed = [...catalog, ...drafts].find((s) => s.lineage === r.scriptId);
+    const portId = r.portId ?? renamed?.port.id ?? recorded(r);
+    return resolveIdentity({ ...r, ...(portId !== undefined ? { portId } : {}) }, catalog, drafts);
+  };
+  const dedupe = createRowDeduper();
+  const unique = rows.filter((r) => {
+    const i = identityRowV2(r);
+    const at = r.kind === "record" ? r.rec.at : r.kind === "correction" ? r.c.at : r.at;
+    if (at === undefined) return true; // Keep counts, but repeats remain undetermined below.
+    return dedupe({
+      ...(r.entryId !== undefined ? { entryId: r.entryId } : {}),
+      at,
+      digest:
+        r.kind === "correction"
+          ? r.c.correctionDigest
+          : r.kind === "record"
+            ? r.rec.requestDigest
+            : r.details.requestDigest,
+      scriptKey: `${i.scriptId}@${i.scriptVer}`,
+    });
+  });
+  const stats = accumulateV2(unique, resolve);
+  const occurrences: { session: string; at: number; key: string; digest: string }[] = [];
+  const unknown = new Set<string>();
+  for (const row of unique) {
+    if (row.kind === "correction" || (row.kind === "record" && row.rec.kind === "ambiguous")) continue;
+    const identity = resolve(identityRowV2(row));
+    if (identity === undefined) continue;
+    const key = identityKey(identity);
+    const at = row.kind === "record" ? row.rec.at : row.at;
+    if (row.session === undefined || at === undefined || !Number.isFinite(at)) {
+      unknown.add(key);
+      continue;
+    }
+    occurrences.push({
+      session: row.session,
+      at,
+      key,
+      digest: row.kind === "record" ? row.rec.requestDigest : row.details.requestDigest,
+    });
+  }
+  const repeats = countCrossSessionRepeats(occurrences);
+  for (const [key, s] of stats) if (!unknown.has(key) && repeats.has(key)) s.crossSessionRepeats = repeats.get(key)!;
+  const ports = foldPortsV2(unique, (r) => resolve(r)?.portId ?? portOfScript(r.scriptId));
+  return { stats, ports };
+}
+
+export function evaluateMergedPromotion(e: MergedEvidence): PromotionVerdictV2 {
+  const reasons: string[] = [];
+  let undetermined = false;
+  const g = PROMOTION_GATE_V2;
+  const same = (i: EvidenceIdentity): boolean => identityKey(i) === identityKey(e.identity);
+  const b = e.backtest;
+  const live = e.live;
+  const liveOK =
+    live !== undefined &&
+    same(live.identity) &&
+    live.judged >= g.minIntentSamples &&
+    live.diverge / live.judged <= g.maxDivergeRate;
+  const backOK =
+    b !== undefined &&
+    same(b.identity) &&
+    e.batchValid?.ok === true &&
+    b.confirmed.judged >= g.minIntentSamples &&
+    b.confirmed.diverge / b.confirmed.judged <= g.maxDivergeRate &&
+    b.reviewed === b.suspects &&
+    b.misfires === 0;
+  if (!liveOK && !backOK) reasons.push("intent-evidence-insufficient");
+  if (b !== undefined) {
+    if (!same(b.identity)) reasons.push("identity-mismatch");
+    if (b.reviewed !== b.suspects) reasons.push("review-incomplete");
+    if (b.misfires !== 0) reasons.push("misfire");
+    if (e.batchValid?.ok !== true) reasons.push(e.batchValid?.reason ?? "batch-invalid");
+  }
+  if (live !== undefined && !same(live.identity)) reasons.push("identity-mismatch");
+  if (!e.scanComplete) reasons.push("scan-incomplete");
+  const p = e.port;
+  if (p !== undefined && p.missing > 0) {
+    reasons.push("port-missing");
+    undetermined = true;
+  }
+  if (p === undefined || p.portId !== e.identity.portId || p.portVer !== e.identity.portVer || p.runs < g.minPortRuns)
+    reasons.push("port-runs-insufficient");
+  if (p !== undefined && p.ok !== p.runs) reasons.push("port-not-all-ok");
+  if ((live === undefined && b === undefined) || (live !== undefined && live.crossSessionRepeats === undefined)) {
+    reasons.push("cross-session-undetermined");
+    undetermined = true;
+  }
+  if ((live?.reasked ?? 0) + (b?.reasked ?? 0) > 0) reasons.push("reasked");
+  if ((live?.corrected ?? 0) + (b?.corrected ?? 0) > 0) reasons.push("corrected");
+  if ((live?.crossSessionRepeats ?? 0) + (b?.crossSessionRepeats ?? 0) > 0) reasons.push("cross-session-repeat");
+  return {
+    verdict: reasons.length === 0 ? "eligible" : undetermined ? "undetermined" : "not-eligible",
+    reasons,
+    identity: e.identity,
+    ...(b !== undefined ? { batchId: b.batchId, manifestHash: b.manifestHash } : {}),
+  };
+}
