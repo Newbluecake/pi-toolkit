@@ -37,6 +37,7 @@ import type { RootWakeController } from "./fabric/root-wake.js";
 import type { StackXs } from "./fabric/xs/stack.js";
 import type { QuotaStack } from "./quota/index.js";
 import type { Stack } from "./stack.js";
+import type { LoadActivation } from "./sysload/activation.js";
 import type { FleetWidgetController } from "./ui/fleet-widget.js";
 import type { BackgroundWorkflows } from "./workflow/background.js";
 
@@ -109,6 +110,10 @@ export interface TeardownParts {
   keepalive?: CacheKeepaliveService | undefined;
   /** quota-plan §4.1: `QuotaService.dispose` is the single idempotent owner. */
   quota?: QuotaStack | undefined;
+  /** #31: the sysload sampler (`createLoadActivation`, 5 s unref'd timer). Paths B/C4 reach it through the `Stack`
+   *  member; path A needs this slot — without it a same-module rebuild (`rebuild-handoff` or two builds in a row)
+   *  left the PREVIOUS build's sampler ticking behind the new stack. `dispose` is idempotent (guards on `disposed`). */
+  load?: LoadActivation | undefined;
   /** Background workflows: the defensive handoff — stop everything, report nothing (primary teardown is `shutdown`). */
   workflowRuns?: BackgroundWorkflows | undefined;
   /** workflow-worktree D13: spawn-service + runtime-adapter pair. */
@@ -174,6 +179,9 @@ const REBUILD_STEPS: readonly RebuildStep[] = [
   rebuildDispose("fabricMailbox", "fabricMailbox"),
   rebuildDispose("keepalive", "keepalive"),
   rebuildDispose("quota", "quota"),
+  // #31: same relative position as path C (keepalive → quota → … → load): stop the previous build's sysload sampler
+  // before the workflows handoff; idempotent after C already disposed it.
+  rebuildDispose("load", "load"),
   {
     id: "workflowRuns",
     run(parts) {

@@ -169,6 +169,11 @@ schedule at all). Rules that are easy to break:
   `parts` (`StackStep.run(stack, env, entry, parts)`).
   G8: `session_shutdown` ends by `delete holder.current` (identity-checked, in `finally`), so a late holder-routed call fails with
   `no active session yet` instead of being answered by the torn-down stack; `createTidyPort` degrades instead of throwing.
+  `load` (the sysload sampler, a 5 s unref'd timer) is on all three paths (B/C4 through the `Stack` member, A through
+  `parts.load`, right after keepalive/quota — the same relative position as C, idempotently after it). Before #31 path A
+  missed it, so a rebuild with no B/C before it (`Stack.dispose({kind:"rebuild-handoff"}`, or two builds in a row in the
+  same module) left the PREVIOUS build's sampler ticking behind the new stack — and its leaked real timer randomly
+  reddened the fake-timer tests of the matrix suite.
   **Still open:** G5/G6 only (missing from the unreachable path B — deliberately not fixed).
 
 ## Host human delegation in child sessions (#14 P2c)

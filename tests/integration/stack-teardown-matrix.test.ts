@@ -356,6 +356,9 @@ function pathA(g: string, profile: Profile = "full", o: { fabricAlreadyDisposed?
     ...(o.fabricAlreadyDisposed === true ? [] : [`${g}.fabric.wake.dispose`]),
     `${g}.keepalive.dispose`,
     `${g}.quota.dispose`,
+    // #31 FIXED: path A now idempotently disposes the sysload sampler too (same relative position as path C —
+    // after keepalive/quota); before, a rebuild with no B/C before it leaked the previous build's 5 s sampler.
+    `${g}.load.dispose`,
     `${g}.workflow.runs.abandon`,
     `${g}.worktreeLate.dispose`,
     `${g}.worktreeOrphansStartup.dispose`,
@@ -437,26 +440,30 @@ async function rebuildOnly(): Promise<string[]> {
   buildSessionStack(h.pi, ctx, settings, types, []);
   buildSessionStack(h.pi, ctx, settings, types, []);
   const log = [...probe.log];
-  // No activation owns these stacks, so release the surviving one by hand (its timers would leak into later tests).
-  const last = probe.stacks[probe.stacks.length - 1];
-  for (const part of [
-    last.xs,
-    last.backgroundCompletions,
-    last.fleetWidget,
-    last.bashJobs,
-    last.archive,
-    last.bashJobRecovery,
-    last.fabric,
-    last.keepalive,
-    last.quota,
-    last.dynamic,
-    last.load,
-    last.rpc,
-    last.worktreeLate,
-    last.external,
-  ])
-    (part?.dispose ?? part?.close)?.call(part);
-  last.workflow.runs.abandon();
+  // No activation owns these stacks, so release EVERY one by hand (its timers would leak into later tests) —
+  // #31 test hygiene: the old version cleaned only the LAST stack, so the FIRST build's sysload sampler (a real,
+  // unref'd 5 s timer — before the #31 fix path A did not dispose it) leaked into the fake-timer tests below and
+  // randomly reddened G10/baseline/G2/G3. Dispose is idempotent, so re-releasing what path A already tore down is a no-op.
+  for (const stack of probe.stacks) {
+    for (const part of [
+      stack.xs,
+      stack.backgroundCompletions,
+      stack.fleetWidget,
+      stack.bashJobs,
+      stack.archive,
+      stack.bashJobRecovery,
+      stack.fabric,
+      stack.keepalive,
+      stack.quota,
+      stack.dynamic,
+      stack.load,
+      stack.rpc,
+      stack.worktreeLate,
+      stack.external,
+    ])
+      (part?.dispose ?? part?.close)?.call(part);
+    stack.workflow.runs.abandon();
+  }
   return log;
 }
 
@@ -560,13 +567,13 @@ describe("teardown matrix: ordered calls per entry (FULL profile)", () => {
     ]);
   }, 60_000);
   it("path A alone (a rebuild with neither B nor C before it) also disposes the wake service through the mailbox", async () => {
-    expect(await rebuildOnly()).toEqual([
-      "build:g1:begin",
-      "build:g1:end",
-      "build:g2:begin",
-      ...pathA("g1", "full"),
-      "build:g2:end",
-    ]);
+    const log = await rebuildOnly();
+    // #31: the FIRST build's sysload sampler must be disposed by the second build's path A — its 5 s unref'd timer
+    // must not tick behind the new stack. (The extra `g1.load.dispose` later in probe.log is rebuildOnly's own
+    // manual cleanup of every stack; `log` was captured before it.)
+    expect(probe.stacks[0]?.load).toBeDefined(); // FULL arms the sampler
+    expect(log.filter((line) => line === "g1.load.dispose")).toHaveLength(1);
+    expect(log).toEqual(["build:g1:begin", "build:g1:end", "build:g2:begin", ...pathA("g1", "full"), "build:g2:end"]);
   }, 60_000);
 });
 

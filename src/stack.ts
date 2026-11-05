@@ -599,6 +599,9 @@ export function buildSessionStack(
   }
   const load = settings.load.enabled ? createLoadActivation({ settings: settings.load }) : undefined;
   load?.start({ mode: ctx.mode, ...(process.env.HOME === undefined ? {} : { home: process.env.HOME }), cwd: ctx.cwd });
+  // #31: publish at the creation site (incremental `parts` fill) — the NEXT build's path A must dispose this
+  // sampler; `runRebuildHandoff(previousParts)` above has already run, so this only affects the next handoff.
+  if (load) parts.load = load;
   const loadPort = load?.port();
   const loadListeners = new Set<() => void>();
   let lastLoadGating = loadPort?.verdict().gating ?? false;
