@@ -9,6 +9,7 @@ import type { Matcher } from "./core/match.js";
 import { accumulate, evaluatePromotion, msPercentiles, type PromotionRow, type ScriptStats } from "./core/promotion.js";
 import type {
   Capability,
+  DraftLoadResult,
   ReflexAnswerDetailsV1,
   ReflexCorrectionV1,
   ReflexRecordV1,
@@ -25,6 +26,18 @@ export interface ReflexCommandDeps {
   capabilities(): ReadonlySet<Capability>;
   /** Clears strikes + demote overlay (all scripts when `id` is undefined). Returns false for an unknown id. */
   reset(id?: string): boolean;
+  /**
+   * #25 runtime drafts. Absent or `enabled()===false` ⇒ every draft-related output below is skipped, so
+   * `/reflex status` stays byte-identical to the pre-drafts text (drafts-off parity).
+   */
+  drafts?: {
+    enabled(): boolean;
+    dir(): string;
+    /** `undefined` ⇒ not loaded yet (or the load was aborted and will be retried). */
+    result(): DraftLoadResult | undefined;
+    loading(): boolean;
+    counters(): { candidates: number; ambiguous: number; reasked: number; corrected: number };
+  };
 }
 
 const COUNTER_ORDER = ["candidates", "answered", "ambiguous", "repeat", "reasked", "corrected"] as const;
@@ -128,6 +141,19 @@ export function statusText(deps: ReflexCommandDeps, branch: readonly unknown[]):
     .sort()
     .map((k) => `${k}=${counters[k]}`);
   lines.push(`本激活计数：${counterParts.join(" ")} fallback=${fb.length === 0 ? "0" : fb.join(",")}`);
+  if (deps.drafts?.enabled() === true) {
+    const d = deps.drafts;
+    const res = d.result();
+    const c = d.counters();
+    const loadState = res === undefined ? (d.loading() ? "loading" : "not-loaded") : `loaded=${res.loaded.length}`;
+    const failed = res?.failure !== undefined ? ` failure=${res.failure.code}` : "";
+    lines.push(
+      `草案：enabled · ${loadState} rejected=${res?.rejected.length ?? 0}${failed} · candidates=${c.candidates} ambiguous=${c.ambiguous} reasked=${c.reasked} corrected=${c.corrected}（草案恒 shadow：draft.* 不可自动作答，详见 /reflex drafts）`,
+    );
+    if (auto.some((id) => id.startsWith("draft."))) {
+      lines.push("autoResolve 含 draft.* id：草案不参与自动作答，已忽略。");
+    }
+  }
 
   const { stats } = branchStats(branch);
   lines.push("本会话记录（getBranch）：");
@@ -146,6 +172,33 @@ export function statusText(deps: ReflexCommandDeps, branch: readonly unknown[]):
   if (snap.unknownAutoResolve.length > 0) {
     lines.push(`autoResolve 含未知 id（已忽略）：${snap.unknownAutoResolve.join(", ")}`);
   }
+  return lines.join("\n");
+}
+
+/** `/reflex drafts` text: loaded `<id>@<ver>#<templateHash8> port=<p>` + rejected `<file> <code>`. */
+export function draftsText(deps: ReflexCommandDeps): string {
+  const d = deps.drafts;
+  if (d === undefined || !d.enabled()) return "reflex drafts: disabled（reflex.drafts.enabled=false）";
+  const res = d.result();
+  const lines: string[] = [];
+  if (res === undefined) {
+    lines.push(
+      `reflex drafts: enabled · ${d.loading() ? "loading…" : "尚未加载（session_start 时加载一次）"} · dir=${d.dir()}`,
+    );
+    return lines.join("\n");
+  }
+  lines.push(
+    `reflex drafts: enabled · loaded ${res.loaded.length} · rejected ${res.rejected.length}${res.failure !== undefined ? ` · failure ${res.failure.code}${res.failure.detail !== undefined ? ` (${res.failure.detail})` : ""}` : ""} · dir=${d.dir()}`,
+  );
+  for (const l of res.loaded) {
+    lines.push(`  loaded ${l.script.id}@${l.script.version}#${l.templateHash.slice(0, 8)} port=${l.script.port.id}`);
+  }
+  for (const r of res.rejected) {
+    lines.push(`  rejected ${r.file} ${r.code}${r.detail !== undefined ? ` (${r.detail.slice(0, 80)})` : ""}`);
+  }
+  if (res.loaded.length === 0 && res.rejected.length === 0 && res.failure === undefined)
+    lines.push("  （目录为空或不存在）");
+  lines.push("草案恒 shadow；改动草案文件后需 /reload 才会重新加载。");
   return lines.join("\n");
 }
 
@@ -169,13 +222,21 @@ export function createReflexCommand(deps: ReflexCommandDeps): Omit<RegisteredCom
           out = statusText(deps, branch);
         } else if (sub === "explain") {
           out = explainText(deps, rest);
+        } else if (sub === "drafts") {
+          out = draftsText(deps);
         } else if (sub === "reset") {
           const id = rest === "" ? undefined : rest;
-          out = deps.reset(id)
-            ? `reflex: reset ${id ?? "all"}（strikes 与降级覆盖层已清）`
-            : `reflex: 未知脚本 id「${id}」`;
+          out =
+            id !== undefined && id.startsWith("draft.") && deps.drafts?.enabled() === true
+              ? `reflex: 草案「${id}」没有降级状态（draft.* 恒 shadow，无 strikes / 覆盖层可清）`
+              : deps.reset(id)
+                ? `reflex: reset ${id ?? "all"}（strikes 与降级覆盖层已清）`
+                : `reflex: 未知脚本 id「${id}」`;
         } else {
-          out = "用法：/reflex [status] | explain <文本> | reset [id]";
+          out =
+            deps.drafts?.enabled() === true
+              ? "用法：/reflex [status] | explain <文本> | reset [id] | drafts"
+              : "用法：/reflex [status] | explain <文本> | reset [id]";
         }
         ctx.ui.notify(out, "info");
       } catch {

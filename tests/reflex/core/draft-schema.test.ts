@@ -16,8 +16,7 @@ import {
   validateDraft,
   type DraftReject,
 } from "../../../src/reflex/core/draft-schema.js";
-import { DRAFT_READ_FLAGS, loadDrafts } from "../../../src/reflex/drafts/load.js";
-import { FakeClock } from "../../../src/core/clock.js";
+import { DRAFT_READ_FLAGS } from "../../../src/reflex/drafts/load.js";
 import { makeDraft } from "../helpers/turn.js";
 import type { RScriptV1 } from "../../../src/reflex/core/types.js";
 
@@ -176,15 +175,6 @@ describe("loader constants (BA §4.6)", () => {
     expect(DRAFT_NAME_RE.test("a b.json")).toBe(false);
     expect(DRAFT_NAME_RE.test("../x.json")).toBe(false);
     expect(DRAFT_NAME_RE.test(`${"a".repeat(65)}.json`)).toBe(false);
-  });
-});
-
-describe("loadDrafts — B0 skeleton", () => {
-  it("always returns an empty result and never touches the filesystem", async () => {
-    const clock = new FakeClock(0);
-    const result = await loadDrafts("/nonexistent/drafts", BUILTIN_IDS, clock, new AbortController().signal);
-    expect(result).toEqual({ loaded: [], rejected: [] });
-    expect(result.loaded).toHaveLength(0);
   });
 });
 

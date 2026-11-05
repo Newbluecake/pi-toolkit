@@ -81,6 +81,65 @@ describe("src/reflex governance scans", () => {
     }
   });
 
+  // ---- G5 (#25 B4, R-I12): the draft layer can never reach AUTO or the builtin state machine ----
+  it("G5a: `runAuto(` has exactly ONE call site (the builtin AUTO branch, behind admitAuto)", () => {
+    const wire = files.find((x) => x.f === "wire.ts")!.src;
+    const calls = [...wire.matchAll(/\brunAuto\s*\(/g)];
+    // definition `const runAuto = async (` is not a call (no `(` right after the name); one real call remains
+    expect(calls).toHaveLength(1);
+    const around = wire.slice(Math.max(0, calls[0]!.index! - 160), calls[0]!.index!);
+    expect(around).toMatch(/inFlight = true/);
+    expect(wire.slice(0, calls[0]!.index!)).toMatch(/if \(admitAuto\(script\.id\)\)/);
+    expect(offenders(/\brunAuto\s*\(/)).toEqual(["wire.ts"]);
+  });
+
+  it("G5b: catalog.ts contains no `draft.` literal (builtin ids never live in the draft namespace)", () => {
+    const catalog = files.find((x) => x.f === "core/catalog.ts")!.src;
+    expect(catalog).not.toMatch(/draft\./);
+  });
+
+  it('G5c: every `accountBuiltin(` call site is guarded by an `origin === "builtin"` check just before it', () => {
+    const wire = files.find((x) => x.f === "wire.ts")!.src;
+    const sites = [...wire.matchAll(/\baccountBuiltin\s*\(/g)].filter(
+      // the definition is `const accountBuiltin = (` — its name is followed by ` =`, not `(`
+      (m) => !wire.slice(Math.max(0, m.index! - 6), m.index!).includes("const "),
+    );
+    expect(sites.length).toBeGreaterThanOrEqual(2); // shadow-port path + AUTO fallback path
+    for (const m of sites) {
+      const before = wire.slice(Math.max(0, m.index! - 220), m.index!);
+      expect(before, `call site at ${m.index}`).toMatch(/origin === "builtin"/);
+    }
+    // and nothing outside wire.ts may call it
+    expect(offenders(/\baccountBuiltin\s*\(/)).toEqual(["wire.ts"]);
+  });
+
+  it("G5d: the draft candidate path never touches the builtin state machine or AUTO", () => {
+    const wire = files.find((x) => x.f === "wire.ts")!.src;
+    const start = wire.indexOf("const draftCandidate");
+    expect(start).toBeGreaterThan(0);
+    const end = wire.indexOf('pi.on("input"', start);
+    const body = wire.slice(start, end);
+    for (const forbidden of [
+      /\bstateOf\s*\(/,
+      /\beffectiveState\s*\(/,
+      /\brunAuto\s*\(/,
+      /\baccountBuiltin\s*\(/,
+      /\brtOf\s*\(/,
+      /runtimes\./,
+      /\bonExecOutcome\b/,
+      /\bonRepeat\b/,
+      /\bonCorrected\b/,
+    ]) {
+      expect(body, String(forbidden)).not.toMatch(forbidden);
+    }
+  });
+
+  it("G5e: the scan self-test — a guard-less call site would be flagged", () => {
+    const bad = code("const x = () => { accountBuiltin(script, outcome, () => 1); };");
+    const m = [...bad.matchAll(/\baccountBuiltin\s*\(/g)][0]!;
+    expect(bad.slice(Math.max(0, m.index! - 220), m.index!)).not.toMatch(/origin === "builtin"/);
+  });
+
   it("the scan itself detects violations (self-test of the stripping + patterns)", () => {
     const bad = code("const a = Symbol.for('x'); setTimeout(() => 1, 1); pi.sendUserMessage('x');");
     expect(/Symbol\s*\.\s*for\s*\(/.test(bad)).toBe(true);

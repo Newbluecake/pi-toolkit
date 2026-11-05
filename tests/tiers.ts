@@ -44,6 +44,8 @@ export const TIER2_FILES: readonly string[] = [
   "tests/governance/bundle-parity.test.ts",
   // actually runs scripts/release/package.sh (36 s)
   "tests/release/package-zip.test.ts",
+  // #25 B4: needs a real `mkfifo` child process (skips when unavailable)
+  "tests/reflex/drafts/load-fifo.test.ts",
 ];
 
 /** The 17 files with REAL gocryptfs mount blocks (plan D2a: each was read; judged by content,

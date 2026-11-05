@@ -14,7 +14,10 @@
  * PD11; the AUTO continuation captures its generation and drops itself when stale), R-I8 (all mutable
  * state in this closure, no `Symbol.for`; timers only via the injected Clock).
  */
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, InputEvent, InputEventResult } from "@earendil-works/pi-coding-agent";
+import { resolveAgentDir } from "../core/agent-dir.js";
 import { systemClock, type Clock } from "../core/clock.js";
 import { createReflexCommand } from "./command.js";
 import { collectToolShapes, judgeAgreement } from "./core/agreement.js";
@@ -23,7 +26,7 @@ import { PENDING_MAX_AGE_MS, REFLEX_BUDGET_MS, REPEAT_WINDOW_MS } from "./core/b
 import { BUILTIN_SCRIPTS } from "./core/catalog.js";
 import { requestDigest } from "./core/digest.js";
 import { evaluateGate } from "./core/gate.js";
-import { compileCatalog } from "./core/match.js";
+import { compileCatalog, type Matcher } from "./core/match.js";
 import { normalizeInput } from "./core/normalize.js";
 import { renderAnswer } from "./core/render.js";
 import type { ReflexSettings } from "./core/settings.js";
@@ -39,13 +42,17 @@ import {
 import type {
   Agreement,
   Band,
+  DraftLoadResult,
   ExecOutcome,
+  LoadedDraft,
+  ReflexCorrectionV1,
   ReflexRecordV1,
   ReflexStatusSnapshot,
   RScriptV1,
   ScriptRuntime,
   ScriptState,
 } from "./core/types.js";
+import { loadDrafts, type DraftFs } from "./drafts/load.js";
 import { createPortRegistry, executePort, type ReflexPortDeps } from "./ports/index.js";
 import { renderReflexMessage } from "./render-tui.js";
 
@@ -65,6 +72,10 @@ export interface ReflexWireDeps {
   monoNow?: () => number;
   /** Test hook: alternative catalog (default `BUILTIN_SCRIPTS`). */
   scripts?: readonly RScriptV1[];
+  /** #25 BD9: test hook — drafts directory (default `<agentDir>/reflex/drafts`, computed inside, only when drafts are on). */
+  draftsDir?: string;
+  /** #25 BD9: test hook — injectable fs for the draft loader (default `node:fs/promises`). */
+  draftFs?: DraftFs;
 }
 
 export interface ReflexWiring {
@@ -77,6 +88,10 @@ export interface ReflexWiring {
 
 /** One un-settled candidate (single slot): shadow / ambiguous (R2b), fallback / repeat (R3a AUTO). */
 interface Pending {
+  /** #25: who owns the slot. A "draft" slot is shadow-only: it never touches `stateOf`/runtimes/AUTO. */
+  origin: "builtin" | "draft";
+  /** Draft slots only: identity written onto the record (builtin records get NO new fields, BD11). */
+  draft?: { templateHash: string; draftHash: string };
   kind: "shadow" | "ambiguous" | "fallback" | "repeat";
   at: number;
   scriptId: string;
@@ -89,6 +104,9 @@ interface Pending {
   reasked: boolean;
   port?: NonNullable<ReflexRecordV1["port"]>;
 }
+
+/** The correction memo plus (draft targets only) the template hash the correction entry must carry. */
+type WireMemo = CorrectionMemo & { draft?: { templateHash: string } };
 
 const REASK_MAP_CAP = 64;
 
@@ -112,7 +130,7 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
   let inFlight = false; // R3a: true only while an AUTO answer awaits in-band (single-flight, arch R3/C-R7)
   let abort = new AbortController();
   let pending: Pending | undefined;
-  let memo: CorrectionMemo | undefined;
+  let memo: WireMemo | undefined;
   /** `${id}@${ver}\0${digest}` → time it last became a candidate (PD6 window; per session). */
   const recent = new Map<string, number>();
   /** `${id}@${ver}\0${digest}` → time reflex last ANSWERED it (AUTO repeat window, PD5; per session). */
@@ -130,6 +148,15 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
   const bump = (k: string): void => {
     counters[k] = (counters[k] ?? 0) + 1;
   };
+
+  // ---- #25 runtime drafts (BD8): loaded once per activation, shadow-only ----
+  let draftResult: DraftLoadResult | undefined;
+  let draftLoad: AbortController | undefined;
+  let draftMatcher: Matcher | undefined;
+  const draftById = new Map<string, LoadedDraft>();
+  const draftsEnabled = (): boolean => deps.settings().drafts?.enabled === true;
+  const draftsDirPath = (): string =>
+    deps.draftsDir ?? join(resolveAgentDir(process.env, homedir()).dir, "reflex", "drafts");
 
   const isStale = (gen: number): boolean => disposed || gen !== generation;
   const rtOf = (id: string): ScriptRuntime => runtimes.get(id) ?? { strikes: 0, demoted: false };
@@ -164,6 +191,9 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
       ...(p.port !== undefined ? { port: p.port } : {}),
       model,
       ...(p.reasked ? { reasked: true as const } : {}),
+      ...(p.origin === "draft" && p.draft !== undefined
+        ? { origin: "draft" as const, draftHash: p.draft.draftHash, templateHash: p.draft.templateHash }
+        : {}),
     };
     safeAppend("subagent:reflex-record", rec);
     // Any model-answered outcome (shadow / fallback / repeat) can be corrected next; an ambiguous
@@ -176,6 +206,7 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
         digest: p.digest,
         settledAt: clock.now(),
         corrected: false,
+        ...(p.origin === "draft" && p.draft !== undefined ? { draft: { templateHash: p.draft.templateHash } } : {}),
       };
     }
   };
@@ -197,8 +228,17 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
     }
   };
 
-  /** Run the read-only port off the input path (microtask) and attach the outcome to `p`. */
-  const scheduleShadowPort = (p: Pending, script: RScriptV1, cwd: string, notify: (m: string) => void): void => {
+  /**
+   * Run the read-only port off the input path (microtask) and attach the outcome to `p` (#25: shared by
+   * builtin and draft slots; it NEVER touches script state). `onOutcome` runs right after the attach, only
+   * for the slot owner that wants state accounting (builtin).
+   */
+  const runPortAttach = (
+    p: Pending,
+    script: RScriptV1,
+    cwd: string,
+    onOutcome?: (outcome: ExecOutcome) => void,
+  ): void => {
     const gen = generation;
     const signal = abort.signal;
     queueMicrotask(() => {
@@ -222,22 +262,47 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
             ms,
             ...("reason" in outcome ? { reason: outcome.reason.slice(0, 80) } : {}),
             portVer: port?.version ?? 0,
+            ...(p.origin === "draft" ? { portId: script.port.id } : {}),
           };
-          const before = stateOf(script.id);
-          const r = onExecOutcome(rtOf(script.id), outcome, clock.now());
-          runtimes.set(script.id, r.rt);
-          if (r.demotedNow && before === "auto") {
-            try {
-              notify(`reflex: ${script.id} demoted to shadow (${r.rt.demoteReason ?? "strikes"})`);
-            } catch {
-              /* ui best-effort */
-            }
-          }
+          onOutcome?.(outcome);
         } catch {
           /* fail-open: the shadow slot just keeps no port data */
         }
       })();
     });
+  };
+
+  /**
+   * Builtin-only state accounting (strikes / demote overlay). Callers MUST be inside an
+   * `origin === "builtin"` branch (G5 scans for it); the id check is the runtime backstop.
+   */
+  const accountBuiltin = (script: RScriptV1, outcome: ExecOutcome, onDemoted: (rt: ScriptRuntime) => void): void => {
+    if (!scriptById.has(script.id)) return;
+    const before = stateOf(script.id);
+    const r = onExecOutcome(rtOf(script.id), outcome, clock.now());
+    runtimes.set(script.id, r.rt);
+    if (r.demotedNow && before === "auto") {
+      try {
+        onDemoted(r.rt);
+      } catch {
+        /* ui best-effort */
+      }
+    }
+  };
+
+  /** AUTO admission: only a builtin id from the catalog whose effective state is "auto" (R-I12). */
+  const admitAuto = (id: string): boolean => scriptById.has(id) && stateOf(id) === "auto";
+
+  const scheduleShadowPort = (p: Pending, script: RScriptV1, cwd: string, notify: (m: string) => void): void => {
+    if (p.origin === "builtin") {
+      runPortAttach(p, script, cwd, (outcome) =>
+        accountBuiltin(script, outcome, (rt) =>
+          notify(`reflex: ${script.id} demoted to shadow (${rt.demoteReason ?? "strikes"})`),
+        ),
+      );
+    } else {
+      runPortAttach(p, script, cwd); // draft: port evidence only — no strikes, no overlay, no notify
+    }
   };
 
   /**
@@ -297,15 +362,10 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
         }; // a later correction of THIS answer demotes the script (PD12/PD5)
         return { action: "handled" };
       }
-      const before = stateOf(script.id);
-      const r = onExecOutcome(rtOf(script.id), outcome, clock.now());
-      runtimes.set(script.id, r.rt);
-      if (r.demotedNow && before === "auto") {
-        try {
-          ctx.ui?.notify?.(`reflex：${script.id} 连续失败，已降回 shadow（/reflex reset 或 /reload 恢复）`, "warning");
-        } catch {
-          /* ui best-effort */
-        }
+      if (p.origin === "builtin") {
+        accountBuiltin(script, outcome, () =>
+          ctx.ui?.notify?.(`reflex：${script.id} 连续失败，已降回 shadow（/reflex reset 或 /reload 恢复）`, "warning"),
+        );
       }
       bump(`fallback.${outcome.kind}`);
       p.kind = "fallback";
@@ -332,6 +392,86 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
     }
   };
 
+  /**
+   * BD8: on every `session_start`, if drafts are on and there is neither a result nor a load in flight,
+   * start the one-shot bounded load. The finished result survives re-arms until `/reload`; an aborted
+   * load (shutdown mid-flight) is dropped so the next start retries. Never notifies, never sets status.
+   */
+  const startDraftLoad = (): void => {
+    if (!draftsEnabled() || draftResult !== undefined || draftLoad !== undefined) return;
+    const ac = new AbortController();
+    draftLoad = ac;
+    void loadDrafts(draftsDirPath(), new Set(scriptById.keys()), clock, ac.signal, deps.draftFs)
+      .then((res) => {
+        if (draftLoad === ac) draftLoad = undefined;
+        if (ac.signal.aborted) return;
+        draftResult = res;
+        draftById.clear();
+        for (const d of res.loaded) draftById.set(d.script.id, d);
+        draftMatcher = res.loaded.length > 0 ? compileCatalog(res.loaded.map((d) => d.script)) : undefined;
+      })
+      .catch(() => {
+        if (draftLoad === ac) draftLoad = undefined;
+      });
+  };
+
+  /**
+   * #25 draft candidate (builtin MISSED, drafts loaded). Shadow-only by construction: no `stateOf`, no
+   * `runtimes`, no `runAuto` — only a slot whose port evidence lands on the record. Always a sync `continue`.
+   */
+  const draftCandidate = (norm: string, chars: number, now: number, ctx: ExtensionContext): InputEventResult => {
+    const dm = draftMatcher?.match(norm, registry.capabilities());
+    if (dm === undefined || dm.kind === "miss") return CONTINUE;
+    const loaded = draftById.get(dm.scriptId);
+    if (loaded === undefined) return CONTINUE;
+    const script = loaded.script;
+    const digest = requestDigest(norm);
+    const old = pending;
+    if (old !== undefined) settlePending(old, { agree: "unknown", tools: [] }); // single slot (shared with builtin)
+    const ref = { templateHash: loaded.templateHash, draftHash: loaded.draftHash };
+    if (dm.band === "ambiguous") {
+      bump("draft.ambiguous");
+      pending = {
+        origin: "draft",
+        draft: ref,
+        kind: "ambiguous",
+        at: now,
+        scriptId: script.id,
+        scriptVer: script.version,
+        candidates: dm.candidates,
+        state: "shadow",
+        band: "ambiguous",
+        digest,
+        chars,
+        reasked: false,
+      };
+      return CONTINUE;
+    }
+    const key = `${script.id}@${script.version}\u0000${digest}`;
+    const prev = recent.get(key);
+    const reasked = prev !== undefined && now - prev <= REPEAT_WINDOW_MS;
+    remember(recent, key, now);
+    bump("draft.candidates");
+    if (reasked) bump("draft.reasked");
+    const p: Pending = {
+      origin: "draft",
+      draft: ref,
+      kind: "shadow",
+      at: now,
+      scriptId: script.id,
+      scriptVer: script.version,
+      state: "shadow", // a draft is ALWAYS shadow, whatever `autoResolve` says (R-I12)
+      band: "high",
+      digest,
+      chars,
+      reasked,
+    };
+    pending = p;
+    const ui = ctx.ui;
+    scheduleShadowPort(p, script, ctx.cwd, (msg) => ui.notify(msg, "warning"));
+    return CONTINUE;
+  };
+
   // ① input — plain (non-async) function. fail-open on purpose: pi's docs suggest fail-closed for guards, but this
   // layer is purely advisory — any bug must degrade to "the model answers as usual", never to a dropped input.
   // R3a step 0: every branch returns a synchronous `InputEventResult` EXCEPT the AUTO branch, which
@@ -346,16 +486,22 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
         const c = detectCorrection(normalizeInput(event.text).norm, memo, now);
         if (c !== undefined && memo !== undefined) {
           const target = memo;
-          const written = safeAppend("subagent:reflex-correction", c);
+          // #25: a correction of a DRAFT candidate carries its origin + template hash (builtin entries stay
+          // byte-identical) and never demotes anything — drafts have no state machine.
+          const entry: ReflexCorrectionV1 =
+            target.draft !== undefined
+              ? { ...c, targetOrigin: "draft", targetTemplateHash: target.draft.templateHash }
+              : c;
+          const written = safeAppend("subagent:reflex-correction", entry);
           // Flip the one-shot ONLY when the entry was actually persisted (root nit b): a failed
           // append leaves the window open so a later correction can retry it.
           if (written) {
             memo = { ...target, corrected: true };
-            bump("corrected");
+            bump(target.draft !== undefined ? "draft.corrected" : "corrected");
           }
           // A corrected AUTO answer demotes immediately (PD5) + one notify. The persisted entry
           // above is the audit record; the demote is behaviour and happens either way.
-          if (target.kind === "answer") {
+          if (target.kind === "answer" && target.draft === undefined) {
             const r = onCorrected(rtOf(target.scriptId), clock.now(), stateOf(target.scriptId));
             runtimes.set(target.scriptId, r.rt);
             if (r.demotedNow) {
@@ -387,7 +533,10 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
       if (!gate.pass) return CONTINUE;
 
       const m = matcher.match(gate.norm.norm, registry.capabilities());
-      if (m.kind === "miss") return CONTINUE;
+      // #25 K2: drafts only get a look when the builtin catalog MISSES (builtin behaviour stays untouched).
+      if (m.kind === "miss") {
+        return draftMatcher === undefined ? CONTINUE : draftCandidate(gate.norm.norm, gate.norm.chars, now, ctx);
+      }
       const script = scriptById.get(m.scriptId);
       if (script === undefined) return CONTINUE;
 
@@ -398,6 +547,7 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
       if (m.band === "ambiguous") {
         bump("ambiguous");
         pending = {
+          origin: "builtin",
           kind: "ambiguous",
           at: now,
           scriptId: script.id,
@@ -422,6 +572,7 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
       bump("candidates");
       if (reasked) bump("reasked");
       const p: Pending = {
+        origin: "builtin",
         kind: "shadow",
         at: now,
         scriptId: script.id,
@@ -434,7 +585,7 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
       };
       pending = p;
 
-      if (state === "auto") {
+      if (admitAuto(script.id)) {
         // Repeat escape hatch (PD5/PD6): this exact question was ANSWERED within the window ⇒ hand
         // it to the model, demote immediately, notify once. Synchronous `continue` (no await).
         const ansAt = answers.get(key);
@@ -481,7 +632,7 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
       try {
         const branch = ctx.sessionManager.getBranch();
         const collected = collectToolShapes(toBranchLike(branch as readonly unknown[]), p.digest);
-        const script = scriptById.get(p.scriptId);
+        const script = p.origin === "draft" ? draftById.get(p.scriptId)?.script : scriptById.get(p.scriptId);
         if (collected.status === "ok") {
           // An ambiguous slot has no single script to judge against ⇒ unknown, shapes kept for
           // audit; shadow / fallback / repeat slots all name one script and ARE judged (R3a).
@@ -508,12 +659,19 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
     recent.clear();
     answers.clear(); // the repeat/correction windows bind to THIS session's transcript (PD11)
     inFlight = false;
+    startDraftLoad();
   });
 
   // ④ session_shutdown — abort in-flight work, drop pending (NOT persisted), bump generation.
   pi.on("session_shutdown", () => {
     try {
       abort.abort();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      draftLoad?.abort(); // an in-flight draft load is cancelled; its result is dropped (retried on the next start)
+      draftLoad = undefined;
     } catch {
       /* best-effort */
     }
@@ -558,6 +716,18 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
       catalog,
       matcher,
       capabilities: () => registry.capabilities(),
+      drafts: {
+        enabled: draftsEnabled,
+        dir: draftsDirPath,
+        result: () => draftResult,
+        loading: () => draftLoad !== undefined,
+        counters: () => ({
+          candidates: counters["draft.candidates"] ?? 0,
+          ambiguous: counters["draft.ambiguous"] ?? 0,
+          reasked: counters["draft.reasked"] ?? 0,
+          corrected: counters["draft.corrected"] ?? 0,
+        }),
+      },
       reset: (id) => {
         if (id === undefined) {
           for (const [k, rt] of runtimes) runtimes.set(k, reset(rt));
