@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.6] - 2026-11-05
+
+### Added
+
+- **reflex**: answer opted-in status questions without a model turn (`1cc71b60`)
+- **reflex**: add cross-session shadow promotion report (`26d6bdd1`)
+- **reflex**: record shadow reflex decisions and add /reflex (`b669a255`)
+- **reflex**: add pi-free reflex decision core (`645050a4`)
+- **reflex**: add read-only status ports (`18aad043`)
+- **reflex**: add disabled-by-default Jev reflex skeleton (`ab14948b`)
+- **fabric**: enable wake_session and web activation controls (`d77a42ac`)
+- **fabric**: carry trusted wake grants into child agents (`e74467bd`)
+- **web-hub**: show cross-session delivery progress in detail views (`08a195ea`)
+- **fabric**: add idempotent activation for delivered cross-session messages (`163cb4b6`)
+- **fabric**: enable default wake for trusted direct cross-session sends (`3cb35058`)
+- **schedule**: retire scheduled-task confirmation capability (`c286d5c5`)
+- **web-hub**: show schedules in the composer task chip (`023edaa0`)
+- **fabric**: add trusted human wake grants for cross-session sends (`a8d431c3`)
+- **web-hub**: show todos and schedules in one task panel (`884f24b7`)
+- **schedule**: remove approval gates from scheduled tasks (`86216fec`)
+- **web-hub**: remove hub-side scheduled-task approvals (`40c41b8b`)
+- **web-hub**: remove scheduled-task approval UI (`30584e1c`)
+- **fabric**: track cross-session delivery progress across hub and agents (`1cb62cb6`)
+- **web-hub**: derive schedule rows and summary for task panels (`9110b7bb`)
+- **fabric**: add cross-session progress state machine (`0f8043bf`)
+- **web-hub**: allow up to ten managed web sessions by default (`91220bf6`)
+- **fabric**: add cross-session activation protocol and setting (`c53daddb`)
+- **memory**: add bounded deepseek prediction and session cache (`6db71845`)
+- **bash**: strip ANSI controls from displayed output (`db355cf1`)
+- **memory**: wire predictive recall into turn-start injection (`0f6716c3`)
+- **memory**: add the pi-free prediction rule engine (`4f01b9ca`)
+- **memory**: remove the Jev action gate (`ff5400bc`)
+- **web-hub-ui**: add external todo chip to Composer (`554783ff`)
+- **web-tools**: add Tavily extract as web_fetch fallback provider (`4ebf352b`)
+
+### Fixed
+
+- **web-hub**: simplify task chip counts and read-only schedule rows (`a1922c2a`)
+- **memory**: make Jev tagging failures diagnosable and less flaky (`e6d19357`)
+- **web-hub**: mark handled mention prompts as consumed (`58f850a0`)
+- **quota**: keep GLM account costs visible across mixed peers (`a2726921`)
+- **web-hub-ui**: reduce assistant message indentation (`c139e852`)
+- **web-hub-ui**: hide channel filters when the sidebar collapses (`6bb1041a`)
+- **web-hub-ui**: shorten quota exhaustion copy (`57cbd6f2`)
+- **quota**: aggregate GLM account cost across provider aliases (`10e5b467`)
+- **web-hub-ui**: improve Composer todo chip interactions (`132584e3`)
+
+### Changed
+
+- **reflex**: share the budget race between ports and core (`f833a129`)
+
+### Documentation
+
+- **reflex**: document auto answers and the shadow promotion report (`66fb114b`)
+- **jev-reflex**: add feasibility, architecture and plan for reflex MVP (`1e69e50a`)
+- **guide**: add a new-environment configuration guide (`1069250d`)
+
+### Tests
+
+- **web-hub**: pin the reflex settings import closure (`0aee25c2`)
+- **fabric**: add cross-session activation gates (`8efdad1d`)
+- **schedule**: pin clock for schedule status wiring (`bee1b89d`)
+- **memory**: prove the turn-start merged-message channel (`0daa59ae`)
+
+Stats: 30 feat, 9 fix, 1 refactor/perf, 3 docs, 4 test
+
 ## [0.10.5] - 2026-11-04
 
 ### Added
@@ -1625,7 +1691,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.5...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.6...HEAD
+[0.10.6]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.5...v0.10.6
 [0.10.5]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.4...v0.10.5
 [0.10.4]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.3...v0.10.4
 [0.10.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.2...v0.10.3
