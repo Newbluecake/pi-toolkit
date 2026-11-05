@@ -187,6 +187,8 @@ export interface OrEntry {
   readonly error?: string;
   /** failed：人读原因（wire message 或本地 i18n 文案由展示层经 orFailReason 补）。 */
   readonly message?: string;
+  /** parked：agent 报告的等待对象（#30 D8；缺失 ⇒ 沿用 #23 的 fleet 文案）。 */
+  readonly waitingFor?: "runs" | "idle";
 }
 
 export const OR_IDLE: OrEntry = { phase: "idle" };
@@ -198,6 +200,94 @@ export interface OrSendResult {
   readonly ok: boolean;
   readonly error?: string;
   readonly message?: string;
+}
+
+/**
+ * #30 D2：status.reload 的前端镜像（本地结构解析，不 import protocol）。
+ * `state` 是最近事实；`open` 表示请求是否仍在进行；UI 只按 cmdIds + rev 去重，不按 `at`。
+ */
+export type ReloadFactState = "deferred" | "started" | "cancelled" | "failed" | "completed";
+export interface ReloadStatus {
+  readonly v: 1;
+  readonly life: string;
+  readonly cmdIds: readonly string[];
+  readonly rev: number;
+  readonly execId: string;
+  readonly state: ReloadFactState;
+  readonly open: boolean;
+  readonly at: number;
+  readonly waitingFor?: "runs" | "idle";
+  readonly activeRuns?: number;
+  readonly code?: string;
+  readonly message?: string;
+  readonly version?: string;
+  readonly epoch?: string;
+}
+
+const RELOAD_STATES: ReadonlySet<string> = new Set(["deferred", "started", "cancelled", "failed", "completed"]);
+const RELOAD_MAX_CMD_IDS = 4;
+const RELOAD_MAX_STR = 256;
+
+function nonEmptyStr(v: unknown, max = RELOAD_MAX_STR): string | undefined {
+  return typeof v === "string" && v !== "" && v.length <= max ? v : undefined;
+}
+
+/**
+ * 防御性收窄 `status.reload`：必填字段（v===1、life、cmdIds 1..4 个字符串、rev 非负整数、
+ * execId、state 枚举、open 布尔、at 有限数）任一不符 ⇒ undefined；可选字段类型不符 ⇒
+ * 丢弃该字段（未来扩展值不致整体作废）。never throws。
+ */
+export function parseReloadStatus(status: unknown): ReloadStatus | undefined {
+  try {
+    if (status === null || typeof status !== "object" || Array.isArray(status)) return undefined;
+    const raw = (status as { reload?: unknown }).reload;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    const r = raw as Record<string, unknown>;
+    if (r["v"] !== 1) return undefined;
+    const life = nonEmptyStr(r["life"]);
+    const execId = nonEmptyStr(r["execId"]);
+    if (life === undefined || execId === undefined) return undefined;
+    const ids = r["cmdIds"];
+    if (!Array.isArray(ids) || ids.length < 1 || ids.length > RELOAD_MAX_CMD_IDS) return undefined;
+    const cmdIds: string[] = [];
+    for (const id of ids) {
+      const s = nonEmptyStr(id, 128);
+      if (s === undefined) return undefined;
+      cmdIds.push(s);
+    }
+    const rev = r["rev"];
+    if (typeof rev !== "number" || !Number.isInteger(rev) || rev < 0) return undefined;
+    const state = r["state"];
+    if (typeof state !== "string" || !RELOAD_STATES.has(state)) return undefined;
+    if (typeof r["open"] !== "boolean") return undefined;
+    const at = r["at"];
+    if (typeof at !== "number" || !Number.isFinite(at)) return undefined;
+    const waitingFor = r["waitingFor"] === "runs" || r["waitingFor"] === "idle" ? r["waitingFor"] : undefined;
+    const ar = r["activeRuns"];
+    const activeRuns = typeof ar === "number" && Number.isInteger(ar) && ar >= 0 ? ar : undefined;
+    const code = nonEmptyStr(r["code"]);
+    const message = nonEmptyStr(r["message"], 1024);
+    const version = nonEmptyStr(r["version"]);
+    const epoch = nonEmptyStr(r["epoch"]);
+    return {
+      v: 1,
+      life,
+      cmdIds,
+      rev,
+      execId,
+      state: state as ReloadFactState,
+      open: r["open"],
+      at,
+      ...(waitingFor !== undefined ? { waitingFor } : {}),
+      ...(activeRuns !== undefined ? { activeRuns } : {}),
+      ...(code !== undefined ? { code } : {}),
+      ...(message !== undefined ? { message } : {}),
+      ...(version !== undefined ? { version } : {}),
+      ...(epoch !== undefined ? { epoch } : {}),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export interface OrCoordinatorDeps {
@@ -215,8 +305,17 @@ export interface OrCoordinatorDeps {
   /** #23 D1：当前时钟（绝对截止时间的真源；测试注入假钟）。 */
   now(): number;
   /** 实际送帧；transport 约定必 settle，但 body 可能拖过 deadline——协调器本地有
-   *  OR_SEND_TIMEOUT_MS 上界（D2），迟到的 settle 由 attempt token 挡掉（D3）。 */
-  send(agentKey: string): Promise<OrSendResult>;
+   *  OR_SEND_TIMEOUT_MS 上界（D2），迟到的 settle 由 attempt token 挡掉（D3）。
+   *  #30：`cmdId` 是本次 attempt 的命令帧 id（deps.newCmdId 生成），实现须原样作为命令
+   *  id 发出，agent 的 status.reload.cmdIds 才能对上。 */
+  send(agentKey: string, cmdId: string): Promise<OrSendResult>;
+  /** #30：生成命令帧 id；缺省（老测试/老装配）⇒ 内置计数器。 */
+  newCmdId?(): string;
+  /** #30：该会话 status.reload 的解析结果（parseReloadStatus）；缺省/无 ⇒ 老 agent 路径，
+   *  行为与 #23 完全一致。 */
+  reloadOutcome?(agentKey: string): ReloadStatus | undefined;
+  /** #30 Q2：hub 版本（completed 版本对比）；缺省 ⇒ 版本未知，不判成功也不判没升级。 */
+  hubVersion?(): string | undefined;
   /** 取消已送达但被 park 的 reload（`/agent reload cancel`）；fire-and-forget，结果忽略。 */
   sendCancel(agentKey: string): Promise<unknown>;
   setTimeout(fn: () => void, ms: number): unknown;
@@ -241,7 +340,10 @@ export interface OrCoordinator {
 
 export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
   const entries = new Map<string, OrEntry>();
-  const timers = new Map<string, { queue?: unknown; effect?: unknown; send?: unknown; toast?: unknown }>();
+  const timers = new Map<
+    string,
+    { queue?: unknown; effect?: unknown; send?: unknown; toast?: unknown; cancel?: unknown }
+  >();
   /** #23 D1：request 时记下的绝对截止时间（now() + OR_QUEUE_TIMEOUT_MS）；无在飞请求 ⇒ 无条目。 */
   const deadlines = new Map<string, number>();
   /** #23 D3：attempt token —— 每次 send 自增（每 key 单调递增，永不重置/重用）；
@@ -249,6 +351,22 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
    *  succeed/reset/cancelQueue/request ⇒ clearAllTimers）后 phase 不再是 sending，直到
    *  下一次 send 发更大的新 token——旧 attempt 的迟到回调自然全部失效（修 ABA）。 */
   const attempts = new Map<string, number>();
+  // ---- #30 D8：agent 结果事实的吸收状态（每 key 一份，随 attempt 重置） ----------------
+  let cmdSeq = 0;
+  /** 本 attempt 的命令帧 id（只匹配含它的 reload 事实；跨 attempt 的事实一律忽略）。 */
+  const cmdIds = new Map<string, string>();
+  /** 已处理的最大 rev（同一 rev 只处理一次）。 */
+  const appliedRev = new Map<string, number>();
+  /** 最近一次已吸收事实（下线时 started ⇒ E_RELOAD_LOST，否则 E_OFFLINE）。 */
+  const lastFact = new Map<string, ReloadFactState>();
+  /** 已有事实接管：此后不再按 fleet 启发式在 parked/awaiting 间迁移。 */
+  const authoritative = new Set<string>();
+  /** 同一请求只建立一次的固定 effectDeadline（绝对时刻）。 */
+  const effectDeadline = new Map<string, number>();
+  /** `sendCancel` 恰好一次（总截止 / IDLE_WAIT 竞态去重）。 */
+  const cancelSent = new Set<string>();
+  /** 失败后后端报告了 open:false 的事实 ⇒ 请求已结束，到点无需 cancel。 */
+  const cancelClosed = new Set<string>();
 
   function changed(key: string): void {
     deps.onChange?.(key);
@@ -259,7 +377,7 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
     changed(key);
   }
 
-  function clearTimerKind(key: string, kind: "queue" | "effect" | "send" | "toast"): void {
+  function clearTimerKind(key: string, kind: "queue" | "effect" | "send" | "toast" | "cancel"): void {
     const slot = timers.get(key);
     const h = slot?.[kind];
     if (h !== undefined) {
@@ -273,12 +391,18 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
     clearTimerKind(key, "effect");
     clearTimerKind(key, "send");
     clearTimerKind(key, "toast");
+    clearTimerKind(key, "cancel");
     // #23 D3：不清 attempts 计数器——计数器必须单调递增，旧 token 永不重用；清场后
     // phase 不再是 sending，直到下一次 send 发新 token，旧 attempt 的回调自然全部失效
     // （删条目会把计数器归零，让新 attempt 重用旧 token——正是要修的 ABA）。
   }
 
-  function armTimer(key: string, kind: "queue" | "effect" | "send" | "toast", ms: number, fn: () => void): void {
+  function armTimer(
+    key: string,
+    kind: "queue" | "effect" | "send" | "toast" | "cancel",
+    ms: number,
+    fn: () => void,
+  ): void {
     clearTimerKind(key, kind);
     const h = deps.setTimeout(fn, ms);
     let slot = timers.get(key);
@@ -287,6 +411,24 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
       timers.set(key, slot);
     }
     slot[kind] = h;
+  }
+
+  /** 丢掉本 attempt 的事实吸收状态（request/reset/cancel/succeed 调用）。 */
+  function forgetAttempt(key: string): void {
+    cmdIds.delete(key);
+    appliedRev.delete(key);
+    lastFact.delete(key);
+    authoritative.delete(key);
+    effectDeadline.delete(key);
+    cancelSent.delete(key);
+    cancelClosed.delete(key);
+  }
+
+  /** `sendCancel` 恰好一次（settleExpired 与 IDLE_WAIT 的 cancelAt 共用）。 */
+  function cancelOnce(key: string): void {
+    if (cancelSent.has(key)) return;
+    cancelSent.add(key);
+    void deps.sendCancel(key).then(undefined, () => {});
   }
 
   function fail(key: string, error: string, message?: string): void {
@@ -298,6 +440,7 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
   function succeed(key: string): void {
     clearAllTimers(key);
     deadlines.delete(key);
+    forgetAttempt(key);
     set(key, { phase: "done" });
     // toast 停 OR_TOAST_MS 后回 idle（此时会话已不再落后，提示条自然消失）。
     armTimer(key, "toast", OR_TOAST_MS, () => {
@@ -327,6 +470,8 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
 
   /** #23 D1：总预算耗尽时按当前相结算（queue 计时器回调与各入口的截止检查共用）。 */
   function settleExpired(key: string): void {
+    // #30：先吸收已到的事实（同一 tick 内 IDLE_WAIT 与总截止竞争，两种处理顺序结果一致）。
+    absorb(key);
     const cur = entries.get(key);
     if (cur === undefined || !inFlight(cur.phase)) return;
     if (cur.phase === "queued") {
@@ -335,7 +480,7 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
     }
     if (cur.phase === "parked") {
       // 已送达的 park 超总上限：先取消后端 arm 着的 reload，再如实报超时。
-      void deps.sendCancel(key).then(undefined, () => {});
+      cancelOnce(key);
       fail(key, "E_QUEUE_TIMEOUT");
       return;
     }
@@ -358,17 +503,45 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
   function enterAwaiting(key: string): void {
     if (expired(key)) return;
     set(key, { phase: "awaiting" });
+    effectDeadline.set(
+      key,
+      Math.min(deps.now() + OR_EFFECT_TIMEOUT_MS, deadlines.get(key) ?? Number.POSITIVE_INFINITY),
+    );
     armTimer(key, "effect", Math.min(OR_EFFECT_TIMEOUT_MS, remainingMs(key)), () => {
       if (entries.get(key)?.phase !== "awaiting") return;
       fail(key, "E_TIMEOUT");
     });
   }
 
+  /** #30 D8-4：started 事实 ⇒ awaiting；effectDeadline 同一请求只建立一次（重复补发 /
+   *  每秒 tick 都不重开），到点 E_TIMEOUT；总截止仍是上界。 */
+  function enterAwaitingFact(key: string): void {
+    if (expired(key)) return;
+    clearTimerKind(key, "send");
+    let eff = effectDeadline.get(key);
+    if (eff === undefined) {
+      eff = Math.min(deps.now() + OR_EFFECT_TIMEOUT_MS, deadlines.get(key) ?? Number.POSITIVE_INFINITY);
+      effectDeadline.set(key, eff);
+    }
+    const left = eff - deps.now();
+    if (left <= 0) {
+      fail(key, "E_TIMEOUT");
+      return;
+    }
+    const cur = entries.get(key);
+    if (cur?.phase === "awaiting" && timers.get(key)?.effect !== undefined) return;
+    set(key, { phase: "awaiting" });
+    armTimer(key, "effect", Math.min(left, remainingMs(key)), () => {
+      if (entries.get(key)?.phase !== "awaiting") return;
+      fail(key, "E_TIMEOUT");
+    });
+  }
+
   /** 进入 parked（已送达，deferred reload 在等 fleet）；queue 总预算计时保持不清。 */
-  function enterParked(key: string): void {
+  function enterParked(key: string, waitingFor?: "runs" | "idle"): void {
     if (expired(key)) return;
     clearTimerKind(key, "effect");
-    set(key, { phase: "parked" });
+    set(key, waitingFor === undefined ? { phase: "parked" } : { phase: "parked", waitingFor });
   }
 
   function send(key: string): void {
@@ -376,6 +549,13 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
     clearTimerKind(key, "effect");
     const token = (attempts.get(key) ?? 0) + 1;
     attempts.set(key, token);
+    // #30：每次 send 一个新的命令帧 id；事实吸收状态随之重置。
+    const cmdId = deps.newCmdId?.() ?? `or-${(cmdSeq += 1).toString(36)}`;
+    cmdIds.set(key, cmdId);
+    appliedRev.delete(key);
+    lastFact.delete(key);
+    authoritative.delete(key);
+    effectDeadline.delete(key);
     set(key, { phase: "sending" });
     // #23 D2：send 的本地上界（剩余预算更小则收紧）；超时要求 token+phase 双核对。
     armTimer(key, "send", Math.min(OR_SEND_TIMEOUT_MS, remainingMs(key)), () => {
@@ -384,7 +564,7 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
       fail(key, "E_SEND_UNKNOWN");
     });
     deps
-      .send(key)
+      .send(key, cmdId)
       .then((r) => {
         if (attempts.get(key) !== token) return; // 旧 attempt 的迟到回调（D3 ABA 修复）
         const cur = entries.get(key);
@@ -393,6 +573,7 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
           // 送达时 fleet 已忙 ⇒ deferred reload 会 park：不计 90s，转 parked 等 fleet 清空。
           if (deps.fleetActive(key) > 0) enterParked(key);
           else enterAwaiting(key);
+          absorb(key); // SSE 先于 HTTP 到达的事实
         } else {
           fail(key, r.error ?? "E_UNKNOWN", r.message);
         }
@@ -413,6 +594,112 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // #30 D8：agent 结果事实（status.reload）吸收
+  // ---------------------------------------------------------------------------
+
+  /** 只在失败后可被细化的本地/推断错误码（Q4）。 */
+  const REFINABLE = new Set(["E_OFFLINE", "E_SEND_UNKNOWN", "E_TIMEOUT"]);
+
+  /** 取本 attempt 的、rev 未处理过的事实；其余（无 reload / 别人的 cmdId / 已处理）⇒ undefined。 */
+  function matchFact(key: string): ReloadStatus | undefined {
+    const cmdId = cmdIds.get(key);
+    if (cmdId === undefined || deps.reloadOutcome === undefined) return undefined;
+    const o = deps.reloadOutcome(key);
+    if (o === undefined || !o.cmdIds.includes(cmdId)) return undefined;
+    const applied = appliedRev.get(key);
+    if (applied !== undefined && o.rev <= applied) return undefined;
+    appliedRev.set(key, o.rev);
+    return o;
+  }
+
+  /** completed 的判定：done / noupgrade / unknown（缺 version/epoch、hub 版本未知或不可比）。 */
+  function completedVerdict(o: ReloadStatus): "done" | "noupgrade" | "unknown" {
+    if (o.version === undefined || o.epoch === undefined) return "unknown";
+    const hv = deps.hubVersion?.();
+    if (hv === undefined || hv === "") return "unknown";
+    const cmp = compareVersions(o.version, hv);
+    if (cmp === null) return "unknown";
+    return cmp === 0 ? "done" : "noupgrade";
+  }
+
+  function scheduleCancelAt(key: string, at: number): void {
+    const left = at - deps.now();
+    if (left <= 0) {
+      cancelOnce(key);
+      return;
+    }
+    armTimer(key, "cancel", left, () => {
+      if (entries.get(key)?.phase !== "failed" || cancelClosed.has(key)) return;
+      cancelOnce(key);
+    });
+  }
+
+  function absorbFailedPhase(key: string, cur: OrEntry, o: ReloadStatus): void {
+    const err = cur.error ?? "";
+    if (!o.open) cancelClosed.add(key);
+    if (o.state === "completed") {
+      const v = completedVerdict(o);
+      if (v === "done") succeed(key);
+      else if (v === "noupgrade" && REFINABLE.has(err)) fail(key, "E_RELOAD_NO_UPGRADE");
+      return;
+    }
+    if (o.state === "failed") {
+      const code = o.code;
+      if (code === undefined || !code.startsWith("E_RELOAD_")) return;
+      if (REFINABLE.has(err) || (err === "E_QUEUE_TIMEOUT" && code === "E_RELOAD_IDLE_WAIT")) {
+        fail(key, code, o.message);
+      }
+      return;
+    }
+    if (o.state === "cancelled" && REFINABLE.has(err)) fail(key, "E_RELOAD_CANCELLED");
+    // deferred / started 迟到：一律忽略（failed 不被复活）。
+  }
+
+  function absorb(key: string): void {
+    const cur = entries.get(key);
+    if (cur === undefined || cur.phase === "idle" || cur.phase === "done" || cur.phase === "queued") return;
+    const o = matchFact(key);
+    if (o === undefined) return;
+    if (cur.phase === "failed") {
+      absorbFailedPhase(key, cur, o);
+      return;
+    }
+    authoritative.add(key);
+    let state: ReloadFactState = o.state;
+    if (state === "completed") {
+      const v = completedVerdict(o);
+      if (v === "done") {
+        succeed(key);
+        return;
+      }
+      if (v === "noupgrade") {
+        fail(key, "E_RELOAD_NO_UPGRADE");
+        return;
+      }
+      state = "started"; // 接管已发生但版本未知：按已启动处理，等版本到位 / 生效计时
+    }
+    lastFact.set(key, state);
+    if (state === "cancelled") {
+      fail(key, "E_RELOAD_CANCELLED");
+      return;
+    }
+    if (state === "failed") {
+      const code = o.code ?? "E_RELOAD_FAILED";
+      const dl = deadlines.get(key);
+      fail(key, code, o.message);
+      // Q3：IDLE_WAIT 立即判失败、不额外 cancel；但 #23 的绝对截止照常 cancel 一次。
+      if (code === "E_RELOAD_IDLE_WAIT" && o.open && dl !== undefined) scheduleCancelAt(key, dl);
+      return;
+    }
+    if (state === "deferred") {
+      clearTimerKind(key, "send");
+      enterParked(key, o.waitingFor);
+      return;
+    }
+    enterAwaitingFact(key); // started
+  }
+
   function request(key: string): void {
     const cur = entries.get(key);
     if (
@@ -431,6 +718,7 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
       return;
     }
     clearAllTimers(key);
+    forgetAttempt(key);
     deadlines.set(key, deps.now() + OR_QUEUE_TIMEOUT_MS); // #23 D1：绝对截止时间，从 request 起算
     armQueueCap(key); // 总预算计时只在 request 设置，覆盖全部在飞阶段（阶段切换不清除）
     if (blocked(key)) {
@@ -449,12 +737,14 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
       if (cur.phase === "parked") void deps.sendCancel(key).then(undefined, () => {});
       clearAllTimers(key);
       deadlines.delete(key);
+      forgetAttempt(key);
       entries.delete(key);
       changed(key);
     },
     reset(key) {
       clearAllTimers(key);
       deadlines.delete(key);
+      forgetAttempt(key);
       entries.delete(key);
       changed(key);
     },
@@ -469,6 +759,12 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
       const toSend: string[] = [];
       const toPark: string[] = [];
       const toAwait: string[] = [];
+      // #30：版本到位优先；否则先吸收 agent 的结果事实（可能直接结算 / 换相），再判下线。
+      for (const key of [...entries.keys()]) {
+        const e0 = entries.get(key);
+        if (e0 === undefined || e0.phase === "idle" || e0.phase === "done") continue;
+        if (!deps.isSettled(key)) absorb(key);
+      }
       for (const [key, entry] of entries) {
         if (entry.phase === "idle" || entry.phase === "done") continue;
         if (deps.isSettled(key)) {
@@ -479,12 +775,13 @@ export function createOrCoordinator(deps: OrCoordinatorDeps): OrCoordinator {
           toOffline.push(key);
           continue;
         }
+        const auth = authoritative.has(key);
         if (entry.phase === "queued" && !blocked(key) && deps.precheck(key) === "ok") toSend.push(key);
-        else if (entry.phase === "awaiting" && deps.fleetActive(key) > 0) toPark.push(key);
-        else if (entry.phase === "parked" && deps.fleetActive(key) === 0) toAwait.push(key);
+        else if (!auth && entry.phase === "awaiting" && deps.fleetActive(key) > 0) toPark.push(key);
+        else if (!auth && entry.phase === "parked" && deps.fleetActive(key) === 0) toAwait.push(key);
       }
       for (const key of toSettle) succeed(key);
-      for (const key of toOffline) fail(key, "E_OFFLINE");
+      for (const key of toOffline) fail(key, lastFact.get(key) === "started" ? "E_RELOAD_LOST" : "E_OFFLINE");
       for (const key of toSend) send(key);
       for (const key of toPark) enterParked(key);
       for (const key of toAwait) enterAwaiting(key);
@@ -527,7 +824,15 @@ export type OutdatedMsgKey =
   | "outdated.errUnsupported"
   | "outdated.errTimeout"
   | "outdated.errQueueTimeout"
-  | "outdated.errSendUnknown";
+  | "outdated.errSendUnknown"
+  | "outdated.errReloadLost"
+  | "outdated.errReloadNoUpgrade"
+  | "outdated.errReloadCancelled"
+  | "outdated.errReloadUnavailable"
+  | "outdated.errReloadSettle"
+  | "outdated.errReloadIdleWait"
+  | "outdated.errReloadRefused"
+  | "outdated.errReloadFailed";
 
 /**
  * failed 相的人读原因（展示层唯一入口：详情横幅、卡片 chip、汇总失败行、目标消失后的
@@ -547,6 +852,23 @@ export function orFailReason(entry: OrEntry): { key: OutdatedMsgKey } | { raw: s
       return { key: "outdated.errQueueTimeout" };
     case "E_SEND_UNKNOWN":
       return { key: "outdated.errSendUnknown" };
+    case "E_RELOAD_LOST":
+      return { key: "outdated.errReloadLost" };
+    case "E_RELOAD_NO_UPGRADE":
+      return { key: "outdated.errReloadNoUpgrade" };
+    case "E_RELOAD_CANCELLED":
+      return { key: "outdated.errReloadCancelled" };
+    case "E_RELOAD_UNAVAILABLE":
+      return { key: "outdated.errReloadUnavailable" };
+    case "E_RELOAD_SETTLE":
+      return { key: "outdated.errReloadSettle" };
+    case "E_RELOAD_IDLE_WAIT":
+      return { key: "outdated.errReloadIdleWait" };
+    case "E_RELOAD_REFUSED":
+      return { key: "outdated.errReloadRefused" };
+    case "E_RELOAD_FAILED":
+    case "E_RELOAD_THREW":
+      return { key: "outdated.errReloadFailed" };
     default:
       return { raw: entry.error ?? "" };
   }

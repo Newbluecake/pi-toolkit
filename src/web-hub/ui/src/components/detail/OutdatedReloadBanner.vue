@@ -96,7 +96,7 @@ function onClose(): void {
       }}</span>
       <!-- parked：已送达，deferred reload 在等 fleet（major 修复 2026-10-26） -->
       <span v-else-if="entry.phase === 'parked'" class="or-banner-text">{{
-        t("outdated.parkedText", { n: fleetN })
+        entry.waitingFor === "idle" ? t("outdated.parkedIdle") : t("outdated.parkedText", { n: fleetN })
       }}</span>
       <!-- failed（§3）：原因 + 错误码 -->
       <span v-else class="or-banner-text">

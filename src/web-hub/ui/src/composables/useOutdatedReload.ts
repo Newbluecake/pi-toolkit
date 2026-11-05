@@ -27,6 +27,7 @@ import {
   fleetActiveCount,
   isSnoozed,
   outdatedSessions,
+  parseReloadStatus,
   readSnoozeMap,
   sessionOutdatedInfo,
   sessionReloadedToHub,
@@ -40,6 +41,7 @@ import {
   type SnoozeStorage,
 } from "@logic/outdatedReload.js";
 import type { AgentState, HubHandle } from "../types.js";
+import { newCmdId } from "@logic/control.js";
 
 function cardRecord(agent: AgentState | undefined): Record<string, unknown> {
   const c = agent?.card;
@@ -144,13 +146,16 @@ export function useOutdatedReload(deps: OutdatedReloadDeps): OutdatedReloadHandl
     isSettled: (key) => sessionReloadedToHub(cardRecord(hub.state.value.agents.get(key)), hubVersion.value),
     offline: (key) => agentOffline(hub.state.value.agents.get(key)),
     now: deps.now,
-    send: (key) => {
+    newCmdId: () => newCmdId(),
+    reloadOutcome: (key) => parseReloadStatus(hub.state.value.agents.get(key)?.status),
+    hubVersion: () => hubVersion.value,
+    send: (key, cmdId) => {
       const control = hub.control;
       if (control === undefined) return Promise.resolve({ ok: false, error: "E_UNSUPPORTED" });
       // 送 `/agent reload` 而非 `/reload`（web 通道不经 TUI 编辑器，editor.ts 的改写不会
       // 触发；/agent reload 自带 deferred-reload 的「等子 agent 结束」保护）。confirm:true
       // —— 按钮本身就是用户确认；/agent reload 在 command-policy 是 confirm 级。
-      return control.runCommand(key, "agent", "reload", { confirm: true }).then(
+      return control.runCommand(key, "agent", "reload", { confirm: true, id: cmdId }).then(
         (outcome): { ok: boolean; error?: string; message?: string } =>
           outcome.ok
             ? { ok: true }
@@ -188,8 +193,10 @@ export function useOutdatedReload(deps: OutdatedReloadDeps): OutdatedReloadHandl
       const parts: string[] = [hubVersion.value ?? ""];
       for (const agent of hub.state.value.agents.values()) {
         const card = cardRecord(agent);
+        // #30：追加 reload 事实签名（life/rev；无 reload ⇒ 空段，老 agent 签名不变含义）。
+        const rl = parseReloadStatus(agent.status);
         parts.push(
-          `${agent.key}=${busyOf(agent) ? 1 : 0}:${fleetOf(agent)}:${sessionReloadedToHub(card, hubVersion.value) ? 1 : 0}:${agentOffline(agent) ? 1 : 0}`,
+          `${agent.key}=${busyOf(agent) ? 1 : 0}:${fleetOf(agent)}:${sessionReloadedToHub(card, hubVersion.value) ? 1 : 0}:${agentOffline(agent) ? 1 : 0}${rl === undefined ? "" : `:${rl.life}/${rl.rev}`}`,
         );
       }
       return parts.join("|");

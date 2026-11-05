@@ -14,6 +14,7 @@ export default {
   reloading: "Reloading…",
   queuedText: "A turn is running; the reload will fire automatically once the session goes idle.",
   queuedFleetText: "{n} sub-agent(s)/workflow(s) still running; the reload will fire automatically once they settle.",
+  parkedIdle: "Reload delivered — waiting for the current turn to end and the session to go idle before it fires.",
   parkedText: "Reload delivered — waiting for {n} sub-agent(s)/workflow(s) to settle before it fires.",
   cancelQueue: "Cancel queued reload",
   awaitingText: "Command delivered; waiting for the reload to take effect…",
@@ -25,7 +26,18 @@ export default {
     "the session is offline (its process exited or is restarting); the reload did not finish — if it restarted, check or retry on the new card",
   errUnsupported: "this session has no web control plane",
   errTimeout: "command delivered, but the reload did not take effect in time",
-  errQueueTimeout: "timed out waiting for the session to go idle",
+  errQueueTimeout: "the 30-minute overall limit on the web side ran out; the queued reload was cancelled",
+  errReloadLost:
+    "the reload started, but the session never came back online (loading may have failed or the process exited); check the terminal hosting the session",
+  errReloadNoUpgrade:
+    "the session reloaded, but its plugin version still differs from the hub (the installed copy on disk may not be updated yet)",
+  errReloadCancelled: "the reload was cancelled (on the session side, or superseded by another reload)",
+  errReloadUnavailable: "the host running this session cannot reload",
+  errReloadSettle: "the session did not go idle in time, so the reload could not start",
+  errReloadIdleWait:
+    "the session timed out waiting to go idle; the reload is still pending and will be cancelled at the overall limit",
+  errReloadRefused: "the host refused the reload (the session is streaming or compacting)",
+  errReloadFailed: "the reload failed",
   errSendUnknown:
     "command outcome unknown (the network response never completed); if the reload did take effect, it turns successful once the version lands",
   chipNeedsUpdate: "Update",
