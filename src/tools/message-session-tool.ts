@@ -146,7 +146,8 @@ const REPLY_DESCRIPTION =
   "reply only; wake is ignored). " +
   'effect "applied" = delivery confirmed; "none" = provably NOT delivered (safe to retry later); "unknown" = the ' +
   "message may have entered the recipient's queue — it usually becomes visible at the recipient's next turn " +
-  "boundary; do NOT blindly resend a request (a replyTo resend is idempotent but may be refused).";
+  "boundary; do NOT blindly resend a request (a replyTo resend is idempotent but may be refused). " +
+  "While working on a request that carried reply_to, send any intermediate question to its requester as a NEW message with expectReply (wake:true) — never the original replyTo (it accepts exactly one reply: your final result) — and do not block on ask_user: the requester cannot see your local dialog (the host redirects ask_user for you when it can).";
 
 export function createMessageSessionTool(
   deps: MessageSessionToolDeps,
