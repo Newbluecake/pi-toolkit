@@ -146,6 +146,8 @@ import type { PromptGatePort } from "./prompt-gate.js";
 import { appendToolTimingEntries, registerToolTimingEntryRenderer } from "./tool-timing.js";
 import { createBuiltinBridge, type BuiltinBridgeDeps } from "./builtin-bridge.js";
 import { createExecGate, createResumeExec } from "./resume-exec.js";
+import { createReloadTracker } from "./reload-track.js";
+import type { ReloadPhaseEvent } from "../../reload/phase.js";
 import { createResumeList, defaultResumeCore } from "./resume-list.js";
 import { classifyCommand, listSlashCommands, stripCommandArgs, type CommandArgsHints } from "./slash.js";
 import {
@@ -445,6 +447,10 @@ export interface WebHubDeps {
   paths?: HubPaths;
   /** Explicit home for the launched hub. Never inferred from an injected `paths` object. */
   launchHome?: string;
+  /** #30 reload-result: test seam standing in for the re-evaluated module instance a real
+   *  /reload hands the tracker (MODULE_INSTANCE is one random UUID per module evaluation, so a
+   *  single test process cannot produce two). Production leaves this unset. */
+  reloadModuleInstance?: string;
   buildInfo?: () => Promise<{ pluginVersion: string; buildId: string }>;
   argv1?: string;
 }
@@ -476,6 +482,11 @@ export type LanAdminResult<T> =
 
 export interface WebHubControl {
   readonly capture?: CommandCapturePort;
+  /** #30 reload-result plan §1 D6: the deferred-reload command port's phase sink — the tracker
+   *  behind `StatusInfo.reload`. Wired late-bound from src/index.ts
+   *  (`() => webHubRef.current?.onReloadPhase?.(event)`); optional so pre-feature doubles keep
+   *  compiling (same convention as `capture`). No new pi.on — handlerCounts stay frozen. */
+  onReloadPhase?(event: ReloadPhaseEvent): void;
   /** fabric-thread arch r3 §6.7 (P3): the engine-reply sink — forwards the engine's first-reply
    *  outcomes onto the live command handler (which holds the pending cmd frames). Threaded by
    *  src/index.ts into buildSessionStack's StackThreadInput. Present iff deps.threads is set. */
@@ -677,6 +688,28 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // `internalExec` below routes each op through its own consumer. An expired `/new` nonce is
   // dropped lazily by the gate itself.
   const execGate = createExecGate({ now });
+
+  // #30 reload-result plan §1 D3–D6: the reload tracker. Pure-state machine in
+  // `reload-track.ts`; its process-global Symbol.for store ({v:1, rec?, handover?}, capacity
+  // 1+1, D5) survives the in-process reload handover, which is exactly how a started fact from
+  // the OLD activation meets the NEW activation's session_start takeover validation (D4).
+  // `publish()` (late-bound — publishStatus is declared further down) fires only on a real
+  // projection change (D6): no record / no change ⇒ no frame, byte-identical wire.
+  const reloadTracker = createReloadTracker(
+    {
+      now,
+      moduleInstance: deps.reloadModuleInstance ?? MODULE_INSTANCE,
+      version: () => packageVersionSync(),
+      session: () => {
+        const x = ctx;
+        if (x === undefined) return undefined;
+        const sessionId = safe(() => x.sessionManager.getSessionId() ?? "", "");
+        if (sessionId === "") return undefined;
+        return { sessionId, sessionFile: safe(() => x.sessionManager.getSessionFile(), undefined) };
+      },
+    },
+    { publish: () => publishStatus() },
+  );
 
   const attributePromptRef: { current: (e: WireEvent) => WireEvent } = { current: (e) => e };
   const tap = createEventTap(
@@ -1052,6 +1085,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       const running = commandRecorder.running();
       if (running.length > 0) s.cmdRunning = running;
     }
+    // #30 reload-result plan §1 D6: the tracked reload slot — present ONLY while a valid,
+    // non-expired record exists (deferred/started/…). TUI-origin reloads are never tracked and
+    // a web-hub-off session never wires this code path, so those status frames stay
+    // byte-identical to the pre-feature shape (StatusInfoSchema is open; old hubs/UIs ignore it).
+    const reloadView = reloadTracker.projection();
+    if (reloadView !== undefined) s.reload = reloadView;
     c.setSlot("status", { t: "status", ...s }, xsBridge?.slotFlush);
   };
 
@@ -1153,6 +1192,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         publishStatus();
       }
     }
+    // #30 reload-result plan §1 D5: TTL constrains reads only — this same 1Hz probe catches an
+    // expiry (open 40min / closed 10min) and retracts the slot with exactly ONE publish; no
+    // new timer (I5). Regular facts publish through onReloadPhase directly.
+    if (reloadTracker.tick()) publishStatus();
     // bash-jobs-panel plan §3.7 (包 A, D3-1): the manager has no events, so the same 1Hz tick
     // carries a light-fingerprint gate over the selectJobs result (running logBytes and
     // second-level elapsed stay OUT; terminal logBytes — the footer patch — is IN, R3-2). A
@@ -1839,6 +1882,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // happens immediately (subject to isLive()); same-cwd /new・/resume・/fork keeps the cache.
     bashSampler.start(); // bash-jobs-panel plan §3.7: clear cache/generations + re-kick — a new
     // stack means a new manager instance anyway (D3-4 session boundaries).
+    // #30 reload-result plan §1 D4: reload handover validation — consume the marker and complete
+    // the tracked record iff EVERY identity condition holds (reason, sessionId + sessionFile,
+    // originEpoch ≠ this activation, shutdownAt written, the 120s window, the record's life).
+    // BEFORE the attach below so the completed projection is already in place for it (the
+    // record's own change probe drops the publish while `conn` is still undefined — the
+    // replayed slot then carries it, D9); a failed validation leaves the record started (UI
+    // infers via its effect timer / version).
+    reloadTracker.onSessionStart(reasonOf(event));
     // O(branch entries) cost sum, deferred so session_start returns at once.
     const im = setImmediate(() => {
       if (gen !== generation) return;
@@ -1894,6 +1945,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     resumeExec.onSessionBoundary();
     resumeList.onShutdown();
     dialogBridge.detachAll();
+    // #30 reload-result plan §1 D3/D4: the boundary facts — shutdown{reload} completes the
+    // handover marker's shutdownAt (never a frame: the marker does not ride the wire) and
+    // supersedes a still-parked record; a non-reload shutdown cancels an open record as
+    // session|quit. Record mutations persist in the process-global store; the NEXT
+    // activation's publishes carry them (a quit publishes nothing — the UI infers offline).
+    reloadTracker.onSessionShutdown(reasonOf(event));
     tap.dispose();
     // §4.4 (F2 verifier P1): session replacement is a RESET, not a kill — /new・/resume・/fork
     // re-enter session_start inside this same activation and the run service must answer again
@@ -2272,6 +2329,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // byte-identically once the ref is actually populated.
     capture: commandCapture,
     ...(commandRecorder !== undefined ? { recorder: commandRecorder } : {}),
+    // #30 reload-result plan §1 D6: the deferred-reload command port's phase sink — assembled
+    // late-bound in src/index.ts (`() => webHubRef.current?.onReloadPhase?.(event)`), so no
+    // new pi.on and no handlerCounts change (I9). Optional like `capture` so pre-feature
+    // WebHubControl doubles keep compiling.
+    onReloadPhase: (event) => reloadTracker.onPhase(event),
     // fabric-thread P3: exposed for src/index.ts → buildSessionStack (StackThreadInput.replySink).
     ...(threadSink !== undefined ? { threadSink } : {}),
     internalExec: async (args, ctx) => {

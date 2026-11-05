@@ -843,7 +843,14 @@ export default function activate(rawPi: ExtensionAPI): void {
           if (key === "concurrencyLimit" && typeof value === "number") holder.current?.spawn.setConcurrencyLimit(value);
         },
       },
-      reload: createReloadCommandPort(() => reloadRef.current, pi),
+      reload: createReloadCommandPort(
+        () => reloadRef.current,
+        pi,
+        (event) =>
+          // #30 D1/D6: late-bound phase sink — the web-hub tracker, iff wired (webHub off ⇒
+          // webHubRef.current stays undefined and the port's events simply go nowhere).
+          webHubRef.current?.onReloadPhase?.(event),
+      ),
     }),
   );
 

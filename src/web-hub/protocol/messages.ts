@@ -767,6 +767,58 @@ export interface StatusInfo {
    *  it through old hubs untouched (xsInbox/threads precedent); old UIs ignore it. No body/hash/
    *  token ever rides it. */
   xsRequests?: XsRequestsStatusWire;
+  /** #30 reload-result plan §1 D2: the tracked web-initiated reload lifecycle riding the same
+   *  status slot lifecycle as `todo`/`worktrees`. Absent ⇔ no valid tracked record (TUI-origin
+   *  reloads are never tracked, web-hub off, or the record expired) — byte-equal to the
+   *  pre-feature shape. `state` is the LATEST fact; `open` says whether the request is still in
+   *  flight (a `failed` with `open:true` — e.g. E_RELOAD_IDLE_WAIT — keeps recording later
+   *  facts). The open StatusInfoSchema forwards it through old hubs untouched; old UIs ignore it.
+   *  No PROTO bump, no cap, no new frame (D6). */
+  reload?: ReloadStatusWire;
+}
+
+/** `StatusInfo.reload.state` — the most recent fact of the tracked lifecycle. */
+export type ReloadResultState = "deferred" | "started" | "cancelled" | "failed" | "completed";
+
+/** `StatusInfo.reload.code` — the E_* reason for `failed`, or the cancellation origin. */
+export type ReloadResultCode =
+  | "E_RELOAD_IDLE_WAIT"
+  | "E_RELOAD_UNAVAILABLE"
+  | "E_RELOAD_SETTLE"
+  | "E_RELOAD_REFUSED"
+  | "E_RELOAD_THREW"
+  | "user"
+  | "superseded"
+  | "session"
+  | "quit";
+
+/** #30 reload-result plan §1 D2 — the wire shape of `StatusInfo.reload`. Append-only optional
+ *  fields only; field order here is the projection's byte order. */
+export interface ReloadStatusWire {
+  v: 1;
+  /** The reload lifecycle id (one per request lifecycle, D1). */
+  life: string;
+  /** The web command frame ids attributed to this lifecycle, 1..4 (FIFO beyond 4). */
+  cmdIds: string[];
+  /** Monotone within the life; +1 per new fact (UI dedups on it). */
+  rev: number;
+  /** The current execution's token — only facts of the current execution ever set it. */
+  execId: string;
+  state: ReloadResultState;
+  /** Collector-side: is the request still in flight (an `open:true` failed keeps recording). */
+  open: boolean;
+  /** Agent clock; the UI never judges expiry from it (clocks differ). */
+  at: number;
+  waitingFor?: "runs" | "idle";
+  /** deferred-only: the active run count when `waitingFor === "runs"`. */
+  activeRuns?: number;
+  code?: ReloadResultCode;
+  /** Only `E_RELOAD_THREW` carries it; ≤256 bytes, cut at a UTF-8 boundary. */
+  message?: string;
+  /** Only `completed`, and only when the version is trusted (never empty/"0.0.0"). */
+  version?: string;
+  /** Only `completed`: the taking-over activation's MODULE_INSTANCE. */
+  epoch?: string;
 }
 
 export interface FleetRowWire {

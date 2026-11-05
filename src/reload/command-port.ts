@@ -10,6 +10,8 @@ import {
 } from "./continue.js";
 import { clampSpanMs, withDeadline } from "../core/deadline.js";
 import { systemClock } from "../core/clock.js";
+import { webCmdIdOf } from "../commands/capture.js";
+import { newReloadExec, newReloadLife, type ReloadPhaseEvent, type ReloadPhaseFact } from "./phase.js";
 
 /** pi 1.3 TUI refuses ctx.reload while streaming; settling must never hang the command. */
 export const RELOAD_SETTLE_MS = 5_000;
@@ -20,6 +22,9 @@ export interface ReloadCommandPort {
   cancel(ctx: ExtensionCommandContext): boolean;
   /** Register a non-blocking natural-idle wait; true means defer this command. */
   deferFire(ctx: ExtensionCommandContext): boolean;
+  /** #30 reload-result plan §1 D3: the host cannot reload — emits `failed
+   * E_RELOAD_UNAVAILABLE` (closing the tracked lifecycle) and notifies the user. */
+  unavailable(ctx: ExtensionCommandContext): void;
   reload(ctx: ExtensionCommandContext, mode?: "force" | "deferred"): Promise<void>;
 }
 
@@ -36,17 +41,56 @@ export function notifyReloadUnavailable(ctx: ExtensionCommandContext): void {
   );
 }
 
+/** #30 D1: facts that may open (or reopen) a lifecycle — a request entering the port. */
+const ENTRY_FACTS: ReadonlySet<ReloadPhaseFact["kind"]> = new Set(["deferred", "unavailable", "exec"]);
+
 /** Late-bound facade: index.ts only assembles it; all command lifecycle logic lives here. */
 export function createReloadCommandPort(
   current: () => DeferredReloadController | undefined,
   pi: Pick<ExtensionAPI, "sendMessage">,
+  onPhase?: (event: ReloadPhaseEvent) => void,
 ): ReloadCommandPort {
   let turnAtArm: ReloadTurnSnapshot | undefined;
+  // #30 reload-result plan §1 D1 — the port-level lifecycle: ONE open `life` at a time; it ends
+  // on cancel, unavailable or `ctx.reload()` returning. Every real reload attempt rotates the
+  // execution token `execId`; asynchronously-captured continuations re-check both before
+  // emitting so a superseded attempt can never speak for (or after) a newer one.
+  let life: string | undefined;
+  let lifeOpen = false;
+  let execId = "";
+  let lastDeferredKey: string | undefined;
   const notifyModel = (ctx: ExtensionCommandContext, content: string) => {
     pi.sendMessage(
       { customType: "subagent:reload-pending", display: true, content },
       { deliverAs: isReloadStreaming(ctx) ? "steer" : "nextTurn" },
     );
+  };
+  const openLife = (): void => {
+    life = newReloadLife();
+    execId = newReloadExec();
+    lifeOpen = true;
+    lastDeferredKey = undefined;
+  };
+  /** Entry facts open a fresh lifecycle when none is open; continuation facts need an open one. */
+  const emit = (fact: ReloadPhaseFact, ctx: ExtensionCommandContext): void => {
+    if (onPhase === undefined) return;
+    if (!lifeOpen) {
+      if (!ENTRY_FACTS.has(fact.kind)) return;
+      openLife();
+    }
+    const by = webCmdIdOf(ctx);
+    onPhase({ life: life!, execId, ...(by !== undefined ? { by } : {}), ...fact });
+  };
+  /** Execution-scoped emission for awaited continuations: only the captured attempt may speak. */
+  const emitFrom = (
+    attempt: { life: string; execId: string },
+    fact: ReloadPhaseFact,
+    ctx: ExtensionCommandContext,
+  ): void => {
+    if (onPhase === undefined) return;
+    if (attempt.life !== life || attempt.execId !== execId || !lifeOpen) return;
+    const by = webCmdIdOf(ctx);
+    onPhase({ ...attempt, ...(by !== undefined ? { by } : {}), ...fact });
   };
   return {
     get pending() {
@@ -55,7 +99,19 @@ export function createReloadCommandPort(
     arm(activeCount, ctx) {
       const ctl = current();
       if (!ctl || !canReload(ctx)) return;
-      if (!ctl.arm(activeCount, isReloadStreaming(ctx))) return;
+      const first = ctl.arm(activeCount, isReloadStreaming(ctx));
+      // #30 D3: arm OR refresh ⇒ deferred{runs|idle, activeRuns} — after every ctl.arm call; a
+      // refresh with an unchanged shape emits nothing (the projection would not change, D6).
+      const waitingFor = activeCount > 0 ? ("runs" as const) : ("idle" as const);
+      // The memo carries the ATTRIBUTION key too: a TUI-sourced fact about an untracked life is
+      // dropped by the tracker (Q1), so it must never suppress a later WEB fact of the same
+      // shape (that one establishes the record).
+      const key = `${webCmdIdOf(ctx) ?? ""}|${waitingFor}:${activeCount}`;
+      if (key !== lastDeferredKey) {
+        emit({ kind: "deferred", waitingFor, ...(activeCount > 0 ? { activeRuns: activeCount } : {}) }, ctx);
+        lastDeferredKey = key; // after emit: a freshly opened life resets the memo inside
+      }
+      if (!first) return; // refresh: count updated, no re-notify, first snapshot kept
       turnAtArm = snapshotReloadTurn(ctx);
       const waiting = activeCount > 0 ? `正在等待 ${activeCount} 个子 agent/workflow 结束后执行` : "会在本轮结束后执行";
       notifyModel(
@@ -67,6 +123,8 @@ export function createReloadCommandPort(
       const ctl = current();
       if (!ctl?.pending) return false;
       ctl.disarm();
+      emit({ kind: "cancel" }, ctx); // #30 D3: any-source cancel ⇒ cancelled user, open:false
+      lifeOpen = false;
       notifyModel(ctx, "reload 已取消，可恢复派发 Agent / SubagentWorkflow。");
       return true;
     },
@@ -81,12 +139,32 @@ export function createReloadCommandPort(
           return ctx.waitForIdle();
         },
         () => !isReloadStreaming(ctx),
-        (reason) => ctx.ui.notify(reason, "warning"),
+        (reason) => {
+          ctx.ui.notify(reason, "warning");
+          // #30 D3: the natural-idle wait failed/timed out — the request stays parked (open).
+          emit({ kind: "idleWait" }, ctx);
+        },
       );
+      const idleKey = `${webCmdIdOf(ctx) ?? ""}|idle`;
+      if (lastDeferredKey !== idleKey) {
+        emit({ kind: "deferred", waitingFor: "idle" }, ctx);
+        lastDeferredKey = idleKey; // after emit: a freshly opened life resets the memo inside
+      }
       return true;
     },
+    unavailable(ctx) {
+      // #30 D3: `failed E_RELOAD_UNAVAILABLE, open:false` — closes whatever lifecycle this is.
+      emit({ kind: "unavailable" }, ctx);
+      lifeOpen = false;
+      notifyReloadUnavailable(ctx);
+    },
     async reload(ctx, mode = "force") {
+      if (lifeOpen) execId = newReloadExec(); // #30 D1: each attempt gets a fresh execId…
+      emit({ kind: "exec" }, ctx); // …opening a lifecycle when none is open (entry fact)
+      const attempt = { life: life!, execId };
       if (!canReload(ctx)) {
+        emit({ kind: "unavailable" }, ctx);
+        lifeOpen = false;
         notifyReloadUnavailable(ctx);
         return;
       }
@@ -117,10 +195,11 @@ export function createReloadCommandPort(
             "Reload could not settle the current response within 5s; retry /agent reload now or cancel.",
             "warning",
           );
+          emitFrom(attempt, { kind: "settle", open: ctl?.pending ?? false }, ctx);
           return;
         }
         // A user cancellation during the bounded wait also invalidates this fire/now.
-        if (wasPending && !ctl?.pending) return;
+        if (wasPending && !ctl?.pending) return; // the cancel fact already closed the lifecycle
       }
       // Deferred calls must be idle; never silently inherit the force/abort behavior.
       if (mode === "deferred" && isReloadStreaming(ctx)) return;
@@ -134,11 +213,19 @@ export function createReloadCommandPort(
       const needsContinue = needsReloadContinue(interrupted, ctx) && !naturallyFinished;
       ctl?.disarm();
       const rollback = needsContinue ? writeReloadContinue(ctx) : undefined;
+      emitFrom(attempt, { kind: "started" }, ctx); // #30 D3/D4: the only marker-writing fact
       try {
         await ctx.reload();
+        emitFrom(attempt, { kind: "returned" }, ctx); // tracker judges E_RELOAD_REFUSED
       } catch (error) {
         rollback?.();
+        emitFrom(attempt, { kind: "threw", message: error instanceof Error ? error.message : String(error) }, ctx);
         throw error;
+      } finally {
+        // D1: the lifecycle ends when ctx.reload() returned or threw (success and refusal
+        // alike) — the finally also runs on the rethrow, so a failed attempt cannot leak its
+        // life into the next request (A13).
+        lifeOpen = false;
       }
     },
   };

@@ -8,7 +8,7 @@
 - **I3 / I6**：reload 接线及准入依赖只在 HOST_KEY 之后创建。子会话不消费主会话继续标记，嵌套 Agent 保持原有行为。
 - **I4**：controller/命令端口/等待 token 均为每次 activate 的实例或闭包状态。唯一跨 activate 状态是 `Symbol.for("pi-subagent:reload-continue")` 全局槽，**容量 1、TTL 120 秒**；同时匹配 sessionId 与会话文件（文件可 undefined）。任何主会话 session_start 都读后即删，过期、不匹配、非 reload、无身份均不继续。无磁盘标记。
 - **I5**：所有等待计时器通过 `clampSpanMs` / `systemClock`（分段时钟，每个底层 timer 都 unref）；成功、取消、now、session_start/session_shutdown 清除自然等待 timer，并以 token 身份使旧 Promise 回调失效。标记 TTL 惰性校验，不用常驻清理 timer。
-- **I7 / I9 / I10**：保留旧运行时命名；不改 wire 协议或 fixture。`reload.defer=false` 时编辑器不改写，内置 `/reload` 不经本流程；显式 `/agent reload` 不受 defer 设置限制。无有效继续标记不发继续消息。
+- **I7 / I9 / I10**：保留旧运行时命名；`reload.defer=false` 时编辑器不改写，内置 `/reload` 不经本流程；显式 `/agent reload` 不受 defer 设置限制。无有效继续标记不发继续消息。**wire 只在新增的可选槽上追加**（见下节 phase observer）：没有跟踪记录时 `StatusInfo` 与帧序列逐字节不变（`tests/fixtures/web-hub/reload-result-compat-golden.json` 钉住 TUI 全序列相等）。
 - **I8 / I11 / I12**：不向 pi-free 模块引入 pi，不变更 secure 强制关闭项，工具机械准入逻辑不写进 skill。
 - **钩子数不变**：复用 reload 原有 session_start/session_shutdown；等待通过现有 `ctx.waitForIdle()` 的完成回调重发 fire，**不新增 pi.on**、不轮询，维持 schedule-off 等冻结 golden 的 handlerCounts。
 
@@ -35,6 +35,19 @@
   4. 此 assistant 后没有新的 user/toolResult 消息（元数据和 custom 通知不视为新任务）。
 - 这证明模型自然完成了本轮工作，不因曾在 arm/等待时流式而无意义地再唤醒。前一轮遗留的旧 stop、不完整 toolUse、aborted/error/缺 stopReason、后续 user/toolResult、无法读历史均不构成证明；基线为 true 时仍继续。
 - 正常完成但 pending messages=true 仍继续，以便处理队列；now 永远使用基线，不把被强制中止的回合当正常完成。
+
+## Phase observer（#30 reload-result，P-A）
+
+本模块不自己上报，只把生命周期事实交给**可选的 third-arg 回调** `createReloadCommandPort(current, pi, onPhase?)`，由 `src/index.ts` 晚绑定到 web-hub 的 `WebHubControl.onReloadPhase`（`webHub` 关时 `webHubRef.current` 为 undefined ⇒ 事件无处可去，端口行为与之前逐字节相同；不新增 `pi.on`，`handlerCounts` 不变）。
+
+- **归属单位**：`life`（`randomUUID()`，从第一个事实到 cancel / unavailable / `ctx.reload()` 返回/抛出为止）+ 执行级 `execId`（每次真正调用 reload 轮换）。异步回调（5s settle、`ctx.reload()` 结算）在入口捕获 `{life, execId}`，发射前两项都要比对：过时的执行一律丢弃。**不加执行单飞门**，deferred reload 语义完全不变。
+- **`by`**：capture 代理新增的只读 `webCmdId`（`webCmdIdOf(ctx)`，来自 hub 命令帧 id）。有值 ⇒ 建立或并入记录；无值（TUI）⇒ 只写进已跟踪且仍 open 的 life（Q1）。
+- **事实**：`deferred{runs|idle, activeRuns}`（arm/refresh，内容不变则不发）、`idleWait`（自然等待失败/30 分钟超时，`failed E_RELOAD_IDLE_WAIT, open:true`）、`cancel`（任意来源，`cancelled user`）、`unavailable`（宿主不能 reload，`E_RELOAD_UNAVAILABLE`，新方法，`commands/status.ts` 的不可用分支改调它）、`exec`、`settle`、`started`（唯一会写接管标记的事实）、`returned`（本 activation 未见到 reload-shutdown ⇒ `E_RELOAD_REFUSED`，覆盖 TUI 流式/压缩拒绝）、`threw`（`E_RELOAD_THREW` + ≤256 B 的 UTF-8 安全 message，主要是 RPC）。
+- **能力边界**：shutdown 之后加载失败（TUI 自己 catch 成 `Reload failed:`）**无法采集** ⇒ 不发帧，UI 由 started + 下线判 `E_RELOAD_LOST`。所有失败都有具体原因是不成立的承诺。
+- **接管验证**（`web-hub/agent/reload-track.ts`）：新 activation 的 `session_start` 读后即删标记，全部满足才记 completed —— `reason==="reload"`、sessionId+sessionFile 一致、`originEpoch !== MODULE_INSTANCE`、`shutdownAt` 已写、`0 ≤ now−startedAt ≤ 120s`、记录 life 等于标记 life。版本取 `packageVersionSync()`，空或 `"0.0.0"` 不写 `version`（未知 ≠ 没升级）。
+- **进程级结构**（I4）：`Symbol.for("pi-subagent:web-hub:reload-track")`，纯数据 `{v:1, rec?, handover?}`，**容量 1 条记录 + 1 个标记**。未知 `v`/损坏结构读为空、下次整体覆盖；读取时 `at`/`startedAt` 在未来或 `now−at<0` ⇒ 视为无效并立即清除。TTL 只约束读取：closed 记录 10 分钟、open 40 分钟、标记 120 秒；撤销借用现有 1s `onTick` 比较投影指纹，变了才 publish 一次（不新增计时器，I5）。
+- **发送纪律**：投影变化且 attached 才 `publishStatus`；无记录或投影未变时零输出副作用。off/TUI/无跟踪场景的完整帧序列逐字节不变，跟踪中的 Web 场景只允许两类差异（已有 status 帧多一个 `reload` 字段 / 每次投影变化多一帧 status）。
+- **门禁**：`tests/reload/{command-port,status-reload}.test.ts`、`tests/web-hub/agent/{reload-track,wiring-reload-status,reload-result-compat}.test.ts`、`tests/commands/capture.test.ts`；兼容 golden 在**未改动的实现**上录制（`PI_TOOLKIT_RELOAD_RESULT_GOLDEN_CAPTURE=1`，文件已存在时拒绝覆盖），永不为了让 diff 通过而重生。设计：`docs/dev/reload-result/plan.md`（r3）。
 
 ## pi API 与 await 调用链核对
 

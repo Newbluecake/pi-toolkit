@@ -28,7 +28,7 @@ import { describeJobStatus } from "../bash/job-tool.js";
 import type { MentionAutocompleteEntry } from "../mention/autocomplete.js";
 import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor.js";
 import { countActiveRuns } from "../reload/defer.js";
-import { canReload, notifyReloadUnavailable, type ReloadCommandPort } from "../reload/command-port.js";
+import { canReload, type ReloadCommandPort } from "../reload/command-port.js";
 import { formatWakeStatusLine, type WakeStatusView } from "../fabric/wake.js";
 import type { StackXs } from "../fabric/xs/stack.js";
 import { XS_DEFAULT_CHANNEL, XS_MAX_CHANNELS, displayChannel } from "../fabric/xs/channel.js";
@@ -243,7 +243,7 @@ async function handleReload(
   }
   // No arming, model messages or handoff writes on hosts without reload support.
   if (!canReload(ctx)) {
-    notifyReloadUnavailable(ctx);
+    ctl.unavailable(ctx); // #30 D3: failed E_RELOAD_UNAVAILABLE lands on the reload tracker
     return;
   }
   if (action === "now") {
