@@ -51,6 +51,15 @@ const transcript = {
   "tool.viewRendered": "Rendered",
   "tool.viewSource": "Source",
   "tool.viewToggleLabel": "Markdown view mode",
+  "tool.write.code": "Code",
+  "tool.write.raw": "Raw JSON",
+  "tool.write.received": "Received content",
+  "tool.write.copy": "Copy content",
+  "tool.write.expand": "Show all {n} lines",
+  "tool.write.viewLabel": "View mode",
+  "tool.write.ok": "Written successfully; standard output hidden",
+  "tool.write.resultShow": "Show raw output",
+  "tool.write.resultHide": "Hide raw output",
   // web-hub-mermaid plan §6.2 (P2): MermaidBlock chrome. Error-line texts are reason-mapped in
   // the component (`parse`/`render`/`timeout`/`output-invalid` share `mermaidError` + the
   // runtime's ≤160-char message; `unsupported` + a KaTeX-bearing message selects `mermaidMath`).

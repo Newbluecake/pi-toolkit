@@ -685,6 +685,96 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   background: var(--c-danger-soft);
 }
 
+/* write-tool content view (#37, `@logic/writeView.ts` + ToolCard.vue): numbered code instead of
+   the escaped-JSON line. The code never soft-wraps (it pans horizontally; the number gutter is
+   the shared `.pv-line` counter CSS from preview.css). `data-fold` is the >18-line default
+   fold: height cap + fade, toggled by `.write-fold-toggle`; expanded keeps the legacy 420px
+   inner scroll on fine pointers and flows with the page on coarse ones (no nested vertical
+   scroller — same scroll-freeze rule as the clamps above). */
+.tool-write-label {
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.tool-write-title {
+  min-width: 0;
+}
+
+.tool-write-meta {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: var(--fw-medium, 500);
+}
+
+.tool-write-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.tool-write-path {
+  padding: var(--sp-1) var(--sp-3) 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+  overflow-wrap: anywhere;
+}
+
+.tool-section .pre.write-code {
+  position: relative;
+  white-space: pre;
+  overflow-wrap: normal;
+  max-height: 420px;
+}
+
+.write-code-wrap {
+  position: relative;
+}
+
+.write-code-wrap[data-fold="folded"] .pre.write-code {
+  max-height: calc(18lh + 2 * var(--sp-3));
+  overflow-y: hidden;
+}
+
+.write-code-wrap[data-fold="folded"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 44px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--c-surface));
+}
+
+.write-fold-toggle {
+  margin: var(--sp-1) var(--sp-3) var(--sp-2);
+}
+
+.tool-write-ok {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--c-success);
+  font-size: var(--fs-xs);
+}
+
+@media (pointer: coarse) {
+  .write-code-wrap[data-fold="expanded"] .pre.write-code {
+    max-height: none;
+  }
+
+  .tool-write-actions .btn,
+  .tool-write-actions .tool-md-btn,
+  .write-fold-toggle {
+    min-height: 32px;
+  }
+}
+
 /* edit-tool diff view (logic in `@logic/diff.js`, rendered by `ToolCard.vue`): replaces the
    Input section's raw JSON for parseable `edit` args. Two highlight tiers per side — soft row
    background + a deeper inline-fragment chip (`--diff-*-soft` / `--diff-*-strong`, tokens.css) —

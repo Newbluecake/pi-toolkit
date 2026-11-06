@@ -54,6 +54,15 @@ const transcript = {
   "tool.viewRendered": "渲染",
   "tool.viewSource": "源码",
   "tool.viewToggleLabel": "Markdown 显示方式",
+  "tool.write.code": "代码",
+  "tool.write.raw": "原始 JSON",
+  "tool.write.received": "收到的内容",
+  "tool.write.copy": "复制内容",
+  "tool.write.expand": "展开全部 {n} 行",
+  "tool.write.viewLabel": "显示方式",
+  "tool.write.ok": "写入成功，标准输出已隐藏",
+  "tool.write.resultShow": "查看原始输出",
+  "tool.write.resultHide": "隐藏原始输出",
   // web-hub-mermaid 方案 §6.2（P2）：MermaidBlock 外观文案。错误行按 reason 在组件里选文案
   // （parse/render/timeout/output-invalid 共用 mermaidError + runtime 的 ≤160 字符 message；
   // unsupported 且 message 含 KaTeX 时选 mermaidMath）。
