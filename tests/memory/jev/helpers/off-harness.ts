@@ -466,14 +466,18 @@ function settingsFor(config: OffConfigName) {
   switch (config) {
     case "disabled":
       // jev 键在 dev 上是未知键（被 parseMemorySettings 丢弃）—— 正是要钉住的行为。
-      return parseMemorySettings({ jev: { enabled: false } });
+      // #36 D-3（plan §3 jev-off-golden 行，评审 M13）：默认布局将改为 blocks，
+      // 四个依赖默认布局的配置显式钉 layout:"tiered"，golden 字节因此不随默认值
+      // 翻转而变；legacy-layout 配置保持 layout:"legacy" 原值。今天默认仍是
+      // tiered，显式钉不改变录制结果（golden 未重生）。
+      return parseMemorySettings({ layout: "tiered", jev: { enabled: false } });
     case "legacy-layout":
       return parseMemorySettings({ layout: "legacy", jev: { enabled: true } });
     case "legacy-tool":
-      return parseMemorySettings({ toolSurface: "legacy", jev: { enabled: true } });
+      return parseMemorySettings({ layout: "tiered", toolSurface: "legacy", jev: { enabled: true } });
     case "secure-sim":
     case "pi-api":
-      return parseMemorySettings({ jev: { enabled: true } });
+      return parseMemorySettings({ layout: "tiered", jev: { enabled: true } });
   }
 }
 
