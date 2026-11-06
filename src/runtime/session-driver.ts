@@ -5,6 +5,15 @@ import {
   type HumanRuntime,
   type ChildHumanBinding,
 } from "./human-runtime.js";
+import {
+  FAST_BIND_EVENT,
+  FAST_RECORD_TYPE,
+  type FastBindReply,
+  type FastBindRequest,
+  type FastChildStatePort,
+} from "../fast/ports.js";
+import { createEventBus } from "@earendil-works/pi-coding-agent";
+import type { EventBus } from "@earendil-works/pi-coding-agent";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { assertSessionFileInDomain, secureChildSessionDir } from "../secure/domain.js";
 import { DefaultResourceLoader, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -19,6 +28,7 @@ import type {
   SessionSpec,
   UsageDelta,
 } from "../core/types.js";
+import { ClassifiedError } from "../core/errors.js";
 import { childActivationAdvanced, childActivationSnapshot } from "../child/activation-signal.js";
 
 export type { KillableHandle, SessionSpec } from "../core/types.js";
@@ -428,6 +438,7 @@ class PiSessionHandle implements SessionHandle {
     public readonly session: AgentSession,
     readonly childExtensionMissing: boolean = false,
     private readonly humanCleanup?: () => void,
+    private readonly fastCleanup?: () => void,
   ) {
     this.sessionId = session.sessionId;
     this.sessionFile = session.sessionFile;
@@ -485,14 +496,28 @@ class PiSessionHandle implements SessionHandle {
     );
   }
   requestAbort() {
-    this.humanCleanup?.();
-    this.session.abort();
+    try {
+      this.fastCleanup?.();
+    } finally {
+      try {
+        this.humanCleanup?.();
+      } finally {
+        this.session.abort();
+      }
+    }
     return Promise.resolve();
   }
   dispose(): DisposeReport {
     try {
-      this.humanCleanup?.();
-      this.session.dispose();
+      try {
+        this.fastCleanup?.();
+      } finally {
+        try {
+          this.humanCleanup?.();
+        } finally {
+          this.session.dispose();
+        }
+      }
       return { returned: true, killed: 0, unkillable: [] };
     } catch (e) {
       return { returned: false, error: errorInfo(e), killed: 0, unkillable: [] };
@@ -703,16 +728,25 @@ export type ModelResolver = (provider: string, id: string) => unknown | undefine
  * shared settingsManager) plus `systemPromptOverride`, so nothing else about
  * the child session changes (extensions, skills, AGENTS.md, APPEND_SYSTEM).
  */
-export async function toCreateOptions(spec: SessionSpec, cwd: string): Promise<Record<string, unknown>> {
-  const { systemPrompt, ...rest } = spec;
-  if (!systemPrompt) return rest;
+export async function toCreateOptions(
+  spec: SessionSpec,
+  cwd: string,
+  fastBus?: EventBus,
+): Promise<Record<string, unknown>> {
+  const { systemPrompt, fastSeed, ...rest } = spec;
+  // Fast cancellation is driver control only; SDK create has no signal option.
+  // Keep all legacy no-seed options (including their signal key) untouched.
+  if (fastSeed !== undefined) delete (rest as { signal?: AbortSignal }).signal;
+  if (fastSeed === undefined) fastBus = undefined;
+  if (!systemPrompt && !fastBus) return rest;
   const agentDir = rest.agentDir ?? getAgentDir();
   const settingsManager = SettingsManager.create(cwd, agentDir);
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
     settingsManager,
-    systemPromptOverride: () => systemPrompt,
+    ...(fastBus ? { eventBus: fastBus } : {}),
+    ...(systemPrompt ? { systemPromptOverride: () => systemPrompt } : {}),
   });
   await resourceLoader.reload();
   return { ...rest, settingsManager, resourceLoader };
@@ -723,6 +757,7 @@ export class PiSessionDriver implements SessionDriver {
     private readonly rememberAgents = true,
     private readonly resolveModel?: ModelResolver,
     private readonly humanRuntime?: HumanRuntime,
+    private readonly fastChildState?: FastChildStatePort,
   ) {}
 
   /** SessionSpec.model arrives as a {provider, id} pair; createAgentSession
@@ -789,21 +824,117 @@ export class PiSessionDriver implements SessionDriver {
     extra: Record<string, unknown>,
   ) {
     let binding: ChildHumanBinding | undefined;
+    let session: AgentSession | undefined;
+    const seed = resolved.fastSeed;
+    const bus = seed !== undefined ? createEventBus() : undefined;
+    const runtime = request as SessionSpec & { runId?: string; signal?: AbortSignal };
+    const owner = { parentRunId: runtime.runId ?? "", incarnation: {} };
+    let response: FastBindReply | undefined;
+    let unbind: (() => void) | undefined;
+    let live = true;
+    let accepting = false;
+    const cleanup = () => {
+      if (!live) {
+        bus?.clear();
+        return;
+      }
+      live = false;
+      accepting = false;
+      runtime.signal?.removeEventListener("abort", cleanup);
+      try {
+        response?.dispose();
+      } finally {
+        try {
+          unbind?.();
+        } finally {
+          bus?.clear();
+        }
+      }
+    };
     try {
+      if (seed !== undefined) {
+        if (runtime.signal?.aborted) throw new Error("Fast child creation aborted");
+        runtime.signal?.addEventListener("abort", cleanup, { once: true });
+        // Original manager only; a failed append is fatal, never a successful seed/readback.
+        const manager = extra.sessionManager as SessionManager;
+        manager.appendCustomEntry(FAST_RECORD_TYPE, { v: 1, mode: seed.mode });
+        if (runtime.runId && this.fastChildState) {
+          unbind = this.fastChildState.bind(owner, () => (response ? response.readMode() : seed.mode));
+          if (!live) {
+            unbind();
+            throw new Error("Fast child creation aborted");
+          }
+        }
+      }
       const runId = !secure && this.humanRuntime ? humanRunId(request) : undefined;
       binding = runId ? await this.humanRuntime!.prepare(runId) : undefined;
-      let options = await toCreateOptions(resolved, cwd);
+      if (!live) throw new Error("Fast child creation aborted");
+      let options = await toCreateOptions(resolved, cwd, bus);
       if (binding) options = await withHumanBinding(options, cwd, binding);
-      const { session } = await createAgentSession({ ...options, ...extra } as Parameters<
-        typeof createAgentSession
-      >[0]);
+      if (!live) throw new Error("Fast child creation aborted");
+      ({ session } = await createAgentSession({ ...options, ...extra } as Parameters<typeof createAgentSession>[0]));
+      if (bus && seed) {
+        if (!live) throw new Error("Fast child creation aborted");
+        const manager = extra.sessionManager as SessionManager;
+        const bindRequest: FastBindRequest = {
+          v: 1,
+          owner,
+          manager: Object.freeze({ getBranch: () => manager.getBranch() }),
+          reply: (reply) => {
+            // emit is synchronous. Late replies (including same-id ABA) can only revoke
+            // their OWN returned binding; they never publish a new owner's read callback.
+            if (!accepting || !live || response) {
+              if (reply !== response) reply.dispose();
+              return;
+            }
+            if (
+              reply.v !== 1 ||
+              reply.wired !== true ||
+              typeof reply.readMode !== "function" ||
+              typeof reply.dispose !== "function"
+            )
+              return;
+            response = reply;
+          },
+        };
+        accepting = true;
+        try {
+          bus.emit(FAST_BIND_EVENT, bindRequest);
+        } finally {
+          accepting = false;
+        }
+        if (!response && seed.mode !== "inherit")
+          throw Object.assign(
+            new ClassifiedError({
+              kind: "config",
+              message: "fast_receiver_missing: Fast child receiver missing before first prompt",
+              retryable: false,
+            }),
+            { reason: "fast_receiver_missing" },
+          );
+      }
+      if (!live) throw new Error("Fast child creation aborted");
       if (binding) grantHumanScope(request);
-      return new PiSessionHandle(session, computeChildExtensionMissing(activationBefore), binding?.dispose);
+      return new PiSessionHandle(
+        session,
+        computeChildExtensionMissing(activationBefore),
+        binding?.dispose,
+        bus ? cleanup : undefined,
+      );
     } catch (error) {
-      binding?.dispose();
+      try {
+        cleanup();
+      } finally {
+        try {
+          binding?.dispose();
+        } finally {
+          session?.dispose();
+        }
+      }
       throw error;
     }
   }
+
   resume(sessionFile: string, spec: SessionSpec) {
     // data-encryption §2.5: cross-domain resume (vault file from a plain process, or a file outside
     // the vault from a secure one) is refused before pi opens — and possibly rewrites — the file.
@@ -813,16 +944,12 @@ export class PiSessionDriver implements SessionDriver {
       return Promise.reject(error instanceof Error ? error : new Error(String(error)));
     }
     const resolved = this.withResolvedModel(spec);
+    const secure = secureChildSessionDir() !== undefined;
     const sessionManager = SessionManager.open(sessionFile, undefined, resolved.cwd);
     const activationBefore = childActivationSnapshot();
-    return this.createWithHuman(
-      resolved,
-      spec,
-      resolved.cwd ?? sessionManager.getCwd(),
-      secureChildSessionDir() !== undefined,
-      activationBefore,
-      { sessionManager },
-    );
+    return this.createWithHuman(resolved, spec, resolved.cwd ?? sessionManager.getCwd(), secure, activationBefore, {
+      sessionManager,
+    });
   }
   bind(h: SessionHandle, onEvent: (e: DriverEvent) => void) {
     const session = (h as PiSessionHandle)["session"];

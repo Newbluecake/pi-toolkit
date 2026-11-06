@@ -1,3 +1,4 @@
+import type { FastParentPort } from "../fast/ports.js";
 import { applyBudgetPolicy } from "../core/deadline.js";
 import { mergeBudget } from "../config/settings.js";
 import { newRunId, isRunId } from "../core/ids.js";
@@ -174,6 +175,8 @@ export interface SpawnService {
   runningIds(): readonly RunId[];
 }
 export interface SpawnServiceDeps {
+  /** Capture once at synchronous admission; absent/undefined preserves the legacy path. */
+  fastParent?: FastParentPort;
   types: AgentTypeRegistry;
   pool: SlotPool;
   runner: Runner;
@@ -989,6 +992,27 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         fixedDeadline: resolvedPolicy === "fixed",
         extensionsEnabled: deps.extensionsEnabled ?? true,
       });
+      // Capture only after every admission gate, before inbox/labels/slots/async work. Workflow
+      // seeds were already accepted before its own FIFO and must never be read again.
+      if (!admittedExternal) {
+        try {
+          const seed = resolvedReq.fastSeed ?? deps.fastParent?.snapshot(req.parentRunId);
+          if (seed !== undefined) resolvedReq = { ...resolvedReq, fastSeed: { v: 1, mode: seed.mode } };
+        } catch (error) {
+          for (const key of lockKeys) if (resumeOwners.get(key) === runId) resumeOwners.delete(key);
+          return {
+            error: {
+              kind: "config",
+              message: `Fast parent snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
+              retryable: false,
+              reason: "config",
+            },
+          };
+        }
+      } else if (resolvedReq.fastSeed !== undefined) {
+        const { fastSeed: _fastSeed, ...rest } = resolvedReq;
+        resolvedReq = rest;
+      }
       // W3: never trust a caller's trackInput. Only a successfully bound reservation may enable W2.
       if (resolvedReq.trackInput !== undefined) {
         const { trackInput: _untrusted, ...rest } = resolvedReq;

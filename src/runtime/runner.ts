@@ -1081,11 +1081,14 @@ export class RuntimeRunner implements Runner {
       dispatch({ kind: "slot_acquired", at: this.d.clock.now() });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "session_create" });
       const openFile = req.resumeFrom;
+      // Fast owns pending-create bindings: revoke them on the runner/watchdog's
+      // internal cancellation too. No-seed keeps the exact legacy request object.
+      const createReq = req.fastSeed === undefined ? req : { ...req, signal: cancel.signal };
       createP = openFile
         ? this.d.driver.resume
-          ? this.d.driver.resume(openFile, req)
+          ? this.d.driver.resume(openFile, createReq)
           : Promise.reject(new Error("session driver does not support resume"))
-        : this.d.driver.create(req);
+        : this.d.driver.create(createReq);
       const createBudget = remainingFor(budget.startupMs, this.d.clock.now(), state.deadlines);
       const created = await this.guard(createP, createBudget.ms, cancel, "create");
       if (!created.ok) {

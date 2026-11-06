@@ -36,3 +36,25 @@ export interface FastOwner {
 export interface FastChildStatePort {
   bind(owner: FastOwner, readMode: () => FastMode): () => void;
 }
+
+/** In-process public event-bus handshake; never a network/wire protocol frame. */
+export const FAST_BIND_EVENT = "subagent:fast-bind";
+export const FAST_RECORD_TYPE = "subagent:fast";
+/** The original manager's read-only branch view, not a second store or persistence proof. */
+export interface FastManagerView {
+  getBranch(): readonly unknown[];
+}
+export interface FastBindReply {
+  readonly v: 1;
+  readonly wired: true;
+  readonly readMode: () => FastMode;
+  /** Exact binding cleanup, synchronous and idempotent; never revoke a replacement owner. */
+  readonly dispose: () => void;
+}
+export interface FastBindRequest {
+  readonly v: 1;
+  readonly owner: FastOwner;
+  readonly manager: FastManagerView;
+  /** Must be called in the handler's synchronous prefix (before its first await). */
+  readonly reply: (response: FastBindReply) => void;
+}

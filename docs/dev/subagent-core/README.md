@@ -205,3 +205,104 @@ Tests: `tests/runtime/human-runtime.test.ts`,
 `tests/integration/fabric-xs-human-child-runtime.test.ts`. The latter exercises
 real SDK sessions and production Agent tools (blocking and background nesting),
 using controlled admitted-edge and transport ports, not a full network runner.
+
+## Fast child admission and first-prompt barrier (task55 P3)
+
+`SpawnServiceDeps.fastParent?: FastParentPort` is an activation-local optional dependency. Successful
+synchronous admission captures `snapshot(req.parentRunId)` once, before inbox/label/slot mutation and async
+work. An existing workflow `req.fastSeed` wins without another lookup; only `{v:1,mode}` is copied.
+Snapshot exceptions return a config failure and release this admission's resume locks (no slot/label/edge
+has been reserved yet). Missing port/undefined snapshot makes no Fast key, readback or record. External
+droid admissions strip seeds; the runtime adapter explicitly copies request seed to `SessionSpec.fastSeed`
+on the pi path only, not into promptNotes, tool arguments, runner-specific fields or external options.
+
+`PiSessionDriver` accepts a fourth optional constructor argument `fastChildState?: FastChildStatePort`.
+The trusted runtime `request.runId` becomes `FastOwner.parentRunId` (this child's id for a later nested
+admission), with a fresh object incarnation per creation. After seed append, `bind(owner, readMode)` reads
+the admitted mode until the receiver replies, then delegates to that child's branch callback, never root.
+The parent-port implementation/registry and real branch fold are owned by the later Fast wire package.
+No new Agent parameter, module registry, timer, worker option or network protocol is introduced here.
+
+Secure/domain checks precede manager creation/open and Fast writes. The original manager is retained;
+the original persisted child marker remains first, followed by `subagent:fast` `{v:1,mode}`. Terminal
+Agent resume appends its new acceptance seed, including an inherit tombstone over an old child's on.
+Append/init failure is fatal before any model prompt, not swallowed or “proved persisted” via getBranch.
+Normal SDK buffered append success is accepted, **not fsync**. The independent SDK1.5 storage
+characterization does not prove every production failure path; P3 additionally tests a real EISDIR seed
+append failure, public init/append throws, missing receiver, abort and SDK-create failure with prompt count 0.
+
+### V2 public SDK1.5 loader decision and literal handshake
+
+`CreateAgentSessionOptions` has `resourceLoader`, **not eventBus**; its default-loader constructor receives
+only cwd/agentDir/settingsManager. Following root's explicit signature/code review, **only with a seed**
+P3 constructs the public canonical `DefaultResourceLoader({cwd,agentDir,settingsManager,eventBus,
+...(systemPrompt ? {systemPromptOverride} : {})})` and reloads it once, preserving default resource discovery.
+This is the approved conditional alternative for the otherwise inaccessible SDK-default bus, not permission
+to replace arbitrary loaders. Without seed, no-prompt options still use SDK's default loader; the old custom
+prompt path stays unchanged. `fastSeed` is destructured out before SDK options. With a seed only,
+the driver also deletes the `signal` key from SDK options (not `signal: undefined`); it remains on the
+original control spec for the driver's listener. No-seed SDK options retain their original signal key,
+including the custom-prompt path. `withHumanBinding` composes
+its existing supplemental observer on the same base resources without reloading the base. Fast is **not**
+programmatically injected as an extension: production receiver must come from normal settings discovery.
+
+The pi-free additions in `src/fast/ports.ts` are:
+
+- `FAST_BIND_EVENT = "subagent:fast-bind"`, `FAST_RECORD_TYPE = "subagent:fast"`.
+- `FastManagerView = { getBranch(): readonly unknown[] }`, a readonly wrapper of the original manager.
+- `FastBindRequest = { readonly v:1; readonly owner:FastOwner; readonly manager:FastManagerView;
+readonly reply:(response:FastBindReply)=>void }`.
+- `FastBindReply = { readonly v:1; readonly wired:true; readonly readMode:()=>FastMode;
+readonly dispose:()=>void }`.
+
+Receiver subscribes synchronously during its extension factory/pre-guard wiring. Driver appends seed,
+binds the seed callback, reloads resources, creates SDK session, then emits on that exact loader bus before
+returning the handle (no reliance on session_start or session_shutdown). Reply must arrive in the handler's
+synchronous prefix before its first await. No reply for on/off throws a classified non-retryable config
+error with `reason="fast_receiver_missing"` on the thrown error and the same code in its message;
+inherit retains the old extension-missing diagnostic and seed fallback. The original create budget/gate and
+late-handle reaper remain authoritative; no polling, extra timers or lifetime refill are added.
+
+Accepted reply/child-state cleanup is exact-owner, synchronous and once-only on abort/dispose/create failure;
+bus listeners are cleared even when SDK never emits shutdown. A late old reply cannot replace current state
+and disposes only its returned binding. Receiver must itself make same-manager binding idempotent, reject
+another manager, and make its returned cleanup idempotent/owner-scoped; P3 provides the handshake, not a
+second receiver/state implementation. Child wire order remains P4b's keepalive → Fast → lazy budget → traffic.
+
+Tests: `tests/service/{spawn-fast,runtime-adapter-fast}.test.ts`,
+`tests/runtime/session-driver-fast.test.ts`, `tests/conformance/fast-loader.test.ts`,
+`tests/integration/fast-child.test.ts`. The latter two use the real isolated SDK1.5, own settings/local receiver
+fixture, real public bus/loader and independent human observer, zero model prompts; the integration also
+exercises the production driver and real append rollback after EISDIR. They do not certify live providers,
+all faults, secure mounts, production Fast receiver wiring, or the unfinished whole feature.
+
+**Internal cancellation seam (P3 mandatory delta, root-approved):** immediately before driver
+create/resume the runner uses `const createReq = req.fastSeed === undefined ? req : { ...req,
+signal: cancel.signal }`, then passes `createReq` to either call. All Fast seeds (including inherit)
+therefore listen to the existing internal runner/watchdog cancellation, not just the caller's signal.
+No-seed receives the original request object by identity. External parent linkage/detach, slot handling,
+startup/total guards and late-handle reaper are unchanged. This does not add SDK create cancellation:
+the driver listens in its own control layer, synchronously revokes the pending owner and clears its bus;
+a late SDK result is disposed by the driver and rejected before FastBind/handle/prompt. If a handle
+actually arrives late, the existing reaper still owns it (unchanged no-seed coverage).
+
+`tests/runtime/runner-fast-cancel.test.ts` uses the real RuntimeRunner, production PiSessionDriver,
+SingleSlotPool, EscalatingReaper and an explicitly started real EventWatchdog, holding only the SDK
+create promise pending. Create/resume × on/off/inherit × runner abort/startup watchdog prove immediate
+owner/bus revocation before SDK settles, external signal not aborted by internal cancel, exact-once
+SDK disposal, no FastBind or prompt after cancellation, late bus-listener cleanup, same-parent new
+incarnation survival, detached-parent behavior and no-seed request identity/late-handle reaping.
+The watchdog cases explicitly arm it for startup: normal runner wiring arms it after bind. Separate
+create/resume × on/off/inherit cases exercise normal `RuntimeRunner.run()` startup-budget exhaustion
+without arming the watchdog. The startup guard resolves a timeout verdict (it does not cancel directly),
+then runner dispatches startup_failed and its existing finally/reaper cancels with reason `reap`.
+Without a beforeReap hook this revokes owner/bus before run resolves, with SDK still pending; the late
+SDK result is disposed exactly once and cannot bind/prompt. An existing beforeReap hook runs before
+reaper, bounded by the unchanged reapMs, so it may delay this guard-driven cancellation. The controlled
+pending-hook test proves cancellation at the original reapMs bound without waiting for SDK settlement.
+Since finally launches runReap fire-and-forget, run may return before that hook completes: only explicit
+runner abort/already-armed watchdog cancellation is synchronous; not every path is zero-delay. This
+delta preserves the existing hook ordering. Direct runner pending-create user abort
+retains its pre-existing `abort_grace`/undefined-outcome behavior (startup_failed is absorbed there);
+this seam does not change settlement policy or claim to fix that separate behavior. Production receiver
+wiring and the remaining whole-feature integration still belong to P4b.

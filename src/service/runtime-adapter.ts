@@ -651,6 +651,9 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // Pre-H2 cwd: the fallback when H2 never runs (no resolveSessionSpec hook) or fails.
         const preH2Cwd = spec.cwd ?? process.cwd();
         let sessionSpec: SessionSpec = {
+          ...(!isExternal && spec.request.fastSeed !== undefined
+            ? { fastSeed: { v: 1 as const, mode: spec.request.fastSeed.mode } }
+            : {}),
           ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
           ...(spec.model === undefined ? {} : { model: spec.model }),
           ...(spec.type.tools === undefined || isExternal ? {} : { tools: spec.type.tools }),
