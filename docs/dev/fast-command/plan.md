@@ -2,6 +2,16 @@
 
 > 2026-11-07；主树基线 `3fc76437`。**仅方案，未实现、未运行本轮真实 API / 性能实验，未改配置、依赖、Agent 参数或源码。** 本稿消费 [arch.md](./arch.md) r5 及其原文 JSON；不是恢复研究53，也不启动36/45/49的新功能。L3 架构后细化，下一站为独立 Sonnet 方案评审，之后仍须用户实施授权。
 
+## 当前 baseline / V4 同步（2026-11-07，#45）
+
+用户已选择整个 Toolkit 最低 pi 1.5（Breaking Change）：peer `>=1.5.0 <1.6.0`、
+三包 dev 精确 `1.5.0`，tested 仅 `1.5.0 - 1.5.0`。P0 `2f65ea9b` 七场景已验证真实1.5 SDK
+回滚前提，P4a `80af9ca3` 共享合同已合入；P1/P2 并行原生隔离实现。
+旧1.4不再支持，不新增运行时临时IO能力探针/私有rollback/sidecar给它兜底。
+V4剩余是生产controller最后成功值、storage-fault、child初始化失败零prompt与清理的集成验证，
+**七场景P0不等于生产controller已完成**。全部Responses、native warm follows、默认enabled决定保持。
+下文双SDK路线与旧支持范围为原计划历史；本轮只同步baseline/V4，不接管Fast/Workflow README。
+
 ## 1. 一页摘要与边界
 
 - 已定：主会话与新建子 agent；随 session 保存、恢复、分支、fork；全部 OpenAI Responses 模型，包括普通/Codex/Azure 构造器，不限 provider 或 Sol。
@@ -9,7 +19,7 @@
 - 请求三态：`inherit` 原样返回；`on` 请求 `priority`；`off` 显式请求 `default`。不改变 reasoning，不使用 ultrafast，不假设收费倍率。
 - 入口是 session provider 链的最终 payload hook，按 arch §4.3 严格 Responses 判形；`ctx.model` 仅辅助，**不存在 event.model/api**。跨 API 虚拟路由及中途 setModel 是已证实能力，不能以选择模型盲注。
 - 新 child 取受理时父快照；已有 running/queued 不追随 root；workflow replay/FIFO 前捕获。main 历史恢复与 terminal Agent resume 是不同操作。
-- 最大技术阻塞 **V4**：1.4 append 写盘失败可留内存 ghost，1.5 修复；`getBranch()` 不是持久证明。先做最小离线验证；不能先宣称旧支持范围安全，再拿内存重读冒充事务。
+- **V4当前前提**：最低1.5，P0七场景已验证SDK回滚；旧1.4 ghost仅为历史证据，生产controller失败处理仍需集成。`getBranch()` 不是持久证明。
 - **U2新增用户决定**：`fast.enabled=true` 默认可用；session 初始 `inherit`，不主动改请求、不追加 startup record。显式 `false` 保留为严格 I9 紧急总开关。此为未来实现合同，**现在代码未开发，命令仍不可用**。
 - 不新增 web 按钮、工具、模型 catalog、系统 prompt 或 Agent 公共参数；只有通知与紧凑英文 status。
 
@@ -56,9 +66,11 @@
 
 持久状态只存 v/mode，跟原 session/vault/inMemory；不写 URL、prompt、错误、响应或价格，不逐请求记录。main `appendEntry(...):void`，child `appendCustomEntry(...):string` 都不是 fsync 承诺。正常成功返回按 SDK 合同接受，不承诺进程/机器崩溃的强持久性。
 
-### 3.2 V4：最小可验证路线（实施前硬门）
+### 3.2 V4：原最小验证路线与当前状态
 
-已抽验：本地1.4 `_appendEntry` 先改 fileEntries/byId/leafId 后 `_persist`，失败不回滚；隔离1.5 catch 会撤销该 entry。#45已有真实 EISDIR 失败证据，**不是假想风险**。1.5修复不等于 #45 正式支持已放行（peer仍 `<1.5`）。
+**当前裁定**：P0七场景在1.5通过，旧1.4无需兼容，不再执行下方旧宿主识别/放行分支；不得新增临时IO能力探针。生产controller/child故障集成断言仍必须完成。以下为原计划审计路线，不是重新安装旧SDK的指令。
+
+已抽验：本地1.4 `_appendEntry` 先改 fileEntries/byId/leafId 后 `_persist`，失败不回滚；隔离1.5 catch 会撤销该 entry。#45已有真实 EISDIR 失败证据，**不是假想风险**。当时1.5修复尚未改变peer；现在#45按新用户决定将全项目floor收紧至1.5。
 
 授权实施后先写一个公开 SDK characterization，使用已安装本地1.4及隔离1.5，不安装、不改依赖/peer：
 
@@ -147,6 +159,6 @@ core 新增 optional `fastSeed` 到内部 SpawnRequest/SessionSpec；不把扩�
 | G3 集成 | 各包行为测试和独立异源验收，I1/I4/I5/I7/I10/secure/I9全部闭合；新timer若不可避免必须clamp/unref且走原清理链。     |
 | G4 发布 | root依仓库release规则另行授权；不把本方案视为commit/push/安装许可。                                               |
 
-当前未决仅技术 V1（真实body识别覆盖）、V2（同bus组合就绪）、V3（warm并发观测）、V4（ghost兼容保证）。V1/V3是离线验证门，V2双loader公开路径若不可满足即实施接线阻塞，V4是已证旧SDK缺陷导致的实施阻塞；**没有待重问的U1/产品范围决定**。若V4公开API确实无解，root按§3.2分支向用户提出Fast功能特定宿主兼容策略另批（不改整体peer）；不能静默降为仅内存或取消保存/fork。本轮没有授权执行spike，也不重研已证ghost事实。
+原方案时未决仅技术 V1（真实body识别覆盖）、V2（同bus组合就绪）、V3（warm并发观测）、V4（ghost兼容保证）。V1/V3是离线验证门，V2双loader公开路径若不可满足即实施接线阻塞，V4是已证旧SDK缺陷导致的实施阻塞；**没有待重问的U1/产品范围决定**。若V4公开API确实无解，root按§3.2分支向用户提出Fast功能特定宿主兼容策略另批（不改整体peer）；不能静默降为仅内存或取消保存/fork。现P0已执行且1.5七场景通过；不再重研已证旧ghost，V4只保留生产controller集成门。
 
 本轮交接 `/tmp/fast54-plan-handoff.json` 给独立Sonnet；保留arch原fileIndex/evidence/ruledOut并区分继承与本轮抽验，附ownedhash及整合清单。未改源码、Agent参数、配置、依赖、其它任务文档、git状态；未运行build/源码测试/API/性能实验。

@@ -3,6 +3,16 @@
 > 2026-11-07；调研基线`a8fc1dac`。**仅架构/交接，待Plan细化、独立Sonnet评审及实施授权；未开发。**
 > 非恢复已取消研究53，不启动22/39/50，不改变36/45/49。**本稿已纳入真实ask_user决定：保留本会话原生预热，一并跟随Fast。** 不暂停warming、不要求新进程开启、不新增Pi上游origin/cancel工程。
 
+## 当前 baseline / V4 同步（2026-11-07，#45）
+
+用户已选择整个 Toolkit 最低 pi 1.5：peer `>=1.5.0 <1.6.0`、三包 dev 精确 `1.5.0`，
+tested 仅 `1.5.0 - 1.5.0`；1.0–1.4 不再支持（Breaking Change），旧调研版本地图仅为历史证据。
+Fast P0 `2f65ea9b` 七场景已证明 1.5 的公开 SessionManager 回滚前提；1.4 ghost 不再是当前兼容义务。
+**不新增运行时临时 IO 能力探针给旧宿主兜底**。V4 仍要求生产 controller 保留最后成功状态、
+storage-fault、child 初始化失败零 prompt 与清理的集成验证；P0 不是 controller 已完成的证明。
+`80af9ca3` 已合 P4a 共享合同，P1/P2 并行实施；本页除 baseline/V4 外保留原架构快照。
+全部 Responses、native warm follows、默认 enabled 等用户决定不变。#45 不接管 Fast/Workflow README。
+
 ## 1. 背景与目标
 
 ### 1.1 已拍板范围
@@ -45,7 +55,7 @@
 | `src/cache-ttl/{cache-ttl,child,pipeline-ping}.ts` | messages严格捕获；Responses通常invalidate；toolkit ping/measure独立options/validator。      |
 | `src/traffic/index.ts`                             | 持payload引用惰性stringify；Fast必须先替换，fetch rewrite仍可再改实际body。                 |
 | `src/secure/**`                                    | 原session/child已有vault路径；Fast不用旁路store、不放宽LOCKED/cross-domain、不增D8例外。    |
-| `src/adapters/pi-compat.ts`                        | TESTED_PI_RANGE仍1.0–1.4，peer仍>=1.0<1.5，#45独立拥有扩范围门禁。                          |
+| `src/adapters/pi-compat.ts`                        | TESTED_PI_RANGE为1.5.0单点，peer为>=1.5<1.6；#45独立拥有baseline合同。                      |
 
 相关README（subagent-core、context-switch、cache-ttl-keepalive、workflow、data-encryption、traffic-merge、plugin-merge）均全文读。无web-hub变更，不引入新控制面/wire。
 
@@ -140,7 +150,7 @@ function toggleFast(mode: FastMode): "on" | "off";
 
 branch最后subagent:fast权威，只认v1+三枚举；最后畸形/未来版本→inherit+invalid-record，不穿透旧on。未知附加字段忽略，不读accessor/prototype。无record为inherit；reset追加inherit墓碑，不删历史。
 
-记录仅v/mode，无prompt/认证/URL/父内容/价格/错误/响应，不逐request写。main pi.appendEntry，child公开manager.appendCustomEntry，secure跟原session，ephemeral用inMemory。void返回不承诺fsync/事务。**#45真实P0已证pi 1.4 append写盘失败可留内存ghost，1.5修复；getBranch重读不是持久证明**，不能把失败ghost校准成成功。失败保留最后成功状态并标storage-fault，不应用/向child继承失败新值；child初始化失败不得prompt。后续append、branch、fork、restore也不得复活failed mode。当前公开兼容策略尚未证明，列为实施前阻塞V4：先以已安装双SDK离线验证，不能声称1.0–1.5事务可靠，不用私有rollback、全局settings、明文旁路或大型sidecar绕过SDK bug，也不在Fast任务偷扩peer。
+记录仅v/mode，无prompt/认证/URL/父内容/价格/错误/响应，不逐request写。main pi.appendEntry，child公开manager.appendCustomEntry，secure跟原session，ephemeral用inMemory。void返回不承诺fsync/事务。**#45真实P0已证pi 1.4 append写盘失败可留内存ghost，1.5修复；getBranch重读不是持久证明**，不能把失败ghost校准成成功。失败保留最后成功状态并标storage-fault，不应用/向child继承失败新值；child初始化失败不得prompt。后续append、branch、fork、restore也不得复活failed mode。2026-11-07 P0七场景已验证1.5回滚，用户将全项目floor抬至1.5，旧1.4无需兼容；V4剩余为生产controller故障处理集成，不新增旧宿主临时IO探针，不用私有rollback、全局settings、明文旁路或大型sidecar绕过SDK bug。
 
 ### 4.2 命令/UI
 
@@ -280,7 +290,7 @@ TaskSemantics/taskKeyOf加optional fastMode:on|off，从host seed计算；on/off
 
 按Plan §4：P4a先冻结core/types、配置/spec、Fast窄端口与必要最小stack端口签名；P2持有workflow/{types,host,spawner-adapter,journal,replay,call-registry}.ts（TaskSemantics/QueuedAgentCall新增optional字段，queue-mirror引用只读），P3独占runtime-adapter/session-driver/准入。P4b最后消费P1/P2/P3实际接线index/stack/teardown/child wire/command/trace。P4a与P4b同唯一owner串行，不给P2/P3修改stack/core类型，不以P4b反向阻塞P4a形成环；Plan列精确路径，不为分包造框架。
 
-#45可能动compat/cacheTTL类型/支持文档；Fast不改peer/package/lock/TESTED_PI_RANGE，仍>=1.0<1.5。globalCLI1.5/localSDK1.4不代表当前loaded已知。初始B3 pending三文件(memory gate脚本/测试/pg-report)不是本任务资产，不接管并行变化。
+#45可能动compat/cacheTTL类型/支持文档；Fast不改peer/package/lock/TESTED_PI_RANGE；#45新baseline为>=1.5<1.6、tested仅1.5.0。globalCLI1.5/localSDK1.4不代表当前loaded已知。初始B3 pending三文件(memory gate脚本/测试/pg-report)不是本任务资产，不接管并行变化。
 
 ### 6.2 测试门禁（本阶段未运行）
 
@@ -300,7 +310,7 @@ TaskSemantics/taskKeyOf加optional fastMode:on|off，从host seed计算；on/off
 
 ### 6.3 剩余项
 
-**无未决产品问题；U1已拍板，不再询问。** V4持久化兼容是实施前技术阻塞，不是已批准的上游改造。Plan定向核验识别表完整性、公共child握手及native warm组合快照测试，给出V4最小验证路线及无法满足时的root决策建议；不泛调研、不新增上游工程。旧暂停/新边界前置全部排除。后续评审/用户实施闸门仍保留。
+**无未决产品问题；U1已拍板，不再询问。** V4的1.5 SDK回滚前提已有P0七场景证据，剩余为生产故障处理集成，不是上游改造或旧1.4兼容探针。Plan定向核验识别表完整性、公共child握手及native warm组合快照测试，给出V4最小验证路线及无法满足时的root决策建议；不泛调研、不新增上游工程。旧暂停/新边界前置全部排除。后续评审/用户实施闸门仍保留。
 
 ## 附录A：结构化交接原文
 

@@ -35,6 +35,14 @@
 
 ## 安装
 
+**宿主支持：pi `>=1.5.0 <1.6.0`**（pi-ai / pi-coding-agent / pi-tui 同范围）。
+2026-11-07 起最低版本收紧至 1.5，**不再支持 pi 1.0–1.4（Breaking Change）**。
+开发依赖三包精确锁定 `1.5.0`，实际验证点仅为 `1.5.0`；允许安装的后续 1.5.x patch
+（例如 1.5.1）仍会提示未经验证。能力检查仍为结构探测，不以版本号替代功能验证。
+本次仅调整开发支持基线，不改 Toolkit 版本号、不代表已发版，也不会升级或重启任何运行中的宿主。
+隔离验证证据与未授权的 classifier / droid / secure 门禁见
+[适配记录](docs/dev/pi-version-adaptation/plan.md)。
+
 pi 直接加载 TypeScript 源码（经 jiti），无需构建：
 
 ```sh

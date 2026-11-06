@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  TESTED_PI_RANGE,
   assertCompatible,
   checkTurnEndShape,
   detectPiCapabilities,
@@ -36,7 +37,7 @@ describe("pi-compat gate", () => {
     const result = assertCompatible(caps);
     expect(result.ok).toBe(true);
     expect(result).toHaveProperty("warning");
-    for (const v of ["1.5.0", "2.0.0"]) {
+    for (const v of ["1.0.0", "1.4.0", "1.5.1", "1.5.99", "1.6.0", "2.0.0", "1.5.0-beta.1", "1.5.0garbage"]) {
       const out = assertCompatible(
         detectPiCapabilities({ sendMessage() {}, appendEntry() {}, events: { on() {}, emit() {} } }, v),
       );
@@ -44,14 +45,24 @@ describe("pi-compat gate", () => {
     }
   });
 
-  it("does not warn inside the tested range (1.0.x – 1.4.x)", () => {
-    for (const v of ["1.0.0", "1.0.2", "1.1.0", "1.1.5", "1.2.0", "1.2.7", "1.3.0", "1.3.2", "1.4.0", "1.4.3"]) {
+  it("does not warn at the exact tested release (1.5.0 only)", () => {
+    expect(TESTED_PI_RANGE).toBe("1.5.0 - 1.5.0");
+    for (const v of ["1.5.0"]) {
       const result = assertCompatible(
         detectPiCapabilities({ sendMessage() {}, appendEntry() {}, events: { on() {}, emit() {} } }, v),
       );
       expect(result.ok).toBe(true);
       expect(result).not.toHaveProperty("warning");
     }
+  });
+
+  it("unknown version stays quiet and 1.5.0 still rejects missing capabilities", () => {
+    expect(
+      assertCompatible(detectPiCapabilities({ sendMessage() {}, appendEntry() {}, events: { on() {}, emit() {} } })),
+    ).toEqual({ ok: true });
+    expect(
+      assertCompatible(detectPiCapabilities({ appendEntry() {}, events: { on() {}, emit() {} } }, "1.5.0")),
+    ).toMatchObject({ ok: false, reason: expect.stringContaining("sendMessage") });
   });
 
   it("probeReadBackEntries detects the session-start ctx shape", () => {

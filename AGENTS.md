@@ -76,8 +76,13 @@ Check before and after any refactor: `git diff --quiet origin/dev -- tests/fixtu
 
 ## pi peer bump checklist
 
-1. Change the pi peer range in `package.json` (now `>=1.0.0 <1.5.0` for each of `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`) only deliberately, and re-check `src/adapters/pi-compat.ts`.
-2. Run `npm run test:conformance` (= `vitest run tests/conformance`, the whole directory): `pi-boundary`/context-switch capability, `fabric-wake.test.ts` C-P1–C-P5, `fabric-xs.test.ts` C-X1–C-X11, `schedule.test.ts` C-S1–C-S8 (C-S6 skips without tsx), `traffic.test.ts` + `traffic-coexist.test.ts`, `cmd-history.test.ts`, `slash-args.test.ts`, `unknown-slash-text.test.ts` (unknown slash dispatch evidence/input contracts), `rpc-spawn.test.ts`, `keepalive-pipeline.test.ts`, `web-resume.test.ts`, `secure-gocryptfs.test.ts` C1–C5 (self-gating), `agent-dir.test.ts` (agentDir public-API probe: `CONFIG_DIR_NAME === ".pi"` + behavioural env-name check, added in #54), `reflex.test.ts` C-R1–C-R8 (input-interception premises; C-R6 is a reference to `topic-switch-hop.test.ts` S5), `memory-jev-channels.test.ts` C-J1–C-J15 (self-gating; C-J7/C-J8/C-J15 require `PI_TOOLKIT_JEV_CONFORMANCE=1` + a real classifier credential/proxy, added in the jev package), and the rest. The premises each suite pins are in the matching README (traffic → `docs/dev/traffic-merge/README.md`; cmd-history → `docs/dev/web-hub/README.md`; fabric → `docs/dev/fabric-cross-session/README.md`; schedule → `docs/dev/scheduled-reports/README.md`; memory jev → `docs/dev/memory/README.md`; reflex → `docs/dev/jev-reflex/README.md`).
+Current baseline (**Breaking Change**, 2026-11-07 user decision): pi 1.0–1.4 are no longer supported.
+The three dev SDK packages are pinned to `1.5.0`; tested release is exactly `1.5.0`
+(`TESTED_PI_RANGE = "1.5.0 - 1.5.0"`). Peer-allowed 1.5 patches such as 1.5.1 remain untested and warn.
+This is a development support-contract change, not a package release or live-process upgrade.
+
+1. Change the pi peer range in `package.json` (now `>=1.5.0 <1.6.0` for each of `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`) only deliberately, and re-check `src/adapters/pi-compat.ts`.
+2. Run `npm run test:conformance` (= `vitest run tests/conformance`, the whole directory): `pi-boundary`/context-switch capability, `fabric-wake.test.ts` C-P1–C-P5, `fabric-xs.test.ts` C-X1–C-X16 (including C-X12b/C-X14b), `schedule.test.ts` C-S1–C-S8 (C-S6 skips without tsx), `traffic.test.ts` + `traffic-coexist.test.ts`, `cmd-history.test.ts`, `slash-args.test.ts`, `unknown-slash-text.test.ts` (unknown slash dispatch evidence/input contracts), `rpc-spawn.test.ts`, `keepalive-pipeline.test.ts`, `web-resume.test.ts`, `secure-gocryptfs.test.ts` C1–C5 (self-gating), `agent-dir.test.ts` (agentDir public-API probe: `CONFIG_DIR_NAME === ".pi"` + behavioural env-name check, added in #54), `reflex.test.ts` C-R1–C-R8 (input-interception premises; C-R6 is a reference to `topic-switch-hop.test.ts` S5), `memory-jev-channels.test.ts` C-J1–C-J16 (self-gating; C-J7/C-J8/C-J15 require `PI_TOOLKIT_JEV_CONFORMANCE=1` + a real classifier credential/proxy, added in the jev package), and the rest. The premises each suite pins are in the matching README (traffic → `docs/dev/traffic-merge/README.md`; cmd-history → `docs/dev/web-hub/README.md`; fabric → `docs/dev/fabric-cross-session/README.md`; schedule → `docs/dev/scheduled-reports/README.md`; memory jev → `docs/dev/memory/README.md`; reflex → `docs/dev/jev-reflex/README.md`).
 3. Before upgrading pi or droid also run `PI_TOOLKIT_DROID_CONFORMANCE=1 npx vitest run tests/conformance/droid-protocol.test.ts`; before upgrading gocryptfs run `tests/conformance/secure-gocryptfs.test.ts`.
 4. Confirm the A-tier frozen artifacts did not change (above).
 
@@ -128,6 +133,7 @@ Format: entry — one-line role | README to read first and when. `src/*` rows wi
 | `src/traffic/` — provider traffic recording (`node:sqlite`, default off), rewrite rules, web viewer. | `docs/dev/traffic-merge/README.md` · 动 traffic 前 |
 | `src/schedule/` — session-aware scheduled tasks (cron/once; default off). | `docs/dev/scheduled-reports/README.md` · 动 schedule 前（schedule-off golden 勿重生） |
 | `src/reload/` — deferred `/reload` (settings-gated by `reload.defer`): parks the reload while subagents/workflows are active, fires it once the fleet settles; `now` forces, `cancel` cancels. | `docs/dev/deferred-reload/README.md` · 动 deferred reload/派发门/自动继续前 |
+| `src/fast/` — session-scoped service-tier contracts (controller / payload wiring in development). | `docs/dev/fast-command/README.md` · 动 Fast 状态/持久化/payload/child 接线前 |
 | `src/goal/` — `/goal` objective-driven loop: pure state machine (four phases), session store, `agent_settled` loop hook, `/goal` command. Design: `docs/dev/goal/goal-plan.md`. | — |
 | `src/delivery/` — notification outbox: staged → finalize → batched → delivered → consumed, with caller-ack suppression and hold-window coalescing. | — |
 | `src/workflow/` — `SubagentWorkflow` engine: orchestrator, journal/replay, background registry, `agent()` queue/worktree. | `docs/dev/workflow/README.md` · 动 workflow 前 |
@@ -156,7 +162,7 @@ Format: entry — one-line role | README to read first and when. `src/*` rows wi
   `dependencies` (pi ≥1.0 warns; an installed copy can bypass the loader's module mapping).
   There are no runtime `dependencies`.
 - Peer dependencies on `@earendil-works/pi-ai` / `pi-coding-agent` / `pi-tui` are pinned to
-  `>=1.0.0 <1.5.0`; bump deliberately and re-check `src/adapters/pi-compat.ts` — full procedure in
+  `>=1.5.0 <1.6.0`; bump deliberately and re-check `src/adapters/pi-compat.ts` — full procedure in
   the **pi peer bump checklist** above.
 
 ## pi-extension specifics (easy to get wrong)

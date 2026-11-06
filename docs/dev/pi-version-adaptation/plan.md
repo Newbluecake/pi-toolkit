@@ -1,4 +1,72 @@
-# pi 1.5.0 适配调研与实施方案（未实施）
+# pi 1.5.0 适配与最低支持基线（实施记录）
+
+## 当前合同与执行状态（2026-11-07，覆盖下方历史 G0/G1）
+
+**用户已在 ask_user 选择“整个项目最低 1.5”**：三包
+`@earendil-works/{pi-ai,pi-coding-agent,pi-tui}` 的 peer 同步为 `>=1.5.0 <1.6.0`，
+optional 保留，开发依赖精确 `1.5.0`；**不再支持 1.0–1.4，属于 Breaking Change**。
+`SUPPORTED_PI_RANGE={min:"1.5.0",maxExclusive:"1.6.0"}` 与 peer 同源；
+`TESTED_PI_RANGE="1.5.0 - 1.5.0"` 只声明实测单点，1.5.1 即使允许安装仍 warning。
+版本提示仍不替代结构能力门，不清理旧 shim、不加按版本切功能分支、不改 ABI/schema。
+本包不改 Toolkit 版本号/CHANGELOG，不发版、commit、push，不修改主 checkout 的依赖或 global，
+不 reload/重启活跃进程；主树依赖此前仍 1.4、global CLI 由用户自行升至 1.5，
+**运行中实际 loaded SDK 未知**，不能从 CLI 版本推断。
+
+旧 G0 的“必须保留 >=1.0 floor”、六版重跑和旧 SDK 红阻断支持承诺已被这次用户决定覆盖，
+不再重复 6×33 矩阵，也不把旧 1.0/1.1 已知失败冒充修复。Node/CI 策略不顺便调整：
+SDK 1.4/1.5 都要求 >=22.19，当前 Node 22.22.1 满足；已有 lock 的
+nopt 10.0.1 / abbrev 5.0.0 另有 >=22.22.2 分支 engine 告警，版本未变，非本次新增。
+
+### 已合入与已验证证据（与本轮支持声明分开）
+
+- `4b065925`：四处显式 `tiers | undefined` 的 **type-only** 边界兼容，runtime JS 未变。
+- `16289441`：measure managed-effort 的 **结构兼容修复**，stock 1.5 顶层 low 与 1.4 high
+  均只在完整合法结构接受；尾部 high/防滥用拒绝仍保留，不是版本分支。
+- `/tmp/rh45e-h16x/report.md`：真实 SDK/CLI 1.5，实验仅扩上界（min 仍 1.0），
+  RH1–RH4 从 4×503 到 4 pass；独立 RH4 + measure25 + unknownslash7 为 **36 pass**。
+  这些旧实验没有验证新 min1.5 边界，本轮另增 launcher 的旧版本拒绝/1.5 patch 接受边界。
+- `/tmp/45-current-conformance-handoff.json`：真实 1.5 **private-safe34**，353 pass / 4 skip / 1 todo，
+  base `a8fc1dac`；Sonnet 已独立验 safe34。第二次合规复验拥有真实私有依赖目录，
+  32,460 regular files 等 hash/不同 inode、共享目录前后无变化。**第一次 symlink 依赖导致
+  nested Vitest 写共享 `.vite/vitest/results.json`，不合规，未追认**；只保留其测试结果作为历史，
+  不能用它代替第二次隔离证明。skip 为 legacy 三条与未授权 classifier 一条；todo C-R6 引用同组已跑 S5。
+- `2f65ea9b` Fast P0：公开 SessionManager 七场景；1.4 复现 ghost 是不安全 characterization，
+  1.5 回滚通过。`80af9ca3` 已合 Fast P4a 共享合同。P1/P2 仍各自拥有实现/README，
+  本包仅同步 baseline/V4，不抢 Fast 或 Workflow 代码。
+
+### 本轮隔离实现与验证边界
+
+实施 BASE：`80af9ca30ab534db190f8754f577b71c32fc2cd3`；独立 worktree
+`/tmp/pi-subagent-worktrees/r_PR3JHW01`，原无 node_modules。安装采用本 worktree 新建真实私有目录，
+`env -i` 的 HOME / agentDir / XDG / npm cache / tmp / npm userconfig/globalconfig 全在
+`/tmp/b15-PR3J/`；固定官方 npm 包，`--ignore-scripts --save-dev --save-exact --no-audit --no-fund`，
+无 npm update/audit fix/legacy-peer-deps，也未复制旧依赖树冒充安装。
+新用户授权覆盖旧 registry 策略：**仅必要 1.5 闭包采用 npmjs 官方固定包**，保留原 mixed registry，
+相同 version/integrity 的 11 处 incidental resolved URL 改写已恢复。最终用新 lock
+`npm ci --ignore-scripts` 重建自有真实目录验证，不开启 postinstall。
+
+本包门禁为精确 version/launcher/peer/docs、Faststorage7、measure25、unknownslash7，
+以及 typecheck/build/format；真实命令、退出码、SDK/lock integrity、owned hash 与 patch 统计交付在
+`/tmp/pi45-baseline15-handoff.json`，日志 `/tmp/b15-PR3J/`。不另跑 safe34/全 T1/全 Tier2/secure/live。
+**集成主会话仍需在主线同步 npm ci 并执行最终全门**；本轮定向绿不代表全量/外部授权门完成。
+classifier / droid / secure 挂载 / 付费模型 / 真实 memory 均未授权、未执行。
+#36 旧快照的 node_modules 链接仍指主 1.4，root 主依赖切 1.5 前须将原 runtime provenance 标过时并
+重冻 current；本包不动 baseline/PG 快照或数据。
+
+本轮自验：七个精确测试文件 **167/167 pass**（含 Faststorage7 / measure25 / unknownslash7），
+`npm run typecheck`、`npm run build`、`npm run format:check` 均通过。
+格式全树只读检查第一次 120s 超时，增加到 360s 后通过，未全树格式化；
+AGENTS 原基线缺 `src/fast/` layout 行导致 K9 初跑失败，已补唯一行并引用基线中已存在的 Fast README。
+fixtures 对实施 BASE 零差异；对 origin/dev 既有差异仍非零，不归为本包改动。
+
+Fast V4 新结论：旧 1.4 已退出支持，无需新增旧宿主临时 IO 能力探针或兼容兜底。
+1.5 七场景 P0 仅证明 SDK 回滚前提；controller 的最后成功状态、storage-fault、seed 初始化失败
+零 prompt 与清理仍需生产集成验证。全部 Responses / native warm follows / 默认 enabled 用户决定不变。
+
+## 历史调研快照（2026-11-06，非当前支持合同）
+
+> 下方原方案/门禁/“未实施”/peer floor/registry 及现场版本均为当时记录，保留用于审计，
+> 不再作为当前执行指令；冲突一律以上方 2026-11-07 新用户决定与范围为准。
 
 2026-11-06 · L2 调研 / L3 条件升级 · **方案修订；隔离适配验证已获用户授权，尚未实施、未通过兼容验收，未批准 live 升级**。
 
