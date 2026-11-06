@@ -2,7 +2,7 @@
 
 ## 状态
 
-**NOT-EVALUATED；P5b 仍 BLOCKED。** 本报告是脚本、离线测试和执行方法的阶段交付，不是 G1/G2 达标证明。candidate 阶段没有启动真实模型请求；后续 root 授权的一次 G2 live 已执行但因 harness 错误失败，见下方现场记录。未修改生产源码、真实记忆、设置、标签或 fixtures。
+**NOT-EVALUATED；P5b 仍 BLOCKED。** 本报告是脚本、离线测试和执行方法的阶段交付，不是 G1/G2 达标证明。candidate 阶段没有启动真实模型请求；后续 root 分别授权的两次 G2 live 均未取得可判定的完整结果：首次为 harness 时钟端口错误，第二次在记录 400 次 classifier transport 后以 NOT-EVALUATED 结束，见下方两份独立现场记录。未修改生产源码、真实记忆、设置、标签或 fixtures。
 
 - G1：v3 已冻结，正式可计入 negative 76（AA 40 / UU 20 / UA 16）、positive **10**，另有 20 条 `expected:excluded` 审计行不计 primary。正例不足，脚本在发请求前返回 2；没有花 G1 live 预算。正式门槛不变：困难负例 ≥60（AA ≥30 / UU ≥15 / UA ≥15）、明确正例 ≥20；误自动取代率 ≤1/60，且 AA 为零；正例自动取代召回 ≥50%。未裁定的 moderate 样本不能充作明确正例。
 - G2：第三方已条件认可 37 个真实主用户轮、40 个相关性 pair；覆盖 19/34 个 topic 用户令。`g2-turns.jsonl` 已确认的 SHA256：`18ab31816ac7e1e519f299aaf6642a4d6c812c02ca506ba5dabb39b438939a1f`。这仅是标注/来源验收，不是召回结果。
@@ -307,3 +307,162 @@ Sonnet 复验（`r_0H65DQDF`）已 PASS 前两轮 2 major + minor 修复；root 
 
 - LIVE G2 仍须 root 新授权；G1 仍 BLOCKED（10/20）；预算/labels/旧 run 未动。
 - 本轮文件 SHA256：脚本 `118ebfe8dfc54522d4a5e72e64af4eb67a76d6c33d7310cd5bbc6f6f2c4169f5`、测试 `1c8052c0ca94ad87192338a2f82102bfe2d80d79e2edf2c141009c687de797a3`（上一轮 `441926c0…`/`0798cb00…` 作废）。
+
+## 第二次独立授权 G2 live（修复提交 bfd7ef09，2026-11-06）
+
+### 结论与授权隔离
+
+**G2 NOT-EVALUATED，exit 2；不是召回质量 FAIL，也没有 G2 PASS。整个 PG 仍因 G1 明确正例仅 10/20 而 BLOCKED。** 本授权仅运行 G2 一次，没有第三次自动重试、补联网或预算重置，没有 G1 live。
+
+本次使用 root 已验收并提交的脚本，HEAD `bfd7ef09fd5f7b1426de63cfabcb9b040c082d79`，SHA256：
+`118ebfe8dfc54522d4a5e72e64af4eb67a76d6c33d7310cd5bbc6f6f2c4169f5`。
+root 已提供该修复的 Sonnet 验收及 33 个 offline + 11 个 tier governance 测试通过证据；本执行阶段没有重跑全量测试、build 或修改脚本。
+
+本次是**新的独立预算授权**：classifier ≤400 且保守预留 ≤$0.50，chat ≤80 且 ≤$0.28，总 900 秒（外层 1000 秒），provider `maxRetries:0`。前次 `g2-live-20261106-71uexlor` 的消费仍为 unknown，未查询 billing、未倒填为零、未读取或复用其模型回答。保守占用按前次授权上限 $0.78 加本次授权上限 $0.78，共 **$1.56 的两次授权总保守上限**；这不表示实际账单已知，也不表示花费了 $1.56。
+
+### 空 cache 与只读 cheap preflight
+
+新私有目录：
+`~/.pi/agent/memory-reports/eval36/runs/g2-live-rerun-20261106-drnzDx/`
+
+目录为 0700，冻结数据副本、manifest、日志与审计文件为 0600。仅从 v3 冻结源复制四文件和 `freeze.json`，cache 起始不存在，未手填任何模型回答。四件组 SHA256 与本报告上表一致；current 仍为 **535**，history included **0**，37 个来源主用户轮核对通过，分母 **40 pairs**，本集合仅使用 pi-toolkit 项目的候选目录，不与 claude2api 混池。
+
+预检没有网络、没有合成答案、没有写 modelreplycache。它用两版生产 `buildRecallQuestions` / `splitBatches`，对每轮的全部未裁剪 187 条候选只做输入尺寸计算：旧版 185 批 + 新版 185 批，共 **370 个 U 批**的未裁剪估计；若每批均走两个 classifier 档，可能达到 740 次，尚未计 context-split 重试。实际 static/eligible/P 去重可减少请求，缓存和 failover 仍未知，因此不是最终 transport 数。遵照 root 明确裁定，仍保留 400 次硬 cap，不因估算上界接近而加量。
+
+本次实际使用的三包都解析为仓库本地 **1.4.0**：
+
+- `node_modules/@earendil-works/pi-ai/dist/index.js`
+- `node_modules/@earendil-works/pi-coding-agent/dist/index.js`
+- `node_modules/@earendil-works/pi-tui/dist/index.js`
+
+不将全局宿主 1.5 混作本次运行版本或兼容性证明。
+
+### 唯一 live 命令与审计
+
+```bash
+set -o pipefail
+timeout 1000 env PI_TOOLKIT_MEMORY36_GATE_LIVE=1   node scripts/dev/memory36-gate.mjs g2   --data "$HOME/.pi/agent/memory-reports/eval36/runs/g2-live-rerun-20261106-drnzDx"   --dist /tmp/memory36-current-efa12f26-k9A1Uh/dist   --baseline-dist /tmp/memory36-baseline-122de638-a1KeOc/dist   --max-calls 400 --max-classifier-usd 0.5   --max-chat-calls 80 --max-chat-usd 0.28 --timeout-ms 900000   2>&1 | tee "$HOME/.pi/agent/memory-reports/eval36/runs/g2-live-rerun-20261106-drnzDx/aggregate.log"
+```
+
+LIVE 环境开关只施于该命令进程。runtime 仍使用只读 credential store、`allowModelNetwork:false`、`refreshOnCreate:false`；模型调用仅沿生产 redaction/DTO 及冻结脚本 transport 路径，生产临时写入仅在 scratch。
+
+- 命令窗口：北京时间 **20:28:38.947–20:31:45.524**，约 **186.58 秒**。
+- 耐久审计窗口：**20:28:40.932–20:31:45.443**，约 **184.51 秒**；未达到 900 秒总期限。
+- attempt ID：`20261106T122840-273524-b72af285`。
+- 耐久审计：`audit/attempt-20261106T122840-273524-b72af285.json`。
+- 最终状态 `NOT-EVALUATED`，closed error category **`unclassified`**。不由通用错误串猜测具体 provider 错误或凭证原因。
+
+私有目录还包含 `execution-manifest.json`、`cheap-preflight.json`、`command.txt`、`aggregate.log`、`result-summary.json` 与本次真实 `cache/`。没有 `g2-details.json`；未覆盖旧 run 或旧 attempt。
+
+### 实测聚合计数与预算
+
+| 项目                                       | 本次耐久记录                                                      |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| classifier transport calls                 | **400 / 400**，调用硬 cap 已满                                    |
+| classifier conservative reserve            | **$0.33600000000000174 / $0.50**                                  |
+| classifier cache hits / missing / failures | **0 / 0 / 160**                                                   |
+| chat transport calls                       | **31 / 80**                                                       |
+| chat conservative reserve                  | **$0.030651600000000005 / $0.28**                                 |
+| chat cache hits / missing / failures       | **12 / 0 / 12**                                                   |
+| 本次合计 conservative reserve              | **约 $0.3666516**，不是实际账单                                   |
+| 本次剩余 classifier call 容量              | **0**；金额尚余约 $0.164 不构成追加调用许可                       |
+| 本次剩余 chat 容量                         | 49 次、约 $0.2493484 预留空间；本次已结束，不继续消费             |
+| 实际 billed spend                          | **Unknown / N/A**，没有查询 billing 或把预留冒充费用              |
+| 本次回答缓存文件                           | 246 个 classifier reply、19 个 chat reply，另有 2 个 catalog 文件 |
+
+`cache.failures` 是冻结脚本的请求键失败集合计数，不应当与 transport calls 简单相加来冒充调用总数，也不能用回答文件数反推出所有失败的具体原因。模型回答均由本次 live transport 写入，没有读取或手填旧回复；后续若离线重放这些真实缓存，也只能称为本次缓存 replay，不能称为新的 live 证据。
+
+前次 unknown 按授权上限 $0.78 保守占用，加本次已记录预留约 $0.3666516，得到约 **$1.1466516 的保守占用口径**；两次授权总上限仍为 $1.56。这些金额都不是实际账单。
+
+### 指标与 P2 证据边界
+
+| 项目                                  | 结论                                                                              |
+| ------------------------------------- | --------------------------------------------------------------------------------- |
+| 原始标注轮数 / pair 分母              | **37 / 40**，冻结不变                                                             |
+| 完整配对结果数量                      | **N/A**；进程异常前未保存完整逐轮结果集，不能证明 ≥30，也不能冒记为 0             |
+| old / new hits 与 recall              | **N/A / N/A**；没有完整指标，不报告伪造的 0% 或部分结果冒充正式召回率             |
+| `predict.enabled` / `model.enabled`   | 两版均为 true，复用各自生产 wire + renderer + clock                               |
+| 全局实际 P2 evidence                  | chat calls **31** + hits **12** = **43 > 0**，确有真实 P2 通路活动                |
+| 全局完整性条件                        | missing = 0，但 classifier/chat failures 共 **172**，`p2Evidence.satisfied=false` |
+| baseline/current 分别的 P2 calls/hits | **N/A**；冻结脚本没有持久化逐版 telemetry，不能由 aggregate 反推分配              |
+| baseline/current 及时 / 迟到          | **N/A**；临时 branch 的 `kind:call` 记录未保存，不现场改脚本加埋点或补造数据      |
+| G2 形式 PASS                          | **不满足**：无完整配对指标，且 failures 非零；本次到此结束                        |
+
+本次有真实 P2 调用，但这不等于召回门槛通过。没有完整新旧召回率，因此不能据此裁定「新 <旧」或「新 <60%」，也不生成伪漏项 scope-check 列表。若 root 后续另行取得完整指标并确认红门槛，仍按 plan 派生产 P6b-fix；本包不调 cap、阈值或标签。
+
+### 收尾核验
+
+- 固定 current `efa12f26` / baseline `122de638` 双 dist 树 hash 前后与本报告上表匹配。
+- 本次脚本 SHA256 前后仍为 `118ebfe8dfc54522d4a5e72e64af4eb67a76d6c33d7310cd5bbc6f6f2c4169f5`。
+- v3 四件组、真实 `auth.json` / `models.json` / `pi-toolkit.json` 内容 hash 前后不变。
+- 首次失败目录保留原样，消费 unknown 的事实未被新审计覆盖或倒填。
+- 本执行阶段仅更新本报告和自己的私有执行产物；没有修改脚本、测试、src、标签、真实记忆或设置，没有 install/build/git 写操作/Todo/真实 session 消息，也没有全量测试。
+- 本阶段自验为报告精确 `prettier --check` 与只读 hash / manifest 复核；模型门禁结果诚实保持 NOT-EVALUATED。
+
+## #36 evaluator 最小闭环修复（2026-11-07，纯离线）
+
+**仍为 NOT-EVALUATED；G1 positive 10 < 20，P5b BLOCKED。没有第三次 live 授权，也未执行真实 PG/cache 重放。** 上方第二次 G2 失败记录为本包开始时已有 dirty 内容，完整保留；其原始计数及失败结论没有重写。以下只描述 evaluator 的修复，不是新质量指标。
+
+### 生命周期与完成性
+
+- G2 old/new 各共享一个各自版本的 **production client 本体**（含 health、lastModel、usage、budgetExhausted），各探测一次；prepareTags 和后续 sample 也使用同一变体 client。G1 在自己的评价 activation 中共享另一 client。`maxCalls/maxCostUsd` 保持原 config，绝不改成 0；真实有限预算耗尽即 NOT-EVALUATED，不为跑满 37 条重置预算。
+- 每 sample 仍重建 wire、branch、render cache 和生产 wire 内的 PredictCache/flight；仅共享 client、严格完整 DTO 的 transport cache 和两版各自的生产日账。37 条是独立抽样，不是连续轮；不继承上一 sample 的 P2 pending，不新增生产生命周期。
+- 每轮薄 client 代理拦截 `onStatusChange` 并持有退订；finally 调用原 session_shutdown、abortBackground，再清空该轮所有订阅。保留 **drain 在 shutdown 之前**；不是把有效回复收紧成 1 秒窗口，严格 cache replay 的 2 秒延迟仍真实等待。
+- 逻辑完成性只拦截 **client.ask 最终 outcome**，逐条记录 evalId/sampleId/turn/variant/duty/callseq/requestedIds/answeredIds/ok/reason/resolved。所有请求题目均通过有效答案校验且 missing 为空才 resolved；handled tier failure 后最终成功可 resolved。失败、partial、budget、pending 均不是 negative 0；后一 sample 同 DTO 成功不会倒填前一个 sample 的失败。
+- registry 只记录控制类硬拒绝（预算/abort/审计失败/缓存缺失或损坏）的 sticky 类别，不在 classify 层推断 logical resolved。原 cache missing/failure 统计保留作遥测；不再用累计 raw attempt failure 集合直接否决后来完整的 fallback。
+- P2 记录实际 dispatch 与生产 branch 的 `kind:call` 终局。完整的成功，或生产 flight `failed/timeout` 终局后的规则 fallback，均是完整执行；并不要求每次模型成功。已 dispatch 却无终局、aborted/denied、控制类预算或审计拒绝均为 NOT-EVALUATED。生产确定性/短提示 gate 未请求 chat 时记为零 dispatch，不冒充成功调用；正式 G2 仍要求全局 chat calls+hits > 0。两版日账不重置；可观察到已耗尽的日账拒绝也 fail closed。
+
+### 耐久摘要与真实性
+
+- `<data>/audit/attempt-<id>-turns/` 为新 attempt 独立目录，逐轮 old/new finally 写独占 `wx` 的 0600 摘要（目录 0700）：完成性、closedReason、hits/deliveredIds、逻辑 outcomes、逐轮 usage 差分及累计值、P2 telemetry 和订阅余数。失败样本的 hits/deliveredIds 为 null，已有部分 hashes 仅供诊断。
+- attempt 开始写 expected 样本清单，结束写 completion 清单；因准备阶段错误或预算中止而根本没到达的 old/new 样本显式为 missing-sample/NOT-EVALUATED，缺值不补 0。G2 聚合不完整时 old/new hits、recall 为 null；部分结果不能成为正式 PASS。
+- 最终 details 同样移到 attempt 独立路径，不覆写旧 run 的固定名文件。原 pre-transport durable audit、16 个封闭错误类别、fatal unhandled latch、segmented clocks、400/$0.50 + 80/$0.28 上限及模型链保持。
+- usage 记 `usageEstimated:true` 和 SDK `usage.cost.total` 来源；逐轮使用共享 client 累计值的差分，实际费用仍 unknown，不以 SDK estimate 或 reserve 冒充账单。
+- G1 直接 `port.afterWrite` 显式传顶层 `wholeRelation:true`，与 A 的 `a8fc1dac` source 接口对齐。旧 efa12f26 dist 可忽略额外键，但**不能当作验证新 whole criteria 的版本**。当前没有 build/freeze 新 dist；应由 root 在提交 source 后另做 current freeze，baseline 仍为 122de638。
+
+### 离线回归及自验
+
+增加 12 项 fake 回归（33→45 tests）：真实 production client + fakeRegistry 的跨轮 lastModel（清空 health 后仍优先上次成功档）、handled failover、同 DTO 后样本不补前失败、partial 非负例、有限生产预算 sticky 耗尽、订阅归零、真实在飞 background abort 后下轮继续 ask、0600 独占摘要/缺样本、预算硬拒绝不可被 fallback 覆盖、raw failure 仅遥测及 P2 terminal fallback、精确 chat cache 新 sample 复用且保留 2 秒延迟、fresh wire/branch/生产 PredictCache 无 pending carry 及错误 finally 落盘。
+
+为遵守本轮禁止真实 memory/私有标签数据的边界，原 listener 回归中的「读取本机 frozen 私有 corpus 后调用 main」本机分支改为合成 audit/latch 的双 scope 注册/退订断言；没有运行整个真实 PG。原 Clock/flight/preaudit/cap/latch 回归仍执行，已有冻结 dist 的 Clock/flight 本机分支只读生产 JS，不读任何私有标签。
+
+| 命令                                                                                                                                   | 结果                                         |
+| -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `timeout 180 env PI_TOOLKIT_TEST_WORKERS=2 npx vitest run tests/memory/govern/gate-script.test.ts tests/governance/test-tiers.test.ts` | PASS：45 + 11 = 56 tests                     |
+| `timeout 300 env PI_TOOLKIT_TEST_WORKERS=2 npm run typecheck`                                                                          | PASS                                         |
+| 精确三文件 `timeout 30 npx prettier --check ...`                                                                                       | 交付时以 `/tmp/36-evaluator-format.log` 为准 |
+
+日志 `/tmp/36-evaluator-{tests,typecheck,format}.log`；机器可读交接 `/tmp/36-evaluator-handoff.json`。没有 live/API/model、安装、真实 memory 或旧 run 写入、Todo、git 写操作、全量测试；只改授权三文件。未重生 fixture，未修改生产源码、arch/plan/memory README、settings 或任何 cap。独立 Sonnet 验收及新的 live 授权仍由 root 负责；本包报告后冻结停止。
+
+**交验残留（不可据此宣称完整 P2 闭环）**：production `flight.admit()` 除总调用/金额耗尽外，还会在剩余 USD 不足下一笔 estimate reserve 时静默拒绝，不写 `kind:call`。目前 harness 对 no-dispatch 按正常 rule/prompt gate 记录，尚未有离线证据区分该不足预留分支与普通确定性规则门。这是已向 root 上报的待验缺口，不应由本包通过测试推导 G2 完整性已获证明；独立 verifier 应优先检查该分支。未为消除它修改生产源码或放大任何预算。
+
+## Sonnet r_6QHPBMEJ 窄复验修复：1 blocker + 1 major（2026-11-07）
+
+本节只修该次验收核证的两项，不重新设计 evaluator。上节 45-test 交付及其残留说明为修复前事实保留；第二次 G2 live 失败历史、原预算、质量门及模型链不改。无第三次 live、无真实 memory/标签或私有 corpus 重放。
+
+### Blocker：在公共生产边界先排除静默预算拒绝
+
+- `production(dist)` 额外加载各版本自身公开的 `buildPredictSystemPrompt`、`OUTBOUND_MAX_TOTAL_BYTES`、`estimatePredictUsd`。每轮使用实际 taxonomy 生成 P2 system；链上每个 spec 必须由 `registry.find` 找到模型，且 input/cacheRead/output 价格均有限、非负。缺失模型或无效价目立即 NOT-EVALUATED，不能把 silent unbound 当规则 gate。
+- 用 `user = "x".repeat(OUTBOUND_MAX_TOTAL_BYTES)`，对链上全部有效价目调用公共 `estimatePredictUsd(system,user,price)` 后取最大值为 bound。生产估算按 system+user 的 UTF-8 字节数单调计算；ASCII cap 字节覆盖任何生产 serializer 输出的合法 DTO 字节长度，无需复制 uncertain、rules、admit 或 token/输出常量。
+- 按与生产 flight 相同的**真实墙钟本地日**读取保留的 variant 日账：要求 calls < 原 cap 且 maxUsd−spent−reserved ≥ bound。不足即受控 `NOT-EVALUATED: chat budget`，逐轮 finally 摘要 complete=false、零 chat transport。不更改 config，不重置账目，不猜测免费价目。
+- 该检查是**保守准入上界**，不是 production admit 的精确重放：可能比真实短 DTO 提前阻止临界余额轮，诚实记 NOT-EVALUATED；不是充值、增 cap 或绕过预算。所有模型可绑定且上界通过后，fresh flight 没有旧 in-flight/zombie/breaker/disposed，原 no-dispatch 才可视为合法 rules/prompt gate；后续若产生 denied/aborted 终局仍由原 P2 完成性检查硬阻。
+- 此修复关闭上节已上报的「正余额但不足 reserve 无终局」缺口；不把所有 no-dispatch 判无效，也不通过 find 调用次数猜 uncertain。
+
+### Major：测试必须走 main 实际使用的 listener scope
+
+新增脚本导出 `withFatalLatchScope({audit,controller,setExitCode},fn)`，内部创建原 sticky latch、注册原 named listener、`try await fn(latch)`，finally 删除同一 listener。main 的 bounded 主体及原 catch 真实走该 helper；helper 退订后再执行原 controller/summary/scratch cleanup，保留异常审计、exit 2 和 sticky 类别语义。
+
+原来测试自己 `process.once/removeListener` 的自证已删除。新测试真实调用 main 使用的 helper，覆盖成功、连续两次、fn 抛错、先 trip 再抛错；断言 listener 数恢复、审计保留、controller abort、exitCode=2 不被清回 0。直接调用 latch hook，不真实 emit 全局 rejection。删除 helper 的 finally 退订会使这些行为断言失败，不依赖源码字符串检查，也不读取私有 frozen corpus。
+
+### 窄修回归与最终自验
+
+新增实际 **production wire + fakeRegistry + 合成 memory 目录** 的回归：正余额 < bound/2 时 chat-budget/零 dispatch/耐久 incomplete；足额确定性规则合法零 dispatch；足额 uncertain 真正 dispatch；链中任一模型 unbound 拒绝；非法价目拒绝；生产 serializer 的 ASCII、多字节/转义 DTO 字节上界及公共 estimate 单调上界。没有用 mock wire 自证此 blocker。
+
+| 命令                                                                                                                                   | 结果                     |
+| -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `timeout 180 env PI_TOOLKIT_TEST_WORKERS=2 npx vitest run tests/memory/govern/gate-script.test.ts tests/governance/test-tiers.test.ts` | PASS：52 + 11 = 63 tests |
+| `timeout 300 env PI_TOOLKIT_TEST_WORKERS=2 npm run typecheck`                                                                          | PASS                     |
+| 精确三文件 `timeout 30 npx prettier --check ...`                                                                                       | PASS                     |
+| 精确三文件 `timeout 10 git diff --check -- ...`                                                                                        | PASS                     |
+
+最终命令日志仍为 `/tmp/36-evaluator-{tests,typecheck,format,diffcheck}.log`；最终三文件 SHA256 及证据更新至 `/tmp/36-evaluator-handoff.json`。只交 root resume 原 Sonnet 做两项窄复验；G1 仍 **10/20 BLOCKED**，G2 没有新 live/质量结论。冻结后停止，不扩审计范围。

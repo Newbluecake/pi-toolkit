@@ -156,10 +156,10 @@ export function metricsG2(labels, runs) {
           : "FAIL",
     turns: labels.length,
     denominator,
-    oldHits,
-    newHits,
-    oldRecall,
-    newRecall,
+    oldHits: complete ? oldHits : null,
+    newHits: complete ? newHits : null,
+    oldRecall: complete ? oldRecall : null,
+    newRecall: complete ? newRecall : null,
   };
 }
 
@@ -204,10 +204,12 @@ export function createReplyCache({ dir, namespace, live = false, transport, maxC
         });
         validateAnswers(context.questions, result);
         // Persist only the closed answer schema. Provider diagnostics may contain secrets.
-        const actualCost = result.usage?.cost?.total;
+        const usageEstimate = result.usage?.cost?.total;
         const clean = {
           stopReason: "stop",
-          ...(Number.isFinite(actualCost) && actualCost >= 0 ? { usage: { cost: { total: actualCost } } } : {}),
+          ...(Number.isFinite(usageEstimate) && usageEstimate >= 0
+            ? { usage: { cost: { total: usageEstimate } } }
+            : {}),
           answers: Object.fromEntries(
             Object.entries(context.questions).map(([id]) => [id, cleanAnswer(result.answers[id])]),
           ),
@@ -447,6 +449,9 @@ async function production(dist) {
     inject,
     render,
     paths,
+    predictLlm,
+    predictOutbound,
+    predictFlight,
   ] = await Promise.all([
     load("settings"),
     load("jev/config"),
@@ -463,6 +468,9 @@ async function production(dist) {
     load("inject"),
     load("render"),
     load("paths"),
+    load("jev/predict/llm"),
+    load("jev/predict/outbound"),
+    load("jev/predict/flight"),
   ]);
   const clock = await import(pathToFileURL(join(dist, "core/clock.js")).href);
   return {
@@ -481,6 +489,9 @@ async function production(dist) {
     ...inject,
     ...render,
     ...paths,
+    ...predictLlm,
+    ...predictOutbound,
+    ...predictFlight,
     ...clock,
   };
 }
@@ -743,7 +754,27 @@ function classifierCatalog(dir, classifiers, runtime, live) {
   writePrivate(path, catalog);
   return catalog;
 }
-function registryFor(cache, models, chat) {
+export function registryFor(cache, models, chat) {
+  const hardFailures = [];
+  const guarded = async (work) => {
+    try {
+      return await work();
+    } catch (err) {
+      const category = classifyErrorCategory(err);
+      if (
+        [
+          "classifier-budget",
+          "chat-budget",
+          "deadline-abort",
+          "audit-write",
+          "cache-missing",
+          "cache-corrupt",
+        ].includes(category)
+      )
+        hardFailures.push(category);
+      throw err;
+    }
+  };
   const pending = new Set();
   const track = (promise) => {
     pending.add(promise);
@@ -754,11 +785,15 @@ function registryFor(cache, models, chat) {
     return promise;
   };
   return {
+    hardFailures: () => [...hardFailures],
     getAvailableOfType: async () => models,
     getModelOfType: (_type, provider, id) => models.find((m) => m.provider === provider && m.id === id),
-    classify: (...args) => track(cache.classify(...args)),
+    classify: (...args) => track(guarded(() => cache.classify(...args))),
     ...(chat
-      ? { find: chat.find, streamSimple: (...args) => ({ result: () => track(chat.streamSimple(...args).result()) }) }
+      ? {
+          find: chat.find,
+          streamSimple: (...args) => ({ result: () => track(guarded(() => chat.streamSimple(...args).result())) }),
+        }
       : {}),
     async drain() {
       // Classifier settle queues production askAll/commit continuations. Drain
@@ -770,7 +805,7 @@ function registryFor(cache, models, chat) {
     },
   };
 }
-function clientFor(p, config) {
+export function clientFor(p, config) {
   return p.createJevClient({
     config,
     isChild: false,
@@ -779,6 +814,102 @@ function clientFor(p, config) {
     bucket: p.createTokenBucket(),
     log: () => {},
   });
+}
+/** Thin turn-local view: retain the production client's lastModel and sticky
+ * budget, but own every wire subscription and every FINAL ask outcome. Registry
+ * always comes from this call's request, never a cached session context. */
+export function turnClient(client, identity) {
+  const outcomes = [],
+    subscriptions = new Set();
+  let callseq = 0;
+  const initialUsage = client.usage();
+  const proxy = {
+    ...client,
+    onStatusChange(cb) {
+      const off = client.onStatusChange(cb);
+      subscriptions.add(off);
+      return () => {
+        subscriptions.delete(off);
+        off();
+      };
+    },
+    async ask(req) {
+      const record = {
+        ...identity,
+        duty: req.duty,
+        callseq: ++callseq,
+        requestedIds: Object.keys(req.questions),
+        answeredIds: [],
+        ok: false,
+        reason: "pending",
+        resolved: false,
+      };
+      outcomes.push(record);
+      try {
+        const outcome = await client.ask(req);
+        record.ok = outcome.ok;
+        record.answeredIds = Object.keys(outcome.answers ?? {});
+        let valid = false;
+        if (outcome.ok && outcome.missing?.length === 0) {
+          try {
+            validateAnswers(req.questions, { stopReason: "stop", answers: outcome.answers });
+            valid = true;
+          } catch {
+            /* unresolved, never negative */
+          }
+        }
+        record.resolved = valid;
+        record.reason = valid ? "resolved" : outcome.ok ? "missing-or-invalid" : outcome.reason;
+        return outcome;
+      } finally {
+        if (record.reason === "pending") record.reason = "exception";
+      }
+    },
+  };
+  return {
+    client: proxy,
+    outcomes,
+    subscriptions: () => subscriptions.size,
+    close() {
+      for (const off of subscriptions) off();
+      subscriptions.clear();
+    },
+    usage() {
+      const u = client.usage();
+      return {
+        calls: u.calls - initialUsage.calls,
+        costUsd: u.costUsd - initialUsage.costUsd,
+        cumulative: u,
+        usageEstimated: true,
+        provenance: "production-client SDK usage.cost.total; actual unknown",
+      };
+    },
+  };
+}
+/** Exclusive per-attempt, per-sample files: no old run or summary is replaced. */
+export function persistTurnSummary(dir, identity, summary) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = join(dir, `${digest(identity)}.json`);
+  try {
+    writeFileSync(path, JSON.stringify({ ...identity, ...summary }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+  } catch {
+    throw new Error("NOT-EVALUATED: pre-transport audit write failed");
+  }
+  return path;
+}
+export function logicalComplete(outcomes) {
+  return outcomes.every((o) => o.resolved === true);
+}
+/** P2 terminal errors/timeouts are production's completed rule fallback. An
+ * aborted/nonterminal flight or a budget/audit/cache denial is NOT evaluated.
+ * With runTurn's model-binding/upper-bound budget precheck and a fresh flight,
+ * no dispatch can be an ordinary certain-rule/prompt gate, not a fake hit. */
+export function p2Completion(calls, dispatched, hardFailures = []) {
+  return (
+    hardFailures.length === 0 &&
+    (dispatched === 0 ? calls.length === 0 : calls.length > 0) &&
+    calls.every((c) => c.ok === true || ["failed", "timeout"].includes(c.reason))
+  );
 }
 async function prepareTags(p, dir, client, registry, signal) {
   const index = p.readIndex(dir).index;
@@ -835,8 +966,22 @@ export function relationContext(corpus, next, old, blockApi) {
   }
   return { corpus: { ...corpus, entries: [...current, mapped], sidecars }, mapping };
 }
-async function runG1({ p, corpus, labels, scratch, registry, config, signal, blockApi, governance }) {
+async function runG1({
+  p,
+  corpus,
+  labels,
+  scratch,
+  registry,
+  config,
+  signal,
+  blockApi,
+  governance,
+  summaryDir,
+  evalId,
+}) {
   const runs = [];
+  const sharedClient = clientFor(p, config);
+  await sharedClient.probe(registry, signal);
   for (const row of labels) {
     check(!signal.aborted, "NOT-EVALUATED: run deadline");
     const next = corpus.entries.find((e) => e.id === row.a),
@@ -849,40 +994,61 @@ async function runG1({ p, corpus, labels, scratch, registry, config, signal, blo
       b = snap.map.get(row.b);
     const cls = a.authority === b.authority ? `${a.authority}-${b.authority}` : "user-agent";
     check(row.pairClass === cls, "pairClass does not match production authority");
-    const client = clientFor(p, config);
-    await client.probe(registry, signal);
-    const taxonomy = p.mergeTaxonomy(p.readTaxonomyFile(dir));
-    check(taxonomy.ok, "invalid taxonomy");
-    const port = p.createJevWritePort({
-      client,
-      entryIndex: new p.EntryIndex(),
-      dirFor: () => dir,
-      taxonomyFor: () => taxonomy.taxonomy,
-      now: Date.now,
-    });
-    const parsed = blockApi.parseBlockFile(`${next.block.id}.md`, next.block.raw);
-    const result = await port.afterWrite({
-      cwd: dir,
-      file: `${next.block.id}.md`,
-      before: undefined,
-      after: next.block.raw,
-      registry,
-      signal,
-      block: { id: parsed.id, rev: parsed.rev, authority: parsed.meta.authority, scopeExplicit: true },
-    });
-    check(result.usage?.calls > 0, "NOT-EVALUATED: relation classification unavailable");
-    // Includes the real pool, matrix, per-write cap, rev/CAS/active/residue
-    // checks. Writes ONLY to the disposable evaluation snapshot.
-    const executed = await governance.supersede(dir, result.relations ?? [], { signal });
-    runs.push({
-      id: row.id,
-      wouldAuto: executed.some((r) => r.oldId === b.block.id && r.outcome === "superseded"),
-      verdicts: result.relations ?? [],
-      executed,
-      identityMapping: context.mapping,
-    });
-    client.abortBackground();
-    rmSync(dir, { recursive: true, force: true });
+    const identity = { evalId, sampleId: row.id, turn: runs.length + 1, variant: "new" };
+    const scoped = turnClient(sharedClient, identity);
+    const client = scoped.client;
+    let completed = false;
+    try {
+      const taxonomy = p.mergeTaxonomy(p.readTaxonomyFile(dir));
+      check(taxonomy.ok, "invalid taxonomy");
+      const port = p.createJevWritePort({
+        client,
+        entryIndex: new p.EntryIndex(),
+        dirFor: () => dir,
+        taxonomyFor: () => taxonomy.taxonomy,
+        now: Date.now,
+      });
+      const parsed = blockApi.parseBlockFile(`${next.block.id}.md`, next.block.raw);
+      const result = await port.afterWrite({
+        cwd: dir,
+        wholeRelation: true,
+        file: `${next.block.id}.md`,
+        before: undefined,
+        after: next.block.raw,
+        registry,
+        signal,
+        block: { id: parsed.id, rev: parsed.rev, authority: parsed.meta.authority, scopeExplicit: true },
+      });
+      check(
+        scoped.outcomes.length > 0 && logicalComplete(scoped.outcomes) && registry.hardFailures().length === 0,
+        "NOT-EVALUATED: relation classification unavailable",
+      );
+      // Includes the real pool, matrix, per-write cap, rev/CAS/active/residue
+      // checks. Writes ONLY to the disposable evaluation snapshot.
+      const executed = await governance.supersede(dir, result.relations ?? [], { signal });
+      runs.push({
+        id: row.id,
+        wouldAuto: executed.some((r) => r.oldId === b.block.id && r.outcome === "superseded"),
+        verdicts: result.relations ?? [],
+        executed,
+        identityMapping: context.mapping,
+      });
+      completed = true;
+    } finally {
+      client.abortBackground();
+      scoped.close();
+      try {
+        persistTurnSummary(summaryDir, identity, {
+          complete: completed,
+          closedReason: completed ? "resolved" : "not-evaluated",
+          logicalOutcomes: scoped.outcomes,
+          usage: scoped.usage(),
+          result: runs.find((r) => r.id === row.id) ?? null,
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
   }
   return runs;
 }
@@ -913,7 +1079,36 @@ export function productionClockPort(clockModule) {
     clear: (t) => clearTimeout(t),
   });
 }
-async function runTurn({ p, dir, prompt, previousPrompt, registry, config, settings, now, signal, ledger }) {
+export async function runTurn({
+  p,
+  dir,
+  prompt,
+  previousPrompt,
+  registry,
+  client: sharedClient,
+  config,
+  settings,
+  now,
+  signal,
+  ledger,
+  identity,
+  summaryDir,
+  entryIds = [],
+  relevantIds = [],
+}) {
+  const scoped = turnClient(sharedClient, identity);
+  const client = scoped.client;
+  let complete = false,
+    closedReason = "not-evaluated",
+    hashes = new Set();
+  let p2Dispatched = 0;
+  const turnRegistry = {
+    ...registry,
+    streamSimple: (...args) => {
+      p2Dispatched++;
+      return registry.streamSimple(...args);
+    },
+  };
   const ledgerKey = Symbol.for("pi-subagent:memory-predict-ledger");
   const savedLedger = globalThis[ledgerKey];
   globalThis[ledgerKey] = ledger;
@@ -938,75 +1133,169 @@ async function runTurn({ p, dir, prompt, previousPrompt, registry, config, setti
   };
   if (previousPrompt) branch.push({ type: "message", id: "prev", message: { role: "user", content: previousPrompt } });
   branch.push({ type: "message", id: "user", message: { role: "user", content: prompt } });
-  const client = clientFor(p, config);
-  // Probe availability but do NOT run session_start's async auto-tag/review:
+  // The shared client was probed once. Do NOT run session_start's async auto-tag/review:
   // snapshot tags were prepared above, and only real before_agent_start is
   // under evaluation. Fresh activation/segment per independently labelled turn.
-  await client.probe(registry, signal);
   let renderInfo;
   let rendered;
-  p.wireJev(pi, {
-    config,
-    settings,
-    client,
-    isChildSession: false,
-    dirFor: () => dir,
-    getRenderInfo: () => renderInfo,
-    getSectionSnapshot: () => ({ snapshot: rendered, stale: false }),
-    onAfterWriteHook() {},
-    now: () => now,
-    clock: productionClockPort(p),
-    log: () => logs.push("wire error"),
-  });
-  const ctx = {
-    cwd: dir,
-    hasUI: false,
-    modelRegistry: registry,
-    sessionManager: { getBranch: () => branch, getSessionId: () => "pg-eval" },
-  };
-  const renderRoot = mkdtempSync(join(tmpdir(), "memory36-render-"));
+  let renderRoot;
   const oldMemoryRoot = process.env.ARMORY_MEMORY_ROOT;
-  symlinkSync(dir, join(renderRoot, p.toSlug(dir)), "dir");
-  process.env.ARMORY_MEMORY_ROOT = renderRoot;
-  const section = p.memorySection({
-    settings,
-    isChildSession: false,
-    cache: new p.RenderCache(),
-    frozenBlocks: new Map(),
-    getActiveTools: () => ["memory", "read"],
-    stripInlineMeta: true,
-    onRender: (_cwd, _block, info) => {
-      renderInfo = info;
-    },
-  });
-  rendered = section.provider({ ctx, promptText: "", optionsCwd: dir });
-  check(typeof rendered === "string", "NOT-EVALUATED: memory renderer skipped");
+  let ctx;
   try {
+    const status = client.status();
+    check(!(status.kind === "partial" && status.reason === "budget"), "NOT-EVALUATED: classifier call budget/abort");
+    const modelBudget = config.predict?.model;
+    if (modelBudget) {
+      // Exclude budget-related silent admit(false), WITHOUT replaying the
+      // production uncertain/rules decision. Public producer/estimator only:
+      // serialized DTO <= byte cap, ASCII cap bytes upper-bounds its estimate.
+      const taxonomy = p.mergeTaxonomy(p.readTaxonomyFile(dir));
+      check(taxonomy.ok, "NOT-EVALUATED: invalid taxonomy");
+      const system = p.buildPredictSystemPrompt(taxonomy.taxonomy.tags);
+      const userBound = "x".repeat(p.OUTBOUND_MAX_TOTAL_BYTES);
+      check(modelBudget.models.length > 0, "NOT-EVALUATED: chat model unavailable");
+      const reserves = modelBudget.models.map((spec) => {
+        const slash = spec.indexOf("/");
+        const model = slash > 0 ? registry.find(spec.slice(0, slash), spec.slice(slash + 1)) : undefined;
+        check(model, "NOT-EVALUATED: chat model unavailable");
+        const cost = model.cost;
+        check(
+          cost && [cost.input, cost.cacheRead, cost.output].every((v) => Number.isFinite(v) && v >= 0),
+          "NOT-EVALUATED: chat model price unavailable",
+        );
+        const reserve = p.estimatePredictUsd(system, userBound, {
+          inputPerM: cost.input,
+          cacheReadPerM: cost.cacheRead,
+          outputPerM: cost.output,
+        });
+        check(Number.isFinite(reserve) && reserve >= 0, "NOT-EVALUATED: chat model price unavailable");
+        return reserve;
+      });
+      const bound = Math.max(...reserves);
+      // Same wall-clock local calendar day as productionClockPort/flight.
+      const today = new Date();
+      const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+      const used = ledger.get(day) ?? { calls: 0, spent: 0, reserved: 0 };
+      check(
+        modelBudget.maxCallsPerDay > 0 &&
+          modelBudget.maxUsdPerDay > 0 &&
+          used.calls < modelBudget.maxCallsPerDay &&
+          modelBudget.maxUsdPerDay - used.spent - used.reserved >= bound,
+        "NOT-EVALUATED: chat budget",
+      );
+    }
+    p.wireJev(pi, {
+      config,
+      settings,
+      client,
+      isChildSession: false,
+      dirFor: () => dir,
+      getRenderInfo: () => renderInfo,
+      getSectionSnapshot: () => ({ snapshot: rendered, stale: false }),
+      onAfterWriteHook() {},
+      now: () => now,
+      clock: productionClockPort(p),
+      log: () => logs.push("wire error"),
+    });
+    ctx = {
+      cwd: dir,
+      hasUI: false,
+      modelRegistry: turnRegistry,
+      sessionManager: { getBranch: () => branch, getSessionId: () => "pg-eval" },
+    };
+    renderRoot = mkdtempSync(join(tmpdir(), "memory36-render-"));
+    symlinkSync(dir, join(renderRoot, p.toSlug(dir)), "dir");
+    process.env.ARMORY_MEMORY_ROOT = renderRoot;
+    const section = p.memorySection({
+      settings,
+      isChildSession: false,
+      cache: new p.RenderCache(),
+      frozenBlocks: new Map(),
+      getActiveTools: () => ["memory", "read"],
+      stripInlineMeta: true,
+      onRender: (_cwd, _block, info) => {
+        renderInfo = info;
+      },
+    });
+    rendered = section.provider({ ctx, promptText: "", optionsCwd: dir });
+    check(typeof rendered === "string", "NOT-EVALUATED: memory renderer skipped");
     for (const fn of handlers.get("before_agent_start") ?? []) {
       const r = await fn({ type: "before_agent_start", messageType: "user", prompt }, ctx);
       if (r?.message) messages.push(r.message);
     }
     await registry.drain();
     check(!logs.length && !signal.aborted, "NOT-EVALUATED: wire error/abort");
-    const hashes = new Set();
+    hashes = new Set();
     for (const m of messages) {
       const d = m.details;
       const parts = d?.parts ?? [d];
       for (const part of parts)
         if (["U", "P"].includes(part?.layer)) for (const item of part.items ?? []) hashes.add(item.hash);
     }
+    const p2 = branch.filter((e) => e.type === "custom" && e.data?.kind === "call").map((e) => e.data);
+    check(
+      logicalComplete(scoped.outcomes) && p2Completion(p2, p2Dispatched, registry.hardFailures()),
+      "NOT-EVALUATED: unresolved logical outcome",
+    );
+    complete = true;
+    closedReason = "resolved";
     return hashes;
+  } catch (err) {
+    closedReason = classifyErrorCategory(err);
+    throw err;
   } finally {
-    for (const fn of handlers.get("session_shutdown") ?? []) await fn({}, ctx);
-    client.abortBackground();
-    globalThis[ledgerKey] = savedLedger;
-    if (oldMemoryRoot === undefined) delete process.env.ARMORY_MEMORY_ROOT;
-    else process.env.ARMORY_MEMORY_ROOT = oldMemoryRoot;
-    rmSync(renderRoot, { recursive: true, force: true });
+    // Drain BEFORE shutdown, including late 1.5–3s replies; never shorten the
+    // production validity window to the initial UI wait. Shutdown is retained.
+    try {
+      for (const fn of handlers.get("session_shutdown") ?? []) await fn({}, ctx);
+    } catch (err) {
+      complete = false;
+      closedReason = classifyErrorCategory(err);
+      throw err;
+    } finally {
+      client.abortBackground();
+      scoped.close();
+      globalThis[ledgerKey] = savedLedger;
+      if (oldMemoryRoot === undefined) delete process.env.ARMORY_MEMORY_ROOT;
+      else process.env.ARMORY_MEMORY_ROOT = oldMemoryRoot;
+      if (renderRoot) rmSync(renderRoot, { recursive: true, force: true });
+      persistTurnSummary(summaryDir, identity, {
+        complete,
+        closedReason,
+        hashes: [...hashes],
+        deliveredIds: complete ? entryIds.filter(([hash]) => hashes.has(hash)).map(([, id]) => id) : null,
+        hits: complete
+          ? entryIds.filter(([hash, id]) => hashes.has(hash) && relevantIds.includes(id)).map(([, id]) => id)
+          : null,
+        logicalOutcomes: scoped.outcomes,
+        usage: scoped.usage(),
+        p2: { dispatched: p2Dispatched, calls: branch.filter((e) => e.data?.kind === "call").map((e) => e.data) },
+        hardFailures: registry.hardFailures(),
+        subscriptions: scoped.subscriptions(),
+      });
+    }
   }
 }
-async function runG2({ p, oldP, corpus, labels, prompts, scratch, registry, config, settings, signal, blockApi, now }) {
+async function runG2({
+  p,
+  oldP,
+  corpus,
+  labels,
+  prompts,
+  scratch,
+  registry,
+  config,
+  settings,
+  signal,
+  blockApi,
+  now,
+  summaryDir,
+  evalId,
+}) {
   const runs = [];
+  const clients = { old: clientFor(oldP, config), new: clientFor(p, config) };
+  await clients.old.probe(registry, signal);
+  await clients.new.probe(registry, signal);
   const ledgers = { old: new Map(), new: new Map() };
   const prepared = new Map();
   for (const row of labels) {
@@ -1026,9 +1315,19 @@ async function runG2({ p, oldP, corpus, labels, prompts, scratch, registry, conf
       if (!prep) {
         const dir = mkdtempSync(join(scratch, `prepared-${key}-`));
         const snap = await snapshots(api, corpus, dir, project, blocks, blockApi);
-        const client = clientFor(api, config);
-        await prepareTags(api, dir, client, registry, signal);
-        client.abortBackground();
+        const scoped = turnClient(clients[name], { evalId, sampleId: `prepare-${key}`, turn: 0, variant: name });
+        try {
+          await prepareTags(api, dir, scoped.client, registry, signal);
+          check(logicalComplete(scoped.outcomes), "NOT-EVALUATED: missing production entry tags");
+        } finally {
+          scoped.close();
+          clients[name].abortBackground();
+          persistTurnSummary(
+            summaryDir,
+            { evalId, sampleId: `prepare-${key}`, variant: name },
+            { logicalOutcomes: scoped.outcomes, usage: scoped.usage() },
+          );
+        }
         prep = { dir, snap };
         prepared.set(key, prep);
       }
@@ -1039,20 +1338,28 @@ async function runG2({ p, oldP, corpus, labels, prompts, scratch, registry, conf
         }
       const dir = mkdtempSync(join(scratch, `g2-${name}-`));
       cpSync(prep.dir, dir, { recursive: true });
-      const hashes = await runTurn({
-        p: api,
-        dir,
-        prompt: prompts.get(row.turnId) ?? row.prompt,
-        previousPrompt: row.previousPrompt,
-        registry,
-        config,
-        settings: { ...settings, layout: blocks ? "blocks" : "tiered" },
-        now,
-        signal,
-        ledger: ledgers[name],
-      });
-      pair[`${name}Ids`] = [...prep.snap.map].filter(([, e]) => hashes.has(e.hash)).map(([id]) => id);
-      rmSync(dir, { recursive: true, force: true });
+      try {
+        const hashes = await runTurn({
+          p: api,
+          client: clients[name],
+          identity: { evalId, sampleId: row.turnId, turn: runs.length + 1, variant: name },
+          summaryDir,
+          entryIds: [...prep.snap.map].map(([id, e]) => [e.hash, id]),
+          relevantIds: row.relevantIds,
+          dir,
+          prompt: prompts.get(row.turnId) ?? row.prompt,
+          previousPrompt: row.previousPrompt,
+          registry,
+          config,
+          settings: { ...settings, layout: blocks ? "blocks" : "tiered" },
+          now,
+          signal,
+          ledger: ledgers[name],
+        });
+        pair[`${name}Ids`] = [...prep.snap.map].filter(([, e]) => hashes.has(e.hash)).map(([id]) => id);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
     runs.push({ turnId: row.turnId, ...pair });
   }
@@ -1282,7 +1589,7 @@ export function createAuditState({ dir, mode, budgets, cacheProvenance, attemptI
 /** Formal G2 needs REAL P2 evidence, not a rule-path stand-in: actual chat
  * calls or cache hits must exceed zero AND no cache entry may be missing or
  * failed. Otherwise the run is NOT-EVALUATED — never a fake PASS. */
-export function g2P2Evidence(chatStats, cacheStats) {
+export function g2P2Evidence(chatStats, cacheStats, completion) {
   const calls = chatStats?.calls ?? 0;
   const hits = chatStats?.hits ?? 0;
   const missing = (cacheStats?.missing ?? 0) + (chatStats?.missing ?? 0);
@@ -1292,8 +1599,13 @@ export function g2P2Evidence(chatStats, cacheStats) {
     hits,
     missing,
     failures,
-    satisfied: calls + hits > 0 && missing === 0 && failures === 0,
-    requirement: "P2 actual calls+hits > 0 and zero cache missing/failures",
+    satisfied:
+      calls + hits > 0 &&
+      (completion === undefined
+        ? missing === 0 && failures === 0
+        : completion.complete && completion.hardFailures.length === 0),
+    requirement:
+      "P2 actual calls+hits > 0; complete logical outcomes and terminal P2, no sticky controlled denial (raw failures are telemetry)",
   };
 }
 /** Sticky fatal-rejection latch, local to ONE main() activation (no module
@@ -1325,6 +1637,16 @@ export function createFatalRejectionLatch({ audit, abort, setExitCode }) {
     forcedStatus: (status) => (tripped ? "NOT-EVALUATED" : status),
     forcedExit: (code) => (tripped ? 2 : code),
   };
+}
+/** The SAME listener lifetime used by main and offline regressions. */
+export async function withFatalLatchScope({ audit, controller, setExitCode }, fn) {
+  const latch = createFatalRejectionLatch({ audit, abort: () => controller.abort(), setExitCode });
+  process.once("unhandledRejection", latch.onFatalRejection);
+  try {
+    return await fn(latch);
+  } finally {
+    process.removeListener("unhandledRejection", latch.onFatalRejection);
+  }
 }
 export async function main(args = process.argv.slice(2)) {
   const [mode, ...rest] = args;
@@ -1471,157 +1793,211 @@ export async function main(args = process.argv.slice(2)) {
     },
     cacheProvenance,
   });
+  const summaryDir = join(data, "audit", `attempt-${audit.attemptId}-turns`);
+  const expectedSamples = labels.flatMap((row, i) =>
+    (mode === "g2" ? ["old", "new"] : ["new"]).map((variant) => ({
+      evalId: audit.attemptId,
+      sampleId: row.turnId ?? row.id,
+      turn: i + 1,
+      variant,
+    })),
+  );
+  // This manifest is not a prediction. It records absent rounds explicitly.
+  persistTurnSummary(summaryDir, { evalId: audit.attemptId, kind: "expected" }, { expectedSamples });
   const controller = new AbortController();
   // Sticky fatal-rejection latch for THIS main() activation (no module
   // state): an unhandled rejection aborts further dispatch, finalizes the
   // attempt's audit with the closed category and can never be turned back
   // into a PASS by metrics, a later normal finalize, or the CLI exit-code
   // mapping. No process.exit hard kill, no timers. The named listener is
-  // removed on every exit path (see the finally below), so consecutive
+  // removed by withFatalLatchScope on every exit path, so consecutive
   // activations leave no residue.
-  const latch = createFatalRejectionLatch({
-    audit,
-    abort: () => controller.abort(),
-    setExitCode: (code) => {
-      process.exitCode = code;
-    },
-  });
-  process.once("unhandledRejection", latch.onFatalRejection);
+  let latch;
   const scratch = mkdtempSync(join(tmpdir(), "memory36-gate-"));
   let cache;
   let chat;
   try {
-    return await bounded(
-      async (signal) => {
-        const runtime = live ? await liveRuntime(signal) : undefined;
-        const transport = runtime
-          ? classifierTransport(
-              runtime,
-              p.WRITE_TAG_TOTAL_BUDGET_MS,
-              Number(options["max-classifier-usd"] ?? 0.5),
-              audit,
-            )
-          : undefined;
-        cache = createReplyCache({ dir: join(data, "cache"), namespace, live, transport, maxCalls, signal });
-        chat =
-          mode === "g2"
-            ? await createChatCache({
-                dir: join(data, "cache"),
-                models: config.predict.model.models,
-                namespace,
-                live,
-                runtime,
-                maxCalls: Number(options["max-chat-calls"] ?? 80),
-                maxUsd: Number(options["max-chat-usd"] ?? 0.28),
-                signal,
-                budgetMs: config.predict.model.requestBudgetMs,
-                audit,
-                estimate: (await import(pathToFileURL(join(dist, "memory/jev/predict/flight.js")).href))
-                  .estimatePredictUsd,
-              })
-            : undefined;
-        const models = classifierCatalog(join(data, "cache"), config.classifiers, runtime, live);
-        const registry = registryFor(cache, models, chat);
-        let oldP, baselineHash;
-        if (mode === "g2") {
-          check(text(options["baseline-dist"]), "NOT-EVALUATED: baseline dist required");
-          const oldDist = resolve(options["baseline-dist"]);
-          const manifest = JSON.parse(readFileSync(join(oldDist, "../memory36-baseline.json"), "utf8"));
-          check(
-            manifest.commit === BASELINE && manifest.distHash === treeHash(oldDist),
-            "baseline provenance mismatch",
-          );
-          baselineHash = manifest.distHash;
-          oldP = await production(oldDist);
-        }
-        const inputs = {
-          p,
-          oldP,
-          corpus,
-          labels,
-          prompts,
-          scratch,
-          registry,
-          config,
-          settings,
-          signal,
-          blockApi,
-          governance,
-          now,
-        };
-        const runs = mode === "g1" ? await runG1(inputs) : await runG2(inputs);
-        const stats = cache.stats();
-        const metrics = mode === "g1" ? metricsG1(labels, runs) : metricsG2(labels, runs);
-        const chatStats = chat?.stats();
-        if (stats.missing || stats.failures || chatStats?.missing || chatStats?.failures)
-          metrics.status = "NOT-EVALUATED";
-        // Real P2 evidence is a formal-G2 requirement: without actual chat
-        // calls/hits the run cannot PASS on rule-path output alone.
-        const p2Evidence = mode === "g2" ? g2P2Evidence(chatStats, stats) : undefined;
-        if (p2Evidence && !p2Evidence.satisfied) metrics.status = "NOT-EVALUATED";
-        // Sticky fatal latch: a tripped attempt can never report PASS,
-        // regardless of what the metrics computed. The report/details below
-        // inherit the forced NOT-EVALUATED, and the finish keeps the latch's
-        // closed error category (finish only replaces it when given one).
-        metrics.status = latch.forcedStatus(metrics.status);
-        const report = {
-          mode,
-          metrics,
-          cache: stats,
-          chat: chatStats,
-          baseline: BASELINE,
-          baselineHash,
-          currentCommit: currentManifest.commit,
-          currentDistHash: treeHash(dist),
-          labelReportHash,
-          corpusHash: digest(rawCorpus),
-          labelsHash: digest(rawLabels),
-          configHash: digest(config),
-          at: new Date(now).toISOString(),
-          parameters: {
-            SUPERSEDE_AUTO_P: governance.SUPERSEDE_AUTO_P,
-            CONFLICT_AUTO_P: governance.CONFLICT_AUTO_P,
-            AUTO_PER_WRITE_MAX: governance.AUTO_PER_WRITE_MAX,
-            TOPIC_USER_POOL_CAP,
-          },
-          predict: "U+P2; model.enabled=true in both versions; isolated turns, separate production daily ledgers",
-          classifiers: config.classifiers,
-          cacheProvenance,
-          audit: { attempt: audit.attemptId, file: audit.file },
-          ...(p2Evidence ? { p2Evidence } : {}),
-        };
-        writePrivate(join(data, `${mode}-details.json`), { report, runs });
-        console.log(JSON.stringify(report, null, 2));
-        audit.finish({ status: metrics.status, cache: stats, chat: chatStats });
-        // Even the CLI `.then(code => process.exitCode = code)` mapping cannot
-        // turn a tripped attempt back into exit 0 — main returns 2.
-        return latch.forcedExit(metrics.status === "PASS" ? 0 : metrics.status === "FAIL" ? 1 : 2);
+    return await withFatalLatchScope(
+      {
+        audit,
+        controller,
+        setExitCode: (code) => {
+          process.exitCode = code;
+        },
       },
-      timeoutMs,
-      controller.signal,
+      async (activeLatch) => {
+        latch = activeLatch;
+        try {
+          return await bounded(
+            async (signal) => {
+              const runtime = live ? await liveRuntime(signal) : undefined;
+              const transport = runtime
+                ? classifierTransport(
+                    runtime,
+                    p.WRITE_TAG_TOTAL_BUDGET_MS,
+                    Number(options["max-classifier-usd"] ?? 0.5),
+                    audit,
+                  )
+                : undefined;
+              cache = createReplyCache({ dir: join(data, "cache"), namespace, live, transport, maxCalls, signal });
+              chat =
+                mode === "g2"
+                  ? await createChatCache({
+                      dir: join(data, "cache"),
+                      models: config.predict.model.models,
+                      namespace,
+                      live,
+                      runtime,
+                      maxCalls: Number(options["max-chat-calls"] ?? 80),
+                      maxUsd: Number(options["max-chat-usd"] ?? 0.28),
+                      signal,
+                      budgetMs: config.predict.model.requestBudgetMs,
+                      audit,
+                      estimate: (await import(pathToFileURL(join(dist, "memory/jev/predict/flight.js")).href))
+                        .estimatePredictUsd,
+                    })
+                  : undefined;
+              const models = classifierCatalog(join(data, "cache"), config.classifiers, runtime, live);
+              const registry = registryFor(cache, models, chat);
+              let oldP, baselineHash;
+              if (mode === "g2") {
+                check(text(options["baseline-dist"]), "NOT-EVALUATED: baseline dist required");
+                const oldDist = resolve(options["baseline-dist"]);
+                const manifest = JSON.parse(readFileSync(join(oldDist, "../memory36-baseline.json"), "utf8"));
+                check(
+                  manifest.commit === BASELINE && manifest.distHash === treeHash(oldDist),
+                  "baseline provenance mismatch",
+                );
+                baselineHash = manifest.distHash;
+                oldP = await production(oldDist);
+              }
+              const inputs = {
+                p,
+                oldP,
+                corpus,
+                labels,
+                prompts,
+                scratch,
+                registry,
+                config,
+                settings,
+                signal,
+                blockApi,
+                governance,
+                now,
+                summaryDir,
+                evalId: audit.attemptId,
+              };
+              const runs = mode === "g1" ? await runG1(inputs) : await runG2(inputs);
+              const stats = cache.stats();
+              const metrics = mode === "g1" ? metricsG1(labels, runs) : metricsG2(labels, runs);
+              const chatStats = chat?.stats();
+              if (registry.hardFailures().length) metrics.status = "NOT-EVALUATED";
+              // Real P2 evidence is a formal-G2 requirement: without actual chat
+              // calls/hits the run cannot PASS on rule-path output alone.
+              const p2Evidence =
+                mode === "g2"
+                  ? g2P2Evidence(chatStats, stats, {
+                      complete: runs.length === labels.length,
+                      hardFailures: registry.hardFailures(),
+                    })
+                  : undefined;
+              if (p2Evidence && !p2Evidence.satisfied) metrics.status = "NOT-EVALUATED";
+              // Sticky fatal latch: a tripped attempt can never report PASS,
+              // regardless of what the metrics computed. The report/details below
+              // inherit the forced NOT-EVALUATED, and the finish keeps the latch's
+              // closed error category (finish only replaces it when given one).
+              metrics.status = latch.forcedStatus(metrics.status);
+              const report = {
+                mode,
+                metrics,
+                cache: stats,
+                chat: chatStats,
+                baseline: BASELINE,
+                baselineHash,
+                currentCommit: currentManifest.commit,
+                currentDistHash: treeHash(dist),
+                labelReportHash,
+                corpusHash: digest(rawCorpus),
+                labelsHash: digest(rawLabels),
+                configHash: digest(config),
+                at: new Date(now).toISOString(),
+                parameters: {
+                  SUPERSEDE_AUTO_P: governance.SUPERSEDE_AUTO_P,
+                  CONFLICT_AUTO_P: governance.CONFLICT_AUTO_P,
+                  AUTO_PER_WRITE_MAX: governance.AUTO_PER_WRITE_MAX,
+                  TOPIC_USER_POOL_CAP,
+                },
+                predict: "U+P2; model.enabled=true in both versions; isolated turns, separate production daily ledgers",
+                classifiers: config.classifiers,
+                cacheProvenance,
+                audit: { attempt: audit.attemptId, file: audit.file },
+                ...(p2Evidence ? { p2Evidence } : {}),
+              };
+              writePrivate(join(data, "audit", `attempt-${audit.attemptId}-${mode}-details.json`), { report, runs });
+              console.log(JSON.stringify(report, null, 2));
+              audit.finish({ status: metrics.status, cache: stats, chat: chatStats });
+              // Even the CLI `.then(code => process.exitCode = code)` mapping cannot
+              // turn a tripped attempt back into exit 0 — main returns 2.
+              return latch.forcedExit(metrics.status === "PASS" ? 0 : metrics.status === "FAIL" ? 1 : 2);
+            },
+            timeoutMs,
+            controller.signal,
+          );
+        } catch (err) {
+          // Any abnormal exit (exception, deadline/abort, invalid runtime) still
+          // finalizes the attempt's audit with a closed category and whatever cache
+          // counters exist — an uncaught rejection never leaves a cost-less shell.
+          // Once the fatal latch is tripped its `unhandled-rejection` category must
+          // survive: no replacement category is supplied. A broken audit FS at
+          // finalize cannot mask the run's own error (pre-transport record durable).
+          try {
+            audit.finish({
+              status: "NOT-EVALUATED",
+              ...(latch.tripped() ? {} : { errorCategory: classifyErrorCategory(err) }),
+              cache: cache?.stats(),
+              chat: chat?.stats(),
+            });
+          } catch {
+            // best effort only
+          }
+          throw err;
+        }
+      },
     );
-  } catch (err) {
-    // Any abnormal exit (exception, deadline/abort, invalid runtime) still
-    // finalizes the attempt's audit with a closed category and whatever cache
-    // counters exist — an uncaught rejection never leaves a cost-less shell.
-    // Once the fatal latch is tripped its `unhandled-rejection` category must
-    // survive: no replacement category is supplied. A broken audit FS at
-    // finalize cannot mask the run's own error (pre-transport record durable).
-    try {
-      audit.finish({
-        status: "NOT-EVALUATED",
-        ...(latch.tripped() ? {} : { errorCategory: classifyErrorCategory(err) }),
-        cache: cache?.stats(),
-        chat: chat?.stats(),
-      });
-    } catch {
-      // best effort only
-    }
-    throw err;
   } finally {
-    process.removeListener("unhandledRejection", latch.onFatalRejection);
     controller.abort();
-    rmSync(scratch, { recursive: true, force: true });
+    try {
+      const samples = expectedSamples.map((identity) => {
+        const path = join(summaryDir, `${digest(identity)}.json`);
+        return {
+          ...identity,
+          ...(existsSync(path)
+            ? JSON.parse(readFileSync(path, "utf8"))
+            : { complete: false, closedReason: "missing-sample", hits: null }),
+        };
+      });
+      persistTurnSummary(
+        summaryDir,
+        { evalId: audit.attemptId, kind: "completion" },
+        {
+          complete: samples.every((r) => r.complete),
+          samples,
+          status: latch.forcedStatus(samples.every((r) => r.complete) ? "complete" : "NOT-EVALUATED"),
+        },
+      );
+    } catch (err) {
+      // Completion-summary failure is as fatal as pre-transport audit failure:
+      // no later PASS finalize may conceal it (the return is still unwinding).
+      try {
+        audit.finish({ status: "NOT-EVALUATED", ...(latch.tripped() ? {} : { errorCategory: "audit-write" }) });
+      } catch {
+        /* disk unavailable, CLI still exits 2 */
+      }
+      throw err;
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   }
 }
 export { treeHash, production, snapshots };

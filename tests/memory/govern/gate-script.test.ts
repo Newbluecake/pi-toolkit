@@ -8,12 +8,36 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createJevClient } from "../../../src/memory/jev/client.js";
+import { createTokenBucket } from "../../../src/memory/jev/health.js";
+import { jevConfigOf } from "../../../src/memory/jev/config.js";
+import { parseMemorySettings } from "../../../src/memory/settings.js";
+import { createFakeRegistry } from "../jev/helpers/fake-registry.js";
+import { PredictCache } from "../../../src/memory/jev/predict/cache.js";
 import * as srcClock from "../../../src/core/clock.js";
+import * as srcTaxonomy from "../../../src/memory/jev/taxonomy.js";
+import * as srcStore from "../../../src/memory/jev/index-store.js";
+import * as srcLlm from "../../../src/memory/jev/predict/llm.js";
+import * as srcOutbound from "../../../src/memory/jev/predict/outbound.js";
+import * as srcFlight from "../../../src/memory/jev/predict/flight.js";
+import { wireJev } from "../../../src/memory/jev/wire.js";
+import { EntryIndex } from "../../../src/memory/jev/entries.js";
+import { memorySection } from "../../../src/memory/inject.js";
+import { RenderCache } from "../../../src/memory/render.js";
+import { toSlug } from "../../../src/memory/paths.js";
+import { localDayKey } from "../../../src/memory/jev/predict/ledger.js";
 import { OUTER_GRACE_MS, createPredictFlight } from "../../../src/memory/jev/predict/flight.js";
 import { createPredictLedger } from "../../../src/memory/jev/predict/ledger.js";
 import {
   AUDIT_ERROR_CATEGORIES,
   bounded,
+  clientFor,
+  turnClient,
+  logicalComplete,
+  persistTurnSummary,
+  p2Completion,
+  registryFor,
+  runTurn,
   canonical,
   classifierTransport,
   classifyErrorCategory,
@@ -21,6 +45,7 @@ import {
   createAuditState,
   createChatCache,
   createFatalRejectionLatch,
+  withFatalLatchScope,
   createReplyCache,
   digest,
   g1Support,
@@ -904,20 +929,525 @@ describe("PG fatal-rejection sticky latch", () => {
     expect(latch2.forcedExit(0)).toBe(0);
     expect(latch2.tripped()).toBe(false);
   });
-  it("main() always removes the named listener; consecutive activations leave no residue", async () => {
-    const src = join(homedir(), ".pi/agent/memory-reports/eval36/runs/pg-candidate-v3");
-    const dist = "/tmp/memory36-current-efa12f26-k9A1Uh/dist";
-    if (!existsSync(join(src, "freeze.json")) || !existsSync(dist)) return; // CI / machines without the frozen run
-    const data = temp();
-    for (const name of ["corpus.json", "g1-pairs.jsonl", "g2-turns.jsonl", "label-report.json", "freeze.json"])
-      writeFileSync(join(data, name), readFileSync(join(src, name)));
+  it("main's listener helper removes the listener on success and consecutive activations", async () => {
     const before = process.listenerCount("unhandledRejection");
-    // Exception path (missing baseline dist) — runs past latch registration.
-    await expect(main(["g2", "--data", data, "--dist", dist])).rejects.toThrow();
-    expect(process.listenerCount("unhandledRejection")).toBe(before);
-    await expect(main(["g2", "--data", data, "--dist", dist])).rejects.toThrow();
-    expect(process.listenerCount("unhandledRejection")).toBe(before);
-    // Per-attempt audit retention across consecutive activations.
-    expect(readdirSync(join(data, "audit")).filter((f) => f.endsWith(".json"))).toHaveLength(2);
+    for (let i = 0; i < 2; i++) {
+      const audit = createAuditState({ dir: temp(), mode: "g2", budgets });
+      const controller = new AbortController();
+      const value = await withFatalLatchScope({ audit, controller }, async (latch) => {
+        expect(process.listenerCount("unhandledRejection")).toBe(before + 1);
+        expect(latch.forcedExit(0)).toBe(0);
+        audit.finish({ status: "PASS" });
+        return "success";
+      });
+      expect(value).toBe("success");
+      expect(JSON.parse(readFileSync(audit.path, "utf8")).status).toBe("PASS");
+      expect(process.listenerCount("unhandledRejection")).toBe(before);
+    }
+  });
+  it("main's listener helper removes on exception and preserves a previously tripped latch", async () => {
+    const before = process.listenerCount("unhandledRejection");
+    for (const trip of [false, true]) {
+      const audit = createAuditState({ dir: temp(), mode: "g2", budgets });
+      const controller = new AbortController();
+      let exitCode = 0;
+      await expect(
+        withFatalLatchScope(
+          {
+            audit,
+            controller,
+            setExitCode: (code) => {
+              exitCode = code;
+            },
+          },
+          async (latch) => {
+            expect(process.listenerCount("unhandledRejection")).toBe(before + 1);
+            if (trip) {
+              latch.onFatalRejection(); // direct hook, never emit into Vitest
+              audit.finish({ status: latch.forcedStatus("PASS") });
+              exitCode = latch.forcedExit(0);
+            }
+            throw new Error("synthetic scope error");
+          },
+        ),
+      ).rejects.toThrow("synthetic scope error");
+      expect(process.listenerCount("unhandledRejection")).toBe(before);
+      expect(controller.signal.aborted).toBe(trip);
+      const recorded = JSON.parse(readFileSync(audit.path, "utf8"));
+      if (trip) {
+        expect(recorded).toMatchObject({ status: "NOT-EVALUATED", error: "unhandled-rejection" });
+        expect(exitCode).toBe(2);
+      } else {
+        expect(recorded).toMatchObject({ status: "running", error: null });
+        expect(exitCode).toBe(0);
+      }
+    }
+  });
+});
+
+describe("PG shared production client and per-sample logical completion", () => {
+  function config(maxCalls = 50) {
+    return {
+      ...jevConfigOf(parseMemorySettings({})),
+      classifiers: ["test/free", "test/paid"],
+      proxy: "",
+      maxCalls,
+      maxCostUsd: 0.5,
+    };
+  }
+  function request(registry: unknown) {
+    return { duty: "recall", registry, state: context.state, questions, mode: "sync", budgetMs: 4000 };
+  }
+  function scope(client: unknown, sampleId: string) {
+    return turnClient(client, { evalId: "fake-eval", sampleId, turn: 1, variant: "new" });
+  }
+  function fake(responses: Record<string, unknown[]>) {
+    return createFakeRegistry({ available: ["test/free", "test/paid"], responses: responses as never });
+  }
+  it("shares the actual production lastModel closure across turns, not merely health", async () => {
+    const { registry, callCountFor } = fake({
+      "test/free": [{ stopReason: "error", errorMessage: "temporary failure" }],
+      "test/paid": [result, result],
+    });
+    const health = new Map();
+    const client = createJevClient({
+      config: config(),
+      isChild: false,
+      now: Date.now,
+      health,
+      bucket: createTokenBucket(),
+    });
+    await client.probe(registry);
+    const a = scope(client, "a");
+    expect((await a.client.ask(request(registry))).ok).toBe(true);
+    a.close();
+    client.abortBackground();
+    // Equalize health: only lastModel can now prefer paid over config-first free.
+    health.clear();
+    const b = scope(client, "b");
+    expect((await b.client.ask(request(registry))).model).toBe("test/paid");
+    expect(callCountFor("test/free")).toBe(1);
+    expect(callCountFor("test/paid")).toBe(2);
+    expect(b.usage().calls).toBe(1);
+    expect(b.usage().cumulative.calls).toBeGreaterThan(b.usage().calls);
+    b.close();
+  });
+  it("handled tier failure plus FINAL fallback answers is resolved", async () => {
+    const { registry } = fake({
+      "test/free": [{ stopReason: "error", errorMessage: "temporary" }],
+      "test/paid": [result],
+    });
+    const client = clientFor({ createJevClient, createTokenBucket }, config());
+    const a = scope(client, "a");
+    await a.client.ask(request(registry));
+    expect(a.outcomes).toMatchObject([
+      { requestedIds: ["e1"], answeredIds: ["e1"], ok: true, reason: "resolved", callseq: 1 },
+    ]);
+    expect(logicalComplete(a.outcomes)).toBe(true);
+    a.close();
+  });
+  it("same DTO success in a later sample never backfills an earlier failed FINAL outcome", async () => {
+    const { registry } = fake({
+      "test/free": [{ stopReason: "error", errorMessage: "temporary" }, result],
+      "test/paid": [{ stopReason: "error", errorMessage: "temporary" }],
+    });
+    const client = clientFor({ createJevClient, createTokenBucket }, config());
+    const a = scope(client, "a");
+    await a.client.ask(request(registry));
+    a.close();
+    const b = scope(client, "b");
+    await b.client.ask(request(registry));
+    b.close();
+    expect(logicalComplete(a.outcomes)).toBe(false);
+    expect(logicalComplete(b.outcomes)).toBe(true);
+    expect(a.outcomes[0].sampleId).toBe("a");
+    expect(b.outcomes[0].callseq).toBe(1);
+  });
+  it("partial answers are unresolved, never evaluated negative zero", async () => {
+    const { registry } = fake({ "test/free": [{ stopReason: "stop", answers: {} }] });
+    const a = scope(clientFor({ createJevClient, createTokenBucket }, config()), "partial");
+    await a.client.ask(request(registry));
+    expect(a.outcomes[0]).toMatchObject({ ok: true, resolved: false, reason: "missing-or-invalid" });
+    expect(metricsG2(turns(), [{ turnId: "t0" }]).status).toBe("NOT-EVALUATED");
+    a.close();
+  });
+  it("finite production activation budget really exhausts and remains sticky across turns", async () => {
+    const { registry, callCountFor } = fake({ "test/free": [result, result] });
+    const cfg = config(1),
+      client = clientFor({ createJevClient, createTokenBucket }, cfg);
+    const a = scope(client, "a");
+    await a.client.ask(request(registry));
+    a.close();
+    const b = scope(client, "b");
+    expect(await b.client.ask(request(registry))).toMatchObject({ ok: false, reason: "budget" });
+    client.abortBackground();
+    expect(await b.client.ask(request(registry))).toMatchObject({ ok: false, reason: "budget" });
+    expect(cfg.maxCalls).toBe(1);
+    expect(logicalComplete(b.outcomes)).toBe(false);
+    expect(callCountFor("test/free")).toBe(1);
+    b.close();
+  });
+  it("turn cleanup unsubscribes status callbacks and abortBackground does not poison the next ask", async () => {
+    const { registry } = fake({ "test/free": [result, result] });
+    const client = clientFor({ createJevClient, createTokenBucket }, config());
+    const a = scope(client, "a"),
+      cb = vi.fn();
+    a.client.onStatusChange(cb);
+    expect(a.subscriptions()).toBe(1);
+    await a.client.ask(request(registry));
+    a.close();
+    cb.mockClear();
+    client.abortBackground();
+    const b = scope(client, "b");
+    expect((await b.client.ask(request(registry))).ok).toBe(true);
+    expect(a.subscriptions()).toBe(0);
+    expect(cb).not.toHaveBeenCalled();
+    b.close();
+  });
+  it("abortBackground cancels only the active background ask; next turn still uses the production client", async () => {
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const { registry } = createFakeRegistry({
+      available: ["test/free"],
+      responses: {
+        "test/free": [
+          ({ signal }) =>
+            new Promise((resolve) => {
+              started();
+              signal!.addEventListener("abort", () => resolve({ stopReason: "aborted" }), { once: true });
+            }),
+          result as never,
+        ],
+      },
+    });
+    const client = clientFor({ createJevClient, createTokenBucket }, config());
+    const a = scope(client, "a");
+    const pending = a.client.ask({ ...request(registry), mode: "background" });
+    await ready;
+    client.abortBackground();
+    expect(await pending).toMatchObject({ ok: false, reason: "aborted" });
+    a.close();
+    const b = scope(client, "b");
+    expect((await b.client.ask(request(registry))).ok).toBe(true);
+    expect(logicalComplete(a.outcomes)).toBe(false);
+    expect(logicalComplete(b.outcomes)).toBe(true);
+    b.close();
+  });
+  it("durable 0600 summaries survive failure/missing rounds and cannot overwrite any attempt", () => {
+    const dir = temp(),
+      identity = { evalId: "attempt-a", sampleId: "s1", variant: "old" };
+    const path = persistTurnSummary(dir, identity, { complete: false, closedReason: "not-evaluated", hits: null });
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ complete: false, hits: null });
+    expect(() => persistTurnSummary(dir, identity, { complete: true })).toThrow("audit write");
+    persistTurnSummary(dir, { ...identity, evalId: "attempt-b" }, { complete: true });
+    expect(readdirSync(dir)).toHaveLength(2);
+    expect(metricsG2(turns(), [])).toMatchObject({
+      status: "NOT-EVALUATED",
+      oldHits: null,
+      newHits: null,
+      oldRecall: null,
+      newRecall: null,
+    });
+  });
+  it("hard budget/audit denial is sticky even if later fallback transport succeeds", async () => {
+    const cache = {
+      classify: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("NOT-EVALUATED: classifier USD cap"))
+        .mockResolvedValueOnce(result),
+    };
+    const registry = registryFor(cache, []);
+    await expect(registry.classify(model, context)).rejects.toThrow("USD cap");
+    expect(await registry.classify(model, context)).toEqual(result);
+    expect(registry.hardFailures()).toEqual(["classifier-budget"]);
+    expect(g2P2Evidence({ calls: 1 }, {}, { complete: true, hardFailures: registry.hardFailures() }).satisfied).toBe(
+      false,
+    );
+  });
+  it("raw handled provider failure is telemetry, not a logical completeness failure", async () => {
+    const registry = registryFor(
+      {
+        classify: async () => {
+          throw new Error("NOT-EVALUATED: classifier failed (details suppressed)");
+        },
+      },
+      [],
+    );
+    await expect(registry.classify(model, context)).rejects.toThrow("classifier failed");
+    expect(registry.hardFailures()).toEqual([]);
+    expect(
+      g2P2Evidence({ calls: 1, failures: 3 }, { failures: 10 }, { complete: true, hardFailures: [] }).satisfied,
+    ).toBe(true);
+    expect(p2Completion([{ ok: false, reason: "timeout" }], 1)).toBe(true);
+    expect(p2Completion([{ ok: false, reason: "failed" }], 2)).toBe(true);
+    expect(p2Completion([], 1)).toBe(false);
+    expect(p2Completion([{ ok: false, reason: "aborted" }], 1)).toBe(false);
+  });
+  it("exact chat cache remains usable by a new independent sample with real measured latency", async () => {
+    vi.useFakeTimers();
+    const dir = temp(),
+      models = ["test/chat"],
+      namespace = {};
+    const m = { provider: "test", id: "chat", cost: { input: 1, output: 1, cacheRead: 1 } };
+    writeFileSync(join(dir, `chat-models-${digest(models)}.json`), JSON.stringify([m]));
+    const dto = { systemPrompt: "s", messages: [{ role: "user", content: "{}" }] };
+    const request = { model: m, context: dto, maxTokens: 10, reasoning: "minimal" };
+    const key = digest({ namespace, chat: request });
+    writeFileSync(
+      join(dir, `chat-${key}.json`),
+      JSON.stringify({
+        key,
+        requestHash: digest(request),
+        elapsedMs: 2000,
+        result: { content: [{ type: "text", text: "[]" }] },
+      }),
+    );
+    const chat = await createChatCache({ dir, models, namespace, live: false, maxCalls: 2, maxUsd: 1 });
+    for (let sample = 0; sample < 2; sample++) {
+      let done = false;
+      const pending = chat
+        .streamSimple(m, dto, { maxTokens: 10, reasoning: "minimal" })
+        .result()
+        .then(() => {
+          done = true;
+        });
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(500);
+      await pending;
+    }
+    expect(chat.stats()).toMatchObject({ calls: 0, hits: 2 });
+  });
+  it("fresh wire/branch/PredictCache per sample, late P2 drains before shutdown, cleanup persists on failure", async () => {
+    const client = clientFor({ createJevClient, createTokenBucket }, config());
+    const branches: unknown[] = [],
+      pendingAtStart: unknown[] = [],
+      order: string[] = [];
+    const p = {
+      ...srcClock,
+      ...srcTaxonomy,
+      ...srcStore,
+      ...srcLlm,
+      ...srcOutbound,
+      ...srcFlight,
+      RenderCache: class {},
+      toSlug: () => "fake",
+      memorySection: () => ({ provider: () => "resident" }),
+      wireJev: (pi: any, deps: any) => {
+        const cache = new PredictCache({ ttlMs: 10000 });
+        pendingAtStart.push(cache.peekPending());
+        deps.client.onStatusChange(() => {});
+        pi.on("before_agent_start", async (_e: any, ctx: any) => {
+          branches.push(ctx.sessionManager.getBranch());
+          cache.setPending([], undefined, 1);
+          await ctx.modelRegistry.streamSimple({}, {}, {}).result();
+          pi.appendEntry("predict", { kind: "call", ok: true, timely: false });
+        });
+        pi.on("session_shutdown", () => {
+          order.push("shutdown");
+        });
+      },
+    };
+    const registry = registryFor({ classify: vi.fn() }, [], {
+      find: vi.fn((provider, id) => ({ provider, id, cost: { input: 1, cacheRead: 0, output: 1 } })),
+      streamSimple: () => ({
+        result: async () => {
+          order.push("late-result");
+          return {};
+        },
+      }),
+    });
+    const summaryDir = temp();
+    for (let turn = 1; turn <= 2; turn++)
+      await runTurn({
+        p,
+        dir: temp(),
+        prompt: "independent",
+        registry,
+        client,
+        config: config(),
+        settings: {},
+        now: Date.now(),
+        signal: new AbortController().signal,
+        ledger: new Map(),
+        identity: { evalId: "a", sampleId: `s${turn}`, turn, variant: "new" },
+        summaryDir,
+      });
+    expect(branches[0]).not.toBe(branches[1]);
+    expect(pendingAtStart).toEqual([undefined, undefined]);
+    expect(order).toEqual(["late-result", "shutdown", "late-result", "shutdown"]);
+    for (const f of readdirSync(summaryDir))
+      expect(JSON.parse(readFileSync(join(summaryDir, f), "utf8"))).toMatchObject({
+        complete: true,
+        subscriptions: 0,
+        p2: { dispatched: 1 },
+      });
+    const failedDir = temp();
+    const failing = {
+      ...p,
+      wireJev: (pi: any, deps: any) => {
+        deps.client.onStatusChange(() => {});
+        pi.on("before_agent_start", () => {
+          throw new Error("synthetic turn failure");
+        });
+        pi.on("session_shutdown", () => {
+          order.push("failed-shutdown");
+        });
+      },
+    };
+    await expect(
+      runTurn({
+        p: failing,
+        dir: temp(),
+        prompt: "independent",
+        registry,
+        client,
+        config: config(),
+        settings: {},
+        now: Date.now(),
+        signal: new AbortController().signal,
+        ledger: new Map(),
+        identity: { evalId: "a", sampleId: "failed", turn: 3, variant: "old" },
+        summaryDir: failedDir,
+      }),
+    ).rejects.toThrow("synthetic turn failure");
+    expect(order.at(-1)).toBe("failed-shutdown");
+    const failed = JSON.parse(readFileSync(join(failedDir, readdirSync(failedDir)[0]!), "utf8"));
+    expect(failed).toMatchObject({ complete: false, hits: null, deliveredIds: null, subscriptions: 0 });
+  });
+});
+
+/** Narrow Sonnet blocker: production wire, not a test reimplementation of
+ * uncertain/admit. Corpus and registries are entirely synthetic. */
+describe("PG P2 conservative pre-admission bound through production wire", () => {
+  const api = {
+    ...srcClock,
+    ...srcTaxonomy,
+    ...srcStore,
+    ...srcLlm,
+    ...srcOutbound,
+    ...srcFlight,
+    wireJev,
+    memorySection,
+    RenderCache,
+    toSlug,
+  };
+  async function setup() {
+    const dir = temp(),
+      summaryDir = temp();
+    writeFileSync(
+      join(dir, "core.md"),
+      "# Synthetic\n\n## Dispatch\n- 派发子 agent 前确认范围 <!-- mem user tags=+dispatch -->\n",
+    );
+    const settings = parseMemorySettings({ layout: "tiered", jev: { enabled: true } });
+    settings.jev.predict.enabled = true;
+    settings.jev.predict.model.enabled = true;
+    settings.jev.predict.model.models = ["test/chat"];
+    const config = { ...jevConfigOf(settings), classifiers: ["test/classifier"], proxy: "" };
+    const taxonomy = srcTaxonomy.mergeTaxonomy(srcStore.readTaxonomyFile(dir));
+    if (!taxonomy.ok) throw new Error("synthetic taxonomy");
+    const system = srcLlm.buildPredictSystemPrompt(taxonomy.taxonomy.tags);
+    const price = { inputPerM: 1, cacheReadPerM: 0, outputPerM: 1 };
+    const bound = srcFlight.estimatePredictUsd(system, "x".repeat(srcOutbound.OUTBOUND_MAX_TOTAL_BYTES), price);
+    const fake = createFakeRegistry({ available: ["test/classifier"] });
+    const streamSimple = vi.fn(() => ({
+      result: async () => ({
+        content: [{ type: "text", text: '{"tags":[]}' }],
+        usage: { input: 10, cacheRead: 0, output: 1 },
+      }),
+    }));
+    const find = vi.fn((provider, id) => ({ provider, id, cost: { input: 1, cacheRead: 0, output: 1 } }));
+    const registry = registryFor({ classify: fake.registry.classify }, [{ provider: "test", id: "classifier" }], {
+      find,
+      streamSimple,
+    });
+    const client = clientFor({ createJevClient, createTokenBucket }, config);
+    await client.probe(registry);
+    const run = (prompt: string, ledger: Map<string, unknown>) =>
+      runTurn({
+        p: api,
+        dir,
+        prompt,
+        registry,
+        client,
+        config,
+        settings,
+        now: Date.now(),
+        signal: new AbortController().signal,
+        ledger,
+        identity: { evalId: "synthetic", sampleId: "turn", turn: 1, variant: "new" },
+        summaryDir,
+      });
+    const summaries = () => readdirSync(summaryDir).map((f) => JSON.parse(readFileSync(join(summaryDir, f), "utf8")));
+    const ledgerWithRemaining = (remaining: number) =>
+      new Map([
+        [localDayKey(Date.now()), { calls: 1, spent: config.predict.model.maxUsdPerDay - remaining, reserved: 0 }],
+      ]);
+    return { dir, summaryDir, config, bound, run, find, streamSimple, summaries, ledgerWithRemaining };
+  }
+  it("positive balance below bound/2 rejects as chat budget before any transport and durably records incomplete", async () => {
+    const h = await setup();
+    await expect(
+      h.run("请深入分析这个模块的结构，帮助我明确下一步需要调查的问题", h.ledgerWithRemaining(h.bound / 4)),
+    ).rejects.toThrow("NOT-EVALUATED: chat budget");
+    expect(h.streamSimple).not.toHaveBeenCalled();
+    expect(h.summaries()).toMatchObject([{ complete: false, closedReason: "chat-budget", hits: null }]);
+  });
+  it("sufficient bound plus certain rule prompt is a legitimate zero-dispatch complete turn", async () => {
+    const h = await setup();
+    await h.run("派两个子 agent 并行做", h.ledgerWithRemaining(h.bound * 2));
+    expect(h.streamSimple).not.toHaveBeenCalled();
+    expect(h.summaries()).toMatchObject([{ complete: true, p2: { dispatched: 0 } }]);
+  });
+  it("sufficient bound plus uncertain prompt actually dispatches the production P2 flight", async () => {
+    const h = await setup();
+    await h.run("请深入分析这个模块的结构，帮助我明确下一步需要调查的问题", h.ledgerWithRemaining(h.bound * 2));
+    expect(h.streamSimple.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(h.summaries()).toMatchObject([{ complete: true, p2: { dispatched: 1, calls: [{ ok: true }] } }]);
+  });
+  it("an unbound model anywhere in the configured chain is NOT-EVALUATED, not a silent rule gate", async () => {
+    const h = await setup();
+    h.config.predict.model.models = ["test/chat", "missing/chat"];
+    h.find.mockImplementation((provider, id) =>
+      provider === "missing" ? (undefined as never) : { provider, id, cost: { input: 1, cacheRead: 0, output: 1 } },
+    );
+    await expect(h.run("派两个子 agent 并行做", new Map())).rejects.toThrow("chat model unavailable");
+    expect(h.streamSimple).not.toHaveBeenCalled();
+    expect(h.summaries()).toMatchObject([{ complete: false }]);
+  });
+  it("invalid model price rejects without guessing a zero-cost model", async () => {
+    const h = await setup();
+    h.find.mockImplementation((provider, id) => ({ provider, id, cost: { input: NaN, cacheRead: 0, output: 1 } }));
+    await expect(h.run("派两个子 agent 并行做", new Map())).rejects.toThrow("chat model price unavailable");
+    expect(h.streamSimple).not.toHaveBeenCalled();
+    expect(h.summaries()).toMatchObject([{ complete: false }]);
+  });
+  it("production serializer byte cap upper-bounds production reserve even for multibyte/escaping DTOs", async () => {
+    const h = await setup();
+    for (const request of ["x".repeat(12000), '中😀\\"\n'.repeat(3000)]) {
+      const dto = srcOutbound.serializePredictOutbound({
+        v: 1,
+        request,
+        previous_request: request,
+        workspace: { jobs: [], subagents: 0 },
+        rule_guess: [],
+        todo: Array.from({ length: 8 }, () => ({ status: "pending" as const, subject: request })),
+        recent_tools: [],
+      });
+      expect(Buffer.byteLength(dto, "utf8")).toBeLessThanOrEqual(srcOutbound.OUTBOUND_MAX_TOTAL_BYTES);
+      const taxonomy = srcTaxonomy.mergeTaxonomy();
+      if (!taxonomy.ok) throw new Error("synthetic taxonomy");
+      const system = srcLlm.buildPredictSystemPrompt(taxonomy.taxonomy.tags);
+      for (const price of [
+        { inputPerM: 1, cacheReadPerM: 0, outputPerM: 1 },
+        { inputPerM: 0, cacheReadPerM: 10, outputPerM: 2 },
+      ])
+        expect(srcFlight.estimatePredictUsd(system, dto, price)).toBeLessThanOrEqual(
+          srcFlight.estimatePredictUsd(system, "x".repeat(srcOutbound.OUTBOUND_MAX_TOTAL_BYTES), price),
+        );
+    }
   });
 });
