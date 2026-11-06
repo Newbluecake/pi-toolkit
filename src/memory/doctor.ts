@@ -93,8 +93,11 @@ export interface DoctorSettings {
    *  model; under `legacy` the block inlines file bodies (render.ts) and
    *  those findings would be factually wrong — they sit out entirely.
    *  Omitted ⇒ `"tiered"` (the default layout, and every hand-fed test
-   *  snapshot that predates the field). */
-  layout?: "legacy" | "tiered";
+   *  snapshot that predates the field).
+   *  #36 P0: `"blocks"` joins the union because `MemoryLayout` widened (the
+   *  settings key parses it); until P3 adds the blocks dispatch the value
+   * cannot appear in real settings (P5b flips the default later). */
+  layout?: "legacy" | "tiered" | "blocks";
 }
 
 const ID_ORDER: readonly DoctorId[] = [

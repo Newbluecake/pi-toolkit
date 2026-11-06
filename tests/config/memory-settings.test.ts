@@ -29,6 +29,9 @@ describe("memory settings", () => {
       blockBytes: 2400,
       topicWarnBytes: 8192,
       topicMaxBytes: 16384,
+      migrate: { auto: true },
+      residentBytes: 2048,
+      governance: { enabled: true },
       doctor: { notifyOnStart: true, staleDays: 60 },
       tidy: {
         agentType: "Plan",
@@ -64,7 +67,7 @@ describe("memory settings", () => {
             enabled: true,
             models: ["deepseek/deepseek-flash"],
             threshold: 0.6,
-            waitMs: 500,
+            waitMs: 1000,
             requestBudgetMs: 3000,
             maxCallsPerDay: 60,
             maxUsdPerDay: 0.14,
@@ -214,6 +217,81 @@ describe("memory settings", () => {
     expect(parseMemorySettings({ childProfile: "full" }).childProfile).toBe("full");
     expect(parseMemorySettings({ childProfile: "none" }).childProfile).toBe("none");
     expect(parseMemorySettings({ childProfile: "bogus" }).childProfile).toBe("core");
+  });
+
+  // ───────────────────── #36 memory-governance plan §4 P0（arch §4.6） ─────────────────────
+
+  it('#36: layout gains a parseable "blocks" value; the default stays tiered until P5b', () => {
+    expect(parseMemorySettings({ layout: "blocks" }).layout).toBe("blocks");
+    expect(parseMemorySettings({}).layout).toBe("tiered");
+    expect(parseMemorySettings({ layout: "bogus" }).layout).toBe("tiered");
+    expect(defaults.layout).toBe("tiered");
+    // blocks 在 P0 只可解析，尚无渲染器 —— loadSettings 同样接受（严禁写进真实设置，P3/P5b 接线）。
+    expect(loadSettings({ memory: { layout: "blocks" } }).memory.layout).toBe("blocks");
+  });
+
+  it("#36: migrate.auto only accepts booleans (default true)", () => {
+    expect(parseMemorySettings({ migrate: { auto: false } }).migrate.auto).toBe(false);
+    expect(parseMemorySettings({ migrate: { auto: true } }).migrate.auto).toBe(true);
+    for (const bad of ["yes", 1, 0, null, []]) {
+      expect(parseMemorySettings({ migrate: { auto: bad } }).migrate.auto, `auto=${JSON.stringify(bad)}`).toBe(true);
+    }
+    expect(parseMemorySettings({ migrate: "nope" }).migrate).toEqual({ auto: true });
+    expect(parseMemorySettings({ migrate: null }).migrate).toEqual({ auto: true });
+  });
+
+  it("#36: residentBytes defaults 2048, accepts 512–16384 only", () => {
+    expect(parseMemorySettings({ residentBytes: 2048 }).residentBytes).toBe(2048);
+    expect(parseMemorySettings({ residentBytes: 511 }).residentBytes).toBe(2048);
+    expect(parseMemorySettings({ residentBytes: 16385 }).residentBytes).toBe(2048);
+    expect(parseMemorySettings({ residentBytes: "2048" }).residentBytes).toBe(2048);
+    // 边界值可接受。
+    expect(parseMemorySettings({ residentBytes: 512 }).residentBytes).toBe(512);
+    expect(parseMemorySettings({ residentBytes: 16384 }).residentBytes).toBe(16384);
+  });
+
+  it("#36: governance.enabled only accepts booleans (default true)", () => {
+    expect(parseMemorySettings({ governance: { enabled: false } }).governance.enabled).toBe(false);
+    expect(parseMemorySettings({ governance: { enabled: true } }).governance.enabled).toBe(true);
+    for (const bad of ["off", 0, null]) {
+      expect(
+        parseMemorySettings({ governance: { enabled: bad } }).governance.enabled,
+        `enabled=${JSON.stringify(bad)}`,
+      ).toBe(true);
+    }
+    expect(parseMemorySettings({ governance: 42 }).governance).toEqual({ enabled: true });
+  });
+
+  it("#36: predict.model.waitMs default is 1000 (Q9 window/budget fix; was 500)", () => {
+    expect(defaults.jev.predict.model.waitMs).toBe(1000);
+    expect(parseMemorySettings({}).jev.predict.model.waitMs).toBe(1000);
+    // 显式值照旧生效，值域不变。
+    expect(parseMemorySettings({ jev: { predict: { model: { waitMs: 500 } } } }).jev.predict.model.waitMs).toBe(500);
+  });
+
+  it("#36: the three new keys are registered in SETTING_SPECS, non-live", () => {
+    const keys = ["memory.migrate.auto", "memory.residentBytes", "memory.governance.enabled"];
+    for (const key of keys) {
+      expect(isKnownSettingKey(key), key).toBe(true);
+      const spec = SETTING_SPECS[key]!;
+      expect(spec.live, key).toBeUndefined();
+      expect(spec.time, key).toBeUndefined();
+      expect(defaultOf(spec), key).not.toBeUndefined();
+      expect(currentOf(DEFAULT_SETTINGS, spec), key).not.toBe("(unset)");
+    }
+    expect(SETTING_SPECS["memory.migrate.auto"]).toMatchObject({ kind: "boolean", path: "memory.migrate.auto" });
+    expect(SETTING_SPECS["memory.residentBytes"]).toMatchObject({
+      kind: "number",
+      path: "memory.residentBytes",
+      min: 512,
+      max: 16384,
+      integer: true,
+    });
+    expect(SETTING_SPECS["memory.governance.enabled"]).toMatchObject({
+      kind: "boolean",
+      path: "memory.governance.enabled",
+    });
+    expect(defaultOf(SETTING_SPECS["memory.residentBytes"]!)).toBe(2048);
   });
 
   it("coreBytes clamps to ≤ blockBytes - 600", () => {
@@ -405,7 +483,7 @@ describe("memory settings", () => {
       const spec = SETTING_SPECS[key]!;
       expect(spec.live, key).toBeUndefined();
     }
-    expect(SETTING_SPECS["memory.layout"]).toMatchObject({ kind: "enum", values: ["tiered", "legacy"] });
+    expect(SETTING_SPECS["memory.layout"]).toMatchObject({ kind: "enum", values: ["tiered", "legacy", "blocks"] });
     expect(SETTING_SPECS["memory.toolSurface"]).toMatchObject({ kind: "enum", values: ["v2", "legacy"] });
     expect(SETTING_SPECS["memory.childProfile"]).toMatchObject({ kind: "enum", values: ["core", "full", "none"] });
     expect(SETTING_SPECS["memory.tidy.timeoutS"]).toMatchObject({ path: "memory.tidy.timeoutMs", time: true });

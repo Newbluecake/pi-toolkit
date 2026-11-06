@@ -23,22 +23,30 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     "memory.freezeInjectionAfterWrite",
     "Freeze the injected block after a write (takes effect next session; keeps prompt cache stable)",
   ),
-  "memory.inlineMax": count("memory.inlineMax", 0, "Memory files inlined in full (pinned first); 0 = index only"),
+  "memory.inlineMax": count(
+    "memory.inlineMax",
+    0,
+    "Memory files inlined in full (pinned first); 0 = index only (legacy layout only)",
+  ),
   "memory.byteCap": {
     // Nit 1: count() has no max parameter ⇒ spread the count spec and add max.
     // (cast: spreading the SettingSpec union distributes `max` onto non-number
     // variants; the runtime object is always the number variant.)
-    ...count("memory.byteCap", 0, "Total UTF-8 byte budget for inlined memory bodies; 0 = index only"),
+    ...count(
+      "memory.byteCap",
+      0,
+      "Total UTF-8 byte budget for inlined memory bodies; 0 = index only (legacy layout only)",
+    ),
     max: 65_536,
   } as SettingSpec,
-  "memory.indexMax": count("memory.indexMax", 1, "Memory index entries before the … +N more fold"),
+  "memory.indexMax": count("memory.indexMax", 1, "Memory index entries before the … +N more fold (legacy layout only)"),
   "memory.maxFileBytes": count("memory.maxFileBytes", 1024, "Per-memory-file size cap in bytes"),
   "memory.maxWriteBytes": count("memory.maxWriteBytes", 256, "Single memory write/append content cap in bytes"),
   // todo #22 optimize-plan §9 (P0-b): tiered layout / v2 tool surface knobs.
   "memory.layout": choice(
     "memory.layout",
-    ["tiered", "legacy"],
-    "Injection renderer: tiered (budgeted, default) or legacy (byte-identical to pre-#22)",
+    ["tiered", "legacy", "blocks"],
+    "Injection renderer: tiered (budgeted, default), legacy (byte-identical to pre-#22), or blocks (#36 one file per block; parseable now, renderer lands with #36)",
   ),
   "memory.toolSurface": choice(
     "memory.toolSurface",
@@ -51,25 +59,47 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     "Child-session injection tier under layout:tiered (core/full/none)",
   ),
   "memory.coreBytes": {
-    ...count("memory.coreBytes", 256, "Primary-core byte budget within a tiered block (clamped to ≤ blockBytes-600)"),
+    ...count(
+      "memory.coreBytes",
+      256,
+      "Primary-core byte budget within a tiered block; clamped to ≤ blockBytes-600 (tiered layout only)",
+    ),
     max: 8192,
   } as SettingSpec,
   "memory.blockBytes": {
-    ...count("memory.blockBytes", 800, "Hard byte cap for the whole tiered ## Memory block"),
+    ...count("memory.blockBytes", 800, "Hard byte cap for the whole tiered ## Memory block (tiered layout only)"),
     max: 16384,
   } as SettingSpec,
   "memory.topicWarnBytes": {
-    ...count("memory.topicWarnBytes", 1024, "Non-core file size that triggers a doctor warn (D04)"),
+    ...count("memory.topicWarnBytes", 1024, "Non-core file size that triggers a doctor warn (D04; tiered layout only)"),
     max: 4 * 1024 * 1024,
   } as SettingSpec,
   "memory.topicMaxBytes": {
     ...count(
       "memory.topicMaxBytes",
       1024,
-      "Non-core file size a write/append is rejected past (D05); ≥ topicWarnBytes",
+      "Non-core file size a write/append is rejected past (D05); ≥ topicWarnBytes (tiered layout only)",
     ),
     max: 4 * 1024 * 1024,
   } as SettingSpec,
+  // #36 memory-governance plan §4 P0 / arch §4.6：新键只解析不消费
+  //（迁移器 P2、渲染 P3、治理 P5a/P5b）；均非 live（改后需 /reload）。
+  "memory.migrate.auto": bool(
+    "memory.migrate.auto",
+    "Lazy blocks-layout migration at session start (#36); off = explicit /mem migrate only",
+  ),
+  "memory.residentBytes": {
+    ...count(
+      "memory.residentBytes",
+      512,
+      "Soft byte budget for the resident user-rule region (blocks layout, #36); over-budget merges/demotes are suggested, never truncated",
+    ),
+    max: 16384,
+  } as SettingSpec,
+  "memory.governance.enabled": bool(
+    "memory.governance.enabled",
+    "Governance sweep, auto-supersede and suggestions (#36); rendering-time expiry filtering stays on when off",
+  ),
   "memory.doctor.notifyOnStart": bool(
     "memory.doctor.notifyOnStart",
     "Main-session startup reminder when /mem doctor would report an error (zero model cost)",

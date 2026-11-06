@@ -379,7 +379,9 @@ describe("wait window (§8.3, §11.2 wire-predict-model list)", () => {
   });
 
   test("U settles at 0.2s, model at 0.8s ⇒ handler returns at the 0.5s window, model NOT merged, late result only cached", async () => {
-    const h = harness({ uMode: "gate" });
+    // #36 P0: pin the pre-#36 default window (500ms) — the settings default is
+    // 1000 now (Q9); P6a reworks these window cases for the new semantics.
+    const h = harness({ uMode: "gate", predictModel: { waitMs: 500 } });
     await goStatus(h, "full");
     const p = h.promptNow(UNCERTAIN);
     const s = settledAt(h, p);
@@ -415,7 +417,7 @@ describe("wait window (§8.3, §11.2 wire-predict-model list)", () => {
   });
 
   test("U waits out recall.waitMs without settling ⇒ the model is cut off at the same window and never merges", async () => {
-    const h = harness({ uMode: "hang", recallWaitMs: 60 });
+    const h = harness({ uMode: "hang", recallWaitMs: 60, predictModel: { waitMs: 500 } }); // #36 P0: 500ms 窗口钉（默认已改 1000，Q9）
     await goStatus(h, "full");
     const p = h.promptNow(UNCERTAIN);
     const s = settledAt(h, p);
@@ -481,7 +483,7 @@ describe("late result: exact-key cache + pendingModel next-turn redemption (§7.
   }
 
   test("a carry phrase redeems pendingModel at full weight ⇒ P injects the model tag without a new call", async () => {
-    const h = harness({ fail: "System One API error (451): blocked" });
+    const h = harness({ fail: "System One API error (451): blocked", predictModel: { waitMs: 500 } }); // #36 P0: 500ms 窗口钉
     await goStatus(h, "partial");
     await lateTurn1(h);
     const r = await h.prompt("继续");
@@ -493,7 +495,7 @@ describe("late result: exact-key cache + pendingModel next-turn redemption (§7.
   });
 
   test("a new instruction redeems capped: tags without rule/state support are dropped (nothing injected)", async () => {
-    const h = harness({ fail: "System One API error (451): blocked" });
+    const h = harness({ fail: "System One API error (451): blocked", predictModel: { waitMs: 500 } }); // #36 P0: 500ms 窗口钉
     await goStatus(h, "partial");
     await lateTurn1(h);
     // The new instruction is itself uncertain (§4.4: no tag ≥0.5), so a
@@ -513,7 +515,7 @@ describe("late result: exact-key cache + pendingModel next-turn redemption (§7.
   });
 
   test("a cancel modifier drops pendingModel entirely", async () => {
-    const h = harness({ fail: "System One API error (451): blocked" });
+    const h = harness({ fail: "System One API error (451): blocked", predictModel: { waitMs: 500 } }); // #36 P0: 500ms 窗口钉
     await goStatus(h, "partial");
     await lateTurn1(h);
     const r = await h.prompt("算了，这个先不提交了");
@@ -576,7 +578,7 @@ describe("admission gates (§4.4/§5.2)", () => {
   });
 
   test("deepseek hang never breaks U: U still settles within recall.waitMs and merges alone", async () => {
-    const h = harness({ uMode: "gate" });
+    const h = harness({ uMode: "gate", predictModel: { waitMs: 500 } }); // #36 P0: 500ms 窗口钉
     await goStatus(h, "full");
     const p = h.promptNow(UNCERTAIN);
     const s = settledAt(h, p);
@@ -598,7 +600,10 @@ describe("admission gates (§4.4/§5.2)", () => {
   });
 
   test("maxCallsPerDay=1: the second uncertain turn is denied admission (no second call)", async () => {
-    const h = harness({ fail: "System One API error (451): blocked", predictModel: { maxCallsPerDay: 1 } });
+    const h = harness({
+      fail: "System One API error (451): blocked",
+      predictModel: { maxCallsPerDay: 1, waitMs: 500 },
+    }); // #36 P0: 500ms 窗口钉
     await goStatus(h, "partial");
     const p1 = h.promptNow(UNCERTAIN);
     h.clock.advance(500);

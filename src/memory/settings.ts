@@ -32,11 +32,11 @@ export interface MemorySettings {
    *  （section provider 层），hub 的 stable snapshot 钳的是「Live 值折叠进开头的时机」（hub 层）。true 时 provider 连续多轮返回同一字节，hub 的
    *  resolveAtTurn 因 live === announced 天然不产生尾部更新消息，snapshot 会在下一次合法刷新点（如新会话）自然追上冻结内容——不需要额外接线。 */
   freezeInjectionAfterWrite: boolean;
-  /** 内联全文的文件数上限（pin 优先）。0 = 只出索引。Default 3。 */
+  /** 内联全文的文件数上限（pin 优先；legacy 布局专属，#36 注）。0 = 只出索引。Default 3。 */
   inlineMax: number;
-  /** 内联区总字节预算（UTF-8 字节）。0 = 只出索引。Default 4000。 */
+  /** 内联区总字节预算（UTF-8 字节；legacy 布局专属，#36 注）。0 = 只出索引。Default 4000。 */
   byteCap: number;
-  /** 索引条数上限，超出出 "… +N more"。Default 15。 */
+  /** 索引条数上限（legacy 布局专属，#36 注），超出出 "… +N more"。Default 15。 */
   indexMax: number;
   /** 单文件体积上限（write 替换后 / append 累加后）。Default 262_144（256KB）。 */
   maxFileBytes: number;
@@ -54,15 +54,25 @@ export interface MemorySettings {
    *  else still injects the old block, §2.7's "legacy = old behavior"). */
   childProfile: ChildProfile;
   /** Primary-core byte budget within a tiered block. Default 1600; clamped to
-   *  ≤ `blockBytes - 600` at parse time. */
+   *  ≤ `blockBytes - 600` at parse time（tiered 布局专属，#36 注）。 */
   coreBytes: number;
-  /** Hard byte cap for the whole tiered `## Memory` block. Default 2400. */
+  /** Hard byte cap for the whole tiered `## Memory` block（tiered 布局专属，#36 注）。Default 2400. */
   blockBytes: number;
-  /** Non-core file size that triggers a doctor warn (D04). Default 8192. */
+  /** Non-core file size that triggers a doctor warn (D04)（tiered 布局专属，#36 注）。Default 8192. */
   topicWarnBytes: number;
-  /** Non-core file size that a write/append is rejected past (D05). Default
-   *  16384; ≥ `topicWarnBytes`. */
+  /** Non-core file size that a write/append is rejected past (D05)（tiered 布局专属，#36
+   *  注）。Default 16384; ≥ `topicWarnBytes`. */
   topicMaxBytes: number;
+  // ─────────────────────── #36 记忆块化 + 治理（memory-governance plan §4 P0） ───────────────────────
+  /** blocks 布局惰性迁移开关（arch §4.3.1）。P0 只解析不接线（迁移器在 P2）；
+   *  P8 在默认布局翻转前设 false 取证。Default true（用户定的惰性迁移）。 */
+  migrate: MemoryMigrateSettings;
+  /** 常驻区（用户令 global 块）软字节预算（arch §3.3.2）；超额不截断，出合并/降
+   *  级建议。Default 2048；512–16384。P0 只解析不使用（渲染在 P3）。 */
+  residentBytes: number;
+  /** 治理总开关（arch §4.6）：false ⇒ 不做 sweep 写盘、不自动取代、不生成治理建
+   *  议、不发治理通知；渲染时的到期过滤仍然生效。Default true。P0 只解析不使用。 */
+  governance: MemoryGovernanceSettings;
   doctor: MemoryDoctorSettings;
   tidy: MemoryTidySettings;
   /** Jev 核心 memory：jev-plan v2 §4 J3 / jev-arch §9.1. */
@@ -131,7 +141,7 @@ export interface MemoryJevPredictSettings {
     models: string[];
     /** 模型 tag 的入选概率。Default 0.6；0.5–0.95。 */
     threshold: number;
-    /** 基础等待（ms）；文件键按秒存 `model.waitS`（TIME_SETTING_MS_PATHS）。Default 500；0–1500。 */
+    /** 基础等待（ms）；文件键按秒存 `model.waitS`（TIME_SETTING_MS_PATHS）。Default 1000（#36 §6.5 Q9，原 500）；0–1500。 */
     waitMs: number;
     /** 请求链硬期限（ms），覆盖全部 failover；文件键按秒存 `model.requestBudgetS`（TIME_SETTING_MS_PATHS）。Default 3000；1000–6000。 */
     requestBudgetMs: number;
@@ -144,7 +154,20 @@ export interface MemoryJevPredictSettings {
   cacheTtlMin: number;
 }
 
-export type MemoryLayout = "tiered" | "legacy";
+export type MemoryLayout = "tiered" | "legacy" | "blocks";
+
+/** #36：`"blocks"` 在 P0 只可解析（值域已登记），blocks 渲染器在 P3 合入、默认
+ *  值翻转在 P5b；在此之前严禁把 `layout:"blocks"` 写进真实设置。 */
+export interface MemoryMigrateSettings {
+  /** true = session_start 惰性自动迁移；false = 只能显式 `/mem migrate`。只接受布尔值。Default true。 */
+  auto: boolean;
+}
+
+/** #36：治理开关块（P0 只解析不接线；sweep/取代在 P5a/P5b）。 */
+export interface MemoryGovernanceSettings {
+  /** Default true。 */
+  enabled: boolean;
+}
 
 export type MemoryToolSurface = "v2" | "legacy";
 
@@ -316,6 +339,21 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     topicWarnBytes,
   );
 
+  // #36 P0：新键只解析不消费（迁移器 P2、渲染 P3、治理 P5a/P5b）。
+  const migrateRaw = value.migrate;
+  const migrateObj: Record<string, unknown> =
+    migrateRaw && typeof migrateRaw === "object" && !Array.isArray(migrateRaw)
+      ? (migrateRaw as Record<string, unknown>)
+      : {};
+  const migrate: MemoryMigrateSettings = { auto: bool(migrateObj.auto, defaults.migrate.auto) };
+  const residentBytes = num(value.residentBytes, defaults.residentBytes, 512, 16384);
+  const governanceRaw = value.governance;
+  const governanceObj: Record<string, unknown> =
+    governanceRaw && typeof governanceRaw === "object" && !Array.isArray(governanceRaw)
+      ? (governanceRaw as Record<string, unknown>)
+      : {};
+  const governance: MemoryGovernanceSettings = { enabled: bool(governanceObj.enabled, defaults.governance.enabled) };
+
   const doctorRaw = value.doctor;
   const doctorObj: Record<string, unknown> =
     doctorRaw && typeof doctorRaw === "object" && !Array.isArray(doctorRaw)
@@ -394,13 +432,16 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     indexMax: num(value.indexMax, defaults.indexMax, 1, 100),
     maxFileBytes,
     maxWriteBytes: Math.min(num(value.maxWriteBytes, defaults.maxWriteBytes, 256, 4 * 1024 * 1024), maxFileBytes),
-    layout: choice<MemoryLayout>(value.layout, ["tiered", "legacy"], defaults.layout),
+    layout: choice<MemoryLayout>(value.layout, ["tiered", "legacy", "blocks"], defaults.layout),
     toolSurface: choice<MemoryToolSurface>(value.toolSurface, ["v2", "legacy"], defaults.toolSurface),
     childProfile: choice<ChildProfile>(value.childProfile, ["core", "full", "none"], defaults.childProfile),
     coreBytes,
     blockBytes,
     topicWarnBytes,
     topicMaxBytes,
+    migrate,
+    residentBytes,
+    governance,
     doctor,
     tidy,
     jev,
@@ -424,6 +465,9 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   blockBytes: 2400,
   topicWarnBytes: 8192,
   topicMaxBytes: 16384,
+  migrate: { auto: true },
+  residentBytes: 2048,
+  governance: { enabled: true },
   doctor: { notifyOnStart: true, staleDays: 60 },
   tidy: {
     agentType: "Plan",
@@ -459,7 +503,7 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
         enabled: true,
         models: ["deepseek/deepseek-flash"],
         threshold: 0.6,
-        waitMs: 500,
+        waitMs: 1000,
         requestBudgetMs: 3000,
         maxCallsPerDay: 60,
         maxUsdPerDay: 0.14,
