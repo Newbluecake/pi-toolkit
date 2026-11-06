@@ -192,8 +192,8 @@ function validateAnthropicPayload(p: Record<string, unknown>, expect: PayloadExp
   if (!isRecord(user) || user.role !== "user" || !onlyKeys(user, ["role", "content"])) return refuse("extra-input");
   const userTexts = textParts(user.content);
   if (!userTexts || userTexts.length !== 1 || userTexts[0] !== expect.expectedUser) return refuse("extra-input");
-  // One user message only. pi ≤1.2 managed-effort builds append the builder's empty trailing
-  // effort system message; pi ≥1.3 thinking-off builds have no effort markers at all.
+  // One user message only, plus the stock empty high-effort system message for
+  // managed adaptive builds. Managed thinking-off builds have no effort markers at all.
   if (expect.managedEffort && !managedThinkingDisabled(p)) {
     const effort = messages[1];
     if (
@@ -247,8 +247,10 @@ function validThinking(p: Record<string, unknown>, expect: PayloadExpectation): 
       isRecord(thinking.block_binding) &&
       thinking.block_binding.prefix_mismatch_behavior === "drop_block" &&
       onlyKeys(thinking.block_binding, ["prefix_mismatch_behavior"]) &&
+      // Stock managed builds use high (pi 1.4) or low (pi 1.5) here; the
+      // complete adaptive construction and trailing high marker remain mandatory.
       validEffort(p.output_config) &&
-      p.output_config.effort === "high"
+      (p.output_config.effort === "high" || p.output_config.effort === "low")
     );
   }
   if (expect.adaptiveEffort !== undefined)

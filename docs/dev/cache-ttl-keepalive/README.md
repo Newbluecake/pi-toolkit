@@ -8,6 +8,18 @@
 
 `KeepaliveModelInfo.cost.tiers`（`keepalive-service.ts`）与 `KeepaliveCostModel.tiers`（`keepalive-state.ts`）的类型为显式 `…[] | undefined`：pi 1.5 的价目 DTO 可显式携带 `tiers: undefined`，这是 type-only 边界兼容；本地 pi 1.4 依赖下 typecheck/门禁保持通过，runtime JS 未变，不代表 TESTED_PI_RANGE 已升。详见 `docs/dev/pi-version-adaptation/plan.md`。
 
+## 测量 managed-effort 结构兼容（#45，2026-11-06）
+
+测量 validator 只在完整 managed adaptive 结构下接受顶层 `output_config:{effort:"high"}`
+（实测 stock pi 1.4）或 `{effort:"low"}`（实测 stock pi 1.5）；不是任意 effort 放行，也没有生产版本判断。
+`adaptive` / `summarized` / exact `block_binding:{prefix_mismatch_behavior:"drop_block"}`、
+exact output_config key 和空尾部 system message 的 `effort:"high"` 仍强制要求；预算、多余 key、
+缺尾部、low 尾部、medium/xhigh/max 均拒绝。disabled / force-adaptive / 其他模式不变，cap 仍为 1，
+cache/tier/key 与全部防滥用门不变。定向 conformance 用真实 registry/SDK + loopback stub 验证
+stock 结构和 replay 字节一致，注入非法结构断言 baseFetchCalls=0、stub POST=0。
+这只是已证实结构的测量互操作修复，不扩大 peer / TESTED_PI_RANGE；history 支持门不变。
+详见 `measure-plan.md` §3.3、§9。
+
 ## src/cache-ttl/
 
 `src/cache-ttl/` — prompt-cache TTL modes `auto`/`on`/`off`, status-bar indicator,

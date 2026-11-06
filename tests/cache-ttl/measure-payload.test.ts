@@ -122,18 +122,32 @@ describe("Anthropic build-mode payload validator", () => {
       expected,
     );
   });
-  it("managed-effort requires the fixed top-level high effort and high trailing message", async () => {
+  it("managed-effort accepts only top-level high or low with the complete stock structure and high tail", async () => {
     const p = await realBuild(false, true, false);
-    const expect = { ...expectation, managedEffort: true };
-    refused({ ...p, output_config: { effort: "low" } }, "thinking", expect);
-    refused(
-      {
-        ...p,
-        messages: [(p.messages as unknown[])[0], { role: "system", content: [], output_config: { effort: "low" } }],
-      },
-      "extra-input",
-      expect,
-    );
+    const e = { ...expectation, managedEffort: true };
+    for (const effort of ["high", "low"]) {
+      const stock = { ...p, output_config: { effort } };
+      expect(validate(stock, e)).toEqual({ ok: true, effectiveTier: "ephemeral" });
+      for (const invalid of ["medium", "xhigh", "max", "", null, undefined])
+        refused({ ...stock, output_config: { effort: invalid } }, "thinking", e);
+      for (const extra of [{ budget_tokens: 0 }, { extra: true }])
+        refused({ ...stock, output_config: { effort, ...extra } }, "thinking", e);
+      for (const thinking of [
+        { type: "adaptive", display: "summarized" },
+        { ...(p.thinking as object), display: "omitted" },
+        { ...(p.thinking as object), budget_tokens: 0 },
+        { ...(p.thinking as object), block_binding: { prefix_mismatch_behavior: "keep_block" } },
+        { ...(p.thinking as object), block_binding: { prefix_mismatch_behavior: "drop_block", extra: true } },
+      ])
+        refused({ ...stock, thinking }, "thinking", e);
+      for (const tail of [
+        undefined,
+        { role: "system", content: [], output_config: { effort: "low" } },
+        { role: "system", content: [], output_config: { effort: "high", budget_tokens: 0 } },
+        { role: "system", content: "extra", output_config: { effort: "high" } },
+      ])
+        refused({ ...stock, messages: [(p.messages as unknown[])[0], ...(tail ? [tail] : [])] }, "extra-input", e);
+    }
   });
   it.each([0, -1, 1.5, "1", null, NaN, 2, 4096])("requires an exact positive integer output cap (%j)", (cap) => {
     refused({ ...payload(), max_tokens: cap }, "bad-output-cap");
