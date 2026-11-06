@@ -21,9 +21,13 @@ import {
   P_INJECTED_AT_MAX,
   SIDECAR_MAX_BYTES,
   SIDECAR_MAX_ENTRIES,
+  type DismissedPair,
   type EntryHash,
   type EntryTags,
   type IndexPatch,
+  type ReviewSuggestion,
+  type ReviewSuggestionKind,
+  type ReviewState,
   type TaxonomyFileV1,
 } from "../../../src/memory/jev/contracts.js";
 
@@ -452,5 +456,162 @@ describe("removeIndex", () => {
     expect(existsSync(join(jevPath(dir), "taxonomy.json"))).toBe(true);
     expect(readIndex(dir)).toEqual({ index: { v: 1, entries: {} }, rebuilt: false });
     expect(await removeIndex(dir)).toBe("ok");
+  });
+});
+
+// ───────────────────── #36 memory-governance plan §4 P0（sanitizer 兼容） ─────────────────────
+
+describe("#36 P0 sanitizer increments (governance arch r5 §4.4)", () => {
+  test("EntryTags.globalP round-trips; a non-number globalP drops the field, the entry survives", async () => {
+    const dir = fixture();
+    const hash = "g1100p0hash1" as EntryHash;
+    expect(
+      await writeIndexPatch(dir, {
+        upsert: { [hash]: sampleTags("core.md", "2026-11-06T00:00:00.000Z", { globalP: 0.8 }) },
+      }),
+    ).toBe("ok");
+    expect(readIndex(dir).index.entries[hash]?.globalP).toBe(0.8);
+    // 坏值（字符串/NaN）按字段丢弃，条目本体存活（读容错风格与其余字段一致）。
+    mkdirSync(jevPath(dir), { recursive: true });
+    writeFileSync(
+      join(jevPath(dir), "index.json"),
+      JSON.stringify({
+        v: 1,
+        entries: { [hash]: sampleTags("core.md", "2026-11-06T00:00:00.000Z", { globalP: "high" }) },
+      }),
+      "utf8",
+    );
+    expect(readIndex(dir).index.entries[hash]?.globalP).toBeUndefined();
+    expect(readIndex(dir).index.entries[hash]?.file).toBe("core.md");
+  });
+
+  test("review suggestions accept the 8 new kinds; unknown kinds are still dropped", async () => {
+    const dir = fixture();
+    // mk 的 kind 参数故意留 string（非法值经内部断言写入，与生产写路径的
+    // 「信任调用方」语义一致），读取侧由白名单容错。
+    const mk = (kind: string, id: string): ReviewSuggestion => ({
+      id,
+      kind: kind as ReviewSuggestionKind,
+      a: { hash: "h1", anchor: "quota.007.md|quota|body" },
+      p: 0.9,
+      at: "2026-11-06T00:00:00.000Z",
+    });
+    const review: ReviewState = {
+      lastRunAt: "2026-11-06T00:00:00.000Z",
+      corpusFp: "fp1",
+      suggestions: [
+        mk("expired-user", "s1"),
+        mk("until-check", "s2"),
+        mk("snapshot", "s3"),
+        mk("pointer", "s4"),
+        mk("oversize", "s5"),
+        mk("resident-budget", "s6"),
+        mk("scope-check", "s7"),
+        mk("legacy-drift", "s8"),
+        mk("totally-unknown", "s9"), // 未知 kind 照旧丢弃
+      ],
+      dismissed: [],
+    };
+    expect(await writeIndexPatch(dir, { review })).toBe("ok");
+    const kinds = readIndex(dir).index.review?.suggestions.map((s) => s.kind) ?? [];
+    expect(kinds).toEqual([
+      "expired-user",
+      "until-check",
+      "snapshot",
+      "pointer",
+      "oversize",
+      "resident-budget",
+      "scope-check",
+      "legacy-drift",
+    ]);
+    expect(kinds).not.toContain("totally-unknown");
+  });
+
+  test("dismissed pairs round-trip kind/until; invalid values drop the fields, the pair survives", async () => {
+    const dir = fixture();
+    const review: ReviewState = {
+      lastRunAt: "2026-11-06T00:00:00.000Z",
+      corpusFp: "fp1",
+      suggestions: [],
+      dismissed: [
+        { hashKey: "a+b", anchorKey: "x+y", kind: "scope-check", until: "2026-12-01" },
+        // 故意非法（kind 不在联合里 / until 非日期）：内部断言绕过类型写入，读取侧丢字段。
+        { hashKey: "c+d", anchorKey: "z+w", kind: "not-a-kind", until: "not-a-date" } as unknown as DismissedPair,
+        { hashKey: "e+f", anchorKey: "u+v" }, // 旧形状：无 kind/until
+      ],
+    };
+    expect(await writeIndexPatch(dir, { review })).toBe("ok");
+    const dismissed = readIndex(dir).index.review?.dismissed ?? [];
+    expect(dismissed[0]).toEqual({ hashKey: "a+b", anchorKey: "x+y", kind: "scope-check", until: "2026-12-01" });
+    // 非法 kind/until 只丢字段，dismiss 本体保留（退回旧的两两语义）。
+    expect(dismissed[1]).toEqual({ hashKey: "c+d", anchorKey: "z+w" });
+    expect(dismissed[2]).toEqual({ hashKey: "e+f", anchorKey: "u+v" });
+  });
+
+  test("a pre-#36 sidecar (no new fields) reads back and rewrites byte-identically", async () => {
+    const dir = fixture();
+    // 1) 用 #36 后的代码写入一份「旧形状」数据（无 globalP、旧 kind、无 kind/until）。
+    const hashA = "aaaaaaaaaaaa" as EntryHash;
+    const hashB = "bbbbbbbbbbbb" as EntryHash;
+    const review: ReviewState = {
+      lastRunAt: "2026-10-01T00:00:00.000Z",
+      corpusFp: "fp0",
+      suggestions: [
+        {
+          id: "dup-1",
+          kind: "duplicate",
+          a: { hash: hashA, anchor: "a.md|sec|body" },
+          b: { hash: hashB, anchor: "b.md|sec|body" },
+          p: 0.88,
+          at: "2026-10-01T00:00:00.000Z",
+        },
+      ],
+      dismissed: [{ hashKey: "x+y", anchorKey: "p+q" }],
+    };
+    expect(
+      await writeIndexPatch(dir, {
+        upsert: { [hashA]: sampleTags(), [hashB]: sampleTags("notes.md") },
+        lastTaggedAt: "2026-10-02T03:04:05.000Z",
+        review,
+      }),
+    ).toBe("ok");
+    const path = join(jevPath(dir), "index.json");
+    const before = readFileSync(path, "utf8");
+    expect(before).not.toContain("globalP");
+    expect(before).not.toContain("until");
+    // 2) 读入后再写出（空 patch 只触发 read→merge→serialize）：字节不变。
+    expect(await writeIndexPatch(dir, {})).toBe("ok");
+    expect(readFileSync(path, "utf8")).toBe(before);
+  });
+
+  test("REVIEW_SUGGESTION_KINDS stays in lockstep with the contracts union (drift pin)", async () => {
+    const { REVIEW_SUGGESTION_KINDS } = await import("../../../src/memory/jev/index-store.js");
+    // 编译期①：白名单 ⊆ 联合（多出的成员赋不进这个类型）。注：仓库 typecheck
+    // 不覆盖 tests/**，这两条类型断言不进 CI 门禁，由手工 tsc 核验（见 P0 交付报告）。
+    const allow: readonly ReviewSuggestionKind[] = REVIEW_SUGGESTION_KINDS;
+    // 编译期②：联合 ⊆ 本清单 —— Record 穷尽检查：contracts 联合增/删任何成员，
+    // 这个对象字面量都会缺键/多键而编译失败。
+    const exhaustive: Record<ReviewSuggestionKind, true> = {
+      duplicate: true,
+      supersedes: true,
+      conflict: true,
+      obsolete: true,
+      "user-like": true,
+      "expired-user": true,
+      "until-check": true,
+      snapshot: true,
+      pointer: true,
+      oversize: true,
+      "resident-budget": true,
+      "scope-check": true,
+      "legacy-drift": true,
+    };
+    // 运行期：白名单 ≡ 穷尽清单（双向），5 旧 + 8 新 = 13，无重复。
+    const expected = Object.keys(exhaustive);
+    expect(REVIEW_SUGGESTION_KINDS).toHaveLength(13);
+    expect(expected).toHaveLength(13);
+    expect(new Set(REVIEW_SUGGESTION_KINDS).size).toBe(13);
+    expect([...REVIEW_SUGGESTION_KINDS].sort()).toEqual([...expected].sort());
+    void allow;
   });
 });

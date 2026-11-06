@@ -32,6 +32,7 @@ import {
   type EntryTags,
   type IndexPatch,
   type JevIndexV1,
+  type ReviewSuggestionKind,
   type ReviewState,
   type ReviewSuggestion,
   type TaxonomyFileV1,
@@ -56,6 +57,25 @@ function emptyIndex(): JevIndexV1 {
 
 const ENTRY_TYPES: readonly string[] = ["rule", "pitfall", "procedure", "preference", "fact", "pointer"];
 const TEMPORAL: readonly string[] = ["permanent", "dated", "event"];
+/** #36 P0（arch r5 §4.4）：sanitizeSuggestions/sanitizeDismissed 共用的
+ *  ReviewSuggestionKind 白名单 —— 必须与 contracts.ts 的联合类型逐字同步
+ *  （由 tests/memory/jev/index-store.test.ts 的漂移测试钉住：联合 ↔ 本表
+ *  双向一致，含编译期 `readonly ReviewSuggestionKind[]` 可赋值检查）。 */
+export const REVIEW_SUGGESTION_KINDS: readonly ReviewSuggestionKind[] = [
+  "duplicate",
+  "supersedes",
+  "conflict",
+  "obsolete",
+  "user-like",
+  "expired-user",
+  "until-check",
+  "snapshot",
+  "pointer",
+  "oversize",
+  "resident-budget",
+  "scope-check",
+  "legacy-drift",
+];
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -87,6 +107,10 @@ function sanitizeEntryTags(v: unknown): EntryTags | undefined {
   ) {
     return undefined;
   }
+  // #36 P0: keep the g1 scope-question answer when present; absent stays
+  // absent so pre-#36 sidecars read/write byte-identically (old data first,
+  // appended last — key order of the old serialization is unchanged).
+  const globalP = typeof v["globalP"] === "number" && Number.isFinite(v["globalP"]) ? v["globalP"] : undefined;
   return {
     file: v["file"],
     type: v["type"] as EntryTags["type"],
@@ -99,6 +123,7 @@ function sanitizeEntryTags(v: unknown): EntryTags | undefined {
     model: v["model"],
     at: v["at"],
     taxonomyRev: v["taxonomyRev"],
+    ...(globalP === undefined ? {} : { globalP }),
   };
 }
 
@@ -112,7 +137,7 @@ function sanitizeSuggestions(v: unknown): readonly ReviewSuggestion[] | undefine
     if (
       typeof item["id"] !== "string" ||
       typeof item["kind"] !== "string" ||
-      !["duplicate", "supersedes", "conflict", "obsolete", "user-like"].includes(item["kind"]) ||
+      !REVIEW_SUGGESTION_KINDS.includes(item["kind"] as ReviewSuggestionKind) ||
       !isPlainObject(a) ||
       typeof a["hash"] !== "string" ||
       typeof a["anchor"] !== "string" ||
@@ -139,7 +164,21 @@ function sanitizeDismissed(v: unknown): readonly DismissedPair[] | undefined {
   const out: DismissedPair[] = [];
   for (const item of v) {
     if (isPlainObject(item) && typeof item["hashKey"] === "string" && typeof item["anchorKey"] === "string") {
-      out.push({ hashKey: item["hashKey"], anchorKey: item["anchorKey"] });
+      // #36 P0: optional kind/until ride along when valid (per-field read
+      // tolerance — an invalid value drops just that field, the dismissal
+      // itself survives with its legacy pairwise semantics).
+      const kind =
+        typeof item["kind"] === "string" && REVIEW_SUGGESTION_KINDS.includes(item["kind"] as ReviewSuggestionKind)
+          ? (item["kind"] as DismissedPair["kind"])
+          : undefined;
+      const until =
+        typeof item["until"] === "string" && Number.isFinite(Date.parse(item["until"])) ? item["until"] : undefined;
+      out.push({
+        hashKey: item["hashKey"],
+        anchorKey: item["anchorKey"],
+        ...(kind === undefined ? {} : { kind }),
+        ...(until === undefined ? {} : { until }),
+      });
     }
   }
   return out;

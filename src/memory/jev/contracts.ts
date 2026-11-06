@@ -82,6 +82,18 @@ export interface MemEntry {
   /** Programs the body names explicitly (jev-arch §6.4.2) — extraction rules
    *  live in match.ts `namedPrograms`. */
   readonly namedPrograms: readonly string[];
+  /** #36 blocks layout (arch r5 §4.2/§4.4): present when this entry was
+   *  projected from a block file via `blockToEntry`. r5 裁定 6: `heading` is
+   *  NOT here — it lives on `MemEntry.heading` like every other layout. */
+  readonly block?: {
+    readonly id: string;
+    readonly scope?: "global" | "topic";
+    readonly audience?: "all" | "main" | "child";
+    readonly status: "active" | "superseded" | "archived";
+    readonly supersededBy?: string;
+    readonly snapshot?: boolean;
+    readonly updated: string;
+  };
 }
 
 /** Parsed `<!-- mem … -->` authority comment (jev-arch §4.2). Written by the
@@ -109,6 +121,25 @@ export interface InlineMeta {
   /** `private` — never sent to Jev (no tagging/recall/review), static
    *  block only. */
   readonly isPrivate?: boolean;
+  // ── #36 memory-governance (plan §4 P0 / arch r5 §4.4 — append-only) ──
+  /** `scope=global|topic` — user-rule scoping (arch §3.3.2; only meaningful
+   *  with `authority:user`, default topic). */
+  readonly scope?: "global" | "topic";
+  /** `audience=all|main|child` — session-audience filter (arch §6.1). */
+  readonly audience?: "all" | "main" | "child";
+  /** `supersedes=<id>[,<id>]` — write-time syntax declaring the new entry
+   *  supersedes the listed blocks; never persisted into BlockMeta (single-
+   *  sided `supersededBy` is the only on-disk relation, arch §5.4). */
+  readonly supersedes?: readonly string[];
+  /** `title=` — CC single-fact block title (block-level metadata, shown in
+   *  `view <topic>` lists only; never feeds the topic index, arch r3 N1). */
+  readonly title?: string;
+  /** `when=` — CC single-fact read-condition, same scope as `title`. */
+  readonly when?: string;
+  /** `expires=none` — clears a previously set expiry (arch §4.1.4). */
+  readonly clearExpires?: true;
+  /** `until=none` — clears a previously set event expiry. */
+  readonly clearUntil?: true;
 }
 
 // ───────────────────────────── taxonomy (jev-arch §4.3) ─────────────────────────────
@@ -175,11 +206,32 @@ export interface EntryTags {
   readonly model: string;
   readonly at: string;
   readonly taxonomyRev: string;
+  /** #36 §5.3 g1 scope-question answer, keyed by body hash so multiple
+   *  blocks sharing one entry body share the judgment (arch r5 §4.4). */
+  readonly globalP?: number;
 }
+
+/** Review-suggestion kinds. The first five are the pre-#36 set (decide.ts
+ *  emits, review-command.ts routes); #36 appends the governance kinds
+ *  (arch r5 §4.4). Sanitizer/read tolerance lives in index-store.ts. */
+export type ReviewSuggestionKind =
+  | "duplicate"
+  | "supersedes"
+  | "conflict"
+  | "obsolete"
+  | "user-like"
+  | "expired-user"
+  | "until-check"
+  | "snapshot"
+  | "pointer"
+  | "oversize"
+  | "resident-budget"
+  | "scope-check"
+  | "legacy-drift";
 
 export interface ReviewSuggestion {
   readonly id: string;
-  readonly kind: "duplicate" | "supersedes" | "conflict" | "obsolete" | "user-like";
+  readonly kind: ReviewSuggestionKind;
   readonly a: { hash: EntryHash; anchor: string };
   /** Absent for `obsolete` / `user-like` (single-entry suggestions). */
   readonly b?: { hash: EntryHash; anchor: string };
@@ -193,6 +245,12 @@ export interface DismissedPair {
   /** sort(anchor(a), anchor(b)).join("+"); anchor = file + "|" + section + "|"
    *  + first 24 code points of the normalized body. */
   readonly anchorKey: string;
+  /** #36: which suggestion kind this dismissal targets — absent = the legacy
+   *  pairwise dismissal semantics (kind-agnostic). */
+  readonly kind?: ReviewSuggestionKind;
+  /** #36: ISO date — the dismissal auto-expires once passed; absent =
+   *  permanent (the pre-#36 semantics). */
+  readonly until?: string;
 }
 
 export interface ReviewState {
@@ -455,7 +513,7 @@ export interface JevConfig {
 
 // ───────────────────────────── injection wire shapes (jev-arch §6.1.6) ─────────────────────────────
 
-export type InjectLayer = "U" | "A" | "E" | "B" | "P";
+export type InjectLayer = "U" | "A" | "E" | "B" | "P" | "R"; // #36: R = 常驻变更通知（arch §3.3.5）
 
 /** I7: runtime names never move — `subagent:` prefix stays. */
 export const MEMORY_INJECT_CUSTOM_TYPE = "subagent:memory-inject";
@@ -500,7 +558,19 @@ export interface MemoryInjectDetailsV1 {
   readonly parts?: readonly MemoryInjectPartV1[];
   /** Predict summary riding along the merged message (plan §5.3/§6.1):
    *  informational only, never consumed by the model logic itself. */
-  readonly predict?: { readonly tags: readonly string[]; readonly state?: readonly string[]; readonly origin: string };
+  readonly predict?: {
+    readonly tags: readonly string[];
+    readonly state?: readonly string[];
+    readonly origin: string;
+    /** #36 §6.4: this turn's P injection used the high-risk-tag cooldown
+     *  starvation bypass (≤1 per turn, ≤1 per block per segment). */
+    readonly bypass?: true;
+  };
+  /** #36 R 层（arch §3.3.5，r5 裁定 8）：本条 R 通知发出时的常驻账本快照 ——
+   *  resume/reload 后按 snapshotKey 匹配最近一条恢复 ledger；"ledger 是 id →
+   *  renderKey 的有序对"，消费方只在 wire.ts（P5b 接线）。Append-only：不
+   *  带 resident 的旧消息不受影响。 */
+  readonly resident?: { readonly snapshotKey: string; readonly ledger: readonly (readonly [string, string])[] };
 }
 
 /** `subagent:memory-recall` appendEntry record — segment dedup seeding.
@@ -512,6 +582,28 @@ export interface MemoryRecallEntryV1 {
   readonly keys: readonly EntryHash[];
   /** compaction id, B-layer re-injection only. */
   readonly bFor?: string;
+}
+
+/** `subagent:memory-predict` appendEntry `kind:"call"` 记录（§9.4 账目，每
+ *  个真正 STARTED 的 flight 一条；被拒的准入不记）。wire.ts 目前以字面量构
+ *  造；#36 P0 在此先行声明形状（含 §6.5 追加的 windowMs/attempts），P6a 接
+ *  管构造点后按本类型对齐。 */
+export interface PredictCallEntry {
+  readonly v: 1;
+  readonly kind: "call";
+  readonly at: string;
+  /** `ok` 时为实际模型，否则模型链逗号串。 */
+  readonly model: string;
+  readonly ms: number;
+  readonly ok: boolean;
+  readonly reason?: string;
+  readonly reserveUsd: number;
+  readonly costUsd: number;
+  readonly costSource: string;
+  readonly timely: boolean;
+  /** #36 §6.5：本次实际生效的等待窗口与 failover 尝试档数。 */
+  readonly windowMs?: number;
+  readonly attempts?: number;
 }
 
 // ───────────────────────────── effective metadata (jev-arch §4.4) ─────────────────────────────
@@ -532,21 +624,59 @@ export interface EffectiveMeta {
 
 // ───────────────────────────── ports (consumed by J4–J8) ─────────────────────────────
 
-/** `JevWritePort` — frozen verbatim from jev-plan §2. */
+/** `JevWritePort` — frozen verbatim from jev-plan §2; #36 (arch r5 §4.4,
+ *  裁定 9) appends the OPTIONAL `block`/`askScope` inputs and `relations`
+ *  return field on the SAME method name — no `runAfterWrite`. Omitting the
+ *  new fields keeps the v2 call form byte-identical (v2 callers unchanged). */
 export interface JevWritePort {
   /** 写入提交后、锁外调用；永不 reject；返回回显行与 usage（C-J12 决定 usage 放哪个字段）。 */
   afterWrite(input: {
     cwd: string;
+    /** blocks 布局下为 "<id>.md"。 */
     file: string;
+    /** blocks 布局下为旧块文件全文（create 时 undefined）。 */
     before: string | undefined;
+    /** blocks 布局下为新块文件全文。 */
     after: string;
     signal?: AbortSignal;
     registry: ClassifierRegistryLike | undefined;
-  }): Promise<{ echo: readonly string[]; usage?: { costUsd: number; calls: number } }>;
+    // ── #36 追加（均可缺省；缺省时行为与 HEAD 逐字节相同）──
+    /** blocks 布局写入时由 tool-v3 传入；v2 路径不传。 */
+    readonly block?: {
+      readonly id: string;
+      /** 写入后的 rev，供取代判定记录。 */
+      readonly rev: string;
+      readonly authority: "user" | "agent";
+      /** 本次写入是否显式写了 scope=。 */
+      readonly scopeExplicit: boolean;
+    };
+    /** true ⇒ 本次打标问句集合中加入 g1（arch §5.3）；缺省 false。 */
+    readonly askScope?: boolean;
+  }): Promise<{
+    echo: readonly string[];
+    usage?: { costUsd: number; calls: number };
+    /** #36 追加：取代/冲突判定结果 —— 只判定不执行；执行在 govern/supersede.ts（P5a）。缺省 = 未判定。 */
+    readonly relations?: readonly RelationVerdict[];
+  }>;
   /** 写前同步校验：新引入的行内注释错误 ⇒ 返回错误文本（拒写）。 */
   checkInline(file: string, before: string | undefined, after: string): string | undefined;
   /** 用户令守卫：返回被删改的 user 条目（guardHash 配对，arch §6.2.5 / v4.1 §3.2）。 */
   touchedUserEntries(file: string, before: string, after: string, handWritten: boolean): readonly MemEntry[];
+}
+
+/** #36 写入时取代/冲突判定结果（arch r5 §4.4）。`auto` 已在判定侧应用取代
+ *  矩阵、阈值与「每次写入合计 ≤2 条」上限；执行侧（P5a）在锁内复核
+ *  `oldRev` 后才落地。 */
+export interface RelationVerdict {
+  readonly kind: "supersedes" | "conflict";
+  readonly newId: string;
+  readonly newRev: string;
+  readonly oldId: string;
+  /** 判定时读到的旧块 rev，执行时锁内复核。 */
+  readonly oldRev: string;
+  readonly p: number;
+  /** 是否达到自动执行阈值。 */
+  readonly auto: boolean;
 }
 
 /** `JevCommandPort` — frozen verbatim from jev-plan §2. */
@@ -581,6 +711,9 @@ export interface JevRenderInfo {
   readonly primary?: string; // primary core file name
   readonly omittedSections: readonly string[]; // from TieredRenderResult.omittedSections
   readonly coreInlined: boolean;
+  /** #36（arch §3.3.5）：常驻块的账本 id 集合（= ledger 的 id 集，不是当前
+   *  渲染结果）——U/P 候选排除用。缺省 = 无常驻块（旧布局）。 */
+  readonly residentBlocks?: readonly string[];
 }
 
 // ───────────────────────────── predict ports (memory-predict plan §2.1/§11.1) ─────────────────────────────

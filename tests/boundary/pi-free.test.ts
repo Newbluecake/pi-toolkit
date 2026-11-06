@@ -215,4 +215,31 @@ describe("pi-free boundaries", () => {
     const offenders = memoryOffenders(roots);
     expect(offenders, offenders.join("; ")).toEqual([]);
   });
+
+  // #36 memory-governance plan §4 P0 / arch §3.1: blocks/ and govern/ are new
+  // pi-free roots. P0 pins the boundary AHEAD of the directories existing
+  // (P1 lands blocks/, P3/P5a land govern/) — the assertion covers whatever
+  // the globs discover, so the first file added there is already bound. No
+  // minimum-count assertion until the directories exist (that would fail on
+  // the P0 baseline); P1's verifier should re-check this file's coverage.
+  it("memory blocks/* and govern/* value closures stay pi-free (#36)", () => {
+    const roots = [
+      ...globSync("src/memory/blocks/*.ts", { cwd: ROOT }).map((file) => resolve(ROOT, file)),
+      ...globSync("src/memory/govern/*.ts", { cwd: ROOT }).map((file) => resolve(ROOT, file)),
+    ];
+    // The glob must be wired to reality: a directory that exists yields at
+    // least one root (a silent glob typo would otherwise make the pi-free
+    // check vacuously green once P1/P3/P5a land).
+    for (const dir of ["blocks", "govern"]) {
+      const dirPath = resolve(ROOT, `src/memory/${dir}`);
+      const discovered = roots.filter((file) => file.startsWith(`${dirPath}/`)).length;
+      if (existsSync(dirPath)) {
+        expect(discovered, `src/memory/${dir} exists but the glob matched nothing`).toBeGreaterThan(0);
+      } else {
+        expect(discovered).toBe(0);
+      }
+    }
+    const offenders = memoryOffenders(roots);
+    expect(offenders, offenders.join("; ")).toEqual([]);
+  });
 });

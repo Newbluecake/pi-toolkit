@@ -436,4 +436,20 @@ export interface TidyPort {
   snapshot(runId: RunId): RunSnapshot | undefined;
 }
 
+// ───────────────────────── #36 §4.7 secure 写闸门（P0 声明，P2 实现） ─────────────────────────
+
+/** #36 memory-governance（arch r5 §4.7）：所有自动写入口（启动迁移、sweep、
+ *  自动取代、漂移导入、侧车写入、暂存区构建/清理的每个操作）逐操作复检的写
+ *  闸门。实现 `src/secure/memory-gate.ts`（P2）：plain 域恒 ok；locked 恒拒；
+ *  secure 域复检挂载状态 + 路径身份。自动路径永不 mkdir；`capture` 在显式路径
+ *  新建 memDir 后立即调用，此后自动路径才允许写入该目录。 */
+export interface MemoryWriteGate {
+  /** 每个自动写操作前调用；false ⇒ 本操作及本轮剩余操作全部跳过，不读不写、不 mkdir。 */
+  check(
+    memDir: string,
+  ): { ok: true } | { ok: false; reason: "locked" | "unmounted" | "path-escaped" | "identity-changed" };
+  /** activate 时捕获 memDir 的 realpath + dev/ino（目录不存在则不捕获，之后的自动路径一律视为 identity-changed）。 */
+  capture(memDir: string): void;
+}
+
 export type { RunOutcome };
