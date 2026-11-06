@@ -101,9 +101,10 @@ describe("AgentList.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
 
   it("agent card shows a status pill only when a statusLabel is present", () => {
     const withLabel = mount(AgentList, {
-      props: { cards: [card({ statusLabel: "Working" })], selectedKey: null, filter: "" },
+      props: { cards: [card({ statusLabel: "Waiting", visualState: "waiting" })], selectedKey: null, filter: "" },
     });
-    expect(withLabel.find(".agent-meta .pill-inline").text()).toBe("Working");
+    expect(withLabel.find(".agent-meta .pill-inline").text()).toBe("Waiting");
+    expect(withLabel.find(".agent-meta .pill-inline").classes()).not.toContain("sr-only");
 
     const withoutLabel = mount(AgentList, {
       props: { cards: [card({ statusLabel: null })], selectedKey: null, filter: "" },
@@ -215,7 +216,7 @@ describe("AgentCard.vue — running bash count segment (2026-10-15 会话列表�
   it("agent + bash 都在跑 ⇒ 两段都在,分隔符按段计数正确", () => {
     const wrapper = mount(AgentCard, {
       props: {
-        card: card({ runningSubCount: 3, runningBashCount: 2, statusLabel: "Working" }),
+        card: card({ runningSubCount: 3, runningBashCount: 2, statusLabel: "Waiting", visualState: "waiting" }),
         selected: false,
       },
     });
@@ -224,7 +225,7 @@ describe("AgentCard.vue — running bash count segment (2026-10-15 会话列表�
     expect(meta.find("use[href='#i-terminal']").exists()).toBe(true);
     expect(meta.text()).toContain("3 running");
     expect(meta.text()).toContain("2 running");
-    // model · 62% · 3 running · 2 running · Working ⇒ 4 个分隔符
+    // model · 62% · 3 running · 2 running · Waiting ⇒ 4 个分隔符
     expect(meta.findAll(".sep")).toHaveLength(4);
   });
 
@@ -237,7 +238,16 @@ describe("AgentCard.vue — running bash count segment (2026-10-15 会话列表�
 
     // statusLabel 段前的分隔判断不再把 bash 段计入(0):仅 sub 段 + status ⇒ 1 个分隔符
     const onlySub = mount(AgentCard, {
-      props: { card: card({ modelShort: "", contextPercent: null, runningBashCount: 0 }), selected: false },
+      props: {
+        card: card({
+          modelShort: "",
+          contextPercent: null,
+          runningBashCount: 0,
+          statusLabel: "Waiting",
+          visualState: "waiting",
+        }),
+        selected: false,
+      },
     });
     expect(onlySub.get(".agent-meta").findAll(".sep")).toHaveLength(1);
   });
@@ -245,14 +255,21 @@ describe("AgentCard.vue — running bash count segment (2026-10-15 会话列表�
   it("仅 bash 段 + statusLabel ⇒ statusLabel 前的分隔符把新段计入(不丢 ·)", () => {
     const wrapper = mount(AgentCard, {
       props: {
-        card: card({ modelShort: "", contextPercent: null, runningSubCount: 0, runningBashCount: 1 }),
+        card: card({
+          modelShort: "",
+          contextPercent: null,
+          runningSubCount: 0,
+          runningBashCount: 1,
+          statusLabel: "Waiting",
+          visualState: "waiting",
+        }),
         selected: false,
       },
     });
     const meta = wrapper.get(".agent-meta");
     // happy-dom 的 .text() 不在相邻 span 之间补空白:分隔符存在性由 .sep 计数断言
     expect(meta.text()).toContain("1 running");
-    expect(meta.text()).toContain("Working");
+    expect(meta.text()).toContain("Waiting");
     expect(meta.findAll(".sep")).toHaveLength(1);
   });
 });
@@ -913,6 +930,7 @@ describe("AgentCard.vue — managed `web` badge (SP12, arch §9.1)", () => {
  * fields rich enough for the target function).
  */
 import type { RemoveAgentOutcome, RemoveTarget } from "../../../src/web-hub/ui/src/types.js";
+import { useListDensity } from "../../../src/web-hub/ui/src/composables/useListDensity.js";
 import { setDetailedListForTests } from "./helpers/list-density.js";
 beforeEach(setDetailedListForTests);
 
@@ -1980,5 +1998,43 @@ describe("AgentList.vue — restore order-stability (restoring 卡不换组)", (
       global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
     });
     expect(wrapper.find("li.agent-group").exists()).toBe(true); // sank back into 过期与离线
+  });
+});
+
+describe("AgentCard.vue — running label is screen-reader only (#43)", () => {
+  it("detailed: running ⇒ sr-only label, dot + badges stay, exactly 3 separators (no trailing one)", () => {
+    const w = mount(AgentCard, {
+      props: { card: card({ runningSubCount: 4, runningBashCount: 1 }), selected: false },
+    });
+    const pill = w.get(".pill-inline");
+    expect(pill.classes()).toContain("sr-only");
+    expect(pill.text()).toBe("Working");
+    expect(w.find(".dot").exists()).toBe(true);
+    expect(w.text()).toContain("4 running");
+    expect(w.text()).toContain("1 running");
+    // model · 62% · 4 running · 1 running (· Working omitted)
+    expect(w.get(".agent-meta").findAll(".sep")).toHaveLength(3);
+  });
+
+  it("compact: [data-compact=state] is sr-only with the label kept; sub/bash count nodes correct", () => {
+    // density is restored to detailed by the file-level beforeEach(setDetailedListForTests)
+    useListDensity({ storage: { getItem: () => null, setItem: () => undefined } }).setDensity("compact");
+    const w = mount(AgentCard, {
+      props: { card: card({ runningSubCount: 4, runningBashCount: 1 }), selected: false },
+    });
+    const state = w.get("[data-compact=state]");
+    expect(state.classes()).toContain("sr-only");
+    expect(state.text()).toBe("Working");
+    expect(w.find(".dot").exists()).toBe(true);
+    expect(w.get("[data-compact=sub] .num").text()).toBe("4");
+    expect(w.get("[data-compact=bash] .num").text()).toBe("1");
+  });
+
+  it("compact: non-running state pill stays visible (no sr-only)", () => {
+    useListDensity({ storage: { getItem: () => null, setItem: () => undefined } }).setDensity("compact");
+    const w = mount(AgentCard, {
+      props: { card: card({ visualState: "stale", statusLabel: "Stale" }), selected: false },
+    });
+    expect(w.get("[data-compact=state]").classes()).not.toContain("sr-only");
   });
 });

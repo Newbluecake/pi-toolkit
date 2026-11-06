@@ -240,6 +240,7 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             <span
               v-if="card.statusLabel && !(needsAnswer && card.visualState === 'waiting')"
               class="pill pill-inline"
+              :class="{ 'sr-only': card.visualState === 'running' }"
               data-compact="state"
               :data-st="card.visualState"
             >
@@ -500,13 +501,18 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
         <template v-if="card.statusLabel">
           <span
             v-if="
-              card.modelShort || card.contextPercent !== null || card.runningSubCount > 0 || card.runningBashCount > 0
+              card.visualState !== 'running' &&
+              (card.modelShort || card.contextPercent !== null || card.runningSubCount > 0 || card.runningBashCount > 0)
             "
             class="sep"
             aria-hidden="true"
             >·</span
           >
-          <span class="pill pill-inline" :data-st="card.visualState">
+          <span
+            class="pill pill-inline"
+            :class="{ 'sr-only': card.visualState === 'running' }"
+            :data-st="card.visualState"
+          >
             <AppIcon v-if="card.visualState === 'waiting'" name="message" class="icon-sm" />
             <AppIcon v-else-if="card.visualState === 'offline'" name="unplug" class="icon-sm" />
             {{ card.statusLabel }}
