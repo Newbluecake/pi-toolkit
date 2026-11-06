@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, utimesSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -141,6 +141,16 @@ describe("root entry dispatcher (plan §3.2)", () => {
     const r = run(l);
     expect(r.stdout).toContain('{"via":"bundle"}');
     expect(r.stdout).not.toContain('{"via":"source"}');
+    expect(r.status).toBe(0);
+  });
+
+  it("stale bundle (src newer) ⇒ still loads the bundle, no stale warning", () => {
+    const l = layout(OK_BUNDLE);
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(join(l.dir, "dist", "bundle", "index.js"), old, old);
+    const r = run(l);
+    expect(r.stdout).toContain('{"via":"bundle"}');
+    expect(r.stderr).not.toContain("bundle is stale");
     expect(r.status).toBe(0);
   });
 

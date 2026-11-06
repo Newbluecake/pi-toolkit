@@ -499,12 +499,12 @@ pre-commit 自动改写 `dist/` 会与 `.githooks` 的「prettier --write 后 gi
 
 ## 6. 实施要点
 
-### 6.1 新鲜度政策：local-path 也走 bundle + 陈旧检测（用户拍板 2026-11-03）
+### 6.1 新鲜度政策：local-path 也走 bundle + 陈旧检测（用户拍板 2026-11-03）（**告警部分已于 2026-11-06 撤销**，见下）
 
 #### 6.1.1 决策与机制
 
 **（用户拍板）只要有 `dist/bundle/index.js` 就走 bundle，local-path 安装也在内**——本机日常开发同样
-享受 ~1 s 启动。代价是「改了 `src/` 但没重建 ⇒ 跑旧代码」，因此**必须**配套陈旧检测与告警，
+享受 ~1 s 启动。代价是「改了 `src/` 但没重建 ⇒ 跑旧代码」，原设计曾配套陈旧检测与告警（**历史设计，已撤销**），
 不能静默。
 
 **陈旧判定**（`src/core/bundle-entry.ts` 的 `staleness()`，纯 fs、无缓存、不阻塞）：
@@ -535,8 +535,9 @@ export function staleness(deps?: BundleEntryDeps): Staleness;
                running OLD code — run `npm run build:bundle` (or set PI_TOOLKIT_ENTRY=src)
 ```
 
-- **只 warn，不 throw、不自动重建**（用户明确不要自动重建机制）：陈旧仍以旧代码运行，但**必须可见**。
-- `stale` 时不改变行为（仍用 bundle）——这是拍板内容；告警只是让人知道该重建。
+- **（2026-11-06 用户令：启动期陈旧告警已移除）** `index.ts` 不再调用 `staleness()`/`staleWarning()`、不再 `console.warn`、不扫描源码；陈旧时仍静默用 bundle，不自动重建。helper 仍留在 `bundle-entry.ts`（`tests/core/bundle-entry.test.ts` 覆盖）。以下告警形态与 §7 的 stale 验收行为为历史设计，**不再生效**。
+- ~~只 warn，不 throw、不自动重建~~：陈旧仍以旧代码运行。
+- `stale` 时不改变行为（仍用 bundle）；**当前政策：无任何告警、不扫描 src**。
 - src 比 bundle **旧**（常见：刚 build 完）⇒ 静默，不刷屏。
 - release/npm 安装没有 `src/` 或没有 `.ts` ⇒ `"fresh"`，**零输出**（I9：off/无关形态 byte-identical）。
 
@@ -573,12 +574,12 @@ export PI_TOOLKIT_ENTRY=src     # ~/.bashrc / ~/.zshrc
 
 ⇒ **恢复步骤（各自独立，写清给运维）**：
 
-| 想要                   | 操作                                                                                                       |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------- |
-| 父 pi 用上新代码       | `npm run build:bundle` 后**重启 pi**（不依赖 `/reload`，其重读语义未实测）；或 `PI_TOOLKIT_ENTRY=src` 重启 |
-| hub 用上新源码         | `/webhub restart`（hub 本来就 jiti 读源码，不需重建）                                                      |
-| 两者都对且同代         | 先 `npm run build:bundle`，再重启 pi，再 `/webhub restart`                                                 |
-| 只想确认当前跑的是哪份 | 看启动 stderr 的 `[pi-subagent] bundle is stale ...` 行；无此行且启动 ~1 s ⇒ 跑 bundle 且新鲜              |
+| 想要                   | 操作                                                                                                                   |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| 父 pi 用上新代码       | `npm run build:bundle` 后**重启 pi**（不依赖 `/reload`，其重读语义未实测）；或 `PI_TOOLKIT_ENTRY=src` 重启             |
+| hub 用上新源码         | `/webhub restart`（hub 本来就 jiti 读源码，不需重建）                                                                  |
+| 两者都对且同代         | 先 `npm run build:bundle`，再重启 pi，再 `/webhub restart`                                                             |
+| 只想确认当前跑的是哪份 | （陈旧告警已移除）启动 ~1 s ⇒ 跑 bundle，不保证新鲜；改源码后需 `npm run build:bundle` 重启，或 `PI_TOOLKIT_ENTRY=src` |
 
 ---
 
@@ -693,9 +694,9 @@ profile 上比对（`child`/`thread-child` 等子会话 profile 按 fixture 现�
 | 钩子幂等                             | 连续两次 `installBundleHooks` ⇒ 第二次返回 false/不重复注册                                                                                                     |
 | 无 `registerHooks` 时                | 注入 `installHooks: undefined` ⇒ 走源码路径，功能完整（证明降级可用）                                                                                           |
 | **真实 CLI 启动锚点**（复审第 1 条） | 用**真实 `pi` 可执行文件**启动（`bin/pi` 符号链接原样，**不改** `process.argv[1]`），在扩展里读身份；断言 `Container`/`Type` === 宿主。有/无本地 peers 两类都跑 |
-| 陈旧检测：stale                      | 造 bundle（mtime 旧）+ 触碰 `src/index.ts` 到更晚                                                                                                               | 启动 stderr 含 `[pi-subagent] bundle is stale`；仍成功用 bundle 起来（`tools` 非空） |
-| 陈旧检测：fresh                      | 先 `build:bundle` 再启动                                                                                                                                        | stderr **无** stale 行（零输出）                                                     |
-| 陈旧检测：无 src                     | release 形态目录（只有 `dist/` + `index.ts`）                                                                                                                   | 无 stale 行、无异常输出（I9）                                                        |
+| 陈旧：stale 仍加载 bundle            | 造 bundle（mtime 旧）+ 触碰 `src/index.ts` 到更晚                                                                                                               | stderr **无** `bundle is stale`；仍用 bundle 起来（`tools` 非空）；启动不扫描 src（`dispatcher.test.ts` 已覆盖） |
+| 陈旧：fresh                          | 先 `build:bundle` 再启动                                                                                                                                        | stderr 无 stale 行（同样无该告警）                                                                               |
+| 陈旧：无 src                         | release 形态目录（只有 `dist/` + `index.ts`）                                                                                                                   | 无 stale 行、无异常输出（I9）                                                                                    |
 
 ### 7.3 运维面冒烟（评审第 8 条，补 §6.3 缺口）
 
@@ -707,8 +708,8 @@ profile 上比对（`child`/`thread-child` 等子会话 profile 按 fixture 现�
 | HUD                                 | 启动后 footer                                                                                      | 版本/分支非空（`pluginRoot()` 未返回 undefined）                                                                                                                                  |
 | Feishu                              | 配置存在时                                                                                         | `ownPackageRoot()` 非空（降级分支未被触发）                                                                                                                                       |
 | 子会话                              | `pi install <repo>` 正规装配（隔离 HOME），**禁用 `pi -e`**                                        | 子会话工具/命令集合与「允许集合」相等（不是「零注册」——子会话本来就注册 bash/traffic 等；比对现状 `src` 路径的同一集合）                                                          |
-| **改源码未重建**（复审第 5 条）     | 已有 bundle → 触碰 `src/**`（不重建）→ 重启 pi                                                     | ① stderr 有 `bundle is stale` 行；② 启动仍 ~1 s（跑 bundle）；③ 新代码**未生效**（预先埋一个可观测差异，如工具描述串），以此证明告警说的是真的                                    |
-| 陈旧后重建                          | 接上条，`npm run build:bundle` 后重启 pi                                                           | stale 行消失、新代码生效                                                                                                                                                          |
+| **改源码未重建**（复审第 5 条）     | 已有 bundle → 触碰 `src/**`（不重建）→ 重启 pi                                                     | ① stderr **无** `bundle is stale` 行（告警已移除）；② 启动仍 ~1 s（跑 bundle）；③ 新代码**未生效**（预先埋一个可观测差异，如工具描述串）——用户需自行 `build:bundle`               |
+| 陈旧后重建                          | 接上条，`npm run build:bundle` 后重启 pi                                                           | 新代码生效                                                                                                                                                                        |
 | `/reload`（含精确语义，**待实测**） | 已有 bundle 会话内改 `settings.json` 后 `/reload`；再在**重建 bundle 后**（文件内容已变）`/reload` | ① 设置生效（重激活）② 钩子未重复安装（`Symbol.for` 标记）③ **记录**重建后 `/reload` 是否读到新 bundle（ESM 缓存行为，未定论）⇒ 结论回填 §6.1.3；无论结果如何，恢复手段仍是重启 pi |
 | 父/hub 代差（复审第 5 条）          | 父 pi 跑 bundle；hub 由 `/webhub` 启动                                                             | hub 子进程 argv 指向 `<pkg>/src/web-hub/hub/main.ts`（jiti 读源码）；文档明确 **`/webhub restart` 只更新 hub、不更新父 pi**，不写「restart 后一致」                               |
 
@@ -721,23 +722,23 @@ profile 上比对（`child`/`thread-child` 等子会话 profile 按 fixture 现�
 
 ## 8. 风险表
 
-| #   | 风险                       | 触发                                           | 影响                                          | 缓解                                                                            |
-| --- | -------------------------- | ---------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------- |
-| R1  | 静态边把源码图拉回         | 有人加回命名 re-export                         | bundle 路径白跑（两套图）                     | §7.1「根入口只有 default」断言；§3.2 契约                                       |
-| R2  | 身份分裂                   | 钩子未装/映射错/解析失败静默跳过               | `instanceof` 恒假、schema 语义错              | §3.3 全部映射按宿主 alias 口径；§7.2 两类 peers 场景 + 解析失败即抛             |
-| R3  | `import.meta.url` 深度     | 漏改 §3.4 任一站点                             | hub 起不来 / UI 404 / traffic 500 / HUD 空    | 步骤 1 独立 commit + 现有测试；§7.3 冒烟                                        |
-| R4  | 返回形态被改               | 用 `join()` 实现 `packageUiDistDir`            | 现有测试红（`endsWith("/dist/web-hub-ui/")`） | 契约明写保留尾 `/`；parity 测试覆盖三布局                                       |
-| R5  | 干净 checkout typecheck 红 | 用字面量 import bundle                         | CI 在 build 前失败                            | §3.6 计算式 specifier；禁止全局屏蔽                                             |
-| R6  | 本地开发跑旧 bundle        | 改源码未重建（local-path 也走 bundle，已拍板） | 「新代码不生效」但**有告警**                  | §6.1.1 mtime 陈旧检测 + stderr warn；§7.3 有该场景验收行                        |
-| R14 | 宿主锚点解析失败           | 直接用 `createRequire(argv1)`（符号链接）      | 宿主模块解析不到 ⇒ 身份分裂或钩子装不上       | §3.3.1 强制 realpath → pi package.json → createRequire；§7.2「真实 CLI 启动」行 |
-| R15 | 陈旧检测自身拖慢启动       | 每次都 glob 全量 src                           | +28–33 ms（可接受）                           | §6.1.1 只 statSync `.ts`；无 `src/` 时短路返回 fresh                            |
-| R7  | 坏 bundle 静默降级         | try/catch-import 兜底                          | 问题被掩盖                                    | 契约：只在 `existsSync` 为假时走源码；加载失败抛                                |
-| R8  | I8 边界被破                | protocol 值导入 `src/core/*`                   | boundary 测试红（评审已抓到一次）             | §3.4 镜像 + parity；allowlist 不扩                                              |
-| R9  | Node < 22.15               | 无 `registerHooks`                             | 只能走慢路径                                  | 启动探测 + 显式降级（正确但慢），debug 留痕                                     |
-| R10 | parity 测试静默 skip       | 缺 bundle 时 `describe.skip`                   | 门禁形同虚设                                  | CI 先 build 再测；缺失即 fail（不 skip）                                        |
-| R11 | 耗时口径漂移               | 用 `activate()` 单独计时                       | 数字好看但假                                  | §6.4 统一 `loadExtensions` 整段 + 5 样本中位数                                  |
-| R12 | 打包卷进 node_modules      | 将来加 runtime dep 未 external                 | 体积暴涨/双实例                               | metafile「inputs 全 `src/`」断言                                                |
-| R13 | 双份代码误导排障           | 有人改 `dist/bundle/index.js`                  | 被下次构建覆盖                                | 产物在 `.gitignore` 内；唯一来源是 `build:bundle`                               |
+| #   | 风险                             | 触发                                           | 影响                                                      | 缓解                                                                                   |
+| --- | -------------------------------- | ---------------------------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| R1  | 静态边把源码图拉回               | 有人加回命名 re-export                         | bundle 路径白跑（两套图）                                 | §7.1「根入口只有 default」断言；§3.2 契约                                              |
+| R2  | 身份分裂                         | 钩子未装/映射错/解析失败静默跳过               | `instanceof` 恒假、schema 语义错                          | §3.3 全部映射按宿主 alias 口径；§7.2 两类 peers 场景 + 解析失败即抛                    |
+| R3  | `import.meta.url` 深度           | 漏改 §3.4 任一站点                             | hub 起不来 / UI 404 / traffic 500 / HUD 空                | 步骤 1 独立 commit + 现有测试；§7.3 冒烟                                               |
+| R4  | 返回形态被改                     | 用 `join()` 实现 `packageUiDistDir`            | 现有测试红（`endsWith("/dist/web-hub-ui/")`）             | 契约明写保留尾 `/`；parity 测试覆盖三布局                                              |
+| R5  | 干净 checkout typecheck 红       | 用字面量 import bundle                         | CI 在 build 前失败                                        | §3.6 计算式 specifier；禁止全局屏蔽                                                    |
+| R6  | 本地开发跑旧 bundle              | 改源码未重建（local-path 也走 bundle，已拍板） | 「新代码不生效」且**无启动告警**（2026-11-06 用户令移除） | 重建 `npm run build:bundle` 后重启，或 `PI_TOOLKIT_ENTRY=src`；§7.3 验收行已改为无告警 |
+| R14 | 宿主锚点解析失败                 | 直接用 `createRequire(argv1)`（符号链接）      | 宿主模块解析不到 ⇒ 身份分裂或钩子装不上                   | §3.3.1 强制 realpath → pi package.json → createRequire；§7.2「真实 CLI 启动」行        |
+| R15 | （已随告警移除）陈旧检测拖慢启动 | 启动不再扫描 src                               | 无                                                        | `staleness()` helper 仅保留未调用                                                      |
+| R7  | 坏 bundle 静默降级               | try/catch-import 兜底                          | 问题被掩盖                                                | 契约：只在 `existsSync` 为假时走源码；加载失败抛                                       |
+| R8  | I8 边界被破                      | protocol 值导入 `src/core/*`                   | boundary 测试红（评审已抓到一次）                         | §3.4 镜像 + parity；allowlist 不扩                                                     |
+| R9  | Node < 22.15                     | 无 `registerHooks`                             | 只能走慢路径                                              | 启动探测 + 显式降级（正确但慢），debug 留痕                                            |
+| R10 | parity 测试静默 skip             | 缺 bundle 时 `describe.skip`                   | 门禁形同虚设                                              | CI 先 build 再测；缺失即 fail（不 skip）                                               |
+| R11 | 耗时口径漂移                     | 用 `activate()` 单独计时                       | 数字好看但假                                              | §6.4 统一 `loadExtensions` 整段 + 5 样本中位数                                         |
+| R12 | 打包卷进 node_modules            | 将来加 runtime dep 未 external                 | 体积暴涨/双实例                                           | metafile「inputs 全 `src/`」断言                                                       |
+| R13 | 双份代码误导排障                 | 有人改 `dist/bundle/index.js`                  | 被下次构建覆盖                                            | 产物在 `.gitignore` 内；唯一来源是 `build:bundle`                                      |
 
 ---
 

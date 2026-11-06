@@ -45,10 +45,6 @@ export default async function activate(pi: ExtensionAPI): Promise<void> {
     throw new Error(`[pi-subagent] cannot pin host modules for the bundle: ${hooks.reason}`);
   }
 
-  // 陈旧告警：只 warn，不 throw、不重建（plan §6.1.1）。
-  const warning = entry.staleWarning(entry.staleness());
-  if (warning !== "") console.warn(warning);
-
   // 计算式 specifier：干净 checkout 没有 dist/，字面量会让 typecheck 报 TS2307（plan §3.6）。
   const bundleUrl: string = entry.bundleUrl();
   const bundle = await import(bundleUrl);
