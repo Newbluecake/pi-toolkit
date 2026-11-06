@@ -65,3 +65,33 @@ it never revises the settle the script already received. Design: `docs/dev/workf
 Design:
 `docs/dev/workflow-background/plan.md`, `docs/dev/workflow-agent-queue/plan.md`, `docs/dev/workflow-experts/plan.md` (removed with #40; historical),
 `docs/dev/workflow-worktree/plan.md`.
+
+## Fast admission snapshot (task55 P2)
+
+`HostCallHandlerDeps.fastWorkflow?: FastWorkflowPort` is a host-only dependency
+(`capture(): FastSeed | undefined`), not an `agent()` option. The production assembly can
+instead bind `WorkflowChildSpawnerOptions.fastWorkflow` when constructing the spawner;
+the adapter retains that port as `ChildSpawner.fastWorkflow`, and the host uses it only
+when no direct dependency was provided. Bind the closure to the workflow's **own parent
+session**, never to a process-global/current-active-stack query. Disabled assembly omits
+the port; an undefined capture result adds no Fast keys to legacy requests.
+
+After prompt/opts validation and before task-key/replay/FIFO checks, the host synchronously
+captures exactly once and copies/freezes only `v` and `mode`. The port may return a reused
+readonly-typed object: retaining its reference is not safe. `QueuedAgentCall.fastSeed`
+carries this pure value through local FIFO admission and `spawnRequestFor`; the production
+spawner adapter forwards it as internal `SpawnRequest.fastSeed` before the lower slot queue.
+Neither local dequeue nor adapter dispatch re-captures the parent. Parent mode changes do
+not rewrite running or already accepted queued calls. Downstream service/runtime must
+preserve this seed rather than sample root again (their separate integration contract).
+No Fast data enters worker opts, lifecycle events, prompt text, or public tool schemas.
+
+`TaskSemantics.fastMode?: "on" | "off"` participates explicitly in `taskKeyOf`.
+`inherit` still travels as a child seed, but omits this semantic key, as does disabled;
+legacy hashes/journal bytes remain unchanged. Only mode affects the key, never revision,
+incarnation or a nonce. Switching on/off misses; an early replay hit still captures but
+spawns no child and appends no new entry. Replay is reuse, not evidence of an accelerated
+request. Replay/chain/worktree verification and call-registry cancellation remain unchanged:
+the registry owns phases, while the queued call owns seed data. Tests in
+`tests/workflow/host-fast.test.ts` pin both queue boundaries, immutable copying, early hits,
+legacy hash bytes, cancellation/deadline/admission-timeout and dispatch-rejection behavior.

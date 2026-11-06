@@ -1,6 +1,7 @@
 import type { Clock, TimerHandle } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
-import type { Millis, RunId, ThinkingLevel, UsageDelta } from "../core/types.js";
+import type { FastSeed, Millis, RunId, ThinkingLevel, UsageDelta } from "../core/types.js";
+import type { FastWorkflowPort } from "../fast/ports.js";
 import type { LoadAdmission } from "../sysload/types.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { deriveChildBudget } from "./budget.js";
@@ -58,11 +59,15 @@ export interface ChildOutcome {
   readonly usage?: UsageDelta;
 }
 export interface ChildSpawner {
+  /** Host-only parent-session capture closure; never forwarded to a worker or spawn options. */
+  readonly fastWorkflow?: FastWorkflowPort;
   /** Optional sysload gate for workflow FIFO admission. Absent preserves legacy behavior. */
   readonly loadAdmission?: LoadAdmission;
   spawn(req: {
     type: string;
     prompt: string;
+    /** Internal admission snapshot, preserved before both queue layers. */
+    readonly fastSeed?: FastSeed;
     label?: string;
     deadlineAt?: Millis;
     parentRunId?: string;
@@ -304,6 +309,8 @@ export interface JournalRunConfig {
 }
 
 export interface HostCallHandlerDeps {
+  /** Bound to this workflow owner, not a lookup of the globally active stack. */
+  readonly fastWorkflow?: FastWorkflowPort;
   readonly clock: Clock;
   readonly workerHost: WorkerHost;
   readonly spawner: ChildSpawner;
@@ -395,6 +402,8 @@ const DEFAULT_AGENT_TYPE = "general-purpose";
 
 /** workflow-agent-queue D2/D5: what `dispatchQueued` needs to spawn a call that was acked as queued. */
 interface QueuedAgentCall {
+  /** Pure immutable seed captured once before replay and local FIFO admission. */
+  readonly fastSeed?: FastSeed;
   readonly callId: CallId;
   readonly prompt: string;
   readonly agentType: string;
@@ -911,6 +920,12 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       emitRejected(callId, "admission", "invalid_args", validated.message, displayMetaOfArgs(args));
       return { kind: "host_ack", id: callId, ok: false, error: { message: validated.message } };
     }
+    // Capture only after structural validation, synchronously before hashing/replay
+    // or either queue. Copy the two primitives: readonly typing alone does not
+    // protect an accepted call from a port reusing/mutating its backing object.
+    const captured = (deps.fastWorkflow ?? deps.spawner.fastWorkflow)?.capture();
+    const fastSeed: FastSeed | undefined =
+      captured === undefined ? undefined : Object.freeze({ v: captured.v, mode: captured.mode });
     const validOpts = validated.opts;
     const label = validOpts.label;
     const agentType = validOpts.agentType ?? deps.defaultAgentType ?? DEFAULT_AGENT_TYPE;
@@ -978,6 +993,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         agentType,
         agentTypeConfigHash,
         prompt: a.prompt,
+        ...(fastSeed !== undefined && fastSeed.mode !== "inherit" ? { fastMode: fastSeed.mode } : {}),
         // Raw strings, not the resolved pair: the taskKey must distinguish
         // every distinct *declared* model/thinking (same prompt + different
         // model must never replay the old result). Two spellings of the same
@@ -1166,6 +1182,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
 
     const call: QueuedAgentCall = {
       callId,
+      ...(fastSeed !== undefined ? { fastSeed } : {}),
       prompt: a.prompt,
       agentType,
       ...(label !== undefined ? { label } : {}),
@@ -1311,6 +1328,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     return {
       type: call.agentType,
       prompt: call.prompt,
+      ...(call.fastSeed !== undefined ? { fastSeed: call.fastSeed } : {}),
       ...(call.label !== undefined ? { label: call.label } : {}),
       ...(call.modelOverride !== undefined ? { modelOverride: call.modelOverride } : {}),
       ...(call.modelHintOverride !== undefined ? { modelHintOverride: call.modelHintOverride } : {}),
