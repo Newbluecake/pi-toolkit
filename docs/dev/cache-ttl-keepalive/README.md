@@ -4,6 +4,10 @@
 > 来源：AGENTS.md@fcbf71dc 的对应条目，原文搬运，未改写（仅路径按目录移动更新）。新的实现细节直接写在这里，不要再写回 AGENTS.md。
 > 相关：`plan.md`、`breaker-recovery-plan.md`、`capture-pairing-plan.md`、`measure-plan.md`、`webhub-plan.md`
 
+## 局部类型兼容注记（pi 1.5，2026-11-06）
+
+`KeepaliveModelInfo.cost.tiers`（`keepalive-service.ts`）与 `KeepaliveCostModel.tiers`（`keepalive-state.ts`）的类型为显式 `…[] | undefined`：pi 1.5 的价目 DTO 可显式携带 `tiers: undefined`，这是 type-only 边界兼容；本地 pi 1.4 依赖下 typecheck/门禁保持通过，runtime JS 未变，不代表 TESTED_PI_RANGE 已升。详见 `docs/dev/pi-version-adaptation/plan.md`。
+
 ## src/cache-ttl/
 
 `src/cache-ttl/` — prompt-cache TTL modes `auto`/`on`/`off`, status-bar indicator,

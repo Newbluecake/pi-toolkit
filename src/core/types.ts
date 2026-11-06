@@ -495,7 +495,7 @@ export interface ExternalPriceTier extends ExternalPriceRates {
   inputTokensAbove: number;
 }
 export interface ExternalPriceTable extends ExternalPriceRates {
-  tiers?: readonly ExternalPriceTier[];
+  tiers?: readonly ExternalPriceTier[] | undefined;
 }
 /** 价格从哪来：override=用户覆盖；upstream=droid 标注的上游 provider 的官方条目；family=按模型家族前缀推断的厂商条目；
  *  consensus=无规范 provider 时多个注册表条目价格一致。 */

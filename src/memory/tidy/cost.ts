@@ -47,7 +47,7 @@ export interface ModelCostLike {
   output: number;
   cacheRead: number;
   cacheWrite: number;
-  tiers?: readonly { inputTokensAbove: number; input: number; output: number; cacheWrite: number }[];
+  tiers?: readonly { inputTokensAbove: number; input: number; output: number; cacheWrite: number }[] | undefined;
 }
 
 /** Same request-wide tiered-pricing selection `src/stack.ts`'s `priceOf`

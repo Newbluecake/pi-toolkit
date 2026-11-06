@@ -8,7 +8,10 @@
 
 `src/core/` — pure domain: state machine, deadline budgets, ids, types, and the worktree-origin
 registry (`worktree-origin.ts`: worktree path → original cwd, `Symbol.for` global, FIFO-capped;
-written by `src/extensions/worktree.ts`, read by `src/memory/`). No pi imports. Deadline span
+written by `src/extensions/worktree.ts`, read by `src/memory/`). No pi imports. 局部类型兼容注记（pi 1.5，2026-11-06）：
+`types.ts` 的 `ExternalPriceTable.tiers` 为显式 `…[] | undefined`（pi 1.5 价目 DTO 可显式携带 `tiers: undefined`，
+type-only 边界兼容；本地 pi 1.4 下 typecheck/门禁保持通过，runtime JS 未变，不代表 TESTED_PI_RANGE 已升；
+详见 `docs/dev/pi-version-adaptation/plan.md`）。Deadline span
 guards: `deadline.ts`'s `MAX_DEADLINE_SPAN_MS` (365d) + `clampSpanMs()` clamp every computed span
 (non-finite/≤0 ⇒ undefined) so no NaN/Infinity deadline can ever reach a timer; `clock.ts`'s
 `createSegmentedClock` re-arms delays beyond Node's 2³¹−1 ms `setTimeout` limit in segments

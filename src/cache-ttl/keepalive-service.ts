@@ -98,7 +98,7 @@ interface KeepaliveModelInfo {
         cacheWrite?: number;
         /** late-usage pings only: pi-ai's OUTPUT rate ($ per million tokens) for the ping's own ≤4 output tokens. */
         output?: number;
-        tiers?: { inputTokensAbove: number; cacheRead?: number; cacheWrite?: number; output?: number }[];
+        tiers?: { inputTokensAbove: number; cacheRead?: number; cacheWrite?: number; output?: number }[] | undefined;
       }
     | undefined;
   /** Anthropic-messages compat flag (pi's own default is `true` when unset). See `report()`'s `supportsLongCacheRetention`. */
