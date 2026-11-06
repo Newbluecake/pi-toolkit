@@ -14,9 +14,14 @@ describe("child input-budget provider measurer", () => {
         handlers.set(event, current);
       },
     };
+    // Isolate input-budget hooks from the newly enabled Fast feature in this minimal host stub.
     wireChildSession(
       pi as any,
-      { cacheTtl: { keepalive: false }, compact: { enabled: false } } as unknown as AgentSettings,
+      {
+        cacheTtl: { keepalive: false },
+        compact: { enabled: false },
+        fast: { enabled: false },
+      } as unknown as AgentSettings,
     );
     return { handlers, registry: getInputBudgetRegistry() };
   }

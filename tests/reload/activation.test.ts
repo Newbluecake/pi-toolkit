@@ -18,7 +18,8 @@ describe("reload activation assembly", () => {
     const sb = sandbox("pi-reload-off-");
     resetGlobals();
     try {
-      sb.writeSettings({ ...BASELINE, reload: { defer: false } });
+      // Isolate the frozen pre-Fast surface from the newly enabled feature default.
+      sb.writeSettings({ ...BASELINE, reload: { defer: false }, fast: { enabled: false } });
       const h = fakePi();
       activate(h.pi);
       const golden = JSON.parse(readFileSync(new URL("../fixtures/schedule-off-golden.json", import.meta.url), "utf8"));
