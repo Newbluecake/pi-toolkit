@@ -24,7 +24,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { isWebInvocation } from "../commands/capture.js";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
 import type { MemorySettings } from "../config/settings.js";
-import type { TidyPort } from "./contracts.js";
+import type { MemoryWriteGate, TidyPort } from "./contracts.js";
 import { parseTagsAddArgs, tokenizeTagsArgs } from "./jev/command-port.js";
 import type {
   ClassifierRegistryLike,
@@ -39,8 +39,21 @@ import { deleteEntry as fsDeleteEntry, setInlineMeta as fsSetInlineMeta } from "
 import { handleMemExpired } from "./jev/expired-command.js";
 import { readIndex } from "./jev/index-store.js";
 import { handleMemReview } from "./jev/review-command.js";
-import { memoryDirFor, type MemoryPaths } from "./paths.js";
-import { canonicalMemoryDir } from "./safe-fs.js";
+import { readMarker } from "./blocks/marker.js";
+import { dirFormat } from "./blocks/naming.js";
+import {
+  runMigration,
+  resumeRollback,
+  rollbackMigration,
+  snapshotMigrationSources,
+  plainMemoryWriteGate,
+} from "./blocks/migrate.js";
+import { planMigration } from "./blocks/migrate-plan.js";
+import { legacyDrift, importLegacy } from "./blocks/legacy.js";
+import { readBlocksState, readHold } from "./blocks/state.js";
+import { join } from "node:path";
+import { memoryDirFor, defaultPaths, type MemoryPaths } from "./paths.js";
+import { canonicalMemoryDir, canonicalDir, ensureMemoryDir, inspectDirNoFollow, readRegular } from "./safe-fs.js";
 import { discoverCCProjects, importAll, importProject, listMemory, type ImportResult } from "./store.js";
 import { formatSize } from "./render.js";
 import { handleMemDoctorCommand, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
@@ -71,6 +84,7 @@ function resolveCwd(ctx: ExtensionCommandContext): string {
 
 export interface CreateMemCommandDeps {
   paths?: MemoryPaths;
+  writeGate?: MemoryWriteGate;
   /** Default false — used only by the `/mem tidy`/`/mem restore` gate (§7). */
   isChildSession?: boolean;
   /** §7's spawn port; undefined ⇒ "tidy unavailable in this session". Wired
@@ -160,12 +174,22 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
     return dir === undefined || entryIndex === undefined ? [] : entryIndex.get(dir);
   };
   // I9: without a port the tables and description stay exactly as before.
-  const subcommands = jev === undefined ? MEM_SUBCOMMANDS : [...MEM_SUBCOMMANDS, ...MEM_JEV_SUBCOMMANDS];
+  const blocks = deps.settings?.layout === "blocks";
+  const subcommands = [
+    ...(jev === undefined ? MEM_SUBCOMMANDS : [...MEM_SUBCOMMANDS, ...MEM_JEV_SUBCOMMANDS]),
+    ...(blocks
+      ? [{ value: "migrate", description: "块布局迁移 [--dry-run|--all|--report|--status|--import-legacy|--rollback]" }]
+      : []),
+  ];
   const secondLevel: Record<string, ReadonlyArray<{ value: string; description: string }>> = jev === undefined
     ? { ...MEM_SECOND_LEVEL }
     : { ...MEM_SECOND_LEVEL, ...MEM_JEV_SECOND_LEVEL };
   return {
-    description: jev === undefined ? DESCRIPTION : DESCRIPTION_JEV,
+    description: blocks
+      ? "Project memory blocks. /mem migrate [--dry-run|--all|--report|--status|--import-legacy|--rollback] · /mem doctor · /mem restore"
+      : jev === undefined
+        ? DESCRIPTION
+        : DESCRIPTION_JEV,
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
         const a = (argumentPrefix ?? "").trimStart();
@@ -230,6 +254,90 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
         return body + doctorTrailer() + trailer;
       };
       try {
+        if (sub === "migrate") {
+          const flags = new Set(rest);
+          const allowed = ["--dry-run", "--all", "--report", "--status", "--import-legacy", "--rollback"];
+          if (
+            rest.some((x) => !allowed.includes(x)) ||
+            ["--report", "--status", "--import-legacy", "--rollback"].filter((x) => flags.has(x)).length > 1
+          )
+            throw new Error("usage: /mem migrate [--dry-run|--all|--report|--status|--import-legacy|--rollback]");
+          const readonly = flags.has("--dry-run") || flags.has("--status") || flags.has("--report");
+          if (isChildSession || (!readonly && !isInteractive(ctx)) || (flags.has("--all") && !isInteractive(ctx)))
+            throw new Error("memory migration requires the interactive main session");
+          const gate = deps.writeGate ?? plainMemoryWriteGate;
+          const current = memoryDirFor(cwd, deps.paths);
+          let dirs = [current];
+          if (flags.has("--all")) {
+            const root = (deps.paths ?? defaultPaths()).memoryRoot;
+            // Gate before enumeration: a locked session must not even probe layout.
+            const v = gate.check(current);
+            if (!v.ok && v.reason !== "identity-changed") throw new Error(`E_GATE: ${v.reason}`);
+            dirs = inspectDirNoFollow(root)
+              .names.filter((n) => !n.startsWith("."))
+              .map((n) => join(root, n))
+              .filter((d) => {
+                try {
+                  return inspectDirNoFollow(d).dev === inspectDirNoFollow(root).dev && dirFormat(d) === "files";
+                } catch {
+                  return false;
+                }
+              });
+          }
+          for (const dir of dirs) {
+            if (!readonly) {
+              const before = gate.check(dir);
+              if (!before.ok && before.reason !== "identity-changed") throw new Error(`E_GATE: ${before.reason}`);
+              if (!canonicalDir(dir)) ensureMemoryDir(dir);
+              gate.capture(dir);
+            }
+            const verdict = gate.check(dir);
+            if (!verdict.ok) throw new Error(`E_GATE: ${verdict.reason}`);
+            let text: string;
+            if (flags.has("--status"))
+              text = JSON.stringify(
+                {
+                  auto: deps.settings?.migrate.auto ?? true,
+                  layout: deps.settings?.layout,
+                  dir: dirFormat(dir),
+                  ...readBlocksState(dir),
+                  hold: readHold(dir),
+                  legacyDrift: legacyDrift(dir).length,
+                  runId: readMarker(join(dir, "blocks"))?.runId,
+                },
+                null,
+                2,
+              );
+            else if (flags.has("--report")) text = readRegular(join(dir, "blocks"), ".migration-report.json").text;
+            else if (flags.has("--dry-run") && !flags.has("--import-legacy"))
+              text = JSON.stringify(
+                planMigration(
+                  snapshotMigrationSources(dir),
+                  readIndex(dir).index,
+                  new Date().toISOString().slice(0, 10),
+                ).report,
+                null,
+                2,
+              );
+            else if (flags.has("--dry-run") && flags.has("--import-legacy"))
+              text = JSON.stringify(await importLegacy(dir, { gate, dryRun: true }));
+            else {
+              await resumeRollback(dir, { gate, explicit: true });
+              if (flags.has("--rollback")) {
+                const rollback = await rollbackMigration(dir, { gate });
+                text = `memory: rolled back to current legacy files; retained: ${rollback.retained ?? "held"}; changed/new blocks: ${rollback.changed.join(", ") || "none"} — /reload required`;
+              } else if (flags.has("--import-legacy"))
+                text = JSON.stringify(await importLegacy(dir, { gate, dryRun: flags.has("--dry-run") }));
+              else {
+                const result = await runMigration(dir, { gate, explicit: true });
+                text = `memory: ${result.outcome}${result.reason ? ` — ${result.reason}` : ""}`;
+              }
+              deps.onAfterWrite?.(cwd);
+            }
+            if (ctx.hasUI) ctx.ui.notify(text, "info");
+          }
+          return;
+        }
         if (sub === "path") {
           if (ctx.hasUI) ctx.ui.notify(`memory dir: ${memoryDirFor(cwd, deps.paths)}`, "info");
           return;

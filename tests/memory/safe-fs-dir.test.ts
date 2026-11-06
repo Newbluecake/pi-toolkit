@@ -132,3 +132,17 @@ it("read-only inspection distinguishes empty from EACCES enumeration", () => {
   });
   expect(() => inspectDirNoFollow(p)).toThrow("not enumerable");
 });
+it("removeTree readdir EACCES propagates without deleting anything", () => {
+  const p = root();
+  const child = join(p, "isolated");
+  nodeFs.mkdirSync(child);
+  nodeFs.writeFileSync(join(child, "keep"), "safe");
+  const actual = nodeFs.readdirSync;
+  vi.spyOn(nodeFs, "readdirSync").mockImplementation(((path: nodeFs.PathLike) => {
+    if (String(path) === child) throw Object.assign(new Error("denied"), { code: "EACCES" });
+    return actual(path);
+  }) as typeof nodeFs.readdirSync);
+  expect(() => removeTreeNoFollow(canonicalDir(p)!, "isolated", { maxOps: 10 })).toThrow("denied");
+  expect(nodeFs.readFileSync(join(child, "keep"), "utf8")).toBe("safe");
+  expect(nodeFs.existsSync(child)).toBe(true);
+});

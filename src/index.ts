@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { initSecureDomain } from "./secure/domain.js";
+import { secureMemoryWriteGate } from "./secure/memory-gate.js";
 import { secureGuardsNeeded, wireSecureGuards } from "./secure/guards.js";
 import { registerSecureCommand, secureCommandWanted } from "./secure/command.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -234,6 +235,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       isChildSession,
       sections: promptHub,
       secureDomainKind: secureDomain.kind,
+      writeGate: secureMemoryWriteGate(secureDomain),
       ...(isChildSession ? {} : { sessionSignal: () => sessionAbort?.signal }),
       // memory-predict plan §11.1 signal T: forward the todo snapshot (todo
       // module disabled ⇒ undefined ⇒ P1b sees an empty todo list).

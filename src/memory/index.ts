@@ -32,7 +32,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
 import type { PromptSectionHub } from "../sysprompt/hub.js";
-import type { TidyPort } from "./contracts.js";
+import type { MemoryWriteGate, TidyPort } from "./contracts.js";
 import { createMemCommand } from "./command.js";
 import { memorySection, renderExternalMemoryBlock } from "./inject.js";
 import { RenderCache, type InjectBudget } from "./render.js";
@@ -43,6 +43,9 @@ import { runDoctor } from "./doctor.js";
 import { createStartupReminder, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
 import { summaryLine } from "./doctor.js";
 import { canonicalDir } from "./safe-fs.js";
+import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
+import { dirFormat, effectiveLayout } from "./blocks/naming.js";
+import { runMigration, resumeRollback, plainMemoryWriteGate } from "./blocks/migrate.js";
 import { memoryDirFor } from "./paths.js";
 import { resolveJevWiring, type JevDomainKind } from "./jev/config.js";
 import { wireJev } from "./jev/wire.js";
@@ -51,6 +54,7 @@ import type { JevBashJobsLitePort, JevDoctorPort, JevFleetPort, JevRenderInfo, J
 
 export interface WireMemoryOpts {
   settings: MemorySettings;
+  writeGate?: MemoryWriteGate;
   isChildSession: boolean;
   /** The shared PromptSectionHub (sysprompt-stable §4.6) that folds this
    *  section into the system prompt; created by src/index.ts before memory
@@ -123,7 +127,14 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   // miss); freeze=true → capture the pre-write block (peek miss ⇒ freeze to
   // "no block", R3) so the injected bytes stay stable for this session and
   // the write takes effect next session.
-  const onAfterWrite = (cwd: string): void => {
+  const onAfterWrite = (cwd: string, origin?: string): void => {
+    if (origin === "migrate" || effectiveLayout(opts.settings.layout, dirFormat(memoryDirFor(cwd))) === "blocks") {
+      lastBlocks.delete(cwd);
+      cache.delete(cwd);
+      frozenBlocks.delete(cwd);
+      for (const hook of afterWriteHooks) hook(cwd);
+      return;
+    }
     if (opts.settings.freezeInjectionAfterWrite) {
       // The tiered cache has more dimensions than legacy's InjectBudget. The
       // last provider result is the exact block that was in the prompt, so it
@@ -138,9 +149,41 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     for (const hook of afterWriteHooks) hook(cwd);
   };
 
-  pi.on("session_start", () => {
+  const gate = opts.writeGate ?? plainMemoryWriteGate;
+  let migrationAbort = new AbortController();
+  if (opts.settings.layout === "blocks" && opts.secureDomainKind !== "locked")
+    gate.capture(memoryDirFor(resolveWorktreeOrigin(process.cwd()) ?? process.cwd()));
+  pi.on("session_start", async (_event, ctx) => {
     frozenBlocks.clear();
     lastBlocks.clear();
+    migrationAbort.abort();
+    migrationAbort = new AbortController();
+    // Non-blocks/child/locked paths remain byte-identical and do not probe disk.
+    if (opts.isChildSession || opts.settings.layout !== "blocks" || opts.secureDomainKind === "locked") return;
+    const cwd = resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd;
+    const dir = memoryDirFor(cwd);
+    if (!gate.check(dir).ok || !canonicalDir(dir)) return;
+    try {
+      await resumeRollback(dir, { gate, signal: migrationAbort.signal });
+      if (!opts.settings.migrate.auto || dirFormat(dir) !== "files") return;
+      const result = await runMigration(dir, {
+        gate,
+        signal: migrationAbort.signal,
+        diag: (message) => {
+          if (ctx.hasUI) ctx.ui.notify(message, "warning");
+        },
+      });
+      if (result.outcome === "committed") {
+        onAfterWrite(cwd, "migrate");
+        if (ctx.hasUI)
+          ctx.ui.notify(
+            `memory: migrated ${result.plan!.report.files.length} files → ${result.plan!.blocks.length} blocks — /mem migrate --report · undo: /mem migrate --rollback`,
+            "info",
+          );
+      }
+    } catch {
+      /* bounded migration failure leaves the current files layout usable */
+    }
   });
   // jev-plan J7: the production doctor port is created below (wireJev runs
   // after the hub section); the reminder registers here (unchanged order) and
@@ -160,6 +203,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     });
     pi.on("session_start", reminder.check);
     pi.on("session_shutdown", (event) => {
+      migrationAbort.abort();
       if (event.reason === "reload") reminder.reset();
     });
   }
@@ -235,6 +279,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     createMemCommand({
       isChildSession: opts.isChildSession,
       getTidyPort: () => tidyPort,
+      writeGate: gate,
       settings: opts.settings,
       renderBlock: tieredRender,
       runDoctor: doctorRunner,

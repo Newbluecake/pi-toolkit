@@ -51,6 +51,7 @@ export const TIER2_FILES: readonly string[] = [
 /** The 17 files with REAL gocryptfs mount blocks (plan D2a: each was read; judged by content,
  * not name) → the dedicated `secure` project, so P2 can hang the preflight setup on it. */
 export const SECURE_MOUNT_FILES: readonly string[] = [
+  "tests/secure/memory-gate.test.ts",
   "tests/secure/archive.test.ts",
   "tests/secure/convert-state.test.ts",
   "tests/secure/helper-v0-api.test.ts",

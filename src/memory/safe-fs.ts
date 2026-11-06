@@ -1627,6 +1627,9 @@ export function lockRelease(dir: string, token: string): void {
 }
 
 // #36 P1: directory operations are deliberately separate from legacy fallbacks.
+/** There is a TOCTOU window between lstat(target) and rename. POSIX rename
+ * replaces an existing EMPTY target directory: this is not renameat2(NOREPLACE).
+ * Callers MUST hold the migration lock to exclude cooperating writers. */
 export function renameDirNoClobber(parent: CanonicalDir, from: string, to: string): void {
   try {
     if (!isSafeName(from) || !isSafeName(to)) throw new MemoryError("bad-name: directory rename requires basenames");

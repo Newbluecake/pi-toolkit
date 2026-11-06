@@ -19,6 +19,10 @@
 // goes through `../safe-fs.js`. Pi-free root; no module-scope state (I4).
 
 import { join } from "node:path";
+import { dirFormat } from "../blocks/naming.js";
+import { readCorpus } from "../blocks/store.js";
+import { entryHash } from "./entries.js";
+import type { MemoryWriteGate } from "../contracts.js";
 import { MemoryError } from "../paths.js";
 import { withMemoryDirLock } from "../lock.js";
 import { ensurePrivateDir, readRegular, replaceAtomic, unlinkRegular, writeTempRegular } from "../safe-fs.js";
@@ -44,6 +48,14 @@ export const JEV_DIR_NAME = ".jev";
 const INDEX_NAME = "index.json";
 const TAXONOMY_NAME = "taxonomy.json";
 const INDEX_FILE_MODE = 0o600;
+/** Resolve once per operation; held directories use their old sidecar. */
+function sidecarBase(dir: string): string {
+  return dirFormat(dir) === "blocks" ? join(dir, "blocks") : dir;
+}
+function gateCheck(dir: string, gate?: MemoryWriteGate): void {
+  const verdict = gate?.check(dir);
+  if (verdict && !verdict.ok) throw new MemoryError(`E_GATE: ${verdict.reason}`);
+}
 
 function isErrno(err: unknown, code: string): boolean {
   return typeof err === "object" && err !== null && (err as NodeJS.ErrnoException).code === code;
@@ -216,7 +228,7 @@ function sanitizeCooldownMap(v: unknown): Record<EntryHash, string> | undefined 
 export function readIndex(dir: string): { index: JevIndexV1; rebuilt: boolean } {
   let text: string;
   try {
-    text = readRegular(join(dir, JEV_DIR_NAME), INDEX_NAME).text;
+    text = readRegular(join(sidecarBase(dir), JEV_DIR_NAME), INDEX_NAME).text;
   } catch (err) {
     if (isErrno(err, "ENOENT")) return { index: emptyIndex(), rebuilt: false };
     return { index: emptyIndex(), rebuilt: true };
@@ -368,6 +380,35 @@ export function gcIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHash>): 
   });
 }
 
+/** Exact blocks GC: a content hash survives while ANY block still references it.
+ * Old files-layout gcIndex remains cap-triggered and byte-compatible. */
+export function gcBlockIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHash>, today: string): JevIndexV1 {
+  const filter = <T>(values: Readonly<Record<string, T>> | undefined): Record<string, T> =>
+    Object.fromEntries(Object.entries(values ?? {}).filter(([hash]) => liveHashes.has(hash)));
+  const { aInjectedAt: _a, pInjectedAt: _p, review: _r, ...rest } = index;
+  const a = filter(index.aInjectedAt),
+    p = filter(index.pInjectedAt);
+  return capBlind({
+    ...rest,
+    entries: filter(index.entries),
+    ...(Object.keys(a).length ? { aInjectedAt: a } : {}),
+    ...(Object.keys(p).length ? { pInjectedAt: p } : {}),
+    ...(index.review
+      ? {
+          review: {
+            ...index.review,
+            suggestions: index.review.suggestions.filter(
+              (s) => liveHashes.has(s.a.hash) && (!s.b || liveHashes.has(s.b.hash)),
+            ),
+            dismissed: index.review.dismissed.filter(
+              (d) => (!d.until || d.until >= today) && d.hashKey.split("+").every((h) => liveHashes.has(h)),
+            ),
+          },
+        }
+      : {}),
+  });
+}
+
 /** Deterministic serialization: entry keys sorted so two runs tagging the
  *  same set produce byte-identical files. */
 function serializeIndex(index: JevIndexV1): Buffer {
@@ -397,15 +438,25 @@ function isLockBusy(err: unknown): boolean {
 /** Read → merge-by-hash → atomic replace, inside the directory lock. Lock
  *  busy ⇒ "busy" (the patch is dropped, never thrown); genuine fs errors
  *  propagate. */
-export async function writeIndexPatch(dir: string, patch: IndexPatch): Promise<"ok" | "busy"> {
+export async function writeIndexPatch(dir: string, patch: IndexPatch, gate?: MemoryWriteGate): Promise<"ok" | "busy"> {
   try {
+    gateCheck(dir, gate);
     return await withMemoryDirLock(
       dir,
       () => {
-        const jdir = join(dir, JEV_DIR_NAME);
+        gateCheck(dir, gate);
+        const base = sidecarBase(dir),
+          jdir = join(base, JEV_DIR_NAME);
+        gateCheck(dir, gate);
         ensurePrivateDir(jdir);
-        const merged = capBlind(mergeIndex(readIndex(dir).index, patch));
+        let merged = mergeIndex(readIndex(dir).index, patch);
+        if (base !== dir) {
+          const live = new Set(readCorpus(base).blocks.map((b) => entryHash(b.body)));
+          merged = gcBlockIndex(merged, live, new Date().toISOString().slice(0, 10));
+        } else merged = capBlind(merged);
+        gateCheck(dir, gate);
         const tmp = writeTempRegular(jdir, INDEX_NAME, serializeIndex(merged), INDEX_FILE_MODE);
+        gateCheck(dir, gate);
         replaceAtomic(jdir, tmp, INDEX_NAME);
         return "ok" as const;
       },
@@ -418,13 +469,15 @@ export async function writeIndexPatch(dir: string, patch: IndexPatch): Promise<"
 }
 
 /** Remove the sidecar index (taxonomy file kept). Missing file is a no-op. */
-export async function removeIndex(dir: string): Promise<"ok" | "busy"> {
+export async function removeIndex(dir: string, gate?: MemoryWriteGate): Promise<"ok" | "busy"> {
   try {
+    gateCheck(dir, gate);
     return await withMemoryDirLock(
       dir,
       () => {
         try {
-          unlinkRegular(join(dir, JEV_DIR_NAME), INDEX_NAME);
+          gateCheck(dir, gate);
+          unlinkRegular(join(sidecarBase(dir), JEV_DIR_NAME), INDEX_NAME);
         } catch (err) {
           if (!isErrno(err, "ENOENT")) throw err;
         }
@@ -483,7 +536,7 @@ function sanitizeTaxonomyTags(v: unknown): readonly TaxonomyFileV1["tags"][numbe
 export function readTaxonomyFile(dir: string): TaxonomyFileV1 | undefined {
   let text: string;
   try {
-    text = readRegular(join(dir, JEV_DIR_NAME), TAXONOMY_NAME).text;
+    text = readRegular(join(sidecarBase(dir), JEV_DIR_NAME), TAXONOMY_NAME).text;
   } catch {
     return undefined;
   }
@@ -505,20 +558,28 @@ export function readTaxonomyFile(dir: string): TaxonomyFileV1 | undefined {
  *  file must still merge to a valid taxonomy (≤64 enabled tags, unique
  *  valid ids) — otherwise the write is refused with a throw BEFORE the
  *  current file is touched. */
-export async function writeTaxonomyFile(dir: string, file: TaxonomyFileV1): Promise<"ok" | "busy"> {
+export async function writeTaxonomyFile(
+  dir: string,
+  file: TaxonomyFileV1,
+  gate?: MemoryWriteGate,
+): Promise<"ok" | "busy"> {
   const merged = mergeTaxonomy(file);
   if (!merged.ok) throw new MemoryError(`refusing to write invalid taxonomy file: ${merged.error}`);
   try {
+    gateCheck(dir, gate);
     return await withMemoryDirLock(
       dir,
       () => {
-        const jdir = join(dir, JEV_DIR_NAME);
+        gateCheck(dir, gate);
+        const jdir = join(sidecarBase(dir), JEV_DIR_NAME);
         ensurePrivateDir(jdir);
         const data = Buffer.from(
           JSON.stringify({ v: 1, tags: file.tags, disabledPresets: file.disabledPresets }, null, 2) + "\n",
           "utf8",
         );
+        gateCheck(dir, gate);
         const tmp = writeTempRegular(jdir, TAXONOMY_NAME, data, INDEX_FILE_MODE);
+        gateCheck(dir, gate);
         replaceAtomic(jdir, tmp, TAXONOMY_NAME);
         return "ok" as const;
       },
