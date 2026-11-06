@@ -187,14 +187,22 @@ it.each(["user", "agent"] as const)("%s automatic and explicit matrix cells", as
       expect(result[0]?.outcome).toBe(authority === "agent" && oldAuthority === "user" ? "skipped" : "superseded");
     }
 });
-it("conflict threshold equality and global scope is never inherited", async () => {
+it("conflict never auto-executes, even at the historical cutoff or certainty; explicit remains unchanged", async () => {
   const { CONFLICT_AUTO_P } = await import("../../../src/memory/govern/supersede.js");
   const d = setup(),
     a = block(d, "user");
   const b = createBlockLocked(join(d, "blocks"), "rule", { authority: "user", scope: "global" }, "global old", now);
   const v = { ...verdict(a, b), kind: "conflict" as const, p: CONFLICT_AUTO_P - 0.001 };
   expect((await supersede(d, [v]))[0]?.outcome).toBe("skipped");
-  const passed = await supersede(d, [{ ...v, p: CONFLICT_AUTO_P }]);
+  for (const p of [CONFLICT_AUTO_P, 1]) {
+    expect((await supersede(d, [{ ...v, p }]))[0]?.outcome).toBe("skipped");
+    expect(readGovernBlock(d, b.id).meta.status).toBe("active");
+  }
+  const { readIndex } = await import("../../../src/memory/jev/index-store.js");
+  expect(readIndex(d).index.review?.suggestions).toEqual(
+    expect.arrayContaining([expect.objectContaining({ kind: "conflict" })]),
+  );
+  const passed = await supersede(d, [{ ...v, p: 1 }], { explicit: true });
   expect(passed[0]?.echo).toContain("was global");
   expect(readGovernBlock(d, a.id).meta.scope).toBeUndefined();
 });
@@ -234,4 +242,17 @@ it("restored pair is excluded before classifier questions are constructed", asyn
   });
   expect(requests).toHaveLength(1);
   expect(Object.keys(requests[0]!.questions).filter((k) => /^c[0-9]+/.test(k))).toEqual([]);
+});
+
+it("direct explicit conflict preserves authority checks, including agent→user denial", async () => {
+  const d = setup(),
+    a = block(d),
+    u = block(d, "user"),
+    old = block(d);
+  const denied = await supersede(d, [{ ...verdict(a, u), kind: "conflict" }], { explicit: true });
+  expect(denied[0]?.reason).toContain("user rule");
+  expect(readGovernBlock(d, u.id).meta.status).toBe("active");
+  expect(
+    (await supersede(d, [{ ...verdict(a, old), kind: "conflict", auto: false, p: 0 }], { explicit: true }))[0]?.outcome,
+  ).toBe("superseded");
 });

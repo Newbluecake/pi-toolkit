@@ -250,7 +250,7 @@ export function buildTagQuestions(
   entry: { readonly body: string; readonly file: string; readonly heading?: string; readonly today: string },
   taxonomy: Taxonomy,
   compare: readonly TagCompareCandidate[],
-  opts?: { readonly includeScope?: boolean },
+  opts?: { readonly includeScope?: boolean; readonly wholeRelation?: boolean },
 ): QuestionBatch {
   const state: JsonObject = {
     entry: entry.body,
@@ -264,13 +264,25 @@ export function buildTagQuestions(
     questions[c.id] = {
       type: "choice",
       instructions: `Compare the entry in state with this existing entry from ${c.file}: 「${c.excerpt}」. What is their relation?`,
-      criteria: {
-        unrelated: "Unrelated topics",
-        duplicate: "Same content",
-        conflict: "They contradict each other",
-        supersedes: "The entry in state replaces the existing one",
-        complementary: "Related, both needed",
-      },
+      criteria:
+        opts?.wholeRelation === true
+          ? {
+              unrelated: "Unrelated topics",
+              duplicate:
+                "The new entry in state contains all valid information of the existing entry without contradiction; a new subset is NOT duplicate",
+              conflict:
+                "Partial overlap or contradiction: the existing entry still has valid information not covered or explicitly invalidated by the new entry; keep both for review",
+              supersedes:
+                "The new entry in state wholly replaces the existing entry: it covers or explicitly invalidates ALL of the existing entry's valid information; partial conflict is NOT supersedes",
+              complementary: "Related, both needed; partial overlap without whole replacement",
+            }
+          : {
+              unrelated: "Unrelated topics",
+              duplicate: "Same content",
+              conflict: "They contradict each other",
+              supersedes: "The entry in state replaces the existing one",
+              complementary: "Related, both needed",
+            },
     };
   }
   if (opts?.includeScope === true) {

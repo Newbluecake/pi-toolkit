@@ -5,9 +5,8 @@
  *  (matrix permitting). */
 export const SUPERSEDE_AUTO_P = 0.85;
 
-/** Relation choice `conflict` at or above this probability is auto-executed
- *  (matrix permitting). Between 0.75 and the threshold only a `conflict`
- *  review suggestion is emitted. */
+/** Historical conflict cutoff retained for evaluation parameter readers.
+ *  2026-11-07 user ruling: conflict is suggestion-only, never auto-executed. */
 export const CONFLICT_AUTO_P = 0.9;
 
 /** Auto-executed relations per write, user+agent combined; the rest stay
@@ -129,10 +128,7 @@ export async function supersede(
           if (!opts.explicit && opts.enabled === false) throw new MemoryError("governance disabled");
           if (
             !opts.explicit &&
-            (!v.auto ||
-              !Number.isFinite(v.p) ||
-              v.p > 1 ||
-              v.p < (v.kind === "supersedes" ? SUPERSEDE_AUTO_P : CONFLICT_AUTO_P))
+            (v.kind !== "supersedes" || !v.auto || !Number.isFinite(v.p) || v.p > 1 || v.p < SUPERSEDE_AUTO_P)
           )
             throw new MemoryError("below threshold");
           if (!opts.explicit && executed >= AUTO_PER_WRITE_MAX) throw new MemoryError("per-write limit");

@@ -88,3 +88,11 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 - blocks 的 `/mem review`、`/mem expired` 当前路由到 review-lite 治理子集，尚未完整呈现非治理 Jev 建议及原 expired 四组视图。这是命令能力/需求覆盖缺口，不是文档措辞问题；P7 应逐项核对需求与实现并安排补齐或显式裁定，不能仅靠更改文档宣称完成。
 
 本包证据：`tests/memory/govern/{sweep-plan,sweep,supersede,review-lite}.test.ts`、`tests/integration/memory-blocks-{governance,supersede-race}.test.ts`；相邻门禁包含工具 v3/Jev、命令/tidy、pi-free、activate-trace 与既有 memory golden。
+
+### #36 自动取代收窄（2026-11-07 用户新裁定）
+
+仅完整取代才自动：新块整体覆盖或明确废弃旧块全部有效信息；部分冲突旧块保持 active 并给建议。`supersede` 非 explicit 只接受 supersedes，write-port 只将 supersedes 高 p 且未超 cap 标 auto；conflict 即使 p=1 也不自动。`CONFLICT_AUTO_P` 仅历史 cutoff，SUPERSEDE_AUTO_P 与每写最多 2 条不变；显式路径、agent→user 永禁及 authority/CAS/cycle/residue/dismissed 均不扩域。
+
+治理 on 的 tool-v3 自动 afterWrite 追加 `wholeRelation:true`，经 blocks write-port/tagOne 传到 builder，独立于 askScope/includeScope；off/v2/bulk 不传新键，legacy cN 和 g1 问句原字节不变。治理 cN 的 duplicate 也须「新含旧全部有效信息」（新子集不合格），supersedes 须 whole 覆盖/明确废弃 all，partial overlap/conflict 属于 conflict/complementary。
+
+缓存核证：生产 write-port 正文 hash 未变只跳过，变更 fresh tagOne；decideTagging 不存 cN，client.callOnce 直接 classify，无生产 cN 答案缓存。评测完整 question 文本变化使完整请求 replyKey 自然失效；不清私有缓存、不改 taxonomyRev、不全量 retag。G1 真实正例 10 < 20 仍 block；本包不 live、不实际迁移、不补样本。详见 memory-governance arch §5.4 与 plan 的日期化裁定。

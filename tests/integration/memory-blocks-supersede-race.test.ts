@@ -28,7 +28,7 @@ const dir=process.argv[2];
 process.on('message',()=>{});
 const b=await withMemoryDirLock(dir,()=>createBlockLocked(join(dir,'blocks'),'rule',{authority:'user'},process.argv[3],new Date()));
 process.send({ready:b});
-process.once('message',async ({other})=>{const result=await supersede(dir,[{kind:'conflict',newId:b.id,newRev:b.rev,oldId:other.id,oldRev:other.rev,p:1,auto:true}]);process.send({result});process.disconnect();});
+process.once('message',async ({other})=>{const result=await supersede(dir,[{kind:'supersedes',newId:b.id,newRev:b.rev,oldId:other.id,oldRev:other.rev,p:1,auto:true}]);process.send({result});process.disconnect();});
 `,
   );
   function start(body: string) {

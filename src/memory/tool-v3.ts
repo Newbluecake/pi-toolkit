@@ -597,6 +597,7 @@ async function finishWrite(
         ...(signal === undefined ? {} : { signal }),
         registry: registryOf(ctx),
         block,
+        ...(deps.settings.governance.enabled ? { wholeRelation: true } : {}),
         // arch §4.4: askScope = user ∧ no explicit scope ∧ jev wired (the
         // port's off/partial early-returns suppress g1 naturally).
         ...(block.authority === "user" && !block.scopeExplicit ? { askScope: true } : {}),

@@ -40,7 +40,7 @@ import { tagOne } from "./tagging.js";
 import { blockToEntry } from "../blocks/adapter.js";
 import { parseBlockFile } from "../blocks/format.js";
 import { readCorpus } from "../blocks/store.js";
-import { AUTO_PER_WRITE_MAX, CONFLICT_AUTO_P, SUPERSEDE_AUTO_P } from "../govern/supersede.js";
+import { AUTO_PER_WRITE_MAX, SUPERSEDE_AUTO_P } from "../govern/supersede.js";
 import type { ClassifierRegistryLike, EntryHash, EntryTags, JevClient, JevWritePort, Taxonomy } from "./contracts.js";
 import type { MemoryWriteGate } from "../contracts.js";
 
@@ -288,8 +288,8 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
             : undefined;
       if (kind === undefined) continue;
       const p = answer.probabilities[answer.choice] ?? answer.confidence;
-      const threshold = kind === "supersedes" ? SUPERSEDE_AUTO_P : CONFLICT_AUTO_P;
-      const auto = p >= threshold && out.filter((v) => v.auto).length < AUTO_PER_WRITE_MAX;
+      const auto =
+        kind === "supersedes" && p >= SUPERSEDE_AUTO_P && out.filter((v) => v.auto).length < AUTO_PER_WRITE_MAX;
       out.push({
         kind,
         newId: newEntry.block?.id ?? newEntry.file.replace(/\.md$/, ""),
@@ -312,6 +312,7 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
     registry: ClassifierRegistryLike | undefined;
     block?: { id: string; rev: string; authority: "user" | "agent"; scopeExplicit: boolean };
     askScope?: boolean;
+    readonly wholeRelation?: boolean;
   }): Promise<{
     echo: readonly string[];
     usage?: { costUsd: number; calls: number };
@@ -385,6 +386,7 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
         mode: "sync",
         signal,
         ...(askScope ? { askScope: true } : {}),
+        ...(input.wholeRelation === true ? { wholeRelation: true } : {}),
       });
       const outcome = result.outcome;
       if (!outcome.ok) {

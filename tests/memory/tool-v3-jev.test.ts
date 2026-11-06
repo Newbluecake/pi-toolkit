@@ -574,3 +574,59 @@ describe("production wireMemory with layout:blocks wires jev (fix round)", () =>
     vi.unstubAllEnvs();
   });
 });
+
+describe("whole-replacement-only policy", () => {
+  test.each([0.9, 1])("conflict p=%s stays active with a suggestion", async (p) => {
+    const fx = fixture([{ id: "old.001", authority: "agent", body: "- pipeline and backup rules" }], (ask) =>
+      Object.fromEntries(
+        Object.keys(ask.questions)
+          .filter((id) => /^c\d+$/.test(id))
+          .map((id) => [id, { type: "choice", choice: "conflict", probabilities: { conflict: p }, confidence: p }]),
+      ),
+    );
+    let verdicts: readonly RelationVerdict[] | undefined;
+    const out = await exec(
+      makeTool(fx, (v) => {
+        verdicts = v;
+      }),
+      { command: "create", topic: "old", text: "- change pipeline only" },
+      ctx(fx.cwd, { registry }),
+    );
+    expect(verdicts).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "conflict", p, auto: false })]));
+    expect(block(fx, "old.001").meta.status).toBe("active");
+    expect(block(fx, "old.001").meta.supersededBy).toBeUndefined();
+    expect(out).toContain("review suggested");
+    const q = fx.asks[0]!.questions.c1!;
+    if (q.type !== "choice") throw new Error("expected choice");
+    expect(q.criteria.duplicate).toContain("new subset is NOT duplicate");
+  });
+  test.each([false, true])(
+    "tool-v3 governance=%s only opts automatic afterWrite into wholeRelation",
+    async (enabled) => {
+      const fx = fixture([]);
+      const inputs: Parameters<JevWritePort["afterWrite"]>[0][] = [];
+      const tool = createMemoryToolV3({
+        settings: {
+          ...DEFAULT_SETTINGS.memory,
+          layout: "blocks",
+          governance: { ...DEFAULT_SETTINGS.memory.governance, enabled },
+        },
+        isChildSession: false,
+        onAfterWrite() {},
+        paths: fx.paths,
+        jev: {
+          ...fx.port,
+          async afterWrite(input) {
+            inputs.push(input);
+            return fx.port.afterWrite(input);
+          },
+        },
+      });
+      await exec(tool, { command: "create", topic: "gen", text: "- agent fact" }, ctx(fx.cwd, { registry }));
+      expect(inputs).toHaveLength(1);
+      expect(Object.hasOwn(inputs[0]!, "wholeRelation")).toBe(enabled);
+      expect(inputs[0]!.wholeRelation).toBe(enabled ? true : undefined);
+      expect(inputs[0]!.askScope).toBeUndefined();
+    },
+  );
+});

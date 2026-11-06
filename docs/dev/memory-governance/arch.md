@@ -5,6 +5,8 @@
 > 用户拍板的内容是本文前提，**不再重新讨论**：块化、治理四原则、预测注入修复，以及 2026-11-06 对 r1 §9.2、r2 §9.2 的裁定。本文只回答「怎么落」。r3 起**没有待确认项**（§9.2）。实施方案见同目录 `plan.md`（r3）。
 > 行号以 HEAD 122de638 为准，会漂；以函数名为准。
 
+> **2026-11-07 用户新裁定优先**：本文件保留早期裁定历史；任何「conflict 自动」旧措辞不再是现行规则。当前只允许新块完整覆盖或明确废弃旧块全部有效信息时自动取代，partial conflict 仅建议；显式路径及其余权限/安全边界不变。
+
 ## r5 变更摘要（相对 r4；root 第 2 轮复审后的 13 条裁定）
 
 用户已定事项一条未改。下面每条都是对 r4 实现层的收紧；r4/r3/r2 摘要和第 1 轮处置表保留备查，**与本节冲突的旧表述一律以本节和正文 r5 内容为准**。逐条落点见文末「r5/r3 处置表（root 裁定）」。
@@ -70,7 +72,7 @@
    - Topics 索引行改为：`<topic> — tags: a, b, c · N blocks · D decisions · E expired`。标签取不到时（jev off 或未打标），改用块的 `section` 名，按频次取前 3；再取不到就只显示计数。
    - 旧 frontmatter 里人工写的 `description/read_when` **不作为一次性摘要种子**。种子必须落盘到某处才能在之后的渲染中使用，这在实质上就是登记表，与「只用自动摘要」冲突，所以丢弃。它们只保留在只读的迁移报告（r4 起为 `blocks/.migration-report.json`）以及原地保留的根目录旧文件里，供审计和回滚，**任何渲染路径都不读取**。
    - CC 单事实文件的 description/read_when 写进**块自身**的 `title/when`。这是块级元数据，描述的是那一条事实本身，不是主题描述，所以保留；它不进入索引，只在 `view <topic>` 列表中显示。
-2. **N2 = 允许**：新用户令可以自动取代冲突的 agent 块。阈值为 supersedes≥0.85 / conflict≥0.90，每次写入合计 ≤2 条，可恢复。§5.4 矩阵已定稿，相关的「N2 开关」措辞已删除。
+2. **N2 = 允许**：新用户令可以自动取代冲突的 agent 块。原裁定阈值为 supersedes≥0.85 / conflict≥0.90（历史记录）；**2026-11-07 用户新裁定覆盖自动条件：仅完整取代的 supersedes≥0.85，每次写入合计 ≤2 条；conflict 永远只建议**，可恢复。§5.4 矩阵已定稿，相关的「N2 开关」措辞已删除。
 3. **§9.2 清空**：无待确认项。§8 分包移除登记表相关工作；风险 R12 改写。
 
 ## r2 变更摘要（相对 r1，保留备查；其中第 5 条与「N1/N2 待确认」已被 r3 取代）
@@ -1154,6 +1156,7 @@ export interface JevWritePort {
       readonly scopeExplicit: boolean; // 本次写入是否显式写了 scope=
     };
     readonly askScope?: boolean; // true ⇒ 本次打标问句集合中加入 g1（§5.3）；缺省 false
+    readonly wholeRelation?: boolean; // 2026-11-07：治理完整取代问句，独立于 askScope
   }): Promise<{
     echo: readonly string[];
     usage?: { costUsd: number; calls: number };
@@ -1175,6 +1178,8 @@ export interface RelationVerdict {
 ```
 
 - **P4 调用链**（名称以此为准）：`tool-v3` 写盘成功、释放锁之后调用 `jevWritePort.afterWrite({…, block, askScope})` → `write-port.ts` 在 `input.block !== undefined` 时用 `blockToEntry` 得到 entry（不走 `splitEntries`），compare 池按取代矩阵构造 → `tagging.tagOne({…, askScope})` → `questions.buildTagQuestions(entry, taxonomy, compare, { includeScope: askScope })`（第 4 个参数为追加的可选参数）。`g1` 与打标问句在**同一次** `askAll` 中发出，答案写入 `EntryTags.globalP`；relation 问句的答案组装成 `relations` 返回。
+- **2026-11-07 接线补充**：仅 tool-v3 自动 `afterWrite` 在 `governance.enabled=true` 时传 `wholeRelation:true`；off 不传。write-port blocks → `tagOne` 同名可选键 → builder 第四参数组合 `{includeScope?, wholeRelation?}`；不得复用 askScope 开关。只有 `wholeRelation===true` 使用新 cN criteria；其余问句逐字节不变，g1 不变。v2、bulk、wire、jev-eval 不传新键，不改 taxonomyRev、不全量 retag。
+- **缓存核证（2026-11-07）**：生产 `write-port.runAfterWriteBlocks` 正文 hash 未变只跳过；正文变更调用 fresh `tagOne`。`decideTagging` 仅持久化 m/t 标签与 scope 答案，不存 cN；`client.callOnce` 直接 `registry.classify`，仅 availability/health 等调度缓存，无生产 cN 答案重放缓存。本次完整 question 文本变化使以完整 request/question 为键的评测 replyKey 自然失效；不清私有缓存，不触碰真实数据。
 - `askScope` 的取值由 tool-v3 决定：`block.authority === "user" ∧ !block.scopeExplicit ∧ jev full`。
 - `checkInline` 在 v3 中对模型写入的原始 content（含行内注释）调用一次，语义不变。v3 的用户令守卫直接比较新旧 `BlockMeta.authority`（#26 判定域），不调用 `touchedUserEntries`；该方法保留给 v2。
 - P5a 只消费 `relations`，**不再修改** `JevWritePort` 的签名。
@@ -1361,7 +1366,9 @@ export interface MemoryWriteGate {
 - **结果**：答案存入侧车 `globalP`。`globalP ≥ 0.7` ⇒ 回显 `scope:` 提示；skill 要求模型把提示转述给用户，由用户决定。
 - jev off 或拿不到答案时不提示。
 
-### 5.4 原则④ 冲突：自动取代矩阵与执行协议（r4，评审 B7）
+### 5.4 原则④ 冲突：自动取代矩阵与执行协议（r4，评审 B7；2026-11-07 用户新裁定）
+
+**现行自动条件**：仅新块整体覆盖或明确废弃旧块全部有效信息才是完整取代。部分冲突/重叠保留旧块 active，只出建议；不引入 scope-dominance、历史恢复或新后台任务。下表的「自动」均受此条件约束；显式人指定边界、agent→user 永禁及既有 CAS/cycle/residue/dismissed/每写最多 2 条不变。
 
 | 新块 \ 旧块 | user（global/topic）                                 | agent               |
 | ----------- | ---------------------------------------------------- | ------------------- |
@@ -1382,7 +1389,8 @@ export interface MemoryWriteGate {
   - 新块是 user：跨主题 active user 块的词法 top-8 + 同主题 user 块 + agent 块词法 top-4，合计 ≤12；
   - 新块是 agent：同主题 agent 块 + 跨主题 agent 块词法 top-6，合计 ≤12；外加 user 块词法 top-2，只用来产生 `not superseded:` 回显。
 - 每个候选记录**判定时看到的 rev**。
-- 阈值：`supersedes` p ≥ 0.85，或 `conflict` p ≥ 0.90，才进入执行；0.75 到阈值之间只出 `conflict` 建议。
+- 阈值（2026-11-07）：只有 `supersedes` p ≥ 0.85 才进入自动执行；`conflict` 即使 p=1 也不自动，p ≥ SUGGEST_P 仍回显建议。`CONFLICT_AUTO_P` 保留为历史 cutoff（评测参数读取兼容），不再控制执行。
+- 治理 cN 问句定向比较「新块 → 旧块」：`duplicate` 也必须新含旧的全部有效信息（新块是旧块子集不合格）；`supersedes` 必须整体覆盖或明确废弃全部有效信息；部分重叠/冲突属于 `conflict` 或 `complementary`，不能自动。
 - 每次写入最多执行 2 条（user/agent 合计），超出部分只出建议。
 - 阈值是否合适以 §7.4 离线门禁 G1 的结果为准。门禁不达标时**只能提高阈值**，不能改变矩阵。
 
@@ -1585,13 +1593,13 @@ blocks 目录下 `/mem tidy`（交互式和 `--batch`）直接返回 `not availa
 - **样本来源**：pi-toolkit 与 claude2api 的真实记忆迁移成块之后（使用 dry-run 的规划结果，不写盘），用词法 `prefilter` 取最相似的块对，由 verifier 人工标注。
 - **组成**：
   - **困难负例** ≥ 60 对：相似但不冲突。其中 agent↔agent ≥ 30、user↔user ≥ 15、user→agent ≥ 15。例如同一子系统的互补事实、同一工具的不同坑。
-  - **正例** ≥ 20 对：确实已被取代或相互冲突。例如「验收优先 deepseek-flash」对「验收走 v4-pro」、阈值改动前后、已推翻的线路状态。
+  - **正例** ≥ 20 对：确实被新块完整覆盖或明确废弃全部有效信息（2026-11-07；旧「或相互冲突」定义不再适用，部分冲突是负例）。例如「验收优先 deepseek-flash」对「验收走 v4-pro」、阈值改动前后、已推翻的线路状态。
 - **测法**：脚本 `scripts/dev/memory36-gate.mjs g1`（Tier 3，真实调用由 `PI_TOOLKIT_MEMORY36_GATE_LIVE=1` 门控；回答缓存到数据集目录以便复跑）。对每一对用生产 relation 问句与生产阈值判定「是否会自动执行」。
 - **门槛**：
   - 负例的误自动取代率 ≤ 1/60，并且 agent↔agent 子集为 0/30；
   - 正例的自动取代召回率 ≥ 50%。未自动取代的正例会落入 conflict 建议，所以召回不要求高。
 - **不达标时**（r5，裁定 12）：生产调参必须回到实现包修改，**不得只改评测脚本**：
-  1. 派 **P5a-fix**（文件域只限 `src/memory/govern/supersede.ts` 中的阈值常量 `SUPERSEDE_AUTO_P`/`CONFLICT_AUTO_P` 及其单测 `tests/memory/govern/supersede.test.ts`），按 (0.85/0.90) → (0.90/0.93) → (0.95/0.97) 逐级提高；
+  1. 派 **P5a-fix**（文件域只限 `src/memory/govern/supersede.ts` 中的阈值常量 `SUPERSEDE_AUTO_P`/`CONFLICT_AUTO_P` 及其单测 `tests/memory/govern/supersede.test.ts`），历史阶梯为 (0.85/0.90) → (0.90/0.93) → (0.95/0.97)；2026-11-07 起仅 supersedes 自动阈值可按阶梯提高，conflict cutoff 不再决定自动执行；
   2. 合入后重跑 PG 的 G1；
   3. 最高一档仍超标 ⇒ 停下报告 root，由用户决定（不擅自关闭矩阵中的任何一格）。
 - 评测脚本**只读取**生产常量与生产判定函数：先 `npm run build`，再从 `dist/memory/govern/supersede.js` 导入；脚本源码中不得出现阈值字面量（`gate-script.test.ts` 用正则断言）。

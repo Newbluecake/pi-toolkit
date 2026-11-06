@@ -278,3 +278,41 @@ describe("buildTagQuestions includeScope (§5.3 g1)", () => {
     expect(SCOPE_QUESTION_ID).toBe("g1");
   });
 });
+
+describe("governed whole-block relation criteria (2026-11-07)", () => {
+  it.each([undefined, false, true])("scope %s is independent and legacy bytes remain unchanged", (includeScope) => {
+    const entry = { body: "new subset", file: "new.md", today: "2026-11-07" };
+    const tax = mergeTaxonomy().taxonomy;
+    const compare = [{ id: "c1", file: "old.md", excerpt: "old whole" }];
+    const scope = includeScope === undefined ? {} : { includeScope };
+    const legacy = buildTagQuestions(entry, tax, compare, scope);
+    expect(legacy.questions.c1).toEqual({
+      type: "choice",
+      instructions:
+        "Compare the entry in state with this existing entry from old.md: 「old whole」. What is their relation?",
+      criteria: {
+        unrelated: "Unrelated topics",
+        duplicate: "Same content",
+        conflict: "They contradict each other",
+        supersedes: "The entry in state replaces the existing one",
+        complementary: "Related, both needed",
+      },
+    });
+    expect(JSON.stringify(buildTagQuestions(entry, tax, compare, { ...scope, wholeRelation: false }))).toBe(
+      JSON.stringify(legacy),
+    );
+    const whole = buildTagQuestions(entry, tax, compare, { ...scope, wholeRelation: true });
+    const q = whole.questions.c1!;
+    expect(q.type).toBe("choice");
+    if (q.type !== "choice") throw new Error("expected choice");
+    expect(q.criteria.duplicate).toContain("contains all valid information");
+    expect(q.criteria.duplicate).toContain("new subset is NOT duplicate");
+    expect(q.criteria.supersedes).toContain("ALL");
+    expect(q.criteria.supersedes).toContain("partial conflict is NOT supersedes");
+    expect(q.criteria.conflict).toContain("keep both for review");
+    expect(whole.state).toEqual(legacy.state);
+    for (const id of Object.keys(legacy.questions).filter((id) => id !== "c1"))
+      expect(whole.questions[id]).toEqual(legacy.questions[id]);
+    expect("g1" in whole.questions).toBe(includeScope === true);
+  });
+});

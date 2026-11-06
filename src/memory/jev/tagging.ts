@@ -89,6 +89,8 @@ export interface TagOneInput {
    *  entry's askAll (same call, one round trip) and a bool answer lands in
    *  `EntryTags.globalP`. Default false ⇒ question set byte-identical. */
   readonly askScope?: boolean;
+  /** Independent of scope: require directed whole-block coverage in c* questions. */
+  readonly wholeRelation?: boolean;
 }
 
 export interface TagOneResult {
@@ -112,7 +114,10 @@ export async function tagOne(input: TagOneInput): Promise<TagOneResult> {
     },
     input.taxonomy,
     input.compare,
-    ...(input.askScope === true ? [{ includeScope: true }] : []),
+    {
+      ...(input.askScope === true ? { includeScope: true } : {}),
+      ...(input.wholeRelation === true ? { wholeRelation: true } : {}),
+    },
   );
   const outcome = await input.client.ask({
     duty: "tag",

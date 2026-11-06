@@ -407,3 +407,23 @@ describe("tagOne askScope (#36)", () => {
     expect(bare.tags).not.toHaveProperty("globalP");
   });
 });
+
+test.each([false, true])("tagOne forwards wholeRelation independently of askScope=%s", async (askScope) => {
+  const client = fakeClient();
+  await tagOne({
+    client,
+    registry,
+    entry: corpusOf(1)[0]!,
+    taxonomy,
+    compare: [{ id: "c1", file: "old.md", excerpt: "whole" }],
+    mode: "sync",
+    askScope,
+    wholeRelation: true,
+  });
+  const questions = client.asks[0]!.questions;
+  expect("g1" in questions).toBe(askScope);
+  const q = questions.c1!;
+  if (q.type !== "choice") throw new Error("expected choice");
+  expect(q.criteria.duplicate).toContain("new subset is NOT duplicate");
+  expect(q.criteria.supersedes).toContain("ALL");
+});

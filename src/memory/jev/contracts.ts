@@ -652,6 +652,8 @@ export interface JevWritePort {
     };
     /** true ⇒ 本次打标问句集合中加入 g1（arch §5.3）；缺省 false。 */
     readonly askScope?: boolean;
+    /** Governance-only directed whole-block relation criteria; omitted by v2/off callers. */
+    readonly wholeRelation?: boolean;
   }): Promise<{
     echo: readonly string[];
     usage?: { costUsd: number; calls: number };

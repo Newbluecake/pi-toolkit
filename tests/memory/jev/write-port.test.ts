@@ -857,3 +857,54 @@ describe("write-port sidecar gating (#36 P4 fix)", () => {
     expect(existsSync(join(realDir, ".jev", "index.json"))).toBe(true);
   });
 });
+
+it.each([false, true])(
+  "blocks wholeRelation=%s propagates independently of scope and conflict never gets auto",
+  async (wholeRelation) => {
+    const tmp = mkdtempSync(join(tmpdir(), "wp-whole-"));
+    tmpRoots.push(tmp);
+    const realDir = writeBlocksDir(tmp, [
+      { id: "gen.001", body: "- pipeline change" },
+      { id: "gen.002", body: "- pipeline and backup rules" },
+    ]);
+    const fake = fakeClient({
+      answerFor: (req) =>
+        Object.fromEntries(
+          Object.keys(req.questions)
+            .filter((id) => /^c\d+$/.test(id))
+            .map((id) => [
+              id,
+              { type: "choice" as const, choice: "conflict", probabilities: { conflict: 1 }, confidence: 1 },
+            ]),
+        ),
+    });
+    const port = createJevWritePort({
+      client: fake.client,
+      entryIndex: new EntryIndex(),
+      dirFor: () => tmp,
+      taxonomyFor: () => mergeTaxonomy().taxonomy,
+      now: () => 0,
+    });
+    const result = await port.afterWrite({
+      cwd: tmp,
+      file: "gen.001.md",
+      before: undefined,
+      after: readFileSync(join(realDir, "gen.001.md"), "utf8"),
+      registry: REGISTRY,
+      block: { id: "gen.001", rev: "1-x", authority: "agent", scopeExplicit: false },
+      wholeRelation,
+    });
+    expect(result.relations).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "conflict", p: 1, auto: false })]),
+    );
+    expect(result.echo.join("\n")).toContain("review suggested");
+    const q = fake.asks[0]!.questions.c1!;
+    if (q.type !== "choice") throw new Error("expected choice");
+    expect(q.criteria.duplicate).toBe(
+      wholeRelation
+        ? "The new entry in state contains all valid information of the existing entry without contradiction; a new subset is NOT duplicate"
+        : "Same content",
+    );
+    expect(fake.asks[0]!.questions).not.toHaveProperty("g1");
+  },
+);
