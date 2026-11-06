@@ -533,13 +533,13 @@ describe("FleetDrawer — 「bash」分组(树视图末尾,agent 树之后)", ()
 // —— 徽标 = agent running + bash running(wire `running` 含 staged 等非终态行);
 // aria-label 的 agent/bash 分项小计保留。
 // ---------------------------------------------------------------------------
-describe("FleetSummaryBar — 徽标计入运行中的 bash (2026-10-15 再次拍板)", () => {
+describe("FleetSummaryBar — #41 independent agent and bash counts", () => {
   it("no agents and no bashJobs ⇒ the button stays hidden (legacy 不占位)", () => {
     const wrapper = mount(FleetSummaryBar, { props: { rows: [], open: false } });
     expect(wrapper.find(".fleet-summary-bar").exists()).toBe(false);
   });
 
-  it("仅 bash running ⇒ 按钮出现且徽标计入 bash「1」;抽屉里的 bash 分组要可达", () => {
+  it("only bash running ⇒ terminal button with independent badge 1", () => {
     const wrapper = mount(FleetSummaryBar, {
       props: { rows: [], open: false, bashJobs: wire([row()], { total: 3, running: 1, failed: 0 }) },
     });
@@ -548,19 +548,20 @@ describe("FleetSummaryBar — 徽标计入运行中的 bash (2026-10-15 再次�
     // 2026-10-15 新口径:没有 agent 行但 bash 在跑 ⇒ 徽标显示 bash running 数
     expect(wrapper.find(".fab-count .num").text()).toBe("1");
     expect(wrapper.get(".fab-count").attributes("data-st")).toBe("running");
-    expect(btn.attributes("aria-label")).toContain("bash 1 running");
+    expect(btn.attributes("aria-label")).toContain("1 running");
   });
 
-  it("agents + bash: 2 agent running + 1 bash running ⇒ 徽标「3」;aria-label 分项小计保留", () => {
+  it("agents + bash: 2 agent running + 1 bash running ⇒ independent 2 and 1 badges", () => {
     const rows = [fleetRow("r_1"), fleetRow("r_2")] as never[];
     const wrapper = mount(FleetSummaryBar, {
       props: { rows, open: false, bashJobs: wire([row()], { total: 2, running: 1, failed: 0 }) },
     });
     const btn = wrapper.find(".fleet-summary-bar");
-    expect(wrapper.find(".fab-count .num").text()).toBe("3"); // agent 2 + bash 1
+    expect(wrapper.get('[data-panel="agent"] .num').text()).toBe("2");
+    expect(wrapper.get('[data-panel="bash"] .num').text()).toBe("1");
     const label = btn.attributes("aria-label") ?? "";
     expect(label).toContain("2 running"); // agent 分项
-    expect(label).toContain("bash 1 running"); // bash 分项
+    expect(wrapper.get('[data-panel="bash"]').attributes("aria-label")).toContain("1 running");
   });
 
   it("all-terminal(agents 终态 + bash 终态)⇒ 无徽标;bash 小计回退 done/failed 总数", () => {
@@ -574,7 +575,7 @@ describe("FleetSummaryBar — 徽标计入运行中的 bash (2026-10-15 再次�
     });
     expect(wrapper.find(".fleet-summary-bar").exists()).toBe(true); // 仍有内容,入口保留
     expect(wrapper.find(".fab-count").exists()).toBe(false);
-    expect(wrapper.find(".fleet-summary-bar").attributes("aria-label")).toContain("bash 5 done");
+    expect(wrapper.get('[data-panel="bash"]').attributes("aria-label")).toContain("5 done");
   });
 
   it("staged 等非终态 bash 行计入徽标(wire running = 非终态数,「仍在跑」口径)", () => {

@@ -338,15 +338,18 @@ export type FleetDrawerMode = "docked" | "overlay" | "fullscreen";
 
 export interface FleetSummaryBarProps {
   readonly rows: readonly FleetRowWire[];
-  /** 抽屉当前是否打开(仅驱动 `aria-expanded`;docked+open 时整条由 CSS 隐藏)。 */
+  /** Actual visibility; panel disambiguates the two independent aria-expanded values. */
   readonly open: boolean;
-  /** 2026-10-15 bash→fleet 迁移:主会话后台 bash 任务 wire(bashJobsOf 已 narrowed ——
-   *  零行/缺失 ⇒ undefined)。仅用于「无子 agent 但有 bash 任务时入口按钮仍出现」+ aria-label
-   *  的 bash 小计;running 徽标永远只数 agent 行。 */
+  readonly panel?: "agent" | "bash";
+  /** Main-session bash rows; #41 keeps their badge separate from agent activity. */
   readonly bashJobs?: BashJobsWire | undefined;
 }
 export interface FleetSummaryBarEmits {
   toggle: [];
+  "toggle-panel": [panel: "agent" | "bash", origin: "pointer" | "keyboard", trigger: HTMLElement];
+  "peek-panel": [panel: "agent" | "bash", event: PointerEvent];
+  "peek-end": [];
+  "peek-keep": [];
 }
 
 /** 2026-10-15 bash→fleet 迁移(components/fleet/FleetBashJobs.vue):fleet 抽屉树视图末尾
@@ -401,6 +404,12 @@ export interface FleetTreeEmits {
 }
 
 export interface FleetDrawerProps {
+  /** Absent only for legacy combined callers; production always supplies an explicit panel. */
+  readonly panel?: "agent" | "bash";
+  readonly peeking?: boolean;
+  readonly canPeek?: boolean;
+  readonly openOrigin?: "hover" | "pointer" | "keyboard" | "restore" | "interaction";
+  readonly trigger?: HTMLElement | null;
   readonly agent: AgentState;
   readonly now: number;
   readonly mode: FleetDrawerMode;
@@ -408,6 +417,11 @@ export interface FleetDrawerProps {
 }
 export interface FleetDrawerEmits {
   close: [];
+  "peek-keep": [];
+  "peek-end": [];
+  promote: [holdLayout?: boolean];
+  "interaction-end": [];
+  "toggle-pin": [];
 }
 
 export interface RunHeaderProps {

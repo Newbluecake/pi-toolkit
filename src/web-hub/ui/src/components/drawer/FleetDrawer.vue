@@ -83,37 +83,9 @@ export function useFleetDrawerOpen(mode: Readonly<Ref<FleetDrawerMode>>): FleetD
 </script>
 
 <script setup lang="ts">
-/**
- * FleetDrawer —— 抽屉本体,§6.4 键盘/指针/焦点契约的唯一 owner:
- *
- * 1. 只有本组件注册文档级监听,且仅在 `mode !== "docked" && open` 时(watch + onCleanup
- *    动态注册/移除,卸载时随之移除 —— 不调 transport,run 订阅只归 useHub 管,§6.4 #7):
- *    `document` 的 **bubble** 阶段 keydown,overlay 模式下再加 pointerdown。
- * 2. 事件顺序:元素级处理器(若有 stopPropagation 的 Esc 处理)先执行,
- *    抽屉收不到是期望行为;抽屉处理后 preventDefault + stopPropagation,window 上
- *    DashboardView 的 defaultPrevented 守卫是双保险。
- * 3. Esc 规则链:非 Escape / isComposing / defaultPrevented / 目标是 input|textarea|select
- *    ⇒ 不处理(与 DashboardView.vue 的判定一致)。
- * 4. pointerdown(仅 overlay):落在抽屉内部或 `[aria-controls="fleet-drawer"]`(悬浮开合
- *    按钮,2026-10 起为右缘竖排 tab —— 虽然打开时被抽屉盖住,防御性保留这条豁免)上 ⇒ 忽略,
- *    避免「先关闭再被重新打开」;否则关闭。fullscreen 占满全屏,没有「外部」。
- * 5. 焦点:非 docked 打开时移到抽屉的关闭按钮;关闭时还给开合按钮(悬浮 tab),不在 DOM
- *    则还给主区
- *    `#transcript`。docked 开合不动焦点。
- *
- * 内容区:选中 run 时是 RunHeader + RunTranscript(各模式都只显示其一,fullscreen 的
- * 「← 子 agent 列表」返回键在 RunHeader 上,所有模式都可用来回到树);未选中时是树
- * (FleetTree + 「另有 N 个」)。选中/退选经 `FLEET_SELECT`(provide 给 FleetTree)和
- * RunHeader 的 back —— 都汇到 `HubHandle.selectRun`,组件从不直连 transport。
- *
- * sysload plan §6.4/§7.4/§10 (package P4): the tree view additionally shows a crit/warn
- * dispatch-paused banner (`bannerView`, `@logic/load.js`) above `FleetTree`, reading the
- * SESSION's own `StatusInfo.loadGate` (mirrored onto `AgentState.loadGate`) — never the hub-
- * global `LoadPill`/`LoadCard` reading. Hidden while a run is selected (mockup fleet-crit shows
- * it only on the tree root). Duration stays on the SAME line as the headline (approved mockup
- * tweak ③); the gate wire carries no per-metric breakdown, so (unlike the agent-side turn_end
- * hint text) the banner cannot name which metric tripped — only the overall level + duration.
- */
+/** #41/#42: production passes an explicit panel and effective mode; undefined panel
+ * preserves legacy combined callers. Keyboard/outside/focus remain owned here, while
+ * transient hover/pinned intent belongs to AgentDetail's useActivityRail. */
 import { inject, nextTick, onBeforeUnmount, onMounted, provide } from "vue";
 import type { FleetRowWire } from "@protocol/messages.js";
 import type { FleetDrawerEmits, FleetDrawerProps } from "../../contracts.js";
@@ -258,7 +230,9 @@ const treeEmpty = computed(() => {
   const om = props.agent.fleetOmitted;
   return treeNodes.value.length === 0 && !((om?.active ?? 0) > 0 || (om?.terminal ?? 0) > 0);
 });
-const selectedRunId = computed(() => props.agent.runSel ?? null);
+const showAgent = computed(() => props.panel !== "bash");
+const showBash = computed(() => props.panel !== "agent");
+const selectedRunId = computed(() => (showAgent.value ? (props.agent.runSel ?? null) : null));
 
 // 2026-10-15 bash→fleet 迁移(用户拍板 L1):主会话后台 bash 任务作为树视图末尾的独立
 // 「bash」分组(FleetBashJobs),wire 同原详情头部面板(`StatusInfo.bashJobs`,经
@@ -308,8 +282,8 @@ function onAgentShowAll(): void {
 }
 
 const fillCounts = computed<FillCounts>(() => {
-  const nodes = treeNodes.value;
-  const jobs = bashJobs.value;
+  const nodes = showAgent.value ? treeNodes.value : [];
+  const jobs = showBash.value ? bashJobs.value : undefined;
   const liveBashRows = jobs === undefined ? [] : jobs.rows.filter((r) => bashArchive.value.has(String(r.id)) !== true);
   let bashMust = 0;
   for (const r of liveBashRows) if (statusToken(r).live) bashMust++;
@@ -409,6 +383,17 @@ watch(
 );
 onBeforeUnmount(() => unobserveFill?.());
 
+// A mode/width or panel transition invalidates cached line heights; measure the rendered panel.
+watch(
+  () => [props.panel, props.mode, props.open] as const,
+  () => {
+    lastAgentRowPx = lastBashRowPx = lastAgentFoldPx = lastBashFoldPx = 0;
+    fillBudget.value = null;
+    fillReady.value = false;
+    void nextTick(recomputeFill);
+  },
+);
+
 const agentTerminalBudget = computed(() => fillBudget.value?.agentTerminal);
 const bashTerminalBudget = computed(() => fillBudget.value?.bashTerminal);
 
@@ -437,12 +422,36 @@ provide(FLEET_SELECT, {
   canOpen,
   select(runId: string): void {
     if (!canOpen.value) return;
+    emit("promote");
     hub?.selectRun?.(props.agent.key, runId);
   },
 });
 
+function restoreTrigger(): void {
+  const split = rootEl.value?.closest(".detail-split");
+  const trigger = props.trigger;
+  const fallback = split?.querySelector<HTMLElement>(
+    props.panel === undefined
+      ? '[aria-controls="fleet-drawer"]'
+      : `[data-panel="${props.panel}"][aria-controls="fleet-drawer"]`,
+  );
+  if (trigger?.isConnected && !trigger.hidden) trigger.focus();
+  else if (fallback !== null && fallback !== undefined) fallback.focus();
+  else document.getElementById("transcript")?.focus();
+}
 function onClose(): void {
   emit("close");
+  if (props.panel !== undefined) void nextTick(restoreTrigger);
+}
+// Keep the pointerdown target still until its click handler has run. Capture queues the
+// release even when FleetTree stops bubbling; a microtask never changes layout mid-dispatch.
+function finishInteraction(): void {
+  queueMicrotask(() => emit("interaction-end"));
+}
+function promoteInteraction(ev: Event): void {
+  const target = ev.target;
+  if (!(target instanceof Element) || target.closest(".drawer-close, .activity-pin") !== null) return;
+  if (target.closest("button,a,input,textarea,select,[tabindex]") !== null) emit("promote", ev.type === "pointerdown");
 }
 
 /** 「← 子 agent 列表」:退选 run(订阅由 useHub 拆除),抽屉保持打开、回到树视图。 */
@@ -454,6 +463,25 @@ function onBackToTree(): void {
 // §6.4 键盘/指针契约(唯一 owner)
 // ---------------------------------------------------------------------------
 function onKey(ev: KeyboardEvent): void {
+  if (ev.key === "Tab" && props.mode === "fullscreen") {
+    const elements = Array.from(
+      rootEl.value?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]),a[href],input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex="0"]',
+      ) ?? [],
+    );
+    const first = elements[0],
+      last = elements[elements.length - 1];
+    if (
+      first &&
+      last &&
+      (!rootEl.value?.contains(document.activeElement) ||
+        (ev.shiftKey ? document.activeElement === first : document.activeElement === last))
+    ) {
+      ev.preventDefault();
+      (ev.shiftKey ? last : first).focus();
+    }
+    return;
+  }
   if (ev.key !== "Escape" || ev.isComposing || ev.defaultPrevented) return;
   const target = ev.target as HTMLElement | null;
   if (target && /^(input|textarea|select)$/i.test(target.tagName)) return;
@@ -467,13 +495,13 @@ function onPointer(ev: PointerEvent): void {
   if (target === null) return;
   if (rootEl.value?.contains(target) === true) return;
   if (target instanceof Element && target.closest('[aria-controls="fleet-drawer"]') !== null) return;
-  onClose();
+  if (!props.peeking) emit("close"); // outside clicks retain their own natural focus
 }
 
 watch(
   () => [props.mode, props.open] as const,
   ([mode, open], _prev, onCleanup) => {
-    if (mode === "docked" || !open) return;
+    if (!open || (mode === "docked" && props.panel === undefined)) return;
     document.addEventListener("keydown", onKey);
     if (mode === "overlay") document.addEventListener("pointerdown", onPointer);
     onCleanup(() => {
@@ -491,23 +519,44 @@ onBeforeUnmount(() => {
 });
 
 // ---------------------------------------------------------------------------
-// §6.4 #6 焦点迁移(仅非 docked;docked 开合不动焦点)
-// ---------------------------------------------------------------------------
+// Only keyboard opens move focus. Legacy standalone callers retain their prior behavior.
 watch(
   () => props.open,
   async (open, wasOpen) => {
-    if (props.mode === "docked" || open === wasOpen) return;
+    if (open === wasOpen) return;
     if (open) {
+      if (props.panel === undefined ? props.mode === "docked" : props.openOrigin !== "keyboard") return;
       await nextTick();
-      rootEl.value?.querySelector<HTMLElement>(".drawer-close")?.focus();
-      return;
+      if (props.open) rootEl.value?.querySelector<HTMLElement>(".drawer-close")?.focus();
+    } else if (props.panel === undefined && props.mode !== "docked") restoreTrigger();
+  },
+);
+// Fullscreen is modal, without stealing focus on pointer opens. Cleanup on resize/unmount.
+watch(
+  () => [props.mode, props.open] as const,
+  async ([mode, open], _old, cleanup) => {
+    let disposed = false;
+    const restored: Array<[HTMLElement, boolean]> = [];
+    cleanup(() => {
+      disposed = true;
+      for (const [el, inert] of restored) el.inert = inert;
+    });
+    if (mode !== "fullscreen" || !open) return;
+    await nextTick();
+    if (disposed) return;
+    // Inert every background sibling up to body (header/sidebar/topbar included), not just
+    // the transcript column. Preserve pre-existing inert values for nested-overlay cleanup.
+    let branch: HTMLElement | null = rootEl.value;
+    while (branch?.parentElement) {
+      const parent: HTMLElement = branch.parentElement;
+      for (const el of Array.from(parent.children)) {
+        if (!(el instanceof HTMLElement) || el === branch) continue;
+        restored.push([el, el.inert]);
+        el.inert = true;
+      }
+      if (parent === document.body) break;
+      branch = parent;
     }
-    const toggle = document.querySelector<HTMLElement>('[aria-controls="fleet-drawer"]');
-    if (toggle !== null && document.contains(toggle)) {
-      toggle.focus();
-      return;
-    }
-    document.getElementById("transcript")?.focus();
   },
 );
 </script>
@@ -518,19 +567,38 @@ watch(
     ref="rootEl"
     class="fleet-drawer"
     :data-mode="mode"
+    :data-panel="panel"
+    :data-peeking="peeking || undefined"
+    @pointerenter="emit('peek-keep')"
+    @pointerleave="emit('peek-end')"
+    @pointerdown.capture="promoteInteraction"
+    @click.capture="finishInteraction"
+    @pointercancel="finishInteraction"
+    @focusin="promoteInteraction"
     :data-open="open || undefined"
     :role="mode === 'docked' ? undefined : 'dialog'"
     :aria-modal="mode === 'fullscreen' ? true : undefined"
-    :aria-label="t('fleet.panelTitle')"
+    :aria-label="t(panel === 'bash' ? 'fleet.commandsTitle' : 'fleet.panelTitle')"
   >
+    <span v-if="mode === 'overlay'" class="activity-bridge" aria-hidden="true"></span>
     <template v-if="selectedRunId !== null">
       <RunHeader :agent="agent" :mode="mode" @back="onBackToTree" @close="onClose" />
       <RunTranscript :key="selectedRunId" :agent="agent" :now="now" />
     </template>
     <template v-else>
       <div class="drawer-head">
-        <AppIcon name="bot" class="icon-sm drawer-title-icon" />
-        <span class="drawer-title">{{ t("fleet.panelTitle") }}</span>
+        <AppIcon :name="panel === 'bash' ? 'terminal' : 'bot'" class="icon-sm drawer-title-icon" />
+        <span class="drawer-title">{{ t(panel === "bash" ? "fleet.commandsTitle" : "fleet.panelTitle") }}</span>
+        <button
+          v-if="panel !== undefined && canPeek"
+          class="btn btn-ghost btn-icon activity-pin"
+          type="button"
+          :aria-label="t(peeking ? 'fleet.pin' : 'fleet.unpin')"
+          :aria-pressed="!peeking"
+          @click="emit('toggle-pin')"
+        >
+          <AppIcon :name="peeking ? 'unlock' : 'lock'" class="icon-sm" />
+        </button>
         <button
           class="btn btn-ghost btn-icon drawer-close"
           type="button"
@@ -540,7 +608,7 @@ watch(
           <AppIcon name="x" class="icon-sm" />
         </button>
       </div>
-      <div v-if="banner" class="ld-banner" :data-level="banner.level">
+      <div v-if="banner && showAgent" class="ld-banner" :data-level="banner.level">
         <AppIcon name="alert" class="icon-sm" />
         <span class="ld-banner-body">
           <strong>{{ t("load.bannerPaused") }}</strong>
@@ -552,6 +620,7 @@ watch(
       </div>
       <div ref="treeScrollEl" class="tree-scroll">
         <FleetTree
+          v-if="showAgent"
           :nodes="treeNodes"
           :now="now"
           :orphans="orphans"
@@ -561,15 +630,15 @@ watch(
         />
         <!-- web-hub archive plan: the archived-runs fold (hidden when nothing archived). -->
         <FleetArchived
-          v-if="archivedRows.length > 0"
+          v-if="showAgent && archivedRows.length > 0"
           :rows="archivedRows"
           :set="runArchive"
           @update:open="onArchivedOpen"
         />
         <!-- 2026-10-15:子 agent 树之后的独立 bash 分组(无任务/无字段 ⇒ 不渲染)。 -->
         <FleetBashJobs
-          v-if="bashJobs"
-          :class="{ 'fleet-bash-solo': treeEmpty }"
+          v-if="showBash && bashJobs"
+          :class="{ 'fleet-bash-solo': !showAgent || treeEmpty }"
           :jobs="bashJobs"
           :now="now"
           :archived="bashArchive"

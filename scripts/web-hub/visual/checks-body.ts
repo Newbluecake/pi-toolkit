@@ -116,7 +116,9 @@ async function checkFleetDrawerOpen(ctx: CheckContext): Promise<CheckOutcome> {
   if (shared !== null) return shared;
   const result = await ctx.page.evaluate((width: number) => {
     const detail = document.querySelector(".detail");
-    const bar = document.querySelector(".fleet-summary-bar");
+    const bar =
+      document.querySelector('button[data-panel="agent"][aria-controls="fleet-drawer"]') ??
+      document.querySelector('button[data-panel="bash"][aria-controls="fleet-drawer"]');
     const drawer = document.querySelector("#fleet-drawer");
     if (!detail || !bar || !drawer) return { present: false as const };
     const mode = detail.getAttribute("data-drawer");
@@ -125,6 +127,8 @@ async function checkFleetDrawerOpen(ctx: CheckContext): Promise<CheckOutcome> {
       present: true as const,
       mode,
       open,
+      dockedOpen: detail.hasAttribute("data-docked-open"),
+      peeking: detail.hasAttribute("data-peek-open"),
       ariaExpanded: bar.getAttribute("aria-expanded"),
       rows: drawer.querySelectorAll(".tree .run").length,
       expectMode: width >= 1280 ? "docked" : width <= 767 ? "fullscreen" : "overlay",
@@ -144,6 +148,8 @@ async function checkFleetDrawerOpen(ctx: CheckContext): Promise<CheckOutcome> {
   const problems: string[] = [];
   if (result.mode !== result.expectMode) problems.push(`mode=${result.mode} expected=${result.expectMode}`);
   if (result.open !== result.expectOpen) problems.push(`open=${result.open} expected=${result.expectOpen}`);
+  if (result.dockedOpen !== (result.open && result.mode === "docked" && !result.peeking))
+    problems.push("docked-open does not match pinned viewport mode");
   if (result.ariaExpanded !== String(result.open)) {
     problems.push(`aria-expanded=${result.ariaExpanded} vs open=${result.open}`);
   }

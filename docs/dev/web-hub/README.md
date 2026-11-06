@@ -21,6 +21,7 @@
 - Session switching
 - prompt-gate.ts
 - Slash-arg completion
+- Unknown slash text（#40）
 - Command history
 - Peer-bump conformance premises (cmd-history)
 - Registry epoch 刷新与 epoch.up.v1（#23）
@@ -224,6 +225,41 @@ to a read-only `BashJobsPanel` on the web detail header. Command + log tail are 
 ruling — `agent/redact.ts`'s secret scrubbing is HYGIENE ONLY, never a security boundary. Design:
 `docs/dev/web-hub/bash-jobs-panel-plan.md`.
 
+## Activity rail（#41/#42）
+
+Two independent right-edge buttons now expose agent and background-bash activity: each has its
+own running count (bash includes staged), `99+` visual cap with the full accessible count, and
+no-record classes render nothing. The user explicitly rejected a white card / square outlined
+rail: only bot/terminal icons and corner badges are visible, with transparent 44px hit targets.
+Active icons get a soft **circular radial** opacity-only halo (3.2s); idle is still; reduced-motion
+keeps a static halo and badge. Keyboard focus-visible is circular, not a persistent square frame.
+
+`AgentDetail` owns `useActivityRail` and mounts the rail beside `FleetDrawer` at the existing
+relative `.detail-split` anchor. Fine/hover pointers above 767px peek after 120ms; leaving both
+button/bridge/panel closes after 280ms. Peek never resizes the main column, persists state or
+steals composer focus. Click pins using the EXISTING viewport modes: ≥1280 docked (grid shrinks
+main), 768–1279 overlay, ≤767 fullscreen with no hover. `useFleetDrawerOpen` still exclusively
+owns `webhub.fleetDrawer.open`, default-open and breakpoint resets; no new key/wire/setting.
+`data-docked-open` alone drives grid allocation; `data-peek-open` is transient visibility intent.
+Pinned hover never switches type; clicking the other button does. Production always passes an
+explicit `panel`, while undefined panel is legacy combined-render/fill-budget compatibility.
+
+Peek interactions promote before action. Real pointer testing caught dock movement losing the
+mouseup/click target: `layoutHeld` temporarily retains overlay geometry after logical pin, then
+click-capture queues release AFTER the target action. Pointercancel/blur/close/type/viewport/
+unmount clean the temporary state and gesture listeners; pointerup uses only a next-task no-click
+fallback, never a pre-action microtask. Run subscribe/unsubscribe still belongs solely to useHub.
+Only keyboard Enter/Space opens focus close; close/Escape return to the triggering type (never
+first aria-controls), timeout/outside do not grab focus. Fullscreen restores background inert
+values on close/resize/unmount and traps Tab; input/composition Escape guards remain.
+
+Budget measurement resets on panel/effective-mode/open and ResizeObserver updates; explicit
+panels give the other class zero budget counts, undefined preserves the previous joint algorithm.
+Privacy lock still unmounts the whole detail subtree including both rail buttons. Gate coverage:
+`tests/web-hub/ui/{activity-rail,fleet-drawer,fleet-fill-budget,fleet-tree,fleet-bash-jobs,privacy-lock,
+checks-body-applicability,detail-body}.test.ts`; real compiled-UI evidence and design decisions:
+`docs/dev/activity-rail/plan.md`. No Vue Transition/rAF, inline style or new dependency.
+
 ## Fleet drawer archive
 
 **Fleet drawer archive (archive-report.md)**: `src/archive/` (per-session `ArchiveControl` built by
@@ -348,6 +384,24 @@ slot released + audit `aborted` (r1 #6). Enter applies a candidate ONLY after ex
 navigation (D2 拍板). `/webhub status` prints `cmd-args: <mode> · hub-cap on|off|n/a`
 (`agent/cmd-args-status.ts`). Conformance: `tests/conformance/slash-args.test.ts` (real pi
 rpc child + real InteractiveMode) before any pi peer bump.
+
+## Unknown slash text（#40）
+
+默认开启，无新设置：Composer 未在当前公布名单命中的 `/name` 只是 unresolved，不代表不存在（名单最多 400）。只有当前 agent 的 `StatusInfo.features` 含 `unknown-slash-text.v1` 且 Web commands 已开启时，才放行给权威 agent 分类。精确命中的 deny 不放行；Web commands 关闭仍沿用直接普通 prompt，无 A→B。旧 agent 无 token 保留旧命令拒绝；旧 hub 开放 status.features 透传即可，无 hub/hello cap、新字段、PromptArgs/result schema 或 PROTO bump。旧 UI 忽略 token。
+
+`agent/slash.ts` 保留旧 `classifyCommand` 的 completion/shadow 容错语义；另增 dispatch-only `classifyCommandStrict`，成功验证完整注册表（不受 UI cap 限制）后才能证明 unknown；缺 port、throw、非数组、坏条目均 unavailable→E_UNSUPPORTED。bridge 只对确定未知返回 E_UNKNOWN_COMMAND。原有 source/name/大小写/重复名 `:n` 优先级不变。
+
+Web 仅收到终态 E_UNKNOWN_COMMAND＋effect:none 后，用缓存的完整 composer 正文发送一次普通 prompt B。命令 A 和 B 使用不同 cmdId；A 不执行，不伪造 command history 成功卡，UI 移除 A 的未知失败占位，B 承担 message/ctl/recall 归因。附件不再次 compose；B 显式 expandPromptTemplates:false，不执行斜杠。BAD_REQUEST、策略拒绝、确认、handler 异常、timeout、网络失败或 effect:unknown 均不回退。页面内一次性意图在 await 前消费；token/epoch/session/online 状态变化或卸载取消，恢复旧值也不复活；断线/刷新不自动新建 B，B 效果未知只按已有 id 查询，不换 id 重发。
+
+Unicode/路径/超长 token 等不满足旧 command wire-name regex 的输入走现有 prompt，但并不靠 E_BAD_REQUEST 回退：`handlePrompt` 在 beginOrReply 与 ctx/session/auth-admin/fabric/compaction 检查之后、任何 mention/thread/hold/origin/send 副作用之前，只对 Web commands 开启的非法 wire-name 做严格只读分类。已注册名拒绝 E_BAD_REQUEST，读取失败拒绝 E_UNSUPPORTED，均 settleAndReply；确证未知才继续。Feishu、thread metadata、dispatchHeld 重入、wire 合法名字、前置空白、`//`、单 `/`、commands-disabled 均不进入此分类。
+
+普通消息仍经过 secure/input 等原链，不强迫模型绕过合法 handled：LOCKED 拦截、D8、reflex/topic-switch 的 slash-prefix veto 保持，未新增输入回灌 hook。接受 pi 1.4 TUI 提交前 trim；RPC/Web 不由本功能 trim；`@notify/#notify` 仍按已有通知 hook 去关键词并 trim。Web 按 whitespace 拆参数与 pi 扩展仅按 ASCII 空格拆名的差异不统一；`//` 的 Web 双斜杠保留、飞书去一根斜杠的旧约定不变。
+
+**飞书来源边界**：只有已启用 bot 命令 `/list /use /cur /new /unbind /file /help`（以及启用时的 `/schedule`、`/main`）按 bot 命令处理；参数错保留 help，权限/执行错不改发文本。其余斜杠默认作为普通请求，包括 pi 的 `/model`、`/reload` 和关闭的 `/main`、`/schedule`，不显示 unknown，不执行 pi 命令；`/mainx` 不匹配 `/main`。普通请求仍需授权/绑定并经过持久接收、去重和既有 thread 路由；飞书没有完整 pi registry，不能拿 bot 名单假称区分 pi 已知/未知。详见 [Feishu bot README](../feishu-bot/README.md)。
+
+门禁：`tests/conformance/unknown-slash-text.test.ts`（真实 pi 1.4.0 TUI/RPC＋fake provider，含 handler throw/重名/trim/notify）、`tests/integration/unknown-slash-text.test.ts`（真实 HTTP frontend→handler/bridge→真实 pi＋fake provider，飞书真实 admission/durable/dedup）、agent/UI/parser/optional features 定向测试。这些 runtime characterization 仅为实际安装 **pi 1.4.0** 的取证，不是全版本保证；1.0–1.3 未验证，pi 1.5 的 #45 适配仍在独立 clone、尚未集成主树。pi peer bump 必跑该 conformance（AGENTS checklist 已追加）。
+
+**五个冻结比较测试的具名投影（root 裁定）**：`tests/integration/{fabric-xs-off-golden,fabric-xs-reply-off-golden,fabric-xs-channel-compat,thread-off-golden,thread-rebind-off-golden}.test.ts` 仅在历史比较前断言 `unknown-slash-text.v1` 恰一次，再剥离这一已声明的正交 token；其余 features 与所有 XS/thread 字段、帧顺序仍完整比较原 golden，不通用忽略 features。默认 on 独立专例还精确断言原始 features 为 `[resume.v1,cmd.history.v1,unknown-slash-text.v1]`；历史 cmdHistory-off 比较不因此伪造 history token。所有 A fixtures 保持原字节，不重录、不加生产测试开关。
 
 ## Command history
 

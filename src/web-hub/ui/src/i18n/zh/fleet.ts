@@ -8,6 +8,11 @@ import en from "../en/fleet.js";
 type Messages<T> = { [K in keyof T]: string };
 
 const fleet = {
+  commandsTitle: "后台命令",
+  activityTitle: "活动入口",
+  pin: "固定面板",
+  unpin: "取消固定",
+
   panelTitle: "Agents",
   running: "{n} 个运行中",
   totalCost: "共 {n} 个 · {cost}",

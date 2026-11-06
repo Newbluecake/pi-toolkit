@@ -61,6 +61,10 @@ import DetailDock from "./DetailDock.vue";
 import DetailHeader from "./DetailHeader.vue";
 import OutdatedReloadBanner from "./OutdatedReloadBanner.vue";
 import NoticeBanner from "../shell/NoticeBanner.vue";
+import FleetSummaryBar from "../fleet/FleetSummaryBar.vue";
+import { useActivityRail } from "../../composables/useActivityRail.js";
+import { useMedia } from "../../composables/useMedia.js";
+import type { FleetRowWire } from "@protocol/messages.js";
 import FleetDrawer, { useFleetDrawerMode, useFleetDrawerOpen } from "../drawer/FleetDrawer.vue";
 
 const RETRY_NOTICE_ID = "history-error";
@@ -525,17 +529,13 @@ const dockCtlProps = computed(() => ({
 // --- fleet drawer (fleet-drawer plan v2 §6.1/§6.2 — F6) --------------------------------------
 
 const drawerMode = useFleetDrawerMode(window).mode;
-const { open: drawerOpen, toggle: toggleDrawerState, close: closeDrawerState } = useFleetDrawerOpen(drawerMode);
+const { open: pinnedOpen } = useFleetDrawerOpen(drawerMode);
 const hasFleet = computed(() => props.agent.fleet.length > 0);
 // 2026-10-15 bash→fleet 迁移:后台 bash 任务住在抽屉树视图的「bash」分组里 —— 无子 agent
 // 但有 bash 任务时抽屉同样挂载(否则分组不可达)。
 const hasBashJobs = computed(() => bashJobsOf(props.agent) !== undefined);
 const selectedRunId = computed(() => props.agent.runSel ?? null);
-/** 2026-10-08 (user field report: fresh session's composer sat in a squashed left column):
- * `data-drawer-open` must only be set when the drawer will actually RENDER (the `v-if` below
- * gates on `hasFleet || selectedRunId !== null`). The persisted docked-open pref defaults to
- * true, so without this gate a fleet-less session got the docked grid's `1fr var(--drawer-w)`
- * tracks with an unmounted drawer — a dead 480-760px column on the pane's right side. */
+// Only rail.open with real content may allocate a docked column. Peek never does.
 
 /** 退选正在看的 run(「没人看就不推」,§2;transport 拆除在 useHub 里)。所有关闭入口统一
  * 走这个语义 —— Esc/外点/关闭按钮(onCloseDrawer)和摘要行按钮的关方向(onToggleDrawer)
@@ -545,14 +545,25 @@ function deselectRun(): void {
   if (typeof props.agent.runSel === "string") hub?.selectRun?.(props.agent.key, null);
 }
 
-function onToggleDrawer(): void {
-  if (drawerOpen.value) deselectRun(); // 关方向:统一退订;开方向不自动重选(展示树)
-  toggleDrawerState();
-}
-
+const hoverFine = useMedia(window, "(hover: hover) and (pointer: fine)").matches;
+const rail = useActivityRail({
+  mode: drawerMode,
+  pinnedOpen,
+  hoverFine,
+  hasAgent: computed(() => hasFleet.value || selectedRunId.value !== null),
+  hasBash: hasBashJobs,
+  deselectRun,
+});
+const drawerOpen = rail.open;
+const drawerPanel = rail.panel;
+const effectiveMode = rail.effectiveMode;
+const peeking = rail.peeking;
+const openOrigin = rail.origin;
+const trigger = rail.trigger;
+const canPeek = rail.canPeek;
+const bashJobs = computed(() => bashJobsOf(props.agent));
 function onCloseDrawer(): void {
-  deselectRun();
-  closeDrawerState();
+  rail.close();
 }
 </script>
 
@@ -561,7 +572,9 @@ function onCloseDrawer(): void {
     class="detail"
     aria-labelledby="detail-title"
     :data-drawer="drawerMode"
-    :data-drawer-open="(drawerOpen && (hasFleet || hasBashJobs || selectedRunId !== null)) || undefined"
+    :data-drawer-open="drawerOpen || undefined"
+    :data-docked-open="(drawerOpen && effectiveMode === 'docked') || undefined"
+    :data-peek-open="peeking || undefined"
   >
     <DetailHeader :agent="agent" :narrow="narrow" @back="emit('back')" />
 
@@ -586,11 +599,9 @@ function onCloseDrawer(): void {
           :now="now"
           :following="following"
           :narrow="narrow"
-          :drawer-open="drawerOpen"
           @load-older="emit('load-older')"
           @update:following="onUpdateFollowing"
           @new-count="onNewCount"
-          @toggle-drawer="onToggleDrawer"
         />
 
         <!-- ask_user dialogs: ONE non-modal floating window (user ruling 2026-10-20, mock
@@ -623,6 +634,16 @@ function onCloseDrawer(): void {
         <ResumeDialog v-if="resumeOpen" :scope="resumeScope" @close="resumeOpen = false" />
       </div>
 
+      <FleetSummaryBar
+        :rows="agent.fleet as unknown as readonly FleetRowWire[]"
+        :bash-jobs="bashJobs"
+        :open="drawerOpen"
+        :panel="drawerPanel"
+        @toggle-panel="rail.toggle"
+        @peek-panel="rail.enter"
+        @peek-end="rail.leave"
+        @peek-keep="rail.keep"
+      />
       <!-- §6.1: 抽屉在 CONTROL_CTX 的 provide 作用域内(原为树上的行内动作,2026-10-17 已移除);
            v-if 按方案冻结:有 fleet 行或有选中 run 才挂载;`id="fleet-drawer"` 在
            FleetDrawer 根元素上(§6.1 的锚点,FleetSummaryBar 的 aria-controls 指它)。 -->
@@ -630,8 +651,18 @@ function onCloseDrawer(): void {
         v-if="hasFleet || hasBashJobs || selectedRunId !== null"
         :agent="agent"
         :now="now"
-        :mode="drawerMode"
+        :mode="effectiveMode"
         :open="drawerOpen"
+        :panel="drawerPanel"
+        :peeking="peeking"
+        :can-peek="canPeek"
+        :open-origin="openOrigin"
+        :trigger="trigger"
+        @peek-keep="rail.keep"
+        @peek-end="rail.leave"
+        @promote="rail.promote"
+        @interaction-end="rail.releaseInteraction"
+        @toggle-pin="rail.togglePin"
         @close="onCloseDrawer"
       />
     </div>

@@ -229,7 +229,8 @@ describe("P0 gate — locked session never mounts AgentDetail", () => {
     expect(m.wrapper.find(".detail-body").exists()).toBe(false);
     expect(m.wrapper.find(".dock").exists()).toBe(false);
     expect(m.wrapper.find(".composer").exists()).toBe(false);
-    expect(m.wrapper.find(".fleet-summary-bar").exists()).toBe(false);
+    expect(m.wrapper.find(".activity-rail").exists()).toBe(false);
+    expect(m.wrapper.find('button[aria-controls="fleet-drawer"]').exists()).toBe(false);
   });
 
   it("unlocked viewed session renders AgentDetail normally while another session is locked", async () => {

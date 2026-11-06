@@ -126,7 +126,8 @@ function mountDetail(agent: unknown, hub: HubHandle = fakeHub()) {
 }
 
 const drawerEl = () => document.querySelector<HTMLElement>("#fleet-drawer");
-const summaryBtn = () => document.querySelector<HTMLElement>(".fleet-summary-bar");
+const summaryBtn = (type = "agent") =>
+  document.querySelector<HTMLElement>(`button[data-panel="${type}"][aria-controls="fleet-drawer"]`);
 const escOn = (target: EventTarget, init: KeyboardEventInit = {}) =>
   target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, ...init }));
 
@@ -251,13 +252,13 @@ describe("U2/U3: Esc 规则链(§6.4 #2/#3,overlay 模式)", () => {
     expect(document.querySelector(".detail")!.hasAttribute("data-drawer-open")).toBe(true);
   });
 
-  it("docked 模式不注册任何监听:Esc 不关抽屉(开合只有摘要行按钮)", async () => {
+  it("docked pinned Escape closes without invoking parent navigation", async () => {
     stubModes(MODE_DOCKED);
     mountDetail(baseAgent());
     expect(document.querySelector(".detail")!.hasAttribute("data-drawer-open")).toBe(true);
     escOn(document);
     await nextTick();
-    expect(document.querySelector(".detail")!.hasAttribute("data-drawer-open")).toBe(true);
+    expect(document.querySelector(".detail")!.hasAttribute("data-drawer-open")).toBe(false);
   });
 });
 
