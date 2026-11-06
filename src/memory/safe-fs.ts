@@ -1625,3 +1625,127 @@ export function lockRelease(dir: string, token: string): void {
     // already gone
   }
 }
+
+// #36 P1: directory operations are deliberately separate from legacy fallbacks.
+export function renameDirNoClobber(parent: CanonicalDir, from: string, to: string): void {
+  try {
+    if (!isSafeName(from) || !isSafeName(to)) throw new MemoryError("bad-name: directory rename requires basenames");
+    const pst = lstatSync(parent.real);
+    const src = join(parent.real, from);
+    const dst = join(parent.real, to);
+    const st = lstatSync(src);
+    if (!pst.isDirectory() || pst.isSymbolicLink() || !st.isDirectory() || st.isSymbolicLink() || st.dev !== pst.dev)
+      throw new MemoryError("not-dir: rename source must be a real directory on the parent's device");
+    try {
+      lstatSync(dst);
+      throw new MemoryError("EEXIST: directory rename target already exists");
+    } catch (err) {
+      if (codeOf(err) !== "ENOENT") throw err;
+    }
+    try {
+      renameSync(src, dst);
+    } catch (err) {
+      throw new MemoryError(`E_RENAME_UNSUPPORTED: ${codeOf(err) ?? "IO"}: ${String(err)}`);
+    }
+    const after = lstatSync(dst);
+    if (!after.isDirectory() || after.isSymbolicLink() || after.dev !== st.dev || after.ino !== st.ino)
+      throw new MemoryError("identity-changed: renamed directory identity changed");
+  } catch (err) {
+    if (err instanceof MemoryError) throw err;
+    throw new MemoryError(`${codeOf(err) ?? "IO"}: directory rename failed: ${String(err)}`);
+  }
+}
+
+export function removeTreeNoFollow(
+  parent: CanonicalDir,
+  childName: string,
+  opts: { maxOps: number; beforeOp?: () => boolean },
+):
+  | { removed: true; ops: number }
+  | { removed: false; ops: number; reason: "budget" | "stopped" | "not-dir" | "symlink" | "xdev" | "bad-name" } {
+  type Reason = "budget" | "stopped" | "not-dir" | "symlink" | "xdev" | "bad-name";
+  let ops = 0;
+  const fail = (reason: Reason): { removed: false; ops: number; reason: Reason } => ({ removed: false, ops, reason });
+  if (!isSafeName(childName)) return fail("bad-name");
+  const parentStat = lstatSync(parent.real);
+  const root = join(parent.real, childName);
+  const same = (path: string, identity: { dev: number; ino: number }): boolean => {
+    try {
+      const st = lstatSync(path);
+      return st.isDirectory() && !st.isSymbolicLink() && st.dev === identity.dev && st.ino === identity.ino;
+    } catch {
+      return false;
+    }
+  };
+  const limit = (): Reason | undefined => {
+    if (opts.beforeOp?.() === false) return "stopped";
+    if (!Number.isSafeInteger(opts.maxOps) || ops >= opts.maxOps) return "budget";
+    return undefined;
+  };
+  const walk = (
+    path: string,
+    ancestors: readonly { path: string; dev: number; ino: number }[],
+    isRoot: boolean,
+  ): Reason | undefined => {
+    if (!ancestors.every((a) => same(a.path, a))) return "not-dir";
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) {
+      if (isRoot) return "symlink";
+      const stop = limit();
+      if (stop) return stop;
+      if (!ancestors.every((a) => same(a.path, a))) return "not-dir";
+      unlinkSync(path);
+      ops++;
+      return undefined;
+    }
+    if (st.dev !== parentStat.dev) return "xdev";
+    if (!st.isDirectory()) {
+      if (isRoot || !st.isFile()) return "not-dir";
+      const stop = limit();
+      if (stop) return stop;
+      if (!ancestors.every((a) => same(a.path, a))) return "not-dir";
+      unlinkSync(path);
+      ops++;
+      return undefined;
+    }
+    const identity = { path, dev: st.dev, ino: st.ino };
+    const chain = [...ancestors, identity];
+    for (const name of readdirSync(path)) {
+      const stop = limit();
+      if (stop) return stop;
+      const reason = walk(join(path, name), chain, false);
+      if (reason) return reason;
+    }
+    const stop = limit();
+    if (stop) return stop;
+    if (!chain.every((a) => same(a.path, a))) return "not-dir";
+    rmdirSync(path);
+    ops++;
+    return undefined;
+  };
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) return fail("not-dir");
+  try {
+    const reason = walk(root, [{ path: parent.real, dev: parentStat.dev, ino: parentStat.ino }], true);
+    return reason ? fail(reason) : { removed: true, ops };
+  } catch (err) {
+    if (codeOf(err) === "ENOENT" || codeOf(err) === "ENOTDIR") return fail("not-dir");
+    throw err;
+  }
+}
+
+export function fsyncDir(path: string): void {
+  const fd = openSync(path, fsConstants.O_RDONLY | O_DIRECTORY | (O_NOFOLLOW ?? 0));
+  try {
+    if (!fstatSync(fd).isDirectory()) throw new MemoryError("not-dir: fsync requires a directory");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** #36 P1, root-approved read-only directory identity probe. */
+export function inspectDirNoFollow(path: string): { dev: number; ino: number; mtimeMs: number; names: string[] } {
+  const st = lstatSync(path);
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new MemoryError(`not-dir: ${path} is not a real directory`);
+  return { dev: st.dev, ino: st.ino, mtimeMs: st.mtimeMs, names: readdirSync(path) };
+}
