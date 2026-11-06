@@ -17,11 +17,8 @@
   already running) is translated into "open the panel, replace the hash with `#/`" the moment it
   is observed — `#/settings` itself is never a route `DashboardView` has to render around.
 
-  C5: the chip switches on the hub's negotiated control plane (`HUB_CTX.state.control`) —
-  `Read-only` when off, a warn-coloured `Control` button when on; clicking it expands the
-  persistent `ControlNotice` (shared `CONTROL_ENV.noticeExpanded`; App.vue owns the mounted
-  notice, §7.4). Both chips keep the base `.chip` class (shell.css's <481px hiding rule applies
-  to either).
+  #44: only the `Read-only` chip remains (control off); the control-mode terminal chip and the
+  App-level ControlNotice banner were removed as redundant (control itself is unchanged).
 
   Phone decluttering (≤480px, user-approved plan A/B/C — phone screenshot report: the bar
   collapsed into an unreadable row of a green "在线" pill, a squeezed-to-a-sliver quota pill
@@ -51,7 +48,7 @@ import LangMenu from "./LangMenu.vue";
 import { UI_BUILD } from "../../build-info.js";
 import { uiBuildStamp } from "@logic/build-stamp.js";
 import type { TopBarEmits, TopBarProps } from "../../contracts.js";
-import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
+import { HUB_CTX } from "../control/controlContext.js";
 import { parseRouteHash } from "../../composables/useHashRoute.js";
 import { useMedia } from "../../composables/useMedia.js";
 import SettingsOverlay from "./SettingsOverlay.vue";
@@ -72,7 +69,6 @@ const { t } = i18n;
  * persists via setLangOverride's `pwh_lang` localStorage key. */
 
 const hub = inject(HUB_CTX, null);
-const env = inject(CONTROL_ENV, null);
 const controlOn = computed(() => hub?.state.value.control === true);
 
 /**
@@ -120,10 +116,6 @@ const brandTitle = computed(() => {
   if (uiStamp.value) parts.push(`ui ${uiStamp.value}`);
   return parts.join(" · ");
 });
-
-function onControlChipClick(): void {
-  if (env) env.noticeExpanded.value = !env.noticeExpanded.value;
-}
 
 // Settings panel (floating, not a route): `open` drives SettingsOverlay's mount/unmount
 // directly. `#/settings` is only ever a transitional signal — whenever it is observed (at
@@ -320,18 +312,9 @@ onUnmounted(() => {
         @mouseleave="onChipLeave"
       />
     </span>
-    <button
-      v-if="controlOn"
-      class="chip control-chip"
-      type="button"
-      :aria-label="t('control.noticeTitle')"
-      :title="t('control.noticeTitle')"
-      :aria-expanded="env?.noticeExpanded.value === true"
-      @click="onControlChipClick"
+    <span v-if="!controlOn" class="chip readonly-chip"
+      ><AppIcon name="eye" class="icon-sm" />{{ t("common.readonly") }}</span
     >
-      <AppIcon name="terminal" class="icon-sm" />
-    </button>
-    <span v-else class="chip readonly-chip"><AppIcon name="eye" class="icon-sm" />{{ t("common.readonly") }}</span>
 
     <span class="topbar-spacer"></span>
 

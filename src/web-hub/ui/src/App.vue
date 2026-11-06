@@ -43,7 +43,6 @@ import "./styles/highlight.css";
 import IconSprite from "./icons/IconSprite.vue";
 import { browserLocalStorage } from "./components/shell/themeStorage.js";
 import { hubVersionStamp } from "@logic/build-stamp.js";
-import ControlNotice from "./components/control/ControlNotice.vue";
 import PageDropZone from "./components/control/PageDropZone.vue";
 import { CONTROL_ENV, HUB_CTX, type ControlEnv } from "./components/control/controlContext.js";
 import DashboardView from "./components/shell/DashboardView.vue";
@@ -293,8 +292,6 @@ function onBootRetry(): void {
   // (back to the spinner splash) and openStream() closes the old EventSource and opens a fresh one.
   if (hub) void hub.start();
 }
-// C5: control negotiated (hub caps include cmd.v1) ⇒ persistent ControlNotice + Control chip.
-const controlOn = computed(() => hub?.state.value.control === true);
 const hubVersion = computed<string | null>(() => {
   const h = hub?.state.value.hub as { version?: unknown; buildId?: unknown } | null | undefined;
   return hubVersionStamp(h?.version, h?.buildId);
@@ -388,7 +385,6 @@ onUnmounted(() => {
            短会话的 composer 悬在半空）。包一层永远存在的容器，保证网格项恒为 3 个。 -->
       <div class="app-notices">
         <HubStateBanner />
-        <ControlNotice v-if="controlOn" />
         <NoticeStack :notices="globalNotices" @action="onGlobalNoticeAction" />
       </div>
       <DashboardView :hub="hub!" :route="route!" />
