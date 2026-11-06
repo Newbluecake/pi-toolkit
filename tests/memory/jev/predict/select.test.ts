@@ -319,3 +319,49 @@ describe("prioritizeCandidates (section 5.4, 40-slot quota)", () => {
     expect(prioritizeCandidates(candidates)).toHaveLength(40);
   });
 });
+
+// ───────────────────── #36 P6b — decay ×m on the sort key (arch §6.2) ─────────────────────
+
+describe("decay multiplier (#36 P6b, arch §6.2)", () => {
+  const tags = [tag("git-commit", 0.9)];
+  const eligible = new Set(["git-commit"]);
+
+  it("multiplies the score by Candidate.decay", () => {
+    expect(scoreCandidate(candidate({ decay: 0.6 }), tags, eligible)).toBeCloseTo(0.9 * 1 * 2 * 0.6, 5);
+    expect(scoreCandidate(candidate({ decay: 0.8 }), tags, eligible)).toBeCloseTo(0.9 * 1 * 2 * 0.8, 5);
+  });
+
+  it("omitted decay stays 1.0 (existing callers unchanged)", () => {
+    expect(scoreCandidate(candidate(), tags, eligible)).toBeCloseTo(0.9 * 1 * 2, 5);
+  });
+
+  it("reorders selection when the higher-raw-score candidate is decayed (maxEntries budget)", () => {
+    const fresh = candidate({ hash: "fresh", decay: 1, tagP: { "git-commit": 0.85 } }); // raw 1.53
+    const stale = candidate({ hash: "stale", decay: 0.6, tagP: { "git-commit": 1 } }); // raw 1.8 → ×0.6 = 1.08
+    const picked = selectPEntries({
+      tags,
+      eligibleTags: eligible,
+      candidates: [stale, fresh],
+      maxEntries: 1,
+      maxBytes: 2048,
+    });
+    expect(picked.map((p) => p.hash)).toEqual(["fresh"]); // without decay `stale` would win
+  });
+
+  it("the §6.4 bypass ranking also decays: the less-stale cooled candidate wins the bypass slot", () => {
+    const highRisk = new Set(["git-commit"]);
+    const cooledFresh = candidate({ hash: "cf", coolingDown: true, decay: 1 });
+    const cooledStale = candidate({ hash: "cs", coolingDown: true, decay: 0.6 });
+    // both cooled ⇒ git-commit starved ⇒ exactly one bypass pick, decay applied
+    const picked = selectPEntries({
+      tags,
+      eligibleTags: eligible,
+      candidates: [cooledStale, cooledFresh],
+      maxEntries: 1,
+      maxBytes: 2048,
+      highRiskTags: highRisk,
+    });
+    const bypass = picked.find((p) => p.bypass === true);
+    expect(bypass?.hash).toBe("cf"); // equal raw scores; decay breaks the tie toward the fresh one
+  });
+});

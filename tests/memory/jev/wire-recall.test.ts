@@ -947,3 +947,334 @@ describe("blocks layout (#36 P3)", () => {
     expect(bMsgs).toHaveLength(0); // the only queued entry was dropped as superseded
   });
 });
+
+// ───────────────────── #36 P6b — audience two-way filter (arch §6.1) ─────────────────────
+
+describe("#36 P6b audience (arch §6.1)", () => {
+  /** files layout + a sidecar-tagged dispatch rule: the tag tier alone must
+   *  infer `main` (type rule ∧ dispatch p ≥ 0.7 ∧ top score). */
+  async function tagDispatchRule(): Promise<void> {
+    writeFileSync(
+      join(memDir, "dispatch-rules.md"),
+      "# Dispatch\n\n## Rules\n\n- dispatch decisions need scope confirmation first\n",
+    );
+    const e = entries().find((x) => x.body.includes("scope confirmation"))!;
+    await tagEntry(e, { dispatch: 0.9 }, { type: "rule" });
+  }
+
+  test("files layout, tag-inferred main: main session injects it (U layer)", async () => {
+    await tagDispatchRule();
+    const h = harness({ rules: [["scope confirmation", 0.9]] });
+    const r = await h.prompt("the dispatch rule for confirming scope");
+    expect(r?.message?.content).toContain("scope confirmation");
+  });
+
+  test("files layout, tag-inferred main: child session drops it (U layer, V25)", async () => {
+    await tagDispatchRule();
+    const h = harness({ isChild: true, rules: [["scope confirmation", 0.9]] });
+    const r = await h.prompt("the dispatch rule for confirming scope");
+    expect(r).toBeUndefined();
+    expect(h.sent).toHaveLength(0);
+  });
+
+  test("files layout, dispatch p below the top score ⇒ audience all ⇒ child session keeps it", async () => {
+    writeFileSync(
+      join(memDir, "dispatch-rules.md"),
+      "# Dispatch\n\n## Rules\n\n- dispatch decisions need scope confirmation first\n",
+    );
+    const e = entries().find((x) => x.body.includes("scope confirmation"))!;
+    await tagEntry(e, { dispatch: 0.9, testing: 0.95 }, { type: "rule" }); // not the top tag
+    const h = harness({ isChild: true, rules: [["scope confirmation", 0.9]] });
+    const r = await h.prompt("the dispatch rule for confirming scope");
+    expect(r?.message?.content).toContain("scope confirmation");
+  });
+
+  test("blocks layout frontmatter audience: child drops main, main drops child (both directions)", async () => {
+    const blocks = join(memDir, "blocks");
+    mkdirSync(blocks, { recursive: true });
+    writeFileSync(join(blocks, ".layout.json"), JSON.stringify({ v: 1, source: "migrate", gen: 1, files: [] }));
+    const block = (id: string, meta: string[], body: string): void => {
+      writeFileSync(
+        join(blocks, `${id}.md`),
+        [
+          "---",
+          "kind: block",
+          ...meta,
+          'created: "2026-01-01T00:00:00.000Z"',
+          'updated: "2026-01-02T00:00:00.000Z"',
+          "version: 1",
+          "---",
+          "",
+          body,
+          "",
+        ].join("\n"),
+      );
+    };
+    block("general.010", ["authority: agent", "audience: main"], "- mainline rule: orchestrate via lanes");
+    block("general.011", ["authority: agent", "audience: child"], "- childwork rule: child sessions commit less");
+    const anchorsOf = (r: unknown): string[] =>
+      ((r as { message?: { details: { items: { anchor: string }[] } } })?.message?.details?.items ?? []).map(
+        (i) => i.anchor,
+      );
+    const main = harness({
+      rules: [
+        ["orchestrate via lanes", 0.9],
+        ["child sessions commit less", 0.9],
+      ],
+    });
+    const mainAnchors = anchorsOf(await main.prompt("lanes and childwork rules please"));
+    expect(mainAnchors).toContain("general.010"); // main keeps audience:main
+    expect(mainAnchors).not.toContain("general.011"); // main drops audience:child
+    const child = harness({
+      isChild: true,
+      rules: [
+        ["orchestrate via lanes", 0.9],
+        ["child sessions commit less", 0.9],
+      ],
+    });
+    const childAnchors = anchorsOf(await child.prompt("lanes and childwork rules please"));
+    expect(childAnchors).not.toContain("general.010"); // child drops audience:main
+    expect(childAnchors).toContain("general.011"); // child keeps audience:child
+  });
+});
+
+// ───────────────────── #36 P6b — U-layer p×m decay (arch §6.2) ─────────────────────
+
+describe("#36 P6b U decay (arch §6.2 p×m)", () => {
+  const DAY = 86_400_000;
+  function iso(daysAgo: number): string {
+    return new Date(Date.now() - daysAgo * DAY).toISOString();
+  }
+
+  /** blocks layout with four snapshot-styled blocks: an aged agent
+   *  snapshot (decay target), a fresh agent snapshot, an aged USER topic
+   *  rule (never decays) and an aged agent block WITH expires (never
+   *  decays). No sidecar — the audience tier stays out of the picture. */
+  function makeDecayBlocks(): void {
+    const blocks = join(memDir, "blocks");
+    mkdirSync(blocks, { recursive: true });
+    writeFileSync(join(blocks, ".layout.json"), JSON.stringify({ v: 1, source: "migrate", gen: 1, files: [] }));
+    const block = (id: string, meta: string[], body: string): void => {
+      writeFileSync(
+        join(blocks, `${id}.md`),
+        ["---", "kind: block", ...meta, 'created: "2026-01-01T00:00:00.000Z"', "version: 1", "---", "", body, ""].join(
+          "\n",
+        ),
+      );
+    };
+    block("quota.001", ["authority: agent", `updated: "${iso(40)}"`], "- run r_old42 的 5h 窗口配额已用 62%");
+    block("quota.002", ["authority: agent", `updated: "${iso(1)}"`], "- run r_now01 的 5h 窗口配额已用 62%");
+    block(
+      "general.020",
+      ["authority: user", "scope: topic", `updated: "${iso(40)}"`],
+      "- user rule r_user77 的 5h 窗口配额已用 62%",
+    );
+    block(
+      "quota.003",
+      ["authority: agent", 'expires: "2999-01-01"', `updated: "${iso(40)}"`],
+      "- dated fact r_fix77 的 5h 窗口配额已用 62%",
+    );
+  }
+
+  test("aged agent snapshot (40d, m=0.6) fails the threshold after p×m; user and deadline blocks do not decay", async () => {
+    makeDecayBlocks();
+    const h = harness({
+      rules: [
+        ["r_old42", 0.9], // 0.9 × 0.6 = 0.54 < 0.6 threshold ⇒ dropped
+        ["r_now01", 0.9], // fresh ⇒ 0.9 ≥ 0.6 ⇒ injected
+        ["r_user77", 0.9], // user ⇒ never decays ⇒ injected
+        ["r_fix77", 0.9], // has expires ⇒ never decays ⇒ injected
+      ],
+    });
+    const r = await h.prompt("quota readings r_old42 r_now01 r_user77 r_fix77");
+    const anchors = (r?.message?.details?.items ?? []).map((i: { anchor: string }) => i.anchor);
+    expect(anchors).not.toContain("quota.001"); // the aged snapshot is decayed below threshold
+    expect(anchors).toContain("quota.002");
+    expect(anchors).toContain("general.020");
+    expect(anchors).toContain("quota.003");
+  });
+});
+
+// ───────────────────── #36 P6b — topic user rules enter the U pool first (arch §3.3.1) ─────────────────────
+
+describe("#36 P6b topic-user pool-first trimming (arch §3.3.1 / §6.2)", () => {
+  test("a zero-overlap topic user rule still reaches the classifier when eligible > 360", async () => {
+    const filler = Array.from(
+      { length: 361 },
+      (_, i) => `- 预算队列填充规则第 ${i} 号：与当前问题无关的说明文字 <!-- mem lesson -->`,
+    );
+    writeFileSync(
+      join(memDir, "core.md"),
+      [
+        "# Core",
+        "",
+        "## Filler",
+        "",
+        ...filler,
+        "",
+        "## Topic user needle",
+        "",
+        "- 用户决策 needle-zz 不含任何查询词，裁剪时仍须先入池 <!-- mem user -->",
+        "",
+      ].join("\n"),
+    );
+    const h = harness({ rules: [["needle-zz", 0.95]] });
+    await h.prompt("预算队列预算预算");
+    // the needle entry must be among the classifier's recall questions even
+    // though its lexical overlap with the query is zero (361 fillers all
+    // share 预算, so the prefilter alone would cut it past slot 360)
+    const asked = h.fake.calls.map((c) => JSON.stringify(c.questions)).join("\n");
+    expect(asked).toContain("needle-zz");
+  });
+});
+
+// ───────────────────── #36 P6b — A-layer naming requirement (arch §6.2) ─────────────────────
+
+describe("#36 P6b A-layer naming (arch §6.2 点名要求)", () => {
+  /** blocks layout + one agent snapshot block (fresh — the naming gate is
+   *  independent of age) sidecar-tagged git-commit so the A fast path can
+   *  pick it up. */
+  async function makeSnapshotBlock(): Promise<void> {
+    const blocks = join(memDir, "blocks");
+    mkdirSync(blocks, { recursive: true });
+    writeFileSync(join(blocks, ".layout.json"), JSON.stringify({ v: 1, source: "migrate", gen: 1, files: [] }));
+    writeFileSync(
+      join(blocks, "quota.005.md"),
+      [
+        "---",
+        "kind: block",
+        "authority: agent",
+        `updated: "${new Date().toISOString()}"`,
+        'created: "2026-01-01T00:00:00.000Z"',
+        "version: 1",
+        "---",
+        "",
+        "- run r_dec99 的 5h 窗口配额已用 62%",
+        "",
+      ].join("\n"),
+    );
+    const e = entries().find((x) => x.body.includes("r_dec99"))!;
+    await tagEntry(e, { "git-commit": 0.9 }, { type: "rule", temporal: "permanent" });
+  }
+
+  async function gitCommitTool(h: ReturnType<typeof harness>): Promise<void> {
+    await h.emit("tool_call", {
+      toolName: "bash",
+      toolCallId: "t1",
+      input: { command: "git commit -m x" },
+    });
+  }
+
+  test("snapshot block not named by the turn ⇒ A layer never injects it", async () => {
+    await makeSnapshotBlock();
+    const h = harness();
+    await h.prompt("把这些改动提交一下，顺便跑下格式检查"); // names nothing in the block
+    await gitCommitTool(h);
+    const aMsgs = h.sent.filter((s) => s.message.details?.layer === "A").map((s) => s.message);
+    expect(aMsgs).toHaveLength(0);
+  });
+
+  test("snapshot block named by the turn ⇒ A layer injects it as before", async () => {
+    await makeSnapshotBlock();
+    const h = harness();
+    await h.prompt("提交这些改动，先核对 run r_dec99 的配额"); // names run / r_dec99 / 配额
+    await gitCommitTool(h);
+    const aMsgs = h.sent.filter((s) => s.message.details?.layer === "A").map((s) => s.message);
+    expect(aMsgs).toHaveLength(1);
+    expect(aMsgs[0]!.content).toContain("r_dec99");
+  });
+});
+
+// ───────────────────── #36 P6b 验改 — 满池计数 / custom 轮点名基准清空 ─────────────────────
+
+describe("#36 P6b fix round (pool count / custom-turn prompt reset)", () => {
+  test("fix3: topic users never double-claim a priority slot — the merged pool caps at exactly 360 unique candidates", async () => {
+    const filler = Array.from(
+      { length: 330 },
+      (_, i) => `- 预算队列填充规则第 ${i} 号：与当前问题无关的说明文字 <!-- mem lesson -->`,
+    );
+    // a predicted-tag topic user needle (dispatch fires on the prompt) plus
+    // 40 predicted-tag agent fillers — before fix3 the needle would occupy
+    // BOTH a topicKept slot and one of the 40 priority slots, and the merged
+    // pool would dedup down below the cap
+    writeFileSync(
+      join(memDir, "core.md"),
+      [
+        "# Core",
+        "",
+        "## Filler",
+        "",
+        ...filler,
+        "",
+        "## Predicted",
+        "",
+        ...Array.from({ length: 40 }, (_, i) => `- 派单 prio-agent-${i} 预算条目 <!-- mem lesson tags=+dispatch -->`),
+        "",
+        "## Topic user needle",
+        "",
+        "- 用户决策 needle-zz 派单类规则：裁剪时先入池且不占预测槽 <!-- mem user tags=+dispatch -->",
+        "",
+      ].join("\n"),
+    );
+    // cool the needle for P (pInjectedAt) so the P layer leaves it for U —
+    // the U priority loop ignores cooldowns, so the needle still competes
+    // for both a topicKept slot AND a priority slot (the double-claim case)
+    const needleEntry = new EntryIndex().get(memDir).find((e) => e.body.includes("needle-zz"))!;
+    expect(await writeIndexPatch(memDir, { pInjectedAt: { [needleEntry.hash]: new Date().toISOString() } })).toBe("ok");
+    const h = harness({
+      rules: [["needle-zz", 0.95]],
+      settings: {
+        jev: { ...DEFAULT_MEMORY_SETTINGS.jev, predict: { ...DEFAULT_MEMORY_SETTINGS.jev.predict, enabled: true } },
+      },
+    });
+    await h.prompt("预算队列预算预算，派两个子 agent 并行做");
+    const asked = h.fake.calls.map((c) => JSON.stringify(c.questions)).join("\n");
+    expect(asked).toContain("needle-zz"); // topic-user pool-first still holds
+    // the candidate pool (union over the recall batches) is exactly
+    // RECALL_MAX_CANDIDATES (360) unique ids — no slot lost to a topic user
+    // double-claimed by the priority segment, no duplicates
+    const ids = new Set<string>();
+    for (const c of h.recallCalls()) for (const id of Object.keys(c.questions)) ids.add(id);
+    expect(ids.size).toBeLessThanOrEqual(360);
+    expect(ids.size).toBe(360); // full pool: topic slots + priority slots + prefilter sum to the cap
+    // the priority segment did not shrink: a predicted agent filler made it in
+    expect(asked).toContain("prio-agent-");
+  });
+
+  test("fix4: a custom turn with no bash notice clears the naming basis — a stale prior prompt must not keep the A gate open", async () => {
+    const blocks = join(memDir, "blocks");
+    mkdirSync(blocks, { recursive: true });
+    writeFileSync(join(blocks, ".layout.json"), JSON.stringify({ v: 1, source: "migrate", gen: 1, files: [] }));
+    writeFileSync(
+      join(blocks, "quota.012.md"),
+      [
+        "---",
+        "kind: block",
+        "authority: agent",
+        `updated: "${new Date().toISOString()}"`,
+        'created: "2026-01-01T00:00:00.000Z"',
+        "version: 1",
+        "---",
+        "",
+        "- run r_stale51 的 5h 窗口配额已用 62%",
+        "",
+      ].join("\n"),
+    );
+    const e = entries().find((x) => x.body.includes("r_stale51"))!;
+    await tagEntry(e, { "git-commit": 0.9 }, { type: "rule", temporal: "permanent" });
+    const h = harness();
+    // turn 1 names the block ⇒ the A gate opens for that turn only
+    await h.prompt("提交这些改动，先核对 run r_stale51 的配额");
+    await h.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: "git commit -m x" } });
+    expect(h.sent.filter((s) => s.message.details?.layer === "A")).toHaveLength(1);
+    // turn 2 is a custom message that is NOT a bash notice ⇒ curTurnPrompt
+    // resets to "" — the previous turn's words must not name anything now
+    await h.emit("before_agent_start", {
+      type: "before_agent_start",
+      messageType: "custom",
+      message: { customType: "some:other-notice", content: "unrelated" },
+    });
+    await h.emit("tool_call", { toolName: "bash", toolCallId: "t2", input: { command: "git commit -m y" } });
+    expect(h.sent.filter((s) => s.message.details?.layer === "A")).toHaveLength(1); // no new injection
+  });
+});

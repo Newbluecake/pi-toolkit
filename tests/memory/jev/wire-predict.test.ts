@@ -9,9 +9,10 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { jevConfigOf } from "../../../src/memory/jev/config.js";
+import { jevConfigOf, predictConfigOf } from "../../../src/memory/jev/config.js";
 import type { EntryTags, JevConfig, JevQuestion, MemEntry } from "../../../src/memory/jev/contracts.js";
 import { EntryIndex } from "../../../src/memory/jev/entries.js";
+import { writeIndexPatch } from "../../../src/memory/jev/index-store.js";
 import { clearHealthTable } from "../../../src/memory/jev/health.js";
 import { formatJevReport } from "../../../src/memory/jev/format.js";
 import { evidenceForTag, mergeInjectMessages, restoreCarryFromBranch, wireJev } from "../../../src/memory/jev/wire.js";
@@ -741,5 +742,323 @@ describe("git signals (dirty bit / branch) go through a real git repo", () => {
     // low-score R12 alone cannot clear the 0.3 floor, so pair it with the carry-free dispatch hit.
     const r = await h.prompt("派两个子 agent 并行做");
     expect(r?.message).toBeDefined();
+  });
+});
+
+// ───────────────────── #36 P6b — P-layer naming requirement + decay (arch §6.2) ─────────────────────
+
+describe("#36 P6b P-layer naming + decay (arch §6.2)", () => {
+  const DAY = 86_400_000;
+  const iso = (daysAgo: number) => new Date(Date.now() - daysAgo * DAY).toISOString();
+
+  function writeBlock(id: string, meta: string[], body: string): void {
+    writeFileSync(
+      join(memDir, "blocks", `${id}.md`),
+      ["---", "kind: block", ...meta, 'created: "2026-01-01T00:00:00.000Z"', "version: 1", "---", "", body, ""].join(
+        "\n",
+      ),
+    );
+  }
+
+  async function sidecar(needle: string, tags: Record<string, number>, extra: Partial<EntryTags> = {}): Promise<void> {
+    const e = entries().find((x) => x.body.includes(needle))!;
+    const rec: EntryTags = {
+      file: e.file,
+      type: "rule",
+      typeP: 0.9,
+      importance: 2,
+      tags: Object.fromEntries(Object.entries(tags).map(([k, p]) => [k, { p, rev: 1 }])),
+      guard: 0.1,
+      temporal: "permanent",
+      userLike: 0.1,
+      model: "opencode/jev-1.13",
+      at: "2026-11-01T00:00:00.000Z",
+      taxonomyRev: "x",
+      ...extra,
+    };
+    expect(await writeIndexPatch(memDir, { upsert: { [e.hash]: rec } })).toBe("ok");
+  }
+
+  /** blocks layout + one FRESH agent snapshot block (quota-window body ⇒ the
+   *  §5.3 regex hits) tagged git-commit so the decisive R02 rule can pick it
+   *  up. Fresh ⇒ m=1: the ONLY thing standing between it and injection is the
+   *  naming requirement. */
+  async function makeNamedBlocks(): Promise<void> {
+    const blocks = join(memDir, "blocks");
+    mkdirSync(blocks, { recursive: true });
+    writeFileSync(join(blocks, ".layout.json"), JSON.stringify({ v: 1, source: "migrate", gen: 1, files: [] }));
+    writeFileSync(
+      join(blocks, "quota.005.md"),
+      [
+        "---",
+        "kind: block",
+        "authority: agent",
+        `updated: "${iso(1)}"`,
+        'created: "2026-01-01T00:00:00.000Z"',
+        "version: 1",
+        "---",
+        "",
+        "- run r_dec99 的 5h 窗口配额已用 62%",
+        "",
+      ].join("\n"),
+    );
+    await sidecar("r_dec99", { "git-commit": 0.9 }, { temporal: "permanent" });
+  }
+
+  test("decisive git-commit turn that does NOT name the snapshot block ⇒ zero P injection (V26)", async () => {
+    await makeNamedBlocks();
+    const h = harness({ fail: "System One API error (451): blocked" });
+    await goPartial(h);
+    const r = await h.prompt("提交这些改动，顺便跑下格式检查");
+    expect(r).toBeUndefined(); // no message at all — the block is a decay target nobody named
+    expect(h.sent).toHaveLength(0);
+  });
+
+  test("same block, turn names run/r_dec99/配额 ⇒ P injects it", async () => {
+    await makeNamedBlocks();
+    const h = harness({ fail: "System One API error (451): blocked" });
+    await goPartial(h);
+    const r = await h.prompt("提交这些改动，先核对 run r_dec99 的配额");
+    expect(r?.message?.details?.layer).toBe("P");
+    expect(r!.message.content).toContain("r_dec99");
+  });
+
+  test("decay ×m reorders P selection: a higher-tagP stale snapshot loses to a fresher twin (V26)", async () => {
+    const blocks = join(memDir, "blocks");
+    mkdirSync(blocks, { recursive: true });
+    writeFileSync(join(blocks, ".layout.json"), JSON.stringify({ v: 1, source: "migrate", gen: 1, files: [] }));
+    writeFileSync(
+      join(blocks, "quota.006.md"),
+      [
+        "---",
+        "kind: block",
+        "authority: agent",
+        `updated: "${iso(1)}"`,
+        'created: "2026-01-01T00:00:00.000Z"',
+        "version: 1",
+        "---",
+        "",
+        "- quota check lane f1 fresh reading",
+        "",
+      ].join("\n"),
+    );
+    // stale twin: temporal dated (§6.2 target) 40 days old — WITHOUT decay its
+    // raw score (tagP 1.0) would beat the fresh block (tagP 0.85)
+    writeFileSync(
+      join(blocks, "quota.007.md"),
+      [
+        "---",
+        "kind: block",
+        "authority: agent",
+        `updated: "${iso(40)}"`,
+        'created: "2026-01-01T00:00:00.000Z"',
+        "version: 1",
+        "---",
+        "",
+        "- quota check lane g1 stale reading",
+        "",
+      ].join("\n"),
+    );
+    await sidecar("lane f1 fresh", { "git-commit": 0.85 });
+    await sidecar("lane g1 stale", { "git-commit": 1.0 }, { temporal: "dated" });
+    const h = harness({
+      fail: "System One API error (451): blocked",
+      config: {
+        predict: predictConfigOf({
+          ...DEFAULT_MEMORY_SETTINGS,
+          jev: { ...DEFAULT_MEMORY_SETTINGS.jev, predict: { ...DEFAULT_MEMORY_SETTINGS.jev.predict, maxEntries: 1 } },
+        }),
+      },
+    });
+    await goPartial(h);
+    const r = await h.prompt("提交这些改动，先看 lane f1 和 lane g1 的 quota check");
+    expect(r?.message?.details?.layer).toBe("P");
+    expect(r!.message.content).toContain("lane f1 fresh");
+    expect(r!.message.content).not.toContain("lane g1 stale"); // 1.8 × 0.6 < 1.53
+  });
+});
+
+// ───────────────────── #36 P6b 收口 — bypass must reflect the COMMITTED set (P6a 遗留） ─────────────────────
+
+describe("#36 P6b bypass reporting reflects the committed set (P6a leftover)", () => {
+  /** Writes the two-entry corpus + B's cooldown stamp into the CURRENT
+   *  memDir. Each run gets its own directory — recordPInjection stamps the
+   *  sidecar fire-and-forget, and the dir is shared per harness, so a prior
+   *  run's stamps must not leak into the next harness's cooldown view. */
+  async function setupCorpus(): Promise<void> {
+    writeFileSync(
+      join(memDir, "core.md"),
+      [
+        "# Core",
+        "",
+        "## Commit",
+        "",
+        "- commit-entry-a 只用精确路径提交 <!-- mem tags=+git-commit -->",
+        "",
+        "## Dispatch",
+        "",
+        "- dispatch-entry-b 派发前先确认范围",
+        "",
+      ].join("\n"),
+    );
+    // entry A (inline +git-commit, pending ⇒ importance 2) ranks first at
+    // 0.9×1×2×1.25=2.25; entry B carries a SIDE-CAR dispatch tag at p=0.72
+    // (0.9×0.72×2×1.25≈1.62 — always below A, no hash-order tie) and is
+    // cooled via pInjectedAt so the dispatch tag is starved ⇒ B returns ONLY
+    // via the §6.4 bypass (appended after A).
+    const b = entries().find((e) => e.body.includes("dispatch-entry-b"))!;
+    const bTags: EntryTags = {
+      file: b.file,
+      type: "rule",
+      typeP: 0.9,
+      importance: 2,
+      tags: { dispatch: { p: 0.72, rev: 1 } },
+      guard: 0.1,
+      temporal: "permanent",
+      userLike: 0.1,
+      model: "opencode/jev-1.13",
+      at: "2026-11-01T00:00:00.000Z",
+      taxonomyRev: "x",
+    };
+    expect(
+      await writeIndexPatch(memDir, {
+        upsert: { [b.hash]: bTags },
+        pInjectedAt: { [b.hash]: new Date().toISOString() },
+      }),
+    ).toBe("ok");
+  }
+
+  test("bypass-selected pick rejected by the commit (segment cap) ⇒ no predict.bypass report; positive control without the cap reports it", async () => {
+    const seedSegment = (h: ReturnType<typeof harness>): void => {
+      // 29 already-injected hashes ⇒ one slot left before SEGMENT_MAX_INJECTED
+      h.branch.push({
+        type: "custom",
+        id: "seed-recall",
+        customType: "subagent:memory-recall",
+        data: {
+          v: 1,
+          layer: "U",
+          keys: Array.from({ length: 29 }, (_, i) => `seedhash${String(i).padStart(2, "0")}`),
+        },
+      });
+    };
+    const prompt = "提交这些改动，然后派两个子 agent 并行做收尾";
+    // the fix: with one slot left the commit accepts only A (segment cap) —
+    // selection still marked B as bypass, but the report must NOT say so
+    await setupCorpus();
+    const capped = harness({ fail: "System One API error (451): blocked" });
+    seedSegment(capped);
+    await goPartial(capped);
+    const rx = await capped.prompt(prompt);
+    expect(rx?.message?.content).toContain("commit-entry-a"); // the top pick took the last slot
+    expect(rx?.message?.content).not.toContain("dispatch-entry-b"); // bypass pick rejected at commit
+    expect(rx?.message?.details?.predict?.bypass).toBeUndefined(); // and is NOT reported as bypassed
+    // positive control in a FRESH dir: no cap ⇒ both picks committed ⇒ reported
+    memDir = join(tmp, "mem2");
+    mkdirSync(memDir, { recursive: true });
+    await setupCorpus();
+    const control = harness({ fail: "System One API error (451): blocked" });
+    await goPartial(control);
+    const rc = await control.prompt(prompt);
+    expect(rc?.message?.content).toContain("commit-entry-a");
+    expect(rc?.message?.content).toContain("dispatch-entry-b"); // the bypass pick injected
+    expect(rc?.message?.details?.predict?.bypass).toBe(true);
+  });
+});
+
+// ───────────────────── #36 P6b 验改 — until 豁免 / S 不受点名门 ─────────────────────
+
+describe("#36 P6b fix round (until exempt / S gate scope)", () => {
+  const DAY = 86_400_000;
+  const iso = (daysAgo: number) => new Date(Date.now() - daysAgo * DAY).toISOString();
+
+  async function sidecar(needle: string, tags: Record<string, number>, extra: Partial<EntryTags> = {}): Promise<void> {
+    const e = entries().find((x) => x.body.includes(needle))!;
+    const rec: EntryTags = {
+      file: e.file,
+      type: "rule",
+      typeP: 0.9,
+      importance: 2,
+      tags: Object.fromEntries(Object.entries(tags).map(([k, p]) => [k, { p, rev: 1 }])),
+      guard: 0.1,
+      temporal: "permanent",
+      userLike: 0.1,
+      model: "opencode/jev-1.13",
+      at: "2026-11-01T00:00:00.000Z",
+      taxonomyRev: "x",
+      ...extra,
+    };
+    expect(await writeIndexPatch(memDir, { upsert: { [e.hash]: rec } })).toBe("ok");
+  }
+
+  test("fix1: a 40-day snapshot block WITH until is not a decay target — m stays 1 and the P naming gate does not apply", async () => {
+    const blocks = join(memDir, "blocks");
+    mkdirSync(blocks, { recursive: true });
+    writeFileSync(join(blocks, ".layout.json"), JSON.stringify({ v: 1, source: "migrate", gen: 1, files: [] }));
+    writeFileSync(
+      join(blocks, "quota.010.md"),
+      [
+        "---",
+        "kind: block",
+        "authority: agent",
+        'until: "网络恢复后清理这条"',
+        `updated: "${iso(40)}"`,
+        'created: "2026-01-01T00:00:00.000Z"',
+        "version: 1",
+        "---",
+        "",
+        "- run r_kee99 的 5h 窗口配额已用 62%",
+        "",
+      ].join("\n"),
+    );
+    await sidecar("r_kee99", { "git-commit": 0.9 });
+    const h = harness({ fail: "System One API error (451): blocked" });
+    await goPartial(h);
+    // the prompt fires decisive git-commit but names NOTHING in the block —
+    // with until set the block is exempt from decay AND the naming gate
+    const r = await h.prompt("提交这些改动，顺便跑下格式检查");
+    expect(r?.message?.details?.layer).toBe("P");
+    expect(r!.message.content).toContain("r_kee99"); // m=1 ⇒ full score ⇒ injected
+  });
+
+  test("fix2: S state candidates bypass the naming gate — an unnamed decay-target release entry still injects via S", async () => {
+    const blocks = join(memDir, "blocks");
+    mkdirSync(blocks, { recursive: true });
+    writeFileSync(join(blocks, ".layout.json"), JSON.stringify({ v: 1, source: "migrate", gen: 1, files: [] }));
+    writeFileSync(
+      join(blocks, "quota.011.md"),
+      [
+        "---",
+        "kind: block",
+        "authority: agent",
+        `updated: "${iso(40)}"`,
+        'created: "2026-01-01T00:00:00.000Z"',
+        "version: 1",
+        "---",
+        "",
+        "- run r_rel99 的 5h 窗口配额已用 62%",
+        "",
+      ].join("\n"),
+    );
+    // sidecar: release tag (S needs it) + dated temporal ⇒ decay target; the
+    // "继续" prompt shares no token with the block's first line
+    await sidecar("r_rel99", { release: 0.95 }, { temporal: "dated" });
+    const h = harness({
+      fail: "System One API error (451): blocked",
+      bashJobs: [{ status: "running", command: "bash release.sh" }],
+    });
+    await goPartial(h);
+    const r = await h.prompt("继续吧，辛苦了，务必按计划推进");
+    expect(r?.message).toBeDefined();
+    expect(r!.message.content).toContain("r_rel99"); // S injected the unnamed decay target
+    expect(r!.message.content).toContain("（发版进行中）"); // via the S constraint, not a normal P pick
+    // the quota.011 item exists ONLY as the releaseInProgress (S) pick — it
+    // never entered P's scored selection (naming gate held for P)
+    const items = (r!.message.details.items ?? []) as { anchor: string; releaseInProgress?: boolean }[];
+    // details.items carries no releaseInProgress marker (that annotation is
+    // content-only); exactly ONE quota.011 item + the「（发版进行中）」line in
+    // the content prove it came via S, not a scored P pick
+    const mine = items.filter((i) => i.anchor === "quota.011");
+    expect(mine).toHaveLength(1);
   });
 });

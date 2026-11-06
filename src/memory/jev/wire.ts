@@ -189,6 +189,11 @@ import {
 } from "../blocks/render.js";
 import { readCorpus, type BlockCorpus } from "../blocks/store.js";
 import { eligible, type EligibilityLayer } from "../govern/eligibility.js";
+// #36 P6b（arch §6.1/§6.2）：受众三级判定 + 时效降权/点名要求，纯函数内核
+// 在 govern/；wire 只做接线（tags 来源 = 侧车 index）。TOPIC_USER_POOL_CAP
+// 唯一定义在 govern/decay.ts（PG 的 G2 调参只改那里，plan r3 裁定 12）。
+import { audienceMatches, effectiveAudience } from "../govern/audience.js";
+import { TOPIC_USER_POOL_CAP, decayFactor, decaySubjectOf, isDecayTarget, namesSubject } from "../govern/decay.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import { parseBlockFile, type ParsedBlock } from "../blocks/format.js";
 
@@ -847,6 +852,11 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   const curRunToolIndex = new Map<string, number>();
   let dirtyCache: { value: boolean | undefined; at: number } = { value: undefined, at: -Infinity };
   let dirtyGitRunner: GitRunner | undefined;
+  // #36 P6b（arch §6.2 点名要求）：当前这一轮的用户 prompt（剥 skill 块后），
+  // before_agent_start 开轮时更新；A 层（tool_call 时点）用它判定降权对象
+  // 块是否被本轮文本“点名”。未开轮前为空串 ⇒ 降权对象一律不入选（对过期
+  // 事实 fail closed）。
+  let curTurnPrompt = "";
   let predictBashJobs: JevBashJobsLitePort | undefined;
   let predictFleet: JevFleetPort | undefined;
   let rulesFired = 0;
@@ -970,17 +980,22 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
    *  `block`) keep their existing predicates untouched; block entries run
    * the unified verdict. A block that vanished from `blocks/` mid-cache is
    *  ineligible (the next corpus refresh drops it). */
-  const entryEligible = (e: MemEntry, dir: string, layer: EligibilityLayer): boolean => {
-    if (e.block === undefined) return true;
+  const entryEligible = (e: MemEntry, dir: string, layer: EligibilityLayer, tags?: EntryTags): boolean => {
+    // #36 P6b: files-layout entries keep their existing per-layer predicates
+    // (private/secret/static/injected live in the callers) EXCEPT the new
+    // two-way audience filter (arch §6.1 — inline `audience:` key first,
+    // then the sidecar tag tier).
+    if (e.block === undefined) return audienceMatches(effectiveAudience(e.inline.audience, tags), isChild);
     const parsed = blocksCorpusFor(dir).blocks.find((b) => b.id === e.block?.id);
     if (parsed === undefined) return false;
-    // `tags` is reserved for the P6b audience inference path (arch §3.3.6
-    // signature); the verdict itself does not consult it yet.
     return eligible(parsed, undefined, {
       today: localToday(now()),
       isChild: isChild,
       ledger: ledgerOf(dir),
       layer,
+      // #36 P6b: the full three-tier audience (frontmatter → sidecar tag
+      // inference) — the same verdict the files path applies directly above.
+      audienceOf: (b) => effectiveAudience(b.meta.audience, tags),
     }).ok;
   };
 
@@ -988,8 +1003,20 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
    *  reading ONLY the picked block's file (acceptance fix: no full-corpus
    *  re-read per pick): existence, rev, then the unified verdict against
    *  the fresh parse. */
-  const commitEligible = (e: MemEntry, dir: string, layer: EligibilityLayer, rev: string | undefined): boolean => {
-    if (e.block === undefined) return true;
+  const commitEligible = (
+    e: MemEntry,
+    dir: string,
+    layer: EligibilityLayer,
+    rev: string | undefined,
+    cwd?: string,
+  ): boolean => {
+    // #36 P6b: the commit-time audience verdict is the SAME three-tier
+    // `effectiveAudience` as selection time — the recheck can never
+    // contradict the candidate filter (sidecar tags come from the
+    // 2s-cached corpus index; a tag write racing the commit at worst keeps
+    // the selection-time verdict one more message).
+    const tags = cwd === undefined ? undefined : corpusFor(cwd)?.index.entries[e.hash];
+    if (e.block === undefined) return audienceMatches(effectiveAudience(e.inline.audience, tags), isChild);
     const name = `${e.block.id}.md`;
     let raw: string | undefined;
     try {
@@ -1005,6 +1032,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       isChild: isChild,
       ledger: ledgerOf(dir),
       layer,
+      audienceOf: (b) => effectiveAudience(b.meta.audience, tags),
     }).ok;
   };
 
@@ -1483,7 +1511,9 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   ): InjectMessage | undefined => {
     const recheckDir = opts.cwd !== undefined ? safeDirFor(opts.cwd) : undefined;
     const survived =
-      recheckDir === undefined ? picks : picks.filter((p) => commitEligible(p.entry, recheckDir, layer, p.rev));
+      recheckDir === undefined
+        ? picks
+        : picks.filter((p) => commitEligible(p.entry, recheckDir, layer, p.rev, opts.cwd));
     const fresh = survived.filter((p) => !segment.isInjected(p.entry.hash));
     const fitted = fitPicks(fresh, maxEntries, maxBytes);
     if (fitted.length === 0) return undefined;
@@ -1542,17 +1572,32 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         !e.secret &&
         !segment.isInjected(e.hash) &&
         !isStaticCore(e, info) &&
-        (dir === undefined || entryEligible(e, dir, "U")),
+        // #36 P6b: sidecar tags feed the audience tag tier (arch §6.1).
+        (dir === undefined || entryEligible(e, dir, "U", c.index.entries[e.hash])),
     );
     let pool = eligiblePool;
     if (eligiblePool.length > RECALL_MAX_CANDIDATES) {
       // §5.4 优先入池：带预测 tag（score ≥0.5）的条目最多保留 40 槽（排序
       // 用户令 → max p × importance → file），其余 320 槽交给现有 prefilter
       // （tieBreak 仍是 user-first），两段合并后按 hash 去重。
+      // #36 P6b（arch §3.3.1/§6.2）：topic 类用户令（authority=user 且非
+      // global）在裁剪时最先入池，上限 TOPIC_USER_POOL_CAP（唯一常量定义在
+      // govern/decay.ts，PG 的 G2 调参只改那里）；超额时按与 query 的词法
+      // 重合度取前 cap 条。不放宽阈值（arch §3.3.1）。已优先入池的 topic
+      // 用户令不再占 40 预测槽（验改 #3：防 hash 去重后挤占其它预测条目、
+      // 合并池计数缩水）。
+      const topicUsers = eligiblePool.filter((e) => e.authority === "user" && e.inline.scope !== "global");
+      const claimed = new Set<string>();
+      const topicKept =
+        topicUsers.length > TOPIC_USER_POOL_CAP
+          ? prefilter(topicUsers, (e) => e.body, query, TOPIC_USER_POOL_CAP)
+          : topicUsers;
+      for (const e of topicKept) claimed.add(e.hash);
       let priorityEntries: MemEntry[] = [];
       if (predicted !== undefined && predicted.size > 0) {
         const prio: { entry: MemEntry; cand: PriorityCandidate }[] = [];
         for (const e of eligiblePool) {
+          if (claimed.has(e.hash)) continue; // 验改 #3：topic 用户令已占先入池槽
           const record = c.index.entries[e.hash];
           const meta = effectiveMeta(e, record, c.taxonomy);
           let p = 0;
@@ -1579,15 +1624,15 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       }
       const priorityHashes = new Set(priorityEntries.map((e) => e.hash));
       const rest = prefilter(
-        eligiblePool.filter((e) => !priorityHashes.has(e.hash)),
+        eligiblePool.filter((e) => !claimed.has(e.hash) && !priorityHashes.has(e.hash)),
         (e) => e.body,
         query,
-        RECALL_MAX_CANDIDATES - priorityEntries.length,
+        RECALL_MAX_CANDIDATES - topicKept.length - priorityEntries.length,
         (a, b) => (a.authority === b.authority ? 0 : a.authority === "user" ? -1 : 1),
       );
       const seen = new Set<string>();
       const merged: MemEntry[] = [];
-      for (const e of [...priorityEntries, ...rest]) {
+      for (const e of [...topicKept, ...priorityEntries, ...rest]) {
         if (seen.has(e.hash)) continue;
         seen.add(e.hash);
         merged.push(e);
@@ -1696,6 +1741,14 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     }
     const { cands, entries: byId } = recallCandidates(c, cwd, `${userMessage}\n${previous ?? ""}`, predicted);
     if (cands.length === 0) return undefined;
+    // #36 P6b：候选池里存在降权对象时，askAll 返回后需要 p×m 调整。
+    let poolDecays = false;
+    for (const e of byId.values()) {
+      if (isDecayTarget(decaySubjectOf(e, c.index.entries[e.hash]))) {
+        poolDecays = true;
+        break;
+      }
+    }
     const { state, questions } = buildRecallQuestions({
       userMessage,
       ...(previous === undefined ? {} : { previousUserMessage: previous }),
@@ -1722,7 +1775,20 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const work = (async (): Promise<(() => InjectMessage | undefined) | undefined> => {
       const res = await askAll("recall", reg, state, questions, RECALL_BUDGET_MS, controller.signal);
       if (res === undefined) return undefined;
-      const decided = decideRecall(res.answers, cands, config);
+      // #36 P6b（arch §6.2 U 层 p×m）：降权对象（agent、无期限、快照/
+      // temporal）的布尔概率先乘 m 再进阈值与排序——decide.ts 不动，这里
+      // 只调整传入的 answers；非降权轮零额外分配。
+      let answers = res.answers;
+      if (poolDecays) {
+        const adjusted: Record<string, JevAnswer> = {};
+        for (const [id, a] of Object.entries(res.answers)) {
+          const e = byId.get(id);
+          const m = e === undefined ? 1 : decayFactor(decaySubjectOf(e, c.index.entries[e.hash]), localToday(now()));
+          adjusted[id] = a.type === "bool" && m < 1 ? { ...a, probability: a.probability * m } : a;
+        }
+        answers = adjusted;
+      }
+      const decided = decideRecall(answers, cands, config);
       const picks: Pick[] = [];
       for (const d of decided) {
         const entry = byId.get(d.id);
@@ -1767,7 +1833,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const dir = safeDirFor(input.cwd);
     let pool = c.entries.filter((e) => {
       if (e.inline.isPrivate === true || e.secret || segment.isInjected(e.hash)) return false;
-      if (dir !== undefined && !entryEligible(e, dir, "E")) return false;
+      if (dir !== undefined && !entryEligible(e, dir, "E", c.index.entries[e.hash])) return false;
       const meta = effectiveMeta(e, c.index.entries[e.hash], c.taxonomy);
       // Pending entries (no sidecar record yet) have no known type — they stay
       // candidates rather than being silently excluded (untagged corpora
@@ -1848,7 +1914,10 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       if (same !== undefined) {
         // #36 P3 (arch §3.3.6): B-layer re-found entries re-run the unified
         // eligibility — a block superseded during compaction drops out.
-        if (same.inline.isPrivate !== true && (dir === undefined || entryEligible(same, dir, "B")))
+        if (
+          same.inline.isPrivate !== true &&
+          (dir === undefined || entryEligible(same, dir, "B", c.index.entries[same.hash]))
+        )
           picks.push({ entry: same });
         continue;
       }
@@ -1860,7 +1929,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       if (
         moved !== undefined &&
         moved.inline.isPrivate !== true &&
-        (dir === undefined || entryEligible(moved, dir, "B"))
+        (dir === undefined || entryEligible(moved, dir, "B", c.index.entries[moved.hash]))
       )
         picks.push({ entry: moved, modified: true });
     }
@@ -1976,8 +2045,13 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const scored: { pick: Pick; score: number }[] = [];
     for (const e of c.entries) {
       if (e.inline.isPrivate === true || segment.isInjected(e.hash) || isStaticCore(e, info)) continue;
-      if (dir !== undefined && !entryEligible(e, dir, "A")) continue;
       const record = c.index.entries[e.hash];
+      if (dir !== undefined && !entryEligible(e, dir, "A", record)) continue;
+      // #36 P6b（arch §6.2 点名要求，A 层）：降权对象（agent、无期限、
+      // 快照/temporal）没被本轮文本点名（首行无区分性 token 重合）⇒ 不入
+      // 候选；点名后照常参与打分（A 层不乘 m，arch §6.2 只规定 U/P 乘）。
+      const subject = decaySubjectOf(e, record);
+      if (isDecayTarget(subject) && !namesSubject(curTurnPrompt, subject)) continue;
       const meta = effectiveMeta(e, record, c.taxonomy);
       const shared = meta.tags.filter((t) => hit.has(t));
       if (shared.length === 0) continue;
@@ -2100,24 +2174,33 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
 
   /** §5.1 candidate materialization: same exclusion/meta pipeline as the A
    *  layer (`fastPath` above), reshaped into `predict/select.ts`'s pure
-   *  `Candidate`/`SCandidate` input shapes. */
+   *  `Candidate`/`SCandidate` input shapes. #36 P6b (arch §6.2): decay
+   *  targets must be NAMED by `turnText` to enter the pool, and scored
+   *  candidates carry their decay multiplier (select.ts sorts ×m). */
   const predictCandidatesFor = (
     c: Corpus,
     cwd: string,
+    turnText: string | undefined,
   ): { pCands: PredictCandidate[]; sCands: SCandidate[]; byHash: Map<EntryHash, MemEntry> } => {
     const info = renderInfoFor(cwd);
     const dir = safeDirFor(cwd);
     const byHash = new Map<EntryHash, MemEntry>();
     const pCands: PredictCandidate[] = [];
     const sCands: SCandidate[] = [];
+    const today = localToday(now());
     for (const e of c.entries) {
       if (e.inline.isPrivate === true || e.secret || segment.isInjected(e.hash) || isStaticCore(e, info)) continue;
+      const record = c.index.entries[e.hash];
       // #36 P3: the unified eligibility runs per layer shape — P for the
       // scored candidates, S for the release-state constraint.
-      if (dir !== undefined && !entryEligible(e, dir, "P")) continue;
-      if (dir !== undefined && !entryEligible(e, dir, "S")) continue;
+      if (dir !== undefined && !entryEligible(e, dir, "P", record)) continue;
+      if (dir !== undefined && !entryEligible(e, dir, "S", record)) continue;
+      // #36 P6b（arch §6.2 点名要求，仅 P）：降权对象没被本轮文本点名 ⇒
+      // 不进 P 候选（turnText 缺失同样 fail closed）；S 状态候选不受此门
+      // （验改 #2：S 与 P 各自独立入池，未点名的降权对象仍可作 S 注入）。
+      const subject = decaySubjectOf(e, record);
+      const pExcluded = isDecayTarget(subject) && (turnText === undefined || !namesSubject(turnText, subject));
       byHash.set(e.hash, e);
-      const record = c.index.entries[e.hash];
       const meta = effectiveMeta(e, record, c.taxonomy);
       const tagP: Record<string, number> = {};
       for (const t of meta.tags) {
@@ -2128,6 +2211,17 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       // select.ts's Candidate.authority is "user"|"model"|"none" (only "user"
       // affects scoring, §5.1); map the entry's "user"|"agent" authority.
       const selectAuthority: "user" | "model" = meta.authority === "user" ? "user" : "model";
+      const decay = decayFactor(subject, today); // #36 §6.2：排序键 ×m
+      sCands.push({
+        hash: e.hash,
+        isPrivate: false,
+        isSecret: false,
+        authority: selectAuthority,
+        ...(meta.type === undefined ? {} : { type: meta.type }),
+        hasReleaseTag: meta.tags.includes("release"),
+        byteLength,
+      });
+      if (pExcluded) continue; // P-only naming gate (验改 #2)
       pCands.push({
         hash: e.hash,
         isPrivate: false,
@@ -2141,15 +2235,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         authority: selectAuthority,
         tagP,
         byteLength,
-      });
-      sCands.push({
-        hash: e.hash,
-        isPrivate: false,
-        isSecret: false,
-        authority: selectAuthority,
-        ...(meta.type === undefined ? {} : { type: meta.type }),
-        hasReleaseTag: meta.tags.includes("release"),
-        byteLength,
+        ...(decay < 1 ? { decay } : {}),
       });
     }
     return { pCands, sCands, byHash };
@@ -2207,7 +2293,9 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       const eligible = fastPathEligibleTags(c.taxonomy);
       // #36 §6.4：高危 tag 集合交给 select 做冷却饿死出口。
       const highRiskTagIds = new Set(c.taxonomy.tags.filter((t) => t.risk === "high").map((t) => t.id));
-      const { pCands, sCands, byHash } = predictCandidatesFor(c, cwd);
+      // #36 P6b（arch §6.2 点名）：本轮文本（剥 skill 块、4000 码点截断后
+      // 的 prompt）作为 P 层点名判定的基准。
+      const { pCands, sCands, byHash } = predictCandidatesFor(c, cwd, r0.input.prompt);
       const selected = selectPEntries({
         tags,
         eligibleTags: eligible,
@@ -2216,7 +2304,10 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         maxBytes: config.predict.maxBytes,
         ...(highRiskTagIds.size > 0 ? { highRiskTags: highRiskTagIds } : {}),
       });
-      bypassed = selected.some((s) => s.bypass === true);
+      // #36 P6b 收口（P6a 遗留）：bypass 只在“选择带 bypass 标记”且“该条
+      // 最终被 commit 接受（进入消息 items）”时才上报——commit 阶段的
+      // segment 容量/去重/复检仍可能拒绝它，选择层命中不等于注入。
+      const bypassHash = selected.find((s) => s.bypass === true)?.hash;
       const usedBytes = selected.reduce((sum, s) => sum + s.byteLength, 0);
       const sSelected = selectSEntry(result.state, sCands, Math.max(0, config.predict.maxBytes - usedBytes));
       const picks: Pick[] = [];
@@ -2238,6 +2329,10 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         });
         if (message !== undefined) recordPInjection(c, message);
       }
+      bypassed =
+        bypassHash !== undefined &&
+        message !== undefined &&
+        (message.details as MemoryInjectDetailsV1).items.some((i) => i.hash === bypassHash);
     }
     return {
       message,
@@ -2598,6 +2693,9 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       if (event.messageType === "custom") {
         const customType = (event.message as { customType?: unknown } | undefined)?.customType;
         const notice = bashNotice(event.message as { customType?: unknown; content?: unknown; details?: unknown });
+        // #36 P6b：自定义消息轮没有用户 prompt——非 bash 通知的早返回也必须
+        // 先清空点名基准，不能继承上一轮的 prompt（旧词不能替本轮“点名”）。
+        curTurnPrompt = notice === undefined ? "" : notice.text;
         if (notice === undefined) return undefined;
         const work = recallE({
           cwd,
@@ -2615,6 +2713,9 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         return m === undefined || typeof m === "function" ? undefined : { message: m };
       }
       if (!isChild && judgedAllowed() && client.status().kind === "full") backfillPending(cwd);
+      // #36 P6b（arch §6.2 点名要求）：记录本轮用户 prompt（剥 skill 块），
+      // 供本轮后续 tool_call 的 A 层点名判定使用。
+      curTurnPrompt = stripSkillBlocks(event.prompt).trim();
       // §5.3/§8.3: P 与 U 互不拖累——P 抛异常只放弃 P（记诊断日志），U 仍按
       // 原路径返回/合并；U 的异常仍由外层 catch 兜底（原行为不变）。
       let begun: BegunPredictTurn | undefined;

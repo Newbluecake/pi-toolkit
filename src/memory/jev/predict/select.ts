@@ -53,6 +53,10 @@ export interface Candidate {
   /** tag → p(e,t)，仅含该条目实际共享的 tag。 */
   readonly tagP: Readonly<Record<string, number>>;
   readonly byteLength: number;
+  /** #36 arch r5 §6.2（P6b）时效降权乘子 m(age)（≤7 天 1.0 / ≤30 天
+   *  0.8 / >30 天 0.6；非降权对象为 1）。排序键整体乘以它；缺省 = 1
+   *  （既有调用与纯测试不填）。 */
+  readonly decay?: number;
 }
 
 export interface SelectPInput {
@@ -100,8 +104,9 @@ export function eligibleTagsOf(tags: readonly TagScore[], fastPathEligible: Read
 
 /** 单个条目在 eligibleTags 下的分数（不含 private/secret/injected/staticCore/
  *  冷却等标志位排除——bypass 排名复用同一公式，见 §6.4）：
- *  `max_t(finalScore(t) × p(e,t)) × importance × (authority=user ? 1.25 : 1)`
- *  （§5.1）；不存在共享 tag 或未过 type 门时返回 undefined。 */
+ *  `max_t(finalScore(t) × p(e,t)) × importance × (authority=user ? 1.25 : 1)
+ *  × decay`（§5.1 + #36 §6.2 排序键 ×m）；不存在共享 tag 或未过 type 门
+ *  时返回 undefined。decay（缺省 1）同样作用于 §6.4 bypass 的排名。 */
 function scoreCandidateShared(
   c: Candidate,
   tags: readonly TagScore[],
@@ -118,12 +123,12 @@ function scoreCandidateShared(
   }
   const importance = effectiveImportance(c);
   const authorityBonus = c.authority === "user" ? 1.25 : 1;
-  return best * importance * authorityBonus;
+  return best * importance * authorityBonus * (c.decay ?? 1);
 }
 
 /** 单个条目在 eligibleTags 下的分数：`max_t(finalScore(t) × p(e,t)) ×
- *  importance × (authority=user ? 1.25 : 1)`（§5.1）；不存在共享 tag 时
- *  返回 undefined（调用方应跳过）。 */
+ *  importance × (authority=user ? 1.25 : 1) × decay`（§5.1；#36 §6.2 排序键
+ *  ×m）；不存在共享 tag 时返回 undefined（调用方应跳过）。 */
 export function scoreCandidate(
   c: Candidate,
   tags: readonly TagScore[],
