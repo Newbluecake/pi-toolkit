@@ -235,13 +235,50 @@ describe("DetailDock.vue — orchestration (§7.4/§7.7)", () => {
   it("inline StopButton (inside Composer since 2026-10) ⇒ abort; queue retry/discard ⇒ control.retry/discard", async () => {
     const pendingCtl = [{ id: "f1", kind: "prompt", text: "x", state: "failed", error: "E_NETWORK", at: 0 }];
     const { control, calls } = fakeControl();
-    const w = mountDock(control, { busy: true, pendingCtl });
-    await w.find(".stop-btn").trigger("click");
-    await w.find(".stop-btn").trigger("click");
-    await w.find(".queue-actions .btn").trigger("click"); // retry
-    await flush();
-    expect(calls.map((c) => c.method)).toEqual(["abort", "retry"]);
-    expect(calls[1]!.args).toEqual(["agent-a", "f1"]);
+    const { view } = fakeView(control, {
+      busy: true,
+      pendingCtl,
+      session: { sessionId: "s1" },
+      card: { epoch: "e1" },
+    });
+    vi.useFakeTimers();
+    const w = mount(DetailDock, {
+      props: { following: true, newCount: 0 },
+      global: {
+        provide: {
+          [CONTROL_VIEW as symbol]: view,
+          [CONTROL_CTX as symbol]: { agentKey: "agent-a", control, enabled: true },
+          [HUB_CTX as symbol]: { state: ref({ conn: "open", hub: null }) },
+        },
+      },
+    });
+    mounted.push(w);
+    try {
+      const stop = w.get(".stop-btn");
+      await stop.trigger("click", { detail: 1 });
+      await stop.trigger("click", { detail: 1 });
+      expect(calls).toEqual([]);
+      await stop.trigger("pointerdown", {
+        pointerId: 1,
+        pointerType: "mouse",
+        isPrimary: true,
+        button: 0,
+      });
+      vi.advanceTimersByTime(699);
+      expect(calls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      window.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
+      await flush();
+      expect(calls).toEqual([{ method: "abort", args: ["agent-a"] }]);
+      await w.find(".queue-actions .btn").trigger("click"); // retry
+      await flush();
+      expect(calls.map((c) => c.method)).toEqual(["abort", "retry"]);
+      expect(calls[1]!.args).toEqual(["agent-a", "f1"]);
+    } finally {
+      w.unmount();
+      mounted.splice(mounted.indexOf(w), 1);
+      vi.useRealTimers();
+    }
   });
 
   it("notExecuted retry re-sends with a NEW id (sendPrompt) and discards the old item (§7.7)", async () => {
