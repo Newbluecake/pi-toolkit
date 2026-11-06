@@ -28,6 +28,7 @@ const props = withDefaults(
     readonly commands: readonly unknown[];
     readonly query: string;
     readonly busy?: boolean;
+    readonly unknownAsText?: boolean;
     /** Highlighted row index (combobox aria-activedescendant model — the composer owns it). */
     readonly active?: number;
     /** id of the listbox root; option ids are `<listboxId>-opt-<index>` (mirrored by Composer). */
@@ -71,7 +72,9 @@ const policyLabel = (p: "allow" | "confirm" | "deny"): string =>
       <span v-if="row.policy === 'deny'" class="command-denied-reason">{{ t("control.cmdDeniedTerminal") }}</span>
     </button>
     <p v-if="rows.length === 0" class="command-empty">
-      <AppIcon name="ban" class="icon-sm" />{{ t("control.cmdDeniedUnknown") }}
+      <AppIcon v-if="!unknownAsText" name="ban" class="icon-sm" />{{
+        t(unknownAsText ? "control.cmdUnknownText" : "control.cmdDeniedUnknown")
+      }}
     </p>
     <p v-else class="command-hint">{{ t("control.paletteHint") }}</p>
   </div>

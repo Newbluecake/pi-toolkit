@@ -49,6 +49,7 @@ import {
   CMD_HISTORY_FEATURE_V1,
   FORWARDED_EVENTS,
   RESUME_FEATURE_V1,
+  UNKNOWN_SLASH_TEXT_FEATURE_V1,
   type AgentKind,
   type CommandsFrame,
   type LanInfoPayload,
@@ -1018,13 +1019,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
    * `command.v1` can never reach the resume ops at all, so advertising the feature there would
    * only surface a guaranteed failure). Old agents never emit `features`, so a new UI against an
    *  old agent degrades to no intercept / no button (§2.8 row 1). */
+  const unknownSlashTextEnabled = (): boolean =>
+    settings.control !== false && settings.webCommands !== false && ctx !== undefined;
+
   const resumeFeatures = (): string[] | undefined => {
     // web-resume plan §2.7 (HEAD semantics, B1 restore): `resume.v1` requires control ∧
     // webCommands ∧ policy ∧ ctx ∧ a PERSISTED session (`getSessionFile()` defined) — entirely
     // independent of the command recorder. web-hub-cmd-history plan §4.6 (A1) adds
     // `cmd.history.v1` with its OWN gate (recorder wired ∧ the same persisted check — no
     // control-plane conjuncts, the recorder records TUI invocations too). One getSessionFile
-    // read serves both. Order is frozen: [resume.v1?, cmd.history.v1?].
+    // read serves both. Existing token order is retained; #40 appends its independent token.
     const tokens: string[] = [];
     const x = ctx;
     const file = x === undefined ? undefined : safe(() => x.sessionManager.getSessionFile(), undefined);
@@ -1034,6 +1038,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         tokens.push(RESUME_FEATURE_V1);
     }
     if (commandRecorder !== undefined && file !== undefined) tokens.push(CMD_HISTORY_FEATURE_V1);
+    if (unknownSlashTextEnabled()) tokens.push(UNKNOWN_SLASH_TEXT_FEATURE_V1);
     return tokens.length > 0 ? tokens : undefined;
   };
 
@@ -1287,6 +1292,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         }
       : {}),
     controlEnabled: () => settings.control !== false,
+    unknownSlashTextEnabled,
     now,
     send: (frame) => conn?.send(frame),
     // Never throws (each step isolated): commands.ts sends the cmd_result / cmd_late frame

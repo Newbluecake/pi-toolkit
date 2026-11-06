@@ -7,6 +7,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { formatXsMessage } from "../../src/fabric/xs/format.js";
 import { XS_MEMBERSHIP_CUSTOM_TYPE } from "../../src/fabric/xs/membership.js";
 import { P2_HUB_CAPS, VERSION_HUB_CAP } from "../../src/web-hub/protocol/version.js";
+import { UNKNOWN_SLASH_TEXT_FEATURE_V1 } from "../../src/web-hub/protocol/messages.js";
 import {
   XS_ALIAS_AGENT_CAP,
   XS_ALIAS_V2_AGENT_CAP,
@@ -336,6 +337,22 @@ async function capture(config: Config): Promise<Capture> {
   }) as Capture;
 }
 
+/**
+ * #40 ruling (2026-11-06): `unknown-slash-text.v1` is a declared orthogonal default-on feature
+ * token that post-dates the frozen reply-off golden. Raw captures KEEP it (asserted exactly once,
+ * in order, by the test body); only the golden-anchor / withoutExceptions comparisons use this
+ * named-token projection — a shallow copy of statusFrame with that single token removed. No
+ * generic strip, no `delete features`: any other features diff still fails the golden anchor.
+ */
+function statusFrameWithoutUnknownSlash(c: Capture): Record<string, unknown> {
+  const rawFeatures = (c.statusFrame.features as string[] | undefined) ?? [];
+  expect(rawFeatures.filter((f) => f === UNKNOWN_SLASH_TEXT_FEATURE_V1)).toHaveLength(1);
+  const statusFrame: Record<string, unknown> = { ...c.statusFrame };
+  statusFrame.features = rawFeatures.filter((f) => f !== UNKNOWN_SLASH_TEXT_FEATURE_V1);
+  expect(statusFrame.features).toEqual(["resume.v1"]);
+  return statusFrame;
+}
+
 /** The declared exceptions removed: exactly one occurrence of each cap (asserted), the hub channels/alias keys. */
 function withoutExceptions(c: Capture, opts: { channelCap: boolean; aliasCap?: boolean }): Record<string, unknown> {
   const caps = [...((c.hello.caps as string[]) ?? [])];
@@ -369,7 +386,7 @@ function withoutExceptions(c: Capture, opts: { channelCap: boolean; aliasCap?: b
     hello: { ...c.hello, caps },
     slotSequence: c.slotSequence,
     memberFrame: c.memberFrame,
-    statusFrame: c.statusFrame,
+    statusFrame: statusFrameWithoutUnknownSlash(c),
     hubConfig: { ...c.hubConfig, crossSession },
     membershipEntry: c.membershipEntry,
     formatXsMessage: c.formatXsMessage,
@@ -387,11 +404,18 @@ describe("channel-plan §9.4-2 (CHW): agent-side compat anchor — real activate
     const { c1, c2, c3, c4, c5 } = caps as Record<"c1" | "c2" | "c3" | "c4" | "c5", Capture>;
     const golden = GOLDEN.wiring;
 
+    // #40 (2026-11-06): the raw captures (all five configs, cmdHistory:false as pinned) carry the
+    // orthogonal default-on `unknown-slash-text.v1` — exactly once, in order, and nothing else.
+    // Raw is kept untouched; only the golden anchor below uses the named-token projection.
+    for (const c of [c1, c2, c3, c4, c5]) {
+      expect(c.statusFrame.features).toEqual(["resume.v1", UNKNOWN_SLASH_TEXT_FEATURE_V1]);
+    }
+
     // ③④ anchored to v0.7.1 through the golden.
     for (const c of [c3, c4]) {
       expect(c.memberFrame).toEqual(golden.memberFrame);
       expect(JSON.stringify(c.memberFrame)).toBe(JSON.stringify(golden.memberFrame));
-      expect(JSON.stringify(c.statusFrame)).toBe(JSON.stringify(golden.statusFrame));
+      expect(JSON.stringify(statusFrameWithoutUnknownSlash(c))).toBe(JSON.stringify(golden.statusFrame));
       expect(JSON.stringify(c.slotSequence)).toBe(JSON.stringify(golden.slotSequence));
       expect(JSON.stringify(c.membershipEntry)).toBe(JSON.stringify(GOLDEN.membershipEntry));
       expect(JSON.stringify(c.formatXsMessage)).toBe(JSON.stringify(GOLDEN.formatXsMessage));

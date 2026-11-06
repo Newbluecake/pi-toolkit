@@ -23,8 +23,8 @@ export interface SlashCommand {
 const SLASH_RE = /^\/([^\s]+)(?:\s+([\s\S]*))?$/;
 
 /** `/name args` → `{name, args}`; `undefined` when `text` is not slash-shaped at all. Splitting
- *  only — charset / policy validation is `resolveCommandPolicy`'s job (§4.6: never fall back to
- *  plain text for an unparseable or unknown command). */
+ *  only — command dispatch still validates charset/policy; #40 raw prompts use strict
+ *  classification only at their guarded invalid-wire-name boundary. */
 export function parseSlashCommand(text: string): SlashCommand | undefined {
   const m = SLASH_RE.exec(text);
   return m ? { name: m[1]!, args: m[2] ?? "" } : undefined;
@@ -71,8 +71,8 @@ export interface ClassifyResult {
 
 /**
  * §4.6 step 2: `pi.getCommands()` hit ⇒ extension/template/skill; else the builtin name tables
- * ⇒ builtin; else `undefined` (the caller replies `E_UNKNOWN_COMMAND` — a `/xxx` this bridge does
- * not recognize is NEVER silently redispatched as plain text).
+ * ⇒ builtin; else `undefined`. Legacy completion/shadow API: do not use absence from this
+ * fail-soft reader as dispatch evidence. #40 bridge/prompt callers use the strict variant.
  */
 export function classifyCommand(pi: CommandsPort | undefined, name: string): ClassifyResult | undefined {
   const found = safeGetCommands(pi).find((c) => c.name === name);
@@ -83,6 +83,41 @@ export function classifyCommand(pi: CommandsPort | undefined, name: string): Cla
   }
   if (BUILTIN_BRIDGE_NAMES.has(name) || BUILTIN_DENY_NAMES.has(name)) return { kind: "builtin" };
   return undefined;
+}
+
+/** Dispatch-only evidence. Completion/shadow retain classifyCommand's legacy fail-soft API. */
+export type StrictClassifyResult =
+  { state: "known"; command: ClassifyResult } | { state: "unknown" } | { state: "unavailable" };
+
+export function classifyCommandStrict(pi: CommandsPort | undefined, name: string): StrictClassifyResult {
+  try {
+    if (pi === undefined) return { state: "unavailable" };
+    const commands: unknown = pi.getCommands();
+    if (!Array.isArray(commands)) return { state: "unavailable" };
+    // Validate the WHOLE list before using absence (including entries beyond the UI's cap).
+    for (const c of commands) {
+      if (
+        c === null ||
+        typeof c !== "object" ||
+        typeof c.name !== "string" ||
+        c.name === "" ||
+        !["extension", "prompt", "skill"].includes(c.source) ||
+        (c.description !== undefined && typeof c.description !== "string")
+      )
+        return { state: "unavailable" };
+    }
+    const found = (commands as RawSlashCommandInfo[]).find((c) => c.name === name);
+    if (found !== undefined) {
+      const command: ClassifyResult = { kind: sourceToKind(found.source) };
+      if (found.description !== undefined) command.description = found.description;
+      return { state: "known", command };
+    }
+    return BUILTIN_BRIDGE_NAMES.has(name) || BUILTIN_DENY_NAMES.has(name)
+      ? { state: "known", command: { kind: "builtin" } }
+      : { state: "unknown" };
+  } catch {
+    return { state: "unavailable" };
+  }
 }
 
 const DESCRIPTION_MAX_CHARS = 120;

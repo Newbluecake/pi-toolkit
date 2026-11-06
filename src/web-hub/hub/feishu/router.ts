@@ -68,14 +68,14 @@ export function parseFeishuCommand(text: string, opts: FeishuParseOptions = {}):
     if (cwd && Buffer.byteLength(cwd) <= 4_096 && !/[\p{Cc}\p{Cf}]/u.test(cwd))
       return { op: "new", cwd, firstPrompt: [rest, tail].filter(Boolean).join("\n") };
   }
-  if (opts.threads === true && first.startsWith("/main")) {
+  if (opts.threads === true && token === "/main") {
     const text = [first.slice(5).trim(), tail].filter(Boolean).join("\n");
-    if (first === "/main" || text.trim() === "") return { op: "help", unknown: "/main" };
+    if (text.trim() === "") return { op: "help" };
     return { op: "main", text };
   }
   return ["/list", "/use", "/cur", "/new", "/unbind", "/file", "/help"].includes(token)
     ? { op: "help" }
-    : { op: "help", unknown: token.slice(0, 64) }; // Unknown commands NEVER reach pi.
+    : { op: "prompt", text }; // Only enabled bot commands execute; all other slash text is data.
 }
 export type FeishuRouterIntent =
   | { type: "notice"; message: FeishuMessage; code: string; unknownCommand?: string }

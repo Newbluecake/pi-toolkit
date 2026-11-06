@@ -22,8 +22,8 @@ describe("F6 command grammar", () => {
     ["/new /repo first message\nnext line", { op: "new", cwd: "/repo", firstPrompt: "first message\nnext line" }],
     ['/new "/space dir" hello', { op: "new", cwd: "/space dir", firstPrompt: "hello" }],
     ["/file /abs path", { op: "file", path: "/abs path" }],
-    ["/unknown", { op: "help", unknown: "/unknown" }],
-    ["/List", { op: "help", unknown: "/List" }],
+    ["/unknown", { op: "prompt", text: "/unknown" }],
+    ["/List", { op: "prompt", text: "/List" }],
     ["/list args", { op: "help" }],
     ["/list\nbody", { op: "help" }],
     ["/new", { op: "help" }],
@@ -67,7 +67,7 @@ describe("F6 routing intents and bindings", () => {
     expect(r.state.bindings.get("p2p:chat")!.rev).toBeGreaterThan(original);
     expect(r.request).not.toHaveBeenCalled();
   });
-  it("unbound plain messages are not held; unknown slash commands never forward", async () => {
+  it("unbound unknown slash text still requires a binding", async () => {
     const r = await f6Rig();
     r.state.bindings.remove("p2p:chat");
     for (const text of ["plain", "/unknown", "/newer /repo"]) {
@@ -75,7 +75,11 @@ describe("F6 routing intents and bindings", () => {
       await r.state.commit();
       p.durable?.();
     }
-    expect(r.intents.map((i) => (i.type === "notice" ? i.code : i.type))).toEqual(["no-session-bound", "help", "help"]);
+    expect(r.intents.map((i) => (i.type === "notice" ? i.code : i.type))).toEqual([
+      "no-session-bound",
+      "no-session-bound",
+      "no-session-bound",
+    ]);
     expect(r.state.requests.list()).toHaveLength(0);
     expect(r.requests.bufferedChats).toBe(0);
     expect(r.request).not.toHaveBeenCalled();
@@ -266,8 +270,8 @@ describe("F6 routing intents and bindings", () => {
 describe("F8 command-help ruling", () => {
   it.each([
     ["/help", { op: "help" }],
-    ["/xxx extra", { op: "help", unknown: "/xxx" }],
-    ["/", { op: "help", unknown: "/" }],
+    ["/xxx extra", { op: "prompt", text: "/xxx extra" }],
+    ["/", { op: "prompt", text: "/" }],
     ["/home/me/file.txt 帮我看看", { op: "prompt", text: "/home/me/file.txt 帮我看看" }],
     ["请看 /home/x", { op: "prompt", text: "请看 /home/x" }],
     ["请看\n/home/x", { op: "prompt", text: "请看\n/home/x" }],
@@ -283,5 +287,21 @@ describe("F8 command-help ruling", () => {
     prepared.durable?.();
     expect(r.intents.at(-1)).toMatchObject({ type: "notice", code: "help" });
     expect(r.request).not.toHaveBeenCalled();
+  });
+});
+
+describe("#40 enabled bot commands only", () => {
+  it.each(["/model x", "/reload", "/main x", "/schedule run 1", "/mainx x", "/Model", "/oops\n  x  "])(
+    "preserves %s as text",
+    (text) => {
+      expect(parseFeishuCommand(text)).toEqual({ op: "prompt", text });
+    },
+  );
+  it("matches main exactly and preserves enabled-command usage errors", () => {
+    expect(parseFeishuCommand("/mainx x", { threads: true })).toEqual({ op: "prompt", text: "/mainx x" });
+    expect(parseFeishuCommand("/main", { threads: true })).toEqual({ op: "help" });
+    expect(parseFeishuCommand("/main\nx", { threads: true })).toEqual({ op: "main", text: "x" });
+    expect(parseFeishuCommand("/schedule nope", { schedule: true })).toEqual({ op: "help" });
+    expect(parseFeishuCommand("/use\tx")).toEqual({ op: "help" });
   });
 });

@@ -111,6 +111,8 @@ import { computed, inject, nextTick, onMounted, onUnmounted, ref, shallowRef, us
 import { useTicker } from "../../composables/useTicker.js";
 import {
   commandPolicyFor,
+  slashTextRoute,
+  unknownSlashTextAvailable,
   composerKeyAction,
   matchCommandRows,
   mergeRecalledDraft,
@@ -211,9 +213,10 @@ const resumeSlash = computed(() => {
   if (s === undefined || !commandsEnabled.value || !resumeOn.value) return false;
   return s.name === "resume" || s.name === "resume-recent";
 });
-const commandMode = computed(
-  () => slash.value !== undefined && commandsEnabled.value && !sendAsText.value && !resumeSlash.value,
+const slashRoute = computed(() =>
+  slashTextRoute(text.value, [...commands.value], busy.value, commandsEnabled.value, view?.agent.value.status),
 );
+const commandMode = computed(() => slashRoute.value.mode !== "text" && !sendAsText.value && !resumeSlash.value);
 
 // ---------------------------------------------------------------------------
 // @mention completion (web-hub task #11) + @文件补全 (file-mention)
@@ -617,9 +620,7 @@ function onTodoMouseLeave(): void {
   todoHover.value = false;
 }
 
-const policy = computed(() =>
-  commandMode.value && slash.value ? commandPolicyFor([...commands.value], slash.value.name, busy.value) : null,
-);
+const policy = computed(() => (commandMode.value ? slashRoute.value.policy : null));
 // §2.6 decoratePalette: the /resume + /resume-recent rows render RUNNABLE with the
 // 「恢复会话」 description while available (the agent advertises them deny for old UIs).
 // The decoration rides BOTH surfaces: the `commands` prop (CommandPalette re-derives its
@@ -1202,11 +1203,9 @@ function sendGate() {
     // they are NOT command-routed — the advertised deny must not block them at the gate.
     // DetailDock still re-derives the policy from the ROUTED text (sendAsText only changes
     // composer display), so the non-resume branches keep seeing exactly the routed answer.
-    commandRouted: slash.value !== undefined && commandsEnabled.value && !resumeSlash.value,
+    commandRouted: slashRoute.value.mode !== "text" && !resumeSlash.value,
     policy:
-      slash.value !== undefined && commandsEnabled.value && !resumeSlash.value
-        ? commandPolicyFor([...commands.value], slash.value.name, busy.value)
-        : policy.value,
+      slash.value !== undefined && commandsEnabled.value && !resumeSlash.value ? slashRoute.value.policy : policy.value,
   });
   // §2.6 "intent ∧ available ∧ empty tray": with attachments the composed text stops
   // matching the intent (bare form) — the slash form would still pass as plain text, so it
@@ -1357,6 +1356,7 @@ watch(
       :busy="busy"
       :active="paletteActiveIndex"
       :listbox-id="paletteId"
+      :unknown-as-text="unknownSlashTextAvailable(view?.agent.value.status)"
       @pick="completeCommand"
       @hover="paletteActive = $event"
     />

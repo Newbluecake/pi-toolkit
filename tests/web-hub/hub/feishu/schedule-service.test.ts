@@ -72,16 +72,13 @@ const offer = (n: number, over: Partial<ScheduleReportOffer> = {}): ScheduleRepo
 });
 
 describe("feature off (no HubConfig.schedule ⇒ no port)", () => {
-  it("/schedule is an unknown command, help has no schedule line, push is inert, no state key", async () => {
+  it("disabled /schedule is plain text once; no schedule port/timer/push/state key appears", async () => {
     const r = await rig();
-    await r.bind();
-    r.send(messageEnvelope("s1", "/schedule"));
-    await eventually(() => expect(sentContent(r)).toContain("未知命令 /schedule"));
-    expect(sentContent(r)).not.toContain("定时任务");
-    r.send(messageEnvelope("h1", "/help"));
-    await eventually(() => expect(sentContent(r)).toContain("/unbind"));
-    expect(sentContent(r)).not.toContain("/schedule [run");
-    const before = r.fake.sent.length;
+    expect(r.deps.schedule).toBeUndefined();
+    expect(r.service.schedule.enabled).toBe(false);
+    // Probe the inactive schedule facade before any inbound work can schedule unrelated timers.
+    const timers = vi.spyOn(r.clock, "setTimeout");
+    const sentBeforePush = r.fake.sent.length;
     expect((await r.service.schedule.pushReport(offer(1))).outcome).toBe("n/a");
     expect(
       await r.service.schedule.pushNotice({
@@ -95,8 +92,34 @@ describe("feature off (no HubConfig.schedule ⇒ no port)", () => {
       }),
     ).toEqual({ outcome: "refused", reason: "inactive" });
     expect(r.service.schedule.receiptsFor("session-1")).toEqual([]);
-    expect(r.fake.sent.length).toBe(before);
-    expect("scheduleReceipts" in (await r.disk())).toBe(false);
+    expect(timers).not.toHaveBeenCalled();
+    timers.mockRestore();
+    expect(r.fake.sent).toHaveLength(sentBeforePush);
+    await r.bind();
+    const keysBefore = Object.keys(await r.disk()).sort();
+    const text = "/schedule\n  /reload raw body  ";
+    const event = messageEnvelope("s1", text);
+    const acks = r.ackCount();
+    r.send(event);
+    await eventually(() => expect(r.request).toHaveBeenCalledTimes(1));
+    const frame = r.request.mock.calls[0]![0];
+    expect(frame.cmd.op).toBe("prompt");
+    if (frame.cmd.op !== "prompt") throw new Error("disabled schedule must use plain admission");
+    expect(frame.cmd.text.slice(frame.cmd.text.indexOf("\n") + 1)).toBe(text);
+    expect(frame.cmd).not.toHaveProperty("thread");
+    expect((await r.disk())["requests"][frame.id].payload.body).toBe(text);
+    r.send(event);
+    await eventually(() => expect(r.ackCount()).toBe(acks + 2));
+    expect(r.request).toHaveBeenCalledTimes(1); // duplicate event never executes a pi command
+    expect(r.request.mock.calls.every(([f]) => f.cmd.op === "prompt" && !f.queryOnly)).toBe(true);
+    expect(sentContent(r)).not.toContain("未知命令");
+    r.send(messageEnvelope("h1", "/help"));
+    await eventually(() => expect(sentContent(r)).toContain("/unbind"));
+    expect(sentContent(r)).not.toContain("/schedule [run");
+    expect(sentContent(r)).not.toContain("定时任务");
+    const disk = await r.disk();
+    expect("scheduleReceipts" in disk).toBe(false);
+    expect(Object.keys(disk).sort()).toEqual(keysBefore);
   });
 });
 

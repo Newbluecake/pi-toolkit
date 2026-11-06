@@ -245,7 +245,7 @@ describe("wireWebHub — resume wiring (§2.4/§2.5/§2.7)", () => {
     const status = hub!.all().find((f) => f.t === "status") as { features?: string[] };
     // web-hub-cmd-history plan §4.6 (A1): the recorder is wired (cmdHistory defaults on) and the
     // session is persisted, so the frozen feature order is [resume.v1, cmd.history.v1].
-    expect(status.features).toEqual([RESUME_FEATURE_V1, "cmd.history.v1"]);
+    expect(status.features).toEqual([RESUME_FEATURE_V1, "cmd.history.v1", "unknown-slash-text.v1"]);
 
     // deny override ⇒ feature off (same status shape otherwise)
     resetGlobals();
@@ -267,15 +267,17 @@ describe("wireWebHub — resume wiring (§2.4/§2.5/§2.7)", () => {
     );
     const withToken = statuses.filter((s) => s.features !== undefined);
     expect(withToken.length).toBeGreaterThan(0);
-    expect(new Set(withToken.map((s) => JSON.stringify(s.features))).has(JSON.stringify(["cmd.history.v1"]))).toBe(
-      true,
-    );
+    expect(
+      new Set(withToken.map((s) => JSON.stringify(s.features))).has(
+        JSON.stringify(["cmd.history.v1", "unknown-slash-text.v1"]),
+      ),
+    ).toBe(true);
   });
 
   // ---------------------------------------------------------------------------
   // A1 verify B1 (2026-10-24): resume.v1's HEAD gate restored — REAL wireWebHub assembly,
-  // not fake deps. Non-persisted sessions must declare NO features (resume.v1 included),
-  // regardless of the recorder; cmdHistory:false must leave resume.v1 exactly as HEAD had it.
+  // not fake deps. Non-persisted sessions omit resume/history tokens; #40 stays independent.
+  // cmdHistory:false still retains resume.v1 and the appended #40 token.
   // ---------------------------------------------------------------------------
   it("B1: a NON-persisted session (--no-session shape) declares neither resume.v1 nor cmd.history.v1", async () => {
     hub = await startFakeHub(pathsIn(tmp.dir).socketPath, { autoAck: false });
@@ -289,11 +291,11 @@ describe("wireWebHub — resume wiring (§2.4/§2.5/§2.7)", () => {
     await waitUntil(() => hub!.all().some((f) => f.t === "status"), 3_000, "status");
     const statuses = hub!.all().filter((f) => f.t === "status") as Array<{ features?: string[] }>;
     expect(statuses.length).toBeGreaterThan(0);
-    // HEAD behavior for resume.v1 + the plan's own gate for cmd.history.v1: NO features at all
-    expect(statuses.every((s) => s.features === undefined)).toBe(true);
+    // #40 does not depend on persisted history: only its positive feature token remains.
+    expect(statuses.every((s) => JSON.stringify(s.features) === JSON.stringify(["unknown-slash-text.v1"]))).toBe(true);
   });
 
-  it("B1: cmdHistory=false + persisted session ⇒ features is exactly [resume.v1] (HEAD-identical)", async () => {
+  it("B1: cmdHistory=false + persisted session ⇒ features appends #40 independently of cmdHistory", async () => {
     hub = await startFakeHub(pathsIn(tmp.dir).socketPath, { autoAck: false });
     const { pi, fire } = fakePi();
     wireWebHub(pi, deps({ settings: { ...SETTINGS, cmdHistory: false } }));
@@ -306,9 +308,29 @@ describe("wireWebHub — resume wiring (§2.4/§2.5/§2.7)", () => {
     const statuses = hub!.all().filter((f) => f.t === "status") as Array<{ features?: string[] }>;
     const withToken = statuses.filter((s) => s.features !== undefined);
     expect(withToken.length).toBeGreaterThan(0);
-    // every features array is EXACTLY [resume.v1] — byte-identical to the pre-cmd-history agent
-    expect(withToken.every((s) => JSON.stringify(s.features) === JSON.stringify([RESUME_FEATURE_V1]))).toBe(true);
+    // #40 appends its independent capability after the existing resume token.
+    expect(
+      withToken.every(
+        (s) => JSON.stringify(s.features) === JSON.stringify([RESUME_FEATURE_V1, "unknown-slash-text.v1"]),
+      ),
+    ).toBe(true);
   });
+
+  it.each([{ control: false }, { webCommands: false }])(
+    "#40 does not advertise on disabled command surfaces: %j",
+    async (off) => {
+      hub = await startFakeHub(pathsIn(tmp.dir).socketPath, { autoAck: false });
+      const { pi, fire } = fakePi();
+      wireWebHub(pi, deps({ settings: { ...SETTINGS, ...off } }));
+      fire("session_start", { type: "session_start", reason: "startup" }, fakeCtx({ mode: "tui" }).ctx);
+      await waitUntil(() => hub!.all().some((f) => f.t === "hello"));
+      const hello = hub!.all().find((f) => f.t === "hello") as Extract<AgentFrame, { t: "hello" }>;
+      hub!.send(hub!.conns[0]!, ackFrame(`a${hello.agentId.pid}`, 4242, FULL_CAPS));
+      await waitUntil(() => hub!.all().some((f) => f.t === "status"));
+      const statuses = hub!.all().filter((f) => f.t === "status") as Array<{ features?: string[] }>;
+      expect(statuses.every((s) => !s.features?.includes("unknown-slash-text.v1"))).toBe(true);
+    },
+  );
 
   // ---------------------------------------------------------------------------
   // A1 verify B2 (2026-10-24): the /new frame's cmdId survives the REAL wiring — hub cmd

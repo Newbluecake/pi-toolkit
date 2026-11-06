@@ -27,6 +27,7 @@ import type { SessionMentionRouteResult } from "../../mention/session.js";
  *    caller (`index.ts`) routes them straight to the dialog bridge (C2).
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { classifyCommandStrict, parseSlashCommand } from "./slash.js";
 import type { BuiltinBridge } from "./builtin-bridge.js";
 import type { CommandLedger, LedgerResult } from "./ledger.js";
 import type { QueueMirror } from "./queue-mirror.js";
@@ -73,6 +74,8 @@ export interface CommandHandlerDeps {
   builtinBridge: BuiltinBridge;
   query?: () => QueryControlPort | undefined;
   controlEnabled(): boolean;
+  /** Same activation-local readiness predicate that advertises unknown-slash-text.v1. */
+  unknownSlashTextEnabled?(): boolean;
   now(): number;
   send(frame: CmdResultFrame | CmdLateFrame): void;
   /** Called after any ledger/queue mutation so the caller can republish the `status`/`ctl` slots. */
@@ -372,6 +375,25 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     // prompt has NOT been delivered (checked before any dispatch), so effect stays none.
     if (deps.switchInFlight?.() === true) {
       return settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
+    }
+    // #40: AFTER begin/security validation, BEFORE any routing, origin or dispatch effect.
+    // Held deliveries never re-enter here; bot/thread inputs are not a pi command surface.
+    if (
+      deps.unknownSlashTextEnabled?.() === true &&
+      !isFeishuCmdOrigin(frame.origin) &&
+      !("thread" in cmd) &&
+      !cmd.text.startsWith("//")
+    ) {
+      const slash = parseSlashCommand(cmd.text);
+      if (slash !== undefined && !/^[A-Za-z0-9:_.-]{1,64}$/.test(slash.name)) {
+        const classified = classifyCommandStrict(deps.pi, slash.name);
+        if (classified.state !== "unknown") {
+          return settleAndReply(
+            frame,
+            errResult(classified.state === "known" ? "E_BAD_REQUEST" : "E_UNSUPPORTED", false, "none"),
+          );
+        }
+      }
     }
     // Mention routing deliberately precedes topic-switch and steer-recall hold. The input is
     // already admitted above, and routeMention uses the same registry/steer/resume/fabric/note

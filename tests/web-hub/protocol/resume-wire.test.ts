@@ -11,6 +11,7 @@ import { Value } from "@sinclair/typebox/value";
 import {
   decodeAgentFrame,
   RESUME_FEATURE_V1,
+  UNKNOWN_SLASH_TEXT_FEATURE_V1,
   STATUS_FEATURES_MAX_CHARS,
   STATUS_FEATURES_MAX_ITEMS,
   type AgentFrame,
@@ -97,5 +98,15 @@ describe("web-resume wire — data.sessions on cmd_result (§2.4)", () => {
   it("a cmd_result without sessions is unaffected", () => {
     const out = decodeAgentFrame({ ...frame, data: { op: "command", kind: "builtin", completion: "sync" } });
     expect((out as { data: unknown }).data).toEqual({ op: "command", kind: "builtin", completion: "sync" });
+  });
+});
+
+describe("#40 optional unknown-slash feature token", () => {
+  it("passes the current and pre-feature open status schema without a new cap or field", () => {
+    const frame = { ...baseStatus, features: [RESUME_FEATURE_V1, UNKNOWN_SLASH_TEXT_FEATURE_V1] };
+    expect(UNKNOWN_SLASH_TEXT_FEATURE_V1).toBe("unknown-slash-text.v1");
+    expect(decodeAgentFrame(frame)).toEqual(frame);
+    expect(Value.Check(legacyStatusFrameSchema, frame)).toBe(true);
+    expect(decodeAgentFrame(baseStatus)).toEqual(baseStatus);
   });
 });

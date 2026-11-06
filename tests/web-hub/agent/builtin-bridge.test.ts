@@ -110,6 +110,7 @@ function fakeCapture(over: Partial<CommandCapturePort> = {}): CommandCapturePort
 function baseDeps(over: Partial<BuiltinBridgeDeps> = {}): BuiltinBridgeDeps {
   const { ctx } = fakeCtx();
   return {
+    pi: fakePi().pi,
     getCtx: () => ctx,
     getSessionId: () => "sess-1",
     now: () => 1000,
@@ -525,7 +526,9 @@ describe("execute — builtin dispatch (§4.6 builtin row)", () => {
     expect(sent[0]).toEqual({ text: "/agent reload", options: { expandPromptTemplates: true, deliverAs: "followUp" } });
   });
   it("builtins that need pi degrade to E_UNSUPPORTED when pi is not wired", () => {
-    const bridge = createBuiltinBridge(baseDeps());
+    const deps = baseDeps();
+    delete deps.pi;
+    const bridge = createBuiltinBridge(deps);
     expect(bridge.execute(frame("name", "x"))).toEqual({
       ok: false,
       code: "E_UNSUPPORTED",
@@ -1054,5 +1057,24 @@ describe("execute — cmd-history: M3 freeze (recorder unwired ⇒ byte-identica
       const withRec = strip(mk(() => rec.recorder).execute(frame(name, args, {}, confirm)));
       expect(withRec, name).toEqual(without);
     }
+  });
+});
+
+describe("#40 authoritative unknown evidence", () => {
+  it.each([null, {}, [null], [{ name: "oops" }]])("malformed registry is unavailable, not unknown: %j", (value) => {
+    const bridge = createBuiltinBridge(baseDeps({ pi: { getCommands: () => value } as never }));
+    expect(bridge.execute(frame("oops", ""))).toMatchObject({ ok: false, code: "E_UNSUPPORTED", effect: "none" });
+  });
+  it("throwing registry is unavailable even for builtin names", () => {
+    const bridge = createBuiltinBridge(
+      baseDeps({
+        pi: {
+          getCommands() {
+            throw new Error("broken");
+          },
+        } as never,
+      }),
+    );
+    expect(bridge.execute(frame("model", "x"))).toMatchObject({ ok: false, code: "E_UNSUPPORTED", effect: "none" });
   });
 });

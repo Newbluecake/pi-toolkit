@@ -2,7 +2,7 @@
  * #30 reload-result plan §3 G1 — the reload-result compat golden.
  *
  * Captured from UNMODIFIED dev BEFORE any P-A source change
- * (`PI_TOOLKIT_RELOAD_RESULT_GOLDEN_CAPTURE=1`; refuses to overwrite an existing file), over the
+ * (historical capture via `PI_TOOLKIT_RELOAD_RESULT_GOLDEN_CAPTURE=1`; capture is now disabled), over the
  * REAL agent-side stack a web "reload this agent" request travels: the real `wireWebHub`
  * (real command handler, real builtin bridge, real capture engine, real command recorder) on a
  * fakeNet socket, plus the real `wrapCommandApi`-registered `/agent` command, the real
@@ -23,7 +23,7 @@
  * Never regenerate the golden to make a diff pass: a diff outside the allow-list means
  * observable wire behavior changed.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, RegisteredCommand } from "@earendil-works/pi-coding-agent";
@@ -34,7 +34,7 @@ import { createReloadCommandPort } from "../../../src/reload/command-port.js";
 import { DeferredReloadController } from "../../../src/reload/defer.js";
 import { wireWebHub } from "../../../src/web-hub/agent/index.js";
 import { parseSlashCommand } from "../../../src/web-hub/agent/slash.js";
-import type { AgentFrame } from "../../../src/web-hub/protocol/messages.js";
+import { UNKNOWN_SLASH_TEXT_FEATURE_V1, type AgentFrame } from "../../../src/web-hub/protocol/messages.js";
 import { ackFrame, fakeCtx, fakeNet, fakePi, pathsIn, resetGlobals, SETTINGS, tmpDir, waitUntil } from "./helpers.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -294,6 +294,26 @@ interface Parsed {
   [k: string]: unknown;
 }
 
+/** #40 root ruling: project ONLY the named orthogonal token for historical comparison.
+ * Raw frames are immutable; canonical JSON is asserted BEFORE status reserialization so
+ * whitespace/key-order changes cannot be hidden by parse/stringify. Non-status bytes pass intact.
+ */
+function projectUnknownSlashTokenForReloadGolden(raw: string): string {
+  const frame = JSON.parse(raw) as Parsed;
+  if (frame.t !== "status") return raw;
+  expect(JSON.stringify(frame), "live status must already be canonical NDJSON").toBe(raw);
+  if (frame.features === undefined) return raw;
+  expect(frame.features, "live raw status features: exact default-on gate").toEqual([
+    "resume.v1",
+    "cmd.history.v1",
+    UNKNOWN_SLASH_TEXT_FEATURE_V1,
+  ]);
+  const features = frame.features as string[];
+  expect(features.filter((f) => f === UNKNOWN_SLASH_TEXT_FEATURE_V1)).toHaveLength(1);
+  const projected = { ...frame, features: features.filter((f) => f !== UNKNOWN_SLASH_TEXT_FEATURE_V1) };
+  return JSON.stringify(projected);
+}
+
 /**
  * D6's two allowed difference classes for the tracked-Web scenarios:
  *  ① an existing status frame may carry an appended `reload` field;
@@ -309,11 +329,16 @@ function expectCompat(goldenRaw: string[], liveRaw: string[], label: string): vo
     return JSON.stringify(rest);
   };
   const g = goldenRaw.map((r) => JSON.parse(r) as Parsed);
-  const l = liveRaw.map((r) => JSON.parse(r) as Parsed);
+  const projectedLiveRaw = liveRaw.map(projectUnknownSlashTokenForReloadGolden);
+  const l = projectedLiveRaw.map((r) => JSON.parse(r) as Parsed);
+  for (const raw of goldenRaw) {
+    const frame = JSON.parse(raw) as Parsed;
+    if (frame.t === "status") expect(JSON.stringify(frame), "golden status is canonical NDJSON").toBe(raw);
+  }
   expect(
-    g.filter((f) => f.t !== "status").map((f) => JSON.stringify(f)),
+    goldenRaw.filter((_, i) => g[i]!.t !== "status"),
     `${label}: non-status frames must stay byte-equal`,
-  ).toEqual(l.filter((f) => f.t !== "status").map((f) => JSON.stringify(f)));
+  ).toEqual(projectedLiveRaw.filter((_, i) => l[i]!.t !== "status"));
   const gs = g.filter((f) => f.t === "status");
   const ls = l.filter((f) => f.t === "status");
   let i = 0;
@@ -334,22 +359,16 @@ function expectCompat(goldenRaw: string[], liveRaw: string[], label: string): vo
 // ---------------------------------------------------------------------- the suite
 
 describe("#30 reload-result compat golden (plan §3 G1, recorded pre-change on dev)", () => {
-  it("s1 TUI reload: the COMPLETE frame sequence stays byte-identical; s2/s3 stay within the D6 allow-list", async () => {
+  it("s1 full sequence only projects the named #40 token; s2/s3 retain the D6 allow-list", async () => {
     const fresh = await captureAll();
-    if (CAPTURE && !existsSync(FIXTURE)) {
-      mkdirSync(dirname(FIXTURE), { recursive: true });
-      const out = {
-        note: "#30 P-A compat golden — captured on UNMODIFIED dev (pre reload-result). Never regenerate to fix a diff.",
-        scenarios: Object.fromEntries(Object.entries(fresh).map(([k, v]) => [k, { frames: v.raw }])),
-      };
-      writeFileSync(FIXTURE, `${JSON.stringify(out, null, 2)}\n`);
-    }
+    if (CAPTURE) throw new Error("reload-result golden is frozen: capture is disabled; never generate a replacement");
     expect(existsSync(FIXTURE), "golden missing — capture it BEFORE changing any source").toBe(true);
     const golden = JSON.parse(readFileSync(FIXTURE, "utf8")) as { scenarios: Record<string, { frames: string[] }> };
     // s1: full byte equality (TUI reloads are never tracked — Q1)
-    expect(fresh["s1-tui-reload-idle-handover"]!.raw, "s1 full sequence").toEqual(
-      golden.scenarios["s1-tui-reload-idle-handover"]!.frames,
-    );
+    expect(
+      fresh["s1-tui-reload-idle-handover"]!.raw.map(projectUnknownSlashTokenForReloadGolden),
+      "s1 full sequence except the named #40 token",
+    ).toEqual(golden.scenarios["s1-tui-reload-idle-handover"]!.frames);
     expectCompat(
       golden.scenarios["s2-web-reload-idle"]!.frames,
       fresh["s2-web-reload-idle"]!.raw,
@@ -379,5 +398,32 @@ describe("#30 reload-result compat golden (plan §3 G1, recorded pre-change on d
     const c = await runS2();
     const d = await runS2();
     expect(d.raw).toEqual(c.raw);
+  });
+});
+
+describe("#40 named reload golden projection guardrails", () => {
+  const live = JSON.stringify({
+    t: "status",
+    leafId: "L1",
+    features: ["resume.v1", "cmd.history.v1", UNKNOWN_SLASH_TEXT_FEATURE_V1],
+    reload: { state: "started" },
+  });
+  it("only removes the named token, leaving raw data/reload fields and all non-status bytes intact", () => {
+    const original = JSON.parse(live) as Parsed;
+    const projected = projectUnknownSlashTokenForReloadGolden(live);
+    expect(JSON.parse(projected)).toEqual({ ...original, features: ["resume.v1", "cmd.history.v1"] });
+    expect(JSON.parse(live)).toEqual(original);
+    const nonStatus = ' {"t":"hello", "extra":1} ';
+    expect(projectUnknownSlashTokenForReloadGolden(nonStatus)).toBe(nonStatus);
+  });
+  it("rejects noncanonical JSON, unapproved feature variants and duplicated/missing named tokens", () => {
+    expect(() => projectUnknownSlashTokenForReloadGolden(JSON.stringify(JSON.parse(live), null, 2))).toThrow();
+    for (const features of [
+      ["resume.v1", "cmd.history.v1"],
+      ["resume.v1", "cmd.history.v1", UNKNOWN_SLASH_TEXT_FEATURE_V1, UNKNOWN_SLASH_TEXT_FEATURE_V1],
+      ["resume.v1", "other.v1", UNKNOWN_SLASH_TEXT_FEATURE_V1],
+    ]) {
+      expect(() => projectUnknownSlashTokenForReloadGolden(JSON.stringify({ t: "status", features }))).toThrow();
+    }
   });
 });

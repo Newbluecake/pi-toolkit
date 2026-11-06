@@ -11,6 +11,7 @@ import { createMessageSessionTool } from "../../src/tools/message-session-tool.j
 import { wireWebHub } from "../../src/web-hub/agent/index.js";
 import type { XsStackPort } from "../../src/web-hub/agent/xs.js";
 import { P2_HUB_CAPS, VERSION_HUB_CAP } from "../../src/web-hub/protocol/version.js";
+import { UNKNOWN_SLASH_TEXT_FEATURE_V1 } from "../../src/web-hub/protocol/messages.js";
 import { XS_HUB_CAP, type XsMemberLimitsWire } from "../../src/web-hub/protocol/xs.js";
 import {
   ackFrame,
@@ -166,13 +167,25 @@ async function captureWiring(): Promise<WiringCapture> {
     expect(status).toBeDefined();
     const member = all.find((f) => f.t === "xs_member");
     expect(member).toBeDefined();
+    // #40 ruling (2026-11-06): `unknown-slash-text.v1` is a declared orthogonal default-on
+    // feature token that post-dates this A-tier fixture. The frozen golden must stay
+    // byte-identical, so — and ONLY for this named token — the historical snapshot is
+    // compared against a shallow copy with that single token removed. No generic strip of
+    // unknown tokens, no full `delete features`: any other features diff still fails the
+    // golden comparison. The raw status stays untouched; member/xs fields/slots/caps are
+    // compared as captured.
+    const rawFeatures = (status as { features?: string[] }).features ?? [];
+    expect(rawFeatures.filter((f) => f === UNKNOWN_SLASH_TEXT_FEATURE_V1)).toHaveLength(1);
+    const statusFrame: Record<string, unknown> = { ...(status as Record<string, unknown>) };
+    statusFrame.features = rawFeatures.filter((f) => f !== UNKNOWN_SLASH_TEXT_FEATURE_V1);
+    expect(statusFrame.features).toEqual(["resume.v1"]);
     const configRaw = spawnEnv.map((env) => JSON.parse(String(env.PI_WEBHUB_CONFIG))) as Record<string, unknown>[];
     expect(configRaw.length).toBe(1);
     return {
       hello: hello as Record<string, unknown>,
       slotSequence: all.slice(1).map((f) => String(f.t)),
       memberFrame: member as Record<string, unknown>,
-      statusFrame: status as Record<string, unknown>,
+      statusFrame,
       hubConfig: configRaw[0]!,
     };
   } finally {

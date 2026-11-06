@@ -30,7 +30,7 @@ import type {
   CmdResultBody,
   CommandOutputWire,
 } from "../protocol/messages.js";
-import { buildSlashText, classifyCommand, type CommandsPort } from "./slash.js";
+import { buildSlashText, classifyCommandStrict, type CommandsPort } from "./slash.js";
 import { effectivePolicy, resolveCommandPolicy, type CommandPolicy } from "./command-policy.js";
 import type { CommandCapturePort } from "../../commands/capture.js";
 import type { CommandRecorder } from "./command-record.js";
@@ -639,8 +639,10 @@ export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge
           return errResult("E_SESSION_CHANGED", false, "none");
         }
       }
-      const classified = classifyCommand(deps.pi, cmd.name);
-      if (classified === undefined) return errResult("E_UNKNOWN_COMMAND", false, "none");
+      const classification = classifyCommandStrict(deps.pi, cmd.name);
+      if (classification.state === "unavailable") return errResult("E_UNSUPPORTED", false, "none");
+      if (classification.state === "unknown") return errResult("E_UNKNOWN_COMMAND", false, "none");
+      const classified = classification.command;
       const busy = !safe(() => ctx.isIdle(), true);
       const overrides = deps.overrides?.();
       const decision = resolveCommandPolicy({

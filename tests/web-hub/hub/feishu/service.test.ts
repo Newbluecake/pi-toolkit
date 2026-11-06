@@ -521,12 +521,11 @@ describe("F8 spawn and group-root seams", () => {
 });
 
 describe("F8 /help transport", () => {
-  it("/help and unknown leading slash emit short usage text via outbox; paths/later slash remain prompts", async () => {
+  it("/help remains usage; unknown/pi-looking slash text is admitted once with the original body", async () => {
     const r = await rig();
     await r.bind();
     r.send(messageEnvelope("help", "/help"));
-    r.send(messageEnvelope("unknown", "/xxx"));
-    await eventually(() => expect(sentContent(r)).toContain("未知命令 /xxx"));
+    await eventually(() => expect(sentContent(r)).toContain("/unbind"));
     for (const command of [
       "/list",
       "/use <n|@alias|name>",
@@ -539,18 +538,43 @@ describe("F8 /help transport", () => {
       expect(sentContent(r).replaceAll("\u200b", "")).toContain(command);
     expect(sentContent(r)).toContain("@ 机器人");
     expect(r.request).not.toHaveBeenCalled();
-    r.send(messageEnvelope("path", "/home/me/file.txt 帮我看看"));
-    await eventually(() => expect(r.request).toHaveBeenCalledTimes(1));
-    r.send(messageEnvelope("sentence", "正常句子里的 /xxx\n/home/x"));
-    await eventually(() => expect(r.request).toHaveBeenCalledTimes(2));
-    expect(r.request.mock.calls[0]![0].cmd).toMatchObject({
-      op: "prompt",
-      text: expect.stringContaining("/home/me/file.txt 帮我看看"),
-    });
-    expect(r.request.mock.calls[1]![0].cmd).toMatchObject({
-      op: "prompt",
-      text: expect.stringContaining("正常句子里的 /xxx\n/home/x"),
-    });
+    const bodies = [
+      "/xxx\n  raw tail  ",
+      "/model p/m",
+      "/reload",
+      "/home/me/file.txt 帮我看看",
+      "正常句子里的 /xxx\n/home/x",
+    ];
+    for (const [i, text] of bodies.entries()) {
+      const event = messageEnvelope(`plain-${i}`, text);
+      const acks = r.ackCount();
+      r.send(event);
+      await eventually(() => expect(r.request).toHaveBeenCalledTimes(i + 1));
+      const frame = r.request.mock.calls[i]![0];
+      expect(frame.cmd.op).toBe("prompt");
+      if (frame.cmd.op !== "prompt") throw new Error("slash text reached the command executor");
+      expect(frame.cmd.text.slice(frame.cmd.text.indexOf("\n") + 1)).toBe(text);
+      expect(frame.cmd).not.toHaveProperty("thread");
+      expect((await r.disk())["requests"][frame.id].payload.body).toBe(text);
+      // Pin the formerly-unknown event's durable dedup, not a sleep/no-throw approximation.
+      if (i === 0) {
+        r.send(event);
+        await eventually(() => expect(r.ackCount()).toBe(acks + 2));
+        expect(r.request).toHaveBeenCalledTimes(1);
+      }
+    }
+    expect(r.request.mock.calls.every(([f]) => f.cmd.op === "prompt" && !f.queryOnly)).toBe(true);
+    expect(sentContent(r)).not.toContain("未知命令");
+    // A malformed ENABLED bot command remains help and never becomes a sixth prompt.
+    const before = r.fake.sent.length;
+    r.send(messageEnvelope("bad-use", "/use"));
+    await eventually(() => expect(r.fake.sent.length).toBeGreaterThan(before));
+    const badArgumentReply = r.fake.sent
+      .slice(before)
+      .map((message) => String(message.body["content"]))
+      .join("\n");
+    expect(badArgumentReply.replaceAll("\u200b", "")).toContain("/use <n|@alias|name>");
+    expect(r.request).toHaveBeenCalledTimes(bodies.length);
   });
   it.each(["resolve", "reject"] as const)(
     "approved F6 lifecycle fence: late router %s cannot mutate a disposed installation",

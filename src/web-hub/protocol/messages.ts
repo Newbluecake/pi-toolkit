@@ -1069,6 +1069,8 @@ export interface ResumeSessionsWire {
 /** web-resume plan §2.7: the one `StatusInfo.features` token this version emits. Old agents
  *  never send `features` at all, so its presence is a positive capability signal. */
 export const RESUME_FEATURE_V1 = "resume.v1";
+/** #40: strict unknown evidence + guarded raw slash prompt validation are wired. */
+export const UNKNOWN_SLASH_TEXT_FEATURE_V1 = "unknown-slash-text.v1";
 /** web-hub-cmd-history plan §4.6: the `StatusInfo.features` token this version emits once the
  *  recorder is wired (`webHub.enabled ∧ cmdHistory !== false`) AND the session is persisted
  *  (same gate as `resume.v1`; emitted after it — features order `[resume.v1?, cmd.history.v1?]`).

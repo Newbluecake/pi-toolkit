@@ -110,6 +110,7 @@ const control = {
   outputHere: "output here",
   outputTerminal: "output in terminal",
   cmdDeniedTerminal: "仅终端可用",
+  cmdUnknownText: "未匹配命令；确认后按普通消息发送",
   cmdDeniedUnknown: "未知命令——绝不会作为普通文本发送",
   cmdConfirmAria: "执行 {cmd}？",
   cmdConfirmDo: "执行",

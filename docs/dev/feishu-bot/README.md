@@ -43,7 +43,7 @@
 | `/file <absolute path>`      | 显式发送绑定会话主机上的文件；仍经过权限、绑定、大小与 preview 拒绝链检查。                                                                                                                                                                                                                                                                                                         |
 | （卡片，非命令）定时任务审批 | **已移除（schedule-auto-approve r2，2026-11-04）**；不再发卡，旧卡点击静默无效，nonce 按 TTL 过期。原 #61：AI 创建/修改 `schedule` 任务后，owner 的 p2p 绑定收到带完整定义的审批卡片，只有「批准 / 拒绝」两个按钮；不是命令、不能由文本触发，也不经 `admission.dispatch` 的 op 白名单（走 `port.decide → sched_decide`）。详见 `docs/dev/scheduled-reports/README.md`「当场确认」。 |
 
-未知首行命令（如 `/oops`）只回复“未知命令”加帮助，**不会送给 agent**。需要字面斜杠开头的请求时用 `//text`（转为 `/text`）。`/home/me/file.txt 帮我看看` 是路径类请求，不是未知命令；普通句子或后续行中的 `/` 不触发命令解析。
+**只有已启用的 bot 命令按命令处理**；它们的参数错误仍显示帮助，执行/授权/绑定错误不会重发为文本。其余斜杠开头输入（如 `/oops`、pi 的 `/model` 或 `/reload`）默认保留原文进入普通请求，不显示“未知命令”，也不会执行 pi 命令。`/schedule` 仅在 schedule 启用时是 bot 命令，`/main` 仅在 threads 启用时是 bot 命令；关闭时两者也是普通文本。命令名区分大小写且精确匹配，`/mainx` 不匹配 `/main`。`//text` 保留既有转义语义（转为 `/text`）；`/home/me/file.txt 帮我看看` 仍是路径类请求，普通句子或后续行中的 `/` 不触发命令解析。普通请求仍需授权、绑定，并经过持久接收/去重和既有 thread/输入安全链；飞书不持有完整 pi 命令注册表，不据 bot 名单判断 pi 命令是否存在。
 
 ### 群话题
 
@@ -207,3 +207,5 @@ stranded notices. Gates: `tests/web-hub/hub/feishu/{xs-mirror,xs-mirror-isolatio
 `tests/integration/web-hub-feishu-bot.test.ts` (「feishu-xs-mirror」 block, I1–I16, real hub child × fake Feishu × fake xs
 agents; every no-card case is compared with the same input under `xsMirror:false`). Real-device checklist:
 `docs/dev/feishu-xs-mirror/acceptance.md`.
+
+**未知斜杠回归（#40）**：`tests/web-hub/hub/feishu/router.test.ts` 固定 enabled-only 命令名单、坏参数 help、禁用 main/schedule 转文本和 mainx 前缀；`tests/integration/unknown-slash-text.test.ts` 通过真实 admission/持久接收/重复事件检查普通请求仅派发一次，无真实租户连接。Web 的能力与回退规则见 `docs/dev/unknown-slash-text/runtime-notes.md`（待合并至 Web Hub README）。

@@ -924,3 +924,55 @@ export function isWebSentMessage(ctl, timestamp) {
   }
   return false;
 }
+
+/** #40 positive dispatch-evidence signal; never infer it from a version or a missing row.
+ * @param {unknown} status
+ */
+export function unknownSlashTextAvailable(status) {
+  return (
+    status !== null &&
+    typeof status === "object" &&
+    Array.isArray(status.features) &&
+    status.features.includes("unknown-slash-text.v1")
+  );
+}
+
+/** Shared Composer/DetailDock gate. Missing rows are unresolved only on a capable surface.
+ * @param {unknown} text @param {any[]} commands @param {boolean} busy
+ * @param {boolean} enabled @param {unknown} status
+ * @returns {{mode: "text"|"command"|"deny", policy: "allow"|"confirm"|"deny"|null}}
+ */
+export function slashTextRoute(text, commands, busy, enabled, status) {
+  const slash = parseSlash(text);
+  if (!enabled || !slash) return { mode: "text", policy: null };
+  const found = commands.find((c) => c && c.name === slash.name);
+  const capable = unknownSlashTextAvailable(status);
+  const policy = found ? commandPolicyFor(commands, slash.name, busy) : capable ? "allow" : "deny";
+  if (policy === "deny") return { mode: "deny", policy };
+  if (capable && !/^[A-Za-z0-9:_.-]{1,64}$/.test(slash.name)) return { mode: "text", policy: null };
+  return { mode: "command", policy };
+}
+
+/** One page-local A→B intention. No timers, query replay, persistence or effect-unknown retry.
+ * Scope includes capability, session, epoch and the caller's invalidation generation.
+ * @param {()=>string|null} scope @param {()=>Promise<void>} send
+ */
+export function createUnknownSlashFallback(scope, send) {
+  const initial = scope();
+  let consumed = false;
+  /** @param {{ok?: boolean, error?: string, effect?: string}} outcome */
+  return async (outcome) => {
+    if (
+      consumed ||
+      initial === null ||
+      scope() !== initial ||
+      outcome.ok !== false ||
+      outcome.error !== "E_UNKNOWN_COMMAND" ||
+      outcome.effect !== "none"
+    )
+      return false;
+    consumed = true; // BEFORE awaiting: duplicate callbacks cannot mint a second prompt id.
+    await send();
+    return true;
+  };
+}

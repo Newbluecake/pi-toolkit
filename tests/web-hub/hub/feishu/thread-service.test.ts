@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { f8Rig, eventually, sentContent } from "../../../fixtures/feishu/f8.js";
 import { messageEnvelope, OWNER } from "../../../fixtures/feishu/f6.js";
+import { decodeFeishuEvent } from "../../../../src/web-hub/hub/feishu/inbound.js";
+import { parseFeishuCommand } from "../../../../src/web-hub/hub/feishu/router.js";
 import type { CmdFrame } from "../../../../src/web-hub/protocol/messages.js";
 import type { ThrReqFrame, ThrResFrame } from "../../../../src/web-hub/protocol/thread.js";
 import type { FeishuThreadTransport } from "../../../../src/web-hub/hub/feishu/thread-hub.js";
@@ -87,7 +89,7 @@ describe("thread service wiring (§8.1/§8.2/§6.2/§7.3)", () => {
     expect(newNotices.length).toBe(0); // later events never repeat the text receipt
   });
 
-  it("/main rides a main: synthetic member with bypass; threads-off stays an unknown command (G2a)", async () => {
+  it("/main rides a main: synthetic member with bypass; threads-off admits plain text once without thread effects", async () => {
     const on = await rig();
     await on.bind(TOPIC);
     on.send(messageEnvelope("mm1", "/main force the slow path", TOPIC));
@@ -99,10 +101,84 @@ describe("thread service wiring (§8.1/§8.2/§6.2/§7.3)", () => {
     expect(record.triggerMessageId).toBe("mm1");
 
     const off = await rig(false);
+    expect(off.deps.config.threads).toBeUndefined();
+    const threadSend = vi.fn(() => true);
+    const threadCaps = vi.fn(() => ["thr.v1"]);
+    off.service.setThreadTransport({ getCaps: threadCaps, send: threadSend });
     await off.bind(TOPIC);
-    off.send(messageEnvelope("mm2", "/main force", TOPIC));
-    await eventually(() => expect(sentContent(off)).toContain("未知命令 /main"));
-    expect(off.request).not.toHaveBeenCalled();
+    const keysBefore = Object.keys(await off.disk()).sort();
+    const text = "  @_user_1  /main force\n  /reload raw  ";
+    const expected = "/main force\n  /reload raw";
+    const event = messageEnvelope("mm2", text, TOPIC);
+    // Existing inbound normalization, independent literal pin: remove @ then trim boundaries,
+    // preserving the internal newline, two spaces and /reload text. This is NOT #40's parser.
+    const decoded = decodeFeishuEvent(event, "cli_test");
+    expect(decoded.kind).toBe("message");
+    if (decoded.kind !== "message") throw new Error("group fixture did not decode");
+    expect(decoded.message.text).toBe("/main force\n  /reload raw");
+    expect(parseFeishuCommand(decoded.message.text, { threads: false })).toEqual({ op: "prompt", text: expected });
+    const acks = off.ackCount();
+    off.send(event);
+    await eventually(() => expect(promptFrames(off)).toHaveLength(1));
+    const plain = promptFrames(off)[0]!;
+    expect(plain.cmd.op).toBe("prompt");
+    if (plain.cmd.op !== "prompt") throw new Error("threads-off must not execute pi commands");
+    expect(plain.cmd.text.slice(plain.cmd.text.indexOf("\n") + 1)).toBe(expected);
+    expect(plain.cmd.text.slice(plain.cmd.text.indexOf("\n") + 1)).toBe(decoded.message.text);
+    expect(plain.cmd).not.toHaveProperty("thread"); // no h/bypass/new thread route
+    const offRecord = (await off.disk())["requests"][plain.id];
+    expect(offRecord.payload.body).toBe(expected);
+    expect(offRecord.payload.messageIds).toEqual(["mm2"]); // not the enabled main: synthetic member
+    off.send(event);
+    await eventually(() => expect(off.ackCount()).toBe(acks + 2));
+    expect(off.request).toHaveBeenCalledTimes(1);
+    // Non-slash control uses the same pre-parser normalization, so the trim is not new
+    // unknown-slash behavior. Both the decoder and dispatch have independent literal pins.
+    const control = messageEnvelope("plain-control", "  @_user_1  ordinary  request\n  /reload raw  ", TOPIC);
+    const decodedControl = decodeFeishuEvent(control, "cli_test");
+    expect(decodedControl.kind).toBe("message");
+    if (decodedControl.kind !== "message") throw new Error("plain control did not decode");
+    expect(decodedControl.message.text).toBe("ordinary  request\n  /reload raw");
+    const controlAcks = off.ackCount();
+    off.send(control);
+    off.send(control);
+    await eventually(() => expect(off.ackCount()).toBe(controlAcks + 2));
+    await eventually(() => expect(off.request).toHaveBeenCalledTimes(2));
+    const controlCmd = promptFrames(off)[1]!.cmd;
+    expect(controlCmd.op).toBe("prompt");
+    if (controlCmd.op !== "prompt") throw new Error("plain control reached command execution");
+    expect(controlCmd.text.slice(controlCmd.text.indexOf("\n") + 1)).toBe("ordinary  request\n  /reload raw");
+    expect(controlCmd.text.slice(controlCmd.text.indexOf("\n") + 1)).toBe(decodedControl.message.text);
+    expect(controlCmd).not.toHaveProperty("thread");
+    expect(off.request.mock.calls.every(([f]) => f.cmd.op === "prompt" && !f.queryOnly)).toBe(true);
+    expect(sentContent(off)).not.toContain("未知命令");
+    expect(sentContent(off)).not.toContain("已转交");
+    expect(threadSend).not.toHaveBeenCalled();
+    expect(threadCaps).not.toHaveBeenCalled();
+    const timer = vi.spyOn(off.clock, "setTimeout");
+    const replies: ThrResFrame[] = [];
+    off.service.thrReq(
+      "agent-1",
+      {
+        t: "thr_req",
+        rid: "off-post",
+        op: "post",
+        h: "fs:abcdefghijkl",
+        sessionId: "session-1",
+        by: RUN,
+        postId: "r_23456789:1",
+        text: "must-not-push",
+      },
+      (reply) => replies.push(reply),
+    );
+    await eventually(() =>
+      expect(replies).toEqual([{ t: "thr_res", rid: "off-post", ok: false, code: "E_THR_STATE", effect: "none" }]),
+    );
+    expect(timer).not.toHaveBeenCalled();
+    timer.mockRestore();
+    expect(threadSend).not.toHaveBeenCalled();
+    expect(sentContent(off)).not.toContain("must-not-push");
+    expect(Object.keys(await off.disk()).sort()).toEqual(keysBefore);
   });
 
   it("/cur appends the live subscription lines only when a threads slot was seen", async () => {

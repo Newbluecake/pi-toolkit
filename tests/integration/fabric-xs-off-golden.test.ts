@@ -8,6 +8,7 @@ import { RESERVED_TOOL_NAMES } from "../../src/runtime/tool-scope.js";
 import { MessageAgentParams } from "../../src/tools/message-agent-tool.js";
 import { wireWebHub, type WebHubDeps } from "../../src/web-hub/agent/index.js";
 import { P2_HUB_CAPS, VERSION_HUB_CAP } from "../../src/web-hub/protocol/version.js";
+import { UNKNOWN_SLASH_TEXT_FEATURE_V1 } from "../../src/web-hub/protocol/messages.js";
 import {
   ackFrame,
   fakeCtx,
@@ -145,12 +146,23 @@ async function captureWiring(): Promise<WiringCapture> {
     const all = socket.frames();
     const status = all.find((f) => f.t === "status");
     expect(status).toBeDefined();
+    // #40 ruling (2026-11-06): `unknown-slash-text.v1` is a declared orthogonal default-on
+    // feature token that post-dates this A-tier fixture. The frozen golden must stay
+    // byte-identical, so — and ONLY for this named token — the XS historical snapshot is
+    // compared against a shallow copy with that single token removed. No generic strip of
+    // unknown tokens, no full `delete features`: any other features diff still fails the
+    // golden comparison below. The raw status stays untouched for the default-on test.
+    const rawFeatures = (status as { features?: string[] }).features ?? [];
+    expect(rawFeatures.filter((f) => f === UNKNOWN_SLASH_TEXT_FEATURE_V1)).toHaveLength(1);
+    const statusFrame: Record<string, unknown> = { ...(status as Record<string, unknown>) };
+    statusFrame.features = rawFeatures.filter((f) => f !== UNKNOWN_SLASH_TEXT_FEATURE_V1);
+    expect(statusFrame.features).toEqual(["resume.v1"]);
     const configRaw = spawnEnv.map((env) => JSON.parse(String(env.PI_WEBHUB_CONFIG))) as Record<string, unknown>[];
     expect(configRaw.length).toBe(1);
     return {
       hello: hello as Record<string, unknown>,
       slotSequence: all.slice(1).map((f) => String(f.t)),
-      statusFrame: status as Record<string, unknown>,
+      statusFrame,
       hubConfig: configRaw[0]!,
     };
   } finally {
@@ -202,8 +214,9 @@ describe("fabric xs-off golden (phase2-plan §2.8 H3 / §10.1 XI1)", () => {
 
   it("cmd-history default-on adds exactly the cmd.history.v1 feature token (A1 pin, orthogonal to the frozen golden)", async () => {
     // Same capture harness, default settings (cmdHistory on): the persisted fake session meets
-    // plan §4.6's gate, so statusFrame.features is [resume.v1, cmd.history.v1] and nothing else
-    // changes — this is the assertion the frozen golden deliberately does NOT carry.
+    // plan §4.6's gate, so statusFrame.features is [resume.v1, cmd.history.v1, and the #40
+    // orthogonal default-on `unknown-slash-text.v1`] in that order and nothing else changes —
+    // these are the assertions the frozen golden deliberately does NOT carry.
     vi.useFakeTimers();
     vi.setSystemTime(FIXED_NOW);
     const tmp = tmpDir("wh-xs-cmdhistory-");
@@ -236,7 +249,13 @@ describe("fabric xs-off golden (phase2-plan §2.8 H3 / §10.1 XI1)", () => {
       socket.hub(ackFrame("a1-key", 4242, [...P2_HUB_CAPS, VERSION_HUB_CAP]));
       vi.advanceTimersByTime(50);
       const status = socket.frames().find((f) => f.t === "status") as { features?: string[] };
-      expect(status.features).toEqual(["resume.v1", "cmd.history.v1"]);
+      // Raw, unprojected status: default-on features are exactly, and in order,
+      // [resume.v1, cmd.history.v1, unknown-slash-text.v1] (contract literal mirrors the
+      // production constant UNKNOWN_SLASH_TEXT_FEATURE_V1 — see the import above).
+      expect(status.features).toEqual(["resume.v1", "cmd.history.v1", "unknown-slash-text.v1"]);
+      // The #40 token appears exactly once — a duplicate or any other unexpected token above
+      // would already fail toEqual, this also guards against masking via projection.
+      expect(status.features?.filter((f) => f === UNKNOWN_SLASH_TEXT_FEATURE_V1)).toHaveLength(1);
     } finally {
       resetGlobals();
       vi.useRealTimers();

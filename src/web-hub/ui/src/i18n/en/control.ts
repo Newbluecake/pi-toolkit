@@ -119,6 +119,7 @@ const control = {
   outputHere: "output here",
   outputTerminal: "output in terminal",
   cmdDeniedTerminal: "Terminal only",
+  cmdUnknownText: "No matching command; sent as text once confirmed unknown",
   cmdDeniedUnknown: "Unknown command — never sent as plain text",
   cmdConfirmAria: "Run {cmd}?",
   cmdConfirmDo: "Run",

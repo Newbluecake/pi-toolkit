@@ -742,3 +742,63 @@ describe("createCommandHandler — queryOnly (§3.4)", () => {
     });
   });
 });
+
+describe("#40 raw slash prompt validation", () => {
+  it.each([
+    ["/名字\n raw  ", [], true, "sent"],
+    ["/名字 raw", [{ name: "名字", source: "extension" }], true, "E_BAD_REQUEST"],
+    ["/名字 raw", null, true, "E_UNSUPPORTED"],
+    ["/legal-name bad args", null, true, "sent"],
+    [" /名字", null, true, "sent"],
+    ["//名字", null, true, "sent"],
+    ["/名字", null, false, "sent"],
+  ])("validates %s only in the enabled invalid-wire-name path", (text, commands, enabled, expected) => {
+    const h = makeHarness();
+    h.deps.unknownSlashTextEnabled = () => enabled as boolean;
+    Object.assign(h.deps.pi, { getCommands: () => commands });
+    const send = vi.spyOn(h.deps.pi, "sendUserMessage");
+    h.handler.handle(frame("raw-slash", { op: "prompt", text: text as string, deliver: "followUp" }));
+    if (expected === "sent") {
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledWith(text, { deliverAs: "followUp", expandPromptTemplates: false });
+      expect(h.originEntry.appendOrigin).toHaveBeenCalledTimes(1);
+    } else {
+      expect(send).not.toHaveBeenCalled();
+      expect(h.originEntry.appendOrigin).not.toHaveBeenCalled();
+      expect(h.sent).toMatchObject([{ ok: false, code: expected, effect: "none" }]);
+      expect(h.deps.ledger.get("raw-slash")?.state).toBe("failed");
+    }
+    h.handler.dispose();
+  });
+  it("never classifies Feishu raw prompts", () => {
+    const h = makeHarness();
+    h.deps.unknownSlashTextEnabled = () => true;
+    const read = vi.fn(() => {
+      throw new Error("must skip");
+    });
+    Object.assign(h.deps.pi, { getCommands: read });
+    const send = vi.spyOn(h.deps.pi, "sendUserMessage");
+    h.handler.handle(
+      frame("bot", { op: "prompt", text: "/名字 raw", deliver: "followUp" }, { origin: { ...ORIGIN, ip: "feishu" } }),
+    );
+    expect(read).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(1);
+    h.handler.dispose();
+  });
+});
+
+it("#40 thread metadata skips W3 even when the wire name is invalid", () => {
+  const h = makeHarness();
+  h.deps.unknownSlashTextEnabled = () => true;
+  const read = vi.fn(() => {
+    throw new Error("must not classify threads");
+  });
+  Object.assign(h.deps.pi, { getCommands: read });
+  const send = vi.spyOn(h.deps.pi, "sendUserMessage");
+  h.handler.handle(
+    frame("thread-raw", { op: "prompt", text: "/注册名 x", deliver: "followUp", thread: {} } as CmdFrame["cmd"]),
+  );
+  expect(read).not.toHaveBeenCalled();
+  expect(send).toHaveBeenCalledTimes(1);
+  h.handler.dispose();
+});

@@ -28,7 +28,14 @@
 -->
 <script setup lang="ts">
 import { computed, inject, onUnmounted, ref, watch } from "vue";
-import { commandPolicyFor, newCmdId, parseSlash, validRecallText } from "@logic/control.js";
+import {
+  createUnknownSlashFallback,
+  slashTextRoute,
+  unknownSlashTextAvailable,
+  newCmdId,
+  parseSlash,
+  validRecallText,
+} from "@logic/control.js";
 import { cmdHistoryModeOn } from "@logic/cmdRecord.js";
 import {
   acceptXsStatus,
@@ -131,9 +138,11 @@ async function runCommandHistory(
   name: string,
   args: string,
   confirm: boolean,
+  fallback?: (outcome: import("../../types.js").CmdOutcome) => Promise<boolean>,
+  commandId?: string,
 ): Promise<void> {
   const store = useCmdHistory(key);
-  const id = newCmdId();
+  const id = commandId ?? newCmdId();
   store.begin({ cmdId: id, name, args, startedAt: Date.now() });
   cmdWaitingTerminal.value = false;
   // §7.7's terminal-interaction banner survives historyMode (第三方命令占位卡) — same 2 s probe.
@@ -144,6 +153,10 @@ async function runCommandHistory(
   }, 2000);
 
   const outcome = await c.runCommand(key, name, args, { id, ...(confirm ? { confirm: true as const } : {}) });
+  if (fallback && (await fallback(outcome))) {
+    store.drop(id);
+    return;
+  }
   if (!outcome.ok) {
     if (outcome.error === "E_CONFIRM_REQUIRED") {
       store.drop(id);
@@ -314,12 +327,18 @@ function handle(): import("../../types.js").ControlHandle | null {
   return view?.control ?? props.control ?? null;
 }
 
-async function runCommand(name: string, args: string, confirm: boolean): Promise<void> {
+async function runCommand(
+  name: string,
+  args: string,
+  confirm: boolean,
+  fallback?: (outcome: import("../../types.js").CmdOutcome) => Promise<boolean>,
+  commandId?: string,
+): Promise<void> {
   const c = handle();
   const key = agentKey();
   if (!c || key === null) return;
   pendingConfirm.value = null;
-  if (historyMode.value) return runCommandHistory(c, key, name, args, confirm); // §4.7 — no CommandResult
+  if (historyMode.value) return runCommandHistory(c, key, name, args, confirm, fallback, commandId); // §4.7 — no CommandResult
   cmdResult.value = { name, state: "running" };
   cmdWaitingTerminal.value = false;
   trackingCmd = { id: null, name };
@@ -333,7 +352,20 @@ async function runCommand(name: string, args: string, confirm: boolean): Promise
     cmdWaitingTerminal.value = promptCount() > promptsBefore;
   }, 2000);
 
-  const outcome = await c.runCommand(key, name, args, confirm ? { confirm: true } : undefined);
+  const outcome = await c.runCommand(
+    key,
+    name,
+    args,
+    commandId !== undefined
+      ? { id: commandId, ...(confirm ? { confirm: true as const } : {}) }
+      : confirm
+        ? { confirm: true }
+        : undefined,
+  );
+  if (fallback && (await fallback(outcome))) {
+    trackingCmd = null;
+    return;
+  }
   if (!outcome.ok) {
     trackingCmd = null;
     if (outcome.error === "E_CONFIRM_REQUIRED") {
@@ -459,6 +491,33 @@ function watchCommandItem(): void {
   );
 }
 
+// A transient loss of token/identity cancels old intentions even if that value later returns.
+let slashGeneration = 0;
+let slashDisposed = false;
+const slashIdentity = computed(() => {
+  if (
+    !view?.enabled.value ||
+    !view.commandsEnabled.value ||
+    !unknownSlashTextAvailable(view.agent.value.status) ||
+    view.agent.value.down
+  )
+    return null;
+  return JSON.stringify([agentKey(), sessionId(), view.agent.value.card?.epoch]);
+});
+watch(
+  slashIdentity,
+  () => {
+    slashGeneration++;
+  },
+  { flush: "sync" },
+);
+onUnmounted(() => {
+  slashDisposed = true;
+});
+function slashFallbackScope(): string | null {
+  return slashDisposed || slashIdentity.value === null ? null : `${slashGeneration}:${slashIdentity.value}`;
+}
+
 function onSend(text: string, deliver: "steer" | "followUp"): void {
   const c = handle();
   const key = agentKey();
@@ -474,11 +533,36 @@ function onSend(text: string, deliver: "steer" | "followUp"): void {
   }
   const slash = parseSlash(text);
   const commands = view?.commands.value ?? [];
-  const commandMode = slash !== undefined && (view?.commandsEnabled.value ?? false);
-  if (commandMode && slash) {
-    const policy = commandPolicyFor([...commands], slash.name, busy.value);
-    if (policy === "deny") return; // palette already shows the reason; never falls back to text
-    void runCommand(slash.name, slash.args, false);
+  const route = slashTextRoute(
+    text,
+    [...commands],
+    busy.value,
+    view?.commandsEnabled.value ?? false,
+    view?.agent.value.status,
+  );
+  if (route.mode === "deny") return;
+  if (route.mode === "command" && slash) {
+    const commandId = unknownSlashTextAvailable(view?.agent.value.status) ? newCmdId() : undefined;
+    const fallback = createUnknownSlashFallback(slashFallbackScope, async () => {
+      if (commandId !== undefined) {
+        c.discard(key, commandId);
+        if (historyMode.value) useCmdHistory(key).drop(commandId);
+      }
+      trackingCmd = null;
+      cmdResult.value = null;
+      cmdWaitingTerminal.value = false;
+      if (waitPromptTimer !== undefined) clearTimeout(waitPromptTimer);
+      // B is a new prompt id, never a mutation/retry of A; do not compose attachments again.
+      const result = await c.sendPrompt(key, text, deliver, text);
+      if (!result.ok)
+        cmdResult.value = {
+          name: slash.name,
+          state: "failed",
+          error: result.error ?? "E_FAILED",
+          ...(result.message !== undefined ? { message: result.message } : {}),
+        };
+    });
+    void runCommand(slash.name, slash.args, false, fallback, commandId);
     return;
   }
   // @mention routing belongs to the agent's live registry. Even a label omitted by the

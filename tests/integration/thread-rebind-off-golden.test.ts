@@ -11,6 +11,7 @@ import type { FeishuRequestRecord } from "../../src/web-hub/hub/feishu/state.js"
 import { wireWebHub } from "../../src/web-hub/agent/index.js";
 import { DEFAULT_FEISHU_BOT_SETTINGS } from "../../src/web-hub/agent/settings.js";
 import { P2_HUB_CAPS, VERSION_HUB_CAP } from "../../src/web-hub/protocol/version.js";
+import { UNKNOWN_SLASH_TEXT_FEATURE_V1 } from "../../src/web-hub/protocol/messages.js";
 import {
   ackFrame,
   fakeCtx,
@@ -165,12 +166,23 @@ async function captureWiring(): Promise<WiringCapture> {
     const all = socket.frames();
     const status = all.find((f) => f.t === "status");
     expect(status).toBeDefined();
+    // #40 ruling (2026-11-06): `unknown-slash-text.v1` is a declared orthogonal default-on
+    // feature token that post-dates this A-tier fixture (the fixture file itself NEVER
+    // changes). Only for this named token the historical snapshot is a shallow copy with
+    // that single token removed; no generic strip, no `delete features` — any other
+    // features diff still fails the golden toEqual. Raw status stays untouched; the
+    // orthogonal default-on change is protected by the raw pin below (token exactly once).
+    const rawFeatures = (status as { features?: string[] }).features ?? [];
+    expect(rawFeatures.filter((f) => f === UNKNOWN_SLASH_TEXT_FEATURE_V1)).toHaveLength(1);
+    const statusFrame: Record<string, unknown> = { ...(status as Record<string, unknown>) };
+    statusFrame.features = rawFeatures.filter((f) => f !== UNKNOWN_SLASH_TEXT_FEATURE_V1);
+    expect(statusFrame.features).toEqual(["resume.v1"]);
     const configRaw = spawnEnv.map((env) => JSON.parse(String(env.PI_WEBHUB_CONFIG))) as Record<string, unknown>[];
     expect(configRaw.length).toBe(1);
     return {
       hello: hello as Record<string, unknown>,
       slotSequence: all.slice(1).map((f) => String(f.t)),
-      statusFrame: status as Record<string, unknown>,
+      statusFrame,
       hubConfig: configRaw[0]!,
     };
   } finally {
