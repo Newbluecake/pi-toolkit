@@ -19,6 +19,17 @@
   },
   "bytes": {
     "legacy": 1333,
-    "v2": 1443
+    "v2": 1443,
+    "blocks": 923,
+    "blocksJev": 1111
+  },
+  "blocks": {
+    "description": "\"Project memory as blocks (one fact per file, body ≤1024B). User rules with scope=global are always injected; other blocks are injected when relevant; a topic index is shown. view [path] (omit = list; <topic> = its blocks) · search query · create topic text · update path rev text (whole-block replace; rev from view) · delete path [rev]. Never store secrets.\"",
+    "promptSnippet": "\"Project memory: view/search; one fact per block\"",
+    "promptGuidelines": "[\"memory: fix a stale fact with update (view first for rev) instead of creating a duplicate; one durable fact per block; mark user orders with <!-- mem user -->.\"]",
+    "parameters": "{\"properties\":{\"command\":{\"anyOf\":[{\"const\":\"view\",\"type\":\"string\"},{\"const\":\"create\",\"type\":\"string\"},{\"const\":\"update\",\"type\":\"string\"},{\"const\":\"delete\",\"type\":\"string\"},{\"const\":\"search\",\"type\":\"string\"}]},\"path\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"},\"rev\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"topic\":{\"type\":\"string\"}},\"type\":\"object\"}"
+  },
+  "blocksJev": {
+    "description": "\"Project memory as blocks (one fact per file, body ≤1024B). User rules with scope=global are always injected; other blocks are injected when relevant; a topic index is shown. view [path] (omit = list; <topic> = its blocks) · search query · create topic text · update path rev text (whole-block replace; rev from view) · delete path [rev]. Never store secrets. Entries are tagged automatically. Meta on the text's first line: <!-- mem user|lesson scope=global audience=main|child expires=YYYY-MM-DD until=\\\"…\\\" supersedes=id tags=+a,-b private -->.\""
   }
 }

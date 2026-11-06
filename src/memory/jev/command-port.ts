@@ -32,6 +32,7 @@ import { mergeTaxonomy, validateTagDef, PRESET_TAGS } from "./taxonomy.js";
 import { formatJevReport, formatStatusLine } from "./format.js";
 import { parseProxyUrl, redactProxyUrl } from "./proxy-fetch.js";
 import { EntryIndex } from "./entries.js";
+import type { MemoryWriteGate } from "../contracts.js";
 import type {
   ClassifierRegistryLike,
   EntryHash,
@@ -72,6 +73,8 @@ export interface JevCommandPortDeps {
   readonly segment?: () => JevReportView["segment"];
   /** Health table for per-model notes (defaults to the shared table). */
   readonly health?: HealthTable;
+  /** #36 P4 修复轮：生产 writeGate —— /mem jev 侧车写入逐原语复检。 */
+  readonly gate?: MemoryWriteGate;
 }
 
 const ZERO_SEGMENT: JevReportView["segment"] = {
@@ -193,7 +196,7 @@ export function createJevCommandPort(deps: JevCommandPortDeps): JevCommandPort {
     const ctx = indexAndEntries(cwd);
     if (ctx === undefined || ctx.index.review === undefined) return false;
     const review = mutate(ctx.index.review);
-    return (await writeIndexPatch(ctx.dir, { review })) === "ok";
+    return (await writeIndexPatch(ctx.dir, { review }, deps.gate)) === "ok";
   };
 
   const statusLine = (cwd: string): string => {
@@ -297,7 +300,7 @@ export function createJevCommandPort(deps: JevCommandPortDeps): JevCommandPort {
     const write =
       Object.keys(fresh).length === 0
         ? "ok"
-        : await writeIndexPatch(ctx.dir, { upsert: fresh, lastTaggedAt: isoNow() });
+        : await writeIndexPatch(ctx.dir, { upsert: fresh, lastTaggedAt: isoNow() }, deps.gate);
     return [
       `jev: retag ${result.tagged}/${result.tagged + result.pending} tagged · ${result.calls} calls · $${result.costUsd.toFixed(4)}`,
       write === "busy" ? " · sidecar busy — results not saved, rerun later" : "",
@@ -309,7 +312,7 @@ export function createJevCommandPort(deps: JevCommandPortDeps): JevCommandPort {
     const dir = dirOf(cwd);
     if (dir === undefined) return "jev: no memory directory for this cwd";
     try {
-      const out = await removeIndex(dir);
+      const out = await removeIndex(dir, deps.gate);
       return out === "busy"
         ? "jev: reset-index skipped — memory dir busy, try again"
         : "jev: sidecar index cleared (taxonomy kept)";
@@ -346,7 +349,7 @@ export function createJevCommandPort(deps: JevCommandPortDeps): JevCommandPort {
   };
 
   const writeTaxonomy = async (dir: string, file: TaxonomyFileV1, note: string): Promise<string> => {
-    const out = await writeTaxonomyFile(dir, file);
+    const out = await writeTaxonomyFile(dir, file, deps.gate);
     if (out === "busy") return "tags: memory dir busy — change not saved, try again";
     return note;
   };
@@ -459,7 +462,7 @@ export function createJevCommandPort(deps: JevCommandPortDeps): JevCommandPort {
     if ("ok" in outcome) {
       return `jev: review run failed (${outcome.reason}${outcome.detail === "" ? "" : `: ${outcome.detail.slice(0, 160)}`})`;
     }
-    const write = await writeIndexPatch(ctx.dir, { review: outcome });
+    const write = await writeIndexPatch(ctx.dir, { review: outcome }, deps.gate);
     const open = outcome.suggestions.length;
     return `jev: review pass complete — ${open} suggestion(s)${write === "busy" ? " · sidecar busy, results not saved" : ""} → /mem review`;
   };

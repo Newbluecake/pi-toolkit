@@ -14,13 +14,17 @@
 // startup reminder in `index.ts`; both paths use the real renderer/doctor.
 
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import type { ExtensionCommandContext, ExtensionHandler, SessionStartEvent } from "@earendil-works/pi-coding-agent";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
 import type { MemorySettings } from "../config/settings.js";
-import type { DoctorFinding, TieredRenderInput, TieredRenderResult } from "./contracts.js";
+import type { TieredRenderInput, TieredRenderResult } from "./contracts.js";
 import {
   formatDoctorReport,
   runDoctor,
+  runDoctorBlocks,
+  type DoctorBlocksInput,
+  type DoctorFindingLike,
   type DoctorSettings,
   type DoctorSkippedFile,
   type DoctorSnapshot,
@@ -31,8 +35,12 @@ import { splitEntries } from "./jev/entries.js";
 import type { JevDoctorPort } from "./jev/contracts.js";
 import { parseMemoryMeta } from "./meta.js";
 import { memoryDirFor, type MemoryPaths } from "./paths.js";
-import { canonicalDirState, listRegular, readRegular } from "./safe-fs.js";
+import { canonicalDirState, inspectDirNoFollow, listDirNames, listRegular, readRegular } from "./safe-fs.js";
 import { renderTiered } from "./tiered.js";
+import { dirFormat, parseArchiveName } from "./blocks/naming.js";
+import { readCorpus } from "./blocks/store.js";
+import { legacyDrift } from "./blocks/legacy.js";
+import { readBlocksState, readHold } from "./blocks/state.js";
 
 export type RenderTieredPort = (input: TieredRenderInput) => TieredRenderResult;
 
@@ -150,9 +158,115 @@ function runDoctorFor(
   renderPort: RenderTieredPort,
   now: () => number,
   jev?: JevDoctorPort,
-): DoctorFinding[] {
+): DoctorFindingLike[] {
+  const display = memoryDirFor(cwd, paths);
+  // #36 P4 (root ruling 2026-11-06, fix round 2): a blocks-format
+  // directory always takes the blocks dispatch, but a "held" one only
+  // does while the rollback is still unfinished (D25's rollback-unfinished
+  // finding must stay reachable) OR the blocks/ dir is still a real
+  // directory (the blocks layout is still live). A COMPLETED rollback whose
+  // blocks/ dir is gone is a files layout now — running the blocks doctor
+  // there misreported D24 block-format and dropped the legacy file codes.
+  // The files/absent paths are byte-identical to before.
+  const format = dirFormat(display);
+  if (format === "blocks" || (format === "held" && heldStillUsesBlocks(display))) {
+    return blocksDoctorFindings(display, settings, now);
+  }
   const snapshot = buildSnapshot(cwd, paths, settings, renderPort, now, jev === undefined ? undefined : isoDate(now()));
   return runDoctor(snapshot, toDoctorSettings(settings), jev === undefined ? undefined : { today: isoDate(now()) });
+}
+
+/** #36 P4 fix round 2: should a "held" directory take the blocks dispatch?
+ * `true` while the hold records an unfinished rollback (D25 reachable even
+ * if blocks/ was already removed) or blocks/ is still a real directory;
+ * `false` once a completed rollback has removed blocks/ — the files-layout
+ * doctor runs there instead (legacy codes restored, no false D24). */
+function heldStillUsesBlocks(memDir: string): boolean {
+  const canon = canonicalDirState(memDir);
+  const dir = canon.state === "ok" ? canon.dir.real : memDir;
+  try {
+    if (readHold(dir)?.rollback?.done === false) return true;
+  } catch {
+    /* unreadable hold — fall through to the blocks-dir presence check */
+  }
+  try {
+    inspectDirNoFollow(join(dir, "blocks"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Assemble `runDoctorBlocks`'s input from a real blocks directory. Every
+ *  read is fail-soft — a partial directory still yields the findings whose
+ *  inputs read cleanly (an unfinished rollback leaves dirFormat "held" with
+ *  blocks/ possibly still present; D25's hold finding reads independently). */
+function blocksDoctorFindings(memDir: string, settings: MemorySettings, now: () => number): DoctorFindingLike[] {
+  const canon = canonicalDirState(memDir);
+  const dir = canon.state === "ok" ? canon.dir.real : memDir;
+  const realDir = join(dir, "blocks");
+  let input: DoctorBlocksInput;
+  try {
+    const corpus = readCorpus(realDir);
+    const archivedIds: string[] = [];
+    try {
+      for (const f of listRegular(join(realDir, "archive"), { names: "v2" }).files) {
+        const parsed = parseArchiveName(f.name);
+        if (parsed !== undefined) archivedIds.push(`${parsed.topic}.${parsed.seq}`);
+      }
+    } catch {
+      // no archive dir — nothing to add
+    }
+    let driftCount = 0;
+    try {
+      driftCount = legacyDrift(dir).length;
+    } catch {
+      driftCount = 0; // unreadable migration report ⇒ no drift claim
+    }
+    const stagingWithoutOwner = listDirNames(dir)
+      .filter((name) => /^\.blocks-staging-/.test(name))
+      .filter((name) => {
+        try {
+          return !inspectDirNoFollow(join(dir, name)).names.includes("owner.json");
+        } catch {
+          return true; // unreadable ⇒ treat as ownerless (surfaces D25)
+        }
+      });
+    input = {
+      blocks: corpus.blocks,
+      strays: corpus.strays,
+      archivedIds,
+      settingsLayout: settings.layout,
+      rootFileCount: corpus.legacy.files.length,
+      driftCount,
+      residentBytes: settings.residentBytes,
+      today: isoDate(now()),
+      ...(stagingWithoutOwner.length === 0 ? {} : { stagingWithoutOwner }),
+    };
+  } catch {
+    // corpus unreadable (mid-rollback) — report only the state/hold codes
+    input = {
+      blocks: [],
+      strays: [],
+      settingsLayout: settings.layout,
+      rootFileCount: 0,
+      residentBytes: settings.residentBytes,
+      today: isoDate(now()),
+    };
+  }
+  try {
+    input = { ...input, state: readBlocksState(dir) };
+  } catch {
+    /* state file unreadable — D25's overBudgetStreak simply sits out */
+  }
+  const hold = (() => {
+    try {
+      return readHold(dir);
+    } catch {
+      return undefined;
+    }
+  })();
+  return runDoctorBlocks(hold === undefined ? input : { ...input, hold });
 }
 
 /** P5 shared health port for the v2 directory view and tidy integration. */
@@ -163,7 +277,7 @@ export function collectDoctorFindings(
   renderPort: RenderTieredPort = DEFAULT_RENDER_PORT,
   now: () => number = () => Date.now(),
   jev?: JevDoctorPort,
-): DoctorFinding[] {
+): DoctorFindingLike[] {
   return runDoctorFor(cwd, paths, settings, renderPort, now, jev);
 }
 
@@ -198,12 +312,12 @@ export async function handleMemDoctorCommand(
 
 /** `sha1` over the sorted `id+file` pairs of the error/D01 findings that
  *  would trigger a reminder — cheap, stable dedup key (§6.3's "指纹"). */
-function fingerprintFindings(findings: readonly DoctorFinding[]): string {
+function fingerprintFindings(findings: readonly DoctorFindingLike[]): string {
   const keys = findings.map((f) => `${f.id}:${f.file ?? ""}`).sort();
   return createHash("sha1").update(keys.join("\n")).digest("hex");
 }
 
-function startupReminderText(findings: readonly DoctorFinding[]): string {
+function startupReminderText(findings: readonly DoctorFindingLike[]): string {
   const errors = findings.filter((f) => f.severity === "error").length;
   const d01 = findings.some((f) => f.id === "D01");
   const bits: string[] = [];
@@ -291,7 +405,7 @@ export function createStartupReminder(deps: CreateStartupReminderDeps): StartupR
       if (sessionId !== undefined && notifiedSessions.has(sessionId)) return;
 
       const cwd = resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd;
-      let findings: DoctorFinding[];
+      let findings: DoctorFindingLike[];
       try {
         findings = runDoctorFor(cwd, deps.paths, settings, renderPort, now, deps.jev);
       } catch {

@@ -23,14 +23,25 @@ import { frontmatterSource } from "../frontmatter.js";
 import { parseMemoryMeta } from "../meta.js";
 import { clampSpanMs } from "../../core/deadline.js";
 import { splitEntries, type EntryFileInfo, type EntryIndex } from "./entries.js";
-import type { MemEntry } from "./contracts.js";
-import { formatWriteEcho, type WriteEchoInput } from "./format.js";
+import type { MemEntry, RelationVerdict } from "./contracts.js";
+import {
+  formatWriteEcho,
+  formatV3ConflictLine,
+  formatV3NotSupersededLine,
+  formatV3ScopeAdvice,
+  type WriteEchoInput,
+} from "./format.js";
 import { touchedUserEntries as pairedUserEntries } from "./guard.js";
 import { writeIndexPatch } from "./index-store.js";
 import { prefilter } from "./match.js";
 import { redactForJev } from "./redact.js";
 import { tagOne } from "./tagging.js";
+import { blockToEntry } from "../blocks/adapter.js";
+import { parseBlockFile } from "../blocks/format.js";
+import { readCorpus } from "../blocks/store.js";
+import { AUTO_PER_WRITE_MAX, CONFLICT_AUTO_P, SUPERSEDE_AUTO_P } from "../govern/supersede.js";
 import type { ClassifierRegistryLike, EntryHash, EntryTags, JevClient, JevWritePort, Taxonomy } from "./contracts.js";
+import type { MemoryWriteGate } from "../contracts.js";
 
 /** §6.2.1 total cap, raised 3000 → 6000 with the per-tier budget (2026-11-04
  *  all-failed fix — see tagging.ts). One unref'd abort timer caps the whole
@@ -72,6 +83,10 @@ export interface JevWritePortDeps {
   readonly dirFor: (cwd: string) => string | undefined;
   readonly taxonomyFor: (dir: string) => Taxonomy;
   readonly now: () => number;
+  /** #36 P4 修复轮（root 2026-11-06）：生产 writeGate（wireMemory 经 wireJev
+   *  传入）—— 侧车写入走 writeIndexPatch 的逐原语 gateCheck 复检；缺省无
+   *  gate 时行为与此前逐字节相同（I9）。 */
+  readonly gate?: MemoryWriteGate;
 }
 
 interface CompareCandidate {
@@ -179,6 +194,264 @@ function relationPicks(
 
 export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
   const EMPTY: { echo: readonly string[] } = { echo: [] };
+
+  // ── #36 P4 (arch r5 §4.4/§5.4): blocks-layout write path ──
+
+  /** §5.4 compare pool. User-new: cross-topic active user top-8 + same-topic
+   *  user + agent top-4 (≤12). Agent-new: same-topic agent + cross-topic
+   *  agent top-6 (≤12); the agent→user matrix cell is NEVER eligible, but
+   *  the two lexically-closest user blocks ride along as `userEcho` — the
+   *  `not superseded:` suggestion's only source. */
+  interface BlockPool {
+    readonly pool: readonly MemEntry[];
+    readonly userEcho: readonly MemEntry[];
+  }
+  const BLOCK_POOL_MAX = 12;
+  const USER_ECHO_TOP_N = 2;
+  /** The §5.4 suggestion gate ("0.75 到阈值之间只出建议") — same figure the
+   *  v2 `conflict:` line uses; not one of the supersede.ts tuning knobs. */
+  const SUGGEST_P = 0.75;
+
+  function blockPool(newEntry: MemEntry, corpus: readonly MemEntry[]): BlockPool {
+    const others = corpus.filter(
+      (e) => e.hash !== newEntry.hash && e.inline.isPrivate !== true && !e.secret && e.block?.status === "active",
+    );
+    const sameTopic = (e: MemEntry): boolean => {
+      const own = newEntry.file.replace(/\.md$/, "").split(".")[0] ?? "";
+      const their = e.file.replace(/\.md$/, "").split(".")[0] ?? "";
+      return own !== "" && own === their;
+    };
+    const isUser = (e: MemEntry): boolean => e.authority === "user";
+    const pick = (candidates: readonly MemEntry[], n: number): MemEntry[] =>
+      prefilter(
+        candidates,
+        (e) => e.body,
+        newEntry.body,
+        n,
+        (a, b) => (a.authority === b.authority ? 0 : a.authority === "user" ? -1 : 1),
+      );
+    const seen = new Set<string>();
+    const dedup = (list: readonly MemEntry[]): MemEntry[] => {
+      const out: MemEntry[] = [];
+      for (const e of list) {
+        const key = `${e.file}\u0000${e.hash}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(e);
+      }
+      return out;
+    };
+    if (isUser(newEntry)) {
+      const userOthers = others.filter(isUser);
+      const agentOthers = others.filter((e) => !isUser(e));
+      const crossUser = pick(
+        userOthers.filter((e) => !sameTopic(e)),
+        8,
+      );
+      const topicUser = userOthers.filter(sameTopic);
+      const agents = pick(agentOthers, 4);
+      return { pool: dedup([...topicUser, ...crossUser, ...agents]).slice(0, BLOCK_POOL_MAX), userEcho: [] };
+    }
+    const agentOthers = others.filter((e) => !isUser(e));
+    const topicAgents = agentOthers.filter(sameTopic);
+    const crossAgents = pick(
+      agentOthers.filter((e) => !sameTopic(e)),
+      6,
+    );
+    const userEcho = pick(others.filter(isUser), USER_ECHO_TOP_N);
+    return { pool: dedup([...topicAgents, ...crossAgents]).slice(0, BLOCK_POOL_MAX), userEcho };
+  }
+
+  /** Verdicts from the c* answers: kind supersedes (choice `supersedes` or
+   *  `duplicate`) / conflict; `auto` applies the §5.4 matrix + thresholds +
+   *  the per-write cap (agent→user never enters the pool, so it can never be
+   *  auto). The OLD block's rev is recorded for P5a's in-lock recheck. */
+  function blockVerdicts(
+    newEntry: MemEntry,
+    newRev: string,
+    compare: readonly { cand: { id: string }; entry: MemEntry }[],
+    answers: Record<string, unknown> | undefined,
+    revs: ReadonlyMap<string, string>,
+  ): readonly RelationVerdict[] {
+    const out: RelationVerdict[] = [];
+    for (const c of compare) {
+      const answer = asChoiceAnswer(answers?.[c.cand.id]);
+      if (answer === undefined) continue;
+      const oldId = c.entry.block?.id;
+      if (oldId === undefined) continue;
+      const kind: "supersedes" | "conflict" | undefined =
+        answer.choice === "conflict"
+          ? "conflict"
+          : answer.choice === "supersedes" || answer.choice === "duplicate"
+            ? "supersedes"
+            : undefined;
+      if (kind === undefined) continue;
+      const p = answer.probabilities[answer.choice] ?? answer.confidence;
+      const threshold = kind === "supersedes" ? SUPERSEDE_AUTO_P : CONFLICT_AUTO_P;
+      const auto = p >= threshold && out.filter((v) => v.auto).length < AUTO_PER_WRITE_MAX;
+      out.push({
+        kind,
+        newId: newEntry.block?.id ?? newEntry.file.replace(/\.md$/, ""),
+        newRev,
+        oldId,
+        oldRev: revs.get(oldId) ?? "",
+        p,
+        auto,
+      });
+    }
+    return out;
+  }
+
+  const runAfterWriteBlocks = async (input: {
+    cwd: string;
+    file: string;
+    before: string | undefined;
+    after: string;
+    signal?: AbortSignal;
+    registry: ClassifierRegistryLike | undefined;
+    block?: { id: string; rev: string; authority: "user" | "agent"; scopeExplicit: boolean };
+    askScope?: boolean;
+  }): Promise<{
+    echo: readonly string[];
+    usage?: { costUsd: number; calls: number };
+    relations?: readonly RelationVerdict[];
+  }> => {
+    const dir = deps.dirFor(input.cwd);
+    if (dir === undefined || input.block === undefined) return EMPTY;
+    const block = input.block;
+    const parsed = parseBlockFile(input.file, input.after);
+    if ("stray" in parsed) return EMPTY;
+    const today = new Date(deps.now()).toISOString().slice(0, 10);
+    const entry = blockToEntry(parsed, today);
+    // Re-tag only when the BODY hash changed (arch §4.1.2 update row); a
+    // metadata-only edit keeps its tags. Private/secret blocks stay silent.
+    if (input.before !== undefined) {
+      const beforeParsed = parseBlockFile(input.file, input.before);
+      if (!("stray" in beforeParsed) && blockToEntry(beforeParsed, today).hash === entry.hash) return EMPTY;
+    }
+    if (entry.inline.isPrivate === true || entry.secret) return EMPTY;
+    if (input.registry === undefined) {
+      return { echo: [formatWriteEcho({ kind: "not-tagged", reason: "off: pi-api", long: false })] };
+    }
+    const status = deps.client.status();
+    if (status.kind === "off") {
+      return { echo: [formatWriteEcho({ kind: "not-tagged", reason: `off: ${status.reason}`, long: false })] };
+    }
+    if (status.kind === "partial") {
+      return { echo: [formatWriteEcho({ kind: "not-tagged", reason: `partial: ${status.reason}`, long: true })] };
+    }
+
+    const taxonomy = deps.taxonomyFor(dir);
+    const corpus = deps.entryIndex.get(dir).filter((e) => e.inline.isPrivate !== true && !e.secret);
+    const { pool, userEcho } = blockPool(entry, corpus);
+    // userEcho candidates ride the SAME askAll (they need c-ids + answers for
+    // the `not superseded:` suggestion) but stay OUT of the verdict pool —
+    // the §5.4 matrix cell agent→user can never produce a verdict.
+    const poolSet = new Set(pool.map((e) => e.file + "\u0000" + e.hash));
+    const compare = [...pool, ...userEcho].map((e, i) => ({
+      cand: { id: `c${i + 1}`, file: e.file, excerpt: redactForJev(e.body, "entry") },
+      entry: e,
+    }));
+    const verdictCompare = compare.filter((c) => poolSet.has(c.entry.file + "\u0000" + c.entry.hash));
+
+    const budgetMs = clampSpanMs(WRITE_TAG_TOTAL_BUDGET_MS) ?? WRITE_TAG_TOTAL_BUDGET_MS;
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), budgetMs + WRITE_TAG_OUTER_SLACK_MS);
+    timer.unref?.();
+    const signal = input.signal === undefined ? abort.signal : AbortSignal.any([abort.signal, input.signal]);
+    try {
+      const askScope = input.askScope === true;
+      const result = await tagOne({
+        client: deps.client,
+        registry: input.registry,
+        entry,
+        taxonomy,
+        compare: compare.map((c) => c.cand),
+        mode: "sync",
+        signal,
+        ...(askScope ? { askScope: true } : {}),
+      });
+      const outcome = result.outcome;
+      if (!outcome.ok) {
+        const now2 = deps.client.status();
+        return {
+          echo: [
+            formatWriteEcho({
+              kind: "not-tagged",
+              ...(now2.kind === "partial"
+                ? { reason: `partial: ${now2.reason}`, long: true }
+                : { reason: outcome.reason, long: false }),
+            }),
+          ],
+        };
+      }
+      if (result.tags === undefined) return EMPTY; // private/secret guard — unreachable here
+      const tags = result.tags;
+      // revs for the verdicts' oldRev (one no-lock corpus read; P5a rechecks
+      // in-lock anyway).
+      let revs: ReadonlyMap<string, string>;
+      try {
+        revs = new Map(readCorpus(`${dir}/blocks`).blocks.map((b) => [b.id, b.rev] as const));
+      } catch {
+        revs = new Map();
+      }
+      const verdicts = blockVerdicts(entry, block.rev, verdictCompare, outcome.answers, revs);
+      const echo: string[] = [];
+      const input2: WriteEchoInput = {
+        kind: "tagged",
+        anchor: {
+          file: entry.file,
+          ordinal: entry.ordinal,
+          lineStart: entry.lineStart,
+          lineEnd: entry.lineEnd,
+        },
+        type: tags.type,
+        typeP: tags.typeP,
+        importance: tags.importance,
+        tags: Object.entries(tags.tags)
+          .map(([id, v]) => ({ id, p: v.p }))
+          .sort((a, b) => b.p - a.p || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+        guard: tags.guard,
+        temporal: tags.temporal,
+        // #36 §5.4: the v2 `similar:`/`conflict:` lines are replaced by the
+        // block verdict echoes below — never both.
+        userLike: tags.userLike,
+        authority: entry.authority,
+        ...(entry.inline.expires !== undefined || entry.inline.until !== undefined ? { hasExpiry: true } : {}),
+      };
+      echo.push(formatWriteEcho(input2));
+      // §5.3 scope advice: g1 answered ≥0.7 on a scope-less user block.
+      if (askScope && tags.globalP !== undefined && tags.globalP >= 0.7) {
+        echo.push(formatV3ScopeAdvice(tags.globalP));
+      }
+      // §5.4 echoes: agent→user suggestions first, then below-threshold
+      // conflicts. Auto-passing verdicts are handed to P5a via `relations`
+      // (execution echo lands there).
+      for (const e of userEcho) {
+        const c = compare.find((x) => x.entry === e);
+        if (c === undefined) continue;
+        const answer = asChoiceAnswer(outcome.answers[c.cand.id]);
+        if (answer === undefined) continue;
+        const p = answer.probabilities[answer.choice] ?? answer.confidence;
+        const related = answer.choice === "conflict" || answer.choice === "supersedes" || answer.choice === "duplicate";
+        if (related && p >= SUGGEST_P) {
+          echo.push(formatV3NotSupersededLine(e.block?.id ?? e.file, p));
+        }
+      }
+      for (const v of verdicts) {
+        if (!v.auto && v.p >= SUGGEST_P) echo.push(formatV3ConflictLine(v.oldId, v.p));
+      }
+      // Sidecar merge: same lock turn + fail-soft rules as the v2 path.
+      await writeIndexPatch(
+        dir,
+        { upsert: { [entry.hash]: tags }, lastTaggedAt: new Date(deps.now()).toISOString() },
+        deps.gate,
+      ).catch(() => "busy" as const);
+      return { echo, usage: { costUsd: outcome.costUsd, calls: 1 }, relations: verdicts };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 
   const runAfterWrite = async (input: {
     cwd: string;
@@ -328,11 +601,13 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
       if (Object.keys(upserts).length > 0) {
         // Sidecar merge runs in its own directory-lock turn (writeIndexPatch)
         // — we are outside the tool's lock here, so "busy" only drops the
-        // patch (never throws; the next tagging rewrites the same data).
-        await writeIndexPatch(dir, {
-          upsert: upserts,
-          lastTaggedAt: new Date(deps.now()).toISOString(),
-        }).catch(() => "busy" as const);
+        // patch (never throws; the next tagging rewrites the same data). A
+        // GATE refusal lands in the same drop path: zero sidecar writes.
+        await writeIndexPatch(
+          dir,
+          { upsert: upserts, lastTaggedAt: new Date(deps.now()).toISOString() },
+          deps.gate,
+        ).catch(() => "busy" as const);
       }
       return { echo, usage: { costUsd, calls: changed.length } };
     } finally {
@@ -343,6 +618,9 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
   return {
     async afterWrite(input) {
       try {
+        // #36 P4 (arch r5 §4.4): the blocks branch is selected by the tool
+        // passing `block`; the v2 call form (no `block`) is byte-identical.
+        if (input.block !== undefined) return await runAfterWriteBlocks(input);
         return await runAfterWrite(input);
       } catch {
         // Never rejects (frozen contract): a tagging crash must not turn a

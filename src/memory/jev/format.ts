@@ -198,6 +198,82 @@ export function formatWriteEcho(input: WriteEchoInput): string {
   return lines.join("\n");
 }
 
+// ───────────────────── #36 P4: v3 blocks write echo (arch r5 §4.1.5) ─────────────────────
+
+/** One decimal, e.g. `2.0k` — same shape as blocks/render.ts's `kb`. */
+function v3kb(bytes: number): string {
+  return `${(bytes / 1024).toFixed(1)}k`;
+}
+
+/** §4.1.2 success first lines. */
+export function formatV3CreatedLine(id: string, topic: string, rev: string, bytes: number, maxBytes: number): string {
+  return `created ${id} (topic ${topic}) · rev ${rev} · ${bytes}/${maxBytes}B`;
+}
+
+export function formatV3UpdatedLine(id: string, rev: string, wasRev: string, bytes: number, maxBytes: number): string {
+  return `updated ${id} · rev ${rev} (was ${wasRev}) · ${bytes}/${maxBytes}B`;
+}
+
+export function formatV3DeletedLine(id: string, trashId: string): string {
+  return `deleted ${id} → .trash (restore: /mem restore --trash ${trashId})`;
+}
+
+/** The post-write budget line (§4.1.5 example: `budget: resident
+ *  0.9k/2.0k · index 1.4k/2.0k`). */
+export function formatV3BudgetLine(
+  residentUsed: number,
+  residentMax: number,
+  indexUsed: number,
+  indexMax: number,
+): string {
+  return `budget: resident ${v3kb(residentUsed)}/${v3kb(residentMax)} · index ${v3kb(indexUsed)}/${v3kb(indexMax)}`;
+}
+
+/** §5.3 scope advice — only for a user block without explicit scope whose
+ *  g1 answer reached ≥0.7. The classifier SUGGESTS; only an explicit
+ *  `scope=global` ever promotes (user ruling D-4). */
+export function formatV3ScopeAdvice(globalP: number): string {
+  return `scope: topic (decision record — injected when relevant). Looks like a standing rule (p=${globalP.toFixed(2)}) — add scope=global to inject it every turn`;
+}
+
+/** §4.1.5 row: a resident (user∧global) write shows the current resident
+ *  meter even within budget — the model sees the state it just changed. */
+export function formatV3ResidentLine(used: number, max: number): string {
+  return `resident: ${v3kb(used)}/${v3kb(max)}`;
+}
+
+/** Resident over-budget marker (soft budget: everything stays injected). */
+export function formatV3ResidentOverBudget(used: number, max: number): string {
+  return `resident: ${v3kb(used)}/${v3kb(max)} over budget — still injected; merge or demote to topic`;
+}
+
+/** §5.3 state-snapshot advice — agent blocks only, never user rules. */
+export function formatV3StateSnapshotLine(kinds: readonly string[]): string {
+  return `state snapshot: ${kinds.join(" / ")} — add expires=YYYY-MM-DD or until="…", or rewrite as a durable conclusion`;
+}
+
+/** §6.1 audience hint — the formatter exists for P6b's inference path to
+ *  call; P4's tool never emits it (no inference yet). */
+export function formatV3AudienceHint(evidence: string): string {
+  return `audience: looks main-session-only (${evidence}) — add audience=main if so`;
+}
+
+/** §4.1.4 server-owned keys ignored in the inline comment. */
+export function formatV3IgnoredLine(keys: readonly string[]): string {
+  return keys.length === 0 ? "" : `ignored: ${keys.join(", ")} (server-owned)`;
+}
+
+/** §5.4 agent→user verdict echo: the matrix forbids auto-supersede; only
+ *  the suggestion is emitted. */
+export function formatV3NotSupersededLine(oldId: string, p: number): string {
+  return `not superseded: ${oldId} is a user rule — agent blocks never supersede user rules (conflict p=${p.toFixed(2)}; review suggested)`;
+}
+
+/** §5.4 below-threshold conflict echo (0.75 ≤ p < threshold). */
+export function formatV3ConflictLine(oldId: string, p: number): string {
+  return `conflict: ${oldId} (p=${p.toFixed(2)}) — below auto threshold; review suggested`;
+}
+
 // ───────────────────────────── status line (§5.3) ─────────────────────────────
 
 export interface StatusCoverage {

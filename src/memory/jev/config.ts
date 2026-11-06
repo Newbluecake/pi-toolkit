@@ -23,6 +23,14 @@ export type JevOffReason = "disabled" | "legacy" | "secure" | "empty-list";
 export type JevWiring =
   { readonly on: true; readonly config: JevConfig } | { readonly on: false; readonly reason: JevOffReason };
 
+/** #36 P4 修复轮（root 2026-11-06）：jev 允许的布局×工具面组合。v3 块工具
+ *  由 `layout:"blocks"` 驱动注册（settings 的 `toolSurface` 键保持 `"v2"`，
+ *  `toolSurfaceFor` 只叠加目录判定），故 blocks+v2 与 tiered+v2 同为合法
+ *  jev 载体；`layout:"legacy"` 与 `toolSurface:"legacy"`（旧工具）维持互斥。 */
+export function jevLayoutAllowed(memory: MemorySettings): boolean {
+  return memory.toolSurface === "v2" && (memory.layout === "tiered" || memory.layout === "blocks");
+}
+
 /** Map `MemorySettings.jev` (J3) onto the frozen pure `JevConfig` (J1). */
 export function jevConfigOf(memory: MemorySettings): JevConfig {
   const jev = memory.jev;
@@ -80,7 +88,7 @@ export function predictConfigOf(memory: MemorySettings): JevConfig["predict"] {
 
 export function resolveJevWiring(memory: MemorySettings, domainKind: JevDomainKind): JevWiring {
   if (domainKind !== "plain") return { on: false, reason: "secure" };
-  if (memory.layout !== "tiered" || memory.toolSurface !== "v2") return { on: false, reason: "legacy" };
+  if (!jevLayoutAllowed(memory)) return { on: false, reason: "legacy" };
   if (!memory.jev.enabled) return { on: false, reason: "disabled" };
   if (memory.jev.classifiers.length === 0) return { on: false, reason: "empty-list" };
   return { on: true, config: jevConfigOf(memory) };

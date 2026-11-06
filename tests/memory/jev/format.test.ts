@@ -11,6 +11,16 @@ import {
   formatNotify,
   formatStatusLine,
   formatWriteEcho,
+  formatV3BudgetLine,
+  formatV3ConflictLine,
+  formatV3CreatedLine,
+  formatV3DeletedLine,
+  formatV3IgnoredLine,
+  formatV3NotSupersededLine,
+  formatV3ResidentOverBudget,
+  formatV3ScopeAdvice,
+  formatV3StateSnapshotLine,
+  formatV3UpdatedLine,
 } from "../../../src/memory/jev/format.js";
 import type { JevReportView } from "../../../src/memory/jev/contracts.js";
 
@@ -263,5 +273,53 @@ describe("/mem jev report (§9.4)", () => {
     expect(out).not.toContain("pending");
     expect(out).toContain("tags     142/150 tagged · taxonomy 4f2a91c0");
     expect(out).toContain("review   0 open → /mem review");
+  });
+});
+
+// ── #36 P4 (arch r5 §4.1.5): the v3 blocks write-echo line builders ──
+
+describe("v3 write echo lines (#36)", () => {
+  it("success heads carry id/topic/rev/bytes", () => {
+    expect(formatV3CreatedLine("quota.007", "quota", "1-3fa9c2", 412, 1024)).toBe(
+      "created quota.007 (topic quota) · rev 1-3fa9c2 · 412/1024B",
+    );
+    expect(formatV3UpdatedLine("quota.007", "4-a1b2c3", "3-9f8e7d", 530, 1024)).toBe(
+      "updated quota.007 · rev 4-a1b2c3 (was 3-9f8e7d) · 530/1024B",
+    );
+    expect(formatV3DeletedLine("quota.007", "20261106T000000000Z-123-abc123")).toBe(
+      "deleted quota.007 → .trash (restore: /mem restore --trash 20261106T000000000Z-123-abc123)",
+    );
+  });
+
+  it("budget line uses one-decimal kibibytes for both meters", () => {
+    expect(formatV3BudgetLine(921, 2048, 1434, 2048)).toBe("budget: resident 0.9k/2.0k · index 1.4k/2.0k");
+    expect(formatV3BudgetLine(0, 2048, 0, 2048)).toBe("budget: resident 0.0k/2.0k · index 0.0k/2.0k");
+  });
+
+  it("scope advice names the probability and never promotes by itself", () => {
+    const line = formatV3ScopeAdvice(0.82);
+    expect(line).toContain("scope: topic (decision record — injected when relevant)");
+    expect(line).toContain("p=0.82");
+    expect(line).toContain("add scope=global to inject it every turn");
+  });
+
+  it("resident over-budget marker; state snapshot line lists the matched kinds", () => {
+    expect(formatV3ResidentOverBudget(2355, 2048)).toBe(
+      "resident: 2.3k/2.0k over budget — still injected; merge or demote to topic",
+    );
+    expect(formatV3StateSnapshotLine(["run id", "progress"])).toBe(
+      'state snapshot: run id / progress — add expires=YYYY-MM-DD or until="…", or rewrite as a durable conclusion',
+    );
+  });
+
+  it("ignored/server-owned, not-superseded and conflict suggestion lines", () => {
+    expect(formatV3IgnoredLine(["rev", "version"])).toBe("ignored: rev, version (server-owned)");
+    expect(formatV3IgnoredLine([])).toBe("");
+    expect(formatV3NotSupersededLine("pitfalls.012", 0.91)).toBe(
+      "not superseded: pitfalls.012 is a user rule — agent blocks never supersede user rules (conflict p=0.91; review suggested)",
+    );
+    expect(formatV3ConflictLine("pitfalls.020", 0.78)).toBe(
+      "conflict: pitfalls.020 (p=0.78) — below auto threshold; review suggested",
+    );
   });
 });

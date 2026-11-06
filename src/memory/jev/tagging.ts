@@ -18,7 +18,13 @@
 // through `redactForJev`. Pi-free root; no module-scope state (I4).
 
 import { decideTagging } from "./decide.js";
-import { buildTagMajorQuestions, buildTagQuestions, splitBatches, type TagCompareCandidate } from "./questions.js";
+import {
+  buildTagMajorQuestions,
+  buildTagQuestions,
+  SCOPE_QUESTION_ID,
+  splitBatches,
+  type TagCompareCandidate,
+} from "./questions.js";
 import { redactForJev } from "./redact.js";
 import type {
   BulkResult,
@@ -79,6 +85,10 @@ export interface TagOneInput {
   readonly compare: readonly TagCompareCandidate[];
   readonly mode: "sync" | "background";
   readonly signal?: AbortSignal;
+  /** #36 P4 (arch r5 §4.4/§5.3): true ⇒ the g1 scope question joins this
+   *  entry's askAll (same call, one round trip) and a bool answer lands in
+   *  `EntryTags.globalP`. Default false ⇒ question set byte-identical. */
+  readonly askScope?: boolean;
 }
 
 export interface TagOneResult {
@@ -102,6 +112,7 @@ export async function tagOne(input: TagOneInput): Promise<TagOneResult> {
     },
     input.taxonomy,
     input.compare,
+    ...(input.askScope === true ? [{ includeScope: true }] : []),
   );
   const outcome = await input.client.ask({
     duty: "tag",
@@ -113,10 +124,21 @@ export async function tagOne(input: TagOneInput): Promise<TagOneResult> {
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   });
   if (!outcome.ok) return { outcome };
-  return {
-    tags: decideTagging(outcome.answers, input.taxonomy, outcome.model, new Date().toISOString(), input.entry.file),
-    outcome,
-  };
+  const tags = decideTagging(
+    outcome.answers,
+    input.taxonomy,
+    outcome.model,
+    new Date().toISOString(),
+    input.entry.file,
+  );
+  // #36 P4 (arch r5 §5.3): the g1 answer shares the tagging askAll; a bool
+  // answer's `probability` IS `globalP` (probability that this user rule is
+  // a standing global rule). No answer ⇒ no field (never a default).
+  const scopeAnswer = outcome.answers[SCOPE_QUESTION_ID];
+  if (input.askScope === true && scopeAnswer !== undefined && scopeAnswer.type === "bool") {
+    return { tags: { ...tags, globalP: scopeAnswer.probability }, outcome };
+  }
+  return { tags, outcome };
 }
 
 // ───────────────────────────── tagBulk (§6.2.3) ─────────────────────────────

@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createJevWritePort } from "../../../src/memory/jev/write-port.js";
+import { writeBlocksDir } from "../blocks/helpers.js";
 import { EntryIndex } from "../../../src/memory/jev/entries.js";
 import { entryHash } from "../../../src/memory/jev/entries.js";
 import { readIndex } from "../../../src/memory/jev/index-store.js";
@@ -724,5 +725,135 @@ describe("touchedUserEntries (v4.1 §3.2 through the port)", () => {
     const before = mk("- identical user order\n- identical user order");
     const after = mk("- identical user order");
     expect(port.touchedUserEntries("core.md", before, after, true)).toHaveLength(1);
+  });
+});
+
+// ── #36 P4 (arch r5 §4.4): the blocks branch — selected by `input.block`,
+// verdicts only (execution is P5a), v2 call form untouched ──
+
+describe("write-port blocks branch (#36)", () => {
+  it("the v2 call form (no block) never enters the blocks branch", async () => {
+    const fx = fixture();
+    const port = makePort(fx, fakeClient({}).client);
+    writeFileSync(join(fx.memDir, "core.md"), "---\nsource: agent\n---\n\n- entry\n");
+    const result = await port.afterWrite({
+      cwd: fx.cwd,
+      file: "core.md",
+      before: undefined,
+      after: "---\nsource: agent\n---\n\n- entry two\n",
+      registry: {} as never,
+    });
+    expect(result.relations).toBeUndefined();
+  });
+
+  it("a private block write stays silent (no tagging, no questions)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "wp-blocks-"));
+    tmpRoots.push(tmp);
+    const cwd = join(tmp, "proj");
+    mkdirSync(cwd, { recursive: true });
+    const paths = { memoryRoot: join(tmp, "mem"), ccProjectsRoot: join(tmp, "cc") };
+    const memDir = memoryDirFor(cwd, paths);
+    const realDir = join(memDir, "blocks");
+    mkdirSync(realDir, { recursive: true });
+    writeFileSync(
+      join(realDir, "gen.001.md"),
+      "---\nkind: block\nauthority: agent\nprivate: true\nstatus: active\ncreated: 2026-01-01T00:00:00.000Z\nupdated: 2026-01-02T00:00:00.000Z\nversion: 1\n---\n\n- secret-ish body\n",
+    );
+    const fake = fakeClient({});
+    const port = createJevWritePort({
+      client: fake.client,
+      entryIndex: new EntryIndex(),
+      dirFor: (c) => memoryDirFor(c, paths),
+      taxonomyFor: () => mergeTaxonomy().taxonomy,
+      now: () => 0,
+    });
+    const raw = readFileSync(join(realDir, "gen.001.md"), "utf8");
+    const result = await port.afterWrite({
+      cwd,
+      file: "gen.001.md",
+      before: undefined,
+      after: raw,
+      registry: {} as never,
+      block: { id: "gen.001", rev: "1-x", authority: "agent", scopeExplicit: false },
+    });
+    expect(result.echo).toEqual([]);
+    expect(result.relations).toBeUndefined(); // "not judged", not "judged empty"
+    expect(fake.client.status()).toEqual({ kind: "full", model: "opencode/jev-1.13-free" });
+  });
+});
+
+// ── #36 P4 修复轮：生产 writeGate 传入侧车写入 —— 拒绝 ⇒ 侧车文件不变。 ──
+
+describe("write-port sidecar gating (#36 P4 fix)", () => {
+  it("a refusing gate leaves the sidecar file untouched (no write, no substitute dir)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "wp-gate-"));
+    tmpRoots.push(tmp);
+    const cwd = join(tmp, "proj");
+    mkdirSync(cwd, { recursive: true });
+    const paths = { memoryRoot: join(tmp, "mem"), ccProjectsRoot: join(tmp, "cc") };
+    const memDir = memoryDirFor(cwd, paths);
+    const realDir = join(memDir, "blocks");
+    mkdirSync(realDir, { recursive: true });
+    writeFileSync(
+      join(realDir, "gen.001.md"),
+      "---\nkind: block\nauthority: agent\nstatus: active\ncreated: 2026-01-01T00:00:00.000Z\nupdated: 2026-01-02T00:00:00.000Z\nversion: 1\n---\n\n- a fact about releases\n",
+    );
+    const refuse = {
+      check: () => ({ ok: false as const, reason: "locked" as const }),
+      capture: () => {},
+    };
+    const fake = fakeClient({});
+    const port = createJevWritePort({
+      client: fake.client,
+      entryIndex: new EntryIndex(),
+      dirFor: (c) => memoryDirFor(c, paths),
+      taxonomyFor: () => mergeTaxonomy().taxonomy,
+      now: () => 0,
+      gate: refuse,
+    });
+    const raw = readFileSync(join(realDir, "gen.001.md"), "utf8");
+    const result = await port.afterWrite({
+      cwd,
+      file: "gen.001.md",
+      before: undefined,
+      after: raw.replace("- a fact about releases", "- a CHANGED fact"),
+      registry: {} as never,
+      block: { id: "gen.001", rev: "2-x", authority: "agent", scopeExplicit: false },
+    });
+    // the tagging echo still flows (the write already landed) but the sidecar
+    // merge was dropped by the gate — no .jev dir, no index.json anywhere.
+    expect(result.echo.join("\n")).toContain("jev:");
+    expect(existsSync(join(realDir, ".jev"))).toBe(false);
+    expect(existsSync(join(memDir, ".jev"))).toBe(false);
+  });
+
+  it("a passing gate writes the blocks sidecar through the same path (control)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "wp-gate-ok-"));
+    tmpRoots.push(tmp);
+    const cwd = join(tmp, "proj");
+    mkdirSync(cwd, { recursive: true });
+    const paths = { memoryRoot: join(tmp, "mem"), ccProjectsRoot: join(tmp, "cc") };
+    const memDir = memoryDirFor(cwd, paths);
+    const realDir = writeBlocksDir(memDir, [{ id: "gen.001", body: "- a fact about releases" }]);
+    const allow = { check: () => ({ ok: true as const }), capture: () => {} };
+    const fake = fakeClient({});
+    const port = createJevWritePort({
+      client: fake.client,
+      entryIndex: new EntryIndex(),
+      dirFor: (c) => memoryDirFor(c, paths),
+      taxonomyFor: () => mergeTaxonomy().taxonomy,
+      now: () => 0,
+      gate: allow,
+    });
+    const raw = readFileSync(join(realDir, "gen.001.md"), "utf8");
+    await port.afterWrite({
+      cwd,
+      file: "gen.001.md",
+      before: undefined,
+      after: raw,
+      registry: {} as never,
+      block: { id: "gen.001", rev: "1-x", authority: "agent", scopeExplicit: false },
+    });
+    expect(existsSync(join(realDir, ".jev", "index.json"))).toBe(true);
   });
 });

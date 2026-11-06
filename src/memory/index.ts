@@ -38,13 +38,14 @@ import { memorySection, renderExternalMemoryBlock } from "./inject.js";
 import { RenderCache, type InjectBudget } from "./render.js";
 import { createMemoryTool } from "./tool.js";
 import { createMemoryToolV2 } from "./tool-v2.js";
+import { createMemoryToolV3 } from "./tool-v3.js";
 import { renderTiered } from "./tiered.js";
 import { runDoctor } from "./doctor.js";
 import { createStartupReminder, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
 import { summaryLine } from "./doctor.js";
 import { canonicalDir } from "./safe-fs.js";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
-import { dirFormat, effectiveLayout } from "./blocks/naming.js";
+import { dirFormat, effectiveLayout, toolSurfaceFor } from "./blocks/naming.js";
 import { runMigration, resumeRollback, plainMemoryWriteGate } from "./blocks/migrate.js";
 import { memoryDirFor } from "./paths.js";
 import { resolveJevWiring, type JevDomainKind } from "./jev/config.js";
@@ -214,9 +215,15 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       isChildSession: opts.isChildSession,
       cache,
       frozenBlocks,
-      onRender: (cwd, block, info) => {
+      onRender: (cwd, block, info, resident) => {
         lastBlocks.set(cwd, block);
-        if (jevOn && info !== undefined) renderInfos.set(cwd, info);
+        // #36 P4 (arch §3.3.5): the fourth argument carries this render's
+        // resident id → renderKey map — fold its id set into the recorded
+        // JevRenderInfo (wire.ts's renderInfoFor overlays the LEDGER ids on
+        // top of whatever lands here).
+        if (jevOn && info !== undefined) {
+          renderInfos.set(cwd, resident === undefined ? info : { ...info, residentBlocks: [...resident.keys()] });
+        }
       },
       ...(jevOn ? { stripInlineMeta: true } : {}),
       // 自己不消费，俛 legacy layout 不调用它；tiered 的 `accessFromTools` 计算属于 P1）。
@@ -243,6 +250,19 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         getRenderInfo: (cwd) => renderInfos.get(cwd),
         onAfterWriteHook: (fn) => afterWriteHooks.push(fn),
         createWritePort: createJevWritePort,
+        // #36 P4 (arch §3.3.5, r3 裁定 8): the R layer reads the hub's
+        // PERSISTED pi_project_memory state so snapshot vs. ledger follows
+        // the real hub lifecycle (resume/reload/tree restore the snapshot;
+        // stale/undefined falls back to this turn's provider output inside
+        // wire). `_state` is the hub's existing interface member — the hub
+        // itself is untouched.
+        // #36 P4 修复轮：生产 writeGate 覆盖 jev 侧车写入（打标/冷却戳/
+        // 建议/taxonomy —— writeIndexPatch 逐原语复检）。
+        writeGate: gate,
+        getSectionSnapshot: () => {
+          const s = opts.sections._state("pi_project_memory");
+          return s === undefined ? undefined : { snapshot: s.snapshot, stale: s.stale };
+        },
         ...(jevTodo === undefined ? {} : { todo: jevTodo }),
         // J8 acceptance #3 "core usage": doctor's D19 (≥80% of coreBytes, not
         // when D02/D03 already flag the primary) as one reminder line.
@@ -261,18 +281,37 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         ? collectDoctorFindings(cwd, undefined, opts.settings, tieredRender)
         : collectDoctorFindings(cwd, undefined, opts.settings, tieredRender, undefined, jev.doctorPort),
     );
+  // #36 P4 (arch §3.4): activate-time surface choice. `toolSurfaceFor`
+  // returns v3 for layout:blocks + a blocks/absent/(files+auto) directory —
+  // the registration COUNT and NAME stay exactly one `memory` tool (the
+  // activate-trace contract).
+  const surface = toolSurfaceFor(
+    opts.settings,
+    dirFormat(memoryDirFor(resolveWorktreeOrigin(process.cwd()) ?? process.cwd())),
+    opts.secureDomainKind === "locked",
+  );
+  const toolCommon = {
+    settings: opts.settings,
+    isChildSession: opts.isChildSession,
+    onAfterWrite,
+    ...(opts.sessionSignal === undefined ? {} : { sessionSignal: opts.sessionSignal }),
+  };
   pi.registerTool(
-    opts.settings.toolSurface === "v2"
-      ? createMemoryToolV2({
-          settings: opts.settings,
-          isChildSession: opts.isChildSession,
-          onAfterWrite,
-          ...(opts.settings.layout === "tiered" ? { renderBlock: tieredRender } : {}),
+    surface === "v3"
+      ? createMemoryToolV3({
+          ...toolCommon,
+          writeGate: gate,
           doctorSummary,
           ...(jev === undefined ? {} : { jev: jev.makeWritePort() }),
-          ...(opts.sessionSignal === undefined ? {} : { sessionSignal: opts.sessionSignal }),
         })
-      : createMemoryTool({ settings: opts.settings, isChildSession: opts.isChildSession, onAfterWrite }),
+      : surface === "v2"
+        ? createMemoryToolV2({
+            ...toolCommon,
+            ...(opts.settings.layout === "tiered" ? { renderBlock: tieredRender } : {}),
+            doctorSummary,
+            ...(jev === undefined ? {} : { jev: jev.makeWritePort() }),
+          })
+        : createMemoryTool({ settings: opts.settings, isChildSession: opts.isChildSession, onAfterWrite }),
   );
   pi.registerCommand(
     "mem",

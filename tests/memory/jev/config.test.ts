@@ -2,7 +2,7 @@
 // and the JevConfig mapping.
 
 import { describe, expect, test } from "vitest";
-import { jevConfigOf, resolveJevWiring } from "../../../src/memory/jev/config.js";
+import { jevConfigOf, jevLayoutAllowed, resolveJevWiring } from "../../../src/memory/jev/config.js";
 import { DEFAULT_MEMORY_SETTINGS, parseMemorySettings } from "../../../src/memory/settings.js";
 
 describe("resolveJevWiring", () => {
@@ -88,5 +88,49 @@ describe("resolveJevWiring", () => {
     });
     const dup = jevConfigOf({ ...s, jev: { ...s.jev, classifiers: ["a/b", "a/b", "c/d"] } });
     expect(dup.classifiers).toEqual(["a/b", "c/d"]);
+  });
+});
+
+// ── #36 P4 修复轮（root 2026-11-06）：jev 允许 blocks 布局（v3 载体） ──
+
+describe("jevLayoutAllowed / resolveJevWiring blocks acceptance (#36 P4)", () => {
+  test("layout:blocks + toolSurface:v2 wires jev ON (the v3 carrier)", () => {
+    const settings = parseMemorySettings({ layout: "blocks" });
+    expect(settings.layout).toBe("blocks");
+    expect(settings.toolSurface).toBe("v2");
+    expect(jevLayoutAllowed(settings)).toBe(true);
+    expect(resolveJevWiring(settings, "plain").on).toBe(true);
+  });
+
+  test("tiered+v2 stays ON; legacy layout or legacy tool stays OFF (unchanged)", () => {
+    expect(jevLayoutAllowed(parseMemorySettings({}))).toBe(true);
+    expect(resolveJevWiring(parseMemorySettings({ layout: "legacy" }), "plain")).toEqual({
+      on: false,
+      reason: "legacy",
+    });
+    expect(resolveJevWiring(parseMemorySettings({ toolSurface: "legacy" }), "plain")).toEqual({
+      on: false,
+      reason: "legacy",
+    });
+    // legacy tool over a blocks layout is still a legacy-surface mismatch
+    expect(resolveJevWiring(parseMemorySettings({ layout: "blocks", toolSurface: "legacy" }), "plain")).toEqual({
+      on: false,
+      reason: "legacy",
+    });
+  });
+
+  test("secure/D8 and disabled/empty-list keep their precedence over the layout", () => {
+    expect(resolveJevWiring(parseMemorySettings({ layout: "blocks" }), "secure")).toEqual({
+      on: false,
+      reason: "secure",
+    });
+    expect(resolveJevWiring(parseMemorySettings({ layout: "blocks", jev: { enabled: false } }), "plain")).toEqual({
+      on: false,
+      reason: "disabled",
+    });
+    expect(resolveJevWiring(parseMemorySettings({ layout: "blocks", jev: { classifiers: [] } }), "plain")).toEqual({
+      on: false,
+      reason: "empty-list",
+    });
   });
 });

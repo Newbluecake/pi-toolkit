@@ -70,6 +70,53 @@ export const MEMORY_TOOL_V2_TEXT_JEV: {
   description: `${MEMORY_TOOL_V2_TEXT.description} ${MEMORY_TOOL_V2_JEV_SUFFIX}`,
 };
 
+/** #36 arch r5 §4.1.1 — the v3 (blocks layout) parameter schema. The
+ *  frozen v2 exports above are untouched. `action`/`name`/`content`/
+ *  `old_str`/`new_str`/`insert_*`/`old_path`/`new_path`/`view_range`/
+ *  `section` are deliberately GONE; a model still sending them gets either
+ *  the host's schema rejection (unknown `command` enum values never reach
+ *  `execute`) or `normalizeV3`'s `E_UNSUPPORTED_COMMAND` (extra properties
+ *  pass typebox's default-tolerant validation and are inspected there). */
+export const MemoryToolParamsV3 = Type.Object({
+  command: lit(["view", "create", "update", "delete", "search"]),
+  path: S(), // block id (quota.007 / quota.007.md / /memories/quota.007.md); view also accepts a topic name
+  topic: S(), // create: [a-z0-9-]{1,48}
+  text: S(), // create/update: whole-block body, first line may carry <!-- mem … -->
+  rev: S(), // update required, delete optional
+  query: S(), // search
+});
+export type MemoryToolParamsV3 = Static<typeof MemoryToolParamsV3>;
+
+/** arch r5 §4.1.1 — the v3 tool text (blocks layout). Do not edit without
+ *  updating `tests/fixtures/memory-tool-surface.json` (the `blocks` /
+ *  `blocksJev` / `bytes.blocks` / `bytes.blocksJev` keys) in the same
+ *  change. Budget ceiling: 1700B. */
+export const MEMORY_TOOL_V3_TEXT = {
+  description:
+    "Project memory as blocks (one fact per file, body ≤1024B). User rules with scope=global are always injected; " +
+    "other blocks are injected when relevant; a topic index is shown. view [path] (omit = list; <topic> = its blocks) · " +
+    "search query · create topic text · update path rev text (whole-block replace; rev from view) · delete path [rev]. " +
+    "Never store secrets.",
+  promptSnippet: "Project memory: view/search; one fact per block",
+  promptGuidelines: [
+    "memory: fix a stale fact with update (view first for rev) instead of creating a duplicate; one durable fact per block; mark user orders with <!-- mem user -->.",
+  ],
+} as const;
+
+/** arch r5 §4.1.1 — the jev-on variant: only the description swaps (the
+ *  write-syntax sentence is appended); schema/snippet/guidelines shared
+ *  with the base variant (same rule as v2's `MEMORY_TOOL_V2_TEXT_JEV`). */
+export const MEMORY_TOOL_V3_TEXT_JEV: {
+  readonly description: string;
+  readonly promptSnippet: string;
+  readonly promptGuidelines: readonly string[];
+} = {
+  ...MEMORY_TOOL_V3_TEXT,
+  description:
+    `${MEMORY_TOOL_V3_TEXT.description} Entries are tagged automatically. Meta on the text's first line: ` +
+    '<!-- mem user|lesson scope=global audience=main|child expires=YYYY-MM-DD until="…" supersedes=id tags=+a,-b private -->.',
+};
+
 export interface ToolSurfaceText {
   description: string;
   promptSnippet?: string;

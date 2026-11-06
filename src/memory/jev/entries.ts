@@ -76,20 +76,57 @@ const INLINE_OPENER_RE = /<!--[ \t]*mem\b/;
 const TAG_ID_RE = /^[a-z][a-z0-9-]{1,31}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/** #36 P4 (arch r5 §4.1.4): server-owned frontmatter keys that may appear
+ *  in a write-time inline comment. They are IGNORED silently (collected in
+ *  the `ignored` return field for the tool's `ignored: … (server-owned)`
+ *  echo) — never an error, never metadata. Everything else unknown stays an
+ *  error (D18 / checkInline). */
+const SERVER_OWNED_KEYS: ReadonlySet<string> = new Set([
+  "kind",
+  "id",
+  "rev",
+  "version",
+  "created",
+  "updated",
+  "status",
+  "supersededby",
+  "supersededBy",
+  "heading",
+  "section",
+  "residue",
+  "origin",
+  "seq",
+  "file",
+  "topic",
+]);
+const BLOCK_ID_RE = /^[a-z0-9][a-z0-9-]{0,47}\.[0-9]{3,6}$/;
+
 /** Parse one line's `<!-- mem … -->` authority comment. NEVER throws: every
  *  problem lands in `errors` (→ D18). No comment ⇒ `{present:false}`, no
- *  errors. Keys: user · lesson · expires=YYYY-MM-DD · until="…" ·
- *  gate|gate=hold|nogate · tags=+a,-b · private; ≤200B overall. */
-export function parseInlineMeta(line: string): { meta: InlineMeta; errors: string[] } {
+ *  errors. Keys: user · lesson · expires=YYYY-MM-DD|none · until="…"|none ·
+ *  gate|gate=hold|nogate · tags=+a,-b · private · scope=global|topic ·
+ *  audience=all|main|child · supersedes=id[,id] · title="…" · when="…";
+ *  ≤200B overall.
+ *
+ *  #36 P4 修复轮（root 2026-11-06）：默认保持 v2 的严格校验 —— 服务端字段
+ *  （rev/version/…，见 SERVER_OWNED_KEYS）与一切未知键同样是 `unknown key`
+ *  错误，v2 的 checkInline/D18 语义逐字节不变。仅 `lenientServerOwned:true`
+ *  （tool-v3 的写入语法解析）把服务端字段降级为静默忽略并经 `ignored`
+ *  返回（供 `ignored: … (server-owned)` 回显）；宽松模式不改变任何其他键的
+ *  校验。 */
+export function parseInlineMeta(
+  line: string,
+  opts?: { readonly lenientServerOwned?: boolean },
+): { meta: InlineMeta; errors: string[]; ignored: readonly string[] } {
   const errors: string[] = [];
   INLINE_COMMENT_RE.lastIndex = 0;
   const first = INLINE_COMMENT_RE.exec(line);
   if (first === null) {
     // An opener without a closer on the same line is still a (broken) attempt.
     if (INLINE_OPENER_RE.test(line)) {
-      return { meta: { present: true }, errors: ["unterminated inline comment (missing -->)"] };
+      return { meta: { present: true }, errors: ["unterminated inline comment (missing -->)"], ignored: [] };
     }
-    return { meta: { present: false }, errors };
+    return { meta: { present: false }, errors, ignored: [] };
   }
   const whole = first[0];
   if (INLINE_COMMENT_RE.exec(line) !== null) errors.push("multiple inline comments on one line");
@@ -111,7 +148,15 @@ export function parseInlineMeta(line: string): { meta: InlineMeta; errors: strin
     tagsAdd?: string[];
     tagsRemove?: string[];
     isPrivate?: boolean;
+    scope?: "global" | "topic";
+    audience?: "all" | "main" | "child";
+    supersedes?: string[];
+    title?: string;
+    when?: string;
+    clearExpires?: true;
+    clearUntil?: true;
   } = { present: true };
+  const ignoredKeys: string[] = [];
   const seen = new Set<string>();
   let sawGate = false;
   let sawNogate = false;
@@ -162,6 +207,10 @@ export function parseInlineMeta(line: string): { meta: InlineMeta; errors: strin
           errors.push("expires requires a value");
           break;
         }
+        if (value === "none") {
+          meta.clearExpires = true;
+          break;
+        }
         if (!DATE_RE.test(value) || Number.isNaN(Date.parse(value))) {
           errors.push(`expires ${JSON.stringify(value)} is not a valid YYYY-MM-DD date`);
         }
@@ -170,6 +219,10 @@ export function parseInlineMeta(line: string): { meta: InlineMeta; errors: strin
       case "until":
         if (value === undefined || value === "") {
           errors.push("until requires a value");
+          break;
+        }
+        if (value === "none") {
+          meta.clearUntil = true;
           break;
         }
         meta.until = value;
@@ -210,12 +263,59 @@ export function parseInlineMeta(line: string): { meta: InlineMeta; errors: strin
         if (value !== undefined) errors.push("private takes no value");
         meta.isPrivate = true;
         break;
+      // ── #36 P4 (arch r5 §4.1.4) — block write-syntax keys ──
+      case "scope":
+        if (value !== "global" && value !== "topic") {
+          errors.push(`scope ${JSON.stringify(value)} is not a valid value (use scope=global or scope=topic)`);
+          break;
+        }
+        meta.scope = value;
+        break;
+      case "audience":
+        if (value !== "all" && value !== "main" && value !== "child") {
+          errors.push(`audience ${JSON.stringify(value)} is not a valid value (use audience=all|main|child)`);
+          break;
+        }
+        meta.audience = value;
+        break;
+      case "supersedes": {
+        if (value === undefined || value === "") {
+          errors.push("supersedes requires a value");
+          break;
+        }
+        const ids: string[] = [];
+        for (const item of value.split(",")) {
+          if (item === "") continue;
+          if (BLOCK_ID_RE.test(item)) ids.push(item);
+          else errors.push(`invalid block id ${JSON.stringify(item)} in supersedes=`);
+        }
+        if (ids.length > 0) meta.supersedes = ids;
+        break;
+      }
+      case "title":
+      case "when": {
+        if (value === undefined || value === "") {
+          errors.push(`${key} requires a value`);
+          break;
+        }
+        const maxBytes = key === "title" ? 110 : 70; // mirrors BlockMeta LIMITS
+        if (/[\r\n]/.test(value) || Buffer.byteLength(value, "utf8") > maxBytes) {
+          errors.push(`invalid ${key}`);
+          break;
+        }
+        meta[key] = value;
+        break;
+      }
       default:
+        if (opts?.lenientServerOwned === true && SERVER_OWNED_KEYS.has(key)) {
+          ignoredKeys.push(key);
+          break;
+        }
         errors.push(`unknown key ${JSON.stringify(key)}`);
     }
   }
   if (sawGate && sawNogate) errors.push("gate and nogate are mutually exclusive");
-  return { meta: meta, errors };
+  return { meta: meta, errors, ignored: ignoredKeys };
 }
 
 /** Remove every `<!-- mem … -->` comment from a text (rendering + body

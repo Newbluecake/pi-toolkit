@@ -189,6 +189,7 @@ import {
 } from "../blocks/render.js";
 import { readCorpus, type BlockCorpus } from "../blocks/store.js";
 import { eligible, type EligibilityLayer } from "../govern/eligibility.js";
+import type { MemoryWriteGate } from "../contracts.js";
 import { parseBlockFile, type ParsedBlock } from "../blocks/format.js";
 
 // ───────────────────────────── constants (jev-arch §5.5) ─────────────────────────────
@@ -267,6 +268,8 @@ export interface JevWritePortFactoryDeps {
   readonly dirFor: (cwd: string) => string | undefined;
   readonly taxonomyFor: (dir: string) => Taxonomy;
   readonly now: () => number;
+  /** #36 P4 修复轮：生产 writeGate — 传给 write port 的侧车写入。 */
+  readonly gate?: MemoryWriteGate;
 }
 
 export interface WireJevDeps {
@@ -297,6 +300,11 @@ export interface WireJevDeps {
   /** Startup-reminder "core usage" line (jev-plan J8 acceptance #3) —
    *  supplied by `wireMemory` from doctor's D19 verdict. */
   readonly coreUsageLine?: (cwd: string) => string | undefined;
+  /** #36 P4 修复轮（root 2026-11-06）：wireMemory 的生产 writeGate —— 本层与
+   *  command-port、write-port 的全部侧车写入（打标/冷却戳/建议/taxonomy）都
+   *  经 writeIndexPatch/writeTaxonomyFile 的逐原语 gateCheck 复检；缺省无
+   *  gate 时行为与此前逐字节相同（I9，off-golden 不变）。 */
+  readonly writeGate?: MemoryWriteGate;
 }
 
 export interface WireJevResult {
@@ -1157,7 +1165,11 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
 
   const persistTags = async (dir: string, upserts: Record<EntryHash, EntryTags>): Promise<void> => {
     if (Object.keys(upserts).length === 0) return;
-    const out = await writeIndexPatch(dir, { upsert: upserts, lastTaggedAt: new Date(now()).toISOString() });
+    const out = await writeIndexPatch(
+      dir,
+      { upsert: upserts, lastTaggedAt: new Date(now()).toISOString() },
+      deps.writeGate,
+    );
     if (out === "busy") log("sidecar busy — tagging results not saved");
     dataCache.delete(dir);
   };
@@ -1253,7 +1265,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         log(`periodic review failed (${outcome.reason})`);
         return;
       }
-      const out = await writeIndexPatch(c.dir, { review: outcome });
+      const out = await writeIndexPatch(c.dir, { review: outcome }, deps.writeGate);
       if (out === "busy") log("sidecar busy — review results not saved");
       dataCache.delete(c.dir);
     });
@@ -1940,7 +1952,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       aStamps.set(item.hash, at);
       upsert[item.hash] = at;
     }
-    void writeIndexPatch(c.dir, { aInjectedAt: upsert })
+    void writeIndexPatch(c.dir, { aInjectedAt: upsert }, deps.writeGate)
       .then((out) => {
         if (out === "busy") log("sidecar busy — A-injection cooldown stamps not saved");
       })
@@ -2079,7 +2091,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       pStamps.set(item.hash, at);
       upsert[item.hash] = at;
     }
-    void writeIndexPatch(c.dir, { pInjectedAt: upsert })
+    void writeIndexPatch(c.dir, { pInjectedAt: upsert }, deps.writeGate)
       .then((out) => {
         if (out === "busy") log("sidecar busy — P-injection cooldown stamps not saved");
       })
@@ -2900,6 +2912,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   const basePort = createJevCommandPort({
     client: statusClient,
     entryIndex,
+    ...(deps.writeGate === undefined ? {} : { gate: deps.writeGate }),
     dirFor: (cwd) => deps.dirFor(resolveWorktreeOrigin(cwd) ?? cwd),
     now,
     isChildSession: isChild,
@@ -3015,6 +3028,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       const port = deps.createWritePort({
         client,
         entryIndex,
+        ...(deps.writeGate === undefined ? {} : { gate: deps.writeGate }),
         dirFor: deps.dirFor,
         taxonomyFor: (dir) => {
           const merged = mergeTaxonomy(readTaxonomyFile(dir));

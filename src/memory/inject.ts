@@ -45,10 +45,11 @@ import {
   type InjectBudget,
   type RenderCache,
 } from "./render.js";
-import { canonicalDir, listRegular } from "./safe-fs.js";
+import { canonicalDir, listRegular, statRegularIfExists } from "./safe-fs.js";
 import { accessFromTools, MetaCache, renderTiered, tieredFingerprint, TieredRenderCache } from "./tiered.js";
-import type { JevRenderInfo } from "./jev/contracts.js";
+import type { JevRenderInfo, JevIndexV1 } from "./jev/contracts.js";
 import { stripInlineMeta } from "./jev/entries.js";
+import { readIndex } from "./jev/index-store.js";
 // #36 P3 (arch §3.3.3/§3.4): layout dispatch — a blocks-format directory
 // renders through blocks/render.ts even under a tiered/legacy setting (the
 // data format wins); a files directory under layout:blocks still renders
@@ -283,6 +284,21 @@ function resolveCwd(input: SectionProviderInput): string {
   return resolveWorktreeOrigin(rawCwd) ?? rawCwd;
 }
 
+/** #36 P4: stat-only stamp of the blocks sidecar index (size + mtimeMs),
+ *  joining the blocks render cache key — a tagging run can change the
+ *  sidecar without touching any block file, and the tag summaries must
+ *  refresh anyway (root ruling 2026-11-06). Missing file ⇒ a constant (no
+ *  sidecar influence); stat trouble ⇒ a unique value (render once, don't
+ *  cache on a suspect state). */
+function sidecarStampOf(memDir: string): string {
+  try {
+    const st = statRegularIfExists(join(memDir, "blocks", ".jev"), "index.json");
+    return st === undefined ? "none" : `${st.size}:${st.mtimeMs}`;
+  } catch {
+    return `unreadable:${Date.now()}`;
+  }
+}
+
 function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext, caches: TieredCaches): Live {
   const budget: InjectBudget = {
     inlineMax: deps.settings.inlineMax,
@@ -301,10 +317,14 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
   } else if (effectiveLayout(deps.settings.layout, dirFormat(memoryDirFor(cwd, deps.paths))) === "blocks") {
     // #36 P3 blocks branch (arch §3.3.3): resident section + one-line topic
     // index, straight from frontmatter. Cache key = corpus fingerprint +
-    // LOCAL DATE + budget + profile — never the wall clock, so an unchanged
-    // corpus renders byte-identically across turns. `jevIndex` stays absent
-    // here until P4 wires the blocks sidecar read (index falls back to
-    // section summaries meanwhile — a pure render input, not a Jev dep).
+    // LOCAL DATE + budget + profile + SIDECAR stamp — never the wall clock,
+    // so an unchanged corpus renders byte-identically across turns. #36 P4
+    // (root ruling 2026-11-06): the blocks SIDECAR (index-store.ts resolves
+    // the blocks-layout sidecar via sidecarBase) feeds the renderer's tag
+    // summaries + resident sort importance — the P2 block sidecar, never a
+    // stale root `.jev`. Because tagging can change the sidecar WITHOUT any
+    // block file changing, its stat (size+mtimeMs) joins the cache key so a
+    // sidecar-only change still refreshes the summaries.
     const today = localTodayOf(Date.now());
     const memDir = memoryDirFor(cwd, deps.paths);
     const realDir = join(memDir, "blocks");
@@ -312,18 +332,26 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
     // turns cost N stat passes and ZERO body reads; the full `readCorpus`
     // runs once per actual change (mtimeMs/ino flip) or date rollover.
     const stamp = corpusStampFingerprint(realDir);
-    const key = `${stamp}:${today}:${deps.settings.residentBytes}:${deps.isChildSession ? "child" : "main"}`;
+    const sidecar = sidecarStampOf(memDir);
+    const key = `${stamp}:${sidecar}:${today}:${deps.settings.residentBytes}:${deps.isChildSession ? "child" : "main"}`;
     const hit = caches.blocksRender.get(cwd);
     let result = hit !== undefined && hit.key === key ? hit.result : undefined;
     if (result === undefined) {
       const reader = caches.blocksReaders.get(cwd) ?? { warned: false };
       caches.blocksReaders.set(cwd, reader);
       const corpus = readCorpus(realDir, reader);
+      let jevIndex: JevIndexV1 | undefined;
+      try {
+        jevIndex = dirFormat(memDir) === "blocks" ? readIndex(memDir).index : undefined;
+      } catch {
+        jevIndex = undefined; // unreadable sidecar ⇒ section-summary fallback
+      }
       const input: RenderBlocksInput = {
         slug: toSlug(cwd),
         isChild: deps.isChildSession,
         residentBytes: deps.settings.residentBytes,
         today,
+        ...(jevIndex === undefined ? {} : { jevIndex }),
       };
       result = renderBlocks(corpus, input);
       caches.blocksRender.set(cwd, { key, result });

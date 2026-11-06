@@ -17,6 +17,7 @@ import { createPromptSectionHub } from "../../../src/sysprompt/hub.js";
 import { memorySection } from "../../../src/memory/inject.js";
 import { memoryDirFor } from "../../../src/memory/paths.js";
 import { wireJev } from "../../../src/memory/jev/wire.js";
+import { wireMemory } from "../../../src/memory/index.js";
 import { jevConfigOf } from "../../../src/memory/jev/config.js";
 import { EntryIndex } from "../../../src/memory/jev/entries.js";
 import { clearHealthTable } from "../../../src/memory/jev/health.js";
@@ -452,5 +453,125 @@ describe("removal + replacement notices", () => {
     expect(notices[0]!.content).toContain("- 已移除 general.001（已取代 → 见 general.009）");
     expect(notices[0]!.content).toContain("- 新增 general.009");
     await settle(h);
+  });
+});
+
+// ── #36 P4 (plan r3 P4「R 层生产接线」): ONE case assembled through the REAL
+// `wireMemory` — the production closure passes getSectionSnapshot to wireJev
+// (hub-persisted snapshot, real lifecycle) and folds the onRender 4th
+// argument into the recorded render info. Settings stay tiered/v2 so the
+// PRODUCTION resolveJevWiring turns jev on; the blocks-format DIRECTORY makes
+// every layer render blocks (arch §3.4 "data format wins"). Registration
+// count/name unchanged ⇒ activate-trace untouched (tests/governance). ──
+
+describe("production assembly via wireMemory (P4)", () => {
+  test("ledger follows the real hub snapshot through wireMemory", async () => {
+    clearHealthTable();
+    const tmp = mkdtempSync(join(tmpdir(), "pi-mem-hub-prod-"));
+    const cwd = join(tmp, "proj");
+    mkdirSync(cwd, { recursive: true });
+    // wireMemory takes no paths injection — pin the env like the #26
+    // production harness does (memory-user-rule-direct.test.ts)
+    vi.stubEnv("HOME", join(tmp, "nohome"));
+    vi.stubEnv("ARMORY_MEMORY_ROOT", join(tmp, "mem"));
+    const paths = { memoryRoot: join(tmp, "mem"), ccProjectsRoot: join(tmp, "cc") };
+    const memDir = memoryDirFor(cwd, paths);
+    const realDir = writeBlocksDir(memDir, [
+      { id: "general.001", authority: "user", scope: "global", body: "- prod rule one" },
+      { id: "general.002", authority: "user", scope: "global", body: "- prod rule two" },
+    ]);
+    const handlers = new Map<string, Handler[]>();
+    const sent: { customType: string; details: any }[] = [];
+    const branch: any[] = [];
+    let nextId = 1;
+    const pi = {
+      on: (event: string, handler: Handler) => {
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      },
+      registerTool: () => {},
+      registerCommand: () => {},
+      registerMessageRenderer: () => {},
+      getActiveTools: () => ["read", "bash", "memory"],
+      sendMessage: (message: any) => {
+        sent.push(message);
+        branch.push({ type: "custom_message", id: `m${nextId++}`, ...message });
+      },
+      appendEntry: (customType: string, data: unknown) => {
+        branch.push({ type: "custom", id: `c${nextId++}`, customType, data });
+      },
+    } as unknown as ExtensionAPI;
+    const hub = createPromptSectionHub(pi, {
+      mode: () => "stable",
+      wakeReplay: false,
+      adoptForeignForcedPrompt: false,
+    });
+    const settings: MemorySettings = {
+      ...DEFAULT_MEMORY_SETTINGS,
+      layout: "tiered", // production jev wiring gate (resolveJevWiring)
+      freezeInjectionAfterWrite: false,
+      jev: { ...DEFAULT_MEMORY_SETTINGS.jev, predict: { ...DEFAULT_MEMORY_SETTINGS.jev.predict, enabled: false } },
+    };
+    wireMemory(pi, {
+      settings,
+      isChildSession: false,
+      sections: hub,
+      secureDomainKind: "plain",
+    });
+    const fake = createFakeRegistry({
+      available: CLASSIFIERS,
+      responses: Object.fromEntries(
+        CLASSIFIERS.map((id) => [id, [async () => ({ stopReason: "stop" as const, answers: {} })]]),
+      ),
+    });
+    const ctx = () => ({
+      cwd,
+      hasUI: true,
+      ui: { notify: () => {} },
+      modelRegistry: fake.registry,
+      sessionManager: { getBranch: () => branch, getSessionId: () => "prod-1" },
+    });
+    const emit = async (event: string, payload: unknown): Promise<void> => {
+      for (const h of handlers.get(event) ?? []) await h(payload, ctx());
+    };
+    const turn = () =>
+      emit("before_agent_start", {
+        type: "before_agent_start",
+        messageType: "user",
+        prompt: "continue",
+        systemPrompt: "",
+      });
+    await turn(); // hub snapshot freezes; R diffs against it
+    await turn(); // settle — ledger must cover every want block's renderKey
+
+    // 1. the hub's PERSISTED snapshot parses to exactly the resident set
+    const hubSnapshot = hub._state("pi_project_memory")!.snapshot ?? "";
+    const snapshotMap = parseResidentSection(hubSnapshot);
+    expect([...snapshotMap.keys()].sort()).toEqual(["general.001", "general.002"]);
+
+    // 2. ledger == want: after the settle turn, NO further R notice fires and
+    //    the last notice's ledger equals the snapshot map (the getSectionSnapshot
+    //    path — hub text, not a re-render — matched, so nothing re-notifies)
+    const rNotices = sent.filter((m) => m.customType === "subagent:memory-inject" && m.details?.layer === "R");
+    await turn();
+    const afterSettle = sent.filter((m) => m.customType === "subagent:memory-inject" && m.details?.layer === "R");
+    expect(afterSettle.length).toBe(rNotices.length); // idempotent — ledger complete
+
+    // 3. a foreign write to a resident block produces exactly one 已变更
+    writeFileSync(
+      join(realDir, "general.001.md"),
+      blockRaw({ id: "general.001", authority: "user", scope: "global", body: "- prod rule one EDITED" }),
+    );
+    await turn();
+    const notices = sent.filter((m) => m.customType === "subagent:memory-inject" && m.details?.layer === "R");
+    expect(notices.length).toBe(afterSettle.length + 1);
+    expect(notices.at(-1)!.content).toContain("- 已变更 general.001（以此为准）");
+    // and the newest ledger carries the NEW renderKey for the edited block
+    const ledger = new Map(notices.at(-1)!.details.resident.ledger as [string, string][]);
+    expect(ledger.has("general.001")).toBe(true);
+    expect(ledger.get("general.001")).not.toBe(snapshotMap.get("general.001"));
+
+    vi.unstubAllEnvs();
+    rmSync(tmp, { recursive: true, force: true });
+    clearHealthTable();
   });
 });

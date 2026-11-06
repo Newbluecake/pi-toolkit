@@ -1,7 +1,7 @@
 // command-port tests (jev-plan §4 J4 第 6 条: report 各行、probe 强制刷新、
 // retag/reset-index、tags 增删停启、review 流).
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -10,6 +10,7 @@ import { readIndex, readTaxonomyFile, writeIndexPatch } from "../../../src/memor
 import { EntryIndex } from "../../../src/memory/jev/entries.js";
 import { getHealthTable } from "../../../src/memory/jev/health.js";
 import { DEFAULT_JEV_FAST_PATH } from "../../../src/memory/jev/contracts.js";
+import type { MemoryWriteGate } from "../../src/memory/contracts.js";
 import type {
   ClassifierRegistryLike,
   EntryTags,
@@ -310,6 +311,38 @@ describe("probe / retag / reset-index", () => {
     expect(existsSync(join(dir, ".jev", "index.json"))).toBe(false);
     const child = makePort(dir, cwd, fakeClient(), { isChildSession: true });
     expect(await child.port.resetIndex(cwd)).toContain("main-session only");
+  });
+
+  test("#36 P4 close: a refusing gate blocks reset-index — sidecar bytes unchanged, no new dirs", async () => {
+    const { dir, cwd } = fixture();
+    writeCorpus(dir, ["- rule alpha"]);
+    await writeIndexPatch(dir, { upsert: { a: record() } });
+    const indexPath = join(dir, ".jev", "index.json");
+    const before = readFileSync(indexPath, "utf8");
+    const namesBefore = readdirSync(dir).sort().join(",");
+    const gate: MemoryWriteGate = {
+      check: () => ({ ok: false, reason: "locked" }),
+      capture: () => {},
+    };
+    const { port } = makePort(dir, cwd, fakeClient(), { gate });
+    const out = await port.resetIndex(cwd);
+    expect(out).toContain("reset-index failed");
+    expect(out).toContain("E_GATE");
+    expect(out).toContain("locked");
+    // refusal leaves the index byte-identical and creates no new dirs
+    expect(readFileSync(indexPath, "utf8")).toBe(before);
+    expect(readdirSync(dir).sort().join(",")).toBe(namesBefore);
+    expect(existsSync(indexPath)).toBe(true);
+  });
+
+  test("#36 P4 close: an ok gate lets reset-index proceed as before", async () => {
+    const { dir, cwd } = fixture();
+    writeCorpus(dir, ["- rule alpha"]);
+    await writeIndexPatch(dir, { upsert: { a: record() } });
+    const gate: MemoryWriteGate = { check: () => ({ ok: true }), capture: () => {} };
+    const { port } = makePort(dir, cwd, fakeClient(), { gate });
+    expect(await port.resetIndex(cwd)).toContain("cleared");
+    expect(existsSync(join(dir, ".jev", "index.json"))).toBe(false);
   });
 });
 

@@ -357,3 +357,53 @@ describe("tagBulk (§6.2.3 / Q28)", () => {
     expect(result.calls).toBe(1);
   });
 });
+
+// ── #36 P4 (arch r5 §4.4/§5.3): tagOne's askScope — g1 rides the same askAll ──
+
+describe("tagOne askScope (#36)", () => {
+  test("askScope=false/omitted: the question set is byte-identical to the pre-#36 call", async () => {
+    const client = fakeClient();
+    const entry = corpusOf(1)[0]!;
+    const taxonomy = mergeTaxonomy().taxonomy;
+    await tagOne({ client, registry, entry, taxonomy, compare: [], mode: "sync" });
+    const before = JSON.stringify(client.asks[0]!.questions);
+    const client2 = fakeClient();
+    await tagOne({ client: client2, registry, entry, taxonomy, compare: [], mode: "sync", askScope: false });
+    expect(JSON.stringify(client2.asks[0]!.questions)).toBe(before);
+  });
+
+  test("askScope=true: exactly one extra g1 question, and the bool answer lands in EntryTags.globalP", async () => {
+    const client = fakeClient({
+      answerFor: (ask) => ({ ...defaultAnswers(ask), g1: { type: "bool", probability: 0.77 } }),
+    });
+    const taxonomy = mergeTaxonomy().taxonomy;
+    const result = await tagOne({
+      client,
+      registry,
+      entry: corpusOf(1)[0]!,
+      taxonomy,
+      compare: [],
+      mode: "sync",
+      askScope: true,
+    });
+    const ids = Object.keys(client.asks[0]!.questions);
+    const base = ids.filter((k) => k !== "g1");
+    expect(ids.filter((k) => k === "g1")).toHaveLength(1);
+    expect(base.length).toBeGreaterThan(5); // m_* + t_* still there
+    expect(result.tags?.globalP).toBeCloseTo(0.77);
+    // without an answer: no globalP field at all (never a default)
+    const client3 = fakeClient({
+      answerFor: (ask) => Object.fromEntries(Object.entries(defaultAnswers(ask)).filter(([k]) => k !== "g1")),
+    });
+    const bare = await tagOne({
+      client: client3,
+      registry,
+      entry: corpusOf(1)[0]!,
+      taxonomy,
+      compare: [],
+      mode: "sync",
+      askScope: true,
+    });
+    expect(bare.tags).not.toHaveProperty("globalP");
+  });
+});

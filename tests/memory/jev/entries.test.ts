@@ -551,3 +551,70 @@ describe("EntryIndex blocks branch (#36 P3)", () => {
     expect(reads).toBe(1);
   });
 });
+
+// ── #36 P4 (arch r5 §4.1.4): the v3 write-syntax keys + server-owned ignore ──
+
+describe("parseInlineMeta #36 keys (scope/audience/supersedes/title/when/clears)", () => {
+  it("scope/audience validate their enums and land in meta", () => {
+    const ok = parseInlineMeta("- r <!-- mem user scope=global audience=main -->");
+    expect(ok.meta.scope).toBe("global");
+    expect(ok.meta.audience).toBe("main");
+    expect(ok.errors).toEqual([]);
+    const badScope = parseInlineMeta("- r <!-- mem scope=everywhere -->");
+    expect(badScope.errors[0]).toContain('scope "everywhere" is not a valid value');
+    const badAudience = parseInlineMeta("- r <!-- mem audience=some -->");
+    expect(badAudience.errors[0]).toContain('audience "some" is not a valid value');
+  });
+
+  it("supersedes takes comma-separated block ids; bad ids error", () => {
+    const ok = parseInlineMeta("- r <!-- mem supersedes=quota.007,pitfalls.012 -->");
+    expect(ok.meta.supersedes).toEqual(["quota.007", "pitfalls.012"]);
+    const bad = parseInlineMeta("- r <!-- mem supersedes=not-a-block -->");
+    expect(bad.errors[0]).toContain("invalid block id");
+    expect(bad.meta.supersedes).toBeUndefined();
+  });
+
+  it("title/when accept bare or quoted values within BlockMeta limits", () => {
+    expect(parseInlineMeta('- r <!-- mem title="release steps" when="before any release" -->').meta).toMatchObject({
+      title: "release steps",
+      when: "before any release",
+    });
+    expect(parseInlineMeta("<!-- mem title=t -->").errors).toEqual([]);
+    const tooLong = `<!-- mem title=${"t".repeat(111)} -->`;
+    expect(parseInlineMeta(tooLong).errors[0]).toContain("invalid title");
+  });
+
+  it("expires=none / until=none clear instead of erroring", () => {
+    const cleared = parseInlineMeta("- r <!-- mem expires=none until=none -->");
+    expect(cleared.meta.clearExpires).toBe(true);
+    expect(cleared.meta.clearUntil).toBe(true);
+    expect(cleared.meta.expires).toBeUndefined();
+    expect(cleared.errors).toEqual([]);
+    // real dates still parse as dates
+    expect(parseInlineMeta("- r <!-- mem expires=2030-01-01 -->").meta.expires).toBe("2030-01-01");
+  });
+
+  it("server-owned keys: STRICT default (v2 byte-parity) — still unknown-key errors", () => {
+    const r = parseInlineMeta("- r <!-- mem user rev=3 version=2 -->");
+    expect(r.errors).toEqual(['unknown key "rev"', 'unknown key "version"']);
+    expect(r.ignored).toEqual([]);
+    expect(r.meta.present).toBe(true); // errors never reject the parse
+  });
+
+  it("server-owned keys: lenient mode (tool-v3 write syntax) silently ignores + reports them", () => {
+    const r = parseInlineMeta("- r <!-- mem user rev=3 version=2 created=2020-01-01 supersededBy=x.001 -->", {
+      lenientServerOwned: true,
+    });
+    expect(r.errors).toEqual([]);
+    expect(r.ignored.sort()).toEqual(["created", "rev", "supersededBy", "version"]);
+    expect(r.meta.present).toBe(true);
+    // unknown non-server keys still error in lenient mode too
+    expect(parseInlineMeta("x <!-- mem bogus=1 -->", { lenientServerOwned: true }).errors[0]).toContain("unknown key");
+  });
+
+  it("the extended result shape stays backward compatible (ignored optional)", () => {
+    const none = parseInlineMeta("- plain line");
+    expect(none.meta.present).toBe(false);
+    expect(none.ignored).toEqual([]);
+  });
+});

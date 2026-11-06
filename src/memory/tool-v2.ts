@@ -233,8 +233,12 @@ function assertCommitNotAborted(signal: AbortSignal | undefined, name: string): 
 }
 
 /** Concatenate the tool signal with the session lifecycle signal (plan
- *  Major #2/#3). `AbortSignal.any` needs ≥Node 20 (engines pin ≥22). */
-function concatGuardSignals(tool: AbortSignal | undefined, session: AbortSignal | undefined): AbortSignal | undefined {
+ *  Major #2/#3). `AbortSignal.any` needs ≥Node 20 (engines pin ≥22).
+ *  #36 P4: shared with tool-v3.ts (exported unchanged). */
+export function concatGuardSignals(
+  tool: AbortSignal | undefined,
+  session: AbortSignal | undefined,
+): AbortSignal | undefined {
   if (tool === undefined) return session;
   if (session === undefined) return tool;
   if (tool.aborted || session.aborted) return AbortSignal.abort();
@@ -243,6 +247,18 @@ function concatGuardSignals(tool: AbortSignal | undefined, session: AbortSignal 
   } catch {
     return tool;
   }
+}
+
+/** #36 P4: registry resolution shared with tool-v3.ts — arch §5.3
+ *  off(pi-api): the registry must actually carry the classifier API; an
+ *  object without `classify`/`getAvailableOfType` is runtime-off, not a
+ *  callable port (verifier minor #3). Module scope (pure). */
+export function registryOf(ctx: ExtensionContext | undefined): ClassifierRegistryLike | undefined {
+  const registry = (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry;
+  if (registry === undefined || registry === null) return undefined;
+  const r = registry as Record<string, unknown>;
+  if (typeof r.classify !== "function" || typeof r.getAvailableOfType !== "function") return undefined;
+  return registry as ClassifierRegistryLike;
 }
 
 /** Archived judgment shared with entries.ts `EntryIndex.splitFile`
@@ -552,6 +568,14 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
   }
 
   function nameFor(target: string | undefined, real: string): string {
+    // Checked BEFORE resolveMemoryFile (which rejects separators with its own
+    // generic message): a block-subtree target gets the curated pointer.
+    const stem = target === undefined ? "" : target.replace(/^\/+/, "").replace(/^memories\//, "");
+    if (stem === "blocks" || stem.startsWith("blocks/")) {
+      throw new MemoryError(
+        "E_BLOCKS_DIR: this path is inside the block layout — /reload so the v3 block tool (view/create/update/delete) replaces this one",
+      );
+    }
     const resolved = resolveMemoryFile(target, real);
     if (resolved.kind === "dir") throw new MemoryError("this command requires a file path (a directory was given)");
     return resolved.name;
@@ -814,17 +838,6 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     if (voided.length > 0) parts.push(voided.join("\n"));
     if (out.budgetLine !== undefined) parts.push(out.budgetLine);
     return parts.join("\n");
-  }
-
-  function registryOf(ctx: ExtensionContext | undefined): ClassifierRegistryLike | undefined {
-    const registry = (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry;
-    if (registry === undefined || registry === null) return undefined;
-    // arch §5.3 off(pi-api): the registry must actually carry the classifier
-    // API — an object without `classify`/`getAvailableOfType` (e.g. a stub
-    // `{}`) is runtime-off, not a callable port (verifier minor #3).
-    const r = registry as Record<string, unknown>;
-    if (typeof r.classify !== "function" || typeof r.getAvailableOfType !== "function") return undefined;
-    return registry as ClassifierRegistryLike;
   }
 
   /** Post-commit phase (arch §6.2.1): outside the lock, tag the changed

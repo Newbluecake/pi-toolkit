@@ -450,6 +450,18 @@ export interface MemoryWriteGate {
   ): { ok: true } | { ok: false; reason: "locked" | "unmounted" | "path-escaped" | "identity-changed" };
   /** activate 时捕获 memDir 的 realpath + dev/ino（目录不存在则不捕获，之后的自动路径一律视为 identity-changed）。 */
   capture(memDir: string): void;
+  /** #36 P4 修复轮（root 2026-11-06）：受控的**显式路径**目录创建前置验证。
+   *  仅在 memDir 尚不存在、且调用方是显式写入入口（工具写入、/mem init、
+   *  显式 /mem migrate）时调用：plain 域恒 ok；secure 域先验证 domain 未锁、
+   *  vault 挂载有效、路径位于写区、且最近存在祖先（含挂载点）的当前身份
+   *  可验证，然后由调用方 ensureMemoryDir 并立即 capture 新目录，锁内再走
+   *  正常 check。不存在目录不要求已有 capture；已存在目录的 identity 异常
+   *  仍拒绝。**自动路径（sweep、取代、侧车写入、自动迁移）永不调用** —
+   *  它们不获得 mkdir 能力。缺省无此方法 ⇒ 调用方回退到 check() 的既有
+   *  语义（旧 gate 实现零改动）。 */
+  bootstrap?(
+    memDir: string,
+  ): { ok: true } | { ok: false; reason: "locked" | "unmounted" | "path-escaped" | "identity-changed" };
 }
 
 export type { RunOutcome };

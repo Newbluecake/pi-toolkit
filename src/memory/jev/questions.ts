@@ -237,12 +237,20 @@ export interface TagCompareCandidate {
   readonly excerpt: string;
 }
 
+/** #36 P4 (arch r5 §5.3) — the g1 scope question's id, exported for
+ *  tagOne/write-port answer extraction and tests. */
+export const SCOPE_QUESTION_ID = "g1";
+
 /** Full per-write tagging call (jev-arch §6.2.2): 5 `m_*` + one `t_<id>` per
- *  enabled tag (≤64) + up to 20 `c<n>` comparisons. */
+ *  enabled tag (≤64) + up to 20 `c<n>` comparisons. #36 P4: the optional
+ *  fourth argument adds the g1 scope question (asked in the SAME askAll as
+ *  the tagging questions — arch r5 §4.4); without it the question set is
+ *  byte-identical to the pre-#36 shape. */
 export function buildTagQuestions(
   entry: { readonly body: string; readonly file: string; readonly heading?: string; readonly today: string },
   taxonomy: Taxonomy,
   compare: readonly TagCompareCandidate[],
+  opts?: { readonly includeScope?: boolean },
 ): QuestionBatch {
   const state: JsonObject = {
     entry: entry.body,
@@ -262,6 +270,18 @@ export function buildTagQuestions(
         conflict: "They contradict each other",
         supersedes: "The entry in state replaces the existing one",
         complementary: "Related, both needed",
+      },
+    };
+  }
+  if (opts?.includeScope === true) {
+    questions[SCOPE_QUESTION_ID] = {
+      type: "bool",
+      instructions:
+        "Is the user rule in state a standing rule that applies to all work in this project (global), " +
+        "rather than a decision about one feature or subsystem (topic)?",
+      criteria: {
+        true: "Global standing rule — applies to every task in this project",
+        false: "Topic-scoped decision — only applies to one feature or subsystem",
       },
     };
   }

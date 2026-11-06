@@ -13,7 +13,9 @@ import {
   buildTagQuestions,
   estimateTokens,
   recallLabel,
+  SCOPE_QUESTION_ID,
   splitBatches,
+  type TagCompareCandidate,
 } from "../../../src/memory/jev/questions.js";
 import type { JevQuestion } from "../../../src/memory/jev/contracts.js";
 import { QUESTION_BATCH_TOKENS } from "../../../src/memory/jev/contracts.js";
@@ -242,5 +244,37 @@ describe("buildReviewQuestions (§6.3.3)", () => {
       ["a_supersedes_b", "b_supersedes_a", "complementary", "conflict", "duplicate", "unrelated"].sort(),
     );
     expect(batch.questions.o7?.type).toBe("bool");
+  });
+});
+
+// ── #36 P4 (arch r5 §5.3): the g1 scope question ──
+
+describe("buildTagQuestions includeScope (§5.3 g1)", () => {
+  const tax = mergeTaxonomy().taxonomy;
+  const compare: TagCompareCandidate[] = [{ id: "c1", file: "a.md", excerpt: "other" }];
+
+  it("without the option the question set is byte-identical to the pre-#36 shape", () => {
+    const before = buildTagQuestions({ body: "b", file: "a.md", today: "2026-11-06" }, tax, compare);
+    const after = buildTagQuestions({ body: "b", file: "a.md", today: "2026-11-06" }, tax, compare, {});
+    expect(after).toEqual(before);
+  });
+
+  it("includeScope adds exactly one g1 bool question and nothing else", () => {
+    const base = buildTagQuestions({ body: "b", file: "a.md", today: "2026-11-06" }, tax, compare);
+    const withScope = buildTagQuestions({ body: "b", file: "a.md", today: "2026-11-06" }, tax, compare, {
+      includeScope: true,
+    });
+    expect(Object.keys(withScope.questions).length).toBe(Object.keys(base.questions).length + 1);
+    expect(withScope.questions).toHaveProperty("g1");
+    expect(withScope.questions.g1!.type).toBe("bool");
+    expect(withScope.state).toEqual(base.state);
+    // base keys untouched
+    for (const [id, q] of Object.entries(base.questions)) {
+      expect(withScope.questions[id]).toEqual(q);
+    }
+  });
+
+  it("SCOPE_QUESTION_ID is g1 (the write-port/tagOne extraction key)", () => {
+    expect(SCOPE_QUESTION_ID).toBe("g1");
   });
 });

@@ -1,7 +1,16 @@
-import { mkdirSync, mkdtempSync, rmSync, renameSync, existsSync, writeFileSync, readdirSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  renameSync,
+  existsSync,
+  writeFileSync,
+  readdirSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { secureMemoryWriteGate } from "../../../src/secure/memory-gate.js";
 import type { SecureDomain } from "../../../src/secure/domain.js";
 import { runMigration } from "../../../src/memory/blocks/migrate.js";
@@ -140,4 +149,56 @@ it("migrate commands dry-run/status and effective-root --all leave unrelated dir
   expect(readdirSync(empty)).toEqual([]);
   const old = createMemCommand({ paths, settings: parseMemorySettings({ layout: "tiered", jev: { enabled: false } }) });
   expect(old.description).not.toContain("migrate");
+});
+
+// ── #36 P4 修复轮：MemoryWriteGate.bootstrap 协议（tier1 单元面；真实挂载
+// 的工具级用例在 tests/secure/memory-gate.test.ts）。 ──
+
+describe("gate bootstrap protocol (#36 P4 fix)", () => {
+  it("plain domains bootstrap ok; a mounted in-zone absent dir bootstraps ok", () => {
+    const f = fixture();
+    const absent = join(f.dir, "..", "brand-new-slug");
+    expect(f.gate.bootstrap!(absent)).toEqual({ ok: true });
+    const plain = secureMemoryWriteGate({ kind: "plain" } as unknown as SecureDomain);
+    expect(plain.bootstrap!(f.dir)).toEqual({ ok: true });
+  });
+
+  it("an EXISTING directory never bootstraps (identity-changed — use check/capture)", () => {
+    const f = fixture();
+    expect(f.gate.bootstrap!(f.dir)).toEqual({ ok: false, reason: "identity-changed" });
+  });
+
+  it("unmounted and path-escape refuse before any mkdir", () => {
+    const f = fixture();
+    f.unmount();
+    expect(f.gate.bootstrap!(join(f.dir, "..", "new-slug"))).toEqual({ ok: false, reason: "unmounted" });
+    // remount for the escape case
+    const f2 = fixture();
+    expect(f2.gate.bootstrap!("/tmp/elsewhere")).toEqual({ ok: false, reason: "path-escaped" });
+  });
+
+  it("locked refuses bootstrap like check", () => {
+    const locked = secureMemoryWriteGate({ kind: "locked" } as unknown as SecureDomain);
+    expect(locked.bootstrap!("/any/where")).toEqual({ ok: false, reason: "locked" });
+  });
+
+  it("a replaced nearest ancestor refuses (identity-changed, not bootstrap-able)", () => {
+    const f = fixture();
+    // capture the slug root, then swap it for a symlink pointing elsewhere —
+    // both check() and bootstrap() must treat that as identity-changed.
+    const memoryRoot = join(f.root, "mnt", "state", "memory");
+    f.gate.capture(memoryRoot);
+    rmSync(memoryRoot, { recursive: true, force: true });
+    symlinkSync(join(f.root, "mnt", "state"), memoryRoot);
+    // check() reports identity-changed (captured real no longer matches) or
+    // path-escaped (the symlink target == a write-zone BASE dir); either way
+    // it REFUSES. bootstrap() through the swapped ancestor refuses too —
+    // never ok.
+    const checked = f.gate.check(memoryRoot);
+    expect(checked.ok).toBe(false);
+    if (!checked.ok) expect(["identity-changed", "path-escaped"]).toContain(checked.reason);
+    const boot = f.gate.bootstrap!(join(memoryRoot, "another-slug"));
+    expect(boot.ok).toBe(false);
+    if (!boot.ok) expect(["identity-changed", "path-escaped"]).toContain(boot.reason);
+  });
 });

@@ -17,6 +17,8 @@ import { RenderCache } from "../../../src/memory/render.js";
 import { readCorpus } from "../../../src/memory/blocks/store.js";
 import { renderBlocks } from "../../../src/memory/blocks/render.js";
 import { blockRaw, writeBlocksDir } from "./helpers.js";
+import { writeIndexPatch } from "../../../src/memory/jev/index-store.js";
+import { entryHash } from "../../../src/memory/jev/entries.js";
 
 const tmpRoots: string[] = [];
 afterEach(() => {
@@ -221,3 +223,92 @@ function todayNow(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
+
+// ── #36 P4 (root ruling 2026-11-06): the blocks SIDECAR feeds the renderer's
+// tag summaries, and a sidecar-only change refreshes the cached render even
+// when no block file changed. ──
+
+function makeTags(tags: Record<string, number>): import("../../../src/memory/jev/contracts.js").EntryTags {
+  return {
+    file: "quota.001.md",
+    type: "fact",
+    typeP: 0.9,
+    importance: 2,
+    tags: Object.fromEntries(Object.entries(tags).map(([id, p]) => [id, { p, rev: 1 }])),
+    guard: 0.05,
+    temporal: "permanent",
+    userLike: 0.1,
+    model: "opencode/jev-1.13",
+    at: "2026-11-06T00:00:00.000Z",
+    taxonomyRev: "r1",
+  };
+}
+
+describe("blocks sidecar → renderer (P4 wiring)", () => {
+  function tagBody(body: string): string {
+    return body; // entryHash is over the normalized body
+  }
+
+  test("sidecar tags shape the topic summary line (tags: …), not just sections", async () => {
+    const fx = fixture();
+    const memDir = memoryDirFor(fx.cwd, fx.paths);
+    writeBlocksDir(memDir, [
+      { id: "quota.001", body: "- quota reading note one" },
+      { id: "quota.002", body: "- quota reading note two" },
+    ]);
+    // no sidecar ⇒ section-less topics fall back to plain counts (no tags:)
+    const { registration } = section({ layout: "tiered" }, { paths: fx.paths });
+    const before = registration.provider({ ...INPUT, ctx: ctx(fx.cwd) }) as string;
+    expect(before).toContain("- quota · 2 blocks");
+    expect(before).not.toContain("tags: quota");
+    // write the P2 blocks sidecar with a high-p tag for both bodies
+    await writeIndexPatch(memDir, {
+      upsert: {
+        [entryHash(tagBody("- quota reading note one"))]: makeTags({ quota: 0.9 }),
+        [entryHash(tagBody("- quota reading note two"))]: makeTags({ quota: 0.8 }),
+      },
+      lastTaggedAt: "2026-11-06T00:00:00.000Z",
+    });
+    const after = registration.provider({ ...INPUT, ctx: ctx(fx.cwd) }) as string;
+    expect(after).toContain("tags: quota");
+    expect(after).not.toContain("sections:");
+  });
+
+  test("a sidecar-only change refreshes the cached summary (mtime joins the cache key)", async () => {
+    const fx = fixture();
+    const memDir = memoryDirFor(fx.cwd, fx.paths);
+    writeBlocksDir(memDir, [{ id: "quota.001", body: "- quota reading note one" }]);
+    const { registration } = section({ layout: "tiered" }, { paths: fx.paths });
+    const first = registration.provider({ ...INPUT, ctx: ctx(fx.cwd) }) as string;
+    expect(first).toContain("- quota · 1 blocks");
+    // same corpus, NEW sidecar ⇒ the line gains the tag summary
+    await writeIndexPatch(memDir, {
+      upsert: { [entryHash(tagBody("- quota reading note one"))]: makeTags({ quota: 0.9 }) },
+      lastTaggedAt: "2026-11-06T00:00:00.000Z",
+    });
+    const second = registration.provider({ ...INPUT, ctx: ctx(fx.cwd) }) as string;
+    expect(second).toContain("tags: quota");
+  });
+
+  test("files layouts never read a blocks sidecar (old layout unchanged)", () => {
+    const fx = fixture();
+    const dir = memoryDirFor(fx.cwd, fx.paths);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "core.md"), "# Core\n\n## Rules\n\n- run the gate first\n");
+    // a stray blocks/.jev dir must not affect the tiered render
+    const out = section({ layout: "tiered" }, { paths: fx.paths }).registration.provider({
+      ...INPUT,
+      ctx: ctx(fx.cwd),
+    }) as string;
+    expect(out).toBe(
+      renderTiered({
+        cwd: fx.cwd,
+        profile: "full",
+        access: "memory",
+        coreBytes: DEFAULT_SETTINGS.memory.coreBytes,
+        blockBytes: DEFAULT_SETTINGS.memory.blockBytes,
+        indexMax: DEFAULT_SETTINGS.memory.indexMax,
+      }).text,
+    );
+  });
+});
