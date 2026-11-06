@@ -1,4 +1,7 @@
 // @vitest-environment happy-dom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { mount } from "@vue/test-utils";
 import { effectScope, nextTick, ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -270,5 +273,35 @@ describe("real components (not mock HTML)", () => {
     await w.get(".drawer-close").trigger("click");
     await nextTick();
     expect((w.get(".detail-main").element as HTMLElement).inert).toBeFalsy();
+  });
+});
+
+describe("#48 phone-only shared rail background", () => {
+  it("uses the fullscreen width breakpoint, themed surface and no overflow clipping; desktop stays transparent", () => {
+    const css = readFileSync(
+      resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/fleet.css"),
+      "utf8",
+    );
+    const base = css.match(/\.activity-rail\s*\{([^}]+)\}/)?.[1] ?? "";
+    expect(base).toMatch(/background:\s*transparent/);
+    expect(base).toMatch(/border:\s*0/);
+    expect(base).toMatch(/box-shadow:\s*none/);
+    const phone = css.match(/@media\s*\(max-width:\s*767px\)\s*\{\s*\.activity-rail\s*\{([^}]+)\}/)?.[1] ?? "";
+    expect(phone).toContain("background: var(--c-surface)");
+    expect(phone).toContain("border: 1px solid var(--c-border)");
+    expect(phone).toContain("box-shadow: var(--shadow-2)");
+    expect(phone).toContain("padding: var(--sp-1)");
+    expect(phone).not.toMatch(/overflow|width:|height:|pointer/);
+  });
+  it("one category produces one content-sized shared container; no records produce none", async () => {
+    const w = mount(FleetSummaryBar, { props: { rows: [row] as never[], open: false } });
+    cleanups.push(() => w.unmount());
+    expect(w.findAll(".activity-rail")).toHaveLength(1);
+    expect(w.findAll(".fleet-summary-bar")).toHaveLength(1);
+    await w.setProps({ bashJobs: jobs as never });
+    expect(w.findAll(".activity-rail")).toHaveLength(1);
+    expect(w.findAll(".fleet-summary-bar")).toHaveLength(2);
+    await w.setProps({ rows: [], bashJobs: undefined });
+    expect(w.find(".activity-rail").exists()).toBe(false);
   });
 });

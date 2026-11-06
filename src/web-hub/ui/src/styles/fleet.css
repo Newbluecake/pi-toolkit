@@ -9,11 +9,26 @@
   flex-direction: column;
   gap: 12px;
   padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
   pointer-events: none;
 }
 @media (pointer: fine) {
   .activity-rail {
     right: 20px;
+  }
+}
+/* #48: phone-only shared backdrop separates the icons from transcript text.
+ * Content-sized (one or two buttons), never a reserved layout column. */
+@media (max-width: 767px) {
+  .activity-rail {
+    gap: var(--sp-2);
+    padding: var(--sp-1);
+    border: 1px solid var(--c-border);
+    border-radius: var(--r-md);
+    background: var(--c-surface);
+    box-shadow: var(--shadow-2);
   }
 }
 .fleet-summary-bar {

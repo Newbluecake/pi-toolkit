@@ -234,6 +234,13 @@ rail: only bot/terminal icons and corner badges are visible, with transparent 44
 Active icons get a soft **circular radial** opacity-only halo (3.2s); idle is still; reduced-motion
 keeps a static halo and badge. Keyboard focus-visible is circular, not a persistent square frame.
 
+**Phone exception (#48, ≤767px only)**: both icons share one compact content-sized rounded
+`--c-surface` backdrop with a themed border and soft shadow, so dark/light transcript text
+cannot visually merge into the controls. A single category automatically shrinks to one button;
+no records still render nothing. Individual 44px buttons remain transparent; badges and circular
+halos are not clipped. This is an absolute overlay, never a reserved column. At ≥768px the rail
+remains transparent, borderless and shadowless, regardless of coarse/fine pointer capability.
+
 `AgentDetail` owns `useActivityRail` and mounts the rail beside `FleetDrawer` at the existing
 relative `.detail-split` anchor. Fine/hover pointers above 767px peek after 120ms; leaving both
 button/bridge/panel closes after 280ms. Peek never resizes the main column, persists state or
