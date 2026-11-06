@@ -406,7 +406,7 @@ function makeHarness(over: Partial<SpawnSupervisorDeps> = {}): Harness {
     }),
     readFileSync: (p) => {
       if (p === "/repo/package.json") {
-        return JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.0.2" });
+        return JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.5.0" });
       }
       throw new Error(`ENOENT: ${p}`);
     },
@@ -1155,7 +1155,8 @@ describe("supervisor launcher chain (arch §4.2/#12)", () => {
   it("init failure reasons surface in policy + start", async () => {
     for (const [fs, reason] of [
       [badPkgFs("0.99.0"), "incompatible"],
-      [badPkgFs("1.5.0"), "incompatible"],
+      [badPkgFs("1.4.0"), "incompatible"],
+      [badPkgFs("1.6.0"), "incompatible"],
     ] as const) {
       const sup = await initWithFs(fs);
       expect(sup.policy("p", "loopback", "http", false)).toMatchObject({ allowed: false, reason: "launcher" });

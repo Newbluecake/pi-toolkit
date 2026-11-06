@@ -68,14 +68,14 @@ class FakeChild extends EventEmitter {
 /** A pid `/proc/<pid>` will never have in the test env (past the default pid_max). */
 const FAKE_PID = 4_000_000;
 
-/** Real tmp launcher tree satisfying SP7's init check (v1.0.0 ∈ SUPPORTED_PI_RANGE,
+/** Real tmp launcher tree satisfying SP7's init check (v1.5.0 ∈ SUPPORTED_PI_RANGE,
  * which is pinned to this package's pi peer range — NOT arch.md's prose "0.87.x"). */
 function launcherFixture(root: string): readonly [string, string] {
   const pkgDir = `${root}/node_modules/@earendil-works/pi-coding-agent`;
   mkdirSync(pkgDir, { recursive: true });
   writeFileSync(
     `${pkgDir}/package.json`,
-    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.0.0" }),
+    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.5.0" }),
   );
   writeFileSync(`${pkgDir}/cli.js`, "// test launcher entry\n");
   return [process.execPath, `${pkgDir}/cli.js`];

@@ -94,14 +94,15 @@ describe("AgentSettings.reflex wiring", () => {
 });
 
 describe("reflex setting specs", () => {
-  it("exposes exactly the three keys, appended at the END of the table", () => {
+  it("exposes exactly the three reflex keys at the legacy tail, followed by Fast", () => {
     const keys = settingKeys();
     expect(keys.filter((k) => k.startsWith("reflex."))).toEqual([
       "reflex.enabled",
       "reflex.autoResolve",
       "reflex.drafts.enabled",
     ]);
-    expect(keys.slice(-3)).toEqual(["reflex.enabled", "reflex.autoResolve", "reflex.drafts.enabled"]);
+    // Fast is intentionally appended after the legacy reflex tail; preserve both groups' order.
+    expect(keys.slice(-4)).toEqual(["reflex.enabled", "reflex.autoResolve", "reflex.drafts.enabled", "fast.enabled"]);
     expect(isKnownSettingKey("reflex.enabled")).toBe(true);
     expect(isKnownSettingKey("reflex.drafts.enabled")).toBe(true);
   });
