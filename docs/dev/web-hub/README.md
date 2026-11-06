@@ -758,3 +758,39 @@ on just the bash segment without adding padding or a chip frame. Both active sou
 idle/stale/offline remain still. #43's screen-reader running label remains hidden visually. Independent
 legacy cards without the optional field conservatively infer main activity only for running
 without bash, or use an explicit child count. No transport/subscription changes.
+
+## Current-turn hold stop (#47)
+
+Composer's ring and provider-absent StopButton use `useHoldStop`: primary mouse/touch holds
+700ms, fires once, and short pointer clicks never arm. Enter/Space keyup or independent
+semantic click opens an explicit `StopConfirm` group with Cancel initially focused; an
+independent focus-visible no-hold button keeps AT reachable without pointer-source guessing.
+Pointer-derived clicks and key repeat cannot confirm. This is current-turn abort only, not
+DetailHeader's managed-session stop; queued messages remain retained and the hold/confirm copy
+says so.
+
+Composer owns same-scope singleflight and provides the feature-local typed `HOLD_STOP_HOST`
+read-only pending signal across ring/fallback remounts. It checks view permissions plus the
+existing hub snapshot/connection and agent/session/epoch scope before the unchanged abort API;
+missing scope fails closed, and an old Promise finalizer cannot release a newer scope's lock.
+The reducer snapshot is read directly so a published scope/permission change cannot hide behind
+parent-render batching. Root accepts native EventSource frame-task boundaries: published observable ABA must cancel;
+artificial same-stack frames coalesced before the existing render gate publishes are not claimed
+to be detectable. This feature does not change that transport/render contract.
+
+Only one pointer/hold-deadline is active; a second finger is ignored. Touch contextmenu only prevents
+default (a ~500ms menu must not cancel a 700ms hold), while mouse/pen contextmenu cancels.
+Pointer cancel, movement beyond 8px/out, scroll, blur/hidden, unmount and observed busy/permission/
+connection/scope changes cancel. Short taps show a neutral hold hint; real hold cancellation
+says it did not stop. Feedback clears after 1.5s and on blur/scope/unmount. CSS-only progress
+is independent of context usage, with static dashed feedback under reduced motion.
+
+The rectangular transparent target is at least 44×44 while preserving the old 32px slot,
+20px ring/11px icon and neighbouring attach/send geometry. Only the hit area expands; no
+button background grows. The graphic anchors to the unchanged slot to preserve its legacy
+vertical center on shorter phone cards. `useArmedConfirm` keeps its original settings-action
+logic/signature; only its caller header changed.
+
+Tests: `tests/web-hub/ui/{hold-stop,stop-button,context-ring,composer,use-control}.test.ts`.
+Design, compiled-App evidence and manual physical-device/AT limits:
+`docs/dev/hold-stop/{plan,runtime-notes}.md`. No wire/settings/backend/schema changes.

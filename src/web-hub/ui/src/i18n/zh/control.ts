@@ -36,6 +36,13 @@ const control = {
   stopConfirm: "确认中止",
   stopAria: "中止当前轮",
   stopArmed: "已待确认——再次点击确认，Esc 取消",
+  stopHelp: "按住0.7秒中止；松开、移开或滚动取消。键盘或辅助技术：激活后确认。",
+  stopAlternative: "无需长按：确认中止当前轮",
+  stopHolding: "按住以中止，松开取消",
+  stopCancelled: "长按已取消，未停止",
+  stopHint: "按住0.7秒以中止",
+  stopPending: "已请求中止，等待结果",
+  stopConfirmTitle: "中止当前轮？",
   stopQueueNote: "排队中的 {n} 条仍会发送",
 
   queueAria: "消息队列",

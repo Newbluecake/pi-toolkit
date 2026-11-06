@@ -64,7 +64,7 @@
   the card's right-edge vertical center whenever the row is collapsed (typing / no switcher —
   the `.composer-input` wrapper; the textarea's constant `padding-right` makes room via `:has`
   in BOTH states). IDLE ⇒ the ring's details toggle; BUSY ⇒
-  the ring's whole zone is the two-step stop button (stop wins — nothing else intercepts taps
+  the ring's whole zone is the 700ms hold-to-stop button (stop wins — nothing else intercepts taps
   there). It injects `DETAIL_METRICS` itself and self-hides the ring without a provider (then
   falls back to the standalone stop look) — nothing here reads the metrics.
 
@@ -107,7 +107,7 @@
   `plain-names` — no action buttons, run links still jump to the fleet drawer).
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onMounted, onUnmounted, ref, shallowRef, useId, watch } from "vue";
+import { computed, inject, nextTick, onMounted, onUnmounted, provide, ref, shallowRef, useId, watch } from "vue";
 import { useTicker } from "../../composables/useTicker.js";
 import {
   commandPolicyFor,
@@ -155,6 +155,7 @@ import AttachmentTray from "./AttachmentTray.vue";
 import CommandPalette from "./CommandPalette.vue";
 import CommandArgPalette from "./CommandArgPalette.vue";
 import ContextRing from "./ContextRing.vue";
+import { HOLD_STOP_HOST } from "../../composables/useHoldStop.js";
 import ModelSwitcher from "./ModelSwitcher.vue";
 import { CONTROL_ENV, CONTROL_VIEW, HUB_CTX } from "./controlContext.js";
 import { useDeliverDefault } from "../../composables/useDeliverDefault.js";
@@ -1296,12 +1297,83 @@ function onSendClick(): void {
   doSend(deliverDefault.deliver.value);
 }
 
-/** Stop (2026-10 user request: moved INTO the input's inner edge): same channel the dock used —
- * `CONTROL_VIEW`'s `ControlHandle` straight from the inject, no emit hop. Renders only when a
- * view with a live control handle is present (the dock's control-ON context). */
+/** #47 current-turn abort host. Its lock survives ContextRing/StopButton surface changes.
+ * Missing old-host scope/connection data fails closed; no contracts or transport changes. */
+// Read the already-existing reducer snapshot synchronously: parent props are render-batched,
+// and can otherwise hide an SSE A→B→A scope/permission change within one browser task.
+const stopAgent = computed(() => {
+  const agents = hub?.state.value.agents;
+  return agents instanceof Map ? agents.get(view?.agentKey ?? "") : view?.agent?.value;
+});
+const stopScope = computed(() => {
+  if (view === null) return null;
+  const sid = (stopAgent.value?.session as { sessionId?: unknown } | undefined)?.sessionId;
+  const epoch = stopAgent.value?.card?.epoch;
+  const key = view.agentKey;
+  return typeof sid === "string" &&
+    sid !== "" &&
+    typeof epoch === "string" &&
+    epoch !== "" &&
+    typeof key === "string" &&
+    key !== ""
+    ? JSON.stringify([key, sid, epoch])
+    : null;
+});
+const stopFlight = shallowRef<{ scope: string; token: object } | null>(null);
+const abortPending = computed(() => stopFlight.value !== null && stopFlight.value.scope === stopScope.value);
+const stopEligible = computed(() => {
+  const state = hub?.state.value;
+  const agent = stopAgent.value;
+  const snapshotOk =
+    !(state?.agents instanceof Map) ||
+    (state.selected === view?.agentKey &&
+      state.control === true &&
+      agent !== undefined &&
+      !agent.down &&
+      agent.card.state !== "stale" &&
+      agent.card.control === true &&
+      (agent.status as { busy?: unknown } | undefined)?.busy === true);
+  return (
+    props.enabled &&
+    busy.value &&
+    view?.busy?.value === true &&
+    view.enabled?.value === true &&
+    view.control != null &&
+    state?.conn === "open" &&
+    stopScope.value !== null &&
+    snapshotOk
+  );
+});
+provide(HOLD_STOP_HOST, { scope: stopScope, eligible: stopEligible, abortPending });
+watch(
+  stopScope,
+  () => {
+    stopFlight.value = null;
+  },
+  { flush: "sync" },
+);
+onUnmounted(() => {
+  stopFlight.value = null;
+});
+
 function onStopInline(): void {
-  if (view === null || view.control === null) return;
-  void view.control.abort(view.agentKey).catch(() => {});
+  const scope = stopScope.value;
+  const control = view?.control;
+  const key = view?.agentKey;
+  if (!stopEligible.value || abortPending.value || scope === null || !control || key === undefined) return;
+  const flight = { scope, token: {} };
+  // Set singleflight BEFORE abort() can mint a cmdId or synchronously publish optimistic ctl.
+  stopFlight.value = flight;
+  try {
+    void control
+      .abort(key)
+      .catch(() => {})
+      .finally(() => {
+        if (stopFlight.value === flight && stopScope.value === scope) stopFlight.value = null;
+      });
+  } catch {
+    if (stopFlight.value === flight && stopScope.value === scope) stopFlight.value = null;
+  }
 }
 
 /** The 44px touch-target floor lives on the CARD (control.css, 2026-10-07 symmetric-gap
@@ -1603,7 +1675,7 @@ watch(
             <!-- Context ring + stop, merged (right end of the bottom row while the row is
                  expanded; absolute mid-right overlay otherwise — control.css's `:not(.has-text)`
                  tier). Idle ⇒ ring details toggle; busy + live control ⇒ the whole ring zone is
-                 the two-step stop button. Self-hides the ring when no DETAIL_METRICS provider/
+                 the 700ms hold-to-stop button. Self-hides the ring when no DETAIL_METRICS provider/
                  contextUsage exists, falling back to the standalone stop look so stop stays
                  reachable. Same stop channel the dock used — no emit hop (see `onStopInline`). -->
             <ContextRing
