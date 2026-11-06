@@ -48,6 +48,7 @@ const THREADED = [
  * (this table is what a reviewer should read when a new field shows up here):
  */
 const NOT_THREADED = [
+  "fastSeed", // Fast control-plane seed; P3 must explicitly transfer to SessionSpec.fastSeed, never a ResolvedSpawnRequest runner field; P4a contract only
   "runId", // supplied directly as RunnerSpec.runId / ResolvedSpawnRequest.runId
   "type", // resolved to RunnerSpec.type (AgentTypeConfig) before this layer
   "prompt", // assembled by buildPrompt(spec), not passed through raw

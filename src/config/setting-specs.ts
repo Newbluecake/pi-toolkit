@@ -168,6 +168,10 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   ...TRAFFIC_SETTING_SPECS,
   ...SCHEDULE_SETTING_SPECS,
   ...REFLEX_SETTING_SPECS,
+  "fast.enabled": bool(
+    "fast.enabled",
+    "/fast 总开关（默认 true，初始 inherit 不改请求）；false 为零接线紧急关闭，修改后需 /reload",
+  ),
 };
 
 /** Live settings object + persistence port, shared by the command and the editor. */

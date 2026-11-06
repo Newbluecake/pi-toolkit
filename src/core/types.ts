@@ -198,7 +198,24 @@ export interface DispatchMeasure {
   payloadTokens?: number;
 }
 
+/** Session-local request policy; inherit preserves the provider payload unchanged. */
+export type FastMode = "inherit" | "on" | "off";
+
+/** Minimal session custom-entry data (subagent:fast); no activation-local identity. */
+export interface FastRecord {
+  readonly v: 1;
+  readonly mode: FastMode;
+}
+
+/** Immutable admission-time data for internal child creation, never an Agent tool parameter. */
+export interface FastSeed {
+  readonly v: 1;
+  readonly mode: FastMode;
+}
+
 export interface SpawnRequest {
+  /** Captured before queueing; absent preserves the legacy path. Never re-snapshot at dequeue. */
+  readonly fastSeed?: FastSeed;
   /** Dispatch-time input budget; the runtime measures both its coarse preflight and final provider payload. */
   inputBudget?: InputBudget;
   /** Assigned run identifier, used by lifecycle extensions for resource names. */
@@ -1382,6 +1399,8 @@ export interface RunState {
  * the original SpawnRequest and the DeadlineBudget.
  */
 export interface SessionSpec {
+  /** Internal child initialization only; omit when absent, never put into promptNotes. */
+  readonly fastSeed?: FastSeed;
   cwd?: string;
   agentDir?: string;
   model?: unknown;

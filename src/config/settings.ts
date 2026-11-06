@@ -234,6 +234,8 @@ export interface AgentSettings {
   sessionNav: EnabledGroup;
   /** Merged plugins: cwd-keyed project memory (injection + memory tool + /mem). Pre-guard, child sessions included. Default on. */
   memory: MemorySettings;
+  /** /fast activation gate (default true); session mode starts at inherit, not a global setting. */
+  fast: EnabledGroup;
   /** Deferred /reload while subagents are running. */
   reload: ReloadSettings;
   /** system prompt 稳定化（sysprompt-stable §3.2）：S1 只含 wakeReplay。 */
@@ -295,6 +297,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   feishuNotify: { enabled: true },
   sessionNav: { enabled: true },
   memory: DEFAULT_MEMORY_SETTINGS,
+  fast: { enabled: true },
   reload: DEFAULT_RELOAD_SETTINGS,
   systemPrompt: DEFAULT_SYSTEM_PROMPT_SETTINGS,
   title: DEFAULT_TITLE_SETTINGS,
@@ -571,6 +574,7 @@ function parseSettingsSource(source: unknown): AgentSettings {
     feishuNotify: parseEnabledGroup(value.feishuNotify, DEFAULT_SETTINGS.feishuNotify),
     sessionNav: parseEnabledGroup(value.sessionNav, DEFAULT_SETTINGS.sessionNav),
     memory: parseMemorySettings(value.memory),
+    fast: parseEnabledGroup(value.fast, DEFAULT_SETTINGS.fast),
     reload: parseReloadSettings(value.reload),
     systemPrompt: parseSystemPromptSettings(value.systemPrompt),
     title: parseTitleSettings(value.title),

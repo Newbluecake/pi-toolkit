@@ -221,7 +221,7 @@ afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 let fileSeq = 0;
 
 /** One case → one canonical string (settings + console.warn lines + the three warning loaders). */
-function evaluate(input: unknown): string {
+function evaluate(input: unknown, legacyFastProjection = false): string {
   const warns: string[] = [];
   const spy = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
     warns.push(args.map(String).join(" "));
@@ -229,7 +229,8 @@ function evaluate(input: unknown): string {
   let settings: unknown;
   let files: unknown = null;
   try {
-    settings = loadSettings(input);
+    const loaded = loadSettings(input);
+    settings = legacyFastProjection ? withoutFast(loaded) : loaded;
     if (input !== undefined) {
       const path = join(scratch, `case-${fileSeq++}.json`);
       writeFileSync(path, JSON.stringify(input));
@@ -269,6 +270,15 @@ function stripRetired(template: unknown, retiredPaths: readonly string[]): unkno
   return node;
 }
 
+/** task55: intentional additive /fast configuration. Preserve every old field's order/value
+ * and all warns/files hashes, while checking the new block for every legacy input. The
+ * generator continues to use the unprojected result; no corpus/template/hash is refreshed. */
+function withoutFast(settings: typeof DEFAULT_SETTINGS): Omit<typeof DEFAULT_SETTINGS, "fast"> {
+  expect(settings.fast).toEqual({ enabled: true });
+  const { fast: _fast, ...legacy } = settings;
+  return legacy;
+}
+
 const generateFrom = process.env.GOV_CORPUS_GENERATE;
 if (generateFrom) {
   describe("settings corpus generation (baseline only)", () => {
@@ -305,7 +315,7 @@ if (generateFrom) {
 
   describe("settings decomposition corpus (byte-exact, key order included)", () => {
     it("DEFAULT_SETTINGS serialises identically (values + key order)", () => {
-      const text = stringify(DEFAULT_SETTINGS);
+      const text = stringify(withoutFast(DEFAULT_SETTINGS));
       dump("defaults", text);
       expect(sha(text)).toBe(corpus.defaultsSha);
       // the frozen template is the same document MINUS retired paths (#26:
@@ -320,7 +330,7 @@ if (generateFrom) {
       const bad: number[] = [];
       corpus.captured.forEach((c, i) => {
         const input = JSON.parse(JSON.stringify(c.input), untag) as unknown;
-        const text = evaluate(input);
+        const text = evaluate(input, true);
         dump(`captured-${i}`, text);
         if (sha(text) !== c.sha) bad.push(i);
       });
@@ -333,12 +343,12 @@ if (generateFrom) {
       expect(gen.blocks).toHaveLength(corpus.blockShas.length);
       const bad: string[] = [];
       gen.random.forEach((input, i) => {
-        const text = evaluate(input);
+        const text = evaluate(input, true);
         dump(`random-${i}`, text);
         if (sha(text) !== corpus.randomShas[i]) bad.push(`random-${i}`);
       });
       gen.blocks.forEach((input, i) => {
-        const text = evaluate(input);
+        const text = evaluate(input, true);
         dump(`block-${i}`, text);
         if (sha(text) !== corpus.blockShas[i]) bad.push(`block-${i}`);
       });
@@ -352,7 +362,7 @@ if (generateFrom) {
         ["number", 3],
         ["array", []],
       ] as const) {
-        const text = evaluate(input);
+        const text = evaluate(input, true);
         dump(`source-${name}`, text);
         expect(JSON.parse(text).settings.concurrencyLimit).toBe(DEFAULT_SETTINGS.concurrencyLimit);
       }
