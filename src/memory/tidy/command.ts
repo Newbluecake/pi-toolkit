@@ -97,6 +97,16 @@ export async function handleMemTidyCommand(
   ctx: ExtensionCommandContext,
   deps: TidyCommandDeps,
 ): Promise<void> {
+  if (
+    kind === "tidy" &&
+    (await import("../blocks/naming.js")).dirFormat(
+      memoryDirFor(resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd, deps.paths),
+    ) === "blocks"
+  ) {
+    if (ctx.hasUI)
+      ctx.ui.notify("memory: /mem tidy is disabled for block-layout directories — use /mem review", "info");
+    return;
+  }
   if (deps.isChildSession || !ctx.hasUI) {
     if (ctx.hasUI) ctx.ui.notify(`/mem ${kind} is only available in the main session`, "warning");
     return;

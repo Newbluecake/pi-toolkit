@@ -1,8 +1,8 @@
 // #36 P4 (arch r5 §4.4/§5.3/§5.4) — the v3 tool against the REAL
 // `createJevWritePort` with a scripted full-status client: the g1 scope
 // question rides the tagging askAll, `EntryTags.globalP` lands in the blocks
-// sidecar, relation VERDICTS come back without executing anything (P5a's
-// job), and the jev-off shape stays silent.
+// sidecar, relation VERDICTS execute through P5a's locked single-edge
+// protocol, and the jev-off shape stays silent.
 
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -281,7 +281,7 @@ describe("v3 jev: the g1 scope question (§5.3)", () => {
   });
 });
 
-// ───────────────────── §5.4 relation verdicts (judge only, never execute) ─────────────────────
+// ───────────────────── §5.4 relation verdicts + P5a execution ─────────────────────
 
 describe("v3 jev: relation verdicts (§5.4 — P5a executes)", () => {
   const supersedes09 = (ask: AskRecord): Record<string, unknown> => {
@@ -294,11 +294,12 @@ describe("v3 jev: relation verdicts (§5.4 — P5a executes)", () => {
     return out;
   };
 
-  test("user→agent at p≥0.85 is an AUTO verdict; the old block is untouched on disk", async () => {
+  test("user→agent at p≥0.85 is an AUTO verdict and supersedes the old block with CAS", async () => {
     const fx = fixture(
       [{ id: "old.001", authority: "agent", body: "- ship releases via the scripted pipeline" }],
       supersedes09,
     );
+    const oldBefore = block(fx, "old.001");
     let verdicts: readonly RelationVerdict[] | undefined;
     const tool = makeTool(fx, (v) => {
       verdicts = v;
@@ -319,12 +320,14 @@ describe("v3 jev: relation verdicts (§5.4 — P5a executes)", () => {
     expect(auto[0]!.newRev).toBe(block(fx, "other.001").rev);
     // oldRev = the rev the JUDGMENT actually saw (P5a's in-lock CAS recheck
     // compares against exactly this value)
-    expect(auto[0]!.oldRev).toBe(block(fx, "old.001").rev);
-    // NOT executed: the old block keeps status active and no supersededBy
-    expect(block(fx, "old.001").meta.status).toBe("active");
-    expect(block(fx, "old.001").meta.supersededBy).toBeUndefined();
-    // no superseded echo either — execution + echo land in P5a
-    expect(out).not.toContain("superseded: old.001");
+    expect(auto[0]!.oldRev).toBe(oldBefore.rev);
+    const oldAfter = block(fx, "old.001");
+    expect(oldAfter.rev).not.toBe(oldBefore.rev);
+    expect(oldAfter.meta.version).toBe(oldBefore.meta.version + 1);
+    expect(oldAfter.body).toBe(oldBefore.body);
+    expect(oldAfter.meta.status).toBe("superseded");
+    expect(oldAfter.meta.supersededBy).toBe("other.001");
+    expect(out).toContain("superseded: old.001 by other.001");
   });
 
   test("below the auto threshold (0.75–0.85): conflict suggestion echo, auto=false", async () => {
@@ -347,6 +350,8 @@ describe("v3 jev: relation verdicts (§5.4 — P5a executes)", () => {
     expect(verdicts!.length).toBeGreaterThan(0);
     expect(verdicts!.every((v) => !v.auto)).toBe(true);
     expect(out).toContain("conflict: old.001 (p=0.78) — below auto threshold; review suggested");
+    expect(block(fx, "old.001").meta.status).toBe("active");
+    expect(block(fx, "old.001").meta.supersededBy).toBeUndefined();
   });
 
   test("agent→user NEVER auto: the not-superseded suggestion echoes instead", async () => {
@@ -379,6 +384,8 @@ describe("v3 jev: relation verdicts (§5.4 — P5a executes)", () => {
       expect(v.oldId).not.toBe("rule.001");
     }
     expect(out).toContain("not superseded: rule.001 is a user rule — agent blocks never supersede user rules");
+    expect(block(fx, "rule.001").meta.status).toBe("active");
+    expect(block(fx, "rule.001").meta.supersededBy).toBeUndefined();
   });
 
   test("compare pool: user-new pools cross-topic user + agents; agent-new pools agents + userEcho", async () => {
@@ -558,10 +565,12 @@ describe("production wireMemory with layout:blocks wires jev (fix round)", () =>
     const tags = Object.values(index.entries)[0]!;
     expect(tags.globalP).toBeCloseTo(0.82);
     expect(tags.file).toBe("other.001.md");
-    // 4. the old block is untouched on disk (verdicts judge only)
-    expect(parseBlockFile("old.001.md", readFileSync(join(realDir, "old.001.md"), "utf8")).meta.status).toBe(
-      "active" as never,
-    );
+    // 4. P5a consumes the verdict through the real production assembly.
+    const superseded = parseBlockFile("old.001.md", readFileSync(join(realDir, "old.001.md"), "utf8"));
+    if ("stray" in superseded) throw new Error("superseded block is malformed");
+    expect(superseded.meta.status).toBe("superseded");
+    expect(superseded.meta.supersededBy).toBe("other.001");
+    expect(out).toContain("superseded: old.001 by other.001");
     vi.unstubAllEnvs();
   });
 });

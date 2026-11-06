@@ -32,7 +32,8 @@ import {
   type WriteEchoInput,
 } from "./format.js";
 import { touchedUserEntries as pairedUserEntries } from "./guard.js";
-import { writeIndexPatch } from "./index-store.js";
+import { readIndex, writeIndexPatch } from "./index-store.js";
+import { anchorOf } from "./review.js";
 import { prefilter } from "./match.js";
 import { redactForJev } from "./redact.js";
 import { tagOne } from "./tagging.js";
@@ -342,7 +343,21 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
     }
 
     const taxonomy = deps.taxonomyFor(dir);
-    const corpus = deps.entryIndex.get(dir).filter((e) => e.inline.isPrivate !== true && !e.secret);
+    // Restoring an edge is a permanent decision to keep this pair. Filter
+    // before question construction, not merely at execution: it must never
+    // spend another automatic relation judgment on that restored pair.
+    const dismissed = readIndex(dir).index.review?.dismissed ?? [];
+    const corpus = deps.entryIndex.get(dir).filter((e) => {
+      if (e.inline.isPrivate === true || e.secret) return false;
+      const hashKey = [entry.hash, e.hash].sort().join("+");
+      const anchorKey = [anchorOf(entry), anchorOf(e)].sort().join("+");
+      return !dismissed.some(
+        (d) =>
+          (!d.until || d.until >= today) &&
+          (!d.kind || d.kind === "conflict" || d.kind === "supersedes") &&
+          (d.hashKey === hashKey || d.anchorKey === anchorKey),
+      );
+    });
     const { pool, userEcho } = blockPool(entry, corpus);
     // userEcho candidates ride the SAME askAll (they need c-ids + answers for
     // the `not superseded:` suggestion) but stay OUT of the verdict pool —

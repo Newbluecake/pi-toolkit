@@ -33,6 +33,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
 import type { PromptSectionHub } from "../sysprompt/hub.js";
 import type { MemoryWriteGate, TidyPort } from "./contracts.js";
+import { createSweepRunner } from "./govern/sweep.js";
+import type { SweepReason } from "./govern/sweep-plan.js";
 import { createMemCommand } from "./command.js";
 import { memorySection, renderExternalMemoryBlock } from "./inject.js";
 import { RenderCache, type InjectBudget } from "./render.js";
@@ -128,7 +130,33 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   // miss); freeze=true → capture the pre-write block (peek miss ⇒ freeze to
   // "no block", R3) so the injected bytes stay stable for this session and
   // the write takes effect next session.
+  const sweepRunners = new Map<string, ReturnType<typeof createSweepRunner>>();
+  let governanceNotify: ((message: string) => void) | undefined;
+  const triggerSweep = (cwd: string, reason: SweepReason, origin?: string): void => {
+    if (
+      !opts.settings.governance.enabled ||
+      opts.isChildSession ||
+      opts.secureDomainKind === "locked" ||
+      origin === "sweep"
+    )
+      return;
+    const dir = memoryDirFor(cwd);
+    if (!gate.check(dir).ok || dirFormat(dir) !== "blocks") return;
+    let runner = sweepRunners.get(dir);
+    if (!runner) {
+      runner = createSweepRunner({
+        enabled: true,
+        gate,
+        residentBudget: opts.settings.residentBytes,
+        notify: (message) => governanceNotify?.(message),
+        onAfterWrite: () => onAfterWrite(cwd, "sweep"),
+      });
+      sweepRunners.set(dir, runner);
+    }
+    void runner.runSweep(dir, reason, migrationAbort.signal, origin);
+  };
   const onAfterWrite = (cwd: string, origin?: string): void => {
+    if (origin !== "sweep") triggerSweep(cwd, "write", origin);
     if (origin === "migrate" || effectiveLayout(opts.settings.layout, dirFormat(memoryDirFor(cwd))) === "blocks") {
       lastBlocks.delete(cwd);
       cache.delete(cwd);
@@ -159,6 +187,8 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     lastBlocks.clear();
     migrationAbort.abort();
     migrationAbort = new AbortController();
+    sweepRunners.clear();
+    governanceNotify = ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined;
     // Non-blocks/child/locked paths remain byte-identical and do not probe disk.
     if (opts.isChildSession || opts.settings.layout !== "blocks" || opts.secureDomainKind === "locked") return;
     const cwd = resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd;
@@ -166,6 +196,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     if (!gate.check(dir).ok || !canonicalDir(dir)) return;
     try {
       await resumeRollback(dir, { gate, signal: migrationAbort.signal });
+      triggerSweep(cwd, "startup");
       if (!opts.settings.migrate.auto || dirFormat(dir) !== "files") return;
       const result = await runMigration(dir, {
         gate,

@@ -79,6 +79,8 @@ import {
   formatV3StateSnapshotLine,
   formatV3UpdatedLine,
 } from "./jev/format.js";
+import { supersede, readGovernBlock } from "./govern/supersede.js";
+import type { RelationVerdict } from "./jev/contracts.js";
 import { looksLikeStateSnapshot, stateSnapshotKinds } from "./govern/snapshot.js";
 import type { MemoryWriteGate } from "./contracts.js";
 import type { JevIndexV1, JevWritePort } from "./jev/contracts.js";
@@ -201,11 +203,9 @@ function parseWriteMeta(rawText: string): { meta: WriteMeta; body: string } {
     ...(meta.isPrivate === undefined ? {} : { isPrivate: meta.isPrivate }),
     ...(meta.title === undefined ? {} : { title: meta.title }),
     ...(meta.when === undefined ? {} : { when: meta.when }),
-    // P5a 交接（root 2026-11-06）：`supersedes=<id>` 是写入时输入指令，P4 只
-    //  解析不执行。P5a 接手执行链：读旧块当前 rev → 锁内七条件复核（含
-    //  oldRev CAS、residue 豁免不适用显式指令）→ 单边写 supersededBy →
-    //  `superseded:`/`note:` 回显（含新块不继承 global 的提示）→ 恢复入口
-    //  /mem restore --block。在此之前该字段随本对象一起丢弃，绝不落盘。
+    // Input-only instruction: finishWrite records old revisions, then runs
+    // the same locked single-edge protocol as classified relations. Never
+    // persist a reciprocal supersedes field on the new block.
     ...(meta.supersedes === undefined ? {} : { supersedes: meta.supersedes }),
   };
   return { meta: out, body };
@@ -532,6 +532,7 @@ interface WriteFinish {
   /** §6.1 audience 建议的确定性证据（无显式 audience 且正文点名主会话类
    *  信号时）；P6b 的 tag 推导上线后可替换该启发式。 */
   audienceEvidence: string | undefined;
+  explicitSupersedes?: readonly string[];
 }
 
 /** Compose the §4.1.5 echo: head → budget → jev block (section/jev/scope/
@@ -554,6 +555,38 @@ async function finishWrite(
   const indexUsed = indexBytesUsed(out.corpus, toSlug(cwd), deps.settings, today, deps.isChildSession);
   parts.push(formatV3BudgetLine(budget.used, budget.max, indexUsed, INDEX_MAX_BYTES));
   let usage: ToolTextResult["usage"];
+  const memDir = canonicalDir(memoryDirFor(cwd, deps.paths))?.real ?? memoryDirFor(cwd, deps.paths);
+  const explicit: RelationVerdict[] = [];
+  for (const oldId of out.explicitSupersedes ?? []) {
+    try {
+      const old = readGovernBlock(memDir, oldId);
+      explicit.push({
+        kind: "supersedes",
+        newId: block.id,
+        newRev: block.rev,
+        oldId,
+        oldRev: old.rev,
+        p: 1,
+        auto: true,
+      });
+    } catch {
+      parts.push(`skipped: ${oldId}: target missing or invalid`);
+    }
+  }
+  const executeRelations = async (relations: readonly RelationVerdict[], explicitPath: boolean): Promise<void> => {
+    const results = await supersede(memDir, relations, {
+      explicit: explicitPath,
+      enabled: deps.settings.governance.enabled,
+      ...(deps.writeGate ? { gate: deps.writeGate } : {}),
+      ...(signal ? { signal } : {}),
+      notify: (message) => {
+        if (!deps.isChildSession && ctx?.hasUI) ctx.ui.notify(message, "warning");
+      },
+    });
+    parts.push(...results.map((r) => r.echo));
+    if (results.some((r) => r.outcome === "superseded")) deps.onAfterWrite(cwd);
+  };
+  await executeRelations(explicit, true);
   if (deps.jev !== undefined) {
     try {
       const result = await deps.jev.afterWrite({
@@ -568,6 +601,11 @@ async function finishWrite(
         // port's off/partial early-returns suppress g1 naturally).
         ...(block.authority === "user" && !block.scopeExplicit ? { askScope: true } : {}),
       });
+      if (result.relations && deps.settings.jev.enabled && deps.settings.governance.enabled)
+        await executeRelations(
+          result.relations.filter((v) => !explicit.some((e) => e.oldId === v.oldId)),
+          false,
+        );
       if (result.echo.length > 0) parts.push(result.echo.join("\n"));
       if (result.usage !== undefined && result.usage.calls > 0) {
         usage = {
@@ -806,6 +844,7 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
             isGlobalWrite: isResident(created.meta),
             notes: normalized.notes,
             audienceEvidence: meta.audience === undefined ? audienceEvidenceOf(body) : undefined,
+            ...(meta.supersedes ? { explicitSupersedes: meta.supersedes } : {}),
           },
           {
             id: created.id,
@@ -887,6 +926,7 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
             isGlobalWrite: isResident(updated.meta),
             notes: normalized.notes,
             audienceEvidence: meta.audience === undefined ? audienceEvidenceOf(body) : undefined,
+            ...(meta.supersedes ? { explicitSupersedes: meta.supersedes } : {}),
           },
           { id, rev: updated.rev, authority: updated.meta.authority, scopeExplicit: meta.scope !== undefined },
           current.raw,

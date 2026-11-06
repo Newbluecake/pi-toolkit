@@ -38,6 +38,8 @@ import { EntryIndex, expiredEntries, untilEntries } from "./jev/entries.js";
 import { deleteEntry as fsDeleteEntry, setInlineMeta as fsSetInlineMeta } from "./jev/entry-edit.js";
 import { handleMemExpired } from "./jev/expired-command.js";
 import { readIndex } from "./jev/index-store.js";
+import { restoreBlock } from "./govern/sweep.js";
+import { handleReviewLite } from "./govern/review-lite.js";
 import { handleMemReview } from "./jev/review-command.js";
 import { readMarker } from "./blocks/marker.js";
 import { dirFormat } from "./blocks/naming.js";
@@ -407,6 +409,31 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
             ...(deps.renderBlock === undefined ? {} : { renderTieredPort: deps.renderBlock }),
             ...(jev === undefined ? {} : { jev: jevDoctorPortFrom(jev, entriesFor) }),
           });
+          return;
+        }
+        if (
+          (sub === "restore" && rest[0] === "--block") ||
+          ((sub === "review" || sub === "expired") && dirFormat(memoryDirFor(cwd, deps.paths)) === "blocks")
+        ) {
+          const dir = canonicalDir(memoryDirFor(cwd, deps.paths))?.real ?? memoryDirFor(cwd, deps.paths);
+          if (sub === "restore") {
+            if (isChildSession) {
+              if (ctx.hasUI) ctx.ui.notify("restore: requires main session", "warning");
+              return;
+            }
+            if (!rest[1]) throw new Error("usage: /mem restore --block <id or stored name>");
+            const message = await restoreBlock(dir, rest[1], { gate: deps.writeGate ?? plainMemoryWriteGate });
+            deps.onAfterWrite?.(cwd);
+            if (ctx.hasUI) ctx.ui.notify(message, "info");
+          } else {
+            await handleReviewLite(dir, rest.join(" "), toMemCommandUi(ctx), {
+              interactive: !isChildSession && isInteractive(ctx),
+              enabled: deps.settings?.governance.enabled ?? false,
+              residentBudget: deps.settings?.residentBytes ?? 2048,
+              gate: deps.writeGate ?? plainMemoryWriteGate,
+              onAfterWrite: () => deps.onAfterWrite?.(cwd),
+            });
+          }
           return;
         }
         if (sub === "tidy" || sub === "restore") {

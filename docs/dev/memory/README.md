@@ -59,3 +59,28 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 **残留风险**：gate 拦截已移除（2026-11），不再有误拦形态，也不再有进程/git 证据收集（`probes.ts` 已删）；#26 移除用户令确认后——用户令可被 agent 静默作废（缓解只有三样：TUI warning、工具结果回显、skill 要求向用户转述；print、子会话、Web/headless 都没有通知；delete 可从 `.trash` 找回（保留 20 份），edit 无自动备份），手写文件保护可先翻转 provenance 再操作绕开，voided 回显仍带 heading（进入工具结果与 transcript，通知侧已不含）；Jev 判断质量依赖评测；默认开启使工具描述一次性变化、前缀缓存失效一次；dismissed 改写条目开头会重新提示整理建议；P 层的 W 信号端口（bashJobs/fleet）只在主会话 post-guard 挂载（`src/index.ts`，plan §11.1），子会话虽按 `predict.childSessions` 跑规则与 S，但 bashJobs 恒为空 ⇒ **S（发版进行中）在子会话永不触发**（R12/R13 的 git branch/dirty 部分照常）。
 
 **默认值、分类器列表、阈值以代码为准**：`src/memory/settings.ts`、`src/memory/setting-specs.ts`（28 个 `memory.jev.*` 键：原 14（#26 删 `confirmTimeoutS`）+ memory-predict 的 14 个 `memory.jev.predict.*`，plan §10；其中 `model.*` 7 键在 P1b 只解析不使用，P2（§11.2）接线后生效）。各包交付报告见 `docs/dev/memory/reports/J*-report.md`。
+
+## #36 blocks 治理 · P5a 开发状态（2026-11-06）
+
+本节是当前开发状态，不表示 #36 的全部接线、默认布局翻转或真实数据迁移已经完成。治理核心位于 `src/memory/govern/{sweep-plan,sweep,supersede,review-lite}.ts`，pi-free；既有 files/tiered 行为与 golden 保持不变。
+
+### 预算口径与一致性
+
+- `runSweep` 的 **50 操作**指**写类安全原语的保守成本**，不是所有读取与写入总计 50，也不是 50 个归档块。一次完整归档计 6：确保 archive 目录、临时写映射、原子替换映射、移动块、临时写归档正文、原子替换正文；治理侧车 index 写计 3：确保目录、临时写、替换。已有目录的确保也计费；不把原语内部的 syscall 单独累加。
+- **1000 ms 总墙钟包含扫描读取、规划、锁等待和写入**；锁等待最多 500 ms，并按剩余时间收紧。线性扫描逐读检查 deadline/gate/abort，块读取每 128 个 yield；写原语边界再次检查。同步文件系统原语不能在执行中被 JS 抢占。
+- 扫描捕获一次目录身份/列表，no-follow 读取常规块文件后复核 dev/ino，避免旧通用 reader 逐块重枚举造成的二次复杂度。快照只提供候选：写锁内仍复核 rev、authority、active、expires，移动前再次做 rev 校验；取代同样走锁内七条件与旧块单边 CAS。
+- 真实 2000 块临时目录基准：开发复跑 **371 ms / 48 写成本 / 8 归档**；独立验收 **418/419/457 ms**，同为 48/8。性能数据不替代边界检查，不承诺任意同步 I/O 都能被硬中断；生产门槛仍为 1000 ms / 50 写成本 / 500 ms 锁等待。
+
+### 已接线与待接线
+
+- **已接**：`wireMemory` 复用已有 `session_start` 和 `onAfterWrite` 触发 startup/write sweep；shutdown/reload abort；sweep-origin 写入只失效缓存，不自触发。显式 `supersedes=`、分类关系执行、单边恢复及永久 dismissed 已接工具/命令路径；Jev off 仍可显式取代，agent 永不取代 user。
+- **P5b 待接**：task-done/push/release 的 Jev 事件信号、turn_end 消费，以及 render 预算/索引溢出信号；不能据此宣称全部治理事件已经上线。复用 `createSweepRunner(options).runSweep(memDir, reason, signal?, origin?)`，保持同目录重入合并、session abort 和 sweep-origin 屏蔽。
+- **P5b 待接**：迁移后首次 user↔user review 的 host judge 与首轮信号/执行标记。核心端口为 `firstUserReviewPass(memDir, judge, { gate?, signal? })`；judge 接收 `readonly { a: string; b: string }[]`（块 id pair），返回 `Promise<readonly { a: string; b: string; p: number }[]>`。核心过滤非 active/private/secret 用户块，锁内丢弃 rev 已变化的迟到答案，只写建议、不自动取代；host 仍须负责准入、模型预算和外发脱敏。
+- 默认布局翻转与真实数据治理不属于 P5a 完成状态；实际迁移必须继续遵守 #36 后续门禁和用户批准流程。
+
+### P7 交接：需核对的行为缺口（未在本轮改行为）
+
+- 迁移后 reload 提醒目前可能在每次 startup 重复显示，尚不是持久化的一次性提醒。
+- blocks 的 `/mem review`、`/mem expired` 当前路由到 review-lite 治理子集，尚未完整呈现非治理 Jev 建议及原 expired 四组视图。这是命令能力/需求覆盖缺口，不是文档措辞问题；P7 应逐项核对需求与实现并安排补齐或显式裁定，不能仅靠更改文档宣称完成。
+
+本包证据：`tests/memory/govern/{sweep-plan,sweep,supersede,review-lite}.test.ts`、`tests/integration/memory-blocks-{governance,supersede-race}.test.ts`；相邻门禁包含工具 v3/Jev、命令/tidy、pi-free、activate-trace 与既有 memory golden。
