@@ -748,8 +748,13 @@ SIGTERM/SIGHUP），reload 的任何结局都不会产生它；新 pid 是用户
 aggregate visualState (which also counts bash for sorting/grouping). Waiting only counts live
 children, not the blocked main turn; down or raw stale snapshots never animate (even when waiting
 takes visual precedence over stale), without suppressing retained counts. Both list densities
-use `data-activity-source=agent|bash|none`: Agent activity wins the dot halo; bash-only uses a
-circular terminal-icon halo (not the chip). CSS-only 3.2s opacity breathing becomes a static halo
-under reduced motion; #43's screen-reader running label remains hidden visually. Independent
+use `data-activity-source=agent|bash|none`: Agent activity wins the circular dot halo; bash-only
+breathes the **whole terminal + count rounded-rectangle background** (#51), not an icon-circle
+halo, card or meta row. `.agent-bash-activity` anchors an inset-zero, inherited-radius pseudo-layer
+behind the foreground in an isolated stacking context: only that layer changes opacity, never the
+icon/text or layout dimensions. Compact keeps its existing chip radius; detailed uses `--r-sm`
+on just the bash segment without adding padding or a chip frame. Both active sources use CSS-only
+3.2s breathing; reduced motion keeps a static background cue. Both-active never double-animates;
+idle/stale/offline remain still. #43's screen-reader running label remains hidden visually. Independent
 legacy cards without the optional field conservatively infer main activity only for running
 without bash, or use an explicit child count. No transport/subscription changes.

@@ -1131,20 +1131,36 @@
   display: inline-flex;
   color: inherit;
 }
+/* #51: anchor the background to the whole terminal + count segment. Isolation keeps
+ * the negative-z overlay above the chip's own fill but behind its unchanged foreground.
+ * No padding/border/size changes: the detailed segment is not a new chip or meta-row panel. */
+.agent-card .agent-bash-activity {
+  position: relative;
+  isolation: isolate;
+}
+.agent-card[data-density="detailed"] .agent-bash-activity {
+  border-radius: var(--r-sm);
+}
 .agent-card[data-activity-source="agent"] .dot::after,
-.agent-card[data-activity-source="bash"] .agent-terminal-icon::after {
+.agent-card[data-activity-source="bash"] .agent-bash-activity::after {
   content: "";
   position: absolute;
-  inset: -7px;
-  border-radius: 50%;
-  background: radial-gradient(circle, currentColor 0%, transparent 70%);
   pointer-events: none;
   transform: none;
   opacity: 0.28;
   animation: agent-card-activity 3.2s ease-in-out infinite;
 }
 .agent-card[data-activity-source="agent"] .dot::after {
+  inset: -7px;
+  border-radius: 50%;
+  background: radial-gradient(circle, currentColor 0%, transparent 70%);
   color: var(--st-running);
+}
+.agent-card[data-activity-source="bash"] .agent-bash-activity::after {
+  inset: 0;
+  border-radius: inherit;
+  background: var(--st-running, var(--c-primary));
+  z-index: -1;
 }
 @keyframes agent-card-activity {
   0%,
@@ -1157,7 +1173,7 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .agent-card[data-activity-source="agent"] .dot::after,
-  .agent-card[data-activity-source="bash"] .agent-terminal-icon::after {
+  .agent-card[data-activity-source="bash"] .agent-bash-activity::after {
     animation: none;
     transform: none;
     opacity: 0.28;

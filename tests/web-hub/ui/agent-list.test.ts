@@ -2093,6 +2093,19 @@ describe("left AgentCard activity source (#46)", () => {
       expect(w.attributes("data-density")).toBe(density);
       expect(w.attributes("data-activity-source")).toBe(c.expected);
       expect(w.findAll(".agent-terminal-icon")).toHaveLength(c.bash > 0 ? 1 : 0);
+      expect(w.findAll(".agent-bash-activity")).toHaveLength(c.bash > 0 ? 1 : 0);
+      if (c.bash > 0) {
+        // #51: the breathing anchor contains BOTH foreground pieces, never the whole meta row.
+        const segment = w.get(".agent-bash-activity");
+        expect(segment.get(".agent-terminal-icon").element.parentElement).toBe(segment.element);
+        expect(segment.get(".num").element.parentElement).toBe(segment.element);
+        expect(segment.text()).toBe(density === "compact" ? String(c.bash) : `${c.bash} running`);
+        expect(segment.classes()).not.toContain("agent-meta");
+        if (density === "compact") {
+          expect(segment.attributes("data-compact")).toBe("bash");
+          expect(segment.attributes("aria-label")).toBe("1 running");
+        }
+      }
       if (c.visual === "running")
         expect(w.get(density === "compact" ? "[data-compact=state]" : ".pill-inline").classes()).toContain("sr-only");
       w.unmount();
@@ -2119,7 +2132,7 @@ describe("left AgentCard activity source (#46)", () => {
       w.unmount();
     }
   });
-  it("halo CSS is card-local, radial, opacity-only, slow and static under reduced motion", () => {
+  it("activity CSS keeps the dot radial but the whole bash segment rectangular, foreground steady and reduced motion static", () => {
     const css = readFileSync(
       resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/agents.css"),
       "utf8",
@@ -2128,6 +2141,15 @@ describe("left AgentCard activity source (#46)", () => {
     expect(activity).toContain(".agent-card .dot::after");
     expect(activity).toContain("content: none");
     expect(activity).toContain("radial-gradient(circle");
+    expect(activity).not.toContain(".agent-terminal-icon::after");
+    expect(activity).toContain("isolation: isolate");
+    const bashBackground = activity.match(
+      /\.agent-card\[data-activity-source="bash"\] \.agent-bash-activity::after \{([^}]+)\}/g,
+    )!;
+    expect(bashBackground[1]).toContain("inset: 0");
+    expect(bashBackground[1]).toContain("border-radius: inherit");
+    expect(bashBackground[1]).toContain("background: var(--st-running, var(--c-primary))");
+    expect(bashBackground[1]).toContain("z-index: -1");
     expect(activity).toContain("agent-card-activity 3.2s");
     expect(activity).toContain("@media (prefers-reduced-motion: reduce)");
     expect(activity.slice(activity.indexOf("@media"))).toContain("animation: none");

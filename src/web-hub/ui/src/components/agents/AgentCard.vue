@@ -291,7 +291,7 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             >
             <span
               v-if="card.runningBashCount > 0"
-              class="chip chip-run-count"
+              class="chip chip-run-count agent-bash-activity"
               data-compact="bash"
               :title="t('agents.runningCount', { n: card.runningBashCount })"
               :aria-label="t('agents.runningCount', { n: card.runningBashCount })"
@@ -504,7 +504,7 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             aria-hidden="true"
             >·</span
           >
-          <span
+          <span class="agent-bash-activity"
             ><span class="agent-terminal-icon"><AppIcon name="terminal" class="icon-sm" /></span
             ><span class="num">{{ t("agents.runningCount", { n: card.runningBashCount }) }}</span></span
           >
