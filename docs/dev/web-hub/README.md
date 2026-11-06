@@ -741,3 +741,15 @@ SIGTERM/SIGHUP），reload 的任何结局都不会产生它；新 pid 是用户
 永不存在）。写入同步且 fail-soft（轮转/写入失败只重估 size，绝不抛进 hub）。#24 定位时曾因
 只留 1 份备份丢失关键日志窗口，故扩为 3 份；门禁 `tests/web-hub/hub/idle.test.ts` 的
 `createHubLog` describe。
+
+## Left session-list activity (#46)
+
+`toAgentCardView.activitySource` separates live main/child Agent activity from the unchanged
+aggregate visualState (which also counts bash for sorting/grouping). Waiting only counts live
+children, not the blocked main turn; down or raw stale snapshots never animate (even when waiting
+takes visual precedence over stale), without suppressing retained counts. Both list densities
+use `data-activity-source=agent|bash|none`: Agent activity wins the dot halo; bash-only uses a
+circular terminal-icon halo (not the chip). CSS-only 3.2s opacity breathing becomes a static halo
+under reduced motion; #43's screen-reader running label remains hidden visually. Independent
+legacy cards without the optional field conservatively infer main activity only for running
+without bash, or use an explicit child count. No transport/subscription changes.

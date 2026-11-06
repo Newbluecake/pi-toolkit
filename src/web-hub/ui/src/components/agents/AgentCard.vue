@@ -161,6 +161,16 @@ const managed = computed(() => managedFor(hub?.state.value.spawns ?? null, props
 const restoring = computed(() => restoringKeys(hub?.state.value.spawns ?? null).has(props.card.key));
 const restored = computed(() => managed.value !== undefined && isFreshlyRestored(managed.value));
 
+// Legacy independent cards cannot distinguish main busy from bash-promoted running.
+// Prefer explicit child activity; infer main activity only without a bash count.
+const activitySource = computed(() => {
+  const c = props.card;
+  if (c.down || c.stale || c.visualState === "offline" || c.visualState === "stale") return "none";
+  if (c.activitySource !== undefined) return c.activitySource;
+  const agent = c.runningSubCount > 0 || (c.visualState === "running" && c.runningBashCount === 0);
+  return agent ? "agent" : c.runningBashCount > 0 ? "bash" : "none";
+});
+
 const dotClass = computed(() => {
   switch (props.card.visualState) {
     case "running":
@@ -216,6 +226,7 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
     :href="`#/agent/${encodeURIComponent(card.key)}`"
     :aria-current="selected ? 'page' : undefined"
     :data-st="card.visualState"
+    :data-activity-source="activitySource"
     :data-density="compact ? 'compact' : 'detailed'"
     :data-outdated="card.outdated ? 'true' : undefined"
   >
@@ -284,7 +295,8 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
               data-compact="bash"
               :title="t('agents.runningCount', { n: card.runningBashCount })"
               :aria-label="t('agents.runningCount', { n: card.runningBashCount })"
-              ><AppIcon name="terminal" class="icon-sm" /><span class="num">{{ card.runningBashCount }}</span></span
+              ><span class="agent-terminal-icon"><AppIcon name="terminal" class="icon-sm" /></span
+              ><span class="num">{{ card.runningBashCount }}</span></span
             >
             <span v-if="xsAlias" class="chip chip-xs-alias" translate="no" :title="`@${xsAlias}`">{{
               aliasChipText(xsAlias)
@@ -493,9 +505,8 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             >·</span
           >
           <span
-            ><AppIcon name="terminal" class="icon-sm" /><span class="num">{{
-              t("agents.runningCount", { n: card.runningBashCount })
-            }}</span></span
+            ><span class="agent-terminal-icon"><AppIcon name="terminal" class="icon-sm" /></span
+            ><span class="num">{{ t("agents.runningCount", { n: card.runningBashCount }) }}</span></span
           >
         </template>
         <template v-if="card.statusLabel">

@@ -161,6 +161,14 @@ export function toAgentCardView(agent: AgentState, t: I18nHandle["t"], home?: st
     contextPercent: contextPercentOf(agent),
     runningSubCount,
     runningBashCount,
+    activitySource:
+      agent.down || card["state"] === "stale"
+        ? "none"
+        : base === "running" || runningSubCount > 0
+          ? "agent"
+          : runningBashCount > 0
+            ? "bash"
+            : "none",
     costLabel: agentCostLabel(agent),
     ...(costTitleOf(agent, t) ?? {}),
     visualState: visual,

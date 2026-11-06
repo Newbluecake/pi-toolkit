@@ -829,6 +829,8 @@ export interface AgentCardView {
    * (`status.bashJobs` wire's `running` = non-terminal rows incl. staged, 「仍在跑」 semantics);
    * 0 (no/malformed/empty wire) ⇒ the terminal-icon segment is not rendered. */
   readonly runningBashCount: number;
+  /** Live activity halo target, independent of aggregate visualState/sort/counts. */
+  readonly activitySource?: "agent" | "bash" | "none";
   /** Pre-formatted `own [+ sub $x]` cost label (tabular-nums display string). */
   readonly costLabel: string;
   /** Hover breakdown (own + subagents) when subagents cost anything; the label itself is the total only. */

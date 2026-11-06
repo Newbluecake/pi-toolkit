@@ -2038,3 +2038,100 @@ describe("AgentCard.vue — running label is screen-reader only (#43)", () => {
     expect(w.get("[data-compact=state]").classes()).not.toContain("sr-only");
   });
 });
+
+// #46: list aggregate running still includes bash; activity must not infer main busy from it.
+describe("left AgentCard activity source (#46)", () => {
+  const cases = [
+    { name: "main", busy: true, sub: 0, bash: 0, expected: "agent", visual: "running" },
+    { name: "child", busy: false, sub: 1, bash: 0, expected: "agent", visual: "running" },
+    { name: "bash", busy: false, sub: 0, bash: 1, expected: "bash", visual: "running" },
+    { name: "both", busy: true, sub: 1, bash: 1, expected: "agent", visual: "running" },
+    { name: "main + child", busy: true, sub: 1, bash: 0, expected: "agent", visual: "running" },
+    { name: "idle", busy: false, sub: 0, bash: 0, expected: "none", visual: "idle" },
+    { name: "offline", busy: true, sub: 1, bash: 1, down: true, expected: "none", visual: "offline" },
+    { name: "stale", busy: true, sub: 1, bash: 1, stale: true, expected: "none", visual: "stale" },
+    { name: "waiting main", busy: true, sub: 0, bash: 0, waiting: true, expected: "none", visual: "waiting" },
+    { name: "waiting child", busy: true, sub: 1, bash: 1, waiting: true, expected: "agent", visual: "waiting" },
+    { name: "waiting bash", busy: true, sub: 0, bash: 1, waiting: true, expected: "bash", visual: "waiting" },
+    {
+      name: "waiting stale",
+      busy: true,
+      sub: 1,
+      bash: 1,
+      waiting: true,
+      stale: true,
+      expected: "none",
+      visual: "waiting",
+    },
+  ];
+  function view(c: (typeof cases)[number]) {
+    const a = agentStateWithBash(bashWire(c.bash));
+    return toAgentCardView(
+      {
+        ...a,
+        card: { state: c.stale ? "stale" : "live" } as unknown as AgentState["card"],
+        down: c.down ?? false,
+        prompts: c.waiting ? [{}] : [],
+        status: { ...a.status, busy: c.busy },
+        fleet: Array.from({ length: c.sub }, () => ({ status: "running", terminal: false })),
+      } as unknown as AgentState,
+      keyT,
+    );
+  }
+  for (const density of ["compact", "detailed"] as const) {
+    it.each(cases)(`${density}: $name — model + rendered source`, (c) => {
+      useListDensity({ storage: { getItem: () => null, setItem: () => undefined } }).setDensity(density);
+      const v = view(c);
+      expect(v.visualState).toBe(c.visual);
+      expect(v.activitySource).toBe(c.expected);
+      // Old snapshots retain their honest counts and grouping flags; only halos stop.
+      expect(v.runningSubCount).toBe(c.sub);
+      expect(v.runningBashCount).toBe(c.bash);
+      expect(v.stale).toBe(c.visual === "stale");
+      expect(v.down).toBe(c.down ?? false);
+      const w = mount(AgentCard, { props: { card: v, selected: false } });
+      expect(w.attributes("data-density")).toBe(density);
+      expect(w.attributes("data-activity-source")).toBe(c.expected);
+      expect(w.findAll(".agent-terminal-icon")).toHaveLength(c.bash > 0 ? 1 : 0);
+      if (c.visual === "running")
+        expect(w.get(density === "compact" ? "[data-compact=state]" : ".pill-inline").classes()).toContain("sr-only");
+      w.unmount();
+    });
+    it(`${density}: reused card transitions never retain an old source`, async () => {
+      useListDensity({ storage: { getItem: () => null, setItem: () => undefined } }).setDensity(density);
+      const w = mount(AgentCard, { props: { card: view(cases[0]!), selected: false } });
+      for (const c of [...cases, cases[0]!]) {
+        await w.setProps({ card: view(c) });
+        expect(w.attributes("data-activity-source")).toBe(c.expected);
+      }
+      w.unmount();
+    });
+  }
+  it("legacy cards are conservative: ambiguous running+bash is bash-only; child count wins", () => {
+    for (const [over, source] of [
+      [{ runningSubCount: 0, runningBashCount: 1 }, "bash"],
+      [{ runningSubCount: 1, runningBashCount: 1 }, "agent"],
+      [{ runningSubCount: 0, runningBashCount: 0 }, "agent"],
+      [{ runningSubCount: 0, runningBashCount: 0, visualState: "waiting" }, "none"],
+    ] as const) {
+      const w = mount(AgentCard, { props: { card: card(over), selected: false } });
+      expect(w.attributes("data-activity-source")).toBe(source);
+      w.unmount();
+    }
+  });
+  it("halo CSS is card-local, radial, opacity-only, slow and static under reduced motion", () => {
+    const css = readFileSync(
+      resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/agents.css"),
+      "utf8",
+    );
+    const activity = css.slice(css.indexOf("/* #46:"));
+    expect(activity).toContain(".agent-card .dot::after");
+    expect(activity).toContain("content: none");
+    expect(activity).toContain("radial-gradient(circle");
+    expect(activity).toContain("agent-card-activity 3.2s");
+    expect(activity).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(activity.slice(activity.indexOf("@media"))).toContain("animation: none");
+    const frames = activity.slice(activity.indexOf("@keyframes"), activity.indexOf("@media"));
+    expect(frames).not.toMatch(/transform|box-shadow|width|height/);
+  });
+});
