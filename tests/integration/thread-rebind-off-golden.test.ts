@@ -239,9 +239,11 @@ async function capture(): Promise<Record<string, unknown>> {
     resetSettingsFiles(home.home);
     const agentDir = join(home.home, ".pi", "agent");
     mkdirSync(agentDir, { recursive: true });
+    // Isolate this historical capture from the unrelated, newly default-on Fast registration.
     writeFileSync(
       join(agentDir, "pi-toolkit.json"),
-      JSON.stringify({ fabric: { enabled: true, threads: { enabled: true } } }, null, 2) + "\n",
+      JSON.stringify({ fabric: { enabled: true, threads: { enabled: true } }, fast: { enabled: false } }, null, 2) +
+        "\n",
     );
     const rec = recordingPi();
     activate(rec.pi);
