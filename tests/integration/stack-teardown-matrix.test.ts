@@ -909,3 +909,52 @@ describe("teardown matrix: activate-level gaps (no timers needed)", () => {
     resetChildSwitchCapabilityForTests();
   }, 60_000);
 });
+
+// task55: append-only lifecycle evidence for the new session-local resource. Existing
+// ordered legacy matrices above stay byte-for-byte; Fast-disabled profiles own no resource.
+describe("Fast exact owner teardown (task55)", () => {
+  it.each(["new", "reload", "quit"])(
+    "shutdown %s revokes captures and child readers; later path A cannot revoke replacement",
+    async (reason) => {
+      const a = await boot({ ...BASELINE, fast: { enabled: true } });
+      await fire(a, "session_start", "startup");
+      const first = probe.stacks.at(-1).fast;
+      expect(first.workflow.capture()).toEqual({ v: 1, mode: "inherit" });
+      const read = vi.fn(() => "on");
+      const oldCleanup = first.childState.bind({ parentRunId: "same-child", incarnation: {} }, read);
+      expect(first.parent.snapshot("same-child")).toEqual({ v: 1, mode: "on" });
+      await fire(a, "session_shutdown", reason);
+      expect(first.workflow.capture()).toBeUndefined();
+      expect(first.parent.snapshot("same-child")).toBeUndefined();
+      expect(read).toHaveBeenCalledTimes(1);
+      const b = await boot({ ...BASELINE, fast: { enabled: true } });
+      await fire(b, "session_start", "startup");
+      const next = probe.stacks.at(-1).fast;
+      next.childState.bind({ parentRunId: "same-child", incarnation: {} }, () => "off");
+      first.dispose();
+      oldCleanup();
+      expect(next.parent.snapshot("same-child")).toEqual({ v: 1, mode: "off" });
+      expect(read).toHaveBeenCalledTimes(1); // no callback survives either shutdown or repeated handoff disposal
+    },
+  );
+  it("defensive same-ID ABA closes old owner and leaves the new one live", async () => {
+    const a = await boot({ ...BASELINE, fast: { enabled: true } });
+    await fire(a, "session_start", "startup");
+    const first = probe.stacks.at(-1).fast;
+    await fire(a, "session_start", "new");
+    const second = probe.stacks.at(-1).fast;
+    expect(second).not.toBe(first);
+    expect(first.workflow.capture()).toBeUndefined();
+    expect(second.workflow.capture()).toEqual({ v: 1, mode: "inherit" });
+    first.dispose();
+    expect(second.workflow.capture()).toEqual({ v: 1, mode: "inherit" });
+  });
+  it("explicit false has no Fast owner/cleanup/command", async () => {
+    const a = await boot({ ...BASELINE, fast: { enabled: false } });
+    await fire(a, "session_start", "startup");
+    expect(probe.stacks.at(-1)).not.toHaveProperty("fast");
+    expect(a.h.commands.has("fast")).toBe(false);
+    await fire(a, "session_shutdown", "quit");
+    expect(probe.log.filter((line) => /\.fast\./.test(line))).toEqual([]);
+  });
+});

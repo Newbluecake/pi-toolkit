@@ -11,7 +11,8 @@
  */
 import { BASELINE } from "../integration/helpers/schedule-activate.js";
 
-export type ProfileName = "default" | "minimal" | "max" | "child" | "compat-failure" | "thread-main" | "thread-child";
+export type ProfileName =
+  "fast-disabled" | "default" | "minimal" | "max" | "child" | "compat-failure" | "thread-main" | "thread-child";
 
 /**
  * Pinned `quota.providers` for the phase-2 profiles (see the header note). The trace HOME carries no `auth.json`,
@@ -28,9 +29,13 @@ export const PROFILES: Record<
   { settings: unknown; child?: true; omit?: readonly string[]; phase2: boolean }
 > = {
   default: { settings: { quota: { ...QUOTA_PIN } }, phase2: true },
-  minimal: { settings: { ...BASELINE, quota: { ...QUOTA_PIN } }, phase2: true },
+  // Fast default-enabled is intentional only in the default profile. Historical profiles
+  // explicitly disable this new feature to retain their original registration/phase2 bytes.
+  "fast-disabled": { settings: { quota: { ...QUOTA_PIN }, fast: { enabled: false } }, phase2: true },
+  minimal: { settings: { ...BASELINE, fast: { enabled: false }, quota: { ...QUOTA_PIN } }, phase2: true },
   max: {
     settings: {
+      fast: { enabled: false },
       fabric: {
         enabled: true,
         wake: { enabled: true },
@@ -64,8 +69,8 @@ export const PROFILES: Record<
     },
     phase2: true,
   },
-  child: { settings: BASELINE, child: true, phase2: false },
-  "compat-failure": { settings: BASELINE, omit: ["appendEntry"], phase2: false },
+  child: { settings: { ...BASELINE, fast: { enabled: false } }, child: true, phase2: false },
+  "compat-failure": { settings: { ...BASELINE, fast: { enabled: false } }, omit: ["appendEntry"], phase2: false },
   // fabric-thread arch §9.3 (P0): the two thread profiles. `thread-main` turns on every switch
   // `max` can run offline PLUS fabric.threads (still inert in P0 — the main-session `thread` tool
   // and the hello cap arrive in P3, so today's trace must be IDENTICAL to `max`'s; when P3 wires
@@ -76,6 +81,7 @@ export const PROFILES: Record<
   // injection, never registerTool — §9.2), so its trace must stay identical to `child`'s.
   "thread-main": {
     settings: {
+      fast: { enabled: false },
       fabric: {
         enabled: true,
         wake: { enabled: true },
@@ -111,6 +117,7 @@ export const PROFILES: Record<
   },
   "thread-child": {
     settings: {
+      fast: { enabled: false },
       fabric: {
         enabled: true,
         wake: { enabled: true },

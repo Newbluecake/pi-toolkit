@@ -6,6 +6,7 @@ import { registerSecureCommand, secureCommandWanted } from "./secure/command.js"
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
+import { wireFastMain } from "./fast/wire.js";
 import { wireCacheTtl } from "./cache-ttl/cache-ttl.js";
 import { getProviderEvidenceStore } from "./cache-ttl/provider-evidence.js";
 import type { SubagentExtensionPoints } from "./core/types.js";
@@ -273,7 +274,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   // `-e`/`--no-extensions`, outside settings.json). Must not depend on any feature setting.
   if (isChildSession) {
     markChildExtensionActivated();
-    wireChildSession(pi, preGuardSettings);
+    wireChildSession(pi, preGuardSettings, { canUse: (ctx) => secureGuards?.recheckForWrite(ctx) === undefined });
     // traffic-merge T3（§2.3）：子会话只注册录制钩子（含 agent_settled / cache_warming_decision），
     // 无命令/服务/重放；isActive = 进程内 toolkit claim 存活（主会话发布；secure 域 settings 已强制
     // enabled=false，这里双保险在 assemble 内部复查）。childSessions=false 只禁落库不禁改写归属（拍板①）。
@@ -445,6 +446,9 @@ export default function activate(rawPi: ExtensionAPI): void {
   // duplicate entries across same-module activations — the stale ones closing
   // over an invalidated pi (observed in the wild: H2 fan-out hit a dead
   // worktree extension and crashed the run).
+  const fast = wireFastMain(pi, settings.fast.enabled, {
+    canUse: (ctx) => secureGuards?.recheckForWrite(ctx) === undefined,
+  });
   const extensionPoints: SubagentExtensionPoints[] = [wireWorktree(pi, settings)];
   const types = createAgentTypeRegistry();
   // Eager warm-up: session_start's awaited reload() is authoritative, but a
@@ -942,6 +946,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       // conn → 激活级 hub 连接）。关闭 ⇒ buildSessionStack 收到 undefined ⇒ 栈面缺席（G2a）。
       threadsOn ? { replySink: () => webHubRef.current?.threadSink, conn: currentConnection } : undefined,
       settingsFile,
+      fast,
     );
     holder.current = stack;
     xs.attach(stack, ctx, pi, nextXsSessionId);

@@ -125,6 +125,7 @@ import { createMentionRegistry, type MentionRegistry } from "./mention/registry.
 import { createMentionNotes, type MentionNotes } from "./mention/notes.js";
 export type { MentionNotes };
 import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
+import type { FastMainWiring, FastSessionPorts } from "./fast/wire.js";
 import { PiSessionDriver } from "./runtime/session-driver.js";
 import { SingleSlotPool } from "./runtime/slot-pool.js";
 import { EventWatchdog } from "./runtime/watchdog.js";
@@ -244,6 +245,8 @@ export interface StackModelPort {
 }
 
 export interface Stack {
+  /** Exact session owner, absent when Fast is disabled. No global/current-stack lookup. */
+  fast?: FastSessionPorts;
   /**
    * The one teardown entry (src/stack-teardown.ts holds the ordered step lists and the per-component rationale):
    *  - `{kind:"shutdown", reason}` — index.ts's session_shutdown main handler (async: schedule closeEpoch, run drain, seal);
@@ -564,6 +567,7 @@ export function buildSessionStack(
   threadInput?: StackThreadInput,
   /** #54: the activate-time settings-file report; its notices are surfaced once, on the first stack build. */
   settingsFile?: SettingsFileReport,
+  fastWiring?: FastMainWiring,
 ): Stack {
   // settings-rename plan §3.8: S6b conflict / ignored relative PI_CODING_AGENT_DIR reach the user through the
   // existing session_start path (no new pi.on registration). Once per activation: the flag lives on the report,
@@ -589,6 +593,8 @@ export function buildSessionStack(
   const { prevBashJobs } = runRebuildHandoff(previousParts);
   const parts: TeardownParts = {};
   previousParts = parts;
+  const fast = settings.fast.enabled ? fastWiring?.open(ctx) : undefined;
+  if (fast) parts.fast = fast;
 
   if (loadHintState !== undefined) {
     loadHintState.latches.clear();
@@ -1536,6 +1542,7 @@ export function buildSessionStack(
         settings.rememberAgents,
         (p, id) => ctx.modelRegistry.find(p, id),
         (xsInput as StackXsInput & { humanRuntime?: import("./runtime/human-runtime.js").HumanRuntime }).humanRuntime,
+        fast?.childState,
       );
       return externalPort !== undefined ? new RoutingSessionDriver(piDriver, externalPort.providers) : piDriver;
     })(),
@@ -1621,6 +1628,7 @@ export function buildSessionStack(
   });
   runnerRef.current = runner; // M4: 接通 watchdog 的晚绑定
   const spawn = createSpawnService({
+    ...(fast ? { fastParent: fast.parent } : {}),
     types,
     pool,
     tombstones,
@@ -2269,6 +2277,7 @@ export function buildSessionStack(
   // `false` — the engine stays entirely inert until then).
   // (M9: created above the fleet widget, which lists in-flight workflows.)
   const workflowChildSpawner = createWorkflowChildSpawner(spawn, types, {
+    ...(fast ? { fastWorkflow: fast.workflow } : {}),
     ...(loadAdmission ? { loadAdmission } : {}),
     // workflow-worktree plan D2: read fresh on every call (not snapshotted
     // at stack-build time) so a `/reload` that flips `worktree.enabled`
@@ -2428,6 +2437,7 @@ export function buildSessionStack(
   parts.rootWakeRecovery = rootWakeRecovery;
   parts.xs = xs;
   const stack: Stack = {
+    ...(fast ? { fast } : {}),
     dispose: ((entry: StackTeardownEntry, env?: StackTeardownEnv) =>
       entry.kind === "rebuild-handoff"
         ? void runRebuildHandoff(parts)

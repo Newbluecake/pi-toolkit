@@ -55,18 +55,24 @@ async function captureScenario(name: Scenario): Promise<Record<string, unknown>>
   resetSecureDomainForTests();
   let vault: ReturnType<typeof makeFakeVault> | undefined;
   try {
-    if (name === "default") sb.writeSettings({ ...BASELINE });
-    else if (name === "explicit-off") sb.writeSettings({ ...BASELINE, reflex: { enabled: false } });
+    if (name === "default") sb.writeSettings({ ...BASELINE, fast: { enabled: false } });
+    else if (name === "explicit-off")
+      sb.writeSettings({ ...BASELINE, fast: { enabled: false }, reflex: { enabled: false } });
     else if (name === "child") {
-      sb.writeSettings({ ...BASELINE, reflex: { enabled: true } });
+      sb.writeSettings({ ...BASELINE, fast: { enabled: false }, reflex: { enabled: true } });
       (globalThis as Record<symbol, unknown>)[HOST_KEY] = { activatedAt: 1 };
     } else {
-      sb.writeSettings({ ...BASELINE, reflex: { enabled: true } });
+      sb.writeSettings({ ...BASELINE, fast: { enabled: false }, reflex: { enabled: true } });
       vault = makeFakeVault();
       const entry = { dir: vault.dir, mnt: vault.mnt };
       writeFileSync(
         vault.settingsPath,
-        JSON.stringify({ ...BASELINE, reflex: { enabled: true }, secure: { vaults: { acme: entry } } }),
+        JSON.stringify({
+          ...BASELINE,
+          fast: { enabled: false },
+          reflex: { enabled: true },
+          secure: { vaults: { acme: entry } },
+        }),
       );
       const frozen = freezeDomain(vault);
       expect(frozen.domain.kind).toBe("secure");

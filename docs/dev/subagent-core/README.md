@@ -306,3 +306,18 @@ delta preserves the existing hook ordering. Direct runner pending-create user ab
 retains its pre-existing `abort_grace`/undefined-outcome behavior (startup_failed is absorbed there);
 this seam does not change settlement policy or claim to fix that separate behavior. Production receiver
 wiring and the remaining whole-feature integration still belong to P4b.
+
+## Fast 集中装配与 Stack 资源（task55 P4b）
+
+`buildSessionStack` 可选接收 activate-local `FastMainWiring`，在旧 parts handoff 后创建具体 session owner；
+仅 enabled 时构造，不用 holder/global-current 查询。该 owner 的 parent、childState、workflow 分别接到
+SpawnService、PiSessionDriver 第四参数、createWorkflowChildSpawner 的 `fastWorkflow` option（真实 host
+通过 spawner 桥消费）。child 绑定前受理 seed、绑定后 branch 的语义仍由上面的 P3 合同负责；装配不
+重新采样 queued seed。关闭 owner 后 capture 返回 undefined，不读下一 session。
+
+Fast 的同步幂等 dispose 在三条 ordered lists 都紧接 backgroundCompletions，早于 drain/reap 等异步
+工作：path A 通过 `parts.fast`，B/C 通过 `stack.fast`。只撤销本 owner/child reader，不新建 timer、不
+增加 I1 预算或等待；disabled 无该成员/cleanup 效果，C→A 重复到达不会重开或伤害替代 owner。
+`stack-teardown-matrix.test.ts` 保留原28 case并追加5个 owner/ABA/disabled case。child pre-guard 接线在
+keepalive capture 之后、lazy budget registry 订阅及可能的同步重放之前，traffic 仍在最后；细节与真实
+SDK/原生 warming/最终 body 证据见 `docs/dev/fast-command/README.md`。

@@ -50,13 +50,13 @@ afterEach(() => {
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-async function record(name: ProfileName): Promise<Entry> {
+async function record(name: ProfileName, fastDisabled = false): Promise<Entry> {
   const profile = PROFILES[name];
   const box = sandbox("pi-trace-");
   try {
     resetGlobals();
     resetSecureDomainForTests();
-    box.writeSettings(profile.settings);
+    box.writeSettings(fastDisabled ? { ...(profile.settings as object), fast: { enabled: false } } : profile.settings);
     if (profile.child) (globalThis as Record<symbol, unknown>)[HOST_KEY] = { activatedAt: 1 };
     const handlers = new Map<string, Array<(e: unknown, c: unknown) => unknown>>();
     const trace = traceActivation(activate, {
@@ -101,6 +101,21 @@ async function record(name: ProfileName): Promise<Entry> {
 
 describe("activation call-trace golden", () => {
   const names = Object.keys(PROFILES) as ProfileName[];
+  it("explicit fast:false retains the pre-wiring SDK1.5 trace bytes", async () => {
+    const actual: Record<string, Entry> = {};
+    for (const name of names) actual[name] = await record(name, true);
+    const golden = JSON.parse(readFileSync(FIXTURE, "utf8")) as Record<string, Entry>;
+    for (const name of names) expect(actual[name], name).toEqual(golden[name === "default" ? "fast-disabled" : name]);
+    // Optional pre-implementation capture: never regenerate it after wiring. Includes all seven old profiles.
+    const path = process.env.PI_TOOLKIT_FAST_OFF_BASELINE;
+    if (path) {
+      const before = JSON.parse(readFileSync(path, "utf8")) as Record<string, Entry>;
+      expect(Object.keys(before)).toHaveLength(7);
+      for (const name of Object.keys(before))
+        expect(JSON.stringify(actual[name]), name).toBe(JSON.stringify(before[name]));
+    }
+  });
+
   it("matches the stored trace for every profile", async () => {
     const actual: Record<string, Entry> = {};
     for (const name of names) actual[name] = await record(name);

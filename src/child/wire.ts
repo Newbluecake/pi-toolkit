@@ -10,12 +10,15 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentSettings } from "../config/settings.js";
+import { wireFastChild, type FastWireOptions } from "../fast/wire.js";
 import { wireChildContextSwitch } from "../context-switch/child.js";
 import { wireChildKeepalive } from "../cache-ttl/child.js";
 import { getInputBudgetRegistry, inputTokensForBytes } from "../runtime/input-budget-registry.js";
 
-export function wireChildSession(pi: ExtensionAPI, settings: AgentSettings): void {
+export function wireChildSession(pi: ExtensionAPI, settings: AgentSettings, fastOptions?: FastWireOptions): void {
   const keepalive = wireChildKeepalive(pi, settings);
+  // Fast must precede even synchronous budget-registry replay (and traffic outside this factory).
+  wireFastChild(pi, settings.fast.enabled, fastOptions);
   const registry = getInputBudgetRegistry();
   // Registration is deferred until the first budgeted run in this process.
   // At most one provider handler is installed for this child pi session; an

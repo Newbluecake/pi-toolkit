@@ -82,6 +82,8 @@ export interface StackTeardownEnv {
  * components for the next build's handoff (a single end-of-build write would change that).
  */
 export interface TeardownParts {
+  /** Session-bound Fast capture/child readers; revoke before any late run drain. */
+  fast?: { dispose(): void } | undefined;
   /** Same-module defensive rebuild; a fresh-module reload is disposed by `Stack.disposeXsSync`. */
   xs?: StackXs | undefined;
   rootWakeRecovery?: RootWakeController | undefined;
@@ -158,6 +160,7 @@ const REBUILD_STEPS: readonly RebuildStep[] = [
   rebuildDispose("xs", "xs"),
   rebuildDispose("rootWakeRecovery", "rootWakeRecovery"),
   rebuildDispose("backgroundCompletions", "backgroundCompletions"),
+  rebuildDispose("fast", "fast"),
   rebuildDispose("fleetWidget", "fleetWidget"),
   rebuildDispose("usageBroadcaster", "usageBroadcaster"),
   rebuildDispose("coalescer", "coalescer"),
@@ -222,6 +225,7 @@ const DEFENSIVE_STEPS: readonly StackStep<void>[] = [
       env.activation.defensiveXsTeardown(entry.kind === "defensive" ? entry.nextXsSessionId : undefined),
   },
   { id: "backgroundCompletions", run: (stack) => void stack.backgroundCompletions.dispose() },
+  { id: "fast", run: (stack) => void stack.fast?.dispose() },
   { id: "fleetWidget", run: (stack) => void stack.fleetWidget?.dispose() },
   // web-hub archive plan: stop the stale auto-sweep (dual-path with buildSessionStack).
   { id: "archive", run: (stack) => void stack.archive?.dispose() },
@@ -254,6 +258,7 @@ const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
   // ask-user-async §3.3 (P2): FIRST — the hub stops broadcasting before the drain/seal below settles anything;
   // completions surfacing during shutdown must not interrupt whatever session comes next.
   { id: "backgroundCompletions", run: (stack) => void stack.backgroundCompletions.dispose() },
+  { id: "fast", run: (stack) => void stack.fast?.dispose() },
   // G9 (7b): the /goal delivery/eval watchdogs are activate-level timers; without this one kept re-sending the
   // continuation (and the brake report) through the OLD pi after the session ended. Before the run drain, so an
   // evaluation settling during the drain cannot inject a continuation into the closing session.
