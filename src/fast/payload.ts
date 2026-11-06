@@ -103,7 +103,11 @@ function tools(value: unknown): boolean {
 }
 function item(value: unknown): boolean {
   const p = data(value);
-  if (!strings(p, "id status phase namespace")) return false;
+  if (
+    !strings(p, "id phase namespace") ||
+    !optional(p, "status", (v) => str(v) || (p.type === "reasoning" && v === null))
+  )
+    return false;
   switch (p.type) {
     case undefined:
     case "message":
@@ -127,11 +131,13 @@ function item(value: unknown): boolean {
       return keys(p, "type id status call_id output") && str(p.call_id) && (str(p.output) || content(p.output));
     case "reasoning":
       return (
-        keys(p, "type id status summary encrypted_content signature") &&
+        keys(p, "type id status summary content encrypted_content signature") &&
         list(p.summary, (s) => {
           const d = data(s);
           return keys(d, "type text") && d.type === "summary_text" && str(d.text);
         }) &&
+        // SDK replays this opaque array from thinkingSignature; never inspect reasoning text.
+        optional(p, "content", (v) => list(v, () => true)) &&
         optional(p, "encrypted_content", (v) => v === null || str(v)) &&
         optional(p, "signature", str)
       );

@@ -156,6 +156,7 @@ function context(api: Api, variant: string): TranscriptContext {
   });
 }
 
+let responseEvents: object[] = events;
 let httpBodies: Body[] = [];
 let wsBodies: Body[] = [];
 const localFetch: typeof fetch = async (input, init) => {
@@ -171,9 +172,12 @@ const localFetch: typeof fetch = async (input, init) => {
       .toString();
   } else text = new TextDecoder().decode(bytes);
   httpBodies.push(JSON.parse(text) as Body);
-  return new Response(events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(""), {
-    headers: { "Content-Type": "text/event-stream" },
-  });
+  return new Response(
+    responseEvents.map((e) => `event: ${(e as { type: string }).type}\ndata: ${JSON.stringify(e)}\n\n`).join(""),
+    {
+      headers: { "Content-Type": "text/event-stream" },
+    },
+  );
 };
 class LocalWebSocket extends EventTarget {
   readyState = 0;
@@ -188,7 +192,7 @@ class LocalWebSocket extends EventTarget {
   send(text: string) {
     wsBodies.push(JSON.parse(text) as Body);
     setImmediate(() => {
-      for (const e of events) this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(e) }));
+      for (const e of responseEvents) this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(e) }));
     });
   }
   close() {
@@ -196,6 +200,7 @@ class LocalWebSocket extends EventTarget {
   }
 }
 beforeEach(() => {
+  responseEvents = events;
   httpBodies = [];
   wsBodies = [];
   // Hard deny sockets (including any proxy); all transport here must remain in-process.
@@ -217,6 +222,7 @@ async function run(
   variant: string,
   ws = false,
   simple = false,
+  replay?: AssistantMessage,
 ) {
   const m = model(api, variant);
   deepFreeze(m);
@@ -252,7 +258,9 @@ async function run(
       return undefined;
     },
   };
-  const ctx = context(api, variant);
+  const ctx = replay
+    ? normalizeContext({ messages: [replay, { role: "user", content: "fixture", timestamp: 1 }] })
+    : context(api, variant);
   const stream =
     api === "openai-responses"
       ? simple
@@ -351,3 +359,56 @@ it.each([{ messages: [] }, { unrecognized_sdk_extension: true }])(
     });
   },
 );
+
+// Exercise SDK receive -> thinkingSignature -> SDK replay, not a fabricated helper payload.
+for (const api of ["openai-responses", "openai-codex-responses"] as const)
+  for (const mode of ["inherit", "on", "off"] as const)
+    for (const ws of api === "openai-codex-responses" ? [false, true] : [false])
+      it(`SDK raw reasoning receive/replay ${api} ${mode} ${ws ? "WS" : "SSE"}`, async () => {
+        const raw = {
+          type: "reasoning",
+          id: "rs_fixture",
+          summary: [],
+          content: [{ type: "reasoning_text", text: "fixture" }],
+          status: null,
+          encrypted_content: null,
+        };
+        responseEvents = [
+          events[0]!,
+          { type: "response.output_item.added", output_index: 0, item: { type: "reasoning", id: raw.id, summary: [] } },
+          { type: "response.output_item.done", output_index: 0, item: raw },
+          { ...terminal, response: { ...terminal.response, output: [raw] } },
+        ];
+        const m = model(api);
+        const options = {
+          apiKey: api === "openai-codex-responses" ? fakeToken : "FAKE_LOCAL_ONLY",
+          env: {},
+          fetch: localFetch,
+          maxRetries: 0,
+          transport: "sse" as const,
+        };
+        const received = await (
+          api === "openai-responses"
+            ? commonStream(m as Model<"openai-responses">, normalizeContext({ messages: [] }), options)
+            : codexStream(m as Model<"openai-codex-responses">, normalizeContext({ messages: [] }), options)
+        ).result();
+        expect(received.stopReason, received.errorMessage).toBe("stop");
+        expect(received.content).toEqual([
+          { type: "thinking", thinking: "fixture", thinkingSignature: JSON.stringify(raw) },
+        ]);
+        expect(httpBodies).toHaveLength(1);
+        httpBodies = [];
+        responseEvents = events;
+        const final = await run(api, mode, "basic", ws, false, received);
+        expect((final.input as Body[]).find((i) => i.type === "reasoning")).toEqual(raw);
+        expect(final.service_tier).toBe(
+          mode === "inherit"
+            ? api === "openai-responses"
+              ? "flex"
+              : undefined
+            : mode === "on"
+              ? "priority"
+              : "default",
+        );
+        expect(final.reasoning).toMatchObject({ effort: "high" });
+      });

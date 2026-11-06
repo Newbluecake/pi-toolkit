@@ -235,3 +235,57 @@ it("seeded rewrite invariants preserve inherited bytes and callback-delivered bo
     { seed: 5502, numRuns: 100 },
   );
 });
+
+it.each([undefined, null, "opaque"])(
+  "preserves opaque reasoning replay content with encrypted_content=%s",
+  (encrypted) => {
+    let reads = 0;
+    const part = Object.defineProperty({ type: "reasoning_text" }, "text", {
+      enumerable: true,
+      get() {
+        reads++;
+        throw Error("opaque");
+      },
+    });
+    const content = Object.freeze([part]);
+    const reasoning = Object.freeze({
+      type: "reasoning",
+      summary: [],
+      content,
+      status: null,
+      ...(encrypted === undefined ? {} : { encrypted_content: encrypted }),
+    });
+    const input = Object.freeze([reasoning]);
+    const p = Object.freeze(body({ input, reasoning: { effort: "high" }, service_tier: "flex" }));
+    for (const mode of ["on", "off"] as const) {
+      const r = rewriteFastPayload(p, snap(mode));
+      expect(r?.kind).toBe("applied");
+      if (r?.kind !== "applied") throw Error("expected applied");
+      expect(r.replacement.input).toBe(input);
+      expect((r.replacement.input as typeof input)[0]).toBe(reasoning);
+      expect(reasoning.content).toBe(content);
+      expect(r.replacement.reasoning).toBe(p.reasoning);
+      expect(r.replacement.service_tier).toBe(mode === "on" ? "priority" : "default");
+    }
+    expect(rewriteFastPayload(p, snap("inherit"))).toBeUndefined();
+    expect(reads).toBe(0);
+    expect(p.service_tier).toBe("flex");
+  },
+);
+it.each([{ content: "invalid" }, { content: null }, { unknown: true }, { messages: [] }, { status: 1 }])(
+  "rejects illegal reasoning replay fields %s",
+  (extra) => {
+    expect(
+      classifyResponsesPayload(
+        body({ input: [{ type: "reasoning", summary: [], content: [], status: null, ...extra }] }),
+      ),
+    ).toEqual({ kind: "unsupported", reason: "invalid-input" });
+  },
+);
+it("does not extend nullable status to other items", () => {
+  expect(
+    classifyResponsesPayload(
+      body({ input: [{ type: "message", role: "assistant", content: "fixture", status: null }] }),
+    ).kind,
+  ).toBe("unsupported");
+});

@@ -204,7 +204,7 @@ input项为普通record，只接受已核变体；空input允许，其余根标�
 | 无type或message                              | role=system/developer/user/assistant；content string或array，array仅input_text{text}、output_text{text,annotations?:array}、input_image{image_url,detail?:string}。 |
 | function_call/custom_tool_call               | call_id/name string，arguments/input string，id/namespace可选string。                                                                                               |
 | function_call_output/custom_tool_call_output | call_id string，output string或input_text/input_image数组。                                                                                                         |
-| reasoning                                    | summary数组（summary_text文本项），encrypted_content若有string/null，id/status可选；signature不改写。                                                               |
+| reasoning                                    | summary数组（summary_text项）；content?:array（嵌套opaque）；encrypted_content?:string/null；id?:string；status?:string/null；signature保留。                       |
 | additional_tools                             | role=developer，tools通过下述检查。                                                                                                                                 |
 | configuration_update                         | reasoning普通record、effort string。                                                                                                                                |
 | tool_search_call/output                      | call_id string、execution=client；call.arguments普通record，output.tools通过检查。                                                                                  |

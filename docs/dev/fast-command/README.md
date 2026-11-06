@@ -41,3 +41,7 @@ P0 已独立验证 pi 1.5 七场景回滚，**只证明该故障回滚范围安�
 - `tests/conformance/fast-payload-sdk.test.ts` 属自动 tier2：调用已安装 **真实 pi-ai 1.5.0 的 stream/streamSimple 构造器**，在合参后的 onPayload 调用 helper，再捕获 SDK 最终 fetch body / Codex WebSocket `response.create` 帧；不是自造 buildParams。普通 Responses、Azure deployment、Codex SSE/受控 WS 三态，text/image/function/grammar/tool output/reasoning/additional tools/search/configuration update、空 input/warm-shaped 请求与不同 selection API 均覆盖。未知或混合真实构造器 body 仍发送一次原值，不静默重试。
 - 测试只用 loopback URL 的进程内 fake fetch/受控 WebSocket；全局 fetch 同受 loopback guard，真实 Socket.connect 硬拒，fake Codex token 仅本地。无模型、认证、代理或外部网络。SDK 语料证明合法构造器形状与最终序列化，不冒充实际 CacheWarmer 调度、AgentSession 虚拟路由、故障 controller、wire 次序或全功能集成验证。
 - P1 验证使用只读 `/tmp/c45-ccG9/node_modules` 的真实 1.5 依赖；本 worktree baseline package 声明仍为 1.4（task45 并行拥有修改）。cache/HOME/agent/TMPDIR 均独立 `/tmp/fast55-p1`，不向共享依赖写缓存，不安装依赖。未重跑历史 36 次线上报告，不宣称性能/收费证据。
+
+### P1 reasoning replay 小覆盖修复
+
+真实 SDK 1.5 将完整 reasoning item JSON 存入 thinkingSignature 并原样回放。判形接受 reasoning 的可选 content 数组（嵌套保持 opaque，不读取正文）及 status:null，与 summary/encrypted_content 组合保留；仅 reasoning 放宽 nullable status，未知 item 字段/混协议仍拒绝。定向 conformance 以 synthetic fixture 验证 SDK 接收→signature→普通 Responses/Codex SSE/受控 WS 三态最终 body/frame；不扩第三方 message phase/logprobs 或 WS continuation 切档集成。
