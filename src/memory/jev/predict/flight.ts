@@ -7,7 +7,9 @@
 // 语义（§8.2/§9.2）：
 //   - admit：flight 未在飞 ∧ zombies=0 ∧ breaker 闭合 ∧ 日计数/估算预算允许（只读，无副作用）。
 //   - start：全链 deadlineAt = now + requestBudgetMs；逐模型 failover，每档独立 reserve，
-//     attemptTimeout = min(剩余, ceil(requestBudgetMs/2))，剩余 ≤0 即停止 failover。
+//     attemptTimeout：链上最后一档直接用全部剩余预算（#36 §6.5：单档链不再被
+//     budget/2 掐断），其余档 = min(剩余, ceil(requestBudgetMs/2))，剩余 ≤0 即停止
+//     failover。
 //     每次尝试有自己的计时器与 abort 监听，在该尝试结束时移除。档位的 price 非法
 //     （非有限/负值）时估算退回 estimatePrice 保守预留（不让 NaN 估算静默拒发），
 //     结算仍按该档自身 price 判定（不可用 ⇒ 按预留）。
@@ -80,10 +82,13 @@ export function estimatePredictUsd(system: string, user: string, price: PredictP
   return (estimateInputTokens(system, user) * price.inputPerM + MAX_OUTPUT_TOKENS * price.outputPerM) / 1e6;
 }
 
-/** §8.2 attemptTimeout = min(deadlineAt−now, ceil(requestBudgetMs/2))；非负。 */
-export function attemptBudgetMs(requestBudgetMs: number, remainingMs: number): number {
-  const cap = Math.ceil(requestBudgetMs / 2);
-  return Math.max(0, Math.min(Math.max(0, remainingMs), cap));
+/** §8.2 attemptTimeout；#36 §6.5 修复——`isLastAttempt`（链上最后一档）直接
+ *  用全部剩余预算（单模型链即拿满 requestBudgetMs，不再被 budget/2=1500ms
+ *  掐断）；其余档仍为 `min(deadlineAt−now, ceil(requestBudgetMs/2))`。非负。 */
+export function attemptBudgetMs(requestBudgetMs: number, remainingMs: number, isLastAttempt: boolean): number {
+  const remaining = Math.max(0, remainingMs);
+  if (isLastAttempt) return remaining;
+  return Math.min(remaining, Math.ceil(requestBudgetMs / 2));
 }
 
 // ───────────────────────────── 结果类型 ─────────────────────────────
@@ -328,7 +333,8 @@ export function createPredictFlight(ledger: PredictLedger, config: PredictFlight
 
     const run = (async (): Promise<void> => {
       let anyDispatched = false;
-      for (const model of input.models) {
+      const lastIdx = input.models.length - 1;
+      for (const [idx, model] of input.models.entries()) {
         if (signal.aborted) {
           outcomeKind = "aborted";
           return;
@@ -338,7 +344,8 @@ export function createPredictFlight(ledger: PredictLedger, config: PredictFlight
           outcomeKind = anyDispatched ? "failed" : "denied";
           return;
         }
-        const attemptTimeout = attemptBudgetMs(requestBudgetMs, remaining);
+        // #36 §6.5：最后一档拿全部剩余预算（arch r5 §6.5）。
+        const attemptTimeout = attemptBudgetMs(requestBudgetMs, remaining, idx === lastIdx);
         const price = model.price;
         // 估算价目：档位价目不可用（非有限/负值）时退回保守缺省，绝不产出 NaN 预留。
         const reserve = ledger.reserve(

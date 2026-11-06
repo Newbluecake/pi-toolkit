@@ -97,12 +97,44 @@ describe("estimatePredictUsd / attemptBudgetMs", () => {
     expect(estimatePredictUsd(SYSTEM, USER, DEEPSEEK)).toBeCloseTo(expected, 12);
   });
 
-  it("attemptBudgetMs = min(remaining, ceil(budget/2)) and is non-negative", () => {
-    expect(attemptBudgetMs(3000, 3000)).toBe(1500);
-    expect(attemptBudgetMs(3000, 1500)).toBe(1500);
-    expect(attemptBudgetMs(3000, 500)).toBe(500);
-    expect(attemptBudgetMs(3000, 0)).toBe(0);
-    expect(attemptBudgetMs(3000, -10)).toBe(0);
+  it("attemptBudgetMs: last tier takes the FULL remaining budget; others cap at ceil(budget/2) (#36 §6.5)", () => {
+    // 非末档：min(remaining, ceil(budget/2))，非负。
+    expect(attemptBudgetMs(3000, 3000, false)).toBe(1500);
+    expect(attemptBudgetMs(3000, 1500, false)).toBe(1500);
+    expect(attemptBudgetMs(3000, 500, false)).toBe(500);
+    expect(attemptBudgetMs(3000, 0, false)).toBe(0);
+    expect(attemptBudgetMs(3000, -10, false)).toBe(0);
+    // 末档：直接用全部剩余预算（单档链修复）。
+    expect(attemptBudgetMs(3000, 3000, true)).toBe(3000);
+    expect(attemptBudgetMs(3000, 1800, true)).toBe(1800);
+    expect(attemptBudgetMs(3000, 0, true)).toBe(0);
+    expect(attemptBudgetMs(3000, -10, true)).toBe(0);
+  });
+
+  it("single-model chain uses the FULL 3000 ms: a port returning at 2000 ms settles ok (not cut at 1500) (#36 §6.5)", async () => {
+    // 修复前（arch r5 §6.5 根因）：单档链唯一一次尝试被 budget/2 = 1500 ms
+    // 摘断（abort 尊重型端口 reject ⇒ failed）；修复后：末档拿全部剩余预算
+    // ⇒ 2000 ms 返回即 ok。
+    const { flight, clock } = makeFlight();
+    let resolvePort!: (v: { text: string }) => void;
+    const gated: PredictFlightPort = {
+      complete: (_s, _u, signal) =>
+        new Promise((res, rej) => {
+          resolvePort = res;
+          signal.addEventListener("abort", () => rej(new Error("aborted")), { once: true });
+        }),
+    };
+    const p = flight.start(input([model("deepseek", "deepseek-flash", gated, DEEPSEEK)]));
+    clock.advance(2000); // 计时器在 3000（全部剩余预算）才到点 ⇒ 2000 ms 仍在档内
+    resolvePort({ text: '{"tags":[]}' });
+    await flush();
+    const outcome = await p;
+    expect(outcome.kind).toBe("ok");
+    if (outcome.kind !== "ok") return;
+    expect(outcome.attempts).toHaveLength(1);
+    expect(outcome.attempts[0]!.kind).toBe("ok");
+    expect(outcome.attempts[0]!.ms).toBe(2000);
+    expect(clock.pendingTimers).toBe(0);
   });
 });
 

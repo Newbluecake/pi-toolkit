@@ -136,6 +136,127 @@ describe("selectPEntries", () => {
   });
 });
 
+describe("selectPEntries · 高危 tag 冷却饿死出口 (#36 §6.4 / arch r5 §6.4)", () => {
+  const HIGH_RISK = new Set(["deletion"]);
+  const starvedInput = (overrides: Partial<Parameters<typeof selectPEntries>[0]> = {}) => ({
+    tags: [tag("deletion", 0.9)],
+    eligibleTags: new Set(["deletion"]),
+    candidates: [candidate({ hash: "cool1", tagP: { deletion: 0.9 }, coolingDown: true })],
+    maxEntries: 2,
+    maxBytes: 4096,
+    highRiskTags: HIGH_RISK,
+    ...overrides,
+  });
+
+  it("命中：tag 高危且 score ≥0.85、合格候选全部被冷却挡住 ⇒ 绕过冷却追加 1 条（bypass 标记）", () => {
+    const picks = selectPEntries(starvedInput());
+    expect(picks).toHaveLength(1);
+    expect(picks[0]).toMatchObject({ hash: "cool1", bypass: true });
+  });
+
+  it("命中：绕过条目按完整公式排序取最高（authority=user 加成参与）", () => {
+    const picks = selectPEntries(
+      starvedInput({
+        candidates: [
+          candidate({ hash: "agent", tagP: { deletion: 0.9 }, coolingDown: true, authority: "model" }),
+          candidate({ hash: "user", tagP: { deletion: 0.9 }, coolingDown: true, authority: "user" }),
+        ],
+      }),
+    );
+    expect(picks).toHaveLength(1);
+    expect(picks[0]!.hash).toBe("user"); // 1.25x user 加成 ⇒ 分更高
+  });
+
+  it("不命中：候选已在 segment 已注入集合中（isInjected）⇒ 它不算饿死候选，零注入", () => {
+    expect(
+      selectPEntries(
+        starvedInput({
+          candidates: [candidate({ hash: "seg", tagP: { deletion: 0.9 }, coolingDown: true, isInjected: true })],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("不命中：候选是 static（isStaticCore）⇒ 常驻块不需要重注，零注入", () => {
+    expect(
+      selectPEntries(
+        starvedInput({
+          candidates: [candidate({ hash: "st", tagP: { deletion: 0.9 }, coolingDown: true, isStaticCore: true })],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("不命中：tag score 0.84（未过 eligibleTagsOf 的 0.85 门）⇒ 不触发", () => {
+    // fast-path 集合里有该 tag，但 0.84 < 0.85 ⇒ derived eligible 为空。
+    expect(selectPEntries(starvedInput({ tags: [tag("deletion", 0.84)] }))).toEqual([]);
+  });
+
+  it("不命中：非高危 tag（risk:normal）即使饿死也不触发", () => {
+    const picks = selectPEntries(
+      starvedInput({
+        tags: [tag("docs", 0.9)],
+        eligibleTags: new Set(["docs"]),
+        candidates: [candidate({ hash: "cool", tagP: { docs: 0.9 }, coolingDown: true })],
+      }),
+    );
+    expect(picks).toEqual([]);
+  });
+
+  it("不命中：t 下存在未被冷却的合格候选（未饿死）⇒ 正常路径已覆盖，无 bypass", () => {
+    const picks = selectPEntries(
+      starvedInput({
+        candidates: [
+          candidate({ hash: "warm", tagP: { deletion: 0.9 }, coolingDown: false }),
+          candidate({ hash: "cool", tagP: { deletion: 0.9 }, coolingDown: true }),
+        ],
+      }),
+    );
+    expect(picks.map((p) => p.hash)).toEqual(["warm"]);
+    expect(picks.every((p) => p.bypass === undefined)).toBe(true);
+  });
+
+  it("每轮最多 1 条：两个高危 tag 同时饿死也只 bypass 排序最高的那一个 tag 的 top-1", () => {
+    const picks = selectPEntries(
+      starvedInput({
+        tags: [tag("deletion", 0.9), tag("git-commit", 0.95)],
+        eligibleTags: new Set(["deletion", "git-commit"]),
+        highRiskTags: new Set(["deletion", "git-commit"]),
+        candidates: [
+          candidate({ hash: "del", tagP: { deletion: 0.9 }, coolingDown: true }),
+          candidate({ hash: "commit", tagP: { "git-commit": 0.9 }, coolingDown: true }),
+        ],
+      }),
+    );
+    const bypassPicks = picks.filter((p) => p.bypass === true);
+    expect(bypassPicks).toHaveLength(1);
+  });
+
+  it("bypass 仍受 maxEntries/maxBytes 预算约束：预算不够时不追加", () => {
+    // 正常路径已有 1 条（另一 tag）且 maxEntries=1 已满 ⇒ 不追加。
+    const full = selectPEntries(
+      starvedInput({
+        tags: [tag("docs", 0.9), tag("deletion", 0.9)],
+        eligibleTags: new Set(["docs", "deletion"]),
+        candidates: [
+          candidate({ hash: "warm-docs", tagP: { docs: 0.9 }, coolingDown: false }),
+          candidate({ hash: "cool", tagP: { deletion: 0.9 }, coolingDown: true }),
+        ],
+        maxEntries: 1,
+      }),
+    );
+    expect(full.map((p) => p.hash)).toEqual(["warm-docs"]);
+    expect(full.every((p) => p.bypass === undefined)).toBe(true);
+    // 字节预算不够容下 bypass 条目 ⇒ 不追加。
+    const noBytes = selectPEntries(starvedInput({ maxBytes: 50 })); // 候选 byteLength=100
+    expect(noBytes).toEqual([]);
+    // 空位仍在（maxEntries 未满、字节够）⇒ 允许单独追加 bypass。
+    const room = selectPEntries(starvedInput({ maxEntries: 1 }));
+    expect(room).toHaveLength(1);
+    expect(room[0]!.bypass).toBe(true);
+  });
+});
+
 describe("selectSEntry", () => {
   function sCandidate(overrides: Partial<SCandidate> = {}): SCandidate {
     return {

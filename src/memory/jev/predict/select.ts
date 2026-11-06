@@ -61,12 +61,17 @@ export interface SelectPInput {
   readonly candidates: readonly Candidate[];
   readonly maxEntries: number;
   readonly maxBytes: number;
+  /** #36 §6.4（arch r5 §6.4）冷却饿死出口：`TagDef.risk === "high"` 的 tag id
+   *  集合（调用方从 taxonomy 传入）；缺省时该出口不触发（仅违测试用）。 */
+  readonly highRiskTags?: ReadonlySet<string>;
 }
 
 export interface SelectedPEntry {
   readonly hash: string;
   readonly score: number;
   readonly byteLength: number;
+  /** #36 §6.4：该 pick 经冷却饿死 bypass 注入（details 记 predict.bypass）。 */
+  readonly bypass?: true;
 }
 
 function excludedByFlags(c: Candidate): boolean {
@@ -93,15 +98,15 @@ export function eligibleTagsOf(tags: readonly TagScore[], fastPathEligible: Read
   return out;
 }
 
-/** 单个条目在 eligibleTags 下的分数：`max_t(finalScore(t) × p(e,t)) ×
- *  importance × (authority=user ? 1.25 : 1)`（§5.1）；不存在共享 tag 时
- *  返回 undefined（调用方应跳过）。 */
-export function scoreCandidate(
+/** 单个条目在 eligibleTags 下的分数（不含 private/secret/injected/staticCore/
+ *  冷却等标志位排除——bypass 排名复用同一公式，见 §6.4）：
+ *  `max_t(finalScore(t) × p(e,t)) × importance × (authority=user ? 1.25 : 1)`
+ *  （§5.1）；不存在共享 tag 或未过 type 门时返回 undefined。 */
+function scoreCandidateShared(
   c: Candidate,
   tags: readonly TagScore[],
   eligibleTags: ReadonlySet<string>,
 ): number | undefined {
-  if (excludedByFlags(c)) return undefined;
   const shared = Object.keys(c.tagP).filter((t) => eligibleTags.has(t));
   if (shared.length === 0) return undefined;
   if (!passesTypeGate(c)) return undefined;
@@ -114,6 +119,18 @@ export function scoreCandidate(
   const importance = effectiveImportance(c);
   const authorityBonus = c.authority === "user" ? 1.25 : 1;
   return best * importance * authorityBonus;
+}
+
+/** 单个条目在 eligibleTags 下的分数：`max_t(finalScore(t) × p(e,t)) ×
+ *  importance × (authority=user ? 1.25 : 1)`（§5.1）；不存在共享 tag 时
+ *  返回 undefined（调用方应跳过）。 */
+export function scoreCandidate(
+  c: Candidate,
+  tags: readonly TagScore[],
+  eligibleTags: ReadonlySet<string>,
+): number | undefined {
+  if (excludedByFlags(c)) return undefined;
+  return scoreCandidateShared(c, tags, eligibleTags);
 }
 
 /** 贪心按分数取前 `maxEntries` 个、累计 `byteLength` 不超过 `maxBytes`
@@ -135,7 +152,46 @@ function fitPicks(
   return out;
 }
 
-/** §5.1 全流程：eligibleTags → 逐条目打分/过滤 → `fitPicks`。 */
+/** §6.4（#36 arch r5）高危 tag 冷却饿死出口：预测 tag t 满足 score ≥ 0.85
+ *  （eligibleTagsOf 已保证）∧ `TagDef.risk === "high"`，t 下的合格候选
+ *  （过 private/secret/segment-injected/static 与 type 门、共享 t）全部被
+ *  `pInjectedAt` 冷却挡住 ⇒ 绕过冷却注入排序最高的 1 条。每轮（每次
+ *  selectPEntries 调用）最多 1 条；“同一块每个 segment 最多 1 条”由注入后
+ *  segment.isInjected ⇒ Candidate.isInjected=true 在后续轮次自然排除。 */
+function starvedBypassPick(
+  input: SelectPInput,
+  eligible: ReadonlySet<string>,
+  picked: readonly SelectedPEntry[],
+): SelectedPEntry | undefined {
+  if (input.highRiskTags === undefined) return undefined;
+  const pickedHashes = new Set(picked.map((p) => p.hash));
+  for (const t of input.tags) {
+    if (!eligible.has(t.tag) || !input.highRiskTags.has(t.tag)) continue; // score ≥0.85 由 eligible 保证
+    let starvedCount = 0;
+    let top: { hash: string; score: number; byteLength: number } | undefined;
+    for (const c of input.candidates) {
+      if (c.isPrivate || c.isSecret || c.isInjected || c.isStaticCore) continue;
+      if ((c.tagP[t.tag] ?? 0) <= 0) continue;
+      if (!passesTypeGate(c)) continue;
+      if (!c.coolingDown) {
+        starvedCount = -1; // t 下存在未被冷却的合格候选 ⇒ 未饿死，不触发
+        break;
+      }
+      starvedCount += 1;
+      const score = scoreCandidateShared(c, input.tags, eligible);
+      if (score === undefined) continue;
+      if (top === undefined || score > top.score || (score === top.score && c.hash.localeCompare(top.hash) < 0)) {
+        top = { hash: c.hash, score, byteLength: c.byteLength };
+      }
+    }
+    if (starvedCount <= 0 || top === undefined || pickedHashes.has(top.hash)) continue;
+    return { hash: top.hash, score: top.score, byteLength: top.byteLength, bypass: true };
+  }
+  return undefined;
+}
+
+/** §5.1 全流程：eligibleTags → 逐条目打分/过滤 → `fitPicks` → §6.4 冷却
+ *  饿死出口（最多追加 1 条 bypass，仍受 maxEntries/maxBytes 预算约束）。 */
 export function selectPEntries(input: SelectPInput): readonly SelectedPEntry[] {
   const eligible = eligibleTagsOf(input.tags, input.eligibleTags);
   if (eligible.size === 0) return [];
@@ -144,7 +200,12 @@ export function selectPEntries(input: SelectPInput): readonly SelectedPEntry[] {
     const score = scoreCandidate(c, input.tags, eligible);
     if (score !== undefined) scored.push({ hash: c.hash, score, byteLength: c.byteLength });
   }
-  return fitPicks(scored, input.maxEntries, input.maxBytes);
+  const picks = fitPicks(scored, input.maxEntries, input.maxBytes);
+  const bypass = starvedBypassPick(input, eligible, picks);
+  if (bypass === undefined || picks.length >= input.maxEntries) return picks;
+  const usedBytes = picks.reduce((sum, s) => sum + s.byteLength, 0);
+  if (usedBytes + bypass.byteLength > input.maxBytes) return picks;
+  return [...picks, bypass];
 }
 
 // ───────────────────────────── S 条目（§3.4 / §5.1） ─────────────────────────────

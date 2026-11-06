@@ -92,6 +92,7 @@ import {
   type MemEntry,
   type MemoryInjectDetailsV1,
   type MemoryInjectPartV1,
+  type PredictCallEntry,
   type SimpleCommand,
   type Taxonomy,
 } from "./contracts.js";
@@ -187,6 +188,10 @@ const A_MAX_ENTRIES = 3;
 const A_MAX_BYTES = 4_096;
 const E_MAX_CANDIDATES = 150;
 const E_MAX_PER_SEGMENT = 10;
+/** #36 §6.3（arch r5 §6.3）：只读工具的失败不走 E 层——失败文本几乎不含动作
+ *  语义，撞词注入全是噪音（评测 2026-11-05：E 层 54% irrelevant 基本全部来自
+ *  read/grep/ls/find 失败的撞词）。命中即直接返回，也不消耗 E_MAX_PER_SEGMENT。 */
+const E_READONLY_TOOLS = new Set(["read", "grep", "ls", "find"]);
 const BACKFILL_INTERVAL_MS = 60_000;
 const BACKFILL_MAX_PER_PASS = 8;
 const PARSED_CACHE_MAX = 64;
@@ -505,6 +510,8 @@ export interface PredictSummary {
   readonly tags: readonly string[];
   readonly state: readonly string[];
   readonly origin: string;
+  /** #36 §6.4：本轮 P 注入用过冷却饿死 bypass（≤1 条/轮）。 */
+  readonly bypass?: true;
 }
 
 /** §5.3 commitParts: U-only stays byte-identical to pre-P1 (returned
@@ -1443,6 +1450,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     hitTags: readonly string[];
   }): Promise<(() => InjectMessage | undefined) | undefined> | undefined => {
     const reg = registry;
+    if (E_READONLY_TOOLS.has(input.tool)) return undefined; // #36 §6.3：只读工具失败零 E 注入
     if (reg === undefined || !judgedAllowed() || segment.full() || errorAsks >= E_MAX_PER_SEGMENT) return undefined;
     const firstErrorLine = input.errorText.split("\n").find((l) => l.trim() !== "") ?? "";
     const signature = createHash("sha1")
@@ -1455,12 +1463,24 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const c = corpusFor(input.cwd);
     if (c === undefined) return undefined;
     const hit = new Set(input.hitTags);
+    // #36 §6.3：高危动作类 tag 集合（TagDef.risk==="high"）——标签全部属于该
+    // 集合且与失败命令 hitTags 无交集的块从候选池剔除（动作类条目对无关
+    // 失败只可能是撞词）；pending 条目无标签，不适用此剔除。
+    const highRiskTagIds = new Set(c.taxonomy.tags.filter((t) => t.risk === "high").map((t) => t.id));
     let pool = c.entries.filter((e) => {
       if (e.inline.isPrivate === true || e.secret || segment.isInjected(e.hash)) return false;
       const meta = effectiveMeta(e, c.index.entries[e.hash], c.taxonomy);
       // Pending entries (no sidecar record yet) have no known type — they stay
       // candidates rather than being silently excluded (untagged corpora
       // would otherwise never get E recall).
+      if (
+        !meta.pending &&
+        meta.tags.length > 0 &&
+        meta.tags.every((t) => highRiskTagIds.has(t)) &&
+        !meta.tags.some((t) => hit.has(t))
+      ) {
+        return false; // #36 §6.3：纯高危动作类标签且与失败命令无交集
+      }
       return meta.pending || meta.type === "pitfall" || meta.type === "procedure" || meta.tags.some((t) => hit.has(t));
     });
     if (pool.length === 0) return undefined;
@@ -1858,8 +1878,11 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       );
     }
     let message: InjectMessage | undefined;
+    let bypassed = false;
     {
       const eligible = fastPathEligibleTags(c.taxonomy);
+      // #36 §6.4：高危 tag 集合交给 select 做冷却饿死出口。
+      const highRiskTagIds = new Set(c.taxonomy.tags.filter((t) => t.risk === "high").map((t) => t.id));
       const { pCands, sCands, byHash } = predictCandidatesFor(c, cwd);
       const selected = selectPEntries({
         tags,
@@ -1867,7 +1890,9 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         candidates: pCands,
         maxEntries: config.predict.maxEntries,
         maxBytes: config.predict.maxBytes,
+        ...(highRiskTagIds.size > 0 ? { highRiskTags: highRiskTagIds } : {}),
       });
+      bypassed = selected.some((s) => s.bypass === true);
       const usedBytes = selected.reduce((sum, s) => sum + s.byteLength, 0);
       const sSelected = selectSEntry(result.state, sCands, Math.max(0, config.predict.maxBytes - usedBytes));
       const picks: Pick[] = [];
@@ -1892,6 +1917,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         tags: tags.map((t) => t.tag),
         state: result.state.map((s) => s.kind),
         origin,
+        ...(bypassed ? { bypass: true as const } : {}),
       },
       // §5.4 优先入池原料：本轮预测 tag → finalScore（≥0.5 的由
       // recallCandidates 筛）。predict.enabled=false / P 未跑时本对象不存在。
@@ -1913,6 +1939,9 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         readonly waitMs: number;
         readonly turnSeqAtStart: number;
         readonly chain: readonly string[];
+        /** #36 §6.5：本轮 beginPredictTurn 入口时钟（windowMs =
+         *  max(waitMs, U 实际完成时刻) 的基准）。 */
+        readonly turnStartClock: number;
         readonly flightPromise: Promise<PredictFlightOutcome>;
         readonly predicted: ReadonlyMap<string, number>;
       };
@@ -1924,6 +1953,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
    *  (off/partial-inactive/segment-full/no corpus/predict disabled) —
    *  distinct from "ran but produced nothing to inject". */
   const beginPredictTurn = (prompt: string, ctx: ExtensionContext, cwd: string): BegunPredictTurn | undefined => {
+    const turnStartClock = clock.now();
     const allowed = zeroCallAllowed();
     if (!allowed.ok || segment.full()) return undefined;
     const c = corpusFor(cwd);
@@ -2061,6 +2091,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       waitMs: Math.max(0, Math.min(1500, modelCfg.waitMs)),
       turnSeqAtStart: predictTurnSeq,
       chain,
+      turnStartClock,
       flightPromise: predictFlight.start(flightInput),
       predicted: new Map(mergedTags.map((t) => [t.tag, t.score] as const)),
     };
@@ -2110,11 +2141,27 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       );
     });
 
+  /** #36 §6.5：本次实际生效的等待窗口 = max(waitMs, U 实际完成时刻)。U 的
+   *  settle 观察先于 handler 的 `await uDone` 续延挂上（微任务序保证先写
+   *  入），未跑 U（partial 等）时保持 undefined ⇒ 窗口退化为 waitMs。 */
+  interface PredictWindowState {
+    uSettleElapsedMs?: number;
+  }
+
+  const effectiveWindowMs = (b: Extract<BegunPredictTurn, { kind: "model" }>, ws: PredictWindowState): number =>
+    Math.max(b.waitMs, ws.uSettleElapsedMs ?? 0);
+
   /** §9.4 `kind:"call"` ledger entry — one per STARTED flight (denied
-   *  admissions never reserved and never record). */
-  const appendPredictCall = (chain: readonly string[], outcome: PredictFlightOutcome, timely: boolean): void => {
+   *  admissions never reserved and never record). #36 §6.5 追加
+   *  `windowMs`/`attempts`（实际生效窗口与 failover 尝试档数）。 */
+  const appendPredictCall = (
+    chain: readonly string[],
+    outcome: PredictFlightOutcome,
+    timely: boolean,
+    windowMs: number,
+  ): void => {
     const reason = outcome.kind === "ok" ? undefined : outcome.kind;
-    appendPredict({
+    const entry: PredictCallEntry = {
       v: 1,
       kind: "call",
       at: new Date(now()).toISOString(),
@@ -2126,13 +2173,20 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       costUsd: outcome.cost.costUsd,
       costSource: outcome.cost.costSource,
       timely,
-    });
+      windowMs: Math.max(0, Math.round(windowMs)),
+      attempts: outcome.attempts.length,
+    };
+    appendPredict(entry);
   };
 
   /** §7.2 late path: the flight settled only after the window closed — the
    *  parsed result seeds the exact-key cache + pendingModel and NOTHING is
    *  delivered (P never calls sendMessage), plus the §9.4 call record. */
-  const latePredictOutcome = (b: Extract<BegunPredictTurn, { kind: "model" }>, outcome: PredictFlightOutcome): void => {
+  const latePredictOutcome = (
+    b: Extract<BegunPredictTurn, { kind: "model" }>,
+    outcome: PredictFlightOutcome,
+    ws: PredictWindowState,
+  ): void => {
     if (predictDisposed) return;
     if (outcome.kind === "ok") {
       const parsed = parsePredictReply(outcome.text, b.knownTags);
@@ -2141,7 +2195,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         predictCache.setPending(parsed.tags, undefined, b.turnSeqAtStart);
       }
     }
-    appendPredictCall(b.chain, outcome, false);
+    appendPredictCall(b.chain, outcome, false, effectiveWindowMs(b, ws));
   };
 
   /** §8.3 finish: merge a timely M into r0, write the final record, then
@@ -2150,6 +2204,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   const finishPredictModelTurn = (
     b: Extract<BegunPredictTurn, { kind: "model" }>,
     raced: Awaited<ReturnType<typeof racePredictWindow>>,
+    ws: PredictWindowState,
   ): PredictCommit => {
     let tags = b.mergedTags;
     let origin = b.origin;
@@ -2164,21 +2219,25 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
             origin = "rules+model";
           }
         }
-        if (!predictDisposed) appendPredictCall(b.chain, raced.outcome, parsed.ok);
+        if (!predictDisposed) appendPredictCall(b.chain, raced.outcome, parsed.ok, effectiveWindowMs(b, ws));
       } else if (!predictDisposed) {
         // fast failure/abort/timeout inside the window — no merge, still a call
-        appendPredictCall(b.chain, raced.outcome, false);
+        appendPredictCall(b.chain, raced.outcome, false, effectiveWindowMs(b, ws));
       }
     } else {
       void b.flightPromise.then(
-        (outcome) => latePredictOutcome(b, outcome),
+        (outcome) => latePredictOutcome(b, outcome, ws),
         () =>
-          latePredictOutcome(b, {
-            kind: "failed",
-            ms: 0,
-            cost: { reserveUsd: 0, costUsd: 0, costSource: "reserve" },
-            attempts: [],
-          }),
+          latePredictOutcome(
+            b,
+            {
+              kind: "failed",
+              ms: 0,
+              cost: { reserveUsd: 0, costUsd: 0, costSource: "reserve" },
+              attempts: [],
+            },
+            ws,
+          ),
       );
     }
     return commitPredictParts(b.r0, tags, origin);
@@ -2241,12 +2300,22 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         // deferred until P has claimed shared entries (§5.3 P-first dedup).
         // P never breaks U: any failure here degrades to U's message alone.
         const uDone = recallU(event.prompt, ctx, cwd, reg, begun.predicted, { deferCommit: true });
+        // #36 §6.5 windowMs：先挂 U-settle 观察器（微任务序早于下方
+        // `await uDone` 的续延），finishPredictModelTurn/latePredictOutcome
+        // 据此计算实际生效窗口 max(waitMs, U 实际完成时刻)。
+        const windowState: PredictWindowState = {};
+        const onUSettled = (): void => {
+          if (windowState.uSettleElapsedMs === undefined) {
+            windowState.uSettleElapsedMs = Math.max(0, clock.now() - begun.turnStartClock);
+          }
+        };
+        uDone.then(onUSettled, onUSettled);
         try {
           const raced = await racePredictWindow(begun.flightPromise, uDone, begun.waitMs);
           const uFin = await uDone;
           let pRes: PredictCommit | undefined;
           try {
-            pRes = finishPredictModelTurn(begun, raced);
+            pRes = finishPredictModelTurn(begun, raced, windowState);
           } catch (err) {
             log(`predict model finish failed: ${String((err as Error)?.message ?? err)}`);
           }

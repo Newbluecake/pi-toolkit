@@ -658,6 +658,87 @@ describe("E layer (failure recall)", () => {
   });
 });
 
+describe("E layer read-only failure gate (#36 §6.3 / arch r5 §6.3)", () => {
+  /** pitfalls-rm.md：一条被 deletion（高危动作类）打标的条目。 */
+  async function tagDeletionEntry(h: ReturnType<typeof harness>): Promise<void> {
+    writeFileSync(
+      join(memDir, "pitfalls-rm.md"),
+      "# Pitfalls rm\n\n## Delete\n\n- 删除只用精确路径，绝不 git add -A\n",
+    );
+    for (const hook of h.writeHooks) hook(tmp); // invalidate the corpus cache
+    const e = entries().find((x) => x.body.includes("删除只用精确路径"))!;
+    await tagEntry(e, { deletion: 0.9 });
+    for (const hook of h.writeHooks) hook(tmp);
+  }
+
+  test("read/grep/ls/find 失败 ⇒ 零 E 询问、零注入，且不消耗 E_MAX_PER_SEGMENT", async () => {
+    const h = harness({ rules: [["node 18", 0.9]] });
+    const readonlyFail = (tool: string, n: number) =>
+      h.emit("tool_result", {
+        toolName: tool,
+        toolCallId: `r${n}`,
+        input: { path: "src/missing.ts" },
+        content: [{ type: "text", text: "file not found" }],
+        isError: true,
+      });
+    await readonlyFail("read", 1);
+    await readonlyFail("grep", 2);
+    await readonlyFail("ls", 3);
+    await readonlyFail("find", 4);
+    await settleBackground();
+    expect(h.fake.calls.filter((c) => c.state["tool"])).toHaveLength(0); // 零 E 询问
+    expect(h.sent).toHaveLength(0);
+    // 不消耗 errorAsks：随后的 10 个不同 bash 失败仍能全部询问（若只读
+    // 失败计过一次，第 10 个会被 E_MAX_PER_SEGMENT=10 挡住）。
+    const fail = (n: number, text = "boom") =>
+      h.emit("tool_result", {
+        toolName: "bash",
+        toolCallId: `t${n}`,
+        input: { command: `cmd${n}` },
+        content: [{ type: "text", text: `${text}\nCommand exited with code 2` }],
+        isError: false,
+      });
+    for (let i = 1; i <= 10; i++) await fail(i, `distinct failure ${i}`);
+    await settleBackground();
+    expect(h.fake.calls.filter((c) => c.state["tool"] === "bash")).toHaveLength(10);
+  });
+
+  test("bash 删除失败（hitTags 含 deletion）⇒ 删除类条目仍注入", async () => {
+    const h = harness({ rules: [["删除只用精确路径", 0.9]] });
+    await tagDeletionEntry(h);
+    await h.emit("tool_result", {
+      toolName: "bash",
+      toolCallId: "t1",
+      input: { command: "rm -rf build" },
+      content: [{ type: "text", text: "cannot remove 'build': No such file or directory\nCommand exited with code 1" }],
+      isError: false,
+    });
+    await settleBackground();
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]!.message.details).toMatchObject({ layer: "E", trigger: "bash" });
+    expect(h.sent[0]!.message.content).toContain("删除只用精确路径");
+  });
+
+  test("bash 非删除失败 ⇒ 纯高危动作类标签（deletion）且与 hitTags 无交集的条目被剔除", async () => {
+    const h = harness({ rules: [["删除只用精确路径", 0.9]] });
+    await tagDeletionEntry(h);
+    await h.emit("tool_result", {
+      toolName: "bash",
+      toolCallId: "t1",
+      input: { command: "npm install" },
+      content: [{ type: "text", text: "npm ERR! network timeout\nCommand exited with code 1" }],
+      isError: false,
+    });
+    await settleBackground();
+    // 询问照常发生（其它候选仍在池），但删除类条目已不在候选问题里，
+    // 也不会被注入。
+    const ask = h.fake.calls.find((c) => c.state["tool"] === "bash");
+    expect(ask).toBeDefined();
+    expect(JSON.stringify(ask!.questions)).not.toContain("删除只用精确路径");
+    expect(h.sent).toHaveLength(0);
+  });
+});
+
 // ───────────────────────────── B layer ─────────────────────────────
 
 describe("B layer (re-inject after compaction)", () => {

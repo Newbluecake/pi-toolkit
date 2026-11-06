@@ -588,8 +588,8 @@ describe("P→U dedup with a genuinely overlapping entry", () => {
   });
 });
 
-describe("pInjectedAt cooldown (§5.3/§10)", () => {
-  test("a P-injected entry is not re-injected within cooldownH in a fresh wireJev session", async () => {
+describe("pInjectedAt cooldown (§5.3/§10; #36 X2 bypass)", () => {
+  test("cooldown blocks the normal path in a fresh session; the #36 §6.4 starvation bypass is the only way back in", async () => {
     const h1 = harness({ fail: "System One API error (451): blocked" });
     await goPartial(h1);
     const r1 = await h1.prompt("派两个子 agent 并行做");
@@ -611,11 +611,16 @@ describe("pInjectedAt cooldown (§5.3/§10)", () => {
       await new Promise((r) => setTimeout(r, 25));
     }
     expect(stamped).toBe(true);
-    // fresh wireJev (new segment + pStamps overlay): the on-disk cooldown alone must suppress re-injection.
+    // fresh wireJev (new segment + pStamps overlay): the on-disk cooldown
+    // suppresses the NORMAL selection path; per #36 arch §6.4 (approved
+    // exception X2) the high-risk `dispatch` tag with all qualified
+    // candidates cooling is exactly the starvation exit — the entry returns
+    // ONLY via the bypass, and the message says so.
     const h2 = harness({ fail: "System One API error (451): blocked" });
     await goPartial(h2);
     const r2 = await h2.prompt("派两个子 agent 并行做");
-    expect(r2 === undefined || !(r2.message?.content ?? "").includes("派发子 agent 前先确认范围")).toBe(true);
+    expect(r2?.message?.content).toContain("派发子 agent 前先确认范围");
+    expect(r2?.message?.details?.predict?.bypass).toBe(true);
   });
 });
 

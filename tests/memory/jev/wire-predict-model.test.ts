@@ -15,7 +15,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FakeClock } from "../../../src/core/clock.js";
 import { jevConfigOf } from "../../../src/memory/jev/config.js";
 import type { JevConfig, JevQuestion, PredictModelConfig } from "../../../src/memory/jev/contracts.js";
+import { EntryIndex } from "../../../src/memory/jev/entries.js";
 import { clearHealthTable } from "../../../src/memory/jev/health.js";
+import { writeIndexPatch } from "../../../src/memory/jev/index-store.js";
+import { PredictCache, PENDING_CAP_P } from "../../../src/memory/jev/predict/cache.js";
+import { isCarryPhrase } from "../../../src/memory/jev/predict/carry.js";
 import { clearPredictLedgerTable, wireJev } from "../../../src/memory/jev/wire.js";
 import { DEFAULT_MEMORY_SETTINGS, type MemorySettings } from "../../../src/memory/settings.js";
 import { createFakeRegistry, type ClassifyCallRecord, type ClassifyResult } from "./helpers/fake-registry.js";
@@ -167,6 +171,8 @@ interface HarnessOpts {
   /** `recall.waitMs` override (real-ms; U's settle is not on the fake clock). */
   recallWaitMs?: number;
   completeOnly?: boolean;
+  /** Extra `JevConfig` overrides (e.g. `fastPath.allowTags` for #36 tests). */
+  config?: Partial<JevConfig>;
 }
 
 interface Harness {
@@ -239,6 +245,7 @@ function harness(opts: HarnessOpts = {}): Harness {
     classifiers: CLASSIFIERS,
     ...(opts.recallWaitMs === undefined ? {} : { recall: { ...base.recall, waitMs: opts.recallWaitMs } }),
     predict: { ...base.predict, model: modelCfg },
+    ...opts.config,
   };
   const clock = new FakeClock(0);
   const wire = wireJev(pi, {
@@ -471,58 +478,12 @@ describe("wait window (§8.3, §11.2 wire-predict-model list)", () => {
 });
 
 // ───────────────────── §7.2 late-result next-turn redemption ─────────────────────
+// （#36 P6a：原“承接/新指令/cancel”三个 500ms 钉住用例已并入下方 G3 的
+// 3a/3b/3c —— 按 plan r3 §4 P6a，P0 的 7 处 predictModel:{waitMs:500} 临时钉
+// 在重做窗口语义用例时消化；这里保留 exact-key cache 用例（waitMs:0 是其
+// 自身语义，不是默认窗口钉）。）
 
 describe("late result: exact-key cache + pendingModel next-turn redemption (§7.2)", () => {
-  async function lateTurn1(h: Harness): Promise<void> {
-    const p = h.promptNow(UNCERTAIN);
-    h.clock.advance(500); // window closes before the model answers
-    await p;
-    h.model.resolve(0, { content: [{ type: "text", text: REPLY_OK }] });
-    await flush(14);
-    expect(h.predictCalls()).toHaveLength(1);
-  }
-
-  test("a carry phrase redeems pendingModel at full weight ⇒ P injects the model tag without a new call", async () => {
-    const h = harness({ fail: "System One API error (451): blocked", predictModel: { waitMs: 500 } }); // #36 P0: 500ms 窗口钉
-    await goStatus(h, "partial");
-    await lateTurn1(h);
-    const r = await h.prompt("继续");
-    expect(r?.message?.details?.layer).toBe("P");
-    expect(r.message.content).toContain("提交只用精确路径");
-    expect(r.message.details.predict.origin).toBe("rules+model");
-    expect(h.model.calls).toHaveLength(1); // redeemed, not re-asked
-    expect(h.predictCalls()).toHaveLength(1);
-  });
-
-  test("a new instruction redeems capped: tags without rule/state support are dropped (nothing injected)", async () => {
-    const h = harness({ fail: "System One API error (451): blocked", predictModel: { waitMs: 500 } }); // #36 P0: 500ms 窗口钉
-    await goStatus(h, "partial");
-    await lateTurn1(h);
-    // The new instruction is itself uncertain (§4.4: no tag ≥0.5), so a
-    // second flight IS admitted — the capped redemption only guarantees that
-    // nothing INJECTS this turn (the dropped git-commit tag never merges).
-    const p = h.promptNow("顺便再看一下测试覆盖的情况，列一下薄弱点");
-    h.clock.advance(500); // window closes before the model answers
-    const r = await p;
-    expect(r).toBeUndefined();
-    expect(h.model.calls).toHaveLength(2); // a fresh uncertain instruction re-asks (§4.4)
-    h.model.resolve(1, { content: [{ type: "text", text: REPLY_OK }] });
-    await flush(14);
-    const calls = h.predictCalls();
-    expect(calls).toHaveLength(2);
-    expect(calls[1]).toMatchObject({ kind: "call", ok: true, timely: false });
-    expect(h.sent).toHaveLength(0); // late results are never delivered
-  });
-
-  test("a cancel modifier drops pendingModel entirely", async () => {
-    const h = harness({ fail: "System One API error (451): blocked", predictModel: { waitMs: 500 } }); // #36 P0: 500ms 窗口钉
-    await goStatus(h, "partial");
-    await lateTurn1(h);
-    const r = await h.prompt("算了，这个先不提交了");
-    expect(r).toBeUndefined();
-    expect(h.model.calls).toHaveLength(1);
-  });
-
   test("exact-key cache hit: the same DTO replays from cache — no second model call, origin rules+cache", async () => {
     const h = harness({ fail: "System One API error (451): blocked", predictModel: { waitMs: 0 } });
     await goStatus(h, "partial");
@@ -548,6 +509,268 @@ describe("late result: exact-key cache + pendingModel next-turn redemption (§7.
     expect(h.model.calls).toHaveLength(1); // no second call — served from cache
     const text = await h.report();
     expect(text).toContain("cached 1");
+  });
+});
+
+// ───────────────────── G3 预测注入及时/迟到/下一轮兑现（#36 arch r5 §7.4，8 用例，假时钟） ─────────────────────
+// 默认窗口 waitMs=1000（#36 Q9）、单链预算 3000（最后一档拿全部剩余预算）。
+// 3a–3c / 4 按 `cache.ts redeemPending` 的代码规则直接导入 PENDING_CAP_P 与
+// isCarryPhrase，不在测试里复制常量。
+
+describe("G3 offline gate: timely / late / next-turn redemption (arch r5 §7.4)", () => {
+  /** partial（U 不跑）下制造一次迟到：窗口 = waitMs = 1000，之后模型才回。 */
+  async function lateTurn1(h: Harness): Promise<void> {
+    const p = h.promptNow(UNCERTAIN);
+    h.clock.advance(1000); // 窗口（U 未跑 ⇒ 纯 waitMs）在 1000 关闭
+    await p;
+    h.model.resolve(0, { content: [{ type: "text", text: REPLY_OK }] });
+    await flush(14);
+    expect(h.predictCalls()).toHaveLength(1);
+  }
+
+  test("1 · U 1500ms 结束、模型 800ms 返回 ⇒ timely:true，本轮合并；call 记 windowMs=1500/attempts=1", async () => {
+    const h = harness({ uMode: "gate" });
+    await goStatus(h, "full");
+    const p = h.promptNow(UNCERTAIN);
+    const s = settledAt(h, p);
+    h.clock.advance(800);
+    h.model.resolve(0, { content: [{ type: "text", text: REPLY_OK }], usage: USAGE });
+    await flush();
+    h.clock.advance(700); // U settles at 1500
+    h.resolveU();
+    const r = await p;
+    expect(s.at()).toBe(1500);
+    expect(r?.message?.details?.parts?.map((x: any) => x.layer)).toEqual(["P", "U"]);
+    expect(r.message.details.predict.origin).toBe("rules+model");
+    const [call] = h.predictCalls();
+    expect(call).toMatchObject({ ok: true, timely: true, ms: 800, windowMs: 1500, attempts: 1 });
+  });
+
+  test("2 · U 1500ms 结束、模型 1700ms 返回（单链，预算 3000）⇒ 不被 1500ms 摘断；迟到入 pendingModel，timely:false，windowMs=1500", async () => {
+    const h = harness({ uMode: "gate" });
+    await goStatus(h, "full");
+    const p = h.promptNow(UNCERTAIN);
+    h.clock.advance(1500);
+    h.resolveU(); // 窗口 = max(1000, 1500) = 1500 关闭
+    const r = await p;
+    expect(r?.message?.details?.layer).toBe("U"); // 无 P 部分：规则零注入，模型未及时
+    h.clock.advance(200); // 1700：旧代码会在 1500 被 attempt 预算摘断；修复后仍在档内
+    h.model.resolve(0, { content: [{ type: "text", text: REPLY_OK }] });
+    await flush(14);
+    const [call] = h.predictCalls();
+    expect(call).toMatchObject({ ok: true, timely: false, ms: 1700, windowMs: 1500, attempts: 1 });
+    expect(h.sent).toHaveLength(0); // 迟到结果永不投递，只写 pendingModel（3a 验证）
+  });
+
+  test("3a · 相邻下一轮是承接短语（isCarryPhrase）⇒ full：pending tag 按原 p 全权重兑现并注入，无新调用", async () => {
+    const h = harness({ fail: "System One API error (451): blocked" }); // partial：U 不跑
+    await goStatus(h, "partial");
+    await lateTurn1(h);
+    expect(isCarryPhrase("继续")).toBe(true); // 直接导入判定，不复制短语表
+    const r = await h.prompt("继续");
+    expect(r?.message?.details?.layer).toBe("P");
+    expect(r.message.content).toContain("提交只用精确路径"); // p=1 全权重 ⇒ 过 0.85 门注入（封顶 0.6 不可能注入）
+    expect(r.message.details.predict.origin).toBe("rules+model");
+    expect(h.model.calls).toHaveLength(1); // 兑现而非重问
+    expect(h.predictCalls()).toHaveLength(1);
+  });
+
+  test("3b · 相邻下一轮是普通新指令 ⇒ capped：无支撑 tag 丢弃、有支撑 p 封顶 PENDING_CAP_P；本轮零注入", async () => {
+    const h = harness({ fail: "System One API error (451): blocked" });
+    await goStatus(h, "partial");
+    await lateTurn1(h);
+    // 新指令本身 uncertain（§4.4）⇒ 第二次 flight 被准入；封顶 0.6 单独达不到注入门槛。
+    const p = h.promptNow("顺便再看一下测试覆盖的情况，列一下薄弱点");
+    h.clock.advance(1000);
+    const r = await p;
+    expect(r).toBeUndefined();
+    expect(h.model.calls).toHaveLength(2); // 新的 uncertain 指令重问（§4.4）
+    h.model.resolve(1, { content: [{ type: "text", text: REPLY_OK }] });
+    await flush(14);
+    expect(h.predictCalls()[1]).toMatchObject({ kind: "call", ok: true, timely: false });
+    expect(h.sent).toHaveLength(0);
+    // 封顶规则直接在生产常量上验证（redeemPending 代码规则）：
+    expect(isCarryPhrase("顺便再看一下测试覆盖的情况，列一下薄弱点")).toBe(false);
+    const cache = new PredictCache({ ttlMs: 60_000, clock: () => 0 });
+    cache.setPending(
+      [
+        { tag: "git-commit", p: 1 },
+        { tag: "docs", p: 0.95 },
+      ],
+      undefined,
+      1,
+    );
+    const redeemed = cache.redeemPending({
+      turnSeq: 2,
+      prompt: "顺便再看一下测试覆盖的情况，列一下薄弱点",
+      currentTags: [{ tag: "docs", score: 0.7, sources: ["U"], rules: ["x"] }],
+      modifiers: [],
+    });
+    expect(redeemed.kind).toBe("capped");
+    if (redeemed.kind === "capped") {
+      expect(redeemed.tags.find((t) => t.tag === "git-commit")).toBeUndefined(); // 无支撑 ⇒ 丢弃
+      expect(redeemed.tags.find((t) => t.tag === "docs")?.p).toBe(PENDING_CAP_P); // 直接导入常量
+    }
+  });
+
+  test("3c · 相邻下一轮带 cancel 修饰 ⇒ dropped：不兑现，单槽已清空", async () => {
+    const h = harness({ fail: "System One API error (451): blocked" });
+    await goStatus(h, "partial");
+    await lateTurn1(h);
+    const r = await h.prompt("算了，这个先不提交了");
+    expect(r).toBeUndefined();
+    expect(h.model.calls).toHaveLength(1); // 不重问
+    // 单槽已清空：之后的承接短语也无从兑现
+    const later = await h.prompt("继续");
+    expect(later).toBeUndefined();
+  });
+
+  test("4 · 隔一轮再到来 ⇒ none：turnSeq 不相邻不兑现，单槽已清空（redeemPending 代码规则）", () => {
+    const cache = new PredictCache({ ttlMs: 60_000, clock: () => 0 });
+    cache.setPending([{ tag: "git-commit", p: 1 }], undefined, 5);
+    // wire 层每个 predict 轮都会尝试兑现，相邻性只由 redeemPending 的
+    // turnSeq 规则决定 —— 直接在生产规则上钉住隔轮语义。
+    expect(cache.redeemPending({ turnSeq: 7, prompt: "继续", currentTags: [], modifiers: [] })).toEqual({
+      kind: "none",
+    });
+    // 用过一次即清空：再相邻也无可兑现
+    expect(cache.redeemPending({ turnSeq: 6 + 1, prompt: "继续", currentTags: [], modifiers: [] })).toEqual({
+      kind: "none",
+    });
+  });
+
+  test("5 · 模型 3600ms 仍不返回 ⇒ 外层期限（3000+500）结算 timeout，不迟到投递", async () => {
+    const h = harness({ fail: "System One API error (451): blocked" });
+    await goStatus(h, "partial");
+    const p = h.promptNow(UNCERTAIN);
+    h.clock.advance(1000); // 窗口（waitMs）关闭
+    const r = await p;
+    expect(r).toBeUndefined();
+    h.clock.advance(2500); // 3500：外层 race 宽限到点
+    await flush(14);
+    const [call] = h.predictCalls();
+    expect(call).toMatchObject({ ok: false, reason: "timeout", timely: false, attempts: 1 });
+    expect(h.sent).toHaveLength(0);
+    // 迟到的 resolve 只做 zombie 减回，不投递、不追加记账（partial 状态下
+    // client 的恢复重试计时器仍在 —— 与本用例无关，不断言 pendingTimers）
+    h.model.resolve(0, { content: [{ type: "text", text: REPLY_OK }] });
+    await flush(14);
+    expect(h.sent).toHaveLength(0);
+    expect(h.predictCalls()).toHaveLength(1);
+  });
+
+  test("6 · U 不跑（partial）⇒ 窗口 = waitMs（1000）；900ms 返回即及时，call 记 windowMs=1000", async () => {
+    // 注：arch 表格写「短 prompt」；字面上的短 prompt 同时会挡掉模型分支
+    // （同一 passesPromptGate 门），可测的语义是「U 不跑 ⇒ 窗口退化为
+    // waitMs」—— 用 partial（U 被跳过、模型分支仍跑）刻画。
+    const h = harness({ fail: "System One API error (451): blocked" });
+    await goStatus(h, "partial");
+    const p = h.promptNow(UNCERTAIN);
+    h.clock.advance(900); // < 1000 = waitMs
+    h.model.resolve(0, { content: [{ type: "text", text: REPLY_OK }] });
+    const r = await p;
+    expect(r?.message?.details?.layer).toBe("P");
+    expect(r.message.details.predict.origin).toBe("rules+model");
+    const [call] = h.predictCalls();
+    expect(call).toMatchObject({ ok: true, timely: true, ms: 900, windowMs: 1000, attempts: 1 });
+  });
+});
+
+// ───────────────────── #36 §5.2 model-off 差分 + §6.4 bypass ─────────────────────
+
+describe("switch differentials and bypass (#36 §5.2 / §6.4)", () => {
+  /** decisive 提示（规则路径注入 P）+ 三种 model 配置下跑同一场景。 */
+  async function decisive(h: Harness): Promise<string | undefined> {
+    const r = await h.prompt("提交并推送一下，把这两个文件的改动都带上");
+    return r === undefined ? undefined : JSON.stringify(r.message);
+  }
+
+  test("model-off 差分：model on 但调用被拒（链不可绑定 / 日额拒绝）vs model off ⇒ P 层输出逐字节相同；off 无 flight、无 kind:'call'", async () => {
+    // 三个 harness 共享本测试的 memDir：先把 git-commit 条目标进 pInjectedAt
+    // 冷却，使三者的 P 选择都走同一条（冷却饿死 bypass）路径 —— 否则第一个
+    // harness 的注入会异步写下冷却 stamp，后续 harness 的输出路径分叉。
+    const target = new EntryIndex().get(memDir).find((e) => e.body.includes("提交只用精确路径"))!;
+    expect(await writeIndexPatch(memDir, { pInjectedAt: { [target.hash]: new Date().toISOString() } })).toBe("ok");
+
+    const off = harness({ fail: "System One API error (451): blocked", predictModel: { enabled: false } });
+    await goStatus(off, "partial");
+    const offText = await decisive(off);
+    expect(offText).toBeDefined();
+    expect(off.model.calls).toHaveLength(0);
+    expect(off.predictCalls()).toHaveLength(0);
+
+    const unbindable = harness({
+      fail: "System One API error (451): blocked",
+      predictModel: { models: ["nope/none"] },
+    });
+    await goStatus(unbindable, "partial");
+    expect(await decisive(unbindable)).toBe(offText); // 逐字节相同
+    expect(unbindable.model.calls).toHaveLength(0);
+    expect(unbindable.predictCalls()).toHaveLength(0);
+
+    const dayCapped = harness({
+      fail: "System One API error (451): blocked",
+      predictModel: { maxCallsPerDay: 0 },
+    });
+    await goStatus(dayCapped, "partial");
+    expect(await decisive(dayCapped)).toBe(offText); // 逐字节相同
+    expect(dayCapped.model.calls).toHaveLength(0);
+    expect(dayCapped.predictCalls()).toHaveLength(0);
+  });
+
+  test("§6.4 冷却饿死 bypass：高危 tag 命中但合格候选全在 pInjectedAt 冷却 ⇒ 仍注入 1 条，details.predict.bypass=true", async () => {
+    const h = harness({ fail: "System One API error (451): blocked" });
+    // 在任何 corpus 读取前把 git-commit 条目标进冷却（默认 cooldown 24h）。
+    const target = new EntryIndex().get(memDir).find((e) => e.body.includes("提交只用精确路径"))!;
+    expect(await writeIndexPatch(memDir, { pInjectedAt: { [target.hash]: new Date().toISOString() } })).toBe("ok");
+    await goStatus(h, "partial");
+    const r = await h.prompt("提交并推送一下，把这两个文件的改动都带上");
+    expect(r?.message?.details?.layer).toBe("P");
+    expect(r.message.content).toContain("提交只用精确路径"); // 绕过冷却注入的那 1 条
+    expect(r.message.details.predict.bypass).toBe(true);
+    expect(h.model.calls).toHaveLength(0); // decisive 提示不走模型分支
+    // 同一块每个 segment 最多 1 条：同 segment 再问不重注（isInjected 去重）
+    const again = await h.prompt("再提交一次并且推送上去");
+    expect(again?.message?.content ?? "").not.toContain("提交只用精确路径");
+  });
+
+  test("§6.4 反例（root 追认）：非高危 tag 命中但候选在冷却 ⇒ 仍不注入、无 bypass（冷却在正常路径照旧生效）", async () => {
+    // memory-system 是 risk:normal —— rules-only 上限 w(U)×c(high)=0.72，须经
+    // 模型 M 源（w(M)×p=0.85×1=0.85）才过 0.85 门，故反例只能在本文件（有模型
+    // 通路）构造；fastPath.allowTags 放行其 P 资格。
+    writeFileSync(
+      join(memDir, "mem-how.md"),
+      "# Mem\n\n## Style\n\n- 写记忆前先 view/search 查重 <!-- mem tags=+memory-system -->\n",
+    );
+    const REPLY = '{"tags":[{"id":"memory-system","p":1}]}';
+    const h = harness({
+      fail: "System One API error (451): blocked",
+      config: { fastPath: { allowTags: ["memory-system"], denyTags: [], cooldownMs: 24 * 3_600_000 } },
+    });
+    await goStatus(h, "partial");
+    // Turn 1：模型 timely 回复 memory-system（p=1 ⇒ 0.85 过门）⇒ 正常路径注入并落 pInjectedAt。
+    const p1 = h.promptNow(
+      "把这次会话里讨论过的记忆条目风格问题重新梳理一遍，对照现有条目把要改的都列出来，然后说说还有哪些细节要补充",
+    );
+    h.clock.advance(400);
+    h.model.resolve(0, { content: [{ type: "text", text: REPLY }] });
+    const r1 = await p1;
+    expect(r1?.message?.content).toContain("写记忆前先 view/search 查重");
+    expect(r1?.message?.details?.predict?.bypass).toBeUndefined(); // 正常路径，非 bypass
+    await flush(20); // recordPInjection fire-and-forget 落盘（pStamps overlay 本就同步生效）
+    // Turn 2：同 tag 再次过门（final 记录含 memory-system，证明被拦下的是条目
+    // 不是 tag），但唯一合格候选在冷却、tag 非高危 ⇒ 不触发 §6.4 出口 ⇒
+    // 零注入、零 bypass —— 冷却在正常路径照旧生效。
+    const p2 = h.promptNow(
+      "再把记忆条目的整理建议从头到尾过一遍，列出哪些条目需要合并或拆分，顺便给出你建议的先后顺序和理由",
+    );
+    h.clock.advance(400);
+    h.model.resolve(1, { content: [{ type: "text", text: REPLY }] });
+    const r2 = await p2;
+    expect(r2).toBeUndefined();
+    expect(h.sent).toHaveLength(0);
+    const finals = h.appended.filter((a) => a.customType === "subagent:memory-predict" && a.data?.kind === "final");
+    expect(finals.at(-1)?.data.tags.map((t: any) => t.tag)).toContain("memory-system");
   });
 });
 
