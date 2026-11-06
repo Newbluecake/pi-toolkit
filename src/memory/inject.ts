@@ -31,6 +31,7 @@
  */
 
 import { SKIP, type Live } from "../prompt-sections/stable-section.js";
+import { join } from "node:path";
 import type { SectionProviderInput, SectionRegistration } from "../sysprompt/hub.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
@@ -48,6 +49,20 @@ import { canonicalDir, listRegular } from "./safe-fs.js";
 import { accessFromTools, MetaCache, renderTiered, tieredFingerprint, TieredRenderCache } from "./tiered.js";
 import type { JevRenderInfo } from "./jev/contracts.js";
 import { stripInlineMeta } from "./jev/entries.js";
+// #36 P3 (arch §3.3.3/§3.4): layout dispatch — a blocks-format directory
+// renders through blocks/render.ts even under a tiered/legacy setting (the
+// data format wins); a files directory under layout:blocks still renders
+// tiered until migration (P2's session_start hook flips it).
+import { dirFormat, effectiveLayout } from "./blocks/naming.js";
+import {
+  corpusStampFingerprint,
+  renderBlocks,
+  residentRenderKey,
+  type RenderBlocksInput,
+  type RenderBlocksResult,
+} from "./blocks/render.js";
+import { readCorpus, type CorpusReaderState } from "./blocks/store.js";
+import { eligible } from "./govern/eligibility.js";
 
 export interface MemorySectionDeps {
   settings: MemorySettings; // 静态（Nit 7）
@@ -63,8 +78,16 @@ export interface MemorySectionDeps {
   /** Called for each non-frozen provider result so P5 can freeze the exact
    * tiered block that was last injected after a write. The third argument
    * (jev-plan J6) carries the static-core map Jev needs to skip entries that
-   * are already in the system prompt; `undefined` for the legacy layout. */
-  onRender?: (cwd: string, block: string | undefined, info: JevRenderInfo | undefined) => void;
+   * are already in the system prompt; `undefined` for the legacy layout.
+   * #36 P3 (arch §3.3.5): the fourth argument carries THIS render's resident
+   * `id → renderKey` map — blocks layout only; the legacy/tiered branches
+   * never pass it (existing 3-arg callbacks stay type-compatible). */
+  onRender?: (
+    cwd: string,
+    block: string | undefined,
+    info: JevRenderInfo | undefined,
+    resident?: ReadonlyMap<string, string>,
+  ) => void;
   /** jev on (jev-plan J6, jev-arch §8): strip `<!-- mem … -->` inline
    *  authority comments from the injected block. Settings-derived, constant
    *  within one activation; absent/false ⇒ byte-identical to before. */
@@ -225,11 +248,26 @@ function tieredPointerText(
   return `${changedPart} ${actionPartFor(access, memoryDirFor(cwd))}`;
 }
 
+/** `YYYY-MM-DD` local date — the blocks render cache key and the expiry
+ *  filter both rotate on it (arch §3.3.3: cross-midnight re-render). */
+function localTodayOf(nowMs: number): string {
+  const d = new Date(nowMs);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 interface TieredCaches {
   access: Map<string, MemoryAccess>;
   sessionStart: Map<string, number>;
   meta: MetaCache;
   render: TieredRenderCache;
+  /** #36 P3 blocks render cache: keyed by cwd, the value's key bundles
+   *  corpus fingerprint + LOCAL DATE + budget + session profile, so external
+   *  writes and midnight both invalidate (fingerprint = stamps of every block
+   *  file, §3.3.5). */
+  blocksRender: Map<string, { key: string; result: RenderBlocksResult }>;
+  /** Per-cwd no-lock reader states (arch §4.3.8) — survive session_start so
+   *  a mid-read rename returns the last good corpus. */
+  blocksReaders: Map<string, CorpusReaderState>;
 }
 
 /** `## Memory (<slug>)` is the stable prefix of the block's real first line
@@ -253,12 +291,46 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
   };
   let block: string | undefined;
   let info: JevRenderInfo | undefined;
+  let resident: ReadonlyMap<string, string> | undefined;
   let usedFrozen = false;
   if (deps.frozenBlocks.has(cwd)) {
     usedFrozen = true;
     // Frozen source (§5.5): may be a captured `undefined` (R3), which flows
     // to the same "nothing to inject" exit below.
     block = deps.frozenBlocks.get(cwd);
+  } else if (effectiveLayout(deps.settings.layout, dirFormat(memoryDirFor(cwd, deps.paths))) === "blocks") {
+    // #36 P3 blocks branch (arch §3.3.3): resident section + one-line topic
+    // index, straight from frontmatter. Cache key = corpus fingerprint +
+    // LOCAL DATE + budget + profile — never the wall clock, so an unchanged
+    // corpus renders byte-identically across turns. `jevIndex` stays absent
+    // here until P4 wires the blocks sidecar read (index falls back to
+    // section summaries meanwhile — a pure render input, not a Jev dep).
+    const today = localTodayOf(Date.now());
+    const memDir = memoryDirFor(cwd, deps.paths);
+    const realDir = join(memDir, "blocks");
+    // acceptance fix: STAT-only fingerprint heads the cache key — N unchanged
+    // turns cost N stat passes and ZERO body reads; the full `readCorpus`
+    // runs once per actual change (mtimeMs/ino flip) or date rollover.
+    const stamp = corpusStampFingerprint(realDir);
+    const key = `${stamp}:${today}:${deps.settings.residentBytes}:${deps.isChildSession ? "child" : "main"}`;
+    const hit = caches.blocksRender.get(cwd);
+    let result = hit !== undefined && hit.key === key ? hit.result : undefined;
+    if (result === undefined) {
+      const reader = caches.blocksReaders.get(cwd) ?? { warned: false };
+      caches.blocksReaders.set(cwd, reader);
+      const corpus = readCorpus(realDir, reader);
+      const input: RenderBlocksInput = {
+        slug: toSlug(cwd),
+        isChild: deps.isChildSession,
+        residentBytes: deps.settings.residentBytes,
+        today,
+      };
+      result = renderBlocks(corpus, input);
+      caches.blocksRender.set(cwd, { key, result });
+    }
+    block = result.text;
+    info = { omittedSections: [], coreInlined: false, residentBlocks: result.resident.map((b) => b.id) };
+    resident = new Map(result.resident.map((b) => [b.id, residentRenderKey(b, today)] as const));
   } else if (deps.settings.layout === "tiered") {
     // todo #22 optimize-plan §2 (P1): the tiered renderer. `access` is
     // computed once per session (§2.4's sticky rule — same tools mid-session
@@ -305,7 +377,7 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
   if (deps.stripInlineMeta === true && block !== undefined && INLINE_META_PROBE_RE.test(block)) {
     block = stripInlineMeta(block);
   }
-  if (!usedFrozen) deps.onRender?.(cwd, block, info);
+  if (!usedFrozen) deps.onRender?.(cwd, block, info, resident);
   return block ?? "";
 }
 
@@ -326,6 +398,8 @@ export function memorySection(deps: MemorySectionDeps): SectionRegistration {
     sessionStart: new Map(),
     meta: new MetaCache(),
     render: new TieredRenderCache(),
+    blocksRender: new Map(),
+    blocksReaders: new Map(),
   };
   // `wireMemory` (src/memory/index.ts) already does
   // `pi.on("session_start", () => frozenBlocks.clear())` for EVERY reason
@@ -372,14 +446,24 @@ export function memorySection(deps: MemorySectionDeps): SectionRegistration {
     // (never invoked under `mode:"legacy"`/zero-update golden scenarios
     // anyway, but kept literal out of caution for the frozen legacy golden);
     // tiered layout gets the dynamic "changed this session" hint.
-    pointerHint:
-      deps.settings.layout === "tiered"
-        ? (input: SectionProviderInput) => {
-            const cwd = resolveCwd(input);
-            const sessionKey = resolveSessionKey(input.ctx);
-            return tieredPointerText(deps, caches, cwd, sessionKey);
-          }
-        : "Use the memory tool (action: 'list') to read the current entries.",
+    // #36 P3 (v3 tool surface): a blocks-format directory points at
+    // `memory view` — the v3 read command — under ANY layout setting (the
+    // data format wins). Probed per call; tiered files-layout keeps its
+    // dynamic hint and legacy its ORIGINAL literal, byte-for-byte.
+    pointerHint: (input: SectionProviderInput) => {
+      try {
+        const cwd = resolveCwd(input);
+        if (effectiveLayout(deps.settings.layout, dirFormat(memoryDirFor(cwd, deps.paths))) === "blocks") {
+          return "Use the memory tool (action: 'view') to read the current entries.";
+        }
+        if (deps.settings.layout === "tiered") {
+          return tieredPointerText(deps, caches, cwd, resolveSessionKey(input.ctx));
+        }
+      } catch {
+        /* fall through to the legacy literal */
+      }
+      return "Use the memory tool (action: 'list') to read the current entries.";
+    },
     skipIf: (input) => {
       try {
         const slug = toSlug(resolveCwd(input));
@@ -411,6 +495,23 @@ export function renderExternalMemoryBlock(
   if (settings.childProfile === "none") return undefined;
   try {
     const dir = resolveWorktreeOrigin(cwd) ?? cwd;
+    // #36 P3 (arch §3.3.6 接入清单): a blocks-format directory renders the
+    // resident section + topic index through the blocks renderer (child
+    // audience口径), never the legacy inline branch. The §3.3.6 unified
+    // eligibility runs first — external is the egress-relevant layer, so
+    // private/secret/audience-mismatched blocks drop out of BOTH the resident
+    // set and the index counts before any byte is handed to the foreign run.
+    if (effectiveLayout(settings.layout, dirFormat(memoryDirFor(dir))) === "blocks") {
+      const today = localTodayOf(Date.now());
+      const corpus = readCorpus(join(memoryDirFor(dir), "blocks"));
+      const ctx = { today, isChild: true, ledger: new Set<string>(), layer: "external" as const };
+      const visible = corpus.blocks.filter((b) => eligible(b, undefined, ctx).ok);
+      const text = renderBlocks(
+        { ...corpus, blocks: visible },
+        { slug: toSlug(dir), isChild: true, residentBytes: settings.residentBytes, today },
+      ).text;
+      return text === "" ? undefined : text;
+    }
     if (settings.layout === "tiered") {
       const input: TieredRenderInput = {
         cwd: dir,

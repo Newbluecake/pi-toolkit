@@ -451,3 +451,103 @@ describe("ordinals", () => {
     ]);
   });
 });
+
+// ───────────────────────────── blocks branch (#36 P3, arch §3.2.5) ─────────────────────────────
+
+describe("EntryIndex blocks branch (#36 P3)", () => {
+  const BLOCK = (id: string, meta: readonly string[], body: string): string =>
+    [
+      "---",
+      "kind: block",
+      ...meta,
+      'created: "2026-01-01T00:00:00.000Z"',
+      'updated: "2026-01-02T00:00:00.000Z"',
+      "version: 1",
+      "---",
+      "",
+      body,
+      "",
+    ].join("\n");
+
+  function blocksFs(files: Record<string, string>): EntryIndexFs & { reads: Record<string, number> } {
+    const reads: Record<string, number> = {};
+    const stats = Object.fromEntries(
+      Object.entries(files).map(([name, text]) => [name, { name, size: text.length, mtimeMs: 1 }]),
+    );
+    let layout = true;
+    return {
+      reads,
+      list: () => [],
+      read: () => undefined,
+      blockLayout: () => layout,
+      listBlocks: () => Object.values(stats).sort((a, b) => (a.name < b.name ? -1 : 1)),
+      readBlock: (_dir, name) => {
+        reads[name] = (reads[name] ?? 0) + 1;
+        return files[name];
+      },
+    } as never;
+  }
+
+  it("one MemEntry per block file; heading from frontmatter; fileStatus active", () => {
+    const fs = blocksFs({
+      "general.001.md": BLOCK(
+        "general.001",
+        ["authority: user", "scope: global", "section: 核心规则", "heading: 验收 › 模型选择"],
+        "- always ask first",
+      ),
+      "quota.001.md": BLOCK("quota.001", ["authority: agent"], "- quota note"),
+      "NOTABLOCK.md": "plain text file",
+    });
+    const entries = new EntryIndex(fs).get("/mem");
+    expect(entries.map((e) => e.file)).toEqual(["general.001.md", "quota.001.md"]); // stray drops out
+    const g = entries[0]!;
+    expect(g.heading).toBe("验收 › 模型选择");
+    expect(g.section).toBe("核心规则");
+    expect(g.block).toMatchObject({ id: "general.001", scope: "global", status: "active" });
+    expect(g.fileStatus).toBe("active");
+    expect(g.authority).toBe("user");
+    expect(g.inline.scope).toBe("global");
+  });
+
+  it("fingerprint caching: unchanged files are never re-read; a changed file is", () => {
+    // ONE mutable seam: same counters, stats can be rewritten in place.
+    let body = "- v1";
+    const reads: Record<string, number> = {};
+    const stat = { name: "quota.001.md", size: Buffer.byteLength(body), mtimeMs: 1 };
+    const fs: EntryIndexFs = {
+      list: () => [],
+      read: () => undefined,
+      blockLayout: () => true,
+      listBlocks: () => [{ ...stat }],
+      readBlock: (_dir, name) => {
+        reads[name] = (reads[name] ?? 0) + 1;
+        return BLOCK("quota.001", [], body);
+      },
+    };
+    const index = new EntryIndex(fs);
+    const first = index.get("/mem");
+    expect(first.map((e) => e.body)).toEqual(["- v1"]);
+    index.get("/mem");
+    expect(reads["quota.001.md"]).toBe(1); // unchanged stat ⇒ no re-read
+    // rewrite the file: size changes ⇒ the fingerprint flips ⇒ re-read
+    body = "- v1 rewritten longer body";
+    stat.size = Buffer.byteLength(body);
+    const second = index.get("/mem");
+    expect(reads["quota.001.md"]).toBe(2);
+    expect(second.map((e) => e.body)).toEqual(["- v1 rewritten longer body"]); // content really updated
+  });
+
+  it("no blockLayout seam ⇒ the files branch is untouched (pre-#36 seams stay compatible)", () => {
+    let reads = 0;
+    const fs: EntryIndexFs = {
+      list: () => [{ name: "a.md", size: 4, mtimeMs: 1 }],
+      read: () => {
+        reads += 1;
+        return "- x\n";
+      },
+    };
+    const entries = new EntryIndex(fs).get("/mem");
+    expect(entries.map((e) => e.file)).toEqual(["a.md"]);
+    expect(reads).toBe(1);
+  });
+});

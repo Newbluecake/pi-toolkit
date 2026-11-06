@@ -1,0 +1,3 @@
+{
+  "report": "/mem doctor: 0 error · 3 warn · 0 info\n  [warn] D25 Auto-migration went over budget 3 times in a row — run /mem migrate explicitly.\n  [warn] D25 1 staging dir(s) missing owner.json — never auto-cleaned; remove by hand if stale.\n  [warn] D25 Rollback unfinished (hold.rollback.done=false) — the next /mem migrate continues it."
+}

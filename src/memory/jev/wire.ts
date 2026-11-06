@@ -66,6 +66,7 @@ import { clampSpanMs } from "../../core/deadline.js";
 import { resolveWorktreeOrigin } from "../../core/worktree-origin.js";
 import { createGitRunner, type GitRunner } from "../../git/run.js";
 import { readRegular } from "../safe-fs.js";
+import { toSlug } from "../paths.js";
 import type { MemorySettings } from "../settings.js";
 import { createJevClient, type JevClientHandle } from "./client.js";
 import { createJevCommandPort } from "./command-port.js";
@@ -175,6 +176,20 @@ import { createSegmentState, recallRecord, type BranchEntryLike, type SegmentSta
 import { parseShell, type ParseShellResult } from "./shell-parse.js";
 import { tagBulk, taggableEntries, tagOne } from "./tagging.js";
 import { mergeTaxonomy } from "./taxonomy.js";
+// #36 P3 (arch §3.3.5/§3.3.6): blocks-layout residency — snapshot+ledger R
+// layer, the unified eligibility verdict, and the blocks corpus/rev probes.
+import { join } from "node:path";
+import {
+  corpusStampFingerprint,
+  parseResidentSection,
+  renderBlocks,
+  residentBlocksOf,
+  residentEntryText,
+  residentRenderKey,
+} from "../blocks/render.js";
+import { readCorpus, type BlockCorpus } from "../blocks/store.js";
+import { eligible, type EligibilityLayer } from "../govern/eligibility.js";
+import { parseBlockFile, type ParsedBlock } from "../blocks/format.js";
 
 // ───────────────────────────── constants (jev-arch §5.5) ─────────────────────────────
 
@@ -264,6 +279,13 @@ export interface WireJevDeps {
   /** memory-predict plan §2.1 signal T — absent ⇒ todo treated as empty
    *  (P1b degrades gracefully when `todo.enabled` is off). */
   readonly todo?: JevTodoPort;
+  /** #36 P3 (arch §3.3.5): read the hub's persisted `pi_project_memory`
+   *  state — `{ snapshot, stale }`. Production wiring lands in P4
+   *  (`src/memory/index.ts` passes `sections._state`); while absent the R
+   *  layer falls back to THIS turn's provider output (wire re-renders the
+   *  blocks corpus with the same renderer, byte-identical for an unchanged
+   * corpus). Blocks layout is not production until P5b flips the default. */
+  readonly getSectionSnapshot?: () => { snapshot: string | undefined; stale: boolean } | undefined;
   // ── seams (tests; production uses the defaults) ──
   readonly now?: () => number;
   readonly clock?: Clock;
@@ -306,15 +328,24 @@ export function passesPromptGate(stripped: string): boolean {
 
 /** Static-core verdict (§6.1.1, review #10): an entry of the primary core
  *  file whose `## ` section was NOT omitted is already in the system prompt.
- *  Never rendered yet, or core not inlined (L4/L5 demotion) ⇒ not static. */
+ *  Never rendered yet, or core not inlined (L4/L5 demotion) ⇒ not static.
+ *  #36 P3 (arch §3.3.4): blocks layout — `residentBlocks` (the §3.3.5 ledger
+ *  ids) replaces the primary/omitted machinery entirely; compare block ids,
+ *  never `entry.file`. */
 export function isStaticCore(entry: MemEntry, info: JevRenderInfo | undefined): boolean {
+  if (info?.residentBlocks !== undefined) {
+    return info.residentBlocks.includes(entry.block?.id ?? "");
+  }
   if (info === undefined || !info.coreInlined || info.primary === undefined) return false;
   if (entry.file !== info.primary) return false;
   return !info.omittedSections.includes(entry.section);
 }
 
-/** Display anchor, e.g. `pitfalls-git › #3` / `core › Rules #2`. */
+/** Display anchor, e.g. `pitfalls-git › #3` / `core › Rules #2`.
+ *  #36 P3 (arch §4.2): block entries anchor on the block id itself — the
+ *  model can act on it directly (`memory view quota.007`). */
 export function entryAnchor(entry: MemEntry): string {
+  if (entry.block !== undefined) return entry.block.id;
   const stem = entry.file.replace(/\.md$/, "");
   return entry.heading === undefined || entry.heading === ""
     ? `${stem} › #${entry.ordinal}`
@@ -448,6 +479,9 @@ interface Pick {
   readonly modified?: boolean;
   /** S state-constraint pick (§3.4) — rendered with the「（发版进行中）」note. */
   readonly releaseInProgress?: boolean;
+  /** #36 P3 (arch §3.3.5): the block rev recorded at SELECTION time; the
+   *  async U/E/P commits drop picks whose rev changed while waiting. */
+  readonly rev?: string;
 }
 
 /** Cap by count and cumulative body bytes; the first pick always survives
@@ -873,10 +907,12 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const dir = deps.dirFor(cwd);
     if (dir === undefined) {
       dataCache.clear();
+      blocksCorpusCache.clear();
       return;
     }
     dataCache.delete(dir);
     entryIndex.invalidate(dir);
+    blocksCorpusCache.delete(dir);
   };
   deps.onAfterWriteHook((cwd) => {
     try {
@@ -885,6 +921,89 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       /* never break the write path */
     }
   });
+
+  // ───────── #36 P3 blocks corpus + residency (arch §3.3.5/§3.3.6) ─────────
+
+  /** Blocks corpus cache gated by the STAT-ONLY fingerprint (acceptance
+   *  fix: every turn used to re-read every body + hash the legacy root).
+   *  `corpusStampFingerprint` stats name/size/mtimeMs/ino of `blocks/*.md`
+   *  and nothing else; the expensive `readCorpus` (body parse + legacy
+   *  drift hash) runs ONCE per actual change. Reads are lock-free (store.ts
+   *  §4.3.8 reader rules still apply inside that one read). */
+  const blocksCorpusCache = new Map<string, { stamp: string; corpus: BlockCorpus }>();
+  const blocksCorpusFor = (dir: string): BlockCorpus => {
+    const realDir = join(dir, "blocks");
+    let stamp: string;
+    try {
+      stamp = `${corpusStampFingerprint(realDir)}\u0000${localToday(now())}`;
+    } catch {
+      stamp = `unreadable\u0000${now()}`; // stat trouble ⇒ read once, don't cache
+    }
+    const hit = blocksCorpusCache.get(dir);
+    if (hit !== undefined && hit.stamp === stamp) return hit.corpus;
+    const corpus = readCorpus(realDir);
+    blocksCorpusCache.set(dir, { stamp, corpus });
+    return corpus;
+  };
+
+  /** One R-layer ledger per memory dir (I4: closure state). */
+  interface ResidentState {
+    recomputeKey: string;
+    snapshotKey: string;
+    want: Map<string, { key: string; block: ParsedBlock }>;
+    ledger: Map<string, string>;
+    restored: boolean;
+  }
+  const residentStates = new Map<string, ResidentState>();
+
+  const ledgerOf = (dir: string): ReadonlySet<string> => new Set(residentStates.get(dir)?.ledger.keys() ?? []);
+
+  /** Selection-time eligibility for a MemEntry: files-layout entries (no
+   *  `block`) keep their existing predicates untouched; block entries run
+   * the unified verdict. A block that vanished from `blocks/` mid-cache is
+   *  ineligible (the next corpus refresh drops it). */
+  const entryEligible = (e: MemEntry, dir: string, layer: EligibilityLayer): boolean => {
+    if (e.block === undefined) return true;
+    const parsed = blocksCorpusFor(dir).blocks.find((b) => b.id === e.block?.id);
+    if (parsed === undefined) return false;
+    // `tags` is reserved for the P6b audience inference path (arch §3.3.6
+    // signature); the verdict itself does not consult it yet.
+    return eligible(parsed, undefined, {
+      today: localToday(now()),
+      isChild: isChild,
+      ledger: ledgerOf(dir),
+      layer,
+    }).ok;
+  };
+
+  /** Commit-time recheck (arch §3.3.6 两处校验 + §3.3.5 异步 rev 丢弃),
+   *  reading ONLY the picked block's file (acceptance fix: no full-corpus
+   *  re-read per pick): existence, rev, then the unified verdict against
+   *  the fresh parse. */
+  const commitEligible = (e: MemEntry, dir: string, layer: EligibilityLayer, rev: string | undefined): boolean => {
+    if (e.block === undefined) return true;
+    const name = `${e.block.id}.md`;
+    let raw: string | undefined;
+    try {
+      raw = readRegular(join(dir, "blocks"), name).text;
+    } catch {
+      return false; // deleted / rolled back mid-wait
+    }
+    const parsed = parseBlockFile(name, raw);
+    if ("stray" in parsed) return false;
+    if (rev !== undefined && parsed.rev !== rev) return false;
+    return eligible(parsed, undefined, {
+      today: localToday(now()),
+      isChild: isChild,
+      ledger: ledgerOf(dir),
+      layer,
+    }).ok;
+  };
+
+  const parsedRevOf = (e: MemEntry, dir: string): string | undefined => {
+    if (e.block === undefined) return undefined;
+    return blocksCorpusFor(dir).blocks.find((b) => b.id === e.block?.id)?.rev;
+  };
 
   // ───────── status ─────────
 
@@ -1154,6 +1273,151 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
 
   // ───────── message building ─────────
 
+  /** #36 P3 (arch §3.3.4): `JevRenderInfo.residentBlocks` = the §3.3.5
+   *  LEDGER ids (what the model has been told), never this turn's render —
+   *  overlay it on whatever the onRender callback recorded. */
+  const renderInfoFor = (cwd: string): JevRenderInfo | undefined => {
+    const info = deps.getRenderInfo(cwd);
+    const dir = safeDirFor(cwd);
+    const rs = dir === undefined ? undefined : residentStates.get(dir);
+    if (rs === undefined) return info;
+    return {
+      ...(info ?? { omittedSections: [], coreInlined: false }),
+      residentBlocks: [...rs.ledger.keys()],
+    };
+  };
+
+  const safeDirFor = (cwd: string): string | undefined => {
+    try {
+      return deps.dirFor(cwd);
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** R-layer removal reason (arch §3.3.5 差分表). */
+  const residentRemoveWhy = (corpus: BlockCorpus, id: string): string => {
+    const b = corpus.blocks.find((x) => x.id === id);
+    if (b === undefined) return "已删除或已归档";
+    if (b.meta.supersededBy !== undefined) return `已取代 → 见 ${b.meta.supersededBy}`;
+    if (b.meta.authority !== "user" || (b.meta.scope ?? "topic") !== "global") return "降为 topic";
+    return "受众不符";
+  };
+
+  /** #36 P3 R layer (arch §3.3.5, r5 裁定 8): snapshot + ledger 差分，每轮
+   *  before_agent_start 重算判定 = (corpusFingerprint, today, snapshotKey)。
+   *  snapshot 取 hub 持久化文本（P4 接线 getSectionSnapshot）；未接线或
+   *  stale 时用本轮 provider 输出（同一渲染器重算，字节一致）。通知经
+   *  sendMessage(triggerTurn:false) 下发——与 hub 尾部更新同延迟量级，
+   *  送达后 ledger 即视为已告知（并集无遗漏）。 */
+  const residentTurn = (cwd: string, ctx: ExtensionContext): void => {
+    try {
+      const dir = safeDirFor(cwd);
+      if (dir === undefined) return;
+      // acceptance fix: the stat-only fingerprint inside blocksCorpusFor gates
+      // the body reads — N unchanged turns cost N stat passes, zero reads.
+      const corpus = blocksCorpusFor(dir);
+      if (corpus.blocks.length === 0 && corpus.archivedByTopic.size === 0) {
+        residentStates.delete(dir);
+        return;
+      }
+      const today = localToday(now());
+      const fallback = renderBlocks(corpus, {
+        slug: toSlug(cwd),
+        isChild: isChild,
+        residentBytes: deps.settings.residentBytes,
+        today,
+      }).text;
+      const hubState = (() => {
+        try {
+          return deps.getSectionSnapshot?.();
+        } catch {
+          return undefined;
+        }
+      })();
+      const snapshotText =
+        hubState !== undefined && !hubState.stale && hubState.snapshot !== undefined ? hubState.snapshot : fallback;
+      const snapshotKey = createHash("sha1").update(snapshotText, "utf8").digest("hex");
+      const wantBlocks = residentBlocksOf(corpus.blocks, { isChild, today }).filter(
+        (b) => eligible(b, undefined, { today, isChild, ledger: ledgerOf(dir), layer: "R" }).ok,
+      );
+      const want = new Map(wantBlocks.map((b) => [b.id, { key: residentRenderKey(b, today), block: b }] as const));
+      const recomputeKey = `${corpus.fingerprint}\u0000${today}\u0000${snapshotKey}`;
+      let st = residentStates.get(dir);
+      if (st === undefined || st.recomputeKey !== recomputeKey) {
+        const snapshotMap = parseResidentSection(snapshotText);
+        const ledger = st === undefined || st.snapshotKey !== snapshotKey ? new Map(snapshotMap) : new Map(st.ledger);
+        st = { recomputeKey, snapshotKey, want, ledger, restored: st?.restored ?? false };
+        residentStates.set(dir, st);
+      } else {
+        st.want = want;
+      }
+      // resume/reload/tree: restore the ledger from the newest R message on
+      // the branch carrying the SAME snapshotKey (arch §3.3.5 恢复).
+      if (!st.restored) {
+        st.restored = true;
+        const branch = branchOf(ctx);
+        if (branch !== undefined) {
+          for (let i = branch.length - 1; i >= 0; i--) {
+            const e = branch[i] as
+              | {
+                  type?: string;
+                  customType?: unknown;
+                  details?: { layer?: unknown; resident?: { snapshotKey?: unknown; ledger?: unknown } };
+                }
+              | undefined;
+            if (e?.type !== "custom_message" || e.customType !== MEMORY_INJECT_CUSTOM_TYPE) continue;
+            const d = e.details;
+            if (d === undefined || d.layer !== "R" || d.resident === undefined) continue;
+            if (d.resident.snapshotKey !== snapshotKey || !Array.isArray(d.resident.ledger)) continue;
+            const restored = new Map<string, string>();
+            for (const pair of d.resident.ledger as unknown[]) {
+              if (Array.isArray(pair) && typeof pair[0] === "string" && typeof pair[1] === "string")
+                restored.set(pair[0], pair[1]);
+            }
+            st.ledger = restored;
+            break;
+          }
+        }
+      }
+      const adds: ParsedBlock[] = [];
+      const changes: ParsedBlock[] = [];
+      const removes: { id: string; why: string }[] = [];
+      for (const [id, w] of st.want) {
+        const prev = st.ledger.get(id);
+        if (prev === undefined) adds.push(w.block);
+        else if (prev !== w.key) changes.push(w.block);
+      }
+      for (const id of st.ledger.keys()) if (!st.want.has(id)) removes.push({ id, why: residentRemoveWhy(corpus, id) });
+      if (adds.length + changes.length + removes.length > 0) {
+        const lines = [
+          ...adds.map((b) => `- 新增 ${b.id}：${residentEntryText(b, today)}`),
+          ...changes.map((b) => `- 已变更 ${b.id}（以此为准）：${residentEntryText(b, today)}`),
+          ...removes.map((r) => `- 已移除 ${r.id}（${r.why}）`),
+        ];
+        for (const b of [...adds, ...changes]) {
+          const w = st.want.get(b.id);
+          if (w !== undefined) st.ledger.set(b.id, w.key);
+        }
+        for (const r of removes) st.ledger.delete(r.id);
+        send({
+          customType: MEMORY_INJECT_CUSTOM_TYPE,
+          content: `[memory · R] 常驻规则已变更（以此为准）：\n${lines.join("\n")}`,
+          display: true,
+          details: {
+            v: 1,
+            layer: "R",
+            trigger: "resident",
+            items: [],
+            resident: { snapshotKey, ledger: [...st.ledger.entries()] },
+          },
+        });
+      }
+    } catch (err) {
+      log(`resident turn failed: ${String((err as Error)?.message ?? err)}`);
+    }
+  };
+
   const buildMessage = (
     layer: InjectLayer,
     fitted: readonly { pick: Pick; body: string }[],
@@ -1192,16 +1456,23 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   };
 
   /** Dedup + cap + durable record, then the message (or undefined when
-   *  nothing survived). */
+   *  nothing survived). #36 P3: `opts.cwd` enables the commit-time recheck
+   *  (arch §3.3.6 两处校验) — fresh corpus eligibility + async rev guard —
+   *  which drops block picks that were superseded/deleted/expired/demoted
+   *  (or rewritten while an async layer was waiting) between selection and
+   *  this commit. */
   const commit = (
     layer: InjectLayer,
     picks: readonly Pick[],
     maxEntries: number,
     maxBytes: number,
     trigger: string,
-    opts: { model?: string; partial?: boolean; bFor?: string } = {},
+    opts: { model?: string; partial?: boolean; bFor?: string; cwd?: string } = {},
   ): InjectMessage | undefined => {
-    const fresh = picks.filter((p) => !segment.isInjected(p.entry.hash));
+    const recheckDir = opts.cwd !== undefined ? safeDirFor(opts.cwd) : undefined;
+    const survived =
+      recheckDir === undefined ? picks : picks.filter((p) => commitEligible(p.entry, recheckDir, layer, p.rev));
+    const fresh = survived.filter((p) => !segment.isInjected(p.entry.hash));
     const fitted = fitPicks(fresh, maxEntries, maxBytes);
     if (fitted.length === 0) return undefined;
     const accepted = new Set(
@@ -1251,19 +1522,25 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     query: string,
     predicted?: ReadonlyMap<string, number>,
   ): { cands: RecallCandidate[]; entries: Map<string, MemEntry> } => {
-    const info = deps.getRenderInfo(cwd);
-    const eligible = c.entries.filter(
-      (e) => e.inline.isPrivate !== true && !e.secret && !segment.isInjected(e.hash) && !isStaticCore(e, info),
+    const info = renderInfoFor(cwd);
+    const dir = safeDirFor(cwd);
+    const eligiblePool = c.entries.filter(
+      (e) =>
+        e.inline.isPrivate !== true &&
+        !e.secret &&
+        !segment.isInjected(e.hash) &&
+        !isStaticCore(e, info) &&
+        (dir === undefined || entryEligible(e, dir, "U")),
     );
-    let pool = eligible;
-    if (eligible.length > RECALL_MAX_CANDIDATES) {
+    let pool = eligiblePool;
+    if (eligiblePool.length > RECALL_MAX_CANDIDATES) {
       // §5.4 优先入池：带预测 tag（score ≥0.5）的条目最多保留 40 槽（排序
       // 用户令 → max p × importance → file），其余 320 槽交给现有 prefilter
       // （tieBreak 仍是 user-first），两段合并后按 hash 去重。
       let priorityEntries: MemEntry[] = [];
       if (predicted !== undefined && predicted.size > 0) {
         const prio: { entry: MemEntry; cand: PriorityCandidate }[] = [];
-        for (const e of eligible) {
+        for (const e of eligiblePool) {
           const record = c.index.entries[e.hash];
           const meta = effectiveMeta(e, record, c.taxonomy);
           let p = 0;
@@ -1290,7 +1567,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       }
       const priorityHashes = new Set(priorityEntries.map((e) => e.hash));
       const rest = prefilter(
-        eligible.filter((e) => !priorityHashes.has(e.hash)),
+        eligiblePool.filter((e) => !priorityHashes.has(e.hash)),
         (e) => e.body,
         query,
         RECALL_MAX_CANDIDATES - priorityEntries.length,
@@ -1304,7 +1581,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         merged.push(e);
       }
       pool = merged;
-      truncated = { from: eligible.length, to: pool.length };
+      truncated = { from: eligiblePool.length, to: pool.length };
     } else {
       truncated = undefined;
     }
@@ -1424,6 +1701,12 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     // work stays bounded either way: askAll's budget + settle's waitMs (I1).
     if (opts.deferCommit !== true) recallAbort = controller;
     const gen = ++generation;
+    const dir = safeDirFor(cwd);
+    // #36 P3: record every candidate's block rev at SELECTION time (before
+    // the classifier wait) — the commit-time recheck drops picks whose rev
+    // changed while we waited (arch §3.3.5 异步结果).
+    const revsById = new Map<string, string | undefined>();
+    for (const [id, e] of byId) revsById.set(id, dir === undefined ? undefined : parsedRevOf(e, dir));
     const work = (async (): Promise<(() => InjectMessage | undefined) | undefined> => {
       const res = await askAll("recall", reg, state, questions, RECALL_BUDGET_MS, controller.signal);
       if (res === undefined) return undefined;
@@ -1431,10 +1714,12 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       const picks: Pick[] = [];
       for (const d of decided) {
         const entry = byId.get(d.id);
-        if (entry !== undefined) picks.push({ entry, p: d.p });
+        const rev = revsById.get(d.id);
+        if (entry !== undefined) picks.push({ entry, p: d.p, ...(rev === undefined ? {} : { rev }) });
       }
       if (picks.length === 0) return undefined;
-      return () => commit("U", picks, config.recall.maxEntries, config.recall.maxBytes, "user", { model: res.model });
+      return () =>
+        commit("U", picks, config.recall.maxEntries, config.recall.maxBytes, "user", { model: res.model, cwd });
     })();
     return settle(work, gen, controller, config.recall.waitMs, opts.deferCommit === true);
   };
@@ -1467,8 +1752,10 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     // 集合且与失败命令 hitTags 无交集的块从候选池剔除（动作类条目对无关
     // 失败只可能是撞词）；pending 条目无标签，不适用此剔除。
     const highRiskTagIds = new Set(c.taxonomy.tags.filter((t) => t.risk === "high").map((t) => t.id));
+    const dir = safeDirFor(input.cwd);
     let pool = c.entries.filter((e) => {
       if (e.inline.isPrivate === true || e.secret || segment.isInjected(e.hash)) return false;
+      if (dir !== undefined && !entryEligible(e, dir, "E")) return false;
       const meta = effectiveMeta(e, c.index.entries[e.hash], c.taxonomy);
       // Pending entries (no sidecar record yet) have no known type — they stay
       // candidates rather than being silently excluded (untagged corpora
@@ -1485,6 +1772,8 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     });
     if (pool.length === 0) return undefined;
     if (pool.length > E_MAX_CANDIDATES) pool = prefilter(pool, (e) => e.body, input.errorText, E_MAX_CANDIDATES);
+    // #36 P3: revs recorded at selection time (before the classifier wait).
+    const revsAtSelection = pool.map((e) => (dir === undefined ? undefined : parsedRevOf(e, dir)));
     errorSignatures.add(signature);
     errorAsks += 1;
     const cands: ErrorCandidate[] = pool.map((e, i) => {
@@ -1511,10 +1800,11 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       for (const d of decideErrorRecall(res.answers, cands)) {
         const idx = cands.findIndex((x) => x.id === d.id);
         const entry = pool[idx];
-        if (entry !== undefined) picks.push({ entry, p: d.p });
+        const rev = revsAtSelection[idx];
+        if (entry !== undefined) picks.push({ entry, p: d.p, ...(rev === undefined ? {} : { rev }) });
       }
       if (picks.length === 0) return undefined;
-      return () => commit("E", picks, 2, config.recall.maxBytes, input.tool, { model: res.model });
+      return () => commit("E", picks, 2, config.recall.maxBytes, input.tool, { model: res.model, cwd: input.cwd });
     })();
   };
 
@@ -1539,11 +1829,15 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const c = corpusFor(cwd);
     segment.markReinjected(pending.compactionId);
     if (c === undefined) return undefined;
+    const dir = safeDirFor(cwd);
     const picks: Pick[] = [];
     for (const hash of pending.hashes) {
       const same = c.entries.find((e) => e.hash === hash);
       if (same !== undefined) {
-        if (same.inline.isPrivate !== true) picks.push({ entry: same });
+        // #36 P3 (arch §3.3.6): B-layer re-found entries re-run the unified
+        // eligibility — a block superseded during compaction drops out.
+        if (same.inline.isPrivate !== true && (dir === undefined || entryEligible(same, dir, "B")))
+          picks.push({ entry: same });
         continue;
       }
       const a = anchors.get(hash);
@@ -1551,9 +1845,18 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       const moved = c.entries.find(
         (e) => e.file === a.file && e.section === a.section && e.heading === a.heading && e.ordinal === a.ordinal,
       );
-      if (moved !== undefined && moved.inline.isPrivate !== true) picks.push({ entry: moved, modified: true });
+      if (
+        moved !== undefined &&
+        moved.inline.isPrivate !== true &&
+        (dir === undefined || entryEligible(moved, dir, "B"))
+      )
+        picks.push({ entry: moved, modified: true });
     }
-    return commit("B", picks, 3, A_MAX_BYTES, "compaction", { bFor: pending.compactionId, partial: allowed.partial });
+    return commit("B", picks, 3, A_MAX_BYTES, "compaction", {
+      bFor: pending.compactionId,
+      partial: allowed.partial,
+      cwd,
+    });
   };
 
   const onCompaction = (compactionId: string, cwd: string): void => {
@@ -1656,10 +1959,12 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const eligible = fastPathEligibleTags(c.taxonomy);
     const hit = new Set(hits.filter((t) => eligible.has(t)));
     if (hit.size === 0) return;
-    const info = deps.getRenderInfo(cwd);
+    const info = renderInfoFor(cwd);
+    const dir = safeDirFor(cwd);
     const scored: { pick: Pick; score: number }[] = [];
     for (const e of c.entries) {
       if (e.inline.isPrivate === true || segment.isInjected(e.hash) || isStaticCore(e, info)) continue;
+      if (dir !== undefined && !entryEligible(e, dir, "A")) continue;
       const record = c.index.entries[e.hash];
       const meta = effectiveMeta(e, record, c.taxonomy);
       const shared = meta.tags.filter((t) => hit.has(t));
@@ -1688,6 +1993,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       event.toolName,
       {
         ...(allowed.partial ? { partial: true } : {}),
+        cwd,
       },
     );
     if (m !== undefined) {
@@ -1787,12 +2093,17 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     c: Corpus,
     cwd: string,
   ): { pCands: PredictCandidate[]; sCands: SCandidate[]; byHash: Map<EntryHash, MemEntry> } => {
-    const info = deps.getRenderInfo(cwd);
+    const info = renderInfoFor(cwd);
+    const dir = safeDirFor(cwd);
     const byHash = new Map<EntryHash, MemEntry>();
     const pCands: PredictCandidate[] = [];
     const sCands: SCandidate[] = [];
     for (const e of c.entries) {
       if (e.inline.isPrivate === true || e.secret || segment.isInjected(e.hash) || isStaticCore(e, info)) continue;
+      // #36 P3: the unified eligibility runs per layer shape — P for the
+      // scored candidates, S for the release-state constraint.
+      if (dir !== undefined && !entryEligible(e, dir, "P")) continue;
+      if (dir !== undefined && !entryEligible(e, dir, "S")) continue;
       byHash.set(e.hash, e);
       const record = c.index.entries[e.hash];
       const meta = effectiveMeta(e, record, c.taxonomy);
@@ -1864,6 +2175,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
    *  even when the turn's carry resolves to "empty". */
   const commitPredictParts = (r0: PredictR0, tags: readonly TagScore[], origin: string): PredictCommit => {
     const { c, cwd, partial, result, hits, cancelled, todoReplaced, hadCarryBefore, revalidatedCarry } = r0;
+    const dir = safeDirFor(cwd);
     const tagsWithEvidence = tags.map((t) => ({ ...t, evidence: evidenceForTag(hits, t.tag) }));
     const clearedReason = detectCarryClear({
       cancelled,
@@ -1896,17 +2208,21 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       const usedBytes = selected.reduce((sum, s) => sum + s.byteLength, 0);
       const sSelected = selectSEntry(result.state, sCands, Math.max(0, config.predict.maxBytes - usedBytes));
       const picks: Pick[] = [];
+      const revOf = (e: MemEntry): string | undefined => (dir === undefined ? undefined : parsedRevOf(e, dir));
       for (const s of selected) {
         const e = byHash.get(s.hash);
-        if (e !== undefined) picks.push({ entry: e });
+        const rev = e === undefined ? undefined : revOf(e);
+        if (e !== undefined) picks.push({ entry: e, ...(rev === undefined ? {} : { rev }) });
       }
       if (sSelected !== undefined) {
         const e = byHash.get(sSelected.hash);
-        if (e !== undefined) picks.push({ entry: e, releaseInProgress: true });
+        const rev = e === undefined ? undefined : revOf(e);
+        if (e !== undefined) picks.push({ entry: e, releaseInProgress: true, ...(rev === undefined ? {} : { rev }) });
       }
       if (picks.length > 0) {
         message = commit("P", picks, picks.length, config.predict.maxBytes, "predict", {
           ...(partial ? { partial: true } : {}),
+          cwd,
         });
         if (message !== undefined) recordPInjection(c, message);
       }
@@ -2261,6 +2577,10 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       recallAbort?.abort();
       if (config.predict.enabled) rotateRecentTools();
       seedFrom(ctx);
+      // #36 P3 R layer (arch §3.3.5): runs on EVERY before_agent_start turn
+      // (custom/wake turns included) BEFORE the recall layers — the ledger it
+      // maintains feeds `renderInfoFor`'s residentBlocks exclusion below.
+      residentTurn(cwd, ctx);
       const b = reinject(cwd);
       if (b !== undefined) send(b);
       if (event.messageType === "custom") {
@@ -2459,6 +2779,10 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         errorAsks = 0;
         parsedCache.clear();
         dataCache.clear();
+        // #36 P3: a resume/reload reentry re-reads the ledger from the
+        // branch on the next turn (arch §3.3.5 恢复) — reset the restored
+        // flags so residentTurn rescans instead of trusting in-memory state.
+        for (const st of residentStates.values()) st.restored = false;
         bgAbort = new AbortController();
         seedFrom(ctx);
         if (reg === undefined) return; // off(pi-api)
@@ -2534,6 +2858,10 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       // single-layer line; a plain (pre-P1) message has no `parts` and keeps
       // the original rendering byte-identical.
       const parts = d.parts;
+      // #36 P3: R notices carry no items — render the one-line marker.
+      if (d.layer === "R" && !Array.isArray(parts)) {
+        return new Text(theme.fg("dim", "[memory · R] resident rules changed"), padX, 0);
+      }
       const line = Array.isArray(parts)
         ? formatInjectMarkerParts(
             parts.map((part: MemoryInjectPartV1) => ({

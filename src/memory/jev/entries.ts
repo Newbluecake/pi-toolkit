@@ -8,12 +8,22 @@
 // tests/memory/jev/entries.test.ts.
 
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { frontmatterSource, parseFrontmatter, stripLeadingDriftHeader } from "../frontmatter.js";
 import { parseMemoryMeta } from "../meta.js";
 import { listRegular, readRegular } from "../safe-fs.js";
 import { looksSecret } from "../secret-patterns.js";
 import { INLINE_META_MAX_BYTES, type EntryHash, type InlineMeta, type MemEntry } from "./contracts.js";
 import { namedPrograms } from "./match.js";
+// #36 P3: the blocks branch of EntryIndex projects each block file into one
+// MemEntry via blocks/adapter.ts. That module imports entryHash/
+// normalizeBody from THIS file — a deliberate module cycle of function
+// declarations only (no top-level evaluation on either side), which ESM
+// live bindings resolve safely in both load orders (root ruling 2026-11-06;
+// pinned by tests/memory/blocks/cycle-order.test.ts).
+import { blockToEntry } from "../blocks/adapter.js";
+import { parseBlockFile } from "../blocks/format.js";
+import { dirFormat } from "../blocks/naming.js";
 
 // ───────────────────────────── normalization & hashing ─────────────────────────────
 
@@ -545,10 +555,21 @@ export interface EntryIndexStat {
 }
 
 /** Injectable fs seam so tests can count reads (fingerprint pinning). The
- *  default lists `*.md` via node:fs and never throws. */
+ *  default lists `*.md` via node:fs and never throws.
+ *
+ *  #36 P3 blocks branch: `blockLayout`/`listBlocks`/`readBlock` are optional
+ *  so every pre-#36 injected seam (list/read only) keeps behaving exactly as
+ *  before — a missing `blockLayout` reads as "not a blocks directory". */
 export interface EntryIndexFs {
   list(dir: string): readonly EntryIndexStat[];
   read(dir: string, name: string): string | undefined;
+  /** Layout probe for `dir` (the memDir): true ⇒ `dir/blocks/` holds the
+   *  corpus. Default impl: `dirFormat(dir) === "blocks"`. */
+  blockLayout?(dir: string): boolean;
+  /** Stats of `<dir>/blocks/*.md` (same `names: "legacy"` rule readCorpus
+   *  uses — archive names included). */
+  listBlocks?(dir: string): readonly EntryIndexStat[];
+  readBlock?(dir: string, name: string): string | undefined;
 }
 
 class DefaultEntryIndexFs implements EntryIndexFs {
@@ -567,6 +588,30 @@ class DefaultEntryIndexFs implements EntryIndexFs {
   read(dir: string, name: string): string | undefined {
     try {
       return readRegular(dir, name).text;
+    } catch {
+      return undefined;
+    }
+  }
+  blockLayout(dir: string): boolean {
+    try {
+      return dirFormat(dir) === "blocks";
+    } catch {
+      return false;
+    }
+  }
+  listBlocks(dir: string): readonly EntryIndexStat[] {
+    try {
+      const { files } = listRegular(join(dir, "blocks"), { names: "legacy" });
+      return files
+        .map((f) => ({ name: f.name, size: f.size, mtimeMs: f.mtimeMs }))
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    } catch {
+      return [];
+    }
+  }
+  readBlock(dir: string, name: string): string | undefined {
+    try {
+      return readRegular(join(dir, "blocks"), name).text;
     } catch {
       return undefined;
     }
@@ -591,6 +636,9 @@ export class EntryIndex {
   }
 
   get(dir: string): readonly MemEntry[] {
+    // #36 P3 blocks branch (arch §3.2.5/§3.3): a blocks directory projects
+    // exactly one MemEntry per block file (fileStatus always "active").
+    if (this.isBlockLayout(dir)) return this.getBlocks(dir);
     const cached = this.cache.get(dir);
     const stats = this.fs.list(dir);
     if (cached !== undefined) {
@@ -623,6 +671,55 @@ export class EntryIndex {
   invalidate(dir?: string): void {
     if (dir === undefined) this.cache.clear();
     else this.cache.delete(dir);
+  }
+
+  private isBlockLayout(dir: string): boolean {
+    try {
+      return this.fs.blockLayout?.(dir) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Blocks-branch twin of `get`: same name+size+mtime fingerprint caching,
+   *  but every changed file re-parses as ONE block entry (strays produce
+   *  none — doctor D23 reports them; blocks never split further). */
+  private getBlocks(dir: string): readonly MemEntry[] {
+    const stats = this.fs.listBlocks?.(dir) ?? [];
+    const cached = this.cache.get(dir);
+    if (cached !== undefined) {
+      let changed = stats.length !== cached.files.size;
+      const next = new Map<string, CachedFile>();
+      for (const stat of stats) {
+        const prev = cached.files.get(stat.name);
+        const fp = `${stat.name}:${stat.size}:${stat.mtimeMs}`;
+        if (prev !== undefined && prev.fp === fp) {
+          next.set(stat.name, prev);
+        } else {
+          changed = true;
+          next.set(stat.name, this.splitBlockFile(dir, stat.name, fp));
+        }
+      }
+      if (!changed) return cached.entries;
+      const entries = [...next.values()].flatMap((f) => [...f.entries]);
+      this.cache.set(dir, { files: next, entries });
+      return entries;
+    }
+    const files = new Map<string, CachedFile>();
+    for (const stat of stats) {
+      files.set(stat.name, this.splitBlockFile(dir, stat.name, `${stat.name}:${stat.size}:${stat.mtimeMs}`));
+    }
+    const entries = [...files.values()].flatMap((f) => [...f.entries]);
+    this.cache.set(dir, { files, entries });
+    return entries;
+  }
+
+  private splitBlockFile(dir: string, name: string, fp: string): CachedFile {
+    const raw = this.fs.readBlock?.(dir, name);
+    if (raw === undefined) return { fp, entries: [] };
+    const block = parseBlockFile(name, raw);
+    if ("stray" in block) return { fp, entries: [] };
+    return { fp, entries: [blockToEntry(block, "")] };
   }
 
   private splitFile(dir: string, name: string, fp: string): CachedFile {

@@ -43,6 +43,7 @@ import {
   statRegularIfExists,
   writeTempRegular,
 } from "./safe-fs.js";
+import { dirFormat } from "./blocks/naming.js";
 
 const CORE_NAME = "core.md";
 
@@ -50,7 +51,8 @@ export type MemInitOutcome =
   | { kind: "created"; path: string; topicFiles: number }
   | { kind: "exists"; path: string }
   | { kind: "archived"; path: string }
-  | { kind: "pinStandin"; name: string };
+  | { kind: "pinStandin"; name: string }
+  | { kind: "blocks"; path: string };
 
 export interface MemInitDeps {
   paths?: MemoryPaths;
@@ -100,6 +102,9 @@ export async function runMemInit(cwd: string, deps: MemInitDeps): Promise<MemIni
   if (!canon) throw new MemoryError(`memory directory for ${cwd} is not accessible`);
   const real = canon.real;
   const path = `${display}/${CORE_NAME}`;
+  // #36 P3 (arch §3.3.4): blocks 目录下没有 core 文件 —— init 不生成任何文
+  // 件，只提示改用带 scope=global 的用户令。放在锁外判定（只读）。
+  if (dirFormat(real) === "blocks") return { kind: "blocks", path };
   return withMemoryDirLock(real, () => {
     const existing = statRegularIfExists(real, CORE_NAME);
     if (existing) {
@@ -153,6 +158,14 @@ export async function handleMemInitCommand(ctx: ExtensionCommandContext, deps: M
   const outcome = await runMemInit(cwd, deps);
   if (!ctx.hasUI) return;
   switch (outcome.kind) {
+    case "blocks":
+      // arch §3.3.4 init-command row — keep the exact remedy wording so the
+      // hint and the doctor always point at the same command.
+      ctx.ui.notify(
+        `${outcome.path}: blocks layout has no core file — write an always-on user rule with memory create … <!-- mem user scope=global -->`,
+        "info",
+      );
+      return;
     case "exists":
       ctx.ui.notify(`core.md 已存在，无需初始化。\n${outcome.path}`, "info");
       return;

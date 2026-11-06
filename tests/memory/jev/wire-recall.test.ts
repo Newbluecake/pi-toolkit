@@ -790,3 +790,160 @@ describe("renderer", () => {
     expect(c.render(200).join("\n")).toContain("── mem U: pitfalls-git › Push #1 (0.81) ──");
   });
 });
+
+// ───────────────────────────── blocks layout (#36 P3, arch §3.3.4/§3.3.5) ─────────────────────────────
+
+describe("blocks layout (#36 P3)", () => {
+  /** memDir already holds core.md (files layout) from beforeEach; adding a
+   *  blocks/ subdir with .layout.json flips dirFormat to "blocks" (data
+   *  format wins), so EntryIndex projects one MemEntry per block file. */
+  function makeBlocks(): void {
+    const blocks = join(memDir, "blocks");
+    mkdirSync(blocks, { recursive: true });
+    writeFileSync(join(blocks, ".layout.json"), JSON.stringify({ v: 1, source: "migrate", gen: 1, files: [] }));
+    const block = (id: string, meta: string[], body: string): void => {
+      writeFileSync(
+        join(blocks, `${id}.md`),
+        [
+          "---",
+          "kind: block",
+          ...meta,
+          'created: "2026-01-01T00:00:00.000Z"',
+          'updated: "2026-01-02T00:00:00.000Z"',
+          "version: 1",
+          "---",
+          "",
+          body,
+          "",
+        ].join("\n"),
+      );
+    };
+    block("general.001", ["authority: user", "scope: global"], "- global rule: always ask first (resident)");
+    block("general.002", ["authority: user", "scope: topic"], "- decision: use deepseek-flash for review");
+    block("quota.001", ["authority: agent"], "- quota dispatch needs the fast-fail gate");
+  }
+
+  test("resident (ledger) blocks never enter U; topic user rules stay candidates; anchor is the block id", async () => {
+    makeBlocks();
+    const h = harness({
+      rules: [
+        ["quota dispatch", 0.9],
+        ["deepseek-flash", 0.9],
+      ],
+    });
+    // first turn: the R layer establishes ledger == want (no getSectionSnapshot
+    // wired ⇒ snapshot falls back to this turn's provider output)
+    const r = await h.prompt("release the quota change with the new dispatch");
+    const rNotices = h.sent.filter((s) => s.message.details?.layer === "R");
+    expect(rNotices).toHaveLength(0); // fallback snapshot == want ⇒ empty diff
+    const uMsg = r?.message; // U rides the before_agent_start return, not sendMessage
+    expect(uMsg).toBeDefined();
+    const anchors = uMsg.details.items.map((i: { anchor: string }) => i.anchor);
+    for (const a of anchors) expect(a).toMatch(/^(quota|general)\.[0-9]{3}$/); // block ids
+    expect(anchors).not.toContain("general.001"); // resident global excluded
+    expect(anchors).toContain("general.002"); // topic user decision stays a candidate
+    expect(anchors).toContain("quota.001");
+  });
+
+  test("expired topic user rule still injects WITH the expiry note (V20)", async () => {
+    makeBlocks();
+    // give the topic decision an expires in the past
+    writeFileSync(
+      join(memDir, "blocks", "general.002.md"),
+      [
+        "---",
+        "kind: block",
+        "authority: user",
+        "scope: topic",
+        'expires: "2026-01-01"',
+        'created: "2026-01-01T00:00:00.000Z"',
+        'updated: "2026-01-02T00:00:00.000Z"',
+        "version: 1",
+        "---",
+        "",
+        "- decision: use deepseek-flash for review",
+        "",
+      ].join("\n"),
+    );
+    const h = harness({ rules: [["deepseek-flash", 0.9]] });
+    const r = await h.prompt("which model should the review use");
+    const uMsg = r?.message;
+    expect(uMsg).toBeDefined();
+    expect(uMsg.details.items.some((i: { anchor: string }) => i.anchor === "general.002")).toBe(true);
+    expect(uMsg.content).toContain("（已到期，待用户确认）");
+  });
+
+  test("async U result: a block rewritten during the classifier wait is dropped (rev guard)", async () => {
+    makeBlocks();
+    // only quota.001 judges relevant; the wait is long enough to rewrite it
+    const h = harness({ rules: [["quota dispatch", 0.95]], delayMs: 60 });
+    const p = h.prompt("the quota dispatch gate broke mid-release");
+    await new Promise((r) => setTimeout(r, 20));
+    // rewrite the block while the classifier is still deciding (rev flips)
+    writeFileSync(
+      join(memDir, "blocks", "quota.001.md"),
+      [
+        "---",
+        "kind: block",
+        "authority: agent",
+        'created: "2026-01-01T00:00:00.000Z"',
+        'updated: "2026-01-03T00:00:00.000Z"',
+        "version: 2",
+        "---",
+        "",
+        "- quota dispatch rule REWRITTEN during the wait",
+        "",
+      ].join("\n"),
+    );
+    await p;
+    await settleBackground();
+    const uMsgs = h.sent.filter((s) => s.message.details?.layer === "U").map((s) => s.message);
+    for (const m of uMsgs) {
+      expect(m.content).not.toContain("REWRITTEN during the wait");
+      expect(m.details.items.every((i: { anchor: string }) => i.anchor !== "quota.001")).toBe(true);
+    }
+  });
+
+  test("B layer re-inject: a block superseded during compaction drops out", async () => {
+    makeBlocks();
+    const h = harness({ rules: [["quota dispatch", 0.9]] });
+    const r = await h.prompt("the quota dispatch gate broke mid-release");
+    expect(r?.message?.details?.items?.some((i: { anchor: string }) => i.anchor === "quota.001")).toBe(true);
+    // compaction queues a re-inject of quota.001; BEFORE it lands, supersede it
+    h.branch.push({ type: "compaction", id: "cmp-blk" });
+    writeFileSync(
+      join(memDir, "blocks", "quota.001.md"),
+      [
+        "---",
+        "kind: block",
+        "authority: agent",
+        "supersededBy: quota.009",
+        'created: "2026-01-01T00:00:00.000Z"',
+        'updated: "2026-01-04T00:00:00.000Z"',
+        "version: 2",
+        "---",
+        "",
+        "- quota dispatch needs the fast-fail gate",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(memDir, "blocks", "quota.009.md"),
+      [
+        "---",
+        "kind: block",
+        "authority: agent",
+        'created: "2026-01-01T00:00:00.000Z"',
+        'updated: "2026-01-04T00:00:00.000Z"',
+        "version: 1",
+        "---",
+        "",
+        "- quota dispatch replacement rule",
+        "",
+      ].join("\n"),
+    );
+    await h.emit("turn_end", { type: "turn_end" });
+    const bMsgs = h.sent.filter((s) => s.message.details?.layer === "B").map((s) => s.message);
+    expect(bMsgs).toHaveLength(0); // the only queued entry was dropped as superseded
+  });
+});
