@@ -181,3 +181,15 @@ DAG：`P0 → (P1 ∥ P2) → P3`。P2 只消费 P0 的证明接口，不触 #59
 - 预算耗尽、网络/宿主未知、Root 自身不可用时，本机制不保证即时处理；提供清楚回执与既有可见记录；#59 仅可能后续兜底，不是此状态机依赖。
 - 请求超时不替用户拍板；child 继续无关工作或报告阻塞，不擅自越过需要决策的边界。
 - 交接：`/tmp/fabric61-plan-handoff.json`（fileIndex/evidence/ruledOut/openQuestions + plan SHA-256）；按证据选择性核验，不重查 xs 广播。
+
+## 技术处置附录 · 2026-11-07 18:47 用户新裁定（不重排旧 DAG）
+
+- 本附录及 `ingress-design.md` r2 对旧 §3/§9 的入口结论作限定：可信宿主直接 session.prompt 产生同形 interactive 事件，不证明 LLM 能经正常工具伪造；在既定信任宿主边界下原生 TUI 来源可用。P0 同形实验保留为能力边界证据，不能用作“必须 patch 才安全”的论证；现 proof DTO 仅 web 型不是 TUI 来源不可信的证据。
+- 用户正式选择专用 RPC + 一次性提交 ticket + **实际消费** callback，不采用 TUI/Web 接受即开窗；SDK 适配若需要，是为该更强产品语义/原对象队列 identity/专用 RPC 能力，而非认证物理人。优先 coding-agent WeakMap/sidecar，先证原 ref 保留与 pre-model 消费时序，必要才申请 agent-core 扩域。
+- 用户同时授权：effective decisionOn 时未知 RPC 不再以普通 source=rpc 重置旧 Root 因果级；显式 off/旧工厂保留原行为，A/B 不重生。新预算仅消费 proof 开窗；Root causal 的 input/consume 时点详见 ingress-design §4。局部显式 strictRpc 工厂参数，不全局改共享 classifier/XS human-delegation；交叉 handover 由 Root 协调。
+- Root 提供当前主 HEAD 5312f6ec：P0 ledger 已独验合主、无生产 wiring。本附录不重新证明该状态。旧 P0→P1/P2 DAG 增前置门：接口/消费 identity 离线证据与必要 SDK 供给审批；实际 terminal 定位/正负 harness、入口能力验收与用户明确首期生产范围。两门未过 **P1/P2 持续暂停**，不默认 Web-only 投产，不宣称全 RPC 支持。
+- 默认 true、独立 2/root+1/child 预算、lazy checkpoint、decision causal 隔离不变；未批准 source/SDK/config/依赖/安装/重启/fork。旧 plan handoff 哈希仅对应附录前版本，新哈希及 review 处置在 `/tmp/fabric61-ingress-design-handoff.json`；原 handoff 不修改。
+
+## 后续状态 · 2026-11-08（取代上节强路径）
+
+用户撤回了“专用 RPC + 实际消费 callback”作为本功能前置，改为按运行状态判断的有界唤醒预算：主会话运行/启动中只排队不计数，空闲时每用户窗口最多两次请求唤醒，用尽后仅投递并给出降级原因，可信 TUI/Web 用户消息到达即重置窗口。实现见 `src/fabric/root-wake-budget.ts`、`src/fabric/router.ts` 的 `rootAdmission` 接缝与 `docs/dev/fabric-cross-session/README.md`；SDK 侧补丁保持未安装、不随本版发布。
