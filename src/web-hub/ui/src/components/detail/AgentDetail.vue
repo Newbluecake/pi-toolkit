@@ -34,7 +34,7 @@
   defensive agent-key watcher re-reads it.
 -->
 <script setup lang="ts">
-import { computed, defineAsyncComponent, inject, onBeforeUnmount, provide, ref, watch } from "vue";
+import { computed, defineAsyncComponent, inject, nextTick, onBeforeUnmount, provide, ref, watch } from "vue";
 import { holdAvailable, heldRowMode, isWebSentMessage, mergeQueue, newCmdId } from "@logic/control.js";
 import { forgetXsRemote, forgetXsSeeds } from "@logic/xsRequestState.js";
 import { RESUME_DIALOG, type ResumeScope } from "@logic/resume.js";
@@ -561,6 +561,38 @@ const peeking = rail.peeking;
 const openOrigin = rail.origin;
 const trigger = rail.trigger;
 const canPeek = rail.canPeek;
+
+// --- Task60 (docs/dev/activity-rail/compact-panel-plan.md §2.1/§3): 单实例入口双宿主 -------
+// 零预留列后，手动/锁定/fullscreen 展开的入口进 FleetDrawer 公共头部（正常文档流）；
+// hover/held 及收起态留在浮动宿主。唯一一份 FleetSummaryBar 用局部 Teleport 在两个
+// 稳定 HTMLElement 之间移动 —— 不复制组件、不 Teleport 到 body、不用全局 selector 寻址。
+/** peek 或 held 都必须保持浮动 DOM 与几何：hover 打开时不移走 hover 目标（避免振荡），
+ * held(pointerdown 提升后) 不在 click 落地前移动按钮（避免丢 click）。held 时 peeking
+ * 已为 false，所以不能只看 peeking/mode —— 这正是独立派生 floating 的原因。 */
+const panelFloating = computed(() => peeking.value || rail.held.value);
+const floatingHostEl = ref<HTMLElement | null>(null);
+const headerHostEl = ref<HTMLElement | null>(null);
+/** 首选宿主；header 宿主 ref 未就绪时返回 null ⇒ Teleport disabled，内容就地渲染在
+ * 浮动宿主内（Teleport 本身在浮动宿主里），nextTick 后再迁移，绝不向不存在的目标传送。 */
+const railTarget = computed<HTMLElement | null>(() => {
+  if (panelFloating.value || !drawerOpen.value) return floatingHostEl.value;
+  return headerHostEl.value;
+});
+// Teleport 移动可能使浏览器丢焦点：仅当移动前焦点在被移动的 rail 按钮内，且没有更高
+// 优先级的开/关焦点动作接手（activeElement 仍是 body）时，才把焦点还给**同一节点**；
+// 键盘开抽屉聚焦 close、外点/超时关闭不归还 —— 一律不主动抢焦点。
+let railMoveFocus: HTMLElement | null = null;
+watch(railTarget, () => {
+  const active = document.activeElement;
+  railMoveFocus = active instanceof HTMLElement && active.closest(".activity-rail") !== null ? active : null;
+});
+watch(railTarget, async () => {
+  const el = railMoveFocus;
+  railMoveFocus = null;
+  if (el === null) return;
+  await nextTick();
+  if (el.isConnected && document.activeElement === document.body) el.focus();
+});
 const bashJobs = computed(() => bashJobsOf(props.agent));
 function onCloseDrawer(): void {
   rail.close();
@@ -634,16 +666,22 @@ function onCloseDrawer(): void {
         <ResumeDialog v-if="resumeOpen" :scope="resumeScope" @close="resumeOpen = false" />
       </div>
 
-      <FleetSummaryBar
-        :rows="agent.fleet as unknown as readonly FleetRowWire[]"
-        :bash-jobs="bashJobs"
-        :open="drawerOpen"
-        :panel="drawerPanel"
-        @toggle-panel="rail.toggle"
-        @peek-panel="rail.enter"
-        @peek-end="rail.leave"
-        @peek-keep="rail.keep"
-      />
+      <!-- Task60 §2.1: 常驻浮动宿主 —— rail 的定位祖先（absolute inset:0 + 点击穿透，零布局
+           占位）。单实例 SummaryBar 默认在这里；只有 settled open 才 Teleport 进抽屉公共头部。 -->
+      <div ref="floatingHostEl" data-rail-host="floating">
+        <Teleport :to="railTarget" :disabled="railTarget === null">
+          <FleetSummaryBar
+            :rows="agent.fleet as unknown as readonly FleetRowWire[]"
+            :bash-jobs="bashJobs"
+            :open="drawerOpen"
+            :panel="drawerPanel"
+            @toggle-panel="rail.toggle"
+            @peek-panel="rail.enter"
+            @peek-end="rail.leave"
+            @peek-keep="rail.keep"
+          />
+        </Teleport>
+      </div>
       <!-- §6.1: 抽屉在 CONTROL_CTX 的 provide 作用域内(原为树上的行内动作,2026-10-17 已移除);
            v-if 按方案冻结:有 fleet 行或有选中 run 才挂载;`id="fleet-drawer"` 在
            FleetDrawer 根元素上(§6.1 的锚点,FleetSummaryBar 的 aria-controls 指它)。 -->
@@ -658,13 +696,20 @@ function onCloseDrawer(): void {
         :can-peek="canPeek"
         :open-origin="openOrigin"
         :trigger="trigger"
+        :floating="panelFloating"
         @peek-keep="rail.keep"
         @peek-end="rail.leave"
         @promote="rail.promote"
         @interaction-end="rail.releaseInteraction"
         @toggle-pin="rail.togglePin"
         @close="onCloseDrawer"
-      />
+      >
+        <!-- 公共头部的常驻 header 宿主（在 tree/run 互斥分支之前，不随分支切换销毁）；
+             生产必传 floating，组件内仅局部扩展 props 类型，不改 contracts。 -->
+        <template #activity>
+          <div ref="headerHostEl" data-rail-host="header"></div>
+        </template>
+      </FleetDrawer>
     </div>
   </main>
 </template>

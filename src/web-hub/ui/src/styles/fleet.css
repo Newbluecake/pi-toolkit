@@ -752,3 +752,51 @@ details[open] > summary.run .chev {
   border-radius: var(--r-sm);
   padding: 0 4px;
 }
+
+/* ---------------------------------------------------------------------------
+ * Task60 (docs/dev/activity-rail/compact-panel-plan.md §2.1/§2.2): 零预留列后，唯一
+ * activity rail 在两个局部稳定宿主之间移动（AgentDetail 持有元素并 Teleport，无第二份
+ * SummaryBar、无全局 selector 寻址）。
+ * ------------------------------------------------------------------------- */
+
+/* 浮动宿主：.detail-split 的常驻直属子节点，是浮动 .activity-rail 的定位祖先 —— absolute
+ * inset:0 + 点击穿透，零布局占位（不建层叠上下文，rail 的 z-index:31 仍按原样与
+ * overlay 抽屉的 30 比较）。按钮自身 pointer-events:auto（上面 .fleet-summary-bar 规则）。 */
+[data-rail-host="floating"] {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* 头部宿主：drawer 公共头部的正常流 flex item（position:static，不以 split 作定位基准）。
+ * block padding 4 给 badge（top:-2px）与 focus ring 留空间：基本行高至少 52px。 */
+[data-rail-host="header"] {
+  display: flex;
+  flex-direction: row;
+  flex-shrink: 0;
+  padding: 4px 0;
+}
+
+/* 头部内的 rail 覆盖为静态横排：明确清掉浮动定位/变换与 ≤767px 手机 backdrop 的容器
+ * 装饰（背景/边框/阴影/圆角/内边距）；只清容器 chrome —— 按钮 badge、pulse（data-active
+ * 的 ::after 圆 halo）、focus、44×44 命中全部原样保留。属性选择器优先级高于上面所有
+ * .activity-rail 规则（含手机媒体块），源码顺序无关。 */
+[data-rail-host="header"] .activity-rail {
+  position: static;
+  inset: auto;
+  transform: none;
+  z-index: auto;
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+[data-rail-host="header"] .activity-rail .fleet-summary-bar {
+  flex-shrink: 0;
+}

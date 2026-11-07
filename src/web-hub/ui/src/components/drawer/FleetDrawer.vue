@@ -112,9 +112,18 @@ import { buildFleetTree, orphanRunIds, runTranscriptAvailable, FLEET_ARCHIVE, FL
 import RunHeader from "./RunHeader.vue";
 import RunTranscript from "./RunTranscript.vue";
 
-const props = defineProps<FleetDrawerProps>();
+const props = defineProps<FleetDrawerProps & { readonly floating?: boolean }>();
 const emit = defineEmits<FleetDrawerEmits>();
 const { t } = useI18n();
+
+/** Task60 (compact-panel-plan §2.2): `floating` 是 AgentDetail 派生的 peek/held 真值
+ * （panelFloating = peeking || held，生产必传），驱动 data-floating 几何、bridge 渲染与
+ * fill 预算重测。旧独立调用未传时以 peeking 回退 —— 不能由 mode 猜测：中宽 manual
+ * overlay 与 held overlay 同为 data-mode="overlay"，只有 floating 能区分。
+ * 注：用 `||` 而非方案文案里的 `??`：Vue 运行时把缺席的 Boolean prop 规范化为 false
+ * （不是 undefined），`??` 永远短路到 false、回退不可达；而生产口径下 floating=false
+ * 时 peeking 必为 false（floating = peeking || held），`||` 与 `??` 语义在真实调用上等价。 */
+const resolvedFloating = computed(() => props.floating || (props.peeking ?? false));
 
 const rootEl = ref<HTMLElement | null>(null);
 
@@ -384,8 +393,10 @@ watch(
 onBeforeUnmount(() => unobserveFill?.());
 
 // A mode/width or panel transition invalidates cached line heights; measure the rendered panel.
+// Task60: resolvedFloating 也入列 —— held 释放时 effectiveMode 仍可能是 overlay，但
+// floating 从 true→false 改变了可用宽度（right72+桥8 ⇒ right12），必须清行高缓存重测。
 watch(
-  () => [props.panel, props.mode, props.open] as const,
+  () => [props.panel, props.mode, props.open, resolvedFloating.value] as const,
   () => {
     lastAgentRowPx = lastBashRowPx = lastAgentFoldPx = lastBashFoldPx = 0;
     fillBudget.value = null;
@@ -427,6 +438,14 @@ provide(FLEET_SELECT, {
   },
 });
 
+/** Task60 §3: isConnected/hidden 不足以证明可见 —— 入口可能在 Teleport 迁移窗口或
+ * display:none/inert 祖先内。实际可见（checkVisibility；happy-dom/旧浏览器回退旧语义）
+ * 且无 inert 祖先才可作为焦点归还目标。 */
+function focusTargetVisible(el: HTMLElement): boolean {
+  if (!el.isConnected || el.hidden) return false;
+  for (let p: HTMLElement | null = el; p !== null; p = p.parentElement) if (p.inert) return false;
+  return typeof el.checkVisibility !== "function" || el.checkVisibility();
+}
 function restoreTrigger(): void {
   const split = rootEl.value?.closest(".detail-split");
   const trigger = props.trigger;
@@ -435,8 +454,9 @@ function restoreTrigger(): void {
       ? '[aria-controls="fleet-drawer"]'
       : `[data-panel="${props.panel}"][aria-controls="fleet-drawer"]`,
   );
-  if (trigger?.isConnected && !trigger.hidden) trigger.focus();
-  else if (fallback !== null && fallback !== undefined) fallback.focus();
+  // close/Esc 先关闭并迁回浮动宿主（nextTick 后），再归还：此时按钮在浮动宿主内可见。
+  if (trigger !== null && trigger !== undefined && focusTargetVisible(trigger)) trigger.focus();
+  else if (fallback != null && focusTargetVisible(fallback)) fallback.focus();
   else document.getElementById("transcript")?.focus();
 }
 function onClose(): void {
@@ -451,7 +471,11 @@ function finishInteraction(): void {
 function promoteInteraction(ev: Event): void {
   const target = ev.target;
   if (!(target instanceof Element) || target.closest(".drawer-close, .activity-pin") !== null) return;
-  if (target.closest("button,a,input,textarea,select,[tabindex]") !== null) emit("promote", ev.type === "pointerdown");
+  // Task60 guard-fix: HEAD 语义是「仅交互元素才 promote」——非交互区域（drawer-title/head/
+  // run-open 等）pointerdown 不升级，peek 由 hover 状态机自行收起；否则反例 1024 hover peek
+  // 下点标题会误 pin 并迁 header（right 952→1012 跳 60px），focusin 也走不到 .run-open 升级。
+  if (target.closest("button,a,input,textarea,select,[tabindex]") === null) return;
+  emit("promote", ev.type === "pointerdown");
 }
 
 /** 「← 子 agent 列表」:退选 run(订阅由 useHub 拆除),抽屉保持打开、回到树视图。 */
@@ -569,6 +593,7 @@ watch(
     :data-mode="mode"
     :data-panel="panel"
     :data-peeking="peeking || undefined"
+    :data-floating="resolvedFloating || undefined"
     @pointerenter="emit('peek-keep')"
     @pointerleave="emit('peek-end')"
     @pointerdown.capture="promoteInteraction"
@@ -580,34 +605,43 @@ watch(
     :aria-modal="mode === 'fullscreen' ? true : undefined"
     :aria-label="t(panel === 'bash' ? 'fleet.commandsTitle' : 'fleet.panelTitle')"
   >
-    <span v-if="mode === 'overlay'" class="activity-bridge" aria-hidden="true"></span>
+    <!-- Task60 §2.2: 桥仅 hover/held 浮动几何存在（resolvedFloating 与根 data-floating
+         同源）；manual overlay 入口已进头部，无外侧 rail 栏也无桥。 -->
+    <span v-if="mode === 'overlay' && resolvedFloating" class="activity-bridge" aria-hidden="true"></span>
+    <!-- Task60 §2.2: 公共头部行提升到 tree/run 互斥分支之外 —— 列表时标题/入口/既有
+         pin/close；子详情时入口+pin（下方原 RunHeader 保留 back/name/status/close，
+         公共头部不重复 close）。活动入口宿主（activity slot）在分支切换间永不销毁。 -->
+    <div class="drawer-head">
+      <template v-if="selectedRunId === null">
+        <AppIcon :name="panel === 'bash' ? 'terminal' : 'bot'" class="icon-sm drawer-title-icon" />
+        <span class="drawer-title">{{ t(panel === "bash" ? "fleet.commandsTitle" : "fleet.panelTitle") }}</span>
+      </template>
+      <slot name="activity"></slot>
+      <button
+        v-if="panel !== undefined && canPeek"
+        class="btn btn-ghost btn-icon activity-pin"
+        type="button"
+        :aria-label="t(peeking ? 'fleet.pin' : 'fleet.unpin')"
+        :aria-pressed="!peeking"
+        @click="emit('toggle-pin')"
+      >
+        <AppIcon :name="peeking ? 'unlock' : 'lock'" class="icon-sm" />
+      </button>
+      <button
+        v-if="selectedRunId === null"
+        class="btn btn-ghost btn-icon drawer-close"
+        type="button"
+        :aria-label="t('drawer.close')"
+        @click="onClose"
+      >
+        <AppIcon name="x" class="icon-sm" />
+      </button>
+    </div>
     <template v-if="selectedRunId !== null">
       <RunHeader :agent="agent" :mode="mode" @back="onBackToTree" @close="onClose" />
       <RunTranscript :key="selectedRunId" :agent="agent" :now="now" />
     </template>
     <template v-else>
-      <div class="drawer-head">
-        <AppIcon :name="panel === 'bash' ? 'terminal' : 'bot'" class="icon-sm drawer-title-icon" />
-        <span class="drawer-title">{{ t(panel === "bash" ? "fleet.commandsTitle" : "fleet.panelTitle") }}</span>
-        <button
-          v-if="panel !== undefined && canPeek"
-          class="btn btn-ghost btn-icon activity-pin"
-          type="button"
-          :aria-label="t(peeking ? 'fleet.pin' : 'fleet.unpin')"
-          :aria-pressed="!peeking"
-          @click="emit('toggle-pin')"
-        >
-          <AppIcon :name="peeking ? 'unlock' : 'lock'" class="icon-sm" />
-        </button>
-        <button
-          class="btn btn-ghost btn-icon drawer-close"
-          type="button"
-          :aria-label="t('drawer.close')"
-          @click="onClose"
-        >
-          <AppIcon name="x" class="icon-sm" />
-        </button>
-      </div>
       <div v-if="banner && showAgent" class="ld-banner" :data-level="banner.level">
         <AppIcon name="alert" class="icon-sm" />
         <span class="ld-banner-body">

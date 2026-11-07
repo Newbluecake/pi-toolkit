@@ -32,6 +32,10 @@ export function useActivityRail(options: {
   const open = computed(() => available(panel.value) && (options.pinnedOpen.value || peekPanel.value !== null));
   const peeking = computed(() => open.value && !options.pinnedOpen.value);
   const effectiveMode = computed(() => (peeking.value || layoutHeld.value ? ("overlay" as const) : options.mode.value));
+  /** Task60 (compact-panel-plan §2.1): read-only view of the pointerdown-promoted hold.
+   * Host/geometry decisions need to distinguish a HELD overlay (floating rail must survive
+   * until the click lands) from a settled open; mutation stays owned by the guards below. */
+  const held = computed(() => layoutHeld.value);
   // A pointerdown promotion must not move its target before click. Normal click capture
   // releases after the action; pointerup's *next task* is only a no-click fallback, never a
   // pointerup microtask. These guards exist only during this one gesture.
@@ -165,6 +169,7 @@ export function useActivityRail(options: {
     panel,
     open,
     peeking,
+    held,
     effectiveMode,
     trigger,
     origin,

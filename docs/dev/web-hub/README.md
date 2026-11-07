@@ -268,6 +268,43 @@ Privacy lock still unmounts the whole detail subtree including both rail buttons
 checks-body-applicability,detail-body}.test.ts`; real compiled-UI evidence and design decisions:
 `docs/dev/activity-rail/plan.md`. No Vue Transition/rAF, inline style or new dependency.
 
+### Task60 compact panel — zero reserved column, entry moves into the header
+
+User-confirmed rework (`docs/dev/activity-rail/compact-panel-plan.md`, frozen): the expanded
+panel no longer keeps ANY right-edge reserved column (the old docked 84px padding overrides are
+deleted; normal 8/12px paddings stay) and the manual/locked/fullscreen entries live in the
+drawer's COMMON header row in normal document flow. Hover/held keep the original floating DOM
+and geometry, with panel↔button gap and bridge tightened 20→8px (drawer `right: 72px` = fine
+rail 20 + hit 44 + gap 8; manual overlay is `right: 12px`, no bridge; docked column width policy
+unchanged).
+
+Single instance, two local hosts: `AgentDetail` owns both `[data-rail-host]` elements — a
+resident `floating` host (absolute inset-0, pointer-events none, the rail's positioning ancestor
+inside `.detail-split`) and a `header` host placed via FleetDrawer's optional `activity` slot in
+the common `drawer-head` lifted OUTSIDE the tree/run branches (child detail keeps its own
+RunHeader back/name/status/close; the common header shows entry+pin and NO duplicate close).
+One Teleport moves the SAME `FleetSummaryBar` between them: `panelFloating = peeking || held`
+(`useActivityRail` now exposes readonly `held` — held has `peeking === false`, so peeking/mode
+alone can't pick the host) selects the floating host when closed/peeking/held, the header host
+otherwise (fullscreen included). The header host's rail CSS resets to `position:static; inset:auto;
+transform:none; display:flex; flex-direction:row; gap:8px; flex-shrink:0` and clears the ≤767px
+backdrop chrome (buttons/badges/44px pulse untouched). Hover never moves the hovered DOM
+(anti-oscillation); held migrates only AFTER its click landed (click exactly once); a Teleport
+move re-focuses the SAME node only if focus was inside the rail and nothing higher-priority took
+it (keyboard open still focuses close).
+
+`FleetDrawer` takes a local `floating` prop (`FleetDrawerProps & { floating?: boolean }`, no
+contracts change; legacy callers fall back to `peeking` — implemented with `||` because Vue
+casts absent Boolean props to `false`, so `??` would never reach the fallback). `resolvedFloating`
+drives `data-floating`, the bridge render condition (`overlay && floating`) and the fill-budget
+invalidation watch (a held release keeps `mode === "overlay"` but flips floating true→false ⇒
+remeasure + row-height cache clear). `restoreTrigger` now requires an actually-visible,
+non-inert target (`checkVisibility` + ancestor inert walk; falls back to old semantics where
+unavailable). Validation: the three suites above plus real-browser CDP evidence
+(geometry/host/migration/focus/viewport 375–1600/container 478–600/fill/fullscreen trap) — see
+`docs/dev/activity-rail/compact-panel-plan.md` §6; the #51 agent-card terminal+count background
+pulse in `agents.css` is a DIFFERENT object and stays untouched.
+
 ## Fleet drawer archive
 
 **Fleet drawer archive (archive-report.md)**: `src/archive/` (per-session `ArchiveControl` built by

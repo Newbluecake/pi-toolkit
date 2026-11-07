@@ -635,6 +635,24 @@ describe("FleetDrawer — 测量与接线(验收 #6)", () => {
     expect(w.findAll(".bj-item")).toHaveLength(27);
   });
 
+  it("Task60: floating 变化（held 释放/入头部）清行高缓存并重测 —— 即使 mode 仍 overlay", async () => {
+    stubLayout();
+    const w = mountDrawer(drawerAgent(flatFleet(30), doneBash(30)), "agent");
+    await settle();
+    expect(w.findAll(".tree > li")).toHaveLength(19); // H=400: live 1 + terminal 18
+    expect(w.find(".activity-bridge").exists()).toBe(false); // 未传 floating ⇒ peeking 回退 false ⇒ 无桥
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get() {
+        return 600;
+      },
+    });
+    await w.setProps({ floating: true }); // right72 浮动几何 ⇒ 可用宽/高变化 ⇒ 失效重测
+    await settle();
+    expect(drawerEl()!.getAttribute("data-floating")).toBe("true"); // 多根组件：VTU attributes 不可用，直接读 aside
+    expect(w.findAll(".tree > li")).toHaveLength(29); // H=600 重测: live 1 + terminal 28
+  });
+
   it("测量全为 0 ⇒ 预算 null ⇒ 两块渲染与不传预算完全一致(旧 3/5 + 默认折叠)", async () => {
     // happy-dom 默认 offsetHeight/clientHeight 全 0,正好就是「测量不可用」环境
     mountDrawer(drawerAgent(flatFleet(7), doneBash(8)));
