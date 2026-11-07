@@ -1,6 +1,8 @@
 import type { Clock, TimerHandle } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
-import type { FastSeed, Millis, RunId, ThinkingLevel, UsageDelta } from "../core/types.js";
+import type { FastSeed, MemorySeedCapture, Millis, RunId, ThinkingLevel, UsageDelta } from "../core/types.js";
+import type { MemoryWorkflowPort } from "../memory/scopes/types.js";
+import { validateSeedCapture } from "../memory/scopes/limits.js";
 import type { FastWorkflowPort } from "../fast/ports.js";
 import type { LoadAdmission } from "../sysload/types.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
@@ -61,6 +63,8 @@ export interface ChildOutcome {
 export interface ChildSpawner {
   /** Host-only parent-session capture closure; never forwarded to a worker or spawn options. */
   readonly fastWorkflow?: FastWorkflowPort;
+  /** #39 P2: host-only memory-seed capture closure; never forwarded to a worker or spawn options. */
+  readonly memoryWorkflow?: MemoryWorkflowPort;
   /** Optional sysload gate for workflow FIFO admission. Absent preserves legacy behavior. */
   readonly loadAdmission?: LoadAdmission;
   spawn(req: {
@@ -68,6 +72,8 @@ export interface ChildSpawner {
     prompt: string;
     /** Internal admission snapshot, preserved before both queue layers. */
     readonly fastSeed?: FastSeed;
+    /** #39 P2: per-call memory-seed capture, frozen before local FIFO admission. */
+    readonly memorySeed?: MemorySeedCapture;
     label?: string;
     deadlineAt?: Millis;
     parentRunId?: string;
@@ -247,7 +253,31 @@ export type WorkflowChildRejectReason =
   | "spawn_timeout"
   | "host_call_timeout"
   /** workflow-worktree plan D2: `isolation:"worktree"` requested while `ChildSpawner.worktreeAvailable?.()` is not `true` — no fallback to the shared checkout (decision 1). */
-  | "isolation_unavailable";
+  | "isolation_unavailable"
+  /** #39 P2: the memory-seed workflow port threw (or returned an invalid capture) at the per-call admission capture — the call is rejected, never degraded. */
+  | "memory_capture_failed";
+
+/** #39 P2 (memory-scopes arch §6.3): validate + deep-freeze a capture for queueing — the
+ *  port may return a reused mutable backing object; retaining its reference is unsafe.
+ *  The frozen P0 validator rebuilds pure data (the deep copy); an invalid capture (e.g.
+ *  the exhaustion sentinel nextN 1_000_000) throws — reject the call, never drop/degrade. */
+function frozenMemoryCapture(value: unknown): MemorySeedCapture {
+  const checked = validateSeedCapture(value);
+  if (!checked.ok) throw new Error(`invalid memory seed capture (${checked.reason})`);
+  const capture = checked.capture;
+  if (capture.state === "empty") return Object.freeze({ v: 1, state: "empty" } as const);
+  const items = capture.seed.items.map((item) =>
+    Object.freeze({
+      ...item,
+      ...(item.grant !== undefined ? { grant: Object.freeze({ ...item.grant }) } : {}),
+    }),
+  );
+  return Object.freeze({
+    v: 1,
+    state: "captured",
+    seed: Object.freeze({ ...capture.seed, items: Object.freeze(items) as typeof capture.seed.items }),
+  });
+}
 
 /** §5: event messages are capped at 200 chars. */
 export function capEventMessage(message: string): string {
@@ -311,6 +341,8 @@ export interface JournalRunConfig {
 export interface HostCallHandlerDeps {
   /** Bound to this workflow owner, not a lookup of the globally active stack. */
   readonly fastWorkflow?: FastWorkflowPort;
+  /** #39 P2: memory-seed capture bound to this workflow's own parent session; absent ⇒ no seed. */
+  readonly memoryWorkflow?: MemoryWorkflowPort;
   readonly clock: Clock;
   readonly workerHost: WorkerHost;
   readonly spawner: ChildSpawner;
@@ -404,6 +436,8 @@ const DEFAULT_AGENT_TYPE = "general-purpose";
 interface QueuedAgentCall {
   /** Pure immutable seed captured once before replay and local FIFO admission. */
   readonly fastSeed?: FastSeed;
+  /** #39 P2: deep-frozen memory-seed capture, taken once per accepted call; never re-read at dequeue. */
+  readonly memorySeed?: MemorySeedCapture;
   readonly callId: CallId;
   readonly prompt: string;
   readonly agentType: string;
@@ -926,6 +960,22 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     const captured = (deps.fastWorkflow ?? deps.spawner.fastWorkflow)?.capture();
     const fastSeed: FastSeed | undefined =
       captured === undefined ? undefined : Object.freeze({ v: captured.v, mode: captured.mode });
+    // #39 P2 (memory-scopes arch §6.3): the memory seed is captured INDEPENDENTLY of
+    // fastSeed — once per accepted agent() call, synchronously after structural
+    // validation and before hash/replay/FIFO — so two sibling calls can carry different
+    // snapshots and a queued call never re-reads the parent at dispatch. The value is
+    // rebuilt + deep-frozen via the frozen P0 validator; a capture failure (throw OR
+    // invalid capture, e.g. the exhaustion sentinel) rejects the call right here —
+    // never dropped, never degraded to empty, never retried.
+    let memorySeed: MemorySeedCapture | undefined;
+    try {
+      const capturedMemory = (deps.memoryWorkflow ?? deps.spawner.memoryWorkflow)?.capture();
+      if (capturedMemory !== undefined) memorySeed = frozenMemoryCapture(capturedMemory);
+    } catch (error) {
+      const message = `memory seed capture failed: ${errMsg(error)}`;
+      emitRejected(callId, "admission", "memory_capture_failed", message, displayMetaOfArgs(args));
+      return { kind: "host_ack", id: callId, ok: false, error: { message } };
+    }
     const validOpts = validated.opts;
     const label = validOpts.label;
     const agentType = validOpts.agentType ?? deps.defaultAgentType ?? DEFAULT_AGENT_TYPE;
@@ -1183,6 +1233,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     const call: QueuedAgentCall = {
       callId,
       ...(fastSeed !== undefined ? { fastSeed } : {}),
+      ...(memorySeed !== undefined ? { memorySeed } : {}),
       prompt: a.prompt,
       agentType,
       ...(label !== undefined ? { label } : {}),
@@ -1329,6 +1380,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       type: call.agentType,
       prompt: call.prompt,
       ...(call.fastSeed !== undefined ? { fastSeed: call.fastSeed } : {}),
+      ...(call.memorySeed !== undefined ? { memorySeed: call.memorySeed } : {}),
       ...(call.label !== undefined ? { label: call.label } : {}),
       ...(call.modelOverride !== undefined ? { modelOverride: call.modelOverride } : {}),
       ...(call.modelHintOverride !== undefined ? { modelHintOverride: call.modelHintOverride } : {}),

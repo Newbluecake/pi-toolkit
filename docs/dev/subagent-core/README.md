@@ -321,3 +321,39 @@ Fast 的同步幂等 dispose 在三条 ordered lists 都紧接 backgroundComplet
 `stack-teardown-matrix.test.ts` 保留原28 case并追加5个 owner/ABA/disabled case。child pre-guard 接线在
 keepalive capture 之后、lazy budget registry 订阅及可能的同步重放之前，traffic 仍在最后；细节与真实
 SDK/原生 warming/最终 body 证据见 `docs/dev/fast-command/README.md`。
+
+## Memory-seed pipeline (task39 #39 P2, memory-scopes arch §6.3)
+
+Independent of FastSeed/promptNotes (`SpawnRequest.memorySeed: MemorySeedCapture`, a P0 DTO).
+`SpawnService` captures ONCE at the synchronous admission point — the fastSeed capture site,
+after every admission gate, before inbox/labels/slots and any async work: a host-provided value
+(workflow `agent()` admission) is kept including its explicit `empty` marker (which exists to
+block dequeue re-reads); otherwise `deps.memoryParent?.snapshot(req.parentRunId)`. Every value
+crossing that boundary goes through `frozenMemorySeedCapture` — the frozen P0
+`validateSeedCapture` rebuild (the deep copy) + recursive `Object.freeze`. External agents and
+resumes never carry a seed (stripped): an external runtime has no session-memory branch, and a
+resumed terminal child restores its OWN session instead of re-inheriting the current parent.
+Capture failure (throw OR invalid capture — including the LEGALLY REACHABLE exhaustion
+sentinel `nextN=1_000_000`, which the frozen P0 product validator rejects by design) fails
+CLOSED before any binding: resume locks released, spawn refused with a config error
+(`memory seed capture failed: …`, reason `config`); never dropped, degraded to empty, retried
+or privately re-widened. `admission-reason.test.ts`'s static count guard moved 26→27 with it.
+
+`runtime-adapter.ts` sets `SessionSpec.memorySeed = seed` ONLY for
+`!isExternal && memorySeed?.state === "captured"` (empty ⇒ nothing set: a child of an empty
+parent starts with no entries); `request-threading.ts` keeps `memorySeed` in `NOT_THREADED`
+(already classified). `PiSessionDriver.create()` appends the seed snap EXACTLY ONCE right
+after `markChildSession` (marker stays first) and BEFORE any awaited reload/createAgentSession:
+final snap DTO re-validated via `validateSessionEntry({mode:"write"})`, the
+`SessionWriteGate` (`secureSessionWriteGate`, P1) checked synchronously at the append point
+(no await between check and append; locked ⇒ zero branch/disk reads), then one
+`appendCustomEntry(SESSION_MEMORY_ENTRY_TYPE, …)` on the ORIGINAL SDK SessionManager
+(buffered append only — C0: observed failure is fatal, success never promises fsync, no torn
+file is ever cleared). Any validation/gate/append failure REJECTS create before the first
+model prompt — the child is never created memoryless. `resume()` never seeds. The gate is the
+driver's optional 5th constructor param; absent ⇒ derived from the frozen secure-domain
+verdict (`defaultSessionWriteGate`). Production assembly (real `memoryParent` port, injected
+gate) is P4. Tests: `tests/service/memory-seed.test.ts` (admission contract, fail-closed,
+freeze, resume/external strips, Fast coexistence), `tests/integration/memory-scopes-seed.test.ts`
+(real SDK SessionManager/createAgentSession, fake model, tmp resources; order/gate/append
+faults/resume-no-reseed).

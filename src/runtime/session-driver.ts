@@ -15,7 +15,11 @@ import {
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 import type { EventBus } from "@earendil-works/pi-coding-agent";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
-import { assertSessionFileInDomain, secureChildSessionDir } from "../secure/domain.js";
+import { assertSessionFileInDomain, getSecureDomain, secureChildSessionDir } from "../secure/domain.js";
+import { secureSessionWriteGate } from "../secure/memory-gate.js";
+import { SESSION_MEMORY_ENTRY_TYPE } from "../memory/scopes/types.js";
+import type { SessionWriteGate } from "../memory/scopes/types.js";
+import { validateSessionEntry } from "../memory/scopes/limits.js";
 import { DefaultResourceLoader, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -720,6 +724,50 @@ export function explainPromptRejection(session: unknown, e: unknown): Error {
 
 export type ModelResolver = (provider: string, id: string) => unknown | undefined;
 
+/** Plain-domain gate used only when no secure verdict was ever frozen in this process. */
+const PLAIN_SESSION_WRITE_GATE: SessionWriteGate = { check: () => ({ ok: true }) };
+
+/** #39 P2: derive the session write gate from the frozen secure-domain verdict (same source
+ *  as the store commit gate). Production assembly (P4) injects the real gate explicitly. */
+function defaultSessionWriteGate(): SessionWriteGate {
+  const domain = getSecureDomain();
+  return domain === undefined ? PLAIN_SESSION_WRITE_GATE : secureSessionWriteGate(domain);
+}
+
+/**
+ * #39 P2 (memory-scopes arch §6.3): build the child's first session-memory entry from the
+ * frozen parent seed, re-validate the FINAL snap DTO against §6.6 product budgets, run the
+ * secure-session write gate synchronously at the append point, then append once via the
+ * ORIGINAL SDK SessionManager. Locked ⇒ refused before any branch read (zero reads, no new
+ * plaintext file); any validation/gate/append failure throws so create() rejects — the child
+ * is never created without its memory seed. `resume()` never calls this.
+ */
+function appendMemorySeedSnap(
+  sm: SessionManager,
+  seed: NonNullable<SessionSpec["memorySeed"]>,
+  gate: SessionWriteGate,
+  secureDir: string | undefined,
+): void {
+  const entry = {
+    v: 1 as const,
+    sid: sm.getSessionId(),
+    op: "snap" as const,
+    items: seed.items,
+    nextN: seed.nextN,
+    inherit: {
+      kind: "spawn" as const,
+      fromSid: seed.fromSid,
+      ...(seed.fromLeaf !== undefined ? { fromLeaf: seed.fromLeaf } : {}),
+      frozenAt: seed.frozenAt,
+    },
+  };
+  const checked = validateSessionEntry(entry, { mode: "write" });
+  if (!checked.ok) throw new Error(`memory seed append failed: invalid seed snap (${checked.reason})`);
+  const verdict = gate.check(secureDir !== undefined ? { sessionDir: secureDir } : {});
+  if (!verdict.ok) throw new Error(`memory seed append failed: write gate refused (${verdict.reason})`);
+  sm.appendCustomEntry(SESSION_MEMORY_ENTRY_TYPE, checked.entry);
+}
+
 /**
  * Turn a SessionSpec into createAgentSession options. `systemPrompt`
  * (prompt_mode: replace types) is not a createAgentSession option: pi only
@@ -733,7 +781,9 @@ export async function toCreateOptions(
   cwd: string,
   fastBus?: EventBus,
 ): Promise<Record<string, unknown>> {
-  const { systemPrompt, fastSeed, ...rest } = spec;
+  // #39 P2: `memorySeed` is driver-internal data (like fastSeed) — never a
+  // createAgentSession option. It was already consumed by create() below.
+  const { systemPrompt, fastSeed, memorySeed: _memorySeed, ...rest } = spec;
   // Fast cancellation is driver control only; SDK create has no signal option.
   // Keep all legacy no-seed options (including their signal key) untouched.
   if (fastSeed !== undefined) delete (rest as { signal?: AbortSignal }).signal;
@@ -758,6 +808,7 @@ export class PiSessionDriver implements SessionDriver {
     private readonly resolveModel?: ModelResolver,
     private readonly humanRuntime?: HumanRuntime,
     private readonly fastChildState?: FastChildStatePort,
+    private readonly sessionWriteGate?: SessionWriteGate,
   ) {}
 
   /** SessionSpec.model arrives as a {provider, id} pair; createAgentSession
@@ -806,6 +857,26 @@ export class PiSessionDriver implements SessionDriver {
     // flushes). Driver-side on purpose: it fires even when the child extension never activated
     // (todo #27). `resume()` above never marks.
     markChildSession(sessionManager, persist);
+    // #39 P2 (memory-scopes arch §6.3): the seed snap is appended EXACTLY ONCE, right
+    // after the child marker (so the marker stays the first entry) and BEFORE any
+    // awaited reload/createAgentSession — a child whose seed cannot be written is
+    // never created: no session handle, no first model prompt. The final snap DTO is
+    // re-validated HERE (§6.6: validating the captured seed once is not enough) and the
+    // write gate is checked synchronously at the append itself (§6.2 step 4/§8.2 — no
+    // await between the check and the append). Buffered append only (C0): the real
+    // SDK's appendCustomEntry is memory-buffered, not fsync — an observed failure is
+    // fatal, success never promises durability, and no torn file is ever cleared.
+    const memorySeed = resolved.memorySeed;
+    if (memorySeed !== undefined) {
+      const gate = this.sessionWriteGate ?? defaultSessionWriteGate();
+      try {
+        appendMemorySeedSnap(sessionManager, memorySeed, gate, secureDir);
+      } catch (error) {
+        return Promise.reject(
+          error instanceof Error ? error : new Error(`memory seed append failed: ${String(error)}`),
+        );
+      }
+    }
     // todo #27: snapshot BEFORE the awaited resourceLoader.reload()/activate() window — see
     // src/child/activation-signal.ts for why "did the counter advance at all" (not "by exactly
     // one") is the correct check here.

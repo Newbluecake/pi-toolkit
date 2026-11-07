@@ -95,3 +95,19 @@ request. Replay/chain/worktree verification and call-registry cancellation remai
 the registry owns phases, while the queued call owns seed data. Tests in
 `tests/workflow/host-fast.test.ts` pin both queue boundaries, immutable copying, early hits,
 legacy hash bytes, cancellation/deadline/admission-timeout and dispatch-rejection behavior.
+
+## Memory-seed workflow admission (task39 #39 P2, memory-scopes arch §6.3)
+
+Mirror of the Fast admission snapshot, fully independent of it: each accepted `agent()` call
+captures ONCE via `(deps.memoryWorkflow ?? deps.spawner.memoryWorkflow)?.capture()` —
+synchronously after structural opts validation, before hash/replay/FIFO — so two sibling calls
+can carry different snapshots and a queued call never re-reads the parent at dispatch
+(`QueuedAgentCall.memorySeed` → `spawnRequestFor`; `createWorkflowChildSpawner` forwards it
+and exposes `memoryWorkflow` exactly like `fastWorkflow`). The value is rebuilt + deep-frozen
+via the frozen P0 `validateSeedCapture`; a capture failure (throw OR invalid capture, e.g. the
+exhaustion sentinel) rejects the call with `memory_capture_failed` — never dropped or degraded.
+`memorySeed` never enters the journal taskKey/chain digest/journal entries, worker opts or
+public `agent()` options (`agent-opts.ts`'s allowlist already rejects a `memorySeed` key); an
+early replay hit still captures but spawns nothing. Tests: `tests/workflow/host-memory.test.ts`
+(per-call capture, FIFO no-re-read, empty/absent port, fail-closed, untrusted opts, replay
+byte-stability, adapter forwarding).

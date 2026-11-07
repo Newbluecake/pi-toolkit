@@ -1,4 +1,5 @@
 import type { FastWorkflowPort } from "../fast/ports.js";
+import type { MemoryWorkflowPort } from "../memory/scopes/types.js";
 import type { StopCause } from "../core/types.js";
 import type { LoadAdmission } from "../sysload/types.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
@@ -46,6 +47,8 @@ function toCoreStopCause(cause?: string): StopCause | undefined {
 export interface WorkflowChildSpawnerOptions {
   /** Parent-session-bound host capture; not a public script/worker option. */
   readonly fastWorkflow?: FastWorkflowPort;
+  /** #39 P2: parent-session-bound memory-seed capture; not a public script/worker option. */
+  readonly memoryWorkflow?: MemoryWorkflowPort;
   /** Optional sysload workflow FIFO gate; late-bound and absent by default. */
   loadAdmission?: LoadAdmission;
   /**
@@ -76,6 +79,7 @@ export function createWorkflowChildSpawner(
         type: req.type,
         prompt: req.prompt,
         ...(req.fastSeed !== undefined ? { fastSeed: req.fastSeed } : {}),
+        ...(req.memorySeed !== undefined ? { memorySeed: req.memorySeed } : {}),
         ...(req.label !== undefined ? { label: req.label } : {}),
         // workflow-worktree plan D1: forwarded verbatim to `SpawnRequest.
         // isolation` — the real worktree-isolation machinery lives entirely
@@ -139,6 +143,7 @@ export function createWorkflowChildSpawner(
       return types.configHashOf(type);
     },
     ...(opts?.fastWorkflow !== undefined ? { fastWorkflow: opts.fastWorkflow } : {}),
+    ...(opts?.memoryWorkflow !== undefined ? { memoryWorkflow: opts.memoryWorkflow } : {}),
     ...(opts?.loadAdmission !== undefined ? { loadAdmission: opts.loadAdmission } : {}),
     ...(opts?.worktreeAvailable ? { worktreeAvailable: opts.worktreeAvailable } : {}),
     ...(opts?.isolationReplayMode ? { isolationReplayMode: opts.isolationReplayMode } : {}),

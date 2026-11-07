@@ -654,6 +654,15 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           ...(!isExternal && spec.request.fastSeed !== undefined
             ? { fastSeed: { v: 1 as const, mode: spec.request.fastSeed.mode } }
             : {}),
+          // #39 P2 (memory-scopes arch §6.3): only a `captured` seed reaches the session
+          // spec — the explicit `empty` marker exists to stop admission/dequeue re-reads,
+          // not to write anything (a child of an empty parent simply starts with no
+          // memory entries). The seed object is spawn admission's already-validated
+          // deep-frozen copy, retained by reference on purpose: no re-copy, no
+          // re-sampling of the parent, nothing extra on any external/droid path.
+          ...(!isExternal && spec.request.memorySeed?.state === "captured"
+            ? { memorySeed: spec.request.memorySeed.seed }
+            : {}),
           ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
           ...(spec.model === undefined ? {} : { model: spec.model }),
           ...(spec.type.tools === undefined || isExternal ? {} : { tools: spec.type.tools }),
