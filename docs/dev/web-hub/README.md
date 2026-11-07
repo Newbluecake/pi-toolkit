@@ -796,12 +796,13 @@ Tests: `tests/web-hub/ui/{hold-stop,stop-button,context-ring,composer,use-contro
 Design, compiled-App evidence and manual physical-device/AT limits:
 `docs/dev/hold-stop/{plan,runtime-notes}.md`. No wire/settings/schema changes.
 
-## 助手回复 tokens/s（task58 P1，backend/protocol 已合，UI 未上线）
+## 助手回复 tokens/s（task58，UI 已实现并独验，尚未部署）
 
-实现状态（截至 P1 精确合主 7f064822）：agent 侧观测/证明与 protocol 契约已实装并合入主
-干（`src/web-hub/agent/{message-speed,message-speed-wire,message-speed-binding,event-tap}.ts`、
-`src/web-hub/protocol/message-generation.ts`、`keys.ts` 白名单投影）；UI 包（P2/P3）尚未合并，
-**不得视为已上线**。设计定稿见 `docs/dev/web-hub-tokens-speed/plan.md`（r3.1 Root gate）。
+实现状态：P1 backend/protocol 与 P2 UI 已实现、合入并各自独立验收；**尚未部署，未做
+真实服务/收费模型速度验证**。UI 通过 `entries.ts` 的唯一解析点和 production reducer
+消费 core / 精确 mid 历史 map，在 `TxAssistant.vue` 以独立 span 显示费用和固定一位小数的
+`20.0 tokens/s`，streaming 始终隐藏。设计定稿见
+`docs/dev/web-hub-tokens-speed/plan.md`（r3.1 Root gate）。
 
 - **计时/信任**：分母为原始摄取点首个→最后一个非空 `text|thinking|toolcall` delta 的
   `performance.now()` 窗口（delta-only，无合并后观测）；分子固定 SDK `usage.output`。
@@ -824,3 +825,22 @@ Design, compiled-App evidence and manual physical-device/AT limits:
   tokens/s 显示（仅上述完整可观测窗口）；child 无公开 raw 端口，保守 hide 且永不 append。
   tests: `tests/web-hub/agent/{message-speed,message-speed-p0,wiring-message-speed}.test.ts`、
   `tests/web-hub/protocol/message-generation.test.ts`。
+
+- **合并链回归**：`tests/integration/web-message-speed.test.ts`（自动归属 tier2）用真实
+  SDK `createAgentSession` + `DefaultResourceLoader`（禁 user context/extensions 发现）和
+  内存 fake Responses SSE，经公开 provider raw / message / turn 事件进入生产
+  `wireMessageSpeed` / `eventTap`，所得 frames 进入生产 reducer / `buildTxEntries`；
+  不手填最终 core。两条相同文本回复之间插入真实 SessionManager toolResult entry，
+  断言公开 mid 精确匹配、10 tokens / 500ms / 2 delta → `20.0 tokens/s`、费用独立；第三条
+  缺 raw reasoning 字段但 SDK normalized reasoning=0 必须隐藏。实际 `manager.getBranch()`
+  经 `projectSessionEntry` 新建 snapshot 恢复，并验证删除/replace metadata 无残留；
+  metadata 不在 SDK assistant 对象、`buildSessionContext` 或后续模型 context 中。
+- **真实浏览器验收**：同文件的 opt-in Chromium companion 使用已缓存的 Playwright
+  （`PI_TOOLKIT_MESSAGE_SPEED_BROWSER=<已安装 Playwright 的绝对入口路径>`，不安装/联网），
+  own `/tmp` Vite 页面加载真实 reducer / entries / `TxAssistant`，复用上述 SDK 产物，
+  实跑 live → 刷新保留 → 删除 metadata 的替换 snapshot → 真刷新仍隐藏 → replace 后
+  真刷新恢复，费用不变、767px 两 chip 不重叠。此为组件浏览器集成，不宣称真实 hub/App
+  网络、真实 provider、收费覆盖率或物理移动设备已验证；默认 tier2 运行不启动浏览器，
+  浏览器需显式设该环境变量。P2 的独立 App fakeHub 浏览器验收不替代本条删除链。
+  当前 child producer 无同等公开 raw port，保守隐藏且无持久化；UI 可消费合法 child live
+  core 不意味着当前 child 请求会产生数值。旧历史永不回填，并非所有 Requests 都显示。
