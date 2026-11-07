@@ -1,3 +1,4 @@
+import type { HumanDispatchBridge } from "./human-dispatch-proof.js";
 import type { XsActivationPort, XsActivationHubPort } from "../../fabric/xs/session-activation.js";
 /**
  * web-hub agent client wiring (plan §包 D — index.ts; arch §3.2).
@@ -322,6 +323,8 @@ export interface ThreadAgentPort extends ThreadPromptPort {
   threadClosed(h: string, reason: ThreadCloseReason): void;
 }
 export interface WebHubDeps {
+  /** P4 owns/wires ONE bridge independent of webHub.enabled; this client only dispatches. */
+  memoryProof?: () => HumanDispatchBridge | undefined;
   /** Top-level, non-live settings; only buildHubConfig consumes it. */
   feishuBot?: FeishuBotSettings;
   settings: WebHubSettings;
@@ -506,6 +509,8 @@ export interface WebHubControl {
   readonly recorder?: CommandRecorder;
   internalExec(args: string, ctx: unknown): Promise<{ ok: true } | { ok: false; code: "E_UNSUPPORTED" }>;
   askUserRemote(): AskUserRemotePort | undefined;
+  /** Same effective object this WebHub instance uses; P4 feeds it to the slot adapter. */
+  memoryHubPaths?(): { readonly stateDir: string };
   /**
    * fabric-cross-session plan §3.3 L7 (W1): attribution port for the causal-level reset. An `extension`-sourced `input`
    * event is a HUMAN prompt iff it is a prompt the web hub itself dispatched on a browser user's behalf — answered by a
@@ -1294,6 +1299,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   };
 
   const commandHandler = createCommandHandler({
+    ...(deps.memoryProof !== undefined ? { memoryProof: deps.memoryProof } : {}),
     pi,
     getCtx: () => ctx,
     getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
@@ -2444,6 +2450,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       return { ok: false, code: "E_UNSUPPORTED" };
     },
     askUserRemote: () => (remoteAskUserEnabled() ? dialogBridge : undefined),
+    memoryHubPaths: () => paths,
     attributeInput: (text) =>
       safe(
         () =>

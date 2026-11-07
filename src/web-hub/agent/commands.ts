@@ -1,3 +1,4 @@
+import type { HumanDispatchBridge } from "./human-dispatch-proof.js";
 import { clampSpanMs } from "../../core/deadline.js";
 import { isXsWebCommand, parseXsWebAction } from "../protocol/xs-web-command.js";
 import { randomUUID } from "node:crypto";
@@ -64,6 +65,8 @@ export interface Timer {
 }
 
 export interface CommandHandlerDeps {
+  /** P4's shared source bridge. Never derive it from ledger text/XS attribution. */
+  memoryProof?: () => HumanDispatchBridge | undefined;
   pi: ExtensionAPI;
   getCtx(): ExtensionContext | undefined;
   getSessionId(): string;
@@ -602,7 +605,15 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     const pending = registerObservation(frame, cmd.deliver);
     try {
       noteWebProof(frame.id, cmd.text, frame.origin);
-      deps.pi.sendUserMessage(cmd.text, { deliverAs: cmd.deliver, expandPromptTemplates: false });
+      const send = () => deps.pi.sendUserMessage(cmd.text, { deliverAs: cmd.deliver, expandPromptTemplates: false });
+      let proof: HumanDispatchBridge | undefined;
+      try {
+        proof = deps.memoryProof?.();
+      } catch {
+        /* memory unavailable, ordinary prompt still sends */
+      }
+      if (proof) proof.dispatchWeb(frame.id, frame.origin, send);
+      else send();
     } catch {
       if (pendingObservation.delete(frame.id)) pending.timer.cancel();
       return settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
@@ -693,6 +704,8 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     // 30s timer (already armed above) if no observation ever lands — exactly the "possibly-delivered"
     // semantics called for, with no new state needed.
     try {
+      // Held/topic-switch/replay release is NOT a new human memory source, even if
+      // the historical item had browser origin. Ordinary delivery remains unchanged.
       noteWebProof(item.cmdId, item.text, item.origin);
       deps.pi.sendUserMessage(item.text, { deliverAs: item.deliver, expandPromptTemplates: false });
     } catch {
