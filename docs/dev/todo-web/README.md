@@ -32,3 +32,19 @@ markup 与折叠尾行逻辑原样搬迁自已删除的 `TodoPanel.vue`（`style
 `open-run`→`hub.selectRun` 跳 fleet，`open-schedule`→SchedulePanel）。面板渲染条件 =
 「todo 非空 或 schedSummaryOf 有值」；两侧各自为空时只隐藏自己的分区。TUI 侧的 todo widget
 不受影响。
+
+**todo-nudge 可见性（Task59 阶段A, 2026-11-07）**: the main-session staleness nudge message
+(`subagent:todo-nudge`) is now sent `display: true` — pi's TUI renders it via the stock
+`CustomMessageComponent` (default box + markdown body; no extension renderer registered) and
+the web-hub transcript's `itemEntry` admits it as a `custom` entry (`TxCustom.vue`, kind chip
+`todo-nudge`), while `display:false` customs stay dropped there. Historical display:false
+entries are NOT rewritten — only nudges fired from this version on are visible.
+`triggerTurn:false` is preserved (agent-session's `sendCustomMessage` never starts a run on a
+falsy triggerTurn), so visibility adds no new model turn and no E1 self-loop (`message_start`
+fires regardless of display; E1 matches only the three completion customTypes). The copy now
+asks for an actionable authorized-scope check first (continue tasks whose dependencies are
+satisfied and not waiting on user/approval/external/timer; TaskUpdate after verified; do NOT
+use the nudge to start queued/unauthorized tasks), with evidence labels calibrated to the
+counting口径: E1 「N 条后台完成通知」（子 agent/workflow/bash job）, E2 「N 次 git 写操作」
+（commit/merge/cherry-pick/rebase/revert）. 阶段B（自动空闲唤醒）未实现。Tests:
+`tests/web-hub/agent/todo-nudge-visibility.test.ts`（真实 SDK 组件 + 双端投影）。

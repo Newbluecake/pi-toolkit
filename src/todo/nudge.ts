@@ -165,10 +165,11 @@ function truncateTitle(subject: string): string {
 }
 
 /**
- * Render the hidden nudge message body (Chinese prose per the UI-text
- * convention: this addresses the model, not a compact status line). A
- * zero-count evidence item is omitted entirely; at most 5 in_progress tasks
- * are listed, each title truncated to 60 chars.
+ * Render the nudge message body (Chinese prose per the UI-text convention: this addresses
+ * the model, not a compact status line). A zero-count evidence item is omitted entirely; at
+ * most 5 in_progress tasks are listed, each title truncated to 60 chars. Task59 阶段A: the
+ * message is now VISIBLE in the TUI/WebUI (display:true, still triggerTurn:false), and the
+ * tail asks for an actionable authorized-scope check first — not just a status update.
  */
 export function buildNudgeText(
   counts: NudgeCounts,
@@ -176,24 +177,31 @@ export function buildNudgeText(
   kind: NudgeKind = "stale",
 ): string {
   const clauses: string[] = [];
-  if (counts.e1 > 0) clauses.push(`${counts.e1} 个子 agent/workflow 完成`);
-  if (counts.e2 > 0) clauses.push(`${counts.e2} 次 git 提交`);
+  // 口径与计数一致 (Task59): E1 counts subagent/workflow/bash-job completion NOTIFICATIONS,
+  // E2 counts git WRITE commands (commit/merge/cherry-pick/rebase/revert), not just commits.
+  if (counts.e1 > 0) clauses.push(`${counts.e1} 条后台完成通知`);
+  if (counts.e2 > 0) clauses.push(`${counts.e2} 次 git 写操作`);
   if (counts.e3 > 0) clauses.push(`已过 ${counts.e3} 轮`);
   const listed = tasks
     .slice(0, MAX_LISTED_TASKS)
     .map((task) => `#${task.id} ${truncateTitle(task.subject)}`)
     .join("、");
+  const actionable =
+    "若在已授权范围内有依赖已满足、且不在等待用户/审批/外部结果/定时的任务，请直接继续下一步，完成并核验后用 TaskUpdate 更新；" +
+    "仍在等待的标明等待原因即可。不要借本提醒启动排队中或未授权的任务，也不要只读任务列表就当作进展。";
   if (kind === "untracked") {
     const pending = listed ? `待办：${listed}。` : "";
     return (
       `[todo] 自上次更新任务以来：${clauses.slice(0, 2).join("、")}，但当前没有进行中的任务。` +
       pending +
+      actionable +
       "请用 TaskCreate 登记正在做的工作，或用 TaskUpdate 把对应任务标为 in_progress/completed；确实不需要跟踪可以忽略。"
     );
   }
   return (
     `[todo] 自上次更新任务以来：${clauses.join("、")}。进行中：${listed}。` +
-    "如状态或进度有变，请用 TaskUpdate 更新；没有变化可以忽略。"
+    actionable +
+    "如状态或进度另有变化，也请用 TaskUpdate 更新。"
   );
 }
 

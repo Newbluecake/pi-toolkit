@@ -1,6 +1,7 @@
 // Wiring tests for the main-session todo staleness nudge (L1 feature):
 // event-hook gating (child session / disabled setting → zero new
-// registrations), the hidden nudge message shape, git-command E2 detection,
+// registrations), the nudge message shape (visible since Task59: display:true,
+// triggerTurn:false), git-command E2 detection,
 // counter reset on Task* touch, and the switch_context tracker port.
 //
 // Harness pattern follows tests/todo/tools.test.ts (inline fake
@@ -150,7 +151,7 @@ describe("todo/index wireTodo: nudge gating", () => {
 });
 
 describe("todo/index wireTodo: nudge firing", () => {
-  test("fires a hidden, non-turn-triggering message after fallbackTurns turns with no evidence", async () => {
+  test("fires a visible (display:true), non-turn-triggering message after fallbackTurns turns with no evidence", async () => {
     const host = fakePi();
     wireTodo(host.pi, { isChildSession: false, nudge: NUDGE, sendMessage: host.pi.sendMessage });
     const ctx = fakeCtx();
@@ -163,7 +164,7 @@ describe("todo/index wireTodo: nudge firing", () => {
 
     const sent = host.sent[0]!;
     expect(sent.message.customType).toBe(TODO_NUDGE_CUSTOM_TYPE);
-    expect(sent.message.display).toBe(false);
+    expect(sent.message.display).toBe(true);
     expect(sent.options.triggerTurn).toBe(false);
     expect(sent.message.content).toContain("#1 Do the thing");
     expect(sent.message.content).toContain(`已过 ${NUDGE.fallbackTurns} 轮`);
@@ -208,7 +209,7 @@ describe("todo/index wireTodo: nudge firing", () => {
     expect(host.sent).toHaveLength(0);
     turnEnd(host);
     expect(host.sent).toHaveLength(1);
-    expect(host.sent[0]?.message.content).toContain("1 个子 agent/workflow 完成");
+    expect(host.sent[0]?.message.content).toContain("1 条后台完成通知");
   });
 
   test("E1 also recognizes the workflow-notification and bash-job:notification customTypes", async () => {
@@ -259,7 +260,7 @@ describe("todo/index wireTodo: nudge firing", () => {
     expect(host.sent).toHaveLength(0);
     turnEnd(host);
     expect(host.sent).toHaveLength(1);
-    expect(host.sent[0]?.message.content).toContain("1 次 git 提交");
+    expect(host.sent[0]?.message.content).toContain("1 次 git 写操作");
   });
 
   test("a failed git commit (isError) does not count as E2 evidence", async () => {

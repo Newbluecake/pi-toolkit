@@ -160,7 +160,8 @@ export interface TodoNudgeDeps {
   /** True in a re-activated child subagent session (src/index.ts's `isChildSession`) — the tracker never turns on there. */
   readonly isChildSession?: boolean;
   readonly nudge?: NudgeConfig & { readonly enabled: boolean };
-  /** Injected `pi.sendMessage`, matching the compact-hint/quota-hint hook shape (hidden, never triggers a new turn). */
+  /** Injected `pi.sendMessage`, matching the compact-hint/quota-hint hook shape (visible since
+   * Task59 阶段A — `display: true` — but still `triggerTurn: false`, never a new turn). */
   readonly sendMessage?: (
     message: { customType: string; content: string; display: boolean; details?: unknown },
     options: { triggerTurn: false },
@@ -723,7 +724,14 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
       if (isGitWriteCommand(command)) nudgeState = recordEvidence(nudgeState, "e2");
     });
 
-    // E3 + trigger evaluation. Hidden message, never triggers a new turn.
+    // E3 + trigger evaluation. Task59 阶段A: the message is now VISIBLE (`display: true`) —
+    // pi's TUI renders display:true custom messages through CustomMessageComponent (default
+    // box + markdown body) and the web-hub transcript's itemEntry admits them (display:false
+    // non-date customs are dropped there). Still `triggerTurn: false`: sendCustomMessage with
+    // a falsy triggerTurn NEVER starts a run (it only appends the entry + emits
+    // message_start/message_end), so visibility adds no new model turn and no E1 self-loop
+    // (message_start fires regardless of display, and E1 matches only the three completion
+    // customTypes above — TODO_NUDGE_CUSTOM_TYPE is not one of them).
     pi.on("turn_end", () => {
       const precondition: NudgePrecondition = {
         inProgress: state.tasks.filter((task) => task.status === "in_progress").length,
@@ -746,7 +754,7 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
           {
             customType: TODO_NUDGE_CUSTOM_TYPE,
             content: text,
-            display: false,
+            display: true,
             details: { e1: nudgeState.e1, e2: nudgeState.e2, e3: nudgeState.e3, kind: result.kind },
           },
           { triggerTurn: false },
