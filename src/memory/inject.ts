@@ -30,6 +30,9 @@
  *   local try/catch returning `undefined`.
  */
 
+import { ProjectCapture, type ProjectSource } from "./scoped-project-view.js";
+import { sameProjectionOwner, type ScopedProjectProjection } from "./scoped-projection.js";
+import type { MemoryOwner } from "./scopes/types.js";
 import { SKIP, type Live } from "../prompt-sections/stable-section.js";
 import { join } from "node:path";
 import type { SectionProviderInput, SectionRegistration } from "../sysprompt/hub.js";
@@ -59,6 +62,7 @@ import {
   corpusStampFingerprint,
   renderBlocks,
   residentRenderKey,
+  parseResidentSection,
   type RenderBlocksInput,
   type RenderBlocksResult,
 } from "./blocks/render.js";
@@ -66,6 +70,8 @@ import { readCorpus, type CorpusReaderState } from "./blocks/store.js";
 import { eligible } from "./govern/eligibility.js";
 
 export interface MemorySectionDeps {
+  /** #39 P4a2 opt-in only. P4c owns actual registration/host gates. */
+  projection?: ScopedProjectProjection;
   settings: MemorySettings; // 静态（Nit 7）
   isChildSession: boolean;
   cache: RenderCache;
@@ -409,13 +415,95 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
   return block ?? "";
 }
 
+/** A frozen SOURCE includes provenance and admission spans, never just the
+ * already-marked string. P4c consumes these local ports at its existing write/
+ * lifecycle seams; this package does not alter wireMemory or add a hook. */
+export interface ProjectSourcePorts {
+  freeze(cwd: string): boolean;
+  clear(): void;
+  delete(cwd: string): void;
+  source(cwd: string): ProjectSource | undefined;
+}
+export interface MemorySectionRegistration extends SectionRegistration {
+  readonly projectSources: ProjectSourcePorts;
+}
+interface CapturedProjectRender {
+  readonly key: string;
+  readonly owner: MemoryOwner;
+  readonly source: ProjectSource;
+  readonly info: JevRenderInfo | undefined;
+  readonly blocks: boolean;
+}
+
+function renderScopedSource(
+  deps: MemorySectionDeps,
+  cwd: string,
+  ctx: ExtensionContext,
+  caches: TieredCaches,
+  key: string,
+  owner: MemoryOwner,
+): CapturedProjectRender {
+  const project = new ProjectCapture(deps.isChildSession);
+  let text: string;
+  let info: JevRenderInfo | undefined;
+  const blocks = effectiveLayout(deps.settings.layout, dirFormat(memoryDirFor(cwd, deps.paths))) === "blocks";
+  if (blocks) {
+    const today = localTodayOf(Date.now());
+    const memDir = memoryDirFor(cwd, deps.paths);
+    const reader = caches.blocksReaders.get(cwd) ?? { warned: false };
+    caches.blocksReaders.set(cwd, reader);
+    const corpus = readCorpus(join(memDir, "blocks"), reader);
+    let jevIndex: JevIndexV1 | undefined;
+    try {
+      jevIndex = dirFormat(memDir) === "blocks" ? readIndex(memDir).index : undefined;
+    } catch {
+      /* no sidecar */
+    }
+    const result = renderBlocks(corpus, {
+      slug: toSlug(cwd),
+      isChild: deps.isChildSession,
+      residentBytes: deps.settings.residentBytes,
+      today,
+      project,
+      ...(jevIndex === undefined ? {} : { jevIndex }),
+    });
+    text = result.text;
+    info = { omittedSections: [], coreInlined: false, residentBlocks: result.resident.map((b) => b.id) };
+  } else if (deps.settings.layout === "tiered") {
+    const sessionKey = resolveSessionKey(ctx);
+    ensureSessionStart(caches, sessionKey);
+    const result = renderTiered(
+      {
+        cwd,
+        profile: deps.isChildSession ? deps.settings.childProfile : "full",
+        access: resolveAccess(deps, caches, sessionKey),
+        coreBytes: deps.settings.coreBytes,
+        blockBytes: deps.settings.blockBytes,
+        indexMax: deps.settings.indexMax,
+      },
+      { metaCache: caches.meta, project, ...(deps.paths === undefined ? {} : { paths: deps.paths }) },
+    );
+    text = result.text;
+    info = jevRenderInfoOf(result);
+  } else {
+    text =
+      renderMemoryBlock(
+        cwd,
+        { inlineMax: deps.settings.inlineMax, byteCap: deps.settings.byteCap, indexMax: deps.settings.indexMax },
+        deps.paths,
+        project,
+      ) ?? "";
+  }
+  return { key, owner, source: project.finish(text), info, blocks };
+}
+
 /**
  * Build the `pi_project_memory` section registration. The provider is
  * synchronous (review-2 already confirmed `memoryFingerprint` /
  * `renderMemoryBlock` are sync) — required by the hub's provider contract
  * (I7: no async IO on the request path).
  */
-export function memorySection(deps: MemorySectionDeps): SectionRegistration {
+export function memorySection(deps: MemorySectionDeps): MemorySectionRegistration {
   // Per-"activate()" state, NOT per-cwd: `memorySection()` is called exactly
   // once (from `wireMemory`), so these closures live for the whole process
   // lifetime until the next `/reload`. Keyed by session id (§2.4/§2.6) —
@@ -440,13 +528,46 @@ export function memorySection(deps: MemorySectionDeps): SectionRegistration {
   // for callers that never clear `frozenBlocks` (e.g. direct unit tests
   // that construct `memorySection()` without a session_start hookup at
   // all) — those already get fresh caches per fixture.
+  const renderedInputs = new WeakMap<SectionProviderInput, Live>();
+  const sourceCache = new Map<string, CapturedProjectRender>();
+  const frozenSources = new Map<string, CapturedProjectRender>();
+  const lastSources = new Map<string, CapturedProjectRender>();
+  const projectSources: ProjectSourcePorts = {
+    freeze(cwd) {
+      const source = lastSources.get(cwd);
+      if (source === undefined) return false; // no source, never adopt a bare string
+      frozenSources.set(cwd, source);
+      return true;
+    },
+    clear() {
+      sourceCache.clear();
+      frozenSources.clear();
+      lastSources.clear();
+    },
+    delete(cwd) {
+      sourceCache.delete(cwd);
+      frozenSources.delete(cwd);
+      lastSources.delete(cwd);
+    },
+    source(cwd) {
+      return (frozenSources.get(cwd) ?? lastSources.get(cwd))?.source;
+    },
+  };
   const baseFrozenBlocksClear = deps.frozenBlocks.clear.bind(deps.frozenBlocks);
   deps.frozenBlocks.clear = (): void => {
     baseFrozenBlocksClear();
     caches.access.clear();
     caches.sessionStart.clear();
+    projectSources.clear();
   };
   return {
+    projectSources,
+    ...(deps.projection === undefined
+      ? {}
+      : {
+          resampleIf: (input: SectionProviderInput) =>
+            deps.projection!.isEnabled() && deps.projection!.needsProjectResample(input),
+        }),
     provider: (input) => {
       if (deps.isChildSession) {
         if (!deps.settings.injectInChildSessions) return "";
@@ -458,7 +579,61 @@ export function memorySection(deps: MemorySectionDeps): SectionRegistration {
       }
       try {
         const cwd = resolveCwd(input);
-        return renderLive(deps, cwd, input.ctx, caches);
+        const projection = deps.projection;
+        if (projection === undefined || !projection.isEnabled()) return renderLive(deps, cwd, input.ctx, caches);
+        const owner = projection.begin(input);
+        if (owner === undefined || !projection.ownerValid(input)) return SKIP;
+        const memoized = renderedInputs.get(input);
+        if (memoized !== undefined) return memoized;
+        let captured = frozenSources.get(cwd);
+        if (deps.frozenBlocks.has(cwd) && captured === undefined) return SKIP;
+        if (captured !== undefined && !sameProjectionOwner(captured.owner, owner)) return SKIP;
+        if (captured === undefined) {
+          const memDir = memoryDirFor(cwd, deps.paths);
+          const blocks = effectiveLayout(deps.settings.layout, dirFormat(memDir)) === "blocks";
+          const fingerprint = blocks
+            ? `${corpusStampFingerprint(join(memDir, "blocks"))}:${sidecarStampOf(memDir)}:${localTodayOf(Date.now())}`
+            : memoryFingerprint(cwd, deps.paths);
+          const sessionKey = resolveSessionKey(input.ctx);
+          const access = deps.settings.layout === "tiered" ? resolveAccess(deps, caches, sessionKey) : "none";
+          const key = JSON.stringify([
+            fingerprint,
+            deps.settings.layout,
+            deps.settings.inlineMax,
+            deps.settings.byteCap,
+            deps.settings.indexMax,
+            deps.settings.coreBytes,
+            deps.settings.blockBytes,
+            deps.settings.residentBytes,
+            deps.isChildSession,
+            deps.settings.childProfile,
+            access,
+          ]);
+          const hit = sourceCache.get(cwd);
+          captured =
+            hit !== undefined && hit.key === key && sameProjectionOwner(hit.owner, owner)
+              ? hit
+              : renderScopedSource(deps, cwd, input.ctx, caches, key, owner);
+          if (!projection.ownerValid(input)) return SKIP;
+          if (sourceCache.size >= STICKY_CACHE_CAPACITY && !sourceCache.has(cwd)) sourceCache.clear();
+          sourceCache.set(cwd, captured);
+        }
+        const block = projection.project(input, captured.source, (text) =>
+          deps.stripInlineMeta === true ? stripInlineMeta(text) : text,
+        );
+        if (!projection.ownerValid(input)) return SKIP;
+        if (lastSources.size >= STICKY_CACHE_CAPACITY && !lastSources.has(cwd)) lastSources.clear();
+        lastSources.set(cwd, captured);
+        // Jev/R ledger receives FINAL actual rendered bytes, not the unmarked
+        // source. Frozen source can reproject markers without re-reading disk.
+        deps.onRender?.(
+          cwd,
+          block || undefined,
+          captured.info,
+          captured.blocks ? parseResidentSection(block) : undefined,
+        );
+        renderedInputs.set(input, block);
+        return block;
       } catch {
         return SKIP; // never crash the session
       }

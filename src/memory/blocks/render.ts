@@ -15,6 +15,7 @@
 // P6b's `govern/audience.ts`, injected through `audienceOf`): the rendered
 // result therefore does not depend on Jev at all.
 
+import type { ProjectCapture } from "../scoped-project-view.js";
 import { createHash } from "node:crypto";
 import { isExpired, isResident, type ParsedBlock } from "./format.js";
 import { readCorpus, topicSummary, type BlockCorpus } from "./store.js";
@@ -58,6 +59,7 @@ function kb(bytes: number): string {
 }
 
 export interface RenderBlocksInput {
+  readonly project?: ProjectCapture;
   readonly slug: string;
   readonly isChild: boolean;
   /** `memory.residentBytes` — soft budget; over-budget renders everything
@@ -339,12 +341,15 @@ export function renderBlocks(corpus: BlockCorpus, input: RenderBlocksInput): Ren
   const resident = input.isChild
     ? mainResident.filter((b) => audienceMatches(b, true, input.audienceOf))
     : mainResident;
-  const mainSessionBytes = residentMeteredBytes(mainResident, input.today);
+  const mainSessionBytes =
+    residentMeteredBytes(mainResident, input.today) +
+    (input.project === undefined ? 0 : mainResident.length * input.project.entryReserve);
   const residentSection = renderResidentSection(resident, {
     today: input.today,
     residentBytes: input.residentBytes,
     mainSessionBytes,
   });
+  for (const b of resident) input.project?.block(b, residentLines(b, input.today).join("\n"));
   const archivedCount = [...corpus.archivedByTopic.values()].reduce((sum, n) => sum + n, 0);
   const index = renderIndexPart(corpus, visible, archivedCount, input);
   const pieces: string[] = [];

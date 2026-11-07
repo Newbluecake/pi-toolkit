@@ -12,6 +12,7 @@
 // Zero pi/typebox imports; independently unit-testable (matches every other
 // file under `src/memory/**` except `safe-fs.ts`).
 
+import type { ProjectCapture, ProjectUnit } from "./scoped-project-view.js";
 import { createHash } from "node:crypto";
 import type { MemoryToolSurface } from "../config/settings.js";
 import { READONLY_DOMAIN_TOOLS } from "../runtime/tool-scope.js";
@@ -25,7 +26,7 @@ import {
 } from "./contracts.js";
 import { frontmatterSource, stripFrontmatter } from "./frontmatter.js";
 import { descriptionOrHeading, parseMemoryMeta, splitSections, type MemorySection } from "./meta.js";
-import { memoryDirFor, toSlug } from "./paths.js";
+import { memoryDirFor, toSlug, type MemoryPaths } from "./paths.js";
 import { injectionSentinel, stripDriftHeader } from "./render.js";
 import { canonicalDir, listRegular, readRegular, readRegularHead } from "./safe-fs.js";
 
@@ -271,8 +272,8 @@ interface Gathered {
   files: FileMeta[];
 }
 
-function gatherFiles(cwd: string, metaCache: MetaCache): Gathered {
-  const displayDir = memoryDirFor(cwd);
+function gatherFiles(cwd: string, metaCache: MetaCache, paths?: MemoryPaths): Gathered {
+  const displayDir = memoryDirFor(cwd, paths);
   const canon = canonicalDir(displayDir);
   const realDir = canon ? canon.real : displayDir;
   const { files: entries } = listRegular(realDir, { names: "v2" });
@@ -344,6 +345,7 @@ interface AdmitResult {
   text: string;
   /** Omitted section headings, in ORIGINAL file order. */
   omitted: string[];
+  admittedSource?: string[];
 }
 
 /**
@@ -359,10 +361,15 @@ function admitPrimarySections(
   primaryName: string,
   access: MemoryAccess,
   dirDisplay: string,
+  projection?: { capture: ProjectCapture; unit: ProjectUnit },
 ): AdmitResult {
   const { preamble, sections } = splitSections(rawBody);
+  const reserveFor = (pieces: readonly string[]): number =>
+    projection === undefined
+      ? 0
+      : projection.capture.reserve(projection.unit, projection.capture.ranges(projection.unit, pieces));
   const avail = coreAvail - byteLen(headPart) - 2; // reserve the trailing "\n\n"
-  if (avail < 0 || byteLen(preamble) > avail) {
+  if (avail < 0 || byteLen(preamble) + reserveFor([preamble]) > avail) {
     return { fits: false, text: "", omitted: [] };
   }
 
@@ -370,7 +377,7 @@ function admitPrimarySections(
   let used = byteLen(preamble);
   for (const s of sections) {
     const need = used === 0 ? byteLen(s.text) : byteLen(`\n${s.text}`);
-    if (used + need <= avail) {
+    if (used + need + reserveFor([preamble, ...admitted.map((a) => a.text), s.text]) <= avail) {
       admitted.push(s);
       used += need;
     }
@@ -386,7 +393,12 @@ function admitPrimarySections(
     // Nothing skipped — only reachable if the whole-file check's slightly
     // different accounting (no `- 2` margin split the same way) missed an
     // exact-fit case; render as plain admitted content, no omitted line.
-    return { fits: true, text: headPart + buildBody(admitted), omitted: [] };
+    return {
+      fits: true,
+      text: headPart + buildBody(admitted),
+      omitted: [],
+      admittedSource: [preamble, ...admitted.map((a) => a.text)],
+    };
   }
 
   const currentAdmitted = [...admitted];
@@ -396,8 +408,9 @@ function admitPrimarySections(
     const omittedLine = omittedLineText(omittedInFileOrder, primaryName, access, dirDisplay);
     const body = buildBody(currentAdmitted);
     const candidate = headPart + body + (body === "" ? "" : "\n") + omittedLine;
-    if (byteLen(candidate) <= coreAvail - 2) {
-      return { fits: true, text: candidate, omitted: omittedInFileOrder };
+    const admittedSource = [preamble, ...currentAdmitted.map((a) => a.text)];
+    if (byteLen(candidate) + reserveFor(admittedSource) <= coreAvail - 2) {
+      return { fits: true, text: candidate, omitted: omittedInFileOrder, admittedSource };
     }
     if (currentAdmitted.length === 0) {
       return { fits: false, text: "", omitted: [] };
@@ -409,6 +422,7 @@ function admitPrimarySections(
 // ───────────────────────────── core (primary + extra pinned) admission ─────────────────────────────
 
 interface CoreBuild {
+  reservedBytes: number;
   pieces: string[];
   level: TieredLevel;
   demotedPrimary?: FileMeta;
@@ -416,12 +430,15 @@ interface CoreBuild {
   primaryOmittedSections: string[];
 }
 
-function wholePiece(realDir: string, f: FileMeta): string {
+function wholePiece(realDir: string, f: FileMeta, project?: ProjectCapture): { text: string; unit?: ProjectUnit } {
   const raw = readRegular(realDir, f.name).text;
   const fenced = frontmatterSource(raw) === "agent";
   const fenceLine = fenced ? `${TIERED_TEMPLATES.agentSourceFence}\n` : "";
   const body = stripDriftHeader(stripFrontmatter(raw)).replace(/\s+$/, "");
-  return `### ${f.name}\n${fenceLine}${body}`;
+  return {
+    text: `### ${f.name}\n${fenceLine}${body}`,
+    ...(project === undefined ? {} : { unit: project.file(f.name, raw, body) }),
+  };
 }
 
 function buildCore(
@@ -431,8 +448,10 @@ function buildCore(
   coreAvail: number,
   access: MemoryAccess,
   dirDisplay: string,
+  project?: ProjectCapture,
 ): CoreBuild {
   const pieces: string[] = [];
+  let reservedBytes = 0;
   let used = 0;
   let level: TieredLevel = 0;
   let demotedPrimary: FileMeta | undefined;
@@ -447,15 +466,31 @@ function buildCore(
     const rawBody = stripDriftHeader(stripFrontmatter(raw));
     const wholeBody = rawBody.replace(/\s+$/, "");
     const wholeCandidate = headPart + wholeBody;
-    const wholeCost = byteLen(wholeCandidate) + 2;
+    const unit = project?.file(primary.name, raw, rawBody);
+    const reserve = unit === undefined ? 0 : project!.reserve(unit);
+    const wholeCost = byteLen(wholeCandidate) + 2 + reserve;
     if (wholeCost <= coreAvail) {
       pieces.push(wholeCandidate);
       used += wholeCost;
+      reservedBytes += reserve;
+      if (unit !== undefined) project?.track(wholeCandidate, unit);
     } else {
-      const admitted = admitPrimarySections(rawBody, headPart, coreAvail, primary.name, access, dirDisplay);
+      const admitted = admitPrimarySections(
+        rawBody,
+        headPart,
+        coreAvail,
+        primary.name,
+        access,
+        dirDisplay,
+        project !== undefined && unit !== undefined ? { capture: project, unit } : undefined,
+      );
       if (admitted.fits) {
         pieces.push(admitted.text);
-        used += byteLen(admitted.text) + 2;
+        const ranges = unit === undefined ? undefined : project?.ranges(unit, admitted.admittedSource ?? []);
+        const admittedReserve = unit === undefined || ranges === undefined ? 0 : project!.reserve(unit, ranges);
+        used += byteLen(admitted.text) + 2 + admittedReserve;
+        reservedBytes += admittedReserve;
+        if (unit !== undefined && ranges !== undefined) project?.track(admitted.text, unit, ranges);
         primaryOmittedSections = admitted.omitted;
         if (admitted.omitted.length > 0) level = 2;
       } else {
@@ -466,11 +501,15 @@ function buildCore(
   }
 
   for (const p of extraPinned) {
-    const candidate = wholePiece(realDir, p);
-    const cost = byteLen(candidate) + 2;
+    const piece = wholePiece(realDir, p, project);
+    const candidate = piece.text;
+    const reserve = piece.unit === undefined ? 0 : project!.reserve(piece.unit);
+    const cost = byteLen(candidate) + 2 + reserve;
     if (used + cost <= coreAvail) {
       pieces.push(candidate);
       used += cost;
+      reservedBytes += reserve;
+      if (piece.unit !== undefined) project?.track(candidate, piece.unit);
     } else {
       demotedPinned.push(p);
       level = Math.max(level, 3) as TieredLevel;
@@ -478,6 +517,7 @@ function buildCore(
   }
 
   return {
+    reservedBytes,
     pieces,
     level,
     ...(demotedPrimary !== undefined ? { demotedPrimary } : {}),
@@ -631,9 +671,9 @@ interface Frame {
   I: string;
 }
 
-function computeFrame(input: TieredRenderInput, metaCache: MetaCache): Frame {
+function computeFrame(input: TieredRenderInput, metaCache: MetaCache, paths?: MemoryPaths): Frame {
   const slug = toSlug(input.cwd);
-  const { displayDir, realDir, files } = gatherFiles(input.cwd, metaCache);
+  const { displayDir, realDir, files } = gatherFiles(input.cwd, metaCache, paths);
   const nonArchived = files.filter((f) => f.meta.status !== "archived");
   const archived = files.filter((f) => f.meta.status === "archived");
   const N = files.length;
@@ -651,6 +691,9 @@ function computeFrame(input: TieredRenderInput, metaCache: MetaCache): Frame {
 // ───────────────────────────── public entry points ─────────────────────────────
 
 export interface TieredRenderContext {
+  /** Optional source admission capture; absent preserves old bytes and reads. */
+  project?: ProjectCapture;
+  paths?: MemoryPaths;
   metaCache?: MetaCache;
 }
 
@@ -682,7 +725,7 @@ export function renderTiered(input: TieredRenderInput, context: TieredRenderCont
   const metaCache = context.metaCache ?? new MetaCache();
   const B = input.blockBytes;
   const C = Math.min(Math.max(0, input.coreBytes), Math.max(0, B - RESERVED_MARGIN));
-  const frame = computeFrame(input, metaCache);
+  const frame = computeFrame(input, metaCache, context.paths);
   // §2.2's closing note: "目录为空（可寻址文件 0 个）⇒返回 ''（与现状一致）" — same parity legacy's
   // `renderMemoryBlock` has (an empty/missing dir yields nothing to inject,
   // not a header-only frame). Checked AFTER `computeFrame` so it naturally
@@ -710,7 +753,7 @@ export function renderTiered(input: TieredRenderInput, context: TieredRenderCont
   const extraPinned = nonArchived.filter((f) => f.meta.pin && f !== primary).sort(byName);
   const topics = nonArchived.filter((f) => f !== primary && !extraPinned.includes(f));
 
-  const core = buildCore(primary, extraPinned, realDir, coreAvail, input.access, displayDir);
+  const core = buildCore(primary, extraPinned, realDir, coreAvail, input.access, displayDir, context.project);
   let level: TieredLevel = core.level;
 
   const activeTopics = topics.filter((f) => f.meta.status === "active").sort(byName);
@@ -729,7 +772,7 @@ export function renderTiered(input: TieredRenderInput, context: TieredRenderCont
 
   const corePart = core.pieces.length > 0 ? core.pieces.join("\n\n") : undefined;
   const prefixJoined = corePart !== undefined ? `${H}\n\n${corePart}` : H;
-  const restBudget = B - byteLen(prefixJoined);
+  const restBudget = B - byteLen(prefixJoined) - core.reservedBytes;
   const availableForIndexPart = restBudget - 4 - byteLen(S);
 
   const maxK = input.profile === "core" ? 0 : Math.min(input.indexMax, candidates.length);
@@ -776,7 +819,7 @@ export function renderTiered(input: TieredRenderInput, context: TieredRenderCont
 export function minimalFrame(input: TieredRenderInput, context: TieredRenderContext = {}): string {
   if (input.profile === "none") return "";
   const metaCache = context.metaCache ?? new MetaCache();
-  const frame = computeFrame(input, metaCache);
+  const frame = computeFrame(input, metaCache, context.paths);
   if (frame.N === 0) return ""; // parity with renderTiered's empty-dir short-circuit (I-M1c)
   return frame.M;
 }

@@ -41,6 +41,8 @@ export interface SectionProviderInput {
   ctx: ExtensionContext;
   promptText: string;
   optionsCwd?: string;
+  /** Internal invocation identity is this object, never ctx/prompt text. */
+  phase?: "turn" | "seed";
 }
 
 export type SectionProvider = (input: SectionProviderInput) => Live;
@@ -75,6 +77,11 @@ export interface SectionRegistration {
    * gates. This does not retract frozen history or clear wake replay / foreign tails.
    */
   invalidateIf?: (input: SectionProviderInput) => boolean;
+  /** Project-only opt-in provenance recovery: reset ONLY this name, then sample in this
+   * SAME invocation. Unlike invalidateIf this does not skip the provider.
+   * Absent for old registrations; project scopes-on uses it for restored
+   * snapshots lacking a source manifest. A throw fails closed own-only. */
+  resampleIf?: (input: SectionProviderInput) => boolean;
 }
 
 export interface PromptSectionHubOpts {
@@ -288,6 +295,22 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
     return true;
   }
 
+  function resampleStableSection(
+    name: SectionName,
+    registration: SectionRegistration,
+    input: SectionProviderInput,
+    mode: SystemPromptMode,
+  ): boolean {
+    if (name !== "pi_project_memory" || mode !== "stable" || registration.resampleIf === undefined) return false;
+    try {
+      if (registration.resampleIf(input)) states.set(name, initialSectionState());
+      return false;
+    } catch {
+      states.set(name, initialSectionState());
+      return true; // no fallback to unproven snapshot
+    }
+  }
+
   function sectionTexts(
     input: SectionProviderInput,
     mode: SystemPromptMode,
@@ -297,6 +320,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
     const updates: RenderUpdate[] = [];
     for (const [name, registration] of registrations) {
       if (invalidateStableSection(name, registration, input, mode)) continue;
+      if (resampleStableSection(name, registration, input, mode)) continue;
       try {
         if (registration.skipIf?.(input)) continue;
         const live = callProvider(registration, input);
@@ -347,10 +371,11 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
   }
 
   function seedSections(ctx: ExtensionContext, promptText: string, mode: SystemPromptMode): string {
-    const input: SectionProviderInput = { ctx, promptText };
+    const input: SectionProviderInput = { ctx, promptText, phase: "seed" };
     const texts: string[] = [];
     for (const [name, registration] of registrations) {
       if (invalidateStableSection(name, registration, input, mode)) continue;
+      if (resampleStableSection(name, registration, input, mode)) continue;
       try {
         if (registration.skipIf?.(input)) continue;
         if (mode === "legacy") {
@@ -383,6 +408,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
     const input: SectionProviderInput = {
       ctx,
       promptText: event.systemPrompt,
+      phase: "turn",
       ...(event.systemPromptOptions?.cwd === undefined ? {} : { optionsCwd: event.systemPromptOptions.cwd }),
     };
     const { texts, updates } = sectionTexts(input, mode, mode === "stable");
