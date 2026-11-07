@@ -33,7 +33,7 @@
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { withMemoryDirLock } from "../lock.js";
-import { createBlockLocked, readCorpus, replaceBlockLocked, trashBlockLocked } from "../blocks/store.js";
+import { createBlockLocked, readCorpus, replaceBlockLocked } from "../blocks/store.js";
 import { isExpired, type BlockMeta, type ParsedBlock } from "../blocks/format.js";
 import {
   createExclusive,
@@ -46,6 +46,7 @@ import {
 import { MemoryError } from "../paths.js";
 import {
   checkHubSlot,
+  captureHubSlotIdentity,
   defaultIo,
   hubMemoryRoot,
   dirSecurityMatches,
@@ -88,6 +89,13 @@ import {
   type RawRecord,
   type RawValue,
 } from "./limits.js";
+import {
+  createHubManagement,
+  archiveHubDeleteLocked,
+  validateHubArchive,
+  completeHubCorpus,
+  type HubManagementPort,
+} from "./hub-management.js";
 import { renderHubItems, crossLayerDupMarkers } from "./render.js";
 import type { FoldedSessionItem } from "./types.js";
 
@@ -136,7 +144,7 @@ export interface HubItemsFileV1 {
 const GRANT_VIA = new Set(["dialog", "command"]);
 const GRANT_BY = new Set(["agent", "user"]);
 
-function parseProvenanceEntry(unknown: RawValue): HubProvenanceEntry | undefined {
+export function parseProvenanceEntry(unknown: RawValue): HubProvenanceEntry | undefined {
   if (typeof unknown !== "object" || unknown === null || Array.isArray(unknown)) return undefined;
   const record = unknown as RawRecord;
   const keys = Object.keys(record);
@@ -212,7 +220,7 @@ export function parseHubItemsFile(text: string): HubItemsFileV1 | undefined {
   return { v: 1, items: out };
 }
 
-const serializeHubItemsFile = (items: ReadonlyMap<string, HubProvenanceEntry>): string => {
+export const serializeHubItemsFile = (items: ReadonlyMap<string, HubProvenanceEntry>): string => {
   const record: Record<string, unknown> = {};
   const ids = [...items.keys()].sort();
   for (const id of ids) {
@@ -310,7 +318,7 @@ const activeHubBlocks = (blocks: readonly ParsedBlock[], today: string): readonl
       isHubTopic(b.topic),
   );
 
-const blockToItem = (block: ParsedBlock, provenance: HubProvenanceEntry): HubItem | undefined => {
+export const blockToItem = (block: ParsedBlock, provenance: HubProvenanceEntry): HubItem | undefined => {
   if (!isMemoryTimestamp(block.meta.created) || !isMemoryTimestamp(block.meta.updated)) return undefined;
   if (provenance.updated !== block.meta.updated || provenance.rev !== block.rev) return undefined;
   const item: HubItem = {
@@ -345,11 +353,27 @@ export function readHubCorpus(
       if (check === "absent") return { state: "absent", items: [] };
       return { state: "inert", reason: check.inert, items: [] };
     }
+    completeHubCorpus({ slot, io, now: (opts.now ?? (() => new Date()))() });
     const corpus = readCorpus(join(root, "blocks"));
+    if (
+      corpus.marker === undefined ||
+      corpus.strays.length > 0 ||
+      corpus.blocks.some(
+        (b) =>
+          b.errors.length > 0 ||
+          b.meta.storageScope !== "hub" ||
+          b.meta.authority !== "user" ||
+          b.meta.status !== "active",
+      )
+    )
+      return { state: "inert", reason: "invalid-hub-corpus", items: [] };
     const today = (opts.now ?? (() => new Date()))().toISOString().slice(0, 10);
     const itemsText = io.readUtf8File(join(root, "items.json"));
     const itemsFile = parseHubItemsFile(itemsText);
     if (itemsFile === undefined) return { state: "inert", reason: "provenance-corrupt", items: [] };
+    if (itemsFile.items.size !== corpus.blocks.length || corpus.blocks.some((b) => !itemsFile.items.has(b.id)))
+      return { state: "inert", reason: "provenance-incomplete", items: [] };
+    validateHubArchive({ slot, io, now: (opts.now ?? (() => new Date()))() });
     const items: HubItem[] = [];
     for (const block of activeHubBlocks(corpus.blocks, today)) {
       const entry = itemsFile.items.get(block.id);
@@ -360,8 +384,12 @@ export function readHubCorpus(
     }
     if (jsonUtf8Bytes(items) > HUB_MEMORY_DTO_MAX_BYTES) return { state: "inert", reason: "dto-over", items: [] };
     return { state: "ok", items };
-  } catch {
-    return { state: "inert", reason: "read-failed", items: [] };
+  } catch (err) {
+    const reason =
+      err instanceof MemoryError && err.message.startsWith("E_NAMESPACE: ")
+        ? err.message.slice("E_NAMESPACE: ".length)
+        : "read-failed";
+    return { state: "inert", reason, items: [] };
   }
 }
 
@@ -412,7 +440,7 @@ const KNOWN_CODES: readonly ScopedMemoryErrorCode[] = [
   "E_FROM_INVALID",
 ];
 
-const asCode = (err: unknown): ScopedMemoryErrorCode => {
+export const asCode = (err: unknown): ScopedMemoryErrorCode => {
   if (err instanceof MemoryError) {
     const message = err.message;
     if (message.startsWith("memory dir busy")) return "E_BUSY";
@@ -462,7 +490,7 @@ const metaFor = (): Omit<BlockMeta, "created" | "updated" | "version" | "status"
 });
 
 /** Snapshot only existing dirs; stateDir modes intentionally not restricted. */
-const assertDirectorySnapshot = (
+export const assertDirectorySnapshot = (
   ctx: HubCommitContext,
   previous?: readonly HubDirIdentity[],
   includeBlocks = true,
@@ -525,7 +553,7 @@ const readProvenanceLocked = (ctx: HubCommitContext): Map<string, HubProvenanceE
   return new Map(parsed.items);
 };
 
-const writeProvenanceAndAuditLocked = (
+export const writeProvenanceAndAuditLocked = (
   ctx: HubCommitContext,
   items: Map<string, HubProvenanceEntry>,
   liveIds: ReadonlySet<string>,
@@ -579,7 +607,7 @@ const readItemsForCapacity = (ctx: HubCommitContext): readonly HubItem[] => {
   return read.items;
 };
 
-const capacityCheck = (
+export const capacityCheck = (
   items: readonly HubItem[],
   replacingId: string | undefined,
   nextText: string | undefined,
@@ -683,6 +711,7 @@ export function commitHubUserCommandLocked(
     readonly src: HubMemorySource;
     readonly from?: string;
   },
+  recheck?: () => void,
 ): ScopedMemoryWriteResult {
   const shape = readUntrustedValue(req);
   if (!shape.ok || shape.value === null || typeof shape.value !== "object" || Array.isArray(shape.value))
@@ -710,16 +739,25 @@ export function commitHubUserCommandLocked(
     project: req.src.project,
     sid8: req.src.sid8,
   };
-  return commitPlanLocked(ctx, {
-    op: req.op,
-    provenance,
-    audit,
-    ...(req.topic !== undefined ? { topic: req.topic } : {}),
-    ...(req.targetId !== undefined ? { targetId: req.targetId } : {}),
-    ...(req.text !== undefined ? { text: req.text } : {}),
-    ...(req.expectRev !== undefined ? { expectRev: req.expectRev } : {}),
-    ...(req.from !== undefined ? { from: req.from } : {}),
-  });
+  return commitPlanLocked(
+    ctx,
+    {
+      op: req.op,
+      provenance,
+      audit,
+      ...(req.topic !== undefined ? { topic: req.topic } : {}),
+      ...(req.targetId !== undefined ? { targetId: req.targetId } : {}),
+      ...(req.text !== undefined ? { text: req.text } : {}),
+      ...(req.expectRev !== undefined ? { expectRev: req.expectRev } : {}),
+      ...(req.from !== undefined ? { from: req.from } : {}),
+    },
+    undefined,
+    undefined,
+    () => {
+      recheck?.();
+      return true;
+    },
+  );
 }
 
 function commitPlanLocked(
@@ -732,6 +770,8 @@ function commitPlanLocked(
   const root = hubMemoryRoot(ctx.slot);
   const blocksDir = join(root, "blocks");
   let mutationAttempted = false;
+  let blockAttempted = false;
+  let blockCommitted = false;
   try {
     // Same private-sidecar validator on both paths, before any mutating IO.
     const metadata = readUntrustedValue(plan.provenance);
@@ -764,12 +804,21 @@ function commitPlanLocked(
     }
     const provenance = readProvenanceLocked(ctx);
     const identity = assertDirectorySnapshot(ctx);
+    const namespaceBytes = ctx.io.readUtf8File(join(root, "namespace.json"));
+    const namespaceStat = ctx.io.statFile(join(root, "namespace.json"));
     ctx.faults?.beforeBlockWrite?.();
+    assertDirectorySnapshot(ctx, identity);
+    if (
+      namespaceBytes !== ctx.io.readUtf8File(join(root, "namespace.json")) ||
+      JSON.stringify(namespaceStat) !== JSON.stringify(ctx.io.statFile(join(root, "namespace.json")))
+    )
+      throw new MemoryError("E_NAMESPACE: namespace CAS");
     assertDirectorySnapshot(ctx, identity);
     ensureSlotOkLocked(ctx);
     checkGate(ctx);
     if (recheck?.() === false) throw new MemoryError("E_HUB_CAP_STALE");
     mutationAttempted = true;
+    blockAttempted = true;
     let id: string;
     let rev: string | undefined;
     if (plan.op === "create") {
@@ -798,20 +847,34 @@ function commitPlanLocked(
       rev = updated.rev;
       provenance.set(id, { ...plan.provenance, updated: updated.meta.updated, rev: updated.rev });
     } else {
-      trashBlockLocked(blocksDir, `${plan.targetId}.md`, plan.expectRev!, blocksGateOf(ctx.gate));
+      archiveHubDeleteLocked(ctx, plan.targetId!, plan.expectRev!, provenance.get(plan.targetId!)!, () => {
+        assertDirectorySnapshot(ctx, identity);
+        ensureSlotOkLocked(ctx);
+        checkGate(ctx);
+        if (recheck?.() === false) throw new MemoryError("E_HUB_CAP_STALE");
+      });
       id = plan.targetId!;
       rev = undefined;
       provenance.delete(id);
     }
+    blockCommitted = true;
     ctx.faults?.afterBlockWrite?.();
     const liveIds = new Set(current.map((item) => item.id));
     if (plan.op === "delete") liveIds.delete(id);
     else liveIds.add(id);
     writeProvenanceAndAuditLocked(ctx, provenance, liveIds, plan.audit);
+    if (
+      readHubCorpus(ctx.slot, {
+        io: ctx.io,
+        now: () => ctx.now,
+        ...(ctx.expectedHost !== undefined ? { expectedHost: ctx.expectedHost } : {}),
+      }).state !== "ok"
+    )
+      throw new MemoryError("E_PERSIST_UNKNOWN: hub post-write verification failed");
     if (registry !== undefined && cap !== undefined) {
       if (!registry.consume(cap)) {
         registry.revoke(cap);
-        return { ok: false, code: "E_HUB_CAP_STALE" };
+        return { ok: false, code: "E_PERSIST_UNKNOWN" };
       }
     }
     // Hub writes are durable regular files; `appended` here means "written to the persistent
@@ -821,6 +884,8 @@ function commitPlanLocked(
     if (registry !== undefined && cap !== undefined) registry.revoke(cap);
     if (ENOENT(err) && !mutationAttempted) return { ok: false, code: "E_NOT_FOUND" };
     const code = asCode(err);
+    if (blockCommitted || (blockAttempted && ["E_NAMESPACE", "E_WRITE_GATE", "E_HUB_CAP_STALE"].includes(code)))
+      return { ok: false, code: "E_PERSIST_UNKNOWN" };
     return { ok: false, code: mutationAttempted && (code === "E_PERSIST" || ENOENT(err)) ? "E_PERSIST_UNKNOWN" : code };
   }
 }
@@ -858,12 +923,16 @@ export interface HubProviderDeps {
   readonly now?: () => Date;
   readonly queueLimit?: number;
   readonly lockTimeoutMs?: number;
+  /** Host-only native-main-TUI command predicate; never sourced from model/wire fields. */
+  readonly trustedCommand?: () => boolean;
+  readonly commandSource?: () => HubMemorySource;
 }
 
 export interface HubMemoryPort {
   view(): HubMemoryView;
   render(): string;
   enqueue(request: HubMemoryWrite): Promise<ScopedMemoryWriteResult>;
+  readonly management: HubManagementPort;
   dispose(): void;
 }
 
@@ -908,125 +977,67 @@ export function createHubMemoryProvider(deps: HubProviderDeps): HubMemoryPort {
 
   const fail = (code: ScopedMemoryErrorCode): ScopedMemoryWriteResult => ({ ok: false, code });
 
-  const enqueue = (request: HubMemoryWrite): Promise<ScopedMemoryWriteResult> => {
-    const rejectAdmission = (code: ScopedMemoryErrorCode): Promise<ScopedMemoryWriteResult> => {
-      if (request.cap !== undefined) deps.registry.revoke(request.cap);
-      return Promise.resolve(fail(code));
+  // One bounded FIFO and one lock path for ALL writers, including management. The
+  // lock protects the pre-await directory identities, not merely a path string.
+  const schedule = (
+    owner: MemoryOwner,
+    signal: AbortSignal | undefined,
+    allowInert: boolean,
+    body: (ctx: HubCommitContext, recheck: () => void) => ScopedMemoryWriteResult,
+    validate?: () => void,
+  ): Promise<ScopedMemoryWriteResult> => {
+    if (pending >= queueLimit) return Promise.resolve(fail("E_BUSY"));
+    if (disposed) return Promise.resolve(fail("E_STALE_SESSION"));
+    const slot = { ...deps.slot() };
+    const recheck = () => {
+      validate?.();
+      if (disposed || !sameHubOwner(owner, deps.owner())) throw new MemoryError("E_STALE_SESSION");
+      if (signal?.aborted) throw new MemoryError("E_HUB_CAP_STALE");
+      if (deps.capability() !== "ok") throw new MemoryError("E_SCOPE_DISABLED");
+      if (deps.isChildSession?.() === true) throw new MemoryError("E_CHILD_READONLY");
+      const latest = deps.slot();
+      if (latest.uid !== slot.uid || latest.effectiveStateDir !== slot.effectiveStateDir)
+        throw new MemoryError("E_NAMESPACE");
+      if (deps.gate && !deps.gate.check({ sessionDir: hubMemoryRoot(slot) }).ok) throw new MemoryError("E_WRITE_GATE");
     };
-    // — admission: pure checks, zero disk —
-    if (disposed) return rejectAdmission("E_STALE_SESSION");
-    if (pending >= queueLimit) return rejectAdmission("E_BUSY");
-    if (deps.capability() !== "ok") return rejectAdmission("E_SCOPE_DISABLED");
-    if (deps.isChildSession?.() === true) return rejectAdmission("E_CHILD_READONLY");
-    const op = request.operation;
-    if (op.storageScope !== "hub" || op.authority !== "user") return rejectAdmission("E_AUTHORITY");
-    if (op.op === "create") {
-      if (op.topic === undefined || !isHubTopic(op.topic)) return rejectAdmission("E_META_INVALID");
-      if (op.text === undefined || utf8Bytes(op.text) > MEMORY_ITEM_MAX_BYTES) return rejectAdmission("E_TOO_LARGE");
-    } else {
-      if (op.targetId === undefined || !isHubMemoryId(op.targetId)) return rejectAdmission("E_META_INVALID");
-      if (op.expectRev === undefined) return rejectAdmission("E_REV_REQUIRED");
-      if (op.op === "update" && (op.text === undefined || utf8Bytes(op.text!) > MEMORY_ITEM_MAX_BYTES))
-        return rejectAdmission("E_TOO_LARGE");
-    }
-    if (op.from !== undefined && !isFromRef(op.from)) return rejectAdmission("E_FROM_INVALID");
-    const reserved = deps.registry.reserve(request.cap, request.owner);
-    if (reserved === undefined) return rejectAdmission("E_HUB_CAP_STALE");
-
     pending++;
-    const run = async (): Promise<ScopedMemoryWriteResult> => {
-      const refuse = (code: ScopedMemoryErrorCode): ScopedMemoryWriteResult => {
-        deps.registry.revoke(request.cap);
-        return fail(code);
-      };
+    const run = async () => {
       try {
-        // — dequeue recheck: owner/signal/cap still live (zero disk on any failure) —
-        if (disposed) return refuse("E_STALE_SESSION");
-        if (request.signal?.aborted) return refuse("E_HUB_CAP_STALE");
-        if (deps.registry.check(request.cap, request.owner) === undefined) return refuse("E_HUB_CAP_STALE");
-        const ownerNow = deps.owner();
-        if (
-          ownerNow.incarnation !== request.owner.incarnation ||
-          ownerNow.sid !== request.owner.sid ||
-          ownerNow.sessionEpoch !== request.owner.sessionEpoch ||
-          ownerNow.branchGen !== request.owner.branchGen ||
-          ownerNow.sessionFile !== request.owner.sessionFile
-        )
-          return refuse("E_STALE_SESSION");
-        if (deps.isChildSession?.() === true) return refuse("E_CHILD_READONLY");
-        if (deps.capability() !== "ok") return refuse("E_SCOPE_DISABLED");
-        // Read-only slot verdict: inert ⇒ refuse with ZERO creation; absent ⇒ materialize the
-        // (empty, 0700) root so the directory lock can be taken — content still only appears
-        // after every in-lock recheck passes (an interrupted first write leaves an empty dir,
-        // which checkHubSlot keeps classifying as "absent", never inert).
-        const slot = deps.slot();
-        const slotCheck = checkHubSlot(slot, {
+        recheck();
+        const ctx: HubCommitContext = {
+          slot,
           io,
-          ...(hubHostFingerprint() !== undefined ? { expectedHost: hubHostFingerprint() } : {}),
-        });
-        if (slotCheck !== "absent" && slotCheck !== "ok") return refuse("E_NAMESPACE");
-        if (slotCheck === "absent") io.ensureDir(hubMemoryRoot(slot));
-        const lockIdentity = assertDirectorySnapshot({ slot, io, now: now() }, undefined, false);
+          now: now(),
+          expectedHost: hubHostFingerprint(),
+          ...(deps.gate ? { gate: deps.gate } : {}),
+          ...(deps.faults ? { faults: deps.faults } : {}),
+        };
+        const checked = checkHubSlot(slot, { io, expectedHost: hubHostFingerprint() });
+        if (!allowInert && checked !== "ok" && checked !== "absent") throw new MemoryError("E_NAMESPACE");
+        if (checked === "absent" && !allowInert) io.ensureDir(hubMemoryRoot(slot));
+        const identities = assertDirectorySnapshot(ctx, undefined, false);
+        let lockSnapshot: string;
+        try {
+          lockSnapshot = captureHubSlotIdentity(slot, io);
+        } catch {
+          throw new MemoryError("E_NAMESPACE");
+        }
         return await withMemoryDirLock(
           hubMemoryRoot(slot),
           () => {
-            // The lock must still protect the exact dirs inspected before its await.
-            assertDirectorySnapshot({ slot, io, now: now() }, lockIdentity, false);
-            const slotNow = deps.slot();
-            if (slotNow.effectiveStateDir !== slot.effectiveStateDir || slotNow.uid !== slot.uid)
-              return refuse("E_NAMESPACE");
-            // — in-lock: last recheck, then the single synchronous commit —
-            if (disposed) return refuse("E_STALE_SESSION");
-            if (deps.capability() !== "ok") return refuse("E_SCOPE_DISABLED");
-            if (deps.isChildSession?.() === true) return refuse("E_CHILD_READONLY");
-            if (deps.registry.check(request.cap, request.owner) === undefined) return refuse("E_HUB_CAP_STALE");
-            if (request.signal?.aborted) return refuse("E_HUB_CAP_STALE");
-            const ownerInLock = deps.owner();
-            if (
-              ownerInLock.incarnation !== request.owner.incarnation ||
-              ownerInLock.sid !== request.owner.sid ||
-              ownerInLock.sessionEpoch !== request.owner.sessionEpoch ||
-              ownerInLock.branchGen !== request.owner.branchGen ||
-              ownerInLock.sessionFile !== request.owner.sessionFile
-            )
-              return refuse("E_STALE_SESSION");
-            return commitHubOpLocked(
-              {
-                slot,
-                io,
-                now: now(),
-                expectedHost: hubHostFingerprint(),
-                ...(deps.faults !== undefined ? { faults: deps.faults } : {}),
-                ...(deps.gate !== undefined ? { gate: deps.gate } : {}),
-              },
-              reserved,
-              {
-                cap: request.cap,
-                owner: ownerInLock,
-                registry: deps.registry,
-                recheck: () => {
-                  const current = deps.owner();
-                  return (
-                    !disposed &&
-                    !request.signal?.aborted &&
-                    deps.capability() === "ok" &&
-                    deps.isChildSession?.() !== true &&
-                    current.incarnation === request.owner.incarnation &&
-                    current.sid === request.owner.sid &&
-                    current.sessionFile === request.owner.sessionFile &&
-                    current.branchGen === request.owner.branchGen &&
-                    current.sessionEpoch === request.owner.sessionEpoch
-                  );
-                },
-              },
-            );
+            assertDirectorySnapshot(ctx, identities, false);
+            try {
+              if (lockSnapshot !== captureHubSlotIdentity(slot, io)) throw new Error("changed");
+            } catch {
+              throw new MemoryError("E_NAMESPACE");
+            }
+            recheck();
+            return body(ctx, recheck);
           },
           { timeoutMs: deps.lockTimeoutMs ?? HUB_LOCK_TIMEOUT_MS },
         );
       } catch (err) {
-        // Unknown IO effects are not retried; every observed failure revokes this cap.
-        if (err instanceof MemoryError && err.message.startsWith("memory dir busy")) return refuse("E_BUSY");
-        return refuse(asCode(err));
+        return fail(asCode(err));
       } finally {
         pending--;
       }
@@ -1039,11 +1050,75 @@ export function createHubMemoryProvider(deps: HubProviderDeps): HubMemoryPort {
     return result;
   };
 
+  const enqueue = (request: HubMemoryWrite): Promise<ScopedMemoryWriteResult> => {
+    const reject = (code: ScopedMemoryErrorCode) => {
+      deps.registry.revoke(request.cap);
+      return Promise.resolve(fail(code));
+    };
+    try {
+      if (disposed) return reject("E_STALE_SESSION");
+      if (deps.capability() !== "ok") return reject("E_SCOPE_DISABLED");
+      if (deps.isChildSession?.() === true) return reject("E_CHILD_READONLY");
+      const shape = readUntrustedValue(request.operation);
+      if (!shape.ok || !shape.value || typeof shape.value !== "object" || Array.isArray(shape.value))
+        return reject("E_META_INVALID");
+      const op = Object.freeze(shape.value) as unknown as HubMemoryWrite["operation"];
+      if (op.storageScope !== "hub" || op.authority !== "user") return reject("E_AUTHORITY");
+      const reserved = deps.registry.reserve(request.cap, request.owner);
+      if (!reserved) return reject("E_HUB_CAP_STALE");
+      const matches = () => {
+        const live = deps.registry.check(request.cap, request.owner);
+        return (
+          live !== undefined &&
+          scopedOpDigest(op as unknown as Record<string, unknown>) === live.binding.opDigest &&
+          scopedOpDigest(live.operation as unknown as Record<string, unknown>) === live.binding.opDigest &&
+          bodyTextDigest(op.text ?? "") === live.binding.textDigest
+        );
+      };
+      if (!matches()) return reject("E_HUB_CAP_STALE");
+      return schedule({ ...request.owner }, request.signal, false, (ctx, recheck) => {
+        recheck();
+        if (!matches()) return fail("E_HUB_CAP_STALE");
+        return commitHubOpLocked(ctx, reserved, {
+          cap: request.cap,
+          owner: request.owner,
+          registry: deps.registry,
+          recheck: () => {
+            try {
+              recheck();
+              return matches();
+            } catch {
+              return false;
+            }
+          },
+        });
+      }).then((result) => {
+        if (!result.ok) deps.registry.revoke(request.cap);
+        return result;
+      });
+    } catch (err) {
+      return reject(asCode(err));
+    }
+  };
+
+  const management = createHubManagement({
+    io,
+    slot: deps.slot,
+    owner: deps.owner,
+    now,
+    available: () => !disposed && deps.capability() === "ok" && deps.isChildSession?.() !== true,
+    trustedCommand: () => deps.trustedCommand?.() === true,
+    ...(deps.commandSource ? { source: deps.commandSource } : {}),
+    schedule,
+  });
+
   return {
     view,
     render,
     enqueue,
+    management,
     dispose(): void {
+      management.dispose();
       disposed = true;
     },
   };
@@ -1051,3 +1126,11 @@ export function createHubMemoryProvider(deps: HubProviderDeps): HubMemoryPort {
 
 /** Current-project slug formula shared by render and future P4 assembly (one formula). */
 export const projectSlugOf = (label: string): string => sha256Hex(label).slice(0, 12);
+
+/** Full owner equality including session-file identity (registry's historical comparator is narrower). */
+export const sameHubOwner = (a: MemoryOwner, b: MemoryOwner): boolean =>
+  a.incarnation === b.incarnation &&
+  a.sid === b.sid &&
+  a.sessionFile === b.sessionFile &&
+  a.sessionEpoch === b.sessionEpoch &&
+  a.branchGen === b.branchGen;

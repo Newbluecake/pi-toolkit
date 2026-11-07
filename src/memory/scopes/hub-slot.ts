@@ -242,3 +242,24 @@ export function dirSecurityMatches(st: HubDirIdentity, uid: number, privateMode 
     (!privateMode || (st.mode & 0o077) === 0)
   );
 }
+
+/** P3c lock-await CAS. Read-only; includes absent optional directories and namespace
+ * bytes as well as no-follow file identity. File uid is not part of safe-fs's API.
+ * Directory uid/mode/devino are always mandatory; no repair/chmod is performed. */
+export function captureHubSlotIdentity(slot: HubSlotRef, io: HubSlotIo = defaultIo): string {
+  const root = hubMemoryRoot(slot);
+  const dirs = [slot.effectiveStateDir, root, join(root, "blocks"), join(root, "blocks", ".trash")].map((path, i) => {
+    const st = io.inspectDir(path);
+    if (i >= 2 && st === undefined) return [path, null];
+    if (!st || st === "not-dir" || !dirSecurityMatches(st, slot.uid, i !== 0))
+      throw new Error("unsafe hub directory identity");
+    return [path, st];
+  });
+  const path = join(root, "namespace.json");
+  const st = io.statFile(path);
+  if (st === "not-file" || (st && (st.mode & 0o777) !== 0o600)) throw new Error("unsafe hub namespace");
+  const bytes = st ? io.readUtf8File(path) : null;
+  const after = io.statFile(path);
+  if (JSON.stringify(after) !== JSON.stringify(st)) throw new Error("hub namespace changed");
+  return JSON.stringify({ slot, dirs, namespace: [st ?? null, bytes] });
+}
