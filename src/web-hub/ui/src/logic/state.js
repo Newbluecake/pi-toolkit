@@ -85,6 +85,7 @@
  * @typedef {{ runId: string, tapId?: string | undefined, lastSeq: number, items: Item[],
  *   keys: Set<string>, entryIds: Set<string>, uid: number, streaming: any, tools: LiveTool[],
  *   toolDurations: Map<string, number>,
+ *   generation: Map<string, import("../../../protocol/message-generation.ts").GenerationCore>, genLog: any[],
  *   history: "none" | "waiting" | "loaded" | "error", historyError?: string | undefined,
  *   reason?: string | undefined, hasMore: boolean, oldestEntryId?: string | undefined, paging: boolean,
  *   terminal: boolean, status: string, live: boolean, source?: "live" | "file" | undefined,
@@ -96,6 +97,7 @@
  *   items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number,
  *   lastSeq: number, streaming: any | null, tools: LiveTool[],
  *   toolDurations: Map<string, number>,
+ *   generation: Map<string, import("../../../protocol/message-generation.ts").GenerationCore>, genLog: any[],
  *   history: "none" | "waiting" | "loaded" | "error", historyError?: string | undefined,
  *   hasMore: boolean, oldestEntryId?: string | undefined, paging: boolean,
  *   needsResync: boolean, sub: Sub | null, abandoned: boolean,
@@ -130,6 +132,7 @@ import { isCmdRecordWire } from "./cmdRecord.ts";
 import { isLoadGateWireLike, isLoadWireLike, parseLoadTopWire } from "./load.js";
 import { SCHED_CAP, SCHED_EVENT, isSchedulesPayloadLike } from "./schedule.js";
 import { SSE_EVENTS } from "@protocol/http-contract.ts";
+import { generationHistoryIndex, WEB_MESSAGE_SPEED_ENTRY_TYPE } from "@protocol/message-generation.ts";
 
 /**
  * Anti-drift pin (verifier r1 #2, P2 打回): `"agent_removed"` has no standalone named export in
@@ -1192,8 +1195,20 @@ function sameSession(a, b) {
 function applySession(a, session) {
   const card = { ...a.card, session };
   if (sameSession(a.session, session) || a.session === undefined) return { ...a, session, card };
+  // task58 §5.3: a replaced session drops the generation map/log with the rest of the scope —
+  // the fresh `history` rebuilds both from exactly its own loaded entries.
   if (a.history === "none")
-    return { ...a, session, card, items: [], keys: new Set(), entryIds: new Set(), toolDurations: new Map() };
+    return {
+      ...a,
+      session,
+      card,
+      items: [],
+      keys: new Set(),
+      entryIds: new Set(),
+      toolDurations: new Map(),
+      generation: new Map(),
+      genLog: [],
+    };
   return {
     ...a,
     session,
@@ -1205,6 +1220,8 @@ function applySession(a, session) {
     streaming: null,
     tools: [],
     toolDurations: new Map(),
+    generation: new Map(),
+    genLog: [],
     history: "waiting",
     hasMore: false,
     oldestEntryId: undefined,
@@ -1261,8 +1278,12 @@ function entryItem(entry) {
  * (the projected `subagent:web-tool-timing` tombstones) still render nothing, but their
  * toolCallId → durationMs pairs are collected into `durations` (this batch only — callers
  * own the merge) so history-reloaded tool cards can show their durations.
+ * task58 §5.3: generation-relevant entries (assistant message entries + `subagent:web-msg-speed`
+ * custom tombstones, AFTER the entry-id dedupe) are kept in order in `genLog` — the caller
+ * merges/logs them and rebuilds the mid→core map through the protocol's single
+ * `generationHistoryIndex` (never a second bounds/key ruleset here).
  * @param {AgentState} a @param {any[]} entries
- * @returns {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, durations: Map<string, number> }}
+ * @returns {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, durations: Map<string, number>, genLog: any[] }}
  */
 function buildItems(a, entries) {
   const keys = new Set(a.keys);
@@ -1272,9 +1293,19 @@ function buildItems(a, entries) {
   const items = [];
   /** @type {Map<string, number>} */
   const durations = new Map();
+  /** @type {any[]} */
+  const genLog = [];
   for (const entry of entries) {
     if (!entry || typeof entry.id !== "string" || entryIds.has(entry.id)) continue;
     entryIds.add(entry.id);
+    const genRelevant =
+      entry.type === "custom"
+        ? entry.customType === WEB_MESSAGE_SPEED_ENTRY_TYPE
+        : entry.type === "message" &&
+          entry.message !== null &&
+          typeof entry.message === "object" &&
+          entry.message.role === "assistant";
+    if (genRelevant) genLog.push(entry);
     if (entry.type === "custom" && entry.timing && typeof entry.timing === "object") {
       for (const [id, ms] of Object.entries(entry.timing)) {
         if (typeof id === "string" && id !== "" && typeof ms === "number" && Number.isFinite(ms) && ms >= 0)
@@ -1289,7 +1320,19 @@ function buildItems(a, entries) {
     }
     items.push({ ...it, id: `e:${entry.id}:${uid++}` });
   }
-  return { items, keys, entryIds, uid, durations };
+  return { items, keys, entryIds, uid, durations, genLog };
+}
+
+/**
+ * task58 §5.3: the ordered generation log is capped defensively (the MAP's 512 cap is enforced
+ * by `generationHistoryIndex` itself; this only bounds reducer memory against an agent that
+ * floods speed tombstones — assistant entries are already retained via items, and 8× the map
+ * cap leaves the last-512-live semantics untouched for any realistic stream). Trims the OLDEST
+ * (head) — same direction as "较旧项隐藏".
+ * @param {any[]} log
+ */
+function capGenerationLog(log) {
+  return log.length > GENERATION_LOG_CAP ? log.slice(log.length - GENERATION_LOG_CAP) : log;
 }
 
 // ---------------------------------------------------------------------------
@@ -1300,19 +1343,24 @@ function buildItems(a, entries) {
 // seq/tapId/terminal rules from §3.3 on top.
 // ---------------------------------------------------------------------------
 
+/** task58: reducer-side ceiling for the generation log (see `capGenerationLog`). */
+const GENERATION_LOG_CAP = 4096;
+
 /**
  * A history snapshot wholesale replaces the transcript core (fresh sets — dedupe state does
  * NOT carry over), folds `tailMessages`, derives `streaming`/live `tools` from `inflight`,
- * and lands `lastSeq = fromSeq - 1`.
+ * and lands `lastSeq = fromSeq - 1`. task58 §5.3: the generation map is rebuilt FRESH from
+ * exactly this snapshot's loaded entries (never carried over from the previous scope).
  * @param {{ uid: number }} _c (core — only `uid` seeds the fresh id counter)
  * @param {any} d
- * @returns {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, streaming: any, tools: LiveTool[], lastSeq: number, hasMore: boolean, oldestEntryId: string | undefined }}
+ * @returns {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, streaming: any, tools: LiveTool[], lastSeq: number, hasMore: boolean, oldestEntryId: string | undefined, generation: Map<string, any>, genLog: any[] }}
  */
 function historyCore(_c, d) {
   const built = buildItems(
     { items: [], keys: new Set(), entryIds: new Set(), uid: _c.uid },
     Array.isArray(d.entries) ? d.entries : [],
   );
+  const genLog = capGenerationLog(built.genLog);
   let uid = built.uid;
   const items = built.items;
   const keys = built.keys;
@@ -1344,6 +1392,8 @@ function historyCore(_c, d) {
     toolDurations: built.durations,
     hasMore: d.hasMore === true,
     oldestEntryId: typeof d.oldestEntryId === "string" ? d.oldestEntryId : undefined,
+    generation: generationHistoryIndex(genLog),
+    genLog,
   };
 }
 
@@ -1351,14 +1401,19 @@ function historyCore(_c, d) {
  * One older page prepends its entries ahead of the existing items; dedupe state carries over.
  * Tool-duration plan: timing entries in the older page MERGE into the existing duration map
  * (same map reference kept when the page carried none — no-op ⇒ same-state stays intact).
- * @param {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, toolDurations: Map<string, number>, oldestEntryId?: string | undefined }} c
+ * task58 §5.3: the generation log is rebuilt in LOADED order (page entries ahead of the
+ * existing log) so the map's last-512-live semantics match a wholesale rebuild; the map is
+ * then re-derived through `generationHistoryIndex` (same reference kept when the page carried
+ * no generation-relevant entries).
+ * @param {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, toolDurations: Map<string, number>, genLog?: any[] | undefined, oldestEntryId?: string | undefined }} c
  * @param {any} d
- * @returns {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, toolDurations: Map<string, number>, hasMore: boolean, oldestEntryId: string | undefined }}
+ * @returns {{ items: Item[], keys: Set<string>, entryIds: Set<string>, uid: number, toolDurations: Map<string, number>, hasMore: boolean, oldestEntryId: string | undefined, generation: Map<string, any>, genLog: any[] }}
  */
 function pageCore(c, d) {
   const built = buildItems(c, Array.isArray(d.entries) ? d.entries : []);
   const toolDurations =
     built.durations.size === 0 ? c.toolDurations : new Map([...c.toolDurations, ...built.durations]);
+  const genLog = capGenerationLog([...built.genLog, ...(c.genLog ?? [])]);
   return {
     items: [...built.items, ...c.items],
     keys: built.keys,
@@ -1367,6 +1422,8 @@ function pageCore(c, d) {
     toolDurations,
     hasMore: d.hasMore === true,
     oldestEntryId: typeof d.oldestEntryId === "string" ? d.oldestEntryId : c.oldestEntryId,
+    generation: generationHistoryIndex(genLog),
+    genLog,
   };
 }
 
@@ -1394,12 +1451,22 @@ function applyPage(a, d) {
 }
 
 /** SSE `append` (spike K7④): entries the event stream never carried. Timing entries fold
- *  their durations in the same pass. @param {AgentState} a @param {any[]} entries */
+ *  their durations in the same pass. task58 §5.3: appended generation-relevant entries extend
+ *  the log (loaded order) and the map is re-derived through `generationHistoryIndex` — the
+ *  same cap/last-valid-wins rules as a wholesale rebuild, never an incremental merge of our
+ *  own. @param {AgentState} a @param {any[]} entries */
 function appendEntries(a, entries) {
   const built = buildItems(a, entries);
-  if (built.items.length === 0 && built.entryIds.size === a.entryIds.size && built.durations.size === 0) return a;
+  if (
+    built.items.length === 0 &&
+    built.entryIds.size === a.entryIds.size &&
+    built.durations.size === 0 &&
+    built.genLog.length === 0
+  )
+    return a;
   const toolDurations =
     built.durations.size === 0 ? a.toolDurations : new Map([...a.toolDurations, ...built.durations]);
+  const genLog = capGenerationLog([...(a.genLog ?? []), ...built.genLog]);
   return {
     ...a,
     items: [...a.items, ...built.items],
@@ -1407,6 +1474,8 @@ function appendEntries(a, entries) {
     entryIds: built.entryIds,
     uid: built.uid,
     toolDurations,
+    generation: generationHistoryIndex(genLog),
+    genLog,
   };
 }
 

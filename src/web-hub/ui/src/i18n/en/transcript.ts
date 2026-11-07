@@ -92,6 +92,11 @@ const transcript = {
   cmdNeedsTerminal: "These interactive steps need the terminal: {steps}",
   cmdInteractedTerminal: "Interacted in the terminal: {steps}",
   cmdCopy: "Copy output",
+  // task58 (web-hub-tokens-speed §6, Root-approved single key): the `12.4 tokens/s` chip's
+  // tooltip — disclosure copy for the client-observed metric. The chip text itself is a fixed
+  // English token (HUD convention), never localized.
+  generationSpeedTitle:
+    "Locally observed generation speed: output tokens over the window from the first to the last generation delta. Excludes first-token wait; not a GPU-throughput measure. Only complete, fully observed replies show a value.",
 } satisfies Record<string, string>;
 
 export default transcript;

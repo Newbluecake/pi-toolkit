@@ -94,6 +94,10 @@ const transcript = {
   cmdNeedsTerminal: "以下交互步骤需在终端完成：{steps}",
   cmdInteractedTerminal: "已在终端交互：{steps}",
   cmdCopy: "复制输出",
+  // task58 (web-hub-tokens-speed §6, Root-approved single key): 与英文同 key 对齐
+  //（i18n-parity 钉死）；徽章本身固定 `tokens/s` 英文 token，不夹中文。
+  generationSpeedTitle:
+    "本地观测的生成速率：输出 token 数 ÷ 首个到最后一个生成 delta 的时间窗。不含首字等待，也非 GPU 吞吐。仅完整可观测的回复才显示数值。",
 } satisfies Messages<typeof en>;
 
 export default transcript;

@@ -15,6 +15,7 @@ import { resultText, messageKey } from "@logic/state.js";
 import { foldCmdRecords, resolveCmdState, type CmdCardView } from "../../logic/cmdRecord.js";
 import type { Item, ToolView } from "../../types.js";
 import type { TranscriptSource } from "../../contracts.js";
+import { sanitizeGenerationCore, type GenerationCore } from "@protocol/message-generation.js";
 import { DATE_CUSTOM_TYPE, parseDateMarker, type DateMarker } from "../../logic/dateMarker.js";
 import { indexTools, type ToolIndex } from "./tool-index.js";
 
@@ -31,6 +32,11 @@ export interface AssistantView {
   readonly streaming: boolean;
   readonly errorText: string;
   readonly timestamp: number | undefined;
+  /** task58 (web-hub-tokens-speed §5.1/§6): the VALIDATED generation core behind the optional
+   *  `x tokens/s` meta chip — absent ⇒ no chip. Resolved exclusively in `generationOf` (trusted
+   *  custom-entry map for history items, agent-stamped live container otherwise); streaming
+   *  never carries one. */
+  readonly generation?: GenerationCore;
 }
 
 export type TxEntry =
@@ -111,7 +117,12 @@ export function assistantBlocks(m: Record<string, unknown>, idx: ToolIndex): Ass
   return out;
 }
 
-function assistantView(m: Record<string, unknown>, idx: ToolIndex, streaming: boolean): AssistantView {
+function assistantView(
+  m: Record<string, unknown>,
+  idx: ToolIndex,
+  streaming: boolean,
+  generation?: GenerationCore,
+): AssistantView {
   const usage = m.usage as { cost?: { total?: unknown } } | undefined;
   const cost = usage?.cost?.total;
   const errorMessage = m.errorMessage;
@@ -123,10 +134,32 @@ function assistantView(m: Record<string, unknown>, idx: ToolIndex, streaming: bo
     streaming,
     errorText: m.stopReason === "error" && isNonEmptyString(errorMessage) ? errorMessage : "",
     timestamp: typeof timestamp === "number" ? timestamp : undefined,
+    ...(generation !== undefined ? { generation } : {}),
   };
 }
 
-function itemEntry(it: Item, idx: ToolIndex): TxEntry | undefined {
+/**
+ * task58 (web-hub-tokens-speed §5.2/§5.3): the ONE place a display core is resolved — never
+ * inferred from neighbours, timestamps or content.
+ * - History items (an `entryId` is present): ONLY the trusted custom-entry map (already
+ *   validated + capped by `generationHistoryIndex`). The message's own `piToolkitGeneration`
+ *   is IGNORED here even if a non-stripping peer left one — history stamps come from the
+ *   persisted custom entry or not at all.
+ * - Live/tail items (no `entryId`): the agent-stamped container on the message itself, run
+ *   through the protocol's single `sanitizeGenerationCore` (own-data, fixed bounds) — a
+ *   missing/invalid container hides.
+ */
+function generationOf(it: Item, index: ReadonlyMap<string, GenerationCore> | undefined): GenerationCore | undefined {
+  if (it.entryId !== undefined) return index?.get(it.entryId);
+  const m = it.message;
+  return sanitizeGenerationCore(m !== undefined ? (m as Record<string, unknown>).piToolkitGeneration : undefined);
+}
+
+function itemEntry(
+  it: Item,
+  idx: ToolIndex,
+  generationIndex?: ReadonlyMap<string, GenerationCore>,
+): TxEntry | undefined {
   const truncated = it.truncated === true;
   switch (it.kind) {
     case "compaction": {
@@ -167,7 +200,12 @@ function itemEntry(it: Item, idx: ToolIndex): TxEntry | undefined {
   if (!m) return undefined;
   switch (m.role) {
     case "assistant":
-      return { type: "assistant", key: it.id, assistant: assistantView(m, idx, false), truncated };
+      return {
+        type: "assistant",
+        key: it.id,
+        assistant: assistantView(m, idx, false, generationOf(it, generationIndex)),
+        truncated,
+      };
     case "user": {
       const timestamp = m.timestamp;
       return {
@@ -284,7 +322,7 @@ export function buildTxEntries(a: TranscriptSource, cmdLive?: CmdLiveContext): T
       anchors.push(anchorIdsOf(it));
       continue;
     }
-    const entry = itemEntry(it, idx);
+    const entry = itemEntry(it, idx, a.generation);
     if (!entry) continue;
     entries.push(entry);
     renderKeys.push(itemRenderKey(it, idx));

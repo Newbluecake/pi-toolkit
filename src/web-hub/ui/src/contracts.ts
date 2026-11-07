@@ -8,6 +8,7 @@
 import type { Lan2faChallenge, LanFactorBody } from "@protocol/lan-2fa.js";
 import type { AgentCard, HistoryPayload } from "@protocol/http-contract.js";
 import type { BashJobsWire, FleetRowWire, SessionInfo as WireSessionInfo } from "@protocol/messages.js";
+import type { GenerationCore } from "@protocol/message-generation.js";
 import type { IconName } from "./icons/names.js";
 import type {
   AgentCardView,
@@ -446,11 +447,20 @@ export interface RunTranscriptProps {
  * fleet-drawer plan §6.6 (F6): `Transcript.vue` 的渲染内核只吃这 8 个字段 —— 主会话传整个
  * `AgentState`(结构上兼容),抽屉传 `RunTxState` 的投影。F5 已保证两者的 items/streaming/
  * tools/history 四态同构,`buildTxEntries`/`indexTools` 随之同步收窄。
+ *
+ * task58 (web-hub-tokens-speed plan §5.3): `generation` — the mid→GenerationCore map the
+ * reducer rebuilds from exactly the current loaded entries (`generationHistoryIndex`).
+ * OPTIONAL so the frozen `AgentState`/`RunTxState` mirrors (types.ts — outside this task's
+ * file domain) and the drawer's hand-built projection stay assignable unchanged; absent ⇒
+ * history assistant items show no speed (the live stamped-core path in `entries.ts` still
+ * works — it reads the message itself, not this map).
  */
 export type TranscriptSource = Pick<
   AgentState,
   "key" | "items" | "streaming" | "tools" | "toolDurations" | "history" | "historyError" | "hasMore" | "paging"
->;
+> & {
+  readonly generation?: ReadonlyMap<string, GenerationCore> | undefined;
+};
 
 export interface TranscriptProps {
   readonly agent: TranscriptSource;
