@@ -8,6 +8,7 @@
  * （同 type 同内容的连续 custom 会撞键），只能配合 `reconcileRecent` /
  * `diffAppended` 的多重集对账使用 —— 持久化严格按事件顺序，尾部计数对账正确。
  */
+import { generationOwnData, sanitizeGenerationMetadata, WEB_MESSAGE_SPEED_ENTRY_TYPE } from "./message-generation.js";
 import { Buffer } from "node:buffer";
 import { CMD_RECORD_ENTRY_TYPE, sanitizeCmdRecord } from "./cmd-record.js";
 import { LIMITS, type WireEntry, type WireMessage } from "./messages.js";
@@ -151,7 +152,13 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
       if (m === null || typeof m !== "object" || Array.isArray(m)) return undefined;
       if (typeof (m as Record<string, unknown>).role !== "string") return undefined;
       return finish(
-        { id: r.id, parentId, type: "message", timestamp: r.timestamp, message: truncateDeep(m, flag) as WireMessage },
+        {
+          id: r.id,
+          parentId,
+          type: "message",
+          timestamp: r.timestamp,
+          message: truncateDeep(stripGeneration(m), flag) as WireMessage,
+        },
         flag,
       );
     }
@@ -174,6 +181,19 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
     }
     case "custom": {
       if (typeof r.customType !== "string") return undefined;
+      if (r.customType === WEB_MESSAGE_SPEED_ENTRY_TYPE) {
+        const generation = sanitizeGenerationMetadata(generationOwnData(r.data, "piToolkitGeneration"));
+        return {
+          id: r.id,
+          parentId,
+          type: "custom",
+          timestamp: r.timestamp,
+          customType: r.customType,
+          dataKey: customKey(r.customType, r.data),
+          display: false,
+          ...(generation !== undefined ? { piToolkitGeneration: generation } : {}),
+        };
+      }
       // tool-duration plan: `subagent:web-tool-timing` keeps the tombstone shape (display:false,
       // dataKey over the full data — dedupe/reconciliation semantics unchanged) but additionally
       // carries the bounded timing map so a freshly-attached browser can fold per-tool durations
@@ -358,4 +378,13 @@ function fnv1a32(input: string): string {
     h = Math.imul(h, 0x01000193) >>> 0;
   }
   return h.toString(16).padStart(8, "0");
+}
+
+/** Strip untrusted SDK-owned metadata before any message deep-copy. */
+function stripGeneration(value: object): Record<string, unknown> {
+  const copy: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) {
+    if (key !== "piToolkitGeneration") copy[key] = (value as Record<string, unknown>)[key];
+  }
+  return copy;
 }

@@ -96,6 +96,8 @@ import type {
 import type { XsHubLimitsWire } from "../protocol/xs.js";
 import type { XsPhase, XsStateFrame } from "../protocol/xs-activation.js";
 import { createRunTranscripts, type RunTxRunInfo, type RunTranscriptPort } from "./run-transcript.js";
+import { createMessageSpeed } from "./message-speed.js";
+import { wireMessageSpeed } from "./message-speed-wire.js";
 import { createEventTap } from "./event-tap.js";
 import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
 import { formatUiStatusLines } from "./ui-status.js";
@@ -434,6 +436,8 @@ export interface WebHubDeps {
   hubMainPath?: string; // 默认 join(packageRoot(), "src/web-hub/hub/main.ts")
   env?: NodeJS.ProcessEnv;
   now?: () => number;
+  /** Generation delta ingestion clock (not a setting/feature switch). */
+  monotonicNow?: () => number;
   // ---- test seams (optional; production leaves them unset) ----
   netConnect?: typeof import("node:net").connect;
   spawnImpl?: typeof import("node:child_process").spawn;
@@ -712,6 +716,27 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     { publish: () => publishStatus() },
   );
 
+  // Object identities, not timestamps/epochs, bind this activation's live writer.
+  const speedActivation = {};
+  let speedOwnerToken = {};
+  const speed = createMessageSpeed({
+    ...(deps.monotonicNow !== undefined ? { monotonicNow: deps.monotonicNow } : {}),
+    currentOwner: () => {
+      if (!attached || ctx === undefined) return undefined;
+      const sessionId = ctx.sessionManager.getSessionId();
+      return {
+        sessionId,
+        sessionGeneration: generation,
+        activationGeneration: speedActivation,
+        ownerToken: speedOwnerToken,
+      };
+    },
+    getCurrentContext: () => ctx,
+    sessionId: (c: ExtensionContext) => c.sessionManager.getSessionId(),
+    ...(deps.secureRecheckForWrite !== undefined ? { secureRecheckForWrite: deps.secureRecheckForWrite } : {}),
+    appendEntry: (type, data) => pi.appendEntry(type, data),
+  });
+  const speedWire = wireMessageSpeed(pi, speed, () => attached);
   const attributePromptRef: { current: (e: WireEvent) => WireEvent } = { current: (e) => e };
   const tap = createEventTap(
     (e, droppable) => {
@@ -720,6 +745,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       c.send({ t: "ev", seq: c.nextSeq(), e }, { droppable });
     },
     {
+      speed,
       now,
       setTimer: (ms, fn) => {
         const t = setTimeout(fn, ms);
@@ -1859,6 +1885,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   on("session_start", (event, c) => {
     if (c.mode !== "tui" && c.mode !== "rpc") return; // print/json: never attach
     generation += 1;
+    speedOwnerToken = {};
+    speed.reset();
     const gen = generation;
     ctx = c;
     attached = true;
@@ -1919,6 +1947,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   on("session_shutdown", (event) => {
     if (!attached) return;
     attached = false;
+    speedOwnerToken = {};
+    speed.reset();
     generation += 1;
     stopTick();
     // web-hub-slash-args plan §4.5 (P1): drop the captured S-tui provider (the wrappers list
@@ -1984,7 +2014,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     on(type, (event, c) => {
       if (!attached) return;
       if (c !== undefined) ctx = c;
-      tap.handle(event as { type: string } & Record<string, unknown>);
+      speedWire.forward(tap, event as { type: string } & Record<string, unknown>);
       // tool-duration plan: `turn_end` fires after the turn's tool executions (pi-agent-core
       // emits it from the loop right after executeToolCalls), so it is the flush point.
       if (type === "turn_end") flushToolTimings();

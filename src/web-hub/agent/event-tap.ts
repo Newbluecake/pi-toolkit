@@ -27,10 +27,12 @@ import { LIMITS, type FORWARDED_EVENTS, type InflightState, type SnapshotReplyBo
 import type { WireEvent, WireMessage } from "../protocol/messages.js";
 import { truncateText } from "../protocol/keys.js";
 import { ASK_USER_MARKER } from "../../ask-user/channel-handler.js";
+import type { MessageSpeed } from "./message-speed.js";
+import type { MessageSpeedBinding } from "./message-speed-binding.js";
 import { createInflightAccumulator } from "./inflight-accumulator.js";
 
 export interface EventTap {
-  handle(event: { type: string } & Record<string, unknown>): void;
+  handle(event: { type: string } & Record<string, unknown>, binding?: MessageSpeedBinding): void;
   recent(): SnapshotReplyBody["recent"];
   inflight(): InflightState | undefined;
   prompts(): SnapshotReplyBody["prompts"];
@@ -71,6 +73,7 @@ interface InflightTool {
 export function createEventTap(
   sink: (e: WireEvent, droppable: boolean) => void,
   opts: {
+    speed?: MessageSpeed;
     now: () => number;
     setTimer: (ms: number, fn: () => void) => { cancel(): void };
     /** seq of the ev frame the sink just emitted (recent[] carries it for snapshot reconciliation). */
@@ -145,13 +148,18 @@ export function createEventTap(
     flushToolUpdates();
   };
 
-  const onMessageUpdate = (event: Record<string, unknown>): void => {
+  const onMessageUpdate = (event: Record<string, unknown>, binding: MessageSpeedBinding | undefined): void => {
     // Deliberately read ONLY `assistantMessageEvent` — never `event.message`.
     const ame = event.assistantMessageEvent;
     if (ame === null || typeof ame !== "object") return;
     const a = ame as Record<string, unknown>;
     const type = typeof a.type === "string" ? a.type : "";
     const contentIndex = typeof a.contentIndex === "number" ? a.contentIndex : -1;
+    try {
+      opts.speed?.delta(type, typeof a.delta === "string" ? a.delta : "", binding);
+    } catch {
+      opts.speed?.reset(); /* observation cannot break forwarding */
+    }
     if (DELTA_TYPES.has(type)) {
       const delta = typeof a.delta === "string" ? a.delta : "";
       const last = pendingDeltas[pendingDeltas.length - 1];
@@ -183,12 +191,17 @@ export function createEventTap(
     emit({ type: "message_update", assistantMessageEvent: out }, false);
   };
 
-  const handle = (event: { type: string } & Record<string, unknown>): void => {
+  const handle = (event: { type: string } & Record<string, unknown>, binding?: MessageSpeedBinding): void => {
     try {
       const type = event.type;
       if (type === "message_update") {
-        onMessageUpdate(event);
+        onMessageUpdate(event, binding);
         return;
+      }
+      try {
+        opts.speed?.event(event);
+      } catch {
+        opts.speed?.reset();
       }
       if (type === "tool_execution_update") {
         const id = str(event.toolCallId);
@@ -250,7 +263,14 @@ export function createEventTap(
         break;
       }
       case "message_end": {
+        let core;
+        try {
+          core = opts.speed?.end(event.message);
+        } catch {
+          opts.speed?.reset();
+        }
         const message = projectMessage(event.message, flag);
+        if (message !== undefined && core !== undefined) message.piToolkitGeneration = core;
         e = { type: "message_end", message };
         if (flag.truncated) e.truncated = true;
         emit(e, false);
@@ -388,6 +408,7 @@ export function createEventTap(
   };
 
   const resetState = (): void => {
+    opts.speed?.reset();
     deltaTimer?.cancel();
     deltaTimer = undefined;
     toolTimer?.cancel();
@@ -468,7 +489,11 @@ function modelRef(m: unknown): { provider: string; id: string } | undefined {
 export function projectMessage(m: unknown, flag: { truncated: boolean }): WireMessage | undefined {
   if (m === null || typeof m !== "object" || Array.isArray(m)) return undefined;
   if (typeof (m as Record<string, unknown>).role !== "string") return undefined;
-  return truncateDeep(m, flag) as WireMessage;
+  const copy: Record<string, unknown> = {};
+  for (const key of Object.keys(m)) {
+    if (key !== "piToolkitGeneration") copy[key] = (m as Record<string, unknown>)[key];
+  }
+  return truncateDeep(copy, flag) as WireMessage;
 }
 
 function assistantCost(m: WireMessage): number {
