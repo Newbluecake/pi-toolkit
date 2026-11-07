@@ -96,3 +96,33 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 治理 on 的 tool-v3 自动 afterWrite 追加 `wholeRelation:true`，经 blocks write-port/tagOne 传到 builder，独立于 askScope/includeScope；off/v2/bulk 不传新键，legacy cN 和 g1 问句原字节不变。治理 cN 的 duplicate 也须「新含旧全部有效信息」（新子集不合格），supersedes 须 whole 覆盖/明确废弃 all，partial overlap/conflict 属于 conflict/complementary。
 
 缓存核证：生产 write-port 正文 hash 未变只跳过，变更 fresh tagOne；decideTagging 不存 cN，client.callOnce 直接 classify，无生产 cN 答案缓存。评测完整 question 文本变化使完整请求 replyKey 自然失效；不清私有缓存、不改 taxonomyRev、不全量 retag。G1 真实正例 10 < 20 仍 block；本包不 live、不实际迁移、不补样本。详见 memory-governance arch §5.4 与 plan 的日期化裁定。
+
+## #39 三层记忆 · P1 session 内核实装与限界（2026-11-07）
+
+本节是 P1（session 内核 + 通用授权面）的实装记录。**只描述已存在的代码**；装配（P4）、seed 管线（P2）、hub 存储/来源桥（P3）尚未实现，`memory.scopes.*` 默认 off，本包未加任何 hook/section 注册/工具/设置变更。
+
+### 已交付（全部 pi-free、闭包态、无新定时器）
+
+- `src/memory/scopes/limits.ts` — 不可信形状先行校验（描述符读取，绝不执行 getter/toJSON；拒绝 accessor/sparse/symbol/异原型/循环/超深/非有限数）、字段 regex（id/sid/leaf/from/24 字符 ISO 等）、三预算实测（raw UTF-8 / 最终 DTO JSON / render）、`META_MAX`/`ENVELOPE_MAX`、`sessionItemRevision`（sha1/8）与全字段 `opDigest`（sha256，canonical key 序）。fold 模式用 FOLD_HARD 界（64 项/每项 1024B/总 65536B/DTO 428032B），write 模式用产品界（48/8192/75776）；同一 validator 双档，不重复实现。
+- `session-fold.ts` — `foldSessionMemory(branch, currentSid)`：以最近一条**整体合法** snap 为基（坏 snap 整条拒收并继续向前找），其后合法 put/del 顺序应用；非法条目记 `dropped`（≤16，保最近）；fork 继承（写入方 sid ≠ currentSid）与 spawn 继承（seed snap `inherit`）逐条标注；`currentSid === undefined` ⇒ 全部继承；历史 del 缺失 id 容忍为 no-op（折叠宽容、写入严格）；nextN 不回退（snap 项与 del 引用都参与下界）。
+- `session-ops.ts` — `planSessionOp`：每操作恰好生成**一个** entry；`opsSinceSnap+1 ≥ 32` 时改为含本次效果与 `cause` 的完整 snap；单条 1024B/总数 8192B/48 项产品界（`E_TOO_LARGE`/`E_FULL`，拒收不截断）；update/delete 强制 expectRev CAS（`E_REV_REQUIRED`/`E_CONFLICT`）；最终 entry 过实际 JSON 字节门后才返回。
+- `session-store.ts` — `createSessionMemoryStore`（`SessionMemoryPort` + `poisonedNow`/`verifyRecovery`）：串行 FIFO（默认界 64，超界 `E_BUSY`）；出队时**全新折叠**（leafId+条目数仅作只读缓存键）；last-await 同步复核（owner 引用身份/sid/epoch/branchGen/sessionFile、signal、cap、sessionWriteGate）后 cap 一次性 consume 再**单次 append**；append 后重新折叠核对效果，不可见 ⇒ `E_PERSIST_UNKNOWN`。**Poison（Root C0 裁定）**：本 writer 在自己 scoped append 上观察到的 E_PERSIST/E_PERSIST_UNKNOWN 即毒化本 store——后续 enqueue 一律带 `SessionPersistenceFailure{recovery:"explicit-reopen-and-verify"}` 拒绝；不重试/不修复/不删尾/不私有回滚；`verifyRecovery()` 仅在宿主 `isReopened()===true` 且真实 branch 折叠不抛时清除（普通 reload 不算）。locked ⇒ fold/view/snapshot 返回空且**零次 getBranch**。user 级写入的持久化 `grant` 完全由 cap 派生（turn8/capId8/channel），模型参数不进入。
+- `op-cap.ts` — 私有 OpCap 注册表（mint→reserve→consume 一次性、revoked 终态；brand 符号不可构造，宿主外无 mint 路径）；reserve/check 校验 owner（incarnation 按**引用**）与 tracker 当前回合；审计行只来自 cap 字段（无正文）；`HumanTurnTracker`（interactive/web 新回合、非人类清空、生命周期撤销、每回合 3 框上限 + 单次拒绝记忆）。
+- `authorize.ts` — `createOpApprovalPort`（`ApprovalPort`）：TUI select ⟂ `AskUserRemotePort` 经 `createDialogRace` 竞速；拒绝项恒第一；AFFIRM 标签内嵌 opDigest 前 8 位、题干含冻结原文全文；binding 摘要与冻结操作重算比对（篡改 ⇒ `E_META_INVALID` 不开框）；web 答案仅接受 `originKind ∈ {loopback, lan}`（飞书/缺省/字符串来源 ⇒ 回调 false），且回调时同步复核回合绑定，mint 前再次复核；取消/超时/abort/异值 ⇒ `E_HUB_DECLINED` 并记回合拒绝（同回合再请求 `E_HUB_DECLINED_TURN`，第 4 框 `E_HUB_RATE`）；无渠道 `E_HUB_CONFIRM_UNAVAILABLE`；rpc 模式不开本地 select；默认时钟 unref + `clampSpanMs`（I1/I5），测试注入 ManualClock。**生产 HumanDispatchProofPort（P3）未接**：tracker 回合由宿主喂入，authorize 不把任何字符串当 proof。
+- `render.ts` / `session-section.ts` — authority-first 跨层去重（NFKC+空白压缩+去行内 meta 后 sha1；同权威取更具体层，败者 `(dup of …)` 标注，低权威 session 副本永不容遮 hub user 副本）；优先级说明行；English 行内标记；`pi_session_memory` 内容工厂：locked ⇒ SKIP 且**不调 view**（不读 branch）、空 ⇒ SKIP、超 render 预算退化为 pointer 残句（正文永不截断）。注册进 PromptSectionHub 属 P4。
+- `src/secure/memory-gate.ts` 追加 `secureSessionWriteGate(domain, deps?)`（`SessionWriteGate`）：plain ok / locked 拒 / secure 每次实时读 mountinfo 判真挂载 + 目标（`sessionDir ?? dirname(sessionFile)`）canonical 化后必须在写区**严格内部**（sentinel 本身拒）；无文件（inMemory）仅查挂载；无状态无定时器。与 D3 同口径（`canonicalPath`/`inVaultWriteZone`/`vaultMountState`）。
+
+### 门禁与证据
+
+- 新测试：`tests/memory/scopes/{limits,session-fold,session-ops,session-store,session-section,op-cap,authorize}.test.ts`、`tests/secure/memory-session-gate.test.ts`（fake mountinfo + own tmp，无真实挂载，tier1）。覆盖：种子化随机序列与参考模型等价（4 seeds）、坏 snap 整拒、dropped≤16、每操作恰一次 append（含失败尝试计数）、第 32 次 cause-snap、1024/1025 与 8192/8193 与 48/49（及历史 64/65、65536/65537）±1、getter/toJSON 零执行、poison 三态与显式 reopen 复原、owner 死亡/迟到 cap/abort/门拒零 append、子会话 `E_CHILD_AUTHORITY`/继承 user 条目 `E_AUTHORITY`、locked 零 branch 读、TUI/Web 竞速各通道、originKind 门、绑定复核、rate/rejected、nonce/digest 篡改。
+- 定向命令（PI_TOOLKIT_TEST_WORKERS=2）：`npx vitest run tests/memory/scopes tests/secure/memory-session-gate.test.ts` = 9 files / 114 tests 全绿；`tests/governance/test-tiers.test.ts` + `tests/boundary/pi-free.test.ts` 同跑 = 11 files / 157 tests 全绿；`npm run typecheck`（TS7×2 + vue-tsc）与 `npm run build` 通过；18 个改动路径过 prettier。未跑 full tier1/tier2/secure/conformance（按 P1 任务边界）。
+
+### 限界（不得据此声称已完成的东西）
+
+- **生产装配未实现**：P0 冻结文件与 `src/index.ts`/`src/stack.ts`/settings 均未动；无 section 注册、无 `scoped_memory` 工具、无 `/mem session` 子命令、无子会话写闸接线；flags-off 字节不变性由 P0/P4 门负责，本包零装配改动。
+- **seed 管线未接**：`snapshot()` 是 P2 `MemoryParentPort`/`MemoryWorkflowPort` 的稳定缝（深拷贝+全冻结），driver/spawn/workflow 均未改。
+- **hub 侧未实现**：P3 才有 hub-slot/hub-store/来源桥；render 的 hub 分支只是纯渲染供其消费。
+- **授权来源证明未接生产**：TUI select 与 remote port 均为注入端口（P1 测试用 fake）；真实 `ctx.ui.select`、`AskUserRemotePort` 生产实例、`RemoteOutcome.originKind` 生产者与 HumanDispatchProofPort 归 P3/P4。Web 组件 width 40/80/120 渲染已由 P0 C4 证，非本包。
+- **poison 语义边界**：只覆盖本 writer 在自己 scoped append 上观察到的失败；SDK 会话 flush 在别处的失败不可观察、不承诺 fsync/崩溃事务；`appended ≠ persisted`。custom-only 写入报 `memory-only`。
+- **测试身份**：`tests/secure/memory-session-gate.test.ts` 是 fake mountinfo 的 tier1 单元（真实挂载 17 文件未动）；真实 UI/TUI viewport 验收属 P5。
+- **id 编号耗尽（2026-11-07 Sonnet 独验反例修复）**：fold 与 planner 不再把 nextN 双钳到 999999——存在 `n999999` 时内部 nextN 到达 **1_000_000 耗尽哨兵**（published snap 的 `nextN` 字段仍保持在合法 1..999999 内，哨兵可由条目 id 重构）；此后 `create` 明确 `E_FULL` 拒写（零 append、绝不复用/覆写已存在 id，符合 K9），`update`/`delete` 凭显式 id+rev 不受编号耗尽牵连，且删除不释放编号（nextN 对见过的所有 id 单调）。已知边界：耗尽是**合法可触达状态**（存在 n999999 即到达）；耗尽会话的 seed `nextN=1_000_000` 目前按 P0 冻结的 seed 校验拒绝，后续 P2 必须对此显式 fail-closed（拒绝 seed 操作并如实报错），而不是丢弃 seed 或降级为空继承（不扩大 seed 契约）。

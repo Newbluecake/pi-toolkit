@@ -2,6 +2,7 @@
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import type { MemoryWriteGate } from "../memory/contracts.js";
+import type { SessionWriteGate, SessionWriteGateResult } from "../memory/scopes/types.js";
 import { canonicalPath, inVaultWriteZone, readProcMountinfo, type SecureDomain } from "./domain.js";
 import { vaultMountState } from "./config.js";
 import { join } from "node:path";
@@ -95,6 +96,47 @@ export function secureMemoryWriteGate(
           }
           break;
         }
+        return { ok: true };
+      } catch {
+        return { ok: false, reason: "identity-changed" };
+      }
+    },
+  };
+}
+
+// ───────────────────────── #39 P1: session-scope write gate ─────────────────────────
+
+/**
+ * Session-memory write gate (#39 arch §8.2): checked synchronously after the LAST await of
+ * every session-memory write (session-store.ts commit gate) and before a driver appends a
+ * child seed (P2).
+ *
+ * plain ⇒ ok · locked ⇒ refuse (the caller's provider must not even read the branch) ·
+ * secure ⇒ the vault must be REALLY mounted right now (mountinfo is re-read on every check —
+ * a mid-session unmount flips the answer) AND the write target must lie strictly inside the
+ * vault write zone (`<mnt>/work` or `<mnt>/state`, sentinels excluded, symlink escapes
+ * resolved by realpath). A missing target (inMemory / `--no-session` sessions) checks the
+ * mount only. No timers, no state: every call re-verifies (I4/I5).
+ */
+export function secureSessionWriteGate(
+  domain: SecureDomain,
+  deps: { readMountinfo?: () => string } = {},
+): SessionWriteGate {
+  return {
+    check(target: { sessionFile?: string; sessionDir?: string }): SessionWriteGateResult {
+      if (domain.kind === "plain") return { ok: true };
+      if (domain.kind === "locked") return { ok: false, reason: "locked" };
+      try {
+        const mounted = vaultMountState(
+          (deps.readMountinfo ?? readProcMountinfo)(),
+          domain.vault.mntReal,
+          join(domain.vault.root, "cipher"),
+        );
+        if (mounted !== "mounted") return { ok: false, reason: "unmounted" };
+        const raw = target.sessionDir ?? (target.sessionFile !== undefined ? dirname(target.sessionFile) : undefined);
+        if (raw === undefined) return { ok: true }; // inMemory: mount-only check
+        const canonical = canonicalPath(raw);
+        if (!inVaultWriteZone(canonical, domain.vault)) return { ok: false, reason: "path-escaped" };
         return { ok: true };
       } catch {
         return { ok: false, reason: "identity-changed" };
