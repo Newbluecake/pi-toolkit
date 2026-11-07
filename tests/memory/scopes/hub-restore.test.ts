@@ -280,3 +280,69 @@ describe("multi-file failures: no repair/retry and honest UNKNOWN", () => {
     },
   );
 });
+
+describe("complete frozen restore confirmation", () => {
+  it("shows exact full text/trash/rev/updated/from history and distinct new source without fabricating grant id", async () => {
+    const f = setup();
+    const text = "第一行中文 🧠\n第二行完整文本\n" + "🚀逐字保留".repeat(20);
+    const c = await f.command({ ...add(text), from: "project:notes/facts" });
+    if (!c.ok || !c.rev) throw Error("create");
+    const old = f.provider.management.inspect(c.id);
+    if (!old.ok) throw Error("inspect");
+    expect(
+      (await f.command({ storageScope: "hub", authority: "user", op: "delete", targetId: c.id, expectRev: c.rev })).ok,
+    ).toBe(true);
+    const name = readdirSync(f.trash)[0]!;
+    f.source(nextSource);
+    const p = f.provider.management.prepareRestore(name);
+    if (!p.ok || p.confirmation.kind !== "restore") throw Error("prepare");
+    const summary = p.confirmation;
+    expect(summary).toMatchObject({
+      kind: "restore",
+      target: { effectiveStateDir: f.dir, hubRoot: f.root, uid: process.getuid?.() ?? 0 },
+      trashFileName: name,
+      id: c.id,
+      text,
+      rev: c.rev,
+      updated: old.item.updated,
+      oldSource: old.item.src,
+      oldGrant: old.item.grant,
+      oldFrom: "project:notes/facts",
+      newSource: nextSource,
+      newAuthorization: { via: "command", by: "user", issued: "on-commit" },
+    });
+    expect(summary.newAuthorization).not.toHaveProperty("cap");
+    expect(summary.warning).toContain("仅在 commit 时生成");
+    expect(Object.isFrozen(summary)).toBe(true);
+    expect(Object.isFrozen(summary.newSource)).toBe(true);
+    expect(Object.isFrozen(summary.oldGrant)).toBe(true);
+    expect(Object.isFrozen(summary.oldSource)).toBe(true);
+    expect(Object.isFrozen(summary.newAuthorization)).toBe(true);
+    expect(Object.isFrozen(summary.target)).toBe(true);
+    expect(Reflect.set(summary, "text", "replaced")).toBe(false);
+    expect(Reflect.set(summary.oldGrant, "via", "dialog")).toBe(false);
+    expect(Reflect.set(summary.newSource, "label", "replaced")).toBe(false);
+    expect(await f.provider.management.commit(p.token)).toMatchObject({ ok: true, id: c.id, rev: c.rev });
+    const restored = f.provider.management.inspect(c.id);
+    if (!restored.ok) throw Error("inspect restored");
+    expect(restored.item.text).toBe(text);
+    expect(restored.item.updated).toBe(summary.updated);
+    expect(restored.item.grant.cap).toMatch(/^[a-f0-9]{8}$/);
+    expect(restored.item.src).toEqual(nextSource);
+    const history = JSON.parse(readFileSync(join(f.root, HUB_ARCHIVE_FILE), "utf8")).entries[name];
+    expect(history.provenance.from).toBe(summary.oldFrom);
+    expect(history.provenance.grant).toEqual(summary.oldGrant);
+  });
+
+  it("new current source changed after prepare refuses commit instead of authorizing another source", async () => {
+    const f = await deleted();
+    f.source(nextSource);
+    const p = f.provider.management.prepareRestore(f.name);
+    if (!p.ok || p.confirmation.kind !== "restore") throw Error("prepare");
+    f.source({ ...nextSource, label: "changed source" });
+    expect(await f.provider.management.commit(p.token)).toEqual({ ok: false, code: "E_STALE_SESSION" });
+    expect(p.confirmation.newSource).toEqual(nextSource);
+    expect(readdirSync(f.trash)).toEqual([f.name]);
+    expect(f.provider.view().items).toEqual([]);
+  });
+});

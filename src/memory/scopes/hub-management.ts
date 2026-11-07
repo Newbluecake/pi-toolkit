@@ -17,7 +17,15 @@ import { readCorpus } from "../blocks/store.js";
 import { parseBlockFile, type ParsedBlock } from "../blocks/format.js";
 import { listDirNames, renameNoClobber, fsyncDir } from "../safe-fs.js";
 import { newTidyId } from "../tidy/manifest.js";
-import { checkHubSlot, dirSecurityMatches, hubMemoryRoot, parseHubNamespace, type HubSlotRef } from "./hub-slot.js";
+import {
+  checkHubSlot,
+  dirSecurityMatches,
+  hubMemoryRoot,
+  parseHubNamespace,
+  type HubSlotRef,
+  type HubNamespaceV1,
+  type HubDirIdentity,
+} from "./hub-slot.js";
 import {
   asCode,
   blockToItem,
@@ -299,20 +307,68 @@ export interface HubManagementToken {
   readonly [tokenBrand]: true;
 }
 type Failure = { readonly ok: false; readonly code: ScopedMemoryErrorCode; readonly reason?: string };
+/** Local host presentation DTO, built from the token-bound prepare observation.
+ * Full bodies are never truncated. No grant id is minted for presentation. */
+export interface HubConfirmationItem {
+  readonly id: string;
+  readonly text: string;
+  readonly rev: string;
+  readonly updated: string;
+  readonly source: HubMemorySource;
+  readonly grant: HubProvenanceEntry["grant"];
+  readonly from?: string;
+}
+interface HubConfirmationBase {
+  readonly target: { readonly effectiveStateDir: string; readonly hubRoot: string; readonly uid: number };
+  /** Original P3c fields remain available to existing host consumers. */
+  readonly id?: string;
+  readonly text?: string;
+  readonly oldSource?: HubMemorySource;
+  readonly oldGrant?: HubProvenanceEntry["grant"];
+  readonly warning: string;
+}
+export type HubConfirmation = HubConfirmationBase &
+  (
+    | {
+        readonly kind: "restore";
+        readonly trashFileName: string;
+        readonly id: string;
+        readonly text: string;
+        readonly rev: string;
+        readonly updated: string;
+        readonly oldSource: HubMemorySource;
+        readonly oldGrant: HubProvenanceEntry["grant"];
+        readonly oldFrom?: string;
+        readonly newSource: HubMemorySource;
+        readonly newAuthorization: { readonly via: "command"; readonly by: "user"; readonly issued: "on-commit" };
+      }
+    | {
+        readonly kind: "adopt";
+        readonly items: readonly HubConfirmationItem[];
+        readonly namespace: {
+          readonly current: HubNamespaceV1;
+          readonly reseal: HubNamespaceV1;
+          readonly changedFields: readonly (keyof HubNamespaceV1)[];
+        };
+      }
+  );
 export type HubPrepared =
   | Failure
   | {
       readonly ok: true;
       readonly token: HubManagementToken;
-      readonly confirmation: {
-        readonly kind: "adopt" | "restore";
-        readonly id?: string;
-        readonly text?: string;
-        readonly oldSource?: HubMemorySource;
-        readonly oldGrant?: HubProvenanceEntry["grant"];
-        readonly warning: string;
-      };
+      readonly confirmation: HubConfirmation;
     };
+
+/** Only called on newly constructed, acyclic, host-owned plain presentation data. */
+function freezeConfirmation<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const child of Object.values(value)) freezeConfirmation(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 export interface HubManagementPort {
   status(): HubMemoryView;
   inspect(id: string): Failure | { readonly ok: true; readonly item: HubItem; readonly rev: string };
@@ -356,6 +412,7 @@ interface PreparedRecord {
   readonly source: HubMemorySource;
   readonly signal?: AbortSignal;
   readonly trashName?: string;
+  readonly reseal?: HubNamespaceV1;
 }
 
 export function createHubManagement(host: HubManagementHost): HubManagementPort {
@@ -404,8 +461,19 @@ export function createHubManagement(host: HubManagementHost): HubManagementPort 
         owner = { ...host.owner() },
         src = source();
       const frozen = snapshot(ctx);
-      const ns = parseHubNamespace(readPrivate(ctx.io, join(hubMemoryRoot(ctx.slot), "namespace.json")));
-      if (!ns) return { ok: false, code: "E_NAMESPACE" };
+      // Reuse the exact namespace bytes and directory identities already captured for
+      // token CAS, rather than performing a separate presentation read of the target.
+      const captured = JSON.parse(frozen) as {
+        real: string | undefined;
+        dirs: readonly (readonly [string, HubDirIdentity | null])[];
+        files: readonly (readonly [string, unknown, string?])[];
+      };
+      const namespaceBytes = captured.files.find(
+        ([path]) => path === join(hubMemoryRoot(ctx.slot), "namespace.json"),
+      )?.[2];
+      const ns = namespaceBytes === undefined ? undefined : parseHubNamespace(namespaceBytes);
+      const stateIdentity = captured.dirs.find(([path]) => path === ctx.slot.effectiveStateDir)?.[1];
+      if (!ns || !stateIdentity || !captured.real) return { ok: false, code: "E_NAMESPACE" };
       const corpus = completeHubCorpus(ctx);
       let b: ParsedBlock | undefined, p: HubProvenanceEntry | undefined;
       if (kind === "restore") {
@@ -428,6 +496,66 @@ export function createHubManagement(host: HubManagementHost): HubManagementPort 
       }
       guard(owner, signal);
       if (frozen !== snapshot(ctx)) return { ok: false, code: "E_CONFLICT" };
+      const target = {
+        effectiveStateDir: ctx.slot.effectiveStateDir,
+        hubRoot: hubMemoryRoot(ctx.slot),
+        uid: ctx.slot.uid,
+      };
+      let summary: HubConfirmation;
+      if (kind === "restore") {
+        if (!b || !p || !name) return { ok: false, code: "E_NAMESPACE" };
+        summary = {
+          kind,
+          target,
+          trashFileName: name,
+          id: b.id,
+          text: b.body,
+          rev: b.rev,
+          updated: b.meta.updated,
+          oldSource: { ...p.src },
+          oldGrant: { ...p.grant },
+          ...(p.from !== undefined ? { oldFrom: p.from } : {}),
+          newSource: { ...src },
+          newAuthorization: { via: "command", by: "user", issued: "on-commit" },
+          warning: "保留旧来源/旧授权为历史；恢复记新的命令授权与当前来源，不复用旧权限；新的授权仅在 commit 时生成",
+        };
+      } else {
+        const reseal: HubNamespaceV1 = {
+          ...ns,
+          uid: target.uid,
+          stateDirReal: captured.real,
+          stateDev: stateIdentity.dev,
+          stateIno: stateIdentity.ino,
+          host: hubHostFingerprint(),
+        };
+        const identityKeys = ["uid", "stateDirReal", "stateDev", "stateIno", "host"] as const;
+        summary = {
+          kind,
+          target,
+          items: corpus.items
+            .map((item) => {
+              const block = corpus.blocks.find((block) => block.id === item.id);
+              if (!block) return error("E_NAMESPACE", "confirmation corpus mismatch");
+              return {
+                id: item.id,
+                text: item.text,
+                rev: block.rev,
+                updated: item.updated,
+                source: { ...item.src },
+                grant: { ...item.grant },
+                ...(item.from !== undefined ? { from: item.from } : {}),
+              };
+            })
+            .sort((a, b) => a.id.localeCompare(b.id)),
+          namespace: {
+            current: { ...ns },
+            reseal,
+            changedFields: identityKeys.filter((key) => ns[key] !== reseal[key]),
+          },
+          warning: "仅重封以下完整安全 Hub 库的身份；条目正文与来源/授权不变，不修复、不导入、不更改权限",
+        };
+      }
+      const confirmation = freezeConfirmation(summary);
       const token = Object.freeze({}) as HubManagementToken;
       tokens.set(token, {
         kind,
@@ -435,22 +563,11 @@ export function createHubManagement(host: HubManagementHost): HubManagementPort 
         owner,
         snapshot: frozen,
         source: src,
+        ...(confirmation.kind === "adopt" ? { reseal: confirmation.namespace.reseal } : {}),
         ...(signal ? { signal } : {}),
         ...(name ? { trashName: name } : {}),
       });
-      return {
-        ok: true,
-        token,
-        confirmation: {
-          kind,
-          ...(b ? { id: b.id, text: b.body } : {}),
-          ...(p ? { oldSource: p.src, oldGrant: p.grant } : {}),
-          warning:
-            kind === "restore"
-              ? "保留旧来源为历史；恢复记新的命令授权与当前来源，不复用旧权限"
-              : "仅重封完整安全 Hub 库身份；不修复、不导入、不更改权限",
-        },
-      };
+      return Object.freeze({ ok: true as const, token, confirmation });
     } catch (err) {
       return { ok: false, code: asCode(err) };
     }
@@ -579,22 +696,16 @@ export function createHubManagement(host: HubManagementHost): HubManagementPort 
                 if (ctx.slot.uid !== rec.slot.uid || ctx.slot.effectiveStateDir !== rec.slot.effectiveStateDir)
                   error("E_NAMESPACE");
                 if (snapshot(ctx) !== rec.snapshot) error("E_CONFLICT");
+                if (rec.reseal && rec.reseal.host !== hubHostFingerprint()) error("E_CONFLICT", "reseal host changed");
               };
               verify();
               const corpus = completeHubCorpus(ctx);
               ctx.faults?.beforeBlockWrite?.();
               verify();
               if (rec.kind === "adopt") {
-                const old = parseHubNamespace(readPrivate(ctx.io, join(hubMemoryRoot(ctx.slot), "namespace.json")));
-                const st = ctx.io.inspectDir(ctx.slot.effectiveStateDir),
-                  real = ctx.io.realpath(ctx.slot.effectiveStateDir);
-                if (!old || !st || st === "not-dir" || !real) return fail("E_NAMESPACE");
+                if (!rec.reseal) return fail("E_NAMESPACE");
                 mutation = true;
-                ctx.io.writePrivateFile(
-                  hubMemoryRoot(ctx.slot),
-                  "namespace.json",
-                  `${JSON.stringify({ ...old, uid: ctx.slot.uid, stateDirReal: real, stateDev: st.dev, stateIno: st.ino, host: hubHostFingerprint() })}\n`,
-                );
+                ctx.io.writePrivateFile(hubMemoryRoot(ctx.slot), "namespace.json", `${JSON.stringify(rec.reseal)}\n`);
               } else {
                 const entries = readArchive(ctx),
                   name = rec.trashName!,

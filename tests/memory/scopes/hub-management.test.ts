@@ -329,3 +329,125 @@ describe("adopt: prepare/read-only -> one-shot exact CAS -> reseal only", () => 
     expect(f.provider.management.prepareAdopt()).toEqual({ ok: false, code: "E_SCOPE_DISABLED" });
   });
 });
+
+describe("token-bound complete adopt confirmation", () => {
+  it("includes every full CJK/multiline/emoji body, distinct source/rev and stable identity diff", async () => {
+    const f = fixture();
+    const fullText = "完整中文正文 🧠\n第二行，不能截断。\n" + "🌏跨项目约定".repeat(18);
+    const first = await f.provider.management.command({ ...add, text: fullText, from: "session:n1" });
+    if (!first.ok || !first.rev) throw Error("create");
+    const updated = await f.provider.management.command({
+      ...add,
+      op: "update",
+      targetId: first.id,
+      expectRev: first.rev,
+      text: fullText,
+      from: "session:n1",
+    });
+    if (!updated.ok || !updated.rev) throw Error("update");
+    const otherSource = { project: "def456", label: "另一个项目", sid8: "other" };
+    const secondProvider = createHubMemoryProvider({
+      slot: () => f.slot,
+      owner: f.owner,
+      capability: () => "ok",
+      registry: createMemoryOpCapRegistry(),
+      trustedCommand: () => true,
+      commandSource: () => otherSource,
+    });
+    const secondText = "独立正文 🚀\n逐字保留";
+    const second = await secondProvider.management.command({ ...add, text: secondText, from: "project:docs/facts" });
+    if (!second.ok || !second.rev) throw Error("create second");
+    const firstObserved = f.provider.management.inspect(first.id);
+    const secondObserved = f.provider.management.inspect(second.id);
+    if (!firstObserved.ok || !secondObserved.ok) throw Error("observed items");
+    changeHost(f.root);
+    const namespaceBefore = JSON.parse(readFileSync(join(f.root, "namespace.json"), "utf8"));
+    const p = f.provider.management.prepareAdopt();
+    if (!p.ok || p.confirmation.kind !== "adopt") throw Error("prepare");
+    const c = p.confirmation;
+    expect(c.target).toEqual({ effectiveStateDir: f.dir, hubRoot: f.root, uid: f.slot.uid });
+    expect(c.items).toEqual([
+      {
+        id: first.id,
+        text: fullText,
+        rev: updated.rev,
+        updated: firstObserved.item.updated,
+        source: src,
+        grant: { via: "command", by: "user" },
+        from: "session:n1",
+      },
+      {
+        id: second.id,
+        text: secondText,
+        rev: second.rev,
+        updated: secondObserved.item.updated,
+        source: otherSource,
+        grant: { via: "command", by: "user" },
+        from: "project:docs/facts",
+      },
+    ]);
+    expect(c.items.map((i) => i.rev)).toEqual([updated.rev, second.rev]);
+    expect(c.items[0]!.rev).not.toBe(c.items[1]!.rev);
+    expect(c.namespace.current).toEqual(namespaceBefore);
+    expect(c.namespace.reseal).toEqual({ ...namespaceBefore, host: hubHostFingerprint() });
+    expect(c.namespace.changedFields).toEqual(["host"]);
+    expect(c.warning).toContain("正文与来源/授权不变");
+    // Legacy fields remain accessible; adopt never claims a made-up individual body.
+    expect(c.id).toBeUndefined();
+    expect(c.text).toBeUndefined();
+    expect((await f.provider.management.commit(p.token)).ok).toBe(true);
+    expect(f.provider.view().items.map((i) => i.text)).toEqual([fullText, secondText]);
+  });
+
+  it("deep-freezes detached presentation data; caller edits cannot alter the token's exact operation", async () => {
+    const f = await seeded();
+    changeHost(f.root);
+    const p = f.provider.management.prepareAdopt();
+    if (!p.ok || p.confirmation.kind !== "adopt") throw Error("prepare");
+    const c = p.confirmation;
+    const assertFrozen = (value: unknown): void => {
+      if (value !== null && typeof value === "object") {
+        expect(Object.isFrozen(value)).toBe(true);
+        for (const child of Object.values(value)) assertFrozen(child);
+      }
+    };
+    assertFrozen(c);
+    expect(Object.isFrozen(p)).toBe(true);
+    expect(Reflect.set(c.items[0]!, "text", "caller substituted body")).toBe(false);
+    expect(Reflect.set(c.items[0]!.source, "label", "caller source")).toBe(false);
+    expect(Reflect.set(c.namespace.reseal, "host", "b".repeat(16))).toBe(false);
+    expect(Reflect.set(c.target, "uid", -1)).toBe(false);
+    expect(Reflect.set(c.items, "length", 0)).toBe(false);
+    expect((await f.provider.management.commit(p.token)).ok).toBe(true);
+    expect(f.provider.view().items[0]?.text).toBe("body");
+    expect(f.provider.view().items[0]?.src).toEqual(src);
+  });
+
+  it.each(["body", "source", "namespace"])(
+    "summary remains frozen but %s changed after prepare still rejects original token CAS",
+    async (kind) => {
+      const f = await seeded();
+      changeHost(f.root);
+      const p = f.provider.management.prepareAdopt();
+      if (!p.ok || p.confirmation.kind !== "adopt") throw Error("prepare");
+      const shown = JSON.stringify(p.confirmation);
+      const path =
+        kind === "body"
+          ? join(f.root, "blocks/general.001.md")
+          : join(f.root, kind === "source" ? "items.json" : "namespace.json");
+      const before = readFileSync(path, "utf8");
+      writeFileSync(
+        path,
+        kind === "body"
+          ? before.replace("body", "changed")
+          : kind === "source"
+            ? before.replace("current", "changed")
+            : before + " ",
+      );
+      const namespaceBefore = readFileSync(join(f.root, "namespace.json"), "utf8");
+      expect((await f.provider.management.commit(p.token)).ok).toBe(false);
+      expect(JSON.stringify(p.confirmation)).toBe(shown);
+      expect(readFileSync(join(f.root, "namespace.json"), "utf8")).toBe(namespaceBefore);
+    },
+  );
+});
