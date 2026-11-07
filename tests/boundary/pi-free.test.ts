@@ -162,6 +162,31 @@ describe("pi-free boundaries", () => {
     });
   }
 
+  it("#39 pure scoped kernels and child-bind stay pi-free (PI-facing owner/wire are not pure domain)", () => {
+    const names = [
+      "types",
+      "limits",
+      "authorize",
+      "op-cap",
+      "session-command",
+      "session-fold",
+      "session-ops",
+      "session-poison",
+      "session-store",
+      "session-section",
+      "hub-slot",
+      "hub-store",
+      "hub-management",
+      "hub-section",
+      "render",
+      "child-bind",
+    ];
+    const roots = names.map((name) => resolve(ROOT, `src/memory/scopes/${name}.ts`));
+    for (const file of roots) expect(existsSync(file), file).toBe(true);
+    const offenders = memoryOffenders(roots);
+    expect(offenders, offenders.join("; ")).toEqual([]);
+  });
+
   it("memory paths/frontmatter/store/render value closure stays pi-free; roots also reject pi types", () => {
     const roots = ["paths", "frontmatter", "store", "render"].flatMap((name) =>
       globSync(`src/memory/${name}.ts`, { cwd: ROOT }).map((file) => resolve(ROOT, file)),

@@ -321,6 +321,7 @@ function tokenize(args: string): string[] {
 }
 
 export interface ResolvePolicyOptions {
+  memoryScopes?: boolean;
   name: string;
   args: string;
   kind: CommandKind;
@@ -330,6 +331,10 @@ export interface ResolvePolicyOptions {
 /** Main entry point (§4.6/§4.9): resolves the base decision for a classified command, before
  *  the busy/idle split (`effectivePolicy`) and before the caller checks `cmd.confirm`. */
 export function resolveCommandPolicy(opts: ResolvePolicyOptions): PolicyDecision {
+  if (opts.memoryScopes && opts.name === "mem") {
+    const scoped = scopedMemoryCommandPolicy(opts.args);
+    if (scoped) return scoped;
+  }
   const override = opts.overrides?.[opts.name];
   if (override !== undefined) return { policy: override };
   if (opts.kind === "template" || opts.kind === "skill") return { policy: "allow" };
@@ -344,4 +349,17 @@ export function resolveCommandPolicy(opts: ResolvePolicyOptions): PolicyDecision
 /** Applies the busy/idle split (only `/compact` has a `policyBusy` today). */
 export function effectivePolicy(decision: PolicyDecision, busy: boolean): CommandPolicy {
   return busy && decision.policyBusy !== undefined ? decision.policyBusy : decision.policy;
+}
+
+/** Exact new /mem subroutes only. Web writes are never overrideable. */
+export function scopedMemoryCommandPolicy(args: string): PolicyDecision | undefined {
+  const tokens = tokenize(args);
+  const scope = tokens[0];
+  if (scope !== "session" && scope !== "hub") return undefined;
+  const sub = tokens[1];
+  const read =
+    tokens.length === 1 ||
+    (tokens.length === 2 && ["list", "status", "path"].includes(sub ?? "")) ||
+    (scope === "hub" && ((sub === "show" && tokens.length === 3) || (sub === "trash" && tokens.length === 2)));
+  return { policy: read ? "allow" : "deny" };
 }

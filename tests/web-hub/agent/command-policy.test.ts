@@ -341,3 +341,38 @@ describe("cache-ttl measure web policy", () => {
     ).toEqual({ policy: "deny" });
   });
 });
+
+describe("#39 scopes-on exact command policy", () => {
+  it.each([
+    "session",
+    "session list",
+    "session path",
+    "session status",
+    "hub",
+    "hub list",
+    "hub path",
+    "hub status",
+    "hub show rule.123",
+    "hub trash",
+  ])("read %s", (args) => {
+    expect(
+      resolveCommandPolicy({ name: "mem", args, kind: "extension", memoryScopes: true, overrides: { mem: "deny" } }),
+    ).toEqual({ policy: "allow" });
+  });
+  it.each([
+    "session add raw",
+    "hub add raw",
+    "hub rm rule.123",
+    "hub restore trash",
+    "hub adopt",
+    "hub nope",
+    "session list extra",
+  ])("write %s cannot override", (args) => {
+    expect(
+      resolveCommandPolicy({ name: "mem", args, kind: "extension", memoryScopes: true, overrides: { mem: "allow" } }),
+    ).toEqual({ policy: "deny" });
+    expect(resolveCommandPolicy({ name: "mem", args, kind: "extension", overrides: { mem: "allow" } })).toEqual({
+      policy: "allow",
+    });
+  });
+});

@@ -1,4 +1,10 @@
 import {
+  MEMORY_BIND_EVENT,
+  type MemoryBindReply,
+  type MemoryBindRequest,
+  type MemoryChildBindingPort,
+} from "../memory/scopes/child-bind.js";
+import {
   humanRunId,
   grantHumanScope,
   withHumanBinding,
@@ -435,6 +441,7 @@ export function toolSourcesOf(session: AgentSession): ReadonlyMap<string, string
 }
 
 class PiSessionHandle implements SessionHandle {
+  private readonly boundManager: AgentSession["sessionManager"];
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
   readonly killableHandles = new Set<KillableHandle>();
@@ -444,6 +451,7 @@ class PiSessionHandle implements SessionHandle {
     private readonly humanCleanup?: () => void,
     private readonly fastCleanup?: () => void,
   ) {
+    this.boundManager = session.sessionManager;
     this.sessionId = session.sessionId;
     this.sessionFile = session.sessionFile;
     if (humanCleanup)
@@ -671,7 +679,13 @@ class PiSessionHandle implements SessionHandle {
    * persisted root→leaf order, read-only, same seam as getSwitchTail above.
    */
   getBranchEntries(): readonly unknown[] {
-    return this.session.sessionManager.getBranch();
+    const manager = this.session.sessionManager;
+    if (manager !== this.boundManager || this.session.sessionId !== this.sessionId)
+      throw new Error("session branch owner changed");
+    const branch = manager.getBranch();
+    if (this.session.sessionManager !== manager || this.session.sessionId !== this.sessionId)
+      throw new Error("session branch owner changed during read");
+    return branch;
   }
   /**
    * fleet-drawer plan §4.1 (#7): `session.subscribe` with a swallowing
@@ -786,8 +800,7 @@ export async function toCreateOptions(
   const { systemPrompt, fastSeed, memorySeed: _memorySeed, ...rest } = spec;
   // Fast cancellation is driver control only; SDK create has no signal option.
   // Keep all legacy no-seed options (including their signal key) untouched.
-  if (fastSeed !== undefined) delete (rest as { signal?: AbortSignal }).signal;
-  if (fastSeed === undefined) fastBus = undefined;
+  if (fastSeed !== undefined || fastBus !== undefined) delete (rest as { signal?: AbortSignal }).signal;
   if (!systemPrompt && !fastBus) return rest;
   const agentDir = rest.agentDir ?? getAgentDir();
   const settingsManager = SettingsManager.create(cwd, agentDir);
@@ -809,6 +822,7 @@ export class PiSessionDriver implements SessionDriver {
     private readonly humanRuntime?: HumanRuntime,
     private readonly fastChildState?: FastChildStatePort,
     private readonly sessionWriteGate?: SessionWriteGate,
+    private readonly memoryBinding?: MemoryChildBindingPort,
   ) {}
 
   /** SessionSpec.model arrives as a {provider, id} pair; createAgentSession
@@ -881,7 +895,7 @@ export class PiSessionDriver implements SessionDriver {
     // src/child/activation-signal.ts for why "did the counter advance at all" (not "by exactly
     // one") is the correct check here.
     const activationBefore = childActivationSnapshot();
-    return this.createWithHuman(resolved, spec, cwd, secureDir !== undefined, activationBefore, {
+    return this.createWithHuman(resolved, spec, cwd, secureDir !== undefined, activationBefore, "created", {
       sessionManager,
       ...(persist ? {} : { persist: false }),
     });
@@ -892,15 +906,18 @@ export class PiSessionDriver implements SessionDriver {
     cwd: string,
     secure: boolean,
     activationBefore: number,
+    reason: "created" | "resume",
     extra: Record<string, unknown>,
   ) {
     let binding: ChildHumanBinding | undefined;
     let session: AgentSession | undefined;
     const seed = resolved.fastSeed;
-    const bus = seed !== undefined ? createEventBus() : undefined;
+    const memoryPort = !secure ? this.memoryBinding : undefined;
+    const bus = seed !== undefined || memoryPort !== undefined ? createEventBus() : undefined;
     const runtime = request as SessionSpec & { runId?: string; signal?: AbortSignal };
     const owner = { parentRunId: runtime.runId ?? "", incarnation: {} };
     let response: FastBindReply | undefined;
+    let memoryResponse: MemoryBindReply | undefined;
     let unbind: (() => void) | undefined;
     let live = true;
     let accepting = false;
@@ -913,7 +930,11 @@ export class PiSessionDriver implements SessionDriver {
       accepting = false;
       runtime.signal?.removeEventListener("abort", cleanup);
       try {
-        response?.dispose();
+        try {
+          memoryResponse?.dispose();
+        } finally {
+          response?.dispose();
+        }
       } finally {
         try {
           unbind?.();
@@ -923,9 +944,11 @@ export class PiSessionDriver implements SessionDriver {
       }
     };
     try {
-      if (seed !== undefined) {
-        if (runtime.signal?.aborted) throw new Error("Fast child creation aborted");
+      if (bus) {
+        if (runtime.signal?.aborted) throw new Error("Child creation aborted");
         runtime.signal?.addEventListener("abort", cleanup, { once: true });
+      }
+      if (seed !== undefined) {
         // Original manager only; a failed append is fatal, never a successful seed/readback.
         const manager = extra.sessionManager as SessionManager;
         manager.appendCustomEntry(FAST_RECORD_TYPE, { v: 1, mode: seed.mode });
@@ -984,7 +1007,40 @@ export class PiSessionDriver implements SessionDriver {
             { reason: "fast_receiver_missing" },
           );
       }
-      if (!live) throw new Error("Fast child creation aborted");
+      if (!live) throw new Error("Child creation aborted");
+      if (bus && memoryPort) {
+        const bindRequest: MemoryBindRequest = {
+          v: 1,
+          owner: Object.freeze({ runId: runtime.runId ?? "", incarnation: owner.incarnation }),
+          manager: extra.sessionManager as SessionManager,
+          reason,
+          ...(memoryPort.frozenParentHubSlot
+            ? { frozenParentHubSlot: Object.freeze({ ...memoryPort.frozenParentHubSlot }) }
+            : {}),
+          reply: (reply) => {
+            if (!accepting || !live || memoryResponse) {
+              if (reply !== memoryResponse) reply.dispose();
+              return;
+            }
+            if (reply.v !== 1 || reply.wired !== true || typeof reply.dispose !== "function") return;
+            memoryResponse = reply;
+          },
+        };
+        accepting = true;
+        try {
+          bus.emit(MEMORY_BIND_EVENT, bindRequest);
+        } finally {
+          accepting = false;
+        }
+        if (!memoryResponse) {
+          if (memoryPort.strict)
+            throw new Error("memory_receiver_missing: Memory child receiver missing before first prompt");
+          console.warn(
+            "[pi-subagent] memory child receiver missing before first prompt; continuing without scoped child binding",
+          );
+        }
+      }
+      if (!live) throw new Error("Child creation aborted");
       if (binding) grantHumanScope(request);
       return new PiSessionHandle(
         session,
@@ -1018,9 +1074,17 @@ export class PiSessionDriver implements SessionDriver {
     const secure = secureChildSessionDir() !== undefined;
     const sessionManager = SessionManager.open(sessionFile, undefined, resolved.cwd);
     const activationBefore = childActivationSnapshot();
-    return this.createWithHuman(resolved, spec, resolved.cwd ?? sessionManager.getCwd(), secure, activationBefore, {
-      sessionManager,
-    });
+    return this.createWithHuman(
+      resolved,
+      spec,
+      resolved.cwd ?? sessionManager.getCwd(),
+      secure,
+      activationBefore,
+      "resume",
+      {
+        sessionManager,
+      },
+    );
   }
   bind(h: SessionHandle, onEvent: (e: DriverEvent) => void) {
     const session = (h as PiSessionHandle)["session"];

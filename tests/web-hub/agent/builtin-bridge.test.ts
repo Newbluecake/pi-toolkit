@@ -1078,3 +1078,29 @@ describe("#40 authoritative unknown evidence", () => {
     expect(bridge.execute(frame("model", "x"))).toMatchObject({ ok: false, code: "E_UNSUPPORTED", effect: "none" });
   });
 });
+
+describe("#39 actual Web command choke point", () => {
+  it.each(["session add raw", "hub add raw", "hub rm rule.123", "hub restore trash", "hub adopt"])(
+    "%s is DENY despite confirm and allow override",
+    (args) => {
+      const p = fakePi({ commands: [{ name: "mem", source: "extension" }] });
+      const capture = fakeCapture();
+      const bridge = createBuiltinBridge(
+        baseDeps({ pi: p.pi, memoryScopes: true, overrides: () => ({ mem: "allow" }), capture: () => capture }),
+      );
+      expect(bridge.execute(frame("mem", args, {}, true))).toMatchObject({
+        ok: false,
+        code: "E_COMMAND_DENIED",
+        effect: "none",
+      });
+      expect(p.sent).toEqual([]);
+      expect(capture.armed).toBeUndefined();
+    },
+  );
+  it("scoped reads reach existing real extension dispatch path", () => {
+    const p = fakePi({ commands: [{ name: "mem", source: "extension" }] });
+    const bridge = createBuiltinBridge(baseDeps({ pi: p.pi, memoryScopes: true }));
+    expect(bridge.execute(frame("mem", "session list"))).toMatchObject({ ok: true });
+    expect(p.sent).toHaveLength(1);
+  });
+});

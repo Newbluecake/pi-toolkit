@@ -85,6 +85,10 @@ function resolveCwd(ctx: ExtensionCommandContext): string {
 }
 
 export interface CreateMemCommandDeps {
+  scopedRouter?: (args: string, ctx: ExtensionCommandContext) => Promise<{ handled: boolean; result?: unknown }>;
+  scopedDoctor?: () => readonly import("./scopes/doctor.js").ScopedDoctorFinding[];
+  contentReadonly?: boolean;
+  contentWriteGate?: MemoryWriteGate;
   paths?: MemoryPaths;
   writeGate?: MemoryWriteGate;
   /** Default false — used only by the `/mem tidy`/`/mem restore` gate (§7). */
@@ -232,6 +236,17 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
     },
     handler: async (args, ctx) => {
       const a = (args ?? "").trim();
+      if (deps.scopedRouter) {
+        const routed = await deps.scopedRouter(a, ctx);
+        if (routed.handled) {
+          if (ctx.hasUI) ctx.ui.notify(JSON.stringify(routed.result, null, 2), "info");
+          return;
+        }
+      }
+      if (deps.contentReadonly && !/^(?:list|path|doctor|jev|tags(?: list)?)?$/.test(a)) {
+        if (ctx.hasUI) ctx.ui.notify("E_CHILD_READONLY: project memory is readonly", "warning");
+        return;
+      }
       const [sub, ...rest] = a.split(/\s+/);
       const cwd = resolveCwd(ctx);
       const doctorTrailer = (): string => {
@@ -349,6 +364,7 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
           await handleMemInitCommand(ctx, {
             ...(deps.paths === undefined ? {} : { paths: deps.paths }),
             isChildSession,
+            ...(deps.contentWriteGate ? { writeGate: deps.contentWriteGate } : {}),
             ...(initSettings === undefined ? {} : { settings: initSettings }),
             ...(deps.onAfterWrite === undefined ? {} : { onAfterWrite: deps.onAfterWrite }),
             ...(initSettings === undefined
@@ -408,6 +424,7 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
             ...(deps.paths === undefined ? {} : { paths: deps.paths }),
             ...(deps.renderBlock === undefined ? {} : { renderTieredPort: deps.renderBlock }),
             ...(jev === undefined ? {} : { jev: jevDoctorPortFrom(jev, entriesFor) }),
+            ...(deps.scopedDoctor ? { scoped: deps.scopedDoctor } : {}),
           });
           return;
         }

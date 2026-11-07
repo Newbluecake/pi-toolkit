@@ -67,6 +67,8 @@ import type { SpawnService } from "./spawn-service.js";
 import type { LifecycleSink, Runner, RunnerCallbacks, RunnerSpec } from "./ports.js";
 
 export interface RuntimeAdapterDeps {
+  /** Same activation-local memory binding as driver; absent when scopes are off. */
+  memoryBindingEnabled?: boolean;
   clock: Clock;
   driver: SessionDriver;
   pool: SlotPool;
@@ -430,6 +432,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     (runId, generation, kind, err) => runtime.notifyEffectFailed(runId, generation, kind as RunEffect["kind"], err),
   );
   const runnerDeps: RunnerDeps = {
+    ...(deps.memoryBindingEnabled !== undefined ? { memoryBindingEnabled: deps.memoryBindingEnabled } : {}),
     clock: deps.clock,
     driver: deps.driver,
     pool: deps.pool,

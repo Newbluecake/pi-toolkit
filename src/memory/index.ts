@@ -1,3 +1,6 @@
+import type { MemoryScopesWiring } from "./scopes/wire.js";
+import { createScopedProjection } from "./scoped-projection.js";
+import type { SystemPromptMode } from "../sysprompt/hub.js";
 /**
  * Entry contract for the merged armory-memory module (merge-plan D6):
  * `wireMemory(pi, opts)` registers the `pi_project_memory` section into the
@@ -57,6 +60,8 @@ import type { JevBashJobsLitePort, JevDoctorPort, JevFleetPort, JevRenderInfo, J
 
 export interface WireMemoryOpts {
   settings: MemorySettings;
+  scopes?: MemoryScopesWiring;
+  systemPromptMode?: () => SystemPromptMode;
   writeGate?: MemoryWriteGate;
   isChildSession: boolean;
   /** The shared PromptSectionHub (sysprompt-stable §4.6) that folds this
@@ -109,6 +114,9 @@ export function jevSettingsWarnings(settings: MemorySettings, verdict: ReturnTyp
 }
 
 export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryResult {
+  // Scopes-on child content is unconditionally readonly, even with an old allow=true setting.
+  if (opts.scopes && opts.isChildSession)
+    opts = { ...opts, settings: { ...opts.settings, allowWriteInChildSessions: false } };
   const cache = new RenderCache();
   const frozenBlocks = new Map<string, string | undefined>();
   const lastBlocks = new Map<string, string | undefined>();
@@ -161,6 +169,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       lastBlocks.delete(cwd);
       cache.delete(cwd);
       frozenBlocks.delete(cwd);
+      projectSection?.projectSources.delete(cwd);
       for (const hook of afterWriteHooks) hook(cwd);
       return;
     }
@@ -169,6 +178,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       // last provider result is the exact block that was in the prompt, so it
       // is the correct freeze source for either layout (including an explicit
       // "no block" result before the first render).
+      projectSection?.projectSources.freeze(cwd);
       frozenBlocks.set(cwd, lastBlocks.has(cwd) ? lastBlocks.get(cwd) : cache.peek(cwd, budget)?.block);
     } else if (opts.settings.layout === "tiered") {
       lastBlocks.delete(cwd);
@@ -178,7 +188,61 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     for (const hook of afterWriteHooks) hook(cwd);
   };
 
-  const gate = opts.writeGate ?? plainMemoryWriteGate;
+  const secureGate = opts.writeGate ?? plainMemoryWriteGate;
+  const gate: MemoryWriteGate =
+    opts.scopes && opts.isChildSession
+      ? {
+          check: () => ({ ok: false, reason: "locked" }),
+          bootstrap: () => ({ ok: false, reason: "locked" }),
+          capture() {},
+        }
+      : secureGate;
+  let projectSection: ReturnType<typeof memorySection> | undefined;
+  const projection = opts.scopes
+    ? createScopedProjection({
+        enabled: () => true,
+        owner: () => opts.scopes?.current()?.owner,
+        mode: opts.systemPromptMode ?? (() => "stable"),
+        state: opts.sections,
+        ...(opts.settings.scopes.session
+          ? {
+              session: {
+                available: (input: import("../sysprompt/hub.js").SectionProviderInput) => {
+                  opts.scopes!.context(input.ctx);
+                  return opts.scopes!.current()?.capability() === "ok";
+                },
+                view: () => {
+                  const store = opts.scopes!.current()?.session;
+                  if (!store) throw Error("E_STALE_SESSION");
+                  return store.view();
+                },
+              },
+            }
+          : {}),
+        ...(opts.settings.scopes.hub
+          ? {
+              hub: {
+                available: (input: import("../sysprompt/hub.js").SectionProviderInput) => {
+                  opts.scopes!.context(input.ctx);
+                  const r = opts.scopes!.current();
+                  return r?.capability() === "ok" && r.hub !== undefined;
+                },
+                view: () => {
+                  const store = opts.scopes!.current()?.hub;
+                  if (!store) throw Error("E_STALE_SESSION");
+                  return store.view();
+                },
+              },
+            }
+          : {}),
+      })
+    : undefined;
+  if (opts.scopes)
+    pi.on("session_tree", () => {
+      projectSection?.projectSources.clear();
+      frozenBlocks.clear();
+      lastBlocks.clear();
+    });
   let migrationAbort = new AbortController();
   if (opts.settings.layout === "blocks" && opts.secureDomainKind !== "locked")
     gate.capture(memoryDirFor(resolveWorktreeOrigin(process.cwd()) ?? process.cwd()));
@@ -239,36 +303,37 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       if (event.reason === "reload") reminder.reset();
     });
   }
-  opts.sections.register(
-    "pi_project_memory",
-    memorySection({
-      settings: opts.settings,
-      isChildSession: opts.isChildSession,
-      cache,
-      frozenBlocks,
-      onRender: (cwd, block, info, resident) => {
-        lastBlocks.set(cwd, block);
-        // #36 P4 (arch §3.3.5): the fourth argument carries this render's
-        // resident id → renderKey map — fold its id set into the recorded
-        // JevRenderInfo (wire.ts's renderInfoFor overlays the LEDGER ids on
-        // top of whatever lands here).
-        if (jevOn && info !== undefined) {
-          renderInfos.set(cwd, resident === undefined ? info : { ...info, residentBlocks: [...resident.keys()] });
-        }
-      },
-      ...(jevOn ? { stripInlineMeta: true } : {}),
-      // 自己不消费，俛 legacy layout 不调用它；tiered 的 `accessFromTools` 计算属于 P1）。
-      // 防御地抖错把它包成安全函数：`pi.getActiveTools` 缺失或抛错都降级为 `[]`
-      // （同 `context-switch/child.ts:470` 的这个先例）。
-      getActiveTools: () => {
-        try {
-          return typeof pi.getActiveTools === "function" ? pi.getActiveTools() : [];
-        } catch {
-          return [];
-        }
-      },
-    }),
-  );
+  projectSection = memorySection({
+    settings: opts.settings,
+    ...(projection ? { projection } : {}),
+    isChildSession: opts.isChildSession,
+    cache,
+    frozenBlocks,
+    onRender: (cwd, block, info, resident) => {
+      lastBlocks.set(cwd, block);
+      // #36 P4 (arch §3.3.5): the fourth argument carries this render's
+      // resident id → renderKey map — fold its id set into the recorded
+      // JevRenderInfo (wire.ts's renderInfoFor overlays the LEDGER ids on
+      // top of whatever lands here).
+      if (jevOn && info !== undefined) {
+        renderInfos.set(cwd, resident === undefined ? info : { ...info, residentBlocks: [...resident.keys()] });
+      }
+    },
+    ...(jevOn ? { stripInlineMeta: true } : {}),
+    // 自己不消费，俛 legacy layout 不调用它；tiered 的 `accessFromTools` 计算属于 P1）。
+    // 防御地抖错把它包成安全函数：`pi.getActiveTools` 缺失或抛错都降级为 `[]`
+    // （同 `context-switch/child.ts:470` 的这个先例）。
+    getActiveTools: () => {
+      try {
+        return typeof pi.getActiveTools === "function" ? pi.getActiveTools() : [];
+      } catch {
+        return [];
+      }
+    },
+  });
+  opts.sections.register("pi_project_memory", projectSection);
+  if (projection?.sessionSection) opts.sections.register("pi_session_memory", projection.sessionSection);
+  if (projection?.hubSection) opts.sections.register("pi_hub_memory", projection.hubSection);
   // jev-plan J6: Jev hooks register after the hub (src/index.ts creates the
   // hub first) and before the tool/command so the command port exists.
   const jevTodo = opts.todo?.();
@@ -289,7 +354,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         // itself is untouched.
         // #36 P4 修复轮：生产 writeGate 覆盖 jev 侧车写入（打标/冷却戳/
         // 建议/taxonomy —— writeIndexPatch 逐原语复检）。
-        writeGate: gate,
+        writeGate: secureGate,
         getSectionSnapshot: () => {
           const s = opts.sections._state("pi_project_memory");
           return s === undefined ? undefined : { snapshot: s.snapshot, stale: s.stale };
@@ -325,6 +390,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     settings: opts.settings,
     isChildSession: opts.isChildSession,
     onAfterWrite,
+    ...(opts.scopes ? { writeGate: gate } : {}),
     ...(opts.sessionSignal === undefined ? {} : { sessionSignal: opts.sessionSignal }),
   };
   pi.registerTool(
@@ -342,12 +408,25 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
             doctorSummary,
             ...(jev === undefined ? {} : { jev: jev.makeWritePort() }),
           })
-        : createMemoryTool({ settings: opts.settings, isChildSession: opts.isChildSession, onAfterWrite }),
+        : createMemoryTool({
+            settings: opts.settings,
+            isChildSession: opts.isChildSession,
+            onAfterWrite,
+            ...(opts.scopes ? { writeGate: gate } : {}),
+          }),
   );
   pi.registerCommand(
     "mem",
     createMemCommand({
       isChildSession: opts.isChildSession,
+      ...(opts.scopes
+        ? {
+            scopedRouter: opts.scopes.command,
+            scopedDoctor: () => opts.scopes?.current()?.doctor.inspect() ?? [],
+            contentReadonly: opts.isChildSession,
+            contentWriteGate: gate,
+          }
+        : {}),
       getTidyPort: () => tidyPort,
       writeGate: gate,
       settings: opts.settings,

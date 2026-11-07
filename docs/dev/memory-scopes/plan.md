@@ -248,3 +248,15 @@ Root 记录 suite/版本/退出码/日志与未测项；修复失败必须重跑
 ## 附录 · 交接
 
 结构化交接：`/tmp/handoff/task39-memory-scopes-plan.json`，含 fileIndex/evidence/ruledOut/openQuestions、DAG、验收索引、已跑 probe 与未测清单。下游按坐标选择性核验；已排除的文本 proof、FastSeed 复用、HOME 二次推算、raw=JSON、TUI-only 均不重开。
+
+### 2026-11-08 P4c source assembly 交接状态
+
+- Stage A：pi-free child bind + public SDK loader bus barrier，实际 manager/reason/frozen parent slot；
+  memory-only internal Runner cancellation（经精确追加的 runtime-adapter 可选 boolean 两缝），不改 #62 budgets。
+- Stage B：early unique owner/context/proof/approval/store/command/provider，实际 Stack gate/parent/workflow ports，
+  连续 P4a2 projection 与 SOURCE freeze/clear/delete，child project content hardreadonly 和 Web exact policy。
+- Gate：仅定向测试、strict noEmit、project typecheck、私有 `/tmp` backend build；最终命令日志及未覆盖项
+  由 `/tmp/memory39-p4c-handoff.json` 报告。旧 A/B fixtures 冻结，不 UPDATE_TRACE、不全树 format。
+- 不宣称 SDK append=fsync；actual-manager weak poison 和 legacy process-restart 限界见 memory README。
+- P5 **未做**：真实原生 viewport/keyboard 与 browser dialogs acceptance，payload 断言不等价于可读屏幕；
+  如裁切后续 feature-local scroll adapter，不升级 SDK。无真实资源迁移/paid API/reload/commit/push/release。

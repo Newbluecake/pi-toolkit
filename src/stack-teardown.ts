@@ -82,6 +82,7 @@ export interface StackTeardownEnv {
  * components for the next build's handoff (a single end-of-build write would change that).
  */
 export interface TeardownParts {
+  memoryScopes?: { dispose(): void } | undefined;
   /** Session-bound Fast capture/child readers; revoke before any late run drain. */
   fast?: { dispose(): void } | undefined;
   /** Same-module defensive rebuild; a fresh-module reload is disposed by `Stack.disposeXsSync`. */
@@ -157,6 +158,7 @@ function rebuildDispose<K extends keyof TeardownParts>(id: string, key: K): Rebu
 
 // ───────────────────────────── path A — rebuild-handoff (order = §4.2 column A) ─────────────────────────────
 const REBUILD_STEPS: readonly RebuildStep[] = [
+  rebuildDispose("memoryScopes", "memoryScopes"),
   rebuildDispose("xs", "xs"),
   rebuildDispose("rootWakeRecovery", "rootWakeRecovery"),
   rebuildDispose("backgroundCompletions", "backgroundCompletions"),
@@ -213,6 +215,7 @@ export function runRebuildHandoff(parts: TeardownParts): RebuildHandoff {
 
 // ───────────────────────────── path B — defensive (order = §4.2 column B) ─────────────────────────────
 const DEFENSIVE_STEPS: readonly StackStep<void>[] = [
+  { id: "memoryScopes", run: (stack) => void stack.memoryScopes?.dispose() },
   // ask-user-async §3.3 (P2): stop the old hub's broadcast FIRST so a completion flushed by the teardown below can
   // never reach the new session's ask_user (idempotent; shutdown is the other path).
   { id: "xs", run: (stack) => void stack.xs?.dispose() },
@@ -252,6 +255,7 @@ const DEFENSIVE_STEPS: readonly StackStep<void>[] = [
 
 // ───────────────────────────── path C4 — shutdown (order = §4.2 column C4) ─────────────────────────────
 const SHUTDOWN_STEPS: readonly StackStep<void | Promise<void>>[] = [
+  { id: "memoryScopes", run: (stack) => void stack.memoryScopes?.dispose() },
   // G11 (7b): FIRST — nothing that settles during the drain below may toast on a context that is about to die, and
   // the process-global capability record must not keep this activation's listener across /reload.
   { id: "capabilityAlert", run: (_stack, env) => void env.activation.releaseCapabilityAlert() },

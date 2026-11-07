@@ -271,12 +271,14 @@ export function createHumanDispatchHookOwner(bridge: HumanDispatchBridge): (pi: 
  * P4 supplies the SAME tracker/registry used by this bridge and a live remote port.
  */
 export function createHumanOpApproval(
-  deps: Omit<OpApprovalDeps, "select" | "localSelectForbidden"> & {
+  deps: Omit<OpApprovalDeps, "select" | "localSelectForbidden" | "remote"> & {
+    readonly remote?: import("../../ask-user/remote.js").AskUserRemotePort | undefined;
     context(): Pick<ExtensionContext, "mode" | "ui"> | undefined;
   },
 ) {
-  return createOpApprovalPort({
-    ...deps,
+  const { remote: _initialRemote, ...rest } = deps;
+  const approvalDeps: OpApprovalDeps = {
+    ...rest,
     select: async (title, options, opts) => {
       const ctx = deps.context();
       if (ctx?.mode !== "tui" || typeof ctx.ui?.select !== "function") return undefined;
@@ -286,5 +288,7 @@ export function createHumanOpApproval(
       const ctx = deps.context();
       return ctx?.mode !== "tui" || typeof ctx.ui?.select !== "function";
     },
-  });
+  };
+  Object.defineProperty(approvalDeps, "remote", { get: () => deps.remote });
+  return createOpApprovalPort(approvalDeps);
 }

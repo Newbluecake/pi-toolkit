@@ -1,5 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { initSecureDomain } from "./secure/domain.js";
+import { wireMemoryScopes } from "./memory/scopes/wire.js";
+import { secureSessionWriteGate } from "./secure/memory-gate.js";
 import { secureMemoryWriteGate } from "./secure/memory-gate.js";
 import { secureGuardsNeeded, wireSecureGuards } from "./secure/guards.js";
 import { registerSecureCommand, secureCommandWanted } from "./secure/command.js";
@@ -185,6 +187,21 @@ export default function activate(rawPi: ExtensionAPI): void {
     ? wireSecureGuards(pi, { domain: secureDomain, isChildSession })
     : undefined;
 
+  const memoryScopes =
+    preGuardSettings.memory.enabled &&
+    secureDomain.kind === "plain" &&
+    (preGuardSettings.memory.scopes.session || preGuardSettings.memory.scopes.hub)
+      ? wireMemoryScopes(pi, {
+          settings: preGuardSettings.memory,
+          child: isChildSession,
+          domain: secureDomain.kind,
+          gate: secureSessionWriteGate(secureDomain),
+          locked: () => secureGuards?.lockedReason() !== undefined,
+          remote: () => askUserRemoteRef.current?.(),
+          hubPaths: () => webHubRef.current?.memoryHubPaths?.(),
+        })
+      : undefined;
+
   if (preGuardSettings.webSearch.enabled) registerWebSearchTool(pi);
   // date 模块：首轮 + 跨日以隐藏消息注入当前日期（主/子会话都注入；pre-guard）。
   // enabled=false ⇒ wireDate 零注册。
@@ -233,6 +250,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   if (preGuardSettings.memory.enabled)
     memoryWiring = wireMemory(pi, {
       settings: preGuardSettings.memory,
+      ...(memoryScopes ? { scopes: memoryScopes, systemPromptMode: () => preGuardSettings.systemPrompt.mode } : {}),
       isChildSession,
       sections: promptHub,
       secureDomainKind: secureDomain.kind,
@@ -927,27 +945,34 @@ export default function activate(rawPi: ExtensionAPI): void {
     if (holder.current) {
       holder.current.dispose({ kind: "defensive", nextXsSessionId }, { ctx, settings, activation: activationTeardown });
     }
-    await types.reload();
-    const stack = buildSessionStack(
-      pi,
-      ctx,
-      settings,
-      types,
-      [mergeExtensionPoints(extensionPoints)],
-      _event.reason,
-      loadHintState,
-      // external-agent plan §5.5（P5）：memory 的外部导出（P4a renderForExternal）经
-      // holder 晚绑定——wireMemory 在 activate() 早期已返回，这里只传 getter；是否
-      // 真正注入由 buildSessionStack 按 externalAgents.droid.{enabled,injectMemory} 判定。
-      memoryWiring !== undefined ? { memoryBlock: (cwd: string) => memoryWiring?.renderForExternal(cwd) } : undefined,
-      xs.stackInput(),
-      scheduleWiring,
-      // fabric-thread P3（§11.1）：threads 开启时才传跨接线（replySink → web-hub 命令处理器；
-      // conn → 激活级 hub 连接）。关闭 ⇒ buildSessionStack 收到 undefined ⇒ 栈面缺席（G2a）。
-      threadsOn ? { replySink: () => webHubRef.current?.threadSink, conn: currentConnection } : undefined,
-      settingsFile,
-      fast,
-    );
+    let stack: ReturnType<typeof buildSessionStack>;
+    try {
+      await types.reload();
+      stack = buildSessionStack(
+        pi,
+        ctx,
+        settings,
+        types,
+        [mergeExtensionPoints(extensionPoints)],
+        _event.reason,
+        loadHintState,
+        // external-agent plan §5.5（P5）：memory 的外部导出（P4a renderForExternal）经
+        // holder 晚绑定——wireMemory 在 activate() 早期已返回，这里只传 getter；是否
+        // 真正注入由 buildSessionStack 按 externalAgents.droid.{enabled,injectMemory} 判定。
+        memoryWiring !== undefined ? { memoryBlock: (cwd: string) => memoryWiring?.renderForExternal(cwd) } : undefined,
+        xs.stackInput(),
+        scheduleWiring,
+        // fabric-thread P3（§11.1）：threads 开启时才传跨接线（replySink → web-hub 命令处理器；
+        // conn → 激活级 hub 连接）。关闭 ⇒ buildSessionStack 收到 undefined ⇒ 栈面缺席（G2a）。
+        threadsOn ? { replySink: () => webHubRef.current?.threadSink, conn: currentConnection } : undefined,
+        settingsFile,
+        fast,
+        memoryScopes?.group(),
+      );
+    } catch (error) {
+      memoryScopes?.group()?.dispose();
+      throw error;
+    }
     holder.current = stack;
     xs.attach(stack, ctx, pi, nextXsSessionId);
     mention.attachAutocomplete(ctx);
@@ -1090,6 +1115,7 @@ export default function activate(rawPi: ExtensionAPI): void {
           notifySession: (notice) => pi.sendMessage(mention.sessionNoticeMessage(notice)),
         }),
       askUserEnabled: () => settings.askUser.enabled,
+      ...(memoryScopes ? { memoryProof: () => memoryScopes.proof } : {}),
       ownedCommandNames,
       // web-hub-cmd-history plan §4.3/§5.4 (A1, M1): the recorder's pre-write LOCKED query.
       // Unassigned (plain domain without guards) ⇒ the deps stay unset ⇒ treated as writable.

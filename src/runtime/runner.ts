@@ -231,6 +231,8 @@ export class BasicEffectInterpreter implements EffectInterpreter {
   }
 }
 export interface RunnerDeps {
+  /** Same activation-local port presence as driver; not a model/DTO/wire field. */
+  memoryBindingEnabled?: boolean;
   clock: Clock;
   driver: SessionDriver;
   pool: SlotPool;
@@ -647,7 +649,18 @@ export class RuntimeRunner implements Runner {
     const handleEntry = this.activeHandles.get(runId);
     if (!handleEntry || handleEntry.gen !== state.generation) return undefined;
     try {
-      return handleEntry.handle.getBranchEntries?.();
+      const branch = handleEntry.handle.getBranchEntries?.();
+      const after = this.states.get(runId);
+      if (
+        !after ||
+        after.generation !== state.generation ||
+        after.sessionId !== state.sessionId ||
+        this.activeHandles.get(runId) !== handleEntry ||
+        after.status === "stopping" ||
+        isTerminalStatus(after.status)
+      )
+        return undefined;
+      return branch;
     } catch {
       return undefined;
     }
@@ -1083,7 +1096,8 @@ export class RuntimeRunner implements Runner {
       const openFile = req.resumeFrom;
       // Fast owns pending-create bindings: revoke them on the runner/watchdog's
       // internal cancellation too. No-seed keeps the exact legacy request object.
-      const createReq = req.fastSeed === undefined ? req : { ...req, signal: cancel.signal };
+      const createReq =
+        req.fastSeed === undefined && !this.d.memoryBindingEnabled ? req : { ...req, signal: cancel.signal };
       createP = openFile
         ? this.d.driver.resume
           ? this.d.driver.resume(openFile, createReq)

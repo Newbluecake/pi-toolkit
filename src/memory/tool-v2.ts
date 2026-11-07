@@ -54,6 +54,7 @@ import { MEMORY_TOOL_V2_TEXT, MEMORY_TOOL_V2_TEXT_JEV, MemoryToolParamsV2 } from
 import type { ClassifierRegistryLike, JevWritePort, MemEntry } from "./jev/contracts.js";
 
 export interface MemoryToolV2Deps {
+  writeGate?: import("./contracts.js").MemoryWriteGate;
   settings: MemorySettings;
   isChildSession: boolean;
   onAfterWrite: (cwd: string) => void;
@@ -555,7 +556,11 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
 
   function requireDir(cwd: string): { display: string; real: string } {
     const display = memoryDirFor(cwd, deps.paths);
+    if (deps.writeGate && !(deps.writeGate.bootstrap?.(display) ?? deps.writeGate.check(display)).ok)
+      throw new MemoryError("writes not allowed");
     ensureMemoryDir(display);
+    deps.writeGate?.capture(display);
+    if (deps.writeGate && !deps.writeGate.check(display).ok) throw new MemoryError("writes not allowed");
     const canon = canonicalDir(display);
     if (!canon) throw new MemoryError(`memory directory for ${cwd} is not accessible`);
     return { display, real: canon.real };
@@ -893,6 +898,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
   ): Promise<WriteOutcome> {
     assertWithinWriteLimit(fileText, settings.maxWriteBytes);
     return withMemoryDirLock(real, () => {
+      if (deps.writeGate && !deps.writeGate.check(real).ok) throw new MemoryError("writes not allowed");
       const existing = statRegularIfExists(real, name);
       if (existing)
         throw new MemoryError(
@@ -930,6 +936,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     if (oldStr === undefined) throw new Error("str_replace requires old_str");
     assertWithinWriteLimit(newStr ?? "", settings.maxWriteBytes);
     return withMemoryDirLock(real, () => {
+      if (deps.writeGate && !deps.writeGate.check(real).ok) throw new MemoryError("writes not allowed");
       const existing = readExisting(real, name);
       if (!existing) throw new MemoryError(`the path ${name} does not exist`);
       const matches = findStrReplaceMatches(existing.text, oldStr);
@@ -986,6 +993,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     if (insertText === undefined) throw new Error("insert requires insert_text (or content)");
     assertWithinWriteLimit(insertText, settings.maxWriteBytes);
     return withMemoryDirLock(real, () => {
+      if (deps.writeGate && !deps.writeGate.check(real).ok) throw new MemoryError("writes not allowed");
       const existing = readExisting(real, name);
       if (!existing) throw new MemoryError(`the path ${name} does not exist`);
       const target = resolveInsertTarget(existing.text, {
@@ -1032,6 +1040,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
   ): Promise<WriteOutcome> {
     assertWithinWriteLimit(body, settings.maxWriteBytes);
     return withMemoryDirLock(real, () => {
+      if (deps.writeGate && !deps.writeGate.check(real).ok) throw new MemoryError("writes not allowed");
       const existing = readExisting(real, name);
       if (existing && isHandWritten(existing.text)) {
         throw new MemoryError(
@@ -1069,6 +1078,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
   ): Promise<WriteOutcome> {
     assertWithinWriteLimit(content, settings.maxWriteBytes);
     return withMemoryDirLock(real, () => {
+      if (deps.writeGate && !deps.writeGate.check(real).ok) throw new MemoryError("writes not allowed");
       const existing = readExisting(real, name);
       const handWritten = existing !== undefined && isHandWritten(existing.text);
       const needsNewline = existing !== undefined && existing.stat.size > 0 && !existing.text.endsWith("\n");
@@ -1109,6 +1119,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     commitSignal?: AbortSignal,
   ): Promise<string> {
     return withMemoryDirLock(real, () => {
+      if (deps.writeGate && !deps.writeGate.check(real).ok) throw new MemoryError("writes not allowed");
       const existing = statRegularIfExists(real, name);
       if (!existing) throw new MemoryError(`the path ${name} does not exist`);
       // Guard phase 3 (v4.1 §3.2 — delete guards too): the file must still
@@ -1149,6 +1160,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
     if (!isV2Name(newName))
       throw new MemoryError(`invalid memory file name ${JSON.stringify(newName)} — *.md only, no path separators`);
     return withMemoryDirLock(real, () => {
+      if (deps.writeGate && !deps.writeGate.check(real).ok) throw new MemoryError("writes not allowed");
       const existing = statRegularIfExists(real, oldName);
       if (!existing) throw new MemoryError(`the path ${oldName} does not exist`);
       const { text: body } = readRegular(real, oldName);
@@ -1225,7 +1237,7 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
       }
 
       // every remaining op writes — resolve the real directory + target name
-      assertAllowWrite(true); // structural gate (R7); tool-level gate already ran (assertWritable)
+      assertAllowWrite(deps.writeGate ? deps.writeGate.check(memoryDirFor(cwd, deps.paths)).ok : true); // structural gate (R7); tool-level gate already ran (assertWritable)
       const { real } = requireDir(cwd);
 
       switch (op) {

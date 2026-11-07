@@ -55,6 +55,7 @@ export type MemInitOutcome =
   | { kind: "blocks"; path: string };
 
 export interface MemInitDeps {
+  writeGate?: import("./contracts.js").MemoryWriteGate;
   paths?: MemoryPaths;
   isChildSession: boolean;
   /** Defaults to `DEFAULT_SETTINGS.memory` (same convention as tidy). */
@@ -97,7 +98,10 @@ source: agent
  *  below owns all user-facing text. */
 export async function runMemInit(cwd: string, deps: MemInitDeps): Promise<MemInitOutcome> {
   const display = memoryDirFor(cwd, deps.paths);
+  if (deps.writeGate && !(deps.writeGate.bootstrap?.(display) ?? deps.writeGate.check(display)).ok)
+    throw new MemoryError("writes not allowed");
   ensureMemoryDir(display);
+  deps.writeGate?.capture(display);
   const canon = canonicalDir(display);
   if (!canon) throw new MemoryError(`memory directory for ${cwd} is not accessible`);
   const real = canon.real;
@@ -106,6 +110,7 @@ export async function runMemInit(cwd: string, deps: MemInitDeps): Promise<MemIni
   // 件，只提示改用带 scope=global 的用户令。放在锁外判定（只读）。
   if (dirFormat(real) === "blocks") return { kind: "blocks", path };
   return withMemoryDirLock(real, () => {
+    if (deps.writeGate && !deps.writeGate.check(real).ok) throw new MemoryError("writes not allowed");
     const existing = statRegularIfExists(real, CORE_NAME);
     if (existing) {
       const { text } = readRegular(real, CORE_NAME);

@@ -70,6 +70,7 @@ export interface WriteOptions {
   append?: boolean;
   /** 结构性写闸门（R7）：false 时抛 MemoryError("writes not allowed")。调用方必须显式传 true；工具层按 isChildSession/settings 计算。 */
   allowWrite: boolean;
+  writeGate?: import("./contracts.js").MemoryWriteGate;
   maxWriteBytes: number;
   maxFileBytes: number;
   /** 测试确定性注入；缺省 new Date().toISOString()。 */
@@ -168,7 +169,13 @@ export function writeMemoryFile(
       `content is ${contentBytes}B, over the per-write limit of ${opts.maxWriteBytes}B — split it into smaller writes`,
     );
   }
+  if (opts.writeGate) {
+    const verdict = opts.writeGate.bootstrap?.(display) ?? opts.writeGate.check(display);
+    if (!verdict.ok) throw new MemoryError("writes not allowed");
+  }
   ensureMemoryDir(display);
+  opts.writeGate?.capture(display);
+  if (opts.writeGate && !opts.writeGate.check(display).ok) throw new MemoryError("writes not allowed");
   const canon = canonicalDir(display);
   if (!canon) throw new MemoryError(`memory directory for ${cwd} is not accessible`);
   const dir = canon.real;

@@ -48,6 +48,7 @@ export interface BuiltinBridge {
 }
 
 export interface BuiltinBridgeDeps {
+  memoryScopes?: boolean;
   pi?: ExtensionAPI & CommandsPort;
   getCtx?(): ExtensionContext | undefined;
   getSessionId?(): string;
@@ -648,6 +649,7 @@ export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge
       const decision = resolveCommandPolicy({
         name: cmd.name,
         args: cmd.args,
+        ...(deps.memoryScopes ? { memoryScopes: true } : {}),
         kind: classified.kind,
         ...(overrides !== undefined ? { overrides } : {}),
       });

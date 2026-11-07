@@ -158,3 +158,60 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 **证据与限界**：`tests/conformance/memory-scopes-proof.test.ts` 使用 own HOME/agentDir、真实 SDK、scripted local runtime 和生产 bridge/commands/dialogs/approval/provider；native idle TUI 与正常 idle Web（实际 void ExtensionAPI send）均经过**真实 SDK toolCall → exact Web 确认 callback → cap reserve → P3a hub 写入 → 读取原文**。native queued steer/followUp 保持普通投递且工具得到 `E_HUB_NEEDS_HUMAN_TURN`，零 popup/写/重发；RPC、Feishu、机器同文、nested/custom/handled、owner-change、并发和 transform 有负/正门。另有三个 agent 单测文件覆盖 one-shot、owner/session/file/epoch/tree、未知 idle API、Promise reject、origin/race/旧 nonce/late popup、RPC local-select 禁门与路径 absent。没有模型/API/真实用户数据/挂载/安装/reload；不是 P4 根装配或真实终端/浏览器 viewport 首发验收，不宣称产品三层接线已经完成。
 
 **真实最小缺口（回 Root，未在本包伪造）**：P3a provider 只有 view/render/enqueue CRUD/dispose，hub-slot 只有只读检查/解析；无授权 reseal/adopt 公共 kernel、无 hub-trash 列举/restore 公共 kernel。`/mem hub`、工具 surface 和 root/stack 唯一装配属于 P4；adopt/restore 不能以普通 enqueue 或无条件覆盖 namespace 冒充实现，需后续批准 kernel 端口包。#61 专用 RPC 强消费凭证不成为本包 SDK 前置。
+
+## #39 P4c 实际装配（2026-11-08；独立验收与 P5 尚待）
+
+前文 P1/P3 各节的“未装配”是当时交付记录；本节记录本次 source 接线，不将 factory 门禁冒充完整上线。
+plain + `memory.enabled` + 任一 scopes flag 才构造早期 shell，secure/locked/off 不构造 port、resolver、
+store 或 poison registry。根唯一 actual-manager owner 提供稳定 MemoryOwner 引用、tracker/caps/proof、
+shared approval、command registry、session store 和 Hub provider。上下文在 proof hooks 前更新；普通
+leaf append 不变 branchGen，真正 tree 边界才换 owner。child 只接 public-bus receiver，无 human hooks。
+
+- Store 必传实际 SDK manager identity（`getManager`），root append 走 void `pi.appendEntry`，child 走原
+  manager append；sid/file/leaf/branch 均来自真实 manager。仅 SDK 实际 resume/new-manager 首次合格尝试
+  消费 recovery receipt，并立即 fresh fold + zero dropped 核验；created/reload/tree 不签发。raw append
+  **不是 fsync**，首 SDK conversation flush 之前仍可能只在 buffer；不可观察的别处 flush 失败不在本 writer
+  保证内。unknown 不重试、不删尾、不修复。
+- I4 的 poison 例外仍是同一个有界全局：最多 256 tombstones + WeakMap 实际 manager 的小 opaque identity/
+  首次尝试标记；无 manager backref、正文、UI/cap/ctx closure。legacy v1 shape 保留原容器并 fail closed；
+  需要**进程重启后真实 reopen**，普通 reload/off-on 不能清除它。
+- Native main/TUI/UI/not-Web `/mem session add`、Hub add/rm 走 host-private direct command，无额外弹框，
+  不是物理人类来源证明。adopt/restore 保留完整 token-bound 原文/metadata/digest 的**一次**确认。
+  模型 `scoped_memory` 的 Hub/user 写入仍走同一个 exact sharedApproval；RPC 不当作 local TUI。
+  Web 只允许新 scoped read routes，write routes 在 transport policy 前于 override 强制 deny，completion
+  复用相同策略；原 memory/mem description/schema 不变。未增加模型 `/mem` 入口或新 SDK 依赖。
+- 单个 `createScopedProjection` 与真实 `memorySection.projectSources` 接入；project→session→Hub 连续注册，
+  同一 input 同步捕获真实 view。`available` 不额外读取 view；inert 由该次 captured view 判定。
+  write freeze 保存 SOURCE+manifest，migrate/clear/delete/tree/session 生命周期清除本地来源；Jev render key
+  来自最终投影文字，不重新解析已标注 prompt 推导权威，不改渲染内核。
+- scopes-on child 即使旧 allowWriteInChildSessions=true 也强制 effective false，另有独立 content gate
+  覆盖 mkdir/bootstrap/capture/internal commit。legacy/v2/store/init 仅增加可选实际 gate seam；command
+  只读白名单在 import/init 任何发现/写入前拒绝。scopes-off 不替换 settings 对象、不改旧描述/注册。
+  Jev 仍传**原 secure gate**，保留现有 cooldown/diag 派生写；自动 tag/backfill/review 的 child 早退未改。
+- parent/workflow 端口捕获 owning root store；nested 读真实 Runner state/branch，并在读后复核 generation/
+  sessionId/handle identity。缺失/变化/非法 seed 拒绝，不变 empty，不 shadow registry、不 resume reseed。
+
+定向证据包括 actual root activate + official SDK/local fake provider 的 native commands/三层 prompt、
+actual settings-discovered child activation 的 pre-context receiver、seed/own-agent 写与旧 allow=true 的 project
+拒写、actual adapter→Runner→Driver memory-only cancellation、owner reopen/ABA/live remote，以及既有
+source-proof/projection/Jev/trace/teardown 回归。精确命令、日志、未覆盖矩阵见 `/tmp/memory39-p4c-handoff.json`。
+**P5 未做**：真实 TUI viewport/键盘/默认拒绝/滚动竞态、真实 browser dialog→CmdOrigin→cap→store。
+select title/payload 测试不算 viewport pass；如实际裁切只评估 feature-local scroll adapter，不升级 SDK。
+
+### P4c 装配门禁续包（2026-11-08）
+
+新增 actual Stack→SpawnService→Runner→SDK 的 slot FIFO/direct-parent 捕获，actual Stack workflow worker 的
+per-call/local FIFO 捕获，以及 terminal resume 原 history 无再采样/再 seed 的断言。真实反例表明仅检查
+Runner state.sessionId 不够：SDK 原 manager 的 `newSession()` 可在同 handle 中换 sid；Driver branch
+read 现在在读取前后复核实际 SDK sid 与构造时 manager identity，失败不发布 branch、不降 empty seed。
+预算、取消顺序和 SDK 均未改。
+
+scopes-on child 的 Jev 实验经过真实 wireMemory→wireJev：A cooldown 写入原 `aInjectedAt`；独立 P 例只开
+既有规则且 `predict.model=false`，写入原 `pInjectedAt`。A/diag 例关闭 predict。fake classifier、own /tmp、
+无付费调用；content/自动 tagging/review/promotion 均不因此放开。**child diag 的既有行为是 ring/report，
+不是 diag.jsonl**（child 不初始化 sessionCwd）；本包按实际行为保留，不为测试新增落盘权。
+
+实际 SDK Web 测试覆盖 sendUserMessage 的 expand=false 原始 slash-shaped prompt、expand=true 的受控
+command-capture 环境拒写、最终 Web transport scoped deny、普通 prompt 保持原语义；native add/rm 无
+额外框，restore/adopt 各一个完整框。三条实际 Stack teardown entry 在不合作 popup 下同步首先关闭本
+owner。secure/locked 测试只用 fake mountinfo 的实际 activate/SDK construction，不声称真实挂载验收。

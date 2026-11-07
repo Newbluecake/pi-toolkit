@@ -1,7 +1,12 @@
+import { MEMORY_BIND_EVENT, type MemoryBindRequest } from "../../src/memory/scopes/child-bind.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastBindRequest, FastOwner } from "../../src/fast/ports.js";
 import type { SessionSpec } from "../../src/core/types.js";
 const fixture = vi.hoisted(() => ({
+  memoryRequests: [] as MemoryBindRequest[],
+  memoryDispose: vi.fn(),
+  memoryReceiver: true,
+  memoryLate: false,
   records: [] as Array<{ type: string; data: unknown }>,
   prompt: vi.fn(async () => {}),
   disposed: vi.fn(),
@@ -57,8 +62,14 @@ vi.mock("@earendil-works/pi-coding-agent", async (original) => {
       }
       async reload() {
         fixture.readBeforeReady?.();
-        if (!fixture.receiver) return;
         const bus = this.options.eventBus as ReturnType<typeof sdk.createEventBus> | undefined;
+        if (fixture.memoryReceiver)
+          bus?.on("subagent:memory-bind", (value) => {
+            const req = value as MemoryBindRequest;
+            fixture.memoryRequests.push(req);
+            if (!fixture.memoryLate) req.reply({ v: 1, wired: true, dispose: fixture.memoryDispose });
+          });
+        if (!fixture.receiver) return;
         bus?.on("subagent:fast-bind", (value) => {
           const req = value as FastBindRequest;
           fixture.requests.push(req);
@@ -88,6 +99,11 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 
 beforeEach(() => {
   vi.clearAllMocks();
+  fixture.memoryRequests = [];
+  fixture.memoryReceiver = true;
+  fixture.memoryLate = false;
+  fixture.memoryDispose.mockReset();
+  fixture.receiverDispose.mockReset();
   fixture.records = [];
   fixture.requests = [];
   fixture.loaders = [];
@@ -243,4 +259,82 @@ describe("Fast driver first-prompt barrier", () => {
     expect(owners[0]!.incarnation).not.toBe(owners[1]!.incarnation);
     handle.dispose();
   });
+});
+
+describe("#39 memory-specific driver response fence and cleanup", () => {
+  const driver = (strict = true) => new PiSessionDriver(true, undefined, undefined, undefined, undefined, { strict });
+  it.each([false, true])("actual manager and literal reason; resume=%s, no Fastseed dependency", async (resume) => {
+    const h = await (resume ? driver().resume("owned", {}) : driver().create({}));
+    expect(fixture.memoryRequests).toHaveLength(1);
+    expect(fixture.memoryRequests[0]!.manager).toBe(manager);
+    expect(fixture.memoryRequests[0]!.reason).toBe(resume ? "resume" : "created");
+    expect(fixture.requests).toHaveLength(0);
+    expect(Object.hasOwn(fixture.options[0]!, "signal")).toBe(false);
+    h.dispose();
+    h.dispose();
+    expect(fixture.memoryDispose).toHaveBeenCalledTimes(1);
+  });
+  it("late/duplicate replies dispose only their own binding; old same-run cleanup does not touch new incarnation", async () => {
+    const one = await driver().create({ runId: "same" } as SessionSpec);
+    const old = fixture.memoryRequests[0]!;
+    const two = await driver().create({ runId: "same" } as SessionSpec);
+    const fresh = fixture.memoryRequests[1]!;
+    expect(old.owner.incarnation).not.toBe(fresh.owner.incarnation);
+    const duplicate = vi.fn();
+    old.reply({ v: 1, wired: true, dispose: duplicate });
+    expect(duplicate).toHaveBeenCalledTimes(1);
+    one.dispose();
+    expect(fixture.memoryDispose).toHaveBeenCalledTimes(1);
+    const late = vi.fn();
+    old.reply({ v: 1, wired: true, dispose: late });
+    expect(late).toHaveBeenCalledTimes(1);
+    expect(fixture.memoryDispose).toHaveBeenCalledTimes(1);
+    two.dispose();
+    expect(fixture.memoryDispose).toHaveBeenCalledTimes(2);
+  });
+  it("production missing receiver is diagnostic-only; strict missing refuses before prompt and disposes SDK once", async () => {
+    fixture.memoryReceiver = false;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = await driver(false).create({});
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("continuing without scoped child binding"));
+      expect(fixture.memoryDispose).not.toHaveBeenCalled();
+      h.dispose();
+      fixture.disposed.mockClear();
+      await expect(driver().create({})).rejects.toThrow("memory_receiver_missing");
+      expect(fixture.prompt).not.toHaveBeenCalled();
+      expect(fixture.disposed).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+  it("reply after synchronous emit boundary cannot resurrect failed strict creation", async () => {
+    fixture.memoryLate = true;
+    await expect(driver().create({})).rejects.toThrow("memory_receiver_missing");
+    const release = vi.fn();
+    fixture.memoryRequests[0]!.reply({ v: 1, wired: true, dispose: release });
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(fixture.disposed).toHaveBeenCalledTimes(1);
+    expect(fixture.memoryDispose).not.toHaveBeenCalled();
+  });
+  it.each(["Fast", "memory"] as const)(
+    "throwing %s cleanup cannot block the other binding, SDK disposal, or bus clearing",
+    async (failure) => {
+      const h = await driver().create(spec("off"));
+      expect(fixture.memoryRequests).toHaveLength(1);
+      expect(fixture.requests).toHaveLength(1);
+      (failure === "Fast" ? fixture.receiverDispose : fixture.memoryDispose).mockImplementationOnce(() => {
+        throw Error(`${failure} close fault`);
+      });
+      expect(h.dispose().returned).toBe(false);
+      expect(fixture.memoryDispose).toHaveBeenCalledTimes(1);
+      expect(fixture.receiverDispose).toHaveBeenCalledTimes(1);
+      expect(fixture.disposed).toHaveBeenCalledTimes(1);
+      const bus = fixture.loaders[0]!.eventBus as ReturnType<
+        typeof import("@earendil-works/pi-coding-agent").createEventBus
+      >;
+      bus.emit(MEMORY_BIND_EVENT, fixture.memoryRequests[0]);
+      expect(fixture.memoryRequests).toHaveLength(1);
+    },
+  );
 });

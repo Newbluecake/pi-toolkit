@@ -54,6 +54,7 @@ function isoDate(ms: number): string {
 }
 
 export interface DoctorCommandDeps {
+  scoped?: () => readonly import("./scopes/doctor.js").ScopedDoctorFinding[];
   paths?: MemoryPaths;
   /** Production callers thread the activate-time settings snapshot. */
   settings: MemorySettings;
@@ -299,7 +300,12 @@ export async function handleMemDoctorCommand(
   const now = deps.now ?? (() => Date.now());
   const renderPort = deps.renderTieredPort ?? DEFAULT_RENDER_PORT;
   const findings = runDoctorFor(cwd, deps.paths, settings, renderPort, now, deps.jev);
-  const report = formatDoctorReport(findings);
+  const extra = deps.scoped?.() ?? [];
+  const report =
+    formatDoctorReport(findings) +
+    (extra.length
+      ? "\n" + extra.map((f) => `${f.code} ${f.scope}: ${f.reason}${f.entryId ? ` (${f.entryId})` : ""}`).join("\n")
+      : "");
   if (findings.length > 20) {
     await ctx.ui.editor("memory doctor", report);
     return;

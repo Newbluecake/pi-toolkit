@@ -674,3 +674,23 @@ Plan/方案制定按本会话用户指定 `localcodex/gpt-6-astra`。先完成�
 ## 附录 A · 交接
 
 `/tmp/handoff/task39-memory-scopes-arch-r3.json`（r2.1 交接保留在 `/tmp/handoff/task39-memory-scopes-arch-r2.json`；r1 版本保留在 `/tmp/handoff/task39-memory-scopes-arch.json`）。
+
+### P4c source assembly fact sheet（2026-11-08）
+
+实现以 `scopes/wire.ts`（early root shell/child receiver）和 `scopes/owner.ts`（exact manager owner）为装配边界。
+`scopes/child-bind.ts` 是 pi-free local bus contract，不是 DTO/wire/security platform。原 SDK manager 对象
+与 literal created/resume 在 after-create/before-prompt barrier 传递；同 parent Hub slot 冻为纯 data。
+Driver 第五 gate 不变，第六才是 memory port。Fastoff memoryon 也建 loader/bus，并经可选 adapter boolean
+接原 Runner 内部取消；off 无该 key。三条 Stack teardown lists 第一项同步关闭 exact group。
+
+共享 poison I4 例外只含有界 tombstone 和无 manager backref 的 weak identity/first-attempt metadata；
+legacy shape 不被替换，不可用 reload 清除，恢复需要 process restart + actual reopen。正常 buffered
+SDK append 不承诺 fsync 或 crash transaction，首 SDK flush 及 writer 之外 flush 仍是明确限制。
+
+Native session add / Hub add-rm 为 host-private direct commands；adopt/restore 才是一轮完整确认；
+模型 scoped_memory 的 Hub/user exact sharedApproval 不变。普通 LLM 无 direct /mem 路由，任意 host JS
+不属于本功能威胁模型。Web scoped reads allow、writes deny 且不可 override；不另造 slash human proof。
+
+实际 prompt 接单个 P4a2 coordinator，project/session/Hub 同 input 连续同步注册；freeze 是 SOURCE+manifest，
+不是 marked string。child project hardreadonly 只在 scopes-on 强制生效；Jev cooldown/diag 保原 secure gate。
+此为 source 实装事实，不是 P5 native viewport/browser 验收结论；SDK #61 PAUSED，与 #39 无依赖。

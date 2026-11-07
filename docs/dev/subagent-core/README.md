@@ -396,3 +396,32 @@ gate) is P4. Tests: `tests/service/memory-seed.test.ts` (admission contract, fai
 freeze, resume/external strips, Fast coexistence), `tests/integration/memory-scopes-seed.test.ts`
 (real SDK SessionManager/createAgentSession, fake model, tmp resources; order/gate/append
 faults/resume-no-reseed).
+
+## #39 P4c child memory bind 与取消链（2026-11-08）
+
+Driver 的第 **5** 参数仍是 `SessionWriteGate`，第 **6** 可选参数是 activation-local
+`MemoryChildBindingPort`。Fast seed **或** memory port 存在时才构造同一个 public event bus / canonical
+loader；两者都缺席保留原无 seed 的 options/loader 路径。`subagent:memory-bind` 在 SDK create 完成后、
+首 prompt 前同步发出，携带**原始实际 manager 对象**、每次创建独立 incarnation、literal
+`created` / `resume` 和父同次解析的 frozen Hub slot。created 不作为 reopen，resume 不重播 seed。
+receiver 在 child activate 的 pre-guard 阶段订阅，不依赖 child session_start/shutdown。
+
+回复只在同步 accepting/live 窗口接收；晚到/重复/旧 incarnation 回复不能替换绑定。abort、SDK 失败、
+late SDK success、handle abort/dispose 复用原清理路径；memory/Fast cleanup 用 finally 隔离，清 bus/listeners。
+缺 receiver 默认仅静态 diagnostic（保留 #27 的 `-e` 兼容），strict 只用于内部测试，不伪称已绑定。
+
+memory-only（即 `fastSeed === undefined`）也必须接 Runner 内部 `cancel.signal`。
+Stack 从同一实际 memory port 派生 `memoryBindingEnabled`，只经 runtime-adapter 的两个可选 seam
+透传到 Runner；无 Fast seed 且无标记仍传原 request 引用。不调整 watchdog、预算、beforeReap 顺序或
+reaper 等待界。`peekRunBranch` 在实际 handle 读取后再次检查 generation/sessionId/active-handle identity
+和 stopping/terminal，阻止重入期间旧 branch 发布。内存父捕获缺失/变化抛错，不降级 empty。
+
+三条 ordered teardown lists 最前新增 exact `memoryScopes` group 同步幂等 dispose：先 abort popup，
+撤销 turn/caps/command environment，再关闭 proof/approval/store/Hub/recovery authority；不清全局 poison。
+旧 Stack/parts 只持有自己的 group；树边界在该 group 内轮换 owner，旧 group 的晚 cleanup 不伤新 group。
+activate 的早期 shutdown fallback 覆盖兼容早退，Stack build 失败也关闭本次 group。
+
+P4c 续包实际 SDK 反例：`SessionManager.newSession()` 可让同一个实际 manager 在同 handle 中换 sid，
+而 Runner state 的已捕获 sid 尚未变化。`PiSessionHandle.getBranchEntries()` 因此同时保留构造时原 manager，
+在 branch read 前后核验 SDK 的实际 manager/sid；变化抛错，由 peek/capture 拒绝，不能把新空 branch
+当成旧 parent 的 empty seed。实际 Stack admission 测试已钉住这一负例；未改 SDK 或取消/预算语义。
