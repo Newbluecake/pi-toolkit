@@ -67,7 +67,7 @@ const operation: SessionMemoryWrite["operation"] = {
   text: "typed exactly",
 };
 
-describe("trusted TUI command seam", () => {
+describe("host-private native command seam", () => {
   it("add uses original single-append core and command grant, not dialog cap", async () => {
     const h = fixture();
     expect(await h.command.add("typed exactly")).toMatchObject({ ok: true, id: "n1", persistence: "memory-only" });
@@ -79,7 +79,7 @@ describe("trusted TUI command seam", () => {
     });
     expect(h.store.view().items[0]?.item.grant).toEqual({ via: "command" });
   });
-  it("nontrusted source refused before issue and again immediately before commit", async () => {
+  it("disallowed command environment refused before issue and again immediately before commit", async () => {
     const h = fixture();
     h.setTrusted(false);
     expect(await h.command.add("x")).toMatchObject({ ok: false, code: "E_AUTHORITY" });

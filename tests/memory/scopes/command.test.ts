@@ -23,7 +23,7 @@ function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "p4b-command-"));
   dirs.push(dir);
   let owner: MemoryOwner = { incarnation: {}, sid: "session1", sessionEpoch: 1, branchGen: 0 };
-  let ctx: NativeMemoryCommandContext = { mode: "tui", hasUI: true, isWeb: false, interactive: true };
+  let ctx: NativeMemoryCommandContext = { mode: "tui", hasUI: true, isWeb: false };
   let capability: "ok" | "locked" = "ok",
     reads = 0,
     flip = false;
@@ -111,14 +111,13 @@ it("optional exact subrouter does not consume original /mem, preserves full add 
   });
   expect(await f.command.route("session add")).toMatchObject({ result: { code: "E_META_INVALID" } });
 });
-it("RPC with UI, unknown, Web, noninteractive and child refuse writes", async () => {
+it("RPC with UI, unknown, Web, missing UI and child refuse writes", async () => {
   const f = fixture();
   for (const ctx of [
-    { mode: "rpc", hasUI: true, isWeb: false, interactive: true },
-    { mode: "unknown", hasUI: true, isWeb: false, interactive: true },
-    { mode: "tui", hasUI: true, isWeb: true, interactive: true },
-    { mode: "tui", hasUI: true, isWeb: false, interactive: false },
-    { mode: "tui", hasUI: false, isWeb: false, interactive: true },
+    { mode: "rpc", hasUI: true, isWeb: false },
+    { mode: "unknown", hasUI: true, isWeb: false },
+    { mode: "tui", hasUI: true, isWeb: true },
+    { mode: "tui", hasUI: false, isWeb: false },
   ]) {
     f.ctx(ctx);
     expect(await f.command.route("session add denied")).toMatchObject({ result: { code: "E_AUTHORITY" } });
@@ -129,7 +128,7 @@ it("RPC with UI, unknown, Web, noninteractive and child refuse writes", async ()
   const child = createScopedMemoryCommand({ ...f.deps, child: true });
   expect(await child.route("session add denied")).toMatchObject({ result: { code: "E_CHILD_READONLY" } });
 });
-it("shared real session registry rechecks trust at commit; abort old request does not poison next owner", async () => {
+it("shared real session registry rechecks command environment at commit; abort old request does not poison next owner", async () => {
   const f = fixture();
   f.flip();
   expect(await f.command.route("session add denied")).toMatchObject({ result: { code: "E_AUTHORITY" } });
@@ -208,6 +207,7 @@ it("restore renders ONLY complete token-bound confirmation, reject-first digest 
   const trash = f.hub.management.listTrash()[0]!;
   f.source({ project: "def456", label: "NEW", sid8: "new" });
   let title = "",
+    selectCalls = 0,
     labels: readonly string[] = [],
     expectedDigest = "";
   const command = createScopedMemoryCommand({
@@ -230,12 +230,14 @@ it("restore renders ONLY complete token-bound confirmation, reject-first digest 
       },
     },
     select: async (t, options) => {
+      selectCalls++;
       title = t;
       labels = options;
       return options[1];
     },
   });
   expect(await command.route(`hub restore ${trash.fileName}`)).toMatchObject({ result: { ok: true } });
+  expect(selectCalls).toBe(1);
   expect(title).toContain(expectedDigest);
   expect(labels[1]).toContain(expectedDigest.slice(0, 8));
   expect(title).toContain('"oldFrom": "session:n1"');
@@ -273,15 +275,18 @@ it("adopt displays complete multi-item bodies/revs/history and namespace before/
     old = JSON.parse(readFileSync(namespace, "utf8"));
   old.host = old.host === "a".repeat(16) ? "b".repeat(16) : "a".repeat(16);
   writeFileSync(namespace, JSON.stringify(old));
-  let title = "";
+  let title = "",
+    selectCalls = 0;
   const command = createScopedMemoryCommand({
     ...f.deps,
     select: async (t, options) => {
+      selectCalls++;
       title = t;
       return options[1];
     },
   });
   expect(await command.route("hub adopt")).toMatchObject({ result: { ok: true } });
+  expect(selectCalls).toBe(1);
   for (const text of ["first\n完整🧠", "second raw body", '"current"', '"reseal"', '"changedFields"', old.host, f.dir])
     expect(title).toContain(text);
   for (const item of original) {
@@ -316,7 +321,7 @@ it("prepare popup trust/owner/source drift rejected after answer, token cannot b
     const command = createScopedMemoryCommand({
       ...f.deps,
       select: async (_t, options) => {
-        if (kind === "trust") f.ctx({ mode: "rpc", hasUI: true, isWeb: false, interactive: true });
+        if (kind === "trust") f.ctx({ mode: "rpc", hasUI: true, isWeb: false });
         if (kind === "owner") f.renew();
         if (kind === "source") f.source({ project: "def456", label: "different", sid8: "other" });
         return options[1];
@@ -382,4 +387,33 @@ it("confirmation has bounded request-local timeout even if native select never s
   } finally {
     vi.useRealTimers();
   }
+});
+
+it("native session add and Hub add/rm preserve original direct command behavior without invoking select", async () => {
+  const f = fixture();
+  let popups = 0;
+  const command = createScopedMemoryCommand({
+    ...f.deps,
+    select: async () => {
+      popups++;
+      throw Error("add/rm must not ask again");
+    },
+  });
+  expect(await command.route("session add native raw\nbody")).toMatchObject({ result: { ok: true, id: "n1" } });
+  expect(f.session.view().items[0]?.item).toMatchObject({
+    text: "native raw\nbody",
+    authority: "user",
+    grant: { via: "command" },
+  });
+  expect(await command.route("hub add native hub raw\nbody")).toMatchObject({
+    result: { ok: true, id: "general.001" },
+  });
+  expect(f.hub.management.inspect("general.001")).toMatchObject({
+    ok: true,
+    item: { text: "native hub raw\nbody" },
+    rev: expect.any(String),
+  });
+  expect(await command.route("hub rm general.001")).toMatchObject({ result: { ok: true } });
+  expect(f.hub.view().items).toEqual([]);
+  expect(popups).toBe(0);
 });

@@ -1,7 +1,8 @@
 /** Host-private command authorization; never part of ScopedMemoryWrite/model parameters.
- * P4 constructs ONE registry and supplies it to store + command adapter. Only the adapter
- * gets issue(); store gets the consumer port. Trusted context must come from actual command
- * dispatch (including not-Web), not args/hasUI alone. No dialog cap is minted or mimicked.
+ * P4 constructs ONE registry and supplies it to store + command adapter. Only the host command adapter
+ * gets issue(); store gets the consumer port. The predicate checks the local main/TUI/UI/not-Web
+ * command environment again at commit; it is NOT physical-human or input-origin proof.
+ * No dialog cap is minted or mimicked; model tools use their separate approval path.
  */
 import { canonicalJson, readUntrustedValue } from "./limits.js";
 import type { FrozenScopedOp, MemoryOwner, ScopedMemoryWriteResult, SessionMemoryWrite } from "./types.js";
@@ -57,11 +58,11 @@ export interface SessionCommandGrantPort {
 export interface SessionCommandRegistry extends SessionCommandGrantPort {
   issue(operation: SessionOp, owner: MemoryOwner): SessionCommandGrant | undefined;
 }
-export function createSessionCommandRegistry(trustedTuiNow: () => boolean): SessionCommandRegistry {
+export function createSessionCommandRegistry(nativeCommandEnvironmentNow: () => boolean): SessionCommandRegistry {
   const grants = new WeakMap<SessionCommandGrant, { operation: SessionOp; owner: MemoryOwner }>();
   return {
     issue(operation, owner) {
-      if (!trustedTuiNow()) return undefined;
+      if (!nativeCommandEnvironmentNow()) return undefined;
       const frozen = freezeSessionOperation(operation);
       if (frozen === undefined || frozen.op !== "create" || frozen.authority !== "user") return undefined;
       const grant = Object.freeze({}) as SessionCommandGrant;
@@ -71,7 +72,7 @@ export function createSessionCommandRegistry(trustedTuiNow: () => boolean): Sess
     check(grant, operation, owner) {
       const stored = grants.get(grant);
       return (
-        trustedTuiNow() &&
+        nativeCommandEnvironmentNow() &&
         stored !== undefined &&
         sameSessionOwner(stored.owner, owner) &&
         sameSessionOperation(stored.operation, operation)

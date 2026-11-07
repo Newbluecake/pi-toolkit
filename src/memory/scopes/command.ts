@@ -30,8 +30,6 @@ export interface NativeMemoryCommandContext {
   readonly mode: string;
   readonly hasUI: boolean;
   readonly isWeb: boolean;
-  /** Host dispatch provenance, NOT tool/model metadata. */
-  readonly interactive: boolean;
 }
 export interface ScopedCommandDeps extends ScopedSurfaceDeps {
   readonly commandContext: () => NativeMemoryCommandContext;
@@ -40,12 +38,13 @@ export interface ScopedCommandDeps extends ScopedSurfaceDeps {
   readonly sessionCommandTarget: SessionCommandTarget;
   readonly sessionPath: () => string | undefined;
   readonly hubPath: () => string;
-  /** Actual native UI port, never a model answer. Used only after trusted native predicate. */
+  /** Actual native UI port for adopt/restore confirmation only. Add/rm require no extra popup. */
   readonly select?: TuiSelectPort;
 }
 export function trustedNativeMemoryCommand(deps: Pick<ScopedCommandDeps, "child" | "commandContext">): boolean {
   const ctx = deps.commandContext();
-  return !deps.child && ctx.mode === "tui" && ctx.hasUI && !ctx.isWeb && ctx.interactive;
+  // This is the host command environment, NOT physical-human or input-origin proof.
+  return !deps.child && ctx.mode === "tui" && ctx.hasUI && !ctx.isWeb;
 }
 async function selectNativeConfirmation(
   deps: ScopedCommandDeps,
