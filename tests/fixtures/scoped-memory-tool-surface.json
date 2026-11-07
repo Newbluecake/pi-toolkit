@@ -1,0 +1,76 @@
+{
+  "declaration": "declared-only; not registered",
+  "name": "scoped_memory",
+  "description": "Session and Hub memory: op=view|create|update|delete. update/delete require the actual rev returned by view (for Hub, supply id); delete confirms the full current body. Session defaults to agent; user authority and changes to user items require exact-content human approval. Child sessions accept no explicit authority, including agent. Hub is shared by ALL projects of this Hub; a write needs the user to approve it in a dialog (terminal or web). scope=global inside memory text is NOT cross-project. No human proof/remote channel means refusal, not queueing or resending. Never store secrets.",
+  "parameters": {
+    "additionalProperties": false,
+    "type": "object",
+    "required": ["op", "storageScope"],
+    "properties": {
+      "op": {
+        "anyOf": [
+          {
+            "const": "view",
+            "type": "string"
+          },
+          {
+            "const": "create",
+            "type": "string"
+          },
+          {
+            "const": "update",
+            "type": "string"
+          },
+          {
+            "const": "delete",
+            "type": "string"
+          }
+        ]
+      },
+      "storageScope": {
+        "anyOf": [
+          {
+            "const": "session",
+            "type": "string"
+          },
+          {
+            "const": "hub",
+            "type": "string"
+          }
+        ]
+      },
+      "id": {
+        "description": "Exact target id. Required for update/delete; Hub view with id returns actual rev.",
+        "type": "string"
+      },
+      "text": {
+        "description": "Full body for create/update. Delete always freezes the actual current body, never supplied substitute text.",
+        "type": "string"
+      },
+      "rev": {
+        "description": "Actual current revision from view, required for update/delete CAS.",
+        "type": "string"
+      },
+      "topic": {
+        "description": "Hub create topic (lowercase letters, digits, hyphens). Not accepted for session.",
+        "type": "string"
+      },
+      "from": {
+        "description": "Optional provenance link session:nN or project:<reference>; does not grant authority or move the source.",
+        "type": "string"
+      },
+      "authority": {
+        "anyOf": [
+          {
+            "const": "agent",
+            "type": "string"
+          },
+          {
+            "const": "user",
+            "type": "string"
+          }
+        ]
+      }
+    }
+  }
+}
