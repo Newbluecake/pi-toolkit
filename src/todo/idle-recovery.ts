@@ -15,10 +15,10 @@
  *    may NARROW eligibility (`disabled`, `waiting`); it never grants it. Task metadata is
  *    model-writable data, not an attestation — a model that writes `progressKey` buys no extra
  *    budget, a model that writes nothing buys no permission.
- *  - A budget window opens ONLY from a host-injected strong-consumption human proof for the
- *    CURRENT sid+owner (`applyHumanProof`). TUI `interactive` prompts and Web admission are
- *    weak proofs: they may hand the current turn over (B2) but never open a window and never
- *    clear a Stop. No function here accepts an epoch or a "human" claim from model input.
+ *  - A budget window opens from a host-injected `user-arrival` proof for the CURRENT
+ *    sid+owner (`applyHumanProof`); legacy `strong-consumption` remains compatible, not required.
+ *    Raw TUI `interactive` and Web `admission` labels alone are weak proofs: they may hand
+ *    the current turn over (B2) but never open a window and never clear a Stop. No function here accepts an epoch or a "human" claim from model input.
  *  - Machine messages, Task* calls, notifications, tree rollback and elapsed time cannot change
  *    any counter: there is deliberately no entry point that takes such a reason.
  *
@@ -42,7 +42,7 @@ export const RECOVERY_PROGRESS_KEY_MAX_BYTES = 64;
 /** Hard cap on the session-wide `seen` set. Full ⇒ fail closed (no eviction to regain eligibility). */
 export const RECOVERY_SEEN_CAP = 256;
 
-/** Attempts allowed inside one strong human input window, regardless of how the keys change. */
+/** Attempts allowed inside one trusted human input window, regardless of how the keys change. */
 export const RECOVERY_ATTEMPTS_PER_WINDOW = 2;
 
 /** Bound on the diagnostic "reserved but never committed" attempt ids replayed from the log. */
@@ -59,8 +59,8 @@ export type RecoveryWaitingReason = (typeof RECOVERY_WAITING_REASONS)[number];
 export const RECOVERY_STOP_REASONS = ["aborted", "abort-admission", "owner-lost", "session-boundary"] as const;
 export type RecoveryStopReason = (typeof RECOVERY_STOP_REASONS)[number];
 
-/** Provenance of a human-input proof. Only `strong-consumption` opens a budget window. */
-export const RECOVERY_PROVENANCES = ["strong-consumption", "admission", "interactive"] as const;
+/** Host user arrival opens a window immediately; strong consumption is legacy compatibility. */
+export const RECOVERY_PROVENANCES = ["user-arrival", "strong-consumption", "admission", "interactive"] as const;
 export type RecoveryProvenance = (typeof RECOVERY_PROVENANCES)[number];
 
 /** Persistence customType for the private recovery entries (non-message, `subagent:*` family). */
@@ -313,8 +313,12 @@ export function selectRecoveryCandidates(
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Host-injected read-only port (B2 host supplies it; B3 wires #61's strong consumer). B1 never
- * derives a proof from model metadata, tool arguments, message text or `role: "user"`.
+ * Host-injected read-only port. The future producer is a trusted TUI/Web new-chat inbound
+ * callback, not model consumption or root-level persistence. Each new arrival (including
+ * consecutive root-level-0 messages) gets a fresh epoch/inputId; duplicate arrivals reuse the
+ * same proof. Producer dedup is bounded/fail-closed (plan §4). This is a host API trust boundary,
+ * NOT authentication of arbitrary objects: the model must never supply epoch/owner/inputId.
+ * B1 neither constructs a source nor derives proof from metadata, tool args or `role: "user"`.
  */
 export interface HumanEpochPort {
   /** Current trusted input proof, or undefined when no producer is wired (⇒ zero budget). */
@@ -364,12 +368,12 @@ export interface RecoveryState {
   readonly sid: string;
   /** Accounting window restored from the entry log. Persisted; NOT proof of a live window. */
   readonly window: RecoveryWindowKey | undefined;
-  /** Process-local: true only after a fresh strong-consumption proof for this instance. */
+  /** Process-local: true only after a fresh trusted host proof for this instance. */
   readonly open: boolean;
   readonly attemptsInWindow: number;
   readonly totalAttempts: number;
   readonly seen: readonly SeenPair[];
-  /** Current-window Stop; cleared only by a NEW strong-consumption window. */
+  /** Current-window Stop; cleared only by a NEW trusted user window. */
   readonly stopped: boolean;
   /** attemptIds reserved (written before any send) without a terminal outcome. Never resent. */
   readonly unresolved: readonly string[];
@@ -411,8 +415,8 @@ export type RecoveryProofResult =
   | { readonly kind: "conflict"; readonly state: RecoveryState };
 
 /**
- * Apply a host-supplied proof. Only `strong-consumption` for the CURRENT sid+owner may open a
- * window:
+ * Apply a host-supplied proof. `user-arrival` for the CURRENT sid+owner opens a window on
+ * arrival, without waiting for model consumption. `strong-consumption` remains compatible:
  *  - no window yet / newer epoch ⇒ fresh window (budget 0, Stop cleared);
  *  - same window key ⇒ idempotent reopen with the SAME accounting (a reload cannot refund and
  *    a duplicate proof cannot clear a Stop);
@@ -431,7 +435,8 @@ export function applyHumanProof(
   if (parsed.sid !== expected.sid || parsed.sid !== state.sid)
     return { kind: "ignored", reason: "sid-mismatch", state };
   if (parsed.owner !== expected.owner) return { kind: "ignored", reason: "owner-mismatch", state };
-  if (parsed.provenance !== "strong-consumption") return { kind: "ignored", reason: "weak-provenance", state };
+  if (parsed.provenance !== "user-arrival" && parsed.provenance !== "strong-consumption")
+    return { kind: "ignored", reason: "weak-provenance", state };
   const window: RecoveryWindowKey = { sid: parsed.sid, inputId: parsed.inputId, epoch: parsed.epoch };
   if (state.window === undefined) {
     return {

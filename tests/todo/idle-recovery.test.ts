@@ -38,7 +38,6 @@ import type { Task, TodoState } from "../../src/todo/state.js";
 function task(overrides: Partial<Task> & { id: number }): Task {
   const id = overrides.id;
   return {
-    id,
     subject: `task ${id}`,
     description: `description ${id}`,
     status: "in_progress",
@@ -881,6 +880,81 @@ describe("idle-recovery: module boundary", () => {
       const source = readFileSync(new URL(`../../src/todo/${file}`, import.meta.url), "utf8");
       expect(source).not.toMatch(/@earendil-works|@sinclair\/typebox/);
       expect(source).not.toMatch(/^(let|var) /m);
+    }
+  });
+});
+
+// 2026-11-08 ruling: trusted new-chat arrival is sufficient; no SDK consumption receipt.
+describe("idle-recovery: host user-arrival windows", () => {
+  const arrival = (overrides: Partial<RecoveryHumanProof> = {}): RecoveryHumanProof =>
+    PROOF({ provenance: "user-arrival", ...overrides });
+  const expected = { sid: "s1", owner: "root" };
+
+  it("parses host user-arrival and opens immediately, retaining strong-consumption compatibility", () => {
+    for (const provenance of ["user-arrival", "strong-consumption"] as const) {
+      const proof = PROOF({ provenance });
+      expect(parseRecoveryHumanProof(proof)).toEqual(proof);
+      expect(applyHumanProof(emptyRecoveryState("s1"), proof, expected)).toMatchObject({
+        kind: "opened",
+        fresh: true,
+        state: { open: true, attemptsInWindow: 0, stopped: false },
+      });
+    }
+  });
+
+  it("clears Stop only on a new arrival and grants exactly two attempts in each new window", () => {
+    let state = suppressRecoveryWindow(opened(arrival()));
+    const duplicate = applyHumanProof(state, arrival(), expected);
+    expect(duplicate).toMatchObject({ kind: "opened", fresh: false, state: { stopped: true } });
+    for (let epoch = 2; epoch <= 4; epoch++) {
+      const result = applyHumanProof(state, arrival({ epoch, inputId: `in-${epoch}` }), expected);
+      expect(result).toMatchObject({ kind: "opened", fresh: true, state: { stopped: false, attemptsInWindow: 0 } });
+      state = result.state;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const pairs = [{ fingerprint: "a".repeat(64), key: `${epoch}-${attempt}` }];
+        expect(decideRecoveryAttempt(state, pairs)).toMatchObject({ allowed: true, attemptNumber: attempt });
+        state = recordRecoveryAttempt(state, pairs, `ir_${epoch}_${attempt}`);
+      }
+      expect(decideRecoveryAttempt(state, [{ fingerprint: "b".repeat(64), key: "third" }])).toMatchObject({
+        allowed: false,
+        reason: "window-exhausted",
+      });
+      expect(applyHumanProof(state, arrival({ epoch, inputId: `in-${epoch}` }), expected).state.attemptsInWindow).toBe(
+        2,
+      );
+      state = suppressRecoveryWindow(state);
+    }
+    expect(state.seen).toHaveLength(6);
+    expect(state.totalAttempts).toBe(6);
+  });
+
+  it.each([
+    [{ owner: "old-owner", epoch: 3, inputId: "new" }, "owner-mismatch"],
+    [{ sid: "other", epoch: 3, inputId: "new" }, "sid-mismatch"],
+    [{ epoch: 1, inputId: "old" }, "stale-epoch"],
+    [{ provenance: "admission", epoch: 3, inputId: "new" }, "weak-provenance"],
+    [{ provenance: "interactive", epoch: 3, inputId: "new" }, "weak-provenance"],
+  ] as const)("rejects ineligible arrival %j without clearing Stop", (overrides, reason) => {
+    const state = suppressRecoveryWindow(opened(arrival({ epoch: 2, inputId: "in-2" })));
+    const result = applyHumanProof(state, arrival(overrides), expected);
+    expect(result).toMatchObject({ kind: "ignored", reason });
+    expect(result.state).toBe(state);
+    expect(result.state.stopped).toBe(true);
+  });
+
+  it("does not interpret role:user, machine notifications or tool operations as trusted proof", () => {
+    const state = suppressRecoveryWindow(opened(arrival()));
+    for (const raw of [
+      { role: "user", content: "hello" },
+      { source: "interactive" },
+      { source: "admission" },
+      { tool: "TaskList" },
+      { tool: "TaskGet" },
+      { tool: "TaskUpdate" },
+      { customType: "subagent:complete" },
+    ]) {
+      expect(applyHumanProof(state, raw, expected)).toMatchObject({ kind: "ignored", reason: "invalid" });
+      expect(applyHumanProof(state, raw, expected).state).toBe(state);
     }
   });
 });

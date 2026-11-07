@@ -23,8 +23,8 @@
  *  - `open` is process-local: folding restores the accounting window, the used attempts, the
  *    `seen` pairs and the Stop latch, but never a live window. A forged or copied entry
  *    therefore cannot manufacture a human proof, and only a fresh host-injected
- *    strong-consumption proof (`HumanEpochPort`) may open one. Same-sid `/reload` keeps the
- *    budget; new/fork/switch (another sid) starts empty and must wait for that session's own
+ *    user-arrival proof (`HumanEpochPort`, legacy strong-consumption compatible) may open one.
+ *    Same-sid `/reload` keeps the budget; new/fork/switch (another sid) starts empty and must wait for that session's own
  *    trusted input. A reserved-but-uncommitted attempt is replayed as `unresolved`: it stays
  *    charged and is never resent.
  *  - the storage seam is synchronous, and every read of session data/task metadata goes through
@@ -32,9 +32,9 @@
  *    an attestation.
  *
  * Every piece of state lives in this factory closure (I4); no module-scope mutable state, no
- * pi imports, no timers (I5). Production activation additionally needs the #61 strong-consumption
- * consumer (which does not exist yet) plus the B2 runner and B3 host wiring — B1 alone can never
- * send, so it cannot activate recovery by itself.
+ * pi imports, no timers (I5). Production activation still needs a trusted TUI/Web inbound
+ * producer plus the B2 runner and B3 host wiring (not #61 or a consumption receipt).
+ * B1 alone can never send, so it cannot activate recovery by itself.
  */
 import { randomUUID } from "node:crypto";
 import type { TodoState } from "./state.js";
@@ -120,7 +120,7 @@ export interface IdleRecoveryStoreDeps {
 export interface IdleRecoveryStore {
   /** Fold the log forward and return the current accounting state (no writes). */
   view(): RecoveryState;
-  /** Host-injected trusted input proof (HumanEpochPort). Only strong consumption opens a window. */
+  /** Host-injected proof (HumanEpochPort): user-arrival opens immediately; strong consumption is compatible. */
   noteHumanProof(proof: unknown): RecoveryProofResult;
   /** Stop the current window. Machine messages, Task* calls and elapsed time have no entry point on purpose. */
   noteStop(reason: RecoveryStopReason): RecoveryState;

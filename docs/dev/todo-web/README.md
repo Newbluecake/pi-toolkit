@@ -48,3 +48,17 @@ use the nudge to start queued/unauthorized tasks), with evidence labels calibrat
 counting口径: E1 「N 条后台完成通知」（子 agent/workflow/bash job）, E2 「N 次 git 写操作」
 （commit/merge/cherry-pick/rebase/revert）. 阶段B（自动空闲唤醒）未实现。Tests:
 `tests/web-hub/agent/todo-nudge-visibility.test.ts`（真实 SDK 组件 + 双端投影）。
+
+**todo-idle-recovery B1 / arrival 裁定（2026-11-08）**：已实现
+`src/todo/idle-recovery.ts` 的纯候选/指纹/窗口-Stop 内核及
+`idle-recovery-store.ts` 的全树 high-water 记账接口，**未接生产 hooks/设置/发送**，B2/B3 尚未实现。
+用户新裁定覆盖旧 strong-consumption 前置：未来可信 Host TUI/Web 新用户聊天入站 callback
+以 `HumanEpochPort` 提供 `user-arrival` proof，到达即开窗/清 Stop，不等模型消费、root-level persist
+变化或 #61 整项；连续 root-level-0 新消息每条新窗口，重复到达复用 proof 不退款。
+legacy `strong-consumption` 仅兼容；raw `admission`/`interactive`、`role:user`、机器/Task* 不续额。
+模型不能传 epoch/owner/inputId 宣称 human；本包只定义 API，不构造实际可信 producer。
+每窗口 2 次、全 sid 同组合一次、seen256 满闭、先 append attempt 再 send、unknown 不返不重试、
+旧 owner/stale epoch/重复 proof 不清 Stop、reload/replay 不造 live window 均保留。
+B2 专用 runner/owned deadline 等仍须真实 SDK 本地 conformance 证明；B3 共享入口待 #39
+当前包独验并 commit 后再接，todo 不依赖 fabric/#61 内核。详见 `../todo-idle-recovery/plan.md`
+顶部新裁定；旧历史 strong-window/Q2 口径由其覆盖。

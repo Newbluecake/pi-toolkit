@@ -28,7 +28,6 @@ const PROOF = (overrides: Partial<RecoveryHumanProof> = {}): RecoveryHumanProof 
 
 function task(overrides: Partial<Task> & { id: number }): Task {
   return {
-    id: overrides.id,
     subject: `task ${overrides.id}`,
     description: `description ${overrides.id}`,
     status: "in_progress",
@@ -576,5 +575,111 @@ describe("idle-recovery store: plan ownership", () => {
     expect(store.reserve(foreignPlan)).toMatchObject({ kind: "denied", reason: "stale-plan" });
     expect(store.reserve({ ...prepared.plan, sid: "other" })).toMatchObject({ kind: "denied", reason: "stale-plan" });
     expect(store.view().attemptsInWindow).toBe(0);
+  });
+});
+
+describe("idle-recovery store: host user-arrival", () => {
+  const arrival = (epoch = 1): RecoveryHumanProof =>
+    PROOF({ provenance: "user-arrival", epoch, inputId: `arrival-${epoch}` });
+
+  it("opens on each consecutive new arrival, not on consumption/root-level changes, while preserving session seen", () => {
+    const host = makeHost();
+    const store = storeFor(host);
+    const tasks = [task({ id: 1 })];
+    for (let epoch = 1; epoch <= 3; epoch++) {
+      expect(store.noteHumanProof(arrival(epoch))).toMatchObject({ kind: "opened", fresh: true });
+      expect(store.view()).toMatchObject({ attemptsInWindow: 0, stopped: false, open: true });
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const prepared = store.prepare({ todo: withProgressKey(tasks[0]!, tasks, `${epoch}-${attempt}`) });
+        if (prepared.kind !== "ready") throw new Error("expected ready after arrival");
+        expect(prepared.plan.attemptNumber).toBe(attempt);
+        const reserved = store.reserve(prepared.plan);
+        if (reserved.kind !== "reserved") throw new Error("expected write-ahead reservation");
+        expect(lastEntry(host).data).toMatchObject({ kind: "attempt", attemptId: prepared.plan.attemptId });
+        store.commit(reserved.reservation, "unknown");
+      }
+      expect(store.prepare({ todo: withProgressKey(tasks[0]!, tasks, "third") })).toMatchObject({
+        kind: "denied",
+        reason: "window-exhausted",
+      });
+      store.noteStop("aborted");
+      const count = host.entries.length;
+      expect(store.noteHumanProof(arrival(epoch))).toMatchObject({ kind: "opened", fresh: false });
+      expect(host.entries).toHaveLength(count);
+      expect(store.view()).toMatchObject({ attemptsInWindow: 2, stopped: true });
+    }
+    store.noteHumanProof(arrival(4));
+    expect(store.prepare({ todo: withProgressKey(tasks[0]!, tasks, "1-1") })).toMatchObject({
+      kind: "denied",
+      reason: "seen",
+    });
+    expect(store.view()).toMatchObject({ totalAttempts: 6, attemptsInWindow: 0 });
+    expect(store.view().seen).toHaveLength(6);
+  });
+
+  it("Task reads, no-op/cosmetic updates and notifications do not refill arrival budget or clear Stop", () => {
+    const host = makeHost();
+    const store = storeFor(host);
+    store.noteHumanProof(arrival());
+    const tasks = [task({ id: 1 })];
+    const prepared = store.prepare({ todo: todo(tasks) });
+    if (prepared.kind !== "ready") throw new Error("expected ready");
+    expect(store.reserve(prepared.plan).kind).toBe("reserved");
+    store.noteStop("aborted");
+    host.entries.push(
+      { type: "message", message: { role: "user", content: "machine" } },
+      { type: "custom", customType: "subagent:complete", data: {} },
+    );
+    for (const target of [
+      tasks[0]!,
+      { ...tasks[0]!, updatedAt: 99, activeForm: "working", metadata: { unrelated: true } },
+    ]) {
+      expect(store.prepare({ todo: todo([target]) })).toMatchObject({ kind: "denied", reason: "stopped" });
+      expect(store.view()).toMatchObject({ attemptsInWindow: 1, stopped: true });
+    }
+    expect(host.entries).toHaveLength(5); // window + attempt + Stop + two non-recovery entries
+  });
+
+  it("replay/reload does not open a window; stale owner/sid/epoch and duplicate arrival do not clear Stop", () => {
+    const host = makeHost();
+    const first = storeFor(host);
+    first.noteHumanProof(arrival(2));
+    first.noteStop("abort-admission");
+    const reloaded = storeFor(host, { owner: "new-owner" });
+    expect(reloaded.view()).toMatchObject({ open: false, stopped: true });
+    for (const proof of [
+      arrival(3),
+      { ...arrival(3), owner: "new-owner", sid: "other" },
+      { ...arrival(1), owner: "new-owner" },
+    ]) {
+      expect(reloaded.noteHumanProof(proof).kind).toBe("ignored");
+      expect(reloaded.view()).toMatchObject({ open: false, stopped: true });
+    }
+    expect(reloaded.noteHumanProof({ ...arrival(2), owner: "new-owner" })).toMatchObject({
+      kind: "opened",
+      fresh: false,
+    });
+    expect(reloaded.view().stopped).toBe(true);
+    expect(reloaded.noteHumanProof({ ...arrival(3), owner: "new-owner" })).toMatchObject({
+      kind: "opened",
+      fresh: true,
+    });
+    expect(reloaded.view()).toMatchObject({ stopped: false, attemptsInWindow: 0 });
+    const fork = storeFor(host, { sessionId: "fork" });
+    expect(fork.view()).toMatchObject({ open: false, window: undefined, seen: [] });
+    expect(fork.noteHumanProof(arrival(4))).toMatchObject({ kind: "ignored", reason: "sid-mismatch" });
+  });
+
+  it("fails closed on arrival-window append failure without enabling recovery", () => {
+    const host = makeHost();
+    const store = storeFor(host);
+    host.failAppend = true;
+    store.noteHumanProof(arrival());
+    expect(store.view().latch).toBe("persist-uncertain");
+    expect(store.prepare({ todo: todo([task({ id: 1 })]) })).toMatchObject({
+      kind: "denied",
+      reason: "persist-uncertain",
+    });
+    expect(host.entries).toHaveLength(0);
   });
 });
