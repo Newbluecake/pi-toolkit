@@ -34,7 +34,13 @@ const STATUS_KEY = Symbol.for("pi-subagent:background-status");
 type Handler = (event: unknown, ctx: unknown) => unknown;
 type Sent = { message: { customType: string; content: string; details: any }; options?: { triggerTurn?: boolean } };
 
+// One fake host instance is one pi session: real pi keeps the session id stable
+// for the whole session, so the fake must too. A per-instance counter keeps the
+// id unique across cases (no identity bleed between tests).
+let fakeSessionSeq = 0;
+
 function fakePi(branch: unknown[]) {
+  const sessionId = `explicit-timeout-e2e-${++fakeSessionSeq}`;
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, ToolDefinition>();
   const sent: Sent[] = [];
@@ -90,7 +96,7 @@ function fakePi(branch: unknown[]) {
     sessionManager: {
       getEntries: () => branch,
       getBranch: () => branch,
-      getSessionId: () => `explicit-timeout-e2e-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      getSessionId: () => sessionId,
       getSessionFile: () => undefined,
     },
     modelRegistry: { getAvailable: () => [], find: () => undefined },
@@ -215,6 +221,10 @@ function makeHandle(dir: string, hang: () => boolean) {
     getActiveTools: () => [],
     getLastAssistantText: () => "hello from subagent",
     getUsage: () => undefined,
+    // Real PiSessionHandle exposes the child's live branch (session-driver
+    // §4.1); the nested memory-seed capture reads it via peekRunBranch, so a
+    // fake handle without it makes every nested spawn fail admission.
+    getBranchEntries: () => [],
   };
 }
 function stubDriver(hang: () => boolean) {

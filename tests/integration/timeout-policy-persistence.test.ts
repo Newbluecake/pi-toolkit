@@ -48,7 +48,13 @@ const LIVE_FILES_KEY = Symbol.for("pi-subagent:live-session-files");
 type Handler = (event: unknown, ctx: unknown) => unknown;
 type Sent = { message: { customType: string; content: string; details: any }; options?: unknown };
 
+// One fake host instance is one pi session: real pi keeps the session id stable
+// for the whole session, so the fake must too. A per-instance counter keeps the
+// id unique across cases (no identity bleed between tests).
+let fakeSessionSeq = 0;
+
 function fakePi(branch: unknown[]) {
+  const sessionId = `timeout-policy-persistence-${++fakeSessionSeq}`;
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, ToolDefinition>();
   const sent: Sent[] = [];
@@ -102,7 +108,7 @@ function fakePi(branch: unknown[]) {
     sessionManager: {
       getEntries: () => branch,
       getBranch: () => branch,
-      getSessionId: () => `timeout-policy-persistence-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      getSessionId: () => sessionId,
       getSessionFile: () => undefined,
     },
     modelRegistry: { getAvailable: () => [], find: () => undefined },
