@@ -198,6 +198,17 @@ export function createIdleRecoveryRunner(deps: IdleRecoveryRunnerDeps): IdleReco
       terminal = "stuck";
     }
   };
+  // #59 B2 acceptance: markers this instance actually put on the wire — the ONLY later proof
+  // that a rejected BAS marker is our own stale check rather than another feature's run.
+  // Bounded; dropping an old entry only loses the ability to abort our own stale check
+  // (conservative direction), never grants permission for anything foreign.
+  const issuedMarkers: { token: string; attemptId: string }[] = [];
+  const recordIssuedMarker = (token: string, attemptId: string) => {
+    issuedMarkers.push({ token, attemptId });
+    if (issuedMarkers.length > 8) issuedMarkers.splice(0, issuedMarkers.length - 8);
+  };
+  const isIssuedMarker = (d: { sid: string; ownerToken: string; attemptId: string }): boolean =>
+    d.sid === deps.sid && issuedMarkers.some((i) => i.token === d.ownerToken && i.attemptId === d.attemptId);
   const expire = (a: Attempt) => {
     deadline = undefined;
     if (active !== a || disposed) return;
@@ -274,6 +285,9 @@ export function createIdleRecoveryRunner(deps: IdleRecoveryRunnerDeps): IdleReco
         return;
       }
       try {
+        // #59 B2: record issuance BEFORE the send — a synchronous throw is delivery-UNKNOWN,
+        // the marker may still be on the wire and must stay provably ours if it returns late.
+        recordIssuedMarker(a.token, a.plan.attemptId);
         deps.sendMessage(
           {
             customType: IDLE_RECOVERY_CHECK,
@@ -355,6 +369,8 @@ export function createIdleRecoveryRunner(deps: IdleRecoveryRunnerDeps): IdleReco
       serial += 1;
       const trigger = readBeforeAgentStartTrigger(event);
       if (trigger.kind !== "custom" || trigger.customType !== IDLE_RECOVERY_CHECK) {
+        // Foreign/non-check trigger (user prompt or another feature's custom run): hand over
+        // THIS runner's rights only; never abort — that run is not ours to abort (#59 B2).
         handover();
         return;
       }
@@ -371,11 +387,19 @@ export function createIdleRecoveryRunner(deps: IdleRecoveryRunnerDeps): IdleReco
         clock.now() >= a.deadlineAt ||
         !matches(a, read(), true)
       ) {
+        // #59 B2 acceptance: rejection (late/stale/foreign/malformed marker, or no current
+        // claim) only forfeits THIS runner's supervision rights (claim/handover/timer/deadline).
+        // It is NEVER authorization to abort whatever run the host is starting — with no
+        // current claim there is nothing of ours to abort, and a foreign marker's run may be
+        // another feature's already-accepted custom run. deps.abort stays reachable ONLY for
+        // a marker this instance provably issued (our own late/stale check run).
         handover();
-        try {
-          deps.abort();
-        } catch {
-          disabled = true;
+        if (d && isIssuedMarker(d)) {
+          try {
+            deps.abort();
+          } catch {
+            disabled = true;
+          }
         }
         return;
       }

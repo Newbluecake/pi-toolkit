@@ -362,15 +362,20 @@ describe("current BAS ownership and fixed supervised deadline", () => {
     expect(f.abort).not.toHaveBeenCalled();
     expect(f.store.view().attemptsInWindow).toBe(1);
   });
-  it.each(["ownerToken", "attemptId", "sid"])("wrong %s current marker rejected, not bound", (field) => {
-    const f = fixture();
-    f.start();
-    const m = f.sent[0]!;
-    f.bas({ ...m, details: { ...m.details, [field]: "wrong" } });
-    expect(f.abort).toHaveBeenCalledOnce();
-    expect(f.runner.phase()).toBe("idle");
-    expect(f.clock.pendingTimers).toBe(0);
-  });
+  it.each(["ownerToken", "attemptId", "sid"])(
+    "wrong %s current marker rejected, never bound and never aborts a foreign run",
+    (field) => {
+      const f = fixture();
+      f.start();
+      const m = f.sent[0]!;
+      f.bas({ ...m, details: { ...m.details, [field]: "wrong" } });
+      // #59 B2: a non-own marker is not authorization to abort the run it starts (that run
+      // may be another feature's accepted custom run) — only this runner's rights are forfeited.
+      expect(f.abort).not.toHaveBeenCalled();
+      expect(f.runner.phase()).toBe("idle");
+      expect(f.clock.pendingTimers).toBe(0);
+    },
+  );
   it("fixed 15min from attempt, not BAS; one abort, then 10s grace stuck with no retries", () => {
     const f = fixture();
     f.start();
@@ -438,6 +443,58 @@ describe("current BAS ownership and fixed supervised deadline", () => {
     f.arrival();
     f.clock.advance(IDLE_RECOVERY_DEADLINE_MS + IDLE_RECOVERY_GRACE_MS);
     expect(f.abort).not.toHaveBeenCalled();
+    expect(f.clock.pendingTimers).toBe(0);
+  });
+  it("#59 B2: foreign custom BAS forfeits only own rights — no abort, claim invalid, own marker cannot rebind", () => {
+    const f = fixture();
+    f.start();
+    expect(f.runner.phase()).toBe("unknown");
+    // another feature's accepted custom run starts (marker-shaped payload must not matter)
+    f.runner.beforeAgentStart({
+      messageType: "custom",
+      message: { customType: "another:feature", details: { v: 1, sid: "s", ownerToken: "not-ours", attemptId: "aX" } },
+    });
+    expect(f.abort).not.toHaveBeenCalled();
+    // this runner's claim/handover/timer/deadline rights are cleared (token invalidated)
+    expect(f.runner.phase()).toBe("idle");
+    expect(f.clock.pendingTimers).toBe(0);
+    expect(f.entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ phase: "handed" }) }));
+    // a later own marker cannot bind the revoked claim; only its own stale run may be aborted
+    f.bas();
+    expect(f.runner.phase()).toBe("idle");
+    expect(f.abort).toHaveBeenCalledOnce();
+    f.clock.advance(IDLE_RECOVERY_DEADLINE_MS);
+    expect(f.abort).toHaveBeenCalledOnce();
+  });
+  it("#59 B2: coexistence — a foreign feature's accepted custom run is never aborted by late/mimicking markers", () => {
+    const f = fixture();
+    f.start();
+    f.runner.beforeAgentStart({ messageType: "custom", message: { customType: "fabric:xs", details: {} } });
+    expect(f.abort).not.toHaveBeenCalled();
+    const m = f.sent[0]!;
+    // check-type BAS with a forged token: rejected without aborting the in-flight foreign run
+    f.bas({ ...m, details: { ...m.details, ownerToken: "forged", attemptId: "aX" } });
+    expect(f.abort).not.toHaveBeenCalled();
+    expect(f.runner.phase()).toBe("idle");
+    expect(f.clock.pendingTimers).toBe(0);
+    // own late marker still follows the accepted rule: rejected, aborts only its own stale turn
+    f.bas();
+    expect(f.abort).toHaveBeenCalledOnce();
+    expect(f.runner.phase()).toBe("idle");
+  });
+  it("#59 B2: check-type BAS with no current claim and no issuance never aborts", () => {
+    const f = fixture();
+    f.arrival();
+    f.emit();
+    f.runner.beforeAgentStart({
+      messageType: "custom",
+      message: {
+        customType: IDLE_RECOVERY_CHECK,
+        details: { v: 1, sid: "s", ownerToken: "forged", attemptId: "a1" },
+      },
+    });
+    expect(f.abort).not.toHaveBeenCalled();
+    expect(f.runner.phase()).toBe("idle");
     expect(f.clock.pendingTimers).toBe(0);
   });
   it("external BAS revokes abort but does not reset quota; context never trusts a history marker", () => {
