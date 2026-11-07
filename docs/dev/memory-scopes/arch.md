@@ -341,10 +341,12 @@
 
 ### 6.1 设置
 
-| 键                      | 默认  | live | 备注                                                       |
-| ----------------------- | ----- | ---- | ---------------------------------------------------------- |
-| `memory.scopes.session` | false | 否   | 含子 agent seed、子会话 project 只读硬门                   |
-| `memory.scopes.hub`     | false | 否   | D8 强制为 false；接线时再校验 `secureDomainKind==="plain"` |
+> **2026-11-08 用户裁定：产品默认开启**。下表「默认 false」是 2026-11-07 设计时裁定，已被覆盖；当前默认为 `memory.scopes = { session: true, hub: true }`，parser 尊重显式 `false` 与部分覆盖，`memory.enabled=false` 只阻止接线，非 live 需 `/reload` 生效。回滚 = 显式 false/false + reload，数据保留不擦除；secure 域 D8 继续强制 hub:false 且现有装配要求 plain，secure/locked 实际不创建 scoped shell/工具/section/store——默认翻转不等于 secure 内已启用。
+
+| 键                      | 默认                                              | live | 备注                                                       |
+| ----------------------- | ------------------------------------------------- | ---- | ---------------------------------------------------------- |
+| `memory.scopes.session` | ~~false~~ **true**（2026-11-08）                  | 否   | 含子 agent seed、子会话 project 只读硬门                   |
+| `memory.scopes.hub`     | ~~false~~ **true**（2026-11-08；D8 仍强制 false） | 否   | D8 强制为 false；接线时再校验 `secureDomainKind==="plain"` |
 
 依附于 `memory.enabled`。任一开关开启 ⇒ 子会话硬门生效。
 
@@ -556,12 +558,12 @@
 
 ### 8.1 off / 兼容
 
-| 场景                      | 保证                                                                                                                                                                                                     |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 两个开关都关（默认）      | 不注册工具/section/hook；不追加条目；不注入端口 ⇒ `memorySeed` 永远不存在；不解析槽位；子会话行为不变；activate-trace default、memory-tool-surface、jev-off、secure-off、schedule-off 等 golden 全部不变 |
-| 新 golden（B 级，申报式） | `scoped-memory-tool-surface.json`（enum 变体 × 描述）；activate-trace 新增「scopes on」配置                                                                                                              |
-| 旧扩展                    | 忽略未知 customType；不读 hub-memory                                                                                                                                                                     |
-| 回滚                      | 关开关 + `/reload`；数据保留；手动删除 `hub-memory/` 即彻底清除                                                                                                                                          |
+| 场景                                                                    | 保证                                                                                                                                                                                                     |
+| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 两个开关都关（~~默认~~显式 off；默认已于 2026-11-08 用户裁定翻转为 on） | 不注册工具/section/hook；不追加条目；不注入端口 ⇒ `memorySeed` 永远不存在；不解析槽位；子会话行为不变；activate-trace default、memory-tool-surface、jev-off、secure-off、schedule-off 等 golden 全部不变 |
+| 新 golden（B 级，申报式）                                               | `scoped-memory-tool-surface.json`（enum 变体 × 描述）；activate-trace 新增「scopes on」配置                                                                                                              |
+| 旧扩展                                                                  | 忽略未知 customType；不读 hub-memory                                                                                                                                                                     |
+| 回滚                                                                    | 显式 `scopes:{session:false,hub:false}` + `/reload`（2026-11-08 默认开启后回滚即此路径）；数据保留、不擦除历史；手动删除 `hub-memory/` 才彻底清除                                                        |
 
 ### 8.2 安全边界（#9）
 
@@ -666,6 +668,8 @@ Plan/方案制定按本会话用户指定 `localcodex/gpt-6-astra`。先完成�
 | Q3  | 分期         | 本轮完成 session / project / hub 三层，不把 Hub 留待后续；首期 TUI + Web 授权                                                             |
 
 **Q4 已定（用户 2026-11-07）**：首期同时支持 TUI 与 Web 授权；Web 复用现有远程问答通道（§0.3 D1–D4、§5.2）。
+
+**Q5 已定（用户 2026-11-08）**：`memory.scopes`（session+hub）改为**产品默认开启**（§6.1 已就地更正）；历史裁定「默认 off」保留记录但被本裁定覆盖。secure 域不受影响：D8 仍强制 hub:false，默认翻转不等于 secure 内已启用（§8.1/§8.2）。
 
 已定、不再列出：fork/子 snapshot 语义、U4 授权须明确且宿主可核验、TUI+Web 授权、secure 强制关闭、子会话只读的窄义（D5）。已由本文裁定：槽位根（K2）、独立工具（K4）、对话框授权（K5）、单次 append（K8）、branch-local（K10）、子会话硬门例外（K11）。
 

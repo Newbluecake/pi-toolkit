@@ -10,7 +10,7 @@
 - **容量已定**：session 48 条 / 正文总 8 KiB，hub 32 条 / 4 KiB；单条正文 1024 B。Hub 自动全量注入。满了拒写，不截断，不自动淘汰/提升。
 - **全局写入必须真人确认具体内容**：主 agent 请求后，TUI 或 Web 宿主对话框展示冻结原文与完整操作摘要；拒绝项第一。只有受信渠道的明确动作才能生成一次性 OpCap。缺渠道、来源未知、超时、取消、迟到答案都拒写。首次上线同时支持 TUI + Web。
 - **子与 secure**：子只能写自己的 session agent 条目，不能伪造/改继承的 user 条目；project/hub 内容硬只读，旧 `allowWriteInChildSessions=true` 无效。secure/locked 强关 hub；session/project 沿既有加密路径，不造明文 sidecar。
-- **兼容与回滚**：两个新 flags 默认 off；现有 files/tiered、Jev、#36 默认与数据不动。关 flag 并按现有重载流程生效即可回滚，保留存储、不删除数据。本轮不实际启用、不迁移、不调用付费分类器。
+- **兼容与回滚**：两个新 flags ~~默认 off~~ **产品默认开启（2026-11-08 用户裁定，见 arch.md §10 Q5；历史「默认 off」为 2026-11-07 设计裁定，已被覆盖）**；现有 files/tiered、Jev、#36 默认与数据不动。回滚：显式 false/false + 按现有重载流程生效，保留存储、不删除数据。本轮不实际启用、不迁移、不调用付费分类器。
 - **落地顺序**：P0 真 SDK 能力与接口冻结 → session → seed 与 hub/auth 并行 →统一权限/装配 → 全链验收。共 6 包，独立异源 verifier；只有 Root/指定一名 gate 执行者跑全量。
 - **技术未知不再抛产品选择**：生产 input 入口顺序/queued proof、首次落盘失败恢复、浏览器/TUI 全文确认属于 P0 硬门。局部 own/tmp 真 SDK 探针已成功证明正常即时派发可行，但**不等于生产 P0 已完成**。无新增产品问题。
 
@@ -52,7 +52,7 @@ Hub 每次 agent start 自动全量快照；stable 模式仍沿现有尾更新�
 
 | 面                                            | 新增 / 保留                                                                                | 兼容要求                                                                                          |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `memory.scopes.session` / `memory.scopes.hub` | boolean，默认 false，非 live，依附 memory.enabled                                          | off 不注册新工具/section/hook/port、不解析槽位；D8 覆盖 hub=false，接线再验 plain                 |
+| `memory.scopes.session` / `memory.scopes.hub` | boolean，~~默认 false~~**默认 true（2026-11-08 用户裁定）**，非 live，依附 memory.enabled  | off 不注册新工具/section/hook/port、不解析槽位；D8 覆盖 hub=false，接线再验 plain                 |
 | `scoped_memory`                               | 新独立工具；`storageScope`、`command`、`id/text/rev/topic/from/authority`                  | 主 enum 只含开启层；子只含 session；不更改旧 memory 三套 schema；机制写工具描述，策略仅仓库 skill |
 | customType                                    | 新 `subagent:memory-session`，v1 put/del/snap + cause/inherit                              | 旧扩展忽略未知 entry；不直接成为模型 context；通过 section 注入                                   |
 | session 文件                                  | 现有 SessionManager JSONL，或 inMemory                                                     | 无新 plain 文件；fork 保持 data、owner sid 可分辨；new 不读取父                                   |
@@ -239,8 +239,8 @@ Root 记录 suite/版本/退出码/日志与未测项；修复失败必须重跑
 
 ## 7. 回滚、发布与剩余技术门
 
-- 默认 flags off，完成实现也不擅自修改实际用户设置或开启全局。当前 project 不迁移。Hub 初始化只能针对新根，不“收编”现有数据。
-- 回滚：用户/Root 决定关 flags，按非 live 设置的正常重载要求生效；本任务不实际 reload。custom entries/hub 文件保留，旧扩展忽略；不删除存储、不把关闭等同于擦除敏感历史。
+- ~~默认 flags off~~ **默认 flags on（2026-11-08 用户裁定，历史「默认 off」裁定保留记录）**，完成实现也不擅自修改实际用户设置或开启全局。当前 project 不迁移。Hub 初始化只能针对新根，不“收编”现有数据。
+- 回滚（默认开启后同样适用）：用户/Root 决定显式关 flags（session/hub 均 false），按非 live 设置的正常重载要求生效；custom entries/hub 文件保留，旧扩展忽略；不删除存储、不把关闭等同于擦除敏感历史。
 - namespace 损坏/host不符仅惰化 + doctor；adopt 仅显式 TUI 用户动作并验证，无自动修库。Hub stop/restart/token rotation 的清理回归必须证明 store 保留。
 - 不 commit/push/release；不安装，不清私有数据，不挂载，不翻 #36 gates。实施完成后的发布另按仓库流程授权。
 - **剩余技术门，不是产品 open questions**：生产 proof ingress 排序与 handled/nested 清理；正常 idle 准入与 settled deferral（首期无新 held）；partial-write/首次 flush 异常；完整 op/source UI 绑定和可见性；effective paths 生产透传与 cleanup。P0 证据失败则报告准确接口，调整局部技术实现，不私自放宽权限或重问已定产品语义。

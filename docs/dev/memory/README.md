@@ -198,6 +198,18 @@ source-proof/projection/Jev/trace/teardown 回归。精确命令、日志、未�
 **P5 未做**：真实 TUI viewport/键盘/默认拒绝/滚动竞态、真实 browser dialog→CmdOrigin→cap→store。
 select title/payload 测试不算 viewport pass；如实际裁切只评估 feature-local scroll adapter，不升级 SDK。
 
+### #39 三层记忆默认开启（2026-11-08 用户裁定）
+
+`memory.scopes` 自 2026-11-08 起为**产品默认开启**：默认 `scopes = { session: true, hub: true }`（默认值定义在 `src/memory/settings.ts`，随 #39 默认翻转包更新）。要点：
+
+- parser 尊重显式 `false` 与部分覆盖（显式只关一层时另一层仍按默认开）；`memory.enabled=false` 只阻止接线，不改 scopes 默认值本身。设置非 live，改后需 `/reload` 生效。
+- **回滚**：显式 `scopes:{session:false,hub:false}` + reload；数据保留——不回滚存储、不擦除历史（session 条目留在会话文件、hub 条目留在 `hub-memory/`，旧扩展忽略）。
+- **secure 域**：D8 继续强制 `memory.scopes.hub=false`，且现有装配要求 plain 域，secure/locked 实际不创建 scoped shell/工具/section/store。**默认翻转不等于 secure 内已启用**；secure 内启用属于另一个安全装配任务，不在 #39 默认翻转范围内。
+- **影响面（事实，以源码为准）**：主会话多一个 `scoped_memory` 工具与 `pi_session_memory`/`pi_hub_memory` 两个 prompt section（沿 `pi_project_memory` 之后注册）；wire 侧 6 个 context hook（`session_start`/`input`/`before_agent_start`/`agent_start`/`session_tree`/`session_shutdown`，`src/memory/scopes/wire.ts`）+ proof hook owner 的 8 个 hook（`input`/`before_agent_start`/`agent_start`/`agent_end`/`agent_settled`/`session_start`/`session_tree`/`session_shutdown`，`src/web-hub/agent/human-dispatch-proof.ts`）。child 只有 public-bus receiver + 两 section，无任何 human proof hook；project/Hub 内容硬只读（旧 `allowWriteInChildSessions=true` 失效）。空 session/空 Hub 不注入占位 section。
+- **预算**：正文 48 项/8192B（session）与 32 项/4096B（hub）；render ceiling 63488B/34816B，超限退 pointer、不截正文（arch.md §6.6）。
+- 首次空 Hub 不创建目录；mkdir 只发生在获准写入的路径上。默认开启不会自动迁移或收编旧数据（旧 files/tiered project 记忆原样）。
+- **已知边界**：P5 真实 TUI viewport/browser 验收仍未做；默认开启不替代该证据。
+
 ### P4c 装配门禁续包（2026-11-08）
 
 新增 actual Stack→SpawnService→Runner→SDK 的 slot FIFO/direct-parent 捕获，actual Stack workflow worker 的
