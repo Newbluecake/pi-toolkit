@@ -84,7 +84,7 @@ export async function readPluginInfo(deps: PluginInfoDeps): Promise<PluginInfo> 
   if (topReal !== rootReal) return info;
 
   const [log, status] = await Promise.all([
-    deps.git(["log", "-1", "--format=%h%x09%ct"]),
+    deps.git(["log", "--no-show-signature", "-1", "--format=%h%x09%ct"]),
     deps.git(["status", "--porcelain", "--untracked-files=no"]),
   ]);
   const [hash, ct] = (log ?? "").trim().split("\t");
