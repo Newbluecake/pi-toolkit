@@ -87,8 +87,13 @@ unknown。无公开 request/origin 关联，只叫 latest observed **(origin unk
 绑定到某次正常请求。default 不等于没有加速，priority 不作账单确认。
 
 只用既有 notify 与 `setStatus("subagent:fast",...)`，紧凑英文 marker、中文费用说明，TUI/RPC/web
-沿已有通道可见；不新增 web 按钮/协议。other/unsupported 通知按有限静态原因去重。费用/额度 premium
-未知，包括 native warm；原 usage/cost 逻辑不改。
+沿已有通道可见；不新增 web 按钮/协议。`FastController.command(args, ui?)` 的可选反馈通道只在
+本次调用内使用：main handler 传入调用 ctx 的 notify，让 Web claimed capture 和 TUI observed
+commandRecord 都能收集命令反馈，同时终端只通知一次。usage/status/幂等或 invalid 回显/写失败/成功
+只选调用 notify 或默认 session notify，不叠加、不保存调用 UI；闭 UI 异常不影响存储判断。
+footer 的 setStatus 和 provider 的 suspended/unsupported 通知仍走 open ctx 的 session 通道，后续
+provider 回调不会粘住已结束命令的 capture/record window。other/unsupported 通知按有限静态原因
+去重。费用/额度 premium 未知，包括 native warm；原 usage/cost 逻辑不改。
 
 ## 验证地图与剩余证据
 
@@ -96,6 +101,9 @@ unknown。无公开 request/origin 关联，只叫 latest observed **(origin unk
   普通/Codex/Azure SSE、受控 WS 最终 body/frame、reasoning replay，非自造 buildParams。
 - `tests/fast/wire-{controller,main,order}`：三态、成功/失败/notify-fail、invalid reset、零 startup/status
   记录、expired ctx/ABA/owner 隔离、只读观察、同步 registry replay/延迟安装/重复安装次序。
+- `tests/web-hub/agent/fast-command-capture`：真实 wrapper/capture/commandRecord/Fast 接线，独立
+  open/callback ctx 的 Web 与 TUI 反馈矩阵、单次终端通知、无 footer/LLM context 旁路、provider
+  去重与已结束/下一命令 window 隔离；纯受控 SDK/storage/UI 端口，不含真实浏览器/模型请求。
 - `tests/integration/fast-wiring-storage`：真实1.5 buffered 正常返回与 flushed EISDIR 失败、后续 append/
   branch/reopen 不复活失败 on；真实 SDK command、stale ctx。P0 七场景回滚仍是独立前提，不冒称本测试
   重跑了全部七场景。

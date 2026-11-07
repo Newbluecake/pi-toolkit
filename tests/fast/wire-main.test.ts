@@ -148,6 +148,64 @@ describe("Fast fixed main/child wiring", () => {
     ports.dispose();
   });
 
+  it.each([
+    { args: "status", mode: "off", expected: /^Fast requested=off/, level: "info", writes: 0 },
+    { args: "on", mode: "inherit", expected: /^Fast requested=on/, level: "info", writes: 1 },
+    { args: "off", mode: "on", expected: /^Fast requested=off/, level: "info", writes: 1 },
+    { args: "inherit", mode: "on", expected: /^Fast requested=inherit/, level: "info", writes: 1 },
+    { args: "on", mode: "on", expected: /^Fast requested=on/, level: "info", writes: 0 },
+    { args: "status", mode: "invalid", expected: /invalid-record/, level: "info", writes: 0 },
+    { args: "reset", mode: "invalid", expected: /^Fast requested=inherit/, level: "info", writes: 1 },
+    { args: "bad args", mode: "on", expected: /^用法：\/fast/, level: "warning", writes: 0 },
+    { args: "on", mode: "off", expected: /^Fast storage-fault/, level: "error", writes: 1, fail: true },
+  ])("routes $args from $mode only to this callback UI", async ({ args, mode, expected, level, writes, fail }) => {
+    const f = api();
+    const opened = context();
+    const callback = context(); // Same valid public identity; not the open ctx/UI.
+    opened.branch([rec(mode)]);
+    f.append.mockImplementation((customType: string, data: unknown) => {
+      if (fail) throw Error("append failed");
+      opened.branch([{ type: "custom", customType, data }]);
+    });
+    const ports = wireFastMain(f.pi, true)!.open(opened.ctx);
+    await f.commands.get("fast")!.handler(args, callback.ctx);
+    expect(callback.ui.notify).toHaveBeenCalledTimes(1);
+    expect(callback.ui.notify).toHaveBeenLastCalledWith(expect.stringMatching(expected), level);
+    expect(opened.ui.notify).not.toHaveBeenCalled();
+    expect(callback.ui.setStatus).not.toHaveBeenCalled();
+    expect(f.append).toHaveBeenCalledTimes(writes);
+    if (fail) expect(ports.workflow.capture()).toEqual({ v: 1, mode: "off" });
+    ports.dispose();
+  });
+
+  it("swallows a closed callback UI without fallback, storage fault or retained provider UI", async () => {
+    const f = api();
+    const opened = context();
+    const callback = context();
+    const ports = wireFastMain(f.pi, true)!.open(opened.ctx);
+    f.append.mockImplementation((customType: string, data: unknown) =>
+      opened.branch([{ type: "custom", customType, data }]),
+    );
+    callback.ui.notify.mockImplementation(() => {
+      throw Error("closed UI");
+    });
+    await f.commands.get("fast")!.handler("on", callback.ctx);
+    expect(callback.ui.notify).toHaveBeenCalledTimes(1);
+    expect(opened.ui.notify).not.toHaveBeenCalled();
+    expect(ports.workflow.capture()).toEqual({ v: 1, mode: "on" });
+    expect(opened.ui.setStatus).toHaveBeenLastCalledWith("subagent:fast", "Fast requested");
+    f.emit("before_provider_request", { messages: [] }, callback.ctx);
+    expect(opened.ui.notify).toHaveBeenCalledTimes(1);
+    expect(opened.ui.notify).toHaveBeenLastCalledWith(expect.stringMatching(/^Fast suspended/), "warning");
+    expect(callback.ui.notify).toHaveBeenCalledTimes(1);
+    const later = context();
+    await f.commands.get("fast")!.handler("status", later.ctx);
+    expect(later.ui.notify).toHaveBeenCalledTimes(1);
+    expect(later.ui.notify).toHaveBeenLastCalledWith(expect.stringMatching(/^Fast requested=on/), "info");
+    expect(later.ui.notify.mock.calls[0]?.[0]).not.toContain("storage-fault");
+    ports.dispose();
+  });
+
   it("main fixed handlers, no facade identity reliance, expired commands and same-ID ABA owners", async () => {
     const f = api();
     const wire = wireFastMain(f.pi, true)!;

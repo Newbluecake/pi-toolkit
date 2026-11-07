@@ -32,7 +32,7 @@ interface FastControllerDeps {
 }
 export interface FastController {
   snapshot(): FastSnapshot | undefined;
-  command(args: string): void;
+  command(args: string, ui?: { notify?: FastControllerDeps["notify"] }): void;
   rewrite(payload: unknown): unknown;
   observe(data: unknown, api: string): void;
   describe(): string;
@@ -122,16 +122,24 @@ export function createFastController(deps: FastControllerDeps): FastController {
   return {
     snapshot,
     describe,
-    command(args) {
+    command(args, ui) {
+      // Per-call feedback only: never retain a command UI in the session/provider channel.
+      const say = (text: string, level: "info" | "warning" | "error" = "info") => {
+        try {
+          (ui?.notify ?? deps.notify)?.(text, level);
+        } catch {
+          /* Closed command UI is not a storage failure; do not also notify the session UI. */
+        }
+      };
       const parsed = parseFastCommand(args);
       if (!current()) return;
       if (parsed.kind === "usage") {
-        notify("用法：/fast [toggle|on|off|inherit|reset|status]", "warning");
+        say("用法：/fast [toggle|on|off|inherit|reset|status]", "warning");
         return;
       }
       if (!refresh()) return;
       if (parsed.command === "status") {
-        notify(describe());
+        say(describe());
         return;
       }
       // Explicit inherit/reset repairs a latest invalid/future record with one valid tombstone.
@@ -139,7 +147,7 @@ export function createFastController(deps: FastControllerDeps): FastController {
         resolveFastCommandMode(state.mode, parsed) ??
         (state.invalidRecord && parsed.command === "inherit" ? "inherit" : undefined);
       if (next === undefined) {
-        notify(describe());
+        say(describe());
         return;
       }
       try {
@@ -148,7 +156,7 @@ export function createFastController(deps: FastControllerDeps): FastController {
         if (!current()) return;
         storageFault = true;
         render();
-        notify("Fast storage-fault：未切档，保留最后成功模式。", "error");
+        say("Fast storage-fault：未切档，保留最后成功模式。", "error");
         return;
       }
       if (!current()) return;
@@ -157,7 +165,7 @@ export function createFastController(deps: FastControllerDeps): FastController {
       storageFault = false;
       atHook = "unknown";
       render();
-      notify(describe());
+      say(describe());
     },
     rewrite(payload) {
       const captured = snapshot(); // Capture once, synchronously at callback entry.
@@ -285,7 +293,7 @@ export function wireFastMain(
   pi.registerCommand("fast", {
     description: "会话服务档位：/fast [toggle|on|off|inherit|reset|status]；原生预热跟随，费用未核实",
     handler: async (args, ctx) => {
-      get(ctx)?.command(args);
+      get(ctx)?.command(args, { notify: (text, level) => ctx.ui.notify(text, level) });
     },
   });
   pi.on("before_provider_request", (event, ctx) => get(ctx)?.rewrite(event.payload));
