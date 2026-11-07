@@ -209,6 +209,7 @@ select title/payload 测试不算 viewport pass；如实际裁切只评估 featu
 - **预算**：正文 48 项/8192B（session）与 32 项/4096B（hub）；render ceiling 63488B/34816B，超限退 pointer、不截正文（arch.md §6.6）。
 - 首次空 Hub 不创建目录；mkdir 只发生在获准写入的路径上。默认开启不会自动迁移或收编旧数据（旧 files/tiered project 记忆原样）。
 - **已知边界**：P5 真实 TUI viewport/browser 验收仍未做；默认开启不替代该证据。
+- **leaf hint 缺失时的兼容性（2026-11-08 默认开启回归修复）**：owner 只把 `manager.getLeafId` 当作可选的 fold-cache hint；裁剪宿主未提供该方法时，仍读取真实 manager 的 branch/sid/file。leaf 未知时 store 不复用缓存（同长度 branch 也重新折叠），不能把 `noleaf:length` 当稳定身份。真实 sid/branch 异常、owner 变化或非法 seed 仍拒绝捕获，不降级为空继承。该缺陷曾使 workflow `agent()` 在捕获时提前 `script_error`，因此尚未到 deadline 就终结而无 grace 通知；不涉及预算或通知策略变更。
 
 ### P4c 装配门禁续包（2026-11-08）
 

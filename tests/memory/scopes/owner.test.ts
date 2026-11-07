@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { createMemoryOwner } from "../../../src/memory/scopes/owner.js";
+import { captureMemorySeed, type MemoryScopesGroup } from "../../../src/memory/scopes/wire.js";
 const roots: string[] = [];
 afterEach(() => {
   for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -32,6 +33,53 @@ function owner(
   });
 }
 describe("actual manager owner production factory", () => {
+  it("a manager without a leaf hint still reads and captures its real session memory", async () => {
+    const manager = SessionManager.inMemory("/owned");
+    Object.defineProperty(manager, "getLeafId", { value: undefined });
+    const r = owner(manager, "created");
+    try {
+      expect(r.manager).toBe(manager);
+      expect(r.session!.view().items).toEqual([]);
+      expect(r.session!.snapshot()).toEqual({ v: 1, state: "empty" });
+      expect(
+        await r.tool.run("create", { op: "create", storageScope: "session", text: "real branch memory" }),
+      ).toMatchObject({ ok: true, id: "n1" });
+      expect(r.session!.view().items.map((i) => i.item.text)).toEqual(["real branch memory"]);
+      expect(r.session!.snapshot()).toMatchObject({
+        v: 1,
+        state: "captured",
+        seed: { fromSid: manager.getSessionId(), items: [{ id: "n1", text: "real branch memory" }] },
+      });
+    } finally {
+      r.dispose();
+    }
+  });
+
+  it.each(["getSessionId", "getBranch"] as const)("%s failures still refuse parent capture", (method) => {
+    const manager = SessionManager.inMemory("/owned");
+    Object.defineProperty(manager, "getLeafId", { value: undefined });
+    const r = owner(manager, "created");
+    const group: MemoryScopesGroup = {
+      runtime: () => r,
+      childBinding: {},
+      gate: { check: () => ({ ok: true }) },
+      dispose: () => r.dispose(),
+    };
+    try {
+      expect(captureMemorySeed(group, {})).toEqual({ v: 1, state: "empty" });
+      Object.defineProperty(manager, method, {
+        value: () => {
+          throw Error(`actual ${method} failed`);
+        },
+      });
+      expect(() => captureMemorySeed(group, {})).toThrow(
+        method === "getSessionId" ? "memory parent unavailable" : "actual getBranch failed",
+      );
+    } finally {
+      r.dispose();
+    }
+  });
+
   it("buffered append uses original object, same stable owner, once-only poison recovery only on actual reopen", async () => {
     const root = mkdtempSync(join(tmpdir(), "memory39-owner-"));
     roots.push(root);

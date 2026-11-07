@@ -85,7 +85,9 @@ export function createMemoryOwner(deps: MemoryOwnerDeps) {
         currentOwner: requireOwner,
         isLocked: () => capability() !== "ok",
         getBranch: () => manager.getBranch(),
-        getLeafId: () => manager.getLeafId() ?? undefined,
+        // Leaf identity is only a fold-cache hint. Reduced host managers may omit it;
+        // without the hint the store reads/folds the real branch on every capture.
+        getLeafId: () => manager.getLeafId?.() ?? undefined,
         getSessionId: () => manager.getSessionId(),
         getSessionFile: () => manager.getSessionFile(),
         getManager: () => (current() ? manager : undefined),

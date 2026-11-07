@@ -142,6 +142,32 @@ const userPut = (text: string, owner: MemoryOwner, cap?: SessionMemoryWrite["cap
 });
 
 describe("write protocol", () => {
+  it.each(["absent", "unknown"] as const)(
+    "%s leaf hint never reuses a stale fold for a same-length branch",
+    async (hint) => {
+      const h = harness();
+      const other = harness();
+      expect(await h.store.enqueue(agentPut("first branch", h.owner))).toMatchObject({ ok: true });
+      expect(await other.store.enqueue(agentPut("replacement branch", other.owner))).toMatchObject({ ok: true });
+      const { getLeafId: _hint, ...deps } = h.deps;
+      const store = createSessionMemoryStore({
+        ...deps,
+        ...(hint === "unknown" ? { getLeafId: () => undefined } : {}),
+      });
+      expect(store.view().items.map((i) => i.item.text)).toEqual(["first branch"]);
+      expect(store.snapshot()).toMatchObject({ state: "captured", seed: { items: [{ text: "first branch" }] } });
+      const previousLength = h.branch.length;
+      h.branch.splice(0, h.branch.length, ...other.branch);
+      expect(h.branch.length).toBe(previousLength);
+      expect(store.view().items.map((i) => i.item.text)).toEqual(["replacement branch"]);
+      expect(store.snapshot()).toMatchObject({
+        state: "captured",
+        seed: { items: [{ text: "replacement branch" }] },
+      });
+      store.dispose();
+    },
+  );
+
   it("each operation performs EXACTLY one append and the effect is visible afterwards", async () => {
     const h = harness();
     const first = await h.store.enqueue(agentPut("one", h.owner));

@@ -132,10 +132,11 @@ export function createSessionMemoryStore(deps: SessionMemoryStoreDeps): SessionM
   const fold = (): FoldedSessionMemory => {
     if (deps.enabled === false || deps.isLocked()) return EMPTY_FOLD; // zero branch/disk reads while locked (A10)
     const branch = deps.getBranch();
-    const key = foldCacheKey(deps.getLeafId?.(), branch);
-    if (cache !== undefined && cache.key === key) return cache.value;
+    const leafId = deps.getLeafId?.();
+    const key = foldCacheKey(leafId, branch);
+    if (leafId !== undefined && cache !== undefined && cache.key === key) return cache.value;
     const value = foldSessionMemory(branch, deps.getSessionId());
-    cache = { key, value };
+    cache = leafId === undefined ? undefined : { key, value };
     return value;
   };
 
