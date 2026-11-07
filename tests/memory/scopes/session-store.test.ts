@@ -1,6 +1,10 @@
 /** #39 P1 store: single-append protocol, owner/cap/gate rechecks, poison, queue, locked. */
 import { describe, expect, it } from "vitest";
-import { createSessionMemoryStore, type SessionMemoryStoreDeps } from "../../../src/memory/scopes/session-store.js";
+import {
+  createSessionMemoryStore,
+  sessionPoisonIdentity,
+  type SessionMemoryStoreDeps,
+} from "../../../src/memory/scopes/session-store.js";
 import { createMemoryOpCapRegistry, createHumanTurnTracker } from "../../../src/memory/scopes/op-cap.js";
 import { scopedOpDigest, bodyTextDigest } from "../../../src/memory/scopes/limits.js";
 import {
@@ -10,6 +14,7 @@ import {
   type SessionMemoryWrite,
 } from "../../../src/memory/scopes/types.js";
 
+import { createSessionPoisonRegistry, type SessionRecoveryReceipt } from "../../../src/memory/scopes/session-poison.js";
 const STAMP = "2026-11-07T00:00:00.000Z";
 
 interface Harness {
@@ -25,6 +30,7 @@ interface Harness {
   setOwner: (owner: MemoryOwner) => void;
   setLocked: (locked: boolean) => void;
   setReopened: (value: boolean) => void;
+  receipt: () => SessionRecoveryReceipt;
   deps: SessionMemoryStoreDeps;
 }
 
@@ -36,13 +42,17 @@ function harness(overrides: Partial<{ child: boolean; sessionFile: string | null
   let swallowNext = false;
   let getBranchCalls = 0;
   let locked = false;
-  let reopened = false;
+  const poisonRegistry = createSessionPoisonRegistry();
+  const recovery = poisonRegistry.recoveryAuthority();
+  let receipt = Object.freeze({}) as SessionRecoveryReceipt;
   let entrySeq = 0;
   const incarnation = {};
   const owner: MemoryOwner = {
     incarnation,
     sid: "sess-1",
-    sessionFile: "/vault/state/sessions/default/s.json",
+    ...(overrides.sessionFile === null
+      ? {}
+      : { sessionFile: overrides.sessionFile ?? "/vault/state/sessions/default/s.json" }),
     sessionEpoch: 1,
     branchGen: 1,
   };
@@ -68,12 +78,14 @@ function harness(overrides: Partial<{ child: boolean; sessionFile: string | null
       if (!swallowNext) branch.push(entry);
       swallowNext = false;
       appends.push({ type, data });
-      return entry.id;
+      // Real ExtensionAPI.appendEntry returns void.
     },
     now: () => STAMP,
     ...(overrides.child !== undefined ? { isChildSession: overrides.child } : {}),
     ...(overrides.queueLimit !== undefined ? { queueLimit: overrides.queueLimit } : {}),
-    isReopened: () => reopened,
+    poisonRegistry,
+    recovery,
+    stableSessionIdentity: () => "fixture-session",
   };
   const store = createSessionMemoryStore(deps);
   return {
@@ -96,8 +108,9 @@ function harness(overrides: Partial<{ child: boolean; sessionFile: string | null
       locked = value;
     },
     setReopened: (value) => {
-      reopened = value;
+      if (value) receipt = recovery.recordReopen(sessionPoisonIdentity("fixture-session"), "reopen");
     },
+    receipt: () => receipt,
     deps,
   };
 }
@@ -146,7 +159,6 @@ describe("write protocol", () => {
           targetId: "n1",
           text: "a2",
           authority: "agent",
-          expectRev: undefined,
         } as unknown as FrozenScopedOp & { storageScope: "session" },
         owner: h.owner,
       }),
@@ -162,7 +174,7 @@ describe("write protocol", () => {
     // flip the owner during the dequeue-time fresh fold: the synchronous last-await recheck
     // (immediately before the append) must then see a dead owner and refuse.
     const original = h.deps.getBranch;
-    (h.deps as { getBranch: () => unknown[] }).getBranch = () => {
+    (h.deps as { getBranch: () => readonly unknown[] }).getBranch = () => {
       h.setOwner({ ...h.owner, sid: "other-session" });
       return original();
     };
@@ -220,7 +232,7 @@ describe("authority and child rules", () => {
           humanTurn: turn,
           toolCallId: "tc1",
           nonce: "a".repeat(32),
-          opDigest: scopedOpDigest(operation),
+          opDigest: scopedOpDigest(operation as unknown as Record<string, unknown>),
           textDigest: bodyTextDigest("user fact"),
         },
         channel: "tui" as const,
@@ -321,7 +333,7 @@ describe("poison (Root C0 ruling)", () => {
     const h = harness();
     h.failAppend();
     const first = await h.store.enqueue(agentPut("x", h.owner));
-    expect(first).toMatchObject({ ok: false, code: "E_PERSIST" });
+    expect(first).toMatchObject({ ok: false, code: "E_PERSIST_UNKNOWN" });
     expect(first.ok === false && first.persistenceFailure).toMatchObject({
       poisoned: true,
       recovery: "explicit-reopen-and-verify",
@@ -329,7 +341,7 @@ describe("poison (Root C0 ruling)", () => {
     });
     expect(h.appendAttempts()).toBe(1); // exactly one failed attempt — and NOTHING after it
     const second = await h.store.enqueue(agentPut("y", h.owner));
-    expect(second).toMatchObject({ ok: false, code: "E_PERSIST" });
+    expect(second).toMatchObject({ ok: false, code: "E_PERSIST_UNKNOWN" });
     expect(second.ok === false && second.persistenceFailure?.poisoned).toBe(true);
     expect(h.appendAttempts()).toBe(1); // no auto retry/repair
     expect(h.store.view().poisoned).toBe(true);
@@ -339,9 +351,9 @@ describe("poison (Root C0 ruling)", () => {
     const h = harness();
     h.failAppend();
     await h.store.enqueue(agentPut("x", h.owner));
-    expect(h.store.verifyRecovery()).toBe(false); // isReopened() is still false
+    expect(h.store.verifyRecovery(h.receipt())).toBe(false); // isReopened() is still false
     h.setReopened(true);
-    expect(h.store.verifyRecovery()).toBe(true);
+    expect(h.store.verifyRecovery(h.receipt())).toBe(true);
     const after = await h.store.enqueue(agentPut("x", h.owner));
     expect(after).toMatchObject({ ok: true, id: "n1" });
     expect(h.appendAttempts()).toBe(2);
@@ -353,12 +365,12 @@ describe("poison (Root C0 ruling)", () => {
     await h.store.enqueue(agentPut("x", h.owner));
     h.setReopened(true);
     const original = h.deps.getBranch;
-    (h.deps as { getBranch: () => unknown[] }).getBranch = () => {
+    (h.deps as { getBranch: () => readonly unknown[] }).getBranch = () => {
       throw new Error("session file unreadable");
     };
-    expect(h.store.verifyRecovery()).toBe(false);
+    expect(h.store.verifyRecovery(h.receipt())).toBe(false);
     expect(h.store.poisonedNow()).toBe(true);
-    (h.deps as { getBranch: () => unknown[] }).getBranch = original;
+    (h.deps as { getBranch: () => readonly unknown[] }).getBranch = original;
   });
 
   it("append succeeded but the effect is invisible ⇒ E_PERSIST_UNKNOWN + poison", async () => {
@@ -487,5 +499,311 @@ describe("snapshot (seed capture seam for P2)", () => {
     expect(h.store.view().items.length).toBe(before);
     await h.store.enqueue(agentPut("b", h.owner));
     expect(h.store.view().items.length).toBe(before + 1);
+  });
+});
+
+describe("P1c exact cap binding and exception closure", () => {
+  function authorization(
+    h: Harness,
+    operation: FrozenScopedOp,
+    digests: Partial<{ opDigest: string; textDigest: string }> = {},
+  ) {
+    const tracker = createHumanTurnTracker();
+    const registry = createMemoryOpCapRegistry(() => tracker.current());
+    const turn = tracker.noteInteractive(h.owner);
+    const cap = registry.mint({
+      operation,
+      channel: "tui",
+      project: "proj",
+      binding: {
+        owner: h.owner,
+        humanTurn: turn,
+        toolCallId: "tc",
+        nonce: "a".repeat(32),
+        opDigest: digests.opDigest ?? scopedOpDigest(operation as unknown as Record<string, unknown>),
+        textDigest: digests.textDigest ?? bodyTextDigest(operation.text ?? ""),
+      },
+    });
+    return { registry, cap };
+  }
+  const approved = (): SessionMemoryWrite["operation"] => ({
+    storageScope: "session",
+    op: "create",
+    text: "approved A",
+    authority: "user",
+  });
+  it.each([
+    { text: "request B" },
+    { authority: "agent" },
+    { from: "project:other.md" },
+    { op: "update", targetId: "n1", expectRev: "12345678" },
+    { topic: "ignored-topic" },
+  ])("cap A cannot authorize substituted operation %j; failed cap is revoked", async (patch) => {
+    const h = harness();
+    const { registry, cap } = authorization(h, approved());
+    const store = createSessionMemoryStore({ ...h.deps, caps: registry });
+    const result = await store.enqueue({
+      operation: { ...approved(), ...patch } as SessionMemoryWrite["operation"],
+      owner: h.owner,
+      cap,
+    });
+    expect(result.ok).toBe(false);
+    expect(h.appendAttempts()).toBe(0);
+    expect(registry.stateOf(cap)).toBe("revoked");
+    expect(await store.enqueue({ operation: approved(), owner: h.owner, cap })).toMatchObject({
+      ok: false,
+      code: "E_HUB_CAP_STALE",
+    });
+  });
+  it.each(["opDigest", "textDigest"] as const)("checks full %s before planning", async (field) => {
+    const h = harness();
+    const { registry, cap } = authorization(h, approved(), { [field]: "0".repeat(64) });
+    let plans = 0;
+    const store = createSessionMemoryStore({
+      ...h.deps,
+      caps: registry,
+      now: () => {
+        plans++;
+        return STAMP;
+      },
+    });
+    expect(await store.enqueue({ operation: approved(), owner: h.owner, cap })).toMatchObject({
+      ok: false,
+      code: "E_HUB_CAP_STALE",
+    });
+    expect(plans).toBe(0);
+    expect(h.appendAttempts()).toBe(0);
+    expect(registry.stateOf(cap)).toBe("revoked");
+  });
+  it("checks operation + digests AGAIN at commit, rejecting changed registry inspection", async () => {
+    const h = harness();
+    const { registry, cap } = authorization(h, approved());
+    const store = createSessionMemoryStore({
+      ...h.deps,
+      caps: {
+        ...registry,
+        check: (c, o) => {
+          const original = registry.check(c, o);
+          return original === undefined
+            ? undefined
+            : { ...original, binding: { ...original.binding, textDigest: "0".repeat(64) } };
+        },
+      },
+    });
+    expect(await store.enqueue({ operation: approved(), owner: h.owner, cap })).toMatchObject({
+      ok: false,
+      code: "E_HUB_CAP_STALE",
+    });
+    expect(h.appendAttempts()).toBe(0);
+    expect(registry.stateOf(cap)).toBe("revoked");
+  });
+  it("request mutation during planning cannot change authorized text; cap revoked", async () => {
+    const h = harness();
+    const { registry, cap } = authorization(h, approved());
+    const op = { ...approved() };
+    const store = createSessionMemoryStore({
+      ...h.deps,
+      caps: registry,
+      now: () => {
+        op.text = "changed";
+        return STAMP;
+      },
+    });
+    expect(await store.enqueue({ operation: op, owner: h.owner, cap })).toMatchObject({
+      ok: false,
+      code: "E_HUB_CAP_STALE",
+    });
+    expect(h.appendAttempts()).toBe(0);
+    expect(registry.stateOf(cap)).toBe("revoked");
+  });
+  it("gate throw is proven zero-write normal rejection, cap revoked, queue released", async () => {
+    const h = harness();
+    const { registry, cap } = authorization(h, approved());
+    let throws = true;
+    const store = createSessionMemoryStore({
+      ...h.deps,
+      caps: registry,
+      queueLimit: 1,
+      sessionWriteGate: {
+        check() {
+          if (throws) throw new Error("gate");
+          return { ok: true };
+        },
+      },
+    });
+    expect(await store.enqueue({ operation: approved(), owner: h.owner, cap })).toEqual({
+      ok: false,
+      code: "E_WRITE_GATE",
+    });
+    expect(store.poisonedNow()).toBe(false);
+    expect(h.appendAttempts()).toBe(0);
+    expect(registry.stateOf(cap)).toBe("revoked");
+    throws = false;
+    expect(await store.enqueue(agentPut("next", h.owner))).toMatchObject({ ok: true });
+  });
+  it.each(["branch", "leaf", "sessionId"])(
+    "post-append %s throws => resolved UNKNOWN + shared poison, no retry",
+    async (failure) => {
+      const h = harness();
+      let appended = false;
+      const store = createSessionMemoryStore({
+        ...h.deps,
+        appendCustomEntry: (t, d) => {
+          h.deps.appendCustomEntry(t, d);
+          appended = true;
+        },
+        getBranch: () => {
+          if (appended && failure === "branch") throw new Error("branch");
+          return h.deps.getBranch();
+        },
+        getLeafId: () => {
+          if (appended && failure === "leaf") throw new Error("leaf");
+          return "leaf";
+        },
+        getSessionId: () => {
+          if (appended && failure === "sessionId") throw new Error("sid");
+          return h.owner.sid;
+        },
+      });
+      expect(await store.enqueue(agentPut("x", h.owner))).toMatchObject({
+        ok: false,
+        code: "E_PERSIST_UNKNOWN",
+        persistenceFailure: { poisoned: true },
+      });
+      const rebuilt = createSessionMemoryStore({ ...h.deps, currentOwner: () => ({ ...h.owner, incarnation: {} }) });
+      expect(rebuilt.poisonedNow()).toBe(true);
+      expect(await rebuilt.enqueue(agentPut("y", { ...h.owner, incarnation: {} }))).toMatchObject({ ok: false });
+      expect(h.appendAttempts()).toBe(1);
+    },
+  );
+  it("ordinary rebuild/tree/off-on preserves poison, explicit receipt plus real branch required", async () => {
+    const h = harness();
+    h.failAppend();
+    await h.store.enqueue(agentPut("x", h.owner));
+    const rebuilt = createSessionMemoryStore(h.deps);
+    expect(rebuilt.poisonedNow()).toBe(true);
+    expect(rebuilt.verifyRecovery(h.receipt())).toBe(false);
+    h.setReopened(true);
+    expect(rebuilt.verifyRecovery(h.receipt())).toBe(true);
+    expect(h.store.poisonedNow()).toBe(false);
+    expect(await rebuilt.enqueue(agentPut("x", h.owner))).toMatchObject({ ok: true });
+  });
+  it("disabled and locked recovery never read branch or resolve poison global", async () => {
+    const h = harness();
+    let registryReads = 0;
+    const deps = {
+      ...h.deps,
+      enabled: false,
+      get poisonRegistry(): ReturnType<typeof createSessionPoisonRegistry> {
+        registryReads++;
+        throw new Error("must not resolve");
+      },
+    };
+    const off = createSessionMemoryStore(deps);
+    expect(off.view().items).toEqual([]);
+    expect(off.snapshot()).toEqual({ v: 1, state: "empty" });
+    expect(await off.enqueue(agentPut("x", h.owner))).toEqual({ ok: false, code: "E_SCOPE_DISABLED" });
+    expect(off.poisonedNow()).toBe(false);
+    expect(off.verifyRecovery(h.receipt())).toBe(false);
+    expect(registryReads).toBe(0);
+    expect(h.getBranchCalls()).toBe(0);
+    h.setLocked(true);
+    expect(h.store.verifyRecovery(h.receipt())).toBe(false);
+    expect(h.getBranchCalls()).toBe(0);
+  });
+  it("32nd delete cause-snap verifies deletion without poisoning", async () => {
+    const h = harness();
+    await h.store.enqueue(agentPut("target", h.owner));
+    for (let n = 0; n < 30; n++) {
+      const item = h.store.view().items[0]!;
+      expect(
+        await h.store.enqueue({
+          operation: {
+            storageScope: "session",
+            op: "update",
+            authority: "agent",
+            targetId: item.item.id,
+            expectRev: item.rev,
+            text: `v${n}`,
+          },
+          owner: h.owner,
+        }),
+      ).toMatchObject({ ok: true });
+    }
+    const item = h.store.view().items[0]!;
+    expect(
+      await h.store.enqueue({
+        operation: {
+          storageScope: "session",
+          op: "delete",
+          authority: "agent",
+          targetId: item.item.id,
+          expectRev: item.rev,
+        },
+        owner: h.owner,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(h.appendAttempts()).toBe(32);
+    expect(h.store.view().items).toHaveLength(0);
+    expect(h.store.poisonedNow()).toBe(false);
+  });
+});
+
+describe("P1c stable global store identity", () => {
+  it("new activation and tree do not forgive, different sid/new/fork writes remain independent", async () => {
+    const h = harness();
+    const { poisonRegistry: _registry, stableSessionIdentity: _identity, ...base } = h.deps;
+    const originalOwner = { ...h.owner, sid: "p1c-global-parent" };
+    const originalDeps = { ...base, currentOwner: () => originalOwner, getSessionId: () => originalOwner.sid };
+    const parent = createSessionMemoryStore(originalDeps);
+    expect(await parent.enqueue(agentPut("inherited parent fact", originalOwner))).toMatchObject({ ok: true });
+    h.failAppend();
+    expect(await parent.enqueue(agentPut("uncertain", originalOwner))).toMatchObject({
+      ok: false,
+      code: "E_PERSIST_UNKNOWN",
+    });
+    const reloadOwner = { ...originalOwner, incarnation: {}, sessionEpoch: 9, branchGen: 12 };
+    const reloaded = createSessionMemoryStore({ ...originalDeps, currentOwner: () => reloadOwner });
+    expect(reloaded.poisonedNow()).toBe(true);
+    expect(await reloaded.enqueue(agentPut("cannot retry", reloadOwner))).toMatchObject({
+      ok: false,
+      code: "E_PERSIST_UNKNOWN",
+    });
+    expect(h.appendAttempts()).toBe(2);
+    const forkOwner = { ...reloadOwner, sid: "p1c-global-fork", sessionFile: "/own-tmp/fork.json" };
+    const fork = createSessionMemoryStore({
+      ...base,
+      currentOwner: () => forkOwner,
+      getSessionId: () => forkOwner.sid,
+      getSessionFile: () => forkOwner.sessionFile,
+    });
+    expect(fork.poisonedNow()).toBe(false);
+    expect(fork.view().items[0]?.inherited).toEqual({ kind: "fork", fromSid: originalOwner.sid });
+    expect(await fork.enqueue(agentPut("independent fork", forkOwner))).toMatchObject({ ok: true });
+    const newOwner = { ...reloadOwner, sid: "p1c-global-new" };
+    const blank: unknown[] = [];
+    const fresh = createSessionMemoryStore({
+      ...base,
+      currentOwner: () => newOwner,
+      getSessionId: () => newOwner.sid,
+      getBranch: () => blank,
+      appendCustomEntry: (type, data) => {
+        blank.push({ type: "custom", customType: type, id: "new-entry", data });
+      },
+    });
+    expect(fresh.view().items).toHaveLength(0);
+    expect(await fresh.enqueue(agentPut("fresh", newOwner))).toMatchObject({ ok: true });
+    expect(reloaded.poisonedNow()).toBe(true);
+  });
+  it("all enqueue admission errors resolve; getters are not leaked as rejected promises", async () => {
+    const h = harness();
+    const request = {
+      ...agentPut("x", h.owner),
+      get cap(): SessionMemoryWrite["cap"] {
+        throw new Error("getter");
+      },
+    } as SessionMemoryWrite;
+    expect(await h.store.enqueue(request)).toEqual({ ok: false, code: "E_META_INVALID" });
+    expect(h.appendAttempts()).toBe(0);
   });
 });
