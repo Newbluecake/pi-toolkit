@@ -178,6 +178,16 @@ async function capture(): Promise<Record<string, unknown>> {
   releaseGuards();
   try {
     resetSettingsFiles(home.home);
+    // #39 (2026-11-08): three-tier memory scopes default to ON after that change. This
+    // historical xs-off golden pins the pre-#39 bytes, so the scopes stay explicitly OFF —
+    // the merged settings (and therefore the captured surface) equal the defaults the
+    // fixture was captured under. The fixture JSON itself never changes.
+    const agentDir = join(home.home, ".pi", "agent");
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(
+      join(agentDir, "pi-toolkit.json"),
+      JSON.stringify({ memory: { scopes: { session: false, hub: false } } }, null, 2) + "\n",
+    );
     const rec = recordingPi();
     activate(rec.pi);
     const mainSessionTools = [...rec.tools];

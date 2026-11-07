@@ -174,7 +174,14 @@ async function capture(): Promise<Record<string, unknown>> {
     resetSettingsFiles(home.home);
     const agentDir = join(home.home, ".pi", "agent");
     mkdirSync(agentDir, { recursive: true });
-    writeFileSync(join(agentDir, "pi-toolkit.json"), JSON.stringify({ fabric: { enabled: true } }, null, 2) + "\n");
+    // `memory.scopes` explicit OFF (#39, 2026-11-08): the scopes default flipped ON, but this
+    // historical threads-off golden pins the pre-#39 bytes, so the merged settings stay equal
+    // to the defaults the fixture was captured under (fast-like isolation, same posture as the
+    // rebind golden's `fast.enabled:false`). The fixture JSON itself never changes.
+    writeFileSync(
+      join(agentDir, "pi-toolkit.json"),
+      JSON.stringify({ fabric: { enabled: true }, memory: { scopes: { session: false, hub: false } } }, null, 2) + "\n",
+    );
     const rec = recordingPi();
     activate(rec.pi);
     const mainSessionTools = [...rec.tools];

@@ -240,10 +240,20 @@ async function capture(): Promise<Record<string, unknown>> {
     const agentDir = join(home.home, ".pi", "agent");
     mkdirSync(agentDir, { recursive: true });
     // Isolate this historical capture from the unrelated, newly default-on Fast registration.
+    // `memory.scopes` explicit OFF (#39, 2026-11-08): the scopes default flipped ON, but this
+    // threads-on × rebind-off golden pins the pre-#39 bytes, so the merged settings stay equal
+    // to the defaults the fixture was captured under. The fixture JSON itself never changes.
     writeFileSync(
       join(agentDir, "pi-toolkit.json"),
-      JSON.stringify({ fabric: { enabled: true, threads: { enabled: true } }, fast: { enabled: false } }, null, 2) +
-        "\n",
+      JSON.stringify(
+        {
+          fabric: { enabled: true, threads: { enabled: true } },
+          fast: { enabled: false },
+          memory: { scopes: { session: false, hub: false } },
+        },
+        null,
+        2,
+      ) + "\n",
     );
     const rec = recordingPi();
     activate(rec.pi);
