@@ -263,10 +263,33 @@ export function createFastSessionPorts(controller: FastController): FastSessionP
   };
 }
 
-// Public ID/file identify the selected history. SDK1.5 stale context getters throw after replacement;
-// each open still creates a fresh incarnation, even when ID/file are reused. No facade identity assumptions.
-function identity(ctx: ExtensionContext): string {
-  return JSON.stringify([ctx.sessionManager.getSessionId(), ctx.sessionManager.getSessionFile() ?? null]);
+/** Public ID/file identify the selected history. SDK1.5 stale context getters throw after replacement;
+ * each open still creates a fresh incarnation, even when ID/file are reused. No facade identity assumptions.
+ *
+ * Returns undefined when the host exposes no session-identity capability (sessionManager missing, or
+ * getSessionId/getSessionFile not callable): that is a capability ABSENCE, so Fast must degrade to inert
+ * rather than crash the session open. A *throwing* getter on a real host is a genuine error and is left to
+ * propagate — never masked here as capability absence; the stale-ctx case is covered by get()'s own catch. */
+function identity(ctx: ExtensionContext): string | undefined {
+  const manager = ctx.sessionManager;
+  if (
+    manager === undefined ||
+    typeof manager.getSessionId !== "function" ||
+    typeof manager.getSessionFile !== "function"
+  ) {
+    return undefined;
+  }
+  return JSON.stringify([manager.getSessionId(), manager.getSessionFile() ?? null]);
+}
+
+/** Capability absence ⇒ Fast inert: ports that never produce a seed, capture or child binding. */
+function inertFastPorts(): FastSessionPorts {
+  return {
+    parent: { snapshot: () => undefined },
+    workflow: { capture: () => undefined },
+    childState: { bind: () => () => {} },
+    dispose: () => {},
+  };
 }
 export interface FastWireOptions {
   /** Existing secure pre-write recheck: slash commands bypass input guards. No new domain policy. */
@@ -302,8 +325,11 @@ export function wireFastMain(
   });
   return {
     open(ctx) {
+      // Dispose the previous session owner first; the new session then either binds Fast or stays inert.
       active?.ports.dispose();
+      active = undefined;
       const key = identity(ctx);
+      if (key === undefined) return inertFastPorts(); // host capability absence ⇒ Fast not enabled for this session
       let controller: FastController;
       controller = createFastController({
         getBranch: () => ctx.sessionManager.getBranch(),
@@ -366,6 +392,14 @@ export function wireFastChild(pi: ExtensionAPI, enabled: boolean, options: FastW
   const get = (ctx: ExtensionContext) => {
     if (closed || options.canUse?.(ctx) === false) return undefined;
     const key = identity(ctx);
+    if (key === undefined) {
+      // Host capability absence ⇒ child Fast inert for this callback ctx.
+      if (legacy) {
+        legacy.controller.dispose();
+        legacy = undefined;
+      }
+      return undefined;
+    }
     if (legacy && legacy.key !== key) {
       legacy.controller.dispose();
       legacy = undefined;

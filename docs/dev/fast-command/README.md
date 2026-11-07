@@ -58,6 +58,12 @@ backgroundCompletions 后同步 dispose Fast，早于 drain；重复 C→A 无�
 
 每次 open 都新建 incarnation，branch mode 改变递增 revision。运行时用公开 sessionId/file 确认当前历史，
 不假定 ReadonlySessionManager façade 对象相等；SDK1.5 替换/销毁后旧 ctx getter 会抛 stale，安全丢弃。
+宿主/测试 ctx 的 sessionManager 缺失（undefined，或缺 getSessionId/getSessionFile）是**能力缺失**而非运行时
+错误：identity 返回 undefined，open 先关闭旧 owner、active 置空、返回 inert ports（不产生 seed/capture/
+binding），Fast 对该 session 不生效，session 打开绝不因此失败；main/child 的 get 同样在能力缺失时返回
+undefined（无 controller）。存在但抛错的 getter 是真实异常，identity 不掩盖：open 让它上浮，get 由既有
+catch 安全丢弃 stale ctx（限 main 的 get；child 的 get 没有 catch，child 侧抛错会从 provider
+hook 上浮）——不把真实 bug 伪造成“能力缺失”悄悄关掉 Fast。
 **ctx.signal 是当前 turn 的 signal，idle 可以 undefined，不能当 session 身份。** branch/fork/tree/
 restore/reload/compaction/context-switch 均从当前 branch 折叠，不读模型摘要；同 ID 重建仍关闭旧 owner。
 模式切换不撤回已交付 body，callback 入口同步捕获 mode/revision/incarnation。
@@ -101,6 +107,9 @@ provider 回调不会粘住已结束命令的 capture/record window。other/unsu
   普通/Codex/Azure SSE、受控 WS 最终 body/frame、reasoning replay，非自造 buildParams。
 - `tests/fast/wire-{controller,main,order}`：三态、成功/失败/notify-fail、invalid reset、零 startup/status
   记录、expired ctx/ABA/owner 隔离、只读观察、同步 registry replay/延迟安装/重复安装次序。
+- `tests/fast/wire-identity-guard`：宿主能力缺失（sessionManager undefined / 缺 getSessionId / 缺
+  getSessionFile）下 open 不抛错且 Fast inert（无 seed/capture/binding、命令不写、payload 不覆写）；
+  降级 open 后正常宿主仍按原 identity 语义工作。
 - `tests/web-hub/agent/fast-command-capture`：真实 wrapper/capture/commandRecord/Fast 接线，独立
   open/callback ctx 的 Web 与 TUI 反馈矩阵、单次终端通知、无 footer/LLM context 旁路、provider
   去重与已结束/下一命令 window 隔离；纯受控 SDK/storage/UI 端口，不含真实浏览器/模型请求。
