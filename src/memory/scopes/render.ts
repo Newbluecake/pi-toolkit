@@ -169,3 +169,112 @@ export const fitsRenderBudget = (text: string, capBytes: number): boolean => utf
 export function sessionSectionPointer(count: number, overBytes: number, hint: string): string {
   return `Session memory: ${count} entries · render ${overBytes}B over budget — use ${hint}`;
 }
+/** Pure visible-input DTO. Hosts MUST omit private/hidden entries before construction.
+ * `full` means actually admitted body text, not a file/index pointer. In particular,
+ * this kernel does not invent a project visibility manifest (P4a2 owns projection).
+ */
+export interface ThreeLayerDuplicateCandidate {
+  readonly layer: LayerSpecificity;
+  readonly id: string;
+  readonly authority: LayerAuthority;
+  readonly text: string;
+  readonly visibility: "full" | "index";
+}
+
+export interface ThreeLayerDuplicatePlan {
+  readonly candidates: readonly ThreeLayerDuplicateCandidate[];
+  /** Parallel to candidates; markers annotate, never replace/truncate raw bodies. */
+  readonly markers: readonly (DupMarker | undefined)[];
+  /**
+   * For THIS plan's same-key candidates, the maximum UTF-8 suffix bytes this entry
+   * could carry AS A LOSER, considering other full candidates (never itself).
+   * A single full entry therefore has bound 0; a current winner's bound may be
+   * nonzero, but its actual marker costs 0. This is not a global reservation for
+   * future/new candidates or another plan. P4a2 cached prepared projections MUST
+   * independently reserve future markers using legal anchor size limits.
+   * Sum EVERY admitted entry's bound, not one marker per layer. Includes the
+   * leading space/parentheses; final UTF-8 admission also counts bodies/headers/newlines.
+   */
+  readonly markerMaxBytes: readonly number[];
+}
+
+const duplicateSuffix = (marker: DupMarker): string => ` (dup of ${marker.layer} ${marker.id})`;
+
+/** Exact UTF-8 upper bound for one marker suffix, including its separator. */
+export const duplicateMarkerUtf8Bytes = (marker: DupMarker): number => utf8Bytes(duplicateSuffix(marker));
+
+/**
+ * Append-only three-layer planner. Only actual full bodies can win. Authority first,
+ * then specificity, then code-unit id order (locale independent), then input position
+ * for otherwise identical DTOs. Output is aligned with input, without mutating it.
+ * No I/O, store view conversion, registration or project visibility inference.
+ */
+export function planThreeLayerDuplicates(candidates: readonly ThreeLayerDuplicateCandidate[]): ThreeLayerDuplicatePlan {
+  const keys = candidates.map((candidate) => dedupeKeyOf(candidate.text));
+  const markers: (DupMarker | undefined)[] = candidates.map(() => undefined);
+  const markerMaxBytes: number[] = candidates.map(() => 0);
+  const buckets = new Map<string, number[]>();
+  for (const [index, key] of keys.entries()) {
+    const bucket = buckets.get(key) ?? [];
+    bucket.push(index);
+    buckets.set(key, bucket);
+  }
+  for (const bucket of buckets.values()) {
+    const full = bucket.filter((index) => candidates[index]?.visibility === "full");
+    full.sort((a, b) => {
+      const left = candidates[a]!;
+      const right = candidates[b]!;
+      return (
+        authorityRank(right.authority) - authorityRank(left.authority) ||
+        specificityRank(right.layer) - specificityRank(left.layer) ||
+        (left.id < right.id ? -1 : left.id > right.id ? 1 : 0) ||
+        a - b
+      );
+    });
+    const winnerIndex = full[0];
+    if (winnerIndex === undefined) continue;
+    const winner = candidates[winnerIndex]!;
+    for (const index of bucket) {
+      markerMaxBytes[index] = full.reduce((max, other) => {
+        if (other === index) return max;
+        return Math.max(max, duplicateMarkerUtf8Bytes(candidates[other]!));
+      }, 0);
+      if (index !== winnerIndex) markers[index] = { layer: winner.layer, id: winner.id };
+    }
+  }
+  return {
+    candidates: candidates.map(({ layer, id, authority, text, visibility }) => ({
+      layer,
+      id,
+      authority,
+      text,
+      visibility,
+    })),
+    markers,
+    markerMaxBytes,
+  };
+}
+
+/**
+ * Optional same-turn consumer seam. The host supplies a plan built from the SAME
+ * views and actual visibility used for this turn. Unknown other layers are omitted,
+ * not fabricated as full. Exact body/authority matching avoids annotating stale DTOs.
+ * This never changes the underlying view or removes its raw text.
+ */
+export function projectedDuplicateMarkers(
+  plan: ThreeLayerDuplicatePlan,
+  layer: LayerSpecificity,
+  items: readonly { readonly id: string; readonly text: string; readonly authority: LayerAuthority }[],
+): readonly (DupMarker | undefined)[] {
+  return items.map((item) => {
+    const index = plan.candidates.findIndex(
+      (candidate) =>
+        candidate.layer === layer &&
+        candidate.id === item.id &&
+        candidate.text === item.text &&
+        candidate.authority === item.authority &&
+        candidate.visibility === "full",
+    );
+    return index < 0 ? undefined : plan.markers[index];
+  });
+}

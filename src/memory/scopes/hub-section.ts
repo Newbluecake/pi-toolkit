@@ -5,7 +5,8 @@
  * start is P4; here `view()` is consulted immediately per call (no poll timer, I5).
  *
  * LOCKED / disabled / inert / absent first: SKIP WITHOUT calling `view()` when locked
- * (no disk touch), SKIP for a non-ok view (nothing to inject, no partial provenance).
+ * (no disk touch), SKIP for disabled/inert (no partial provenance); safe absent/ok-empty
+ * returns "" for successful removal. The host owns stable invalidation and live skipIf gates.
  * The full view is never truncated: an over-budget section degrades to a pointer stub.
  * Cross-layer dedup reuses P1's authority-first `crossLayerDupMarkers` — a hub user entry
  * can never be shadowed by a session agent entry and vice-versa per §6.7.
@@ -17,7 +18,12 @@ import { SKIP } from "../../prompt-sections/stable-section.js";
 import type { FoldedSessionItem, HubItem, HubMemoryView } from "./types.js";
 import { HUB_MEMORY_RENDER_MAX_BYTES } from "./types.js";
 import { utf8Bytes } from "./limits.js";
-import { crossLayerDupMarkers, renderHubItems } from "./render.js";
+import {
+  crossLayerDupMarkers,
+  renderHubItems,
+  projectedDuplicateMarkers,
+  type ThreeLayerDuplicatePlan,
+} from "./render.js";
 
 export const HUB_MEMORY_VIEW_HINT = "scoped_memory view";
 
@@ -31,6 +37,8 @@ export interface HubSectionDeps {
   readonly currentProjectSlug?: () => string;
   /** Render budget for the full section (default HUB_MEMORY_RENDER_MAX_BYTES). */
   readonly renderBudgetBytes?: number;
+  /** Optional same-turn plan using this exact view; unknown other layers stay absent. */
+  readonly projection?: (view: HubMemoryView) => ThreeLayerDuplicatePlan | undefined;
 }
 
 export type HubSectionContent = string | typeof SKIP;
@@ -44,15 +52,23 @@ export function createHubMemorySection(deps: HubSectionDeps): () => HubSectionCo
   return () => {
     if (deps.isLocked()) return SKIP;
     const view = deps.view();
-    if (view.state !== "ok" || view.items.length === 0) return SKIP;
+    if (view.state === "absent") return "";
+    if (view.state !== "ok") return SKIP;
+    if (view.items.length === 0) return "";
     const slug = deps.currentProjectSlug?.() ?? "";
     const items: readonly HubItem[] = view.items.map((item) =>
       item.src.project === slug ? { ...item, src: { ...item.src, project: "" } } : item,
     );
-    const session = deps.sessionItems?.() ?? [];
-    const dup = session.length > 0 ? crossLayerDupMarkers(session, items) : undefined;
+    const plan = deps.projection?.(view);
+    const session = plan === undefined ? (deps.sessionItems?.() ?? []) : [];
+    const markers =
+      plan !== undefined
+        ? projectedDuplicateMarkers(plan, "hub", items)
+        : session.length > 0
+          ? crossLayerDupMarkers(session, items).hub
+          : undefined;
     const header = "Hub memory (shared by all projects of this hub)";
-    const body = renderHubItems(items, dup?.hub);
+    const body = renderHubItems(items, markers);
     const text = body === "" ? header : `${header}\n${body}`;
     if (utf8Bytes(text) <= budget) return text;
     return hubSectionPointer(items.length, utf8Bytes(text) - budget);

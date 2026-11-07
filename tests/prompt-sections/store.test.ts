@@ -170,3 +170,24 @@ describe("prompt section store", () => {
     });
   });
 });
+
+describe("#39 append-only scoped names", () => {
+  it("round-trips both new names without changing v1 or accepting unrelated names", () => {
+    const scopedNames = ["pi_session_memory", "pi_hub_memory"] as const;
+    const encoded = serializeSectionStates(new Map(scopedNames.map((name) => [name, state])));
+    expect(encoded.v).toBe(1);
+    expect(
+      sanitizePromptSectionsEntry({
+        ...encoded,
+        sections: { ...encoded.sections, pi_fake_memory: { snapshot: "bad", sentCount: 0, sentBytes: 0 } },
+      }),
+    ).toEqual(encoded);
+    const restored = readBackSectionStates(
+      [{ type: "custom", customType: PROMPT_SECTIONS_ENTRY_TYPE, data: encoded }],
+      "reload",
+      scopedNames,
+    );
+    for (const name of scopedNames) expect(restored?.states.get(name)).toEqual(state);
+    expect(restored?.exact).toBe(true);
+  });
+});

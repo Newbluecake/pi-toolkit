@@ -66,6 +66,15 @@ export interface SectionRegistration {
    * section's persistence is as before.
    */
   sessionScoped?: true;
+  /**
+   * Opt-in safety gate for stable snapshots, evaluated BEFORE provider/seed/fallback.
+   * True (or throw) resets only this section and omits its output this invocation.
+   * Restrict to this section's own disabled/locked/owner/inert verdict; unknown other
+   * layers are NOT invalidation. A closure may reuse a same-invocation captured view
+   * with the provider (no second disk/lock probe). Live/legacy keep their own provider
+   * gates. This does not retract frozen history or clear wake replay / foreign tails.
+   */
+  invalidateIf?: (input: SectionProviderInput) => boolean;
 }
 
 export interface PromptSectionHubOpts {
@@ -105,6 +114,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
   let warnedPersist = false;
   let currentSid: string | undefined;
   const warnedPointerHint = new Set<SectionName>();
+  const warnedInvalidation = new Set<SectionName>();
   /**
    * D2: scoped sections whose parent-session update messages ride in this (forked/copied) branch's
    * history. Once the section has a snapshot of its own, one tail update retracts/replaces them.
@@ -250,6 +260,34 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
     lastPersisted = undefined;
   }
 
+  /** Outside the fallback try: a failed safety verdict must NEVER restore a snapshot. */
+  function invalidateStableSection(
+    name: SectionName,
+    registration: SectionRegistration,
+    input: SectionProviderInput,
+    mode: SystemPromptMode,
+  ): boolean {
+    if (mode !== "stable" || registration.invalidateIf === undefined) return false;
+    let invalid: boolean;
+    try {
+      invalid = registration.invalidateIf(input);
+    } catch {
+      invalid = true;
+      if (!warnedInvalidation.has(name)) {
+        warnedInvalidation.add(name);
+        // Bounded enum name only: never include thrown error/body/path text.
+        try {
+          log(`prompt section "${name}" invalidateIf threw; resetting section`);
+        } catch {
+          // Diagnostics cannot prevent a safety reset.
+        }
+      }
+    }
+    if (!invalid) return false;
+    states.set(name, initialSectionState());
+    return true;
+  }
+
   function sectionTexts(
     input: SectionProviderInput,
     mode: SystemPromptMode,
@@ -258,6 +296,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
     const texts: string[] = [];
     const updates: RenderUpdate[] = [];
     for (const [name, registration] of registrations) {
+      if (invalidateStableSection(name, registration, input, mode)) continue;
       try {
         if (registration.skipIf?.(input)) continue;
         const live = callProvider(registration, input);
@@ -311,6 +350,7 @@ export function createPromptSectionHub(pi: ExtensionAPI, opts: PromptSectionHubO
     const input: SectionProviderInput = { ctx, promptText };
     const texts: string[] = [];
     for (const [name, registration] of registrations) {
+      if (invalidateStableSection(name, registration, input, mode)) continue;
       try {
         if (registration.skipIf?.(input)) continue;
         if (mode === "legacy") {
