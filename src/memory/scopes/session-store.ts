@@ -2,7 +2,7 @@
  * Root-approved poison tombstones survive reload via session-poison.ts. P4 must supply a
  * stable identity for in-memory sessions (e.g. host process session UUID retained on reload),
  * never activation incarnation/epoch/leaf. File sessions default to hash(sid + sessionFile).
- * P4 owns recoveryAuthority: issue receipt only AFTER actual explicit reopen/new completes,
+ * P4 owns recoveryAuthority: issue receipt only AFTER actual runtime resume open completes,
  * inject verify-only recovery port and call verifyRecovery(receipt) against that manager.
  * Reload/tree/off-on MUST NOT issue receipts. No automatic retry/SDK rollback/fsync promise.
  */
@@ -37,6 +37,7 @@ import {
   type SessionPoisonRegistry,
   type SessionRecoveryPort,
   type SessionRecoveryReceipt,
+  type SessionManagerIdentity,
 } from "./session-poison.js";
 
 export interface SessionMemoryStoreDeps {
@@ -49,6 +50,11 @@ export interface SessionMemoryStoreDeps {
   readonly getLeafId?: () => string | undefined;
   readonly getSessionId: () => string | undefined;
   readonly getSessionFile: () => string | undefined;
+  /** P4c MUST inject actual ctx.sessionManager, not ctx/object clone/ID. Absent is legacy:
+   * writes work but failures have no manager proof and can NEVER recover automatically.
+   * Present but missing/throwing/nonobject refuses BEFORE append (no legacy fallback).
+   */
+  readonly getManager?: () => object | undefined;
   /** The single append seam (SDK appendCustomEntry). THROWS with unknown effect ⇒ E_PERSIST_UNKNOWN + poison. */
   readonly appendCustomEntry: (customType: string, data: unknown) => void;
   readonly sessionWriteGate?: SessionWriteGate;
@@ -95,6 +101,13 @@ export interface SessionMemoryStore extends SessionMemoryPort {
 
 export function createSessionMemoryStore(deps: SessionMemoryStoreDeps): SessionMemoryStore {
   const queueLimit = deps.queueLimit ?? SESSION_STORE_QUEUE_LIMIT;
+  const hasManagerGetter = (): boolean => "getManager" in deps;
+  const readManager = (): object | undefined => {
+    if (!hasManagerGetter()) return undefined;
+    const manager = deps.getManager?.();
+    if (typeof manager !== "object" || manager === null) throw new Error("actual session manager unavailable");
+    return manager;
+  };
   let cache: { key: string; value: FoldedSessionMemory } | undefined;
   const registry = (): SessionPoisonRegistry => deps.poisonRegistry ?? sharedSessionPoisonRegistry();
   const identity = (): string =>
@@ -191,11 +204,14 @@ export function createSessionMemoryStore(deps: SessionMemoryStoreDeps): SessionM
     const run = (): ScopedMemoryWriteResult => {
       let attempted = false;
       let writeIdentity: string | undefined;
+      let writeManager: object | undefined;
+      let writeManagerId: SessionManagerIdentity | undefined;
+      let writeRegistry: SessionPoisonRegistry | undefined;
       const unknown = (): ScopedMemoryWriteResult => {
         // Identity was captured before append. Owner changes cannot poison a different session.
         if (writeIdentity !== undefined) {
           try {
-            registry().mark(writeIdentity, "E_PERSIST_UNKNOWN");
+            writeRegistry?.mark(writeIdentity, "E_PERSIST_UNKNOWN", writeManagerId);
           } catch {
             localFailure = { identity: writeIdentity, code: "E_PERSIST_UNKNOWN" };
           }
@@ -207,10 +223,17 @@ export function createSessionMemoryStore(deps: SessionMemoryStoreDeps): SessionM
         if (disposed || !sameOwner(deps.currentOwner(), owner) || signal?.aborted) return reject("E_STALE_SESSION");
         if (deps.isLocked()) return reject("E_WRITE_GATE");
         writeIdentity = identity();
-        const poisoned = localFailure?.identity === writeIdentity ? localFailure.code : registry().code(writeIdentity);
+        writeRegistry = registry();
+        writeManager = readManager();
+        const poisoned =
+          localFailure?.identity === writeIdentity ? localFailure.code : writeRegistry.code(writeIdentity);
         if (poisoned !== undefined) {
           revoke();
           return { ok: false, code: poisoned, ...poisonFailure(poisoned) };
+        }
+        if (hasManagerGetter()) {
+          writeManagerId = writeRegistry.captureManager(writeManager!);
+          if (writeManagerId === undefined) return reject("E_WRITE_GATE");
         }
         const fresh0 = foldUncached();
         const op = operation;
@@ -308,6 +331,10 @@ export function createSessionMemoryStore(deps: SessionMemoryStoreDeps): SessionM
           deps.getSessionFile() !== owner.sessionFile
         )
           return reject("E_STALE_SESSION");
+        // Final actual-manager gate. The failure handler uses ONLY captured metadata;
+        // a switching/throwing getter in append must never poison the new manager instead.
+        if (readManager() !== writeManager) return reject("E_WRITE_GATE");
+        if (!sameOwner(deps.currentOwner(), owner) || identity() !== writeIdentity) return reject("E_STALE_SESSION");
         // Exactly one real pi.appendEntry (void); never synthesize an entry id.
         attempted = true;
         deps.appendCustomEntry(SESSION_MEMORY_ENTRY_TYPE, planned.entry);
@@ -318,7 +345,13 @@ export function createSessionMemoryStore(deps: SessionMemoryStoreDeps): SessionM
         const deleted =
           planned.entry.op === "del" || (planned.entry.op === "snap" && planned.entry.cause?.op === "del");
         const visible = deleted ? afterTarget === undefined : afterTarget?.rev === planned.rev;
-        if (!visible || !sameOwner(deps.currentOwner(), owner)) return unknown();
+        if (
+          !visible ||
+          !sameOwner(deps.currentOwner(), owner) ||
+          readManager() !== writeManager ||
+          identity() !== writeIdentity
+        )
+          return unknown();
         cache = { key: foldCacheKey(deps.getLeafId?.(), branch), value: after };
         return {
           ok: true,
@@ -355,15 +388,28 @@ export function createSessionMemoryStore(deps: SessionMemoryStoreDeps): SessionM
     enqueueCommand: (request, grant) => enqueue(request, grant),
     poisonedNow: () => poisonCode() !== undefined,
     verifyRecovery(receipt): boolean {
-      if (deps.enabled === false || disposed || deps.isLocked() || deps.recovery === undefined) return false;
       try {
+        if (deps.enabled === false || disposed || deps.isLocked() || deps.recovery === undefined || !hasManagerGetter())
+          return false;
         const key = identity();
-        return deps.recovery.verify(receipt, key, () => {
-          if (deps.isLocked()) return false;
-          const owner = deps.currentOwner();
+        const actualManager = readManager();
+        if (actualManager === undefined) return false;
+        const owner = { ...deps.currentOwner() };
+        return deps.recovery.verify(receipt, key, actualManager, () => {
+          if (disposed || deps.isLocked() || readManager() !== actualManager || !sameOwner(owner, deps.currentOwner()))
+            return false;
           const state = foldUncached();
           cache = undefined;
-          return state.dropped.length === 0 && identity() === key && sameOwner(owner, deps.currentOwner());
+          return (
+            !disposed &&
+            !deps.isLocked() &&
+            state.dropped.length === 0 &&
+            identity() === key &&
+            readManager() === actualManager &&
+            sameOwner(owner, deps.currentOwner()) &&
+            deps.getSessionId() === owner.sid &&
+            deps.getSessionFile() === owner.sessionFile
+          );
         });
       } catch {
         return false;

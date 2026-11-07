@@ -29,7 +29,9 @@ interface Harness {
   owner: MemoryOwner;
   setOwner: (owner: MemoryOwner) => void;
   setLocked: (locked: boolean) => void;
-  setReopened: (value: boolean) => void;
+  reopenManager: (manager: object) => void;
+  setManager: (manager: object) => void;
+  manager: () => object;
   receipt: () => SessionRecoveryReceipt;
   deps: SessionMemoryStoreDeps;
 }
@@ -45,6 +47,7 @@ function harness(overrides: Partial<{ child: boolean; sessionFile: string | null
   const poisonRegistry = createSessionPoisonRegistry();
   const recovery = poisonRegistry.recoveryAuthority();
   let receipt = Object.freeze({}) as SessionRecoveryReceipt;
+  let manager: object = {};
   let entrySeq = 0;
   const incarnation = {};
   const owner: MemoryOwner = {
@@ -66,6 +69,7 @@ function harness(overrides: Partial<{ child: boolean; sessionFile: string | null
     },
     getLeafId: () => `leaf-${branch.length}`,
     getSessionId: () => current.sid,
+    getManager: () => manager,
     getSessionFile: () =>
       overrides.sessionFile === undefined ? current.sessionFile : (overrides.sessionFile ?? undefined),
     appendCustomEntry: (type: string, data: unknown) => {
@@ -107,8 +111,15 @@ function harness(overrides: Partial<{ child: boolean; sessionFile: string | null
     setLocked: (value) => {
       locked = value;
     },
-    setReopened: (value) => {
-      if (value) receipt = recovery.recordReopen(sessionPoisonIdentity("fixture-session"), "reopen");
+    manager: () => manager,
+    setManager: (value) => {
+      manager = value;
+    },
+    reopenManager: (newManager) => {
+      manager = newManager;
+      receipt =
+        recovery.recordReopen(sessionPoisonIdentity("fixture-session"), "resume", manager) ??
+        (Object.freeze({}) as SessionRecoveryReceipt);
     },
     receipt: () => receipt,
     deps,
@@ -347,12 +358,12 @@ describe("poison (Root C0 ruling)", () => {
     expect(h.store.view().poisoned).toBe(true);
   });
 
-  it("reload alone is NOT recovery: verifyRecovery needs the host's explicit reopen assertion", async () => {
+  it("reload alone is NOT recovery: verifyRecovery needs an actual different manager + resume receipt", async () => {
     const h = harness();
     h.failAppend();
     await h.store.enqueue(agentPut("x", h.owner));
-    expect(h.store.verifyRecovery(h.receipt())).toBe(false); // isReopened() is still false
-    h.setReopened(true);
+    expect(h.store.verifyRecovery(h.receipt())).toBe(false); // no qualified new manager observed
+    h.reopenManager({});
     expect(h.store.verifyRecovery(h.receipt())).toBe(true);
     const after = await h.store.enqueue(agentPut("x", h.owner));
     expect(after).toMatchObject({ ok: true, id: "n1" });
@@ -363,7 +374,7 @@ describe("poison (Root C0 ruling)", () => {
     const h = harness();
     h.failAppend();
     await h.store.enqueue(agentPut("x", h.owner));
-    h.setReopened(true);
+    h.reopenManager({});
     const original = h.deps.getBranch;
     (h.deps as { getBranch: () => readonly unknown[] }).getBranch = () => {
       throw new Error("session file unreadable");
@@ -683,7 +694,7 @@ describe("P1c exact cap binding and exception closure", () => {
     const rebuilt = createSessionMemoryStore(h.deps);
     expect(rebuilt.poisonedNow()).toBe(true);
     expect(rebuilt.verifyRecovery(h.receipt())).toBe(false);
-    h.setReopened(true);
+    h.reopenManager({});
     expect(rebuilt.verifyRecovery(h.receipt())).toBe(true);
     expect(h.store.poisonedNow()).toBe(false);
     expect(await rebuilt.enqueue(agentPut("x", h.owner))).toMatchObject({ ok: true });
@@ -805,5 +816,167 @@ describe("P1c stable global store identity", () => {
     } as SessionMemoryWrite;
     expect(await h.store.enqueue(request)).toEqual({ ok: false, code: "E_META_INVALID" });
     expect(h.appendAttempts()).toBe(0);
+  });
+});
+
+describe("actual manager write/recovery gate", () => {
+  it.each([
+    () => undefined,
+    () => null as unknown as object,
+    () => "caller-id" as unknown as object,
+    () => {
+      throw new Error("actual getter unavailable");
+    },
+  ])("present invalid manager seam rejects BEFORE append, never falls back to legacy", async (getManager) => {
+    const h = harness();
+    const store = createSessionMemoryStore({ ...h.deps, getManager });
+    expect(await store.enqueue(agentPut("no manager", h.owner))).toEqual({ ok: false, code: "E_WRITE_GATE" });
+    expect(h.appendAttempts()).toBe(0);
+    expect(store.poisonedNow()).toBe(false);
+  });
+  it("explicitly present undefined getter rejects rather than legacy fallback", async () => {
+    const h = harness();
+    const deps = { ...h.deps, getManager: undefined } as unknown as SessionMemoryStoreDeps;
+    expect(await createSessionMemoryStore(deps).enqueue(agentPut("x", h.owner))).toEqual({
+      ok: false,
+      code: "E_WRITE_GATE",
+    });
+    expect(h.appendAttempts()).toBe(0);
+  });
+  it("ABSENT getter permits old callers to write but failure has no recoverable metadata", async () => {
+    const h = harness();
+    const { getManager: _manager, ...legacyDeps } = h.deps;
+    const legacy = createSessionMemoryStore(legacyDeps);
+    expect(await legacy.enqueue(agentPut("legacy works", h.owner))).toMatchObject({ ok: true });
+    h.failAppend();
+    expect(await legacy.enqueue(agentPut("legacy unknown", h.owner))).toMatchObject({
+      ok: false,
+      code: "E_PERSIST_UNKNOWN",
+    });
+    h.reopenManager({});
+    expect(legacy.verifyRecovery(h.receipt())).toBe(false);
+    const rebuilt = createSessionMemoryStore(h.deps);
+    expect(rebuilt.verifyRecovery(h.receipt())).toBe(false);
+    expect(rebuilt.poisonedNow()).toBe(true);
+    expect(await rebuilt.enqueue(agentPut("cannot guess manager", h.owner))).toMatchObject({
+      ok: false,
+      code: "E_PERSIST_UNKNOWN",
+    });
+    expect(h.appendAttempts()).toBe(2);
+  });
+  it("manager replacement during planning rejects before append; owner still matches", async () => {
+    const h = harness();
+    const replacement = {};
+    const store = createSessionMemoryStore({
+      ...h.deps,
+      now: () => {
+        h.setManager(replacement);
+        return STAMP;
+      },
+    });
+    expect(await store.enqueue(agentPut("switched manager", h.owner))).toEqual({ ok: false, code: "E_WRITE_GATE" });
+    expect(h.appendAttempts()).toBe(0);
+    expect(store.poisonedNow()).toBe(false);
+  });
+  it("unknown append marks CAPTURED failed manager; never dynamically reads replacement getter in catch", async () => {
+    const h = harness();
+    const failed = h.manager(),
+      opened = {};
+    let afterAppend = false,
+      lateGetterReads = 0;
+    const store = createSessionMemoryStore({
+      ...h.deps,
+      getManager: () => {
+        if (afterAppend) {
+          lateGetterReads++;
+          throw new Error("late getter");
+        }
+        return failed;
+      },
+      appendCustomEntry: () => {
+        afterAppend = true;
+        h.setManager(opened);
+        throw new Error("unknown append");
+      },
+    });
+    expect(await store.enqueue(agentPut("uncertain", h.owner))).toMatchObject({ ok: false, code: "E_PERSIST_UNKNOWN" });
+    expect(lateGetterReads).toBe(0);
+    const authority = h.deps.poisonRegistry!.recoveryAuthority();
+    const key = sessionPoisonIdentity("fixture-session");
+    expect(authority.recordReopen(key, "resume", failed)).toBeUndefined();
+    const receipt = authority.recordReopen(key, "resume", opened);
+    expect(receipt).toBeDefined();
+    const newStore = createSessionMemoryStore({ ...h.deps, recovery: authority });
+    expect(newStore.verifyRecovery(receipt!)).toBe(true);
+    expect(newStore.poisonedNow()).toBe(false);
+  });
+  it("recovery binds current actual manager; foreign/replaced object cannot clear", async () => {
+    const h = harness();
+    h.failAppend();
+    await h.store.enqueue(agentPut("unknown", h.owner));
+    h.reopenManager({});
+    h.setManager({});
+    expect(h.store.verifyRecovery(h.receipt())).toBe(false);
+    expect(h.store.poisonedNow()).toBe(true);
+  });
+  it.each(["owner", "manager", "identity", "disposed", "dropped"] as const)(
+    "fresh verification %s drift refuses clearing tombstone",
+    async (failure) => {
+      const h = harness();
+      h.failAppend();
+      await h.store.enqueue(agentPut("unknown", h.owner));
+      h.reopenManager({});
+      let identity = "fixture-session";
+      const store = createSessionMemoryStore({
+        ...h.deps,
+        stableSessionIdentity: () => identity,
+        getBranch: () => {
+          if (failure === "owner") h.setOwner({ ...h.owner, sessionEpoch: 9 });
+          if (failure === "manager") h.setManager({});
+          if (failure === "identity") identity = "different-session";
+          if (failure === "disposed") store.dispose();
+          if (failure === "dropped")
+            return [{ type: "custom", customType: SESSION_MEMORY_ENTRY_TYPE, id: "bad", data: { broken: true } }];
+          return h.branch;
+        },
+      });
+      expect(store.verifyRecovery(h.receipt())).toBe(false);
+      expect(h.deps.poisonRegistry!.code(sessionPoisonIdentity("fixture-session"))).toBe("E_PERSIST_UNKNOWN");
+    },
+  );
+  it("disposed old store and disposed old authority cannot consume late receipts or retry", async () => {
+    const h = harness();
+    h.failAppend();
+    await h.store.enqueue(agentPut("unknown", h.owner));
+    h.reopenManager({});
+    h.store.dispose();
+    expect(h.store.verifyRecovery(h.receipt())).toBe(false);
+    expect(await h.store.enqueue(agentPut("late", h.owner))).toEqual({ ok: false, code: "E_STALE_SESSION" });
+    const authority = h.deps.poisonRegistry!.recoveryAuthority(),
+      manager = {};
+    const token = authority.recordReopen(sessionPoisonIdentity("fixture-session"), "resume", manager)!;
+    authority.dispose();
+    h.setManager(manager);
+    const rebuilt = createSessionMemoryStore({ ...h.deps, recovery: authority });
+    expect(rebuilt.verifyRecovery(token)).toBe(false);
+    expect(rebuilt.poisonedNow()).toBe(true);
+    expect(h.appendAttempts()).toBe(1);
+  });
+  it("per-manager failed recovery attempt remains one-shot across a new store/authority", async () => {
+    const h = harness();
+    h.failAppend();
+    await h.store.enqueue(agentPut("unknown", h.owner));
+    const manager = {};
+    h.reopenManager(manager);
+    const bad = createSessionMemoryStore({
+      ...h.deps,
+      getBranch: () => {
+        throw new Error("fresh read fails");
+      },
+    });
+    expect(bad.verifyRecovery(h.receipt())).toBe(false);
+    const nextAuthority = h.deps.poisonRegistry!.recoveryAuthority();
+    expect(nextAuthority.recordReopen(sessionPoisonIdentity("fixture-session"), "resume", manager)).toBeUndefined();
+    expect(createSessionMemoryStore(h.deps).poisonedNow()).toBe(true);
   });
 });
